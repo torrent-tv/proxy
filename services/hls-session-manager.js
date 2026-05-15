@@ -13,6 +13,9 @@ const DEFAULT_SESSION_TTL_MS = 30 * 60 * 1000;
 const DEFAULT_STARTUP_WAIT_MS = 5_000;
 const MICROSECONDS_PER_SECOND = 1_000_000;
 const PROGRESS_LOG_INTERVAL_MS = 5_000;
+const VIDEO_TRANSCODE_PRESET = "superfast";
+const VIDEO_TRANSCODE_CRF = "24";
+const VIDEO_TRANSCODE_FPS = 24;
 
 function delay(ms) {
   return new Promise((resolve) => {
@@ -200,14 +203,32 @@ export class HlsSessionManager {
     this.cleanupTimer.unref();
   }
 
-  async createOrGetSession({ sourceKey, fileIndex, transcodeVideo = false, consumerId = "", fileName = "" }) {
+  async createOrGetSession({
+    sourceKey,
+    fileIndex,
+    transcodeVideo = false,
+    transcodeAudio = false,
+    consumerId = "",
+    fileName = "",
+    targetWidth = 0,
+    targetHeight = 0
+  }) {
     if (!this.enabled) {
       const error = new Error("Audio transcoding is disabled on this proxy.");
       error.code = "TRANSCODE_DISABLED";
       throw error;
     }
 
-    const sourceMapKey = `${sourceKey}:${fileIndex}:${transcodeVideo ? "video" : "audio"}`;
+    const normalizedTargetWidth = Number.isInteger(targetWidth) && targetWidth > 0 ? targetWidth : 0;
+    const normalizedTargetHeight = Number.isInteger(targetHeight) && targetHeight > 0 ? targetHeight : 0;
+    const sourceMapKey = [
+      sourceKey,
+      String(fileIndex),
+      transcodeVideo ? "video" : "audio",
+      transcodeAudio ? "a1" : "a0",
+      String(normalizedTargetWidth),
+      String(normalizedTargetHeight)
+    ].join(":");
     const existingId = this.sessionIdBySource.get(sourceMapKey);
     if (existingId) {
       const existing = this.sessionsById.get(existingId);
@@ -238,8 +259,22 @@ export class HlsSessionManager {
     const durationSeconds = await probeInputDurationSeconds(this.ffmpegBin, inputUrl.toString());
 
     const videoCodecArgs = transcodeVideo
-      ? ["-c:v", "libx264", "-preset", "veryfast", "-pix_fmt", "yuv420p"]
+      ? [
+          "-vf",
+          this.#buildVideoFilter(normalizedTargetWidth, normalizedTargetHeight),
+          "-c:v",
+          "libx264",
+          "-preset",
+          VIDEO_TRANSCODE_PRESET,
+          "-crf",
+          VIDEO_TRANSCODE_CRF,
+          "-pix_fmt",
+          "yuv420p"
+        ]
       : ["-c:v", "copy"];
+    const audioCodecArgs = transcodeAudio
+      ? ["-c:a", "aac", "-ac", "2", "-b:a", "128k"]
+      : ["-c:a", "copy"];
 
     const args = [
       "-hide_banner",
@@ -255,12 +290,7 @@ export class HlsSessionManager {
       "-map",
       "0:a:0?",
       ...videoCodecArgs,
-      "-c:a",
-      "aac",
-      "-ac",
-      "2",
-      "-b:a",
-      "160k",
+      ...audioCodecArgs,
       "-f",
       "hls",
       "-hls_time",
@@ -401,6 +431,12 @@ export class HlsSessionManager {
       // Do not fail session creation on warmup timeout; playlist can appear later.
       return session;
     }
+  }
+
+  #buildVideoFilter(targetWidth, targetHeight) {
+    const safeWidth = Number.isInteger(targetWidth) && targetWidth > 0 ? targetWidth : 1280;
+    const safeHeight = Number.isInteger(targetHeight) && targetHeight > 0 ? targetHeight : 720;
+    return `scale=${safeWidth}:${safeHeight}:force_original_aspect_ratio=decrease:force_divisible_by=2,fps=${VIDEO_TRANSCODE_FPS}`;
   }
 
   async waitUntilReady(session) {

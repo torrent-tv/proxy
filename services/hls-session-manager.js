@@ -1,9 +1,19 @@
+/**
+ * @file HLS transcode session manager.
+ *
+ * Spawns one ffmpeg process per unique source+settings combination and
+ * streams the resulting HLS playlist and segments from a temporary directory.
+ * Sessions are expired automatically via a periodic cleanup interval, or
+ * immediately when all registered consumers release them.
+ */
+
 import { createReadStream } from "node:fs";
 import { access, mkdir, readdir, readFile, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
 import { spawn } from "node:child_process";
+import { logger } from "../utils/logger.js";
 
 const PLAYLIST_FILE_NAME = "index.m3u8";
 const SEGMENT_FILE_NAME_PATTERN = /^segment-\d{5}\.ts$/;
@@ -17,12 +27,25 @@ const VIDEO_TRANSCODE_PRESET = "superfast";
 const VIDEO_TRANSCODE_CRF = "24";
 const VIDEO_TRANSCODE_FPS = 24;
 
+/**
+ * Resolve after a given number of milliseconds.
+ *
+ * @param {number} ms
+ * @returns {Promise<void>}
+ */
 function delay(ms) {
   return new Promise((resolve) => {
     setTimeout(resolve, ms);
   });
 }
 
+/**
+ * Wait for a child process to exit, with a hard timeout fallback.
+ *
+ * @param {import("node:child_process").ChildProcess} child
+ * @param {number} [timeoutMs=2000]
+ * @returns {Promise<void>}
+ */
 function waitForChildExit(child, timeoutMs = 2_000) {
   return new Promise((resolve) => {
     let settled = false;
@@ -38,6 +61,13 @@ function waitForChildExit(child, timeoutMs = 2_000) {
   });
 }
 
+/**
+ * Convert a bind-all host address to the loopback address so that
+ * the HLS input URL is always reachable from the same machine.
+ *
+ * @param {string} host
+ * @returns {string}
+ */
 function toLoopbackHost(host) {
   if (host === "0.0.0.0" || host === "::") {
     return "127.0.0.1";
@@ -45,6 +75,13 @@ function toLoopbackHost(host) {
   return host;
 }
 
+/**
+ * Build the HTTP base URL (scheme + host + port) for the local proxy server.
+ *
+ * @param {string} host - Bind host (may be "0.0.0.0" or "::").
+ * @param {number} port
+ * @returns {string} e.g. "http://127.0.0.1:9090"
+ */
 function buildHttpBaseUrl(host, port) {
   const url = new URL("http://localhost");
   url.hostname = toLoopbackHost(host);
@@ -52,18 +89,44 @@ function buildHttpBaseUrl(host, port) {
   return url.origin;
 }
 
+/**
+ * Return the temporary directory path for a given HLS session.
+ *
+ * @param {string} sessionId - UUID of the session.
+ * @returns {string}
+ */
 function createSessionDirPath(sessionId) {
   return path.join(os.tmpdir(), "torrent-tv-hls", sessionId);
 }
 
+/**
+ * Guard against path traversal by validating that a session ID is a UUID.
+ *
+ * @param {unknown} value
+ * @returns {boolean}
+ */
 function isSafeSessionId(value) {
   return /^[a-f0-9-]{36}$/i.test(value);
 }
 
+/**
+ * Guard against path traversal by restricting file names to the known
+ * playlist and segment patterns produced by ffmpeg.
+ *
+ * @param {string} fileName
+ * @returns {boolean}
+ */
 function isSafeFileName(fileName) {
   return fileName === PLAYLIST_FILE_NAME || SEGMENT_FILE_NAME_PATTERN.test(fileName);
 }
 
+/**
+ * Parse an ffmpeg `HH:MM:SS.mmm` timestamp string into total seconds.
+ * Returns `null` if the value is absent or malformed.
+ *
+ * @param {string | undefined} value
+ * @returns {number | null}
+ */
 function parseFfmpegTimestamp(value) {
   if (!value || typeof value !== "string") {
     return null;
@@ -81,6 +144,13 @@ function parseFfmpegTimestamp(value) {
   return hours * 3600 + minutes * 60 + seconds;
 }
 
+/**
+ * Extract the total duration in seconds from ffmpeg stderr output.
+ * Returns `null` if the duration line is absent or unparseable.
+ *
+ * @param {string} stderrText
+ * @returns {number | null}
+ */
 function parseFfmpegDurationSeconds(stderrText) {
   if (typeof stderrText !== "string" || stderrText.length === 0) {
     return null;
@@ -98,6 +168,12 @@ function parseFfmpegDurationSeconds(stderrText) {
   return hours * 3600 + minutes * 60 + seconds;
 }
 
+/**
+ * Format a seconds value as `HH:MM:SS`, or `"n/a"` if not finite.
+ *
+ * @param {number} seconds
+ * @returns {string}
+ */
 function formatSeconds(seconds) {
   if (!Number.isFinite(seconds) || seconds < 0) {
     return "n/a";
@@ -109,6 +185,13 @@ function formatSeconds(seconds) {
   return `${String(hours).padStart(2, "0")}:${String(minutes).padStart(2, "0")}:${String(rest).padStart(2, "0")}`;
 }
 
+/**
+ * Compute derived progress metrics from raw ffmpeg output values.
+ *
+ * @param {number} processedSeconds - Seconds of content encoded so far.
+ * @param {number | null} totalSeconds - Total duration, or `null` if unknown.
+ * @returns {{ totalSeconds: number | null, percent: number | null, remainingSeconds: number | null, processedSeconds: number }}
+ */
 function computeProgressMetrics(processedSeconds, totalSeconds) {
   const processed = Number.isFinite(processedSeconds) ? Math.max(0, processedSeconds) : 0;
   if (!Number.isFinite(totalSeconds) || totalSeconds <= 0) {
@@ -125,6 +208,14 @@ function computeProgressMetrics(processedSeconds, totalSeconds) {
   };
 }
 
+/**
+ * Run a short ffmpeg probe to extract the total duration of a stream.
+ * Times out after 8 s and returns `null` on failure.
+ *
+ * @param {string} ffmpegBin - Path to the ffmpeg executable.
+ * @param {string | URL} inputUrl - URL of the stream to probe.
+ * @returns {Promise<number | null>} Duration in seconds, or `null`.
+ */
 async function probeInputDurationSeconds(ffmpegBin, inputUrl) {
   return new Promise((resolve) => {
     const ffmpeg = spawn(ffmpegBin, ["-hide_banner", "-loglevel", "info", "-i", inputUrl, "-f", "null", "-"], {
@@ -179,7 +270,43 @@ function normalizeLogFileName(fileName, fileIndex) {
   return value;
 }
 
+/**
+ * @typedef {Object} HlsSessionManagerOptions
+ * @property {boolean} enabled              - Whether HLS transcoding is enabled.
+ * @property {string}  ffmpegBin            - Path to the ffmpeg executable.
+ * @property {string}  localBindHost        - Host the proxy HTTP server is bound to.
+ * @property {number}  localPort            - Port the proxy HTTP server is listening on.
+ * @property {number}  [segmentDurationSec] - HLS segment length in seconds.
+ * @property {number}  [sessionTtlMs]       - Session idle TTL in milliseconds.
+ * @property {number}  [startupWaitMs]      - Max time to wait for the first playlist file.
+ */
+
+/**
+ * @typedef {Object} HlsSession
+ * @property {string}  id            - UUID of the session.
+ * @property {string}  sourceMapKey  - Cache key combining source + transcode settings.
+ * @property {string}  fileName      - Display name of the file being transcoded.
+ * @property {string}  dirPath       - Temp directory containing HLS output.
+ * @property {"starting" | "ready" | "failed" | "disposed"} state
+ * @property {number}  startedAt     - Unix ms timestamp when the session was created.
+ * @property {number}  lastAccessedAt - Unix ms timestamp of the last consumer access.
+ * @property {import("node:child_process").ChildProcess} ffmpeg
+ * @property {string}  lastError
+ * @property {Set<string>} consumers  - Consumer IDs currently using this session.
+ * @property {object}  progress       - Live progress metrics updated from ffmpeg stdout.
+ */
+
+/**
+ * Manages HLS transcode sessions backed by ffmpeg child processes.
+ *
+ * One session is created per unique (source, fileIndex, transcode settings)
+ * combination. Sessions are reused across consumers and are automatically
+ * expired after {@link HlsSessionManagerOptions.sessionTtlMs} of idle time.
+ */
 export class HlsSessionManager {
+  /**
+   * @param {HlsSessionManagerOptions} options
+   */
   constructor({
     enabled,
     ffmpegBin,
@@ -203,6 +330,24 @@ export class HlsSessionManager {
     this.cleanupTimer.unref();
   }
 
+  /**
+   * Return an existing HLS session for the given source/settings, or create
+   * one by spawning a new ffmpeg process.
+   *
+   * Throws with `error.code === "TRANSCODE_DISABLED"` when transcoding is
+   * disabled on this proxy instance.
+   *
+   * @param {object} options
+   * @param {string}  options.sourceKey      - Registry source key.
+   * @param {number}  options.fileIndex      - Zero-based file index in the torrent.
+   * @param {boolean} [options.transcodeVideo=false]
+   * @param {boolean} [options.transcodeAudio=false]
+   * @param {string}  [options.consumerId=""]   - Caller ID for reference counting.
+   * @param {string}  [options.fileName=""]     - Display name for log output.
+   * @param {number}  [options.targetWidth=0]   - Target video width (0 = keep source).
+   * @param {number}  [options.targetHeight=0]  - Target video height (0 = keep source).
+   * @returns {Promise<HlsSession>}
+   */
   async createOrGetSession({
     sourceKey,
     fileIndex,
@@ -377,8 +522,8 @@ export class HlsSessionManager {
           session.progress.updatedAt - session.progress.lastLoggedAt >= PROGRESS_LOG_INTERVAL_MS;
         if (shouldLog) {
           session.progress.lastLoggedAt = session.progress.updatedAt;
-          console.log(
-            `[proxy-client] transcode ${session.id} "${session.fileName}" ${session.progress.percent.toFixed(1)}% ` +
+          logger.info(
+            `transcode ${session.id} "${session.fileName}" ${session.progress.percent.toFixed(1)}% ` +
               `(${formatSeconds(session.progress.processedSeconds)} / ${formatSeconds(session.progress.totalSeconds)})` +
               ` speed=${session.progress.speed || "n/a"}`
           );
@@ -390,7 +535,7 @@ export class HlsSessionManager {
       const line = String(chunk).trim();
       if (line.length > 0) {
         session.lastError = line;
-        console.warn(`[proxy-client] ffmpeg: ${line}`);
+        logger.warn(`ffmpeg: ${line}`);
       }
     });
 
@@ -399,7 +544,7 @@ export class HlsSessionManager {
       session.lastError = error instanceof Error ? error.message : String(error);
       session.progress.state = "failed";
       session.progress.updatedAt = Date.now();
-      console.error(`[proxy-client] ffmpeg process error: ${session.lastError}`);
+      logger.error(`ffmpeg process error: ${session.lastError}`);
     });
 
     ffmpeg.on("exit", (code) => {
@@ -439,6 +584,14 @@ export class HlsSessionManager {
     return `scale=${safeWidth}:${safeHeight}:force_original_aspect_ratio=decrease:force_divisible_by=2,fps=${VIDEO_TRANSCODE_FPS}`;
   }
 
+  /**
+   * Poll until the HLS playlist file exists and contains a valid `#EXTM3U`
+   * header, or until the session fails, or until the startup timeout elapses.
+   * Throws with message `"HLS playlist is still warming up."` on timeout.
+   *
+   * @param {HlsSession} session
+   * @returns {Promise<void>}
+   */
   async waitUntilReady(session) {
     const playlistPath = path.join(session.dirPath, PLAYLIST_FILE_NAME);
     const deadline = Date.now() + this.startupWaitMs;
@@ -463,6 +616,18 @@ export class HlsSessionManager {
     throw new Error("HLS playlist is still warming up.");
   }
 
+  /**
+   * Open a read stream for an HLS segment or playlist file from a session.
+   *
+   * @param {string} sessionId
+   * @param {string} fileName - Must match the playlist or segment name pattern.
+   * @returns {Promise<
+   *   | { kind: "not-found" }
+   *   | { kind: "warming-up" }
+   *   | { kind: "failed"; message: string }
+   *   | { kind: "file"; stream: import("node:fs").ReadStream; contentType: string; isPlaylist: boolean }
+   * >}
+   */
   async getFileStream(sessionId, fileName) {
     if (!isSafeSessionId(sessionId) || !isSafeFileName(fileName)) {
       return { kind: "not-found" };
@@ -495,6 +660,12 @@ export class HlsSessionManager {
     };
   }
 
+  /**
+   * Dispose all sessions that have been idle longer than `sessionTtlMs`.
+   * Called automatically on the cleanup interval.
+   *
+   * @returns {Promise<void>}
+   */
   async cleanupExpired() {
     const now = Date.now();
     const idsToDispose = [];
@@ -508,6 +679,13 @@ export class HlsSessionManager {
     }
   }
 
+  /**
+   * Return a progress snapshot for the given session, or `null` if not found.
+   * Also refreshes `lastAccessedAt` to prevent the session from expiring.
+   *
+   * @param {string} sessionId
+   * @returns {object | null}
+   */
   getSessionProgress(sessionId) {
     if (!isSafeSessionId(sessionId)) {
       return null;
@@ -541,6 +719,15 @@ export class HlsSessionManager {
     };
   }
 
+  /**
+   * Remove a consumer from a session. Disposes the session when the last
+   * consumer leaves.
+   *
+   * @param {string} sessionId
+   * @param {string} [consumerId=""]
+   * @param {string} [reason=""]     - Human-readable reason shown in logs.
+   * @returns {Promise<boolean>} `false` if the session was not found.
+   */
   async releaseSessionConsumer(sessionId, consumerId = "", reason = "") {
     if (!isSafeSessionId(sessionId) || typeof consumerId !== "string" || consumerId.length === 0) {
       return false;
@@ -555,8 +742,8 @@ export class HlsSessionManager {
     session.consumers.delete(consumerId);
     session.lastAccessedAt = Date.now();
     const logReason = typeof reason === "string" && reason.length > 0 ? reason : "unspecified";
-    console.log(
-      `[proxy-client] consumer released (${logReason}) session=${session.id} consumer=${consumerId} ` +
+    logger.info(
+      `consumer released (${logReason}) session=${session.id} consumer=${consumerId} ` +
         `remaining=${session.consumers.size}`
     );
     if (session.consumers.size > 0) {
@@ -566,6 +753,12 @@ export class HlsSessionManager {
     return true;
   }
 
+  /**
+   * Kill the ffmpeg process, remove it from all maps, and delete the temp dir.
+   *
+   * @param {string} sessionId
+   * @returns {Promise<void>}
+   */
   async disposeSession(sessionId) {
     const session = this.sessionsById.get(sessionId);
     if (!session) {
@@ -583,10 +776,17 @@ export class HlsSessionManager {
       await rm(session.dirPath, { recursive: true, force: true });
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      console.warn(`[proxy-client] failed to cleanup HLS temp dir: ${message}`);
+      logger.warn(`failed to cleanup HLS temp dir: ${message}`);
     }
   }
 
+  /**
+   * Stop the cleanup timer, dispose all active sessions, and attempt to
+   * remove the shared temp root directory if it is empty.
+   * Called by Fastify's `onClose` hook during graceful shutdown.
+   *
+   * @returns {Promise<void>}
+   */
   async disposeAll() {
     clearInterval(this.cleanupTimer);
     const activeIds = Array.from(this.sessionsById.keys());

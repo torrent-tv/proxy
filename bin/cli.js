@@ -1,11 +1,20 @@
 #!/usr/bin/env node
-import chalk from "chalk";
+/**
+ * @file CLI entry point for the torrent-tv proxy.
+ *
+ * Parses command-line arguments, starts the local HTTP server, registers
+ * this proxy with the registry server, establishes the WebSocket tunnel,
+ * and maintains a periodic heartbeat.
+ */
+
 import { Command } from "commander";
 import crypto from "node:crypto";
 import { spawnSync } from "node:child_process";
 import ffmpegStatic from "ffmpeg-static";
 import { startProxyServer } from "../server.js";
 import { registerClient, sendHeartbeat } from "../services/registry-api.js";
+import { createTunnelClient } from "../services/tunnel-client.js";
+import { logger } from "../utils/logger.js";
 
 const program = new Command();
 
@@ -45,7 +54,7 @@ const options = program.opts();
 
 const localPort = Number(options.port);
 if (!Number.isInteger(localPort) || localPort <= 0 || localPort > 65535) {
-  console.error(chalk.red("[proxy-client] Invalid --port value."));
+  logger.error("Invalid --port value.");
   process.exit(1);
 }
 
@@ -61,6 +70,12 @@ const transcodeAudio = options.transcodeAudio !== false;
 const bundledFfmpegBin = typeof ffmpegStatic === "string" ? ffmpegStatic : "";
 const ffmpegBin = options.ffmpegBin ? String(options.ffmpegBin) : bundledFfmpegBin || "ffmpeg";
 
+/**
+ * Verify that the ffmpeg binary is reachable and exits cleanly.
+ * Throws with a descriptive message when the check fails.
+ *
+ * @returns {void}
+ */
 function assertFfmpegAvailability() {
   const probe = spawnSync(ffmpegBin, ["-version"], {
     stdio: "ignore",
@@ -78,12 +93,30 @@ function assertFfmpegAvailability() {
   }
 }
 
+/** @type {boolean} */
 let registrationInProgress = false;
+
+/** @type {ReturnType<typeof setInterval> | null} */
 let heartbeatTimer = null;
+
+/** @type {import("fastify").FastifyInstance | null} */
 let app = null;
+
+/** @type {number} */
 let actualPort = localPort;
+
+/** @type {boolean} */
 let shutdownInProgress = false;
 
+/** @type {ReturnType<typeof import("../services/tunnel-client.js").createTunnelClient> | null} */
+let tunnelClient = null;
+
+/**
+ * Register this proxy with the registry server.
+ * Silently skips if a registration is already in flight.
+ *
+ * @returns {Promise<void>}
+ */
 async function registerClientSafe() {
   if (registrationInProgress) {
     return;
@@ -97,12 +130,18 @@ async function registerClientSafe() {
       baseUrl: explicitBaseUrl || `http://${bindHost}:${actualPort}`,
       token
     });
-    console.log(chalk.green(`[proxy-client] Registered: ${JSON.stringify(result.client)}`));
+    logger.success(`Registered: ${JSON.stringify(result.client)}`);
   } finally {
     registrationInProgress = false;
   }
 }
 
+/**
+ * Gracefully shut down the tunnel, heartbeat timer, and HTTP server.
+ *
+ * @param {string} signal - Signal name (e.g. "SIGINT").
+ * @returns {Promise<void>}
+ */
 async function shutdown(signal) {
   if (shutdownInProgress) {
     return;
@@ -112,7 +151,11 @@ async function shutdown(signal) {
     clearInterval(heartbeatTimer);
     heartbeatTimer = null;
   }
-  console.log(chalk.yellow(`[proxy-client] Received ${signal}, shutting down...`));
+  if (tunnelClient) {
+    tunnelClient.disconnect();
+    tunnelClient = null;
+  }
+  logger.warn(`Received ${signal}, shutting down...`);
   try {
     if (app) {
       await app.close();
@@ -120,7 +163,7 @@ async function shutdown(signal) {
     process.exit(0);
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
-    console.error(chalk.red(`[proxy-client] Shutdown failed: ${message}`));
+    logger.error(`Shutdown failed: ${message}`);
     process.exit(1);
   }
 }
@@ -139,15 +182,22 @@ try {
   actualPort = started.port;
   const directBaseUrl = explicitBaseUrl || `http://${bindHost}:${actualPort}`;
 
-  console.log(chalk.cyan(`[proxy-client] Local stream endpoint: http://${bindHost}:${actualPort}/stream`));
-  console.log(chalk.cyan(`[proxy-client] Advertised direct URL: ${directBaseUrl}`));
+  logger.info(`Local stream endpoint: http://${bindHost}:${actualPort}/stream`);
+  logger.info(`Advertised direct URL: ${directBaseUrl}`);
   if (transcodeAudio) {
-    console.log(
-      chalk.cyan(`[proxy-client] Optional HLS audio transcode is enabled (ffmpeg: ${ffmpegBin}).`)
-    );
+    logger.info(`Optional HLS audio transcode is enabled (ffmpeg: ${ffmpegBin}).`);
   }
 
   await registerClientSafe();
+
+  tunnelClient = createTunnelClient({
+    serverUrl,
+    proxyId: clientId,
+    token,
+    proxyPort: actualPort,
+    onLog: (msg) => logger.info(msg)
+  });
+  tunnelClient.connect();
 
   heartbeatTimer = setInterval(async () => {
     const status = await sendHeartbeat({
@@ -156,18 +206,18 @@ try {
       token
     });
     if (status === 404) {
-      console.log(chalk.yellow("[proxy-client] Heartbeat returned 404, re-registering..."));
+      logger.warn("Heartbeat returned 404, re-registering...");
       try {
         await registerClientSafe();
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
-        console.error(chalk.red(`[proxy-client] Re-register failed: ${message}`));
+        logger.error(`Re-register failed: ${message}`);
       }
     }
   }, 20_000);
 } catch (error) {
   const message = error instanceof Error ? error.message : String(error);
-  console.error(chalk.red(`[proxy-client] ${message}`));
+  logger.error(message);
   process.exit(1);
 }
 

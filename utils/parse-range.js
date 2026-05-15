@@ -1,3 +1,16 @@
+/**
+ * @file HTTP Range header parser.
+ */
+
+/**
+ * Parse an HTTP `Range` header value into a byte range clamped to the file size.
+ * Only the `bytes=<start>-<end>` form is supported.
+ *
+ * @param {string | undefined} rangeHeader - Value of the `Range` request header.
+ * @param {number} fileLength              - Total file size in bytes.
+ * @returns {{ start: number, end: number } | null} Byte range, or `null` if the
+ *   header is absent, malformed, or uses an unsupported unit.
+ */
 export function parseRange(rangeHeader, fileLength) {
   if (!rangeHeader || !rangeHeader.startsWith("bytes=")) {
     return null;

@@ -1,5 +1,21 @@
+/**
+ * @file Byte-range aware torrent file streaming endpoint.
+ *
+ * Accepts either a `sourceKey` (registered via POST /api/sources) or a raw
+ * `sourceType` + `source` pair.  Responds with HTTP 206 for range requests
+ * and HTTP 200 for full-file requests.
+ */
+
 import { parseRange } from "../../utils/parse-range.js";
 
+/**
+ * Resolve source parameters from the query string.
+ * Prefers a registered `sourceKey`; falls back to inline `sourceType`+`source`.
+ *
+ * @param {import("fastify").FastifyRequest["query"]} query
+ * @param {ReturnType<import("../../store/source-registry.js").createSourceRegistry>} sourceRegistry
+ * @returns {{ sourceType: string, source: string }}
+ */
 function getSourceParams(query, sourceRegistry) {
   const sourceKey = typeof query.sourceKey === "string" ? query.sourceKey : "";
   const sourceTypeFromQuery = typeof query.sourceType === "string" ? query.sourceType : "";
@@ -11,6 +27,16 @@ function getSourceParams(query, sourceRegistry) {
   return { sourceType, source };
 }
 
+/**
+ * Stream a torrent file over HTTP with byte-range support.
+ *
+ * GET /stream
+ *
+ * @param {import("fastify").FastifyRequest} req
+ * @param {import("fastify").FastifyReply} reply
+ * @param {{ sourceRegistry: ReturnType<import("../../store/source-registry.js").createSourceRegistry>, torrentPool: import("../../services/torrent-pool.js").TorrentPool }} deps
+ * @returns {Promise<void>}
+ */
 export async function handleStreamGet(req, reply, { sourceRegistry, torrentPool }) {
   const fileIndexRaw = typeof req.query.fileIndex === "string" ? req.query.fileIndex : "";
   const fileIndex = Number(fileIndexRaw);
@@ -58,6 +84,15 @@ export async function handleStreamGet(req, reply, { sourceRegistry, torrentPool 
   return reply.send(stream);
 }
 
+/**
+ * Attach event listeners that release the file reference exactly once when
+ * the stream or the underlying HTTP connection closes.
+ *
+ * @param {import("node:stream").Readable} stream
+ * @param {import("fastify").FastifyReply} reply
+ * @param {() => void} release
+ * @returns {void}
+ */
 function bindRelease(stream, reply, release) {
   let released = false;
   const releaseOnce = () => {

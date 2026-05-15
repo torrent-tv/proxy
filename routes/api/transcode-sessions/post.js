@@ -1,3 +1,21 @@
+/**
+ * Create or return an existing HLS transcode session for a torrent file.
+ *
+ * POST /api/transcode-sessions
+ *
+ * @param {import("fastify").FastifyRequest} req
+ * @param {import("fastify").FastifyReply} reply
+ * @param {{ hlsSessionManager: import("../../../services/hls-session-manager.js").HlsSessionManager }} deps
+ * @returns {Promise<void>}
+ */
+
+/**
+ * Extract a plain object from the request body, guarding against
+ * non-object payloads (arrays, primitives, null).
+ *
+ * @param {unknown} body
+ * @returns {Record<string, unknown>}
+ */
 function getPayload(body) {
   if (body && typeof body === "object" && !Array.isArray(body)) {
     return body;

@@ -1,3 +1,21 @@
+/**
+ * Register a torrent source with the proxy and receive a stable source key.
+ *
+ * POST /api/sources
+ *
+ * @param {import("fastify").FastifyRequest} req
+ * @param {import("fastify").FastifyReply} reply
+ * @param {{ sourceRegistry: ReturnType<import("../../../store/source-registry.js").createSourceRegistry> }} deps
+ * @returns {Promise<void>}
+ */
+
+/**
+ * Extract a plain object from the request body, guarding against
+ * non-object payloads (arrays, primitives, null).
+ *
+ * @param {unknown} body
+ * @returns {Record<string, unknown>}
+ */
 function getPayload(body) {
   if (body && typeof body === "object" && !Array.isArray(body)) {
     return body;

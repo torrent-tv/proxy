@@ -1,3 +1,11 @@
+/**
+ * @file Proxy HTTP server bootstrap.
+ *
+ * Creates and configures the Fastify application, registers all routes and
+ * plugins, then starts listening on the first available port at or above the
+ * requested one.
+ */
+
 import Fastify from "fastify";
 import fastifyCors from "@fastify/cors";
 import fastifyHelmet from "@fastify/helmet";
@@ -23,6 +31,13 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const publicRoot = path.resolve(__dirname, "./public");
 
+/**
+ * Build a list of candidate port numbers starting at `startPort`.
+ *
+ * @param {number} startPort
+ * @param {number} [maxAttempts=51]
+ * @returns {number[]}
+ */
 function buildPortCandidates(startPort, maxAttempts = 51) {
   const ports = [];
   for (let index = 0; index < maxAttempts; index += 1) {
@@ -31,6 +46,20 @@ function buildPortCandidates(startPort, maxAttempts = 51) {
   return ports;
 }
 
+/**
+ * @typedef {Object} ProxyServerOptions
+ * @property {string}  host           - Bind host (e.g. "127.0.0.1" or "0.0.0.0").
+ * @property {number}  port           - Preferred listen port.
+ * @property {boolean} transcodeAudio - Whether HLS audio transcoding is enabled.
+ * @property {string}  ffmpegBin      - Path to the ffmpeg executable.
+ */
+
+/**
+ * Create, configure, and start the proxy HTTP server.
+ *
+ * @param {ProxyServerOptions} options
+ * @returns {Promise<{ app: import("fastify").FastifyInstance, port: number }>}
+ */
 export async function startProxyServer({ host, port, transcodeAudio, ffmpegBin }) {
   const app = Fastify({
     bodyLimit: 10 * 1024 * 1024

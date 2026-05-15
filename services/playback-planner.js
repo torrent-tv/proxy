@@ -1,7 +1,22 @@
+/**
+ * @file Playback planner service.
+ *
+ * Determines whether a torrent file can be served directly or requires
+ * HLS audio transcoding by probing the stream codecs with ffmpeg.
+ * Results are cached indefinitely (keyed by source + file index).
+ */
+
 import { spawn } from "node:child_process";
 
+/** Audio codecs that browsers can decode natively without transcoding. */
 const DIRECT_AUDIO_CODECS = new Set(["aac", "mp3", "opus", "vorbis", "flac"]);
 
+/**
+ * Parse audio and video codec names from ffmpeg stderr output.
+ *
+ * @param {string} ffmpegOutput
+ * @returns {{ audioCodec: string, videoCodec: string }}
+ */
 function parseStreamCodecs(ffmpegOutput) {
   const audioMatch = ffmpegOutput.match(/Audio:\s*([A-Za-z0-9_]+)/i);
   const videoMatch = ffmpegOutput.match(/Video:\s*([A-Za-z0-9_]+)/i);
@@ -11,6 +26,17 @@ function parseStreamCodecs(ffmpegOutput) {
   };
 }
 
+/**
+ * Run a brief ffmpeg probe to identify the audio and video codecs of a stream.
+ * Times out after `timeoutMs` and returns empty strings on failure.
+ *
+ * @param {object} options
+ * @param {string} options.ffmpegBin
+ * @param {string} options.inputUrl
+ * @param {string} [options.userAgent=""]
+ * @param {number} [options.timeoutMs=8000]
+ * @returns {Promise<{ audioCodec: string, videoCodec: string }>}
+ */
 function probeStreamCodecs({ ffmpegBin, inputUrl, userAgent = "", timeoutMs = 8_000 }) {
   return new Promise((resolve) => {
     const args = ["-hide_banner", "-loglevel", "info"];
@@ -57,6 +83,14 @@ function probeStreamCodecs({ ffmpegBin, inputUrl, userAgent = "", timeoutMs = 8_
   });
 }
 
+/**
+ * Build the direct stream URL for a source file served by the local proxy.
+ *
+ * @param {string} localBaseUrl - e.g. "http://127.0.0.1:9090"
+ * @param {string} sourceKey
+ * @param {number} fileIndex
+ * @returns {string}
+ */
 function buildDirectUrl(localBaseUrl, sourceKey, fileIndex) {
   const directUrl = new URL("/stream", `${localBaseUrl}/`);
   directUrl.searchParams.set("sourceKey", sourceKey);
@@ -64,6 +98,31 @@ function buildDirectUrl(localBaseUrl, sourceKey, fileIndex) {
   return directUrl.toString();
 }
 
+/**
+ * @typedef {Object} PlaybackPlan
+ * @property {"direct" | "hls"} mode
+ * @property {string} directUrl
+ * @property {string} reason   - Human-readable explanation of the chosen mode.
+ * @property {string} audioCodec
+ * @property {string} videoCodec
+ */
+
+/**
+ * @typedef {Object} PlaybackPlannerOptions
+ * @property {string}  ffmpegBin
+ * @property {boolean} transcodeAudioEnabled
+ * @property {string}  localBaseUrl
+ * @property {ReturnType<import("../store/source-registry.js").createSourceRegistry>} sourceRegistry
+ * @property {import("./torrent-pool.js").TorrentPool} torrentPool
+ */
+
+/**
+ * Create a playback planner that decides the optimal streaming mode for
+ * a torrent file. Plans are cached per (sourceKey, fileIndex) pair.
+ *
+ * @param {PlaybackPlannerOptions} options
+ * @returns {{ getPlan: (params: { sourceKey: string, fileIndex: number, userAgent?: string }) => Promise<PlaybackPlan> }}
+ */
 export function createPlaybackPlanner({
   ffmpegBin,
   transcodeAudioEnabled,
@@ -71,9 +130,21 @@ export function createPlaybackPlanner({
   sourceRegistry,
   torrentPool
 }) {
+  /** @type {Map<string, PlaybackPlan>} */
   const cache = new Map();
 
   return {
+    /**
+     * Return the playback plan for the given source file.
+     * Throws with `error.code === "SOURCE_NOT_FOUND"` or `"FILE_NOT_FOUND"`
+     * when the source or file cannot be located.
+     *
+     * @param {object} params
+     * @param {string} params.sourceKey
+     * @param {number} params.fileIndex
+     * @param {string} [params.userAgent=""]
+     * @returns {Promise<PlaybackPlan>}
+     */
     async getPlan({ sourceKey, fileIndex, userAgent = "" }) {
       const cacheKey = `${sourceKey}:${fileIndex}`;
       const cached = cache.get(cacheKey);

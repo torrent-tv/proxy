@@ -1,3 +1,16 @@
+/**
+ * Serve HLS playlist and segment files from an active transcode session.
+ *
+ * Polls until the requested file appears (up to 15 s) so that HLS clients
+ * do not receive a 404 during the ffmpeg warmup phase.
+ *
+ * GET /transcode/:sessionId/:fileName
+ *
+ * @param {import("fastify").FastifyRequest} req
+ * @param {import("fastify").FastifyReply} reply
+ * @param {{ hlsSessionManager: import("../../../services/hls-session-manager.js").HlsSessionManager }} deps
+ * @returns {Promise<void>}
+ */
 export async function handleTranscodeSessionFileGet(req, reply, { hlsSessionManager }) {
   const sessionId = typeof req.params.sessionId === "string" ? req.params.sessionId : "";
   const fileName = typeof req.params.fileName === "string" ? req.params.fileName : "";
@@ -23,6 +36,16 @@ export async function handleTranscodeSessionFileGet(req, reply, { hlsSessionMana
   return reply.send(result.stream);
 }
 
+/**
+ * Poll `hlsSessionManager.getFileStream()` until the file is available,
+ * the session fails, or the timeout elapses.
+ *
+ * @param {import("../../../services/hls-session-manager.js").HlsSessionManager} hlsSessionManager
+ * @param {string} sessionId
+ * @param {string} fileName
+ * @param {number} timeoutMs
+ * @returns {Promise<Awaited<ReturnType<import("../../../services/hls-session-manager.js").HlsSessionManager["getFileStream"]>>>}
+ */
 async function waitForSessionFile(hlsSessionManager, sessionId, fileName, timeoutMs) {
   const startedAt = Date.now();
   while (Date.now() - startedAt < timeoutMs) {
@@ -35,6 +58,12 @@ async function waitForSessionFile(hlsSessionManager, sessionId, fileName, timeou
   return { kind: "warming-up" };
 }
 
+/**
+ * Resolve after a given number of milliseconds.
+ *
+ * @param {number} ms
+ * @returns {Promise<void>}
+ */
 function delay(ms) {
   return new Promise((resolve) => {
     setTimeout(resolve, ms);

@@ -1,3 +1,22 @@
+/**
+ * Determine the best playback mode (direct stream or HLS transcode) for a
+ * torrent file and return the corresponding plan.
+ *
+ * POST /api/playback-plan
+ *
+ * @param {import("fastify").FastifyRequest} req
+ * @param {import("fastify").FastifyReply} reply
+ * @param {{ playbackPlanner: ReturnType<import("../../../services/playback-planner.js").createPlaybackPlanner> }} deps
+ * @returns {Promise<void>}
+ */
+
+/**
+ * Extract a plain object from the request body, guarding against
+ * non-object payloads (arrays, primitives, null).
+ *
+ * @param {unknown} body
+ * @returns {Record<string, unknown>}
+ */
 function getPayload(body) {
   if (body && typeof body === "object" && !Array.isArray(body)) {
     return body;

@@ -11,6 +11,8 @@
  * unexpected close.
  */
 
+import { WebSocket } from "ws";
+
 /** @import { HealthMetrics } from './health-collector.js' */
 
 /**

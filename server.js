@@ -77,6 +77,12 @@ export async function startProxyServer({ host, port, transcodeAudio, ffmpegBin }
     allowedHeaders: ["Content-Type", "Range"]
   });
 
+  // Allow browser requests from an HTTPS page to this private-network proxy
+  // without triggering Chromium's Private Network Access permission prompt.
+  app.addHook("onRequest", async (_req, reply) => {
+    reply.header("Access-Control-Allow-Private-Network", "true");
+  });
+
   const sourceRegistry = createSourceRegistry(200);
   const torrentPool = new TorrentPool();
   const selectedPort = await getPort({

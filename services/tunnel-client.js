@@ -1,28 +1,75 @@
 /**
  * @file Outbound WebSocket tunnel from the proxy to the registry server.
  *
- * The proxy establishes one persistent connection on startup.
- * The server sends relay requests through it; the proxy fetches them
- * locally (against 127.0.0.1) and streams responses back chunk-by-chunk.
+ * The proxy opens one persistent connection on startup.  Through it the
+ * server can:
+ *   - relay browser HTTP requests to the proxy's local Fastify server, and
+ *   - forward WebRTC signalling messages (offers, ICE candidates) between
+ *     the browser and the proxy's WebRTC manager.
+ *
+ * The tunnel reconnects automatically with a fixed back-off after any
+ * unexpected close.
  */
 
+/** @import { HealthMetrics } from './health-collector.js' */
+
 /**
+ * Configuration for the tunnel client.
+ *
  * @typedef {Object} TunnelClientOptions
- * @property {string} serverUrl   - Base URL of the registry server (http/https).
- * @property {string} proxyId     - Stable ID used to identify this proxy on the server.
- * @property {string} token       - Auth token sent as a header during the WS handshake.
- * @property {number} proxyPort   - Local port the proxy HTTP server is listening on.
- * @property {(message: string) => void} [onLog] - Optional log callback.
+ * @property {string}  serverUrl
+ *   Base URL of the registry server (http or https — converted to ws/wss automatically).
+ * @property {string}  proxyId
+ *   Stable ID used to identify this proxy on the server.
+ * @property {string}  token
+ *   Auth token sent as the `x-proxy-id` / `x-proxy-token` headers during the WS handshake.
+ * @property {number}  proxyPort
+ *   Local port the proxy's Fastify server is listening on.
+ * @property {(sessionId: string, signal: WebRtcSignal) => void} [onSignal]
+ *   Called when the server forwards a WebRTC signal (SDP offer or ICE candidate)
+ *   from a browser to this proxy.  `sessionId` scopes the signal to a P2P session.
+ * @property {() => void} [onConnect]
+ *   Called each time the WebSocket connection becomes open (including reconnects).
+ *   Use to re-register the proxy so the server's in-memory store stays consistent
+ *   after server restarts.
+ * @property {() => HealthMetrics} [onHealthRequest]
+ *   Called when the server sends a `health-request` message.  The return value is
+ *   sent back as `health-response` and used by the server to score this proxy.
+ * @property {(message: string) => void} [onLog]
+ *   Optional structured log sink.
  */
 
 /**
+ * A single WebRTC signal message forwarded through the tunnel.
+ *
+ * @typedef {Object} WebRtcSignal
+ * @property {string}  type       - Signal kind: "offer" | "answer" | "candidate".
+ * @property {string}  [sdp]      - SDP string (for "offer" and "answer").
+ * @property {string}  [candidate] - ICE candidate string (for "candidate").
+ * @property {string}  [mid]      - SDP media ID associated with the candidate.
+ */
+
+/**
+ * A relay request sent by the server — asking the proxy to perform a local
+ * HTTP fetch and stream the response back through the tunnel.
+ *
  * @typedef {Object} TunnelRelayRequest
- * @property {string} requestId - Unique ID assigned by the server for this relay round-trip.
- * @property {string} method    - HTTP method to use when calling the local proxy.
- * @property {string} path      - Request path (e.g. "/health").
- * @property {string} query     - Query string without the leading "?".
+ * @property {string} requestId - Unique ID that ties request → response chunks.
+ * @property {string} method    - HTTP method (GET, POST, etc.).
+ * @property {string} path      - Request path on the local proxy (e.g. "/health").
+ * @property {string} query     - Raw query string without the leading "?".
  * @property {Record<string, string>} headers - Headers forwarded from the browser.
- * @property {string | null} body - Serialised JSON body, or null for GET.
+ * @property {string | null} body - Serialised request body, or null.
+ */
+
+/**
+ * The object returned by {@link createTunnelClient}.
+ *
+ * @typedef {Object} TunnelClient
+ * @property {() => void}   connect      - Open the tunnel; reconnects on drop.
+ * @property {() => void}   disconnect   - Close the tunnel; suppresses reconnects.
+ * @property {(sessionId: string, signal: WebRtcSignal) => void} sendSignal
+ *   Send a WebRTC signal (answer / candidate) back to the browser.
  */
 
 const RECONNECT_DELAY_MS = 5_000;
@@ -31,9 +78,9 @@ const RECONNECT_DELAY_MS = 5_000;
  * Create and manage the outbound WebSocket tunnel to the registry server.
  *
  * @param {TunnelClientOptions} options
- * @returns {{ connect: () => void, disconnect: () => void }}
+ * @returns {TunnelClient}
  */
-export function createTunnelClient({ serverUrl, proxyId, token, proxyPort, onLog }) {
+export function createTunnelClient({ serverUrl, proxyId, token, proxyPort, onSignal, onConnect, onHealthRequest, onLog }) {
   const wsUrl = serverUrl.replace(/^http/, "ws").replace(/\/+$/, "") + "/ws/proxy-tunnel";
 
   /** @type {WebSocket | null} */
@@ -43,7 +90,7 @@ export function createTunnelClient({ serverUrl, proxyId, token, proxyPort, onLog
   let stopped = false;
 
   /**
-   * Emit a log message via the provided callback.
+   * Write a message to the log sink if one was provided.
    *
    * @param {string} message
    * @returns {void}
@@ -56,7 +103,7 @@ export function createTunnelClient({ serverUrl, proxyId, token, proxyPort, onLog
 
   /**
    * Open a new WebSocket connection to the server.
-   * Automatically reconnects on close unless {@link disconnect} was called.
+   * Automatically schedules a reconnect after any unintentional close.
    *
    * @returns {void}
    */
@@ -75,6 +122,9 @@ export function createTunnelClient({ serverUrl, proxyId, token, proxyPort, onLog
 
     socket.addEventListener("open", () => {
       log("Tunnel connected.");
+      if (typeof onConnect === "function") {
+        onConnect();
+      }
     });
 
     socket.addEventListener("message", (event) => {
@@ -84,10 +134,27 @@ export function createTunnelClient({ serverUrl, proxyId, token, proxyPort, onLog
       } catch {
         return;
       }
+
       if (message.type === "request") {
         void handleRelayRequest(message).catch((error) => {
           log(`Tunnel relay error: ${error?.message ?? error}`);
         });
+        return;
+      }
+
+      // WebRTC signalling: server forwards a signal from a browser session.
+      if (message.type === "signal") {
+        if (typeof message.sessionId === "string" && message.signal && typeof onSignal === "function") {
+          onSignal(message.sessionId, message.signal);
+        }
+        return;
+      }
+
+      // Health check: server requests current metrics for proxy scoring.
+      if (message.type === "health-request") {
+        const metrics = typeof onHealthRequest === "function" ? onHealthRequest() : {};
+        send({ type: "health-response", requestId: message.requestId, metrics });
+        return;
       }
     });
 
@@ -105,8 +172,8 @@ export function createTunnelClient({ serverUrl, proxyId, token, proxyPort, onLog
   }
 
   /**
-   * Execute a relay request sent by the server: fetch the resource
-   * from the local proxy and stream the response back chunk-by-chunk.
+   * Fetch a resource from the local Fastify server and stream the response
+   * back to the registry server chunk-by-chunk over the WebSocket.
    *
    * @param {TunnelRelayRequest} relayRequest
    * @returns {Promise<void>}
@@ -129,17 +196,13 @@ export function createTunnelClient({ serverUrl, proxyId, token, proxyPort, onLog
       return;
     }
 
+    /** @type {Record<string, string>} */
     const responseHeaders = {};
     for (const [headerName, headerValue] of response.headers.entries()) {
       responseHeaders[headerName] = headerValue;
     }
 
-    send({
-      type: "response-start",
-      requestId,
-      status: response.status,
-      headers: responseHeaders
-    });
+    send({ type: "response-start", requestId, status: response.status, headers: responseHeaders });
 
     if (!response.body) {
       send({ type: "response-chunk", requestId, data: "", done: true });
@@ -167,7 +230,7 @@ export function createTunnelClient({ serverUrl, proxyId, token, proxyPort, onLog
   }
 
   /**
-   * Send a JSON message through the WebSocket if it is open.
+   * Serialise a message to JSON and send it through the WebSocket if open.
    *
    * @param {object} message
    * @returns {void}
@@ -179,7 +242,7 @@ export function createTunnelClient({ serverUrl, proxyId, token, proxyPort, onLog
   }
 
   /**
-   * Send a `response-error` message back to the server for the given request.
+   * Send a `response-error` frame for a given relay request.
    *
    * @param {string} requestId
    * @param {string} errorMessage
@@ -191,7 +254,7 @@ export function createTunnelClient({ serverUrl, proxyId, token, proxyPort, onLog
 
   return {
     /**
-     * Start the tunnel, connecting immediately and reconnecting on drop.
+     * Start the tunnel.  Connects immediately and auto-reconnects on drop.
      *
      * @returns {void}
      */
@@ -201,7 +264,8 @@ export function createTunnelClient({ serverUrl, proxyId, token, proxyPort, onLog
     },
 
     /**
-     * Stop the tunnel and close the current connection without reconnecting.
+     * Tear down the tunnel.  Closes the current connection and prevents
+     * any future reconnect attempts.
      *
      * @returns {void}
      */
@@ -215,6 +279,18 @@ export function createTunnelClient({ serverUrl, proxyId, token, proxyPort, onLog
         socket.close(1000, "shutdown");
         socket = null;
       }
+    },
+
+    /**
+     * Forward a WebRTC signal (SDP answer or ICE candidate) from this proxy
+     * to the browser via the server tunnel.
+     *
+     * @param {string} sessionId   - Scopes the signal to a single P2P session.
+     * @param {WebRtcSignal} signal
+     * @returns {void}
+     */
+    sendSignal(sessionId, signal) {
+      send({ type: "signal", sessionId, signal });
     }
   };
 }

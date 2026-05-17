@@ -1,230 +1,335 @@
-# Torrent Proxy Client
+# @torrent-tv/proxy
 
-`@torrent-tv/proxy` is a lightweight Node.js service that turns torrent content into HTTP endpoints that are easy to consume from web players and backend services.
-
-It is designed for setups where a central registry/UI needs a simple direct media URL, while the actual torrent fetching happens on a separate edge/client machine.
+A lightweight Node.js service that streams torrent content to browsers via a direct WebRTC P2P data channel or, when needed, HTTP. It handles torrent fetching, codec detection, and on-demand HLS transcoding with ffmpeg.
 
 ## Why this exists
 
-- Browsers and many media players cannot consume torrents directly.
-- This service exposes torrent files through regular HTTP (`/stream`) with range support.
-- It can optionally create HLS sessions with AAC audio when direct playback is not suitable.
-- It can also create HLS sessions with video transcoding when browser-side decode still fails.
-- It registers itself in an external registry service and sends heartbeats, so other services can discover and use it.
+- Browsers cannot consume torrents directly.
+- This service exposes torrent files through HTTP (`/stream`) with Range support, and through a WebRTC data channel for NAT-traversed streaming.
+- It can transcode audio (or video + audio) to HLS on demand so the browser can always play the content regardless of codec support.
+- It registers itself in an external registry server and maintains a persistent tunnel WebSocket so the server can route browser requests and WebRTC signals to it.
 
-## What it does
+## Architecture Overview
 
-- Runs a Fastify server with health and media endpoints.
-- Accepts torrent sources (`magnet` or base64 `.torrent`) and returns a stable `sourceKey`.
-- Streams a selected file from a torrent by `fileIndex`.
-- Builds a playback plan (`direct` vs `hls`) based on detected audio codec and returns both audio/video codecs.
-- Starts ffmpeg-based HLS transcoding sessions (`audio-only` or `video+audio`) and serves generated playlist/segments.
-- Tracks multi-client consumers per transcode session and stops ffmpeg when the last consumer releases.
+```mermaid
+graph TB
+  subgraph Browser
+    WP[WebRtcProxy]
+    HLS[HLS.js + WebRtcHlsLoader]
+  end
 
-## Requirements
+  subgraph Server["Registry Server"]
+    API[REST API]
+    TS[ProxyTunnelServer]
+    SH[SignalHub /ws/browser-signal]
+  end
 
-- Node.js 18+ (ESM and built-in `fetch` are required).
-- npm.
-- ffmpeg is required only when audio transcoding is enabled.
-  - By default, the package uses `ffmpeg-static`.
-  - You can override binary path with `--ffmpeg-bin`.
-  - You can disable transcoding with `--no-transcode-audio`.
+  subgraph Proxy["@torrent-tv/proxy (Fastify)"]
+    TC[TunnelClient]
+    WM[WebRtcManager]
+    HC[HealthCollector]
+    DCH[DataChannelHandler]
+    PP[PlaybackPlanner]
+    HLM[HlsSessionManager]
+    TP[TorrentPool]
+    FF[ffmpeg]
+  end
 
-## Install
+  TC -->|"persistent WebSocket /ws/proxy-tunnel"| TS
+  TC -->|re-register on reconnect| API
+  HC -->|metrics: cpu, mem, load| TC
 
-```bash
-npm install
+  TS <-->|signal forward| SH
+  SH <-->|WebSocket| WP
+
+  WP <-->|"P2P data channel (STUN)"| WM
+  WM --> DCH
+  DCH --> TP
+  DCH --> HLM
+  HLM --> FF
+
+  HLS -->|segment/manifest fetches| WP
 ```
 
-## Run
+## Service Internals
 
-```bash
-npm start -- --server-url http://localhost:3000
+### TunnelClient
+
+Opens one persistent WebSocket to the registry server's `/ws/proxy-tunnel` endpoint on startup.
+Reconnects automatically with back-off on unexpected close.
+
+Handles three inbound message types from the server:
+
+| Message type | What the proxy does |
+|---|---|
+| `health-request` | Calls `HealthCollector`, sends `health-response` back through tunnel |
+| `signal` | Forwards SDP offer or ICE candidate to `WebRtcManager` |
+| `relay-request` | Fetches the path from local Fastify, streams `relay-response` back |
+
+### WebRtcManager
+
+Manages RTCPeerConnection sessions keyed by `sessionId`. On receiving an SDP offer from the server it creates a peer connection using [`node-datachannel`](https://github.com/murat-dogan/node-datachannel), generates an answer, and exchanges ICE candidates through the tunnel. When the data channel opens it hands it off to `DataChannelHandler`.
+
+```mermaid
+sequenceDiagram
+  participant S as Server (via TunnelClient)
+  participant WM as WebRtcManager
+  participant DC as DataChannelHandler
+
+  S->>WM: { type:"offer", sessionId, sdp }
+  WM->>WM: createPeerConnection(sessionId)
+  WM->>WM: setRemoteDescription(offer)
+  WM->>WM: createAnswer()
+  WM->>S: { type:"answer", sdp }
+
+  loop ICE candidates
+    WM->>S: { type:"candidate", candidate, mid }
+    S->>WM: { type:"candidate", … }
+  end
+
+  Note over WM: data channel opens
+  WM->>DC: handleChannel(dataChannel)
 ```
 
-Minimal required argument:
+### DataChannelHandler
 
-- `--server-url <url>`: base URL of your registry server.
+Receives JSON `request` messages over the data channel and dispatches them to the proxy's local Fastify server. Responses are streamed back as base64 `response-chunk` messages.
 
-Useful optional arguments:
+**Wire protocol (browser ↔ proxy):**
 
-- `--host <host>`: bind host (default `127.0.0.1`).
-- `--port <port>`: preferred local port (default `9090`; first free port in range is selected).
-- `--public-base-url <url>`: externally reachable base URL advertised to registry.
-- `--id <id>`: stable proxy client id.
-- `--name <name>`: display name for registry.
-- `--token <token>`: token sent to register/heartbeat endpoints.
-- `--ffmpeg-bin <path>`: custom ffmpeg binary path.
-- `--no-transcode-audio`: disable HLS audio transcoding.
-- `--help`: print all options with descriptions and examples, then exit.
+| Direction | Type | Key fields |
+|---|---|---|
+| Browser → Proxy | `request` | `requestId`, `method`, `path`, `query`, `headers`, `body` |
+| Proxy → Browser | `response-start` | `requestId`, `status`, `headers` |
+| Proxy → Browser | `response-chunk` | `requestId`, `data` (base64), `done: true\|false` |
+| Proxy → Browser | `response-error` | `requestId`, `error` |
+| Browser → Proxy | `ping` | `id` |
+| Proxy → Browser | `pong` | `id` |
+
+### HealthCollector
+
+Collects system-level health metrics on every request from the server:
+
+| Metric | Range | Description |
+|---|---|---|
+| `cpuLoad` | 0 – ∞ | 1-minute load average divided by CPU count (>1 = overloaded) |
+| `memFree` | 0 – 1 | Free memory fraction |
+| `activeSessions` | 0 – ∞ | Number of active HLS transcode sessions |
+
+The browser uses these metrics together with tunnel RTT to score proxies:
+
+```
+score = memFree × 0.4 + (1 - clamp(cpuLoad, 0, 1)) × 0.4 − (rttMs / 2000) × 0.2
+```
+
+### HlsSessionManager & ffmpeg
+
+Creates and manages ffmpeg-based HLS transcode sessions. Sessions are keyed by `sourceKey:fileIndex:mode` and shared across consumers.
+
+```mermaid
+sequenceDiagram
+  participant B as Browser (via DataChannel)
+  participant H as HlsSessionManager
+  participant F as ffmpeg
+
+  B->>H: POST /api/transcode-sessions (consumerId, mode)
+  H->>F: start (or reuse) ffmpeg process
+  H-->>B: { sessionId, playlistPath }
+
+  loop segment requests
+    B->>H: GET /transcode/:sessionId/seg000.ts
+    H-->>B: MPEG-TS segment (via data channel chunk)
+  end
+
+  B->>H: GET /api/transcode-sessions/:id/progress
+  H-->>B: { percent, speed, remainingSeconds, … }
+
+  B->>H: POST /api/transcode-sessions/:id/release (consumerId)
+  H->>H: remove consumer
+  alt last consumer released
+    H->>F: kill process + cleanup segments
+  end
+```
 
 ## HTTP API
 
-Base URL examples below use `http://127.0.0.1:9090`.
+Base URL examples use `http://127.0.0.1:9090`.
 
 ### Health
 
 ```bash
-curl http://127.0.0.1:9090/health
-curl http://127.0.0.1:9090/healthz
+GET /health
+GET /healthz
 ```
 
-### 1) Register a source
+### Register a source
 
 ```bash
-curl -X POST http://127.0.0.1:9090/api/sources \
-  -H "Content-Type: application/json" \
-  -d '{
-    "sourceType": "magnet",
-    "source": "magnet:?xt=urn:btih:..."
-  }'
+POST /api/sources
+Content-Type: application/json
+
+{
+  "sourceType": "magnet",         # or "torrent" (base64-encoded bytes)
+  "source": "magnet:?xt=urn:btih:…"
+}
+```
+
+Response: `{ "sourceKey": "…" }`
+
+### Build playback plan
+
+```bash
+POST /api/playback-plan
+Content-Type: application/json
+
+{
+  "sourceKey": "<sourceKey>",
+  "fileIndex": 0,
+  "userAgent": "Mozilla/5.0 …"
+}
 ```
 
 Response:
 
 ```json
-{ "sourceKey": "..." }
-```
-
-Supported `sourceType` values:
-
-- `magnet`: magnet URI string.
-- `torrent`: base64-encoded raw `.torrent` file bytes.
-
-### 2) Build playback plan
-
-```bash
-curl -X POST http://127.0.0.1:9090/api/playback-plan \
-  -H "Content-Type: application/json" \
-  -d '{
-    "sourceKey": "<sourceKey>",
-    "fileIndex": 0,
-    "userAgent": "Mozilla/5.0"
-  }'
-```
-
-Typical response:
-
-```json
 {
   "mode": "direct",
-  "directUrl": "http://127.0.0.1:9090/stream?sourceKey=...&fileIndex=0",
+  "directUrl": "http://127.0.0.1:9090/stream?sourceKey=…&fileIndex=0",
   "reason": "audio-codec-supported",
   "audioCodec": "aac",
   "videoCodec": "h264"
 }
 ```
 
-`mode` can be:
+`mode` is `"direct"` or `"hls"`.
 
-- `direct`: play `directUrl` directly.
-- `hls`: create an HLS session, then use playlist URL.
-
-### 3) Direct stream endpoint
+### Direct stream
 
 ```bash
-curl -v "http://127.0.0.1:9090/stream?sourceKey=<sourceKey>&fileIndex=0"
+GET /stream?sourceKey=<key>&fileIndex=0
 ```
 
-Or without pre-registering source:
+Supports HTTP Range requests.
+
+### Create HLS transcode session
 
 ```bash
-curl -v "http://127.0.0.1:9090/stream?sourceType=magnet&source=magnet:?xt=...&fileIndex=0"
-```
+POST /api/transcode-sessions
+Content-Type: application/json
 
-The endpoint supports HTTP Range requests.
-
-### 4) Create HLS transcode session (optional)
-
-```bash
-curl -X POST http://127.0.0.1:9090/api/transcode-sessions \
-  -H "Content-Type: application/json" \
-  -d '{
-    "sourceKey": "<sourceKey>",
-    "fileIndex": 0,
-    "transcodeVideo": false,
-    "consumerId": "browser-session-uuid",
-    "fileName": "Episode01.mkv"
-  }'
-```
-
-Set `"transcodeVideo": true` to force video transcoding (for browser decode fallback cases).
-
-Response:
-
-```json
 {
-  "sessionId": "...",
-  "playlistPath": "/transcode/<sessionId>/index.m3u8"
+  "sourceKey": "<key>",
+  "fileIndex": 0,
+  "transcodeVideo": false,
+  "consumerId": "uuid",
+  "fileName": "Episode01.mkv"
 }
 ```
 
-Open playlist as:
+Response: `{ "sessionId": "…", "playlistPath": "/transcode/<id>/index.m3u8" }`
 
-`http://127.0.0.1:9090/transcode/<sessionId>/index.m3u8`
-
-### 5) Poll transcode progress
+### Poll transcode progress
 
 ```bash
-curl "http://127.0.0.1:9090/api/transcode-sessions/<sessionId>/progress"
+GET /api/transcode-sessions/:sessionId/progress
 ```
 
-Response includes transcode and warmup metrics:
-- `percent`, `processedSeconds`, `totalSeconds`, `remainingSeconds`, `speed`
-- `warmupPercent`, `warmupRemainingSeconds`
+Returns: `percent`, `processedSeconds`, `totalSeconds`, `remainingSeconds`, `speed`, `warmupPercent`, `warmupRemainingSeconds`.
 
-### 6) Release transcode consumer
+### Release consumer
 
 ```bash
-curl -X POST http://127.0.0.1:9090/api/transcode-sessions/<sessionId>/release \
-  -H "Content-Type: application/json" \
-  -d '{
-    "consumerId": "browser-session-uuid",
-    "reason": "pagehide"
-  }'
+POST /api/transcode-sessions/:sessionId/release
+Content-Type: application/json
+
+{ "consumerId": "uuid", "reason": "pagehide" }
 ```
 
-When the last consumer is released, proxy disposes the session and stops ffmpeg.
+When the last consumer is released, the transcode session stops and temp files are cleaned up.
 
-## End-to-end flow
+## Requirements
 
-1. Start proxy client with `--server-url`.
-2. Register torrent source via `/api/sources` and get `sourceKey`.
-3. Request `/api/playback-plan`.
-4. If plan is `direct`, use `directUrl`.
-5. If plan is `hls`, create session and play generated playlist.
-6. Poll `/progress` for UI updates, then release session on client stop/close.
+- Node.js 18+ (ESM, built-in `fetch`).
+- ffmpeg is required only when transcoding is enabled (bundled via `ffmpeg-static` by default).
 
-## Transcode Session Lifecycle
+## Run
+
+```bash
+npm install
+npm start -- --server-url http://localhost:3000
+```
+
+### CLI Options
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `--server-url` | — | **(Required)** Base URL of the registry server |
+| `--host` | `127.0.0.1` | Bind host |
+| `--port` | `9090` | Preferred local port (auto-increments if taken) |
+| `--public-base-url` | — | Externally reachable base URL advertised to registry |
+| `--id` | auto | Stable proxy client ID |
+| `--name` | hostname | Display name in registry |
+| `--token` | — | Auth token for register/heartbeat |
+| `--ffmpeg-bin` | bundled | Path to custom ffmpeg binary |
+| `--no-transcode-audio` | — | Disable HLS audio transcoding |
+| `--help` | — | Print all options and exit |
+
+## Docker
+
+```bash
+docker build -t torrent-tv-proxy .
+docker run torrent-tv-proxy --server-url http://my-server:8080
+```
+
+## Full End-to-End Flow
 
 ```mermaid
 sequenceDiagram
-  participant C as Client
+  participant B as Browser
+  participant S as Registry Server
   participant P as Proxy
-  participant F as FFmpeg
 
-  C->>P: POST /api/transcode-sessions (consumerId, mode, fileName)
-  P->>F: start/reuse transcode session
-  C->>P: GET /transcode/:sessionId/index.m3u8
-  C->>P: GET /api/transcode-sessions/:sessionId/progress
-  C->>P: POST /api/transcode-sessions/:sessionId/release (reason)
-  P->>P: remove consumer
-  alt no consumers left
-    P->>F: stop process and cleanup
-  end
+  Note over P,S: Startup
+  P->>S: POST /api/proxy-clients/register
+  P->>S: WebSocket /ws/proxy-tunnel (persistent)
+
+  Note over B,P: Playback start
+  B->>S: GET /api/proxy-clients/health
+  S->>P: health-request via tunnel
+  P-->>S: health-response (cpu, mem, activeSessions)
+  S-->>B: scored proxy list
+
+  Note over B,P: WebRTC setup
+  B->>S: WebSocket /ws/browser-signal
+  B->>B: RTCPeerConnection + DataChannel + createOffer
+  B->>S: { type:"offer", proxyId, sdp }
+  S->>P: forward via tunnel
+  P->>P: createAnswer
+  P->>S: { type:"answer", sdp }
+  S->>B: forward
+  Note over B,P: ICE candidates exchanged same way
+  Note over B,P: Data channel opens (P2P, STUN-assisted)
+
+  Note over B,P: Streaming
+  B->>P: request via data channel: POST /api/sources
+  P-->>B: response-chunk: { sourceKey }
+  B->>P: request via data channel: POST /api/playback-plan
+  P-->>B: response-chunk: { mode, audioCodec, videoCodec, … }
+  B->>P: request via data channel: POST /api/transcode-sessions
+  P-->>B: response-chunk: { sessionId, playlistPath }
+  B->>P: HLS.js fetches: GET /transcode/:id/index.m3u8
+  B->>P: HLS.js fetches: GET /transcode/:id/seg000.ts …
+  Note over B,P: All via data channel — no server relay
 ```
 
 ## Notes
 
-- HLS session files are stored in OS temp directory and cleaned up automatically.
-- Transcode sessions are cached by `sourceKey:fileIndex:mode`.
-- ffmpeg is bundled via `ffmpeg-static` for out-of-the-box availability.
-- Source registry is in-memory and bounded (old entries are evicted).
+- HLS session temp files are in the OS temp directory and cleaned up automatically.
+- Transcode sessions are cached by `sourceKey:fileIndex:mode` and shared across consumers.
+- The source registry is in-memory and bounded (old entries evicted).
+- The proxy reconnects to the server automatically on tunnel disconnect.
 
 ## License
 
-This project is distributed under GPL-3.0-or-later (see `LICENSE`).
-
-Third-party dependencies keep their own licenses. In particular, bundled ffmpeg binaries
-provided by `ffmpeg-static` are GPL-compatible.
-
+GPL-3.0-or-later (see `LICENSE`). Third-party dependencies keep their own licenses.
+Bundled ffmpeg binaries (`ffmpeg-static`) are GPL-compatible.

@@ -1,8 +1,34 @@
 /**
  * @file HTTP client for the registry server API.
  *
- * Handles proxy registration and periodic heartbeat requests.
+ * Handles proxy registration with the registry server.
  * The auth token is sent as the `x-proxy-token` request header.
+ *
+ * Liveness is tracked via the WebSocket tunnel connection — no heartbeat
+ * HTTP polling is needed.  The proxy re-registers on every tunnel reconnect
+ * so the server's in-memory store stays consistent after restarts.
+ */
+
+/**
+ * Parameters required to register this proxy with the registry server.
+ *
+ * @typedef {Object} RegisterClientParams
+ * @property {string} serverUrl - Base URL of the registry server (e.g. "http://my-server:8080").
+ * @property {string} id        - Stable unique identifier for this proxy instance.
+ * @property {string} name      - Human-readable display name shown in the server UI.
+ * @property {string} baseUrl   - Publicly reachable base URL of this proxy's HTTP server.
+ * @property {string} token     - Auth token sent as the `x-proxy-token` header.
+ */
+
+/**
+ * The summary record returned by the server after a successful registration.
+ *
+ * @typedef {Object} ProxyClientSummary
+ * @property {string} id         - Stable unique identifier.
+ * @property {string} name       - Display name.
+ * @property {string} baseUrl    - Advertised base URL.
+ * @property {string} createdAt  - ISO timestamp of first registration.
+ * @property {string} lastSeenAt - ISO timestamp of this registration.
  */
 
 /**
@@ -28,20 +54,13 @@ function ensureBaseUrl(serverUrl) {
 }
 
 /**
- * @typedef {Object} RegisterClientParams
- * @property {string} serverUrl - Base URL of the registry server.
- * @property {string} id        - Stable unique identifier for this proxy.
- * @property {string} name      - Human-readable display name.
- * @property {string} baseUrl   - Publicly reachable base URL of this proxy.
- * @property {string} token     - Auth token sent as `x-proxy-token`.
- */
-
-/**
  * Register this proxy with the registry server.
- * Throws if the server responds with a non-2xx status.
+ *
+ * Throws if the server responds with a non-2xx status.  The caller is
+ * responsible for retrying — see `cli.js` → `registerWithRetry`.
  *
  * @param {RegisterClientParams} params
- * @returns {Promise<{ client: { id: string, name: string, baseUrl: string, createdAt: string, lastSeenAt: string } }>}
+ * @returns {Promise<{ client: ProxyClientSummary }>}
  */
 export async function registerClient({ serverUrl, id, name, baseUrl, token }) {
   const response = await fetch(buildRegistryUrl(serverUrl, "api/proxy-clients/register"), {
@@ -59,35 +78,4 @@ export async function registerClient({ serverUrl, id, name, baseUrl, token }) {
   }
 
   return response.json();
-}
-
-/**
- * @typedef {Object} SendHeartbeatParams
- * @property {string} serverUrl - Base URL of the registry server.
- * @property {string} id        - Proxy ID to refresh.
- * @property {string} token     - Auth token sent as `x-proxy-token`.
- */
-
-/**
- * Send a heartbeat to the registry server to refresh `lastSeenAt`.
- * Returns the HTTP status code, or `null` if the request failed entirely
- * (e.g. network error).
- *
- * @param {SendHeartbeatParams} params
- * @returns {Promise<number | null>}
- */
-export async function sendHeartbeat({ serverUrl, id, token }) {
-  try {
-    const response = await fetch(buildRegistryUrl(serverUrl, "api/proxy-clients/heartbeat"), {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "x-proxy-token": token
-      },
-      body: JSON.stringify({ id })
-    });
-    return response.status;
-  } catch (_error) {
-    return null;
-  }
 }

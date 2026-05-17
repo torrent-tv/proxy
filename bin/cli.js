@@ -2,9 +2,10 @@
 /**
  * @file CLI entry point for the torrent-tv proxy.
  *
- * Parses command-line arguments, starts the local HTTP server, registers
- * this proxy with the registry server, establishes the WebSocket tunnel,
- * and maintains a periodic heartbeat.
+ * Parses command-line arguments, starts the local HTTP server, opens a
+ * persistent WebSocket tunnel to the registry server, and registers this
+ * proxy. Liveness is tracked via the tunnel connection — the proxy re-registers
+ * automatically on reconnect so the server's in-memory store stays consistent.
  */
 
 import { Command } from "commander";
@@ -12,8 +13,11 @@ import crypto from "node:crypto";
 import { spawnSync } from "node:child_process";
 import ffmpegStatic from "ffmpeg-static";
 import { startProxyServer } from "../server.js";
-import { registerClient, sendHeartbeat } from "../services/registry-api.js";
+import { registerClient } from "../services/registry-api.js";
 import { createTunnelClient } from "../services/tunnel-client.js";
+import { createWebRtcManager } from "../services/webrtc-manager.js";
+import { createDataChannelHandler } from "../services/data-channel-handler.js";
+import { collectHealthMetrics } from "../services/health-collector.js";
 import { logger } from "../utils/logger.js";
 
 const program = new Command();
@@ -96,9 +100,6 @@ function assertFfmpegAvailability() {
 /** @type {boolean} */
 let registrationInProgress = false;
 
-/** @type {ReturnType<typeof setInterval> | null} */
-let heartbeatTimer = null;
-
 /** @type {import("fastify").FastifyInstance | null} */
 let app = null;
 
@@ -108,8 +109,9 @@ let actualPort = localPort;
 /** @type {boolean} */
 let shutdownInProgress = false;
 
-/** @type {ReturnType<typeof import("../services/tunnel-client.js").createTunnelClient> | null} */
+/** @type {ReturnType<typeof createTunnelClient> | null} */
 let tunnelClient = null;
+
 
 /**
  * Register this proxy with the registry server.
@@ -130,7 +132,7 @@ async function registerClientSafe() {
       baseUrl: explicitBaseUrl || `http://${bindHost}:${actualPort}`,
       token
     });
-    logger.success(`Registered: ${JSON.stringify(result.client)}`);
+    logger.success(`Registered as "${result.client?.name}" (${result.client?.id?.slice(0, 8)})`);
   } finally {
     registrationInProgress = false;
   }
@@ -172,10 +174,6 @@ async function shutdown(signal) {
     return;
   }
   shutdownInProgress = true;
-  if (heartbeatTimer) {
-    clearInterval(heartbeatTimer);
-    heartbeatTimer = null;
-  }
   if (tunnelClient) {
     tunnelClient.disconnect();
     tunnelClient = null;
@@ -213,33 +211,56 @@ try {
     logger.info(`Optional HLS audio transcode is enabled (ffmpeg: ${ffmpegBin}).`);
   }
 
-  await registerWithRetry();
+  // Create tunnel + WebRTC manager.
+  // The tunnel forwards WebRTC signals between browser (via server) and this proxy.
+  // The WebRTC manager handles the actual peer connection and data channel.
+  //
+  // We use a late-binding ref so both objects can reference each other without
+  // running into the TDZ (tunnelClient is declared above; webRtcManager uses let
+  // so the closure in createTunnelClient can call it after both are initialised).
+  /** @type {ReturnType<typeof createWebRtcManager> | null} */
+  let webRtcManager = null;
 
   tunnelClient = createTunnelClient({
     serverUrl,
     proxyId: clientId,
     token,
     proxyPort: actualPort,
-    onLog: (msg) => logger.info(msg)
+    onSignal(sessionId, signal) {
+      webRtcManager?.handleSignal(sessionId, signal);
+    },
+    onHealthRequest() {
+      return collectHealthMetrics();
+    },
+    onConnect() {
+      // Re-register on every tunnel connect/reconnect so the server's
+      // in-memory store stays consistent after server restarts.
+      void registerClientSafe().catch((error) => {
+        const message = error instanceof Error ? error.message : String(error);
+        logger.error(`Re-registration after tunnel connect failed: ${message}`);
+      });
+    },
+    onLog: (message) => logger.info(message)
   });
+
+  const dataChannelHandler = createDataChannelHandler({
+    proxyPort: actualPort,
+    onLog: (message) => logger.info(message)
+  });
+
+  webRtcManager = createWebRtcManager({
+    sendSignal(sessionId, signal) {
+      tunnelClient?.sendSignal(sessionId, signal);
+    },
+    onDataChannel(sessionId, channel) {
+      dataChannelHandler.handleChannel(sessionId, channel);
+    },
+    onLog: (message) => logger.info(message)
+  });
+
   tunnelClient.connect();
 
-  heartbeatTimer = setInterval(async () => {
-    const status = await sendHeartbeat({
-      serverUrl,
-      id: clientId,
-      token
-    });
-    if (status === 404) {
-      logger.warn("Heartbeat returned 404, re-registering...");
-      try {
-        await registerClientSafe();
-      } catch (error) {
-        const message = error instanceof Error ? error.message : String(error);
-        logger.error(`Re-register failed: ${message}`);
-      }
-    }
-  }, 20_000);
+  await registerWithRetry();
 } catch (error) {
   const message = error instanceof Error ? error.message : String(error);
   logger.error(message);

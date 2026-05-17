@@ -137,6 +137,31 @@ async function registerClientSafe() {
 }
 
 /**
+ * Register this proxy with the registry server, retrying indefinitely
+ * with exponential backoff until it succeeds. This allows the proxy to
+ * survive temporary server outages (restarts, deployments) without crashing.
+ *
+ * @returns {Promise<void>}
+ */
+async function registerWithRetry() {
+  const MAX_DELAY_MS = 60_000;
+  let delayMs = 2_000;
+  let attempt = 0;
+  while (true) {
+    attempt++;
+    try {
+      await registerClientSafe();
+      return;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      logger.warn(`Registration attempt ${attempt} failed: ${message}. Retrying in ${delayMs / 1000}s…`);
+      await new Promise((resolve) => setTimeout(resolve, delayMs));
+      delayMs = Math.min(delayMs * 2, MAX_DELAY_MS);
+    }
+  }
+}
+
+/**
  * Gracefully shut down the tunnel, heartbeat timer, and HTTP server.
  *
  * @param {string} signal - Signal name (e.g. "SIGINT").
@@ -188,7 +213,7 @@ try {
     logger.info(`Optional HLS audio transcode is enabled (ffmpeg: ${ffmpegBin}).`);
   }
 
-  await registerClientSafe();
+  await registerWithRetry();
 
   tunnelClient = createTunnelClient({
     serverUrl,

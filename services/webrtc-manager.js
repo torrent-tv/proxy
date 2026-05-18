@@ -94,15 +94,6 @@ export function createWebRtcManager({ sendSignal, onDataChannel, onLog }) {
   const peers = new Map();
 
   /**
-   * Per-session ICE candidate state.
-   * Tracks buffered private candidates and whether a public (srflx/relay)
-   * candidate has already been forwarded to the browser.
-   *
-   * @type {Map<string, { privateCandidates: Array<{candidate: string, mid: string}>, sentPublic: boolean }>}
-   */
-  const iceState = new Map();
-
-  /**
    * @param {string} message
    * @returns {void}
    */
@@ -131,58 +122,21 @@ export function createWebRtcManager({ sendSignal, onDataChannel, onLog }) {
       iceServers: ICE_SERVERS
     });
 
-    // Per-session ICE state for the public-first / private-fallback strategy.
-    const ice = { privateCandidates: [], sentPublic: false };
-    iceState.set(sessionId, ice);
-
-    /**
-     * Release any buffered private candidates to the browser.
-     * Called as a last resort when ICE gathering completes without producing
-     * a public (srflx/relay) candidate — e.g. when STUN is unreachable or
-     * the NAT is symmetric.  The browser will show a PNA permission dialog,
-     * but at least connectivity is possible.
-     */
-    function flushPrivateCandidates() {
-      if (ice.sentPublic || ice.privateCandidates.length === 0) {
-        return;
-      }
-      log(`[webrtc] Session ${sessionId.slice(0, 8)}: no public ICE candidate available — falling back to private (PNA dialog will appear)`);
-      for (const { candidate, mid } of ice.privateCandidates) {
-        sendSignal(sessionId, { type: "candidate", candidate, mid });
-      }
-      ice.privateCandidates = [];
-    }
-
-    // Forward our ICE candidates to the browser through the tunnel.
+    // Forward all ICE candidates to the browser through the tunnel.
     //
-    // Strategy: send public (srflx / relay) candidates immediately so the
-    // browser can connect via the proxy's public IP — this never triggers
-    // Chrome's Private Network Access (PNA) permission dialog.
-    // Private host candidates (RFC 1918, Docker bridge IPs, ULA IPv6) are
-    // buffered.  If ICE gathering completes without a public candidate the
-    // buffer is flushed as a fallback so the user still gets a PNA dialog
-    // rather than a silent failure.
+    // All candidates — both private (RFC 1918) and public (srflx) — are sent
+    // immediately. The browser will attempt all paths in parallel and use
+    // whichever connects first. Private candidates trigger Chrome's Private
+    // Network Access (PNA) permission dialog once; after the user allows it
+    // the connection proceeds via the local LAN path.
     pc.onLocalCandidate((candidate, mid) => {
-      if (isPrivateHostCandidate(candidate)) {
-        log(`[webrtc] Session ${sessionId.slice(0, 8)}: buffered private host candidate`);
-        ice.privateCandidates.push({ candidate, mid });
-        return;
-      }
-      // Public candidate — send immediately and discard the private buffer.
-      if (!ice.sentPublic) {
-        ice.sentPublic = true;
-        ice.privateCandidates = [];
-        log(`[webrtc] Session ${sessionId.slice(0, 8)}: sent public ICE candidate (PNA-free path)`);
-      }
+      const isPrivate = isPrivateHostCandidate(candidate);
+      log(`[webrtc] Session ${sessionId.slice(0, 8)}: sending ${isPrivate ? "private" : "public"} candidate`);
       sendSignal(sessionId, { type: "candidate", candidate, mid });
     });
 
-    // When gathering finishes, flush private candidates if no public one arrived.
     pc.onGatheringStateChange((state) => {
       log(`[webrtc] Session ${sessionId.slice(0, 8)}: gathering → ${state}`);
-      if (state === "complete") {
-        flushPrivateCandidates();
-      }
     });
 
     // Forward our SDP answer to the browser through the tunnel.
@@ -259,7 +213,6 @@ export function createWebRtcManager({ sendSignal, onDataChannel, onLog }) {
     if (pc) {
       try { pc.close(); } catch { /* ignore */ }
       peers.delete(sessionId);
-      iceState.delete(sessionId);
       log(`[webrtc] Session ${sessionId.slice(0, 8)}: closed`);
     }
   }

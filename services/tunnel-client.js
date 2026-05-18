@@ -75,6 +75,8 @@ import { WebSocket } from "ws";
  */
 
 const RECONNECT_DELAY_MS = 5_000;
+/** Send a keepalive ping every 30 s to prevent Cloudflare's idle WebSocket timeout (~100 s). */
+const KEEPALIVE_INTERVAL_MS = 30_000;
 
 /**
  * Create and manage the outbound WebSocket tunnel to the registry server.
@@ -89,6 +91,8 @@ export function createTunnelClient({ serverUrl, proxyId, token, proxyPort, onSig
   let socket = null;
   /** @type {ReturnType<typeof setTimeout> | null} */
   let reconnectTimer = null;
+  /** @type {ReturnType<typeof setInterval> | null} */
+  let keepaliveTimer = null;
   let stopped = false;
 
   /**
@@ -118,12 +122,19 @@ export function createTunnelClient({ serverUrl, proxyId, token, proxyPort, onSig
     socket = new WebSocket(wsUrl, {
       headers: {
         "x-proxy-id": proxyId,
-        "x-proxy-token": token
+        "x-proxy-token": token,
+        "user-agent": "torrent-tv-proxy/1.0"
       }
     });
 
     socket.addEventListener("open", () => {
       log("Tunnel connected.");
+      // Start keepalive pings to prevent Cloudflare's idle WebSocket timeout.
+      keepaliveTimer = setInterval(() => {
+        if (socket && socket.readyState === WebSocket.OPEN) {
+          send({ type: "ping" });
+        }
+      }, KEEPALIVE_INTERVAL_MS);
       if (typeof onConnect === "function") {
         onConnect();
       }
@@ -163,6 +174,10 @@ export function createTunnelClient({ serverUrl, proxyId, token, proxyPort, onSig
     socket.addEventListener("close", (event) => {
       log(`Tunnel disconnected (code=${event.code}). Reconnecting in ${RECONNECT_DELAY_MS}ms...`);
       socket = null;
+      if (keepaliveTimer !== null) {
+        clearInterval(keepaliveTimer);
+        keepaliveTimer = null;
+      }
       if (!stopped) {
         reconnectTimer = setTimeout(connect, RECONNECT_DELAY_MS);
       }
@@ -273,6 +288,10 @@ export function createTunnelClient({ serverUrl, proxyId, token, proxyPort, onSig
      */
     disconnect() {
       stopped = true;
+      if (keepaliveTimer !== null) {
+        clearInterval(keepaliveTimer);
+        keepaliveTimer = null;
+      }
       if (reconnectTimer != null) {
         clearTimeout(reconnectTimer);
         reconnectTimer = null;

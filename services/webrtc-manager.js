@@ -16,6 +16,49 @@ import nodeDataChannel from "node-datachannel";
 const ICE_SERVERS = ["stun:stun.l.google.com:19302"];
 
 /**
+ * Return true when the ICE candidate string describes a `typ host` candidate
+ * with a private (RFC 1918 / ULA / loopback) IP address.
+ *
+ * Browsers enforce Private Network Access (PNA) and show a permission dialog
+ * when a page served from a public origin (e.g. webauth.courses) attempts a
+ * WebRTC connection to a private-network address.  Filtering these candidates
+ * out before forwarding them to the browser lets the connection proceed via the
+ * server-reflexive (srflx) candidate — the proxy's public IP as seen by STUN —
+ * which does not trigger PNA.
+ *
+ * Edge case: if no srflx candidate is available (STUN unreachable, symmetric
+ * NAT that maps differently per destination, etc.) all host candidates are
+ * suppressed and the connection will fail.  We accept this trade-off; STUN is
+ * a hard dependency of the WebRTC path in any case.
+ *
+ * @param {string} candidate - Raw candidate attribute string from node-datachannel.
+ * @returns {boolean}
+ */
+function isPrivateHostCandidate(candidate) {
+  // Only care about "typ host" — srflx and relay are already public/relay.
+  if (!candidate.includes("typ host")) {
+    return false;
+  }
+  // RFC 1918 IPv4 private ranges.
+  if (/\b(10\.|172\.(1[6-9]|2\d|3[01])\.|192\.168\.|169\.254\.)/.test(candidate)) {
+    return true;
+  }
+  // Docker / typical private subnets not covered above (100.64–127 are special).
+  if (/\b127\./.test(candidate)) {
+    return true;
+  }
+  // IPv6 loopback.
+  if (/\s::1\s/.test(candidate)) {
+    return true;
+  }
+  // IPv6 Unique Local Addresses (ULA): fc00::/7 — starts with fc or fd.
+  if (/\s(?:fc|fd)[0-9a-f]{2}:/i.test(candidate)) {
+    return true;
+  }
+  return false;
+}
+
+/**
  * Configuration for the WebRTC manager.
  *
  * @typedef {Object} WebRtcManagerOptions
@@ -51,6 +94,15 @@ export function createWebRtcManager({ sendSignal, onDataChannel, onLog }) {
   const peers = new Map();
 
   /**
+   * Per-session ICE candidate state.
+   * Tracks buffered private candidates and whether a public (srflx/relay)
+   * candidate has already been forwarded to the browser.
+   *
+   * @type {Map<string, { privateCandidates: Array<{candidate: string, mid: string}>, sentPublic: boolean }>}
+   */
+  const iceState = new Map();
+
+  /**
    * @param {string} message
    * @returns {void}
    */
@@ -79,9 +131,58 @@ export function createWebRtcManager({ sendSignal, onDataChannel, onLog }) {
       iceServers: ICE_SERVERS
     });
 
+    // Per-session ICE state for the public-first / private-fallback strategy.
+    const ice = { privateCandidates: [], sentPublic: false };
+    iceState.set(sessionId, ice);
+
+    /**
+     * Release any buffered private candidates to the browser.
+     * Called as a last resort when ICE gathering completes without producing
+     * a public (srflx/relay) candidate — e.g. when STUN is unreachable or
+     * the NAT is symmetric.  The browser will show a PNA permission dialog,
+     * but at least connectivity is possible.
+     */
+    function flushPrivateCandidates() {
+      if (ice.sentPublic || ice.privateCandidates.length === 0) {
+        return;
+      }
+      log(`[webrtc] Session ${sessionId.slice(0, 8)}: no public ICE candidate available — falling back to private (PNA dialog will appear)`);
+      for (const { candidate, mid } of ice.privateCandidates) {
+        sendSignal(sessionId, { type: "candidate", candidate, mid });
+      }
+      ice.privateCandidates = [];
+    }
+
     // Forward our ICE candidates to the browser through the tunnel.
+    //
+    // Strategy: send public (srflx / relay) candidates immediately so the
+    // browser can connect via the proxy's public IP — this never triggers
+    // Chrome's Private Network Access (PNA) permission dialog.
+    // Private host candidates (RFC 1918, Docker bridge IPs, ULA IPv6) are
+    // buffered.  If ICE gathering completes without a public candidate the
+    // buffer is flushed as a fallback so the user still gets a PNA dialog
+    // rather than a silent failure.
     pc.onLocalCandidate((candidate, mid) => {
+      if (isPrivateHostCandidate(candidate)) {
+        log(`[webrtc] Session ${sessionId.slice(0, 8)}: buffered private host candidate`);
+        ice.privateCandidates.push({ candidate, mid });
+        return;
+      }
+      // Public candidate — send immediately and discard the private buffer.
+      if (!ice.sentPublic) {
+        ice.sentPublic = true;
+        ice.privateCandidates = [];
+        log(`[webrtc] Session ${sessionId.slice(0, 8)}: sent public ICE candidate (PNA-free path)`);
+      }
       sendSignal(sessionId, { type: "candidate", candidate, mid });
+    });
+
+    // When gathering finishes, flush private candidates if no public one arrived.
+    pc.onGatheringStateChange((state) => {
+      log(`[webrtc] Session ${sessionId.slice(0, 8)}: gathering → ${state}`);
+      if (state === "complete") {
+        flushPrivateCandidates();
+      }
     });
 
     // Forward our SDP answer to the browser through the tunnel.
@@ -158,6 +259,7 @@ export function createWebRtcManager({ sendSignal, onDataChannel, onLog }) {
     if (pc) {
       try { pc.close(); } catch { /* ignore */ }
       peers.delete(sessionId);
+      iceState.delete(sessionId);
       log(`[webrtc] Session ${sessionId.slice(0, 8)}: closed`);
     }
   }

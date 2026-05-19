@@ -143,11 +143,8 @@ export function createDataChannelHandler({ proxyPort, onLog }) {
       return;
     }
 
-    // Reject unreasonably large JSON bodies (legitimate API calls are small).
-    const MAX_BODY_BYTES = 64 * 1024; // 64 KB
-    if (body != null && typeof body === "string" && body.length > MAX_BODY_BYTES) {
-      send(channel, { type: "response-error", requestId, error: "Request body too large." });
-      return;
+    if (body != null && typeof body === "string" && body.length > 0) {
+      log(`[dc] ${method} ${path} body=${body.length} bytes`);
     }
 
     const targetUrl = `http://127.0.0.1:${proxyPort}${path}${query ? `?${query}` : ""}`;

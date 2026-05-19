@@ -162,6 +162,113 @@ export class TorrentPool {
   }
 
   /**
+   * Return download statistics for a torrent and optionally a specific file.
+   *
+   * @param {import("webtorrent").Torrent} torrent
+   * @param {number | null} [fileIndex] - Zero-based file index, or null for torrent-level only.
+   * @returns {{
+   *   numPeers: number,
+   *   downloadSpeed: number,
+   *   uploadSpeed: number,
+   *   fileProgress: number | null,
+   *   fileDownloaded: number | null,
+   *   fileLength: number | null
+   * }}
+   */
+  getFileStats(torrent, fileIndex = null) {
+    const numPeers = typeof torrent?.numPeers === "number" ? torrent.numPeers : 0;
+    const downloadSpeed = typeof torrent?.downloadSpeed === "number" ? torrent.downloadSpeed : 0;
+    const uploadSpeed = typeof torrent?.uploadSpeed === "number" ? torrent.uploadSpeed : 0;
+
+    const base = { numPeers, downloadSpeed, uploadSpeed };
+
+    if (fileIndex === null || !Number.isInteger(fileIndex) || !Array.isArray(torrent?.files)) {
+      return { ...base, fileProgress: null, fileDownloaded: null, fileLength: null };
+    }
+
+    const file = torrent.files[fileIndex];
+    if (!file) {
+      return { ...base, fileProgress: null, fileDownloaded: null, fileLength: null };
+    }
+
+    return {
+      ...base,
+      fileProgress: typeof file.progress === "number" ? file.progress : 0,
+      fileDownloaded: typeof file.downloaded === "number" ? file.downloaded : 0,
+      fileLength: typeof file.length === "number" ? file.length : 0
+    };
+  }
+
+  /**
+   * Pre-fetch the leading and trailing bytes of a torrent file so that
+   * WebTorrent prioritises the pieces that contain file headers and footers.
+   *
+   * For MP4 files the MOOV atom is often placed at the very end of the file
+   * (non-faststart encoding).  Fetching the tail ensures that ffprobe can
+   * identify codecs and duration even for freshly-added torrents without
+   * waiting for the rest of the content to download.
+   *
+   * Resolves once both regions have been fully downloaded, or when the
+   * timeout elapses — whichever comes first.  Never rejects.
+   *
+   * @param {import("webtorrent").Torrent} torrent
+   * @param {number} fileIndex - Zero-based index into `torrent.files`.
+   * @param {object} [options]
+   * @param {number} [options.headBytes=262144]   - Leading bytes to fetch (default 256 KB).
+   * @param {number} [options.tailBytes=2097152]  - Trailing bytes to fetch (default 2 MB).
+   * @param {number} [options.timeoutMs=300000]   - Maximum wait time in milliseconds (default 5 min).
+   * @returns {Promise<void>}
+   */
+  async prefetchFileEdges(
+    torrent,
+    fileIndex,
+    { headBytes = 256 * 1024, tailBytes = 2 * 1024 * 1024, timeoutMs = 300_000 } = {}
+  ) {
+    if (!torrent || !Array.isArray(torrent.files)) {
+      return;
+    }
+    const file = torrent.files[fileIndex];
+    if (!file || typeof file.createReadStream !== "function") {
+      return;
+    }
+    const fileSize = file.length;
+    if (!Number.isFinite(fileSize) || fileSize <= 0) {
+      return;
+    }
+
+    const safeHeadEnd = Math.min(headBytes, fileSize) - 1;
+    const safeTailStart = Math.max(0, fileSize - tailBytes);
+
+    /** Drain a readable stream, resolving on end/error/close. */
+    const drainStream = (stream) =>
+      new Promise((resolve) => {
+        stream.on("data", () => undefined);
+        stream.once("end", resolve);
+        stream.once("error", resolve);
+        stream.once("close", resolve);
+      });
+
+    try {
+      const tasks = [
+        // Head: FTYP/MOOV (faststart MP4), EBML header (MKV), etc.
+        drainStream(file.createReadStream({ start: 0, end: safeHeadEnd }))
+      ];
+
+      // Tail: MOOV atom for non-faststart MP4.  Skip when it overlaps the head.
+      if (safeTailStart > safeHeadEnd + 1) {
+        tasks.push(drainStream(file.createReadStream({ start: safeTailStart, end: fileSize - 1 })));
+      }
+
+      await Promise.race([
+        Promise.all(tasks),
+        new Promise((resolve) => setTimeout(resolve, timeoutMs))
+      ]);
+    } catch (_error) {
+      // Best-effort — a prefetch failure must never prevent playback.
+    }
+  }
+
+  /**
    * Update WebTorrent piece selection to match the current usage map.
    * Files with at least one consumer are selected; all others are deselected.
    *

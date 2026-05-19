@@ -180,13 +180,24 @@ export function createPlaybackPlanner({
         return plan;
       }
 
+      // Pre-fetch file edges (head + tail) before probing so that WebTorrent
+      // has the MOOV atom (or MKV EBML headers) ready for ffprobe.
+      // Without this, ffprobe times out on fresh torrents whose MOOV sits at
+      // the end of the file and hasn't been downloaded yet.
+      await torrentPool.prefetchFileEdges(torrent, fileIndex);
+
       const { audioCodec, videoCodec } = await probeStreamCodecs({
         ffmpegBin,
         inputUrl: directUrl,
         userAgent
       });
 
-      const requiresTranscode = !audioCodec || !DIRECT_AUDIO_CODECS.has(audioCodec);
+      // Only transcode when the codec is known AND not natively supported.
+      // When ffprobe cannot detect the codec (e.g. the torrent has just started
+      // downloading and the MOOV atom at the end of the MP4 is not yet available),
+      // fall back to "direct" so the browser can attempt native playback.  The
+      // browser-side loading pipeline already has its own transcode fallback.
+      const requiresTranscode = audioCodec.length > 0 && !DIRECT_AUDIO_CODECS.has(audioCodec);
       const plan = {
         mode: requiresTranscode ? "hls" : "direct",
         directUrl,

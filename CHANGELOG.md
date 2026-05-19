@@ -1,3 +1,7 @@
+## 2.6.3
+
+- **Fix**: Data channel handler now logs **all** requests regardless of body presence — `GET /transcode/…`, `GET /api/…/progress`, `GET /api/…/stats` etc. were previously invisible in logs. Non-2xx response statuses and fetch errors are also logged, enabling diagnosis of HLS manifest load failures.
+
 ## 2.6.1
 
 - **Fix**: `TorrentPool.getTorrent()` — eliminated a race condition where two concurrent requests for the same torrent both found the cache empty and both called `client.add()`, causing WebTorrent to throw "Cannot add duplicate torrent". In-flight promises are now cached in a private `#pending` map; subsequent requests for the same key join the existing promise instead of triggering a second `client.add()`.

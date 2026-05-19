@@ -143,9 +143,9 @@ export function createDataChannelHandler({ proxyPort, onLog }) {
       return;
     }
 
-    if (body != null && typeof body === "string" && body.length > 0) {
-      log(`[dc] ${method} ${path} body=${body.length} bytes`);
-    }
+    const queryInfo = query ? `?${query}` : "";
+    const bodyInfo = body != null && typeof body === "string" && body.length > 0 ? ` body=${body.length} bytes` : "";
+    log(`[dc] ${method} ${path}${queryInfo}${bodyInfo}`);
 
     const targetUrl = `http://127.0.0.1:${proxyPort}${path}${query ? `?${query}` : ""}`;
     const requestHeaders = { ...(forwardedHeaders ?? {}), host: `127.0.0.1:${proxyPort}` };
@@ -159,8 +159,13 @@ export function createDataChannelHandler({ proxyPort, onLog }) {
         redirect: "manual"
       });
     } catch (fetchError) {
+      log(`[dc] ${method} ${path}${queryInfo} → error: ${fetchError?.message ?? String(fetchError)}`);
       send(channel, { type: "response-error", requestId, error: fetchError?.message ?? String(fetchError) });
       return;
+    }
+
+    if (response.status !== 200 && response.status !== 206) {
+      log(`[dc] ${method} ${path}${queryInfo} → ${response.status}`);
     }
 
     /** @type {Record<string, string>} */

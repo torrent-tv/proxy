@@ -36,6 +36,15 @@ function decodeTorrentSource(sourceType, source) {
  * that only files with at least one active stream cause downloading.
  */
 export class TorrentPool {
+  /**
+   * In-flight `client.add()` promises keyed by the same key as `torrents`.
+   * Prevents duplicate `client.add()` calls when two requests arrive
+   * concurrently for the same torrent before the first one resolves.
+   *
+   * @type {Map<string, Promise<import("webtorrent").Torrent>>}
+   */
+  #pending = new Map();
+
   constructor() {
     /** @type {import("webtorrent").WebTorrent} */
     this.client = new WebTorrent();
@@ -70,26 +79,38 @@ export class TorrentPool {
    */
   async getTorrent(sourceType, source) {
     const key = `${sourceType}:${crypto.createHash("sha1").update(source).digest("hex")}`;
+
+    // Already resolved — return immediately.
     const existing = this.torrents.get(key);
     if (existing) {
       return existing;
     }
 
+    // In-flight — a concurrent request already called client.add() for the
+    // same torrent; join that promise instead of calling add() again.
+    const inFlight = this.#pending.get(key);
+    if (inFlight) {
+      return inFlight;
+    }
+
     const torrentId = decodeTorrentSource(sourceType, source);
-    const torrent = await new Promise((resolve, reject) => {
+    const promise = new Promise((resolve, reject) => {
       const onError = (error) => {
         this.client.off("error", onError);
+        this.#pending.delete(key);
         reject(error);
       };
       this.client.once("error", onError);
       this.client.add(torrentId, (readyTorrent) => {
         this.client.off("error", onError);
+        this.torrents.set(key, readyTorrent);
+        this.#pending.delete(key);
         resolve(readyTorrent);
       });
     });
 
-    this.torrents.set(key, torrent);
-    return torrent;
+    this.#pending.set(key, promise);
+    return promise;
   }
 
   /**

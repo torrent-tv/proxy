@@ -147,7 +147,9 @@ export function createWebRtcManager({ sendSignal, onDataChannel, onLog }) {
 
     pc.onStateChange((state) => {
       log(`[webrtc] Session ${sessionId.slice(0, 8)}: state → ${state}`);
-      if (state === "disconnected" || state === "failed" || state === "closed") {
+      // "disconnected" is a transient state — ICE may recover on its own.
+      // Only tear down on terminal states: "failed" and "closed".
+      if (state === "failed" || state === "closed") {
         closeSession(sessionId);
       }
     });

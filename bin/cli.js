@@ -11,6 +11,7 @@
 import { Command } from "commander";
 import crypto from "node:crypto";
 import { spawnSync } from "node:child_process";
+import { createRequire } from "node:module";
 import ffmpegStatic from "ffmpeg-static";
 import { startProxyServer } from "../server.js";
 import { registerClient } from "../services/registry-api.js";
@@ -19,6 +20,9 @@ import { createWebRtcManager } from "../services/webrtc-manager.js";
 import { createDataChannelHandler } from "../services/data-channel-handler.js";
 import { collectHealthMetrics } from "../services/health-collector.js";
 import { logger } from "../utils/logger.js";
+
+const require = createRequire(import.meta.url);
+const { version: PROXY_VERSION } = require("../package.json");
 
 const program = new Command();
 
@@ -205,6 +209,7 @@ try {
   actualPort = started.port;
   const directBaseUrl = explicitBaseUrl || `http://${bindHost}:${actualPort}`;
 
+  logger.info(`Starting @torrent-tv/proxy v${PROXY_VERSION}`);
   logger.info(`Local stream endpoint: http://${bindHost}:${actualPort}/stream`);
   logger.info(`Advertised direct URL: ${directBaseUrl}`);
   if (transcodeAudio) {

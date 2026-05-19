@@ -188,17 +188,28 @@ function formatSeconds(seconds) {
 /**
  * Compute derived progress metrics from raw ffmpeg output values.
  *
- * @param {number} processedSeconds - Seconds of content encoded so far.
+ * When `startPositionSeconds` is provided (seek-restart case), progress is
+ * computed relative to the remaining duration after the seek point so the
+ * percent value reflects transcoding of the requested segment, not the whole
+ * file.
+ *
+ * @param {number} processedSeconds   - Output timestamp of last encoded frame.
  * @param {number | null} totalSeconds - Total duration, or `null` if unknown.
+ * @param {number} [startPositionSeconds=0] - Seek offset used for this session.
  * @returns {{ totalSeconds: number | null, percent: number | null, remainingSeconds: number | null, processedSeconds: number }}
  */
-function computeProgressMetrics(processedSeconds, totalSeconds) {
+function computeProgressMetrics(processedSeconds, totalSeconds, startPositionSeconds = 0) {
   const processed = Number.isFinite(processedSeconds) ? Math.max(0, processedSeconds) : 0;
+  const startOffset = Number.isFinite(startPositionSeconds) && startPositionSeconds > 0
+    ? startPositionSeconds
+    : 0;
   if (!Number.isFinite(totalSeconds) || totalSeconds <= 0) {
     return { totalSeconds: null, percent: null, remainingSeconds: null, processedSeconds: processed };
   }
   const safeTotal = totalSeconds;
-  const percent = Math.max(0, Math.min(100, (processed / safeTotal) * 100));
+  const segmentDuration = Math.max(1, safeTotal - startOffset);
+  const segmentProcessed = Math.max(0, processed - startOffset);
+  const percent = Math.max(0, Math.min(100, (segmentProcessed / segmentDuration) * 100));
   const remainingSeconds = Math.max(0, safeTotal - processed);
   return {
     totalSeconds: safeTotal,
@@ -342,10 +353,11 @@ export class HlsSessionManager {
    * @param {number}  options.fileIndex      - Zero-based file index in the torrent.
    * @param {boolean} [options.transcodeVideo=false]
    * @param {boolean} [options.transcodeAudio=false]
-   * @param {string}  [options.consumerId=""]   - Caller ID for reference counting.
-   * @param {string}  [options.fileName=""]     - Display name for log output.
-   * @param {number}  [options.targetWidth=0]   - Target video width (0 = keep source).
-   * @param {number}  [options.targetHeight=0]  - Target video height (0 = keep source).
+   * @param {string}  [options.consumerId=""]            - Caller ID for reference counting.
+   * @param {string}  [options.fileName=""]              - Display name for log output.
+   * @param {number}  [options.targetWidth=0]            - Target video width (0 = keep source).
+   * @param {number}  [options.targetHeight=0]           - Target video height (0 = keep source).
+   * @param {number}  [options.startPositionSeconds=0]   - Seek start position in seconds.
    * @returns {Promise<HlsSession>}
    */
   async createOrGetSession({
@@ -356,7 +368,8 @@ export class HlsSessionManager {
     consumerId = "",
     fileName = "",
     targetWidth = 0,
-    targetHeight = 0
+    targetHeight = 0,
+    startPositionSeconds = 0
   }) {
     if (!this.enabled) {
       const error = new Error("Audio transcoding is disabled on this proxy.");
@@ -366,13 +379,20 @@ export class HlsSessionManager {
 
     const normalizedTargetWidth = Number.isInteger(targetWidth) && targetWidth > 0 ? targetWidth : 0;
     const normalizedTargetHeight = Number.isInteger(targetHeight) && targetHeight > 0 ? targetHeight : 0;
+    // Round seek position to the nearest 10 s so that two consumers seeking
+    // to similar positions can share the same ffmpeg session.
+    const normalizedStartPosition =
+      Number.isFinite(startPositionSeconds) && startPositionSeconds > 0
+        ? Math.round(startPositionSeconds / 10) * 10
+        : 0;
     const sourceMapKey = [
       sourceKey,
       String(fileIndex),
       transcodeVideo ? "video" : "audio",
       transcodeAudio ? "a1" : "a0",
       String(normalizedTargetWidth),
-      String(normalizedTargetHeight)
+      String(normalizedTargetHeight),
+      String(normalizedStartPosition)
     ].join(":");
     const existingId = this.sessionIdBySource.get(sourceMapKey);
     if (existingId) {
@@ -421,15 +441,23 @@ export class HlsSessionManager {
       ? ["-c:a", "aac", "-ac", "2", "-b:a", "128k"]
       : ["-c:a", "copy"];
 
-    const args = [
-      "-hide_banner",
-      "-nostats",
-      "-loglevel",
-      "error",
-      "-progress",
-      "pipe:1",
-      "-i",
-      inputUrl.toString(),
+    const args = ["-hide_banner", "-nostats", "-loglevel", "error", "-progress", "pipe:1"];
+
+    // Fast keyframe-level seek before -i.  This is efficient because ffmpeg
+    // skips decoding all frames before the target position.
+    if (normalizedStartPosition > 0) {
+      args.push("-ss", String(normalizedStartPosition));
+    }
+
+    args.push("-i", inputUrl.toString());
+
+    // Shift output timestamps to match the original timeline so that
+    // video.currentTime reflects the seeked position, not a reset-to-zero.
+    if (normalizedStartPosition > 0) {
+      args.push("-output_ts_offset", String(normalizedStartPosition));
+    }
+
+    args.push(
       "-map",
       "0:v:0?",
       "-map",
@@ -443,13 +471,13 @@ export class HlsSessionManager {
       "-hls_list_size",
       "0",
       "-hls_playlist_type",
-      "vod",
+      "event",
       "-hls_flags",
       "independent_segments+temp_file",
       "-hls_segment_filename",
       "segment-%05d.ts",
       PLAYLIST_FILE_NAME
-    ];
+    );
 
     const ffmpeg = spawn(this.ffmpegBin, args, {
       cwd: sessionDir,
@@ -469,10 +497,13 @@ export class HlsSessionManager {
       consumers: new Set(consumerId ? [consumerId] : []),
       progress: {
         state: "starting",
-        processedSeconds: 0,
+        // With -output_ts_offset the first out_time will be ≈ normalizedStartPosition,
+        // so initialise processedSeconds to that value for consistent percent math.
+        processedSeconds: normalizedStartPosition,
+        startPositionSeconds: normalizedStartPosition,
         totalSeconds: Number.isFinite(durationSeconds) ? durationSeconds : null,
         percent: null,
-        remainingSeconds: Number.isFinite(durationSeconds) ? durationSeconds : null,
+        remainingSeconds: Number.isFinite(durationSeconds) ? durationSeconds - normalizedStartPosition : null,
         speed: "",
         updatedAt: Date.now(),
         lastLoggedAt: 0
@@ -512,7 +543,8 @@ export class HlsSessionManager {
         }
         const metrics = computeProgressMetrics(
           session.progress.processedSeconds,
-          session.progress.totalSeconds
+          session.progress.totalSeconds,
+          session.progress.startPositionSeconds
         );
         session.progress.percent = metrics.percent;
         session.progress.remainingSeconds = metrics.remainingSeconds;
@@ -708,6 +740,7 @@ export class HlsSessionManager {
       sessionId: session.id,
       state: session.progress.state,
       processedSeconds: session.progress.processedSeconds,
+      startPositionSeconds: session.progress.startPositionSeconds ?? 0,
       totalSeconds: session.progress.totalSeconds,
       percent: session.progress.percent,
       remainingSeconds: session.progress.remainingSeconds,

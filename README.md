@@ -122,9 +122,17 @@ The browser uses these metrics together with tunnel RTT to score proxies:
 score = memFree × 0.4 + (1 - clamp(cpuLoad, 0, 1)) × 0.4 − (rttMs / 2000) × 0.2
 ```
 
+### PlaybackPlanner
+
+Determines whether a file should be streamed directly or transcoded to HLS, and caches the result per `(sourceKey, fileIndex)`.
+
+Before running ffprobe it calls `TorrentPool.prefetchFileEdges()` which opens WebTorrent read streams for the first 256 KB and last 2 MB of the file. This forces WebTorrent to prioritise those torrent pieces, ensuring the MOOV atom (usually at the end of non-faststart MP4 files) is available before codec detection runs. The timeout is 5 minutes; if it elapses the plan still proceeds with whatever data is available and defaults to `direct` mode when the codec is unknown.
+
 ### HlsSessionManager & ffmpeg
 
-Creates and manages ffmpeg-based HLS transcode sessions. Sessions are keyed by `sourceKey:fileIndex:mode` and shared across consumers.
+Creates and manages ffmpeg-based HLS transcode sessions. Sessions are keyed by `sourceKey:fileIndex:mode:startPosition` and shared across consumers.
+
+**Seek-to-position:** `createOrGetSession` accepts `startPositionSeconds` which allows restarting a transcode from an arbitrary point. ffmpeg is invoked with `-ss <N>` (fast keyframe seek before `-i`) and `-output_ts_offset <N>` (shifts output PTS) so that `video.currentTime` in the browser reflects the original timeline position rather than resetting to zero. Start positions are rounded to 10-second buckets for session reuse.
 
 ```mermaid
 sequenceDiagram
@@ -211,6 +219,27 @@ GET /stream?sourceKey=<key>&fileIndex=0
 
 Supports HTTP Range requests.
 
+### Source stats
+
+```bash
+GET /api/sources/:sourceKey/stats?fileIndex=0
+```
+
+Returns live torrent statistics for polling during the metadata wait phase:
+
+```json
+{
+  "numPeers": 4,
+  "downloadSpeed": 1258291,
+  "uploadSpeed": 0,
+  "fileProgress": 0.008,
+  "fileDownloaded": 10485760,
+  "fileLength": 1299000000
+}
+```
+
+`fileProgress` is 0–1 and reflects only the pieces that have been downloaded so far (initially the prefetched head + tail). `downloadSpeed` and `uploadSpeed` are in bytes/s.
+
 ### Create HLS transcode session
 
 ```bash
@@ -222,9 +251,12 @@ Content-Type: application/json
   "fileIndex": 0,
   "transcodeVideo": false,
   "consumerId": "uuid",
-  "fileName": "Episode01.mkv"
+  "fileName": "Episode01.mkv",
+  "startPositionSeconds": 300
 }
 ```
+
+`startPositionSeconds` is optional (default `0`). When set, ffmpeg fast-seeks to the specified position and shifts output timestamps accordingly, enabling seek-to-position playback.
 
 Response: `{ "sessionId": "…", "playlistPath": "/transcode/<id>/index.m3u8" }`
 
@@ -234,7 +266,7 @@ Response: `{ "sessionId": "…", "playlistPath": "/transcode/<id>/index.m3u8" }`
 GET /api/transcode-sessions/:sessionId/progress
 ```
 
-Returns: `percent`, `processedSeconds`, `totalSeconds`, `remainingSeconds`, `speed`, `warmupPercent`, `warmupRemainingSeconds`.
+Returns: `percent`, `processedSeconds`, `startPositionSeconds`, `totalSeconds`, `remainingSeconds`, `speed`, `warmupPercent`, `warmupRemainingSeconds`.
 
 ### Release consumer
 
@@ -325,9 +357,11 @@ sequenceDiagram
 ## Notes
 
 - HLS session temp files are in the OS temp directory and cleaned up automatically.
-- Transcode sessions are cached by `sourceKey:fileIndex:mode` and shared across consumers.
+- Transcode sessions are cached by `sourceKey:fileIndex:mode:startPosition` and shared across consumers.
 - The source registry is in-memory and bounded (old entries evicted).
 - The proxy reconnects to the server automatically on tunnel disconnect.
+- `prefetchFileEdges` downloads only the file's head and tail (≈ 2.3 MB total), not the full file, before codec detection runs.
+- When `startPositionSeconds > 0`, ffmpeg uses fast seek (`-ss` before `-i`) — it starts from the nearest keyframe at or before the requested position. The first few frames may be slightly before the exact seek time.
 
 ## License
 

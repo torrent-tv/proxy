@@ -33,6 +33,7 @@ export async function handleApiTranscodeSessionsPost(req, reply, { hlsSessionMan
   const fileName = typeof payload.fileName === "string" ? payload.fileName.trim() : "";
   const targetWidth = Number(payload.targetWidth);
   const targetHeight = Number(payload.targetHeight);
+  const startPositionSeconds = Number(payload.startPositionSeconds);
 
   if (!sourceKey || !Number.isInteger(fileIndex) || fileIndex < 0) {
     return reply.code(400).send({ error: "sourceKey and valid fileIndex are required." });
@@ -47,7 +48,11 @@ export async function handleApiTranscodeSessionsPost(req, reply, { hlsSessionMan
       consumerId,
       fileName,
       targetWidth: Number.isInteger(targetWidth) && targetWidth > 0 ? targetWidth : 0,
-      targetHeight: Number.isInteger(targetHeight) && targetHeight > 0 ? targetHeight : 0
+      targetHeight: Number.isInteger(targetHeight) && targetHeight > 0 ? targetHeight : 0,
+      startPositionSeconds:
+        Number.isFinite(startPositionSeconds) && startPositionSeconds > 0
+          ? startPositionSeconds
+          : 0
     });
     return reply.send({
       sessionId: session.id,

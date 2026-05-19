@@ -1,3 +1,7 @@
+## 2.6.1
+
+- **Fix**: `TorrentPool.getTorrent()` — eliminated a race condition where two concurrent requests for the same torrent both found the cache empty and both called `client.add()`, causing WebTorrent to throw "Cannot add duplicate torrent". In-flight promises are now cached in a private `#pending` map; subsequent requests for the same key join the existing promise instead of triggering a second `client.add()`.
+
 ## 2.5.15
 
 - **New**: `GET /api/sources/:sourceKey/stats?fileIndex=N` — returns live torrent stats: connected peer count, download/upload speed, per-file download progress and size. Used by the browser to show meaningful feedback while waiting for file metadata.

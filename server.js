@@ -62,7 +62,9 @@ function buildPortCandidates(startPort, maxAttempts = 51) {
  */
 export async function startProxyServer({ host, port, transcodeAudio, ffmpegBin }) {
   const app = Fastify({
-    bodyLimit: 10 * 1024 * 1024
+    // No practical body-size limit — the proxy server is localhost-only and
+    // receives torrent source payloads that may be arbitrarily large.
+    bodyLimit: 256 * 1024 * 1024 // 256 MB
   });
 
   await app.register(fastifyHelmet, {

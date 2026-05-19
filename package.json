@@ -11,9 +11,9 @@
     "torrent-tv-proxy": "./bin/cli.js"
   },
   "scripts": {
-    "patch": "npm version patch && npm publish && git push --follow-tags",
-    "minor": "npm version minor && npm publish && git push --follow-tags",
-    "major": "npm version major && npm publish && git push --follow-tags",
+    "patch": "npm whoami && npm version patch && npm publish && git push --follow-tags",
+    "minor": "npm whoami && npm version minor && npm publish && git push --follow-tags",
+    "major": "npm whoami && npm version major && npm publish && git push --follow-tags",
     "start": "node ./bin/cli.js",
     "dev": "node --inspect=0 --experimental-network-inspection ./bin/cli.js"
   },

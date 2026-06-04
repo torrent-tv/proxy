@@ -27,6 +27,8 @@ import { createSourceRegistry } from "./store/source-registry.js";
 import { TorrentPool } from "./services/torrent-pool.js";
 import { HlsSessionManager } from "./services/hls-session-manager.js";
 import { createPlaybackPlanner } from "./services/playback-planner.js";
+import { detectVideoEncoder } from "./services/hwaccel.js";
+import { logger } from "./utils/logger.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -91,11 +93,18 @@ export async function startProxyServer({ host, port, transcodeAudio, ffmpegBin }
   const selectedPort = await getPort({
     port: buildPortCandidates(port)
   });
+  // Auto-detect the best available H.264 encoder (hardware-accelerated or
+  // software) once at startup, with a real test-encode and graceful fallback.
+  // Only needed when transcoding can occur.
+  const videoEncoder = transcodeAudio
+    ? await detectVideoEncoder({ ffmpegBin, logger })
+    : null;
   const hlsSessionManager = new HlsSessionManager({
     enabled: transcodeAudio,
     ffmpegBin,
     localBindHost: host,
-    localPort: selectedPort
+    localPort: selectedPort,
+    videoEncoder
   });
   const playbackPlanner = createPlaybackPlanner({
     ffmpegBin,

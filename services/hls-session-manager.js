@@ -15,6 +15,7 @@ import path from "node:path";
 import { randomUUID } from "node:crypto";
 import { spawn } from "node:child_process";
 import { logger } from "../utils/logger.js";
+import { softwareDescriptor } from "./hwaccel.js";
 
 const PLAYLIST_FILE_NAME = "index.m3u8";
 const SEGMENT_FILE_NAME_PATTERN = /^segment-\d{5}\.ts$/;
@@ -32,9 +33,6 @@ const DEFAULT_SESSION_TTL_MS = 120 * 1000;
 const DEFAULT_STARTUP_WAIT_MS = 5_000;
 const MICROSECONDS_PER_SECOND = 1_000_000;
 const PROGRESS_LOG_INTERVAL_MS = 5_000;
-const VIDEO_TRANSCODE_PRESET = "superfast";
-const VIDEO_TRANSCODE_CRF = "24";
-const VIDEO_TRANSCODE_FPS = 24;
 
 /**
  * Resolve after a given number of milliseconds.
@@ -349,10 +347,15 @@ export class HlsSessionManager {
     localPort,
     segmentDurationSec = DEFAULT_SEGMENT_DURATION_SEC,
     sessionTtlMs = DEFAULT_SESSION_TTL_MS,
-    startupWaitMs = DEFAULT_STARTUP_WAIT_MS
+    startupWaitMs = DEFAULT_STARTUP_WAIT_MS,
+    videoEncoder = null
   }) {
     this.enabled = Boolean(enabled);
     this.ffmpegBin = ffmpegBin;
+    // Detected H.264 encoder descriptor (hardware or software). Defaults to
+    // software libx264 when no detection result is supplied. May be downgraded
+    // to software at runtime if a hardware encode fails.
+    this.videoEncoder = videoEncoder ?? softwareDescriptor();
     this.segmentDurationSec = segmentDurationSec;
     this.sessionTtlMs = sessionTtlMs;
     this.startupWaitMs = startupWaitMs;
@@ -588,30 +591,26 @@ export class HlsSessionManager {
       }
     }
 
+    // Video: re-encode only when required, using the detected encoder
+    // (hardware-accelerated or software). The descriptor builds the filter +
+    // codec args (including keyframe alignment on segment boundaries).
     const videoCodecArgs = session.transcodeVideo
-      ? [
-          "-vf",
-          this.#buildVideoFilter(session.targetWidth, session.targetHeight),
-          "-c:v",
-          "libx264",
-          "-preset",
-          VIDEO_TRANSCODE_PRESET,
-          "-crf",
-          VIDEO_TRANSCODE_CRF,
-          "-pix_fmt",
-          "yuv420p",
-          // Force keyframes on segment boundaries so each segment is
-          // independently decodable and exactly segmentDuration long — this
-          // keeps the synthetic playlist's timing accurate.
-          "-force_key_frames",
-          `expr:gte(t,n_forced*${this.segmentDurationSec})`
-        ]
+      ? this.videoEncoder.buildVideoArgs({
+          targetWidth: session.targetWidth,
+          targetHeight: session.targetHeight,
+          segmentDurationSec: this.segmentDurationSec
+        })
       : ["-c:v", "copy"];
     const audioCodecArgs = session.transcodeAudio
       ? ["-c:a", "aac", "-ac", "2", "-b:a", "128k"]
       : ["-c:a", "copy"];
 
     const args = ["-hide_banner", "-nostats", "-loglevel", "error", "-progress", "pipe:1"];
+    // Hardware decode/encode setup (e.g. VAAPI device) must precede -i, and
+    // only applies when we actually re-encode the video track.
+    if (session.transcodeVideo && Array.isArray(this.videoEncoder.inputArgs)) {
+      args.push(...this.videoEncoder.inputArgs);
+    }
     if (startSeconds > 0) {
       // Fast keyframe-level seek before -i (skips decoding earlier frames).
       args.push("-ss", String(startSeconds));
@@ -762,12 +761,25 @@ export class HlsSessionManager {
         logger.info(`transcode ${session.id} encode-run complete "${session.fileName}"`);
         return;
       }
-      session.state = "failed";
-      session.progress.state = "failed";
-      session.progress.updatedAt = Date.now();
       if (!session.lastError) {
         session.lastError = `ffmpeg exited with code ${code ?? -1}${signal ? ` (signal ${signal})` : ""}`;
       }
+      // Runtime safety net: if a hardware encode fails, downgrade this proxy to
+      // software encoding for all sessions and restart this one, so playback is
+      // never permanently broken by a hardware/driver issue.
+      if (session.transcodeVideo && this.videoEncoder.kind !== "software") {
+        const failedEncoder = this.videoEncoder.name;
+        this.videoEncoder = softwareDescriptor();
+        logger.warn(
+          `transcode ${session.id} hardware encoder ${failedEncoder} failed ` +
+            `(${session.lastError}); falling back to software libx264 and restarting`
+        );
+        this.#startEncodeRun(session, session.encodeStartIndex);
+        return;
+      }
+      session.state = "failed";
+      session.progress.state = "failed";
+      session.progress.updatedAt = Date.now();
       logger.error(`transcode ${session.id} encode-run failed: ${session.lastError}`);
     });
   }
@@ -798,12 +810,6 @@ export class HlsSessionManager {
       `transcode ${session.id} seek → restart at segment #${index} (encode head #${head})`
     );
     this.#startEncodeRun(session, index);
-  }
-
-  #buildVideoFilter(targetWidth, targetHeight) {
-    const safeWidth = Number.isInteger(targetWidth) && targetWidth > 0 ? targetWidth : 1280;
-    const safeHeight = Number.isInteger(targetHeight) && targetHeight > 0 ? targetHeight : 720;
-    return `scale=${safeWidth}:${safeHeight}:force_original_aspect_ratio=decrease:force_divisible_by=2,fps=${VIDEO_TRANSCODE_FPS}`;
   }
 
   /**

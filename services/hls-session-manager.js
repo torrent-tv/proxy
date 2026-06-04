@@ -512,7 +512,7 @@ export class HlsSessionManager {
 
     logger.info(
       `transcode ${sessionId} start "${logName}" ` +
-        `video=${transcodeVideo ? "x264" : "copy"} audio=${transcodeAudio ? "aac" : "copy"} ` +
+        `video=${transcodeVideo ? this.videoEncoder.name : "copy"} audio=${transcodeAudio ? "aac" : "copy"} ` +
         `duration=${hasDuration ? formatSeconds(durationSeconds) : "unknown"} segments=${segmentCount}`
     );
 

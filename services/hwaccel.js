@@ -139,27 +139,6 @@ function nvencDescriptor() {
   };
 }
 
-/** @returns {import("./hwaccel.js").VideoEncoderDescriptor} */
-function v4l2m2mDescriptor() {
-  // ARM SoC (e.g. Raspberry Pi) stateful M2M encoder. No GPU scaler — scale in
-  // software, then hand YUV420 frames to the hardware encoder.
-  return {
-    name: "h264_v4l2m2m",
-    kind: "v4l2m2m",
-    device: null,
-    inputArgs: [],
-    buildVideoArgs({ targetWidth, targetHeight, segmentDurationSec }) {
-      const { w, h } = safeDimensions(targetWidth, targetHeight);
-      return [
-        "-vf",
-        `scale=${w}:${h}:force_original_aspect_ratio=decrease:force_divisible_by=2,fps=${TRANSCODE_FPS},format=yuv420p`,
-        "-c:v", "h264_v4l2m2m",
-        "-b:v", "3M",
-        ...keyFrameArgs(segmentDurationSec)
-      ];
-    }
-  };
-}
 
 /**
  * @typedef {Object} VideoEncoderDescriptor
@@ -243,15 +222,6 @@ function hasNvidiaDevice() {
   }
 }
 
-/** @returns {boolean} Whether any /dev/video* node exists (V4L2 M2M). */
-function hasV4l2Device() {
-  try {
-    return readdirSync("/dev").some((n) => /^video\d+$/.test(n));
-  } catch {
-    return false;
-  }
-}
-
 /**
  * Kind-specific test-encode args that verify the encoder initialises and
  * encodes a few frames from a synthetic source.
@@ -280,11 +250,6 @@ function testEncodeArgs(descriptor) {
       ];
     case "nvenc":
       return ["-hide_banner", "-loglevel", "error", ...src, "-c:v", "h264_nvenc", "-f", "null", "-"];
-    case "v4l2m2m":
-      return [
-        "-hide_banner", "-loglevel", "error",
-        ...src, "-pix_fmt", "yuv420p", "-c:v", "h264_v4l2m2m", "-f", "null", "-"
-      ];
     default:
       return [
         "-hide_banner", "-loglevel", "error",
@@ -324,9 +289,11 @@ export async function detectVideoEncoder({ ffmpegBin, logger }) {
   if (has("h264_vaapi") && renderNodes.length > 0) {
     candidates.push(vaapiDescriptor(renderNodes[0]));
   }
-  if (has("h264_v4l2m2m") && hasV4l2Device()) {
-    candidates.push(v4l2m2mDescriptor());
-  }
+  // NOTE: h264_v4l2m2m (ARM SoC / Raspberry Pi) is intentionally NOT used. In
+  // ffmpeg it does not reliably honour forced keyframes and frequently emits a
+  // corrupted stream, which breaks HLS segment alignment. Such hosts fall back
+  // to software libx264 (correct, just CPU-bound) until a dedicated, tested
+  // V4L2 M2M path exists.
 
   for (const candidate of candidates) {
     const result = await runFfmpeg(ffmpegBin, testEncodeArgs(candidate), 12000);

@@ -20,9 +20,19 @@ const DIRECT_AUDIO_CODECS = new Set(["aac", "mp3", "opus", "vorbis", "flac"]);
 function parseStreamCodecs(ffmpegOutput) {
   const audioMatch = ffmpegOutput.match(/Audio:\s*([A-Za-z0-9_]+)/i);
   const videoMatch = ffmpegOutput.match(/Video:\s*([A-Za-z0-9_]+)/i);
+  const containerMatch = ffmpegOutput.match(/Input #0,\s*([^,]+(?:,[^,]+)*?),\s*from/i);
+  const durationMatch = ffmpegOutput.match(/Duration:\s*(\d+):(\d+):(\d+(?:\.\d+)?)/i);
+  let durationSeconds = 0;
+  if (durationMatch) {
+    const value =
+      Number(durationMatch[1]) * 3600 + Number(durationMatch[2]) * 60 + Number(durationMatch[3]);
+    durationSeconds = Number.isFinite(value) ? value : 0;
+  }
   return {
     audioCodec: audioMatch ? String(audioMatch[1]).toLowerCase() : "",
-    videoCodec: videoMatch ? String(videoMatch[1]).toLowerCase() : ""
+    videoCodec: videoMatch ? String(videoMatch[1]).toLowerCase() : "",
+    container: containerMatch ? String(containerMatch[1]).trim().toLowerCase() : "",
+    durationSeconds
   };
 }
 
@@ -43,7 +53,11 @@ function probeStreamCodecs({ ffmpegBin, inputUrl, userAgent = "", timeoutMs = 8_
     if (typeof userAgent === "string" && userAgent.trim().length > 0) {
       args.push("-user_agent", userAgent.trim());
     }
-    args.push("-i", inputUrl, "-map", "0:a:0", "-t", "0.1", "-f", "null", "-");
+    // Decode a tiny slice of all streams (no per-stream -map, so video-only
+    // files probe correctly too).  The ffmpeg banner that precedes decoding
+    // gives us audio/video codecs, the container format and the duration in a
+    // single pass.
+    args.push("-i", inputUrl, "-t", "0.1", "-f", "null", "-");
 
     const ffmpeg = spawn(ffmpegBin, args, {
       stdio: ["ignore", "ignore", "pipe"],
@@ -105,6 +119,8 @@ function buildDirectUrl(localBaseUrl, sourceKey, fileIndex) {
  * @property {string} reason   - Human-readable explanation of the chosen mode.
  * @property {string} audioCodec
  * @property {string} videoCodec
+ * @property {string} container         - Demuxer/container name(s) reported by ffmpeg.
+ * @property {number} durationSeconds   - Total media duration in seconds (0 if unknown).
  */
 
 /**
@@ -174,7 +190,9 @@ export function createPlaybackPlanner({
           directUrl,
           reason: "transcode-disabled",
           audioCodec: "",
-          videoCodec: ""
+          videoCodec: "",
+          container: "",
+          durationSeconds: 0
         };
         cache.set(cacheKey, plan);
         return plan;
@@ -186,7 +204,7 @@ export function createPlaybackPlanner({
       // the end of the file and hasn't been downloaded yet.
       await torrentPool.prefetchFileEdges(torrent, fileIndex);
 
-      const { audioCodec, videoCodec } = await probeStreamCodecs({
+      const { audioCodec, videoCodec, container, durationSeconds } = await probeStreamCodecs({
         ffmpegBin,
         inputUrl: directUrl,
         userAgent
@@ -199,11 +217,16 @@ export function createPlaybackPlanner({
       // browser-side loading pipeline already has its own transcode fallback.
       const requiresTranscode = audioCodec.length > 0 && !DIRECT_AUDIO_CODECS.has(audioCodec);
       const plan = {
+        // `mode` is advisory only (audio-codec based).  The browser makes the
+        // authoritative decision independently per stream via canPlayType /
+        // mediaCapabilities, transcoding only what it cannot play.
         mode: requiresTranscode ? "hls" : "direct",
         directUrl,
         reason: requiresTranscode ? "audio-codec-transcode-required" : "audio-codec-supported",
         audioCodec,
-        videoCodec
+        videoCodec,
+        container,
+        durationSeconds
       };
       cache.set(cacheKey, plan);
       return plan;

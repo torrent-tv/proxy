@@ -18,13 +18,23 @@ import { logger } from "../utils/logger.js";
 
 const PLAYLIST_FILE_NAME = "index.m3u8";
 const SEGMENT_FILE_NAME_PATTERN = /^segment-\d{5}\.ts$/;
-const CLEANUP_INTERVAL_MS = 60_000;
+const CLEANUP_INTERVAL_MS = 30_000;
 const DEFAULT_SEGMENT_DURATION_SEC = 4;
 // How many segments ahead of the current encode head a missing-segment request
 // is allowed to be before we restart ffmpeg at that position (server-side seek).
 // Requests within the window are served by waiting for the running encode.
 const MAX_LOOKAHEAD_SEGMENTS = 8;
-const DEFAULT_SESSION_TTL_MS = 30 * 60 * 1000;
+// Just-in-time pacing: pause the encoder once it is this many segments ahead of
+// the player's current position, and resume once the lead shrinks to the resume
+// threshold.  This keeps a comfortable buffer for smooth playback while capping
+// CPU near real-time instead of racing through the whole file at once.
+const PACING_PAUSE_AHEAD_SEGMENTS = 8;
+const PACING_RESUME_AHEAD_SEGMENTS = 4;
+// Idle TTL: a session is disposed this long after the last segment/playlist
+// access. Kept short so an ffmpeg process does not keep burning CPU after the
+// viewer stops or navigates away. Active playback refreshes the timer on every
+// segment fetch, so it never expires mid-watch.
+const DEFAULT_SESSION_TTL_MS = 120 * 1000;
 const DEFAULT_STARTUP_WAIT_MS = 5_000;
 const MICROSECONDS_PER_SECOND = 1_000_000;
 const PROGRESS_LOG_INTERVAL_MS = 5_000;
@@ -488,6 +498,11 @@ export class HlsSessionManager {
       encodeStartIndex: 0,
       // Guards against repeatedly restarting to the same seek position.
       pendingRestartIndex: -1,
+      // Just-in-time pacing: highest segment index the player has requested
+      // (≈ playhead) and whether the encoder is currently paused for running
+      // far enough ahead.
+      playheadIndex: 0,
+      paused: false,
       progress: {
         state: "starting",
         processedSeconds: 0,
@@ -575,14 +590,19 @@ export class HlsSessionManager {
 
     // Terminate any existing encode process before starting a new one.  The
     // old process's exit handler no-ops because session.ffmpeg is reassigned
-    // below (it checks identity).
+    // below (it checks identity).  Resume first in case it was paused, so the
+    // termination signal is actually delivered.
     if (session.ffmpeg && !session.ffmpeg.killed) {
       try {
+        if (session.paused) {
+          session.ffmpeg.kill("SIGCONT");
+        }
         session.ffmpeg.kill("SIGTERM");
       } catch (_error) {
         // Best effort.
       }
     }
+    session.paused = false;
 
     const videoCodecArgs = session.transcodeVideo
       ? [
@@ -649,6 +669,7 @@ export class HlsSessionManager {
     session.ffmpeg = ffmpeg;
     session.encodeStartIndex = safeIndex;
     session.pendingRestartIndex = -1;
+    session.playheadIndex = safeIndex;
     session.state = session.state === "disposed" ? "disposed" : "starting";
     session.progress.state = "running";
     session.progress.processedSeconds = startSeconds;
@@ -721,6 +742,8 @@ export class HlsSessionManager {
               ` speed=${session.progress.speed || "n/a"}`
           );
         }
+        // Just-in-time pacing: pause once we are far enough ahead of the player.
+        this.#maybePauseEncoder(session);
       }
     });
 
@@ -794,6 +817,79 @@ export class HlsSessionManager {
       `transcode ${session.id} seek → restart at segment #${index} (encode head #${head})`
     );
     this.#startEncodeRun(session, index);
+  }
+
+  /**
+   * Segment index ffmpeg has encoded up to so far, derived from the output
+   * timestamp reported via -progress.
+   *
+   * @param {HlsSession} session
+   * @returns {number}
+   */
+  #producedSegmentIndex(session) {
+    const processed = Number(session.progress?.processedSeconds);
+    if (!Number.isFinite(processed) || processed <= 0) {
+      return session.encodeStartIndex;
+    }
+    return Math.floor(processed / this.segmentDurationSec);
+  }
+
+  /**
+   * Pause the encoder once it has produced enough segments ahead of the
+   * player's current position (just-in-time pacing).  No-op on platforms
+   * without POSIX job-control signals (fail-open: the encoder keeps running).
+   *
+   * @param {HlsSession} session
+   * @returns {void}
+   */
+  #maybePauseEncoder(session) {
+    if (session.paused || !session.ffmpeg || session.ffmpeg.killed) {
+      return;
+    }
+    if (process.platform === "win32") {
+      return;
+    }
+    const ahead = this.#producedSegmentIndex(session) - session.playheadIndex;
+    if (ahead < PACING_PAUSE_AHEAD_SEGMENTS) {
+      return;
+    }
+    try {
+      session.ffmpeg.kill("SIGSTOP");
+      session.paused = true;
+      logger.info(
+        `transcode ${session.id} paused (buffered ${ahead} segments ahead) "${session.fileName}"`
+      );
+    } catch (_error) {
+      // Fail-open: if we cannot pause, let the encoder keep running.
+    }
+  }
+
+  /**
+   * Resume a paused encoder when the player has caught up enough that the
+   * buffered lead has shrunk to the resume threshold.
+   *
+   * @param {HlsSession} session
+   * @returns {void}
+   */
+  #maybeResumeEncoder(session) {
+    if (!session.paused || !session.ffmpeg || session.ffmpeg.killed) {
+      return;
+    }
+    const ahead = this.#producedSegmentIndex(session) - session.playheadIndex;
+    if (ahead > PACING_RESUME_AHEAD_SEGMENTS) {
+      return;
+    }
+    try {
+      session.ffmpeg.kill("SIGCONT");
+      session.paused = false;
+      session.progress.updatedAt = Date.now();
+      logger.info(`transcode ${session.id} resumed (lead ${ahead} segments) "${session.fileName}"`);
+    } catch (_error) {
+      // If resume fails, force a restart from the player's position so it does
+      // not stall (fail-safe toward smooth playback).
+      session.paused = false;
+      this.#startEncodeRun(session, session.playheadIndex);
+    }
   }
 
   #buildVideoFilter(targetWidth, targetHeight) {
@@ -873,6 +969,16 @@ export class HlsSessionManager {
       };
     }
     session.lastAccessedAt = Date.now();
+
+    // Track the player position (≈ playhead) from segment requests and resume
+    // a paused encoder as the player approaches the buffered edge.
+    if (fileName !== PLAYLIST_FILE_NAME) {
+      const requestedIndex = segmentIndexFromName(fileName);
+      if (requestedIndex >= 0) {
+        session.playheadIndex = Math.max(session.playheadIndex, requestedIndex);
+        this.#maybeResumeEncoder(session);
+      }
+    }
 
     // Serve the synthetic VOD playlist (full duration, terminated with
     // #EXT-X-ENDLIST) so the player gets the correct total length and a fully
@@ -1021,6 +1127,16 @@ export class HlsSessionManager {
     this.sessionIdBySource.delete(session.sourceMapKey);
 
     if (session.ffmpeg && !session.ffmpeg.killed) {
+      // Resume first if paused, otherwise SIGTERM is not delivered to a
+      // stopped process.
+      if (session.paused) {
+        try {
+          session.ffmpeg.kill("SIGCONT");
+        } catch (_error) {
+          // Best effort.
+        }
+        session.paused = false;
+      }
       session.ffmpeg.kill("SIGTERM");
       await waitForChildExit(session.ffmpeg);
     }

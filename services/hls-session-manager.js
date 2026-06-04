@@ -9,6 +9,7 @@
 
 import { createReadStream } from "node:fs";
 import { access, mkdir, readdir, readFile, rm } from "node:fs/promises";
+import { Readable } from "node:stream";
 import os from "node:os";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
@@ -19,6 +20,10 @@ const PLAYLIST_FILE_NAME = "index.m3u8";
 const SEGMENT_FILE_NAME_PATTERN = /^segment-\d{5}\.ts$/;
 const CLEANUP_INTERVAL_MS = 60_000;
 const DEFAULT_SEGMENT_DURATION_SEC = 4;
+// How many segments ahead of the current encode head a missing-segment request
+// is allowed to be before we restart ffmpeg at that position (server-side seek).
+// Requests within the window are served by waiting for the running encode.
+const MAX_LOOKAHEAD_SEGMENTS = 8;
 const DEFAULT_SESSION_TTL_MS = 30 * 60 * 1000;
 const DEFAULT_STARTUP_WAIT_MS = 5_000;
 const MICROSECONDS_PER_SECOND = 1_000_000;
@@ -118,6 +123,21 @@ function isSafeSessionId(value) {
  */
 function isSafeFileName(fileName) {
   return fileName === PLAYLIST_FILE_NAME || SEGMENT_FILE_NAME_PATTERN.test(fileName);
+}
+
+/**
+ * Extract the zero-based segment index from a segment file name.
+ * Returns -1 when the name is not a valid segment file.
+ *
+ * @param {string} fileName - e.g. "segment-00012.ts"
+ * @returns {number}
+ */
+function segmentIndexFromName(fileName) {
+  const match = /^segment-(\d{5})\.ts$/.exec(fileName);
+  if (!match) {
+    return -1;
+  }
+  return Number(match[1]);
 }
 
 /**
@@ -421,12 +441,153 @@ export class HlsSessionManager {
     const inputUrl = new URL("/stream", `${this.localBaseUrl}/`);
     inputUrl.searchParams.set("sourceKey", sourceKey);
     inputUrl.searchParams.set("fileIndex", String(fileIndex));
-    const durationSeconds = await probeInputDurationSeconds(this.ffmpegBin, inputUrl.toString());
 
-    const videoCodecArgs = transcodeVideo
+    // Probe the full media duration up-front so we can serve a complete VOD
+    // playlist (terminated with #EXT-X-ENDLIST) immediately.  This gives the
+    // player the correct total duration and a fully seekable timeline before a
+    // single segment has been transcoded.
+    const durationSeconds = await probeInputDurationSeconds(this.ffmpegBin, inputUrl.toString());
+    const hasDuration = Number.isFinite(durationSeconds) && durationSeconds > 0;
+    const logName = normalizeLogFileName(fileName, fileIndex);
+    if (!hasDuration) {
+      logger.warn(
+        `transcode ${sessionId}: could not probe duration; falling back to ` +
+          `ffmpeg-managed (growing) playlist for "${logName}"`
+      );
+    }
+    const segmentCount = hasDuration
+      ? Math.max(1, Math.ceil(durationSeconds / this.segmentDurationSec))
+      : 0;
+
+    const session = {
+      id: sessionId,
+      sourceMapKey,
+      fileName: logName,
+      dirPath: sessionDir,
+      state: "starting",
+      startedAt: Date.now(),
+      lastAccessedAt: Date.now(),
+      ffmpeg: null,
+      lastError: "",
+      consumers: new Set(consumerId ? [consumerId] : []),
+      // Transcode parameters retained so the encode run can be restarted at an
+      // arbitrary segment when the player seeks (server-side seeking).
+      sourceKey,
+      fileIndex,
+      transcodeVideo,
+      transcodeAudio,
+      targetWidth: normalizedTargetWidth,
+      targetHeight: normalizedTargetHeight,
+      inputUrl: inputUrl.toString(),
+      // VOD playlist bookkeeping.
+      useSyntheticPlaylist: hasDuration,
+      totalDurationSeconds: hasDuration ? durationSeconds : null,
+      segmentCount,
+      playlistText: hasDuration ? this.#buildVodPlaylist(durationSeconds, this.segmentDurationSec) : "",
+      // Segment index the current ffmpeg run started producing from.
+      encodeStartIndex: 0,
+      // Guards against repeatedly restarting to the same seek position.
+      pendingRestartIndex: -1,
+      progress: {
+        state: "starting",
+        processedSeconds: 0,
+        startPositionSeconds: 0,
+        totalSeconds: hasDuration ? durationSeconds : null,
+        percent: null,
+        remainingSeconds: hasDuration ? durationSeconds : null,
+        speed: "",
+        updatedAt: Date.now(),
+        lastLoggedAt: 0
+      }
+    };
+    this.sessionsById.set(sessionId, session);
+    this.sessionIdBySource.set(sourceMapKey, sessionId);
+
+    logger.info(
+      `transcode ${sessionId} start "${logName}" ` +
+        `video=${transcodeVideo ? "x264" : "copy"} audio=${transcodeAudio ? "aac" : "copy"} ` +
+        `duration=${hasDuration ? formatSeconds(durationSeconds) : "unknown"} segments=${segmentCount}`
+    );
+
+    this.#startEncodeRun(session, 0);
+
+    try {
+      await this.waitUntilReady(session);
+      return session;
+    } catch (error) {
+      if (session.state === "failed") {
+        await this.disposeSession(session.id);
+        throw error;
+      }
+      // Do not fail session creation on warmup timeout; the synthetic playlist
+      // is already available and segments appear as ffmpeg produces them.
+      return session;
+    }
+  }
+
+  /**
+   * Build a complete VOD HLS playlist for the full media duration.
+   *
+   * The playlist lists every segment up-front and is terminated with
+   * `#EXT-X-ENDLIST`, so the player knows the total duration and can seek to
+   * any position immediately — even before the corresponding segment has been
+   * transcoded.  Segments are produced on demand (see {@link getFileStream}).
+   *
+   * @param {number} totalSeconds
+   * @param {number} segSec
+   * @returns {string}
+   */
+  #buildVodPlaylist(totalSeconds, segSec) {
+    const count = Math.max(1, Math.ceil(totalSeconds / segSec));
+    const lines = [
+      "#EXTM3U",
+      "#EXT-X-VERSION:3",
+      `#EXT-X-TARGETDURATION:${Math.ceil(segSec)}`,
+      "#EXT-X-MEDIA-SEQUENCE:0",
+      "#EXT-X-PLAYLIST-TYPE:VOD",
+      "#EXT-X-INDEPENDENT-SEGMENTS"
+    ];
+    for (let index = 0; index < count; index += 1) {
+      const remaining = totalSeconds - index * segSec;
+      const duration = index < count - 1 ? segSec : Math.max(0.1, remaining);
+      lines.push(`#EXTINF:${duration.toFixed(6)},`);
+      lines.push(`segment-${String(index).padStart(5, "0")}.ts`);
+    }
+    lines.push("#EXT-X-ENDLIST");
+    return `${lines.join("\n")}\n`;
+  }
+
+  /**
+   * (Re)start the ffmpeg encode run beginning at segment `startIndex`.
+   *
+   * Any ffmpeg process currently running for this session is terminated first.
+   * Segment files are named with a global index (`-start_number`) so they
+   * always line up with the synthetic VOD playlist regardless of where
+   * encoding started — this is what makes server-side seeking work.
+   *
+   * @param {HlsSession} session
+   * @param {number} startIndex
+   * @returns {void}
+   */
+  #startEncodeRun(session, startIndex) {
+    const safeIndex = Number.isInteger(startIndex) && startIndex > 0 ? startIndex : 0;
+    const startSeconds = safeIndex * this.segmentDurationSec;
+
+    // Terminate any existing encode process before starting a new one.  The
+    // old process's exit handler no-ops because session.ffmpeg is reassigned
+    // below (it checks identity).
+    if (session.ffmpeg && !session.ffmpeg.killed) {
+      try {
+        session.ffmpeg.kill("SIGTERM");
+      } catch (_error) {
+        // Best effort.
+      }
+    }
+
+    const videoCodecArgs = session.transcodeVideo
       ? [
           "-vf",
-          this.#buildVideoFilter(normalizedTargetWidth, normalizedTargetHeight),
+          this.#buildVideoFilter(session.targetWidth, session.targetHeight),
           "-c:v",
           "libx264",
           "-preset",
@@ -434,29 +595,29 @@ export class HlsSessionManager {
           "-crf",
           VIDEO_TRANSCODE_CRF,
           "-pix_fmt",
-          "yuv420p"
+          "yuv420p",
+          // Force keyframes on segment boundaries so each segment is
+          // independently decodable and exactly segmentDuration long — this
+          // keeps the synthetic playlist's timing accurate.
+          "-force_key_frames",
+          `expr:gte(t,n_forced*${this.segmentDurationSec})`
         ]
       : ["-c:v", "copy"];
-    const audioCodecArgs = transcodeAudio
+    const audioCodecArgs = session.transcodeAudio
       ? ["-c:a", "aac", "-ac", "2", "-b:a", "128k"]
       : ["-c:a", "copy"];
 
     const args = ["-hide_banner", "-nostats", "-loglevel", "error", "-progress", "pipe:1"];
-
-    // Fast keyframe-level seek before -i.  This is efficient because ffmpeg
-    // skips decoding all frames before the target position.
-    if (normalizedStartPosition > 0) {
-      args.push("-ss", String(normalizedStartPosition));
+    if (startSeconds > 0) {
+      // Fast keyframe-level seek before -i (skips decoding earlier frames).
+      args.push("-ss", String(startSeconds));
     }
-
-    args.push("-i", inputUrl.toString());
-
-    // Shift output timestamps to match the original timeline so that
-    // video.currentTime reflects the seeked position, not a reset-to-zero.
-    if (normalizedStartPosition > 0) {
-      args.push("-output_ts_offset", String(normalizedStartPosition));
+    args.push("-i", session.inputUrl);
+    if (startSeconds > 0) {
+      // Keep output timestamps on the original timeline so video.currentTime
+      // matches the requested position.
+      args.push("-output_ts_offset", String(startSeconds));
     }
-
     args.push(
       "-map",
       "0:v:0?",
@@ -470,48 +631,48 @@ export class HlsSessionManager {
       String(this.segmentDurationSec),
       "-hls_list_size",
       "0",
-      "-hls_playlist_type",
-      "event",
       "-hls_flags",
       "independent_segments+temp_file",
+      "-start_number",
+      String(safeIndex),
       "-hls_segment_filename",
       "segment-%05d.ts",
+      // ffmpeg writes its own playlist here; we ignore it and serve the
+      // synthetic VOD playlist instead (see getFileStream).
       PLAYLIST_FILE_NAME
     );
 
     const ffmpeg = spawn(this.ffmpegBin, args, {
-      cwd: sessionDir,
+      cwd: session.dirPath,
       stdio: ["ignore", "pipe", "pipe"]
     });
+    session.ffmpeg = ffmpeg;
+    session.encodeStartIndex = safeIndex;
+    session.pendingRestartIndex = -1;
+    session.state = session.state === "disposed" ? "disposed" : "starting";
+    session.progress.state = "running";
+    session.progress.processedSeconds = startSeconds;
+    session.progress.startPositionSeconds = startSeconds;
+    session.progress.updatedAt = Date.now();
 
-    const session = {
-      id: sessionId,
-      sourceMapKey,
-      fileName: normalizeLogFileName(fileName, fileIndex),
-      dirPath: sessionDir,
-      state: "starting",
-      startedAt: Date.now(),
-      lastAccessedAt: Date.now(),
-      ffmpeg,
-      lastError: "",
-      consumers: new Set(consumerId ? [consumerId] : []),
-      progress: {
-        state: "starting",
-        // With -output_ts_offset the first out_time will be ≈ normalizedStartPosition,
-        // so initialise processedSeconds to that value for consistent percent math.
-        processedSeconds: normalizedStartPosition,
-        startPositionSeconds: normalizedStartPosition,
-        totalSeconds: Number.isFinite(durationSeconds) ? durationSeconds : null,
-        percent: null,
-        remainingSeconds: Number.isFinite(durationSeconds) ? durationSeconds - normalizedStartPosition : null,
-        speed: "",
-        updatedAt: Date.now(),
-        lastLoggedAt: 0
-      }
-    };
-    this.sessionsById.set(sessionId, session);
-    this.sessionIdBySource.set(sourceMapKey, sessionId);
+    logger.info(
+      `transcode ${session.id} encode-run from segment #${safeIndex} ` +
+        `(${formatSeconds(startSeconds)}) "${session.fileName}"`
+    );
 
+    this.#wireEncodeProcess(session, ffmpeg);
+  }
+
+  /**
+   * Wire stdout (progress), stderr (errors) and exit handlers for an ffmpeg
+   * encode process.  Handlers no-op when the process has been superseded by a
+   * later encode run (identity check against `session.ffmpeg`).
+   *
+   * @param {HlsSession} session
+   * @param {import("node:child_process").ChildProcess} ffmpeg
+   * @returns {void}
+   */
+  #wireEncodeProcess(session, ffmpeg) {
     ffmpeg.stdout.on("data", (chunk) => {
       const lines = String(chunk).split(/\r?\n/);
       for (const line of lines) {
@@ -567,19 +728,26 @@ export class HlsSessionManager {
       const line = String(chunk).trim();
       if (line.length > 0) {
         session.lastError = line;
-        logger.warn(`ffmpeg: ${line}`);
+        logger.warn(`ffmpeg ${session.id}: ${line}`);
       }
     });
 
     ffmpeg.on("error", (error) => {
+      if (session.ffmpeg !== ffmpeg) {
+        return;
+      }
       session.state = "failed";
       session.lastError = error instanceof Error ? error.message : String(error);
       session.progress.state = "failed";
       session.progress.updatedAt = Date.now();
-      logger.error(`ffmpeg process error: ${session.lastError}`);
+      logger.error(`ffmpeg ${session.id} process error: ${session.lastError}`);
     });
 
-    ffmpeg.on("exit", (code) => {
+    ffmpeg.on("exit", (code, signal) => {
+      // Ignore the exit of a process that was superseded by a seek-restart.
+      if (session.ffmpeg !== ffmpeg) {
+        return;
+      }
       if (session.state === "disposed") {
         return;
       }
@@ -587,27 +755,45 @@ export class HlsSessionManager {
         session.state = "ready";
         session.progress.state = "ready";
         session.progress.updatedAt = Date.now();
+        logger.info(`transcode ${session.id} encode-run complete "${session.fileName}"`);
         return;
       }
       session.state = "failed";
       session.progress.state = "failed";
       session.progress.updatedAt = Date.now();
       if (!session.lastError) {
-        session.lastError = `ffmpeg exited with code ${code ?? -1}`;
+        session.lastError = `ffmpeg exited with code ${code ?? -1}${signal ? ` (signal ${signal})` : ""}`;
       }
+      logger.error(`transcode ${session.id} encode-run failed: ${session.lastError}`);
     });
+  }
 
-    try {
-      await this.waitUntilReady(session);
-      return session;
-    } catch (error) {
-      if (session.state === "failed") {
-        await this.disposeSession(session.id);
-        throw error;
-      }
-      // Do not fail session creation on warmup timeout; playlist can appear later.
-      return session;
+  /**
+   * Ensure the encoder is producing (or will soon produce) the requested
+   * segment.  If the segment is far ahead of the current encode head, or
+   * behind it, restart ffmpeg at that segment (server-side seek).  Requests
+   * within the look-ahead window are served by waiting for the running encode.
+   *
+   * @param {HlsSession} session
+   * @param {number} index
+   * @returns {void}
+   */
+  #ensureEncodingFor(session, index) {
+    if (!session || session.state === "disposed" || index < 0) {
+      return;
     }
+    const head = session.encodeStartIndex;
+    const withinWindow = index >= head && index <= head + MAX_LOOKAHEAD_SEGMENTS;
+    if (withinWindow) {
+      return;
+    }
+    if (session.pendingRestartIndex === index) {
+      return;
+    }
+    logger.info(
+      `transcode ${session.id} seek → restart at segment #${index} (encode head #${head})`
+    );
+    this.#startEncodeRun(session, index);
   }
 
   #buildVideoFilter(targetWidth, targetHeight) {
@@ -625,6 +811,18 @@ export class HlsSessionManager {
    * @returns {Promise<void>}
    */
   async waitUntilReady(session) {
+    // With a synthetic VOD playlist there is nothing to wait for: the playlist
+    // is generated from the probed duration and is available immediately.
+    // Individual segments are long-polled by the segment route as ffmpeg
+    // produces them.
+    if (session.useSyntheticPlaylist) {
+      if (session.state === "failed") {
+        throw new Error(session.lastError || "ffmpeg failed to start HLS session.");
+      }
+      session.state = "ready";
+      return;
+    }
+
     const playlistPath = path.join(session.dirPath, PLAYLIST_FILE_NAME);
     const deadline = Date.now() + this.startupWaitMs;
 
@@ -675,21 +873,42 @@ export class HlsSessionManager {
       };
     }
     session.lastAccessedAt = Date.now();
+
+    // Serve the synthetic VOD playlist (full duration, terminated with
+    // #EXT-X-ENDLIST) so the player gets the correct total length and a fully
+    // seekable timeline up-front, independent of how far ffmpeg has encoded.
+    if (fileName === PLAYLIST_FILE_NAME && session.useSyntheticPlaylist) {
+      return {
+        kind: "file",
+        stream: Readable.from([session.playlistText]),
+        contentType: "application/vnd.apple.mpegurl",
+        isPlaylist: true
+      };
+    }
+
     const filePath = path.join(session.dirPath, fileName);
     try {
       await access(filePath);
+      return {
+        kind: "file",
+        stream: createReadStream(filePath),
+        contentType:
+          fileName === PLAYLIST_FILE_NAME
+            ? "application/vnd.apple.mpegurl"
+            : "video/mp2t",
+        isPlaylist: fileName === PLAYLIST_FILE_NAME
+      };
     } catch (_error) {
-      return { kind: "warming-up" };
+      // File not produced yet.
     }
-    return {
-      kind: "file",
-      stream: createReadStream(filePath),
-      contentType:
-        fileName === PLAYLIST_FILE_NAME
-          ? "application/vnd.apple.mpegurl"
-          : "video/mp2t",
-      isPlaylist: fileName === PLAYLIST_FILE_NAME
-    };
+
+    // A segment was requested that ffmpeg has not produced yet.  Decide whether
+    // to wait for the current encode run to reach it or to restart the encoder
+    // at this position (server-side seeking).  The caller long-polls.
+    if (fileName !== PLAYLIST_FILE_NAME) {
+      this.#ensureEncodingFor(session, segmentIndexFromName(fileName));
+    }
+    return { kind: "warming-up" };
   }
 
   /**

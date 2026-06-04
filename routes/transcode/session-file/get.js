@@ -14,14 +14,17 @@
 export async function handleTranscodeSessionFileGet(req, reply, { hlsSessionManager }) {
   const sessionId = typeof req.params.sessionId === "string" ? req.params.sessionId : "";
   const fileName = typeof req.params.fileName === "string" ? req.params.fileName : "";
-  const result = await waitForSessionFile(hlsSessionManager, sessionId, fileName, 15_000);
+  const result = await waitForSessionFile(hlsSessionManager, sessionId, fileName, 30_000);
 
   if (result.kind === "not-found") {
     return reply.code(404).send({ error: "Transcode session file was not found." });
   }
   if (result.kind === "warming-up") {
-    reply.header("Retry-After", "2");
-    return reply.code(202).send({ status: "warming-up" });
+    // The segment is still being produced (e.g. just after a seek-restart).
+    // Return a retryable 503 — never 202, which hls.js cannot consume as a
+    // media segment — so the player retries the fetch shortly.
+    reply.header("Retry-After", "1");
+    return reply.code(503).send({ error: "Transcode segment is still being produced." });
   }
   if (result.kind === "failed") {
     return reply.code(500).send({ error: result.message });

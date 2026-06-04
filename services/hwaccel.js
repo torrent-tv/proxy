@@ -21,7 +21,9 @@
  */
 
 import { spawn } from "node:child_process";
-import { readdirSync } from "node:fs";
+import { mkdtempSync, readdirSync, rmSync } from "node:fs";
+import os from "node:os";
+import path from "node:path";
 
 const SOFTWARE_PRESET = "superfast";
 const SOFTWARE_CRF = "24";
@@ -139,6 +141,32 @@ function nvencDescriptor() {
   };
 }
 
+/** @returns {import("./hwaccel.js").VideoEncoderDescriptor} */
+function v4l2m2mDescriptor() {
+  // ARM SoC (e.g. Raspberry Pi / HA Yellow) stateful M2M encoder. No GPU
+  // scaler — scale in software, hand YUV420 frames to the hardware encoder.
+  // `-g` aligns the GOP to the segment length so an IDR lands on every segment
+  // boundary; this is verified by the keyframe-alignment test before use,
+  // because v4l2m2m does not always honour these hints.
+  return {
+    name: "h264_v4l2m2m",
+    kind: "v4l2m2m",
+    device: null,
+    inputArgs: [],
+    buildVideoArgs({ targetWidth, targetHeight, segmentDurationSec }) {
+      const { w, h } = safeDimensions(targetWidth, targetHeight);
+      return [
+        "-vf",
+        `scale=${w}:${h}:force_original_aspect_ratio=decrease:force_divisible_by=2,fps=${TRANSCODE_FPS},format=yuv420p`,
+        "-c:v", "h264_v4l2m2m",
+        "-b:v", "3M",
+        "-g", String(TRANSCODE_FPS * segmentDurationSec),
+        ...keyFrameArgs(segmentDurationSec)
+      ];
+    }
+  };
+}
+
 
 /**
  * @typedef {Object} VideoEncoderDescriptor
@@ -222,40 +250,99 @@ function hasNvidiaDevice() {
   }
 }
 
+/** @returns {boolean} Whether any /dev/video* node exists (V4L2 M2M). */
+function hasV4l2Device() {
+  try {
+    return readdirSync("/dev").some((n) => /^video\d+$/.test(n));
+  } catch {
+    return false;
+  }
+}
+
 /**
- * Kind-specific test-encode args that verify the encoder initialises and
- * encodes a few frames from a synthetic source.
+ * Build a full ffmpeg command that encodes a short, *moving* synthetic clip
+ * (testsrc2 — far more representative than a static black frame) through the
+ * candidate encoder into real HLS segments in `outDir`, with keyframes forced
+ * on segment boundaries. Verifying the resulting segments (see
+ * {@link verifySegmentsDecodeCleanly}) catches encoders that silently produce
+ * a corrupted or non-IDR-aligned stream (e.g. some V4L2 M2M builds).
  *
  * @param {VideoEncoderDescriptor} descriptor
+ * @param {number} segmentDurationSec
+ * @param {string} outDir
  * @returns {string[]}
  */
-function testEncodeArgs(descriptor) {
-  const src = ["-f", "lavfi", "-i", "color=c=black:s=320x240:r=15:d=0.4"];
+function buildEncoderTestArgs(descriptor, segmentDurationSec, outDir) {
+  const durationSec = Math.max(8, segmentDurationSec * 3);
+  const source = ["-f", "lavfi", "-i", `testsrc2=s=640x360:r=${TRANSCODE_FPS}:d=${durationSec}`];
+  const kf = keyFrameArgs(segmentDurationSec);
+
+  /** @type {string[]} */
+  let pre = ["-hide_banner", "-loglevel", "error"];
+  /** @type {string[]} */
+  let encode;
   switch (descriptor.kind) {
     case "vaapi":
-      return [
-        "-hide_banner", "-loglevel", "error",
-        "-vaapi_device", String(descriptor.device),
-        ...src,
-        "-vf", "format=nv12,hwupload", "-c:v", "h264_vaapi",
-        "-f", "null", "-"
-      ];
+      pre = [...pre, "-vaapi_device", String(descriptor.device)];
+      encode = ["-vf", "format=nv12,hwupload", "-c:v", "h264_vaapi", "-qp", "24", ...kf];
+      break;
     case "qsv":
-      return [
-        "-hide_banner", "-loglevel", "error",
-        "-qsv_device", String(descriptor.device),
-        ...src,
-        "-vf", "hwupload=extra_hw_frames=16,format=qsv", "-c:v", "h264_qsv",
-        "-f", "null", "-"
-      ];
+      pre = [...pre, "-qsv_device", String(descriptor.device)];
+      encode = ["-vf", "hwupload=extra_hw_frames=16,format=qsv", "-c:v", "h264_qsv", "-global_quality", "24", ...kf];
+      break;
     case "nvenc":
-      return ["-hide_banner", "-loglevel", "error", ...src, "-c:v", "h264_nvenc", "-f", "null", "-"];
+      encode = ["-c:v", "h264_nvenc", "-preset", "p4", "-cq", "24", "-pix_fmt", "yuv420p", ...kf];
+      break;
+    case "v4l2m2m":
+      encode = ["-pix_fmt", "yuv420p", "-c:v", "h264_v4l2m2m", "-b:v", "3M", "-g", String(TRANSCODE_FPS * segmentDurationSec), ...kf];
+      break;
     default:
-      return [
-        "-hide_banner", "-loglevel", "error",
-        ...src, "-c:v", "libx264", "-preset", "ultrafast", "-f", "null", "-"
-      ];
+      encode = ["-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p", ...kf];
+      break;
   }
+
+  const hlsOut = [
+    "-f", "hls",
+    "-hls_time", String(segmentDurationSec),
+    "-hls_list_size", "0",
+    "-hls_flags", "independent_segments",
+    "-hls_segment_filename", path.join(outDir, "seg-%03d.ts"),
+    path.join(outDir, "index.m3u8")
+  ];
+  return [...pre, ...source, ...encode, ...hlsOut];
+}
+
+/**
+ * Verify the HLS segments produced by the test encode are valid: at least two
+ * segments exist, and each decodes standalone without errors. A segment that
+ * does not begin with a keyframe (broken/corrupted output) emits decode errors
+ * when read on its own, which fails this check.
+ *
+ * @param {string} ffmpegBin
+ * @param {string} outDir
+ * @returns {Promise<boolean>}
+ */
+async function verifySegmentsDecodeCleanly(ffmpegBin, outDir) {
+  let files;
+  try {
+    files = readdirSync(outDir).filter((n) => /^seg-\d+\.ts$/.test(n)).sort();
+  } catch {
+    return false;
+  }
+  if (files.length < 2) {
+    return false;
+  }
+  for (const file of files) {
+    const result = await runFfmpeg(
+      ffmpegBin,
+      ["-hide_banner", "-loglevel", "error", "-i", path.join(outDir, file), "-f", "null", "-"],
+      8000
+    );
+    if (result.code !== 0 || result.stderr.trim().length > 0) {
+      return false;
+    }
+  }
+  return true;
 }
 
 /**
@@ -263,10 +350,10 @@ function testEncodeArgs(descriptor) {
  * software libx264). Each hardware candidate is verified with a real
  * test-encode before being selected.
  *
- * @param {{ ffmpegBin: string, logger?: { info: (m: string) => void, warn: (m: string) => void } }} options
+ * @param {{ ffmpegBin: string, logger?: { info: (m: string) => void, warn: (m: string) => void }, segmentDurationSec?: number }} options
  * @returns {Promise<VideoEncoderDescriptor>}
  */
-export async function detectVideoEncoder({ ffmpegBin, logger }) {
+export async function detectVideoEncoder({ ffmpegBin, logger, segmentDurationSec = 4 }) {
   const log = logger ?? { info: () => {}, warn: () => {} };
   const software = softwareDescriptor();
 
@@ -289,22 +376,41 @@ export async function detectVideoEncoder({ ffmpegBin, logger }) {
   if (has("h264_vaapi") && renderNodes.length > 0) {
     candidates.push(vaapiDescriptor(renderNodes[0]));
   }
-  // NOTE: h264_v4l2m2m (ARM SoC / Raspberry Pi) is intentionally NOT used. In
-  // ffmpeg it does not reliably honour forced keyframes and frequently emits a
-  // corrupted stream, which breaks HLS segment alignment. Such hosts fall back
-  // to software libx264 (correct, just CPU-bound) until a dedicated, tested
-  // V4L2 M2M path exists.
+  // h264_v4l2m2m (ARM SoC / Raspberry Pi / HA Yellow). It is gated behind the
+  // strict keyframe-alignment test below, because some V4L2 M2M builds silently
+  // emit a corrupted / non-IDR-aligned stream; the test rejects those and the
+  // host falls back to software libx264.
+  if (has("h264_v4l2m2m") && hasV4l2Device()) {
+    candidates.push(v4l2m2mDescriptor());
+  }
 
   for (const candidate of candidates) {
-    const result = await runFfmpeg(ffmpegBin, testEncodeArgs(candidate), 12000);
-    if (result.code === 0) {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "tt-hwtest-"));
+    let ok = false;
+    try {
+      const encoded = await runFfmpeg(
+        ffmpegBin,
+        buildEncoderTestArgs(candidate, segmentDurationSec, dir),
+        25000
+      );
+      if (encoded.code === 0) {
+        ok = await verifySegmentsDecodeCleanly(ffmpegBin, dir);
+      }
+    } finally {
+      try {
+        rmSync(dir, { recursive: true, force: true });
+      } catch {
+        // best effort
+      }
+    }
+    if (ok) {
       log.info(
         `hwaccel: using hardware encoder ${candidate.name}` +
           `${candidate.device ? ` (${candidate.device})` : ""}`
       );
       return candidate;
     }
-    log.warn(`hwaccel: ${candidate.name} present but test-encode failed; skipping`);
+    log.warn(`hwaccel: ${candidate.name} failed the HLS keyframe-alignment test; skipping`);
   }
 
   log.info("hwaccel: no working hardware encoder; using software libx264");

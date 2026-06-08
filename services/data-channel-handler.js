@@ -162,6 +162,10 @@ export function createDataChannelHandler({ proxyPort, onLog }) {
     const requestHeaders = { ...(forwardedHeaders ?? {}), host: `127.0.0.1:${proxyPort}` };
 
     let response;
+    // [net-debug] TEMPORARY: time spent in the local fetch (waiting for the
+    // route to return a response — e.g. long-polling until an HLS segment is
+    // finalized by ffmpeg) vs. the body transfer over the data channel.
+    const fetchStartedAt = Date.now();
     try {
       response = await fetch(targetUrl, {
         method,
@@ -195,7 +199,13 @@ export function createDataChannelHandler({ proxyPort, onLog }) {
     try {
       const reader = response.body.getReader();
       // [net-debug] TEMPORARY: measure transfer size/time and channel buffering.
+      // fetchMs = time waiting for the route (incl. ffmpeg segment finalization).
+      // ttfbMs  = time from body-read start to the first chunk with data (loopback).
+      // sendMs  = total body read+send duration over the data channel.
+      const fetchMs = Date.now() - fetchStartedAt;
       const sendStartedAt = Date.now();
+      let firstByteMs = -1;
+      let chunks = 0;
       let totalBytes = 0;
       let maxBuffered = 0;
       while (true) {
@@ -206,11 +216,14 @@ export function createDataChannelHandler({ proxyPort, onLog }) {
           let bufferedNow = 0;
           try { bufferedNow = typeof channel.bufferedAmount === "function" ? channel.bufferedAmount() : 0; } catch { /* ignore */ }
           log(
-            `[net-debug] sent ${path}${queryInfo} bytes=${totalBytes} ms=${elapsedMs} ` +
+            `[net-debug] sent ${path}${queryInfo} bytes=${totalBytes} fetchMs=${fetchMs} ` +
+              `ttfbMs=${firstByteMs} sendMs=${elapsedMs} chunks=${chunks} ` +
               `maxBuffered=${maxBuffered} bufferedAtEnd=${bufferedNow}`
           );
           break;
         }
+        if (firstByteMs < 0) firstByteMs = Date.now() - sendStartedAt;
+        chunks += 1;
         totalBytes += value.length;
         try {
           const b = typeof channel.bufferedAmount === "function" ? channel.bufferedAmount() : 0;

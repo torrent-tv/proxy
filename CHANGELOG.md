@@ -1,3 +1,7 @@
+## 2.9.4
+
+- **Chore**: Temporary `[net-debug]` instrumentation in `data-channel-handler.js` now splits transfer timing into `fetchMs` (waiting for the local route, incl. ffmpeg segment finalization), `ttfbMs` (time to first body chunk), `sendMs` (channel send duration) and `chunks`, to locate where early-segment latency is spent (transport vs segment production).
+
 ## 2.9.3
 
 - **New**: WebRTC data-channel response bodies are now sent as **binary** frames (`sendMessageBinary`) instead of base64-encoded JSON `response-chunk` messages, removing the ~33% base64 overhead and the JSON encode cost. Frame layout: `[flags(1)][idLen(1)][requestId(ASCII)][payload]`. Control messages (`response-start`, `response-error`, `pong`) remain JSON strings. Requires the matching browser client (server ≥ 0.8.0); **deploy the server before the proxy**.

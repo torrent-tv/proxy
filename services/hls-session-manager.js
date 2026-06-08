@@ -33,6 +33,11 @@ const DEFAULT_SESSION_TTL_MS = 120 * 1000;
 const DEFAULT_STARTUP_WAIT_MS = 5_000;
 const MICROSECONDS_PER_SECOND = 1_000_000;
 const PROGRESS_LOG_INTERVAL_MS = 5_000;
+// Read segment files in large blocks so the body is delivered to the data
+// channel in few, big chunks. On a busy ARM host the in-process WebTorrent
+// hashing starves the event loop in bursts, so fewer read iterations means
+// far less time lost between chunks while serving the first segments.
+const SEGMENT_READ_HIGH_WATER_MARK = 4 * 1024 * 1024;
 
 /**
  * Resolve after a given number of milliseconds.
@@ -899,9 +904,12 @@ export class HlsSessionManager {
     const filePath = path.join(session.dirPath, fileName);
     try {
       await access(filePath);
+      const isPlaylist = fileName === PLAYLIST_FILE_NAME;
       return {
         kind: "file",
-        stream: createReadStream(filePath),
+        stream: isPlaylist
+          ? createReadStream(filePath)
+          : createReadStream(filePath, { highWaterMark: SEGMENT_READ_HIGH_WATER_MARK }),
         contentType:
           fileName === PLAYLIST_FILE_NAME
             ? "application/vnd.apple.mpegurl"

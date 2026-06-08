@@ -1,3 +1,7 @@
+## 2.9.5
+
+- **Fix**: Segment files are now read with a 4 MB `highWaterMark` (`hls-session-manager.js` `getFileStream`) so the body is delivered in few, large chunks. On a busy ARM host the in-process WebTorrent hashing starves the Node event loop in bursts while the first segments are served; reading in fewer iterations cuts the time lost between chunks (the first segment previously transferred in ~79 × 43 KB reads spaced ~610 ms apart).
+
 ## 2.9.4
 
 - **Chore**: Temporary `[net-debug]` instrumentation in `data-channel-handler.js` now splits transfer timing into `fetchMs` (waiting for the local route, incl. ffmpeg segment finalization), `ttfbMs` (time to first body chunk), `sendMs` (channel send duration) and `chunks`, to locate where early-segment latency is spent (transport vs segment production).

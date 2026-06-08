@@ -277,6 +277,17 @@ async function probeInputDurationSeconds(ffmpegBin, inputUrl) {
     }, 8_000);
     ffmpeg.stderr.on("data", (chunk) => {
       stderr += String(chunk);
+      // ffmpeg prints the container header ("Duration:") almost immediately,
+      // long before it decodes anything. Bail as soon as we have it instead of
+      // letting `-f null -` decode the whole stream until the 8 s timeout.
+      const duration = parseFfmpegDurationSeconds(stderr);
+      if (duration != null) {
+        clearTimeout(timeoutId);
+        if (!ffmpeg.killed) {
+          ffmpeg.kill("SIGTERM");
+        }
+        finish(duration);
+      }
     });
     ffmpeg.on("error", () => {
       clearTimeout(timeoutId);
@@ -983,6 +994,10 @@ export class HlsSessionManager {
       remainingSeconds: session.progress.remainingSeconds,
       warmupPercent,
       warmupRemainingSeconds,
+      // Segment length, so the browser can show progress toward the FIRST
+      // segment (the only thing it waits for before playback starts) instead
+      // of a percentage of the whole-file transcode.
+      segmentDurationSec: this.segmentDurationSec,
       speed: session.progress.speed,
       updatedAt: session.progress.updatedAt,
       error: session.state === "failed" ? session.lastError : ""

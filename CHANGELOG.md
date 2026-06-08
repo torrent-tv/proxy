@@ -1,3 +1,8 @@
+## 2.9.6
+
+- **Fix**: `probeInputDurationSeconds` now returns as soon as ffmpeg prints the container header (`Duration:`) instead of letting `-f null -` decode the whole stream until the 8 s timeout. Transcode-session creation was wasting ~8.6 s per session on this redundant decode (the duration was already available from the header, and `playback-plan` had probed it moments earlier). Cuts session-creation latency from ~9.7 s to ~1 s.
+- **New**: `GET /api/transcode-sessions/:id/progress` now includes `segmentDurationSec`, so the browser can show progress toward the first segment (the only thing it waits for before playback) instead of a percentage of the whole-file transcode.
+
 ## 2.9.5
 
 - **Fix**: Segment files are now read with a 4 MB `highWaterMark` (`hls-session-manager.js` `getFileStream`) so the body is delivered in few, large chunks. On a busy ARM host the in-process WebTorrent hashing starves the Node event loop in bursts while the first segments are served; reading in fewer iterations cuts the time lost between chunks (the first segment previously transferred in ~79 × 43 KB reads spaced ~610 ms apart).

@@ -16,11 +16,22 @@
  *
  * Proxy → Browser
  * ```
- * { type: "response-start", requestId, status, headers }
- * { type: "response-chunk", requestId, data: string (base64), done: boolean }
- * { type: "response-error", requestId, error: string }
- * { type: "pong",           id }
+ * { type: "response-start", requestId, status, headers }   (JSON string)
+ * { type: "response-error", requestId, error: string }     (JSON string)
+ * { type: "pong",           id }                            (JSON string)
  * ```
+ *
+ * Response bodies are sent as BINARY data-channel messages (not JSON), to
+ * avoid the ~33% base64 overhead and the JSON encode/decode cost. Each binary
+ * frame is laid out as:
+ * ```
+ * byte 0          flags     (bit 0: done)
+ * byte 1          idLen     (length of the requestId in bytes)
+ * bytes 2..2+N    requestId (ASCII)
+ * bytes 2+N..     payload   (raw body bytes; empty on the final done frame)
+ * ```
+ * Control messages stay JSON strings so the browser can distinguish them from
+ * body frames by message type (string vs ArrayBuffer).
  *
  * The protocol mirrors the tunnel relay protocol so both transports share
  * the same mental model and the same browser-side `WebRtcProxy` implementation.
@@ -177,28 +188,105 @@ export function createDataChannelHandler({ proxyPort, onLog }) {
     send(channel, { type: "response-start", requestId, status: response.status, headers: responseHeaders });
 
     if (!response.body) {
-      send(channel, { type: "response-chunk", requestId, data: "", done: true });
+      sendChunk(channel, requestId, null, true);
       return;
     }
 
     try {
       const reader = response.body.getReader();
+      // [net-debug] TEMPORARY: measure transfer size/time and channel buffering.
+      const sendStartedAt = Date.now();
+      let totalBytes = 0;
+      let maxBuffered = 0;
       while (true) {
         const { done, value } = await reader.read();
         if (done) {
-          send(channel, { type: "response-chunk", requestId, data: "", done: true });
+          sendChunk(channel, requestId, null, true);
+          const elapsedMs = Date.now() - sendStartedAt;
+          let bufferedNow = 0;
+          try { bufferedNow = typeof channel.bufferedAmount === "function" ? channel.bufferedAmount() : 0; } catch { /* ignore */ }
+          log(
+            `[net-debug] sent ${path}${queryInfo} bytes=${totalBytes} ms=${elapsedMs} ` +
+              `maxBuffered=${maxBuffered} bufferedAtEnd=${bufferedNow}`
+          );
           break;
         }
-        send(channel, {
-          type: "response-chunk",
-          requestId,
-          data: Buffer.from(value).toString("base64"),
-          done: false
-        });
+        totalBytes += value.length;
+        try {
+          const b = typeof channel.bufferedAmount === "function" ? channel.bufferedAmount() : 0;
+          if (b > maxBuffered) maxBuffered = b;
+        } catch { /* ignore */ }
+        sendChunk(channel, requestId, value, false);
+        // Backpressure: do not keep queuing chunks once the channel's outgoing
+        // buffer is large — wait for it to drain. Prevents the SCTP send buffer
+        // from ballooning, which stalls throughput.
+        await waitForBufferDrain(channel);
       }
     } catch {
-      send(channel, { type: "response-chunk", requestId, data: "", done: true });
+      sendChunk(channel, requestId, null, true);
     }
+  }
+
+  /**
+   * Send a response body frame as a BINARY data-channel message.
+   * Layout: [flags(1)][idLen(1)][requestId(ASCII)][payload].
+   *
+   * @param {DataChannel}            channel
+   * @param {string}                 requestId
+   * @param {Uint8Array | null}      bytes - Body bytes, or null/empty for the done frame.
+   * @param {boolean}                done
+   * @returns {void}
+   */
+  function sendChunk(channel, requestId, bytes, done) {
+    try {
+      const idBuf = Buffer.from(requestId, "ascii");
+      const header = Buffer.allocUnsafe(2 + idBuf.length);
+      header[0] = done ? 1 : 0;
+      header[1] = idBuf.length;
+      idBuf.copy(header, 2);
+      const frame =
+        bytes && bytes.length > 0 ? Buffer.concat([header, Buffer.from(bytes)]) : header;
+      channel.sendMessageBinary(frame);
+    } catch {
+      // Channel closed between check and send — safe to ignore.
+    }
+  }
+
+  /**
+   * Resolve once the channel's outgoing buffer has drained below the low-water
+   * mark. No-op (resolves immediately) when the buffer is already small or the
+   * channel does not expose buffer APIs. A timeout fallback guards against a
+   * missed low-water event so the send loop can never deadlock.
+   *
+   * @param {DataChannel} channel
+   * @returns {Promise<void>}
+   */
+  function waitForBufferDrain(channel) {
+    return new Promise((resolve) => {
+      try {
+        if (typeof channel.bufferedAmount !== "function" || channel.bufferedAmount() <= DC_BUFFER_HIGH_WATER) {
+          resolve();
+          return;
+        }
+        let settled = false;
+        const done = () => {
+          if (settled) return;
+          settled = true;
+          resolve();
+        };
+        channel.setBufferedAmountLowThreshold(DC_BUFFER_LOW_WATER);
+        channel.onBufferedAmountLow(done);
+        // Guard against a race where the buffer drained between the check above
+        // and registering the callback (the low-water event would never fire).
+        if (channel.bufferedAmount() <= DC_BUFFER_LOW_WATER) {
+          done();
+          return;
+        }
+        setTimeout(done, DC_BUFFER_DRAIN_TIMEOUT_MS);
+      } catch {
+        resolve();
+      }
+    });
   }
 
   /**
@@ -226,3 +314,10 @@ export function createDataChannelHandler({ proxyPort, onLog }) {
  * Only the known proxy API and streaming routes are accepted.
  */
 const PATH_ALLOWLIST_RE = /^(?:\/api\/|\/stream(?:$|\?)|\/?transcode\/|\/health(?:z)?(?:$|\?))/;
+
+/** Pause sending body chunks once the channel buffer exceeds this many bytes. */
+const DC_BUFFER_HIGH_WATER = 8 * 1024 * 1024;
+/** Resume sending once the channel buffer drains to this many bytes. */
+const DC_BUFFER_LOW_WATER = 1 * 1024 * 1024;
+/** Safety fallback so the send loop cannot deadlock on a missed drain event. */
+const DC_BUFFER_DRAIN_TIMEOUT_MS = 5000;

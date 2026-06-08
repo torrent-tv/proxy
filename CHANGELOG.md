@@ -1,3 +1,8 @@
+## 2.9.3
+
+- **New**: WebRTC data-channel response bodies are now sent as **binary** frames (`sendMessageBinary`) instead of base64-encoded JSON `response-chunk` messages, removing the ~33% base64 overhead and the JSON encode cost. Frame layout: `[flags(1)][idLen(1)][requestId(ASCII)][payload]`. Control messages (`response-start`, `response-error`, `pong`) remain JSON strings. Requires the matching browser client (server ≥ 0.8.0); **deploy the server before the proxy**.
+- **New**: Backpressure on the send loop — `data-channel-handler.js` pauses queuing body chunks once the channel's `bufferedAmount()` exceeds 8 MB and resumes when it drains below 1 MB (`setBufferedAmountLowThreshold` + `onBufferedAmountLow`), with a 5 s timeout fallback. Prevents the SCTP send buffer from ballooning and stalling throughput.
+
 ## 2.6.3
 
 - **Fix**: Data channel handler now logs **all** requests regardless of body presence — `GET /transcode/…`, `GET /api/…/progress`, `GET /api/…/stats` etc. were previously invisible in logs. Non-2xx response statuses and fetch errors are also logged, enabling diagnosis of HLS manifest load failures.

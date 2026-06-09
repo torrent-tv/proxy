@@ -37,8 +37,11 @@ const BENCHMARK_REF_W = 640;
 const BENCHMARK_REF_H = 360;
 const BENCHMARK_DURATION_SEC = 3;
 // Require the encoder to be this much faster than realtime for the target
-// resolution, leaving headroom for complex scenes and delivery.
-const PRESET_SPEED_MARGIN = 1.3;
+// resolution. The benchmark runs at startup with an idle CPU; during playback
+// ffmpeg competes with in-process WebTorrent (download + hashing) and delivery,
+// so real throughput is lower. A generous margin keeps playback above 1× under
+// that real load and absorbs complex scenes.
+const PRESET_SPEED_MARGIN = 1.8;
 
 /**
  * @param {number} targetWidth

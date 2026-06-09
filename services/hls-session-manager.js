@@ -616,6 +616,9 @@ export class HlsSessionManager {
       `transcode ${sessionId} start "${logName}" ` +
         `video=${transcodeVideo ? `${this.videoEncoder.name}${softwarePreset ? `/${softwarePreset}` : ""}` : "copy"} ` +
         `audio=${transcodeAudio ? "aac" : "copy"} ` +
+        // Branch tag for log correlation: A = video re-encode (fixed GOP, grid
+        // aligned, ts-offset); B = video copy (cut at source keyframes, copyts).
+        `branch=${transcodeVideo ? "A(reencode,fixed-gop)" : "B(copy,copyts)"} ` +
         `${sourceWidth && sourceHeight ? `src=${sourceWidth}x${sourceHeight} ` : ""}` +
         `duration=${hasDuration ? formatSeconds(durationSeconds) : "unknown"} segments=${segmentCount}`
     );
@@ -740,14 +743,27 @@ export class HlsSessionManager {
       args.push(...this.videoEncoder.inputArgs);
     }
     if (startSeconds > 0) {
-      // Fast keyframe-level seek before -i (skips decoding earlier frames).
-      args.push("-ss", String(startSeconds));
+      // Accurate seek before -i (decodes from the preceding keyframe and trims
+      // to the exact point), so the first output frame is exactly at startSeconds.
+      args.push("-accurate_seek", "-ss", String(startSeconds));
     }
     args.push("-i", session.inputUrl);
-    if (startSeconds > 0) {
-      // Keep output timestamps on the original timeline so video.currentTime
-      // matches the requested position.
-      args.push("-output_ts_offset", String(startSeconds));
+    if (session.transcodeVideo) {
+      // Branch A (re-encode): fixed GOP makes keyframes land exactly on the
+      // segment grid; relabel output onto the original timeline so segment N
+      // carries PTS = N × segmentDuration.
+      if (startSeconds > 0) {
+        args.push("-output_ts_offset", String(startSeconds));
+      }
+    } else {
+      // Branch B (video copied — only audio is transcoded): we cannot insert
+      // keyframes, so segments are cut at the source's own keyframes. Keep the
+      // source's real timestamps (`-copyts`) instead of relabelling, so the
+      // copied frames stay continuous across segment boundaries and seek-restarts
+      // (relabelling to a 4 s grid that does not match the real keyframe times is
+      // exactly what produced the PTS holes / glitches). Audio is transcoded on
+      // the same timeline.
+      args.push("-copyts");
     }
     args.push(
       "-map",

@@ -1,3 +1,11 @@
+## 2.9.12
+
+- **Fix**: Eliminate PTS-gap glitches (stutter/freeze on video while audio keeps playing) at start and after seeking, for both transcode modes:
+  - **Branch A — video re-encoded** (`video=libx264`): use a fixed GOP (`-g`/`-keyint_min` = segmentDuration × fps, `-sc_threshold 0`) instead of `-force_key_frames expr:gte(t,n_forced*SEG)`. The old expression broke after a seek because `t` is shifted by `-output_ts_offset`, forcing keyframes at the wrong places and producing segments that did not line up with the playlist grid. A frame-count GOP is offset-independent → every segment is exactly segmentDuration and starts on a keyframe.
+  - **Branch B — video copied** (`video=copy`, only audio transcoded): keep the source's real timestamps with `-copyts` (and accurate seek) instead of relabelling onto a 4 s grid that does not match the source's own keyframe positions. Relabelling was the source of the holes in this mode.
+- **Chore**: Session-start log tags the active branch (`branch=A(reencode,fixed-gop)` / `branch=B(copy,copyts)`) so glitches can be attributed to the right mode.
+- **Fix**: Log timestamps reverted to UTC (`HH:MM:SS.mmm`) so the proxy and browser logs share one timezone and line up exactly when correlated.
+
 ## 2.9.11
 
 - **New**: Seek-aware torrent piece prioritization. On every `/stream` range request the proxy now marks the torrent pieces at the read position **critical** (`TorrentPool.prioritizeByteRange` → `torrent.critical`, ~8 MB window). After a seek, ffmpeg opens the input at a new byte offset; previously those pieces waited behind the sequential download backlog, so seeking into an undownloaded region stalled ~15-18 s while the proxy fetched data. Now the seek position jumps the download queue.

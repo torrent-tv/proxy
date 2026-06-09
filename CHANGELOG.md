@@ -1,3 +1,7 @@
+## 2.9.7
+
+- **Fix**: `playback-planner` retries the codec probe while the file header is still downloading and no longer caches an **empty** probe result. Previously a transient empty probe (common for a later file in a multi-file torrent whose pieces arrive late) was cached permanently, so the file was mis-planned as directly playable forever — an unsupported video codec (e.g. xvid) got copied and played as a **black screen**. The probe now retries (up to 60 s) until at least one codec is detected, and only a successful detection is cached.
+
 ## 2.9.6
 
 - **Fix**: `probeInputDurationSeconds` now returns as soon as ffmpeg prints the container header (`Duration:`) instead of letting `-f null -` decode the whole stream until the 8 s timeout. Transcode-session creation was wasting ~8.6 s per session on this redundant decode (the duration was already available from the header, and `playback-plan` had probed it moments earlier). Cuts session-creation latency from ~9.7 s to ~1 s.

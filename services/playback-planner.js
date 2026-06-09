@@ -98,6 +98,18 @@ function probeStreamCodecs({ ffmpegBin, inputUrl, userAgent = "", timeoutMs = 8_
 }
 
 /**
+ * Resolve after a given number of milliseconds.
+ *
+ * @param {number} ms
+ * @returns {Promise<void>}
+ */
+function delay(ms) {
+  return new Promise((resolve) => {
+    setTimeout(resolve, ms);
+  });
+}
+
+/**
  * Build the direct stream URL for a source file served by the local proxy.
  *
  * @param {string} localBaseUrl - e.g. "http://127.0.0.1:9090"
@@ -198,28 +210,34 @@ export function createPlaybackPlanner({
         return plan;
       }
 
-      // Pre-fetch file edges (head + tail) before probing so that WebTorrent
-      // has the MOOV atom (or MKV EBML headers) ready for ffprobe.
-      // Without this, ffprobe times out on fresh torrents whose MOOV sits at
-      // the end of the file and hasn't been downloaded yet.
+      // Pre-fetch file edges (head + tail), then probe — retrying while the
+      // file header is still downloading. In a multi-file torrent the pieces
+      // for a given file arrive unevenly, so the first probe can return empty
+      // codecs. A transient empty probe must NOT be cached: otherwise the wrong
+      // plan (file treated as directly playable) sticks permanently for this
+      // file, and an unsupported codec like xvid gets copied → black video.
       await torrentPool.prefetchFileEdges(torrent, fileIndex);
+      let probe = await probeStreamCodecs({ ffmpegBin, inputUrl: directUrl, userAgent });
+      const probeDeadline = Date.now() + 60_000;
+      let attempt = 0;
+      while (
+        probe.audioCodec.length === 0 &&
+        probe.videoCodec.length === 0 &&
+        Date.now() < probeDeadline
+      ) {
+        attempt += 1;
+        await delay(Math.min(3_000, 500 + attempt * 250));
+        await torrentPool.prefetchFileEdges(torrent, fileIndex);
+        probe = await probeStreamCodecs({ ffmpegBin, inputUrl: directUrl, userAgent });
+      }
+      const { audioCodec, videoCodec, container, durationSeconds } = probe;
+      const codecsDetected = audioCodec.length > 0 || videoCodec.length > 0;
 
-      const { audioCodec, videoCodec, container, durationSeconds } = await probeStreamCodecs({
-        ffmpegBin,
-        inputUrl: directUrl,
-        userAgent
-      });
-
-      // Only transcode when the codec is known AND not natively supported.
-      // When ffprobe cannot detect the codec (e.g. the torrent has just started
-      // downloading and the MOOV atom at the end of the MP4 is not yet available),
-      // fall back to "direct" so the browser can attempt native playback.  The
-      // browser-side loading pipeline already has its own transcode fallback.
+      // `mode` is advisory only (audio-codec based). The browser makes the
+      // authoritative decision independently per stream via canPlayType /
+      // mediaCapabilities, transcoding only what it cannot play.
       const requiresTranscode = audioCodec.length > 0 && !DIRECT_AUDIO_CODECS.has(audioCodec);
       const plan = {
-        // `mode` is advisory only (audio-codec based).  The browser makes the
-        // authoritative decision independently per stream via canPlayType /
-        // mediaCapabilities, transcoding only what it cannot play.
         mode: requiresTranscode ? "hls" : "direct",
         directUrl,
         reason: requiresTranscode ? "audio-codec-transcode-required" : "audio-codec-supported",
@@ -228,7 +246,12 @@ export function createPlaybackPlanner({
         container,
         durationSeconds
       };
-      cache.set(cacheKey, plan);
+      // Only cache a plan whose codecs were actually detected. An empty probe is
+      // a "header not downloaded yet" signal, not a valid result — caching it
+      // would permanently mis-plan the file.
+      if (codecsDetected) {
+        cache.set(cacheKey, plan);
+      }
       return plan;
     }
   };

@@ -64,6 +64,11 @@ export async function handleStreamGet(req, reply, { sourceRegistry, torrentPool 
   const releaseFile = torrentPool.acquireFile(torrent, fileIndex);
 
   const range = parseRange(req.headers.range, file.length);
+  // Prioritize the pieces at this read position so a seek (a request at a new
+  // byte offset) downloads first instead of waiting behind the sequential
+  // backlog — this is what caused ~15-18 s stalls when seeking into an
+  // undownloaded region.
+  torrentPool.prioritizeByteRange(torrent, fileIndex, range ? range.start : 0);
   reply.header("Accept-Ranges", "bytes");
   reply.header("Content-Type", "application/octet-stream");
   reply.header("Content-Disposition", `inline; filename*=UTF-8''${encodeURIComponent(file.name)}`);

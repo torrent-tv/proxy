@@ -1,4 +1,8 @@
-## 2.9.8
+## 2.9.10
+
+- **Fix**: Raised the adaptive-preset speed margin (`PRESET_SPEED_MARGIN` 1.3 → 1.8). The preset benchmark runs at startup with an idle CPU, but during playback ffmpeg competes with in-process WebTorrent (download + SHA1 hashing) and delivery, so real throughput is lower than benchmarked. A 1.3× margin picked a preset that ran near/below realtime under load (e.g. `faster` at ~1.3×) and stalled; 1.8× picks a preset with genuine headroom (e.g. `veryfast`), keeping playback above 1× under real load.
+
+## 2.9.9
 
 - **Fix**: Software (libx264) video transcode is much faster on weak ARM hosts, so playback keeps up with realtime: encode uses all CPU cores (`-threads`), and the scaler **never upscales** — the target box is capped to the source size via `min(W,iw)`/`min(H,ih)`, so a small source (e.g. 720x400) is encoded at its own resolution instead of being scaled up to the viewport (far fewer pixels).
 - **New**: Adaptive software preset (preset auto-benchmark). At startup the proxy benchmarks libx264 presets (`fast`→`ultrafast`) on this host and records encode throughput (pixels/sec). Per stream, `hls-session-manager` picks the **highest-quality preset that still encodes the actual (source-capped) output resolution faster than realtime** with a safety margin, falling back to `ultrafast`. This maximises quality without dropping below 1× (which causes stalls). Logged as `video=libx264/<preset>` at session start.

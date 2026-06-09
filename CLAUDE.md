@@ -50,9 +50,14 @@ Linux-only host (e.g. POSIX-only signals must degrade elsewhere).
 ## Changelog
 
 Every behavioural change must be recorded in `CHANGELOG.md` — add an entry under
-a new `## <version>` heading at the top (the next patch version that
-`npm run patch` will publish), following the existing
-`- **New**/**Fix**/**Chore**:` format. See the parent `../CLAUDE.md`.
+a new `## <version>` heading at the top, following the existing
+`- **New**/**Fix**/**Chore**:` format.
+
+**Do NOT edit `package.json` version.** `npm run patch`/`minor` runs `npm
+version …` which bumps it. Write the CHANGELOG entry at the version that bump
+will produce: **current `package.json` version + 1 patch** (or + 1 minor).
+Accumulate bullets into that single pending entry until it's published. See the
+parent `../CLAUDE.md`.
 
 ## Release
 

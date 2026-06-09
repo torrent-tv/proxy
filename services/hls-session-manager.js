@@ -201,6 +201,27 @@ function parseFfmpegDurationSeconds(stderrText) {
 }
 
 /**
+ * Parse the container start time (seconds) from ffmpeg's "Duration: …, start:
+ * X, …" line. Many MKVs report a small non-zero start (e.g. 0.1 s); preserving
+ * it via `-copyts` would put a hole at the beginning, so we normalize it away.
+ * Returns 0 when absent.
+ *
+ * @param {string} stderrText
+ * @returns {number}
+ */
+function parseFfmpegStartTimeSeconds(stderrText) {
+  if (typeof stderrText !== "string" || stderrText.length === 0) {
+    return 0;
+  }
+  const match = stderrText.match(/Duration:[^\n]*?start:\s*(-?\d+(?:\.\d+)?)/i);
+  if (!match) {
+    return 0;
+  }
+  const value = Number(match[1]);
+  return Number.isFinite(value) ? value : 0;
+}
+
+/**
  * Format a seconds value as `HH:MM:SS`, or `"n/a"` if not finite.
  *
  * @param {number} seconds
@@ -298,7 +319,12 @@ async function probeInputMediaInfo(ffmpegBin, inputUrl) {
       }
       settled = true;
       const dims = parseFfmpegVideoDimensions(stderr);
-      resolve({ durationSeconds: parseFfmpegDurationSeconds(stderr), width: dims.width, height: dims.height });
+      resolve({
+        durationSeconds: parseFfmpegDurationSeconds(stderr),
+        width: dims.width,
+        height: dims.height,
+        startTime: parseFfmpegStartTimeSeconds(stderr)
+      });
     };
     const timeoutId = setTimeout(() => {
       if (!ffmpeg.killed) {
@@ -358,6 +384,156 @@ function computeOutputDimensions(targetWidth, targetHeight, sourceWidth, sourceH
   w -= w % 2;
   h -= h % 2;
   return { w: Math.max(2, w), h: Math.max(2, h) };
+}
+
+/**
+ * Resolve the ffprobe binary path from the ffmpeg path (same directory / name).
+ *
+ * @param {string} ffmpegBin
+ * @returns {string}
+ */
+function ffprobeBinFor(ffmpegBin) {
+  if (typeof ffmpegBin !== "string" || ffmpegBin.length === 0) {
+    return "ffprobe";
+  }
+  if (/ffmpeg(\.exe)?$/i.test(ffmpegBin)) {
+    return ffmpegBin.replace(/ffmpeg(\.exe)?$/i, "ffprobe$1");
+  }
+  return "ffprobe";
+}
+
+/**
+ * Probe the source video stream's keyframe timestamps (seconds, in the source
+ * timeline) via ffprobe packet flags. Used for the video-copy path, where we
+ * cannot insert keyframes: the synthetic playlist's segment boundaries must
+ * match the source's real keyframe positions or the player sees gaps on seek.
+ *
+ * Time-bounded; returns `null` on failure/timeout (caller falls back to a
+ * uniform grid). NOTE: reading all video packets streams much of the file from
+ * the torrent, so for large files this may time out and fall back.
+ *
+ * @param {string} ffmpegBin
+ * @param {string | URL} inputUrl
+ * @param {number} [timeoutMs]
+ * @returns {Promise<number[] | null>} Sorted keyframe times, or null.
+ */
+async function probeVideoKeyframeTimes(ffmpegBin, inputUrl, timeoutMs = 25_000) {
+  return new Promise((resolve) => {
+    let proc;
+    try {
+      proc = spawn(
+        ffprobeBinFor(ffmpegBin),
+        [
+          "-v", "error",
+          "-select_streams", "v:0",
+          "-show_entries", "packet=pts_time,flags",
+          "-of", "csv=p=0",
+          String(inputUrl)
+        ],
+        { stdio: ["ignore", "pipe", "ignore"], windowsHide: true }
+      );
+    } catch {
+      resolve(null);
+      return;
+    }
+    let stdout = "";
+    let settled = false;
+    const finish = (value) => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      resolve(value);
+    };
+    const timer = setTimeout(() => {
+      try {
+        if (!proc.killed) {
+          proc.kill("SIGTERM");
+        }
+      } catch {
+        // ignore
+      }
+      finish(null);
+    }, timeoutMs);
+    proc.stdout.on("data", (chunk) => {
+      stdout += String(chunk);
+    });
+    proc.on("error", () => {
+      clearTimeout(timer);
+      finish(null);
+    });
+    proc.on("exit", (code) => {
+      clearTimeout(timer);
+      if (code !== 0) {
+        finish(null);
+        return;
+      }
+      const times = [];
+      for (const line of stdout.split("\n")) {
+        // Each line: "<pts_time>,<flags>" e.g. "12.345000,K__"
+        const comma = line.indexOf(",");
+        if (comma < 0) {
+          continue;
+        }
+        const flags = line.slice(comma + 1);
+        if (!flags.includes("K")) {
+          continue;
+        }
+        const t = Number(line.slice(0, comma));
+        if (Number.isFinite(t)) {
+          times.push(t);
+        }
+      }
+      times.sort((a, b) => a - b);
+      finish(times.length > 0 ? times : null);
+    });
+  });
+}
+
+/**
+ * Compute segment START times (a 0-based timeline) for a session.
+ *
+ * - Re-encoded video: a uniform grid (0, segDur, 2·segDur, …) — ffmpeg's fixed
+ *   GOP makes the real cuts land exactly here.
+ * - Copied video: the source's real keyframes, normalized to 0 (start time
+ *   subtracted) and greedily grouped to ≥ segDur — these are exactly where
+ *   `-hls_time segDur` cuts a copied stream, so the playlist matches reality.
+ *
+ * The returned array starts at 0 and ends at `durationSeconds` (so segment i
+ * spans `[boundaries[i], boundaries[i+1])`). Falls back to a uniform grid when
+ * keyframes are unavailable.
+ *
+ * @param {{ transcodeVideo: boolean, durationSeconds: number, segDur: number, keyframeTimes: number[] | null, startTime: number }} params
+ * @returns {number[]}
+ */
+function computeSegmentBoundaries({ transcodeVideo, durationSeconds, segDur, keyframeTimes, startTime }) {
+  const total = Number.isFinite(durationSeconds) && durationSeconds > 0 ? durationSeconds : 0;
+  const step = Number.isFinite(segDur) && segDur > 0 ? segDur : 4;
+  const uniform = () => {
+    const boundaries = [];
+    for (let t = 0; t < total - 0.001; t += step) {
+      boundaries.push(Number(t.toFixed(6)));
+    }
+    boundaries.push(total);
+    return boundaries;
+  };
+  if (transcodeVideo || !Array.isArray(keyframeTimes) || keyframeTimes.length === 0 || total <= 0) {
+    return uniform();
+  }
+  const base = Number.isFinite(startTime) ? startTime : 0;
+  const norm = keyframeTimes
+    .map((t) => t - base)
+    .filter((t) => t >= -0.001 && t < total - 0.05)
+    .sort((a, b) => a - b);
+  const boundaries = [0];
+  for (const kf of norm) {
+    if (kf >= boundaries[boundaries.length - 1] + step - 0.05) {
+      boundaries.push(Number(kf.toFixed(6)));
+    }
+  }
+  boundaries.push(total);
+  // Guard against a degenerate probe (e.g. a single keyframe) — fall back.
+  return boundaries.length >= 2 ? boundaries : uniform();
 }
 
 function isWarmupTimeoutError(error) {
@@ -538,6 +714,7 @@ export class HlsSessionManager {
     const durationSeconds = mediaInfo.durationSeconds;
     const sourceWidth = mediaInfo.width;
     const sourceHeight = mediaInfo.height;
+    const sourceStartTime = Number.isFinite(mediaInfo.startTime) ? mediaInfo.startTime : 0;
     const hasDuration = Number.isFinite(durationSeconds) && durationSeconds > 0;
     const logName = normalizeLogFileName(fileName, fileIndex);
     if (!hasDuration) {
@@ -546,9 +723,36 @@ export class HlsSessionManager {
           `ffmpeg-managed (growing) playlist for "${logName}"`
       );
     }
-    const segmentCount = hasDuration
-      ? Math.max(1, Math.ceil(durationSeconds / this.segmentDurationSec))
-      : 0;
+
+    // For the video-copy path we cannot insert keyframes, so the playlist's
+    // segment boundaries must match the source's real keyframes (otherwise the
+    // player sees gaps on seek). Probe them; on failure we fall back to a
+    // uniform grid (current behaviour). Re-encoded video uses a uniform grid
+    // (its fixed GOP makes the cuts land there).
+    let keyframeTimes = null;
+    if (hasDuration && !transcodeVideo) {
+      // Short timeout: mp4 keyframes come from the moov index (fast); containers
+      // that force a full packet scan time out and fall back to a uniform grid,
+      // so this never adds more than ~6 s to session start.
+      keyframeTimes = await probeVideoKeyframeTimes(this.ffmpegBin, inputUrl.toString(), 6_000);
+      if (!keyframeTimes) {
+        logger.warn(
+          `transcode ${sessionId}: keyframe probe unavailable; using uniform grid ` +
+            `for copied video "${logName}" (seek precision may be reduced)`
+        );
+      }
+    }
+    const segmentBoundaries = hasDuration
+      ? computeSegmentBoundaries({
+          transcodeVideo,
+          durationSeconds,
+          segDur: this.segmentDurationSec,
+          keyframeTimes,
+          startTime: sourceStartTime
+        })
+      : [];
+    const usingKeyframeBoundaries = hasDuration && !transcodeVideo && Array.isArray(keyframeTimes);
+    const segmentCount = segmentBoundaries.length > 1 ? segmentBoundaries.length - 1 : 0;
 
     // Pick the highest-quality software preset that still encodes the actual
     // (source-capped) output resolution faster than realtime. Null for hardware
@@ -583,14 +787,20 @@ export class HlsSessionManager {
       targetHeight: normalizedTargetHeight,
       sourceWidth,
       sourceHeight,
+      // Container start time (seconds); subtracted on the copy path so the
+      // output timeline is 0-based even when the source starts at e.g. 0.1 s.
+      sourceStartTime,
       // Chosen libx264 preset for this stream (software only), or null.
       softwarePreset,
       inputUrl: inputUrl.toString(),
       // VOD playlist bookkeeping.
       useSyntheticPlaylist: hasDuration,
       totalDurationSeconds: hasDuration ? durationSeconds : null,
+      // Segment start times (0-based). Uniform grid for re-encoded video; real
+      // keyframe positions for copied video. Drives the playlist and seeking.
+      segmentBoundaries,
       segmentCount,
-      playlistText: hasDuration ? this.#buildVodPlaylist(durationSeconds, this.segmentDurationSec) : "",
+      playlistText: hasDuration ? this.#buildVodPlaylist(segmentBoundaries) : "",
       // Segment index the current ffmpeg run started producing from.
       encodeStartIndex: 0,
       // Guards against repeatedly restarting to the same seek position.
@@ -619,7 +829,9 @@ export class HlsSessionManager {
         // Branch tag for log correlation: A = video re-encode (fixed GOP, grid
         // aligned, ts-offset); B = video copy (cut at source keyframes, copyts).
         `branch=${transcodeVideo ? "A(reencode,fixed-gop)" : "B(copy,copyts)"} ` +
+        `seg=${usingKeyframeBoundaries ? "keyframe" : "uniform"} ` +
         `${sourceWidth && sourceHeight ? `src=${sourceWidth}x${sourceHeight} ` : ""}` +
+        `${sourceStartTime ? `start=${sourceStartTime.toFixed(3)} ` : ""}` +
         `duration=${hasDuration ? formatSeconds(durationSeconds) : "unknown"} segments=${segmentCount}`
     );
 
@@ -647,28 +859,80 @@ export class HlsSessionManager {
    * any position immediately — even before the corresponding segment has been
    * transcoded.  Segments are produced on demand (see {@link getFileStream}).
    *
-   * @param {number} totalSeconds
-   * @param {number} segSec
+   * @param {number[]} boundaries - Segment start times (0-based); segment i
+   *   spans `[boundaries[i], boundaries[i+1])`.
    * @returns {string}
    */
-  #buildVodPlaylist(totalSeconds, segSec) {
-    const count = Math.max(1, Math.ceil(totalSeconds / segSec));
+  #buildVodPlaylist(boundaries) {
+    const count = Math.max(0, boundaries.length - 1);
+    let maxDuration = 0;
+    for (let index = 0; index < count; index += 1) {
+      const duration = Math.max(0.1, boundaries[index + 1] - boundaries[index]);
+      if (duration > maxDuration) {
+        maxDuration = duration;
+      }
+    }
     const lines = [
       "#EXTM3U",
       "#EXT-X-VERSION:3",
-      `#EXT-X-TARGETDURATION:${Math.ceil(segSec)}`,
+      `#EXT-X-TARGETDURATION:${Math.ceil(maxDuration)}`,
       "#EXT-X-MEDIA-SEQUENCE:0",
       "#EXT-X-PLAYLIST-TYPE:VOD",
       "#EXT-X-INDEPENDENT-SEGMENTS"
     ];
     for (let index = 0; index < count; index += 1) {
-      const remaining = totalSeconds - index * segSec;
-      const duration = index < count - 1 ? segSec : Math.max(0.1, remaining);
+      const duration = Math.max(0.1, boundaries[index + 1] - boundaries[index]);
       lines.push(`#EXTINF:${duration.toFixed(6)},`);
       lines.push(`segment-${String(index).padStart(5, "0")}.ts`);
     }
     lines.push("#EXT-X-ENDLIST");
     return `${lines.join("\n")}\n`;
+  }
+
+  /**
+   * Start time (seconds, 0-based) of segment `index`, from the session's
+   * boundary table. Clamped to valid range.
+   *
+   * @param {HlsSession} session
+   * @param {number} index
+   * @returns {number}
+   */
+  #segmentStartTime(session, index) {
+    const boundaries = Array.isArray(session.segmentBoundaries) ? session.segmentBoundaries : [];
+    if (boundaries.length === 0) {
+      return index * this.segmentDurationSec;
+    }
+    const clamped = Math.max(0, Math.min(index, boundaries.length - 1));
+    return boundaries[clamped];
+  }
+
+  /**
+   * Segment index whose span contains time `t` (0-based), via the boundary
+   * table.
+   *
+   * @param {HlsSession} session
+   * @param {number} t
+   * @returns {number}
+   */
+  #segmentIndexForTime(session, t) {
+    const boundaries = Array.isArray(session.segmentBoundaries) ? session.segmentBoundaries : [];
+    if (boundaries.length < 2) {
+      return Math.max(0, Math.floor(t / this.segmentDurationSec));
+    }
+    // boundaries is sorted ascending; find the last boundary <= t.
+    let lo = 0;
+    let hi = boundaries.length - 1;
+    let result = 0;
+    while (lo <= hi) {
+      const mid = (lo + hi) >> 1;
+      if (boundaries[mid] <= t) {
+        result = mid;
+        lo = mid + 1;
+      } else {
+        hi = mid - 1;
+      }
+    }
+    return Math.min(result, boundaries.length - 2);
   }
 
   /**
@@ -707,7 +971,10 @@ export class HlsSessionManager {
    */
   #startEncodeRun(session, startIndex) {
     const safeIndex = Number.isInteger(startIndex) && startIndex > 0 ? startIndex : 0;
-    const startSeconds = safeIndex * this.segmentDurationSec;
+    // 0-based output time of this segment, from the boundary table (uniform for
+    // re-encode, real keyframe for copy).
+    const startSeconds = this.#segmentStartTime(session, safeIndex);
+    const sourceStartTime = Number.isFinite(session.sourceStartTime) ? session.sourceStartTime : 0;
 
     // Terminate any existing encode process before starting a new one.  The
     // old process's exit handler no-ops because session.ffmpeg is reassigned
@@ -742,10 +1009,14 @@ export class HlsSessionManager {
     if (session.transcodeVideo && Array.isArray(this.videoEncoder.inputArgs)) {
       args.push(...this.videoEncoder.inputArgs);
     }
-    if (startSeconds > 0) {
+    // Seek position in SOURCE time. For copy we seek to the real keyframe
+    // (startSeconds is already a real-keyframe offset from 0, so add back the
+    // container start time); for re-encode startSeconds is a plain grid offset.
+    const seekSeconds = session.transcodeVideo ? startSeconds : startSeconds + sourceStartTime;
+    if (seekSeconds > 0) {
       // Accurate seek before -i (decodes from the preceding keyframe and trims
-      // to the exact point), so the first output frame is exactly at startSeconds.
-      args.push("-accurate_seek", "-ss", String(startSeconds));
+      // to the exact point), so the first output frame is exactly at the target.
+      args.push("-accurate_seek", "-ss", String(seekSeconds));
     }
     args.push("-i", session.inputUrl);
     if (session.transcodeVideo) {
@@ -757,13 +1028,16 @@ export class HlsSessionManager {
       }
     } else {
       // Branch B (video copied — only audio is transcoded): we cannot insert
-      // keyframes, so segments are cut at the source's own keyframes. Keep the
-      // source's real timestamps (`-copyts`) instead of relabelling, so the
-      // copied frames stay continuous across segment boundaries and seek-restarts
-      // (relabelling to a 4 s grid that does not match the real keyframe times is
-      // exactly what produced the PTS holes / glitches). Audio is transcoded on
-      // the same timeline.
+      // keyframes, so segments are cut at the source's own keyframes (the
+      // playlist boundaries were built from those keyframes). Keep the source's
+      // real timestamps (`-copyts`) so copied frames stay continuous across
+      // boundaries/seeks, and shift by -startTime so the output timeline is
+      // 0-based (a non-zero container start otherwise puts a hole at the very
+      // beginning and desyncs audio/video). Audio is transcoded on this timeline.
       args.push("-copyts");
+      if (sourceStartTime !== 0) {
+        args.push("-output_ts_offset", String(-sourceStartTime));
+      }
     }
     args.push(
       "-map",
@@ -950,8 +1224,8 @@ export class HlsSessionManager {
     // request just ahead of the live edge.
     const processed = Number.isFinite(session.progress?.processedSeconds)
       ? session.progress.processedSeconds
-      : head * this.segmentDurationSec;
-    const currentSeg = Math.max(head, Math.floor(processed / this.segmentDurationSec));
+      : this.#segmentStartTime(session, head);
+    const currentSeg = Math.max(head, this.#segmentIndexForTime(session, processed));
     const withinWindow = index >= head && index <= currentSeg + MAX_LOOKAHEAD_SEGMENTS;
     if (withinWindow) {
       return;

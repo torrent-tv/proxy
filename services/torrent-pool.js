@@ -15,6 +15,11 @@ import { logger } from "../utils/logger.js";
 // small enough not to make "everything critical" (which defeats prioritization).
 const PRIORITY_WINDOW_BYTES = 8 * 1024 * 1024;
 
+// The file's header/index region the codec probe needs (phase 1). Must match
+// the ranges prefetchFileEdges fetches: leading bytes + trailing bytes.
+const HEADER_HEAD_BYTES = 256 * 1024;
+const HEADER_TAIL_BYTES = 2 * 1024 * 1024;
+
 /**
  * Decode a raw torrent source value into the format expected by WebTorrent.
  *
@@ -217,12 +222,66 @@ export class TorrentPool {
       return { ...base, fileProgress: null, fileDownloaded: null, fileLength: null };
     }
 
+    const header = this.#getHeaderRangeProgress(torrent, file);
+
     return {
       ...base,
       fileProgress: typeof file.progress === "number" ? file.progress : 0,
       fileDownloaded: typeof file.downloaded === "number" ? file.downloaded : 0,
-      fileLength: typeof file.length === "number" ? file.length : 0
+      fileLength: typeof file.length === "number" ? file.length : 0,
+      // Phase-1 progress: how much of the header/index region (the bytes the
+      // codec probe needs before transcoding can start) is downloaded. Counted
+      // by whole pieces from the torrent bitfield, so it advances coarsely
+      // (piece granularity). Null when the bitfield/piece info is unavailable.
+      headerBytes: header ? header.totalBytes : null,
+      headerDownloadedBytes: header ? header.downloadedBytes : null
     };
+  }
+
+  /**
+   * Count, by whole torrent pieces, how many bytes of a file's header/index
+   * region (leading {@link HEADER_HEAD_BYTES} + trailing {@link HEADER_TAIL_BYTES})
+   * are downloaded. Used to show progress toward the codec-probe phase.
+   *
+   * @param {import("webtorrent").Torrent} torrent
+   * @param {import("webtorrent").TorrentFile} file
+   * @returns {{ totalBytes: number, downloadedBytes: number } | null}
+   */
+  #getHeaderRangeProgress(torrent, file) {
+    const pieceLength = Number(torrent?.pieceLength);
+    const bitfield = torrent?.bitfield;
+    const fileLength = Number(file?.length);
+    if (
+      !Number.isFinite(pieceLength) || pieceLength <= 0 ||
+      !bitfield || typeof bitfield.get !== "function" ||
+      !Number.isFinite(fileLength) || fileLength <= 0
+    ) {
+      return null;
+    }
+    const fileOffset = Number.isFinite(file.offset) ? file.offset : 0;
+    const headEnd = Math.min(HEADER_HEAD_BYTES, fileLength) - 1;
+    const ranges = [[0, headEnd]];
+    const tailStart = Math.max(headEnd + 1, fileLength - HEADER_TAIL_BYTES);
+    if (tailStart <= fileLength - 1) {
+      ranges.push([tailStart, fileLength - 1]);
+    }
+    const pieces = new Set();
+    for (const [start, end] of ranges) {
+      const first = Math.floor((fileOffset + start) / pieceLength);
+      const last = Math.floor((fileOffset + end) / pieceLength);
+      for (let piece = first; piece <= last; piece += 1) {
+        pieces.add(piece);
+      }
+    }
+    let totalBytes = 0;
+    let downloadedBytes = 0;
+    for (const piece of pieces) {
+      totalBytes += pieceLength;
+      if (bitfield.get(piece)) {
+        downloadedBytes += pieceLength;
+      }
+    }
+    return { totalBytes, downloadedBytes };
   }
 
   /**

@@ -27,7 +27,7 @@ import { createSourceRegistry } from "./store/source-registry.js";
 import { TorrentPool } from "./services/torrent-pool.js";
 import { HlsSessionManager } from "./services/hls-session-manager.js";
 import { createPlaybackPlanner } from "./services/playback-planner.js";
-import { detectVideoEncoder } from "./services/hwaccel.js";
+import { detectVideoEncoder, benchmarkSoftwarePresets } from "./services/hwaccel.js";
 import { logger } from "./utils/logger.js";
 
 const __filename = fileURLToPath(import.meta.url);
@@ -99,12 +99,19 @@ export async function startProxyServer({ host, port, transcodeAudio, ffmpegBin }
   const videoEncoder = transcodeAudio
     ? await detectVideoEncoder({ ffmpegBin, logger })
     : null;
+  // For software libx264, benchmark preset throughput once at startup so the
+  // session manager can pick the highest-quality preset that still encodes each
+  // stream faster than realtime. Hardware encoders use their own fixed preset.
+  const softwarePresetBenchmark = videoEncoder?.kind === "software"
+    ? await benchmarkSoftwarePresets({ ffmpegBin, logger })
+    : null;
   const hlsSessionManager = new HlsSessionManager({
     enabled: transcodeAudio,
     ffmpegBin,
     localBindHost: host,
     localPort: selectedPort,
-    videoEncoder
+    videoEncoder,
+    softwarePresetBenchmark
   });
   const playbackPlanner = createPlaybackPlanner({
     ffmpegBin,

@@ -15,7 +15,7 @@ import path from "node:path";
 import { randomUUID } from "node:crypto";
 import { spawn } from "node:child_process";
 import { logger } from "../utils/logger.js";
-import { softwareDescriptor } from "./hwaccel.js";
+import { softwareDescriptor, pickSoftwarePreset, TRANSCODE_FPS } from "./hwaccel.js";
 
 const PLAYLIST_FILE_NAME = "index.m3u8";
 const SEGMENT_FILE_NAME_PATTERN = /^segment-\d{5}\.ts$/;
@@ -25,6 +25,11 @@ const DEFAULT_SEGMENT_DURATION_SEC = 4;
 // is allowed to be before we restart ffmpeg at that position (server-side seek).
 // Requests within the window are served by waiting for the running encode.
 const MAX_LOOKAHEAD_SEGMENTS = 8;
+// After a seek-restart, ignore competing restart requests for this long. The
+// synthetic VOD playlist lets the player request distant segments in quick
+// succession (stall-recovery seeks); without a cooldown ffmpeg ping-pongs
+// between positions, restarting endlessly and producing nothing.
+const RESTART_COOLDOWN_MS = 4_000;
 // Idle TTL: a session is disposed this long after the last segment/playlist
 // access. Kept short so an ffmpeg process does not keep burning CPU after the
 // viewer stops or navigates away. Active playback refreshes the timer on every
@@ -247,14 +252,39 @@ function computeProgressMetrics(processedSeconds, totalSeconds, startPositionSec
 }
 
 /**
- * Run a short ffmpeg probe to extract the total duration of a stream.
- * Times out after 8 s and returns `null` on failure.
+ * Parse the source video resolution from ffmpeg's stderr (the "Stream … Video:
+ * … WxH" line). Returns `{ width: null, height: null }` when absent.
+ *
+ * @param {string} stderrText
+ * @returns {{ width: number | null, height: number | null }}
+ */
+function parseFfmpegVideoDimensions(stderrText) {
+  if (typeof stderrText !== "string" || stderrText.length === 0) {
+    return { width: null, height: null };
+  }
+  const match = stderrText.match(/Video:[^\n]*?\b(\d{2,5})x(\d{2,5})\b/i);
+  if (!match) {
+    return { width: null, height: null };
+  }
+  const width = Number(match[1]);
+  const height = Number(match[2]);
+  return {
+    width: Number.isFinite(width) && width > 0 ? width : null,
+    height: Number.isFinite(height) && height > 0 ? height : null
+  };
+}
+
+/**
+ * Run a short ffmpeg probe to extract the total duration AND video resolution
+ * of a stream from the container header. Both are printed almost immediately
+ * (before any decoding), so this returns as soon as they are seen; an 8 s
+ * timeout guards the rest.
  *
  * @param {string} ffmpegBin - Path to the ffmpeg executable.
  * @param {string | URL} inputUrl - URL of the stream to probe.
- * @returns {Promise<number | null>} Duration in seconds, or `null`.
+ * @returns {Promise<{ durationSeconds: number | null, width: number | null, height: number | null }>}
  */
-async function probeInputDurationSeconds(ffmpegBin, inputUrl) {
+async function probeInputMediaInfo(ffmpegBin, inputUrl) {
   return new Promise((resolve) => {
     const ffmpeg = spawn(ffmpegBin, ["-hide_banner", "-loglevel", "info", "-i", inputUrl, "-f", "null", "-"], {
       stdio: ["ignore", "ignore", "pipe"],
@@ -262,42 +292,72 @@ async function probeInputDurationSeconds(ffmpegBin, inputUrl) {
     });
     let stderr = "";
     let settled = false;
-    const finish = (value) => {
+    const finish = () => {
       if (settled) {
         return;
       }
       settled = true;
-      resolve(value);
+      const dims = parseFfmpegVideoDimensions(stderr);
+      resolve({ durationSeconds: parseFfmpegDurationSeconds(stderr), width: dims.width, height: dims.height });
     };
     const timeoutId = setTimeout(() => {
       if (!ffmpeg.killed) {
         ffmpeg.kill("SIGTERM");
       }
-      finish(parseFfmpegDurationSeconds(stderr));
+      finish();
     }, 8_000);
     ffmpeg.stderr.on("data", (chunk) => {
       stderr += String(chunk);
-      // ffmpeg prints the container header ("Duration:") almost immediately,
-      // long before it decodes anything. Bail as soon as we have it instead of
-      // letting `-f null -` decode the whole stream until the 8 s timeout.
+      // The header ("Duration:" then the "Video: … WxH" stream line) is printed
+      // before any decoding. Bail as soon as both are present instead of letting
+      // `-f null -` decode the whole stream until the 8 s timeout.
       const duration = parseFfmpegDurationSeconds(stderr);
-      if (duration != null) {
+      const dims = parseFfmpegVideoDimensions(stderr);
+      if (duration != null && dims.width != null) {
         clearTimeout(timeoutId);
         if (!ffmpeg.killed) {
           ffmpeg.kill("SIGTERM");
         }
-        finish(duration);
+        finish();
       }
     });
     ffmpeg.on("error", () => {
       clearTimeout(timeoutId);
-      finish(null);
+      finish();
     });
     ffmpeg.on("exit", () => {
       clearTimeout(timeoutId);
-      finish(parseFfmpegDurationSeconds(stderr));
+      finish();
     });
   });
+}
+
+/**
+ * Compute the actual output resolution ffmpeg will produce: the target box
+ * capped to the source (never upscaled), preserving aspect, divisible by 2.
+ * Mirrors the `scale='min(w,iw)':'min(h,ih)':force_original_aspect_ratio=decrease`
+ * filter. Returns `null` when the source size is unknown.
+ *
+ * @param {number} targetWidth
+ * @param {number} targetHeight
+ * @param {number | null} sourceWidth
+ * @param {number | null} sourceHeight
+ * @returns {{ w: number, h: number } | null}
+ */
+function computeOutputDimensions(targetWidth, targetHeight, sourceWidth, sourceHeight) {
+  const sw = Number.isFinite(sourceWidth) && sourceWidth > 0 ? sourceWidth : 0;
+  const sh = Number.isFinite(sourceHeight) && sourceHeight > 0 ? sourceHeight : 0;
+  if (!sw || !sh) {
+    return null;
+  }
+  const tw = Number.isInteger(targetWidth) && targetWidth > 0 ? targetWidth : sw;
+  const th = Number.isInteger(targetHeight) && targetHeight > 0 ? targetHeight : sh;
+  const scale = Math.min(tw / sw, th / sh, 1);
+  let w = Math.round(sw * scale);
+  let h = Math.round(sh * scale);
+  w -= w % 2;
+  h -= h % 2;
+  return { w: Math.max(2, w), h: Math.max(2, h) };
 }
 
 function isWarmupTimeoutError(error) {
@@ -364,7 +424,8 @@ export class HlsSessionManager {
     segmentDurationSec = DEFAULT_SEGMENT_DURATION_SEC,
     sessionTtlMs = DEFAULT_SESSION_TTL_MS,
     startupWaitMs = DEFAULT_STARTUP_WAIT_MS,
-    videoEncoder = null
+    videoEncoder = null,
+    softwarePresetBenchmark = null
   }) {
     this.enabled = Boolean(enabled);
     this.ffmpegBin = ffmpegBin;
@@ -372,6 +433,10 @@ export class HlsSessionManager {
     // software libx264 when no detection result is supplied. May be downgraded
     // to software at runtime if a hardware encode fails.
     this.videoEncoder = videoEncoder ?? softwareDescriptor();
+    // Per-preset software encode throughput (pixels/sec) measured at startup,
+    // used to pick the best preset per stream. Null when unavailable (hardware
+    // encoder, or benchmark skipped/failed).
+    this.softwarePresetBenchmark = Array.isArray(softwarePresetBenchmark) ? softwarePresetBenchmark : null;
     this.segmentDurationSec = segmentDurationSec;
     this.sessionTtlMs = sessionTtlMs;
     this.startupWaitMs = startupWaitMs;
@@ -469,7 +534,10 @@ export class HlsSessionManager {
     // playlist (terminated with #EXT-X-ENDLIST) immediately.  This gives the
     // player the correct total duration and a fully seekable timeline before a
     // single segment has been transcoded.
-    const durationSeconds = await probeInputDurationSeconds(this.ffmpegBin, inputUrl.toString());
+    const mediaInfo = await probeInputMediaInfo(this.ffmpegBin, inputUrl.toString());
+    const durationSeconds = mediaInfo.durationSeconds;
+    const sourceWidth = mediaInfo.width;
+    const sourceHeight = mediaInfo.height;
     const hasDuration = Number.isFinite(durationSeconds) && durationSeconds > 0;
     const logName = normalizeLogFileName(fileName, fileIndex);
     if (!hasDuration) {
@@ -481,6 +549,18 @@ export class HlsSessionManager {
     const segmentCount = hasDuration
       ? Math.max(1, Math.ceil(durationSeconds / this.segmentDurationSec))
       : 0;
+
+    // Pick the highest-quality software preset that still encodes the actual
+    // (source-capped) output resolution faster than realtime. Null for hardware
+    // encoders or when the source size / benchmark is unavailable — buildVideoArgs
+    // then uses its static default preset.
+    const softwarePreset = this.#chooseSoftwarePreset({
+      transcodeVideo,
+      targetWidth: normalizedTargetWidth,
+      targetHeight: normalizedTargetHeight,
+      sourceWidth,
+      sourceHeight
+    });
 
     const session = {
       id: sessionId,
@@ -501,6 +581,10 @@ export class HlsSessionManager {
       transcodeAudio,
       targetWidth: normalizedTargetWidth,
       targetHeight: normalizedTargetHeight,
+      sourceWidth,
+      sourceHeight,
+      // Chosen libx264 preset for this stream (software only), or null.
+      softwarePreset,
       inputUrl: inputUrl.toString(),
       // VOD playlist bookkeeping.
       useSyntheticPlaylist: hasDuration,
@@ -511,6 +595,8 @@ export class HlsSessionManager {
       encodeStartIndex: 0,
       // Guards against repeatedly restarting to the same seek position.
       pendingRestartIndex: -1,
+      // Timestamp of the last encode (re)start, for the restart cooldown.
+      lastRestartAt: 0,
       progress: {
         state: "starting",
         processedSeconds: 0,
@@ -528,7 +614,9 @@ export class HlsSessionManager {
 
     logger.info(
       `transcode ${sessionId} start "${logName}" ` +
-        `video=${transcodeVideo ? this.videoEncoder.name : "copy"} audio=${transcodeAudio ? "aac" : "copy"} ` +
+        `video=${transcodeVideo ? `${this.videoEncoder.name}${softwarePreset ? `/${softwarePreset}` : ""}` : "copy"} ` +
+        `audio=${transcodeAudio ? "aac" : "copy"} ` +
+        `${sourceWidth && sourceHeight ? `src=${sourceWidth}x${sourceHeight} ` : ""}` +
         `duration=${hasDuration ? formatSeconds(durationSeconds) : "unknown"} segments=${segmentCount}`
     );
 
@@ -581,6 +669,28 @@ export class HlsSessionManager {
   }
 
   /**
+   * Choose the libx264 preset for a software video transcode: the highest
+   * quality the startup benchmark says this host can encode at the actual
+   * (source-capped) output resolution faster than realtime. Returns null when
+   * not applicable (no video transcode, hardware encoder, or missing
+   * benchmark/source size) — buildVideoArgs then uses its default preset.
+   *
+   * @param {{ transcodeVideo: boolean, targetWidth: number, targetHeight: number, sourceWidth: number | null, sourceHeight: number | null }} params
+   * @returns {string | null}
+   */
+  #chooseSoftwarePreset({ transcodeVideo, targetWidth, targetHeight, sourceWidth, sourceHeight }) {
+    if (!transcodeVideo || this.videoEncoder?.kind !== "software" || !this.softwarePresetBenchmark) {
+      return null;
+    }
+    const out = computeOutputDimensions(targetWidth, targetHeight, sourceWidth, sourceHeight);
+    if (!out) {
+      return null;
+    }
+    const pixelsPerSecNeeded = out.w * out.h * TRANSCODE_FPS;
+    return pickSoftwarePreset(this.softwarePresetBenchmark, pixelsPerSecNeeded);
+  }
+
+  /**
    * (Re)start the ffmpeg encode run beginning at segment `startIndex`.
    *
    * Any ffmpeg process currently running for this session is terminated first.
@@ -614,7 +724,9 @@ export class HlsSessionManager {
       ? this.videoEncoder.buildVideoArgs({
           targetWidth: session.targetWidth,
           targetHeight: session.targetHeight,
-          segmentDurationSec: this.segmentDurationSec
+          segmentDurationSec: this.segmentDurationSec,
+          // Software-only; hardware descriptors ignore it.
+          preset: session.softwarePreset ?? undefined
         })
       : ["-c:v", "copy"];
     const audioCodecArgs = session.transcodeAudio
@@ -668,6 +780,7 @@ export class HlsSessionManager {
     session.ffmpeg = ffmpeg;
     session.encodeStartIndex = safeIndex;
     session.pendingRestartIndex = -1;
+    session.lastRestartAt = Date.now();
     session.state = session.state === "disposed" ? "disposed" : "starting";
     session.progress.state = "running";
     session.progress.processedSeconds = startSeconds;
@@ -815,15 +928,32 @@ export class HlsSessionManager {
       return;
     }
     const head = session.encodeStartIndex;
-    const withinWindow = index >= head && index <= head + MAX_LOOKAHEAD_SEGMENTS;
+    // Anchor the look-ahead window on the CURRENT encode position (start index +
+    // seconds already processed), not the run's start index. Otherwise a long
+    // run that has encoded well past `head` would needlessly restart for a
+    // request just ahead of the live edge.
+    const processed = Number.isFinite(session.progress?.processedSeconds)
+      ? session.progress.processedSeconds
+      : head * this.segmentDurationSec;
+    const currentSeg = Math.max(head, Math.floor(processed / this.segmentDurationSec));
+    const withinWindow = index >= head && index <= currentSeg + MAX_LOOKAHEAD_SEGMENTS;
     if (withinWindow) {
       return;
     }
     if (session.pendingRestartIndex === index) {
       return;
     }
+    // Restart cooldown: a stalled player requests several distant segments in
+    // quick succession; without this guard ffmpeg ping-pongs between them and
+    // never makes progress. Skip the restart during the cooldown — the caller
+    // long-polls / the client retries, and a genuine seek is honored once the
+    // cooldown elapses.
+    const sinceLastRestart = Date.now() - (session.lastRestartAt ?? 0);
+    if (sinceLastRestart < RESTART_COOLDOWN_MS) {
+      return;
+    }
     logger.info(
-      `transcode ${session.id} seek → restart at segment #${index} (encode head #${head})`
+      `transcode ${session.id} seek → restart at segment #${index} (encode head #${head}, current #${currentSeg})`
     );
     this.#startEncodeRun(session, index);
   }

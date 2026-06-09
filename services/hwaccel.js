@@ -25,9 +25,20 @@ import { mkdtempSync, readdirSync, rmSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
-const SOFTWARE_PRESET = "superfast";
+const SOFTWARE_PRESET = "ultrafast";
 const SOFTWARE_CRF = "24";
-const TRANSCODE_FPS = 24;
+export const TRANSCODE_FPS = 24;
+// Software x264 on weak ARM hosts is the transcode bottleneck — use all cores.
+const CPU_THREADS = Math.max(1, os.cpus().length);
+
+// libx264 presets to benchmark, ordered slowest/highest-quality → fastest.
+const BENCHMARK_PRESETS = ["fast", "faster", "veryfast", "superfast", "ultrafast"];
+const BENCHMARK_REF_W = 640;
+const BENCHMARK_REF_H = 360;
+const BENCHMARK_DURATION_SEC = 3;
+// Require the encoder to be this much faster than realtime for the target
+// resolution, leaving headroom for complex scenes and delivery.
+const PRESET_SPEED_MARGIN = 1.3;
 
 /**
  * @param {number} targetWidth
@@ -58,14 +69,23 @@ export function softwareDescriptor() {
     kind: "software",
     device: null,
     inputArgs: [],
-    buildVideoArgs({ targetWidth, targetHeight, segmentDurationSec }) {
+    buildVideoArgs({ targetWidth, targetHeight, segmentDurationSec, preset }) {
       const { w, h } = safeDimensions(targetWidth, targetHeight);
+      const chosenPreset = typeof preset === "string" && preset.length > 0 ? preset : SOFTWARE_PRESET;
       return [
+        // Never upscale: cap the target box to the source size (min with
+        // iw/ih), so a small source (e.g. 720x400) is encoded at its own
+        // resolution instead of being scaled up to the viewport — far fewer
+        // pixels, much faster on ARM. force_original_aspect_ratio keeps aspect.
         "-vf",
-        `scale=${w}:${h}:force_original_aspect_ratio=decrease:force_divisible_by=2,fps=${TRANSCODE_FPS}`,
+        `scale='min(${w},iw)':'min(${h},ih)':force_original_aspect_ratio=decrease:force_divisible_by=2,fps=${TRANSCODE_FPS}`,
         "-c:v", "libx264",
-        "-preset", SOFTWARE_PRESET,
+        // Preset is chosen per stream by the session manager from the startup
+        // benchmark (highest quality that still encodes the source resolution
+        // faster than realtime); falls back to the static default.
+        "-preset", chosenPreset,
         "-crf", SOFTWARE_CRF,
+        "-threads", String(CPU_THREADS),
         "-pix_fmt", "yuv420p",
         ...keyFrameArgs(segmentDurationSec)
       ];
@@ -415,4 +435,67 @@ export async function detectVideoEncoder({ ffmpegBin, logger, segmentDurationSec
 
   log.info("hwaccel: no working hardware encoder; using software libx264");
   return software;
+}
+
+/**
+ * Benchmark software libx264 presets on this host. Encodes a short synthetic
+ * clip at a fixed reference resolution with each preset and measures encoder
+ * throughput in pixels/second. The session manager uses this to pick, per
+ * stream, the highest-quality preset that still encodes the actual
+ * (source-capped) resolution faster than realtime.
+ *
+ * Runs once at startup; bounded by a per-encode timeout. Presets that fail are
+ * omitted from the result.
+ *
+ * @param {{ ffmpegBin: string, logger?: { info: (m: string) => void, warn: (m: string) => void } }} options
+ * @returns {Promise<Array<{ preset: string, pixelsPerSec: number }>>} Ordered slowest→fastest.
+ */
+export async function benchmarkSoftwarePresets({ ffmpegBin, logger }) {
+  const log = logger ?? { info: () => {}, warn: () => {} };
+  const totalPixels = BENCHMARK_REF_W * BENCHMARK_REF_H * TRANSCODE_FPS * BENCHMARK_DURATION_SEC;
+  /** @type {Array<{ preset: string, pixelsPerSec: number }>} */
+  const results = [];
+  for (const preset of BENCHMARK_PRESETS) {
+    const args = [
+      "-hide_banner", "-loglevel", "error",
+      "-f", "lavfi", "-i", `testsrc2=s=${BENCHMARK_REF_W}x${BENCHMARK_REF_H}:r=${TRANSCODE_FPS}:d=${BENCHMARK_DURATION_SEC}`,
+      "-c:v", "libx264", "-preset", preset, "-crf", SOFTWARE_CRF, "-pix_fmt", "yuv420p",
+      "-f", "null", "-"
+    ];
+    const startedAt = Date.now();
+    const { code } = await runFfmpeg(ffmpegBin, args, 30000);
+    const elapsedSec = (Date.now() - startedAt) / 1000;
+    if (code !== 0 || elapsedSec <= 0) {
+      log.warn(`hwaccel: preset benchmark "${preset}" failed; skipping`);
+      continue;
+    }
+    const pixelsPerSec = totalPixels / elapsedSec;
+    results.push({ preset, pixelsPerSec });
+    log.info(
+      `hwaccel: preset "${preset}" ~= ${(pixelsPerSec / 1e6).toFixed(1)} Mpx/s ` +
+        `(${(BENCHMARK_DURATION_SEC / elapsedSec).toFixed(2)}x @ ${BENCHMARK_REF_W}x${BENCHMARK_REF_H})`
+    );
+  }
+  return results;
+}
+
+/**
+ * Pick the highest-quality (slowest) benchmarked preset that can encode
+ * `pixelsPerSecNeeded` with the speed margin. Falls back to the fastest
+ * benchmarked preset, or `"ultrafast"` when no benchmark is available.
+ *
+ * @param {Array<{ preset: string, pixelsPerSec: number }>} benchmark - slowest→fastest
+ * @param {number} pixelsPerSecNeeded
+ * @returns {string}
+ */
+export function pickSoftwarePreset(benchmark, pixelsPerSecNeeded) {
+  if (!Array.isArray(benchmark) || benchmark.length === 0) {
+    return "ultrafast";
+  }
+  for (const entry of benchmark) {
+    if (entry.pixelsPerSec >= pixelsPerSecNeeded * PRESET_SPEED_MARGIN) {
+      return entry.preset;
+    }
+  }
+  return benchmark[benchmark.length - 1].preset;
 }

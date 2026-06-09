@@ -1,3 +1,7 @@
+## 2.9.11
+
+- **New**: Seek-aware torrent piece prioritization. On every `/stream` range request the proxy now marks the torrent pieces at the read position **critical** (`TorrentPool.prioritizeByteRange` → `torrent.critical`, ~8 MB window). After a seek, ffmpeg opens the input at a new byte offset; previously those pieces waited behind the sequential download backlog, so seeking into an undownloaded region stalled ~15-18 s while the proxy fetched data. Now the seek position jumps the download queue.
+
 ## 2.9.10
 
 - **Fix**: Raised the adaptive-preset speed margin (`PRESET_SPEED_MARGIN` 1.3 → 1.8). The preset benchmark runs at startup with an idle CPU, but during playback ffmpeg competes with in-process WebTorrent (download + SHA1 hashing) and delivery, so real throughput is lower than benchmarked. A 1.3× margin picked a preset that ran near/below realtime under load (e.g. `faster` at ~1.3×) and stalled; 1.8× picks a preset with genuine headroom (e.g. `veryfast`), keeping playback above 1× under real load.

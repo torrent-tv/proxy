@@ -10,6 +10,11 @@ import crypto from "node:crypto";
 import WebTorrent from "webtorrent";
 import { logger } from "../utils/logger.js";
 
+// Bytes ahead of a read position to mark CRITICAL (download-first) on each
+// range request. Big enough to unstick a seek into an undownloaded region,
+// small enough not to make "everything critical" (which defeats prioritization).
+const PRIORITY_WINDOW_BYTES = 8 * 1024 * 1024;
+
 /**
  * Decode a raw torrent source value into the format expected by WebTorrent.
  *
@@ -316,6 +321,47 @@ export class TorrentPool {
       if (typeof file.deselect === "function") {
         file.deselect();
       }
+    }
+  }
+
+  /**
+   * Mark the torrent pieces covering a byte window of a file as CRITICAL, so
+   * WebTorrent downloads them before the rest of the selected file. Called on
+   * every range request: after a seek, the new read position jumps the download
+   * queue instead of waiting behind the sequential backlog (which caused
+   * ~15-18 s stalls when seeking into an undownloaded region).
+   *
+   * @param {import("webtorrent").Torrent} torrent
+   * @param {number} fileIndex
+   * @param {number} byteStart - Start offset within the file.
+   * @param {number} [windowBytes] - Bytes ahead of `byteStart` to prioritize.
+   * @returns {void}
+   */
+  prioritizeByteRange(torrent, fileIndex, byteStart, windowBytes = PRIORITY_WINDOW_BYTES) {
+    if (!torrent || typeof torrent.critical !== "function" || !Array.isArray(torrent.files)) {
+      return;
+    }
+    const pieceLength = Number(torrent.pieceLength);
+    if (!Number.isFinite(pieceLength) || pieceLength <= 0) {
+      return;
+    }
+    const file = torrent.files[fileIndex];
+    if (!file) {
+      return;
+    }
+    const fileOffset = Number.isFinite(file.offset) ? file.offset : 0;
+    const safeStart = Math.max(0, Number(byteStart) || 0);
+    const absStart = fileOffset + safeStart;
+    const absEnd = Math.min(fileOffset + file.length - 1, absStart + Math.max(1, windowBytes) - 1);
+    const startPiece = Math.floor(absStart / pieceLength);
+    const endPiece = Math.floor(absEnd / pieceLength);
+    if (endPiece < startPiece) {
+      return;
+    }
+    try {
+      torrent.critical(startPiece, endPiece);
+    } catch {
+      // Best effort — never break streaming because prioritization failed.
     }
   }
 }

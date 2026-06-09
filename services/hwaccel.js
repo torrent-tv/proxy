@@ -90,7 +90,17 @@ export function softwareDescriptor() {
         "-crf", SOFTWARE_CRF,
         "-threads", String(CPU_THREADS),
         "-pix_fmt", "yuv420p",
-        ...keyFrameArgs(segmentDurationSec)
+        // Fixed GOP: a keyframe exactly every (segmentDurationSec × fps) frames,
+        // scene-cut keyframes disabled. This is frame-count based, so it is
+        // independent of the PTS offset used on seek-restart — every HLS segment
+        // is exactly segmentDurationSec long and starts on a keyframe, so segment
+        // boundaries line up with the synthetic playlist with no gaps. (The old
+        // `-force_key_frames expr:gte(t,n_forced*SEG)` broke after a seek because
+        // `t` is offset by `-output_ts_offset`, forcing keyframes at the wrong
+        // places.)
+        "-g", String(segmentDurationSec * TRANSCODE_FPS),
+        "-keyint_min", String(segmentDurationSec * TRANSCODE_FPS),
+        "-sc_threshold", "0"
       ];
     }
   };

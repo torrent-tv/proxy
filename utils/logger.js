@@ -10,13 +10,14 @@ import chalk from "chalk";
 const PREFIX = "[proxy-client]";
 
 /**
- * Return the current time as a compact ISO-8601 string, e.g. `12:34:56.789`.
- * Uses only the time portion to keep log lines short.
+ * Return the current time as a compact ISO-8601 (UTC) string, e.g.
+ * `12:34:56.789`. UTC is used deliberately so proxy and browser logs share the
+ * same timezone and line up exactly when correlating them.
  *
  * @returns {string}
  */
 function ts() {
-  return new Date().toISOString().slice(11, 23); // "HH:MM:SS.mmm"
+  return new Date().toISOString().slice(11, 23); // "HH:MM:SS.mmm" (UTC)
 }
 
 /**

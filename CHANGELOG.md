@@ -1,3 +1,8 @@
+## 2.9.13
+
+- **Fix**: Video-copy path (`video=copy`, audio transcoded or copied) no longer drops video / desyncs audio at the start. The output timeline is now forced 0-based: the container `start_time` (parsed from the probe; many MKVs report ~0.1 s) is subtracted via `-output_ts_offset -start_time` together with `-copyts`, so segment 0 begins exactly at 0 with audio and video aligned (previously `-copyts` preserved the non-zero start, leaving a hole at the beginning where video was blank but audio played).
+- **New**: Unified segment-boundary model. The synthetic VOD playlist and all seek math now come from a boundary table: a uniform grid for re-encoded video, and the source's **real keyframe positions** (probed once with ffprobe, normalized to 0) for copied video — so the declared segment boundaries match where a copied stream actually cuts, eliminating seek gaps. The keyframe probe is time-bounded (~6 s); on slow containers it falls back to the uniform grid (start still 0-based). Session log shows `seg=keyframe|uniform` and `start=…`.
+
 ## 2.9.12
 
 - **Fix**: Eliminate PTS-gap glitches (stutter/freeze on video while audio keeps playing) at start and after seeking, for both transcode modes:

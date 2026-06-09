@@ -1,3 +1,7 @@
+## 2.9.14
+
+- **New**: `GET /api/sources/:sourceKey/stats` now reports `headerBytes` / `headerDownloadedBytes` — how much of the file's header/index region (leading 256 KB + trailing 2 MB, the bytes the codec probe needs) is downloaded, counted by whole torrent pieces from the bitfield. Lets the browser show the download phase's progress and ETA toward the next (transcode) phase. Coarse by design (piece granularity).
+
 ## 2.9.13
 
 - **Fix**: Video-copy path (`video=copy`, audio transcoded or copied) no longer drops video / desyncs audio at the start. The output timeline is now forced 0-based: the container `start_time` (parsed from the probe; many MKVs report ~0.1 s) is subtracted via `-output_ts_offset -start_time` together with `-copyts`, so segment 0 begins exactly at 0 with audio and video aligned (previously `-copyts` preserved the non-zero start, leaving a hole at the beginning where video was blank but audio played).

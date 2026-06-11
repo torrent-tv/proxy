@@ -15,6 +15,72 @@ import nodeDataChannel from "node-datachannel";
 
 const ICE_SERVERS = ["stun:stun.l.google.com:19302"];
 
+// Symmetric-NAT port prediction window. For each real srflx candidate we offer
+// this many extra candidates at ports base + delta*k (k = 1..N), because the
+// number of NAT mappings the router allocates between STUN gathering and the
+// browser connectivity check is unknown — a small window covers the likely
+// values without bloating the SDP.
+const PORT_PREDICTION_WINDOW = 16;
+
+/**
+ * Build predicted srflx ICE candidates for a symmetric NAT.
+ *
+ * A symmetric NAT assigns a different external port per destination, so the
+ * STUN-learned srflx port is not the port the NAT will use toward the browser.
+ * Given the per-destination port `delta` measured at startup, we offer ports
+ * `base + delta*k` (k = 1..window) so the browser also probes them; if one
+ * matches the mapping the NAT creates for the proxy→browser path, ICE connects.
+ * This is the practical, signalling-only form of the birthday-paradox trick —
+ * it works for sequential/predictable symmetric NATs, not fully random ones.
+ *
+ * Each predicted candidate gets a unique foundation so ICE treats it as a
+ * distinct candidate. Returns [] for non-srflx, IPv6, missing/zero delta, or a
+ * candidate string we cannot parse.
+ *
+ * @param {string} candidate - Raw candidate string (with or without `a=`).
+ * @param {number} delta - Per-destination external-port delta (from NAT classification).
+ * @param {number} [windowSize]
+ * @returns {Array<{ candidate: string, port: number }>}
+ */
+function buildPredictedSrflxCandidates(candidate, delta, windowSize = PORT_PREDICTION_WINDOW) {
+  if (!Number.isInteger(delta) || delta === 0) {
+    return [];
+  }
+  const raw = candidate.replace(/^a=/, "");
+  if (!/ typ srflx /.test(raw)) {
+    return [];
+  }
+  // candidate:<foundation> <component> <proto> <priority> <ip> <port> typ srflx ...
+  const parts = raw.split(" ");
+  if (parts.length < 8 || !parts[0].startsWith("candidate:")) {
+    return [];
+  }
+  const ip = parts[4];
+  if (typeof ip !== "string" || ip.includes(":")) {
+    // IPv6 has no NAT — port prediction is meaningless.
+    return [];
+  }
+  const basePort = Number(parts[5]);
+  if (!Number.isInteger(basePort)) {
+    return [];
+  }
+
+  const out = [];
+  const seen = new Set([basePort]);
+  for (let k = 1; k <= windowSize; k++) {
+    const port = basePort + delta * k;
+    if (port < 1 || port > 65535 || seen.has(port)) {
+      continue;
+    }
+    seen.add(port);
+    const p = parts.slice();
+    p[0] = `candidate:pp${k}`;
+    p[5] = String(port);
+    out.push({ candidate: p.join(" "), port });
+  }
+  return out;
+}
+
 /**
  * Return true when the ICE candidate string describes a `typ host` candidate
  * with a private (RFC 1918 / ULA / loopback) IP address.
@@ -70,6 +136,10 @@ function isPrivateHostCandidate(candidate) {
  *   `node-datachannel` `DataChannel` object; hand it to `createDataChannelHandler`.
  * @property {(message: string) => void} [onLog]
  *   Optional log sink.
+ * @property {() => ({ klass: string, portDelta: number|null } | null)} [getNatInfo]
+ *   Returns the latest NAT classification (or null if not yet known). When it
+ *   reports a symmetric NAT with a known port delta, each srflx candidate is
+ *   accompanied by predicted-port candidates (see {@link buildPredictedSrflxCandidates}).
  * @property {number} [udpPort]
  *   When set, all WebRTC sessions are multiplexed onto this single UDP port so
  *   it can be statically UPnP-mapped (one mapping, one reachable port). A
@@ -106,7 +176,7 @@ function isPrivateHostCandidate(candidate) {
  * @param {WebRtcManagerOptions} options
  * @returns {WebRtcManager}
  */
-export function createWebRtcManager({ sendSignal, onDataChannel, onLog, udpPort }) {
+export function createWebRtcManager({ sendSignal, onDataChannel, onLog, udpPort, getNatInfo }) {
   /** @type {Map<string, import("node-datachannel").PeerConnection>} */
   const peers = new Map();
 
@@ -182,6 +252,28 @@ export function createWebRtcManager({ sendSignal, onDataChannel, onLog, udpPort 
         `[webrtc] Session ${sessionId.slice(0, 8)}: sending ${isPrivate ? "private" : "public"} candidate: ${candidate.replace(/^a=/, "")}`
       );
       sendSignal(sessionId, { type: "candidate", candidate, mid });
+
+      // Symmetric-NAT port prediction: offer extra srflx candidates at the
+      // predicted external ports so the browser probes them too. No-op unless
+      // the NAT is symmetric with a known delta and this is an IPv4 srflx
+      // candidate. Best-effort — never let it break candidate forwarding.
+      try {
+        const nat = typeof getNatInfo === "function" ? getNatInfo() : null;
+        if (nat && nat.klass === "symmetric") {
+          const predicted = buildPredictedSrflxCandidates(candidate, nat.portDelta);
+          if (predicted.length > 0) {
+            log(
+              `[webrtc] Session ${sessionId.slice(0, 8)}: symmetric NAT (delta=${nat.portDelta}) — injecting ${predicted.length} predicted srflx candidates: ${predicted.map((p) => p.port).join(",")}`
+            );
+            for (const p of predicted) {
+              sendSignal(sessionId, { type: "candidate", candidate: p.candidate, mid });
+            }
+          }
+        }
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        log(`[webrtc] Session ${sessionId.slice(0, 8)}: port-prediction inject failed: ${message}`);
+      }
     });
 
     pc.onGatheringStateChange((state) => {

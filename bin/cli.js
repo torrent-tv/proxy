@@ -129,6 +129,9 @@ let udpPortMapper = null;
 /** @type {ReturnType<typeof createWebRtcManager> | null} */
 let webRtcManager = null;
 
+/** @type {import("../services/nat-classifier.js").NatClassification | null} Latest NAT classification (for WebRTC port prediction). */
+let natInfo = null;
+
 
 /**
  * Register this proxy with the registry server.
@@ -291,13 +294,15 @@ try {
   // never block startup.
   void classifyNat()
     .then((nat) => {
+      // Stored for WebRTC port prediction (webRtcManager reads it per session).
+      natInfo = nat;
       if (nat.klass === "endpoint-independent") {
         logger.info(
           `nat: endpoint-independent (cone) — external UDP port stable across STUN servers (${nat.externalIp}); fixed-port WebRTC mapping is sufficient, no port prediction needed`
         );
       } else if (nat.klass === "symmetric") {
         logger.warn(
-          `nat: SYMMETRIC — external UDP port varies per destination (delta ${nat.portDelta}); WebRTC will need port prediction to reach remote viewers`
+          `nat: SYMMETRIC — external UDP port varies per destination (delta ${nat.portDelta}); WebRTC offers predicted ports (base+delta*k) — covers sequential/predictable symmetric NAT, not fully random`
         );
       } else {
         logger.info("nat: classification inconclusive (STUN probes failed); continuing");
@@ -356,6 +361,8 @@ try {
     // persistent ICE UDP mux listener, so the WebRTC path is reachable from the
     // internet on one fixed port.
     udpPort: webrtcUdpPort,
+    // Latest NAT classification — enables symmetric-NAT port prediction.
+    getNatInfo: () => natInfo,
     sendSignal(sessionId, signal) {
       tunnelClient?.sendSignal(sessionId, signal);
     },

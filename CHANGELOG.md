@@ -1,3 +1,7 @@
+## 2.9.18
+
+- **New**: WebRTC is now reachable behind NAT via a static UDP port mapping. All sessions are pinned to a single UDP port (same number as the HTTP port, default 9090) and multiplexed over it (`enableIceUdpMux` + `portRangeBegin`/`portRangeEnd` in `webrtc-manager.js`), and that UDP port is UPnP/NAT-PMP-mapped at startup (a second `port-mapper.js` instance, protocol UDP, removed on shutdown). Because the socket is bound to a fixed, statically-mapped port, the proxy's `srflx` ICE candidate now carries `publicIP:9090` — reachable from the browser even behind symmetric NAT for that port (previously WebRTC used an ephemeral UDP port that UPnP could not map). Verified: two PeerConnections share the one UDP port with no bind conflict; host + srflx (v4 and global v6) candidates all carry the fixed port. The UDP endpoint is not reported to the server (the browser learns it via ICE, not the TCP dial-back probe).
+
 ## 2.9.17
 
 - **New**: The proxy reports its UPnP-mapped external endpoint to the server over the tunnel (new `proxy-endpoint` message: `{ externalIp, externalPort, protocol }` from `port-mapper.getMappedEndpoint()`). Sent when the mapping completes and re-sent on every tunnel (re)connect, so the server can dial back and verify the proxy is reachable from the internet (server 0.8.22). No effect if port mapping is disabled or failed.

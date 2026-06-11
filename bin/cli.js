@@ -122,6 +122,9 @@ let tunnelClient = null;
 /** @type {ReturnType<typeof createPortMapper> | null} */
 let portMapper = null;
 
+/** @type {ReturnType<typeof createPortMapper> | null} UDP mapping for the WebRTC port. */
+let udpPortMapper = null;
+
 
 /**
  * Register this proxy with the registry server.
@@ -190,11 +193,15 @@ async function shutdown(signal) {
   }
   logger.warn(`Received ${signal}, shutting down...`);
   try {
-    // Remove the router port mapping before exiting (lease expiry is the
+    // Remove the router port mappings before exiting (lease expiry is the
     // backstop if this is skipped on a hard kill).
     if (portMapper) {
       await portMapper.stop();
       portMapper = null;
+    }
+    if (udpPortMapper) {
+      await udpPortMapper.stop();
+      udpPortMapper = null;
     }
     if (app) {
       await app.close();
@@ -248,6 +255,21 @@ try {
         const message = error instanceof Error ? error.message : String(error);
         logger.warn(`Port mapping failed to start: ${message}`);
       });
+
+    // Also map the WebRTC UDP port (same number, different protocol). All
+    // WebRTC sessions are multiplexed onto this single UDP port (ICE UDP mux),
+    // so a static mapping makes the proxy's WebRTC path reachable even behind
+    // symmetric NAT. This endpoint is NOT reported to the server: the browser
+    // discovers it via ICE (srflx) candidates, not the TCP dial-back probe.
+    udpPortMapper = createPortMapper({
+      port: actualPort,
+      protocol: "UDP",
+      description: "torrent-tv proxy (WebRTC)"
+    });
+    void udpPortMapper.start().catch((error) => {
+      const message = error instanceof Error ? error.message : String(error);
+      logger.warn(`UDP port mapping failed to start: ${message}`);
+    });
   } else {
     logger.info("Automatic port mapping is disabled (--no-port-mapping).");
   }
@@ -297,6 +319,9 @@ try {
   });
 
   webRtcManager = createWebRtcManager({
+    // Pin all WebRTC sessions to this single UDP port (multiplexed via ICE UDP
+    // mux) so the UPnP UDP mapping above makes the WebRTC path reachable.
+    udpPort: actualPort,
     sendSignal(sessionId, signal) {
       tunnelClient?.sendSignal(sessionId, signal);
     },

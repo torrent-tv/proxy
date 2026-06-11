@@ -167,13 +167,22 @@ export function createPlaybackPlanner({
      * Throws with `error.code === "SOURCE_NOT_FOUND"` or `"FILE_NOT_FOUND"`
      * when the source or file cannot be located.
      *
+     * When the file header has not downloaded yet (cold torrent, peers still
+     * connecting) the codec probe cannot succeed. Rather than block the HTTP
+     * response until it can, the planner prioritises the header, probes for at
+     * most `maxWaitMs`, and if still undetectable returns a plan flagged
+     * `pending: true` (NOT cached). The caller polls again — each call keeps the
+     * header prioritised and downloading — until a real plan comes back. This
+     * avoids a single long request racing the transport's request timeout.
+     *
      * @param {object} params
      * @param {string} params.sourceKey
      * @param {number} params.fileIndex
      * @param {string} [params.userAgent=""]
-     * @returns {Promise<PlaybackPlan>}
+     * @param {number} [params.maxWaitMs=60000] - Max time to wait for the header within ONE call.
+     * @returns {Promise<PlaybackPlan & { pending?: boolean }>}
      */
-    async getPlan({ sourceKey, fileIndex, userAgent = "" }) {
+    async getPlan({ sourceKey, fileIndex, userAgent = "", maxWaitMs = 60_000 }) {
       const cacheKey = `${sourceKey}:${fileIndex}`;
       const cached = cache.get(cacheKey);
       if (cached) {
@@ -218,7 +227,7 @@ export function createPlaybackPlanner({
       // file, and an unsupported codec like xvid gets copied → black video.
       await torrentPool.prefetchFileEdges(torrent, fileIndex);
       let probe = await probeStreamCodecs({ ffmpegBin, inputUrl: directUrl, userAgent });
-      const probeDeadline = Date.now() + 60_000;
+      const probeDeadline = Date.now() + Math.max(0, maxWaitMs);
       let attempt = 0;
       while (
         probe.audioCodec.length === 0 &&
@@ -248,11 +257,14 @@ export function createPlaybackPlanner({
       };
       // Only cache a plan whose codecs were actually detected. An empty probe is
       // a "header not downloaded yet" signal, not a valid result — caching it
-      // would permanently mis-plan the file.
+      // would permanently mis-plan the file. In that case flag the plan
+      // `pending` so the caller polls again (the header keeps downloading,
+      // prioritised by the prefetch above).
       if (codecsDetected) {
         cache.set(cacheKey, plan);
+        return plan;
       }
-      return plan;
+      return { ...plan, pending: true };
     }
   };
 }

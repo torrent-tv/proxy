@@ -106,12 +106,15 @@ export function createPortMapper({
    * @param {InstanceType<typeof NatAPI>} instance
    * @returns {Promise<void>}
    */
-  async function safeDestroy(instance) {
+  async function safeDestroy(instance, { logRemoval = false } = {}) {
     try {
       await withTimeout(instance.destroy(), STOP_TIMEOUT_MS, "destroy");
+      if (logRemoval) {
+        logger.info(`port-mapper: removed mapping for ${protocol} ${port}`);
+      }
     } catch (error) {
       // Lease expiry (ttl) is the backstop if we cannot unmap cleanly.
-      logger.warn(`port-mapper: failed to remove port mapping cleanly: ${describeError(error)}`);
+      logger.warn(`port-mapper: failed to remove ${protocol} ${port} mapping cleanly: ${describeError(error)}`);
     }
   }
 
@@ -182,7 +185,7 @@ export function createPortMapper({
     const instance = nat;
     nat = null;
     mappedEndpoint = null;
-    await safeDestroy(instance);
+    await safeDestroy(instance, { logRemoval: true });
   }
 
   /**

@@ -126,6 +126,9 @@ let portMapper = null;
 /** @type {ReturnType<typeof createPortMapper> | null} UDP mapping for the WebRTC port. */
 let udpPortMapper = null;
 
+/** @type {ReturnType<typeof createWebRtcManager> | null} */
+let webRtcManager = null;
+
 
 /**
  * Register this proxy with the registry server.
@@ -204,6 +207,11 @@ async function shutdown(signal) {
       await udpPortMapper.stop();
       udpPortMapper = null;
     }
+    // Close WebRTC sessions and release the shared UDP mux listener socket.
+    if (webRtcManager) {
+      try { webRtcManager.dispose(); } catch { /* ignore */ }
+      webRtcManager = null;
+    }
     if (app) {
       await app.close();
     }
@@ -236,6 +244,11 @@ try {
     logger.info(`Optional HLS audio transcode is enabled (ffmpeg: ${ffmpegBin}).`);
   }
 
+  // All WebRTC sessions are multiplexed onto this single UDP port (same number
+  // as the HTTP port, different protocol) via a persistent ICE UDP mux listener
+  // in the WebRTC manager. One port → one UPnP mapping → one reachable endpoint.
+  const webrtcUdpPort = actualPort;
+
   // Try to open the local port on the home router (UPnP/NAT-PMP) so the proxy
   // is reachable from the internet without manual port forwarding. Best-effort
   // and fire-and-forget: failure is normal (router without UPnP) and must not
@@ -257,13 +270,11 @@ try {
         logger.warn(`Port mapping failed to start: ${message}`);
       });
 
-    // Also map the WebRTC UDP port (same number, different protocol). All
-    // WebRTC sessions are multiplexed onto this single UDP port (ICE UDP mux),
-    // so a static mapping makes the proxy's WebRTC path reachable even behind
-    // symmetric NAT. This endpoint is NOT reported to the server: the browser
-    // discovers it via ICE (srflx) candidates, not the TCP dial-back probe.
+    // Also map the single WebRTC UDP port. Not reported to the server: the
+    // browser discovers the endpoint via ICE (srflx) candidates, not the TCP
+    // dial-back probe.
     udpPortMapper = createPortMapper({
-      port: actualPort,
+      port: webrtcUdpPort,
       protocol: "UDP",
       description: "torrent-tv proxy (WebRTC)"
     });
@@ -302,10 +313,9 @@ try {
   // The WebRTC manager handles the actual peer connection and data channel.
   //
   // We use a late-binding ref so both objects can reference each other without
-  // running into the TDZ (tunnelClient is declared above; webRtcManager uses let
-  // so the closure in createTunnelClient can call it after both are initialised).
-  /** @type {ReturnType<typeof createWebRtcManager> | null} */
-  let webRtcManager = null;
+  // running into the TDZ (tunnelClient is declared above; webRtcManager is the
+  // module-scoped `let` above so the closure in createTunnelClient — and the
+  // shutdown handler — can reach it after initialisation).
 
   tunnelClient = createTunnelClient({
     serverUrl,
@@ -342,9 +352,10 @@ try {
   });
 
   webRtcManager = createWebRtcManager({
-    // Pin all WebRTC sessions to this single UDP port (multiplexed via ICE UDP
-    // mux) so the UPnP UDP mapping above makes the WebRTC path reachable.
-    udpPort: actualPort,
+    // Single UDP port (UPnP-mapped above) shared by all sessions via a
+    // persistent ICE UDP mux listener, so the WebRTC path is reachable from the
+    // internet on one fixed port.
+    udpPort: webrtcUdpPort,
     sendSignal(sessionId, signal) {
       tunnelClient?.sendSignal(sessionId, signal);
     },

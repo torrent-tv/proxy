@@ -85,14 +85,24 @@ function withTimeout(promise, ms, label) {
  * @param {"TCP" | "UDP"} [opts.protocol] - Protocol to map. Defaults to "TCP" (the HTTP/stream port).
  * @param {string} [opts.description] - Human-readable label shown in the router's port-mapping table.
  * @param {number} [opts.ttlSeconds] - Lease time in seconds. Defaults to {@link DEFAULT_TTL_SECONDS}.
+ * @param {number} [opts.portRangeEnd] - When set and > `port`, map the whole
+ *   contiguous range `[port..portRangeEnd]` (used for the WebRTC UDP range, so
+ *   whichever port a session binds is reachable). Single port otherwise.
  * @returns {PortMapper}
  */
 export function createPortMapper({
   port,
   protocol = "TCP",
   description = "torrent-tv proxy",
-  ttlSeconds = DEFAULT_TTL_SECONDS
+  ttlSeconds = DEFAULT_TTL_SECONDS,
+  portRangeEnd
 } = {}) {
+  const rangeEnd = Number.isInteger(portRangeEnd) && portRangeEnd > port ? portRangeEnd : null;
+  const portList = rangeEnd
+    ? Array.from({ length: rangeEnd - port + 1 }, (_, i) => port + i)
+    : [port];
+  const label = rangeEnd ? `${protocol} ${port}-${rangeEnd}` : `${protocol} ${port}`;
+
   /** @type {InstanceType<typeof NatAPI> | null} */
   let nat = null;
   /** @type {MappedEndpoint | null} */
@@ -110,11 +120,11 @@ export function createPortMapper({
     try {
       await withTimeout(instance.destroy(), STOP_TIMEOUT_MS, "destroy");
       if (logRemoval) {
-        logger.info(`port-mapper: removed mapping for ${protocol} ${port}`);
+        logger.info(`port-mapper: removed mapping for ${label}`);
       }
     } catch (error) {
       // Lease expiry (ttl) is the backstop if we cannot unmap cleanly.
-      logger.warn(`port-mapper: failed to remove ${protocol} ${port} mapping cleanly: ${describeError(error)}`);
+      logger.warn(`port-mapper: failed to remove ${label} mapping cleanly: ${describeError(error)}`);
     }
   }
 
@@ -133,16 +143,25 @@ export function createPortMapper({
     }
 
     let instance;
+    let mappedCount = 0;
     try {
       instance = new NatAPI({ ttl: ttlSeconds, autoUpdate: true, description });
-      await withTimeout(
-        instance.map({ publicPort: port, privatePort: port, protocol, description, ttl: ttlSeconds }),
-        START_TIMEOUT_MS,
-        "map"
-      );
+      // Map every port in the range, best-effort per port (one port failing
+      // must not abort the rest). All share the one NatAPI instance, so its
+      // auto-renew covers them and a single destroy() unmaps all.
+      for (const p of portList) {
+        try {
+          await withTimeout(
+            instance.map({ publicPort: p, privatePort: p, protocol, description, ttl: ttlSeconds }),
+            START_TIMEOUT_MS,
+            `map ${p}`
+          );
+          mappedCount++;
+        } catch (error) {
+          logger.warn(`port-mapper: failed to map ${protocol} ${p}: ${describeError(error)}`);
+        }
+      }
     } catch (error) {
-      // No UPnP/NAT-PMP on this router, or it declined. Normal, non-fatal: the
-      // proxy still works on LAN and wherever hole punching succeeds.
       mappedEndpoint = null;
       logger.warn(`port-mapper: no port mapping available (${describeError(error)}); continuing without it`);
       if (instance) {
@@ -151,8 +170,17 @@ export function createPortMapper({
       return;
     }
 
+    if (mappedCount === 0) {
+      // No UPnP/NAT-PMP on this router, or it declined. Normal, non-fatal: the
+      // proxy still works on LAN and wherever hole punching succeeds.
+      mappedEndpoint = null;
+      logger.warn(`port-mapper: no ports mapped for ${label}; continuing without it`);
+      await safeDestroy(instance);
+      return;
+    }
+
     // Mapping succeeded — keep the instance so its auto-renew timers stay alive
-    // and stop() can remove the mapping later.
+    // and stop() can remove the mappings later.
     nat = instance;
 
     // Discover the external IP (best-effort; the mapping is valid without it).
@@ -160,17 +188,18 @@ export function createPortMapper({
     try {
       externalIp = await withTimeout(instance.externalIp(), START_TIMEOUT_MS, "externalIp");
     } catch (error) {
-      logger.warn(`port-mapper: mapped ${protocol} ${port} but could not read external IP: ${describeError(error)}`);
+      logger.warn(`port-mapper: mapped ${label} but could not read external IP: ${describeError(error)}`);
     }
 
     mappedEndpoint = { externalIp: externalIp || null, externalPort: port, protocol };
+    const counts = portList.length > 1 ? ` (${mappedCount}/${portList.length} ports)` : "";
     if (externalIp) {
       logger.success(
-        `port-mapper: mapped ${externalIp}:${port} → ${protocol} ${port} (ttl ${ttlSeconds}s, auto-renew)`
+        `port-mapper: mapped ${externalIp} → ${label}${counts} (ttl ${ttlSeconds}s, auto-renew)`
       );
     } else {
       logger.info(
-        `port-mapper: mapped ${protocol} ${port} (external IP unknown; ttl ${ttlSeconds}s, auto-renew)`
+        `port-mapper: mapped ${label}${counts} (external IP unknown; ttl ${ttlSeconds}s, auto-renew)`
       );
     }
   }

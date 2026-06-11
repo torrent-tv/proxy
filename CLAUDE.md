@@ -51,11 +51,16 @@ Linux-only host (e.g. POSIX-only signals must degrade elsewhere).
 
 Decided direction — full plan in the parent `../CLAUDE.md`. Proxy-side pieces:
 
-- **Auto port mapping** at startup via UPnP IGD / NAT-PMP / PCP (`nat-api` /
-  `@silentbot1/nat-api`; WebTorrent already does this for the torrent port).
-  Always request a lease time and renew it while running; remove the mapping
-  on graceful shutdown — lease expiry cleans up after crashes. Zero user
-  action, nothing left behind on the router.
+- **Auto port mapping** — IMPLEMENTED (`services/port-mapper.js`, changelog
+  2.9.16). UPnP IGD / NAT-PMP via `@silentbot1/nat-api` (now a direct dep; the
+  same lib WebTorrent uses for the torrent port). Maps TCP 9090 with a 2 h
+  auto-renewed lease, removed on shutdown (lease expiry covers hard kills).
+  Best-effort + start/stop timeouts; `--no-port-mapping` opts out;
+  `getMappedEndpoint()` exposes the external endpoint for the reachability
+  probe. NOT yet done: mapping the **UDP** port WebRTC actually uses (it binds
+  ephemeral UDP ports, so this TCP mapping does not yet help WebRTC — see the
+  NAT-traversal toolbox in the parent CLAUDE.md), and reporting the endpoint
+  to the server.
 - Report the mapped external endpoint (and local addresses) to the server over
   the tunnel; the server dial-back-verifies reachability before use.
 - **HTTPS listener**: serve the existing routes over TLS with a per-proxy

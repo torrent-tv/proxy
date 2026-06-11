@@ -20,6 +20,7 @@ import { createWebRtcManager } from "../services/webrtc-manager.js";
 import { createDataChannelHandler } from "../services/data-channel-handler.js";
 import { collectHealthMetrics } from "../services/health-collector.js";
 import { createPortMapper } from "../services/port-mapper.js";
+import { classifyNat } from "../services/nat-classifier.js";
 import { logger } from "../utils/logger.js";
 
 const require = createRequire(import.meta.url);
@@ -273,6 +274,28 @@ try {
   } else {
     logger.info("Automatic port mapping is disabled (--no-port-mapping).");
   }
+
+  // Classify the home NAT (diagnostic + decides whether WebRTC will need port
+  // prediction for remote viewers). Best-effort, fire-and-forget — STUN probes
+  // never block startup.
+  void classifyNat()
+    .then((nat) => {
+      if (nat.klass === "endpoint-independent") {
+        logger.info(
+          `nat: endpoint-independent (cone) — external UDP port stable across STUN servers (${nat.externalIp}); fixed-port WebRTC mapping is sufficient, no port prediction needed`
+        );
+      } else if (nat.klass === "symmetric") {
+        logger.warn(
+          `nat: SYMMETRIC — external UDP port varies per destination (delta ${nat.portDelta}); WebRTC will need port prediction to reach remote viewers`
+        );
+      } else {
+        logger.info("nat: classification inconclusive (STUN probes failed); continuing");
+      }
+    })
+    .catch((error) => {
+      const message = error instanceof Error ? error.message : String(error);
+      logger.warn(`nat classification failed: ${message}`);
+    });
 
   // Create tunnel + WebRTC manager.
   // The tunnel forwards WebRTC signals between browser (via server) and this proxy.

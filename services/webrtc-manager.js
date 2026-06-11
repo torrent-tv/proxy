@@ -144,7 +144,11 @@ export function createWebRtcManager({ sendSignal, onDataChannel, onLog, udpPort 
     // the connection proceeds via the local LAN path.
     pc.onLocalCandidate((candidate, mid) => {
       const isPrivate = isPrivateHostCandidate(candidate);
-      log(`[webrtc] Session ${sessionId.slice(0, 8)}: sending ${isPrivate ? "private" : "public"} candidate`);
+      // Log the full candidate (addr:port typ …) so we can confirm WebRTC is
+      // pinned to the mapped UDP port and diagnose which paths are offered.
+      log(
+        `[webrtc] Session ${sessionId.slice(0, 8)}: sending ${isPrivate ? "private" : "public"} candidate: ${candidate.replace(/^a=/, "")}`
+      );
       sendSignal(sessionId, { type: "candidate", candidate, mid });
     });
 
@@ -160,11 +164,33 @@ export function createWebRtcManager({ sendSignal, onDataChannel, onLog, udpPort 
 
     pc.onStateChange((state) => {
       log(`[webrtc] Session ${sessionId.slice(0, 8)}: state → ${state}`);
+      // On connect, log which candidate pair actually won — this is the single
+      // most useful line for "did the open-port/WebRTC path work, and over
+      // which route (LAN / public srflx v4 / v6)".
+      if (state === "connected") {
+        try {
+          const pair = pc.getSelectedCandidatePair();
+          if (pair) {
+            const fmt = (c) => `${c.type} ${c.address}:${c.port}/${c.transportType}`;
+            log(
+              `[webrtc] Session ${sessionId.slice(0, 8)}: selected pair local=[${fmt(pair.local)}] remote=[${fmt(pair.remote)}]`
+            );
+          }
+        } catch {
+          // Diagnostics only — never let a logging call affect the connection.
+        }
+      }
       // "disconnected" is a transient state — ICE may recover on its own.
       // Only tear down on terminal states: "failed" and "closed".
       if (state === "failed" || state === "closed") {
         closeSession(sessionId);
       }
+    });
+
+    // Granular ICE-level transitions (checking → connected/failed) — finer than
+    // the peer state above; pinpoints where a failing connection stalls.
+    pc.onIceStateChange((state) => {
+      log(`[webrtc] Session ${sessionId.slice(0, 8)}: ICE → ${state}`);
     });
 
     // Browser creates the data channel — we receive it here.

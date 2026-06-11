@@ -154,7 +154,10 @@ export async function startProxyServer({ host, port, transcodeAudio, ffmpegBin }
   });
 
   app.addHook("onClose", async () => {
+    // Order matters: stop the ffmpeg readers (HLS sessions) before destroying
+    // the torrents whose files they read from, then remove the torrent data.
     await hlsSessionManager.disposeAll();
+    await torrentPool.destroyAll();
   });
 
   await app.listen({ host, port: selectedPort });

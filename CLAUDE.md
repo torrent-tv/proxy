@@ -47,6 +47,58 @@ Linux-only host (e.g. POSIX-only signals must degrade elsewhere).
   around it with `--ignore-scripts` + a targeted rebuild of `node-datachannel`;
   if you ever change install flow, keep that in mind.
 
+## Planned: public reachability (remote access)
+
+Decided direction — full plan in the parent `../CLAUDE.md`. Proxy-side pieces:
+
+- **Auto port mapping** at startup via UPnP IGD / NAT-PMP / PCP (`nat-api` /
+  `@silentbot1/nat-api`; WebTorrent already does this for the torrent port).
+  Always request a lease time and renew it while running; remove the mapping
+  on graceful shutdown — lease expiry cleans up after crashes. Zero user
+  action, nothing left behind on the router.
+- Report the mapped external endpoint (and local addresses) to the server over
+  the tunnel; the server dial-back-verifies reachability before use.
+- **HTTPS listener**: serve the existing routes over TLS with a per-proxy
+  certificate delivered by the server through the tunnel (persist cert+key
+  locally; ~90-day renewals are pushed the same way). Add CORS headers for the
+  web-app origin so hls.js / `<video>` can fetch cross-origin.
+- Plain HTTPS becomes the preferred video transport; WebRTC data channel stays
+  as fallback for hosts where no port could be opened.
+- **NAT-traversal toolbox** (staged, see parent `../CLAUDE.md`): birthday-
+  paradox port prediction (open ~256 UDP sockets, inject predicted-port ICE
+  candidates) for symmetric NAT; IPv6-first (audit the candidate filter — do
+  not drop *global* v6); STUN-based NAT pre-classification at startup reported
+  to the registry; relay-then-upgrade later.
+- Future: ed25519 proxy identity (sign announcements), BEP 44 endpoint
+  announcements via the `bittorrent-dht` already bundled with WebTorrent.
+
+All of this must stay deployment-agnostic (HA addon, bare npm, Docker).
+
+## Disk hygiene (open item — torrent data is NOT cleaned up today)
+
+HLS segments are handled (`hls-session-manager.js`: idle TTL, `disposeSession`,
+`disposeAll`). Torrent data is NOT: `new WebTorrent()` in `torrent-pool.js` uses
+the default FS store under `os.tmpdir()`, there is no `client.remove()` /
+`torrent.destroy()`, `deselect()` only stops further download, nothing sweeps
+orphans at startup, and `TorrentPool` is not wired into the `onClose` shutdown
+hook (`server.js` only disposes HLS sessions on close — see `cli.js` shutdown →
+`app.close()` → `onClose`).
+
+Level 1 (do first): `client.remove(torrent, { destroyStore: true })` on last-
+file refcount 0 + idle TTL; startup sweep of orphaned store dirs; wire
+`TorrentPool` teardown into the `onClose` hook so closing the proxy cleans up
+(not only startup); global disk cap with LRU eviction of whole torrents.
+Level 2 (research): sliding-window chunk store. Full rationale in the parent
+`../CLAUDE.md` "Disk hygiene" section.
+
+## Cloud proxy
+
+The same proxy code also runs as the company-hosted fallback when the user
+pool can't serve a viewer. Keep the proxy host-agnostic so it runs unchanged on
+rented infra (flat-rate/unmetered bandwidth — Hetzner dedicated / OVH; NOT
+metered-egress clouds). Provider/economics analysis in the parent
+`../CLAUDE.md` "Cloud proxy" section.
+
 ## Changelog
 
 Every behavioural change must be recorded in `CHANGELOG.md` — add an entry under

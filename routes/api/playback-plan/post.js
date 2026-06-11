@@ -35,7 +35,11 @@ export async function handleApiPlaybackPlanPost(req, reply, { playbackPlanner })
   }
 
   try {
-    const plan = await playbackPlanner.getPlan({ sourceKey, fileIndex, userAgent });
+    // Short per-request budget: if the file header is not downloaded yet the
+    // planner returns quickly with `pending: true` instead of blocking up to
+    // the transport's 60 s request timeout. The browser polls again (the header
+    // keeps downloading, prioritised on each call). Well under that 60 s limit.
+    const plan = await playbackPlanner.getPlan({ sourceKey, fileIndex, userAgent, maxWaitMs: 8_000 });
     return reply.send(plan);
   } catch (error) {
     if (error instanceof Error && error.code === "SOURCE_NOT_FOUND") {

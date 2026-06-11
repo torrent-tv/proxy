@@ -72,6 +72,9 @@ import { WebSocket } from "ws";
  * @property {() => void}   disconnect   - Close the tunnel; suppresses reconnects.
  * @property {(sessionId: string, signal: WebRtcSignal) => void} sendSignal
  *   Send a WebRTC signal (answer / candidate) back to the browser.
+ * @property {(endpoint: { externalIp: string | null, externalPort: number, protocol: string }) => void} sendEndpoint
+ *   Report this proxy's UPnP-mapped external endpoint to the server so it can
+ *   dial back and verify reachability.
  */
 
 const RECONNECT_DELAY_MS = 5_000;
@@ -312,6 +315,18 @@ export function createTunnelClient({ serverUrl, proxyId, token, proxyPort, onSig
      */
     sendSignal(sessionId, signal) {
       send({ type: "signal", sessionId, signal });
+    },
+
+    /**
+     * Report this proxy's UPnP-mapped external endpoint to the server.
+     * No-op if the tunnel is not currently open (the caller re-sends on
+     * connect / reconnect).
+     *
+     * @param {{ externalIp: string | null, externalPort: number, protocol: string }} endpoint
+     * @returns {void}
+     */
+    sendEndpoint(endpoint) {
+      send({ type: "proxy-endpoint", endpoint });
     }
   };
 }

@@ -234,10 +234,20 @@ try {
   // delay tunnel connect / registration, so we do not await it.
   if (portMappingEnabled) {
     portMapper = createPortMapper({ port: actualPort, protocol: "TCP" });
-    void portMapper.start().catch((error) => {
-      const message = error instanceof Error ? error.message : String(error);
-      logger.warn(`Port mapping failed to start: ${message}`);
-    });
+    void portMapper
+      .start()
+      .then(() => {
+        // Mapping may finish after the tunnel is already connected; report the
+        // endpoint now. If the tunnel is not open yet, onConnect re-sends it.
+        const endpoint = portMapper?.getMappedEndpoint();
+        if (endpoint) {
+          tunnelClient?.sendEndpoint(endpoint);
+        }
+      })
+      .catch((error) => {
+        const message = error instanceof Error ? error.message : String(error);
+        logger.warn(`Port mapping failed to start: ${message}`);
+      });
   } else {
     logger.info("Automatic port mapping is disabled (--no-port-mapping).");
   }
@@ -270,6 +280,13 @@ try {
         const message = error instanceof Error ? error.message : String(error);
         logger.error(`Re-registration after tunnel connect failed: ${message}`);
       });
+      // Re-report the mapped endpoint on every (re)connect — the server's
+      // in-memory reachability state resets on restart, and the mapping may
+      // have completed before this connection existed.
+      const endpoint = portMapper?.getMappedEndpoint();
+      if (endpoint) {
+        tunnelClient?.sendEndpoint(endpoint);
+      }
     },
     onLog: (message) => logger.info(message)
   });

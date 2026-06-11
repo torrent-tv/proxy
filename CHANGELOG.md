@@ -1,3 +1,7 @@
+## 2.9.17
+
+- **New**: The proxy reports its UPnP-mapped external endpoint to the server over the tunnel (new `proxy-endpoint` message: `{ externalIp, externalPort, protocol }` from `port-mapper.getMappedEndpoint()`). Sent when the mapping completes and re-sent on every tunnel (re)connect, so the server can dial back and verify the proxy is reachable from the internet (server 0.8.22). No effect if port mapping is disabled or failed.
+
 ## 2.9.16
 
 - **New**: Automatic port mapping (`services/port-mapper.js`). At startup the proxy asks the home router to open its local port (default TCP 9090) via UPnP IGD / NAT-PMP using `@silentbot1/nat-api` (the same library WebTorrent already uses for the torrent port — no new host dependency). The mapping uses a 2 h lease auto-renewed while running and is removed on graceful shutdown (wired into the `cli.js` shutdown path; lease expiry is the backstop on a hard kill). Strictly best-effort: a router without UPnP/NAT-PMP is a normal case — it is logged and the proxy continues. Bounded by start/stop timeouts so a non-responding gateway never delays startup or hangs shutdown. Disable with `--no-port-mapping`. The discovered external endpoint is exposed via `getMappedEndpoint()` for the upcoming server-side reachability probe (not yet reported). `@silentbot1/nat-api` is now a direct dependency (was transitive via WebTorrent).

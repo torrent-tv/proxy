@@ -56,24 +56,29 @@ Decided direction — full plan in the parent `../CLAUDE.md`. Proxy-side pieces:
   same lib WebTorrent uses for the torrent port). Maps TCP 9090 with a 2 h
   auto-renewed lease, removed on shutdown (lease expiry covers hard kills).
   Best-effort + start/stop timeouts; `--no-port-mapping` opts out;
-  `getMappedEndpoint()` exposes the external endpoint for the reachability
-  probe. NOT yet done: mapping the **UDP** port WebRTC actually uses (it binds
-  ephemeral UDP ports, so this TCP mapping does not yet help WebRTC — see the
-  NAT-traversal toolbox in the parent CLAUDE.md), and reporting the endpoint
-  to the server.
-- Report the mapped external endpoint (and local addresses) to the server over
-  the tunnel; the server dial-back-verifies reachability before use.
+  `getMappedEndpoint()` exposes the external endpoint. NOT yet done: mapping the
+  **UDP** port WebRTC actually uses (it binds ephemeral UDP ports, so this TCP
+  mapping does not yet help WebRTC — roadmap step 3 in the parent CLAUDE.md).
+  Also pending (next iteration): a success log line in `port-mapper.js` `stop()`
+  (`removed mapping for TCP <port>`) — today stop() only logs on failure, so a
+  clean unmap on shutdown is silent.
+- **Report endpoint to server** — ✅ DONE (proxy 2.9.17). The mapped endpoint
+  is sent over the tunnel (`tunnel-client.sendEndpoint` → `proxy-endpoint`) on
+  mapping success and on every tunnel (re)connect; the server dial-back-verifies
+  reachability (server 0.8.22, roadmap step 2).
 - **HTTPS listener**: serve the existing routes over TLS with a per-proxy
   certificate delivered by the server through the tunnel (persist cert+key
   locally; ~90-day renewals are pushed the same way). Add CORS headers for the
   web-app origin so hls.js / `<video>` can fetch cross-origin.
 - Plain HTTPS becomes the preferred video transport; WebRTC data channel stays
   as fallback for hosts where no port could be opened.
-- **NAT-traversal toolbox** (staged, see parent `../CLAUDE.md`): birthday-
-  paradox port prediction (open ~256 UDP sockets, inject predicted-port ICE
-  candidates) for symmetric NAT; IPv6-first (audit the candidate filter — do
-  not drop *global* v6); STUN-based NAT pre-classification at startup reported
-  to the registry; relay-then-upgrade later.
+- **Later roadmap steps** (single staged roadmap in parent `../CLAUDE.md`,
+  WebRTC-first ordering): step 3 map the WebRTC UDP port (fixed
+  `portRangeBegin`/`End` + UPnP-map UDP); step 4 birthday-paradox port
+  prediction (open ~256 UDP sockets, inject predicted-port ICE candidates) for
+  symmetric NAT; step 5 IPv6-first (audit the candidate filter — do not drop
+  *global* v6) + STUN NAT pre-classification reported to the registry; then
+  the DNS+TLS path (steps 6–7); step 8 relay-then-upgrade (deferred).
 - Future: ed25519 proxy identity (sign announcements), BEP 44 endpoint
   announcements via the `bittorrent-dht` already bundled with WebTorrent.
 
@@ -82,17 +87,16 @@ All of this must stay deployment-agnostic (HA addon, bare npm, Docker).
 ## Disk hygiene (open item — torrent data is NOT cleaned up today)
 
 HLS segments are handled (`hls-session-manager.js`: idle TTL, `disposeSession`,
-`disposeAll`). Torrent data is NOT: `new WebTorrent()` in `torrent-pool.js` uses
-the default FS store under `os.tmpdir()`, there is no `client.remove()` /
-`torrent.destroy()`, `deselect()` only stops further download, nothing sweeps
-orphans at startup, and `TorrentPool` is not wired into the `onClose` shutdown
-hook (`server.js` only disposes HLS sessions on close — see `cli.js` shutdown →
-`app.close()` → `onClose`).
+`disposeAll`). Torrent data is **partially** handled: shutdown cleanup is done
+(`TorrentPool.destroyAll()` with `destroyStore: true`, wired into the `onClose`
+hook — proxy 2.9.15), but `deselect()` only stops further download and nothing
+removes a torrent's data **while the proxy keeps running**, nor sweeps orphans
+left by a previous hard kill at startup.
 
-Level 1 (do first): `client.remove(torrent, { destroyStore: true })` on last-
-file refcount 0 + idle TTL; startup sweep of orphaned store dirs; wire
-`TorrentPool` teardown into the `onClose` hook so closing the proxy cleans up
-(not only startup); global disk cap with LRU eviction of whole torrents.
+Level 1 — remaining: `client.remove(torrent, { destroyStore: true })` on last-
+file refcount 0 + idle TTL (mirror the HLS session model); startup sweep of
+orphaned store dirs under `os.tmpdir()`; global disk cap with LRU eviction of
+whole torrents. (Shutdown teardown ✅ done.)
 Level 2 (research): sliding-window chunk store. Full rationale in the parent
 `../CLAUDE.md` "Disk hygiene" section.
 

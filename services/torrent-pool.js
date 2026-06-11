@@ -7,8 +7,22 @@
  */
 
 import crypto from "node:crypto";
+import os from "node:os";
+import path from "node:path";
+import { rmSync } from "node:fs";
 import WebTorrent from "webtorrent";
 import { logger } from "../utils/logger.js";
+
+// WebTorrent's default download root (see webtorrent lib/torrent.js: TMP =
+// path.join(os.tmpdir(), 'webtorrent')). We use the default store, so all
+// torrent data lives under here.
+const WEBTORRENT_STORE_ROOT = path.join(os.tmpdir(), "webtorrent");
+
+// How long a torrent may sit with zero active file readers before it is
+// removed (with its on-disk store). Generous so brief gaps between ffmpeg
+// range reads — or a short pause — do not evict an in-use torrent; a longer
+// idle (viewer gone) frees the disk. Re-requesting re-adds (re-downloads) it.
+const TORRENT_IDLE_TTL_MS = 300_000;
 
 // Bytes ahead of a read position to mark CRITICAL (download-first) on each
 // range request. Big enough to unstick a seek into an undownloaded region,
@@ -55,7 +69,26 @@ export class TorrentPool {
    */
   #pending = new Map();
 
+  /**
+   * Pending idle-removal timers, keyed by torrent object. A torrent with zero
+   * file refcount is scheduled for removal; re-acquiring it cancels the timer.
+   *
+   * @type {Map<import("webtorrent").Torrent, ReturnType<typeof setTimeout>>}
+   */
+  #idleTimers = new Map();
+
   constructor() {
+    // Sweep orphaned torrent data left by a previous hard kill (no graceful
+    // shutdown ran, so destroyAll never cleaned the store). Safe here: no
+    // torrents are loaded yet at construction. Best-effort, synchronous so it
+    // completes before the client starts writing.
+    try {
+      rmSync(WEBTORRENT_STORE_ROOT, { recursive: true, force: true });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      logger.warn(`torrent-pool: could not sweep orphaned store at startup: ${message}`);
+    }
+
     /** @type {import("webtorrent").WebTorrent} */
     this.client = new WebTorrent();
 
@@ -170,6 +203,8 @@ export class TorrentPool {
       usage = new Map();
       this.fileUsageByTorrent.set(torrent, usage);
     }
+    // The torrent is in use again — cancel any pending idle removal.
+    this.#cancelIdleRemoval(torrent);
     usage.set(fileIndex, (usage.get(fileIndex) ?? 0) + 1);
     this.#syncSelections(torrent, usage);
 
@@ -187,9 +222,82 @@ export class TorrentPool {
       }
       if (usage.size === 0) {
         this.fileUsageByTorrent.delete(torrent);
+        // No active readers — schedule removal (with store) after an idle TTL.
+        this.#scheduleIdleRemoval(torrent);
       }
       this.#syncSelections(torrent, usage);
     };
+  }
+
+  /**
+   * Schedule removal of a torrent (with its on-disk store) after
+   * {@link TORRENT_IDLE_TTL_MS} of zero file refcount. Idempotent — replaces
+   * any existing timer for the torrent.
+   *
+   * @param {import("webtorrent").Torrent} torrent
+   * @returns {void}
+   */
+  #scheduleIdleRemoval(torrent) {
+    if (!torrent) {
+      return;
+    }
+    this.#cancelIdleRemoval(torrent);
+    const timer = setTimeout(() => {
+      this.#idleTimers.delete(torrent);
+      // Re-check: a new acquire since scheduling would have cancelled this
+      // timer, but guard anyway against a race.
+      const usage = this.fileUsageByTorrent.get(torrent);
+      if (usage && usage.size > 0) {
+        return;
+      }
+      this.#removeTorrent(torrent);
+    }, TORRENT_IDLE_TTL_MS);
+    timer.unref?.();
+    this.#idleTimers.set(torrent, timer);
+  }
+
+  /**
+   * Cancel a pending idle-removal timer for a torrent, if any.
+   *
+   * @param {import("webtorrent").Torrent} torrent
+   * @returns {void}
+   */
+  #cancelIdleRemoval(torrent) {
+    const timer = this.#idleTimers.get(torrent);
+    if (timer) {
+      clearTimeout(timer);
+      this.#idleTimers.delete(torrent);
+    }
+  }
+
+  /**
+   * Remove a torrent from the pool together with its on-disk store, freeing
+   * disk while the proxy keeps running. Best-effort.
+   *
+   * @param {import("webtorrent").Torrent} torrent
+   * @returns {void}
+   */
+  #removeTorrent(torrent) {
+    if (!torrent) {
+      return;
+    }
+    // Drop it from the source→torrent map so a later request re-adds it.
+    for (const [key, value] of this.torrents) {
+      if (value === torrent) {
+        this.torrents.delete(key);
+        break;
+      }
+    }
+    this.fileUsageByTorrent.delete(torrent);
+    const name = typeof torrent.name === "string" ? torrent.name : "(unknown)";
+    try {
+      torrent.destroy({ destroyStore: true }, () => {
+        logger.info(`torrent-pool: removed idle torrent "${name}" and its store`);
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      logger.warn(`torrent-pool: failed to remove idle torrent "${name}": ${message}`);
+    }
   }
 
   /**
@@ -438,6 +546,12 @@ export class TorrentPool {
    * @returns {Promise<void>}
    */
   async destroyAll() {
+    // Cancel any pending idle-removal timers — destroyAll handles teardown.
+    for (const timer of this.#idleTimers.values()) {
+      clearTimeout(timer);
+    }
+    this.#idleTimers.clear();
+
     if (!this.client || this.client.destroyed) {
       return;
     }

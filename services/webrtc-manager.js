@@ -13,7 +13,10 @@ import nodeDataChannel from "node-datachannel";
 
 /** @import { WebRtcSignal } from './tunnel-client.js' */
 
-const ICE_SERVERS = ["stun:stun.l.google.com:19302"];
+// Two STUN servers from different operators, both with IPv6 (AAAA) records, so
+// the proxy gathers a server-reflexive candidate over BOTH v4 and (when the
+// host has global v6) v6 — enabling a direct IPv6 path on v6-native networks.
+const ICE_SERVERS = ["stun:stun.l.google.com:19302", "stun:stun.cloudflare.com:3478"];
 
 // Symmetric-NAT port prediction window. For each real srflx candidate we offer
 // this many extra candidates at ports base + delta*k (k = 1..N), because the
@@ -82,46 +85,47 @@ function buildPredictedSrflxCandidates(candidate, delta, windowSize = PORT_PREDI
 }
 
 /**
- * Return true when the ICE candidate string describes a `typ host` candidate
- * with a private (RFC 1918 / ULA / loopback) IP address.
+ * Classify an ICE candidate by its address family and scope, for diagnostics.
  *
- * Browsers enforce Private Network Access (PNA) and show a permission dialog
- * when a page served from a public origin (e.g. webauth.courses) attempts a
- * WebRTC connection to a private-network address.  Filtering these candidates
- * out before forwarding them to the browser lets the connection proceed via the
- * server-reflexive (srflx) candidate — the proxy's public IP as seen by STUN —
- * which does not trigger PNA.
+ * Returns one of: `v4-private`, `v4-public`, `v6-global`, `v6-ula`,
+ * `v6-linklocal`, `v6-loopback`, or `unknown`. This is logged for every
+ * candidate so the field log shows whether a **global IPv6** path is being
+ * offered (IPv6 has no NAT — if both sides have a global v6 address the
+ * connection can go direct, which matters for v6-native mobile networks).
  *
- * Edge case: if no srflx candidate is available (STUN unreachable, symmetric
- * NAT that maps differently per destination, etc.) all host candidates are
- * suppressed and the connection will fail.  We accept this trade-off; STUN is
- * a hard dependency of the WebRTC path in any case.
+ * Note on PNA: a `v4-private` host candidate triggers the browser's Private
+ * Network Access permission prompt; the connection otherwise proceeds via the
+ * public srflx candidate. We forward all candidates regardless (the browser
+ * decides) — this only labels them.
  *
- * @param {string} candidate - Raw candidate attribute string from node-datachannel.
- * @returns {boolean}
+ * @param {string} candidate - Raw candidate attribute string (with or without `a=`).
+ * @returns {"v4-private"|"v4-public"|"v6-global"|"v6-ula"|"v6-linklocal"|"v6-loopback"|"unknown"}
  */
-function isPrivateHostCandidate(candidate) {
-  // Only care about "typ host" — srflx and relay are already public/relay.
-  if (!candidate.includes("typ host")) {
-    return false;
+function candidateAddrKind(candidate) {
+  const parts = candidate.replace(/^a=/, "").split(" ");
+  const ip = parts.length > 4 ? parts[4] : "";
+  if (!ip) {
+    return "unknown";
   }
-  // RFC 1918 IPv4 private ranges.
-  if (/\b(10\.|172\.(1[6-9]|2\d|3[01])\.|192\.168\.|169\.254\.)/.test(candidate)) {
-    return true;
+  if (!ip.includes(":")) {
+    // IPv4: RFC 1918 / loopback / link-local are private.
+    if (/^(10\.|127\.|169\.254\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.)/.test(ip)) {
+      return "v4-private";
+    }
+    return "v4-public";
   }
-  // Docker / typical private subnets not covered above (100.64–127 are special).
-  if (/\b127\./.test(candidate)) {
-    return true;
+  const low = ip.toLowerCase();
+  if (low === "::1") {
+    return "v6-loopback";
   }
-  // IPv6 loopback.
-  if (/\s::1\s/.test(candidate)) {
-    return true;
+  if (low.startsWith("fe80")) {
+    return "v6-linklocal";
   }
-  // IPv6 Unique Local Addresses (ULA): fc00::/7 — starts with fc or fd.
-  if (/\s(?:fc|fd)[0-9a-f]{2}:/i.test(candidate)) {
-    return true;
+  if (/^f[cd][0-9a-f]{2}:/.test(low)) {
+    // Unique Local Address (fc00::/7).
+    return "v6-ula";
   }
-  return false;
+  return "v6-global";
 }
 
 /**
@@ -245,11 +249,12 @@ export function createWebRtcManager({ sendSignal, onDataChannel, onLog, udpPort,
     // Network Access (PNA) permission dialog once; after the user allows it
     // the connection proceeds via the local LAN path.
     pc.onLocalCandidate((candidate, mid) => {
-      const isPrivate = isPrivateHostCandidate(candidate);
-      // Log the full candidate (addr:port typ …) so we can confirm WebRTC is
-      // pinned to the mapped UDP port and diagnose which paths are offered.
+      const kind = candidateAddrKind(candidate);
+      // Log the full candidate (addr:port typ …) with its address kind so we
+      // can confirm WebRTC is pinned to the mapped UDP port, see whether a
+      // global IPv6 path is offered, and diagnose which routes are available.
       log(
-        `[webrtc] Session ${sessionId.slice(0, 8)}: sending ${isPrivate ? "private" : "public"} candidate: ${candidate.replace(/^a=/, "")}`
+        `[webrtc] Session ${sessionId.slice(0, 8)}: sending ${kind} candidate: ${candidate.replace(/^a=/, "")}`
       );
       sendSignal(sessionId, { type: "candidate", candidate, mid });
 

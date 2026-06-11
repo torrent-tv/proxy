@@ -1,3 +1,5 @@
+import { logger } from "../../../../utils/logger.js";
+
 /**
  * Return download statistics for a registered torrent source.
  *
@@ -38,5 +40,20 @@ export async function handleApiSourceStatsGet(req, reply, { sourceRegistry, torr
   const fileIndexRaw = typeof req.query.fileIndex === "string" ? req.query.fileIndex : "";
   const fileIndex = fileIndexRaw !== "" && /^\d+$/.test(fileIndexRaw) ? Number(fileIndexRaw) : null;
 
-  return reply.send(torrentPool.getFileStats(torrent, fileIndex));
+  const stats = torrentPool.getFileStats(torrent, fileIndex);
+
+  // Diagnostic: surface the real swarm state per poll so a cold-start download
+  // stall (0 peers / header not advancing → playback-plan blocks on the codec
+  // probe → browser timeout) is visible in the proxy log.
+  const downKbps = (stats.downloadSpeed / 1024).toFixed(0);
+  const filePct = stats.fileProgress != null ? `${(stats.fileProgress * 100).toFixed(1)}%` : "n/a";
+  const header =
+    stats.headerBytes != null
+      ? `${stats.headerDownloadedBytes}/${stats.headerBytes}B`
+      : "n/a";
+  logger.info(
+    `[stats] ${sourceKey.slice(0, 8)} peers=${stats.numPeers} down=${downKbps}KB/s file=${filePct} header=${header}`
+  );
+
+  return reply.send(stats);
 }

@@ -71,10 +71,19 @@ function isPrivateHostCandidate(candidate) {
  * @property {(message: string) => void} [onLog]
  *   Optional log sink.
  * @property {number} [udpPort]
- *   When set, every PeerConnection is pinned to this single UDP port and ICE
- *   UDP multiplexing is enabled, so all sessions share one port that can be
- *   statically UPnP-mapped (makes the WebRTC path reachable behind NAT). When
- *   omitted, node-datachannel uses an ephemeral UDP port (previous behaviour).
+ *   When set, all WebRTC sessions are multiplexed onto this single UDP port so
+ *   it can be statically UPnP-mapped (one mapping, one reachable port). A
+ *   persistent {@link import("node-datachannel").IceUdpMuxListener} is created
+ *   once at startup and owns the shared socket; every PeerConnection enables
+ *   `enableIceUdpMux` on the same port and demuxes over it by ICE ufrag.
+ *
+ *   The persistent listener is the crucial part: per-PeerConnection
+ *   `enableIceUdpMux` WITHOUT it ties the shared socket to a connection's
+ *   lifetime, so a freshly-opened session fails to bind the port while a
+ *   just-closed one still holds it → "Failed to gather local ICE candidates"
+ *   (which crashed the proxy). The listener keeps the socket alive across
+ *   sessions; verified with sequential + concurrent connections on one port.
+ *   When omitted, node-datachannel uses an ephemeral UDP port.
  */
 
 /**
@@ -86,6 +95,9 @@ function isPrivateHostCandidate(candidate) {
  *   the matching peer connection, creating it if necessary.
  * @property {(sessionId: string) => void} closeSession
  *   Tear down and remove a peer connection by session ID.
+ * @property {() => void} dispose
+ *   Close all peer connections and stop the shared UDP mux listener. Call on
+ *   proxy shutdown so the listener's socket is released.
  */
 
 /**
@@ -98,16 +110,6 @@ export function createWebRtcManager({ sendSignal, onDataChannel, onLog, udpPort 
   /** @type {Map<string, import("node-datachannel").PeerConnection>} */
   const peers = new Map();
 
-  // Base PeerConnection config shared by every session. When a UDP port is
-  // configured, pin all sessions to it and enable ICE UDP mux so they share the
-  // single (UPnP-mapped) port; otherwise fall back to an ephemeral UDP port.
-  const pcConfig = { iceServers: ICE_SERVERS };
-  if (Number.isInteger(udpPort) && udpPort > 0 && udpPort <= 65535) {
-    pcConfig.enableIceUdpMux = true;
-    pcConfig.portRangeBegin = udpPort;
-    pcConfig.portRangeEnd = udpPort;
-  }
-
   /**
    * @param {string} message
    * @returns {void}
@@ -115,6 +117,36 @@ export function createWebRtcManager({ sendSignal, onDataChannel, onLog, udpPort 
   function log(message) {
     if (typeof onLog === "function") {
       onLog(message);
+    }
+  }
+
+  // Base PeerConnection config shared by every session.
+  const pcConfig = { iceServers: ICE_SERVERS };
+
+  // Single-port UDP mux: create ONE persistent listener that owns the shared
+  // UDP socket for the proxy's whole lifetime, then have every PeerConnection
+  // mux over it (enableIceUdpMux + the same fixed port). The listener must
+  // outlive individual sessions — without it the socket is bound/freed per
+  // connection and a repeat session fails to gather ICE candidates.
+  /** @type {import("node-datachannel").IceUdpMuxListener | null} */
+  let udpMuxListener = null;
+  if (Number.isInteger(udpPort) && udpPort > 0 && udpPort <= 65535) {
+    try {
+      udpMuxListener = new nodeDataChannel.IceUdpMuxListener(udpPort);
+      // STUN that doesn't match an existing session (our PeerConnections are
+      // created from the SDP offer before the browser's STUN arrives, so normal
+      // traffic is "handled"). Stray/unhandled requests are simply dropped.
+      udpMuxListener.onUnhandledStunRequest(() => {});
+      pcConfig.enableIceUdpMux = true;
+      pcConfig.portRangeBegin = udpPort;
+      pcConfig.portRangeEnd = udpPort;
+      log(`[webrtc] UDP mux listener bound on port ${udpPort}; all sessions share it`);
+    } catch (error) {
+      // Could not bind the mux port — fall back to ephemeral UDP ports (no
+      // single-port reachability, but the proxy still works on LAN / via STUN).
+      const message = error instanceof Error ? error.message : String(error);
+      log(`[webrtc] UDP mux listener failed on port ${udpPort} (${message}); using ephemeral ports`);
+      udpMuxListener = null;
     }
   }
 
@@ -225,9 +257,19 @@ export function createWebRtcManager({ sendSignal, onDataChannel, onLog, udpPort 
         return;
       }
       log(`[webrtc] Session ${sessionId.slice(0, 8)}: received offer`);
-      const pc = getOrCreatePeer(sessionId);
-      pc.setRemoteDescription(signal.sdp, "offer");
-      // `onLocalDescription` fires automatically with the SDP answer.
+      // node-datachannel can throw SYNCHRONOUSLY here (e.g. "Failed to gather
+      // local ICE candidates" when the pinned UDP port cannot be bound). A
+      // single bad session must never crash the whole proxy — that would drop
+      // every other viewer and the tunnel. Contain it: fail this session only.
+      try {
+        const pc = getOrCreatePeer(sessionId);
+        pc.setRemoteDescription(signal.sdp, "offer");
+        // `onLocalDescription` fires automatically with the SDP answer.
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        log(`[webrtc] Session ${sessionId.slice(0, 8)}: failed to handle offer: ${message}`);
+        closeSession(sessionId);
+      }
       return;
     }
 
@@ -237,7 +279,12 @@ export function createWebRtcManager({ sendSignal, onDataChannel, onLog, udpPort 
         return;
       }
       if (typeof signal.candidate === "string" && typeof signal.mid === "string") {
-        pc.addRemoteCandidate(signal.candidate, signal.mid);
+        try {
+          pc.addRemoteCandidate(signal.candidate, signal.mid);
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          log(`[webrtc] Session ${sessionId.slice(0, 8)}: failed to add candidate: ${message}`);
+        }
       }
     }
   }
@@ -258,5 +305,20 @@ export function createWebRtcManager({ sendSignal, onDataChannel, onLog, udpPort 
     }
   }
 
-  return { handleSignal, closeSession };
+  /**
+   * Close all peer connections and stop the shared UDP mux listener.
+   *
+   * @returns {void}
+   */
+  function dispose() {
+    for (const sessionId of [...peers.keys()]) {
+      closeSession(sessionId);
+    }
+    if (udpMuxListener) {
+      try { udpMuxListener.stop(); } catch { /* ignore */ }
+      udpMuxListener = null;
+    }
+  }
+
+  return { handleSignal, closeSession, dispose };
 }

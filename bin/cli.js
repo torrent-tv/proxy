@@ -19,6 +19,7 @@ import { createTunnelClient } from "../services/tunnel-client.js";
 import { createWebRtcManager } from "../services/webrtc-manager.js";
 import { createDataChannelHandler } from "../services/data-channel-handler.js";
 import { collectHealthMetrics } from "../services/health-collector.js";
+import { createPortMapper } from "../services/port-mapper.js";
 import { logger } from "../utils/logger.js";
 
 const require = createRequire(import.meta.url);
@@ -53,6 +54,7 @@ program
   .option("--id <id>", "Stable client id")
   .option("--name <name>", "Display name")
   .option("--no-transcode-audio", "Disable optional HLS AAC audio transcoding")
+  .option("--no-port-mapping", "Disable automatic UPnP/NAT-PMP port mapping")
   .option("--ffmpeg-bin <path>", "Path to ffmpeg binary")
   .option("--token <token>", "Registration token", "")
   .addHelpText("after", HELP_EXAMPLES);
@@ -75,6 +77,7 @@ const clientId = options.id ? String(options.id) : crypto.randomUUID();
 const clientName = options.name ? String(options.name) : `proxy-${clientId.slice(0, 8)}`;
 const token = String(options.token ?? "");
 const transcodeAudio = options.transcodeAudio !== false;
+const portMappingEnabled = options.portMapping !== false;
 const bundledFfmpegBin = typeof ffmpegStatic === "string" ? ffmpegStatic : "";
 const ffmpegBin = options.ffmpegBin ? String(options.ffmpegBin) : bundledFfmpegBin || "ffmpeg";
 
@@ -115,6 +118,9 @@ let shutdownInProgress = false;
 
 /** @type {ReturnType<typeof createTunnelClient> | null} */
 let tunnelClient = null;
+
+/** @type {ReturnType<typeof createPortMapper> | null} */
+let portMapper = null;
 
 
 /**
@@ -184,6 +190,12 @@ async function shutdown(signal) {
   }
   logger.warn(`Received ${signal}, shutting down...`);
   try {
+    // Remove the router port mapping before exiting (lease expiry is the
+    // backstop if this is skipped on a hard kill).
+    if (portMapper) {
+      await portMapper.stop();
+      portMapper = null;
+    }
     if (app) {
       await app.close();
     }
@@ -214,6 +226,20 @@ try {
   logger.info(`Advertised direct URL: ${directBaseUrl}`);
   if (transcodeAudio) {
     logger.info(`Optional HLS audio transcode is enabled (ffmpeg: ${ffmpegBin}).`);
+  }
+
+  // Try to open the local port on the home router (UPnP/NAT-PMP) so the proxy
+  // is reachable from the internet without manual port forwarding. Best-effort
+  // and fire-and-forget: failure is normal (router without UPnP) and must not
+  // delay tunnel connect / registration, so we do not await it.
+  if (portMappingEnabled) {
+    portMapper = createPortMapper({ port: actualPort, protocol: "TCP" });
+    void portMapper.start().catch((error) => {
+      const message = error instanceof Error ? error.message : String(error);
+      logger.warn(`Port mapping failed to start: ${message}`);
+    });
+  } else {
+    logger.info("Automatic port mapping is disabled (--no-port-mapping).");
   }
 
   // Create tunnel + WebRTC manager.

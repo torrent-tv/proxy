@@ -70,6 +70,11 @@ function isPrivateHostCandidate(candidate) {
  *   `node-datachannel` `DataChannel` object; hand it to `createDataChannelHandler`.
  * @property {(message: string) => void} [onLog]
  *   Optional log sink.
+ * @property {number} [udpPort]
+ *   When set, every PeerConnection is pinned to this single UDP port and ICE
+ *   UDP multiplexing is enabled, so all sessions share one port that can be
+ *   statically UPnP-mapped (makes the WebRTC path reachable behind NAT). When
+ *   omitted, node-datachannel uses an ephemeral UDP port (previous behaviour).
  */
 
 /**
@@ -89,9 +94,19 @@ function isPrivateHostCandidate(candidate) {
  * @param {WebRtcManagerOptions} options
  * @returns {WebRtcManager}
  */
-export function createWebRtcManager({ sendSignal, onDataChannel, onLog }) {
+export function createWebRtcManager({ sendSignal, onDataChannel, onLog, udpPort }) {
   /** @type {Map<string, import("node-datachannel").PeerConnection>} */
   const peers = new Map();
+
+  // Base PeerConnection config shared by every session. When a UDP port is
+  // configured, pin all sessions to it and enable ICE UDP mux so they share the
+  // single (UPnP-mapped) port; otherwise fall back to an ephemeral UDP port.
+  const pcConfig = { iceServers: ICE_SERVERS };
+  if (Number.isInteger(udpPort) && udpPort > 0 && udpPort <= 65535) {
+    pcConfig.enableIceUdpMux = true;
+    pcConfig.portRangeBegin = udpPort;
+    pcConfig.portRangeEnd = udpPort;
+  }
 
   /**
    * @param {string} message
@@ -118,9 +133,7 @@ export function createWebRtcManager({ sendSignal, onDataChannel, onLog }) {
       return existing;
     }
 
-    const pc = new nodeDataChannel.PeerConnection(`proxy-${sessionId.slice(0, 8)}`, {
-      iceServers: ICE_SERVERS
-    });
+    const pc = new nodeDataChannel.PeerConnection(`proxy-${sessionId.slice(0, 8)}`, pcConfig);
 
     // Forward all ICE candidates to the browser through the tunnel.
     //

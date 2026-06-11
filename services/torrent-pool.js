@@ -423,4 +423,56 @@ export class TorrentPool {
       // Best effort — never break streaming because prioritization failed.
     }
   }
+
+  /**
+   * Destroy every torrent together with its on-disk store, then tear down the
+   * WebTorrent client. Called from the proxy's graceful-shutdown `onClose`
+   * hook so downloaded torrent data does not linger under `os.tmpdir()` after
+   * the process stops.
+   *
+   * `client.destroy()` on its own destroys the torrents but only *closes* their
+   * stores (data stays on disk), so each torrent is removed explicitly with
+   * `{ destroyStore: true }` first. Best-effort: never rejects and never hangs
+   * on a single store-removal error during shutdown.
+   *
+   * @returns {Promise<void>}
+   */
+  async destroyAll() {
+    if (!this.client || this.client.destroyed) {
+      return;
+    }
+
+    // Destroy each torrent with its store so downloaded pieces are removed
+    // from disk. This also removes the torrent from `client.torrents`, so the
+    // subsequent `client.destroy()` only tears down the client internals.
+    const torrents = [...this.client.torrents];
+    await Promise.all(
+      torrents.map(
+        (torrent) =>
+          new Promise((resolve) => {
+            try {
+              torrent.destroy({ destroyStore: true }, () => resolve());
+            } catch (error) {
+              const message = error instanceof Error ? error.message : String(error);
+              logger.warn(`failed to destroy torrent store: ${message}`);
+              resolve();
+            }
+          })
+      )
+    );
+
+    // Tear down the client itself (DHT, connection pool, TCP server).
+    await new Promise((resolve) => {
+      try {
+        this.client.destroy(() => resolve());
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        logger.warn(`failed to destroy WebTorrent client: ${message}`);
+        resolve();
+      }
+    });
+
+    this.torrents.clear();
+    this.#pending.clear();
+  }
 }

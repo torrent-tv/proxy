@@ -1,3 +1,7 @@
+## 2.9.15
+
+- **Fix**: Torrent data is now cleaned up on graceful shutdown. `TorrentPool.destroyAll()` removes every torrent **with its on-disk store** (`torrent.destroy({ destroyStore: true })`) and then tears down the WebTorrent client; it is wired into the Fastify `onClose` hook (after `hlsSessionManager.disposeAll()`, so ffmpeg readers stop before their source files are removed). Previously nothing called `client.remove()`/`torrent.destroy()` anywhere, so downloaded files accumulated under `os.tmpdir()` until the process was killed — and even a clean SIGTERM/SIGINT left them behind. (First step of disk-hygiene Level 1; refcount/TTL removal and the startup orphan sweep are separate, still pending.)
+
 ## 2.9.14
 
 - **New**: `GET /api/sources/:sourceKey/stats` now reports `headerBytes` / `headerDownloadedBytes` — how much of the file's header/index region (leading 256 KB + trailing 2 MB, the bytes the codec probe needs) is downloaded, counted by whole torrent pieces from the bitfield. Lets the browser show the download phase's progress and ETA toward the next (transcode) phase. Coarse by design (piece granularity).

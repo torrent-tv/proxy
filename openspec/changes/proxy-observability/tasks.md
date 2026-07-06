@@ -14,7 +14,8 @@
 ## 2. Release
 
 - [x] 2.1 CHANGELOG.md entry at 2.9.25
-- [ ] 2.2 `npm run patch` (needs npm auth), then ha-addon bump 0.2.47 + push
+- [x] 2.2 `npm run patch` (needs npm auth), then ha-addon bump 0.2.47 + push
+      (2.9.25 published by the owner — npm 2FA; addon 0.2.47 pushed after)
 - [ ] 2.3 After the addon updates: verify version via `/healthz`, watch the
       addon log for announce lines on a real torrent, confirm no SSDP
       warnings

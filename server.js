@@ -12,6 +12,7 @@ import fastifyHelmet from "@fastify/helmet";
 import fastifyStatic from "@fastify/static";
 import getPort from "get-port";
 import path from "node:path";
+import { createRequire } from "node:module";
 import { fileURLToPath } from "node:url";
 import { handleHealthGet } from "./routes/health/get.js";
 import { handleHealthzGet } from "./routes/healthz/get.js";
@@ -32,6 +33,8 @@ import { logger } from "./utils/logger.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
+const require = createRequire(import.meta.url);
+const { version } = require("./package.json");
 const publicRoot = path.resolve(__dirname, "./public");
 
 /**
@@ -121,8 +124,8 @@ export async function startProxyServer({ host, port, transcodeAudio, ffmpegBin }
     torrentPool
   });
 
-  app.get("/health", async (req, reply) => handleHealthGet(req, reply));
-  app.get("/healthz", async (req, reply) => handleHealthzGet(req, reply));
+  app.get("/health", async (req, reply) => handleHealthGet(req, reply, { version }));
+  app.get("/healthz", async (req, reply) => handleHealthzGet(req, reply, { version }));
   app.post("/api/sources", async (req, reply) =>
     handleApiSourcesPost(req, reply, { sourceRegistry })
   );

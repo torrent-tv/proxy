@@ -157,6 +157,13 @@ export function createPortMapper({
             `map ${p}`
           );
           mappedCount++;
+          if (mappedCount === 1) {
+            // The UPnP SSDP emitter gains one listener per map()/renewal; a
+            // 10-port range exceeds Node's default limit of 10 and floods the
+            // log with MaxListenersExceededWarning. The client is created
+            // lazily by the first map(), so lift the limit right after it.
+            instance._upnpClient?.ssdp?.setMaxListeners?.(0);
+          }
         } catch (error) {
           logger.warn(`port-mapper: failed to map ${protocol} ${p}: ${describeError(error)}`);
         }

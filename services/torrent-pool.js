@@ -110,6 +110,50 @@ export class TorrentPool {
     this.client.on("error", (error) => {
       logger.error(`WebTorrent client error: ${error.message}`);
     });
+    this.client.on("warning", (warning) => {
+      const message = warning instanceof Error ? warning.message : String(warning);
+      logger.warn(`torrent-pool: client warning: ${message}`);
+    });
+  }
+
+  /**
+   * Attach peer-discovery diagnostics to a freshly added torrent: tracker
+   * announce results (seeders/leechers per announce) and torrent-level
+   * warnings (tracker rejections/errors surface here). Without these a
+   * zero-peer torrent gives no clue WHY it has no peers.
+   *
+   * @param {string} label - Short source label for log lines.
+   * @param {import("webtorrent").Torrent} torrent
+   * @returns {void}
+   */
+  #attachSwarmDiagnostics(label, torrent) {
+    const trackerCount = Array.isArray(torrent.announce) ? torrent.announce.length : 0;
+    logger.info(
+      `torrent-pool: [${label}] added: files=${torrent.files?.length ?? 0} ` +
+        `private=${torrent.private ? "yes" : "no"} trackers=${trackerCount}`
+    );
+
+    torrent.on("warning", (warning) => {
+      const message = warning instanceof Error ? warning.message : String(warning);
+      logger.warn(`torrent-pool: [${label}] warning: ${message}`);
+    });
+
+    // bittorrent-tracker's Client emits "update" with each announce response.
+    // `complete`/`incomplete` are the tracker's seeder/leecher counts — the
+    // authoritative answer to "does the tracker accept us and does the swarm
+    // have anyone in it". Internal API, so strictly best-effort.
+    const tracker = torrent.discovery?.tracker;
+    if (tracker && typeof tracker.on === "function") {
+      tracker.on("update", (data) => {
+        const announceUrl = typeof data?.announce === "string" ? data.announce : "?";
+        logger.info(
+          `torrent-pool: [${label}] announce ${announceUrl}: ` +
+            `seeders=${data?.complete ?? "?"} leechers=${data?.incomplete ?? "?"}`
+        );
+      });
+    } else {
+      logger.info(`torrent-pool: [${label}] tracker client not exposed; announce results not logged`);
+    }
   }
 
   /**
@@ -148,6 +192,9 @@ export class TorrentPool {
         this.client.off("error", onError);
         this.torrents.set(key, readyTorrent);
         this.#pending.delete(key);
+        // Key layout is `${sourceType}:${sha1}`; log with the sha1 prefix so
+        // lines correlate with the [stats] source key.
+        this.#attachSwarmDiagnostics(key.split(":")[1]?.slice(0, 8) ?? key, readyTorrent);
         resolve(readyTorrent);
       });
     });

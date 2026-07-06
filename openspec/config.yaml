@@ -1,0 +1,38 @@
+schema: spec-driven
+
+context: |
+  @torrent-tv/proxy — WebTorrent + ffmpeg, published to npm. Downloads a torrent
+  and streams the chosen file to the browser over a WebRTC data channel (plain
+  HTTPS transport planned), transcoding to HLS only for the track(s) the browser
+  cannot play natively (supported track = copied).
+  Constraints (see CLAUDE.md for the full set):
+  - Deployment-agnostic: the HA addon is only one way to run it. No
+    Home-Assistant assumptions; runtime detection with graceful fallback only.
+  - Routes: routes/<path>/<method>.js exporting handle<Name><Method>.
+  - All code, comments and docs in English.
+  - Every behavioural change adds a CHANGELOG.md entry at current package.json
+    version + 1 patch. Never edit package.json version (npm run patch bumps it).
+  - Any behavioural proxy change requires bumping ha-addon config.yaml version
+    in the same changeset (the addon must be re-released to pull the new proxy).
+  - HLS is VOD-only with server-side seeking (never -hls_playlist_type event).
+  - Hardware encoders are gated by a strict startup test; software libx264 is
+    the fallback.
+
+# Project context (optional)
+# This is shown to AI when creating artifacts.
+# Add your tech stack, conventions, style guides, domain knowledge, etc.
+# Example:
+#   context: |
+#     Tech stack: TypeScript, React, Node.js
+#     We use conventional commits
+#     Domain: e-commerce platform
+
+# Per-artifact rules (optional)
+# Add custom rules for specific artifacts.
+# Example:
+#   rules:
+#     proposal:
+#       - Keep proposals under 500 words
+#       - Always include a "Non-goals" section
+#     tasks:
+#       - Break tasks into chunks of max 2 hours

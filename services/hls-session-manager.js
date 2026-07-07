@@ -709,6 +709,7 @@ export class HlsSessionManager {
    * @param {number}  [options.targetHeight=0]           - Target video height (0 = keep source).
    * @param {number}  [options.startPositionSeconds=0]   - Seek start position in seconds.
    * @param {number}  [options.audioTrackIndex=0]        - Type-relative audio track to map (0:a:N).
+   * @param {boolean} [options.manualQuality=false]      - User-forced resolution: encode the target box exactly (capped to source), no budget downscale / runtime downswitch.
    * @returns {Promise<HlsSession>}
    */
   async createOrGetSession({
@@ -721,7 +722,8 @@ export class HlsSessionManager {
     targetWidth = 0,
     targetHeight = 0,
     startPositionSeconds = 0,
-    audioTrackIndex = 0
+    audioTrackIndex = 0,
+    manualQuality = false
   }) {
     if (!this.enabled) {
       const error = new Error("Audio transcoding is disabled on this proxy.");
@@ -739,6 +741,7 @@ export class HlsSessionManager {
         : 0;
     const normalizedAudioTrack =
       Number.isInteger(audioTrackIndex) && audioTrackIndex > 0 ? audioTrackIndex : 0;
+    const forceManualQuality = manualQuality === true && transcodeVideo;
     const sourceMapKey = [
       sourceKey,
       String(fileIndex),
@@ -747,6 +750,7 @@ export class HlsSessionManager {
       `t${normalizedAudioTrack}`,
       String(normalizedTargetWidth),
       String(normalizedTargetHeight),
+      forceManualQuality ? "q-manual" : "q-auto",
       String(normalizedStartPosition)
     ].join(":");
     const existingId = this.sessionIdBySource.get(sourceMapKey);
@@ -835,14 +839,21 @@ export class HlsSessionManager {
     // instead of dropping into sub-realtime playback. Null for hardware
     // encoders or when the source size / benchmark is unavailable — the encode
     // then keeps the client target box and buildVideoArgs's default preset.
-    const encodeBudget = this.#chooseEncodeBudget({
-      transcodeVideo,
-      targetWidth: normalizedTargetWidth,
-      targetHeight: normalizedTargetHeight,
-      sourceWidth,
-      sourceHeight,
-      outputFps
-    });
+    //
+    // Manual quality bypasses the budget entirely: the user forced a specific
+    // resolution, so encode exactly that box (capped to source by the scale
+    // filter) with the default preset, and the runtime downswitch is skipped
+    // for the session (budgetLadder stays null).
+    const encodeBudget = forceManualQuality
+      ? null
+      : this.#chooseEncodeBudget({
+          transcodeVideo,
+          targetWidth: normalizedTargetWidth,
+          targetHeight: normalizedTargetHeight,
+          sourceWidth,
+          sourceHeight,
+          outputFps
+        });
     const softwarePreset = encodeBudget?.preset ?? null;
     // Effective encode box: the budget's downscaled resolution when applied,
     // otherwise the client target (0 = keep source, handled by buildVideoArgs).
@@ -932,9 +943,10 @@ export class HlsSessionManager {
         `branch=${transcodeVideo ? "A(reencode,fixed-gop)" : "B(copy,copyts)"} ` +
         `seg=${usingKeyframeBoundaries ? "keyframe" : "uniform"} ` +
         `${sourceWidth && sourceHeight ? `src=${sourceWidth}x${sourceHeight} ` : ""}` +
-        // Effective encode resolution and whether the realtime budget downscaled
-        // it below the client target (the orientation-independent ceiling).
+        // Effective encode resolution: budget-on (auto downscale from the
+        // ceiling), manual (user-forced, budget off), or unset (keep source).
         `${transcodeVideo && encodeBudget ? `enc=${encodeWidth}x${encodeHeight}@${outputFps} budget=on ` : ""}` +
+        `${transcodeVideo && forceManualQuality ? `enc=${encodeWidth || "src"}x${encodeHeight || "src"}@${outputFps} quality=manual ` : ""}` +
         `${sourceStartTime ? `start=${sourceStartTime.toFixed(3)} ` : ""}` +
         `duration=${hasDuration ? formatSeconds(durationSeconds) : "unknown"} segments=${segmentCount}`
     );

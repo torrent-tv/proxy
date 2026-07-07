@@ -68,6 +68,18 @@ function parseStreams(ffmpegOutput) {
 function parseStreamCodecs(ffmpegOutput) {
   const audioMatch = ffmpegOutput.match(/Audio:\s*([A-Za-z0-9_]+)/i);
   const videoMatch = ffmpegOutput.match(/Video:\s*([A-Za-z0-9_]+)/i);
+  // Coded resolution from the video Stream line ("Video: h264 …, 1280x720, …").
+  // The first WxH is the coded size (any trailing "[SAR …]" is ignored).
+  const videoLineMatch = ffmpegOutput.match(/Video:[^\n]*/i);
+  let videoWidth = 0;
+  let videoHeight = 0;
+  if (videoLineMatch) {
+    const dim = videoLineMatch[0].match(/\b(\d{2,5})x(\d{2,5})\b/);
+    if (dim) {
+      videoWidth = Number(dim[1]);
+      videoHeight = Number(dim[2]);
+    }
+  }
   const containerMatch = ffmpegOutput.match(/Input #0,\s*([^,]+(?:,[^,]+)*?),\s*from/i);
   const durationMatch = ffmpegOutput.match(/Duration:\s*(\d+):(\d+):(\d+(?:\.\d+)?)/i);
   let durationSeconds = 0;
@@ -106,6 +118,8 @@ function parseStreamCodecs(ffmpegOutput) {
     videoCodec: videoMatch ? String(videoMatch[1]).toLowerCase() : "",
     container: containerMatch ? String(containerMatch[1]).trim().toLowerCase() : "",
     durationSeconds,
+    videoWidth,
+    videoHeight,
     audioTracks,
     subtitleTracks
   };
@@ -208,6 +222,8 @@ function buildDirectUrl(localBaseUrl, sourceKey, fileIndex) {
  * @property {string} videoCodec
  * @property {string} container         - Demuxer/container name(s) reported by ffmpeg.
  * @property {number} durationSeconds   - Total media duration in seconds (0 if unknown).
+ * @property {number} videoWidth        - Source coded width (0 if unknown).
+ * @property {number} videoHeight       - Source coded height (0 if unknown).
  */
 
 /**
@@ -289,6 +305,8 @@ export function createPlaybackPlanner({
           videoCodec: "",
           container: "",
           durationSeconds: 0,
+          videoWidth: 0,
+          videoHeight: 0,
           audioTracks: [],
           subtitleTracks: []
         };
@@ -316,7 +334,7 @@ export function createPlaybackPlanner({
         await torrentPool.prefetchFileEdges(torrent, fileIndex);
         probe = await probeStreamCodecs({ ffmpegBin, inputUrl: directUrl, userAgent });
       }
-      const { audioCodec, videoCodec, container, durationSeconds, audioTracks, subtitleTracks } = probe;
+      const { audioCodec, videoCodec, container, durationSeconds, videoWidth, videoHeight, audioTracks, subtitleTracks } = probe;
       const codecsDetected = audioCodec.length > 0 || videoCodec.length > 0;
 
       // `mode` is advisory only (audio-codec based). The browser makes the
@@ -331,6 +349,10 @@ export function createPlaybackPlanner({
         videoCodec,
         container,
         durationSeconds,
+        // Source coded resolution — drives the browser's manual quality menu
+        // (list of forced resolutions <= source). 0 when unknown.
+        videoWidth,
+        videoHeight,
         // Full track inventory for the browser's audio/subtitle menus.
         audioTracks: audioTracks ?? [],
         subtitleTracks: subtitleTracks ?? []

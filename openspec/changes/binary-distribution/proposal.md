@@ -48,5 +48,6 @@ gap that the HA addon solves today.
 
 ## Priority
 
-Queued (research). Prerequisite thinking for the "pool of non-technical
-owners" product goal; not blocking any current stage.
+MINIMAL — explicitly NOT part of the POC (owner decision, 2026-07-07).
+Research for the eventual "pool of non-technical owners" product goal; do
+not pick up while any POC work remains.

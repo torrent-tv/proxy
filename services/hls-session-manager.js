@@ -642,6 +642,7 @@ export class HlsSessionManager {
    * @param {number}  [options.targetWidth=0]            - Target video width (0 = keep source).
    * @param {number}  [options.targetHeight=0]           - Target video height (0 = keep source).
    * @param {number}  [options.startPositionSeconds=0]   - Seek start position in seconds.
+   * @param {number}  [options.audioTrackIndex=0]        - Type-relative audio track to map (0:a:N).
    * @returns {Promise<HlsSession>}
    */
   async createOrGetSession({
@@ -653,7 +654,8 @@ export class HlsSessionManager {
     fileName = "",
     targetWidth = 0,
     targetHeight = 0,
-    startPositionSeconds = 0
+    startPositionSeconds = 0,
+    audioTrackIndex = 0
   }) {
     if (!this.enabled) {
       const error = new Error("Audio transcoding is disabled on this proxy.");
@@ -669,11 +671,14 @@ export class HlsSessionManager {
       Number.isFinite(startPositionSeconds) && startPositionSeconds > 0
         ? Math.round(startPositionSeconds / 10) * 10
         : 0;
+    const normalizedAudioTrack =
+      Number.isInteger(audioTrackIndex) && audioTrackIndex > 0 ? audioTrackIndex : 0;
     const sourceMapKey = [
       sourceKey,
       String(fileIndex),
       transcodeVideo ? "video" : "audio",
       transcodeAudio ? "a1" : "a0",
+      `t${normalizedAudioTrack}`,
       String(normalizedTargetWidth),
       String(normalizedTargetHeight),
       String(normalizedStartPosition)
@@ -783,6 +788,7 @@ export class HlsSessionManager {
       fileIndex,
       transcodeVideo,
       transcodeAudio,
+      audioTrackIndex: normalizedAudioTrack,
       targetWidth: normalizedTargetWidth,
       targetHeight: normalizedTargetHeight,
       sourceWidth,
@@ -1043,7 +1049,8 @@ export class HlsSessionManager {
       "-map",
       "0:v:0?",
       "-map",
-      "0:a:0?",
+      // Type-relative audio track chosen by the viewer (default 0).
+      `0:a:${session.audioTrackIndex ?? 0}?`,
       ...videoCodecArgs,
       ...audioCodecArgs,
       "-f",

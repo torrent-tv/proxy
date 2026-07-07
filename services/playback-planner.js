@@ -11,6 +11,54 @@ import { spawn } from "node:child_process";
 /** Audio codecs that browsers can decode natively without transcoding. */
 const DIRECT_AUDIO_CODECS = new Set(["aac", "mp3", "opus", "vorbis", "flac"]);
 
+/** Subtitle codecs that can be converted to WebVTT (text-based). */
+const TEXT_SUBTITLE_CODECS = new Set(["subrip", "srt", "ass", "ssa", "webvtt", "vtt", "mov_text", "text"]);
+
+/**
+ * Parse every stream from the ffmpeg `-i` banner: type, codec, language tag,
+ * default disposition and (when present) the stream's `title` metadata line.
+ *
+ * @param {string} ffmpegOutput
+ * @returns {Array<{ streamIndex: number, type: string, codec: string, language: string, title: string, isDefault: boolean }>}
+ */
+function parseStreams(ffmpegOutput) {
+  // Only the Input section: ffmpeg prints Stream lines for the null OUTPUT
+  // too (wrapped_avframe / pcm_s16le), which would duplicate every track.
+  const inputSection = ffmpegOutput.split(/^(?:Output #|Stream mapping:)/m)[0] ?? ffmpegOutput;
+  const lines = inputSection.split(/\r?\n/);
+  const streams = [];
+  let current = null;
+  for (const line of lines) {
+    const streamMatch = line.match(
+      /^\s*Stream #0:(\d+)(?:\[[^\]]*\])?(?:\(([A-Za-z0-9]{2,3})\))?: (Audio|Video|Subtitle): ([A-Za-z0-9_]+)/
+    );
+    if (streamMatch) {
+      current = {
+        streamIndex: Number(streamMatch[1]),
+        type: streamMatch[3].toLowerCase(),
+        codec: String(streamMatch[4]).toLowerCase(),
+        language: (streamMatch[2] ?? "").toLowerCase(),
+        title: "",
+        isDefault: /\(default\)/.test(line)
+      };
+      streams.push(current);
+      continue;
+    }
+    if (current) {
+      const titleMatch = line.match(/^\s+title\s*:\s*(.+)$/);
+      if (titleMatch && current.title.length === 0) {
+        current.title = titleMatch[1].trim();
+        continue;
+      }
+      // A new top-level section (non-indented line) ends the stream's block.
+      if (!/^\s/.test(line)) {
+        current = null;
+      }
+    }
+  }
+  return streams;
+}
+
 /**
  * Parse audio and video codec names from ffmpeg stderr output.
  *
@@ -28,11 +76,38 @@ function parseStreamCodecs(ffmpegOutput) {
       Number(durationMatch[1]) * 3600 + Number(durationMatch[2]) * 60 + Number(durationMatch[3]);
     durationSeconds = Number.isFinite(value) ? value : 0;
   }
+  const streams = parseStreams(ffmpegOutput);
+  const audioTracks = streams
+    .filter((s) => s.type === "audio")
+    .map((s, i) => ({
+      // Type-relative index — what ffmpeg's `-map 0:a:N` selects.
+      index: i,
+      streamIndex: s.streamIndex,
+      codec: s.codec,
+      language: s.language,
+      title: s.title,
+      isDefault: s.isDefault
+    }));
+  const subtitleTracks = streams
+    .filter((s) => s.type === "subtitle")
+    .map((s, i) => ({
+      // Type-relative index — what ffmpeg's `-map 0:s:N` selects.
+      index: i,
+      streamIndex: s.streamIndex,
+      codec: s.codec,
+      language: s.language,
+      title: s.title,
+      isDefault: s.isDefault,
+      // Image-based subtitles (PGS/VobSub) cannot become WebVTT.
+      textBased: TEXT_SUBTITLE_CODECS.has(s.codec)
+    }));
   return {
     audioCodec: audioMatch ? String(audioMatch[1]).toLowerCase() : "",
     videoCodec: videoMatch ? String(videoMatch[1]).toLowerCase() : "",
     container: containerMatch ? String(containerMatch[1]).trim().toLowerCase() : "",
-    durationSeconds
+    durationSeconds,
+    audioTracks,
+    subtitleTracks
   };
 }
 
@@ -213,7 +288,9 @@ export function createPlaybackPlanner({
           audioCodec: "",
           videoCodec: "",
           container: "",
-          durationSeconds: 0
+          durationSeconds: 0,
+          audioTracks: [],
+          subtitleTracks: []
         };
         cache.set(cacheKey, plan);
         return plan;
@@ -239,7 +316,7 @@ export function createPlaybackPlanner({
         await torrentPool.prefetchFileEdges(torrent, fileIndex);
         probe = await probeStreamCodecs({ ffmpegBin, inputUrl: directUrl, userAgent });
       }
-      const { audioCodec, videoCodec, container, durationSeconds } = probe;
+      const { audioCodec, videoCodec, container, durationSeconds, audioTracks, subtitleTracks } = probe;
       const codecsDetected = audioCodec.length > 0 || videoCodec.length > 0;
 
       // `mode` is advisory only (audio-codec based). The browser makes the
@@ -253,7 +330,10 @@ export function createPlaybackPlanner({
         audioCodec,
         videoCodec,
         container,
-        durationSeconds
+        durationSeconds,
+        // Full track inventory for the browser's audio/subtitle menus.
+        audioTracks: audioTracks ?? [],
+        subtitleTracks: subtitleTracks ?? []
       };
       // Only cache a plan whose codecs were actually detected. An empty probe is
       // a "header not downloaded yet" signal, not a valid result — caching it

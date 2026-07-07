@@ -349,6 +349,30 @@ function parseFfmpegVideoFps(stderrText) {
 }
 
 /**
+ * Detect an HDR / wide-gamut source from the ffmpeg "Video:" line's colour
+ * metadata. HDR is identified by the transfer function — `smpte2084` (PQ /
+ * HDR10) or `arib-std-b67` (HLG). Re-encoding such a source to 8-bit SDR
+ * without tone mapping produces a washed-out, desaturated picture, so this
+ * gates the tonemap filter chain.
+ *
+ * @param {string} stderrText
+ * @returns {boolean}
+ */
+function parseFfmpegHdr(stderrText) {
+  if (typeof stderrText !== "string" || stderrText.length === 0) {
+    return false;
+  }
+  const videoLine = stderrText.match(/Video:[^\n]*/i);
+  if (!videoLine) {
+    return false;
+  }
+  // ffmpeg prints the colour info in parentheses, e.g.
+  // "yuv420p10le(tv, bt2020nc/bt2020/smpte2084)". The transfer (last token) is
+  // the reliable HDR signal.
+  return /\b(smpte2084|arib-std-b67|arib_std_b67)\b/i.test(videoLine[0]);
+}
+
+/**
  * Run a short ffmpeg probe to extract the total duration AND video resolution
  * of a stream from the container header. Both are printed almost immediately
  * (before any decoding), so this returns as soon as they are seen; an 8 s
@@ -356,7 +380,7 @@ function parseFfmpegVideoFps(stderrText) {
  *
  * @param {string} ffmpegBin - Path to the ffmpeg executable.
  * @param {string | URL} inputUrl - URL of the stream to probe.
- * @returns {Promise<{ durationSeconds: number | null, width: number | null, height: number | null }>}
+ * @returns {Promise<{ durationSeconds: number | null, width: number | null, height: number | null, fps: number | null, startTime: number, isHdr: boolean }>}
  */
 async function probeInputMediaInfo(ffmpegBin, inputUrl) {
   return new Promise((resolve) => {
@@ -377,7 +401,8 @@ async function probeInputMediaInfo(ffmpegBin, inputUrl) {
         width: dims.width,
         height: dims.height,
         fps: parseFfmpegVideoFps(stderr),
-        startTime: parseFfmpegStartTimeSeconds(stderr)
+        startTime: parseFfmpegStartTimeSeconds(stderr),
+        isHdr: parseFfmpegHdr(stderr)
       });
     };
     const timeoutId = setTimeout(() => {
@@ -656,7 +681,8 @@ export class HlsSessionManager {
     startupWaitMs = DEFAULT_STARTUP_WAIT_MS,
     videoEncoder = null,
     softwarePresetBenchmark = null,
-    getSourceStats = null
+    getSourceStats = null,
+    tonemapSupported = false
   }) {
     this.enabled = Boolean(enabled);
     this.ffmpegBin = ffmpegBin;
@@ -672,6 +698,9 @@ export class HlsSessionManager {
     // used to pick the best preset per stream. Null when unavailable (hardware
     // encoder, or benchmark skipped/failed).
     this.softwarePresetBenchmark = Array.isArray(softwarePresetBenchmark) ? softwarePresetBenchmark : null;
+    // Whether this ffmpeg build can tone-map HDR→SDR (zscale + tonemap filters).
+    // Gates the tonemap chain for HDR sources on the software path.
+    this.tonemapSupported = Boolean(tonemapSupported);
     this.segmentDurationSec = segmentDurationSec;
     this.sessionTtlMs = sessionTtlMs;
     this.startupWaitMs = startupWaitMs;
@@ -790,6 +819,15 @@ export class HlsSessionManager {
     const sourceWidth = mediaInfo.width;
     const sourceHeight = mediaInfo.height;
     const sourceStartTime = Number.isFinite(mediaInfo.startTime) ? mediaInfo.startTime : 0;
+    // Tone-map an HDR source to SDR only when re-encoding video on the software
+    // path and this ffmpeg has the filters. Hardware encoders keep their own
+    // (untone-mapped) path for now; when unavailable, HDR falls back to a plain
+    // 8-bit convert (washed-out but playable).
+    const applyTonemap =
+      transcodeVideo === true &&
+      mediaInfo.isHdr === true &&
+      this.tonemapSupported &&
+      this.videoEncoder?.kind === "software";
     // Output frame rate inherited from the source (integer, capped) so 25/30
     // fps content is not resampled to 24. Fixed-GOP encoders keep the fps↔GOP
     // relationship exact; time-based-keyframe encoders just use it as the rate.
@@ -888,6 +926,8 @@ export class HlsSessionManager {
       // software hosts, else the client target). 0 = keep source.
       encodeWidth,
       encodeHeight,
+      // Whether to insert the HDR→SDR tone-map chain (software path only).
+      applyTonemap,
       // Realtime-budget runtime state (software encoder only). The ladder is the
       // resolution rungs from the ceiling down; rungIndex is the current rung.
       // The monitor steps rungIndex down when the encoder is sustainedly
@@ -947,6 +987,9 @@ export class HlsSessionManager {
         // ceiling), manual (user-forced, budget off), or unset (keep source).
         `${transcodeVideo && encodeBudget ? `enc=${encodeWidth}x${encodeHeight}@${outputFps} budget=on ` : ""}` +
         `${transcodeVideo && forceManualQuality ? `enc=${encodeWidth || "src"}x${encodeHeight || "src"}@${outputFps} quality=manual ` : ""}` +
+        // HDR source and whether the tone-map chain was applied (vs washed-out
+        // fallback when the filters are missing or on a hardware encoder).
+        `${transcodeVideo && mediaInfo.isHdr ? `hdr=1 tonemap=${applyTonemap ? "on" : "off"} ` : ""}` +
         `${sourceStartTime ? `start=${sourceStartTime.toFixed(3)} ` : ""}` +
         `duration=${hasDuration ? formatSeconds(durationSeconds) : "unknown"} segments=${segmentCount}`
     );
@@ -1282,7 +1325,9 @@ export class HlsSessionManager {
           // use time-based keyframes just apply it as the frame rate.
           fps: session.outputFps,
           // Software-only; hardware descriptors ignore it.
-          preset: session.softwarePreset ?? undefined
+          preset: session.softwarePreset ?? undefined,
+          // HDR→SDR tone map (software path only; gated on filter availability).
+          tonemap: session.applyTonemap === true
         })
       : ["-c:v", "copy"];
     const audioCodecArgs = session.transcodeAudio

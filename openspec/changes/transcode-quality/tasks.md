@@ -34,10 +34,16 @@
       at the switch point.
 - [ ] 2.3 `-maxrate`/`-bufsize`
 
-## 3. HDR tone mapping (planned)
+## 3. HDR tone mapping
 
-- [ ] 3.1 Detect 10-bit/HDR; insert tonemap chain when re-encoding to 8-bit
-- [ ] 3.2 Guard on tonemap-filter availability in the ffmpeg build
+- [x] 3.1 Detect HDR from the probe (PQ `smpte2084` / HLG `arib-std-b67`
+      transfer); insert a `zscale`+`tonemap` (hable) BT.2020→BT.709 SDR chain
+      when re-encoding video on the software path (after the downscale).
+- [x] 3.2 Guard on tonemap-filter availability: startup `detectTonemapSupport`
+      checks `ffmpeg -filters` for `zscale` + `tonemap`; when missing, HDR
+      falls back to the plain 8-bit convert (washed-out but plays). Logged.
+      NOTE (follow-up 3.3): hardware-encoder tone mapping (tonemap_vaapi / npp /
+      opencl) — software path only for now.
 
 ## 4. Manual quality
 

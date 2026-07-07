@@ -30,7 +30,7 @@ import { createSourceRegistry } from "./store/source-registry.js";
 import { TorrentPool } from "./services/torrent-pool.js";
 import { HlsSessionManager } from "./services/hls-session-manager.js";
 import { createPlaybackPlanner } from "./services/playback-planner.js";
-import { detectVideoEncoder, benchmarkSoftwarePresets } from "./services/hwaccel.js";
+import { detectVideoEncoder, benchmarkSoftwarePresets, detectTonemapSupport } from "./services/hwaccel.js";
 import { logger } from "./utils/logger.js";
 
 const __filename = fileURLToPath(import.meta.url);
@@ -111,6 +111,12 @@ export async function startProxyServer({ host, port, transcodeAudio, ffmpegBin, 
   const softwarePresetBenchmark = videoEncoder?.kind === "software"
     ? await benchmarkSoftwarePresets({ ffmpegBin, logger })
     : null;
+  // Whether this ffmpeg build can tone-map HDR→SDR (zscale + tonemap filters).
+  // Detected once; the session manager applies the tonemap chain only for HDR
+  // sources on the software path when available.
+  const tonemapSupported = transcodeAudio
+    ? await detectTonemapSupport({ ffmpegBin, logger })
+    : false;
   const hlsSessionManager = new HlsSessionManager({
     enabled: transcodeAudio,
     ffmpegBin,
@@ -118,6 +124,7 @@ export async function startProxyServer({ host, port, transcodeAudio, ffmpegBin, 
     localPort: selectedPort,
     videoEncoder,
     softwarePresetBenchmark,
+    tonemapSupported,
     // Live download stats accessor for the realtime budget: lets it tell a
     // CPU-bound transcode from a download-starved input before downscaling.
     getSourceStats: async (sourceKey, fileIndex) => {

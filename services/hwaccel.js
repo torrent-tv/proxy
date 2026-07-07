@@ -27,6 +27,14 @@ import path from "node:path";
 
 const SOFTWARE_PRESET = "ultrafast";
 const SOFTWARE_CRF = "24";
+// HDR→SDR tone-map chain (software). Converts a BT.2020 PQ/HLG source to BT.709
+// 8-bit SDR so the re-encode is not washed-out/desaturated. Requires the
+// `zscale` (libzimg) and `tonemap` filters — gated by detectTonemapSupport;
+// when unavailable the encode falls back to a plain 8-bit convert (no tonemap).
+// npl=100 targets ~100-nit SDR; hable is a well-behaved tone-mapping operator.
+const TONEMAP_FILTER_CHAIN =
+  "zscale=t=linear:npl=100,format=gbrpf32le,zscale=p=bt709," +
+  "tonemap=tonemap=hable:desat=0,zscale=t=bt709:m=bt709:r=tv,format=yuv420p";
 // Default output frame rate when the source rate is unknown, and the rate used
 // by the synthetic startup test-encode / preset benchmark. The real encode
 // inherits the source rate (rounded to an integer, capped) — see
@@ -108,20 +116,24 @@ export function softwareDescriptor() {
     kind: "software",
     device: null,
     inputArgs: [],
-    buildVideoArgs({ targetWidth, targetHeight, segmentDurationSec, preset, fps }) {
+    buildVideoArgs({ targetWidth, targetHeight, segmentDurationSec, preset, fps, tonemap }) {
       const { w, h } = safeDimensions(targetWidth, targetHeight);
       const chosenPreset = typeof preset === "string" && preset.length > 0 ? preset : SOFTWARE_PRESET;
       // Output frame rate: inherited from the source (rounded/capped) by the
       // session manager, TRANSCODE_FPS by default. MUST be an integer and MUST
       // equal the value used in the GOP below, or keyframes drift off the grid.
       const outFps = Number.isInteger(fps) && fps > 0 ? fps : TRANSCODE_FPS;
+      // HDR→SDR tone-map, inserted AFTER the downscale so it runs on the smaller
+      // frame (cheaper on ARM); only when the source is HDR and the filters are
+      // present (session manager gates on both).
+      const tonemapPart = tonemap === true ? `,${TONEMAP_FILTER_CHAIN}` : "";
       return [
         // Never upscale: cap the target box to the source size (min with
         // iw/ih), so a small source (e.g. 720x400) is encoded at its own
         // resolution instead of being scaled up to the viewport — far fewer
         // pixels, much faster on ARM. force_original_aspect_ratio keeps aspect.
         "-vf",
-        `scale='min(${w},iw)':'min(${h},ih)':force_original_aspect_ratio=decrease:force_divisible_by=2,fps=${outFps}`,
+        `scale='min(${w},iw)':'min(${h},ih)':force_original_aspect_ratio=decrease:force_divisible_by=2${tonemapPart},fps=${outFps}`,
         "-c:v", "libx264",
         // Preset is chosen per stream by the session manager from the startup
         // benchmark (highest quality that still encodes the source resolution
@@ -494,6 +506,33 @@ export async function detectVideoEncoder({ ffmpegBin, logger, segmentDurationSec
 
   log.info("hwaccel: no working hardware encoder; using software libx264");
   return software;
+}
+
+/**
+ * Detect whether this ffmpeg build has the filters needed for the HDR→SDR
+ * tone-map chain (`zscale`, from libzimg, and `tonemap`). Both are required;
+ * when either is missing, HDR sources are re-encoded without tone mapping
+ * (washed-out but playable). Always resolves.
+ *
+ * @param {{ ffmpegBin: string, logger?: { info: (m: string) => void, warn: (m: string) => void } }} options
+ * @returns {Promise<boolean>}
+ */
+export async function detectTonemapSupport({ ffmpegBin, logger }) {
+  const log = logger ?? { info: () => {}, warn: () => {} };
+  const { code, stdout } = await runFfmpeg(ffmpegBin, ["-hide_banner", "-filters"], 10000);
+  if (code !== 0) {
+    log.warn("hwaccel: could not list ffmpeg filters; HDR tone mapping disabled");
+    return false;
+  }
+  // `-filters` prints one filter per line: "... zscale  ...", "... tonemap ...".
+  const hasZscale = /\bzscale\b/.test(stdout);
+  const hasTonemap = /\btonemap\b/.test(stdout);
+  const supported = hasZscale && hasTonemap;
+  log.info(
+    `hwaccel: HDR tone mapping ${supported ? "available" : "unavailable"} ` +
+      `(zscale=${hasZscale} tonemap=${hasTonemap})`
+  );
+  return supported;
 }
 
 /**

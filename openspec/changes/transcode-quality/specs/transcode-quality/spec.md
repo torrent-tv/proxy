@@ -117,3 +117,23 @@ behaviour.
 - **WHEN** the viewer selects Auto
 - **THEN** the proxy applies the realtime budget (startup selection + runtime
   downswitch) as before
+
+### Requirement: HDR sources are tone-mapped when re-encoded to SDR
+
+The proxy SHALL apply an HDR→BT.709 SDR tone-map chain when re-encoding an HDR
+source (a BT.2020 PQ `smpte2084` or HLG `arib-std-b67` transfer) to 8-bit SDR on
+the software path, so the output is not washed-out — provided this ffmpeg build
+has the required filters. The proxy SHALL detect filter availability (`zscale`
+and `tonemap`) at startup and, when either is missing, SHALL fall back to a
+plain 8-bit convert without failing playback.
+
+#### Scenario: HDR source, filters available
+- **WHEN** an HDR source is re-encoded on the software path and the build has
+  `zscale` + `tonemap`
+- **THEN** the tone-map chain is inserted and the output is BT.709 SDR (not
+  washed-out)
+
+#### Scenario: HDR source, filters missing
+- **WHEN** an HDR source is re-encoded but the build lacks `zscale`/`tonemap`
+- **THEN** playback still proceeds with a plain 8-bit convert (no tone map) and
+  the limitation is logged

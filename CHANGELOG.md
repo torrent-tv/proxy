@@ -1,3 +1,10 @@
+## 2.9.26
+
+- **New**: Track inventory in the playback plan (OpenSpec change `track-selection`). The codec probe now parses EVERY input stream from the same ffmpeg banner, and the plan returns `audioTracks` and `subtitleTracks` — type-relative index, codec, language tag, `title` metadata, default disposition, and (for subtitles) a `textBased` flag (PGS/VobSub cannot become WebVTT).
+- **New**: Audio track selection for HLS sessions. `POST /api/transcode-sessions` accepts `audioTrackIndex`; the session maps `0:a:N` instead of always the first track, and the index is part of the session key, so switching tracks creates a fresh session (server-side restart) while the old one expires via the idle TTL.
+- **New**: Embedded subtitle extraction — `GET /api/subtitles?sourceKey&fileIndex&trackIndex` streams the chosen text subtitle track converted to WebVTT. Extraction reads the file up to the last cue, so on a cold torrent it drives the sequential download; callers must use a generous timeout. Non-text tracks (or a dead extraction) return 422 before any body.
+- **Chore**: The announce log line strips the query string from the tracker URL — private trackers embed the account passkey there.
+
 ## 2.9.25
 
 - **New**: Observability (OpenSpec change `proxy-observability`). (1) `/healthz` and `/health` now include the proxy `version` — the addon shipped a stale proxy for a whole release and nothing could detect it remotely. (2) Peer-discovery diagnostics in `torrent-pool.js`: each added torrent logs its file count, `private` flag and tracker count; torrent-level `warning` events (tracker rejections/errors) are logged; every tracker announce response is logged with the seeder/leecher counts the tracker returned — so a zero-peer torrent is now explainable from the addon log. (3) Client-level WebTorrent warnings are logged too.

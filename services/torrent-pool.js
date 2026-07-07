@@ -145,7 +145,10 @@ export class TorrentPool {
     const tracker = torrent.discovery?.tracker;
     if (tracker && typeof tracker.on === "function") {
       tracker.on("update", (data) => {
-        const announceUrl = typeof data?.announce === "string" ? data.announce : "?";
+        // Private trackers embed the account passkey in the announce URL —
+        // strip the query string before logging.
+        const announceUrl =
+          typeof data?.announce === "string" ? data.announce.replace(/\?.*$/, "") : "?";
         logger.info(
           `torrent-pool: [${label}] announce ${announceUrl}: ` +
             `seeders=${data?.complete ?? "?"} leechers=${data?.incomplete ?? "?"}`

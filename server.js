@@ -19,6 +19,7 @@ import { handleHealthzGet } from "./routes/healthz/get.js";
 import { handleApiSourcesPost } from "./routes/api/sources/post.js";
 import { handleApiSourceStatsGet } from "./routes/api/sources/stats/get.js";
 import { handleApiPlaybackPlanPost } from "./routes/api/playback-plan/post.js";
+import { handleApiSubtitlesGet } from "./routes/api/subtitles/get.js";
 import { handleApiTranscodeSessionsPost } from "./routes/api/transcode-sessions/post.js";
 import { handleApiTranscodeSessionsProgressGet } from "./routes/api/transcode-sessions/progress/get.js";
 import { handleApiTranscodeSessionReleasePost } from "./routes/api/transcode-sessions/release/post.js";
@@ -134,6 +135,14 @@ export async function startProxyServer({ host, port, transcodeAudio, ffmpegBin }
   );
   app.post("/api/playback-plan", async (req, reply) =>
     handleApiPlaybackPlanPost(req, reply, { playbackPlanner })
+  );
+  app.get("/api/subtitles", async (req, reply) =>
+    handleApiSubtitlesGet(req, reply, {
+      sourceRegistry,
+      torrentPool,
+      ffmpegBin,
+      localBaseUrl: hlsSessionManager.localBaseUrl
+    })
   );
   app.get("/stream", async (req, reply) =>
     handleStreamGet(req, reply, { sourceRegistry, torrentPool })

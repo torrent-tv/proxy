@@ -1,3 +1,7 @@
+## 2.9.27
+
+- **Fix**: A magnet whose infoHash matches a torrent already loaded in the pool no longer fails with 500 "Cannot add duplicate torrent" (scenario: one viewer opened the .torrent file, another pasted the magnet of the same content — different source keys, one swarm). The duplicate-add error now resolves to the already-loaded torrent (waiting for its metadata when it is itself still cold), so both source keys share the swarm. Found by a field test of the magnet flow.
+
 ## 2.9.26
 
 - **New**: Track inventory in the playback plan (OpenSpec change `track-selection`). The codec probe now parses EVERY input stream from the same ffmpeg banner, and the plan returns `audioTracks` and `subtitleTracks` — type-relative index, codec, language tag, `title` metadata, default disposition, and (for subtitles) a `textBased` flag (PGS/VobSub cannot become WebVTT).

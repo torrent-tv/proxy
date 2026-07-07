@@ -187,6 +187,27 @@ export class TorrentPool {
     const promise = new Promise((resolve, reject) => {
       const onError = (error) => {
         this.client.off("error", onError);
+        // The same content can arrive as a .torrent AND as a magnet —
+        // different pool keys, one swarm. WebTorrent rejects the duplicate
+        // add; resolve with the already-loaded torrent instead of failing.
+        const message = error instanceof Error ? error.message : String(error);
+        const dupMatch = /duplicate torrent ([0-9a-f]{40})/i.exec(message);
+        if (dupMatch) {
+          const existing = this.client.torrents.find((t) => t?.infoHash === dupMatch[1]);
+          if (existing) {
+            const settle = () => {
+              this.torrents.set(key, existing);
+              this.#pending.delete(key);
+              resolve(existing);
+            };
+            if (existing.ready) {
+              settle();
+            } else {
+              existing.once("ready", settle);
+            }
+            return;
+          }
+        }
         this.#pending.delete(key);
         reject(error);
       };

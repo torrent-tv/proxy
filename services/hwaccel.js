@@ -558,3 +558,87 @@ export function pickSoftwarePreset(benchmark, pixelsPerSecNeeded) {
   }
   return benchmark[benchmark.length - 1].preset;
 }
+
+// Resolution-ladder heights (output height rungs), high→low. The ladder is
+// derived per-stream from the ceiling (the client-requested, source-capped
+// output box): only rungs at or below the ceiling height are used, so the
+// budget never upscales past what the client asked for. Standard heights keep
+// the downscaled output at familiar resolutions.
+const RESOLUTION_LADDER_HEIGHTS = [2160, 1440, 1080, 720, 540, 480, 360, 240];
+
+/**
+ * Build the resolution ladder for a ceiling box. Returns candidate output
+ * dimensions from the ceiling downward, preserving the ceiling's aspect ratio,
+ * each even-sized. The ceiling itself is always the top rung; ladder heights
+ * at or above it are skipped (never upscale). Deduped by height.
+ *
+ * @param {number} ceilingWidth
+ * @param {number} ceilingHeight
+ * @returns {Array<{ width: number, height: number }>} high→low
+ */
+export function buildResolutionLadder(ceilingWidth, ceilingHeight) {
+  const cw = Number.isInteger(ceilingWidth) && ceilingWidth > 0 ? ceilingWidth : 0;
+  const ch = Number.isInteger(ceilingHeight) && ceilingHeight > 0 ? ceilingHeight : 0;
+  if (!cw || !ch) {
+    return [];
+  }
+  const even = (v) => {
+    const r = Math.round(v);
+    return Math.max(2, r - (r % 2));
+  };
+  /** @type {Array<{ width: number, height: number }>} */
+  const rungs = [{ width: cw, height: ch }];
+  for (const h of RESOLUTION_LADDER_HEIGHTS) {
+    if (h >= ch) {
+      continue; // at/above the ceiling — the ceiling rung already covers it
+    }
+    rungs.push({ width: even(cw * (h / ch)), height: h });
+  }
+  const seen = new Set();
+  return rungs.filter((rung) => {
+    if (seen.has(rung.height)) {
+      return false;
+    }
+    seen.add(rung.height);
+    return true;
+  });
+}
+
+/**
+ * Choose the software encode settings (resolution + preset) that fit the
+ * realtime budget on this host. From the resolution ladder (ceiling downward),
+ * pick the HIGHEST rung whose encode throughput — predicted from the startup
+ * benchmark's fastest preset — clears realtime × PRESET_SPEED_MARGIN. Then, at
+ * that resolution, pick the highest-quality preset that still clears the
+ * margin. When even the lowest rung cannot clear it, use the lowest rung with
+ * the fastest preset (best effort — a smaller picture beats sub-realtime
+ * playback at full size). Returns null when no benchmark or ceiling is
+ * available (the caller keeps the ceiling resolution and the default preset).
+ *
+ * @param {Array<{ preset: string, pixelsPerSec: number }>} benchmark - slowest→fastest
+ * @param {{ width: number, height: number }} ceiling
+ * @param {number} outputFps
+ * @returns {{ width: number, height: number, preset: string, ladder: Array<{ width: number, height: number }>, rungIndex: number } | null}
+ */
+export function chooseSoftwareEncodeSettings(benchmark, ceiling, outputFps) {
+  if (!Array.isArray(benchmark) || benchmark.length === 0) {
+    return null;
+  }
+  const fps = Number.isFinite(outputFps) && outputFps > 0 ? outputFps : TRANSCODE_FPS;
+  const ladder = buildResolutionLadder(ceiling?.width, ceiling?.height);
+  if (ladder.length === 0) {
+    return null;
+  }
+  const fastest = benchmark[benchmark.length - 1].pixelsPerSec; // ultrafast throughput
+  let chosenIndex = ladder.length - 1; // default: lowest rung (best effort)
+  for (let i = 0; i < ladder.length; i += 1) {
+    const needed = ladder[i].width * ladder[i].height * fps;
+    if (fastest >= needed * PRESET_SPEED_MARGIN) {
+      chosenIndex = i;
+      break;
+    }
+  }
+  const chosen = ladder[chosenIndex];
+  const preset = pickSoftwarePreset(benchmark, chosen.width * chosen.height * fps);
+  return { width: chosen.width, height: chosen.height, preset, ladder, rungIndex: chosenIndex };
+}

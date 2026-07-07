@@ -15,7 +15,13 @@ import path from "node:path";
 import { randomUUID } from "node:crypto";
 import { spawn } from "node:child_process";
 import { logger } from "../utils/logger.js";
-import { softwareDescriptor, pickSoftwarePreset, TRANSCODE_FPS, chooseOutputFps } from "./hwaccel.js";
+import {
+  softwareDescriptor,
+  chooseSoftwareEncodeSettings,
+  pickSoftwarePreset,
+  TRANSCODE_FPS,
+  chooseOutputFps
+} from "./hwaccel.js";
 
 const PLAYLIST_FILE_NAME = "index.m3u8";
 const SEGMENT_FILE_NAME_PATTERN = /^segment-\d{5}\.ts$/;
@@ -36,6 +42,30 @@ const RESTART_COOLDOWN_MS = 4_000;
 // segment fetch, so it never expires mid-watch.
 const DEFAULT_SESSION_TTL_MS = 120 * 1000;
 const DEFAULT_STARTUP_WAIT_MS = 5_000;
+// Realtime budget — runtime downswitch (software encoder only). Periodically
+// check each active software-transcode session's ffmpeg `speed`; when it stays
+// below realtime for a sustained window AND the input is not download-starved
+// (so the limit is the encoder, not the torrent), step down one resolution rung
+// and restart at the current segment. Conservative so it never thrashes: a long
+// sustained window, a post-action cooldown, a step cap, and no upswitch (v1).
+const BUDGET_CHECK_INTERVAL_MS = 5_000;
+// Speed below this (cumulative ffmpeg average) counts as "slow"; recovery to
+// realtime resets the slow window (hysteresis).
+const BUDGET_SPEED_SLOW = 0.95;
+const BUDGET_SPEED_OK = 1.0;
+// Slow must persist this long before a downshift (absorbs warm-up + brief
+// complex scenes; the cumulative average won't dip this long unless the host
+// genuinely can't keep up).
+const BUDGET_SUSTAINED_MS = 15_000;
+// After a downshift, wait this long before another (lets the new profile settle
+// and a fresh cumulative average build).
+const BUDGET_ACTION_COOLDOWN_MS = 30_000;
+// Never step down more than this many rungs below the startup choice.
+const BUDGET_MAX_DOWNSHIFTS = 3;
+// The input counts as "keeping up" when the torrent downloads at least this
+// multiple of the source's average byte rate. Below it (and not yet fully
+// downloaded), a low speed is download-bound, not CPU-bound → do NOT downscale.
+const BUDGET_DOWNLOAD_OK_FACTOR = 1.0;
 const MICROSECONDS_PER_SECOND = 1_000_000;
 const PROGRESS_LOG_INTERVAL_MS = 5_000;
 // Read segment files in large blocks so the body is delivered to the data
@@ -625,10 +655,15 @@ export class HlsSessionManager {
     sessionTtlMs = DEFAULT_SESSION_TTL_MS,
     startupWaitMs = DEFAULT_STARTUP_WAIT_MS,
     videoEncoder = null,
-    softwarePresetBenchmark = null
+    softwarePresetBenchmark = null,
+    getSourceStats = null
   }) {
     this.enabled = Boolean(enabled);
     this.ffmpegBin = ffmpegBin;
+    // Optional async accessor for a source's live download stats, used by the
+    // realtime budget to tell a CPU limit from a download-starved input:
+    // (sourceKey, fileIndex) => Promise<{ downloadSpeed, fileLength, fileProgress } | null>.
+    this.getSourceStats = typeof getSourceStats === "function" ? getSourceStats : null;
     // Detected H.264 encoder descriptor (hardware or software). Defaults to
     // software libx264 when no detection result is supplied. May be downgraded
     // to software at runtime if a hardware encode fails.
@@ -647,6 +682,13 @@ export class HlsSessionManager {
       void this.cleanupExpired();
     }, CLEANUP_INTERVAL_MS);
     this.cleanupTimer.unref();
+    // Realtime-budget monitor: only meaningful for the software encoder with a
+    // benchmark (the only path that can pick/step resolution). Cheap no-op scan
+    // otherwise.
+    this.budgetTimer = setInterval(() => {
+      void this.#enforceRealtimeBudget();
+    }, BUDGET_CHECK_INTERVAL_MS);
+    this.budgetTimer.unref();
   }
 
   /**
@@ -787,17 +829,25 @@ export class HlsSessionManager {
     const usingKeyframeBoundaries = hasDuration && !transcodeVideo && Array.isArray(keyframeTimes);
     const segmentCount = segmentBoundaries.length > 1 ? segmentBoundaries.length - 1 : 0;
 
-    // Pick the highest-quality software preset that still encodes the actual
-    // (source-capped) output resolution faster than realtime. Null for hardware
-    // encoders or when the source size / benchmark is unavailable — buildVideoArgs
-    // then uses its static default preset.
-    const softwarePreset = this.#chooseSoftwarePreset({
+    // Realtime budget (software encoder): pick the output resolution + libx264
+    // preset this host can encode faster than realtime. On a weak host this
+    // downscales below the client target (the orientation-independent ceiling)
+    // instead of dropping into sub-realtime playback. Null for hardware
+    // encoders or when the source size / benchmark is unavailable — the encode
+    // then keeps the client target box and buildVideoArgs's default preset.
+    const encodeBudget = this.#chooseEncodeBudget({
       transcodeVideo,
       targetWidth: normalizedTargetWidth,
       targetHeight: normalizedTargetHeight,
       sourceWidth,
-      sourceHeight
+      sourceHeight,
+      outputFps
     });
+    const softwarePreset = encodeBudget?.preset ?? null;
+    // Effective encode box: the budget's downscaled resolution when applied,
+    // otherwise the client target (0 = keep source, handled by buildVideoArgs).
+    const encodeWidth = encodeBudget?.width ?? normalizedTargetWidth;
+    const encodeHeight = encodeBudget?.height ?? normalizedTargetHeight;
 
     const session = {
       id: sessionId,
@@ -818,8 +868,24 @@ export class HlsSessionManager {
       transcodeAudio,
       audioTrackIndex: normalizedAudioTrack,
       outputFps,
+      // Client-requested target box (the orientation-independent ceiling). Kept
+      // for the session key and reference; the actual encode uses encodeWidth/
+      // encodeHeight, which the realtime budget may have downscaled below this.
       targetWidth: normalizedTargetWidth,
       targetHeight: normalizedTargetHeight,
+      // Effective encode resolution handed to ffmpeg (budget-selected on weak
+      // software hosts, else the client target). 0 = keep source.
+      encodeWidth,
+      encodeHeight,
+      // Realtime-budget runtime state (software encoder only). The ladder is the
+      // resolution rungs from the ceiling down; rungIndex is the current rung.
+      // The monitor steps rungIndex down when the encoder is sustainedly
+      // CPU-bound and restarts ffmpeg at the current segment.
+      budgetLadder: encodeBudget?.ladder ?? null,
+      budgetRungIndex: Number.isInteger(encodeBudget?.rungIndex) ? encodeBudget.rungIndex : 0,
+      budgetDownshifts: 0,
+      budgetSlowSince: 0,
+      budgetLastActionAt: 0,
       sourceWidth,
       sourceHeight,
       // Container start time (seconds); subtracted on the copy path so the
@@ -866,6 +932,9 @@ export class HlsSessionManager {
         `branch=${transcodeVideo ? "A(reencode,fixed-gop)" : "B(copy,copyts)"} ` +
         `seg=${usingKeyframeBoundaries ? "keyframe" : "uniform"} ` +
         `${sourceWidth && sourceHeight ? `src=${sourceWidth}x${sourceHeight} ` : ""}` +
+        // Effective encode resolution and whether the realtime budget downscaled
+        // it below the client target (the orientation-independent ceiling).
+        `${transcodeVideo && encodeBudget ? `enc=${encodeWidth}x${encodeHeight}@${outputFps} budget=on ` : ""}` +
         `${sourceStartTime ? `start=${sourceStartTime.toFixed(3)} ` : ""}` +
         `duration=${hasDuration ? formatSeconds(durationSeconds) : "unknown"} segments=${segmentCount}`
     );
@@ -971,25 +1040,190 @@ export class HlsSessionManager {
   }
 
   /**
-   * Choose the libx264 preset for a software video transcode: the highest
-   * quality the startup benchmark says this host can encode at the actual
-   * (source-capped) output resolution faster than realtime. Returns null when
-   * not applicable (no video transcode, hardware encoder, or missing
-   * benchmark/source size) — buildVideoArgs then uses its default preset.
+   * Realtime budget (software encoder only): choose the output resolution AND
+   * libx264 preset this host can encode faster than realtime, from the startup
+   * benchmark. The ceiling is the client-requested box capped to the source
+   * (never upscaled); the budget picks the highest resolution rung at or below
+   * that ceiling that clears realtime × margin, then the best preset at that
+   * resolution. On a weak host this downscales below the client target instead
+   * of dropping into sub-realtime playback. Returns null when not applicable
+   * (no video transcode, hardware encoder, or missing benchmark/source size) —
+   * the encode then keeps the ceiling resolution and the default preset.
    *
-   * @param {{ transcodeVideo: boolean, targetWidth: number, targetHeight: number, sourceWidth: number | null, sourceHeight: number | null }} params
-   * @returns {string | null}
+   * @param {{ transcodeVideo: boolean, targetWidth: number, targetHeight: number, sourceWidth: number | null, sourceHeight: number | null, outputFps: number }} params
+   * @returns {{ width: number, height: number, preset: string } | null}
    */
-  #chooseSoftwarePreset({ transcodeVideo, targetWidth, targetHeight, sourceWidth, sourceHeight }) {
+  #chooseEncodeBudget({ transcodeVideo, targetWidth, targetHeight, sourceWidth, sourceHeight, outputFps }) {
     if (!transcodeVideo || this.videoEncoder?.kind !== "software" || !this.softwarePresetBenchmark) {
       return null;
     }
-    const out = computeOutputDimensions(targetWidth, targetHeight, sourceWidth, sourceHeight);
-    if (!out) {
+    const ceiling = computeOutputDimensions(targetWidth, targetHeight, sourceWidth, sourceHeight);
+    if (!ceiling) {
       return null;
     }
-    const pixelsPerSecNeeded = out.w * out.h * TRANSCODE_FPS;
-    return pickSoftwarePreset(this.softwarePresetBenchmark, pixelsPerSecNeeded);
+    return chooseSoftwareEncodeSettings(this.softwarePresetBenchmark, { width: ceiling.w, height: ceiling.h }, outputFps);
+  }
+
+  /**
+   * Parse ffmpeg's `speed` progress value (e.g. "0.903x", "1.6x", "N/A") into a
+   * number. Returns null when it cannot be parsed (no data yet).
+   *
+   * @param {string} value
+   * @returns {number | null}
+   */
+  #parseSpeed(value) {
+    if (typeof value !== "string" || value.length === 0) {
+      return null;
+    }
+    const numeric = Number.parseFloat(value);
+    return Number.isFinite(numeric) && numeric > 0 ? numeric : null;
+  }
+
+  /**
+   * Realtime budget monitor (software encoder only). For each active
+   * software-transcode session, watch the encoder's cumulative `speed`: when it
+   * stays below realtime for a sustained window AND the input is not
+   * download-starved (so the limit is the encoder, not the torrent), step the
+   * resolution one rung down the ladder and restart the encode at the current
+   * segment. Conservative: sustained window, post-action cooldown, a step cap,
+   * and a resolution floor (the last ladder rung). No upswitch in v1.
+   *
+   * @returns {Promise<void>}
+   */
+  async #enforceRealtimeBudget() {
+    if (this.videoEncoder?.kind !== "software") {
+      return;
+    }
+    const now = Date.now();
+    for (const session of this.sessionsById.values()) {
+      if (
+        !session ||
+        session.state === "disposed" ||
+        session.state === "failed" ||
+        !session.transcodeVideo ||
+        !Array.isArray(session.budgetLadder) ||
+        session.budgetLadder.length < 2
+      ) {
+        continue;
+      }
+      // Already at the floor or out of steps — nothing more to give.
+      if (
+        session.budgetRungIndex >= session.budgetLadder.length - 1 ||
+        session.budgetDownshifts >= BUDGET_MAX_DOWNSHIFTS
+      ) {
+        continue;
+      }
+      const speed = this.#parseSpeed(session.progress?.speed);
+      if (speed === null) {
+        continue; // no measurement yet
+      }
+      if (speed >= BUDGET_SPEED_OK) {
+        session.budgetSlowSince = 0; // recovered — reset the slow window
+        continue;
+      }
+      if (speed >= BUDGET_SPEED_SLOW) {
+        continue; // in the hysteresis band; neither slow nor ok
+      }
+      // speed < BUDGET_SPEED_SLOW — track how long it has been slow.
+      if (session.budgetSlowSince === 0) {
+        session.budgetSlowSince = now;
+        continue;
+      }
+      if (now - session.budgetSlowSince < BUDGET_SUSTAINED_MS) {
+        continue; // not sustained yet
+      }
+      if (now - session.budgetLastActionAt < BUDGET_ACTION_COOLDOWN_MS) {
+        continue; // let the previous action settle
+      }
+      // Sustained sub-realtime. Only downscale if the encoder — not a
+      // download-starved input — is the limit.
+      const bound = await this.#classifyTranscodeBound(session);
+      if (bound === "download") {
+        logger.info(
+          `[budget] transcode ${session.id} speed=${speed.toFixed(2)}x but download-limited ` +
+            `"${session.fileName}"; not downscaling (torrent is the bottleneck)`
+        );
+        session.budgetSlowSince = 0; // re-evaluate fresh; don't thrash on this
+        continue;
+      }
+      this.#applyBudgetDownshift(session, speed, bound);
+    }
+  }
+
+  /**
+   * Decide whether a sustained sub-realtime transcode is limited by the encoder
+   * (CPU) or by a download-starved input. Compares the torrent's download rate
+   * with the source's average byte rate; a fully-downloaded file can never be
+   * download-bound. Returns "cpu" | "download" | "unknown" ("unknown" is treated
+   * as CPU by the caller — the common case, logged as such).
+   *
+   * @param {HlsSession} session
+   * @returns {Promise<"cpu" | "download" | "unknown">}
+   */
+  async #classifyTranscodeBound(session) {
+    if (!this.getSourceStats) {
+      return "unknown";
+    }
+    let stats;
+    try {
+      stats = await this.getSourceStats(session.sourceKey, session.fileIndex);
+    } catch {
+      return "unknown";
+    }
+    if (!stats) {
+      return "unknown";
+    }
+    // A fully (or almost fully) downloaded file cannot be download-bound.
+    if (typeof stats.fileProgress === "number" && stats.fileProgress >= 0.999) {
+      return "cpu";
+    }
+    const duration = Number.isFinite(session.totalDurationSeconds) ? session.totalDurationSeconds : 0;
+    const length = Number.isFinite(stats.fileLength) && stats.fileLength > 0 ? stats.fileLength : 0;
+    const downloadSpeed = Number.isFinite(stats.downloadSpeed) ? stats.downloadSpeed : 0;
+    if (duration <= 0 || length <= 0) {
+      return "unknown"; // cannot compute the source byte rate
+    }
+    const sourceByteRate = length / duration;
+    return downloadSpeed >= sourceByteRate * BUDGET_DOWNLOAD_OK_FACTOR ? "cpu" : "download";
+  }
+
+  /**
+   * Step a session one resolution rung down the budget ladder and restart the
+   * encode at the current segment with the lighter profile.
+   *
+   * @param {HlsSession} session
+   * @param {number} speed - The measured (sub-realtime) speed, for logging.
+   * @param {"cpu" | "unknown"} bound
+   * @returns {void}
+   */
+  #applyBudgetDownshift(session, speed, bound) {
+    const nextIndex = session.budgetRungIndex + 1;
+    const rung = session.budgetLadder[nextIndex];
+    if (!rung) {
+      return;
+    }
+    const fps = Number.isInteger(session.outputFps) && session.outputFps > 0 ? session.outputFps : TRANSCODE_FPS;
+    session.budgetRungIndex = nextIndex;
+    session.budgetDownshifts += 1;
+    session.budgetLastActionAt = Date.now();
+    session.budgetSlowSince = 0;
+    session.encodeWidth = rung.width;
+    session.encodeHeight = rung.height;
+    session.softwarePreset = pickSoftwarePreset(this.softwarePresetBenchmark, rung.width * rung.height * fps);
+    // Restart at the current live-edge segment so the lighter profile takes over
+    // from where the viewer is watching (hard-restart tier).
+    const head = session.encodeStartIndex;
+    const processed = Number.isFinite(session.progress?.processedSeconds)
+      ? session.progress.processedSeconds
+      : this.#segmentStartTime(session, head);
+    const currentSeg = Math.max(head, this.#segmentIndexForTime(session, processed));
+    logger.info(
+      `[budget] transcode ${session.id} ${bound === "unknown" ? "assuming CPU-bound" : "CPU-bound"} ` +
+        `speed=${speed.toFixed(2)}x → downscale to ${rung.width}x${rung.height}/${session.softwarePreset} ` +
+        `(rung ${nextIndex + 1}/${session.budgetLadder.length}, downshift ${session.budgetDownshifts}/${BUDGET_MAX_DOWNSHIFTS}), ` +
+        `restart at segment #${currentSeg} "${session.fileName}"`
+    );
+    this.#startEncodeRun(session, currentSeg);
   }
 
   /**
@@ -1027,8 +1261,10 @@ export class HlsSessionManager {
     // codec args (including keyframe alignment on segment boundaries).
     const videoCodecArgs = session.transcodeVideo
       ? this.videoEncoder.buildVideoArgs({
-          targetWidth: session.targetWidth,
-          targetHeight: session.targetHeight,
+          // Budget-selected encode box (may be below the client target on weak
+          // software hosts); falls back to the client target for hardware.
+          targetWidth: session.encodeWidth,
+          targetHeight: session.encodeHeight,
           segmentDurationSec: this.segmentDurationSec,
           // Source-inherited output rate (integer, capped); descriptors that
           // use time-based keyframes just apply it as the frame rate.
@@ -1115,6 +1351,11 @@ export class HlsSessionManager {
     session.progress.processedSeconds = startSeconds;
     session.progress.startPositionSeconds = startSeconds;
     session.progress.updatedAt = Date.now();
+    // Any (re)start resets the cumulative `speed` ffmpeg reports, so reset the
+    // realtime-budget slow window too — otherwise warm-up right after a user
+    // seek could be mis-counted as sustained sub-realtime and trigger a
+    // premature downscale.
+    session.budgetSlowSince = 0;
 
     logger.info(
       `transcode ${session.id} encode-run from segment #${safeIndex} ` +
@@ -1533,6 +1774,7 @@ export class HlsSessionManager {
    */
   async disposeAll() {
     clearInterval(this.cleanupTimer);
+    clearInterval(this.budgetTimer);
     const activeIds = Array.from(this.sessionsById.keys());
     for (const sessionId of activeIds) {
       await this.disposeSession(sessionId);

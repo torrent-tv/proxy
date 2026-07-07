@@ -35,3 +35,62 @@ chosen encoder places keyframes:
 - **WHEN** the source frame rate cannot be probed on the software path
 - **THEN** the output falls back to the default rate and playback still
   segments correctly
+
+### Requirement: Software encode fits a realtime budget at startup
+
+For the software encoder, the proxy SHALL choose the output resolution and
+libx264 preset a startup benchmark predicts this host can encode faster than
+realtime (with a margin), rather than always encoding at the client-requested
+resolution. The client-requested box, capped to the source resolution (never
+upscaled), is the ceiling; the proxy SHALL pick the highest resolution rung at
+or below that ceiling that clears the realtime margin, then the highest-quality
+preset that still clears it at that resolution. When even the lowest rung
+cannot clear the margin, the proxy SHALL use the lowest rung (best effort). The
+realtime need SHALL be computed from the session's actual output frame rate.
+Hardware encoders and the no-benchmark case SHALL keep the ceiling resolution
+and the default preset.
+
+#### Scenario: Weak host, source above realtime capacity
+- **WHEN** the software benchmark shows the host cannot encode the source-capped
+  resolution faster than realtime (e.g. 720p60→30 that runs below 1×)
+- **THEN** the proxy downscales to the highest ladder rung that clears the
+  realtime margin (e.g. 480p) instead of encoding sub-realtime at full size
+
+#### Scenario: Capable host
+- **WHEN** the benchmark shows ample headroom at the ceiling resolution
+- **THEN** the proxy keeps the ceiling resolution and spends the headroom on a
+  higher-quality (slower) preset
+
+#### Scenario: Hardware encoder
+- **WHEN** a hardware encoder is selected
+- **THEN** no benchmark-based downscale is applied and the ceiling resolution
+  is used
+
+### Requirement: Software encode downswitches at runtime when CPU-bound
+
+The proxy SHALL, for the software encoder, step the output resolution one rung
+down the ladder and restart the encode at the segment currently being watched
+when a transcode runs below realtime for a sustained window. Before downscaling
+it SHALL determine whether the limit is the encoder or a download-starved
+input — comparing the torrent download rate with the source's average byte rate
+(a fully-downloaded file is never download-bound) — and SHALL NOT downscale when
+the limit is the download (it SHALL log that instead). The downswitch SHALL be
+bounded by a sustained-slow window, a post-action cooldown, a maximum number of
+steps, and a resolution floor, and SHALL reset its slow window on every encode
+(re)start. There SHALL be no automatic upswitch in this version.
+
+#### Scenario: Sustained CPU-bound transcode
+- **WHEN** a software transcode's encoder speed stays below realtime for the
+  sustained window while the input download keeps up
+- **THEN** the proxy downscales one rung and restarts at the current segment,
+  up to the step cap / resolution floor
+
+#### Scenario: Download-limited, not CPU-limited
+- **WHEN** the encoder speed is below realtime but the torrent cannot download
+  the source's byte rate and the file is not fully downloaded
+- **THEN** the proxy does not downscale and logs that the download is the limit
+
+#### Scenario: No thrash after a switch
+- **WHEN** a downswitch (or a viewer seek) has just restarted the encode
+- **THEN** the slow window is reset and no further downswitch occurs until a new
+  sustained-slow window elapses after the cooldown

@@ -117,7 +117,21 @@ export async function startProxyServer({ host, port, transcodeAudio, ffmpegBin, 
     localBindHost: host,
     localPort: selectedPort,
     videoEncoder,
-    softwarePresetBenchmark
+    softwarePresetBenchmark,
+    // Live download stats accessor for the realtime budget: lets it tell a
+    // CPU-bound transcode from a download-starved input before downscaling.
+    getSourceStats: async (sourceKey, fileIndex) => {
+      const record = sourceRegistry.get(sourceKey);
+      if (!record) {
+        return null;
+      }
+      try {
+        const torrent = await torrentPool.getTorrent(record.sourceType, record.source);
+        return torrentPool.getFileStats(torrent, Number.isInteger(fileIndex) ? fileIndex : null);
+      } catch {
+        return null;
+      }
+    }
   });
   const playbackPlanner = createPlaybackPlanner({
     ffmpegBin,

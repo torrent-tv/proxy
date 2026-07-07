@@ -39,10 +39,17 @@
 - [ ] 3.1 Detect 10-bit/HDR; insert tonemap chain when re-encoding to 8-bit
 - [ ] 3.2 Guard on tonemap-filter availability in the ffmpeg build
 
-## 4. Manual quality (planned)
+## 4. Manual quality
 
-- [ ] 4.1 Proxy honours requested target height (already partly there)
-- [ ] 4.2 Server Quality menu (Auto + forced resolutions)
+- [x] 4.1 Proxy honours a forced resolution: `manualQuality` flag on the
+      transcode-session request encodes the requested box exactly (capped to
+      source, budget + runtime downswitch disabled); `manualQuality` in the
+      session key; playback plan reports source `videoWidth`/`videoHeight`.
+- [x] 4.2 Server Quality menu (Auto + forced resolutions <= source). Custom
+      media-chrome submenu mirroring the audio menu; selection re-opens the
+      stream at the forced resolution with the position preserved (reuses the
+      audio-switch machinery); shared settings button shows for audio OR
+      quality.
 
 ## 5. Release
 

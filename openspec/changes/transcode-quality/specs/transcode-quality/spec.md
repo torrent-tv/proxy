@@ -94,3 +94,26 @@ steps, and a resolution floor, and SHALL reset its slow window on every encode
 - **WHEN** a downswitch (or a viewer seek) has just restarted the encode
 - **THEN** the slow window is reset and no further downswitch occurs until a new
   sustained-slow window elapses after the cooldown
+
+### Requirement: Manual quality forces a constant resolution
+
+The viewer SHALL be able to force a specific output resolution instead of Auto.
+When a resolution is forced the proxy SHALL encode exactly that box (capped to
+the source, never upscaled) with the realtime budget disabled — no startup
+auto-downscale and no runtime downswitch — so the resolution stays constant for
+the whole session. The browser SHALL offer Auto plus resolutions at or below the
+source height, built from the source resolution reported in the playback plan.
+Selecting a quality SHALL re-open the stream at the new resolution with the
+playback position preserved. Auto SHALL keep the current realtime-budget
+behaviour.
+
+#### Scenario: Forced resolution is constant
+- **WHEN** the viewer forces a resolution (e.g. 480p)
+- **THEN** the proxy encodes at that resolution for the whole session, with no
+  budget downscale or runtime downswitch, and playback resumes at the same
+  position
+
+#### Scenario: Auto
+- **WHEN** the viewer selects Auto
+- **THEN** the proxy applies the realtime budget (startup selection + runtime
+  downswitch) as before

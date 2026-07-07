@@ -33,6 +33,10 @@ export async function handleApiTranscodeSessionsPost(req, reply, { hlsSessionMan
   const fileName = typeof payload.fileName === "string" ? payload.fileName.trim() : "";
   const targetWidth = Number(payload.targetWidth);
   const targetHeight = Number(payload.targetHeight);
+  // Manual quality: the target box is a user-forced resolution, encoded exactly
+  // (capped to source), with the realtime budget's auto-downscale + runtime
+  // downswitch disabled for the session.
+  const manualQuality = payload.manualQuality === true;
   const startPositionSeconds = Number(payload.startPositionSeconds);
   const audioTrackIndex = Number(payload.audioTrackIndex);
 
@@ -50,6 +54,7 @@ export async function handleApiTranscodeSessionsPost(req, reply, { hlsSessionMan
       fileName,
       targetWidth: Number.isInteger(targetWidth) && targetWidth > 0 ? targetWidth : 0,
       targetHeight: Number.isInteger(targetHeight) && targetHeight > 0 ? targetHeight : 0,
+      manualQuality,
       startPositionSeconds:
         Number.isFinite(startPositionSeconds) && startPositionSeconds > 0
           ? startPositionSeconds

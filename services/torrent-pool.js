@@ -9,7 +9,7 @@
 import crypto from "node:crypto";
 import os from "node:os";
 import path from "node:path";
-import { rmSync } from "node:fs";
+import { rmSync, statfsSync } from "node:fs";
 import WebTorrent from "webtorrent";
 import { logger } from "../utils/logger.js";
 
@@ -33,6 +33,37 @@ const PRIORITY_WINDOW_BYTES = 8 * 1024 * 1024;
 // the ranges prefetchFileEdges fetches: leading bytes + trailing bytes.
 const HEADER_HEAD_BYTES = 256 * 1024;
 const HEADER_TAIL_BYTES = 2 * 1024 * 1024;
+
+// Global disk cap. Downloaded torrent data is removed on idle TTL and at
+// shutdown, but under pressure (several large files within the TTL window)
+// it can still fill a small HA host's disk (SD/eMMC), which can take down
+// Home Assistant itself. When the total exceeds the cap, whole torrents with
+// no active reader are evicted least-recently-used first. Active torrents are
+// never evicted (we cannot delete what is playing).
+const DISK_CAP_ABSOLUTE_MAX_BYTES = 10 * 1024 * 1024 * 1024; // 10 GB
+const DISK_CAP_SWEEP_INTERVAL_MS = 30_000;
+
+/**
+ * Compute the default disk cap: the smaller of a fixed 10 GB and half of the
+ * currently free space on the store's filesystem (so a tiny host is never
+ * asked to hold more than it can). Best-effort; falls back to the fixed max
+ * when the filesystem cannot be stat'd.
+ *
+ * @param {string} storePath
+ * @returns {number}
+ */
+function computeDefaultDiskCap(storePath) {
+  try {
+    const stat = statfsSync(storePath);
+    const freeBytes = stat.bavail * stat.bsize;
+    if (Number.isFinite(freeBytes) && freeBytes > 0) {
+      return Math.min(DISK_CAP_ABSOLUTE_MAX_BYTES, Math.floor(freeBytes / 2));
+    }
+  } catch {
+    // statfs unavailable (old Node / odd FS) — fall back to the fixed max.
+  }
+  return DISK_CAP_ABSOLUTE_MAX_BYTES;
+}
 
 /**
  * Decode a raw torrent source value into the format expected by WebTorrent.
@@ -77,7 +108,27 @@ export class TorrentPool {
    */
   #idleTimers = new Map();
 
-  constructor() {
+  /**
+   * Last time each torrent was acquired or fetched, for LRU eviction under
+   * the disk cap.
+   *
+   * @type {Map<import("webtorrent").Torrent, number>}
+   */
+  #lastAccess = new Map();
+
+  /** Global disk cap in bytes (0 = disabled). */
+  #maxDiskBytes = 0;
+
+  /** Periodic disk-cap enforcement timer. */
+  #diskSweepTimer = null;
+
+  /**
+   * @param {{ maxDiskBytes?: number }} [options]
+   *   `maxDiskBytes` caps total downloaded torrent data; when omitted a
+   *   default is computed from free disk (min(10 GB, half free)). Pass 0 to
+   *   disable the cap.
+   */
+  constructor({ maxDiskBytes } = {}) {
     // Sweep orphaned torrent data left by a previous hard kill (no graceful
     // shutdown ran, so destroyAll never cleaned the store). Safe here: no
     // torrents are loaded yet at construction. Best-effort, synchronous so it
@@ -114,6 +165,71 @@ export class TorrentPool {
       const message = warning instanceof Error ? warning.message : String(warning);
       logger.warn(`torrent-pool: client warning: ${message}`);
     });
+
+    this.#maxDiskBytes = Number.isFinite(maxDiskBytes) && maxDiskBytes >= 0
+      ? maxDiskBytes
+      : computeDefaultDiskCap(os.tmpdir());
+    if (this.#maxDiskBytes > 0) {
+      const gb = (this.#maxDiskBytes / (1024 * 1024 * 1024)).toFixed(1);
+      logger.info(`torrent-pool: disk cap ${gb} GB (LRU eviction of idle torrents above it)`);
+      this.#diskSweepTimer = setInterval(() => this.#enforceDiskCap(), DISK_CAP_SWEEP_INTERVAL_MS);
+      this.#diskSweepTimer.unref?.();
+    }
+  }
+
+  /**
+   * Sum of downloaded bytes across pooled torrents — a cheap proxy for the
+   * on-disk footprint (the FS store writes downloaded pieces).
+   *
+   * @returns {number}
+   */
+  #currentDiskBytes() {
+    let total = 0;
+    for (const torrent of this.torrents.values()) {
+      const downloaded = typeof torrent?.downloaded === "number" ? torrent.downloaded : 0;
+      total += Math.max(0, downloaded);
+    }
+    return total;
+  }
+
+  /**
+   * Evict whole torrents, least-recently-used first, while the total on-disk
+   * footprint exceeds the cap. Only torrents with NO active file reader are
+   * evictable — a playing torrent cannot be deleted. Best-effort.
+   *
+   * @returns {void}
+   */
+  #enforceDiskCap() {
+    if (this.#maxDiskBytes <= 0) {
+      return;
+    }
+    let used = this.#currentDiskBytes();
+    if (used <= this.#maxDiskBytes) {
+      return;
+    }
+    // Candidates: pooled torrents with zero active readers, LRU first.
+    const candidates = [...this.torrents.values()]
+      .filter((t) => {
+        const usage = this.fileUsageByTorrent.get(t);
+        return !usage || usage.size === 0;
+      })
+      .sort((a, b) => (this.#lastAccess.get(a) ?? 0) - (this.#lastAccess.get(b) ?? 0));
+
+    for (const torrent of candidates) {
+      if (used <= this.#maxDiskBytes) {
+        break;
+      }
+      const freed = typeof torrent?.downloaded === "number" ? Math.max(0, torrent.downloaded) : 0;
+      const name = typeof torrent?.name === "string" ? torrent.name : "(unknown)";
+      const gb = (this.#maxDiskBytes / (1024 * 1024 * 1024)).toFixed(1);
+      logger.info(
+        `torrent-pool: disk cap ${gb} GB exceeded — evicting idle torrent "${name}" ` +
+          `(~${(freed / (1024 * 1024)).toFixed(0)} MB)`
+      );
+      this.#cancelIdleRemoval(torrent);
+      this.#removeTorrent(torrent);
+      used -= freed;
+    }
   }
 
   /**
@@ -173,6 +289,7 @@ export class TorrentPool {
     // Already resolved — return immediately.
     const existing = this.torrents.get(key);
     if (existing) {
+      this.#lastAccess.set(existing, Date.now());
       return existing;
     }
 
@@ -197,6 +314,7 @@ export class TorrentPool {
           if (existing) {
             const settle = () => {
               this.torrents.set(key, existing);
+              this.#lastAccess.set(existing, Date.now());
               this.#pending.delete(key);
               resolve(existing);
             };
@@ -215,6 +333,7 @@ export class TorrentPool {
       this.client.add(torrentId, (readyTorrent) => {
         this.client.off("error", onError);
         this.torrents.set(key, readyTorrent);
+        this.#lastAccess.set(readyTorrent, Date.now());
         this.#pending.delete(key);
         // Key layout is `${sourceType}:${sha1}`; log with the sha1 prefix so
         // lines correlate with the [stats] source key.
@@ -274,8 +393,10 @@ export class TorrentPool {
       usage = new Map();
       this.fileUsageByTorrent.set(torrent, usage);
     }
-    // The torrent is in use again — cancel any pending idle removal.
+    // The torrent is in use again — cancel any pending idle removal and mark
+    // it recently accessed so LRU eviction keeps it.
     this.#cancelIdleRemoval(torrent);
+    this.#lastAccess.set(torrent, Date.now());
     usage.set(fileIndex, (usage.get(fileIndex) ?? 0) + 1);
     this.#syncSelections(torrent, usage);
 
@@ -360,6 +481,7 @@ export class TorrentPool {
       }
     }
     this.fileUsageByTorrent.delete(torrent);
+    this.#lastAccess.delete(torrent);
     const name = typeof torrent.name === "string" ? torrent.name : "(unknown)";
     try {
       torrent.destroy({ destroyStore: true }, () => {
@@ -617,11 +739,17 @@ export class TorrentPool {
    * @returns {Promise<void>}
    */
   async destroyAll() {
+    // Stop periodic disk-cap enforcement.
+    if (this.#diskSweepTimer) {
+      clearInterval(this.#diskSweepTimer);
+      this.#diskSweepTimer = null;
+    }
     // Cancel any pending idle-removal timers — destroyAll handles teardown.
     for (const timer of this.#idleTimers.values()) {
       clearTimeout(timer);
     }
     this.#idleTimers.clear();
+    this.#lastAccess.clear();
 
     if (!this.client || this.client.destroyed) {
       return;

@@ -56,6 +56,7 @@ program
   .option("--name <name>", "Display name")
   .option("--no-transcode-audio", "Disable optional HLS AAC audio transcoding")
   .option("--no-port-mapping", "Disable automatic UPnP/NAT-PMP port mapping")
+  .option("--max-disk-bytes <bytes>", "Cap total downloaded torrent data (0 = disabled; default min(10GB, half free disk))")
   .option("--ffmpeg-bin <path>", "Path to ffmpeg binary")
   .option("--token <token>", "Registration token", "")
   .addHelpText("after", HELP_EXAMPLES);
@@ -79,6 +80,12 @@ const clientName = options.name ? String(options.name) : `proxy-${clientId.slice
 const token = String(options.token ?? "");
 const transcodeAudio = options.transcodeAudio !== false;
 const portMappingEnabled = options.portMapping !== false;
+// Optional disk cap. undefined → the pool computes its own default; a valid
+// non-negative number (0 disables) → passed through.
+const maxDiskBytes =
+  options.maxDiskBytes !== undefined && Number.isFinite(Number(options.maxDiskBytes)) && Number(options.maxDiskBytes) >= 0
+    ? Number(options.maxDiskBytes)
+    : undefined;
 const bundledFfmpegBin = typeof ffmpegStatic === "string" ? ffmpegStatic : "";
 const ffmpegBin = options.ffmpegBin ? String(options.ffmpegBin) : bundledFfmpegBin || "ffmpeg";
 
@@ -234,7 +241,8 @@ try {
     host: bindHost,
     port: localPort,
     transcodeAudio,
-    ffmpegBin
+    ffmpegBin,
+    maxDiskBytes
   });
   app = started.app;
   actualPort = started.port;

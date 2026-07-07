@@ -60,6 +60,7 @@ function buildPortCandidates(startPort, maxAttempts = 51) {
  * @property {number}  port           - Preferred listen port.
  * @property {boolean} transcodeAudio - Whether HLS audio transcoding is enabled.
  * @property {string}  ffmpegBin      - Path to the ffmpeg executable.
+ * @property {number}  [maxDiskBytes] - Global disk cap for torrent data (undefined = pool default).
  */
 
 /**
@@ -68,7 +69,7 @@ function buildPortCandidates(startPort, maxAttempts = 51) {
  * @param {ProxyServerOptions} options
  * @returns {Promise<{ app: import("fastify").FastifyInstance, port: number }>}
  */
-export async function startProxyServer({ host, port, transcodeAudio, ffmpegBin }) {
+export async function startProxyServer({ host, port, transcodeAudio, ffmpegBin, maxDiskBytes }) {
   const app = Fastify({
     // No practical body-size limit — the proxy server is localhost-only and
     // receives torrent source payloads that may be arbitrarily large.
@@ -94,7 +95,7 @@ export async function startProxyServer({ host, port, transcodeAudio, ffmpegBin }
   });
 
   const sourceRegistry = createSourceRegistry(200);
-  const torrentPool = new TorrentPool();
+  const torrentPool = new TorrentPool({ maxDiskBytes });
   const selectedPort = await getPort({
     port: buildPortCandidates(port)
   });

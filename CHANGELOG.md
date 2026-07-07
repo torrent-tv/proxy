@@ -1,3 +1,7 @@
+## 2.9.28
+
+- **Fix**: `GET /api/sources/:key/files` no longer blocks until metadata arrives (or fails prematurely on a cold magnet). It now waits only a short per-request budget (`maxWaitMs`, default 8 s, cap 20 s) and returns `{ pending: true }` while the swarm fetch continues in the background, so the browser can poll — mirroring the cold-torrent playback-plan poll. Field-found: a magnet whose metadata had not arrived yet failed with "no peers" on the first paste, then succeeded on a second paste because the fetch had kept running in the background. A real fetch error now returns 502 (distinct from pending). Pairs with server 0.8.39.
+
 ## 2.9.27
 
 - **Fix**: A magnet whose infoHash matches a torrent already loaded in the pool no longer fails with 500 "Cannot add duplicate torrent" (scenario: one viewer opened the .torrent file, another pasted the magnet of the same content — different source keys, one swarm). The duplicate-add error now resolves to the already-loaded torrent (waiting for its metadata when it is itself still cold), so both source keys share the swarm. Found by a field test of the magnet flow.

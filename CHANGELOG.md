@@ -1,3 +1,7 @@
+## 2.9.30
+
+- **New**: The proxy owns subtitle conversion and detects the language from content (OpenSpec change `subtitle-language`). `GET /api/subtitles` now also serves EXTERNAL subtitle files (no `trackIndex`): it reads the file, decodes its encoding (UTF-8 or Windows-1251 — common for Russian `.srt`), converts `.srt`/`.ass`/`.ssa` → WebVTT on the proxy (the browser no longer converts), and reports the language in `X-Subtitle-Language`/`X-Subtitle-Language-Name`. Language is detected with `franc` (n-gram, MIT) restricted to a curated language set — it distinguishes Russian from Ukrainian (and Latin languages) and avoids short-text false positives, returning no header when undetermined. Embedded tracks detect from the first chunk of extracted VTT. Pairs with the server release that fetches VTT from here and applies the filename → content → audio-language priority.
+
 ## 2.9.29
 
 - **New**: Global disk cap with LRU eviction (OpenSpec change `disk-cap`; Disk hygiene Level 1, final piece). Downloaded torrent data was already removed on a 5-min idle TTL and at shutdown, but under pressure it could still fill a small Home Assistant host's disk (which can take down HA itself). The pool now caps total downloaded data — default min(10 GB, half of free disk), overridable with `--max-disk-bytes` (0 disables) — and, when exceeded, evicts whole torrents with no active reader least-recently-used first (checked every 30 s). A torrent that is currently playing is never evicted. (LRU = least-recently-used.)

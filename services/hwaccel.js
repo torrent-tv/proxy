@@ -27,7 +27,43 @@ import path from "node:path";
 
 const SOFTWARE_PRESET = "ultrafast";
 const SOFTWARE_CRF = "24";
+// Default output frame rate when the source rate is unknown, and the rate used
+// by the synthetic startup test-encode / preset benchmark. The real encode
+// inherits the source rate (rounded to an integer, capped) — see
+// chooseOutputFps — so 25/30 fps content no longer plays resampled to 24.
 export const TRANSCODE_FPS = 24;
+// Upper bound on the output frame rate: 50/60 fps sources are halved-in-effort
+// by capping to 30, protecting the realtime encode budget on weak hosts.
+export const MAX_OUTPUT_FPS = 30;
+
+/**
+ * Choose an INTEGER output frame rate from the (possibly fractional) source
+ * rate, for the frame-count-GOP encoders ONLY (software libx264, v4l2m2m).
+ * Those place keyframes with `-g = segmentDur × fps` (frame count), so the
+ * `fps=` filter value must be an integer that makes seg×fps an exact whole
+ * number of frames per segment — otherwise segments drift off the synthetic
+ * playlist's uniform grid and seek accuracy degrades over a long file. Film
+ * rates (23.976) round to 24, 25 stays 25, 29.97 rounds to 30; the cap clamps
+ * high rates (the cap is a SPEED guard for the weak software/v4l2m2m path).
+ *
+ * Time-based-keyframe encoders (nvenc, vaapi, qsv) do NOT use this — they
+ * inherit the exact source rate untouched (their keyframes are forced by
+ * output time, so any rate segments correctly).
+ *
+ * @param {number | null | undefined} sourceFps
+ * @param {number} [cap=MAX_OUTPUT_FPS]
+ * @returns {number}
+ */
+export function chooseOutputFps(sourceFps, cap = MAX_OUTPUT_FPS) {
+  if (!Number.isFinite(sourceFps) || sourceFps <= 0) {
+    return TRANSCODE_FPS;
+  }
+  const rounded = Math.round(sourceFps);
+  if (rounded < 1) {
+    return TRANSCODE_FPS;
+  }
+  return Math.min(cap, rounded);
+}
 // Software x264 on weak ARM hosts is the transcode bottleneck — use all cores.
 const CPU_THREADS = Math.max(1, os.cpus().length);
 
@@ -72,16 +108,20 @@ export function softwareDescriptor() {
     kind: "software",
     device: null,
     inputArgs: [],
-    buildVideoArgs({ targetWidth, targetHeight, segmentDurationSec, preset }) {
+    buildVideoArgs({ targetWidth, targetHeight, segmentDurationSec, preset, fps }) {
       const { w, h } = safeDimensions(targetWidth, targetHeight);
       const chosenPreset = typeof preset === "string" && preset.length > 0 ? preset : SOFTWARE_PRESET;
+      // Output frame rate: inherited from the source (rounded/capped) by the
+      // session manager, TRANSCODE_FPS by default. MUST be an integer and MUST
+      // equal the value used in the GOP below, or keyframes drift off the grid.
+      const outFps = Number.isInteger(fps) && fps > 0 ? fps : TRANSCODE_FPS;
       return [
         // Never upscale: cap the target box to the source size (min with
         // iw/ih), so a small source (e.g. 720x400) is encoded at its own
         // resolution instead of being scaled up to the viewport — far fewer
         // pixels, much faster on ARM. force_original_aspect_ratio keeps aspect.
         "-vf",
-        `scale='min(${w},iw)':'min(${h},ih)':force_original_aspect_ratio=decrease:force_divisible_by=2,fps=${TRANSCODE_FPS}`,
+        `scale='min(${w},iw)':'min(${h},ih)':force_original_aspect_ratio=decrease:force_divisible_by=2,fps=${outFps}`,
         "-c:v", "libx264",
         // Preset is chosen per stream by the session manager from the startup
         // benchmark (highest quality that still encodes the source resolution
@@ -98,8 +138,8 @@ export function softwareDescriptor() {
         // `-force_key_frames expr:gte(t,n_forced*SEG)` broke after a seek because
         // `t` is offset by `-output_ts_offset`, forcing keyframes at the wrong
         // places.)
-        "-g", String(segmentDurationSec * TRANSCODE_FPS),
-        "-keyint_min", String(segmentDurationSec * TRANSCODE_FPS),
+        "-g", String(segmentDurationSec * outFps),
+        "-keyint_min", String(segmentDurationSec * outFps),
         "-sc_threshold", "0"
       ];
     }
@@ -117,6 +157,8 @@ function vaapiDescriptor(device) {
     device,
     // Decode on the GPU into VAAPI surfaces; scale and encode stay on-GPU.
     inputArgs: ["-hwaccel", "vaapi", "-hwaccel_output_format", "vaapi", "-vaapi_device", device],
+    // No fps filter: VAAPI inherits the source rate and keeps keyframes on the
+    // grid via time-based -force_key_frames, so it already honours source fps.
     buildVideoArgs({ targetWidth, targetHeight, segmentDurationSec }) {
       const { w, h } = safeDimensions(targetWidth, targetHeight);
       return [
@@ -159,11 +201,14 @@ function nvencDescriptor() {
     kind: "nvenc",
     device: null,
     inputArgs: [],
+    // No fps filter: NVENC is fast and places keyframes by time-based
+    // -force_key_frames, so it inherits the exact source rate (fractional
+    // included) with no need to round or cap. Same rationale as VAAPI/QSV.
     buildVideoArgs({ targetWidth, targetHeight, segmentDurationSec }) {
       const { w, h } = safeDimensions(targetWidth, targetHeight);
       return [
         "-vf",
-        `scale=${w}:${h}:force_original_aspect_ratio=decrease:force_divisible_by=2,fps=${TRANSCODE_FPS}`,
+        `scale=${w}:${h}:force_original_aspect_ratio=decrease:force_divisible_by=2`,
         "-c:v", "h264_nvenc",
         "-preset", "p4",
         "-cq", "24",
@@ -186,14 +231,15 @@ function v4l2m2mDescriptor() {
     kind: "v4l2m2m",
     device: null,
     inputArgs: [],
-    buildVideoArgs({ targetWidth, targetHeight, segmentDurationSec }) {
+    buildVideoArgs({ targetWidth, targetHeight, segmentDurationSec, fps }) {
       const { w, h } = safeDimensions(targetWidth, targetHeight);
+      const outFps = Number.isInteger(fps) && fps > 0 ? fps : TRANSCODE_FPS;
       return [
         "-vf",
-        `scale=${w}:${h}:force_original_aspect_ratio=decrease:force_divisible_by=2,fps=${TRANSCODE_FPS},format=yuv420p`,
+        `scale=${w}:${h}:force_original_aspect_ratio=decrease:force_divisible_by=2,fps=${outFps},format=yuv420p`,
         "-c:v", "h264_v4l2m2m",
         "-b:v", "3M",
-        "-g", String(TRANSCODE_FPS * segmentDurationSec),
+        "-g", String(outFps * segmentDurationSec),
         ...keyFrameArgs(segmentDurationSec)
       ];
     }

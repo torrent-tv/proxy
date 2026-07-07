@@ -15,7 +15,7 @@ import path from "node:path";
 import { randomUUID } from "node:crypto";
 import { spawn } from "node:child_process";
 import { logger } from "../utils/logger.js";
-import { softwareDescriptor, pickSoftwarePreset, TRANSCODE_FPS } from "./hwaccel.js";
+import { softwareDescriptor, pickSoftwarePreset, TRANSCODE_FPS, chooseOutputFps } from "./hwaccel.js";
 
 const PLAYLIST_FILE_NAME = "index.m3u8";
 const SEGMENT_FILE_NAME_PATTERN = /^segment-\d{5}\.ts$/;
@@ -296,6 +296,29 @@ function parseFfmpegVideoDimensions(stderrText) {
 }
 
 /**
+ * Parse the source frame rate from the ffmpeg "Video:" line
+ * (e.g. "… 23.98 fps," / "… 25 fps,"). Returns null when absent.
+ *
+ * @param {string} stderrText
+ * @returns {number | null}
+ */
+function parseFfmpegVideoFps(stderrText) {
+  if (typeof stderrText !== "string" || stderrText.length === 0) {
+    return null;
+  }
+  const videoLine = stderrText.match(/Video:[^\n]*/i);
+  if (!videoLine) {
+    return null;
+  }
+  const match = videoLine[0].match(/([\d.]+)\s*fps/i);
+  if (!match) {
+    return null;
+  }
+  const value = Number(match[1]);
+  return Number.isFinite(value) && value > 0 ? value : null;
+}
+
+/**
  * Run a short ffmpeg probe to extract the total duration AND video resolution
  * of a stream from the container header. Both are printed almost immediately
  * (before any decoding), so this returns as soon as they are seen; an 8 s
@@ -323,6 +346,7 @@ async function probeInputMediaInfo(ffmpegBin, inputUrl) {
         durationSeconds: parseFfmpegDurationSeconds(stderr),
         width: dims.width,
         height: dims.height,
+        fps: parseFfmpegVideoFps(stderr),
         startTime: parseFfmpegStartTimeSeconds(stderr)
       });
     };
@@ -720,6 +744,10 @@ export class HlsSessionManager {
     const sourceWidth = mediaInfo.width;
     const sourceHeight = mediaInfo.height;
     const sourceStartTime = Number.isFinite(mediaInfo.startTime) ? mediaInfo.startTime : 0;
+    // Output frame rate inherited from the source (integer, capped) so 25/30
+    // fps content is not resampled to 24. Fixed-GOP encoders keep the fps↔GOP
+    // relationship exact; time-based-keyframe encoders just use it as the rate.
+    const outputFps = chooseOutputFps(mediaInfo.fps);
     const hasDuration = Number.isFinite(durationSeconds) && durationSeconds > 0;
     const logName = normalizeLogFileName(fileName, fileIndex);
     if (!hasDuration) {
@@ -789,6 +817,7 @@ export class HlsSessionManager {
       transcodeVideo,
       transcodeAudio,
       audioTrackIndex: normalizedAudioTrack,
+      outputFps,
       targetWidth: normalizedTargetWidth,
       targetHeight: normalizedTargetHeight,
       sourceWidth,
@@ -1001,6 +1030,9 @@ export class HlsSessionManager {
           targetWidth: session.targetWidth,
           targetHeight: session.targetHeight,
           segmentDurationSec: this.segmentDurationSec,
+          // Source-inherited output rate (integer, capped); descriptors that
+          // use time-based keyframes just apply it as the frame rate.
+          fps: session.outputFps,
           // Software-only; hardware descriptors ignore it.
           preset: session.softwarePreset ?? undefined
         })

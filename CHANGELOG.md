@@ -1,3 +1,7 @@
+## 2.9.29
+
+- **New**: Output frame rate follows the source instead of a fixed 24 fps (OpenSpec change `transcode-quality`, part 1). 25/30 fps content no longer plays resampled to 24 (which caused judder). Frame-count-GOP encoders (software libx264, v4l2m2m) use an integer rate — source rounded, capped at 30 as a speed guard — with the fps filter and the GOP length kept in lockstep so a keyframe still lands on every segment boundary; the time-based-keyframe encoders (nvenc, vaapi, qsv) inherit the exact source rate untouched (nvenc previously forced 24 — its fps filter is removed). Source rate is parsed from the existing startup probe. (GOP = group of pictures, the span between keyframes; the segment grid needs a keyframe at each boundary.)
+
 ## 2.9.28
 
 - **Fix**: `GET /api/sources/:key/files` no longer blocks until metadata arrives (or fails prematurely on a cold magnet). It now waits only a short per-request budget (`maxWaitMs`, default 8 s, cap 20 s) and returns `{ pending: true }` while the swarm fetch continues in the background, so the browser can poll — mirroring the cold-torrent playback-plan poll. Field-found: a magnet whose metadata had not arrived yet failed with "no peers" on the first paste, then succeeded on a second paste because the fetch had kept running in the background. A real fetch error now returns 502 (distinct from pending). Pairs with server 0.8.39.

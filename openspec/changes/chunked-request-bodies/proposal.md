@@ -25,22 +25,18 @@ should be symmetric.
   execution path as a legacy request. Bounded: per-body cap 32 MB, partial
   bodies dropped after a 60 s TTL or an abort frame, all per-channel state
   freed on channel close.
-- **Hello capability announcement.** On channel open the proxy sends
-  `{type:"hello", proto:1, version, maxRequestBytes}`. The browser uses it
-  to gate the chunked path (an old proxy never sends it → the browser
-  falls back to the legacy single message), and gains the proxy version for
-  log correlation.
-- **The 16 MB `max-message-size` advertisement (pending 2.9.35) STAYS.** It
-  is what keeps OLD (cached) browser bundles working against new proxies —
-  they still single-send large bodies. Chunking is for the new browser.
+- **No capability negotiation.** POC: the pool is one proxy, released in
+  lockstep with the site (proxy first, then server). The browser just uses
+  chunked frames for large bodies; this proxy just understands them.
+- **The 16 MB `max-message-size` advertisement (pending 2.9.35) stays** —
+  a single config value, no logic: it covers the transition window while
+  already-open tabs still run the single-send bundle.
 - **Observability**: the `[dc]` request log line reports chunked bodies
-  (`body=<bytes> (chunked)`).
+  (`body=<bytes> bytes (chunked)`).
 
-Browser-side counterpart (chunk writer, hello consumption, threshold,
-backpressure) is the server repo's `chunked-request-bodies` change. Release
-order: proxy (with addon bump) FIRST, then server — but either order is
-safe: the new browser falls back to legacy single-send when no hello
-arrives, which the 16 MB advertisement covers on 2.9.35+.
+Browser-side counterpart (chunk writer, threshold, backpressure, abort) is
+the server repo's `chunked-request-bodies` change. Release order: proxy
+(with addon bump) FIRST, then server.
 
 ## Capabilities
 
@@ -50,10 +46,8 @@ arrives, which the 16 MB advertisement covers on 2.9.35+.
 
 ## Impact
 
-- `services/data-channel-handler.js` — hello on channel open; binary
-  inbound frame parsing; per-channel partial-body assembly with caps/TTL;
-  `request-start` handling; shared execution path.
-- `package.json` version is read for the hello (same mechanism healthz
-  uses).
+- `services/data-channel-handler.js` — binary inbound frame parsing;
+  per-channel partial-body assembly with caps/TTL; `request-start`
+  handling; shared execution path.
 - Release: folds into the PENDING proxy 2.9.35 (extend its CHANGELOG entry;
   do not create a new version) + ha-addon 0.2.56 (same rule).

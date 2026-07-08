@@ -8,13 +8,10 @@ its top first.
 - [ ] 1.1 `data-channel-handler.js`: factor the execution tail of
       `handleRequest` so a legacy `request` message and an assembled
       chunked request run the SAME function. `node --check`.
-- [ ] 1.2 Hello: send `{type:"hello", proto:1, version, maxRequestBytes}`
-      at channel wire-up (version from the same source healthz uses);
-      non-fatal on failure; log once per channel.
-- [ ] 1.3 `request-start` + binary inbound frames + per-channel assembly
+- [ ] 1.2 `request-start` + binary inbound frames + per-channel assembly
       with cap (32 MB), size-mismatch check, abort flag (bit 1), TTL
       (60 s), cleanup on channel close. Unknown-requestId frames ignored.
-- [ ] 1.4 Logging: `body=<bytes> bytes (chunked)` on execution; stale-drop
+- [ ] 1.3 Logging: `body=<bytes> bytes (chunked)` on execution; stale-drop
       line on TTL.
 
 ## 2. Verification

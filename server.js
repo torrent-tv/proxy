@@ -138,7 +138,11 @@ export async function startProxyServer({ host, port, transcodeAudio, ffmpegBin, 
       } catch {
         return null;
       }
-    }
+    },
+    // Reuse the media info the planner already probed for this file (same
+    // ffmpeg scan) so createSession skips its own probe. Late-bound: invoked
+    // only at session-create time, after playbackPlanner is initialised.
+    getCachedMediaInfo: (params) => playbackPlanner.getCachedMediaInfo(params)
   });
   const playbackPlanner = createPlaybackPlanner({
     ffmpegBin,

@@ -7,9 +7,22 @@
  */
 
 import { spawn } from "node:child_process";
+import {
+  parseFfmpegDurationSeconds,
+  parseFfmpegStartTimeSeconds,
+  parseFfmpegVideoDimensions,
+  parseFfmpegVideoFps,
+  parseFfmpegHdr
+} from "./ffmpeg-banner.js";
 
 /** Audio codecs that browsers can decode natively without transcoding. */
 const DIRECT_AUDIO_CODECS = new Set(["aac", "mp3", "opus", "vorbis", "flac"]);
+
+// Once the plan probe succeeds, warm the START of the file body so the
+// transcode session's ffmpeg reads hit downloaded data instead of paying
+// piece latency at encode time (the edge prefetch only covers head+tail for
+// the codec probe). ~16 MB ≈ the first segments of typical media.
+const BODY_PREFETCH_BYTES = 16 * 1024 * 1024;
 
 /** Subtitle codecs that can be converted to WebVTT (text-based). */
 const TEXT_SUBTITLE_CODECS = new Set(["subrip", "srt", "ass", "ssa", "webvtt", "vtt", "mov_text", "text"]);
@@ -134,7 +147,9 @@ function parseStreamCodecs(ffmpegOutput) {
  * @param {string} options.inputUrl
  * @param {string} [options.userAgent=""]
  * @param {number} [options.timeoutMs=8000]
- * @returns {Promise<{ audioCodec: string, videoCodec: string }>}
+ * @returns {Promise<{ audioCodec: string, videoCodec: string, container: string, durationSeconds: number, videoWidth: number, videoHeight: number, audioTracks: object[], subtitleTracks: object[], stderr: string }>}
+ *   Parsed banner fields plus the raw `stderr`, so the caller can derive the
+ *   full media info (fps/startTime/HDR) without a second ffmpeg scan.
  */
 function probeStreamCodecs({ ffmpegBin, inputUrl, userAgent = "", timeoutMs = 8_000 }) {
   return new Promise((resolve) => {
@@ -167,7 +182,7 @@ function probeStreamCodecs({ ffmpegBin, inputUrl, userAgent = "", timeoutMs = 8_
       if (!ffmpeg.killed) {
         ffmpeg.kill("SIGTERM");
       }
-      finish(parseStreamCodecs(stderr));
+      finish({ ...parseStreamCodecs(stderr), stderr });
     }, timeoutMs);
 
     ffmpeg.stderr.on("data", (chunk) => {
@@ -176,12 +191,12 @@ function probeStreamCodecs({ ffmpegBin, inputUrl, userAgent = "", timeoutMs = 8_
 
     ffmpeg.on("error", () => {
       clearTimeout(timeoutId);
-      finish({ audioCodec: "", videoCodec: "" });
+      finish({ audioCodec: "", videoCodec: "", stderr: "" });
     });
 
     ffmpeg.on("exit", () => {
       clearTimeout(timeoutId);
-      finish(parseStreamCodecs(stderr));
+      finish({ ...parseStreamCodecs(stderr), stderr });
     });
   });
 }
@@ -251,8 +266,26 @@ export function createPlaybackPlanner({
 }) {
   /** @type {Map<string, PlaybackPlan>} */
   const cache = new Map();
+  /**
+   * Full media info parsed from the SAME probe that produced the plan, cached
+   * under the same key so a transcode session can reuse it instead of running
+   * a second ffmpeg scan. Only set when the plan is cached (codecs detected).
+   * @type {Map<string, { durationSeconds: number | null, width: number | null, height: number | null, fps: number | null, startTime: number, isHdr: boolean }>}
+   */
+  const mediaInfoCache = new Map();
 
   return {
+    /**
+     * Media info the planner already probed for this file, or `null`. Lets the
+     * HLS session manager skip its own duplicate `probeInputMediaInfo` scan.
+     *
+     * @param {{ sourceKey: string, fileIndex: number }} params
+     * @returns {{ durationSeconds: number | null, width: number | null, height: number | null, fps: number | null, startTime: number, isHdr: boolean } | null}
+     */
+    getCachedMediaInfo({ sourceKey, fileIndex }) {
+      return mediaInfoCache.get(`${sourceKey}:${fileIndex}`) ?? null;
+    },
+
     /**
      * Return the playback plan for the given source file.
      * Throws with `error.code === "SOURCE_NOT_FOUND"` or `"FILE_NOT_FOUND"`
@@ -364,6 +397,26 @@ export function createPlaybackPlanner({
       // prioritised by the prefetch above).
       if (codecsDetected) {
         cache.set(cacheKey, plan);
+        // Cache the full media info from THIS probe's banner (same helpers the
+        // session manager uses) so createSession can skip its own probe.
+        const dims = parseFfmpegVideoDimensions(probe.stderr);
+        mediaInfoCache.set(cacheKey, {
+          durationSeconds: parseFfmpegDurationSeconds(probe.stderr),
+          width: dims.width,
+          height: dims.height,
+          fps: parseFfmpegVideoFps(probe.stderr),
+          startTime: parseFfmpegStartTimeSeconds(probe.stderr),
+          isHdr: parseFfmpegHdr(probe.stderr)
+        });
+        // Warm the file-body start for the transcode session that follows.
+        // Fire-and-forget: never delays the plan response.
+        void torrentPool
+          .prefetchFileEdges(torrent, fileIndex, {
+            headBytes: BODY_PREFETCH_BYTES,
+            tailBytes: 0,
+            timeoutMs: 60_000
+          })
+          .catch(() => {});
         return plan;
       }
       return { ...plan, pending: true };

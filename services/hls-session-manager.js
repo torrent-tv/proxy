@@ -22,6 +22,13 @@ import {
   TRANSCODE_FPS,
   chooseOutputFps
 } from "./hwaccel.js";
+import {
+  parseFfmpegDurationSeconds,
+  parseFfmpegStartTimeSeconds,
+  parseFfmpegVideoDimensions,
+  parseFfmpegVideoFps,
+  parseFfmpegHdr
+} from "./ffmpeg-banner.js";
 
 const PLAYLIST_FILE_NAME = "index.m3u8";
 const SEGMENT_FILE_NAME_PATTERN = /^segment-\d{5}\.ts$/;
@@ -207,51 +214,6 @@ function parseFfmpegTimestamp(value) {
 }
 
 /**
- * Extract the total duration in seconds from ffmpeg stderr output.
- * Returns `null` if the duration line is absent or unparseable.
- *
- * @param {string} stderrText
- * @returns {number | null}
- */
-function parseFfmpegDurationSeconds(stderrText) {
-  if (typeof stderrText !== "string" || stderrText.length === 0) {
-    return null;
-  }
-  const match = stderrText.match(/Duration:\s*(\d+):(\d+):(\d+(?:\.\d+)?)/i);
-  if (!match) {
-    return null;
-  }
-  const hours = Number(match[1]);
-  const minutes = Number(match[2]);
-  const seconds = Number(match[3]);
-  if (![hours, minutes, seconds].every((item) => Number.isFinite(item))) {
-    return null;
-  }
-  return hours * 3600 + minutes * 60 + seconds;
-}
-
-/**
- * Parse the container start time (seconds) from ffmpeg's "Duration: …, start:
- * X, …" line. Many MKVs report a small non-zero start (e.g. 0.1 s); preserving
- * it via `-copyts` would put a hole at the beginning, so we normalize it away.
- * Returns 0 when absent.
- *
- * @param {string} stderrText
- * @returns {number}
- */
-function parseFfmpegStartTimeSeconds(stderrText) {
-  if (typeof stderrText !== "string" || stderrText.length === 0) {
-    return 0;
-  }
-  const match = stderrText.match(/Duration:[^\n]*?start:\s*(-?\d+(?:\.\d+)?)/i);
-  if (!match) {
-    return 0;
-  }
-  const value = Number(match[1]);
-  return Number.isFinite(value) ? value : 0;
-}
-
-/**
  * Format a seconds value as `HH:MM:SS`, or `"n/a"` if not finite.
  *
  * @param {number} seconds
@@ -300,76 +262,6 @@ function computeProgressMetrics(processedSeconds, totalSeconds, startPositionSec
     remainingSeconds,
     processedSeconds: processed
   };
-}
-
-/**
- * Parse the source video resolution from ffmpeg's stderr (the "Stream … Video:
- * … WxH" line). Returns `{ width: null, height: null }` when absent.
- *
- * @param {string} stderrText
- * @returns {{ width: number | null, height: number | null }}
- */
-function parseFfmpegVideoDimensions(stderrText) {
-  if (typeof stderrText !== "string" || stderrText.length === 0) {
-    return { width: null, height: null };
-  }
-  const match = stderrText.match(/Video:[^\n]*?\b(\d{2,5})x(\d{2,5})\b/i);
-  if (!match) {
-    return { width: null, height: null };
-  }
-  const width = Number(match[1]);
-  const height = Number(match[2]);
-  return {
-    width: Number.isFinite(width) && width > 0 ? width : null,
-    height: Number.isFinite(height) && height > 0 ? height : null
-  };
-}
-
-/**
- * Parse the source frame rate from the ffmpeg "Video:" line
- * (e.g. "… 23.98 fps," / "… 25 fps,"). Returns null when absent.
- *
- * @param {string} stderrText
- * @returns {number | null}
- */
-function parseFfmpegVideoFps(stderrText) {
-  if (typeof stderrText !== "string" || stderrText.length === 0) {
-    return null;
-  }
-  const videoLine = stderrText.match(/Video:[^\n]*/i);
-  if (!videoLine) {
-    return null;
-  }
-  const match = videoLine[0].match(/([\d.]+)\s*fps/i);
-  if (!match) {
-    return null;
-  }
-  const value = Number(match[1]);
-  return Number.isFinite(value) && value > 0 ? value : null;
-}
-
-/**
- * Detect an HDR / wide-gamut source from the ffmpeg "Video:" line's colour
- * metadata. HDR is identified by the transfer function — `smpte2084` (PQ /
- * HDR10) or `arib-std-b67` (HLG). Re-encoding such a source to 8-bit SDR
- * without tone mapping produces a washed-out, desaturated picture, so this
- * gates the tonemap filter chain.
- *
- * @param {string} stderrText
- * @returns {boolean}
- */
-function parseFfmpegHdr(stderrText) {
-  if (typeof stderrText !== "string" || stderrText.length === 0) {
-    return false;
-  }
-  const videoLine = stderrText.match(/Video:[^\n]*/i);
-  if (!videoLine) {
-    return false;
-  }
-  // ffmpeg prints the colour info in parentheses, e.g.
-  // "yuv420p10le(tv, bt2020nc/bt2020/smpte2084)". The transfer (last token) is
-  // the reliable HDR signal.
-  return /\b(smpte2084|arib-std-b67|arib_std_b67)\b/i.test(videoLine[0]);
 }
 
 /**
@@ -682,10 +574,14 @@ export class HlsSessionManager {
     videoEncoder = null,
     softwarePresetBenchmark = null,
     getSourceStats = null,
-    tonemapSupported = false
+    tonemapSupported = false,
+    getCachedMediaInfo = null
   }) {
     this.enabled = Boolean(enabled);
     this.ffmpegBin = ffmpegBin;
+    // Optional accessor for media info the playback planner already probed for
+    // (sourceKey, fileIndex), so session create can skip its own ffmpeg scan.
+    this.getCachedMediaInfo = typeof getCachedMediaInfo === "function" ? getCachedMediaInfo : null;
     // Optional async accessor for a source's live download stats, used by the
     // realtime budget to tell a CPU limit from a download-starved input:
     // (sourceKey, fileIndex) => Promise<{ downloadSpeed, fileLength, fileProgress } | null>.
@@ -804,17 +700,35 @@ export class HlsSessionManager {
     }
 
     const sessionId = randomUUID();
+    const createEntryMs = Date.now();
     const sessionDir = createSessionDirPath(sessionId);
     await mkdir(sessionDir, { recursive: true });
     const inputUrl = new URL("/stream", `${this.localBaseUrl}/`);
     inputUrl.searchParams.set("sourceKey", sourceKey);
     inputUrl.searchParams.set("fileIndex", String(fileIndex));
 
-    // Probe the full media duration up-front so we can serve a complete VOD
-    // playlist (terminated with #EXT-X-ENDLIST) immediately.  This gives the
-    // player the correct total duration and a fully seekable timeline before a
-    // single segment has been transcoded.
-    const mediaInfo = await probeInputMediaInfo(this.ffmpegBin, inputUrl.toString());
+    // Media info (duration/resolution/fps/startTime/HDR) up front, so we can
+    // serve a complete VOD playlist (#EXT-X-ENDLIST) with the correct total
+    // duration and a fully seekable timeline before a single segment exists.
+    // Reuse the planner's probe when it is available and complete — the plan
+    // request just ran the same ffmpeg scan over the same input. Fall back to
+    // a fresh probe otherwise (proxy restarted between plan and session, or a
+    // critical field is missing).
+    const mediaInfoStartMs = Date.now();
+    const cachedMediaInfo = this.getCachedMediaInfo?.({ sourceKey, fileIndex }) ?? null;
+    const cachedUsable =
+      cachedMediaInfo &&
+      Number.isFinite(cachedMediaInfo.durationSeconds) &&
+      cachedMediaInfo.durationSeconds > 0 &&
+      Number.isFinite(cachedMediaInfo.width) &&
+      cachedMediaInfo.width > 0 &&
+      Number.isFinite(cachedMediaInfo.height) &&
+      cachedMediaInfo.height > 0;
+    const mediaInfo = cachedUsable
+      ? cachedMediaInfo
+      : await probeInputMediaInfo(this.ffmpegBin, inputUrl.toString());
+    const mediaInfoMs = Date.now() - mediaInfoStartMs;
+    const mediaInfoSource = cachedUsable ? "cached" : "probed";
     const durationSeconds = mediaInfo.durationSeconds;
     const sourceWidth = mediaInfo.width;
     const sourceHeight = mediaInfo.height;
@@ -847,11 +761,14 @@ export class HlsSessionManager {
     // uniform grid (current behaviour). Re-encoded video uses a uniform grid
     // (its fixed GOP makes the cuts land there).
     let keyframeTimes = null;
+    let keyframeMs = -1; // -1 = not run (skipped)
     if (hasDuration && !transcodeVideo) {
       // Short timeout: mp4 keyframes come from the moov index (fast); containers
       // that force a full packet scan time out and fall back to a uniform grid,
       // so this never adds more than ~6 s to session start.
+      const keyframeStartMs = Date.now();
       keyframeTimes = await probeVideoKeyframeTimes(this.ffmpegBin, inputUrl.toString(), 6_000);
+      keyframeMs = Date.now() - keyframeStartMs;
       if (!keyframeTimes) {
         logger.warn(
           `transcode ${sessionId}: keyframe probe unavailable; using uniform grid ` +
@@ -859,6 +776,10 @@ export class HlsSessionManager {
         );
       }
     }
+    logger.info(
+      `cold-start ${sessionId.slice(0, 8)}: media-info=${mediaInfoMs}ms (${mediaInfoSource}) ` +
+        `keyframes=${keyframeMs < 0 ? "skipped" : `${keyframeMs}ms`} create-total=${Date.now() - createEntryMs}ms`
+    );
     const segmentBoundaries = hasDuration
       ? computeSegmentBoundaries({
           transcodeVideo,
@@ -908,6 +829,10 @@ export class HlsSessionManager {
       lastAccessedAt: Date.now(),
       ffmpeg: null,
       lastError: "",
+      // Cold-start timing: entry timestamp + a once-guard so the first servable
+      // segment logs its latency exactly once.
+      createEntryMs,
+      firstSegmentLogged: false,
       consumers: new Set(consumerId ? [consumerId] : []),
       // Transcode parameters retained so the encode run can be restarted at an
       // arbitrary segment when the player seeks (server-side seeking).
@@ -1673,6 +1598,14 @@ export class HlsSessionManager {
     try {
       await access(filePath);
       const isPlaylist = fileName === PLAYLIST_FILE_NAME;
+      // Cold-start: log the first servable SEGMENT of this session exactly once
+      // — the time from session-create entry to a playable first segment.
+      if (!isPlaylist && !session.firstSegmentLogged) {
+        session.firstSegmentLogged = true;
+        logger.info(
+          `cold-start ${sessionId.slice(0, 8)}: first-segment ready +${Date.now() - session.createEntryMs}ms`
+        );
+      }
       return {
         kind: "file",
         stream: isPlaylist

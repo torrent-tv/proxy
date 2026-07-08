@@ -95,21 +95,131 @@ export function createDataChannelHandler({ proxyPort, onLog }) {
    * @returns {void}
    */
   function handleChannel(sessionId, channel) {
-    log(`[dc] Session ${sessionId.slice(0, 8)}: channel open`);
+    const tag = sessionId.slice(0, 8);
+    log(`[dc] Session ${tag}: channel open`);
+
+    // Partial chunked-request bodies in flight on THIS channel, keyed by
+    // requestId. Each entry buffers frames until the done frame, then runs the
+    // assembled request through the same path as a single-message request.
+    /** @type {Map<string, { meta: object, chunks: Buffer[], receivedBytes: number, bodyBytes: number, timer: ReturnType<typeof setTimeout> }>} */
+    const partials = new Map();
+
+    const dropPartial = (requestId) => {
+      const entry = partials.get(requestId);
+      if (entry) {
+        clearTimeout(entry.timer);
+        partials.delete(requestId);
+      }
+    };
+
+    /**
+     * Begin assembling a chunked request. Validates the path and size up front
+     * so an invalid or oversized request never buffers a body.
+     *
+     * @param {any} message - The `request-start` control message.
+     */
+    const startPartialRequest = (message) => {
+      const { requestId, method, path, query, headers, bodyBytes } = message ?? {};
+      if (typeof requestId !== "string" || requestId.length === 0) {
+        return;
+      }
+      if (!isValidRequestPath(path)) {
+        send(channel, { type: "response-error", requestId, error: "Invalid request path." });
+        return;
+      }
+      if (!Number.isInteger(bodyBytes) || bodyBytes < 0 || bodyBytes > PROXY_MAX_REQUEST_BODY_BYTES) {
+        send(channel, { type: "response-error", requestId, error: "Request body too large." });
+        return;
+      }
+      dropPartial(requestId); // replace any stale entry with the same id
+      const timer = setTimeout(() => {
+        const entry = partials.get(requestId);
+        partials.delete(requestId);
+        log(`[dc] Session ${tag}: dropped stale partial request ${requestId.slice(0, 8)} (${entry?.receivedBytes ?? 0}B)`);
+      }, PARTIAL_REQUEST_TTL_MS);
+      partials.set(requestId, {
+        meta: { requestId, method, path, query, headers },
+        chunks: [],
+        receivedBytes: 0,
+        bodyBytes,
+        timer
+      });
+    };
+
+    /**
+     * Handle a binary body frame for a chunked request.
+     * Layout: [flags(1)][idLen(1)][requestId(ASCII)][payload].
+     *
+     * @param {Buffer} buf
+     */
+    const handleBodyFrame = (buf) => {
+      if (buf.length < 2) {
+        return;
+      }
+      const flags = buf[0];
+      const idLen = buf[1];
+      if (buf.length < 2 + idLen) {
+        return;
+      }
+      const requestId = buf.toString("ascii", 2, 2 + idLen);
+      const entry = partials.get(requestId);
+      if (!entry) {
+        return; // stale / already-dropped / aborted
+      }
+      if (flags & 2) {
+        // Aborted by the browser — drop silently, no reply.
+        dropPartial(requestId);
+        return;
+      }
+      if (buf.length > 2 + idLen) {
+        const payload = buf.subarray(2 + idLen);
+        entry.chunks.push(Buffer.from(payload));
+        entry.receivedBytes += payload.length;
+      }
+      if (entry.receivedBytes > entry.bodyBytes || entry.receivedBytes > PROXY_MAX_REQUEST_BODY_BYTES) {
+        dropPartial(requestId);
+        send(channel, { type: "response-error", requestId, error: "Request body size mismatch." });
+        return;
+      }
+      if (flags & 1) {
+        // Done frame — assemble and execute.
+        dropPartial(requestId);
+        if (entry.receivedBytes !== entry.bodyBytes) {
+          send(channel, { type: "response-error", requestId, error: "Request body size mismatch." });
+          return;
+        }
+        const body = Buffer.concat(entry.chunks).toString("utf8");
+        void handleRequest(channel, { ...entry.meta, body }, true).catch((error) => {
+          log(`[dc] Session ${tag}: request error: ${error?.message ?? error}`);
+        });
+      }
+    };
 
     channel.onMessage((raw) => {
-      /** @type {DataChannelRequest | { type: "ping", id: string }} */
+      // Binary messages are chunked-request body frames; the proxy otherwise
+      // only ever receives JSON strings, so the type discriminates cleanly.
+      if (typeof raw !== "string") {
+        handleBodyFrame(Buffer.isBuffer(raw) ? raw : Buffer.from(raw));
+        return;
+      }
+
+      /** @type {DataChannelRequest | { type: string, id?: string }} */
       let message;
       try {
-        message = JSON.parse(typeof raw === "string" ? raw : raw.toString());
+        message = JSON.parse(raw);
       } catch {
         return;
       }
 
       if (message.type === "request") {
         void handleRequest(channel, message).catch((error) => {
-          log(`[dc] Session ${sessionId.slice(0, 8)}: request error: ${error?.message ?? error}`);
+          log(`[dc] Session ${tag}: request error: ${error?.message ?? error}`);
         });
+        return;
+      }
+
+      if (message.type === "request-start") {
+        startPartialRequest(message);
         return;
       }
 
@@ -119,11 +229,15 @@ export function createDataChannelHandler({ proxyPort, onLog }) {
     });
 
     channel.onClosed(() => {
-      log(`[dc] Session ${sessionId.slice(0, 8)}: channel closed`);
+      for (const entry of partials.values()) {
+        clearTimeout(entry.timer);
+      }
+      partials.clear();
+      log(`[dc] Session ${tag}: channel closed`);
     });
 
     channel.onError((err) => {
-      log(`[dc] Session ${sessionId.slice(0, 8)}: channel error: ${err}`);
+      log(`[dc] Session ${tag}: channel error: ${err}`);
     });
   }
 
@@ -138,24 +252,22 @@ export function createDataChannelHandler({ proxyPort, onLog }) {
    * @param {DataChannelRequest} req
    * @returns {Promise<void>}
    */
-  async function handleRequest(channel, req) {
+  async function handleRequest(channel, req, viaChunks = false) {
     const { requestId, method, path, query, headers: forwardedHeaders, body } = req;
 
     // Reject paths that are not absolute, contain traversal sequences, or
     // do not start with a known proxy route prefix.  All valid browser-side
     // requests use /api/*, /stream, /transcode/*, /health, or /healthz.
-    if (
-      typeof path !== "string" ||
-      !path.startsWith("/") ||
-      path.includes("..") ||
-      !PATH_ALLOWLIST_RE.test(path)
-    ) {
+    if (!isValidRequestPath(path)) {
       send(channel, { type: "response-error", requestId, error: "Invalid request path." });
       return;
     }
 
     const queryInfo = query ? `?${query}` : "";
-    const bodyInfo = body != null && typeof body === "string" && body.length > 0 ? ` body=${body.length} bytes` : "";
+    const bodyInfo =
+      body != null && typeof body === "string" && body.length > 0
+        ? ` body=${body.length} bytes${viaChunks ? " (chunked)" : ""}`
+        : "";
     log(`[dc] ${method} ${path}${queryInfo}${bodyInfo}`);
 
     const targetUrl = `http://127.0.0.1:${proxyPort}${path}${query ? `?${query}` : ""}`;
@@ -327,6 +439,27 @@ export function createDataChannelHandler({ proxyPort, onLog }) {
  * Only the known proxy API and streaming routes are accepted.
  */
 const PATH_ALLOWLIST_RE = /^(?:\/api\/|\/stream(?:$|\?)|\/?transcode\/|\/health(?:z)?(?:$|\?))/;
+
+/**
+ * True when `path` is an absolute, traversal-free path on a known proxy route.
+ * Shared by the single-message and chunked request entry points.
+ *
+ * @param {unknown} path
+ * @returns {boolean}
+ */
+function isValidRequestPath(path) {
+  return (
+    typeof path === "string" &&
+    path.startsWith("/") &&
+    !path.includes("..") &&
+    PATH_ALLOWLIST_RE.test(path)
+  );
+}
+
+/** Max assembled size of a chunked request body (guards proxy memory). */
+const PROXY_MAX_REQUEST_BODY_BYTES = 32 * 1024 * 1024;
+/** Drop an incomplete chunked body if no further frame arrives within this window. */
+const PARTIAL_REQUEST_TTL_MS = 60_000;
 
 /** Pause sending body chunks once the channel buffer exceeds this many bytes. */
 const DC_BUFFER_HIGH_WATER = 8 * 1024 * 1024;

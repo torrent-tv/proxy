@@ -25,6 +25,18 @@ const ICE_SERVERS = ["stun:stun.l.google.com:19302", "stun:stun.cloudflare.com:3
 // values without bloating the SDP.
 const PORT_PREDICTION_WINDOW = 16;
 
+// Max size of a single data-channel message the proxy advertises (SDP
+// `a=max-message-size`) and will accept. The browser caps `channel.send()` at
+// the REMOTE's advertised value, so this is what lets the browser send a large
+// request body in one message — notably registering a source, whose body is
+// the base64-encoded .torrent. A big multi-season pack's .torrent (thousands of
+// piece hashes) can be hundreds of KB (e.g. Poirot: 420 KB → ~560 KB base64),
+// which exceeds libdatachannel's ~256 KB default and made `send()` throw
+// "message larger than max-message-size". 16 MB is a generous ceiling (memory
+// is allocated per actual message, not reserved). Responses (proxy→browser)
+// are already safe — they stream in small reader-sized chunks.
+const MAX_DC_MESSAGE_BYTES = 16 * 1024 * 1024;
+
 /**
  * Build predicted srflx ICE candidates for a symmetric NAT.
  *
@@ -195,7 +207,7 @@ export function createWebRtcManager({ sendSignal, onDataChannel, onLog, udpPort,
   }
 
   // Base PeerConnection config shared by every session.
-  const pcConfig = { iceServers: ICE_SERVERS };
+  const pcConfig = { iceServers: ICE_SERVERS, maxMessageSize: MAX_DC_MESSAGE_BYTES };
 
   // Single-port UDP mux: create ONE persistent listener that owns the shared
   // UDP socket for the proxy's whole lifetime, then have every PeerConnection

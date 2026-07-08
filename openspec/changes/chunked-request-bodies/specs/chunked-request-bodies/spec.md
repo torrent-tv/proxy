@@ -28,19 +28,3 @@ requests SHALL keep working unchanged.
 - **WHEN** frames stop arriving (tab closed, aborted without a frame)
 - **THEN** the partial body is dropped after the TTL (or immediately on
   channel close) and its memory is released
-
-### Requirement: The proxy announces its protocol capabilities
-
-On every fresh data channel the proxy SHALL send a `hello` message carrying
-the protocol level, the proxy version and the request-body cap, before or
-alongside serving requests. Browsers that do not understand it are
-unaffected (unknown JSON types are ignored by design).
-
-#### Scenario: New browser gates on capability
-- **WHEN** the browser receives the hello
-- **THEN** it knows chunked requests are supported and up to what size
-
-#### Scenario: Old proxy, new browser
-- **WHEN** no hello arrives on an open channel
-- **THEN** the browser falls back to the legacy single-message request (see
-  the server-side delta spec)

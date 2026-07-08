@@ -7,20 +7,10 @@ and do-NOT list are normative. Read before coding:
   doc comment (~lines 9–37), `handleChannel` (onMessage string handling),
   `handleRequest`, `sendChunk` (the response frame writer whose layout the
   request frames mirror), `send`.
-- `services/webrtc-manager.js`: where `onDataChannel` hands the channel to
-  the handler (hello is sent from the handler's `handleChannel`, at wire-up
-  time — the channel is already open when it is delivered).
-- `routes/healthz/get.js` or `bin/cli.js`: how the proxy version string is
-  obtained today (reuse the same mechanism; do not re-read package.json in
-  a second way).
 
 ## Wire protocol (additions)
 
 Existing messages are UNCHANGED. New:
-
-    Proxy → Browser, once, immediately at channel wire-up:
-      { type: "hello", proto: 1, version: "<proxy version>",
-        maxRequestBytes: 33554432 }
 
     Browser → Proxy, announcing a chunked request:
       { type: "request-start", requestId, method, path, query, headers,
@@ -36,7 +26,12 @@ Existing messages are UNCHANGED. New:
                               may be empty on a done/abort frame)
 
 Identical layout to the response frames (`sendChunk`) — one mental model,
-and the browser already has a builder/parser for it.
+and the browser already has a parser for it (its builder mirrors it).
+
+No capability negotiation: POC, single-proxy pool, lockstep releases
+(proxy first, then server). The 16 MB `maxMessageSize` advertisement in
+webrtc-manager.js (pending 2.9.35) stays as a one-line transition cover
+for tabs still running the single-send bundle.
 
 ## Constants
 
@@ -67,27 +62,18 @@ and the browser already has a builder/parser for it.
 - `channel.onClosed`: clear ALL timers and the map (extend the existing
   handler — do not replace its logging).
 
-## Hello
-
-Sent from `handleChannel` right after the handlers are wired (the channel
-is open by the time `onDataChannel` delivers it — same reason the existing
-code can log "channel open" there). Use the same version source healthz
-uses. `send()` failure is non-fatal (log and continue) — an old browser
-simply ignores the unknown JSON type by design.
-
 ## Logging
 
-- Chunked request execution logs the SAME `[dc] <method> <path>` line as
-  legacy, with `body=<bytes> bytes (chunked)`.
-- Hello logs once per channel: `[dc] Session …: hello sent (v<version>)`.
+Chunked request execution logs the SAME `[dc] <method> <path>` line as
+legacy, with `body=<bytes> bytes (chunked)`.
 
 ## Rules — do NOT
 
 - Do NOT change the legacy `{type:"request"}` handling, the response
   framing, ping/pong, or the path allowlist semantics.
-- Do NOT revert the 16 MB `maxMessageSize` advertisement in
-  webrtc-manager.js (pending 2.9.35) — it is the compatibility path for
-  old cached browser bundles.
+- Do NOT add capability/version negotiation — POC decision, revisit only
+  when the pool has independently-updated proxies.
+- Do NOT revert the 16 MB `maxMessageSize` advertisement (pending 2.9.35).
 - Do NOT hold partial bodies beyond the TTL or channel lifetime; no global
   (cross-channel) state.
 - Do NOT create a new proxy version: fold into the pending 2.9.35

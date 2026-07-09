@@ -43,6 +43,17 @@ const MAX_LOOKAHEAD_SEGMENTS = 8;
 // succession (stall-recovery seeks); without a cooldown ffmpeg ping-pongs
 // between positions, restarting endlessly and producing nothing.
 const RESTART_COOLDOWN_MS = 4_000;
+// Seek debounce. A far (out-of-window) segment request is a server-side seek.
+// Rather than restart ffmpeg on the first one, wait a short quiet period:
+// further far requests re-arm it and update the target to the latest index, so
+// a scrub that emits a burst of scattered requests (e.g. iOS native HLS firing
+// 367,732,369,368,370 seconds apart) collapses to ONE restart at the position
+// the player ended on, instead of ping-ponging ffmpeg between positions and
+// producing nothing.
+const SEEK_SETTLE_MS = 1_200;
+// Hard cap on the total settle wait, measured from the first far request of a
+// burst, so a still-moving scrubber cannot delay a genuine seek forever.
+const SEEK_SETTLE_MAX_MS = 2_500;
 // Idle TTL: a session is disposed this long after the last segment/playlist
 // access. Kept short so an ffmpeg process does not keep burning CPU after the
 // viewer stops or navigates away. Active playback refreshes the timer on every
@@ -884,6 +895,12 @@ export class HlsSessionManager {
       pendingRestartIndex: -1,
       // Timestamp of the last encode (re)start, for the restart cooldown.
       lastRestartAt: 0,
+      // Seek debounce: pending settle timer, the far segment index to restart
+      // at once the burst settles, and the timestamp of the burst's first far
+      // request (for the SEEK_SETTLE_MAX_MS cap).
+      seekSettleTimer: null,
+      seekTarget: null,
+      seekFirstFarAt: 0,
       progress: {
         state: "starting",
         processedSeconds: 0,
@@ -1492,22 +1509,52 @@ export class HlsSessionManager {
     if (withinWindow) {
       return;
     }
-    if (session.pendingRestartIndex === index) {
+    // Far request = a server-side seek. Do NOT restart on the first one:
+    // debounce a burst of scattered requests into a single restart at the
+    // position the player ended on. Record the latest target and (re)arm the
+    // settle timer; the caller long-polls / the client retries meanwhile.
+    session.seekTarget = index;
+    if (session.seekSettleTimer) {
+      clearTimeout(session.seekSettleTimer);
+    } else {
+      session.seekFirstFarAt = Date.now();
+    }
+    const waited = Date.now() - session.seekFirstFarAt;
+    const delay = waited >= SEEK_SETTLE_MAX_MS ? 0 : Math.min(SEEK_SETTLE_MS, SEEK_SETTLE_MAX_MS - waited);
+    session.seekSettleTimer = setTimeout(() => this.#fireSettledSeek(session), delay);
+    session.seekSettleTimer.unref?.();
+  }
+
+  /**
+   * Fire a settled server-side seek: restart the encoder once at the target
+   * recorded during the settle window. Enforces the restart cooldown as a
+   * floor between actual restarts (re-arming for the remainder if still
+   * cooling down). No-op for a disposed session or a cleared target.
+   *
+   * @param {HlsSession} session
+   * @returns {void}
+   */
+  #fireSettledSeek(session) {
+    const target = session.seekTarget;
+    session.seekSettleTimer = null;
+    if (!session || session.state === "disposed" || target == null) {
+      session.seekTarget = null;
+      session.seekFirstFarAt = 0;
       return;
     }
-    // Restart cooldown: a stalled player requests several distant segments in
-    // quick succession; without this guard ffmpeg ping-pongs between them and
-    // never makes progress. Skip the restart during the cooldown — the caller
-    // long-polls / the client retries, and a genuine seek is honored once the
-    // cooldown elapses.
+    // Minimum gap between actual restarts (the settle already collapses bursts;
+    // this only guards back-to-back seeks). If still cooling down, re-arm once
+    // for the remaining cooldown instead of restarting now.
     const sinceLastRestart = Date.now() - (session.lastRestartAt ?? 0);
     if (sinceLastRestart < RESTART_COOLDOWN_MS) {
+      session.seekSettleTimer = setTimeout(() => this.#fireSettledSeek(session), RESTART_COOLDOWN_MS - sinceLastRestart);
+      session.seekSettleTimer.unref?.();
       return;
     }
-    logger.info(
-      `transcode ${session.id} seek → restart at segment #${index} (encode head #${head}, current #${currentSeg})`
-    );
-    this.#startEncodeRun(session, index);
+    session.seekTarget = null;
+    session.seekFirstFarAt = 0;
+    logger.info(`transcode ${session.id} seek settle → restart at segment #${target}`);
+    this.#startEncodeRun(session, target);
   }
 
   /**
@@ -1742,6 +1789,13 @@ export class HlsSessionManager {
     session.state = "disposed";
     this.sessionsById.delete(sessionId);
     this.sessionIdBySource.delete(session.sourceMapKey);
+
+    // Clear any pending seek-settle timer so it cannot fire and restart a
+    // disposed session.
+    if (session.seekSettleTimer) {
+      clearTimeout(session.seekSettleTimer);
+      session.seekSettleTimer = null;
+    }
 
     if (session.ffmpeg && !session.ffmpeg.killed) {
       session.ffmpeg.kill("SIGTERM");

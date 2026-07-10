@@ -1,6 +1,6 @@
 {
   "name": "@torrent-tv/proxy",
-  "version": "2.9.37",
+  "version": "2.9.38",
   "description": "Torrent proxy client that exposes webseed-like HTTP stream endpoint.",
   "license": "GPL-3.0-or-later",
   "publishConfig": {

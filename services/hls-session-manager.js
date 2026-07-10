@@ -8,7 +8,7 @@
  */
 
 import { createReadStream } from "node:fs";
-import { access, mkdir, readdir, readFile, rm } from "node:fs/promises";
+import { access, mkdir, readdir, readFile, rm, stat } from "node:fs/promises";
 import { Readable } from "node:stream";
 import os from "node:os";
 import path from "node:path";
@@ -84,6 +84,24 @@ const BUDGET_MAX_DOWNSHIFTS = 3;
 // multiple of the source's average byte rate. Below it (and not yet fully
 // downloaded), a low speed is download-bound, not CPU-bound → do NOT downscale.
 const BUDGET_DOWNLOAD_OK_FACTOR = 1.0;
+// Viewer-link adaptation (adaptive bitrate, part b). The browser reports its
+// measured data-channel throughput + buffered seconds every ~10 s; when a
+// FRESH report shows the usable link (reported × safety margin) sustainedly
+// below the observed produced bitrate AND the viewer's buffer is low, the
+// budget loop steps the encode one rung down — same machinery, cooldown and
+// floor as the CPU trigger. Manual-quality sessions are inherently exempt
+// (their budgetLadder is null).
+const LINK_REPORT_FRESH_MS = 30_000;
+// Usable share of the reported link (protocol overhead + measurement noise).
+const LINK_SAFETY = 0.8;
+// Deficit must persist this long before acting (absorbs one slow segment).
+const LINK_SLOW_WINDOW_MS = 15_000;
+// Only act while the viewer is actually running dry; a comfortable buffer
+// (e.g. paused playback filling ahead) suppresses the trigger.
+const LINK_LOW_BUFFER_SEC = 10;
+// Observed produced bitrate: average over this many recently completed
+// segments (the newest file on disk may still be written and is excluded).
+const LINK_OBSERVED_SEGMENTS = 5;
 const MICROSECONDS_PER_SECOND = 1_000_000;
 const PROGRESS_LOG_INTERVAL_MS = 5_000;
 // Read segment files in large blocks so the body is delivered to the data
@@ -873,6 +891,10 @@ export class HlsSessionManager {
       budgetDownshifts: 0,
       budgetSlowSince: 0,
       budgetLastActionAt: 0,
+      // Latest viewer link report ({ linkMbps, bufferedAheadSec, at }) and the
+      // link-deficit slow window (mirrors budgetSlowSince for the CPU path).
+      netReport: null,
+      linkSlowSince: 0,
       sourceWidth,
       sourceHeight,
       // Container start time (seconds); subtracted on the copy path so the
@@ -1087,6 +1109,110 @@ export class HlsSessionManager {
    *
    * @returns {Promise<void>}
    */
+  /**
+   * Record the latest viewer link report for a session (adaptive bitrate).
+   * Returns false for an unknown/disposed session.
+   *
+   * @param {string} sessionId
+   * @param {{ linkMbps: number, bufferedAheadSec: number }} report
+   * @returns {boolean}
+   */
+  recordNetReport(sessionId, { linkMbps, bufferedAheadSec }) {
+    const session = this.sessionsById.get(sessionId);
+    if (!session || session.state === "disposed") {
+      return false;
+    }
+    session.netReport = { linkMbps, bufferedAheadSec, at: Date.now() };
+    return true;
+  }
+
+  /**
+   * Observed produced bitrate (Mbit/s) averaged over the last few COMPLETED
+   * segment files (the newest file may still be being written and is
+   * excluded). Transcode sessions only — their segment grid is uniform, so
+   * bytes / (count × segDur) is exact. Returns null when there is not enough
+   * material to measure.
+   *
+   * @param {HlsSession} session
+   * @returns {Promise<number | null>}
+   */
+  async #observedStreamMbps(session) {
+    let names;
+    try {
+      names = await readdir(session.dirPath);
+    } catch {
+      return null;
+    }
+    const indices = [];
+    for (const name of names) {
+      const match = /^segment-(\d{5})\.ts$/.exec(name);
+      if (match) {
+        indices.push(parseInt(match[1], 10));
+      }
+    }
+    if (indices.length < 3) {
+      return null; // need ≥2 completed segments after dropping the newest
+    }
+    indices.sort((a, b) => a - b);
+    const completed = indices.slice(0, -1).slice(-LINK_OBSERVED_SEGMENTS);
+    let bytes = 0;
+    try {
+      for (const index of completed) {
+        const st = await stat(path.join(session.dirPath, `segment-${String(index).padStart(5, "0")}.ts`));
+        bytes += st.size;
+      }
+    } catch {
+      return null; // a segment vanished mid-measure (seek-restart cleanup)
+    }
+    return (bytes * 8) / (completed.length * this.segmentDurationSec) / 1e6;
+  }
+
+  /**
+   * Viewer-link deficit check for one session (adaptive bitrate, part b).
+   * Mirrors the CPU slow-window pattern; shares the action cooldown and the
+   * downshift machinery. Returns true when a downshift was applied this tick.
+   *
+   * @param {HlsSession} session
+   * @param {number} now
+   * @returns {Promise<boolean>}
+   */
+  async #checkLinkBudget(session, now) {
+    const report = session.netReport;
+    if (!report || now - report.at > LINK_REPORT_FRESH_MS) {
+      session.linkSlowSince = 0; // no fresh data — old clients / stopped reporter
+      return false;
+    }
+    if (report.bufferedAheadSec >= LINK_LOW_BUFFER_SEC) {
+      session.linkSlowSince = 0; // viewer is comfortable — nothing to fix
+      return false;
+    }
+    const observed = await this.#observedStreamMbps(session);
+    if (observed === null) {
+      return false; // not enough produced material to compare against
+    }
+    if (report.linkMbps * LINK_SAFETY >= observed) {
+      session.linkSlowSince = 0; // link keeps up
+      return false;
+    }
+    if (session.linkSlowSince === 0) {
+      session.linkSlowSince = now;
+      return false;
+    }
+    if (now - session.linkSlowSince < LINK_SLOW_WINDOW_MS) {
+      return false; // not sustained yet
+    }
+    if (now - session.budgetLastActionAt < BUDGET_ACTION_COOLDOWN_MS) {
+      return false; // let the previous action settle
+    }
+    this.#applyBudgetDownshift(
+      session,
+      `link=${report.linkMbps.toFixed(2)}Mbps stream=${observed.toFixed(2)}Mbps buffer=${report.bufferedAheadSec.toFixed(1)}s`,
+      "link"
+    );
+    session.linkSlowSince = 0;
+    return true;
+  }
+
   async #enforceRealtimeBudget() {
     if (this.videoEncoder?.kind !== "software") {
       return;
@@ -1108,6 +1234,13 @@ export class HlsSessionManager {
         session.budgetRungIndex >= session.budgetLadder.length - 1 ||
         session.budgetDownshifts >= BUDGET_MAX_DOWNSHIFTS
       ) {
+        continue;
+      }
+      // Viewer-link deficit first (adaptive bitrate): independent of encoder
+      // speed — a thin cellular link starves even a faster-than-realtime
+      // encode. When it acts, skip the CPU check this tick (shared cooldown
+      // guards double-firing anyway).
+      if (await this.#checkLinkBudget(session, now)) {
         continue;
       }
       const speed = this.#parseSpeed(session.progress?.speed);
@@ -1143,7 +1276,7 @@ export class HlsSessionManager {
         session.budgetSlowSince = 0; // re-evaluate fresh; don't thrash on this
         continue;
       }
-      this.#applyBudgetDownshift(session, speed, bound);
+      this.#applyBudgetDownshift(session, `speed=${speed.toFixed(2)}x`, bound);
     }
   }
 
@@ -1189,11 +1322,11 @@ export class HlsSessionManager {
    * encode at the current segment with the lighter profile.
    *
    * @param {HlsSession} session
-   * @param {number} speed - The measured (sub-realtime) speed, for logging.
-   * @param {"cpu" | "unknown"} bound
+   * @param {string} reasonText - Measurement summary for the log line.
+   * @param {"cpu" | "unknown" | "link"} bound
    * @returns {void}
    */
-  #applyBudgetDownshift(session, speed, bound) {
+  #applyBudgetDownshift(session, reasonText, bound) {
     const nextIndex = session.budgetRungIndex + 1;
     const rung = session.budgetLadder[nextIndex];
     if (!rung) {
@@ -1214,9 +1347,11 @@ export class HlsSessionManager {
       ? session.progress.processedSeconds
       : this.#segmentStartTime(session, head);
     const currentSeg = Math.max(head, this.#segmentIndexForTime(session, processed));
+    const boundLabel =
+      bound === "link" ? "viewer-link-bound" : bound === "unknown" ? "assuming CPU-bound" : "CPU-bound";
     logger.info(
-      `[budget] transcode ${session.id} ${bound === "unknown" ? "assuming CPU-bound" : "CPU-bound"} ` +
-        `speed=${speed.toFixed(2)}x → downscale to ${rung.width}x${rung.height}/${session.softwarePreset} ` +
+      `[budget] transcode ${session.id} ${boundLabel} ` +
+        `${reasonText} → downscale to ${rung.width}x${rung.height}/${session.softwarePreset} ` +
         `(rung ${nextIndex + 1}/${session.budgetLadder.length}, downshift ${session.budgetDownshifts}/${BUDGET_MAX_DOWNSHIFTS}), ` +
         `restart at segment #${currentSeg} "${session.fileName}"`
     );

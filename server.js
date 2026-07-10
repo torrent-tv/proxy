@@ -24,6 +24,7 @@ import { handleApiSubtitlesGet } from "./routes/api/subtitles/get.js";
 import { handleApiTranscodeSessionsPost } from "./routes/api/transcode-sessions/post.js";
 import { handleApiTranscodeSessionsProgressGet } from "./routes/api/transcode-sessions/progress/get.js";
 import { handleApiTranscodeSessionReleasePost } from "./routes/api/transcode-sessions/release/post.js";
+import { handleApiTranscodeSessionNetReportPost } from "./routes/api/transcode-sessions/net-report/post.js";
 import { handleStreamGet } from "./routes/stream/get.js";
 import { handleTranscodeSessionFileGet } from "./routes/transcode/session-file/get.js";
 import { createSourceRegistry } from "./store/source-registry.js";
@@ -185,6 +186,9 @@ export async function startProxyServer({ host, port, transcodeAudio, ffmpegBin, 
   );
   app.get("/api/transcode-sessions/:sessionId/progress", async (req, reply) =>
     handleApiTranscodeSessionsProgressGet(req, reply, { hlsSessionManager })
+  );
+  app.post("/api/transcode-sessions/:sessionId/net-report", async (req, reply) =>
+    handleApiTranscodeSessionNetReportPost(req, reply, { hlsSessionManager })
   );
   app.get("/transcode/:sessionId/:fileName", async (req, reply) =>
     handleTranscodeSessionFileGet(req, reply, { hlsSessionManager })

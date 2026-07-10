@@ -75,6 +75,54 @@ export function chooseOutputFps(sourceFps, cap = MAX_OUTPUT_FPS) {
 // Software x264 on weak ARM hosts is the transcode bottleneck — use all cores.
 const CPU_THREADS = Math.max(1, os.cpus().length);
 
+// Bitrate caps (constrained CRF). CRF stays the quality driver; -maxrate/
+// -bufsize only bound the peaks. Field evidence (iPhone on cellular,
+// 2026-07-10): uncapped complex scenes produced 4 s segments of ~18 Mbit/s
+// against a 1-6 Mbit/s viewer link — 45 s prebuffer, draining buffer.
+// Nominal H.264 rates per rung height; multipliers from webtor's production
+// ladder (content-transcoder): maxrate = 1.3x nominal, bufsize = 1.5x.
+const RUNG_NOMINAL_KBPS = [
+  [1080, 5000],
+  [720, 2800],
+  [480, 1400],
+  [360, 800],
+  [240, 400]
+];
+const CAP_MAXRATE_FACTOR = 1.3;
+const CAP_BUFSIZE_FACTOR = 1.5;
+
+/**
+ * Nominal kbps for an encode height: nearest rung wins (odd heights snap to
+ * the closest standard rung; anything above the top rung uses the top one).
+ *
+ * @param {number} height
+ * @returns {number}
+ */
+export function nominalKbpsForHeight(height) {
+  const h = Number.isFinite(height) && height > 0 ? height : 720;
+  let best = RUNG_NOMINAL_KBPS[0];
+  for (const rung of RUNG_NOMINAL_KBPS) {
+    if (Math.abs(rung[0] - h) < Math.abs(best[0] - h)) {
+      best = rung;
+    }
+  }
+  return best[1];
+}
+
+/**
+ * `-maxrate`/`-bufsize` args for an encode height (constrained CRF).
+ *
+ * @param {number} height
+ * @returns {string[]}
+ */
+function bitrateCapArgs(height) {
+  const nominal = nominalKbpsForHeight(height);
+  return [
+    "-maxrate", `${Math.round(nominal * CAP_MAXRATE_FACTOR)}k`,
+    "-bufsize", `${Math.round(nominal * CAP_BUFSIZE_FACTOR)}k`
+  ];
+}
+
 // libx264 presets to benchmark, ordered slowest/highest-quality → fastest.
 const BENCHMARK_PRESETS = ["fast", "faster", "veryfast", "superfast", "ultrafast"];
 const BENCHMARK_REF_W = 640;
@@ -140,6 +188,11 @@ export function softwareDescriptor() {
         // faster than realtime); falls back to the static default.
         "-preset", chosenPreset,
         "-crf", SOFTWARE_CRF,
+        // Constrained CRF: bound peak bitrate per rung so a complex scene
+        // cannot produce segments a thin viewer link (cellular) can't
+        // download in time. Sized by the TARGET box height (the rung the
+        // budget/manual selection chose).
+        ...bitrateCapArgs(h),
         "-threads", String(CPU_THREADS),
         "-pix_fmt", "yuv420p",
         // Fixed GOP: a keyframe exactly every (segmentDurationSec × fps) frames,

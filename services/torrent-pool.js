@@ -49,6 +49,24 @@ const DISK_CAP_SWEEP_INTERVAL_MS = 30_000;
  * asked to hold more than it can). Best-effort; falls back to the fixed max
  * when the filesystem cannot be stat'd.
  *
+ * Format a WebTorrent warning for logging: message plus a bounded stack.
+ * WebTorrent surfaces internal peer-connection failures (e.g. the µTP
+ * null-peer NPEs, webtorrent#1932/#1940) as non-fatal "warning" events
+ * carrying only a terse message; the stack pinpoints the exact library path,
+ * so we log the first few frames to diagnose which failure it is.
+ *
+ * @param {unknown} warning
+ * @returns {string}
+ */
+function formatWarning(warning) {
+  if (!(warning instanceof Error)) {
+    return String(warning);
+  }
+  const stack = typeof warning.stack === "string" ? warning.stack.split("\n").slice(0, 4).join(" | ") : "";
+  return stack || warning.message;
+}
+
+/**
  * @param {string} storePath
  * @returns {number}
  */
@@ -162,8 +180,7 @@ export class TorrentPool {
       logger.error(`WebTorrent client error: ${error.message}`);
     });
     this.client.on("warning", (warning) => {
-      const message = warning instanceof Error ? warning.message : String(warning);
-      logger.warn(`torrent-pool: client warning: ${message}`);
+      logger.warn(`torrent-pool: client warning: ${formatWarning(warning)}`);
     });
 
     this.#maxDiskBytes = Number.isFinite(maxDiskBytes) && maxDiskBytes >= 0
@@ -250,8 +267,7 @@ export class TorrentPool {
     );
 
     torrent.on("warning", (warning) => {
-      const message = warning instanceof Error ? warning.message : String(warning);
-      logger.warn(`torrent-pool: [${label}] warning: ${message}`);
+      logger.warn(`torrent-pool: [${label}] warning: ${formatWarning(warning)}`);
     });
 
     // bittorrent-tracker's Client emits "update" with each announce response.

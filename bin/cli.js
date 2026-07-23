@@ -26,6 +26,22 @@ import { logger } from "../utils/logger.js";
 const require = createRequire(import.meta.url);
 const { version: PROXY_VERSION } = require("../package.json");
 
+// Last-resort process guard. This proxy runs UNTRUSTED torrents through
+// WebTorrent, which can throw ASYNCHRONOUSLY on a malformed source — e.g. a
+// v2-only / hybrid magnet crashes `arr2hex(parsedTorrent.infoHash)` deep inside
+// `Torrent._onTorrentId` (undefined v1 infohash), in a microtask that bypasses
+// the client "error" event. Without this, one bad torrent takes down the whole
+// node and every viewer on it, and the addon restarts in a crash loop. Log the
+// full stack and keep serving: the offending session fails on its own; everyone
+// else is unaffected. (The add path also pre-validates the infohash, so this is
+// a backstop for anything not caught there.)
+process.on("uncaughtException", (error) => {
+  logger.error(`uncaughtException (kept alive): ${error?.stack ?? error}`);
+});
+process.on("unhandledRejection", (reason) => {
+  logger.error(`unhandledRejection (kept alive): ${reason instanceof Error ? reason.stack : String(reason)}`);
+});
+
 const program = new Command();
 
 const HELP_EXAMPLES = `

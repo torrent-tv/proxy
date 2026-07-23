@@ -24,10 +24,15 @@ const WEBTORRENT_STORE_ROOT = path.join(os.tmpdir(), "webtorrent");
 // idle (viewer gone) frees the disk. Re-requesting re-adds (re-downloads) it.
 const TORRENT_IDLE_TTL_MS = 300_000;
 
-// Bytes ahead of a read position to mark CRITICAL (download-first) on each
-// range request. Big enough to unstick a seek into an undownloaded region,
-// small enough not to make "everything critical" (which defeats prioritization).
-const PRIORITY_WINDOW_BYTES = 8 * 1024 * 1024;
+// Bytes ahead of a read position to mark CRITICAL on each range request. In
+// WebTorrent, `critical` does NOT reorder the sequential piece scan — it enables
+// HOTSWAP (re-request a block from a faster peer when a slower one already
+// reserved it), so this is the near read-ahead cushion where stealing from slow
+// peers pays off. The actual "download the seek target first" effect comes from
+// deselecting the gap BEHIND the playhead (see prioritizeByteRange). Kept a
+// moving window (reset each call) so criticality never accumulates over the
+// whole file across seeks, which would make hotswap thrash.
+const PRIORITY_WINDOW_BYTES = 16 * 1024 * 1024;
 
 // The file's header/index region the codec probe needs (phase 1). Must match
 // the ranges prefetchFileEdges fetches: leading bytes + trailing bytes.
@@ -701,16 +706,42 @@ export class TorrentPool {
   }
 
   /**
-   * Mark the torrent pieces covering a byte window of a file as CRITICAL, so
-   * WebTorrent downloads them before the rest of the selected file. Called on
-   * every range request: after a seek, the new read position jumps the download
-   * queue instead of waiting behind the sequential backlog (which caused
-   * ~15-18 s stalls when seeking into an undownloaded region).
+   * Bias the torrent's download toward the current read position, so a seek
+   * downloads the seek target first instead of waiting behind the sequential
+   * backlog (which caused ~15-18 s stalls when seeking into an undownloaded
+   * region). Called on every range request.
+   *
+   * Two levers, matched to how WebTorrent's picker actually works:
+   *
+   * 1. **Demote the gap BEHIND the playhead** — `deselect(fileStart, playhead-1)`.
+   *    The picker scans each selection sequentially from its first UNdownloaded
+   *    piece; with the whole file selected, a far forward seek would make it
+   *    fetch the undownloaded gap behind the new position first. Removing that
+   *    gap from the selection makes the scan START at the playhead, so all peer
+   *    capacity goes to the pieces the player needs next. This only STOPS
+   *    fetching the gap; already-downloaded pieces stay on disk (deleting them
+   *    is Disk hygiene Level 2), and a later backward seek re-selects the region
+   *    via this same call. The whole file is re-selected by `file.select()` on
+   *    the next `acquireFile`, so nothing is permanently dropped.
+   *
+   * 2. **Critical read-ahead window** — `critical(playhead, playhead+window)`.
+   *    `critical` does not reorder the scan; it enables HOTSWAP (re-request a
+   *    block from a faster peer when a slow one reserved it) over the near
+   *    window. Reset first so criticality stays a moving window rather than
+   *    accumulating over the whole file across seeks.
+   *
+   * Scope: single active reader per file (≈100% today). The multi-viewer union
+   * window — demote only where behind for ALL sessions — is deferred (roadmap
+   * item 23); here the latest read position wins.
+   *
+   * The pinned head/tail (prefetchFileEdges, codec probe) is downloaded up front
+   * and lives forward of the playhead (tail) or is already on disk (head), so
+   * demotion never costs the probe its data.
    *
    * @param {import("webtorrent").Torrent} torrent
    * @param {number} fileIndex
    * @param {number} byteStart - Start offset within the file.
-   * @param {number} [windowBytes] - Bytes ahead of `byteStart` to prioritize.
+   * @param {number} [windowBytes] - Bytes ahead of `byteStart` to mark critical.
    * @returns {void}
    */
   prioritizeByteRange(torrent, fileIndex, byteStart, windowBytes = PRIORITY_WINDOW_BYTES) {
@@ -726,18 +757,43 @@ export class TorrentPool {
       return;
     }
     const fileOffset = Number.isFinite(file.offset) ? file.offset : 0;
-    const safeStart = Math.max(0, Number(byteStart) || 0);
-    const absStart = fileOffset + safeStart;
-    const absEnd = Math.min(fileOffset + file.length - 1, absStart + Math.max(1, windowBytes) - 1);
-    const startPiece = Math.floor(absStart / pieceLength);
-    const endPiece = Math.floor(absEnd / pieceLength);
-    if (endPiece < startPiece) {
+    const fileLength = Number(file.length);
+    if (!Number.isFinite(fileLength) || fileLength <= 0) {
       return;
     }
-    try {
-      torrent.critical(startPiece, endPiece);
-    } catch {
-      // Best effort — never break streaming because prioritization failed.
+    const fileStartPiece = Math.floor(fileOffset / pieceLength);
+    const fileEndPiece = Math.floor((fileOffset + fileLength - 1) / pieceLength);
+
+    const safeStart = Math.max(0, Number(byteStart) || 0);
+    const absStart = fileOffset + safeStart;
+    const playheadPiece = Math.floor(absStart / pieceLength);
+    const absWindowEnd = Math.min(
+      fileOffset + fileLength - 1,
+      absStart + Math.max(1, windowBytes) - 1
+    );
+    const windowEndPiece = Math.floor(absWindowEnd / pieceLength);
+
+    // (1) Demote the gap behind the playhead so the picker scans forward from
+    //     the read position. Only when there IS a gap (not at the file start).
+    if (playheadPiece > fileStartPiece && typeof torrent.deselect === "function") {
+      try {
+        torrent.deselect(fileStartPiece, playheadPiece - 1);
+      } catch {
+        // Best effort — never break streaming because demotion failed.
+      }
+    }
+
+    // (2) Reset criticality to a moving read-ahead window (hotswap over the near
+    //     pieces), so it does not accumulate over the whole file across seeks.
+    if (Array.isArray(torrent._critical)) {
+      torrent._critical.length = 0;
+    }
+    if (windowEndPiece >= playheadPiece) {
+      try {
+        torrent.critical(playheadPiece, windowEndPiece);
+      } catch {
+        // Best effort.
+      }
     }
   }
 

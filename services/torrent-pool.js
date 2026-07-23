@@ -48,6 +48,67 @@ const HEADER_TAIL_BYTES = 2 * 1024 * 1024;
 const DISK_CAP_ABSOLUTE_MAX_BYTES = 10 * 1024 * 1024 * 1024; // 10 GB
 const DISK_CAP_SWEEP_INTERVAL_MS = 30_000;
 
+// Adaptive upload. Seeding to the BitTorrent swarm does not help our viewer (we
+// deliver over our own WebRTC/HTTPS channel) — it is pure uplink cost and the
+// riskiest legal act (active distribution). So the default is minimal: no
+// seeding when nothing is being watched, and only a token upload while actively
+// downloading. BUT zero upload can get us choked by tit-for-tat (peers re-rank
+// and stop sending) → slower download → the exact starvation we fight. So the
+// limit is ADAPTIVE: raised only when download is starving AND the wires show
+// reciprocity is the cause (many peers we want data from are choking us).
+const UPLOAD_FLOOR_BYTES = 50 * 1024;            // token upload while a reader is active
+const UPLOAD_BOOST_BYTES = 512 * 1024;           // raised to earn tit-for-tat unchoke slots
+const UPLOAD_STARVING_SPEED_BYTES = 200 * 1024;  // download below this (with demand) = starving
+const UPLOAD_CHOKED_WIRE_THRESHOLD = 2;          // interested-but-choked wires implying reciprocity
+const UPLOAD_ADJUST_INTERVAL_MS = 5_000;
+
+/**
+ * Decide the client-wide upload limit (bytes/sec) from the torrents that
+ * currently have an active reader. Pure function so the policy is unit-testable
+ * without a live swarm.
+ *
+ * - No active readers → 0 (stop seeding entirely; nothing is being watched).
+ * - Any active torrent starving (still wants data, download barely trickling)
+ *   AND showing reciprocity choke (>= threshold wires we are interested in that
+ *   are choking us) → boost, to earn unchoke slots.
+ * - Otherwise → floor (token upload, avoids an immediate choke without seeding).
+ *
+ * @param {Array<{ wires?: Array<{ amInterested?: boolean, peerChoking?: boolean }>, downloadSpeed?: number, progress?: number, name?: string }>} activeTorrents
+ * @param {{ floor?: number, boost?: number, starvingSpeed?: number, chokedThreshold?: number }} [opts]
+ * @returns {{ bytesPerSec: number, reason: string }}
+ */
+export function decideUploadLimit(activeTorrents, opts = {}) {
+  const floor = opts.floor ?? UPLOAD_FLOOR_BYTES;
+  const boost = opts.boost ?? UPLOAD_BOOST_BYTES;
+  const starvingSpeed = opts.starvingSpeed ?? UPLOAD_STARVING_SPEED_BYTES;
+  const chokedThreshold = opts.chokedThreshold ?? UPLOAD_CHOKED_WIRE_THRESHOLD;
+
+  if (!Array.isArray(activeTorrents) || activeTorrents.length === 0) {
+    return { bytesPerSec: 0, reason: "idle: no active readers — stop seeding" };
+  }
+
+  for (const torrent of activeTorrents) {
+    const wires = Array.isArray(torrent?.wires) ? torrent.wires : [];
+    const chokedInterested = wires.filter(
+      (wire) => wire && wire.amInterested === true && wire.peerChoking === true
+    ).length;
+    const downloadSpeed = typeof torrent?.downloadSpeed === "number" ? torrent.downloadSpeed : 0;
+    const progress = typeof torrent?.progress === "number" ? torrent.progress : 0;
+    const starving = progress < 1 && downloadSpeed < starvingSpeed;
+    if (starving && chokedInterested >= chokedThreshold) {
+      const name = typeof torrent?.name === "string" ? torrent.name : "?";
+      return {
+        bytesPerSec: boost,
+        reason:
+          `earn unchoke — "${name}" choked=${chokedInterested}/${wires.length} ` +
+          `down=${Math.round(downloadSpeed / 1024)}KB/s`
+      };
+    }
+  }
+
+  return { bytesPerSec: floor, reason: "active readers, not choke-starved" };
+}
+
 /**
  * Compute the default disk cap: the smaller of a fixed 10 GB and half of the
  * currently free space on the store's filesystem (so a tiny host is never
@@ -145,6 +206,12 @@ export class TorrentPool {
   /** Periodic disk-cap enforcement timer. */
   #diskSweepTimer = null;
 
+  /** Current client-wide upload limit in bytes/sec (adaptive). -1 = not yet set. */
+  #uploadLimit = -1;
+
+  /** Periodic adaptive-upload adjustment timer. */
+  #uploadAdjustTimer = null;
+
   /**
    * @param {{ maxDiskBytes?: number }} [options]
    *   `maxDiskBytes` caps total downloaded torrent data; when omitted a
@@ -197,6 +264,41 @@ export class TorrentPool {
       this.#diskSweepTimer = setInterval(() => this.#enforceDiskCap(), DISK_CAP_SWEEP_INTERVAL_MS);
       this.#diskSweepTimer.unref?.();
     }
+
+    // Adaptive upload: start with seeding OFF (nothing is being watched yet),
+    // then let the periodic adjuster raise it to the floor while a reader is
+    // active and to the boost when download is choke-starved. WebTorrent's
+    // default is unlimited upload, which we explicitly do NOT want.
+    if (typeof this.client.throttleUpload === "function") {
+      this.client.throttleUpload(0);
+      this.#uploadLimit = 0;
+    }
+    this.#uploadAdjustTimer = setInterval(() => this.#adjustUploadLimit(), UPLOAD_ADJUST_INTERVAL_MS);
+    this.#uploadAdjustTimer.unref?.();
+  }
+
+  /**
+   * Re-evaluate and apply the client-wide upload limit from current swarm state
+   * (see {@link decideUploadLimit}). Runs on a timer; only calls into WebTorrent
+   * when the target changes, and logs each change for field tuning.
+   *
+   * @returns {void}
+   */
+  #adjustUploadLimit() {
+    if (!this.client || this.client.destroyed || typeof this.client.throttleUpload !== "function") {
+      return;
+    }
+    const active = [...this.torrents.values()].filter((torrent) => {
+      const usage = this.fileUsageByTorrent.get(torrent);
+      return usage && usage.size > 0;
+    });
+    const { bytesPerSec, reason } = decideUploadLimit(active);
+    if (bytesPerSec === this.#uploadLimit) {
+      return;
+    }
+    this.#uploadLimit = bytesPerSec;
+    this.client.throttleUpload(bytesPerSec);
+    logger.info(`torrent-pool: upload limit -> ${Math.round(bytesPerSec / 1024)} KB/s (${reason})`);
   }
 
   /**
@@ -815,6 +917,11 @@ export class TorrentPool {
     if (this.#diskSweepTimer) {
       clearInterval(this.#diskSweepTimer);
       this.#diskSweepTimer = null;
+    }
+    // Stop periodic adaptive-upload adjustment.
+    if (this.#uploadAdjustTimer) {
+      clearInterval(this.#uploadAdjustTimer);
+      this.#uploadAdjustTimer = null;
     }
     // Cancel any pending idle-removal timers — destroyAll handles teardown.
     for (const timer of this.#idleTimers.values()) {

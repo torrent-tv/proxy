@@ -20,9 +20,11 @@ const WEBTORRENT_STORE_ROOT = path.join(os.tmpdir(), "webtorrent");
 
 // How long a torrent may sit with zero active file readers before it is
 // removed (with its on-disk store). Generous so brief gaps between ffmpeg
-// range reads — or a short pause — do not evict an in-use torrent; a longer
-// idle (viewer gone) frees the disk. Re-requesting re-adds (re-downloads) it.
-const TORRENT_IDLE_TTL_MS = 300_000;
+// range reads — a pause, a backgrounded tab, or a phone turned off for a few
+// minutes — do not evict an in-use torrent's already-downloaded data, so a
+// resume plays from disk instead of re-downloading. A longer idle (viewer truly
+// gone) frees the disk; the global disk cap still evicts earlier under pressure.
+const TORRENT_IDLE_TTL_MS = 15 * 60 * 1000;
 
 // Bytes ahead of a read position to mark CRITICAL on each range request. In
 // WebTorrent, `critical` does NOT reorder the sequential piece scan — it enables

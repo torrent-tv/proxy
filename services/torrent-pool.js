@@ -11,6 +11,7 @@ import os from "node:os";
 import path from "node:path";
 import { rmSync, statfsSync } from "node:fs";
 import WebTorrent from "webtorrent";
+import parseTorrent from "parse-torrent";
 import { logger } from "../utils/logger.js";
 
 // WebTorrent's default download root (see webtorrent lib/torrent.js: TMP =
@@ -426,6 +427,26 @@ export class TorrentPool {
     }
 
     const torrentId = decodeTorrentSource(sourceType, source);
+
+    // Pre-validate the infohash BEFORE handing the source to WebTorrent.
+    // WebTorrent's Torrent._onTorrentId does `arr2hex(parsedTorrent.infoHash)`
+    // assuming a BitTorrent v1 infohash exists; a v2-only / hybrid magnet (or a
+    // malformed source) parses with `infoHash === undefined`, so that call does
+    // `Buffer.from(undefined)` and throws in a microtask that bypasses the
+    // client "error" event — crashing the whole process. Reject cleanly here so
+    // the browser gets an error it can show, and the proxy stays up.
+    let parsed;
+    try {
+      parsed = await parseTorrent(torrentId);
+    } catch {
+      parsed = null;
+    }
+    if (!parsed || typeof parsed.infoHash !== "string" || !/^[0-9a-f]{40}$/i.test(parsed.infoHash)) {
+      throw new Error(
+        "Unsupported torrent source: no BitTorrent v1 infohash (v2-only or malformed torrents are not supported)."
+      );
+    }
+
     const promise = new Promise((resolve, reject) => {
       const onError = (error) => {
         this.client.off("error", onError);

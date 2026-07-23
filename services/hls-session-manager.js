@@ -55,10 +55,13 @@ const SEEK_SETTLE_MS = 1_200;
 // burst, so a still-moving scrubber cannot delay a genuine seek forever.
 const SEEK_SETTLE_MAX_MS = 2_500;
 // Idle TTL: a session is disposed this long after the last segment/playlist
-// access. Kept short so an ffmpeg process does not keep burning CPU after the
-// viewer stops or navigates away. Active playback refreshes the timer on every
-// segment fetch, so it never expires mid-watch.
-const DEFAULT_SESSION_TTL_MS = 120 * 1000;
+// access. Long enough that a viewer who pauses, backgrounds the tab, or briefly
+// turns the phone off can resume WITHOUT a cold ffmpeg restart (the warm session
+// also backs the seamless auto-reconnect). ffmpeg stops producing at the
+// look-ahead cap when idle, so a lingering session costs retained segments on
+// disk, not sustained CPU. Active playback refreshes the timer on every segment
+// fetch, so it never expires mid-watch.
+const DEFAULT_SESSION_TTL_MS = 10 * 60 * 1000;
 const DEFAULT_STARTUP_WAIT_MS = 5_000;
 // Realtime budget — runtime downswitch (software encoder only). Periodically
 // check each active software-transcode session's ffmpeg `speed`; when it stays

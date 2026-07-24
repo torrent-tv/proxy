@@ -303,6 +303,10 @@ function v4l2m2mDescriptor() {
         "-vf",
         `scale=${w}:${h}:force_original_aspect_ratio=decrease:force_divisible_by=2,fps=${outFps},format=yuv420p`,
         "-c:v", "h264_v4l2m2m",
+        // More capture buffers than the default 4 — the default deadlocks /
+        // drops frames on the CM4 encoder ("All capture buffers returned to
+        // userspace").
+        "-num_capture_buffers", "32",
         "-b:v", "3M",
         "-g", String(outFps * segmentDurationSec),
         ...keyFrameArgs(segmentDurationSec)
@@ -438,7 +442,7 @@ function buildEncoderTestArgs(descriptor, segmentDurationSec, outDir) {
       encode = ["-c:v", "h264_nvenc", "-preset", "p4", "-cq", "24", "-pix_fmt", "yuv420p", ...kf];
       break;
     case "v4l2m2m":
-      encode = ["-pix_fmt", "yuv420p", "-c:v", "h264_v4l2m2m", "-b:v", "3M", "-g", String(TRANSCODE_FPS * segmentDurationSec), ...kf];
+      encode = ["-pix_fmt", "yuv420p", "-c:v", "h264_v4l2m2m", "-num_capture_buffers", "32", "-b:v", "3M", "-g", String(TRANSCODE_FPS * segmentDurationSec), ...kf];
       break;
     default:
       encode = ["-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p", ...kf];
@@ -450,7 +454,10 @@ function buildEncoderTestArgs(descriptor, segmentDurationSec, outDir) {
     "-hls_time", String(segmentDurationSec),
     "-hls_list_size", "0",
     "-hls_flags", "independent_segments",
-    "-hls_segment_filename", path.join(outDir, "seg-%03d.ts"),
+    // fMP4 (CMAF) — matches the runtime pipeline (hls-session-manager).
+    "-hls_segment_type", "fmp4",
+    "-hls_fmp4_init_filename", "init.mp4",
+    "-hls_segment_filename", path.join(outDir, "seg-%03d.m4s"),
     path.join(outDir, "index.m3u8")
   ];
   return [...pre, ...source, ...encode, ...hlsOut];
@@ -469,24 +476,24 @@ function buildEncoderTestArgs(descriptor, segmentDurationSec, outDir) {
 async function verifySegmentsDecodeCleanly(ffmpegBin, outDir) {
   let files;
   try {
-    files = readdirSync(outDir).filter((n) => /^seg-\d+\.ts$/.test(n)).sort();
+    files = readdirSync(outDir).filter((n) => /^seg-\d+\.m4s$/.test(n));
   } catch {
     return false;
   }
   if (files.length < 2) {
     return false;
   }
-  for (const file of files) {
-    const result = await runFfmpeg(
-      ffmpegBin,
-      ["-hide_banner", "-loglevel", "error", "-i", path.join(outDir, file), "-f", "null", "-"],
-      8000
-    );
-    if (result.code !== 0 || result.stderr.trim().length > 0) {
-      return false;
-    }
-  }
-  return true;
+  // fMP4: parameter sets (SPS/PPS) live in init.mp4, not in each segment.
+  // Decode the whole playlist (ffmpeg's own, which references init.mp4 via
+  // #EXT-X-MAP), so every segment is exercised together with the init. Any
+  // corrupt / non-conformant segment (e.g. some V4L2 M2M builds emit a stray
+  // no-picture access unit) surfaces as a decode error here.
+  const result = await runFfmpeg(
+    ffmpegBin,
+    ["-hide_banner", "-loglevel", "error", "-i", path.join(outDir, "index.m3u8"), "-f", "null", "-"],
+    12000
+  );
+  return result.code === 0 && result.stderr.trim().length === 0;
 }
 
 /**

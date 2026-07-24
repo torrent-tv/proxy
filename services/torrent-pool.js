@@ -52,13 +52,19 @@ const DISK_CAP_SWEEP_INTERVAL_MS = 30_000;
 
 // Adaptive upload. Seeding to the BitTorrent swarm does not help our viewer (we
 // deliver over our own WebRTC/HTTPS channel) — it is pure uplink cost and the
-// riskiest legal act (active distribution). So the default is minimal: no
-// seeding when nothing is being watched, and only a token upload while actively
-// downloading. BUT zero upload can get us choked by tit-for-tat (peers re-rank
+// riskiest legal act (active distribution). So the default is minimal: a
+// near-zero keep-alive when nothing is being watched (NOT 0 — that blocks the
+// swarm in wt3.x), and only a token upload while actively downloading. BUT zero
+// upload can get us choked by tit-for-tat (peers re-rank
 // and stop sending) → slower download → the exact starvation we fight. So the
 // limit is ADAPTIVE: raised only when download is starving AND the wires show
 // reciprocity is the cause (many peers we want data from are choking us).
 const UPLOAD_FLOOR_BYTES = 50 * 1024;            // token upload while a reader is active
+// Minimal keep-alive upload when NOTHING is being watched. It must NOT be 0:
+// in webtorrent 3.x `throttleUpload(0)` blocks ALL swarm exchange client-wide
+// (even peer connections and DOWNLOAD), so a torrent still fetching metadata /
+// pieces would stall. A few KB/s is negligible seeding but keeps the swarm alive.
+const UPLOAD_IDLE_FLOOR_BYTES = 8 * 1024;
 const UPLOAD_BOOST_BYTES = 512 * 1024;           // raised to earn tit-for-tat unchoke slots
 const UPLOAD_STARVING_SPEED_BYTES = 200 * 1024;  // download below this (with demand) = starving
 const UPLOAD_CHOKED_WIRE_THRESHOLD = 2;          // interested-but-choked wires implying reciprocity
@@ -69,24 +75,27 @@ const UPLOAD_ADJUST_INTERVAL_MS = 5_000;
  * currently have an active reader. Pure function so the policy is unit-testable
  * without a live swarm.
  *
- * - No active readers → 0 (stop seeding entirely; nothing is being watched).
+ * - No active readers → a MINIMAL keep-alive floor (NOT 0: `throttleUpload(0)`
+ *   blocks the whole swarm client-wide in webtorrent 3.x, stalling any torrent
+ *   still downloading). Effectively no seeding, just enough to keep peers.
  * - Any active torrent starving (still wants data, download barely trickling)
  *   AND showing reciprocity choke (>= threshold wires we are interested in that
  *   are choking us) → boost, to earn unchoke slots.
  * - Otherwise → floor (token upload, avoids an immediate choke without seeding).
  *
- * @param {Array<{ wires?: Array<{ amInterested?: boolean, peerChoking?: boolean }>, downloadSpeed?: number, progress?: number, name?: string }>} activeTorrents
- * @param {{ floor?: number, boost?: number, starvingSpeed?: number, chokedThreshold?: number }} [opts]
+ * @param {Array<{ wires?: Array<{ amInterested?: boolean, peerChoking?: boolean }>, downloadSpeed?: number, done?: boolean, name?: string }>} activeTorrents
+ * @param {{ floor?: number, idleFloor?: number, boost?: number, starvingSpeed?: number, chokedThreshold?: number }} [opts]
  * @returns {{ bytesPerSec: number, reason: string }}
  */
 export function decideUploadLimit(activeTorrents, opts = {}) {
   const floor = opts.floor ?? UPLOAD_FLOOR_BYTES;
+  const idleFloor = opts.idleFloor ?? UPLOAD_IDLE_FLOOR_BYTES;
   const boost = opts.boost ?? UPLOAD_BOOST_BYTES;
   const starvingSpeed = opts.starvingSpeed ?? UPLOAD_STARVING_SPEED_BYTES;
   const chokedThreshold = opts.chokedThreshold ?? UPLOAD_CHOKED_WIRE_THRESHOLD;
 
   if (!Array.isArray(activeTorrents) || activeTorrents.length === 0) {
-    return { bytesPerSec: 0, reason: "idle: no active readers — stop seeding" };
+    return { bytesPerSec: idleFloor, reason: "idle: minimal keep-alive (0 blocks the swarm in wt3.x)" };
   }
 
   for (const torrent of activeTorrents) {
@@ -95,8 +104,11 @@ export function decideUploadLimit(activeTorrents, opts = {}) {
       (wire) => wire && wire.amInterested === true && wire.peerChoking === true
     ).length;
     const downloadSpeed = typeof torrent?.downloadSpeed === "number" ? torrent.downloadSpeed : 0;
-    const progress = typeof torrent?.progress === "number" ? torrent.progress : 0;
-    const starving = progress < 1 && downloadSpeed < starvingSpeed;
+    // Use `done` (a plain boolean) — NOT `progress`/`downloaded`, whose getters
+    // iterate the piece array and throw on webtorrent 3.x when a piece is null
+    // (deselected / mid-verify), which would crash this timer every cycle.
+    const notDone = torrent?.done !== true;
+    const starving = notDone && downloadSpeed < starvingSpeed;
     if (starving && chokedInterested >= chokedThreshold) {
       const name = typeof torrent?.name === "string" ? torrent.name : "?";
       return {
@@ -166,6 +178,87 @@ function decodeTorrentSource(sourceType, source) {
     return Buffer.from(source, "base64");
   }
   throw new Error("Unsupported sourceType. Expected magnet or torrent.");
+}
+
+/**
+ * Downloaded bytes of a single piece, treating a null (deselected) piece as 0.
+ *
+ * webtorrent 3.x sets `pieces[index] = null` for pieces we removed from the
+ * download set via `deselect` (file selection, seek-behind-playhead demotion).
+ * Its own `get downloaded` / `get progress` do NOT guard that null and throw
+ * `Cannot read properties of null (reading 'length')`, which crashed our
+ * disk-cap and stats timers every cycle. A deselected piece has 0 downloaded
+ * bytes, so treating null as 0 is the correct value — and keeps the OTHER
+ * pieces counted (a blanket try/catch that returned 0 for the whole torrent
+ * would under-report disk usage and freeze the progress bar at 0%).
+ *
+ * @param {import("webtorrent").Torrent} torrent
+ * @param {number} index
+ * @returns {number}
+ */
+function pieceDownloadedBytes(torrent, index) {
+  const len = index === torrent.pieces.length - 1 ? torrent.lastPieceLength : torrent.pieceLength;
+  if (torrent.bitfield.get(index)) {
+    return len; // verified
+  }
+  const piece = torrent.pieces[index];
+  return piece ? len - piece.missing : 0; // in-progress, or null (deselected) → 0
+}
+
+/**
+ * Total downloaded bytes across ALL pieces, null-safe (mirrors webtorrent's
+ * `torrent.downloaded` but never throws on a deselected null piece).
+ *
+ * @param {import("webtorrent").Torrent} torrent
+ * @returns {number}
+ */
+export function torrentDownloadedBytes(torrent) {
+  if (!torrent?.bitfield || !Array.isArray(torrent.pieces)) {
+    return 0;
+  }
+  let downloaded = 0;
+  for (let index = 0; index < torrent.pieces.length; index += 1) {
+    downloaded += pieceDownloadedBytes(torrent, index);
+  }
+  return downloaded;
+}
+
+/**
+ * Downloaded bytes of a single file, null-safe (mirrors webtorrent's
+ * `file.downloaded`, including the first/last-piece offset trims, but never
+ * throws on a deselected null piece).
+ *
+ * @param {import("webtorrent").Torrent} torrent
+ * @param {import("webtorrent").TorrentFile & { _startPiece?: number, _endPiece?: number, offset?: number, length?: number }} file
+ * @returns {number}
+ */
+export function fileDownloadedBytes(torrent, file) {
+  if (!torrent?.bitfield || !Array.isArray(torrent.pieces) || !file) {
+    return 0;
+  }
+  const start = file._startPiece;
+  const end = file._endPiece;
+  const pieceLength = torrent.pieceLength;
+  if (!Number.isInteger(start) || !Number.isInteger(end) || !(pieceLength > 0)) {
+    return 0;
+  }
+  let downloaded = 0;
+  for (let index = start; index <= end; index += 1) {
+    const pieceDownloaded = pieceDownloadedBytes(torrent, index);
+    downloaded += pieceDownloaded;
+    if (index === start) {
+      // First piece may carry irrelevant bytes from the previous file.
+      const irrelevant = file.offset % pieceLength;
+      downloaded -= Math.min(irrelevant, pieceDownloaded);
+    }
+    if (index === end) {
+      // Last piece may carry irrelevant bytes from the next file.
+      const lastLen = index === torrent.pieces.length - 1 ? torrent.lastPieceLength : pieceLength;
+      const irrelevant = lastLen - ((file.offset + file.length) % pieceLength);
+      downloaded -= Math.min(irrelevant, pieceDownloaded);
+    }
+  }
+  return downloaded;
 }
 
 /**
@@ -312,8 +405,7 @@ export class TorrentPool {
   #currentDiskBytes() {
     let total = 0;
     for (const torrent of this.torrents.values()) {
-      const downloaded = typeof torrent?.downloaded === "number" ? torrent.downloaded : 0;
-      total += Math.max(0, downloaded);
+      total += Math.max(0, torrentDownloadedBytes(torrent));
     }
     return total;
   }
@@ -345,7 +437,7 @@ export class TorrentPool {
       if (used <= this.#maxDiskBytes) {
         break;
       }
-      const freed = typeof torrent?.downloaded === "number" ? Math.max(0, torrent.downloaded) : 0;
+      const freed = Math.max(0, torrentDownloadedBytes(torrent));
       const name = typeof torrent?.name === "string" ? torrent.name : "(unknown)";
       const gb = (this.#maxDiskBytes / (1024 * 1024 * 1024)).toFixed(1);
       logger.info(
@@ -651,11 +743,16 @@ export class TorrentPool {
 
     const header = this.#getHeaderRangeProgress(torrent, file);
 
+    // Null-safe downloaded/progress (webtorrent's own getters throw on a
+    // deselected null piece — see fileDownloadedBytes).
+    const fileLength = typeof file.length === "number" ? file.length : 0;
+    const fileDownloaded = fileDownloadedBytes(torrent, file);
+
     return {
       ...base,
-      fileProgress: typeof file.progress === "number" ? file.progress : 0,
-      fileDownloaded: typeof file.downloaded === "number" ? file.downloaded : 0,
-      fileLength: typeof file.length === "number" ? file.length : 0,
+      fileProgress: fileLength > 0 ? Math.max(0, Math.min(1, fileDownloaded / fileLength)) : 0,
+      fileDownloaded,
+      fileLength,
       // Phase-1 progress: how much of the header/index region (the bytes the
       // codec probe needs before transcoding can start) is downloaded. Counted
       // by whole pieces from the torrent bitfield, so it advances coarsely

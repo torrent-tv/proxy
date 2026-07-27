@@ -295,6 +295,16 @@ export class TorrentPool {
    */
   #lastAccess = new Map();
 
+  /**
+   * Last byte offset each active reader is streaming from, keyed by torrent then
+   * fileIndex. Set by prioritizeByteRange on every /stream range request; read by
+   * getFileStats to report how much of the window ahead of the read head is still
+   * to download — the "amount left to resume" shown while buffering.
+   *
+   * @type {Map<import("webtorrent").Torrent, Map<number, number>>}
+   */
+  #readPositionByTorrent = new Map();
+
   /** Global disk cap in bytes (0 = disabled). */
   #maxDiskBytes = 0;
 
@@ -700,6 +710,7 @@ export class TorrentPool {
     }
     this.fileUsageByTorrent.delete(torrent);
     this.#lastAccess.delete(torrent);
+    this.#readPositionByTorrent.delete(torrent);
     const name = typeof torrent.name === "string" ? torrent.name : "(unknown)";
     try {
       torrent.destroy({ destroyStore: true }, () => {
@@ -743,6 +754,14 @@ export class TorrentPool {
 
     const header = this.#getHeaderRangeProgress(torrent, file);
 
+    // Bytes still to download in the window ahead of where this file is being
+    // read — "how much left to resume". Null until a read position is known.
+    const readPositions = this.#readPositionByTorrent.get(torrent);
+    const readByteStart = readPositions ? readPositions.get(fileIndex) : undefined;
+    const resume = typeof readByteStart === "number"
+      ? this.#getResumeWindowProgress(torrent, file, readByteStart)
+      : null;
+
     // Null-safe downloaded/progress (webtorrent's own getters throw on a
     // deselected null piece — see fileDownloadedBytes).
     const fileLength = typeof file.length === "number" ? file.length : 0;
@@ -753,6 +772,9 @@ export class TorrentPool {
       fileProgress: fileLength > 0 ? Math.max(0, Math.min(1, fileDownloaded / fileLength)) : 0,
       fileDownloaded,
       fileLength,
+      // Resume window (ahead of the read head): bytes needed vs downloaded.
+      resumeNeededBytes: resume ? resume.totalBytes : null,
+      resumeDownloadedBytes: resume ? resume.downloadedBytes : null,
       // Phase-1 progress: how much of the header/index region (the bytes the
       // codec probe needs before transcoding can start) is downloaded. Counted
       // by whole pieces from the torrent bitfield, so it advances coarsely
@@ -804,6 +826,45 @@ export class TorrentPool {
       if (bitfield.get(piece)) {
         downloadedBytes += pieceLength;
       }
+    }
+    return { totalBytes, downloadedBytes };
+  }
+
+  /**
+   * Count, by whole torrent pieces, how many bytes of the window AHEAD of the
+   * current read position are downloaded — i.e. how much is still to download
+   * before playback can continue from that point. Mirrors
+   * {@link #getHeaderRangeProgress}, for the moving read head.
+   *
+   * @param {import("webtorrent").Torrent} torrent
+   * @param {import("webtorrent").TorrentFile} file
+   * @param {number} readByteStart - Byte offset within the file the reader is at.
+   * @returns {{ totalBytes: number, downloadedBytes: number } | null}
+   */
+  #getResumeWindowProgress(torrent, file, readByteStart) {
+    const pieceLength = Number(torrent?.pieceLength);
+    const bitfield = torrent?.bitfield;
+    const fileLength = Number(file?.length);
+    if (
+      !Number.isFinite(pieceLength) || pieceLength <= 0 ||
+      !bitfield || typeof bitfield.get !== "function" ||
+      !Number.isFinite(fileLength) || fileLength <= 0
+    ) {
+      return null;
+    }
+    const fileOffset = Number.isFinite(file.offset) ? file.offset : 0;
+    const windowStart = Math.max(0, Math.min(Number(readByteStart) || 0, fileLength - 1));
+    const windowEnd = Math.min(fileLength - 1, windowStart + PRIORITY_WINDOW_BYTES - 1);
+    const firstPiece = Math.floor((fileOffset + windowStart) / pieceLength);
+    const lastPiece = Math.floor((fileOffset + windowEnd) / pieceLength);
+    // Byte-accurate: count the PARTIAL progress of in-progress pieces (not whole
+    // pieces), so "amount left" moves smoothly instead of jumping by a whole
+    // piece (8 MB here) at a time.
+    let totalBytes = 0;
+    let downloadedBytes = 0;
+    for (let piece = firstPiece; piece <= lastPiece; piece += 1) {
+      totalBytes += pieceLength;
+      downloadedBytes += pieceDownloadedBytes(torrent, piece);
     }
     return { totalBytes, downloadedBytes };
   }
@@ -967,6 +1028,16 @@ export class TorrentPool {
     const fileEndPiece = Math.floor((fileOffset + fileLength - 1) / pieceLength);
 
     const safeStart = Math.max(0, Number(byteStart) || 0);
+
+    // Remember where this file is being read from, so getFileStats can report the
+    // download progress of the window ahead of the read head (resume amount).
+    let readPositions = this.#readPositionByTorrent.get(torrent);
+    if (!readPositions) {
+      readPositions = new Map();
+      this.#readPositionByTorrent.set(torrent, readPositions);
+    }
+    readPositions.set(fileIndex, safeStart);
+
     const absStart = fileOffset + safeStart;
     const playheadPiece = Math.floor(absStart / pieceLength);
     const absWindowEnd = Math.min(

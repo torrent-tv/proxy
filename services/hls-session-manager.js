@@ -48,6 +48,15 @@ const MAX_LOOKAHEAD_SEGMENTS = 8;
 // succession (stall-recovery seeks); without a cooldown ffmpeg ping-pongs
 // between positions, restarting endlessly and producing nothing.
 const RESTART_COOLDOWN_MS = 4_000;
+// Encoder stall watchdog. A running ffmpeg emits `-progress` output on stdout
+// continuously while it encodes; when it hangs mid-file (alive, but producing
+// no output and no stderr — a deadlock, e.g. a stalled input read), that output
+// stops and `progress.updatedAt` freezes. If a segment INSIDE the look-ahead
+// window is being demanded but progress has not advanced for this long, the
+// encoder is wedged (observed: the segment 503s forever). Treat it like a seek
+// and restart ffmpeg at the demanded segment. Conservative — a slow-but-moving
+// encode keeps advancing `updatedAt`, so this only fires on a true freeze.
+const ENCODER_STALL_MS = 12_000;
 // Seek debounce. A far (out-of-window) segment request is a server-side seek.
 // Rather than restart ffmpeg on the first one, wait a short quiet period:
 // further far requests re-arm it and update the target to the latest index, so
@@ -1804,12 +1813,28 @@ export class HlsSessionManager {
     // and position-independent, but each seek-restart run REWRITES init.mp4, so
     // cache the FIRST one and always serve that — otherwise the init the player
     // fetched could differ from a later run's, breaking playback after a seek.
+    //
+    // ffmpeg creates init.mp4 before it has finished writing the fMP4 header
+    // boxes into it (unlike segments, its write is not gated behind an atomic
+    // rename), so a read can race a moment where the file EXISTS but is still
+    // EMPTY. Root cause of a real incident: that empty read used to be cached
+    // as `session.initBytes` — a zero-length Buffer is still a truthy object,
+    // so `if (session.initBytes)` treated it as "already resolved" and served
+    // the empty file for the rest of the session's life, permanently breaking
+    // playback (hls.js can never initialize its SourceBuffer from an empty
+    // init segment) while the transcode itself kept encoding normally. Guard
+    // on non-empty content on both the cache check and the fresh read, so an
+    // empty read is treated as not-yet-ready and the caller's long-poll keeps
+    // retrying until ffmpeg has actually written the header.
     if (fileName === SEGMENT_INIT_FILE_NAME) {
-      if (session.initBytes) {
+      if (session.initBytes && session.initBytes.length > 0) {
         return { kind: "file", stream: Readable.from([session.initBytes]), contentType: "video/mp4", isPlaylist: false };
       }
       try {
         const bytes = await readFile(path.join(session.dirPath, SEGMENT_INIT_FILE_NAME));
+        if (bytes.length === 0) {
+          return { kind: "warming-up" };
+        }
         session.initBytes = bytes;
         return { kind: "file", stream: Readable.from([bytes]), contentType: "video/mp4", isPlaylist: false };
       } catch {

@@ -1,3 +1,7 @@
+## 2.9.47
+
+- **Fix**: Playback could get permanently stuck (hls.js endlessly re-fetching the manifest and the first segment, buffer never advancing) even though the transcode itself was encoding fine, running ahead of realtime. Root cause: ffmpeg creates the fMP4 `init.mp4` file before it finishes writing the codec-header boxes into it (unlike segments, its write is not gated behind an atomic rename), so a request could race a moment where the file exists but is still empty. That empty read was then cached forever as the session's init segment — a zero-length `Buffer` is still a truthy object, so the `if (session.initBytes)` cache guard treated it as "already resolved" and kept serving the empty file for the rest of the session, which hls.js can never initialize a SourceBuffer from. Fixed by treating a zero-byte read as not-yet-ready (keeps the caller's existing long-poll retrying) instead of caching it as final.
+
 ## 2.9.46
 
 - **New**: `getFileStats` now reports `resumeNeededBytes` / `resumeDownloadedBytes` — the bytes still to download in the 16 MB window ahead of the file's current read position (tracked per file by `prioritizeByteRange`, cleared on torrent removal), counted byte-accurately including partial pieces. Lets the browser show how much is left to download and the time to resume while buffering.

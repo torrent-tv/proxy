@@ -68,6 +68,10 @@ const SEEK_SETTLE_MS = 1_200;
 // Hard cap on the total settle wait, measured from the first far request of a
 // burst, so a still-moving scrubber cannot delay a genuine seek forever.
 const SEEK_SETTLE_MAX_MS = 2_500;
+// Grace period to wait for the PREVIOUS ffmpeg process to exit (per signal
+// escalation step: SIGTERM, then SIGKILL) before spawning its replacement into
+// the same session directory. See #startEncodeRun.
+const ENCODE_RUN_TERMINATE_GRACE_MS = 2_000;
 // Idle TTL: a session is disposed this long after the last segment/playlist
 // access. Long enough that a viewer who pauses, backgrounds the tab, or briefly
 // turns the phone off can resume WITHOUT a cold ffmpeg restart (the warm session
@@ -159,6 +163,20 @@ function waitForChildExit(child, timeoutMs = 2_000) {
     child.once("exit", finish);
     setTimeout(finish, timeoutMs);
   });
+}
+
+/**
+ * Whether a child process has genuinely exited. `ChildProcess.killed` only
+ * means `.kill()` was called — the process can stay alive well after that
+ * (blocked in I/O, ignoring/delaying the signal). `exitCode`/`signalCode` are
+ * only set once the `exit` event has actually fired, so this is the reliable
+ * check before treating a directory/file as free for a new process to use.
+ *
+ * @param {import("node:child_process").ChildProcess} child
+ * @returns {boolean}
+ */
+function hasChildExited(child) {
+  return child.exitCode !== null || child.signalCode !== null;
 }
 
 /**
@@ -600,6 +618,9 @@ function normalizeLogFileName(fileName, fileIndex) {
  * @property {string}  lastError
  * @property {Set<string>} consumers  - Consumer IDs currently using this session.
  * @property {object}  progress       - Live progress metrics updated from ffmpeg stdout.
+ * @property {number}  encodeRunGeneration - Bumped on every #startEncodeRun call;
+ *   lets a call that awaited the previous ffmpeg's exit detect it was superseded
+ *   by a newer restart request and abort instead of spawning a second process.
  */
 
 /**
@@ -878,6 +899,7 @@ export class HlsSessionManager {
       startedAt: Date.now(),
       lastAccessedAt: Date.now(),
       ffmpeg: null,
+      encodeRunGeneration: 0,
       lastError: "",
       // Cold-start timing: entry timestamp + a once-guard so the first servable
       // segment logs its latency exactly once.
@@ -979,7 +1001,7 @@ export class HlsSessionManager {
         `duration=${hasDuration ? formatSeconds(durationSeconds) : "unknown"} segments=${segmentCount}`
     );
 
-    this.#startEncodeRun(session, 0);
+    await this.#startEncodeRun(session, 0);
 
     try {
       await this.waitUntilReady(session);
@@ -1229,7 +1251,7 @@ export class HlsSessionManager {
     if (now - session.budgetLastActionAt < BUDGET_ACTION_COOLDOWN_MS) {
       return false; // let the previous action settle
     }
-    this.#applyBudgetDownshift(
+    await this.#applyBudgetDownshift(
       session,
       `link=${report.linkMbps.toFixed(2)}Mbps stream=${observed.toFixed(2)}Mbps buffer=${report.bufferedAheadSec.toFixed(1)}s`,
       "link"
@@ -1301,7 +1323,7 @@ export class HlsSessionManager {
         session.budgetSlowSince = 0; // re-evaluate fresh; don't thrash on this
         continue;
       }
-      this.#applyBudgetDownshift(session, `speed=${speed.toFixed(2)}x`, bound);
+      await this.#applyBudgetDownshift(session, `speed=${speed.toFixed(2)}x`, bound);
     }
   }
 
@@ -1349,9 +1371,9 @@ export class HlsSessionManager {
    * @param {HlsSession} session
    * @param {string} reasonText - Measurement summary for the log line.
    * @param {"cpu" | "unknown" | "link"} bound
-   * @returns {void}
+   * @returns {Promise<void>}
    */
-  #applyBudgetDownshift(session, reasonText, bound) {
+  async #applyBudgetDownshift(session, reasonText, bound) {
     const nextIndex = session.budgetRungIndex + 1;
     const rung = session.budgetLadder[nextIndex];
     if (!rung) {
@@ -1380,22 +1402,66 @@ export class HlsSessionManager {
         `(rung ${nextIndex + 1}/${session.budgetLadder.length}, downshift ${session.budgetDownshifts}/${BUDGET_MAX_DOWNSHIFTS}), ` +
         `restart at segment #${currentSeg} "${session.fileName}"`
     );
-    this.#startEncodeRun(session, currentSeg);
+    await this.#startEncodeRun(session, currentSeg);
   }
 
   /**
    * (Re)start the ffmpeg encode run beginning at segment `startIndex`.
    *
-   * Any ffmpeg process currently running for this session is terminated first.
+   * Any ffmpeg process currently running for this session is terminated FIRST
+   * AND ITS EXIT IS AWAITED before the replacement is spawned into the same
+   * directory. This closes a real incident: a fire-and-forget SIGTERM does not
+   * mean the process is dead — `ChildProcess.killed` reflects only that a
+   * signal was sent, not that the process exited (ffmpeg's own blocking read of
+   * our torrent-backed `/stream` input can defer signal handling for a long
+   * time while starved). On a rapid sequence of seeks this left multiple
+   * ffmpeg processes alive concurrently, all writing into the SAME session
+   * directory — observed as `failed to rename file segment-NNNNN.m4s.tmp`
+   * (a dying process racing a fresh one) and a zombie process still writing a
+   * `.tmp` file ~30s after being "killed" by two LATER restarts, even after the
+   * session had already been released. Multiple ffmpeg processes fighting over
+   * CPU and the same files on a weak host is what a seek could get "stuck" on.
+   *
+   * Because this now awaits, a NEWER restart request can arrive while an OLDER
+   * one is still waiting for the previous process to die. `encodeRunGeneration`
+   * resolves that: each call captures its own generation number, and after the
+   * await, a call whose generation was superseded aborts without spawning —
+   * only the LATEST requested target ever actually starts a process.
+   *
    * Segment files are named with a global index (`-start_number`) so they
    * always line up with the synthetic VOD playlist regardless of where
    * encoding started — this is what makes server-side seeking work.
    *
    * @param {HlsSession} session
    * @param {number} startIndex
-   * @returns {void}
+   * @returns {Promise<void>}
    */
-  #startEncodeRun(session, startIndex) {
+  async #startEncodeRun(session, startIndex) {
+    const generation = ++session.encodeRunGeneration;
+    const previousFfmpeg = session.ffmpeg;
+    if (previousFfmpeg && !hasChildExited(previousFfmpeg)) {
+      try {
+        previousFfmpeg.kill("SIGTERM");
+      } catch {
+        // Best effort.
+      }
+      await waitForChildExit(previousFfmpeg, ENCODE_RUN_TERMINATE_GRACE_MS);
+      if (!hasChildExited(previousFfmpeg)) {
+        try {
+          previousFfmpeg.kill("SIGKILL");
+        } catch {
+          // Best effort.
+        }
+        await waitForChildExit(previousFfmpeg, ENCODE_RUN_TERMINATE_GRACE_MS);
+      }
+    }
+    // A newer restart (or disposal) won the race while we were waiting for the
+    // old process to die — it either already spawned its own replacement or
+    // there is nothing left to start. Do not also spawn from this stale call.
+    if (session.encodeRunGeneration !== generation || session.state === "disposed") {
+      return;
+    }
+
     const safeIndex = Number.isInteger(startIndex) && startIndex > 0 ? startIndex : 0;
     // 0-based output time of this segment, from the boundary table (uniform for
     // re-encode, real keyframe for copy).
@@ -1640,7 +1706,7 @@ export class HlsSessionManager {
           `transcode ${session.id} hardware encoder ${failedEncoder} failed ` +
             `(${session.lastError}); falling back to software libx264 and restarting`
         );
-        this.#startEncodeRun(session, session.encodeStartIndex);
+        void this.#startEncodeRun(session, session.encodeStartIndex);
         return;
       }
       session.state = "failed";
@@ -1722,7 +1788,7 @@ export class HlsSessionManager {
     session.seekTarget = null;
     session.seekFirstFarAt = 0;
     logger.info(`transcode ${session.id} seek settle → restart at segment #${target}`);
-    this.#startEncodeRun(session, target);
+    void this.#startEncodeRun(session, target);
   }
 
   /**

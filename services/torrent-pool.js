@@ -727,6 +727,16 @@ export class TorrentPool {
    *
    * @param {import("webtorrent").Torrent} torrent
    * @param {number | null} [fileIndex] - Zero-based file index, or null for torrent-level only.
+   * @param {{ resumeAnchorByteStart?: number | null }} [options] - `resumeAnchorByteStart`
+   *   pins the resume window to a FIXED byte offset instead of the live (moving)
+   *   read position. Without it, the window is anchored to wherever the file is
+   *   CURRENTLY being read from — which slides forward as playback/encoding
+   *   advances, so "bytes still needed" can jump up mid-poll even though nothing
+   *   regressed (the window just moved past already-downloaded pieces into
+   *   fresh ones). The caller should capture the returned `resumeAnchorByteStart`
+   *   on the FIRST poll of a buffering episode and pass it back on subsequent
+   *   polls of that SAME episode, so "bytes needed" counts down monotonically
+   *   against a fixed target instead of chasing a moving one.
    * @returns {{
    *   numPeers: number,
    *   downloadSpeed: number,
@@ -736,7 +746,7 @@ export class TorrentPool {
    *   fileLength: number | null
    * }}
    */
-  getFileStats(torrent, fileIndex = null) {
+  getFileStats(torrent, fileIndex = null, options = {}) {
     const numPeers = typeof torrent?.numPeers === "number" ? torrent.numPeers : 0;
     const downloadSpeed = typeof torrent?.downloadSpeed === "number" ? torrent.downloadSpeed : 0;
     const uploadSpeed = typeof torrent?.uploadSpeed === "number" ? torrent.uploadSpeed : 0;
@@ -754,10 +764,14 @@ export class TorrentPool {
 
     const header = this.#getHeaderRangeProgress(torrent, file);
 
-    // Bytes still to download in the window ahead of where this file is being
-    // read — "how much left to resume". Null until a read position is known.
+    // Bytes still to download in the window ahead of the anchor point — "how
+    // much left to resume". Null until a read position is known. The anchor is
+    // the caller-supplied FROZEN offset when given (see JSDoc above), otherwise
+    // the live (moving) read position tracked from /stream range requests.
     const readPositions = this.#readPositionByTorrent.get(torrent);
-    const readByteStart = readPositions ? readPositions.get(fileIndex) : undefined;
+    const liveReadByteStart = readPositions ? readPositions.get(fileIndex) : undefined;
+    const requestedAnchor = options?.resumeAnchorByteStart;
+    const readByteStart = Number.isFinite(requestedAnchor) ? requestedAnchor : liveReadByteStart;
     const resume = typeof readByteStart === "number"
       ? this.#getResumeWindowProgress(torrent, file, readByteStart)
       : null;
@@ -772,9 +786,11 @@ export class TorrentPool {
       fileProgress: fileLength > 0 ? Math.max(0, Math.min(1, fileDownloaded / fileLength)) : 0,
       fileDownloaded,
       fileLength,
-      // Resume window (ahead of the read head): bytes needed vs downloaded.
+      // Resume window (ahead of the anchor): bytes needed vs downloaded, plus
+      // the anchor itself so the caller can pin it for the rest of one episode.
       resumeNeededBytes: resume ? resume.totalBytes : null,
       resumeDownloadedBytes: resume ? resume.downloadedBytes : null,
+      resumeAnchorByteStart: typeof readByteStart === "number" ? readByteStart : null,
       // Phase-1 progress: how much of the header/index region (the bytes the
       // codec probe needs before transcoding can start) is downloaded. Counted
       // by whole pieces from the torrent bitfield, so it advances coarsely

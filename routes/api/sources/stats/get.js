@@ -40,7 +40,14 @@ export async function handleApiSourceStatsGet(req, reply, { sourceRegistry, torr
   const fileIndexRaw = typeof req.query.fileIndex === "string" ? req.query.fileIndex : "";
   const fileIndex = fileIndexRaw !== "" && /^\d+$/.test(fileIndexRaw) ? Number(fileIndexRaw) : null;
 
-  const stats = torrentPool.getFileStats(torrent, fileIndex);
+  // Optional: pin the resume window to a FIXED byte offset for the duration of
+  // one buffering episode (see getFileStats JSDoc) instead of the live, moving
+  // read position — otherwise "bytes needed" can jump up mid-poll as the window
+  // slides forward with playback/encoding progress.
+  const resumeAnchorRaw = typeof req.query.resumeAnchorByteStart === "string" ? req.query.resumeAnchorByteStart : "";
+  const resumeAnchorByteStart = resumeAnchorRaw !== "" && /^\d+$/.test(resumeAnchorRaw) ? Number(resumeAnchorRaw) : null;
+
+  const stats = torrentPool.getFileStats(torrent, fileIndex, { resumeAnchorByteStart });
 
   // Diagnostic: surface the real swarm state per poll so a cold-start download
   // stall (0 peers / header not advancing → playback-plan blocks on the codec

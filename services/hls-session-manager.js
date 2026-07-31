@@ -1970,9 +1970,9 @@ export class HlsSessionManager {
    * Also refreshes `lastAccessedAt` to prevent the session from expiring.
    *
    * @param {string} sessionId
-   * @returns {object | null}
+   * @returns {Promise<object | null>}
    */
-  getSessionProgress(sessionId) {
+  async getSessionProgress(sessionId) {
     if (!isSafeSessionId(sessionId)) {
       return null;
     }
@@ -1990,6 +1990,13 @@ export class HlsSessionManager {
     const warmupRemainingSeconds = isWarmupPhase
       ? Math.max(0, warmupTotalSeconds - warmupElapsedSeconds)
       : null;
+    // Observed OUTPUT bitrate (Mbit/s) from recently completed segment sizes —
+    // already computed for the viewer-link budget check (#checkLinkBudget); also
+    // exposed here so the browser can turn its OWN measured link throughput into
+    // a "content-seconds delivered per wall-clock second" rate for the unified
+    // three-stage ETA (download / transcode / delivery), the same way the
+    // transcode's own `speed` already is one. Null when not enough segments yet.
+    const outputMbps = await this.#observedStreamMbps(session);
     return {
       sessionId: session.id,
       state: session.progress.state,
@@ -2005,6 +2012,7 @@ export class HlsSessionManager {
       // of a percentage of the whole-file transcode.
       segmentDurationSec: this.segmentDurationSec,
       speed: session.progress.speed,
+      outputMbps,
       updatedAt: session.progress.updatedAt,
       error: session.state === "failed" ? session.lastError : ""
     };

@@ -882,24 +882,57 @@ export class HlsSessionManager {
     // branches; on failure both fall back to their current behaviour (uniform
     // grid for boundaries, raw target for seeking) — no regression.
     let keyframeTimes = null;
-    let keyframeMs = -1; // -1 = not run (skipped)
-    if (hasDuration) {
-      // Short timeout: mp4 keyframes come from the moov index (fast); containers
-      // that force a full packet scan time out and fall back to a uniform grid,
-      // so this never adds more than ~6 s to session start.
+    let keyframeMs = -1; // -1 = not run (skipped), -2 = running in the background
+    if (hasDuration && !transcodeVideo) {
+      // Video-COPY path: keyframeTimes are REQUIRED to build correct segment
+      // boundaries (the playlist itself), so this MUST block session creation —
+      // an incorrect playlist is worse than a slower start. Short timeout: mp4
+      // keyframes come from the moov index (fast); containers that force a full
+      // packet scan time out and fall back to a uniform grid, so this never adds
+      // more than ~6 s to session start.
       const keyframeStartMs = Date.now();
       keyframeTimes = await probeVideoKeyframeTimes(this.ffmpegBin, inputUrl.toString(), 6_000);
       keyframeMs = Date.now() - keyframeStartMs;
       if (!keyframeTimes) {
         logger.warn(
-          `transcode ${sessionId}: keyframe probe unavailable; using uniform grid / raw seek targets ` +
+          `transcode ${sessionId}: keyframe probe unavailable; using uniform grid ` +
             `for "${logName}" (seek precision may be reduced)`
         );
       }
+    } else if (hasDuration && transcodeVideo) {
+      // Re-encode path: keyframeTimes are ONLY used to snap a LATER seek (see
+      // #startEncodeRun) — segment boundaries stay on the uniform grid either
+      // way. So this does NOT need to block session creation / the first
+      // segment's start. Run it in the background with a FULL budget instead of
+      // the 6 s cap: AVI-class containers need a full packet scan, which 6 s can
+      // never afford without delaying playback start — that starved budget is
+      // exactly why the probe kept missing on the container where the seek bug
+      // was field-diagnosed. #startEncodeRun reads session.keyframeTimes fresh
+      // on every call, so a seek that happens AFTER this finishes picks it up
+      // automatically; one that happens before falls back to the existing
+      // circuit breaker as a safety net (no regression either way).
+      keyframeMs = -2;
+      const backgroundStartedAt = Date.now();
+      void probeVideoKeyframeTimes(this.ffmpegBin, inputUrl.toString(), 25_000).then((times) => {
+        const liveSession = this.sessionsById.get(sessionId);
+        if (!liveSession || liveSession.state === "disposed") {
+          return; // Session gone before the probe finished — nothing to update.
+        }
+        liveSession.keyframeTimes = times;
+        const elapsedMs = Date.now() - backgroundStartedAt;
+        logger.info(
+          times
+            ? `transcode ${sessionId}: background keyframe probe found ${times.length} keyframes ` +
+                `(${elapsedMs}ms) for "${logName}" — later seeks will snap to them`
+            : `transcode ${sessionId}: background keyframe probe unavailable (${elapsedMs}ms) for "${logName}" ` +
+                `— seeks keep using the raw target (falls back to the circuit breaker on failure)`
+        );
+      });
     }
     logger.info(
       `cold-start ${sessionId.slice(0, 8)}: media-info=${mediaInfoMs}ms (${mediaInfoSource}) ` +
-        `keyframes=${keyframeMs < 0 ? "skipped" : `${keyframeMs}ms`} create-total=${Date.now() - createEntryMs}ms`
+        `keyframes=${keyframeMs === -1 ? "skipped" : keyframeMs === -2 ? "background" : `${keyframeMs}ms`} ` +
+        `create-total=${Date.now() - createEntryMs}ms`
     );
     const segmentBoundaries = hasDuration
       ? computeSegmentBoundaries({

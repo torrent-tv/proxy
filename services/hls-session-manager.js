@@ -72,6 +72,19 @@ const SEEK_SETTLE_MAX_MS = 2_500;
 // escalation step: SIGTERM, then SIGKILL) before spawning its replacement into
 // the same session directory. See #startEncodeRun.
 const ENCODE_RUN_TERMINATE_GRACE_MS = 2_000;
+// A seek-restart run that exits this fast never did real work — it failed at
+// the seek/open step itself (container demux error, bad audio frame boundary,
+// etc.), not mid-stream. Used to tell a genuine seek failure apart from a
+// later, unrelated crash so the circuit breaker below only counts the former.
+const SEEK_FAST_FAIL_MS = 2_000;
+// Circuit breaker: consecutive fast failures AT THE SAME target before we stop
+// auto-retrying and leave the session in its terminal "failed" state (surfaced
+// to the client as a clean, retryable error) instead of looping forever. The
+// keyframe-snap seek (see #startEncodeRun) already fixes the dominant failure
+// mode (an unreliable container-computed seek position); this is a safety net
+// for whatever residual case still fails — not a second competing "fix" that
+// blindly retries the identical command hoping for a different result.
+const MAX_SEEK_FAILURES = 3;
 // Idle TTL: a session is disposed this long after the last segment/playlist
 // access. Long enough that a viewer who pauses, backgrounds the tab, or briefly
 // turns the phone off can resume WITHOUT a cold ffmpeg restart (the warm session
@@ -575,6 +588,27 @@ function computeSegmentBoundaries({ transcodeVideo, durationSeconds, segDur, key
   return boundaries.length >= 2 ? boundaries : uniform();
 }
 
+/**
+ * The largest keyframe time that does not exceed `target`, from a SORTED
+ * (ascending) array of keyframe times such as {@link probeVideoKeyframeTimes}
+ * returns. Null when `target` is before the first keyframe or the array is
+ * empty — the caller then falls back to its unsnapped target.
+ *
+ * @param {number[]} keyframeTimes - Sorted ascending.
+ * @param {number} target
+ * @returns {number | null}
+ */
+function nearestKeyframeAtOrBefore(keyframeTimes, target) {
+  let result = null;
+  for (const time of keyframeTimes) {
+    if (time > target) {
+      break;
+    }
+    result = time;
+  }
+  return result;
+}
+
 function isWarmupTimeoutError(error) {
   if (!(error instanceof Error)) {
     return false;
@@ -621,6 +655,12 @@ function normalizeLogFileName(fileName, fileIndex) {
  * @property {number}  encodeRunGeneration - Bumped on every #startEncodeRun call;
  *   lets a call that awaited the previous ffmpeg's exit detect it was superseded
  *   by a newer restart request and abort instead of spawning a second process.
+ * @property {number[] | null} keyframeTimes - Real source keyframe times
+ *   (sorted seconds), or null when the probe failed/timed out. Used to snap a
+ *   source seek onto a known-valid position (see #startEncodeRun).
+ * @property {number}  seekFailureTarget - Segment index of the last fast seek
+ *   failure, for the consecutive-failure circuit breaker (see MAX_SEEK_FAILURES).
+ * @property {number}  seekFailureCount  - Consecutive fast failures at seekFailureTarget.
  */
 
 /**
@@ -828,12 +868,22 @@ export class HlsSessionManager {
 
     // For the video-copy path we cannot insert keyframes, so the playlist's
     // segment boundaries must match the source's real keyframes (otherwise the
-    // player sees gaps on seek). Probe them; on failure we fall back to a
-    // uniform grid (current behaviour). Re-encoded video uses a uniform grid
-    // (its fixed GOP makes the cuts land there).
+    // player sees gaps on seek). Re-encoded video uses a uniform grid for
+    // segment boundaries instead (its fixed GOP makes the cuts land there —
+    // computeSegmentBoundaries ignores keyframeTimes when transcodeVideo).
+    //
+    // But the probe is ALSO used for something both branches need: choosing a
+    // SOURCE seek position ffmpeg can actually land on. `-ss` before `-i` trusts
+    // the container's own on-the-fly seek/index, which for some containers
+    // (observed: AVI with VBR MP3 audio) can point at a position with no valid
+    // frame boundary at all — ffmpeg then fails outright ("Seek failed" /
+    // "Header missing"), not just imprecisely. Snapping the seek to the nearest
+    // KNOWN real keyframe (see #startEncodeRun) avoids that. So probe for both
+    // branches; on failure both fall back to their current behaviour (uniform
+    // grid for boundaries, raw target for seeking) — no regression.
     let keyframeTimes = null;
     let keyframeMs = -1; // -1 = not run (skipped)
-    if (hasDuration && !transcodeVideo) {
+    if (hasDuration) {
       // Short timeout: mp4 keyframes come from the moov index (fast); containers
       // that force a full packet scan time out and fall back to a uniform grid,
       // so this never adds more than ~6 s to session start.
@@ -842,8 +892,8 @@ export class HlsSessionManager {
       keyframeMs = Date.now() - keyframeStartMs;
       if (!keyframeTimes) {
         logger.warn(
-          `transcode ${sessionId}: keyframe probe unavailable; using uniform grid ` +
-            `for copied video "${logName}" (seek precision may be reduced)`
+          `transcode ${sessionId}: keyframe probe unavailable; using uniform grid / raw seek targets ` +
+            `for "${logName}" (seek precision may be reduced)`
         );
       }
     }
@@ -953,6 +1003,11 @@ export class HlsSessionManager {
       // keyframe positions for copied video. Drives the playlist and seeking.
       segmentBoundaries,
       segmentCount,
+      // Real source keyframe times (sorted seconds), or null when the probe
+      // failed/timed out. Used by #startEncodeRun to snap a source seek onto a
+      // KNOWN valid position instead of trusting the container's own on-the-fly
+      // seek at an arbitrary target — see the probe call above for why.
+      keyframeTimes,
       playlistText: hasDuration ? this.#buildVodPlaylist(segmentBoundaries) : "",
       // Segment index the current ffmpeg run started producing from.
       encodeStartIndex: 0,
@@ -966,6 +1021,12 @@ export class HlsSessionManager {
       seekSettleTimer: null,
       seekTarget: null,
       seekFirstFarAt: 0,
+      // Circuit breaker: consecutive FAST failures (see SEEK_FAST_FAIL_MS) at
+      // seekFailureTarget. Reset whenever a run starts at a DIFFERENT target or
+      // survives past the fast-fail window. See the exit handler in
+      // #wireEncodeProcess and MAX_SEEK_FAILURES.
+      seekFailureTarget: -1,
+      seekFailureCount: 0,
       progress: {
         state: "starting",
         processedSeconds: 0,
@@ -1512,12 +1573,40 @@ export class HlsSessionManager {
     // (startSeconds is already a real-keyframe offset from 0, so add back the
     // container start time); for re-encode startSeconds is a plain grid offset.
     const seekSeconds = session.transcodeVideo ? startSeconds : startSeconds + sourceStartTime;
-    if (seekSeconds > 0) {
-      // Accurate seek before -i (decodes from the preceding keyframe and trims
-      // to the exact point), so the first output frame is exactly at the target.
-      args.push("-accurate_seek", "-ss", String(seekSeconds));
+    // Two-step seek when we have a real keyframe map: jump to a KNOWN-valid
+    // keyframe (coarse, before -i — safe because WE sourced it from ffprobe,
+    // not the container's own on-the-fly seek/index) and trim the short
+    // residual (bounded by the keyframe interval) precisely AFTER -i, which is
+    // always frame-accurate regardless of -accurate_seek.
+    //
+    // Root cause this works around: `-accurate_seek -ss X` before -i trusts the
+    // CONTAINER's own seek to land near X. For some containers (observed: AVI
+    // with VBR MP3 audio) that on-the-fly seek can point at a position with no
+    // valid frame boundary at all — ffmpeg fails outright ("Seek failed" /
+    // "Header missing"), not just imprecisely, and repeatedly so since every
+    // retry re-tries the SAME bad container-computed position. A keyframe we
+    // read directly from the packet list is a position ffmpeg has already
+    // proven it can decode.
+    const snappedKeyframe = Array.isArray(session.keyframeTimes) && session.keyframeTimes.length > 0
+      ? nearestKeyframeAtOrBefore(session.keyframeTimes, seekSeconds)
+      : null;
+    if (snappedKeyframe !== null) {
+      const residualSeconds = Math.max(0, seekSeconds - snappedKeyframe);
+      if (snappedKeyframe > 0) {
+        args.push("-ss", String(snappedKeyframe));
+      }
+      args.push("-i", session.inputUrl);
+      if (residualSeconds > 0) {
+        args.push("-ss", String(residualSeconds));
+      }
+    } else {
+      if (seekSeconds > 0) {
+        // No keyframe map (probe failed/timed out) — fall back to the previous
+        // behaviour: trust the container's own accurate seek.
+        args.push("-accurate_seek", "-ss", String(seekSeconds));
+      }
+      args.push("-i", session.inputUrl);
     }
-    args.push("-i", session.inputUrl);
     if (session.transcodeVideo) {
       // Branch A (re-encode): fixed GOP makes keyframes land exactly on the
       // segment grid; relabel output onto the original timeline so segment N
@@ -1709,6 +1798,30 @@ export class HlsSessionManager {
         void this.#startEncodeRun(session, session.encodeStartIndex);
         return;
       }
+      // Circuit-breaker bookkeeping: a seek-restart run that exits THIS fast
+      // never did real work — it failed at the seek/open step itself, not
+      // mid-stream (see SEEK_FAST_FAIL_MS). Track consecutive fast failures at
+      // the SAME target so #ensureEncodingFor/#fireSettledSeek (which check
+      // this below) can stop retrying instead of looping forever on a position
+      // that keeps failing even with the keyframe-snapped seek.
+      const elapsedMs = Date.now() - session.lastRestartAt;
+      if (elapsedMs < SEEK_FAST_FAIL_MS && session.encodeStartIndex > 0) {
+        if (session.seekFailureTarget === session.encodeStartIndex) {
+          session.seekFailureCount += 1;
+        } else {
+          session.seekFailureTarget = session.encodeStartIndex;
+          session.seekFailureCount = 1;
+        }
+        logger.warn(
+          `transcode ${session.id} fast failure at segment #${session.encodeStartIndex} ` +
+            `(${elapsedMs}ms) — ${session.seekFailureCount}/${MAX_SEEK_FAILURES} consecutive`
+        );
+      } else {
+        // Real progress was made (or this was the very first run) — not a
+        // repeating seek failure. Reset the breaker.
+        session.seekFailureTarget = -1;
+        session.seekFailureCount = 0;
+      }
       session.state = "failed";
       session.progress.state = "failed";
       session.progress.updatedAt = Date.now();
@@ -1743,6 +1856,15 @@ export class HlsSessionManager {
     if (withinWindow) {
       return;
     }
+    // Circuit breaker: this exact target has already failed MAX_SEEK_FAILURES
+    // times in a row (fast failures — see #wireEncodeProcess's exit handler).
+    // Stop auto-retrying it; session.state stays "failed" so getFileStream
+    // reports a clean, retryable error instead of looping forever. A DIFFERENT
+    // target (the viewer seeking elsewhere) is unaffected — it gets its own
+    // fresh attempt budget.
+    if (index === session.seekFailureTarget && session.seekFailureCount >= MAX_SEEK_FAILURES) {
+      return;
+    }
     // Far request = a server-side seek. Do NOT restart on the first one:
     // debounce a burst of scattered requests into a single restart at the
     // position the player ended on. Record the latest target and (re)arm the
@@ -1772,6 +1894,14 @@ export class HlsSessionManager {
     const target = session.seekTarget;
     session.seekSettleTimer = null;
     if (!session || session.state === "disposed" || target == null) {
+      session.seekTarget = null;
+      session.seekFirstFarAt = 0;
+      return;
+    }
+    // Circuit breaker (defense in depth): a timer armed before the cap was hit
+    // could still be pending when it was reached — do not fire the restart it
+    // was going to make. See the matching check in #ensureEncodingFor.
+    if (target === session.seekFailureTarget && session.seekFailureCount >= MAX_SEEK_FAILURES) {
       session.seekTarget = null;
       session.seekFirstFarAt = 0;
       return;

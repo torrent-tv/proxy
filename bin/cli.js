@@ -21,6 +21,7 @@ import { createDataChannelHandler } from "../services/data-channel-handler.js";
 import { collectHealthMetrics } from "../services/health-collector.js";
 import { createPortMapper } from "../services/port-mapper.js";
 import { classifyNat } from "../services/nat-classifier.js";
+import { DEFAULT_SEGMENT_FORMAT_ID, SEGMENT_FORMAT_IDS } from "../services/segment-formats/index.js";
 import { logger } from "../utils/logger.js";
 
 const require = createRequire(import.meta.url);
@@ -74,6 +75,11 @@ program
   .option("--no-port-mapping", "Disable automatic UPnP/NAT-PMP port mapping")
   .option("--max-disk-bytes <bytes>", "Cap total downloaded torrent data (0 = disabled; default min(10GB, half free disk))")
   .option("--ffmpeg-bin <path>", "Path to ffmpeg binary")
+  .option(
+    "--segment-format <format>",
+    `HLS output container: ${SEGMENT_FORMAT_IDS.join(" | ")}`,
+    DEFAULT_SEGMENT_FORMAT_ID
+  )
   .option("--token <token>", "Registration token", "")
   .addHelpText("after", HELP_EXAMPLES);
 
@@ -258,7 +264,8 @@ try {
     port: localPort,
     transcodeAudio,
     ffmpegBin,
-    maxDiskBytes
+    maxDiskBytes,
+    segmentFormat: options.segmentFormat
   });
   app = started.app;
   actualPort = started.port;

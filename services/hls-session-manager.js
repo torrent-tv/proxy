@@ -29,14 +29,9 @@ import {
   parseFfmpegVideoFps,
   parseFfmpegHdr
 } from "./ffmpeg-banner.js";
+import { resolveSegmentFormat } from "./segment-formats/index.js";
 
 const PLAYLIST_FILE_NAME = "index.m3u8";
-// fMP4 (CMAF) segments: SPS/PPS live once in the init segment, so every media
-// segment is small and hardware encoders that do not repeat parameter sets
-// (e.g. v4l2m2m) still produce independently-usable segments. The init segment
-// is referenced by `#EXT-X-MAP` and fetched once by the player.
-const SEGMENT_INIT_FILE_NAME = "init.mp4";
-const SEGMENT_FILE_NAME_PATTERN = /^segment-\d{5}\.m4s$/;
 const CLEANUP_INTERVAL_MS = 30_000;
 const DEFAULT_SEGMENT_DURATION_SEC = 4;
 // How many segments ahead of the current encode head a missing-segment request
@@ -242,32 +237,19 @@ function isSafeSessionId(value) {
 
 /**
  * Guard against path traversal by restricting file names to the known
- * playlist and segment patterns produced by ffmpeg.
+ * playlist and segment patterns produced by ffmpeg. Which segment names are
+ * legal depends on the active container, so the format decides.
  *
  * @param {string} fileName
+ * @param {import("./segment-formats/index.js").SegmentFormat} segmentFormat
  * @returns {boolean}
  */
-function isSafeFileName(fileName) {
+function isSafeFileName(fileName, segmentFormat) {
   return (
     fileName === PLAYLIST_FILE_NAME ||
-    fileName === SEGMENT_INIT_FILE_NAME ||
-    SEGMENT_FILE_NAME_PATTERN.test(fileName)
+    (segmentFormat.initFileName !== null && fileName === segmentFormat.initFileName) ||
+    segmentFormat.isSegmentFileName(fileName)
   );
-}
-
-/**
- * Extract the zero-based segment index from a segment file name.
- * Returns -1 when the name is not a valid segment file.
- *
- * @param {string} fileName - e.g. "segment-00012.m4s"
- * @returns {number}
- */
-function segmentIndexFromName(fileName) {
-  const match = /^segment-(\d{5})\.m4s$/.exec(fileName);
-  if (!match) {
-    return -1;
-  }
-  return Number(match[1]);
 }
 
 /**
@@ -637,6 +619,8 @@ function normalizeLogFileName(fileName, fileIndex) {
  * @property {number}  [segmentDurationSec] - HLS segment length in seconds.
  * @property {number}  [sessionTtlMs]       - Session idle TTL in milliseconds.
  * @property {number}  [startupWaitMs]      - Max time to wait for the first playlist file.
+ * @property {string}  [segmentFormatId]    - Output container: "fmp4" (default)
+ *   or "mpegts". See `./segment-formats/index.js`.
  */
 
 /**
@@ -686,10 +670,15 @@ export class HlsSessionManager {
     softwarePresetBenchmark = null,
     getSourceStats = null,
     tonemapSupported = false,
-    getCachedMediaInfo = null
+    getCachedMediaInfo = null,
+    segmentFormatId = undefined
   }) {
     this.enabled = Boolean(enabled);
     this.ffmpegBin = ffmpegBin;
+    // Output container (fMP4/CMAF or MPEG-TS). Everything container-specific —
+    // muxer args, file naming, playlist header, per-segment correction — lives
+    // in this module; nothing here branches on the format.
+    this.segmentFormat = resolveSegmentFormat(segmentFormatId);
     // Optional accessor for media info the playback planner already probed for
     // (sourceKey, fileIndex), so session create can skip its own ffmpeg scan.
     this.getCachedMediaInfo = typeof getCachedMediaInfo === "function" ? getCachedMediaInfo : null;
@@ -1134,20 +1123,20 @@ export class HlsSessionManager {
     }
     const lines = [
       "#EXTM3U",
-      // Version 7: required for fMP4 media segments + `#EXT-X-MAP`.
-      "#EXT-X-VERSION:7",
+      // The container decides the minimum version (fMP4 + `#EXT-X-MAP` needs 7,
+      // MPEG-TS is fine at 3).
+      `#EXT-X-VERSION:${this.segmentFormat.playlistVersion}`,
       `#EXT-X-TARGETDURATION:${Math.ceil(maxDuration)}`,
       "#EXT-X-MEDIA-SEQUENCE:0",
       "#EXT-X-PLAYLIST-TYPE:VOD",
       "#EXT-X-INDEPENDENT-SEGMENTS",
-      // The fMP4 init segment (codec config / SPS/PPS). Fetched once; applies to
-      // every media segment below.
-      `#EXT-X-MAP:URI="${SEGMENT_INIT_FILE_NAME}"`
+      // Container-specific header lines (e.g. fMP4's `#EXT-X-MAP`).
+      ...this.segmentFormat.playlistHeaderLines()
     ];
     for (let index = 0; index < count; index += 1) {
       const duration = Math.max(0.1, boundaries[index + 1] - boundaries[index]);
       lines.push(`#EXTINF:${duration.toFixed(6)},`);
-      lines.push(`segment-${String(index).padStart(5, "0")}.m4s`);
+      lines.push(this.segmentFormat.segmentFileName(index));
     }
     lines.push("#EXT-X-ENDLIST");
     return `${lines.join("\n")}\n`;
@@ -1286,9 +1275,9 @@ export class HlsSessionManager {
     }
     const indices = [];
     for (const name of names) {
-      const match = /^segment-(\d{5})\.m4s$/.exec(name);
-      if (match) {
-        indices.push(parseInt(match[1], 10));
+      const index = this.segmentFormat.segmentIndexFromName(name);
+      if (index >= 0) {
+        indices.push(index);
       }
     }
     if (indices.length < 3) {
@@ -1299,7 +1288,7 @@ export class HlsSessionManager {
     let bytes = 0;
     try {
       for (const index of completed) {
-        const st = await stat(path.join(session.dirPath, `segment-${String(index).padStart(5, "0")}.m4s`));
+        const st = await stat(path.join(session.dirPath, this.segmentFormat.segmentFileName(index)));
         bytes += st.size;
       }
     } catch {
@@ -1676,18 +1665,10 @@ export class HlsSessionManager {
       "0",
       "-hls_flags",
       "independent_segments+temp_file",
-      // fMP4 (CMAF) segments: codec config goes once into the init segment,
-      // referenced by `#EXT-X-MAP`. Each seek-restart run rewrites init.mp4, but
-      // it is codec-config only (position-independent), so getFileStream caches
-      // and serves the first one for the whole session.
-      "-hls_segment_type",
-      "fmp4",
-      "-hls_fmp4_init_filename",
-      SEGMENT_INIT_FILE_NAME,
+      // Container selection + segment naming, from the active format module.
+      ...this.segmentFormat.muxerArgs(),
       "-start_number",
       String(safeIndex),
-      "-hls_segment_filename",
-      "segment-%05d.m4s",
       // ffmpeg writes its own playlist here; we ignore it and serve the
       // synthetic VOD playlist instead (see getFileStream).
       PLAYLIST_FILE_NAME
@@ -2047,7 +2028,7 @@ export class HlsSessionManager {
    * >}
    */
   async getFileStream(sessionId, fileName) {
-    if (!isSafeSessionId(sessionId) || !isSafeFileName(fileName)) {
+    if (!isSafeSessionId(sessionId) || !isSafeFileName(fileName, this.segmentFormat)) {
       return { kind: "not-found" };
     }
     const session = this.sessionsById.get(sessionId);
@@ -2074,10 +2055,12 @@ export class HlsSessionManager {
       };
     }
 
-    // The fMP4 init segment (referenced by #EXT-X-MAP). It is codec-config only
-    // and position-independent, but each seek-restart run REWRITES init.mp4, so
-    // cache the FIRST one and always serve that — otherwise the init the player
-    // fetched could differ from a later run's, breaking playback after a seek.
+    // The init segment (fMP4 only; referenced by #EXT-X-MAP). Each seek-restart
+    // run REWRITES it, so cache the FIRST one and always serve that — the
+    // player fetches it once and never re-fetches, so it must stay stable for
+    // the session's lifetime. (What that costs, and why segments must therefore
+    // carry their own position, is documented in `segment-formats/mp4-boxes.js`
+    // `stampSegmentStartTime`.)
     //
     // ffmpeg creates init.mp4 before it has finished writing the fMP4 header
     // boxes into it (unlike segments, its write is not gated behind an atomic
@@ -2091,17 +2074,28 @@ export class HlsSessionManager {
     // on non-empty content on both the cache check and the fresh read, so an
     // empty read is treated as not-yet-ready and the caller's long-poll keeps
     // retrying until ffmpeg has actually written the header.
-    if (fileName === SEGMENT_INIT_FILE_NAME) {
+    const { initFileName } = this.segmentFormat;
+    if (initFileName !== null && fileName === initFileName) {
       if (session.initBytes && session.initBytes.length > 0) {
-        return { kind: "file", stream: Readable.from([session.initBytes]), contentType: "video/mp4", isPlaylist: false };
+        return {
+          kind: "file",
+          stream: Readable.from([session.initBytes]),
+          contentType: this.segmentFormat.initContentType,
+          isPlaylist: false
+        };
       }
       try {
-        const bytes = await readFile(path.join(session.dirPath, SEGMENT_INIT_FILE_NAME));
+        const bytes = await readFile(path.join(session.dirPath, initFileName));
         if (bytes.length === 0) {
           return { kind: "warming-up" };
         }
         session.initBytes = bytes;
-        return { kind: "file", stream: Readable.from([bytes]), contentType: "video/mp4", isPlaylist: false };
+        return {
+          kind: "file",
+          stream: Readable.from([bytes]),
+          contentType: this.segmentFormat.initContentType,
+          isPlaylist: false
+        };
       } catch {
         // Not produced yet — the encode run started at session creation writes
         // it early; the caller long-polls until it appears.
@@ -2110,9 +2104,9 @@ export class HlsSessionManager {
     }
 
     const filePath = path.join(session.dirPath, fileName);
+    const isPlaylist = fileName === PLAYLIST_FILE_NAME;
     try {
       await access(filePath);
-      const isPlaylist = fileName === PLAYLIST_FILE_NAME;
       // Cold-start: log the first servable SEGMENT of this session exactly once
       // — the time from session-create entry to a playable first segment.
       if (!isPlaylist && !session.firstSegmentLogged) {
@@ -2121,16 +2115,32 @@ export class HlsSessionManager {
           `cold-start ${sessionId.slice(0, 8)}: first-segment ready +${Date.now() - session.createEntryMs}ms`
         );
       }
+      // Formats whose segments need correcting before they are valid against
+      // the session's cached init are read whole and passed through the format
+      // module; the rest stream straight off disk.
+      if (!isPlaylist && this.segmentFormat.needsSegmentRewrite) {
+        const index = this.segmentFormat.segmentIndexFromName(fileName);
+        const bytes = await readFile(filePath);
+        const prepared = this.segmentFormat.prepareSegmentBytes(bytes, {
+          startSeconds: this.#segmentStartTime(session, index),
+          initBytes: session.initBytes ?? null
+        });
+        return {
+          kind: "file",
+          stream: Readable.from([prepared]),
+          contentType: this.segmentFormat.segmentContentType,
+          isPlaylist: false
+        };
+      }
       return {
         kind: "file",
         stream: isPlaylist
           ? createReadStream(filePath)
           : createReadStream(filePath, { highWaterMark: SEGMENT_READ_HIGH_WATER_MARK }),
-        contentType:
-          fileName === PLAYLIST_FILE_NAME
-            ? "application/vnd.apple.mpegurl"
-            : "video/mp4",
-        isPlaylist: fileName === PLAYLIST_FILE_NAME
+        contentType: isPlaylist
+          ? "application/vnd.apple.mpegurl"
+          : this.segmentFormat.segmentContentType,
+        isPlaylist
       };
     } catch (_error) {
       // File not produced yet.
@@ -2139,8 +2149,8 @@ export class HlsSessionManager {
     // A segment was requested that ffmpeg has not produced yet.  Decide whether
     // to wait for the current encode run to reach it or to restart the encoder
     // at this position (server-side seeking).  The caller long-polls.
-    if (fileName !== PLAYLIST_FILE_NAME) {
-      this.#ensureEncodingFor(session, segmentIndexFromName(fileName));
+    if (!isPlaylist) {
+      this.#ensureEncodingFor(session, this.segmentFormat.segmentIndexFromName(fileName));
     }
     return { kind: "warming-up" };
   }

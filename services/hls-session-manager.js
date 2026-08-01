@@ -1906,20 +1906,18 @@ export class HlsSessionManager {
     if (!session || session.state === "disposed" || index < 0) {
       return;
     }
-    // A stale in-flight request must not steer the encoder. One scrub of the
-    // seek bar makes the player fire SEVERAL segment requests within a few
-    // hundred ms (field-observed 2026-08-01: #534, #694, #817, #828 within
-    // 361 ms), and each one long-polls this method every 300 ms until it is
-    // served or times out. Without this guard they take turns overwriting
-    // `seekTarget`, so the encoder ping-pongs between their positions
-    // (534→828→694→828→817→828) and none of them ever completes — the buffer
-    // stayed empty for over a minute while ffmpeg restarted six times. Only
-    // the NEWEST request may set the target: older ones keep polling (their
-    // segment may still be produced) but no longer move the encoder.
-    if (requestSeq < session.latestRequestSeq) {
-      return;
-    }
-    session.latestRequestSeq = requestSeq;
+    // NOTE (2026-08-01): a "only the newest request may steer the encoder"
+    // guard was tried here and REVERTED — it made seeking worse, not better.
+    // The premise (the newest request is the one the viewer wants) does not
+    // hold: when the player cannot get its target segment it starts SCANNING
+    // the playlist, firing dozens of requests across the whole file within
+    // half a second (field log: #178, #681, #725, #807, #74, #245, #387 …).
+    // Under that traffic the newest request is an arbitrary scan probe, so
+    // the guard steered the encoder away from the actual seek target, the
+    // target segment was never produced, and the player gave up and reset to
+    // the start of the file. The ping-pong this tried to fix is real, but the
+    // fix has to distinguish a VIEWER seek from the player's own scan — the
+    // request's arrival order does not carry that information.
     const head = session.encodeStartIndex;
     // Anchor the look-ahead window on the CURRENT encode position (start index +
     // seconds already processed), not the run's start index. Otherwise a long

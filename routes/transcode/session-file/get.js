@@ -51,8 +51,13 @@ export async function handleTranscodeSessionFileGet(req, reply, { hlsSessionMana
  */
 async function waitForSessionFile(hlsSessionManager, sessionId, fileName, timeoutMs) {
   const startedAt = Date.now();
+  // One sequence number for THIS request, reused by every poll below, so the
+  // session can tell a newly-arrived request apart from an old one polling
+  // again — see HlsSessionManager#ensureEncodingFor for the encoder ping-pong
+  // this prevents when one seek-bar scrub fires several segment requests.
+  const requestSeq = hlsSessionManager.nextRequestSeq(sessionId);
   while (Date.now() - startedAt < timeoutMs) {
-    const result = await hlsSessionManager.getFileStream(sessionId, fileName);
+    const result = await hlsSessionManager.getFileStream(sessionId, fileName, { requestSeq });
     if (result.kind !== "warming-up") {
       return result;
     }

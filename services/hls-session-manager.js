@@ -1721,6 +1721,42 @@ export class HlsSessionManager {
   }
 
   /**
+   * Rebase ffmpeg's `-progress` `out_time`/`out_time_ms` onto the SOURCE
+   * (absolute) timeline, so `session.progress.processedSeconds` is always
+   * comparable to `session.progress.startPositionSeconds` — which
+   * `computeProgressMetrics` and the client's own cushion-percent/ETA math
+   * both assume.
+   *
+   * Branch B (video copy, `-copyts`) already reports `out_time` on the
+   * source's absolute timeline — no rebase needed. Branch A (video re-encode)
+   * does NOT: `-output_ts_offset` (used there to relabel the MUXED output's
+   * timestamps onto the absolute grid) does not affect what `-progress`
+   * reports — verified empirically (a 5s clip encoded with
+   * `-output_ts_offset 100` still reports `out_time` counting 0→5, not
+   * 100→105). Left unrebased, `processedSeconds` jumps from the post-restart
+   * placeholder (`session.progress.startPositionSeconds`, absolute) down to a
+   * near-zero RELATIVE value the moment real ffmpeg progress starts flowing —
+   * `processedSeconds - startPositionSeconds` then goes deeply negative,
+   * clamps to 0, and the client's cushion percent/ETA reads as permanently
+   * stuck at 0% for the whole run even while the encode is actively
+   * producing (field-diagnosed 2026-08-01: a re-encode session logged
+   * `processed=39.5 startPos=1824` at a healthy 6x realtime speed).
+   *
+   * @param {HlsSession} session
+   * @param {number} rawSeconds - As parsed from `out_time`/`out_time_ms`.
+   * @returns {number}
+   */
+  #toAbsoluteProcessedSeconds(session, rawSeconds) {
+    if (!session.transcodeVideo) {
+      return rawSeconds;
+    }
+    const offset = Number.isFinite(session.progress?.startPositionSeconds)
+      ? session.progress.startPositionSeconds
+      : 0;
+    return rawSeconds + offset;
+  }
+
+  /**
    * Wire stdout (progress), stderr (errors) and exit handlers for an ffmpeg
    * encode process.  Handlers no-op when the process has been superseded by a
    * later encode run (identity check against `session.ffmpeg`).
@@ -1747,12 +1783,12 @@ export class HlsSessionManager {
         if (key === "out_time_ms") {
           const numeric = Number(value);
           if (Number.isFinite(numeric) && numeric >= 0) {
-            session.progress.processedSeconds = numeric / MICROSECONDS_PER_SECOND;
+            session.progress.processedSeconds = this.#toAbsoluteProcessedSeconds(session, numeric / MICROSECONDS_PER_SECOND);
           }
         } else if (key === "out_time") {
           const parsed = parseFfmpegTimestamp(value);
           if (parsed != null) {
-            session.progress.processedSeconds = parsed;
+            session.progress.processedSeconds = this.#toAbsoluteProcessedSeconds(session, parsed);
           }
         } else if (key === "speed") {
           session.progress.speed = value;

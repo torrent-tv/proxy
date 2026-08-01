@@ -1042,6 +1042,12 @@ export class HlsSessionManager {
       // request (for the SEEK_SETTLE_MAX_MS cap).
       seekSettleTimer: null,
       seekTarget: null,
+      // Monotonic sequence of INCOMING segment requests (see #ensureEncodingFor
+      // and nextRequestSeq): a request is issued one number when it arrives and
+      // keeps it across all its long-poll iterations, so a burst of requests
+      // from one scrub cannot take turns steering the encoder.
+      requestSeqCounter: 0,
+      latestRequestSeq: 0,
       seekFirstFarAt: 0,
       // Circuit breaker: consecutive FAST failures (see SEEK_FAST_FAIL_MS) at
       // seekFailureTarget. Reset whenever a run starts at a DIFFERENT target or
@@ -1708,29 +1714,36 @@ export class HlsSessionManager {
    * `computeProgressMetrics` and the client's own cushion-percent/ETA math
    * both assume.
    *
-   * Branch B (video copy, `-copyts`) already reports `out_time` on the
-   * source's absolute timeline — no rebase needed. Branch A (video re-encode)
-   * does NOT: `-output_ts_offset` (used there to relabel the MUXED output's
-   * timestamps onto the absolute grid) does not affect what `-progress`
-   * reports — verified empirically (a 5s clip encoded with
-   * `-output_ts_offset 100` still reports `out_time` counting 0→5, not
-   * 100→105). Left unrebased, `processedSeconds` jumps from the post-restart
+   * ffmpeg's `-progress` output counts from the START OF THIS RUN on BOTH
+   * branches — neither `-output_ts_offset` (branch A, re-encode) nor
+   * `-copyts` (branch B, video copy) changes it: both relabel the MUXED
+   * output's timestamps, which is a different thing from what `-progress`
+   * reports. Verified empirically on each branch separately against a real
+   * file on the field host:
+   *   - branch A: a clip encoded with `-output_ts_offset 100` reports
+   *     `out_time` counting 0→5, not 100→105;
+   *   - branch B: `-ss 600 … -copyts -c:v copy` reports `out_time` =
+   *     0, 40.7, 54.9, 90.9 — relative, NOT 600, 640.7, …
+   * The branch-B half was originally ASSUMED to be absolute (because of
+   * `-copyts`) and left unrebased in 2.9.53; that assumption was wrong and
+   * cost a field session — hence both measurements above are recorded here,
+   * and neither branch may be exempted again without a fresh measurement.
+   *
+   * Left unrebased, `processedSeconds` jumps from the post-restart
    * placeholder (`session.progress.startPositionSeconds`, absolute) down to a
    * near-zero RELATIVE value the moment real ffmpeg progress starts flowing —
    * `processedSeconds - startPositionSeconds` then goes deeply negative,
    * clamps to 0, and the client's cushion percent/ETA reads as permanently
    * stuck at 0% for the whole run even while the encode is actively
-   * producing (field-diagnosed 2026-08-01: a re-encode session logged
-   * `processed=39.5 startPos=1824` at a healthy 6x realtime speed).
+   * producing (field-diagnosed 2026-08-01: `processed=39.5 startPos=1824` at
+   * a healthy 6x speed on branch A; `processed=12.638 startPos=3312` at 12.6x
+   * on branch B).
    *
    * @param {HlsSession} session
    * @param {number} rawSeconds - As parsed from `out_time`/`out_time_ms`.
    * @returns {number}
    */
   #toAbsoluteProcessedSeconds(session, rawSeconds) {
-    if (!session.transcodeVideo) {
-      return rawSeconds;
-    }
     const offset = Number.isFinite(session.progress?.startPositionSeconds)
       ? session.progress.startPositionSeconds
       : 0;
@@ -1889,10 +1902,24 @@ export class HlsSessionManager {
    * @param {number} index
    * @returns {void}
    */
-  #ensureEncodingFor(session, index) {
+  #ensureEncodingFor(session, index, requestSeq = Number.MAX_SAFE_INTEGER) {
     if (!session || session.state === "disposed" || index < 0) {
       return;
     }
+    // A stale in-flight request must not steer the encoder. One scrub of the
+    // seek bar makes the player fire SEVERAL segment requests within a few
+    // hundred ms (field-observed 2026-08-01: #534, #694, #817, #828 within
+    // 361 ms), and each one long-polls this method every 300 ms until it is
+    // served or times out. Without this guard they take turns overwriting
+    // `seekTarget`, so the encoder ping-pongs between their positions
+    // (534→828→694→828→817→828) and none of them ever completes — the buffer
+    // stayed empty for over a minute while ffmpeg restarted six times. Only
+    // the NEWEST request may set the target: older ones keep polling (their
+    // segment may still be produced) but no longer move the encoder.
+    if (requestSeq < session.latestRequestSeq) {
+      return;
+    }
+    session.latestRequestSeq = requestSeq;
     const head = session.encodeStartIndex;
     // Anchor the look-ahead window on the CURRENT encode position (start index +
     // seconds already processed), not the run's start index. Otherwise a long
@@ -2016,10 +2043,31 @@ export class HlsSessionManager {
   }
 
   /**
+   * Issue the sequence number an incoming segment request keeps for all of its
+   * long-poll iterations. The caller (the route) takes ONE number when the
+   * request arrives and passes it back on every poll, which is what lets
+   * #ensureEncodingFor tell "a newer request arrived" apart from "the same
+   * request polled again" — see the ping-pong it prevents there.
+   *
+   * @param {string} sessionId
+   * @returns {number} 0 when the session is unknown (treated as newest).
+   */
+  nextRequestSeq(sessionId) {
+    const session = isSafeSessionId(sessionId) ? this.sessionsById.get(sessionId) : null;
+    if (!session) {
+      return 0;
+    }
+    session.requestSeqCounter += 1;
+    return session.requestSeqCounter;
+  }
+
+  /**
    * Open a read stream for an HLS segment or playlist file from a session.
    *
    * @param {string} sessionId
    * @param {string} fileName - Must match the playlist or segment name pattern.
+   * @param {{ requestSeq?: number }} [options] - `requestSeq` from
+   *   {@link nextRequestSeq}, constant across one request's long-poll loop.
    * @returns {Promise<
    *   | { kind: "not-found" }
    *   | { kind: "warming-up" }
@@ -2027,7 +2075,7 @@ export class HlsSessionManager {
    *   | { kind: "file"; stream: import("node:fs").ReadStream; contentType: string; isPlaylist: boolean }
    * >}
    */
-  async getFileStream(sessionId, fileName) {
+  async getFileStream(sessionId, fileName, options = {}) {
     if (!isSafeSessionId(sessionId) || !isSafeFileName(fileName, this.segmentFormat)) {
       return { kind: "not-found" };
     }
@@ -2150,7 +2198,11 @@ export class HlsSessionManager {
     // to wait for the current encode run to reach it or to restart the encoder
     // at this position (server-side seeking).  The caller long-polls.
     if (!isPlaylist) {
-      this.#ensureEncodingFor(session, this.segmentFormat.segmentIndexFromName(fileName));
+      this.#ensureEncodingFor(
+        session,
+        this.segmentFormat.segmentIndexFromName(fileName),
+        Number.isFinite(options?.requestSeq) ? options.requestSeq : Number.MAX_SAFE_INTEGER
+      );
     }
     return { kind: "warming-up" };
   }

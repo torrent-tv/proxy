@@ -1,3 +1,7 @@
+## 2.9.64
+
+- **Fix**: The 2.9.63 pull-to-lowest-awaited-segment dragged the encoder to the start of the file. A seek to #1354 restarted at **#123** — the position of the *previous* watch — because requests outstanding from before the seek still counted toward `lowestAwaitedIndex`. Two fixes: the awaited floor is cleared the moment a new seek arrives (earlier requests describe where the player used to be, not where it is going), and the pull is bounded by `SEEK_PULL_LIMIT_SEGMENTS` (120) below the target — anything deeper is a leftover, not the preceding keyframe.
+
 ## 2.9.63
 
 - **Fix**: A seek landed the encoder on exactly the requested segment, which is the one position the player never asks for — so it produced files nobody was waiting for and playback hung. Per Apple HLS authoring guidance, a player given a position locates the nearest keyframe **preceding** it, decodes from there, and only then presents from the requested point; it therefore always fetches segments **below** the target. Measured on iOS: a seek to #1082 fetched from #1074 (8 back), one to #1358 fetched from #1301 (57 back) and asked for **nothing at or above** the target. The encoder now starts `SEEK_BACKOFF_SEGMENTS` (12) before the requested segment, and — since the needed depth varies and no fixed number covers it — is pulled down further to the lowest segment the player is actually waiting on, which its own requests report exactly (`lowestAwaitedIndex`). Only ever moves the start earlier, never later. Costs a few seconds of extra encoding per seek.

@@ -3,24 +3,26 @@
  * from the container's own tables rather than by scanning the media.
  *
  * The problem it solves: on the video-COPY path ffmpeg can only cut segments at
- * the source's existing keyframes. If our playlist declares an even grid
- * instead, the declared times do not match the media, and players respond by
- * either walking the whole file to rebuild the timeline or showing audio with
- * no picture (both seen in the field 2026-08-02). Getting those positions by
- * decoding is not an option here — the file is served from a torrent, and a
- * full packet scan of 5.5 GB found 77 keyframes in 45 s without finishing.
+ * the source's existing keyframes. A playlist declaring an even grid instead is
+ * then false, and players punish it — either walking the whole file to rebuild
+ * the timeline, or presenting audio with no picture because a segment begins
+ * with nothing decodable (both seen in the field 2026-08-02; the file measured
+ * had 10.43 s keyframe spacing against our declared 4 s).
  *
- * Containers already store this. The reader takes a byte-range function and
- * does a couple of point reads, so it works over any transport and knows
- * nothing about torrents, HTTP or our session model.
+ * Scanning for the answer is not an option here: the file is served from a
+ * torrent, and a full packet scan of 5.5 GB found 77 keyframes in 45 s without
+ * finishing. Containers already store the table — this reads it with a couple
+ * of point reads (16 KB, 0.8 s for 570 keyframes on that same file).
  *
- * Format support is deliberately partial: a container we cannot index returns
- * null, and the caller falls back (re-encode with forced keyframes, which is
- * what Jellyfin, hls-media-server and hls-vod-too all do unconditionally).
+ * Transport-agnostic by construction: it takes a byte-range function and knows
+ * nothing about torrents, HTTP or our session model, which is what let it be
+ * verified standalone before being wired in.
  */
 
 import { logger } from "../../utils/logger.js";
 import { isMatroska, readMatroskaKeyframeTimes } from "./matroska.js";
+import { isMp4, readMp4KeyframeTimes } from "./mp4.js";
+import { isAvi, readAviKeyframeTimes } from "./avi.js";
 
 /**
  * @callback ReadRange
@@ -29,8 +31,29 @@ import { isMatroska, readMatroskaKeyframeTimes } from "./matroska.js";
  * @returns {Promise<Buffer | null>} The bytes, or null when unavailable.
  */
 
-// Enough to identify any supported container from its magic bytes.
+// Enough to identify every supported container from its opening bytes.
 const SNIFF_BYTES = 16;
+
+/**
+ * Container readers, in detection order. Each pairs a cheap magic-byte test
+ * with the reader for that format.
+ *
+ * Formats deliberately absent, and why:
+ *  - **MPEG-TS / M2TS** carry no index at all — the format is a continuous
+ *    broadcast stream with no table of contents anywhere. Nothing to read.
+ *  - **FLV / ASF-WMV** do have keyframe tables, but effectively never appear in
+ *    the releases this serves; adding them is mechanical if that changes.
+ *  - **Fragmented MP4** spreads its timing across fragments instead of a single
+ *    `moov` table; `readMp4KeyframeTimes` returns null for it rather than
+ *    guessing.
+ *
+ * @type {{ name: string, matches: (head: Buffer) => boolean, read: ReadRange extends never ? never : (readRange: ReadRange, fileSize: number) => Promise<number[] | null> }[]}
+ */
+const READERS = [
+  { name: "matroska", matches: isMatroska, read: readMatroskaKeyframeTimes },
+  { name: "mp4", matches: isMp4, read: readMp4KeyframeTimes },
+  { name: "avi", matches: isAvi, read: readAviKeyframeTimes }
+];
 
 /**
  * Read a file's keyframe times from its container index.
@@ -49,28 +72,31 @@ export async function readKeyframeIndex({ readRange, fileSize, label = "" }) {
 
   const startedAt = Date.now();
   let times = null;
+  let format = "unrecognised";
   try {
     const sniff = await readRange(0, Math.min(SNIFF_BYTES - 1, fileSize - 1));
     if (!sniff) {
       return null;
     }
-    if (isMatroska(sniff)) {
-      times = await readMatroskaKeyframeTimes(readRange, fileSize);
+    const reader = READERS.find((candidate) => candidate.matches(sniff));
+    if (reader) {
+      format = reader.name;
+      times = await reader.read(readRange, fileSize);
     }
-    // Other containers fall through as null until their readers land; MP4's
-    // sync-sample table and AVI's index are the next candidates.
   } catch (error) {
     // A malformed or partially-downloaded index must never take playback down —
-    // it only means we do not know the grid, which the caller handles.
+    // it only means the grid is unknown, which the caller already handles.
     logger.warn(`container-index: failed to read index for "${label}": ${error?.message ?? error}`);
     return null;
   }
 
   const elapsedMs = Date.now() - startedAt;
   if (times) {
-    logger.info(`container-index: ${times.length} keyframes from the container index in ${elapsedMs}ms for "${label}"`);
+    logger.info(
+      `container-index: ${times.length} keyframes from the ${format} index in ${elapsedMs}ms for "${label}"`
+    );
   } else {
-    logger.info(`container-index: no usable index for "${label}" (${elapsedMs}ms)`);
+    logger.info(`container-index: no usable index for "${label}" (${format}, ${elapsedMs}ms)`);
   }
   return times;
 }

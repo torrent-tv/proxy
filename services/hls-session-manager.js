@@ -16,6 +16,7 @@ import { randomUUID } from "node:crypto";
 import { spawn } from "node:child_process";
 import { createRequire } from "node:module";
 import { logger } from "../utils/logger.js";
+import { readKeyframeIndex } from "./container-index/index.js";
 
 /** Own package version, stamped onto session-start log lines. */
 const PROXY_VERSION = createRequire(import.meta.url)("../package.json").version;
@@ -492,6 +493,17 @@ async function probeVideoKeyframeTimes(ffmpegBin, inputUrl, timeoutMs = 25_000) 
         ffprobeBinFor(ffmpegBin),
         [
           "-v", "error",
+          // `-skip_frame nokey` makes the decoder discard non-keyframes, so the
+          // probe reads only what it needs. Without it a full packet scan of a
+          // ~5 GB MKV cannot finish inside any sane budget over a torrent-backed
+          // input, the probe returns nothing, and the playlist falls back to a
+          // uniform grid — which on the COPY path is a lie: cuts land on the
+          // source's real keyframes, not on a 4 s ruler. The player then finds
+          // the declared times do not match the media, stops trusting the
+          // playlist and walks the file from segment #1 to locate the seek
+          // position by hand (field 2026-08-02: a seek to 1:30 produced requests
+          // #1, #2, #45, #86, #123 … #1187, taking minutes and never arriving).
+          "-skip_frame", "nokey",
           "-select_streams", "v:0",
           "-show_entries", "packet=pts_time,flags",
           "-of", "csv=p=0",
@@ -735,6 +747,11 @@ export class HlsSessionManager {
     this.startupWaitMs = startupWaitMs;
     this.localBaseUrl = buildHttpBaseUrl(localBindHost, localPort);
     this.sessionsById = new Map();
+    // Container keyframe index per (source, file). Immutable per file, so one
+    // read serves every session, re-open and seek. Null means "this file has no
+    // readable index" and is cached too — no point retrying a scan that cannot
+    // succeed.
+    this.keyframeIndexCache = new Map();
     this.sessionIdBySource = new Map();
     this.cleanupTimer = setInterval(() => {
       void this.cleanupExpired();
@@ -913,12 +930,22 @@ export class HlsSessionManager {
       // packet scan time out and fall back to a uniform grid, so this never adds
       // more than ~6 s to session start.
       const keyframeStartMs = Date.now();
-      keyframeTimes = await probeVideoKeyframeTimes(this.ffmpegBin, inputUrl.toString(), 6_000);
+      // Read the container's OWN keyframe table (Cues/stss) rather than
+      // scanning the media. On the copy path ffmpeg can only cut at the
+      // source's existing keyframes, so these times ARE the segment
+      // boundaries — declaring an even grid instead is a falsehood the player
+      // punishes: it walks the whole file to rebuild the timeline, or presents
+      // audio with no picture because a segment starts with nothing decodable
+      // (both field-observed 2026-08-02). Scanning cannot supply them here —
+      // the file comes off a torrent, and a full packet scan of 5.5 GB found 77
+      // keyframes in 45 s without finishing, while the container index yields
+      // all 570 in 0.8 s from two point reads (16 KB).
+      keyframeTimes = await this.#readContainerKeyframes({ sourceKey, fileIndex, inputUrl, logName });
       keyframeMs = Date.now() - keyframeStartMs;
       if (!keyframeTimes) {
         logger.warn(
-          `transcode ${sessionId}: keyframe probe unavailable; using uniform grid ` +
-            `for "${logName}" (seek precision may be reduced)`
+          `transcode ${sessionId}: no container keyframe index for "${logName}"; ` +
+            `falling back to a uniform grid — segment boundaries will not match the media`
         );
       }
     } else if (hasDuration && transcodeVideo) {
@@ -1157,6 +1184,56 @@ export class HlsSessionManager {
    *   spans `[boundaries[i], boundaries[i+1])`.
    * @returns {string}
    */
+  /**
+   * Keyframe times for a source file, from the container's own index.
+   *
+   * Cached per (source, file) because the answer never changes for a given
+   * file: a second session, a re-open or a seek all reuse the first read
+   * instead of repeating it.
+   *
+   * Reads byte ranges through the proxy's own /stream route, so it goes through
+   * the same torrent piece prioritisation as everything else and needs no
+   * separate access path.
+   *
+   * @param {{ sourceKey: string, fileIndex: number, inputUrl: URL, logName: string }} params
+   * @returns {Promise<number[] | null>} Ascending seconds, or null when this
+   *   file carries no readable index.
+   */
+  async #readContainerKeyframes({ sourceKey, fileIndex, inputUrl, logName }) {
+    const cacheKey = `${sourceKey}:${fileIndex}`;
+    if (this.keyframeIndexCache.has(cacheKey)) {
+      return this.keyframeIndexCache.get(cacheKey);
+    }
+
+    const url = inputUrl.toString();
+    let fileSize = 0;
+    try {
+      const head = await fetch(url, { method: "HEAD" });
+      fileSize = Number(head.headers.get("content-length")) || 0;
+    } catch {
+      return null;
+    }
+    if (fileSize <= 0) {
+      return null;
+    }
+
+    const readRange = async (start, end) => {
+      try {
+        const response = await fetch(url, { headers: { Range: `bytes=${start}-${end}` } });
+        if (!response.ok && response.status !== 206) {
+          return null;
+        }
+        return Buffer.from(await response.arrayBuffer());
+      } catch {
+        return null;
+      }
+    };
+
+    const times = await readKeyframeIndex({ readRange, fileSize, label: logName });
+    this.keyframeIndexCache.set(cacheKey, times);
+    return times;
+  }
+
   #buildVodPlaylist(boundaries) {
     const count = Math.max(0, boundaries.length - 1);
     let maxDuration = 0;

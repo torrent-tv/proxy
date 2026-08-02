@@ -1,0 +1,171 @@
+/**
+ * @file `TorrentPool`'s interface, served from the worker thread.
+ *
+ * The routes, the planner, the health report and the session manager all reach
+ * for a torrent pool and use it the same handful of ways. Rather than rewrite
+ * every one of them to thread a `sourceKey` through and await what used to be
+ * immediate, this presents the shape they already expect and does the thread
+ * hop behind it. Swapping the implementation is then a one-line change at
+ * construction, and the call sites are untouched — which is what keeps a change
+ * of this size reviewable.
+ *
+ * Two accommodations are needed, and both are deliberate:
+ *
+ *  - **`acquireFile` and `prioritizeByteRange` stay synchronous.** They return
+ *    nothing the caller inspects, so the command is dispatched and not awaited.
+ *    `acquireFile` hands back a release function exactly as before, which sends
+ *    its own command when called. Awaiting them would mean touching every call
+ *    site for no observable gain.
+ *  - **`getTorrent` needs a `sourceKey`.** Torrent objects cannot cross a
+ *    thread, so the worker keys them. Callers that have one pass it; the rest
+ *    get one derived from the source itself, so the identity stays stable
+ *    across calls for the same torrent.
+ */
+
+import crypto from "node:crypto";
+import { TorrentWorkerClient } from "./client.js";
+
+/**
+ * Stable key for a source, matching how the worker keys its torrents.
+ *
+ * Derived from the source itself rather than handed out per request, so two
+ * routes asking for the same torrent name the same thing on the worker side.
+ *
+ * @param {"magnet" | "torrent"} sourceType
+ * @param {string} source
+ * @returns {string}
+ */
+function deriveSourceKey(sourceType, source) {
+  return `${sourceType}:${crypto.createHash("sha1").update(source).digest("hex")}`;
+}
+
+/**
+ * A torrent pool whose work happens on another thread.
+ *
+ * See `protocol.js` for why: the torrent was taking ~85% of the main thread and
+ * everything owed to a viewer queued behind it.
+ */
+export class WorkerTorrentPool {
+  #client;
+  /** Stand-ins by source key, so repeat calls return the same object. */
+  #torrents = new Map();
+
+  /**
+   * @param {{ maxDiskBytes?: number }} [options]
+   */
+  constructor(options = {}) {
+    this.#client = new TorrentWorkerClient(options);
+  }
+
+  /**
+   * Load (or join) a torrent and return a stand-in for it.
+   *
+   * @param {"magnet" | "torrent"} sourceType
+   * @param {string} source
+   * @returns {Promise<object>}
+   */
+  async getTorrent(sourceType, source) {
+    const sourceKey = deriveSourceKey(sourceType, source);
+    const existing = this.#torrents.get(sourceKey);
+    if (existing) {
+      return existing;
+    }
+    const torrent = await this.#client.getTorrent({ sourceKey, sourceType, source });
+    this.#torrents.set(sourceKey, torrent);
+    return torrent;
+  }
+
+  /**
+   * Claim a file for reading; the returned function releases it.
+   *
+   * Synchronous by design — see the file header.
+   *
+   * @param {object} torrent - A stand-in from {@link getTorrent}.
+   * @param {number} fileIndex
+   * @returns {() => void}
+   */
+  acquireFile(torrent, fileIndex) {
+    const sourceKey = torrent?.sourceKey;
+    if (!sourceKey) {
+      return () => undefined;
+    }
+    void this.#client.acquireFile(sourceKey, fileIndex).catch(() => undefined);
+    let released = false;
+    return () => {
+      if (released) {
+        return;
+      }
+      released = true;
+      void this.#client.releaseFile(sourceKey, fileIndex).catch(() => undefined);
+    };
+  }
+
+  /**
+   * Live download figures for the progress display.
+   *
+   * @param {object} torrent
+   * @param {number | null} [fileIndex]
+   * @param {{ resumeAnchorByteStart?: number | null }} [options]
+   * @returns {Promise<object | null>}
+   */
+  async getFileStats(torrent, fileIndex = null, options = {}) {
+    const sourceKey = torrent?.sourceKey;
+    if (!sourceKey) {
+      return null;
+    }
+    return this.#client.getFileStats({
+      sourceKey,
+      fileIndex,
+      resumeAnchorByteStart: options?.resumeAnchorByteStart ?? null
+    });
+  }
+
+  /**
+   * Reorder piece selection around a read position.
+   *
+   * Synchronous by design — see the file header.
+   *
+   * @param {object} torrent
+   * @param {number} fileIndex
+   * @param {number} byteStart
+   * @param {number} [windowBytes]
+   * @returns {void}
+   */
+  prioritizeByteRange(torrent, fileIndex, byteStart, windowBytes) {
+    const sourceKey = torrent?.sourceKey;
+    if (!sourceKey) {
+      return;
+    }
+    void this.#client
+      .prioritizeByteRange({ sourceKey, fileIndex, byteStart, windowBytes })
+      .catch(() => undefined);
+  }
+
+  /**
+   * Pre-fetch the head and tail the codec probe needs.
+   *
+   * @param {object} torrent
+   * @param {number} fileIndex
+   * @param {number} [headBytes]
+   * @param {number} [tailBytes]
+   * @param {number} [timeoutMs]
+   * @returns {Promise<unknown>}
+   */
+  async prefetchFileEdges(torrent, fileIndex, headBytes, tailBytes, timeoutMs) {
+    const sourceKey = torrent?.sourceKey;
+    if (!sourceKey) {
+      return null;
+    }
+    return this.#client.prefetchFileEdges({ sourceKey, fileIndex, headBytes, tailBytes, timeoutMs });
+  }
+
+  /**
+   * Shut the torrent client down and stop the thread.
+   *
+   * @returns {Promise<void>}
+   */
+  async destroyAll() {
+    this.#torrents.clear();
+    await this.#client.destroyAll();
+  }
+}

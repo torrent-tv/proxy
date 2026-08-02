@@ -29,7 +29,7 @@ import { handleApiTranscodeSessionSeekPost } from "./routes/api/transcode-sessio
 import { handleStreamGet } from "./routes/stream/get.js";
 import { handleTranscodeSessionFileGet } from "./routes/transcode/session-file/get.js";
 import { createSourceRegistry } from "./store/source-registry.js";
-import { TorrentPool } from "./services/torrent-pool.js";
+import { WorkerTorrentPool } from "./services/torrent-worker/pool-adapter.js";
 import { HlsSessionManager } from "./services/hls-session-manager.js";
 import { createPlaybackPlanner } from "./services/playback-planner.js";
 import { detectVideoEncoder, benchmarkSoftwarePresets, detectTonemapSupport } from "./services/hwaccel.js";
@@ -98,7 +98,13 @@ export async function startProxyServer({ host, port, transcodeAudio, ffmpegBin, 
   });
 
   const sourceRegistry = createSourceRegistry(200);
-  const torrentPool = new TorrentPool({ maxDiskBytes });
+  // The torrent runs on its own thread. Profiling a live seek (2026-08-02)
+  // found the main thread ~85% occupied by WebTorrent — buffer concatenation
+  // ~15%, wire updates ~9%, garbage collection ~5% — while three of four cores
+  // idled. Serving a segment shared that thread, so reading an already-finished
+  // 10 MB file took 12-23 s against 125 ms to hand it to the channel. The
+  // adapter keeps TorrentPool's interface, so nothing downstream changed.
+  const torrentPool = new WorkerTorrentPool({ maxDiskBytes });
   const selectedPort = await getPort({
     port: buildPortCandidates(port)
   });

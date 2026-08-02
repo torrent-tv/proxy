@@ -69,6 +69,22 @@ const ENCODER_STALL_MS = 12_000;
 // 367,732,369,368,370 seconds apart) collapses to ONE restart at the position
 // the player ended on, instead of ping-ponging ffmpeg between positions and
 // producing nothing.
+// How many segments BEFORE the requested position the encoder starts.
+//
+// Required by how HLS players seek, per Apple's HLS authoring guidance: given a
+// position, the player locates the nearest IDR (keyframe) *preceding* it,
+// decodes from there, and only then presents from the requested point. So it
+// always fetches segments BELOW the target — measured 2026-08-02 on iOS: a seek
+// to #1082 fetched from #1074 (8 back), one to #1358 fetched from #1301 (57
+// back), and in the latter case the player asked for NOTHING at or above the
+// target, so an encoder starting exactly on it produced only files nobody was
+// waiting for and playback hung indefinitely.
+//
+// The observed backoff is not constant, so this is a floor, not the whole
+// answer: #fireSettledSeek also pulls the start down to the lowest segment the
+// player is actually waiting on when that is lower still. Costs a few seconds
+// of extra encoding per seek.
+const SEEK_BACKOFF_SEGMENTS = 12;
 const SEEK_SETTLE_MS = 1_200;
 // Hard cap on the total settle wait, measured from the first far request of a
 // burst, so a still-moving scrubber cannot delay a genuine seek forever.
@@ -1065,6 +1081,9 @@ export class HlsSessionManager {
       // #wireEncodeProcess and MAX_SEEK_FAILURES.
       seekFailureTarget: -1,
       seekFailureCount: 0,
+      // Lowest segment index the player is currently waiting for; -1 when
+      // nothing is pending. See getFileStream and #fireSettledSeek.
+      lowestAwaitedIndex: -1,
       progress: {
         state: "starting",
         processedSeconds: 0,
@@ -2040,10 +2059,15 @@ export class HlsSessionManager {
       );
       return true;
     }
+    // Start BEFORE the requested position (see SEEK_BACKOFF_SEGMENTS): the
+    // player needs a segment containing the preceding keyframe, so one that
+    // begins exactly at the target is useless to it.
+    const startIndex = Math.max(0, index - SEEK_BACKOFF_SEGMENTS);
     logger.info(
-      `transcode ${session.id} viewer seek to ${positionSeconds.toFixed(1)}s → segment #${index}`
+      `transcode ${session.id} viewer seek to ${positionSeconds.toFixed(1)}s → segment #${index}, ` +
+        `starting at #${startIndex} (${SEEK_BACKOFF_SEGMENTS} back for the preceding keyframe)`
     );
-    session.seekTarget = index;
+    session.seekTarget = startIndex;
     if (session.seekSettleTimer) {
       clearTimeout(session.seekSettleTimer);
     } else {
@@ -2140,10 +2164,22 @@ export class HlsSessionManager {
       : producedThisRun >= this.segmentDurationSec
         ? `run produced ${producedThisRun.toFixed(1)}s (first segment done)`
         : `grace of ${RUN_FIRST_SEGMENT_GRACE_MS / 1000}s expired`;
+    // The player may be waiting on something below our fixed backoff — its own
+    // requests say exactly how far back it needs the keyframe, so honour that
+    // rather than a guess. Only ever pulls the start EARLIER, never later.
+    const awaited = session.lowestAwaitedIndex;
+    const effectiveTarget = awaited >= 0 && awaited < target ? awaited : target;
+    if (effectiveTarget !== target) {
+      logger.info(
+        `transcode ${session.id} pulling encode start #${target} → #${effectiveTarget} ` +
+          `(lowest segment the player is waiting on)`
+      );
+    }
     session.seekTarget = null;
     session.seekFirstFarAt = 0;
-    logger.info(`transcode ${session.id} seek settle → restart at segment #${target} (${allowedBecause})`);
-    void this.#startEncodeRun(session, target);
+    session.lowestAwaitedIndex = -1;
+    logger.info(`transcode ${session.id} seek settle → restart at segment #${effectiveTarget} (${allowedBecause})`);
+    void this.#startEncodeRun(session, effectiveTarget);
   }
 
   /**
@@ -2346,9 +2382,20 @@ export class HlsSessionManager {
     // to wait for the current encode run to reach it or to restart the encoder
     // at this position (server-side seeking).  The caller long-polls.
     if (!isPlaylist) {
+      const requestedIndex = this.segmentFormat.segmentIndexFromName(fileName);
+      // Remember the LOWEST segment currently being waited on. The player
+      // always fetches below the seek target (it needs the preceding keyframe),
+      // and by how much varies — 8 segments in one measured seek, 57 in
+      // another. This is that figure straight from the player, and
+      // #fireSettledSeek uses it to pull the encode start down when the fixed
+      // SEEK_BACKOFF_SEGMENTS floor is not deep enough. Reset whenever a run
+      // starts, so it only ever describes the pending seek.
+      if (requestedIndex >= 0 && (session.lowestAwaitedIndex < 0 || requestedIndex < session.lowestAwaitedIndex)) {
+        session.lowestAwaitedIndex = requestedIndex;
+      }
       this.#ensureEncodingFor(
         session,
-        this.segmentFormat.segmentIndexFromName(fileName),
+        requestedIndex,
         Number.isFinite(options?.requestSeq) ? options.requestSeq : Number.MAX_SAFE_INTEGER
       );
     }

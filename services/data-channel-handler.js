@@ -76,6 +76,9 @@
  * @param {DataChannelHandlerOptions} options
  * @returns {DataChannelHandler}
  */
+import { performance } from "node:perf_hooks";
+import { eventLoopDelay, resetEventLoopDelay } from "../utils/perf.js";
+
 export function createDataChannelHandler({ proxyPort, onLog }) {
   /**
    * @param {string} message
@@ -320,17 +323,37 @@ export function createDataChannelHandler({ proxyPort, onLog }) {
       let chunks = 0;
       let totalBytes = 0;
       let maxBuffered = 0;
+      // Attribute the transfer to the step that actually consumes the time.
+      // Without this split a slow transfer is indistinguishable between "the
+      // source is slow", "the channel is slow" and "the event loop is blocked",
+      // which is exactly the argument a field seek left unresolved.
+      let readMs = 0;
+      let sendMs2 = 0;
+      let drainMs = 0;
+      resetEventLoopDelay();
       while (true) {
+        const readStartedAt = performance.now();
         const { done, value } = await reader.read();
+        readMs += performance.now() - readStartedAt;
         if (done) {
           sendChunk(channel, requestId, null, true);
           const elapsedMs = Date.now() - sendStartedAt;
           let bufferedNow = 0;
           try { bufferedNow = typeof channel.bufferedAmount === "function" ? channel.bufferedAmount() : 0; } catch { /* ignore */ }
+          const loop = eventLoopDelay();
+          const mbps = elapsedMs > 0 ? (totalBytes * 8) / (elapsedMs * 1000) : 0;
           log(
             `[net-debug] sent ${path}${queryInfo} bytes=${totalBytes} fetchMs=${fetchMs} ` +
               `ttfbMs=${firstByteMs} sendMs=${elapsedMs} chunks=${chunks} ` +
-              `maxBuffered=${maxBuffered} bufferedAtEnd=${bufferedNow}`
+              `maxBuffered=${maxBuffered} bufferedAtEnd=${bufferedNow} ` +
+              // Where the time went: reading the body from the local route,
+              // handing chunks to the channel, or waiting for its queue. Plus
+              // the event-loop delay over the same window — a large max here
+              // means the transfer was blocked by synchronous work, not by the
+              // network, and the three figures above will all look inflated.
+              `readMs=${readMs.toFixed(0)} chanMs=${sendMs2.toFixed(0)} drainMs=${drainMs.toFixed(0)} ` +
+              `loopMean=${loop.meanMs.toFixed(1)} loopP99=${loop.p99Ms.toFixed(1)} loopMax=${loop.maxMs.toFixed(1)} ` +
+              `rate=${mbps.toFixed(1)}Mbps`
           );
           break;
         }
@@ -341,11 +364,15 @@ export function createDataChannelHandler({ proxyPort, onLog }) {
           const b = typeof channel.bufferedAmount === "function" ? channel.bufferedAmount() : 0;
           if (b > maxBuffered) maxBuffered = b;
         } catch { /* ignore */ }
+        const sendStepAt = performance.now();
         sendChunk(channel, requestId, value, false);
+        sendMs2 += performance.now() - sendStepAt;
         // Backpressure: do not keep queuing chunks once the channel's outgoing
         // buffer is large — wait for it to drain. Prevents the SCTP send buffer
         // from ballooning, which stalls throughput.
+        const drainStepAt = performance.now();
         await waitForBufferDrain(channel);
+        drainMs += performance.now() - drainStepAt;
       }
     } catch {
       sendChunk(channel, requestId, null, true);

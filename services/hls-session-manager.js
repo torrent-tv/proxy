@@ -43,6 +43,12 @@ const MAX_LOOKAHEAD_SEGMENTS = 8;
 // succession (stall-recovery seeks); without a cooldown ffmpeg ping-pongs
 // between positions, restarting endlessly and producing nothing.
 const RESTART_COOLDOWN_MS = 4_000;
+// How long a seek restart waits for the CURRENT run to produce its first
+// segment before it is allowed to pre-empt it anyway. Generous, because the
+// first segment after a seek is the slowest thing this pipeline does (ffmpeg
+// restart + torrent pieces for a fresh position); still bounded so a wedged
+// run cannot block seeking forever. See #fireSettledSeek.
+const RUN_FIRST_SEGMENT_GRACE_MS = 30_000;
 // Encoder stall watchdog. A running ffmpeg emits `-progress` output on stdout
 // continuously while it encodes; when it hangs mid-file (alive, but producing
 // no output and no stderr — a deadlock, e.g. a stalled input read), that output
@@ -1965,6 +1971,25 @@ export class HlsSessionManager {
    * @param {HlsSession} session
    * @returns {void}
    */
+  /**
+   * Content-seconds the CURRENT encode run has produced, from ffmpeg's own
+   * progress. Both branches report on the absolute source timeline (the copy
+   * branch via `-copyts`, the re-encode branch rebased by
+   * {@link #toAbsoluteProcessedSeconds}), so subtracting the run's start
+   * position gives what THIS run has made — 0 right after a restart.
+   *
+   * @param {HlsSession} session
+   * @returns {number} Seconds produced by the current run; 0 when unknown.
+   */
+  #producedSecondsThisRun(session) {
+    const processed = session.progress?.processedSeconds;
+    const startPosition = session.progress?.startPositionSeconds;
+    if (!Number.isFinite(processed) || !Number.isFinite(startPosition)) {
+      return 0;
+    }
+    return Math.max(0, processed - startPosition);
+  }
+
   #fireSettledSeek(session) {
     const target = session.seekTarget;
     session.seekSettleTimer = null;
@@ -1987,6 +2012,35 @@ export class HlsSessionManager {
     const sinceLastRestart = Date.now() - (session.lastRestartAt ?? 0);
     if (sinceLastRestart < RESTART_COOLDOWN_MS) {
       session.seekSettleTimer = setTimeout(() => this.#fireSettledSeek(session), RESTART_COOLDOWN_MS - sinceLastRestart);
+      session.seekSettleTimer.unref?.();
+      return;
+    }
+    // Let the CURRENT run finish what it started. Restarting a run that has not
+    // yet produced a single segment destroys all its work and starts the wait
+    // over — and after a seek the first segment is always the slowest, so this
+    // is self-perpetuating: field log (2026-08-02, one user seek) shows
+    // restarts at #617 → #717 → #732 → #732 every 5-7 s, none of which ever
+    // produced anything, leaving the viewer with a flickering loading pill and
+    // no playback at all.
+    //
+    // These extra targets are NOT further user seeks: when the player cannot
+    // get its segment it SCANS the playlist (every segment is listed in our
+    // synthetic VOD playlist, so from its point of view they all exist), and
+    // each far-enough probe looked like a fresh seek to us. Waiting for the
+    // first segment makes the scan harmless — it can no longer steer the
+    // encoder — and one genuine seek now reliably completes.
+    //
+    // Bounded by RUN_FIRST_SEGMENT_GRACE_MS so a wedged run cannot block seeks
+    // forever; the encoder-stall watchdog and the exit handler cover a run that
+    // dies outright.
+    const producedThisRun = this.#producedSecondsThisRun(session);
+    const runIsAlive = session.ffmpeg != null && !hasChildExited(session.ffmpeg);
+    if (
+      runIsAlive &&
+      producedThisRun < this.segmentDurationSec &&
+      sinceLastRestart < RUN_FIRST_SEGMENT_GRACE_MS
+    ) {
+      session.seekSettleTimer = setTimeout(() => this.#fireSettledSeek(session), SEEK_SETTLE_MS);
       session.seekSettleTimer.unref?.();
       return;
     }

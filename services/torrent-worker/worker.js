@@ -83,6 +83,15 @@ async function streamRange({ id, sourceKey, fileIndex, start, end }) {
   const sender = createSendStream({ port: parentPort, requestId: id });
   readsById.set(id, sender);
 
+  // Hold the file for as long as this read runs. The caller also acquires it,
+  // but that acquire and its release are separate messages from another thread
+  // and can be reordered; this one cannot, because it lives entirely inside the
+  // read. Without it the idle sweep saw a zero reader count and removed the
+  // torrent AND its store mid-read — field 2026-08-02: "removed idle torrent
+  // ... and its store", after which every subsequent read hung and ffmpeg got
+  // an empty input.
+  const releaseRead = pool.acquireFile(torrent, fileIndex);
+
   const options = start === null || start === undefined ? {} : { start, end };
   const source = file.createReadStream(options);
 
@@ -118,6 +127,7 @@ async function streamRange({ id, sourceKey, fileIndex, start, end }) {
     }
   } finally {
     readsById.delete(id);
+    releaseRead();
     sender.end();
     // A cancelled read must stop the underlying torrent stream too, or the
     // pieces keep being fetched for a viewer who has gone.

@@ -2244,18 +2244,15 @@ export class HlsSessionManager {
       : producedThisRun >= this.segmentDurationSec
         ? `run produced ${producedThisRun.toFixed(1)}s (first segment done)`
         : `grace of ${RUN_FIRST_SEGMENT_GRACE_MS / 1000}s expired`;
-    // The player may be waiting on something below our fixed backoff — its own
-    // requests say exactly how far back it needs the keyframe, so honour that
-    // rather than a guess. Only ever pulls the start EARLIER, never later.
-    const awaited = session.lowestAwaitedIndex;
-    const pullFloor = Math.max(0, target - SEEK_PULL_LIMIT_SEGMENTS);
-    const effectiveTarget = awaited >= pullFloor && awaited < target ? awaited : target;
-    if (effectiveTarget !== target) {
-      logger.info(
-        `transcode ${session.id} pulling encode start #${target} → #${effectiveTarget} ` +
-          `(lowest segment the player is waiting on)`
-      );
-    }
+    // Deliberately NOT pulled towards the lowest segment the player is waiting
+    // on. That was a stand-in for not knowing how far back the preceding
+    // keyframe lay, and it is now both unnecessary and harmful: boundaries are
+    // real keyframes (2.9.65), so exactly one segment back always suffices,
+    // while the player's outstanding requests at seek time still describe where
+    // it was PLAYING, not where it is going. Field 2026-08-02: a seek to #135
+    // was dragged back to #82 — the position the viewer had just left — because
+    // the player was still fetching around it.
+    const effectiveTarget = target;
     session.seekTarget = null;
     session.seekFirstFarAt = 0;
     session.lowestAwaitedIndex = -1;

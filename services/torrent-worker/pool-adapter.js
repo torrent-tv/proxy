@@ -89,14 +89,22 @@ export class WorkerTorrentPool {
     if (!sourceKey) {
       return () => undefined;
     }
-    void this.#client.acquireFile(sourceKey, fileIndex).catch(() => undefined);
+    // Dispatched, not awaited — callers use the result immediately and inspect
+    // nothing. But the release MUST NOT overtake it: both are ordinary messages
+    // to the worker, and if release arrives first the reader count drops to zero
+    // while a read is still running. The idle sweep then removes the torrent AND
+    // its downloaded data out from under the encoder — field 2026-08-02:
+    // "removed idle torrent ... and its store" mid-playback, after which every
+    // read hung and ffmpeg saw an empty input ("Stream ends prematurely at 0").
+    // Chaining the release onto the acquire keeps them in order.
+    const acquired = this.#client.acquireFile(sourceKey, fileIndex).catch(() => undefined);
     let released = false;
     return () => {
       if (released) {
         return;
       }
       released = true;
-      void this.#client.releaseFile(sourceKey, fileIndex).catch(() => undefined);
+      void acquired.then(() => this.#client.releaseFile(sourceKey, fileIndex)).catch(() => undefined);
     };
   }
 

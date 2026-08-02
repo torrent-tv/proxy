@@ -185,9 +185,21 @@ export function createSendStream({ port, requestId }) {
       inFlight += 1;
       // Transfer the underlying memory rather than copying it — the whole point
       // of the design, and the difference between 4.8 ms and 37 ms per 10 MB.
+      //
+      // But only memory this chunk owns OUTRIGHT may be transferred. Node hands
+      // out small buffers from a shared 8 KB pool: several unrelated buffers sit
+      // in one region, each viewing its own slice (verified: a 1 KB buffer
+      // reports an 8192-byte region at offset 8). Transferring that region
+      // detaches it from every other buffer living there — which is what broke
+      // reads in the field 2026-08-02: headers were produced in 325 ms and the
+      // body never arrived, because chunks from the network are small enough to
+      // be pooled while local disk reads, which is all the local test exercised,
+      // are not.
+      const ownsRegion = bytes.byteOffset === 0 && bytes.byteLength === bytes.buffer.byteLength;
+      const payload = ownsRegion ? bytes : new Uint8Array(bytes);
       port.postMessage(
-        { type: Event.CHUNK, id: requestId, bytes },
-        [bytes.buffer]
+        { type: Event.CHUNK, id: requestId, bytes: payload },
+        [payload.buffer]
       );
     },
 

@@ -46,6 +46,16 @@ export async function handleTranscodeSessionFileGet(req, reply, { hlsSessionMana
     // Return a retryable 503 — never 202, which hls.js cannot consume as a
     // media segment — so the player retries the fetch shortly.
     reply.header("Retry-After", "1");
+    // `Retry-After` tells the player to re-request THIS segment after a short
+    // pause. Without it a bare 503 reads as "nothing here", and the player goes
+    // looking elsewhere: because our synthetic VOD playlist lists every segment
+    // of the file, it believes they all exist and SCANS them (field log: one
+    // user seek produced probes at #617, #717, #732…). That scan is what used
+    // to steer the encoder off the real target. Whether iOS's native player
+    // honours the hint is not guaranteed — its behaviour is closed — but this
+    // is the standard, correct way to say "wait, don't look elsewhere", and
+    // hls.js already retries the same fragment regardless.
+    reply.header("Retry-After", "1");
     return reply.code(503).send({ error: "Transcode segment is still being produced." });
   }
   if (result.kind === "failed") {

@@ -47,7 +47,10 @@ export async function handleApiSourceStatsGet(req, reply, { sourceRegistry, torr
   const resumeAnchorRaw = typeof req.query.resumeAnchorByteStart === "string" ? req.query.resumeAnchorByteStart : "";
   const resumeAnchorByteStart = resumeAnchorRaw !== "" && /^\d+$/.test(resumeAnchorRaw) ? Number(resumeAnchorRaw) : null;
 
-  const stats = torrentPool.getFileStats(torrent, fileIndex, { resumeAnchorByteStart });
+  // Awaited: with the torrent on its own thread this is a round trip, not a
+  // local lookup. Without the await the reply was the pending promise itself,
+  // which serialises to `{}` — the empty stats seen in the field 2026-08-02.
+  const stats = await torrentPool.getFileStats(torrent, fileIndex, { resumeAnchorByteStart });
 
   // Diagnostic: surface the real swarm state per poll so a cold-start download
   // stall (0 peers / header not advancing → playback-plan blocks on the codec

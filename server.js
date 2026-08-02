@@ -144,7 +144,9 @@ export async function startProxyServer({ host, port, transcodeAudio, ffmpegBin, 
       }
       try {
         const torrent = await torrentPool.getTorrent(record.sourceType, record.source);
-        return torrentPool.getFileStats(torrent, Number.isInteger(fileIndex) ? fileIndex : null);
+        // Awaited for the same reason as the stats route: this now crosses a
+        // thread boundary and returns a promise.
+        return await torrentPool.getFileStats(torrent, Number.isInteger(fileIndex) ? fileIndex : null);
       } catch {
         return null;
       }

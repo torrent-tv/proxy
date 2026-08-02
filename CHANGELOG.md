@@ -1,3 +1,7 @@
+## 2.9.68
+
+- **Fix**: A seek could be dragged back to the position the viewer had just left. The encoder start was pulled down to the lowest segment the player had outstanding — a stand-in from when the distance to the preceding keyframe was unknown — but at seek time those requests still describe where the player was PLAYING, not where it is going. Field 2026-08-02: a seek to 23:34 (#135) correctly resolved to a start of #134, then got pulled to **#82** (14:15, the position just left) and crawled forward from there. Removed: since boundaries became real keyframes (2.9.65), exactly one segment back always suffices, so the pull has nothing left to correct for.
+
 ## 2.9.67
 
 - **Fix**: A seek waited far longer than it needed to — 56 s measured in the field, of which roughly 50 s was self-inflicted. `SEEK_BACKOFF_SEGMENTS` (how far before the requested segment the encoder starts) was **12**, chosen when segments were an invented 4 s apart and the distance to a usable keyframe was unknown. Since 2.9.65 every boundary IS a real keyframe read from the container index, so the single preceding segment is guaranteed to start on one — and with real 10.43 s segments the old value meant encoding **125 s of content** before reaching the viewer position. Lowered to **1**. Observed: the encoder started at #332 for a seek to #344 and the requested segment only arrived 56 s later, while every segment after it was served in ~100 ms.

@@ -1,8 +1,17 @@
 /**
+ * How long a request for a not-yet-produced file is held before answering with
+ * a retryable 503. Must stay comfortably below iOS AVPlayer's ~3.5 s
+ * response-header deadline (see the call site for the full rationale).
+ */
+const SEGMENT_WAIT_MS = 2_000;
+
+/**
  * Serve HLS playlist and segment files from an active transcode session.
  *
- * Polls until the requested file appears (up to 15 s) so that HLS clients
- * do not receive a 404 during the ffmpeg warmup phase.
+ * Briefly waits for the requested file to appear, then answers with a
+ * retryable 503 rather than holding the connection, so clients — in
+ * particular iOS's native HLS player — never hit their own response
+ * deadline while a segment is still being produced.
  *
  * GET /transcode/:sessionId/:fileName
  *
@@ -14,7 +23,20 @@
 export async function handleTranscodeSessionFileGet(req, reply, { hlsSessionManager }) {
   const sessionId = typeof req.params.sessionId === "string" ? req.params.sessionId : "";
   const fileName = typeof req.params.fileName === "string" ? req.params.fileName : "";
-  const result = await waitForSessionFile(hlsSessionManager, sessionId, fileName, 30_000);
+  // Hold the request only briefly, then answer "retry" instead of waiting for
+  // the segment. iOS's native HLS player (AVPlayer) enforces a hard ~3.5 s
+  // deadline on RESPONSE HEADERS and raises -12889 ("No response for media
+  // file") when it passes — it then cancels in-flight requests, probes
+  // neighbouring positions and can restart the stream from the beginning. That
+  // is exactly the post-seek "player thrashing" seen in the field, because a
+  // seek restarts ffmpeg and the first segment then takes far longer than 3.5 s
+  // to appear. Holding the connection for 30 s (as this did) guaranteed the
+  // timeout on every seek. A short hold keeps the fast path intact (a ready or
+  // nearly-ready segment is still served on the first request) while a slow one
+  // gets a prompt retryable answer, which resets the player's own deadline.
+  // hls.js is unaffected: it consumes the 503 through its retry policy, whose
+  // budget the client widens to match (see hls-player.js fragLoadPolicy).
+  const result = await waitForSessionFile(hlsSessionManager, sessionId, fileName, SEGMENT_WAIT_MS);
 
   if (result.kind === "not-found") {
     return reply.code(404).send({ error: "Transcode session file was not found." });

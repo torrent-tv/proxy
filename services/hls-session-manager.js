@@ -2013,6 +2013,23 @@ export class HlsSessionManager {
       session.seekFirstFarAt = 0;
       return;
     }
+    // Already encoding exactly this position — there is nothing to seek TO, so
+    // restarting can only destroy the very work being waited for. The player
+    // keeps re-requesting the target segment while it is still being produced,
+    // and every such request looks "far" from where the encoder USED to be, so
+    // without this check each one re-triggered a restart at the position we had
+    // only just moved to: field log 2026-08-02 shows `restart at #865` twice in
+    // ten seconds, each killing a run that was encoding #865. The guard below
+    // did not catch it — it only decides whether to let the current run finish,
+    // not whether a new run is needed at all.
+    if (target === session.encodeStartIndex && session.ffmpeg != null && !hasChildExited(session.ffmpeg)) {
+      logger.info(
+        `transcode ${session.id} seek #${target} ignored — the current run already starts there`
+      );
+      session.seekTarget = null;
+      session.seekFirstFarAt = 0;
+      return;
+    }
     // Minimum gap between actual restarts (the settle already collapses bursts;
     // this only guards back-to-back seeks). If still cooling down, re-arm once
     // for the remaining cooldown instead of restarting now.

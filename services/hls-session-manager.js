@@ -14,7 +14,11 @@ import os from "node:os";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
 import { spawn } from "node:child_process";
+import { createRequire } from "node:module";
 import { logger } from "../utils/logger.js";
+
+/** Own package version, stamped onto session-start log lines. */
+const PROXY_VERSION = createRequire(import.meta.url)("../package.json").version;
 import {
   softwareDescriptor,
   chooseSoftwareEncodeSettings,
@@ -1077,7 +1081,10 @@ export class HlsSessionManager {
     this.sessionIdBySource.set(sourceMapKey, sessionId);
 
     logger.info(
-      `transcode ${sessionId} start "${logName}" ` +
+      // Proxy version on the session-start line: a field report always includes
+      // one of these, so "is the host actually running the build I published?"
+      // is answered by the log itself instead of a round trip to the machine.
+      `transcode ${sessionId} start (proxy ${PROXY_VERSION}) "${logName}" ` +
         `video=${transcodeVideo ? `${this.videoEncoder.name}${softwarePreset ? `/${softwarePreset}` : ""}` : "copy"} ` +
         `audio=${transcodeAudio ? "aac" : "copy"} ` +
         // Branch tag for log correlation: A = video re-encode (fixed GOP, grid
@@ -2040,13 +2047,26 @@ export class HlsSessionManager {
       producedThisRun < this.segmentDurationSec &&
       sinceLastRestart < RUN_FIRST_SEGMENT_GRACE_MS
     ) {
+      logger.info(
+        `transcode ${session.id} seek #${target} HELD — current run has produced ` +
+          `${producedThisRun.toFixed(1)}s of the ${this.segmentDurationSec}s first segment ` +
+          `(${(sinceLastRestart / 1000).toFixed(1)}s into a ${RUN_FIRST_SEGMENT_GRACE_MS / 1000}s grace)`
+      );
       session.seekSettleTimer = setTimeout(() => this.#fireSettledSeek(session), SEEK_SETTLE_MS);
       session.seekSettleTimer.unref?.();
       return;
     }
+    // Why the restart was allowed — the counterpart of the HELD line above.
+    // Without it a restart is indistinguishable from the runaway ping-pong this
+    // guard exists to stop, and diagnosing a field report becomes guesswork.
+    const allowedBecause = !runIsAlive
+      ? "run is dead"
+      : producedThisRun >= this.segmentDurationSec
+        ? `run produced ${producedThisRun.toFixed(1)}s (first segment done)`
+        : `grace of ${RUN_FIRST_SEGMENT_GRACE_MS / 1000}s expired`;
     session.seekTarget = null;
     session.seekFirstFarAt = 0;
-    logger.info(`transcode ${session.id} seek settle → restart at segment #${target}`);
+    logger.info(`transcode ${session.id} seek settle → restart at segment #${target} (${allowedBecause})`);
     void this.#startEncodeRun(session, target);
   }
 

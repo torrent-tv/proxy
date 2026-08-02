@@ -1,3 +1,7 @@
+## 2.9.69
+
+- **Fix**: Removed the last traces of the seek-start "pull", so nothing can move the encode position except the viewer's own seek. Root cause now measured rather than guessed: **during a scrub the player loads from wherever the slider pauses on its way**. Browser log 2026-08-02 — dragging from 0 to 23:34 lingered at 863.4 s, the player fetched segment #82 for that intermediate point, and a seek that had correctly resolved to start at #134 was dragged back to **#82**, then crawled forward for a minute. The browser's 300 ms debounce exists precisely to discard intermediate scrub positions; reading them back off the segment-request stream defeated it. Gone with it: `lowestAwaitedIndex` tracking, `SEEK_PULL_LIMIT_SEGMENTS`, and the reset paths they needed.
+
 ## 2.9.68
 
 - **Fix**: A seek could be dragged back to the position the viewer had just left. The encoder start was pulled down to the lowest segment the player had outstanding — a stand-in from when the distance to the preceding keyframe was unknown — but at seek time those requests still describe where the player was PLAYING, not where it is going. Field 2026-08-02: a seek to 23:34 (#135) correctly resolved to a start of #134, then got pulled to **#82** (14:15, the position just left) and crawled forward from there. Removed: since boundaries became real keyframes (2.9.65), exactly one segment back always suffices, so the pull has nothing left to correct for.

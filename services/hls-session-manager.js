@@ -84,7 +84,6 @@ const ENCODER_STALL_MS = 12_000;
 // encoding 125 s of content before reaching the viewer's position. Field
 // 2026-08-02: a seek took 56 s, of which ~50 s was this backoff.
 const SEEK_BACKOFF_SEGMENTS = 1;
-const SEEK_PULL_LIMIT_SEGMENTS = 120;
 const SEEK_SETTLE_MS = 1_200;
 // Hard cap on the total settle wait, measured from the first far request of a
 // burst, so a still-moving scrubber cannot delay a genuine seek forever.
@@ -1107,9 +1106,6 @@ export class HlsSessionManager {
       // #wireEncodeProcess and MAX_SEEK_FAILURES.
       seekFailureTarget: -1,
       seekFailureCount: 0,
-      // Lowest segment index the player is currently waiting for; -1 when
-      // nothing is pending. See getFileStream and #fireSettledSeek.
-      lowestAwaitedIndex: -1,
       progress: {
         state: "starting",
         processedSeconds: 0,
@@ -2139,10 +2135,6 @@ export class HlsSessionManager {
     // player needs a segment containing the preceding keyframe, so one that
     // begins exactly at the target is useless to it.
     const startIndex = Math.max(0, index - SEEK_BACKOFF_SEGMENTS);
-    // A new seek invalidates everything the player was waiting for before it:
-    // those requests describe where it USED to be. Clearing here is what keeps
-    // the pull below anchored to this seek.
-    session.lowestAwaitedIndex = -1;
     logger.info(
       `transcode ${session.id} viewer seek to ${positionSeconds.toFixed(1)}s → segment #${index}, ` +
         `starting at #${startIndex} (${SEEK_BACKOFF_SEGMENTS} back for the preceding keyframe)`
@@ -2244,20 +2236,23 @@ export class HlsSessionManager {
       : producedThisRun >= this.segmentDurationSec
         ? `run produced ${producedThisRun.toFixed(1)}s (first segment done)`
         : `grace of ${RUN_FIRST_SEGMENT_GRACE_MS / 1000}s expired`;
-    // Deliberately NOT pulled towards the lowest segment the player is waiting
-    // on. That was a stand-in for not knowing how far back the preceding
-    // keyframe lay, and it is now both unnecessary and harmful: boundaries are
-    // real keyframes (2.9.65), so exactly one segment back always suffices,
-    // while the player's outstanding requests at seek time still describe where
-    // it was PLAYING, not where it is going. Field 2026-08-02: a seek to #135
-    // was dragged back to #82 — the position the viewer had just left — because
-    // the player was still fetching around it.
-    const effectiveTarget = target;
+    // The start is exactly what requestSeek computed — one segment before the
+    // viewer's position — and nothing else may move it.
+    //
+    // An earlier version pulled it down to the lowest segment the player had
+    // outstanding, guessing how far back the preceding keyframe lay. That guess
+    // is unnecessary now (boundaries ARE keyframes since 2.9.65) and was
+    // actively wrong: during a scrub the player loads from wherever the slider
+    // paused on its way, so those requests describe INTERMEDIATE positions, not
+    // the destination. Measured 2026-08-02: dragging from 0 to 23:34 paused at
+    // 863.4 s, the player fetched #82 for it, and a seek correctly resolved to
+    // #134 was dragged back to #82. The browser's 300 ms debounce exists to
+    // discard those intermediate positions — reading them back off the request
+    // stream defeated it.
     session.seekTarget = null;
     session.seekFirstFarAt = 0;
-    session.lowestAwaitedIndex = -1;
-    logger.info(`transcode ${session.id} seek settle → restart at segment #${effectiveTarget} (${allowedBecause})`);
-    void this.#startEncodeRun(session, effectiveTarget);
+    logger.info(`transcode ${session.id} seek settle → restart at segment #${target} (${allowedBecause})`);
+    void this.#startEncodeRun(session, target);
   }
 
   /**
@@ -2461,16 +2456,6 @@ export class HlsSessionManager {
     // at this position (server-side seeking).  The caller long-polls.
     if (!isPlaylist) {
       const requestedIndex = this.segmentFormat.segmentIndexFromName(fileName);
-      // Remember the LOWEST segment currently being waited on. The player
-      // always fetches below the seek target (it needs the preceding keyframe),
-      // and by how much varies — 8 segments in one measured seek, 57 in
-      // another. This is that figure straight from the player, and
-      // #fireSettledSeek uses it to pull the encode start down when the fixed
-      // SEEK_BACKOFF_SEGMENTS floor is not deep enough. Reset whenever a run
-      // starts, so it only ever describes the pending seek.
-      if (requestedIndex >= 0 && (session.lowestAwaitedIndex < 0 || requestedIndex < session.lowestAwaitedIndex)) {
-        session.lowestAwaitedIndex = requestedIndex;
-      }
       this.#ensureEncodingFor(
         session,
         requestedIndex,

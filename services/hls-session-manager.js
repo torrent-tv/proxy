@@ -1953,20 +1953,26 @@ export class HlsSessionManager {
     if (index === session.seekFailureTarget && session.seekFailureCount >= MAX_SEEK_FAILURES) {
       return;
     }
-    // Far request = a server-side seek. Do NOT restart on the first one:
-    // debounce a burst of scattered requests into a single restart at the
-    // position the player ended on. Record the latest target and (re)arm the
-    // settle timer; the caller long-polls / the client retries meanwhile.
-    session.seekTarget = index;
-    if (session.seekSettleTimer) {
-      clearTimeout(session.seekSettleTimer);
-    } else {
-      session.seekFirstFarAt = Date.now();
-    }
-    const waited = Date.now() - session.seekFirstFarAt;
-    const delay = waited >= SEEK_SETTLE_MAX_MS ? 0 : Math.min(SEEK_SETTLE_MS, SEEK_SETTLE_MAX_MS - waited);
-    session.seekSettleTimer = setTimeout(() => this.#fireSettledSeek(session), delay);
-    session.seekSettleTimer.unref?.();
+    // A far request is NOT treated as a seek. Measured 2026-08-02: on a single
+    // viewer seek the player opens ~25 CONCURRENT requests spanning #904..#1101
+    // and holds them all for the full 60 s without aborting any — normal
+    // read-ahead, not probing. There is therefore no such thing as "the segment
+    // the player ended on": at any instant a couple of dozen different indices
+    // are outstanding, so any rule picking one of them picks noise. Doing so
+    // produced NINE encoder restarts in one minute (#576→#885→#609→#591→#673→
+    // #833→#624→#1071→#1101), each killed 5-8 s in, turning a seek into a
+    // ~70 s ordeal.
+    //
+    // The seek target now arrives explicitly from the browser (requestSeek,
+    // POST /api/transcode-sessions/:id/seek) — the only place the viewer's
+    // intent actually exists. Same split as Jellyfin (startTimeTicks) and
+    // webtor (?t=): requests fetch data, they do not steer the encoder.
+    //
+    // Requests are still valuable, just not as commands: they are a queue of
+    // claims. Held open until produced (the player waits), served from disk
+    // when behind the encoder, and the LOWEST outstanding index marks where the
+    // viewer is actually stalled — the honest input for what to produce first.
+    // See research/hls-seek-prior-art-2026-08-02.md.
   }
 
   /**
@@ -1995,6 +2001,59 @@ export class HlsSessionManager {
       return 0;
     }
     return Math.max(0, processed - startPosition);
+  }
+
+  /**
+   * The viewer seeked. Called from POST /api/transcode-sessions/:id/seek with
+   * the position the browser read off its own player once the scrub ended.
+   *
+   * This is the ONLY thing that repositions the encoder. It replaces inferring
+   * the target from segment requests, which cannot work: a single seek leaves
+   * ~25 concurrent requests outstanding across a wide span (measured), so no
+   * rule over them can recover which one the viewer meant.
+   *
+   * The existing settle/cooldown/first-segment guards still apply — they
+   * protect against restarting too eagerly, which is orthogonal to knowing
+   * WHERE to restart.
+   *
+   * @param {string} sessionId
+   * @param {number} positionSeconds - Absolute position on the source timeline.
+   * @returns {boolean} False when the session is unknown or disposed.
+   */
+  requestSeek(sessionId, positionSeconds) {
+    const session = this.sessionsById.get(sessionId);
+    if (!session || session.state === "disposed") {
+      return false;
+    }
+    const index = this.#segmentIndexForTime(session, positionSeconds);
+    const head = session.encodeStartIndex;
+    const processed = Number.isFinite(session.progress?.processedSeconds)
+      ? session.progress.processedSeconds
+      : this.#segmentStartTime(session, head);
+    const currentSeg = Math.max(head, this.#segmentIndexForTime(session, processed));
+    // Already covered by the running encode — the data is on its way, so
+    // restarting would only destroy work the viewer is waiting for.
+    if (index >= head && index <= currentSeg + MAX_LOOKAHEAD_SEGMENTS) {
+      logger.info(
+        `transcode ${session.id} seek to ${positionSeconds.toFixed(1)}s (#${index}) ` +
+          `already within the running encode (#${head}..#${currentSeg}) — not restarting`
+      );
+      return true;
+    }
+    logger.info(
+      `transcode ${session.id} viewer seek to ${positionSeconds.toFixed(1)}s → segment #${index}`
+    );
+    session.seekTarget = index;
+    if (session.seekSettleTimer) {
+      clearTimeout(session.seekSettleTimer);
+    } else {
+      session.seekFirstFarAt = Date.now();
+    }
+    const waited = Date.now() - session.seekFirstFarAt;
+    const delay = waited >= SEEK_SETTLE_MAX_MS ? 0 : Math.min(SEEK_SETTLE_MS, SEEK_SETTLE_MAX_MS - waited);
+    session.seekSettleTimer = setTimeout(() => this.#fireSettledSeek(session), delay);
+    session.seekSettleTimer.unref?.();
+    return true;
   }
 
   #fireSettledSeek(session) {

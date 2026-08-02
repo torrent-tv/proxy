@@ -1,9 +1,26 @@
+import { logger } from "../../../utils/logger.js";
+
 /**
  * How long a request for a not-yet-produced file is held before answering with
- * a retryable 503. Must stay comfortably below iOS AVPlayer's ~3.5 s
- * response-header deadline (see the call site for the full rationale).
+ * a retryable 503.
+ *
+ * MEASUREMENT MODE (2026-08-02): deliberately far above any plausible player
+ * deadline, so OUR limit never fires first. Whatever ends the wait is then the
+ * player's own behaviour — which is exactly what we need to observe. The
+ * `[hold]` log line at the call site records, per request, whether the segment
+ * arrived, whether we gave up, or whether the CLIENT aborted, and after how
+ * long.
+ *
+ * The previous value (2 s) was chosen to dodge a reported iOS AVPlayer ~3.5 s
+ * response-header deadline. That deadline never appears in our own logs (no
+ * -12889 across six hours of production logs), and every reference project
+ * holds rather than refusing: Jellyfin and hls-vod-too hold unbounded,
+ * hls-media-server holds 10 s. The early refusal is what made the player probe
+ * scattered positions, which then steered the encoder off target. Choose the
+ * final value from what this measurement shows, not from a number read
+ * elsewhere.
  */
-const SEGMENT_WAIT_MS = 2_000;
+const SEGMENT_WAIT_MS = 60_000;
 
 /**
  * Serve HLS playlist and segment files from an active transcode session.
@@ -36,7 +53,24 @@ export async function handleTranscodeSessionFileGet(req, reply, { hlsSessionMana
   // gets a prompt retryable answer, which resets the player's own deadline.
   // hls.js is unaffected: it consumes the 503 through its retry policy, whose
   // budget the client widens to match (see hls-player.js fragLoadPolicy).
+  // Instrumented wait. `clientAborted` flips when the player drops the
+  // connection while we are still holding it — the single most informative
+  // signal about its real patience, and observable only from this side.
+  const holdStartedAt = Date.now();
+  let clientAborted = false;
+  const onClientAbort = () => { clientAborted = true; };
+  req.raw.on("close", onClientAbort);
+
   const result = await waitForSessionFile(hlsSessionManager, sessionId, fileName, SEGMENT_WAIT_MS);
+
+  req.raw.off("close", onClientAbort);
+  const heldMs = Date.now() - holdStartedAt;
+  if (result.isPlaylist !== true) {
+    const outcome = clientAborted
+      ? "client-aborted"
+      : result.kind === "ok" ? "served" : result.kind;
+    logger.info(`[hold] ${fileName} ${outcome} after ${heldMs}ms`);
+  }
 
   if (result.kind === "not-found") {
     return reply.code(404).send({ error: "Transcode session file was not found." });

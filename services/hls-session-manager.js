@@ -72,26 +72,18 @@ const ENCODER_STALL_MS = 12_000;
 // producing nothing.
 // How many segments BEFORE the requested position the encoder starts.
 //
-// Required by how HLS players seek, per Apple's HLS authoring guidance: given a
-// position, the player locates the nearest IDR (keyframe) *preceding* it,
-// decodes from there, and only then presents from the requested point. So it
-// always fetches segments BELOW the target — measured 2026-08-02 on iOS: a seek
-// to #1082 fetched from #1074 (8 back), one to #1358 fetched from #1301 (57
-// back), and in the latter case the player asked for NOTHING at or above the
-// target, so an encoder starting exactly on it produced only files nobody was
-// waiting for and playback hung indefinitely.
+// A player given a position decodes from the nearest keyframe PRECEDING it
+// (Apple HLS authoring guidance), so it fetches segments below the target and
+// an encoder starting exactly on it produces nothing anyone waits for.
 //
-// The observed backoff is not constant, so this is a floor, not the whole
-// answer: #fireSettledSeek also pulls the start down to the lowest segment the
-// player is actually waiting on when that is lower still. Costs a few seconds
-// of extra encoding per seek.
-const SEEK_BACKOFF_SEGMENTS = 12;
-// Hard limit on how far below the requested segment the start may be pulled by
-// `lowestAwaitedIndex`. Without it a stale request from earlier playback drags
-// the encoder across the whole file: field 2026-08-02, a seek to #1354 was
-// pulled to #123 — the start of the previous watch — because requests from
-// before the seek were still counted. Anything deeper than this is not the
-// preceding keyframe, it is a leftover.
+// ONE segment is now enough. Since 2.9.65 every boundary IS a real keyframe
+// (read from the container index), so the segment before the target is
+// guaranteed to start on one. The old value of 12 dates from the invented 4 s
+// grid, where the distance to a usable keyframe was unknown — and it became
+// actively harmful once boundaries turned real: with 10.43 s segments it meant
+// encoding 125 s of content before reaching the viewer's position. Field
+// 2026-08-02: a seek took 56 s, of which ~50 s was this backoff.
+const SEEK_BACKOFF_SEGMENTS = 1;
 const SEEK_PULL_LIMIT_SEGMENTS = 120;
 const SEEK_SETTLE_MS = 1_200;
 // Hard cap on the total settle wait, measured from the first far request of a

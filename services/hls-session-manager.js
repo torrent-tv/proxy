@@ -85,6 +85,13 @@ const ENCODER_STALL_MS = 12_000;
 // player is actually waiting on when that is lower still. Costs a few seconds
 // of extra encoding per seek.
 const SEEK_BACKOFF_SEGMENTS = 12;
+// Hard limit on how far below the requested segment the start may be pulled by
+// `lowestAwaitedIndex`. Without it a stale request from earlier playback drags
+// the encoder across the whole file: field 2026-08-02, a seek to #1354 was
+// pulled to #123 — the start of the previous watch — because requests from
+// before the seek were still counted. Anything deeper than this is not the
+// preceding keyframe, it is a leftover.
+const SEEK_PULL_LIMIT_SEGMENTS = 120;
 const SEEK_SETTLE_MS = 1_200;
 // Hard cap on the total settle wait, measured from the first far request of a
 // burst, so a still-moving scrubber cannot delay a genuine seek forever.
@@ -2063,6 +2070,10 @@ export class HlsSessionManager {
     // player needs a segment containing the preceding keyframe, so one that
     // begins exactly at the target is useless to it.
     const startIndex = Math.max(0, index - SEEK_BACKOFF_SEGMENTS);
+    // A new seek invalidates everything the player was waiting for before it:
+    // those requests describe where it USED to be. Clearing here is what keeps
+    // the pull below anchored to this seek.
+    session.lowestAwaitedIndex = -1;
     logger.info(
       `transcode ${session.id} viewer seek to ${positionSeconds.toFixed(1)}s → segment #${index}, ` +
         `starting at #${startIndex} (${SEEK_BACKOFF_SEGMENTS} back for the preceding keyframe)`
@@ -2168,7 +2179,8 @@ export class HlsSessionManager {
     // requests say exactly how far back it needs the keyframe, so honour that
     // rather than a guess. Only ever pulls the start EARLIER, never later.
     const awaited = session.lowestAwaitedIndex;
-    const effectiveTarget = awaited >= 0 && awaited < target ? awaited : target;
+    const pullFloor = Math.max(0, target - SEEK_PULL_LIMIT_SEGMENTS);
+    const effectiveTarget = awaited >= pullFloor && awaited < target ? awaited : target;
     if (effectiveTarget !== target) {
       logger.info(
         `transcode ${session.id} pulling encode start #${target} → #${effectiveTarget} ` +

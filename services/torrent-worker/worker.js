@@ -126,6 +126,7 @@ async function streamRange({ id, sourceKey, fileIndex, start, end }) {
     await sender.send(merged);
   };
 
+  let failed = false;
   try {
     for await (const part of source) {
       if (sender.isCancelled()) {
@@ -140,10 +141,20 @@ async function streamRange({ id, sourceKey, fileIndex, start, end }) {
     if (!sender.isCancelled()) {
       await flush();
     }
+  } catch (error) {
+    // The end-of-read marker means "the body is complete". Sending it after a
+    // failure told the reader the file simply ended — a truncated segment that
+    // ffmpeg reported as `Stream ends prematurely`, with the real cause thrown
+    // away. Let the error propagate instead; the command handler reports it and
+    // the main thread fails the stream.
+    failed = true;
+    throw error;
   } finally {
     readsById.delete(id);
     releaseRead();
-    sender.end();
+    if (!failed) {
+      sender.end();
+    }
     // A cancelled read must stop the underlying torrent stream too, or the
     // pieces keep being fetched for a viewer who has gone.
     if (typeof source.destroy === "function") {

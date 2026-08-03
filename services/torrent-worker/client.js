@@ -41,6 +41,8 @@ export class TorrentWorkerClient {
   #poolBySource = new Map();
   /** Which pool an in-flight read belongs to, keyed by request id. */
   #poolByRead = new Map();
+  /** Reads consuming fragments in place, keyed by request id. */
+  #fragmentReaders = new Map();
 
   /**
    * @param {{ maxDiskBytes?: number, memoryBytes?: number }} [options]
@@ -64,25 +66,42 @@ export class TorrentWorkerClient {
         read.fail(new Error(message.error ?? "Torrent worker read failed."));
         return;
       }
+      if (message?.type === Event.ERROR && this.#fragmentReaders.has(message.id)) {
+        const reader = this.#fragmentReaders.get(message.id);
+        this.#fragmentReaders.delete(message.id);
+        this.#poolByRead.delete(message.id);
+        reader.fail(new Error(message.error ?? "Torrent worker read failed."));
+        return;
+      }
       if (this.#caller.handleReply(message)) {
         return;
       }
       switch (message?.type) {
         case Event.FRAGMENT: {
-          // The bytes are already here — this thread maps the same pool. Read
-          // them where they lie, then say so, which is what lets the worker
-          // unpin the piece and move on. The copy exists only because the
-          // consumer keeps what it is given while the slot may be reused; it is
-          // one copy on this thread rather than one on the torrent's.
           const pool = this.#poolByRead.get(message.id);
-          const bytes = pool
-            ? Uint8Array.prototype.slice.call(
-                new Uint8Array(pool, message.offset, message.length)
-              )
-            : null;
-          if (bytes) {
-            this.#reads.get(message.id)?.push(bytes);
+          if (!pool) {
+            // No pool means no way to read the fragment; confirm it so the
+            // worker is not left waiting, and let the read end short.
+            this.#worker.postMessage({ type: Event.FRAGMENT_DONE, id: message.id });
+            break;
           }
+          const view = new Uint8Array(pool, message.offset, message.length);
+
+          const reader = this.#fragmentReaders.get(message.id);
+          if (reader) {
+            // Handed on as a view into the pool — no copy anywhere. The piece
+            // stays pinned until the consumer says it is done with these exact
+            // bytes, which for a response body means the socket write has
+            // completed.
+            reader.push(view, () => {
+              this.#worker.postMessage({ type: Event.FRAGMENT_DONE, id: message.id });
+            });
+            break;
+          }
+
+          // Plain-stream consumers keep what they are given while the slot may
+          // be reused, so they get a copy and the piece is released at once.
+          this.#reads.get(message.id)?.push(Uint8Array.prototype.slice.call(view));
           this.#worker.postMessage({ type: Event.FRAGMENT_DONE, id: message.id });
           break;
         }
@@ -96,6 +115,8 @@ export class TorrentWorkerClient {
         case Event.READ_END:
           this.#reads.get(message.id)?.close();
           this.#reads.delete(message.id);
+          this.#fragmentReaders.get(message.id)?.close();
+          this.#fragmentReaders.delete(message.id);
           this.#poolByRead.delete(message.id);
           break;
         case Event.LOG:
@@ -236,6 +257,104 @@ export class TorrentWorkerClient {
   }
 
   /**
+   * Read a byte range as fragments of shared memory, without copying.
+   *
+   * Each fragment is a view straight into the torrent's piece pool, and the
+   * piece behind it stays pinned until `release()` is called — so the consumer
+   * must call it once it is genuinely finished with those bytes. For a response
+   * body that means after the socket write has completed, not when it was
+   * queued: verified that writing a shared-memory view and then overwriting the
+   * pool from the write callback leaves the client's copy intact, and that
+   * overwriting it earlier corrupts it silently.
+   *
+   * Returns `null` when this source has no shared pool, so the caller can fall
+   * back to {@link createReadStream}.
+   *
+   * @param {{ sourceKey: string, fileIndex: number, start?: number | null, end?: number | null }} params
+   * @returns {{ [Symbol.asyncIterator]: () => AsyncGenerator<{ bytes: Uint8Array, release: () => void }>, cancel: () => void } | null}
+   */
+  createFragmentReader({ sourceKey, fileIndex, start = null, end = null }) {
+    const pool = this.#poolBySource.get(sourceKey);
+    if (!pool) {
+      return null;
+    }
+
+    const readId = this.#caller.nextId();
+    /** @type {{ bytes: Uint8Array, release: () => void }[]} */
+    const queue = [];
+    let wake = null;
+    let finished = false;
+    let failure = null;
+
+    const notify = () => {
+      const resume = wake;
+      wake = null;
+      resume?.();
+    };
+
+    this.#fragmentReaders.set(readId, {
+      push(bytes, confirm) {
+        queue.push({ bytes, release: confirm });
+        notify();
+      },
+      close() {
+        finished = true;
+        notify();
+      },
+      fail(error) {
+        failure = error;
+        finished = true;
+        notify();
+      }
+    });
+    this.#poolByRead.set(readId, pool);
+
+    const cancel = () => {
+      if (this.#fragmentReaders.delete(readId)) {
+        this.#poolByRead.delete(readId);
+        void this.#caller.call(Command.CANCEL_READ, { readId }).catch(() => undefined);
+      }
+      finished = true;
+      notify();
+    };
+
+    this.#worker.postMessage({
+      command: Command.READ_RANGE,
+      id: readId,
+      params: { sourceKey, fileIndex, start, end }
+    });
+
+    return {
+      cancel,
+      async *[Symbol.asyncIterator]() {
+        try {
+          for (;;) {
+            while (queue.length > 0) {
+              yield queue.shift();
+            }
+            if (failure) {
+              throw failure;
+            }
+            if (finished) {
+              return;
+            }
+            await new Promise((resolve) => {
+              wake = resolve;
+            });
+          }
+        } finally {
+          // Covers the consumer breaking out early — a client that hung up, a
+          // superseded seek — which must stop the read rather than leave it
+          // fetching pieces nobody will take.
+          if (!finished) {
+            cancel();
+          }
+        }
+      }
+    };
+  }
+
+  /**
    * A stand-in for the WebTorrent torrent object, backed by the worker.
    *
    * Callers already hold a torrent and reach into `torrent.files[i]` — for the
@@ -285,6 +404,22 @@ export class TorrentWorkerClient {
               end: options.end ?? null
             })
           );
+        },
+
+        /**
+         * Fragments of shared memory, for a caller that can say when it has
+         * finished with each one. `null` when this source has no shared pool.
+         *
+         * @param {{ start?: number, end?: number }} [options]
+         * @returns {ReturnType<TorrentWorkerClient["createFragmentReader"]>}
+         */
+        createFragmentReader(options = {}) {
+          return client.createFragmentReader({
+            sourceKey,
+            fileIndex: file.index,
+            start: options.start ?? null,
+            end: options.end ?? null
+          });
         }
       }))
     };

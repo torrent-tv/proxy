@@ -32,8 +32,12 @@ import { Command, Event, STREAM_CHUNK_BYTES } from "./protocol.js";
 // the hook above had a chance to register. Verified the hard way: with a static
 // import the process still aborted, and the stack named the genuine polyfill.
 const { TorrentPool } = await import("../torrent-pool.js");
+const { collectStoreStats } = await import("../piece-store/shared-piece-store.js");
 
-const pool = new TorrentPool({ maxDiskBytes: workerData?.maxDiskBytes });
+const pool = new TorrentPool({
+  maxDiskBytes: workerData?.maxDiskBytes,
+  memoryBytes: workerData?.memoryBytes
+});
 
 /** Torrents by sourceKey — the main thread names them, this thread owns them. */
 const torrentsByKey = new Map();
@@ -272,5 +276,37 @@ parentPort.on("message", async (message) => {
     parentPort.postMessage({ type: Event.ERROR, id, error: error?.message ?? String(error) });
   }
 });
+
+/**
+ * How often the piece store reports what it has been doing.
+ *
+ * The store decides whether a read costs nothing or costs a disk trip, and
+ * until 2.9.75 nothing about it reached the log — a field oddity would have had
+ * no evidence to work from. Reported only when something changed, so an idle
+ * proxy stays quiet.
+ */
+const STORE_REPORT_INTERVAL_MS = 60_000;
+
+/** Last reported figures per store, so unchanged ones stay silent. */
+const lastReported = new Map();
+
+setInterval(() => {
+  for (const stats of collectStoreStats()) {
+    const signature = `${stats.fromMemory}/${stats.fromDisk}/${stats.spills}/${stats.revivals}/${stats.blockedByPins}`;
+    if (lastReported.get(stats.name) === signature) {
+      continue;
+    }
+    lastReported.set(stats.name, signature);
+
+    const reads = stats.fromMemory + stats.fromDisk;
+    const fromMemoryShare = reads > 0 ? ((stats.fromMemory / reads) * 100).toFixed(1) : "—";
+    log(
+      `piece-store "${stats.name.slice(0, 40)}": resident=${stats.resident}/${stats.capacity} ` +
+      `spilled=${stats.spilled} reads=${reads} (${fromMemoryShare}% from memory) ` +
+      `spills=${stats.spills} revivals=${stats.revivals}` +
+      (stats.blockedByPins > 0 ? ` blocked-by-pins=${stats.blockedByPins}` : "")
+    );
+  }
+}, STORE_REPORT_INTERVAL_MS).unref();
 
 log("torrent worker started");

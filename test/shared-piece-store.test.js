@@ -209,6 +209,82 @@ test("a range within a piece is served correctly from memory and from disk", asy
   }
 });
 
+test("takes memory as it needs it, not the whole budget up front", async () => {
+  // The budget is per torrent, so a torrent that is merely open — or one being
+  // probed for its codecs — must not charge the host for the ceiling.
+  const { store, directory } = await makeStore({ pieces: 16, totalPieces: 64 });
+  try {
+    assert.equal(store.capacity, 16);
+    const initial = store.sharedBuffer.byteLength;
+    assert.ok(initial <= CHUNK * 2, `claimed ${initial} bytes before holding anything`);
+
+    for (let index = 0; index < 5; index += 1) {
+      await put(store, index, piece(index));
+    }
+
+    assert.equal(store.residentCount, 5);
+    assert.ok(
+      store.sharedBuffer.byteLength >= CHUNK * 5,
+      "the pool did not grow to hold what was put in it"
+    );
+    assert.ok(
+      store.sharedBuffer.byteLength <= CHUNK * 6,
+      "the pool grew past what was actually needed"
+    );
+
+    // Growing must not move bytes already written.
+    assert.deepEqual(await get(store, 0), piece(0), "an early piece was disturbed by growth");
+  } finally {
+    await new Promise((resolve) => store.destroy(resolve));
+    await fs.rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("counts where reads were served from, so the budget can be judged", async () => {
+  const { store, directory } = await makeStore({ pieces: 2, totalPieces: 8 });
+  try {
+    await put(store, 0, piece(0));
+    await get(store, 0); // memory
+    await get(store, 0); // memory
+
+    await put(store, 1, piece(1));
+    await put(store, 2, piece(2)); // piece 0 spills
+    await get(store, 0); // disk
+
+    const stats = store.stats();
+    assert.equal(stats.fromMemory, 2, "memory reads miscounted");
+    assert.equal(stats.fromDisk, 1, "disk reads miscounted");
+    // Two: piece 0 goes out to make room for piece 2, then piece 1 goes out to
+    // make room for piece 0 coming back. Reviving costs a spill of its own, and
+    // that is worth seeing in the figures rather than hiding.
+    assert.equal(stats.spills, 2, "spills miscounted");
+    assert.equal(stats.revivals, 1, "revivals miscounted");
+    assert.equal(stats.blockedByPins, 0);
+    assert.equal(stats.capacity, 2);
+  } finally {
+    await new Promise((resolve) => store.destroy(resolve));
+    await fs.rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("counts a refusal caused by pinned pieces", async () => {
+  const { store, directory } = await makeStore({ pieces: 2, totalPieces: 8 });
+  try {
+    await put(store, 0, piece(0));
+    await put(store, 1, piece(1));
+    store.pin(0);
+    store.pin(1);
+    await assert.rejects(() => put(store, 2, piece(2)));
+
+    assert.equal(store.stats().blockedByPins, 1, "a refusal went unrecorded");
+  } finally {
+    store.unpin(0);
+    store.unpin(1);
+    await new Promise((resolve) => store.destroy(resolve));
+    await fs.rm(directory, { recursive: true, force: true });
+  }
+});
+
 test("destroy removes the spill file", async () => {
   const { store, directory } = await makeStore({ pieces: 2, totalPieces: 8 });
   await put(store, 0, piece(0));

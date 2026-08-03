@@ -12,6 +12,7 @@ import path from "node:path";
 import { rmSync, statfsSync } from "node:fs";
 import WebTorrent from "webtorrent";
 import { logger } from "../utils/logger.js";
+import { SharedPieceStore } from "./piece-store/shared-piece-store.js";
 
 // WebTorrent's default download root (see webtorrent lib/torrent.js: TMP =
 // path.join(os.tmpdir(), 'webtorrent')). We use the default store, so all
@@ -308,6 +309,9 @@ export class TorrentPool {
   /** Global disk cap in bytes (0 = disabled). */
   #maxDiskBytes = 0;
 
+  /** Memory budget per torrent for resident pieces; undefined = store default. */
+  #memoryBytes;
+
   /** Periodic disk-cap enforcement timer. */
   #diskSweepTimer = null;
 
@@ -323,7 +327,9 @@ export class TorrentPool {
    *   default is computed from free disk (min(10 GB, half free)). Pass 0 to
    *   disable the cap.
    */
-  constructor({ maxDiskBytes } = {}) {
+  constructor({ maxDiskBytes, memoryBytes } = {}) {
+    this.#memoryBytes = Number.isFinite(memoryBytes) && memoryBytes > 0 ? memoryBytes : undefined;
+
     // Sweep orphaned torrent data left by a previous hard kill (no graceful
     // shutdown ran, so destroyAll never cleaned the store). Safe here: no
     // torrents are loaded yet at construction. Best-effort, synchronous so it
@@ -558,7 +564,17 @@ export class TorrentPool {
         reject(error);
       };
       this.client.once("error", onError);
-      this.client.add(torrentId, (readyTorrent) => {
+      // Our own store, and WebTorrent's piece cache switched off in front of it
+      // (`storeCacheSlots: 0`). That cache is what made the thread split fail:
+      // it hands out the buffer it keeps and re-slices it later, so moving a
+      // piece across threads detached memory still in use. Ours owns what it
+      // hands out, holds pieces in shared memory the main thread can read
+      // directly, and spills to disk instead of losing them.
+      this.client.add(torrentId, {
+        store: SharedPieceStore,
+        storeCacheSlots: 0,
+        storeOpts: { memoryBytes: this.#memoryBytes }
+      }, (readyTorrent) => {
         this.client.off("error", onError);
         this.torrents.set(key, readyTorrent);
         this.#lastAccess.set(readyTorrent, Date.now());

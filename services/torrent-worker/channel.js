@@ -183,20 +183,24 @@ export function createSendStream({ port, requestId }) {
         return;
       }
       inFlight += 1;
-      // Transfer the underlying memory rather than copying it — the whole point
-      // of the design, and the difference between 4.8 ms and 37 ms per 10 MB.
+      // Copy into memory this transport allocated, then transfer THAT.
       //
-      // But only memory this chunk owns OUTRIGHT may be transferred. Node hands
-      // out small buffers from a shared 8 KB pool: several unrelated buffers sit
-      // in one region, each viewing its own slice (verified: a 1 KB buffer
-      // reports an 8192-byte region at offset 8). Transferring that region
-      // detaches it from every other buffer living there — which is what broke
-      // reads in the field 2026-08-02: headers were produced in 325 ms and the
-      // body never arrived, because chunks from the network are small enough to
-      // be pooled while local disk reads, which is all the local test exercised,
-      // are not.
-      const ownsRegion = bytes.byteOffset === 0 && bytes.byteLength === bytes.buffer.byteLength;
-      const payload = ownsRegion ? bytes : new Uint8Array(bytes);
+      // Transferring the caller's buffer is faster and was what shipped, but it
+      // is only correct if the caller owns the memory outright — and no test at
+      // this boundary can establish that. 2.9.73 tried to decide it by
+      // inspection (`byteOffset === 0 && byteLength === buffer.byteLength`),
+      // which answers "does this view cover its region", not "did we allocate
+      // it". WebTorrent's piece cache returns a buffer covering its whole
+      // region and keeps using it, so the check passed and the transfer
+      // detached the cache: every later read failed with a detached
+      // ArrayBuffer, and because the error never reached the reader it looked
+      // like an empty file (`Stream ends prematurely at 0`).
+      //
+      // The copy costs 3.64 ms per 8 MB on the field host, against 37 ms for a
+      // structured clone. It disappears entirely for pieces read through the
+      // shared piece store, which the main thread reads by offset without any
+      // hand-over at all.
+      const payload = new Uint8Array(bytes);
       port.postMessage(
         { type: Event.CHUNK, id: requestId, bytes: payload },
         [payload.buffer]

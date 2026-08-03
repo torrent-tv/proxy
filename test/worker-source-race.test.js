@@ -37,6 +37,10 @@ function outcomeWithin(promise, ms) {
 test("commands wait for a source that is still being added", async () => {
   const client = new TorrentWorkerClient({ memoryBytes: 16 * 1024 * 1024 });
   try {
+    // Without this the worker's own startup would keep the commands waiting and
+    // the test would pass for the wrong reason.
+    await client.listFiles("warm-up").catch(() => undefined);
+
     const sourceKey = "pending-source";
     // Deliberately not awaited: this is the window under test.
     const adding = client.addSource({ sourceKey, sourceType: "magnet", source: pendingMagnet() });
@@ -57,6 +61,11 @@ test("commands wait for a source that is still being added", async () => {
 test("a source that was never added is still reported as unknown", async () => {
   const client = new TorrentWorkerClient({ memoryBytes: 16 * 1024 * 1024 });
   try {
+    // Starting the worker takes several seconds — it builds a torrent client,
+    // a DHT and the rest — so the first command measures startup, not the
+    // behaviour under test. Wait for one to come back before timing anything.
+    await client.listFiles("warm-up").catch(() => undefined);
+
     // Waiting forever for something nobody ever asked for would be worse than
     // an error — this case must stay an error.
     const outcome = await outcomeWithin(client.listFiles("never-added"), 5000);

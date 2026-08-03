@@ -37,8 +37,6 @@ export class TorrentWorkerClient {
   #caller;
   /** Receive-side handles for in-flight reads, keyed by request id. */
   #reads = new Map();
-  /** Monotonic ids for reads, independent of the caller's own numbering. */
-  #nextReadId = 0;
 
   /**
    * @param {{ maxDiskBytes?: number, memoryBytes?: number }} [options]
@@ -50,6 +48,18 @@ export class TorrentWorkerClient {
     this.#caller = createCaller(this.#worker);
 
     this.#worker.on("message", (message) => {
+      // A failed read must fail its stream. This is checked BEFORE the caller
+      // sees the message: until 2.9.76 nothing here handled a read error at
+      // all, so the worker's report was dropped as unknown, and because the
+      // worker sent the end-of-read marker from its `finally` even when the
+      // read had thrown, the reader saw a clean end of file instead. A read
+      // that failed before it produced anything simply hung forever.
+      if (message?.type === Event.ERROR && this.#reads.has(message.id)) {
+        const read = this.#reads.get(message.id);
+        this.#reads.delete(message.id);
+        read.fail(new Error(message.error ?? "Torrent worker read failed."));
+        return;
+      }
       if (this.#caller.handleReply(message)) {
         return;
       }
@@ -176,7 +186,8 @@ export class TorrentWorkerClient {
    * @returns {ReadableStream<Uint8Array>}
    */
   createReadStream({ sourceKey, fileIndex, start = null, end = null }) {
-    const readId = (this.#nextReadId += 1);
+    // Same id sequence as commands — see `nextId` in `channel.js`.
+    const readId = this.#caller.nextId();
     const receive = createReceiveStream({
       port: this.#worker,
       requestId: readId,

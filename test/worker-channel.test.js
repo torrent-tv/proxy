@@ -16,7 +16,8 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { MessageChannel } from "node:worker_threads";
-import { createSendStream, createReceiveStream } from "../services/torrent-worker/channel.js";
+import { createSendStream, createReceiveStream, createCaller } from "../services/torrent-worker/channel.js";
+import { TorrentWorkerClient } from "../services/torrent-worker/client.js";
 
 /**
  * A buffer standing in for one owned by WebTorrent's piece cache: allocated
@@ -96,6 +97,36 @@ test("chunks arrive with their contents intact", async () => {
   }
 });
 
+test("reads and commands never share a request id", () => {
+  const { port1, port2 } = new MessageChannel();
+  try {
+    const commandIds = [];
+    port2.on("message", (message) => commandIds.push(message.id));
+
+    const caller = createCaller(port1);
+    const readIds = [];
+
+    // Interleaved exactly as the real client does it: commands through `call`,
+    // reads taking an id directly, both over the same channel.
+    for (let round = 0; round < 50; round += 1) {
+      void caller.call("noop", {});
+      readIds.push(caller.nextId());
+    }
+
+    // A repeat between the two sequences is the collision that let a read's
+    // reply resolve a command — with its result, silently.
+    const everyId = [...commandIds, ...readIds];
+    assert.equal(
+      new Set(everyId).size,
+      everyId.length,
+      "an id was handed out to both a command and a read"
+    );
+  } finally {
+    port1.close();
+    port2.close();
+  }
+});
+
 test("a failed read surfaces on the reader instead of ending quietly", async () => {
   const { port1, port2 } = new MessageChannel();
   try {
@@ -116,5 +147,29 @@ test("a failed read surfaces on the reader instead of ending quietly", async () 
   } finally {
     port1.close();
     port2.close();
+  }
+});
+
+test("a read of an unknown source fails the stream rather than hanging", async () => {
+  // End to end through a real worker, because this is where the defect lived:
+  // the worker reported the failure, nothing on the main thread listened, and
+  // the reader waited forever. A unit test on either half alone passes happily.
+  const client = new TorrentWorkerClient({ memoryBytes: 8 * 1024 * 1024 });
+  try {
+    const stream = client.createReadStream({ sourceKey: "no-such-source", fileIndex: 0 });
+    const reader = stream.getReader();
+
+    const outcome = await Promise.race([
+      reader.read().then(() => "resolved", (error) => `rejected: ${error?.message}`),
+      new Promise((resolve) => setTimeout(() => resolve("hung"), 10_000))
+    ]);
+
+    assert.match(
+      outcome,
+      /^rejected: .*no-such-source/,
+      `expected the read to fail, got "${outcome}"`
+    );
+  } finally {
+    await client.destroyAll();
   }
 });

@@ -42,6 +42,18 @@ export function createCaller(port) {
   const pending = new Map();
 
   return {
+    /**
+     * The one source of request ids on this side of the channel.
+     *
+     * Reads used to number themselves from a second counter, which put two
+     * unrelated sequences in one namespace: a read and a command could both be
+     * in flight as id 5, and the worker's reply to the read then resolved the
+     * command — with the read's result, silently, while the command's real
+     * answer arrived later and was dropped as unknown. Handing out every id
+     * from here makes that collision impossible rather than unlikely.
+     */
+    nextId,
+
     call(command, params = {}) {
       return new Promise((resolve, reject) => {
         const id = nextId();

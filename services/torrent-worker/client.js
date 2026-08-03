@@ -41,11 +41,11 @@ export class TorrentWorkerClient {
   #nextReadId = 0;
 
   /**
-   * @param {{ maxDiskBytes?: number }} [options]
+   * @param {{ maxDiskBytes?: number, memoryBytes?: number }} [options]
    */
-  constructor({ maxDiskBytes } = {}) {
+  constructor({ maxDiskBytes, memoryBytes } = {}) {
     this.#worker = new Worker(fileURLToPath(WORKER_URL), {
-      workerData: { maxDiskBytes }
+      workerData: { maxDiskBytes, memoryBytes }
     });
     this.#caller = createCaller(this.#worker);
 

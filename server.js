@@ -63,6 +63,7 @@ function buildPortCandidates(startPort, maxAttempts = 51) {
  * @property {boolean} transcodeAudio - Whether HLS audio transcoding is enabled.
  * @property {string}  ffmpegBin      - Path to the ffmpeg executable.
  * @property {number}  [maxDiskBytes] - Global disk cap for torrent data (undefined = pool default).
+ * @property {number}  [memoryBytes]  - Per-torrent budget for pieces held in memory (undefined = store default).
  * @property {string}  [segmentFormat] - HLS output container: "fmp4" (default) or "mpegts".
  */
 
@@ -72,7 +73,7 @@ function buildPortCandidates(startPort, maxAttempts = 51) {
  * @param {ProxyServerOptions} options
  * @returns {Promise<{ app: import("fastify").FastifyInstance, port: number }>}
  */
-export async function startProxyServer({ host, port, transcodeAudio, ffmpegBin, maxDiskBytes, segmentFormat }) {
+export async function startProxyServer({ host, port, transcodeAudio, ffmpegBin, maxDiskBytes, memoryBytes, segmentFormat }) {
   const app = Fastify({
     // No practical body-size limit — the proxy server is localhost-only and
     // receives torrent source payloads that may be arbitrarily large.
@@ -104,7 +105,7 @@ export async function startProxyServer({ host, port, transcodeAudio, ffmpegBin, 
   // idled. Serving a segment shared that thread, so reading an already-finished
   // 10 MB file took 12-23 s against 125 ms to hand it to the channel. The
   // adapter keeps TorrentPool's interface, so nothing downstream changed.
-  const torrentPool = new WorkerTorrentPool({ maxDiskBytes });
+  const torrentPool = new WorkerTorrentPool({ maxDiskBytes, memoryBytes });
   const selectedPort = await getPort({
     port: buildPortCandidates(port)
   });

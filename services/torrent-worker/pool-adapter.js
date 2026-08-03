@@ -51,7 +51,7 @@ export class WorkerTorrentPool {
   #torrents = new Map();
 
   /**
-   * @param {{ maxDiskBytes?: number }} [options]
+   * @param {{ maxDiskBytes?: number, memoryBytes?: number }} [options]
    */
   constructor(options = {}) {
     this.#client = new TorrentWorkerClient(options);

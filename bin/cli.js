@@ -74,6 +74,7 @@ program
   .option("--no-transcode-audio", "Disable optional HLS AAC audio transcoding")
   .option("--no-port-mapping", "Disable automatic UPnP/NAT-PMP port mapping")
   .option("--max-disk-bytes <bytes>", "Cap total downloaded torrent data (0 = disabled; default min(10GB, half free disk))")
+  .option("--memory-bytes <bytes>", "Per-torrent budget for pieces kept in memory before spilling to disk (default 512MB)")
   .option("--ffmpeg-bin <path>", "Path to ffmpeg binary")
   .option(
     "--segment-format <format>",
@@ -107,6 +108,12 @@ const portMappingEnabled = options.portMapping !== false;
 const maxDiskBytes =
   options.maxDiskBytes !== undefined && Number.isFinite(Number(options.maxDiskBytes)) && Number(options.maxDiskBytes) >= 0
     ? Number(options.maxDiskBytes)
+    : undefined;
+// Per-torrent memory budget for resident pieces. Pieces past it spill to disk
+// rather than being lost, so a small value costs read latency, never data.
+const memoryBytes =
+  options.memoryBytes !== undefined && Number.isFinite(Number(options.memoryBytes)) && Number(options.memoryBytes) > 0
+    ? Number(options.memoryBytes)
     : undefined;
 const bundledFfmpegBin = typeof ffmpegStatic === "string" ? ffmpegStatic : "";
 const ffmpegBin = options.ffmpegBin ? String(options.ffmpegBin) : bundledFfmpegBin || "ffmpeg";
@@ -265,6 +272,7 @@ try {
     transcodeAudio,
     ffmpegBin,
     maxDiskBytes,
+    memoryBytes,
     segmentFormat: options.segmentFormat
   });
   app = started.app;

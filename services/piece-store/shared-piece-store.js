@@ -26,11 +26,56 @@
  * and nothing here disagrees.
  */
 
+import os from "node:os";
 import { PieceLru } from "./piece-lru.js";
 import { DiskTier } from "./disk-tier.js";
 
-/** Fallback budget when the caller names none: enough for a comfortable window. */
-const DEFAULT_MEMORY_BYTES = 512 * 1024 * 1024;
+/**
+ * Live stores, so the worker can report on them.
+ *
+ * WebTorrent constructs the store itself, deep inside its own wrappers, so
+ * there is no handle to reach for from outside. Registering here is what makes
+ * the store's behaviour visible in the field at all — without it the first
+ * strange case has nothing to go on.
+ *
+ * @type {Set<SharedPieceStore>}
+ */
+const liveStores = new Set();
+
+/**
+ * A snapshot of every live store, for logging.
+ *
+ * @returns {{ name: string, resident: number, capacity: number, spilled: number, fromMemory: number, fromDisk: number, spills: number, revivals: number, blockedByPins: number }[]}
+ */
+export function collectStoreStats() {
+  return [...liveStores].map((store) => store.stats());
+}
+
+/**
+ * Ceiling for the automatic budget, and the share of free memory it will take.
+ *
+ * A flat default would be a guess dressed as a decision: the proxy runs on
+ * whatever the owner has, from a Pi to a rented box, and the budget is **per
+ * torrent** — several viewers mean several of these. Measured on the field host
+ * after one session: the proxy container sat at 796 MB with 4.1 GB free and 1.3
+ * GB already in swap, so a fixed half-gigabyte per torrent is not something to
+ * hand out blindly. Hence: a quarter of what is free, capped.
+ */
+const MEMORY_BUDGET_CEILING_BYTES = 512 * 1024 * 1024;
+const FREE_MEMORY_SHARE = 0.25;
+
+/**
+ * Budget for one torrent's resident pieces when the caller names none.
+ *
+ * @returns {number}
+ */
+function defaultMemoryBytes() {
+  const share = Math.floor(os.freemem() * FREE_MEMORY_SHARE);
+  return Math.max(MIN_BUDGET_BYTES, Math.min(MEMORY_BUDGET_CEILING_BYTES, share));
+}
+
+/** Floor for the automatic budget — below this the store thrashes to disk. */
+const MIN_BUDGET_BYTES = 64 * 1024 * 1024;
 /**
  * Never keep fewer than this many pieces resident, whatever the budget says.
  *
@@ -63,7 +108,22 @@ export class SharedPieceStore {
   #freeSlots = [];
   #lru;
   #disk;
+  /** Slots backed by memory right now; grows towards {@link capacity}. */
+  #allocatedSlots = 0;
   #closed = false;
+  #name;
+  /**
+   * What the store has actually been doing. Reported, not just kept: the
+   * balance between memory and disk reads is the number that says whether the
+   * budget is right, and it cannot be guessed from outside.
+   */
+  #counters = {
+    fromMemory: 0,
+    fromDisk: 0,
+    spills: 0,
+    revivals: 0,
+    blockedByPins: 0
+  };
 
   /**
    * @param {number} chunkLength - Piece length, and therefore the slot size.
@@ -86,20 +146,44 @@ export class SharedPieceStore {
 
     const memoryBytes = Number.isFinite(options.memoryBytes) && options.memoryBytes > 0
       ? options.memoryBytes
-      : DEFAULT_MEMORY_BYTES;
+      : defaultMemoryBytes();
     this.#capacity = Math.max(MIN_RESIDENT_PIECES, Math.floor(memoryBytes / chunkLength));
 
-    this.#shared = new SharedArrayBuffer(this.#capacity * chunkLength);
+    // Grows into the budget instead of taking it up front. The budget is per
+    // torrent, so claiming all of it on `add` would charge a host for pieces
+    // nobody has asked for — and a torrent that is merely open, or one being
+    // probed for its codecs, needs a handful of slots, not the ceiling.
+    this.#shared = new SharedArrayBuffer(MIN_RESIDENT_PIECES * chunkLength, {
+      maxByteLength: this.#capacity * chunkLength
+    });
     this.#pool = Buffer.from(this.#shared);
-    for (let slot = 0; slot < this.#capacity; slot += 1) {
+    for (let slot = 0; slot < MIN_RESIDENT_PIECES; slot += 1) {
       this.#freeSlots.push(slot);
     }
+    this.#allocatedSlots = MIN_RESIDENT_PIECES;
     this.#lru = new PieceLru(this.#capacity);
+    this.#name = options.name ?? "pieces";
     this.#disk = new DiskTier({
       directory: options.path ?? ".",
-      name: `${options.name ?? "pieces"}.pieces`,
+      name: `${this.#name}.pieces`,
       chunkLength
     });
+    liveStores.add(this);
+  }
+
+  /**
+   * What this store has been doing, for the periodic report.
+   *
+   * @returns {{ name: string, resident: number, capacity: number, spilled: number, fromMemory: number, fromDisk: number, spills: number, revivals: number, blockedByPins: number }}
+   */
+  stats() {
+    return {
+      name: this.#name,
+      resident: this.#slotOf.size,
+      capacity: this.#capacity,
+      spilled: this.#disk.size,
+      ...this.#counters
+    };
   }
 
   /** `abstract-chunk-store` exposes the piece size under this name. */
@@ -189,16 +273,28 @@ export class SharedPieceStore {
       return free;
     }
 
+    // Room left in the budget: take more memory rather than evicting. Growing
+    // replaces the view over the pool, so every slot offset stays valid — the
+    // bytes do not move.
+    if (this.#allocatedSlots < this.#capacity) {
+      this.#allocatedSlots += 1;
+      this.#shared.grow(this.#allocatedSlots * this.#chunkLength);
+      this.#pool = Buffer.from(this.#shared);
+      return this.#allocatedSlots - 1;
+    }
+
     const victim = this.#lru.evictionCandidate();
     if (victim === null) {
       // Every resident piece is being read. Taking one anyway is precisely the
       // failure this store exists to make impossible.
+      this.#counters.blockedByPins += 1;
       throw new Error("Every resident piece is pinned; no slot can be freed.");
     }
 
     const slot = this.#slotOf.get(victim);
     const bytes = this.#pool.subarray(slot * this.#chunkLength, slot * this.#chunkLength + this.#lengthOf(victim));
     await this.#disk.write(victim, bytes);
+    this.#counters.spills += 1;
 
     this.#slotOf.delete(victim);
     this.#lru.remove(victim);
@@ -265,6 +361,7 @@ export class SharedPieceStore {
       const slot = this.#slotOf.get(index);
       if (slot !== undefined) {
         this.#lru.touch(index);
+        this.#counters.fromMemory += 1;
         const start = slot * this.#chunkLength + offset;
         return Buffer.from(this.#pool.subarray(start, start + length));
       }
@@ -283,6 +380,8 @@ export class SharedPieceStore {
       await this.#disk.read(index, target);
       this.#slotOf.set(index, revived);
       this.#lru.touch(index);
+      this.#counters.fromDisk += 1;
+      this.#counters.revivals += 1;
       const start = revived * this.#chunkLength + offset;
       return Buffer.from(this.#pool.subarray(start, start + length));
     };
@@ -298,6 +397,7 @@ export class SharedPieceStore {
    */
   close(callback = () => undefined) {
     this.#closed = true;
+    liveStores.delete(this);
     this.#disk.close().then(() => callback(null), (error) => callback(error));
   }
 
@@ -309,6 +409,7 @@ export class SharedPieceStore {
    */
   destroy(callback = () => undefined) {
     this.#closed = true;
+    liveStores.delete(this);
     this.#slotOf.clear();
     this.#disk.destroy().then(() => callback(null), (error) => callback(error));
   }

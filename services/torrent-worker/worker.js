@@ -17,10 +17,21 @@
  * threads.
  */
 
+// MUST stay first: it redirects `webrtc-polyfill` to a JavaScript WebRTC stack
+// before WebTorrent can reach the native one. Two isolates using
+// node-datachannel at once abort the process, and the torrent's wss trackers
+// create peer connections of their own.
+import "./install-webrtc-shim.js";
 import { parentPort, workerData } from "node:worker_threads";
-import { TorrentPool } from "../torrent-pool.js";
 import { createSendStream } from "./channel.js";
 import { Command, Event, STREAM_CHUNK_BYTES } from "./protocol.js";
+
+// Imported dynamically, and that is load-bearing: static imports are RESOLVED
+// during linking, before any module body runs, so a statically imported pool
+// would drag in WebTorrent — and with it the real `webrtc-polyfill` — before
+// the hook above had a chance to register. Verified the hard way: with a static
+// import the process still aborted, and the stack named the genuine polyfill.
+const { TorrentPool } = await import("../torrent-pool.js");
 
 const pool = new TorrentPool({ maxDiskBytes: workerData?.maxDiskBytes });
 

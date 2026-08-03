@@ -1,3 +1,7 @@
+## 2.9.74
+
+- **Chore**: The proxy has tests, and publishing runs them. There were none before, and nothing stood between writing code and `npm publish` — which is how the 2.9.71 thread split reached the field with a defect that stopped every read. `npm test` (Node's own runner, no new dependencies) plus `prepublishOnly`, so an unproven package cannot be published. The first cases cover the transport's memory contract and are written to FAIL on the current code: sending a chunk must leave the source buffer usable by its owner, and a second read of the same piece must still return its bytes. Both fail today, which is the point — they describe the shipped defect.
+
 ## 2.9.73
 
 - **Fix**: File stats came back as `{}` after the torrent moved to its own thread (2.9.71), which left the loading screen with no peers, no speed and no progress. Two call sites — the stats route and the health report — invoked `getFileStats` **without awaiting**: it used to answer locally and immediately, and now crosses a thread boundary, so the reply was the pending promise itself, serialised to an empty object. Both now await it.

@@ -24,6 +24,7 @@
 import "./install-webrtc-shim.js";
 import { parentPort, workerData } from "node:worker_threads";
 import { createSendStream } from "./channel.js";
+import { createFileClaims } from "./file-claims.js";
 import { Command, Event, STREAM_CHUNK_BYTES } from "./protocol.js";
 
 // Imported dynamically, and that is load-bearing: static imports are RESOLVED
@@ -41,8 +42,8 @@ const pool = new TorrentPool({
 
 /** Torrents by sourceKey — the main thread names them, this thread owns them. */
 const torrentsByKey = new Map();
-/** File-claim release callbacks, keyed `${sourceKey}:${fileIndex}`. */
-const releaseByClaim = new Map();
+/** File claims, each with its own identity — see `file-claims.js`. */
+const fileClaims = createFileClaims();
 /** In-flight reads, so a cancel can stop one mid-body. */
 const readsById = new Map();
 
@@ -58,17 +59,29 @@ function log(message) {
 }
 
 /**
- * The torrent for a sourceKey, or throw a message the caller can surface.
+ * The torrent for a sourceKey, waiting for it if it is still being added.
+ *
+ * The map holds a PROMISE, registered the moment the add begins rather than
+ * when it finishes. That distinction is the whole fix: adding a magnet takes as
+ * long as its metadata does — seconds to tens of seconds — and until 2.9.77
+ * everything naming that source in the meantime was told `Unknown source`,
+ * which is false. The source exists; it is not ready. Reproduced with a magnet
+ * nobody seeds: stats, the file listing and a read all failed instantly while
+ * the add was still in flight, which on the loading screen shows up as no
+ * peers, no progress, and a plan request that fails before the torrent has had
+ * a chance to start.
+ *
+ * A source that was never added still throws, which is the honest answer.
  *
  * @param {string} sourceKey
- * @returns {import("webtorrent").Torrent}
+ * @returns {Promise<import("webtorrent").Torrent>}
  */
-function requireTorrent(sourceKey) {
-  const torrent = torrentsByKey.get(sourceKey);
-  if (!torrent) {
+async function requireTorrent(sourceKey) {
+  const pending = torrentsByKey.get(sourceKey);
+  if (!pending) {
     throw new Error(`Unknown source ${sourceKey}.`);
   }
-  return torrent;
+  return pending;
 }
 
 /**
@@ -89,7 +102,7 @@ function requireTorrent(sourceKey) {
  * @returns {Promise<void>}
  */
 async function streamRange({ id, sourceKey, fileIndex, start, end }) {
-  const torrent = requireTorrent(sourceKey);
+  const torrent = await requireTorrent(sourceKey);
   const file = torrent.files?.[fileIndex];
   if (!file) {
     throw new Error(`File ${fileIndex} not found in ${sourceKey}.`);
@@ -174,8 +187,24 @@ async function streamRange({ id, sourceKey, fileIndex, start, end }) {
 async function runCommand(command, params, id) {
   switch (command) {
     case Command.ADD_SOURCE: {
-      const torrent = await pool.getTorrent(params.sourceType, params.source);
-      torrentsByKey.set(params.sourceKey, torrent);
+      // Registered before it resolves, so anything naming this source while it
+      // is being added waits for it instead of being told it does not exist.
+      // Reusing the same promise for a repeated add also collapses two callers
+      // racing to open the same torrent into one.
+      let pending = torrentsByKey.get(params.sourceKey);
+      if (!pending) {
+        pending = pool.getTorrent(params.sourceType, params.source);
+        torrentsByKey.set(params.sourceKey, pending);
+        // A failed add must not be remembered, or every later attempt at this
+        // source replays the same failure. The handler also marks the rejection
+        // as observed, so it cannot surface as an unhandled one.
+        pending.catch(() => {
+          if (torrentsByKey.get(params.sourceKey) === pending) {
+            torrentsByKey.delete(params.sourceKey);
+          }
+        });
+      }
+      const torrent = await pending;
       return {
         infoHash: torrent.infoHash,
         name: torrent.name,
@@ -190,7 +219,7 @@ async function runCommand(command, params, id) {
     }
 
     case Command.LIST_FILES: {
-      const torrent = requireTorrent(params.sourceKey);
+      const torrent = await requireTorrent(params.sourceKey);
       return (torrent.files ?? []).map((file, index) => ({
         index,
         name: file.name,
@@ -200,42 +229,42 @@ async function runCommand(command, params, id) {
     }
 
     case Command.ACQUIRE_FILE: {
-      const torrent = requireTorrent(params.sourceKey);
-      const claimKey = `${params.sourceKey}:${params.fileIndex}`;
-      // One claim per key; a second acquire without release would leak the
-      // first release callback and pin the file forever.
-      if (!releaseByClaim.has(claimKey)) {
-        releaseByClaim.set(claimKey, pool.acquireFile(torrent, params.fileIndex));
-      }
-      return true;
+      const torrent = await requireTorrent(params.sourceKey);
+      // Every acquire is its own claim. Sharing one per file meant the first
+      // reader to finish released the hold while others were still reading.
+      return fileClaims.open(
+        params.sourceKey,
+        params.fileIndex,
+        pool.acquireFile(torrent, params.fileIndex)
+      );
     }
 
     case Command.RELEASE_FILE: {
-      const claimKey = `${params.sourceKey}:${params.fileIndex}`;
-      const release = releaseByClaim.get(claimKey);
-      if (release) {
-        releaseByClaim.delete(claimKey);
-        release();
+      const released = fileClaims.close(params.claimId);
+      if (!released) {
+        // Not fatal — but it means a release arrived twice or after teardown,
+        // and silence here is what let the previous scheme look healthy.
+        log(`release for unknown file claim ${params.claimId}`);
       }
-      return true;
+      return released;
     }
 
     case Command.FILE_STATS: {
-      const torrent = requireTorrent(params.sourceKey);
+      const torrent = await requireTorrent(params.sourceKey);
       return pool.getFileStats(torrent, params.fileIndex, {
         resumeAnchorByteStart: params.resumeAnchorByteStart ?? null
       });
     }
 
     case Command.PRIORITIZE: {
-      const torrent = requireTorrent(params.sourceKey);
+      const torrent = await requireTorrent(params.sourceKey);
       pool.prioritizeByteRange(torrent, params.fileIndex, params.byteStart, params.windowBytes);
       return true;
     }
 
     case Command.PREFETCH_EDGES: {
-      const torrent = requireTorrent(params.sourceKey);
-      return pool.prefetchFileEdges(torrent, params.fileIndex, params.headBytes, params.tailBytes, params.timeoutMs);
+      const torrent = await requireTorrent(params.sourceKey);
+      return pool.prefetchFileEdges(torrent, params.fileIndex, params.options ?? {});
     }
 
     case Command.READ_RANGE: {
@@ -257,10 +286,7 @@ async function runCommand(command, params, id) {
     }
 
     case Command.DESTROY_ALL: {
-      for (const [, release] of releaseByClaim) {
-        release();
-      }
-      releaseByClaim.clear();
+      fileClaims.closeAll();
       torrentsByKey.clear();
       await pool.destroyAll();
       return true;

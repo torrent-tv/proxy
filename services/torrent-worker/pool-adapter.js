@@ -97,14 +97,18 @@ export class WorkerTorrentPool {
     // "removed idle torrent ... and its store" mid-playback, after which every
     // read hung and ffmpeg saw an empty input ("Stream ends prematurely at 0").
     // Chaining the release onto the acquire keeps them in order.
-    const acquired = this.#client.acquireFile(sourceKey, fileIndex).catch(() => undefined);
+    const acquired = this.#client.acquireFile(sourceKey, fileIndex).catch(() => null);
     let released = false;
     return () => {
       if (released) {
         return;
       }
       released = true;
-      void acquired.then(() => this.#client.releaseFile(sourceKey, fileIndex)).catch(() => undefined);
+      // Release the claim this call opened, not "the file" — waiting for the
+      // acquire is also what tells us which claim that is.
+      void acquired
+        .then((claimId) => (claimId ? this.#client.releaseFile(claimId) : undefined))
+        .catch(() => undefined);
     };
   }
 
@@ -152,19 +156,24 @@ export class WorkerTorrentPool {
   /**
    * Pre-fetch the head and tail the codec probe needs.
    *
+   * Takes an options object, matching `TorrentPool.prefetchFileEdges` — this
+   * adapter exists to present that same interface. It previously declared
+   * positional parameters instead, so the planner's options object arrived as
+   * `headBytes` and only worked because it was passed along far enough to be
+   * destructured at the far end. Anyone calling it as documented got the
+   * defaults instead of the sizes they asked for.
+   *
    * @param {object} torrent
    * @param {number} fileIndex
-   * @param {number} [headBytes]
-   * @param {number} [tailBytes]
-   * @param {number} [timeoutMs]
+   * @param {{ headBytes?: number, tailBytes?: number, timeoutMs?: number }} [options]
    * @returns {Promise<unknown>}
    */
-  async prefetchFileEdges(torrent, fileIndex, headBytes, tailBytes, timeoutMs) {
+  async prefetchFileEdges(torrent, fileIndex, options = {}) {
     const sourceKey = torrent?.sourceKey;
     if (!sourceKey) {
       return null;
     }
-    return this.#client.prefetchFileEdges({ sourceKey, fileIndex, headBytes, tailBytes, timeoutMs });
+    return this.#client.prefetchFileEdges({ sourceKey, fileIndex, options });
   }
 
   /**

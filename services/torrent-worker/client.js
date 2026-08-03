@@ -122,21 +122,23 @@ export class TorrentWorkerClient {
    *
    * @param {string} sourceKey
    * @param {number} fileIndex
-   * @returns {Promise<void>}
+   * @returns {Promise<string>} The claim's identity, for {@link releaseFile}.
    */
   async acquireFile(sourceKey, fileIndex) {
-    await this.#caller.call(Command.ACQUIRE_FILE, { sourceKey, fileIndex });
+    return this.#caller.call(Command.ACQUIRE_FILE, { sourceKey, fileIndex });
   }
 
   /**
-   * Drop a claim taken with {@link acquireFile}.
+   * Drop one claim taken with {@link acquireFile}.
    *
-   * @param {string} sourceKey
-   * @param {number} fileIndex
+   * Named by claim rather than by file: several readers hold the same file at
+   * once, and releasing "the file" released somebody else's hold.
+   *
+   * @param {string} claimId
    * @returns {Promise<void>}
    */
-  async releaseFile(sourceKey, fileIndex) {
-    await this.#caller.call(Command.RELEASE_FILE, { sourceKey, fileIndex });
+  async releaseFile(claimId) {
+    await this.#caller.call(Command.RELEASE_FILE, { claimId });
   }
 
   /**
@@ -162,17 +164,11 @@ export class TorrentWorkerClient {
   /**
    * Pre-fetch the head and tail the codec probe needs.
    *
-   * @param {{ sourceKey: string, fileIndex: number, headBytes?: number, tailBytes?: number, timeoutMs?: number }} params
+   * @param {{ sourceKey: string, fileIndex: number, options?: { headBytes?: number, tailBytes?: number, timeoutMs?: number } }} params
    * @returns {Promise<unknown>}
    */
-  async prefetchFileEdges({ sourceKey, fileIndex, headBytes, tailBytes, timeoutMs }) {
-    return this.#caller.call(Command.PREFETCH_EDGES, {
-      sourceKey,
-      fileIndex,
-      headBytes,
-      tailBytes,
-      timeoutMs
-    });
+  async prefetchFileEdges({ sourceKey, fileIndex, options = {} }) {
+    return this.#caller.call(Command.PREFETCH_EDGES, { sourceKey, fileIndex, options });
   }
 
   /**

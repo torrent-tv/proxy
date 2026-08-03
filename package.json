@@ -33,6 +33,7 @@
     "node-datachannel": "^0.32.0",
     "uint8-util": "2.2.6",
     "webtorrent": "2.8.5",
+    "werift": "^0.24.2",
     "ws": "^8.18.2"
   }
 }

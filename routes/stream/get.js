@@ -61,6 +61,31 @@ export async function handleStreamGet(req, reply, { sourceRegistry, torrentPool 
     return reply.code(404).send({ error: "File index was not found in torrent." });
   }
 
+  // HEAD asks what a GET would return, not for the bytes. Fastify serves HEAD
+  // from this same handler, which used to mean a HEAD started a read of the
+  // WHOLE file: the body was discarded by Node, but the read ran on, the
+  // response never finished, and the next request on that keep-alive connection
+  // waited behind it. Measured on the field host: the keyframe-index HEAD
+  // returned headers in 23 ms and then held the connection until its 15 s
+  // timeout, which is where the 73 s transcode-session create went.
+  if (req.method === "HEAD") {
+    // Written to the raw response on purpose. Answering through `reply.send()`
+    // with no payload makes Fastify set `content-length: 0`, which is worse
+    // than useless here: the keyframe index asks for the file size with this
+    // very request and treats 0 as "no index available", silently falling back
+    // to an invented segment grid. Hijacking leaves the response to us, and
+    // Node omits the body for HEAD by itself.
+    reply.hijack();
+    reply.raw.writeHead(200, {
+      "Accept-Ranges": "bytes",
+      "Content-Type": "application/octet-stream",
+      "Content-Length": String(file.length),
+      "Content-Disposition": `inline; filename*=UTF-8''${encodeURIComponent(file.name)}`
+    });
+    reply.raw.end();
+    return;
+  }
+
   const releaseFile = torrentPool.acquireFile(torrent, fileIndex);
 
   const range = parseRange(req.headers.range, file.length);

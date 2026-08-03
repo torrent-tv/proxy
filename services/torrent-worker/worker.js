@@ -25,7 +25,8 @@ import "./install-webrtc-shim.js";
 import { parentPort, workerData } from "node:worker_threads";
 import { createSendStream } from "./channel.js";
 import { createFileClaims } from "./file-claims.js";
-import { Command, Event, STREAM_CHUNK_BYTES } from "./protocol.js";
+import { readFragments } from "./piece-reader.js";
+import { Command, Event } from "./protocol.js";
 
 // Imported dynamically, and that is load-bearing: static imports are RESOLVED
 // during linking, before any module body runs, so a statically imported pool
@@ -33,7 +34,7 @@ import { Command, Event, STREAM_CHUNK_BYTES } from "./protocol.js";
 // the hook above had a chance to register. Verified the hard way: with a static
 // import the process still aborted, and the stack named the genuine polyfill.
 const { TorrentPool } = await import("../torrent-pool.js");
-const { collectStoreStats } = await import("../piece-store/shared-piece-store.js");
+const { collectStoreStats, findSharedStore } = await import("../piece-store/shared-piece-store.js");
 
 const pool = new TorrentPool({
   maxDiskBytes: workerData?.maxDiskBytes,
@@ -85,6 +86,57 @@ async function requireTorrent(sourceKey) {
 }
 
 /**
+ * Fragments waiting for the main thread to say it has finished reading them,
+ * keyed by request id. One per read, because only one fragment is in flight.
+ *
+ * @type {Map<number, () => void>}
+ */
+const fragmentWaiters = new Map();
+
+/**
+ * Wake a read that is waiting for a fragment to be confirmed.
+ *
+ * Used both by the confirmation itself and by cancellation — a cancelled read
+ * will never be confirmed, and without this it would wait forever holding a pin.
+ *
+ * @param {number} id
+ * @returns {void}
+ */
+function settleFragment(id) {
+  const done = fragmentWaiters.get(id);
+  if (done) {
+    fragmentWaiters.delete(id);
+    done();
+  }
+}
+
+/**
+ * Send one fragment's position and wait until the main thread is done with it.
+ *
+ * The pin is dropped only after the confirmation, because until then the other
+ * thread may still be reading those exact bytes.
+ *
+ * @param {number} id
+ * @param {import("./piece-reader.js").PieceFragment} fragment
+ * @returns {Promise<void>}
+ */
+function sendFragment(id, fragment) {
+  return new Promise((resolve) => {
+    fragmentWaiters.set(id, () => {
+      fragment.release();
+      resolve();
+    });
+    parentPort.postMessage({
+      type: Event.FRAGMENT,
+      id,
+      pieceIndex: fragment.pieceIndex,
+      offset: fragment.offset,
+      length: fragment.length
+    });
+  });
+}
+
+/**
  * Stream a byte range back as CHUNK messages.
  *
  * Reads through WebTorrent's own read stream — which serves already-downloaded
@@ -120,39 +172,31 @@ async function streamRange({ id, sourceKey, fileIndex, start, end }) {
   // an empty input.
   const releaseRead = pool.acquireFile(torrent, fileIndex);
 
-  const options = start === null || start === undefined ? {} : { start, end };
-  const source = file.createReadStream(options);
-
-  // Coalesce WebTorrent's own chunking (piece-sized, often much smaller) up to
-  // our chunk size: a round trip costs ~100 µs, so sending its native pieces
-  // straight through would multiply the crossings for no benefit.
-  let pendingParts = [];
-  let pendingBytes = 0;
-
-  const flush = async () => {
-    if (pendingBytes === 0) {
-      return;
-    }
-    const merged = pendingParts.length === 1 ? pendingParts[0] : Buffer.concat(pendingParts, pendingBytes);
-    pendingParts = [];
-    pendingBytes = 0;
-    await sender.send(merged);
-  };
+  const rangeStart = start ?? 0;
+  const rangeEnd = end ?? file.length - 1;
 
   let failed = false;
   try {
-    for await (const part of source) {
+    // Positions in shared memory, not bytes: the main thread maps the same pool
+    // and reads each fragment in place, so nothing is copied and nothing is
+    // transferred. See `piece-reader.js`.
+    for await (const fragment of readFragments({
+      torrent,
+      fileIndex,
+      start: rangeStart,
+      end: rangeEnd,
+      cancellation: sender
+    })) {
       if (sender.isCancelled()) {
+        fragment.release();
         break;
       }
-      pendingParts.push(part);
-      pendingBytes += part.length;
-      if (pendingBytes >= STREAM_CHUNK_BYTES) {
-        await flush();
-      }
-    }
-    if (!sender.isCancelled()) {
-      await flush();
+      // One fragment in flight at a time. Each one holds a piece pinned, and
+      // the store guarantees only two resident pieces at its smallest budget —
+      // holding two pins while asking for a third would deadlock it against
+      // itself. The round trip costs ~100 µs against a piece worth megabytes,
+      // so there is nothing to win by overlapping them.
+      await sendFragment(id, fragment);
     }
   } catch (error) {
     // The end-of-read marker means "the body is complete". Sending it after a
@@ -164,15 +208,16 @@ async function streamRange({ id, sourceKey, fileIndex, start, end }) {
     throw error;
   } finally {
     readsById.delete(id);
+    // Any fragment still awaiting confirmation will never get one now; settling
+    // it here releases its pin rather than leaking a held slot.
+    settleFragment(id);
     releaseRead();
     if (!failed) {
       sender.end();
     }
-    // A cancelled read must stop the underlying torrent stream too, or the
-    // pieces keep being fetched for a viewer who has gone.
-    if (typeof source.destroy === "function") {
-      source.destroy();
-    }
+    // Nothing else to tear down: the reader owns no stream of its own, and a
+    // cancelled read stops at its next fragment boundary because it polls the
+    // same `sender` for cancellation.
   }
 }
 
@@ -208,6 +253,10 @@ async function runCommand(command, params, id) {
       return {
         infoHash: torrent.infoHash,
         name: torrent.name,
+        // The piece pool itself. A `SharedArrayBuffer` crosses as a reference to
+        // the same memory rather than a copy, which is what lets the main thread
+        // read a piece where it already lies instead of being sent its bytes.
+        sharedBuffer: findSharedStore(torrent)?.sharedBuffer ?? null,
         // Files cross as plain data; the objects stay here.
         files: (torrent.files ?? []).map((file, index) => ({
           index,
@@ -282,6 +331,9 @@ async function runCommand(command, params, id) {
 
     case Command.CANCEL_READ: {
       readsById.get(params.readId)?.cancel();
+      // A cancelled read will never have its outstanding fragment confirmed, so
+      // wake it here — otherwise it waits forever with a piece pinned.
+      settleFragment(params.readId);
       return true;
     }
 
@@ -302,6 +354,13 @@ parentPort.on("message", async (message) => {
   // in-flight read.
   if (message?.type === Event.CHUNK_ACK) {
     readsById.get(message.id)?.ack();
+    return;
+  }
+
+  // The main thread has finished reading a fragment out of shared memory, so
+  // its piece may be unpinned and the read may continue.
+  if (message?.type === Event.FRAGMENT_DONE) {
+    settleFragment(message.id);
     return;
   }
 

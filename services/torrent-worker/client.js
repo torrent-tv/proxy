@@ -37,6 +37,10 @@ export class TorrentWorkerClient {
   #caller;
   /** Receive-side handles for in-flight reads, keyed by request id. */
   #reads = new Map();
+  /** Each torrent's piece pool, so a fragment can be read where it lies. */
+  #poolBySource = new Map();
+  /** Which pool an in-flight read belongs to, keyed by request id. */
+  #poolByRead = new Map();
 
   /**
    * @param {{ maxDiskBytes?: number, memoryBytes?: number }} [options]
@@ -64,6 +68,24 @@ export class TorrentWorkerClient {
         return;
       }
       switch (message?.type) {
+        case Event.FRAGMENT: {
+          // The bytes are already here — this thread maps the same pool. Read
+          // them where they lie, then say so, which is what lets the worker
+          // unpin the piece and move on. The copy exists only because the
+          // consumer keeps what it is given while the slot may be reused; it is
+          // one copy on this thread rather than one on the torrent's.
+          const pool = this.#poolByRead.get(message.id);
+          const bytes = pool
+            ? Uint8Array.prototype.slice.call(
+                new Uint8Array(pool, message.offset, message.length)
+              )
+            : null;
+          if (bytes) {
+            this.#reads.get(message.id)?.push(bytes);
+          }
+          this.#worker.postMessage({ type: Event.FRAGMENT_DONE, id: message.id });
+          break;
+        }
         case Event.CHUNK: {
           const bytes = message.bytes;
           this.#reads.get(message.id)?.push(
@@ -74,6 +96,7 @@ export class TorrentWorkerClient {
         case Event.READ_END:
           this.#reads.get(message.id)?.close();
           this.#reads.delete(message.id);
+          this.#poolByRead.delete(message.id);
           break;
         case Event.LOG:
           logger.info(`torrent-worker: ${message.message}`);
@@ -190,9 +213,16 @@ export class TorrentWorkerClient {
       onCancel: () => {
         void this.#caller.call(Command.CANCEL_READ, { readId }).catch(() => undefined);
         this.#reads.delete(readId);
+        this.#poolByRead.delete(readId);
       }
     });
     this.#reads.set(readId, receive);
+    // Which pool this read's fragments will point into. Recorded before the
+    // command is sent, because the first fragment can arrive immediately.
+    const pool = this.#poolBySource.get(sourceKey);
+    if (pool) {
+      this.#poolByRead.set(readId, pool);
+    }
 
     // The worker replies to READ_RANGE only once the body is fully sent; a
     // failure before that must surface on the stream, not vanish.
@@ -224,6 +254,11 @@ export class TorrentWorkerClient {
    */
   async getTorrent({ sourceKey, sourceType, source }) {
     const info = await this.addSource({ sourceKey, sourceType, source });
+    // The torrent's piece pool. Both threads now hold the same memory, so a
+    // read can be answered with an offset instead of with bytes.
+    if (info.sharedBuffer) {
+      this.#poolBySource.set(sourceKey, info.sharedBuffer);
+    }
     const client = this;
     return {
       infoHash: info.infoHash,

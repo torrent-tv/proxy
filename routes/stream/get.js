@@ -94,6 +94,58 @@ export async function handleStreamGet(req, reply, { sourceRegistry, torrentPool 
   // backlog — this is what caused ~15-18 s stalls when seeking into an
   // undownloaded region.
   torrentPool.prioritizeByteRange(torrent, fileIndex, range ? range.start : 0);
+
+  const start = range ? range.start : 0;
+  const end = range ? range.end : file.length - 1;
+  const contentLength = end - start + 1;
+
+  // Written straight out of the torrent's shared memory when that is available:
+  // no copy on either thread, at the cost of doing the writing by hand, because
+  // only the write callback tells us when a piece may be released. Falls back to
+  // the ordinary stream for sources without a shared pool.
+  const fragments = typeof file.createFragmentReader === "function"
+    ? file.createFragmentReader({ start, end })
+    : null;
+
+  if (fragments) {
+    reply.hijack();
+    reply.raw.writeHead(range ? 206 : 200, {
+      "Accept-Ranges": "bytes",
+      "Content-Type": "application/octet-stream",
+      "Content-Length": String(contentLength),
+      "Content-Disposition": `inline; filename*=UTF-8''${encodeURIComponent(file.name)}`,
+      ...(range ? { "Content-Range": `bytes ${start}-${end}/${file.length}` } : {})
+    });
+
+    // A client that goes away mid-response must stop the read, or pieces keep
+    // being fetched for nobody.
+    reply.raw.once("close", () => fragments.cancel());
+
+    try {
+      for await (const fragment of fragments) {
+        if (reply.raw.writableEnded || reply.raw.destroyed) {
+          fragment.release();
+          break;
+        }
+        await new Promise((resolve, reject) => {
+          reply.raw.write(fragment.bytes, (error) => (error ? reject(error) : resolve()));
+        });
+        // Only now are these bytes gone: the piece can be unpinned, and the
+        // slot it occupies reused. Releasing before this point corrupts the
+        // response silently.
+        fragment.release();
+      }
+      reply.raw.end();
+    } catch {
+      // The body is already committed by its headers, so there is nothing
+      // useful to send instead — drop the connection and let the client retry.
+      reply.raw.destroy();
+    } finally {
+      releaseFile();
+    }
+    return;
+  }
+
   reply.header("Accept-Ranges", "bytes");
   reply.header("Content-Type", "application/octet-stream");
   reply.header("Content-Disposition", `inline; filename*=UTF-8''${encodeURIComponent(file.name)}`);
@@ -105,11 +157,10 @@ export async function handleStreamGet(req, reply, { sourceRegistry, torrentPool 
     return reply.send(stream);
   }
 
-  const contentLength = range.end - range.start + 1;
   reply.code(206);
   reply.header("Content-Length", String(contentLength));
-  reply.header("Content-Range", `bytes ${range.start}-${range.end}/${file.length}`);
-  const stream = file.createReadStream({ start: range.start, end: range.end });
+  reply.header("Content-Range", `bytes ${start}-${end}/${file.length}`);
+  const stream = file.createReadStream({ start, end });
   bindRelease(stream, reply, releaseFile);
   return reply.send(stream);
 }

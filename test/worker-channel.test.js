@@ -156,6 +156,11 @@ test("a read of an unknown source fails the stream rather than hanging", async (
   // the reader waited forever. A unit test on either half alone passes happily.
   const client = new TorrentWorkerClient({ memoryBytes: 8 * 1024 * 1024 });
   try {
+    // Starting the worker takes several seconds — it builds a torrent client
+    // and a DHT — so the first request would measure startup, not the failure
+    // path under test.
+    await client.listFiles("warm-up").catch(() => undefined);
+
     const stream = client.createReadStream({ sourceKey: "no-such-source", fileIndex: 0 });
     const reader = stream.getReader();
 

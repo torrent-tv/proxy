@@ -80,6 +80,18 @@ export const Event = {
   ERROR: "error",
   /** One piece of a READ_RANGE body; its bytes are transferred, never copied. */
   CHUNK: "chunk",
+  /**
+   * Where a piece of the body sits in the torrent's shared pool — an offset and
+   * a length, no bytes at all. The main thread maps the same memory and reads it
+   * in place; see `piece-reader.js` for why this replaces sending the bytes.
+   */
+  FRAGMENT: "fragment",
+  /**
+   * The main thread has finished with a FRAGMENT and its pin may be dropped.
+   * Distinct from {@link CHUNK_ACK}, which only reports queue capacity: this one
+   * is a promise that nothing is reading those bytes any more.
+   */
+  FRAGMENT_DONE: "fragment-done",
   /** A READ_RANGE ended; no further CHUNKs bear that request id. */
   READ_END: "read-end",
   /** The main thread consumed a chunk — see {@link STREAM_HIGH_WATER_CHUNKS}. */

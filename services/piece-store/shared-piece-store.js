@@ -52,6 +52,31 @@ export function collectStoreStats() {
 }
 
 /**
+ * The shared store behind a torrent, or `null` if it is not one of ours.
+ *
+ * WebTorrent wraps whatever store it is given — today in `ImmediateChunkStore`,
+ * and historically in a piece cache as well — and offers no way to ask for the
+ * innermost one. Walking the `store` chain finds it regardless of how many
+ * wrappers there are or what order they sit in, which is sturdier than reaching
+ * for a fixed `torrent.store.store`.
+ *
+ * @param {{ store?: object } | null | undefined} torrent
+ * @returns {SharedPieceStore | null}
+ */
+export function findSharedStore(torrent) {
+  let candidate = torrent?.store;
+  // Bounded rather than `while (candidate)`: a store that referenced itself
+  // would otherwise hang the thread instead of failing.
+  for (let depth = 0; candidate && depth < 8; depth += 1) {
+    if (candidate instanceof SharedPieceStore) {
+      return candidate;
+    }
+    candidate = candidate.store;
+  }
+  return null;
+}
+
+/**
  * Ceiling for the automatic budget, and the share of free memory it will take.
  *
  * A flat default would be a guess dressed as a decision: the proxy runs on
@@ -387,6 +412,53 @@ export class SharedPieceStore {
     };
 
     fetch().then((bytes) => done(null, bytes), (error) => done(error));
+  }
+
+  /**
+   * Ensure a piece is in memory and say where it sits — without copying it.
+   *
+   * This is {@link get} minus its final copy, and it exists for exactly one
+   * caller: the reader that hands pieces to the other thread. That thread maps
+   * the same {@link sharedBuffer}, so an offset and a length are all it needs,
+   * and the bytes never move. `get` cannot serve that purpose because
+   * WebTorrent keeps what `get` returns while the slot underneath may be
+   * reused.
+   *
+   * The caller MUST hold a pin across the whole read — the returned offset
+   * stays valid only while the piece is pinned.
+   *
+   * @param {number} index
+   * @returns {Promise<{ offset: number, length: number } | null>} `null` when
+   *   the store holds no such piece, in memory or on disk.
+   */
+  async reside(index) {
+    if (this.#closed) {
+      throw new Error("Piece store is closed.");
+    }
+
+    const slot = this.#slotOf.get(index);
+    if (slot !== undefined) {
+      this.#lru.touch(index);
+      this.#counters.fromMemory += 1;
+      return this.locate(index);
+    }
+
+    if (!this.#disk.has(index)) {
+      return null;
+    }
+
+    const pieceLength = this.#lengthOf(index);
+    const revived = await this.#claimSlot();
+    const target = this.#pool.subarray(
+      revived * this.#chunkLength,
+      revived * this.#chunkLength + pieceLength
+    );
+    await this.#disk.read(index, target);
+    this.#slotOf.set(index, revived);
+    this.#lru.touch(index);
+    this.#counters.fromDisk += 1;
+    this.#counters.revivals += 1;
+    return this.locate(index);
   }
 
   /**

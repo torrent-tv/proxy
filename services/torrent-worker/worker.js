@@ -398,7 +398,7 @@ setInterval(() => {
     const fromMemoryShare = reads > 0 ? ((stats.fromMemory / reads) * 100).toFixed(1) : "—";
     log(
       `piece-store "${stats.name.slice(0, 40)}": resident=${stats.resident}/${stats.capacity} ` +
-      `spilled=${stats.spilled} reads=${reads} (${fromMemoryShare}% from memory) ` +
+      `pinned=${stats.pinned} spilled=${stats.spilled} reads=${reads} (${fromMemoryShare}% from memory) ` +
       `spills=${stats.spills} revivals=${stats.revivals}` +
       (stats.blockedByPins > 0 ? ` blocked-by-pins=${stats.blockedByPins}` : "")
     );

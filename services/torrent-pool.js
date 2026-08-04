@@ -383,6 +383,14 @@ export class TorrentPool {
    */
   #readPositionByTorrent = new Map();
 
+  /**
+   * Edge prefetches currently running, keyed by infoHash and file index, so two
+   * callers asking at the same time share one.
+   *
+   * @type {Map<string, Promise<void>>}
+   */
+  #edgePrefetches = new Map();
+
   /** Global disk cap in bytes (0 = disabled). */
   #maxDiskBytes = 0;
 
@@ -1034,6 +1042,37 @@ export class TorrentPool {
     fileIndex,
     { headBytes = 256 * 1024, tailBytes = 2 * 1024 * 1024, timeoutMs = 300_000 } = {}
   ) {
+    if (!torrent || !Array.isArray(torrent.files)) {
+      return;
+    }
+    // Two callers can ask for the same edges at once: the warm-up that starts
+    // when a torrent is picked, and the playback plan a moment later. Reading
+    // the same two pieces twice costs nothing in bandwidth — the torrent
+    // fetches each piece once — but it does open a second pair of readers, each
+    // claiming a window and holding pieces. One is enough.
+    const inFlightKey = `${torrent.infoHash}:${fileIndex}`;
+    const running = this.#edgePrefetches.get(inFlightKey);
+    if (running) {
+      return running;
+    }
+    const prefetch = this.#prefetchFileEdgesOnce(torrent, fileIndex, { headBytes, tailBytes, timeoutMs });
+    this.#edgePrefetches.set(inFlightKey, prefetch);
+    try {
+      return await prefetch;
+    } finally {
+      this.#edgePrefetches.delete(inFlightKey);
+    }
+  }
+
+  /**
+   * The body of {@link prefetchFileEdges}, without the de-duplication.
+   *
+   * @param {import("webtorrent").Torrent} torrent
+   * @param {number} fileIndex
+   * @param {{ headBytes: number, tailBytes: number, timeoutMs: number }} options
+   * @returns {Promise<void>}
+   */
+  async #prefetchFileEdgesOnce(torrent, fileIndex, { headBytes, tailBytes, timeoutMs }) {
     if (!torrent || !Array.isArray(torrent.files)) {
       return;
     }

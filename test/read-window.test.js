@@ -219,7 +219,8 @@ test("criticality marks the window being waited for, not the whole range", async
   try {
     const iterator = readFragments({
       torrent, fileIndex: 0, start: 0, end: 8000 * PIECE - 1,
-      cancellation: { isCancelled: () => false }
+      cancellation: { isCancelled: () => false },
+      windowBytes: WINDOW_PIECES * PIECE
     });
     const pending = iterator.next();
     await new Promise((resolve) => setImmediate(resolve));

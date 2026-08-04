@@ -1,3 +1,8 @@
+## 2.9.99
+
+- **New**: A source can be told to start before anyone asks to play it — `POST /api/sources/:sourceKey/warm`. Everything a cold torrent must do first takes seconds and none of it depends on which file is wanted: announce to the trackers, connect to peers, be unchoked by them. Given a file index it also fetches the two pieces at that file's edges, which is what the codec probe reads and what took **6.7 s of the 10.3 s** before playback in the session measured 2026-08-04. All of it used to begin only once a file had been chosen, because it was buried inside the playback plan. The route returns as soon as the work is under way and reports a refusal rather than an error — nothing is broken if a warm-up does not happen, since the ordinary path still does all of it.
+- **Chore**: Two callers asking for the same file's edges at once now share one prefetch instead of opening a second pair of readers, each claiming a window and holding pieces. That happens by design on a single-video torrent, where the warm-up and the playback plan both want them.
+
 ## 2.9.98
 
 - **Fix**: The upload is no longer raised at moments when nobody wants a byte. A torrent with no reader was counted as starving whenever its download read low — which it always does while the encoder is held back for running ahead of the viewer. Measured: four cycles of 512 KB/s and back in three minutes, each reported as `earn unchoke … down=0KB/s`. Starvation now requires somebody to be waiting.

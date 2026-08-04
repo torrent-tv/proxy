@@ -198,11 +198,17 @@ export class TorrentWorkerClient {
   /**
    * Reorder piece selection around a read position (seek prioritisation).
    *
-   * @param {{ sourceKey: string, fileIndex: number, byteStart: number, windowBytes?: number }} params
+   * @param {{ sourceKey: string, fileIndex: number, byteStart: number, windowBytes?: number, wholeFileRead?: boolean }} params
    * @returns {Promise<void>}
    */
-  async prioritizeByteRange({ sourceKey, fileIndex, byteStart, windowBytes }) {
-    await this.#caller.call(Command.PRIORITIZE, { sourceKey, fileIndex, byteStart, windowBytes });
+  async prioritizeByteRange({ sourceKey, fileIndex, byteStart, windowBytes, wholeFileRead }) {
+    await this.#caller.call(Command.PRIORITIZE, {
+      sourceKey,
+      fileIndex,
+      byteStart,
+      windowBytes,
+      wholeFileRead
+    });
   }
 
   /**

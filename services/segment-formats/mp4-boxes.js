@@ -113,6 +113,19 @@ export function readTrackTimescales(initSegment) {
  * independently-addressable segment anyway: it carries its own position, so it
  * is valid against any init for the same tracks.
  *
+ * A SEGMENT MAY HOLD SEVERAL FRAGMENTS PER TRACK, so the segment's start is
+ * applied as a SHIFT, not as a value written into every `tfdt`. The muxer that
+ * takes explicit cut times uses `frag_keyframe`, which opens a fragment at each
+ * keyframe, while a cut point is only every few keyframes — measured on the
+ * field host: a 6 s piece carried three fragments per track, at 0, 2 and 4 s of
+ * its own clock. Writing the segment's start into all three made them claim the
+ * same decode time; the player rejected the segment and re-fetched it forever
+ * (field 2026-08-04: segments 1 and 2 alternating for minutes, each served in
+ * tens of milliseconds, transcode healthy at 12x). Each track's first fragment
+ * therefore defines the base and the rest keep their distance from it. With one
+ * fragment per track — what the `hls` muxer produces — a shift and a write are
+ * the same thing, so both paths are served by this.
+ *
  * Mutates a copy; the caller's buffer is untouched.
  *
  * @param {Buffer} segment
@@ -128,6 +141,8 @@ export function stampSegmentStartTime(segment, startSeconds, trackTimescales) {
   // `tfhd` carries the track id and always precedes the `tfdt` inside the same
   // `traf`, so an ordered pass pairs each `tfdt` with its track's timescale.
   let currentTrackId = null;
+  /** @type {Map<number, number>} trackId → decode time of that track's first fragment. */
+  const fragmentBase = new Map();
   walkBoxes(stamped, (type, bodyStart, bodyEnd) => {
     if (type === "tfhd") {
       if (bodyStart + 8 <= bodyEnd) {
@@ -143,17 +158,27 @@ export function stampSegmentStartTime(segment, startSeconds, trackTimescales) {
       return;
     }
     const version = stamped[bodyStart];
-    const value = Math.round(startSeconds * timescale);
+    if (version === 1 ? bodyStart + 12 > bodyEnd : bodyStart + 8 > bodyEnd) {
+      return;
+    }
+    const existing =
+      version === 1
+        ? Number(stamped.readBigUInt64BE(bodyStart + 4))
+        : stamped.readUInt32BE(bodyStart + 4);
+    if (!fragmentBase.has(currentTrackId)) {
+      fragmentBase.set(currentTrackId, existing);
+    }
+    // Distance from the track's first fragment in this segment. Never negative:
+    // decode times only move forward, and a malformed one must not drag a later
+    // fragment behind the segment's start.
+    const withinSegment = Math.max(0, existing - (fragmentBase.get(currentTrackId) ?? 0));
+    const value = Math.round(startSeconds * timescale) + withinSegment;
     if (version === 1) {
-      if (bodyStart + 12 <= bodyEnd) {
-        stamped.writeBigUInt64BE(BigInt(value), bodyStart + 4);
-      }
-    } else if (bodyStart + 8 <= bodyEnd) {
+      stamped.writeBigUInt64BE(BigInt(value), bodyStart + 4);
+    } else if (value <= 0xffffffff) {
       // A 32-bit field cannot express beyond ~2^32 ticks; leave it rather than
       // write a wrapped value (the player would land somewhere arbitrary).
-      if (value <= 0xffffffff) {
-        stamped.writeUInt32BE(value, bodyStart + 4);
-      }
+      stamped.writeUInt32BE(value, bodyStart + 4);
     }
   });
   return stamped;

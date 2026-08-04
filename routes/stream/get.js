@@ -29,6 +29,46 @@ function getSourceParams(query, sourceRegistry) {
 }
 
 /**
+ * How long a request may wait for a torrent that is still being added.
+ *
+ * Adding a magnet takes as long as its metadata does — seconds when peers
+ * answer, forever when none do — and `getTorrent` waits for it. Awaiting that
+ * with no bound is what made this route answer nothing at all.
+ */
+const TORRENT_READY_TIMEOUT_MS = 10_000;
+
+/**
+ * The torrent for a source, or a `TORRENT_NOT_READY` error once the wait has
+ * gone on long enough to be worth reporting.
+ *
+ * The underlying add is NOT cancelled: it keeps running and warms the pool, so
+ * the client's next attempt is likely to find it ready.
+ *
+ * @param {import("../../services/torrent-pool.js").TorrentPool} torrentPool
+ * @param {string} sourceType
+ * @param {string} source
+ * @returns {Promise<import("webtorrent").Torrent>}
+ */
+async function waitForTorrent(torrentPool, sourceType, source) {
+  let timer = null;
+  const expiry = new Promise((_resolve, reject) => {
+    timer = setTimeout(() => {
+      const error = new Error("Torrent metadata is not available yet.");
+      error.code = "TORRENT_NOT_READY";
+      reject(error);
+    }, TORRENT_READY_TIMEOUT_MS);
+    timer.unref?.();
+  });
+  try {
+    return await Promise.race([torrentPool.getTorrent(sourceType, source), expiry]);
+  } finally {
+    if (timer) {
+      clearTimeout(timer);
+    }
+  }
+}
+
+/**
  * Stream a torrent file over HTTP with byte-range support.
  *
  * GET /stream
@@ -51,8 +91,18 @@ export async function handleStreamGet(req, reply, { sourceRegistry, torrentPool 
 
   let torrent;
   try {
-    torrent = await torrentPool.getTorrent(sourceType, source);
+    torrent = await waitForTorrent(torrentPool, sourceType, source);
   } catch (error) {
+    if (error instanceof Error && error.code === "TORRENT_NOT_READY") {
+      // Say so, rather than holding the connection until the client gives up.
+      // Reproduced 2026-08-04 on a magnet whose metadata never arrived: both a
+      // ranged GET and a HEAD returned nothing at all for the full 30 s the
+      // probe was willing to wait, and the route had written neither a status
+      // nor a header — from the client that is indistinguishable from the proxy
+      // having died, and it left no trace in the log either.
+      reply.header("Retry-After", "1");
+      return reply.code(503).send({ error: "Torrent metadata is not available yet." });
+    }
     const message = error instanceof Error ? error.message : String(error);
     return reply.code(500).send({ error: `Failed to load torrent source: ${message}` });
   }

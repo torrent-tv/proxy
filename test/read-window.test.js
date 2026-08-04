@@ -209,7 +209,7 @@ test("two readers add up, and one leaving takes only its own window", async () =
   }
 });
 
-test("criticality marks the piece being waited for, not the whole range", async () => {
+test("criticality marks the window being waited for, not the whole range", async () => {
   // Nothing is present, so the reader blocks on its first piece and marks it.
   let arrived = false;
   const { torrent, store, directory } = await recordingTorrent({
@@ -226,10 +226,14 @@ test("criticality marks the piece being waited for, not the whole range", async 
 
     const criticals = torrent.calls.filter((entry) => entry.call === "critical");
     assert.equal(criticals.length, 1);
-    assert.ok(
-      criticals[0].to - criticals[0].from + 1 <= 3,
-      `marked ${criticals[0].to - criticals[0].from + 1} pieces critical; the signal means "blocked here now"`
-    );
+    const marked = criticals[0].to - criticals[0].from + 1;
+    // The window, and nothing beyond it. Marking only the blocked piece made
+    // the pieces after it arrive strictly one at a time — measured, the first
+    // segment after a seek took 7.2 s for four pieces. Marking the whole
+    // requested range would be the old mistake: for ffmpeg's input that is
+    // every piece to the end of the file, and the flag stops meaning anything.
+    assert.equal(marked, WINDOW_PIECES, `marked ${marked} pieces critical`);
+    assert.ok(criticals[0].to < 8000 - 1, "criticality must not reach the end of the file");
 
     arrived = true;
     torrent.emit("verified", 0);

@@ -1222,6 +1222,41 @@ export class HlsSessionManager {
    * @returns {Promise<number[] | null>} Ascending seconds, or null when this
    *   file carries no readable index.
    */
+  /**
+   * The init header, lifted out of the first segment that exists.
+   *
+   * Needed only on the explicit-cut path, where the muxer produces no init file
+   * of its own. Scans rather than assuming segment 0: a run started by a seek
+   * begins at whatever index the viewer asked for.
+   *
+   * @param {HlsSession} session
+   * @returns {Promise<Buffer | null>}
+   */
+  async #initFromFirstSegment(session) {
+    if (typeof this.segmentFormat.extractInit !== "function") {
+      return null;
+    }
+    let names;
+    try {
+      names = (await readdir(session.dirPath))
+        .filter((name) => this.segmentFormat.isSegmentFileName(name))
+        .sort();
+    } catch {
+      return null;
+    }
+    for (const name of names) {
+      try {
+        const init = this.segmentFormat.extractInit(await readFile(path.join(session.dirPath, name)));
+        if (init && init.length > 0) {
+          return init;
+        }
+      } catch {
+        // Being written right now — try the next one.
+      }
+    }
+    return null;
+  }
+
   async #readContainerKeyframes({ sourceKey, fileIndex, inputUrl, logName }) {
     const cacheKey = `${sourceKey}:${fileIndex}`;
     if (this.keyframeIndexCache.has(cacheKey)) {
@@ -2472,8 +2507,13 @@ export class HlsSessionManager {
         };
       }
       try {
-        const bytes = await readFile(path.join(session.dirPath, initFileName));
-        if (bytes.length === 0) {
+        // With explicit cut times there is no init file: that muxer writes each
+        // piece self-contained, header and all. The header is identical in every
+        // piece, so the first one to exist supplies it.
+        const bytes = session.usesExplicitCuts
+          ? await this.#initFromFirstSegment(session)
+          : await readFile(path.join(session.dirPath, initFileName));
+        if (!bytes || bytes.length === 0) {
           return { kind: "warming-up" };
         }
         session.initBytes = bytes;
@@ -2528,7 +2568,11 @@ export class HlsSessionManager {
       // module; the rest stream straight off disk.
       if (!isPlaylist && this.segmentFormat.needsSegmentRewrite) {
         const index = this.segmentFormat.segmentIndexFromName(fileName);
-        const bytes = await readFile(filePath);
+        const raw = await readFile(filePath);
+        // Self-contained pieces carry the init header; a media segment must not.
+        const bytes = session.usesExplicitCuts && this.segmentFormat.stripInit
+          ? this.segmentFormat.stripInit(raw)
+          : raw;
         const prepared = this.segmentFormat.prepareSegmentBytes(bytes, {
           startSeconds: this.#segmentStartTime(session, index),
           initBytes: session.initBytes ?? null

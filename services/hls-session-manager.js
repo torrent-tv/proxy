@@ -1868,6 +1868,9 @@ export class HlsSessionManager {
       stdio: ["ignore", "pipe", "pipe"]
     });
     session.ffmpeg = ffmpeg;
+    // Whether this run cuts at times we gave it. Decides how a segment is
+    // judged finished — see getFileStream.
+    session.usesExplicitCuts = Boolean(cutTimes && cutTimes.length > 0);
     session.encodeStartIndex = safeIndex;
     session.pendingRestartIndex = -1;
     session.lastRestartAt = Date.now();
@@ -2491,6 +2494,27 @@ export class HlsSessionManager {
     const isPlaylist = fileName === PLAYLIST_FILE_NAME;
     try {
       await access(filePath);
+
+      // Existing is not the same as finished. The `hls` muxer wrote each
+      // segment to a temporary name and renamed it once complete, so a file
+      // appearing WAS a finished segment. The `segment` muxer has no such
+      // option: the file appears when writing begins. Serving it then hands the
+      // player a truncated segment, which it rejects and then simply stops —
+      // observed as playback dying a few seconds in with the encoder still
+      // running happily ahead. A segment is finished once the NEXT one has been
+      // started, or once the run producing it has ended.
+      if (!isPlaylist && session.usesExplicitCuts) {
+        const index = this.segmentFormat.segmentIndexFromName(fileName);
+        const isLast = index >= Math.max(0, (session.segmentBoundaries?.length ?? 1) - 2);
+        if (!isLast && session.ffmpeg) {
+          const nextPath = path.join(session.dirPath, this.segmentFormat.segmentFileName(index + 1));
+          try {
+            await access(nextPath);
+          } catch {
+            return { kind: "warming-up" };
+          }
+        }
+      }
       // Cold-start: log the first servable SEGMENT of this session exactly once
       // — the time from session-create entry to a playable first segment.
       if (!isPlaylist && !session.firstSegmentLogged) {

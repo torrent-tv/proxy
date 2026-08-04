@@ -34,7 +34,7 @@ import {
   parseFfmpegVideoFps,
   parseFfmpegHdr
 } from "./ffmpeg-banner.js";
-import { resolveSegmentFormat } from "./segment-formats/index.js";
+import { resolveSegmentFormat, SEGMENT_FORMAT_IDS } from "./segment-formats/index.js";
 
 const PLAYLIST_FILE_NAME = "index.m3u8";
 const CLEANUP_INTERVAL_MS = 30_000;
@@ -824,13 +824,30 @@ export class HlsSessionManager {
     targetHeight = 0,
     startPositionSeconds = 0,
     audioTrackIndex = 0,
-    manualQuality = false
+    manualQuality = false,
+    segmentFormatId = ""
   }) {
     if (!this.enabled) {
       const error = new Error("Audio transcoding is disabled on this proxy.");
       error.code = "TRANSCODE_DISABLED";
       throw error;
     }
+
+    // The container is the viewer's to choose, because the viewer's browser is
+    // what has to decode the result and only it knows what its media stack
+    // accepts. A copied MP3 track is the case that forced this: hls.js demuxes
+    // MPEG-TS itself and hands raw MP3 to an `audio/mpeg` buffer, which every
+    // browser supports, while an fMP4 segment goes to MSE untouched and
+    // `audio/mp4; codecs="mp3"` is refused — measured false in Chromium, where
+    // `canPlayType` cheerfully answers "probably". Same file, same browser:
+    // plays as MPEG-TS, silent loop as fMP4. The proxy's `--segment-format`
+    // stays the default for a client that expresses no preference.
+    // An unrecognised value falls back to the operator's choice rather than to
+    // the library default — `resolveSegmentFormat` cannot tell the two apart,
+    // and this value arrives from a client.
+    const segmentFormat = SEGMENT_FORMAT_IDS.includes(segmentFormatId)
+      ? resolveSegmentFormat(segmentFormatId)
+      : this.segmentFormat;
 
     const normalizedTargetWidth = Number.isInteger(targetWidth) && targetWidth > 0 ? targetWidth : 0;
     const normalizedTargetHeight = Number.isInteger(targetHeight) && targetHeight > 0 ? targetHeight : 0;
@@ -852,7 +869,9 @@ export class HlsSessionManager {
       String(normalizedTargetWidth),
       String(normalizedTargetHeight),
       forceManualQuality ? "q-manual" : "q-auto",
-      String(normalizedStartPosition)
+      String(normalizedStartPosition),
+      // Two viewers asking for different containers cannot share one ffmpeg.
+      segmentFormat.id
     ].join(":");
     const existingId = this.sessionIdBySource.get(sourceMapKey);
     if (existingId) {
@@ -1104,6 +1123,10 @@ export class HlsSessionManager {
       // Chosen libx264 preset for this stream (software only), or null.
       softwarePreset,
       inputUrl: inputUrl.toString(),
+      // The container this session produces. Per session, not per proxy: the
+      // viewer's browser decides, because it is the one that has to decode the
+      // result (see createOrGetSession).
+      segmentFormat,
       // VOD playlist bookkeeping.
       useSyntheticPlaylist: hasDuration,
       totalDurationSeconds: hasDuration ? durationSeconds : null,
@@ -1116,7 +1139,7 @@ export class HlsSessionManager {
       // KNOWN valid position instead of trusting the container's own on-the-fly
       // seek at an arbitrary target — see the probe call above for why.
       keyframeTimes,
-      playlistText: hasDuration ? this.#buildVodPlaylist(segmentBoundaries) : "",
+      playlistText: hasDuration ? this.#buildVodPlaylist(segmentBoundaries, segmentFormat) : "",
       // Segment index the current ffmpeg run started producing from.
       encodeStartIndex: 0,
       // Guards against repeatedly restarting to the same seek position.
@@ -1236,20 +1259,20 @@ export class HlsSessionManager {
    * @returns {Promise<Buffer | null>}
    */
   async #initFromFirstSegment(session) {
-    if (typeof this.segmentFormat.extractInit !== "function") {
+    if (typeof session.segmentFormat.extractInit !== "function") {
       return null;
     }
     let names;
     try {
       names = (await readdir(session.dirPath))
-        .filter((name) => this.segmentFormat.isSegmentFileName(name))
+        .filter((name) => session.segmentFormat.isSegmentFileName(name))
         .sort();
     } catch {
       return null;
     }
     for (const name of names) {
       try {
-        const init = this.segmentFormat.extractInit(await readFile(path.join(session.dirPath, name)));
+        const init = session.segmentFormat.extractInit(await readFile(path.join(session.dirPath, name)));
         if (init && init.length > 0) {
           return init;
         }
@@ -1295,7 +1318,7 @@ export class HlsSessionManager {
     return times;
   }
 
-  #buildVodPlaylist(boundaries) {
+  #buildVodPlaylist(boundaries, segmentFormat) {
     const count = Math.max(0, boundaries.length - 1);
     let maxDuration = 0;
     for (let index = 0; index < count; index += 1) {
@@ -1308,18 +1331,18 @@ export class HlsSessionManager {
       "#EXTM3U",
       // The container decides the minimum version (fMP4 + `#EXT-X-MAP` needs 7,
       // MPEG-TS is fine at 3).
-      `#EXT-X-VERSION:${this.segmentFormat.playlistVersion}`,
+      `#EXT-X-VERSION:${segmentFormat.playlistVersion}`,
       `#EXT-X-TARGETDURATION:${Math.ceil(maxDuration)}`,
       "#EXT-X-MEDIA-SEQUENCE:0",
       "#EXT-X-PLAYLIST-TYPE:VOD",
       "#EXT-X-INDEPENDENT-SEGMENTS",
       // Container-specific header lines (e.g. fMP4's `#EXT-X-MAP`).
-      ...this.segmentFormat.playlistHeaderLines()
+      ...segmentFormat.playlistHeaderLines()
     ];
     for (let index = 0; index < count; index += 1) {
       const duration = Math.max(0.1, boundaries[index + 1] - boundaries[index]);
       lines.push(`#EXTINF:${duration.toFixed(6)},`);
-      lines.push(this.segmentFormat.segmentFileName(index));
+      lines.push(segmentFormat.segmentFileName(index));
     }
     lines.push("#EXT-X-ENDLIST");
     return `${lines.join("\n")}\n`;
@@ -1458,7 +1481,7 @@ export class HlsSessionManager {
     }
     const indices = [];
     for (const name of names) {
-      const index = this.segmentFormat.segmentIndexFromName(name);
+      const index = session.segmentFormat.segmentIndexFromName(name);
       if (index >= 0) {
         indices.push(index);
       }
@@ -1471,7 +1494,7 @@ export class HlsSessionManager {
     let bytes = 0;
     try {
       for (const index of completed) {
-        const st = await stat(path.join(session.dirPath, this.segmentFormat.segmentFileName(index)));
+        const st = await stat(path.join(session.dirPath, session.segmentFormat.segmentFileName(index)));
         bytes += st.size;
       }
     } catch {
@@ -1857,7 +1880,7 @@ export class HlsSessionManager {
     // outright. Passing the very boundaries the playlist was built from makes
     // the two agree by construction. Only cut points already known to be real
     // keyframes are sent, so ffmpeg never has to move one forward.
-    const explicitTimes = this.segmentFormat.explicitTimesMuxerArgs?.() ?? null;
+    const explicitTimes = session.segmentFormat.explicitTimesMuxerArgs?.() ?? null;
     const cutTimes = explicitTimes && !session.transcodeVideo
       ? segmentCutTimesFrom(session.segmentBoundaries, safeIndex)
       : null;
@@ -1879,7 +1902,7 @@ export class HlsSessionManager {
         "-segment_start_number",
         String(safeIndex),
         ...explicitTimes,
-        this.segmentFormat.segmentFileNameTemplate()
+        session.segmentFormat.segmentFileNameTemplate()
       );
     } else {
       args.push(
@@ -1892,7 +1915,7 @@ export class HlsSessionManager {
         "-hls_flags",
         "independent_segments+temp_file",
         // Container selection + segment naming, from the active format module.
-        ...this.segmentFormat.muxerArgs(),
+        ...session.segmentFormat.muxerArgs(),
         "-start_number",
         String(safeIndex),
         // ffmpeg writes its own playlist here; we ignore it and serve the
@@ -2477,11 +2500,14 @@ export class HlsSessionManager {
    * >}
    */
   async getFileStream(sessionId, fileName, options = {}) {
-    if (!isSafeSessionId(sessionId) || !isSafeFileName(fileName, this.segmentFormat)) {
+    if (!isSafeSessionId(sessionId)) {
       return { kind: "not-found" };
     }
     const session = this.sessionsById.get(sessionId);
-    if (!session) {
+    // The session is looked up BEFORE the name is validated, because what
+    // counts as a valid segment name depends on the container this session
+    // chose — `.mp4` for fMP4, `.ts` for MPEG-TS.
+    if (!session || !isSafeFileName(fileName, session.segmentFormat)) {
       return { kind: "not-found" };
     }
     if (session.state === "failed") {
@@ -2523,13 +2549,13 @@ export class HlsSessionManager {
     // on non-empty content on both the cache check and the fresh read, so an
     // empty read is treated as not-yet-ready and the caller's long-poll keeps
     // retrying until ffmpeg has actually written the header.
-    const { initFileName } = this.segmentFormat;
+    const { initFileName } = session.segmentFormat;
     if (initFileName !== null && fileName === initFileName) {
       if (session.initBytes && session.initBytes.length > 0) {
         return {
           kind: "file",
           stream: Readable.from([session.initBytes]),
-          contentType: this.segmentFormat.initContentType,
+          contentType: session.segmentFormat.initContentType,
           isPlaylist: false
         };
       }
@@ -2547,7 +2573,7 @@ export class HlsSessionManager {
         return {
           kind: "file",
           stream: Readable.from([bytes]),
-          contentType: this.segmentFormat.initContentType,
+          contentType: session.segmentFormat.initContentType,
           isPlaylist: false
         };
       } catch {
@@ -2571,10 +2597,10 @@ export class HlsSessionManager {
       // running happily ahead. A segment is finished once the NEXT one has been
       // started, or once the run producing it has ended.
       if (!isPlaylist && session.usesExplicitCuts) {
-        const index = this.segmentFormat.segmentIndexFromName(fileName);
+        const index = session.segmentFormat.segmentIndexFromName(fileName);
         const isLast = index >= Math.max(0, (session.segmentBoundaries?.length ?? 1) - 2);
         if (!isLast && session.ffmpeg) {
-          const nextPath = path.join(session.dirPath, this.segmentFormat.segmentFileName(index + 1));
+          const nextPath = path.join(session.dirPath, session.segmentFormat.segmentFileName(index + 1));
           try {
             await access(nextPath);
           } catch {
@@ -2593,21 +2619,21 @@ export class HlsSessionManager {
       // Formats whose segments need correcting before they are valid against
       // the session's cached init are read whole and passed through the format
       // module; the rest stream straight off disk.
-      if (!isPlaylist && this.segmentFormat.needsSegmentRewrite) {
-        const index = this.segmentFormat.segmentIndexFromName(fileName);
+      if (!isPlaylist && session.segmentFormat.needsSegmentRewrite) {
+        const index = session.segmentFormat.segmentIndexFromName(fileName);
         const raw = await readFile(filePath);
         // Self-contained pieces carry the init header; a media segment must not.
-        const bytes = session.usesExplicitCuts && this.segmentFormat.stripInit
-          ? this.segmentFormat.stripInit(raw)
+        const bytes = session.usesExplicitCuts && session.segmentFormat.stripInit
+          ? session.segmentFormat.stripInit(raw)
           : raw;
-        const prepared = this.segmentFormat.prepareSegmentBytes(bytes, {
+        const prepared = session.segmentFormat.prepareSegmentBytes(bytes, {
           startSeconds: this.#segmentStartTime(session, index),
           initBytes: session.initBytes ?? null
         });
         return {
           kind: "file",
           stream: Readable.from([prepared]),
-          contentType: this.segmentFormat.segmentContentType,
+          contentType: session.segmentFormat.segmentContentType,
           isPlaylist: false
         };
       }
@@ -2618,7 +2644,7 @@ export class HlsSessionManager {
           : createReadStream(filePath, { highWaterMark: SEGMENT_READ_HIGH_WATER_MARK }),
         contentType: isPlaylist
           ? "application/vnd.apple.mpegurl"
-          : this.segmentFormat.segmentContentType,
+          : session.segmentFormat.segmentContentType,
         isPlaylist
       };
     } catch (_error) {
@@ -2629,7 +2655,7 @@ export class HlsSessionManager {
     // to wait for the current encode run to reach it or to restart the encoder
     // at this position (server-side seeking).  The caller long-polls.
     if (!isPlaylist) {
-      const requestedIndex = this.segmentFormat.segmentIndexFromName(fileName);
+      const requestedIndex = session.segmentFormat.segmentIndexFromName(fileName);
       this.#ensureEncodingFor(
         session,
         requestedIndex,

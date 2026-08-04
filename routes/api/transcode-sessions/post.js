@@ -39,6 +39,11 @@ export async function handleApiTranscodeSessionsPost(req, reply, { hlsSessionMan
   const manualQuality = payload.manualQuality === true;
   const startPositionSeconds = Number(payload.startPositionSeconds);
   const audioTrackIndex = Number(payload.audioTrackIndex);
+  // Which container to produce. The browser knows what its media stack will
+  // accept for the tracks it asked to be copied; an absent or unknown value
+  // leaves the proxy's own `--segment-format` in charge.
+  const segmentFormatId =
+    typeof payload.segmentFormat === "string" ? payload.segmentFormat.trim() : "";
 
   if (!sourceKey || !Number.isInteger(fileIndex) || fileIndex < 0) {
     return reply.code(400).send({ error: "sourceKey and valid fileIndex are required." });
@@ -60,7 +65,8 @@ export async function handleApiTranscodeSessionsPost(req, reply, { hlsSessionMan
           ? startPositionSeconds
           : 0,
       audioTrackIndex:
-        Number.isInteger(audioTrackIndex) && audioTrackIndex > 0 ? audioTrackIndex : 0
+        Number.isInteger(audioTrackIndex) && audioTrackIndex > 0 ? audioTrackIndex : 0,
+      segmentFormatId
     });
     return reply.send({
       sessionId: session.id,

@@ -801,6 +801,14 @@ function normalizeLogFileName(fileName, fileIndex) {
  */
 export class HlsSessionManager {
   /**
+   * Recent times from session-create to a servable first segment, in ms.
+   * See #rememberFirstSegmentLatency.
+   *
+   * @type {number[]}
+   */
+  #firstSegmentLatencies = [];
+
+  /**
    * @param {HlsSessionManagerOptions} options
    */
   constructor({
@@ -2728,6 +2736,45 @@ export class HlsSessionManager {
   }
 
   /**
+   * Remember how long this host took to make a session's first segment.
+   *
+   * The browser has to answer "how long until playback" during the gap between
+   * the file being downloaded and the first segment existing, and until now it
+   * assumed the pipeline merely keeps up with realtime — which on the measured
+   * session meant showing 15 s where 3.8 s were left, and showing it as a jump
+   * UP from 5.5 s. This host knows the real figure because it has just done it
+   * several times: 782 ms, 1052 ms, 1387 ms, 1518 ms on the sessions measured
+   * 2026-08-04/05. A median of recent runs is a measurement, not an assumption,
+   * and it is per-host, so a weak box and a fast one each get their own.
+   *
+   * @param {number} latencyMs
+   * @returns {void}
+   */
+  #rememberFirstSegmentLatency(latencyMs) {
+    if (!Number.isFinite(latencyMs) || latencyMs <= 0) {
+      return;
+    }
+    this.#firstSegmentLatencies.push(latencyMs);
+    if (this.#firstSegmentLatencies.length > FIRST_SEGMENT_SAMPLES) {
+      this.#firstSegmentLatencies.shift();
+    }
+  }
+
+  /**
+   * What this host typically takes to produce a session's first segment, in
+   * milliseconds — the median of recent runs, or null before any has finished.
+   *
+   * @returns {number | null}
+   */
+  expectedFirstSegmentMs() {
+    if (this.#firstSegmentLatencies.length === 0) {
+      return null;
+    }
+    const sorted = [...this.#firstSegmentLatencies].sort((left, right) => left - right);
+    return sorted[Math.floor(sorted.length / 2)];
+  }
+
+  /**
    * How many times the viewer has moved since this session started.
    *
    * A request being held for a segment answers "retry" as soon as this changes,
@@ -2881,6 +2928,7 @@ export class HlsSessionManager {
       // — the time from session-create entry to a playable first segment.
       if (!isPlaylist && !session.firstSegmentLogged) {
         session.firstSegmentLogged = true;
+        this.#rememberFirstSegmentLatency(Date.now() - session.createEntryMs);
         logger.info(
           `cold-start ${sessionId.slice(0, 8)}: first-segment ready +${Date.now() - session.createEntryMs}ms`
         );

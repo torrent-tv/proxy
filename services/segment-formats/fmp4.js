@@ -1,5 +1,5 @@
 /**
- * @file fMP4 (CMAF) segment format — `.m4s` media segments plus one shared
+ * @file fMP4 (CMAF) segment format — `.mp4` media segments plus one shared
  * `init.mp4` referenced by `#EXT-X-MAP`.
  *
  * Codec configuration (SPS/PPS) lives once in the init segment instead of being
@@ -54,7 +54,7 @@ function findFragmentBounds(bytes) {
 }
 
 const INIT_FILE_NAME = "init.mp4";
-const SEGMENT_PATTERN = /^segment-(\d{5})\.m4s$/;
+const SEGMENT_PATTERN = /^segment-(\d{5})\.mp4$/;
 
 /**
  * @type {import("./index.js").SegmentFormat}
@@ -74,7 +74,7 @@ export const fmp4Format = {
       "-hls_fmp4_init_filename",
       INIT_FILE_NAME,
       "-hls_segment_filename",
-      "segment-%05d.m4s"
+      "segment-%05d.mp4"
     ];
   },
 
@@ -109,7 +109,7 @@ export const fmp4Format = {
 
   /** The output path template for the `segment` muxer. */
   segmentFileNameTemplate() {
-    return "segment-%05d.m4s";
+    return "segment-%05d.mp4";
   },
 
   /**
@@ -151,7 +151,7 @@ export const fmp4Format = {
   },
 
   segmentFileName(index) {
-    return `segment-${String(index).padStart(5, "0")}.m4s`;
+    return `segment-${String(index).padStart(5, "0")}.mp4`;
   },
 
   isSegmentFileName(fileName) {

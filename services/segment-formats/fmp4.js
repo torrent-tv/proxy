@@ -12,6 +12,47 @@
 
 import { readTrackTimescales, stampSegmentStartTime } from "./mp4-boxes.js";
 
+/**
+ * Where the fragments begin and where the trailing index starts, as offsets of
+ * whole boxes at the TOP level.
+ *
+ * Deliberately not `walkBoxes`: that reports the start of a box's *body* and
+ * descends into containers, so it cannot say where a box begins — and cutting a
+ * file at the wrong offset by eight bytes produces something that parses as
+ * garbage rather than failing outright.
+ *
+ * @param {Buffer} bytes
+ * @returns {{ firstFragment: number, trailingIndex: number }} Offsets, or -1.
+ */
+function findFragmentBounds(bytes) {
+  let firstFragment = -1;
+  let trailingIndex = -1;
+  let offset = 0;
+  while (offset + 8 <= bytes.length) {
+    let size = bytes.readUInt32BE(offset);
+    const type = bytes.toString("latin1", offset + 4, offset + 8);
+    if (size === 1) {
+      if (offset + 16 > bytes.length) {
+        break;
+      }
+      size = Number(bytes.readBigUInt64BE(offset + 8));
+    } else if (size === 0) {
+      size = bytes.length - offset;
+    }
+    if (size < 8) {
+      break;
+    }
+    if (firstFragment === -1 && (type === "moof" || type === "sidx")) {
+      firstFragment = offset;
+    }
+    if (type === "mfra") {
+      trailingIndex = offset;
+    }
+    offset += size;
+  }
+  return { firstFragment, trailingIndex };
+}
+
 const INIT_FILE_NAME = "init.mp4";
 const SEGMENT_PATTERN = /^segment-(\d{5})\.m4s$/;
 
@@ -38,21 +79,67 @@ export const fmp4Format = {
   },
 
   /**
-   * Not supported on this format — deliberately, for now.
+   * Cut at times we choose rather than times ffmpeg picks.
    *
-   * The `segment` muxer can produce fMP4 (verified: explicit times cut exactly
-   * where asked), but only as self-contained fragments carrying their own
-   * `moov`. That removes the shared init segment this format is built around —
-   * `#EXT-X-MAP`, and with it the whole `tfdt` rewriting that took a field
-   * failure to get right. Changing all of that at once, on a path no current
-   * deployment exercises and that cannot be verified without a real browser, is
-   * how the last round of regressions happened. MPEG-TS, which is what runs in
-   * the field, gets the fix first.
+   * The `segment` muxer writes each fMP4 piece as a **self-contained** file:
+   * `ftyp moov moof mdat … mfra`, verified on the field host. That is not what
+   * HLS wants — it wants one init segment named by `#EXT-X-MAP` and media
+   * segments carrying only fragments — so the pieces are split on serve:
+   * {@link extractInit} takes the header off the first one to serve as the init,
+   * and {@link stripInit} removes it from every one.
    *
-   * @returns {null}
+   * The timestamps still need stamping, exactly as before: measured on the
+   * field host, all three pieces of a run reported a start time of 0.080 s,
+   * i.e. each carries its own zero. That is the same defect the shared-init
+   * path already corrects, so `prepareSegmentBytes` handles both.
+   *
+   * @returns {string[]}
    */
   explicitTimesMuxerArgs() {
-    return null;
+    return [
+      "-segment_format",
+      "mp4",
+      // `empty_moov` is what makes each piece self-describing, which is what
+      // lets the init be lifted out of it; `default_base_moof` keeps fragment
+      // offsets relative, so removing the header does not invalidate them.
+      "-segment_format_options",
+      "movflags=+frag_keyframe+empty_moov+default_base_moof"
+    ];
+  },
+
+  /** The output path template for the `segment` muxer. */
+  segmentFileNameTemplate() {
+    return "segment-%05d.m4s";
+  },
+
+  /**
+   * The init part of a self-contained piece: everything before the first
+   * fragment.
+   *
+   * @param {Buffer} bytes
+   * @returns {Buffer | null} `null` when the piece carries no fragment, which
+   *   means it is not one of these and must not be cut up.
+   */
+  extractInit(bytes) {
+    const { firstFragment } = findFragmentBounds(bytes);
+    return firstFragment > 0 ? bytes.subarray(0, firstFragment) : null;
+  },
+
+  /**
+   * A piece with its init header removed, and the trailing random-access index
+   * dropped — a player reading a media segment has no use for either, and
+   * `mfra` describes offsets that stop being true once the header is gone.
+   *
+   * @param {Buffer} bytes
+   * @returns {Buffer}
+   */
+  stripInit(bytes) {
+    const { firstFragment, trailingIndex } = findFragmentBounds(bytes);
+    if (firstFragment < 0) {
+      return bytes;
+    }
+    const end = trailingIndex > firstFragment ? trailingIndex : bytes.length;
+    return bytes.subarray(firstFragment, end);
   },
 
   playlistHeaderLines() {

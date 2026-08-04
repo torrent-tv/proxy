@@ -307,7 +307,9 @@ async function runCommand(command, params, id) {
 
     case Command.PRIORITIZE: {
       const torrent = await requireTorrent(params.sourceKey);
-      pool.prioritizeByteRange(torrent, params.fileIndex, params.byteStart, params.windowBytes);
+      pool.prioritizeByteRange(torrent, params.fileIndex, params.byteStart, params.windowBytes, {
+        wholeFileRead: params.wholeFileRead === true
+      });
       return true;
     }
 

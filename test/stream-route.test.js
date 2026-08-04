@@ -20,7 +20,7 @@ import { handleStreamGet } from "../routes/stream/get.js";
  */
 function harness({ method, range }) {
   const opened = [];
-  const state = { claims: 0 };
+  const state = { claims: 0, prioritized: [] };
 
   const sent = { code: 200, headers: {}, body: undefined, called: false };
   const reply = {
@@ -72,7 +72,9 @@ function harness({ method, range }) {
       state.claims += 1;
       return () => undefined;
     },
-    prioritizeByteRange() {}
+    prioritizeByteRange(_torrent, fileIndex, byteStart, _windowBytes, options) {
+      state.prioritized.push({ byteStart, wholeFileRead: options?.wholeFileRead === true });
+    }
   };
 
   const req = {
@@ -118,4 +120,26 @@ test("GET with a range streams only that range", async () => {
   assert.equal(sent.code, 206);
   assert.equal(sent.headers["content-range"], "bytes 100-199/5869669065");
   assert.equal(sent.headers["content-length"], "100");
+});
+
+// A request with no byte range says nothing about where the viewer is: ffmpeg
+// opens its input with a plain GET and abandons it the moment it seeks, and the
+// keyframe index and the codec probe do the same — four such reads around every
+// encoder restart. Reported as ordinary reads at offset 0, they undid the seek
+// that had just happened and sent the swarm walking the file from its first
+// missing piece; a seek to 89.1% of a 4.7 GB film downloaded 2.47 GB that way.
+test("a range-less GET is reported as a whole-file read", async () => {
+  const { req, reply, state, deps } = harness({ method: "GET" });
+
+  await handleStreamGet(req, reply, deps);
+
+  assert.deepEqual(state.prioritized, [{ byteStart: 0, wholeFileRead: true }]);
+});
+
+test("a ranged GET is reported as a real read position", async () => {
+  const { req, reply, state, deps } = harness({ method: "GET", range: "bytes=4390000000-" });
+
+  await handleStreamGet(req, reply, deps);
+
+  assert.deepEqual(state.prioritized, [{ byteStart: 4_390_000_000, wholeFileRead: false }]);
 });

@@ -94,7 +94,9 @@ export async function handleStreamGet(req, reply, { sourceRegistry, torrentPool 
   // byte offset) downloads first instead of waiting behind the sequential
   // backlog — this is what caused ~15-18 s stalls when seeking into an
   // undownloaded region.
-  torrentPool.prioritizeByteRange(torrent, fileIndex, range ? range.start : 0);
+  torrentPool.prioritizeByteRange(torrent, fileIndex, range ? range.start : 0, undefined, {
+    wholeFileRead: range === null
+  });
 
   const start = range ? range.start : 0;
   const end = range ? range.end : file.length - 1;

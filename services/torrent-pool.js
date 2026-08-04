@@ -1048,9 +1048,18 @@ export class TorrentPool {
    * @param {number} fileIndex
    * @param {number} byteStart - Start offset within the file.
    * @param {number} [windowBytes] - Bytes ahead of `byteStart` to mark critical.
+   * @param {{ wholeFileRead?: boolean }} [options] - `wholeFileRead` marks a
+   *   request that carried no byte range, i.e. one that merely opens the file at
+   *   0 rather than asking to read from there. See the guard below.
    * @returns {void}
    */
-  prioritizeByteRange(torrent, fileIndex, byteStart, windowBytes = PRIORITY_WINDOW_BYTES) {
+  prioritizeByteRange(
+    torrent,
+    fileIndex,
+    byteStart,
+    windowBytes = PRIORITY_WINDOW_BYTES,
+    options = {}
+  ) {
     if (!torrent || typeof torrent.critical !== "function" || !Array.isArray(torrent.files)) {
       return;
     }
@@ -1080,6 +1089,20 @@ export class TorrentPool {
       this.#readPositionByTorrent.set(torrent, readPositions);
     }
     const previousStart = readPositions.get(fileIndex);
+
+    // A request with no byte range says nothing about where the viewer is. ffmpeg
+    // opens its input with a plain GET and abandons it the moment it seeks, and
+    // the keyframe index and the codec probe do the same — four such reads around
+    // every encoder restart, each one arriving here as "position 0". Acting on
+    // them undoes the seek that just happened: the whole file is re-selected from
+    // piece 0, the picker skips the pieces already on disk and walks the swarm
+    // forward from the first hole. Measured on a 4.7 GB film: a seek to 89.1%
+    // downloaded 2.47 GB over 93 s before the segment could be served. So a
+    // whole-file read only sets the position when nothing else has.
+    if (options.wholeFileRead && previousStart !== undefined) {
+      return;
+    }
+
     readPositions.set(fileIndex, safeStart);
 
     // Log jumps only. Sequential reading calls this on every range request and
@@ -1133,6 +1156,16 @@ export class TorrentPool {
     if (playheadPiece > fileStartPiece && typeof torrent.deselect === "function") {
       try {
         torrent.deselect(fileStartPiece, playheadPiece - 1);
+        // `deselect` subtracts the interval and copies the selection's `offset`
+        // — how many pieces from its start are already downloaded — into what
+        // remains. The picker scans from `from + offset`, so the surviving
+        // selection starts scanning far past its own end and can never yield a
+        // piece: measured with the library's own `Selections`, deselecting
+        // 0-522 from `{0-587, offset 226}` leaves `{523-587, offset 226}`,
+        // i.e. a scan starting at piece 749 of 587. The seek target ends up
+        // wanted by nobody. Re-selecting the same range replaces that dead
+        // entry with a fresh one whose offset is 0.
+        torrent.select(playheadPiece, fileEndPiece, 1);
         this.#selectedFromPiece.get(torrent)?.set(fileIndex, playheadPiece);
       } catch {
         // Best effort — never break streaming because demotion failed.

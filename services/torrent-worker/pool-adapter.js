@@ -141,15 +141,22 @@ export class WorkerTorrentPool {
    * @param {number} fileIndex
    * @param {number} byteStart
    * @param {number} [windowBytes]
+   * @param {{ wholeFileRead?: boolean }} [options]
    * @returns {void}
    */
-  prioritizeByteRange(torrent, fileIndex, byteStart, windowBytes) {
+  prioritizeByteRange(torrent, fileIndex, byteStart, windowBytes, options) {
     const sourceKey = torrent?.sourceKey;
     if (!sourceKey) {
       return;
     }
     void this.#client
-      .prioritizeByteRange({ sourceKey, fileIndex, byteStart, windowBytes })
+      .prioritizeByteRange({
+        sourceKey,
+        fileIndex,
+        byteStart,
+        windowBytes,
+        wholeFileRead: options?.wholeFileRead === true
+      })
       .catch(() => undefined);
   }
 

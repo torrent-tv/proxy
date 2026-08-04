@@ -115,6 +115,34 @@ const UPLOAD_HURRY_MS = 25_000;
  * @param {{ floor?: number, idleFloor?: number, boost?: number, starvingSpeed?: number, chokedThreshold?: number, now?: number }} [opts]
  * @returns {{ bytesPerSec: number, reason: string }}
  */
+/**
+ * The torrents the upload policy is allowed to see.
+ *
+ * A torrent with a reader qualifies for the obvious reason. A torrent in a
+ * HURRY qualifies even without one, and that case is the important one: the
+ * first thing done with a new torrent is fetching the file's head and tail for
+ * the codec probe, and that read goes straight to `createReadStream` without
+ * registering a reader. Judged by readers alone the torrent looks unused for
+ * the whole of that wait — 8.36 s of the 11.46 s before playback in the session
+ * measured 2026-08-04 — so the upload stayed at the near-silent idle floor
+ * during the exact seconds peers were deciding whether to serve us.
+ *
+ * @param {Iterable<{ hurryUntil?: number }>} torrents
+ * @param {Map<object, { size: number }>} usageByTorrent - fileIndex sets, keyed by torrent.
+ * @param {number} now
+ * @returns {object[]}
+ */
+export function torrentsForUploadPolicy(torrents, usageByTorrent, now) {
+  const chosen = [];
+  for (const torrent of torrents) {
+    const usage = usageByTorrent?.get?.(torrent);
+    if ((usage && usage.size > 0) || (torrent?.hurryUntil ?? 0) > now) {
+      chosen.push(torrent);
+    }
+  }
+  return chosen;
+}
+
 export function decideUploadLimit(activeTorrents, opts = {}) {
   const floor = opts.floor ?? UPLOAD_FLOOR_BYTES;
   const idleFloor = opts.idleFloor ?? UPLOAD_IDLE_FLOOR_BYTES;
@@ -465,10 +493,11 @@ export class TorrentPool {
     if (!this.client || this.client.destroyed || typeof this.client.throttleUpload !== "function") {
       return;
     }
-    const active = [...this.torrents.values()].filter((torrent) => {
-      const usage = this.fileUsageByTorrent.get(torrent);
-      return usage && usage.size > 0;
-    });
+    const active = torrentsForUploadPolicy(
+      this.torrents.values(),
+      this.fileUsageByTorrent,
+      Date.now()
+    );
     const { bytesPerSec, reason } = decideUploadLimit(active);
     if (bytesPerSec === this.#uploadLimit) {
       return;

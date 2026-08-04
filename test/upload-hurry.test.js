@@ -17,7 +17,7 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
-import { decideUploadLimit } from "../services/torrent-pool.js";
+import { decideUploadLimit, torrentsForUploadPolicy } from "../services/torrent-pool.js";
 
 const NOW = 1_000_000;
 const healthy = (extra = {}) => ({
@@ -63,4 +63,34 @@ test("the reciprocity boost still works when no hurry is on", () => {
   const decision = decideUploadLimit([starving], { now: NOW });
   assert.equal(decision.bytesPerSec, 512 * 1024);
   assert.match(decision.reason, /earn unchoke/);
+});
+
+test("a torrent with no reader still reaches the policy while it is in a hurry", () => {
+  // The moment that matters: a torrent has just been added and its head and
+  // tail are being fetched for the codec probe. That read goes straight to
+  // `createReadStream`, so no reader is registered — and the selection only
+  // ever kept torrents that had one, which is where the gap was.
+  const hurrying = { name: "film.mkv", hurryUntil: NOW + 20_000 };
+  const idle = { name: "other.mkv" };
+  const usage = new Map();
+
+  assert.deepEqual(
+    torrentsForUploadPolicy([hurrying, idle], usage, NOW),
+    [hurrying],
+    "a torrent with no reader yet was ignored"
+  );
+
+  assert.deepEqual(
+    torrentsForUploadPolicy([{ ...hurrying, hurryUntil: NOW - 1 }, idle], usage, NOW),
+    [],
+    "and stops counting once the rush is over"
+  );
+
+  const read = { name: "watched.mkv" };
+  usage.set(read, new Set([0]));
+  assert.deepEqual(
+    torrentsForUploadPolicy([read], usage, NOW),
+    [read],
+    "a torrent being read still counts, hurry or not"
+  );
 });

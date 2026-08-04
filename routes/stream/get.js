@@ -7,6 +7,7 @@
  */
 
 import { parseRange } from "../../utils/parse-range.js";
+import { logger } from "../../utils/logger.js";
 
 /**
  * Resolve source parameters from the query string.
@@ -121,6 +122,7 @@ export async function handleStreamGet(req, reply, { sourceRegistry, torrentPool 
     // being fetched for nobody.
     reply.raw.once("close", () => fragments.cancel());
 
+    let sent = 0;
     try {
       for await (const fragment of fragments) {
         if (reply.raw.writableEnded || reply.raw.destroyed) {
@@ -130,15 +132,23 @@ export async function handleStreamGet(req, reply, { sourceRegistry, torrentPool 
         await new Promise((resolve, reject) => {
           reply.raw.write(fragment.bytes, (error) => (error ? reject(error) : resolve()));
         });
+        sent += fragment.bytes.length;
         // Only now are these bytes gone: the piece can be unpinned, and the
         // slot it occupies reused. Releasing before this point corrupts the
         // response silently.
         fragment.release();
       }
       reply.raw.end();
-    } catch {
+    } catch (error) {
       // The body is already committed by its headers, so there is nothing
       // useful to send instead — drop the connection and let the client retry.
+      // But say why: swallowing this made the route close connections with no
+      // status and no trace, which from the client looks like the proxy died
+      // and from the log looks like nothing happened at all.
+      logger.warn(
+        `stream: read of "${file.name}" bytes ${start}-${end} failed after ` +
+        `${sent} of ${contentLength} bytes: ${error instanceof Error ? error.message : String(error)}`
+      );
       reply.raw.destroy();
     } finally {
       releaseFile();

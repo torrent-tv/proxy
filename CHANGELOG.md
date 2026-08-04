@@ -1,3 +1,7 @@
+## 2.9.81
+
+- **New**: The stream route says why a read failed. A body that failed mid-flight was dropped silently — the connection closed with no status and no log line, which from the client looks like the proxy died and from the log like nothing happened; found while probing the route by hand, where every ranged read closed the socket without a word. It now reports the file, the range, how many bytes had been sent, and the error.
+
 ## 2.9.80
 
 - **Fix**: A seek backward could hang forever. `prioritizeByteRange` demotes the pieces behind the playhead with `deselect`, which removes them from the download set — and `critical`, which runs right after, only flags pieces that are already selected, so it never puts them back. A seek forward followed by a seek backward therefore left the target pieces wanted by nobody: the encoder waited on data the torrent had been told to stop fetching, while the swarm ran at full speed on pieces nobody needed. The read position is now re-selected whenever it moves back behind what an earlier seek deselected, tracked per file because WebTorrent does not report its own selection back.

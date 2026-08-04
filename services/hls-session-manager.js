@@ -1379,6 +1379,29 @@ export class HlsSessionManager {
     return null;
   }
 
+  /**
+   * Read the file's keyframe index into the cache before a session needs it.
+   *
+   * The index lives at the END of a Matroska file, which is also where the
+   * codec probe reads — both wait for the same piece to arrive, and they used
+   * to do it one after the other: measured 2026-08-04, a probe of 722-1206 ms
+   * followed by an index read of 311-430 ms, all of it before the first
+   * segment. Started together, the second costs nothing.
+   *
+   * Never rejects and is never awaited by the caller: a session that finds
+   * nothing cached simply reads it itself, as before.
+   *
+   * @param {{ sourceKey: string, fileIndex: number, inputUrl: URL, logName: string }} params
+   * @returns {Promise<void>}
+   */
+  async warmKeyframeIndex({ sourceKey, fileIndex, inputUrl, logName }) {
+    try {
+      await this.#readContainerKeyframes({ sourceKey, fileIndex, inputUrl, logName });
+    } catch {
+      // Best effort by construction.
+    }
+  }
+
   async #readContainerKeyframes({ sourceKey, fileIndex, inputUrl, logName }) {
     const cacheKey = `${sourceKey}:${fileIndex}`;
     if (this.keyframeIndexCache.has(cacheKey)) {
@@ -2165,7 +2188,15 @@ export class HlsSessionManager {
     // were verified to handle a copied AC-3 track on this very host, so the
     // arguments that run actually received are the missing evidence. One line
     // per run, and a run happens at most every few seconds.
-    logger.info(`transcode ${session.id} ffmpeg ${describeFfmpegArgs(args)}`);
+    // Numbered, because a burst of seeks starts several runs in one second and
+    // every line about them carries the SESSION id, which is the same for all.
+    // Without a run number the command that failed cannot be told from the two
+    // that succeeded around it — which is exactly the state the unexplained
+    // `Cannot write moov atom before AC3 packets` was found in.
+    session.runCounter = (session.runCounter ?? 0) + 1;
+    const runLabel = `run#${session.runCounter}`;
+    session.runLabel = runLabel;
+    logger.info(`transcode ${session.id} ${runLabel} ffmpeg ${describeFfmpegArgs(args)}`);
 
     const ffmpeg = spawn(this.ffmpegBin, args, {
       cwd: session.dirPath,
@@ -2191,7 +2222,7 @@ export class HlsSessionManager {
     session.budgetSlowSince = 0;
 
     logger.info(
-      `transcode ${session.id} encode-run from segment #${safeIndex} ` +
+      `transcode ${session.id} ${session.runLabel} encode-run from segment #${safeIndex} ` +
         `(${formatSeconds(startSeconds)}) "${session.fileName}"`
     );
 
@@ -2379,7 +2410,9 @@ export class HlsSessionManager {
       session.state = "failed";
       session.progress.state = "failed";
       session.progress.updatedAt = Date.now();
-      logger.error(`transcode ${session.id} encode-run failed: ${session.lastError}`);
+      logger.error(
+        `transcode ${session.id} ${session.runLabel ?? "run#?"} encode-run failed: ${session.lastError}`
+      );
     });
   }
 

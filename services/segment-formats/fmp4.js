@@ -37,6 +37,24 @@ export const fmp4Format = {
     ];
   },
 
+  /**
+   * Not supported on this format — deliberately, for now.
+   *
+   * The `segment` muxer can produce fMP4 (verified: explicit times cut exactly
+   * where asked), but only as self-contained fragments carrying their own
+   * `moov`. That removes the shared init segment this format is built around —
+   * `#EXT-X-MAP`, and with it the whole `tfdt` rewriting that took a field
+   * failure to get right. Changing all of that at once, on a path no current
+   * deployment exercises and that cannot be verified without a real browser, is
+   * how the last round of regressions happened. MPEG-TS, which is what runs in
+   * the field, gets the fix first.
+   *
+   * @returns {null}
+   */
+  explicitTimesMuxerArgs() {
+    return null;
+  },
+
   playlistHeaderLines() {
     return [
       // The init segment (codec config). Fetched once; applies to every media

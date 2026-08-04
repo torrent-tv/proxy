@@ -31,6 +31,26 @@ export const mpegtsFormat = {
     return ["-hls_segment_filename", "segment-%05d.ts"];
   },
 
+  /**
+   * Arguments for cutting at times we choose rather than times ffmpeg picks.
+   *
+   * The `hls` muxer takes only a target duration and finds its own cut points,
+   * which is why the playlist and the real segments drifted apart; the `segment`
+   * muxer takes the list. Self-contained segments make this straightforward
+   * here: no init segment to reconcile, so the only difference is the container
+   * and the file name template.
+   *
+   * @returns {string[]}
+   */
+  explicitTimesMuxerArgs() {
+    return ["-segment_format", "mpegts"];
+  },
+
+  /** The output path template for the `segment` muxer. */
+  segmentFileNameTemplate() {
+    return "segment-%05d.ts";
+  },
+
   playlistHeaderLines() {
     return []; // no `#EXT-X-MAP`
   },

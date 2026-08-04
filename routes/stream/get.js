@@ -144,8 +144,14 @@ export async function handleStreamGet(req, reply, { sourceRegistry, torrentPool 
   // byte offset) downloads first instead of waiting behind the sequential
   // backlog — this is what caused ~15-18 s stalls when seeking into an
   // undownloaded region.
+  // Only the encoder's own input read tracks where the viewer is. Everything
+  // else that comes through here — the codec probe, the keyframe index, a
+  // subtitle fetch — reads the file's edges, and treating those as a viewer
+  // position made every session start and every encoder restart look like a
+  // burst of seeks (measured: two spurious "the viewer moved" per start).
   torrentPool.prioritizeByteRange(torrent, fileIndex, range ? range.start : 0, undefined, {
-    wholeFileRead: range === null
+    wholeFileRead: range === null,
+    isPlaybackRead: req.query.reader === "playback"
   });
 
   const start = range ? range.start : 0;

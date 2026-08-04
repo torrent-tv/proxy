@@ -75,6 +75,13 @@ export async function handleTranscodeSessionFileGet(req, reply, { hlsSessionMana
   if (result.kind === "not-found") {
     return reply.code(404).send({ error: "Transcode session file was not found." });
   }
+  if (result.kind === "superseded") {
+    // The viewer moved while this was being held. Answer at once so the player
+    // can ask for where it is now; `Retry-After: 0` because there is nothing to
+    // wait for — this segment is simply no longer the one being watched.
+    reply.header("Retry-After", "0");
+    return reply.code(503).send({ error: "Superseded by a seek." });
+  }
   if (result.kind === "warming-up") {
     // The segment is still being produced (e.g. just after a seek-restart).
     // Return a retryable 503 — never 202, which hls.js cannot consume as a
@@ -122,10 +129,20 @@ async function waitForSessionFile(hlsSessionManager, sessionId, fileName, timeou
   // again — see HlsSessionManager#ensureEncodingFor for the encoder ping-pong
   // this prevents when one seek-bar scrub fires several segment requests.
   const requestSeq = hlsSessionManager.nextRequestSeq(sessionId);
+  // The viewer's position when this request was made. A seek makes every held
+  // request stale — it asks for a segment nobody is going to watch — and hls.js
+  // keeps only ONE fragment load outstanding, so holding on blocks the request
+  // the player actually needs now. Measured: 57 s of a 58 s backward seek was
+  // this wait, and the segment the viewer wanted took 15 ms once it was asked
+  // for.
+  const seekEpoch = hlsSessionManager.seekEpoch(sessionId);
   while (Date.now() - startedAt < timeoutMs) {
     const result = await hlsSessionManager.getFileStream(sessionId, fileName, { requestSeq });
     if (result.kind !== "warming-up") {
       return result;
+    }
+    if (hlsSessionManager.seekEpoch(sessionId) !== seekEpoch) {
+      return { kind: "superseded" };
     }
     await delay(300);
   }

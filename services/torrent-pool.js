@@ -306,17 +306,6 @@ export class TorrentPool {
    */
   #readPositionByTorrent = new Map();
 
-  /**
-   * Lowest piece currently selected for download, per torrent and fileIndex.
-   *
-   * Needed because selection is not readable back from WebTorrent, and a seek
-   * backward has to know whether the pieces it wants were deselected by an
-   * earlier seek forward.
-   *
-   * @type {Map<import("webtorrent").Torrent, Map<number, number>>}
-   */
-  #selectedFromPiece = new Map();
-
   /** Global disk cap in bytes (0 = disabled). */
   #maxDiskBytes = 0;
 
@@ -982,8 +971,20 @@ export class TorrentPool {
   }
 
   /**
-   * Update WebTorrent piece selection to match the current usage map.
-   * Files with at least one consumer are selected; all others are deselected.
+   * Drop the pieces of files nobody is reading from the download set.
+   *
+   * It does NOT select the files that ARE in use, and that is the point. What a
+   * file needs is decided by the readers walking it: each one claims a moving
+   * window around its own read head and gives it back when it ends (see
+   * `torrent-worker/piece-reader.js`). Selecting the whole file here as well
+   * put a second, contradictory claim on the same pieces — one that covered
+   * everything and therefore always outranked the window — and it was re-made
+   * on every single `/stream` request, so a seek's prioritisation survived at
+   * most until the next one. Measured consequence: a seek to 89.1% of a 4.7 GB
+   * film waited 93 s while the swarm fetched 2.47 GB in file order.
+   *
+   * A file with no reader is deselected outright, which is what stops a torrent
+   * downloading files the viewer never opened.
    *
    * @param {import("webtorrent").Torrent} torrent
    * @param {Map<number, number>} usage - fileIndex → refCount.
@@ -995,14 +996,7 @@ export class TorrentPool {
     }
     for (let index = 0; index < torrent.files.length; index += 1) {
       const file = torrent.files[index];
-      if (!file) {
-        continue;
-      }
-      const shouldSelect = (usage.get(index) ?? 0) > 0;
-      if (shouldSelect) {
-        if (typeof file.select === "function") {
-          file.select();
-        }
+      if (!file || (usage.get(index) ?? 0) > 0) {
         continue;
       }
       if (typeof file.deselect === "function") {
@@ -1012,42 +1006,27 @@ export class TorrentPool {
   }
 
   /**
-   * Bias the torrent's download toward the current read position, so a seek
-   * downloads the seek target first instead of waiting behind the sequential
-   * backlog (which caused ~15-18 s stalls when seeking into an undownloaded
-   * region). Called on every range request.
+   * Record where a file is being read from.
    *
-   * Two levers, matched to how WebTorrent's picker actually works:
+   * This used to also decide what the torrent should download, and that was the
+   * mistake: it was one of THREE places claiming pieces for the same file — the
+   * whole-file `file.select()` in `#syncSelections`, this method, and the reader
+   * itself — and they overwrote each other on every request. The claim now
+   * belongs to the reader alone, which holds a moving window around its own read
+   * head and gives it back when it ends
+   * (`torrent-worker/piece-reader.js`); several readers on one file therefore
+   * produce the union of their windows instead of the last caller's opinion.
    *
-   * 1. **Demote the gap BEHIND the playhead** — `deselect(fileStart, playhead-1)`.
-   *    The picker scans each selection sequentially from its first UNdownloaded
-   *    piece; with the whole file selected, a far forward seek would make it
-   *    fetch the undownloaded gap behind the new position first. Removing that
-   *    gap from the selection makes the scan START at the playhead, so all peer
-   *    capacity goes to the pieces the player needs next. This only STOPS
-   *    fetching the gap; already-downloaded pieces stay on disk (deleting them
-   *    is Disk hygiene Level 2), and a later backward seek re-selects the region
-   *    via this same call. The whole file is re-selected by `file.select()` on
-   *    the next `acquireFile`, so nothing is permanently dropped.
-   *
-   * 2. **Critical read-ahead window** — `critical(playhead, playhead+window)`.
-   *    `critical` does not reorder the scan; it enables HOTSWAP (re-request a
-   *    block from a faster peer when a slow one reserved it) over the near
-   *    window. Reset first so criticality stays a moving window rather than
-   *    accumulating over the whole file across seeks.
-   *
-   * Scope: single active reader per file (≈100% today). The multi-viewer union
-   * window — demote only where behind for ALL sessions — is deferred (roadmap
-   * item 23); here the latest read position wins.
-   *
-   * The pinned head/tail (prefetchFileEdges, codec probe) is downloaded up front
-   * and lives forward of the playhead (tail) or is already on disk (head), so
-   * demotion never costs the probe its data.
+   * What is left here is bookkeeping the readers cannot do: `getFileStats`
+   * reports how much of the window ahead of the read head is still missing, so
+   * the viewer can be shown how long a resume will take, and a jump in the read
+   * position is logged because a seek that never reaches the torrent is
+   * invisible otherwise.
    *
    * @param {import("webtorrent").Torrent} torrent
    * @param {number} fileIndex
    * @param {number} byteStart - Start offset within the file.
-   * @param {number} [windowBytes] - Bytes ahead of `byteStart` to mark critical.
+   * @param {number} [windowBytes] - Unused; kept so callers need not change.
    * @param {{ wholeFileRead?: boolean }} [options] - `wholeFileRead` marks a
    *   request that carried no byte range, i.e. one that merely opens the file at
    *   0 rather than asking to read from there. See the guard below.
@@ -1060,24 +1039,17 @@ export class TorrentPool {
     windowBytes = PRIORITY_WINDOW_BYTES,
     options = {}
   ) {
-    if (!torrent || typeof torrent.critical !== "function" || !Array.isArray(torrent.files)) {
-      return;
-    }
-    const pieceLength = Number(torrent.pieceLength);
-    if (!Number.isFinite(pieceLength) || pieceLength <= 0) {
+    if (!torrent || !Array.isArray(torrent.files)) {
       return;
     }
     const file = torrent.files[fileIndex];
     if (!file) {
       return;
     }
-    const fileOffset = Number.isFinite(file.offset) ? file.offset : 0;
     const fileLength = Number(file.length);
     if (!Number.isFinite(fileLength) || fileLength <= 0) {
       return;
     }
-    const fileStartPiece = Math.floor(fileOffset / pieceLength);
-    const fileEndPiece = Math.floor((fileOffset + fileLength - 1) / pieceLength);
 
     const safeStart = Math.max(0, Number(byteStart) || 0);
 
@@ -1120,70 +1092,6 @@ export class TorrentPool {
       );
     }
 
-    const absStart = fileOffset + safeStart;
-    const playheadPiece = Math.floor(absStart / pieceLength);
-    const absWindowEnd = Math.min(
-      fileOffset + fileLength - 1,
-      absStart + Math.max(1, windowBytes) - 1
-    );
-    const windowEndPiece = Math.floor(absWindowEnd / pieceLength);
-
-    // (1) Re-select from the playhead when it moved BACK behind what an earlier
-    //     seek deselected. `deselect` removes pieces from the download set, and
-    //     `critical` does NOT put them back — it only flags pieces already
-    //     selected. So without this, a seek forward followed by a seek backward
-    //     leaves the target pieces wanted by nobody: the encoder waits on data
-    //     the torrent was told to stop fetching, and waits forever.
-    //     Only on a backward move, so repeat calls do not pile up selections.
-    let selectedFrom = this.#selectedFromPiece.get(torrent)?.get(fileIndex);
-    if (selectedFrom === undefined || playheadPiece < selectedFrom) {
-      try {
-        torrent.select(playheadPiece, fileEndPiece, 1);
-      } catch {
-        // Best effort — never break streaming because selection failed.
-      }
-      let perFile = this.#selectedFromPiece.get(torrent);
-      if (!perFile) {
-        perFile = new Map();
-        this.#selectedFromPiece.set(torrent, perFile);
-      }
-      perFile.set(fileIndex, playheadPiece);
-      selectedFrom = playheadPiece;
-    }
-
-    // (2) Demote the gap behind the playhead so the picker scans forward from
-    //     the read position. Only when there IS a gap (not at the file start).
-    if (playheadPiece > fileStartPiece && typeof torrent.deselect === "function") {
-      try {
-        torrent.deselect(fileStartPiece, playheadPiece - 1);
-        // `deselect` subtracts the interval and copies the selection's `offset`
-        // — how many pieces from its start are already downloaded — into what
-        // remains. The picker scans from `from + offset`, so the surviving
-        // selection starts scanning far past its own end and can never yield a
-        // piece: measured with the library's own `Selections`, deselecting
-        // 0-522 from `{0-587, offset 226}` leaves `{523-587, offset 226}`,
-        // i.e. a scan starting at piece 749 of 587. The seek target ends up
-        // wanted by nobody. Re-selecting the same range replaces that dead
-        // entry with a fresh one whose offset is 0.
-        torrent.select(playheadPiece, fileEndPiece, 1);
-        this.#selectedFromPiece.get(torrent)?.set(fileIndex, playheadPiece);
-      } catch {
-        // Best effort — never break streaming because demotion failed.
-      }
-    }
-
-    // (3) Reset criticality to a moving read-ahead window (hotswap over the near
-    //     pieces), so it does not accumulate over the whole file across seeks.
-    if (Array.isArray(torrent._critical)) {
-      torrent._critical.length = 0;
-    }
-    if (windowEndPiece >= playheadPiece) {
-      try {
-        torrent.critical(playheadPiece, windowEndPiece);
-      } catch {
-        // Best effort.
-      }
-    }
   }
 
   /**

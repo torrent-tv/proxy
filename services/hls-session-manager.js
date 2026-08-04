@@ -1134,6 +1134,9 @@ export class HlsSessionManager {
       // from one scrub cannot take turns steering the encoder.
       requestSeqCounter: 0,
       latestRequestSeq: 0,
+      // Bumped by every viewer seek; a held segment request that started under
+      // an older value gives up at once. See requestSeek.
+      waitEpoch: 0,
       seekFirstFarAt: 0,
       // Circuit breaker: consecutive FAST failures (see SEEK_FAST_FAIL_MS) at
       // seekFailureTarget. Reset whenever a run starts at a DIFFERENT target or
@@ -2233,6 +2236,16 @@ export class HlsSessionManager {
     if (!session || session.state === "disposed") {
       return false;
     }
+    // Every segment request being held right now was made for the position the
+    // viewer has just left. Release them: hls.js keeps ONE fragment load
+    // outstanding, so until the one in flight answers, the player cannot ask
+    // for the segment it now needs — measured 2026-08-04, a backward seek into
+    // fully-downloaded data waited 57 s for a held request for #609 to time
+    // out, then fetched the segment it wanted in 15 ms. Bumping the epoch makes
+    // those waits answer "retry" on their next poll instead of running out the
+    // 60 s hold. Prescribed by `hls-media-server` (one outstanding wait per
+    // session) in research/hls-seek-prior-art-2026-08-02.md.
+    session.waitEpoch = (session.waitEpoch ?? 0) + 1;
     const index = this.#segmentIndexForTime(session, positionSeconds);
     const head = session.encodeStartIndex;
     const processed = Number.isFinite(session.progress?.processedSeconds)
@@ -2433,6 +2446,20 @@ export class HlsSessionManager {
     }
     session.requestSeqCounter += 1;
     return session.requestSeqCounter;
+  }
+
+  /**
+   * How many times the viewer has moved since this session started.
+   *
+   * A request being held for a segment answers "retry" as soon as this changes,
+   * because it was made for a position the viewer has left — see `requestSeek`.
+   *
+   * @param {string} sessionId
+   * @returns {number}
+   */
+  seekEpoch(sessionId) {
+    const session = isSafeSessionId(sessionId) ? this.sessionsById.get(sessionId) : null;
+    return session?.waitEpoch ?? 0;
   }
 
   /**

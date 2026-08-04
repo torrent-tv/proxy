@@ -574,6 +574,28 @@ async function probeVideoKeyframeTimes(ffmpegBin, inputUrl, timeoutMs = 25_000) 
 }
 
 /**
+ * A number of seconds as ffmpeg will accept it.
+ *
+ * `String(n)` switches to exponential notation below 1e-6, and ffmpeg's
+ * duration parser rejects that outright: a field session died on
+ * `Invalid duration for option ss: 3.3333333249174757e-7`, after which the
+ * transcode was in state `failed` and every segment request answered 500 for
+ * as long as the viewer kept trying. Anything under a millisecond is also not a
+ * real offset — it is the residue of subtracting two nearly equal floats — so
+ * it is dropped rather than passed on.
+ *
+ * @param {number} value
+ * @returns {string}
+ */
+export function ffmpegSeconds(value) {
+  if (!Number.isFinite(value) || Math.abs(value) < 0.001) {
+    return "0";
+  }
+  // Microsecond resolution, fixed notation, no trailing zero noise.
+  return value.toFixed(6).replace(/\.?0+$/, "");
+}
+
+/**
  * Compute segment START times (a 0-based timeline) for a session.
  *
  * - Re-encoded video: a uniform grid (0, segDur, 2·segDur, …) — ffmpeg's fixed
@@ -1588,24 +1610,41 @@ export class HlsSessionManager {
    */
   #enforceLookAhead() {
     for (const session of this.sessionsById.values()) {
-      if (!session || session.state === "disposed" || !session.ffmpeg) {
-        continue;
-      }
-      const encodedTo = Number(session.progress?.processedSeconds);
-      if (!Number.isFinite(encodedTo)) {
-        continue;
-      }
-      // Where the viewer is. Before the first segment request, the position the
-      // run started at — so a session nobody has read from yet is bounded too.
-      const viewerAt = Number.isInteger(session.lastRequestedSegment)
-        ? this.#segmentStartTime(session, session.lastRequestedSegment)
-        : this.#segmentStartTime(session, session.encodeStartIndex ?? 0);
-      const ahead = encodedTo - viewerAt;
-      if (!session.encoderPaused && ahead > LOOKAHEAD_PAUSE_SECONDS) {
-        this.#pauseEncoder(session, `${Math.round(ahead)}s ahead of the viewer`);
-      } else if (session.encoderPaused && ahead <= LOOKAHEAD_RESUME_SECONDS) {
-        this.#resumeEncoder(session, `${Math.round(ahead)}s ahead of the viewer`);
-      }
+      this.#enforceLookAheadFor(session);
+    }
+  }
+
+  /**
+   * Decide whether one session's encoder should be running right now.
+   *
+   * Called both on the monitor's interval and the moment a segment is
+   * requested. It must be the SAME decision in both places: an earlier version
+   * simply resumed on any request, which meant a request for a segment produced
+   * ten minutes ago released an encoder that had nothing left to do — measured
+   * 2026-08-04, the encoder sawtoothed between suspended and running and drifted
+   * from 135 s to 702 s ahead of the viewer while doing it.
+   *
+   * @param {HlsSession} session
+   * @returns {void}
+   */
+  #enforceLookAheadFor(session) {
+    if (!session || session.state === "disposed" || !session.ffmpeg) {
+      return;
+    }
+    const encodedTo = Number(session.progress?.processedSeconds);
+    if (!Number.isFinite(encodedTo)) {
+      return;
+    }
+    // Where the viewer is. Before the first segment request, the position the
+    // run started at — so a session nobody has read from yet is bounded too.
+    const viewerAt = Number.isInteger(session.lastRequestedSegment)
+      ? this.#segmentStartTime(session, session.lastRequestedSegment)
+      : this.#segmentStartTime(session, session.encodeStartIndex ?? 0);
+    const ahead = encodedTo - viewerAt;
+    if (!session.encoderPaused && ahead > LOOKAHEAD_PAUSE_SECONDS) {
+      this.#pauseEncoder(session, `${Math.round(ahead)}s ahead of the viewer`);
+    } else if (session.encoderPaused && ahead <= LOOKAHEAD_RESUME_SECONDS) {
+      this.#resumeEncoder(session, `${Math.round(ahead)}s ahead of the viewer`);
     }
   }
 
@@ -1933,17 +1972,17 @@ export class HlsSessionManager {
     if (snappedKeyframe !== null) {
       const residualSeconds = Math.max(0, seekSeconds - snappedKeyframe);
       if (snappedKeyframe > 0) {
-        args.push("-ss", String(snappedKeyframe));
+        args.push("-ss", ffmpegSeconds(snappedKeyframe));
       }
       args.push("-i", session.inputUrl);
       if (residualSeconds > 0) {
-        args.push("-ss", String(residualSeconds));
+        args.push("-ss", ffmpegSeconds(residualSeconds));
       }
     } else {
       if (seekSeconds > 0) {
         // No keyframe map (probe failed/timed out) — fall back to the previous
         // behaviour: trust the container's own accurate seek.
-        args.push("-accurate_seek", "-ss", String(seekSeconds));
+        args.push("-accurate_seek", "-ss", ffmpegSeconds(seekSeconds));
       }
       args.push("-i", session.inputUrl);
     }
@@ -1952,7 +1991,7 @@ export class HlsSessionManager {
       // segment grid; relabel output onto the original timeline so segment N
       // carries PTS = N × segmentDuration.
       if (startSeconds > 0) {
-        args.push("-output_ts_offset", String(startSeconds));
+        args.push("-output_ts_offset", ffmpegSeconds(startSeconds));
       }
     } else {
       // Branch B (video copied — only audio is transcoded): we cannot insert
@@ -1964,7 +2003,7 @@ export class HlsSessionManager {
       // beginning and desyncs audio/video). Audio is transcoded on this timeline.
       args.push("-copyts");
       if (sourceStartTime !== 0) {
-        args.push("-output_ts_offset", String(-sourceStartTime));
+        args.push("-output_ts_offset", ffmpegSeconds(-sourceStartTime));
       }
     }
     args.push(
@@ -2389,8 +2428,14 @@ export class HlsSessionManager {
       : this.#segmentStartTime(session, head);
     const currentSeg = Math.max(head, this.#segmentIndexForTime(session, processed));
     // Already covered by the running encode — the data is on its way, so
-    // restarting would only destroy work the viewer is waiting for.
-    if (index >= head && index <= currentSeg + MAX_LOOKAHEAD_SEGMENTS) {
+    // restarting would only destroy work the viewer is waiting for. The run has
+    // to be ALIVE for that to hold: after a run died, `session.ffmpeg` still
+    // pointed at the dead process and every later seek was waved through as
+    // "already covered", so nothing could ever restart it. Measured 2026-08-04:
+    // one ffmpeg failure turned into a session that answered 500 to every
+    // segment for as long as the viewer kept trying.
+    const runIsAlive = session.ffmpeg != null && !hasChildExited(session.ffmpeg);
+    if (runIsAlive && index >= head && index <= currentSeg + MAX_LOOKAHEAD_SEGMENTS) {
       logger.info(
         `transcode ${session.id} seek to ${positionSeconds.toFixed(1)}s (#${index}) ` +
           `already within the running encode (#${head}..#${currentSeg}) — not restarting`
@@ -2678,8 +2723,10 @@ export class HlsSessionManager {
       const requested = session.segmentFormat.segmentIndexFromName(fileName);
       if (requested >= 0) {
         session.lastRequestedSegment = requested;
-        // A viewer who has caught up must not wait out the monitor's interval.
-        this.#resumeEncoder(session, "a segment was requested");
+        // A viewer who has caught up must not wait out the monitor's interval —
+        // but only if they HAVE caught up, which is why this re-evaluates the
+        // same condition instead of resuming outright.
+        this.#enforceLookAheadFor(session);
       }
     }
     try {

@@ -71,14 +71,16 @@ export function readWindowFor({ pieceIndex, lastPiece, windowPieces }) {
  *
  * @param {import("webtorrent").Torrent} torrent
  * @param {{ from: number, to: number }} window
+ * @param {number} [priority] - 1 for what a reader needs next, 0 for the
+ *   background fill of the rest of the file.
  * @returns {void}
  */
-function claimWindow(torrent, { from, to }) {
+function claimWindow(torrent, { from, to }, priority = 1) {
   try {
     if (typeof torrent._select === "function") {
-      torrent._select(from, to, 1, null, true);
+      torrent._select(from, to, priority, null, true);
     } else if (typeof torrent.select === "function") {
-      torrent.select(from, to, 1);
+      torrent.select(from, to, priority);
     }
   } catch {
     // Best effort — never fail a read because selection bookkeeping refused.
@@ -278,18 +280,90 @@ export async function* readFragments({
   let window = null;
   /** @type {{ from: number, to: number } | null} */
   let criticalMark = null;
+  /**
+   * The rest of the file, claimed at the lowest priority so it is fetched with
+   * whatever capacity the near window does not need. Null whenever it must not
+   * be fetched at all — see {@link updateBackfill}.
+   *
+   * @type {{ from: number, to: number } | null}
+   */
+  let backfill = null;
 
   // Identity of this read, so the store can tell one reader's window from
   // another's. Each read gets its own; `readerSequence` never repeats within a
   // process.
   const readerId = `read-${(readerSequence += 1)}`;
 
+  /**
+   * Whether every piece of the current window is already downloaded.
+   *
+   * A handful of pieces, checked against the bitfield, so this is cheap enough
+   * to re-run on every window move.
+   *
+   * @returns {boolean}
+   */
+  const windowIsComplete = () => {
+    if (!window) {
+      return false;
+    }
+    for (let index = window.from; index <= window.to; index += 1) {
+      if (!torrent.bitfield?.get(index)) {
+        return false;
+      }
+    }
+    return true;
+  };
+
+  /**
+   * Keep the rest of the file downloading in the background, but ONLY while
+   * that cannot cost the viewer anything.
+   *
+   * The rule is deliberately blunt rather than clever: the tail is in the
+   * download set only when every piece of the near window is already on hand.
+   * The moment one is missing — the window slid onto undownloaded content, or a
+   * seek moved it somewhere new — the tail leaves the set, so the swarm has
+   * nothing else to work on. Relying on WebTorrent's priority ordering alone
+   * would be weaker: it decides which selection a wire is offered FIRST, not
+   * what a wire already has outstanding, so a seek would still queue behind
+   * whatever tail blocks were in flight.
+   *
+   * Priority 0 against the window's 1 is kept as well, for the moments between
+   * one evaluation and the next.
+   *
+   * What this buys: a file watched for a while ends up downloaded, and every
+   * later seek into it is instant. What it costs: the pool owner's bandwidth
+   * and disk for a film the viewer may abandon — which is why it never runs
+   * ahead of the viewer's own needs.
+   *
+   * @returns {void}
+   */
+  const updateBackfill = () => {
+    const wanted = window && window.to < lastPiece && windowIsComplete()
+      ? { from: window.to + 1, to: lastPiece }
+      : null;
+    if (backfill && (!wanted || backfill.from !== wanted.from || backfill.to !== wanted.to)) {
+      releaseWindow(torrent, backfill);
+      backfill = null;
+    }
+    if (wanted && !backfill) {
+      claimWindow(torrent, wanted, 0);
+      backfill = wanted;
+    }
+  };
+
   const moveWindowTo = (pieceIndex) => {
     const next = readWindowFor({ pieceIndex, lastPiece, windowPieces });
     if (window && window.from === next.from && window.to === next.to) {
+      updateBackfill();
       return;
     }
     const isJump = !window || next.from > window.to || next.from < window.from;
+    // Whatever was being fetched for later stops being wanted the instant the
+    // window moves: the new position has to have the whole swarm to itself.
+    if (backfill) {
+      releaseWindow(torrent, backfill);
+      backfill = null;
+    }
     if (window) {
       releaseWindow(torrent, window);
     }
@@ -313,6 +387,9 @@ export async function* readFragments({
         );
       }
     }
+    // Only now, with the new window claimed and marked, may anything else be
+    // asked for — and only if the window needs nothing.
+    updateBackfill();
   };
 
   try {
@@ -393,6 +470,9 @@ export async function* readFragments({
     // Reached on completion, on cancellation, on a throw, and when the consumer
     // stops iterating — a window left behind would keep the swarm fetching for
     // a reader that no longer exists.
+    if (backfill) {
+      releaseWindow(torrent, backfill);
+    }
     if (window) {
       releaseWindow(torrent, window);
     }

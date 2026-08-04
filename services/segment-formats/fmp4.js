@@ -102,8 +102,18 @@ export const fmp4Format = {
       // `empty_moov` is what makes each piece self-describing, which is what
       // lets the init be lifted out of it; `default_base_moof` keeps fragment
       // offsets relative, so removing the header does not invalidate them.
+      //
+      // `delay_moov` is not optional here. The MP4 muxer builds a copied AC-3
+      // track's `dac3` box out of the bitstream, so it cannot write `moov`
+      // until the first audio packet has arrived — while `empty_moov` asks for
+      // it at header time. Without this flag ffmpeg exits before producing
+      // anything: "Cannot write moov atom before AC3 packets", which is exactly
+      // how fMP4 playback died in the field on 2.9.84/2.9.85. The `hls` muxer
+      // sets this flag itself, which is why the fault only appeared once the
+      // muxing moved here. Delaying `moov` does not change the piece layout —
+      // measured: still `ftyp moov moof mdat … mfra`.
       "-segment_format_options",
-      "movflags=+frag_keyframe+empty_moov+default_base_moof"
+      "movflags=+frag_keyframe+empty_moov+default_base_moof+delay_moov"
     ];
   },
 

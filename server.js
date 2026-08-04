@@ -164,7 +164,8 @@ export async function startProxyServer({ host, port, transcodeAudio, ffmpegBin, 
     localBaseUrl: hlsSessionManager.localBaseUrl,
     sourceRegistry,
     torrentPool,
-    warmKeyframeIndex: (params) => hlsSessionManager.warmKeyframeIndex(params)
+    warmKeyframeIndex: (params) => hlsSessionManager.warmKeyframeIndex(params),
+    expectedFirstSegmentMs: () => hlsSessionManager.expectedFirstSegmentMs()
   });
 
   app.get("/health", async (req, reply) => handleHealthGet(req, reply, { version }));

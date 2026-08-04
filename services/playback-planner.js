@@ -264,6 +264,11 @@ export function createPlaybackPlanner({
   localBaseUrl,
   sourceRegistry,
   torrentPool,
+  // Optional. Reports what this host typically takes to produce a session's
+  // first segment. The browser needs it for the gap between "the file is
+  // downloaded" and "a segment exists": until now it assumed the pipeline
+  // merely keeps up with realtime, and showed 15 s where 3.8 s were left.
+  expectedFirstSegmentMs,
   // Optional. Called once the file's edges are downloaded, so the keyframe
   // index — which reads the same tail of the file — is fetched alongside the
   // codec probe instead of after it. Late-bound to the HLS session manager,
@@ -396,6 +401,7 @@ export function createPlaybackPlanner({
       }
       const { audioCodec, videoCodec, container, durationSeconds, videoWidth, videoHeight, audioTracks, subtitleTracks } = probe;
       const codecsDetected = audioCodec.length > 0 || videoCodec.length > 0;
+      const firstSegmentMs = expectedFirstSegmentMs?.() ?? null;
       logger.info(
         `plan ${sourceKey.slice(0, 8)}:${fileIndex} torrent-ready=${torrentReadyMs}ms ` +
           `file-edges=${edgesReadyMs - torrentReadyMs}ms probe=${Date.now() - planEntryMs - edgesReadyMs}ms ` +
@@ -421,7 +427,10 @@ export function createPlaybackPlanner({
         videoHeight,
         // Full track inventory for the browser's audio/subtitle menus.
         audioTracks: audioTracks ?? [],
-        subtitleTracks: subtitleTracks ?? []
+        subtitleTracks: subtitleTracks ?? [],
+        // What this host has recently taken to make a session's first segment.
+        // Null until one has finished since startup.
+        expectedFirstSegmentMs: firstSegmentMs
       };
       // Only cache a plan whose codecs were actually detected. An empty probe is
       // a "header not downloaded yet" signal, not a valid result — caching it

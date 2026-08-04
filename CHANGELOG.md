@@ -1,3 +1,7 @@
+## 2.9.101
+
+- **New**: The playback plan reports what this host takes to produce a session's first segment — the median of its last eight, measured from session-create to a servable segment (782-1518 ms on the field host). The browser needs it for the gap between "the file is downloaded" and "a segment exists", where until now it assumed the pipeline merely keeps up with realtime and therefore showed 15 s where 3.8 s were left. It is per-host, so a weak box and a fast one each answer for themselves.
+
 ## 2.9.100
 
 - **New**: A long wait for a piece now says who was working on it. The open question about a seek is that a single 8 MiB piece takes 3.0-4.6 s while the swarm as a whole moves 4-6 MB/s, so only about 2 MB/s reaches the piece being waited for — and whether that is because few peers hold it, few are being asked, or each is slow could not be told apart from outside. The line now carries the rate achieved on that piece and, sampled at its peak while waiting, how many connected peers had it, how many were asked, and how many blocks were in flight.

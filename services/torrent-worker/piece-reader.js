@@ -21,6 +21,10 @@
  */
 
 import { findSharedStore } from "../piece-store/shared-piece-store.js";
+import { logger } from "../../utils/logger.js";
+
+/** Only waits at least this long are reported; sequential reading stays silent. */
+const PIECE_WAIT_LOG_MS = 1_000;
 
 /**
  * How far ahead of the read head pieces are asked for.
@@ -318,7 +322,21 @@ export async function* readFragments({
         criticalMark = markCritical(torrent, pieceIndex, Math.min(lastPiece, pieceIndex + criticalRun), criticalMark);
       }
 
+      const waitStartedAt = Date.now();
       await whenPieceReady(torrent, pieceIndex, cancellation);
+      // What a reader spent waiting for data, attributed to the exact piece. A
+      // seek's cost is dominated by the first segment after the encoder
+      // restarts (measured 9.2-9.4 s), and without this there is no way to say
+      // whether that is the swarm, the picker, or ffmpeg. Logged only when the
+      // wait is long enough to matter, so ordinary sequential reading is silent.
+      const waitedMs = Date.now() - waitStartedAt;
+      if (waitedMs >= PIECE_WAIT_LOG_MS) {
+        logger.info(
+          `piece-reader: waited ${waitedMs}ms for piece ${pieceIndex} ` +
+            `(${pieceIndex - firstPiece + 1} of ${lastPiece - firstPiece + 1} in a read from ` +
+            `${(start / 1024 / 1024).toFixed(0)}MB of "${file.name}")`
+        );
+      }
 
       // Pinned BEFORE it is located, and before any await that could let an
       // eviction run: the offset is only meaningful while the piece is held.

@@ -63,6 +63,23 @@ const RUN_FIRST_SEGMENT_GRACE_MS = 30_000;
 // and restart ffmpeg at the demanded segment. Conservative — a slow-but-moving
 // encode keeps advancing `updatedAt`, so this only fires on a true freeze.
 const ENCODER_STALL_MS = 12_000;
+// How far ahead of the viewer the encoder may run before it is stopped, and how
+// far it must fall back to before it is let go again.
+//
+// Nothing used to bound this. Measured 2026-08-04 on the copy path: three
+// minutes after a film was opened the encode had reached 00:39:24 of a 01:26:51
+// source at 12.8x while the viewer was still at the start, and the torrent had
+// pulled 80% of 4.7 GB to feed it. That costs the pool owner's bandwidth and
+// disk for a viewer who may watch two minutes, evicts from memory the pieces
+// the viewer is actually reading, and competes for the swarm with the segment
+// being waited on.
+//
+// In seconds of content rather than segments, because a segment is 4 s of
+// re-encoded video but a whole keyframe interval on the copy path. Generous
+// enough that ordinary watching never touches it: the encoder fills two minutes
+// ahead, stops, and is released as soon as the viewer has spent a minute of it.
+const LOOKAHEAD_PAUSE_SECONDS = 120;
+const LOOKAHEAD_RESUME_SECONDS = 60;
 // Seek debounce. A far (out-of-window) segment request is a server-side seek.
 // Rather than restart ffmpeg on the first one, wait a short quiet period:
 // further far requests re-arm it and update the target to the latest index, so
@@ -787,6 +804,7 @@ export class HlsSessionManager {
     // benchmark (the only path that can pick/step resolution). Cheap no-op scan
     // otherwise.
     this.budgetTimer = setInterval(() => {
+      this.#enforceLookAhead();
       void this.#enforceRealtimeBudget();
     }, BUDGET_CHECK_INTERVAL_MS);
     this.budgetTimer.unref();
@@ -1160,6 +1178,12 @@ export class HlsSessionManager {
       // Bumped by every viewer seek; a held segment request that started under
       // an older value gives up at once. See requestSeek.
       waitEpoch: 0,
+      // Highest segment the viewer has actually asked for, and whether the
+      // encoder is currently suspended for running too far past it.
+      // See #enforceLookAhead.
+      lastRequestedSegment: null,
+      encoderPaused: false,
+      encoderPauseUnsupported: false,
       seekFirstFarAt: 0,
       // Circuit breaker: consecutive FAST failures (see SEEK_FAST_FAIL_MS) at
       // seekFailureTarget. Reset whenever a run starts at a DIFFERENT target or
@@ -1549,6 +1573,94 @@ export class HlsSessionManager {
     return true;
   }
 
+  /**
+   * Stop encoders that have run too far ahead of their viewer, and release
+   * those the viewer has caught up with.
+   *
+   * The encoder is SUSPENDED, not killed. Killing would be simpler, but
+   * restarting it costs about nine seconds on this hardware — the torrent has
+   * to serve a fresh position and ffmpeg has to reach its first keyframe — so a
+   * viewer reaching the end of the produced range would stall every time.
+   * Suspending keeps the process, its open input and its position, and costs
+   * nothing to undo.
+   *
+   * POSIX only. `SIGSTOP` does not exist on Windows, where `process.kill`
+   * throws; the attempt is made once per session and, if it fails, that session
+   * simply keeps its old unbounded behaviour rather than breaking.
+   *
+   * @returns {void}
+   */
+  #enforceLookAhead() {
+    for (const session of this.sessionsById.values()) {
+      if (!session || session.state === "disposed" || !session.ffmpeg) {
+        continue;
+      }
+      const encodedTo = Number(session.progress?.processedSeconds);
+      if (!Number.isFinite(encodedTo)) {
+        continue;
+      }
+      // Where the viewer is. Before the first segment request, the position the
+      // run started at — so a session nobody has read from yet is bounded too.
+      const viewerAt = Number.isInteger(session.lastRequestedSegment)
+        ? this.#segmentStartTime(session, session.lastRequestedSegment)
+        : this.#segmentStartTime(session, session.encodeStartIndex ?? 0);
+      const ahead = encodedTo - viewerAt;
+      if (!session.encoderPaused && ahead > LOOKAHEAD_PAUSE_SECONDS) {
+        this.#pauseEncoder(session, `${Math.round(ahead)}s ahead of the viewer`);
+      } else if (session.encoderPaused && ahead <= LOOKAHEAD_RESUME_SECONDS) {
+        this.#resumeEncoder(session, `${Math.round(ahead)}s ahead of the viewer`);
+      }
+    }
+  }
+
+  /**
+   * Suspend a session's encoder. No-op when already paused or unsupported here.
+   *
+   * @param {HlsSession} session
+   * @param {string} reason
+   * @returns {void}
+   */
+  #pauseEncoder(session, reason) {
+    if (session.encoderPaused || session.encoderPauseUnsupported || !session.ffmpeg?.pid) {
+      return;
+    }
+    try {
+      process.kill(session.ffmpeg.pid, "SIGSTOP");
+    } catch (error) {
+      session.encoderPauseUnsupported = true;
+      logger.info(
+        `transcode ${session.id} cannot suspend the encoder on this platform ` +
+          `(${error instanceof Error ? error.message : String(error)}); look-ahead stays unbounded`
+      );
+      return;
+    }
+    session.encoderPaused = true;
+    logger.info(
+      `transcode ${session.id} encoder suspended — ${reason} ` +
+        `"${session.fileName}"`
+    );
+  }
+
+  /**
+   * Let a suspended encoder run again.
+   *
+   * @param {HlsSession} session
+   * @param {string} reason
+   * @returns {void}
+   */
+  #resumeEncoder(session, reason) {
+    if (!session.encoderPaused || !session.ffmpeg?.pid) {
+      return;
+    }
+    try {
+      process.kill(session.ffmpeg.pid, "SIGCONT");
+    } catch {
+      // The process is gone; the exit handler will deal with it.
+    }
+    session.encoderPaused = false;
+    logger.info(`transcode ${session.id} encoder resumed — ${reason} "${session.fileName}"`);
+  }
+
   async #enforceRealtimeBudget() {
     if (this.videoEncoder?.kind !== "software") {
       return;
@@ -1728,6 +1840,9 @@ export class HlsSessionManager {
   async #startEncodeRun(session, startIndex) {
     const generation = ++session.encodeRunGeneration;
     const previousFfmpeg = session.ffmpeg;
+    // A suspended process does not act on SIGTERM until it is continued, so the
+    // wait below would never end. Let it run before asking it to stop.
+    this.#resumeEncoder(session, "terminating for a new run");
     if (previousFfmpeg && !hasChildExited(previousFfmpeg)) {
       try {
         previousFfmpeg.kill("SIGTERM");
@@ -1760,6 +1875,7 @@ export class HlsSessionManager {
     // Terminate any existing encode process before starting a new one.  The
     // old process's exit handler no-ops because session.ffmpeg is reassigned
     // below (it checks identity).
+    this.#resumeEncoder(session, "terminating");
     if (session.ffmpeg && !session.ffmpeg.killed) {
       try {
         session.ffmpeg.kill("SIGTERM");
@@ -1933,6 +2049,7 @@ export class HlsSessionManager {
     // judged finished — see getFileStream.
     session.usesExplicitCuts = Boolean(cutTimes && cutTimes.length > 0);
     session.encodeStartIndex = safeIndex;
+    session.encoderPaused = false;
     session.pendingRestartIndex = -1;
     session.lastRestartAt = Date.now();
     session.state = session.state === "disposed" ? "disposed" : "starting";
@@ -2585,6 +2702,17 @@ export class HlsSessionManager {
 
     const filePath = path.join(session.dirPath, fileName);
     const isPlaylist = fileName === PLAYLIST_FILE_NAME;
+    if (!isPlaylist) {
+      // Where the viewer actually is. Recorded for every segment request,
+      // served or not, because it is what bounds how far ahead the encoder is
+      // allowed to run — see #enforceLookAhead.
+      const requested = session.segmentFormat.segmentIndexFromName(fileName);
+      if (requested >= 0) {
+        session.lastRequestedSegment = requested;
+        // A viewer who has caught up must not wait out the monitor's interval.
+        this.#resumeEncoder(session, "a segment was requested");
+      }
+    }
     try {
       await access(filePath);
 
@@ -2793,6 +2921,7 @@ export class HlsSessionManager {
       session.seekSettleTimer = null;
     }
 
+    this.#resumeEncoder(session, "session disposed");
     if (session.ffmpeg && !session.ffmpeg.killed) {
       session.ffmpeg.kill("SIGTERM");
       await waitForChildExit(session.ffmpeg);

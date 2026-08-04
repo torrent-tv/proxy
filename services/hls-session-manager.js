@@ -607,6 +607,41 @@ function computeSegmentBoundaries({ transcodeVideo, durationSeconds, segDur, key
 }
 
 /**
+ * The cut times to hand ffmpeg for a run that starts at `startIndex`.
+ *
+ * Two adjustments, both of which cost a broken session to learn:
+ *
+ *  - **Rebased.** `-segment_times` is measured from the start of the run, not
+ *    of the file. Measured: starting at 12 s and asking for a cut at 18 s put
+ *    it at 29.4 s — 12 + 18. So every boundary has the run's own start
+ *    subtracted.
+ *  - **Interior only.** The first boundary is where the run begins and the last
+ *    is where the file ends; neither is a cut. Sending them would produce an
+ *    empty leading segment and a spurious trailing one.
+ *
+ * @param {number[]} boundaries - Segment start times, ascending, ending at the
+ *   file duration (as {@link computeSegmentBoundaries} returns).
+ * @param {number} startIndex - Segment this run starts at.
+ * @returns {number[] | null} Times relative to the run start, or null when the
+ *   boundaries cannot serve (missing, or the index is outside them).
+ */
+export function segmentCutTimesFrom(boundaries, startIndex) {
+  if (!Array.isArray(boundaries) || boundaries.length < 2) {
+    return null;
+  }
+  const index = Number.isInteger(startIndex) && startIndex > 0 ? startIndex : 0;
+  if (index >= boundaries.length - 1) {
+    return null;
+  }
+  const base = boundaries[index];
+  const times = [];
+  for (let at = index + 1; at < boundaries.length - 1; at += 1) {
+    times.push(Number((boundaries[at] - base).toFixed(6)));
+  }
+  return times;
+}
+
+/**
  * The largest keyframe time that does not exceed `target`, from a SORTED
  * (ascending) array of keyframe times such as {@link probeVideoKeyframeTimes}
  * returns. Null when `target` is before the first keyframe or the array is
@@ -1766,23 +1801,67 @@ export class HlsSessionManager {
       // Type-relative audio track chosen by the viewer (default 0).
       `0:a:${session.audioTrackIndex ?? 0}?`,
       ...videoCodecArgs,
-      ...audioCodecArgs,
-      "-f",
-      "hls",
-      "-hls_time",
-      String(this.segmentDurationSec),
-      "-hls_list_size",
-      "0",
-      "-hls_flags",
-      "independent_segments+temp_file",
-      // Container selection + segment naming, from the active format module.
-      ...this.segmentFormat.muxerArgs(),
-      "-start_number",
-      String(safeIndex),
-      // ffmpeg writes its own playlist here; we ignore it and serve the
-      // synthetic VOD playlist instead (see getFileStream).
-      PLAYLIST_FILE_NAME
+      ...audioCodecArgs
     );
+
+    // Where the cuts come from. On the copy path they are the source's own
+    // keyframes, and until now they were only ever GUESSED: ffmpeg got a target
+    // duration and chose its own cut points, while the playlist was built from
+    // the container index — two independent calculations with nothing tying
+    // them together but the hope that they agree. They do not. The index is a
+    // navigation table and is not obliged to list every keyframe; for a field
+    // file it held 1902 while ffmpeg found roughly twice as many and cut twice
+    // as often. Segment #876 then meant 1:26:50 to the player and about minute
+    // 58 to ffmpeg, which is why a seek landed nowhere near where it was aimed
+    // and the reported duration drifted.
+    //
+    // So stop guessing and say it: the `segment` muxer takes the list of times
+    // outright. Passing the very boundaries the playlist was built from makes
+    // the two agree by construction. Only cut points already known to be real
+    // keyframes are sent, so ffmpeg never has to move one forward.
+    const explicitTimes = this.segmentFormat.explicitTimesMuxerArgs?.() ?? null;
+    const cutTimes = explicitTimes && !session.transcodeVideo
+      ? segmentCutTimesFrom(session.segmentBoundaries, safeIndex)
+      : null;
+
+    if (cutTimes && cutTimes.length > 0) {
+      args.push(
+        "-f",
+        "segment",
+        // Times are measured from the START OF THIS RUN, not from the start of
+        // the file — verified: starting at 12 s and asking for a cut at 18 s
+        // produced one at 29.4 s. `segmentCutTimesFrom` rebases them.
+        "-segment_times",
+        cutTimes.join(","),
+        // A cut lands on the first keyframe at or after its time, so a boundary
+        // recorded a hair late would skip to the next one and double the
+        // segment. The tolerance absorbs that rounding.
+        "-segment_time_delta",
+        "0.05",
+        "-segment_start_number",
+        String(safeIndex),
+        ...explicitTimes,
+        this.segmentFormat.segmentFileNameTemplate()
+      );
+    } else {
+      args.push(
+        "-f",
+        "hls",
+        "-hls_time",
+        String(this.segmentDurationSec),
+        "-hls_list_size",
+        "0",
+        "-hls_flags",
+        "independent_segments+temp_file",
+        // Container selection + segment naming, from the active format module.
+        ...this.segmentFormat.muxerArgs(),
+        "-start_number",
+        String(safeIndex),
+        // ffmpeg writes its own playlist here; we ignore it and serve the
+        // synthetic VOD playlist instead (see getFileStream).
+        PLAYLIST_FILE_NAME
+      );
+    }
 
     const ffmpeg = spawn(this.ffmpegBin, args, {
       cwd: session.dirPath,

@@ -136,7 +136,11 @@ export function torrentsForUploadPolicy(torrents, usageByTorrent, now) {
   const chosen = [];
   for (const torrent of torrents) {
     const usage = usageByTorrent?.get?.(torrent);
-    if ((usage && usage.size > 0) || (torrent?.hurryUntil ?? 0) > now) {
+    const hasReader = Boolean(usage && usage.size > 0);
+    if (hasReader || (torrent?.hurryUntil ?? 0) > now) {
+      // Recorded so the policy can tell "nothing is arriving and somebody is
+      // waiting" from "nothing is arriving because nobody asked".
+      torrent.hasActiveReader = hasReader;
       chosen.push(torrent);
     }
   }
@@ -176,7 +180,13 @@ export function decideUploadLimit(activeTorrents, opts = {}) {
     // iterate the piece array and throw on webtorrent 3.x when a piece is null
     // (deselected / mid-verify), which would crash this timer every cycle.
     const notDone = torrent?.done !== true;
-    const starving = notDone && downloadSpeed < starvingSpeed;
+    // A torrent nobody is reading is not starving, however still its download
+    // looks. The encoder is held back once it is far enough ahead of the
+    // viewer, and while it is held nothing is requested — measured
+    // 2026-08-04: four cycles of 512 -> 50 KB/s in three minutes, each
+    // reported as `earn unchoke ... down=0KB/s`, all of them raising the
+    // upload at moments when no byte was wanted by anyone.
+    const starving = notDone && torrent?.hasActiveReader !== false && downloadSpeed < starvingSpeed;
     if (starving && chokedInterested >= chokedThreshold) {
       const name = typeof torrent?.name === "string" ? torrent.name : "?";
       return {
@@ -1125,9 +1135,11 @@ export class TorrentPool {
    * @param {number} fileIndex
    * @param {number} byteStart - Start offset within the file.
    * @param {number} [windowBytes] - Unused; kept so callers need not change.
-   * @param {{ wholeFileRead?: boolean }} [options] - `wholeFileRead` marks a
-   *   request that carried no byte range, i.e. one that merely opens the file at
-   *   0 rather than asking to read from there. See the guard below.
+   * @param {{ wholeFileRead?: boolean, isPlaybackRead?: boolean }} [options] -
+   *   `wholeFileRead` marks a request that carried no byte range, i.e. one that
+   *   merely opens the file at 0 rather than asking to read from there.
+   *   `isPlaybackRead` marks the encoder's input read, the only one that
+   *   follows the viewer. See the guards below.
    * @returns {void}
    */
   prioritizeByteRange(
@@ -1182,10 +1194,15 @@ export class TorrentPool {
     const isJump =
       previousStart === undefined || Math.abs(safeStart - previousStart) > PRIORITY_WINDOW_BYTES;
     if (isJump) {
-      // A jump is a seek. Whatever the swarm was giving us was for somewhere
-      // else, and the pieces at the new position have to be earned from peers
-      // that are choking us — the same standing start as a fresh torrent.
-      this.#markHurry(torrent, "the viewer moved");
+      // A jump in the read that follows the viewer is a seek. Whatever the
+      // swarm was giving us was for somewhere else, and the pieces at the new
+      // position have to be earned from peers that are choking us — the same
+      // standing start as a fresh torrent. A jump in any OTHER read is the
+      // codec probe or the keyframe index visiting the ends of the file, and
+      // nobody is waiting on those the way a viewer waits on a seek.
+      if (options.isPlaybackRead) {
+        this.#markHurry(torrent, "the viewer moved");
+      }
       const percent = ((safeStart / fileLength) * 100).toFixed(1);
       logger.info(
         `torrent-pool: [${String(torrent.infoHash).slice(0, 8)}] read position -> ` +

@@ -94,3 +94,28 @@ test("a torrent with no reader still reaches the policy while it is in a hurry",
     "a torrent being read still counts, hurry or not"
   );
 });
+
+test("a torrent nobody is reading is not treated as starving", () => {
+  // The encoder is suspended once it is far enough ahead, and while it is
+  // suspended nothing is requested — so the download reads zero without anyone
+  // waiting. Measured before this guard: four cycles of 512 -> 50 KB/s in three
+  // minutes, every one of them reported as `earn unchoke ... down=0KB/s`.
+  const idleButChoked = {
+    name: "film.mkv",
+    hasActiveReader: false,
+    wires: [
+      { amInterested: true, peerChoking: true },
+      { amInterested: true, peerChoking: true }
+    ],
+    downloadSpeed: 0,
+    done: false
+  };
+  assert.equal(decideUploadLimit([idleButChoked], { now: NOW }).bytesPerSec, 50 * 1024);
+
+  const waiting = { ...idleButChoked, hasActiveReader: true };
+  assert.equal(
+    decideUploadLimit([waiting], { now: NOW }).bytesPerSec,
+    512 * 1024,
+    "a reader that IS waiting must still earn unchoke slots"
+  );
+});

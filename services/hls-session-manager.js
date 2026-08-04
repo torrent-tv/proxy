@@ -672,6 +672,33 @@ function computeSegmentBoundaries({ transcodeVideo, durationSeconds, segDur, key
  * @returns {number[] | null} Times relative to the run start, or null when the
  *   boundaries cannot serve (missing, or the index is outside them).
  */
+/**
+ * The ffmpeg command as one readable line.
+ *
+ * Everything is shown as passed except the list of cut times, which is one
+ * value per segment — 830 of them on a two-hour film, about 7 KB of log for a
+ * single run, repeated on every restart. The count and the two ends say
+ * everything the list is ever consulted for: whether cutting was explicit at
+ * all, how far it reaches, and where it starts.
+ *
+ * @param {string[]} args
+ * @returns {string}
+ */
+export function describeFfmpegArgs(args) {
+  const parts = [];
+  for (let index = 0; index < args.length; index += 1) {
+    const value = args[index];
+    if (value === "-segment_times" && typeof args[index + 1] === "string") {
+      const times = args[index + 1].split(",");
+      parts.push(value, `<${times.length} cuts ${times[0]}..${times[times.length - 1]}>`);
+      index += 1;
+      continue;
+    }
+    parts.push(value);
+  }
+  return parts.join(" ");
+}
+
 export function segmentCutTimesFrom(boundaries, startIndex) {
   if (!Array.isArray(boundaries) || boundaries.length < 2) {
     return null;
@@ -999,6 +1026,12 @@ export class HlsSessionManager {
     const readWindowBytes = await this.#readWindowBytesFor(sourceKey, fileIndex, durationSeconds);
     if (readWindowBytes > 0) {
       inputUrl.searchParams.set("windowBytes", String(readWindowBytes));
+      // This read, and only this read, follows the viewer. The codec probe and
+      // the keyframe index also go through `/stream`, and they jump between the
+      // first bytes and the last ones — which is indistinguishable, from byte
+      // offsets alone, from someone dragging the slider. Saying so here is
+      // cheaper and more truthful than guessing from the offsets.
+      inputUrl.searchParams.set("reader", "playback");
     }
     if (!hasDuration) {
       logger.warn(
@@ -2132,7 +2165,7 @@ export class HlsSessionManager {
     // were verified to handle a copied AC-3 track on this very host, so the
     // arguments that run actually received are the missing evidence. One line
     // per run, and a run happens at most every few seconds.
-    logger.info(`transcode ${session.id} ffmpeg ${args.join(" ")}`);
+    logger.info(`transcode ${session.id} ffmpeg ${describeFfmpegArgs(args)}`);
 
     const ffmpeg = spawn(this.ffmpegBin, args, {
       cwd: session.dirPath,

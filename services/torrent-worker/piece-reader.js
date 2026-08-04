@@ -155,6 +155,41 @@ function clearCritical(torrent, { from, to }) {
 }
 
 /**
+ * Who is working on the piece a reader is blocked on, right now.
+ *
+ * The open question about a seek: a single 8 MiB piece takes 3.0-4.6 s to
+ * arrive while the swarm as a whole is moving 4-6 MB/s, so roughly 2 MB/s is
+ * reaching the piece that is actually being waited for. Whether that is because
+ * few peers hold it, few are being asked, or each is slow cannot be told apart
+ * from the outside — these three counts tell them apart.
+ *
+ * `wire.requests` is what has been asked of that peer and not yet answered; a
+ * block is 16 KB, so `blocks x 16 KB` is the work in flight on this piece.
+ *
+ * @param {import("webtorrent").Torrent} torrent
+ * @param {number} pieceIndex
+ * @returns {{ peers: number, holders: number, askedOf: number, blocks: number }}
+ */
+export function pieceSupply(torrent, pieceIndex) {
+  const wires = Array.isArray(torrent?.wires) ? torrent.wires : [];
+  let holders = 0;
+  let askedOf = 0;
+  let blocks = 0;
+  for (const wire of wires) {
+    if (wire?.peerPieces?.get?.(pieceIndex)) {
+      holders += 1;
+    }
+    const requests = Array.isArray(wire?.requests) ? wire.requests : [];
+    const forThisPiece = requests.filter((request) => request?.piece === pieceIndex).length;
+    if (forThisPiece > 0) {
+      askedOf += 1;
+      blocks += forThisPiece;
+    }
+  }
+  return { peers: wires.length, holders, askedOf, blocks };
+}
+
+/**
  * Wait until a piece has been downloaded and verified.
  *
  * WebTorrent announces this as `verified`. The bitfield is re-checked after the
@@ -421,7 +456,20 @@ export async function* readFragments({
       }
 
       const waitStartedAt = Date.now();
-      await whenPieceReady(torrent, pieceIndex, cancellation);
+      // Sampled while waiting rather than after: once the piece lands, nothing
+      // is outstanding on it any more and every count reads zero.
+      let supply = null;
+      const supplyProbe = setInterval(() => {
+        const sample = pieceSupply(torrent, pieceIndex);
+        if (!supply || sample.blocks > supply.blocks) {
+          supply = sample;
+        }
+      }, 500);
+      try {
+        await whenPieceReady(torrent, pieceIndex, cancellation);
+      } finally {
+        clearInterval(supplyProbe);
+      }
       // What a reader spent waiting for data, attributed to the exact piece. A
       // seek's cost is dominated by the first segment after the encoder
       // restarts (measured 9.2-9.4 s), and without this there is no way to say
@@ -429,10 +477,16 @@ export async function* readFragments({
       // wait is long enough to matter, so ordinary sequential reading is silent.
       const waitedMs = Date.now() - waitStartedAt;
       if (waitedMs >= PIECE_WAIT_LOG_MS) {
+        const rateKbps = Math.round(pieceLength / 1024 / (waitedMs / 1000));
         logger.info(
           `piece-reader: waited ${waitedMs}ms for piece ${pieceIndex} ` +
             `(${pieceIndex - firstPiece + 1} of ${lastPiece - firstPiece + 1} in a read from ` +
-            `${(start / 1024 / 1024).toFixed(0)}MB of "${file.name}")`
+            `${(start / 1024 / 1024).toFixed(0)}MB of "${file.name}") ` +
+            `— ${rateKbps}KB/s on this piece; ` +
+            (supply
+              ? `${supply.holders}/${supply.peers} peers had it, ${supply.askedOf} were asked, ` +
+                `${supply.blocks} blocks (${Math.round((supply.blocks * 16384) / 1024)}KB) in flight at peak`
+              : "no sample taken")
         );
       }
 

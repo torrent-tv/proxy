@@ -263,7 +263,12 @@ export function createPlaybackPlanner({
   transcodeAudioEnabled,
   localBaseUrl,
   sourceRegistry,
-  torrentPool
+  torrentPool,
+  // Optional. Called once the file's edges are downloaded, so the keyframe
+  // index — which reads the same tail of the file — is fetched alongside the
+  // codec probe instead of after it. Late-bound to the HLS session manager,
+  // which owns the cache both of them share.
+  warmKeyframeIndex
 }) {
   /** @type {Map<string, PlaybackPlan>} */
   const cache = new Map();
@@ -365,6 +370,17 @@ export function createPlaybackPlanner({
       // file, and an unsupported codec like xvid gets copied → black video.
       await torrentPool.prefetchFileEdges(torrent, fileIndex);
       edgesReadyMs = Date.now() - planEntryMs;
+      // The keyframe index reads the tail of the file, which the probe has just
+      // waited for as well. Started here it overlaps the probe instead of
+      // following the whole plan — worth 311-430 ms of the time before the
+      // first segment. Fire and forget: the session reads it itself if this has
+      // not finished, and both share one cache entry.
+      warmKeyframeIndex?.({
+        sourceKey,
+        fileIndex,
+        inputUrl: new URL(directUrl),
+        logName: file.name
+      });
       let probe = await probeStreamCodecs({ ffmpegBin, inputUrl: directUrl, userAgent });
       const probeDeadline = Date.now() + Math.max(0, maxWaitMs);
       let attempt = 0;

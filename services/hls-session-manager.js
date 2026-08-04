@@ -2125,6 +2125,15 @@ export class HlsSessionManager {
       );
     }
 
+    // The exact command, every run. An encode failure is otherwise reported
+    // with ffmpeg's message and nothing about what it was asked to do, and the
+    // two are not always deducible from each other: 2026-08-04 a run died with
+    // "Cannot write moov atom before AC3 packets" although both muxing paths
+    // were verified to handle a copied AC-3 track on this very host, so the
+    // arguments that run actually received are the missing evidence. One line
+    // per run, and a run happens at most every few seconds.
+    logger.info(`transcode ${session.id} ffmpeg ${args.join(" ")}`);
+
     const ffmpeg = spawn(this.ffmpegBin, args, {
       cwd: session.dirPath,
       stdio: ["ignore", "pipe", "pipe"]

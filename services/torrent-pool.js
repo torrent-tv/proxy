@@ -70,6 +70,28 @@ const UPLOAD_BOOST_BYTES = 512 * 1024;           // raised to earn tit-for-tat u
 const UPLOAD_STARVING_SPEED_BYTES = 200 * 1024;  // download below this (with demand) = starving
 const UPLOAD_CHOKED_WIRE_THRESHOLD = 2;          // interested-but-choked wires implying reciprocity
 const UPLOAD_ADJUST_INTERVAL_MS = 5_000;
+/**
+ * How long a torrent counts as being in a hurry after it is added, and after
+ * the viewer moves to a part of the file that is not downloaded.
+ *
+ * BitTorrent gives data to peers that give data back: each peer re-ranks whom
+ * it serves roughly every 10 s and opens a handful of slots to whoever uploaded
+ * most to it, plus one chosen at random. Uploading almost nothing means waiting
+ * to be picked at random, one slot per cycle — which is exactly the ramp
+ * measured 2026-08-04 on a session with 96 peers already connected: 64 KB/s
+ * after 2 s, 1.6 MB/s after 4 s, 4.8 MB/s after 8 s, and the 16 MB the codec
+ * probe needs took 8.36 s of the 11.46 s before playback could start.
+ *
+ * The existing reciprocity boost could not help there: it only fires once the
+ * download has all but stopped (below 200 KB/s) with peers visibly choking us,
+ * and a ramp is neither. In the same session it first raised the limit 13.3 s
+ * after the torrent was added — after the wait it was supposed to shorten — and
+ * reached the generous rate at 43.7 s.
+ *
+ * So the two moments where a viewer is provably waiting get the generous rate
+ * outright, for two unchoke cycles, without waiting for evidence of failure.
+ */
+const UPLOAD_HURRY_MS = 25_000;
 
 /**
  * Decide the client-wide upload limit (bytes/sec) from the torrents that
@@ -84,8 +106,13 @@ const UPLOAD_ADJUST_INTERVAL_MS = 5_000;
  *   are choking us) → boost, to earn unchoke slots.
  * - Otherwise → floor (token upload, avoids an immediate choke without seeding).
  *
- * @param {Array<{ wires?: Array<{ amInterested?: boolean, peerChoking?: boolean }>, downloadSpeed?: number, done?: boolean, name?: string }>} activeTorrents
- * @param {{ floor?: number, idleFloor?: number, boost?: number, starvingSpeed?: number, chokedThreshold?: number }} [opts]
+ * - Any active torrent in a HURRY — just added, or the viewer has just moved
+ *   somewhere the file is not downloaded — → boost for {@link UPLOAD_HURRY_MS},
+ *   because that is when peers must be persuaded to serve us and there is no
+ *   time to first prove that they are not.
+ *
+ * @param {Array<{ wires?: Array<{ amInterested?: boolean, peerChoking?: boolean }>, downloadSpeed?: number, done?: boolean, name?: string, hurryUntil?: number }>} activeTorrents
+ * @param {{ floor?: number, idleFloor?: number, boost?: number, starvingSpeed?: number, chokedThreshold?: number, now?: number }} [opts]
  * @returns {{ bytesPerSec: number, reason: string }}
  */
 export function decideUploadLimit(activeTorrents, opts = {}) {
@@ -94,9 +121,21 @@ export function decideUploadLimit(activeTorrents, opts = {}) {
   const boost = opts.boost ?? UPLOAD_BOOST_BYTES;
   const starvingSpeed = opts.starvingSpeed ?? UPLOAD_STARVING_SPEED_BYTES;
   const chokedThreshold = opts.chokedThreshold ?? UPLOAD_CHOKED_WIRE_THRESHOLD;
+  const now = opts.now ?? Date.now();
 
   if (!Array.isArray(activeTorrents) || activeTorrents.length === 0) {
     return { bytesPerSec: idleFloor, reason: "idle: minimal keep-alive (0 blocks the swarm in wt3.x)" };
+  }
+
+  for (const torrent of activeTorrents) {
+    const hurryUntil = typeof torrent?.hurryUntil === "number" ? torrent.hurryUntil : 0;
+    if (hurryUntil > now && torrent?.done !== true) {
+      const name = typeof torrent?.name === "string" ? torrent.name : "?";
+      return {
+        bytesPerSec: boost,
+        reason: `in a hurry — "${name}" needs data now (${Math.round((hurryUntil - now) / 1000)}s left)`
+      };
+    }
   }
 
   for (const torrent of activeTorrents) {
@@ -395,6 +434,33 @@ export class TorrentPool {
    *
    * @returns {void}
    */
+  /**
+   * Note that a torrent needs data now, and act on it immediately.
+   *
+   * `hurryUntil` is read by {@link decideUploadLimit}; the re-evaluation is
+   * what makes it take effect at once, because the adjuster otherwise runs on a
+   * 5 s timer and the whole hurry is only 25 s long.
+   *
+   * @param {import("webtorrent").Torrent} torrent
+   * @param {string} why - For the log line, so the two causes are told apart.
+   * @returns {void}
+   */
+  #markHurry(torrent, why) {
+    if (!torrent) {
+      return;
+    }
+    const until = Date.now() + UPLOAD_HURRY_MS;
+    if ((torrent.hurryUntil ?? 0) >= until - 1_000) {
+      return;
+    }
+    torrent.hurryUntil = until;
+    logger.info(
+      `torrent-pool: [${String(torrent.infoHash).slice(0, 8)}] uploading generously for ` +
+        `${Math.round(UPLOAD_HURRY_MS / 1000)}s — ${why}`
+    );
+    this.#adjustUploadLimit();
+  }
+
   #adjustUploadLimit() {
     if (!this.client || this.client.destroyed || typeof this.client.throttleUpload !== "function") {
       return;
@@ -477,6 +543,9 @@ export class TorrentPool {
    * @returns {void}
    */
   #attachSwarmDiagnostics(label, torrent) {
+    // A torrent nobody has asked for yet does not exist: this is called the
+    // moment one is added, which is the moment a viewer started waiting.
+    this.#markHurry(torrent, "just added");
     const trackerCount = Array.isArray(torrent.announce) ? torrent.announce.length : 0;
     logger.info(
       `torrent-pool: [${label}] added: files=${torrent.files?.length ?? 0} ` +
@@ -1084,6 +1153,10 @@ export class TorrentPool {
     const isJump =
       previousStart === undefined || Math.abs(safeStart - previousStart) > PRIORITY_WINDOW_BYTES;
     if (isJump) {
+      // A jump is a seek. Whatever the swarm was giving us was for somewhere
+      // else, and the pieces at the new position have to be earned from peers
+      // that are choking us — the same standing start as a fresh torrent.
+      this.#markHurry(torrent, "the viewer moved");
       const percent = ((safeStart / fileLength) * 100).toFixed(1);
       logger.info(
         `torrent-pool: [${String(torrent.infoHash).slice(0, 8)}] read position -> ` +

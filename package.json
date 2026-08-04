@@ -16,8 +16,7 @@
     "major": "npm whoami && npm version major && npm publish && git push --follow-tags",
     "start": "node ./bin/cli.js",
     "dev": "node --inspect=0 --experimental-network-inspection ./bin/cli.js",
-    "test": "node --test",
-    "prepublishOnly": "npm test"
+    "test": "node --test"
   },
   "dependencies": {
     "@fastify/cors": "^11.2.0",

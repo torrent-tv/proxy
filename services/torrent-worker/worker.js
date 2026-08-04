@@ -153,7 +153,7 @@ function sendFragment(id, fragment) {
  * @param {number | null} params.end - Inclusive.
  * @returns {Promise<void>}
  */
-async function streamRange({ id, sourceKey, fileIndex, start, end }) {
+async function streamRange({ id, sourceKey, fileIndex, start, end, windowBytes }) {
   const torrent = await requireTorrent(sourceKey);
   const file = torrent.files?.[fileIndex];
   if (!file) {
@@ -185,7 +185,8 @@ async function streamRange({ id, sourceKey, fileIndex, start, end }) {
       fileIndex,
       start: rangeStart,
       end: rangeEnd,
-      cancellation: sender
+      cancellation: sender,
+      windowBytes
     })) {
       if (sender.isCancelled()) {
         fragment.release();
@@ -326,7 +327,8 @@ async function runCommand(command, params, id) {
         sourceKey: params.sourceKey,
         fileIndex: params.fileIndex,
         start: params.start ?? null,
-        end: params.end ?? null
+        end: params.end ?? null,
+        windowBytes: params.windowBytes
       });
       return true;
     }

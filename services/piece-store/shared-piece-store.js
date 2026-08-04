@@ -542,6 +542,63 @@ export class SharedPieceStore {
    * @returns {Promise<{ offset: number, length: number } | null>} `null` when
    *   the store holds no such piece, in memory or on disk.
    */
+  /**
+   * Declare the pieces a reader is about to need, so eviction takes something
+   * else while it can. Replaces that reader's previous declaration.
+   *
+   * @param {string|number} readerId
+   * @param {number} from - First piece, inclusive.
+   * @param {number} to - Last piece, inclusive.
+   * @returns {void}
+   */
+  protectRange(readerId, from, to) {
+    this.#lru.protect(readerId, from, to);
+  }
+
+  /**
+   * Forget a reader's declaration. Call it when the reader ends.
+   *
+   * @param {string|number} readerId
+   * @returns {void}
+   */
+  releaseProtection(readerId) {
+    this.#lru.unprotect(readerId);
+  }
+
+  /**
+   * Bring back into memory, in parallel and without waiting, the pieces of a
+   * range that have been spilled to disk.
+   *
+   * A piece is otherwise revived only when the reader arrives at it, one at a
+   * time and in step with decoding, so a seek backward into content already
+   * downloaded pays a disk round trip per piece. The disk is local; the whole
+   * window can be brought back at once while the reader is still on its first
+   * piece.
+   *
+   * Bounded, because each revival needs a slot and unbounded revival of a
+   * window larger than the store would simply thrash. Errors are swallowed: a
+   * failed warm-up costs nothing, the reader will ask for the piece properly.
+   *
+   * @param {number} from - First piece, inclusive.
+   * @param {number} to - Last piece, inclusive.
+   * @param {number} [limit] - Most pieces to revive at once.
+   * @returns {number} How many revivals were started.
+   */
+  warmRange(from, to, limit = Math.max(1, Math.floor(this.#capacity / 4))) {
+    if (this.#closed || !Number.isInteger(from) || !Number.isInteger(to)) {
+      return 0;
+    }
+    let started = 0;
+    for (let index = from; index <= to && started < limit; index += 1) {
+      if (this.#slotOf.has(index) || !this.#disk.has(index)) {
+        continue;
+      }
+      started += 1;
+      void this.reside(index).catch(() => undefined);
+    }
+    return started;
+  }
+
   async reside(index) {
     if (this.#closed) {
       throw new Error("Piece store is closed.");

@@ -26,6 +26,9 @@ import { logger } from "../../utils/logger.js";
 /** Only waits at least this long are reported; sequential reading stays silent. */
 const PIECE_WAIT_LOG_MS = 1_000;
 
+/** Distinguishes concurrent readers to the piece store. Never reused. */
+let readerSequence = 0;
+
 /**
  * How far ahead of the read head pieces are asked for.
  *
@@ -45,22 +48,6 @@ const PIECE_WAIT_LOG_MS = 1_000;
  * matters here is that it is bounded and moving rather than "to the end".
  */
 const READ_WINDOW_BYTES = 32 * 1024 * 1024;
-
-/**
- * How many pieces past the one being waited for are marked critical.
- *
- * `critical` means "a reader is blocked on this now" — it is what lets a piece
- * jump the sequential scan. Marking a whole range critical, as this did, says
- * it about hundreds of pieces at once and the signal stops meaning anything.
- * WebTorrent's own reader marks `min(1 MB / pieceLength, 2)` pieces, i.e. the
- * one under the head and at most two more; the same rule is used here.
- *
- * @param {number} pieceLength
- * @returns {number}
- */
-function criticalRunLength(pieceLength) {
-  return Math.min(Math.floor((1024 * 1024) / Math.max(1, pieceLength)), 2);
-}
 
 /**
  * The pieces a reader at `pieceIndex` wants next, clamped to its own range.
@@ -287,22 +274,45 @@ export async function* readFragments({
   // `bytes 0-<EOF>` left a permanent selection over the entire file, and no
   // later prioritisation could outrank it.
   const windowPieces = Math.max(1, Math.ceil(Math.max(1, windowBytes) / pieceLength));
-  const criticalRun = criticalRunLength(pieceLength);
   /** @type {{ from: number, to: number } | null} */
   let window = null;
   /** @type {{ from: number, to: number } | null} */
   let criticalMark = null;
+
+  // Identity of this read, so the store can tell one reader's window from
+  // another's. Each read gets its own; `readerSequence` never repeats within a
+  // process.
+  const readerId = `read-${(readerSequence += 1)}`;
 
   const moveWindowTo = (pieceIndex) => {
     const next = readWindowFor({ pieceIndex, lastPiece, windowPieces });
     if (window && window.from === next.from && window.to === next.to) {
       return;
     }
+    const isJump = !window || next.from > window.to || next.from < window.from;
     if (window) {
       releaseWindow(torrent, window);
     }
     claimWindow(torrent, next);
     window = next;
+    // Tell the store these pieces are wanted, so it evicts something else.
+    // Without it the piece the decoder reads next looks exactly as stale as one
+    // the encoder fetched forty minutes ahead, and the second kind is what
+    // fills the store while the encoder runs ahead of the viewer.
+    store.protectRange?.(readerId, next.from, next.to);
+    if (isJump) {
+      // A jump — a seek, not the window sliding along — can land on pieces that
+      // are already downloaded but have been spilled to disk. Bring the whole
+      // window back at once instead of one disk round trip per piece as the
+      // reader reaches them.
+      const revived = store.warmRange?.(next.from, next.to) ?? 0;
+      if (revived > 0) {
+        logger.info(
+          `piece-reader: reviving ${revived} spilled piece(s) of ${next.from}-${next.to} ` +
+            `for a jump to ${(start / 1024 / 1024).toFixed(0)}MB of "${file.name}"`
+        );
+      }
+    }
   };
 
   try {
@@ -318,8 +328,19 @@ export async function* readFragments({
       moveWindowTo(pieceIndex);
 
       if (!torrent.bitfield?.get(pieceIndex)) {
-        // Blocked here and now — this is the one case `critical` is meant for.
-        criticalMark = markCritical(torrent, pieceIndex, Math.min(lastPiece, pieceIndex + criticalRun), criticalMark);
+        // Everything from here to the end of the window is wanted NOW, so all
+        // of it is marked, not just the piece under the head. `critical`
+        // enables hotswap: a block reserved by a slow peer is re-requested from
+        // a faster one instead of holding up the reader. Measured 2026-08-04
+        // with only the blocked piece marked, the first segment after a seek
+        // took 7.2 s while its four 4 MB pieces arrived one after another at
+        // ~2.2 MB/s, with waits of 1.3 s and 2.8 s on single pieces.
+        //
+        // This is not the old behaviour returning: that marked the whole
+        // REQUESTED RANGE, which for ffmpeg's input means every piece to the
+        // end of the file — hundreds of them, at which point the flag says
+        // nothing. A window is what a reader genuinely needs next.
+        criticalMark = markCritical(torrent, pieceIndex, window.to, criticalMark);
       }
 
       const waitStartedAt = Date.now();
@@ -375,6 +396,7 @@ export async function* readFragments({
     if (window) {
       releaseWindow(torrent, window);
     }
+    store.releaseProtection?.(readerId);
     if (criticalMark) {
       clearCritical(torrent, criticalMark);
     }

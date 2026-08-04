@@ -7,6 +7,7 @@
  */
 
 import { spawn } from "node:child_process";
+import { logger } from "../utils/logger.js";
 import {
   parseFfmpegDurationSeconds,
   parseFfmpegStartTimeSeconds,
@@ -312,6 +313,14 @@ export function createPlaybackPlanner({
       if (cached) {
         return cached;
       }
+      // Where the time before playback goes. `cold-start` already breaks down
+      // everything from the transcode-session request onwards, but the plan
+      // runs BEFORE that and was a single opaque wait: a field session spent
+      // 5.7 s here on a torrent already in the store, with the codec probe
+      // cached, and nothing said which part of it was slow.
+      const planEntryMs = Date.now();
+      let torrentReadyMs = 0;
+      let edgesReadyMs = 0;
 
       const sourceRecord = sourceRegistry.get(sourceKey);
       if (!sourceRecord) {
@@ -321,6 +330,7 @@ export function createPlaybackPlanner({
       }
 
       const torrent = await torrentPool.getTorrent(sourceRecord.sourceType, sourceRecord.source);
+      torrentReadyMs = Date.now() - planEntryMs;
       const file = torrent.files[fileIndex];
       if (!file) {
         const error = new Error("File index was not found in torrent.");
@@ -354,6 +364,7 @@ export function createPlaybackPlanner({
       // plan (file treated as directly playable) sticks permanently for this
       // file, and an unsupported codec like xvid gets copied → black video.
       await torrentPool.prefetchFileEdges(torrent, fileIndex);
+      edgesReadyMs = Date.now() - planEntryMs;
       let probe = await probeStreamCodecs({ ffmpegBin, inputUrl: directUrl, userAgent });
       const probeDeadline = Date.now() + Math.max(0, maxWaitMs);
       let attempt = 0;
@@ -369,6 +380,12 @@ export function createPlaybackPlanner({
       }
       const { audioCodec, videoCodec, container, durationSeconds, videoWidth, videoHeight, audioTracks, subtitleTracks } = probe;
       const codecsDetected = audioCodec.length > 0 || videoCodec.length > 0;
+      logger.info(
+        `plan ${sourceKey.slice(0, 8)}:${fileIndex} torrent-ready=${torrentReadyMs}ms ` +
+          `file-edges=${edgesReadyMs - torrentReadyMs}ms probe=${Date.now() - planEntryMs - edgesReadyMs}ms ` +
+          `total=${Date.now() - planEntryMs}ms attempts=${attempt + 1} ` +
+          `${codecsDetected ? `${videoCodec || "-"}/${audioCodec || "-"}` : "codecs NOT detected (will be polled again)"}`
+      );
 
       // `mode` is advisory only (audio-codec based). The browser makes the
       // authoritative decision independently per stream via canPlayType /

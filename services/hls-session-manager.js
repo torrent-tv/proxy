@@ -67,6 +67,18 @@ const RESTART_COOLDOWN_MS = 500;
 // re-encoded video but a whole keyframe interval on the copy path. Generous
 // enough that ordinary watching never touches it: the encoder fills two minutes
 // ahead, stops, and is released as soon as the viewer has spent a minute of it.
+// How far ahead of its own read head a reader asks the swarm for, expressed in
+// seconds of PLAYBACK. The torrent thread can only think in bytes, and a fixed
+// byte window is wrong at both ends of the range: 32 MB is half a minute of a
+// 1080p film and about four seconds of a disc remux. Duration and file size are
+// both known here, so the window is sized where the knowledge is and sent down
+// on the ffmpeg input URL.
+const READ_WINDOW_SECONDS = 30;
+// Bounds, so a wrong or unusual byte rate cannot ask for something absurd. The
+// floor keeps a few pieces in flight on a low-bitrate file; the ceiling keeps
+// one reader from claiming more than a fraction of the piece store.
+const READ_WINDOW_MIN_BYTES = 16 * 1024 * 1024;
+const READ_WINDOW_MAX_BYTES = 96 * 1024 * 1024;
 const LOOKAHEAD_PAUSE_SECONDS = 120;
 const LOOKAHEAD_RESUME_SECONDS = 60;
 // Seek debounce. A far (out-of-window) segment request is a server-side seek.
@@ -979,6 +991,15 @@ export class HlsSessionManager {
     const outputFps = chooseOutputFps(mediaInfo.fps);
     const hasDuration = Number.isFinite(durationSeconds) && durationSeconds > 0;
     const logName = normalizeLogFileName(fileName, fileIndex);
+
+    // Size the reader's window in seconds of playback rather than bytes. Needs
+    // the file's own average byte rate, which is size ÷ duration; the size
+    // comes from the same stats call the realtime budget uses. Best effort —
+    // without it the reader keeps its own byte default.
+    const readWindowBytes = await this.#readWindowBytesFor(sourceKey, fileIndex, durationSeconds);
+    if (readWindowBytes > 0) {
+      inputUrl.searchParams.set("windowBytes", String(readWindowBytes));
+    }
     if (!hasDuration) {
       logger.warn(
         `transcode ${sessionId}: could not probe duration; falling back to ` +
@@ -1608,6 +1629,35 @@ export class HlsSessionManager {
    *
    * @returns {void}
    */
+  /**
+   * The read-ahead window for a file, in bytes, sized from how many seconds of
+   * playback it holds.
+   *
+   * @param {string} sourceKey
+   * @param {number} fileIndex
+   * @param {number} durationSeconds
+   * @returns {Promise<number>} Zero when the byte rate cannot be established,
+   *   which leaves the reader on its own default.
+   */
+  async #readWindowBytesFor(sourceKey, fileIndex, durationSeconds) {
+    if (!this.getSourceStats || !Number.isFinite(durationSeconds) || durationSeconds <= 0) {
+      return 0;
+    }
+    let fileLength = 0;
+    try {
+      const stats = await this.getSourceStats(sourceKey, fileIndex);
+      fileLength = Number(stats?.fileLength);
+    } catch {
+      return 0;
+    }
+    if (!Number.isFinite(fileLength) || fileLength <= 0) {
+      return 0;
+    }
+    const bytesPerSecond = fileLength / durationSeconds;
+    const wanted = Math.round(bytesPerSecond * READ_WINDOW_SECONDS);
+    return Math.min(READ_WINDOW_MAX_BYTES, Math.max(READ_WINDOW_MIN_BYTES, wanted));
+  }
+
   #enforceLookAhead() {
     for (const session of this.sessionsById.values()) {
       this.#enforceLookAheadFor(session);

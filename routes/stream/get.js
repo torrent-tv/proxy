@@ -106,8 +106,18 @@ export async function handleStreamGet(req, reply, { sourceRegistry, torrentPool 
   // no copy on either thread, at the cost of doing the writing by hand, because
   // only the write callback tells us when a piece may be released. Falls back to
   // the ordinary stream for sources without a shared pool.
+  // How far ahead of its own read head this reader should ask the swarm for.
+  // Supplied by whoever knows the media's byte rate — the transcode session
+  // puts it on the ffmpeg input URL, sized in seconds of playback — because
+  // this thread knows only bytes, and 32 MB is half a minute of a 1080p film
+  // but four seconds of a disc remux. Absent or unusable, the reader's own
+  // default stands.
+  const windowBytesRaw = Number(req.query.windowBytes);
+  const windowBytes =
+    Number.isFinite(windowBytesRaw) && windowBytesRaw > 0 ? windowBytesRaw : undefined;
+
   const fragments = typeof file.createFragmentReader === "function"
-    ? file.createFragmentReader({ start, end })
+    ? file.createFragmentReader({ start, end, windowBytes })
     : null;
 
   if (fragments) {

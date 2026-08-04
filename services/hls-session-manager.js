@@ -43,26 +43,15 @@ const DEFAULT_SEGMENT_DURATION_SEC = 4;
 // is allowed to be before we restart ffmpeg at that position (server-side seek).
 // Requests within the window are served by waiting for the running encode.
 const MAX_LOOKAHEAD_SEGMENTS = 8;
-// After a seek-restart, ignore competing restart requests for this long. The
-// synthetic VOD playlist lets the player request distant segments in quick
-// succession (stall-recovery seeks); without a cooldown ffmpeg ping-pongs
-// between positions, restarting endlessly and producing nothing.
-const RESTART_COOLDOWN_MS = 4_000;
-// How long a seek restart waits for the CURRENT run to produce its first
-// segment before it is allowed to pre-empt it anyway. Generous, because the
-// first segment after a seek is the slowest thing this pipeline does (ffmpeg
-// restart + torrent pieces for a fresh position); still bounded so a wedged
-// run cannot block seeking forever. See #fireSettledSeek.
-const RUN_FIRST_SEGMENT_GRACE_MS = 30_000;
-// Encoder stall watchdog. A running ffmpeg emits `-progress` output on stdout
-// continuously while it encodes; when it hangs mid-file (alive, but producing
-// no output and no stderr — a deadlock, e.g. a stalled input read), that output
-// stops and `progress.updatedAt` freezes. If a segment INSIDE the look-ahead
-// window is being demanded but progress has not advanced for this long, the
-// encoder is wedged (observed: the segment 503s forever). Treat it like a seek
-// and restart ffmpeg at the demanded segment. Conservative — a slow-but-moving
-// encode keeps advancing `updatedAt`, so this only fires on a true freeze.
-const ENCODER_STALL_MS = 12_000;
+// Floor between actual restarts. It used to be 4 s, from when a far segment
+// REQUEST could steer the encoder and a playlist scan produced a burst of them.
+// Requests no longer steer anything (see #ensureEncodingFor) — every restart
+// now comes from a position the viewer stated — so this is no longer a policy
+// about noise, only a guard against a client that spams the seek endpoint.
+// Measured cost of the old value 2026-08-04: two seeks 1.3 s apart produced two
+// restarts 4.4 s apart, the first encoding 119.5 s of content nobody wanted
+// before the second killed it.
+const RESTART_COOLDOWN_MS = 500;
 // How far ahead of the viewer the encoder may run before it is stopped, and how
 // far it must fall back to before it is let go again.
 //
@@ -101,10 +90,17 @@ const LOOKAHEAD_RESUME_SECONDS = 60;
 // encoding 125 s of content before reaching the viewer's position. Field
 // 2026-08-02: a seek took 56 s, of which ~50 s was this backoff.
 const SEEK_BACKOFF_SEGMENTS = 1;
-const SEEK_SETTLE_MS = 1_200;
-// Hard cap on the total settle wait, measured from the first far request of a
+// How long to wait for a scrub to stop moving before acting on it. Small,
+// because the browser already collapses a drag into ONE report
+// (`SEEK_REPORT_DEBOUNCE_MS`, 300 ms) and only reports where it settled — this
+// is a second debounce on an already-debounced signal, and every millisecond of
+// it is dead time in front of the viewer. It was 1.2 s when the encoder was
+// also steered by segment requests, which arrive in bursts of dozens; measured
+// 2026-08-04, that cost 1.2 s of every seek.
+const SEEK_SETTLE_MS = 300;
+// Hard cap on the total settle wait, measured from the first request of a
 // burst, so a still-moving scrubber cannot delay a genuine seek forever.
-const SEEK_SETTLE_MAX_MS = 2_500;
+const SEEK_SETTLE_MAX_MS = 1_000;
 // Grace period to wait for the PREVIOUS ffmpeg process to exit (per signal
 // escalation step: SIGTERM, then SIGKILL) before spawning its replacement into
 // the same session directory. See #startEncodeRun.
@@ -2464,48 +2460,21 @@ export class HlsSessionManager {
       session.seekSettleTimer.unref?.();
       return;
     }
-    // Let the CURRENT run finish what it started. Restarting a run that has not
-    // yet produced a single segment destroys all its work and starts the wait
-    // over — and after a seek the first segment is always the slowest, so this
-    // is self-perpetuating: field log (2026-08-02, one user seek) shows
-    // restarts at #617 → #717 → #732 → #732 every 5-7 s, none of which ever
-    // produced anything, leaving the viewer with a flickering loading pill and
-    // no playback at all.
-    //
-    // These extra targets are NOT further user seeks: when the player cannot
-    // get its segment it SCANS the playlist (every segment is listed in our
-    // synthetic VOD playlist, so from its point of view they all exist), and
-    // each far-enough probe looked like a fresh seek to us. Waiting for the
-    // first segment makes the scan harmless — it can no longer steer the
-    // encoder — and one genuine seek now reliably completes.
-    //
-    // Bounded by RUN_FIRST_SEGMENT_GRACE_MS so a wedged run cannot block seeks
-    // forever; the encoder-stall watchdog and the exit handler cover a run that
-    // dies outright.
+    // A run in progress is NOT protected any more. It used to be: a restart was
+    // held for up to 30 s while the current run reached its first segment,
+    // because a far segment REQUEST could steer the encoder and the player's
+    // playlist scan produced dozens of them — restarts at #617 → #717 → #732 →
+    // #732 every 5-7 s, none producing anything (field 2026-08-02). Requests
+    // stopped steering anything when the position became explicit, so the only
+    // thing that can arrive here is a position the viewer has stated, and
+    // finishing a segment for where they no longer are is work nobody wants.
+    // Holding it was also expensive in the other direction: a genuine second
+    // seek could be delayed by the whole grace.
     const producedThisRun = this.#producedSecondsThisRun(session);
     const runIsAlive = session.ffmpeg != null && !hasChildExited(session.ffmpeg);
-    if (
-      runIsAlive &&
-      producedThisRun < this.segmentDurationSec &&
-      sinceLastRestart < RUN_FIRST_SEGMENT_GRACE_MS
-    ) {
-      logger.info(
-        `transcode ${session.id} seek #${target} HELD — current run has produced ` +
-          `${producedThisRun.toFixed(1)}s of the ${this.segmentDurationSec}s first segment ` +
-          `(${(sinceLastRestart / 1000).toFixed(1)}s into a ${RUN_FIRST_SEGMENT_GRACE_MS / 1000}s grace)`
-      );
-      session.seekSettleTimer = setTimeout(() => this.#fireSettledSeek(session), SEEK_SETTLE_MS);
-      session.seekSettleTimer.unref?.();
-      return;
-    }
-    // Why the restart was allowed — the counterpart of the HELD line above.
-    // Without it a restart is indistinguishable from the runaway ping-pong this
-    // guard exists to stop, and diagnosing a field report becomes guesswork.
     const allowedBecause = !runIsAlive
       ? "run is dead"
-      : producedThisRun >= this.segmentDurationSec
-        ? `run produced ${producedThisRun.toFixed(1)}s (first segment done)`
-        : `grace of ${RUN_FIRST_SEGMENT_GRACE_MS / 1000}s expired`;
+      : `viewer moved; run had produced ${producedThisRun.toFixed(1)}s`;
     // The start is exactly what requestSeek computed — one segment before the
     // viewer's position — and nothing else may move it.
     //

@@ -50,6 +50,18 @@ export class PieceLru {
   }
 
   /**
+   * How many pieces are currently held by a reader.
+   *
+   * Reported rather than merely tracked: a pin that is never released is
+   * invisible until eviction has nothing left to take, and by then the store is
+   * already failing. A count that keeps climbing between reports names the leak
+   * long before that.
+   */
+  get pinnedCount() {
+    return this.#pins.size;
+  }
+
+  /**
    * Mark a piece as resident, or as used again if it already was.
    *
    * A `Set` preserves insertion order, so deleting and re-adding is what moves

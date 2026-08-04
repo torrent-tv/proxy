@@ -131,6 +131,28 @@ export class SharedPieceStore {
   #slotOf = new Map();
   /** Slot numbers not currently holding a piece. */
   #freeSlots = [];
+  /**
+   * Pieces being written out to disk right now: index → that write.
+   *
+   * Such a piece is in neither place — its slot has already been given away,
+   * and the disk copy is not finished. A reader arriving in that window must
+   * wait for the write instead of concluding the piece is gone.
+   *
+   * @type {Map<number, Promise<void>>}
+   */
+  #evicting = new Map();
+  /**
+   * Slots handed out but not yet recorded against a piece.
+   *
+   * A slot is claimed before the piece is copied into it, so between those two
+   * moments the slot belongs to nobody the books know about. Without counting
+   * them, a burst of concurrent puts — which is the normal case, pieces arrive
+   * from many peers at once — sees an empty eviction list and concludes the
+   * store is exhausted, when in fact it is merely mid-flight.
+   */
+  #outstandingSlots = 0;
+  /** Resolvers waiting for a slot to become claimable. @type {(() => void)[]} */
+  #waiters = [];
   #lru;
   #disk;
   /** Slots backed by memory right now; grows towards {@link capacity}. */
@@ -206,6 +228,7 @@ export class SharedPieceStore {
       name: this.#name,
       resident: this.#slotOf.size,
       capacity: this.#capacity,
+      pinned: this.#lru.pinnedCount,
       spilled: this.#disk.size,
       ...this.#counters
     };
@@ -293,8 +316,65 @@ export class SharedPieceStore {
    * @returns {Promise<number>} Slot number.
    */
   async #claimSlot() {
+    for (;;) {
+      const slot = await this.#claimSlotOnce();
+      if (slot !== null) {
+        return slot;
+      }
+      // Nothing claimable this instant, but work is in flight that will make a
+      // slot claimable: a spill finishing, or a piece being written into a slot
+      // already handed out. Wait for either and look again, rather than failing
+      // while the store is in the middle of making room.
+      await new Promise((resolve) => {
+        this.#waiters.push(resolve);
+        for (const spill of this.#evicting.values()) {
+          void spill.then(() => this.#wake(), () => this.#wake());
+        }
+      });
+    }
+  }
+
+  /**
+   * Record a piece against the slot it now occupies, and let waiters retry.
+   *
+   * @param {number} index
+   * @param {number} slot
+   * @returns {void}
+   */
+  #registerSlot(index, slot) {
+    this.#slotOf.set(index, slot);
+    this.#lru.touch(index);
+    this.#outstandingSlots -= 1;
+    this.#wake();
+  }
+
+  /**
+   * Release everyone waiting for a slot; each rechecks for itself.
+   *
+   * @returns {void}
+   */
+  #wake() {
+    const waiting = this.#waiters;
+    this.#waiters = [];
+    for (const resolve of waiting) {
+      resolve();
+    }
+  }
+
+  /**
+   * One attempt at a slot: a number, or `null` when the caller should wait for
+   * an in-flight spill and try again.
+   *
+   * @returns {Promise<number | null>}
+   */
+  async #claimSlotOnce() {
+    // Every slot handed out below is counted BEFORE this function can suspend.
+    // Counting it after an `await` would leave concurrent callers — which is
+    // how pieces actually arrive — seeing an idle store and declaring it
+    // exhausted while its slots are already spoken for.
     const free = this.#freeSlots.pop();
     if (free !== undefined) {
+      this.#outstandingSlots += 1;
       return free;
     }
 
@@ -305,11 +385,15 @@ export class SharedPieceStore {
       this.#allocatedSlots += 1;
       this.#shared.grow(this.#allocatedSlots * this.#chunkLength);
       this.#pool = Buffer.from(this.#shared);
+      this.#outstandingSlots += 1;
       return this.#allocatedSlots - 1;
     }
 
     const victim = this.#lru.evictionCandidate();
     if (victim === null) {
+      if (this.#evicting.size > 0 || this.#outstandingSlots > 0) {
+        return null;
+      }
       // Every resident piece is being read. Taking one anyway is precisely the
       // failure this store exists to make impossible.
       this.#counters.blockedByPins += 1;
@@ -317,12 +401,30 @@ export class SharedPieceStore {
     }
 
     const slot = this.#slotOf.get(victim);
-    const bytes = this.#pool.subarray(slot * this.#chunkLength, slot * this.#chunkLength + this.#lengthOf(victim));
-    await this.#disk.write(victim, bytes);
-    this.#counters.spills += 1;
 
+    // Claim the victim NOW, before the write can suspend us. Picking it and
+    // releasing it either side of an `await` lets a second claim, arriving in
+    // that gap, pick the same victim and be handed the same slot — after which
+    // two pieces write over each other, both fail their hash, and the torrent
+    // downloads them again, forever. Removing it from the books first makes the
+    // choice atomic; `#evicting` keeps readers correct in the meantime.
     this.#slotOf.delete(victim);
     this.#lru.remove(victim);
+    this.#outstandingSlots += 1;
+
+    const bytes = this.#pool.subarray(slot * this.#chunkLength, slot * this.#chunkLength + this.#lengthOf(victim));
+    const spill = this.#disk.write(victim, bytes).then(
+      () => {
+        this.#counters.spills += 1;
+        this.#evicting.delete(victim);
+      },
+      (error) => {
+        this.#evicting.delete(victim);
+        throw error;
+      }
+    );
+    this.#evicting.set(victim, spill);
+    await spill;
     return slot;
   }
 
@@ -346,8 +448,11 @@ export class SharedPieceStore {
       bytes.copy
         ? bytes.copy(this.#pool, slot * this.#chunkLength)
         : this.#pool.set(bytes, slot * this.#chunkLength);
-      this.#slotOf.set(index, slot);
-      this.#lru.touch(index);
+      if (existing === undefined) {
+        this.#registerSlot(index, slot);
+      } else {
+        this.#lru.touch(index);
+      }
       // A newer copy is in memory; whatever is on disk is stale.
       this.#disk.forget(index);
     };
@@ -391,6 +496,13 @@ export class SharedPieceStore {
         return Buffer.from(this.#pool.subarray(start, start + length));
       }
 
+      // Mid-spill: neither in memory nor yet on disk. See `reside` — reporting
+      // it missing here would tell WebTorrent to fetch a piece we already have.
+      const spill = this.#evicting.get(index);
+      if (spill) {
+        await spill.catch(() => undefined);
+      }
+
       if (!this.#disk.has(index)) {
         throw new Error(`Piece ${index} is not in the store.`);
       }
@@ -403,8 +515,7 @@ export class SharedPieceStore {
         revived * this.#chunkLength + pieceLength
       );
       await this.#disk.read(index, target);
-      this.#slotOf.set(index, revived);
-      this.#lru.touch(index);
+      this.#registerSlot(index, revived);
       this.#counters.fromDisk += 1;
       this.#counters.revivals += 1;
       const start = revived * this.#chunkLength + offset;
@@ -443,6 +554,14 @@ export class SharedPieceStore {
       return this.locate(index);
     }
 
+    // Caught mid-spill: the slot is already gone, the disk copy is not there
+    // yet. Waiting is the only correct answer — reporting it missing would make
+    // the caller re-download a piece we are in the middle of keeping.
+    const spill = this.#evicting.get(index);
+    if (spill) {
+      await spill.catch(() => undefined);
+    }
+
     if (!this.#disk.has(index)) {
       return null;
     }
@@ -454,8 +573,7 @@ export class SharedPieceStore {
       revived * this.#chunkLength + pieceLength
     );
     await this.#disk.read(index, target);
-    this.#slotOf.set(index, revived);
-    this.#lru.touch(index);
+    this.#registerSlot(index, revived);
     this.#counters.fromDisk += 1;
     this.#counters.revivals += 1;
     return this.locate(index);

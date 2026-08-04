@@ -1,3 +1,7 @@
+## 2.9.85
+
+- **Fix**: fMP4 playback did not start at all in 2.9.84 — every request for the init segment answered 500. ffmpeg had refused to open the output: `Could not write header (incorrect codec parameters ?)`, because the `segment` muxer determines the container from the file extension and does not recognise `.m4s` for MP4, whatever `-segment_format` says. Segments are now written and named `.mp4` on both paths. The extension is internal: it appears only in our own playlist and in the temporary directory, so nothing outside changes.
+
 ## 2.9.84
 
 - **Fix**: fMP4 now cuts segments where the playlist says too, closing the gap left by 2.9.82 (which covered MPEG-TS only). The muxer that takes explicit cut times writes each fMP4 piece self-contained — `ftyp moov moof mdat … mfra`, confirmed on the field host — which is not what HLS wants, so the pieces are split on serve: the header is lifted out of the first one to become the init segment named by `#EXT-X-MAP`, and removed from every media segment along with the trailing random-access index, whose offsets describe a file that no longer exists. Timestamps still need stamping exactly as before: measured, all pieces of a run report a start of 0.080 s, each carrying its own zero, which is the same defect the existing rewriting already corrects. Verified end to end on a real piece from the field host — split into a 779-byte init and 221 KB of fragments, recombined, and decoded clean.

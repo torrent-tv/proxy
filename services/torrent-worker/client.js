@@ -228,7 +228,7 @@ export class TorrentWorkerClient {
    * (viewer gone, seek superseded) stops the worker reading, so pieces are not
    * fetched for a stream nobody will drain.
    *
-   * @param {{ sourceKey: string, fileIndex: number, start?: number | null, end?: number | null }} params
+   * @param {{ sourceKey: string, fileIndex: number, start?: number | null, end?: number | null, windowBytes?: number }} params
    * @returns {ReadableStream<Uint8Array>}
    */
   createReadStream({ sourceKey, fileIndex, start = null, end = null }) {
@@ -256,7 +256,7 @@ export class TorrentWorkerClient {
     this.#worker.postMessage({
       command: Command.READ_RANGE,
       id: readId,
-      params: { sourceKey, fileIndex, start, end }
+      params: { sourceKey, fileIndex, start, end, windowBytes }
     });
 
     return receive.stream;
@@ -276,10 +276,10 @@ export class TorrentWorkerClient {
    * Returns `null` when this source has no shared pool, so the caller can fall
    * back to {@link createReadStream}.
    *
-   * @param {{ sourceKey: string, fileIndex: number, start?: number | null, end?: number | null }} params
+   * @param {{ sourceKey: string, fileIndex: number, start?: number | null, end?: number | null, windowBytes?: number }} params
    * @returns {{ [Symbol.asyncIterator]: () => AsyncGenerator<{ bytes: Uint8Array, release: () => void }>, cancel: () => void } | null}
    */
-  createFragmentReader({ sourceKey, fileIndex, start = null, end = null }) {
+  createFragmentReader({ sourceKey, fileIndex, start = null, end = null, windowBytes }) {
     const pool = this.#poolBySource.get(sourceKey);
     if (!pool) {
       return null;
@@ -327,7 +327,7 @@ export class TorrentWorkerClient {
     this.#worker.postMessage({
       command: Command.READ_RANGE,
       id: readId,
-      params: { sourceKey, fileIndex, start, end }
+      params: { sourceKey, fileIndex, start, end, windowBytes }
     });
 
     return {
@@ -394,7 +394,7 @@ export class TorrentWorkerClient {
       files: info.files.map((file) => ({
         ...file,
         /**
-         * @param {{ start?: number, end?: number }} [options]
+         * @param {{ start?: number, end?: number, windowBytes?: number }} [options]
          * @returns {ReadableStream<Uint8Array>}
          */
         createReadStream(options = {}) {
@@ -416,7 +416,7 @@ export class TorrentWorkerClient {
          * Fragments of shared memory, for a caller that can say when it has
          * finished with each one. `null` when this source has no shared pool.
          *
-         * @param {{ start?: number, end?: number }} [options]
+         * @param {{ start?: number, end?: number, windowBytes?: number }} [options]
          * @returns {ReturnType<TorrentWorkerClient["createFragmentReader"]>}
          */
         createFragmentReader(options = {}) {
@@ -424,7 +424,8 @@ export class TorrentWorkerClient {
             sourceKey,
             fileIndex: file.index,
             start: options.start ?? null,
-            end: options.end ?? null
+            end: options.end ?? null,
+            windowBytes: options.windowBytes
           });
         }
       }))

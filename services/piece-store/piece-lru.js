@@ -27,6 +27,21 @@ export class PieceLru {
   #order = new Set();
   /** Piece index → number of readers currently holding it. */
   #pins = new Map();
+  /**
+   * Reader id → the piece range it expects to read next.
+   *
+   * Recency alone does not describe this. A reader walking a film touches its
+   * pieces once, so the piece the decoder will want in two seconds looks
+   * exactly as stale as one fetched forty minutes ago and never read again —
+   * and with the encoder running ahead of the viewer, the second kind is what
+   * fills the store. Measured 2026-08-04: the hit rate fell from 100% to 45.7%
+   * with 221 pieces read back from disk in one session.
+   *
+   * A preference, not a pin. At the smallest budget the store guarantees only
+   * two resident pieces, so a hard hold on a window would deadlock it; when
+   * nothing unprotected is left, protection is ignored rather than obeyed.
+   */
+  #protected = new Map();
   #capacity;
 
   /**
@@ -143,12 +158,68 @@ export class PieceLru {
    * @returns {number | null}
    */
   evictionCandidate() {
+    // First choice: the least recently used piece nobody is reading and nobody
+    // is about to read.
+    for (const index of this.#order) {
+      if (!this.#pins.has(index) && !this.#isProtected(index)) {
+        return index;
+      }
+    }
+    // Nothing spare left. Protection yields — it is a preference, and refusing
+    // here would leave the store unable to admit anything at all. Pins do not
+    // yield: a piece being read now cannot have its memory taken away.
     for (const index of this.#order) {
       if (!this.#pins.has(index)) {
         return index;
       }
     }
     return null;
+  }
+
+  /**
+   * Declare the pieces a reader expects to need next, replacing whatever it
+   * declared before. Ranges from different readers add up.
+   *
+   * @param {string|number} readerId - Identity of the reader, so its own range
+   *   is replaced rather than accumulated.
+   * @param {number} from - First piece, inclusive.
+   * @param {number} to - Last piece, inclusive.
+   * @returns {void}
+   */
+  protect(readerId, from, to) {
+    if (!Number.isInteger(from) || !Number.isInteger(to) || to < from) {
+      return;
+    }
+    this.#protected.set(readerId, { from, to });
+  }
+
+  /**
+   * Drop a reader's declared range. Must be called when the reader ends, or its
+   * window keeps occupying the store for a reader that no longer exists.
+   *
+   * @param {string|number} readerId
+   * @returns {void}
+   */
+  unprotect(readerId) {
+    this.#protected.delete(readerId);
+  }
+
+  /** How many readers currently declare a range. */
+  get protectedCount() {
+    return this.#protected.size;
+  }
+
+  /**
+   * @param {number} index
+   * @returns {boolean}
+   */
+  #isProtected(index) {
+    for (const range of this.#protected.values()) {
+      if (index >= range.from && index <= range.to) {
+        return true;
+      }
+    }
+    return false;
   }
 
   /**

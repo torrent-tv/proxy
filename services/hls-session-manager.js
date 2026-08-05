@@ -181,6 +181,13 @@ const LINK_LOW_BUFFER_SEC = 10;
 // Observed produced bitrate: average over this many recently completed
 // segments (the newest file on disk may still be written and is excluded).
 const LINK_OBSERVED_SEGMENTS = 5;
+// How many recent runs the two cold-start estimates keep. Both the
+// session-create time and the first-segment time are reported to the browser as
+// the median of this many samples, so it has to be long enough that one slow run
+// does not move the figure and short enough that the estimate still follows the
+// host: a proxy whose swarm has warmed up, or which has just picked up a second
+// viewer, should stop quoting the numbers from ten minutes ago.
+const FIRST_SEGMENT_SAMPLES = 20;
 const MICROSECONDS_PER_SECOND = 1_000_000;
 const PROGRESS_LOG_INTERVAL_MS = 5_000;
 // Read segment files in large blocks so the body is delivered to the data
@@ -990,7 +997,6 @@ export class HlsSessionManager {
     const sessionId = randomUUID();
     const createEntryMs = Date.now();
     const sessionDir = createSessionDirPath(sessionId);
-    await mkdir(sessionDir, { recursive: true });
     const inputUrl = new URL("/stream", `${this.localBaseUrl}/`);
     inputUrl.searchParams.set("sourceKey", sourceKey);
     inputUrl.searchParams.set("fileIndex", String(fileIndex));
@@ -1175,6 +1181,14 @@ export class HlsSessionManager {
     // otherwise the client target (0 = keep source, handled by buildVideoArgs).
     const encodeWidth = encodeBudget?.width ?? normalizedTargetWidth;
     const encodeHeight = encodeBudget?.height ?? normalizedTargetHeight;
+
+    // Only now, when nothing above can still throw. Everything from the probe
+    // to the keyframe index used to run with the directory already made, so a
+    // failure between the two left it behind: nothing tracks a directory whose
+    // session was never registered, and no sweep looks for one. Proxy
+    // 2.9.101-2.9.102 failed here on every single request and the leftovers
+    // were the only trace of it on disk.
+    await mkdir(sessionDir, { recursive: true });
 
     const session = {
       id: sessionId,

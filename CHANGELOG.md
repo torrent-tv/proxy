@@ -1,3 +1,11 @@
+## 2.9.103
+
+- **Fix**: Playback worked in neither 2.9.101 nor 2.9.102. Both cold-start estimates keep a window of recent samples, and the constant naming that window was used twice and declared nowhere. The session-create one runs on every new session, so `POST /api/transcode-sessions` answered 500 to every viewer and the browser then reported the first segment missing. Field session 2026-08-05: the plan succeeded in 5858 ms, the session request failed 47 ms later, the data channel closed 16 ms after that.
+- **Fix**: The fallback read path threw the same way. `createReadStream` passed a `windowBytes` its own signature never accepted — a reference to nothing, which in a module is an error, not an undefined. It is the path taken for a source with no shared piece pool, so it had never run on a host where it would have been noticed.
+- **Fix**: A failed session no longer leaves its directory behind. It was created before the probe and the keyframe index, both of which can fail, and nothing tracks or sweeps a directory whose session was never registered.
+- **New**: The transcode-session route says why it failed, on the proxy's own log and with the stack. It caught, answered 500 and stayed silent, so the log carried only the data-channel layer's bare `→ 500`: the cause of the defect above had to be recovered by replaying the request against the live proxy.
+- **Chore**: The proxy has a linter. It had none, and the rule for an undeclared name catches this whole class outright — it found the second occurrence above on its first run. Biome, `npm run lint`, limited to the correctness rules that describe real faults rather than style.
+
 ## 2.9.102
 
 - **New**: The playback plan also reports what this host takes to CREATE a session — median of the last eight, 116-843 ms depending on whether the keyframe index is already in hand. It is the second term of the browser's end-to-end estimate, which is being rebuilt as a sum over the stages that have not happened yet rather than a choice between figures that each describe only one of them (`research/playback-eta-2026-08-05.md`).

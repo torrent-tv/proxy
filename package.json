@@ -16,7 +16,8 @@
     "major": "npm whoami && npm version major && npm publish && git push --follow-tags",
     "start": "node ./bin/cli.js",
     "dev": "node --inspect=0 --experimental-network-inspection ./bin/cli.js",
-    "test": "node --test"
+    "test": "node --test",
+    "lint": "biome lint ."
   },
   "dependencies": {
     "@fastify/cors": "^11.2.0",
@@ -34,5 +35,8 @@
     "webtorrent": "2.8.5",
     "werift": "^0.24.2",
     "ws": "^8.18.2"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "^2.5.7"
   }
 }

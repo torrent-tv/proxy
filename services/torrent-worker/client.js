@@ -231,7 +231,7 @@ export class TorrentWorkerClient {
    * @param {{ sourceKey: string, fileIndex: number, start?: number | null, end?: number | null, windowBytes?: number }} params
    * @returns {ReadableStream<Uint8Array>}
    */
-  createReadStream({ sourceKey, fileIndex, start = null, end = null }) {
+  createReadStream({ sourceKey, fileIndex, start = null, end = null, windowBytes }) {
     // Same id sequence as commands — see `nextId` in `channel.js`.
     const readId = this.#caller.nextId();
     const receive = createReceiveStream({
@@ -407,7 +407,8 @@ export class TorrentWorkerClient {
               sourceKey,
               fileIndex: file.index,
               start: options.start ?? null,
-              end: options.end ?? null
+              end: options.end ?? null,
+              windowBytes: options.windowBytes
             })
           );
         },

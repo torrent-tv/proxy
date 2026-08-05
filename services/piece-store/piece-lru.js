@@ -200,6 +200,18 @@ export class PieceLru {
    * @param {string|number} readerId
    * @returns {void}
    */
+  /**
+   * Every live reader's declared window. Read by the pool to check that the
+   * torrent has actually been asked for those pieces — WebTorrent deletes a
+   * selection of its own accord once it is fully downloaded, so a claim made
+   * once does not stay made.
+   *
+   * @returns {Array<{ from: number, to: number }>}
+   */
+  protectedRanges() {
+    return [...this.#protected.values()].map((range) => ({ from: range.from, to: range.to }));
+  }
+
   unprotect(readerId) {
     this.#protected.delete(readerId);
   }

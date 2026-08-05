@@ -561,6 +561,15 @@ export class SharedPieceStore {
    * @param {string|number} readerId
    * @returns {void}
    */
+  /**
+   * The windows live readers have declared. See {@link PieceLru.protectedRanges}.
+   *
+   * @returns {Array<{ from: number, to: number }>}
+   */
+  protectedRanges() {
+    return this.#lru.protectedRanges();
+  }
+
   releaseProtection(readerId) {
     this.#lru.unprotect(readerId);
   }

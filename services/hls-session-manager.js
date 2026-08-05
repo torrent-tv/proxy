@@ -809,6 +809,16 @@ export class HlsSessionManager {
   #firstSegmentLatencies = [];
 
   /**
+   * Recent times to create a session, in ms — the second term of the browser's
+   * estimate. Measured for the same reason as the first: it is 116-843 ms
+   * depending on whether the keyframe index is already in hand, and guessing it
+   * was one of the ways the shown figure stopped describing the whole wait.
+   *
+   * @type {number[]}
+   */
+  #sessionCreateLatencies = [];
+
+  /**
    * @param {HlsSessionManagerOptions} options
    */
   constructor({
@@ -1121,6 +1131,7 @@ export class HlsSessionManager {
         );
       });
     }
+    this.#rememberSessionCreateLatency(Date.now() - createEntryMs);
     logger.info(
       `cold-start ${sessionId.slice(0, 8)}: media-info=${mediaInfoMs}ms (${mediaInfoSource}) ` +
         `keyframes=${keyframeMs === -1 ? "skipped" : keyframeMs === -2 ? "background" : `${keyframeMs}ms`} ` +
@@ -2750,6 +2761,30 @@ export class HlsSessionManager {
    * @param {number} latencyMs
    * @returns {void}
    */
+  #rememberSessionCreateLatency(latencyMs) {
+    if (!Number.isFinite(latencyMs) || latencyMs <= 0) {
+      return;
+    }
+    this.#sessionCreateLatencies.push(latencyMs);
+    if (this.#sessionCreateLatencies.length > FIRST_SEGMENT_SAMPLES) {
+      this.#sessionCreateLatencies.shift();
+    }
+  }
+
+  /**
+   * What this host typically takes to create a session, in ms — the median of
+   * recent ones, or null before any has finished.
+   *
+   * @returns {number | null}
+   */
+  expectedSessionCreateMs() {
+    if (this.#sessionCreateLatencies.length === 0) {
+      return null;
+    }
+    const sorted = [...this.#sessionCreateLatencies].sort((left, right) => left - right);
+    return sorted[Math.floor(sorted.length / 2)];
+  }
+
   #rememberFirstSegmentLatency(latencyMs) {
     if (!Number.isFinite(latencyMs) || latencyMs <= 0) {
       return;

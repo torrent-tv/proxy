@@ -7,7 +7,7 @@
  * immediately when all registered consumers release them.
  */
 
-import { createReadStream } from "node:fs";
+import { createReadStream, readdirSync } from "node:fs";
 import { access, mkdir, readdir, readFile, rm, stat } from "node:fs/promises";
 import { Readable } from "node:stream";
 import os from "node:os";
@@ -2394,6 +2394,29 @@ export class HlsSessionManager {
         return;
       }
       if (code === 0) {
+        // ffmpeg exits 0 both when it reaches the end of the file and when its
+        // input simply stops producing bytes — over HTTP the two look identical
+        // to it. Field 2026-08-05: the torrent's download died, the read ended,
+        // and a run that had made 188 segments of 624 reported itself complete;
+        // the player then consumed what was on disk and froze on the first
+        // segment nobody was making. So the claim is checked against the
+        // playlist we published, and a run that stopped short is a FAILURE that
+        // can be restarted, not a finished file.
+        const producedThrough = this.#latestProducedSegment(session);
+        const expectedLast = session.segmentCount > 0 ? session.segmentCount - 1 : null;
+        if (expectedLast !== null && producedThrough !== null && producedThrough < expectedLast) {
+          session.state = "failed";
+          session.progress.state = "failed";
+          session.progress.updatedAt = Date.now();
+          session.lastError =
+            `input ended after segment #${producedThrough} of ${expectedLast} — ` +
+            "the source stopped delivering data";
+          logger.error(
+            `transcode ${session.id} ${session.runLabel ?? "run#?"} encode-run ended early: ` +
+            `${session.lastError} "${session.fileName}"`
+          );
+          return;
+        }
         session.state = "ready";
         session.progress.state = "ready";
         session.progress.updatedAt = Date.now();
@@ -2821,6 +2844,27 @@ export class HlsSessionManager {
     }
     const sorted = [...this.#firstSegmentLatencies].sort((left, right) => left - right);
     return sorted[Math.floor(sorted.length / 2)];
+  }
+
+  /**
+   * The highest segment index this session has on disk, or null when it has
+   * none. Used to tell "the file ended" from "the data ran out".
+   *
+   * @param {HlsSession} session
+   * @returns {number | null}
+   */
+  #latestProducedSegment(session) {
+    let highest = null;
+    for (const name of readdirSync(session.dirPath, { withFileTypes: false })) {
+      if (!this.segmentFormat.isSegmentFileName(name)) {
+        continue;
+      }
+      const index = this.segmentFormat.segmentIndexFromName(name);
+      if (index >= 0 && (highest === null || index > highest)) {
+        highest = index;
+      }
+    }
+    return highest;
   }
 
   /**

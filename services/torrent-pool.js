@@ -92,6 +92,73 @@ const UPLOAD_ADJUST_INTERVAL_MS = 5_000;
  * outright, for two unchoke cycles, without waiting for evidence of failure.
  */
 const UPLOAD_HURRY_MS = 25_000;
+// A torrent somebody is reading, that is not finished, and is moving less than
+// this, is not downloading. Well below the slowest real swarm seen in the field
+// (470 KB/s two seconds after a cold add) and well above idle chatter.
+const STALL_SPEED_BYTES = 32 * 1024;
+// How long it must stay there before saying so, and how often to repeat.
+const STALL_REPORT_AFTER_MS = 10_000;
+const STALL_REPORT_INTERVAL_MS = 30_000;
+
+/**
+ * What the swarm has been asked for, and what it is doing about it.
+ *
+ * Answers the question a stalled download cannot answer for itself: were the
+ * peers never told what we want, or told and not delivering? Reaches into
+ * WebTorrent's own bookkeeping because none of it is exposed — `_selections`
+ * is what the picker walks, `wire.requests` is what is actually outstanding.
+ *
+ * @param {import("webtorrent").Torrent} torrent
+ * @returns {string}
+ */
+function describeSwarmDemand(torrent) {
+  const items = Array.isArray(torrent?._selections?._items) ? torrent._selections._items : [];
+  let selectedPieces = 0;
+  let missingSelected = 0;
+  for (const item of items) {
+    const from = Number(item?.from);
+    const to = Number(item?.to);
+    if (!Number.isFinite(from) || !Number.isFinite(to)) {
+      continue;
+    }
+    selectedPieces += to - from + 1;
+    for (let index = from; index <= to; index += 1) {
+      if (!torrent.bitfield?.get(index)) {
+        missingSelected += 1;
+      }
+    }
+  }
+
+  const wires = Array.isArray(torrent?.wires) ? torrent.wires : [];
+  let inFlight = 0;
+  let asking = 0;
+  let choking = 0;
+  let interested = 0;
+  for (const wire of wires) {
+    const requests = Array.isArray(wire?.requests) ? wire.requests.length : 0;
+    inFlight += requests;
+    if (requests > 0) {
+      asking += 1;
+    }
+    if (wire?.peerChoking === true) {
+      choking += 1;
+    }
+    if (wire?.amInterested === true) {
+      interested += 1;
+    }
+  }
+
+  const critical = Array.isArray(torrent?._critical)
+    ? torrent._critical.reduce((count, flag) => (flag ? count + 1 : count), 0)
+    : 0;
+
+  return (
+    `${items.length} selection(s) covering ${selectedPieces} piece(s), ` +
+    `${missingSelected} of them missing, ${critical} marked critical; ` +
+    `${wires.length} peers, ${interested} we want data from, ${choking} choking us, ` +
+    `${asking} being asked, ${inFlight} blocks in flight`
+  );
+}
 
 /**
  * Decide the client-wide upload limit (bytes/sec) from the torrents that
@@ -383,6 +450,11 @@ export class TorrentPool {
    */
   #readPositionByTorrent = new Map();
 
+  /** When each torrent's download first fell below the stall threshold. */
+  #stallSince = new Map();
+  /** When each torrent's stall was last reported, so it is not repeated hotly. */
+  #stallReportedAt = new Map();
+
   /**
    * Edge prefetches currently running, keyed by infoHash and file index, so two
    * callers asking at the same time share one.
@@ -507,6 +579,53 @@ export class TorrentPool {
     this.#adjustUploadLimit();
   }
 
+  /**
+   * Say when a torrent that somebody is reading has stopped downloading.
+   *
+   * Field 2026-08-05: a session died 32 minutes in because the download fell to
+   * **1 KB/s for five minutes** with 186 peer connections open and trackers
+   * reporting ~300 seeders, on a torrent that was not finished. ffmpeg then ran
+   * out of input and reported itself complete at segment 188 of 624. Not one
+   * line of the log said anything was wrong — the collapse had to be recovered
+   * afterwards by hand from three unrelated counters.
+   *
+   * So the stall reports itself, and it reports the two things that tell the
+   * candidates apart: whether the swarm was ASKED for anything (pieces selected
+   * and still missing, blocks in flight) or was asked and did not answer (peers
+   * holding what we want, how many are choking us).
+   *
+   * @returns {void}
+   */
+  #reportStalledDownloads() {
+    const now = Date.now();
+    for (const torrent of this.torrents.values()) {
+      const usage = this.fileUsageByTorrent.get(torrent);
+      if (!usage || usage.size === 0 || torrent?.done === true) {
+        continue;
+      }
+      const speed = typeof torrent.downloadSpeed === "number" ? torrent.downloadSpeed : 0;
+      if (speed >= STALL_SPEED_BYTES) {
+        this.#stallSince.delete(torrent);
+        continue;
+      }
+      const since = this.#stallSince.get(torrent) ?? now;
+      this.#stallSince.set(torrent, since);
+      if (now - since < STALL_REPORT_AFTER_MS) {
+        continue;
+      }
+      const lastReport = this.#stallReportedAt.get(torrent) ?? 0;
+      if (now - lastReport < STALL_REPORT_INTERVAL_MS) {
+        continue;
+      }
+      this.#stallReportedAt.set(torrent, now);
+      logger.warn(
+        `torrent-pool: [${String(torrent.infoHash).slice(0, 8)}] download stalled at ` +
+        `${Math.round(speed / 1024)}KB/s for ${Math.round((now - since) / 1000)}s — ` +
+        describeSwarmDemand(torrent)
+      );
+    }
+  }
+
   #adjustUploadLimit() {
     if (!this.client || this.client.destroyed || typeof this.client.throttleUpload !== "function") {
       return;
@@ -516,6 +635,7 @@ export class TorrentPool {
       this.fileUsageByTorrent,
       Date.now()
     );
+    this.#reportStalledDownloads();
     const { bytesPerSec, reason } = decideUploadLimit(active);
     if (bytesPerSec === this.#uploadLimit) {
       return;

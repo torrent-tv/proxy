@@ -1,0 +1,21 @@
+{
+	"$schema": "https://biomejs.dev/schemas/2.5.7/schema.json",
+	"files": {
+		"includes": ["**/*.js", "!**/node_modules/**"]
+	},
+	"formatter": { "enabled": false },
+	"assist": { "enabled": false },
+	"linter": {
+		"enabled": true,
+		"rules": {
+			"preset": "none",
+			"correctness": {
+				"noUndeclaredVariables": "error",
+				"noUnusedImports": "error",
+				"noUnusedVariables": "error",
+				"noInvalidUseBeforeDeclaration": "error",
+				"noPrivateImports": "error"
+			}
+		}
+	}
+}

@@ -9,6 +9,8 @@
  * @returns {Promise<void>}
  */
 
+import { logger } from "../../../utils/logger.js";
+
 /**
  * Extract a plain object from the request body, guarding against
  * non-object payloads (arrays, primitives, null).
@@ -77,6 +79,17 @@ export async function handleApiTranscodeSessionsPost(req, reply, { hlsSessionMan
       return reply.code(409).send({ error: error.message });
     }
     const message = error instanceof Error ? error.message : String(error);
+    // Say why on the proxy's own log, not only in the answer. This route
+    // answered 500 for every viewer of proxy 2.9.101-2.9.102 (an undeclared
+    // constant) and the addon log carried nothing but the data-channel layer's
+    // bare "→ 500": the cause had to be recovered by replaying the request
+    // against the live proxy. The stack is worth the two lines it costs — a
+    // programming error here is invisible to the viewer, who only sees that
+    // nothing plays.
+    logger.error(
+      `transcode-sessions: ${sourceKey}:${fileIndex} failed to prepare: ${message}\n` +
+        `${error instanceof Error ? (error.stack ?? "") : ""}`
+    );
     return reply.code(500).send({ error: `Failed to prepare transcode session: ${message}` });
   }
 }

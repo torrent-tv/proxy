@@ -15,7 +15,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { Worker } from "node:worker_threads";
-import { fileURLToPath } from "node:url";
 import {
   RTCPeerConnection,
   RTCSessionDescription

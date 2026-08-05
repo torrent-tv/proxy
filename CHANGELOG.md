@@ -1,3 +1,7 @@
+## 2.9.102
+
+- **New**: The playback plan also reports what this host takes to CREATE a session — median of the last eight, 116-843 ms depending on whether the keyframe index is already in hand. It is the second term of the browser's end-to-end estimate, which is being rebuilt as a sum over the stages that have not happened yet rather than a choice between figures that each describe only one of them (`research/playback-eta-2026-08-05.md`).
+
 ## 2.9.101
 
 - **New**: The playback plan reports what this host takes to produce a session's first segment — the median of its last eight, measured from session-create to a servable segment (782-1518 ms on the field host). The browser needs it for the gap between "the file is downloaded" and "a segment exists", where until now it assumed the pipeline merely keeps up with realtime and therefore showed 15 s where 3.8 s were left. It is per-host, so a weak box and a fast one each answer for themselves.

@@ -12,7 +12,7 @@ import path from "node:path";
 import { rmSync, statfsSync } from "node:fs";
 import WebTorrent from "webtorrent";
 import { logger } from "../utils/logger.js";
-import { SharedPieceStore } from "./piece-store/shared-piece-store.js";
+import { SharedPieceStore, findSharedStore } from "./piece-store/shared-piece-store.js";
 
 // WebTorrent's default download root (see webtorrent lib/torrent.js: TMP =
 // path.join(os.tmpdir(), 'webtorrent')). We use the default store, so all
@@ -596,6 +596,73 @@ export class TorrentPool {
    *
    * @returns {void}
    */
+  /**
+   * Put back the reader windows WebTorrent has quietly dropped.
+   *
+   * A reader claims its window as a stream selection and releases it when it
+   * ends. That claim is NOT durable: `_gcSelections` deletes a selection the
+   * moment every piece in it is present, so a window that has been satisfied
+   * stops existing — and with it, everything the swarm had been asked for.
+   *
+   * While a reader keeps moving that is invisible, because the next window is
+   * claimed immediately. It becomes fatal when the reader STOPS: the encoder is
+   * held back by the look-ahead cap, ffmpeg stops reading, the reader parks on a
+   * window that is fully downloaded, the selection disappears — and nothing our
+   * code runs can notice, because the reader is parked inside a write. Measured
+   * 2026-08-05: the encoder was suspended at 22:44:51, the download hit zero at
+   * 22:45:05 and stayed there for **eleven minutes** with 150 peer connections
+   * open, `0 selection(s) covering 0 piece(s), 0 being asked, 0 blocks in
+   * flight`. When the encoder was let go there was nothing ahead of it, and the
+   * viewer's picture stopped.
+   *
+   * So the claim is re-asserted from outside, on this timer, using the windows
+   * the store already knows about — those are declared by live readers and
+   * withdrawn when they end, which is exactly the set that should be selected.
+   *
+   * @returns {void}
+   */
+  #reassertReaderWindows() {
+    for (const torrent of this.torrents.values()) {
+      const usage = this.fileUsageByTorrent.get(torrent);
+      if (!usage || usage.size === 0 || torrent?.done === true) {
+        continue;
+      }
+      const store = findSharedStore(torrent);
+      const ranges = typeof store?.protectedRanges === "function" ? store.protectedRanges() : [];
+      if (ranges.length === 0) {
+        continue;
+      }
+      const items = Array.isArray(torrent?._selections?._items) ? torrent._selections._items : [];
+      for (const range of ranges) {
+        const present = items.some((item) => item?.from === range.from && item?.to === range.to);
+        if (present) {
+          continue;
+        }
+        // Only worth re-claiming what is actually missing: re-claiming a window
+        // that is already complete would be deleted again on the next pass and
+        // the two would take turns forever.
+        let missing = false;
+        for (let index = range.from; index <= range.to && !missing; index += 1) {
+          if (!torrent.bitfield?.get(index)) {
+            missing = true;
+          }
+        }
+        if (!missing) {
+          continue;
+        }
+        try {
+          torrent._select(range.from, range.to, 1, null, true);
+          logger.info(
+            `torrent-pool: [${String(torrent.infoHash).slice(0, 8)}] re-claimed reader window ` +
+            `${range.from}-${range.to} — the selection had been dropped once it was satisfied`
+          );
+        } catch {
+          // Best effort: a torrent being torn down is not worth failing over.
+        }
+      }
+    }
+  }
+
   #reportStalledDownloads() {
     const now = Date.now();
     for (const torrent of this.torrents.values()) {
@@ -635,6 +702,7 @@ export class TorrentPool {
       this.fileUsageByTorrent,
       Date.now()
     );
+    this.#reassertReaderWindows();
     this.#reportStalledDownloads();
     const { bytesPerSec, reason } = decideUploadLimit(active);
     if (bytesPerSec === this.#uploadLimit) {

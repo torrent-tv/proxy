@@ -61,8 +61,21 @@ export async function handleApiSourceStatsGet(req, reply, { sourceRegistry, torr
     stats.headerBytes != null
       ? `${stats.headerDownloadedBytes}/${stats.headerBytes}B`
       : "n/a";
+  // When the answer is empty, say WHICH thing is missing. Field 2026-08-05: a
+  // source reported `peers=0 file=n/a header=n/a` for minutes while that very
+  // torrent was announcing to trackers with hundreds of seeders — and the line
+  // above cannot tell apart "the torrent handle is not the live one", "the file
+  // index did not resolve" and "no file index was asked for". That is what the
+  // viewer's loading screen was showing at the time, so it has to be
+  // answerable from the log rather than by reasoning about it afterwards.
+  const emptyAnswer = stats.fileProgress == null || (stats.numPeers === 0 && torrent.done !== true);
+  const detail = emptyAnswer
+    ? ` | infoHash=${String(torrent.infoHash).slice(0, 8)} files=${torrent.files?.length ?? "?"}` +
+      ` askedFor=${fileIndex ?? "none"} resolved=${torrent.files?.[fileIndex ?? -1] ? "yes" : "no"}` +
+      ` wires=${torrent.wires?.length ?? "?"} done=${torrent.done === true}`
+    : "";
   logger.info(
-    `[stats] ${sourceKey.slice(0, 8)} peers=${stats.numPeers} down=${downKbps}KB/s file=${filePct} header=${header}`
+    `[stats] ${sourceKey.slice(0, 8)} peers=${stats.numPeers} down=${downKbps}KB/s file=${filePct} header=${header}${detail}`
   );
 
   return reply.send(stats);

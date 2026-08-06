@@ -286,6 +286,31 @@ export function createPlaybackPlanner({
    */
   const mediaInfoCache = new Map();
 
+  /**
+   * Attach what this host currently measures itself taking to create a session
+   * and to produce a first segment.
+   *
+   * Read at RESPONSE time, deliberately. Both are medians of sessions that have
+   * already finished on this host, so at the moment a plan is BUILT the very
+   * first file opened after a restart has none and gets `null` — and the plan
+   * is then cached, so that file kept answering `null` for the life of the
+   * process however many sessions ran afterwards. Measured 2026-08-05: a fresh
+   * 2.9.103 answered `null` for both, then produced the session in 6 ms and the
+   * first segment in 21 479 ms. The figures existed; the plan could not carry
+   * them, and the browser's estimate fell back to its own guess in exactly the
+   * cold-start case the feature was built for.
+   *
+   * @param {PlaybackPlan} plan
+   * @returns {PlaybackPlan}
+   */
+  function withHostTimings(plan) {
+    return {
+      ...plan,
+      expectedFirstSegmentMs: expectedFirstSegmentMs?.() ?? null,
+      expectedSessionCreateMs: expectedSessionCreateMs?.() ?? null
+    };
+  }
+
   return {
     /**
      * Media info the planner already probed for this file, or `null`. Lets the
@@ -322,7 +347,7 @@ export function createPlaybackPlanner({
       const cacheKey = `${sourceKey}:${fileIndex}`;
       const cached = cache.get(cacheKey);
       if (cached) {
-        return cached;
+        return withHostTimings(cached);
       }
       // Where the time before playback goes. `cold-start` already breaks down
       // everything from the transcode-session request onwards, but the plan
@@ -365,7 +390,7 @@ export function createPlaybackPlanner({
           subtitleTracks: []
         };
         cache.set(cacheKey, plan);
-        return plan;
+        return withHostTimings(plan);
       }
 
       // Pre-fetch file edges (head + tail), then probe — retrying while the
@@ -402,8 +427,6 @@ export function createPlaybackPlanner({
       }
       const { audioCodec, videoCodec, container, durationSeconds, videoWidth, videoHeight, audioTracks, subtitleTracks } = probe;
       const codecsDetected = audioCodec.length > 0 || videoCodec.length > 0;
-      const firstSegmentMs = expectedFirstSegmentMs?.() ?? null;
-      const sessionCreateMs = expectedSessionCreateMs?.() ?? null;
       logger.info(
         `plan ${sourceKey.slice(0, 8)}:${fileIndex} torrent-ready=${torrentReadyMs}ms ` +
           `file-edges=${edgesReadyMs - torrentReadyMs}ms probe=${Date.now() - planEntryMs - edgesReadyMs}ms ` +
@@ -463,9 +486,9 @@ export function createPlaybackPlanner({
             timeoutMs: 60_000
           })
           .catch(() => {});
-        return plan;
+        return withHostTimings(plan);
       }
-      return { ...plan, pending: true };
+      return withHostTimings({ ...plan, pending: true });
     }
   };
 }

@@ -5,7 +5,7 @@
  *
  * @param {import("fastify").FastifyRequest} req
  * @param {import("fastify").FastifyReply} reply
- * @param {{ hlsSessionManager: import("../../../services/hls-session-manager.js").HlsSessionManager }} deps
+ * @param {{ hlsSessionManager: import("../../../services/hls-session-manager.js").HlsSessionManager, sourceRegistry: object, torrentPool: object }} deps
  * @returns {Promise<void>}
  */
 
@@ -25,7 +25,41 @@ function getPayload(body) {
   return {};
 }
 
-export async function handleApiTranscodeSessionsPost(req, reply, { hlsSessionManager }) {
+/**
+ * Claim the source's file so the pool cannot clean it up under a live session.
+ *
+ * Asynchronous underneath — the torrent lives on another thread — but the
+ * caller needs a release function immediately, so the claim is chased and the
+ * release waits for it.
+ *
+ * @param {{ sourceRegistry: object, torrentPool: object, sourceKey: string, fileIndex: number }} params
+ * @returns {() => void}
+ */
+function holdSource({ sourceRegistry, torrentPool, sourceKey, fileIndex }) {
+  let release = null;
+  let releasedEarly = false;
+  const record = sourceRegistry?.get?.(sourceKey);
+  if (!record) {
+    return () => {};
+  }
+  void Promise.resolve(torrentPool.getTorrent(record.sourceType, record.source))
+    .then((torrent) => {
+      release = torrentPool.acquireFile(torrent, fileIndex);
+      if (releasedEarly) {
+        release();
+      }
+    })
+    .catch(() => {});
+  return () => {
+    releasedEarly = true;
+    if (typeof release === "function") {
+      release();
+      release = null;
+    }
+  };
+}
+
+export async function handleApiTranscodeSessionsPost(req, reply, { hlsSessionManager, sourceRegistry, torrentPool }) {
   const payload = getPayload(req.body);
   const sourceKey = typeof payload.sourceKey === "string" ? payload.sourceKey.trim() : "";
   const fileIndex = Number(payload.fileIndex);
@@ -68,7 +102,12 @@ export async function handleApiTranscodeSessionsPost(req, reply, { hlsSessionMan
           : 0,
       audioTrackIndex:
         Number.isInteger(audioTrackIndex) && audioTrackIndex > 0 ? audioTrackIndex : 0,
-      segmentFormatId
+      segmentFormatId,
+      // Hold the torrent for as long as this session lives. Reads take a claim
+      // only while they run, and a seek leaves a gap with no read at all — the
+      // disk sweep caught that gap on 2026-08-06 and deleted the film being
+      // watched.
+      acquireSource: () => holdSource({ sourceRegistry, torrentPool, sourceKey, fileIndex })
     });
     return reply.send({
       sessionId: session.id,

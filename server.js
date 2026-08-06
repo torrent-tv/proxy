@@ -198,7 +198,7 @@ export async function startProxyServer({ host, port, transcodeAudio, ffmpegBin, 
     handleStreamGet(req, reply, { sourceRegistry, torrentPool })
   );
   app.post("/api/transcode-sessions", async (req, reply) =>
-    handleApiTranscodeSessionsPost(req, reply, { hlsSessionManager })
+    handleApiTranscodeSessionsPost(req, reply, { hlsSessionManager, sourceRegistry, torrentPool })
   );
   app.post("/api/transcode-sessions/:sessionId/release", async (req, reply) =>
     handleApiTranscodeSessionReleasePost(req, reply, { hlsSessionManager })

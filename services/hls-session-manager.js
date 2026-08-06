@@ -137,7 +137,17 @@ const MAX_SEEK_FAILURES = 3;
 // look-ahead cap when idle, so a lingering session costs retained segments on
 // disk, not sustained CPU. Active playback refreshes the timer on every segment
 // fetch, so it never expires mid-watch.
-const DEFAULT_SESSION_TTL_MS = 10 * 60 * 1000;
+// How long a session outlives the BROWSER, not the viewing. Since server
+// 0.8.103 a browser that holds a session re-asserts it every 30 s, so an open
+// tab never consumes this at all — not while paused, not across a three-hour
+// film. What is left is the case where the browser has genuinely gone: the tab
+// was killed without releasing, the phone slept, the network dropped. Keeping
+// the session means such a viewer comes back to a warm encoder instead of
+// waiting out a cold start; the cost while nobody is there is disk for the
+// produced segments, since the encoder is suspended and burns no CPU, and that
+// disk is already bounded by the pool's 10 GB cap with eviction. Thirty minutes
+// covers a meal, a phone call or a lift ride.
+const DEFAULT_SESSION_TTL_MS = 30 * 60 * 1000;
 const DEFAULT_STARTUP_WAIT_MS = 5_000;
 // Realtime budget — runtime downswitch (software encoder only). Periodically
 // check each active software-transcode session's ffmpeg `speed`; when it stays

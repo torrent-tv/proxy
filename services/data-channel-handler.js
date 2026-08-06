@@ -71,6 +71,90 @@
  */
 
 /**
+ * Watch one channel's send queue and, when it stops draining, say WHY.
+ *
+ * A channel that is open, keeps accepting requests and delivers nothing was
+ * seen in the field 2026-08-06: the queue grew from 214 049 to 239 731 bytes in
+ * fourteen seconds and never fell, while every layer above reported success —
+ * the route answered in 15 ms, the handler sent 378 bytes, the channel was
+ * open. The viewer sat in front of a spinner for eleven minutes.
+ *
+ * `bufferedAmount` alone cannot say why: it only proves the bytes are still
+ * OURS. The transport counters can, and this is the table the snapshot is read
+ * against — written down in advance so the answer is a reading, not an opinion:
+ *
+ *   bytesSent rising, queue rising    → packets leave, nothing acknowledges
+ *                                       them: the return path is broken.
+ *   bytesSent flat, queue rising      → SCTP is not transmitting: the peer's
+ *                                       receive window is shut or congestion
+ *                                       control has collapsed.
+ *   bytesReceived rising either way   → the peer is alive and its packets do
+ *                                       reach us; the failure is one-way.
+ *   both flat                         → nothing crosses at all.
+ *
+ * Sampled every second; reported only once the queue has failed to fall for
+ * {@link SEND_QUEUE_STUCK_MS}, then every second while it lasts, so the trend
+ * of every counter is in the log rather than one snapshot of it.
+ *
+ * @param {string} sessionId
+ * @param {string} tag
+ * @param {string} label
+ * @param {DataChannel} channel
+ * @returns {() => void} Stops the watch.
+ */
+function makeSendQueueWatcher({ log, getTransportSnapshot }) {
+  return function watchSendQueue(sessionId, tag, label, channel) {
+    let lowestSinceDrain = Number.POSITIVE_INFINITY;
+    let stuckSince = 0;
+    let previous = null;
+
+    const timer = setInterval(() => {
+      let queued = 0;
+      try {
+        queued = typeof channel.bufferedAmount === "function" ? channel.bufferedAmount() : 0;
+      } catch {
+        return;
+      }
+      if (queued === 0 || queued < lowestSinceDrain) {
+        lowestSinceDrain = queued;
+        stuckSince = 0;
+        previous = null;
+        return;
+      }
+      const now = Date.now();
+      if (stuckSince === 0) {
+        stuckSince = now;
+        return;
+      }
+      if (now - stuckSince < SEND_QUEUE_STUCK_MS) {
+        return;
+      }
+      const snapshot = getTransportSnapshot?.(sessionId) ?? null;
+      if (!snapshot) {
+        log(`[dc] Session ${tag} "${label}": send queue stuck at ${queued}B for ` +
+          `${Math.round((now - stuckSince) / 1000)}s — no transport to ask`);
+        return;
+      }
+      const sentDelta = previous ? snapshot.bytesSent - previous.bytesSent : null;
+      const recvDelta = previous ? snapshot.bytesReceived - previous.bytesReceived : null;
+      previous = snapshot;
+      log(
+        `[dc] Session ${tag} "${label}": send queue stuck at ${queued}B for ` +
+        `${Math.round((now - stuckSince) / 1000)}s — transport ` +
+        `sent=${snapshot.bytesSent}${sentDelta === null ? "" : ` (+${sentDelta})`} ` +
+        `received=${snapshot.bytesReceived}${recvDelta === null ? "" : ` (+${recvDelta})`} ` +
+        `rtt=${snapshot.rtt}ms pc=${snapshot.state} ice=${snapshot.iceState} pair=${snapshot.pair}`
+      );
+    }, SEND_QUEUE_SAMPLE_MS);
+
+    if (typeof timer.unref === "function") {
+      timer.unref();
+    }
+    return () => clearInterval(timer);
+  };
+}
+
+/**
  * Create a handler for incoming WebRTC data channels.
  *
  * @param {DataChannelHandlerOptions} options
@@ -106,9 +190,11 @@ export function encodeFrame(idBytes, bytes, done) {
   return frame;
 }
 
-export function createDataChannelHandler({ proxyPort, onLog }) {
+export function createDataChannelHandler({ proxyPort, onLog, getTransportSnapshot }) {
   /** Request id → its ASCII bytes; see {@link requestIdBytes}. */
   const requestIdCache = new Map();
+
+  const watchSendQueue = makeSendQueueWatcher({ log: (message) => log(message), getTransportSnapshot });
 
   /**
    * @param {string} message
@@ -129,7 +215,9 @@ export function createDataChannelHandler({ proxyPort, onLog }) {
    */
   function handleChannel(sessionId, channel) {
     const tag = sessionId.slice(0, 8);
+    const label = typeof channel.getLabel === "function" ? channel.getLabel() : "?";
     log(`[dc] Session ${tag}: channel open`);
+    const stopWatchdog = watchSendQueue(sessionId, tag, label, channel);
 
     // Partial chunked-request bodies in flight on THIS channel, keyed by
     // requestId. Each entry buffers frames until the done frame, then runs the
@@ -262,6 +350,7 @@ export function createDataChannelHandler({ proxyPort, onLog }) {
     });
 
     channel.onClosed(() => {
+      stopWatchdog();
       for (const entry of partials.values()) {
         clearTimeout(entry.timer);
       }
@@ -535,6 +624,13 @@ const PROXY_MAX_REQUEST_BODY_BYTES = 32 * 1024 * 1024;
 const PARTIAL_REQUEST_TTL_MS = 60_000;
 
 /** Pause sending body chunks once the channel buffer exceeds this many bytes. */
+// How often the send queue is sampled, and how long it must fail to fall
+// before the transport is asked what it is doing. Five seconds is far longer
+// than any healthy burst drains in — measured, a 6-11 MB segment leaves in
+// well under a second on the LAN — and short enough that a stuck channel is
+// named while the viewer is still looking at it.
+const SEND_QUEUE_SAMPLE_MS = 1_000;
+const SEND_QUEUE_STUCK_MS = 5_000;
 const DC_BUFFER_HIGH_WATER = 8 * 1024 * 1024;
 /** Resume sending once the channel buffer drains to this many bytes. */
 const DC_BUFFER_LOW_WATER = 1 * 1024 * 1024;

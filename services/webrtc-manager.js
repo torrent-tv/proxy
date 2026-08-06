@@ -429,5 +429,50 @@ export function createWebRtcManager({ sendSignal, onDataChannel, onLog, udpPort,
     }
   }
 
-  return { handleSignal, closeSession, dispose };
+  /**
+   * What the transport itself is doing for one session.
+   *
+   * The discriminator for a send queue that stops draining. `bufferedAmount`
+   * alone says only that bytes are stuck in OUR queue; these say whether they
+   * are leaving the machine:
+   *
+   *  - `bytesSent` climbing while the queue climbs → packets ARE going out and
+   *    nothing is acknowledging them: the path back is broken.
+   *  - `bytesSent` flat while the queue climbs → SCTP is not transmitting at
+   *    all: the peer's receive window is closed, or congestion control has
+   *    collapsed. `bytesReceived` still climbing at the same time proves the
+   *    peer is alive and its packets still reach us, i.e. the failure is
+   *    one-directional.
+   *  - both flat → nothing crosses in either direction.
+   *
+   * @param {string} sessionId
+   * @returns {{ bytesSent: number, bytesReceived: number, rtt: number, pair: string, state: string, iceState: string } | null}
+   */
+  function getTransportSnapshot(sessionId) {
+    const pc = peers.get(sessionId);
+    if (!pc) {
+      return null;
+    }
+    const read = (fn, fallback) => {
+      try {
+        return fn();
+      } catch {
+        return fallback;
+      }
+    };
+    const pair = read(() => pc.getSelectedCandidatePair(), null);
+    return {
+      bytesSent: read(() => pc.bytesSent(), -1),
+      bytesReceived: read(() => pc.bytesReceived(), -1),
+      rtt: read(() => pc.rtt(), -1),
+      pair: pair
+        ? `${pair.local?.address}:${pair.local?.port}->${pair.remote?.address}:${pair.remote?.port}` +
+          ` (${pair.local?.type}/${pair.remote?.type})`
+        : "none",
+      state: read(() => pc.state(), "?"),
+      iceState: read(() => pc.iceState(), "?")
+    };
+  }
+
+  return { handleSignal, closeSession, dispose, getTransportSnapshot };
 }

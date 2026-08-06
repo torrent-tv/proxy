@@ -1,3 +1,8 @@
+## 2.9.121
+
+- **Fix**: A segment that is short of a track is no longer served, which is what left a seek hanging with the proxy answering every request in 98 ms. A run that is terminated closes its current output file properly — trailing index and all — but the file holds only what had been muxed by then, and after a seek-restart that is routinely one track of two. Nothing about such a file looks unfinished: it exists, the next one exists, so the readiness rule called it done. Measured 2026-08-06 on a stuck session: segment #133 carried one `tfdt` where #131 and #134 carried two, and #132 was zero bytes. The fragments are already walked to stamp their timestamps, so counting the tracks in them costs nothing; a segment missing one is deleted and produced again.
+- **New**: The session-start line says where the browser asked the encoder to begin. A resume that reaches hls.js but not this call makes the player request a segment nobody was told to produce — measured the same day, the session began at #0 while the player asked for #127 and gave up 45.6 s later — and neither side said what it meant.
+
 ## 2.9.120
 
 - **Fix**: The rest of the file is fetched while the viewer needs nothing, instead of the link sitting idle. The background fill was re-evaluated only when a reader window MOVED, so during exactly the state it exists for — the encoder held back by the look-ahead cap, the viewer comfortably ahead, the link free — nothing was fetched at all. It is now owned by the pool's own timer rather than by the reader, because a parked reader cannot act, and parked is the whole point. Priority 0 against the window's 1, and withdrawn the moment any reader window wants something, so it can never take capacity from the picture.

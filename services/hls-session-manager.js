@@ -8,7 +8,7 @@
  */
 
 import { createReadStream, readdirSync } from "node:fs";
-import { access, mkdir, readdir, readFile, rm, stat } from "node:fs/promises";
+import { access, mkdir, readdir, readFile, rm, stat, unlink } from "node:fs/promises";
 import { Readable } from "node:stream";
 import os from "node:os";
 import path from "node:path";
@@ -1430,6 +1430,12 @@ export class HlsSessionManager {
       // one of these, so "is the host actually running the build I published?"
       // is answered by the log itself instead of a round trip to the machine.
       `transcode ${sessionId} start (proxy ${PROXY_VERSION}) "${logName}" ` +
+        // Where the browser asked the encoder to begin. A resume that reaches
+        // hls.js but not this call makes the player request a segment nobody
+        // was told to produce: measured 2026-08-06, the session began at #0
+        // while the player asked for #127 and gave up 45.6 s later. Neither
+        // side saying what it meant is why that took three attempts to place.
+        `start=${Math.round(normalizedStartPosition)}s ` +
         `video=${transcodeVideo ? `${this.videoEncoder.name}${softwarePreset ? `/${softwarePreset}` : ""}` : "copy"} ` +
         `audio=${transcodeAudio ? "aac" : "copy"} ` +
         // Branch tag for log correlation: A = video re-encode (fixed GOP, grid
@@ -3388,6 +3394,30 @@ export class HlsSessionManager {
         const bytes = session.usesExplicitCuts && session.segmentFormat.stripInit
           ? session.segmentFormat.stripInit(raw)
           : raw;
+        // A segment that is short of a track is not servable, whatever the
+        // directory says about it. A terminated run closes its current output
+        // file properly — trailing index and all — but with only what had been
+        // muxed by then, and after a seek-restart that is routinely one track
+        // of two. The file exists and so does the next one, so the readiness
+        // rule calls it done. Measured 2026-08-06: segment #133 held one track
+        // where its neighbours held two, the proxy answered every request for
+        // it in 98 ms, and the viewer's seek never completed. Treated as not
+        // ready, so the encoder makes it again.
+        if (
+          typeof session.segmentFormat.hasEveryTrack === "function" &&
+          !session.segmentFormat.hasEveryTrack(bytes, session.initBytes ?? null)
+        ) {
+          logger.warn(
+            `transcode ${session.id} segment #${index} is short of a track — ` +
+            "left behind by a run that was terminated; producing it again"
+          );
+          try {
+            await unlink(filePath);
+          } catch {
+            // Already gone, or being rewritten: either way nothing to do.
+          }
+          return { kind: "warming-up" };
+        }
         const prepared = session.segmentFormat.prepareSegmentBytes(bytes, {
           startSeconds: this.#segmentStartTime(session, index),
           initBytes: session.initBytes ?? null

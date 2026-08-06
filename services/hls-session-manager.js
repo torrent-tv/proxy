@@ -1909,7 +1909,8 @@ export class HlsSessionManager {
     // — `0 selection(s)` with 33 peers connected — and segment 646 was never
     // made. Segments beyond a hole are not look-ahead: the viewer cannot reach
     // them without the hole being filled first.
-    const aheadSeconds = this.#contiguousAheadSeconds(session, viewerSegment);
+    const reading = this.#contiguousAheadSeconds(session, viewerSegment);
+    const aheadSeconds = reading === null ? null : reading.seconds;
     if (aheadSeconds === null) {
       // The segment the viewer needs does not exist. Whatever else is on disk,
       // this encoder has work to do right now.
@@ -1942,7 +1943,19 @@ export class HlsSessionManager {
     }
 
     if (!session.encoderPaused && aheadSeconds > LOOKAHEAD_PAUSE_SECONDS) {
-      this.#pauseEncoder(session, `${Math.round(aheadSeconds)}s ahead of the viewer`);
+      // The decision names what it was taken on. Suspending the encoder stops
+      // the only thing that reads the input, so a wrong reading here stops the
+      // download too — measured 2026-08-06: the log said "135s ahead" while
+      // three segments totalling 31 s lay on disk, and neither figure could be
+      // checked against the other because the line carried no evidence. The
+      // directory holds segments from every run this session has had, so which
+      // ones were counted is the whole question.
+      this.#pauseEncoder(
+        session,
+        `${Math.round(aheadSeconds)}s ahead of the viewer ` +
+          `(viewer at #${viewerSegment}, unbroken through #${reading.lastCovered}, ` +
+          `${reading.total} segment file(s) present)`
+      );
     } else if (session.encoderPaused && aheadSeconds <= LOOKAHEAD_RESUME_SECONDS) {
       this.#resumeEncoder(session, `${Math.round(aheadSeconds)}s ahead of the viewer`);
     }
@@ -1957,7 +1970,7 @@ export class HlsSessionManager {
    *
    * @param {HlsSession} session
    * @param {number} viewerSegment
-   * @returns {number | null}
+   * @returns {{ seconds: number, lastCovered: number, total: number } | null}
    */
   #contiguousAheadSeconds(session, viewerSegment) {
     let present;
@@ -1984,7 +1997,7 @@ export class HlsSessionManager {
     if (!Number.isFinite(from) || !Number.isFinite(to)) {
       return null;
     }
-    return Math.max(0, to - from);
+    return { seconds: Math.max(0, to - from), lastCovered, total: present.size };
   }
 
   /**

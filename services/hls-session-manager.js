@@ -162,6 +162,9 @@ const MAX_SEEK_FAILURES = 3;
 // wait, not a verdict. Backed off so a source that is truly unavailable costs a
 // process every few seconds rather than continuously, and never given up on —
 // the session's own idle TTL is what ends it if the viewer leaves.
+// How often the look-ahead may report that ffmpeg's position and the segments
+// on disk disagree. It is a diagnostic, not an event.
+const LOOKAHEAD_DISAGREEMENT_LOG_MS = 60_000;
 const INPUT_RETRY_BASE_MS = 2_000;
 const INPUT_RETRY_MAX_MS = 15_000;
 // Idle TTL: a session is disposed this long after the last segment/playlist
@@ -1845,7 +1848,17 @@ export class HlsSessionManager {
     // Worth knowing when the two disagree wildly — it is the only trace of
     // whatever made ffmpeg report a position it had not reached.
     const claimed = Number(session.progress?.processedSeconds);
-    if (Number.isFinite(claimed) && Math.abs(claimed - encodedTo) > LOOKAHEAD_PAUSE_SECONDS) {
+    // Once a minute at most. The check runs on every segment request, and the
+    // two figures disagree for as long as a fresh run has not caught up with
+    // the segments an older one left on disk — which printed this line three
+    // hundred times a minute after one seek.
+    const now = Date.now();
+    if (
+      Number.isFinite(claimed) &&
+      Math.abs(claimed - encodedTo) > LOOKAHEAD_PAUSE_SECONDS &&
+      now - (session.lookAheadDisagreementLoggedAt ?? 0) > LOOKAHEAD_DISAGREEMENT_LOG_MS
+    ) {
+      session.lookAheadDisagreementLoggedAt = now;
       logger.info(
         `transcode ${session.id} ffmpeg claims ${Math.round(claimed)}s processed ` +
           `but has produced through ${Math.round(encodedTo)}s (segment #${producedThrough})`

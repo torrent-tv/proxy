@@ -3418,14 +3418,38 @@ export class HlsSessionManager {
           typeof session.segmentFormat.hasEveryTrack === "function" &&
           !session.segmentFormat.hasEveryTrack(bytes, session.initBytes ?? null)
         ) {
+          // Short of a track means one of two very different things, and the
+          // first version of this check treated them alike — deleting the file
+          // an encoder was writing INTO, so it went on writing to something
+          // nobody could open and the segment never appeared. Measured
+          // 2026-08-06: segment #225 was deleted 14 s into the run producing
+          // it, and answered 404 thirty-three seconds later.
+          //
+          // The run that is producing this segment right now has simply not
+          // finished it: wait, exactly as for a segment that does not exist
+          // yet. Only a segment the CURRENT run has already moved past — the
+          // next one exists, or no run is producing at all — is a leftover, and
+          // only that one is worth removing so it can be made again.
+          // Whose file is this? The current run writes from
+          // `encodeStartIndex` upwards, so anything at or above that index
+          // while the run is alive may simply be unfinished — the readiness
+          // rule can wave it through on the strength of a NEXT segment left by
+          // an older run, which is exactly how the file being written came to
+          // be read. Anything below it, or any file at all once no run is
+          // producing, belongs to a run that has ended.
+          const stale = session.ffmpeg === null || index < (session.encodeStartIndex ?? 0);
           logger.warn(
             `transcode ${session.id} segment #${index} is short of a track — ` +
-            "left behind by a run that was terminated; producing it again"
+            (stale
+              ? "left behind by a run that was terminated; producing it again"
+              : "still being written; waiting for it")
           );
-          try {
-            await unlink(filePath);
-          } catch {
-            // Already gone, or being rewritten: either way nothing to do.
+          if (stale) {
+            try {
+              await unlink(filePath);
+            } catch {
+              // Already gone, or being rewritten: either way nothing to do.
+            }
           }
           return { kind: "warming-up" };
         }

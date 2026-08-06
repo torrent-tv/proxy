@@ -1,3 +1,7 @@
+## 2.9.123
+
+- **Fix**: The check added in 2.9.121 was deleting the file an encoder was writing into. A segment short of a track means one of two very different things — left behind by a run that was killed, or simply not finished yet — and treating them alike removed the file mid-write, after which ffmpeg went on writing to something nobody could open and the segment never appeared. Measured 2026-08-06: segment #225 was deleted 14 s into the run producing it and answered 404 thirty-three seconds later. The readiness rule could not prevent it, because it waves a segment through once the NEXT one exists and that next one had been left by an older run. Ownership decides it now: the current run writes from its start index upwards, so a file at or above that index while the run is alive is unfinished and is waited for, and only a file below it, or any file once no run is producing, is a leftover worth removing.
+
 ## 2.9.122
 
 - **Fix**: A session created with a start position begins encoding there, instead of at the top of the file. The position was honoured everywhere except the one place that mattered: it went into the session key and into the log line, and then the first run started at index 0 regardless. Measured 2026-08-06 on a Retry after the proxy had restarted — the session was created with `start=1580s`, the encoder began at #0, the player asked for #152, and 45 s later the browser gave up with "no data arrived from the proxy" while the transcode ran happily at 9.9x through the opening credits.

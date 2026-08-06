@@ -17,8 +17,7 @@
     "start": "node ./bin/cli.js",
     "dev": "node --inspect=0 --experimental-network-inspection ./bin/cli.js",
     "test": "node --test",
-    "lint": "biome lint .",
-    "prepublishOnly": "npm run lint"
+    "lint": "biome lint ."
   },
   "dependencies": {
     "@fastify/cors": "^11.2.0",

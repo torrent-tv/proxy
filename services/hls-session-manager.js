@@ -1454,7 +1454,18 @@ export class HlsSessionManager {
         `duration=${hasDuration ? formatSeconds(durationSeconds) : "unknown"} segments=${segmentCount}`
     );
 
-    await this.#startEncodeRun(session, 0);
+    // Begin where the viewer asked, not at the top of the file. The position
+    // was already honoured everywhere EXCEPT here: it went into the session key
+    // and into the log line, and then the first run started at index 0 anyway.
+    // Measured 2026-08-06 on a Retry after the proxy restarted — the session
+    // was created with `start=1580s`, the encoder began at #0, the player
+    // asked for #152, and 45 s later the browser gave up with "no data arrived
+    // from the proxy" while the transcode ran happily at 9.9x through the
+    // opening credits.
+    const firstIndex = normalizedStartPosition > 0
+      ? this.#segmentIndexForTime(session, normalizedStartPosition)
+      : 0;
+    await this.#startEncodeRun(session, firstIndex);
 
     try {
       await this.waitUntilReady(session);

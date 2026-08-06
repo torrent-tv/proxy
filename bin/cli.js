@@ -392,7 +392,10 @@ try {
 
   const dataChannelHandler = createDataChannelHandler({
     proxyPort: actualPort,
-    onLog: (message) => logger.info(message)
+    onLog: (message) => logger.info(message),
+    // Lets a stuck send queue ask the transport what it is doing. Late-bound:
+    // the manager is created below, with this handler already in hand.
+    getTransportSnapshot: (sessionId) => webRtcManager?.getTransportSnapshot(sessionId) ?? null
   });
 
   webRtcManager = createWebRtcManager({

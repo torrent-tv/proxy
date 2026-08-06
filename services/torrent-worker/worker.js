@@ -21,6 +21,7 @@
 // before WebTorrent can reach the native one. Two isolates using
 // node-datachannel at once abort the process, and the torrent's wss trackers
 // create peer connections of their own.
+import { isUsableTorrentHandle } from "./handle-state.js";
 import "./install-webrtc-shim.js";
 import { parentPort, workerData } from "node:worker_threads";
 import { createSendStream } from "./channel.js";
@@ -43,6 +44,15 @@ const pool = new TorrentPool({
 
 /** Torrents by sourceKey — the main thread names them, this thread owns them. */
 const torrentsByKey = new Map();
+
+/**
+ * How each source was named when it was added, so a torrent that has since been
+ * destroyed can be added again. Kept separately from {@link torrentsByKey}
+ * because that map holds the promise, not the recipe.
+ *
+ * @type {Map<string, { sourceType: string, source: string }>}
+ */
+const sourceRecipes = new Map();
 /** File claims, each with its own identity — see `file-claims.js`. */
 const fileClaims = createFileClaims();
 /** In-flight reads, so a cancel can stop one mid-body. */
@@ -82,8 +92,35 @@ async function requireTorrent(sourceKey) {
   if (!pending) {
     throw new Error(`Unknown source ${sourceKey}.`);
   }
-  return pending;
+  const torrent = await pending;
+  if (isUsableTorrentHandle(torrent)) {
+    return torrent;
+  }
+  // The pool destroys a torrent that has gone unread for a quarter of an hour,
+  // and under disk pressure. It clears its OWN map when it does; this one it
+  // knows nothing about, so the promise here went on resolving to a corpse: a
+  // destroyed torrent keeps its object but loses its files. Every later session
+  // for that source then failed the same way — the plan and the codec probe
+  // answered from cache in milliseconds, nothing waited for metadata because
+  // everything believed the torrent was known, and ffmpeg's first read died on
+  // `File N not found` 130 ms in, after which the session answered 500 for
+  // ever. Measured 2026-08-06 on two sessions in a row, both from a phone,
+  // which is what made it look like a mobile problem.
+  const recipe = sourceRecipes.get(sourceKey);
+  if (!recipe) {
+    torrentsByKey.delete(sourceKey);
+    throw new Error(`Source ${sourceKey} is gone and cannot be re-added.`);
+  }
+  const revived = pool.getTorrent(recipe.sourceType, recipe.source);
+  torrentsByKey.set(sourceKey, revived);
+  revived.catch(() => {
+    if (torrentsByKey.get(sourceKey) === revived) {
+      torrentsByKey.delete(sourceKey);
+    }
+  });
+  return revived;
 }
+
 
 /**
  * Fragments waiting for the main thread to say it has finished reading them,
@@ -237,6 +274,10 @@ async function runCommand(command, params, id) {
       // is being added waits for it instead of being told it does not exist.
       // Reusing the same promise for a repeated add also collapses two callers
       // racing to open the same torrent into one.
+      sourceRecipes.set(params.sourceKey, {
+        sourceType: params.sourceType,
+        source: params.source
+      });
       let pending = torrentsByKey.get(params.sourceKey);
       if (!pending) {
         pending = pool.getTorrent(params.sourceType, params.source);
@@ -344,6 +385,7 @@ async function runCommand(command, params, id) {
     case Command.DESTROY_ALL: {
       fileClaims.closeAll();
       torrentsByKey.clear();
+      sourceRecipes.clear();
       await pool.destroyAll();
       return true;
     }

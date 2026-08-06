@@ -450,6 +450,14 @@ export class TorrentPool {
    */
   #readPositionByTorrent = new Map();
 
+  /**
+   * The background-fill selection held for each torrent, so it can be withdrawn
+   * again. See #updateBackgroundFill.
+   *
+   * @type {Map<import("webtorrent").Torrent, { from: number, to: number }>}
+   */
+  #backgroundFill = new Map();
+
   /** When each torrent's download first fell below the stall threshold. */
   #stallSince = new Map();
   /** When each torrent's stall was last reported, so it is not repeated hotly. */
@@ -663,6 +671,97 @@ export class TorrentPool {
     }
   }
 
+  /**
+   * The reader windows of a torrent, and whether any of them still wants
+   * something. Two questions with one answer, because both callers below need
+   * exactly this: the background fill may only run when nothing is wanted, and
+   * a download sitting at zero is only worth warning about when something is.
+   *
+   * @param {import("webtorrent").Torrent} torrent
+   * @returns {{ ranges: Array<{ from: number, to: number }>, missing: boolean }}
+   */
+  #readerDemand(torrent) {
+    const store = findSharedStore(torrent);
+    const ranges = typeof store?.protectedRanges === "function" ? store.protectedRanges() : [];
+    let missing = false;
+    for (const range of ranges) {
+      for (let index = range.from; index <= range.to; index += 1) {
+        if (!torrent.bitfield?.get(index)) {
+          missing = true;
+          break;
+        }
+      }
+      if (missing) {
+        break;
+      }
+    }
+    return { ranges, missing };
+  }
+
+  /**
+   * Keep fetching the rest of the file while the viewer needs nothing.
+   *
+   * Owned here rather than by the reader, because the reader cannot act while
+   * it is parked — and parked is exactly the state this is for. The encoder is
+   * held back by the look-ahead cap, the viewer is comfortably ahead, the link
+   * is idle: that is the cheapest bandwidth of the whole session and it was
+   * going unused, because the fill was re-evaluated only when a reader window
+   * MOVED. Priority 0 against the window's 1, and withdrawn the moment any
+   * window wants something, so it can never take capacity from the picture.
+   *
+   * @param {import("webtorrent").Torrent} torrent
+   * @param {{ ranges: Array<{ from: number, to: number }>, missing: boolean }} demand
+   * @returns {void}
+   */
+  #updateBackgroundFill(torrent, demand) {
+    const held = this.#backgroundFill.get(torrent) ?? null;
+    const wanted = !demand.missing && demand.ranges.length > 0
+      ? this.#tailAfterWindows(torrent, demand.ranges)
+      : null;
+    if (held && (!wanted || held.from !== wanted.from || held.to !== wanted.to)) {
+      try {
+        torrent._deselect?.(held.from, held.to, false);
+      } catch {
+        // Best effort.
+      }
+      this.#backgroundFill.delete(torrent);
+    }
+    if (wanted && !this.#backgroundFill.has(torrent)) {
+      try {
+        torrent._select?.(wanted.from, wanted.to, 0, null, false);
+        this.#backgroundFill.set(torrent, wanted);
+      } catch {
+        // Best effort.
+      }
+    }
+  }
+
+  /**
+   * Everything after the furthest reader window, up to the end of the file it
+   * belongs to. Null when there is nothing left.
+   *
+   * @param {import("webtorrent").Torrent} torrent
+   * @param {Array<{ from: number, to: number }>} ranges
+   * @returns {{ from: number, to: number } | null}
+   */
+  #tailAfterWindows(torrent, ranges) {
+    const pieceLength = Number(torrent.pieceLength);
+    if (!Number.isFinite(pieceLength) || pieceLength <= 0) {
+      return null;
+    }
+    const usage = this.fileUsageByTorrent.get(torrent);
+    let lastPiece = -1;
+    for (const [fileIndex, count] of usage ?? []) {
+      const file = count > 0 ? torrent.files?.[fileIndex] : null;
+      if (!file) {
+        continue;
+      }
+      lastPiece = Math.max(lastPiece, Math.floor((file.offset + file.length - 1) / pieceLength));
+    }
+    const from = Math.max(...ranges.map((range) => range.to)) + 1;
+    return lastPiece >= from ? { from, to: lastPiece } : null;
+  }
+
   #reportStalledDownloads() {
     const now = Date.now();
     for (const torrent of this.torrents.values()) {
@@ -672,6 +771,16 @@ export class TorrentPool {
       }
       const speed = typeof torrent.downloadSpeed === "number" ? torrent.downloadSpeed : 0;
       if (speed >= STALL_SPEED_BYTES) {
+        this.#stallSince.delete(torrent);
+        continue;
+      }
+      // Nothing is being downloaded because nothing is wanted: every reader has
+      // all the pieces of its window. That is the encoder being held back, not
+      // a fault, and it warned all through a healthy session on 2026-08-06 —
+      // 65.3% of the file present, the encoder 134-159 s ahead, its window
+      // complete. A warning that fires when everything is right teaches the
+      // reader to ignore it.
+      if (!this.#readerDemand(torrent).missing) {
         this.#stallSince.delete(torrent);
         continue;
       }
@@ -703,6 +812,13 @@ export class TorrentPool {
       Date.now()
     );
     this.#reassertReaderWindows();
+    for (const torrent of this.torrents.values()) {
+      const usage = this.fileUsageByTorrent.get(torrent);
+      if (!usage || usage.size === 0 || torrent?.done === true) {
+        continue;
+      }
+      this.#updateBackgroundFill(torrent, this.#readerDemand(torrent));
+    }
     this.#reportStalledDownloads();
     const { bytesPerSec, reason } = decideUploadLimit(active);
     if (bytesPerSec === this.#uploadLimit) {

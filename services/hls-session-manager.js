@@ -3504,6 +3504,15 @@ export class HlsSessionManager {
       currentHeight: session.transcodeVideo
         ? (session.encodeHeight ?? session.sourceHeight ?? 0)
         : (session.sourceHeight ?? 0),
+      // What this host takes to create a session and to make a first segment.
+      // Also on the playback plan, but the browser reads that once per file:
+      // measured 2026-08-06 across four seeks, a proxy that had just restarted
+      // answered null for both, and every later seek then computed its estimate
+      // with one term of four — the figure hit zero after 3.5 s of an 11.8 s
+      // wait and read "starting now" for the remaining 8.4 s. This response is
+      // polled about every 1.5 s, so carrying them here keeps them current.
+      expectedSessionCreateMs: this.expectedSessionCreateMs(),
+      expectedFirstSegmentMs: this.expectedFirstSegmentMs(),
       updatedAt: session.progress.updatedAt,
       error: session.state === "failed" ? session.lastError : ""
     };

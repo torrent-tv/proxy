@@ -1,3 +1,9 @@
+## 2.9.120
+
+- **Fix**: The rest of the file is fetched while the viewer needs nothing, instead of the link sitting idle. The background fill was re-evaluated only when a reader window MOVED, so during exactly the state it exists for — the encoder held back by the look-ahead cap, the viewer comfortably ahead, the link free — nothing was fetched at all. It is now owned by the pool's own timer rather than by the reader, because a parked reader cannot act, and parked is the whole point. Priority 0 against the window's 1, and withdrawn the moment any reader window wants something, so it can never take capacity from the picture.
+- **Fix**: The stall warning stays quiet when a download of zero is correct. It fired all through a healthy session on 2026-08-06 — 65.3% of the file present, the encoder 134-159 s ahead, its window complete — and a warning that goes off when everything is right teaches the reader to ignore it. It now checks whether any reader window is actually missing a piece before saying anything.
+- **New**: The progress response carries what this host takes to create a session and to produce a first segment. Both are on the playback plan too, but the browser reads that once per file: measured 2026-08-06 across four seeks, a proxy that had just restarted answered null for both, so every later seek estimated the wait with one term of four — the figure reached zero after 3.5 s of an 11.8 s wait and read "starting now" for the remaining 8.4 s. This response is polled about every 1.5 s.
+
 ## 2.9.119
 
 - **Fix**: The progress report says the height the viewer is actually watching, not only the one an encoder is producing. It was zero whenever the video was copied — which is most sessions — so the quality menu read a bare "Auto" in exactly the case it was built to explain. Copying reports the source height, re-encoding reports the rung the proxy has settled on.

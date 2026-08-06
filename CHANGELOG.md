@@ -1,3 +1,7 @@
+## 2.9.119
+
+- **Fix**: The progress report says the height the viewer is actually watching, not only the one an encoder is producing. It was zero whenever the video was copied — which is most sessions — so the quality menu read a bare "Auto" in exactly the case it was built to explain. Copying reports the source height, re-encoding reports the rung the proxy has settled on.
+
 ## 2.9.118
 
 - **New**: Suspending the encoder says what the decision was taken on — where the viewer is, how far the unbroken run of segments reaches from there, and how many segment files the session directory holds. Suspending stops the only thing that reads the input, so a wrong reading here stops the download as well: measured 2026-08-06, the log announced "135s ahead of the viewer" while three segments totalling 31 s lay on disk, and neither figure could be checked against the other because the line carried no evidence. The directory keeps the segments of every run a session has had, so which of them were counted is the whole question.

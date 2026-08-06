@@ -935,7 +935,12 @@ export class HlsSessionManager {
     startPositionSeconds = 0,
     audioTrackIndex = 0,
     manualQuality = false,
-    segmentFormatId = ""
+    segmentFormatId = "",
+    // Called once for a session that is actually created, and expected to
+    // return a function that lets the source go. It is what keeps the torrent's
+    // data alive for as long as a viewer has a session on it — see
+    // disposeSession.
+    acquireSource = null
   }) {
     if (!this.enabled) {
       const error = new Error("Audio transcoding is disabled on this proxy.");
@@ -1318,6 +1323,13 @@ export class HlsSessionManager {
         lastLoggedAt: 0
       }
     };
+    if (typeof acquireSource === "function") {
+      try {
+        session.releaseSource = acquireSource();
+      } catch {
+        session.releaseSource = null;
+      }
+    }
     this.sessionsById.set(sessionId, session);
     this.sessionIdBySource.set(sourceMapKey, sessionId);
 
@@ -1780,9 +1792,30 @@ export class HlsSessionManager {
     if (!session || session.state === "disposed" || !session.ffmpeg) {
       return;
     }
-    const encodedTo = Number(session.progress?.processedSeconds);
+    // How far the encoder has got, measured by what EXISTS. ffmpeg's own
+    // report of its timeline position is not evidence: field 2026-08-06, it
+    // claimed 6012 s at `speed=1.18e+03x` on a file that was one percent
+    // downloaded and had produced exactly one segment. The limiter believed it,
+    // suspended the encoder twelve seconds into the session, and segment #1 —
+    // which nobody was now making — was held for 45.7 s until the viewer gave
+    // up and seeked. A segment on disk is something the viewer can be served;
+    // a number from ffmpeg is not.
+    const producedThrough = this.#latestProducedSegment(session);
+    if (producedThrough === null) {
+      return;
+    }
+    const encodedTo = this.#segmentStartTime(session, producedThrough + 1);
     if (!Number.isFinite(encodedTo)) {
       return;
+    }
+    // Worth knowing when the two disagree wildly — it is the only trace of
+    // whatever made ffmpeg report a position it had not reached.
+    const claimed = Number(session.progress?.processedSeconds);
+    if (Number.isFinite(claimed) && Math.abs(claimed - encodedTo) > LOOKAHEAD_PAUSE_SECONDS) {
+      logger.info(
+        `transcode ${session.id} ffmpeg claims ${Math.round(claimed)}s processed ` +
+          `but has produced through ${Math.round(encodedTo)}s (segment #${producedThrough})`
+      );
     }
     // Where the viewer is. Before the first segment request, the position the
     // run started at — so a session nobody has read from yet is bounded too.
@@ -3205,6 +3238,23 @@ export class HlsSessionManager {
     session.state = "disposed";
     this.sessionsById.delete(sessionId);
     this.sessionIdBySource.delete(session.sourceMapKey);
+
+    // Let go of the source. While a session exists its torrent must survive
+    // both cleanups the pool runs, and until now neither knew about it: the
+    // only claim on a file is taken by a READ, and during a seek there is no
+    // read at all — the old encoder is dead and the new one has not started.
+    // Field 2026-08-06, that window met the thirty-second disk sweep and the
+    // film being watched was evicted mid-seek, six gigabytes deleted, after
+    // which the new encoder had nothing to read. The session's own thirty
+    // minutes governed the session, never the data under it.
+    if (typeof session.releaseSource === "function") {
+      try {
+        session.releaseSource();
+      } catch {
+        // Best effort — a session must always finish being disposed.
+      }
+      session.releaseSource = null;
+    }
 
     // Clear any pending seek-settle timer so it cannot fire and restart a
     // disposed session.

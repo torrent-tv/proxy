@@ -453,11 +453,11 @@ export function createPlaybackPlanner({
         // Full track inventory for the browser's audio/subtitle menus.
         audioTracks: audioTracks ?? [],
         subtitleTracks: subtitleTracks ?? [],
-        // What this host has recently taken to make a session's first segment.
-        // Null until one has finished since startup.
-        expectedFirstSegmentMs: firstSegmentMs,
-        // Second term of the browser's estimate; see research/playback-eta-2026-08-05.md.
-        expectedSessionCreateMs: sessionCreateMs
+        // Both host timings are filled in by `withHostTimings` on the way out,
+        // never here: read at build time they would be frozen into the cached
+        // plan, which is the bug fixed in 2.9.106.
+        expectedFirstSegmentMs: null,
+        expectedSessionCreateMs: null
       };
       // Only cache a plan whose codecs were actually detected. An empty probe is
       // a "header not downloaded yet" signal, not a valid result — caching it

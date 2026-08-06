@@ -10,7 +10,23 @@
  * See {@link SegmentFormat} in `./index.js` for the interface contract.
  */
 
-import { readTrackTimescales, stampSegmentStartTime } from "./mp4-boxes.js";
+import { readTrackTimescales, stampSegmentStartTime, walkBoxes } from "./mp4-boxes.js";
+
+/**
+ * How many distinct tracks have a fragment in this segment.
+ *
+ * @param {Buffer} bytes
+ * @returns {number}
+ */
+function countFragmentTracks(bytes) {
+  const tracks = new Set();
+  walkBoxes(bytes, (type, bodyStart) => {
+    if (type === "tfhd" && bodyStart + 8 <= bytes.length) {
+      tracks.add(bytes.readUInt32BE(bodyStart + 4));
+    }
+  });
+  return tracks.size;
+}
 
 /**
  * Where the fragments begin and where the trailing index starts, as offsets of
@@ -184,6 +200,35 @@ export const fmp4Format = {
    * transcode itself; the box walk never descends into `mdat`.
    */
   needsSegmentRewrite: true,
+
+  /**
+   * Whether a segment carries every track the init promises.
+   *
+   * A run that is TERMINATED closes its current output file properly — trailing
+   * index and all — but the file holds only what had been muxed by then, which
+   * after a seek-restart is routinely one track of two. Nothing about it looks
+   * unfinished: the file exists, the next one exists, so the readiness rule
+   * calls it done and it is served. The player then cannot use it and the seek
+   * never completes. Measured 2026-08-06: segment #133 carried one `tfdt`
+   * where its neighbours carried two, and a viewer sat on a spinner while the
+   * proxy answered every request in 98 ms.
+   *
+   * Cheap to check: the fragments are already walked to stamp them.
+   *
+   * @param {Buffer} bytes - The media segment, init header already removed.
+   * @param {Buffer | null} initBytes
+   * @returns {boolean} False only when a track is provably missing.
+   */
+  hasEveryTrack(bytes, initBytes) {
+    if (!initBytes || initBytes.length === 0) {
+      return true;
+    }
+    const expected = readTrackTimescales(initBytes);
+    if (expected.size === 0) {
+      return true;
+    }
+    return countFragmentTracks(bytes) >= expected.size;
+  },
 
   prepareSegmentBytes(bytes, { startSeconds, initBytes }) {
     if (!initBytes || initBytes.length === 0) {

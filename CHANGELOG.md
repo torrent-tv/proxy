@@ -1,3 +1,7 @@
+## 2.9.116
+
+- **New**: A progress report says which height is being produced right now. Under automatic quality the proxy steps the resolution down when the host cannot encode in realtime or the viewer's link cannot carry the stream, and nothing said so — the menu read "Auto" whatever it had settled on. Zero when the video is copied, because then nothing is being chosen and the source's own height is what plays.
+
 ## 2.9.114
 
 - **Fix**: A seek leaked a pinned piece, and enough of them destroyed the torrent. A piece is pinned before its fragment is handed to the reader and released by whoever received it — but a consumer that ABANDONS the read never gets the chance, and a seek abandons it every time: the encoder is killed, the response is torn down, the loop is left between two fragments. Field 2026-08-06, one seek was enough: the store answered `Every resident piece is pinned; no slot can be freed`, and it answered it to the WebTorrent client, which closed the store and destroyed the torrent — after which every read failed with `File 0 not found`, the session went terminal, and the segment the viewer was waiting for returned an instant error. The pin of a fragment still in the consumer's hands is now dropped by the reader itself on every exit, abandonment included. Covered by a test that abandons a read mid-fragment and checks the store has nothing pinned.

@@ -107,8 +107,42 @@ function makeSendQueueWatcher({ log, getTransportSnapshot }) {
     let lowestSinceDrain = Number.POSITIVE_INFINITY;
     let stuckSince = 0;
     let previous = null;
+    // Independent of the queue: the transport's own counters, sampled for as
+    // long as the channel is open. The queue was the wrong thing to watch —
+    // field 2026-08-06, a 9.26 MB segment was accepted by the transport with
+    // `maxBuffered=0 bufferedAtEnd=0`, reported as sent at 274 Mbit/s, and
+    // never arrived; everything the proxy sent from that moment on was lost the
+    // same way while requests kept coming the other direction. With nothing
+    // queued this watcher never woke, so the one question that matters — did
+    // those bytes leave the machine — has no answer in the log. It does now.
+    let heartbeatPrevious = null;
+    let heartbeatAt = 0;
 
     const timer = setInterval(() => {
+      const sampledAt = Date.now();
+      if (sampledAt - heartbeatAt >= TRANSPORT_HEARTBEAT_MS) {
+        heartbeatAt = sampledAt;
+        const snapshot = getTransportSnapshot?.(sessionId) ?? null;
+        if (snapshot) {
+          const sent = heartbeatPrevious ? snapshot.bytesSent - heartbeatPrevious.bytesSent : null;
+          const received = heartbeatPrevious
+            ? snapshot.bytesReceived - heartbeatPrevious.bytesReceived
+            : null;
+          heartbeatPrevious = snapshot;
+          let depth = 0;
+          try {
+            depth = typeof channel.bufferedAmount === "function" ? channel.bufferedAmount() : 0;
+          } catch {
+            depth = -1;
+          }
+          log(
+            `[dc-transport] ${tag} "${label}" sent=${snapshot.bytesSent}` +
+            `${sent === null ? "" : ` (+${sent})`} received=${snapshot.bytesReceived}` +
+            `${received === null ? "" : ` (+${received})`} queued=${depth}B ` +
+            `rtt=${snapshot.rtt}ms pc=${snapshot.state} ice=${snapshot.iceState} pair=${snapshot.pair}`
+          );
+        }
+      }
       let queued = 0;
       try {
         queued = typeof channel.bufferedAmount === "function" ? channel.bufferedAmount() : 0;
@@ -630,6 +664,10 @@ const PARTIAL_REQUEST_TTL_MS = 60_000;
 // well under a second on the LAN — and short enough that a stuck channel is
 // named while the viewer is still looking at it.
 const SEND_QUEUE_SAMPLE_MS = 1_000;
+// How often the transport's own counters are written to the log, whatever the
+// send queue is doing. Frequent enough to place a loss within a few seconds,
+// sparse enough that a two-hour film costs a few hundred lines.
+const TRANSPORT_HEARTBEAT_MS = 5_000;
 const SEND_QUEUE_STUCK_MS = 5_000;
 const DC_BUFFER_HIGH_WATER = 8 * 1024 * 1024;
 /** Resume sending once the channel buffer drains to this many bytes. */

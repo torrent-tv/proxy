@@ -1,7 +1,7 @@
 ## 2.9.114
 
 - **Fix**: A seek leaked a pinned piece, and enough of them destroyed the torrent. A piece is pinned before its fragment is handed to the reader and released by whoever received it — but a consumer that ABANDONS the read never gets the chance, and a seek abandons it every time: the encoder is killed, the response is torn down, the loop is left between two fragments. Field 2026-08-06, one seek was enough: the store answered `Every resident piece is pinned; no slot can be freed`, and it answered it to the WebTorrent client, which closed the store and destroyed the torrent — after which every read failed with `File 0 not found`, the session went terminal, and the segment the viewer was waiting for returned an instant error. The pin of a fragment still in the consumer's hands is now dropped by the reader itself on every exit, abandonment included. Covered by a test that abandons a read mid-fragment and checks the store has nothing pinned.
-- **Chore**: The look-ahead's report that ffmpeg's position and the segments on disk disagree is limited to once a minute. It is a diagnostic, not an event, and it printed three hundred times a minute after a seek — for as long as a fresh run had not caught up with the segments an older one left behind.
+- **Chore**: The look-ahead reports that ffmpeg's position and the segments on disk disagree on the EDGES of that state — once when they part company, once when they meet again, with how long it lasted. It was printed per call of a function that runs on every segment request, which after a seek meant three hundred times a minute; a rate limit would only have hidden that the line was in the wrong place, and it could not have said how long the disagreement went on.
 
 ## 2.9.113
 

@@ -3284,6 +3284,13 @@ export class HlsSessionManager {
       segmentDurationSec: this.segmentDurationSec,
       speed: session.progress.speed,
       outputMbps,
+      // The height being produced RIGHT NOW. On automatic quality the proxy
+      // steps down a rung when the host cannot keep up or the viewer's link
+      // cannot carry the stream, and the menu said only "Auto" — so the one
+      // question it raises, what am I actually watching, had no answer
+      // anywhere. Zero when the video is copied, because then nothing is being
+      // chosen: the source's own height is what plays.
+      currentHeight: session.transcodeVideo ? (session.encodeHeight ?? 0) : 0,
       updatedAt: session.progress.updatedAt,
       error: session.state === "failed" ? session.lastError : ""
     };

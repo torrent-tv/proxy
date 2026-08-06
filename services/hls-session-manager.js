@@ -64,6 +64,60 @@ export function isInputUnavailable(message) {
 }
 
 const PLAYLIST_FILE_NAME = "index.m3u8";
+// The resolutions a viewer may choose between. Only rungs at or below the
+// source are offered: upscaling invents detail and costs the encoder more than
+// the source itself.
+const VARIANT_LADDER = [2160, 1440, 1080, 720, 540, 480, 360, 240];
+
+/**
+ * The last index of the unbroken run of segments starting at `from`.
+ *
+ * Null when `from` itself is absent. A hole matters: segments beyond one are
+ * not look-ahead, because the viewer cannot reach them until it is filled.
+ *
+ * @param {Set<number>} present
+ * @param {number} from
+ * @returns {number | null}
+ */
+export function contiguousEnd(present, from) {
+  if (!present.has(from)) {
+    return null;
+  }
+  let last = from;
+  while (present.has(last + 1)) {
+    last += 1;
+  }
+  return last;
+}
+
+/**
+ * The heights offered for a source of this height, largest first.
+ *
+ * @param {number} sourceHeight
+ * @returns {number[]}
+ */
+export function variantHeightsFor(sourceHeight) {
+  if (!Number.isFinite(sourceHeight) || sourceHeight <= 0) {
+    return [];
+  }
+  const rungs = VARIANT_LADDER.filter((height) => height < sourceHeight);
+  return [Math.round(sourceHeight), ...rungs];
+}
+
+/**
+ * A rough bitrate for a height, in bits per second.
+ *
+ * `BANDWIDTH` is required on every variant by the HLS specification, and the
+ * player uses it to order them. It does not have to be exact — nothing here
+ * adapts on it, because the viewer chooses — so it is the usual H.264 rule of
+ * thumb rather than a measurement we do not have before encoding starts.
+ *
+ * @param {number} height
+ * @returns {number}
+ */
+export function estimatedBitrateFor(height) {
+  return Math.max(400_000, Math.round(height * height * 3.2));
+}
 const CLEANUP_INTERVAL_MS = 30_000;
 const DEFAULT_SEGMENT_DURATION_SEC = 4;
 // How many segments ahead of the current encode head a missing-segment request
@@ -1357,6 +1411,10 @@ export class HlsSessionManager {
         lastLoggedAt: 0
       }
     };
+    // Kept so a variant of this session can take its own hold on the same
+    // source: a variant is another encode of the same file and must keep the
+    // torrent's data alive exactly as this one does.
+    session.acquireSource = typeof acquireSource === "function" ? acquireSource : null;
     if (typeof acquireSource === "function") {
       try {
         session.releaseSource = acquireSource();
@@ -1834,51 +1892,99 @@ export class HlsSessionManager {
     // which nobody was now making — was held for 45.7 s until the viewer gave
     // up and seeked. A segment on disk is something the viewer can be served;
     // a number from ffmpeg is not.
-    const producedThrough = this.#latestProducedSegment(session);
-    if (producedThrough === null) {
+    // Where the viewer is. Before the first segment request, the position the
+    // run started at — so a session nobody has read from yet is bounded too.
+    const viewerSegment = Number.isInteger(session.lastRequestedSegment)
+      ? session.lastRequestedSegment
+      : (session.encodeStartIndex ?? 0);
+
+    // How much is ready CONTIGUOUSLY FROM WHERE THE VIEWER IS — not the highest
+    // segment number lying in the directory. The two are the same only while a
+    // viewer moves forward through one run, and the difference destroyed a
+    // session on 2026-08-06: a seek forward left segments 662-665 on disk, the
+    // viewer then seeked BACK to 646, and the limiter measured 6950 s of output
+    // against a viewer at 6700 s, called it "250s ahead" and suspended a run
+    // 136 ms after it started, before it had produced anything at all. Nothing
+    // was then encoding, so nothing read the input, so no pieces were asked for
+    // — `0 selection(s)` with 33 peers connected — and segment 646 was never
+    // made. Segments beyond a hole are not look-ahead: the viewer cannot reach
+    // them without the hole being filled first.
+    const aheadSeconds = this.#contiguousAheadSeconds(session, viewerSegment);
+    if (aheadSeconds === null) {
+      // The segment the viewer needs does not exist. Whatever else is on disk,
+      // this encoder has work to do right now.
+      if (session.encoderPaused) {
+        this.#resumeEncoder(session, "the viewer needs a segment nobody has made");
+      }
       return;
     }
-    const encodedTo = this.#segmentStartTime(session, producedThrough + 1);
-    if (!Number.isFinite(encodedTo)) {
-      return;
-    }
-    // Worth knowing when the two disagree wildly — it is the only trace of
-    // whatever made ffmpeg report a position it had not reached.
-    // Reported on its EDGES, because it is a state and not a stream: it starts
-    // when the two figures part company and ends when they meet again, however
-    // often this function happens to run. Printing it per call meant printing
-    // it at the rate of segment requests — three hundred times a minute after
-    // one seek — and a limit of one a minute would only have hidden that the
-    // line was in the wrong place. Two lines per occurrence also say how long
-    // it lasted, which no sampled version could.
+
+    // Worth knowing when ffmpeg's own report and what exists disagree wildly —
+    // it is the only trace of whatever made it claim a position it had not
+    // reached. Reported on its EDGES, because it is a state and not a stream.
     const claimed = Number(session.progress?.processedSeconds);
+    const encodedTo = this.#segmentStartTime(session, viewerSegment) + aheadSeconds;
     const disagrees =
       Number.isFinite(claimed) && Math.abs(claimed - encodedTo) > LOOKAHEAD_PAUSE_SECONDS;
     if (disagrees && !session.lookAheadDisagreementSince) {
       session.lookAheadDisagreementSince = Date.now();
       logger.info(
         `transcode ${session.id} ffmpeg claims ${Math.round(claimed)}s processed ` +
-          `but has produced through ${Math.round(encodedTo)}s (segment #${producedThrough})`
+          `but the viewer's own run of segments ends at ${Math.round(encodedTo)}s`
       );
     } else if (!disagrees && session.lookAheadDisagreementSince) {
       const lastedMs = Date.now() - session.lookAheadDisagreementSince;
       session.lookAheadDisagreementSince = 0;
       logger.info(
         `transcode ${session.id} ffmpeg's position and the segments on disk agree again ` +
-          `after ${(lastedMs / 1000).toFixed(1)}s (produced through ${Math.round(encodedTo)}s)`
+          `after ${(lastedMs / 1000).toFixed(1)}s (ready through ${Math.round(encodedTo)}s)`
       );
     }
-    // Where the viewer is. Before the first segment request, the position the
-    // run started at — so a session nobody has read from yet is bounded too.
-    const viewerAt = Number.isInteger(session.lastRequestedSegment)
-      ? this.#segmentStartTime(session, session.lastRequestedSegment)
-      : this.#segmentStartTime(session, session.encodeStartIndex ?? 0);
-    const ahead = encodedTo - viewerAt;
-    if (!session.encoderPaused && ahead > LOOKAHEAD_PAUSE_SECONDS) {
-      this.#pauseEncoder(session, `${Math.round(ahead)}s ahead of the viewer`);
-    } else if (session.encoderPaused && ahead <= LOOKAHEAD_RESUME_SECONDS) {
-      this.#resumeEncoder(session, `${Math.round(ahead)}s ahead of the viewer`);
+
+    if (!session.encoderPaused && aheadSeconds > LOOKAHEAD_PAUSE_SECONDS) {
+      this.#pauseEncoder(session, `${Math.round(aheadSeconds)}s ahead of the viewer`);
+    } else if (session.encoderPaused && aheadSeconds <= LOOKAHEAD_RESUME_SECONDS) {
+      this.#resumeEncoder(session, `${Math.round(aheadSeconds)}s ahead of the viewer`);
     }
+  }
+
+  /**
+   * Seconds of playback ready without a gap, starting at the segment the viewer
+   * is on.
+   *
+   * Null when that very segment is missing — which is not "zero ahead" but
+   * "the viewer is waiting", and the two call for opposite decisions.
+   *
+   * @param {HlsSession} session
+   * @param {number} viewerSegment
+   * @returns {number | null}
+   */
+  #contiguousAheadSeconds(session, viewerSegment) {
+    let present;
+    try {
+      present = new Set();
+      for (const name of readdirSync(session.dirPath, { withFileTypes: false })) {
+        if (!this.segmentFormat.isSegmentFileName(name)) {
+          continue;
+        }
+        const index = this.segmentFormat.segmentIndexFromName(name);
+        if (index >= 0) {
+          present.add(index);
+        }
+      }
+    } catch {
+      return null;
+    }
+    const lastCovered = contiguousEnd(present, viewerSegment);
+    if (lastCovered === null) {
+      return null;
+    }
+    const from = this.#segmentStartTime(session, viewerSegment);
+    const to = this.#segmentStartTime(session, lastCovered + 1);
+    if (!Number.isFinite(from) || !Number.isFinite(to)) {
+      return null;
+    }
+    return Math.max(0, to - from);
   }
 
   /**
@@ -2998,6 +3104,97 @@ export class HlsSessionManager {
       }
     }
     return highest;
+  }
+
+  /**
+   * The session that produces a given height for the same file, created on
+   * first request.
+   *
+   * A variant IS a session — same source, same file, a different encode — so
+   * this makes one rather than inventing a parallel object. It is created only
+   * when its playlist is actually asked for, which is what keeps a weak host
+   * running one encoder: with the player's own bitrate adaptation off, no
+   * variant is ever requested unless the viewer picked it.
+   *
+   * @param {string} baseSessionId
+   * @param {number} height - Encode height; must be one of the offered rungs.
+   * @returns {Promise<HlsSession | null>} Null when the base session is unknown.
+   */
+  async getVariantSession(baseSessionId, height) {
+    const base = this.sessionsById.get(baseSessionId);
+    if (!base || base.state === "disposed") {
+      return null;
+    }
+    if (!Number.isInteger(height) || height <= 0) {
+      return null;
+    }
+    // Where the viewer is now, so a variant created mid-film starts there
+    // rather than at the beginning.
+    const processed = Number.isFinite(base.progress?.processedSeconds)
+      ? base.progress.processedSeconds
+      : 0;
+    return this.createOrGetSession({
+      sourceKey: base.sourceKey,
+      fileIndex: base.fileIndex,
+      transcodeVideo: true,
+      transcodeAudio: base.transcodeAudio,
+      fileName: base.fileName,
+      targetWidth: 0,
+      targetHeight: height,
+      startPositionSeconds: processed,
+      audioTrackIndex: base.audioTrackIndex,
+      // A variant is a resolution the viewer chose, so it is encoded at exactly
+      // that size and the realtime budget does not move it — otherwise two
+      // variants could drift onto the same height and the choice would mean
+      // nothing.
+      manualQuality: true,
+      segmentFormatId: base.segmentFormat?.id ?? "",
+      acquireSource: base.acquireSource
+    });
+  }
+
+  /**
+   * The master playlist: every resolution this file can be served at, as HLS
+   * variants.
+   *
+   * This is what makes a change of quality seamless. Our media playlist is VOD
+   * and terminated with `#EXT-X-ENDLIST`, and hls.js only re-reads a playlist
+   * that is live — so rewriting it underneath the player achieves nothing, and
+   * a switch had to tear the player down and build a new session. Offered as
+   * variants instead, the switch is the player's own: it fetches the other
+   * variant, appends it after what is already buffered, and changes the
+   * decoder's type if the codec parameters differ.
+   *
+   * @param {string} sessionId
+   * @returns {string | null} The playlist text, or null when there is nothing
+   *   to choose between — a copied video, or a source too small to step down.
+   */
+  buildMasterPlaylist(sessionId) {
+    const session = this.sessionsById.get(sessionId);
+    if (!session || session.state === "disposed" || !session.transcodeVideo) {
+      return null;
+    }
+    const sourceHeight = Number(session.sourceHeight) || 0;
+    const rungs = variantHeightsFor(sourceHeight);
+    if (rungs.length < 2) {
+      return null;
+    }
+    const sourceWidth = Number(session.sourceWidth) || 0;
+    const lines = ["#EXTM3U", "#EXT-X-VERSION:7"];
+    for (const height of rungs) {
+      const width = sourceHeight > 0 && sourceWidth > 0
+        ? Math.round((sourceWidth / sourceHeight) * height / 2) * 2
+        : 0;
+      lines.push(
+        `#EXT-X-STREAM-INF:BANDWIDTH=${estimatedBitrateFor(height)}` +
+        (width > 0 ? `,RESOLUTION=${width}x${height}` : "")
+      );
+      // A subdirectory, so every relative name inside the variant's own
+      // playlist — its segments and its init — resolves to that variant
+      // without any of them having to change.
+      lines.push(`v/${height}/${PLAYLIST_FILE_NAME}`);
+    }
+    return `${lines.join("\n")}\n`;
   }
 
   /**

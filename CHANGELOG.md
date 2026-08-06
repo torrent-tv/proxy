@@ -1,3 +1,7 @@
+## 2.9.122
+
+- **Fix**: A session created with a start position begins encoding there, instead of at the top of the file. The position was honoured everywhere except the one place that mattered: it went into the session key and into the log line, and then the first run started at index 0 regardless. Measured 2026-08-06 on a Retry after the proxy had restarted — the session was created with `start=1580s`, the encoder began at #0, the player asked for #152, and 45 s later the browser gave up with "no data arrived from the proxy" while the transcode ran happily at 9.9x through the opening credits.
+
 ## 2.9.121
 
 - **Fix**: A segment that is short of a track is no longer served, which is what left a seek hanging with the proxy answering every request in 98 ms. A run that is terminated closes its current output file properly — trailing index and all — but the file holds only what had been muxed by then, and after a seek-restart that is routinely one track of two. Nothing about such a file looks unfinished: it exists, the next one exists, so the readiness rule called it done. Measured 2026-08-06 on a stuck session: segment #133 carried one `tfdt` where #131 and #134 carried two, and #132 was zero bytes. The fragments are already walked to stamp their timestamps, so counting the tracks in them costs nothing; a segment missing one is deleted and produced again.

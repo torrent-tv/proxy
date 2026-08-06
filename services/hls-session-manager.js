@@ -36,6 +36,33 @@ import {
 } from "./ffmpeg-banner.js";
 import { resolveSegmentFormat, SEGMENT_FORMAT_IDS } from "./segment-formats/index.js";
 
+/**
+ * Whether an encoder run died because its INPUT went away, rather than because
+ * of anything about the encode itself.
+ *
+ * These are the messages the read path and ffmpeg's HTTP client produce when
+ * the torrent is gone, being re-added, or has no data for the range yet — all
+ * of them temporary by nature: the source can be added again and the pieces
+ * fetched again.
+ *
+ * @param {string} message
+ * @returns {boolean}
+ */
+export function isInputUnavailable(message) {
+  const text = typeof message === "string" ? message : "";
+  return (
+    /Error reading HTTP response/i.test(text) ||
+    /not found in (?:magnet|torrent):/i.test(text) ||
+    /Unknown source/i.test(text) ||
+    /is gone and cannot be re-added/i.test(text) ||
+    /Read error at pos/i.test(text) ||
+    /Server returned 5\d\d/i.test(text) ||
+    /Input\/output error/i.test(text) ||
+    /Connection reset by peer/i.test(text) ||
+    /End of file/i.test(text)
+  );
+}
+
 const PLAYLIST_FILE_NAME = "index.m3u8";
 const CLEANUP_INTERVAL_MS = 30_000;
 const DEFAULT_SEGMENT_DURATION_SEC = 4;
@@ -130,6 +157,13 @@ const SEEK_FAST_FAIL_MS = 2_000;
 // for whatever residual case still fails — not a second competing "fix" that
 // blindly retries the identical command hoping for a different result.
 const MAX_SEEK_FAILURES = 3;
+// A run that lost its INPUT is retried rather than condemned: the torrent can
+// be added again and the pieces downloaded again, so the data being gone is a
+// wait, not a verdict. Backed off so a source that is truly unavailable costs a
+// process every few seconds rather than continuously, and never given up on —
+// the session's own idle TTL is what ends it if the viewer leaves.
+const INPUT_RETRY_BASE_MS = 2_000;
+const INPUT_RETRY_MAX_MS = 15_000;
 // Idle TTL: a session is disposed this long after the last segment/playlist
 // access. Long enough that a viewer who pauses, backgrounds the tab, or briefly
 // turns the phone off can resume WITHOUT a cold ffmpeg restart (the warm session
@@ -2506,6 +2540,45 @@ export class HlsSessionManager {
         session.seekFailureTarget = -1;
         session.seekFailureCount = 0;
       }
+      // Losing the INPUT is not the session failing — it is the data not being
+      // there YET. The torrent can be re-added and re-downloaded, so the
+      // honest answer to the viewer is "still working", not an error screen.
+      // Field 2026-08-06: a torrent evicted mid-seek took the film with it, the
+      // run died on `File 0 not found`, the session went terminal and answered
+      // 500 to every request from then on — although the swarm was there and
+      // the data would have come back in seconds. The circuit breaker below
+      // stays for what it was built for, a target that genuinely cannot be
+      // encoded; it must not condemn a session whose data merely went away.
+      if (isInputUnavailable(session.lastError)) {
+        session.state = "recovering";
+        // On the wire it is simply "not ready yet" — a state the browser has
+        // always known how to wait through. Only the proxy needs the
+        // distinction between waiting for data and having given up.
+        session.progress.state = "starting";
+        session.progress.updatedAt = Date.now();
+        session.inputRetryCount = (session.inputRetryCount ?? 0) + 1;
+        const delayMs = Math.min(
+          INPUT_RETRY_MAX_MS,
+          INPUT_RETRY_BASE_MS * 2 ** Math.min(session.inputRetryCount - 1, 6)
+        );
+        logger.warn(
+          `transcode ${session.id} ${session.runLabel ?? "run#?"} lost its input ` +
+            `(${session.lastError}); retrying in ${Math.round(delayMs / 1000)}s ` +
+            `(attempt ${session.inputRetryCount})`
+        );
+        session.inputRetryTimer = setTimeout(() => {
+          session.inputRetryTimer = null;
+          if (session.state !== "recovering") {
+            return;
+          }
+          const at = Number.isInteger(session.lastRequestedSegment)
+            ? session.lastRequestedSegment
+            : (session.encodeStartIndex ?? 0);
+          this.#startEncodeRun(session, at).catch(() => {});
+        }, delayMs);
+        session.inputRetryTimer.unref?.();
+        return;
+      }
       session.state = "failed";
       session.progress.state = "failed";
       session.progress.updatedAt = Date.now();
@@ -2949,6 +3022,12 @@ export class HlsSessionManager {
     if (!session || !isSafeFileName(fileName, session.segmentFormat)) {
       return { kind: "not-found" };
     }
+    if (session.state === "recovering") {
+      // The data went away and is being fetched again. Holding the request is
+      // the truthful answer: nothing is broken and there is nothing for the
+      // viewer to retry.
+      return { kind: "warming-up" };
+    }
     if (session.state === "failed") {
       return {
         kind: "failed",
@@ -3064,6 +3143,9 @@ export class HlsSessionManager {
       // — the time from session-create entry to a playable first segment.
       if (!isPlaylist && !session.firstSegmentLogged) {
         session.firstSegmentLogged = true;
+        // Data is flowing again, so the next loss starts its backoff afresh
+        // rather than inheriting the delay of the last one.
+        session.inputRetryCount = 0;
         this.#rememberFirstSegmentLatency(Date.now() - session.createEntryMs);
         logger.info(
           `cold-start ${sessionId.slice(0, 8)}: first-segment ready +${Date.now() - session.createEntryMs}ms`
@@ -3261,6 +3343,10 @@ export class HlsSessionManager {
     if (session.seekSettleTimer) {
       clearTimeout(session.seekSettleTimer);
       session.seekSettleTimer = null;
+    }
+    if (session.inputRetryTimer) {
+      clearTimeout(session.inputRetryTimer);
+      session.inputRetryTimer = null;
     }
 
     this.#resumeEncoder(session, "session disposed");

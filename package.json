@@ -7,6 +7,9 @@
     "access": "public"
   },
   "type": "module",
+  "engines": {
+    "node": ">=24 <25"
+  },
   "bin": {
     "torrent-tv-proxy": "./bin/cli.js"
   },

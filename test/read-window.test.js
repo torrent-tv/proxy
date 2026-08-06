@@ -245,3 +245,34 @@ test("criticality marks the window being waited for, not the whole range", async
     await fs.rm(directory, { recursive: true, force: true });
   }
 });
+
+test("a reader that is abandoned mid-fragment does not keep the piece pinned", async () => {
+  // The pin is taken before the fragment is handed out and released by the
+  // consumer — but a seek abandons the iterator between two fragments, and the
+  // consumer never gets the chance. Field 2026-08-06: after one seek every slot
+  // in the store was pinned, the store answered `Every resident piece is
+  // pinned; no slot can be freed` to the WebTorrent client, which closed the
+  // store and destroyed the torrent.
+  const { torrent, store, directory } = await recordingTorrent({ pieceCount: 40 });
+  try {
+    const iterator = readFragments({
+      torrent,
+      fileIndex: 0,
+      start: 0,
+      end: 40 * PIECE - 1,
+      cancellation: { isCancelled: () => false },
+      windowBytes: WINDOW_PIECES * PIECE
+    });
+    await iterator.next(); // held, deliberately NOT released
+    await iterator.return(); // what a seek does
+
+    assert.equal(
+      store.stats().pinned,
+      0,
+      "the abandoned fragment's piece is still pinned; slots leak one per seek"
+    );
+  } finally {
+    store.destroy(() => undefined);
+    await fs.rm(directory, { recursive: true, force: true });
+  }
+});

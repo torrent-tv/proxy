@@ -316,6 +316,13 @@ export async function* readFragments({
   /** @type {{ from: number, to: number } | null} */
   let criticalMark = null;
   /**
+   * Drops the pin of the fragment currently in the consumer's hands, if it
+   * still holds one. See where it is assigned.
+   *
+   * @type {(() => void) | null}
+   */
+  let releaseHeldPin = null;
+  /**
    * The rest of the file, claimed at the lowest priority so it is fetched with
    * whatever capacity the near window does not need. Null whenever it must not
    * be fetched at all — see {@link updateBackfill}.
@@ -507,6 +514,21 @@ export async function* readFragments({
       }
 
       let releasedThisPiece = false;
+      // Remembered so the generator can drop it itself. The pin is taken here
+      // and the consumer is expected to release it — but a consumer that
+      // ABANDONS the iterator never gets the chance, and a seek abandons it
+      // every time: the encoder is killed, the response is torn down, and the
+      // loop is left between two fragments. Field 2026-08-06: after one seek
+      // every slot in the store was pinned, the store answered
+      // `Every resident piece is pinned; no slot can be freed` — to the
+      // WebTorrent client, which closed the store and destroyed the torrent —
+      // and the session died with `File 0 not found`.
+      releaseHeldPin = () => {
+        if (!releasedThisPiece) {
+          releasedThisPiece = true;
+          store.unpin(pieceIndex);
+        }
+      };
       yield {
         pieceIndex,
         offset: located.offset + fromWithinPiece,
@@ -519,8 +541,17 @@ export async function* readFragments({
           store.unpin(pieceIndex);
         }
       };
+      // Handed back, and released by the consumer or not at all — either way
+      // this reader no longer owes anything for it.
+      releaseHeldPin = null;
     }
   } finally {
+    // A fragment handed out and never released is a slot lost for the life of
+    // the process. Reached on every exit, including the consumer walking away.
+    if (releaseHeldPin) {
+      releaseHeldPin();
+      releaseHeldPin = null;
+    }
     // Reached on completion, on cancellation, on a throw, and when the consumer
     // stops iterating — a window left behind would keep the swarm fetching for
     // a reader that no longer exists.

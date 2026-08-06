@@ -1,3 +1,7 @@
+## 2.9.107
+
+- **Fix**: 2.9.106 could not produce a playback plan at all — `Failed to prepare playback plan: firstSegmentMs is not defined`. Moving the two host timings to be read when a plan is ANSWERED removed the two variables but left the object literal still naming them, on the path that builds a fresh plan. My own linter reports it in four seconds and I did not run it, which is the second time an undeclared name has reached a release; `npm publish` now runs it, so this class of error cannot leave the machine again. The test added with 2.9.106 did not catch it because it exercises the cached path only — the fresh-plan path needs a real probe.
+
 ## 2.9.106
 
 - **Fix**: The two figures the browser needs to say how long until playback now reach it for the file that needs them most. Both are medians of sessions already finished on this host, and the plan read them at the moment it was BUILT and then cached the result — so the very first file opened after a restart got `null` for both and kept answering `null` for the life of the process, however many sessions ran afterwards. Measured 2026-08-05: a fresh proxy answered `null`, then created the session in 6 ms and produced the first segment in 21 479 ms. They are now read when the plan is ANSWERED, so a cached plan reports what the host currently knows. Covered by tests.

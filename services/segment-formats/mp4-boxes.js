@@ -183,3 +183,65 @@ export function stampSegmentStartTime(segment, startSeconds, trackTimescales) {
   });
   return stamped;
 }
+
+/**
+ * Where a self-contained piece really begins, in seconds, or null.
+ *
+ * The `segment` muxer writes each piece with its own `moov`, and puts the
+ * piece's position on the source timeline into an EMPTY EDIT at the head of the
+ * track's edit list: an entry whose `media_time` is -1 and whose duration, in
+ * the movie timescale, is the offset. That is the piece's own account of where
+ * it sits, and it is the only honest one available.
+ *
+ * It matters because the alternative — the time the playlist ASSIGNED to that
+ * segment — can be wrong. The playlist is built from the container's keyframe
+ * index, and an index can list times that are not keyframes: measured
+ * 2026-08-06 on a Matroska file whose index claimed one at 157.99 s while the
+ * real keyframes were at 153.82 and 164.247. The cut therefore produced a piece
+ * starting at 153.82, and stamping it with the playlist's 157.99 told the
+ * player that picture belonged four seconds later than it did — while the
+ * subtitles, extracted straight from the source, kept the true times. The
+ * result was a steady 4.17 s desync between speech and text.
+ *
+ * @param {Buffer} piece
+ * @returns {number | null} Seconds, or null when the piece carries no edit list.
+ */
+export function readSelfContainedStartSeconds(piece) {
+  let movieTimescale = 0;
+  let startSeconds = null;
+  walkBoxes(piece, (type, bodyStart, bodyEnd) => {
+    if (type === "mvhd" && movieTimescale === 0) {
+      const version = piece[bodyStart];
+      const offset = version === 1 ? bodyStart + 20 : bodyStart + 12;
+      if (offset + 4 <= piece.length) {
+        movieTimescale = piece.readUInt32BE(offset);
+      }
+      return;
+    }
+    if (type !== "elst" || startSeconds !== null || movieTimescale === 0) {
+      return;
+    }
+    const version = piece[bodyStart];
+    const entryStart = bodyStart + 8;
+    if (version === 1) {
+      if (entryStart + 16 > bodyEnd) {
+        return;
+      }
+      const duration = Number(piece.readBigUInt64BE(entryStart));
+      const mediaTime = piece.readBigInt64BE(entryStart + 8);
+      if (mediaTime === -1n) {
+        startSeconds = duration / movieTimescale;
+      }
+      return;
+    }
+    if (entryStart + 8 > bodyEnd) {
+      return;
+    }
+    const duration = piece.readUInt32BE(entryStart);
+    const mediaTime = piece.readInt32BE(entryStart + 4);
+    if (mediaTime === -1) {
+      startSeconds = duration / movieTimescale;
+    }
+  });
+  return startSeconds;
+}

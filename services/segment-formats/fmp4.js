@@ -190,6 +190,21 @@ export const fmp4Format = {
   },
 
   /**
+   * Where a self-contained piece says it begins, in seconds, or null.
+   *
+   * Only the pieces the `segment` muxer writes carry this — they have their
+   * own `moov` — which is exactly the path where the playlist's own answer
+   * can be wrong. Must be given the piece BEFORE {@link stripInit}, since that
+   * removes the header the position lives in.
+   *
+   * @param {Buffer} piece
+   * @returns {number | null}
+   */
+  readSegmentStartSeconds(piece) {
+    return readSelfContainedStartSeconds(piece);
+  },
+
+  /**
    * fMP4 segments must be read into memory and corrected before being served —
    * see {@link stampSegmentStartTime} for the full reasoning. Without this a
    * seek is permanently broken: ffmpeg leaves every segment claiming to start

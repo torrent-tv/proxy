@@ -3453,8 +3453,34 @@ export class HlsSessionManager {
           }
           return { kind: "warming-up" };
         }
+        // Where this segment REALLY begins, taken from the piece itself, and
+        // only from the playlist when the piece does not say.
+        //
+        // The playlist's own answer is built from the container's keyframe
+        // index, and an index can be wrong: measured 2026-08-06 on a Matroska
+        // file whose index claimed a keyframe at 157.99 s where the real ones
+        // were 153.82 and 164.247. ffmpeg cut at 153.82, and stamping that
+        // picture with 157.99 told the player it belonged four seconds later
+        // than it did — while subtitles, extracted straight from the source,
+        // kept the true times. Speech and text drifted apart by 4.17 s.
+        //
+        // Read from `raw`, before the header is stripped: the position lives
+        // in an empty edit in the piece's own `moov`, which `stripInit`
+        // removes. Identical to the playlist's figure whenever the index is
+        // honest, so nothing changes for a well-formed file.
+        const trueStart = session.usesExplicitCuts
+          ? session.segmentFormat.readSegmentStartSeconds?.(raw) ?? null
+          : null;
+        const declaredStart = this.#segmentStartTime(session, index);
+        if (trueStart !== null && Math.abs(trueStart - declaredStart) > SEGMENT_START_DISAGREEMENT_SEC) {
+          logger.warn(
+            `transcode ${session.id} segment #${index} really starts at ` +
+            `${trueStart.toFixed(3)}s, the playlist says ${declaredStart.toFixed(3)}s — ` +
+            "the container's keyframe index disagrees with the file; using the file"
+          );
+        }
         const prepared = session.segmentFormat.prepareSegmentBytes(bytes, {
-          startSeconds: this.#segmentStartTime(session, index),
+          startSeconds: trueStart ?? declaredStart,
           initBytes: session.initBytes ?? null
         });
         return {

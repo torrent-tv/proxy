@@ -10,7 +10,12 @@
  * See {@link SegmentFormat} in `./index.js` for the interface contract.
  */
 
-import { readTrackTimescales, stampSegmentStartTime, walkBoxes } from "./mp4-boxes.js";
+import {
+  readSelfContainedStartSeconds,
+  readTrackTimescales,
+  stampSegmentStartTime,
+  walkBoxes
+} from "./mp4-boxes.js";
 
 /**
  * How many distinct tracks have a fragment in this segment.

@@ -293,6 +293,12 @@ const PROGRESS_LOG_INTERVAL_MS = 5_000;
 // hashing starves the event loop in bursts, so fewer read iterations means
 // far less time lost between chunks while serving the first segments.
 const SEGMENT_READ_HIGH_WATER_MARK = 4 * 1024 * 1024;
+// How far a segment's own recorded start may sit from the one the playlist
+// assigned it before the disagreement is worth a log line. The two are built
+// from the same keyframe index and normally match to the sample; a quarter of a
+// second is below any drift a viewer could notice, so anything above it is the
+// index being wrong about where a keyframe is rather than rounding.
+const SEGMENT_START_DISAGREEMENT_SEC = 0.25;
 
 /**
  * Resolve after a given number of milliseconds.
@@ -3338,10 +3344,20 @@ export class HlsSessionManager {
           contentType: session.segmentFormat.initContentType,
           isPlaylist: false
         };
-      } catch {
-        // Not produced yet — the encode run started at session creation writes
-        // it early; the caller long-polls until it appears.
-        return { kind: "warming-up" };
+      } catch (error) {
+        if (error?.code === "ENOENT") {
+          // Not produced yet — the encode run started at session creation
+          // writes it early; the caller long-polls until it appears.
+          return { kind: "warming-up" };
+        }
+        logger.error(
+          `transcode ${session.id} could not serve ${initFileName}: ${error?.message ?? error}` +
+          (error?.stack ? `\n${error.stack}` : "")
+        );
+        return {
+          kind: "failed",
+          message: `Could not serve ${initFileName}: ${error?.message ?? String(error)}`
+        };
       }
     }
 
@@ -3360,9 +3376,21 @@ export class HlsSessionManager {
         this.#enforceLookAheadFor(session);
       }
     }
+    // Whether the file is there is asked on its own, and nothing else shares
+    // this catch. Everything below is PREPARATION of a file that exists, and a
+    // failure there means something entirely different from "not produced yet"
+    // — but for one release the two were caught together, so an undeclared name
+    // in the fMP4 path read as "the segment is not ready". Every poll threw the
+    // same ReferenceError, every poll answered "wait", and playback never began
+    // on any file cut at keyframes (2.9.124; measured 2026-08-08: segment #0
+    // held for 45 281 ms with twelve finished segments on disk).
     try {
       await access(filePath);
-
+    } catch {
+      // Not produced yet.
+      return this.#holdForProduction(session, fileName, isPlaylist, options);
+    }
+    try {
       // Existing is not the same as finished. The `hls` muxer wrote each
       // segment to a temporary name and renamed it once complete, so a file
       // appearing WAS a finished segment. The `segment` muxer has no such
@@ -3500,10 +3528,38 @@ export class HlsSessionManager {
           : session.segmentFormat.segmentContentType,
         isPlaylist
       };
-    } catch (_error) {
-      // File not produced yet.
+    } catch (error) {
+      if (error?.code === "ENOENT") {
+        // The file went away between the check and the read — a leftover being
+        // removed so it can be produced again. Means exactly what never having
+        // existed means.
+        return this.#holdForProduction(session, fileName, isPlaylist, options);
+      }
+      // Anything else is a fault in producing the answer. Name it: a request
+      // answered "wait" for ever tells the viewer nothing and leaves no trace
+      // of what actually happened.
+      logger.error(
+        `transcode ${session.id} could not serve ${fileName}: ${error?.message ?? error}` +
+        (error?.stack ? `\n${error.stack}` : "")
+      );
+      return {
+        kind: "failed",
+        message: `Could not serve ${fileName}: ${error?.message ?? String(error)}`
+      };
     }
+  }
 
+  /**
+   * Answer a request for a file that is not on disk: make sure the encoder is
+   * heading for it, and hold the request.
+   *
+   * @param {HlsSession} session
+   * @param {string} fileName
+   * @param {boolean} isPlaylist
+   * @param {{ requestSeq?: number }} options
+   * @returns {{ kind: "warming-up" }}
+   */
+  #holdForProduction(session, fileName, isPlaylist, options) {
     // A segment was requested that ffmpeg has not produced yet.  Decide whether
     // to wait for the current encode run to reach it or to restart the encoder
     // at this position (server-side seeking).  The caller long-polls.

@@ -19,7 +19,7 @@
     "major": "npm whoami && npm version major && npm publish && git push --follow-tags",
     "start": "node ./bin/cli.js",
     "dev": "node --inspect=0 --experimental-network-inspection ./bin/cli.js",
-    "test": "node --test",
+    "test": "npm run lint && node --test",
     "lint": "biome lint ."
   },
   "dependencies": {

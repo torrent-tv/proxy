@@ -288,6 +288,7 @@ export class TorrentWorkerClient {
         void this.#caller.call(Command.CANCEL_READ, { readId }).catch(() => undefined);
         this.#reads.delete(readId);
         this.#poolByRead.delete(readId);
+        this.#lastPieceByRead.delete(readId);
       }
     });
     this.#reads.set(readId, receive);

@@ -37,6 +37,14 @@ export class TorrentWorkerClient {
   #caller;
   /** Receive-side handles for in-flight reads, keyed by request id. */
   #reads = new Map();
+
+  /**
+   * The last piece served to each open read, so a fragment arriving out of
+   * order can be named. Cleared when the read ends.
+   *
+   * @type {Map<number, number>}
+   */
+  #lastPieceByRead = new Map();
   /** Each torrent's piece pool, so a fragment can be read where it lies. */
   #poolBySource = new Map();
   /** Which pool an in-flight read belongs to, keyed by request id. */
@@ -104,6 +112,25 @@ export class TorrentWorkerClient {
             this.#worker.postMessage({ type: Event.FRAGMENT_DONE, id: message.id });
             break;
           }
+          // A sequential read walks the file forwards, so each fragment either
+          // continues the piece before it or moves to the very next one.
+          // Anything else means the bytes handed to the decoder are not the
+          // file's bytes in order — which is what a decoder complaining about
+          // its input has twice turned out to mean (2.9.126, and the AC-3
+          // failure of 2026-08-09: the encoder ran at 9.3x, the piece store
+          // reported no spills and 100% of reads from memory, and the decoder
+          // still saw "new coupling strategy must be present in block 0"). The
+          // bounds check catches a fragment outside the pool; this catches one
+          // inside it that belongs somewhere else.
+          const lastPiece = this.#lastPieceByRead.get(message.id);
+          if (lastPiece !== undefined && message.pieceIndex !== lastPiece && message.pieceIndex !== lastPiece + 1) {
+            logger.warn(
+              `torrent-worker: read ${message.id} jumped from piece ${lastPiece} to ` +
+              `${message.pieceIndex} (${message.length}B at pool offset ${message.offset}) — ` +
+              "the consumer is being handed the file out of order"
+            );
+          }
+          this.#lastPieceByRead.set(message.id, message.pieceIndex);
           const view = new Uint8Array(pool, message.offset, message.length);
 
           const reader = this.#fragmentReaders.get(message.id);
@@ -132,6 +159,7 @@ export class TorrentWorkerClient {
           break;
         }
         case Event.READ_END:
+          this.#lastPieceByRead.delete(message.id);
           this.#reads.get(message.id)?.close();
           this.#reads.delete(message.id);
           this.#fragmentReaders.get(message.id)?.close();

@@ -85,6 +85,25 @@ export class TorrentWorkerClient {
             this.#worker.postMessage({ type: Event.FRAGMENT_DONE, id: message.id });
             break;
           }
+          // The pool is a growable SharedArrayBuffer shared with the worker
+          // thread, and an offset is only meaningful against the buffer of the
+          // store that produced it. When the two disagree — a second store
+          // opened for the same torrent, a slot handed out before the buffer
+          // grew — this threw `RangeError: Invalid typed array length`, which
+          // the process-wide handler swallowed. Reads then stopped answering
+          // for good: field 2026-08-09, one segment was held for a minute
+          // eight times running while the audio decoder was fed cut-up frames
+          // and reported them as a broken AC-3 stream. A read that cannot be
+          // satisfied must end short and say so, not take the whole source
+          // down silently.
+          if (message.offset + message.length > pool.byteLength) {
+            logger.warn(
+              `torrent-worker: fragment ${message.offset}+${message.length} lies outside ` +
+              `its pool of ${pool.byteLength}B (read ${message.id}) — ending the read short`
+            );
+            this.#worker.postMessage({ type: Event.FRAGMENT_DONE, id: message.id });
+            break;
+          }
           const view = new Uint8Array(pool, message.offset, message.length);
 
           const reader = this.#fragmentReaders.get(message.id);

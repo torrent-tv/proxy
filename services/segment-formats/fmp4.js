@@ -250,6 +250,28 @@ export const fmp4Format = {
     return countFragmentTracks(bytes) >= expected.size;
   },
 
+  /**
+   * How many tracks an init segment declares.
+   *
+   * The init is extracted from the first self-contained piece and then cached
+   * for the WHOLE session — the player fetches `#EXT-X-MAP` once and never
+   * again. So an init taken from a piece written before the video track was
+   * muxed describes audio alone, and the browser then has no video source
+   * buffer for the rest of the session however much video arrives afterwards.
+   * Measured 2026-08-10: sixty-five seconds of playing sound with
+   * `videoWidth=0`, `totalVideoFrames=0` and `readyState=4` — an element
+   * perfectly happy, with no picture in it.
+   *
+   * @param {Buffer} initBytes
+   * @returns {number}
+   */
+  countInitTracks(initBytes) {
+    if (!initBytes || initBytes.length === 0) {
+      return 0;
+    }
+    return readTrackTimescales(initBytes).size;
+  },
+
   prepareSegmentBytes(bytes, { startSeconds, initBytes }) {
     if (!initBytes || initBytes.length === 0) {
       // No init cached yet — nothing to read timescales from. The player always

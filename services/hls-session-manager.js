@@ -1528,6 +1528,13 @@ export class HlsSessionManager {
     if (typeof session.segmentFormat.extractInit !== "function") {
       return null;
     }
+    // Both streams are mapped (`-map 0:v:0? -map 0:a:0?`), so a complete header
+    // declares two tracks. A source genuinely missing one is legitimate, and
+    // must not be left without an init for ever — hence the fallback below to
+    // the richest header found rather than a hard requirement.
+    const expectedTracks = 2;
+    let best = null;
+    let bestTracks = 0;
     let names;
     try {
       names = (this.#runDirs(session).flatMap((dir) => {
@@ -1552,7 +1559,17 @@ export class HlsSessionManager {
         // Being written right now — try the next one.
       }
     }
-    return null;
+    if (best !== null) {
+      // Nothing carried the full set. The source is probably missing a stream;
+      // serving the richest header found is right, and saying so makes the
+      // other possibility — every piece so far written before the video was
+      // muxed — visible rather than silent.
+      logger.warn(
+        `transcode ${session.id} no piece declared ${expectedTracks} tracks; ` +
+        `serving an init with ${bestTracks}`
+      );
+    }
+    return best;
   }
 
   /**

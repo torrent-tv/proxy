@@ -265,6 +265,22 @@ export const fmp4Format = {
    * @param {Buffer} initBytes
    * @returns {number}
    */
+  /**
+   * How many distinct tracks this piece's own fragments carry.
+   *
+   * Needs no knowledge of the source: whatever a produced piece contains, it
+   * contains. Comparing the richest piece against a candidate header is what
+   * lets an init be judged without assuming how many tracks a file "should"
+   * have — a film with no soundtrack and a file with two audio tracks are both
+   * answered correctly, and neither is guessed at.
+   *
+   * @param {Buffer} bytes
+   * @returns {number}
+   */
+  countSegmentTracks(bytes) {
+    return countFragmentTracks(bytes);
+  },
+
   countInitTracks(initBytes) {
     if (!initBytes || initBytes.length === 0) {
       return 0;

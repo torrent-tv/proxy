@@ -226,3 +226,37 @@ test("a run's FIRST segment is served once the encoder has passed it, without wa
     "the encoder is past this segment's end, so it is finished — the absence of a next one says nothing"
   );
 });
+
+test("a segment is found in the run directory that produced it, newest run first", async (t) => {
+  const { manager, session, dirPath } = await managerWithReadySegment();
+  t.after(async () => {
+    await manager.disposeAll();
+    await rm(dirPath, { recursive: true, force: true });
+  });
+  // Runs write into a directory each — that is what lets a restart begin
+  // without waiting for its predecessor to die, which measured 0.7-1.3 s of
+  // every seek. A later run's answer supersedes an earlier one's, because the
+  // older file may be the truncated output of a run that was killed mid-write.
+  const { mkdir } = await import("node:fs/promises");
+  const piece = selfContainedPiece(SEGMENT_START_SECONDS);
+  await mkdir(path.join(dirPath, "run-1"), { recursive: true });
+  await mkdir(path.join(dirPath, "run-2"), { recursive: true });
+  await writeFile(path.join(dirPath, "run-1", "segment-00000.mp4"), Buffer.alloc(8));
+  await writeFile(path.join(dirPath, "run-2", "segment-00000.mp4"), piece);
+  await writeFile(path.join(dirPath, "run-2", "segment-00001.mp4"), piece);
+  await rm(path.join(dirPath, "segment-00000.mp4"));
+  await rm(path.join(dirPath, "segment-00001.mp4"));
+  session.encodeStartIndex = 0;
+
+  const result = await manager.getFileStream(SESSION_ID, "segment-00000.mp4", { requestSeq: 1 });
+
+  assert.equal(result.kind, "file", "a segment produced by a run must be found in that run's directory");
+  const chunks = [];
+  for await (const chunk of result.stream) {
+    chunks.push(chunk);
+  }
+  assert.ok(
+    Buffer.concat(chunks).length > 8,
+    "the newest run's output must win — the older file here is the 8-byte stub a killed run leaves"
+  );
+});

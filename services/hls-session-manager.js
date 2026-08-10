@@ -2248,6 +2248,11 @@ export class HlsSessionManager {
    * @returns {Promise<void>}
    */
   async #startEncodeRun(session, startIndex) {
+    // Where a restart's seconds go. A seek costs 5-8 s in the field and the
+    // recorded reason — waiting for the previous ffmpeg to exit, measured at
+    // 0.54-1.47 s — does not account for it. Before rebuilding the hottest path
+    // in the proxy on a guess, make each stage state its own cost.
+    const restartEnteredAt = Date.now();
     const generation = ++session.encodeRunGeneration;
     const previousFfmpeg = session.ffmpeg;
     // A suspended process does not act on SIGTERM until it is continued, so the
@@ -2259,7 +2264,11 @@ export class HlsSessionManager {
       } catch {
         // Best effort.
       }
+      const termSentAt = Date.now();
       await waitForChildExit(previousFfmpeg, ENCODE_RUN_TERMINATE_GRACE_MS);
+      logger.info(
+        `transcode ${session.id} restart: previous run took ${Date.now() - termSentAt}ms to exit after SIGTERM`
+      );
       if (!hasChildExited(previousFfmpeg)) {
         try {
           previousFfmpeg.kill("SIGKILL");
@@ -2492,6 +2501,7 @@ export class HlsSessionManager {
 
     logger.info(
       `transcode ${session.id} ${session.runLabel} encode-run from segment #${safeIndex} ` +
+      `(+${Date.now() - restartEnteredAt}ms since the restart was asked for) ` +
         `(${formatSeconds(startSeconds)}) "${session.fileName}"`
     );
 

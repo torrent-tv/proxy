@@ -203,3 +203,26 @@ test("a fault while preparing an existing segment is named, not turned into a wa
   );
   assert.match(result.message, /readSelfContainedStartSeconds is not defined/);
 });
+
+test("a run's FIRST segment is served once the encoder has passed it, without waiting for a next one", async (t) => {
+  const { manager, session, dirPath } = await managerWithReadySegment();
+  t.after(async () => {
+    await manager.disposeAll();
+    await rm(dirPath, { recursive: true, force: true });
+  });
+  // The shape a resume takes: a run begun mid-file, so its first segment has no
+  // successor and nothing is producing one. Waiting for that successor is what
+  // held #317 for 46 s and then answered 404 to a browser that had given up.
+  await rm(path.join(dirPath, "segment-00001.mp4"));
+  session.encodeStartIndex = 0;
+  session.ffmpeg = { killed: true, kill() {} };
+  session.progress = { processedSeconds: SEGMENT_START_SECONDS + 10 };
+
+  const result = await manager.getFileStream(SESSION_ID, "segment-00000.mp4", { requestSeq: 1 });
+
+  assert.equal(
+    result.kind,
+    "file",
+    "the encoder is past this segment's end, so it is finished — the absence of a next one says nothing"
+  );
+});

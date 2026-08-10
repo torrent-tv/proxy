@@ -3404,18 +3404,34 @@ export class HlsSessionManager {
         const isLast = index >= Math.max(0, (session.segmentBoundaries?.length ?? 1) - 2);
         if (!isLast && session.ffmpeg) {
           const nextPath = path.join(session.dirPath, session.segmentFormat.segmentFileName(index + 1));
+          // The FIRST segment of a run cannot be judged by "the next one
+          // exists": nothing is producing a next one yet, because the run has
+          // only just begun here. Waiting for it holds precisely the segment a
+          // resume depends on — measured 2026-08-09, #807 held while it lay on
+          // disk, and in August the same shape held #317 for 46 s and then
+          // answered 404 to a browser that had given up.
+          //
+          // What "finished" means for it is that the encoder has moved PAST the
+          // end of its span. ffmpeg reports the output timestamp of its last
+          // encoded frame, so a run whose position is beyond this segment's end
+          // has necessarily closed it.
+          const isRunStart = index === (session.encodeStartIndex ?? -1);
+          const encoderPosition = Number(session.progress?.processedSeconds);
+          const segmentEnd = this.#segmentStartTime(session, index + 1);
+          if (isRunStart && Number.isFinite(encoderPosition) && encoderPosition > segmentEnd) {
+            // Past its end — it is complete, whatever the directory says about
+            // what comes next.
+          } else {
           try {
             await access(nextPath);
           } catch {
-            // The rule is "finished once the NEXT one has been started". For the
-            // FIRST segment of a run begun mid-file this is the one that decides
-            // whether a resume plays at all, so it must say so out loud.
             this.#explainHold(
               session,
               fileName,
               `it exists, but the next segment (#${index + 1}) has not been started yet`
             );
             return { kind: "warming-up" };
+          }
           }
         }
       }

@@ -1,5 +1,9 @@
 ## 2.9.127
 
+- **Fix**: A read that ends because the reader left is no longer reported as a failure. ffmpeg is terminated on every seek and whenever the look-ahead bound suspends it, and its connection closes with it, so `write ECANCELED` on the stream route is the ordinary end of a read — yet it was logged as a warning several times a minute through healthy playback. On 2026-08-09 it was read as the cause of broken audio, which it was not. The line now says whose end it was: a reader that disconnected is recorded at debug and says so, anything else stays a warning.
+
+## 2.9.127
+
 - **New**: A read that hands the file over out of order now says so. A sequential read walks forwards, so each fragment either continues the piece before it or moves to the very next one; anything else means the bytes reaching the decoder are not the file's bytes in order. Measured 2026-08-09 on a 1080p file with an AC-3 track: the encoder ran at 7.7-9.3x, produced its first segment in 9.1 s, reached 00:02:19 of 02:29:58 — and the AC-3 decoder reported "new coupling strategy must be present in block 0", "exponent 26 is out-of-range" and "invalid coupling range" while the piece store showed no spills and 100% of reads served from memory. Video was being COPIED in the same run, so the viewer lost the picture and the sound together: one fault, not two. The bounds check added in 2.9.126 catches a fragment outside the shared pool and stayed silent throughout, so the bytes came from the pool legitimately and belonged somewhere else. This names which piece arrived where.
 
 ## 2.9.126

@@ -213,10 +213,23 @@ export async function handleStreamGet(req, reply, { sourceRegistry, torrentPool 
       // But say why: swallowing this made the route close connections with no
       // status and no trace, which from the client looks like the proxy died
       // and from the log looks like nothing happened at all.
-      logger.warn(
-        `stream: read of "${file.name}" bytes ${start}-${end} failed after ` +
-        `${sent} of ${contentLength} bytes: ${error instanceof Error ? error.message : String(error)}`
-      );
+      // WHOSE end it was. A write cancelled because the consumer went away is
+      // the ordinary end of a read: ffmpeg is terminated on every seek and
+      // whenever the look-ahead bound suspends it, and its connection closes
+      // with it. Reported as a failure, that line fired several times a minute
+      // during healthy playback — and on 2026-08-09 it was read as the cause of
+      // broken audio, which it was not. A read that ends because the reader
+      // left is not a fault and must not be dressed as one; anything else is.
+      const message = error instanceof Error ? error.message : String(error);
+      const consumerLeft = req.raw.aborted || reply.raw.destroyed || /ECANCELED|EPIPE|ERR_STREAM_DESTROYED/.test(message);
+      const line =
+        `stream: read of "${file.name}" bytes ${start}-${end} ended after ` +
+        `${sent} of ${contentLength} bytes: ${message}`;
+      if (consumerLeft) {
+        logger.debug(`${line} (the reader disconnected — expected on an encoder restart)`);
+      } else {
+        logger.warn(line);
+      }
       reply.raw.destroy();
     } finally {
       releaseFile();

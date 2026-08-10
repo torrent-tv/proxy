@@ -1,4 +1,4 @@
-## 2.9.132
+## 2.9.135
 
 - **Fix**: A session no longer plays sound with no picture at all. The init segment — the header that tells the browser which tracks exist — is lifted out of the first self-contained piece and then cached for the WHOLE session, because the player fetches `#EXT-X-MAP` once and never again. A piece written before the video track had been muxed declares audio alone, and the browser then has no video source buffer for the rest of the session however much video arrives afterwards. Measured 2026-08-10 from the browser's own counters: sixty-five seconds of playing sound with `videoWidth=0`, `totalVideoFrames=0` and `readyState=4` — an element perfectly satisfied, with no picture in it. A header short of a track is now passed over and the next piece tried; if no piece carries the full set the richest one found is served and the shortfall is logged, so a source that genuinely lacks a stream still plays while the other possibility stays visible.
 

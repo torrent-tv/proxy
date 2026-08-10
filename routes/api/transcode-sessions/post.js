@@ -111,7 +111,12 @@ export async function handleApiTranscodeSessionsPost(req, reply, { hlsSessionMan
     });
     return reply.send({
       sessionId: session.id,
-      playlistPath: `/transcode/${session.id}/index.m3u8`
+      playlistPath: `/transcode/${session.id}/index.m3u8`,
+      // What this session's output will carry, stated rather than left to be
+      // discovered. The browser checks what it actually got against this: a
+      // track that never arrives is otherwise noticed only by its absence,
+      // minutes later, as a black picture with working sound.
+      tracks: hlsSessionManager.declaredTracks(session)
     });
   } catch (error) {
     if (error instanceof Error && error.code === "TRANSCODE_DISABLED") {

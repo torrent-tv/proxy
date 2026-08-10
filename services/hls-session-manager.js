@@ -1524,6 +1524,37 @@ export class HlsSessionManager {
    * @param {HlsSession} session
    * @returns {Promise<Buffer | null>}
    */
+  /**
+   * The track set this session's output will carry — what the proxy DECLARES,
+   * and the one answer both sides must agree on.
+   *
+   * The source may hold any number of tracks: several dubs, subtitles, even a
+   * cover-art video stream. The output does not inherit that list — the command
+   * maps at most one video and at most one audio, each optional, and subtitles
+   * never enter the HLS output at all (they are served separately as WebVTT).
+   * So this is not an inference about the file; it is the proxy stating what it
+   * chose to produce.
+   *
+   * Used in two places, and that is the point: the init segment is checked
+   * against it here, and it is sent to the browser so the browser can check
+   * what it actually received against the same statement. Without the second
+   * check a missing track is only noticed by its absence, minutes later, as a
+   * black picture with working sound.
+   *
+   * @param {HlsSession} session
+   * @returns {{ video: boolean, audio: boolean }}
+   */
+  declaredTracks(session) {
+    const probed = this.getCachedMediaInfo?.({
+      sourceKey: session.sourceKey,
+      fileIndex: session.fileIndex
+    }) ?? null;
+    return {
+      video: Boolean(probed?.videoCodec),
+      audio: Boolean(probed?.audioCodec)
+    };
+  }
+
   async #initFromFirstSegment(session) {
     if (typeof session.segmentFormat.extractInit !== "function") {
       return null;
@@ -1542,15 +1573,10 @@ export class HlsSessionManager {
     // the header this exists to reject. The pieces are still consulted, but
     // only as a floor: a piece carrying more than the probe led us to expect is
     // evidence, and evidence outranks the probe.
-    const probed = this.getCachedMediaInfo?.({
-      sourceKey: session.sourceKey,
-      fileIndex: session.fileIndex
-    }) ?? null;
-    let expectedTracks = probed
-      ? (probed.videoCodec ? 1 : 0) + (probed.audioCodec ? 1 : 0)
-      : 0;
+    const declared = this.declaredTracks(session);
+    let expectedTracks = (declared.video ? 1 : 0) + (declared.audio ? 1 : 0);
     if (expectedTracks === 0) {
-      // No probe to consult. Fall back to the evidence, with its known lag.
+      // Nothing to consult. Fall back to the evidence, with its known lag.
       expectedTracks = 1;
     }
     let best = null;

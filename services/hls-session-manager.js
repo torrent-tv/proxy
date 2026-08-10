@@ -1528,13 +1528,35 @@ export class HlsSessionManager {
     if (typeof session.segmentFormat.extractInit !== "function") {
       return null;
     }
-    // Both streams are mapped (`-map 0:v:0? -map 0:a:0?`), so a complete header
-    // declares two tracks. A source genuinely missing one is legitimate, and
-    // must not be left without an init for ever — hence the fallback below to
-    // the richest header found rather than a hard requirement.
-    const expectedTracks = 2;
+    // How many tracks a complete header must declare is ANSWERED, not assumed.
+    //
+    // The probe already knows the source's stream list, and the output maps at
+    // most one of each (`-map 0:v:0? -map 0:a:0?`), so the count follows from
+    // what the source actually has. A film with no soundtrack expects one; an
+    // ordinary file expects two; neither is a convention.
+    //
+    // Deriving it from the produced pieces instead — the first version of this
+    // — reads correctly only once a piece carrying every track exists, and the
+    // whole point is the moment BEFORE that: early pieces written before the
+    // video was muxed would set the requirement to one and wave through exactly
+    // the header this exists to reject. The pieces are still consulted, but
+    // only as a floor: a piece carrying more than the probe led us to expect is
+    // evidence, and evidence outranks the probe.
+    const probed = this.getCachedMediaInfo?.({
+      sourceKey: session.sourceKey,
+      fileIndex: session.fileIndex
+    }) ?? null;
+    let expectedTracks = probed
+      ? (probed.videoCodec ? 1 : 0) + (probed.audioCodec ? 1 : 0)
+      : 0;
+    if (expectedTracks === 0) {
+      // No probe to consult. Fall back to the evidence, with its known lag.
+      expectedTracks = 1;
+    }
     let best = null;
     let bestTracks = 0;
+    /** @type {Map<string, Buffer>} Pieces read once and used for both passes. */
+    const pieces = new Map();
     let names;
     try {
       names = (this.#runDirs(session).flatMap((dir) => {
@@ -1545,13 +1567,32 @@ export class HlsSessionManager {
     } catch {
       return null;
     }
+    // First pass: what do the produced pieces actually carry? The answer is the
+    // requirement — no assumption about the source is involved.
+    if (typeof session.segmentFormat.countSegmentTracks === "function") {
+      for (const name of names) {
+        try {
+          const found = await this.#findProducedFile(session, name);
+          if (!found) {
+            continue;
+          }
+          const bytes = await readFile(found);
+          pieces.set(name, bytes);
+          expectedTracks = Math.max(expectedTracks, session.segmentFormat.countSegmentTracks(bytes));
+        } catch {
+          // Being written right now — it says nothing about the others.
+        }
+      }
+    }
+
     for (const name of names) {
       try {
-        const found = await this.#findProducedFile(session, name);
+        const cached = pieces.get(name);
+        const found = cached ? name : await this.#findProducedFile(session, name);
         if (!found) {
           continue;
         }
-        const init = session.segmentFormat.extractInit(await readFile(found));
+        const init = session.segmentFormat.extractInit(cached ?? await readFile(found));
         if (init && init.length > 0) {
           return init;
         }

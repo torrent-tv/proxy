@@ -2273,7 +2273,16 @@ export class HlsSessionManager {
     session.runSerial = (session.runSerial ?? 0) + 1;
     session.runDirPath = path.join(session.dirPath, `run-${session.runSerial}`);
     await mkdir(session.runDirPath, { recursive: true });
-    const wantedAt = session.firstWantedAt?.get(startIndex);
+    // The restart backs off a segment or two from what was asked for, so the
+    // request that prompted it is recorded under a HIGHER index than the run
+    // starts at. Looking it up by the start index alone found nothing and the
+    // line never printed once.
+    let wantedAt = null;
+    for (const [index, at] of session.firstWantedAt ?? []) {
+      if (index >= startIndex && (wantedAt === null || at < wantedAt)) {
+        wantedAt = at;
+      }
+    }
     if (typeof wantedAt === "number") {
       logger.info(
         `transcode ${session.id} restart for #${startIndex} decided ` +

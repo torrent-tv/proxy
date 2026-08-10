@@ -1,4 +1,4 @@
-## 2.9.127
+## 2.9.128
 
 - **Fix**: A read that ends because the reader left is no longer reported as a failure. ffmpeg is terminated on every seek and whenever the look-ahead bound suspends it, and its connection closes with it, so `write ECANCELED` on the stream route is the ordinary end of a read — yet it was logged as a warning several times a minute through healthy playback. On 2026-08-09 it was read as the cause of broken audio, which it was not. The line now says whose end it was: a reader that disconnected is recorded at debug and says so, anything else stays a warning.
 

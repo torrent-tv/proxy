@@ -1,3 +1,7 @@
+## 2.9.134
+
+- **Fix**: The line reporting how long a segment waited before anyone decided to restart for it now prints. A restart backs off a segment or two from what was asked for, so the request that prompted it is recorded under a higher index than the run starts at; looking it up by the start index alone found nothing, and the instrument added in 2.9.132 never said a word. It now takes the earliest request at or above the index the run begins from.
+
 ## 2.9.133
 
 - **Fix**: A restarted encoder no longer waits for its predecessor to die — every seek is about a second shorter. Runs shared one output directory, so two of them writing `segment-00042.mp4` at once would produce a file that is neither; the only defence was to kill the old run and block until it was gone. Measured 2.9.132 across four seeks: 712, 852, 882 and 1297 ms, against 11-15 ms of everything else a restart does. So that wait WAS the restart. Each run now writes into a directory of its own, which makes the collision impossible, so the new run starts at once and the old one is left to die in the background. Serving a segment searches the run directories newest-first, because a later run's answer supersedes an earlier one's — the older file may be the truncated output of a run that was killed mid-write, which is precisely what sharing a directory used to hide. Covered by a test that lays out two runs and insists the newer one wins.

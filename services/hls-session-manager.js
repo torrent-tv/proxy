@@ -3407,6 +3407,14 @@ export class HlsSessionManager {
           try {
             await access(nextPath);
           } catch {
+            // The rule is "finished once the NEXT one has been started". For the
+            // FIRST segment of a run begun mid-file this is the one that decides
+            // whether a resume plays at all, so it must say so out loud.
+            this.#explainHold(
+              session,
+              fileName,
+              `it exists, but the next segment (#${index + 1}) has not been started yet`
+            );
             return { kind: "warming-up" };
           }
         }
@@ -3559,7 +3567,41 @@ export class HlsSessionManager {
    * @param {{ requestSeq?: number }} options
    * @returns {{ kind: "warming-up" }}
    */
+  /**
+   * Say WHY a segment is being held, at most once every few seconds per file.
+   *
+   * A hold is silent today, and that silence has now cost three releases: a
+   * file that exists, a route that answers "not yet", and nothing anywhere
+   * saying which of the several reasons applied. Measured 2026-08-09: a run
+   * begun mid-file at segment #317 produced two minutes of video from #317
+   * upwards at 10.5x, and #317 itself was held 46 s and then answered 404 once
+   * the browser had given up — with not one line about the cause.
+   *
+   * @param {HlsSession} session
+   * @param {string} fileName
+   * @param {string} reason
+   * @returns {void}
+   */
+  #explainHold(session, fileName, reason) {
+    const now = Date.now();
+    session.holdExplainedAt ??= new Map();
+    const last = session.holdExplainedAt.get(fileName) ?? 0;
+    if (now - last < 5_000) {
+      return;
+    }
+    session.holdExplainedAt.set(fileName, now);
+    const index = session.segmentFormat.segmentIndexFromName(fileName);
+    logger.warn(
+      `transcode ${session.id} holding ${fileName}: ${reason} ` +
+      `(run from #${session.encodeStartIndex ?? "?"}, viewer at #${session.lastRequestedSegment ?? "?"}, ` +
+      `encoder ${session.ffmpeg ? "alive" : "stopped"}, index #${index})`
+    );
+  }
+
   #holdForProduction(session, fileName, isPlaylist, options) {
+    if (!isPlaylist) {
+      this.#explainHold(session, fileName, "the file is not on disk");
+    }
     // A segment was requested that ffmpeg has not produced yet.  Decide whether
     // to wait for the current encode run to reach it or to restart the encoder
     // at this position (server-side seeking).  The caller long-polls.

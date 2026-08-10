@@ -1,3 +1,7 @@
+## 2.9.129
+
+- **New**: A held segment says why it is held. A hold was silent, and that silence has now cost three releases: a file that exists, a route answering "not yet", and nothing saying which of the several reasons applied. Measured 2026-08-09 — a run begun mid-file at segment #317 produced two minutes of video from #317 upwards at 10.5x while #317 itself was held for 46 116 ms and then answered 404, once the browser had already given up. At most once every five seconds per file it now names the reason (not on disk, or present but the next segment has not been started), together with the index the run began at, where the viewer is, and whether the encoder is alive. The readiness rule — a segment counts as finished once the NEXT one exists — is the suspect for a resume, because for the first segment of a mid-file run that rule decides whether playback begins at all.
+
 ## 2.9.128
 
 - **Fix**: A read that ends because the reader left is no longer reported as a failure. ffmpeg is terminated on every seek and whenever the look-ahead bound suspends it, and its connection closes with it, so `write ECANCELED` on the stream route is the ordinary end of a read — yet it was logged as a warning several times a minute through healthy playback. On 2026-08-09 it was read as the cause of broken audio, which it was not. The line now says whose end it was: a reader that disconnected is recorded at debug and says so, anything else stays a warning.

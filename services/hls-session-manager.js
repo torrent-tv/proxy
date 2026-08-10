@@ -1530,7 +1530,9 @@ export class HlsSessionManager {
     }
     let names;
     try {
-      names = (await readdir(session.dirPath))
+      names = (this.#runDirs(session).flatMap((dir) => {
+        try { return readdirSync(dir, { withFileTypes: false }); } catch { return []; }
+      }))
         .filter((name) => session.segmentFormat.isSegmentFileName(name))
         .sort();
     } catch {
@@ -1538,7 +1540,11 @@ export class HlsSessionManager {
     }
     for (const name of names) {
       try {
-        const init = session.segmentFormat.extractInit(await readFile(path.join(session.dirPath, name)));
+        const found = await this.#findProducedFile(session, name);
+        if (!found) {
+          continue;
+        }
+        const init = session.segmentFormat.extractInit(await readFile(found));
         if (init && init.length > 0) {
           return init;
         }
@@ -1764,7 +1770,9 @@ export class HlsSessionManager {
   async #observedStreamMbps(session) {
     let names;
     try {
-      names = await readdir(session.dirPath);
+      names = this.#runDirs(session).flatMap((dir) => {
+        try { return readdirSync(dir, { withFileTypes: false }); } catch { return []; }
+      });
     } catch {
       return null;
     }
@@ -1783,7 +1791,11 @@ export class HlsSessionManager {
     let bytes = 0;
     try {
       for (const index of completed) {
-        const st = await stat(path.join(session.dirPath, session.segmentFormat.segmentFileName(index)));
+        const segmentPath = await this.#findProducedFile(session, session.segmentFormat.segmentFileName(index));
+        if (!segmentPath) {
+          break;
+        }
+        const st = await stat(segmentPath);
         bytes += st.size;
       }
     } catch {
@@ -1999,7 +2011,9 @@ export class HlsSessionManager {
     let present;
     try {
       present = new Set();
-      for (const name of readdirSync(session.dirPath, { withFileTypes: false })) {
+      for (const name of this.#runDirs(session).flatMap((dir) => {
+        try { return readdirSync(dir, { withFileTypes: false }); } catch { return []; }
+      })) {
         if (!this.segmentFormat.isSegmentFileName(name)) {
           continue;
         }
@@ -2253,6 +2267,19 @@ export class HlsSessionManager {
     // 0.54-1.47 s — does not account for it. Before rebuilding the hottest path
     // in the proxy on a guess, make each stage state its own cost.
     const restartEnteredAt = Date.now();
+    // One directory per run. Two runs writing the same segment name at once
+    // produce a file that is neither, which is the only reason a restart ever
+    // had to wait for its predecessor to die.
+    session.runSerial = (session.runSerial ?? 0) + 1;
+    session.runDirPath = path.join(session.dirPath, `run-${session.runSerial}`);
+    await mkdir(session.runDirPath, { recursive: true });
+    const wantedAt = session.firstWantedAt?.get(startIndex);
+    if (typeof wantedAt === "number") {
+      logger.info(
+        `transcode ${session.id} restart for #${startIndex} decided ` +
+        `${restartEnteredAt - wantedAt}ms after it was first asked for`
+      );
+    }
     const generation = ++session.encodeRunGeneration;
     const previousFfmpeg = session.ffmpeg;
     // A suspended process does not act on SIGTERM until it is continued, so the
@@ -2264,11 +2291,16 @@ export class HlsSessionManager {
       } catch {
         // Best effort.
       }
+      // NOT awaited. The previous run has its own directory, so it cannot
+      // corrupt this one's output by still writing; letting it die in the
+      // background removes 0.7-1.3 s from every seek (measured 2.9.132, where
+      // that wait was essentially the whole cost of a restart).
       const termSentAt = Date.now();
-      await waitForChildExit(previousFfmpeg, ENCODE_RUN_TERMINATE_GRACE_MS);
-      logger.info(
-        `transcode ${session.id} restart: previous run took ${Date.now() - termSentAt}ms to exit after SIGTERM`
-      );
+      void waitForChildExit(previousFfmpeg, ENCODE_RUN_TERMINATE_GRACE_MS).then(() => {
+        logger.info(
+          `transcode ${session.id} restart: previous run took ${Date.now() - termSentAt}ms to exit after SIGTERM`
+        );
+      });
       if (!hasChildExited(previousFfmpeg)) {
         try {
           previousFfmpeg.kill("SIGKILL");
@@ -2477,7 +2509,7 @@ export class HlsSessionManager {
     logger.info(`transcode ${session.id} ${runLabel} ffmpeg ${describeFfmpegArgs(args)}`);
 
     const ffmpeg = spawn(this.ffmpegBin, args, {
-      cwd: session.dirPath,
+      cwd: session.runDirPath ?? session.dirPath,
       stdio: ["ignore", "pipe", "pipe"]
     });
     session.ffmpeg = ffmpeg;
@@ -2768,6 +2800,14 @@ export class HlsSessionManager {
    * @returns {void}
    */
   #ensureEncodingFor(session, index, requestSeq = Number.MAX_SAFE_INTEGER) {
+    // When this segment was FIRST asked for and nobody was producing it. The
+    // restart itself costs 0.7-1.3 s (measured 2.9.132), while a seek costs
+    // 5-8 s end to end — so most of the wait happens before a restart is even
+    // decided on, and that is what this records.
+    session.firstWantedAt ??= new Map();
+    if (!session.firstWantedAt.has(index)) {
+      session.firstWantedAt.set(index, Date.now());
+    }
     if (!session || session.state === "disposed" || index < 0) {
       return;
     }
@@ -3140,7 +3180,9 @@ export class HlsSessionManager {
    */
   #latestProducedSegment(session) {
     let highest = null;
-    for (const name of readdirSync(session.dirPath, { withFileTypes: false })) {
+    for (const name of this.#runDirs(session).flatMap((dir) => {
+      try { return readdirSync(dir, { withFileTypes: false }); } catch { return []; }
+    })) {
       if (!this.segmentFormat.isSegmentFileName(name)) {
         continue;
       }
@@ -3343,7 +3385,7 @@ export class HlsSessionManager {
         // piece, so the first one to exist supplies it.
         const bytes = session.usesExplicitCuts
           ? await this.#initFromFirstSegment(session)
-          : await readFile(path.join(session.dirPath, initFileName));
+          : await readFile((await this.#findProducedFile(session, initFileName)) ?? path.join(session.dirPath, initFileName));
         if (!bytes || bytes.length === 0) {
           return { kind: "warming-up" };
         }
@@ -3371,7 +3413,7 @@ export class HlsSessionManager {
       }
     }
 
-    const filePath = path.join(session.dirPath, fileName);
+    const filePath = (await this.#findProducedFile(session, fileName)) ?? path.join(session.dirPath, fileName);
     const isPlaylist = fileName === PLAYLIST_FILE_NAME;
     if (!isPlaylist) {
       // Where the viewer actually is. Recorded for every segment request,
@@ -3413,7 +3455,8 @@ export class HlsSessionManager {
         const index = session.segmentFormat.segmentIndexFromName(fileName);
         const isLast = index >= Math.max(0, (session.segmentBoundaries?.length ?? 1) - 2);
         if (!isLast && session.ffmpeg) {
-          const nextPath = path.join(session.dirPath, session.segmentFormat.segmentFileName(index + 1));
+          const nextName = session.segmentFormat.segmentFileName(index + 1);
+          const nextPath = (await this.#findProducedFile(session, nextName)) ?? path.join(session.dirPath, nextName);
           // The FIRST segment of a run cannot be judged by "the next one
           // exists": nothing is producing a next one yet, because the run has
           // only just begun here. Waiting for it holds precisely the segment a
@@ -3622,6 +3665,55 @@ export class HlsSessionManager {
       `(run from #${session.encodeStartIndex ?? "?"}, viewer at #${session.lastRequestedSegment ?? "?"}, ` +
       `encoder ${session.ffmpeg ? "alive" : "stopped"}, index #${index})`
     );
+  }
+
+  /**
+   * The directories runs have written into, newest first.
+   *
+   * Runs used to share one directory, which is why a restart had to wait for
+   * the previous ffmpeg to die: two processes writing `segment-00042.mp4` at
+   * once produce a file that is neither. Measured 2.9.132, that wait was
+   * 0.7-1.3 s of every seek and essentially the whole cost of a restart.
+   * Given a directory each they cannot collide, so the new run starts at once
+   * and the old one is left to die in the background.
+   *
+   * Newest first because a later run's answer for a segment supersedes an
+   * earlier one's: the older file may be the truncated output of a run that was
+   * killed mid-write, which is exactly what sharing a directory used to hide.
+   *
+   * @param {HlsSession} session
+   * @returns {string[]}
+   */
+  #runDirs(session) {
+    try {
+      return readdirSync(session.dirPath, { withFileTypes: true })
+        .filter((entry) => entry.isDirectory() && entry.name.startsWith("run-"))
+        .map((entry) => entry.name)
+        .sort((a, b) => Number(b.slice(4)) - Number(a.slice(4)))
+        .map((name) => path.join(session.dirPath, name));
+    } catch {
+      return [];
+    }
+  }
+
+  /**
+   * Where a produced file actually is, or null when no run has written it.
+   *
+   * @param {HlsSession} session
+   * @param {string} fileName
+   * @returns {Promise<string | null>}
+   */
+  async #findProducedFile(session, fileName) {
+    for (const dir of this.#runDirs(session)) {
+      const candidate = path.join(dir, fileName);
+      try {
+        await access(candidate);
+        return candidate;
+      } catch {
+        // Not this run's; try an older one.
+      }
+    }
+    return null;
   }
 
   #holdForProduction(session, fileName, isPlaylist, options) {

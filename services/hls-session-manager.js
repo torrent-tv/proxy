@@ -3890,10 +3890,21 @@ export class HlsSessionManager {
     }
     session.holdExplainedAt.set(fileName, now);
     const index = session.segmentFormat.segmentIndexFromName(fileName);
+    // What the encoder has actually DONE since it restarted. "Alive at the right
+    // index" was as far as the old line went, and it left the two possible
+    // causes indistinguishable: an encoder waiting for torrent pieces looks
+    // exactly like one that is encoding and simply has not finished. The
+    // difference is whether its position has moved at all.
+    const runStartSeconds = this.#segmentStartTime(session, session.encodeStartIndex ?? 0);
+    const position = Number(session.progress?.processedSeconds);
+    const produced = Number.isFinite(position) ? position - runStartSeconds : null;
+    const speed = session.progress?.speed ?? "n/a";
     logger.warn(
       `transcode ${session.id} holding ${fileName}: ${reason} ` +
       `(run from #${session.encodeStartIndex ?? "?"}, viewer at #${session.lastRequestedSegment ?? "?"}, ` +
-      `encoder ${session.ffmpeg ? "alive" : "stopped"}, index #${index})`
+      `encoder ${session.ffmpeg ? "alive" : "stopped"}, index #${index}, ` +
+      `produced ${produced === null ? "nothing yet — no position reported" : `${produced.toFixed(1)}s`} ` +
+      `at ${speed}${produced !== null && produced <= 0 ? " — the encoder has not moved, so it is waiting on its input" : ""})`
     );
   }
 

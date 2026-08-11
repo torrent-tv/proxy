@@ -1619,8 +1619,25 @@ export class HlsSessionManager {
           continue;
         }
         const init = session.segmentFormat.extractInit(cached ?? await readFile(found));
-        if (init && init.length > 0) {
+        if (!init || init.length === 0) {
+          continue;
+        }
+        // The requirement computed above is APPLIED here. It was computed and
+        // then ignored: this loop returned the first header it found, so a
+        // piece written before the video was muxed supplied an audio-only
+        // header — and that header is cached for the session's whole life,
+        // because the player fetches `#EXT-X-MAP` once. Measured 2026-08-11:
+        // `videoWidth=0`, `totalVideoFrames=0`, `readyState=4` — sound playing
+        // and no picture, for as long as the session lasted.
+        const tracks = typeof session.segmentFormat.countInitTracks === "function"
+          ? session.segmentFormat.countInitTracks(init)
+          : expectedTracks;
+        if (tracks >= expectedTracks) {
           return init;
+        }
+        if (tracks > bestTracks) {
+          best = init;
+          bestTracks = tracks;
         }
       } catch {
         // Being written right now — try the next one.
@@ -1635,6 +1652,7 @@ export class HlsSessionManager {
         `transcode ${session.id} no piece declared ${expectedTracks} tracks; ` +
         `serving an init with ${bestTracks}`
       );
+      return best;
     }
     return best;
   }

@@ -1,3 +1,7 @@
+## 2.9.138
+
+- **Fix**: The init segment is now required to declare every track before it is cached — the requirement was computed and then ignored. One pass worked out how many tracks a complete header must have; the next returned the FIRST header it found, whatever it declared. A piece written before the video was muxed therefore supplied an audio-only header, and that header is kept for the session's whole life, because the player fetches `#EXT-X-MAP` exactly once and never again. The browser then has no video source buffer however much video arrives afterwards. Measured 2026-08-11 on the field host: `videoWidth=0`, `totalVideoFrames=0`, `readyState=4` — an element perfectly content, playing sound, with no picture in it for as long as the session lasted. A header short of a track is now kept only as a fallback and used only if no complete one is found, which is also when the log says so.
+
 ## 2.9.137
 
 - **New**: A session states the track set its output will carry, and sends it to the browser. The proxy knows the set exactly — it chose it: the command maps at most one video and at most one audio, each optional, and subtitles never enter the HLS output. That statement is now used twice, which is the point of making it: the init segment is checked against it here, and the browser checks what it actually received against the same statement (server 0.8.161). A track lost between the encoder and the element was previously noticed only by its absence, minutes later, as a black picture with working sound.

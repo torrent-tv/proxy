@@ -470,6 +470,17 @@ export function createPlaybackPlanner({
         // session manager uses) so createSession can skip its own probe.
         const dims = parseFfmpegVideoDimensions(probe.stderr);
         mediaInfoCache.set(cacheKey, {
+          // The codecs, because the session manager asks this cache which
+          // tracks the output will carry — and they were never stored here. It
+          // read `videoCodec`/`audioCodec` off an object that has only ever had
+          // dimensions and duration, got `undefined` for both, and declared
+          // `{video: false, audio: false}` for EVERY session since the check was
+          // written. Measured 2026-08-11: `declared tracks video=false
+          // audio=false`, which left the browser unable to tell "this file has
+          // no video" from "the video was lost on the way", and left the init
+          // guard expecting zero tracks and therefore accepting any header.
+          videoCodec: plan.videoCodec,
+          audioCodec: plan.audioCodec,
           durationSeconds: parseFfmpegDurationSeconds(probe.stderr),
           width: dims.width,
           height: dims.height,

@@ -1,3 +1,7 @@
+## 2.9.141
+
+- **New**: A held segment says whether the encoder is actually moving. The line already reported that the run was alive and at the right index and stopped there, which left the two possible causes indistinguishable: an encoder waiting on torrent pieces looks exactly like one that is encoding and has not finished. It now reports how much media the run has produced since it started and at what speed, and says outright when the position has not moved at all — which means the input is what is being waited for. Measured 2026-08-11: segment #675 was held with the run started at #675 and the encoder alive, nothing in the log could say why, and the browser then abandoned the session and built another — which is where the "second session after a seek" came from.
+
 ## 2.9.140
 
 - **New**: What this host takes to produce a first segment is now derived from the startup benchmark, so a machine answers correctly on its very first run. Encoder detection already encodes `testsrc2` through the real HLS pipeline and records each preset's throughput in pixels per second; one segment is a known quantity of pixels, so the time follows by division. No coefficient is involved — it is a measurement of this machine taken minutes earlier, applied to a known amount of work. Until now there was no answer at all before the first session finished, and the browser filled the gap with an assumed rate of exactly one, which was wrong by a factor of four in both directions.

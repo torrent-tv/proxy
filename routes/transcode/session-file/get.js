@@ -40,6 +40,24 @@ const SEGMENT_WAIT_MS = 60_000;
 export async function handleTranscodeSessionFileGet(req, reply, { hlsSessionManager }) {
   const sessionId = typeof req.params.sessionId === "string" ? req.params.sessionId : "";
   const fileName = typeof req.params.fileName === "string" ? req.params.fileName : "";
+  return serveSessionFile(req, reply, { hlsSessionManager, sessionId, fileName });
+}
+
+/**
+ * Serve one playlist or segment from a named session.
+ *
+ * Split from the route above because the variant route
+ * (`/transcode/:sessionId/v/:height/:fileName`) serves the same files from
+ * another session of the same family, and must hold, log and answer them
+ * identically — a switch of quality must not go through a different code path
+ * from the stream it switches away from.
+ *
+ * @param {import("fastify").FastifyRequest} req
+ * @param {import("fastify").FastifyReply} reply
+ * @param {{ hlsSessionManager: import("../../../services/hls-session-manager.js").HlsSessionManager, sessionId: string, fileName: string }} params
+ * @returns {Promise<void>}
+ */
+export async function serveSessionFile(req, reply, { hlsSessionManager, sessionId, fileName }) {
   // Hold the request only briefly, then answer "retry" instead of waiting for
   // the segment. iOS's native HLS player (AVPlayer) enforces a hard ~3.5 s
   // deadline on RESPONSE HEADERS and raises -12889 ("No response for media

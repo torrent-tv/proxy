@@ -148,13 +148,35 @@ function safeDimensions(targetWidth, targetHeight) {
 
 /**
  * Force a keyframe on every segment boundary so each HLS segment is
- * independently decodable and exactly `segmentDurationSec` long.
+ * independently decodable.
+ *
+ * Two grids exist. The usual one is even — a keyframe every
+ * `segmentDurationSec` — and the encoder is free to place them because it is
+ * producing every frame anyway. The other is the SOURCE's own keyframe times,
+ * used when this encode has to be interchangeable with a stream that is
+ * COPIED: a copy can only be cut where the source already has a keyframe, so a
+ * rung meant to splice into it must be cut at exactly those times and nowhere
+ * else. Then the times are given outright.
  *
  * @param {number} segmentDurationSec
+ * @param {number[] | null} [forcedTimes] - Run-relative seconds, ascending.
  * @returns {string[]}
  */
-function keyFrameArgs(segmentDurationSec) {
+function keyFrameArgs(segmentDurationSec, forcedTimes = null) {
+  if (Array.isArray(forcedTimes) && forcedTimes.length > 0) {
+    return ["-force_key_frames", forcedTimes.join(",")];
+  }
   return ["-force_key_frames", `expr:gte(t,n_forced*${segmentDurationSec})`];
+}
+
+/**
+ * Whether an explicit cut list was supplied.
+ *
+ * @param {number[] | null | undefined} forcedTimes
+ * @returns {boolean}
+ */
+function hasForcedTimes(forcedTimes) {
+  return Array.isArray(forcedTimes) && forcedTimes.length > 0;
 }
 
 /** @returns {import("./hwaccel.js").VideoEncoderDescriptor} */
@@ -164,7 +186,7 @@ export function softwareDescriptor() {
     kind: "software",
     device: null,
     inputArgs: [],
-    buildVideoArgs({ targetWidth, targetHeight, segmentDurationSec, preset, fps, tonemap }) {
+    buildVideoArgs({ targetWidth, targetHeight, segmentDurationSec, preset, fps, tonemap, forcedKeyframeTimes }) {
       const { w, h } = safeDimensions(targetWidth, targetHeight);
       const chosenPreset = typeof preset === "string" && preset.length > 0 ? preset : SOFTWARE_PRESET;
       // Output frame rate: inherited from the source (rounded/capped) by the
@@ -200,11 +222,24 @@ export function softwareDescriptor() {
         // independent of the PTS offset used on seek-restart — every HLS segment
         // is exactly segmentDurationSec long and starts on a keyframe, so segment
         // boundaries line up with the synthetic playlist with no gaps. (The old
-        // `-force_key_frames expr:gte(t,n_forced*SEG)` broke after a seek because
-        // `t` is offset by `-output_ts_offset`, forcing keyframes at the wrong
-        // places.)
+        // the OLD `expr:` form of -force_key_frames broke after a seek, because
+        // the `t` it reads is shifted by `-output_ts_offset`.)
+        //
+        // An explicit cut LIST is a different thing and does work: verified by
+        // running it, its times are on the run's own timeline — the same one
+        // `-segment_times` is measured on — so both are given one list and
+        // cannot drift apart. It replaces the frame-count GOP, which cannot
+        // describe the source's keyframes because they are not evenly spaced.
+        // `-g` stays as an upper bound on the interval: an extra keyframe
+        // inside a segment costs a little bitrate and cuts nothing, while
+        // leaving the interval unbounded means a driver that ignores the list
+        // produces one enormous segment instead of a wrong but cut one.
+        // `-keyint_min` goes, since a MINIMUM interval is the one thing that
+        // could argue with a forced keyframe.
         "-g", String(segmentDurationSec * outFps),
-        "-keyint_min", String(segmentDurationSec * outFps),
+        ...(hasForcedTimes(forcedKeyframeTimes)
+          ? keyFrameArgs(segmentDurationSec, forcedKeyframeTimes)
+          : ["-keyint_min", String(segmentDurationSec * outFps)]),
         "-sc_threshold", "0"
       ];
     }
@@ -224,14 +259,14 @@ function vaapiDescriptor(device) {
     inputArgs: ["-hwaccel", "vaapi", "-hwaccel_output_format", "vaapi", "-vaapi_device", device],
     // No fps filter: VAAPI inherits the source rate and keeps keyframes on the
     // grid via time-based -force_key_frames, so it already honours source fps.
-    buildVideoArgs({ targetWidth, targetHeight, segmentDurationSec }) {
+    buildVideoArgs({ targetWidth, targetHeight, segmentDurationSec, forcedKeyframeTimes }) {
       const { w, h } = safeDimensions(targetWidth, targetHeight);
       return [
         "-vf",
         `scale_vaapi=w=${w}:h=${h}:force_original_aspect_ratio=decrease`,
         "-c:v", "h264_vaapi",
         "-qp", "24",
-        ...keyFrameArgs(segmentDurationSec)
+        ...keyFrameArgs(segmentDurationSec, forcedKeyframeTimes)
       ];
     }
   };
@@ -247,13 +282,13 @@ function qsvDescriptor(device) {
     kind: "qsv",
     device,
     inputArgs: ["-hwaccel", "qsv", "-qsv_device", device],
-    buildVideoArgs({ targetWidth, targetHeight, segmentDurationSec }) {
+    buildVideoArgs({ targetWidth, targetHeight, segmentDurationSec, forcedKeyframeTimes }) {
       const { w, h } = safeDimensions(targetWidth, targetHeight);
       return [
         "-vf", `scale_qsv=w=${w}:h=${h}`,
         "-c:v", "h264_qsv",
         "-global_quality", "24",
-        ...keyFrameArgs(segmentDurationSec)
+        ...keyFrameArgs(segmentDurationSec, forcedKeyframeTimes)
       ];
     }
   };
@@ -269,7 +304,7 @@ function nvencDescriptor() {
     // No fps filter: NVENC is fast and places keyframes by time-based
     // -force_key_frames, so it inherits the exact source rate (fractional
     // included) with no need to round or cap. Same rationale as VAAPI/QSV.
-    buildVideoArgs({ targetWidth, targetHeight, segmentDurationSec }) {
+    buildVideoArgs({ targetWidth, targetHeight, segmentDurationSec, forcedKeyframeTimes }) {
       const { w, h } = safeDimensions(targetWidth, targetHeight);
       return [
         "-vf",
@@ -278,7 +313,7 @@ function nvencDescriptor() {
         "-preset", "p4",
         "-cq", "24",
         "-pix_fmt", "yuv420p",
-        ...keyFrameArgs(segmentDurationSec)
+        ...keyFrameArgs(segmentDurationSec, forcedKeyframeTimes)
       ];
     }
   };
@@ -296,7 +331,7 @@ function v4l2m2mDescriptor() {
     kind: "v4l2m2m",
     device: null,
     inputArgs: [],
-    buildVideoArgs({ targetWidth, targetHeight, segmentDurationSec, fps }) {
+    buildVideoArgs({ targetWidth, targetHeight, segmentDurationSec, fps, forcedKeyframeTimes }) {
       const { w, h } = safeDimensions(targetWidth, targetHeight);
       const outFps = Number.isInteger(fps) && fps > 0 ? fps : TRANSCODE_FPS;
       return [
@@ -308,8 +343,12 @@ function v4l2m2mDescriptor() {
         // userspace").
         "-num_capture_buffers", "32",
         "-b:v", "3M",
+        // Kept even with an explicit cut list, as an upper bound on the
+        // interval: this encoder is the one known not always to honour keyframe
+        // hints, and without any bound a list it ignores yields one segment for
+        // the whole file rather than a wrongly-cut one.
         "-g", String(outFps * segmentDurationSec),
-        ...keyFrameArgs(segmentDurationSec)
+        ...keyFrameArgs(segmentDurationSec, forcedKeyframeTimes)
       ];
     }
   };
@@ -322,7 +361,7 @@ function v4l2m2mDescriptor() {
  * @property {"software"|"vaapi"|"qsv"|"nvenc"|"v4l2m2m"} kind
  * @property {string|null} device
  * @property {string[]} inputArgs
- * @property {(opts: { targetWidth: number, targetHeight: number, segmentDurationSec: number }) => string[]} buildVideoArgs
+ * @property {(opts: { targetWidth: number, targetHeight: number, segmentDurationSec: number, preset?: string, fps?: number, tonemap?: boolean, forcedKeyframeTimes?: number[] | null }) => string[]} buildVideoArgs
  */
 
 /**

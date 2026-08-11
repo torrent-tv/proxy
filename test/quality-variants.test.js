@@ -133,19 +133,37 @@ test("the master offers every rung, the session's own height among them", async 
   );
 });
 
-test("a copied video is offered no variants", async (t) => {
+test("a copied video is offered variants when its cut grid is real", async (t) => {
   const { manager, base, dirPath } = await managerWithBase();
   t.after(async () => {
     await manager.disposeAll();
     await rm(dirPath, { recursive: true, force: true });
   });
+  // A copy is cut at the source's own keyframes — it has no other choice. A
+  // re-encoded rung CAN be cut there too, by being told those times, and then
+  // its segments cover the same spans and can stand in the copy's place.
   base.transcodeVideo = false;
+  base.cutGrid = "keyframe";
 
-  assert.equal(
-    manager.buildMasterPlaylist(BASE_ID),
-    null,
-    "its segments are cut at the source's own keyframes, so a re-encoded rung cannot be spliced into it"
-  );
+  const master = manager.buildMasterPlaylist(BASE_ID);
+
+  assert.ok(master, "the obstacle was never the encoder, it was the cut points");
+  assert.match(master, /^v\/1080\/index\.m3u8$/m, "the copy itself is the top rung — no encoder, no cost");
+  assert.match(master, /^v\/540\/index\.m3u8$/m);
+});
+
+test("a copied video with no readable keyframe index is offered nothing", async (t) => {
+  const { manager, base, dirPath } = await managerWithBase();
+  t.after(async () => {
+    await manager.disposeAll();
+    await rm(dirPath, { recursive: true, force: true });
+  });
+  // Its playlist claims an even grid that ffmpeg does not cut on. Aligning a
+  // rung to that is aligning it to a fiction.
+  base.transcodeVideo = false;
+  base.cutGrid = "uniform";
+
+  assert.equal(manager.buildMasterPlaylist(BASE_ID), null);
 });
 
 test("the session's own height resolves to the session itself", async (t) => {
@@ -236,6 +254,35 @@ test("a segment request hands the encoder to the variant the viewer moved to", a
   );
 });
 
+test("a rung is placed where the player asked it for, not where the other rung had read to", async (t) => {
+  const { manager, base, dirPath } = await managerWithBase();
+  t.after(async () => {
+    await manager.disposeAll();
+    await rm(dirPath, { recursive: true, force: true });
+  });
+  const variant = fakeSession({ id: VARIANT_ID, encodeHeight: 540, dirPath });
+  variant.variantHeight = 540;
+  variant.variantBases = new Set([BASE_ID]);
+  manager.sessionsById.set(VARIANT_ID, variant);
+  base.variants = new Map([[540, VARIANT_ID]]);
+  base.ffmpeg = fakeEncoder();
+  // The rung being left had read fourteen segments further than the picture had
+  // played — an encoder running at several times realtime fills the buffer far
+  // ahead. Measured 2026-08-11: 56 s of gap, and using the read head placed the
+  // new run past everything the player then asked for, which no request could
+  // ever be answered from.
+  base.lastRequestedSegment = 70;
+  base.viewerPositionSeconds = 280;
+
+  await manager.resolveVariantFile(BASE_ID, 540, "segment-00056.mp4");
+
+  assert.equal(
+    variant.seekTarget,
+    55,
+    "the segment the player asked this rung for is where it must begin (one back for the keyframe)"
+  );
+});
+
 test("the viewer's position is kept current by the segments they ask for", async (t) => {
   const { manager, base, dirPath } = await managerWithBase();
   t.after(async () => {
@@ -306,21 +353,38 @@ test("a downshift does not rename the variant the viewer is watching", async (t)
   );
 });
 
-test("the cut grid does not depend on the encode height", () => {
-  // Why a segment from one encoder can stand where another's would have: on the
-  // re-encode path the boundaries are a uniform grid and the encoder is given a
-  // fixed GOP of the same length, so segment N covers the same span at every
-  // rung. Nothing about the height enters this — and nothing may, or the
-  // variants stop being interchangeable.
-  const shape = { transcodeVideo: true, durationSeconds: 100, segDur: SEGMENT_SECONDS, startTime: 0 };
-  const withIndex = computeSegmentBoundaries({ ...shape, keyframeTimes: [0, 3.1, 9.7, 14.2] });
-  const withoutIndex = computeSegmentBoundaries({ ...shape, keyframeTimes: null });
+test("the cut grid follows the grid asked for, not who produces the frames", () => {
+  // Why a segment from one encoder can stand where another's would have: both
+  // are cut at the same times. Which times is a property of the SESSION — the
+  // even grid, or the source's own keyframes — and it must not be re-derived
+  // from whether the video is copied, because a variant of a copied stream is
+  // re-encoded and still has to land on the copy's cuts.
+  const shape = { durationSeconds: 100, segDur: SEGMENT_SECONDS, startTime: 0 };
+  const keyframeTimes = [0, 3.1, 9.7, 14.2, 21.5, 40, 61.25];
 
+  const even = computeSegmentBoundaries({ ...shape, useKeyframeGrid: false, keyframeTimes });
+  assert.equal(even[1], SEGMENT_SECONDS, "the even grid ignores the source's keyframes");
+  assert.equal(even.at(-1), 100);
+
+  const source = computeSegmentBoundaries({ ...shape, useKeyframeGrid: true, keyframeTimes });
   assert.deepEqual(
-    withIndex,
-    withoutIndex,
-    "a re-encode forces its own keyframes onto the grid, so the source's keyframes cannot move the cuts"
+    source,
+    [0, 9.7, 14.2, 21.5, 40, 61.25, 100],
+    "the source's own keyframes, kept only where they are at least a segment apart"
   );
-  assert.equal(withIndex[1], SEGMENT_SECONDS);
-  assert.equal(withIndex.at(-1), 100);
+
+  // The one that matters: a copy and a re-encoded rung of it, given the same
+  // grid, produce the SAME table. Segment N then covers the same span in both,
+  // which is what lets one stand where the other would have.
+  assert.deepEqual(
+    computeSegmentBoundaries({ ...shape, useKeyframeGrid: true, keyframeTimes }),
+    source,
+    "a variant inherits the grid, so its boundaries are the same values"
+  );
+  // And with no index there is nothing to align to — the even grid, whoever asks.
+  assert.deepEqual(
+    computeSegmentBoundaries({ ...shape, useKeyframeGrid: true, keyframeTimes: null }),
+    even,
+    "no keyframes means no keyframe grid, however the caller asks"
+  );
 });

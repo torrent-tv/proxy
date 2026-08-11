@@ -7,7 +7,7 @@
  * immediately when all registered consumers release them.
  */
 
-import { createReadStream, readdirSync } from "node:fs";
+import { createReadStream, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { access, mkdir, readdir, readFile, rm, stat, unlink } from "node:fs/promises";
 import { Readable } from "node:stream";
 import os from "node:os";
@@ -15,6 +15,7 @@ import path from "node:path";
 import { randomUUID } from "node:crypto";
 import { spawn } from "node:child_process";
 import { createRequire } from "node:module";
+import { fileURLToPath } from "node:url";
 import { logger } from "../utils/logger.js";
 import { readKeyframeIndex } from "./container-index/index.js";
 
@@ -976,6 +977,9 @@ export class HlsSessionManager {
     this.startupWaitMs = startupWaitMs;
     this.localBaseUrl = buildHttpBaseUrl(localBindHost, localPort);
     this.sessionsById = new Map();
+    // What this host learned last time it ran. Without it every restart shows
+    // the first viewer a figure with no measurement behind it.
+    this.#loadHostTimings();
     // Container keyframe index per (source, file). Immutable per file, so one
     // read serves every session, re-open and seek. Null means "this file has no
     // readable index" and is cached too — no point retrying a scan that cannot
@@ -3234,6 +3238,115 @@ export class HlsSessionManager {
    * @param {number} latencyMs
    * @returns {void}
    */
+  /**
+   * What this host should take to produce a first segment, derived from the
+   * startup benchmark rather than from any past session.
+   *
+   * The encoder detection already encodes `testsrc2` through the real HLS
+   * pipeline and records each preset's throughput in pixels per second. One
+   * segment is `segmentDurationSec x width x height x fps` pixels, so the time
+   * to make it follows by division. No coefficient is involved: it is a
+   * measurement of this machine taken minutes earlier, applied to a known
+   * quantity of work.
+   *
+   * This is the answer we would LIKE to rely on exclusively — it needs no
+   * history, so it is right on a machine's very first run, when nothing has
+   * been recorded yet. Whether it is good enough to replace the recorded median
+   * is what {@link #compareSyntheticWithMeasured} is for.
+   *
+   * @param {{ width?: number, height?: number, fps?: number }} [output]
+   * @returns {number | null} Milliseconds, or null without a benchmark.
+   */
+  /**
+   * Where this host's recorded timings live: one file, always the same path,
+   * beside the proxy's own installation.
+   *
+   * Kept so a proxy that has just restarted is not back to knowing nothing —
+   * the browser was shown an assumed rate for the whole of the first wait after
+   * every restart. It is meant to be TEMPORARY: if the synthetic figure tracks
+   * the measured one closely enough (see #compareSyntheticWithMeasured) this
+   * file can go, and every machine is then right from its first second without
+   * carrying anything between runs.
+   *
+   * @returns {string}
+   */
+  #hostTimingsPath() {
+    return path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "host-timings.json");
+  }
+
+  /** Load them, if any were ever written. Never throws. */
+  #loadHostTimings() {
+    try {
+      const raw = JSON.parse(readFileSync(this.#hostTimingsPath(), "utf8"));
+      if (Array.isArray(raw?.firstSegment)) {
+        this.#firstSegmentLatencies = raw.firstSegment.filter((value) => Number.isFinite(value) && value > 0);
+      }
+      if (Array.isArray(raw?.sessionCreate)) {
+        this.#sessionCreateLatencies = raw.sessionCreate.filter((value) => Number.isFinite(value) && value > 0);
+      }
+      logger.info(
+        `host timings loaded: first-segment ${this.expectedFirstSegmentMs() ?? "n/a"}ms, ` +
+        `session-create ${this.expectedSessionCreateMs() ?? "n/a"}ms`
+      );
+    } catch {
+      // No file yet, or it is unreadable. The synthetic figure answers instead.
+    }
+  }
+
+  /** Write them. Best effort: losing them costs a first estimate, nothing more. */
+  #saveHostTimings() {
+    try {
+      writeFileSync(this.#hostTimingsPath(), JSON.stringify({
+        firstSegment: this.#firstSegmentLatencies,
+        sessionCreate: this.#sessionCreateLatencies
+      }));
+    } catch {
+      // Read-only install, no permission — not worth failing a session over.
+    }
+  }
+
+  syntheticFirstSegmentMs(output = {}) {
+    const benchmark = this.softwarePresetBenchmark;
+    if (!Array.isArray(benchmark) || benchmark.length === 0) {
+      return null;
+    }
+    const width = Number.isFinite(output.width) && output.width > 0 ? output.width : 1920;
+    const height = Number.isFinite(output.height) && output.height > 0 ? output.height : 1080;
+    const fps = Number.isFinite(output.fps) && output.fps > 0 ? output.fps : TRANSCODE_FPS;
+    // The preset actually chosen sits somewhere in the middle of the ladder;
+    // the median entry is the representative one and involves no choice.
+    const sorted = [...benchmark].sort((left, right) => left.pixelsPerSec - right.pixelsPerSec);
+    const pixelsPerSec = sorted[Math.floor(sorted.length / 2)]?.pixelsPerSec;
+    if (!Number.isFinite(pixelsPerSec) || pixelsPerSec <= 0) {
+      return null;
+    }
+    const pixels = this.segmentDurationSec * width * height * fps;
+    return (pixels / pixelsPerSec) * 1000;
+  }
+
+  /**
+   * Say how the synthetic figure compares with what actually happened.
+   *
+   * The point is to learn whether the startup benchmark alone can carry the
+   * estimate. If the two track each other, the recorded history can go and
+   * every machine is right from its first second; if they do not, the log says
+   * by how much and in which direction, which is the beginning of knowing why.
+   *
+   * @param {number} measuredMs
+   * @returns {void}
+   */
+  #compareSyntheticWithMeasured(measuredMs) {
+    const synthetic = this.syntheticFirstSegmentMs();
+    if (synthetic === null) {
+      return;
+    }
+    const ratio = measuredMs / synthetic;
+    logger.info(
+      `first-segment synthetic=${Math.round(synthetic)}ms measured=${Math.round(measuredMs)}ms ` +
+      `ratio=${ratio.toFixed(2)} (1.00 would mean the startup benchmark alone suffices)`
+    );
+  }
+
   #rememberSessionCreateLatency(latencyMs) {
     if (!Number.isFinite(latencyMs) || latencyMs <= 0) {
       return;
@@ -3242,6 +3355,7 @@ export class HlsSessionManager {
     if (this.#sessionCreateLatencies.length > FIRST_SEGMENT_SAMPLES) {
       this.#sessionCreateLatencies.shift();
     }
+    this.#saveHostTimings();
   }
 
   /**
@@ -3262,10 +3376,12 @@ export class HlsSessionManager {
     if (!Number.isFinite(latencyMs) || latencyMs <= 0) {
       return;
     }
+    this.#compareSyntheticWithMeasured(latencyMs);
     this.#firstSegmentLatencies.push(latencyMs);
     if (this.#firstSegmentLatencies.length > FIRST_SEGMENT_SAMPLES) {
       this.#firstSegmentLatencies.shift();
     }
+    this.#saveHostTimings();
   }
 
   /**
@@ -3276,7 +3392,10 @@ export class HlsSessionManager {
    */
   expectedFirstSegmentMs() {
     if (this.#firstSegmentLatencies.length === 0) {
-      return null;
+      // Nothing recorded yet — a machine's first run, or one whose history has
+      // not been written. The startup benchmark answers without any history at
+      // all, which is why the browser was showing an assumed rate here.
+      return this.syntheticFirstSegmentMs();
     }
     const sorted = [...this.#firstSegmentLatencies].sort((left, right) => left - right);
     return sorted[Math.floor(sorted.length / 2)];

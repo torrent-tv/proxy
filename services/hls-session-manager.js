@@ -65,6 +65,13 @@ export function isInputUnavailable(message) {
 }
 
 const PLAYLIST_FILE_NAME = "index.m3u8";
+// The index of variants. Served from the same route as the media playlist, so
+// it needs no path of its own.
+const MASTER_PLAYLIST_FILE_NAME = "master.m3u8";
+// Path prefix under a session for one of its variants: `v/<height>/<file>`. A
+// directory level, so every relative name inside a variant's own playlist — its
+// segments and its init — resolves to that variant without any of them changing.
+const VARIANT_PATH_PREFIX = "v";
 // The resolutions a viewer may choose between. Only rungs at or below the
 // source are offered: upscaling invents detail and costs the encoder more than
 // the source itself.
@@ -103,6 +110,20 @@ export function variantHeightsFor(sourceHeight) {
   }
   const rungs = VARIANT_LADDER.filter((height) => height < sourceHeight);
   return [Math.round(sourceHeight), ...rungs];
+}
+
+/**
+ * The consumer a base session registers on its variants.
+ *
+ * Derived from the base's id so it is stable across requests and unique per
+ * family: releasing it is how a base lets go of a variant that another family
+ * may still be watching.
+ *
+ * @param {string} baseSessionId
+ * @returns {string}
+ */
+function variantConsumerId(baseSessionId) {
+  return `variant-of:${baseSessionId}`;
 }
 
 /**
@@ -409,6 +430,7 @@ function isSafeSessionId(value) {
 function isSafeFileName(fileName, segmentFormat) {
   return (
     fileName === PLAYLIST_FILE_NAME ||
+    fileName === MASTER_PLAYLIST_FILE_NAME ||
     (segmentFormat.initFileName !== null && fileName === segmentFormat.initFileName) ||
     segmentFormat.isSegmentFileName(fileName)
   );
@@ -735,7 +757,7 @@ export function ffmpegSeconds(value) {
  * @param {{ transcodeVideo: boolean, durationSeconds: number, segDur: number, keyframeTimes: number[] | null, startTime: number }} params
  * @returns {number[]}
  */
-function computeSegmentBoundaries({ transcodeVideo, durationSeconds, segDur, keyframeTimes, startTime }) {
+export function computeSegmentBoundaries({ transcodeVideo, durationSeconds, segDur, keyframeTimes, startTime }) {
   const total = Number.isFinite(durationSeconds) && durationSeconds > 0 ? durationSeconds : 0;
   const step = Number.isFinite(segDur) && segDur > 0 ? segDur : 4;
   const uniform = () => {
@@ -1084,7 +1106,18 @@ export class HlsSessionManager {
       forceManualQuality ? "q-manual" : "q-auto",
       String(normalizedStartPosition),
       // Two viewers asking for different containers cannot share one ffmpeg.
-      segmentFormat.id
+      segmentFormat.id,
+      // A re-encoded session is NOT shared between viewers, because a quality
+      // change acts on the session: it stops the encoder of the rung being left
+      // and repositions the one being joined. Shared, one viewer's change would
+      // stop the stream the other is watching, and that viewer's seek would
+      // then be forwarded to a variant they never asked for. Sharing here was
+      // always narrow — it needs two viewers to open the same file, at the same
+      // size, within the same ten seconds — and a shared seek already dragged
+      // both of them. Restoring it needs the active variant to be tracked per
+      // consumer rather than per session, which is a change to three routes and
+      // the variant path; recorded in the roadmap, not attempted here.
+      transcodeVideo ? consumerId : ""
     ].join(":");
     const existingId = this.sessionIdBySource.get(sourceMapKey);
     if (existingId) {
@@ -1855,11 +1888,13 @@ export class HlsSessionManager {
    * @returns {boolean}
    */
   recordNetReport(sessionId, { linkMbps, bufferedAheadSec }) {
-    const session = this.sessionsById.get(sessionId);
-    if (!session || session.state === "disposed") {
+    const named = this.sessionsById.get(sessionId);
+    if (!named || named.state === "disposed") {
       return false;
     }
-    session.netReport = { linkMbps, bufferedAheadSec, at: Date.now() };
+    // The link carries the stream on screen, so the report belongs to the
+    // variant producing it — that is the encoder whose bitrate it can bound.
+    this.#activeVariant(named).netReport = { linkMbps, bufferedAheadSec, at: Date.now() };
     return true;
   }
 
@@ -2202,6 +2237,11 @@ export class HlsSessionManager {
         session.state === "disposed" ||
         session.state === "failed" ||
         !session.transcodeVideo ||
+        // Nothing is encoding, so there is no speed to judge. A variant the
+        // viewer has switched away from is left in exactly this state, and its
+        // last recorded speed would otherwise buy it a downshift — which
+        // restarts the encoder it was just stopped for.
+        !session.ffmpeg ||
         !Array.isArray(session.budgetLadder) ||
         session.budgetLadder.length < 2
       ) {
@@ -3028,10 +3068,17 @@ export class HlsSessionManager {
    * @returns {boolean} False when the session is unknown or disposed.
    */
   requestSeek(sessionId, positionSeconds) {
-    const session = this.sessionsById.get(sessionId);
-    if (!session || session.state === "disposed") {
+    const named = this.sessionsById.get(sessionId);
+    if (!named || named.state === "disposed") {
       return false;
     }
+    // The browser holds one session id for the whole file and knows nothing of
+    // variants, so a seek it reports means the stream on screen.
+    named.viewerPositionSeconds = positionSeconds;
+    named.lastAccessedAt = Date.now();
+    const session = this.#activeVariant(named);
+    session.viewerPositionSeconds = positionSeconds;
+    session.lastAccessedAt = Date.now();
     // Every segment request being held right now was made for the position the
     // viewer has just left. Release them: hls.js keeps ONE fragment load
     // outstanding, so until the one in flight answers, the player cannot ask
@@ -3425,6 +3472,153 @@ export class HlsSessionManager {
   }
 
   /**
+   * Which variant a session IS, as a height. Zero encode height means "keep the
+   * source", so the source's own height is the answer.
+   *
+   * Settled once and then kept, because it is a NAME — the player addresses the
+   * variant by it for the whole session, having fetched the master exactly
+   * once. The height a session encodes at is not stable: the realtime budget
+   * steps it down when the host cannot keep up. Deriving the name afresh each
+   * time would mean a downshift silently renames the variant the viewer is
+   * watching, and the next segment request under the old name would build a
+   * SECOND session at the height the host had just proved it could not manage.
+   * A downshift changes the picture inside the variant instead, which is what
+   * it has always done.
+   *
+   * @param {HlsSession} session
+   * @returns {number}
+   */
+  variantHeightOf(session) {
+    if (Number.isInteger(session.variantHeight) && session.variantHeight > 0) {
+      return session.variantHeight;
+    }
+    const encodeHeight = Number(session.encodeHeight) || 0;
+    session.variantHeight = encodeHeight > 0
+      ? encodeHeight
+      : Math.round(Number(session.sourceHeight) || 0);
+    return session.variantHeight;
+  }
+
+  /**
+   * The heights this session's file is offered at, largest first.
+   *
+   * The base session's OWN height is always among them, even when it is not a
+   * ladder rung: it is whatever the realtime budget and the viewer's viewport
+   * settled on, and an encoder is already producing it. Leaving it out would
+   * mean the player, on loading the master, immediately asks for a rung nobody
+   * is encoding — a second cold start in place of the run that is already
+   * serving segments.
+   *
+   * @param {HlsSession} session
+   * @returns {number[]}
+   */
+  #variantHeights(session) {
+    const heights = new Set(variantHeightsFor(Number(session.sourceHeight) || 0));
+    const own = this.variantHeightOf(session);
+    if (own > 0) {
+      heights.add(own);
+    }
+    return [...heights].sort((left, right) => right - left);
+  }
+
+  /**
+   * The variant of a session that the viewer is watching right now.
+   *
+   * Every request that names the base session — seek, progress, link report,
+   * release — means the stream the viewer has on screen, and after a quality
+   * change that is another session. The browser is not told about the swap: it
+   * holds one session id for the whole file, which is what keeps the switch out
+   * of the state machine on that side.
+   *
+   * @param {HlsSession} base
+   * @returns {HlsSession}
+   */
+  #activeVariant(base) {
+    const activeId = base.activeVariantId;
+    if (!activeId || activeId === base.id) {
+      return base;
+    }
+    const active = this.sessionsById.get(activeId);
+    if (!active || active.state === "disposed") {
+      base.activeVariantId = base.id;
+      return base;
+    }
+    return active;
+  }
+
+  /**
+   * Where the viewer is on this session's timeline, in seconds.
+   *
+   * The reported seek position when there has been one, otherwise the segment
+   * the player last asked for — which is its read head, a little ahead of the
+   * picture but never behind it. Used to place a variant's first encode run, so
+   * a switch mid-film starts where the viewer is standing.
+   *
+   * @param {HlsSession} session
+   * @returns {number}
+   */
+  #viewerPositionOf(session) {
+    if (Number.isFinite(session.viewerPositionSeconds) && session.viewerPositionSeconds > 0) {
+      return session.viewerPositionSeconds;
+    }
+    if (Number.isInteger(session.lastRequestedSegment) && session.lastRequestedSegment > 0) {
+      return this.#segmentStartTime(session, session.lastRequestedSegment);
+    }
+    return 0;
+  }
+
+  /**
+   * Stop this session's encoder without replacing it.
+   *
+   * A variant nobody is watching must not go on encoding: the host has one
+   * encoder's worth of capacity, and the whole point of switching quality
+   * seamlessly is that the new rung gets it. The session itself stays — its
+   * produced segments remain servable, and switching back restarts it from
+   * where the viewer then is.
+   *
+   * @param {HlsSession} session
+   * @param {string} reason - Named in the log; a stopped encoder is otherwise
+   *   indistinguishable from one that died.
+   * @returns {void}
+   */
+  #stopEncodeRun(session, reason) {
+    // Everything armed to (re)start this session. A stop that leaves them
+    // running is not a stop: the input-retry timer fires seconds later and
+    // spawns a run for a variant nobody is watching — and torrent starvation,
+    // which is what arms it, is routine here. The seek settle timer does the
+    // same on a rapid second switch.
+    if (session.seekSettleTimer) {
+      clearTimeout(session.seekSettleTimer);
+      session.seekSettleTimer = null;
+    }
+    session.seekTarget = null;
+    if (session.inputRetryTimer) {
+      clearTimeout(session.inputRetryTimer);
+      session.inputRetryTimer = null;
+    }
+    const ffmpeg = session.ffmpeg;
+    if (!ffmpeg) {
+      return;
+    }
+    // A newer start may be waiting on an await inside #startEncodeRun; bumping
+    // the generation makes it abort instead of spawning into a stopped session.
+    session.encodeRunGeneration += 1;
+    // A suspended process does not act on SIGTERM until it is continued.
+    this.#resumeEncoder(session, reason);
+    // Cleared BEFORE the signal: the exit handler checks identity against this
+    // field, so a deliberate stop must not read as a run that failed.
+    session.ffmpeg = null;
+    if (!hasChildExited(ffmpeg)) {
+      try {
+        ffmpeg.kill("SIGTERM");
+      } catch {
+        // Best effort — the process may have exited between the two lines.
+      }
+    }
+    logger.info(`transcode ${session.id} encoder stopped: ${reason}`);
+  }
+
+  /**
    * The session that produces a given height for the same file, created on
    * first request.
    *
@@ -3436,9 +3630,13 @@ export class HlsSessionManager {
    *
    * @param {string} baseSessionId
    * @param {number} height - Encode height; must be one of the offered rungs.
-   * @returns {Promise<HlsSession | null>} Null when the base session is unknown.
+   * @returns {Promise<HlsSession | null>} Null when the base session is unknown,
+   *   or the height is not offered for it.
    */
-  async getVariantSession(baseSessionId, height) {
+  async resolveVariantSession(baseSessionId, height) {
+    if (!isSafeSessionId(baseSessionId)) {
+      return null;
+    }
     const base = this.sessionsById.get(baseSessionId);
     if (!base || base.state === "disposed") {
       return null;
@@ -3446,20 +3644,51 @@ export class HlsSessionManager {
     if (!Number.isInteger(height) || height <= 0) {
       return null;
     }
-    // Where the viewer is now, so a variant created mid-film starts there
-    // rather than at the beginning.
-    const processed = Number.isFinite(base.progress?.processedSeconds)
-      ? base.progress.processedSeconds
-      : 0;
-    return this.createOrGetSession({
+    // Only the heights the master offers. Anything else is a made-up request,
+    // and honouring it would let a client start encoder runs at will.
+    if (!this.#variantHeights(base).includes(height)) {
+      return null;
+    }
+    if (height === this.variantHeightOf(base)) {
+      return base;
+    }
+    base.variants ??= new Map();
+    const existingId = base.variants.get(height);
+    if (existingId) {
+      const existing = this.sessionsById.get(existingId);
+      if (existing && existing.state !== "disposed") {
+        existing.lastAccessedAt = Date.now();
+        return existing;
+      }
+      base.variants.delete(height);
+    }
+    // hls.js asks for a new level's playlist, its init and its first segments
+    // within the same moment. Without this every one of them would build its
+    // own session, and the ones that lost would encode for nobody.
+    base.variantPending ??= new Map();
+    const pending = base.variantPending.get(height);
+    if (pending) {
+      return pending;
+    }
+    const creation = this.createOrGetSession({
       sourceKey: base.sourceKey,
       fileIndex: base.fileIndex,
       transcodeVideo: true,
       transcodeAudio: base.transcodeAudio,
       fileName: base.fileName,
+      // The family's own claim on it. Sessions are already shared between
+      // consumers and disposed when the last one leaves, and a variant is
+      // shareable in exactly the same way — two viewers on the same rung of the
+      // same file are one encode. This is how the base lets go of it.
+      consumerId: variantConsumerId(base.id),
       targetWidth: 0,
       targetHeight: height,
-      startPositionSeconds: processed,
+      // Where the viewer is now, so a variant created mid-film starts there
+      // rather than at the beginning. Floored onto the ten-second grid that
+      // session keys are bucketed to: rounding is what that bucket does, and a
+      // position rounded UP starts the run past the viewer, so the run just
+      // spawned is killed and restarted before it has produced anything.
+      startPositionSeconds: Math.floor(this.#viewerPositionOf(this.#activeVariant(base)) / 10) * 10,
       audioTrackIndex: base.audioTrackIndex,
       // A variant is a resolution the viewer chose, so it is encoded at exactly
       // that size and the realtime budget does not move it — otherwise two
@@ -3468,7 +3697,135 @@ export class HlsSessionManager {
       manualQuality: true,
       segmentFormatId: base.segmentFormat?.id ?? "",
       acquireSource: base.acquireSource
-    });
+    })
+      .then(async (variant) => {
+        // Making a session takes seconds — a probe and a keyframe index — and
+        // the viewer can leave inside that window. A variant registered onto a
+        // disposed base is reachable by nobody: the browser never learns its
+        // id, so nothing would release it and it would hold an encoder, a temp
+        // directory and a claim on the torrent until its own idle timer noticed
+        // half an hour later.
+        if (base.state === "disposed") {
+          await this.releaseSessionConsumer(
+            variant.id,
+            variantConsumerId(base.id),
+            "the session it was made for ended while it was being made"
+          );
+          return null;
+        }
+        variant.variantHeight = height;
+        (variant.variantBases ??= new Set()).add(base.id);
+        base.variants.set(height, variant.id);
+        return variant;
+      })
+      .finally(() => {
+        base.variantPending.delete(height);
+      });
+    base.variantPending.set(height, creation);
+    return creation;
+  }
+
+  /**
+   * Resolve one file request addressed to a variant: `v/<height>/<fileName>`
+   * under a session.
+   *
+   * The single entry point for the variant route, so the policy — which variant
+   * exists, which one the viewer is watching, which encoder runs — stays here
+   * rather than being spread into a route handler.
+   *
+   * @param {string} baseSessionId
+   * @param {number} height
+   * @param {string} fileName
+   * @returns {Promise<{ sessionId: string | null, error?: string }>} The session
+   *   to serve the file from; a null id means there is no such variant.
+   */
+  async resolveVariantFile(baseSessionId, height, fileName) {
+    if (!isSafeSessionId(baseSessionId)) {
+      return { sessionId: null };
+    }
+    const base = this.sessionsById.get(baseSessionId);
+    if (!base || base.state === "disposed") {
+      return { sessionId: null };
+    }
+    // A variant carries a media playlist, an init segment and segments. Nothing
+    // else lives under that path — a master there would describe variants of a
+    // variant.
+    const isPlaylist = fileName === PLAYLIST_FILE_NAME;
+    const isInit = base.segmentFormat.initFileName !== null &&
+      fileName === base.segmentFormat.initFileName;
+    const isSegment = base.segmentFormat.isSegmentFileName(fileName);
+    if (!isPlaylist && !isInit && !isSegment) {
+      return { sessionId: null };
+    }
+    if (!this.#variantHeights(base).includes(height)) {
+      return { sessionId: null };
+    }
+    // Answered from the base, and no encoder is started for it. Every variant of
+    // a file has the SAME media playlist — same duration, same boundaries, same
+    // init name — because that is exactly what makes them interchangeable. The
+    // player fetches a level's playlist to decide with, and creating a session
+    // for one it may never switch to would leave a second encoder running on a
+    // host that has capacity for one.
+    if (isPlaylist) {
+      return { sessionId: base.id };
+    }
+    let variant;
+    try {
+      variant = await this.resolveVariantSession(baseSessionId, height);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      logger.error(
+        `transcode ${baseSessionId} could not prepare the ${height}p variant: ${message}` +
+        (error instanceof Error && error.stack ? `\n${error.stack}` : "")
+      );
+      return { sessionId: null, error: message };
+    }
+    if (!variant) {
+      return { sessionId: null };
+    }
+    // Only a SEGMENT says the viewer is watching this rung.
+    if (isSegment) {
+      this.#noteVariantActive(base, variant);
+    }
+    return { sessionId: variant.id };
+  }
+
+  /**
+   * Record which variant the viewer is watching, and give it the encoder.
+   *
+   * The previous variant's encoder is stopped and the new one is pointed at
+   * where the viewer stands, because a segment request does not steer the
+   * encoder anywhere (see #ensureEncodingFor) and a variant that was watched a
+   * minute ago is parked wherever it was left.
+   *
+   * @param {HlsSession} base
+   * @param {HlsSession} variant
+   * @returns {void}
+   */
+  #noteVariantActive(base, variant) {
+    const previous = this.#activeVariant(base);
+    if (previous.id === variant.id) {
+      return;
+    }
+    const position = this.#viewerPositionOf(previous);
+    base.activeVariantId = variant.id;
+    logger.info(
+      `transcode ${base.id} variant now ${this.variantHeightOf(variant)}p ` +
+      `(was ${this.variantHeightOf(previous)}p) at ${position.toFixed(1)}s`
+    );
+    // Every request still held on the old rung is for a segment nobody will
+    // produce now — its encoder is about to be stopped — and the player has
+    // already stopped waiting for them. Answering "retry" at once frees them
+    // instead of holding each for the full minute.
+    previous.waitEpoch = (previous.waitEpoch ?? 0) + 1;
+    this.#stopEncodeRun(previous, `the viewer moved to ${this.variantHeightOf(variant)}p`);
+    if (position > 0) {
+      variant.viewerPositionSeconds = position;
+      // A variant just created already starts here, and requestSeek says so
+      // rather than restarting it. One that existed before is parked where it
+      // was left, and this is what brings it to the viewer.
+      this.requestSeek(variant.id, position);
+    }
   }
 
   /**
@@ -3483,22 +3840,30 @@ export class HlsSessionManager {
    * variant, appends it after what is already buffered, and changes the
    * decoder's type if the codec parameters differ.
    *
+   * Offered only where the variants can actually be joined: every one of them
+   * is re-encoded, so all are cut on the same uniform grid with keyframes
+   * forced onto it. A session that COPIES the video is cut at the source's own
+   * keyframes instead, and a rung cut elsewhere cannot be spliced into it.
+   *
    * @param {string} sessionId
    * @returns {string | null} The playlist text, or null when there is nothing
    *   to choose between — a copied video, or a source too small to step down.
    */
   buildMasterPlaylist(sessionId) {
+    if (!isSafeSessionId(sessionId)) {
+      return null;
+    }
     const session = this.sessionsById.get(sessionId);
     if (!session || session.state === "disposed" || !session.transcodeVideo) {
       return null;
     }
     const sourceHeight = Number(session.sourceHeight) || 0;
-    const rungs = variantHeightsFor(sourceHeight);
+    const rungs = this.#variantHeights(session);
     if (rungs.length < 2) {
       return null;
     }
     const sourceWidth = Number(session.sourceWidth) || 0;
-    const lines = ["#EXTM3U", "#EXT-X-VERSION:7"];
+    const lines = ["#EXTM3U", `#EXT-X-VERSION:${session.segmentFormat.playlistVersion}`];
     for (const height of rungs) {
       const width = sourceHeight > 0 && sourceWidth > 0
         ? Math.round((sourceWidth / sourceHeight) * height / 2) * 2
@@ -3507,10 +3872,7 @@ export class HlsSessionManager {
         `#EXT-X-STREAM-INF:BANDWIDTH=${estimatedBitrateFor(height)}` +
         (width > 0 ? `,RESOLUTION=${width}x${height}` : "")
       );
-      // A subdirectory, so every relative name inside the variant's own
-      // playlist — its segments and its init — resolves to that variant
-      // without any of them having to change.
-      lines.push(`v/${height}/${PLAYLIST_FILE_NAME}`);
+      lines.push(`${VARIANT_PATH_PREFIX}/${height}/${PLAYLIST_FILE_NAME}`);
     }
     return `${lines.join("\n")}\n`;
   }
@@ -3567,6 +3929,21 @@ export class HlsSessionManager {
       };
     }
     session.lastAccessedAt = Date.now();
+
+    // The index of variants. Served from here rather than a route of its own,
+    // because to a player it is simply another playlist under the session.
+    if (fileName === MASTER_PLAYLIST_FILE_NAME) {
+      const masterText = this.buildMasterPlaylist(sessionId);
+      if (!masterText) {
+        return { kind: "not-found" };
+      }
+      return {
+        kind: "file",
+        stream: Readable.from([masterText]),
+        contentType: "application/vnd.apple.mpegurl",
+        isPlaylist: true
+      };
+    }
 
     // Serve the synthetic VOD playlist (full duration, terminated with
     // #EXT-X-ENDLIST) so the player gets the correct total length and a fully
@@ -3652,6 +4029,13 @@ export class HlsSessionManager {
       const requested = session.segmentFormat.segmentIndexFromName(fileName);
       if (requested >= 0) {
         session.lastRequestedSegment = requested;
+        // Where the viewer is, kept current. A reported seek is the only other
+        // source of it and playback never issues one, so a position recorded at
+        // a seek is stale for as long as the viewer then watches — and it is
+        // read when a quality change has to place the next variant's first
+        // encode run. The freshest evidence wins: a seek overwrites this, and
+        // the first request after the seek overwrites it back.
+        session.viewerPositionSeconds = this.#segmentStartTime(session, requested);
         // A viewer who has caught up must not wait out the monitor's interval —
         // but only if they HAVE caught up, which is why this re-evaluates the
         // same condition instead of resuming outright.
@@ -4005,10 +4389,16 @@ export class HlsSessionManager {
     if (!isSafeSessionId(sessionId)) {
       return null;
     }
-    const session = this.sessionsById.get(sessionId);
-    if (!session) {
+    const named = this.sessionsById.get(sessionId);
+    if (!named) {
       return null;
     }
+    named.lastAccessedAt = Date.now();
+    // Progress is asked about the stream on screen, which after a quality
+    // change is another session. Touching the named one as well is what keeps
+    // the family alive: only the ACTIVE variant gets segment requests, so
+    // without this the base session would idle out from under its own variants.
+    const session = this.#activeVariant(named);
     session.lastAccessedAt = Date.now();
     const warmupTotalSeconds = this.startupWaitMs / 1000;
     const warmupElapsedSeconds = Math.max(0, (Date.now() - session.startedAt) / 1000);
@@ -4027,7 +4417,9 @@ export class HlsSessionManager {
     // transcode's own `speed` already is one. Null when not enough segments yet.
     const outputMbps = await this.#observedStreamMbps(session);
     return {
-      sessionId: session.id,
+      // The id the caller asked about, not the variant it was answered from —
+      // the browser tracks its sessions by the id it was given.
+      sessionId: named.id,
       state: session.progress.state,
       processedSeconds: session.progress.processedSeconds,
       startPositionSeconds: session.progress.startPositionSeconds ?? 0,
@@ -4114,6 +4506,41 @@ export class HlsSessionManager {
     session.state = "disposed";
     this.sessionsById.delete(sessionId);
     this.sessionIdBySource.delete(session.sourceMapKey);
+
+    // A variant serves this session's viewer and nobody learns its id but us,
+    // so it would otherwise encode and occupy disk for no one until its idle
+    // timer noticed. Released rather than disposed: two families can land on
+    // one variant (same file, same rung, same neighbourhood of the timeline),
+    // and the existing consumer count is what already knows whether anyone else
+    // is still watching it.
+    if (session.variants instanceof Map) {
+      const variantIds = [...session.variants.values()];
+      session.variants.clear();
+      for (const variantId of variantIds) {
+        await this.releaseSessionConsumer(
+          variantId,
+          variantConsumerId(sessionId),
+          "the session it was a variant of ended"
+        );
+      }
+    }
+    // Disposed on its own (idle, or with its last family): it must stop being
+    // offered, or the next request for that height would be answered with a
+    // session that no longer exists.
+    if (session.variantBases instanceof Set) {
+      for (const baseId of session.variantBases) {
+        const base = this.sessionsById.get(baseId);
+        if (!base) {
+          continue;
+        }
+        if (base.variants instanceof Map && base.variants.get(session.variantHeight) === session.id) {
+          base.variants.delete(session.variantHeight);
+        }
+        if (base.activeVariantId === session.id) {
+          base.activeVariantId = base.id;
+        }
+      }
+    }
 
     // Let go of the source. While a session exists its torrent must survive
     // both cleanups the pool runs, and until now neither knew about it: the

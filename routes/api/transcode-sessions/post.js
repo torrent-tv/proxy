@@ -109,9 +109,26 @@ export async function handleApiTranscodeSessionsPost(req, reply, { hlsSessionMan
       // watched.
       acquireSource: () => holdSource({ sourceRegistry, torrentPool, sourceKey, fileIndex })
     });
+    // The index of quality variants, when this session has more than one to
+    // offer. Its presence is what tells the browser it can change quality
+    // without a new session: the player switches variants itself, appending the
+    // new one after what is already buffered. Absent for a copied video, whose
+    // segments are cut at the source's own keyframes and so cannot be spliced
+    // with a re-encoded rung.
+    const hasVariants = hlsSessionManager.buildMasterPlaylist(session.id) !== null;
     return reply.send({
       sessionId: session.id,
       playlistPath: `/transcode/${session.id}/index.m3u8`,
+      ...(hasVariants
+        ? {
+            masterPath: `/transcode/${session.id}/master.m3u8`,
+            // Which of the master's variants this session IS. The browser pins
+            // the player to it, so loading the master costs nothing: an encoder
+            // is already producing that height, and any other rung would be a
+            // second cold start before the first frame.
+            variantHeight: hlsSessionManager.variantHeightOf(session)
+          }
+        : {}),
       // What this session's output will carry, stated rather than left to be
       // discovered. The browser checks what it actually got against this: a
       // track that never arrives is otherwise noticed only by its absence,

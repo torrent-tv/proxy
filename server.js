@@ -29,6 +29,7 @@ import { handleApiTranscodeSessionNetReportPost } from "./routes/api/transcode-s
 import { handleApiTranscodeSessionSeekPost } from "./routes/api/transcode-sessions/seek/post.js";
 import { handleStreamGet } from "./routes/stream/get.js";
 import { handleTranscodeSessionFileGet } from "./routes/transcode/session-file/get.js";
+import { handleTranscodeVariantFileGet } from "./routes/transcode/variant-file/get.js";
 import { createSourceRegistry } from "./store/source-registry.js";
 import { WorkerTorrentPool } from "./services/torrent-worker/pool-adapter.js";
 import { HlsSessionManager } from "./services/hls-session-manager.js";
@@ -214,6 +215,12 @@ export async function startProxyServer({ host, port, transcodeAudio, ffmpegBin, 
   );
   app.get("/transcode/:sessionId/:fileName", async (req, reply) =>
     handleTranscodeSessionFileGet(req, reply, { hlsSessionManager })
+  );
+  // A quality variant's files. Registered before the static handler for the
+  // same reason as the line above, and kept a separate route rather than a
+  // wildcard so the height stays a parsed parameter.
+  app.get("/transcode/:sessionId/v/:height/:fileName", async (req, reply) =>
+    handleTranscodeVariantFileGet(req, reply, { hlsSessionManager })
   );
   await app.register(fastifyStatic, {
     root: publicRoot,

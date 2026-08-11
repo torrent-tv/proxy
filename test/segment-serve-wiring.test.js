@@ -153,6 +153,22 @@ async function managerWithReadySegment(overrides = {}) {
   return { manager, session, dirPath };
 }
 
+test("serving a segment records what its real start says about the container's index", async (t) => {
+  const { manager, session, dirPath } = await managerWithReadySegment();
+  t.after(async () => {
+    await manager.disposeAll();
+    await rm(dirPath, { recursive: true, force: true });
+  });
+  // The tally is counted in the module tests; what this pins is that serving a
+  // segment reaches it at all. A counter nothing increments reports a clean
+  // index for every file forever, which is worse than no measurement.
+  session.indexCheck = { checked: 0, disagreed: 0, maxDeviationSec: 0, firstDisagreementIndex: -1, seen: new Set() };
+
+  await manager.getFileStream(SESSION_ID, "segment-00000.mp4", { requestSeq: 1 });
+
+  assert.equal(session.indexCheck.checked, 1, "the boundary that was just produced must have been examined");
+});
+
 test("a segment that exists is served, not reported as still being produced", async (t) => {
   const { manager, dirPath } = await managerWithReadySegment();
   t.after(async () => {

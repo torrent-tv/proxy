@@ -62,12 +62,16 @@ const READERS = [
  * @param {ReadRange} params.readRange
  * @param {number} params.fileSize
  * @param {string} [params.label] - For logging only.
- * @returns {Promise<number[] | null>} Ascending seconds, or null when this file
- *   has no readable index — the caller must then not claim to know the grid.
+ * @returns {Promise<{ times: number[] | null, format: string }>} Ascending
+ *   seconds, or null times when this file has no readable index — the caller
+ *   must then not claim to know the grid. The format is which reader matched,
+ *   reported whether or not it produced anything: how often an index disagrees
+ *   with its own file is a question about the CONTAINER, and it cannot be
+ *   answered by a measurement that does not say which one it came from.
  */
 export async function readKeyframeIndex({ readRange, fileSize, label = "" }) {
   if (typeof readRange !== "function" || !Number.isFinite(fileSize) || fileSize <= 0) {
-    return null;
+    return { times: null, format: "unknown" };
   }
 
   const startedAt = Date.now();
@@ -76,7 +80,7 @@ export async function readKeyframeIndex({ readRange, fileSize, label = "" }) {
   try {
     const sniff = await readRange(0, Math.min(SNIFF_BYTES - 1, fileSize - 1));
     if (!sniff) {
-      return null;
+      return { times: null, format: "unread" };
     }
     const reader = READERS.find((candidate) => candidate.matches(sniff));
     if (reader) {
@@ -87,7 +91,7 @@ export async function readKeyframeIndex({ readRange, fileSize, label = "" }) {
     // A malformed or partially-downloaded index must never take playback down —
     // it only means the grid is unknown, which the caller already handles.
     logger.warn(`container-index: failed to read index for "${label}": ${error?.message ?? error}`);
-    return null;
+    return { times: null, format };
   }
 
   const elapsedMs = Date.now() - startedAt;
@@ -98,5 +102,5 @@ export async function readKeyframeIndex({ readRange, fileSize, label = "" }) {
   } else {
     logger.info(`container-index: no usable index for "${label}" (${format}, ${elapsedMs}ms)`);
   }
-  return times;
+  return { times, format };
 }

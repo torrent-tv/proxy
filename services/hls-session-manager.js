@@ -113,6 +113,49 @@ export function variantHeightsFor(sourceHeight) {
 }
 
 /**
+ * A fresh tally of how well a container's keyframe index matches its file.
+ *
+ * @returns {{ checked: number, disagreed: number, maxDeviationSec: number, firstDisagreementIndex: number, seen: Set<number> }}
+ */
+export function newIndexCheck() {
+  return {
+    checked: 0,
+    disagreed: 0,
+    maxDeviationSec: 0,
+    firstDisagreementIndex: -1,
+    // Which boundaries have been counted. A segment can be requested again, and
+    // a repeat is the same boundary, not new evidence.
+    seen: new Set()
+  };
+}
+
+/**
+ * Add one produced segment's deviation to the tally.
+ *
+ * @param {ReturnType<typeof newIndexCheck>} check
+ * @param {number} index - Segment index, so a repeat can be recognised.
+ * @param {number} deviationSec - How far the piece's own start fell from the
+ *   start the playlist declared for it.
+ * @returns {void}
+ */
+export function noteIndexDeviation(check, index, deviationSec) {
+  if (check.seen.has(index)) {
+    return;
+  }
+  check.seen.add(index);
+  check.checked += 1;
+  if (deviationSec > SEGMENT_START_DISAGREEMENT_SEC) {
+    check.disagreed += 1;
+    if (check.firstDisagreementIndex < 0) {
+      check.firstDisagreementIndex = index;
+    }
+  }
+  if (deviationSec > check.maxDeviationSec) {
+    check.maxDeviationSec = deviationSec;
+  }
+}
+
+/**
  * The consumer a base session registers on its variants.
  *
  * Derived from the base's id so it is stable across requests and unique per
@@ -213,6 +256,19 @@ const SEEK_BACKOFF_SEGMENTS = 1;
 // also steered by segment requests, which arrive in bursts of dozens; measured
 // 2026-08-04, that cost 1.2 s of every seek.
 const SEEK_SETTLE_MS = 300;
+// How long a segment BELOW the running encode's start may go unanswered before
+// the encoder is moved back to it. Long enough that a burst around a reported
+// seek settles on its own — the seek is what should move the encoder — and
+// short enough that a session cannot sit on an unanswerable request, which
+// measured two minutes forty-one before a viewer gave up.
+const BEHIND_HEAD_REPAIR_MS = 3_000;
+// How far behind the run a request may be and still be treated as the encoder
+// standing in the wrong place rather than as a player scanning the playlist. A
+// misplaced run is out by at most the buffer the player was holding — measured
+// 2026-08-11 at 14 segments — while a scan probe is out by anything at all.
+// Generous against that measurement, and far short of the hundreds of segments
+// a scan reaches.
+const BEHIND_HEAD_REPAIR_MAX_SEGMENTS = 60;
 // Hard cap on the total settle wait, measured from the first request of a
 // burst, so a still-moving scrubber cannot delay a genuine seek forever.
 const SEEK_SETTLE_MAX_MS = 1_000;
@@ -754,10 +810,18 @@ export function ffmpegSeconds(value) {
  * spans `[boundaries[i], boundaries[i+1])`). Falls back to a uniform grid when
  * keyframes are unavailable.
  *
- * @param {{ transcodeVideo: boolean, durationSeconds: number, segDur: number, keyframeTimes: number[] | null, startTime: number }} params
+ * Which grid applies is NOT the same question as whether the video is copied.
+ * A copy has no choice — it can only be cut where the source already has a
+ * keyframe. A re-encode normally takes the even grid, because it is producing
+ * every frame and may put keyframes where it likes; but when it has to be
+ * INTERCHANGEABLE with a copy — a quality variant of one — it takes the
+ * source's grid instead and forces its keyframes onto it. So the caller says
+ * which grid, and this stopped asking whether the video is re-encoded.
+ *
+ * @param {{ useKeyframeGrid: boolean, durationSeconds: number, segDur: number, keyframeTimes: number[] | null, startTime: number }} params
  * @returns {number[]}
  */
-export function computeSegmentBoundaries({ transcodeVideo, durationSeconds, segDur, keyframeTimes, startTime }) {
+export function computeSegmentBoundaries({ useKeyframeGrid, durationSeconds, segDur, keyframeTimes, startTime }) {
   const total = Number.isFinite(durationSeconds) && durationSeconds > 0 ? durationSeconds : 0;
   const step = Number.isFinite(segDur) && segDur > 0 ? segDur : 4;
   const uniform = () => {
@@ -768,7 +832,7 @@ export function computeSegmentBoundaries({ transcodeVideo, durationSeconds, segD
     boundaries.push(total);
     return boundaries;
   };
-  if (transcodeVideo || !Array.isArray(keyframeTimes) || keyframeTimes.length === 0 || total <= 0) {
+  if (!useKeyframeGrid || !Array.isArray(keyframeTimes) || keyframeTimes.length === 0 || total <= 0) {
     return uniform();
   }
   const base = Number.isFinite(startTime) ? startTime : 0;
@@ -822,7 +886,14 @@ export function describeFfmpegArgs(args) {
   const parts = [];
   for (let index = 0; index < args.length; index += 1) {
     const value = args[index];
-    if (value === "-segment_times" && typeof args[index + 1] === "string") {
+    // Both take the same list, and a keyframe-grid variant passes it twice.
+    // `-force_key_frames` also takes an expression, which is short and is left
+    // alone — only a list is folded.
+    if (
+      (value === "-segment_times" || value === "-force_key_frames") &&
+      typeof args[index + 1] === "string" &&
+      args[index + 1].includes(",")
+    ) {
       const times = args[index + 1].split(",");
       parts.push(value, `<${times.length} cuts ${times[0]}..${times[times.length - 1]}>`);
       index += 1;
@@ -1056,6 +1127,11 @@ export class HlsSessionManager {
     audioTrackIndex = 0,
     manualQuality = false,
     segmentFormatId = "",
+    // The cut grid of the session this one is a quality variant of: its
+    // keyframe times and which container they were read from. Present only for
+    // a variant of a session cut at the source's keyframes, and it is what
+    // makes the two interchangeable.
+    inheritedGrid = null,
     // Called once for a session that is actually created, and expected to
     // return a function that lets the source go. It is what keeps the torrent's
     // data alive for as long as a viewer has a session on it — see
@@ -1117,7 +1193,11 @@ export class HlsSessionManager {
       // both of them. Restoring it needs the active variant to be tracked per
       // consumer rather than per session, which is a change to three routes and
       // the variant path; recorded in the roadmap, not attempted here.
-      transcodeVideo ? consumerId : ""
+      transcodeVideo ? consumerId : "",
+      // Two sessions at the same height cut on different grids are different
+      // streams: one of them can be spliced into a copy of this file and the
+      // other cannot.
+      inheritedGrid ? "grid-keyframe" : "grid-own"
     ].join(":");
     const existingId = this.sessionIdBySource.get(sourceMapKey);
     if (existingId) {
@@ -1227,7 +1307,18 @@ export class HlsSessionManager {
     // grid for boundaries, raw target for seeking) — no regression.
     let keyframeTimes = null;
     let keyframeMs = -1; // -1 = not run (skipped), -2 = running in the background
-    if (hasDuration && !transcodeVideo) {
+    // Which container supplied the index, carried so the accuracy summary can
+    // say what it is a summary OF.
+    let containerFormat = "";
+    // A quality variant of a session whose cuts are the source's keyframes must
+    // be cut at exactly those same times, or its segments cannot stand where
+    // the other's would have. The grid arrives with the request rather than
+    // being worked out again: it is the same file, so a second reading could
+    // only agree — or, if the index were read differently, disagree silently.
+    if (inheritedGrid) {
+      keyframeTimes = inheritedGrid.keyframeTimes;
+      containerFormat = inheritedGrid.containerFormat ?? "";
+    } else if (hasDuration && !transcodeVideo) {
       // Video-COPY path: keyframeTimes are REQUIRED to build correct segment
       // boundaries (the playlist itself), so this MUST block session creation —
       // an incorrect playlist is worse than a slower start. Short timeout: mp4
@@ -1245,7 +1336,9 @@ export class HlsSessionManager {
       // the file comes off a torrent, and a full packet scan of 5.5 GB found 77
       // keyframes in 45 s without finishing, while the container index yields
       // all 570 in 0.8 s from two point reads (16 KB).
-      keyframeTimes = await this.#readContainerKeyframes({ sourceKey, fileIndex, inputUrl, logName });
+      const index = await this.#readContainerKeyframes({ sourceKey, fileIndex, inputUrl, logName });
+      keyframeTimes = index.times;
+      containerFormat = index.format;
       keyframeMs = Date.now() - keyframeStartMs;
       if (!keyframeTimes) {
         logger.warn(
@@ -1289,16 +1382,25 @@ export class HlsSessionManager {
         `keyframes=${keyframeMs === -1 ? "skipped" : keyframeMs === -2 ? "background" : `${keyframeMs}ms`} ` +
         `create-total=${Date.now() - createEntryMs}ms`
     );
+    // Which grid this session is cut on. A copy has no choice: only where the
+    // source already has a keyframe. A re-encode normally takes the even grid —
+    // it produces every frame and may put keyframes where it likes — unless it
+    // is a variant of a keyframe-cut session, in which case it must land on the
+    // same times to be interchangeable with it.
+    const useKeyframeGrid = hasDuration &&
+      Array.isArray(keyframeTimes) &&
+      keyframeTimes.length > 0 &&
+      (!transcodeVideo || inheritedGrid != null);
     const segmentBoundaries = hasDuration
       ? computeSegmentBoundaries({
-          transcodeVideo,
+          useKeyframeGrid,
           durationSeconds,
           segDur: this.segmentDurationSec,
           keyframeTimes,
           startTime: sourceStartTime
         })
       : [];
-    const usingKeyframeBoundaries = hasDuration && !transcodeVideo && Array.isArray(keyframeTimes);
+    const usingKeyframeBoundaries = useKeyframeGrid;
     const segmentCount = segmentBoundaries.length > 1 ? segmentBoundaries.length - 1 : 0;
 
     // Realtime budget (software encoder): pick the output resolution + libx264
@@ -1399,15 +1501,32 @@ export class HlsSessionManager {
       // VOD playlist bookkeeping.
       useSyntheticPlaylist: hasDuration,
       totalDurationSeconds: hasDuration ? durationSeconds : null,
-      // Segment start times (0-based). Uniform grid for re-encoded video; real
-      // keyframe positions for copied video. Drives the playlist and seeking.
+      // Segment start times (0-based). The source's real keyframes when this
+      // session is cut on that grid — always for copied video, and for a
+      // re-encoded variant of such a session — otherwise a uniform grid.
+      // Drives the playlist and seeking.
       segmentBoundaries,
+      // Which of the two it is, as a fact about the session rather than
+      // something re-derived from "is the video copied" at each call site. The
+      // two questions came apart the moment a re-encode had to be cut like a
+      // copy.
+      cutGrid: useKeyframeGrid ? "keyframe" : "uniform",
       segmentCount,
       // Real source keyframe times (sorted seconds), or null when the probe
       // failed/timed out. Used by #startEncodeRun to snap a source seek onto a
       // KNOWN valid position instead of trusting the container's own on-the-fly
       // seek at an arbitrary target — see the probe call above for why.
       keyframeTimes,
+      // Which container the index came from, and how well it has held up. The
+      // cut times of a copied video ARE its index, and an index can be wrong —
+      // measured 2026-08-06, one claimed a keyframe four seconds from where the
+      // real ones were. Each produced segment states where it truly begins, so
+      // the comparison costs a subtraction on a piece that is already being
+      // read; this counts them so a session can report what it found. It is
+      // what decides whether a re-encoded rung can be cut on this same grid and
+      // spliced into the copy (roadmap item 28).
+      containerFormat,
+      indexCheck: newIndexCheck(),
       playlistText: hasDuration ? this.#buildVodPlaylist(segmentBoundaries, segmentFormat) : "",
       // Segment index the current ffmpeg run started producing from.
       encodeStartIndex: 0,
@@ -1717,6 +1836,12 @@ export class HlsSessionManager {
     }
   }
 
+  /**
+   * The file's keyframe times from its container index, and which container it
+   * turned out to be.
+   *
+   * @returns {Promise<{ times: number[] | null, format: string }>}
+   */
   async #readContainerKeyframes({ sourceKey, fileIndex, inputUrl, logName }) {
     const cacheKey = `${sourceKey}:${fileIndex}`;
     if (this.keyframeIndexCache.has(cacheKey)) {
@@ -1729,10 +1854,10 @@ export class HlsSessionManager {
       const head = await fetch(url, { method: "HEAD" });
       fileSize = Number(head.headers.get("content-length")) || 0;
     } catch {
-      return null;
+      return { times: null, format: "unknown" };
     }
     if (fileSize <= 0) {
-      return null;
+      return { times: null, format: "unknown" };
     }
 
     const readRange = async (start, end) => {
@@ -1747,9 +1872,9 @@ export class HlsSessionManager {
       }
     };
 
-    const times = await readKeyframeIndex({ readRange, fileSize, label: logName });
-    this.keyframeIndexCache.set(cacheKey, times);
-    return times;
+    const result = await readKeyframeIndex({ readRange, fileSize, label: logName });
+    this.keyframeIndexCache.set(cacheKey, result);
+    return result;
   }
 
   #buildVodPlaylist(boundaries, segmentFormat) {
@@ -2435,6 +2560,14 @@ export class HlsSessionManager {
         `${restartEnteredAt - wantedAt}ms after it was first asked for`
       );
     }
+    // Cleared with the run that could not answer them. These are "how long has
+    // this segment gone unanswered", and the question only means anything about
+    // the run in force: a timestamp kept from an abandoned scan probe minutes
+    // ago says a fresh request has already waited long enough, which is how the
+    // behind-head repair came to fire on the very first poll instead of waiting
+    // for the seek that should move the encoder. It also stops the map growing
+    // for the life of a session.
+    session.firstWantedAt = new Map();
     const generation = ++session.encodeRunGeneration;
     const previousFfmpeg = session.ffmpeg;
     // A suspended process does not act on SIGTERM until it is continued, so the
@@ -2473,10 +2606,26 @@ export class HlsSessionManager {
     }
 
     const safeIndex = Number.isInteger(startIndex) && startIndex > 0 ? startIndex : 0;
-    // 0-based output time of this segment, from the boundary table (uniform for
-    // re-encode, real keyframe for copy).
+    // 0-based output time of this segment, from the boundary table.
     const startSeconds = this.#segmentStartTime(session, safeIndex);
     const sourceStartTime = Number.isFinite(session.sourceStartTime) ? session.sourceStartTime : 0;
+    // Cut where this session's grid says, whoever is producing the frames. The
+    // times are measured from the start of THIS run; the same list serves as
+    // the cut points and, when re-encoding, as the keyframes to force — one
+    // list, so the two cannot drift apart.
+    const explicitTimes = session.segmentFormat.explicitTimesMuxerArgs?.() ?? null;
+    // A COPY is cut by this list whatever grid it ended up on. Even when no
+    // keyframe index could be read and the boundaries are a plain grid, saying
+    // them outright is what keeps the playlist and the muxer agreeing — ffmpeg
+    // moves each cut forward to the first real keyframe, and serving reads back
+    // where the piece truly begins. Requiring a keyframe grid here dropped a
+    // copy with no index onto the `hls` muxer, which takes no cut list and
+    // writes no self-contained pieces, so nothing could read a true start and
+    // segments were stamped with times the file does not have — the 4.17 s
+    // speech-against-subtitles drift, back again.
+    const cutTimes = explicitTimes && (!session.transcodeVideo || session.cutGrid === "keyframe")
+      ? segmentCutTimesFrom(session.segmentBoundaries, safeIndex)
+      : null;
 
     // Terminate any existing encode process before starting a new one.  The
     // old process's exit handler no-ops because session.ffmpeg is reassigned
@@ -2506,7 +2655,11 @@ export class HlsSessionManager {
           // Software-only; hardware descriptors ignore it.
           preset: session.softwarePreset ?? undefined,
           // HDR→SDR tone map (software path only; gated on filter availability).
-          tonemap: session.applyTonemap === true
+          tonemap: session.applyTonemap === true,
+          // On the source's grid the cuts are not evenly spaced, so no frame
+          // count can describe them: the encoder is told the times outright,
+          // the same ones the muxer will cut at.
+          forcedKeyframeTimes: cutTimes
         })
       : ["-c:v", "copy"];
     const audioCodecArgs = session.transcodeAudio
@@ -2519,10 +2672,14 @@ export class HlsSessionManager {
     if (session.transcodeVideo && Array.isArray(this.videoEncoder.inputArgs)) {
       args.push(...this.videoEncoder.inputArgs);
     }
-    // Seek position in SOURCE time. For copy we seek to the real keyframe
-    // (startSeconds is already a real-keyframe offset from 0, so add back the
-    // container start time); for re-encode startSeconds is a plain grid offset.
-    const seekSeconds = session.transcodeVideo ? startSeconds : startSeconds + sourceStartTime;
+    // Seek position in SOURCE time. On the keyframe grid `startSeconds` is a
+    // real keyframe's offset from zero, so the container's own start time goes
+    // back on to reach it; on the uniform grid it is a plain offset. This
+    // follows the GRID, not whether the video is re-encoded — a variant cut on
+    // the source's keyframes has to seek to them like the copy it accompanies.
+    const seekSeconds = session.cutGrid === "keyframe"
+      ? startSeconds + sourceStartTime
+      : startSeconds;
     // Two-step seek when we have a real keyframe map: jump to a KNOWN-valid
     // keyframe (coarse, before -i — safe because WE sourced it from ffprobe,
     // not the container's own on-the-fly seek/index) and trim the short
@@ -2602,11 +2759,10 @@ export class HlsSessionManager {
     // outright. Passing the very boundaries the playlist was built from makes
     // the two agree by construction. Only cut points already known to be real
     // keyframes are sent, so ffmpeg never has to move one forward.
-    const explicitTimes = session.segmentFormat.explicitTimesMuxerArgs?.() ?? null;
-    const cutTimes = explicitTimes && !session.transcodeVideo
-      ? segmentCutTimesFrom(session.segmentBoundaries, safeIndex)
-      : null;
-
+    //
+    // The list is built above, before the encoder args, because a re-encoded
+    // variant of a copied stream needs the same times twice over: once as the
+    // cuts, once as the keyframes to force at them.
     if (cutTimes && cutTimes.length > 0) {
       args.push(
         "-f",
@@ -2991,6 +3147,26 @@ export class HlsSessionManager {
     if (withinWindow) {
       return;
     }
+    // A request BELOW where the run begins is not noise and never will be
+    // satisfied: this encoder only ever moves forward from `head`, so nothing
+    // it does can produce this segment. Every other far request is a claim that
+    // the running encode may yet reach — this one is a hole, and holding it is
+    // holding it for ever.
+    //
+    // Measured 2026-08-11: a run repositioned to #770 while the player needed
+    // #757 held that request for two minutes forty-one, producing 409 s of
+    // video nobody had asked for at 2.48x, until the viewer gave up. That was a
+    // quality switch placing the run wrongly; the placement is fixed, but the
+    // shape must not be able to hang a session again whatever puts it there.
+    //
+    // Waited on rather than acted on at once: a burst that arrives around a
+    // reported seek settles by itself within a moment, and the seek is what
+    // should move the encoder. Only a request still unanswerable after that is
+    // repaired here.
+    if (index < head) {
+      this.#repairBehindHead(session, index, head);
+      return;
+    }
     // Circuit breaker: this exact target has already failed MAX_SEEK_FAILURES
     // times in a row (fast failures — see #wireEncodeProcess's exit handler).
     // Stop auto-retrying it; session.state stays "failed" so getFileStream
@@ -3020,6 +3196,69 @@ export class HlsSessionManager {
     // when behind the encoder, and the LOWEST outstanding index marks where the
     // viewer is actually stalled — the honest input for what to produce first.
     // See research/hls-seek-prior-art-2026-08-02.md.
+  }
+
+  /**
+   * Move the encoder back to a segment it can no longer produce.
+   *
+   * A run only ever goes forward from where it began, so a request below that
+   * point is not a claim the run may yet reach — it is a hole, and holding it
+   * holds it for ever. Measured 2026-08-11: a run placed at #770 while the
+   * player needed #757 held that request for two minutes forty-one, producing
+   * 409 s of video nobody had asked for.
+   *
+   * Deliberately narrow, because moving the encoder from a segment REQUEST is
+   * exactly what this codebase removed once already: a player that cannot get
+   * what it wants scans the playlist, and those probes are scattered across the
+   * whole file (field log: #178, #681, #725, #807, #74, #245, #387 within half
+   * a second). Steering on the lowest of them put the encoder at the start of
+   * the film and left the viewer's own requests unreachable ahead of it.
+   *
+   * What separates the two: a run placed wrongly is out by at most the buffer
+   * the player had — 14 segments in the measured case — while a scan probe is
+   * out by anything at all. So only a request within reach behind the head is
+   * repaired; the rest are what they always were, claims that answer 503.
+   *
+   * @param {HlsSession} session
+   * @param {number} index - The segment being held.
+   * @param {number} head - Where the current run begins.
+   * @returns {void}
+   */
+  #repairBehindHead(session, index, head) {
+    if (head - index > BEHIND_HEAD_REPAIR_MAX_SEGMENTS) {
+      return;
+    }
+    // Nothing is encoding: a rung the viewer has switched away from is left
+    // exactly so, and its held requests must not bring its encoder back.
+    if (session.ffmpeg == null || hasChildExited(session.ffmpeg)) {
+      return;
+    }
+    // A seek already settling is about to move the encoder to where the VIEWER
+    // said they are. That statement outranks anything inferred here.
+    if (session.seekSettleTimer != null) {
+      return;
+    }
+    const wantedAt = session.firstWantedAt?.get(index);
+    if (!Number.isFinite(wantedAt) || Date.now() - wantedAt < BEHIND_HEAD_REPAIR_MS) {
+      return;
+    }
+    const target = Math.max(0, index - SEEK_BACKOFF_SEGMENTS);
+    // The breaker has already refused this target repeatedly. Re-arming for it
+    // would log and re-arm on every poll for as long as the request is held,
+    // and move nothing.
+    if (target === session.seekFailureTarget && session.seekFailureCount >= MAX_SEEK_FAILURES) {
+      return;
+    }
+    logger.warn(
+      `transcode ${session.id} segment #${index} is behind the run (#${head}) and has waited ` +
+      `${Date.now() - wantedAt}ms — nothing this run does can produce it; moving the encoder there`
+    );
+    // Through the same settle a viewer's own seek goes through, so a burst of
+    // behind-head requests produces one restart and not one each.
+    session.seekTarget = target;
+    session.seekFirstFarAt = Date.now();
+    session.seekSettleTimer = setTimeout(() => this.#fireSettledSeek(session), SEEK_SETTLE_MS);
+    session.seekSettleTimer.unref?.();
   }
 
   /**
@@ -3472,6 +3711,69 @@ export class HlsSessionManager {
   }
 
   /**
+   * Record how far a produced segment's real start fell from what the playlist
+   * declared for it.
+   *
+   * The playlist's figure comes from the container's keyframe index; the
+   * segment's own figure comes from the piece ffmpeg wrote. The difference IS
+   * the index's error at that boundary, measured without scanning anything —
+   * the piece is already read whole in order to be stamped, and only boundaries
+   * that were actually produced are counted, which is to say the parts somebody
+   * watched.
+   *
+   * Counted once per boundary: a segment can be requested again, and a repeat
+   * is not new evidence.
+   *
+   * @param {HlsSession} session
+   * @param {number} index
+   * @param {number} trueStart - Seconds, read from the piece itself.
+   * @param {number} declaredStart - Seconds, from the playlist.
+   * @returns {void}
+   */
+  #noteIndexAccuracy(session, index, trueStart, declaredStart) {
+    const deviation = Math.abs(trueStart - declaredStart);
+    session.indexCheck ??= newIndexCheck();
+    noteIndexDeviation(session.indexCheck, index, deviation);
+    if (deviation > SEGMENT_START_DISAGREEMENT_SEC) {
+      logger.warn(
+        `transcode ${session.id} segment #${index} really starts at ` +
+        `${trueStart.toFixed(3)}s, the playlist says ${declaredStart.toFixed(3)}s — ` +
+        (session.transcodeVideo
+          // A re-encode was TOLD to put a keyframe here and did not, so this
+          // rung's segments no longer stand where the stream it accompanies
+          // would have put them. That is a broken splice, not a wrong index.
+          ? "this rung did not cut where its grid says; a switch to it will not join cleanly"
+          : "the container's keyframe index disagrees with the file; using the file")
+      );
+    }
+  }
+
+  /**
+   * What this session learned about its container's keyframe index, as one
+   * line, at the end.
+   *
+   * Written even when nothing disagreed, because that is the finding: with only
+   * the per-boundary warning, silence could not be told from nobody having
+   * watched. Skipped for a session that checked nothing, which says neither.
+   *
+   * @param {HlsSession} session
+   * @returns {void}
+   */
+  #logIndexAccuracy(session) {
+    const check = session.indexCheck;
+    if (!check || check.checked === 0) {
+      return;
+    }
+    logger.info(
+      `keyframe-index ${session.containerFormat || "unknown"} "${session.fileName}": ` +
+      `${check.disagreed} of ${check.checked} produced segments started away from the playlist, ` +
+      `worst ${check.maxDeviationSec.toFixed(3)}s` +
+      (check.firstDisagreementIndex >= 0 ? ` (first at #${check.firstDisagreementIndex})` : "") +
+      ` [tolerance ${SEGMENT_START_DISAGREEMENT_SEC}s]`
+    );
+  }
+
+  /**
    * Which variant a session IS, as a height. Zero encode height means "keep the
    * source", so the source's own height is the answer.
    *
@@ -3557,6 +3859,26 @@ export class HlsSessionManager {
    * @param {HlsSession} session
    * @returns {number}
    */
+  /**
+   * Where a variant's first encode run should begin, in seconds.
+   *
+   * The segment the player asked for, when there is one: after a level switch
+   * hls.js discards what it had buffered ahead and fetches from the picture's
+   * own position, so its first request IS that position. Falling back to the
+   * rung being left means falling back to that rung's READ head, which sits a
+   * whole buffer further on.
+   *
+   * @param {HlsSession} base
+   * @param {number} wantedIndex - Segment index asked for, or -1.
+   * @returns {number}
+   */
+  #variantStartSeconds(base, wantedIndex) {
+    if (Number.isInteger(wantedIndex) && wantedIndex >= 0) {
+      return this.#segmentStartTime(base, wantedIndex);
+    }
+    return this.#viewerPositionOf(this.#activeVariant(base));
+  }
+
   #viewerPositionOf(session) {
     if (Number.isFinite(session.viewerPositionSeconds) && session.viewerPositionSeconds > 0) {
       return session.viewerPositionSeconds;
@@ -3633,7 +3955,7 @@ export class HlsSessionManager {
    * @returns {Promise<HlsSession | null>} Null when the base session is unknown,
    *   or the height is not offered for it.
    */
-  async resolveVariantSession(baseSessionId, height) {
+  async resolveVariantSession(baseSessionId, height, wantedIndex = -1) {
     if (!isSafeSessionId(baseSessionId)) {
       return null;
     }
@@ -3683,12 +4005,21 @@ export class HlsSessionManager {
       consumerId: variantConsumerId(base.id),
       targetWidth: 0,
       targetHeight: height,
-      // Where the viewer is now, so a variant created mid-film starts there
-      // rather than at the beginning. Floored onto the ten-second grid that
-      // session keys are bucketed to: rounding is what that bucket does, and a
-      // position rounded UP starts the run past the viewer, so the run just
-      // spawned is killed and restarted before it has produced anything.
-      startPositionSeconds: Math.floor(this.#viewerPositionOf(this.#activeVariant(base)) / 10) * 10,
+      // Where this variant must begin. The segment the player asked it for when
+      // it can be known — that is the player stating outright where it will
+      // start fetching, and it is the only figure that cannot be stale.
+      //
+      // The other rung's read head is NOT that figure, and using it cost a
+      // stuck session on 2026-08-11: a 240p rung encoding at 5-6x had read 56 s
+      // further than the picture had played, so switching back to 400p placed
+      // that run at 3084 s while the player needed 3028 s, and no segment it
+      // wanted was ever produced.
+      //
+      // Floored onto the ten-second grid that session keys are bucketed to:
+      // rounding is what that bucket does, and a position rounded UP starts the
+      // run past the viewer, so the run just spawned is killed and restarted
+      // before it has produced anything.
+      startPositionSeconds: Math.floor(this.#variantStartSeconds(base, wantedIndex) / 10) * 10,
       audioTrackIndex: base.audioTrackIndex,
       // A variant is a resolution the viewer chose, so it is encoded at exactly
       // that size and the realtime budget does not move it — otherwise two
@@ -3696,6 +4027,13 @@ export class HlsSessionManager {
       // nothing.
       manualQuality: true,
       segmentFormatId: base.segmentFormat?.id ?? "",
+      // Cut where the base is cut. Only for a base on the source's own keyframe
+      // grid — a copy — where the variant has to land on those exact times to
+      // be interchangeable with it. A base on the uniform grid needs nothing
+      // passed: the variant computes the same even grid from the same duration.
+      inheritedGrid: base.cutGrid === "keyframe"
+        ? { keyframeTimes: base.keyframeTimes, containerFormat: base.containerFormat }
+        : null,
       acquireSource: base.acquireSource
     })
       .then(async (variant) => {
@@ -3771,7 +4109,11 @@ export class HlsSessionManager {
     }
     let variant;
     try {
-      variant = await this.resolveVariantSession(baseSessionId, height);
+      variant = await this.resolveVariantSession(
+        baseSessionId,
+        height,
+        isSegment ? base.segmentFormat.segmentIndexFromName(fileName) : -1
+      );
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       logger.error(
@@ -3783,9 +4125,10 @@ export class HlsSessionManager {
     if (!variant) {
       return { sessionId: null };
     }
-    // Only a SEGMENT says the viewer is watching this rung.
+    // Only a SEGMENT says the viewer is watching this rung — and it says more
+    // than that: it names the exact segment the player wants from it.
     if (isSegment) {
-      this.#noteVariantActive(base, variant);
+      this.#noteVariantActive(base, variant, variant.segmentFormat.segmentIndexFromName(fileName));
     }
     return { sessionId: variant.id };
   }
@@ -3800,14 +4143,15 @@ export class HlsSessionManager {
    *
    * @param {HlsSession} base
    * @param {HlsSession} variant
+   * @param {number} wantedIndex - The segment this rung was just asked for.
    * @returns {void}
    */
-  #noteVariantActive(base, variant) {
+  #noteVariantActive(base, variant, wantedIndex = -1) {
     const previous = this.#activeVariant(base);
     if (previous.id === variant.id) {
       return;
     }
-    const position = this.#viewerPositionOf(previous);
+    const position = this.#variantStartSeconds(base, wantedIndex);
     base.activeVariantId = variant.id;
     logger.info(
       `transcode ${base.id} variant now ${this.variantHeightOf(variant)}p ` +
@@ -3840,21 +4184,32 @@ export class HlsSessionManager {
    * variant, appends it after what is already buffered, and changes the
    * decoder's type if the codec parameters differ.
    *
-   * Offered only where the variants can actually be joined: every one of them
-   * is re-encoded, so all are cut on the same uniform grid with keyframes
-   * forced onto it. A session that COPIES the video is cut at the source's own
-   * keyframes instead, and a rung cut elsewhere cannot be spliced into it.
+   * Offered only where the variants can actually be joined, which is a question
+   * about the CUT GRID and not about who produces the frames:
+   *
+   * - a re-encoded session on the uniform grid — its variants are re-encoded on
+   *   the same one, keyframes forced onto it;
+   * - a session cut at the source's own keyframes — a copy, which has no other
+   *   choice — where the variants are re-encoded and forced onto those very
+   *   times, so a rung's segment covers the same span as the copy's.
+   *
+   * What is refused is a session whose own grid is a fiction: a copy with no
+   * readable keyframe index falls back to an even grid that ffmpeg then does
+   * not cut on, and nothing can be aligned to that.
    *
    * @param {string} sessionId
    * @returns {string | null} The playlist text, or null when there is nothing
-   *   to choose between — a copied video, or a source too small to step down.
+   *   to choose between, or nothing to align to.
    */
   buildMasterPlaylist(sessionId) {
     if (!isSafeSessionId(sessionId)) {
       return null;
     }
     const session = this.sessionsById.get(sessionId);
-    if (!session || session.state === "disposed" || !session.transcodeVideo) {
+    if (!session || session.state === "disposed") {
+      return null;
+    }
+    if (!session.transcodeVideo && session.cutGrid !== "keyframe") {
       return null;
     }
     const sourceHeight = Number(session.sourceHeight) || 0;
@@ -4191,12 +4546,8 @@ export class HlsSessionManager {
           ? session.segmentFormat.readSegmentStartSeconds?.(raw) ?? null
           : null;
         const declaredStart = this.#segmentStartTime(session, index);
-        if (trueStart !== null && Math.abs(trueStart - declaredStart) > SEGMENT_START_DISAGREEMENT_SEC) {
-          logger.warn(
-            `transcode ${session.id} segment #${index} really starts at ` +
-            `${trueStart.toFixed(3)}s, the playlist says ${declaredStart.toFixed(3)}s — ` +
-            "the container's keyframe index disagrees with the file; using the file"
-          );
+        if (trueStart !== null) {
+          this.#noteIndexAccuracy(session, index, trueStart, declaredStart);
         }
         const prepared = session.segmentFormat.prepareSegmentBytes(bytes, {
           startSeconds: trueStart ?? declaredStart,
@@ -4506,6 +4857,7 @@ export class HlsSessionManager {
     session.state = "disposed";
     this.sessionsById.delete(sessionId);
     this.sessionIdBySource.delete(session.sourceMapKey);
+    this.#logIndexAccuracy(session);
 
     // A variant serves this session's viewer and nobody learns its id but us,
     // so it would otherwise encode and occupy disk for no one until its idle

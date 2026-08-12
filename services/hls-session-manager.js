@@ -1419,15 +1419,23 @@ export class HlsSessionManager {
       Array.isArray(keyframeTimes) &&
       keyframeTimes.length > 0 &&
       (!transcodeVideo || inheritedGrid != null);
-    const segmentBoundaries = hasDuration
-      ? computeSegmentBoundaries({
-          useKeyframeGrid,
-          durationSeconds,
-          segDur: this.segmentDurationSec,
-          keyframeTimes,
-          startTime: sourceStartTime
-        })
-      : [];
+    // A rung takes the grid it was handed, rather than working one out again
+    // from the same index. The two are not the same table: the one it is handed
+    // has been CORRECTED wherever a produced segment showed the index to be
+    // wrong, and it is those corrected times the copy actually cuts at. Building
+    // it afresh here would put the rung back on the index's fiction and undo the
+    // alignment it exists for.
+    const segmentBoundaries = Array.isArray(inheritedGrid?.boundaries) && inheritedGrid.boundaries.length > 1
+      ? [...inheritedGrid.boundaries]
+      : (hasDuration
+        ? computeSegmentBoundaries({
+            useKeyframeGrid,
+            durationSeconds,
+            segDur: this.segmentDurationSec,
+            keyframeTimes,
+            startTime: sourceStartTime
+          })
+        : []);
     const usingKeyframeBoundaries = useKeyframeGrid;
     const segmentCount = segmentBoundaries.length > 1 ? segmentBoundaries.length - 1 : 0;
 
@@ -3354,7 +3362,27 @@ export class HlsSessionManager {
     // variants, so a seek it reports means the stream on screen.
     named.viewerPositionSeconds = positionSeconds;
     named.lastAccessedAt = Date.now();
-    const session = this.#activeVariant(named);
+    return this.#seekSession(this.#activeVariant(named), positionSeconds);
+  }
+
+  /**
+   * Reposition THIS session, with no forwarding.
+   *
+   * {@link requestSeek} exists for the browser, which names the base session and
+   * means the rung on screen. Everything inside this class means the session it
+   * is holding: warming a rung has to move THAT rung, and forwarding sent the
+   * seek to the one already playing instead — measured 2026-08-12, warming the
+   * base's own height moved the 540p rung and left the base parked at the start,
+   * so the switch had nothing to fetch.
+   *
+   * @param {HlsSession} session
+   * @param {number} positionSeconds
+   * @returns {boolean}
+   */
+  #seekSession(session, positionSeconds) {
+    if (!session || session.state === "disposed") {
+      return false;
+    }
     session.viewerPositionSeconds = positionSeconds;
     session.lastAccessedAt = Date.now();
     // Every segment request being held right now was made for the position the
@@ -3794,6 +3822,92 @@ export class HlsSessionManager {
           : "the container's keyframe index disagrees with the file; using the file")
       );
     }
+    this.correctBoundaryFromSegment(session, index, trueStart);
+  }
+
+  /**
+   * Replace a boundary the index got wrong with the time the file actually has.
+   *
+   * The grid of a copied stream comes from the container's keyframe index,
+   * because a copy can only be cut where a keyframe already is and nothing
+   * cheaper than the index can say where that is before a single byte is
+   * encoded. An index can be wrong — proven 2026-08-12 by reproducing both
+   * cases against the same file: with an honest index every produced segment
+   * started exactly where declared, and with one moved 1.8 s the segments
+   * started 1.8 s early, matching no boundary at all. The field showed the
+   * second shape.
+   *
+   * The truth arrives anyway, one segment at a time: a produced piece states
+   * where it really begins. Writing it back makes the grid describe the file
+   * instead of the index — and it is what lets a re-encoded rung be cut to
+   * match a copied one, because the rung is then forced onto times the copy
+   * really uses. The alternative considered and rejected was to stop offering
+   * quality on files with a bad index, which is not a fix but a withdrawal.
+   *
+   * The whole family shares one grid, so a correction reaches all of it: a rung
+   * created afterwards inherits a table that is true wherever anyone has looked.
+   *
+   * @param {HlsSession} session
+   * @param {number} index
+   * @param {number} trueStart
+   * @returns {void}
+   */
+  correctBoundaryFromSegment(session, index, trueStart) {
+    const boundaries = session.segmentBoundaries;
+    if (!Array.isArray(boundaries) || index <= 0 || index >= boundaries.length - 1) {
+      // Index 0 is the start of the file and the last entry is its end; neither
+      // is a cut, and neither can be learned from a segment.
+      return;
+    }
+    if (Math.abs(boundaries[index] - trueStart) <= SEGMENT_START_DISAGREEMENT_SEC) {
+      return;
+    }
+    // A correction that would put this boundary at or past its neighbours is not
+    // a correction — it is a reading from a run that started somewhere else, and
+    // applying it would make the table describe nothing at all.
+    if (trueStart <= boundaries[index - 1] || trueStart >= boundaries[index + 1]) {
+      return;
+    }
+    const wasAt = boundaries[index];
+    for (const member of this.#familyOf(session)) {
+      if (Array.isArray(member.segmentBoundaries) && member.segmentBoundaries.length === boundaries.length) {
+        member.segmentBoundaries[index] = trueStart;
+      }
+    }
+    logger.info(
+      `transcode ${session.id} boundary #${index} corrected ${wasAt.toFixed(3)}s → ` +
+      `${trueStart.toFixed(3)}s from the file itself`
+    );
+  }
+
+  /**
+   * Every session cut on one grid: a base and its quality rungs.
+   *
+   * @param {HlsSession} session
+   * @returns {HlsSession[]}
+   */
+  #familyOf(session) {
+    const bases = session.variantBases instanceof Set
+      ? [...session.variantBases]
+      : [];
+    const roots = bases.length > 0 ? bases : [session.id];
+    const family = new Set([session]);
+    for (const rootId of roots) {
+      const root = this.sessionsById.get(rootId);
+      if (!root) {
+        continue;
+      }
+      family.add(root);
+      if (root.variants instanceof Map) {
+        for (const variantId of root.variants.values()) {
+          const variant = this.sessionsById.get(variantId);
+          if (variant) {
+            family.add(variant);
+          }
+        }
+      }
+    }
+    return [...family];
   }
 
   /**
@@ -4103,7 +4217,13 @@ export class HlsSessionManager {
       // be interchangeable with it. A base on the uniform grid needs nothing
       // passed: the variant computes the same even grid from the same duration.
       inheritedGrid: base.cutGrid === "keyframe"
-        ? { keyframeTimes: base.keyframeTimes, containerFormat: base.containerFormat }
+        ? {
+            // The table as it stands NOW, corrections included — not the index
+            // it was first built from.
+            boundaries: base.segmentBoundaries,
+            keyframeTimes: base.keyframeTimes,
+            containerFormat: base.containerFormat
+          }
         : null,
       acquireSource: base.acquireSource
     })
@@ -4257,8 +4377,14 @@ export class HlsSessionManager {
     // the switch position exactly as an activation would — the difference is
     // only that the rung on screen keeps its own encoder meanwhile.
     variant.lastAccessedAt = Date.now();
-    if (variant.id !== base.id) {
-      this.requestSeek(variant.id, this.#segmentStartTime(base, index));
+    // Anything that is not the rung on screen has to be pointed at the switch
+    // position — INCLUDING the base. Skipping it because it is the base was a
+    // defect: the base is parked wherever it was when the viewer left it, and
+    // its encoder was stopped then. Measured 2026-08-12, warming 400p at
+    // 6506.5s found the base still at `run from #0`, so the segment the switch
+    // needed was never produced and the viewer got nothing at all.
+    if (variant.id !== this.#activeVariant(base).id) {
+      this.#seekSession(variant, this.#segmentStartTime(base, index));
     }
     logger.info(
       `transcode ${base.id} warming ${height}p at ${positionSeconds.toFixed(1)}s (segment #${index})`
@@ -4281,10 +4407,20 @@ export class HlsSessionManager {
    */
   #noteVariantActive(base, variant, wantedIndex = -1) {
     const previous = this.#activeVariant(base);
-    // Whatever was warmed is decided now: either it is the rung being switched
-    // to, or the viewer went elsewhere and it must stop like any other rung
-    // nobody is watching. Nothing else would ever stop it — only the rung being
-    // LEFT is stopped below.
+    if (previous.id === variant.id) {
+      // The rung on screen asking for more of itself, which it does every few
+      // seconds. Nothing is being decided here — and deciding anything was the
+      // defect: the warm-up was cancelled by the next segment the CURRENT rung
+      // fetched, measured 2026-08-12 at 117 ms and 1.5 s after two warm-ups
+      // began, so the rung being prepared was stopped before it had encoded
+      // anything and the viewer waited out the full thirty-second warm-up for a
+      // segment nobody was making, then waited again for the switch itself.
+      return;
+    }
+    // A rung is being left, so whatever was warmed is decided: either it is the
+    // rung now being switched to, or the viewer went somewhere else and it must
+    // stop like any other rung nobody is watching. Nothing else would ever stop
+    // it — only the rung being LEFT is stopped below.
     const warmed = base.warmingVariantId;
     base.warmingVariantId = null;
     if (warmed && warmed !== variant.id && warmed !== previous.id) {
@@ -4292,9 +4428,6 @@ export class HlsSessionManager {
       if (abandoned) {
         this.#stopEncodeRun(abandoned, "warmed for a switch the viewer did not make");
       }
-    }
-    if (previous.id === variant.id) {
-      return;
     }
     const position = this.#variantStartSeconds(base, wantedIndex);
     base.activeVariantId = variant.id;
@@ -4310,10 +4443,12 @@ export class HlsSessionManager {
     this.#stopEncodeRun(previous, `the viewer moved to ${this.variantHeightOf(variant)}p`);
     if (position > 0) {
       variant.viewerPositionSeconds = position;
-      // A variant just created already starts here, and requestSeek says so
-      // rather than restarting it. One that existed before is parked where it
-      // was left, and this is what brings it to the viewer.
-      this.requestSeek(variant.id, position);
+      // The rung being switched TO, named literally: a warm-up may have left
+      // the family pointing elsewhere, and forwarding would move that one
+      // instead. A rung just created already starts here and is told so rather
+      // than restarted; one that existed before is parked where it was left,
+      // and this is what brings it to the viewer.
+      this.#seekSession(variant, position);
     }
   }
 

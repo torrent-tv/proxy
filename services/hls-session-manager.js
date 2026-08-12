@@ -156,6 +156,34 @@ export function noteIndexDeviation(check, index, deviationSec) {
 }
 
 /**
+ * The same budget, starting at the top of its own ladder.
+ *
+ * The automatic choice takes the highest rung this host can encode faster than
+ * realtime. A viewer who names a resolution has already made that choice, so
+ * the encode starts where they said — and the ladder stays, because a host that
+ * turns out unable to keep up must still have somewhere to go.
+ *
+ * @param {{ ladder: { width: number, height: number }[], rungIndex: number } | null} budget
+ * @param {number} outputFps
+ * @param {unknown} benchmark
+ * @returns {object | null}
+ */
+function startAtLadderTop(budget, outputFps, benchmark) {
+  const top = budget?.ladder?.[0];
+  if (!top) {
+    return null;
+  }
+  const fps = Number.isInteger(outputFps) && outputFps > 0 ? outputFps : TRANSCODE_FPS;
+  return {
+    ...budget,
+    width: top.width,
+    height: top.height,
+    preset: pickSoftwarePreset(benchmark, top.width * top.height * fps),
+    rungIndex: 0
+  };
+}
+
+/**
  * The consumer a base session registers on its variants.
  *
  * Derived from the base's id so it is stable across requests and unique per
@@ -1414,16 +1442,23 @@ export class HlsSessionManager {
     // resolution, so encode exactly that box (capped to source by the scale
     // filter) with the default preset, and the runtime downswitch is skipped
     // for the session (budgetLadder stays null).
-    const encodeBudget = forceManualQuality
-      ? null
-      : this.#chooseEncodeBudget({
-          transcodeVideo,
-          targetWidth: normalizedTargetWidth,
-          targetHeight: normalizedTargetHeight,
-          sourceWidth,
-          sourceHeight,
-          outputFps
-        });
+    const chosenBudget = this.#chooseEncodeBudget({
+      transcodeVideo,
+      targetWidth: normalizedTargetWidth,
+      targetHeight: normalizedTargetHeight,
+      sourceWidth,
+      sourceHeight,
+      outputFps
+    });
+    // A forced resolution starts at exactly that size — the viewer asked for it
+    // — but KEEPS the ladder beneath it. Discarding the ladder is what left a
+    // viewer with no picture at all on 2026-08-11: they picked 480p on a host
+    // that encodes it at 0.27-0.78x, and with the runtime downshift disabled
+    // nothing could step in, so the stream simply never caught up. A smaller
+    // picture that plays beats a correct label that freezes. The rung's NAME is
+    // settled separately and does not move with a downshift, so the player goes
+    // on addressing it by the height it chose.
+    const encodeBudget = forceManualQuality ? startAtLadderTop(chosenBudget, outputFps, this.softwarePresetBenchmark) : chosenBudget;
     const softwarePreset = encodeBudget?.preset ?? null;
     // Effective encode box: the budget's downscaled resolution when applied,
     // otherwise the client target (0 = keep source, handled by buildVideoArgs).
@@ -1607,8 +1642,12 @@ export class HlsSessionManager {
         `${sourceWidth && sourceHeight ? `src=${sourceWidth}x${sourceHeight} ` : ""}` +
         // Effective encode resolution: budget-on (auto downscale from the
         // ceiling), manual (user-forced, budget off), or unset (keep source).
-        `${transcodeVideo && encodeBudget ? `enc=${encodeWidth}x${encodeHeight}@${outputFps} budget=on ` : ""}` +
-        `${transcodeVideo && forceManualQuality ? `enc=${encodeWidth || "src"}x${encodeHeight || "src"}@${outputFps} quality=manual ` : ""}` +
+        `${transcodeVideo && encodeBudget
+          ? `enc=${encodeWidth}x${encodeHeight}@${outputFps} ` +
+            `quality=${forceManualQuality ? "manual" : "auto"} ` +
+            `budget=${encodeBudget.ladder ? `rung ${encodeBudget.rungIndex + 1}/${encodeBudget.ladder.length}` : "off"} `
+          : ""}` +
+        `${transcodeVideo && !encodeBudget && forceManualQuality ? `enc=${encodeWidth || "src"}x${encodeHeight || "src"}@${outputFps} quality=manual budget=off ` : ""}` +
         // HDR source and whether the tone-map chain was applied (vs washed-out
         // fallback when the filters are missing or on a hardware encoder).
         `${transcodeVideo && mediaInfo.isHdr ? `hdr=1 tonemap=${applyTonemap ? "on" : "off"} ` : ""}` +
@@ -3735,9 +3774,18 @@ export class HlsSessionManager {
     session.indexCheck ??= newIndexCheck();
     noteIndexDeviation(session.indexCheck, index, deviation);
     if (deviation > SEGMENT_START_DISAGREEMENT_SEC) {
+      // Which boundary the true start DOES match, if any. This is what tells
+      // the two possible faults apart, and they need opposite fixes: matching
+      // boundary #N-1 means our numbering is shifted by one — a fault in this
+      // code, where the run begins — while matching nothing means the container
+      // index describes times the file does not have. Measured 2026-08-11,
+      // three samples all matched N-1, which is why the line now says so
+      // instead of leaving it to be inferred from the numbers.
+      const at = this.#boundaryIndexAt(session, trueStart);
       logger.warn(
         `transcode ${session.id} segment #${index} really starts at ` +
-        `${trueStart.toFixed(3)}s, the playlist says ${declaredStart.toFixed(3)}s — ` +
+        `${trueStart.toFixed(3)}s (boundary ${at === null ? "none" : `#${at}`}), ` +
+        `the playlist says ${declaredStart.toFixed(3)}s — ` +
         (session.transcodeVideo
           // A re-encode was TOLD to put a keyframe here and did not, so this
           // rung's segments no longer stand where the stream it accompanies
@@ -3746,6 +3794,29 @@ export class HlsSessionManager {
           : "the container's keyframe index disagrees with the file; using the file")
       );
     }
+  }
+
+  /**
+   * The boundary a time falls on, or null when it falls on none of them.
+   *
+   * Within the same tolerance a disagreement is judged by, so "matches boundary
+   * #N-1" and "matches nothing" mean what they say.
+   *
+   * @param {HlsSession} session
+   * @param {number} seconds
+   * @returns {number | null}
+   */
+  #boundaryIndexAt(session, seconds) {
+    const boundaries = session.segmentBoundaries;
+    if (!Array.isArray(boundaries)) {
+      return null;
+    }
+    for (let index = 0; index < boundaries.length; index += 1) {
+      if (Math.abs(boundaries[index] - seconds) <= SEGMENT_START_DISAGREEMENT_SEC) {
+        return index;
+      }
+    }
+    return null;
   }
 
   /**
@@ -4134,6 +4205,68 @@ export class HlsSessionManager {
   }
 
   /**
+   * Prepare a rung the viewer is about to switch to, without switching to it.
+   *
+   * The rung does not exist until it is asked for, so the moment the player is
+   * told to switch it has nothing to fetch and the viewer watches a spinner
+   * while an encoder starts from nothing — measured 2026-08-11 at 15 988 ms for
+   * the first segment of a rung producing at 1.2x. Nothing can make that
+   * production instant; what CAN be done is to have it happen while the rung
+   * the viewer is on is still playing.
+   *
+   * So this creates and positions the variant and says which segment to wait
+   * for, and deliberately does NOT mark it active: the rung on screen keeps its
+   * encoder until the player actually moves. Both encoders run for the length
+   * of the warm-up, which is the price of the switch not being visible.
+   *
+   * @param {string} baseSessionId
+   * @param {number} height
+   * @param {number} positionSeconds - Where the switch will happen.
+   * @returns {Promise<{ sessionId: string, fileName: string } | null>}
+   */
+  async prepareVariant(baseSessionId, height, positionSeconds) {
+    if (!isSafeSessionId(baseSessionId)) {
+      return null;
+    }
+    const base = this.sessionsById.get(baseSessionId);
+    if (!base || base.state === "disposed") {
+      return null;
+    }
+    if (!this.#variantHeights(base).includes(height)) {
+      return null;
+    }
+    const index = this.#segmentIndexForTime(base, positionSeconds);
+    const variant = await this.resolveVariantSession(baseSessionId, height, index);
+    if (!variant) {
+      return null;
+    }
+    // A rung warmed for a switch that was never made. Nothing else would ever
+    // stop it: only becoming active stops the rung being left, so a viewer
+    // trying two rungs in a row would leave the first encoding for nobody until
+    // the look-ahead cap suspended it — three encoders at once on a host sized
+    // for one, which is the opposite of what warming is for.
+    const stillWarming = base.warmingVariantId;
+    if (stillWarming && stillWarming !== variant.id) {
+      const abandoned = this.sessionsById.get(stillWarming);
+      if (abandoned && abandoned.id !== this.#activeVariant(base).id) {
+        this.#stopEncodeRun(abandoned, "warmed for a switch the viewer did not make");
+      }
+    }
+    base.warmingVariantId = variant.id === base.id ? null : variant.id;
+    // An existing rung may be parked wherever it was left, so it is pointed at
+    // the switch position exactly as an activation would — the difference is
+    // only that the rung on screen keeps its own encoder meanwhile.
+    variant.lastAccessedAt = Date.now();
+    if (variant.id !== base.id) {
+      this.requestSeek(variant.id, this.#segmentStartTime(base, index));
+    }
+    logger.info(
+      `transcode ${base.id} warming ${height}p at ${positionSeconds.toFixed(1)}s (segment #${index})`
+    );
+    return { sessionId: variant.id, fileName: variant.segmentFormat.segmentFileName(index) };
+  }
+
+  /**
    * Record which variant the viewer is watching, and give it the encoder.
    *
    * The previous variant's encoder is stopped and the new one is pointed at
@@ -4148,6 +4281,18 @@ export class HlsSessionManager {
    */
   #noteVariantActive(base, variant, wantedIndex = -1) {
     const previous = this.#activeVariant(base);
+    // Whatever was warmed is decided now: either it is the rung being switched
+    // to, or the viewer went elsewhere and it must stop like any other rung
+    // nobody is watching. Nothing else would ever stop it — only the rung being
+    // LEFT is stopped below.
+    const warmed = base.warmingVariantId;
+    base.warmingVariantId = null;
+    if (warmed && warmed !== variant.id && warmed !== previous.id) {
+      const abandoned = this.sessionsById.get(warmed);
+      if (abandoned) {
+        this.#stopEncodeRun(abandoned, "warmed for a switch the viewer did not make");
+      }
+    }
     if (previous.id === variant.id) {
       return;
     }

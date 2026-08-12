@@ -140,7 +140,7 @@ export async function serveSessionFile(req, reply, { hlsSessionManager, sessionI
  * @param {number} timeoutMs
  * @returns {Promise<Awaited<ReturnType<import("../../../services/hls-session-manager.js").HlsSessionManager["getFileStream"]>>>}
  */
-async function waitForSessionFile(hlsSessionManager, sessionId, fileName, timeoutMs) {
+export async function waitForSessionFile(hlsSessionManager, sessionId, fileName, timeoutMs) {
   const startedAt = Date.now();
   // One sequence number for THIS request, reused by every poll below, so the
   // session can tell a newly-arrived request apart from an old one polling

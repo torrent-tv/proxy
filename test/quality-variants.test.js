@@ -310,6 +310,62 @@ test("warming a rung prepares it without taking the encoder from the one on scre
   assert.deepEqual(encoder.signals, [], "stopping it here is what would put the spinner back");
 });
 
+test("the rung on screen fetching its own segments does not cancel a warm-up", async (t) => {
+  const { manager, base, dirPath } = await managerWithBase();
+  t.after(async () => {
+    await manager.disposeAll();
+    await rm(dirPath, { recursive: true, force: true });
+  });
+  const variant = fakeSession({ id: VARIANT_ID, encodeHeight: 540, dirPath });
+  variant.variantHeight = 540;
+  variant.variantBases = new Set([BASE_ID]);
+  manager.sessionsById.set(VARIANT_ID, variant);
+  base.variants = new Map([[540, VARIANT_ID]]);
+  const warmedEncoder = fakeEncoder();
+  variant.ffmpeg = warmedEncoder;
+  base.ffmpeg = fakeEncoder();
+  await manager.prepareVariant(BASE_ID, 540, 100);
+
+  // The viewer has not moved: the rung they are watching goes on asking for its
+  // own segments, every few seconds, for as long as they watch.
+  await manager.resolveVariantFile(BASE_ID, 812, "segment-00026.mp4");
+  await manager.resolveVariantFile(BASE_ID, 812, "segment-00027.mp4");
+
+  assert.equal(base.warmingVariantId, VARIANT_ID, "the rung being prepared is still being prepared");
+  assert.deepEqual(
+    warmedEncoder.signals,
+    [],
+    "cancelling it here left the viewer waiting out the whole warm-up for a segment nobody was making"
+  );
+});
+
+test("warming the height the base itself serves still points it at the switch", async (t) => {
+  const { manager, base, dirPath } = await managerWithBase();
+  t.after(async () => {
+    await manager.disposeAll();
+    await rm(dirPath, { recursive: true, force: true });
+  });
+  // The viewer is on another rung; the base is parked where they left it, with
+  // its encoder stopped. Warming its height must bring it back.
+  const variant = fakeSession({ id: VARIANT_ID, encodeHeight: 540, dirPath });
+  variant.variantHeight = 540;
+  manager.sessionsById.set(VARIANT_ID, variant);
+  base.variants = new Map([[540, VARIANT_ID]]);
+  base.activeVariantId = VARIANT_ID;
+  base.ffmpeg = null;
+  base.encodeStartIndex = 0;
+
+  await manager.prepareVariant(BASE_ID, 812, 400);
+
+  // 400 s falls on the boundary between #99 and #100, and a run starts one
+  // segment back so the player has the preceding keyframe.
+  assert.equal(
+    base.seekTarget,
+    98,
+    "the base is parked at the start, so warming its height must reposition it like any other rung"
+  );
+});
+
 test("the viewer's position is kept current by the segments they ask for", async (t) => {
   const { manager, base, dirPath } = await managerWithBase();
   t.after(async () => {

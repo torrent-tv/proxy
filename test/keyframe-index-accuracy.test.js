@@ -56,6 +56,67 @@ test("a deviation within tolerance is not a disagreement, but still shows in the
   assert.equal(check.maxDeviationSec, 0.2, "and it is still worth knowing how close to the line it ran");
 });
 
+test("a boundary the index got wrong is replaced by the time the file really has", async (t) => {
+  const { HlsSessionManager } = await import("../services/hls-session-manager.js");
+  const manager = new HlsSessionManager({
+    enabled: true,
+    ffmpegBin: "ffmpeg",
+    localBindHost: "127.0.0.1",
+    localPort: 9090
+  });
+  t.after(() => manager.disposeAll());
+  const base = {
+    id: "aaaaaaaa-1111-2222-3333-444444444444",
+    fileName: "film.mkv",
+    state: "ready",
+    transcodeVideo: false,
+    segmentBoundaries: [0, 10, 20, 30, 40],
+    indexCheck: newIndexCheck(),
+    variants: new Map(),
+    segmentFormat: { segmentFileName: (index) => `segment-${index}.mp4` }
+  };
+  const rung = {
+    id: "bbbbbbbb-1111-2222-3333-444444444444",
+    fileName: "film.mkv",
+    state: "ready",
+    transcodeVideo: true,
+    segmentBoundaries: [0, 10, 20, 30, 40],
+    indexCheck: newIndexCheck(),
+    variantBases: new Set([base.id])
+  };
+  base.variants.set(540, rung.id);
+  manager.sessionsById.set(base.id, base);
+  manager.sessionsById.set(rung.id, rung);
+
+  // The copy produced segment #2, and it really begins at 17.4 s — the index
+  // said 20. This is the shape reproduced from the field on 2026-08-12.
+  manager.correctBoundaryFromSegment(base, 2, 17.4);
+
+  assert.equal(
+    base.segmentBoundaries[2],
+    17.4,
+    "the grid must describe the file, not the index — a rung forced onto 20 s would not join the copy"
+  );
+  assert.equal(
+    rung.segmentBoundaries[2],
+    17.4,
+    "the family shares one grid, so a correction reaches the rungs cut against it"
+  );
+  assert.deepEqual(
+    base.segmentBoundaries,
+    [0, 10, 17.4, 30, 40],
+    "only the boundary that was shown to be wrong moves"
+  );
+
+  // A reading that cannot be a boundary is not evidence about one. It comes
+  // from a run that started somewhere else, and applying it would leave the
+  // table describing nothing.
+  manager.correctBoundaryFromSegment(base, 2, 35);
+  manager.correctBoundaryFromSegment(base, 2, 5);
+  manager.correctBoundaryFromSegment(base, 0, 3);
+  assert.deepEqual(base.segmentBoundaries, [0, 10, 17.4, 30, 40], "out-of-order readings are refused");
+});
+
 test("a segment requested again is not new evidence", () => {
   const check = newIndexCheck();
 

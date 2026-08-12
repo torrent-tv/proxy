@@ -30,6 +30,7 @@ import { handleApiTranscodeSessionSeekPost } from "./routes/api/transcode-sessio
 import { handleStreamGet } from "./routes/stream/get.js";
 import { handleTranscodeSessionFileGet } from "./routes/transcode/session-file/get.js";
 import { handleTranscodeVariantFileGet } from "./routes/transcode/variant-file/get.js";
+import { handleTranscodeVariantWarmGet } from "./routes/transcode/variant-warm/get.js";
 import { createSourceRegistry } from "./store/source-registry.js";
 import { WorkerTorrentPool } from "./services/torrent-worker/pool-adapter.js";
 import { HlsSessionManager } from "./services/hls-session-manager.js";
@@ -219,6 +220,12 @@ export async function startProxyServer({ host, port, transcodeAudio, ffmpegBin, 
   // A quality variant's files. Registered before the static handler for the
   // same reason as the line above, and kept a separate route rather than a
   // wildcard so the height stays a parsed parameter.
+  // Registered BEFORE the variant file route: `warm` is not a file name, and
+  // Fastify matches a static segment ahead of a parameter either way — stated
+  // here so the order is not "tidied" into a bug.
+  app.get("/transcode/:sessionId/v/:height/warm", async (req, reply) =>
+    handleTranscodeVariantWarmGet(req, reply, { hlsSessionManager })
+  );
   app.get("/transcode/:sessionId/v/:height/:fileName", async (req, reply) =>
     handleTranscodeVariantFileGet(req, reply, { hlsSessionManager })
   );

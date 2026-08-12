@@ -283,6 +283,33 @@ test("a rung is placed where the player asked it for, not where the other rung h
   );
 });
 
+test("warming a rung prepares it without taking the encoder from the one on screen", async (t) => {
+  const { manager, base, dirPath } = await managerWithBase();
+  t.after(async () => {
+    await manager.disposeAll();
+    await rm(dirPath, { recursive: true, force: true });
+  });
+  const variant = fakeSession({ id: VARIANT_ID, encodeHeight: 540, dirPath });
+  variant.variantHeight = 540;
+  variant.variantBases = new Set([BASE_ID]);
+  manager.sessionsById.set(VARIANT_ID, variant);
+  base.variants = new Map([[540, VARIANT_ID]]);
+  const encoder = fakeEncoder();
+  base.ffmpeg = encoder;
+
+  const prepared = await manager.prepareVariant(BASE_ID, 540, 240);
+
+  assert.deepEqual(
+    prepared,
+    { sessionId: VARIANT_ID, fileName: "segment-00060.mp4" },
+    "the caller is told which segment to wait for — 240 s on a four-second grid"
+  );
+  assert.equal(variant.seekTarget, 59, "the rung is pointed at the switch position, one back for the keyframe");
+  assert.equal(base.activeVariantId, undefined, "nothing has switched yet");
+  assert.equal(base.ffmpeg, encoder, "the picture on screen keeps its encoder until the player actually moves");
+  assert.deepEqual(encoder.signals, [], "stopping it here is what would put the spinner back");
+});
+
 test("the viewer's position is kept current by the segments they ask for", async (t) => {
   const { manager, base, dirPath } = await managerWithBase();
   t.after(async () => {

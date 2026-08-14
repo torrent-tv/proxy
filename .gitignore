@@ -33,3 +33,6 @@ tmp/
 Thumbs.db
 .idea/
 .vscode/
+
+# Recorded host timings — runtime state, rewritten every session.
+host-timings.json

@@ -103,10 +103,73 @@
  * @returns {() => void} Stops the watch.
  */
 function makeSendQueueWatcher({ log, getTransportSnapshot }) {
+  // Every channel of one connection reads the SAME transport counters — the
+  // snapshot describes the peer connection, not the channel — so the heartbeat
+  // belongs to the connection and is printed once for it. Printed per channel
+  // it produced two byte-for-byte identical lines (measured 2026-08-14:
+  // `sent=5153491` under both "proxy" and "proxy-control"), which read as two
+  // independent readings agreeing and made the second channel invisible: the
+  // one thing that IS per channel, its queue depth, was the only real
+  // difference and it was buried in a line that looked like a duplicate.
+  //
+  // sessionId → the channels currently open on that connection, and when it was
+  // last reported. Channels are keyed by the channel OBJECT, not by its label:
+  // a label is whatever the peer chose and two channels can carry the same one
+  // (or none, where `getLabel` is missing and both fall back to "?"), and a
+  // Map keyed on that would let one channel evict the other and then, on
+  // closing, delete the survivor's entry.
+  /** @type {Map<string, { channels: Map<DataChannel, string>, at: number, previous: object | null, unknown: number }>} */
+  const connections = new Map();
+
+  /**
+   * What each channel of a connection is holding, right now.
+   *
+   * @param {Map<DataChannel, string>} channels
+   * @returns {string} `label:NB` per channel, in the order they opened.
+   */
+  const queueDepths = (channels) => {
+    const parts = [];
+    for (const [openChannel, channelLabel] of channels) {
+      let depth = -1;
+      try {
+        depth = typeof openChannel.bufferedAmount === "function" ? openChannel.bufferedAmount() : 0;
+      } catch {
+        depth = -1;
+      }
+      parts.push(`${channelLabel}:${depth}B`);
+    }
+    return parts.join(" ");
+  };
+
   return function watchSendQueue(sessionId, tag, label, channel) {
     let lowestSinceDrain = Number.POSITIVE_INFINITY;
     let stuckSince = 0;
     let previous = null;
+    let connection = connections.get(sessionId);
+    if (!connection) {
+      connection = { channels: new Map(), at: 0, previous: null, unknown: 0 };
+      connections.set(sessionId, connection);
+    }
+    connection.channels.set(channel, label);
+    /** @type {ReturnType<typeof setInterval> | null} */
+    let timer = null;
+    /**
+     * End this channel's watch and let go of its entry.
+     *
+     * @returns {void}
+     */
+    const stop = () => {
+      if (timer) {
+        clearInterval(timer);
+      }
+      connection.channels.delete(channel);
+      // Only if the map still holds THIS record: a late stop, after the same
+      // session id has been reused and a new record made for it, must not evict
+      // the live one.
+      if (connection.channels.size === 0 && connections.get(sessionId) === connection) {
+        connections.delete(sessionId);
+      }
+    };
     // Independent of the queue: the transport's own counters, sampled for as
     // long as the channel is open. The queue was the wrong thing to watch —
     // field 2026-08-06, a 9.26 MB segment was accepted by the transport with
@@ -115,30 +178,38 @@ function makeSendQueueWatcher({ log, getTransportSnapshot }) {
     // same way while requests kept coming the other direction. With nothing
     // queued this watcher never woke, so the one question that matters — did
     // those bytes leave the machine — has no answer in the log. It does now.
-    let heartbeatPrevious = null;
-    let heartbeatAt = 0;
-
-    const timer = setInterval(() => {
+    // A connection the transport no longer knows about is gone, whatever the
+    // channel says. `onClosed` is the ordinary way this watch ends, and it does
+    // not always come — a peer connection can die without it, leaving the timer
+    // and this channel's entry behind for the life of the process.
+    //
+    // The count is kept on the CONNECTION: exactly one channel enters the
+    // heartbeat branch per interval, so a per-channel count would advance only
+    // on that channel's turn and the teardown would take three heartbeats per
+    // channel rather than three in total.
+    timer = setInterval(() => {
       const sampledAt = Date.now();
-      if (sampledAt - heartbeatAt >= TRANSPORT_HEARTBEAT_MS) {
-        heartbeatAt = sampledAt;
+      // Whichever channel's timer arrives first past the interval reports for
+      // the whole connection; the others find the timestamp already moved and
+      // skip. So the line appears once however many channels are open.
+      if (sampledAt - connection.at >= TRANSPORT_HEARTBEAT_MS) {
+        connection.at = sampledAt;
         const snapshot = getTransportSnapshot?.(sessionId) ?? null;
+        connection.unknown = snapshot ? 0 : connection.unknown + 1;
+        if (connection.unknown >= TRANSPORT_UNKNOWN_HEARTBEATS) {
+          stop();
+          return;
+        }
         if (snapshot) {
-          const sent = heartbeatPrevious ? snapshot.bytesSent - heartbeatPrevious.bytesSent : null;
-          const received = heartbeatPrevious
-            ? snapshot.bytesReceived - heartbeatPrevious.bytesReceived
+          const sent = connection.previous ? snapshot.bytesSent - connection.previous.bytesSent : null;
+          const received = connection.previous
+            ? snapshot.bytesReceived - connection.previous.bytesReceived
             : null;
-          heartbeatPrevious = snapshot;
-          let depth = 0;
-          try {
-            depth = typeof channel.bufferedAmount === "function" ? channel.bufferedAmount() : 0;
-          } catch {
-            depth = -1;
-          }
+          connection.previous = snapshot;
           log(
-            `[dc-transport] ${tag} "${label}" sent=${snapshot.bytesSent}` +
+            `[dc-transport] ${tag} sent=${snapshot.bytesSent}` +
             `${sent === null ? "" : ` (+${sent})`} received=${snapshot.bytesReceived}` +
-            `${received === null ? "" : ` (+${received})`} queued=${depth}B ` +
+            `${received === null ? "" : ` (+${received})`} queued[${queueDepths(connection.channels)}] ` +
             `rtt=${snapshot.rtt}ms pc=${snapshot.state} ice=${snapshot.iceState} pair=${snapshot.pair}`
           );
         }
@@ -184,7 +255,7 @@ function makeSendQueueWatcher({ log, getTransportSnapshot }) {
     if (typeof timer.unref === "function") {
       timer.unref();
     }
-    return () => clearInterval(timer);
+    return stop;
   };
 }
 
@@ -668,6 +739,11 @@ const SEND_QUEUE_SAMPLE_MS = 1_000;
 // send queue is doing. Frequent enough to place a loss within a few seconds,
 // sparse enough that a two-hour film costs a few hundred lines.
 const TRANSPORT_HEARTBEAT_MS = 5_000;
+
+// How many heartbeats in a row may find no transport for this session before
+// the watch gives up. Several rather than one, so a momentary gap in the
+// registry does not end a healthy watch.
+const TRANSPORT_UNKNOWN_HEARTBEATS = 3;
 const SEND_QUEUE_STUCK_MS = 5_000;
 const DC_BUFFER_HIGH_WATER = 8 * 1024 * 1024;
 /** Resume sending once the channel buffer drains to this many bytes. */

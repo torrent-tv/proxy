@@ -32,6 +32,7 @@ import { handleTranscodeSessionFileGet } from "./routes/transcode/session-file/g
 import { handleTranscodeVariantFileGet } from "./routes/transcode/variant-file/get.js";
 import { handleTranscodeAudioFileGet } from "./routes/transcode/audio-file/get.js";
 import { handleTranscodeVariantWarmGet } from "./routes/transcode/variant-warm/get.js";
+import { handleTranscodeAudioWarmGet } from "./routes/transcode/audio-warm/get.js";
 import { createSourceRegistry } from "./store/source-registry.js";
 import { WorkerTorrentPool } from "./services/torrent-worker/pool-adapter.js";
 import { HlsSessionManager } from "./services/hls-session-manager.js";
@@ -248,6 +249,9 @@ export async function startProxyServer({ host, port, transcodeAudio, ffmpegBin, 
   // here so the order is not "tidied" into a bug.
   app.get("/transcode/:sessionId/v/:height/warm", async (req, reply) =>
     handleTranscodeVariantWarmGet(req, reply, { hlsSessionManager })
+  );
+  app.get("/transcode/:sessionId/a/:track/warm", async (req, reply) =>
+    handleTranscodeAudioWarmGet(req, reply, { hlsSessionManager })
   );
   app.get("/transcode/:sessionId/a/:trackIndex/:fileName", async (req, reply) =>
     handleTranscodeAudioFileGet(req, reply, { hlsSessionManager })

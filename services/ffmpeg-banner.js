@@ -55,6 +55,48 @@ export function parseFfmpegStartTimeSeconds(stderrText) {
 }
 
 /**
+ * Parse the bitrate (kbit/s) that the decode cost is priced from: the VIDEO
+ * stream's own, falling back to the container's when the stream does not state
+ * one. Returns null when neither is present.
+ *
+ * The distinction is not cosmetic. The calibration clips carry video alone and
+ * are decoded with `-an`, so the fitted bitrate term describes VIDEO bits; the
+ * container figure adds every audio and subtitle track. A Russian release with
+ * two or three AC-3/DTS tracks carries 1-2 Mbit/s of audio, and on this host's
+ * own fit that inflates the predicted decode cost by 10-25 % — refusing rungs
+ * on the strength of audio the benchmark never decoded. And the term is not the
+ * weak one it was once described as: on the shipped clips an 11.7× bitrate
+ * change moved the cost 2.47×, and it accounts for about two thirds of the
+ * predicted cost of a high-bitrate 1080p source.
+ *
+ * @param {string} stderrText
+ * @returns {number | null}
+ */
+export function parseFfmpegBitrateKbps(stderrText) {
+  if (typeof stderrText !== "string" || stderrText.length === 0) {
+    return null;
+  }
+  // `Stream #0:0 … Video: h264 … 11375 kb/s, 24 fps` — the stream's own rate,
+  // stated per stream and therefore free of the other tracks. Only the INPUT
+  // section is read: everything from "Stream mapping:" onwards describes what
+  // ffmpeg is about to produce, and that line carries a bitrate of its own.
+  const inputSection = stderrText.split(/^Stream mapping:/m)[0];
+  const perStream = inputSection.match(/Stream\s+#[^\n]*?Video:[^\n]*?,\s*(\d+)\s*kb\/s/i);
+  if (perStream) {
+    const streamValue = Number(perStream[1]);
+    if (Number.isFinite(streamValue) && streamValue > 0) {
+      return streamValue;
+    }
+  }
+  const match = stderrText.match(/Duration:[^\n]*?bitrate:\s*(\d+)\s*kb\/s/i);
+  if (!match) {
+    return null;
+  }
+  const value = Number(match[1]);
+  return Number.isFinite(value) && value > 0 ? value : null;
+}
+
+/**
  * Parse the source video resolution from ffmpeg's stderr (the "Stream … Video:
  * … WxH" line). Returns `{ width: null, height: null }` when absent.
  *

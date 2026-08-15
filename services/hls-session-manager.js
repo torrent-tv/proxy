@@ -15,7 +15,6 @@ import path from "node:path";
 import { randomUUID } from "node:crypto";
 import { spawn } from "node:child_process";
 import { createRequire } from "node:module";
-import { fileURLToPath } from "node:url";
 import { logger } from "../utils/logger.js";
 import { readKeyframeIndex } from "./container-index/index.js";
 
@@ -25,10 +24,13 @@ import {
   softwareDescriptor,
   chooseSoftwareEncodeSettings,
   pickSoftwarePreset,
+  canSustainOutput,
+  REALTIME_SPEED_MARGIN,
   TRANSCODE_FPS,
   chooseOutputFps
 } from "./hwaccel.js";
 import {
+  parseFfmpegBitrateKbps,
   parseFfmpegDurationSeconds,
   parseFfmpegStartTimeSeconds,
   parseFfmpegVideoDimensions,
@@ -113,6 +115,31 @@ export function variantHeightsFor(sourceHeight) {
 }
 
 /**
+ * What a source costs to DECODE, in the two figures the startup fit prices:
+ * its pixel rate and its bitrate. Every re-encode of this file pays this,
+ * whatever height it is encoded to, because the whole source is decoded first.
+ *
+ * Returns null when the probe did not report enough — the budget then prices
+ * the encoder alone rather than inventing a figure.
+ *
+ * @param {{ width: number | null, height: number | null, fps: number | null, bitrateKbps: number | null }} mediaInfo
+ * @returns {{ megapixelsPerSecond: number, megabitsPerSecond: number } | null}
+ */
+export function sourceDecodeCharacteristics(mediaInfo) {
+  const width = Number(mediaInfo?.width);
+  const height = Number(mediaInfo?.height);
+  const fps = Number(mediaInfo?.fps);
+  const kbps = Number(mediaInfo?.bitrateKbps);
+  if (!(width > 0) || !(height > 0) || !(fps > 0) || !(kbps > 0)) {
+    return null;
+  }
+  return {
+    megapixelsPerSecond: (width * height * fps) / 1e6,
+    megabitsPerSecond: kbps / 1000
+  };
+}
+
+/**
  * A fresh tally of how well a container's keyframe index matches its file.
  *
  * @returns {{ checked: number, disagreed: number, maxDeviationSec: number, firstDisagreementIndex: number, seen: Set<number> }}
@@ -166,20 +193,51 @@ export function noteIndexDeviation(check, index, deviationSec) {
  * @param {{ ladder: { width: number, height: number }[], rungIndex: number } | null} budget
  * @param {number} outputFps
  * @param {unknown} benchmark
+ * @param {{ decodeModel?: object | null, source?: { megapixelsPerSecond: number, megabitsPerSecond: number } | null }} [cost]
  * @returns {object | null}
  */
-function startAtLadderTop(budget, outputFps, benchmark) {
-  const top = budget?.ladder?.[0];
+function startAtLadderTop(budget, outputFps, benchmark, cost = {}) {
+  const ladder = budget?.ladder;
+  const top = ladder?.[0];
   if (!top) {
     return null;
   }
   const fps = Number.isInteger(outputFps) && outputFps > 0 ? outputFps : TRANSCODE_FPS;
+  // The top rung the viewer asked for, unless this host cannot hold it. A
+  // request naming a height arrives from a browser that was told which heights
+  // are on offer — but an older page, a stale tab or a repeated URL can still
+  // name one that was refused, and starting there means the encode never
+  // catches up. The runtime downshift would eventually step down; starting
+  // where the host can hold it means the viewer does not watch that happen.
+  // When NOTHING on the ladder can be held, start at its foot — the smallest
+  // picture this host has, which is the automatic path's answer to the same
+  // question and the best effort available. Starting at the top instead would
+  // hand the weakest hosts, the ones this exists for, the heaviest rung.
+  let startIndex = ladder.length - 1;
+  for (let index = 0; index < ladder.length; index += 1) {
+    const { sustainable } = canSustainOutput({
+      benchmark,
+      decodeModel: cost.decodeModel ?? null,
+      source: cost.source ?? null,
+      outputPixelsPerSec: ladder[index].width * ladder[index].height * fps,
+      observedDecodeCostSec: cost.observedDecodeCostSec ?? null
+    });
+    if (sustainable) {
+      startIndex = index;
+      break;
+    }
+  }
+  const start = ladder[startIndex];
   return {
     ...budget,
-    width: top.width,
-    height: top.height,
-    preset: pickSoftwarePreset(benchmark, top.width * top.height * fps),
-    rungIndex: 0
+    width: start.width,
+    height: start.height,
+    // Priced the same way the offer was. Without the cost the preset came from
+    // the encoder alone — so a rung offered on the combined figure was then
+    // encoded with a preset chosen as if decoding were free, which is how the
+    // check and the encode came to disagree on every rung a viewer picks.
+    preset: pickSoftwarePreset(benchmark, start.width * start.height * fps, cost),
+    rungIndex: startIndex
   };
 }
 
@@ -363,6 +421,18 @@ const BUDGET_SUSTAINED_MS = 15_000;
 const BUDGET_ACTION_COOLDOWN_MS = 30_000;
 // Never step down more than this many rungs below the startup choice.
 const BUDGET_MAX_DOWNSHIFTS = 3;
+// How long an encode run must have been going before a reading of its speed is
+// taken as evidence about decoding. `speed=` is cumulative over the run, so a
+// restart after a seek, a resume after a suspension and the wait for the first
+// pieces all sit in the denominator of an early reading.
+const DECODE_LEARNING_SETTLE_MS = 20_000;
+// How many readings the median is taken over. Long enough to outvote a single
+// disturbed moment, short enough to follow a host whose load has changed.
+const DECODE_LEARNING_READINGS = 7;
+// A new median has to differ by this much to be adopted. Below it the answer is
+// the same one, and re-publishing it would make every session recompute its
+// offer on the path that serves every playlist, init and segment.
+const DECODE_LEARNING_CHANGE = 0.05;
 // The input counts as "keeping up" when the torrent downloads at least this
 // multiple of the source's average byte rate. Below it (and not yet fully
 // downloaded), a low speed is download-bound, not CPU-bound → do NOT downscale.
@@ -621,6 +691,7 @@ async function probeInputMediaInfo(ffmpegBin, inputUrl) {
       const dims = parseFfmpegVideoDimensions(stderr);
       resolve({
         durationSeconds: parseFfmpegDurationSeconds(stderr),
+        bitrateKbps: parseFfmpegBitrateKbps(stderr),
         width: dims.width,
         height: dims.height,
         fps: parseFfmpegVideoFps(stderr),
@@ -1052,6 +1123,21 @@ export class HlsSessionManager {
   #sessionCreateLatencies = [];
 
   /**
+   * What decoding costs for a source this proxy has actually run, keyed by
+   * `sourceKey:fileIndex` — seconds of work per second of video, with a version
+   * that rises whenever a faster reading replaces the one held.
+   *
+   * The startup clips are H.264 and a source that has to be re-encoded usually
+   * is not, so their model is a first approximation. This is the file itself,
+   * measured by the encoder that is running on it, and it replaces the model
+   * for that file as soon as it exists. Held for the life of the process: it
+   * describes a source, and the same source is commonly opened again.
+   *
+   * @type {Map<string, { costSec: number, version: number }>}
+   */
+  #observedDecodeCost = new Map();
+
+  /**
    * @param {HlsSessionManagerOptions} options
    */
   constructor({
@@ -1064,6 +1150,7 @@ export class HlsSessionManager {
     startupWaitMs = DEFAULT_STARTUP_WAIT_MS,
     videoEncoder = null,
     softwarePresetBenchmark = null,
+    decodeCostModel = null,
     getSourceStats = null,
     tonemapSupported = false,
     getCachedMediaInfo = null,
@@ -1090,6 +1177,13 @@ export class HlsSessionManager {
     // used to pick the best preset per stream. Null when unavailable (hardware
     // encoder, or benchmark skipped/failed).
     this.softwarePresetBenchmark = Array.isArray(softwarePresetBenchmark) ? softwarePresetBenchmark : null;
+    // Host decode cost solved at startup from the calibration clips:
+    // `a × Mpixel/s + b × Mbit/s + c` seconds of decoding per second of video.
+    // A re-encode pays for this as well as for the encoder, and leaving it out
+    // is what made the budget offer rungs this host ran at a third of realtime.
+    // Null when the clips are missing or the fit was rejected — the budget then
+    // prices the encoder alone, as it did before.
+    this.decodeCostModel = decodeCostModel ?? null;
     // Whether this ffmpeg build can tone-map HDR→SDR (zscale + tonemap filters).
     // Gates the tonemap chain for HDR sources on the software path.
     this.tonemapSupported = Boolean(tonemapSupported);
@@ -1450,13 +1544,17 @@ export class HlsSessionManager {
     // resolution, so encode exactly that box (capped to source by the scale
     // filter) with the default preset, and the runtime downswitch is skipped
     // for the session (budgetLadder stays null).
+    // What decoding this source costs, which every re-encode pays on top of
+    // the encoder. Read from the probe; null when it did not say enough.
+    const sourceDecode = sourceDecodeCharacteristics(mediaInfo);
     const chosenBudget = this.#chooseEncodeBudget({
       transcodeVideo,
       targetWidth: normalizedTargetWidth,
       targetHeight: normalizedTargetHeight,
       sourceWidth,
       sourceHeight,
-      outputFps
+      outputFps,
+      source: sourceDecode
     });
     // A forced resolution starts at exactly that size — the viewer asked for it
     // — but KEEPS the ladder beneath it. Discarding the ladder is what left a
@@ -1466,7 +1564,13 @@ export class HlsSessionManager {
     // picture that plays beats a correct label that freezes. The rung's NAME is
     // settled separately and does not move with a downshift, so the player goes
     // on addressing it by the height it chose.
-    const encodeBudget = forceManualQuality ? startAtLadderTop(chosenBudget, outputFps, this.softwarePresetBenchmark) : chosenBudget;
+    const encodeBudget = forceManualQuality
+      ? startAtLadderTop(chosenBudget, outputFps, this.softwarePresetBenchmark, {
+          decodeModel: this.decodeCostModel,
+          source: sourceDecode,
+          observedDecodeCostSec: this.#observedDecodeCost.get(`${sourceKey}:${fileIndex}`)?.costSec ?? null
+        })
+      : chosenBudget;
     const softwarePreset = encodeBudget?.preset ?? null;
     // Effective encode box: the budget's downscaled resolution when applied,
     // otherwise the client target (0 = keep source, handled by buildVideoArgs).
@@ -1514,6 +1618,15 @@ export class HlsSessionManager {
       // software hosts, else the client target). 0 = keep source.
       encodeWidth,
       encodeHeight,
+      // The NAME of this rung, fixed at the height that was asked for. It is
+      // deliberately not the height being encoded: a viewer who picked 480p on
+      // a host that then starts them at 360p, or steps down to it later, goes
+      // on addressing the rung as 480p — and a request under the old name must
+      // not build a second session at a height this host has just refused.
+      // Derived from `encodeHeight` when nothing was named, as before.
+      variantHeight: forceManualQuality && normalizedTargetHeight > 0
+        ? normalizedTargetHeight
+        : undefined,
       // Whether to insert the HDR→SDR tone-map chain (software path only).
       applyTonemap,
       // Realtime-budget runtime state (software encoder only). The ladder is the
@@ -1531,6 +1644,8 @@ export class HlsSessionManager {
       linkSlowSince: 0,
       sourceWidth,
       sourceHeight,
+      // Pixel rate and bitrate of the source, for pricing a re-encode of it.
+      sourceDecode,
       // Container start time (seconds); subtracted on the copy path so the
       // output timeline is 0-based even when the source starts at e.g. 0.1 s.
       sourceStartTime,
@@ -2011,10 +2126,10 @@ export class HlsSessionManager {
    * (no video transcode, hardware encoder, or missing benchmark/source size) —
    * the encode then keeps the ceiling resolution and the default preset.
    *
-   * @param {{ transcodeVideo: boolean, targetWidth: number, targetHeight: number, sourceWidth: number | null, sourceHeight: number | null, outputFps: number }} params
+   * @param {{ transcodeVideo: boolean, targetWidth: number, targetHeight: number, sourceWidth: number | null, sourceHeight: number | null, outputFps: number, source?: { megapixelsPerSecond: number, megabitsPerSecond: number } | null }} params
    * @returns {{ width: number, height: number, preset: string } | null}
    */
-  #chooseEncodeBudget({ transcodeVideo, targetWidth, targetHeight, sourceWidth, sourceHeight, outputFps }) {
+  #chooseEncodeBudget({ transcodeVideo, targetWidth, targetHeight, sourceWidth, sourceHeight, outputFps, source = null }) {
     if (!transcodeVideo || this.videoEncoder?.kind !== "software" || !this.softwarePresetBenchmark) {
       return null;
     }
@@ -2022,7 +2137,12 @@ export class HlsSessionManager {
     if (!ceiling) {
       return null;
     }
-    return chooseSoftwareEncodeSettings(this.softwarePresetBenchmark, { width: ceiling.w, height: ceiling.h }, outputFps);
+    return chooseSoftwareEncodeSettings(
+      this.softwarePresetBenchmark,
+      { width: ceiling.w, height: ceiling.h },
+      outputFps,
+      { decodeModel: this.decodeCostModel, source }
+    );
   }
 
   /**
@@ -2439,6 +2559,10 @@ export class HlsSessionManager {
       }
       if (speed >= BUDGET_SPEED_OK) {
         session.budgetSlowSince = 0; // recovered — reset the slow window
+        // A run keeping up with realtime cannot be badly starved of input, so
+        // what it reports is about this machine and this source. That is the
+        // reading worth learning from, and it needs no further check.
+        this.#learnDecodeCost(session, speed);
         continue;
       }
       if (speed >= BUDGET_SPEED_SLOW) {
@@ -2466,6 +2590,10 @@ export class HlsSessionManager {
         session.budgetSlowSince = 0; // re-evaluate fresh; don't thrash on this
         continue;
       }
+      // Sustained, and the encoder — not the torrent — is what is short. So the
+      // figure describes the machine on this source, and it is the case that
+      // matters most: a rung nobody can hold teaches exactly here.
+      this.#learnDecodeCost(session, speed);
       await this.#applyBudgetDownshift(session, `speed=${speed.toFixed(2)}x`, bound);
     }
   }
@@ -2529,7 +2657,20 @@ export class HlsSessionManager {
     session.budgetSlowSince = 0;
     session.encodeWidth = rung.width;
     session.encodeHeight = rung.height;
-    session.softwarePreset = pickSoftwarePreset(this.softwarePresetBenchmark, rung.width * rung.height * fps);
+    // Priced the same way the offer and the starting rung are. Choosing the
+    // preset on the encoder alone treats decoding as free, which is how the
+    // check and the encode came to disagree in the first place — and here it
+    // matters most, because this runs on a host that has already failed to keep
+    // up and is spending one of its few downshifts.
+    session.softwarePreset = pickSoftwarePreset(
+      this.softwarePresetBenchmark,
+      rung.width * rung.height * fps,
+      {
+        decodeModel: this.decodeCostModel,
+        source: session.sourceDecode ?? null,
+        observedDecodeCostSec: this.#observedDecodeCostFor(session)
+      }
+    );
     // Restart at the current live-edge segment so the lighter profile takes over
     // from where the viewer is watching (hard-restart tier).
     const head = session.encodeStartIndex;
@@ -2589,6 +2730,10 @@ export class HlsSessionManager {
     // produce a file that is neither, which is the only reason a restart ever
     // had to wait for its predecessor to die.
     session.runSerial = (session.runSerial ?? 0) + 1;
+    // When THIS run began. ffmpeg's `speed=` is cumulative over a run, so a
+    // reading of it says something about the machine only once the run has left
+    // its own start behind — see #learnDecodeCost.
+    session.encodeRunStartedAt = Date.now();
     session.runDirPath = path.join(session.dirPath, `run-${session.runSerial}`);
     await mkdir(session.runDirPath, { recursive: true });
     // The restart backs off a segment or two from what was asked for, so the
@@ -3611,8 +3756,14 @@ export class HlsSessionManager {
    * @returns {number | null} Milliseconds, or null without a benchmark.
    */
   /**
-   * Where this host's recorded timings live: one file, always the same path,
-   * beside the proxy's own installation.
+   * Where this host's recorded timings live: one file in the WORKING directory,
+   * not in the installation.
+   *
+   * The proxy is installed from npm, often globally and often into a directory
+   * the process cannot write; writing runtime state there also means an upgrade
+   * or reinstall silently discards it, and it puts a file the owner never asked
+   * for inside a package directory. The working directory is the one place a
+   * process may write by convention, and the owner can see and delete it.
    *
    * Kept so a proxy that has just restarted is not back to knowing nothing —
    * the browser was shown an assumed rate for the whole of the first wait after
@@ -3624,7 +3775,7 @@ export class HlsSessionManager {
    * @returns {string}
    */
   #hostTimingsPath() {
-    return path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "host-timings.json");
+    return path.join(process.cwd(), "host-timings.json");
   }
 
   /** Load them, if any were ever written. Never throws. */
@@ -4000,12 +4151,279 @@ export class HlsSessionManager {
    * @returns {number[]}
    */
   #variantHeights(session) {
+    // Settled once per session, and re-settled when this file's own decode cost
+    // is measured or improves. Everything else is fixed for the session's life
+    // — the source, the host's benchmarks, the height it settled on — and this
+    // is asked on the path that serves every playlist, init and segment, where
+    // recomputing it meant repeating the refusal in the log every few seconds.
+    const observed = this.#observedDecodeCost.get(`${session.sourceKey}:${session.fileIndex}`) ?? null;
+    const version = observed?.version ?? 0;
+    if (Array.isArray(session.offeredHeightsCache) && session.offeredHeightsVersion === version) {
+      return session.offeredHeightsCache;
+    }
+    session.offeredHeightsVersion = version;
     const heights = new Set(variantHeightsFor(Number(session.sourceHeight) || 0));
     const own = this.variantHeightOf(session);
     if (own > 0) {
       heights.add(own);
     }
-    return [...heights].sort((left, right) => right - left);
+    const ordered = [...heights].sort((left, right) => right - left);
+    // The rung ON SCREEN is never withdrawn. The list is now recomputed as the
+    // host learns what this source costs, and the reading that teaches it comes
+    // from the rung the viewer has just switched to — so the rung that taught
+    // the lesson would be the first to be dropped, and every route guard reads
+    // this list: its next segment would 404 on a stream that is playing, with
+    // its own encoder still running. It leaves the offer when the viewer leaves
+    // it, not while they are watching it.
+    const playing = this.variantHeightOf(this.#activeVariant(session));
+    session.offeredHeightsCache = this.#sustainableHeights({
+      heights: ordered,
+      ownHeight: own,
+      playingHeight: playing,
+      sourceWidth: Number(session.sourceWidth) || 0,
+      sourceHeight: Math.round(Number(session.sourceHeight) || 0),
+      fps: Number(session.outputFps) || TRANSCODE_FPS,
+      source: session.sourceDecode ?? null,
+      transcodeVideo: session.transcodeVideo === true,
+      observedDecodeCostSec: observed?.costSec ?? null
+    });
+    return session.offeredHeightsCache;
+  }
+
+  /**
+   * What decoding THIS source costs, learned from the encoder already running
+   * on it — seconds of work per second of video, or null until it is known.
+   *
+   * @param {HlsSession} session
+   * @returns {number | null}
+   */
+  #observedDecodeCostFor(session) {
+    const entry = this.#observedDecodeCost.get(`${session.sourceKey}:${session.fileIndex}`);
+    return entry ? entry.costSec : null;
+  }
+
+  /**
+   * Take one reading of a running encode and turn it into the decode cost of
+   * this source.
+   *
+   * A re-encode pays for both halves — unpacking the source and packing the
+   * result — and the running session measures the SUM. The encode half is
+   * priced by the startup benchmark for the preset and pixel rate actually in
+   * use, so subtracting it leaves the half that no startup benchmark can know:
+   * this file's own codec, resolution and grain, on this machine, under
+   * whatever else it is doing.
+   *
+   * The MEDIAN of the recent readings is used, over a bounded window. Keeping
+   * the fastest instead makes the figure a ratchet: `speed=` is cumulative over
+   * a run, its maximum falls in the burst where the encoder races to the
+   * look-ahead cap with the pieces already on disk and nothing competing, and
+   * one such moment would re-admit — permanently — the very rung the field
+   * measured at 0.388-0.947x. The median moves in both directions and describes
+   * the machine as it usually is, which is what a viewer will meet.
+   *
+   * A reading is only taken from a run that has been going long enough to have
+   * left its own start behind: ffmpeg's `speed=` is cumulative, so a restart
+   * after a seek, a resume after a suspension, and the wait for the first
+   * pieces are all in the denominator of an early reading.
+   *
+   * @param {HlsSession} session
+   * @param {number} speed - The `speed=` ffmpeg reports, as a multiple of realtime.
+   */
+  #learnDecodeCost(session, speed) {
+    if (session.transcodeVideo !== true || !(speed > 0)) {
+      return; // a copied video decodes nothing, so it says nothing about decoding
+    }
+    const runStartedAt = Number(session.encodeRunStartedAt);
+    if (!Number.isFinite(runStartedAt) || Date.now() - runStartedAt < DECODE_LEARNING_SETTLE_MS) {
+      return; // no run, or one still carrying its own start in the average
+    }
+    if (this.videoEncoder?.kind !== "software") {
+      return; // the benchmark that prices the encode half is libx264 only
+    }
+    const benchmark = this.softwarePresetBenchmark;
+    if (!Array.isArray(benchmark) || benchmark.length === 0) {
+      return;
+    }
+    const entry = benchmark.find((item) => item.preset === session.softwarePreset);
+    if (!entry || !(entry.pixelsPerSec > 0)) {
+      return;
+    }
+    const height = Number(session.encodeHeight) || 0;
+    const width = Number(session.encodeWidth) || 0;
+    const fps = Number(session.outputFps) || TRANSCODE_FPS;
+    if (height <= 0 || width <= 0) {
+      return;
+    }
+    const encodeCostSec = (width * height * fps) / entry.pixelsPerSec;
+    const decodeCostSec = 1 / speed - encodeCostSec;
+    if (!(decodeCostSec > 0)) {
+      // The encode half already accounts for everything measured. Nothing is
+      // left to attribute to decoding, and a zero or negative cost would say
+      // decoding is free, which is a claim this reading cannot support.
+      return;
+    }
+    const key = `${session.sourceKey}:${session.fileIndex}`;
+    const known = this.#observedDecodeCost.get(key);
+    const readings = [...(known?.readings ?? []), decodeCostSec].slice(-DECODE_LEARNING_READINGS);
+    const sorted = [...readings].sort((left, right) => left - right);
+    const costSec = sorted[Math.floor(sorted.length / 2)];
+    if (known && Math.abs(costSec - known.costSec) / known.costSec < DECODE_LEARNING_CHANGE) {
+      // The same answer as before. Storing it would bump the version and make
+      // every session recompute its offer, which is asked for on the path that
+      // serves every playlist, init and segment.
+      this.#observedDecodeCost.set(key, { ...known, readings });
+      return;
+    }
+    this.#observedDecodeCost.set(key, { costSec, readings, version: (known?.version ?? 0) + 1 });
+    logger.info(
+      `transcode: ${session.fileName} decodes at ${(1 / costSec).toFixed(2)}x on this host ` +
+        `(median of ${readings.length}, latest ${(1 / decodeCostSec).toFixed(2)}x from ${height}p ` +
+        `at ${speed.toFixed(2)}x, preset ${session.softwarePreset})`
+    );
+  }
+
+  /**
+   * The heights this session's file will be served at, largest first — the
+   * public form of the same answer the master playlist is built from.
+   *
+   * The browser asks because the master is not the only way quality changes: a
+   * stream without variants changes it by re-opening the session at a chosen
+   * height, and that list was being invented in the browser from the source
+   * height alone. It has to come from the host that would have to encode it.
+   *
+   * @param {HlsSession} session
+   * @returns {number[]}
+   */
+  offeredHeights(session) {
+    if (!session || session.state === "disposed") {
+      return [];
+    }
+    return this.#variantHeights(session);
+  }
+
+  /**
+   * The heights this host would serve a file at, answered from the PROBE alone
+   * — before any session exists.
+   *
+   * The viewer sees the quality menu the moment they open a file, so the list
+   * cannot wait for an encoder to exist. Everything it needs is already known
+   * by then: the source's size, rate and bitrate from the probe, and this
+   * host's two benchmarks from startup.
+   *
+   * Both branches are answered because only the browser knows which one it will
+   * take — it decides per track whether it can play the video as it is. With a
+   * COPIED video the source height costs no encoder and is always there; with a
+   * re-encoded one it is a prediction like every other rung.
+   *
+   * These are first figures, not final ones: what the encoder then really does
+   * with this file replaces them (`offeredHeights` on a live session).
+   *
+   * @param {{ width: number | null, height: number | null, fps: number | null, bitrateKbps: number | null }} mediaInfo
+   * @returns {{ copy: number[], transcode: number[] } | null}
+   */
+  predictOfferedHeights(mediaInfo) {
+    const sourceHeight = Math.round(Number(mediaInfo?.height) || 0);
+    const sourceWidth = Number(mediaInfo?.width) || 0;
+    if (sourceHeight <= 0 || sourceWidth <= 0) {
+      return null;
+    }
+    const fps = chooseOutputFps(Number(mediaInfo?.fps) || 0);
+    const source = sourceDecodeCharacteristics(mediaInfo);
+    const heights = variantHeightsFor(sourceHeight);
+    // What an encoder has already been seen to cost on this very file, when it
+    // has run before. Without it a second open of a file answers from the
+    // startup clips again, undoing the correction the first playback earned.
+    const observedDecodeCostSec = mediaInfo?.sourceKey !== undefined
+      ? (this.#observedDecodeCost.get(`${mediaInfo.sourceKey}:${mediaInfo.fileIndex}`)?.costSec ?? null)
+      : null;
+    const forBranch = (transcodeVideo) =>
+      this.#sustainableHeights({
+        heights,
+        observedDecodeCostSec,
+        // Nothing is running yet, so nothing is exempt from being predicted —
+        // except the copy itself, which the branch flag already covers.
+        ownHeight: 0,
+        sourceWidth,
+        sourceHeight,
+        fps,
+        source,
+        transcodeVideo
+      });
+    return { copy: forBranch(false), transcode: forBranch(true) };
+  }
+
+  /**
+   * Drop the rungs this host cannot hold at realtime.
+   *
+   * Every rung below the source height is a full re-encode — decode the whole
+   * source, encode a smaller picture — and on a weak host that is dearer than
+   * the copy it replaces. Measured 2026-08-14: 1080p was copied at 7.8-8.9x
+   * while the offered 240p rung ran at 0.388-0.947x, its first segment took
+   * 30 s and later ones were held 22 s, so choosing a LOWER quality is what
+   * broke playback. A rung that cannot be produced faster than it is watched
+   * must not be offered at all.
+   *
+   * The session's OWN height always stays: an encoder is already producing it,
+   * and removing it would point the player at a rung nobody is encoding.
+   *
+   * @param {{ heights: number[], ownHeight: number, sourceWidth: number, sourceHeight: number, fps: number, source: { megapixelsPerSecond: number, megabitsPerSecond: number } | null, transcodeVideo: boolean }} params
+   * @returns {number[]}
+   */
+  #sustainableHeights({
+    heights,
+    ownHeight,
+    playingHeight = 0,
+    sourceWidth,
+    sourceHeight,
+    fps,
+    source,
+    transcodeVideo,
+    observedDecodeCostSec = null
+  }) {
+    const benchmark = this.softwarePresetBenchmark;
+    if (!Array.isArray(benchmark) || benchmark.length === 0 || sourceHeight <= 0 || sourceWidth <= 0) {
+      return heights;
+    }
+    /** @type {number[]} */
+    const kept = [];
+    /** @type {string[]} */
+    const dropped = [];
+    for (const height of heights) {
+      // The height an encoder is ALREADY producing, and the source's own height
+      // when the video is copied — neither has to be predicted, because it is
+      // happening. A source height that would have to be RE-ENCODED is a
+      // prediction like any other: on a session whose budget downshifted to
+      // 480p, the source's 1080p is neither copied nor being produced, and
+      // keeping it unpriced would offer exactly the kind of rung this refuses.
+      if (
+        height === ownHeight ||
+        height === playingHeight ||
+        (height === sourceHeight && !transcodeVideo)
+      ) {
+        kept.push(height);
+        continue;
+      }
+      const width = Math.round(((sourceWidth / sourceHeight) * height) / 2) * 2;
+      const { speed, sustainable } = canSustainOutput({
+        benchmark,
+        decodeModel: this.decodeCostModel,
+        source,
+        outputPixelsPerSec: width * height * fps,
+        observedDecodeCostSec
+      });
+      if (sustainable) {
+        kept.push(height);
+        continue;
+      }
+      dropped.push(`${height}p=${speed === null ? "n/a" : `${speed.toFixed(2)}x`}`);
+    }
+    if (dropped.length > 0) {
+      logger.info(
+        `transcode: not offering ${dropped.join(" ")} — below realtime × ${REALTIME_SPEED_MARGIN} ` +
+          `(offering ${kept.map((height) => `${height}p`).join(" ")})`
+      );
+    }
+    return kept;
   }
 
   /**
@@ -5075,6 +5493,12 @@ export class HlsSessionManager {
       currentHeight: session.transcodeVideo
         ? (session.encodeHeight ?? session.sourceHeight ?? 0)
         : (session.sourceHeight ?? 0),
+      // The rungs still worth offering, as they stand NOW. The list the browser
+      // was given when the file opened came from the startup benchmarks; this
+      // one is corrected by what the encoder has since been seen to do with
+      // this very source, so a rung that turns out to be beyond the host
+      // disappears from the menu instead of being discovered by switching to it.
+      offeredHeights: this.offeredHeights(session),
       // What this host takes to create a session and to make a first segment.
       // Also on the playback plan, but the browser reads that once per file:
       // measured 2026-08-06 across four seeks, a proxy that had just restarted

@@ -24,6 +24,13 @@ import { spawn } from "node:child_process";
 import { mkdtempSync, readdirSync, rmSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
+import {
+  parseFfmpegBitrateKbps,
+  parseFfmpegDurationSeconds,
+  parseFfmpegVideoDimensions,
+  parseFfmpegVideoFps
+} from "./ffmpeg-banner.js";
 
 const SOFTWARE_PRESET = "ultrafast";
 const SOFTWARE_CRF = "24";
@@ -128,12 +135,21 @@ const BENCHMARK_PRESETS = ["fast", "faster", "veryfast", "superfast", "ultrafast
 const BENCHMARK_REF_W = 640;
 const BENCHMARK_REF_H = 360;
 const BENCHMARK_DURATION_SEC = 3;
-// Require the encoder to be this much faster than realtime for the target
-// resolution. The benchmark runs at startup with an idle CPU; during playback
-// ffmpeg competes with in-process WebTorrent (download + hashing) and delivery,
-// so real throughput is lower. A generous margin keeps playback above 1× under
-// that real load and absorbs complex scenes.
-const PRESET_SPEED_MARGIN = 1.8;
+// Require the predicted speed to clear realtime by this much. The benchmarks
+// run at startup with an idle CPU; during playback ffmpeg competes with
+// in-process WebTorrent (download + hashing) and delivery, so real throughput
+// is lower, and the margin covers that plus complex scenes.
+//
+// It was 1.8 while the prediction counted ENCODING only and was therefore
+// several times too optimistic on a re-encode; with the decode term the
+// prediction is within ~13 % of measured, so the margin no longer has to stand
+// in for a missing term as well as for load.
+const PRESET_SPEED_MARGIN = 1.5;
+// The bar for a prediction that has NO decode term — a host whose calibration
+// clips are missing, or whose fit was rejected. That figure is the one the
+// margin was 1.8 for, and lowering it there would make an uncalibrated host
+// more permissive than it was before any of this existed.
+const ENCODE_ONLY_SPEED_MARGIN = 1.8;
 
 /**
  * @param {number} targetWidth
@@ -635,6 +651,422 @@ export async function detectTonemapSupport({ ffmpegBin, logger }) {
 }
 
 /**
+ * Solve a 3×3 linear system by Gaussian elimination with partial pivoting.
+ *
+ * @param {number[][]} rows - Three rows of [c0, c1, c2, rhs].
+ * @returns {number[] | null} The three unknowns, or null when singular.
+ */
+function solveLinear3(rows) {
+  const m = rows.map((row) => [...row]);
+  for (let col = 0; col < 3; col += 1) {
+    let pivot = col;
+    for (let row = col + 1; row < 3; row += 1) {
+      if (Math.abs(m[row][col]) > Math.abs(m[pivot][col])) {
+        pivot = row;
+      }
+    }
+    if (Math.abs(m[pivot][col]) < 1e-12) {
+      return null;
+    }
+    [m[col], m[pivot]] = [m[pivot], m[col]];
+    for (let row = 0; row < 3; row += 1) {
+      if (row === col) {
+        continue;
+      }
+      const factor = m[row][col] / m[col][col];
+      for (let k = col; k < 4; k += 1) {
+        m[row][k] -= factor * m[col][k];
+      }
+    }
+  }
+  return [m[0][3] / m[0][0], m[1][3] / m[1][1], m[2][3] / m[2][2]];
+}
+
+// The clips the decode cost is solved from. They ship with the package
+// (`assets/calibration/`), cut from Netflix Open Content "Meridian" (CC-BY 4.0)
+// — real, grainy live action, because a generated `testsrc2` clip decodes 158 %
+// away from a real film where these are 11 % away (measured 2026-08-14). Two
+// share a pixel count and differ 11.7× in bitrate, the third has the same
+// bitrate class at fewer pixels: three points, three unknowns.
+const CALIBRATION_CLIPS = ["cal-1080-hi.mp4", "cal-1080-lo.mp4", "cal-720.mp4"];
+const CALIBRATION_DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "assets", "calibration");
+// How wide the measured window must be before the slope is trusted, and how
+// long to wait for it at most. A second of decoding is thousands of frames on a
+// quick host and dozens on a weak one; both give a slope, and neither costs the
+// startup more than a second per clip.
+const DECODE_WINDOW_MIN_SEC = 1;
+const DECODE_WINDOW_MAX_MS = 8000;
+
+/**
+ * Read what a calibration clip IS from the decode run's own output: the
+ * dimensions, the frame rate and the bitrate ffmpeg reports for it. Read rather
+ * than declared, so replacing a clip cannot silently invalidate the fit.
+ *
+ * @param {string} stderr
+ * @returns {{ megapixelsPerSecond: number, megabitsPerSecond: number, durationSeconds: number } | null}
+ */
+function parseClipCharacteristics(stderr) {
+  // The same readers the session manager uses on the same banner — one parser
+  // per fact, so a second copy cannot drift from the first.
+  const { width, height } = parseFfmpegVideoDimensions(stderr);
+  const rate = parseFfmpegVideoFps(stderr);
+  const seconds = parseFfmpegDurationSeconds(stderr);
+  const kbps = parseFfmpegBitrateKbps(stderr);
+  if (!(width > 0) || !(height > 0) || !(rate > 0) || !(seconds > 0) || !(kbps > 0)) {
+    return null;
+  }
+  return {
+    megapixelsPerSecond: (width * height * rate) / 1e6,
+    megabitsPerSecond: kbps / 1000,
+    durationSeconds: seconds
+  };
+}
+
+/**
+ * Measure what DECODING costs on this host, as seconds of work per second of
+ * video, and solve it into three host constants:
+ *
+ *   decodeCost = a × Mpixel/s + b × Mbit/s + c
+ *
+ * Why it exists: the preset benchmark below measures ENCODING only, and a
+ * re-encode pays for both halves. Measured 2026-08-14 on the addon host, that
+ * omission made the budget offer a 240p rung it then ran at 0.39-0.95× — the
+ * benchmark said the host cleared the bar 2.5× over. With the decode term the
+ * same file predicts within 4.8 %; without it the error on that rung was 209 %.
+ *
+ * The constants are properties of the HOST, so this runs once at startup (about
+ * 5 s on a CM4) and any source is then priced from figures the probe already
+ * has — nothing is added to a session's cold start.
+ *
+ * They are also properties of the CODEC, and the clips are H.264: HEVC, AV1 and
+ * 10-bit decode dearer per pixel on the same machine, and a source that has to
+ * be re-encoded is by definition one this browser could not play, which is
+ * usually not H.264. So the fit is optimistic exactly there. Closing that needs
+ * clips in those codecs, and is its own roadmap item.
+ *
+ * @param {{ ffmpegBin: string, logger?: { info: (m: string) => void, warn: (m: string) => void }, clipsDir?: string }} options
+ * @returns {Promise<{ pixelTerm: number, bitrateTerm: number, constantTerm: number } | null>}
+ */
+export async function benchmarkDecodeCost({ ffmpegBin, logger, clipsDir = CALIBRATION_DIR }) {
+  const log = logger ?? { info: () => {}, warn: () => {} };
+  const startedAllAt = Date.now();
+  /** @type {number[][]} */
+  const equations = [];
+  for (const clip of CALIBRATION_CLIPS) {
+    const measured = await measureDecodeSlope(ffmpegBin, path.join(clipsDir, clip));
+    if (!measured) {
+      log.warn(`hwaccel: decode benchmark "${clip}" failed or said nothing; decode cost unknown`);
+      return null;
+    }
+    const cost = 1 / measured.speed;
+    equations.push([measured.megapixelsPerSecond, measured.megabitsPerSecond, 1, cost]);
+    log.info(
+      `hwaccel: decode "${clip}" ${measured.megapixelsPerSecond.toFixed(1)} Mpx/s ` +
+        `${measured.megabitsPerSecond.toFixed(2)} Mbit/s -> ${measured.speed.toFixed(1)}x ` +
+        `(cost ${cost.toFixed(4)} s/s, over ${measured.windowSec.toFixed(1)}s of decoding)`
+    );
+  }
+  const fitted = fitDecodeCost(equations);
+  if (!fitted) {
+    log.warn("hwaccel: decode cost could not be fitted to these measurements; decode cost unknown");
+    return null;
+  }
+  log.info(
+    `hwaccel: decode cost = ${fitted.pixelTerm.toFixed(6)} × Mpx/s + ${fitted.bitrateTerm.toFixed(6)} × Mbit/s ` +
+      `+ ${fitted.constantTerm.toFixed(4)} s/s (${fitted.shape}, measured in ${((Date.now() - startedAllAt) / 1000).toFixed(1)}s)`
+  );
+  return { pixelTerm: fitted.pixelTerm, bitrateTerm: fitted.bitrateTerm, constantTerm: fitted.constantTerm };
+}
+
+/**
+ * Measure how fast this host DECODES a clip, from ffmpeg’s own report of how
+ * much video it has processed.
+ *
+ * Wall-clock around the process cannot answer this: starting ffmpeg costs about
+ * a second, and on a quick machine a five-second clip decodes in a tenth of
+ * that, so the measurement would be of the program starting. Progress lines
+ * arrive twice a second AFTER it has started, and the slope between two of them
+ * — video processed against time taken — contains no part of the startup by
+ * construction.
+ *
+ * The clip is looped forever and the process killed as soon as the window is
+ * wide enough, so the cost is bounded by the clock rather than by the clip:
+ * roughly a second of measurement on any host, quick or slow.
+ *
+ * @param {string} ffmpegBin
+ * @param {string} clipPath
+ * @returns {Promise<{ speed: number, windowSec: number, megapixelsPerSecond: number, megabitsPerSecond: number } | null>}
+ */
+function measureDecodeSlope(ffmpegBin, clipPath) {
+  return new Promise((resolve) => {
+    const args = [
+      "-hide_banner", "-loglevel", "info", "-nostats",
+      "-stream_loop", "-1",
+      "-i", clipPath,
+      "-an", "-f", "null", "-",
+      "-progress", "pipe:1"
+    ];
+    /** @type {Array<{ wallSec: number, outSec: number }>} */
+    const samples = [];
+    let stderr = "";
+    let stdout = "";
+    let settled = false;
+    let child;
+    const startedAt = Date.now();
+    const finish = () => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      clearTimeout(timer);
+      try {
+        child?.kill("SIGKILL");
+      } catch {
+        // already gone
+      }
+      // The first sample is the one that still carries the startup — it reports
+      // whatever was processed while the process was coming up. Everything is
+      // measured from the second onwards.
+      const first = samples[1];
+      const last = samples[samples.length - 1];
+      const clipInfo = parseClipCharacteristics(stderr);
+      if (!first || !last || !clipInfo) {
+        resolve(null);
+        return;
+      }
+      const windowSec = last.wallSec - first.wallSec;
+      const producedSec = last.outSec - first.outSec;
+      if (!(windowSec >= DECODE_WINDOW_MIN_SEC) || !(producedSec > 0)) {
+        resolve(null);
+        return;
+      }
+      resolve({
+        speed: producedSec / windowSec,
+        windowSec,
+        megapixelsPerSecond: clipInfo.megapixelsPerSecond,
+        megabitsPerSecond: clipInfo.megabitsPerSecond
+      });
+    };
+    const timer = setTimeout(finish, DECODE_WINDOW_MAX_MS);
+    try {
+      child = spawn(ffmpegBin, args, { stdio: ["ignore", "pipe", "pipe"], windowsHide: true });
+    } catch {
+      // The timer would otherwise hold the event loop for its full wait and
+      // then run against a child that was never created.
+      clearTimeout(timer);
+      settled = true;
+      resolve(null);
+      return;
+    }
+    child.stderr.on("data", (chunk) => {
+      stderr += String(chunk);
+    });
+    child.stdout.on("data", (chunk) => {
+      stdout += String(chunk);
+      let newline = stdout.indexOf("\n");
+      while (newline >= 0) {
+        const line = stdout.slice(0, newline).trim();
+        stdout = stdout.slice(newline + 1);
+        if (line.startsWith("out_time_ms=")) {
+          const microseconds = Number(line.slice("out_time_ms=".length));
+          if (Number.isFinite(microseconds)) {
+            samples.push({ wallSec: (Date.now() - startedAt) / 1000, outSec: microseconds / 1e6 });
+          }
+        }
+        newline = stdout.indexOf("\n");
+      }
+      if (samples.length >= 2 && samples[samples.length - 1].wallSec - samples[1].wallSec >= DECODE_WINDOW_MIN_SEC) {
+        finish();
+      }
+    });
+    child.on("error", () => {
+      if (settled) {
+        return;
+      }
+      clearTimeout(timer);
+      settled = true;
+      resolve(null);
+    });
+    child.on("close", finish);
+  });
+}
+
+/**
+ * Fit the three measurements, and say which shape the data supported.
+ *
+ * The three-term fit is exact — three points, three unknowns — and is used
+ * whenever every term comes out non-negative. A negative term is not a host
+ * being odd; it says the difference it was solved from is smaller than the
+ * noise between runs, which is what a fast machine produces: measured on a
+ * desktop, the 720p clip took LONGER per second than the low-bitrate 1080p one,
+ * because process startup is a large share of a decode that takes a second.
+ *
+ * When that happens the bitrate term — the weak one, and the one solved from a
+ * single difference — is dropped and the remaining two are fitted by least
+ * squares over all three points. If even the pixel slope comes out non-positive
+ * there is no measurable dependence on the source at all, and inventing one is
+ * worse than having none: the caller then prices the encoder alone and refuses
+ * nothing.
+ *
+ * @param {number[][]} equations - Rows of [Mpixel/s, Mbit/s, 1, cost].
+ * @returns {{ pixelTerm: number, bitrateTerm: number, constantTerm: number, shape: string } | null}
+ */
+function fitDecodeCost(equations) {
+  const exact = solveLinear3(equations);
+  if (exact && exact[0] > 0 && exact[1] >= 0 && exact[2] >= 0) {
+    return { pixelTerm: exact[0], bitrateTerm: exact[1], constantTerm: exact[2], shape: "pixels+bitrate+constant" };
+  }
+  const count = equations.length;
+  const meanPixels = equations.reduce((sum, row) => sum + row[0], 0) / count;
+  const meanCost = equations.reduce((sum, row) => sum + row[3], 0) / count;
+  let covariance = 0;
+  let variance = 0;
+  for (const row of equations) {
+    covariance += (row[0] - meanPixels) * (row[3] - meanCost);
+    variance += (row[0] - meanPixels) ** 2;
+  }
+  if (!(variance > 0)) {
+    return null;
+  }
+  const pixelTerm = covariance / variance;
+  const constantTerm = meanCost - pixelTerm * meanPixels;
+  if (pixelTerm > 0 && constantTerm >= 0) {
+    return { pixelTerm, bitrateTerm: 0, constantTerm, shape: "pixels+constant" };
+  }
+  // A negative constant is the line crossing below zero where no clip was
+  // measured — every clip is 22 Mpixel/s or more, and nothing here says what a
+  // tiny picture costs. Rather than carry a term that would price a small
+  // source as free work, fit through the origin: cost proportional to pixels,
+  // which is the relationship the measurements do support.
+  let weighted = 0;
+  let squares = 0;
+  for (const row of equations) {
+    weighted += row[0] * row[3];
+    squares += row[0] ** 2;
+  }
+  const throughOrigin = squares > 0 ? weighted / squares : 0;
+  if (!(throughOrigin > 0)) {
+    return null;
+  }
+  return { pixelTerm: throughOrigin, bitrateTerm: 0, constantTerm: 0, shape: "pixels only" };
+}
+
+/**
+ * How many times realtime this host can DECODE a source of these
+ * characteristics, from the startup fit. `null` when the fit is unavailable or
+ * the source figures are not known.
+ *
+ * @param {{ pixelTerm: number, bitrateTerm: number, constantTerm: number } | null} model
+ * @param {{ megapixelsPerSecond: number, megabitsPerSecond: number }} source
+ * @returns {number | null}
+ */
+export function decodeSpeedFor(model, source) {
+  if (!model) {
+    return null;
+  }
+  const pixels = Number(source?.megapixelsPerSecond);
+  const bits = Number(source?.megabitsPerSecond);
+  if (!Number.isFinite(pixels) || pixels <= 0 || !Number.isFinite(bits) || bits < 0) {
+    return null;
+  }
+  const cost = model.pixelTerm * pixels + model.bitrateTerm * bits + model.constantTerm;
+  if (!(cost > 0)) {
+    return null;
+  }
+  return 1 / cost;
+}
+
+/**
+ * How many times realtime a re-encode of this source at this output pixel rate
+ * would run: decoding and encoding share the machine, so their costs add and
+ * their speeds combine as
+ *
+ *   1 / (1/decodeSpeed + 1/encodeSpeed)
+ *
+ * Checked 2026-08-14 on the rung that broke playback: 1/(1/2.31 + 1/5.99) =
+ * 1.67× against 1.48× measured. With no decode fit this falls back to the
+ * encode speed alone — which is what the budget did before, and which
+ * overestimated that rung five to eleven times.
+ *
+ * @param {{ decodeModel: { pixelTerm: number, bitrateTerm: number, constantTerm: number } | null, encodePixelsPerSec: number, outputPixelsPerSec: number, source: { megapixelsPerSecond: number, megabitsPerSecond: number } | null }} params
+ * @returns {number | null}
+ */
+export function predictedRealtimeSpeed({
+  decodeModel,
+  encodePixelsPerSec,
+  outputPixelsPerSec,
+  source,
+  observedDecodeCostSec = null
+}) {
+  if (!Number.isFinite(encodePixelsPerSec) || encodePixelsPerSec <= 0) {
+    return null;
+  }
+  if (!Number.isFinite(outputPixelsPerSec) || outputPixelsPerSec <= 0) {
+    return null;
+  }
+  const encodeSpeed = encodePixelsPerSec / outputPixelsPerSec;
+  // What this very file has been seen to cost, when it has been: the clips are
+  // H.264 and a source that has to be re-encoded usually is not, so a figure
+  // taken from the encoder actually running on THIS source beats any model of
+  // a stand-in. It arrives seconds into playback and replaces the estimate.
+  const decodeSpeed = Number.isFinite(observedDecodeCostSec) && observedDecodeCostSec > 0
+    ? 1 / observedDecodeCostSec
+    : (source ? decodeSpeedFor(decodeModel, source) : null);
+  if (decodeSpeed === null) {
+    return encodeSpeed;
+  }
+  return 1 / (1 / decodeSpeed + 1 / encodeSpeed);
+}
+
+/**
+ * Whether this host can hold realtime, with the margin, while re-encoding this
+ * source to this output pixel rate — and the predicted speed either way, so a
+ * refusal can say what it refused on.
+ *
+ * The encoder figure is the FASTEST benchmarked preset: it is the best this
+ * host can do, so a rung it cannot hold cannot be held at any quality setting.
+ *
+ * @param {{ benchmark: Array<{ preset: string, pixelsPerSec: number }>, decodeModel?: object | null, source?: { megapixelsPerSecond: number, megabitsPerSecond: number } | null, outputPixelsPerSec: number }} params
+ * @returns {{ speed: number | null, sustainable: boolean }}
+ */
+export function canSustainOutput({
+  benchmark,
+  decodeModel = null,
+  source = null,
+  outputPixelsPerSec,
+  observedDecodeCostSec = null
+}) {
+  if (!Array.isArray(benchmark) || benchmark.length === 0) {
+    // Nothing measured on this host: the budget cannot refuse what it cannot
+    // price, and refusing everything would leave a viewer with no rung at all.
+    return { speed: null, sustainable: true };
+  }
+  const observed = Number.isFinite(observedDecodeCostSec) && observedDecodeCostSec > 0
+    ? observedDecodeCostSec
+    : null;
+  if (observed === null && !isDecodePriced({ decodeModel, source })) {
+    // An encoder-only figure was several times too optimistic on the rung this
+    // check exists for, so it is not fit to refuse anything. Without the decode
+    // term the ladder is offered whole, exactly as it was before.
+    return { speed: null, sustainable: true };
+  }
+  const speed = predictedRealtimeSpeed({
+    decodeModel,
+    encodePixelsPerSec: benchmark[benchmark.length - 1].pixelsPerSec,
+    outputPixelsPerSec,
+    source,
+    observedDecodeCostSec: observed
+  });
+  if (speed === null) {
+    return { speed: null, sustainable: true };
+  }
+  return { speed, sustainable: speed >= PRESET_SPEED_MARGIN };
+}
+
+/** The margin a predicted speed must clear to be offered. */
+export const REALTIME_SPEED_MARGIN = PRESET_SPEED_MARGIN;
+
+/**
  * Benchmark software libx264 presets on this host. Encodes a short synthetic
  * clip at a fixed reference resolution with each preset and measures encoder
  * throughput in pixels/second. The session manager uses this to pick, per
@@ -683,18 +1115,45 @@ export async function benchmarkSoftwarePresets({ ffmpegBin, logger }) {
  *
  * @param {Array<{ preset: string, pixelsPerSec: number }>} benchmark - slowest→fastest
  * @param {number} pixelsPerSecNeeded
+ * @param {{ decodeModel?: object | null, source?: { megapixelsPerSecond: number, megabitsPerSecond: number } | null }} [cost]
  * @returns {string}
  */
-export function pickSoftwarePreset(benchmark, pixelsPerSecNeeded) {
+export function pickSoftwarePreset(benchmark, pixelsPerSecNeeded, cost = {}) {
   if (!Array.isArray(benchmark) || benchmark.length === 0) {
     return "ultrafast";
   }
+  const observed = Number.isFinite(cost?.observedDecodeCostSec) && cost.observedDecodeCostSec > 0
+    ? cost.observedDecodeCostSec
+    : null;
+  const priced = isDecodePriced(cost);
+  const bar = priced ? PRESET_SPEED_MARGIN : ENCODE_ONLY_SPEED_MARGIN;
   for (const entry of benchmark) {
-    if (entry.pixelsPerSec >= pixelsPerSecNeeded * PRESET_SPEED_MARGIN) {
+    const speed = predictedRealtimeSpeed({
+      decodeModel: cost.decodeModel ?? null,
+      encodePixelsPerSec: entry.pixelsPerSec,
+      outputPixelsPerSec: pixelsPerSecNeeded,
+      source: cost.source ?? null,
+      observedDecodeCostSec: observed
+    });
+    if (speed !== null && speed >= bar) {
       return entry.preset;
     }
   }
   return benchmark[benchmark.length - 1].preset;
+}
+
+/**
+ * Whether a cost description can actually price decoding — a fit AND a source
+ * to apply it to. Without both, every prediction is encoder-only.
+ *
+ * @param {{ decodeModel?: object | null, source?: object | null }} cost
+ * @returns {boolean}
+ */
+function isDecodePriced(cost) {
+  if (Number.isFinite(cost?.observedDecodeCostSec) && cost.observedDecodeCostSec > 0) {
+    return true; // measured on the source itself, which needs no fit to stand on
+  }
+  return Boolean(cost?.decodeModel) && Boolean(cost?.source);
 }
 
 // Resolution-ladder heights (output height rungs), high→low. The ladder is
@@ -756,9 +1215,10 @@ export function buildResolutionLadder(ceilingWidth, ceilingHeight) {
  * @param {Array<{ preset: string, pixelsPerSec: number }>} benchmark - slowest→fastest
  * @param {{ width: number, height: number }} ceiling
  * @param {number} outputFps
+ * @param {{ decodeModel?: object | null, source?: { megapixelsPerSecond: number, megabitsPerSecond: number } | null }} [cost]
  * @returns {{ width: number, height: number, preset: string, ladder: Array<{ width: number, height: number }>, rungIndex: number } | null}
  */
-export function chooseSoftwareEncodeSettings(benchmark, ceiling, outputFps) {
+export function chooseSoftwareEncodeSettings(benchmark, ceiling, outputFps, cost = {}) {
   if (!Array.isArray(benchmark) || benchmark.length === 0) {
     return null;
   }
@@ -768,15 +1228,21 @@ export function chooseSoftwareEncodeSettings(benchmark, ceiling, outputFps) {
     return null;
   }
   const fastest = benchmark[benchmark.length - 1].pixelsPerSec; // ultrafast throughput
+  const bar = isDecodePriced(cost) ? PRESET_SPEED_MARGIN : ENCODE_ONLY_SPEED_MARGIN;
   let chosenIndex = ladder.length - 1; // default: lowest rung (best effort)
   for (let i = 0; i < ladder.length; i += 1) {
-    const needed = ladder[i].width * ladder[i].height * fps;
-    if (fastest >= needed * PRESET_SPEED_MARGIN) {
+    const speed = predictedRealtimeSpeed({
+      decodeModel: cost.decodeModel ?? null,
+      encodePixelsPerSec: fastest,
+      outputPixelsPerSec: ladder[i].width * ladder[i].height * fps,
+      source: cost.source ?? null
+    });
+    if (speed !== null && speed >= bar) {
       chosenIndex = i;
       break;
     }
   }
   const chosen = ladder[chosenIndex];
-  const preset = pickSoftwarePreset(benchmark, chosen.width * chosen.height * fps);
+  const preset = pickSoftwarePreset(benchmark, chosen.width * chosen.height * fps, cost);
   return { width: chosen.width, height: chosen.height, preset, ladder, rungIndex: chosenIndex };
 }

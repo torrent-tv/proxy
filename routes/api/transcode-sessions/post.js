@@ -129,6 +129,13 @@ export async function handleApiTranscodeSessionsPost(req, reply, { hlsSessionMan
             variantHeight: hlsSessionManager.variantHeightOf(session)
           }
         : {}),
+      // The heights this host will actually serve this file at, largest first
+      // — the ladder minus every rung it cannot produce faster than it is
+      // watched. The browser needs it whether or not a master exists: without
+      // it, it fell back to a ladder of its own invention and offered rungs the
+      // proxy had just refused, and picking one re-opened the session at a
+      // height measured at a third of realtime.
+      offeredHeights: hlsSessionManager.offeredHeights(session),
       // What this session's output will carry, stated rather than left to be
       // discovered. The browser checks what it actually got against this: a
       // track that never arrives is otherwise noticed only by its absence,

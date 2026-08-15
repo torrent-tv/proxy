@@ -35,7 +35,7 @@ import { createSourceRegistry } from "./store/source-registry.js";
 import { WorkerTorrentPool } from "./services/torrent-worker/pool-adapter.js";
 import { HlsSessionManager } from "./services/hls-session-manager.js";
 import { createPlaybackPlanner } from "./services/playback-planner.js";
-import { detectVideoEncoder, benchmarkSoftwarePresets, detectTonemapSupport } from "./services/hwaccel.js";
+import { detectVideoEncoder, benchmarkSoftwarePresets, benchmarkDecodeCost, detectTonemapSupport } from "./services/hwaccel.js";
 import { logger } from "./utils/logger.js";
 
 const __filename = fileURLToPath(import.meta.url);
@@ -124,6 +124,18 @@ export async function startProxyServer({ host, port, transcodeAudio, ffmpegBin, 
   const softwarePresetBenchmark = videoEncoder?.kind === "software"
     ? await benchmarkSoftwarePresets({ ffmpegBin, logger })
     : null;
+  // A re-encode pays for decoding as well, and the preset benchmark measures
+  // only the encoder — which is how a rung this host runs at 0.39x came to be
+  // offered as if it cleared realtime 2.5× over (measured 2026-08-14). Solve
+  // the decode cost from the bundled calibration clips once at startup; every
+  // source is then priced from figures the probe already has.
+  // Only the software path can read it: the budget and the ladder both bail
+  // on a missing preset benchmark, and that is only produced for libx264. A
+  // host with a hardware encoder would pay three decodes at every start for a
+  // figure nothing would ever ask for.
+  const decodeCostModel = videoEncoder?.kind === "software"
+    ? await benchmarkDecodeCost({ ffmpegBin, logger })
+    : null;
   // Whether this ffmpeg build can tone-map HDR→SDR (zscale + tonemap filters).
   // Detected once; the session manager applies the tonemap chain only for HDR
   // sources on the software path when available.
@@ -137,6 +149,7 @@ export async function startProxyServer({ host, port, transcodeAudio, ffmpegBin, 
     localPort: selectedPort,
     videoEncoder,
     softwarePresetBenchmark,
+    decodeCostModel,
     tonemapSupported,
     segmentFormatId: segmentFormat,
     // Live download stats accessor for the realtime budget: lets it tell a
@@ -168,7 +181,11 @@ export async function startProxyServer({ host, port, transcodeAudio, ffmpegBin, 
     torrentPool,
     warmKeyframeIndex: (params) => hlsSessionManager.warmKeyframeIndex(params),
     expectedFirstSegmentMs: () => hlsSessionManager.expectedFirstSegmentMs(),
-    expectedSessionCreateMs: () => hlsSessionManager.expectedSessionCreateMs()
+    expectedSessionCreateMs: () => hlsSessionManager.expectedSessionCreateMs(),
+    // The quality menu is on screen from the moment a file is opened, so the
+    // heights this host can actually serve have to be answerable before any
+    // encoder exists — from the probe and the startup benchmarks alone.
+    predictOfferedHeights: (mediaInfo) => hlsSessionManager.predictOfferedHeights(mediaInfo)
   });
 
   app.get("/health", async (req, reply) => handleHealthGet(req, reply, { version }));

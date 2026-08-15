@@ -3720,7 +3720,16 @@ export class HlsSessionManager {
     // treated as a seek anywhere in this class, so after a forward jump the
     // audio would be held, refused, and left grinding forward from where it
     // was — the picture playing over silence for as long as the jump was.
-    for (const renditionId of named.audioRenditionSessions?.values() ?? []) {
+    // Only the track being LISTENED to. A track the viewer left keeps its place
+    // but not an encoder, and seeking it would start one for nobody — which is
+    // how a single viewer came to have three ffmpeg processes and three readers
+    // on one file (2026-08-15), enough to pin every resident piece and kill the
+    // session outright.
+    const listening = named.activeAudioTrackIndex ?? named.audioTrackIndex;
+    for (const [trackIndex, renditionId] of named.audioRenditionSessions ?? []) {
+      if (trackIndex !== listening) {
+        continue;
+      }
       const rendition = this.sessionsById.get(renditionId);
       if (rendition && rendition.state !== "disposed") {
         rendition.lastAccessedAt = Date.now();
@@ -5129,6 +5138,54 @@ export class HlsSessionManager {
    * @param {number} positionSeconds - Where the switch will happen.
    * @returns {Promise<{ sessionId: string, fileName: string } | null>}
    */
+  /**
+   * Prepare an audio track at a position, so a change of track is instant.
+   *
+   * The player, told to change track, discards the audio it holds and cannot
+   * show a frame until the new track covers the playhead — so switching first
+   * and producing second puts the whole of the track's cold start on screen as
+   * a spinner. Measured 2026-08-15: the picture stopped for as long as the
+   * first piece took. Prepared first, the player finds the bytes already there.
+   *
+   * The same shape as {@link prepareVariant}, and for the same reason.
+   *
+   * @param {string} baseSessionId
+   * @param {number} trackIndex
+   * @param {number} positionSeconds
+   * @returns {Promise<{ sessionId: string, fileName: string } | null>}
+   */
+  async prepareAudioTrack(baseSessionId, trackIndex, positionSeconds) {
+    const base = this.sessionsById.get(baseSessionId);
+    if (!base || base.state === "disposed" || !this.#servesAudioSeparately(base)) {
+      return null;
+    }
+    if (!this.#audioRenditionsOf(base).some((track) => track.trackIndex === trackIndex)) {
+      return null;
+    }
+    const rendition = await this.#resolveAudioRenditionSession(base, trackIndex);
+    if (!rendition) {
+      return null;
+    }
+    // A track prepared for a change the viewer did not make would otherwise
+    // encode for nobody until its own idle timer noticed — the same trap
+    // warming a quality rung has, and the same answer.
+    const stillWarming = base.warmingAudioSessionId;
+    if (stillWarming && stillWarming !== rendition.id) {
+      const abandoned = this.sessionsById.get(stillWarming);
+      const listening = base.activeAudioTrackIndex ?? base.audioTrackIndex;
+      const active = base.audioRenditionSessions?.get(listening);
+      if (abandoned && abandoned.id !== active) {
+        this.#stopEncodeRun(abandoned, "prepared for a track change the viewer did not make");
+      }
+    }
+    base.warmingAudioSessionId = rendition.id;
+    // Pointed at the position the switch will land on: an existing track is
+    // parked wherever the viewer left it.
+    this.#seekSession(rendition, positionSeconds);
+    const index = this.#segmentIndexForTime(rendition, positionSeconds);
+    return { sessionId: rendition.id, fileName: rendition.segmentFormat.segmentFileName(index) };
+  }
+
   async prepareVariant(baseSessionId, height, positionSeconds) {
     if (!isSafeSessionId(baseSessionId)) {
       return null;
@@ -5387,7 +5444,51 @@ export class HlsSessionManager {
       );
       return { sessionId: null, error: message };
     }
+    if (isSegment && rendition) {
+      this.#noteAudioTrackActive(base, rendition, trackIndex);
+    }
     return { sessionId: rendition?.id ?? null };
+  }
+
+  /**
+   * A SEGMENT of this track is what says the viewer is listening to it — the
+   * player fetches the playlist and the init of tracks it may never choose.
+   *
+   * Every other track is then stopped. Each one is an ffmpeg process AND a
+   * reader holding pieces of the torrent in memory, and the store can only
+   * spill a piece nobody is reading: on 2026-08-15 a viewer who had changed
+   * track once had three readers on one file — picture, the track they chose
+   * and the track they left — and at a seek all three revived their windows at
+   * once, every resident piece was pinned, a read ended with zero bytes, and
+   * every encoder took that for the end of the file and died. Playback was over
+   * for good; the sessions answered 500 to everything after that.
+   *
+   * Stopped, not disposed: the track keeps its place, its grid and its
+   * position, so switching back does not build it again — the same treatment a
+   * quality rung gets when the viewer moves off it.
+   *
+   * @param {HlsSession} base
+   * @param {HlsSession} active
+   * @param {number} trackIndex
+   */
+  #noteAudioTrackActive(base, active, trackIndex) {
+    if (base.activeAudioTrackIndex === trackIndex) {
+      return;
+    }
+    base.activeAudioTrackIndex = trackIndex;
+    for (const [otherIndex, sessionId] of base.audioRenditionSessions ?? []) {
+      if (otherIndex === trackIndex) {
+        continue;
+      }
+      const other = this.sessionsById.get(sessionId);
+      if (!other || other.state === "disposed" || other.ffmpeg == null) {
+        continue;
+      }
+      // Requests held on it are for segments nobody will produce now, and the
+      // player stopped waiting for them the moment it changed track.
+      other.waitEpoch = (other.waitEpoch ?? 0) + 1;
+      this.#stopEncodeRun(other, `the viewer moved to audio track ${trackIndex}`);
+    }
   }
 
   /**

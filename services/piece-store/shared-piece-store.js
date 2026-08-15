@@ -109,6 +109,14 @@ const MIN_BUDGET_BYTES = 64 * 1024 * 1024;
  * in. With one, a single reader would deadlock the store against itself.
  */
 const MIN_RESIDENT_PIECES = 2;
+/**
+ * How long a caller waits for a pinned piece to be released before the store
+ * calls it a deadlock. A pin lasts one read of one piece — milliseconds — so
+ * anything approaching this is a reader waiting for itself.
+ */
+const PINNED_WAIT_MS = 5_000;
+/** How often a wait for a slot looks again when no event is due to wake it. */
+const CLAIM_RETRY_MS = 50;
 
 /**
  * A chunk store holding pieces in a `SharedArrayBuffer`, spilling to disk.
@@ -151,6 +159,8 @@ export class SharedPieceStore {
    * store is exhausted, when in fact it is merely mid-flight.
    */
   #outstandingSlots = 0;
+  /** When the wait for a pinned piece began; 0 when nothing is waiting. */
+  #pinnedWaitStartedAt = 0;
   /** Resolvers waiting for a slot to become claimable. @type {(() => void)[]} */
   #waiters = [];
   #lru;
@@ -169,7 +179,8 @@ export class SharedPieceStore {
     fromDisk: 0,
     spills: 0,
     revivals: 0,
-    blockedByPins: 0
+    blockedByPins: 0,
+    waitedForPins: 0
   };
 
   /**
@@ -308,6 +319,8 @@ export class SharedPieceStore {
    */
   unpin(index) {
     this.#lru.unpin(index);
+    // A released pin can be exactly what a caller waiting for a slot needs.
+    this.#wake();
   }
 
   /**
@@ -330,6 +343,15 @@ export class SharedPieceStore {
         for (const spill of this.#evicting.values()) {
           void spill.then(() => this.#wake(), () => this.#wake());
         }
+        // A wake is not guaranteed to come. Waiting for a spill is safe — one
+        // is in flight and will finish — but waiting for a PIN to be released
+        // is not: if every piece is held and nothing else is happening, there
+        // is no event left to fire, and the deadline that gives up cannot be
+        // reached because it is only tested inside an attempt. That is a hang,
+        // and it hung this store's own test for the full ten minutes a run is
+        // allowed. So the wait also re-checks on a timer.
+        const retry = setTimeout(() => this.#wake(), CLAIM_RETRY_MS);
+        retry.unref?.();
       });
     }
   }
@@ -394,11 +416,34 @@ export class SharedPieceStore {
       if (this.#evicting.size > 0 || this.#outstandingSlots > 0) {
         return null;
       }
-      // Every resident piece is being read. Taking one anyway is precisely the
-      // failure this store exists to make impossible.
+      // Every resident piece is being READ right now. That is not a permanent
+      // condition: a pin lasts as long as one read of one piece, and the reader
+      // releases it a moment later. So wait for that, exactly as the loop above
+      // waits for a spill — pins now wake the waiters.
+      //
+      // It became reachable when a viewer could have three readers on one file
+      // (2026-08-15: picture, the audio track chosen and the one left behind);
+      // failing here ended a read with zero bytes, which ffmpeg reads as the
+      // end of the file, so every encoder died and the session answered 500 to
+      // everything after that.
+      //
+      // The deadline is what keeps a genuine deadlock visible: a reader that
+      // holds a pin while waiting for a slot would otherwise wait for itself
+      // for ever.
+      if (this.#pinnedWaitStartedAt === 0) {
+        this.#pinnedWaitStartedAt = Date.now();
+      }
+      if (Date.now() - this.#pinnedWaitStartedAt < PINNED_WAIT_MS) {
+        this.#counters.waitedForPins += 1;
+        return null;
+      }
+      this.#pinnedWaitStartedAt = 0;
       this.#counters.blockedByPins += 1;
-      throw new Error("Every resident piece is pinned; no slot can be freed.");
+      throw new Error(
+        `Every resident piece is pinned and none was released in ${PINNED_WAIT_MS}ms; no slot can be freed.`
+      );
     }
+    this.#pinnedWaitStartedAt = 0;
 
     const slot = this.#slotOf.get(victim);
 

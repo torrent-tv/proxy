@@ -703,3 +703,36 @@ test("a stale buffer report is not used to place an audio track", async (t) => {
     "the whole look-ahead is subtracted instead — it cannot leave the run ahead of the viewer"
   );
 });
+
+test("an audio track is prepared at the position the switch will land on", async (t) => {
+  const { manager, base, dirPath } = await managerWithBase();
+  t.after(async () => {
+    await manager.disposeAll();
+    await rm(dirPath, { recursive: true, force: true });
+  });
+  base.audioSeparate = true;
+  manager.getCachedAudioTracks = () => [
+    { index: 0, language: "rus", title: "", isDefault: true },
+    { index: 1, language: "eng", title: "", isDefault: false }
+  ];
+  const rendition = fakeSession({ id: VARIANT_ID, encodeHeight: 0, dirPath });
+  rendition.audioOnly = true;
+  rendition.audioTrackIndex = 1;
+  rendition.ffmpeg = fakeEncoder();
+  rendition.encodeStartIndex = 0;
+  manager.sessionsById.set(VARIANT_ID, rendition);
+  base.audioRenditionSessions = new Map([[1, VARIANT_ID]]);
+
+  const prepared = await manager.prepareAudioTrack(BASE_ID, 1, 240);
+
+  assert.deepEqual(
+    prepared,
+    { sessionId: VARIANT_ID, fileName: "segment-00060.mp4" },
+    "the caller is told which segment to wait for — 240 s on a four-second grid"
+  );
+  assert.equal(
+    rendition.seekTarget,
+    59,
+    "and the track is pointed at the switch position, one back for the preceding keyframe"
+  );
+});

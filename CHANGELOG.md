@@ -1,3 +1,7 @@
+## 2.15.3
+
+- **Fix**: A magnet whose swarm never answered no longer poisons the film for good. It leaves a torrent with the right infohash and no file list, and WebTorrent then refuses the same film opened from a `.torrent` as a duplicate — so the answer to every later attempt came from the entry that knows nothing: `Proxy playback plan request failed (404): File index was not found in torrent`, reproduced in a browser 2026-08-15, and no reload could clear it because the useless entry outlives them all. A source that carries the metadata now replaces one that lacks it.
+
 ## 2.15.2
 
 - **Fix**: A segment request that can never be answered is answered as absent instead of being held for a minute. Changing audio track makes hls.js ask the new stream for segment #0 before anything else; the run was at #354, the repair reaches sixty segments back and no further, no seek was coming, and an encoder only moves forward — so the request was unanswerable from the moment it arrived, and holding it simply spent the player's own patience. Measured 2026-08-15: the track was made ready in 7.1 s at the viewer's position, and the viewer then watched a spinner for **63 s** — sixty of them the hold, the rest the player recovering after it failed. Deliberately narrower than the refusal 2.14.1 shipped and 2.14.2 withdrew: a request within the repair's reach, or one with a seek on its way, is still held, because for those the encoder is about to be moved there.

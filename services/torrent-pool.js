@@ -438,6 +438,17 @@ export function fileDownloadedBytes(torrent, file) {
  * File-level piece selection is tracked through a reference-count map so
  * that only files with at least one active stream cause downloading.
  */
+/**
+ * Whether what we are about to add is a magnet — a name for content, with no
+ * file list in it — rather than a .torrent, which carries one.
+ *
+ * @param {string | Buffer} torrentId
+ * @returns {boolean}
+ */
+function isMagnetSource(torrentId) {
+  return typeof torrentId === "string" && /^magnet:\?/i.test(torrentId.trim());
+}
+
 export class TorrentPool {
   /**
    * In-flight `client.add()` promises keyed by the same key as `torrents`.
@@ -989,6 +1000,25 @@ export class TorrentPool {
         const dupMatch = /duplicate torrent ([0-9a-f]{40})/i.exec(message);
         if (dupMatch) {
           const existing = this.client.torrents.find((t) => t?.infoHash === dupMatch[1]);
+          // A torrent already here but WITHOUT metadata is not an answer to a
+          // request that carries metadata. A magnet whose swarm never answered
+          // leaves exactly that: an entry with the right infohash, no file
+          // list, and no way to get one. The same film opened from a .torrent
+          // then collides with it and is refused as a duplicate — measured
+          // 2026-08-15 in a browser, "File index was not found in torrent", and
+          // no reload could ever fix it because the poisoned entry outlives
+          // every attempt. The one that knows the files wins.
+          if (existing && !existing.ready && !isMagnetSource(torrentId)) {
+            logger.info(
+              `torrent-pool: replacing ${dupMatch[1].slice(0, 8)} — it was added from a magnet that never ` +
+              "found peers, and this source carries the metadata it lacks"
+            );
+            existing.destroy({ destroyStore: false }, () => {
+              this.#pending.delete(key);
+              resolve(this.getTorrent(sourceType, source));
+            });
+            return;
+          }
           if (existing) {
             const settle = () => {
               this.torrents.set(key, existing);

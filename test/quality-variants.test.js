@@ -594,3 +594,46 @@ test("the cut grid follows the grid asked for, not who produces the frames", () 
     "no keyframes means no keyframe grid, however the caller asks"
   );
 });
+
+test("a rung served by copy stays offered while a re-encoded rung is on screen", async (t) => {
+  const { manager, base, dirPath } = await managerWithBase();
+  t.after(async () => {
+    await manager.disposeAll();
+    await rm(dirPath, { recursive: true, force: true });
+  });
+  // The field case of 2026-08-15: a 1080p source served by COPY, the viewer on
+  // 240p, and a host too weak to re-encode anything above it.
+  base.transcodeVideo = false;
+  base.encodeHeight = 1080;
+  base.variantHeight = 1080;
+  // Enough to re-encode 240p (1.67x combined) and nowhere near enough for
+  // 720p (0.45x) — the field's own shape, where the rung the viewer picked was
+  // offered and everything between it and the copy was not.
+  manager.softwarePresetBenchmark = [{ preset: "ultrafast", pixelsPerSec: 12_000_000 }];
+  manager.decodeCostModel = { pixelTerm: 0.00793, bitrateTerm: 0, constantTerm: 0 };
+  base.sourceDecode = { megapixelsPerSecond: 49.766, megabitsPerSecond: 8 };
+
+  const watching = fakeSession({ id: VARIANT_ID, encodeHeight: 240, dirPath });
+  watching.variantHeight = 240;
+  watching.transcodeVideo = true;
+  // The rung knows the source as well as the base does. Without this it prices
+  // nothing at all — every height comes back "sustainable" for want of a
+  // measurement — and the assertion below would hold for the wrong reason.
+  watching.sourceDecode = base.sourceDecode;
+  watching.variantBases = new Set([BASE_ID]);
+  manager.sessionsById.set(VARIANT_ID, watching);
+  base.variants = new Map([[240, VARIANT_ID]]);
+  base.activeVariantId = VARIANT_ID;
+
+  const offered = manager.offeredHeights(watching);
+
+  assert.ok(
+    offered.includes(1080),
+    "the height the source is COPIED at costs no encoder, so no measurement of this host can withdraw it"
+  );
+  assert.deepEqual(
+    offered,
+    manager.offeredHeights(base),
+    "one answer for the family: a rung asked while watching another must not disagree with the base"
+  );
+});

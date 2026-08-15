@@ -638,19 +638,18 @@ test("a rung served by copy stays offered while a re-encoded rung is on screen",
   );
 });
 
-test("a separately published audio track starts behind the picture's read head", async (t) => {
+test("a separately published audio track starts where the picture is, from the reported buffer", async (t) => {
   const { manager, base, dirPath } = await managerWithBase();
   t.after(async () => {
     await manager.disposeAll();
     await rm(dirPath, { recursive: true, force: true });
   });
-  // What broke playback on 2026-08-15: the position this class keeps is where
-  // segments have been SERVED to, and the viewer's picture is behind it by
-  // everything they have buffered. Started at the read head, the audio run sat
-  // ahead of the viewer and every request they made was behind a run that only
-  // moves forward.
-  base.viewerPositionSeconds = 140;
   base.audioSeparate = true;
+  // Served up to 140 s, and the browser says it holds 40 s ahead of the
+  // picture — so the viewer is at 100 s, and that, less a segment of margin,
+  // is where the track has to begin.
+  base.viewerPositionSeconds = 140;
+  base.netReport = { linkMbps: 20, bufferedAheadSec: 40, at: Date.now() };
   manager.getCachedAudioTracks = () => [
     { index: 0, language: "rus", title: "", isDefault: true },
     { index: 1, language: "eng", title: "", isDefault: false }
@@ -663,13 +662,44 @@ test("a separately published audio track starts behind the picture's read head",
     return { sessionId: VARIANT_ID, session: rendition };
   };
 
-  // A segment, not the playlist: the playlist is answered from the base and
-  // deliberately starts no encoder.
   await manager.resolveAudioRenditionFile(BASE_ID, 1, "segment-00010.mp4");
 
   assert.equal(created.length, 1, "the track's own session was made");
-  assert.ok(
-    created[0].startPositionSeconds <= 20,
-    `started behind the picture, not at the read head — got ${created[0].startPositionSeconds}s for a read head of 140s`
+  assert.equal(
+    created[0].startPositionSeconds,
+    96,
+    "140 s served, less the 40 s the player holds, less one segment of margin"
+  );
+});
+
+test("a stale buffer report is not used to place an audio track", async (t) => {
+  const { manager, base, dirPath } = await managerWithBase();
+  t.after(async () => {
+    await manager.disposeAll();
+    await rm(dirPath, { recursive: true, force: true });
+  });
+  base.audioSeparate = true;
+  base.viewerPositionSeconds = 300;
+  // Sent a minute ago: the viewer may have seeked anywhere since, so it says
+  // nothing about where they are now.
+  base.netReport = { linkMbps: 20, bufferedAheadSec: 5, at: Date.now() - 60_000 };
+  manager.getCachedAudioTracks = () => [
+    { index: 0, language: "rus", title: "", isDefault: true },
+    { index: 1, language: "eng", title: "", isDefault: false }
+  ];
+  const created = [];
+  manager.createOrGetSession = async (params) => {
+    created.push(params);
+    const rendition = fakeSession({ id: VARIANT_ID, encodeHeight: 0, dirPath });
+    rendition.audioOnly = true;
+    return { sessionId: VARIANT_ID, session: rendition };
+  };
+
+  await manager.resolveAudioRenditionFile(BASE_ID, 1, "segment-00010.mp4");
+
+  assert.equal(
+    created[0].startPositionSeconds,
+    176,
+    "the whole look-ahead is subtracted instead — it cannot leave the run ahead of the viewer"
   );
 });

@@ -354,6 +354,10 @@ const READ_WINDOW_SECONDS = 30;
 const READ_WINDOW_MIN_BYTES = 16 * 1024 * 1024;
 const READ_WINDOW_MAX_BYTES = 96 * 1024 * 1024;
 const LOOKAHEAD_PAUSE_SECONDS = 120;
+// How old a viewer's link report may be and still describe where they are. It
+// is sent every 10 s, and a seek in between moves them somewhere this cannot
+// predict — so anything older is treated as no report at all.
+const NET_REPORT_FRESH_MS = 15_000;
 const LOOKAHEAD_RESUME_SECONDS = 60;
 // Seek debounce. A far (out-of-window) segment request is a server-side seek.
 // Rather than restart ffmpeg on the first one, wait a short quiet period:
@@ -389,7 +393,18 @@ const SEEK_SETTLE_MS = 300;
 // seek settles on its own — the seek is what should move the encoder — and
 // short enough that a session cannot sit on an unanswerable request, which
 // measured two minutes forty-one before a viewer gave up.
-const BEHIND_HEAD_REPAIR_MS = 3_000;
+// A request behind the run is acted on once it has been REPEATED, not once it
+// has waited: repetition is the player saying it still needs this exact
+// segment, while a delay only says time has passed. The floor below stays as a
+// last guard against acting on a single stray poll.
+const BEHIND_HEAD_REPAIR_MIN_ASKS = 2;
+// More distinct indices than this behind the head at once is the player
+// scanning the playlist rather than waiting for a frame.
+const BEHIND_HEAD_SCAN_INDICES = 3;
+// The window the count above is taken over. A player's scan lands inside half a
+// second (field log 2026-08-02); a viewer waiting asks every few seconds.
+const BEHIND_HEAD_SCAN_WINDOW_MS = 2_000;
+const BEHIND_HEAD_REPAIR_MS = 400;
 // How far behind the run a request may be and still be treated as the encoder
 // standing in the wrong place rather than as a player scanning the playlist. A
 // misplaced run is out by at most the buffer the player was holding — measured
@@ -2886,6 +2901,7 @@ export class HlsSessionManager {
     // for the seek that should move the encoder. It also stops the map growing
     // for the life of a session.
     session.firstWantedAt = new Map();
+    session.behindHeadAsks = new Map();
     const generation = ++session.encodeRunGeneration;
     const previousFfmpeg = session.ffmpeg;
     // A suspended process does not act on SIGTERM until it is continued, so the
@@ -3461,6 +3477,16 @@ export class HlsSessionManager {
     if (!session.firstWantedAt.has(index)) {
       session.firstWantedAt.set(index, Date.now());
     }
+    // How often each index behind the run has been asked for, and how many
+    // distinct ones there are. The repair reads both: one index asked twice is
+    // a viewer waiting, a dozen asked once each is the player scanning. Kept
+    // only for what is behind the head — everything ahead is ordinary
+    // read-ahead — and cleared with each run, like the record above.
+    if (index < session.encodeStartIndex) {
+      session.behindHeadAsks ??= new Map();
+      const asked = session.behindHeadAsks.get(index);
+      session.behindHeadAsks.set(index, { count: (asked?.count ?? 0) + 1, at: Date.now() });
+    }
     if (!session || session.state === "disposed" || index < 0) {
       return;
     }
@@ -3578,6 +3604,37 @@ export class HlsSessionManager {
     // A seek already settling is about to move the encoder to where the VIEWER
     // said they are. That statement outranks anything inferred here.
     if (session.seekSettleTimer != null) {
+      return;
+    }
+    // What separates a request the viewer is waiting for from the player
+    // scanning the playlist is not TIME but what else it is asking for. On a
+    // seek hls.js fires dozens of DIFFERENT indices within half a second (field
+    // log: #178, #681, #725, #807, #74, #245, #387) and abandons them all; a
+    // viewer waiting for audio asks for the SAME one, over and over, because it
+    // is the only thing that will let playback continue.
+    //
+    // So: this index has been asked for at least twice, and it is the only
+    // thing behind the head being asked for. Both are facts about the traffic,
+    // available at once, where a delay is a guess about it — and it was three
+    // seconds of the twenty a track change cost on 2026-08-15.
+    const asked = session.behindHeadAsks?.get(index)?.count ?? 0;
+    if (asked < BEHIND_HEAD_REPAIR_MIN_ASKS) {
+      return;
+    }
+    // Counted over a WINDOW, not over the run: a scan is many indices at once,
+    // while the same map left to accumulate would eventually hold every
+    // behind-head request a long run ever saw and switch the repair off for
+    // good.
+    const scanSince = Date.now() - BEHIND_HEAD_SCAN_WINDOW_MS;
+    let distinctBehind = 0;
+    for (const record of session.behindHeadAsks?.values() ?? []) {
+      if (record.at >= scanSince) {
+        distinctBehind += 1;
+      }
+    }
+    if (distinctBehind > BEHIND_HEAD_SCAN_INDICES) {
+      // A scan, not a wait. Moving the encoder to one of these is moving it to
+      // a number the player picked at random.
       return;
     }
     const wantedAt = session.firstWantedAt?.get(index);
@@ -4751,6 +4808,37 @@ export class HlsSessionManager {
     return this.#viewerPositionOf(this.#activeVariant(base));
   }
 
+  /**
+   * Where to start a separately published audio track, in seconds.
+   *
+   * The player, on changing track, discards the audio it holds and refills from
+   * the PICTURE onwards — so that is where the encoder has to begin. What this
+   * class knows directly is the read head, which runs ahead of the picture by
+   * the player's own buffer; the browser reports that buffer with every link
+   * report, so the picture is the one subtraction below.
+   *
+   * One segment of margin, because the report is up to ten seconds old and the
+   * picture has moved on since — a run that begins a little early costs a
+   * segment of audio nobody plays, while one that begins a little late is
+   * behind the viewer and can only be fixed by restarting it.
+   *
+   * With no fresh report, the whole look-ahead is subtracted instead: it is the
+   * furthest the two can be apart, so it cannot leave the run ahead of them.
+   *
+   * @param {HlsSession} base
+   * @returns {number}
+   */
+  #audioStartSecondsFor(base) {
+    const watching = this.#activeVariant(base);
+    const readHead = this.#viewerPositionOf(watching);
+    const report = watching.netReport;
+    const reportAge = Number.isFinite(report?.at) ? Date.now() - report.at : Number.POSITIVE_INFINITY;
+    const buffered = reportAge <= NET_REPORT_FRESH_MS && Number.isFinite(report?.bufferedAheadSec)
+      ? report.bufferedAheadSec
+      : LOOKAHEAD_PAUSE_SECONDS;
+    return Math.max(0, readHead - buffered - this.segmentDurationSec);
+  }
+
   #viewerPositionOf(session) {
     if (Number.isFinite(session.viewerPositionSeconds) && session.viewerPositionSeconds > 0) {
       return session.viewerPositionSeconds;
@@ -5334,26 +5422,23 @@ export class HlsSessionManager {
       // while the player is asking for segment #537 — and the audio would begin
       // at zero and never catch up, since nothing treats a far request as a
       // seek. The accessor falls back to the last segment actually requested.
-      // Behind where the picture has been READ to, by the whole look-ahead.
+      // Where the PICTURE is, not where it has been read to.
       //
       // The position this class keeps is written by the segments a session
-      // serves, so it is the READ head, and the player's picture sits behind it
-      // by everything it has buffered — up to the look-ahead cap. Starting the
-      // audio at the read head therefore starts it AHEAD of the viewer, and
-      // every request they then make is behind a run that only moves forward.
-      // Field 2026-08-15: the run was placed at #16, the player asked for #10,
-      // and the audio never arrived until the encoder was dragged back.
+      // serves, so it is the READ head, and the viewer's picture sits behind it
+      // by everything the player has buffered. Started at the read head, the
+      // audio run begins AHEAD of the viewer, and every request they then make
+      // is behind a run that only moves forward — field 2026-08-15, placed at
+      // #16 while the player asked for #10, and the audio arrived only after
+      // the encoder was dragged back.
       //
-      // The cap is exactly how far apart the two can be, so subtracting it
-      // cannot leave the run ahead of the viewer. The price is audio the player
-      // already has — for a track being encoded at ten to twenty times realtime
-      // and served in 75 KB pieces, that is a second or two of work.
-      startPositionSeconds: Math.max(
-        0,
-        Math.floor(
-          (this.#viewerPositionOf(this.#activeVariant(base)) - LOOKAHEAD_PAUSE_SECONDS) / 10
-        ) * 10
-      ),
+      // The distance is measured, not assumed: the browser reports how many
+      // seconds it holds ahead of the picture with every link report, so the
+      // playhead is one subtraction away. A stale report is no use — a viewer
+      // who seeked since then is somewhere else entirely — so an old one is
+      // ignored and the whole look-ahead is subtracted instead, which cannot
+      // leave the run ahead of them.
+      startPositionSeconds: this.#audioStartSecondsFor(base),
       segmentFormatId: base.segmentFormat.id,
       // Cut where the picture is cut. Two streams meant to be played together
       // have to be divided at the same times, and the grid is the base's — the

@@ -3570,6 +3570,17 @@ export class HlsSessionManager {
     if (head - index > BEHIND_HEAD_REPAIR_MAX_SEGMENTS) {
       return;
     }
+    // An audio rendition is never repaired by moving it. Its run is placed
+    // where the VIEWER is, from the session they are watching, so a request
+    // behind that is not a run in the wrong place — it is the player probing.
+    // Measured 2026-08-15: changing track at 159 s, hls.js asked for the new
+    // rendition's segment #0, the repair obligingly took the encoder to the
+    // start of the film, and the audio the viewer was waiting for arrived
+    // 20.5 s later instead of at once. Left where it is, the right segment is
+    // already being produced.
+    if (session.audioOnly === true) {
+      return;
+    }
     // Nothing is encoding: a rung the viewer has switched away from is left
     // exactly so, and its held requests must not bring its encoder back.
     if (session.ffmpeg == null || hasChildExited(session.ffmpeg)) {
@@ -5863,6 +5874,34 @@ export class HlsSessionManager {
     // at this position (server-side seeking).  The caller long-polls.
     if (!isPlaylist) {
       const requestedIndex = session.segmentFormat.segmentIndexFromName(fileName);
+      // An audio rendition asked for something behind its run says so at once
+      // instead of holding. Its run is placed where the viewer is and is not
+      // moved from there, so the request can never be answered — and holding it
+      // for the full window costs the player its own patience on the fragment
+      // it needs NEXT. Measured 2026-08-15: on a track change at 159 s hls.js
+      // asked for segment #0, and a held request plus a repaired encoder cost
+      // 20.5 s of silence. Refused promptly, the player moves to the segment
+      // that is genuinely being produced.
+      if (
+        session.audioOnly === true &&
+        Number.isFinite(requestedIndex) &&
+        requestedIndex < (session.encodeStartIndex ?? 0) &&
+        session.ffmpeg != null &&
+        // Not while a seek of its own is settling. A viewer seeking BACKWARDS
+        // is reported to the base and forwarded here, but the run only moves
+        // when the settle fires — until then `encodeStartIndex` still names the
+        // old position, and every request for the new one is "behind" it. Those
+        // are exactly the requests the viewer is waiting for, so they are held,
+        // as they were before this refusal existed.
+        session.seekTarget == null &&
+        session.seekSettleTimer == null
+      ) {
+        logger.info(
+          `transcode ${session.id} audio segment #${requestedIndex} is behind this rendition's run ` +
+          `(#${session.encodeStartIndex}); it is not made and the run stays where the viewer is`
+        );
+        return { kind: "not-found" };
+      }
       this.#ensureEncodingFor(
         session,
         requestedIndex,

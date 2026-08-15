@@ -71,21 +71,55 @@ async function managerWithRunAhead() {
   return { manager, session, dirPath, restarts };
 }
 
-test("a request behind the run is repaired once it has waited", async (t) => {
+test("a request behind the run is repaired once the player asks again", async (t) => {
   const { manager, session, dirPath } = await managerWithRunAhead();
   t.after(async () => {
     await manager.disposeAll();
     await rm(dirPath, { recursive: true, force: true });
   });
-  // Asked for four seconds ago and still unanswerable.
-  session.firstWantedAt.set(WANTED, Date.now() - 4000);
+  // Asked for a moment ago and still unanswerable. What decides is that the
+  // player comes BACK for the same segment: it is the only one it wants, and no
+  // amount of waiting could say that as clearly.
+  session.firstWantedAt.set(WANTED, Date.now() - 1000);
+  const name = fmp4Format.segmentFileName(WANTED);
 
-  await manager.getFileStream(SESSION_ID, fmp4Format.segmentFileName(WANTED), { requestSeq: 1 });
+  await manager.getFileStream(SESSION_ID, name, { requestSeq: 1 });
+
+  assert.equal(session.seekTarget, null, "one poll is not yet evidence");
+
+  await manager.getFileStream(SESSION_ID, name, { requestSeq: 2 });
 
   assert.equal(
     session.seekTarget,
     WANTED - 1,
     "the encoder must be moved back to it — one segment early, for the preceding keyframe"
+  );
+});
+
+test("a burst of different segments behind the run is a scan, and moves nothing", async (t) => {
+  const { manager, session, dirPath } = await managerWithRunAhead();
+  t.after(async () => {
+    await manager.disposeAll();
+    await rm(dirPath, { recursive: true, force: true });
+  });
+  // What hls.js does on a seek: dozens of indices within half a second, each
+  // abandoned. Field log 2026-08-02: #178, #681, #725, #807, #74, #245, #387.
+  const scanned = [WANTED, WANTED - 40, WANTED - 120, WANTED - 200, WANTED - 300];
+  for (const index of scanned) {
+    session.firstWantedAt.set(index, Date.now() - 1000);
+  }
+  // Interleaved, as they arrive on the wire: the player opens them together
+  // rather than finishing with one before opening the next.
+  for (const seq of [1, 2]) {
+    for (const index of scanned) {
+      await manager.getFileStream(SESSION_ID, fmp4Format.segmentFileName(index), { requestSeq: seq });
+    }
+  }
+
+  assert.equal(
+    session.seekTarget,
+    null,
+    "moving the encoder to one of these would be moving it to a number the player picked at random"
   );
 });
 

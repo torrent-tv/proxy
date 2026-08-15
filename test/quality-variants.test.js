@@ -637,3 +637,47 @@ test("a rung served by copy stays offered while a re-encoded rung is on screen",
     "one answer for the family: a rung asked while watching another must not disagree with the base"
   );
 });
+
+test("an audio rendition refuses a segment behind its run instead of chasing it", async (t) => {
+  const { manager, dirPath } = await managerWithBase();
+  t.after(async () => {
+    await manager.disposeAll();
+    await rm(dirPath, { recursive: true, force: true });
+  });
+  // The field case of 2026-08-15: the viewer changes track at 159 s, the
+  // rendition is placed there (#26), and hls.js asks for its segment #0.
+  const RENDITION_ID = "99999999-8888-7777-6666-555555555555";
+  const rendition = fakeSession({ id: RENDITION_ID, encodeHeight: 0, dirPath });
+  rendition.audioOnly = true;
+  rendition.audioTrackIndex = 1;
+  rendition.encodeStartIndex = 26;
+  rendition.usesExplicitCuts = true;
+  rendition.ffmpeg = fakeEncoder();
+  rendition.variantBases = new Set([BASE_ID]);
+  manager.sessionsById.set(RENDITION_ID, rendition);
+
+  const answer = await manager.getFileStream(RENDITION_ID, "segment-00000.mp4");
+  // The distinction that matters: "not-found" is an answer, "warming-up" is the
+  // long poll — and holding this one is what cost 20.5 s of silence, because it
+  // can never be produced.
+  assert.notEqual(answer.kind, "warming-up", "not held: this request is unanswerable, not early");
+  assert.equal(
+    answer.kind,
+    "not-found",
+    "answered at once: the run stays where the viewer is, so this can never be produced"
+  );
+  assert.equal(rendition.encodeStartIndex, 26, "and the encoder was not moved to the start of the film");
+  assert.equal(rendition.seekTarget ?? null, null, "no seek was armed for it either");
+
+  // A seek of its own is the case where "behind the run" is temporary and real:
+  // the viewer went backwards, the base forwarded it here, and the run moves
+  // when the settle fires. Until then the request is held, not refused — it is
+  // the one the viewer is waiting for.
+  rendition.seekTarget = 4;
+  rendition.seekSettleTimer = setTimeout(() => {}, 60_000);
+  t.after(() => clearTimeout(rendition.seekSettleTimer));
+
+  const duringSeek = await manager.getFileStream(RENDITION_ID, "segment-00005.mp4");
+
+  assert.equal(duringSeek.kind, "warming-up", "held: the run is about to move there");
+});

@@ -1,3 +1,7 @@
+## 2.15.1
+
+- **Fix**: A magnet that never found its metadata no longer makes the same film unplayable from its own `.torrent`. One infohash is one torrent, so the second add is refused and the pool takes the one already there — which is right when it is ready and wrong when it is not: a magnet whose swarm has not answered has no file list, and everything bound to it is answered 404. Measured 2026-08-15 on the addon host: a magnet with no reachable trackers was added first, the film's own `.torrent` then joined that empty torrent instead of replacing it, `/stream` answered 404, the encoder died on its first read, and the film stayed unplayable until the proxy was restarted. A `.torrent` carries the file list, the piece hashes and the trackers outright, so when it meets a torrent with no metadata it now replaces it; two magnets still wait, because neither has anything the other lacks.
+
 ## 2.15.0
 
 - **New**: An audio track is prepared before the player is told to change to it — `GET /transcode/:id/a/:track/warm?position=<seconds>`, the same shape the quality rung has had since 2.12.0. Changing track makes the player discard the audio it holds, and it cannot show a frame until the new track covers the playhead: switching first and producing second therefore put the track's whole cold start on screen as a spinner over a stopped picture. Prepared first, the player finds the bytes already made. A track prepared for a change the viewer then did not make is stopped, as a warmed rung is.

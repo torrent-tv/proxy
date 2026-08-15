@@ -315,6 +315,30 @@ function computeDefaultDiskCap(storePath) {
  * @param {string} source                   - Magnet URI or base64-encoded .torrent file.
  * @returns {string | Buffer}
  */
+/**
+ * What to do when WebTorrent refuses an add because that infohash is already
+ * here: take the one that exists, replace it, or wait for it to be ready.
+ *
+ * The same content arrives as a `.torrent` and as a magnet — different pool
+ * keys, one swarm — so a duplicate is ordinary. What is NOT ordinary is a
+ * duplicate with no metadata: a magnet whose swarm has not answered has no file
+ * list, and every request bound to it is answered 404 for as long as it lives.
+ * If this add carries metadata — a `.torrent` holds the files, the piece hashes
+ * and the trackers outright — waiting for the swarm to supply what is already
+ * in our hands is waiting for nothing. Measured 2026-08-15: one magnet with no
+ * reachable peers made the same film unplayable from its own `.torrent` until
+ * the proxy was restarted.
+ *
+ * @param {{ existingIsReady: boolean, incomingHasMetadata: boolean }} params
+ * @returns {"adopt" | "replace" | "wait"}
+ */
+export function duplicateAddDecision({ existingIsReady, incomingHasMetadata }) {
+  if (existingIsReady) {
+    return "adopt";
+  }
+  return incomingHasMetadata ? "replace" : "wait";
+}
+
 function decodeTorrentSource(sourceType, source) {
   if (sourceType === "magnet") {
     return source;
@@ -972,11 +996,58 @@ export class TorrentPool {
               this.#pending.delete(key);
               resolve(existing);
             };
-            if (existing.ready) {
+            const decision = duplicateAddDecision({
+              existingIsReady: existing.ready === true,
+              incomingHasMetadata: Buffer.isBuffer(torrentId)
+            });
+            if (decision === "adopt") {
               settle();
-            } else {
-              existing.once("ready", settle);
+              return;
             }
+            // The one already here has no metadata, and THIS add carries it —
+            // a `.torrent` holds the file list, the piece hashes and the
+            // trackers outright. Waiting for the other one to become ready is
+            // waiting on the swarm to supply what is already in our hands, and
+            // when the swarm cannot (a magnet with no reachable peers) it never
+            // arrives: measured 2026-08-15, a magnet added first left every
+            // later attempt at the same infohash — including the complete
+            // `.torrent` — bound to an empty torrent, `/stream` answering 404
+            // and playback impossible until the proxy was restarted.
+            if (decision === "replace") {
+              logger.info(
+                `torrent-pool: [${dupMatch[1].slice(0, 8)}] replacing a torrent with no metadata ` +
+                `with the .torrent just given, which has it`
+              );
+              // Everything this class remembers about the old one goes with it,
+              // or a later request finds it through a map and works with a
+              // torrent the client no longer has.
+              for (const [otherKey, value] of this.torrents) {
+                if (value === existing) {
+                  this.torrents.delete(otherKey);
+                }
+              }
+              this.fileUsageByTorrent.delete(existing);
+              this.#lastAccess.delete(existing);
+              this.#readPositionByTorrent.delete(existing);
+              this.client.remove(existing, { destroyStore: true }, () => {
+                this.client.add(torrentId, {
+                  store: SharedPieceStore,
+                  storeCacheSlots: 0,
+                  storeOpts: { memoryBytes: this.#memoryBytes }
+                }, (replacement) => {
+                  this.torrents.set(key, replacement);
+                  this.#lastAccess.set(replacement, Date.now());
+                  this.#attachSwarmDiagnostics(dupMatch[1].slice(0, 8), replacement);
+                  this.#pending.delete(key);
+                  resolve(replacement);
+                });
+              });
+              return;
+            }
+            // Both are magnets: there is nothing here the other does not have,
+            // so wait for the swarm — the caller's own bound answers if it
+            // takes too long.
+            existing.once("ready", settle);
             return;
           }
         }

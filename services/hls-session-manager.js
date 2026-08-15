@@ -75,6 +75,47 @@ const MASTER_PLAYLIST_FILE_NAME = "master.m3u8";
 // directory level, so every relative name inside a variant's own playlist — its
 // segments and its init — resolves to that variant without any of them changing.
 const VARIANT_PATH_PREFIX = "v";
+// Where an audio rendition lives, and the name the variants refer to it by. One
+// directory level under the base session, exactly as a quality variant is, so
+// every relative name inside its playlist resolves to it unchanged.
+const AUDIO_PATH_PREFIX = "a";
+const AUDIO_GROUP_ID = "aud";
+
+/**
+ * Quote a value for an HLS attribute list. Only the quote itself can end the
+ * attribute early, and a track title comes from the file, so it is not ours to
+ * trust.
+ *
+ * @param {string} value
+ * @returns {string}
+ */
+function escapeAttribute(value) {
+  // The quote would end the attribute early; a line break would end the LINE,
+  // splitting one `#EXT-X-MEDIA` into two and corrupting the master. Both come
+  // from the file's own metadata, which is not ours to trust.
+  return String(value ?? "").replace(/"/g, "'").replace(/[\u0000-\u001f\u007f]/g, " ").trim();
+}
+
+// ISO 639-2 codes as ffmpeg reports them, against the RFC 5646 tags HLS asks
+// for. Only the languages this serves in practice; anything else is passed
+// through, which is what players other than iOS accept anyway.
+const LANGUAGE_TAGS = new Map([
+  ["rus", "ru"], ["eng", "en"], ["ukr", "uk"], ["deu", "de"], ["ger", "de"],
+  ["fra", "fr"], ["fre", "fr"], ["spa", "es"], ["ita", "it"], ["jpn", "ja"],
+  ["kor", "ko"], ["zho", "zh"], ["chi", "zh"], ["pol", "pl"], ["por", "pt"],
+  ["tur", "tr"], ["ces", "cs"], ["cze", "cs"], ["nld", "nl"], ["dut", "nl"]
+]);
+
+/**
+ * The RFC 5646 tag for a language ffmpeg named, or the name unchanged.
+ *
+ * @param {string} language
+ * @returns {string}
+ */
+function languageTag(language) {
+  const code = String(language ?? "").toLowerCase();
+  return LANGUAGE_TAGS.get(code) ?? code;
+}
 // The resolutions a viewer may choose between. Only rungs at or below the
 // source are offered: upscaling invents detail and costs the encoder more than
 // the source itself.
@@ -1155,6 +1196,7 @@ export class HlsSessionManager {
     getSourceStats = null,
     tonemapSupported = false,
     getCachedMediaInfo = null,
+    getCachedAudioTracks = null,
     segmentFormatId = undefined,
     stateDir = ""
   }) {
@@ -1171,6 +1213,9 @@ export class HlsSessionManager {
     // Optional accessor for media info the playback planner already probed for
     // (sourceKey, fileIndex), so session create can skip its own ffmpeg scan.
     this.getCachedMediaInfo = typeof getCachedMediaInfo === "function" ? getCachedMediaInfo : null;
+    // The file's audio tracks, for the master playlist's rendition group. Same
+    // inventory the browser's audio menu is built from.
+    this.getCachedAudioTracks = typeof getCachedAudioTracks === "function" ? getCachedAudioTracks : null;
     // Optional async accessor for a source's live download stats, used by the
     // realtime budget to tell a CPU limit from a download-starved input:
     // (sourceKey, fileIndex) => Promise<{ downloadSpeed, fileLength, fileProgress } | null>.
@@ -1254,6 +1299,20 @@ export class HlsSessionManager {
     startPositionSeconds = 0,
     audioTrackIndex = 0,
     manualQuality = false,
+    // The caller takes its audio from a rendition group, so the picture is
+    // encoded without it and each audio track is encoded once for the file
+    // instead of once per rung. Off unless asked for: a browser that does not
+    // know about renditions must still get its audio in the stream.
+    audioRenditions = false,
+    // This session IS one of those renditions: one audio track, no picture, cut
+    // on the same grid as the video it accompanies.
+    audioOnly = false,
+    // The arrangement decided by the session this one belongs to — a variant or
+    // a rendition of it. Every session of one master must agree about where the
+    // audio is, and only the base is in a position to decide: a variant asked on
+    // its own would answer about the rungs IT would be offered at, which is a
+    // different list. Null means "decide it here", which is what a base does.
+    inheritedAudioSeparate = null,
     segmentFormatId = "",
     // The cut grid of the session this one is a quality variant of: its
     // keyframe times and which container they were read from. Present only for
@@ -1308,6 +1367,11 @@ export class HlsSessionManager {
       String(normalizedTargetWidth),
       String(normalizedTargetHeight),
       forceManualQuality ? "q-manual" : "q-auto",
+      // What the output CARRIES. A picture without its audio, a single audio
+      // track without a picture, and the two muxed together are three different
+      // encodes of the same file, and nothing about them is interchangeable —
+      // so they cannot share a session, a directory or an encoder.
+      audioOnly === true ? "audio-only" : (audioRenditions === true ? "video-only" : "muxed"),
       String(normalizedStartPosition),
       // Two viewers asking for different containers cannot share one ffmpeg.
       segmentFormat.id,
@@ -1446,7 +1510,7 @@ export class HlsSessionManager {
     if (inheritedGrid) {
       keyframeTimes = inheritedGrid.keyframeTimes;
       containerFormat = inheritedGrid.containerFormat ?? "";
-    } else if (hasDuration && !transcodeVideo) {
+    } else if (hasDuration && !transcodeVideo && !audioOnly) {
       // Video-COPY path: keyframeTimes are REQUIRED to build correct segment
       // boundaries (the playlist itself), so this MUST block session creation —
       // an incorrect playlist is worse than a slower start. Short timeout: mp4
@@ -1515,10 +1579,17 @@ export class HlsSessionManager {
     // it produces every frame and may put keyframes where it likes — unless it
     // is a variant of a keyframe-cut session, in which case it must land on the
     // same times to be interchangeable with it.
+    // An audio rendition carries no picture, so it has no keyframes of its own
+    // to be cut at: it takes the grid of the video it accompanies, whatever that
+    // is. Handed one, it uses it; handed none, the base is on the even grid and
+    // so is this. Falling into the COPY branch instead — which is what
+    // `transcodeVideo: false` means everywhere else — would put the audio of a
+    // re-encoded stream on the source's keyframe times while the player was
+    // told the even grid, and the two drift further apart with every segment.
     const useKeyframeGrid = hasDuration &&
       Array.isArray(keyframeTimes) &&
       keyframeTimes.length > 0 &&
-      (!transcodeVideo || inheritedGrid != null);
+      (audioOnly ? inheritedGrid != null : (!transcodeVideo || inheritedGrid != null));
     // A rung takes the grid it was handed, rather than working one out again
     // from the same index. The two are not the same table: the one it is handed
     // has been CORRECTED wherever a produced segment showed the index to be
@@ -1614,6 +1685,12 @@ export class HlsSessionManager {
       transcodeVideo,
       transcodeAudio,
       audioTrackIndex: normalizedAudioTrack,
+      // What this session's output carries. `audioOnly` is a rendition — one
+      // audio track, no picture; `videoOnly` is a stream whose audio the viewer
+      // takes from such a rendition. Neither is set on the ordinary muxed
+      // session, which is what every browser gets until it says otherwise.
+      audioOnly: audioOnly === true,
+      audioRenditions: audioRenditions === true,
       outputFps,
       // Client-requested target box (the orientation-independent ceiling). Kept
       // for the session key and reference; the actual encode uses encodeWidth/
@@ -1750,6 +1827,23 @@ export class HlsSessionManager {
     }
     this.sessionsById.set(sessionId, session);
     this.sessionIdBySource.set(sourceMapKey, sessionId);
+    // Settled ONCE, here, and never derived again. Whether the audio travels
+    // separately decides the ffmpeg arguments, what the master says and whether
+    // the rendition route answers at all, and those three must agree for the
+    // whole life of the session — a session whose picture was encoded without
+    // audio cannot start muxing it in at the next restart without either
+    // playing it twice or refusing the append.
+    //
+    // It cannot be answered before this point (it asks what heights this
+    // session will be offered at, which needs the record) and it must not be
+    // asked after it, because the answer moves: the offered list is recomputed
+    // as the host learns what this source costs, and crossing "two rungs" would
+    // flip the arrangement under a stream that is playing.
+    session.audioSeparate = inheritedAudioSeparate === null
+      ? audioRenditions === true &&
+        this.#variantHeights(session).length >= 2 &&
+        this.#audioRenditionsOf(session).length > 0
+      : inheritedAudioSeparate === true;
 
     logger.info(
       // Proxy version on the session-start line: a field report always includes
@@ -1873,9 +1967,17 @@ export class HlsSessionManager {
       sourceKey: session.sourceKey,
       fileIndex: session.fileIndex
     }) ?? null;
+    // What the SOURCE has, narrowed to what this session's output carries. A
+    // rendition maps only audio and a stream whose audio travels separately
+    // maps only video, so answering from the source alone would tell the
+    // browser about a track that is not in the stream, and would leave
+    // `#initFromFirstSegment` waiting for a second track that no init will ever
+    // declare — its warning about a short header would then fire on every one.
+    const carriesVideo = session.audioOnly !== true;
+    const carriesAudio = !this.#servesAudioSeparately(session);
     return {
-      video: Boolean(probed?.videoCodec),
-      audio: Boolean(probed?.audioCodec)
+      video: carriesVideo && Boolean(probed?.videoCodec),
+      audio: carriesAudio && Boolean(probed?.audioCodec)
     };
   }
 
@@ -2912,7 +3014,17 @@ export class HlsSessionManager {
       }
       args.push("-i", session.inputUrl);
     }
-    if (session.transcodeVideo) {
+    // Which timeline the output is labelled on. An audio rendition has no
+    // picture of its own to follow, so it follows the grid it was given — the
+    // same one the video it plays with is on. Deciding by `transcodeVideo`, as
+    // everything else here does, would put the audio of a re-encoded stream on
+    // the copy branch: `-copyts` and a shift by the container's start time,
+    // against a picture labelled from zero. The two would be offset by
+    // `sourceStartTime` for the whole file.
+    const onKeyframeGrid = session.audioOnly === true
+      ? session.cutGrid === "keyframe"
+      : !session.transcodeVideo;
+    if (!onKeyframeGrid) {
       // Branch A (re-encode): fixed GOP makes keyframes land exactly on the
       // segment grid; relabel output onto the original timeline so segment N
       // carries PTS = N × segmentDuration.
@@ -2932,15 +3044,29 @@ export class HlsSessionManager {
         args.push("-output_ts_offset", ffmpegSeconds(-sourceStartTime));
       }
     }
-    args.push(
-      "-map",
-      "0:v:0?",
-      "-map",
-      // Type-relative audio track chosen by the viewer (default 0).
-      `0:a:${session.audioTrackIndex ?? 0}?`,
-      ...videoCodecArgs,
-      ...audioCodecArgs
-    );
+    if (session.audioOnly === true) {
+      // An audio RENDITION: one track, no picture. Published as its own
+      // `#EXT-X-MEDIA` and shared by every video variant, so the track is
+      // encoded once for the file instead of once per rung, and changing it is
+      // the player switching rendition rather than this proxy rebuilding the
+      // session. Cut on the same grid as the video it accompanies, which is
+      // what lets the two be played together.
+      args.push("-vn", "-map", `0:a:${session.audioTrackIndex ?? 0}?`, ...audioCodecArgs);
+    } else if (this.#servesAudioSeparately(session)) {
+      // The other half of the same arrangement: the picture alone, because its
+      // audio is published as a rendition and would otherwise play twice.
+      args.push("-an", "-map", "0:v:0?", ...videoCodecArgs);
+    } else {
+      args.push(
+        "-map",
+        "0:v:0?",
+        "-map",
+        // Type-relative audio track chosen by the viewer (default 0).
+        `0:a:${session.audioTrackIndex ?? 0}?`,
+        ...videoCodecArgs,
+        ...audioCodecArgs
+      );
+    }
 
     // Where the cuts come from. On the copy path they are the source's own
     // keyframes, and until now they were only ever GUESSED: ffmpeg got a target
@@ -3513,6 +3639,19 @@ export class HlsSessionManager {
     // variants, so a seek it reports means the stream on screen.
     named.viewerPositionSeconds = positionSeconds;
     named.lastAccessedAt = Date.now();
+    // The audio the viewer is listening to moves with them. It is a separate
+    // encoder on a separate session that the browser cannot name, and nothing
+    // else would ever reposition it: a request far AHEAD of its run is not
+    // treated as a seek anywhere in this class, so after a forward jump the
+    // audio would be held, refused, and left grinding forward from where it
+    // was — the picture playing over silence for as long as the jump was.
+    for (const renditionId of named.audioRenditionSessions?.values() ?? []) {
+      const rendition = this.sessionsById.get(renditionId);
+      if (rendition && rendition.state !== "disposed") {
+        rendition.lastAccessedAt = Date.now();
+        this.#seekSession(rendition, positionSeconds);
+      }
+    }
     return this.#seekSession(this.#activeVariant(named), positionSeconds);
   }
 
@@ -4646,6 +4785,16 @@ export class HlsSessionManager {
       // variants could drift onto the same height and the choice would mean
       // nothing.
       manualQuality: true,
+      // A rung of a session whose audio is published separately carries no
+      // audio either — every rung of one master must agree about that, or
+      // switching rung would start or stop a second copy of the same track.
+      audioRenditions: base.audioRenditions === true,
+      // Not re-decided here: asked on its own, a variant would answer about the
+      // rungs IT would be offered at — a 540p rung of a copied 1080p source is
+      // offered nothing but itself, so it would conclude "audio muxed" and
+      // start carrying a second copy of a track the player is already fetching
+      // from the rendition.
+      inheritedAudioSeparate: base.audioSeparate === true,
       segmentFormatId: base.segmentFormat?.id ?? "",
       // Cut where the base is cut. Only for a base on the source's own keyframe
       // grid — a copy — where the variant has to land on those exact times to
@@ -4934,17 +5083,202 @@ export class HlsSessionManager {
     }
     const sourceWidth = Number(session.sourceWidth) || 0;
     const lines = ["#EXTM3U", `#EXT-X-VERSION:${session.segmentFormat.playlistVersion}`];
+    // The audio tracks, published once for the whole file rather than muxed
+    // into every rung. Two things follow from that: the same track is not
+    // encoded once per rung on a host that struggles to encode it once, and
+    // changing track becomes the player switching rendition instead of this
+    // proxy rebuilding the session with another `audioTrackIndex`.
+    //
+    // Only for a session that asked for them. A browser that does not know
+    // about renditions is served audio in its stream, as before, and gets no
+    // `#EXT-X-MEDIA` lines to be confused by.
+    const renditions = this.#servesAudioSeparately(session) ? this.#audioRenditionsOf(session) : [];
+    const audioGroup = renditions.length > 0 ? AUDIO_GROUP_ID : "";
+    for (const rendition of renditions) {
+      lines.push(
+        `#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="${audioGroup}",NAME="${escapeAttribute(rendition.name)}"` +
+        (rendition.language ? `,LANGUAGE="${escapeAttribute(languageTag(rendition.language))}"` : "") +
+        `,AUTOSELECT=YES,DEFAULT=${rendition.isDefault ? "YES" : "NO"}` +
+        `,URI="${AUDIO_PATH_PREFIX}/${rendition.trackIndex}/${PLAYLIST_FILE_NAME}"`
+      );
+    }
     for (const height of rungs) {
       const width = sourceHeight > 0 && sourceWidth > 0
         ? Math.round((sourceWidth / sourceHeight) * height / 2) * 2
         : 0;
       lines.push(
         `#EXT-X-STREAM-INF:BANDWIDTH=${estimatedBitrateFor(height)}` +
-        (width > 0 ? `,RESOLUTION=${width}x${height}` : "")
+        (width > 0 ? `,RESOLUTION=${width}x${height}` : "") +
+        (audioGroup ? `,AUDIO="${audioGroup}"` : "")
       );
       lines.push(`${VARIANT_PATH_PREFIX}/${height}/${PLAYLIST_FILE_NAME}`);
     }
     return `${lines.join("\n")}\n`;
+  }
+
+  /**
+   * Whether this session's audio is published separately rather than muxed into
+   * its picture.
+   *
+   * Two things have to hold, and the second is why this is asked here rather
+   * than settled when the session was made. The browser must understand
+   * renditions — it says so when it creates the session, and one that does not
+   * has to be sent audio in the stream. AND there must be a master playlist to
+   * publish them in: a stream served as a single media playlist has nowhere to
+   * carry an `#EXT-X-MEDIA` line, so taking the audio out of it would leave the
+   * viewer with a picture and silence.
+   *
+   * @param {HlsSession} session
+   * @returns {boolean}
+   */
+  #servesAudioSeparately(session) {
+    return session.audioOnly !== true && session.audioSeparate === true;
+  }
+
+  /**
+   * One file of an audio rendition: its playlist, its init segment or one of
+   * its segments.
+   *
+   * A rendition is an ordinary session underneath — same source, same file,
+   * same cut grid, one audio track and no picture — created on the first
+   * request for it, exactly as a quality variant is. What differs is that the
+   * player fetches it ALONGSIDE a variant rather than instead of one, so both
+   * encoders run: a rung and the audio it is played with.
+   *
+   * @param {string} baseSessionId
+   * @param {number} trackIndex
+   * @param {string} fileName
+   * @returns {Promise<{ sessionId: string | null, error?: string }>}
+   */
+  async resolveAudioRenditionFile(baseSessionId, trackIndex, fileName) {
+    if (!isSafeSessionId(baseSessionId) || !Number.isInteger(trackIndex) || trackIndex < 0) {
+      return { sessionId: null };
+    }
+    const base = this.sessionsById.get(baseSessionId);
+    if (!base || base.state === "disposed" || !this.#servesAudioSeparately(base)) {
+      return { sessionId: null };
+    }
+    const isPlaylist = fileName === PLAYLIST_FILE_NAME;
+    const isInit = base.segmentFormat.initFileName !== null && fileName === base.segmentFormat.initFileName;
+    const isSegment = base.segmentFormat.isSegmentFileName(fileName);
+    if (!isPlaylist && !isInit && !isSegment) {
+      return { sessionId: null };
+    }
+    if (!this.#audioRenditionsOf(base).some((rendition) => rendition.trackIndex === trackIndex)) {
+      return { sessionId: null };
+    }
+    // The playlist is answered from the base, for the same reason a variant's
+    // is: every rendition of a file has the same boundaries and the same
+    // duration — they are cut on one grid — and the player fetches the playlist
+    // of tracks it may never select. Starting an encoder for each would put as
+    // many encoders on the host as the file has languages.
+    if (isPlaylist) {
+      return { sessionId: base.id };
+    }
+    let rendition;
+    try {
+      rendition = await this.#resolveAudioRenditionSession(base, trackIndex);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      logger.error(
+        `transcode ${baseSessionId} could not prepare audio track ${trackIndex}: ${message}` +
+        (error instanceof Error && error.stack ? `\n${error.stack}` : "")
+      );
+      return { sessionId: null, error: message };
+    }
+    return { sessionId: rendition?.id ?? null };
+  }
+
+  /**
+   * The session producing one audio track of this file, made on first request.
+   *
+   * @param {HlsSession} base
+   * @param {number} trackIndex
+   * @returns {Promise<HlsSession | null>}
+   */
+  async #resolveAudioRenditionSession(base, trackIndex) {
+    const existingId = base.audioRenditionSessions?.get(trackIndex);
+    const existing = existingId ? this.sessionsById.get(existingId) : null;
+    if (existing && existing.state !== "disposed") {
+      existing.lastAccessedAt = Date.now();
+      return existing;
+    }
+    const rendition = await this.createOrGetSession({
+      sourceKey: base.sourceKey,
+      fileIndex: base.fileIndex,
+      // No picture at all: the video flag says what to do with a video stream
+      // this output does not carry.
+      transcodeVideo: false,
+      transcodeAudio: base.transcodeAudio,
+      fileName: base.fileName,
+      consumerId: variantConsumerId(base.id),
+      audioTrackIndex: trackIndex,
+      audioOnly: true,
+      // Where the viewer is, so the rendition starts with the picture rather
+      // than at the beginning of the file. Read the same way a quality variant
+      // reads it: the base's own field is only written by a seek or by a
+      // segment IT served, so on a resume-from-position open it is still unset
+      // while the player is asking for segment #537 — and the audio would begin
+      // at zero and never catch up, since nothing treats a far request as a
+      // seek. The accessor falls back to the last segment actually requested.
+      startPositionSeconds:
+        Math.floor(this.#viewerPositionOf(this.#activeVariant(base)) / 10) * 10,
+      segmentFormatId: base.segmentFormat.id,
+      // Cut where the picture is cut. Two streams meant to be played together
+      // have to be divided at the same times, and the grid is the base's — the
+      // table as it stands now, corrections included. A base on the uniform
+      // grid passes nothing: the rendition computes the same even grid from the
+      // same duration.
+      inheritedGrid: base.cutGrid === "keyframe"
+        ? {
+            boundaries: base.segmentBoundaries,
+            keyframeTimes: base.keyframeTimes,
+            containerFormat: base.containerFormat
+          }
+        : null,
+      acquireSource: base.acquireSource
+    });
+    if (!rendition) {
+      return null;
+    }
+    if (!(base.audioRenditionSessions instanceof Map)) {
+      base.audioRenditionSessions = new Map();
+    }
+    base.audioRenditionSessions.set(trackIndex, rendition.id);
+    return rendition;
+  }
+
+  /**
+   * The audio tracks of this session's file, as renditions for the master.
+   *
+   * Taken from the inventory the playback plan already probed — the same list
+   * the browser's audio menu is built from — so nothing is probed again here.
+   * The track the session was created with is the default one: it is what the
+   * viewer chose (or the file's first track), and a master that defaulted to
+   * something else would change the language on its own.
+   *
+   * @param {HlsSession} session
+   * @returns {Array<{ trackIndex: number, name: string, language: string, isDefault: boolean }>}
+   */
+  #audioRenditionsOf(session) {
+    const tracks = this.getCachedAudioTracks?.({
+      sourceKey: session.sourceKey,
+      fileIndex: session.fileIndex
+    }) ?? [];
+    if (!Array.isArray(tracks) || tracks.length === 0) {
+      return [];
+    }
+    const chosen = Number(session.audioTrackIndex) || 0;
+    return tracks.map((track, order) => {
+      const language = typeof track?.language === "string" ? track.language : "";
+      const title = typeof track?.title === "string" && track.title.length > 0 ? track.title : "";
+      return {
+        trackIndex: order,
+        name: title || language || `Track ${order + 1}`,
+        language,
+        isDefault: order === chosen
+      };
+    });
   }
 
   /**
@@ -5594,6 +5928,21 @@ export class HlsSessionManager {
           variantId,
           variantConsumerId(sessionId),
           "the session it was a variant of ended"
+        );
+      }
+    }
+    // The audio renditions of this session, for the same reason and in the same
+    // way. Nobody outside this class knows their ids — the browser holds one id
+    // for the whole file — so nothing else could ever release them, and each
+    // holds a consumer, a claim on the torrent, a directory and a live encoder.
+    if (session.audioRenditionSessions instanceof Map) {
+      const renditionIds = [...session.audioRenditionSessions.values()];
+      session.audioRenditionSessions.clear();
+      for (const renditionId of renditionIds) {
+        await this.releaseSessionConsumer(
+          renditionId,
+          variantConsumerId(sessionId),
+          "the session its audio belonged to ended"
         );
       }
     }

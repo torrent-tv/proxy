@@ -73,6 +73,11 @@ export async function handleApiTranscodeSessionsPost(req, reply, { hlsSessionMan
   // (capped to source), with the realtime budget's auto-downscale + runtime
   // downswitch disabled for the session.
   const manualQuality = payload.manualQuality === true;
+  // Whether this browser will take its audio from a separate rendition group in
+  // the master playlist rather than muxed into the picture. It has to say so:
+  // publishing renditions AND muxing the same audio would play it twice, while
+  // a browser that does not know about them would get no sound at all.
+  const audioRenditions = payload.audioRenditions === true;
   const startPositionSeconds = Number(payload.startPositionSeconds);
   const audioTrackIndex = Number(payload.audioTrackIndex);
   // Which container to produce. The browser knows what its media stack will
@@ -96,6 +101,7 @@ export async function handleApiTranscodeSessionsPost(req, reply, { hlsSessionMan
       targetWidth: Number.isInteger(targetWidth) && targetWidth > 0 ? targetWidth : 0,
       targetHeight: Number.isInteger(targetHeight) && targetHeight > 0 ? targetHeight : 0,
       manualQuality,
+      audioRenditions,
       startPositionSeconds:
         Number.isFinite(startPositionSeconds) && startPositionSeconds > 0
           ? startPositionSeconds

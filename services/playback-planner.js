@@ -334,6 +334,20 @@ export function createPlaybackPlanner({
      * @param {{ sourceKey: string, fileIndex: number }} params
      * @returns {{ durationSeconds: number | null, width: number | null, height: number | null, fps: number | null, startTime: number, isHdr: boolean } | null}
      */
+    /**
+     * The audio tracks this file was probed to have, or an empty list. The
+     * master playlist publishes one rendition per track, and the inventory is
+     * already here — probing again for it would be a second scan of a file the
+     * proxy is in the middle of serving.
+     *
+     * @param {{ sourceKey: string, fileIndex: number }} params
+     * @returns {object[]}
+     */
+    getCachedAudioTracks({ sourceKey, fileIndex }) {
+      const plan = cache.get(`${sourceKey}:${fileIndex}`);
+      return Array.isArray(plan?.audioTracks) ? plan.audioTracks : [];
+    },
+
     getCachedMediaInfo({ sourceKey, fileIndex }) {
       return mediaInfoCache.get(`${sourceKey}:${fileIndex}`) ?? null;
     },

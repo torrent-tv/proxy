@@ -133,6 +133,57 @@ test("the master offers every rung, the session's own height among them", async 
   );
 });
 
+test("audio is published once for the file, and every rung points at it", async (t) => {
+  const { manager, base, dirPath } = await managerWithBase();
+  t.after(async () => {
+    await manager.disposeAll();
+    await rm(dirPath, { recursive: true, force: true });
+  });
+  // The inventory the plan already probed — the same list the browser's audio
+  // menu is built from.
+  manager.getCachedAudioTracks = () => [
+    { index: 0, language: "rus", title: "Дубляж", isDefault: true },
+    { index: 1, language: "eng", title: "", isDefault: false }
+  ];
+  // Settled at creation in production; set here directly, since this test
+  // builds its session by hand.
+  base.audioSeparate = true;
+  base.audioTrackIndex = 1;
+
+  const master = manager.buildMasterPlaylist(BASE_ID);
+
+  assert.match(
+    master,
+    /#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="aud",NAME="Дубляж",LANGUAGE="ru",AUTOSELECT=YES,DEFAULT=NO,URI="a\/0\/index\.m3u8"/,
+    "a track with a title is named by it"
+  );
+  assert.match(
+    master,
+    /#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="aud",NAME="eng",LANGUAGE="en",AUTOSELECT=YES,DEFAULT=YES,URI="a\/1\/index\.m3u8"/,
+    "the track the session was created with is the default one, and an untitled track is named by its language"
+  );
+  const streams = [...master.matchAll(/^#EXT-X-STREAM-INF:.*$/gm)].map((match) => match[0]);
+  assert.equal(streams.length, 7, "every rung");
+  assert.ok(
+    streams.every((line) => line.includes('AUDIO="aud"')),
+    "each rung plays with the shared audio rather than carrying its own"
+  );
+});
+
+test("a session that did not ask for renditions gets audio in its stream, as before", async (t) => {
+  const { manager, dirPath } = await managerWithBase();
+  t.after(async () => {
+    await manager.disposeAll();
+    await rm(dirPath, { recursive: true, force: true });
+  });
+  manager.getCachedAudioTracks = () => [{ index: 0, language: "rus", title: "", isDefault: true }];
+
+  const master = manager.buildMasterPlaylist(BASE_ID);
+
+  assert.ok(!master.includes("EXT-X-MEDIA"), "a browser that does not know about renditions is not sent any");
+  assert.ok(!master.includes("AUDIO="), "and its rungs still carry their own audio");
+});
+
 test("a copied video is offered variants when its cut grid is real", async (t) => {
   const { manager, base, dirPath } = await managerWithBase();
   t.after(async () => {
@@ -308,6 +359,78 @@ test("warming a rung prepares it without taking the encoder from the one on scre
   assert.equal(base.activeVariantId, undefined, "nothing has switched yet");
   assert.equal(base.ffmpeg, encoder, "the picture on screen keeps its encoder until the player actually moves");
   assert.deepEqual(encoder.signals, [], "stopping it here is what would put the spinner back");
+});
+
+test("a rung warmed at the playhead survives the switch that lands just ahead of it", async (t) => {
+  const { manager, base, dirPath } = await managerWithBase();
+  t.after(async () => {
+    await manager.disposeAll();
+    await rm(dirPath, { recursive: true, force: true });
+  });
+  const variant = fakeSession({ id: VARIANT_ID, encodeHeight: 540, dirPath });
+  variant.variantHeight = 540;
+  variant.variantBases = new Set([BASE_ID]);
+  manager.sessionsById.set(VARIANT_ID, variant);
+  base.variants = new Map([[540, VARIANT_ID]]);
+  base.ffmpeg = fakeEncoder();
+
+  // Warmed AT THE PLAYHEAD (240 s = segment #60), which is what the browser
+  // sends from server 0.10.0 onwards, and the run is alive and has produced a
+  // few segments past it.
+  await manager.prepareVariant(BASE_ID, 540, 240);
+  variant.encodeStartIndex = 59;
+  variant.ffmpeg = fakeEncoder();
+  variant.progress = { ...variant.progress, processedSeconds: 268 };
+  variant.seekTarget = null;
+  variant.seekSettleTimer = null;
+
+  // hls.js flushes from the fragment after the one holding
+  // `currentTime + fetchdelay`, so its first request for the new rung is the
+  // playhead plus up to one fragment — here #61 against a run that began at
+  // #59. Warming at the END OF THE BUFFER instead put the run tens of seconds
+  // AHEAD of this request, which the proxy then read as a seek backwards:
+  // measured 2026-08-14, that killed a run holding 21.8 s of encoded output.
+  await manager.resolveVariantFile(BASE_ID, 540, "segment-00061.mp4");
+
+  assert.equal(base.activeVariantId, VARIANT_ID, "the viewer has moved to this rung");
+  assert.equal(
+    variant.seekTarget,
+    null,
+    "the request is inside the warmed run, so nothing is repositioned and the warm-up is kept"
+  );
+  assert.equal(variant.encodeStartIndex, 59, "the run still begins where it was warmed");
+});
+
+test("a rung warmed PAST the switch is repositioned, which is what warming late costs", async (t) => {
+  const { manager, base, dirPath } = await managerWithBase();
+  t.after(async () => {
+    await manager.disposeAll();
+    await rm(dirPath, { recursive: true, force: true });
+  });
+  const variant = fakeSession({ id: VARIANT_ID, encodeHeight: 540, dirPath });
+  variant.variantHeight = 540;
+  variant.variantBases = new Set([BASE_ID]);
+  manager.sessionsById.set(VARIANT_ID, variant);
+  base.variants = new Map([[540, VARIANT_ID]]);
+  base.ffmpeg = fakeEncoder();
+
+  // The same session, warmed where the BUFFER ended rather than where the
+  // picture was — 60 s further on, which is an ordinary cushion. This is what
+  // server 0.9.3 sent and 0.11.0 stopped sending.
+  await manager.prepareVariant(BASE_ID, 540, 300);
+  variant.encodeStartIndex = 74;
+  variant.ffmpeg = fakeEncoder();
+  variant.progress = { ...variant.progress, processedSeconds: 310 };
+  variant.seekTarget = null;
+  variant.seekSettleTimer = null;
+
+  // hls.js still lands near the playhead, so the request is far BEHIND the
+  // warmed run: the proxy reads it as a seek backwards and starts again, and
+  // everything the warm-up produced is thrown away. Measured in the field
+  // 2026-08-14 as 21.8 s of encoded output destroyed by the act of using it.
+  await manager.resolveVariantFile(BASE_ID, 540, "segment-00061.mp4");
+
+  assert.equal(variant.seekTarget, 60, "the run is moved back to where the player actually asked");
 });
 
 test("the rung on screen fetching its own segments does not cancel a warm-up", async (t) => {

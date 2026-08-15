@@ -108,12 +108,11 @@ test("a burst of different segments behind the run is a scan, and moves nothing"
   for (const index of scanned) {
     session.firstWantedAt.set(index, Date.now() - 1000);
   }
-  // Interleaved, as they arrive on the wire: the player opens them together
-  // rather than finishing with one before opening the next.
-  for (const seq of [1, 2]) {
-    for (const index of scanned) {
-      await manager.getFileStream(SESSION_ID, fmp4Format.segmentFileName(index), { requestSeq: seq });
-    }
+  // Asked ONCE each, which is what a scan is: the player opens them together
+  // and abandons them together. Field log 2026-08-02 — #178, #681, #725, #807,
+  // #74, #245, #387 within half a second, none of them repeated.
+  for (const index of scanned) {
+    await manager.getFileStream(SESSION_ID, fmp4Format.segmentFileName(index), { requestSeq: 1 });
   }
 
   assert.equal(
@@ -218,4 +217,35 @@ test("a request ahead of the run is not touched", async (t) => {
     null,
     "the running encode may yet reach it; restarting on a far request is what produced nine restarts in a minute"
   );
+});
+
+test("a request far beyond the repair's reach is answered at once, not held", async (t) => {
+  const { manager, session, dirPath } = await managerWithRunAhead();
+  t.after(async () => {
+    await manager.disposeAll();
+    await rm(dirPath, { recursive: true, force: true });
+  });
+  // What a track change does: hls.js asks the new stream for segment #0 while
+  // the run is hundreds of segments in. The repair cannot reach it, no seek is
+  // coming, and the run only moves forward — so it can never be produced.
+  // Measured 2026-08-15: held for the full minute, and the viewer watched a
+  // spinner for 63 s after a track that had been made ready in 7.
+  const answer = await manager.getFileStream(SESSION_ID, fmp4Format.segmentFileName(0), { requestSeq: 1 });
+
+  assert.equal(answer.kind, "not-found", "answered, so the player can move on to what it can have");
+  assert.equal(session.seekTarget, null, "and the encoder was not sent to the start of the film for it");
+});
+
+test("a request just behind the run is still held, because the repair will fetch it", async (t) => {
+  const { manager, session, dirPath } = await managerWithRunAhead();
+  t.after(async () => {
+    await manager.disposeAll();
+    await rm(dirPath, { recursive: true, force: true });
+  });
+  const name = fmp4Format.segmentFileName(WANTED);
+  session.firstWantedAt.set(WANTED, Date.now() - 1000);
+
+  const answer = await manager.getFileStream(SESSION_ID, name, { requestSeq: 1 });
+
+  assert.equal(answer.kind, "warming-up", "within reach: the encoder is about to be moved there");
 });

@@ -6067,6 +6067,35 @@ export class HlsSessionManager {
     // at this position (server-side seeking).  The caller long-polls.
     if (!isPlaylist) {
       const requestedIndex = session.segmentFormat.segmentIndexFromName(fileName);
+      // Unanswerable, and known to be: behind a run that only moves forward,
+      // too far behind for the repair to fetch it, and no seek on its way to
+      // move the encoder there. Holding it changes nothing about whether it can
+      // be produced — it only spends the player's patience.
+      //
+      // This is what a track change costs when it is held instead: measured
+      // 2026-08-15, hls.js asked the new track for segment #0 while the run was
+      // at #354, the request was held for the full minute, and only when it
+      // failed did the player move to the segment it actually needed — 63 s of
+      // spinner after a track that had been made ready in 7.
+      //
+      // Narrow on purpose. A request behind the head is USUALLY temporary: the
+      // repair moves the encoder back for anything within its reach, and a
+      // reported seek is about to move it anyway. Refusing those was 2.14.1,
+      // and it left a viewer retrying a 404 for ever.
+      if (
+        Number.isFinite(requestedIndex) &&
+        requestedIndex < (session.encodeStartIndex ?? 0) &&
+        (session.encodeStartIndex ?? 0) - requestedIndex > BEHIND_HEAD_REPAIR_MAX_SEGMENTS &&
+        session.ffmpeg != null &&
+        session.seekTarget == null &&
+        session.seekSettleTimer == null
+      ) {
+        logger.info(
+          `transcode ${session.id} segment #${requestedIndex} is ${(session.encodeStartIndex ?? 0) - requestedIndex} ` +
+          `segments behind the run and beyond the repair's reach; answered as absent rather than held`
+        );
+        return { kind: "not-found" };
+      }
       this.#ensureEncodingFor(
         session,
         requestedIndex,

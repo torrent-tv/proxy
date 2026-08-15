@@ -638,46 +638,38 @@ test("a rung served by copy stays offered while a re-encoded rung is on screen",
   );
 });
 
-test("an audio rendition refuses a segment behind its run instead of chasing it", async (t) => {
-  const { manager, dirPath } = await managerWithBase();
+test("a separately published audio track starts behind the picture's read head", async (t) => {
+  const { manager, base, dirPath } = await managerWithBase();
   t.after(async () => {
     await manager.disposeAll();
     await rm(dirPath, { recursive: true, force: true });
   });
-  // The field case of 2026-08-15: the viewer changes track at 159 s, the
-  // rendition is placed there (#26), and hls.js asks for its segment #0.
-  const RENDITION_ID = "99999999-8888-7777-6666-555555555555";
-  const rendition = fakeSession({ id: RENDITION_ID, encodeHeight: 0, dirPath });
-  rendition.audioOnly = true;
-  rendition.audioTrackIndex = 1;
-  rendition.encodeStartIndex = 26;
-  rendition.usesExplicitCuts = true;
-  rendition.ffmpeg = fakeEncoder();
-  rendition.variantBases = new Set([BASE_ID]);
-  manager.sessionsById.set(RENDITION_ID, rendition);
+  // What broke playback on 2026-08-15: the position this class keeps is where
+  // segments have been SERVED to, and the viewer's picture is behind it by
+  // everything they have buffered. Started at the read head, the audio run sat
+  // ahead of the viewer and every request they made was behind a run that only
+  // moves forward.
+  base.viewerPositionSeconds = 140;
+  base.audioSeparate = true;
+  manager.getCachedAudioTracks = () => [
+    { index: 0, language: "rus", title: "", isDefault: true },
+    { index: 1, language: "eng", title: "", isDefault: false }
+  ];
+  const created = [];
+  manager.createOrGetSession = async (params) => {
+    created.push(params);
+    const rendition = fakeSession({ id: VARIANT_ID, encodeHeight: 0, dirPath });
+    rendition.audioOnly = true;
+    return { sessionId: VARIANT_ID, session: rendition };
+  };
 
-  const answer = await manager.getFileStream(RENDITION_ID, "segment-00000.mp4");
-  // The distinction that matters: "not-found" is an answer, "warming-up" is the
-  // long poll — and holding this one is what cost 20.5 s of silence, because it
-  // can never be produced.
-  assert.notEqual(answer.kind, "warming-up", "not held: this request is unanswerable, not early");
-  assert.equal(
-    answer.kind,
-    "not-found",
-    "answered at once: the run stays where the viewer is, so this can never be produced"
+  // A segment, not the playlist: the playlist is answered from the base and
+  // deliberately starts no encoder.
+  await manager.resolveAudioRenditionFile(BASE_ID, 1, "segment-00010.mp4");
+
+  assert.equal(created.length, 1, "the track's own session was made");
+  assert.ok(
+    created[0].startPositionSeconds <= 20,
+    `started behind the picture, not at the read head — got ${created[0].startPositionSeconds}s for a read head of 140s`
   );
-  assert.equal(rendition.encodeStartIndex, 26, "and the encoder was not moved to the start of the film");
-  assert.equal(rendition.seekTarget ?? null, null, "no seek was armed for it either");
-
-  // A seek of its own is the case where "behind the run" is temporary and real:
-  // the viewer went backwards, the base forwarded it here, and the run moves
-  // when the settle fires. Until then the request is held, not refused — it is
-  // the one the viewer is waiting for.
-  rendition.seekTarget = 4;
-  rendition.seekSettleTimer = setTimeout(() => {}, 60_000);
-  t.after(() => clearTimeout(rendition.seekSettleTimer));
-
-  const duringSeek = await manager.getFileStream(RENDITION_ID, "segment-00005.mp4");
-
-  assert.equal(duringSeek.kind, "warming-up", "held: the run is about to move there");
 });

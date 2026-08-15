@@ -12,6 +12,7 @@ import {
   parseFfmpegDurationSeconds,
   parseFfmpegStartTimeSeconds,
   parseFfmpegVideoDimensions,
+  parseFfmpegBitrateKbps,
   parseFfmpegVideoFps,
   parseFfmpegHdr
 } from "./ffmpeg-banner.js";
@@ -274,7 +275,11 @@ export function createPlaybackPlanner({
   // index — which reads the same tail of the file — is fetched alongside the
   // codec probe instead of after it. Late-bound to the HLS session manager,
   // which owns the cache both of them share.
-  warmKeyframeIndex
+  warmKeyframeIndex,
+  // Optional. The heights this host could actually serve this source at, for
+  // both playback branches, so the quality menu is right from the moment the
+  // file is opened rather than from the moment an encoder exists.
+  predictOfferedHeights
 }) {
   /** @type {Map<string, PlaybackPlan>} */
   const cache = new Map();
@@ -307,7 +312,17 @@ export function createPlaybackPlanner({
     return {
       ...plan,
       expectedFirstSegmentMs: expectedFirstSegmentMs?.() ?? null,
-      expectedSessionCreateMs: expectedSessionCreateMs?.() ?? null
+      expectedSessionCreateMs: expectedSessionCreateMs?.() ?? null,
+      // Answered here for the same reason as the two above: a plan is cached for
+      // the life of the process, and what this host will serve a file at is not.
+      // It starts as a prediction from the startup benchmarks and is replaced by
+      // what an encoder running on this very source turns out to cost — frozen
+      // into the cache, every later open of the file would hand the browser the
+      // first guess again and undo that. This is the 2.9.106 defect exactly.
+      offeredHeights: plan.mediaInfoForOffer
+        ? (predictOfferedHeights?.(plan.mediaInfoForOffer) ?? null)
+        : null,
+      mediaInfoForOffer: undefined
     };
   }
 
@@ -457,7 +472,24 @@ export function createPlaybackPlanner({
         // never here: read at build time they would be frozen into the cached
         // plan, which is the bug fixed in 2.9.106.
         expectedFirstSegmentMs: null,
-        expectedSessionCreateMs: null
+        expectedSessionCreateMs: null,
+        offeredHeights: null,
+        // What the offer is computed FROM, kept on the cached plan so the offer
+        // itself can be recomputed on every response. The figures are the
+        // probe's own and never change for a file; the answer derived from them
+        // does, as the host learns what this source costs. Stripped on the way
+        // out — it is not part of the plan the browser is given.
+        mediaInfoForOffer: {
+          width: videoWidth,
+          height: videoHeight,
+          fps: parseFfmpegVideoFps(probe.stderr),
+          bitrateKbps: parseFfmpegBitrateKbps(probe.stderr),
+          // Which file this is, so the offer can be answered from what an
+          // encoder has already learned about THIS source rather than from the
+          // startup clips — the same correction a live session applies.
+          sourceKey,
+          fileIndex
+        }
       };
       // Only cache a plan whose codecs were actually detected. An empty probe is
       // a "header not downloaded yet" signal, not a valid result — caching it
@@ -484,6 +516,7 @@ export function createPlaybackPlanner({
           durationSeconds: parseFfmpegDurationSeconds(probe.stderr),
           width: dims.width,
           height: dims.height,
+          bitrateKbps: parseFfmpegBitrateKbps(probe.stderr),
           fps: parseFfmpegVideoFps(probe.stderr),
           startTime: parseFfmpegStartTimeSeconds(probe.stderr),
           isHdr: parseFfmpegHdr(probe.stderr)

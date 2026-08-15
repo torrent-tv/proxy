@@ -2630,8 +2630,34 @@ export class HlsSessionManager {
     if (this.videoEncoder?.kind !== "software") {
       return;
     }
+    // One tick at a time. It awaits torrent statistics per session now, so a
+    // slow or stuck answer would otherwise let the next tick in behind it —
+    // two passes over the same sessions, taking the same reading twice and
+    // acting on the same speed twice.
+    if (this.budgetTickRunning === true) {
+      return;
+    }
+    this.budgetTickRunning = true;
+    try {
+      await this.#realtimeBudgetPass();
+    } finally {
+      this.budgetTickRunning = false;
+    }
+  }
+
+  /** One pass over the sessions. See `#enforceRealtimeBudget`. */
+  async #realtimeBudgetPass() {
     const now = Date.now();
     for (const session of this.sessionsById.values()) {
+      // What this file costs to decode is learned from EVERY encoding session,
+      // before any of the budget's own conditions are consulted. Those exist to
+      // decide whether to step the quality down, and they exclude most of what
+      // is worth measuring: a rung already at the foot of its ladder has
+      // nowhere to step, and a 240p variant IS its whole ladder — which is
+      // exactly the rung the field measured at 0.95x on 2026-08-15, learning
+      // nothing from three minutes of it because the loop had already skipped
+      // the session as un-actionable.
+      await this.#learnFromEncoder(session);
       if (
         !session ||
         session.state === "disposed" ||
@@ -2667,10 +2693,6 @@ export class HlsSessionManager {
       }
       if (speed >= BUDGET_SPEED_OK) {
         session.budgetSlowSince = 0; // recovered — reset the slow window
-        // A run keeping up with realtime cannot be badly starved of input, so
-        // what it reports is about this machine and this source. That is the
-        // reading worth learning from, and it needs no further check.
-        this.#learnDecodeCost(session, speed);
         continue;
       }
       if (speed >= BUDGET_SPEED_SLOW) {
@@ -2698,10 +2720,6 @@ export class HlsSessionManager {
         session.budgetSlowSince = 0; // re-evaluate fresh; don't thrash on this
         continue;
       }
-      // Sustained, and the encoder — not the torrent — is what is short. So the
-      // figure describes the machine on this source, and it is the case that
-      // matters most: a rung nobody can hold teaches exactly here.
-      this.#learnDecodeCost(session, speed);
       await this.#applyBudgetDownshift(session, `speed=${speed.toFixed(2)}x`, bound);
     }
   }
@@ -4188,6 +4206,32 @@ export class HlsSessionManager {
   }
 
   /**
+   * The session a family answers as: the base a rung belongs to, or the session
+   * itself when it is not a rung.
+   *
+   * A rung knows only its own encode, so anything that is a property of the
+   * FILE rather than of one encode of it — what the source is, whether its
+   * video can be copied, which heights this host can serve it at — has to be
+   * asked here. A live base is required: a rung whose base has been disposed
+   * answers for itself rather than following a dead reference.
+   *
+   * @param {HlsSession} session
+   * @returns {HlsSession}
+   */
+  #baseOf(session) {
+    if (!(session?.variantBases instanceof Set)) {
+      return session;
+    }
+    for (const baseId of session.variantBases) {
+      const base = this.sessionsById.get(baseId);
+      if (base && base !== session && base.state !== "disposed") {
+        return base;
+      }
+    }
+    return session;
+  }
+
+  /**
    * Every session cut on one grid: a base and its quality rungs.
    *
    * @param {HlsSession} session
@@ -4307,43 +4351,65 @@ export class HlsSessionManager {
    * @returns {number[]}
    */
   #variantHeights(session) {
+    // Always answered by the family's BASE, whichever member is asking. A rung
+    // is a session of its own, and it knows only its own encode: asked while
+    // the viewer watches 240p, the 240p session priced the 1080p rung as a
+    // re-encode — because ITS video is re-encoded — and refused it on a host
+    // that was serving that very height by COPY minutes earlier. Field
+    // 2026-08-15: `proxy now offers 360p 240p` seconds after the switch, and
+    // the viewer could not go back. Only the base knows what the family can do
+    // with the source.
+    // Answered ON the base, never recursively: the family is one level deep by
+    // construction, and a `variantBases` cycle would otherwise blow the stack on
+    // the path that serves every playlist, init and segment.
+    const owner = this.#baseOf(session);
     // Settled once per session, and re-settled when this file's own decode cost
-    // is measured or improves. Everything else is fixed for the session's life
-    // — the source, the host's benchmarks, the height it settled on — and this
-    // is asked on the path that serves every playlist, init and segment, where
-    // recomputing it meant repeating the refusal in the log every few seconds.
-    const observed = this.#observedDecodeCost.get(`${session.sourceKey}:${session.fileIndex}`) ?? null;
-    const version = observed?.version ?? 0;
-    if (Array.isArray(session.offeredHeightsCache) && session.offeredHeightsVersion === version) {
-      return session.offeredHeightsCache;
+    // is measured or improves, or when the viewer moves to another rung — the
+    // rung on screen is exempt from refusal, so it is an INPUT to this list and
+    // belongs in what identifies a cached answer. Left out, the exemption
+    // outlived the rung: a rung the host cannot hold went on being offered, and
+    // went on passing every route guard, after the viewer had left it.
+    // Everything else is fixed for the session's life.
+    const observed = this.#observedDecodeCost.get(`${owner.sourceKey}:${owner.fileIndex}`) ?? null;
+    const playing = this.variantHeightOf(this.#activeVariant(owner));
+    const version = `${observed?.version ?? 0}:${playing}`;
+    if (Array.isArray(owner.offeredHeightsCache) && owner.offeredHeightsVersion === version) {
+      return owner.offeredHeightsCache;
     }
-    session.offeredHeightsVersion = version;
-    const heights = new Set(variantHeightsFor(Number(session.sourceHeight) || 0));
-    const own = this.variantHeightOf(session);
+    const heights = new Set(variantHeightsFor(Number(owner.sourceHeight) || 0));
+    const own = this.variantHeightOf(owner);
     if (own > 0) {
       heights.add(own);
     }
     const ordered = [...heights].sort((left, right) => right - left);
-    // The rung ON SCREEN is never withdrawn. The list is now recomputed as the
-    // host learns what this source costs, and the reading that teaches it comes
-    // from the rung the viewer has just switched to — so the rung that taught
-    // the lesson would be the first to be dropped, and every route guard reads
-    // this list: its next segment would 404 on a stream that is playing, with
-    // its own encoder still running. It leaves the offer when the viewer leaves
-    // it, not while they are watching it.
-    const playing = this.variantHeightOf(this.#activeVariant(session));
-    session.offeredHeightsCache = this.#sustainableHeights({
+    // The rung ON SCREEN is never withdrawn while it is on screen. The list is
+    // recomputed as the host learns what this source costs, and the reading
+    // that teaches it comes from the rung the viewer has just switched to — so
+    // the rung that taught the lesson would be the first to be dropped, and
+    // every route guard reads this list: its next segment would 404 on a stream
+    // that is playing, with its own encoder still running.
+    const answer = this.#sustainableHeights({
       heights: ordered,
       ownHeight: own,
       playingHeight: playing,
-      sourceWidth: Number(session.sourceWidth) || 0,
-      sourceHeight: Math.round(Number(session.sourceHeight) || 0),
-      fps: Number(session.outputFps) || TRANSCODE_FPS,
-      source: session.sourceDecode ?? null,
-      transcodeVideo: session.transcodeVideo === true,
+      sourceWidth: Number(owner.sourceWidth) || 0,
+      sourceHeight: Math.round(Number(owner.sourceHeight) || 0),
+      fps: Number(owner.outputFps) || TRANSCODE_FPS,
+      source: owner.sourceDecode ?? null,
+      transcodeVideo: owner.transcodeVideo === true,
       observedDecodeCostSec: observed?.costSec ?? null
     });
-    return session.offeredHeightsCache;
+    if (owner !== session) {
+      // An orphan: its base is gone, so this is the family's last word and
+      // there is nobody to keep it for. Answering is right — the viewer is
+      // still watching it — but caching it on a session whose flags are its
+      // own encode's is how the wrong answer became the family's in the first
+      // place.
+      return answer;
+    }
+    owner.offeredHeightsVersion = version;
+    owner.offeredHeightsCache = answer;
+    return answer;
   }
 
   /**
@@ -4385,6 +4451,46 @@ export class HlsSessionManager {
    * @param {HlsSession} session
    * @param {number} speed - The `speed=` ffmpeg reports, as a multiple of realtime.
    */
+  /**
+   * Take a reading off an encoder that is running, if this one is worth having.
+   *
+   * Separate from the realtime budget, which asks a different question — should
+   * the quality step down — and answers it only where it CAN step down. Most of
+   * what is worth measuring is excluded by that: a rung at the foot of its
+   * ladder, a variant whose ladder is one rung long, a base whose video is
+   * copied. Measuring has no such preconditions.
+   *
+   * What it does refuse: a suspended encoder (ffmpeg reports a CUMULATIVE
+   * speed, so a look-ahead pause is divided into it and the figure decays while
+   * nothing is being encoded), a reading that has not moved since the last one
+   * (the loop runs every 5 s and a stalled encoder would otherwise fill the
+   * whole window with one frozen sample), and a run short of input, where what
+   * is short is the torrent rather than the machine.
+   *
+   * @param {HlsSession} session
+   */
+  async #learnFromEncoder(session) {
+    if (
+      !session ||
+      session.state === "disposed" ||
+      session.state === "failed" ||
+      !session.ffmpeg ||
+      session.encoderPaused === true ||
+      session.transcodeVideo !== true
+    ) {
+      return;
+    }
+    const speed = this.#parseSpeed(session.progress?.speed);
+    if (speed === null || speed === session.lastLearnedSpeed) {
+      return;
+    }
+    if (speed < BUDGET_SPEED_OK && await this.#classifyTranscodeBound(session) === "download") {
+      return; // the torrent is what is short; this says nothing about the host
+    }
+    session.lastLearnedSpeed = speed;
+    this.#learnDecodeCost(session, speed);
+  }
+
   #learnDecodeCost(session, speed) {
     if (session.transcodeVideo !== true || !(speed > 0)) {
       return; // a copied video decodes nothing, so it says nothing about decoding
@@ -4546,11 +4652,18 @@ export class HlsSessionManager {
     const dropped = [];
     for (const height of heights) {
       // The height an encoder is ALREADY producing, and the source's own height
-      // when the video is copied — neither has to be predicted, because it is
-      // happening. A source height that would have to be RE-ENCODED is a
-      // prediction like any other: on a session whose budget downshifted to
-      // 480p, the source's 1080p is neither copied nor being produced, and
-      // keeping it unpriced would offer exactly the kind of rung this refuses.
+      // when the FAMILY serves it by copy — neither has to be predicted,
+      // because it is happening. A copied rung costs no encoder at all, so no
+      // measurement of this host can ever be a reason to withdraw it, and the
+      // whole point of it is that it is where a viewer on a rung the machine
+      // cannot hold goes back to. `transcodeVideo` here is the base's, not the
+      // asking session's: a 240p rung re-encodes, and reading its own flag is
+      // what withdrew a copied 1080p in the field on 2026-08-15.
+      //
+      // A source height that would have to be RE-ENCODED is a prediction like
+      // any other: on a session whose budget downshifted to 480p, the source's
+      // 1080p is neither copied nor being produced, and keeping it unpriced
+      // would offer exactly the kind of rung this refuses.
       if (
         height === ownHeight ||
         height === playingHeight ||

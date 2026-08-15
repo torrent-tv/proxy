@@ -13,6 +13,7 @@ import { Readable } from "node:stream";
 import os from "node:os";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
+import { fileURLToPath } from "node:url";
 import { spawn } from "node:child_process";
 import { createRequire } from "node:module";
 import { logger } from "../utils/logger.js";
@@ -1154,10 +1155,15 @@ export class HlsSessionManager {
     getSourceStats = null,
     tonemapSupported = false,
     getCachedMediaInfo = null,
-    segmentFormatId = undefined
+    segmentFormatId = undefined,
+    stateDir = ""
   }) {
     this.enabled = Boolean(enabled);
     this.ffmpegBin = ffmpegBin;
+    // Where measurements about this host are kept between runs. Empty means
+    // beside the installed proxy; a deployment with somewhere persistent to
+    // write names it (--state-dir).
+    this.stateDir = typeof stateDir === "string" ? stateDir : "";
     // Output container (fMP4/CMAF or MPEG-TS). Everything container-specific —
     // muxer args, file naming, playlist header, per-segment correction — lives
     // in this module; nothing here branches on the format.
@@ -3756,14 +3762,20 @@ export class HlsSessionManager {
    * @returns {number | null} Milliseconds, or null without a benchmark.
    */
   /**
-   * Where this host's recorded timings live: one file in the WORKING directory,
-   * not in the installation.
+   * Where this host's recorded timings live: `--state-dir` when the deployment
+   * names one, otherwise beside the installed proxy, which is where they have
+   * always been kept.
    *
-   * The proxy is installed from npm, often globally and often into a directory
-   * the process cannot write; writing runtime state there also means an upgrade
-   * or reinstall silently discards it, and it puts a file the owner never asked
-   * for inside a package directory. The working directory is the one place a
-   * process may write by convention, and the owner can see and delete it.
+   * The default is deliberately the old location and not the working directory:
+   * measured on the addon, both are inside the container's writable layer and
+   * both are discarded when an update rebuilds it, so moving there bought
+   * nothing — while for an ordinary `npm i -g` install the working directory is
+   * wherever the operator happened to launch from, which splits the history
+   * between runs and drops a file into someone's project.
+   *
+   * A deployment that HAS a persistent directory says so: the addon passes
+   * `/data`, the one path its supervisor keeps across updates. Naming it here
+   * would put Home Assistant into proxy code, which this repo does not do.
    *
    * Kept so a proxy that has just restarted is not back to knowing nothing —
    * the browser was shown an assumed rate for the whole of the first wait after
@@ -3775,7 +3787,10 @@ export class HlsSessionManager {
    * @returns {string}
    */
   #hostTimingsPath() {
-    return path.join(process.cwd(), "host-timings.json");
+    const stateDir = typeof this.stateDir === "string" && this.stateDir.length > 0
+      ? this.stateDir
+      : path.join(path.dirname(fileURLToPath(import.meta.url)), "..");
+    return path.join(stateDir, "host-timings.json");
   }
 
   /** Load them, if any were ever written. Never throws. */
@@ -3788,9 +3803,11 @@ export class HlsSessionManager {
       if (Array.isArray(raw?.sessionCreate)) {
         this.#sessionCreateLatencies = raw.sessionCreate.filter((value) => Number.isFinite(value) && value > 0);
       }
+      const asMs = (value) => (value === null ? "n/a" : `${value}ms`);
       logger.info(
-        `host timings loaded: first-segment ${this.expectedFirstSegmentMs() ?? "n/a"}ms, ` +
-        `session-create ${this.expectedSessionCreateMs() ?? "n/a"}ms`
+        `host timings loaded from ${this.#hostTimingsPath()}: ` +
+        `first-segment ${asMs(this.expectedFirstSegmentMs())}, ` +
+        `session-create ${asMs(this.expectedSessionCreateMs())}`
       );
     } catch {
       // No file yet, or it is unreadable. The synthetic figure answers instead.

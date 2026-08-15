@@ -77,6 +77,10 @@ program
   .option("--memory-bytes <bytes>", "Per-torrent budget for pieces kept in memory before spilling to disk (default 512MB)")
   .option("--ffmpeg-bin <path>", "Path to ffmpeg binary")
   .option(
+    "--state-dir <path>",
+    "Where to keep what this host has measured about itself (default: beside the installed proxy)"
+  )
+  .option(
     "--segment-format <format>",
     `HLS output container: ${SEGMENT_FORMAT_IDS.join(" | ")}`,
     DEFAULT_SEGMENT_FORMAT_ID
@@ -273,7 +277,8 @@ try {
     ffmpegBin,
     maxDiskBytes,
     memoryBytes,
-    segmentFormat: options.segmentFormat
+    segmentFormat: options.segmentFormat,
+    stateDir: options.stateDir
   });
   app = started.app;
   actualPort = started.port;

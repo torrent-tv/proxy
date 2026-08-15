@@ -68,6 +68,7 @@ function buildPortCandidates(startPort, maxAttempts = 51) {
  * @property {number}  [maxDiskBytes] - Global disk cap for torrent data (undefined = pool default).
  * @property {number}  [memoryBytes]  - Per-torrent budget for pieces held in memory (undefined = store default).
  * @property {string}  [segmentFormat] - HLS output container: "fmp4" (default) or "mpegts".
+ * @property {string}  [stateDir] - Where to keep what this host has measured about itself.
  */
 
 /**
@@ -76,7 +77,7 @@ function buildPortCandidates(startPort, maxAttempts = 51) {
  * @param {ProxyServerOptions} options
  * @returns {Promise<{ app: import("fastify").FastifyInstance, port: number }>}
  */
-export async function startProxyServer({ host, port, transcodeAudio, ffmpegBin, maxDiskBytes, memoryBytes, segmentFormat }) {
+export async function startProxyServer({ host, port, transcodeAudio, ffmpegBin, maxDiskBytes, memoryBytes, segmentFormat, stateDir }) {
   const app = Fastify({
     // No practical body-size limit — the proxy server is localhost-only and
     // receives torrent source payloads that may be arbitrarily large.
@@ -152,6 +153,7 @@ export async function startProxyServer({ host, port, transcodeAudio, ffmpegBin, 
     decodeCostModel,
     tonemapSupported,
     segmentFormatId: segmentFormat,
+    stateDir,
     // Live download stats accessor for the realtime budget: lets it tell a
     // CPU-bound transcode from a download-starved input before downscaling.
     getSourceStats: async (sourceKey, fileIndex) => {

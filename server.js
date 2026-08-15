@@ -30,6 +30,7 @@ import { handleApiTranscodeSessionSeekPost } from "./routes/api/transcode-sessio
 import { handleStreamGet } from "./routes/stream/get.js";
 import { handleTranscodeSessionFileGet } from "./routes/transcode/session-file/get.js";
 import { handleTranscodeVariantFileGet } from "./routes/transcode/variant-file/get.js";
+import { handleTranscodeAudioFileGet } from "./routes/transcode/audio-file/get.js";
 import { handleTranscodeVariantWarmGet } from "./routes/transcode/variant-warm/get.js";
 import { createSourceRegistry } from "./store/source-registry.js";
 import { WorkerTorrentPool } from "./services/torrent-worker/pool-adapter.js";
@@ -173,7 +174,10 @@ export async function startProxyServer({ host, port, transcodeAudio, ffmpegBin, 
     // Reuse the media info the planner already probed for this file (same
     // ffmpeg scan) so createSession skips its own probe. Late-bound: invoked
     // only at session-create time, after playbackPlanner is initialised.
-    getCachedMediaInfo: (params) => playbackPlanner.getCachedMediaInfo(params)
+    getCachedMediaInfo: (params) => playbackPlanner.getCachedMediaInfo(params),
+    // The file's audio tracks, for the master playlist's rendition group. Already
+    // probed for the browser's audio menu; read from there rather than probed again.
+    getCachedAudioTracks: (params) => playbackPlanner.getCachedAudioTracks(params)
   });
   const playbackPlanner = createPlaybackPlanner({
     ffmpegBin,
@@ -244,6 +248,9 @@ export async function startProxyServer({ host, port, transcodeAudio, ffmpegBin, 
   // here so the order is not "tidied" into a bug.
   app.get("/transcode/:sessionId/v/:height/warm", async (req, reply) =>
     handleTranscodeVariantWarmGet(req, reply, { hlsSessionManager })
+  );
+  app.get("/transcode/:sessionId/a/:trackIndex/:fileName", async (req, reply) =>
+    handleTranscodeAudioFileGet(req, reply, { hlsSessionManager })
   );
   app.get("/transcode/:sessionId/v/:height/:fileName", async (req, reply) =>
     handleTranscodeVariantFileGet(req, reply, { hlsSessionManager })

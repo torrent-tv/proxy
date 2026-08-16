@@ -20,6 +20,7 @@
     "start": "node ./bin/cli.js",
     "dev": "node --inspect=0 --experimental-network-inspection ./bin/cli.js",
     "test": "npm run lint && node --test",
+    "graph": "node scripts/render-run-graph.js",
     "lint": "biome lint ."
   },
   "dependencies": {

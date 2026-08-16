@@ -21,6 +21,7 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { HlsSessionManager } from "../services/hls-session-manager.js";
+import { ENCODE_RUN_STATE } from "../services/encode-run-state.js";
 import { fmp4Format } from "../services/segment-formats/fmp4.js";
 
 const MOVIE_TIMESCALE = 1000;
@@ -275,4 +276,49 @@ test("a segment is found in the run directory that produced it, newest run first
     Buffer.concat(chunks).length > 8,
     "the newest run's output must win — the older file here is the 8-byte stub a killed run leaves"
   );
+});
+
+test("serving a run's own segment moves the run out of STARTING", async (t) => {
+  const { manager, session, dirPath } = await managerWithReadySegment();
+  t.after(async () => {
+    await manager.disposeAll();
+    await rm(dirPath, { recursive: true, force: true });
+  });
+  // The table lives in `encode-run-state.js` and is tested there as a graph.
+  // What this pins is that a real serve REACHES it: a state nothing writes
+  // describes every run as still starting, for ever, and the log built on it
+  // would say so too.
+  session.runState = ENCODE_RUN_STATE.STARTING;
+  // Where the run in force is writing. The fixture's segments live directly in
+  // the session directory, which is exactly what a single run's directory is
+  // here.
+  session.runDirPath = dirPath;
+
+  await manager.getFileStream(SESSION_ID, "segment-00000.mp4", { requestSeq: 1 });
+
+  assert.equal(session.runState, ENCODE_RUN_STATE.PRODUCING);
+});
+
+test("a segment left by an earlier run does not claim the new run has produced", async (t) => {
+  const { manager, session, dirPath } = await managerWithReadySegment();
+  t.after(async () => {
+    await manager.disposeAll();
+    await rm(dirPath, { recursive: true, force: true });
+  });
+  // A seek places the new run in a directory of its own; the previous run's
+  // segments stay servable and are served from theirs. They say nothing about
+  // what the run now starting has done — and a run believed to be producing is
+  // one the look-ahead may suspend and the seek path may wave through as
+  // "already covered by the running encode".
+  //
+  // Deliberately a segment ABOVE the new run's start index, because that is the
+  // case an index comparison gets wrong: after a backward seek the old run's
+  // output sits ahead of the new run's beginning.
+  session.runState = ENCODE_RUN_STATE.STARTING;
+  session.encodeStartIndex = 0;
+  session.runDirPath = path.join(dirPath, "run-7");
+
+  await manager.getFileStream(SESSION_ID, "segment-00000.mp4", { requestSeq: 1 });
+
+  assert.equal(session.runState, ENCODE_RUN_STATE.STARTING);
 });

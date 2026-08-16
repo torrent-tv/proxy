@@ -4831,6 +4831,26 @@ export class HlsSessionManager {
    *
    * @param {HlsSession} session
    */
+  /**
+   * How many encoders are running and not suspended right now.
+   *
+   * A cost measured while two of them share the machine belongs to neither.
+   *
+   * @returns {number}
+   */
+  #runningEncoders() {
+    let running = 0;
+    for (const session of this.sessionsById.values()) {
+      if (session?.ffmpeg != null &&
+          !hasChildExited(session.ffmpeg) &&
+          session.encoderPaused !== true &&
+          session.state !== "disposed") {
+        running += 1;
+      }
+    }
+    return running;
+  }
+
   async #learnFromEncoder(session) {
     if (
       !session ||
@@ -4864,6 +4884,16 @@ export class HlsSessionManager {
     }
     const speed = speedFromReadings(previous, { takenAt, processedSeconds }, LEARN_WINDOW_MIN_SEC);
     if (speed === null) {
+      return;
+    }
+    // Only while this encoder had the machine to itself. A reading taken beside
+    // another encoder already contains that other work — and the budget then
+    // ADDS the same work again when it predicts, so the cost is counted twice
+    // and grows with every reading. Measured 2026-08-15 in the field: copying,
+    // whose truth is 7.9x, was learned as 2.03x, and decoding, whose clips say
+    // 2.6x, as 0.87x. Every rung was then refused, the offer collapsed to the
+    // one copied height, and the viewer lost the quality menu altogether.
+    if (this.#runningEncoders() > 1) {
       return;
     }
     if (speed < BUDGET_SPEED_OK && await this.#classifyTranscodeBound(session) === "download") {

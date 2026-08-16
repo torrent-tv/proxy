@@ -2489,8 +2489,40 @@ export class HlsSessionManager {
       return 0;
     }
     const bytesPerSecond = fileLength / durationSeconds;
-    const wanted = Math.round(bytesPerSecond * READ_WINDOW_SECONDS);
+    // Shared between the readers this file already has. The window is stated in
+    // seconds of playback and the store's memory is one budget for the whole
+    // torrent, so N readers asking for thirty seconds each ask for N times what
+    // was provided for — and on 2026-08-15 that is exactly what happened: a
+    // viewer with a picture and an audio track had every resident piece held at
+    // once, a read ended with zero bytes, and every encoder on the file took
+    // that for the end of it.
+    //
+    // Dividing keeps the promise the budget was written against. It is not the
+    // sliding window of roadmap item 8 — pieces still leave only by the store's
+    // own eviction — but it removes the multiplication that broke it.
+    const readers = Math.max(1, this.#readersOn(sourceKey, fileIndex));
+    const wanted = Math.round((bytesPerSecond * READ_WINDOW_SECONDS) / readers);
     return Math.min(READ_WINDOW_MAX_BYTES, Math.max(READ_WINDOW_MIN_BYTES, wanted));
+  }
+
+  /**
+   * How many live sessions read this file: the picture, any rung being warmed
+   * beside it, and any audio track published on its own.
+   *
+   * @param {string} sourceKey
+   * @param {number} fileIndex
+   * @returns {number}
+   */
+  #readersOn(sourceKey, fileIndex) {
+    let readers = 0;
+    for (const session of this.sessionsById.values()) {
+      if (session?.sourceKey === sourceKey &&
+          session.fileIndex === fileIndex &&
+          session.state !== "disposed") {
+        readers += 1;
+      }
+    }
+    return readers;
   }
 
   #enforceLookAhead() {

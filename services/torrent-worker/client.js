@@ -243,6 +243,19 @@ export class TorrentWorkerClient {
   }
 
   /**
+   * Bytes every torrent on the worker has moved, downloaded and uploaded apart.
+   *
+   * The client lives on the worker thread, so this cannot be read as a property
+   * from here — which is exactly the mistake 2.19.0 shipped, leaving the figure
+   * always zero and the whole feature inert.
+   *
+   * @returns {Promise<{ downloaded: number, uploaded: number }>}
+   */
+  async getTorrentTotals() {
+    return this.#caller.call(Command.TORRENT_TOTALS, {});
+  }
+
+  /**
    * Reorder piece selection around a read position (seek prioritisation).
    *
    * @param {{ sourceKey: string, fileIndex: number, byteStart: number, windowBytes?: number, wholeFileRead?: boolean }} params

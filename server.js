@@ -155,13 +155,10 @@ export async function startProxyServer({ host, port, transcodeAudio, ffmpegBin, 
     // What every torrent here has moved, so the proxy can price its own
     // downloading, hashing and delivery against the machine (roadmap item 7).
     getTorrentTotals: async () => {
-      let bytesMoved = 0;
-      for (const torrent of torrentPool.client?.torrents ?? []) {
-        const downloaded = Number(torrent?.downloaded);
-        const uploaded = Number(torrent?.uploaded);
-        bytesMoved += (Number.isFinite(downloaded) ? downloaded : 0) + (Number.isFinite(uploaded) ? uploaded : 0);
+      if (typeof torrentPool.getTorrentTotals !== "function") {
+        return null;
       }
-      return { bytesMoved };
+      return torrentPool.getTorrentTotals();
     },
     getSourceStats: async (sourceKey, fileIndex) => {
       const record = sourceRegistry.get(sourceKey);

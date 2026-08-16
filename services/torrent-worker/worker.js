@@ -340,6 +340,22 @@ async function runCommand(command, params, id) {
       return released;
     }
 
+    case Command.TORRENT_TOTALS: {
+      // Downloaded and uploaded are counted apart: hashing every downloaded
+      // byte is work of a different order from sending one back to the swarm,
+      // and adding them would price both at whatever the mixture happened to
+      // be.
+      let downloaded = 0;
+      let uploaded = 0;
+      for (const torrent of pool.client?.torrents ?? []) {
+        const gotBytes = Number(torrent?.downloaded);
+        const sentBytes = Number(torrent?.uploaded);
+        downloaded += Number.isFinite(gotBytes) ? gotBytes : 0;
+        uploaded += Number.isFinite(sentBytes) ? sentBytes : 0;
+      }
+      return { downloaded, uploaded };
+    }
+
     case Command.FILE_STATS: {
       const torrent = await requireTorrent(params.sourceKey);
       return pool.getFileStats(torrent, params.fileIndex, {

@@ -21,7 +21,7 @@
  */
 
 import { spawn } from "node:child_process";
-import { mkdtempSync, readdirSync, rmSync } from "node:fs";
+import { mkdtempSync, readdirSync, rmSync, statSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -135,6 +135,26 @@ const BENCHMARK_PRESETS = ["fast", "faster", "veryfast", "superfast", "ultrafast
 const BENCHMARK_REF_W = 640;
 const BENCHMARK_REF_H = 360;
 const BENCHMARK_DURATION_SEC = 3;
+/**
+ * The narrowest window a slope may be taken over. Measured 2026-08-15: at a
+ * fifth of a second the readings were noisy enough to put `faster` and
+ * `veryfast` BELOW `fast`, which libx264 cannot do — and `pickSoftwarePreset`
+ * walks the list assuming it ascends. Half a second was still noisy enough for that
+ * (measured again: veryfast below faster, twice), so a full second it is —
+ * about six seconds of startup for a ladder the whole budget then rests on.
+ */
+const ENCODE_BENCHMARK_WINDOW_SEC = 1;
+/** The narrowest window that may be used when a run ends early. */
+const ENCODE_BENCHMARK_MIN_WINDOW_SEC = 0.2;
+/** Above this a reading is a fault, not a fast machine. */
+const ENCODE_BENCHMARK_MAX_PLAUSIBLE_SPEED = 1000;
+/**
+ * A preset that has not reported twice in this long is hung, not slow: reports
+ * arrive twice a second whatever the encoding speed.
+ */
+const ENCODE_BENCHMARK_TIMEOUT_MS = 10_000;
+/** Progress reports arrive line by line. */
+const NEWLINE = String.fromCharCode(10);
 // Require the predicted speed to clear realtime by this much. The benchmarks
 // run at startup with an idle CPU; during playback ffmpeg competes with
 // in-process WebTorrent (download + hashing) and delivery, so real throughput
@@ -411,12 +431,12 @@ function runFfmpeg(ffmpegBin, args, timeoutMs = 12000) {
       try {
         child.kill("SIGKILL");
       } catch {
-        // ignore
+        // already gone
       }
       finish(-1);
     }, timeoutMs);
-    child.stdout.on("data", (d) => {
-      stdout += String(d);
+    child.stdout.on("data", (chunk) => {
+      stdout += String(chunk);
     });
     child.stderr.on("data", (d) => {
       stderr += String(d);
@@ -1052,7 +1072,7 @@ export function canSustainOutput({
   }
   const speed = predictedRealtimeSpeed({
     decodeModel,
-    encodePixelsPerSec: benchmark[benchmark.length - 1].pixelsPerSec,
+    encodePixelsPerSec: cheapestPresetPixelsPerSec(benchmark),
     outputPixelsPerSec,
     source,
     observedDecodeCostSec: observed
@@ -1081,31 +1101,239 @@ export const REALTIME_SPEED_MARGIN = PRESET_SPEED_MARGIN;
  */
 export async function benchmarkSoftwarePresets({ ffmpegBin, logger }) {
   const log = logger ?? { info: () => {}, warn: () => {} };
-  const totalPixels = BENCHMARK_REF_W * BENCHMARK_REF_H * TRANSCODE_FPS * BENCHMARK_DURATION_SEC;
+
+  // REAL footage, decoded ONCE into raw frames, and the presets are then timed
+  // on those frames.
+  //
+  // Two reasons, both measured. The pattern this replaced (`testsrc2`) has flat
+  // areas and no grain and encodes 1.23x cheaper than film on the same machine
+  // and preset — an error that always points at offering a rung the host cannot
+  // hold. And feeding a compressed clip to each preset instead would put
+  // decoding and scaling inside the measurement: subtracting them afterwards
+  // compares a wall clock that includes process startup against a decode figure
+  // measured to exclude it, while inside one ffmpeg the two halves overlap. On
+  // the fastest preset — the one every ladder decision reads as the ceiling —
+  // that subtraction is most of the number being measured, so a small error in
+  // it becomes a large error in the answer.
+  //
+  // Raw frames remove all of it: no decoder, no scaler, nothing to subtract,
+  // and no dependence on the decode model. The cost is 25 MB of memory in a
+  // pipe for a few seconds.
+  const rawFramesPath = await decodeToRawFrames(ffmpegBin, log);
+  if (rawFramesPath === null) {
+    // Said once more, in the words that matter to whoever reads the log next:
+    // with no benchmark, `#sustainableHeights` filters nothing and every rung
+    // is offered, which is the failure of 2026-08-14 in full.
+    log.warn("hwaccel: the quality ladder is UNFILTERED on this host — nothing measured the encoder");
+    return [];
+  }
   /** @type {Array<{ preset: string, pixelsPerSec: number }>} */
   const results = [];
-  for (const preset of BENCHMARK_PRESETS) {
-    const args = [
-      "-hide_banner", "-loglevel", "error",
-      "-f", "lavfi", "-i", `testsrc2=s=${BENCHMARK_REF_W}x${BENCHMARK_REF_H}:r=${TRANSCODE_FPS}:d=${BENCHMARK_DURATION_SEC}`,
-      "-c:v", "libx264", "-preset", preset, "-crf", SOFTWARE_CRF, "-pix_fmt", "yuv420p",
-      "-f", "null", "-"
-    ];
-    const startedAt = Date.now();
-    const { code } = await runFfmpeg(ffmpegBin, args, 30000);
-    const elapsedSec = (Date.now() - startedAt) / 1000;
-    if (code !== 0 || elapsedSec <= 0) {
-      log.warn(`hwaccel: preset benchmark "${preset}" failed; skipping`);
-      continue;
+  try {
+    for (const preset of BENCHMARK_PRESETS) {
+      const speed = await measureEncodeSlope(ffmpegBin, preset, rawFramesPath);
+      if (speed === null) {
+        log.warn(`hwaccel: preset benchmark "${preset}" produced no usable reading; skipping`);
+        continue;
+      }
+      const pixelsPerSec = BENCHMARK_REF_W * BENCHMARK_REF_H * TRANSCODE_FPS * speed;
+      results.push({ preset, pixelsPerSec });
+      log.info(
+        `hwaccel: preset "${preset}" ~= ${(pixelsPerSec / 1e6).toFixed(1)} Mpx/s ` +
+          `(${speed.toFixed(2)}x @ ${BENCHMARK_REF_W}x${BENCHMARK_REF_H}, real footage)`
+      );
     }
-    const pixelsPerSec = totalPixels / elapsedSec;
-    results.push({ preset, pixelsPerSec });
-    log.info(
-      `hwaccel: preset "${preset}" ~= ${(pixelsPerSec / 1e6).toFixed(1)} Mpx/s ` +
-        `(${(BENCHMARK_DURATION_SEC / elapsedSec).toFixed(2)}x @ ${BENCHMARK_REF_W}x${BENCHMARK_REF_H})`
-    );
+  } finally {
+    // The encoder was killed a moment ago and on Windows the handle outlives
+    // the signal, so removal is retried and its failure is not worth a session:
+    // this is a temp directory the operating system will clear anyway.
+    try {
+      rmSync(path.dirname(rawFramesPath), { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
+    } catch (error) {
+      log.warn(`hwaccel: could not remove the benchmark's raw frames: ${error instanceof Error ? error.message : String(error)}`);
+    }
   }
   return results;
+}
+
+/**
+ * How fast one preset encodes, from ffmpeg's own reports of how much video it
+ * has written — not from the clock around the process.
+ *
+ * Timing whole runs measures the run STARTING. Measured 2026-08-15 on a desktop
+ * that spawns ffmpeg in ~0.4 s: three seconds of raw frames encoded that way
+ * put `fast` and `ultrafast` within 1.24x of each other, when libx264's own
+ * presets differ by several times — the constant had swallowed the difference.
+ * The slope between two progress reports contains no part of the startup.
+ *
+ * The frames are written repeatedly so there is runway to measure over,
+ * whatever the preset's speed.
+ *
+ * @param {string} ffmpegBin
+ * @param {string} preset
+ * @param {string} rawFramesPath
+ * @returns {Promise<number | null>} Video seconds encoded per second of clock.
+ */
+/**
+ * Video seconds produced per second of clock, from ffmpeg's own reports.
+ *
+ * Startup is excluded by taking a DIFFERENCE: it lands in the wall clock of
+ * every report equally, so it cancels between two of them. (The decode
+ * benchmark drops its first report instead, because there the first one is
+ * emitted at out_time zero; here reports with no time yet are discarded before
+ * they arrive, so the first kept one is already running.)
+ *
+ * @param {Array<{ wallSec: number, outSec: number }>} samples
+ * @param {number} [minimumWindowSec=ENCODE_BENCHMARK_WINDOW_SEC]
+ * @returns {number | null}
+ */
+export function slopeOf(samples, minimumWindowSec = ENCODE_BENCHMARK_WINDOW_SEC) {
+  const first = samples[0];
+  const last = samples[samples.length - 1];
+  if (!first || !last || first === last) {
+    return null;
+  }
+  const took = last.wallSec - first.wallSec;
+  const produced = last.outSec - first.outSec;
+  if (!(took >= minimumWindowSec) || !(produced > 0)) {
+    return null;
+  }
+  const slope = produced / took;
+  // Nothing encodes a thousand times realtime. A figure above that is a
+  // measurement fault, and letting it through opens the whole ladder.
+  return slope <= ENCODE_BENCHMARK_MAX_PLAUSIBLE_SPEED ? slope : null;
+}
+
+function measureEncodeSlope(ffmpegBin, preset, rawFramesPath) {
+  return new Promise((resolve) => {
+    const args = [
+      "-hide_banner", "-loglevel", "error", "-nostats",
+      "-stream_loop", "-1",
+      "-f", "rawvideo", "-pix_fmt", "yuv420p",
+      "-s", `${BENCHMARK_REF_W}x${BENCHMARK_REF_H}`, "-r", String(TRANSCODE_FPS),
+      "-i", rawFramesPath,
+      "-c:v", "libx264", "-preset", preset, "-crf", SOFTWARE_CRF, "-pix_fmt", "yuv420p",
+      "-f", "null", "-",
+      "-progress", "pipe:1"
+    ];
+    /** @type {Array<{ wallSec: number, outSec: number }>} */
+    const samples = [];
+    let settled = false;
+    let buffered = "";
+    let child;
+    const startedAt = Date.now();
+    const finish = (value) => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      clearTimeout(timer);
+      try {
+        child?.kill("SIGKILL");
+      } catch {
+        // already gone
+      }
+      resolve(value);
+    };
+    const timer = setTimeout(() => finish(null), ENCODE_BENCHMARK_TIMEOUT_MS);
+    try {
+      child = spawn(ffmpegBin, args, { stdio: ["ignore", "pipe", "ignore"], windowsHide: true });
+    } catch {
+      finish(null);
+      return;
+    }
+    // The frames come from a FILE, read on repeat by ffmpeg itself. Fed through
+    // a pipe instead, the fastest presets measured the pipe: `ultrafast` on a
+    // desktop wants raw frames at hundreds of megabytes a second, which no
+    // writer here can supply, and the reading then describes the feeding rather
+    // than the encoder.
+    child.stdout.on("data", (chunk) => {
+      buffered += String(chunk);
+      let newline = buffered.indexOf(NEWLINE);
+      while (newline >= 0) {
+        const line = buffered.slice(0, newline).trim();
+        buffered = buffered.slice(newline + 1);
+        if (line.startsWith("out_time_ms=")) {
+          const outSec = Number(line.slice("out_time_ms=".length)) / 1e6;
+          // `N/A` is not the only way ffmpeg says "no position yet": some builds
+          // print the smallest signed 64-bit integer, which IS finite and would
+          // be taken for a position nine trillion seconds before the start.
+          if (Number.isFinite(outSec) && outSec >= 0) {
+            samples.push({ wallSec: (Date.now() - startedAt) / 1000, outSec });
+          }
+        }
+        newline = buffered.indexOf(NEWLINE);
+      }
+      const slope = slopeOf(samples);
+      if (slope !== null) {
+        finish(slope);
+      }
+    });
+    child.on("error", () => finish(null));
+    // A preset that finished before the window was wide enough is measured from
+    // whatever it did report, provided two reports exist at all.
+    // A preset that finished before the wide window was covered is still
+    // measured — but never over a window of nothing. Two reports a millisecond
+    // apart would divide a frame of video by that millisecond and call the host
+    // twenty times faster than it is, and one such reading becomes the figure
+    // every ladder decision is taken from.
+    child.on("exit", () => finish(slopeOf(samples, ENCODE_BENCHMARK_MIN_WINDOW_SEC)));
+  });
+}
+
+/**
+ * The benchmark's footage as raw frames: the calibration clip, looped to the
+ * benchmark's length and scaled to its size, decoded once.
+ *
+ * @param {string} ffmpegBin
+ * @param {{ info: (m: string) => void, warn: (m: string) => void }} log
+ * @returns {Promise<string | null>} Path to the raw frames, or null.
+ */
+async function decodeToRawFrames(ffmpegBin, log) {
+  // A benchmark may leave a host unmeasured; it may never stop it from
+  // starting. Before this the temp directory was made outside any guard, so a
+  // read-only or missing TMPDIR rejected the promise that starts the proxy.
+  let directory;
+  try {
+    directory = mkdtempSync(path.join(os.tmpdir(), "torrent-tv-bench-"));
+  } catch (error) {
+    log.warn(
+      `hwaccel: no writable temp directory for the preset benchmark (${error instanceof Error ? error.message : String(error)}); ` +
+      "presets unmeasured, so no quality rung will be refused on this host"
+    );
+    return null;
+  }
+  const rawPath = path.join(directory, "frames.yuv");
+  const args = [
+    "-hide_banner", "-loglevel", "error",
+    "-stream_loop", "-1",
+    "-i", path.join(CALIBRATION_DIR, CALIBRATION_CLIPS[0]),
+    "-t", String(BENCHMARK_DURATION_SEC),
+    "-vf", `scale=${BENCHMARK_REF_W}:${BENCHMARK_REF_H},fps=${TRANSCODE_FPS}`,
+    "-an", "-f", "rawvideo", "-pix_fmt", "yuv420p", "-y", rawPath
+  ];
+  const { code } = await runFfmpeg(ffmpegBin, args, 30000);
+  const expectedBytes = BENCHMARK_REF_W * BENCHMARK_REF_H * 1.5 * TRANSCODE_FPS * BENCHMARK_DURATION_SEC;
+  let written = 0;
+  try {
+    written = statSync(rawPath).size;
+  } catch {
+    written = 0;
+  }
+  if (code !== 0 || written < expectedBytes * 0.9) {
+    log.warn(
+      "hwaccel: could not decode the calibration clip for the preset benchmark " +
+      `(${written} of ~${Math.round(expectedBytes)} bytes); presets unmeasured, ` +
+      "so no quality rung will be refused on this host"
+    );
+    try {
+      rmSync(directory, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
+    } catch {
+      // A temp directory the operating system will clear; not worth a start-up.
+    }
+    return null;
+  }
+  return rawPath;
 }
 
 /**
@@ -1118,6 +1346,24 @@ export async function benchmarkSoftwarePresets({ ffmpegBin, logger }) {
  * @param {{ decodeModel?: object | null, source?: { megapixelsPerSecond: number, megabitsPerSecond: number } | null }} [cost]
  * @returns {string}
  */
+/**
+ * What this host can do at its CHEAPEST preset — the ceiling of the ladder.
+ *
+ * Deliberately not the largest reading in the array. The list is in quality
+ * order, so its last measured entry is the cheapest preset; taking the maximum
+ * instead would let one noisy reading of an expensive preset raise the bar that
+ * decides which rungs are offered, and a rung offered on noise is a rung the
+ * host cannot hold. For choosing a preset the direction of that error is
+ * harmless; for deciding what to offer it is not, so the two use different
+ * statistics on purpose.
+ *
+ * @param {Array<{ preset: string, pixelsPerSec: number }>} benchmark
+ * @returns {number}
+ */
+function cheapestPresetPixelsPerSec(benchmark) {
+  return benchmark[benchmark.length - 1]?.pixelsPerSec ?? 0;
+}
+
 export function pickSoftwarePreset(benchmark, pixelsPerSecNeeded, cost = {}) {
   if (!Array.isArray(benchmark) || benchmark.length === 0) {
     return "ultrafast";
@@ -1127,6 +1373,11 @@ export function pickSoftwarePreset(benchmark, pixelsPerSecNeeded, cost = {}) {
     : null;
   const priced = isDecodePriced(cost);
   const bar = priced ? PRESET_SPEED_MARGIN : ENCODE_ONLY_SPEED_MARGIN;
+  // The FIRST entry that clears the bar wins — the list is in quality order, so
+  // that is the best picture this host can hold. Every entry is examined rather
+  // than the walk stopping at the first miss, because the measurements do not
+  // always ascend with the list: on a busy machine on 2026-08-15 `faster` read
+  // below `fast` twice.
   for (const entry of benchmark) {
     const speed = predictedRealtimeSpeed({
       decodeModel: cost.decodeModel ?? null,
@@ -1139,6 +1390,9 @@ export function pickSoftwarePreset(benchmark, pixelsPerSecNeeded, cost = {}) {
       return entry.preset;
     }
   }
+  // Nothing clears the bar: the cheapest preset, which is the last in quality
+  // order. Returning whichever preset measured fastest would hand an expensive
+  // one to a host that has just been shown to hold no rung at all.
   return benchmark[benchmark.length - 1].preset;
 }
 
@@ -1227,7 +1481,7 @@ export function chooseSoftwareEncodeSettings(benchmark, ceiling, outputFps, cost
   if (ladder.length === 0) {
     return null;
   }
-  const fastest = benchmark[benchmark.length - 1].pixelsPerSec; // ultrafast throughput
+  const fastest = cheapestPresetPixelsPerSec(benchmark); // the cheapest preset's throughput
   const bar = isDecodePriced(cost) ? PRESET_SPEED_MARGIN : ENCODE_ONLY_SPEED_MARGIN;
   let chosenIndex = ladder.length - 1; // default: lowest rung (best effort)
   for (let i = 0; i < ladder.length; i += 1) {

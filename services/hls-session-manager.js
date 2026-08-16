@@ -18,7 +18,7 @@ import { spawn } from "node:child_process";
 import { createRequire } from "node:module";
 import { logger } from "../utils/logger.js";
 import { readKeyframeIndex } from "./container-index/index.js";
-import { readMachineState, sampleHost, shareOfMachine } from "./host-load.js";
+import { readMachineState, readProcessCpuSeconds, readSystemCpu, shareOfMachine } from "./host-load.js";
 
 /** Own package version, stamped onto session-start log lines. */
 const PROXY_VERSION = createRequire(import.meta.url)("../package.json").version;
@@ -2665,27 +2665,69 @@ export class HlsSessionManager {
       this.#hostLoadSample = null;
       return;
     }
-    // The busiest single encoder is the one worth naming; the system share
-    // below covers everything else the box is doing.
-    const watched = encoding[0];
-    const sample = await sampleHost(watched.ffmpeg?.pid ?? null);
+    // EVERY encoder, added up. One of them is meaningless on a host that runs a
+    // picture and an audio track at once, and picking the first would have
+    // reported whichever the map happened to hold.
+    // Kept per PROCESS, not as one total. The set changes between readings —
+    // a seek kills ffmpeg and starts another with a new pid whose counter
+    // begins at zero, a session ends, a rendition begins — and subtracting one
+    // total from another across a changed set produces nonsense: a restart
+    // alone would print something like `ffmpeg=-598%`. Only pids present in
+    // BOTH readings are counted, so a process that came or went contributes
+    // nothing rather than a lie.
+    const pids = encoding.map((session) => session.ffmpeg?.pid ?? null).filter((pid) => pid !== null);
+    const [system, ...cpuReadings] = await Promise.all([
+      readSystemCpu(),
+      ...pids.map((pid) => readProcessCpuSeconds(pid))
+    ]);
+    /** @type {Map<number, number>} */
+    const byPid = new Map();
+    pids.forEach((pid, index) => {
+      const seconds = cpuReadings[index];
+      if (seconds !== null) {
+        byPid.set(pid, seconds);
+      }
+    });
+    const sample = { takenAt: Date.now(), byPid, system };
     const previous = this.#hostLoadSample;
     this.#hostLoadSample = sample;
     if (previous === null) {
       return; // the first reading is only something to compare against
     }
-    const share = shareOfMachine(previous, sample);
+    // Summed over the pids both readings hold, so nothing is measured against a
+    // process that was not there before. Unknown stays unknown: on a host with
+    // no `/proc` there are no readings at all, and the share is null rather
+    // than a confident zero.
+    let encoderDelta = null;
+    for (const [pid, seconds] of sample.byPid) {
+      const before = previous.byPid?.get(pid);
+      if (before !== undefined && seconds >= before) {
+        encoderDelta = (encoderDelta ?? 0) + (seconds - before);
+      }
+    }
+    const share = shareOfMachine(
+      { takenAt: previous.takenAt, processCpuSeconds: encoderDelta === null ? null : 0, system: previous.system },
+      { takenAt: sample.takenAt, processCpuSeconds: encoderDelta, system: sample.system }
+    );
     if (share === null) {
       return;
     }
+    // How many of them are stopped by the look-ahead cap. Without this a zero
+    // share reads as an encoder being starved of the machine, when it is an
+    // encoder deliberately not running — which is what the first readings on
+    // the addon host actually were (2026-08-15: `ffmpeg=0% system=24%`, both
+    // encoders suspended, and the speed beside it a stale figure from before
+    // they stopped).
+    const suspended = encoding.filter((session) => session.encoderPaused === true).length;
+    const running = encoding.length - suspended;
     const machine = await readMachineState();
     const asPercent = (value) => (value === null ? "n/a" : `${Math.round(value * 100)}%`);
     logger.info(
       `host-load: ffmpeg=${asPercent(share.processShare)} system=${asPercent(share.systemShare)} ` +
       `iowait=${asPercent(share.iowaitShare)} cpu=${machine.megahertz === null ? "n/a" : `${machine.megahertz}MHz`} ` +
       `temp=${machine.celsius === null ? "n/a" : `${machine.celsius}C`} ` +
-      `encoders=${encoding.length} speed=${watched.progress?.speed ?? "n/a"} ` +
-      `over=${share.elapsedSec.toFixed(1)}s`
+      `encoders=${running} running` + (suspended > 0 ? ` +${suspended} suspended` : "") +
+      ` over=${share.elapsedSec.toFixed(1)}s`
     );
   }
 

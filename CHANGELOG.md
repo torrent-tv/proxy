@@ -1,3 +1,7 @@
+## 2.20.0
+
+- **Fix**: A file's read window is shared between the readers it has, instead of being granted whole to each. The window is stated in seconds of playback and the piece store's memory is one budget for the whole torrent, so a viewer with a picture and a separately published audio track asked for twice what the budget was written against, and a warm-up made it three times. On 2026-08-15 that ended as it had to: every resident piece held at once, a read that returned zero bytes, and every encoder on the file taking that for the end of it. This is the first step of the sliding window, not the whole of it — pieces still leave memory only by the store's own eviction.
+
 ## 2.19.0
 
 - **New**: What the torrent itself costs this machine is measured and charged. Downloading a file, verifying every piece of it and pushing segments down a data channel are work on the same box as the encoder, they scale with the file's own bitrate, and the budget counted none of it — measured on the addon host with every encoder suspended, the machine was still 20-29 % busy. The figure is taken only while NOTHING is encoding, which is the one moment it can be attributed without arithmetic, and it is expressed per megabyte moved so any file's rate can be priced from it. A viewer's file is then charged at its own byte rate when deciding what quality this host can offer.

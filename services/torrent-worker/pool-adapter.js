@@ -120,6 +120,15 @@ export class WorkerTorrentPool {
    * @param {{ resumeAnchorByteStart?: number | null }} [options]
    * @returns {Promise<object | null>}
    */
+  /**
+   * Bytes every torrent here has moved.
+   *
+   * @returns {Promise<{ downloaded: number, uploaded: number }>}
+   */
+  async getTorrentTotals() {
+    return this.#client.getTorrentTotals();
+  }
+
   async getFileStats(torrent, fileIndex = null, options = {}) {
     const sourceKey = torrent?.sourceKey;
     if (!sourceKey) {

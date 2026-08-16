@@ -55,6 +55,8 @@ export const Command = {
   LIST_FILES: "list-files",
   /** Live download figures for the progress display. */
   FILE_STATS: "file-stats",
+  /** Bytes every torrent here has moved, for pricing the torrent's own cost. */
+  TORRENT_TOTALS: "torrent-totals",
   /** Reorder piece selection around a read position (seek prioritisation). */
   PRIORITIZE: "prioritize",
   /** Read a byte range; the body arrives as CHUNK messages. */

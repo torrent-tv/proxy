@@ -1,3 +1,8 @@
+## 2.19.0
+
+- **New**: What the torrent itself costs this machine is measured and charged. Downloading a file, verifying every piece of it and pushing segments down a data channel are work on the same box as the encoder, they scale with the file's own bitrate, and the budget counted none of it — measured on the addon host with every encoder suspended, the machine was still 20-29 % busy. The figure is taken only while NOTHING is encoding, which is the one moment it can be attributed without arithmetic, and it is expressed per megabyte moved so any file's rate can be priced from it. A viewer's file is then charged at its own byte rate when deciding what quality this host can offer.
+- **New**: The host-load line reports the proxy's own share of the machine beside the encoders'. The two answer different questions — whether ffmpeg is getting the cores, and how much of the box goes to everything around it — and only the first was visible.
+
 ## 2.18.0
 
 - **New**: Copying the picture is no longer priced at nothing. It demuxes, re-encodes the audio and writes segments, and it is what runs BESIDE every rung warmed for a quality change — the field measured it at 7.92-8.02x, about an eighth of a second of work per second of video. The figure is not a constant: a session that is copying reports its own speed, and the reciprocal of that IS the cost, learned per file as the decode cost already is (median of recent readings, only from a run past its own start, never from a suspended one).

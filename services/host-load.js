@@ -152,3 +152,23 @@ export async function sampleHost(pid) {
   ]);
   return { takenAt: Date.now(), processCpuSeconds, system };
 }
+
+/**
+ * How much CPU THIS process has used, across every thread it owns.
+ *
+ * The proxy is not only its encoders. It downloads the torrent, verifies every
+ * piece it receives, keeps the piece store, and pushes segments down a data
+ * channel — work that happens in this process and its workers, that scales with
+ * the file's own bitrate, and that the encode budget counts as nothing.
+ * Measured on the addon host with both encoders suspended, the machine was
+ * still 20-29 % busy; this is the number that says how much of that is ours.
+ *
+ * `process.cpuUsage()` covers all threads of the process, so the torrent
+ * worker's hashing is included without asking it anything.
+ *
+ * @returns {number} Seconds of CPU used since this process began.
+ */
+export function readProxyCpuSeconds() {
+  const usage = process.cpuUsage();
+  return (usage.user + usage.system) / 1e6;
+}

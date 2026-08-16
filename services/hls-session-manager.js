@@ -20,6 +20,8 @@ import { logger } from "../utils/logger.js";
 import { readKeyframeIndex } from "./container-index/index.js";
 import { readMachineState, readProcessCpuSeconds, readProxyCpuSeconds, readSystemCpu, shareOfMachine } from "./host-load.js";
 import { speedFromReadings } from "./encoder-readings.js";
+import { ENCODE_RUN_EVENT, ENCODE_RUN_STATE, INITIAL_RUN_STATE, nextState } from "./encode-run-state.js";
+import { ENCODE_EXIT, classifyEncodeExit } from "./encode-exit.js";
 
 /** Own package version, stamped onto session-start log lines. */
 const PROXY_VERSION = createRequire(import.meta.url)("../package.json").version;
@@ -1746,6 +1748,13 @@ export class HlsSessionManager {
       lastAccessedAt: Date.now(),
       ffmpeg: null,
       encodeRunGeneration: 0,
+      // What the ENCODER RUN is doing, as one control state from the table in
+      // `encode-run-state.js`. Written at every event today and read by nothing
+      // yet: a refused pair in the log is the model disagreeing with reality,
+      // and that disagreement is the measurement this release exists to take.
+      // The fields it will replace — `state`, `progress.state`, `encoderPaused`
+      // and the repeated liveness checks — keep their current writes meanwhile.
+      runState: INITIAL_RUN_STATE,
       lastError: "",
       // Cold-start timing: entry timestamp + a once-guard so the first servable
       // segment logs its latency exactly once.
@@ -2600,8 +2609,8 @@ export class HlsSessionManager {
     if (aheadSeconds === null) {
       // The segment the viewer needs does not exist. Whatever else is on disk,
       // this encoder has work to do right now.
-      if (session.encoderPaused) {
-        this.#resumeEncoder(session, "the viewer needs a segment nobody has made");
+      if (session.encoderPaused && this.#resumeEncoder(session, "the viewer needs a segment nobody has made")) {
+        this.#transitionRun(session, ENCODE_RUN_EVENT.RESUME_ORDERED);
       }
       return;
     }
@@ -2643,7 +2652,9 @@ export class HlsSessionManager {
           `${reading.total} segment file(s) present)`
       );
     } else if (session.encoderPaused && aheadSeconds <= LOOKAHEAD_RESUME_SECONDS) {
-      this.#resumeEncoder(session, `${Math.round(aheadSeconds)}s ahead of the viewer`);
+      if (this.#resumeEncoder(session, `${Math.round(aheadSeconds)}s ahead of the viewer`)) {
+        this.#transitionRun(session, ENCODE_RUN_EVENT.RESUME_ORDERED);
+      }
     }
   }
 
@@ -2689,6 +2700,91 @@ export class HlsSessionManager {
   }
 
   /**
+   * Move this session's encoder run to the state the table says an event leads
+   * to, and say so in the log.
+   *
+   * The log line is the point of it. Every transition a real run makes is
+   * printed as state, event and target, so a session can be checked against the
+   * specification after the fact — and a pair the table does not declare prints
+   * as a refusal, which is a cell nobody considered rather than a line nobody
+   * wrote. Five field failures in a row were exactly that.
+   *
+   * Refusing changes nothing and never throws: an event that means nothing here
+   * is ignored, and the caller's own work goes on. The machine this pattern
+   * replaces threw from inside a handler, so a refused transition abandoned the
+   * rest of it and left the app describing a state it was no longer in.
+   *
+   * @param {HlsSession} session
+   * @param {string} event - One of {@link ENCODE_RUN_EVENT}.
+   * @returns {string} The state now in force.
+   */
+  #transitionRun(session, event) {
+    const from = session.runState ?? INITIAL_RUN_STATE;
+    const to = nextState(from, event);
+    if (to === null) {
+      logger.warn(`run-state ${session.id} ${from} + ${event} — no such edge; ignored`);
+      return from;
+    }
+    session.runState = to;
+    logger.info(`run-state ${session.id} ${from} --${event}--> ${to}`);
+    return to;
+  }
+
+  /**
+   * Does this process's exit still say anything about the session?
+   *
+   * Two conditions, and the second is why this is a method rather than a
+   * comparison. A process is not the session's own run once a NEWER one has
+   * been installed — and also once it has been marked for replacement, which
+   * happens BEFORE the replacement exists. Between those two moments the field
+   * still names the doomed process, so comparing against it alone answers
+   * "yes, this is the current run" about a process we have just killed.
+   *
+   * @param {HlsSession} session
+   * @param {import("node:child_process").ChildProcess} ffmpeg
+   * @returns {boolean}
+   */
+  #isCurrentRun(session, ffmpeg) {
+    if (session.ffmpeg !== ffmpeg) {
+      return false;
+    }
+    return session.supersededRuns?.has(ffmpeg) !== true;
+  }
+
+  /**
+   * A segment this run made has just been served.
+   *
+   * The one event whose raising is guarded by the state, and the guard is a
+   * READ of the state rather than a second copy of it: "something has been
+   * produced" is a level, not an edge, so without the guard every served
+   * segment would raise it and the log would fill with refusals.
+   *
+   * Whose file it is decides the rest, and the directory answers that outright:
+   * runs write into one each, and serving searches them newest-first, so a
+   * segment left by an EARLIER run is served routinely. Comparing indices
+   * instead would have been fooled by the ordinary case of a backward seek —
+   * the new run starts at #10, the old one left #50 on disk, and #50 is above
+   * the new run's start index while saying nothing about it.
+   *
+   * @param {HlsSession} session
+   * @param {string} filePath - Where the served segment was actually found.
+   * @returns {void}
+   */
+  #noteRunProducedSegment(session, filePath) {
+    if (session.runState !== ENCODE_RUN_STATE.STARTING) {
+      return;
+    }
+    const runDir = session.runDirPath;
+    if (typeof runDir !== "string" || runDir.length === 0 || typeof filePath !== "string") {
+      return;
+    }
+    if (path.dirname(filePath) !== runDir) {
+      return;
+    }
+    this.#transitionRun(session, ENCODE_RUN_EVENT.FIRST_SEGMENT);
+  }
+
+  /**
    * Suspend a session's encoder. No-op when already paused or unsupported here.
    *
    * @param {HlsSession} session
@@ -2712,6 +2808,7 @@ export class HlsSessionManager {
       return;
     }
     session.encoderPaused = true;
+    this.#transitionRun(session, ENCODE_RUN_EVENT.SUSPEND_ORDERED);
     logger.info(
       `transcode ${session.id} encoder suspended — ${reason} ` +
         `"${session.fileName}"`
@@ -2721,23 +2818,40 @@ export class HlsSessionManager {
   /**
    * Let a suspended encoder run again.
    *
+   * Answers whether a process was actually continued, because three of the four
+   * callers do this in order to KILL it — a suspended process ignores SIGTERM
+   * until it is running — and only the two look-ahead callers mean "carry on".
+   * The run's state is theirs to move; a continue-then-kill is not a resume.
+   *
    * @param {HlsSession} session
    * @param {string} reason
-   * @returns {void}
+   * @returns {boolean} True when a live process was continued.
    */
   #resumeEncoder(session, reason) {
     // Any pair spanning this would count a stopped encoder as slow.
     session.learnSample = null;
     if (!session.encoderPaused || !session.ffmpeg?.pid) {
-      return;
+      return false;
     }
+    let continued = true;
     try {
       process.kill(session.ffmpeg.pid, "SIGCONT");
     } catch {
-      // The process is gone; the exit handler will deal with it.
+      // The process is gone; the exit handler will deal with it. The flag is
+      // cleared either way — but nothing was resumed, and saying so is what
+      // stops a dead run being reported as producing again.
+      continued = false;
     }
     session.encoderPaused = false;
-    logger.info(`transcode ${session.id} encoder resumed — ${reason} "${session.fileName}"`);
+    // Two records of one moment must not contradict each other: a line saying
+    // the encoder resumed, beside a return value saying nothing was resumed, is
+    // the sort of pair that costs an hour of reading a field log.
+    logger.info(
+      continued
+        ? `transcode ${session.id} encoder resumed — ${reason} "${session.fileName}"`
+        : `transcode ${session.id} could not resume the encoder (the process is gone) — ${reason} "${session.fileName}"`
+    );
+    return continued;
   }
 
   /**
@@ -3192,6 +3306,27 @@ export class HlsSessionManager {
     session.behindHeadAsks = new Map();
     const generation = ++session.encodeRunGeneration;
     const previousFfmpeg = session.ffmpeg;
+    // Marked BEFORE it is killed, and this is not a formality.
+    //
+    // The exit handler decides whether an exit belongs to the current run by
+    // comparing against `session.ffmpeg` — and that field still names the
+    // PREVIOUS process here, because the new one is not spawned for another
+    // few hundred lines. So a predecessor killed for a seek passed the identity
+    // check and was handled as though the session's own run had died: exit code
+    // null with a signal, i.e. the "ffmpeg failed" branch. Consequences, in
+    // rising order of cost — a spurious `state = "failed"` for the moment
+    // between the kill and the spawn, which a segment request landing in that
+    // window is answered 500 for; a fast-failure tally against a target that
+    // never failed; and on any host with a hardware encoder, the runtime safety
+    // net firing on every seek: the proxy downgraded itself to libx264 for good
+    // and started an extra run at the OLD index, which then took the generation
+    // and made the real restart abort. The comment further down claiming this
+    // could not happen ("the old process's exit handler no-ops") described an
+    // earlier arrangement where the field was already reassigned.
+    session.supersededRuns ??= new WeakSet();
+    if (previousFfmpeg) {
+      session.supersededRuns.add(previousFfmpeg);
+    }
     // A suspended process does not act on SIGTERM until it is continued, so the
     // wait below would never end. Let it run before asking it to stop.
     this.#resumeEncoder(session, "terminating for a new run");
@@ -3249,11 +3384,13 @@ export class HlsSessionManager {
       ? segmentCutTimesFrom(session.segmentBoundaries, safeIndex)
       : null;
 
-    // Terminate any existing encode process before starting a new one.  The
-    // old process's exit handler no-ops because session.ffmpeg is reassigned
-    // below (it checks identity).
+    // A second chance for a predecessor that survived the escalation above —
+    // the first block is the one that does the work. Its exit is ignored
+    // because it was marked superseded there, not because the field it is
+    // compared against has changed: the spawn is still below this line.
     this.#resumeEncoder(session, "terminating");
     if (session.ffmpeg && !session.ffmpeg.killed) {
+      session.supersededRuns.add(session.ffmpeg);
       try {
         session.ffmpeg.kill("SIGTERM");
       } catch (_error) {
@@ -3470,6 +3607,7 @@ export class HlsSessionManager {
       stdio: ["ignore", "pipe", "pipe"]
     });
     session.ffmpeg = ffmpeg;
+    this.#transitionRun(session, ENCODE_RUN_EVENT.SPAWNED);
     // Whether this run cuts at times we gave it. Decides how a segment is
     // judged finished — see getFileStream.
     session.usesExplicitCuts = Boolean(cutTimes && cutTimes.length > 0);
@@ -3610,25 +3748,42 @@ export class HlsSessionManager {
     });
 
     ffmpeg.on("error", (error) => {
-      if (session.ffmpeg !== ffmpeg) {
+      if (!this.#isCurrentRun(session, ffmpeg)) {
         return;
       }
       session.state = "failed";
       session.lastError = error instanceof Error ? error.message : String(error);
       session.progress.state = "failed";
       session.progress.updatedAt = Date.now();
+      this.#transitionRun(session, ENCODE_RUN_EVENT.EXITED_FAILED);
       logger.error(`ffmpeg ${session.id} process error: ${session.lastError}`);
     });
 
     ffmpeg.on("exit", (code, signal) => {
-      // Ignore the exit of a process that was superseded by a seek-restart.
-      if (session.ffmpeg !== ffmpeg) {
+      // Asked FIRST, before anything is written or read. An exit that belongs
+      // to a replaced run must not touch the session's error, which the viewer
+      // is shown and the next real exit is classified by, and must not send the
+      // handler reading directories on its behalf.
+      if (!this.#isCurrentRun(session, ffmpeg) || session.state === "disposed") {
         return;
       }
-      if (session.state === "disposed") {
+      const producedThrough = code === 0 ? this.#latestProducedSegment(session) : null;
+      const expectedLast = session.segmentCount > 0 ? session.segmentCount - 1 : null;
+      if (!session.lastError && code !== 0) {
+        session.lastError = `ffmpeg exited with code ${code ?? -1}${signal ? ` (signal ${signal})` : ""}`;
+      }
+      // What this exit means is decided in one place, from facts, and the
+      // reasoning behind each answer lives with it in `encode-exit.js`.
+      const outcome = classifyEncodeExit({
+        code,
+        producedThrough,
+        lastSegmentIndex: expectedLast,
+        inputUnavailable: isInputUnavailable(session.lastError)
+      });
+      if (outcome === ENCODE_EXIT.IGNORED) {
         return;
       }
-      if (code === 0) {
+      if (outcome === ENCODE_EXIT.SHORT) {
         // ffmpeg exits 0 both when it reaches the end of the file and when its
         // input simply stops producing bytes — over HTTP the two look identical
         // to it. Field 2026-08-05: the torrent's download died, the read ended,
@@ -3637,35 +3792,41 @@ export class HlsSessionManager {
         // segment nobody was making. So the claim is checked against the
         // playlist we published, and a run that stopped short is a FAILURE that
         // can be restarted, not a finished file.
-        const producedThrough = this.#latestProducedSegment(session);
-        const expectedLast = session.segmentCount > 0 ? session.segmentCount - 1 : null;
-        if (expectedLast !== null && producedThrough !== null && producedThrough < expectedLast) {
-          session.state = "failed";
-          session.progress.state = "failed";
-          session.progress.updatedAt = Date.now();
-          session.lastError =
-            `input ended after segment #${producedThrough} of ${expectedLast} — ` +
-            "the source stopped delivering data";
-          logger.error(
-            `transcode ${session.id} ${session.runLabel ?? "run#?"} encode-run ended early: ` +
-            `${session.lastError} "${session.fileName}"`
-          );
-          return;
-        }
+        session.state = "failed";
+        session.progress.state = "failed";
+        session.progress.updatedAt = Date.now();
+        session.lastError =
+          `input ended after segment #${producedThrough} of ${expectedLast} — ` +
+          "the source stopped delivering data";
+        this.#transitionRun(session, ENCODE_RUN_EVENT.EXITED_SHORT);
+        logger.error(
+          `transcode ${session.id} ${session.runLabel ?? "run#?"} encode-run ended early: ` +
+          `${session.lastError} "${session.fileName}"`
+        );
+        return;
+      }
+      if (outcome === ENCODE_EXIT.COMPLETE) {
         session.state = "ready";
         session.progress.state = "ready";
         session.progress.updatedAt = Date.now();
+        this.#transitionRun(session, ENCODE_RUN_EVENT.EXITED_COMPLETE);
         logger.info(`transcode ${session.id} encode-run complete "${session.fileName}"`);
         return;
-      }
-      if (!session.lastError) {
-        session.lastError = `ffmpeg exited with code ${code ?? -1}${signal ? ` (signal ${signal})` : ""}`;
       }
       // Runtime safety net: if a hardware encode fails, downgrade this proxy to
       // software encoding for all sessions and restart this one, so playback is
       // never permanently broken by a hardware/driver issue.
-      if (session.transcodeVideo && this.videoEncoder.kind !== "software") {
+      //
+      // Asked only of a genuine encoder failure. It used to be asked of every
+      // non-zero exit, so a run whose TORRENT DATA went away — which says
+      // nothing whatever about the encoder — condemned a working NVENC or
+      // QuickSync to software for the life of the process, and started an extra
+      // run at the old index while it was at it.
+      if (outcome === ENCODE_EXIT.FAILED && session.transcodeVideo && this.videoEncoder.kind !== "software") {
         const failedEncoder = this.videoEncoder.name;
+        // The run died before the software one takes its place: the failure is
+        // an event of its own, and the restart below is a separate spawn.
+        this.#transitionRun(session, ENCODE_RUN_EVENT.EXITED_FAILED);
         this.videoEncoder = softwareDescriptor();
         logger.warn(
           `transcode ${session.id} hardware encoder ${failedEncoder} failed ` +
@@ -3707,13 +3868,14 @@ export class HlsSessionManager {
       // the data would have come back in seconds. The circuit breaker below
       // stays for what it was built for, a target that genuinely cannot be
       // encoded; it must not condemn a session whose data merely went away.
-      if (isInputUnavailable(session.lastError)) {
+      if (outcome === ENCODE_EXIT.INPUT_LOST) {
         session.state = "recovering";
         // On the wire it is simply "not ready yet" — a state the browser has
         // always known how to wait through. Only the proxy needs the
         // distinction between waiting for data and having given up.
         session.progress.state = "starting";
         session.progress.updatedAt = Date.now();
+        this.#transitionRun(session, ENCODE_RUN_EVENT.EXITED_INPUT_LOST);
         session.inputRetryCount = (session.inputRetryCount ?? 0) + 1;
         const delayMs = Math.min(
           INPUT_RETRY_MAX_MS,
@@ -3729,6 +3891,7 @@ export class HlsSessionManager {
           if (session.state !== "recovering") {
             return;
           }
+          this.#transitionRun(session, ENCODE_RUN_EVENT.RETRY_DUE);
           const at = Number.isInteger(session.lastRequestedSegment)
             ? session.lastRequestedSegment
             : (session.encodeStartIndex ?? 0);
@@ -3740,6 +3903,7 @@ export class HlsSessionManager {
       session.state = "failed";
       session.progress.state = "failed";
       session.progress.updatedAt = Date.now();
+      this.#transitionRun(session, ENCODE_RUN_EVENT.EXITED_FAILED);
       logger.error(
         `transcode ${session.id} ${session.runLabel ?? "run#?"} encode-run failed: ${session.lastError}`
       );
@@ -5418,7 +5582,12 @@ export class HlsSessionManager {
     // Cleared BEFORE the signal: the exit handler checks identity against this
     // field, so a deliberate stop must not read as a run that failed.
     session.ffmpeg = null;
+    // Only a run that was still going is being STOPPED. The handle outlives the
+    // process — nothing nulls it when a run ends — so a rung that had already
+    // finished or failed reaches here too, and calling that a stop would erase
+    // how it actually ended.
     if (!hasChildExited(ffmpeg)) {
+      this.#transitionRun(session, ENCODE_RUN_EVENT.STOP_ORDERED);
       try {
         ffmpeg.kill("SIGTERM");
       } catch {
@@ -6438,12 +6607,16 @@ export class HlsSessionManager {
           startSeconds: trueStart ?? declaredStart,
           initBytes: session.initBytes ?? null
         });
+        this.#noteRunProducedSegment(session, filePath);
         return {
           kind: "file",
           stream: Readable.from([prepared]),
           contentType: session.segmentFormat.segmentContentType,
           isPlaylist: false
         };
+      }
+      if (!isPlaylist) {
+        this.#noteRunProducedSegment(session, filePath);
       }
       return {
         kind: "file",
@@ -6858,7 +7031,16 @@ export class HlsSessionManager {
     }
 
     this.#resumeEncoder(session, "session disposed");
-    if (session.ffmpeg && !session.ffmpeg.killed) {
+    // Whether the process is still RUNNING, not whether anyone has called kill
+    // on it: `.killed` means only that a signal was sent, and a run that ended
+    // by itself — the file watched through, or a failure — was never killed at
+    // all. Asked the old way, every idle session on disposal signalled a dead
+    // pid and claimed to be stopping a run that had already ended.
+    if (session.ffmpeg && !hasChildExited(session.ffmpeg)) {
+      // The run ends with the session, and the state must say so: left where it
+      // was, it would go on claiming a process that can be signalled and an
+      // input that is being read, about a session that no longer exists.
+      this.#transitionRun(session, ENCODE_RUN_EVENT.STOP_ORDERED);
       session.ffmpeg.kill("SIGTERM");
       await waitForChildExit(session.ffmpeg);
     }

@@ -18,7 +18,7 @@ import { spawn } from "node:child_process";
 import { createRequire } from "node:module";
 import { logger } from "../utils/logger.js";
 import { readKeyframeIndex } from "./container-index/index.js";
-import { readMachineState, readProcessCpuSeconds, readSystemCpu, shareOfMachine } from "./host-load.js";
+import { readMachineState, readProcessCpuSeconds, readProxyCpuSeconds, readSystemCpu, shareOfMachine } from "./host-load.js";
 
 /** Own package version, stamped onto session-start log lines. */
 const PROXY_VERSION = createRequire(import.meta.url)("../package.json").version;
@@ -466,6 +466,8 @@ const DEFAULT_STARTUP_WAIT_MS = 5_000;
 // and restart at the current segment. Conservative so it never thrashes: a long
 // sustained window, a post-action cooldown, a step cap, and no upswitch (v1).
 const BUDGET_CHECK_INTERVAL_MS = 5_000;
+/** Below this, a tick has not moved enough of the torrent to price it. */
+const TORRENT_COST_MIN_MEGABYTES = 2;
 // Speed below this (cumulative ffmpeg average) counts as "slow"; recovery to
 // realtime resets the slow window (hysteresis).
 const BUDGET_SPEED_SLOW = 0.95;
@@ -1161,6 +1163,23 @@ function normalizeLogFileName(fileName, fileIndex) {
  * combination. Sessions are reused across consumers and are automatically
  * expired after {@link HlsSessionManagerOptions.sessionTtlMs} of idle time.
  */
+/**
+ * How many megabytes a second of this source is, from what the probe read.
+ *
+ * A viewer consumes the file at its own rate, so this is also the rate at which
+ * the machine must fetch, verify and deliver it while they watch.
+ *
+ * @param {HlsSession} session
+ * @returns {number | null}
+ */
+function sourceMegabytesPerSecond(session) {
+  const megabitsPerSecond = Number(session.sourceDecode?.megabitsPerSecond);
+  if (!Number.isFinite(megabitsPerSecond) || megabitsPerSecond <= 0) {
+    return null;
+  }
+  return megabitsPerSecond / 8;
+}
+
 export class HlsSessionManager {
   /**
    * Recent times from session-create to a servable first segment, in ms.
@@ -1205,6 +1224,12 @@ export class HlsSessionManager {
   #observedCopyCost = new Map();
   /** The previous reading of the machine, to compare the next one against. */
   #hostLoadSample = null;
+  /** The previous reading taken while nothing was encoding, for the torrent's own cost. */
+  #idleLoadSample = null;
+  /** Seconds of this process's CPU per megabyte the torrent moves, once measured. */
+  #observedTorrentCostPerMegabyte = null;
+  /** @type {number[]} Recent readings behind that median. */
+  #torrentCostReadings = [];
 
   /**
    * @param {HlsSessionManagerOptions} options
@@ -1225,8 +1250,8 @@ export class HlsSessionManager {
     getCachedMediaInfo = null,
     getCachedAudioTracks = null,
     segmentFormatId = undefined,
-    stateDir = ""
-  }) {
+    stateDir = "",
+    getTorrentTotals}) {
     this.enabled = Boolean(enabled);
     this.ffmpegBin = ffmpegBin;
     // Where measurements about this host are kept between runs. Empty means
@@ -1247,6 +1272,10 @@ export class HlsSessionManager {
     // realtime budget to tell a CPU limit from a download-starved input:
     // (sourceKey, fileIndex) => Promise<{ downloadSpeed, fileLength, fileProgress } | null>.
     this.getSourceStats = typeof getSourceStats === "function" ? getSourceStats : null;
+    // Totals across every torrent this proxy holds, used to price what the
+    // torrent itself costs the machine (item 7). Optional: a proxy wired
+    // without it simply never learns that figure.
+    this.getTorrentTotals = typeof getTorrentTotals === "function" ? getTorrentTotals : null;
     // Detected H.264 encoder descriptor (hardware or software). Defaults to
     // software libx264 when no detection result is supplied. May be downgraded
     // to software at runtime if a hardware encode fails.
@@ -2666,14 +2695,85 @@ export class HlsSessionManager {
    * Written only while something is encoding, and only when a reading is
    * available: on a host without `/proc` this says nothing at all.
    */
+  /**
+   * What the torrent itself costs this machine, per megabyte it moves.
+   *
+   * Downloading, verifying every piece and pushing segments down a data channel
+   * are work on the same box as the encoder, they scale with the file's own
+   * bitrate, and the budget counts none of it. Measured on the addon host with
+   * every encoder suspended, the machine was still 20-29 % busy.
+   *
+   * Taken only while NOTHING is encoding, because that is the only moment the
+   * spending can be attributed without arithmetic: what this process uses then
+   * is the torrent's.
+   */
+  async #learnTorrentCost() {
+    const now = {
+      takenAt: Date.now(),
+      cpuSeconds: readProxyCpuSeconds(),
+      bytes: await this.#torrentBytesMoved()
+    };
+    const previous = this.#idleLoadSample;
+    this.#idleLoadSample = now;
+    if (previous === null || now.bytes === null || previous.bytes === null) {
+      return;
+    }
+    const elapsedSec = (now.takenAt - previous.takenAt) / 1000;
+    const megabytes = (now.bytes - previous.bytes) / 1e6;
+    const cpuSeconds = now.cpuSeconds - previous.cpuSeconds;
+    // Enough movement to divide by: a tick with almost nothing downloaded
+    // measures the idle loop, not the torrent.
+    if (!(elapsedSec > 0) || !(megabytes >= TORRENT_COST_MIN_MEGABYTES) || !(cpuSeconds > 0)) {
+      return;
+    }
+    const costPerMegabyte = cpuSeconds / megabytes;
+    const readings = [...this.#torrentCostReadings, costPerMegabyte].slice(-DECODE_LEARNING_READINGS);
+    this.#torrentCostReadings = readings;
+    const sorted = [...readings].sort((left, right) => left - right);
+    const median = sorted[Math.floor(sorted.length / 2)];
+    if (this.#observedTorrentCostPerMegabyte !== null &&
+        Math.abs(median - this.#observedTorrentCostPerMegabyte) / this.#observedTorrentCostPerMegabyte < DECODE_LEARNING_CHANGE) {
+      return;
+    }
+    this.#observedTorrentCostPerMegabyte = median;
+    logger.info(
+      `host-load: the torrent costs ${(median * 1000).toFixed(1)}ms of CPU per MB on this host ` +
+      `(median of ${readings.length}, latest ${(costPerMegabyte * 1000).toFixed(1)}ms over ${megabytes.toFixed(1)}MB)`
+    );
+  }
+
+  /**
+   * Bytes this proxy's torrents have moved in total, or null when it cannot be
+   * asked.
+   *
+   * @returns {Promise<number | null>}
+   */
+  async #torrentBytesMoved() {
+    if (typeof this.getTorrentTotals !== "function") {
+      return null;
+    }
+    try {
+      const totals = await this.getTorrentTotals();
+      const moved = Number(totals?.bytesMoved);
+      return Number.isFinite(moved) ? moved : null;
+    } catch {
+      return null; // the pool is busy or gone; a reading missed is not a fault
+    }
+  }
+
   async #reportHostLoad() {
     const encoding = [...this.sessionsById.values()].filter(
       (session) => session?.ffmpeg != null && !hasChildExited(session.ffmpeg) && session.state !== "disposed"
     );
     if (encoding.length === 0) {
+      // Nothing is encoding, which is the ONLY moment the torrent's own cost
+      // can be attributed cleanly: whatever this process spends now is the
+      // download, the hashing, the piece store and the delivery. Item 7.
+      await this.#learnTorrentCost();
       this.#hostLoadSample = null;
       return;
     }
+    this.#idleLoadSample = null;
     // EVERY encoder, added up. One of them is meaningless on a host that runs a
     // picture and an audio track at once, and picking the first would have
     // reported whichever the map happened to hold.
@@ -2697,7 +2797,16 @@ export class HlsSessionManager {
         byPid.set(pid, seconds);
       }
     });
-    const sample = { takenAt: Date.now(), byPid, system };
+    const sample = {
+      takenAt: Date.now(),
+      byPid,
+      system,
+      // The proxy's own CPU, across every thread: the torrent, the hashing, the
+      // piece store and the delivery. None of it is in the encode budget, and
+      // on the addon host it is most of what the machine does while encoders
+      // are suspended.
+      proxyCpuSeconds: readProxyCpuSeconds()
+    };
     const previous = this.#hostLoadSample;
     this.#hostLoadSample = sample;
     if (previous === null) {
@@ -2731,8 +2840,13 @@ export class HlsSessionManager {
     const running = encoding.length - suspended;
     const machine = await readMachineState();
     const asPercent = (value) => (value === null ? "n/a" : `${Math.round(value * 100)}%`);
+    const cores = Math.max(1, os.cpus().length);
+    const proxyShare = Number.isFinite(previous.proxyCpuSeconds)
+      ? (sample.proxyCpuSeconds - previous.proxyCpuSeconds) / (share.elapsedSec * cores)
+      : null;
     logger.info(
-      `host-load: ffmpeg=${asPercent(share.processShare)} system=${asPercent(share.systemShare)} ` +
+      `host-load: ffmpeg=${asPercent(share.processShare)} proxy=${asPercent(proxyShare)} ` +
+      `system=${asPercent(share.systemShare)} ` +
       `iowait=${asPercent(share.iowaitShare)} cpu=${machine.megahertz === null ? "n/a" : `${machine.megahertz}MHz`} ` +
       `temp=${machine.celsius === null ? "n/a" : `${machine.celsius}C`} ` +
       `encoders=${running} running` + (suspended > 0 ? ` +${suspended} suspended` : "") +
@@ -4883,11 +4997,22 @@ export class HlsSessionManager {
    * @returns {number}
    */
   #committedCostOf(session) {
-    if (session.transcodeVideo === true) {
-      return 0;
+    let cost = 0;
+    if (session.transcodeVideo !== true) {
+      const observed = this.#observedCopyCost.get(`${session.sourceKey}:${session.fileIndex}`);
+      cost += observed && observed.costSec > 0 ? observed.costSec : 0;
     }
-    const observed = this.#observedCopyCost.get(`${session.sourceKey}:${session.fileIndex}`);
-    return observed && observed.costSec > 0 ? observed.costSec : 0;
+    // And what the FILE costs simply by being fetched and delivered while it is
+    // watched: a viewer consumes it at its own byte rate, and every one of
+    // those bytes is downloaded, verified and pushed by this process. Priced
+    // per megabyte from readings taken while nothing was encoding, so the two
+    // measurements do not contain each other.
+    const perMegabyte = this.#observedTorrentCostPerMegabyte;
+    const megabytesPerSecond = sourceMegabytesPerSecond(session);
+    if (perMegabyte !== null && megabytesPerSecond !== null) {
+      cost += perMegabyte * megabytesPerSecond;
+    }
+    return cost;
   }
 
   #sustainableHeights({

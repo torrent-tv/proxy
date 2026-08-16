@@ -152,6 +152,17 @@ export async function startProxyServer({ host, port, transcodeAudio, ffmpegBin, 
     stateDir,
     // Live download stats accessor for the realtime budget: lets it tell a
     // CPU-bound transcode from a download-starved input before downscaling.
+    // What every torrent here has moved, so the proxy can price its own
+    // downloading, hashing and delivery against the machine (roadmap item 7).
+    getTorrentTotals: async () => {
+      let bytesMoved = 0;
+      for (const torrent of torrentPool.client?.torrents ?? []) {
+        const downloaded = Number(torrent?.downloaded);
+        const uploaded = Number(torrent?.uploaded);
+        bytesMoved += (Number.isFinite(downloaded) ? downloaded : 0) + (Number.isFinite(uploaded) ? uploaded : 0);
+      }
+      return { bytesMoved };
+    },
     getSourceStats: async (sourceKey, fileIndex) => {
       const record = sourceRegistry.get(sourceKey);
       if (!record) {

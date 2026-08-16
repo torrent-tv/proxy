@@ -1,3 +1,7 @@
+## 2.21.1
+
+- **Fix**: A cost is learned only from an encoder that had the machine to itself. Beside another encoder a reading already contains that other work, and the budget then ADDS the same work again when it predicts — so the price of a file grew with every reading. Measured in the field 2026-08-15: copying, whose truth is 7.9x, was learned as 2.03x; decoding, whose calibration clips say 2.6x, as 0.87x. Every re-encoded rung was then refused (`not offering 720p=0.56x … 240p=0.66x`), the offer collapsed to the one copied height, and the viewer lost the quality menu entirely.
+
 ## 2.21.0
 
 - **Fix**: The two costs added in 2.18.0 and 2.19.0 were never measured in production — both features were inert. The torrent's cost read `torrentPool.client`, a field that belongs to the pool implementation that no longer runs on this thread (the WebTorrent client lives on the worker), so the byte totals were always zero and the guard that needs two megabytes of movement never passed. The copy's cost sat in a branch its only caller had already filtered out, so it never ran. The totals now come from the worker over its own protocol, and the caller admits a copying session.

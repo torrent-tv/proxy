@@ -124,20 +124,14 @@ export async function startProxyServer({ host, port, transcodeAudio, ffmpegBin, 
   // For software libx264, benchmark preset throughput once at startup so the
   // session manager can pick the highest-quality preset that still encodes each
   // stream faster than realtime. Hardware encoders use their own fixed preset.
-  const softwarePresetBenchmark = videoEncoder?.kind === "software"
-    ? await benchmarkSoftwarePresets({ ffmpegBin, logger })
-    : null;
-  // A re-encode pays for decoding as well, and the preset benchmark measures
-  // only the encoder — which is how a rung this host runs at 0.39x came to be
-  // offered as if it cleared realtime 2.5× over (measured 2026-08-14). Solve
-  // the decode cost from the bundled calibration clips once at startup; every
-  // source is then priced from figures the probe already has.
-  // Only the software path can read it: the budget and the ladder both bail
-  // on a missing preset benchmark, and that is only produced for libx264. A
-  // host with a hardware encoder would pay three decodes at every start for a
-  // figure nothing would ever ask for.
+  // The decode model first, and the preset benchmark second — they are
+  // independent now (the presets are timed on raw frames), but the order costs
+  // nothing and keeps the two figures side by side in the log.
   const decodeCostModel = videoEncoder?.kind === "software"
     ? await benchmarkDecodeCost({ ffmpegBin, logger })
+    : null;
+  const softwarePresetBenchmark = videoEncoder?.kind === "software"
+    ? await benchmarkSoftwarePresets({ ffmpegBin, logger })
     : null;
   // Whether this ffmpeg build can tone-map HDR→SDR (zscale + tonemap filters).
   // Detected once; the session manager applies the tonemap chain only for HDR

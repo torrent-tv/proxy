@@ -1,3 +1,7 @@
+## 2.16.0
+
+- **New**: While an encoder runs, one line every five seconds says what the MACHINE is doing: the share of it ffmpeg is getting, the share everything else is taking, the share spent waiting on a disk, the CPU's current clock and its temperature. The budget predicts a rung from benchmarks taken at startup on an idle box, and on 2026-08-15 it predicted 1.83x for a rung that then ran at 0.90-0.999x with nothing else encoding — and no log anywhere could say which of the candidate reasons it was. Now the reading exists: an encoder starved of cores, a machine that has dropped its clock or grown hot, and work around the encode that nobody counted all look different in this line. Linux-only and best effort — a host without `/proc` writes nothing and nothing else changes.
+
 ## 2.15.3
 
 - **Fix**: A magnet whose swarm never answered no longer poisons the film for good. It leaves a torrent with the right infohash and no file list, and WebTorrent then refuses the same film opened from a `.torrent` as a duplicate — so the answer to every later attempt came from the entry that knows nothing: `Proxy playback plan request failed (404): File index was not found in torrent`, reproduced in a browser 2026-08-15, and no reload could clear it because the useless entry outlives them all. A source that carries the metadata now replaces one that lacks it.

@@ -4750,6 +4750,9 @@ export class HlsSessionManager {
       heights: ordered,
       ownHeight: own,
       playingHeight: playing,
+      // What each rung was actually seen doing in this session, which is the
+      // only thing a live reading may speak for.
+      measuredHeights: this.#measuredRungSpeeds(owner),
       // What the family is already spending while a rung is considered. The
       // picture being COPIED is the common case and used to be priced at
       // nothing; measured, it is about an eighth of the machine.
@@ -4759,7 +4762,18 @@ export class HlsSessionManager {
       fps: Number(owner.outputFps) || TRANSCODE_FPS,
       source: owner.sourceDecode ?? null,
       transcodeVideo: owner.transcodeVideo === true,
-      observedDecodeCostSec: observed?.costSec ?? null
+      // NOT the learned cost. What a rung is OFFERED on is the startup
+      // measurement, which is taken on a quiet machine against known clips and
+      // does not move; the figure learned from a live session moves with
+      // whatever else the box was doing at that second, and three field
+      // sessions in a row (2026-08-15) show what that costs: 0.87x, then
+      // 1.34-1.57x against calibration's 2.6x, each reading refusing another
+      // rung until the offer held one height and the menu disappeared with it.
+      //
+      // The learned figure keeps its job — but only over the rung it was
+      // measured ON, and only to take that one away (below). A measurement of
+      // one rung is not a prediction about the others.
+      observedDecodeCostSec: null
     });
     if (owner !== session) {
       // An orphan: its base is gone, so this is the family's last word and
@@ -4896,6 +4910,10 @@ export class HlsSessionManager {
     if (this.#runningEncoders() > 1) {
       return;
     }
+    // What this rung did with the machine to itself — the one figure a live
+    // reading is authority on, and what withdraws a rung that has been seen
+    // failing without letting it speak for rungs nobody has run.
+    session.lastAloneSpeed = speed;
     if (speed < BUDGET_SPEED_OK && await this.#classifyTranscodeBound(session) === "download") {
       return; // the torrent is what is short; this says nothing about the host
     }
@@ -5158,6 +5176,32 @@ export class HlsSessionManager {
     return cost;
   }
 
+  /**
+   * The speed each rung of this family was last seen running at, when it was
+   * running alone.
+   *
+   * A rung that has been watched failing is refused on that evidence; a rung
+   * nobody has run says nothing about itself and is judged by the startup
+   * measurement like any other.
+   *
+   * @param {HlsSession} base
+   * @returns {Map<number, number>}
+   */
+  #measuredRungSpeeds(base) {
+    /** @type {Map<number, number>} */
+    const speeds = new Map();
+    for (const session of this.#familyOf(base)) {
+      if (session.transcodeVideo !== true || !Number.isFinite(session.lastAloneSpeed)) {
+        continue;
+      }
+      const height = this.variantHeightOf(session);
+      if (height > 0) {
+        speeds.set(height, session.lastAloneSpeed);
+      }
+    }
+    return speeds;
+  }
+
   #sustainableHeights({
     heights,
     ownHeight,
@@ -5168,7 +5212,8 @@ export class HlsSessionManager {
     source,
     transcodeVideo,
     observedDecodeCostSec = null,
-    concurrentCostSec = 0
+    concurrentCostSec = 0,
+    measuredHeights = null
   }) {
     const benchmark = this.softwarePresetBenchmark;
     if (!Array.isArray(benchmark) || benchmark.length === 0 || sourceHeight <= 0 || sourceWidth <= 0) {
@@ -5198,6 +5243,14 @@ export class HlsSessionManager {
         (height === sourceHeight && !transcodeVideo)
       ) {
         kept.push(height);
+        continue;
+      }
+      // A rung this session has actually been seen running below realtime is
+      // withdrawn on that evidence, whatever the prediction says. This is the
+      // one thing a live reading is authority on: itself.
+      const measured = measuredHeights?.get(height) ?? null;
+      if (measured !== null && measured < 1) {
+        dropped.push(`${height}p=${measured.toFixed(2)}x measured`);
         continue;
       }
       const width = Math.round(((sourceWidth / sourceHeight) * height) / 2) * 2;

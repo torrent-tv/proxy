@@ -1,3 +1,8 @@
+## 2.22.0
+
+- **Fix**: What a rung is OFFERED on is the startup measurement again, not the figure learned from a live session. The startup one is taken on a quiet machine against known clips and does not move; the learned one moves with whatever else the box was doing that second, and three field sessions in a row show the price of that: decoding learned at 0.87x, then at 1.34-1.57x, against calibration's 2.6x — each reading refusing another rung until the offer held a single height and the quality menu vanished with it.
+- **New**: A live reading keeps the one thing it is authority on — itself. A rung that has actually been seen running below realtime, with the machine to itself, is withdrawn on that evidence whatever any prediction says. A rung nobody has run is judged by the startup measurement like any other, because a measurement of one rung is not a prediction about the rest.
+
 ## 2.21.1
 
 - **Fix**: A cost is learned only from an encoder that had the machine to itself. Beside another encoder a reading already contains that other work, and the budget then ADDS the same work again when it predicts — so the price of a file grew with every reading. Measured in the field 2026-08-15: copying, whose truth is 7.9x, was learned as 2.03x; decoding, whose calibration clips say 2.6x, as 0.87x. Every re-encoded rung was then refused (`not offering 720p=0.56x … 240p=0.66x`), the offer collapsed to the one copied height, and the viewer lost the quality menu entirely.

@@ -1,3 +1,7 @@
+## 2.22.1
+
+- **Fix**: What the torrent costs this machine can actually be measured now. The reading is taken when no encoder is RUNNING, and a SUSPENDED encoder was being counted as one — so on a host with two sessions parked by the look-ahead cap the moment never arrived: measured 2026-08-15, four minutes of `encoders=0 running +2 suspended` in which the price could have been taken and was not. A suspended encoder costs nothing, which is exactly why that moment is the right one.
+
 ## 2.22.0
 
 - **Fix**: What a rung is OFFERED on is the startup measurement again, not the figure learned from a live session. The startup one is taken on a quiet machine against known clips and does not move; the learned one moves with whatever else the box was doing that second, and three field sessions in a row show the price of that: decoding learned at 0.87x, then at 1.34-1.57x, against calibration's 2.6x — each reading refusing another rung until the offer held a single height and the quality menu vanished with it.

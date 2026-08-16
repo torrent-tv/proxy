@@ -2833,10 +2833,13 @@ export class HlsSessionManager {
     const encoding = [...this.sessionsById.values()].filter(
       (session) => session?.ffmpeg != null && !hasChildExited(session.ffmpeg) && session.state !== "disposed"
     );
-    if (encoding.length === 0) {
-      // Nothing is encoding, which is the ONLY moment the torrent's own cost
-      // can be attributed cleanly: whatever this process spends now is the
-      // download, the hashing, the piece store and the delivery. Item 7.
+    const runningNow = encoding.filter((session) => session.encoderPaused !== true);
+    if (runningNow.length === 0) {
+      // No encoder is RUNNING. A suspended one costs nothing, and counting it
+      // as work meant this was never reached: measured 2026-08-15, four minutes
+      // in which every encoder was suspended, the torrent's price could have
+      // been taken, and none was. What this process spends now is the download,
+      // the verification, the piece store and the delivery. Item 7.
       await this.#learnTorrentCost();
       this.#hostLoadSample = null;
       return;

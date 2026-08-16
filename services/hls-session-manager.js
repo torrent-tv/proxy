@@ -1194,6 +1194,15 @@ export class HlsSessionManager {
    * @type {Map<string, { costSec: number, version: number }>}
    */
   #observedDecodeCost = new Map();
+  /**
+   * What copying costs, per source file, learned the same way: `key ->
+   * { costSec, readings, version }`. A copy is what runs BESIDE a rung being
+   * warmed, and pricing it at nothing is what let a host be told it had a whole
+   * machine for the rung.
+   *
+   * @type {Map<string, { costSec: number, readings: number[], version: number }>}
+   */
+  #observedCopyCost = new Map();
   /** The previous reading of the machine, to compare the next one against. */
   #hostLoadSample = null;
 
@@ -4549,6 +4558,10 @@ export class HlsSessionManager {
       heights: ordered,
       ownHeight: own,
       playingHeight: playing,
+      // What the family is already spending while a rung is considered. The
+      // picture being COPIED is the common case and used to be priced at
+      // nothing; measured, it is about an eighth of the machine.
+      concurrentCostSec: this.#committedCostOf(owner),
       sourceWidth: Number(owner.sourceWidth) || 0,
       sourceHeight: Math.round(Number(owner.sourceHeight) || 0),
       fps: Number(owner.outputFps) || TRANSCODE_FPS,
@@ -4648,9 +4661,76 @@ export class HlsSessionManager {
     this.#learnDecodeCost(session, speed);
   }
 
+  /**
+   * What COPYING this file costs on this host, learned from a session that is
+   * doing it: seconds of work per second of video.
+   *
+   * A copy is not free. It demuxes, it re-encodes the audio, it writes
+   * segments, and it runs BESIDE every rung warmed for a quality change — so a
+   * budget that prices it at nothing predicts a machine that does not exist.
+   * The figure is the reciprocal of the speed the session reports, which is the
+   * measurement itself rather than a model of it.
+   *
+   * Median of recent readings, taken only from a run past its own start, for
+   * the same reasons as the decode cost beside it.
+   *
+   * @param {HlsSession} session
+   * @param {number} speed
+   */
+  async #learnCopyCost(session, speed) {
+    const runStartedAt = Number(session.encodeRunStartedAt);
+    if (!Number.isFinite(runStartedAt) || Date.now() - runStartedAt < DECODE_LEARNING_SETTLE_MS) {
+      return;
+    }
+    if (session.encoderPaused === true) {
+      return; // a suspended run reports a cumulative figure that is decaying
+    }
+    // Always asked, not only below realtime. A re-encode near 1x may be the
+    // host; a COPY near 1x is a copy waiting for the torrent, because copying
+    // is what a machine does at eight times realtime — and a starved reading
+    // filed as the price of copying would refuse rungs on the download's
+    // account.
+    if (await this.#classifyTranscodeBound(session) === "download") {
+      return;
+    }
+    const costSec = 1 / speed;
+    if (!(costSec > 0) || !Number.isFinite(costSec)) {
+      return;
+    }
+    const key = `${session.sourceKey}:${session.fileIndex}`;
+    const known = this.#observedCopyCost.get(key);
+    const readings = [...(known?.readings ?? []), costSec].slice(-DECODE_LEARNING_READINGS);
+    const sorted = [...readings].sort((left, right) => left - right);
+    const median = sorted[Math.floor(sorted.length / 2)];
+    if (known && Math.abs(median - known.costSec) / known.costSec < DECODE_LEARNING_CHANGE) {
+      this.#observedCopyCost.set(key, { ...known, readings });
+      return;
+    }
+    this.#observedCopyCost.set(key, { costSec: median, readings, version: (known?.version ?? 0) + 1 });
+    logger.info(
+      `transcode: ${session.fileName} copies at ${(1 / median).toFixed(2)}x on this host ` +
+        `(median of ${readings.length}, latest ${speed.toFixed(2)}x)`
+    );
+  }
+
   #learnDecodeCost(session, speed) {
-    if (session.transcodeVideo !== true || !(speed > 0)) {
-      return; // a copied video decodes nothing, so it says nothing about decoding
+    if (!(speed > 0)) {
+      return;
+    }
+    if (session.transcodeVideo !== true) {
+      // A copied video decodes nothing, so it says nothing about DECODING —
+      // but it says exactly what COPYING costs, which the budget has been
+      // treating as free. Field 2026-08-15: a copy ran at 7.92-8.02x, i.e.
+      // about an eighth of a second of work per second of video, while a rung
+      // warmed beside it needed the rest of the machine.
+      //
+      // An audio rendition also carries no video, and its speed is the cost of
+      // encoding a soundtrack — a different quantity that must not be filed
+      // under what copying the picture costs.
+      if (session.audioOnly !== true) {
+        void this.#learnCopyCost(session, speed);
+      }
+      return;
     }
     const runStartedAt = Number(session.encodeRunStartedAt);
     if (!Number.isFinite(runStartedAt) || Date.now() - runStartedAt < DECODE_LEARNING_SETTLE_MS) {
@@ -4788,6 +4868,28 @@ export class HlsSessionManager {
    * @param {{ heights: number[], ownHeight: number, sourceWidth: number, sourceHeight: number, fps: number, source: { megapixelsPerSecond: number, megabitsPerSecond: number } | null, transcodeVideo: boolean }} params
    * @returns {number[]}
    */
+  /**
+   * Seconds of work per second of video this family is ALREADY committed to,
+   * beside any rung being considered.
+   *
+   * Today that is the copy of the picture, where the video is copied and its
+   * cost has been observed. An encoded picture is not added: a viewer changing
+   * quality leaves the rung they are on, so the two do not overlap for long,
+   * and the warm-up that does overlap is bounded by the switch. An audio
+   * rendition is not added either, until its cost is measured the same way —
+   * counting it at a guess would refuse rungs on arithmetic nobody took.
+   *
+   * @param {HlsSession} session
+   * @returns {number}
+   */
+  #committedCostOf(session) {
+    if (session.transcodeVideo === true) {
+      return 0;
+    }
+    const observed = this.#observedCopyCost.get(`${session.sourceKey}:${session.fileIndex}`);
+    return observed && observed.costSec > 0 ? observed.costSec : 0;
+  }
+
   #sustainableHeights({
     heights,
     ownHeight,
@@ -4797,7 +4899,8 @@ export class HlsSessionManager {
     fps,
     source,
     transcodeVideo,
-    observedDecodeCostSec = null
+    observedDecodeCostSec = null,
+    concurrentCostSec = 0
   }) {
     const benchmark = this.softwarePresetBenchmark;
     if (!Array.isArray(benchmark) || benchmark.length === 0 || sourceHeight <= 0 || sourceWidth <= 0) {
@@ -4835,7 +4938,8 @@ export class HlsSessionManager {
         decodeModel: this.decodeCostModel,
         source,
         outputPixelsPerSec: width * height * fps,
-        observedDecodeCostSec
+        observedDecodeCostSec,
+        concurrentCostSec
       });
       if (sustainable) {
         kept.push(height);

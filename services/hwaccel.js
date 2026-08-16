@@ -1054,7 +1054,8 @@ export function canSustainOutput({
   decodeModel = null,
   source = null,
   outputPixelsPerSec,
-  observedDecodeCostSec = null
+  observedDecodeCostSec = null,
+  concurrentCostSec = 0
 }) {
   if (!Array.isArray(benchmark) || benchmark.length === 0) {
     // Nothing measured on this host: the budget cannot refuse what it cannot
@@ -1070,13 +1071,28 @@ export function canSustainOutput({
     // term the ladder is offered whole, exactly as it was before.
     return { speed: null, sustainable: true };
   }
-  const speed = predictedRealtimeSpeed({
+  const alone = predictedRealtimeSpeed({
     decodeModel,
     encodePixelsPerSec: cheapestPresetPixelsPerSec(benchmark),
     outputPixelsPerSec,
     source,
     observedDecodeCostSec: observed
   });
+  // What ELSE will be running while this rung is. A rung is never the only
+  // thing on the machine: the picture it accompanies is being copied or
+  // encoded, an audio track may have its own encoder, and a warm-up is two
+  // encoders by design. Measured on the addon host, a copy alone takes about an
+  // eighth of the machine per second of video, and the field case of
+  // 2026-08-15 adds up exactly: 0.125 for the copy plus ~1.05 for the rung is
+  // more than the one second per second the machine has, which is what was
+  // observed.
+  //
+  // Zero when nothing else is known to be running, or when nothing has been
+  // measured yet — then this is a LOWER bound on the cost and the check is as
+  // permissive as it was before.
+  const speed = alone === null || !(concurrentCostSec > 0)
+    ? alone
+    : 1 / (1 / alone + concurrentCostSec);
   if (speed === null) {
     return { speed: null, sustainable: true };
   }

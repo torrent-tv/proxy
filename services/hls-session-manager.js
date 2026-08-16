@@ -18,6 +18,7 @@ import { spawn } from "node:child_process";
 import { createRequire } from "node:module";
 import { logger } from "../utils/logger.js";
 import { readKeyframeIndex } from "./container-index/index.js";
+import { readMachineState, sampleHost, shareOfMachine } from "./host-load.js";
 
 /** Own package version, stamped onto session-start log lines. */
 const PROXY_VERSION = createRequire(import.meta.url)("../package.json").version;
@@ -1193,6 +1194,8 @@ export class HlsSessionManager {
    * @type {Map<string, { costSec: number, version: number }>}
    */
   #observedDecodeCost = new Map();
+  /** The previous reading of the machine, to compare the next one against. */
+  #hostLoadSample = null;
 
   /**
    * @param {HlsSessionManagerOptions} options
@@ -2641,7 +2644,53 @@ export class HlsSessionManager {
     logger.info(`transcode ${session.id} encoder resumed — ${reason} "${session.fileName}"`);
   }
 
+  /**
+   * One line per interval about the MACHINE, while an encoder is running on it.
+   *
+   * The budget predicts a rung from benchmarks taken at startup on an idle box,
+   * and on 2026-08-15 it predicted 1.83x for a rung that ran at 0.90-0.999x
+   * with nothing else encoding. Every candidate explanation is measurable — the
+   * encoder not getting the cores, the machine having dropped its clock or
+   * grown hot, the work around the encode costing more than anyone counted —
+   * and none of them was being measured, so the gap could only be argued about.
+   *
+   * Written only while something is encoding, and only when a reading is
+   * available: on a host without `/proc` this says nothing at all.
+   */
+  async #reportHostLoad() {
+    const encoding = [...this.sessionsById.values()].filter(
+      (session) => session?.ffmpeg != null && !hasChildExited(session.ffmpeg) && session.state !== "disposed"
+    );
+    if (encoding.length === 0) {
+      this.#hostLoadSample = null;
+      return;
+    }
+    // The busiest single encoder is the one worth naming; the system share
+    // below covers everything else the box is doing.
+    const watched = encoding[0];
+    const sample = await sampleHost(watched.ffmpeg?.pid ?? null);
+    const previous = this.#hostLoadSample;
+    this.#hostLoadSample = sample;
+    if (previous === null) {
+      return; // the first reading is only something to compare against
+    }
+    const share = shareOfMachine(previous, sample);
+    if (share === null) {
+      return;
+    }
+    const machine = await readMachineState();
+    const asPercent = (value) => (value === null ? "n/a" : `${Math.round(value * 100)}%`);
+    logger.info(
+      `host-load: ffmpeg=${asPercent(share.processShare)} system=${asPercent(share.systemShare)} ` +
+      `iowait=${asPercent(share.iowaitShare)} cpu=${machine.megahertz === null ? "n/a" : `${machine.megahertz}MHz`} ` +
+      `temp=${machine.celsius === null ? "n/a" : `${machine.celsius}C`} ` +
+      `encoders=${encoding.length} speed=${watched.progress?.speed ?? "n/a"} ` +
+      `over=${share.elapsedSec.toFixed(1)}s`
+    );
+  }
+
   async #enforceRealtimeBudget() {
+    void this.#reportHostLoad();
     if (this.videoEncoder?.kind !== "software") {
       return;
     }

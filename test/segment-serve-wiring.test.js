@@ -171,7 +171,7 @@ test("serving a segment records what its real start says about the container's i
 });
 
 test("a segment that exists is served, not reported as still being produced", async (t) => {
-  const { manager, dirPath } = await managerWithReadySegment();
+  const { manager, dirPath, session } = await managerWithReadySegment();
   t.after(async () => {
     await manager.disposeAll();
     await rm(dirPath, { recursive: true, force: true });
@@ -189,12 +189,26 @@ test("a segment that exists is served, not reported as still being produced", as
   const served = Buffer.concat(chunks);
   assert.equal(served.toString("latin1", 4, 8), "moof", "the init header must be stripped off a media segment");
 
-  // The position the PIECE states, carried into the fragment it belongs to.
-  // Reading it is the step that threw in 2.9.124.
+  // Where the PLAYLIST the player holds puts this segment — which is what the
+  // fragment must be stamped with whenever the piece's own position is further
+  // away than a player will bridge. This fixture's piece says 12.5 s while the
+  // playlist says 0, and stamping the piece's figure is what killed a film on
+  // 2026-08-17: the browser asked for two segments 1908 times each over ten
+  // minutes, each served in 4 ms, because a fragment landing 2.5 s from where
+  // it was expected is not recognised as buffered. Reading the piece's own
+  // position still happens — it is the step that threw in 2.9.124, it feeds the
+  // index tally and it corrects the grid for rungs made later — it just no
+  // longer contradicts the timeline the player was sent. See
+  // test/published-timeline.test.js for the rule itself.
   assert.equal(
     Number(served.readBigUInt64BE(served.indexOf("tfdt") + 8)),
-    Math.round(SEGMENT_START_SECONDS * VIDEO_TIMESCALE),
-    "the segment must be stamped with where it really begins"
+    0,
+    "the segment must be stamped where the playlist the player holds says it begins"
+  );
+  assert.equal(
+    session.indexCheck.checked,
+    1,
+    "and the piece's own position must still have been read, or nothing measures the index"
   );
 });
 

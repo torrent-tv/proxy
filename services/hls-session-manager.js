@@ -1178,6 +1178,7 @@ function normalizeLogFileName(fileName, fileIndex) {
  * @param {number | null} fileLengthBytes
  * @returns {number | null}
  */
+
 function sourceMegabytesPerSecond(session, fileLengthBytes) {
   // The FILE's rate, not the video stream's. What the torrent moves is the
   // container: on the releases this serves, two or three AC-3 tracks add 10-25 %
@@ -1190,6 +1191,29 @@ function sourceMegabytesPerSecond(session, fileLengthBytes) {
     return fileLength / durationSeconds / 1e6;
   }
   return null;
+}
+
+/**
+ * Which cost a speed reading from this session is a measurement OF.
+ *
+ * Three encodes share one reading path and price three different things: a
+ * soundtrack published on its own, a picture being re-encoded (whose reading
+ * prices this source's DECODING, the encode half being known from the startup
+ * benchmark), and a picture being copied (which prices copying).
+ *
+ * Exported because the routing is where the fault was: a rendition was refused
+ * a reading by one guard while the call that would have priced it sat behind
+ * another, so the soundtrack was charged at nothing no matter how long it ran.
+ * A pure function makes that a test rather than a field session.
+ *
+ * @param {{ audioOnly?: boolean, transcodeVideo?: boolean }} session
+ * @returns {"audio" | "decode" | "copy"}
+ */
+export function costKindForSession(session) {
+  if (session?.audioOnly === true) {
+    return "audio";
+  }
+  return session?.transcodeVideo === true ? "decode" : "copy";
 }
 
 export class HlsSessionManager {
@@ -1234,6 +1258,28 @@ export class HlsSessionManager {
    * @type {Map<string, { costSec: number, readings: number[], version: number }>}
    */
   #observedCopyCost = new Map();
+
+  /**
+   * What encoding one audio TRACK of one file costs this host, in seconds of
+   * work per second of video. Keyed by source, file and track, because two
+   * tracks of one film are not the same encode: a 5.1 AC-3 dub and a stereo
+   * AAC original decode and mix differently.
+   *
+   * Measured exactly as the copy's price is — from an audio-only session's own
+   * reported speed, past its start, alone on the machine, and never while the
+   * torrent is what is short.
+   *
+   * @type {Map<string, { costSec: number, readings: number[], version: number }>}
+   */
+  #observedAudioCost = new Map();
+
+  /**
+   * The last "not offering" line written, so the same one is not written again.
+   * See the end of {@link HlsSessionManager##sustainableHeights}.
+   *
+   * @type {string}
+   */
+  #lastOfferLine = "";
   /** The previous reading of the machine, to compare the next one against. */
   #hostLoadSample = null;
   /** The previous reading taken while nothing was encoding, for the torrent's own cost. */
@@ -3197,6 +3243,12 @@ export class HlsSessionManager {
     session.budgetSlowSince = 0;
     session.encodeWidth = rung.width;
     session.encodeHeight = rung.height;
+    // What this session was last seen doing described the encode it is no
+    // longer running. Kept, it prices the new, cheaper picture at the old one's
+    // cost, and it keeps the step it was measured on withdrawn from the offer
+    // although nothing is producing that step any more. The next reading of the
+    // new encode replaces it.
+    session.lastAloneSpeed = null;
     // Priced the same way the offer and the starting rung are. Choosing the
     // preset on the encoder alone treats decoding as free, which is how the
     // check and the encode came to disagree in the first place — and here it
@@ -4775,6 +4827,19 @@ export class HlsSessionManager {
           }
         }
       }
+      // The soundtracks published separately. They are encoders of this family
+      // exactly as the quality steps are — one runs for as long as the picture
+      // does — and they were reachable only through `audioRenditionSessions`,
+      // which nothing here walked. So a family never contained one, and every
+      // sum taken over the family priced the soundtrack at nothing.
+      if (root.audioRenditionSessions instanceof Map) {
+        for (const renditionId of root.audioRenditionSessions.values()) {
+          const rendition = this.sessionsById.get(renditionId);
+          if (rendition) {
+            family.add(rendition);
+          }
+        }
+      }
     }
     return [...family];
   }
@@ -4897,7 +4962,43 @@ export class HlsSessionManager {
     // never moves at all, so the cache would never be recomputed.
     const copyVersion = this.#observedCopyCost.get(`${owner.sourceKey}:${owner.fileIndex}`)?.version ?? 0;
     const torrentCost = this.#observedTorrentCostPerMegabyte ?? 0;
-    const version = `${observed?.version ?? 0}:${playing}:${copyVersion}:${torrentCost.toFixed(6)}`;
+    // The soundtrack's price is an input too, and so is how many encoders of
+    // this family are running: both move the answer, and an answer cached
+    // across them is the stale menu this key exists to prevent.
+    const audioVersion = [...this.#familyOf(owner)]
+      .filter((member) => member.audioOnly === true)
+      .map((member) => this.#observedAudioCost.get(this.#audioCostKey(member))?.version ?? 0)
+      .reduce((total, one) => total + one, 0);
+    const running = [...this.#familyOf(owner)]
+      .filter((member) => member.ffmpeg != null && !hasChildExited(member.ffmpeg)).length;
+    // What each running encode was last seen doing, which is BOTH an input to
+    // the answer twice over — it withdraws a step measured below realtime, and
+    // it prices every running picture in the committed total — and a figure
+    // rewritten every five seconds. Left out of the key, the menu could be
+    // pinned to what was computed before anything had been measured: on a
+    // COPIED picture the decode version never moves at all, so nothing else in
+    // the key would ever have recomputed it.
+    // Encoded for the DECISIONS it feeds, not as a raw figure. Two of them: is
+    // this encode below realtime (which withdraws its own step outright), and
+    // what does it cost (which is charged against every other step). A raw
+    // speed at two decimals moves on nearly every five-second reading, so the
+    // menu would be recomputed — and its "not offering" line written — for the
+    // whole film; while rounding alone would hide the 0.995-1.005 crossing,
+    // which is exactly the band a step spends its time in when the host is
+    // marginal. The flag carries the crossing, the rounded cost carries the
+    // rest.
+    const measured = this.#familyOf(owner)
+      .map((member) => {
+        const speed = member.lastAloneSpeed;
+        if (!Number.isFinite(speed) || !(speed > 0)) {
+          return "-";
+        }
+        return `${speed < 1 ? "slow" : "ok"}${(1 / speed).toFixed(2)}`;
+      })
+      .join(",");
+    const version =
+      `${observed?.version ?? 0}:${playing}:${copyVersion}:${torrentCost.toFixed(6)}:` +
+      `${audioVersion}:${running}:${measured}`;
     if (Array.isArray(owner.offeredHeightsCache) && owner.offeredHeightsVersion === version) {
       return owner.offeredHeightsCache;
     }
@@ -4924,6 +5025,9 @@ export class HlsSessionManager {
       // picture being COPIED is the common case and used to be priced at
       // nothing; measured, it is about an eighth of the machine.
       concurrentCostSec: this.#committedCostOf(owner),
+      // So a height already being produced is not charged for itself when it is
+      // judged. See the subtraction in #sustainableHeights.
+      runningCostByHeight: this.#runningCostByHeight(owner),
       sourceWidth: Number(owner.sourceWidth) || 0,
       sourceHeight: Math.round(Number(owner.sourceHeight) || 0),
       fps: Number(owner.outputFps) || TRANSCODE_FPS,
@@ -5038,13 +5142,8 @@ export class HlsSessionManager {
       session.state === "disposed" ||
       session.state === "failed" ||
       !session.ffmpeg ||
-      session.encoderPaused === true ||
-      session.audioOnly === true
+      session.encoderPaused === true
     ) {
-      // An audio rendition is excluded because its speed is the price of a
-      // soundtrack, which neither decoding nor copying the picture is. A COPY
-      // is NOT excluded any more: it says what copying costs, and that used to
-      // be counted as nothing.
       session.learnSample = null;
       return;
     }
@@ -5067,24 +5166,60 @@ export class HlsSessionManager {
     if (speed === null) {
       return;
     }
-    // Only while this encoder had the machine to itself. A reading taken beside
-    // another encoder already contains that other work — and the budget then
-    // ADDS the same work again when it predicts, so the cost is counted twice
-    // and grows with every reading. Measured 2026-08-15 in the field: copying,
-    // whose truth is 7.9x, was learned as 2.03x, and decoding, whose clips say
-    // 2.6x, as 0.87x. Every rung was then refused, the offer collapsed to the
-    // one copied height, and the viewer lost the quality menu altogether.
+    const kind = costKindForSession(session);
+    // A reading taken beside another encoder contains that other encoder's
+    // work, and the budget ADDS the same work again when it predicts — so filed
+    // as it stands the price is counted twice and grows with every reading.
+    // Measured 2026-08-15 in the field: copying, whose truth is 7.9x, was
+    // learned as 2.03x, and decoding, whose clips say 2.6x, as 0.87x. Every
+    // step was then refused, the offer collapsed to the one copied height, and
+    // the viewer lost the quality menu altogether.
+    //
+    // For a picture the answer is to wait for a moment alone, which comes often
+    // enough. For a SOUNDTRACK it never comes: a rendition runs for exactly as
+    // long as the picture it accompanies, so "alone" is a state it is never in,
+    // and the price stayed unmeasured for ever — the hole this was meant to
+    // close. Its share is instead recovered by subtracting what the machine is
+    // already known to be spending, which is the same arithmetic that recovers
+    // this source's decoding from a running encoder, and it is only done when
+    // every other running encode HAS a price. Otherwise the unpriced work would
+    // land in the soundtrack's account and refuse steps on it.
+    let othersCostSec = 0;
     if (this.#runningEncoders() > 1) {
-      return;
+      if (kind !== "audio") {
+        return;
+      }
+      const others = this.#pricedConcurrentCost(session);
+      if (others === null) {
+        return; // something running has no price; nothing can be attributed
+      }
+      othersCostSec = others;
     }
-    // What this rung did with the machine to itself — the one figure a live
-    // reading is authority on, and what withdraws a rung that has been seen
-    // failing without letting it speak for rungs nobody has run.
-    session.lastAloneSpeed = speed;
     if (speed < BUDGET_SPEED_OK && await this.#classifyTranscodeBound(session) === "download") {
       return; // the torrent is what is short; this says nothing about the host
     }
-    if (session.transcodeVideo === true) {
+    // What this encode did with the machine to itself — the one figure a live
+    // reading is authority on, and what withdraws a quality step that has been
+    // seen failing without letting it speak for steps nobody has run.
+    //
+    // Recorded only AFTER the download-bound check, and that order is the whole
+    // point: a run starved of torrent data reports a speed that measures the
+    // swarm. Stored first, as it was, that figure became this encode's price —
+    // 0.3x reads as 3.33 s of work per second of video, more than the machine
+    // has — and every other quality step was refused on the download's account.
+    session.lastAloneSpeed = speed;
+    if (kind === "audio") {
+      // What is left after the work that was already accounted for. `null` when
+      // the subtraction leaves nothing positive, which means the reading says
+      // less than the noise in it.
+      const ownCostSec = 1 / speed - othersCostSec;
+      if (!(ownCostSec > 0) || !Number.isFinite(ownCostSec)) {
+        return;
+      }
+      await this.#learnAudioCost(session, 1 / ownCostSec);
+      return;
+    }
+    if (kind === "decode") {
       this.#learnDecodeCost(session, speed);
       return;
     }
@@ -5143,23 +5278,70 @@ export class HlsSessionManager {
     );
   }
 
+  /**
+   * What this file's audio track costs to encode on this host.
+   *
+   * A rendition is a second encoder, running for as long as the picture does,
+   * and the budget counted it at nothing — which is half of what roadmap item 6
+   * was left owing. It is small beside a picture, and small is not zero: on a
+   * host where a rung needs almost the whole machine, a soundtrack is the
+   * difference between offering it and refusing it.
+   *
+   * Same rules as {@link #learnCopyCost}, for the same reasons: past the run's
+   * own start, never suspended, never while the torrent is what is short.
+   *
+   * @param {HlsSession} session
+   * @param {number} speed
+   */
+  async #learnAudioCost(session, speed) {
+    const runStartedAt = Number(session.encodeRunStartedAt);
+    if (!Number.isFinite(runStartedAt) || Date.now() - runStartedAt < DECODE_LEARNING_SETTLE_MS) {
+      return;
+    }
+    if (session.encoderPaused === true) {
+      return;
+    }
+    if (await this.#classifyTranscodeBound(session) === "download") {
+      return;
+    }
+    const costSec = 1 / speed;
+    if (!(costSec > 0) || !Number.isFinite(costSec)) {
+      return;
+    }
+    const key = this.#audioCostKey(session);
+    const known = this.#observedAudioCost.get(key);
+    const readings = [...(known?.readings ?? []), costSec].slice(-DECODE_LEARNING_READINGS);
+    const sorted = [...readings].sort((left, right) => left - right);
+    const median = sorted[Math.floor(sorted.length / 2)];
+    if (known && Math.abs(median - known.costSec) / known.costSec < DECODE_LEARNING_CHANGE) {
+      this.#observedAudioCost.set(key, { ...known, readings });
+      return;
+    }
+    this.#observedAudioCost.set(key, { costSec: median, readings, version: (known?.version ?? 0) + 1 });
+    logger.info(
+      `transcode: ${session.fileName} encodes audio track ${session.audioTrackIndex ?? 0} at ` +
+        `${(1 / median).toFixed(2)}x on this host (median of ${readings.length}, latest ${speed.toFixed(2)}x)`
+    );
+  }
+
+  /**
+   * @param {HlsSession} session
+   * @returns {string}
+   */
+  #audioCostKey(session) {
+    return `${session.sourceKey}:${session.fileIndex}:${session.audioTrackIndex ?? 0}`;
+  }
+
   #learnDecodeCost(session, speed) {
     if (!(speed > 0)) {
       return;
     }
     if (session.transcodeVideo !== true) {
-      // A copied video decodes nothing, so it says nothing about DECODING —
-      // but it says exactly what COPYING costs, which the budget has been
-      // treating as free. Field 2026-08-15: a copy ran at 7.92-8.02x, i.e.
-      // about an eighth of a second of work per second of video, while a rung
-      // warmed beside it needed the rest of the machine.
-      //
-      // An audio rendition also carries no video, and its speed is the cost of
-      // encoding a soundtrack — a different quantity that must not be filed
-      // under what copying the picture costs.
-      if (session.audioOnly !== true) {
-        void this.#learnCopyCost(session, speed);
-      }
+      // Nothing to learn about decoding here, and nothing else either: the
+      // caller routes a copy to #learnCopyCost and a rendition to
+      // #learnAudioCost before this is ever reached. Routing them from here as
+      // well put both calls behind a guard the caller had already made
+      // (`transcodeVideo === true`), so neither could run.
       return;
     }
     const runStartedAt = Number(session.encodeRunStartedAt);
@@ -5308,24 +5490,177 @@ export class HlsSessionManager {
    * @returns {number[]}
    */
   /**
+   * What a running re-encode of the picture costs, in seconds of work per
+   * second of video.
+   *
+   * Measured first: `lastAloneSpeed` is what this very rung did with the
+   * machine to itself. Failing that, the encode model that decides every rung —
+   * the same benchmark, the same decode term — applied to this rung's own pixel
+   * rate. There is no third answer: a rung whose cost cannot be derived at all
+   * contributes nothing rather than a number somebody invented.
+   *
+   * @param {HlsSession} session
+   * @returns {number}
+   */
+  #pictureCostOf(session) {
+    if (Number.isFinite(session.lastAloneSpeed) && session.lastAloneSpeed > 0) {
+      return 1 / session.lastAloneSpeed;
+    }
+    const benchmark = this.softwarePresetBenchmark;
+    const width = Number(session.encodeWidth) || 0;
+    const height = Number(session.encodeHeight) || 0;
+    const fps = Number(session.outputFps) || TRANSCODE_FPS;
+    if (!Array.isArray(benchmark) || benchmark.length === 0 || width <= 0 || height <= 0) {
+      return 0;
+    }
+    const { speed } = canSustainOutput({
+      benchmark,
+      decodeModel: this.decodeCostModel,
+      source: session.sourceDecode ?? null,
+      outputPixelsPerSec: width * height * fps,
+      observedDecodeCostSec: null,
+      concurrentCostSec: 0
+    });
+    return Number.isFinite(speed) && speed > 0 ? 1 / speed : 0;
+  }
+
+  /**
+   * What everything OTHER than this session is costing right now, or null when
+   * any of it is unpriced.
+   *
+   * Used to recover a soundtrack's own share from a reading taken beside the
+   * picture — the only kind of reading a rendition ever gives, since it runs
+   * exactly as long as the picture does. Refusing to answer when something
+   * running has no price is the point: unpriced work would otherwise be
+   * attributed to the soundtrack, and an overpriced soundtrack refuses quality
+   * steps the host could actually hold.
+   *
+   * @param {HlsSession} session
+   * @returns {number | null}
+   */
+  #pricedConcurrentCost(session) {
+    let cost = 0;
+    for (const member of this.#familyOf(session)) {
+      if (member === session || member.ffmpeg == null || hasChildExited(member.ffmpeg)) {
+        continue;
+      }
+      if (member.audioOnly === true) {
+        const audio = this.#observedAudioCost.get(this.#audioCostKey(member));
+        if (!audio || !(audio.costSec > 0)) {
+          return null;
+        }
+        cost += audio.costSec;
+        continue;
+      }
+      if (member.transcodeVideo !== true) {
+        const copy = this.#observedCopyCost.get(`${member.sourceKey}:${member.fileIndex}`);
+        if (!copy || !(copy.costSec > 0)) {
+          return null;
+        }
+        cost += copy.costSec;
+        continue;
+      }
+      const picture = this.#pictureCostOf(member);
+      if (!(picture > 0)) {
+        return null;
+      }
+      cost += picture;
+    }
+    // Encoders outside this family are counted by number only — there is no
+    // price to look up for another film's session — so a reading taken while
+    // one is running cannot be attributed either.
+    return this.#runningEncoders() > this.#familyOf(session).filter(
+      (member) => member.ffmpeg != null && !hasChildExited(member.ffmpeg)
+    ).length
+      ? null
+      : cost;
+  }
+
+  /**
+   * What each height of this family is costing RIGHT NOW, for the heights an
+   * encoder is actually running at.
+   *
+   * Exists so a height can be judged against what the machine spends on
+   * everything else — a step being warmed is running while it is judged, and
+   * charged its own cost it refuses itself.
+   *
+   * @param {HlsSession} session
+   * @returns {Map<number, number>}
+   */
+  #runningCostByHeight(session) {
+    /** @type {Map<number, number>} */
+    const byHeight = new Map();
+    for (const member of this.#familyOf(session)) {
+      if (member.audioOnly === true || member.transcodeVideo !== true) {
+        continue;
+      }
+      if (member.ffmpeg == null || hasChildExited(member.ffmpeg)) {
+        continue;
+      }
+      const height = this.variantHeightOf(member);
+      if (height > 0) {
+        byHeight.set(height, (byHeight.get(height) ?? 0) + this.#pictureCostOf(member));
+      }
+    }
+    return byHeight;
+  }
+
+  /**
    * Seconds of work per second of video this family is ALREADY committed to,
    * beside any rung being considered.
    *
-   * Today that is the copy of the picture, where the video is copied and its
-   * cost has been observed. An encoded picture is not added: a viewer changing
-   * quality leaves the rung they are on, so the two do not overlap for long,
-   * and the warm-up that does overlap is bounded by the switch. An audio
-   * rendition is not added either, until its cost is measured the same way —
-   * counting it at a guess would refuse rungs on arithmetic nobody took.
+   * Every encoder of the family that is actually running: the picture, whether
+   * it is copied or re-encoded, and each audio rendition. The rung the viewer
+   * is watching and the source's own copied height are never withdrawn by the
+   * caller, so charging for the encoder that serves them cannot strand anyone —
+   * what it does is stop the NEXT rung being offered as though the machine were
+   * idle, which is what the field disproved on 2026-08-15.
+   *
+   * Anything whose cost is neither measured nor derivable contributes nothing.
+   * A guess here would refuse rungs on arithmetic nobody performed.
    *
    * @param {HlsSession} session
    * @returns {number}
    */
   #committedCostOf(session) {
     let cost = 0;
-    if (session.transcodeVideo !== true) {
-      const observed = this.#observedCopyCost.get(`${session.sourceKey}:${session.fileIndex}`);
-      cost += observed && observed.costSec > 0 ? observed.costSec : 0;
+    for (const member of this.#familyOf(session)) {
+      // Only what still HAS an encoder. A quality step the viewer left keeps
+      // its session and its segments but not a process, and it produces nothing
+      // for anybody — charging the machine for it would refuse steps on work
+      // nobody is doing.
+      //
+      // A SUSPENDED encoder is charged, deliberately, and this is not the same
+      // question. The unit here is seconds of work per second of VIDEO, not per
+      // second of wall clock: a copy running at 8x costs 0.125 s/s whether it
+      // is producing right now or parked by the look-ahead cap, because over an
+      // hour of watching it still produces an hour of video. Suspension is how
+      // that cost is spread, not a discount on it — and pricing a parked
+      // encoder at zero would offer a step on the strength of a pause that ends
+      // the moment the viewer catches up.
+      if (member.ffmpeg == null || hasChildExited(member.ffmpeg)) {
+        continue;
+      }
+      if (member.audioOnly === true) {
+        // A soundtrack encoder, priced from its own measured speed. Nothing is
+        // charged for a track nobody has measured: a guess here refuses rungs
+        // on arithmetic no one performed.
+        const audio = this.#observedAudioCost.get(this.#audioCostKey(member));
+        cost += audio && audio.costSec > 0 ? audio.costSec : 0;
+        continue;
+      }
+      if (member.transcodeVideo !== true) {
+        const observed = this.#observedCopyCost.get(`${member.sourceKey}:${member.fileIndex}`);
+        cost += observed && observed.costSec > 0 ? observed.costSec : 0;
+        continue;
+      }
+      // A picture being RE-ENCODED beside the rung being judged — the warm-up
+      // that makes a quality switch seamless is two encoders by design, and
+      // that overlap is exactly where the field measured 0.504x on a rung
+      // predicted at 1.58x (2026-08-15). Priced by what it has been SEEN doing
+      // when it had the machine to itself, and otherwise by the same model that
+      // judges every rung — which is a prediction, not a guess.
+      cost += this.#pictureCostOf(member);
     }
     // And what the FILE costs simply by being fetched and delivered while it is
     // watched: a viewer consumes it at its own byte rate, and every one of
@@ -5380,6 +5715,7 @@ export class HlsSessionManager {
     transcodeVideo,
     observedDecodeCostSec = null,
     concurrentCostSec = 0,
+    runningCostByHeight = null,
     measuredHeights = null
   }) {
     const benchmark = this.softwarePresetBenchmark;
@@ -5421,13 +5757,24 @@ export class HlsSessionManager {
         continue;
       }
       const width = Math.round(((sourceWidth / sourceHeight) * height) / 2) * 2;
+      // What the machine is spending on everything EXCEPT this height. A step
+      // being warmed for a switch is already running while it is judged, so its
+      // own cost is inside the committed total — and charged against itself it
+      // is counted twice. Measured against the field figures of 2026-08-15
+      // that is 1.83x against 1.03x: below the margin, so the step the viewer
+      // had just asked for was dropped from the offer by the act of warming it,
+      // and its next segment answered 404 on a stream that was playing.
+      const concurrentBesideThis = Math.max(
+        0,
+        concurrentCostSec - (runningCostByHeight?.get(height) ?? 0)
+      );
       const { speed, sustainable } = canSustainOutput({
         benchmark,
         decodeModel: this.decodeCostModel,
         source,
         outputPixelsPerSec: width * height * fps,
         observedDecodeCostSec,
-        concurrentCostSec
+        concurrentCostSec: concurrentBesideThis
       });
       if (sustainable) {
         kept.push(height);
@@ -5435,11 +5782,21 @@ export class HlsSessionManager {
       }
       dropped.push(`${height}p=${speed === null ? "n/a" : `${speed.toFixed(2)}x`}`);
     }
+    // Written when the ANSWER changes, not when the answer is recomputed. This
+    // is asked on the path that serves every playlist, init and segment, and
+    // the figures behind it move every five seconds — so an unconditional line
+    // here is roughly seven hundred identical lines an hour into a forwarder
+    // that holds five hundred, which buries whatever is worth reading.
     if (dropped.length > 0) {
-      logger.info(
+      const line =
         `transcode: not offering ${dropped.join(" ")} — below realtime × ${REALTIME_SPEED_MARGIN} ` +
-          `(offering ${kept.map((height) => `${height}p`).join(" ")})`
-      );
+        `(offering ${kept.map((height) => `${height}p`).join(" ")})`;
+      if (line !== this.#lastOfferLine) {
+        this.#lastOfferLine = line;
+        logger.info(line);
+      }
+    } else {
+      this.#lastOfferLine = "";
     }
     return kept;
   }

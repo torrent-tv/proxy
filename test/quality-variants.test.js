@@ -15,7 +15,7 @@ import assert from "node:assert/strict";
 import { mkdtemp, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { computeSegmentBoundaries, HlsSessionManager } from "../services/hls-session-manager.js";
+import { computeSegmentBoundaries, costKindForSession, HlsSessionManager } from "../services/hls-session-manager.js";
 import { fmp4Format } from "../services/segment-formats/fmp4.js";
 
 const BASE_ID = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
@@ -734,5 +734,71 @@ test("an audio track is prepared at the position the switch will land on", async
     rendition.seekTarget,
     59,
     "and the track is pointed at the switch position, one back for the preceding keyframe"
+  );
+});
+
+test("a reading from a soundtrack is priced as one", () => {
+  // The fault this pins: an audio rendition reached no learner at all. One
+  // guard refused renditions a reading, and the only call that would have
+  // priced one sat behind a second guard its caller had already made — so a
+  // soundtrack ran for the whole film and was charged at nothing, which is the
+  // half of roadmap item 6 that was left owing.
+  assert.equal(costKindForSession({ audioOnly: true, transcodeVideo: false }), "audio");
+  assert.equal(
+    costKindForSession({ audioOnly: true, transcodeVideo: true }),
+    "audio",
+    "a rendition carries no picture, whatever the flag it inherited says"
+  );
+  assert.equal(costKindForSession({ transcodeVideo: true }), "decode");
+  assert.equal(costKindForSession({ transcodeVideo: false }), "copy");
+});
+
+test("a quality step being warmed is not refused by its own cost", async (t) => {
+  const dirPath = await mkdtemp(path.join(os.tmpdir(), "warm-cost-"));
+  // The addon host's own figures, so the arithmetic below is the field's and
+  // not an invention. Without a benchmark the check returns every height
+  // untouched and a test over it would pass while proving nothing.
+  const manager = new HlsSessionManager({
+    enabled: true,
+    ffmpegBin: "ffmpeg",
+    localBindHost: "127.0.0.1",
+    localPort: 9090,
+    softwarePresetBenchmark: [
+      { preset: "fast", pixelsPerSec: 17.0e6 },
+      { preset: "ultrafast", pixelsPerSec: 67.5e6 }
+    ],
+    decodeCostModel: { pixelTerm: 0.007742, bitrateTerm: 0, constantTerm: 0 }
+  });
+  t.after(async () => {
+    await manager.disposeAll();
+    await rm(dirPath, { recursive: true, force: true });
+  });
+  // A copied 1080p picture, and a 240p step warmed beside it for a switch —
+  // which is what every quality change does, two encoders on purpose.
+  const base = fakeSession({ id: BASE_ID, encodeHeight: 0, dirPath, transcodeVideo: false });
+  base.variantHeight = 1080;
+  // What this source costs to decode — 1080p24 at 8 Mbit/s, the field file.
+  // Without it nothing can be priced and every height comes back offerable for
+  // want of a measurement, which would make the assertion hold for the wrong
+  // reason.
+  base.sourceDecode = { megapixelsPerSecond: (1920 * 1080 * 24) / 1e6, megabitsPerSecond: 8 };
+  const warming = fakeSession({ id: VARIANT_ID, encodeHeight: 240, dirPath });
+  warming.variantHeight = 240;
+  warming.sourceDecode = base.sourceDecode;
+  base.variants = new Map([[240, VARIANT_ID]]);
+  warming.variantBases = new Set([BASE_ID]);
+  // Running, and running well: it says of itself that it holds twice realtime,
+  // i.e. half a second of work per second of video.
+  warming.ffmpeg = fakeEncoder();
+  warming.lastAloneSpeed = 2;
+  manager.sessionsById.set(BASE_ID, base);
+  manager.sessionsById.set(VARIANT_ID, warming);
+
+  const offered = manager.offeredHeights(base);
+
+  assert.ok(
+    offered.includes(240),
+    "charged its own cost while being judged, the step the viewer just asked for is dropped from the " +
+      "offer by the act of warming it — and its next segment 404s on a stream that is playing"
   );
 });

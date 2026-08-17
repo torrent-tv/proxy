@@ -21,6 +21,7 @@ import { readKeyframeIndex } from "./container-index/index.js";
 import { readMachineState, readProcessCpuSeconds, readProxyCpuSeconds, readSystemCpu, shareOfMachine } from "./host-load.js";
 import { speedFromReadings } from "./encoder-readings.js";
 import { availableShareFrom, correctForAvailability } from "./available-share.js";
+import { contentionPenalty } from "./contention.js";
 import { minimumBufferFrom } from "./supply-margin.js";
 import {
   ENCODE_RUN_EVENT,
@@ -1372,6 +1373,10 @@ export class HlsSessionManager {
     softwarePresetBenchmark = null,
     decodeCostModel = null,
     getSourceStats = null,
+    // What a second job costs on this host, measured at startup. Null when it
+    // could not be measured, and then nothing is corrected — the alternative
+    // is inventing a penalty, which is the same fault as inventing a fill rate.
+    contentionPenalties = null,
     tonemapSupported = false,
     getCachedMediaInfo = null,
     getCachedAudioTracks = null,
@@ -1398,6 +1403,7 @@ export class HlsSessionManager {
     // realtime budget to tell a CPU limit from a download-starved input:
     // (sourceKey, fileIndex) => Promise<{ downloadSpeed, fileLength, fileProgress } | null>.
     this.getSourceStats = typeof getSourceStats === "function" ? getSourceStats : null;
+    this.contentionPenalties = contentionPenalties instanceof Map ? contentionPenalties : null;
     // Totals across every torrent this proxy holds, used to price what the
     // torrent itself costs the machine (item 7). Optional: a proxy wired
     // without it simply never learns that figure.
@@ -2916,6 +2922,26 @@ export class HlsSessionManager {
    * @param {string} event - One of {@link ENCODE_RUN_EVENT}.
    * @returns {string} The state now in force.
    */
+  /**
+   * How many of this proxy's encoders are running right now.
+   *
+   * Suspended runs are not counted: a process stopped by the look-ahead cap
+   * competes for nothing, and counting it would price a machine as busier than
+   * it is — the same distinction the host-load line had to learn (2026-08-15,
+   * `ffmpeg=0% system=24%` with both encoders parked).
+   *
+   * @returns {number}
+   */
+  #encodersRunningNow() {
+    let running = 0;
+    for (const session of this.sessionsById.values()) {
+      if (session.runState === ENCODE_RUN_STATE.STARTING || session.runState === ENCODE_RUN_STATE.PRODUCING) {
+        running += 1;
+      }
+    }
+    return running;
+  }
+
   #transitionRun(session, event) {
     const from = session.runState ?? INITIAL_RUN_STATE;
     const to = nextState(from, event);
@@ -6074,7 +6100,19 @@ export class HlsSessionManager {
       // quarter of it unattributed. Only the unattributed part is charged
       // here: our own encoders are already in `concurrentBesideThis` and the
       // proxy's own work is already priced per megabyte moved.
-      const onThisMachine = correctForAvailability(speed, this.hostAvailability);
+      // Two corrections, and they are different facts about the machine. The
+      // availability share removes work nobody has been charged for; the
+      // contention penalty says what OUR OWN second job costs, because the
+      // budget adds independent prices and this host does not behave that way
+      // — the same work measured 2.6× dearer beside one encoder and 3.7×
+      // beside two (2026-08-18). `concurrentBesideThis` already counts what is
+      // committed; this multiplies by how badly running at all together goes.
+      const othersRunning = concurrentBesideThis > 0 ? this.#encodersRunningNow() : 0;
+      const { penalty } = contentionPenalty(othersRunning, this.contentionPenalties);
+      const onThisMachine = correctForAvailability(
+        speed === null ? null : speed / penalty,
+        this.hostAvailability
+      );
       // Kept against the step's own session, so that when it runs the field
       // says what the prediction was worth. Without this the only comparison
       // available is between two figures written minutes apart in different

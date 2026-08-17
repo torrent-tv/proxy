@@ -23,6 +23,7 @@
 import { findSharedStore } from "../piece-store/shared-piece-store.js";
 import { logger } from "../../utils/logger.js";
 import { askFastestWiresFor, canPlaceRequests } from "./fastest-wires.js";
+import { minimumBufferFrom, requiredSpeedFrom } from "../supply-margin.js";
 
 /** Only waits at least this long are reported; sequential reading stays silent. */
 const PIECE_WAIT_LOG_MS = 1_000;
@@ -304,6 +305,77 @@ function whenPieceReady(torrent, index, cancellation) {
  *   the media's byte rate should size it in seconds of playback instead.
  * @returns {AsyncGenerator<PieceFragment>}
  */
+/**
+ * The last interruptions this file's readers met, newest last.
+ *
+ * Bounded and per file, because both figures derived from it describe THIS
+ * file on THIS swarm: a piece is 8 MiB here and 512 KiB elsewhere, and a swarm
+ * that answers in 200 ms today may not tomorrow. Nothing is stored beyond the
+ * process — a restart starts from no evidence, which is the honest state.
+ *
+ * @type {Map<string, Array<{ waitedMs: number, at: number }>>}
+ */
+const supplyWaits = new Map();
+
+/** How many interruptions are kept per file. */
+const SUPPLY_WAIT_HISTORY = 40;
+
+/** How often the derived figures are printed, at most. */
+const SUPPLY_REPORT_INTERVAL_MS = 30_000;
+
+/** When each file's figures were last printed. */
+const supplyReportedAt = new Map();
+
+/**
+ * Record one interruption and, at most twice a minute, say what it implies.
+ *
+ * The two figures are the whole of roadmap item 3: the speed a step must
+ * sustain to survive this supply (`1 + worst wait / median interval`), and the
+ * smallest buffer that hides an interruption from the viewer. Both are printed
+ * before either is USED, so the field says whether the arithmetic describes
+ * reality before anything is decided by it.
+ *
+ * @param {string} key - Something stable per file.
+ * @param {string} label - What to call it in the log.
+ * @param {number} waitedMs
+ * @returns {void}
+ */
+function noteSupplyWait(key, label, waitedMs) {
+  const history = supplyWaits.get(key) ?? [];
+  history.push({ waitedMs, at: Date.now() });
+  while (history.length > SUPPLY_WAIT_HISTORY) {
+    history.shift();
+  }
+  supplyWaits.set(key, history);
+
+  const now = Date.now();
+  if (now - (supplyReportedAt.get(key) ?? 0) < SUPPLY_REPORT_INTERVAL_MS) {
+    return;
+  }
+  const demand = requiredSpeedFrom(history);
+  if (!demand) {
+    return;
+  }
+  supplyReportedAt.set(key, now);
+  const buffer = minimumBufferFrom({
+    segmentSeconds: SEGMENT_SECONDS_FOR_BUFFER,
+    worstSupplyWaitSec: demand.worstWaitSec
+  });
+  logger.info(
+    `supply "${label.slice(0, 40)}": a step must run at ${demand.requiredSpeed.toFixed(2)}x ` +
+    `to survive this swarm (worst wait ${demand.worstWaitSec.toFixed(2)}s, one every ` +
+    `${demand.medianIntervalSec.toFixed(2)}s, ${demand.samples} measured) — ` +
+    `and the smallest buffer that hides it is ${buffer ? buffer.seconds.toFixed(1) : "?"}s`
+  );
+}
+
+/**
+ * The segment length the buffer figure is stated against. The reader does not
+ * know the session's own, and this is a REPORT rather than a decision — the
+ * decision, when it is made, will use the session's real one.
+ */
+const SEGMENT_SECONDS_FOR_BUFFER = 4;
+
 export async function* readFragments({
   torrent,
   fileIndex,
@@ -495,6 +567,7 @@ export async function* readFragments({
       // short, an immediate hit means it is longer than it needs to be. Applied
       // before the logging below so the line reports the window the next piece
       // will actually use.
+      noteSupplyWait(`${torrent?.infoHash ?? "?"}/${file?.name ?? "?"}`, file?.name ?? "", waitedMs);
       const widened = nextWindowPieces({
         current: windowPieces,
         base: basePieces,

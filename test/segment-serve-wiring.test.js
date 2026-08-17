@@ -189,21 +189,17 @@ test("a segment that exists is served, not reported as still being produced", as
   const served = Buffer.concat(chunks);
   assert.equal(served.toString("latin1", 4, 8), "moof", "the init header must be stripped off a media segment");
 
-  // Where the PLAYLIST the player holds puts this segment — which is what the
-  // fragment must be stamped with whenever the piece's own position is further
-  // away than a player will bridge. This fixture's piece says 12.5 s while the
-  // playlist says 0, and stamping the piece's figure is what killed a film on
-  // 2026-08-17: the browser asked for two segments 1908 times each over ten
-  // minutes, each served in 4 ms, because a fragment landing 2.5 s from where
-  // it was expected is not recognised as buffered. Reading the piece's own
-  // position still happens — it is the step that threw in 2.9.124, it feeds the
-  // index tally and it corrects the grid for rungs made later — it just no
-  // longer contradicts the timeline the player was sent. See
-  // test/published-timeline.test.js for the rule itself.
+  // The piece's OWN start, carried into the fragment it belongs to. Two
+  // releases tried moving it toward the playlist instead (2.24.1 per session,
+  // 2.25.0 by one family offset) and both desynced picture from sound in the
+  // field the same day: the first segment of a run is not cut, it begins where
+  // the seek landed, and the picture must land on a keyframe while the sound
+  // need not. Reading the piece's position is also the step that threw in
+  // 2.9.124, and it still feeds the index tally and the grid correction.
   assert.equal(
     Number(served.readBigUInt64BE(served.indexOf("tfdt") + 8)),
-    0,
-    "the segment must be stamped where the playlist the player holds says it begins"
+    Math.round(SEGMENT_START_SECONDS * VIDEO_TIMESCALE),
+    "the segment must be stamped with where it really begins"
   );
   assert.equal(
     session.indexCheck.checked,

@@ -286,6 +286,7 @@ test("a segment request hands the encoder to the variant the viewer moved to", a
   base.lastRequestedSegment = 25;
   const encoder = fakeEncoder();
   base.ffmpeg = encoder;
+  base.runState = "PRODUCING";
 
   const served = await manager.resolveVariantFile(BASE_ID, 540, "segment-00025.mp4");
 
@@ -317,6 +318,7 @@ test("a rung is placed where the player asked it for, not where the other rung h
   manager.sessionsById.set(VARIANT_ID, variant);
   base.variants = new Map([[540, VARIANT_ID]]);
   base.ffmpeg = fakeEncoder();
+  base.runState = "PRODUCING";
   // The rung being left had read fourteen segments further than the picture had
   // played — an encoder running at several times realtime fills the buffer far
   // ahead. Measured 2026-08-11: 56 s of gap, and using the read head placed the
@@ -347,6 +349,7 @@ test("warming a rung prepares it without taking the encoder from the one on scre
   base.variants = new Map([[540, VARIANT_ID]]);
   const encoder = fakeEncoder();
   base.ffmpeg = encoder;
+  base.runState = "PRODUCING";
 
   const prepared = await manager.prepareVariant(BASE_ID, 540, 240);
 
@@ -373,6 +376,7 @@ test("a rung warmed at the playhead survives the switch that lands just ahead of
   manager.sessionsById.set(VARIANT_ID, variant);
   base.variants = new Map([[540, VARIANT_ID]]);
   base.ffmpeg = fakeEncoder();
+  base.runState = "PRODUCING";
 
   // Warmed AT THE PLAYHEAD (240 s = segment #60), which is what the browser
   // sends from server 0.10.0 onwards, and the run is alive and has produced a
@@ -380,6 +384,7 @@ test("a rung warmed at the playhead survives the switch that lands just ahead of
   await manager.prepareVariant(BASE_ID, 540, 240);
   variant.encodeStartIndex = 59;
   variant.ffmpeg = fakeEncoder();
+  variant.runState = "PRODUCING";
   variant.progress = { ...variant.progress, processedSeconds: 268 };
   variant.seekTarget = null;
   variant.seekSettleTimer = null;
@@ -413,6 +418,7 @@ test("a rung warmed PAST the switch is repositioned, which is what warming late 
   manager.sessionsById.set(VARIANT_ID, variant);
   base.variants = new Map([[540, VARIANT_ID]]);
   base.ffmpeg = fakeEncoder();
+  base.runState = "PRODUCING";
 
   // The same session, warmed where the BUFFER ended rather than where the
   // picture was — 60 s further on, which is an ordinary cushion. This is what
@@ -420,6 +426,7 @@ test("a rung warmed PAST the switch is repositioned, which is what warming late 
   await manager.prepareVariant(BASE_ID, 540, 300);
   variant.encodeStartIndex = 74;
   variant.ffmpeg = fakeEncoder();
+  variant.runState = "PRODUCING";
   variant.progress = { ...variant.progress, processedSeconds: 310 };
   variant.seekTarget = null;
   variant.seekSettleTimer = null;
@@ -447,6 +454,7 @@ test("the rung on screen fetching its own segments does not cancel a warm-up", a
   const warmedEncoder = fakeEncoder();
   variant.ffmpeg = warmedEncoder;
   base.ffmpeg = fakeEncoder();
+  base.runState = "PRODUCING";
   await manager.prepareVariant(BASE_ID, 540, 100);
 
   // The viewer has not moved: the rung they are watching goes on asking for its
@@ -521,6 +529,7 @@ test("a playlist or an init segment does not move the encoder", async (t) => {
   manager.sessionsById.set(VARIANT_ID, variant);
   base.variants = new Map([[540, VARIANT_ID]]);
   base.ffmpeg = fakeEncoder();
+  base.runState = "PRODUCING";
 
   base.variants = new Map([[540, VARIANT_ID]]);
   await manager.resolveVariantFile(BASE_ID, 540, "index.m3u8");
@@ -719,6 +728,7 @@ test("an audio track is prepared at the position the switch will land on", async
   rendition.audioOnly = true;
   rendition.audioTrackIndex = 1;
   rendition.ffmpeg = fakeEncoder();
+  rendition.runState = "PRODUCING";
   rendition.encodeStartIndex = 0;
   manager.sessionsById.set(VARIANT_ID, rendition);
   base.audioRenditionSessions = new Map([[1, VARIANT_ID]]);
@@ -790,6 +800,7 @@ test("a quality step being warmed is not refused by its own cost", async (t) => 
   // Running, and running well: it says of itself that it holds twice realtime,
   // i.e. half a second of work per second of video.
   warming.ffmpeg = fakeEncoder();
+  warming.runState = "PRODUCING";
   warming.lastAloneSpeed = 2;
   manager.sessionsById.set(BASE_ID, base);
   manager.sessionsById.set(VARIANT_ID, warming);

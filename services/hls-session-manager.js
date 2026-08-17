@@ -20,7 +20,13 @@ import { logger } from "../utils/logger.js";
 import { readKeyframeIndex } from "./container-index/index.js";
 import { readMachineState, readProcessCpuSeconds, readProxyCpuSeconds, readSystemCpu, shareOfMachine } from "./host-load.js";
 import { speedFromReadings } from "./encoder-readings.js";
-import { ENCODE_RUN_EVENT, ENCODE_RUN_STATE, INITIAL_RUN_STATE, nextState } from "./encode-run-state.js";
+import {
+  ENCODE_RUN_EVENT,
+  ENCODE_RUN_STATE,
+  INITIAL_RUN_STATE,
+  nextState,
+  processCanBeSignalled
+} from "./encode-run-state.js";
 import { ENCODE_EXIT, classifyEncodeExit } from "./encode-exit.js";
 
 /** Own package version, stamped onto session-start log lines. */
@@ -1817,7 +1823,7 @@ export class HlsSessionManager {
       // `encode-run-state.js`. Written at every event today and read by nothing
       // yet: a refused pair in the log is the model disagreeing with reality,
       // and that disagreement is the measurement this release exists to take.
-      // The fields it will replace — `state`, `progress.state`, `encoderPaused`
+      // The fields it replaces — `state`, `progress.state`
       // and the repeated liveness checks — keep their current writes meanwhile.
       runState: INITIAL_RUN_STATE,
       lastError: "",
@@ -1952,7 +1958,6 @@ export class HlsSessionManager {
       // encoder is currently suspended for running too far past it.
       // See #enforceLookAhead.
       lastRequestedSegment: null,
-      encoderPaused: false,
       encoderPauseUnsupported: false,
       seekFirstFarAt: 0,
       // Circuit breaker: consecutive FAST failures (see SEEK_FAST_FAIL_MS) at
@@ -2744,7 +2749,7 @@ export class HlsSessionManager {
     if (aheadSeconds === null) {
       // The segment the viewer needs does not exist. Whatever else is on disk,
       // this encoder has work to do right now.
-      if (session.encoderPaused && this.#resumeEncoder(session, "the viewer needs a segment nobody has made")) {
+      if (session.runState === ENCODE_RUN_STATE.SUSPENDED && this.#resumeEncoder(session, "the viewer needs a segment nobody has made")) {
         this.#transitionRun(session, ENCODE_RUN_EVENT.RESUME_ORDERED);
       }
       return;
@@ -2772,7 +2777,7 @@ export class HlsSessionManager {
       );
     }
 
-    if (!session.encoderPaused && aheadSeconds > LOOKAHEAD_PAUSE_SECONDS) {
+    if (session.runState !== ENCODE_RUN_STATE.SUSPENDED && aheadSeconds > LOOKAHEAD_PAUSE_SECONDS) {
       // The decision names what it was taken on. Suspending the encoder stops
       // the only thing that reads the input, so a wrong reading here stops the
       // download too — measured 2026-08-06: the log said "135s ahead" while
@@ -2786,7 +2791,7 @@ export class HlsSessionManager {
           `(viewer at #${viewerSegment}, unbroken through #${reading.lastCovered}, ` +
           `${reading.total} segment file(s) present)`
       );
-    } else if (session.encoderPaused && aheadSeconds <= LOOKAHEAD_RESUME_SECONDS) {
+    } else if (session.runState === ENCODE_RUN_STATE.SUSPENDED && aheadSeconds <= LOOKAHEAD_RESUME_SECONDS) {
       if (this.#resumeEncoder(session, `${Math.round(aheadSeconds)}s ahead of the viewer`)) {
         this.#transitionRun(session, ENCODE_RUN_EVENT.RESUME_ORDERED);
       }
@@ -2929,7 +2934,7 @@ export class HlsSessionManager {
   #pauseEncoder(session, reason) {
     // Any pair spanning this would count a stopped encoder as slow.
     session.learnSample = null;
-    if (session.encoderPaused || session.encoderPauseUnsupported || !session.ffmpeg?.pid) {
+    if (session.runState === ENCODE_RUN_STATE.SUSPENDED || session.encoderPauseUnsupported || !session.ffmpeg?.pid) {
       return;
     }
     try {
@@ -2942,7 +2947,6 @@ export class HlsSessionManager {
       );
       return;
     }
-    session.encoderPaused = true;
     this.#transitionRun(session, ENCODE_RUN_EVENT.SUSPEND_ORDERED);
     logger.info(
       `transcode ${session.id} encoder suspended — ${reason} ` +
@@ -2965,7 +2969,7 @@ export class HlsSessionManager {
   #resumeEncoder(session, reason) {
     // Any pair spanning this would count a stopped encoder as slow.
     session.learnSample = null;
-    if (!session.encoderPaused || !session.ffmpeg?.pid) {
+    if (session.runState !== ENCODE_RUN_STATE.SUSPENDED || !session.ffmpeg?.pid) {
       return false;
     }
     let continued = true;
@@ -2977,7 +2981,6 @@ export class HlsSessionManager {
       // stops a dead run being reported as producing again.
       continued = false;
     }
-    session.encoderPaused = false;
     // Two records of one moment must not contradict each other: a line saying
     // the encoder resumed, beside a return value saying nothing was resumed, is
     // the sort of pair that costs an hour of reading a field log.
@@ -3080,9 +3083,9 @@ export class HlsSessionManager {
 
   async #reportHostLoad() {
     const encoding = [...this.sessionsById.values()].filter(
-      (session) => session?.ffmpeg != null && !hasChildExited(session.ffmpeg) && session.state !== "disposed"
+      (session) => processCanBeSignalled(session?.runState) && session.state !== "disposed"
     );
-    const runningNow = encoding.filter((session) => session.encoderPaused !== true);
+    const runningNow = encoding.filter((session) => session.runState !== ENCODE_RUN_STATE.SUSPENDED);
     if (runningNow.length === 0) {
       // No encoder is RUNNING. A suspended one costs nothing, and counting it
       // as work meant this was never reached: measured 2026-08-15, four minutes
@@ -3156,7 +3159,7 @@ export class HlsSessionManager {
     // the addon host actually were (2026-08-15: `ffmpeg=0% system=24%`, both
     // encoders suspended, and the speed beside it a stale figure from before
     // they stopped).
-    const suspended = encoding.filter((session) => session.encoderPaused === true).length;
+    const suspended = encoding.filter((session) => session.runState === ENCODE_RUN_STATE.SUSPENDED).length;
     const running = encoding.length - suspended;
     const machine = await readMachineState();
     const asPercent = (value) => (value === null ? "n/a" : `${Math.round(value * 100)}%`);
@@ -3753,7 +3756,6 @@ export class HlsSessionManager {
     // judged finished — see getFileStream.
     session.usesExplicitCuts = Boolean(cutTimes && cutTimes.length > 0);
     session.encodeStartIndex = safeIndex;
-    session.encoderPaused = false;
     session.pendingRestartIndex = -1;
     session.lastRestartAt = Date.now();
     session.state = session.state === "disposed" ? "disposed" : "starting";
@@ -4191,7 +4193,7 @@ export class HlsSessionManager {
     }
     // Nothing is encoding: a rung the viewer has switched away from is left
     // exactly so, and its held requests must not bring its encoder back.
-    if (session.ffmpeg == null || hasChildExited(session.ffmpeg)) {
+    if (!processCanBeSignalled(session.runState)) {
       return;
     }
     // A seek already settling is about to move the encoder to where the VIEWER
@@ -4375,7 +4377,7 @@ export class HlsSessionManager {
     // "already covered", so nothing could ever restart it. Measured 2026-08-04:
     // one ffmpeg failure turned into a session that answered 500 to every
     // segment for as long as the viewer kept trying.
-    const runIsAlive = session.ffmpeg != null && !hasChildExited(session.ffmpeg);
+    const runIsAlive = processCanBeSignalled(session.runState);
     if (runIsAlive && index >= head && index <= currentSeg + MAX_LOOKAHEAD_SEGMENTS) {
       logger.info(
         `transcode ${session.id} seek to ${positionSeconds.toFixed(1)}s (#${index}) ` +
@@ -4429,7 +4431,7 @@ export class HlsSessionManager {
     // ten seconds, each killing a run that was encoding #865. The guard below
     // did not catch it — it only decides whether to let the current run finish,
     // not whether a new run is needed at all.
-    if (target === session.encodeStartIndex && session.ffmpeg != null && !hasChildExited(session.ffmpeg)) {
+    if (target === session.encodeStartIndex && processCanBeSignalled(session.runState)) {
       logger.info(
         `transcode ${session.id} seek #${target} ignored — the current run already starts there`
       );
@@ -4457,7 +4459,7 @@ export class HlsSessionManager {
     // Holding it was also expensive in the other direction: a genuine second
     // seek could be delayed by the whole grace.
     const producedThisRun = this.#producedSecondsThisRun(session);
-    const runIsAlive = session.ffmpeg != null && !hasChildExited(session.ffmpeg);
+    const runIsAlive = processCanBeSignalled(session.runState);
     const allowedBecause = !runIsAlive
       ? "run is dead"
       : `viewer moved; run had produced ${producedThisRun.toFixed(1)}s`;
@@ -5059,7 +5061,7 @@ export class HlsSessionManager {
       .map((member) => this.#observedAudioCost.get(this.#audioCostKey(member))?.version ?? 0)
       .reduce((total, one) => total + one, 0);
     const running = [...this.#familyOf(owner)]
-      .filter((member) => member.ffmpeg != null && !hasChildExited(member.ffmpeg)).length;
+      .filter((member) => processCanBeSignalled(member.runState)).length;
     // What each running encode was last seen doing, which is BOTH an input to
     // the answer twice over — it withdraws a step measured below realtime, and
     // it prices every running picture in the committed total — and a figure
@@ -5217,7 +5219,7 @@ export class HlsSessionManager {
     for (const session of this.sessionsById.values()) {
       if (session?.ffmpeg != null &&
           !hasChildExited(session.ffmpeg) &&
-          session.encoderPaused !== true &&
+          session.runState !== ENCODE_RUN_STATE.SUSPENDED &&
           session.state !== "disposed") {
         running += 1;
       }
@@ -5231,7 +5233,7 @@ export class HlsSessionManager {
       session.state === "disposed" ||
       session.state === "failed" ||
       !session.ffmpeg ||
-      session.encoderPaused === true
+      session.runState === ENCODE_RUN_STATE.SUSPENDED
     ) {
       session.learnSample = null;
       return;
@@ -5336,7 +5338,7 @@ export class HlsSessionManager {
     if (!Number.isFinite(runStartedAt) || Date.now() - runStartedAt < DECODE_LEARNING_SETTLE_MS) {
       return;
     }
-    if (session.encoderPaused === true) {
+    if (session.runState === ENCODE_RUN_STATE.SUSPENDED) {
       return; // a suspended run reports a cumulative figure that is decaying
     }
     // Always asked, not only below realtime. A re-encode near 1x may be the
@@ -5387,7 +5389,7 @@ export class HlsSessionManager {
     if (!Number.isFinite(runStartedAt) || Date.now() - runStartedAt < DECODE_LEARNING_SETTLE_MS) {
       return;
     }
-    if (session.encoderPaused === true) {
+    if (session.runState === ENCODE_RUN_STATE.SUSPENDED) {
       return;
     }
     if (await this.#classifyTranscodeBound(session) === "download") {
@@ -5630,7 +5632,7 @@ export class HlsSessionManager {
   #pricedConcurrentCost(session) {
     let cost = 0;
     for (const member of this.#familyOf(session)) {
-      if (member === session || member.ffmpeg == null || hasChildExited(member.ffmpeg)) {
+      if (member === session || !processCanBeSignalled(member.runState)) {
         continue;
       }
       if (member.audioOnly === true) {
@@ -5659,7 +5661,7 @@ export class HlsSessionManager {
     // price to look up for another film's session — so a reading taken while
     // one is running cannot be attributed either.
     return this.#runningEncoders() > this.#familyOf(session).filter(
-      (member) => member.ffmpeg != null && !hasChildExited(member.ffmpeg)
+      (member) => processCanBeSignalled(member.runState)
     ).length
       ? null
       : cost;
@@ -5683,7 +5685,7 @@ export class HlsSessionManager {
       if (member.audioOnly === true || member.transcodeVideo !== true) {
         continue;
       }
-      if (member.ffmpeg == null || hasChildExited(member.ffmpeg)) {
+      if (!processCanBeSignalled(member.runState)) {
         continue;
       }
       const height = this.variantHeightOf(member);
@@ -5727,7 +5729,7 @@ export class HlsSessionManager {
       // that cost is spread, not a discount on it — and pricing a parked
       // encoder at zero would offer a step on the strength of a pause that ends
       // the moment the viewer catches up.
-      if (member.ffmpeg == null || hasChildExited(member.ffmpeg)) {
+      if (!processCanBeSignalled(member.runState)) {
         continue;
       }
       if (member.audioOnly === true) {
@@ -7079,9 +7081,30 @@ export class HlsSessionManager {
         // is kept, because it is the honest one and it is what keeps speech and
         // subtitles together on a file whose index is slightly out (2026-08-06,
         // 4.17 s of drift on a Matroska index that lied).
-        let stampStart = trueStart ?? publishedStart;
+        // STAMPED WITH ITS OWN TRUE START, always. Two attempts at moving it
+        // toward the playlist both made things worse, and the reason is in what
+        // the first segment of a run is: it is not CUT at all — it begins where
+        // ffmpeg's seek landed. The picture must land on a keyframe; the sound
+        // needs none and starts at the instant asked for. So after every
+        // restart the two runs genuinely begin at different real times, and the
+        // whole run carries that difference (field 2026-08-17: the sound's
+        // #292 began at 1587.892 s and #293 at 1592.692 s — exactly one segment
+        // apart, the whole run shifted 2.5 s from the grid).
+        //
+        // Labelling each track with its own true time is therefore what keeps
+        // picture and sound together in real time. Moving them onto the
+        // published grid — separately (2.24.1) or by one family offset (2.25.0)
+        // — closes a gap that is real and opens one that is not: it desynced
+        // playback in the field within the hour, twice.
+        //
+        // What that leaves unsolved is the reason those attempts were made: a
+        // playlist that disagrees with the media by more than a player bridges
+        // makes hls.js refetch the same fragment for ever (1908 times each for
+        // two segments, measured). The answer to THAT is to make the published
+        // grid agree with where the runs really begin — not to relabel the
+        // media. Recorded as its own roadmap item rather than guessed at here.
+        const stampStart = trueStart ?? publishedStart;
         if (trueStart !== null && Math.abs(trueStart - publishedStart) > PLAYER_BUFFER_HOLE_SEC) {
-          stampStart = publishedStart;
           this.#notePlaylistDisagreement(session, index, trueStart, publishedStart);
         }
         const prepared = session.segmentFormat.prepareSegmentBytes(bytes, {

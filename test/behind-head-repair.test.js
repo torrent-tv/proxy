@@ -63,6 +63,7 @@ async function managerWithRunAhead() {
     seekTarget: null,
     waitEpoch: 0,
     firstWantedAt: new Map(),
+    runState: "PRODUCING",
     ffmpeg: { pid: 4321, exitCode: null, signalCode: null, kill() {}, once(event, handler) { if (event === "exit") handler(); } },
     progress: { state: "running", processedSeconds: RUN_STARTS_AT * SEGMENT_SECONDS + 400, startPositionSeconds: RUN_STARTS_AT * SEGMENT_SECONDS }
   };

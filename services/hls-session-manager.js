@@ -4263,6 +4263,26 @@ export class HlsSessionManager {
     if (session.seekSettleTimer != null) {
       return;
     }
+    // And it outranks it AFTERWARDS too, which is what was missing. The guard
+    // above only holds while the settle timer is armed — a second later it is
+    // gone, and a request the browser issued BEFORE the seek is then treated as
+    // fresh evidence. Field 2026-08-17: a seek to 2083.4 s put both runs at
+    // #373, a request for #371 from before it arrived a second afterwards, and
+    // this repair moved the encoder to #370 — three segments behind the viewer,
+    // who waited for it to come back. A request BEHIND what the viewer
+    // themselves reported cannot be describing where they are.
+    const reportedSeconds = Number(session.viewerReportedSeconds);
+    if (Number.isFinite(reportedSeconds)) {
+      const reportedIndex = this.#segmentIndexForTime(session, reportedSeconds);
+      if (index < reportedIndex) {
+        this.#explainHold(
+          session,
+          session.segmentFormat.segmentFileName(index),
+          `it is behind #${reportedIndex}, where the viewer said they are — answered, not obeyed`
+        );
+        return;
+      }
+    }
     // What separates a request the viewer is waiting for from the player
     // scanning the playlist is not TIME but what else it is asking for. On a
     // seek hls.js fires dozens of DIFFERENT indices within half a second (field
@@ -4370,6 +4390,14 @@ export class HlsSessionManager {
     // The browser holds one session id for the whole file and knows nothing of
     // variants, so a seek it reports means the stream on screen.
     named.viewerPositionSeconds = positionSeconds;
+    // What the viewer SAID, kept apart from what requests imply. A request is
+    // evidence about where the player is reading; a reported seek is the viewer
+    // stating where they are, and after one, requests already in flight
+    // describe a place that no longer exists. Field 2026-08-17: a seek to
+    // 2083.4 s restarted both runs at #373, a request for #371 issued before it
+    // arrived a second later, and the encoder was dragged back to #370 — three
+    // segments behind the viewer, who then waited for it to return.
+    named.viewerReportedSeconds = positionSeconds;
     named.lastAccessedAt = Date.now();
     // The audio the viewer is listening to moves with them. It is a separate
     // encoder on a separate session that the browser cannot name, and nothing
@@ -4415,6 +4443,7 @@ export class HlsSessionManager {
       return false;
     }
     session.viewerPositionSeconds = positionSeconds;
+    session.viewerReportedSeconds = positionSeconds;
     session.lastAccessedAt = Date.now();
     // Every segment request being held right now was made for the position the
     // viewer has just left. Release them: hls.js keeps ONE fragment load
@@ -7021,7 +7050,16 @@ export class HlsSessionManager {
         // read when a quality change has to place the next variant's first
         // encode run. The freshest evidence wins: a seek overwrites this, and
         // the first request after the seek overwrites it back.
-        session.viewerPositionSeconds = this.#segmentStartTime(session, requested);
+        // A request refines this only FORWARD of what the viewer reported.
+        // Playback always moves forward from a seek, so nothing legitimate is
+        // lost — while a stale request from before the seek can no longer
+        // rewrite the viewer's own statement, which is what let the repair
+        // below drag the encoder backwards.
+        const requestedStart = this.#segmentStartTime(session, requested);
+        const reported = Number(session.viewerReportedSeconds);
+        if (!Number.isFinite(reported) || requestedStart >= reported) {
+          session.viewerPositionSeconds = requestedStart;
+        }
         // A viewer who has caught up must not wait out the monitor's interval —
         // but only if they HAVE caught up, which is why this re-evaluates the
         // same condition instead of resuming outright.

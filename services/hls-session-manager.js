@@ -20,6 +20,7 @@ import { logger } from "../utils/logger.js";
 import { readKeyframeIndex } from "./container-index/index.js";
 import { readMachineState, readProcessCpuSeconds, readProxyCpuSeconds, readSystemCpu, shareOfMachine } from "./host-load.js";
 import { speedFromReadings } from "./encoder-readings.js";
+import { availableShareFrom, correctForAvailability } from "./available-share.js";
 import {
   ENCODE_RUN_EVENT,
   ENCODE_RUN_STATE,
@@ -1902,6 +1903,12 @@ export class HlsSessionManager {
       // software hosts, else the client target). 0 = keep source.
       encodeWidth,
       encodeHeight,
+      // What the offer predicted this height would do on this machine, so the
+      // field can say what the prediction was worth once the step runs. Null
+      // when the step was never judged — a copied stream needs no encoder and
+      // is never predicted.
+      predictedSpeedWhenOffered: this.lastPredictedByHeight?.get(encodeHeight) ?? null,
+      lastPredictionRatio: null,
       // The NAME of this rung, fixed at the height that was asked for. It is
       // deliberately not the height being encoded: a viewer who picked 480p on
       // a host that then starts them at 360p, or steps down to it later, goes
@@ -3217,13 +3224,25 @@ export class HlsSessionManager {
     const proxyShare = Number.isFinite(previous.proxyCpuSeconds)
       ? (sample.proxyCpuSeconds - previous.proxyCpuSeconds) / (share.elapsedSec * cores)
       : null;
+    // Kept for the quality offer, which predicts from a benchmark taken on a
+    // QUIET host: the same reading that is printed here says how much of the
+    // machine a new encoder could actually have. Only what nobody has been
+    // charged for is subtracted — see `available-share.js`.
+    this.hostAvailability = availableShareFrom({
+      systemBusy: share.systemShare,
+      encoderShare: share.processShare,
+      proxyShare
+    });
     logger.info(
       `host-load: ffmpeg=${asPercent(share.processShare)} proxy=${asPercent(proxyShare)} ` +
       `system=${asPercent(share.systemShare)} ` +
       `iowait=${asPercent(share.iowaitShare)} cpu=${machine.megahertz === null ? "n/a" : `${machine.megahertz}MHz`} ` +
       `temp=${machine.celsius === null ? "n/a" : `${machine.celsius}C`} ` +
       `encoders=${running} running` + (suspended > 0 ? ` +${suspended} suspended` : "") +
-      ` over=${share.elapsedSec.toFixed(1)}s`
+      ` over=${share.elapsedSec.toFixed(1)}s` +
+      // What the offer will multiply a prediction by, in the same line as the
+      // readings it comes from.
+      ` available=${asPercent(this.hostAvailability.share)}`
     );
   }
 
@@ -3391,6 +3410,10 @@ export class HlsSessionManager {
     // although nothing is producing that step any more. The next reading of the
     // new encode replaces it.
     session.lastAloneSpeed = null;
+    // And so is the prediction it was compared against: it described the step
+    // this session has just left.
+    session.predictedSpeedWhenOffered = this.lastPredictedByHeight?.get(rung.height) ?? null;
+    session.lastPredictionRatio = null;
     // Priced the same way the offer and the starting rung are. Choosing the
     // preset on the encoder alone treats decoding as free, which is how the
     // check and the encode came to disagree in the first place — and here it
@@ -5444,6 +5467,25 @@ export class HlsSessionManager {
     // 0.3x reads as 3.33 s of work per second of video, more than the machine
     // has — and every other quality step was refused on the download's account.
     session.lastAloneSpeed = speed;
+    // What the offer predicted for this very step, against what it then did
+    // with the machine to itself. The prediction is corrected for the share of
+    // the machine that was free at the time, so this ratio is the error that
+    // remains AFTER that correction — which is the only way to tell whether a
+    // stage of roadmap item 3 moved anything. Written when it changes by more
+    // than a tenth, so a steady step says it once rather than every five
+    // seconds.
+    if (Number.isFinite(session.predictedSpeedWhenOffered) && session.predictedSpeedWhenOffered > 0) {
+      const ratio = speed / session.predictedSpeedWhenOffered;
+      const lastSaid = session.lastPredictionRatio;
+      if (!Number.isFinite(lastSaid) || Math.abs(ratio - lastSaid) > 0.1) {
+        session.lastPredictionRatio = ratio;
+        logger.info(
+          `prediction ${session.id.slice(0, 8)} ${session.encodeHeight || "source"}p: ` +
+          `predicted ${session.predictedSpeedWhenOffered.toFixed(2)}x, measured ${speed.toFixed(2)}x ` +
+          `(ratio ${ratio.toFixed(2)}; 1.00 would mean the arithmetic describes this machine)`
+        );
+      }
+    }
     if (kind === "audio") {
       // What is left after the work that was already accounted for. `null` when
       // the subtraction leaves nothing positive, which means the reading says
@@ -5962,6 +6004,12 @@ export class HlsSessionManager {
     const kept = [];
     /** @type {string[]} */
     const dropped = [];
+    // What each height was predicted to do on THIS machine, kept so a session
+    // started at that height can be compared against it once it runs. The
+    // manager holds the last answer, because the offer is computed on the path
+    // that serves every request while a session is created elsewhere.
+    /** @type {Map<number, number | null>} */
+    const predictedByHeight = new Map();
     for (const height of heights) {
       // The height an encoder is ALREADY producing, and the source's own height
       // when the FAMILY serves it by copy — neither has to be predicted,
@@ -6004,7 +6052,7 @@ export class HlsSessionManager {
         0,
         concurrentCostSec - (runningCostByHeight?.get(height) ?? 0)
       );
-      const { speed, sustainable } = canSustainOutput({
+      const { speed } = canSustainOutput({
         benchmark,
         decodeModel: this.decodeCostModel,
         source,
@@ -6012,11 +6060,24 @@ export class HlsSessionManager {
         observedDecodeCostSec,
         concurrentCostSec: concurrentBesideThis
       });
-      if (sustainable) {
+      // The benchmark behind that figure was taken on a QUIET host — one
+      // ffmpeg and nothing else. The machine a step will actually run on is
+      // also running the kernel, the container and whatever else its owner
+      // does, and on the addon host that was measured at 99 % busy with a
+      // quarter of it unattributed. Only the unattributed part is charged
+      // here: our own encoders are already in `concurrentBesideThis` and the
+      // proxy's own work is already priced per megabyte moved.
+      const onThisMachine = correctForAvailability(speed, this.hostAvailability);
+      // Kept against the step's own session, so that when it runs the field
+      // says what the prediction was worth. Without this the only comparison
+      // available is between two figures written minutes apart in different
+      // lines of the log.
+      predictedByHeight.set(height, onThisMachine);
+      if (onThisMachine !== null && onThisMachine >= REALTIME_SPEED_MARGIN) {
         kept.push(height);
         continue;
       }
-      dropped.push(`${height}p=${speed === null ? "n/a" : `${speed.toFixed(2)}x`}`);
+      dropped.push(`${height}p=${onThisMachine === null ? "n/a" : `${onThisMachine.toFixed(2)}x`}`);
     }
     // Written when the ANSWER changes, not when the answer is recomputed. This
     // is asked on the path that serves every playlist, init and segment, and
@@ -6026,12 +6087,19 @@ export class HlsSessionManager {
     if (dropped.length > 0) {
       const line =
         `transcode: not offering ${dropped.join(" ")} — below realtime × ${REALTIME_SPEED_MARGIN} ` +
+        // Said with the figures, because a step refused on a busy machine and
+        // one refused on an idle machine are different facts about the host.
+        (this.hostAvailability?.known
+          ? `on a machine with ${Math.round(this.hostAvailability.share * 100)}% to spare `
+          : "") +
         `(offering ${kept.map((height) => `${height}p`).join(" ")})`;
       if (line !== this.#lastOfferLine) {
         this.#lastOfferLine = line;
         logger.info(line);
       }
+      this.lastPredictedByHeight = predictedByHeight;
     } else {
+      this.lastPredictedByHeight = predictedByHeight;
       this.#lastOfferLine = "";
     }
     return kept;

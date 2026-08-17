@@ -61,6 +61,37 @@ export function readWindowFor({ pieceIndex, lastPiece, windowPieces }) {
 }
 
 /**
+ * How wide the window should be after a piece that made the reader wait — or
+ * did not.
+ *
+ * The swarm's surplus is what pays for this. Measured 2026-08-17 on the field
+ * torrent: 5.1-5.9 MB/s delivered against a film consumed at about 1 MB/s, and
+ * the reader still blocked 47 times in two minutes, median 1.5 s, worst 4.5 s.
+ * A fivefold surplus never became distance ahead of the head, because the
+ * window is a fixed number of seconds of playback and everything past it is
+ * ordinary background fill at no priority.
+ *
+ * So the window follows the evidence: every wait that mattered widens it by a
+ * piece, every piece that was already there narrows it back toward the size the
+ * caller asked for. Nothing here is chosen — the wait is measured, the
+ * threshold is the one that already defines "a wait worth recording", and the
+ * ceiling is this reader's share of the store's memory, so widening can never
+ * cost more than the store can hold.
+ *
+ * @param {{ current: number, base: number, ceiling: number, waitedMs: number, waitThresholdMs: number }} params
+ * @returns {number}
+ */
+export function nextWindowPieces({ current, base, ceiling, waitedMs, waitThresholdMs }) {
+  const floor = Math.max(1, Math.floor(base));
+  const top = Math.max(floor, Math.floor(ceiling));
+  const now = Math.min(top, Math.max(floor, Math.floor(current)));
+  if (waitedMs >= waitThresholdMs) {
+    return Math.min(top, now + 1);
+  }
+  return Math.max(floor, now - 1);
+}
+
+/**
  * Add this reader's window to the download set as a stream selection.
  *
  * `_select`/`_deselect` with the stream flag are what WebTorrent's own
@@ -310,7 +341,26 @@ export async function* readFragments({
   // critical, and never deselected anything — so ffmpeg's opening
   // `bytes 0-<EOF>` left a permanent selection over the entire file, and no
   // later prioritisation could outrank it.
-  const windowPieces = Math.max(1, Math.ceil(Math.max(1, windowBytes) / pieceLength));
+  const basePieces = Math.max(1, Math.ceil(Math.max(1, windowBytes) / pieceLength));
+  // What the window is RIGHT NOW. It starts at what the caller sized in seconds
+  // of playback and grows while the reader keeps being made to wait — see
+  // `nextWindowPieces`.
+  let windowPieces = basePieces;
+  /**
+   * The widest this reader may go: its share of what the store can hold in
+   * memory. Measured rather than chosen — the capacity is the store's own, and
+   * the number of readers is how many windows are declared on it right now.
+   *
+   * @returns {number}
+   */
+  const ceilingPieces = () => {
+    const capacity = Number(store?.capacity);
+    if (!Number.isFinite(capacity) || capacity <= 0) {
+      return basePieces;
+    }
+    const readers = Math.max(1, store.protectedRanges?.().length ?? 1);
+    return Math.max(basePieces, Math.floor(capacity / readers));
+  };
   /** @type {{ from: number, to: number } | null} */
   let window = null;
   /** @type {{ from: number, to: number } | null} */
@@ -408,6 +458,20 @@ export async function* readFragments({
       // whether that is the swarm, the picker, or ffmpeg. Logged only when the
       // wait is long enough to matter, so ordinary sequential reading is silent.
       const waitedMs = Date.now() - waitStartedAt;
+      // The window answers to what just happened: a wait means the lead was too
+      // short, an immediate hit means it is longer than it needs to be. Applied
+      // before the logging below so the line reports the window the next piece
+      // will actually use.
+      const widened = nextWindowPieces({
+        current: windowPieces,
+        base: basePieces,
+        ceiling: ceilingPieces(),
+        waitedMs,
+        waitThresholdMs: PIECE_WAIT_LOG_MS
+      });
+      if (widened !== windowPieces) {
+        windowPieces = widened;
+      }
       if (waitedMs >= PIECE_WAIT_LOG_MS) {
         const rateKbps = Math.round(pieceLength / 1024 / (waitedMs / 1000));
         logger.info(

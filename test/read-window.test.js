@@ -19,7 +19,11 @@ import { EventEmitter } from "node:events";
 import os from "node:os";
 import path from "node:path";
 import fs from "node:fs/promises";
-import { readFragments, readWindowFor } from "../services/torrent-worker/piece-reader.js";
+import {
+  nextWindowPieces,
+  readFragments,
+  readWindowFor
+} from "../services/torrent-worker/piece-reader.js";
 import { SharedPieceStore } from "../services/piece-store/shared-piece-store.js";
 
 const PIECE = 1024;
@@ -275,4 +279,51 @@ test("a reader that is abandoned mid-fragment does not keep the piece pinned", a
     store.destroy(() => undefined);
     await fs.rm(directory, { recursive: true, force: true });
   }
+});
+
+// ------------------------------------------ the window that grows into a lead
+
+test("a wait that mattered widens the window by a piece", () => {
+  // Field 2026-08-17: 5.1-5.9 MB/s delivered against ~1 MB/s consumed, and the
+  // reader still blocked 47 times in two minutes. The surplus never became
+  // distance ahead of the head.
+  assert.equal(
+    nextWindowPieces({ current: 4, base: 4, ceiling: 12, waitedMs: 1457, waitThresholdMs: 1000 }),
+    5
+  );
+});
+
+test("a piece that was already there gives a piece back", () => {
+  assert.equal(
+    nextWindowPieces({ current: 7, base: 4, ceiling: 12, waitedMs: 0, waitThresholdMs: 1000 }),
+    6
+  );
+});
+
+test("it never shrinks below what the caller asked for", () => {
+  assert.equal(
+    nextWindowPieces({ current: 4, base: 4, ceiling: 12, waitedMs: 0, waitThresholdMs: 1000 }),
+    4
+  );
+});
+
+test("it never grows past this reader's share of the store", () => {
+  assert.equal(
+    nextWindowPieces({ current: 12, base: 4, ceiling: 12, waitedMs: 4453, waitThresholdMs: 1000 }),
+    12
+  );
+  // A ceiling below the base cannot pull the window under it: the caller sized
+  // the base from the file's own byte rate, and a store too small to hold it is
+  // an argument about memory, not about what the reader needs next.
+  assert.equal(
+    nextWindowPieces({ current: 4, base: 4, ceiling: 1, waitedMs: 2000, waitThresholdMs: 1000 }),
+    4
+  );
+});
+
+test("a wait exactly at the threshold counts as a wait", () => {
+  assert.equal(
+    nextWindowPieces({ current: 4, base: 4, ceiling: 9, waitedMs: 1000, waitThresholdMs: 1000 }),
+    5
+  );
 });

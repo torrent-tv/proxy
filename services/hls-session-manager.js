@@ -1019,6 +1019,29 @@ export function ffmpegSeconds(value) {
  * @param {{ useKeyframeGrid: boolean, durationSeconds: number, segDur: number, keyframeTimes: number[] | null, startTime: number }} params
  * @returns {number[]}
  */
+/**
+ * Which timeline a session's own ffmpeg works on.
+ *
+ * True — the COPY branch: the source's timestamps are kept (`-copyts`) and the
+ * output is re-labelled 0-based. Everything handed to the muxer is therefore
+ * stated in the source's terms, and everything read back out of a produced
+ * piece is 0-based.
+ *
+ * False — the re-encode branch: the output is labelled from the run's start on
+ * the 0-based timeline, and the muxer is addressed in those same terms.
+ *
+ * One predicate for both callers, because the two used to answer it separately
+ * and a disagreement between them is exactly what desynced picture from sound.
+ *
+ * @param {{ audioOnly?: boolean, cutGrid?: string, transcodeVideo?: boolean }} session
+ * @returns {boolean}
+ */
+export function onKeyframeGridFor(session) {
+  return session?.audioOnly === true
+    ? session?.cutGrid === "keyframe"
+    : session?.transcodeVideo !== true;
+}
+
 export function computeSegmentBoundaries({ useKeyframeGrid, durationSeconds, segDur, keyframeTimes, startTime }) {
   const total = Number.isFinite(durationSeconds) && durationSeconds > 0 ? durationSeconds : 0;
   const step = Number.isFinite(segDur) && segDur > 0 ? segDur : 4;
@@ -3541,9 +3564,33 @@ export class HlsSessionManager {
     // writes no self-contained pieces, so nothing could read a true start and
     // segments were stamped with times the file does not have — the 4.17 s
     // speech-against-subtitles drift, back again.
-    const cutTimes = explicitTimes && (!session.transcodeVideo || session.cutGrid === "keyframe")
+    const gridCutTimes = explicitTimes && (!session.transcodeVideo || session.cutGrid === "keyframe")
       ? segmentCutTimesFrom(session.segmentBoundaries, safeIndex)
       : null;
+    // On the COPY branch the muxer decides its cuts against the source's own
+    // timestamps, not against the labels we ask it to write. That branch keeps
+    // the source's timestamps (`-copyts`) and re-labels the output 0-based with
+    // `-output_ts_offset -sourceStartTime`; the cut list, being applied before
+    // that relabelling, must therefore be stated in the SOURCE's terms.
+    //
+    // Measured 2026-08-17, and this is the whole of the trouble: asked to cut
+    // at 808.808 s on the 0-based grid, ffmpeg cut at 806.806 s — exactly
+    // `sourceStartTime` (2.002 s) early, and 806.806 s is itself a keyframe the
+    // container's table names, which is why every "disagreement" landed on
+    // another real keyframe. The soundtrack, which is re-encoded and takes the
+    // other branch, cut where it was asked. The two then told the shared
+    // boundary table different things and corrected each other back and forth
+    // for the whole session (#202: 808.808 → 806.806 → 808.750 → …), so the
+    // playlist and the media drifted apart by a whole segment and the player
+    // refetched what it could not place.
+    //
+    // Nothing here is a guess about ffmpeg's semantics: the shift is the same
+    // one the seek already applies on this branch (`seekSeconds = startSeconds
+    // + sourceStartTime`), and the field measurement above is what says the
+    // cuts needed it too.
+    const cutTimes = gridCutTimes && onKeyframeGridFor(session) && sourceStartTime !== 0
+      ? gridCutTimes.map((time) => Number((time + sourceStartTime).toFixed(6)))
+      : gridCutTimes;
 
     // A second chance for a predecessor that survived the escalation above —
     // the first block is the one that does the work. Its exit is ignored
@@ -3641,9 +3688,7 @@ export class HlsSessionManager {
     // the copy branch: `-copyts` and a shift by the container's start time,
     // against a picture labelled from zero. The two would be offset by
     // `sourceStartTime` for the whole file.
-    const onKeyframeGrid = session.audioOnly === true
-      ? session.cutGrid === "keyframe"
-      : !session.transcodeVideo;
+    const onKeyframeGrid = onKeyframeGridFor(session);
     if (!onKeyframeGrid) {
       // Branch A (re-encode): fixed GOP makes keyframes land exactly on the
       // segment grid; relabel output onto the original timeline so segment N

@@ -4896,6 +4896,44 @@ export class HlsSessionManager {
       `transcode ${session.id} boundary #${index} corrected ${wasAt.toFixed(3)}s → ` +
       `${trueStart.toFixed(3)}s from the file itself`
     );
+    // And every OTHER member whose run begins at this very boundary is moved
+    // to the same instant.
+    //
+    // Why they were not there already: the two branches are asked for the same
+    // time and land in different places. The picture cannot begin anywhere but
+    // a real keyframe, and it may not begin before the time asked for — that
+    // content belongs to the previous segment — so it moves FORWARD to the next
+    // one, by up to the keyframe spacing (0.58-2.96 s measured 2026-08-17).
+    // A soundtrack has no keyframes: it begins exactly where asked, to within
+    // one audio frame. So after every restart the two runs of one film began up
+    // to three seconds apart, each correctly labelled with where it really was,
+    // and the viewer got sound with no new picture for the difference.
+    //
+    // The picture's true start is a MEASURED quantity — read from the piece it
+    // just produced, which is what the correction above is — so the soundtrack
+    // can be put exactly there instead of at the time the container's table
+    // claimed. It converges: once the boundary holds the true time, the next
+    // reading agrees with it and the guard above returns before doing anything.
+    for (const member of this.#familyOf(session)) {
+      if (member === session || member.encodeStartIndex !== index) {
+        continue;
+      }
+      if (!processCanBeSignalled(member.runState)) {
+        continue;
+      }
+      logger.info(
+        `transcode ${member.id} begins at #${index}, which really starts ` +
+        `${(trueStart - wasAt).toFixed(3)}s later than the table said — restarting it there ` +
+        `so picture and sound begin together`
+      );
+      // Restarted at the same INDEX, deliberately, rather than seeked to the
+      // time: a seek decides by index, finds this run already begins at #index,
+      // and answers "already within the running encode" — which is true about
+      // the index and false about the instant, and it is why the first version
+      // of this fix moved nothing at all. The boundary now holds the corrected
+      // time, so starting the run at this index starts it at that time.
+      void this.#startEncodeRun(member, index).catch(() => {});
+    }
   }
 
   /**

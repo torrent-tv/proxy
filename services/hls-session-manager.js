@@ -202,6 +202,18 @@ export function newIndexCheck() {
     disagreed: 0,
     maxDeviationSec: 0,
     firstDisagreementIndex: -1,
+    // Every deviation, so the summary can report a distribution instead of one
+    // extreme. Bounded by the number of distinct boundaries a session produces.
+    deviations: [],
+    // Of the segments that started away from the playlist, how many began at
+    // ANOTHER time in the very list the grid was built from. This is the
+    // measurement that separates the two explanations: a table that describes
+    // times the file does not have, against a table that lists only SOME
+    // keyframes and a grid built over its gaps. Asked 2026-08-17 by the user,
+    // who was right that the second is far more likely — every deviation
+    // measured that day was positive, 0.58-2.96 s, which is what a cut pushed
+    // forward to the next real keyframe looks like.
+    landedOnAnotherKeyframe: 0,
     // Which boundaries have been counted. A segment can be requested again, and
     // a repeat is the same boundary, not new evidence.
     seen: new Set()
@@ -217,12 +229,17 @@ export function newIndexCheck() {
  *   start the playlist declared for it.
  * @returns {void}
  */
-export function noteIndexDeviation(check, index, deviationSec) {
+export function noteIndexDeviation(check, index, deviationSec, landedOnKeyframe = null) {
   if (check.seen.has(index)) {
     return;
   }
   check.seen.add(index);
   check.checked += 1;
+  check.deviations ??= [];
+  check.deviations.push(deviationSec);
+  if (landedOnKeyframe === true) {
+    check.landedOnAnotherKeyframe = (check.landedOnAnotherKeyframe ?? 0) + 1;
+  }
   if (deviationSec > SEGMENT_START_DISAGREEMENT_SEC) {
     check.disagreed += 1;
     if (check.firstDisagreementIndex < 0) {
@@ -4786,7 +4803,14 @@ export class HlsSessionManager {
   #noteIndexAccuracy(session, index, trueStart, declaredStart) {
     const deviation = Math.abs(trueStart - declaredStart);
     session.indexCheck ??= newIndexCheck();
-    noteIndexDeviation(session.indexCheck, index, deviation);
+    // Did this segment begin at ANOTHER keyframe from the same list? Half an
+    // audio frame is the tolerance — anything the list names is exact, so a
+    // match is a match. `keyframeTimes` is the list the grid was built from, so
+    // this compares the file against the table on the table's own terms.
+    const knownKeyframe = Array.isArray(session.keyframeTimes)
+      ? session.keyframeTimes.some((time) => Math.abs(time - trueStart) <= 0.05)
+      : null;
+    noteIndexDeviation(session.indexCheck, index, deviation, knownKeyframe);
     if (deviation > SEGMENT_START_DISAGREEMENT_SEC) {
       // Which boundary the true start DOES match, if any. This is what tells
       // the two possible faults apart, and they need opposite fixes: matching
@@ -4807,6 +4831,14 @@ export class HlsSessionManager {
           ? "this rung did not cut where its grid says; a switch to it will not join cleanly"
           : "the container's keyframe index disagrees with the file; using the file")
       );
+    }
+    // Said as the evidence accumulates, not only when the session is disposed.
+    // A proxy restart takes its sessions with it — every addon update does —
+    // and a summary that only ever appears at the end is a summary that is
+    // routinely never written. Twenty-five distinct boundaries is enough for
+    // the proportion to mean something and rare enough not to repeat itself.
+    if (session.indexCheck.checked > 0 && session.indexCheck.checked % 25 === 0) {
+      this.#logIndexAccuracy(session);
     }
     this.correctBoundaryFromSegment(session, index, trueStart);
   }
@@ -4974,12 +5006,19 @@ export class HlsSessionManager {
     if (!check || check.checked === 0) {
       return;
     }
+    const deviations = [...(check.deviations ?? [])].sort((left, right) => left - right);
+    const median = deviations.length > 0 ? deviations[Math.floor(deviations.length / 2)] : 0;
+    const landed = check.landedOnAnotherKeyframe ?? 0;
     logger.info(
       `keyframe-index ${session.containerFormat || "unknown"} "${session.fileName}": ` +
       `${check.disagreed} of ${check.checked} produced segments started away from the playlist, ` +
-      `worst ${check.maxDeviationSec.toFixed(3)}s` +
+      `median ${median.toFixed(3)}s worst ${check.maxDeviationSec.toFixed(3)}s` +
       (check.firstDisagreementIndex >= 0 ? ` (first at #${check.firstDisagreementIndex})` : "") +
-      ` [tolerance ${SEGMENT_START_DISAGREEMENT_SEC}s]`
+      // The discriminator, stated in the same line as the count it explains: a
+      // segment that began at another time the SAME table names was not
+      // mis-described by the table — the grid was built over a gap in it.
+      `; ${landed} of them began at another keyframe the table names` +
+      ` [tolerance ${SEGMENT_START_DISAGREEMENT_SEC}s, ${(session.keyframeTimes?.length ?? 0)} keyframes read]`
     );
   }
 

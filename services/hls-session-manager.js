@@ -1741,6 +1741,14 @@ export class HlsSessionManager {
           })
         : []);
     const usingKeyframeBoundaries = useKeyframeGrid;
+    // What this session will PUBLISH. A member of a family takes its base's
+    // published table verbatim; a session with no base publishes what it cuts
+    // at. The two differ exactly by the corrections made since the family's
+    // first playlist was written, and that difference is what must never reach
+    // the player as two different timelines.
+    const publishedGrid = Array.isArray(inheritedGrid?.published) && inheritedGrid.published.length > 1
+      ? inheritedGrid.published
+      : (hasDuration ? [...segmentBoundaries] : null);
     const segmentCount = segmentBoundaries.length > 1 ? segmentBoundaries.length - 1 : 0;
 
     // Realtime budget (software encoder): pick the output resolution + libx264
@@ -1908,13 +1916,18 @@ export class HlsSessionManager {
       // spliced into the copy (roadmap item 28).
       containerFormat,
       indexCheck: newIndexCheck(),
-      playlistText: hasDuration ? this.#buildVodPlaylist(segmentBoundaries, segmentFormat) : "",
-      // The table AS PUBLISHED, frozen the moment the playlist text is written
-      // from it. `segmentBoundaries` keeps being corrected from produced
-      // segments — that is what makes a re-encoded rung cut like the copy it
-      // joins — but the player's own copy of the timeline never changes, and a
-      // segment must be stamped against the copy the player has.
-      publishedBoundaries: hasDuration ? [...segmentBoundaries] : null,
+      playlistText: hasDuration ? this.#buildVodPlaylist(publishedGrid, segmentFormat) : "",
+      // The table AS PUBLISHED — what every playlist of this family states, and
+      // what every segment of it is stamped against. Inherited whole from the
+      // base when there is one, so a rung or a soundtrack created later
+      // publishes the same timeline as the picture it plays with; only a family
+      // with no base freezes a copy of its own.
+      //
+      // `segmentBoundaries` keeps being corrected from produced segments — that
+      // is what makes a re-encoded rung cut like the copy it joins — and those
+      // corrections deliberately do NOT reach this copy: the player's timeline
+      // was sent once and cannot be revised.
+      publishedBoundaries: publishedGrid,
       // Segment index the current ffmpeg run started producing from.
       encodeStartIndex: 0,
       // Guards against repeatedly restarting to the same seek position.
@@ -6134,8 +6147,14 @@ export class HlsSessionManager {
       inheritedGrid: base.cutGrid === "keyframe"
         ? {
             // The table as it stands NOW, corrections included — not the index
-            // it was first built from.
+            // it was first built from. This is what the new session CUTS at.
             boundaries: base.segmentBoundaries,
+            // And this is what it must SAY, which is not the same thing: every
+            // member of a family has to publish one timeline, or two sessions
+            // stamp the same moment differently and the picture and the sound
+            // drift apart by exactly the corrections made between their two
+            // creations (field 2026-08-17, corrections of 0.6-2.9 s).
+            published: base.publishedBoundaries,
             keyframeTimes: base.keyframeTimes,
             containerFormat: base.containerFormat
           }
@@ -6670,6 +6689,7 @@ export class HlsSessionManager {
       inheritedGrid: base.cutGrid === "keyframe"
         ? {
             boundaries: base.segmentBoundaries,
+            published: base.publishedBoundaries,
             keyframeTimes: base.keyframeTimes,
             containerFormat: base.containerFormat
           }

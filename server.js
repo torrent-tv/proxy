@@ -37,7 +37,7 @@ import { createSourceRegistry } from "./store/source-registry.js";
 import { WorkerTorrentPool } from "./services/torrent-worker/pool-adapter.js";
 import { HlsSessionManager } from "./services/hls-session-manager.js";
 import { createPlaybackPlanner } from "./services/playback-planner.js";
-import { detectVideoEncoder, benchmarkSoftwarePresets, benchmarkDecodeCost, detectTonemapSupport } from "./services/hwaccel.js";
+import { detectVideoEncoder, benchmarkSoftwarePresets, benchmarkDecodeCost, benchmarkContention, detectTonemapSupport } from "./services/hwaccel.js";
 import { logger } from "./utils/logger.js";
 
 const __filename = fileURLToPath(import.meta.url);
@@ -130,6 +130,12 @@ export async function startProxyServer({ host, port, transcodeAudio, ffmpegBin, 
   const decodeCostModel = videoEncoder?.kind === "software"
     ? await benchmarkDecodeCost({ ffmpegBin, logger })
     : null;
+  // What a second job costs on this host. Measured because the budget adds
+  // independent prices and this host says two jobs that each fit alone do not
+  // fit together — 2.6× on the addon box (2026-08-18).
+  const contentionPenalties = videoEncoder?.kind === "software"
+    ? await benchmarkContention({ ffmpegBin, logger })
+    : null;
   const softwarePresetBenchmark = videoEncoder?.kind === "software"
     ? await benchmarkSoftwarePresets({ ffmpegBin, logger })
     : null;
@@ -147,6 +153,7 @@ export async function startProxyServer({ host, port, transcodeAudio, ffmpegBin, 
     videoEncoder,
     softwarePresetBenchmark,
     decodeCostModel,
+    contentionPenalties,
     tonemapSupported,
     segmentFormatId: segmentFormat,
     stateDir,

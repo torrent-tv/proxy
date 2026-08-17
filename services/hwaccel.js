@@ -25,6 +25,7 @@ import { mkdtempSync, readdirSync, rmSync, statSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fitDecodeCost } from "./decode-cost-fit.js";
+import { penaltiesFrom } from "./contention.js";
 import { fileURLToPath } from "node:url";
 import {
   parseFfmpegBitrateKbps,
@@ -751,6 +752,88 @@ function parseClipCharacteristics(stderr) {
  * @param {{ ffmpegBin: string, logger?: { info: (m: string) => void, warn: (m: string) => void }, clipsDir?: string }} options
  * @returns {Promise<{ pixelTerm: number, bitrateTerm: number, constantTerm: number } | null>}
  */
+/**
+ * What a second job costs on this host, measured rather than assumed.
+ *
+ * The budget adds seconds of work per second of content — this encode, plus
+ * that decode, plus what is already committed — and the addon host contradicted
+ * that directly on 2026-08-18: decoding ran at 2.10-2.25x alone, 0.79-0.90x
+ * with one encoder beside it and 0.56-0.64x with two. The same work costs 2.6×
+ * more for having company. Heat is not the cause (the hot idle machine was the
+ * fastest reading of all); four cores sharing one path to memory is.
+ *
+ * So it is measured the way everything else here is: the same clip decoded
+ * alone, then decoded again while an encoder of the same clip runs beside it.
+ * The ratio is the penalty. The encoder is stopped as soon as the reading is
+ * taken, and the whole thing costs one decode plus one short encode.
+ *
+ * @param {{ ffmpegBin: string, logger?: { info: (m: string) => void, warn: (m: string) => void }, clipsDir?: string, upTo?: number }} options
+ * @returns {Promise<Map<number, number> | null>} Penalties by how many other
+ *   jobs were running, or null when the readings could not be taken.
+ */
+export async function benchmarkContention({ ffmpegBin, logger, clipsDir = CALIBRATION_DIR, upTo = 2 }) {
+  const log = logger ?? { info: () => {}, warn: () => {} };
+  // The cheapest clip in the set: this measures the MACHINE's behaviour under
+  // company, not the clip's own cost, so the smallest one says it soonest.
+  const clip = path.join(clipsDir, "cal-h264-480-lo.mp4");
+  const startedAt = Date.now();
+  const alone = await measureDecodeSlope(ffmpegBin, clip);
+  if (!alone) {
+    log.warn("hwaccel: contention could not be measured; costs will be added as though jobs were independent");
+    return null;
+  }
+  /** @type {Array<{ others: number, speed: number }>} */
+  const beside = [];
+  /** @type {import("node:child_process").ChildProcess[]} */
+  const load = [];
+  try {
+    for (let others = 1; others <= Math.max(1, upTo); others += 1) {
+      load.push(
+        spawn(
+          ffmpegBin,
+          [
+            "-hide_banner", "-loglevel", "error", "-nostats",
+            "-stream_loop", "-1", "-i", clip,
+            "-an", "-c:v", "libx264", "-preset", "fast", "-f", "null", "-"
+          ],
+          { stdio: ["ignore", "ignore", "ignore"], windowsHide: true }
+        )
+      );
+      // Let the encoder reach its own speed before reading anything: an encode
+      // measured in its first moments is measuring the process starting.
+      await new Promise((resolve) => {
+        setTimeout(resolve, 2_000);
+      });
+      const withCompany = await measureDecodeSlope(ffmpegBin, clip);
+      if (withCompany) {
+        beside.push({ others, speed: withCompany.speed });
+      }
+    }
+  } finally {
+    for (const child of load) {
+      try {
+        child.kill("SIGKILL");
+      } catch {
+        // Already gone: the reading is what mattered, and nothing else uses it.
+      }
+    }
+  }
+  const penalties = penaltiesFrom(alone.speed, beside);
+  if (!penalties) {
+    log.warn("hwaccel: contention readings said nothing; costs will be added as though jobs were independent");
+    return null;
+  }
+  log.info(
+    `hwaccel: a second job costs ${[...penalties.entries()]
+      .map(([others, penalty]) => `${penalty.toFixed(2)}x beside ${others}`)
+      .join(", ")} ` +
+    `(decode alone ${alone.speed.toFixed(2)}x, ` +
+    `${beside.map((reading) => `${reading.speed.toFixed(2)}x beside ${reading.others}`).join(", ")}, ` +
+    `measured in ${((Date.now() - startedAt) / 1000).toFixed(1)}s)`
+  );
+  return penalties;
+}
+
 export async function benchmarkDecodeCost({ ffmpegBin, logger, clipsDir = CALIBRATION_DIR }) {
   const log = logger ?? { info: () => {}, warn: () => {} };
   const startedAllAt = Date.now();

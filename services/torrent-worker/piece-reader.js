@@ -22,6 +22,7 @@
 
 import { findSharedStore } from "../piece-store/shared-piece-store.js";
 import { logger } from "../../utils/logger.js";
+import { askFastestWiresFor, canPlaceRequests } from "./fastest-wires.js";
 
 /** Only waits at least this long are reported; sequential reading stays silent. */
 const PIECE_WAIT_LOG_MS = 1_000;
@@ -438,6 +439,35 @@ export async function* readFragments({
       }
 
       const waitStartedAt = Date.now();
+      // The reader is blocked, so this piece is now the only thing that matters
+      // on this torrent: hand it to the fastest wires that hold it. A block is
+      // reserved for exactly one wire, and the read ends when the slowest
+      // holder delivers — measured 2026-08-17, the swarm had a fivefold surplus
+      // of bandwidth and the reader still waited 1.0-4.5 s, 47 times in two
+      // minutes, on pieces five peers already had.
+      let pushed = { asked: 0, considered: 0, fastestBytesPerSecond: 0 };
+      const pushToFastest = () => {
+        try {
+          const result = askFastestWiresFor(torrent, pieceIndex);
+          pushed = {
+            asked: pushed.asked + result.asked,
+            considered: result.considered,
+            fastestBytesPerSecond: result.fastestBytesPerSecond
+          };
+        } catch (error) {
+          // The entry is internal to the library; if a version changes it, this
+          // lever stops working and that must be visible rather than silent.
+          logger.warn(`piece-reader: could not steer piece ${pieceIndex} — ${error?.message ?? error}`);
+        }
+      };
+      if (canPlaceRequests(torrent)) {
+        pushToFastest();
+      } else {
+        logger.warn(
+          "piece-reader: this webtorrent build offers no way to place a request; " +
+            "the blocked piece cannot be steered onto a faster peer"
+        );
+      }
       // Sampled while waiting rather than after: once the piece lands, nothing
       // is outstanding on it any more and every count reads zero.
       let supply = null;
@@ -446,6 +476,9 @@ export async function* readFragments({
         if (!supply || sample.blocks > supply.blocks) {
           supply = sample;
         }
+        // Wires come and go, and their speeds change: a holder that was slow a
+        // moment ago may now be the fastest one available.
+        pushToFastest();
       }, 500);
       try {
         await whenPieceReady(torrent, pieceIndex, cancellation);
@@ -482,7 +515,14 @@ export async function* readFragments({
             (supply
               ? `${supply.holders}/${supply.peers} peers had it, ${supply.askedOf} were asked, ` +
                 `${supply.blocks} blocks (${Math.round((supply.blocks * 16384) / 1024)}KB) in flight at peak`
-              : "no sample taken")
+              : "no sample taken") +
+            // What WE did about it, so the next session says whether steering
+            // the piece onto faster holders shortens the tail — by number
+            // rather than by impression.
+            `; steered onto ${pushed.asked} of ${pushed.considered} holders` +
+            (pushed.fastestBytesPerSecond > 0
+              ? `, fastest ${Math.round(pushed.fastestBytesPerSecond / 1024)}KB/s`
+              : "")
         );
       }
 

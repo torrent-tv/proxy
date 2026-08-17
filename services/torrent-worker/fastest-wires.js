@@ -87,7 +87,7 @@ function speedOf(wire) {
  * @param {object} torrent
  * @param {number} pieceIndex
  * @param {number} [limit] - How many wires to push it onto.
- * @returns {{ asked: number, considered: number, fastestBytesPerSecond: number }}
+ * @returns {{ asked: number, attempted: number, considered: number, fastestBytesPerSecond: number }}
  *   `asked` counts requests the library actually placed: it refuses when a
  *   wire's pipeline is full or when nothing can be reserved even with hotswap,
  *   and that refusal is information — a piece nobody can be asked for is
@@ -95,7 +95,7 @@ function speedOf(wire) {
  */
 export function askFastestWiresFor(torrent, pieceIndex, limit = 3) {
   if (!canPlaceRequests(torrent) || !Number.isInteger(pieceIndex) || pieceIndex < 0) {
-    return { asked: 0, considered: 0, fastestBytesPerSecond: 0 };
+    return { asked: 0, attempted: 0, considered: 0, fastestBytesPerSecond: 0 };
   }
   const candidates = wiresForPiece(torrent, pieceIndex);
   let asked = 0;
@@ -116,6 +116,13 @@ export function askFastestWiresFor(torrent, pieceIndex, limit = 3) {
   return {
     asked,
     considered: candidates.length,
+    // How many of the asks the library placed, against how many it was asked
+    // for. The caller sums these over the whole wait, and summing `asked`
+    // against a `considered` taken from the LAST attempt is how the field log
+    // came to read "steered onto 12 of 6 holders" — a ratio of two different
+    // things. Both halves are returned per attempt so the caller can add each
+    // to its own total.
+    attempted: Math.min(candidates.length, Math.max(1, limit)),
     fastestBytesPerSecond: candidates.length > 0 ? speedOf(candidates[0]) : 0
   };
 }

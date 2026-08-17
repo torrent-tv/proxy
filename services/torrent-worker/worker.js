@@ -26,7 +26,7 @@ import "./install-webrtc-shim.js";
 import { parentPort, workerData } from "node:worker_threads";
 import { createSendStream } from "./channel.js";
 import { createFileClaims } from "./file-claims.js";
-import { readFragments } from "./piece-reader.js";
+import { readFragments, supplyFiguresFor } from "./piece-reader.js";
 import { Command, Event } from "./protocol.js";
 
 // Imported dynamically, and that is load-bearing: static imports are RESOLVED
@@ -358,9 +358,20 @@ async function runCommand(command, params, id) {
 
     case Command.FILE_STATS: {
       const torrent = await requireTorrent(params.sourceKey);
-      return pool.getFileStats(torrent, params.fileIndex, {
+      const stats = pool.getFileStats(torrent, params.fileIndex, {
         resumeAnchorByteStart: params.resumeAnchorByteStart ?? null
       });
+      // What this file's own interruptions demand, measured by the reader in
+      // this thread. It travels with the stats because the caller asking for
+      // them is the one that has to decide with them — the browser's smallest
+      // safe buffer, and the speed a quality step must sustain. Null until a
+      // second interruption has been seen: one wait shows no interval, and an
+      // interval invented from one point is exactly what this work removes.
+      const file = Array.isArray(torrent?.files) ? torrent.files[params.fileIndex] : null;
+      return {
+        ...stats,
+        supply: supplyFiguresFor(torrent?.infoHash, file?.name, params.segmentSeconds ?? 4)
+      };
     }
 
     case Command.PRIORITIZE: {

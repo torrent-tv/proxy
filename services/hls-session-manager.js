@@ -3567,30 +3567,22 @@ export class HlsSessionManager {
     const gridCutTimes = explicitTimes && (!session.transcodeVideo || session.cutGrid === "keyframe")
       ? segmentCutTimesFrom(session.segmentBoundaries, safeIndex)
       : null;
-    // On the COPY branch the muxer decides its cuts against the source's own
-    // timestamps, not against the labels we ask it to write. That branch keeps
-    // the source's timestamps (`-copyts`) and re-labels the output 0-based with
-    // `-output_ts_offset -sourceStartTime`; the cut list, being applied before
-    // that relabelling, must therefore be stated in the SOURCE's terms.
+    // Cut times are stated on the grid, for both branches.
     //
-    // Measured 2026-08-17, and this is the whole of the trouble: asked to cut
-    // at 808.808 s on the 0-based grid, ffmpeg cut at 806.806 s — exactly
-    // `sourceStartTime` (2.002 s) early, and 806.806 s is itself a keyframe the
-    // container's table names, which is why every "disagreement" landed on
-    // another real keyframe. The soundtrack, which is re-encoded and takes the
-    // other branch, cut where it was asked. The two then told the shared
-    // boundary table different things and corrected each other back and forth
-    // for the whole session (#202: 808.808 → 806.806 → 808.750 → …), so the
-    // playlist and the media drifted apart by a whole segment and the player
-    // refetched what it could not place.
+    // 2.28.0 added `sourceStartTime` to them on the copy branch, reasoning that
+    // the muxer decides its cuts before the output is relabelled. The field
+    // measured it the next session and the reasoning was wrong: of 75 pieces
+    // the picture produced, only NINE began at a time the container's own
+    // keyframe table names (the soundtrack, untouched by the change, scored 70
+    // of 75). Before it, every piece began exactly on a named keyframe and it
+    // was the PLAYLIST that disagreed with them. So the shift moved the cuts
+    // OFF the keyframes rather than onto them, and it is gone.
     //
-    // Nothing here is a guess about ffmpeg's semantics: the shift is the same
-    // one the seek already applies on this branch (`seekSeconds = startSeconds
-    // + sourceStartTime`), and the field measurement above is what says the
-    // cuts needed it too.
-    const cutTimes = gridCutTimes && onKeyframeGridFor(session) && sourceStartTime !== 0
-      ? gridCutTimes.map((time) => Number((time + sourceStartTime).toFixed(6)))
-      : gridCutTimes;
+    // What remains true, and is what that measurement is really about: the
+    // picture cuts where the source's keyframes are, and the playlist must be
+    // built from those same times. That is the correction path's job, not the
+    // cut list's.
+    const cutTimes = gridCutTimes;
 
     // A second chance for a predecessor that survived the escalation above —
     // the first block is the one that does the work. Its exit is ignored

@@ -517,12 +517,15 @@ export async function* readFragments({
       // holder delivers — measured 2026-08-17, the swarm had a fivefold surplus
       // of bandwidth and the reader still waited 1.0-4.5 s, 47 times in two
       // minutes, on pieces five peers already had.
-      let pushed = { asked: 0, considered: 0, fastestBytesPerSecond: 0 };
+      let pushed = { asked: 0, attempted: 0, considered: 0, fastestBytesPerSecond: 0 };
       const pushToFastest = () => {
         try {
           const result = askFastestWiresFor(torrent, pieceIndex);
           pushed = {
             asked: pushed.asked + result.asked,
+            // Summed like the successes, so the line compares two totals over
+            // the same attempts instead of a total against a snapshot.
+            attempted: (pushed.attempted ?? 0) + result.attempted,
             considered: result.considered,
             fastestBytesPerSecond: result.fastestBytesPerSecond
           };
@@ -592,7 +595,7 @@ export async function* readFragments({
             // What WE did about it, so the next session says whether steering
             // the piece onto faster holders shortens the tail — by number
             // rather than by impression.
-            `; steered onto ${pushed.asked} of ${pushed.considered} holders` +
+            `; steered onto ${pushed.asked} of ${pushed.attempted} asks (${pushed.considered} peers held it)` +
             (pushed.fastestBytesPerSecond > 0
               ? `, fastest ${Math.round(pushed.fastestBytesPerSecond / 1024)}KB/s`
               : "")

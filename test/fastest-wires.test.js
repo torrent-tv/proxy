@@ -97,7 +97,7 @@ test("a build without the request entry is reported, not silently skipped", () =
   assert.equal(canPlaceRequests({ wires: [] }), false);
   assert.equal(canPlaceRequests({ wires: [], _request: () => true }), true);
   const result = askFastestWiresFor({ wires: [wire({ speed: 1 })] }, 1);
-  assert.deepEqual(result, { asked: 0, considered: 0, fastestBytesPerSecond: 0 });
+  assert.deepEqual(result, { asked: 0, attempted: 0, considered: 0, fastestBytesPerSecond: 0 });
 });
 
 test("a wire that cannot say how fast it is ranks last rather than throwing", () => {

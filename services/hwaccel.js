@@ -24,6 +24,7 @@ import { spawn } from "node:child_process";
 import { mkdtempSync, readdirSync, rmSync, statSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { fitDecodeCost } from "./decode-cost-fit.js";
 import { fileURLToPath } from "node:url";
 import {
   parseFfmpegBitrateKbps,
@@ -670,45 +671,28 @@ export async function detectTonemapSupport({ ffmpegBin, logger }) {
   return supported;
 }
 
-/**
- * Solve a 3×3 linear system by Gaussian elimination with partial pivoting.
- *
- * @param {number[][]} rows - Three rows of [c0, c1, c2, rhs].
- * @returns {number[] | null} The three unknowns, or null when singular.
- */
-function solveLinear3(rows) {
-  const m = rows.map((row) => [...row]);
-  for (let col = 0; col < 3; col += 1) {
-    let pivot = col;
-    for (let row = col + 1; row < 3; row += 1) {
-      if (Math.abs(m[row][col]) > Math.abs(m[pivot][col])) {
-        pivot = row;
-      }
-    }
-    if (Math.abs(m[pivot][col]) < 1e-12) {
-      return null;
-    }
-    [m[col], m[pivot]] = [m[pivot], m[col]];
-    for (let row = 0; row < 3; row += 1) {
-      if (row === col) {
-        continue;
-      }
-      const factor = m[row][col] / m[col][col];
-      for (let k = col; k < 4; k += 1) {
-        m[row][k] -= factor * m[col][k];
-      }
-    }
-  }
-  return [m[0][3] / m[0][0], m[1][3] / m[1][1], m[2][3] / m[2][2]];
-}
 
-// The clips the decode cost is solved from. They ship with the package
+// The clips the decode cost is fitted from. They ship with the package
 // (`assets/calibration/`), cut from Netflix Open Content "Meridian" (CC-BY 4.0)
 // — real, grainy live action, because a generated `testsrc2` clip decodes 158 %
-// away from a real film where these are 11 % away (measured 2026-08-14). Two
-// share a pixel count and differ 11.7× in bitrate, the third has the same
-// bitrate class at fewer pixels: three points, three unknowns.
-const CALIBRATION_CLIPS = ["cal-1080-hi.mp4", "cal-1080-lo.mp4", "cal-720.mp4"];
+// away from a real film where these are 11 % away (measured 2026-08-14).
+//
+// Three sizes at two bitrates each, with the axes varied INDEPENDENTLY. The set
+// this replaced was three clips for three unknowns, two of them at the same
+// size: an exact system, which cannot fail visibly. On 2026-08-17 it returned
+// `0.007542 × Mpx/s + 0.000000 × Mbit/s + 0.0000 s/s` — the bitrate term and
+// the constant exactly zero — and the prediction on top of it was 1.8-2.2x
+// optimistic. Six points leave three spare, so the fit has a residual, and a
+// term the data does not determine can be refused instead of published as a
+// zero that looks measured. See `assets/calibration/NOTICE.md`.
+const CALIBRATION_CLIPS = [
+  "cal-h264-1080-hi.mp4",
+  "cal-h264-1080-lo.mp4",
+  "cal-h264-720-hi.mp4",
+  "cal-h264-720-lo.mp4",
+  "cal-h264-480-hi.mp4",
+  "cal-h264-480-lo.mp4"
+];
 const CALIBRATION_DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "assets", "calibration");
 // How wide the measured window must be before the slope is trusted, and how
 // long to wait for it at most. A second of decoding is thousands of frames on a
@@ -770,8 +754,8 @@ function parseClipCharacteristics(stderr) {
 export async function benchmarkDecodeCost({ ffmpegBin, logger, clipsDir = CALIBRATION_DIR }) {
   const log = logger ?? { info: () => {}, warn: () => {} };
   const startedAllAt = Date.now();
-  /** @type {number[][]} */
-  const equations = [];
+  /** @type {Array<{ megapixelsPerSecond: number, megabitsPerSecond: number, costSecondsPerSecond: number }>} */
+  const samples = [];
   for (const clip of CALIBRATION_CLIPS) {
     const measured = await measureDecodeSlope(ffmpegBin, path.join(clipsDir, clip));
     if (!measured) {
@@ -779,21 +763,31 @@ export async function benchmarkDecodeCost({ ffmpegBin, logger, clipsDir = CALIBR
       return null;
     }
     const cost = 1 / measured.speed;
-    equations.push([measured.megapixelsPerSecond, measured.megabitsPerSecond, 1, cost]);
+    samples.push({
+      megapixelsPerSecond: measured.megapixelsPerSecond,
+      megabitsPerSecond: measured.megabitsPerSecond,
+      costSecondsPerSecond: cost
+    });
     log.info(
       `hwaccel: decode "${clip}" ${measured.megapixelsPerSecond.toFixed(1)} Mpx/s ` +
         `${measured.megabitsPerSecond.toFixed(2)} Mbit/s -> ${measured.speed.toFixed(1)}x ` +
         `(cost ${cost.toFixed(4)} s/s, over ${measured.windowSec.toFixed(1)}s of decoding)`
     );
   }
-  const fitted = fitDecodeCost(equations);
+  const fitted = fitDecodeCost(samples);
   if (!fitted) {
     log.warn("hwaccel: decode cost could not be fitted to these measurements; decode cost unknown");
     return null;
   }
   log.info(
     `hwaccel: decode cost = ${fitted.pixelTerm.toFixed(6)} × Mpx/s + ${fitted.bitrateTerm.toFixed(6)} × Mbit/s ` +
-      `+ ${fitted.constantTerm.toFixed(4)} s/s (${fitted.shape}, measured in ${((Date.now() - startedAllAt) / 1000).toFixed(1)}s)`
+      `+ ${fitted.constantTerm.toFixed(4)} s/s (${fitted.shape} from ${fitted.samples} clips, ` +
+      `typical disagreement ${fitted.residualRms.toFixed(4)} s/s` +
+      // Named rather than implied: a zero in the line above means "not
+      // measured" for a dropped term and "measured to be nothing" otherwise,
+      // and those are different claims.
+      (fitted.dropped.length > 0 ? `, ${fitted.dropped.join(" and ")} not determined by these clips` : "") +
+      `, measured in ${((Date.now() - startedAllAt) / 1000).toFixed(1)}s)`
   );
   return { pixelTerm: fitted.pixelTerm, bitrateTerm: fitted.bitrateTerm, constantTerm: fitted.constantTerm };
 }
@@ -911,65 +905,6 @@ function measureDecodeSlope(ffmpegBin, clipPath) {
   });
 }
 
-/**
- * Fit the three measurements, and say which shape the data supported.
- *
- * The three-term fit is exact — three points, three unknowns — and is used
- * whenever every term comes out non-negative. A negative term is not a host
- * being odd; it says the difference it was solved from is smaller than the
- * noise between runs, which is what a fast machine produces: measured on a
- * desktop, the 720p clip took LONGER per second than the low-bitrate 1080p one,
- * because process startup is a large share of a decode that takes a second.
- *
- * When that happens the bitrate term — the weak one, and the one solved from a
- * single difference — is dropped and the remaining two are fitted by least
- * squares over all three points. If even the pixel slope comes out non-positive
- * there is no measurable dependence on the source at all, and inventing one is
- * worse than having none: the caller then prices the encoder alone and refuses
- * nothing.
- *
- * @param {number[][]} equations - Rows of [Mpixel/s, Mbit/s, 1, cost].
- * @returns {{ pixelTerm: number, bitrateTerm: number, constantTerm: number, shape: string } | null}
- */
-function fitDecodeCost(equations) {
-  const exact = solveLinear3(equations);
-  if (exact && exact[0] > 0 && exact[1] >= 0 && exact[2] >= 0) {
-    return { pixelTerm: exact[0], bitrateTerm: exact[1], constantTerm: exact[2], shape: "pixels+bitrate+constant" };
-  }
-  const count = equations.length;
-  const meanPixels = equations.reduce((sum, row) => sum + row[0], 0) / count;
-  const meanCost = equations.reduce((sum, row) => sum + row[3], 0) / count;
-  let covariance = 0;
-  let variance = 0;
-  for (const row of equations) {
-    covariance += (row[0] - meanPixels) * (row[3] - meanCost);
-    variance += (row[0] - meanPixels) ** 2;
-  }
-  if (!(variance > 0)) {
-    return null;
-  }
-  const pixelTerm = covariance / variance;
-  const constantTerm = meanCost - pixelTerm * meanPixels;
-  if (pixelTerm > 0 && constantTerm >= 0) {
-    return { pixelTerm, bitrateTerm: 0, constantTerm, shape: "pixels+constant" };
-  }
-  // A negative constant is the line crossing below zero where no clip was
-  // measured — every clip is 22 Mpixel/s or more, and nothing here says what a
-  // tiny picture costs. Rather than carry a term that would price a small
-  // source as free work, fit through the origin: cost proportional to pixels,
-  // which is the relationship the measurements do support.
-  let weighted = 0;
-  let squares = 0;
-  for (const row of equations) {
-    weighted += row[0] * row[3];
-    squares += row[0] ** 2;
-  }
-  const throughOrigin = squares > 0 ? weighted / squares : 0;
-  if (!(throughOrigin > 0)) {
-    return null;
-  }
-  return { pixelTerm: throughOrigin, bitrateTerm: 0, constantTerm: 0, shape: "pixels only" };
-}
 
 /**
  * How many times realtime this host can DECODE a source of these

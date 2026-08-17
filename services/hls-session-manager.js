@@ -25,7 +25,8 @@ import {
   ENCODE_RUN_STATE,
   INITIAL_RUN_STATE,
   nextState,
-  processCanBeSignalled
+  processCanBeSignalled,
+  wireState
 } from "./encode-run-state.js";
 import { ENCODE_EXIT, classifyEncodeExit } from "./encode-exit.js";
 
@@ -1854,17 +1855,23 @@ export class HlsSessionManager {
       sourceMapKey,
       fileName: logName,
       dirPath: sessionDir,
-      state: "starting",
+      // The SESSION's own lifetime, and nothing else: it exists, or it has been
+      // disposed. It used to carry the encoder run's status as well, which is
+      // why one line in the spawn path read `state === "disposed" ? "disposed"
+      // : "starting"` — two lifetimes in one variable. The run's status lives
+      // in `runState`.
+      state: "live",
       startedAt: Date.now(),
       lastAccessedAt: Date.now(),
       ffmpeg: null,
       encodeRunGeneration: 0,
       // What the ENCODER RUN is doing, as one control state from the table in
-      // `encode-run-state.js`. Written at every event today and read by nothing
-      // yet: a refused pair in the log is the model disagreeing with reality,
-      // and that disagreement is the measurement this release exists to take.
-      // The fields it replaces — `state`, `progress.state`
-      // and the repeated liveness checks — keep their current writes meanwhile.
+      // `encode-run-state.js`. Every question about the run is now answered
+      // from here: whether a process can be signalled, whether anything is
+      // reading the input, what a missing segment is answered with, and what
+      // the browser is told. The three representations it replaced — a status
+      // string, a second status string on the wire, and a child-process handle
+      // consulted at ten sites — could disagree with each other, and did.
       runState: INITIAL_RUN_STATE,
       lastError: "",
       // Cold-start timing: entry timestamp + a once-guard so the first servable
@@ -2007,7 +2014,10 @@ export class HlsSessionManager {
       seekFailureTarget: -1,
       seekFailureCount: 0,
       progress: {
-        state: "starting",
+        // No `state` here. What the browser is told is `wireState(runState)`,
+        // computed where it is sent — a Moore output rather than a field
+        // maintained by hand at seven sites, which is how it came to be read
+        // together with `session.state` under an `||`.
         processedSeconds: 0,
         startPositionSeconds: 0,
         totalSeconds: hasDuration ? durationSeconds : null,
@@ -2099,7 +2109,7 @@ export class HlsSessionManager {
       await this.waitUntilReady(session);
       return session;
     } catch (error) {
-      if (session.state === "failed") {
+      if (session.runState === ENCODE_RUN_STATE.ENDED_FAILED) {
         await this.disposeSession(session.id);
         throw error;
       }
@@ -3253,7 +3263,7 @@ export class HlsSessionManager {
       if (
         !session ||
         session.state === "disposed" ||
-        session.state === "failed" ||
+        session.runState === ENCODE_RUN_STATE.ENDED_FAILED ||
         !session.transcodeVideo ||
         // Nothing is encoding, so there is no speed to judge. A variant the
         // viewer has switched away from is left in exactly this state, and its
@@ -3812,8 +3822,6 @@ export class HlsSessionManager {
     session.encodeStartIndex = safeIndex;
     session.pendingRestartIndex = -1;
     session.lastRestartAt = Date.now();
-    session.state = session.state === "disposed" ? "disposed" : "starting";
-    session.progress.state = "running";
     session.progress.processedSeconds = startSeconds;
     session.progress.startPositionSeconds = startSeconds;
     session.progress.updatedAt = Date.now();
@@ -3912,7 +3920,6 @@ export class HlsSessionManager {
         } else if (key === "speed") {
           session.progress.speed = value;
         } else if (key === "progress") {
-          session.progress.state = value === "end" ? "ready" : "running";
         }
         const metrics = computeProgressMetrics(
           session.progress.processedSeconds,
@@ -3948,9 +3955,7 @@ export class HlsSessionManager {
       if (!this.#isCurrentRun(session, ffmpeg)) {
         return;
       }
-      session.state = "failed";
       session.lastError = error instanceof Error ? error.message : String(error);
-      session.progress.state = "failed";
       session.progress.updatedAt = Date.now();
       this.#transitionRun(session, ENCODE_RUN_EVENT.EXITED_FAILED);
       logger.error(`ffmpeg ${session.id} process error: ${session.lastError}`);
@@ -3989,9 +3994,7 @@ export class HlsSessionManager {
         // segment nobody was making. So the claim is checked against the
         // playlist we published, and a run that stopped short is a FAILURE that
         // can be restarted, not a finished file.
-        session.state = "failed";
-        session.progress.state = "failed";
-        session.progress.updatedAt = Date.now();
+            session.progress.updatedAt = Date.now();
         session.lastError =
           `input ended after segment #${producedThrough} of ${expectedLast} — ` +
           "the source stopped delivering data";
@@ -4003,8 +4006,6 @@ export class HlsSessionManager {
         return;
       }
       if (outcome === ENCODE_EXIT.COMPLETE) {
-        session.state = "ready";
-        session.progress.state = "ready";
         session.progress.updatedAt = Date.now();
         this.#transitionRun(session, ENCODE_RUN_EVENT.EXITED_COMPLETE);
         logger.info(`transcode ${session.id} encode-run complete "${session.fileName}"`);
@@ -4066,11 +4067,9 @@ export class HlsSessionManager {
       // stays for what it was built for, a target that genuinely cannot be
       // encoded; it must not condemn a session whose data merely went away.
       if (outcome === ENCODE_EXIT.INPUT_LOST) {
-        session.state = "recovering";
         // On the wire it is simply "not ready yet" — a state the browser has
         // always known how to wait through. Only the proxy needs the
         // distinction between waiting for data and having given up.
-        session.progress.state = "starting";
         session.progress.updatedAt = Date.now();
         this.#transitionRun(session, ENCODE_RUN_EVENT.EXITED_INPUT_LOST);
         session.inputRetryCount = (session.inputRetryCount ?? 0) + 1;
@@ -4085,7 +4084,7 @@ export class HlsSessionManager {
         );
         session.inputRetryTimer = setTimeout(() => {
           session.inputRetryTimer = null;
-          if (session.state !== "recovering") {
+          if (session.runState !== ENCODE_RUN_STATE.RETRY_WAIT) {
             return;
           }
           this.#transitionRun(session, ENCODE_RUN_EVENT.RETRY_DUE);
@@ -4097,8 +4096,6 @@ export class HlsSessionManager {
         session.inputRetryTimer.unref?.();
         return;
       }
-      session.state = "failed";
-      session.progress.state = "failed";
       session.progress.updatedAt = Date.now();
       this.#transitionRun(session, ENCODE_RUN_EVENT.EXITED_FAILED);
       logger.error(
@@ -4579,10 +4576,9 @@ export class HlsSessionManager {
     // Individual segments are long-polled by the segment route as ffmpeg
     // produces them.
     if (session.useSyntheticPlaylist) {
-      if (session.state === "failed") {
+      if (session.runState === ENCODE_RUN_STATE.ENDED_FAILED) {
         throw new Error(session.lastError || "ffmpeg failed to start HLS session.");
       }
-      session.state = "ready";
       return;
     }
 
@@ -4590,15 +4586,14 @@ export class HlsSessionManager {
     const deadline = Date.now() + this.startupWaitMs;
 
     while (Date.now() < deadline) {
-      if (session.state === "failed") {
+      if (session.runState === ENCODE_RUN_STATE.ENDED_FAILED) {
         throw new Error(session.lastError || "ffmpeg failed to start HLS session.");
       }
       try {
         await access(playlistPath);
         const text = await readFile(playlistPath, "utf8");
         if (text.includes("#EXTM3U")) {
-          session.state = "ready";
-          return;
+            return;
         }
       } catch (_error) {
         // Playlist is not ready yet.
@@ -5114,7 +5109,14 @@ export class HlsSessionManager {
     const median = deviations.length > 0 ? deviations[Math.floor(deviations.length / 2)] : 0;
     const landed = check.landedOnAnotherKeyframe ?? 0;
     logger.info(
-      `keyframe-index ${session.containerFormat || "unknown"} "${session.fileName}": ` +
+      // The session id, because without it this line cannot be attributed. A
+      // family produces one summary per member — the picture and each
+      // soundtrack — and on 2026-08-17 the picture's was read as the sound's,
+      // from a neighbouring log line, and a roadmap item was written against
+      // the wrong half of the stream. The id is the only thing that says whose
+      // reading this is.
+      `keyframe-index ${session.id.slice(0, 8)} ${session.audioOnly === true ? "sound" : "picture"} ` +
+      `${session.containerFormat || "unknown"} "${session.fileName}": ` +
       `${check.disagreed} of ${check.checked} produced segments started away from the playlist, ` +
       `median ${median.toFixed(3)}s worst ${check.maxDeviationSec.toFixed(3)}s` +
       (check.firstDisagreementIndex >= 0 ? ` (first at #${check.firstDisagreementIndex})` : "") +
@@ -5374,7 +5376,7 @@ export class HlsSessionManager {
     if (
       !session ||
       session.state === "disposed" ||
-      session.state === "failed" ||
+      session.runState === ENCODE_RUN_STATE.ENDED_FAILED ||
       !session.ffmpeg ||
       session.runState === ENCODE_RUN_STATE.SUSPENDED
     ) {
@@ -6923,13 +6925,13 @@ export class HlsSessionManager {
     if (!session || !isSafeFileName(fileName, session.segmentFormat)) {
       return { kind: "not-found" };
     }
-    if (session.state === "recovering") {
+    if (session.runState === ENCODE_RUN_STATE.RETRY_WAIT) {
       // The data went away and is being fetched again. Holding the request is
       // the truthful answer: nothing is broken and there is nothing for the
       // viewer to retry.
       return { kind: "warming-up" };
     }
-    if (session.state === "failed") {
+    if (session.runState === ENCODE_RUN_STATE.ENDED_FAILED) {
       return {
         kind: "failed",
         message: session.lastError || "ffmpeg failed for this transcode session."
@@ -7496,7 +7498,11 @@ export class HlsSessionManager {
     session.lastAccessedAt = Date.now();
     const warmupTotalSeconds = this.startupWaitMs / 1000;
     const warmupElapsedSeconds = Math.max(0, (Date.now() - session.startedAt) / 1000);
-    const isWarmupPhase = session.state === "starting" || session.progress.state === "starting";
+    // One question, one answer. This used to read BOTH strings with `||`
+    // because neither could answer alone: `session.state` said "starting" from
+    // the first spawn until something else overwrote it, and `progress.state`
+    // said it again on its own schedule.
+    const isWarmupPhase = wireState(session.runState) === "starting";
     const warmupPercent = isWarmupPhase
       ? Math.max(0, Math.min(100, (warmupElapsedSeconds / warmupTotalSeconds) * 100))
       : null;
@@ -7514,7 +7520,7 @@ export class HlsSessionManager {
       // The id the caller asked about, not the variant it was answered from —
       // the browser tracks its sessions by the id it was given.
       sessionId: named.id,
-      state: session.progress.state,
+      state: wireState(session.runState),
       processedSeconds: session.progress.processedSeconds,
       startPositionSeconds: session.progress.startPositionSeconds ?? 0,
       totalSeconds: session.progress.totalSeconds,
@@ -7554,7 +7560,7 @@ export class HlsSessionManager {
       expectedSessionCreateMs: this.expectedSessionCreateMs(),
       expectedFirstSegmentMs: this.expectedFirstSegmentMs(),
       updatedAt: session.progress.updatedAt,
-      error: session.state === "failed" ? session.lastError : ""
+      error: session.runState === ENCODE_RUN_STATE.ENDED_FAILED ? session.lastError : ""
     };
   }
 

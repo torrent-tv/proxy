@@ -542,6 +542,17 @@ const SEGMENT_READ_HIGH_WATER_MARK = 4 * 1024 * 1024;
 const SEGMENT_START_DISAGREEMENT_SEC = 0.25;
 
 /**
+ * How far a fragment may land from where the playlist put it before the player
+ * stops recognising it as buffered.
+ *
+ * hls.js's own `maxBufferHole`, whose default is 0.5 s: a gap smaller than this
+ * is skipped, a gap larger is a hole, and a fragment appended across one is
+ * judged not to have loaded — so the player asks for it again, and again.
+ * Taken from the player's published default rather than chosen here.
+ */
+const PLAYER_BUFFER_HOLE_SEC = 0.5;
+
+/**
  * Resolve after a given number of milliseconds.
  *
  * @param {number} ms
@@ -1898,6 +1909,12 @@ export class HlsSessionManager {
       containerFormat,
       indexCheck: newIndexCheck(),
       playlistText: hasDuration ? this.#buildVodPlaylist(segmentBoundaries, segmentFormat) : "",
+      // The table AS PUBLISHED, frozen the moment the playlist text is written
+      // from it. `segmentBoundaries` keeps being corrected from produced
+      // segments — that is what makes a re-encoded rung cut like the copy it
+      // joins — but the player's own copy of the timeline never changes, and a
+      // segment must be stamped against the copy the player has.
+      publishedBoundaries: hasDuration ? [...segmentBoundaries] : null,
       // Segment index the current ffmpeg run started producing from.
       encodeStartIndex: 0,
       // Guards against repeatedly restarting to the same seek position.
@@ -2321,6 +2338,65 @@ export class HlsSessionManager {
     }
     const clamped = Math.max(0, Math.min(index, boundaries.length - 1));
     return boundaries[clamped];
+  }
+
+  /**
+   * Start time of segment `index` AS THE PLAYER WAS TOLD IT — from the boundary
+   * table as it stood when this session's playlist text was built.
+   *
+   * Two tables, deliberately: the live one is corrected as produced segments
+   * reveal where the file's cuts truly are, and those corrections are what let a
+   * re-encoded rung be forced onto a copied stream's real grid. But the playlist
+   * a player is holding was written once and never changes, so a stamp taken
+   * from the corrected table describes a timeline nobody sent the player. That
+   * is not a subtlety: it cost ten minutes of a dead film on 2026-08-17, the
+   * browser asking for two segments 1908 times each.
+   *
+   * @param {HlsSession} session
+   * @param {number} index
+   * @returns {number}
+   */
+  #publishedStartTime(session, index) {
+    const boundaries = Array.isArray(session.publishedBoundaries) && session.publishedBoundaries.length > 0
+      ? session.publishedBoundaries
+      : null;
+    if (!boundaries) {
+      // No playlist was published from a table (no duration, so no synthetic
+      // playlist): the live table is all there is, and it has not been
+      // contradicted by anything the player holds.
+      return this.#segmentStartTime(session, index);
+    }
+    const clamped = Math.max(0, Math.min(index, boundaries.length - 1));
+    return boundaries[clamped];
+  }
+
+  /**
+   * Report a segment whose own timeline disagrees with the playlist by more
+   * than a player will bridge.
+   *
+   * Once per segment per five seconds, like every other repeating condition
+   * here: the same segment is requested again and again while it is refused,
+   * and a line each time buries the first one.
+   *
+   * @param {HlsSession} session
+   * @param {number} index
+   * @param {number} trueStart
+   * @param {number} publishedStart
+   * @returns {void}
+   */
+  #notePlaylistDisagreement(session, index, trueStart, publishedStart) {
+    const now = Date.now();
+    session.stampWarnedAt ??= new Map();
+    if (now - (session.stampWarnedAt.get(index) ?? 0) < 5_000) {
+      return;
+    }
+    session.stampWarnedAt.set(index, now);
+    logger.warn(
+      `transcode ${session.id} segment #${index} carries ${trueStart.toFixed(3)}s while the playlist ` +
+      `the player holds says ${publishedStart.toFixed(3)}s — a gap of ` +
+      `${Math.abs(trueStart - publishedStart).toFixed(3)}s, beyond the ${PLAYER_BUFFER_HOLE_SEC}s a player ` +
+      "bridges; stamping it where the playlist says so the fragment lands where it was asked for"
+    );
   }
 
   /**
@@ -6960,8 +7036,36 @@ export class HlsSessionManager {
         if (trueStart !== null) {
           this.#noteIndexAccuracy(session, index, trueStart, declaredStart);
         }
+        // WHERE THE PLAYER WAS TOLD THIS SEGMENT BEGINS, which is the playlist
+        // it holds and nothing else. The published text is fixed when the
+        // session is created; `#segmentStartTime` reads a table that a
+        // correction may since have moved, and a stamp taken from the moved
+        // table describes a timeline the player has never seen.
+        const publishedStart = this.#publishedStartTime(session, index);
+        // A player places a fragment by the playlist. If the bytes claim a
+        // different position, the fragment does not land where the fragment was
+        // expected, hls.js finds the range still unbuffered and asks for the
+        // same fragment again — for ever. Measured 2026-08-17: a seek to
+        // 1590.4 s produced audio segments #292/#293 whose own timeline said
+        // 1587.892 and 1592.692 against a playlist saying 1585.376 and
+        // 1590.585, and the browser fetched those two segments 1908 times each
+        // over ten minutes, every one of them served in 4 ms. The film was dead
+        // and no line said why.
+        //
+        // So the stamp follows the playlist whenever the two disagree by more
+        // than a player will bridge. hls.js bridges up to `maxBufferHole`,
+        // which it defaults to 0.5 s — that is the player's own published
+        // figure, not a number chosen here. Within it the file's own position
+        // is kept, because it is the honest one and it is what keeps speech and
+        // subtitles together on a file whose index is slightly out (2026-08-06,
+        // 4.17 s of drift on a Matroska index that lied).
+        let stampStart = trueStart ?? publishedStart;
+        if (trueStart !== null && Math.abs(trueStart - publishedStart) > PLAYER_BUFFER_HOLE_SEC) {
+          stampStart = publishedStart;
+          this.#notePlaylistDisagreement(session, index, trueStart, publishedStart);
+        }
         const prepared = session.segmentFormat.prepareSegmentBytes(bytes, {
-          startSeconds: trueStart ?? declaredStart,
+          startSeconds: stampStart,
           initBytes: session.initBytes ?? null
         });
         this.#noteRunProducedSegment(session, filePath);

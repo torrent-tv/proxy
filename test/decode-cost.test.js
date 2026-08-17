@@ -211,7 +211,7 @@ test("a real ffmpeg banner reads into the figures the budget prices", async () =
     let text = "";
     const child = spawn(
       ffmpegBin,
-      ["-hide_banner", "-loglevel", "info", "-i", path.join(CALIBRATION_DIR, "cal-720.mp4"), "-t", "0.1", "-f", "null", "-"],
+      ["-hide_banner", "-loglevel", "info", "-i", path.join(CALIBRATION_DIR, "cal-h264-720-hi.mp4"), "-t", "0.1", "-f", "null", "-"],
       { stdio: ["ignore", "ignore", "pipe"], windowsHide: true }
     );
     child.stderr.on("data", (chunk) => {
@@ -220,11 +220,11 @@ test("a real ffmpeg banner reads into the figures the budget prices", async () =
     child.on("close", () => resolve(text));
   });
 
-  // The VIDEO stream's rate (2248), not the container's (2252). On a clip that
+  // The VIDEO stream's rate (9940), not the container's (9946). On a clip that
   // carries nothing else the two differ only by container overhead; on a film
   // with two AC-3 tracks they differ by the whole of the audio, and the fit
   // these figures feed was made from clips decoded with `-an`.
-  assert.equal(parseFfmpegBitrateKbps(stderr), 2248, "the video stream's own bitrate, in kb/s");
+  assert.equal(parseFfmpegBitrateKbps(stderr), 9940, "the video stream's own bitrate, in kb/s");
   const dimensions = parseFfmpegVideoDimensions(stderr);
   const figures = sourceDecodeCharacteristics({
     width: dimensions.width,
@@ -233,7 +233,7 @@ test("a real ffmpeg banner reads into the figures the budget prices", async () =
     bitrateKbps: parseFfmpegBitrateKbps(stderr)
   });
   assert.ok(Math.abs(figures.megapixelsPerSecond - (1280 * 720 * 24) / 1e6) < 0.01);
-  assert.ok(Math.abs(figures.megabitsPerSecond - 2.248) < 0.001);
+  assert.ok(Math.abs(figures.megabitsPerSecond - 9.94) < 0.001);
 });
 
 test("the video stream's bitrate is preferred, and the output's is never read", () => {

@@ -340,6 +340,39 @@ const supplyReportedAt = new Map();
  * @param {number} waitedMs
  * @returns {void}
  */
+/**
+ * What this file's recent interruptions demand, for a caller that has to decide
+ * something with them.
+ *
+ * Exported because the figures are measured HERE — the reader is the only place
+ * that knows how long it waited — while the decisions they feed are made
+ * elsewhere: the smallest buffer that hides an interruption goes to the browser,
+ * and the speed a step must sustain goes to the quality offer.
+ *
+ * @param {string} infoHash
+ * @param {string} fileName
+ * @param {number} segmentSeconds - The session's own segment duration.
+ * @returns {{ requiredSpeed: number, worstWaitSec: number, medianIntervalSec: number, samples: number, minimumBufferSec: number } | null}
+ */
+export function supplyFiguresFor(infoHash, fileName, segmentSeconds) {
+  const history = supplyWaits.get(`${infoHash ?? "?"}/${fileName ?? "?"}`);
+  const demand = requiredSpeedFrom(history ?? []);
+  if (!demand) {
+    return null;
+  }
+  const buffer = minimumBufferFrom({
+    segmentSeconds,
+    worstSupplyWaitSec: demand.worstWaitSec
+  });
+  return {
+    requiredSpeed: demand.requiredSpeed,
+    worstWaitSec: demand.worstWaitSec,
+    medianIntervalSec: demand.medianIntervalSec,
+    samples: demand.samples,
+    minimumBufferSec: buffer ? buffer.seconds : null
+  };
+}
+
 function noteSupplyWait(key, label, waitedMs) {
   const history = supplyWaits.get(key) ?? [];
   history.push({ waitedMs, at: Date.now() });

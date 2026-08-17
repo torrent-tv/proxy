@@ -21,6 +21,7 @@ import { readKeyframeIndex } from "./container-index/index.js";
 import { readMachineState, readProcessCpuSeconds, readProxyCpuSeconds, readSystemCpu, shareOfMachine } from "./host-load.js";
 import { speedFromReadings } from "./encoder-readings.js";
 import { availableShareFrom, correctForAvailability } from "./available-share.js";
+import { minimumBufferFrom } from "./supply-margin.js";
 import {
   ENCODE_RUN_EVENT,
   ENCODE_RUN_STATE,
@@ -3367,6 +3368,12 @@ export class HlsSessionManager {
     }
     if (!stats) {
       return "unknown";
+    }
+    // What this file's own interruptions demand, measured by the reader. Kept
+    // on the session because the browser is told the buffer that follows from
+    // it, and because the quality offer will be held to the speed it names.
+    if (stats.supply) {
+      session.supplyFigures = stats.supply;
     }
     // A fully (or almost fully) downloaded file cannot be download-bound.
     if (typeof stats.fileProgress === "number" && stats.fileProgress >= 0.999) {
@@ -7589,6 +7596,17 @@ export class HlsSessionManager {
       // the browser tracks its sessions by the id it was given.
       sessionId: named.id,
       state: wireState(session.runState),
+      // The smallest buffer at which no interruption reaches the viewer, from
+      // THIS file's own recent interruptions: one whole segment — the one being
+      // played — plus the worst wait that can arrive before the buffer refills.
+      // On the field torrent that is 7-9 s where the browser waits for a
+      // hand-chosen 25, which is sixteen seconds of staring at a spinner that
+      // nothing had shown to be necessary. Null until the reader has seen two
+      // interruptions; the browser keeps its own figure until then.
+      minimumBufferSeconds: minimumBufferFrom({
+        segmentSeconds: this.segmentDurationSec,
+        worstSupplyWaitSec: session.supplyFigures?.worstWaitSec
+      })?.seconds ?? null,
       processedSeconds: session.progress.processedSeconds,
       startPositionSeconds: session.progress.startPositionSeconds ?? 0,
       totalSeconds: session.progress.totalSeconds,

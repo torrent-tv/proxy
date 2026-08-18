@@ -28,6 +28,14 @@ const ID_TIMESTAMP_SCALE = 0x2ad7b1;
 const ID_CUES = 0x1c53bb6b;
 const ID_CUE_POINT = 0xbb;
 const ID_CUE_TIME = 0xb3;
+const ID_CUE_TRACK_POSITIONS = 0xb7;
+const ID_CUE_TRACK = 0xf7;
+const ID_TRACKS = 0x1654ae6b;
+const ID_TRACK_ENTRY = 0xae;
+const ID_TRACK_NUMBER = 0xd7;
+const ID_TRACK_TYPE = 0x83;
+// TrackType 1 is video; 2 is audio, 17 subtitles, and the rest are rarer still.
+const TRACK_TYPE_VIDEO = 1;
 
 // How much of the file start to read. Must cover the EBML header, the SeekHead
 // and Info; 64 KB is generous for every real muxer (the file measured needed
@@ -36,6 +44,10 @@ const HEAD_BYTES = 64 * 1024;
 // Cap on the Cues read. A two-hour film indexes to tens of KB; anything beyond
 // this is not a normal index and not worth pulling over a torrent.
 const MAX_CUES_BYTES = 8 * 1024 * 1024;
+// Cap on a Tracks read, for the rare file whose Tracks element sits outside the
+// head window. Track entries are small, so a file with dozens of them still
+// fits well inside this.
+const MAX_TRACKS_BYTES = 1024 * 1024;
 // Matroska's default timestamp scale (nanoseconds per tick) when Info omits it.
 const DEFAULT_TIMESTAMP_SCALE = 1_000_000;
 
@@ -121,13 +133,64 @@ function readTimestampScale(head, segmentDataOffset) {
 }
 
 /**
- * Cue times (seconds, ascending) from a Cues payload.
+ * The number of the first video track, from a Tracks payload.
+ *
+ * The FIRST one, because that is the track ffmpeg is told to copy (`0:v:0`).
+ *
+ * @param {Buffer} buffer
+ * @param {{ dataOffset: number, size: number }} tracks
+ * @returns {number | null}
+ */
+function readVideoTrackNumber(buffer, tracks) {
+  const tracksEnd = Math.min(buffer.length, tracks.dataOffset + tracks.size);
+  for (const entry of iterateElements(buffer, tracks.dataOffset, tracksEnd)) {
+    if (entry.id !== ID_TRACK_ENTRY) {
+      continue;
+    }
+    const entryEnd = Math.min(tracksEnd, entry.dataOffset + entry.size);
+    let number = null;
+    let type = null;
+    for (const field of iterateElements(buffer, entry.dataOffset, entryEnd)) {
+      if (field.id === ID_TRACK_NUMBER) {
+        number = readUint(buffer, field.dataOffset, field.size);
+      } else if (field.id === ID_TRACK_TYPE) {
+        type = readUint(buffer, field.dataOffset, field.size);
+      }
+    }
+    if (number !== null && type === TRACK_TYPE_VIDEO) {
+      return number;
+    }
+  }
+  return null;
+}
+
+/**
+ * Cue times (seconds, ascending) of ONE track, from a Cues payload.
+ *
+ * The track is the whole point, and leaving it out is what this reader got
+ * wrong until 2026-08-18. A CuePoint belongs to the track named inside its
+ * CueTrackPositions, and a muxer indexes whatever tracks it likes: RFC 9559
+ * says each keyframe of a video track SHOULD be referenced, and that the Cues
+ * Element "can be used to index every single timestamp of every Block or they
+ * can be indexed selectively". Both field files index their SUBTITLE tracks as
+ * well — `Minions.and.Monsters.1080p.mkv` has 2778 video entries every 2.002 s
+ * plus 4669 across four subtitle tracks; `Moana.2 … MegaPeer.mkv` has 1055
+ * video entries plus 5007 across five.
+ *
+ * Read without the track, those extra times enter the cut list as though they
+ * were keyframes. ffmpeg can only cut a COPIED picture at a real keyframe at or
+ * after the time it is given, so every cut asked for at one of them lands late
+ * — which is exactly what the field measured: on the first file every deviation
+ * was 2.002 s, that file's own keyframe spacing, and on the second the median
+ * was 6.3 s with a worst case of 21 s. Never once negative.
  *
  * @param {Buffer} cues
  * @param {number} timestampScale - Nanoseconds per tick.
+ * @param {number | null} trackNumber - Null keeps every entry, which is right
+ *   only for a file that indexes one track.
  * @returns {number[]}
  */
-function readCueTimes(cues, timestampScale) {
+function readCueTimes(cues, timestampScale, trackNumber) {
   const times = [];
   const secondsPerTick = timestampScale / 1e9;
   for (const point of iterateElements(cues)) {
@@ -135,11 +198,26 @@ function readCueTimes(cues, timestampScale) {
       continue;
     }
     const pointEnd = Math.min(cues.length, point.dataOffset + point.size);
+    let time = null;
+    let belongsToTrack = trackNumber === null;
     for (const field of iterateElements(cues, point.dataOffset, pointEnd)) {
       if (field.id === ID_CUE_TIME) {
-        times.push(readUint(cues, field.dataOffset, field.size) * secondsPerTick);
-        break;
+        time = readUint(cues, field.dataOffset, field.size) * secondsPerTick;
+        continue;
       }
+      if (field.id !== ID_CUE_TRACK_POSITIONS || belongsToTrack) {
+        continue;
+      }
+      const positionsEnd = Math.min(pointEnd, field.dataOffset + field.size);
+      for (const inner of iterateElements(cues, field.dataOffset, positionsEnd)) {
+        if (inner.id === ID_CUE_TRACK && readUint(cues, inner.dataOffset, inner.size) === trackNumber) {
+          belongsToTrack = true;
+          break;
+        }
+      }
+    }
+    if (time !== null && belongsToTrack) {
+      times.push(time);
     }
   }
   times.sort((left, right) => left - right);
@@ -195,6 +273,64 @@ export async function readMatroskaKeyframeTimes(readRange, fileSize) {
   const payloadEnd = Math.min(cuesChunk.length, cuesElement.dataOffset + cuesElement.size);
   const payload = cuesChunk.subarray(cuesElement.dataOffset, payloadEnd);
 
-  const times = readCueTimes(payload, readTimestampScale(head, seekHead.segmentDataOffset));
-  return times.length > 0 ? times : null;
+  // Whose entries to keep. Tracks sits near the head and is normally inside the
+  // bytes already fetched; when it is not, SeekHead says where it is and one
+  // more short read gets it. Nothing is fetched twice and nothing is scanned.
+  const videoTrack = await readVideoTrack(readRange, head, seekHead, fileSize);
+  const timestampScale = readTimestampScale(head, seekHead.segmentDataOffset);
+  const times = readCueTimes(payload, timestampScale, videoTrack);
+  if (times.length > 0) {
+    return times;
+  }
+  if (videoTrack === null) {
+    return null;
+  }
+  // The filter left nothing, and that is not an answer about the file: a table
+  // exists, and this reader simply failed to recognise which of its entries
+  // belong to the picture — a track numbered one way in Tracks and another in
+  // the cue points, or an entry with no CueTrack at all. Returning null here
+  // would put an EVEN grid on a copied picture, which is the failure this
+  // module exists to prevent, so the unfiltered table is used instead: less
+  // exact than the picture's own keyframes, better than a grid that has nothing
+  // to do with the file.
+  const unfiltered = readCueTimes(payload, timestampScale, null);
+  return unfiltered.length > 0 ? unfiltered : null;
+}
+
+/**
+ * The video track's number — from the head when it is there, and from one extra
+ * short read when it is not.
+ *
+ * @param {(start: number, end: number) => Promise<Buffer | null>} readRange
+ * @param {Buffer} head
+ * @param {{ segmentDataOffset: number, entries: Map<number, number> }} seekHead
+ * @param {number} fileSize
+ * @returns {Promise<number | null>} Null when Tracks cannot be read at all, and
+ *   then every cue entry is kept — right for a file that indexes only its
+ *   picture, wrong for one that does not, and nothing here can tell them apart.
+ *   Refusing the index instead would put an even grid on a copied picture,
+ *   which is the failure this reader exists to prevent.
+ */
+async function readVideoTrack(readRange, head, seekHead, fileSize) {
+  const inHead = findElement(head, ID_TRACKS, [], seekHead.segmentDataOffset);
+  if (inHead && inHead.dataOffset + inHead.size <= head.length) {
+    return readVideoTrackNumber(head, inHead);
+  }
+  const relative = seekHead.entries.get(ID_TRACKS);
+  if (relative === undefined) {
+    return null;
+  }
+  const offset = seekHead.segmentDataOffset + relative;
+  if (!Number.isFinite(offset) || offset <= 0 || offset >= fileSize) {
+    return null;
+  }
+  const chunk = await readRange(offset, Math.min(fileSize - 1, offset + MAX_TRACKS_BYTES));
+  if (!chunk || chunk.length === 0) {
+    return null;
+  }
+  const element = [...iterateElements(chunk, 0, chunk.length)][0];
+  if (!element || element.id !== ID_TRACKS) {
+    return null;
+  }
+  return readVideoTrackNumber(chunk, { dataOffset: element.dataOffset, size: element.size });
 }

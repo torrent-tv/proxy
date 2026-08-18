@@ -157,21 +157,18 @@ const ENCODE_BENCHMARK_MAX_PLAUSIBLE_SPEED = 1000;
 const ENCODE_BENCHMARK_TIMEOUT_MS = 10_000;
 /** Progress reports arrive line by line. */
 const NEWLINE = String.fromCharCode(10);
-// Require the predicted speed to clear realtime by this much. The benchmarks
-// run at startup with an idle CPU; during playback ffmpeg competes with
-// in-process WebTorrent (download + hashing) and delivery, so real throughput
-// is lower, and the margin covers that plus complex scenes.
-//
-// It was 1.8 while the prediction counted ENCODING only and was therefore
-// several times too optimistic on a re-encode; with the decode term the
-// prediction is within ~13 % of measured, so the margin no longer has to stand
-// in for a missing term as well as for load.
-const PRESET_SPEED_MARGIN = 1.5;
-// The bar for a prediction that has NO decode term — a host whose calibration
-// clips are missing, or whose fit was rejected. That figure is the one the
-// margin was 1.8 for, and lowering it there would make an uncalibrated host
-// more permissive than it was before any of this existed.
-const ENCODE_ONLY_SPEED_MARGIN = 1.8;
+// Producing one second of video per second of clock. Not a margin and not a
+// choice — the definition of keeping up, and the bar when nothing better is
+// known about the supply this step will meet.
+const REALTIME = 1;
+// The bar where decoding CANNOT be priced — no calibration fit, or a source the
+// probe said too little about. This one is not measured and cannot be: the
+// prediction it guards counts encoding only, which on the field host was
+// several times optimistic, and there is no reading on such a host to correct
+// it with. It is left at the figure it has had since before decoding was
+// priced, because lowering it to realtime would make the least-measured hosts
+// the most permissive. Where decoding IS priced, nothing chosen remains.
+const UNPRICED_DECODE_BAR = 1.8;
 
 /**
  * @param {number} targetWidth
@@ -1064,7 +1061,7 @@ export function predictedRealtimeSpeed({
  * The encoder figure is the FASTEST benchmarked preset: it is the best this
  * host can do, so a rung it cannot hold cannot be held at any quality setting.
  *
- * @param {{ benchmark: Array<{ preset: string, pixelsPerSec: number }>, decodeModel?: object | null, source?: { megapixelsPerSecond: number, megabitsPerSecond: number } | null, outputPixelsPerSec: number }} params
+ * @param {{ benchmark: Array<{ preset: string, pixelsPerSec: number }>, decodeModel?: object | null, source?: { megapixelsPerSecond: number, megabitsPerSecond: number } | null, outputPixelsPerSec: number, requiredSpeed?: number | null }} params
  * @returns {{ speed: number | null, sustainable: boolean }}
  */
 export function canSustainOutput({
@@ -1073,7 +1070,8 @@ export function canSustainOutput({
   source = null,
   outputPixelsPerSec,
   observedDecodeCostSec = null,
-  concurrentCostSec = 0
+  concurrentCostSec = 0,
+  requiredSpeed = null
 }) {
   if (!Array.isArray(benchmark) || benchmark.length === 0) {
     // Nothing measured on this host: the budget cannot refuse what it cannot
@@ -1114,11 +1112,45 @@ export function canSustainOutput({
   if (speed === null) {
     return { speed: null, sustainable: true };
   }
-  return { speed, sustainable: speed >= PRESET_SPEED_MARGIN };
+  return { speed, sustainable: speed >= speedBar(requiredSpeed) };
 }
 
-/** The margin a predicted speed must clear to be offered. */
-export const REALTIME_SPEED_MARGIN = PRESET_SPEED_MARGIN;
+/**
+ * The speed a step has to reach to be worth offering.
+ *
+ * Realtime is not enough on its own: a step that produces exactly one second
+ * per second never recovers the seconds lost while its reader waits for the
+ * swarm, so it survives its own supply only if what it gains between
+ * interruptions covers what one interruption costs. That is measured per file
+ * and per swarm by the reader — `1 + worst wait / median interval`, in
+ * `supply-margin.js` — and on the field torrent of 2026-08-17 it came to 1.67
+ * against the 1.5 that used to stand here, and to 4.04-8.14 on a torrent whose
+ * swarm no encoder could have kept up with.
+ *
+ * Where that figure does not exist yet — fewer than two interruptions measured
+ * — the bar is realtime. It is the one thing that can be said without
+ * measuring the swarm, and the offer is restated as soon as the reader has
+ * something to say.
+ *
+ * @param {number | null | undefined} requiredSpeed - What this file's own
+ *   interruptions demand, when they have been measured.
+ * @returns {number}
+ */
+export function speedBar(requiredSpeed) {
+  return Number.isFinite(requiredSpeed) && requiredSpeed > REALTIME ? requiredSpeed : REALTIME;
+}
+
+/**
+ * The bar for a cost description — the supply's demand where decoding is
+ * priced, and never below the unpriced-decode bar where it is not.
+ *
+ * @param {{ decodeModel?: object | null, source?: object | null, observedDecodeCostSec?: number | null, requiredSpeed?: number | null }} cost
+ * @returns {number}
+ */
+function barFor(cost) {
+  const measured = speedBar(cost?.requiredSpeed);
+  return isDecodePriced(cost) ? measured : Math.max(UNPRICED_DECODE_BAR, measured);
+}
 
 /**
  * Benchmark software libx264 presets on this host. Encodes a short synthetic
@@ -1377,7 +1409,7 @@ async function decodeToRawFrames(ffmpegBin, log) {
  *
  * @param {Array<{ preset: string, pixelsPerSec: number }>} benchmark - slowest→fastest
  * @param {number} pixelsPerSecNeeded
- * @param {{ decodeModel?: object | null, source?: { megapixelsPerSecond: number, megabitsPerSecond: number } | null }} [cost]
+ * @param {{ decodeModel?: object | null, source?: { megapixelsPerSecond: number, megabitsPerSecond: number } | null, requiredSpeed?: number | null }} [cost]
  * @returns {string}
  */
 /**
@@ -1405,8 +1437,7 @@ export function pickSoftwarePreset(benchmark, pixelsPerSecNeeded, cost = {}) {
   const observed = Number.isFinite(cost?.observedDecodeCostSec) && cost.observedDecodeCostSec > 0
     ? cost.observedDecodeCostSec
     : null;
-  const priced = isDecodePriced(cost);
-  const bar = priced ? PRESET_SPEED_MARGIN : ENCODE_ONLY_SPEED_MARGIN;
+  const bar = barFor(cost);
   // The FIRST entry that clears the bar wins — the list is in quality order, so
   // that is the best picture this host can hold. Every entry is examined rather
   // than the walk stopping at the first miss, because the measurements do not
@@ -1493,9 +1524,9 @@ export function buildResolutionLadder(ceilingWidth, ceilingHeight) {
  * Choose the software encode settings (resolution + preset) that fit the
  * realtime budget on this host. From the resolution ladder (ceiling downward),
  * pick the HIGHEST rung whose encode throughput — predicted from the startup
- * benchmark's fastest preset — clears realtime × PRESET_SPEED_MARGIN. Then, at
- * that resolution, pick the highest-quality preset that still clears the
- * margin. When even the lowest rung cannot clear it, use the lowest rung with
+ * benchmark's fastest preset — clears the speed this file's own supply
+ * demands (`speedBar`). Then, at that resolution, pick the highest-quality
+ * preset that still clears it. When even the lowest rung cannot clear it, use the lowest rung with
  * the fastest preset (best effort — a smaller picture beats sub-realtime
  * playback at full size). Returns null when no benchmark or ceiling is
  * available (the caller keeps the ceiling resolution and the default preset).
@@ -1503,7 +1534,7 @@ export function buildResolutionLadder(ceilingWidth, ceilingHeight) {
  * @param {Array<{ preset: string, pixelsPerSec: number }>} benchmark - slowest→fastest
  * @param {{ width: number, height: number }} ceiling
  * @param {number} outputFps
- * @param {{ decodeModel?: object | null, source?: { megapixelsPerSecond: number, megabitsPerSecond: number } | null }} [cost]
+ * @param {{ decodeModel?: object | null, source?: { megapixelsPerSecond: number, megabitsPerSecond: number } | null, requiredSpeed?: number | null }} [cost]
  * @returns {{ width: number, height: number, preset: string, ladder: Array<{ width: number, height: number }>, rungIndex: number } | null}
  */
 export function chooseSoftwareEncodeSettings(benchmark, ceiling, outputFps, cost = {}) {
@@ -1516,7 +1547,7 @@ export function chooseSoftwareEncodeSettings(benchmark, ceiling, outputFps, cost
     return null;
   }
   const fastest = cheapestPresetPixelsPerSec(benchmark); // the cheapest preset's throughput
-  const bar = isDecodePriced(cost) ? PRESET_SPEED_MARGIN : ENCODE_ONLY_SPEED_MARGIN;
+  const bar = barFor(cost);
   let chosenIndex = ladder.length - 1; // default: lowest rung (best effort)
   for (let i = 0; i < ladder.length; i += 1) {
     const speed = predictedRealtimeSpeed({

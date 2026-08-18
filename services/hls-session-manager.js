@@ -23,6 +23,8 @@ import { speedFromReadings } from "./encoder-readings.js";
 import { availableShareFrom, correctForAvailability } from "./available-share.js";
 import { contentionPenalty } from "./contention.js";
 import { minimumBufferFrom } from "./supply-margin.js";
+import { baseDrawFrom, costPerMegabyteFrom } from "./torrent-cost.js";
+import { medianOf, movedBeyondScatter, scatterOf } from "./learned-median.js";
 import {
   ENCODE_RUN_EVENT,
   ENCODE_RUN_STATE,
@@ -40,7 +42,7 @@ import {
   chooseSoftwareEncodeSettings,
   pickSoftwarePreset,
   canSustainOutput,
-  REALTIME_SPEED_MARGIN,
+  speedBar,
   TRANSCODE_FPS,
   chooseOutputFps
 } from "./hwaccel.js";
@@ -266,7 +268,7 @@ export function noteIndexDeviation(check, index, deviationSec, landedOnKeyframe 
  * @param {{ ladder: { width: number, height: number }[], rungIndex: number } | null} budget
  * @param {number} outputFps
  * @param {unknown} benchmark
- * @param {{ decodeModel?: object | null, source?: { megapixelsPerSecond: number, megabitsPerSecond: number } | null }} [cost]
+ * @param {{ decodeModel?: object | null, source?: { megapixelsPerSecond: number, megabitsPerSecond: number } | null, requiredSpeed?: number | null }} [cost]
  * @returns {object | null}
  */
 function startAtLadderTop(budget, outputFps, benchmark, cost = {}) {
@@ -293,7 +295,8 @@ function startAtLadderTop(budget, outputFps, benchmark, cost = {}) {
       decodeModel: cost.decodeModel ?? null,
       source: cost.source ?? null,
       outputPixelsPerSec: ladder[index].width * ladder[index].height * fps,
-      observedDecodeCostSec: cost.observedDecodeCostSec ?? null
+      observedDecodeCostSec: cost.observedDecodeCostSec ?? null,
+      requiredSpeed: cost.requiredSpeed ?? null
     });
     if (sustainable) {
       startIndex = index;
@@ -496,8 +499,6 @@ const DEFAULT_STARTUP_WAIT_MS = 5_000;
 // and restart at the current segment. Conservative so it never thrashes: a long
 // sustained window, a post-action cooldown, a step cap, and no upswitch (v1).
 const BUDGET_CHECK_INTERVAL_MS = 5_000;
-/** Below this, a tick has not moved enough of the torrent to price it. */
-const TORRENT_COST_MIN_MEGABYTES = 2;
 /** The narrowest stretch of uninterrupted encoding a speed may be read from. */
 const LEARN_WINDOW_MIN_SEC = 3;
 // Speed below this (cumulative ffmpeg average) counts as "slow"; recovery to
@@ -513,18 +514,10 @@ const BUDGET_SUSTAINED_MS = 15_000;
 const BUDGET_ACTION_COOLDOWN_MS = 30_000;
 // Never step down more than this many rungs below the startup choice.
 const BUDGET_MAX_DOWNSHIFTS = 3;
-// How long an encode run must have been going before a reading of its speed is
-// taken as evidence about decoding. `speed=` is cumulative over the run, so a
-// restart after a seek, a resume after a suspension and the wait for the first
-// pieces all sit in the denominator of an early reading.
-const DECODE_LEARNING_SETTLE_MS = 20_000;
-// How many readings the median is taken over. Long enough to outvote a single
-// disturbed moment, short enough to follow a host whose load has changed.
+// How many readings the median is taken over. This one is a statement about
+// how much of the past still describes the host, not a measured quantity, and
+// it is written here rather than dressed up as one.
 const DECODE_LEARNING_READINGS = 7;
-// A new median has to differ by this much to be adopted. Below it the answer is
-// the same one, and re-publishing it would make every session recompute its
-// offer on the path that serves every playlist, init and segment.
-const DECODE_LEARNING_CHANGE = 0.05;
 // The input counts as "keeping up" when the torrent downloads at least this
 // multiple of the source's average byte rate. Below it (and not yet fully
 // downloaded), a low speed is download-bound, not CPU-bound → do NOT downscale.
@@ -1230,31 +1223,6 @@ function normalizeLogFileName(fileName, fileIndex) {
  * expired after {@link HlsSessionManagerOptions.sessionTtlMs} of idle time.
  */
 /**
- * How many megabytes a second of this source is, from what the probe read.
- *
- * A viewer consumes the file at its own rate, so this is also the rate at which
- * the machine must fetch, verify and deliver it while they watch.
- *
- * @param {HlsSession} session
- * @param {number | null} fileLengthBytes
- * @returns {number | null}
- */
-
-function sourceMegabytesPerSecond(session, fileLengthBytes) {
-  // The FILE's rate, not the video stream's. What the torrent moves is the
-  // container: on the releases this serves, two or three AC-3 tracks add 10-25 %
-  // to what the picture alone would suggest, and `sourceDecode` deliberately
-  // carries the video stream's own bitrate because the decode model was fitted
-  // on video-only clips.
-  const fileLength = Number(fileLengthBytes);
-  const durationSeconds = Number(session.durationSeconds);
-  if (Number.isFinite(fileLength) && fileLength > 0 && Number.isFinite(durationSeconds) && durationSeconds > 0) {
-    return fileLength / durationSeconds / 1e6;
-  }
-  return null;
-}
-
-/**
  * Which cost a speed reading from this session is a measurement OF.
  *
  * Three encodes share one reading path and price three different things: a
@@ -1357,6 +1325,32 @@ export class HlsSessionManager {
   #observedTorrentCostPerMegabyte = null;
   /** @type {number[]} Recent readings behind that median. */
   #torrentCostReadings = [];
+  /**
+   * The share of one core this process draws with nothing encoding and the
+   * torrents moving nothing — the spending that would have happened anyway, and
+   * which must come off a reading before the rest is called the torrent's.
+   */
+  #observedBaseDraw = null;
+  /** @type {number[]} Recent readings behind that median. */
+  #baseDrawReadings = [];
+  /**
+   * What each watched TORRENT is measured to be moving right now, in bytes per
+   * second, keyed by source. Rebuilt every budget tick from the live sessions,
+   * so an entry that is present was taken this tick.
+   *
+   * @type {Map<string, number>}
+   */
+  #downloadRateByKey = new Map();
+  /**
+   * The speed each file's own interruptions were last measured to demand,
+   * keyed `sourceKey:fileIndex`. Kept per source rather than per session
+   * because the first offer for a file is made before any session of it exists,
+   * and a file that has been watched before has already told the reader what
+   * its swarm does.
+   *
+   * @type {Map<string, number>}
+   */
+  #requiredSpeedByKey = new Map();
 
   /**
    * @param {HlsSessionManagerOptions} options
@@ -1827,7 +1821,8 @@ export class HlsSessionManager {
       sourceWidth,
       sourceHeight,
       outputFps,
-      source: sourceDecode
+      source: sourceDecode,
+      requiredSpeed: this.#requiredSpeedFor(sourceKey, fileIndex)
     });
     // A forced resolution starts at exactly that size — the viewer asked for it
     // — but KEEPS the ladder beneath it. Discarding the ladder is what left a
@@ -1841,7 +1836,8 @@ export class HlsSessionManager {
       ? startAtLadderTop(chosenBudget, outputFps, this.softwarePresetBenchmark, {
           decodeModel: this.decodeCostModel,
           source: sourceDecode,
-          observedDecodeCostSec: this.#observedDecodeCost.get(`${sourceKey}:${fileIndex}`)?.costSec ?? null
+          observedDecodeCostSec: this.#observedDecodeCost.get(`${sourceKey}:${fileIndex}`)?.costSec ?? null,
+          requiredSpeed: this.#requiredSpeedFor(sourceKey, fileIndex)
         })
       : chosenBudget;
     const softwarePreset = encodeBudget?.preset ?? null;
@@ -2524,7 +2520,16 @@ export class HlsSessionManager {
    * @param {{ transcodeVideo: boolean, targetWidth: number, targetHeight: number, sourceWidth: number | null, sourceHeight: number | null, outputFps: number, source?: { megapixelsPerSecond: number, megabitsPerSecond: number } | null }} params
    * @returns {{ width: number, height: number, preset: string } | null}
    */
-  #chooseEncodeBudget({ transcodeVideo, targetWidth, targetHeight, sourceWidth, sourceHeight, outputFps, source = null }) {
+  #chooseEncodeBudget({
+    transcodeVideo,
+    targetWidth,
+    targetHeight,
+    sourceWidth,
+    sourceHeight,
+    outputFps,
+    source = null,
+    requiredSpeed = null
+  }) {
     if (!transcodeVideo || this.videoEncoder?.kind !== "software" || !this.softwarePresetBenchmark) {
       return null;
     }
@@ -2536,7 +2541,7 @@ export class HlsSessionManager {
       this.softwarePresetBenchmark,
       { width: ceiling.w, height: ceiling.h },
       outputFps,
-      { decodeModel: this.decodeCostModel, source }
+      { decodeModel: this.decodeCostModel, source, requiredSpeed }
     );
   }
 
@@ -3121,24 +3126,184 @@ export class HlsSessionManager {
     // was the difference between offering it and refusing it.
     const cores = Math.max(1, os.cpus().length);
     const cpuSeconds = (now.cpuSeconds - previous.cpuSeconds) / cores;
-    // Enough movement to divide by: a tick with almost nothing downloaded
-    // measures the idle loop, not the torrent.
-    if (!(elapsedSec > 0) || !(megabytes >= TORRENT_COST_MIN_MEGABYTES) || !(cpuSeconds > 0)) {
+    if (megabytes === 0) {
+      // Nothing encoding and not one byte moved: whatever this process spent in
+      // that interval, it spends whether or not there is a torrent. Measuring
+      // it is what lets the next interval be attributed instead of divided
+      // whole — see `torrent-cost.js` for the readings that forced this.
+      this.#learnBaseDraw(baseDrawFrom({ cpuSeconds, elapsedSeconds: elapsedSec }));
       return;
     }
-    const costPerMegabyte = cpuSeconds / megabytes;
+    const costPerMegabyte = costPerMegabyteFrom({
+      cpuSeconds,
+      elapsedSeconds: elapsedSec,
+      megabytes,
+      baseDraw: this.#observedBaseDraw,
+      // How much the draw's own readings disagree, which is how much of this
+      // interval's remainder means nothing.
+      drawScatter: scatterOf(this.#baseDrawReadings)
+    });
+    if (costPerMegabyte === null) {
+      return;
+    }
     const readings = [...this.#torrentCostReadings, costPerMegabyte].slice(-DECODE_LEARNING_READINGS);
     this.#torrentCostReadings = readings;
-    const sorted = [...readings].sort((left, right) => left - right);
-    const median = sorted[Math.floor(sorted.length / 2)];
-    if (this.#observedTorrentCostPerMegabyte !== null &&
-        Math.abs(median - this.#observedTorrentCostPerMegabyte) / this.#observedTorrentCostPerMegabyte < DECODE_LEARNING_CHANGE) {
+    const median = medianOf(readings);
+    if (!movedBeyondScatter(this.#observedTorrentCostPerMegabyte, median, readings)) {
       return;
     }
     this.#observedTorrentCostPerMegabyte = median;
     logger.info(
       `host-load: the torrent costs ${(median * 1000).toFixed(1)}ms of CPU per MB on this host ` +
-      `(median of ${readings.length}, latest ${(costPerMegabyte * 1000).toFixed(1)}ms over ${megabytes.toFixed(1)}MB)`
+      `(median of ${readings.length}, latest ${(costPerMegabyte * 1000).toFixed(1)}ms over ${megabytes.toFixed(1)}MB, ` +
+      `base draw ${((this.#observedBaseDraw ?? 0) * 100).toFixed(1)}% of a core already taken off)`
+    );
+  }
+
+  /**
+   * What each watched file's torrent is moving right now.
+   *
+   * The torrent is priced per megabyte it moves, so the price has to be charged
+   * against the megabytes it IS moving. Charged against the file's own byte
+   * rate — what the viewer consumes — it asks for payment on a fully downloaded
+   * file that is moving nothing, and it under-charges a file being fetched
+   * ahead of the viewer, which is the state every session starts in.
+   *
+   * Rebuilt whole each tick from the live sessions, so an entry that is here
+   * was taken this tick and a source nobody is watching leaves by itself.
+   *
+   * @returns {Promise<void>}
+   */
+  async #sampleDownloadRates() {
+    if (!this.getSourceStats) {
+      return;
+    }
+    /** @type {Map<string, { sourceKey: string, fileIndex: number }>} */
+    const wanted = new Map();
+    for (const session of this.sessionsById.values()) {
+      if (!session || session.state === "disposed") {
+        continue;
+      }
+      wanted.set(`${session.sourceKey}:${session.fileIndex}`, {
+        sourceKey: session.sourceKey,
+        fileIndex: session.fileIndex
+      });
+    }
+    /** @type {Map<string, number>} */
+    const measured = new Map();
+    for (const [key, source] of wanted) {
+      try {
+        const stats = await this.getSourceStats(source.sourceKey, source.fileIndex);
+        // The TORRENT's rate, which is what it is: one swarm feeding one
+        // client, whichever of its files are being read. Kept per source and
+        // divided among the files being watched, so two episodes of one pack
+        // do not each charge the machine for the whole download.
+        const rate = Number(stats?.downloadSpeed);
+        if (Number.isFinite(rate) && rate >= 0) {
+          measured.set(source.sourceKey, rate);
+        }
+        // Kept, not rebuilt: the demand a swarm made on this file does not stop
+        // being true when a tick fails to fetch it, and it is what the FIRST
+        // offer of the next session will be judged against.
+        const demanded = Number(stats?.supply?.requiredSpeed);
+        if (Number.isFinite(demanded) && demanded > 0) {
+          this.#requiredSpeedByKey.set(key, demanded);
+        }
+        // And onto the sessions themselves, which is where the browser's
+        // minimum buffer is read from. Set only by the downshift check until
+        // now, it stood still on every session that never fell below realtime,
+        // so the figures the viewer waits on were minutes old or absent.
+        if (stats?.supply) {
+          for (const session of this.sessionsById.values()) {
+            if (session?.sourceKey === source.sourceKey && session.fileIndex === source.fileIndex) {
+              session.supplyFigures = stats.supply;
+            }
+          }
+        }
+      } catch {
+        // The pool is busy or gone. A reading missed is not a fault, and the
+        // key simply does not appear this tick.
+      }
+    }
+    this.#downloadRateByKey = measured;
+  }
+
+  /**
+   * How many files of one torrent have a live session reading them.
+   *
+   * @param {string} sourceKey
+   * @returns {number} At least one, so the rate is never divided by nothing.
+   */
+  #filesWatchedOn(sourceKey) {
+    const files = new Set();
+    for (const session of this.sessionsById.values()) {
+      if (session && session.state !== "disposed" && session.sourceKey === sourceKey) {
+        files.add(session.fileIndex);
+      }
+    }
+    return Math.max(1, files.size);
+  }
+
+  /**
+   * The speed this file's supply demands, as last measured on this swarm.
+   *
+   * @param {string} sourceKey
+   * @param {number} fileIndex
+   * @returns {number | null}
+   */
+  #requiredSpeedFor(sourceKey, fileIndex) {
+    return this.#requiredSpeedByKey.get(`${sourceKey}:${fileIndex}`) ?? null;
+  }
+
+  /**
+   * How many megabytes a second the torrent is moving for this file — measured
+   * where a reading exists, and otherwise the rate the file has to be moved at
+   * to be watched at all (its length over its duration), which is what the
+   * measured rate averages to over a viewing.
+   *
+   * @param {string} sourceKey
+   * @param {number} fileIndex
+   * @param {number | null} fileLengthBytes
+   * @param {number | null} durationSeconds
+   * @returns {number | null}
+   */
+  #torrentMegabytesPerSecond(sourceKey, fileIndex, fileLengthBytes, durationSeconds) {
+    const measured = this.#downloadRateByKey.get(sourceKey);
+    if (Number.isFinite(measured)) {
+      return measured / 1e6 / this.#filesWatchedOn(sourceKey);
+    }
+    // The FILE's rate, not the video stream's. What the torrent moves is the
+    // container: on the releases this serves, two or three AC-3 tracks add
+    // 10-25 % to what the picture alone would suggest.
+    const fileLength = Number(fileLengthBytes);
+    const duration = Number(durationSeconds);
+    if (Number.isFinite(fileLength) && fileLength > 0 && Number.isFinite(duration) && duration > 0) {
+      return fileLength / duration / 1e6;
+    }
+    return null;
+  }
+
+  /**
+   * Record what this process draws when it is doing none of the work that gets
+   * priced.
+   *
+   * @param {number | null} share - Of one core, over the interval just read.
+   * @returns {void}
+   */
+  #learnBaseDraw(share) {
+    if (share === null) {
+      return;
+    }
+    const readings = [...this.#baseDrawReadings, share].slice(-DECODE_LEARNING_READINGS);
+    this.#baseDrawReadings = readings;
+    const median = medianOf(readings);
+    if (!movedBeyondScatter(this.#observedBaseDraw, median, readings)) {
+      return;
+    }
+    this.#observedBaseDraw = median;
+    logger.info(
+      `host-load: this process draws ${(median * 100).toFixed(1)}% of a core with nothing encoding and ` +
+      `nothing downloading (median of ${readings.length}, latest ${(share * 100).toFixed(1)}%)`
     );
   }
 
@@ -3275,18 +3440,22 @@ export class HlsSessionManager {
 
   async #enforceRealtimeBudget() {
     void this.#reportHostLoad();
-    if (this.videoEncoder?.kind !== "software") {
-      return;
-    }
-    // One tick at a time. It awaits torrent statistics per session now, so a
-    // slow or stuck answer would otherwise let the next tick in behind it —
-    // two passes over the same sessions, taking the same reading twice and
-    // acting on the same speed twice.
+    // One tick at a time. Both halves await torrent statistics per source, so a
+    // slow or stuck answer would otherwise let the next tick in behind it — two
+    // passes over the same sessions, taking the same reading twice and acting
+    // on the same speed twice, and an earlier tick's rates landing on top of a
+    // later tick's.
     if (this.budgetTickRunning === true) {
       return;
     }
     this.budgetTickRunning = true;
     try {
+      // Taken whatever the encoder is: the torrent's price is charged against
+      // this rate on every host, not only on the ones that re-encode.
+      await this.#sampleDownloadRates();
+      if (this.videoEncoder?.kind !== "software") {
+        return;
+      }
       await this.#realtimeBudgetPass();
     } finally {
       this.budgetTickRunning = false;
@@ -3458,7 +3627,9 @@ export class HlsSessionManager {
       {
         decodeModel: this.decodeCostModel,
         source: session.sourceDecode ?? null,
-        observedDecodeCostSec: this.#observedDecodeCostFor(session)
+        observedDecodeCostSec: this.#observedDecodeCostFor(session),
+        requiredSpeed: session.supplyFigures?.requiredSpeed
+          ?? this.#requiredSpeedFor(session.sourceKey, session.fileIndex)
       }
     );
     // Restart at the current live-edge segment so the lighter profile takes over
@@ -3523,10 +3694,6 @@ export class HlsSessionManager {
     // produce a file that is neither, which is the only reason a restart ever
     // had to wait for its predecessor to die.
     session.runSerial = (session.runSerial ?? 0) + 1;
-    // When THIS run began. ffmpeg's `speed=` is cumulative over a run, so a
-    // reading of it says something about the machine only once the run has left
-    // its own start behind — see #learnDecodeCost.
-    session.encodeRunStartedAt = Date.now();
     session.runDirPath = path.join(session.dirPath, `run-${session.runSerial}`);
     await mkdir(session.runDirPath, { recursive: true });
     // The restart backs off a segment or two from what was asked for, so the
@@ -5288,9 +5455,24 @@ export class HlsSessionManager {
         return `${speed < 1 ? "slow" : "ok"}${(1 / speed).toFixed(2)}`;
       })
       .join(",");
+    // The bar the answer is judged against, and the rate the torrent's price is
+    // charged at. Both are inputs now — the bar rises when the reader meets
+    // interruptions, the rate moves every five seconds — and neither moves any
+    // other term of this key. Left out, a menu computed while nothing was known
+    // about the swarm would stand for the whole film, offering steps that
+    // supply cannot support and passing every route guard on the way.
+    const demanded = owner.supplyFigures?.requiredSpeed
+      ?? this.#requiredSpeedFor(owner.sourceKey, owner.fileIndex);
+    const movingMegabytes = this.#torrentMegabytesPerSecond(
+      owner.sourceKey,
+      owner.fileIndex,
+      this.#fileLengthByKey.get(`${owner.sourceKey}:${owner.fileIndex}`) ?? null,
+      owner.durationSeconds
+    );
     const version =
       `${observed?.version ?? 0}:${playing}:${copyVersion}:${torrentCost.toFixed(6)}:` +
-      `${audioVersion}:${running}:${measured}`;
+      `${audioVersion}:${running}:${measured}:${(demanded ?? 0).toFixed(2)}:` +
+      `${(movingMegabytes ?? 0).toFixed(2)}`;
     if (Array.isArray(owner.offeredHeightsCache) && owner.offeredHeightsVersion === version) {
       return owner.offeredHeightsCache;
     }
@@ -5313,6 +5495,10 @@ export class HlsSessionManager {
       // What each rung was actually seen doing in this session, which is the
       // only thing a live reading may speak for.
       measuredHeights: this.#measuredRungSpeeds(owner),
+      // The speed this file's supply demands, measured by its own reader on
+      // this swarm. A well-seeded film and a thin one ask different speeds of
+      // the same machine, so the bar belongs to the pair, not to the host.
+      requiredSpeed: demanded,
       // What the family is already spending while a rung is considered. The
       // picture being COPIED is the common case and used to be priced at
       // nothing; measured, it is about an eighth of the machine.
@@ -5375,17 +5561,20 @@ export class HlsSessionManager {
    * whatever else it is doing.
    *
    * The MEDIAN of the recent readings is used, over a bounded window. Keeping
-   * the fastest instead makes the figure a ratchet: `speed=` is cumulative over
-   * a run, its maximum falls in the burst where the encoder races to the
-   * look-ahead cap with the pieces already on disk and nothing competing, and
-   * one such moment would re-admit — permanently — the very rung the field
-   * measured at 0.388-0.947x. The median moves in both directions and describes
-   * the machine as it usually is, which is what a viewer will meet.
+   * the fastest instead makes the figure a ratchet: its maximum falls in the
+   * burst where the encoder races to the look-ahead cap with the pieces already
+   * on disk and nothing competing, and one such moment would re-admit —
+   * permanently — the very rung the field measured at 0.388-0.947x. The median
+   * moves in both directions and describes the machine as it usually is, which
+   * is what a viewer will meet.
    *
-   * A reading is only taken from a run that has been going long enough to have
-   * left its own start behind: ffmpeg's `speed=` is cumulative, so a restart
-   * after a seek, a resume after a suspension, and the wait for the first
-   * pieces are all in the denominator of an early reading.
+   * The reading is the difference between two samples of one run: `speed=`
+   * itself is cumulative and would carry the restart, the resume and the wait
+   * for the first pieces in its denominator, but a difference cannot — and a
+   * new run clears the previous sample (`#startEncodeRun`), so no pair can
+   * straddle two runs. That is why nothing here waits a fixed twenty seconds
+   * before believing a run: waiting was a chosen number standing in for this,
+   * and it cost every reading a short run could have given.
    *
    * @param {HlsSession} session
    * @param {number} speed - The `speed=` ffmpeg reports, as a multiple of realtime.
@@ -5450,9 +5639,22 @@ export class HlsSessionManager {
     const processedSeconds = Number(session.progress?.processedSeconds);
     const takenAt = Date.now();
     const previous = session.learnSample ?? null;
-    session.learnSample = { takenAt, processedSeconds };
+    // Stamped with the run it was taken from. A restart clears this sample, but
+    // it then spends up to a second and a half making its directory and burying
+    // its predecessor, and through that window the session still carries the
+    // OLD process and the OLD position — so a sample taken there, paired with
+    // the new run's first position, reads a twenty-minute seek as twenty
+    // minutes of video produced in five seconds. Filed as this file's price it
+    // admits every quality step there is. Comparing the serials is what the
+    // twenty-second wait used to stand in for, and unlike the wait it costs no
+    // readings on a short run.
+    const runSerial = session.runSerial ?? 0;
+    session.learnSample = { takenAt, processedSeconds, runSerial };
     if (previous === null || !Number.isFinite(processedSeconds) || !Number.isFinite(previous.processedSeconds)) {
       return;
+    }
+    if (previous.runSerial !== runSerial) {
+      return; // the pair straddles a restart and measures the seek, not the host
     }
     const speed = speedFromReadings(previous, { takenAt, processedSeconds }, LEARN_WINDOW_MIN_SEC);
     if (speed === null) {
@@ -5547,17 +5749,13 @@ export class HlsSessionManager {
    * The figure is the reciprocal of the speed the session reports, which is the
    * measurement itself rather than a model of it.
    *
-   * Median of recent readings, taken only from a run past its own start, for
-   * the same reasons as the decode cost beside it.
+   * Median of recent readings, for the same reasons as the decode cost beside
+   * it.
    *
    * @param {HlsSession} session
    * @param {number} speed
    */
   async #learnCopyCost(session, speed) {
-    const runStartedAt = Number(session.encodeRunStartedAt);
-    if (!Number.isFinite(runStartedAt) || Date.now() - runStartedAt < DECODE_LEARNING_SETTLE_MS) {
-      return;
-    }
     if (session.runState === ENCODE_RUN_STATE.SUSPENDED) {
       return; // a suspended run reports a cumulative figure that is decaying
     }
@@ -5576,9 +5774,8 @@ export class HlsSessionManager {
     const key = `${session.sourceKey}:${session.fileIndex}`;
     const known = this.#observedCopyCost.get(key);
     const readings = [...(known?.readings ?? []), costSec].slice(-DECODE_LEARNING_READINGS);
-    const sorted = [...readings].sort((left, right) => left - right);
-    const median = sorted[Math.floor(sorted.length / 2)];
-    if (known && Math.abs(median - known.costSec) / known.costSec < DECODE_LEARNING_CHANGE) {
+    const median = medianOf(readings);
+    if (!movedBeyondScatter(known?.costSec ?? null, median, readings)) {
       this.#observedCopyCost.set(key, { ...known, readings });
       return;
     }
@@ -5598,17 +5795,13 @@ export class HlsSessionManager {
    * host where a rung needs almost the whole machine, a soundtrack is the
    * difference between offering it and refusing it.
    *
-   * Same rules as {@link #learnCopyCost}, for the same reasons: past the run's
-   * own start, never suspended, never while the torrent is what is short.
+   * Same rules as {@link #learnCopyCost}, for the same reasons: never
+   * suspended, never while the torrent is what is short.
    *
    * @param {HlsSession} session
    * @param {number} speed
    */
   async #learnAudioCost(session, speed) {
-    const runStartedAt = Number(session.encodeRunStartedAt);
-    if (!Number.isFinite(runStartedAt) || Date.now() - runStartedAt < DECODE_LEARNING_SETTLE_MS) {
-      return;
-    }
     if (session.runState === ENCODE_RUN_STATE.SUSPENDED) {
       return;
     }
@@ -5622,9 +5815,8 @@ export class HlsSessionManager {
     const key = this.#audioCostKey(session);
     const known = this.#observedAudioCost.get(key);
     const readings = [...(known?.readings ?? []), costSec].slice(-DECODE_LEARNING_READINGS);
-    const sorted = [...readings].sort((left, right) => left - right);
-    const median = sorted[Math.floor(sorted.length / 2)];
-    if (known && Math.abs(median - known.costSec) / known.costSec < DECODE_LEARNING_CHANGE) {
+    const median = medianOf(readings);
+    if (!movedBeyondScatter(known?.costSec ?? null, median, readings)) {
       this.#observedAudioCost.set(key, { ...known, readings });
       return;
     }
@@ -5655,10 +5847,6 @@ export class HlsSessionManager {
       // (`transcodeVideo === true`), so neither could run.
       return;
     }
-    const runStartedAt = Number(session.encodeRunStartedAt);
-    if (!Number.isFinite(runStartedAt) || Date.now() - runStartedAt < DECODE_LEARNING_SETTLE_MS) {
-      return; // no run, or one still carrying its own start in the average
-    }
     if (this.videoEncoder?.kind !== "software") {
       return; // the benchmark that prices the encode half is libx264 only
     }
@@ -5687,12 +5875,12 @@ export class HlsSessionManager {
     const key = `${session.sourceKey}:${session.fileIndex}`;
     const known = this.#observedDecodeCost.get(key);
     const readings = [...(known?.readings ?? []), decodeCostSec].slice(-DECODE_LEARNING_READINGS);
-    const sorted = [...readings].sort((left, right) => left - right);
-    const costSec = sorted[Math.floor(sorted.length / 2)];
-    if (known && Math.abs(costSec - known.costSec) / known.costSec < DECODE_LEARNING_CHANGE) {
-      // The same answer as before. Storing it would bump the version and make
-      // every session recompute its offer, which is asked for on the path that
-      // serves every playlist, init and segment.
+    const costSec = medianOf(readings);
+    if (!movedBeyondScatter(known?.costSec ?? null, costSec, readings)) {
+      // The same answer as before, by the readings' own scatter. Storing it
+      // would bump the version and make every session recompute its offer,
+      // which is asked for on the path that serves every playlist, init and
+      // segment.
       this.#observedDecodeCost.set(key, { ...known, readings });
       return;
     }
@@ -5762,14 +5950,26 @@ export class HlsSessionManager {
     // known before any session exists, so the FIRST offer — the one the viewer
     // actually sees when they open a file — is priced with it too. Without this
     // the plan and a live session answer differently about the same file.
-    const torrentCostSec = this.#observedTorrentCostPerMegabyte !== null && mediaInfo?.fileLength > 0 &&
-      mediaInfo?.durationSeconds > 0
-      ? this.#observedTorrentCostPerMegabyte * (mediaInfo.fileLength / mediaInfo.durationSeconds / 1e6)
+    const movingMegabytesPerSec = mediaInfo?.sourceKey !== undefined
+      ? this.#torrentMegabytesPerSecond(
+        mediaInfo.sourceKey,
+        mediaInfo.fileIndex,
+        mediaInfo.fileLength ?? null,
+        mediaInfo.durationSeconds ?? null
+      )
+      : null;
+    const torrentCostSec = this.#observedTorrentCostPerMegabyte !== null && movingMegabytesPerSec !== null
+      ? this.#observedTorrentCostPerMegabyte * movingMegabytesPerSec
       : 0;
     const forBranch = (transcodeVideo) =>
       this.#sustainableHeights({
         heights,
         concurrentCostSec: torrentCostSec,
+        // What this file's swarm demanded the last time it was read. Absent on
+        // a first open, and then the bar is realtime.
+        requiredSpeed: mediaInfo?.sourceKey !== undefined
+          ? this.#requiredSpeedFor(mediaInfo.sourceKey, mediaInfo.fileIndex)
+          : null,
         observedDecodeCostSec,
         // Nothing is running yet, so nothing is exempt from being predicted —
         // except the copy itself, which the branch flag already covers.
@@ -5979,9 +6179,11 @@ export class HlsSessionManager {
     // per megabyte from readings taken while nothing was encoding, so the two
     // measurements do not contain each other.
     const perMegabyte = this.#observedTorrentCostPerMegabyte;
-    const megabytesPerSecond = sourceMegabytesPerSecond(
-      session,
-      this.#fileLengthByKey.get(`${session.sourceKey}:${session.fileIndex}`) ?? null
+    const megabytesPerSecond = this.#torrentMegabytesPerSecond(
+      session.sourceKey,
+      session.fileIndex,
+      this.#fileLengthByKey.get(`${session.sourceKey}:${session.fileIndex}`) ?? null,
+      session.durationSeconds
     );
     if (perMegabyte !== null && megabytesPerSecond !== null) {
       cost += perMegabyte * megabytesPerSecond;
@@ -6027,8 +6229,13 @@ export class HlsSessionManager {
     observedDecodeCostSec = null,
     concurrentCostSec = 0,
     runningCostByHeight = null,
-    measuredHeights = null
+    measuredHeights = null,
+    requiredSpeed = null
   }) {
+    // What this file's own supply demands, measured by its reader — and
+    // realtime while it has not been measured. Read once here so the line that
+    // reports a refusal names the figure it refused against.
+    const bar = speedBar(requiredSpeed);
     const benchmark = this.softwarePresetBenchmark;
     if (!Array.isArray(benchmark) || benchmark.length === 0 || sourceHeight <= 0 || sourceWidth <= 0) {
       return heights;
@@ -6118,7 +6325,7 @@ export class HlsSessionManager {
       // available is between two figures written minutes apart in different
       // lines of the log.
       predictedByHeight.set(height, onThisMachine);
-      if (onThisMachine !== null && onThisMachine >= REALTIME_SPEED_MARGIN) {
+      if (onThisMachine !== null && onThisMachine >= bar) {
         kept.push(height);
         continue;
       }
@@ -6131,7 +6338,10 @@ export class HlsSessionManager {
     // that holds five hundred, which buries whatever is worth reading.
     if (dropped.length > 0) {
       const line =
-        `transcode: not offering ${dropped.join(" ")} — below realtime × ${REALTIME_SPEED_MARGIN} ` +
+        `transcode: not offering ${dropped.join(" ")} — below ${bar.toFixed(2)}x ` +
+        (Number.isFinite(requiredSpeed) && requiredSpeed > 1
+          ? "(the speed this file's own interruptions demand) "
+          : "(realtime, this file's supply not measured yet) ") +
         // Said with the figures, because a step refused on a busy machine and
         // one refused on an idle machine are different facts about the host.
         (this.hostAvailability?.known

@@ -24,7 +24,7 @@ import {
   canSustainOutput,
   decodeSpeedFor,
   predictedRealtimeSpeed,
-  REALTIME_SPEED_MARGIN
+  speedBar
 } from "../services/hwaccel.js";
 import { HlsSessionManager, sourceDecodeCharacteristics } from "../services/hls-session-manager.js";
 import { parseFfmpegBitrateKbps, parseFfmpegVideoDimensions, parseFfmpegVideoFps } from "../services/ffmpeg-banner.js";
@@ -111,7 +111,7 @@ test("with no decode fit the prediction is the encoder alone — what it was bef
   assert.equal(speed, 5.99, "the old figure, four times the truth on that rung");
 });
 
-test("a rung is refused when the combined speed is under the margin", () => {
+test("a rung is refused when the combined speed is under the bar", () => {
   // The addon host's fastest preset, read from its own log: 11.2 Mpx/s.
   const benchmark = [{ preset: "ultrafast", pixelsPerSec: 11.2e6 }];
   const source = MEASURED_FILM;
@@ -123,14 +123,10 @@ test("a rung is refused when the combined speed is under the margin", () => {
     outputPixelsPerSec: 1280 * 720 * 24
   });
   assert.equal(heavy.sustainable, false, "720p needs 22 Mpx/s from an 11.2 Mpx/s host");
-  assert.ok(heavy.speed < REALTIME_SPEED_MARGIN);
+  assert.ok(heavy.speed < 1, `predicted ${heavy.speed.toFixed(2)}x`);
 
-  // And this is the gap the model does NOT close: the 240p rung predicts 1.58x
-  // and clears a margin of 1.5, while the field measured that same rung at
-  // 0.388-0.947x under real load — a host simultaneously copying 1080p,
-  // downloading the torrent and pushing segments. The prediction is honest for
-  // an idle machine; the margin is what has to carry the load, and 1.5 does not
-  // carry it. Pinned here so the arithmetic is not rediscovered from a log.
+  // The 240p rung of that film predicts 1.58x on an idle machine, and with
+  // nothing known about the swarm the bar is realtime, so it is offered.
   const light = canSustainOutput({
     benchmark,
     decodeModel: ADDON_HOST_MODEL,
@@ -139,6 +135,26 @@ test("a rung is refused when the combined speed is under the margin", () => {
   });
   assert.ok(Math.abs(light.speed - 1.58) < 0.01, `predicted ${light.speed.toFixed(2)}x`);
   assert.equal(light.sustainable, true);
+});
+
+test("the bar is what this file's own supply demands, when it has been measured", () => {
+  // The field torrent of 2026-08-17: waits of 1.49 s median arriving every
+  // 2.22 s demand 1.67x of any step that is to survive them. The same 240p rung
+  // predicted at 1.58x clears realtime and does not clear that.
+  const benchmark = [{ preset: "ultrafast", pixelsPerSec: 11.2e6 }];
+  const rung = {
+    benchmark,
+    decodeModel: ADDON_HOST_MODEL,
+    source: MEASURED_FILM,
+    outputPixelsPerSec: 426 * 240 * 24
+  };
+  assert.equal(canSustainOutput({ ...rung, requiredSpeed: 1.67 }).sustainable, false);
+  assert.equal(canSustainOutput({ ...rung, requiredSpeed: 1.2 }).sustainable, true);
+  // A swarm that has not been measured cannot raise the bar, and cannot lower
+  // it below realtime either.
+  assert.equal(speedBar(null), 1);
+  assert.equal(speedBar(0.4), 1);
+  assert.equal(speedBar(1.67), 1.67);
 });
 
 test("a reading from the running encoder outranks the model of the clips", () => {
@@ -340,8 +356,24 @@ test("the master playlist drops the rungs the host cannot hold", async (t) => {
   const stronger = { ...session, id: "dddddddd-eeee-ffff-0000-111111111111", offeredHeightsCache: undefined };
   manager.sessionsById.set(stronger.id, stronger);
   const master = manager.buildMasterPlaylist(stronger.id);
-  assert.ok(master, "1080p copied plus the one rung this host can produce");
+  assert.ok(master, "1080p copied plus the rungs this host can produce");
   const heights = [...master.matchAll(/^v\/(\d+)\/index\.m3u8$/gm)].map((match) => Number(match[1]));
-  assert.deepEqual(heights, [1080, 240]);
+  assert.deepEqual(heights, [1080, 360, 240], "nothing is known about this swarm, so the bar is realtime");
   assert.deepEqual(manager.offeredHeights(stronger), heights);
+
+  // The same host, once the reader has measured what this file's supply
+  // demands: waits arriving as they did on the field torrent of 2026-08-17 ask
+  // 1.67x of any step, and the rungs that only just cleared realtime go.
+  const onAThinSwarm = {
+    ...stronger,
+    id: "eeeeeeee-ffff-0000-1111-222222222222",
+    offeredHeightsCache: undefined,
+    supplyFigures: { requiredSpeed: 1.67, worstWaitSec: 1.49, medianIntervalSec: 2.22, samples: 12 }
+  };
+  manager.sessionsById.set(onAThinSwarm.id, onAThinSwarm);
+  assert.deepEqual(
+    manager.offeredHeights(onAThinSwarm),
+    [1080],
+    "the copied height costs no encoder and stays; nothing re-encoded survives that supply"
+  );
 });

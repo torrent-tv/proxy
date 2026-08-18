@@ -2065,7 +2065,7 @@ export class HlsSessionManager {
     // flip the arrangement under a stream that is playing.
     session.audioSeparate = inheritedAudioSeparate === null
       ? audioRenditions === true &&
-        this.#variantHeights(session).length >= 2 &&
+        this.#splicableHeights(session).length >= 2 &&
         this.#audioRenditionsOf(session).length > 0
       : inheritedAudioSeparate === true;
 
@@ -5380,6 +5380,42 @@ export class HlsSessionManager {
   }
 
   /**
+   * The heights this file's variants CAN be spliced at — a fact about the
+   * source and the cut grid, settled once and never moved.
+   *
+   * Separate from {@link #variantHeights}, which answers a different question:
+   * which of them are worth OFFERING to the viewer right now, on a machine
+   * whose load moves every five seconds. Both were the same list until
+   * 2026-08-18, and that is what broke playback outright: the browser is told
+   * at session creation that a master playlist exists, and 192 ms later — after
+   * the session's own encoder had started and the first supply reading had
+   * arrived — the live list had fallen from five rungs to one, `buildMaster
+   * Playlist` returned null for having fewer than two, and the master answered
+   * 404 to the very session that had just published it. hls.js treats that as
+   * fatal and unrecoverable, so nothing played at all (session `4ef731d8`,
+   * "Moana (2016).mkv", 17:43:01).
+   *
+   * A live figure may decide what to offer. It may not decide whether a
+   * published document exists.
+   *
+   * @param {HlsSession} session
+   * @returns {number[]} Largest first.
+   */
+  #splicableHeights(session) {
+    const owner = this.#baseOf(session);
+    if (Array.isArray(owner.splicableHeights)) {
+      return owner.splicableHeights;
+    }
+    const heights = new Set(variantHeightsFor(Number(owner.sourceHeight) || 0));
+    const own = this.variantHeightOf(owner);
+    if (own > 0) {
+      heights.add(own);
+    }
+    owner.splicableHeights = [...heights].sort((left, right) => right - left);
+    return owner.splicableHeights;
+  }
+
+  /**
    * The heights this session's file is offered at, largest first.
    *
    * The base session's OWN height is always among them, even when it is not a
@@ -6540,8 +6576,11 @@ export class HlsSessionManager {
       return null;
     }
     // Only the heights the master offers. Anything else is a made-up request,
-    // and honouring it would let a client start encoder runs at will.
-    if (!this.#variantHeights(base).includes(height)) {
+    // and honouring it would let a client start encoder runs at will. The
+    // MASTER's list, not the live one: a rung is published for the session's
+    // whole life, and refusing what we published is how a quality switch became
+    // a 404 storm across every level.
+    if (!this.#splicableHeights(base).includes(height)) {
       return null;
     }
     if (height === this.variantHeightOf(base)) {
@@ -6690,7 +6729,7 @@ export class HlsSessionManager {
     if (!isPlaylist && !isInit && !isSegment) {
       return { sessionId: null };
     }
-    if (!this.#variantHeights(base).includes(height)) {
+    if (!this.#splicableHeights(base).includes(height)) {
       return { sessionId: null };
     }
     // Answered from the base, and no encoder is started for it. Every variant of
@@ -6945,7 +6984,11 @@ export class HlsSessionManager {
       return null;
     }
     const sourceHeight = Number(session.sourceHeight) || 0;
-    const rungs = this.#variantHeights(session);
+    // What CAN be spliced, not what is worth offering this second. The live
+    // judgement travels in `offeredHeights` and in every progress report, which
+    // is what the viewer's menu follows; letting it decide the master's
+    // existence made a live session answer 404 to its own published address.
+    const rungs = this.#splicableHeights(session);
     if (rungs.length < 2) {
       return null;
     }

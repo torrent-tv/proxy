@@ -288,7 +288,7 @@ test("the source's decode figures come off the probe, or not at all", () => {
   assert.equal(sourceDecodeCharacteristics(null), null);
 });
 
-test("the master playlist drops the rungs the host cannot hold", async (t) => {
+test("the OFFER drops the rungs the host cannot hold, and the master keeps addressing them", async (t) => {
   const dirPath = await mkdtemp(path.join(os.tmpdir(), "decode-cost-"));
   const manager = new HlsSessionManager({
     enabled: true,
@@ -339,15 +339,22 @@ test("the master playlist drops the rungs the host cannot hold", async (t) => {
   };
   manager.sessionsById.set(session.id, session);
 
-  assert.equal(
-    manager.buildMasterPlaylist(session.id),
-    null,
-    "every rung under the copy runs below realtime here, so there is nothing to switch to"
-  );
   assert.deepEqual(
     manager.offeredHeights(session),
     [1080],
-    "and the list the browser is given says the same, since both come from one answer"
+    "every rung under the copy runs below realtime here, so there is nothing to switch to"
+  );
+  // The master is NOT that answer. It says which rungs can be spliced onto this
+  // cut grid, which is a fact about the file, and it has to hold still for the
+  // session's life: the browser is handed its address at creation, and a live
+  // figure that withdrew it left a session answering 404 to itself (field
+  // 2026-08-18, "Moana (2016).mkv" — nothing played at all).
+  const weakMaster = manager.buildMasterPlaylist(session.id);
+  assert.ok(weakMaster, "published once, whatever the host is managing this second");
+  assert.deepEqual(
+    [...weakMaster.matchAll(/^v\/(\d+)\/index\.m3u8$/gm)].map((match) => Number(match[1])),
+    [1080, 720, 540, 480, 360, 240],
+    "the ladder of the source, addressable — the menu the viewer sees is offeredHeights"
   );
 
   // A host with a little more encoder keeps the rungs it can actually hold. A
@@ -355,11 +362,18 @@ test("the master playlist drops the rungs the host cannot hold", async (t) => {
   manager.softwarePresetBenchmark = [{ preset: "ultrafast", pixelsPerSec: 12e6 }];
   const stronger = { ...session, id: "dddddddd-eeee-ffff-0000-111111111111", offeredHeightsCache: undefined };
   manager.sessionsById.set(stronger.id, stronger);
+  assert.deepEqual(
+    manager.offeredHeights(stronger),
+    [1080, 360, 240],
+    "nothing is known about this swarm, so the bar is realtime"
+  );
   const master = manager.buildMasterPlaylist(stronger.id);
-  assert.ok(master, "1080p copied plus the rungs this host can produce");
-  const heights = [...master.matchAll(/^v\/(\d+)\/index\.m3u8$/gm)].map((match) => Number(match[1]));
-  assert.deepEqual(heights, [1080, 360, 240], "nothing is known about this swarm, so the bar is realtime");
-  assert.deepEqual(manager.offeredHeights(stronger), heights);
+  assert.ok(master, "1080p copied plus every rung that can be spliced beside it");
+  assert.deepEqual(
+    [...master.matchAll(/^v\/(\d+)\/index\.m3u8$/gm)].map((match) => Number(match[1])),
+    [1080, 720, 540, 480, 360, 240],
+    "the same published set as before: what the host manages is the offer's business, not the document's"
+  );
 
   // The same host, once the reader has measured what this file's supply
   // demands: waits arriving as they did on the field torrent of 2026-08-17 ask

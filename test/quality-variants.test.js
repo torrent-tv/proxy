@@ -813,3 +813,49 @@ test("a quality step being warmed is not refused by its own cost", async (t) => 
       "offer by the act of warming it — and its next segment 404s on a stream that is playing"
   );
 });
+
+test("the master survives a live offer that has collapsed to one rung", async (t) => {
+  // The field case of 2026-08-18, in the smallest form that reproduces it: a
+  // host too slow for any re-encoded rung, and a swarm whose interruptions
+  // demand far more than realtime. The live offer then holds only the height an
+  // encoder is already producing — and until this test existed, that made
+  // `buildMasterPlaylist` answer null and the route answer 404 to a session
+  // that had just published the address.
+  const dirPath = await mkdtemp(path.join(os.tmpdir(), "quality-variants-collapse-"));
+  const manager = new HlsSessionManager({
+    enabled: true,
+    ffmpegBin: "ffmpeg",
+    localBindHost: "127.0.0.1",
+    localPort: 9090,
+    // A megapixel a second: every rung below the source costs more than the
+    // machine has.
+    softwarePresetBenchmark: [{ preset: "veryfast", pixelsPerSec: 1_000_000 }],
+    decodeCostModel: { pixelTerm: 0.01, bitrateTerm: 0, constantTerm: 0 }
+  });
+  const base = fakeSession({ id: BASE_ID, encodeHeight: 812, dirPath });
+  base.sourceDecode = { megapixelsPerSecond: 50, megabitsPerSecond: 10 };
+  // What this file's own reader measured: a step must run at eight times
+  // realtime to survive this swarm.
+  base.supplyFigures = { requiredSpeed: 8 };
+  manager.sessionsById.set(BASE_ID, base);
+  t.after(async () => {
+    await manager.disposeAll();
+    await rm(dirPath, { recursive: true, force: true });
+  });
+
+  assert.deepEqual(
+    manager.offeredHeights(base),
+    [812],
+    "the live judgement is unchanged: nothing but the running height is worth offering"
+  );
+
+  const master = manager.buildMasterPlaylist(BASE_ID);
+
+  assert.ok(master, "the master is a published document, not a live figure");
+  const heights = [...master.matchAll(/^v\/(\d+)\/index\.m3u8$/gm)].map((match) => Number(match[1]));
+  assert.deepEqual(
+    heights,
+    [1080, 812, 720, 540, 480, 360, 240],
+    "every rung that can be spliced onto this cut grid stays addressable"
+  );
+});

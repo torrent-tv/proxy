@@ -8,6 +8,11 @@
  * automatically on reconnect so the server's in-memory store stays consistent.
  */
 
+// FIRST, and it must stay first: it sets how many blocking calls this process
+// can have in flight, and a module's imports are evaluated before its body, so
+// anything imported above it would get the default pool. See the file itself
+// for the measurement that made it necessary.
+import "../services/thread-pool.js";
 import { Command } from "commander";
 import crypto from "node:crypto";
 import { spawnSync } from "node:child_process";

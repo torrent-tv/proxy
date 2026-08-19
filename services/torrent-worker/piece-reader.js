@@ -484,6 +484,20 @@ export async function* readFragments({
   // process.
   const readerId = `read-${(readerSequence += 1)}`;
 
+  /**
+   * Set when the window JUMPS, cleared by the first wait after it.
+   *
+   * The wait that follows a jump is the cost of the jump: the pieces at the new
+   * position have not been asked for yet, and the encoder is restarting. It is
+   * not evidence about how well this swarm SUSTAINS a read, which is the only
+   * thing `requiredSpeed` is about — and letting it in is what collapsed the
+   * quality offer 131 ms after the seek measured on 2026-08-18, refusing every
+   * re-encoded rung on the strength of one jump.
+   *
+   * @type {boolean}
+   */
+  let waitBelongsToJump = false;
+
   const moveWindowTo = (pieceIndex) => {
     const next = readWindowFor({ pieceIndex, lastPiece, windowPieces });
     if (window && window.from === next.from && window.to === next.to) {
@@ -501,6 +515,7 @@ export async function* readFragments({
     // fills the store while the encoder runs ahead of the viewer.
     store.protectRange?.(readerId, next.from, next.to);
     if (isJump) {
+      waitBelongsToJump = true;
       // A jump — a seek, not the window sliding along — can land on pieces that
       // are already downloaded but have been spilled to disk. Bring the whole
       // window back at once instead of one disk round trip per piece as the
@@ -603,7 +618,18 @@ export async function* readFragments({
       // short, an immediate hit means it is longer than it needs to be. Applied
       // before the logging below so the line reports the window the next piece
       // will actually use.
-      noteSupplyWait(`${torrent?.infoHash ?? "?"}/${file?.name ?? "?"}`, file?.name ?? "", waitedMs);
+      if (waitBelongsToJump) {
+        // Recorded nowhere: see `waitBelongsToJump`. Said out loud, because a
+        // gap in the supply history is otherwise indistinguishable from a swarm
+        // that never made the reader wait.
+        logger.info(
+          `piece-reader: ${waitedMs}ms on the first piece after a jump — the cost of moving, ` +
+            `not of this swarm's supply, so it is not counted against the quality offer`
+        );
+        waitBelongsToJump = false;
+      } else {
+        noteSupplyWait(`${torrent?.infoHash ?? "?"}/${file?.name ?? "?"}`, file?.name ?? "", waitedMs);
+      }
       const widened = nextWindowPieces({
         current: windowPieces,
         base: basePieces,

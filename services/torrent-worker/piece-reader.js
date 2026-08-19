@@ -22,7 +22,7 @@
 
 import { findSharedStore } from "../piece-store/shared-piece-store.js";
 import { logger } from "../../utils/logger.js";
-import { askFastestWiresFor, canPlaceRequests } from "./fastest-wires.js";
+import { askFastestWiresFor, canPlaceRequests, describePieceTail } from "./fastest-wires.js";
 import { minimumBufferFrom, requiredSpeedFrom } from "../supply-margin.js";
 
 /** Only waits at least this long are reported; sequential reading stays silent. */
@@ -566,9 +566,18 @@ export async function* readFragments({
       // of bandwidth and the reader still waited 1.0-4.5 s, 47 times in two
       // minutes, on pieces five peers already had.
       let pushed = { asked: 0, attempted: 0, considered: 0, fastestBytesPerSecond: 0 };
+      // The tail as it stood at an attempt that placed NOTHING — the state the
+      // duplication work has to answer, and the only one worth a line. Sampled
+      // at that instant rather than once up front, because the steering runs
+      // again every half second and the piece changes under it; the last such
+      // reading is kept, so the line describes the most recent failure.
+      let tailWhenNothingPlaced = null;
       const pushToFastest = () => {
         try {
           const result = askFastestWiresFor(torrent, pieceIndex);
+          if (result.asked === 0) {
+            tailWhenNothingPlaced = describePieceTail(torrent, pieceIndex);
+          }
           pushed = {
             asked: pushed.asked + result.asked,
             // Summed like the successes, so the line compares two totals over
@@ -586,6 +595,9 @@ export async function* readFragments({
       if (canPlaceRequests(torrent)) {
         pushToFastest();
       } else {
+        // Nothing can be placed at all on this build, so the tail is the whole
+        // of the answer.
+        tailWhenNothingPlaced = describePieceTail(torrent, pieceIndex);
         logger.warn(
           "piece-reader: this webtorrent build offers no way to place a request; " +
             "the blocked piece cannot be steered onto a faster peer"
@@ -657,6 +669,19 @@ export async function* readFragments({
             `; steered onto ${pushed.asked} of ${pushed.attempted} asks (${pushed.considered} peers held it)` +
             (pushed.fastestBytesPerSecond > 0
               ? `, fastest ${Math.round(pushed.fastestBytesPerSecond / 1024)}KB/s`
+              : "") +
+            // Only when the steering placed nothing, which is the case that
+            // decides whether duplicating the tail is worth building: it says
+            // how much of the piece is still missing and which wires are
+            // holding it, slowest first.
+            (tailWhenNothingPlaced
+              ? `; tail ${tailWhenNothingPlaced.missing}/${tailWhenNothingPlaced.chunks} blocks missing, held by ` +
+                (tailWhenNothingPlaced.outstanding.length > 0
+                  ? tailWhenNothingPlaced.outstanding
+                    .map((wire) => `${wire.blocks}@${Math.round(wire.bytesPerSecond / 1024)}KB/s` +
+                      (wire.choking ? " (choking)" : ""))
+                    .join(" ")
+                  : "nobody")
               : "")
         );
       }

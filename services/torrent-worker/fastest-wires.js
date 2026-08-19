@@ -126,3 +126,74 @@ export function askFastestWiresFor(torrent, pieceIndex, limit = 3) {
     fastestBytesPerSecond: candidates.length > 0 ? speedOf(candidates[0]) : 0
   };
 }
+
+/**
+ * What is actually holding up a piece the reader is blocked on.
+ *
+ * The steering above can only move a block that the library will hand over, and
+ * the field says it often hands over nothing: `steered onto 0 of 9 asks (8
+ * peers held it)`, recorded 2026-08-18 while eight peers had the piece. When
+ * every block of a piece is already reserved, `Piece.reserve()` answers -1 and
+ * there is no request left to place — the read then ends when the SLOWEST
+ * holder delivers its block, however fast the rest of the swarm is.
+ *
+ * Duplicating those last blocks onto faster wires is the standard remedy, and
+ * it is not free: every duplicate is a block's worth of traffic paid twice. So
+ * this describes the tail before anything is built with it — how many blocks
+ * are still missing, and on which wires they sit, with each wire's speed. If
+ * the missing blocks turn out to sit on one slow wire, duplication is aimed at
+ * exactly the right thing; if they are spread across fast ones, the wait has
+ * another cause and this work should not be done at all.
+ *
+ * Reads only: nothing here changes a reservation or places a request.
+ *
+ * @param {import("webtorrent").Torrent} torrent
+ * @param {number} pieceIndex
+ * @returns {{ chunks: number, missing: number,
+ *   outstanding: Array<{ blocks: number, bytesPerSecond: number, choking: boolean }> } | null}
+ *   Null only when the piece object is gone — it completed and was cleared.
+ *   A piece nobody has reserved a block of yet is NOT null: `torrent-piece`
+ *   creates its buffer lazily on the first reserve, so a piece the picker has
+ *   not reached reads as every block missing and nothing outstanding, which is
+ *   the most informative answer this can give — the wait is not on a slow
+ *   holder, it is on nobody having been asked.
+ */
+export function describePieceTail(torrent, pieceIndex) {
+  const piece = torrent?.pieces?.[pieceIndex];
+  if (!piece) {
+    return null;
+  }
+  const buffer = Array.isArray(piece._buffer) ? piece._buffer : null;
+  const chunks = Number.isFinite(piece._chunks)
+    ? piece._chunks
+    : (buffer ? buffer.length : 0);
+  // No buffer means no block of this piece has been reserved yet, so all of it
+  // is missing. Reading that as "no tail" hid the case worth seeing most.
+  let missing = chunks;
+  if (buffer) {
+    missing = 0;
+    for (let index = 0; index < chunks; index += 1) {
+      if (!buffer[index]) {
+        missing += 1;
+      }
+    }
+  }
+
+  const wires = Array.isArray(torrent?.wires) ? torrent.wires : [];
+  const outstanding = [];
+  for (const wire of wires) {
+    const requests = Array.isArray(wire?.requests) ? wire.requests : [];
+    const blocks = requests.filter((request) => request?.piece === pieceIndex).length;
+    if (blocks > 0) {
+      outstanding.push({
+        blocks,
+        bytesPerSecond: speedOf(wire),
+        choking: wire?.peerChoking === true
+      });
+    }
+  }
+  // Slowest first: that is the wire the read is waiting on, and the one a
+  // duplicate would be aimed past.
+  outstanding.sort((left, right) => left.bytesPerSecond - right.bytesPerSecond);
+  return { chunks, missing, outstanding };
+}

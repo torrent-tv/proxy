@@ -51,6 +51,11 @@ test("a seek releases a held segment request instead of running out the hold", a
   const hlsSessionManager = {
     nextRequestSeq: () => 1,
     seekEpoch: () => epoch,
+    // The viewer seeked AWAY from this segment, so it is genuinely stale. A
+    // request for the segment they seeked TO is kept instead — see
+    // `test/seek-target-not-superseded.test.js`.
+    requestStillWanted: () => false,
+    viewerPositionOf: () => 0,
     async getFileStream() {
       polls += 1;
       // The viewer moves while this request is being held.

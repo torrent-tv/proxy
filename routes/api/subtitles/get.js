@@ -27,6 +27,7 @@
 import { spawn } from "node:child_process";
 import { convertSubtitleToVtt, decodeSubtitleBytes } from "../../../services/subtitle-convert.js";
 import { detectLanguage } from "../../../services/language-detect.js";
+import { logger } from "../../../utils/logger.js";
 
 // Safety cap: no embedded extraction may outlive this.
 const EXTRACTION_TIMEOUT_MS = 30 * 60 * 1000;
@@ -99,6 +100,53 @@ export async function handleApiSubtitlesGet(req, reply, { sourceRegistry, torren
   inputUrl.searchParams.set("sourceKey", sourceKey);
   inputUrl.searchParams.set("fileIndex", String(fileIndex));
 
+  const key = `${sourceKey}:${fileIndex}:${trackIndex}`;
+  const known = extractions.get(key);
+  if (known?.state === "done") {
+    setLanguageHeaders(reply, known.language);
+    reply.header("content-type", "text/vtt; charset=utf-8");
+    reply.header("cache-control", "no-store");
+    reply.header("access-control-allow-origin", "*");
+    return reply.send(known.body);
+  }
+  if (known?.state === "failed") {
+    return reply.code(422).send({ error: known.error });
+  }
+  if (known?.state !== "running") {
+    startExtraction({ key, ffmpegBin, localBaseUrl, sourceKey, fileIndex, trackIndex });
+  }
+  // Being prepared. The connection is NOT held: extracting an embedded track
+  // makes ffmpeg read the whole file, because subtitles are interleaved through
+  // it, and that means downloading the film for the sake of a few kilobytes of
+  // text. Measured 2026-08-19: track 0 of one release produced 3040 bytes over
+  // **752 seconds**, with the data channel idle the whole time — the browser
+  // gave up at its own sixty-second limit, and every retry started the same
+  // twelve-minute scan again. So the work runs once in the background and the
+  // caller is told to come back.
+  return reply.code(202).send({ pending: true });
+}
+
+/**
+ * Extractions by `sourceKey:fileIndex:trackIndex`, so the scan happens once per
+ * track however many times it is asked for.
+ *
+ * @type {Map<string, { state: "running" | "done" | "failed", body?: Buffer, language?: string, error?: string }>}
+ */
+const extractions = new Map();
+
+/**
+ * Run one extraction to completion in the background, keeping the result.
+ *
+ * @param {{ key: string, ffmpegBin: string, localBaseUrl: string, sourceKey: string, fileIndex: number, trackIndex: number }} params
+ * @returns {void}
+ */
+function startExtraction({ key, ffmpegBin, localBaseUrl, sourceKey, fileIndex, trackIndex }) {
+  const inputUrl = new URL("/stream", `${localBaseUrl}/`);
+  inputUrl.searchParams.set("sourceKey", sourceKey);
+  inputUrl.searchParams.set("fileIndex", String(fileIndex));
+
+  extractions.set(key, { state: "running" });
+  const startedAt = Date.now();
   const ffmpeg = spawn(
     ffmpegBin,
     ["-hide_banner", "-loglevel", "error", "-i", inputUrl.toString(), "-map", `0:s:${trackIndex}`, "-f", "webvtt", "pipe:1"],
@@ -112,56 +160,34 @@ export async function handleApiSubtitlesGet(req, reply, { sourceRegistry, torren
     }
   });
 
+  /** @type {Buffer[]} */
+  const chunks = [];
+  ffmpeg.stdout.on("data", (chunk) => chunks.push(chunk));
+
   const killTimer = setTimeout(() => {
     if (!ffmpeg.killed) {
       ffmpeg.kill("SIGKILL");
     }
   }, EXTRACTION_TIMEOUT_MS);
   killTimer.unref?.();
-  req.raw.on("close", () => {
+
+  const settle = () => {
     clearTimeout(killTimer);
-    if (!ffmpeg.killed) {
-      ffmpeg.kill("SIGTERM");
+    const seconds = ((Date.now() - startedAt) / 1000).toFixed(1);
+    const body = Buffer.concat(chunks);
+    if (body.length === 0) {
+      extractions.set(key, {
+        state: "failed",
+        error: `Subtitle track could not be extracted: ${stderr.trim() || "no output from ffmpeg"}`
+      });
+      logger.warn(`subtitles ${key}: nothing produced after ${seconds}s`);
+      return;
     }
-  });
-
-  const firstChunk = await new Promise((resolve) => {
-    let settled = false;
-    const settle = (value) => {
-      if (!settled) {
-        settled = true;
-        resolve(value);
-      }
-    };
-    ffmpeg.stdout.once("data", (chunk) => settle(chunk));
-    ffmpeg.once("exit", () => settle(null));
-    ffmpeg.once("error", () => settle(null));
-  });
-
-  if (firstChunk === null) {
-    clearTimeout(killTimer);
-    return reply
-      .code(422)
-      .send({ error: `Subtitle track could not be extracted: ${stderr.trim() || "no output from ffmpeg"}` });
-  }
-
-  // Detect language from the first chunk of the produced VTT (embedded tracks
-  // frequently lack a language tag in their container metadata).
-  setLanguageHeaders(reply, detectLanguage(String(firstChunk)));
-  reply.raw.writeHead(200, {
-    "content-type": "text/vtt; charset=utf-8",
-    "cache-control": "no-store",
-    "access-control-allow-origin": "*"
-  });
-  reply.raw.write(firstChunk);
-  ffmpeg.stdout.pipe(reply.raw);
-  await new Promise((resolve) => {
-    ffmpeg.stdout.once("end", resolve);
-    ffmpeg.once("error", resolve);
-  });
-  clearTimeout(killTimer);
-  reply.raw.end();
-  return reply;
+    extractions.set(key, { state: "done", body, language: detectLanguage(String(body.subarray(0, 4096))) });
+    logger.info(`subtitles ${key}: ${body.length} bytes in ${seconds}s`);
+  };
+  ffmpeg.once("close", settle);
+  ffmpeg.once("error", settle);
 }
 
 /**

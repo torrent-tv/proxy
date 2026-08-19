@@ -761,6 +761,10 @@ export async function* readFragments({
    * nothing passed in and no assumption about who is reading.
    */
   let deliveredBytes = 0;
+  // How often this read had to stop, and for how long in total. Reported at the
+  // end whatever the outcome, so a read that never stopped is counted too.
+  let waitCount = 0;
+  let waitedTotalMs = 0;
   const readStartedAt = Date.now();
   const consumeBytesPerSec = () => {
     const seconds = (Date.now() - readStartedAt) / 1000;
@@ -979,6 +983,8 @@ export async function* readFragments({
         const supplyKey = `${torrent?.infoHash ?? "?"}/${file?.name ?? "?"}`;
         noteSteeringOutcome(supplyKey, waitedMs, pushed.asked > 0 || duplicated > 0);
         noteReadMode(supplyKey, waitedMs, readMode);
+        waitCount += 1;
+        waitedTotalMs += waitedMs;
         noteSupplyWait(supplyKey, file?.name ?? "", waitedMs);
       }
       const widened = nextWindowPieces({
@@ -1097,9 +1103,22 @@ export async function* readFragments({
       releaseHeldPin();
       releaseHeldPin = null;
     }
-    // Reached on completion, on cancellation, on a throw, and when the consumer
-    // stops iterating — a window left behind would keep the swarm fetching for
-    // a reader that no longer exists.
+    // What this read did, said once at its end and under EVERY outcome — the
+    // arm it ran under, how much it delivered, and how much of that time was
+    // spent waiting. Until now the arm was named only beside a wait, so a read
+    // that never waited left no trace of which way it had claimed its pieces:
+    // measured 2026-08-19 across eight sessions with zero waits, the log could
+    // not say whether `flat` or `bands` had run even once. A comparison that
+    // only records the bad outcomes cannot say that the good ones happened at
+    // all, and "no wait" is exactly the result worth counting.
+    const readSeconds = (Date.now() - readStartedAt) / 1000;
+    if (deliveredBytes > 0) {
+      logger.info(
+        `read "${String(file?.name ?? "?").slice(0, 40)}" mode=${readMode} ` +
+        `delivered=${(deliveredBytes / 1e6).toFixed(1)}MB in ${readSeconds.toFixed(1)}s ` +
+        `waits=${waitCount} waited=${(waitedTotalMs / 1000).toFixed(1)}s`
+      );
+    }
     // Reached on completion, on cancellation, on a throw, and when the consumer
     // stops iterating — a band left behind would keep the swarm fetching for a
     // reader that no longer exists.

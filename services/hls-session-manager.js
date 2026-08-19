@@ -7267,6 +7267,59 @@ export class HlsSessionManager {
   }
 
   /**
+   * Where the viewer of this session is, in seconds.
+   *
+   * Exists so a refusal can name it. A log line that says only "superseded"
+   * cannot be read afterwards: it does not say what was refused or against what
+   * position, which is exactly what the 2026-08-18 investigation lacked.
+   *
+   * @param {string} sessionId
+   * @returns {number} Zero when the session is gone or nothing has been reported.
+   */
+  viewerPositionOf(sessionId) {
+    const session = isSafeSessionId(sessionId) ? this.sessionsById.get(sessionId) : null;
+    const position = Number(session?.viewerPositionSeconds);
+    return Number.isFinite(position) ? position : 0;
+  }
+
+  /**
+   * Whether a held request is for a segment the viewer STILL needs.
+   *
+   * The epoch alone says a seek happened; it cannot say whether this particular
+   * request was made for the position left behind or for the one just arrived
+   * at. That distinction is the whole of the failure measured 2026-08-18: the
+   * viewer seeked to 1061.0 s, the request for `segment-00101` — the segment AT
+   * that position — raced the seek notification, the epoch moved underneath it,
+   * and it was answered 503 twice within 80 ms. The player then hunted at
+   * sn=105-107, never came back to 101, and looped two audio segments 1473
+   * times over 149 s while the picture stood still.
+   *
+   * A request is stale when its segment lies behind where the viewer now is, or
+   * so far ahead that the running encode will not reach it. Anything between is
+   * exactly what the viewer is waiting for, and holding it is the point.
+   *
+   * @param {string} sessionId
+   * @param {string} fileName
+   * @returns {boolean} True when the request should keep waiting.
+   */
+  requestStillWanted(sessionId, fileName) {
+    const session = isSafeSessionId(sessionId) ? this.sessionsById.get(sessionId) : null;
+    if (!session) {
+      return false;
+    }
+    const index = session.segmentFormat?.segmentIndexFromName?.(fileName) ?? -1;
+    if (!(index >= 0)) {
+      return true; // a playlist or an init segment belongs to no position
+    }
+    const position = Number(session.viewerPositionSeconds);
+    if (!Number.isFinite(position)) {
+      return true; // nothing said where the viewer is; refusing would be a guess
+    }
+    const at = this.#segmentIndexForTime(session, position);
+    return index >= at && index <= at + MAX_LOOKAHEAD_SEGMENTS;
+  }
+
+  /**
    * Open a read stream for an HLS segment or playlist file from a session.
    *
    * @param {string} sessionId

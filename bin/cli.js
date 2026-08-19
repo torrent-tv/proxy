@@ -27,7 +27,7 @@ import { collectHealthMetrics } from "../services/health-collector.js";
 import { createPortMapper } from "../services/port-mapper.js";
 import { classifyNat } from "../services/nat-classifier.js";
 import { DEFAULT_SEGMENT_FORMAT_ID, SEGMENT_FORMAT_IDS } from "../services/segment-formats/index.js";
-import { logger } from "../utils/logger.js";
+import { logToFile, logger } from "../utils/logger.js";
 
 const require = createRequire(import.meta.url);
 const { version: PROXY_VERSION } = require("../package.json");
@@ -84,6 +84,10 @@ program
   .option(
     "--state-dir <path>",
     "Where to keep what this host has measured about itself (default: beside the installed proxy)"
+  )
+  .option(
+    "--log-file <path>",
+    "Also write the log to this file, so a crash or an update does not take it with them"
   )
   .option(
     "--segment-format <format>",
@@ -272,6 +276,7 @@ async function shutdown(signal) {
 }
 
 try {
+  logToFile(options.logFile);
   if (transcodeAudio) {
     assertFfmpegAvailability();
   }

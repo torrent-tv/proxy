@@ -94,9 +94,19 @@ export async function serveSessionFile(req, reply, { hlsSessionManager, sessionI
     return reply.code(404).send({ error: "Transcode session file was not found." });
   }
   if (result.kind === "superseded") {
-    // The viewer moved while this was being held. Answer at once so the player
-    // can ask for where it is now; `Retry-After: 0` because there is nothing to
-    // wait for — this segment is simply no longer the one being watched.
+    // The viewer moved while this was being held, and this segment is not the
+    // one they moved TO — that case is kept and waited out, see
+    // `waitForSessionFile`. Answer at once so the player can ask for where it
+    // is now; `Retry-After: 0` because there is nothing to wait for.
+    //
+    // Named in the log, because a refusal that says only "superseded" is what
+    // made the 2026-08-18 freeze take a day to explain: the player was refused
+    // the segment at its own seek target and nothing recorded which segment or
+    // where the viewer was.
+    logger.info(
+      `[hold] ${fileName} refused: the viewer is at ` +
+      `${hlsSessionManager.viewerPositionOf(sessionId).toFixed(1)}s and this is not the segment there`
+    );
     reply.header("Retry-After", "0");
     return reply.code(503).send({ error: "Superseded by a seek." });
   }
@@ -153,14 +163,25 @@ export async function waitForSessionFile(hlsSessionManager, sessionId, fileName,
   // the player actually needs now. Measured: 57 s of a 58 s backward seek was
   // this wait, and the segment the viewer wanted took 15 ms once it was asked
   // for.
-  const seekEpoch = hlsSessionManager.seekEpoch(sessionId);
+  let seekEpoch = hlsSessionManager.seekEpoch(sessionId);
   while (Date.now() - startedAt < timeoutMs) {
     const result = await hlsSessionManager.getFileStream(sessionId, fileName, { requestSeq });
     if (result.kind !== "warming-up") {
       return result;
     }
     if (hlsSessionManager.seekEpoch(sessionId) !== seekEpoch) {
-      return { kind: "superseded" };
+      // A seek moved the epoch. Whether THIS request is stale depends on which
+      // segment it asks for: the one the viewer has just landed on races the
+      // seek notification and would otherwise be refused at the exact moment it
+      // is needed — measured 2026-08-18, two 503s within 80 ms on the segment
+      // at the seek target, after which the player never asked for it again.
+      if (!hlsSessionManager.requestStillWanted(sessionId, fileName)) {
+        return { kind: "superseded" };
+      }
+      logger.info(
+        `[hold] ${fileName} kept across a seek: it is the segment the viewer now needs`
+      );
+      seekEpoch = hlsSessionManager.seekEpoch(sessionId);
     }
     await delay(300);
   }

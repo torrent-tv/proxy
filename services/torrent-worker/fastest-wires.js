@@ -197,3 +197,83 @@ export function describePieceTail(torrent, pieceIndex) {
   outstanding.sort((left, right) => left.bytesPerSecond - right.bytesPerSecond);
   return { chunks, missing, outstanding };
 }
+
+/**
+ * Ask a second wire for blocks the reader is still waiting on.
+ *
+ * WebTorrent reserves each block for exactly one wire, so once `Piece.reserve()`
+ * answers -1 there is no request left to place and the read ends when the
+ * holder of the last block delivers it — however fast the rest of the swarm is.
+ * The library's own remedy is `_hotswap`, and it does precisely the right
+ * thing: `piece.cancel(blockIndex)` frees the reservation while leaving the
+ * first wire's request in flight, so a second wire can be asked for the same
+ * block and whichever arrives first wins. What it will not do is apply that to
+ * these tails. It is gated on speed — the held-up wire must be under 48 KB/s
+ * (`3 * BLOCK_LENGTH`) and at least twice as slow as the asker — and measured
+ * on a real swarm 2026-08-19, the tails a reader waits on sit at 109, 317 and
+ * 870 KB/s. Peers the library rightly considers good, because for bulk
+ * downloading they are; the gate is about throughput across a torrent and knows
+ * nothing about a reader blocked on one piece now.
+ *
+ * Speed is not even what is wrong with them: two blocks — 32 KB — on a wire
+ * measured at 109 KB/s is 0.3 s of transfer, and that read waited 4.6 s. The
+ * blocks are not travelling slowly, they are queued behind that wire's other
+ * work, which no average speed can show.
+ *
+ * The cost is bounded by the same measurement: the tails were 2 to 14 blocks of
+ * 512, so 32 to 224 KB against the 8 MiB piece they hold up. At most one
+ * duplicate is asked per candidate wire per call, and the caller repeats every
+ * half second, so a longer tail is covered across attempts rather than in one
+ * burst.
+ *
+ * Safe against the completion path: a block that arrives twice is dropped by
+ * `Piece.set`, which writes only into an empty slot, and a piece already
+ * flushed answers `false` from `Piece.init` so the second arrival returns
+ * before `flush()` is reached.
+ *
+ * @param {object} torrent
+ * @param {number} pieceIndex
+ * @returns {{ duplicated: number, missing: number, wires: number }}
+ *   `duplicated` counts requests the library actually placed for a block that
+ *   was already outstanding elsewhere.
+ */
+export function duplicateTailFor(torrent, pieceIndex) {
+  const piece = torrent?.pieces?.[pieceIndex];
+  const buffer = Array.isArray(piece?._buffer) ? piece._buffer : null;
+  if (!piece || !buffer || typeof piece.cancel !== "function") {
+    return { duplicated: 0, missing: 0, wires: 0 };
+  }
+  const chunks = Number.isFinite(piece._chunks) ? piece._chunks : buffer.length;
+  const missing = [];
+  for (let index = 0; index < chunks; index += 1) {
+    if (!buffer[index]) {
+      missing.push(index);
+    }
+  }
+  const candidates = wiresForPiece(torrent, pieceIndex);
+  if (missing.length === 0 || candidates.length === 0) {
+    return { duplicated: 0, missing: missing.length, wires: candidates.length };
+  }
+
+  let duplicated = 0;
+  // One block per wire: that is what the pipelines can usefully take at once,
+  // and it needs no number of its own.
+  for (let index = 0; index < Math.min(missing.length, candidates.length); index += 1) {
+    // Freeing the reservation is what makes the block askable again; the
+    // request already in flight is deliberately left alone, because the point
+    // is to have two of them.
+    piece.cancel(missing[index]);
+    // `false` is hotswap: the library's own swap must not run on top of this,
+    // or it would free a THIRD wire's block as well.
+    if (torrent._request(candidates[index], pieceIndex, false) === true) {
+      duplicated += 1;
+      continue;
+    }
+    // The wire's pipeline is full. The block stays in the piece's cancellation
+    // stack and will be handed to whoever asks next, which is harmless — it is
+    // already in flight elsewhere — but there is no point asking the remaining
+    // wires, whose pipelines are no emptier.
+    break;
+  }
+  return { duplicated, missing: missing.length, wires: candidates.length };
+}

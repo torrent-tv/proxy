@@ -22,7 +22,12 @@
 
 import { findSharedStore } from "../piece-store/shared-piece-store.js";
 import { logger } from "../../utils/logger.js";
-import { askFastestWiresFor, canPlaceRequests, describePieceTail } from "./fastest-wires.js";
+import {
+  askFastestWiresFor,
+  canPlaceRequests,
+  describePieceTail,
+  duplicateTailFor
+} from "./fastest-wires.js";
 import { minimumBufferFrom, requiredSpeedFrom } from "../supply-margin.js";
 
 /** Only waits at least this long are reported; sequential reading stays silent. */
@@ -572,11 +577,20 @@ export async function* readFragments({
       // again every half second and the piece changes under it; the last such
       // reading is kept, so the line describes the most recent failure.
       let tailWhenNothingPlaced = null;
+      // What duplicating the tail placed, summed over the wait. Measured
+      // 2026-08-19 on a real swarm: the blocks a reader waits on are 2-14 of
+      // 512 and sit on wires the library considers fast, so its own hotswap
+      // never fires for them — see `duplicateTailFor`.
+      let duplicated = 0;
       const pushToFastest = () => {
         try {
           const result = askFastestWiresFor(torrent, pieceIndex);
           if (result.asked === 0) {
             tailWhenNothingPlaced = describePieceTail(torrent, pieceIndex);
+            // Nothing could be placed the ordinary way, which means every block
+            // is spoken for. That is exactly when a second copy of the last
+            // blocks is worth asking for.
+            duplicated += duplicateTailFor(torrent, pieceIndex).duplicated;
           }
           pushed = {
             asked: pushed.asked + result.asked,
@@ -682,7 +696,10 @@ export async function* readFragments({
                       (wire.choking ? " (choking)" : ""))
                     .join(" ")
                   : "nobody")
-              : "")
+              : "") +
+            // What we did about the tail, so the next session says by number
+            // whether a second copy of those blocks shortens the wait.
+            (duplicated > 0 ? `; duplicated ${duplicated} blocks` : "")
         );
       }
 

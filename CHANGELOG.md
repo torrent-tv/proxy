@@ -1,3 +1,7 @@
+## 2.43.1
+
+- **New**: A subtitle request can say where the browser's copy ends (`?after=<seconds>`) and gets back only the cues past it. A track read out of downloaded clusters grows as the film does, and the browser was being sent all of it every few seconds — 76 KB a time on the field file — for the few lines at its end. The language is still detected from every cue held rather than from the handful being sent, because three lines say much less about a language than a whole track does.
+
 ## 2.43.0
 
 - **New**: An MP4's text subtitles are read the same way, and more cheaply than Matroska's. Where a Matroska cue costs whatever cluster holds it — the picture around it included — an MP4 states every sample's own byte range in its sample table (ISO/IEC 14496-12 §8.6.1.2, §8.7.3-8.7.5), so a cue costs its own few dozen bytes and nothing else. The tables are read out of the `moov` the keyframe reader already fetches: `stts` for when each cue starts and how long it lasts, `stsz` for its length, `stsc` with `stco`/`co64` for where its bytes are. `tx3g` (3GPP timed text) and `wvtt` (WebVTT in MP4) are decoded; `stpp` (TTML) is XML and is deliberately left out rather than half-shown. An empty sample is the format's way of saying nothing is on screen and is not turned into a blank cue. Same rule as before: only samples whose bytes are already downloaded are read, so a cue never costs a request.

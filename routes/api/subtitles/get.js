@@ -100,7 +100,19 @@ export async function handleApiSubtitlesGet(req, reply, { sourceRegistry, torren
   // read that way. Costs no network at all and answers with the part of the
   // film they are watching; the rest arrives as they watch it. Only when the
   // container cannot be read this way does the old extraction run.
-  const held = await cuesFromDownloadedClusters(torrentPool, torrent, fileIndex, trackIndex);
+  // Where the browser's copy of this track ends. It already holds every cue
+  // before this second, so sending them again is bytes for nothing: measured
+  // 2026-08-19, one track is 76 KB and the browser asked for it every few
+  // seconds while the film downloaded. Absent or unparsable means "send
+  // everything", which is what a browser asking for the first time wants.
+  const after = Number.parseFloat(String(req.query?.after ?? ""));
+  const held = await cuesFromDownloadedClusters(
+    torrentPool,
+    torrent,
+    fileIndex,
+    trackIndex,
+    Number.isFinite(after) ? after : null
+  );
   if (held !== null) {
     setLanguageHeaders(reply, held.language);
     reply.header("content-type", "text/vtt; charset=utf-8");
@@ -252,7 +264,7 @@ function readFileFully(file, maxBytes) {
  * @returns {Promise<{ vtt: string, language: object | null, coveredClusters: number, indexedClusters: number } | null>}
  *   Null when this file cannot be read this way, and then the caller falls back.
  */
-async function cuesFromDownloadedClusters(torrentPool, torrent, fileIndex, trackIndex) {
+async function cuesFromDownloadedClusters(torrentPool, torrent, fileIndex, trackIndex, after = null) {
   if (typeof torrentPool?.getSubtitleTracks !== "function") {
     return null;
   }
@@ -275,7 +287,13 @@ async function cuesFromDownloadedClusters(torrentPool, torrent, fileIndex, track
   if (!held || !Array.isArray(held.cues)) {
     return null;
   }
-  const vtt = cuesToVtt(held.cues, held.codecId);
+  // Only what the browser does not have. The language is still detected from
+  // EVERYTHING held, because three new lines say much less about a language
+  // than the whole track does.
+  const fresh = Number.isFinite(after)
+    ? held.cues.filter((cue) => cue.startSeconds > after)
+    : held.cues;
+  const vtt = cuesToVtt(fresh, held.codecId);
   const language = held.cues.length > 0
     ? detectLanguage(held.cues.map((cue) => cue.text).join("\n"))
     : null;

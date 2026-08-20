@@ -158,6 +158,24 @@ export class WorkerTorrentPool {
   }
 
   /**
+   * What the container itself declares about its subtitle tracks, in its own
+   * order and including the picture-based ones — for lining up against
+   * ffmpeg's own numbering.
+   *
+   * @param {object} torrent
+   * @param {number} fileIndex
+   * @returns {Promise<object[]>}
+   */
+  async getDeclaredSubtitleTracks(torrent, fileIndex) {
+    const sourceKey = torrent?.sourceKey;
+    if (!sourceKey) {
+      return [];
+    }
+    const answer = await this.#client.getSubtitleTracks({ sourceKey, fileIndex });
+    return Array.isArray(answer?.declared) ? answer.declared : [];
+  }
+
+  /**
    * The cues of one subtitle track that the downloaded clusters already carry.
    *
    * @param {object} torrent

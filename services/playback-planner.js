@@ -8,6 +8,7 @@
 
 import { spawn } from "node:child_process";
 import { logger } from "../utils/logger.js";
+import { mergeContainerSubtitleFlags } from "./subtitle-defaults.js";
 import {
   parseFfmpegDurationSeconds,
   parseFfmpegStartTimeSeconds,
@@ -308,6 +309,41 @@ export function createPlaybackPlanner({
    * @param {PlaybackPlan} plan
    * @returns {PlaybackPlan}
    */
+  /**
+   * The probe's subtitle tracks, with `FlagDefault` read from the container
+   * instead of inferred from ffmpeg's banner.
+   *
+   * Best-effort by construction: a container that cannot be read this way, or a
+   * reading that does not line up with the probe, leaves the tracks as they
+   * were with `declaresDefault: false` — which the browser reads as "the file
+   * has no opinion", and then nothing is shown unasked.
+   *
+   * @param {object} torrent
+   * @param {number} fileIndex
+   * @param {object[]} subtitleTracks
+   * @returns {Promise<object[]>}
+   */
+  async function withContainerDefaults(torrent, fileIndex, subtitleTracks) {
+    if (subtitleTracks.length === 0 || typeof torrentPool?.getDeclaredSubtitleTracks !== "function") {
+      return subtitleTracks.map((track) => ({ ...track, declaresDefault: false }));
+    }
+    let declared = [];
+    try {
+      declared = await torrentPool.getDeclaredSubtitleTracks(torrent, fileIndex);
+    } catch (error) {
+      logger.info(`subtitle defaults: the container could not be read (${error?.message ?? error})`);
+    }
+    const merged = mergeContainerSubtitleFlags(subtitleTracks, declared);
+    logger.info(
+      merged.aligned
+        ? "subtitle defaults: the container wrote FlagDefault on " +
+          `${merged.tracks.filter((track) => track.declaresDefault).length} of ${merged.tracks.length} ` +
+          `subtitle tracks, marking ${merged.tracks.filter((track) => track.declaresDefault && track.isDefault).length}`
+        : `subtitle defaults: using the probe's own flags — ${merged.reason}`
+    );
+    return merged.tracks;
+  }
+
   function withHostTimings(plan) {
     return {
       ...plan,
@@ -481,7 +517,7 @@ export function createPlaybackPlanner({
         videoHeight,
         // Full track inventory for the browser's audio/subtitle menus.
         audioTracks: audioTracks ?? [],
-        subtitleTracks: subtitleTracks ?? [],
+        subtitleTracks: await withContainerDefaults(torrent, fileIndex, subtitleTracks ?? []),
         // Both host timings are filled in by `withHostTimings` on the way out,
         // never here: read at build time they would be frozen into the cached
         // plan, which is the bug fixed in 2.9.106.

@@ -27,7 +27,7 @@ import { parentPort, workerData } from "node:worker_threads";
 import { createSendStream } from "./channel.js";
 import { createFileClaims } from "./file-claims.js";
 import { readFragments, supplyFiguresFor } from "./piece-reader.js";
-import { cuesHeldFor, subtitleTracksOf } from "./subtitle-cues.js";
+import { cuesHeldFor, declaredSubtitleTracksOf, subtitleTracksOf } from "./subtitle-cues.js";
 import { Command, Event } from "./protocol.js";
 
 // Imported dynamically, and that is load-bearing: static imports are RESOLVED
@@ -359,7 +359,10 @@ async function runCommand(command, params, id) {
 
     case Command.SUBTITLE_TRACKS: {
       const torrent = await requireTorrent(params.sourceKey);
-      return { tracks: await subtitleTracksOf(torrent, params.fileIndex, params.sourceKey) };
+      return {
+        tracks: await subtitleTracksOf(torrent, params.fileIndex, params.sourceKey),
+        declared: await declaredSubtitleTracksOf(torrent, params.fileIndex, params.sourceKey)
+      };
     }
 
     case Command.SUBTITLE_CUES: {

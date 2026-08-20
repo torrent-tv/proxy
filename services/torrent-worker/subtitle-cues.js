@@ -18,6 +18,7 @@
  */
 
 import { readSubtitlePlan, harvestCluster } from "../container-index/matroska-subtitles.js";
+import { decodeSubtitleSample, readMp4SubtitlePlan } from "../container-index/mp4-subtitles.js";
 import { iterateElements } from "../container-index/ebml-reader.js";
 import { logger } from "../../utils/logger.js";
 
@@ -105,15 +106,42 @@ async function planFor(torrent, fileIndex, key) {
     return state.plan;
   }
   const file = torrent?.files?.[fileIndex];
-  if (!file || !/\.mkv$/i.test(String(file.name))) {
-    // Only Matroska is read this way. An MP4's text track is cheaper still —
-    // its sample table gives exact byte offsets — and is not written yet.
-    state.plan = { tracks: [], secondsPerTick: 0.001, segmentDataOffset: 0 };
+  const empty = { tracks: [], secondsPerTick: 0.001, segmentDataOffset: 0 };
+  if (!file) {
+    state.plan = empty;
     return state.plan;
   }
   const readRange = async (start, end) => readHeld(file, start, Math.min(end, file.length - 1));
+  const name = String(file.name);
+  if (/\.mp4$/i.test(name) || /\.m4v$/i.test(name)) {
+    // An MP4 states every sample's byte range in its own table, so a cue costs
+    // its own few dozen bytes rather than the cluster around it. The samples
+    // are carried as `clusterPositions` of one byte range each, so the harvest
+    // treats both containers the same way.
+    const mp4 = await readMp4SubtitlePlan(readRange, file.length);
+    state.plan = mp4
+      ? {
+        ...empty,
+        tracks: mp4.tracks.map((track, order) => ({
+          trackNumber: track.trackId,
+          codecId: track.format,
+          language: track.language,
+          name: "",
+          isDefault: order === 0,
+          codecPrivate: "",
+          clusterPositions: [],
+          samples: track.samples
+        }))
+      }
+      : empty;
+    return state.plan;
+  }
+  if (!/\.mkv$/i.test(name) && !/\.webm$/i.test(name)) {
+    state.plan = empty;
+    return state.plan;
+  }
   const plan = await readSubtitlePlan(readRange, file.length);
-  state.plan = plan ?? { tracks: [], secondsPerTick: 0.001, segmentDataOffset: 0 };
+  state.plan = plan ?? empty;
   if (state.plan.tracks.length > 0) {
     logger.info(
       `subtitles: "${String(file.name).slice(0, 40)}" has ${state.plan.tracks.length} text track(s) — ` +
@@ -153,6 +181,36 @@ export async function cuesHeldFor(torrent, fileIndex, sourceKey, trackNumber) {
   if (!cues) {
     cues = [];
     state.cues.set(trackNumber, cues);
+  }
+
+  if (Array.isArray(track.samples)) {
+    // An MP4: every cue's bytes are stated, so only those bytes are read, and
+    // only where they are already downloaded.
+    for (const sample of track.samples) {
+      if (harvested.has(sample.offset)) {
+        continue;
+      }
+      const last = Math.min(file.length - 1, sample.offset + sample.size - 1);
+      if (!rangeIsHeld(torrent, file, sample.offset, last)) {
+        continue;
+      }
+      const bytes = await readHeld(file, sample.offset, last);
+      if (!bytes) {
+        continue;
+      }
+      harvested.add(sample.offset);
+      const text = decodeSubtitleSample(bytes, track.codecId);
+      if (text) {
+        cues.push({ startSeconds: sample.startSeconds, endSeconds: sample.endSeconds, text });
+      }
+    }
+    cues.sort((left, right) => left.startSeconds - right.startSeconds);
+    return {
+      cues,
+      coveredClusters: harvested.size,
+      indexedClusters: track.samples.length,
+      track
+    };
   }
 
   for (const position of track.clusterPositions) {

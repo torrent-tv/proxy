@@ -142,6 +142,38 @@ export class WorkerTorrentPool {
   }
 
   /**
+   * The text subtitle tracks a file carries, read from its own header.
+   *
+   * @param {object} torrent
+   * @param {number} fileIndex
+   * @returns {Promise<object[]>}
+   */
+  async getSubtitleTracks(torrent, fileIndex) {
+    const sourceKey = torrent?.sourceKey;
+    if (!sourceKey) {
+      return [];
+    }
+    const answer = await this.#client.getSubtitleTracks({ sourceKey, fileIndex });
+    return Array.isArray(answer?.tracks) ? answer.tracks : [];
+  }
+
+  /**
+   * The cues of one subtitle track that the downloaded clusters already carry.
+   *
+   * @param {object} torrent
+   * @param {number} fileIndex
+   * @param {number} trackNumber
+   * @returns {Promise<object | null>}
+   */
+  async getSubtitleCues(torrent, fileIndex, trackNumber) {
+    const sourceKey = torrent?.sourceKey;
+    if (!sourceKey) {
+      return null;
+    }
+    return this.#client.getSubtitleCues({ sourceKey, fileIndex, trackNumber });
+  }
+
+  /**
    * Reorder piece selection around a read position.
    *
    * Synchronous by design — see the file header.

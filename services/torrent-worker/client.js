@@ -243,6 +243,26 @@ export class TorrentWorkerClient {
   }
 
   /**
+   * The text subtitle tracks a file carries.
+   *
+   * @param {{ sourceKey: string, fileIndex: number }} params
+   * @returns {Promise<{ tracks: object[] }>}
+   */
+  async getSubtitleTracks({ sourceKey, fileIndex }) {
+    return this.#caller.call(Command.SUBTITLE_TRACKS, { sourceKey, fileIndex });
+  }
+
+  /**
+   * The cues of one subtitle track that can be read from what is downloaded.
+   *
+   * @param {{ sourceKey: string, fileIndex: number, trackNumber: number }} params
+   * @returns {Promise<object>}
+   */
+  async getSubtitleCues({ sourceKey, fileIndex, trackNumber }) {
+    return this.#caller.call(Command.SUBTITLE_CUES, { sourceKey, fileIndex, trackNumber });
+  }
+
+  /**
    * Bytes every torrent on the worker has moved, downloaded and uploaded apart.
    *
    * The client lives on the worker thread, so this cannot be read as a property

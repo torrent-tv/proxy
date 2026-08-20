@@ -65,6 +65,10 @@ export const Command = {
   CANCEL_READ: "cancel-read",
   /** Pre-fetch the head and tail a codec probe needs. */
   PREFETCH_EDGES: "prefetch-edges",
+  /** The text subtitle tracks a file carries, for the viewer's menu. */
+  SUBTITLE_TRACKS: "subtitle-tracks",
+  /** Cues of one subtitle track, from the clusters already downloaded. */
+  SUBTITLE_CUES: "subtitle-cues",
   /** Shut the client down, optionally deleting downloaded data. */
   DESTROY_ALL: "destroy-all"
 };

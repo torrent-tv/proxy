@@ -96,6 +96,27 @@ export async function handleApiSubtitlesGet(req, reply, { sourceRegistry, torren
     return reply.code(400).send({ error: "trackIndex must be a non-negative integer." });
   }
 
+  // From the clusters the viewer has already downloaded, if this file can be
+  // read that way. Costs no network at all and answers with the part of the
+  // film they are watching; the rest arrives as they watch it. Only when the
+  // container cannot be read this way does the old extraction run.
+  const held = await cuesFromDownloadedClusters(torrentPool, torrent, fileIndex, trackIndex);
+  if (held !== null) {
+    setLanguageHeaders(reply, held.language);
+    reply.header("content-type", "text/vtt; charset=utf-8");
+    reply.header("cache-control", "no-store");
+    reply.header("access-control-allow-origin", "*");
+    // How much of the film these cues cover, so the browser knows to ask again
+    // as playback moves into clusters that were not downloaded yet.
+    reply.header("X-Subtitle-Covered-Clusters", String(held.coveredClusters));
+    reply.header("X-Subtitle-Indexed-Clusters", String(held.indexedClusters));
+    reply.raw.setHeader(
+      "Access-Control-Expose-Headers",
+      "X-Subtitle-Language, X-Subtitle-Language-Name, X-Subtitle-Covered-Clusters, X-Subtitle-Indexed-Clusters"
+    );
+    return reply.send(held.vtt);
+  }
+
   const inputUrl = new URL("/stream", `${localBaseUrl}/`);
   inputUrl.searchParams.set("sourceKey", sourceKey);
   inputUrl.searchParams.set("fileIndex", String(fileIndex));
@@ -214,4 +235,116 @@ function readFileFully(file, maxBytes) {
     stream.on("end", () => resolve(Buffer.concat(chunks)));
     stream.on("error", reject);
   });
+}
+
+/**
+ * The cues of a track from clusters already downloaded, as WebVTT.
+ *
+ * `trackIndex` is the browser's number for the subtitle stream — its position
+ * among the subtitle streams, as ffprobe lists them — while Matroska blocks
+ * carry the file's own track number. The plan lists the text tracks in file
+ * order, so the browser's Nth subtitle stream is the Nth entry.
+ *
+ * @param {object} torrentPool
+ * @param {object} torrent
+ * @param {number} fileIndex
+ * @param {number} trackIndex
+ * @returns {Promise<{ vtt: string, language: object | null, coveredClusters: number, indexedClusters: number } | null>}
+ *   Null when this file cannot be read this way, and then the caller falls back.
+ */
+async function cuesFromDownloadedClusters(torrentPool, torrent, fileIndex, trackIndex) {
+  if (typeof torrentPool?.getSubtitleTracks !== "function") {
+    return null;
+  }
+  let tracks;
+  try {
+    tracks = await torrentPool.getSubtitleTracks(torrent, fileIndex);
+  } catch {
+    return null;
+  }
+  const track = Array.isArray(tracks) ? tracks[trackIndex] : null;
+  if (!track) {
+    return null;
+  }
+  let held;
+  try {
+    held = await torrentPool.getSubtitleCues(torrent, fileIndex, track.trackNumber);
+  } catch {
+    return null;
+  }
+  if (!held || !Array.isArray(held.cues)) {
+    return null;
+  }
+  const vtt = cuesToVtt(held.cues, held.codecId);
+  const language = held.cues.length > 0
+    ? detectLanguage(held.cues.map((cue) => cue.text).join("\n"))
+    : null;
+  return {
+    vtt,
+    language,
+    coveredClusters: held.coveredClusters ?? 0,
+    indexedClusters: held.indexedClusters ?? 0
+  };
+}
+
+/**
+ * WebVTT from cues read out of the container.
+ *
+ * A cue with no duration — a SimpleBlock, which subtitles rarely use — is given
+ * the time until the next one, and the last such cue a few seconds. That is not
+ * an invention about the film: it is what a player does with an open-ended cue,
+ * made explicit here so the file is valid.
+ *
+ * @param {{ startSeconds: number, endSeconds: number | null, text: string }[]} cues
+ * @param {string} codecId
+ * @returns {string}
+ */
+function cuesToVtt(cues, codecId) {
+  const lines = ["WEBVTT", ""];
+  const isAss = codecId === "S_TEXT/ASS" || codecId === "S_TEXT/SSA";
+  cues.forEach((cue, index) => {
+    const next = cues[index + 1];
+    const end = cue.endSeconds ?? (next ? next.startSeconds : cue.startSeconds + 4);
+    const text = isAss ? assDialogueToText(cue.text) : cue.text.trim();
+    if (!text) {
+      return;
+    }
+    lines.push(`${vttTime(cue.startSeconds)} --> ${vttTime(end)}`);
+    lines.push(text);
+    lines.push("");
+  });
+  return lines.join("\n");
+}
+
+/**
+ * The visible text of an ASS dialogue row.
+ *
+ * A block carries the fields after `Dialogue:` without their header — nine of
+ * them, then the text, which itself holds override groups in braces.
+ *
+ * @param {string} raw
+ * @returns {string}
+ */
+function assDialogueToText(raw) {
+  const fields = raw.split(",");
+  const text = fields.length > 9 ? fields.slice(9).join(",") : raw;
+  return text
+    .replace(/\{[^}]*\}/g, "")
+    .replace(/\\N/gi, "\n")
+    .trim();
+}
+
+/**
+ * A time in the form WebVTT requires.
+ *
+ * @param {number} seconds
+ * @returns {string}
+ */
+function vttTime(seconds) {
+  const safe = Math.max(0, seconds);
+  const hours = Math.floor(safe / 3600);
+  const minutes = Math.floor((safe % 3600) / 60);
+  const rest = safe % 60;
+  return `${String(hours).padStart(2, "0")}:${String(minutes).padStart(2, "0")}:` +
+    `${rest.toFixed(3).padStart(6, "0")}`;
 }

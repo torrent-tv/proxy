@@ -39,6 +39,7 @@ function familyAtBoundaryTwo() {
     runState: ENCODE_RUN_STATE.PRODUCING,
     segmentBoundaries: [...BOUNDARIES],
     encodeStartIndex: 2,
+    runSerial: 0,
     audioRenditionSessions: new Map([[1, "sound"]]),
     indexCheck: null
   };
@@ -111,4 +112,30 @@ test("a member that is not running is left alone", () => {
   assert.equal(sound.encodeStartIndex, 2, "a stopped member keeps its place and its silence");
   assert.equal(sound.runState, ENCODE_RUN_STATE.STOPPED);
   assert.notEqual(INITIAL_RUN_STATE, ENCODE_RUN_STATE.STOPPED);
+});
+
+test("a soundtrack does not move the grid the picture is cut on", () => {
+  const { manager, picture, sound } = familyAtBoundaryTwo();
+  const pictureBefore = [...picture.segmentBoundaries];
+  const soundBefore = [...sound.segmentBoundaries];
+
+  // The sound reports where IT began, which is where it was asked to begin, to
+  // within one audio frame. The picture's own boundary is a keyframe of the
+  // file and can be seconds away from that — both readings correct, about
+  // different things.
+  //
+  // Field 2026-08-20: boundary #521 of one film was corrected 2086.084 →
+  // 2084.082 by the picture and 2084.082 → 2086.033 by the sound 1.6 s later,
+  // 1.951 s apart, each overwriting the other for as long as the film ran. The
+  // table never converged, so the guard that stops a correction the table
+  // already holds never fired.
+  manager.correctBoundaryFromSegment(sound, 2, 10.5);
+
+  assert.deepEqual(
+    picture.segmentBoundaries,
+    pictureBefore,
+    "the grid is the picture's cut list and a soundtrack may not move it"
+  );
+  assert.deepEqual(sound.segmentBoundaries, soundBefore);
+  assert.equal(picture.runSerial, 0, "and nothing is restarted on a soundtrack's say-so");
 });

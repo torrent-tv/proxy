@@ -5104,17 +5104,36 @@ export class HlsSessionManager {
       // three samples all matched N-1, which is why the line now says so
       // instead of leaving it to be inferred from the numbers.
       const at = this.#boundaryIndexAt(session, trueStart);
-      logger.warn(
+      // Once per segment per five seconds, like `#notePlaylistDisagreement`
+      // beside it. The same segment is produced and served again and again
+      // while it is refused, and — since a run keeps cutting on the list it was
+      // launched with — a soundtrack whose grid has moved under it deviates on
+      // EVERY segment for the life of that run. A line each time buries the
+      // first one, which is the one somebody is reading the log for.
+      session.deviationWarnedAt ??= new Map();
+      const lastWarnedAt = session.deviationWarnedAt.get(index) ?? 0;
+      if (Date.now() - lastWarnedAt >= 5_000) {
+        session.deviationWarnedAt.set(index, Date.now());
+        logger.warn(
         `transcode ${session.id} segment #${index} really starts at ` +
         `${trueStart.toFixed(3)}s (boundary ${at === null ? "none" : `#${at}`}), ` +
         `the playlist says ${declaredStart.toFixed(3)}s — ` +
-        (session.transcodeVideo
-          // A re-encode was TOLD to put a keyframe here and did not, so this
-          // rung's segments no longer stand where the stream it accompanies
-          // would have put them. That is a broken splice, not a wrong index.
-          ? "this rung did not cut where its grid says; a switch to it will not join cleanly"
-          : "the container's keyframe index disagrees with the file; using the file")
-      );
+        (session.audioOnly === true
+          // A soundtrack is cut exactly where it was asked to be, so a
+          // disagreement here is not a reading about the file at all: it is the
+          // distance between this run's own cuts and a grid the picture has
+          // since corrected under it. Said plainly, because the same sentence
+          // used to claim a keyframe index was wrong when no keyframe was
+          // involved on this side of the stream.
+          ? "sound is cut where it is asked to be; this is the picture's grid having moved, not the index"
+          : session.transcodeVideo
+            // A re-encode was TOLD to put a keyframe here and did not, so this
+            // rung's segments no longer stand where the stream it accompanies
+            // would have put them. That is a broken splice, not a wrong index.
+            ? "this rung did not cut where its grid says; a switch to it will not join cleanly"
+            : "the container's keyframe index disagrees with the file; using the file")
+        );
+      }
     }
     // Said as the evidence accumulates, not only when the session is disposed.
     // A proxy restart takes its sessions with it — every addon update does —
@@ -5155,6 +5174,23 @@ export class HlsSessionManager {
    * @returns {void}
    */
   correctBoundaryFromSegment(session, index, trueStart) {
+    // Only the picture may move the grid, because the grid IS the picture's
+    // cut list: it is built from the container's keyframe index, and a copied
+    // stream can be cut nowhere else. A soundtrack has no keyframes — it is cut
+    // exactly where `-segment_times` asks, to within one audio frame — so its
+    // reading measures nothing about the grid and everything about itself.
+    //
+    // Writing it into the shared table is how one film ended up with two
+    // answers for one boundary, each side correctly describing its own stream
+    // and each overwriting the other: field 2026-08-20, segment #521 of
+    // "Minions.and.Monsters.1080p.mkv" corrected 2086.084s → 2084.082s by the
+    // picture at 11:14:16.939 and 2084.082s → 2086.033s by the sound 1.6s
+    // later — 1.951s apart, against the 0.25s that stops a correction and the
+    // 0.5s a player bridges. The next reading disagrees with the table again,
+    // so it never converges and never stops.
+    if (session.audioOnly === true) {
+      return;
+    }
     const boundaries = session.segmentBoundaries;
     if (!Array.isArray(boundaries) || index <= 0 || index >= boundaries.length - 1) {
       // Index 0 is the start of the file and the last entry is its end; neither
@@ -5338,16 +5374,30 @@ export class HlsSessionManager {
       // from a neighbouring log line, and a roadmap item was written against
       // the wrong half of the stream. The id is the only thing that says whose
       // reading this is.
-      `keyframe-index ${session.id.slice(0, 8)} ${session.audioOnly === true ? "sound" : "picture"} ` +
+      // Named for what is being measured, which is not the same thing on the
+      // two halves of a stream. The picture's cuts ARE keyframes of the file,
+      // so its deviations measure the container's keyframe index. A soundtrack
+      // is cut wherever it is asked to be and has no keyframes at all, so its
+      // deviations measure how far the grid has moved since its run was
+      // launched. One name for both said the index was wrong about a session
+      // that never consulted it.
+      `${session.audioOnly === true ? "sound-vs-grid" : "keyframe-index"} ` +
+      `${session.id.slice(0, 8)} ${session.audioOnly === true ? "sound" : "picture"} ` +
       `${session.containerFormat || "unknown"} "${session.fileName}": ` +
       `${check.disagreed} of ${check.checked} produced segments started away from the playlist, ` +
       `median ${median.toFixed(3)}s worst ${check.maxDeviationSec.toFixed(3)}s` +
       (check.firstDisagreementIndex >= 0 ? ` (first at #${check.firstDisagreementIndex})` : "") +
-      // The discriminator, stated in the same line as the count it explains: a
-      // segment that began at another time the SAME table names was not
-      // mis-described by the table — the grid was built over a gap in it.
-      `; ${landed} of them began at another keyframe the table names` +
-      ` [tolerance ${SEGMENT_START_DISAGREEMENT_SEC}s, ${(session.keyframeTimes?.length ?? 0)} keyframes read]`
+      (session.audioOnly === true
+        // A soundtrack has no keyframes, so there is no "began at another
+        // keyframe" half to state — but the threshold the count was made
+        // against belongs on both lines, or a number stands with nothing to
+        // read it against.
+        ? ` [tolerance ${SEGMENT_START_DISAGREEMENT_SEC}s]`
+        // The discriminator, stated in the same line as the count it explains: a
+        // segment that began at another time the SAME table names was not
+        // mis-described by the table — the grid was built over a gap in it.
+        : `; ${landed} of them began at another keyframe the table names` +
+          ` [tolerance ${SEGMENT_START_DISAGREEMENT_SEC}s, ${(session.keyframeTimes?.length ?? 0)} keyframes read]`)
     );
   }
 

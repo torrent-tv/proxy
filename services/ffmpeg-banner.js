@@ -165,3 +165,48 @@ export function parseFfmpegHdr(stderrText) {
   // the reliable HDR signal.
   return /\b(smpte2084|arib-std-b67|arib_std_b67)\b/i.test(videoLine[0]);
 }
+
+/**
+ * How many bits per sample the video carries, from the pixel format ffmpeg
+ * prints on its `Video:` line.
+ *
+ * This is a decode-cost input, not a colour one: a 10-bit stream holds wider
+ * samples and is decoded with wider arithmetic, and how much that costs is a
+ * property of the machine. It is therefore its own calibration family rather
+ * than a multiplier on the 8-bit one.
+ *
+ * ffmpeg names the depth in the format itself — `yuv420p10le`, `yuv420p12le`,
+ * `p010le` — and omits it at 8 bits (`yuv420p`, `nv12`). An unreadable line
+ * gives null, and the caller then prices the source as 8-bit, which is what
+ * every source was priced as before this existed.
+ *
+ * @param {string} stderrText
+ * @returns {number | null}
+ */
+export function parseFfmpegBitDepth(stderrText) {
+  if (typeof stderrText !== "string" || stderrText.length === 0) {
+    return null;
+  }
+  const videoLine = stderrText.match(/Video:[^\n]*/i);
+  if (!videoLine) {
+    return null;
+  }
+  // The pixel format is the token after the codec and its tag, and the depth
+  // rides on its name. `p010`/`p016` are the two that state it without a `p`
+  // separator, and they are 10 and 16 bits.
+  const named = videoLine[0].match(/\byuv[a-z0-9]*?p(\d{1,2})(?:le|be)\b/i);
+  if (named) {
+    const depth = Number(named[1]);
+    return Number.isFinite(depth) && depth >= 8 ? depth : null;
+  }
+  if (/\bp010(?:le|be)?\b/i.test(videoLine[0])) {
+    return 10;
+  }
+  if (/\bp016(?:le|be)?\b/i.test(videoLine[0])) {
+    return 16;
+  }
+  if (/\byuv[a-z0-9]*p\b|\bnv12\b|\bnv21\b|\bgbrp\b/i.test(videoLine[0])) {
+    return 8;
+  }
+  return null;
+}

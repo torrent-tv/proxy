@@ -17,6 +17,7 @@ import assert from "node:assert/strict";
 import { createRequire } from "node:module";
 import { spawn } from "node:child_process";
 import { mkdtemp, rm } from "node:fs/promises";
+import { decodeCostOf, decodeFamilyOf } from "../services/decode-cost-fit.js";
 import os from "node:os";
 import path from "node:path";
 import {
@@ -282,8 +283,22 @@ test("a banner with no bitrate reads as no bitrate, not as zero", () => {
 test("the source's decode figures come off the probe, or not at all", () => {
   assert.deepEqual(sourceDecodeCharacteristics({ width: 1920, height: 1080, fps: 24, bitrateKbps: 8000 }), {
     megapixelsPerSecond: (1920 * 1080 * 24) / 1e6,
-    megabitsPerSecond: 8
+    megabitsPerSecond: 8,
+    // Which measurement of this host applies. Absent on the probe means absent
+    // here — the caller then prices the source as H.264 8-bit, which is what
+    // every source was priced as before the model was fitted per family.
+    codec: "",
+    bitDepth: null
   });
+  assert.deepEqual(
+    sourceDecodeCharacteristics({ width: 1920, height: 1080, fps: 24, bitrateKbps: 8000, codec: "hevc", bitDepth: 10 }),
+    {
+      megapixelsPerSecond: (1920 * 1080 * 24) / 1e6,
+      megabitsPerSecond: 8,
+      codec: "hevc",
+      bitDepth: 10
+    }
+  );
   assert.equal(sourceDecodeCharacteristics({ width: 1920, height: 1080, fps: 24, bitrateKbps: null }), null);
   assert.equal(sourceDecodeCharacteristics(null), null);
 });
@@ -390,4 +405,53 @@ test("the OFFER drops the rungs the host cannot hold, and the master keeps addre
     [1080],
     "the copied height costs no encoder and stays; nothing re-encoded survives that supply"
   );
+});
+
+test("a source is priced by its own codec family when that family was measured", () => {
+  // A model as the startup benchmark now returns it: H.264 terms at the top
+  // level, for a caller that knows nothing about codecs, and the measured
+  // families beside them.
+  const model = {
+    pixelTerm: 0.006, bitrateTerm: 0.012, constantTerm: 0,
+    families: {
+      h264: { pixelTerm: 0.006, bitrateTerm: 0.012, constantTerm: 0 },
+      hevc: { pixelTerm: 0.011, bitrateTerm: 0.020, constantTerm: 0 },
+      hevc10: { pixelTerm: 0.017, bitrateTerm: 0.026, constantTerm: 0 }
+    }
+  };
+  const rates = { megapixelsPerSecond: 50, megabitsPerSecond: 9 };
+  const asH264 = decodeCostOf(model, { ...rates, codec: "h264", bitDepth: 8 });
+  const asHevc = decodeCostOf(model, { ...rates, codec: "hevc", bitDepth: 8 });
+  const asHevc10 = decodeCostOf(model, { ...rates, codec: "hevc", bitDepth: 10 });
+  assert.equal(Number(asH264.toFixed(4)), 0.408);
+  assert.equal(Number(asHevc.toFixed(4)), 0.73);
+  assert.equal(Number(asHevc10.toFixed(4)), 1.084);
+  // The whole point: the same file costs more as HEVC than as H.264, and more
+  // again at ten bits. A single fit could not say that.
+  assert.ok(asHevc > asH264 && asHevc10 > asHevc);
+});
+
+test("a family with no clips is priced as H.264, and a model with no families still works", () => {
+  const withFamilies = {
+    pixelTerm: 0.006, bitrateTerm: 0.012, constantTerm: 0,
+    families: { h264: { pixelTerm: 0.006, bitrateTerm: 0.012, constantTerm: 0 } }
+  };
+  const rates = { megapixelsPerSecond: 50, megabitsPerSecond: 9 };
+  // AV1 has no set of its own yet.
+  assert.equal(
+    decodeCostOf(withFamilies, { ...rates, codec: "av1", bitDepth: 8 }),
+    decodeCostOf(withFamilies, { ...rates, codec: "h264", bitDepth: 8 })
+  );
+  // And a flat model — every model before this release — is unchanged.
+  const flat = { pixelTerm: 0.006, bitrateTerm: 0.012, constantTerm: 0 };
+  assert.equal(decodeCostOf(flat, { ...rates, codec: "hevc", bitDepth: 10 }), 0.408);
+});
+
+test("the family is chosen by codec and depth, and unknown names fall to H.264", () => {
+  assert.equal(decodeFamilyOf({ codec: "hevc", bitDepth: 8 }), "hevc");
+  assert.equal(decodeFamilyOf({ codec: "HEVC", bitDepth: 10 }), "hevc10");
+  assert.equal(decodeFamilyOf({ codec: "h265", bitDepth: 12 }), "hevc10");
+  assert.equal(decodeFamilyOf({ codec: "h264", bitDepth: 10 }), "h264");
+  assert.equal(decodeFamilyOf({ codec: "vc1", bitDepth: null }), "h264");
+  assert.equal(decodeFamilyOf({}), "h264");
 });

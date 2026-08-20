@@ -683,14 +683,41 @@ export async function detectTonemapSupport({ ffmpegBin, logger }) {
 // optimistic. Six points leave three spare, so the fit has a residual, and a
 // term the data does not determine can be refused instead of published as a
 // zero that looks measured. See `assets/calibration/NOTICE.md`.
-const CALIBRATION_CLIPS = [
-  "cal-h264-1080-hi.mp4",
-  "cal-h264-1080-lo.mp4",
-  "cal-h264-720-hi.mp4",
-  "cal-h264-720-lo.mp4",
-  "cal-h264-480-hi.mp4",
-  "cal-h264-480-lo.mp4"
-];
+//
+// One set PER CODEC FAMILY, because a family is what the model describes. The
+// fit used to be H.264 only, while a video that has to be RE-ENCODED is by
+// definition one the browser could not play — which is to say HEVC, 10-bit or
+// AV1 — and those decode dearer per pixel on the same box. Pricing them with
+// H.264 constants is the one case the model is always asked about and was never
+// measured on.
+//
+// A family that has no set of its own is priced with H.264's, which is what
+// happened to every family before this; the line says so rather than implying
+// it. AV1 has no set yet: the survey of 2026-07-10 found it rare where HEVC was
+// 18 % of releases, so it waits for the same treatment.
+const CALIBRATION_SETS = {
+  h264: [
+    "cal-h264-1080-hi.mp4",
+    "cal-h264-1080-lo.mp4",
+    "cal-h264-720-hi.mp4",
+    "cal-h264-720-lo.mp4",
+    "cal-h264-480-hi.mp4",
+    "cal-h264-480-lo.mp4"
+  ],
+  hevc: [
+    "cal-hevc-1080-hi.mp4",
+    "cal-hevc-1080-lo.mp4",
+    "cal-hevc-480-hi.mp4",
+    "cal-hevc-480-lo.mp4"
+  ],
+  hevc10: [
+    "cal-hevc10-1080-hi.mp4",
+    "cal-hevc10-1080-lo.mp4",
+    "cal-hevc10-480-hi.mp4",
+    "cal-hevc10-480-lo.mp4"
+  ]
+};
+const CALIBRATION_CLIPS = CALIBRATION_SETS.h264;
 const CALIBRATION_DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "assets", "calibration");
 // How wide the measured window must be before the slope is trusted, and how
 // long to wait for it at most. A second of decoding is thousands of frames on a
@@ -834,12 +861,53 @@ export async function benchmarkContention({ ffmpegBin, logger, clipsDir = CALIBR
 export async function benchmarkDecodeCost({ ffmpegBin, logger, clipsDir = CALIBRATION_DIR }) {
   const log = logger ?? { info: () => {}, warn: () => {} };
   const startedAllAt = Date.now();
+  /** @type {Record<string, { pixelTerm: number, bitrateTerm: number, constantTerm: number }>} */
+  const families = {};
+  for (const [family, clips] of Object.entries(CALIBRATION_SETS)) {
+    const fitted = await fitOneFamily({ ffmpegBin, log, clipsDir, family, clips });
+    if (fitted) {
+      families[family] = fitted;
+    }
+  }
+  if (!families.h264) {
+    // H.264 is the family every other one falls back to, so without it there is
+    // no model at all rather than a partial one. Which families DID fit is said
+    // anyway: on a fast host the H.264 clips decode at 20-80x and the readings
+    // stop being ordered — measured 2026-08-20 on a desktop, 1080p at 9.35
+    // Mbit/s costing 0.0307 s/s against 720p at 9.94 costing 0.0472, which is
+    // not a thing a decoder does — so a failure here is a measurement problem
+    // and not a missing file, and the line has to let those be told apart.
+    log.warn(
+      "hwaccel: decode cost unknown — the H.264 clips did not fit" +
+        (Object.keys(families).length > 0
+          ? `, though ${Object.keys(families).join(" and ")} did`
+          : "")
+    );
+    return null;
+  }
+  const missing = Object.keys(CALIBRATION_SETS).filter((family) => !families[family]);
+  log.info(
+    `hwaccel: decode cost measured for ${Object.keys(families).join(", ")}` +
+      (missing.length > 0 ? `; ${missing.join(" and ")} priced as H.264` : "") +
+      ` (in ${((Date.now() - startedAllAt) / 1000).toFixed(1)}s)`
+  );
+  return { families, ...families.h264 };
+}
+
+/**
+ * Fit one codec family's decode cost from its own clips.
+ *
+ * @param {{ ffmpegBin: string, log: { info: Function, warn: Function }, clipsDir: string, family: string, clips: string[] }} params
+ * @returns {Promise<{ pixelTerm: number, bitrateTerm: number, constantTerm: number } | null>}
+ */
+async function fitOneFamily({ ffmpegBin, log, clipsDir, family, clips }) {
+  const startedAllAt = Date.now();
   /** @type {Array<{ megapixelsPerSecond: number, megabitsPerSecond: number, costSecondsPerSecond: number }>} */
   const samples = [];
-  for (const clip of CALIBRATION_CLIPS) {
+  for (const clip of clips) {
     const measured = await measureDecodeSlope(ffmpegBin, path.join(clipsDir, clip));
     if (!measured) {
-      log.warn(`hwaccel: decode benchmark "${clip}" failed or said nothing; decode cost unknown`);
+      log.warn(`hwaccel: decode benchmark "${clip}" failed or said nothing; ${family} not measured`);
       return null;
     }
     const cost = 1 / measured.speed;
@@ -856,11 +924,11 @@ export async function benchmarkDecodeCost({ ffmpegBin, logger, clipsDir = CALIBR
   }
   const fitted = fitDecodeCost(samples);
   if (!fitted) {
-    log.warn("hwaccel: decode cost could not be fitted to these measurements; decode cost unknown");
+    log.warn(`hwaccel: ${family} decode cost could not be fitted to these measurements`);
     return null;
   }
   log.info(
-    `hwaccel: decode cost = ${fitted.pixelTerm.toFixed(6)} × Mpx/s + ${fitted.bitrateTerm.toFixed(6)} × Mbit/s ` +
+    `hwaccel: ${family} decode cost = ${fitted.pixelTerm.toFixed(6)} × Mpx/s + ${fitted.bitrateTerm.toFixed(6)} × Mbit/s ` +
       `+ ${fitted.constantTerm.toFixed(4)} s/s (${fitted.shape} from ${fitted.samples} clips, ` +
       `typical disagreement ${fitted.residualRms.toFixed(4)} s/s` +
       // Named rather than implied: a zero in the line above means "not

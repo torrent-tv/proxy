@@ -13,6 +13,7 @@ import {
   parseFfmpegDurationSeconds,
   parseFfmpegStartTimeSeconds,
   parseFfmpegVideoDimensions,
+  parseFfmpegBitDepth,
   parseFfmpegBitrateKbps,
   parseFfmpegVideoFps,
   parseFfmpegHdr
@@ -534,6 +535,11 @@ export function createPlaybackPlanner({
           height: videoHeight,
           fps: parseFfmpegVideoFps(probe.stderr),
           bitrateKbps: parseFfmpegBitrateKbps(probe.stderr),
+          // Which family of the decode measurement prices this source. A video
+          // that has to be re-encoded is one the browser could not play, so it
+          // is usually NOT H.264, and H.264 constants are wrong for it.
+          codec: videoCodec,
+          bitDepth: parseFfmpegBitDepth(probe.stderr),
           // Which file this is, so the offer can be answered from what an
           // encoder has already learned about THIS source rather than from the
           // startup clips — the same correction a live session applies.
@@ -569,7 +575,8 @@ export function createPlaybackPlanner({
           bitrateKbps: parseFfmpegBitrateKbps(probe.stderr),
           fps: parseFfmpegVideoFps(probe.stderr),
           startTime: parseFfmpegStartTimeSeconds(probe.stderr),
-          isHdr: parseFfmpegHdr(probe.stderr)
+          isHdr: parseFfmpegHdr(probe.stderr),
+          bitDepth: parseFfmpegBitDepth(probe.stderr)
         });
         // Warm the file-body start for the transcode session that follows.
         // Fire-and-forget: never delays the plan response.

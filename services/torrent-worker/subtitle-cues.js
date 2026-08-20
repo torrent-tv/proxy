@@ -99,7 +99,7 @@ function readHeld(file, start, end) {
 async function planFor(torrent, fileIndex, key) {
   let state = byFile.get(key);
   if (!state) {
-    state = { plan: null, harvested: new Map(), cues: new Map() };
+    state = { plan: null, harvested: new Map(), cues: new Map(), seq: new Map(), walked: new Set() };
     byFile.set(key, state);
   }
   if (state.plan !== null) {
@@ -155,6 +155,31 @@ async function planFor(torrent, fileIndex, key) {
 }
 
 /**
+ * The order a cue was FOUND in, which is the only cursor a browser can follow.
+ *
+ * A cue's TIME cannot serve as one. Cues are harvested out of whichever
+ * clusters happen to be downloaded, and those are not contiguous, so the set
+ * grows in the middle as well as at the end. A browser that remembered "the
+ * latest time I hold" and asked for everything past it would never be sent the
+ * cues that turn up BEHIND that mark afterwards — which is exactly the stretch
+ * it is about to play. Measured 2026-08-20 on a viewer at 272 s: one answer
+ * carried cues out to 1176 s, and from then on every cue between the two was
+ * filtered away for the rest of the session, with 59 of 276 clusters read.
+ *
+ * Found-order is monotonic by construction, so `?since=<n>` is exact however
+ * the file arrives.
+ *
+ * @param {{ seq: Map<number, number> }} state
+ * @param {number} trackNumber
+ * @returns {number}
+ */
+function nextSeq(state, trackNumber) {
+  const next = (state.seq.get(trackNumber) ?? 0) + 1;
+  state.seq.set(trackNumber, next);
+  return next;
+}
+
+/**
  * Every cue of one track that can be read from what is already downloaded.
  *
  * @param {object} torrent
@@ -201,7 +226,12 @@ export async function cuesHeldFor(torrent, fileIndex, sourceKey, trackNumber) {
       harvested.add(sample.offset);
       const text = decodeSubtitleSample(bytes, track.codecId);
       if (text) {
-        cues.push({ startSeconds: sample.startSeconds, endSeconds: sample.endSeconds, text });
+        cues.push({
+          startSeconds: sample.startSeconds,
+          endSeconds: sample.endSeconds,
+          text,
+          seq: nextSeq(state, trackNumber)
+        });
       }
     }
     cues.sort((left, right) => left.startSeconds - right.startSeconds);
@@ -213,8 +243,24 @@ export async function cuesHeldFor(torrent, fileIndex, sourceKey, trackNumber) {
     };
   }
 
-  for (const position of track.clusterPositions) {
-    if (harvested.has(position)) {
+  // ONE walk for the whole file, not one per track. A Matroska cluster carries
+  // the blocks of every track that has anything to say over its span, so the
+  // bytes that answer one track answer them all — and reading them once per
+  // track meant the same cluster was fetched and parsed as many times as the
+  // film has subtitle tracks. Measured 2026-08-20 on a film with five: five
+  // requests every fifteen seconds, each costing 0.2-5.2 s of container
+  // reading, for cues that together weigh a few kilobytes.
+  //
+  // The union of the tracks' cluster lists is what gets walked: each track's
+  // list comes from its own Cues entries, so they overlap but do not coincide.
+  const positions = new Set();
+  for (const candidate of plan.tracks) {
+    for (const position of candidate.clusterPositions ?? []) {
+      positions.add(position);
+    }
+  }
+  for (const position of [...positions].sort((left, right) => left - right)) {
+    if (state.walked.has(position)) {
       continue;
     }
     // The header first: it says how long the cluster is, and a cluster whose
@@ -225,7 +271,7 @@ export async function cuesHeldFor(torrent, fileIndex, sourceKey, trackNumber) {
     const probe = await readHeld(file, position, Math.min(file.length - 1, position + CLUSTER_HEADER_PROBE - 1));
     const header = probe && [...iterateElements(probe, 0, probe.length)][0];
     if (!header || header.size <= 0 || header.size > MAX_CLUSTER_BYTES) {
-      harvested.add(position); // not a cluster we can read; do not look again
+      state.walked.add(position); // not a cluster we can read; do not look again
       continue;
     }
     const last = Math.min(file.length - 1, position + header.dataOffset + header.size - 1);
@@ -236,18 +282,33 @@ export async function cuesHeldFor(torrent, fileIndex, sourceKey, trackNumber) {
     if (!bytes) {
       continue;
     }
-    harvested.add(position);
-    for (const cue of harvestCluster(bytes, trackNumber, plan.secondsPerTick)) {
-      cues.push(cue);
+    state.walked.add(position);
+    for (const candidate of plan.tracks) {
+      let into = state.cues.get(candidate.trackNumber);
+      if (!into) {
+        into = [];
+        state.cues.set(candidate.trackNumber, into);
+      }
+      let found = false;
+      for (const cue of harvestCluster(bytes, candidate.trackNumber, plan.secondsPerTick)) {
+        cue.seq = nextSeq(state, candidate.trackNumber);
+        into.push(cue);
+        found = true;
+      }
+      if (found) {
+        into.sort((left, right) => left.startSeconds - right.startSeconds);
+      }
     }
   }
-  cues.sort((left, right) => left.startSeconds - right.startSeconds);
   return {
-    cues,
-    coveredClusters: harvested.size,
+    cues: state.cues.get(trackNumber) ?? [],
+    // Every track is filled by the same walk, so this is a fact about the FILE
+    // and reads the same whichever track asked.
+    coveredClusters: state.walked.size,
     indexedClusters: track.clusterPositions.length,
     track
   };
+
 }
 
 /**

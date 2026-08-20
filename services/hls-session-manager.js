@@ -2434,6 +2434,21 @@ export class HlsSessionManager {
    * @param {number} index
    * @returns {number}
    */
+  /**
+   * The boundary table the player is working from: the one its playlist was
+   * written from, falling back to the live table when no playlist was built
+   * from a table at all (no duration, so no synthetic playlist — and then
+   * nothing the player holds contradicts it).
+   *
+   * @param {HlsSession} session
+   * @returns {number[]}
+   */
+  publishedGridFor(session) {
+    return Array.isArray(session.publishedBoundaries) && session.publishedBoundaries.length > 0
+      ? session.publishedBoundaries
+      : (session.segmentBoundaries ?? []);
+  }
+
   #publishedStartTime(session, index) {
     const boundaries = Array.isArray(session.publishedBoundaries) && session.publishedBoundaries.length > 0
       ? session.publishedBoundaries
@@ -2486,7 +2501,10 @@ export class HlsSessionManager {
    * @returns {number}
    */
   #segmentIndexForTime(session, t) {
-    const boundaries = Array.isArray(session.segmentBoundaries) ? session.segmentBoundaries : [];
+    // The player's grid, for the same reason the cut list uses it: the time
+    // being resolved came from the playlist the player holds, so the index it
+    // means is the index that playlist gives it.
+    const boundaries = this.publishedGridFor(session);
     if (boundaries.length < 2) {
       return Math.max(0, Math.floor(t / this.segmentDurationSec));
     }
@@ -3797,8 +3815,22 @@ export class HlsSessionManager {
     // writes no self-contained pieces, so nothing could read a true start and
     // segments were stamped with times the file does not have — the 4.17 s
     // speech-against-subtitles drift, back again.
+    //
+    // Cut on the grid the PLAYER WAS GIVEN, not on the corrected one. A player
+    // places a fragment by the playlist it holds, and that text was written
+    // once and never changes; the live table keeps moving as produced segments
+    // reveal where the file's cuts really are. Cutting on the moved table makes
+    // every run faithful to a timeline nobody sent the player — measured
+    // 2026-08-20, the picture's segments arriving a uniform 2.002 s before the
+    // times the playlist named for them, which is four times what hls.js will
+    // bridge, so the fragment does not land and is asked for again.
+    //
+    // The corrections keep their purpose: they describe the file, and a variant
+    // created later inherits the corrected table and PUBLISHES it, so its own
+    // playlist and its own cuts agree from the start. What they may not do is
+    // move the cuts of a session whose playlist is already being read.
     const gridCutTimes = explicitTimes && (!session.transcodeVideo || session.cutGrid === "keyframe")
-      ? segmentCutTimesFrom(session.segmentBoundaries, safeIndex)
+      ? segmentCutTimesFrom(this.publishedGridFor(session), safeIndex)
       : null;
     // Cut times are stated on the grid, for both branches.
     //
@@ -5117,7 +5149,7 @@ export class HlsSessionManager {
         logger.warn(
         `transcode ${session.id} segment #${index} really starts at ` +
         `${trueStart.toFixed(3)}s (boundary ${at === null ? "none" : `#${at}`}), ` +
-        `the playlist says ${declaredStart.toFixed(3)}s — ` +
+        `the grid says ${declaredStart.toFixed(3)}s — ` +
         (session.audioOnly === true
           // A soundtrack is cut exactly where it was asked to be, so a
           // disagreement here is not a reading about the file at all: it is the

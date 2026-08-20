@@ -92,7 +92,7 @@ function readString(buffer, element) {
  *
  * @param {(start: number, end: number) => Promise<Buffer | null>} readRange
  * @param {number} fileSize
- * @returns {Promise<{ tracks: SubtitleTrackPlan[], secondsPerTick: number, segmentDataOffset: number } | null>}
+ * @returns {Promise<{ tracks: SubtitleTrackPlan[], declared: object[], secondsPerTick: number, segmentDataOffset: number } | null>}
  */
 export async function readSubtitlePlan(readRange, fileSize) {
   const head = await readRange(0, Math.min(HEAD_BYTES, Math.max(0, fileSize - 1)));
@@ -124,6 +124,15 @@ export async function readSubtitlePlan(readRange, fileSize) {
   const tracksEnd = Math.min(head.length, tracksElement.dataOffset + tracksElement.size);
   /** @type {SubtitleTrackPlan[]} */
   const tracks = [];
+  /**
+   * Every subtitle track the file declares, in the order the Tracks element
+   * names them, text or picture. This is not for extraction — `tracks` is —
+   * but for lining ffmpeg's `0:s:N` numbering up against the container, which
+   * only holds while nothing is missing from the middle of the list.
+   *
+   * @type {Array<{ trackNumber: number, codecId: string, language: string, name: string, isDefault: boolean, declaresDefault: boolean }>}
+   */
+  const declared = [];
   for (const entry of iterateElements(head, tracksElement.dataOffset, tracksEnd)) {
     if (entry.id !== ID_TRACK_ENTRY) {
       continue;
@@ -135,7 +144,13 @@ export async function readSubtitlePlan(readRange, fileSize) {
     let language = "";
     let name = "";
     let codecPrivate = "";
+    // Matroska's `FlagDefault` DEFAULTS TO 1, so a file whose muxer wrote it on
+    // no track is indistinguishable, once the default has been applied, from
+    // one that wrote it on every track — which is how ffmpeg's banner prints it
+    // and why the banner cannot answer this. Both are kept: what the flag
+    // amounts to, and whether the file said anything at all.
     let isDefault = true;
+    let declaresDefault = false;
     for (const field of iterateElements(head, entry.dataOffset, entryEnd)) {
       if (field.id === ID_TRACK_NUMBER) {
         trackNumber = readUint(head, field.dataOffset, field.size);
@@ -149,11 +164,16 @@ export async function readSubtitlePlan(readRange, fileSize) {
         name = readString(head, field);
       } else if (field.id === ID_FLAG_DEFAULT) {
         isDefault = readUint(head, field.dataOffset, field.size) === 1;
+        declaresDefault = true;
       } else if (field.id === ID_CODEC_PRIVATE) {
         codecPrivate = head.toString("base64", field.dataOffset, field.dataOffset + field.size);
       }
     }
-    if (type !== TRACK_TYPE_SUBTITLE || trackNumber === null || !TEXT_CODECS.has(codecId)) {
+    if (type !== TRACK_TYPE_SUBTITLE || trackNumber === null) {
+      continue;
+    }
+    declared.push({ trackNumber, codecId, language, name, isDefault, declaresDefault });
+    if (!TEXT_CODECS.has(codecId)) {
       continue;
     }
     tracks.push({
@@ -167,7 +187,7 @@ export async function readSubtitlePlan(readRange, fileSize) {
     });
   }
   if (tracks.length === 0) {
-    return { tracks, secondsPerTick: scale / 1e9, segmentDataOffset: base };
+    return { tracks, declared, secondsPerTick: scale / 1e9, segmentDataOffset: base };
   }
 
   // Where the clusters holding those tracks are. A file that indexes only its
@@ -232,7 +252,7 @@ export async function readSubtitlePlan(readRange, fileSize) {
       }
     }
   }
-  return { tracks, secondsPerTick: scale / 1e9, segmentDataOffset: base };
+  return { tracks, declared, secondsPerTick: scale / 1e9, segmentDataOffset: base };
 }
 
 /**

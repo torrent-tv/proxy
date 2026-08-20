@@ -106,7 +106,12 @@ async function planFor(torrent, fileIndex, key) {
     return state.plan;
   }
   const file = torrent?.files?.[fileIndex];
-  const empty = { tracks: [], secondsPerTick: 0.001, segmentDataOffset: 0 };
+  // `declared` is what the container itself says about its subtitle tracks, in
+  // its own order. Empty means the container said nothing — which is a real
+  // answer and not a missing one: nothing is then shown unasked. An MP4 has no
+  // element that means "show this subtitle track by default", so it declares
+  // nothing however many tracks it carries.
+  const empty = { tracks: [], declared: [], secondsPerTick: 0.001, segmentDataOffset: 0 };
   if (!file) {
     state.plan = empty;
     return state.plan;
@@ -329,6 +334,25 @@ export async function subtitleTracksOf(torrent, fileIndex, sourceKey) {
     isDefault: track.isDefault,
     indexedClusters: track.clusterPositions.length
   }));
+}
+
+/**
+ * What the container itself says about its subtitle tracks, in its own order
+ * and including the picture-based ones.
+ *
+ * Separate from `subtitleTracksOf`, which lists only what can be turned into
+ * WebVTT and is indexed by position in the subtitle API. This one exists to be
+ * lined up against ffmpeg's `0:s:N` numbering, which counts every subtitle
+ * stream, so leaving the picture ones out would shift it.
+ *
+ * @param {object} torrent
+ * @param {number} fileIndex
+ * @param {string} sourceKey
+ * @returns {Promise<object[]>}
+ */
+export async function declaredSubtitleTracksOf(torrent, fileIndex, sourceKey) {
+  const plan = await planFor(torrent, fileIndex, `${sourceKey}:${fileIndex}`);
+  return plan?.declared ?? [];
 }
 
 /**

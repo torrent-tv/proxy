@@ -316,16 +316,48 @@ function invert(matrix) {
 }
 
 /**
+ * Which measured family prices a source of this codec and depth.
+ *
+ * The families are the ones there are clips for. Anything else is priced as
+ * H.264 — not because it decodes like H.264, but because that is the only
+ * measurement of this host there is, and saying so in one place beats each
+ * caller inventing its own fallback.
+ *
+ * 10-bit is its own family rather than a multiplier on the 8-bit one: the
+ * samples are wider, the arithmetic is wider, and how much that costs is a
+ * property of the machine, which is what is being measured.
+ *
+ * @param {{ codec?: string | null, bitDepth?: number | null }} source
+ * @returns {string}
+ */
+export function decodeFamilyOf(source) {
+  const codec = typeof source?.codec === "string" ? source.codec.trim().toLowerCase() : "";
+  const depth = Number(source?.bitDepth);
+  const tenBit = Number.isFinite(depth) && depth >= 10;
+  if (codec === "hevc" || codec === "h265" || codec === "x265") {
+    return tenBit ? "hevc10" : "hevc";
+  }
+  return "h264";
+}
+
+/**
  * What a model prices one source at.
  *
- * @param {DecodeCostModel} model
- * @param {{ megapixelsPerSecond: number, megabitsPerSecond: number }} source
+ * The model may carry a set of per-family fits (`families`) alongside the H.264
+ * terms it also spreads at the top level, which is what a caller that knows
+ * nothing about codecs still reads. When the source names a codec and that
+ * family was measured, its own constants are used.
+ *
+ * @param {DecodeCostModel & { families?: Record<string, DecodeCostModel> }} model
+ * @param {{ megapixelsPerSecond: number, megabitsPerSecond: number, codec?: string | null, bitDepth?: number | null }} source
  * @returns {number} Seconds of work per second of content.
  */
 export function decodeCostOf(model, source) {
+  const family = decodeFamilyOf(source);
+  const terms = model?.families?.[family] ?? model;
   return (
-    model.pixelTerm * source.megapixelsPerSecond +
-    model.bitrateTerm * source.megabitsPerSecond +
-    model.constantTerm
+    terms.pixelTerm * source.megapixelsPerSecond +
+    terms.bitrateTerm * source.megabitsPerSecond +
+    terms.constantTerm
   );
 }

@@ -180,8 +180,13 @@ export function variantHeightsFor(sourceHeight) {
  * Returns null when the probe did not report enough — the budget then prices
  * the encoder alone rather than inventing a figure.
  *
- * @param {{ width: number | null, height: number | null, fps: number | null, bitrateKbps: number | null }} mediaInfo
- * @returns {{ megapixelsPerSecond: number, megabitsPerSecond: number } | null}
+ * The codec and bit depth travel with the rates because they decide WHICH
+ * measurement of this host applies: the model is fitted per codec family, and a
+ * video that has to be re-encoded is by definition one the browser could not
+ * play — HEVC, 10-bit — which is exactly where H.264 constants are wrong.
+ *
+ * @param {{ width: number | null, height: number | null, fps: number | null, bitrateKbps: number | null, codec?: string | null, bitDepth?: number | null }} mediaInfo
+ * @returns {{ megapixelsPerSecond: number, megabitsPerSecond: number, codec: string, bitDepth: number | null } | null}
  */
 export function sourceDecodeCharacteristics(mediaInfo) {
   const width = Number(mediaInfo?.width);
@@ -191,9 +196,12 @@ export function sourceDecodeCharacteristics(mediaInfo) {
   if (!(width > 0) || !(height > 0) || !(fps > 0) || !(kbps > 0)) {
     return null;
   }
+  const depth = Number(mediaInfo?.bitDepth);
   return {
     megapixelsPerSecond: (width * height * fps) / 1e6,
-    megabitsPerSecond: kbps / 1000
+    megabitsPerSecond: kbps / 1000,
+    codec: typeof mediaInfo?.codec === "string" ? mediaInfo.codec : "",
+    bitDepth: Number.isFinite(depth) && depth > 0 ? depth : null
   };
 }
 

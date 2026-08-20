@@ -58,6 +58,43 @@ ffmpeg's own output rather than from this table. Two rules hold, though:
 - **the axes stay independent** — every size at both bitrates. Dropping one cell
   reintroduces the collinearity that produced the zeros above.
 
-Codecs other than H.264 (HEVC, AV1, 10-bit) decode dearer per pixel, and the
-model fitted here does not describe them. Covering them means a set per codec
-family and constants chosen by the source's own codec — roadmap item 3(b).
+## One set per codec family
+
+A video that has to be RE-ENCODED is by definition one the browser could not
+play, which is to say HEVC, 10-bit or AV1 — so the model was fitted on the one
+codec it is least often asked about. There is now a set per family, and the
+source's own codec chooses the constants.
+
+| file | codec | resolution | bitrate |
+|---|---|---|---|
+| `cal-hevc-1080-hi.mp4` | HEVC Main, 8-bit | 1920×1080 | 5.78 Mbit/s |
+| `cal-hevc-1080-lo.mp4` | HEVC Main, 8-bit | 1920×1080 | 0.52 Mbit/s |
+| `cal-hevc-480-hi.mp4` | HEVC Main, 8-bit | 854×480 | 7.76 Mbit/s |
+| `cal-hevc-480-lo.mp4` | HEVC Main, 8-bit | 854×480 | 0.74 Mbit/s |
+| `cal-hevc10-1080-hi.mp4` | HEVC Main 10 | 1920×1080 | 5.82 Mbit/s |
+| `cal-hevc10-1080-lo.mp4` | HEVC Main 10 | 1920×1080 | 0.52 Mbit/s |
+| `cal-hevc10-480-hi.mp4` | HEVC Main 10 | 854×480 | 6.95 Mbit/s |
+| `cal-hevc10-480-lo.mp4` | HEVC Main 10 | 854×480 | 0.68 Mbit/s |
+
+Four per family, not six: two sizes at two bitrates is the smallest grid that
+keeps the axes independent and still leaves one spare measurement, and every
+clip costs the startup about two seconds. They are one second long rather than
+two — the benchmark loops the clip and measures a slope over about a second of
+decoding, so length beyond that buys nothing and only makes the package larger.
+
+They were cut from `cal-h264-1080-hi.mp4` rather than from the 4K master, which
+is not in this repository. Re-encoding an already-compressed picture softens its
+grain slightly; what is being measured is the cost of decoding the new
+bitstream, and the grain that survives is the same material in every set, which
+is what makes the families comparable to each other.
+
+10-bit is its own family rather than a multiplier on the 8-bit one. Wider
+samples mean wider arithmetic, and how much that costs is a property of the
+machine — which is the thing being measured. Measured on a desktop 2026-08-20,
+1080p at ~5.8 Mbit/s: 7.7x as 8-bit HEVC and 6.3x as 10-bit, so it is a real
+difference and not a rounding.
+
+AV1 has no set yet. The release survey of 2026-07-10 found it rare where HEVC
+was 18 %, so it is priced as H.264 until it is worth the startup seconds — and
+the log says which families were measured and which are falling back, rather
+than leaving it to be inferred.

@@ -100,18 +100,30 @@ export async function handleApiSubtitlesGet(req, reply, { sourceRegistry, torren
   // read that way. Costs no network at all and answers with the part of the
   // film they are watching; the rest arrives as they watch it. Only when the
   // container cannot be read this way does the old extraction run.
-  // Where the browser's copy of this track ends. It already holds every cue
-  // before this second, so sending them again is bytes for nothing: measured
+  // How many cues this browser has already been sent, counted in the order
+  // they were FOUND. Sending them again is bytes for nothing: measured
   // 2026-08-19, one track is 76 KB and the browser asked for it every few
   // seconds while the film downloaded. Absent or unparsable means "send
   // everything", which is what a browser asking for the first time wants.
+  //
+  // Found-order, not time. A cue's time cannot serve as a cursor here: the
+  // cues are read out of whichever clusters are downloaded, and those are not
+  // contiguous, so the set grows in the middle as well as at the end. The old
+  // `?after=<seconds>` therefore threw away every cue that turned up BEHIND
+  // the furthest one already sent — which is the stretch the viewer is about
+  // to watch. Measured 2026-08-20: a viewer at 272 s was sent cues out to
+  // 1176 s, and from that moment nothing between the two could ever reach
+  // them, with 59 of 276 clusters read. `after` is still honoured so an older
+  // browser keeps working.
+  const since = Number.parseInt(String(req.query?.since ?? ""), 10);
   const after = Number.parseFloat(String(req.query?.after ?? ""));
   const held = await cuesFromDownloadedClusters(
     torrentPool,
     torrent,
     fileIndex,
     trackIndex,
-    Number.isFinite(after) ? after : null
+    Number.isFinite(after) ? after : null,
+    Number.isInteger(since) ? since : null
   );
   if (held !== null) {
     setLanguageHeaders(reply, held.language);
@@ -122,9 +134,11 @@ export async function handleApiSubtitlesGet(req, reply, { sourceRegistry, torren
     // as playback moves into clusters that were not downloaded yet.
     reply.header("X-Subtitle-Covered-Clusters", String(held.coveredClusters));
     reply.header("X-Subtitle-Indexed-Clusters", String(held.indexedClusters));
+    // What to send back as `?since=` next time.
+    reply.header("X-Subtitle-Cursor", String(held.cursor));
     reply.raw.setHeader(
       "Access-Control-Expose-Headers",
-      "X-Subtitle-Language, X-Subtitle-Language-Name, X-Subtitle-Covered-Clusters, X-Subtitle-Indexed-Clusters"
+      "X-Subtitle-Language, X-Subtitle-Language-Name, X-Subtitle-Covered-Clusters, X-Subtitle-Indexed-Clusters, X-Subtitle-Cursor"
     );
     return reply.send(held.vtt);
   }
@@ -264,7 +278,7 @@ function readFileFully(file, maxBytes) {
  * @returns {Promise<{ vtt: string, language: object | null, coveredClusters: number, indexedClusters: number } | null>}
  *   Null when this file cannot be read this way, and then the caller falls back.
  */
-async function cuesFromDownloadedClusters(torrentPool, torrent, fileIndex, trackIndex, after = null) {
+async function cuesFromDownloadedClusters(torrentPool, torrent, fileIndex, trackIndex, after = null, since = null) {
   if (typeof torrentPool?.getSubtitleTracks !== "function") {
     return null;
   }
@@ -290,9 +304,12 @@ async function cuesFromDownloadedClusters(torrentPool, torrent, fileIndex, track
   // Only what the browser does not have. The language is still detected from
   // EVERYTHING held, because three new lines say much less about a language
   // than the whole track does.
-  const fresh = Number.isFinite(after)
-    ? held.cues.filter((cue) => cue.startSeconds > after)
-    : held.cues;
+  const cursor = held.cues.reduce((highest, cue) => Math.max(highest, Number(cue.seq) || 0), 0);
+  const fresh = Number.isInteger(since)
+    ? held.cues.filter((cue) => (Number(cue.seq) || 0) > since)
+    : Number.isFinite(after)
+      ? held.cues.filter((cue) => cue.startSeconds > after)
+      : held.cues;
   const vtt = cuesToVtt(fresh, held.codecId);
   const language = held.cues.length > 0
     ? detectLanguage(held.cues.map((cue) => cue.text).join("\n"))
@@ -300,6 +317,7 @@ async function cuesFromDownloadedClusters(torrentPool, torrent, fileIndex, track
   return {
     vtt,
     language,
+    cursor,
     coveredClusters: held.coveredClusters ?? 0,
     indexedClusters: held.indexedClusters ?? 0
   };

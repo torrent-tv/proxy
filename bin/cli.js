@@ -23,6 +23,7 @@ import { registerClient } from "../services/registry-api.js";
 import { createTunnelClient } from "../services/tunnel-client.js";
 import { createWebRtcManager } from "../services/webrtc-manager.js";
 import { createDataChannelHandler } from "../services/data-channel-handler.js";
+import { pruneCoreDumps } from "../services/core-dumps.js";
 import { collectHealthMetrics } from "../services/health-collector.js";
 import { createPortMapper } from "../services/port-mapper.js";
 import { classifyNat } from "../services/nat-classifier.js";
@@ -293,6 +294,11 @@ try {
   app = started.app;
   actualPort = started.port;
   const directBaseUrl = explicitBaseUrl || `http://${bindHost}:${actualPort}`;
+
+  // A native fault writes the whole address space out — 4.18 GB each on the
+  // field host, and four of them nearly filled a 235 GB disk. Keep the newest
+  // two, which are the evidence for the fault still open, and drop the rest.
+  void pruneCoreDumps(options.stateDir);
 
   logger.info(`Starting @torrent-tv/proxy v${PROXY_VERSION}`);
   logger.info(`Local stream endpoint: http://${bindHost}:${actualPort}/stream`);

@@ -22,6 +22,15 @@ import { createCaller, createReceiveStream } from "./channel.js";
 import { Command, Event } from "./protocol.js";
 
 const WORKER_URL = new URL("./worker.js", import.meta.url);
+/**
+ * How long a shutdown waits for the thread to end by itself before forcing it.
+ *
+ * Ending by itself is what lets libuv drain the handle callbacks it is holding;
+ * forcing it is what ran one of those against a freed isolate. Five seconds is
+ * long enough for a destroyed torrent client to release its sockets and short
+ * enough that a shutdown never appears to hang.
+ */
+const WORKER_EXIT_GRACE_MS = 5_000;
 
 /**
  * Runs the torrent client on its own thread and exposes it to the main thread.
@@ -34,6 +43,12 @@ const WORKER_URL = new URL("./worker.js", import.meta.url);
  */
 export class TorrentWorkerClient {
   #worker;
+  /**
+   * Whether this shutdown was asked for, so the thread ending can be told from
+   * the thread dying. Without it both look identical from outside, which is how
+   * five crashes produced no line in the log.
+   */
+  #stopping = false;
   #caller;
   /** Receive-side handles for in-flight reads, keyed by request id. */
   #reads = new Map();
@@ -180,6 +195,30 @@ export class TorrentWorkerClient {
       // worker will never answer, and a stalled request is worse than an error
       // the loading flow can retry.
       const reason = new Error("Torrent worker stopped unexpectedly.");
+      this.#caller.rejectAll(reason);
+      for (const [, read] of this.#reads) {
+        read.fail(reason);
+      }
+      this.#reads.clear();
+    });
+
+    // A worker that ENDS was, until now, not noticed at all: only `message` and
+    // `error` were listened for. So when the thread went away the proxy simply
+    // stopped, the log ended mid-sentence, and nothing said whether we had
+    // asked for it — which is precisely the reading that was missing on
+    // 2026-08-21, when a core dump showed the thread faulting inside
+    // `Environment::CleanupHandles` and there was no way to tell our own
+    // shutdown from the thread ending on its own.
+    this.#worker.on("exit", (code) => {
+      if (this.#stopping) {
+        logger.info(`torrent-worker: thread ended as asked (code ${code})`);
+        return;
+      }
+      logger.error(
+        `torrent-worker: thread ended on its own with code ${code} — nobody asked it to. ` +
+        "Everything waiting on it is failed; the proxy has no torrent client until it is rebuilt."
+      );
+      const reason = new Error("Torrent worker ended unexpectedly.");
       this.#caller.rejectAll(reason);
       for (const [, read] of this.#reads) {
         read.fail(reason);
@@ -520,11 +559,33 @@ export class TorrentWorkerClient {
    * @returns {Promise<void>}
    */
   async destroyAll() {
+    this.#stopping = true;
     try {
       await this.#caller.call(Command.DESTROY_ALL, {});
     } catch {
-      // Already gone — termination below is what matters.
+      // Already gone — the wait below settles either way.
     }
-    await this.#worker.terminate();
+    // Let the thread END rather than tearing it down under itself.
+    //
+    // `terminate()` frees the environment immediately, with the handle
+    // callbacks libuv still holds queued. One of those is utp-native's UDP
+    // read, and running it against a freed isolate is what the core dump of
+    // 2026-08-21 caught: `on_utp_accept` → `napi_get_buffer_info` →
+    // `v8::Value::IsArrayBufferView` inside `Environment::CleanupHandles`.
+    // Once the client inside is destroyed the thread has nothing left holding
+    // its loop open, so it exits by itself and the callbacks drain first.
+    //
+    // `terminate()` stays as the bounded fallback, because a shutdown that
+    // hangs is worse than one that is forced.
+    await new Promise((resolve) => {
+      const timer = setTimeout(() => {
+        logger.warn("torrent-worker: thread did not end in 5s; terminating it");
+        void this.#worker.terminate().finally(resolve);
+      }, WORKER_EXIT_GRACE_MS);
+      this.#worker.once("exit", () => {
+        clearTimeout(timer);
+        resolve();
+      });
+    });
   }
 }

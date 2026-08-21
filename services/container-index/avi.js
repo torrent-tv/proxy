@@ -152,5 +152,16 @@ export async function readAviKeyframeTimes(readRange, fileSize) {
     }
     videoFrame += 1;
   }
-  return times.length > 0 ? times : null;
+  if (times.length === 0) {
+    return null;
+  }
+  // AVI names a keyframe by its FRAME NUMBER, and the time above is that number
+  // multiplied by the frame duration the header declares. The frames are the
+  // right ones — measured 2026-08-21 against the files themselves, 1196 index
+  // entries against 1196 real keyframes and 901 against 901, exactly — but the
+  // names are 10-44 ms away from the presentation times the demuxer computes,
+  // always under one frame. So the caller is told how far a time here may be
+  // from the instant it refers to, and can ask for a seek late enough that it
+  // still lands on the frame rather than on the one before it.
+  return { times, tolerance: secondsPerFrame };
 }

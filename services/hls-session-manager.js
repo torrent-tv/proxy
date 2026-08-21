@@ -1196,12 +1196,17 @@ export function seekLandingOffsetFor(session, keyframe) {
   if (session?.transcodeVideo === true) {
     return 0;
   }
+  // A grid whose times are approximate needs that error added on top, or a name
+  // sitting just below its real keyframe seeks to before it and lands on the
+  // one before that. Only AVI declares one.
+  const tolerance = Number.isFinite(session?.keyframeTolerance) ? Math.max(0, session.keyframeTolerance) : 0;
+  const wanted = SEEK_LANDING_OFFSET_SEC + tolerance;
   const times = Array.isArray(session?.keyframeTimes) ? session.keyframeTimes : [];
   const next = times.find((time) => time > keyframe + 0.001);
   if (next === undefined) {
-    return SEEK_LANDING_OFFSET_SEC;
+    return wanted;
   }
-  return Math.min(SEEK_LANDING_OFFSET_SEC, (next - keyframe) / 2);
+  return Math.min(wanted, (next - keyframe) / 2);
 }
 
 /**
@@ -1746,6 +1751,13 @@ export class HlsSessionManager {
     // branches; on failure both fall back to their current behaviour (uniform
     // grid for boundaries, raw target for seeking) — no regression.
     let keyframeTimes = null;
+    // How far a time in `keyframeTimes` may sit from the instant it names. Only
+    // AVI has anything to declare here: it stores frame NUMBERS and the time is
+    // that number times the frame duration, which lands 10-44 ms from the
+    // presentation time the demuxer computes (measured 2026-08-21). A seek made
+    // at such a name can fall just BELOW the real keyframe and land on the one
+    // before it, which is the same fault the landing offset exists for.
+    let keyframeTolerance = 0;
     let keyframeMs = -1; // -1 = not run (skipped), -2 = running in the background
     // Which container supplied the index, carried so the accuracy summary can
     // say what it is a summary OF.
@@ -1758,6 +1770,9 @@ export class HlsSessionManager {
     if (inheritedGrid) {
       keyframeTimes = inheritedGrid.keyframeTimes;
       containerFormat = inheritedGrid.containerFormat ?? "";
+      keyframeTolerance = Number.isFinite(inheritedGrid.keyframeTolerance)
+        ? inheritedGrid.keyframeTolerance
+        : 0;
     } else if (hasDuration && !transcodeVideo && !audioOnly) {
       // Video-COPY path: keyframeTimes are REQUIRED to build correct segment
       // boundaries (the playlist itself), so this MUST block session creation —
@@ -1779,11 +1794,28 @@ export class HlsSessionManager {
       const index = await this.#readContainerKeyframes({ sourceKey, fileIndex, inputUrl, logName });
       keyframeTimes = index.times;
       containerFormat = index.format;
+      keyframeTolerance = Number.isFinite(index.tolerance) ? index.tolerance : 0;
       keyframeMs = Date.now() - keyframeStartMs;
       if (!keyframeTimes) {
+        // No index, so there is no honest grid for a COPY: a copied picture can
+        // only be cut at the source's own keyframes, and we do not know where
+        // they are. Declaring an even grid instead is a falsehood the player
+        // punishes — it walks the whole file to rebuild the timeline, or shows
+        // audio with no picture because a segment begins with nothing
+        // decodable (both field-observed 2026-08-02).
+        //
+        // Re-encoding is the honest answer and costs an encoder: keyframes are
+        // then PLACED at our own cut times rather than found, so the grid is
+        // correct by construction whatever the container. MPEG-TS is the case
+        // this exists for — measured 2026-08-21, 669 real keyframes and no
+        // index of any kind to read them from — and a container whose index
+        // could not be read in the budget lands here too, which is right for
+        // the same reason.
+        transcodeVideo = true;
         logger.warn(
-          `transcode ${sessionId}: no container keyframe index for "${logName}"; ` +
-            `falling back to a uniform grid — segment boundaries will not match the media`
+          `transcode ${sessionId}: no keyframe index in the ${containerFormat} container for ` +
+            `"${logName}" — a copied picture has no honest grid without one, so the video is ` +
+            "re-encoded instead and its keyframes are placed on our own cuts"
         );
       }
     } else if (hasDuration && transcodeVideo) {
@@ -2035,6 +2067,9 @@ export class HlsSessionManager {
       // KNOWN valid position instead of trusting the container's own on-the-fly
       // seek at an arbitrary target — see the probe call above for why.
       keyframeTimes,
+      // How far those times may sit from the instants they name — nonzero only
+      // for AVI, which computes them from frame numbers.
+      keyframeTolerance,
       // Which container the index came from, and how well it has held up. The
       // cut times of a copied video ARE its index, and an index can be wrong —
       // measured 2026-08-06, one claimed a keyframe four seconds from where the
@@ -6848,6 +6883,7 @@ export class HlsSessionManager {
             // creations (field 2026-08-17, corrections of 0.6-2.9 s).
             published: base.publishedBoundaries,
             keyframeTimes: base.keyframeTimes,
+            keyframeTolerance: base.keyframeTolerance,
             containerFormat: base.containerFormat
           }
         : null,

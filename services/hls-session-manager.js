@@ -568,6 +568,36 @@ const SEGMENT_READ_HIGH_WATER_MARK = 4 * 1024 * 1024;
 // second is below any drift a viewer could notice, so anything above it is the
 // index being wrong about where a keyframe is rather than rounding.
 const SEGMENT_START_DISAGREEMENT_SEC = 0.25;
+/**
+ * What ffmpeg's own CLI subtracts from an input seek, and therefore what has to
+ * be added back to land where we asked.
+ *
+ * `fftools/ffmpeg_demux.c`, in `ifile_open`: when the container does not
+ * declare `AVFMT_SEEK_TO_PTS` — Matroska does not — and any stream carries
+ * B-frames, the seek target is moved back by `3*AV_TIME_BASE / 23` before
+ * `avformat_seek_file` is called. Its purpose is sound: such containers seek in
+ * decode order while the caller asks in presentation order, and with B-frames
+ * the two differ, so it backs off far enough to be sure of reaching the frame
+ * asked for.
+ *
+ * The consequence for a COPY is that asking for a keyframe lands on the one
+ * BEFORE it — deterministically, every time. Measured 2026-08-21 on a Matroska
+ * file with keyframes every 2 s: `-ss 10` produced a first segment starting at
+ * 8.000; `-ss 10.130435` produced one starting at 10.000. On MP4, where the
+ * heuristic does not fire, all of 10, 10.130435 and 10.2 produced 10.000 — so
+ * adding this is right in one case and harmless in the other.
+ *
+ * That landing is what `-segment_times` is measured from, while this code
+ * computes those offsets from the time it ASKED for. One keyframe interval
+ * apart, inherited by every cut of the run: 119 of 125 segments arriving a
+ * uniform 2.002 s early in the field, four times what a player bridges.
+ *
+ * Not applied when the picture is re-encoded: a re-encode decodes from the
+ * keyframe and discards frames up to the requested time, so its output already
+ * begins exactly where asked (measured the same day: `-ss 11` copied starts at
+ * 10.000, re-encoded at 11.000).
+ */
+const SEEK_LANDING_OFFSET_SEC = 3 / 23;
 
 /**
  * How far a fragment may land from where the playlist put it before the player
@@ -1144,6 +1174,34 @@ export function segmentCutTimesFrom(boundaries, startIndex) {
     times.push(Number((boundaries[at] - base).toFixed(6)));
   }
   return times;
+}
+
+/**
+ * How much later than a keyframe to ASK, so that ffmpeg lands on that keyframe.
+ *
+ * Bounded by half the distance to the next keyframe, which matters only where
+ * keyframes stand closer together than twice the offset. There no single value
+ * can satisfy both worlds — asking too little lands a keyframe early when the
+ * heuristic fires, asking too much lands a keyframe late when it does not — and
+ * the bound picks the smaller error, which is then under one keyframe interval
+ * and therefore under what a player bridges.
+ *
+ * @param {HlsSession} session
+ * @param {number} keyframe - A real keyframe time the run is to begin at.
+ * @returns {number} Seconds to add to the request.
+ */
+export function seekLandingOffsetFor(session, keyframe) {
+  // A re-encode trims to the requested time itself, so it needs no help and
+  // must not be pushed past what it was asked for.
+  if (session?.transcodeVideo === true) {
+    return 0;
+  }
+  const times = Array.isArray(session?.keyframeTimes) ? session.keyframeTimes : [];
+  const next = times.find((time) => time > keyframe + 0.001);
+  if (next === undefined) {
+    return SEEK_LANDING_OFFSET_SEC;
+  }
+  return Math.min(SEEK_LANDING_OFFSET_SEC, (next - keyframe) / 2);
 }
 
 /**
@@ -3932,7 +3990,7 @@ export class HlsSessionManager {
     if (snappedKeyframe !== null) {
       const residualSeconds = Math.max(0, seekSeconds - snappedKeyframe);
       if (snappedKeyframe > 0) {
-        args.push("-ss", ffmpegSeconds(snappedKeyframe));
+        args.push("-ss", ffmpegSeconds(snappedKeyframe + seekLandingOffsetFor(session, snappedKeyframe)));
       }
       args.push("-i", session.inputUrl);
       if (residualSeconds > 0) {
@@ -5124,6 +5182,41 @@ export class HlsSessionManager {
    * @param {number} declaredStart - Seconds, from the playlist.
    * @returns {void}
    */
+  /**
+   * Where the run REALLY began, against where it was asked to begin.
+   *
+   * The first piece a run produces is the only statement of this that exists,
+   * and until now nothing compared the two. They disagree whenever the seek
+   * lands somewhere other than the time asked for — which, before the landing
+   * offset, was every run on a Matroska source with B-frames, by exactly one
+   * keyframe interval. Every cut of the run then inherits it, because
+   * `-segment_times` is measured from the landing.
+   *
+   * Said once per run, and only when it matters: within what a player bridges
+   * there is nothing to report.
+   *
+   * @param {HlsSession} session
+   * @param {number} index
+   * @param {number} trueStart
+   * @returns {void}
+   */
+  #noteRunLanding(session, index, trueStart) {
+    if (session.encodeStartIndex !== index || session.landingReportedForRun === index) {
+      return;
+    }
+    session.landingReportedForRun = index;
+    const asked = this.#segmentStartTime(session, index);
+    const drift = trueStart - asked;
+    if (!Number.isFinite(drift) || Math.abs(drift) <= PLAYER_BUFFER_HOLE_SEC) {
+      return;
+    }
+    logger.warn(
+      `transcode ${session.id} run began at ${trueStart.toFixed(3)}s but was asked for ` +
+      `${asked.toFixed(3)}s — ${drift > 0 ? "+" : ""}${drift.toFixed(3)}s, and every cut of this ` +
+      "run is measured from where it began, so the whole run is that far from its playlist"
+    );
+  }
+
   #noteIndexAccuracy(session, index, trueStart, declaredStart) {
     const deviation = Math.abs(trueStart - declaredStart);
     session.indexCheck ??= newIndexCheck();
@@ -7719,6 +7812,7 @@ export class HlsSessionManager {
           : null;
         const declaredStart = this.#segmentStartTime(session, index);
         if (trueStart !== null) {
+          this.#noteRunLanding(session, index, trueStart);
           this.#noteIndexAccuracy(session, index, trueStart, declaredStart);
         }
         // WHERE THE PLAYER WAS TOLD THIS SEGMENT BEGINS, which is the playlist

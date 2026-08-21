@@ -33,8 +33,12 @@ async function startRegistry() {
   let current = null;
   let opened = 0;
   let everEmpty = false;
+  /** Every socket ever accepted, so the server can be shut without waiting. */
+  const accepted = new Set();
   server.on("connection", (socket) => {
     opened += 1;
+    accepted.add(socket);
+    socket.on("close", () => { accepted.delete(socket); });
     const previous = current;
     current = socket;
     // The replacement is registered BEFORE the old one is closed, so a reader
@@ -52,7 +56,15 @@ async function startRegistry() {
   const { port } = server.address();
   return {
     url: `http://127.0.0.1:${port}`,
-    close: () => new Promise((resolve) => { server.close(resolve); }),
+    // `close` waits for every connection to end, and a renewal can leave one
+    // still closing, so they are ended here rather than waited on.
+    close: () => new Promise((resolve) => {
+      for (const socket of accepted) {
+        socket.terminate();
+      }
+      accepted.clear();
+      server.close(() => resolve());
+    }),
     registered: () => (current && current.readyState === 1 ? 1 : 0),
     killCurrent: () => { current?.terminate(); },
     opened: () => opened,

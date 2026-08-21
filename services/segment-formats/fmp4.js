@@ -13,6 +13,7 @@
 import {
   readSelfContainedStartSeconds,
   readTrackTimescales,
+  readVideoSampleSize,
   stampSegmentStartTime,
   walkBoxes
 } from "./mp4-boxes.js";
@@ -286,6 +287,25 @@ export const fmp4Format = {
       return 0;
     }
     return readTrackTimescales(initBytes).size;
+  },
+
+  /**
+   * The picture size this init segment describes, or null when it describes no
+   * picture.
+   *
+   * Asked because one init serves the session's whole life while an encode run
+   * can be restarted with other settings, and a run that changes the SIZE makes
+   * every fragment after it undecodable against the init already in the
+   * player's hands.
+   *
+   * @param {Buffer | null} initBytes
+   * @returns {{ width: number, height: number } | null}
+   */
+  initVideoSize(initBytes) {
+    if (!initBytes || initBytes.length === 0) {
+      return null;
+    }
+    return readVideoSampleSize(initBytes);
   },
 
   prepareSegmentBytes(bytes, { startSeconds, initBytes }) {

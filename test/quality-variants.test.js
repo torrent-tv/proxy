@@ -543,16 +543,17 @@ test("a playlist or an init segment does not move the encoder", async (t) => {
   assert.ok(base.ffmpeg, "the stream on screen must keep its encoder while the player is only looking");
 });
 
-test("a downshift does not rename the variant the viewer is watching", async (t) => {
+test("the name of a variant is fixed, whatever its encode is later set to", async (t) => {
   const { manager, base, dirPath } = await managerWithBase();
   t.after(async () => {
     await manager.disposeAll();
     await rm(dirPath, { recursive: true, force: true });
   });
   // The player fetched the master once and addresses this variant as 812p for
-  // the rest of the session. The realtime budget then finds the host cannot
-  // keep up and steps the encode down — inside this variant, which is what it
-  // has always done.
+  // the rest of the session, so the name must not follow the encode. Nothing in
+  // the proxy changes `encodeHeight` mid-session any more — a change of size is
+  // a change of variant now — but the name and the encode are still two
+  // different things, and the addressing depends on their staying so.
   assert.equal(manager.variantHeightOf(base), 812);
   base.encodeHeight = 540;
 
@@ -564,7 +565,7 @@ test("a downshift does not rename the variant the viewer is watching", async (t)
   assert.deepEqual(
     await manager.resolveVariantFile(BASE_ID, 812, "segment-00000.mp4"),
     { sessionId: BASE_ID },
-    "a second session at the height the host just failed to manage is the opposite of what a downshift is for"
+    "a second session at a height the host has already failed to manage is the opposite of what a step is for"
   );
 });
 

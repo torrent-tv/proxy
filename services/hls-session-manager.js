@@ -43,6 +43,9 @@ import {
   pickSoftwarePreset,
   canSustainOutput,
   speedBar,
+  maxrateKbpsFor,
+  nominalKbpsForHeight,
+  nominalKbpsForMaxrate,
   TRANSCODE_FPS,
   chooseOutputFps
 } from "./hwaccel.js";
@@ -523,11 +526,23 @@ const BUDGET_SPEED_OK = 1.0;
 // complex scenes; the cumulative average won't dip this long unless the host
 // genuinely can't keep up).
 const BUDGET_SUSTAINED_MS = 15_000;
-// After a downshift, wait this long before another (lets the new profile settle
-// and a fresh cumulative average build).
+// After a step, wait this long before another (lets the new picture settle and
+// a fresh slope build).
 const BUDGET_ACTION_COOLDOWN_MS = 30_000;
-// Never step down more than this many rungs below the startup choice.
-const BUDGET_MAX_DOWNSHIFTS = 3;
+// The step BACK UP has to be slower to fire than the step down, or the two
+// take turns: a rung that has just been left is by definition one the arithmetic
+// still thinks this machine can hold, so it would be asked for again as soon as
+// the cooldown expired. Four times the down window is a statement about how long
+// a machine has to look able before it is believed, not a measured quantity, and
+// it is written here rather than dressed up as one.
+const BUDGET_UP_SUSTAINED_MS = 60_000;
+// How long a request to the player to change variant stands before it is
+// treated as unanswered. A progress report is polled about every 1.5 s and the
+// switch itself needs the rung warmed, which is the cold start this host
+// measures; this is long enough for both and short enough that a browser which
+// cannot honour the request (no master playlist, a viewer on a manual pick) is
+// not chased for the rest of the film.
+const QUALITY_ASK_TTL_MS = 45_000;
 // How many readings the median is taken over. This one is a statement about
 // how much of the past still describes the host, not a measured quantity, and
 // it is written here rather than dressed up as one.
@@ -540,9 +555,12 @@ const BUDGET_DOWNLOAD_OK_FACTOR = 1.0;
 // measured data-channel throughput + buffered seconds every ~10 s; when a
 // FRESH report shows the usable link (reported × safety margin) sustainedly
 // below the observed produced bitrate AND the viewer's buffer is low, the
-// budget loop steps the encode one rung down — same machinery, cooldown and
-// floor as the CPU trigger. Manual-quality sessions are inherently exempt
-// (their budgetLadder is null).
+// budget loop bounds the encode's bitrate by that measured link — same
+// machinery and cooldown as the CPU trigger. On a COPIED picture there is no
+// encoder to bound, so the same finding asks the player for a re-encoded rung
+// instead. Which of the two, and whether a viewer's own pick may be moved at
+// all, is decided where the viewer's choice lives: in the browser, which
+// honours the request only in automatic mode.
 const LINK_REPORT_FRESH_MS = 30_000;
 // Usable share of the reported link (protocol overhead + measurement noise).
 const LINK_SAFETY = 0.8;
@@ -1611,7 +1629,7 @@ export class HlsSessionManager {
     // otherwise.
     this.budgetTimer = setInterval(() => {
       this.#enforceLookAhead();
-      void this.#enforceRealtimeBudget();
+      void this.runQualityBudgetOnce();
     }, BUDGET_CHECK_INTERVAL_MS);
     this.budgetTimer.unref();
   }
@@ -2004,8 +2022,7 @@ export class HlsSessionManager {
     //
     // Manual quality bypasses the budget entirely: the user forced a specific
     // resolution, so encode exactly that box (capped to source by the scale
-    // filter) with the default preset, and the runtime downswitch is skipped
-    // for the session (budgetLadder stays null).
+    // filter) with the default preset.
     // What decoding this source costs, which every re-encode pays on top of
     // the encoder. Read from the probe; null when it did not say enough.
     const sourceDecode = sourceDecodeCharacteristics(mediaInfo);
@@ -2118,15 +2135,38 @@ export class HlsSessionManager {
         : undefined,
       // Whether to insert the HDR→SDR tone-map chain (software path only).
       applyTonemap,
-      // Realtime-budget runtime state (software encoder only). The ladder is the
-      // resolution rungs from the ceiling down; rungIndex is the current rung.
-      // The monitor steps rungIndex down when the encoder is sustainedly
-      // CPU-bound and restarts ffmpeg at the current segment.
-      budgetLadder: encodeBudget?.ladder ?? null,
-      budgetRungIndex: Number.isInteger(encodeBudget?.rungIndex) ? encodeBudget.rungIndex : 0,
-      budgetDownshifts: 0,
+      // Realtime-budget runtime state. The ladder that chose the STARTING rung
+      // is not kept: a step is a change of VARIANT now, and a variant is a
+      // session with its own init segment, so there is no per-session rung
+      // index to walk. What is kept is when this session last looked slow, when
+      // it last looked able, and when the family last acted.
       budgetSlowSince: 0,
       budgetLastActionAt: 0,
+      // A standing request to the player to move to another variant, or null.
+      // Kept on the family's BASE — it is the base's id the browser polls
+      // progress with, and the request outlives the rung that raised it.
+      qualityAsk: null,
+      // The last disagreement between the size a run encodes and the size the
+      // served init describes, so the same one is not repeated every run.
+      initSizeSaid: "",
+      // The window in which the machine has looked able to carry a HIGHER rung.
+      // The way back up, which for most of this project's life did not exist:
+      // `budgetRungIndex` was written in exactly one place, `+ 1`.
+      budgetUpSince: 0,
+      // The last speed read as a SLOPE between two progress reports, with the
+      // moment it was read. ffmpeg's own `speed=` is cumulative — output time
+      // over wall time since the run began — so a run starved early carries
+      // that average for the rest of its life, and a decision taken on it is
+      // taken on a figure that stopped being true. Measured 2026-08-21: a
+      // cumulative 0.39x bought a downshift on a run whose own progress lines
+      // showed 1.30x at that moment.
+      recentSpeed: null,
+      // A peak this encode must not exceed, in kbit/s of nominal rate, when the
+      // VIEWER's measured link is what cannot carry the stream. Null while
+      // nothing has measured a limit. It moves `-maxrate`/`-bufsize` and
+      // nothing else: they do not appear in the SPS, so one init segment goes
+      // on describing every fragment — which the picture's SIZE cannot do.
+      rateCapKbps: null,
       // Latest viewer link report ({ linkMbps, bufferedAheadSec, at }) and the
       // link-deficit slow window (mirrors budgetSlowSince for the CPU path).
       netReport: null,
@@ -2778,21 +2818,6 @@ export class HlsSessionManager {
   }
 
   /**
-   * Parse ffmpeg's `speed` progress value (e.g. "0.903x", "1.6x", "N/A") into a
-   * number. Returns null when it cannot be parsed (no data yet).
-   *
-   * @param {string} value
-   * @returns {number | null}
-   */
-  #parseSpeed(value) {
-    if (typeof value !== "string" || value.length === 0) {
-      return null;
-    }
-    const numeric = Number.parseFloat(value);
-    return Number.isFinite(numeric) && numeric > 0 ? numeric : null;
-  }
-
-  /**
    * Realtime budget monitor (software encoder only). For each active
    * software-transcode session, watch the encoder's cumulative `speed`: when it
    * stays below realtime for a sustained window AND the input is not
@@ -2814,6 +2839,11 @@ export class HlsSessionManager {
   recordNetReport(sessionId, { linkMbps, bufferedAheadSec }) {
     const named = this.sessionsById.get(sessionId);
     if (!named || named.state === "disposed") {
+      return false;
+    }
+    // A throughput that is not a positive finite number is not a measurement,
+    // and it reaches an encoder's `-maxrate` from here.
+    if (!Number.isFinite(linkMbps) || !(linkMbps > 0) || !Number.isFinite(bufferedAheadSec)) {
       return false;
     }
     // The link carries the stream on screen, so the report belongs to the
@@ -2966,16 +2996,26 @@ export class HlsSessionManager {
     if (now - session.linkSlowSince < LINK_SLOW_WINDOW_MS) {
       return false; // not sustained yet
     }
-    if (now - session.budgetLastActionAt < BUDGET_ACTION_COOLDOWN_MS) {
-      return false; // let the previous action settle
-    }
-    await this.#applyBudgetDownshift(
-      session,
-      `link=${report.linkMbps.toFixed(2)}Mbps stream=${observed.toFixed(2)}Mbps buffer=${report.bufferedAheadSec.toFixed(1)}s`,
-      "link"
-    );
     session.linkSlowSince = 0;
-    return true;
+    const reasonText =
+      `link=${report.linkMbps.toFixed(2)}Mbps stream=${observed.toFixed(2)}Mbps ` +
+      `buffer=${report.bufferedAheadSec.toFixed(1)}s`;
+    // Which lever this branch HAS, which is not the same on both paths.
+    //
+    // A re-encoded picture can simply be told to make fewer bits at the size it
+    // is already making, and the target is not chosen — it is the link the
+    // browser just measured. Nothing about the picture's size moves, so the one
+    // init segment the player holds goes on describing every fragment.
+    //
+    // A COPIED picture is not being encoded at all, so it has no rate to lower:
+    // its bitrate is the source's. The only way to send fewer bits is to send
+    // another rendering of the film, which is a re-encoded rung — a change of
+    // variant, and the player's own switch. This is the whole of what "a change
+    // of resolution must exist on the copy path too" asks for.
+    if (session.transcodeVideo === true && this.videoEncoder?.kind === "software") {
+      return await this.#applyRateCap(session, report.linkMbps, reasonText);
+    }
+    return this.#askLowerHeight(session, `viewer-link-bound ${reasonText}`);
   }
 
   /**
@@ -3733,7 +3773,18 @@ export class HlsSessionManager {
     );
   }
 
-  async #enforceRealtimeBudget() {
+  /**
+   * One pass of the quality budget: learn what this host is doing with each
+   * running encode, and act on it.
+   *
+   * Public because it is an operation with a name, not an implementation
+   * detail of a timer — and because a loop that decides what the viewer sees
+   * and can only be reached through `setInterval` is a loop nothing can check.
+   * The timer calls exactly this.
+   *
+   * @returns {Promise<void>}
+   */
+  async runQualityBudgetOnce() {
     void this.#reportHostLoad();
     // One tick at a time. Both halves await torrent statistics per source, so a
     // slow or stuck answer would otherwise let the next tick in behind it — two
@@ -3757,83 +3808,529 @@ export class HlsSessionManager {
     }
   }
 
-  /** One pass over the sessions. See `#enforceRealtimeBudget`. */
+  /** One pass over the sessions. See {@link runQualityBudgetOnce}. */
   async #realtimeBudgetPass() {
     const now = Date.now();
     for (const session of this.sessionsById.values()) {
       // What this file costs to decode is learned from EVERY encoding session,
       // before any of the budget's own conditions are consulted. Those exist to
-      // decide whether to step the quality down, and they exclude most of what
-      // is worth measuring: a rung already at the foot of its ladder has
-      // nowhere to step, and a 240p variant IS its whole ladder — which is
-      // exactly the rung the field measured at 0.95x on 2026-08-15, learning
-      // nothing from three minutes of it because the loop had already skipped
-      // the session as un-actionable.
+      // decide whether to step the quality, and they exclude most of what is
+      // worth measuring: a rung already at the foot of its ladder has nowhere
+      // to step, and a 240p variant IS its whole ladder — which is exactly the
+      // rung the field measured at 0.95x on 2026-08-15, learning nothing from
+      // three minutes of it because the loop had already skipped the session as
+      // un-actionable.
       await this.#learnFromEncoder(session);
       if (
         !session ||
         session.state === "disposed" ||
         session.runState === ENCODE_RUN_STATE.ENDED_FAILED ||
-        !session.transcodeVideo ||
         // Nothing is encoding, so there is no speed to judge. A variant the
         // viewer has switched away from is left in exactly this state, and its
-        // last recorded speed would otherwise buy it a downshift — which
-        // restarts the encoder it was just stopped for.
+        // last recorded speed would otherwise buy it a step — which restarts
+        // the encoder it was just stopped for.
         !session.ffmpeg ||
-        !Array.isArray(session.budgetLadder) ||
-        session.budgetLadder.length < 2
+        // A soundtrack published on its own carries no picture, so no quality
+        // step is its to make; its price is learned above and that is all.
+        session.audioOnly === true
       ) {
         continue;
       }
-      // Already at the floor or out of steps — nothing more to give.
-      if (
-        session.budgetRungIndex >= session.budgetLadder.length - 1 ||
-        session.budgetDownshifts >= BUDGET_MAX_DOWNSHIFTS
-      ) {
+      // The cooldown belongs to the FAMILY, not to one rung of it. A step asks
+      // the player to move to another session, so the rung that acted and the
+      // rung that then runs are different objects, and a cooldown kept on each
+      // separately would let the new one act again immediately.
+      if (now - this.#baseOf(session).budgetLastActionAt < BUDGET_ACTION_COOLDOWN_MS) {
         continue;
       }
       // Viewer-link deficit first (adaptive bitrate): independent of encoder
       // speed — a thin cellular link starves even a faster-than-realtime
-      // encode. When it acts, skip the CPU check this tick (shared cooldown
-      // guards double-firing anyway).
+      // encode.
       if (await this.#checkLinkBudget(session, now)) {
         continue;
       }
-      const speed = this.#parseSpeed(session.progress?.speed);
-      if (speed === null) {
-        continue; // no measurement yet
-      }
-      if (speed >= BUDGET_SPEED_OK) {
-        session.budgetSlowSince = 0; // recovered — reset the slow window
+      if (await this.#checkEncoderBudget(session, now)) {
         continue;
       }
-      if (speed >= BUDGET_SPEED_SLOW) {
-        continue; // in the hysteresis band; neither slow nor ok
-      }
-      // speed < BUDGET_SPEED_SLOW — track how long it has been slow.
-      if (session.budgetSlowSince === 0) {
-        session.budgetSlowSince = now;
-        continue;
-      }
-      if (now - session.budgetSlowSince < BUDGET_SUSTAINED_MS) {
-        continue; // not sustained yet
-      }
-      if (now - session.budgetLastActionAt < BUDGET_ACTION_COOLDOWN_MS) {
-        continue; // let the previous action settle
-      }
-      // Sustained sub-realtime. Only downscale if the encoder — not a
-      // download-starved input — is the limit.
-      const bound = await this.#classifyTranscodeBound(session);
-      if (bound === "download") {
-        logger.info(
-          `[budget] transcode ${session.id} speed=${speed.toFixed(2)}x but download-limited ` +
-            `"${session.fileName}"; not downscaling (torrent is the bottleneck)`
-        );
-        session.budgetSlowSince = 0; // re-evaluate fresh; don't thrash on this
-        continue;
-      }
-      await this.#applyBudgetDownshift(session, `speed=${speed.toFixed(2)}x`, bound);
+      await this.#checkStepUp(session, now);
     }
+  }
+
+  /**
+   * The speed this run is making RIGHT NOW, or null when nothing recent enough
+   * says.
+   *
+   * Read as the slope between two progress reports, never as ffmpeg's own
+   * `speed=`. That figure is cumulative — output time over wall time since the
+   * run began — so a run starved of torrent data early carries the average of
+   * that starvation for the rest of its life. Measured 2026-08-21: a run whose
+   * progress lines showed 1.30x at that moment (13 s of video in 10.02 s of
+   * clock) still reported a cumulative 0.39x from four minutes on a ~100 KB/s
+   * swarm, and the budget stepped the picture down on it. The same mistake was
+   * found and solved once already — the startup decode benchmark reads the
+   * slope between two progress reports for exactly this reason.
+   *
+   * @param {HlsSession} session
+   * @param {number} now
+   * @returns {number | null}
+   */
+  #recentSpeedOf(session, now) {
+    const reading = session.recentSpeed;
+    if (!reading || reading.runSerial !== (session.runSerial ?? 0)) {
+      return null; // nothing from THIS run
+    }
+    // Two budget ticks. A reading older than that is not about the machine as
+    // it stands, and the loop takes a fresh one every pass anyway.
+    if (now - reading.at > BUDGET_CHECK_INTERVAL_MS * 2) {
+      return null;
+    }
+    return reading.speed;
+  }
+
+  /**
+   * The encoder-speed check for one session: sustained sub-realtime, and the
+   * encoder — not a download-starved input — is the limit.
+   *
+   * @param {HlsSession} session
+   * @param {number} now
+   * @returns {Promise<boolean>} True when a step was asked for this tick.
+   */
+  async #checkEncoderBudget(session, now) {
+    if (session.transcodeVideo !== true) {
+      // A copy has no encoder to make cheaper. Whatever the machine is short
+      // of, moving this viewer to a RE-ENCODED rung costs it more, not less —
+      // so the copy path's only lever is the viewer's link, above.
+      return false;
+    }
+    const speed = this.#recentSpeedOf(session, now);
+    if (speed === null) {
+      return false; // no measurement yet
+    }
+    if (speed >= BUDGET_SPEED_OK) {
+      session.budgetSlowSince = 0; // recovered — reset the slow window
+      return false;
+    }
+    if (speed >= BUDGET_SPEED_SLOW) {
+      return false; // in the hysteresis band; neither slow nor ok
+    }
+    if (session.budgetSlowSince === 0) {
+      session.budgetSlowSince = now;
+      return false;
+    }
+    if (now - session.budgetSlowSince < BUDGET_SUSTAINED_MS) {
+      return false; // not sustained yet
+    }
+    const bound = await this.#classifyTranscodeBound(session);
+    if (bound === "download") {
+      logger.info(
+        `[budget] transcode ${session.id} speed=${speed.toFixed(2)}x but download-limited ` +
+          `"${session.fileName}"; not stepping down (torrent is the bottleneck)`
+      );
+      session.budgetSlowSince = 0; // re-evaluate fresh; don't thrash on this
+      return false;
+    }
+    session.budgetSlowSince = 0;
+    session.budgetUpSince = 0;
+    const boundLabel = bound === "unknown" ? "assuming CPU-bound" : "CPU-bound";
+    return this.#askLowerHeight(session, `${boundLabel} speed=${speed.toFixed(2)}x`);
+  }
+
+  /**
+   * Ask the player to move down one offered rung.
+   *
+   * THE SIZE OF THE PICTURE IS NEVER REWRITTEN UNDERNEATH A RUNNING SESSION.
+   * The fMP4 init segment is fetched once — a player reads `#EXT-X-MAP` and
+   * never asks again — and `avc1` keeps SPS and PPS in it rather than in the
+   * fragments, so every fragment produced after a size change is decoded
+   * against parameter sets describing a picture that is no longer being made.
+   * Measured 2026-08-21 on two files: one browser went on reporting
+   * `size=1280x720` for three and a half minutes over a band of macroblock
+   * garbage after the encoder had left for 960x540; the other errored on the
+   * first mismatched fragment, closed the MediaSource and sat at `size=0x0`
+   * for four and a half minutes. Which of the two happens is the decoder's
+   * choice, not ours, and no layer reported an error either time.
+   *
+   * A change of resolution is a change of VARIANT, as the standard has it.
+   * Every height is already published in the master with its own init, so the
+   * step is made by ASKING the browser to move — the same act the manual menu
+   * performs, which has never had this fault.
+   *
+   * @param {HlsSession} session
+   * @param {string} reasonText
+   * @returns {boolean} True when an ask was recorded.
+   */
+  #askLowerHeight(session, reasonText) {
+    const base = this.#baseOf(session);
+    const current = this.variantHeightOf(session);
+    const offered = this.offeredHeights(base);
+    // The highest rung strictly below the one on screen that this host is still
+    // willing to serve. `offeredHeights` has already refused everything the
+    // machine cannot hold, so a rung that survives it is one worth moving to.
+    const next = this.#splicableHeights(base)
+      .find((height) => height < current && offered.includes(height));
+    if (next === undefined) {
+      logger.info(
+        `[budget] transcode ${session.id} ${reasonText} at ${current}p, but nothing lower is on offer ` +
+          `for "${session.fileName}"; leaving the picture alone`
+      );
+      return false;
+    }
+    return this.#askQualityHeight(base, next, reasonText);
+  }
+
+  /**
+   * Record a request to the viewer's player to move to another variant.
+   *
+   * The proxy cannot move a player between variants; it can only say which one
+   * it would rather serve. The request travels in every progress report, and
+   * the browser honours it ONLY in automatic mode — a height the viewer picked
+   * by hand is theirs, and nothing here may take it away.
+   *
+   * @param {HlsSession} base
+   * @param {number} height
+   * @param {string} reasonText
+   * @returns {boolean}
+   */
+  #askQualityHeight(base, height, reasonText) {
+    if (!this.#publishesVariants(base)) {
+      // Said once for the session. Repeating it is not information: the answer
+      // is a property of the stream and cannot change while it plays.
+      if (base.saidNoVariants !== true) {
+        base.saidNoVariants = true;
+        logger.info(
+          `[budget] transcode ${base.id} would ask for ${height}p, but this stream publishes no ` +
+            `variants to move between; leaving the picture alone for the rest of the session`
+        );
+      }
+      return false;
+    }
+    const playing = this.variantHeightOf(this.#activeVariant(base));
+    if (height === playing) {
+      return false;
+    }
+    const now = Date.now();
+    const standing = base.qualityAsk;
+    if (standing && standing.height === height && now - standing.at < QUALITY_ASK_TTL_MS) {
+      return false; // already asked, and the request has not run out
+    }
+    base.qualityAsk = { height, at: now, reason: reasonText };
+    base.budgetLastActionAt = now;
+    logger.info(
+      `[budget] transcode ${base.id} asks the player to move ${playing}p → ${height}p: ${reasonText} ` +
+        `"${base.fileName}" (a change of size is a change of variant — its own init describes it)`
+    );
+    return true;
+  }
+
+  /**
+   * The step BACK UP, in two stages: first give this picture its own bitrate
+   * back, then give it its own size back.
+   *
+   * The order matters. A rate cap was imposed because the viewer's link could
+   * not carry the stream; lifting it is cheaper than enlarging the picture and
+   * is what the viewer notices first. Only a session under no cap is considered
+   * for a higher rung.
+   *
+   * @param {HlsSession} session
+   * @param {number} now
+   * @returns {Promise<void>}
+   */
+  async #checkStepUp(session, now) {
+    const base = this.#baseOf(session);
+    const current = this.variantHeightOf(session);
+    // What the machine and the link would have to look like for a step up, held
+    // for a window four times the one a step DOWN needs. Anything that fails
+    // resets it, so the window measures an unbroken stretch.
+    if (!(await this.#couldCarryMore(session, now, current))) {
+      session.budgetUpSince = 0;
+      return;
+    }
+    if (session.budgetUpSince === 0) {
+      session.budgetUpSince = now;
+      return;
+    }
+    if (now - session.budgetUpSince < BUDGET_UP_SUSTAINED_MS) {
+      return;
+    }
+    if (Number.isFinite(session.rateCapKbps) && session.rateCapKbps > 0) {
+      // A different question from the one above: can the link carry THIS
+      // picture with no cap on it. Asked separately because a session at the
+      // top offered height has no next rung at all, and answering "nothing to
+      // step to, so yes" is how a cap came off a link measured at a fifth of
+      // what the picture needs.
+      if (!this.#linkCouldCarry(session, this.#peakMbpsForHeight(this.#baseOf(session), current), now)) {
+        return;
+      }
+      session.budgetUpSince = 0;
+      await this.#liftRateCap(session);
+      return;
+    }
+    session.budgetUpSince = 0;
+    // One rung at a time: the lowest height above the one on screen, never
+    // above the source (upscaling invents detail and costs more than the
+    // source itself). A second step follows a second unbroken window.
+    const higher = this.#nextHeightUp(base, current);
+    if (higher === undefined) {
+      return;
+    }
+    this.#askQualityHeight(
+      base,
+      higher,
+      `the machine and the link have carried ${current}p for ` +
+        `${Math.round(BUDGET_UP_SUSTAINED_MS / 1000)}s with room to spare`
+    );
+  }
+
+  /**
+   * Whether this session has room to spare — the encoder ahead of realtime, the
+   * torrent not the limit, and the viewer's link able to carry what the next
+   * rung is allowed to peak at.
+   *
+   * @param {HlsSession} session
+   * @param {number} now
+   * @param {number} current - The height on screen.
+   * @returns {Promise<boolean>}
+   */
+  async #couldCarryMore(session, now, current) {
+    if (session.transcodeVideo === true) {
+      const speed = this.#recentSpeedOf(session, now);
+      if (speed === null || speed < BUDGET_SPEED_OK) {
+        return false;
+      }
+    }
+    // A run in either slow window is one the budget is already unhappy with.
+    if (session.linkSlowSince !== 0 || session.budgetSlowSince !== 0) {
+      return false;
+    }
+    const report = session.netReport;
+    if (!report || now - report.at > LINK_REPORT_FRESH_MS) {
+      // Nothing fresh measures the link, so it has no opinion either way — the
+      // same silence that stops #checkLinkBudget from acting.
+      return true;
+    }
+    const base = this.#baseOf(session);
+    const next = this.#nextHeightUp(base, current);
+    if (next === undefined) {
+      return true; // nothing to step to; only the cap decision is left
+    }
+    return this.#linkCouldCarry(session, this.#peakMbpsForHeight(base, next), now);
+  }
+
+  /**
+   * Whether the viewer's measured link can carry a given number of Mbit/s.
+   *
+   * A link nobody has measured recently has no opinion either way — the same
+   * silence that stops `#checkLinkBudget` from acting — so it answers yes.
+   *
+   * @param {HlsSession} session
+   * @param {number} wantedMbps
+   * @param {number} now
+   * @returns {boolean}
+   */
+  #linkCouldCarry(session, wantedMbps, now) {
+    const report = session.netReport;
+    if (!report || now - report.at > LINK_REPORT_FRESH_MS) {
+      return true;
+    }
+    return report.linkMbps * LINK_SAFETY >= wantedMbps;
+  }
+
+  /**
+   * The next offered height above `current`, never above the source.
+   *
+   * @param {HlsSession} base
+   * @param {number} current
+   * @returns {number | undefined}
+   */
+  #nextHeightUp(base, current) {
+    const ceiling = Math.round(Number(base.sourceHeight) || 0);
+    return this.offeredHeights(base)
+      .filter((height) => height > current && height <= ceiling)
+      .sort((left, right) => left - right)[0];
+  }
+
+  /**
+   * What a rung is ALLOWED to peak at, in Mbit/s.
+   *
+   * For a re-encoded rung that is the constrained-CRF cap this proxy imposes on
+   * it, which is a figure we set rather than one we hope for. For the height
+   * the family serves by COPY there is no encoder and no cap, so the source's
+   * own bitrate is what will be sent.
+   *
+   * @param {HlsSession} base
+   * @param {number} height
+   * @returns {number}
+   */
+  #peakMbpsForHeight(base, height) {
+    const sourceHeight = Math.round(Number(base.sourceHeight) || 0);
+    if (height === sourceHeight && base.transcodeVideo !== true) {
+      const sourceMbps = Number(base.sourceDecode?.megabitsPerSecond);
+      if (Number.isFinite(sourceMbps) && sourceMbps > 0) {
+        return sourceMbps;
+      }
+    }
+    return maxrateKbpsFor(nominalKbpsForHeight(height)) / 1000;
+  }
+
+  /**
+   * Bound this encode's bitrate by the viewer's MEASURED link.
+   *
+   * The one lever that reduces what is sent without touching the picture's
+   * size: `-maxrate`, `-bufsize` and CRF do not appear in the SPS (x264 writes
+   * no HRD parameters unless asked), so the init segment already in the
+   * player's hands goes on describing every fragment. The target is not chosen
+   * — it is the link the browser reported, less the share protocol overhead and
+   * measurement noise take out of it.
+   *
+   * @param {HlsSession} session
+   * @param {number} linkMbps
+   * @param {string} reasonText
+   * @returns {Promise<boolean>}
+   */
+  async #applyRateCap(session, linkMbps, reasonText) {
+    const usableKbps = Math.round(linkMbps * LINK_SAFETY * 1000);
+    const wanted = nominalKbpsForMaxrate(usableKbps);
+    if (!(wanted > 0)) {
+      return false;
+    }
+    // The floor: what the SMALLEST picture this file is offered at is sized to
+    // carry. Below that, the link is not short of bitrate at this size — it is
+    // short of the size, and the answer is a smaller variant rather than a
+    // number that would make this one unwatchable.
+    const base = this.#baseOf(session);
+    const offered = this.offeredHeights(base);
+    const smallest = offered.length > 0 ? Math.min(...offered) : this.variantHeightOf(session);
+    const floor = nominalKbpsForHeight(smallest);
+    if (wanted < floor) {
+      if (this.#askLowerHeight(session, `viewer-link-bound ${reasonText}`)) {
+        return true;
+      }
+      logger.info(
+        `[budget] transcode ${session.id} the link carries ${maxrateKbpsFor(wanted)}kbps and the ` +
+          `smallest picture on offer (${smallest}p) is sized for ${maxrateKbpsFor(floor)}kbps; ` +
+          `capping at the floor rather than below it "${session.fileName}"`
+      );
+    }
+    const nominal = Math.max(wanted, floor);
+    const standing = Number.isFinite(session.rateCapKbps) ? session.rateCapKbps : null;
+    if (standing !== null && nominal >= standing) {
+      return false; // this would loosen a cap, which is the step UP's business
+    }
+    session.rateCapKbps = nominal;
+    session.budgetSlowSince = 0;
+    session.budgetUpSince = 0;
+    base.budgetLastActionAt = Date.now();
+    // What this run was last seen doing described an encode at another bitrate.
+    // A cheaper one encodes faster, so keeping the figure would price the new
+    // picture at the old one's cost.
+    session.lastAloneSpeed = null;
+    session.recentSpeed = null;
+    logger.info(
+      `[budget] transcode ${session.id} viewer-link-bound ${reasonText} → capping the picture at ` +
+        `${maxrateKbpsFor(nominal)}kbps peak, size unchanged at ${session.encodeWidth}x${session.encodeHeight} ` +
+        `"${session.fileName}"`
+    );
+    await this.#restartAtViewer(session);
+    return true;
+  }
+
+  /**
+   * Give a capped picture its own bitrate back.
+   *
+   * @param {HlsSession} session
+   * @returns {Promise<void>}
+   */
+  async #liftRateCap(session) {
+    const lifted = session.rateCapKbps;
+    session.rateCapKbps = null;
+    session.lastAloneSpeed = null;
+    session.recentSpeed = null;
+    this.#baseOf(session).budgetLastActionAt = Date.now();
+    logger.info(
+      `[budget] transcode ${session.id} the link has carried this picture with room to spare; ` +
+        `lifting the ${maxrateKbpsFor(lifted)}kbps cap "${session.fileName}"`
+    );
+    await this.#restartAtViewer(session);
+  }
+
+  /**
+   * Restart this session's encode run at the segment the viewer is on, so a
+   * changed setting takes over from where they are watching.
+   *
+   * @param {HlsSession} session
+   * @returns {Promise<void>}
+   */
+  async #restartAtViewer(session) {
+    const head = session.encodeStartIndex;
+    const processed = Number.isFinite(session.progress?.processedSeconds)
+      ? session.progress.processedSeconds
+      : this.runStartTimeFor(session, head);
+    const currentSeg = Math.max(head, this.#segmentIndexForTime(session, processed));
+    await this.#startEncodeRun(session, currentSeg);
+  }
+
+  /**
+   * Say so when a run is about to encode a picture the init segment already in
+   * the player's hands does not describe.
+   *
+   * This is the whole class of fault named in one line, and it exists because
+   * the fault is otherwise SILENT: no layer reports an error, the encoder is
+   * healthy, segments are served in milliseconds, and what the viewer gets is
+   * either a band of macroblock garbage or a picture that never appears. The
+   * shape is the one 2.48.0 uses for the TIME a run begins at — a run states
+   * where it really landed, and a disagreement with what was published is
+   * named rather than left to be inferred from a browser's own reading.
+   *
+   * The size the init describes is read from the init's own bytes, not taken
+   * from our record of what the encoder was told, because those two disagreeing
+   * IS the fault. The size the run will produce is computed by the same
+   * arithmetic the scale filter performs, so a source smaller than the target
+   * box is not reported as a disagreement.
+   *
+   * Said once per distinct pair of sizes: a run repeated at the same wrong size
+   * has nothing further to say.
+   *
+   * @param {HlsSession} session
+   * @returns {void}
+   */
+  #warnIfRunLeavesTheInitBehind(session) {
+    if (session.transcodeVideo !== true || !session.initBytes || session.initBytes.length === 0) {
+      return; // nothing served yet, or nothing being encoded
+    }
+    const format = session.segmentFormat;
+    if (typeof format?.initVideoSize !== "function") {
+      return; // a self-describing container (MPEG-TS) cannot have this fault
+    }
+    const described = format.initVideoSize(session.initBytes);
+    if (!described) {
+      return;
+    }
+    if (!(session.encodeWidth > 0) || !(session.encodeHeight > 0)) {
+      return; // the run keeps the encoder's own default box; nothing was told
+    }
+    const producing = computeOutputDimensions(
+      session.encodeWidth,
+      session.encodeHeight,
+      session.sourceWidth,
+      session.sourceHeight
+    );
+    if (!producing) {
+      return; // the source size is unknown, so nothing can be predicted
+    }
+    if (described.width === producing.w && described.height === producing.h) {
+      return;
+    }
+    const said = `${described.width}x${described.height}->${producing.w}x${producing.h}`;
+    if (session.initSizeSaid === said) {
+      return;
+    }
+    session.initSizeSaid = said;
+    logger.warn(
+      `transcode ${session.id} is about to encode ${producing.w}x${producing.h} while the init segment ` +
+        `the player holds describes ${described.width}x${described.height} "${session.fileName}" — ` +
+        `every fragment of this run will be decoded against parameter sets for a picture that is not ` +
+        `being made. A change of size is a change of variant; nothing here should have moved it.`
+    );
   }
 
   /**
@@ -3877,72 +4374,6 @@ export class HlsSessionManager {
     }
     const sourceByteRate = length / duration;
     return downloadSpeed >= sourceByteRate * BUDGET_DOWNLOAD_OK_FACTOR ? "cpu" : "download";
-  }
-
-  /**
-   * Step a session one resolution rung down the budget ladder and restart the
-   * encode at the current segment with the lighter profile.
-   *
-   * @param {HlsSession} session
-   * @param {string} reasonText - Measurement summary for the log line.
-   * @param {"cpu" | "unknown" | "link"} bound
-   * @returns {Promise<void>}
-   */
-  async #applyBudgetDownshift(session, reasonText, bound) {
-    const nextIndex = session.budgetRungIndex + 1;
-    const rung = session.budgetLadder[nextIndex];
-    if (!rung) {
-      return;
-    }
-    const fps = Number.isInteger(session.outputFps) && session.outputFps > 0 ? session.outputFps : TRANSCODE_FPS;
-    session.budgetRungIndex = nextIndex;
-    session.budgetDownshifts += 1;
-    session.budgetLastActionAt = Date.now();
-    session.budgetSlowSince = 0;
-    session.encodeWidth = rung.width;
-    session.encodeHeight = rung.height;
-    // What this session was last seen doing described the encode it is no
-    // longer running. Kept, it prices the new, cheaper picture at the old one's
-    // cost, and it keeps the step it was measured on withdrawn from the offer
-    // although nothing is producing that step any more. The next reading of the
-    // new encode replaces it.
-    session.lastAloneSpeed = null;
-    // And so is the prediction it was compared against: it described the step
-    // this session has just left.
-    session.predictedSpeedWhenOffered = this.lastPredictedByHeight?.get(rung.height) ?? null;
-    session.lastPredictionRatio = null;
-    // Priced the same way the offer and the starting rung are. Choosing the
-    // preset on the encoder alone treats decoding as free, which is how the
-    // check and the encode came to disagree in the first place — and here it
-    // matters most, because this runs on a host that has already failed to keep
-    // up and is spending one of its few downshifts.
-    session.softwarePreset = pickSoftwarePreset(
-      this.softwarePresetBenchmark,
-      rung.width * rung.height * fps,
-      {
-        decodeModel: this.decodeCostModel,
-        source: session.sourceDecode ?? null,
-        observedDecodeCostSec: this.#observedDecodeCostFor(session),
-        requiredSpeed: session.supplyFigures?.requiredSpeed
-          ?? this.#requiredSpeedFor(session.sourceKey, session.fileIndex)
-      }
-    );
-    // Restart at the current live-edge segment so the lighter profile takes over
-    // from where the viewer is watching (hard-restart tier).
-    const head = session.encodeStartIndex;
-    const processed = Number.isFinite(session.progress?.processedSeconds)
-      ? session.progress.processedSeconds
-      : this.runStartTimeFor(session, head);
-    const currentSeg = Math.max(head, this.#segmentIndexForTime(session, processed));
-    const boundLabel =
-      bound === "link" ? "viewer-link-bound" : bound === "unknown" ? "assuming CPU-bound" : "CPU-bound";
-    logger.info(
-      `[budget] transcode ${session.id} ${boundLabel} ` +
-        `${reasonText} → downscale to ${rung.width}x${rung.height}/${session.softwarePreset} ` +
-        `(rung ${nextIndex + 1}/${session.budgetLadder.length}, downshift ${session.budgetDownshifts}/${BUDGET_MAX_DOWNSHIFTS}), ` +
-        `restart at segment #${currentSeg} "${session.fileName}"`
-    );
-    await this.#startEncodeRun(session, currentSeg);
   }
 
   /**
@@ -4171,6 +4602,7 @@ export class HlsSessionManager {
       }
     }
 
+    this.#warnIfRunLeavesTheInitBehind(session);
     // Video: re-encode only when required, using the detected encoder
     // (hardware-accelerated or software). The descriptor builds the filter +
     // codec args (including keyframe alignment on segment boundaries).
@@ -4191,7 +4623,10 @@ export class HlsSessionManager {
           // On the source's grid the cuts are not evenly spaced, so no frame
           // count can describe them: the encoder is told the times outright,
           // the same ones the muxer will cut at.
-          forcedKeyframeTimes: cutTimes
+          forcedKeyframeTimes: cutTimes,
+          // A ceiling the VIEWER's measured link put on this picture, when one
+          // has been measured. Null means the rung's own nominal rate stands.
+          nominalKbps: session.rateCapKbps ?? null
         })
       : ["-c:v", "copy"];
     const audioCodecArgs = session.transcodeAudio
@@ -5887,6 +6322,31 @@ export class HlsSessionManager {
    * @param {HlsSession} session
    * @returns {number[]} Largest first.
    */
+  /**
+   * Whether this stream publishes a master playlist at all — that is, whether
+   * there is anything for a player to move BETWEEN.
+   *
+   * Asked in one place because two callers depend on the same answer and used
+   * to compute it differently: the builder refused a copied stream whose cut
+   * grid is a fiction, while the budget looked only at how many heights could
+   * in principle be spliced. A copy with no readable keyframe index therefore
+   * had requests recorded against it — asking a player with no variants to
+   * change variant, once every window, for the whole film.
+   *
+   * @param {HlsSession} session
+   * @returns {boolean}
+   */
+  #publishesVariants(session) {
+    const owner = this.#baseOf(session);
+    // A copy can only be cut where the source already has a keyframe, so a rung
+    // meant to splice into it has to be cut at exactly those times. A copy that
+    // fell back to an even grid ffmpeg does not cut on has nothing to align to.
+    if (!owner.transcodeVideo && owner.cutGrid !== "keyframe") {
+      return false;
+    }
+    return this.#splicableHeights(owner).length >= 2;
+  }
+
   #splicableHeights(session) {
     const owner = this.#baseOf(session);
     if (Array.isArray(owner.splicableHeights)) {
@@ -6182,6 +6642,14 @@ export class HlsSessionManager {
     if (speed === null) {
       return;
     }
+    // Recorded HERE, before any of the conditions below can discard the
+    // reading, because the budget and the learning ask different questions of
+    // it. Learning refuses a reading taken beside another encoder, since it
+    // would file that encoder's work as this file's price; the budget wants
+    // exactly what this run is doing right now, whatever else the machine is
+    // doing beside it. Sharing the figure and not the conditions is what lets
+    // the budget stop reading ffmpeg's cumulative average.
+    session.recentSpeed = { speed, at: takenAt, runSerial };
     const kind = costKindForSession(session);
     // A reading taken beside another encoder contains that other encoder's
     // work, and the budget ADDS the same work again when it predicts — so filed
@@ -6773,6 +7241,32 @@ export class HlsSessionManager {
     /** @type {Map<number, number | null>} */
     const predictedByHeight = new Map();
     for (const height of heights) {
+      // The rung ON SCREEN is never withdrawn, whatever anything says about it:
+      // every route guard reads this list, so dropping it would 404 the next
+      // segment of a stream that is playing.
+      if (height === playingHeight) {
+        kept.push(height);
+        continue;
+      }
+      // A rung this session has actually been seen running below realtime is
+      // withdrawn on that evidence, whatever the prediction says. This is the
+      // one thing a live reading is authority on: itself — and it is asked
+      // BEFORE the exemptions below, which it did not used to be.
+      //
+      // That order was harmless while a step rewrote the encode inside the base
+      // and the viewer never left it: `ownHeight` then always WAS the rung on
+      // screen. Now a step moves the viewer to another variant, and the height
+      // they left goes on being exempt although nothing is producing it — so
+      // the step back up would ask for the one rung this machine has been
+      // measured failing at, then fail again, then step down, for ever. The
+      // copied source height cannot reach this: `#measuredRungSpeeds` records
+      // only sessions that re-encode, so a copy has no reading to be withdrawn
+      // on, which is right — it costs no encoder.
+      const measured = measuredHeights?.get(height) ?? null;
+      if (measured !== null && measured < 1) {
+        dropped.push(`${height}p=${measured.toFixed(2)}x measured`);
+        continue;
+      }
       // The height an encoder is ALREADY producing, and the source's own height
       // when the FAMILY serves it by copy — neither has to be predicted,
       // because it is happening. A copied rung costs no encoder at all, so no
@@ -6783,23 +7277,14 @@ export class HlsSessionManager {
       // what withdrew a copied 1080p in the field on 2026-08-15.
       //
       // A source height that would have to be RE-ENCODED is a prediction like
-      // any other: on a session whose budget downshifted to 480p, the source's
+      // any other: on a session whose budget stepped down to 480p, the source's
       // 1080p is neither copied nor being produced, and keeping it unpriced
       // would offer exactly the kind of rung this refuses.
       if (
         height === ownHeight ||
-        height === playingHeight ||
         (height === sourceHeight && !transcodeVideo)
       ) {
         kept.push(height);
-        continue;
-      }
-      // A rung this session has actually been seen running below realtime is
-      // withdrawn on that evidence, whatever the prediction says. This is the
-      // one thing a live reading is authority on: itself.
-      const measured = measuredHeights?.get(height) ?? null;
-      if (measured !== null && measured < 1) {
-        dropped.push(`${height}p=${measured.toFixed(2)}x measured`);
         continue;
       }
       const width = Math.round(((sourceWidth / sourceHeight) * height) / 2) * 2;
@@ -6880,6 +7365,39 @@ export class HlsSessionManager {
       this.#lastOfferLine = "";
     }
     return kept;
+  }
+
+  /**
+   * The height this proxy is asking the player to move to, or 0.
+   *
+   * Cleared the moment the viewer is on it — the request has been answered —
+   * and dropped when it runs out, which is the only sign this side ever gets
+   * that a player could not or would not follow it. A browser on a manual pick
+   * ignores every request by design, so an unanswered one is not an error; it
+   * is said once and let go, rather than repeated for the rest of the film.
+   *
+   * @param {HlsSession} named - The session the browser addressed.
+   * @returns {number}
+   */
+  #standingAskFor(named) {
+    const base = this.#baseOf(named);
+    const ask = base.qualityAsk;
+    if (!ask) {
+      return 0;
+    }
+    if (ask.height === this.variantHeightOf(this.#activeVariant(base))) {
+      base.qualityAsk = null; // the viewer is there; nothing left to ask for
+      return 0;
+    }
+    if (Date.now() - ask.at > QUALITY_ASK_TTL_MS) {
+      base.qualityAsk = null;
+      logger.info(
+        `[budget] transcode ${base.id} asked for ${ask.height}p and the player stayed where it was ` +
+          `(${ask.reason}); letting the request go`
+      );
+      return 0;
+    }
+    return ask.height;
   }
 
   /**
@@ -7468,7 +7986,7 @@ export class HlsSessionManager {
     if (!session || session.state === "disposed") {
       return null;
     }
-    if (!session.transcodeVideo && session.cutGrid !== "keyframe") {
+    if (!this.#publishesVariants(session)) {
       return null;
     }
     const sourceHeight = Number(session.sourceHeight) || 0;
@@ -7477,9 +7995,6 @@ export class HlsSessionManager {
     // is what the viewer's menu follows; letting it decide the master's
     // existence made a live session answer 404 to its own published address.
     const rungs = this.#splicableHeights(session);
-    if (rungs.length < 2) {
-      return null;
-    }
     const sourceWidth = Number(session.sourceWidth) || 0;
     const lines = ["#EXTM3U", `#EXT-X-VERSION:${session.segmentFormat.playlistVersion}`];
     // The audio tracks, published once for the whole file rather than muxed
@@ -8476,6 +8991,19 @@ export class HlsSessionManager {
       // this very source, so a rung that turns out to be beyond the host
       // disappears from the menu instead of being discovered by switching to it.
       offeredHeights: this.offeredHeights(session),
+      // The variant this proxy would rather serve, or 0 when it is content.
+      //
+      // A REQUEST, not an instruction — this side cannot move a player between
+      // variants and must not pretend to. The browser honours it only in
+      // automatic mode: a height the viewer picked by hand is theirs, and the
+      // rule that automatic quality changes belong to automatic mode alone is
+      // enforced where the viewer's choice actually lives.
+      //
+      // This is what replaced rewriting the picture's size underneath a running
+      // session. Every height is published in the master with its own init, so
+      // asking the player to move is the only form of the act that a decoder
+      // can follow.
+      requestedHeight: this.#standingAskFor(named),
       // What this host takes to create a session and to make a first segment.
       // Also on the playback plan, but the browser reads that once per file:
       // measured 2026-08-06 across four seeks, a proxy that had just restarted

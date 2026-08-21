@@ -26,6 +26,7 @@ import { handleApiTranscodeSessionsPost } from "./routes/api/transcode-sessions/
 import { handleApiTranscodeSessionsProgressGet } from "./routes/api/transcode-sessions/progress/get.js";
 import { handleApiTranscodeSessionReleasePost } from "./routes/api/transcode-sessions/release/post.js";
 import { handleApiTranscodeSessionNetReportPost } from "./routes/api/transcode-sessions/net-report/post.js";
+import { handleApiTranscodeSessionFragmentFarPost } from "./routes/api/transcode-sessions/fragment-far/post.js";
 import { handleApiTranscodeSessionSeekPost } from "./routes/api/transcode-sessions/seek/post.js";
 import { handleStreamGet } from "./routes/stream/get.js";
 import { handleTranscodeSessionFileGet } from "./routes/transcode/session-file/get.js";
@@ -243,6 +244,9 @@ export async function startProxyServer({ host, port, transcodeAudio, ffmpegBin, 
   );
   app.post("/api/transcode-sessions/:sessionId/net-report", async (req, reply) =>
     handleApiTranscodeSessionNetReportPost(req, reply, { hlsSessionManager })
+  );
+  app.post("/api/transcode-sessions/:sessionId/fragment-far", async (req, reply) =>
+    handleApiTranscodeSessionFragmentFarPost(req, reply, { hlsSessionManager })
   );
   app.post("/api/transcode-sessions/:sessionId/seek", async (req, reply) =>
     handleApiTranscodeSessionSeekPost(req, reply, { hlsSessionManager })

@@ -7,12 +7,46 @@
  */
 
 import crypto from "node:crypto";
+import dns from "node:dns/promises";
 import os from "node:os";
 import path from "node:path";
 import { rmSync, statfsSync } from "node:fs";
 import WebTorrent from "webtorrent";
 import { logger } from "../utils/logger.js";
 import { SharedPieceStore, findSharedStore } from "./piece-store/shared-piece-store.js";
+
+// The DHT's entry points. Two of the three the library ships answer nothing —
+// measured 2026-08-21 from the addon host: `router.bittorrent.com` and
+// `router.utorrent.com` did not reply to a hand-written `ping` at all, while a
+// control datagram to a DNS server came back in 20 ms, so the silence is
+// theirs. They stay in the list because they cost nothing and may come back;
+// what the list needed was entries that answer today.
+//
+// The names are RESOLVED HERE, to IPv4, and the addresses are what the library
+// is given. That is the second half of the fault: `dht.transmissionbt.com` is
+// alive — it answered `find_node` with eight nodes — but on a host with global
+// IPv6 its name resolves to an IPv6 address first, and the DHT's socket is
+// IPv4, so by name the one live entry was never reached. Measured the same day:
+// by name, 0 nodes after 21 s, every run; by address, 22 nodes in 5 s.
+//
+// Addresses are not written down. They rot exactly as the old list rotted.
+const DHT_BOOTSTRAP_NAMES = [
+  "dht.transmissionbt.com:6881",
+  "dht.libtorrent.org:25401",
+  "router.bittorrent.com:6881",
+  "router.utorrent.com:6881"
+];
+
+// How long after start a still-empty routing table is worth saying out loud.
+// Bootstrapping takes seconds; a table empty after this is a list that has died
+// and nobody has noticed, which is the state this host was found in.
+const DHT_EMPTY_REPORT_MS = 60 * 1000;
+
+// How long one bootstrap name may take to resolve. This is awaited before the
+// torrent client is built, so it is time during which the thread answers
+// nothing — and the DHT is best-effort, so a name that is slow to resolve is
+// worth less than the delay of waiting for it.
+const DHT_RESOLVE_TIMEOUT_MS = 2000;
 
 // WebTorrent's default download root (see webtorrent lib/torrent.js: TMP =
 // path.join(os.tmpdir(), 'webtorrent')). We use the default store, so all
@@ -449,6 +483,103 @@ function isMagnetSource(torrentId) {
   return typeof torrentId === "string" && /^magnet:\?/i.test(torrentId.trim());
 }
 
+/**
+ * Split a `host` or `host:port` bootstrap entry.
+ *
+ * @param {unknown} entry
+ * @returns {{ host: string, port: number } | null} Null for anything that is
+ *   not a usable entry, so a typo drops one node instead of failing the client.
+ */
+export function parseBootstrapEntry(entry) {
+  if (typeof entry !== "string") {
+    return null;
+  }
+  const trimmed = entry.trim();
+  if (trimmed.length === 0) {
+    return null;
+  }
+  const colon = trimmed.lastIndexOf(":");
+  if (colon < 0) {
+    return { host: trimmed, port: 6881 };
+  }
+  const host = trimmed.slice(0, colon);
+  const port = Number(trimmed.slice(colon + 1));
+  if (host.length === 0 || !Number.isInteger(port) || port <= 0 || port > 65535) {
+    return null;
+  }
+  return { host, port };
+}
+
+/**
+ * Turn bootstrap names into `address:port` entries, keeping only IPv4.
+ *
+ * Why the resolution happens here rather than being left to the library: the
+ * DHT's socket is IPv4, and a name that resolves to IPv6 first is silently
+ * unreachable through it — which is how a live bootstrap node came to look
+ * dead on this host. See {@link DHT_BOOTSTRAP_NAMES}.
+ *
+ * Best-effort by construction. A name that does not resolve is dropped and
+ * said; if none resolve the caller gets an empty list and the library keeps its
+ * own defaults, which is no worse than before.
+ *
+ * @param {string[]} [names]
+ * @param {number} [timeoutMs] - How long one name may take before it is
+ *   treated as unresolvable.
+ * @returns {Promise<string[]>}
+ */
+export async function resolveDhtBootstrap(names = DHT_BOOTSTRAP_NAMES, timeoutMs = DHT_RESOLVE_TIMEOUT_MS) {
+  const entries = names.map(parseBootstrapEntry).filter((entry) => entry !== null);
+  const resolved = [];
+  const failed = [];
+  await Promise.all(
+    entries.map(async ({ host, port }) => {
+      try {
+        // Capped, because this is awaited before the torrent client exists and
+        // therefore before this thread will answer anything. `dns.resolve4`
+        // talks to the host's resolver with c-ares' own defaults — about five
+        // seconds times four tries — so a black-holing resolver would hold the
+        // whole worker for twenty seconds with nothing said. A name that does
+        // not answer inside the cap is treated exactly like one that fails:
+        // dropped, named, and the rest of the list stands.
+        const addresses = await Promise.race([
+          dns.resolve4(host),
+          new Promise((_resolve, reject) => {
+            const timer = setTimeout(() => reject(new Error("timed out")), timeoutMs);
+            timer.unref?.();
+          })
+        ]);
+        for (const address of addresses) {
+          resolved.push(`${address}:${port}`);
+        }
+      } catch {
+        failed.push(`${host}:${port}`);
+      }
+    })
+  );
+  if (failed.length > 0) {
+    logger.warn(`torrent-pool: DHT bootstrap names that do not resolve to IPv4: ${failed.join(", ")}`);
+  }
+  return resolved;
+}
+
+/**
+ * How many nodes the client's DHT knows, or null when it has no DHT at all.
+ *
+ * @param {{ dht?: { nodes?: { toArray?: () => unknown[] } } }} client
+ * @returns {number | null}
+ */
+export function dhtNodeCount(client) {
+  const nodes = client?.dht?.nodes;
+  if (!nodes || typeof nodes.toArray !== "function") {
+    return null;
+  }
+  try {
+    return nodes.toArray().length;
+  } catch {
+    return null;
+  }
+}
+
 export class TorrentPool {
   /**
    * In-flight `client.add()` promises keyed by the same key as `torrents`.
@@ -521,13 +652,16 @@ export class TorrentPool {
   /** Periodic adaptive-upload adjustment timer. */
   #uploadAdjustTimer = null;
 
+  /** One-shot timer that reports the size of the DHT's routing table. */
+  #dhtReportTimer = null;
+
   /**
    * @param {{ maxDiskBytes?: number }} [options]
    *   `maxDiskBytes` caps total downloaded torrent data; when omitted a
    *   default is computed from free disk (min(10 GB, half free)). Pass 0 to
    *   disable the cap.
    */
-  constructor({ maxDiskBytes, memoryBytes } = {}) {
+  constructor({ maxDiskBytes, memoryBytes, dhtBootstrap } = {}) {
     this.#memoryBytes = Number.isFinite(memoryBytes) && memoryBytes > 0 ? memoryBytes : undefined;
 
     // Sweep orphaned torrent data left by a previous hard kill (no graceful
@@ -541,8 +675,33 @@ export class TorrentPool {
       logger.warn(`torrent-pool: could not sweep orphaned store at startup: ${message}`);
     }
 
+    const bootstrap = Array.isArray(dhtBootstrap) ? dhtBootstrap.filter(Boolean) : [];
+    if (bootstrap.length > 0) {
+      logger.info(`torrent-pool: DHT bootstrap nodes: ${bootstrap.join(", ")}`);
+    } else {
+      logger.warn("torrent-pool: no DHT bootstrap nodes resolved; the library's own list is all there is");
+    }
     /** @type {import("webtorrent").WebTorrent} */
-    this.client = new WebTorrent();
+    this.client = new WebTorrent(bootstrap.length > 0 ? { dht: { bootstrap } } : undefined);
+    // A bootstrap list rots, and it rots silently: the one the library ships
+    // had two dead entries and a third that could not be reached by name, and
+    // nothing said so for as long as that was true. Say it once, late enough
+    // that a slow bootstrap is not mistaken for a dead one.
+    this.#dhtReportTimer = setTimeout(() => {
+      const nodes = dhtNodeCount(this.client);
+      if (nodes === null) {
+        return;
+      }
+      if (nodes === 0) {
+        logger.warn(
+          "torrent-pool: the DHT knows no nodes a minute after start — its bootstrap list is not " +
+          "answering, so a torrent has only its trackers to find peers with"
+        );
+        return;
+      }
+      logger.info(`torrent-pool: the DHT knows ${nodes} nodes`);
+    }, DHT_EMPTY_REPORT_MS);
+    this.#dhtReportTimer.unref?.();
 
     /**
      * Active torrents keyed by `"${sourceType}:${sha1(source)}"`.
@@ -1680,6 +1839,10 @@ export class TorrentPool {
     if (this.#uploadAdjustTimer) {
       clearInterval(this.#uploadAdjustTimer);
       this.#uploadAdjustTimer = null;
+    }
+    if (this.#dhtReportTimer) {
+      clearTimeout(this.#dhtReportTimer);
+      this.#dhtReportTimer = null;
     }
     // Cancel any pending idle-removal timers — destroyAll handles teardown.
     for (const timer of this.#idleTimers.values()) {

@@ -422,6 +422,12 @@ const LOOKAHEAD_RESUME_SECONDS = 60;
 // encoding 125 s of content before reaching the viewer's position. Field
 // 2026-08-02: a seek took 56 s, of which ~50 s was this backoff.
 const SEEK_BACKOFF_SEGMENTS = 1;
+
+// How many produced segments' true start times to remember, so a player's
+// report about one of them can be answered. Two hundred is about twenty
+// minutes of playback at these segment lengths — far more than the recent past
+// a stall report can be about, and small enough to be free.
+const TRUE_START_MEMORY = 200;
 // How long to wait for a scrub to stop moving before acting on it. Small,
 // because the browser already collapses a drag into ONE report
 // (`SEEK_REPORT_DEBOUNCE_MS`, 300 ms) and only reports where it settled — this
@@ -1174,6 +1180,54 @@ export function segmentCutTimesFrom(boundaries, startIndex) {
     times.push(Number((boundaries[at] - base).toFixed(6)));
   }
   return times;
+}
+
+/**
+ * How far the live boundary table has moved from the one the player holds, said
+ * in words.
+ *
+ * The corrections are applied one boundary at a time and each is small enough
+ * to look harmless; what nobody was watching is the total. It matters because a
+ * run positioned on one table and cut on the other carries their difference into
+ * every cut it makes — the fault of 2026-08-21, where the distance reached two
+ * whole segments after one seek and four after the next. Printed beside each
+ * correction so the total is visible while it is still small.
+ *
+ * @param {number[]} published - The table the playlist text was written from.
+ * @param {number[]} live - The table corrected from produced segments.
+ * @returns {string} A phrase, always readable, never throwing on odd input.
+ */
+export function describeGridDrift(published, live) {
+  if (!Array.isArray(published) || !Array.isArray(live) || published.length === 0) {
+    return "not comparable";
+  }
+  if (published.length !== live.length) {
+    return `a different length (${published.length} against ${live.length})`;
+  }
+  let apart = 0;
+  let worst = 0;
+  let worstAt = -1;
+  for (let index = 0; index < published.length; index += 1) {
+    // Rounded to the millisecond BEFORE comparing, not only before printing.
+    // Two boundaries moved by the same amount differ in the last bits of a
+    // double, so an unrounded comparison picks between them by an accident
+    // invisible in the printed figure — and the line would name a boundary the
+    // reader cannot tell apart from the one before it. Rounded, ties keep the
+    // earliest, which is also the one worth looking at first.
+    const distance = Math.round(Math.abs(live[index] - published[index]) * 1000) / 1000;
+    if (distance <= 0.001) {
+      continue;
+    }
+    apart += 1;
+    if (distance > worst) {
+      worst = distance;
+      worstAt = index;
+    }
+  }
+  if (apart === 0) {
+    return "identical";
+  }
+  return `${apart} of ${published.length} boundaries apart, worst ${worst.toFixed(3)}s at #${worstAt}`;
 }
 
 /**
@@ -2550,6 +2604,22 @@ export class HlsSessionManager {
       : (session.segmentBoundaries ?? []);
   }
 
+  /**
+   * Where a run beginning at `index` must be positioned: the time the PLAYER
+   * was told that segment starts at.
+   *
+   * Public because it is the invariant this class has broken twice, and a
+   * private one cannot be pinned by a test. It must always be the table the cut
+   * list is taken from — see the comment where a run is started.
+   *
+   * @param {HlsSession} session
+   * @param {number} index
+   * @returns {number}
+   */
+  runStartTimeFor(session, index) {
+    return this.#publishedStartTime(session, index);
+  }
+
   #publishedStartTime(session, index) {
     const boundaries = Array.isArray(session.publishedBoundaries) && session.publishedBoundaries.length > 0
       ? session.publishedBoundaries
@@ -2706,6 +2776,69 @@ export class HlsSessionManager {
     // The link carries the stream on screen, so the report belongs to the
     // variant producing it — that is the encoder whose bitrate it can bound.
     this.#activeVariant(named).netReport = { linkMbps, bufferedAheadSec, at: Date.now() };
+    return true;
+  }
+
+  /**
+   * Answer the player's report that a delivered fragment sits far from the edge
+   * of its buffer, with the one fact only this side holds: which boundary the
+   * segment of that number really begins at.
+   *
+   * The player can say the gap; it cannot say whether the cause is its own
+   * loading or a run whose output no longer matches its numbering. Here both
+   * are in hand — the time the playlist gave that segment, and, when the
+   * segment has been served, the time it truly began at — so the line either
+   * names a shifted run or clears this side of it.
+   *
+   * Diagnostic only: nothing is repositioned on the strength of a browser's
+   * reading, deliberately, because a wrong answer here would restart an encoder
+   * the viewer is waiting on.
+   *
+   * @param {string} sessionId
+   * @param {{ sn: number, track?: string, fragStartSec: number, bufferEndSec: number, currentTimeSec: number }} report
+   * @returns {boolean} False when no such session exists.
+   */
+  recordFragmentFar(sessionId, { sn, track, fragStartSec, bufferEndSec, currentTimeSec }) {
+    const named = this.sessionsById.get(sessionId);
+    if (!named || named.state === "disposed") {
+      return false;
+    }
+    // Which of the two streams the report is about. The browser addresses
+    // everything to the video session's id — the soundtrack is served under
+    // `/a/<n>/` on that same id — but it is a session of its own, with its own
+    // run and its own position, and that is exactly the pair this report exists
+    // to tell apart. Answering an audio report from the picture's records would
+    // state, confidently, something about the wrong stream.
+    const onScreen = this.#activeVariant(named);
+    const session = track === "audio"
+      ? ([...this.#familyOf(onScreen)].find((member) => member.audioOnly === true) ?? onScreen)
+      : onScreen;
+    const gap = fragStartSec - bufferEndSec;
+    const declared = this.#publishedStartTime(session, sn);
+    const trueStart = session.trueStartByIndex instanceof Map ? session.trueStartByIndex.get(sn) : undefined;
+    const verdict = trueStart === undefined
+      // Where a segment truly began is only ever read off one that was cut on
+      // an explicit list — a uniform grid has nothing to read back — so this is
+      // "not recorded", which is not the same as "not produced", and the line
+      // must not claim the second.
+      ? "where that segment began is not recorded on this side, so the gap cannot be attributed here"
+      : (() => {
+        const at = this.#boundaryIndexAt(session, trueStart, this.publishedGridFor(session));
+        if (at === null) {
+          return `it really began at ${trueStart.toFixed(3)}s, which is no boundary of this grid`;
+        }
+        if (at === sn) {
+          return `it really began at boundary #${sn}, where it should — the gap is not this run's`;
+        }
+        return `it really began at boundary #${at}, ${sn - at} place(s) before its own number — ` +
+          "this run's output does not match its numbering";
+      })();
+    logger.warn(
+      `transcode ${session.id} the player is stuck: ${session.audioOnly === true ? "sound" : "picture"} ` +
+      `fragment #${sn} starts ${gap.toFixed(1)}s past ` +
+      `the end of its buffer (${bufferEndSec.toFixed(1)}s, viewer at ${currentTimeSec.toFixed(1)}s, ` +
+      `the playlist puts it at ${declared.toFixed(3)}s) — ${verdict}`
+    );
     return true;
   }
 
@@ -3756,7 +3889,7 @@ export class HlsSessionManager {
     const head = session.encodeStartIndex;
     const processed = Number.isFinite(session.progress?.processedSeconds)
       ? session.progress.processedSeconds
-      : this.#segmentStartTime(session, head);
+      : this.runStartTimeFor(session, head);
     const currentSeg = Math.max(head, this.#segmentIndexForTime(session, processed));
     const boundLabel =
       bound === "link" ? "viewer-link-bound" : bound === "unknown" ? "assuming CPU-bound" : "CPU-bound";
@@ -3798,9 +3931,18 @@ export class HlsSessionManager {
    *
    * @param {HlsSession} session
    * @param {number} startIndex
+   * @param {number} [positionSecondsOverride] - Begin the run at this instant
+   *   instead of at the time the playlist gives `startIndex`, keeping the
+   *   numbering and the cut list on the published grid. The one caller is the
+   *   realignment below: a COPIED picture cannot cut anywhere but at the
+   *   source's own keyframes, so its segment #N begins where the file says and
+   *   not where the grid does — and the sound that plays with it has to begin
+   *   at that same instant, or the two are apart by the difference. The output
+   *   is still labelled from the source clock (`-copyts`) and stamped on serve,
+   *   so the player sees both at the time the playlist names.
    * @returns {Promise<void>}
    */
-  async #startEncodeRun(session, startIndex) {
+  async #startEncodeRun(session, startIndex, positionSecondsOverride) {
     // A new run starts its own reckoning: a pair spanning the restart would
     // count the gap between two runs as slow encoding.
     session.learnSample = null;
@@ -3899,8 +4041,30 @@ export class HlsSessionManager {
     }
 
     const safeIndex = Number.isInteger(startIndex) && startIndex > 0 ? startIndex : 0;
-    // 0-based output time of this segment, from the boundary table.
-    const startSeconds = this.#segmentStartTime(session, safeIndex);
+    // 0-based output time of this segment, from the table the PLAYER holds —
+    // the same one the cut list below is taken from.
+    //
+    // These two were read from different tables until 2026-08-21, and that is
+    // one fault, not two: `-segment_times` are measured from wherever the run
+    // really began, so any distance between the position and the cut list moves
+    // EVERY cut of that run by it. The live table keeps being corrected as
+    // produced segments reveal where the file's cuts truly are, and those
+    // corrections run backwards, so each restart began a little earlier than
+    // the grid the cuts were stated on — and since the corrections accumulate,
+    // so did the distance. Measured on `JUFD665.mp4`: after one seek restart a
+    // produced segment held the boundary two places before its own number
+    // (16.684 s, exactly 2.0000 segments), after the next it held the one four
+    // places before (33.5 s). The player's buffer then stops extending at all,
+    // because the content of every fragment lands before the time its playlist
+    // entry names: `bufferEnd` stood still at 4571.1 s through four `frag-far`
+    // warnings until hls.js gave up and jumped the viewer 16.8 s forward.
+    //
+    // 2.45.0 moved the CUT LIST onto the published table for this same reason
+    // and left the position on the live one. Both belong on the published
+    // table: a run must begin where the player was told the segment begins.
+    const startSeconds = Number.isFinite(positionSecondsOverride)
+      ? positionSecondsOverride
+      : this.runStartTimeFor(session, safeIndex);
     const sourceStartTime = Number.isFinite(session.sourceStartTime) ? session.sourceStartTime : 0;
     // Cut where this session's grid says, whoever is producing the frames. The
     // times are measured from the start of THIS run; the same list serves as
@@ -4191,6 +4355,17 @@ export class HlsSessionManager {
       `transcode ${session.id} ${session.runLabel} encode-run from segment #${safeIndex} ` +
       `(+${Date.now() - restartEnteredAt}ms since the restart was asked for) ` +
         `(${formatSeconds(startSeconds)}) "${session.fileName}"`
+    );
+    // The four numbers a run is positioned by, said once, because their
+    // disagreement is invisible everywhere else. The two tables are printed
+    // side by side: while they differ, every cut of this run is off by the
+    // difference, and nothing downstream can tell that from a bad index.
+    const liveStart = this.#segmentStartTime(session, safeIndex);
+    logger.info(
+      `transcode ${session.id} ${session.runLabel} positioned at ${startSeconds.toFixed(3)}s ` +
+        `for boundary #${safeIndex} (published ${startSeconds.toFixed(3)}s, ` +
+        `live ${liveStart.toFixed(3)}s, apart ${(liveStart - startSeconds).toFixed(3)}s), ` +
+        `numbering from #${safeIndex}`
     );
 
     this.#wireEncodeProcess(session, ffmpeg);
@@ -4511,7 +4686,7 @@ export class HlsSessionManager {
     // request just ahead of the live edge.
     const processed = Number.isFinite(session.progress?.processedSeconds)
       ? session.progress.processedSeconds
-      : this.#segmentStartTime(session, head);
+      : this.runStartTimeFor(session, head);
     const currentSeg = Math.max(head, this.#segmentIndexForTime(session, processed));
     const withinWindow = index >= head && index <= currentSeg + MAX_LOOKAHEAD_SEGMENTS;
     if (withinWindow) {
@@ -4804,7 +4979,7 @@ export class HlsSessionManager {
     const head = session.encodeStartIndex;
     const processed = Number.isFinite(session.progress?.processedSeconds)
       ? session.progress.processedSeconds
-      : this.#segmentStartTime(session, head);
+      : this.runStartTimeFor(session, head);
     const currentSeg = Math.max(head, this.#segmentIndexForTime(session, processed));
     // Already covered by the running encode — the data is on its way, so
     // restarting would only destroy work the viewer is waiting for. The run has
@@ -5240,7 +5415,17 @@ export class HlsSessionManager {
       return;
     }
     session.landingReportedForRun = index;
-    const asked = this.#segmentStartTime(session, index);
+    // What the run was ASKED for, taken from the run itself rather than looked
+    // up again in a table. The two used to be the same lookup; they stopped
+    // being so when a run began positioning on the published grid while this
+    // read the live one, which made a perfect landing report a drift equal to
+    // the distance between the tables — and cancelled a real landing error of
+    // the same size to zero. A run also has one legitimate position that is in
+    // no table at all: the realignment that starts the sound where the copied
+    // picture truly begins.
+    const asked = Number.isFinite(session.progress?.startPositionSeconds)
+      ? session.progress.startPositionSeconds
+      : this.runStartTimeFor(session, index);
     const drift = trueStart - asked;
     if (!Number.isFinite(drift) || Math.abs(drift) <= PLAYER_BUFFER_HOLE_SEC) {
       return;
@@ -5255,6 +5440,18 @@ export class HlsSessionManager {
   #noteIndexAccuracy(session, index, trueStart, declaredStart) {
     const deviation = Math.abs(trueStart - declaredStart);
     session.indexCheck ??= newIndexCheck();
+    // Where each produced segment truly began, kept so that a player reporting
+    // a stall can be ANSWERED rather than merely believed. Bounded: only the
+    // recent past can be the subject of such a report, and an unbounded map on
+    // a two-hour film is a leak.
+    session.trueStartByIndex ??= new Map();
+    session.trueStartByIndex.set(index, trueStart);
+    if (session.trueStartByIndex.size > TRUE_START_MEMORY) {
+      const oldest = session.trueStartByIndex.keys().next();
+      if (!oldest.done) {
+        session.trueStartByIndex.delete(oldest.value);
+      }
+    }
     // Did this segment begin at ANOTHER keyframe from the same list? Half an
     // audio frame is the tolerance — anything the list names is exact, so a
     // match is a match. `keyframeTimes` is the list the grid was built from, so
@@ -5299,7 +5496,18 @@ export class HlsSessionManager {
             // rung's segments no longer stand where the stream it accompanies
             // would have put them. That is a broken splice, not a wrong index.
             ? "this rung did not cut where its grid says; a switch to it will not join cleanly"
-            : "the container's keyframe index disagrees with the file; using the file")
+            // A copy. The two possible faults need opposite fixes and the
+            // numbers already tell them apart, so the sentence follows THEM
+            // rather than the branch it is printed from. Until 2026-08-21 it
+            // blamed the index either way — including through a session whose
+            // segments each held the boundary two, then four places before
+            // their own number, which is this code's own definition of a fault
+            // in this code. That sentence is what sent the reading of that
+            // session after the file instead of after the arithmetic.
+            : at === null
+              ? "the container's keyframe index disagrees with the file; using the file"
+              : `this began at another boundary of the same list, ${index - at} place(s) before ` +
+                "its own number — the numbering of this run is shifted, not the index")
         );
       }
     }
@@ -5382,7 +5590,9 @@ export class HlsSessionManager {
     }
     logger.info(
       `transcode ${session.id} boundary #${index} corrected ${wasAt.toFixed(3)}s → ` +
-      `${trueStart.toFixed(3)}s from the file itself`
+      `${trueStart.toFixed(3)}s from the file itself` +
+      `, and the live table is now ${describeGridDrift(this.publishedGridFor(session), boundaries)}` +
+      " from the one the player holds"
     );
     // And every OTHER member whose run begins at this very boundary is moved
     // to the same instant.
@@ -5418,9 +5628,18 @@ export class HlsSessionManager {
       // time: a seek decides by index, finds this run already begins at #index,
       // and answers "already within the running encode" — which is true about
       // the index and false about the instant, and it is why the first version
-      // of this fix moved nothing at all. The boundary now holds the corrected
-      // time, so starting the run at this index starts it at that time.
-      void this.#startEncodeRun(member, index).catch(() => {});
+      // of this fix moved nothing at all.
+      //
+      // The instant is passed EXPLICITLY. It used to be smuggled through the
+      // live boundary table — this function had just written `trueStart` into
+      // it, and the run read its position from there — which stopped working
+      // the moment a run began positioning itself on the table the player
+      // holds, as it now must. Smuggled, the restart would land exactly where
+      // it already was: picture and sound would stay apart and a healthy audio
+      // run would be discarded for nothing, which is the shape the field
+      // already showed (eleven restarts in four minutes, eight of them dying
+      // with `run had produced 0.0s`).
+      void this.#startEncodeRun(member, index, trueStart).catch(() => {});
     }
   }
 
@@ -5503,8 +5722,14 @@ export class HlsSessionManager {
    * @param {number} seconds
    * @returns {number | null}
    */
-  #boundaryIndexAt(session, seconds) {
-    const boundaries = session.segmentBoundaries;
+  #boundaryIndexAt(session, seconds, table) {
+    // The table is nameable because the two answer different questions. The
+    // LIVE one says "is this a cut this file actually has", which is what a
+    // reading taken off a produced segment is about. The PUBLISHED one says "is
+    // this a cut the player believes in", which is what a report from the player
+    // is about. Answering one with the other prints an index from one grid
+    // beside a time from the other.
+    const boundaries = Array.isArray(table) ? table : session.segmentBoundaries;
     if (!Array.isArray(boundaries)) {
       return null;
     }
@@ -7985,7 +8210,14 @@ export class HlsSessionManager {
     // causes indistinguishable: an encoder waiting for torrent pieces looks
     // exactly like one that is encoding and simply has not finished. The
     // difference is whether its position has moved at all.
-    const runStartSeconds = this.#segmentStartTime(session, session.encodeStartIndex ?? 0);
+    // Where this run began, from the run — the same reckoning
+    // `processedSeconds` is counted in. A table lookup here can disagree with
+    // it by the distance between the two grids, which is enough to print a
+    // negative "produced" and send the reader after the torrent when the
+    // encoder is the subject.
+    const runStartSeconds = Number.isFinite(session.progress?.startPositionSeconds)
+      ? session.progress.startPositionSeconds
+      : this.runStartTimeFor(session, session.encodeStartIndex ?? 0);
     const position = Number(session.progress?.processedSeconds);
     const produced = Number.isFinite(position) ? position - runStartSeconds : null;
     const speed = session.progress?.speed ?? "n/a";

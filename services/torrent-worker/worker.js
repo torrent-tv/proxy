@@ -35,12 +35,19 @@ import { Command, Event } from "./protocol.js";
 // would drag in WebTorrent — and with it the real `webrtc-polyfill` — before
 // the hook above had a chance to register. Verified the hard way: with a static
 // import the process still aborted, and the stack named the genuine polyfill.
-const { TorrentPool } = await import("../torrent-pool.js");
+const { TorrentPool, resolveDhtBootstrap } = await import("../torrent-pool.js");
 const { collectStoreStats, findSharedStore } = await import("../piece-store/shared-piece-store.js");
+
+// Resolved before the client exists, because the client builds its DHT in its
+// own constructor and the addresses have to be in hand by then. Awaiting here
+// costs the few milliseconds of a DNS answer, once, on a thread that has not
+// been asked for anything yet.
+const dhtBootstrap = await resolveDhtBootstrap();
 
 const pool = new TorrentPool({
   maxDiskBytes: workerData?.maxDiskBytes,
-  memoryBytes: workerData?.memoryBytes
+  memoryBytes: workerData?.memoryBytes,
+  dhtBootstrap
 });
 
 /** Torrents by sourceKey — the main thread names them, this thread owns them. */

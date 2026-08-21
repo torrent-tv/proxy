@@ -119,15 +119,58 @@ export function nominalKbpsForHeight(height) {
 }
 
 /**
+ * The peak this encode may reach, in kbit/s, for a nominal rate.
+ *
+ * Exported because the same figure answers a second question: whether a rung
+ * fits the viewer's measured link. The budget compares the link against what
+ * the encode is ALLOWED to peak at rather than against what it happened to
+ * produce in the last few segments, so a rung is judged by the bound we impose
+ * on it and not by a quiet stretch of the film.
+ *
+ * @param {number} nominalKbps
+ * @returns {number}
+ */
+export function maxrateKbpsFor(nominalKbps) {
+  return Math.round(nominalKbps * CAP_MAXRATE_FACTOR);
+}
+
+/**
+ * The nominal rate whose cap is a given peak — the inverse of
+ * {@link maxrateKbpsFor}.
+ *
+ * Used to turn a MEASURED limit into the figure the cap arithmetic takes. The
+ * viewer's usable link is a peak the stream must not exceed, and the encoder is
+ * configured from a nominal rate, so the two are converted through the one
+ * factor rather than through a second constant invented for the purpose.
+ *
+ * @param {number} maxrateKbps
+ * @returns {number}
+ */
+export function nominalKbpsForMaxrate(maxrateKbps) {
+  return Math.round(maxrateKbps / CAP_MAXRATE_FACTOR);
+}
+
+/**
  * `-maxrate`/`-bufsize` args for an encode height (constrained CRF).
  *
+ * `nominalKbps` overrides the height's own nominal rate. It is how a measured
+ * limit — the viewer's link, the only figure that bounds an encode from
+ * outside this host — reaches the encoder without touching the picture's SIZE.
+ * That distinction is the whole point: `-maxrate`, `-bufsize` and CRF do not
+ * appear in the SPS (x264 writes no HRD parameters by default), so they can be
+ * moved in the middle of a session while one init segment goes on describing
+ * every fragment. The size cannot.
+ *
  * @param {number} height
+ * @param {number | null} [nominalKbps=null]
  * @returns {string[]}
  */
-function bitrateCapArgs(height) {
-  const nominal = nominalKbpsForHeight(height);
+function bitrateCapArgs(height, nominalKbps = null) {
+  const nominal = Number.isFinite(nominalKbps) && nominalKbps > 0
+    ? nominalKbps
+    : nominalKbpsForHeight(height);
   return [
-    "-maxrate", `${Math.round(nominal * CAP_MAXRATE_FACTOR)}k`,
+    "-maxrate", `${maxrateKbpsFor(nominal)}k`,
     "-bufsize", `${Math.round(nominal * CAP_BUFSIZE_FACTOR)}k`
   ];
 }
@@ -221,7 +264,7 @@ export function softwareDescriptor() {
     kind: "software",
     device: null,
     inputArgs: [],
-    buildVideoArgs({ targetWidth, targetHeight, segmentDurationSec, preset, fps, tonemap, forcedKeyframeTimes }) {
+    buildVideoArgs({ targetWidth, targetHeight, segmentDurationSec, preset, fps, tonemap, forcedKeyframeTimes, nominalKbps = null }) {
       const { w, h } = safeDimensions(targetWidth, targetHeight);
       const chosenPreset = typeof preset === "string" && preset.length > 0 ? preset : SOFTWARE_PRESET;
       // Output frame rate: inherited from the source (rounded/capped) by the
@@ -249,7 +292,7 @@ export function softwareDescriptor() {
         // cannot produce segments a thin viewer link (cellular) can't
         // download in time. Sized by the TARGET box height (the rung the
         // budget/manual selection chose).
-        ...bitrateCapArgs(h),
+        ...bitrateCapArgs(h, nominalKbps),
         "-threads", String(CPU_THREADS),
         "-pix_fmt", "yuv420p",
         // Fixed GOP: a keyframe exactly every (segmentDurationSec × fps) frames,
@@ -396,7 +439,7 @@ function v4l2m2mDescriptor() {
  * @property {"software"|"vaapi"|"qsv"|"nvenc"|"v4l2m2m"} kind
  * @property {string|null} device
  * @property {string[]} inputArgs
- * @property {(opts: { targetWidth: number, targetHeight: number, segmentDurationSec: number, preset?: string, fps?: number, tonemap?: boolean, forcedKeyframeTimes?: number[] | null }) => string[]} buildVideoArgs
+ * @property {(opts: { targetWidth: number, targetHeight: number, segmentDurationSec: number, preset?: string, fps?: number, tonemap?: boolean, forcedKeyframeTimes?: number[] | null, nominalKbps?: number | null }) => string[]} buildVideoArgs
  */
 
 /**

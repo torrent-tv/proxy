@@ -245,3 +245,62 @@ export function readSelfContainedStartSeconds(piece) {
   });
   return startSeconds;
 }
+
+/**
+ * Sample entry types that describe a picture. Anything else in an `stsd` is a
+ * soundtrack or a text track, whose "size" means nothing here.
+ *
+ * @type {ReadonlySet<string>}
+ */
+const VISUAL_SAMPLE_ENTRIES = new Set(["avc1", "avc3", "hvc1", "hev1", "hvc2", "av01", "vp08", "vp09", "mp4v"]);
+
+/**
+ * The picture size an init segment describes, in pixels, or null when it
+ * describes no picture.
+ *
+ * Read from the visual sample entry rather than taken from our own record of
+ * what the encoder was told, because those two disagreeing IS the fault this
+ * exists to name: the init segment is fetched once, by `#EXT-X-MAP`, and then
+ * every fragment of the session is decoded against it. A run that encodes
+ * another size produces fragments the decoder cannot read — measured
+ * 2026-08-21, a browser went on reporting 1280x720 for three and a half
+ * minutes after the encoder had left for 960x540, over a band of macroblock
+ * garbage.
+ *
+ * The layout is ISO/IEC 14496-12 `SampleEntry` (6 reserved bytes + 2 bytes of
+ * data_reference_index) followed by `VisualSampleEntry`'s 16 bytes of
+ * pre_defined/reserved, then width and height as 16-bit integers.
+ *
+ * @param {Buffer} initSegment
+ * @returns {{ width: number, height: number } | null}
+ */
+export function readVideoSampleSize(initSegment) {
+  if (!initSegment || initSegment.length === 0) {
+    return null;
+  }
+  /** @type {{ width: number, height: number } | null} */
+  let found = null;
+  walkBoxes(initSegment, (type, bodyStart, bodyEnd) => {
+    if (type !== "stsd" || found !== null) {
+      return;
+    }
+    // Full box: version + flags, then the entry count.
+    let offset = bodyStart + 8;
+    while (offset + 8 <= bodyEnd && found === null) {
+      const size = initSegment.readUInt32BE(offset);
+      const entryType = initSegment.toString("latin1", offset + 4, offset + 8);
+      if (size < 8 || offset + size > bodyEnd) {
+        return; // malformed — say nothing rather than read out of bounds
+      }
+      if (VISUAL_SAMPLE_ENTRIES.has(entryType) && offset + 36 <= bodyEnd) {
+        const width = initSegment.readUInt16BE(offset + 32);
+        const height = initSegment.readUInt16BE(offset + 34);
+        if (width > 0 && height > 0) {
+          found = { width, height };
+        }
+      }
+      offset += size;
+    }
+  });
+  return found;
+}

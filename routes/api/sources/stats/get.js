@@ -61,6 +61,37 @@ export async function handleApiSourceStatsGet(req, reply, { sourceRegistry, torr
     stats.headerBytes != null
       ? `${stats.headerDownloadedBytes}/${stats.headerBytes}B`
       : "n/a";
+  // The swarm, said so that the question this line is asked can be answered
+  // from it. "Connected" and "known" are different numbers and their
+  // difference is the diagnosis: a tracker offering five while we are
+  // connected to none is a connectivity fault, and nobody offering anything is
+  // a supply fault. Until 2026-08-21 the line printed `peers=` beside
+  // `wires=?` — two quantities of which one looked unknown, while in truth the
+  // first WAS the connection count and the second was a field that never
+  // printed anything, because the torrent lives on another thread and the
+  // property does not exist on this side of it.
+  const known = stats.knownPeers === null || stats.knownPeers === undefined ? "?" : stats.knownPeers;
+  const queued = stats.queuedPeers === null || stats.queuedPeers === undefined ? "?" : stats.queuedPeers;
+  // The BEST answer any tracker gave, and how many answered — not the most
+  // recent one. Trackers answer separately, and a dead one replying `0` after a
+  // live one replied `500` would otherwise turn "several offered" into "nobody
+  // offered", which is the distinction this whole line exists to make.
+  const offered = stats.trackerSeeders === null || stats.trackerSeeders === undefined
+    ? (stats.trackersAnswered
+        // Answered, and none of them knew of anybody — a different state from
+        // "no tracker has replied at all", and the line must not read as the
+        // second when it means the first.
+        ? `${stats.trackersAnswered} tracker(s) answered, none reported a count`
+        : "no tracker answer yet")
+    : `${stats.trackersAnswered ?? "?"} tracker(s) offered up to ${stats.trackerSeeders} seeders ` +
+      `${stats.trackerLeechers ?? "?"} leechers`;
+  // The wait for a first peer can be the whole of a cold start — 257 s of it,
+  // measured — and it was neither counted nor shown.
+  const firstPeer = Number.isFinite(stats.secondsToFirstPeer)
+    ? ` firstPeerAfter=${stats.secondsToFirstPeer.toFixed(1)}s`
+    : Number.isFinite(stats.secondsWaitingForFirstPeer)
+      ? ` noPeerFor=${stats.secondsWaitingForFirstPeer.toFixed(1)}s`
+      : "";
   // When the answer is empty, say WHICH thing is missing. Field 2026-08-05: a
   // source reported `peers=0 file=n/a header=n/a` for minutes while that very
   // torrent was announcing to trackers with hundreds of seeders — and the line
@@ -70,12 +101,17 @@ export async function handleApiSourceStatsGet(req, reply, { sourceRegistry, torr
   // answerable from the log rather than by reasoning about it afterwards.
   const emptyAnswer = stats.fileProgress == null || (stats.numPeers === 0 && torrent.done !== true);
   const detail = emptyAnswer
-    ? ` | infoHash=${String(torrent.infoHash).slice(0, 8)} files=${torrent.files?.length ?? "?"}` +
-      ` askedFor=${fileIndex ?? "none"} resolved=${torrent.files?.[fileIndex ?? -1] ? "yes" : "no"}` +
-      ` wires=${torrent.wires?.length ?? "?"} done=${torrent.done === true}`
+    ? ` | files=${torrent.files?.length ?? "?"}` +
+      ` fileIndex=${fileIndex ?? "none"} resolved=${torrent.files?.[fileIndex ?? -1] ? "yes" : "no"}` +
+      ` done=${torrent.done === true}`
     : "";
+  // The infohash is on EVERY line, not only on the ones that look empty: it is
+  // the one identifier the pool's own lines, the worker's and this one share,
+  // and a line that carries it can be lined up with them without a guess.
   logger.info(
-    `[stats] ${sourceKey.slice(0, 8)} peers=${stats.numPeers} down=${downKbps}KB/s file=${filePct} header=${header}${detail}`
+    `[stats] ${sourceKey.slice(0, 8)} ${String(torrent.infoHash).slice(0, 8)} ` +
+    `peers=${stats.connectedPeers ?? stats.numPeers} connected of ${known} known (${queued} queued, ${offered})` +
+    `${firstPeer} down=${downKbps}KB/s file=${filePct} header=${header}${detail}`
   );
 
   return reply.send(stats);

@@ -135,6 +135,100 @@ const STALL_REPORT_AFTER_MS = 10_000;
 const STALL_REPORT_INTERVAL_MS = 30_000;
 
 /**
+ * How far this torrent has got towards HAVING a swarm: connected, known, and
+ * waiting to be tried.
+ *
+ * The question a stalled download is asked is "were we offered anybody", and
+ * until 2026-08-21 nothing could answer it. The line printed `peers=` beside
+ * `wires=?`, which read as two quantities of which one was unknown — while in
+ * fact WebTorrent's `numPeers` IS `wires.length` (`lib/torrent.js`, both 2.8.5
+ * and 3.0.21), so the first was the connection count and the second was a
+ * field that has never printed anything. What was missing is the other side:
+ * how many peer addresses the client HOLDS but is not connected to. A tracker
+ * answering `seeders=5` while `connected=0, known=0` is a different fault from
+ * `connected=0, known=5`, and only the second is about connecting.
+ *
+ * `_peersLength` and `_numQueued` are WebTorrent internals, not its published
+ * interface — a cached counter and a getter in 2.8.5, both getters in 3.0.21,
+ * read the same way in each. Read defensively on purpose: if a later version
+ * drops them the field says nothing rather than breaking a poll the browser
+ * makes every two seconds.
+ *
+ * @param {import("webtorrent").Torrent} torrent
+ * @returns {{ connectedPeers: number, knownPeers: number | null, queuedPeers: number | null }}
+ */
+export function describeSwarmReach(torrent) {
+  const wires = Array.isArray(torrent?.wires) ? torrent.wires.length : 0;
+  const read = (value) => (typeof value === "number" && Number.isFinite(value) ? value : null);
+  let knownPeers = null;
+  let queuedPeers = null;
+  try {
+    knownPeers = read(torrent?._peersLength);
+    queuedPeers = read(torrent?._numQueued);
+  } catch {
+    // silent-ok: these are internals behind getters that can throw on a
+    // destroyed torrent, and the reading is a diagnostic. Nothing here is
+    // worth failing a stats poll for.
+  }
+  return { connectedPeers: wires, knownPeers, queuedPeers };
+}
+
+/**
+ * How long a torrent waited for its first connected peer.
+ *
+ * The whole of a cold start can be this one number and nothing else: measured
+ * 2026-08-21, a tracker answered `seeders=5` at 13:40:30 and the first wire
+ * arrived at 13:44:47 — 257 s during which the stats line repeated, unchanged,
+ * every two seconds. Once the peer connected the file's edges arrived at
+ * 6.8 MB/s and the plan finished in three seconds. It was never measured,
+ * never named, and the viewer saw it as an unexplained wait.
+ *
+ * @param {number} addedAtMs
+ * @param {number} firstPeerAtMs
+ * @returns {number | null} Seconds, or null while there is still no peer or
+ *   the two moments cannot be compared.
+ */
+export function secondsToFirstPeer(addedAtMs, firstPeerAtMs) {
+  if (!Number.isFinite(addedAtMs) || !Number.isFinite(firstPeerAtMs)) {
+    return null;
+  }
+  const seconds = (firstPeerAtMs - addedAtMs) / 1000;
+  return seconds >= 0 ? Number(seconds.toFixed(3)) : null;
+}
+
+/**
+ * The best answer any tracker has given, out of the answers they have given.
+ *
+ * A torrent announces to every tracker it lists and each answers separately,
+ * so keeping "the last one" makes the reading depend on which tracker replied
+ * most recently. A live tracker saying `complete=500` followed two seconds
+ * later by a dead one saying `complete=0` would print "nobody offered" — and
+ * telling that from "several offered and we reached none" is the entire reason
+ * this figure is carried. The best answer is the honest one: a swarm has as
+ * many seeders as the most informed tracker knows about.
+ *
+ * @param {Iterable<{ seeders: number | null, leechers: number | null }>} answers
+ * @returns {{ seeders: number | null, leechers: number | null, trackers: number }}
+ */
+export function bestAnnounce(answers) {
+  let seeders = null;
+  let leechers = null;
+  let trackers = 0;
+  for (const answer of answers ?? []) {
+    trackers += 1;
+    if (typeof answer?.seeders === "number" && (seeders === null || answer.seeders > seeders)) {
+      seeders = answer.seeders;
+      // Taken from the SAME answer, including when that answer gave no leecher
+      // count. Carrying the previous tracker's figure forward would pair one
+      // tracker's seeders with another's leechers and present the pair as one
+      // reading.
+      leechers = typeof answer.leechers === "number" ? answer.leechers : null;
+    }
+  }
+  return { seeders, leechers, trackers };
+}
+
+/**
  * What the swarm has been asked for, and what it is doing about it.
  *
  * Answers the question a stalled download cannot answer for itself: were the
@@ -656,6 +750,26 @@ export class TorrentPool {
   #dhtReportTimer = null;
 
   /**
+   * The last announce answer per torrent — what the TRACKER says the swarm
+   * holds, as opposed to what we have managed to connect to. Kept because the
+   * two disagreeing is the whole diagnosis: five seeders offered and none
+   * connected is a connectivity fault, and nobody offered is a supply fault.
+   *
+   * Kept PER TRACKER, because each answers for itself and the most recent
+   * answer is not the most informed one.
+   *
+   * @type {WeakMap<import("webtorrent").Torrent, Map<string, { seeders: number | null, leechers: number | null, at: number }>>}
+   */
+  #lastAnnounceByTorrent = new WeakMap();
+
+  /**
+   * When each torrent was added, and when its first peer connected.
+   *
+   * @type {WeakMap<import("webtorrent").Torrent, { addedAt: number, firstPeerAt: number | null }>}
+   */
+  #swarmTimingByTorrent = new WeakMap();
+
+  /**
    * @param {{ maxDiskBytes?: number }} [options]
    *   `maxDiskBytes` caps total downloaded torrent data; when omitted a
    *   default is computed from free disk (min(10 GB, half free)). Pass 0 to
@@ -775,7 +889,10 @@ export class TorrentPool {
     }
     torrent.hurryUntil = until;
     logger.info(
-      `torrent-pool: [${String(torrent.infoHash).slice(0, 8)}] uploading generously for ` +
+      // `?? "?"` because one caller is the moment of adding, and `client.add`
+      // returns before the torrent id has been parsed — without it the line
+      // printed the first eight characters of the word "undefined".
+      `torrent-pool: [${String(torrent.infoHash ?? "?").slice(0, 8)}] uploading generously for ` +
         `${Math.round(UPLOAD_HURRY_MS / 1000)}s — ${why}`
     );
     this.#adjustUploadLimit();
@@ -1083,24 +1200,102 @@ export class TorrentPool {
    * warnings (tracker rejections/errors surface here). Without these a
    * zero-peer torrent gives no clue WHY it has no peers.
    *
-   * @param {string} label - Short source label for log lines.
    * @param {import("webtorrent").Torrent} torrent
    * @returns {void}
    */
-  #attachSwarmDiagnostics(label, torrent) {
+  #attachSwarmDiagnostics(torrent) {
+    // Attached ONCE per torrent. WebTorrent answers a duplicate add by handing
+    // back the torrent it already has, and this used to run again on it: a
+    // torrent with twelve connections and a first peer five minutes old had its
+    // timing record reset, so it began reporting "no peer yet" and the next
+    // connection printed "first peer connected after 0.3s" — a false statement
+    // about a swarm that had been healthy for minutes. The same film opened
+    // once as a .torrent and once as a magnet is exactly that case, and the
+    // roadmap already records it happening.
+    if (this.#swarmTimingByTorrent.has(torrent)) {
+      return;
+    }
     // A torrent nobody has asked for yet does not exist: this is called the
     // moment one is added, which is the moment a viewer started waiting.
     this.#markHurry(torrent, "just added");
-    const trackerCount = Array.isArray(torrent.announce) ? torrent.announce.length : 0;
-    logger.info(
-      `torrent-pool: [${label}] added: files=${torrent.files?.length ?? 0} ` +
-        `private=${torrent.private ? "yes" : "no"} trackers=${trackerCount}`
-    );
+    // ONE name for a torrent, and it is the infohash. These lines used to be
+    // labelled with the first eight characters of a sha1 of the SOURCE BYTES,
+    // while the neighbouring lines used the infohash and the stats line used
+    // the registry's own key — three different hashes of one film, in the same
+    // second, none of them matching. Correlating a swarm across three lines
+    // cost a guess every time. The infohash is the one identifier every side
+    // of this system already shares.
+    //
+    // Read at the moment of PRINTING, not now. `client.add` returns before the
+    // torrent id has been parsed — measured against the vendored 2.8.5, both a
+    // magnet and a .torrent buffer have `infoHash === undefined` on the line
+    // after `add` returns — so a label captured here would be the string "?"
+    // for the whole life of the torrent, which is the same fault as three
+    // different hashes with the hash removed.
+    const label = () => String(torrent.infoHash ?? "?").slice(0, 8);
+    const addedAt = Date.now();
+    this.#swarmTimingByTorrent.set(torrent, { addedAt, firstPeerAt: null });
 
-    torrent.on("warning", (warning) => {
-      logger.warn(`torrent-pool: [${label}] warning: ${formatWarning(warning)}`);
+    // The first connected peer, said once, because the wait for it can BE the
+    // whole cold start and nothing else measures it.
+    torrent.on("wire", () => {
+      const timing = this.#swarmTimingByTorrent.get(torrent);
+      if (!timing || timing.firstPeerAt !== null) {
+        return;
+      }
+      timing.firstPeerAt = Date.now();
+      const waited = secondsToFirstPeer(timing.addedAt, timing.firstPeerAt);
+      const byTracker = this.#lastAnnounceByTorrent.get(torrent);
+      const offered = bestAnnounce(byTracker ? byTracker.values() : []);
+      logger.info(
+        `torrent-pool: [${label()}] first peer connected after ${waited === null ? "?" : waited.toFixed(1)}s` +
+          (offered.trackers > 0
+            ? ` (${offered.trackers} tracker(s) had answered, best seeders=${offered.seeders ?? "?"} ` +
+              `leechers=${offered.leechers ?? "?"})`
+            : " (no tracker answer had arrived)")
+      );
     });
 
+    torrent.on("warning", (warning) => {
+      logger.warn(`torrent-pool: [${label()}] warning: ${formatWarning(warning)}`);
+    });
+
+    // Everything below needs the torrent to have been PARSED, and `add` returns
+    // before that: `announce`, `files` and `private` are all still empty, and
+    // `discovery` — which owns the tracker client — is not created until
+    // `_startDiscovery`, which runs immediately before `ready` is emitted.
+    // Attaching the tracker listener at add-time therefore attaches it to
+    // nothing at all, and every announce answer is lost. The two listeners
+    // above stay where they are, because `wire` and `warning` live on the
+    // torrent from construction and both fire before `ready`: the peer that
+    // DELIVERS a magnet's metadata connects first, and `wire` is emitted on
+    // connection and never replayed.
+    const describeOnce = () => {
+      const trackerCount = Array.isArray(torrent.announce) ? torrent.announce.length : 0;
+      logger.info(
+        `torrent-pool: [${label()}] added: files=${torrent.files?.length ?? 0} ` +
+          `private=${torrent.private ? "yes" : "no"} trackers=${trackerCount}`
+      );
+      this.#attachTrackerDiagnostics(torrent, label);
+    };
+    if (torrent.ready === true) {
+      describeOnce();
+    } else {
+      torrent.once("ready", describeOnce);
+    }
+  }
+
+  /**
+   * Watch what the trackers answer.
+   *
+   * Separated from the rest because it can only be done once the torrent has
+   * been parsed — see the reasoning at the call site.
+   *
+   * @param {import("webtorrent").Torrent} torrent
+   * @param {() => string} label
+   * @returns {void}
+   */
+  #attachTrackerDiagnostics(torrent, label) {
     // bittorrent-tracker's Client emits "update" with each announce response.
     // `complete`/`incomplete` are the tracker's seeder/leecher counts — the
     // authoritative answer to "does the tracker accept us and does the swarm
@@ -1112,13 +1307,25 @@ export class TorrentPool {
         // strip the query string before logging.
         const announceUrl =
           typeof data?.announce === "string" ? data.announce.replace(/\?.*$/, "") : "?";
+        const seeders = typeof data?.complete === "number" ? data.complete : null;
+        const leechers = typeof data?.incomplete === "number" ? data.incomplete : null;
+        // Kept, not only printed: what the tracker says the swarm holds is one
+        // half of every later question about why nothing is arriving, and a
+        // number that exists only in a log line cannot be put beside the other
+        // half two minutes later.
+        let byTracker = this.#lastAnnounceByTorrent.get(torrent);
+        if (!byTracker) {
+          byTracker = new Map();
+          this.#lastAnnounceByTorrent.set(torrent, byTracker);
+        }
+        byTracker.set(announceUrl, { seeders, leechers, at: Date.now() });
         logger.info(
-          `torrent-pool: [${label}] announce ${announceUrl}: ` +
-            `seeders=${data?.complete ?? "?"} leechers=${data?.incomplete ?? "?"}`
+          `torrent-pool: [${label()}] announce ${announceUrl}: ` +
+            `seeders=${seeders ?? "?"} leechers=${leechers ?? "?"}`
         );
       });
     } else {
-      logger.info(`torrent-pool: [${label}] tracker client not exposed; announce results not logged`);
+      logger.info(`torrent-pool: [${label()}] tracker client not exposed; announce results not logged`);
     }
   }
 
@@ -1219,17 +1426,18 @@ export class TorrentPool {
               this.#lastAccess.delete(existing);
               this.#readPositionByTorrent.delete(existing);
               this.client.remove(existing, { destroyStore: true }, () => {
-                this.client.add(torrentId, {
+                const addedReplacement = this.client.add(torrentId, {
                   store: SharedPieceStore,
                   storeCacheSlots: 0,
                   storeOpts: { memoryBytes: this.#memoryBytes }
                 }, (replacement) => {
                   this.torrents.set(key, replacement);
                   this.#lastAccess.set(replacement, Date.now());
-                  this.#attachSwarmDiagnostics(dupMatch[1].slice(0, 8), replacement);
                   this.#pending.delete(key);
+                  this.#attachSwarmDiagnostics(replacement);
                   resolve(replacement);
                 });
+                this.#attachSwarmDiagnostics(addedReplacement);
               });
               return;
             }
@@ -1250,7 +1458,7 @@ export class TorrentPool {
       // piece across threads detached memory still in use. Ours owns what it
       // hands out, holds pieces in shared memory the main thread can read
       // directly, and spills to disk instead of losing them.
-      this.client.add(torrentId, {
+      const added = this.client.add(torrentId, {
         store: SharedPieceStore,
         storeCacheSlots: 0,
         storeOpts: { memoryBytes: this.#memoryBytes }
@@ -1259,11 +1467,23 @@ export class TorrentPool {
         this.torrents.set(key, readyTorrent);
         this.#lastAccess.set(readyTorrent, Date.now());
         this.#pending.delete(key);
-        // Key layout is `${sourceType}:${sha1}`; log with the sha1 prefix so
-        // lines correlate with the [stats] source key.
-        this.#attachSwarmDiagnostics(key.split(":")[1]?.slice(0, 8) ?? key, readyTorrent);
+        // The torrent this call ends up with is not always the one it added:
+        // on a duplicate infohash WebTorrent destroys the new one and hands
+        // back the one it already had. Watching only what `add` returned would
+        // leave the survivor unwatched. Attaching twice costs nothing — the
+        // guard makes the second call a no-op when it is the same object.
+        this.#attachSwarmDiagnostics(readyTorrent);
         resolve(readyTorrent);
       });
+      // Attached to what `add` returns, NOT inside its callback. That callback
+      // is `torrent.once("ready")`, and for a magnet everything this watches
+      // has already happened by then: peer discovery starts before the metadata
+      // arrives, so the tracker's answers land before any listener exists, and
+      // the peer that DELIVERED the metadata connected before `ready` fired —
+      // `wire` is emitted at the moment of connection and never replayed. The
+      // torrent that waited minutes for its first peer would have been the one
+      // case this could not measure.
+      this.#attachSwarmDiagnostics(added);
     });
 
     this.#pending.set(key, promise);
@@ -1439,7 +1659,15 @@ export class TorrentPool {
    *   uploadSpeed: number,
    *   fileProgress: number | null,
    *   fileDownloaded: number | null,
-   *   fileLength: number | null
+   *   fileLength: number | null,
+   *   connectedPeers: number,
+   *   knownPeers: number | null,
+   *   queuedPeers: number | null,
+   *   trackerSeeders: number | null,
+   *   trackerLeechers: number | null,
+   *   trackersAnswered: number,
+   *   secondsToFirstPeer: number | null,
+   *   secondsWaitingForFirstPeer: number | null
    * }}
    */
   getFileStats(torrent, fileIndex = null, options = {}) {
@@ -1447,7 +1675,34 @@ export class TorrentPool {
     const downloadSpeed = typeof torrent?.downloadSpeed === "number" ? torrent.downloadSpeed : 0;
     const uploadSpeed = typeof torrent?.uploadSpeed === "number" ? torrent.uploadSpeed : 0;
 
-    const base = { numPeers, downloadSpeed, uploadSpeed };
+    // Everything the caller needs to tell "nobody was offered" from "several
+    // were offered and we connected to none". All of it is read HERE, on the
+    // thread that owns the torrent: the handle the routes hold is a proxy
+    // across a worker boundary, where `torrent.wires` simply does not exist —
+    // which is why the line that tried to print it printed a question mark in
+    // every line it has ever written.
+    const reach = describeSwarmReach(torrent);
+    const byTracker = this.#lastAnnounceByTorrent.get(torrent);
+    const announce = bestAnnounce(byTracker ? byTracker.values() : []);
+    const timing = this.#swarmTimingByTorrent.get(torrent) ?? null;
+
+    const base = {
+      numPeers,
+      downloadSpeed,
+      uploadSpeed,
+      connectedPeers: reach.connectedPeers,
+      knownPeers: reach.knownPeers,
+      queuedPeers: reach.queuedPeers,
+      trackerSeeders: announce.seeders,
+      trackerLeechers: announce.leechers,
+      trackersAnswered: announce.trackers,
+      secondsToFirstPeer: timing ? secondsToFirstPeer(timing.addedAt, timing.firstPeerAt) : null,
+      // How long this torrent has been waiting, when it is still waiting. The
+      // figure above answers "how long did it take"; this one answers "how long
+      // has it been", which is the question during the wait itself.
+      secondsWaitingForFirstPeer:
+        timing && timing.firstPeerAt === null ? secondsToFirstPeer(timing.addedAt, Date.now()) : null
+    };
 
     if (fileIndex === null || !Number.isInteger(fileIndex) || !Array.isArray(torrent?.files)) {
       return { ...base, fileProgress: null, fileDownloaded: null, fileLength: null };

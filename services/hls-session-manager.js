@@ -1183,6 +1183,49 @@ export function segmentCutTimesFrom(boundaries, startIndex) {
 }
 
 /**
+ * Where the viewer is, from the three things that can say so.
+ *
+ * In order, because each is a better answer than the next and each may be
+ * absent:
+ *
+ * 1. a position they seeked to — they said it themselves;
+ * 2. the start of the last segment this session actually served — where the
+ *    reading is;
+ * 3. **the position the file was OPENED at.**
+ *
+ * The third used to be missing, and its absence made the answer zero at exactly
+ * the moment it is asked. Both of the others are written by things that have
+ * not happened yet when a file is opened at a position — the first by a seek,
+ * the second by a segment served — so a session created to begin at 3130 s
+ * answered "the viewer is at the beginning". That is not a cautious default; it
+ * is a wrong answer, and the soundtrack acts on it.
+ *
+ * Field 2026-08-21, `Minions.and.Monsters.1080p.mkv` reopened from the address
+ * bar at 52:07: the picture session was created at `start=3130s` and ran from
+ * segment #781; half a second later the audio rendition was created from this
+ * reading — `start=0s`, no `-ss` at all — and set about re-encoding the film
+ * from the beginning. The player asked both for #782. The picture had it. The
+ * sound reached 57.5 s of 3130 in the 45 s the request lasted, then answered
+ * 404, which the viewer was shown as "the proxy accepted the request but sent
+ * no video".
+ *
+ * @param {{ seeked?: number, lastRequestedStart?: number | null, openedAt?: number }} readings
+ * @returns {number} Seconds, never negative.
+ */
+export function resolveViewerPosition({ seeked, lastRequestedStart, openedAt }) {
+  if (Number.isFinite(seeked) && seeked > 0) {
+    return seeked;
+  }
+  if (Number.isFinite(lastRequestedStart) && lastRequestedStart > 0) {
+    return lastRequestedStart;
+  }
+  if (Number.isFinite(openedAt) && openedAt > 0) {
+    return openedAt;
+  }
+  return 0;
+}
+
+/**
  * How far the live boundary table has moved from the one the player holds, said
  * in words.
  *
@@ -6927,13 +6970,14 @@ export class HlsSessionManager {
   }
 
   #viewerPositionOf(session) {
-    if (Number.isFinite(session.viewerPositionSeconds) && session.viewerPositionSeconds > 0) {
-      return session.viewerPositionSeconds;
-    }
-    if (Number.isInteger(session.lastRequestedSegment) && session.lastRequestedSegment > 0) {
-      return this.#segmentStartTime(session, session.lastRequestedSegment);
-    }
-    return 0;
+    const lastRequestedStart = Number.isInteger(session.lastRequestedSegment) && session.lastRequestedSegment > 0
+      ? this.#segmentStartTime(session, session.lastRequestedSegment)
+      : null;
+    return resolveViewerPosition({
+      seeked: session.viewerPositionSeconds,
+      lastRequestedStart,
+      openedAt: session.progress?.startPositionSeconds
+    });
   }
 
   /**

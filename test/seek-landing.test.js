@@ -48,3 +48,29 @@ test("no keyframe list is still answered", () => {
   assert.equal(seekLandingOffsetFor({ transcodeVideo: false }, 5), OFFSET);
   assert.equal(seekLandingOffsetFor(null, 5), OFFSET);
 });
+
+test("a grid whose times are approximate is asked for that much later again", () => {
+  // AVI names a keyframe by its frame NUMBER and the time is that number times
+  // the frame duration, so a name can sit just BELOW the keyframe it refers to
+  // — measured 2026-08-21, 10-44 ms out on two files, always under one frame.
+  // Asking at the name alone would seek to before the real keyframe and land on
+  // the one before that, which is the fault this offset exists for.
+  const session = {
+    transcodeVideo: false,
+    keyframeTolerance: 0.04,
+    keyframeTimes: [0, 4.004, 8.008, 12.012]
+  };
+  assert.equal(seekLandingOffsetFor(session, 4.004), OFFSET + 0.04);
+});
+
+test("an exact grid claims no tolerance", () => {
+  // Matroska and MP4 state instants outright — measured the same day, nine
+  // files and 11 665 keyframes with not one disagreement.
+  const session = { transcodeVideo: false, keyframeTolerance: 0, keyframeTimes: [0, 4.004, 8.008] };
+  assert.equal(seekLandingOffsetFor(session, 4.004), OFFSET);
+});
+
+test("the bound still holds once a tolerance is added", () => {
+  const session = { transcodeVideo: false, keyframeTolerance: 1, keyframeTimes: [0, 0.1, 0.2] };
+  assert.equal(seekLandingOffsetFor(session, 0.1), 0.05);
+});

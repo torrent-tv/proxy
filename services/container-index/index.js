@@ -62,7 +62,7 @@ const READERS = [
  * @param {ReadRange} params.readRange
  * @param {number} params.fileSize
  * @param {string} [params.label] - For logging only.
- * @returns {Promise<{ times: number[] | null, format: string }>} Ascending
+ * @returns {Promise<{ times: number[] | null, format: string, tolerance: number }>} Ascending
  *   seconds, or null times when this file has no readable index — the caller
  *   must then not claim to know the grid. The format is which reader matched,
  *   reported whether or not it produced anything: how often an index disagrees
@@ -71,27 +71,39 @@ const READERS = [
  */
 export async function readKeyframeIndex({ readRange, fileSize, label = "" }) {
   if (typeof readRange !== "function" || !Number.isFinite(fileSize) || fileSize <= 0) {
-    return { times: null, format: "unknown" };
+    return { times: null, format: "unknown", tolerance: 0 };
   }
 
   const startedAt = Date.now();
   let times = null;
   let format = "unrecognised";
+  // How far a time in `times` may be from the instant it names. Zero wherever
+  // the container states instants outright, which Matroska and MP4 both do.
+  let tolerance = 0;
   try {
     const sniff = await readRange(0, Math.min(SNIFF_BYTES - 1, fileSize - 1));
     if (!sniff) {
-      return { times: null, format: "unread" };
+      return { times: null, format: "unread", tolerance: 0 };
     }
     const reader = READERS.find((candidate) => candidate.matches(sniff));
     if (reader) {
       format = reader.name;
-      times = await reader.read(readRange, fileSize);
+      const read = await reader.read(readRange, fileSize);
+      // A reader may answer with the times alone, or with how far those times
+      // may sit from the instants they name — which only AVI has to say,
+      // because only AVI computes them from frame numbers.
+      if (Array.isArray(read)) {
+        times = read;
+      } else if (read && Array.isArray(read.times)) {
+        times = read.times;
+        tolerance = Number.isFinite(read.tolerance) ? read.tolerance : 0;
+      }
     }
   } catch (error) {
     // A malformed or partially-downloaded index must never take playback down —
     // it only means the grid is unknown, which the caller already handles.
     logger.warn(`container-index: failed to read index for "${label}": ${error?.message ?? error}`);
-    return { times: null, format };
+    return { times: null, format, tolerance: 0 };
   }
 
   const elapsedMs = Date.now() - startedAt;
@@ -102,5 +114,5 @@ export async function readKeyframeIndex({ readRange, fileSize, label = "" }) {
   } else {
     logger.info(`container-index: no usable index for "${label}" (${format}, ${elapsedMs}ms)`);
   }
-  return { times, format };
+  return { times, format, tolerance };
 }

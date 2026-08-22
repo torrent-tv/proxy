@@ -324,7 +324,11 @@ export function createDataChannelHandler({ proxyPort, onLog, getTransportSnapsho
       set = new Set();
       subtitleSubscribers.set(key, set);
     }
+    const isNew = !set.has(channel);
     set.add(channel);
+    if (isNew) {
+      log(`[dc] subtitle push: channel subscribed to ${key} (${set.size} channel(s) now)`);
+    }
   }
 
   /** @param {DataChannel} channel */
@@ -346,18 +350,29 @@ export function createDataChannelHandler({ proxyPort, onLog, getTransportSnapsho
   function publishSubtitleCues({ sourceKey, fileIndex, trackIndex, cues, language }) {
     const set = subtitleSubscribers.get(`${sourceKey}:${fileIndex}`);
     if (!set || set.size === 0) {
+      log(
+        `[dc] subtitle push: ${cues.length} cue(s) for ${sourceKey.slice(0, 8)}:${fileIndex} track ${trackIndex} ` +
+        "found no subscribed channel"
+      );
       return;
     }
     const message = { type: "subtitle-cues", fileIndex, trackIndex, cues, language };
+    const total = set.size;
+    let sent = 0;
     for (const channel of set) {
       try {
         channel.sendMessage(JSON.stringify(message));
+        sent += 1;
       } catch {
         // Closed between the subscription and this send; onClosed will not
         // fire for a channel that is already gone, so drop it here too.
         set.delete(channel);
       }
     }
+    log(
+      `[dc] subtitle push: sent ${cues.length} cue(s) for ${sourceKey.slice(0, 8)}:${fileIndex} track ${trackIndex} ` +
+      `to ${sent}/${total} channel(s)`
+    );
   }
 
   /** Request id → its ASCII bytes; see {@link requestIdBytes}. */

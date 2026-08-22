@@ -1,6 +1,7 @@
 ## 2.56.0
 
 - **Fix**: A source is now keyed by its own infohash, not by a hash of the request bytes. A magnet URI and a `.torrent` file for the same content are different bytes, so the old key (`sha1` of the source) named the same film as two unrelated sources — measured 2026-08-19, `a518ff46…` and `7ab2fb5d…` for one infohash `11f09299…` — sharing neither the swarm, nor a cache, nor any work already downloaded, and surfacing as `WebTorrent client error: Cannot add duplicate torrent`. The new key (`services/torrent-source-key.js`) reads the infohash straight out of the magnet's `btih` or the `.torrent`'s own `info` dictionary via `parse-torrent`, synchronously, with no network round trip — so both forms of the same torrent now share one entry from the first request, on both the pool's own map (`torrent-pool.js`) and the worker-thread boundary (`torrent-worker/pool-adapter.js`), instead of relying on WebTorrent's own duplicate-add error to reconcile them after the fact.
+- **Chore**: The decode-cost reading now logs how many MB/s the pipe was actually fed against how many MB/s the measured speed implies were needed (item 4(d2)) — a divergence between the two is worth a second look before trusting the reading. A `write()`-return-value signal was tried first, to say outright whether the pipe or the decoder was the limit, and measured false on every reading taken while building it — including clips this host decodes at 15-80x with slack to spare — so it does not discriminate and was not shipped; only the byte count, which is real, is kept.
 
 ## 2.55.0
 

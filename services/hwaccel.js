@@ -865,7 +865,7 @@ export async function benchmarkContention({ ffmpegBin, logger, clipsDir = CALIBR
     log.warn("hwaccel: contention could not be measured; costs will be added as though jobs were independent");
     return null;
   }
-  const alone = await decodePipedStream(ffmpegBin, stream);
+  const alone = await decodePipedStream(ffmpegBin, stream, log);
   if (!alone?.speed) {
     log.warn("hwaccel: contention could not be measured; costs will be added as though jobs were independent");
     return null;
@@ -892,7 +892,7 @@ export async function benchmarkContention({ ffmpegBin, logger, clipsDir = CALIBR
       await new Promise((resolve) => {
         setTimeout(resolve, 2_000);
       });
-      const withCompany = await decodePipedStream(ffmpegBin, stream);
+      const withCompany = await decodePipedStream(ffmpegBin, stream, log);
       if (withCompany?.speed) {
         beside.push({ others, speed: withCompany.speed });
       }
@@ -985,7 +985,7 @@ async function fitOneFamily({ ffmpegBin, log, clipsDir, family, clips }) {
   }
   for (const [index, clip] of clips.entries()) {
     const stream = streams[index];
-    const measured = stream ? await decodePipedStream(ffmpegBin, stream) : null;
+    const measured = stream ? await decodePipedStream(ffmpegBin, stream, log) : null;
     if (!measured?.speed) {
       log.warn(
         `hwaccel: decode benchmark "${clip}" said nothing; ${family} not measured` +
@@ -1276,7 +1276,7 @@ export async function measureDecodeSlope(ffmpegBin, clipPath, family = "h264") {
  * @param {{ bytes: Buffer, demuxer: string, megapixelsPerSecond: number, megabitsPerSecond: number, fps: number }} stream
  * @returns {Promise<{ speed: number, windowSec: number, megapixelsPerSecond: number, megabitsPerSecond: number } | null>}
  */
-function decodePipedStream(ffmpegBin, stream) {
+function decodePipedStream(ffmpegBin, stream, log = { info: () => {}, warn: () => {} }) {
   return new Promise((resolve) => {
     const args = [
       "-hide_banner", "-loglevel", "error", "-nostats",
@@ -1298,6 +1298,18 @@ function decodePipedStream(ffmpegBin, stream) {
     let settled = false;
     let child;
     const startedAt = Date.now();
+    // Whether the FEED, not the decoder, could be what this reading measures
+    // (item 4(d2)). `child.stdin.write()` returning false was tried as the
+    // signal — never once true would mean this process was never ahead of the
+    // pipe — and measured false on every reading taken while writing this,
+    // including clips this same host decodes at 15-80x with room to spare, so
+    // it does not discriminate: `write()`'s return value tracks Node's own
+    // internal watermark against the size of what was just handed to it, not
+    // real drain state, and answered "no slack" identically whether the pipe
+    // or the decoder was the true limit. Rather than publish a verdict that
+    // reads the same in both cases, only the byte count is kept, for the
+    // MB/s figure below — a number to read, not a boolean to trust.
+    let bytesWritten = 0;
     const finish = () => {
       if (settled) {
         return;
@@ -1329,11 +1341,25 @@ function decodePipedStream(ffmpegBin, stream) {
         resolve({ error: lastErrorLine(stderr) || `the window was ${windowSec.toFixed(2)}s of ${producedSec.toFixed(2)}s produced` });
         return;
       }
+      const speed = producedSec / windowSec;
+      // Diagnostic only — logged, not acted on. The required rate is what
+      // THIS reading implies was needed to keep the decoder fed; the achieved
+      // rate is what this process actually pushed over its whole run (a wider
+      // span than `windowSec`, since the feed starts before the first kept
+      // sample — a looser figure is enough for a sanity comparison).
+      const elapsedSec = (Date.now() - startedAt) / 1000;
+      const achievedMBps = elapsedSec > 0 ? bytesWritten / elapsedSec / 1e6 : 0;
+      const requiredMBps = ((stream.megabitsPerSecond * 1e6) / 8) * speed / 1e6;
+      log.info(
+        `hwaccel: decode pipe fed ${achievedMBps.toFixed(1)} MB/s, ${requiredMBps.toFixed(1)} MB/s ` +
+        `needed for ${speed.toFixed(2)}x — a reading where these are far apart is worth a second look`
+      );
       resolve({
-        speed: producedSec / windowSec,
+        speed,
         windowSec,
         megapixelsPerSecond: stream.megapixelsPerSecond,
-        megabitsPerSecond: stream.megabitsPerSecond
+        megabitsPerSecond: stream.megabitsPerSecond,
+        pipeThroughputMBps: achievedMBps
       });
     };
     const timer = setTimeout(finish, DECODE_WINDOW_MAX_MS);
@@ -1351,8 +1377,13 @@ function decodePipedStream(ffmpegBin, stream) {
     // Keep the decoder fed. `write` returning false means the pipe is full, and
     // the next copy goes on the `drain` — so the decoder is never starved and
     // this process never buffers more than the pipe holds.
+    const writeOnce = () => {
+      const accepted = child.stdin.write(stream.bytes);
+      bytesWritten += stream.bytes.length;
+      return accepted;
+    };
     const feed = () => {
-      while (!settled && child.stdin.writable && child.stdin.write(stream.bytes)) {
+      while (!settled && child.stdin.writable && writeOnce()) {
         // Written straight through; go round again.
       }
     };

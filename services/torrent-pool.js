@@ -2,11 +2,12 @@
  * @file WebTorrent client pool.
  *
  * Manages a shared WebTorrent client instance and a map of active torrents
- * keyed by a hash of their source. Tracks file-level usage so that only
- * the pieces needed by active streams are selected for download.
+ * keyed by their own infohash (see `torrent-source-key.js`), so a magnet and
+ * a `.torrent` file for the same content share one entry. Tracks file-level
+ * usage so that only the pieces needed by active streams are selected for
+ * download.
  */
 
-import crypto from "node:crypto";
 import dns from "node:dns/promises";
 import os from "node:os";
 import path from "node:path";
@@ -14,6 +15,7 @@ import { rmSync, statfsSync } from "node:fs";
 import WebTorrent from "webtorrent";
 import { logger } from "../utils/logger.js";
 import { SharedPieceStore, findSharedStore } from "./piece-store/shared-piece-store.js";
+import { deriveSourceKey } from "./torrent-source-key.js";
 
 // The DHT's entry points. Two of the three the library ships answer nothing —
 // measured 2026-08-21 from the addon host: `router.bittorrent.com` and
@@ -1338,7 +1340,9 @@ export class TorrentPool {
    * @returns {Promise<import("webtorrent").Torrent>}
    */
   async getTorrent(sourceType, source) {
-    const key = `${sourceType}:${crypto.createHash("sha1").update(source).digest("hex")}`;
+    // Keyed by the torrent's own infohash, not the source bytes — a magnet
+    // and a `.torrent` file for the same content must name the same swarm.
+    const key = await deriveSourceKey(sourceType, source);
 
     // Already resolved — return immediately.
     const existing = this.torrents.get(key);

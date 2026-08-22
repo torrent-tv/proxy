@@ -71,3 +71,13 @@ test("the clip's own characteristics come back with the reading", async () => {
   assert.ok(measured.megabitsPerSecond > 5 && measured.megabitsPerSecond < 15);
   assert.ok(measured.windowSec >= 0.5, "the slope is taken over a window wide enough to divide by");
 });
+
+test("a reading carries what the pipe was actually fed, for item 4(d2)'s sanity check", async () => {
+  const measured = await measureDecodeSlope(ffmpegStatic, clip("cal-h264-480-lo.mp4"));
+
+  assert.ok(measured);
+  assert.ok(
+    measured.pipeThroughputMBps > 0,
+    "the write path pushed a nonzero amount of the clip through, or nothing was measured at all"
+  );
+});

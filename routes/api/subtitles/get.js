@@ -27,6 +27,7 @@
 import { spawn } from "node:child_process";
 import { convertSubtitleToVtt, decodeSubtitleBytes } from "../../../services/subtitle-convert.js";
 import { detectLanguage } from "../../../services/language-detect.js";
+import { finalizeCues } from "../../../services/torrent-worker/subtitle-cues.js";
 import { logger } from "../../../utils/logger.js";
 
 // Safety cap: no embedded extraction may outlive this.
@@ -324,12 +325,10 @@ async function cuesFromDownloadedClusters(torrentPool, torrent, fileIndex, track
 }
 
 /**
- * WebVTT from cues read out of the container.
- *
- * A cue with no duration — a SimpleBlock, which subtitles rarely use — is given
- * the time until the next one, and the last such cue a few seconds. That is not
- * an invention about the film: it is what a player does with an open-ended cue,
- * made explicit here so the file is valid.
+ * WebVTT from cues read out of the container. The end-time synthesis and ASS
+ * stripping are shared with the push path — see `finalizeCues` in
+ * `services/torrent-worker/subtitle-cues.js` — so a pulled cue and a pushed
+ * one read identically; this function only adds the WebVTT framing.
  *
  * @param {{ startSeconds: number, endSeconds: number | null, text: string }[]} cues
  * @param {string} codecId
@@ -337,37 +336,12 @@ async function cuesFromDownloadedClusters(torrentPool, torrent, fileIndex, track
  */
 function cuesToVtt(cues, codecId) {
   const lines = ["WEBVTT", ""];
-  const isAss = codecId === "S_TEXT/ASS" || codecId === "S_TEXT/SSA";
-  cues.forEach((cue, index) => {
-    const next = cues[index + 1];
-    const end = cue.endSeconds ?? (next ? next.startSeconds : cue.startSeconds + 4);
-    const text = isAss ? assDialogueToText(cue.text) : cue.text.trim();
-    if (!text) {
-      return;
-    }
-    lines.push(`${vttTime(cue.startSeconds)} --> ${vttTime(end)}`);
-    lines.push(text);
+  for (const cue of finalizeCues(cues, codecId)) {
+    lines.push(`${vttTime(cue.startSeconds)} --> ${vttTime(cue.endSeconds)}`);
+    lines.push(cue.text);
     lines.push("");
-  });
+  }
   return lines.join("\n");
-}
-
-/**
- * The visible text of an ASS dialogue row.
- *
- * A block carries the fields after `Dialogue:` without their header — nine of
- * them, then the text, which itself holds override groups in braces.
- *
- * @param {string} raw
- * @returns {string}
- */
-function assDialogueToText(raw) {
-  const fields = raw.split(",");
-  const text = fields.length > 9 ? fields.slice(9).join(",") : raw;
-  return text
-    .replace(/\{[^}]*\}/g, "")
-    .replace(/\\N/gi, "\n")
-    .trim();
 }
 
 /**

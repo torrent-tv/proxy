@@ -67,14 +67,18 @@ export class TorrentWorkerClient {
   /** Reads consuming fragments in place, keyed by request id. */
   #fragmentReaders = new Map();
 
+  /** @type {(event: { sourceKey: string, fileIndex: number, trackIndex: number, cues: object[], language: string }) => void} */
+  #onSubtitleCues;
+
   /**
-   * @param {{ maxDiskBytes?: number, memoryBytes?: number }} [options]
+   * @param {{ maxDiskBytes?: number, memoryBytes?: number, onSubtitleCues?: (event: object) => void }} [options]
    */
-  constructor({ maxDiskBytes, memoryBytes } = {}) {
+  constructor({ maxDiskBytes, memoryBytes, onSubtitleCues } = {}) {
     this.#worker = new Worker(fileURLToPath(WORKER_URL), {
       workerData: { maxDiskBytes, memoryBytes }
     });
     this.#caller = createCaller(this.#worker);
+    this.#onSubtitleCues = onSubtitleCues ?? (() => undefined);
 
     this.#worker.on("message", (message) => {
       // A failed read must fail its stream. This is checked BEFORE the caller
@@ -183,6 +187,15 @@ export class TorrentWorkerClient {
           break;
         case Event.LOG:
           logger.info(`torrent-worker: ${message.message}`);
+          break;
+        case Event.SUBTITLE_CUES_READY:
+          this.#onSubtitleCues({
+            sourceKey: message.sourceKey,
+            fileIndex: message.fileIndex,
+            trackIndex: message.trackIndex,
+            cues: message.cues,
+            language: message.language
+          });
           break;
         default:
           break;

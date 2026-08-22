@@ -19,7 +19,11 @@
  * { type: "response-start", requestId, status, headers }   (JSON string)
  * { type: "response-error", requestId, error: string }     (JSON string)
  * { type: "pong",           id }                            (JSON string)
+ * { type: "subtitle-cues",  fileIndex, trackIndex, cues, language } (JSON string)
  * ```
+ * The last one is unsolicited — sent the moment new cues are read from a
+ * file's already-downloaded pieces, to whichever channel last asked for that
+ * file's subtitles over `/api/subtitles`. Not a response to any `requestId`.
  *
  * Response bodies are sent as BINARY data-channel messages (not JSON), to
  * avoid the ~33% base64 overhead and the JSON encode/decode cost. Each binary
@@ -296,6 +300,66 @@ export function encodeFrame(idBytes, bytes, done) {
 }
 
 export function createDataChannelHandler({ proxyPort, onLog, getTransportSnapshot }) {
+  /**
+   * Channels currently interested in one file's subtitle cues, keyed by
+   * `sourceKey:fileIndex`. Populated the moment a browser asks for an
+   * embedded track — there is no separate subscribe message on the wire, the
+   * existing `/api/subtitles` request already says which file a viewer opened
+   * subtitles for. Pruned on channel close and, defensively, on a failed send.
+   *
+   * @type {Map<string, Set<DataChannel>>}
+   */
+  const subtitleSubscribers = new Map();
+
+  /**
+   * @param {string} sourceKey
+   * @param {number} fileIndex
+   * @param {DataChannel} channel
+   * @returns {void}
+   */
+  function subscribeSubtitles(sourceKey, fileIndex, channel) {
+    const key = `${sourceKey}:${fileIndex}`;
+    let set = subtitleSubscribers.get(key);
+    if (!set) {
+      set = new Set();
+      subtitleSubscribers.set(key, set);
+    }
+    set.add(channel);
+  }
+
+  /** @param {DataChannel} channel */
+  function unsubscribeSubtitlesAll(channel) {
+    for (const set of subtitleSubscribers.values()) {
+      set.delete(channel);
+    }
+  }
+
+  /**
+   * Send new cues to every channel watching this file — the push side of
+   * subtitles arriving as they download rather than being polled for. Cues
+   * are tiny (kilobytes at most for a whole track), so this is one message,
+   * not a stream.
+   *
+   * @param {{ sourceKey: string, fileIndex: number, trackIndex: number, cues: object[], language: string }} event
+   * @returns {void}
+   */
+  function publishSubtitleCues({ sourceKey, fileIndex, trackIndex, cues, language }) {
+    const set = subtitleSubscribers.get(`${sourceKey}:${fileIndex}`);
+    if (!set || set.size === 0) {
+      return;
+    }
+    const message = { type: "subtitle-cues", fileIndex, trackIndex, cues, language };
+    for (const channel of set) {
+      try {
+        channel.sendMessage(JSON.stringify(message));
+      } catch {
+        // Closed between the subscription and this send; onClosed will not
+        // fire for a channel that is already gone, so drop it here too.
+        set.delete(channel);
+      }
+    }
+  }
+
   /** Request id → its ASCII bytes; see {@link requestIdBytes}. */
   const requestIdCache = new Map();
 
@@ -460,6 +524,7 @@ export function createDataChannelHandler({ proxyPort, onLog, getTransportSnapsho
         clearTimeout(entry.timer);
       }
       partials.clear();
+      unsubscribeSubtitlesAll(channel);
       log(`[dc] Session ${tag}: channel closed`);
     });
 
@@ -488,6 +553,25 @@ export function createDataChannelHandler({ proxyPort, onLog, getTransportSnapsho
     if (!isValidRequestPath(path)) {
       send(channel, { type: "response-error", requestId, error: "Invalid request path." });
       return;
+    }
+
+    // Piggy-backs on the browser's own request for an EMBEDDED track — no
+    // separate subscribe message. `trackIndex` is what tells the two request
+    // shapes apart: an external subtitle FILE (no trackIndex) names a
+    // different file's own index in `fileIndex` — the subtitle file's, not the
+    // video's — and subscribing under that would just be a key nothing ever
+    // publishes to (an external file is one whole-file read, not something
+    // this walks incrementally). `fileIndex` alone would also scope this to
+    // the wrong grain for the real case — a torrent can carry several playable
+    // files — so the pair is what a push is ever addressed to.
+    if (path === "/api/subtitles" && typeof query === "string") {
+      const params = new URLSearchParams(query);
+      const sourceKey = params.get("sourceKey");
+      const fileIndex = Number(params.get("fileIndex"));
+      const hasTrackIndex = params.get("trackIndex") !== null && params.get("trackIndex") !== "";
+      if (sourceKey && Number.isInteger(fileIndex) && hasTrackIndex) {
+        subscribeSubtitles(sourceKey, fileIndex, channel);
+      }
     }
 
     const queryInfo = query ? `?${query}` : "";
@@ -698,7 +782,7 @@ export function createDataChannelHandler({ proxyPort, onLog, getTransportSnapsho
     }
   }
 
-  return { handleChannel };
+  return { handleChannel, publishSubtitleCues };
 }
 
 /**

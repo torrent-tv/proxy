@@ -80,7 +80,9 @@ function buildPortCandidates(startPort, maxAttempts = 51) {
  * @param {ProxyServerOptions} options
  * @returns {Promise<{ app: import("fastify").FastifyInstance, port: number }>}
  */
-export async function startProxyServer({ host, port, transcodeAudio, ffmpegBin, maxDiskBytes, memoryBytes, segmentFormat, stateDir }) {
+export async function startProxyServer({
+  host, port, transcodeAudio, ffmpegBin, maxDiskBytes, memoryBytes, segmentFormat, stateDir, onSubtitleCues
+}) {
   const app = Fastify({
     // No practical body-size limit — the proxy server is localhost-only and
     // receives torrent source payloads that may be arbitrarily large.
@@ -112,7 +114,7 @@ export async function startProxyServer({ host, port, transcodeAudio, ffmpegBin, 
   // idled. Serving a segment shared that thread, so reading an already-finished
   // 10 MB file took 12-23 s against 125 ms to hand it to the channel. The
   // adapter keeps TorrentPool's interface, so nothing downstream changed.
-  const torrentPool = new WorkerTorrentPool({ maxDiskBytes, memoryBytes });
+  const torrentPool = new WorkerTorrentPool({ maxDiskBytes, memoryBytes, onSubtitleCues });
   const selectedPort = await getPort({
     port: buildPortCandidates(port)
   });

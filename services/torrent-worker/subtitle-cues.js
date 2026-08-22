@@ -99,7 +99,17 @@ function readHeld(file, start, end) {
 async function planFor(torrent, fileIndex, key) {
   let state = byFile.get(key);
   if (!state) {
-    state = { plan: null, harvested: new Map(), cues: new Map(), seq: new Map(), walked: new Set() };
+    state = {
+      plan: null,
+      harvested: new Map(),
+      cues: new Map(),
+      seq: new Map(),
+      walked: new Set(),
+      // The found-order cursor of the last cue PUSHED for each track, so a
+      // second warmup pass sends only what a first one did not — the same
+      // found-order idea `?since=` uses for a browser's own pull.
+      pushed: new Map()
+    };
     byFile.set(key, state);
   }
   if (state.plan !== null) {
@@ -318,25 +328,96 @@ export async function cuesHeldFor(torrent, fileIndex, sourceKey, trackNumber) {
 
 /**
  * Walk whatever clusters have newly arrived, for every text track a file
- * carries — so the browser's first request for a track finds its cues already
- * caught up instead of paying for the whole backlog inside that request.
+ * carries, and report what is new since the last call — so the cues can be
+ * PUSHED to a browser rather than left for it to come back and ask.
  *
  * `cuesHeldFor` already skips positions it has walked before (`state.walked`),
- * so calling this on a timer is cheap once a file is caught up: the only cost
- * is deciding there is nothing new to read. It is `getSubtitleCues` run ahead
- * of being asked, on the same state that call itself would build — nothing is
- * duplicated, and a browser that never asks costs nothing beyond this.
+ * so calling this on a timer or on every verified piece is cheap once a file
+ * is caught up: the only cost is deciding there is nothing new to read. It is
+ * `getSubtitleCues` run ahead of being asked, on the same state that call
+ * itself would build — nothing is duplicated, and a file nobody has opened
+ * costs nothing beyond this.
  *
  * @param {object} torrent
  * @param {number} fileIndex
  * @param {string} sourceKey
- * @returns {Promise<void>}
+ * @returns {Promise<{ trackIndex: number, cues: object[], language: string }[]>}
+ *   One entry per track that gained at least one cue since the last call.
+ *   `trackIndex` is the track's position among `plan.tracks` — the same
+ *   indexing `/api/subtitles?trackIndex=` and the browser's menu use, NOT the
+ *   container's own track number, which the browser never sees.
  */
 export async function warmSubtitleCues(torrent, fileIndex, sourceKey) {
-  const plan = await planFor(torrent, fileIndex, `${sourceKey}:${fileIndex}`);
-  for (const track of plan?.tracks ?? []) {
-    await cuesHeldFor(torrent, fileIndex, sourceKey, track.trackNumber);
+  const key = `${sourceKey}:${fileIndex}`;
+  const plan = await planFor(torrent, fileIndex, key);
+  const state = byFile.get(key);
+  const fresh = [];
+  const tracks = plan?.tracks ?? [];
+  for (let trackIndex = 0; trackIndex < tracks.length; trackIndex += 1) {
+    const track = tracks[trackIndex];
+    const held = await cuesHeldFor(torrent, fileIndex, sourceKey, track.trackNumber);
+    const since = state.pushed.get(track.trackNumber) ?? 0;
+    const newCues = held.cues.filter((cue) => (Number(cue.seq) || 0) > since);
+    if (newCues.length === 0) {
+      continue;
+    }
+    const highest = newCues.reduce((max, cue) => Math.max(max, Number(cue.seq) || 0), since);
+    state.pushed.set(track.trackNumber, highest);
+    fresh.push({
+      trackIndex,
+      cues: finalizeCues(newCues, held.track?.codecId ?? track.codecId),
+      language: held.track?.language ?? ""
+    });
   }
+  return fresh;
+}
+
+/**
+ * Resolve a cue's end time and strip codec-specific formatting, turning a raw
+ * block-derived cue into text a player can show directly. The same step
+ * `routes/api/subtitles/get.js` applies when building WebVTT for a pull —
+ * factored out here so a pushed cue and a pulled one read identically.
+ *
+ * A cue with no duration — a SimpleBlock, which subtitles rarely use — is
+ * given the time until the next one IN THIS LIST, and the last such cue a few
+ * seconds. Not an invention about the film: it is what a player does with an
+ * open-ended cue, made explicit so every consumer agrees on it.
+ *
+ * @param {{ startSeconds: number, endSeconds: number | null, text: string }[]} cues
+ * @param {string} codecId
+ * @returns {{ startSeconds: number, endSeconds: number, text: string }[]}
+ */
+export function finalizeCues(cues, codecId) {
+  const isAss = codecId === "S_TEXT/ASS" || codecId === "S_TEXT/SSA";
+  const result = [];
+  cues.forEach((cue, index) => {
+    const next = cues[index + 1];
+    const endSeconds = cue.endSeconds ?? (next ? next.startSeconds : cue.startSeconds + 4);
+    const text = isAss ? assDialogueToText(cue.text) : cue.text.trim();
+    if (!text) {
+      return;
+    }
+    result.push({ startSeconds: cue.startSeconds, endSeconds, text });
+  });
+  return result;
+}
+
+/**
+ * The visible text of an ASS dialogue row.
+ *
+ * A block carries the fields after `Dialogue:` without their header — nine of
+ * them, then the text, which itself holds override groups in braces.
+ *
+ * @param {string} raw
+ * @returns {string}
+ */
+function assDialogueToText(raw) {
+  const fields = raw.split(",");
+  const text = fields.length > 9 ? fields.slice(9).join(",") : raw;
+  return text
+    .replace(/\{[^}]*\}/g, "")
+    .replace(/\\N/gi, "\n")
+    .trim();
 }
 
 /**

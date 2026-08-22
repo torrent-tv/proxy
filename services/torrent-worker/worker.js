@@ -508,7 +508,9 @@ setInterval(() => {
 }, STORE_REPORT_INTERVAL_MS).unref();
 
 /**
- * Walk subtitle cues for every actively-read file of one torrent.
+ * Walk subtitle cues for every actively-read file of one torrent, and PUSH
+ * whatever came out new to the main thread — which is what makes a browser's
+ * copy current without it having asked.
  *
  * @param {string} sourceKey
  * @param {object} torrent
@@ -520,9 +522,22 @@ function warmActiveFiles(sourceKey, torrent) {
     return;
   }
   for (const fileIndex of usage.keys()) {
-    warmSubtitleCues(torrent, fileIndex, sourceKey).catch((error) => {
-      log(`subtitle warmup ${sourceKey}:${fileIndex} failed: ${error instanceof Error ? error.message : error}`);
-    });
+    warmSubtitleCues(torrent, fileIndex, sourceKey)
+      .then((fresh) => {
+        for (const entry of fresh) {
+          parentPort.postMessage({
+            type: Event.SUBTITLE_CUES_READY,
+            sourceKey,
+            fileIndex,
+            trackIndex: entry.trackIndex,
+            cues: entry.cues,
+            language: entry.language
+          });
+        }
+      })
+      .catch((error) => {
+        log(`subtitle warmup ${sourceKey}:${fileIndex} failed: ${error instanceof Error ? error.message : error}`);
+      });
   }
 }
 

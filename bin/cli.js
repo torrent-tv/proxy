@@ -179,6 +179,9 @@ let udpPortMapper = null;
 /** @type {ReturnType<typeof createWebRtcManager> | null} */
 let webRtcManager = null;
 
+/** @type {ReturnType<typeof createDataChannelHandler> | null} */
+let dataChannelHandler = null;
+
 /** @type {import("../services/nat-classifier.js").NatClassification | null} Latest NAT classification (for WebRTC port prediction). */
 let natInfo = null;
 
@@ -289,7 +292,11 @@ try {
     maxDiskBytes,
     memoryBytes,
     segmentFormat: options.segmentFormat,
-    stateDir: options.stateDir
+    stateDir: options.stateDir,
+    // Late-bound the same way `webRtcManager` is below: the torrent pool is
+    // built inside `startProxyServer`, before `dataChannelHandler` — the
+    // thing that actually owns a channel to push down — exists.
+    onSubtitleCues: (event) => dataChannelHandler?.publishSubtitleCues(event)
   });
   app = started.app;
   actualPort = started.port;
@@ -411,7 +418,7 @@ try {
     onLog: (message) => logger.info(message)
   });
 
-  const dataChannelHandler = createDataChannelHandler({
+  dataChannelHandler = createDataChannelHandler({
     proxyPort: actualPort,
     onLog: (message) => logger.info(message),
     // Lets a stuck send queue ask the transport what it is doing. Late-bound:

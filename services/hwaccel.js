@@ -22,6 +22,7 @@
 
 import { spawn } from "node:child_process";
 import { mkdtempSync, readdirSync, rmSync, statSync } from "node:fs";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { fitDecodeCost } from "./decode-cost-fit.js";
@@ -763,10 +764,20 @@ const CALIBRATION_SETS = {
 const CALIBRATION_CLIPS = CALIBRATION_SETS.h264;
 const CALIBRATION_DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "assets", "calibration");
 // How wide the measured window must be before the slope is trusted, and how
-// long to wait for it at most. A second of decoding is thousands of frames on a
-// quick host and dozens on a weak one; both give a slope, and neither costs the
-// startup more than a second per clip.
-const DECODE_WINDOW_MIN_SEC = 1;
+// long to wait for it at most.
+//
+// Half a second, and it is the TIMING noise that sets it rather than the amount
+// of video: the slope is output time against wall time, both read from the same
+// two progress lines, and the jitter in stamping one is milliseconds — so half
+// a second of window is a fraction of a percent of error on any host. What used
+// to make a longer window necessary was the clip restarting inside it, and that
+// is gone: the stream is continuous now. Measured 2026-08-22 against the
+// continuous-pass truth on a desktop: -3.0 % and +0.6 % at half a second, with
+// the readings spread 2-6 %, against -25 % and -33 % for the loop it replaces.
+// Half a second also costs the startup about 0.6 s per clip less, which matters
+// because every clip of every codec family is paid for before any viewer
+// exists.
+const DECODE_WINDOW_MIN_SEC = 0.5;
 const DECODE_WINDOW_MAX_MS = 8000;
 
 /**
@@ -844,8 +855,18 @@ export async function benchmarkContention({ ffmpegBin, logger, clipsDir = CALIBR
   // company, not the clip's own cost, so the smallest one says it soonest.
   const clip = path.join(clipsDir, "cal-h264-480-lo.mp4");
   const startedAt = Date.now();
-  const alone = await measureDecodeSlope(ffmpegBin, clip);
-  if (!alone) {
+  // Lifted once and decoded three times from the same bytes. Going through
+  // `measureDecodeSlope` lifted it again for every reading — three process
+  // starts on a path that is awaited before the proxy's tunnel opens, for a
+  // remux whose result had not changed.
+  const streams = await extractFamilyStreams(ffmpegBin, [clip], "h264");
+  const stream = streams?.[0];
+  if (!stream) {
+    log.warn("hwaccel: contention could not be measured; costs will be added as though jobs were independent");
+    return null;
+  }
+  const alone = await decodePipedStream(ffmpegBin, stream);
+  if (!alone?.speed) {
     log.warn("hwaccel: contention could not be measured; costs will be added as though jobs were independent");
     return null;
   }
@@ -871,8 +892,8 @@ export async function benchmarkContention({ ffmpegBin, logger, clipsDir = CALIBR
       await new Promise((resolve) => {
         setTimeout(resolve, 2_000);
       });
-      const withCompany = await measureDecodeSlope(ffmpegBin, clip);
-      if (withCompany) {
+      const withCompany = await decodePipedStream(ffmpegBin, stream);
+      if (withCompany?.speed) {
         beside.push({ others, speed: withCompany.speed });
       }
     }
@@ -947,10 +968,29 @@ async function fitOneFamily({ ffmpegBin, log, clipsDir, family, clips }) {
   const startedAllAt = Date.now();
   /** @type {Array<{ megapixelsPerSecond: number, megabitsPerSecond: number, costSecondsPerSecond: number }>} */
   const samples = [];
-  for (const clip of clips) {
-    const measured = await measureDecodeSlope(ffmpegBin, path.join(clipsDir, clip));
-    if (!measured) {
-      log.warn(`hwaccel: decode benchmark "${clip}" failed or said nothing; ${family} not measured`);
+  // Every clip of the family is lifted out of its container FIRST, in one
+  // ffmpeg run. See `extractFamilyStreams` for why one run rather than one per
+  // clip, and why before the measurements rather than beside them.
+  const streams = await extractFamilyStreams(
+    ffmpegBin,
+    clips.map((clip) => path.join(clipsDir, clip)),
+    family
+  );
+  if (!streams) {
+    log.warn(
+      `hwaccel: ${family} cannot be lifted out of its container — no Annex-B filter is mapped for it, ` +
+        `so its clips were never measured`
+    );
+    return null;
+  }
+  for (const [index, clip] of clips.entries()) {
+    const stream = streams[index];
+    const measured = stream ? await decodePipedStream(ffmpegBin, stream) : null;
+    if (!measured?.speed) {
+      log.warn(
+        `hwaccel: decode benchmark "${clip}" said nothing; ${family} not measured` +
+          (measured?.error ? ` — ${measured.error}` : " — the clip could not be lifted out of its container")
+      );
       return null;
     }
     const cost = 1 / measured.speed;
@@ -984,41 +1024,172 @@ async function fitOneFamily({ ffmpegBin, log, clipsDir, family, clips }) {
 }
 
 /**
- * Measure how fast this host DECODES a clip, from ffmpeg’s own report of how
- * much video it has processed.
+ * The bitstream filter and demuxer that turn a clip's video track into a
+ * continuous elementary stream, by codec family.
  *
- * Wall-clock around the process cannot answer this: starting ffmpeg costs about
- * a second, and on a quick machine a five-second clip decodes in a tenth of
- * that, so the measurement would be of the program starting. Progress lines
- * arrive twice a second AFTER it has started, and the slope between two of them
- * — video processed against time taken — contains no part of the startup by
- * construction.
+ * H.264 and HEVC in MP4 keep their parameter sets in the container's `avcC` /
+ * `hvcC` and their access units length-prefixed; Annex-B carries them inline,
+ * with start codes, which is what makes plain byte concatenation a valid
+ * stream. That is the property this whole measurement rests on.
+ */
+const ANNEX_B_BY_FAMILY = {
+  h264: { filter: "h264_mp4toannexb", demuxer: "h264" },
+  hevc: { filter: "hevc_mp4toannexb", demuxer: "hevc" },
+  hevc10: { filter: "hevc_mp4toannexb", demuxer: "hevc" }
+};
+
+/**
+ * The last complaint in an ffmpeg stderr, for a line that has to say why.
  *
- * The clip is looped forever and the process killed as soon as the window is
- * wide enough, so the cost is bounded by the clock rather than by the clip:
- * roughly a second of measurement on any host, quick or slow.
+ * @param {string} stderr
+ * @returns {string}
+ */
+function lastErrorLine(stderr) {
+  const lines = String(stderr ?? "")
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0);
+  return lines[lines.length - 1] ?? "";
+}
+
+/**
+ * How long the lift may take before it is abandoned. It is a remux of a few
+ * megabytes, so this is not a budget — it is the difference between a startup
+ * that reports a failure and one that never finishes. Every other ffmpeg run in
+ * this file has such a bound; this one did not, and it is awaited before the
+ * proxy's tunnel opens.
+ */
+const EXTRACT_TIMEOUT_MS = 20_000;
+
+/**
+ * Lift a whole family's clips out of their containers, as Annex-B elementary
+ * streams, in ONE ffmpeg run.
+ *
+ * No re-encoding — the frames are copied — so the work itself is trivial and
+ * the cost is almost entirely the process. Doing one process per clip added
+ * 11 s to the startup here (fourteen clips at about 0.83 s each), and running
+ * them concurrently did not help: six at once took 4.75 s against 0.89 s for
+ * one, so the machine serialises them. One run with many inputs and many
+ * outputs costs one process.
+ *
+ * The outputs go to temporary files because several outputs cannot share one
+ * pipe; they are read into memory and deleted immediately, and nothing about
+ * this measurement is kept between runs.
+ *
+ * Before the measurements, never beside them: a remux running next to a decode
+ * is a second job on the machine, and this benchmark exists to find out what
+ * ONE job costs here.
  *
  * @param {string} ffmpegBin
- * @param {string} clipPath
- * @returns {Promise<{ speed: number, windowSec: number, megapixelsPerSecond: number, megabitsPerSecond: number } | null>}
+ * @param {string[]} clipPaths
+ * @param {string} family
+ * @returns {Promise<Array<{ bytes: Buffer, demuxer: string, megapixelsPerSecond: number, megabitsPerSecond: number, fps: number } | null> | null>}
+ *   One entry per clip, in order; null when the family cannot be lifted at all.
  */
-function measureDecodeSlope(ffmpegBin, clipPath) {
+async function extractFamilyStreams(ffmpegBin, clipPaths, family) {
+  const shape = ANNEX_B_BY_FAMILY[family];
+  // A family with no mapping is a hard failure, not a silent fallback to
+  // H.264's filter. AV1 has no Annex-B form at all (its packaging is OBU), and
+  // MPEG-2 and VC-1 have no `*_mp4toannexb` filter — so the three families the
+  // roadmap plans next cannot come through here, and finding that out as
+  // "the clip failed" would send the reader after the clip.
+  if (!shape) {
+    return null;
+  }
+  const workDir = await mkdtemp(path.join(os.tmpdir(), "ttv-calibration-"));
+  const outputs = clipPaths.map((_, index) => path.join(workDir, `stream-${index}.${shape.demuxer}`));
+  /** @type {string[]} */
+  const args = ["-hide_banner", "-loglevel", "info", "-nostats", "-y"];
+  for (const clipPath of clipPaths) {
+    args.push("-i", clipPath);
+  }
+  for (const [index, output] of outputs.entries()) {
+    args.push("-map", `${index}:v:0`, "-c:v", "copy", "-bsf:v", shape.filter, "-f", shape.demuxer, output);
+  }
+  const stderr = await runCapturingStderr(ffmpegBin, args, EXTRACT_TIMEOUT_MS);
+  try {
+    if (stderr === null) {
+      return null;
+    }
+    // One banner block per input, in the order they were given. Read rather
+    // than declared, so replacing a clip cannot silently invalidate the fit
+    // that rests on it.
+    const blocks = splitInputBlocks(stderr, clipPaths.length);
+    return await Promise.all(clipPaths.map(async (_, index) => {
+      const block = blocks[index];
+      if (!block) {
+        return null;
+      }
+      const clipInfo = parseClipCharacteristics(block);
+      const fps = parseFfmpegVideoFps(block);
+      if (!clipInfo || !(fps > 0)) {
+        return null;
+      }
+      let bytes;
+      try {
+        bytes = await readFile(outputs[index]);
+      } catch {
+        return null;
+      }
+      if (bytes.length === 0) {
+        return null;
+      }
+      return {
+        bytes,
+        demuxer: shape.demuxer,
+        megapixelsPerSecond: clipInfo.megapixelsPerSecond,
+        megabitsPerSecond: clipInfo.megabitsPerSecond,
+        fps
+      };
+    }));
+  } finally {
+    await rm(workDir, { recursive: true, force: true }).catch(() => {});
+  }
+}
+
+/**
+ * The part of an ffmpeg banner describing each input, in order.
+ *
+ * ffmpeg prints one `Input #N, …` block per input and then the stream mapping;
+ * the parsers here read a single input's facts, so they are given a single
+ * input's text rather than the whole banner.
+ *
+ * @param {string} stderr
+ * @param {number} count
+ * @returns {string[]}
+ */
+function splitInputBlocks(stderr, count) {
+  /** @type {string[]} */
+  const blocks = [];
+  for (let index = 0; index < count; index += 1) {
+    const from = stderr.indexOf(`Input #${index},`);
+    if (from < 0) {
+      blocks.push("");
+      continue;
+    }
+    const nextInput = stderr.indexOf(`Input #${index + 1},`, from);
+    const mapping = stderr.indexOf("Stream mapping:", from);
+    const ends = [nextInput, mapping].filter((at) => at > from);
+    blocks.push(stderr.slice(from, ends.length > 0 ? Math.min(...ends) : stderr.length));
+  }
+  return blocks;
+}
+
+/**
+ * Run ffmpeg to completion and return its stderr, or null when it failed or
+ * outlasted its bound.
+ *
+ * @param {string} ffmpegBin
+ * @param {string[]} args
+ * @param {number} timeoutMs
+ * @returns {Promise<string | null>}
+ */
+function runCapturingStderr(ffmpegBin, args, timeoutMs) {
   return new Promise((resolve) => {
-    const args = [
-      "-hide_banner", "-loglevel", "info", "-nostats",
-      "-stream_loop", "-1",
-      "-i", clipPath,
-      "-an", "-f", "null", "-",
-      "-progress", "pipe:1"
-    ];
-    /** @type {Array<{ wallSec: number, outSec: number }>} */
-    const samples = [];
     let stderr = "";
-    let stdout = "";
     let settled = false;
     let child;
-    const startedAt = Date.now();
-    const finish = () => {
+    const settle = (value) => {
       if (settled) {
         return;
       }
@@ -1029,43 +1200,165 @@ function measureDecodeSlope(ffmpegBin, clipPath) {
       } catch {
         // already gone
       }
-      // The first sample is the one that still carries the startup — it reports
-      // whatever was processed while the process was coming up. Everything is
-      // measured from the second onwards.
-      const first = samples[1];
-      const last = samples[samples.length - 1];
-      const clipInfo = parseClipCharacteristics(stderr);
-      if (!first || !last || !clipInfo) {
-        resolve(null);
-        return;
-      }
-      const windowSec = last.wallSec - first.wallSec;
-      const producedSec = last.outSec - first.outSec;
-      if (!(windowSec >= DECODE_WINDOW_MIN_SEC) || !(producedSec > 0)) {
-        resolve(null);
-        return;
-      }
-      resolve({
-        speed: producedSec / windowSec,
-        windowSec,
-        megapixelsPerSecond: clipInfo.megapixelsPerSecond,
-        megabitsPerSecond: clipInfo.megabitsPerSecond
-      });
+      resolve(value);
     };
-    const timer = setTimeout(finish, DECODE_WINDOW_MAX_MS);
+    const timer = setTimeout(() => settle(null), timeoutMs);
     try {
-      child = spawn(ffmpegBin, args, { stdio: ["ignore", "pipe", "pipe"], windowsHide: true });
+      child = spawn(ffmpegBin, args, { stdio: ["ignore", "ignore", "pipe"], windowsHide: true });
     } catch {
-      // The timer would otherwise hold the event loop for its full wait and
-      // then run against a child that was never created.
-      clearTimeout(timer);
-      settled = true;
-      resolve(null);
+      settle(null);
       return;
     }
     child.stderr.on("data", (chunk) => {
       stderr += String(chunk);
     });
+    child.on("error", () => settle(null));
+    child.on("close", (code) => settle(code === 0 ? stderr : null));
+  });
+}
+
+/**
+ * Measure how fast this host DECODES a clip, from ffmpeg's own report of how
+ * much video it has processed.
+ *
+ * Two things are deliberately outside the measurement.
+ *
+ * **The process starting.** Wall-clock around the process cannot answer this:
+ * starting ffmpeg costs about a second, and on a quick machine a five-second
+ * clip decodes in a tenth of that, so the measurement would be of the program
+ * starting. Progress lines arrive AFTER it has started, and the slope between
+ * two of them — video processed against time taken — contains no part of the
+ * startup by construction.
+ *
+ * **The clip restarting.** This used to loop the clip with `-stream_loop -1`,
+ * and a loop is not free: measured 2026-08-22 on a desktop, a restart costs
+ * 0.03 s on the 480p clip and 0.12 s on the 1080p one — the decoder tearing
+ * down and re-allocating its frame buffers, which is why the price rises with
+ * the picture. A five-second clip decoded at 55x restarts eleven times a
+ * second, so that cost DOMINATED the reading: the same clips measured 53.7x
+ * looped against 80.3x in one continuous pass, and 11.8x against 15.8x. Worse,
+ * the bias is not shared — it depends on the clip's own resolution and on how
+ * fast the host is — so it does not cancel out of the fit, it tilts it. That is
+ * the fast-host failure recorded on 2026-08-20, where 1080p read cheaper than
+ * 720p, which is not a thing a decoder does.
+ *
+ * So the clip is fed to the decoder as ONE stream instead. An Annex-B
+ * elementary stream carries its parameter sets inline, so writing the same
+ * bytes again is simply more stream — the decoder never re-initialises, and
+ * there is no restart inside the window to measure. Verified against the
+ * continuous-pass truth on the same host: -0.2 % and -5.5 %, against -25 % and
+ * -33 % for the loop. Nothing is written to disk and the process is killed as
+ * soon as the window is wide enough.
+ *
+ * Exported because the property that broke here is checkable and was not being
+ * checked: a bigger picture must cost more than a smaller one of the same
+ * bitrate, and under the loop it did not.
+ *
+ * @param {string} ffmpegBin
+ * @param {string} clipPath
+ * @param {string} [family="h264"]
+ * @returns {Promise<{ speed: number, windowSec: number, megapixelsPerSecond: number, megabitsPerSecond: number } | null>}
+ */
+export async function measureDecodeSlope(ffmpegBin, clipPath, family = "h264") {
+  const streams = await extractFamilyStreams(ffmpegBin, [clipPath], family);
+  const stream = streams?.[0];
+  if (!stream) {
+    return null;
+  }
+  const measured = await decodePipedStream(ffmpegBin, stream);
+  return measured?.speed ? measured : null;
+}
+
+/**
+ * Decode an elementary stream fed from memory, and report the slope.
+ *
+ * @param {string} ffmpegBin
+ * @param {{ bytes: Buffer, demuxer: string, megapixelsPerSecond: number, megabitsPerSecond: number, fps: number }} stream
+ * @returns {Promise<{ speed: number, windowSec: number, megapixelsPerSecond: number, megabitsPerSecond: number } | null>}
+ */
+function decodePipedStream(ffmpegBin, stream) {
+  return new Promise((resolve) => {
+    const args = [
+      "-hide_banner", "-loglevel", "error", "-nostats",
+      // A raw stream states no frame rate, so the one the container declared is
+      // given back to it. It decides how output time advances, and therefore
+      // what "seconds of video per second of clock" means.
+      "-f", stream.demuxer, "-framerate", String(stream.fps), "-i", "pipe:0",
+      "-an", "-f", "null", "-",
+      "-progress", "pipe:1"
+    ];
+    /** @type {Array<{ wallSec: number, outSec: number }>} */
+    const samples = [];
+    let stdout = "";
+    // Kept because this path depends on three things the old one did not: the
+    // raw demuxer accepting the frame rate, the bitstream filter having
+    // produced something parsable, and the fed concatenation being decodable.
+    // Without it the only trace of any of those failing is "said nothing".
+    let stderr = "";
+    let settled = false;
+    let child;
+    const startedAt = Date.now();
+    const finish = () => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      clearTimeout(timer);
+      try {
+        child?.stdin?.destroy();
+      } catch {
+        // already gone
+      }
+      try {
+        child?.kill("SIGKILL");
+      } catch {
+        // already gone
+      }
+      // The first sample still carries the startup — it reports whatever was
+      // processed while the process was coming up. Everything is measured from
+      // the second onwards.
+      const first = samples[1];
+      const last = samples[samples.length - 1];
+      if (!first || !last) {
+        resolve({ error: lastErrorLine(stderr) || "the decoder reported no progress" });
+        return;
+      }
+      const windowSec = last.wallSec - first.wallSec;
+      const producedSec = last.outSec - first.outSec;
+      if (!(windowSec >= DECODE_WINDOW_MIN_SEC) || !(producedSec > 0)) {
+        resolve({ error: lastErrorLine(stderr) || `the window was ${windowSec.toFixed(2)}s of ${producedSec.toFixed(2)}s produced` });
+        return;
+      }
+      resolve({
+        speed: producedSec / windowSec,
+        windowSec,
+        megapixelsPerSecond: stream.megapixelsPerSecond,
+        megabitsPerSecond: stream.megabitsPerSecond
+      });
+    };
+    const timer = setTimeout(finish, DECODE_WINDOW_MAX_MS);
+    try {
+      child = spawn(ffmpegBin, args, { stdio: ["pipe", "pipe", "pipe"], windowsHide: true });
+    } catch (error) {
+      clearTimeout(timer);
+      settled = true;
+      resolve({ error: error instanceof Error ? error.message : String(error) });
+      return;
+    }
+    child.stderr.on("data", (chunk) => {
+      stderr += String(chunk);
+    });
+    // Keep the decoder fed. `write` returning false means the pipe is full, and
+    // the next copy goes on the `drain` — so the decoder is never starved and
+    // this process never buffers more than the pipe holds.
+    const feed = () => {
+      while (!settled && child.stdin.writable && child.stdin.write(stream.bytes)) {
+        // Written straight through; go round again.
+      }
+    };
+    child.stdin.on("drain", feed);
+    // The kill closes the pipe under the writer; that is the intended end.
+    child.stdin.on("error", () => {});
     child.stdout.on("data", (chunk) => {
       stdout += String(chunk);
       let newline = stdout.indexOf("\n");
@@ -1084,15 +1377,26 @@ function measureDecodeSlope(ffmpegBin, clipPath) {
         finish();
       }
     });
-    child.on("error", () => {
+    child.on("error", (error) => {
       if (settled) {
         return;
       }
       clearTimeout(timer);
       settled = true;
-      resolve(null);
+      try {
+        child?.stdin?.destroy();
+      } catch {
+        // already gone
+      }
+      try {
+        child?.kill("SIGKILL");
+      } catch {
+        // already gone
+      }
+      resolve({ error: error instanceof Error ? error.message : String(error) });
     });
     child.on("close", finish);
+    feed();
   });
 }
 

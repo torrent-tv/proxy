@@ -508,24 +508,66 @@ setInterval(() => {
 }, STORE_REPORT_INTERVAL_MS).unref();
 
 /**
+ * Walk subtitle cues for every actively-read file of one torrent.
+ *
+ * @param {string} sourceKey
+ * @param {object} torrent
+ * @returns {void}
+ */
+function warmActiveFiles(sourceKey, torrent) {
+  const usage = pool.fileUsageByTorrent.get(torrent);
+  if (!usage) {
+    return;
+  }
+  for (const fileIndex of usage.keys()) {
+    warmSubtitleCues(torrent, fileIndex, sourceKey).catch((error) => {
+      log(`subtitle warmup ${sourceKey}:${fileIndex} failed: ${error instanceof Error ? error.message : error}`);
+    });
+  }
+}
+
+/**
+ * Torrents already wired to warm their subtitle cues the moment a piece
+ * verifies, so the same torrent is not listened to twice.
+ *
+ * @type {WeakSet<object>}
+ */
+const subtitleWarmupWired = new WeakSet();
+
+/**
+ * A piece becoming readable is the actual event a cue can be pulled from —
+ * "downloaded", not "about to be encoded or copied": what a viewer reaches is
+ * decided by the read window ahead of the playhead, not by which of the two
+ * paths a segment takes, and the piece exists (and is worth reading for
+ * subtitles) whichever one that is. `verified` is WebTorrent's own signal for
+ * exactly that instant, set at the same place the bitfield itself is (`
+ * _markVerified`), so nothing here is guessing at readiness a different way.
+ *
+ * @param {string} sourceKey
+ * @param {object} torrent
+ * @returns {void}
+ */
+function ensureSubtitleWarmupWired(sourceKey, torrent) {
+  if (subtitleWarmupWired.has(torrent)) {
+    return;
+  }
+  subtitleWarmupWired.add(torrent);
+  torrent.on("verified", () => warmActiveFiles(sourceKey, torrent));
+}
+
+/**
  * How often an actively-read file's subtitle cues are walked ahead of being
- * asked for. Cheap once caught up (`warmSubtitleCues` skips clusters it has
- * already read), so this can run often; every read.js pass is one it does not
- * have to do.
+ * asked for, as a fallback beside the per-piece `verified` listener above —
+ * catches a listener attached after pieces already verified, and anything the
+ * event path might otherwise miss. Cheap once caught up (`warmSubtitleCues`
+ * skips clusters it has already read).
  */
 const SUBTITLE_WARMUP_INTERVAL_MS = 3_000;
 
 setInterval(() => {
   for (const [sourceKey, torrent] of pool.torrents) {
-    const usage = pool.fileUsageByTorrent.get(torrent);
-    if (!usage) {
-      continue;
-    }
-    for (const fileIndex of usage.keys()) {
-      warmSubtitleCues(torrent, fileIndex, sourceKey).catch((error) => {
-        log(`subtitle warmup ${sourceKey}:${fileIndex} failed: ${error instanceof Error ? error.message : error}`);
-      });
-    }
+    ensureSubtitleWarmupWired(sourceKey, torrent);
+    warmActiveFiles(sourceKey, torrent);
   }
 }, SUBTITLE_WARMUP_INTERVAL_MS).unref();
 

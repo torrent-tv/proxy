@@ -1342,17 +1342,23 @@ function decodePipedStream(ffmpegBin, stream, log = { info: () => {}, warn: () =
         return;
       }
       const speed = producedSec / windowSec;
-      // Diagnostic only — logged, not acted on. The required rate is what
-      // THIS reading implies was needed to keep the decoder fed; the achieved
-      // rate is what this process actually pushed over its whole run (a wider
-      // span than `windowSec`, since the feed starts before the first kept
-      // sample — a looser figure is enough for a sanity comparison).
-      const elapsedSec = (Date.now() - startedAt) / 1000;
-      const achievedMBps = elapsedSec > 0 ? bytesWritten / elapsedSec / 1e6 : 0;
+      // Diagnostic only — logged, not acted on. Both figures are taken over the
+      // SAME window the speed itself is: bytesWritten is snapshotted alongside
+      // every progress sample, so this compares like against like rather than
+      // the achieved rate over the whole run (which starts before the first
+      // kept sample and reads systematically low against the window's own
+      // rate for no reason but that mismatch — measured while building this).
+      const windowBytes = last.bytesWritten - first.bytesWritten;
+      const achievedMBps = windowSec > 0 ? windowBytes / windowSec / 1e6 : 0;
       const requiredMBps = ((stream.megabitsPerSecond * 1e6) / 8) * speed / 1e6;
+      // "Far apart" is stated, not left to the reader to eyeball: outside a
+      // factor of 1.5 either way is bigger than the write-timing slop this
+      // comparison carries on a healthy reading.
+      const farApart = requiredMBps > 0 && (achievedMBps / requiredMBps < 1 / 1.5 || achievedMBps / requiredMBps > 1.5);
       log.info(
         `hwaccel: decode pipe fed ${achievedMBps.toFixed(1)} MB/s, ${requiredMBps.toFixed(1)} MB/s ` +
-        `needed for ${speed.toFixed(2)}x — a reading where these are far apart is worth a second look`
+        `needed for ${speed.toFixed(2)}x` +
+        (farApart ? " — far enough apart to be worth a second look" : "")
       );
       resolve({
         speed,
@@ -1399,7 +1405,7 @@ function decodePipedStream(ffmpegBin, stream, log = { info: () => {}, warn: () =
         if (line.startsWith("out_time_ms=")) {
           const microseconds = Number(line.slice("out_time_ms=".length));
           if (Number.isFinite(microseconds)) {
-            samples.push({ wallSec: (Date.now() - startedAt) / 1000, outSec: microseconds / 1e6 });
+            samples.push({ wallSec: (Date.now() - startedAt) / 1000, outSec: microseconds / 1e6, bytesWritten });
           }
         }
         newline = stdout.indexOf("\n");

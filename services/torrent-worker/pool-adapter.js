@@ -22,22 +22,8 @@
  *    across calls for the same torrent.
  */
 
-import crypto from "node:crypto";
 import { TorrentWorkerClient } from "./client.js";
-
-/**
- * Stable key for a source, matching how the worker keys its torrents.
- *
- * Derived from the source itself rather than handed out per request, so two
- * routes asking for the same torrent name the same thing on the worker side.
- *
- * @param {"magnet" | "torrent"} sourceType
- * @param {string} source
- * @returns {string}
- */
-function deriveSourceKey(sourceType, source) {
-  return `${sourceType}:${crypto.createHash("sha1").update(source).digest("hex")}`;
-}
+import { deriveSourceKey } from "../torrent-source-key.js";
 
 /**
  * A torrent pool whose work happens on another thread.
@@ -65,7 +51,7 @@ export class WorkerTorrentPool {
    * @returns {Promise<object>}
    */
   async getTorrent(sourceType, source) {
-    const sourceKey = deriveSourceKey(sourceType, source);
+    const sourceKey = await deriveSourceKey(sourceType, source);
     const existing = this.#torrents.get(sourceKey);
     if (existing) {
       return existing;

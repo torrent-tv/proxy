@@ -103,7 +103,14 @@ export const Event = {
   /** The main thread consumed a chunk — see {@link STREAM_HIGH_WATER_CHUNKS}. */
   CHUNK_ACK: "chunk-ack",
   /** A log line, so worker output reaches the same place as everything else. */
-  LOG: "log"
+  LOG: "log",
+  /**
+   * New subtitle cues were read for one track, unprompted — the worker found
+   * them off its own `verified`-piece walk, not in answer to a
+   * {@link Command.SUBTITLE_CUES} call. Lets the main thread PUSH them to
+   * whichever browser is watching instead of waiting to be asked.
+   */
+  SUBTITLE_CUES_READY: "subtitle-cues-ready"
 };
 
 /**

@@ -317,6 +317,29 @@ export async function cuesHeldFor(torrent, fileIndex, sourceKey, trackNumber) {
 }
 
 /**
+ * Walk whatever clusters have newly arrived, for every text track a file
+ * carries — so the browser's first request for a track finds its cues already
+ * caught up instead of paying for the whole backlog inside that request.
+ *
+ * `cuesHeldFor` already skips positions it has walked before (`state.walked`),
+ * so calling this on a timer is cheap once a file is caught up: the only cost
+ * is deciding there is nothing new to read. It is `getSubtitleCues` run ahead
+ * of being asked, on the same state that call itself would build — nothing is
+ * duplicated, and a browser that never asks costs nothing beyond this.
+ *
+ * @param {object} torrent
+ * @param {number} fileIndex
+ * @param {string} sourceKey
+ * @returns {Promise<void>}
+ */
+export async function warmSubtitleCues(torrent, fileIndex, sourceKey) {
+  const plan = await planFor(torrent, fileIndex, `${sourceKey}:${fileIndex}`);
+  for (const track of plan?.tracks ?? []) {
+    await cuesHeldFor(torrent, fileIndex, sourceKey, track.trackNumber);
+  }
+}
+
+/**
  * The text subtitle tracks of a file, for the menu the viewer sees.
  *
  * @param {object} torrent

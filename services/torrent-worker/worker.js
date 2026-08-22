@@ -525,6 +525,10 @@ function warmActiveFiles(sourceKey, torrent) {
     warmSubtitleCues(torrent, fileIndex, sourceKey)
       .then((fresh) => {
         for (const entry of fresh) {
+          log(
+            `subtitle push ${sourceKey.slice(0, 8)}:${fileIndex} track ${entry.trackIndex}: ` +
+            `${entry.cues.length} new cue(s) found, posting to main thread`
+          );
           parentPort.postMessage({
             type: Event.SUBTITLE_CUES_READY,
             sourceKey,

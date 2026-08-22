@@ -43,6 +43,8 @@
 
 /** @import { DataChannel } from 'node-datachannel' */
 
+import { deriveSourceKey } from "./torrent-source-key.js";
+
 /**
  * Configuration for the data channel handler.
  *
@@ -299,7 +301,7 @@ export function encodeFrame(idBytes, bytes, done) {
   return frame;
 }
 
-export function createDataChannelHandler({ proxyPort, onLog, getTransportSnapshot }) {
+export function createDataChannelHandler({ proxyPort, onLog, getTransportSnapshot, sourceRegistry }) {
   /**
    * Channels currently interested in one file's subtitle cues, keyed by
    * `sourceKey:fileIndex`. Populated the moment a browser asks for an
@@ -579,13 +581,34 @@ export function createDataChannelHandler({ proxyPort, onLog, getTransportSnapsho
     // this walks incrementally). `fileIndex` alone would also scope this to
     // the wrong grain for the real case — a torrent can carry several playable
     // files — so the pair is what a push is ever addressed to.
+    //
+    // The browser's `sourceKey` is a REGISTRY key — a hash of the raw request
+    // bytes, one per (magnet-or-.torrent, this API session). The torrent pool
+    // publishes under its OWN key — the content's infohash, deliberately the
+    // SAME for a magnet and a `.torrent` naming the same film, so the two
+    // share one swarm (item 10). The two are different strings for the same
+    // torrent whenever a source was added by its `.torrent` file (a `.torrent`
+    // and a magnet are different request bytes, same infohash) — subscribing
+    // under the registry key found no publisher for that reason, not because
+    // nothing was ever read: field case 2026-08-22, cues were found and
+    // logged, every push answered "found no subscribed channel". Resolved to
+    // the pool's key here, the one place both are in hand.
     if (path === "/api/subtitles" && typeof query === "string") {
       const params = new URLSearchParams(query);
-      const sourceKey = params.get("sourceKey");
+      const registrySourceKey = params.get("sourceKey");
       const fileIndex = Number(params.get("fileIndex"));
       const hasTrackIndex = params.get("trackIndex") !== null && params.get("trackIndex") !== "";
-      if (sourceKey && Number.isInteger(fileIndex) && hasTrackIndex) {
-        subscribeSubtitles(sourceKey, fileIndex, channel);
+      if (registrySourceKey && Number.isInteger(fileIndex) && hasTrackIndex) {
+        const record = sourceRegistry?.get(registrySourceKey);
+        if (record) {
+          try {
+            const poolSourceKey = await deriveSourceKey(record.sourceType, record.source);
+            subscribeSubtitles(poolSourceKey, fileIndex, channel);
+          } catch (error) {
+            log(`[dc] subtitle push: could not resolve ${registrySourceKey.slice(0, 8)} to a pool key: ` +
+              `${error instanceof Error ? error.message : error}`);
+          }
+        }
       }
     }
 

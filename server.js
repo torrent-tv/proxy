@@ -290,6 +290,14 @@ export async function startProxyServer({
   await app.listen({ host, port: selectedPort });
   return {
     app,
-    port: selectedPort
+    port: selectedPort,
+    // The browser only ever knows a source by its REGISTRY key (a hash of the
+    // raw request bytes, scoped to one API session) — never the torrent
+    // pool's own key (the content's infohash, shared across a magnet and a
+    // `.torrent` naming the same film). The subtitle push subscription is
+    // recorded from a browser request and published from the pool's side, so
+    // resolving one into the other is what lets the two ends agree on what
+    // they are both calling "sourceKey".
+    sourceRegistry
   };
 }

@@ -590,4 +590,31 @@ setInterval(() => {
   }
 }, SUBTITLE_WARMUP_INTERVAL_MS).unref();
 
+/**
+ * Keeps this thread alive ON PURPOSE — the one interval left accounted for
+ * (no `.unref()`).
+ *
+ * Every other recurring handle here is unref'd, upload is disabled by
+ * default, and idle peer connections close about half a minute after the
+ * traffic stops — so once nothing is being read, every handle can be gone
+ * at once, the event loop drains, and this thread ends BY ITSELF. Node then
+ * tears the isolate down, that teardown touches memory some native module
+ * has already freed, and the fault (SIGSEGV inside `uv_timer_stop`, reached
+ * through `PerIsolatePlatformData::Shutdown`) kills the whole process at
+ * once — HTTP server, tunnel, data channels — before any JS handler runs.
+ * Field evidence: two deaths on 2026-08-22 (15:50:12 and 16:12:21 UTC),
+ * each ~35 s after the last byte of traffic, identical core dumps;
+ * same crash family as the utp-native faults of 2026-08-18..21
+ * (`research/worker-thread-drain-crash-2026-08-22.md`).
+ *
+ * An empty repeating interval costs nothing, keeps the loop from draining
+ * while the process lives, and thereby keeps that teardown path — and the
+ * corrupted structure inside it — unreachable, whichever module is guilty.
+ */
+const WORKER_KEEPALIVE_INTERVAL_MS = 5_000;
+
+setInterval(() => {
+  void process.uptime();
+}, WORKER_KEEPALIVE_INTERVAL_MS);
+
 log("torrent worker started");

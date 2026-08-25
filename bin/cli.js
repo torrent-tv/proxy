@@ -24,6 +24,7 @@ import { createTunnelClient } from "../services/tunnel-client.js";
 import { createWebRtcManager } from "../services/webrtc-manager.js";
 import { createDataChannelHandler } from "../services/data-channel-handler.js";
 import { pruneCoreDumps } from "../services/core-dumps.js";
+import { createPacketWitness, pruneWitnessCaptures } from "../services/packet-witness.js";
 import { collectHealthMetrics } from "../services/health-collector.js";
 import { createPortMapper } from "../services/port-mapper.js";
 import { classifyNat } from "../services/nat-classifier.js";
@@ -307,6 +308,13 @@ try {
   // field host, and four of them nearly filled a 235 GB disk. Keep the newest
   // two, which are the evidence for the fault still open, and drop the rest.
   void pruneCoreDumps(options.stateDir);
+  // Same policy for the packet captures the send-queue witness writes.
+  const packetWitness = createPacketWitness({
+    log: (message) => logger.info(message),
+    dir: options.stateDir || "",
+    port: actualPort
+  });
+  void pruneWitnessCaptures(packetWitness.dir);
 
   logger.info(`Starting @torrent-tv/proxy v${PROXY_VERSION}`);
   logger.info(`Local stream endpoint: http://${bindHost}:${actualPort}/stream`);
@@ -428,7 +436,10 @@ try {
     sourceRegistry,
     // Lets a stuck send queue ask the transport what it is doing. Late-bound:
     // the manager is created below, with this handler already in hand.
-    getTransportSnapshot: (sessionId) => webRtcManager?.getTransportSnapshot(sessionId) ?? null
+    getTransportSnapshot: (sessionId) => webRtcManager?.getTransportSnapshot(sessionId) ?? null,
+    // Records the wire when a queue stays wedged — how the rare one-way
+    // transmit death (roadmap item 10, 2026-08-24) gets its evidence.
+    witness: packetWitness
   });
 
   webRtcManager = createWebRtcManager({

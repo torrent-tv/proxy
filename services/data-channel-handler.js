@@ -54,6 +54,15 @@ import { deriveSourceKey } from "./torrent-source-key.js";
  *   Incoming requests are forwarded to `http://127.0.0.1:{proxyPort}`.
  * @property {(message: string) => void} [onLog]
  *   Optional log sink.
+ * @property {{ maybeCapture: (trigger: {
+ *   sessionId: string, tag: string, label: string,
+ *   remote: { address: string, port: number } | null,
+ *   queuedBytes: number, stuckForMs: number
+ * }) => boolean }} [witness]
+ *   The packet witness (services/packet-witness.js). When a wedged queue
+ *   crosses {@linkcode SEND_QUEUE_CAPTURE_AFTER_MS} the watcher hands it the
+ *   transport snapshot's remote endpoint so a bounded tcpdump can record what
+ *   the wire actually did. Optional; absent means no captures are taken.
  */
 
 /**
@@ -108,7 +117,7 @@ import { deriveSourceKey } from "./torrent-source-key.js";
  * @param {DataChannel} channel
  * @returns {() => void} Stops the watch.
  */
-function makeSendQueueWatcher({ log, getTransportSnapshot }) {
+function makeSendQueueWatcher({ log, getTransportSnapshot, witness }) {
   // Every channel of one connection reads the SAME transport counters — the
   // snapshot describes the peer connection, not the channel — so the heartbeat
   // belongs to the connection and is printed once for it. Printed per channel
@@ -123,8 +132,10 @@ function makeSendQueueWatcher({ log, getTransportSnapshot }) {
   // a label is whatever the peer chose and two channels can carry the same one
   // (or none, where `getLabel` is missing and both fall back to "?"), and a
   // Map keyed on that would let one channel evict the other and then, on
-  // closing, delete the survivor's entry.
-  /** @type {Map<string, { channels: Map<DataChannel, string>, at: number, previous: object | null, unknown: number }>} */
+  // closing, delete the survivor's entry. `captureStarted` rides on the same
+  // record: both channels of one wedged connection must ask the witness once,
+  // not once per channel.
+  /** @type {Map<string, { channels: Map<DataChannel, string>, at: number, previous: object | null, unknown: number, captureStarted: boolean }>} */
   const connections = new Map();
 
   /**
@@ -153,7 +164,7 @@ function makeSendQueueWatcher({ log, getTransportSnapshot }) {
     let previous = null;
     let connection = connections.get(sessionId);
     if (!connection) {
-      connection = { channels: new Map(), at: 0, previous: null, unknown: 0 };
+      connection = { channels: new Map(), at: 0, previous: null, unknown: 0, captureStarted: false };
       connections.set(sessionId, connection);
     }
     connection.channels.set(channel, label);
@@ -256,6 +267,31 @@ function makeSendQueueWatcher({ log, getTransportSnapshot }) {
         `received=${snapshot.bytesReceived}${recvDelta === null ? "" : ` (+${recvDelta})`} ` +
         `rtt=${snapshot.rtt}ms pc=${snapshot.state} ice=${snapshot.iceState} pair=${snapshot.pair}`
       );
+      // Roadmap item 10, occurrence 2026-08-24: a wedge this old is the moment
+      // the packet-level truth has to be caught, because no counter above the
+      // wire can name the cause. One attempt per connection — the witness
+      // applies its own single-flight and cooldown rules after that.
+      if (
+        witness &&
+        !connection.captureStarted &&
+        now - stuckSince >= SEND_QUEUE_CAPTURE_AFTER_MS
+      ) {
+        connection.captureStarted = true;
+        const started = witness.maybeCapture({
+          sessionId,
+          tag,
+          label,
+          remote: snapshot.remote ?? null,
+          queuedBytes: queued,
+          stuckForMs: now - stuckSince
+        });
+        if (!started) {
+          // Refused for now (no remote endpoint yet, capture already running
+          // elsewhere, cooldown): let the next tick try again rather than
+          // spending the one attempt per wedge on a refusal.
+          connection.captureStarted = false;
+        }
+      }
     }, SEND_QUEUE_SAMPLE_MS);
 
     if (typeof timer.unref === "function") {
@@ -301,7 +337,7 @@ export function encodeFrame(idBytes, bytes, done) {
   return frame;
 }
 
-export function createDataChannelHandler({ proxyPort, onLog, getTransportSnapshot, sourceRegistry }) {
+export function createDataChannelHandler({ proxyPort, onLog, getTransportSnapshot, sourceRegistry, witness }) {
   /**
    * Channels currently interested in one file's subtitle cues, keyed by
    * `sourceKey:fileIndex`. Populated the moment a browser asks for an
@@ -380,7 +416,7 @@ export function createDataChannelHandler({ proxyPort, onLog, getTransportSnapsho
   /** Request id → its ASCII bytes; see {@link requestIdBytes}. */
   const requestIdCache = new Map();
 
-  const watchSendQueue = makeSendQueueWatcher({ log: (message) => log(message), getTransportSnapshot });
+  const watchSendQueue = makeSendQueueWatcher({ log: (message) => log(message), getTransportSnapshot, witness });
 
   /**
    * @param {string} message
@@ -867,6 +903,12 @@ const TRANSPORT_HEARTBEAT_MS = 5_000;
 // registry does not end a healthy watch.
 const TRANSPORT_UNKNOWN_HEARTBEATS = 3;
 const SEND_QUEUE_STUCK_MS = 5_000;
+// How long a wedged queue waits before the packet witness starts recording the
+// wire. Long enough to be certain this is not a slow drain (a 6-11 MB segment
+// leaves in well under a second, measured), short enough that the capture is
+// still running while whatever broke is breaking — the 2026-08-24 episode
+// began minutes before anyone could have asked for a capture by hand.
+const SEND_QUEUE_CAPTURE_AFTER_MS = 30_000;
 const DC_BUFFER_HIGH_WATER = 8 * 1024 * 1024;
 /** Resume sending once the channel buffer drains to this many bytes. */
 const DC_BUFFER_LOW_WATER = 1 * 1024 * 1024;

@@ -97,6 +97,7 @@ program
     DEFAULT_SEGMENT_FORMAT_ID
   )
   .option("--token <token>", "Registration token", "")
+  .option("--sctp-debug", "Enable verbose SCTP debug logging (SCTP_DEBUG build only)")
   .addHelpText("after", HELP_EXAMPLES);
 
 program.parse(process.argv);
@@ -282,6 +283,23 @@ async function shutdown(signal) {
 
 try {
   logToFile(options.logFile);
+  // Diagnostic: verbose SCTP logging. The binary must have been built with
+  // SCTP_DEBUG=ON (addon 0.48.0); this flag merely sets the log level.
+  if (options.sctpDebug) {
+    try {
+      const dc = await import("node-datachannel");
+      const initLogger =
+        // node-datachannel exports initLogger at the top level; be defensive
+        // about CJS-default interop.
+        dc.initLogger ?? dc.default?.initLogger ?? null;
+      if (typeof initLogger === "function") {
+        initLogger("Verbose");
+        logger.info("SCTP debug verbose logging enabled");
+      }
+    } catch (error) {
+      logger.warn(`Failed to enable SCTP debug: ${error?.message ?? error}`);
+    }
+  }
   if (transcodeAudio) {
     assertFfmpegAvailability();
   }

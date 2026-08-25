@@ -1,3 +1,7 @@
+## 2.55.12
+
+- **Fix**: `--sctp-debug` now passes the required callback to `initLogger` (`node-datachannel` 0.32.x needs two args). The 2.55.10 single-arg call always threw `Function expected` and left verbose logging off.
+
 ## 2.55.11
 
 - **Fix**: `initLogger('Verbose')` call for `--sctp-debug` used the wrong `this` binding and never enabled verbose logging (`Function expected`). Call it as a method on the imported module's default export so the SCTP debug lines appear.

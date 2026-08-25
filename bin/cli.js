@@ -290,7 +290,11 @@ try {
       const mod = await import("node-datachannel");
       const target = mod.default ?? mod;
       if (typeof target.initLogger === "function") {
-        target.initLogger("Verbose");
+        target.initLogger("Verbose", (level, message) => {
+          if (typeof message === "string" && message.startsWith("usrsctp:")) {
+            logger.info(message);
+          }
+        });
         logger.info("SCTP debug verbose logging enabled");
       }
     } catch (error) {

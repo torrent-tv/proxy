@@ -443,11 +443,11 @@ export function createWebRtcManager({ sendSignal, onDataChannel, onLog, udpPort,
    *    collapsed. `bytesReceived` still climbing at the same time proves the
    *    peer is alive and its packets still reach us, i.e. the failure is
    *    one-directional.
-   *  - both flat → nothing crosses in either direction.
-   *
-   * @param {string} sessionId
-   * @returns {{ bytesSent: number, bytesReceived: number, rtt: number, pair: string, state: string, iceState: string } | null}
-   */
+    *  - both flat → nothing crosses in either direction.
+    *
+    * @param {string} sessionId
+    * @returns {{ bytesSent: number, bytesReceived: number, rtt: number, pair: string, remote: { address: string, port: number } | null, state: string, iceState: string } | null}
+    */
   function getTransportSnapshot(sessionId) {
     const pc = peers.get(sessionId);
     if (!pc) {
@@ -469,6 +469,12 @@ export function createWebRtcManager({ sendSignal, onDataChannel, onLog, udpPort,
         ? `${pair.local?.address}:${pair.local?.port}->${pair.remote?.address}:${pair.remote?.port}` +
           ` (${pair.local?.type}/${pair.remote?.type})`
         : "none",
+      // Structured, for consumers that need to act on the endpoint itself (the
+      // packet witness builds a tcpdump filter from it) rather than print it.
+      remote:
+        typeof pair?.remote?.address === "string" && Number.isFinite(pair?.remote?.port)
+          ? { address: pair.remote.address, port: pair.remote.port }
+          : null,
       state: read(() => pc.state(), "?"),
       iceState: read(() => pc.iceState(), "?")
     };

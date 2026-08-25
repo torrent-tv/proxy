@@ -1,3 +1,7 @@
+## 2.55.10
+
+- **Change**: Add `--sctp-debug` (off by default). When enabled, the proxy calls `node-datachannel.initLogger('Verbose')` early so SCTP-level lines (`usrsctp: …`) become visible. Useful only with an image rebuilt with `SCTP_DEBUG=ON` (addon 0.48.0) — there they carry the SACK `a_rwnd` and gap information that separates the two remaining hypotheses for the delivery-side freeze of 2026-08-24/25.
+
 ## 2.55.9
 
 - **New**: A send queue that stays wedged for over 30 s now records the wire itself. Field session 2026-08-24 (`research/dead-channel-2026-08-24.md`): the proxy counted bytes as sent that never reached the viewer's SCTP stack, and every counter above the wire reported success for 88 minutes — the two candidate causes inside SCTP separate by one look at the packets (duplicate SACKs naming a missing TSN with no retransmission vs SACKs advertising `a_rwnd=0`), but occurrences are rare, so waiting to be asked meant waiting forever. When the stuck warning crosses 30 s, the proxy spawns a bounded tcpdump on the WebRTC UDP port filtered to that session's remote address: snaplen 128 B, ring of 4 × 30 s files beside the core dumps (`--state-dir`), killed after 120 s + grace, one capture at a time with a 10-minute cooldown, old captures pruned at startup the way core dumps are. Where no tcpdump exists it degrades to a single log line; the address travels into the filter only as a validated IPv4/IPv6 literal (zone suffixes stripped), spawned as an argv array without a shell.

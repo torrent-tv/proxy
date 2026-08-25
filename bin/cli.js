@@ -287,13 +287,10 @@ try {
   // SCTP_DEBUG=ON (addon 0.48.0); this flag merely sets the log level.
   if (options.sctpDebug) {
     try {
-      const dc = await import("node-datachannel");
-      const initLogger =
-        // node-datachannel exports initLogger at the top level; be defensive
-        // about CJS-default interop.
-        dc.initLogger ?? dc.default?.initLogger ?? null;
-      if (typeof initLogger === "function") {
-        initLogger("Verbose");
+      const mod = await import("node-datachannel");
+      const target = mod.default ?? mod;
+      if (typeof target.initLogger === "function") {
+        target.initLogger("Verbose");
         logger.info("SCTP debug verbose logging enabled");
       }
     } catch (error) {

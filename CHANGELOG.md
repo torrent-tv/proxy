@@ -1,3 +1,7 @@
+## 2.55.11
+
+- **Fix**: `initLogger('Verbose')` call for `--sctp-debug` used the wrong `this` binding and never enabled verbose logging (`Function expected`). Call it as a method on the imported module's default export so the SCTP debug lines appear.
+
 ## 2.55.10
 
 - **Change**: Add `--sctp-debug` (off by default). When enabled, the proxy calls `node-datachannel.initLogger('Verbose')` early so SCTP-level lines (`usrsctp: …`) become visible. Useful only with an image rebuilt with `SCTP_DEBUG=ON` (addon 0.48.0) — there they carry the SACK `a_rwnd` and gap information that separates the two remaining hypotheses for the delivery-side freeze of 2026-08-24/25.

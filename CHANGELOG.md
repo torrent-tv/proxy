@@ -1,3 +1,7 @@
+## 2.55.14
+
+- **Chore**: `--sctp-debug` is removed. It set node-datachannel's log level to verbose and filtered for `usrsctp:` lines, which only exist in a binary built with `SCTP_DEBUG=ON` — a source rebuild of libdatachannel that is not done any more. A flag that cannot do anything in any image we ship is an untruthful interface; the delivery probes of 2.55.13 answer the question it was wanted for (a probe on an unordered, no-retransmit channel passes head-of-line blocking in another stream but not a closed receive window) without touching the native build.
+
 ## 2.55.13
 
 - **New**: numbered delivery probes (`services/delivery-probe.js`). Every channel of a connection carries a numbered probe twice a second; the far end echoes back the highest number it saw on each, and the gaps are read into a verdict — `flowing`, `stream-stuck` (a retransmission held up in one stream), `association-stopped` (the window shut or transmission halted), `reverse-direction-gone`. The proxy's own counters could never separate those: libdatachannel's `bytesSent` counts bytes accepted into usrsctp, not bytes put on the wire. Logged as `[dc-probe]`, with the numbers that produced each verdict beside it.

@@ -80,6 +80,7 @@ program
   .option("--name <name>", "Display name")
   .option("--no-transcode-audio", "Disable optional HLS AAC audio transcoding")
   .option("--no-port-mapping", "Disable automatic UPnP/NAT-PMP port mapping")
+  .option("--delivery-sink", "Serve /api/delivery-sink, a torrent-free byte stream for delivery testing")
   .option("--max-disk-bytes <bytes>", "Cap total downloaded torrent data (0 = disabled; default min(10GB, half free disk))")
   .option("--memory-bytes <bytes>", "Per-torrent budget for pieces kept in memory before spilling to disk (default 512MB)")
   .option("--ffmpeg-bin <path>", "Path to ffmpeg binary")
@@ -313,6 +314,7 @@ try {
     memoryBytes,
     segmentFormat: options.segmentFormat,
     stateDir: options.stateDir,
+    deliverySink: options.deliverySink === true,
     // Late-bound the same way `webRtcManager` is below: the torrent pool is
     // built inside `startProxyServer`, before `dataChannelHandler` — the
     // thing that actually owns a channel to push down — exists.

@@ -16,6 +16,7 @@ import { createRequire } from "node:module";
 import { fileURLToPath } from "node:url";
 import { handleHealthGet } from "./routes/health/get.js";
 import { handleHealthzGet } from "./routes/healthz/get.js";
+import { handleApiDeliverySinkGet } from "./routes/api/delivery-sink/get.js";
 import { handleApiSourcesPost } from "./routes/api/sources/post.js";
 import { handleApiSourceStatsGet } from "./routes/api/sources/stats/get.js";
 import { handleApiSourceFilesGet } from "./routes/api/sources/files/get.js";
@@ -81,7 +82,8 @@ function buildPortCandidates(startPort, maxAttempts = 51) {
  * @returns {Promise<{ app: import("fastify").FastifyInstance, port: number }>}
  */
 export async function startProxyServer({
-  host, port, transcodeAudio, ffmpegBin, maxDiskBytes, memoryBytes, segmentFormat, stateDir, onSubtitleCues
+  host, port, transcodeAudio, ffmpegBin, maxDiskBytes, memoryBytes, segmentFormat, stateDir, onSubtitleCues,
+  deliverySink = false
 }) {
   const app = Fastify({
     // No practical body-size limit — the proxy server is localhost-only and
@@ -209,6 +211,10 @@ export async function startProxyServer({
 
   app.get("/health", async (req, reply) => handleHealthGet(req, reply, { version }));
   app.get("/healthz", async (req, reply) => handleHealthzGet(req, reply, { version }));
+  // Off unless --delivery-sink was given; see the route for why it exists.
+  app.get("/api/delivery-sink", async (req, reply) =>
+    handleApiDeliverySinkGet(req, reply, { enabled: deliverySink === true })
+  );
   app.post("/api/sources", async (req, reply) =>
     handleApiSourcesPost(req, reply, { sourceRegistry })
   );

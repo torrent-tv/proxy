@@ -63,6 +63,11 @@ const TEXT_CODECS = new Set(["S_TEXT/UTF8", "S_TEXT/ASS", "S_TEXT/SSA"]);
 /**
  * @typedef {object} SubtitleTrackPlan
  * @property {number} trackNumber - As the blocks name it.
+ * @property {number} declaredIndex - Its position among ALL of the file's
+ *   subtitle tracks, picture-based ones included — which is the number ffmpeg
+ *   gives the same stream in `0:s:N`, and therefore the only number the browser
+ *   ever names. Text tracks alone are not a numbering: a file whose PGS track
+ *   comes first would have every text track one lower here than in the browser.
  * @property {string} codecId
  * @property {string} language - The three-letter code the file declares.
  * @property {string} name - What the file calls the track, if anything.
@@ -178,6 +183,7 @@ export async function readSubtitlePlan(readRange, fileSize) {
     }
     tracks.push({
       trackNumber,
+      declaredIndex: declared.length - 1,
       codecId,
       language,
       name,

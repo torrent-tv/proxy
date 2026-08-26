@@ -29,6 +29,15 @@ const MAX_MOOV_BYTES = 32 * 1024 * 1024;
 
 /** Handlers that mean "this track is text on screen". */
 const TEXT_HANDLERS = new Set(["text", "sbtl", "subt"]);
+/**
+ * Every handler ffmpeg's mov demuxer turns into a SUBTITLE stream, whether or
+ * not this file can read it — `subp` is a DVD subpicture and `clcp` closed
+ * captions, both pictures or caption data rather than text. They are counted
+ * because `declaredIndex` has to equal ffmpeg's `0:s:N`, and a track left out
+ * of the count shifts every text track after it, which is the very defect
+ * `declaredIndex` exists to remove.
+ */
+const SUBTITLE_HANDLERS = new Set([...TEXT_HANDLERS, "subp", "clcp"]);
 /** Sample formats this can turn into cues. `stpp` (TTML) is XML and is not one. */
 const TEXT_FORMATS = new Set(["tx3g", "text", "wvtt"]);
 
@@ -218,6 +227,11 @@ function sampleOffsets(moov, stsc, chunkOffsets, sizes) {
 /**
  * @typedef {object} Mp4SubtitleTrack
  * @property {number} trackId
+ * @property {number} declaredIndex - Its position among ALL of the file's
+ *   subtitle tracks, including the ones whose sample format this cannot turn
+ *   into cues (`stpp` TTML). That is the number ffmpeg gives the same stream in
+ *   `0:s:N`, which is the number the browser names; counting only the readable
+ *   ones would shift every track after a TTML one.
  * @property {string} format - `tx3g`, `text` or `wvtt`.
  * @property {string} language - Three letters, as the file declares them.
  * @property {Mp4SubtitleSample[]} samples - In time order.
@@ -246,6 +260,9 @@ export async function readMp4SubtitlePlan(readRange, fileSize) {
 
   /** @type {Mp4SubtitleTrack[]} */
   const tracks = [];
+  // Counts every subtitle track the file has, whether or not this can read it,
+  // so the number handed out matches ffmpeg's `0:s:N`. See `declaredIndex`.
+  let declaredIndex = -1;
   for (const trak of childrenOf(moov, moovBox.dataOffset, moov.length, "trak")) {
     const mdia = childOf(moov, trak.dataOffset, trak.end, "mdia");
     if (!mdia) {
@@ -253,6 +270,13 @@ export async function readMp4SubtitlePlan(readRange, fileSize) {
     }
     const hdlr = childOf(moov, mdia.dataOffset, mdia.end, "hdlr");
     const handler = hdlr ? moov.toString("latin1", hdlr.dataOffset + 8, hdlr.dataOffset + 12) : "";
+    if (!SUBTITLE_HANDLERS.has(handler)) {
+      continue;
+    }
+    // Counted before the readability checks below, and before the handler is
+    // narrowed to the text ones: this number is the track's place in the file,
+    // not its place among the tracks this code can turn into cues.
+    declaredIndex += 1;
     if (!TEXT_HANDLERS.has(handler)) {
       continue;
     }
@@ -337,7 +361,7 @@ export async function readMp4SubtitlePlan(readRange, fileSize) {
         });
       }
     }
-    tracks.push({ trackId, format, language, samples });
+    tracks.push({ trackId, declaredIndex, format, language, samples });
   }
   return { tracks };
 }

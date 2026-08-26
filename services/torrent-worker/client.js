@@ -194,7 +194,8 @@ export class TorrentWorkerClient {
             fileIndex: message.fileIndex,
             trackIndex: message.trackIndex,
             cues: message.cues,
-            language: message.language
+            language: message.language,
+            cursor: message.cursor
           });
           break;
         default:

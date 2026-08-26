@@ -522,12 +522,27 @@ function warmActiveFiles(sourceKey, torrent) {
     return;
   }
   for (const fileIndex of usage.keys()) {
+    const key = `${sourceKey}:${fileIndex}`;
+    // A trigger that arrives while the previous pass is still walking is
+    // dropped, not queued. `verified` fires per piece, so on a fast download
+    // these arrive many times a second; the walk is serialized per file anyway,
+    // and a queue of identical passes would only postpone the one that has
+    // something new to find.
+    if (warmupInFlight.has(key)) {
+      continue;
+    }
+    warmupInFlight.add(key);
     warmSubtitleCues(torrent, fileIndex, sourceKey)
       .then((fresh) => {
         for (const entry of fresh) {
+          const span = entry.spanStartSeconds === null
+            ? "empty"
+            : `${entry.spanStartSeconds.toFixed(1)}-${entry.spanEndSeconds.toFixed(1)}s`;
           log(
             `subtitle push ${sourceKey.slice(0, 8)}:${fileIndex} track ${entry.trackIndex}: ` +
-            `${entry.cues.length} new cue(s) found, posting to main thread`
+            `${entry.cues.length} new cue(s) covering ${span}, ` +
+            `clusters walked ${entry.walkedClusters}/${entry.indexedClusters}, cursor ${entry.cursor}, ` +
+            "posting to main thread"
           );
           parentPort.postMessage({
             type: Event.SUBTITLE_CUES_READY,
@@ -535,15 +550,26 @@ function warmActiveFiles(sourceKey, torrent) {
             fileIndex,
             trackIndex: entry.trackIndex,
             cues: entry.cues,
-            language: entry.language
+            language: entry.language,
+            cursor: entry.cursor
           });
         }
       })
       .catch((error) => {
         log(`subtitle warmup ${sourceKey}:${fileIndex} failed: ${error instanceof Error ? error.message : error}`);
+      })
+      .finally(() => {
+        warmupInFlight.delete(key);
       });
   }
 }
+
+/**
+ * Files whose warmup pass has not finished yet, by `sourceKey:fileIndex`.
+ *
+ * @type {Set<string>}
+ */
+const warmupInFlight = new Set();
 
 /**
  * Torrents already wired to warm their subtitle cues the moment a piece

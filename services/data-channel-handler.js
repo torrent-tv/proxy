@@ -21,7 +21,7 @@
  * { type: "response-start", requestId, status, headers }   (JSON string)
  * { type: "response-error", requestId, error: string }     (JSON string)
  * { type: "pong",           id }                            (JSON string)
- * { type: "subtitle-cues",  fileIndex, trackIndex, cues, language } (JSON string)
+ * { type: "subtitle-cues",  fileIndex, trackIndex, cues, language, cursor } (JSON string)
  * ```
  * The last one is unsolicited — sent the moment new cues are read from a
  * file's already-downloaded pieces, to whichever channel last asked for that
@@ -385,10 +385,10 @@ export function createDataChannelHandler({ proxyPort, onLog, getTransportSnapsho
    * are tiny (kilobytes at most for a whole track), so this is one message,
    * not a stream.
    *
-   * @param {{ sourceKey: string, fileIndex: number, trackIndex: number, cues: object[], language: string }} event
+   * @param {{ sourceKey: string, fileIndex: number, trackIndex: number, cues: object[], language: string, cursor: number }} event
    * @returns {void}
    */
-  function publishSubtitleCues({ sourceKey, fileIndex, trackIndex, cues, language }) {
+  function publishSubtitleCues({ sourceKey, fileIndex, trackIndex, cues, language, cursor }) {
     const set = subtitleSubscribers.get(`${sourceKey}:${fileIndex}`);
     if (!set || set.size === 0) {
       log(
@@ -397,7 +397,7 @@ export function createDataChannelHandler({ proxyPort, onLog, getTransportSnapsho
       );
       return;
     }
-    const message = { type: "subtitle-cues", fileIndex, trackIndex, cues, language };
+    const message = { type: "subtitle-cues", fileIndex, trackIndex, cues, language, cursor };
     const total = set.size;
     let sent = 0;
     for (const channel of set) {

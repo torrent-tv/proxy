@@ -268,9 +268,10 @@ function readFileFully(file, maxBytes) {
  * The cues of a track from clusters already downloaded, as WebVTT.
  *
  * `trackIndex` is the browser's number for the subtitle stream — its position
- * among the subtitle streams, as ffprobe lists them — while Matroska blocks
- * carry the file's own track number. The plan lists the text tracks in file
- * order, so the browser's Nth subtitle stream is the Nth entry.
+ * among ALL the subtitle streams, as ffmpeg lists them — while Matroska blocks
+ * carry the file's own track number. The plan lists only the tracks that can
+ * become text, so it is matched on `declaredIndex`, which each track carries
+ * for exactly this: its place in the file's full list of subtitle tracks.
  *
  * @param {object} torrentPool
  * @param {object} torrent
@@ -289,7 +290,15 @@ async function cuesFromDownloadedClusters(torrentPool, torrent, fileIndex, track
   } catch {
     return null;
   }
-  const track = Array.isArray(tracks) ? tracks[trackIndex] : null;
+  // BY the browser's number, not by position in this list. The list holds only
+  // the tracks that can become WebVTT, while the browser counts every subtitle
+  // stream ffmpeg lists — so on a file carrying a PGS or VobSub track the two
+  // ran one apart, and the request either found the wrong track or found none
+  // and fell through to the ffmpeg extraction below, which reads the whole film
+  // (752 s measured, 2026-08-19) for cues already in hand.
+  const track = Array.isArray(tracks)
+    ? tracks.find((candidate) => candidate.declaredIndex === trackIndex) ?? null
+    : null;
   if (!track) {
     return null;
   }

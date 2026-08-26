@@ -12,10 +12,12 @@
  * ```
  * { type: "request",  requestId, method, path, query, headers, body }
  * { type: "ping",     id }
+ * { type: "probe-echo", seen: { <label>: seq }, report }
  * ```
  *
  * Proxy → Browser
  * ```
+ * { type: "probe",          seq, sentAt }                   (JSON string)
  * { type: "response-start", requestId, status, headers }   (JSON string)
  * { type: "response-error", requestId, error: string }     (JSON string)
  * { type: "pong",           id }                            (JSON string)
@@ -44,6 +46,7 @@
 /** @import { DataChannel } from 'node-datachannel' */
 
 import { deriveSourceKey } from "./torrent-source-key.js";
+import { createDeliveryProbe } from "./delivery-probe.js";
 
 /**
  * Configuration for the data channel handler.
@@ -417,6 +420,11 @@ export function createDataChannelHandler({ proxyPort, onLog, getTransportSnapsho
   const requestIdCache = new Map();
 
   const watchSendQueue = makeSendQueueWatcher({ log: (message) => log(message), getTransportSnapshot, witness });
+  // Numbered probes on every channel, and the browser's echo of what it saw.
+  // The proxy's own counters cannot say whether bytes it handed to usrsctp were
+  // ever put on the wire; the far end can, and it keeps answering throughout a
+  // freeze. See services/delivery-probe.js.
+  const deliveryProbe = createDeliveryProbe({ log: (message) => log(message) });
 
   /**
    * @param {string} message
@@ -440,6 +448,7 @@ export function createDataChannelHandler({ proxyPort, onLog, getTransportSnapsho
     const label = typeof channel.getLabel === "function" ? channel.getLabel() : "?";
     log(`[dc] Session ${tag}: channel open`);
     const stopWatchdog = watchSendQueue(sessionId, tag, label, channel);
+    deliveryProbe.attach(sessionId, tag, label, channel);
 
     // Partial chunked-request bodies in flight on THIS channel, keyed by
     // requestId. Each entry buffers frames until the done frame, then runs the
@@ -568,11 +577,35 @@ export function createDataChannelHandler({ proxyPort, onLog, getTransportSnapsho
 
       if (message.type === "ping") {
         send(channel, { type: "pong", id: message.id });
+        return;
+      }
+
+      // The far end's answer to the numbered probes, plus what it can see of
+      // its own receiving. It travels browser to proxy, the direction that goes
+      // on working through a freeze, so it arrives when nothing else does.
+      if (message.type === "probe-echo") {
+        deliveryProbe.noteEcho(sessionId, message);
+        if (message.report && typeof message.report === "object") {
+          const report = message.report;
+          const channels = report.channels && typeof report.channels === "object"
+            ? Object.entries(report.channels)
+                .map(([name, counters]) => `${name}=${counters?.messages ?? "?"}msg/${counters?.bytes ?? "?"}B`)
+                .join(" ")
+            : "";
+          log(
+            `[dc-far] ${tag} visibility=${report.visibility ?? "?"} ` +
+            `loopLag=${report.loopLagMs ?? "?"}ms handler=${report.handlerMaxMs ?? "?"}ms ` +
+            `transportIn=${report.transportBytesReceived ?? "?"} ${channels} ` +
+            `pending=${report.pending ?? "?"} at=${new Date().toISOString()}`
+          );
+        }
+        return;
       }
     });
 
     channel.onClosed(() => {
       stopWatchdog();
+      deliveryProbe.detach(sessionId, channel);
       for (const entry of partials.values()) {
         clearTimeout(entry.timer);
       }

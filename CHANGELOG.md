@@ -1,3 +1,9 @@
+## 2.55.13
+
+- **New**: numbered delivery probes (`services/delivery-probe.js`). Every channel of a connection carries a numbered probe twice a second; the far end echoes back the highest number it saw on each, and the gaps are read into a verdict — `flowing`, `stream-stuck` (a retransmission held up in one stream), `association-stopped` (the window shut or transmission halted), `reverse-direction-gone`. The proxy's own counters could never separate those: libdatachannel's `bytesSent` counts bytes accepted into usrsctp, not bytes put on the wire. Logged as `[dc-probe]`, with the numbers that produced each verdict beside it.
+- **New**: the far end's own account of itself is logged as `[dc-far]` — tab visibility, event-loop lag, the longest the channel's message handler ran, the transport's received bytes and per-channel message counts. A page that has stopped draining the channel and a sender that has stopped transmitting look identical from here; this is the difference.
+- **New**: `--delivery-sink` serves `GET /api/delivery-sink?bytes=N`, a torrent-free stream of a repeating pattern, so gigabytes can be pushed through a data channel on demand. Off without the flag (404), and it exists because the delivery freeze takes hundreds of megabytes and the real transport to appear at all.
+
 ## 2.55.12
 
 - **Fix**: `--sctp-debug` now passes the required callback to `initLogger` (`node-datachannel` 0.32.x needs two args). The 2.55.10 single-arg call always threw `Function expected` and left verbose logging off.

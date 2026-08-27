@@ -643,4 +643,59 @@ setInterval(() => {
   void process.uptime();
 }, WORKER_KEEPALIVE_INTERVAL_MS);
 
+/**
+ * Say why this thread is ending, from inside it, before anything is torn down.
+ *
+ * The crash of 2026-08-27 15:40 is `node::worker::Worker::Run()` returning and
+ * node faulting as it closes what was left on this loop. The parent DOES watch
+ * for an unexpected exit and has a line ready for it — but that line never
+ * printed, because the fault happens during this thread's own teardown, before
+ * the parent's `exit` event is delivered. So the one reading that would name
+ * the cause was being eaten by the failure it was meant to explain.
+ *
+ * These handlers run first, synchronously, and write through the same channel
+ * as every other line here. `beforeExit` means the loop drained despite the
+ * keepalive above; `exit` means the thread is going whatever the reason. The
+ * list of what was still holding the loop open is the part that says which.
+ */
+process.on("beforeExit", (code) => {
+  log(
+    `thread is about to end because the event loop drained (code ${code}) — ` +
+    `still open: ${describeActiveResources()}`
+  );
+});
+
+process.on("exit", (code) => {
+  log(`thread ending with code ${code} — still open: ${describeActiveResources()}`);
+});
+
+process.on("uncaughtException", (error) => {
+  log(`thread hit an uncaught error: ${error?.stack ?? error}`);
+});
+
+process.on("unhandledRejection", (reason) => {
+  log(`thread hit an unhandled rejection: ${reason?.stack ?? reason}`);
+});
+
+/**
+ * What is still holding this thread's event loop open, as node names it.
+ *
+ * @returns {string} A tally per resource kind, or why it could not be read.
+ */
+function describeActiveResources() {
+  try {
+    const names = process.getActiveResourcesInfo?.() ?? [];
+    if (names.length === 0) {
+      return "nothing";
+    }
+    const tally = new Map();
+    for (const name of names) {
+      tally.set(name, (tally.get(name) ?? 0) + 1);
+    }
+    return [...tally].map(([name, count]) => `${name}x${count}`).join(" ");
+  } catch (error) {
+    return `unreadable (${error?.message ?? error})`;
+  }
+}
+
 log("torrent worker started");

@@ -46,7 +46,7 @@
 /** @import { DataChannel } from 'node-datachannel' */
 
 import { deriveSourceKey } from "./torrent-source-key.js";
-import { createDeliveryProbe } from "./delivery-probe.js";
+import { createDeliveryProbe, PROBE_INTERVAL_MS } from "./delivery-probe.js";
 
 /**
  * Configuration for the data channel handler.
@@ -62,10 +62,10 @@ import { createDeliveryProbe } from "./delivery-probe.js";
  *   remote: { address: string, port: number } | null,
  *   queuedBytes: number, stuckForMs: number
  * }) => boolean }} [witness]
- *   The packet witness (services/packet-witness.js). When a wedged queue
- *   crosses {@linkcode SEND_QUEUE_CAPTURE_AFTER_MS} the watcher hands it the
- *   transport snapshot's remote endpoint so a bounded tcpdump can record what
- *   the wire actually did. Optional; absent means no captures are taken.
+ *   The packet witness (services/packet-witness.js). When {@link wedgeIsCertain}
+ *   says delivery has stopped, the watcher hands it the transport snapshot's
+ *   remote endpoint: the ring's history is kept and a tail capture records what
+ *   the wire actually does. Optional; absent means no captures are taken.
  */
 
 /**
@@ -87,6 +87,45 @@ import { createDeliveryProbe } from "./delivery-probe.js";
  * @property {(sessionId: string, channel: DataChannel) => void} handleChannel
  *   Wire message handlers onto a freshly opened data channel.
  */
+
+/**
+ * How long a wedge must hold before the packet witness is asked for evidence.
+ *
+ * Derived per connection rather than chosen, because a chosen number is what
+ * cost the two field captures their onset: the previous rule waited a flat 30 s
+ * and the recording therefore began half a minute after the interesting part.
+ *
+ * Three quantities, all measured on this connection:
+ *
+ *   the queue's own drain time — `queuedBytes / bytesPerSecond`, how long a
+ *   healthy channel would need to clear what is sitting in it, at the best rate
+ *   this very connection has been seen to move bytes at;
+ *
+ *   the longest this connection has EVER paused while healthy — an ordinary
+ *   retransmission timeout stops the accepted-byte counter dead for as long as
+ *   it lasts, because a full send buffer accepts nothing, and a link with loss
+ *   does that routinely. The longest such pause already observed here is what
+ *   the link's own behaviour says a legitimate pause looks like;
+ *
+ *   the interval at which we offer bytes at all — the delivery probe hands
+ *   every channel a message every {@linkcode PROBE_INTERVAL_MS}, so in health
+ *   the accepted-byte counter cannot stand still for longer than that.
+ *
+ * A wedge is certain once ALL of them have passed with the counter unmoved.
+ * Without a rate there is nothing to divide by, and the function says so
+ * instead of guessing.
+ *
+ * @param {{ queuedBytes: number, bytesPerSecond: number, flatForMs: number, longestHealthyFlatMs?: number }} state
+ * @returns {{ certain: boolean, needMs: number | null }}
+ */
+export function wedgeIsCertain({ queuedBytes, bytesPerSecond, flatForMs, longestHealthyFlatMs = 0 }) {
+  if (!(queuedBytes > 0) || !(bytesPerSecond > 0)) {
+    return { certain: false, needMs: null };
+  }
+  const drainMs = (queuedBytes / bytesPerSecond) * 1000;
+  const needMs = Math.max(drainMs, longestHealthyFlatMs, PROBE_INTERVAL_MS);
+  return { certain: flatForMs >= needMs, needMs };
+}
 
 /**
  * Watch one channel's send queue and, when it stops draining, say WHY.
@@ -161,24 +200,88 @@ function makeSendQueueWatcher({ log, getTransportSnapshot, witness }) {
     return parts.join(" ");
   };
 
-  return function watchSendQueue(sessionId, tag, label, channel) {
+  /**
+   * What this connection is getting away, for whoever else needs it.
+   *
+   * The delivery probe judges a late probe against the queue ahead of it, and
+   * the queue's drain time needs a rate. It is measured here already, once a
+   * second, so it is read from here rather than measured twice.
+   *
+   * @param {string} sessionId
+   * @returns {{ bytesPerSecond: number, rttMs: number } | null}
+   */
+  const readDelivery = (sessionId) => {
+    const connection = connections.get(sessionId);
+    if (!connection) {
+      return null;
+    }
+    return {
+      bytesPerSecond: connection.bytesPerSecond,
+      rttMs: Number(connection.previous?.rtt) || 0
+    };
+  };
+
+  /**
+   * @param {string} sessionId
+   * @param {string} tag
+   * @param {string} label
+   * @param {DataChannel} channel
+   * @returns {() => void} Stops the watch.
+   */
+  const watchSendQueue = (sessionId, tag, label, channel) => {
     let lowestSinceDrain = Number.POSITIVE_INFINITY;
     let stuckSince = 0;
     let previous = null;
+    // The peer's byte count when this queue stopped falling. What separates a
+    // wedge from an ordinary dead connection is that the far end keeps sending
+    // throughout — measured across the whole wedge window rather than sampled
+    // in a one-second slice, because the browser polls every 1.5 s and plenty
+    // of individual seconds are legitimately empty.
+    let receivedWhenStuck = -1;
+    // Per CHANNEL, not per connection: `proxy-control` and `proxy-fast` hold an
+    // empty queue in health and tick every second, so a flag shared with them
+    // would be cleared a second after the wedged channel set it and the line
+    // would print for every second of a 54-minute episode.
+    let wedgeSaid = false;
     let connection = connections.get(sessionId);
     if (!connection) {
-      connection = { channels: new Map(), at: 0, previous: null, unknown: 0, captureStarted: false };
+      connection = {
+        channels: new Map(),
+        at: 0,
+        previous: null,
+        unknown: 0,
+        captureStarted: false,
+        // The accepted-byte counter and when it last moved, plus the rate it
+        // was moving at. `wedgeIsCertain` divides the queue by that rate.
+        rateAt: 0,
+        sentAt: 0,
+        sentBytes: 0,
+        bytesPerSecond: 0,
+        longestHealthyFlatMs: 0
+      };
       connections.set(sessionId, connection);
     }
     connection.channels.set(channel, label);
     /** @type {ReturnType<typeof setInterval> | null} */
     let timer = null;
+    let stopped = false;
+    // Record the wire for as long as this channel is open. Held here rather
+    // than beside `onClosed`, because `onClosed` does not always come — a peer
+    // connection can die without it — and the watch below already ends itself
+    // when the transport stops answering. A hold that outlives its channel
+    // would leave tcpdump writing on an idle proxy for the life of the process.
+    witness?.holdRing?.();
     /**
      * End this channel's watch and let go of its entry.
      *
      * @returns {void}
      */
     const stop = () => {
+      if (stopped) {
+        return;
+      }
+      stopped = true;
+      witness?.releaseRing?.();
       if (timer) {
         clearInterval(timer);
       }
@@ -234,6 +337,47 @@ function makeSendQueueWatcher({ log, getTransportSnapshot, witness }) {
           );
         }
       }
+      // The rate this connection accepts bytes at, and how long that counter
+      // has stood still — both measured every second, whatever the queue is
+      // doing, because the rate has to come from the HEALTHY stretch that
+      // precedes a wedge. One channel updates it for the whole connection.
+      if (sampledAt - connection.rateAt >= SEND_QUEUE_SAMPLE_MS) {
+        connection.rateAt = sampledAt;
+        const snapshot = getTransportSnapshot?.(sessionId) ?? null;
+        const sentNow = Number(snapshot?.bytesSent);
+        if (Number.isFinite(sentNow) && sentNow >= 0) {
+          if (connection.sentAt === 0 || sentNow < connection.sentBytes) {
+            // First reading, or the counter went backwards — a fresh peer
+            // connection reusing this session id. Either way the old baseline
+            // describes a transport that no longer exists, so start over
+            // rather than measure a pause against it for ever.
+            connection.sentBytes = sentNow;
+            connection.sentAt = sampledAt;
+          } else if (sentNow > connection.sentBytes) {
+            const seconds = (sampledAt - connection.sentAt) / 1000;
+            if (seconds > 0) {
+              // The BEST rate this connection has shown, not the latest one.
+              // The latest is usually the quietest: with the browser's buffer
+              // full nothing is requested for tens of seconds and the only
+              // traffic is the probe, a few hundred bytes a second. Dividing a
+              // queue by that gives hours, and the wedge would never be called.
+              const rate = (sentNow - connection.sentBytes) / seconds;
+              if (rate > connection.bytesPerSecond) {
+                connection.bytesPerSecond = rate;
+              }
+            }
+            // How long the counter stood still before this advance. While the
+            // queue is draining that pause was legitimate, so it is the link's
+            // own answer to "how long may a healthy pause be".
+            const pausedMs = sampledAt - connection.sentAt;
+            if (stuckSince === 0 && pausedMs > connection.longestHealthyFlatMs) {
+              connection.longestHealthyFlatMs = pausedMs;
+            }
+            connection.sentBytes = sentNow;
+            connection.sentAt = sampledAt;
+          }
+        }
+      }
       let queued = 0;
       try {
         queued = typeof channel.bufferedAmount === "function" ? channel.bufferedAmount() : 0;
@@ -244,6 +388,12 @@ function makeSendQueueWatcher({ log, getTransportSnapshot, witness }) {
         lowestSinceDrain = queued;
         stuckSince = 0;
         previous = null;
+        receivedWhenStuck = -1;
+        wedgeSaid = false;
+        // The queue moved, so whatever was called a wedge has cleared. Let a
+        // later one be recorded too: one mistaken call must not spend the
+        // session's only capture.
+        connection.captureStarted = false;
         return;
       }
       const now = Date.now();
@@ -251,33 +401,67 @@ function makeSendQueueWatcher({ log, getTransportSnapshot, witness }) {
         stuckSince = now;
         return;
       }
-      if (now - stuckSince < SEND_QUEUE_STUCK_MS) {
-        return;
-      }
       const snapshot = getTransportSnapshot?.(sessionId) ?? null;
       if (!snapshot) {
-        log(`[dc] Session ${tag} "${label}": send queue stuck at ${queued}B for ` +
-          `${Math.round((now - stuckSince) / 1000)}s — no transport to ask`);
+        if (now - stuckSince >= SEND_QUEUE_STUCK_MS) {
+          log(`[dc] Session ${tag} "${label}": send queue stuck at ${queued}B for ` +
+            `${Math.round((now - stuckSince) / 1000)}s — no transport to ask`);
+        }
         return;
       }
       const sentDelta = previous ? snapshot.bytesSent - previous.bytesSent : null;
       const recvDelta = previous ? snapshot.bytesReceived - previous.bytesReceived : null;
       previous = snapshot;
-      log(
-        `[dc] Session ${tag} "${label}": send queue stuck at ${queued}B for ` +
-        `${Math.round((now - stuckSince) / 1000)}s — transport ` +
-        `sent=${snapshot.bytesSent}${sentDelta === null ? "" : ` (+${sentDelta})`} ` +
-        `received=${snapshot.bytesReceived}${recvDelta === null ? "" : ` (+${recvDelta})`} ` +
-        `rtt=${snapshot.rtt}ms pc=${snapshot.state} ice=${snapshot.iceState} pair=${snapshot.pair}`
-      );
-      // Roadmap item 10, occurrence 2026-08-24: a wedge this old is the moment
-      // the packet-level truth has to be caught, because no counter above the
-      // wire can name the cause. One attempt per connection — the witness
-      // applies its own single-flight and cooldown rules after that.
+      if (receivedWhenStuck < 0) {
+        receivedWhenStuck = snapshot.bytesReceived;
+      }
+      // The periodic line waits for {@link SEND_QUEUE_STUCK_MS}, because a
+      // queue that has merely not fallen for a second is ordinary and a line a
+      // second for it is noise. The WEDGE below does not wait for it: its own
+      // condition already says how long this queue may legitimately take, and
+      // on a fast link that is under a second. Holding the evidence back for a
+      // fixed five seconds would repeat, in miniature, the mistake that left
+      // both field captures without an onset in them.
+      if (now - stuckSince >= SEND_QUEUE_STUCK_MS) {
+        log(
+          `[dc] Session ${tag} "${label}": send queue stuck at ${queued}B for ` +
+          `${Math.round((now - stuckSince) / 1000)}s — transport ` +
+          `sent=${snapshot.bytesSent}${sentDelta === null ? "" : ` (+${sentDelta})`} ` +
+          `received=${snapshot.bytesReceived}${recvDelta === null ? "" : ` (+${recvDelta})`} ` +
+          `rtt=${snapshot.rtt}ms pc=${snapshot.state} ice=${snapshot.iceState} pair=${snapshot.pair}`
+        );
+      }
+      // Roadmap item 11: ask for the packet-level truth the moment the wedge is
+      // CERTAIN, not after a chosen delay. The three facts below are not
+      // ambiguous together — the queue has not fallen, the accepted-byte
+      // counter has not moved for longer than the queue's own drain time at
+      // this link's own speed, and the peer is still sending. The previous
+      // rule's flat 30 s is what left both field captures with no onset in
+      // them. One attempt per connection — the witness applies its own
+      // single-flight and cooldown rules after that.
+      const flatForMs = connection.sentAt === 0 ? 0 : now - connection.sentAt;
+      const verdict = wedgeIsCertain({
+        queuedBytes: queued,
+        bytesPerSecond: connection.bytesPerSecond,
+        flatForMs,
+        longestHealthyFlatMs: connection.longestHealthyFlatMs
+      });
+      const peerStillSending = snapshot.bytesReceived > receivedWhenStuck;
+      if (verdict.certain && peerStillSending && !wedgeSaid) {
+        wedgeSaid = true;
+        log(
+          `[dc] Session ${tag} "${label}": delivery has stopped — ${queued}B queued, ` +
+          `accepted-byte counter unmoved for ${Math.round(flatForMs / 1000)}s against the ` +
+          `${(verdict.needMs / 1000).toFixed(1)}s this queue needs at the ` +
+          `${(connection.bytesPerSecond / 1024).toFixed(0)} KB/s last measured here, ` +
+          "and the peer is still sending"
+        );
+      }
       if (
         witness &&
         !connection.captureStarted &&
-        now - stuckSince >= SEND_QUEUE_CAPTURE_AFTER_MS
+        verdict.certain &&
+        peerStillSending
       ) {
         connection.captureStarted = true;
         const started = witness.maybeCapture({
@@ -302,6 +486,8 @@ function makeSendQueueWatcher({ log, getTransportSnapshot, witness }) {
     }
     return stop;
   };
+
+  return { watchSendQueue, readDelivery };
 }
 
 /**
@@ -419,12 +605,16 @@ export function createDataChannelHandler({ proxyPort, onLog, getTransportSnapsho
   /** Request id → its ASCII bytes; see {@link requestIdBytes}. */
   const requestIdCache = new Map();
 
-  const watchSendQueue = makeSendQueueWatcher({ log: (message) => log(message), getTransportSnapshot, witness });
+  const { watchSendQueue, readDelivery } = makeSendQueueWatcher({
+    log: (message) => log(message),
+    getTransportSnapshot,
+    witness
+  });
   // Numbered probes on every channel, and the browser's echo of what it saw.
   // The proxy's own counters cannot say whether bytes it handed to usrsctp were
   // ever put on the wire; the far end can, and it keeps answering throughout a
   // freeze. See services/delivery-probe.js.
-  const deliveryProbe = createDeliveryProbe({ log: (message) => log(message) });
+  const deliveryProbe = createDeliveryProbe({ log: (message) => log(message), readDelivery });
 
   /**
    * @param {string} message
@@ -936,12 +1126,6 @@ const TRANSPORT_HEARTBEAT_MS = 5_000;
 // registry does not end a healthy watch.
 const TRANSPORT_UNKNOWN_HEARTBEATS = 3;
 const SEND_QUEUE_STUCK_MS = 5_000;
-// How long a wedged queue waits before the packet witness starts recording the
-// wire. Long enough to be certain this is not a slow drain (a 6-11 MB segment
-// leaves in well under a second, measured), short enough that the capture is
-// still running while whatever broke is breaking — the 2026-08-24 episode
-// began minutes before anyone could have asked for a capture by hand.
-const SEND_QUEUE_CAPTURE_AFTER_MS = 30_000;
 const DC_BUFFER_HIGH_WATER = 8 * 1024 * 1024;
 /** Resume sending once the channel buffer drains to this many bytes. */
 const DC_BUFFER_LOW_WATER = 1 * 1024 * 1024;

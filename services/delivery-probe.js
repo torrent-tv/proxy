@@ -35,27 +35,56 @@
  * resolution the 2026-08-24 episode had: the onset could be placed no closer
  * than the five seconds between two lines. Sending is cheap - a probe is a few
  * dozen bytes - and the interval is NOT the verdict: a healthy burst can hold a
- * probe up behind queued data, so the verdict takes {@link MISSES_FOR_VERDICT}
- * consecutive probes.
+ * probe up behind queued data, so how many probes may be outstanding is worked
+ * out per channel by {@link allowedGap} from the bytes queued ahead of the
+ * probe and the rate they are leaving at.
  */
 export const PROBE_INTERVAL_MS = 500;
 
 /**
  * How many probes may be outstanding on a channel before it counts as behind.
  *
- * A segment of 6-11 MB leaves in well under a second when the link is healthy,
- * but it shares the association with the probe, so one or two probes can
- * legitimately sit behind it. Four is two seconds - longer than any measured
- * healthy burst, shorter than the five seconds the old heartbeat needed to say
- * anything at all.
+ * DERIVED per channel, not chosen. A probe is handed to the same association as
+ * the data, and SCTP orders per stream but SCHEDULES per association: one
+ * congestion window, one send buffer. So a probe waits for whatever is queued
+ * ahead of it whichever channel it rides on - the unordered one included - and
+ * a fixed threshold cannot tell that wait from a stopped association. Measured
+ * 2026-08-26: `association-stopped` printed with all three channels at gap 4-7
+ * while 110-150 Mbps crossed that same association and 7.34 GB went through it
+ * without a single failure.
+ *
+ * What the wait costs is arithmetic on two measured quantities: the bytes
+ * queued ahead of the probe, and the rate at which this connection is getting
+ * bytes away. Add one round trip for the echo to come back. A probe is behind
+ * only when it is later than that.
+ *
+ * @param {{ queuedBytes: number, bytesPerSecond: number, rttMs: number, intervalMs?: number }} state
+ * @returns {number | null} Probes that may legitimately be outstanding, or null
+ *   when no rate has been measured yet and nothing can be said.
  */
-export const MISSES_FOR_VERDICT = 4;
+export function allowedGap({ queuedBytes, bytesPerSecond, rttMs, intervalMs = PROBE_INTERVAL_MS }) {
+  if (!(bytesPerSecond > 0) || !(intervalMs > 0)) {
+    return null;
+  }
+  const drainMs = (Math.max(queuedBytes, 0) / bytesPerSecond) * 1000;
+  const waitMs = drainMs + Math.max(rttMs, 0);
+  // At least one: a probe sent and not yet echoed is the ordinary state.
+  return Math.max(1, Math.ceil(waitMs / intervalMs));
+}
 
 /** The label the browser gives the unordered, non-retransmitting channel. */
 export const UNRELIABLE_LABEL = "proxy-fast";
 
-/** An echo older than this means the reverse direction has stopped too. */
-const ECHO_STALE_MS = 5_000;
+/**
+ * How old an echo may be before the reverse direction counts as gone, when
+ * nothing better can be derived.
+ *
+ * Used only while no rate has been measured. Otherwise the caller passes
+ * `echoStaleMs`, worked out the same way as {@link allowedGap}: the browser
+ * only echoes a probe it has RECEIVED, so an echo waits behind our own queue
+ * exactly as the probe did.
+ */
+const ECHO_STALE_FALLBACK_MS = 5_000;
 
 /** How often the probe state is written to the log while nothing changes. */
 const REPORT_INTERVAL_MS = 5_000;
@@ -82,21 +111,38 @@ const REPORT_INTERVAL_MS = 5_000;
  * Exported so the rule is testable without a connection: the same numbers
  * always produce the same word.
  *
- * @param {{ seq: number, seen: Map<string, number> | Record<string, number>, labels: string[], echoes: number, echoAgeMs: number | null }} state
+ * `allowed` carries, per channel label, how many probes may legitimately be
+ * outstanding right now — {@link allowedGap} computes it from that channel's
+ * own queue and the connection's measured rate. A label with no entry, or an
+ * entry of null, cannot be judged: with no rate measured there is nothing to
+ * divide the queue by, and the verdict says that rather than inventing one.
+ *
+ * @param {{ seq: number, seen: Map<string, number> | Record<string, number>, labels: string[], echoes: number, echoAgeMs: number | null, allowed?: Map<string, number | null> | Record<string, number | null>, echoStaleMs?: number }} state
  * @returns {{ verdict: string, detail: string }}
  */
 export function readProbeState(state) {
   const seenOf = (label) =>
     state.seen instanceof Map ? state.seen.get(label) : state.seen?.[label];
+  const allowedOf = (label) => {
+    const source = state.allowed;
+    const value = source instanceof Map ? source.get(label) : source?.[label];
+    return Number.isInteger(value) ? Number(value) : null;
+  };
   const parts = [];
   let orderedBehind = false;
   let unreliableBehind = false;
   let unreliableKnown = false;
+  let judgeable = false;
   for (const label of state.labels) {
     const seen = seenOf(label);
     const gap = Number.isInteger(seen) ? state.seq - Number(seen) : null;
-    parts.push(`${label}=${seen ?? "?"}(gap ${gap ?? "?"})`);
-    const behind = gap === null || gap >= MISSES_FOR_VERDICT;
+    const allowance = allowedOf(label);
+    parts.push(`${label}=${seen ?? "?"}(gap ${gap ?? "?"} of ${allowance ?? "?"})`);
+    if (allowance === null) {
+      continue;
+    }
+    judgeable = true;
+    const behind = gap === null || gap > allowance;
     if (label === UNRELIABLE_LABEL) {
       unreliableKnown = true;
       unreliableBehind = behind;
@@ -111,7 +157,13 @@ export function readProbeState(state) {
   if (state.echoes === 0) {
     return { verdict: "no-echo-yet", detail };
   }
-  if (state.echoAgeMs !== null && state.echoAgeMs > ECHO_STALE_MS) {
+  if (!judgeable) {
+    return { verdict: "no-rate-yet", detail };
+  }
+  const staleAfterMs = Number.isFinite(state.echoStaleMs) && state.echoStaleMs > 0
+    ? state.echoStaleMs
+    : ECHO_STALE_FALLBACK_MS;
+  if (state.echoAgeMs !== null && state.echoAgeMs > staleAfterMs) {
     return { verdict: "reverse-direction-gone", detail };
   }
   if (!orderedBehind && !(unreliableKnown && unreliableBehind)) {
@@ -142,7 +194,7 @@ export function readProbeState(state) {
  *   dispose: () => void
  * }}
  */
-export function createDeliveryProbe({ log, intervalMs = PROBE_INTERVAL_MS }) {
+export function createDeliveryProbe({ log, intervalMs = PROBE_INTERVAL_MS, readDelivery }) {
   /** @type {Map<string, ProbeConnection>} */
   const connections = new Map();
 
@@ -165,12 +217,42 @@ export function createDeliveryProbe({ log, intervalMs = PROBE_INTERVAL_MS }) {
       }
     }
 
+    // What this connection is getting away, and how far behind it therefore
+    // sits. Both come from the send-queue watcher, which measures them anyway.
+    const delivery = typeof readDelivery === "function" ? readDelivery(connection.id) : null;
+    const bytesPerSecond = Number(delivery?.bytesPerSecond) || 0;
+    const rttMs = Number(delivery?.rttMs) || 0;
+    /** @type {Map<string, number | null>} */
+    const allowed = new Map();
+    for (const [channel, label] of connection.channels) {
+      let queuedBytes = 0;
+      try {
+        queuedBytes = typeof channel.bufferedAmount === "function" ? channel.bufferedAmount() : 0;
+      } catch {
+        queuedBytes = 0;
+      }
+      const allowance = allowedGap({ queuedBytes, bytesPerSecond, rttMs, intervalMs });
+      // Several channels can carry one label only in malformed cases; the
+      // larger allowance is the safer of the two.
+      const held = allowed.get(label);
+      if (allowance !== null && (!Number.isInteger(held) || allowance > held)) {
+        allowed.set(label, allowance);
+      } else if (!allowed.has(label)) {
+        allowed.set(label, allowance);
+      }
+    }
+    const widest = [...allowed.values()].reduce(
+      (most, value) => (Number.isInteger(value) && value > most ? value : most),
+      0
+    );
     const { verdict, detail } = readProbeState({
       seq: connection.seq,
       seen: connection.seen,
       labels: [...new Set(connection.channels.values())],
       echoes: connection.echoes,
-      echoAgeMs: connection.echoAt === 0 ? null : now - connection.echoAt
+      echoAgeMs: connection.echoAt === 0 ? null : now - connection.echoAt,
+      allowed,
+      echoStaleMs: widest > 0 ? widest * intervalMs + rttMs : 0
     });
     if (verdict !== connection.verdict || now - connection.reportedAt >= REPORT_INTERVAL_MS) {
       connection.verdict = verdict;
@@ -184,6 +266,7 @@ export function createDeliveryProbe({ log, intervalMs = PROBE_INTERVAL_MS }) {
       let connection = connections.get(sessionId);
       if (!connection) {
         connection = {
+          id: sessionId,
           tag,
           channels: new Map(),
           seq: 0,

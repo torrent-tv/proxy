@@ -24,7 +24,7 @@ import { createTunnelClient } from "../services/tunnel-client.js";
 import { createWebRtcManager } from "../services/webrtc-manager.js";
 import { createDataChannelHandler } from "../services/data-channel-handler.js";
 import { pruneCoreDumps } from "../services/core-dumps.js";
-import { createPacketWitness, pruneWitnessCaptures } from "../services/packet-witness.js";
+import { adoptOrphanRingFiles, createPacketWitness, pruneWitnessCaptures } from "../services/packet-witness.js";
 import { collectHealthMetrics } from "../services/health-collector.js";
 import { createPortMapper } from "../services/port-mapper.js";
 import { classifyNat } from "../services/nat-classifier.js";
@@ -180,6 +180,12 @@ let udpPortMapper = null;
 
 /** @type {ReturnType<typeof createWebRtcManager> | null} */
 let webRtcManager = null;
+/**
+ * The packet witness, so shutdown can stop the ring it owns.
+ *
+ * @type {ReturnType<typeof createPacketWitness> | null}
+ */
+let packetWitness = null;
 
 /** @type {ReturnType<typeof createDataChannelHandler> | null} */
 let dataChannelHandler = null;
@@ -270,6 +276,13 @@ async function shutdown(signal) {
       try { webRtcManager.dispose(); } catch { /* ignore */ }
       webRtcManager = null;
     }
+    // Stop the packet ring and remove its scratch files. `process.exit` below
+    // does not take child processes with it, so without this a proxy restarted
+    // outside a container leaves one tcpdump running per restart.
+    if (packetWitness) {
+      try { await packetWitness.dispose(); } catch { /* ignore */ }
+      packetWitness = null;
+    }
     if (app) {
       await app.close();
     }
@@ -311,12 +324,15 @@ try {
   // two, which are the evidence for the fault still open, and drop the rest.
   void pruneCoreDumps(options.stateDir);
   // Same policy for the packet captures the send-queue witness writes.
-  const packetWitness = createPacketWitness({
+  packetWitness = createPacketWitness({
     log: (message) => logger.info(message),
     dir: options.stateDir || "",
     port: actualPort
   });
-  void pruneWitnessCaptures(packetWitness.dir);
+  // A process that was KILLED mid-session leaves the ring's last seconds
+  // behind, and those seconds contain whatever ended it. Keep them under a name
+  // the pruner recognises BEFORE anything starts a new ring over them.
+  void adoptOrphanRingFiles(packetWitness.dir).then(() => pruneWitnessCaptures(packetWitness.dir));
 
   logger.info(`Starting @torrent-tv/proxy v${PROXY_VERSION}`);
   logger.info(`Local stream endpoint: http://${bindHost}:${actualPort}/stream`);

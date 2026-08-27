@@ -122,3 +122,37 @@ test("a burst big enough to explain the lag is not called a stopped association"
   );
   assert.equal(verdict, "flowing");
 });
+
+test("the peer's own answering cadence counts toward the allowance", () => {
+  // Field case 2026-08-27: queues empty, 3.4 MB/s crossing, tab hidden so the
+  // browser echoed about once a second. Without the peer's cadence the
+  // allowance is one probe and every other line read `association-stopped`.
+  const withoutCadence = allowedGap({
+    queuedBytes: 0,
+    bytesPerSecond: 3.4 * 1024 * 1024,
+    rttMs: 9
+  });
+  assert.equal(withoutCadence, 1);
+  const withCadence = allowedGap({
+    queuedBytes: 0,
+    bytesPerSecond: 3.4 * 1024 * 1024,
+    rttMs: 9,
+    echoIntervalMs: 1000
+  });
+  assert.ok(withCadence >= 3, `a second of cadence must allow more than ${withCadence}`);
+  const allowed = Object.fromEntries(ALL.map((label) => [label, withCadence]));
+  const { verdict } = readProbeState(
+    state({ proxy: 98, "proxy-control": 98, "proxy-fast": 98 }, { allowed, echoAgeMs: 977 })
+  );
+  assert.equal(verdict, "flowing");
+});
+
+test("a stale echo is judged against the peer's cadence, not a fixed half second", () => {
+  // The same numbers with the cadence unknown must still be able to say the
+  // reverse direction is gone — the bound rises with the cadence, it does not
+  // disappear.
+  const { verdict } = readProbeState(
+    state({ proxy: 99, "proxy-control": 99, "proxy-fast": 99 }, { echoAgeMs: 60_000, echoStaleMs: 2000 })
+  );
+  assert.equal(verdict, "reverse-direction-gone");
+});

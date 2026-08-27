@@ -34,6 +34,29 @@ const ID_CODEC_PRIVATE = 0x63a2;
 const ID_LANGUAGE = 0x22b59c;
 const ID_NAME = 0x536e;
 const ID_FLAG_DEFAULT = 0x88;
+/**
+ * The rest of what a TrackEntry says about itself, RFC 9559 §5.1.4.1. Read
+ * because the file states them and a releaser's own wording in `Name` is the
+ * only thing we had before: "fors" and "SDH" in a menu were whatever text
+ * someone happened to type.
+ *
+ * `FlagEnabled` defaults to 1 and means "the track is usable"; a track that
+ * says 0 is counted but not offered. `FlagForced` applies only to subtitles and
+ * defaults to 0. `FlagHearingImpaired` is set "if and only if the track is
+ * suitable for users with hearing impairments". `FlagVisualImpaired`,
+ * `FlagOriginal` and `FlagCommentary` bear on the AUDIO choice and are read
+ * with that work, not here — see roadmap item 55.
+ */
+const ID_FLAG_ENABLED = 0xb9;
+const ID_FLAG_FORCED = 0x55aa;
+const ID_FLAG_HEARING_IMPAIRED = 0x55ab;
+/**
+ * The language as RFC 5646 writes it. The specification is a MUST: "If this
+ * element is used, then any Language elements used in the same TrackEntry MUST
+ * be ignored" — so where both are present, this one is the answer and the
+ * three-letter code is not.
+ */
+const ID_LANGUAGE_BCP47 = 0x22b59d;
 const ID_CUES = 0x1c53bb6b;
 const ID_CUE_POINT = 0xbb;
 const ID_CUE_TRACK_POSITIONS = 0xb7;
@@ -69,9 +92,18 @@ const TEXT_CODECS = new Set(["S_TEXT/UTF8", "S_TEXT/ASS", "S_TEXT/SSA"]);
  *   ever names. Text tracks alone are not a numbering: a file whose PGS track
  *   comes first would have every text track one lower here than in the browser.
  * @property {string} codecId
- * @property {string} language - The three-letter code the file declares.
+ * @property {string} language - The language the file declares: its RFC 5646
+ *   tag where it writes one, and the three-letter code otherwise. The
+ *   specification requires that order — where `LanguageBCP47` is present, the
+ *   `Language` element MUST be ignored.
+ * @property {string} languageBcp47 - The RFC 5646 tag alone, or "".
  * @property {string} name - What the file calls the track, if anything.
  * @property {boolean} isDefault
+ * @property {boolean} isForced - `FlagForced`: the track carries what a viewer
+ *   needs even when they asked for no subtitles — signs, and dialogue in
+ *   another language. It does NOT carry the film's own dialogue.
+ * @property {boolean} isHearingImpaired - `FlagHearingImpaired`: suitable for
+ *   viewers who cannot hear, so it carries non-speech sound as well as speech.
  * @property {string} codecPrivate - The ASS/SSA header, base64, or "".
  * @property {number[]} clusterPositions - File offsets of clusters whose cue
  *   points name this track, ascending. Empty when the file indexes only its
@@ -156,6 +188,12 @@ export async function readSubtitlePlan(readRange, fileSize) {
     // amounts to, and whether the file said anything at all.
     let isDefault = true;
     let declaresDefault = false;
+    // Defaults straight from RFC 9559: a track is usable and not forced unless
+    // the file says otherwise, and the impaired flags are absent until claimed.
+    let isEnabled = true;
+    let isForced = false;
+    let isHearingImpaired = false;
+    let languageBcp47 = "";
     for (const field of iterateElements(head, entry.dataOffset, entryEnd)) {
       if (field.id === ID_TRACK_NUMBER) {
         trackNumber = readUint(head, field.dataOffset, field.size);
@@ -165,11 +203,23 @@ export async function readSubtitlePlan(readRange, fileSize) {
         codecId = readString(head, field);
       } else if (field.id === ID_LANGUAGE) {
         language = readString(head, field);
+      } else if (field.id === ID_LANGUAGE_BCP47) {
+        languageBcp47 = readString(head, field);
       } else if (field.id === ID_NAME) {
         name = readString(head, field);
       } else if (field.id === ID_FLAG_DEFAULT) {
         isDefault = readUint(head, field.dataOffset, field.size) === 1;
         declaresDefault = true;
+      } else if (field.id === ID_FLAG_ENABLED) {
+        // An element written with zero length carries its default, which for
+        // this one is 1 — so an empty element must not read as "unusable", and
+        // neither must a value outside the declared 0-1 range. Only an explicit
+        // zero takes a track away.
+        isEnabled = field.size === 0 || readUint(head, field.dataOffset, field.size) !== 0;
+      } else if (field.id === ID_FLAG_FORCED) {
+        isForced = field.size > 0 && readUint(head, field.dataOffset, field.size) !== 0;
+      } else if (field.id === ID_FLAG_HEARING_IMPAIRED) {
+        isHearingImpaired = field.size > 0 && readUint(head, field.dataOffset, field.size) !== 0;
       } else if (field.id === ID_CODEC_PRIVATE) {
         codecPrivate = head.toString("base64", field.dataOffset, field.dataOffset + field.size);
       }
@@ -177,17 +227,46 @@ export async function readSubtitlePlan(readRange, fileSize) {
     if (type !== TRACK_TYPE_SUBTITLE || trackNumber === null) {
       continue;
     }
-    declared.push({ trackNumber, codecId, language, name, isDefault, declaresDefault });
-    if (!TEXT_CODECS.has(codecId)) {
+    // A track the file marks unusable is still COUNTED. FlagEnabled says "the
+    // track is usable", and a player should not offer it — but ffmpeg does not
+    // drop it: `matroskadec.c` parses `MATROSKA_ID_TRACKFLAGENABLED` as
+    // `EBML_NONE`, reading the element and keeping nothing, so the stream is
+    // created and numbered like any other. Leaving it out of this list would
+    // therefore shift `declaredIndex` off ffmpeg's `0:s:N` for every track
+    // after it, which is the numbering defect this file was fixed for a day
+    // earlier. It is counted here and refused where it is offered instead.
+    //
+    // `language` here stays the three-letter code, because this list exists to
+    // be lined up against ffmpeg's banner, which prints that code. The RFC 5646
+    // tag rides beside it for whoever displays the track.
+    declared.push({
+      trackNumber,
+      codecId,
+      language,
+      languageBcp47,
+      name,
+      isDefault,
+      declaresDefault,
+      isEnabled,
+      isForced,
+      isHearingImpaired
+    });
+    if (!TEXT_CODECS.has(codecId) || !isEnabled) {
       continue;
     }
     tracks.push({
       trackNumber,
       declaredIndex: declared.length - 1,
       codecId,
-      language,
+      // This list is ours and is not compared with ffmpeg's, so it carries the
+      // language the file states most precisely: where RFC 5646 is written, the
+      // three-letter code MUST be ignored.
+      language: languageBcp47 || language,
+      languageBcp47,
       name,
       isDefault,
+      isForced,
+      isHearingImpaired,
       codecPrivate,
       clusterPositions: []
     });

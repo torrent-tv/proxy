@@ -58,16 +58,33 @@ export const PROBE_INTERVAL_MS = 500;
  * bytes away. Add one round trip for the echo to come back. A probe is behind
  * only when it is later than that.
  *
- * @param {{ queuedBytes: number, bytesPerSecond: number, rttMs: number, intervalMs?: number }} state
+ * There is a third term, and leaving it out made this worse than the constant
+ * it replaced. The browser answers on ITS own schedule, not ours: it batches
+ * what it has seen and echoes on a timer, and that timer is throttled to about
+ * once a second whenever the tab is hidden. So with an empty queue the
+ * allowance collapsed to one probe and the bound to half a second, while echoes
+ * legitimately arrived every second - measured 2026-08-27, 67 `association-
+ * stopped` and 66 `reverse-direction-gone` against 84 `flowing` on a connection
+ * carrying 3.4 MB/s with every queue at zero. The peer's own cadence is
+ * measurable on the same connection, so it is measured and added rather than
+ * assumed.
+ *
+ * @param {{ queuedBytes: number, bytesPerSecond: number, rttMs: number, echoIntervalMs?: number, intervalMs?: number }} state
  * @returns {number | null} Probes that may legitimately be outstanding, or null
  *   when no rate has been measured yet and nothing can be said.
  */
-export function allowedGap({ queuedBytes, bytesPerSecond, rttMs, intervalMs = PROBE_INTERVAL_MS }) {
+export function allowedGap({
+  queuedBytes,
+  bytesPerSecond,
+  rttMs,
+  echoIntervalMs = 0,
+  intervalMs = PROBE_INTERVAL_MS
+}) {
   if (!(bytesPerSecond > 0) || !(intervalMs > 0)) {
     return null;
   }
   const drainMs = (Math.max(queuedBytes, 0) / bytesPerSecond) * 1000;
-  const waitMs = drainMs + Math.max(rttMs, 0);
+  const waitMs = drainMs + Math.max(rttMs, 0) + Math.max(echoIntervalMs, 0);
   // At least one: a probe sent and not yet echoed is the ordinary state.
   return Math.max(1, Math.ceil(waitMs / intervalMs));
 }
@@ -231,7 +248,13 @@ export function createDeliveryProbe({ log, intervalMs = PROBE_INTERVAL_MS, readD
       } catch {
         queuedBytes = 0;
       }
-      const allowance = allowedGap({ queuedBytes, bytesPerSecond, rttMs, intervalMs });
+      const allowance = allowedGap({
+        queuedBytes,
+        bytesPerSecond,
+        rttMs,
+        echoIntervalMs: connection.echoIntervalMs,
+        intervalMs
+      });
       // Several channels can carry one label only in malformed cases; the
       // larger allowance is the safer of the two.
       const held = allowed.get(label);
@@ -252,7 +275,9 @@ export function createDeliveryProbe({ log, intervalMs = PROBE_INTERVAL_MS, readD
       echoes: connection.echoes,
       echoAgeMs: connection.echoAt === 0 ? null : now - connection.echoAt,
       allowed,
-      echoStaleMs: widest > 0 ? widest * intervalMs + rttMs : 0
+      // Same arithmetic for the echo's own age: the peer cannot answer sooner
+      // than its own cadence allows, and a hidden tab's is about a second.
+      echoStaleMs: widest > 0 ? widest * intervalMs + rttMs + connection.echoIntervalMs : 0
     });
     if (verdict !== connection.verdict || now - connection.reportedAt >= REPORT_INTERVAL_MS) {
       connection.verdict = verdict;
@@ -268,6 +293,10 @@ export function createDeliveryProbe({ log, intervalMs = PROBE_INTERVAL_MS, readD
         connection = {
           id: sessionId,
           tag,
+          // The longest this peer has ever taken between two echoes. Its own
+          // schedule, measured rather than assumed - a hidden tab answers
+          // about once a second because the browser throttles the timer.
+          echoIntervalMs: 0,
           channels: new Map(),
           seq: 0,
           sentAt: 0,
@@ -321,7 +350,14 @@ export function createDeliveryProbe({ log, intervalMs = PROBE_INTERVAL_MS, readD
           }
         }
       }
-      connection.echoAt = Date.now();
+      const now = Date.now();
+      if (connection.echoAt !== 0) {
+        const sinceLast = now - connection.echoAt;
+        if (sinceLast > connection.echoIntervalMs) {
+          connection.echoIntervalMs = sinceLast;
+        }
+      }
+      connection.echoAt = now;
       connection.echoes += 1;
     },
 

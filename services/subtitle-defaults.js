@@ -95,7 +95,20 @@ export function mergeContainerSubtitleFlags(bannerTracks, declared) {
   const banner = Array.isArray(bannerTracks) ? bannerTracks : [];
   const container = Array.isArray(declared) ? declared : [];
   const undecided = () => ({
-    tracks: banner.map((track) => ({ ...track, declaresDefault: false }))
+    // The container reading could not be lined up, so nothing of it is used —
+    // including the flags, which would otherwise be attributed to the wrong
+    // track.
+    tracks: banner.map((track) => ({
+      ...track,
+      declaresDefault: false,
+      isForced: false,
+      isHearingImpaired: false,
+      // Not "the container says this track is unusable" — nothing of the
+      // container is being used here. A track is offered unless it was read to
+      // say otherwise.
+      isEnabled: true,
+      languageBcp47: ""
+    }))
   });
   if (container.length === 0) {
     return { ...undecided(), aligned: false, reason: "the container declares no subtitle track" };
@@ -123,7 +136,20 @@ export function mergeContainerSubtitleFlags(bannerTracks, declared) {
     tracks: banner.map((track, order) => ({
       ...track,
       isDefault: container[order].isDefault === true,
-      declaresDefault: container[order].declaresDefault === true
+      declaresDefault: container[order].declaresDefault === true,
+      // Read from the file rather than guessed from the track's name. Both are
+      // stated by the container itself (RFC 9559 §5.1.4.1) and neither reaches
+      // ffmpeg's `-i` banner, which is where every other field here comes from.
+      isForced: container[order].isForced === true,
+      isHearingImpaired: container[order].isHearingImpaired === true,
+      // FlagEnabled, so the browser can leave an unusable track out of the
+      // menu. It stays in this list and keeps its number: ffmpeg creates a
+      // stream for it either way.
+      isEnabled: container[order].isEnabled !== false,
+      // The RFC 5646 tag, where the file writes one. Kept beside the code
+      // rather than replacing it: what this list is aligned against is ffmpeg's
+      // banner, which prints the three-letter form.
+      languageBcp47: typeof container[order].languageBcp47 === "string" ? container[order].languageBcp47 : ""
     })),
     aligned: true,
     reason: ""

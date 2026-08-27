@@ -37,6 +37,10 @@ const ID_TRACK_NUMBER = 0xd7;
 const ID_TRACK_TYPE = 0x83;
 const ID_CODEC_ID = 0x86;
 const ID_LANGUAGE = 0x22b59c;
+const ID_LANGUAGE_BCP47 = 0x22b59d;
+const ID_FLAG_ENABLED = 0xb9;
+const ID_FLAG_FORCED = 0x55aa;
+const ID_FLAG_HEARING_IMPAIRED = 0x55ab;
 const ID_CUES = 0x1c53bb6b;
 const ID_CUE_POINT = 0xbb;
 const ID_CUE_TIME = 0xb3;
@@ -95,13 +99,26 @@ function uint32Element(id, value) {
   return element(id, payload);
 }
 
-function trackEntry({ number, type, codecId, language }) {
-  return element(ID_TRACK_ENTRY, Buffer.concat([
+function trackEntry({ number, type, codecId, language, flags = {}, languageBcp47 = null }) {
+  const parts = [
     uintElement(ID_TRACK_NUMBER, number),
     uintElement(ID_TRACK_TYPE, type),
     stringElement(ID_CODEC_ID, codecId),
     stringElement(ID_LANGUAGE, language)
-  ]));
+  ];
+  if (languageBcp47 !== null) {
+    parts.push(stringElement(ID_LANGUAGE_BCP47, languageBcp47));
+  }
+  for (const [id, value] of [
+    [ID_FLAG_ENABLED, flags.enabled],
+    [ID_FLAG_FORCED, flags.forced],
+    [ID_FLAG_HEARING_IMPAIRED, flags.hearingImpaired]
+  ]) {
+    if (value !== undefined) {
+      parts.push(uintElement(id, value ? 1 : 0));
+    }
+  }
+  return element(ID_TRACK_ENTRY, Buffer.concat(parts));
 }
 
 /**
@@ -259,4 +276,95 @@ test("two walks of one file at the same time read each cluster once", async () =
     "one probe of the cluster's header and one read of its body — not two of each"
   );
   forgetSubtitles(sourceKey);
+});
+
+/**
+ * A file whose subtitle tracks carry the flags RFC 9559 defines for them: one
+ * forced, one for viewers who cannot hear, one the file marks unusable, and one
+ * writing its language as RFC 5646 alongside the three-letter code.
+ *
+ * @returns {Buffer}
+ */
+function fileWithFlags() {
+  const info = element(ID_INFO, uintElement(ID_TIMESTAMP_SCALE, 1_000_000));
+  const tracks = element(ID_TRACKS, Buffer.concat([
+    trackEntry({ number: 1, type: 1, codecId: "V_MPEG4/ISO/AVC", language: "und" }),
+    trackEntry({ number: 2, type: 17, codecId: "S_TEXT/UTF8", language: "rus", flags: { forced: true } }),
+    trackEntry({ number: 3, type: 17, codecId: "S_TEXT/UTF8", language: "eng", flags: { hearingImpaired: true } }),
+    trackEntry({ number: 4, type: 17, codecId: "S_TEXT/UTF8", language: "fre", flags: { enabled: false } }),
+    trackEntry({ number: 5, type: 17, codecId: "S_TEXT/ASS", language: "por", languageBcp47: "pt-BR" })
+  ]));
+  const seekEntry = (targetId, position) => element(ID_SEEK, Buffer.concat([
+    element(ID_SEEK_ID, idBytes(targetId)),
+    uint32Element(ID_SEEK_POSITION, position)
+  ]));
+  const seekHeadWith = (infoAt, tracksAt) => element(ID_SEEK_HEAD, Buffer.concat([
+    seekEntry(ID_INFO, infoAt),
+    seekEntry(ID_TRACKS, tracksAt)
+  ]));
+  const headLength = seekHeadWith(0, 0).length;
+  const segmentPayload = Buffer.concat([
+    seekHeadWith(headLength, headLength + info.length),
+    info,
+    tracks
+  ]);
+  const ebml = element(ID_EBML, Buffer.from([0x42, 0x86, 0x81, 0x01]));
+  return Buffer.concat([ebml, element(ID_SEGMENT, segmentPayload)]);
+}
+
+test("the flags the file states about a track are read, not guessed from its name", async () => {
+  const plan = await readSubtitlePlan(readerOver(fileWithFlags()), fileWithFlags().length);
+
+  const forced = plan.tracks.find((track) => track.trackNumber === 2);
+  assert.equal(forced.isForced, true, "FlagForced 0x55AA");
+  assert.equal(forced.isHearingImpaired, false);
+
+  const sdh = plan.tracks.find((track) => track.trackNumber === 3);
+  assert.equal(sdh.isHearingImpaired, true, "FlagHearingImpaired 0x55AB");
+  assert.equal(sdh.isForced, false);
+});
+
+test("a track the file marks unusable is not offered, but is still counted", async () => {
+  // FlagEnabled (0xB9): "Set to 1 if the track is usable." Track 4 says 0, so
+  // it is not offered — but it KEEPS its place in the numbering, because ffmpeg
+  // keeps it: `matroskadec.c` parses MATROSKA_ID_TRACKFLAGENABLED as EBML_NONE,
+  // reading the element and storing nothing, so the stream is created and gets
+  // its own `0:s:N`. Dropping it here would shift every track after it.
+  const plan = await readSubtitlePlan(readerOver(fileWithFlags()), fileWithFlags().length);
+
+  assert.equal(plan.tracks.some((track) => track.trackNumber === 4), false, "not offered for extraction");
+  const counted = plan.declared.find((track) => track.trackNumber === 4);
+  assert.ok(counted, "still declared, so the numbering does not move");
+  assert.equal(counted.isEnabled, false);
+});
+
+test("an unusable track keeps its place, so the tracks after it keep theirs", async () => {
+  const plan = await readSubtitlePlan(readerOver(fileWithFlags()), fileWithFlags().length);
+
+  // s:0 forced, s:1 SDH, s:2 the unusable one, s:3 the Brazilian track.
+  assert.deepEqual(
+    plan.tracks.map((track) => [track.trackNumber, track.declaredIndex]),
+    [[2, 0], [3, 1], [5, 3]]
+  );
+});
+
+test("the list ffmpeg is lined up against still speaks ffmpeg's language codes", async () => {
+  // `declared` exists to be paired with the `-i` banner, which prints the
+  // three-letter code; reporting "pt-BR" there would break the pairing and cost
+  // the FlagDefault reading with it.
+  const plan = await readSubtitlePlan(readerOver(fileWithFlags()), fileWithFlags().length);
+
+  const declared = plan.declared.find((track) => track.trackNumber === 5);
+  assert.equal(declared.language, "por");
+  assert.equal(declared.languageBcp47, "pt-BR");
+});
+
+test("where the file writes RFC 5646, that is the language", async () => {
+  // "If this element is used, then any Language elements used in the same
+  // TrackEntry MUST be ignored."
+  const plan = await readSubtitlePlan(readerOver(fileWithFlags()), fileWithFlags().length);
+
+  const track = plan.tracks.find((entry) => entry.trackNumber === 5);
+  assert.equal(track.language, "pt-BR", "not the three-letter por");
+  assert.equal(track.languageBcp47, "pt-BR");
 });

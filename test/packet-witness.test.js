@@ -14,11 +14,13 @@ import {
   buildTcpdumpArgs,
   createPacketWitness,
   isWitnessCapture,
+  isWitnessRingFile,
   normalizeRemoteAddress,
   shouldStartCapture,
-  WITNESS_CAPTURE_SECONDS,
+  WITNESS_RING_FILE_MB,
   WITNESS_RING_FILES,
-  WITNESS_ROTATE_SECONDS
+  WITNESS_RTO_CEILING_SECONDS,
+  WITNESS_TAIL_SECONDS
 } from "../services/packet-witness.js";
 
 test("an IPv4 literal survives unchanged", () => {
@@ -60,22 +62,48 @@ test("the tcpdump command line is bounded and filtered to one peer", () => {
     "any",
     "-w",
     "/data/packet-witness.e2b5ef39.1787600000.pcap",
-    "-G",
-    String(WITNESS_ROTATE_SECONDS),
+    "-C",
+    String(WITNESS_RING_FILE_MB),
     "-W",
     String(WITNESS_RING_FILES),
     "udp",
     "and",
-    "host",
-    "2001:db8::1",
-    "and",
     "port",
-    "9090"
+    "9090",
+    "and",
+    "host",
+    "2001:db8::1"
   ]);
 });
 
-test("the capture window is what the rotation ring adds up to", () => {
-  assert.equal(WITNESS_ROTATE_SECONDS * WITNESS_RING_FILES, WITNESS_CAPTURE_SECONDS);
+test("rotation is by size, so the ring files cannot collapse onto one name", () => {
+  // `-G` with a name carrying no strftime field overwrote a single file, which
+  // is why both field captures held 28 s instead of the intended 120.
+  const args = buildTcpdumpArgs({ port: 9090, filePrefix: "/data/ring.pcap" });
+  assert.equal(args.includes("-G"), false);
+  assert.equal(args[args.indexOf("-C") + 1], String(WITNESS_RING_FILE_MB));
+});
+
+test("with no peer named the ring records every peer on the port", () => {
+  const args = buildTcpdumpArgs({ port: 9090, filePrefix: "/data/ring.pcap" });
+  assert.equal(args.includes("host"), false);
+  assert.deepEqual(args.slice(-4), ["udp", "and", "port", "9090"]);
+});
+
+test("the tail outlasts three retransmission timeouts", () => {
+  assert.equal(WITNESS_TAIL_SECONDS, WITNESS_RTO_CEILING_SECONDS * 3);
+  // A zero-window probe is due once per timeout, so a window shorter than the
+  // ceiling could not tell silence from a probe that had not come round yet.
+  assert.ok(WITNESS_TAIL_SECONDS > WITNESS_RTO_CEILING_SECONDS);
+});
+
+test("ring files are told apart from the copies kept as evidence", () => {
+  assert.equal(isWitnessRingFile("packet-witness-ring.pcap"), true);
+  assert.equal(isWitnessRingFile("packet-witness-ring.pcap3"), true);
+  assert.equal(isWitnessRingFile("packet-witness.e2b5ef39.1787600000.before1.pcap"), false);
+  assert.equal(isWitnessCapture("packet-witness-ring.pcap3"), false);
+  assert.equal(isWitnessCapture("packet-witness.e2b5ef39.1787600000.before1.pcap"), true);
+  assert.equal(isWitnessCapture("packet-witness.e2b5ef39.1787600000.tail.pcap1"), true);
 });
 
 test("one capture runs at a time", () => {

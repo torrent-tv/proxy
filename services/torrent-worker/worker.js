@@ -499,7 +499,12 @@ setInterval(() => {
     const reads = stats.fromMemory + stats.fromDisk;
     const fromMemoryShare = reads > 0 ? ((stats.fromMemory / reads) * 100).toFixed(1) : "—";
     log(
+      // In BYTES as well as in pieces. The count alone says nothing without the
+      // piece size, and the piece size differs per torrent: on the film the
+      // proxy was killed under, 2026-08-28, "63" meant 504 MB.
       `piece-store "${stats.name.slice(0, 40)}": resident=${stats.resident}/${stats.capacity} ` +
+      `(${Math.round((stats.residentBytes || 0) / 1048576)}MB of ` +
+      `${Math.round((stats.budgetBytes || 0) / 1048576)}MB allowed) ` +
       `pinned=${stats.pinned} spilled=${stats.spilled} reads=${reads} (${fromMemoryShare}% from memory) ` +
       `spills=${stats.spills} revivals=${stats.revivals}` +
       (stats.blockedByPins > 0 ? ` blocked-by-pins=${stats.blockedByPins}` : "")

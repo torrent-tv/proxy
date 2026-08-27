@@ -45,6 +45,6 @@
     "@biomejs/biome": "^2.5.7"
   },
   "overrides": {
-    "utp-native": "npm:@torrent-tv/utp-native@2.5.3-ttv.5"
+    "utp-native": "npm:@torrent-tv/utp-native@2.5.3-ttv.6"
   }
 }

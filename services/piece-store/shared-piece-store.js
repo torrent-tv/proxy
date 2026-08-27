@@ -27,6 +27,7 @@
  */
 
 import os from "node:os";
+import { readFileSync } from "node:fs";
 import { PieceLru } from "./piece-lru.js";
 import { DiskTier } from "./disk-tier.js";
 
@@ -45,7 +46,7 @@ const liveStores = new Set();
 /**
  * A snapshot of every live store, for logging.
  *
- * @returns {{ name: string, resident: number, capacity: number, spilled: number, fromMemory: number, fromDisk: number, spills: number, revivals: number, blockedByPins: number }[]}
+ * @returns {{ name: string, resident: number, capacity: number, residentBytes: number, budgetBytes: number, spilled: number, fromMemory: number, fromDisk: number, spills: number, revivals: number, blockedByPins: number }[]}
  */
 export function collectStoreStats() {
   return [...liveStores].map((store) => store.stats());
@@ -77,17 +78,66 @@ export function findSharedStore(torrent) {
 }
 
 /**
- * Ceiling for the automatic budget, and the share of free memory it will take.
+ * Ceiling for the automatic budget, and the share of available memory it takes.
  *
  * A flat default would be a guess dressed as a decision: the proxy runs on
- * whatever the owner has, from a Pi to a rented box, and the budget is **per
- * torrent** — several viewers mean several of these. Measured on the field host
- * after one session: the proxy container sat at 796 MB with 4.1 GB free and 1.3
- * GB already in swap, so a fixed half-gigabyte per torrent is not something to
- * hand out blindly. Hence: a quarter of what is free, capped.
+ * whatever the owner has, from a Pi to a rented box. So it is a share of what
+ * the machine can actually give, capped.
+ *
+ * Two things about this were wrong until 2026-08-28, and the kernel found both.
+ * It killed the proxy at 2.4 GB resident (`exit code 137`, no dump, `Out of
+ * memory: Killed process ... anon-rss: 2422628kB`), on a host with under two
+ * gigabytes to spare and an `oom_score_adj` of 200 that makes the addon the
+ * first thing chosen.
+ *
+ * The first: the budget was **per torrent**, so two torrents meant two of it and
+ * nothing anywhere asked what the process as a whole was holding. It is shared
+ * now — {@link budgetForNewStore} divides what is allowed between the stores
+ * that exist.
+ *
+ * The second: it was a share of `os.freemem()`, which on Linux counts only the
+ * pages free at that instant while the kernel deliberately keeps that number low
+ * by filling the rest with reclaimable cache. The kernel publishes its own
+ * estimate of what an allocation could obtain — `MemAvailable` — and that is the
+ * quantity to divide.
  */
 const MEMORY_BUDGET_CEILING_BYTES = 512 * 1024 * 1024;
-const FREE_MEMORY_SHARE = 0.25;
+const AVAILABLE_MEMORY_SHARE = 0.25;
+
+/**
+ * What all torrent stores together may hold, in bytes.
+ *
+ * Sampled when a store is made rather than kept, because what the machine has
+ * to spare is not ours to predict: another container starting is as much a
+ * change as another viewer arriving.
+ *
+ * @param {number} availableBytes - What the machine can still give out.
+ * @returns {number}
+ */
+export function totalStoreBudgetBytes(availableBytes) {
+  const share = Math.floor(Math.max(availableBytes, 0) * AVAILABLE_MEMORY_SHARE);
+  return Math.max(MIN_BUDGET_BYTES, Math.min(MEMORY_BUDGET_CEILING_BYTES, share));
+}
+
+/**
+ * One store's share of the whole, given how many stores there will be.
+ *
+ * Divided rather than handed out whole: the failure this replaces is several
+ * stores each taking the maximum. The floor is what a store needs to work at
+ * all — below it the store thrashes to disk and the viewer pays for it — so a
+ * proxy serving many torrents at once on a small machine will exceed the total,
+ * and that is deliberate: refusing to serve is worse, and the memory report now
+ * says plainly what is being held.
+ *
+ * @param {number} availableBytes
+ * @param {number} storeCount - Stores that will exist, this one included.
+ * @returns {number}
+ */
+export function budgetForNewStore(availableBytes, storeCount) {
+  const total = totalStoreBudgetBytes(availableBytes);
+  const shares = Math.max(1, Math.floor(storeCount));
+  return Math.max(MIN_BUDGET_BYTES, Math.floor(total / shares));
+}
 
 /**
  * Budget for one torrent's resident pieces when the caller names none.
@@ -95,8 +145,30 @@ const FREE_MEMORY_SHARE = 0.25;
  * @returns {number}
  */
 function defaultMemoryBytes() {
-  const share = Math.floor(os.freemem() * FREE_MEMORY_SHARE);
-  return Math.max(MIN_BUDGET_BYTES, Math.min(MEMORY_BUDGET_CEILING_BYTES, share));
+  return budgetForNewStore(availableMemorySync(), liveStores.size + 1);
+}
+
+/**
+ * What the machine can still give out, without waiting on a file read.
+ *
+ * The store is constructed synchronously, so the asynchronous reading in
+ * `services/memory-report.js` cannot be used here. `MemAvailable` is read from
+ * `/proc` with a blocking read, which is a few microseconds on a pseudo-file,
+ * and `os.freemem()` remains the answer where `/proc` is not there.
+ *
+ * @returns {number}
+ */
+function availableMemorySync() {
+  try {
+    const text = readFileSync("/proc/meminfo", "utf8");
+    const match = /^MemAvailable:\s+(\d+)\s+kB$/m.exec(text);
+    if (match) {
+      return Number(match[1]) * 1024;
+    }
+  } catch {
+    // silent-ok: not Linux, or /proc is not mounted.
+  }
+  return os.freemem();
 }
 
 /** Floor for the automatic budget — below this the store thrashes to disk. */
@@ -232,13 +304,15 @@ export class SharedPieceStore {
   /**
    * What this store has been doing, for the periodic report.
    *
-   * @returns {{ name: string, resident: number, capacity: number, spilled: number, fromMemory: number, fromDisk: number, spills: number, revivals: number, blockedByPins: number }}
+   * @returns {{ name: string, resident: number, capacity: number, residentBytes: number, budgetBytes: number, spilled: number, fromMemory: number, fromDisk: number, spills: number, revivals: number, blockedByPins: number }}
    */
   stats() {
     return {
       name: this.#name,
       resident: this.#slotOf.size,
       capacity: this.#capacity,
+      residentBytes: this.#slotOf.size * this.#chunkLength,
+      budgetBytes: this.#capacity * this.#chunkLength,
       pinned: this.#lru.pinnedCount,
       spilled: this.#disk.size,
       ...this.#counters

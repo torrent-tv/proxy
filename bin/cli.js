@@ -25,6 +25,7 @@ import { createWebRtcManager } from "../services/webrtc-manager.js";
 import { createDataChannelHandler } from "../services/data-channel-handler.js";
 import { pruneCoreDumps } from "../services/core-dumps.js";
 import { adoptOrphanRingFiles, createPacketWitness, pruneWitnessCaptures } from "../services/packet-witness.js";
+import { startMemoryReport } from "../services/memory-report.js";
 import { collectHealthMetrics } from "../services/health-collector.js";
 import { createPortMapper } from "../services/port-mapper.js";
 import { classifyNat } from "../services/nat-classifier.js";
@@ -333,6 +334,12 @@ try {
   // behind, and those seconds contain whatever ended it. Keep them under a name
   // the pruner recognises BEFORE anything starts a new ring over them.
   void adoptOrphanRingFiles(packetWitness.dir).then(() => pruneWitnessCaptures(packetWitness.dir));
+
+  // What this process holds, once a minute. The kernel killed the proxy on
+  // 2026-08-28 at 2.4 GB resident and the log had never said a word about
+  // memory, so the growth that ended in that kill has no shape in any record we
+  // keep. RSS is the figure the OOM killer reads, so RSS is the figure to say.
+  startMemoryReport({ log: (message) => logger.info(message) });
 
   logger.info(`Starting @torrent-tv/proxy v${PROXY_VERSION}`);
   logger.info(`Local stream endpoint: http://${bindHost}:${actualPort}/stream`);

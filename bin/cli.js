@@ -15,6 +15,7 @@
 import "../services/thread-pool.js";
 import { Command } from "commander";
 import crypto from "node:crypto";
+import os from "node:os";
 import { spawnSync } from "node:child_process";
 import { createRequire } from "node:module";
 import ffmpegStatic from "ffmpeg-static";
@@ -349,7 +350,14 @@ try {
   // 2026-08-28 at 2.4 GB resident and the log had never said a word about
   // memory, so the growth that ended in that kill has no shape in any record we
   // keep. RSS is the figure the OOM killer reads, so RSS is the figure to say.
-  startMemoryReport({ log: (message) => logger.info(message) });
+  // The disk path is where pieces spill and torrent data lands. A budget for
+  // memory alone is half a budget: a store that behaves about RAM can still
+  // fill the card an addon host boots from, and neither limit was measured
+  // before (roadmap item 2).
+  startMemoryReport({
+    log: (message) => logger.info(message),
+    diskPath: os.tmpdir()
+  });
 
   logger.info(`Starting @torrent-tv/proxy v${PROXY_VERSION}`);
   logger.info(`Local stream endpoint: http://${bindHost}:${actualPort}/stream`);

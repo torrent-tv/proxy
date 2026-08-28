@@ -140,6 +140,31 @@ export function budgetForNewStore(availableBytes, storeCount) {
 }
 
 /**
+ * Re-derive every live store's growth ceiling from what the machine has NOW.
+ *
+ * A budget settled at birth is not a budget: the machine it was taken from
+ * changes, and this proxy is one process among many on a host that hands its
+ * addons a positive `oom_score_adj`. Lowering a ceiling frees nothing that is
+ * already committed — the pool cannot shrink — but it stops the growth that
+ * would otherwise carry on into memory the machine no longer has, and sends
+ * those pieces to disk instead, which is what the disk tier is for.
+ *
+ * Never above the reservation each store was created with: `maxByteLength` was
+ * fixed from it and `grow()` cannot pass it.
+ *
+ * @returns {{ name: string, ceilingBytes: number, committedBytes: number }[]}
+ *   What each store may now grow to, for the caller to report.
+ */
+export function reviseStoreBudgets() {
+  const share = budgetForNewStore(availableMemorySync(), liveStores.size);
+  const revised = [];
+  for (const store of liveStores) {
+    revised.push(store.reviseGrowthCeiling(share));
+  }
+  return revised;
+}
+
+/**
  * Budget for one torrent's resident pieces when the caller names none.
  *
  * @returns {number}
@@ -203,6 +228,21 @@ export class SharedPieceStore {
   #lastChunkLength;
   #lastChunkIndex;
   #capacity;
+  /**
+   * How many slots this store may grow into RIGHT NOW, as against the
+   * reservation it was born with.
+   *
+   * The budget used to be settled once, when the store was created, from the
+   * memory the machine had at that moment. A store opened on an idle machine
+   * therefore kept an idle machine's allowance for the rest of its life, and
+   * went on growing into it while everything else on the host competed for what
+   * was left — which is how an addon with a positive `oom_score_adj` becomes
+   * the kernel's first choice (roadmap item 2). It is revised on the same
+   * cadence as the memory report, within the reservation: it can never rise
+   * above `#capacity`, because `maxByteLength` was fixed from that and
+   * `grow()` cannot pass it.
+   */
+  #growthCeiling;
   /** @type {SharedArrayBuffer} */
   #shared;
   /** @type {Buffer} A view over the whole pool, for slot arithmetic. */
@@ -291,6 +331,7 @@ export class SharedPieceStore {
       this.#freeSlots.push(slot);
     }
     this.#allocatedSlots = MIN_RESIDENT_PIECES;
+    this.#growthCeiling = this.#capacity;
     this.#lru = new PieceLru(this.#capacity);
     this.#name = options.name ?? "pieces";
     this.#disk = new DiskTier({
@@ -304,18 +345,52 @@ export class SharedPieceStore {
   /**
    * What this store has been doing, for the periodic report.
    *
-   * @returns {{ name: string, resident: number, capacity: number, residentBytes: number, budgetBytes: number, spilled: number, fromMemory: number, fromDisk: number, spills: number, revivals: number, blockedByPins: number }}
+   * `residentBytes` is the pieces held right now; `committedBytes` is the
+   * memory this store has actually taken from the machine, and the two are not
+   * the same number. The pool only ever GROWS — `SharedArrayBuffer` has no
+   * shrink — so a piece spilled to disk returns its slot to the free list and
+   * its memory to nobody. Reporting only the first is what left 650 MB of a
+   * 893 MB process unaccounted for on 2026-08-28 while the store said "144MB"
+   * (roadmap item 2).
+   *
+   * @returns {{ name: string, resident: number, capacity: number, residentBytes: number, committedBytes: number, allocatedSlots: number, budgetBytes: number, spilled: number, spilledBytes: number, fromMemory: number, fromDisk: number, spills: number, revivals: number, blockedByPins: number }}
    */
   stats() {
     return {
       name: this.#name,
       resident: this.#slotOf.size,
-      capacity: this.#capacity,
+      capacity: this.#growthCeiling,
       residentBytes: this.#slotOf.size * this.#chunkLength,
-      budgetBytes: this.#capacity * this.#chunkLength,
+      // The high-water mark, which is what the machine has actually parted
+      // with. It never falls while the store lives.
+      allocatedSlots: this.#allocatedSlots,
+      committedBytes: this.#allocatedSlots * this.#chunkLength,
+      budgetBytes: this.#growthCeiling * this.#chunkLength,
       pinned: this.#lru.pinnedCount,
       spilled: this.#disk.size,
+      spilledBytes: this.#disk.size * this.#chunkLength,
       ...this.#counters
+    };
+  }
+
+  /**
+   * Take a new allowance, within the reservation this store was born with.
+   *
+   * @param {number} allowedBytes
+   * @returns {{ name: string, ceilingBytes: number, committedBytes: number }}
+   */
+  reviseGrowthCeiling(allowedBytes) {
+    const wanted = Math.floor(Number(allowedBytes) / this.#chunkLength);
+    // Never below what a store needs to work at all — under that it thrashes to
+    // disk and the viewer pays for it — and never above the reservation.
+    this.#growthCeiling = Math.min(
+      this.#capacity,
+      Math.max(MIN_RESIDENT_PIECES, Number.isFinite(wanted) ? wanted : this.#capacity)
+    );
+    return {
+      name: this.#name,
+      ceilingBytes: this.#growthCeiling * this.#chunkLength,
+      committedBytes: this.#allocatedSlots * this.#chunkLength
     };
   }
 
@@ -477,7 +552,7 @@ export class SharedPieceStore {
     // Room left in the budget: take more memory rather than evicting. Growing
     // replaces the view over the pool, so every slot offset stays valid — the
     // bytes do not move.
-    if (this.#allocatedSlots < this.#capacity) {
+    if (this.#allocatedSlots < this.#growthCeiling) {
       this.#allocatedSlots += 1;
       this.#shared.grow(this.#allocatedSlots * this.#chunkLength);
       this.#pool = Buffer.from(this.#shared);
@@ -712,7 +787,7 @@ export class SharedPieceStore {
    * @param {number} [limit] - Most pieces to revive at once.
    * @returns {number} How many revivals were started.
    */
-  warmRange(from, to, limit = Math.max(1, Math.floor(this.#capacity / 4))) {
+  warmRange(from, to, limit = Math.max(1, Math.floor(this.#growthCeiling / 4))) {
     if (this.#closed || !Number.isInteger(from) || !Number.isInteger(to)) {
       return 0;
     }

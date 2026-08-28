@@ -29,6 +29,7 @@ import { createFileClaims } from "./file-claims.js";
 import { readFragments, supplyFiguresFor } from "./piece-reader.js";
 import { cuesHeldFor, declaredSubtitleTracksOf, subtitleTracksOf, warmSubtitleCues } from "./subtitle-cues.js";
 import { Command, Event } from "./protocol.js";
+import { startMemoryReport } from "../memory-report.js";
 
 // Imported dynamically, and that is load-bearing: static imports are RESOLVED
 // during linking, before any module body runs, so a statically imported pool
@@ -36,7 +37,7 @@ import { Command, Event } from "./protocol.js";
 // the hook above had a chance to register. Verified the hard way: with a static
 // import the process still aborted, and the stack named the genuine polyfill.
 const { TorrentPool, resolveDhtBootstrap } = await import("../torrent-pool.js");
-const { collectStoreStats, findSharedStore } = await import("../piece-store/shared-piece-store.js");
+const { collectStoreStats, findSharedStore, reviseStoreBudgets } = await import("../piece-store/shared-piece-store.js");
 
 // Resolved before the client exists, because the client builds its DHT in its
 // own constructor and the addresses have to be in hand by then. Awaiting here
@@ -483,12 +484,37 @@ parentPort.on("message", async (message) => {
  * no evidence to work from. Reported only when something changed, so an idle
  * proxy stays quiet.
  */
+// The torrent worker's OWN isolate, reported from inside it. The piece pool is
+// a `SharedArrayBuffer` allocated here, so the main thread's counters cannot
+// see it however carefully they are read — which is half the reason 650 MB of a
+// 893 MB process had no explanation on 2026-08-28 (roadmap item 2).
+startMemoryReport({
+  log,
+  readStores: collectStoreStats,
+  scope: "thread",
+  label: "torrent worker"
+});
+
 const STORE_REPORT_INTERVAL_MS = 60_000;
 
 /** Last reported figures per store, so unchanged ones stay silent. */
 const lastReported = new Map();
 
 setInterval(() => {
+  // What the machine can spare NOW, not what it could spare when each store was
+  // created. Lowering a ceiling frees nothing already committed — the pool
+  // cannot shrink — but it stops growth into memory the host no longer has, and
+  // those pieces go to disk instead (roadmap item 2).
+  for (const revised of reviseStoreBudgets()) {
+    if (revised.committedBytes > revised.ceilingBytes) {
+      log(
+        `piece-store "${revised.name.slice(0, 40)}": allowance is now ` +
+        `${Math.round(revised.ceilingBytes / 1048576)}MB and ` +
+        `${Math.round(revised.committedBytes / 1048576)}MB is already committed — ` +
+        `it will not grow further, and cannot give back what it holds`
+      );
+    }
+  }
   for (const stats of collectStoreStats()) {
     const signature = `${stats.fromMemory}/${stats.fromDisk}/${stats.spills}/${stats.revivals}/${stats.blockedByPins}`;
     if (lastReported.get(stats.name) === signature) {
@@ -505,6 +531,12 @@ setInterval(() => {
       `piece-store "${stats.name.slice(0, 40)}": resident=${stats.resident}/${stats.capacity} ` +
       `(${Math.round((stats.residentBytes || 0) / 1048576)}MB of ` +
       `${Math.round((stats.budgetBytes || 0) / 1048576)}MB allowed) ` +
+      // What the machine has actually parted with, which is not what is held:
+      // the pool only grows, so a spilled piece frees its slot and no memory.
+      // Reporting the first without the second is what hid 650 MB on
+      // 2026-08-28 (roadmap item 2).
+      `committed=${Math.round((stats.committedBytes || 0) / 1048576)}MB ` +
+      `on-disk=${Math.round((stats.spilledBytes || 0) / 1048576)}MB ` +
       `pinned=${stats.pinned} spilled=${stats.spilled} reads=${reads} (${fromMemoryShare}% from memory) ` +
       `spills=${stats.spills} revivals=${stats.revivals}` +
       (stats.blockedByPins > 0 ? ` blocked-by-pins=${stats.blockedByPins}` : "")

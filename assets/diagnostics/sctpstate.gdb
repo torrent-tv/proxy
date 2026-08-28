@@ -6,13 +6,15 @@ set $mask = *(unsigned long *)($base + 8)
 printf "asochash=%p mask=%lu\n", $hash, $mask
 set $i = 0
 set $stcb = 0
-while $i <= $mask && $stcb == 0
-  set $head = *(unsigned long *)($hash + $i * 8)
-  if $head != 0
-    set $stcb = $head
-    printf "bucket %lu -> stcb=%p\n", $i, $stcb
+if $hash != 0
+  while $i <= $mask && $stcb == 0
+    set $head = *(unsigned long *)($hash + $i * 8)
+    if $head != 0
+      set $stcb = $head
+      printf "bucket %lu -> stcb=%p\n", $i, $stcb
+    end
+    set $i = $i + 1
   end
-  set $i = $i + 1
 end
 if $stcb == 0
   printf "no association found (no viewer connected?)\n"

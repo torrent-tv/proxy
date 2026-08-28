@@ -107,6 +107,32 @@ const ECHO_STALE_FALLBACK_MS = 5_000;
 const REPORT_INTERVAL_MS = 5_000;
 
 /**
+ * Whether the `seen` counter has stopped advancing for longer than this
+ * connection's own history says a healthy gap between two advances ever
+ * takes.
+ *
+ * The `association-stopped` verdict alone is not enough to act on: a
+ * connection can sit BEHIND by a bounded, roughly constant amount for
+ * minutes (measured 2026-08-28, session on a backgrounded tab — gap held at
+ * 6-7 probes for 95+ seconds while `seen` kept climbing right along with
+ * `sent`) without anything being wrong. What a true wedge shows instead,
+ * measured the same day against a session already known to be one
+ * (`d85ae4f5`): `seen` FROZEN at one value for over a minute while `sent`
+ * climbs unbounded. So the question is not "is there a gap" but "has the
+ * highest-seen number stopped moving at all, for longer than it has ever
+ * legitimately taken this connection to report an advance" — the same shape
+ * as {@link wedgeIsCertain} in `data-channel-handler.js`, applied to the
+ * probe's own counter instead of the transport's byte counter.
+ *
+ * @param {{ stuckForMs: number, longestHealthySeenGapMs: number, intervalMs?: number }} state
+ * @returns {{ certain: boolean, needMs: number }}
+ */
+export function probeWedgeIsCertain({ stuckForMs, longestHealthySeenGapMs, intervalMs = PROBE_INTERVAL_MS }) {
+  const needMs = Math.max(longestHealthySeenGapMs, intervalMs);
+  return { certain: stuckForMs >= needMs, needMs };
+}
+
+/**
  * One connection's probe state.
  *
  * @typedef {Object} ProbeConnection
@@ -119,6 +145,9 @@ const REPORT_INTERVAL_MS = 5_000;
  * @property {number} echoes     - How many echoes have arrived.
  * @property {string} verdict    - Last verdict reported, so a change is logged at once.
  * @property {number} reportedAt - When the state was last written to the log.
+ * @property {number} lastSeenAdvanceAt - When any label's `seen` value last increased (0 = never yet).
+ * @property {number} longestHealthySeenGapMs - The longest gap between two advances this connection has shown while not flagged as a wedge.
+ * @property {boolean} probeCaptureStarted - One evidence-gathering attempt per wedge; reset once `seen` advances again.
  * @property {ReturnType<typeof setInterval> | null} timer
  */
 
@@ -204,6 +233,11 @@ export function readProbeState(state) {
  * @param {Object} options
  * @param {(message: string) => void} options.log
  * @param {number} [options.intervalMs]
+ * @param {(sessionId: string) => object | null} [options.getTransportSnapshot]
+ *   Needed only to hand the witness a remote endpoint when this probe is the
+ *   one declaring a wedge.
+ * @param {{ maybeCapture: (trigger: object) => boolean }} [options.witness]
+ * @param {{ maybeRead: (reasonText: string) => boolean }} [options.usrsctpState]
  * @returns {{
  *   attach: (sessionId: string, tag: string, label: string, channel: import('node-datachannel').DataChannel) => void,
  *   detach: (sessionId: string, channel: import('node-datachannel').DataChannel) => void,
@@ -211,7 +245,14 @@ export function readProbeState(state) {
  *   dispose: () => void
  * }}
  */
-export function createDeliveryProbe({ log, intervalMs = PROBE_INTERVAL_MS, readDelivery }) {
+export function createDeliveryProbe({
+  log,
+  intervalMs = PROBE_INTERVAL_MS,
+  readDelivery,
+  getTransportSnapshot,
+  witness,
+  usrsctpState
+}) {
   /** @type {Map<string, ProbeConnection>} */
   const connections = new Map();
 
@@ -284,6 +325,47 @@ export function createDeliveryProbe({ log, intervalMs = PROBE_INTERVAL_MS, readD
       connection.reportedAt = now;
       log(`[dc-probe] ${connection.tag} ${verdict} — ${detail} at=${new Date(now).toISOString()}`);
     }
+
+    // `association-stopped` alone is not certainty — see probeWedgeIsCertain.
+    // A connection that is merely lagging by a bounded amount reaches this
+    // verdict too (a hidden tab's own echo cadence, measured 2026-08-28), and
+    // `seen` keeps advancing right along with it. Only a `seen` value that has
+    // stopped moving ENTIRELY, for longer than this connection has ever shown
+    // as a legitimate gap, is the wedge this exists to catch.
+    const stuckForMs = connection.lastSeenAdvanceAt === 0 ? 0 : now - connection.lastSeenAdvanceAt;
+    if (verdict === "association-stopped") {
+      const { certain, needMs } = probeWedgeIsCertain({
+        stuckForMs,
+        longestHealthySeenGapMs: connection.longestHealthySeenGapMs
+      });
+      if (certain && !connection.probeCaptureStarted) {
+        connection.probeCaptureStarted = true;
+        const reasonText =
+          `probe seen-counter unmoved ${Math.round(stuckForMs / 1000)}s against the ` +
+          `${(needMs / 1000).toFixed(1)}s this connection's own history says is legitimate`;
+        if (witness) {
+          const snapshot = getTransportSnapshot?.(connection.id) ?? null;
+          const started = witness.maybeCapture({
+            sessionId: connection.id,
+            tag: connection.tag,
+            label: "probe",
+            remote: snapshot?.remote ?? null,
+            queuedBytes: 0,
+            stuckForMs
+          });
+          if (!started) {
+            connection.probeCaptureStarted = false;
+          }
+        }
+        if (usrsctpState) {
+          usrsctpState.maybeRead(reasonText);
+        }
+      }
+    } else {
+      // Not association-stopped any more: whatever was flagged has cleared,
+      // and a later wedge on the same connection deserves its own attempt.
+      connection.probeCaptureStarted = false;
+    }
   }
 
   return {
@@ -305,6 +387,9 @@ export function createDeliveryProbe({ log, intervalMs = PROBE_INTERVAL_MS, readD
           echoes: 0,
           verdict: "",
           reportedAt: 0,
+          lastSeenAdvanceAt: 0,
+          longestHealthySeenGapMs: 0,
+          probeCaptureStarted: false,
           timer: null
         };
         connections.set(sessionId, connection);
@@ -342,15 +427,36 @@ export function createDeliveryProbe({ log, intervalMs = PROBE_INTERVAL_MS, readD
       if (!connection || !echo || typeof echo !== "object") {
         return;
       }
+      const now = Date.now();
       const seen = echo.seen;
       if (seen && typeof seen === "object") {
+        let advanced = false;
         for (const [label, value] of Object.entries(seen)) {
-          if (Number.isInteger(value)) {
-            connection.seen.set(label, value);
+          if (!Number.isInteger(value)) {
+            continue;
           }
+          const previous = connection.seen.get(label);
+          if (!Number.isInteger(previous) || value > previous) {
+            advanced = true;
+          }
+          connection.seen.set(label, value);
+        }
+        // What a wedge shows is this counter frozen, not merely behind — see
+        // probeWedgeIsCertain. The gap since the last time ANY label moved is
+        // this connection's own answer to "how long may a healthy report take
+        // to arrive", recorded only while nothing is currently flagged (the
+        // same guard `longestHealthyFlatMs` uses): a stretch already under
+        // suspicion must not teach the detector to tolerate it.
+        if (advanced) {
+          if (connection.lastSeenAdvanceAt !== 0 && !connection.probeCaptureStarted) {
+            const gap = now - connection.lastSeenAdvanceAt;
+            if (gap > connection.longestHealthySeenGapMs) {
+              connection.longestHealthySeenGapMs = gap;
+            }
+          }
+          connection.lastSeenAdvanceAt = now;
         }
       }
-      const now = Date.now();
       if (connection.echoAt !== 0) {
         const sinceLast = now - connection.echoAt;
         if (sinceLast > connection.echoIntervalMs) {

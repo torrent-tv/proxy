@@ -25,6 +25,7 @@ import { createWebRtcManager } from "../services/webrtc-manager.js";
 import { createDataChannelHandler } from "../services/data-channel-handler.js";
 import { pruneCoreDumps } from "../services/core-dumps.js";
 import { adoptOrphanRingFiles, createPacketWitness, pruneWitnessCaptures } from "../services/packet-witness.js";
+import { createUsrsctpStateReader } from "../services/usrsctp-state.js";
 import { startMemoryReport } from "../services/memory-report.js";
 import { collectHealthMetrics } from "../services/health-collector.js";
 import { createPortMapper } from "../services/port-mapper.js";
@@ -188,6 +189,9 @@ let webRtcManager = null;
  */
 let packetWitness = null;
 
+/** @type {ReturnType<typeof createUsrsctpStateReader> | null} */
+let usrsctpStateReader = null;
+
 /** @type {ReturnType<typeof createDataChannelHandler> | null} */
 let dataChannelHandler = null;
 
@@ -335,6 +339,12 @@ try {
   // the pruner recognises BEFORE anything starts a new ring over them.
   void adoptOrphanRingFiles(packetWitness.dir).then(() => pruneWitnessCaptures(packetWitness.dir));
 
+  // Reads usrsctp's own association state via gdb the moment a wedge is
+  // declared (roadmap item 11) — no source rebuild, the module ships
+  // unstripped. A host without gdb just never gets a reading, the same way a
+  // host without tcpdump never gets a packet capture.
+  usrsctpStateReader = createUsrsctpStateReader({ log: (message) => logger.info(message) });
+
   // What this process holds, once a minute. The kernel killed the proxy on
   // 2026-08-28 at 2.4 GB resident and the log had never said a word about
   // memory, so the growth that ended in that kill has no shape in any record we
@@ -464,7 +474,8 @@ try {
     getTransportSnapshot: (sessionId) => webRtcManager?.getTransportSnapshot(sessionId) ?? null,
     // Records the wire when a queue stays wedged — how the rare one-way
     // transmit death (roadmap item 10, 2026-08-24) gets its evidence.
-    witness: packetWitness
+    witness: packetWitness,
+    usrsctpState: usrsctpStateReader
   });
 
   webRtcManager = createWebRtcManager({

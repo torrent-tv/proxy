@@ -2176,9 +2176,18 @@ export class HlsSessionManager {
       // nothing else: they do not appear in the SPS, so one init segment goes
       // on describing every fragment — which the picture's SIZE cannot do.
       rateCapKbps: null,
-      // Latest viewer link report ({ linkMbps, bufferedAheadSec, at }) and the
+      // The latest link report of EACH viewer, keyed by consumer id
+      // ({ linkMbps, bufferedAheadSec, positionSeconds, at }), and the
       // link-deficit slow window (mirrors budgetSlowSince for the CPU path).
-      netReport: null,
+      //
+      // One per viewer rather than one per session, because a copied picture is
+      // shared: the session key carries the consumer id only where the video is
+      // re-encoded. A single field was whichever viewer reported last, so the
+      // budget could act on one viewer's link while the other was the one
+      // running dry, and the audio rendition's start subtracted one viewer's
+      // buffer from another viewer's read head.
+      /** @type {Map<string, { linkMbps: number, bufferedAheadSec: number, positionSeconds: number | null, at: number }>} */
+      netReports: new Map(),
       linkSlowSince: 0,
       sourceWidth,
       sourceHeight,
@@ -2841,11 +2850,15 @@ export class HlsSessionManager {
    * Record the latest viewer link report for a session (adaptive bitrate).
    * Returns false for an unknown/disposed session.
    *
+   * Kept per viewer. A browser that does not say who it is lands under one
+   * shared key, which is exactly the old behaviour for that browser and no
+   * worse: with one viewer the two are the same thing.
+   *
    * @param {string} sessionId
-   * @param {{ linkMbps: number, bufferedAheadSec: number }} report
+   * @param {{ linkMbps: number, bufferedAheadSec: number, consumerId?: string, positionSeconds?: number }} report
    * @returns {boolean}
    */
-  recordNetReport(sessionId, { linkMbps, bufferedAheadSec }) {
+  recordNetReport(sessionId, { linkMbps, bufferedAheadSec, consumerId, positionSeconds }) {
     const named = this.sessionsById.get(sessionId);
     if (!named || named.state === "disposed") {
       return false;
@@ -2857,8 +2870,64 @@ export class HlsSessionManager {
     }
     // The link carries the stream on screen, so the report belongs to the
     // variant producing it — that is the encoder whose bitrate it can bound.
-    this.#activeVariant(named).netReport = { linkMbps, bufferedAheadSec, at: Date.now() };
+    const session = this.#activeVariant(named);
+    const now = Date.now();
+    session.netReports.set(typeof consumerId === "string" && consumerId.length > 0 ? consumerId : "", {
+      linkMbps,
+      bufferedAheadSec,
+      // Where the picture is, said by the viewer rather than worked out from
+      // their buffer. Null from a browser that does not send it.
+      positionSeconds:
+        Number.isFinite(positionSeconds) && positionSeconds >= 0 ? positionSeconds : null,
+      at: now
+    });
+    // A viewer who left stops reporting, and their last reading must not go on
+    // deciding for the ones still here. Nothing else removes it: a closed data
+    // channel does not release consumers today (roadmap item 55).
+    for (const [key, report] of session.netReports) {
+      if (now - report.at > LINK_REPORT_FRESH_MS) {
+        session.netReports.delete(key);
+      }
+    }
     return true;
+  }
+
+  /**
+   * The worst of what the viewers of this session report, as one reading.
+   *
+   * The budget asks one question — is anybody failing to keep up — so both
+   * terms are the worst case: the slowest link and the emptiest buffer, which
+   * may belong to different people. That is deliberate. Taking the last report
+   * instead meant a session with two viewers acted on whichever of them
+   * happened to report most recently.
+   *
+   * @param {HlsSession} session
+   * @param {number} now
+   * @returns {{ linkMbps: number, bufferedAheadSec: number, at: number, viewers: number } | null}
+   *   Null when nothing fresh measures the link, which is the silence every
+   *   caller already treats as "no opinion".
+   */
+  #worstNetReport(session, now) {
+    let worst = null;
+    for (const report of session.netReports.values()) {
+      if (now - report.at > LINK_REPORT_FRESH_MS) {
+        continue;
+      }
+      if (worst === null) {
+        worst = {
+          linkMbps: report.linkMbps,
+          bufferedAheadSec: report.bufferedAheadSec,
+          at: report.at,
+          viewers: 1
+        };
+        continue;
+      }
+      worst.linkMbps = Math.min(worst.linkMbps, report.linkMbps);
+      worst.bufferedAheadSec = Math.min(worst.bufferedAheadSec, report.bufferedAheadSec);
+      worst.at = Math.max(worst.at, report.at);
+      worst.viewers += 1;
+    }
+    return worst;
   }
 
   /**
@@ -2981,7 +3050,7 @@ export class HlsSessionManager {
    * @returns {Promise<boolean>}
    */
   async #checkLinkBudget(session, now) {
-    const report = session.netReport;
+    const report = this.#worstNetReport(session, now);
     if (!report || now - report.at > LINK_REPORT_FRESH_MS) {
       session.linkSlowSince = 0; // no fresh data — old clients / stopped reporter
       return false;
@@ -3006,9 +3075,12 @@ export class HlsSessionManager {
       return false; // not sustained yet
     }
     session.linkSlowSince = 0;
+    // How many viewers the two figures were taken over, because with more than
+    // one they are the worst of each and need not belong to the same person.
     const reasonText =
       `link=${report.linkMbps.toFixed(2)}Mbps stream=${observed.toFixed(2)}Mbps ` +
-      `buffer=${report.bufferedAheadSec.toFixed(1)}s`;
+      `buffer=${report.bufferedAheadSec.toFixed(1)}s` +
+      (report.viewers > 1 ? ` (worst of ${report.viewers} viewers)` : "");
     // Which lever this branch HAS, which is not the same on both paths.
     //
     // A re-encoded picture can simply be told to make fewer bits at the size it
@@ -4111,7 +4183,7 @@ export class HlsSessionManager {
     if (session.linkSlowSince !== 0 || session.budgetSlowSince !== 0) {
       return false;
     }
-    const report = session.netReport;
+    const report = this.#worstNetReport(session, now);
     if (!report || now - report.at > LINK_REPORT_FRESH_MS) {
       // Nothing fresh measures the link, so it has no opinion either way — the
       // same silence that stops #checkLinkBudget from acting.
@@ -4137,7 +4209,9 @@ export class HlsSessionManager {
    * @returns {boolean}
    */
   #linkCouldCarry(session, wantedMbps, now) {
-    const report = session.netReport;
+    // The SLOWEST link among the viewers: a step up has to be carried by all of
+    // them, not by whichever reported last.
+    const report = this.#worstNetReport(session, now);
     if (!report || now - report.at > LINK_REPORT_FRESH_MS) {
       return true;
     }
@@ -7509,17 +7583,25 @@ export class HlsSessionManager {
    * Where to start a separately published audio track, in seconds.
    *
    * The player, on changing track, discards the audio it holds and refills from
-   * the PICTURE onwards — so that is where the encoder has to begin. What this
-   * class knows directly is the read head, which runs ahead of the picture by
-   * the player's own buffer; the browser reports that buffer with every link
-   * report, so the picture is the one subtraction below.
+   * the PICTURE onwards — so that is where the encoder has to begin, and with
+   * more than one viewer that means the EARLIEST picture: a run starting at the
+   * leader's position has nothing to give the one behind them.
+   *
+   * The viewer states where they are, in their own link report. It used to be
+   * worked out instead, as the read head less the buffer they reported, and
+   * that subtraction is only sound with one viewer: the read head is the
+   * furthest request of ANY of them while the buffer belongs to whoever
+   * reported last, so with two viewers the two halves belong to different
+   * people and the error is as large as the buffer is deep.
    *
    * One segment of margin, because the report is up to ten seconds old and the
    * picture has moved on since — a run that begins a little early costs a
    * segment of audio nobody plays, while one that begins a little late is
    * behind the viewer and can only be fixed by restarting it.
    *
-   * With no fresh report, the whole look-ahead is subtracted instead: it is the
+   * A browser that reports no position falls back to the old subtraction, with
+   * the DEEPEST buffer reported, which errs early — the cheap direction. With
+   * no fresh report at all the whole look-ahead is subtracted: it is the
    * furthest the two can be apart, so it cannot leave the run ahead of them.
    *
    * @param {HlsSession} base
@@ -7528,11 +7610,33 @@ export class HlsSessionManager {
   #audioStartSecondsFor(base) {
     const watching = this.#activeVariant(base);
     const readHead = this.#viewerPositionOf(watching);
-    const report = watching.netReport;
-    const reportAge = Number.isFinite(report?.at) ? Date.now() - report.at : Number.POSITIVE_INFINITY;
-    const buffered = reportAge <= NET_REPORT_FRESH_MS && Number.isFinite(report?.bufferedAheadSec)
-      ? report.bufferedAheadSec
-      : LOOKAHEAD_PAUSE_SECONDS;
+    const now = Date.now();
+    let earliestStated = null;
+    let deepestBuffer = null;
+    for (const report of watching.netReports.values()) {
+      if (now - report.at > NET_REPORT_FRESH_MS) {
+        continue;
+      }
+      if (Number.isFinite(report.positionSeconds)) {
+        earliestStated =
+          earliestStated === null
+            ? report.positionSeconds
+            : Math.min(earliestStated, report.positionSeconds);
+      }
+      if (Number.isFinite(report.bufferedAheadSec)) {
+        deepestBuffer =
+          deepestBuffer === null
+            ? report.bufferedAheadSec
+            : Math.max(deepestBuffer, report.bufferedAheadSec);
+      }
+    }
+    if (earliestStated !== null) {
+      // Never ahead of the read head: a position claiming to be past what has
+      // been asked for is a report that arrived out of order, and acting on it
+      // would start the run where no request can ever reach it.
+      return Math.max(0, Math.min(earliestStated, readHead) - this.segmentDurationSec);
+    }
+    const buffered = deepestBuffer === null ? LOOKAHEAD_PAUSE_SECONDS : deepestBuffer;
     return Math.max(0, readHead - buffered - this.segmentDurationSec);
   }
 

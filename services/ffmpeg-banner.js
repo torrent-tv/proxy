@@ -120,6 +120,54 @@ export function parseFfmpegVideoDimensions(stderrText) {
 }
 
 /**
+ * Count the streams the source declares, by type, from ffmpeg's banner
+ * ("Stream #0:3(rus): Audio: ac3 …").
+ *
+ * Every `-map` this proxy builds carries the `?` suffix, which tells ffmpeg to
+ * drop the mapping silently when the stream is absent instead of refusing. Map
+ * every stream of a run away that way and the output is left with nothing in
+ * it, which ffmpeg reports as `Output file does not contain any stream` and
+ * exit 255 — three sessions died that way on 2026-08-26 and the log held only
+ * the exit code. What separates "we asked for a track that is not there" from
+ * every other cause of 255 is this count, so it is read once, with the rest of
+ * the banner, and kept for the failure to quote.
+ *
+ * @param {string} stderrText
+ * @returns {{ video: number, audio: number, subtitle: number, other: number } | null}
+ *   Null when the banner carried no stream lines at all — which is itself
+ *   different from a file that genuinely has none.
+ */
+export function parseFfmpegStreamCounts(stderrText) {
+  if (typeof stderrText !== "string" || stderrText.length === 0) {
+    return null;
+  }
+  const lines = stderrText.match(/^\s*Stream #\d+:\d+.*$/gim);
+  if (!lines || lines.length === 0) {
+    return null;
+  }
+  const counts = { video: 0, audio: 0, subtitle: 0, other: 0 };
+  for (const line of lines) {
+    // The type follows the stream's id and its optional language/metadata:
+    // "Stream #0:1(eng): Audio: aac". Attached pictures also announce
+    // themselves as Video, and they are counted as such deliberately — that is
+    // exactly what `0:v:0?` would map, and a cover image mapped as the picture
+    // is one of the ways a run ends up producing nothing anyone can watch.
+    const match = line.match(/Stream #\d+:\d+(?:\[[^\]]*\])?(?:\([^)]*\))?:\s*(\w+)/i);
+    const kind = match ? match[1].toLowerCase() : "";
+    if (kind === "video") {
+      counts.video += 1;
+    } else if (kind === "audio") {
+      counts.audio += 1;
+    } else if (kind === "subtitle") {
+      counts.subtitle += 1;
+    } else {
+      counts.other += 1;
+    }
+  }
+  return counts;
+}
+
+/**
  * Parse the source frame rate from the ffmpeg "Video:" line
  * (e.g. "… 23.98 fps," / "… 25 fps,"). Returns null when absent.
  *

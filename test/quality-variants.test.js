@@ -59,6 +59,7 @@ function fakeSession({ id, encodeHeight, dirPath, transcodeVideo = true }) {
     seekSettleTimer: null,
     seekTarget: null,
     waitEpoch: 0,
+    netReports: new Map(),
     usesExplicitCuts: false,
     useSyntheticPlaylist: true,
     playlistText: "#EXTM3U\n",
@@ -660,7 +661,12 @@ test("a separately published audio track starts where the picture is, from the r
   // picture — so the viewer is at 100 s, and that, less a segment of margin,
   // is where the track has to begin.
   base.viewerPositionSeconds = 140;
-  base.netReport = { linkMbps: 20, bufferedAheadSec: 40, at: Date.now() };
+  base.netReports.set("viewer", {
+    linkMbps: 20,
+    bufferedAheadSec: 40,
+    positionSeconds: null,
+    at: Date.now()
+  });
   manager.getCachedAudioTracks = () => [
     { index: 0, language: "rus", title: "", isDefault: true },
     { index: 1, language: "eng", title: "", isDefault: false }
@@ -683,6 +689,87 @@ test("a separately published audio track starts where the picture is, from the r
   );
 });
 
+test("with two viewers the audio track starts at the EARLIEST picture, not the read head", async (t) => {
+  const { manager, base, dirPath } = await managerWithBase();
+  t.after(async () => {
+    await manager.disposeAll();
+    await rm(dirPath, { recursive: true, force: true });
+  });
+  base.audioSeparate = true;
+  // A copied picture is one session shared by both of them. The read head is
+  // the furthest request of EITHER, so it belongs to the viewer in front.
+  base.viewerPositionSeconds = 140;
+  base.netReports.set("ahead", {
+    linkMbps: 20,
+    bufferedAheadSec: 40,
+    positionSeconds: 100,
+    at: Date.now()
+  });
+  base.netReports.set("behind", {
+    linkMbps: 20,
+    bufferedAheadSec: 8,
+    positionSeconds: 40,
+    at: Date.now()
+  });
+  manager.getCachedAudioTracks = () => [
+    { index: 0, language: "rus", title: "", isDefault: true },
+    { index: 1, language: "eng", title: "", isDefault: false }
+  ];
+  const created = [];
+  manager.createOrGetSession = async (params) => {
+    created.push(params);
+    const rendition = fakeSession({ id: VARIANT_ID, encodeHeight: 0, dirPath });
+    rendition.audioOnly = true;
+    return { sessionId: VARIANT_ID, session: rendition };
+  };
+
+  await manager.resolveAudioRenditionFile(BASE_ID, 1, "segment-00010.mp4");
+
+  assert.equal(
+    created[0].startPositionSeconds,
+    36,
+    "the viewer at 40 s, less one segment of margin — a run starting at the leader " +
+      "has nothing to give the one behind them"
+  );
+});
+
+test("a position past the read head is clamped rather than acted on", async (t) => {
+  const { manager, base, dirPath } = await managerWithBase();
+  t.after(async () => {
+    await manager.disposeAll();
+    await rm(dirPath, { recursive: true, force: true });
+  });
+  base.audioSeparate = true;
+  base.viewerPositionSeconds = 140;
+  // Reports and requests race; a position claiming to be past everything that
+  // has been asked for would start the run where no request can reach it.
+  base.netReports.set("viewer", {
+    linkMbps: 20,
+    bufferedAheadSec: 40,
+    positionSeconds: 900,
+    at: Date.now()
+  });
+  manager.getCachedAudioTracks = () => [
+    { index: 0, language: "rus", title: "", isDefault: true },
+    { index: 1, language: "eng", title: "", isDefault: false }
+  ];
+  const created = [];
+  manager.createOrGetSession = async (params) => {
+    created.push(params);
+    const rendition = fakeSession({ id: VARIANT_ID, encodeHeight: 0, dirPath });
+    rendition.audioOnly = true;
+    return { sessionId: VARIANT_ID, session: rendition };
+  };
+
+  await manager.resolveAudioRenditionFile(BASE_ID, 1, "segment-00010.mp4");
+
+  assert.equal(
+    created[0].startPositionSeconds,
+    136,
+    "clamped to the read head, less one segment of margin"
+  );
+});
+
 test("a stale buffer report is not used to place an audio track", async (t) => {
   const { manager, base, dirPath } = await managerWithBase();
   t.after(async () => {
@@ -691,9 +778,14 @@ test("a stale buffer report is not used to place an audio track", async (t) => {
   });
   base.audioSeparate = true;
   base.viewerPositionSeconds = 300;
-  // Sent a minute ago: the viewer may have seeked anywhere since, so it says
-  // nothing about where they are now.
-  base.netReport = { linkMbps: 20, bufferedAheadSec: 5, at: Date.now() - 60_000 };
+  // Sent a minute ago: the viewer may have seeked anywhere since, so neither
+  // the buffer nor the position in it says where they are now.
+  base.netReports.set("viewer", {
+    linkMbps: 20,
+    bufferedAheadSec: 5,
+    positionSeconds: 250,
+    at: Date.now() - 60_000
+  });
   manager.getCachedAudioTracks = () => [
     { index: 0, language: "rus", title: "", isDefault: true },
     { index: 1, language: "eng", title: "", isDefault: false }

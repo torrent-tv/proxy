@@ -146,7 +146,13 @@ export async function handleApiTranscodeSessionsPost(req, reply, { hlsSessionMan
       // discovered. The browser checks what it actually got against this: a
       // track that never arrives is otherwise noticed only by its absence,
       // minutes later, as a black picture with working sound.
-      tracks: hlsSessionManager.declaredTracks(session)
+      tracks: hlsSessionManager.declaredTracks(session),
+      // How far ahead of the viewer this proxy lets the encoder run, in seconds
+      // of playback. The browser sizes its own forward buffer from it, so the
+      // two sides agree by construction instead of each carrying a constant of
+      // its own — which is how the browser came to hold thirty seconds while
+      // two minutes stood produced on disk (roadmap item 4).
+      lookaheadSeconds: hlsSessionManager.lookaheadSeconds
     });
   } catch (error) {
     if (error instanceof Error && error.code === "TRANSCODE_DISABLED") {

@@ -1235,6 +1235,24 @@ export function segmentCutTimesFrom(boundaries, startIndex) {
  * @param {{ seeked?: number, lastRequestedStart?: number | null, openedAt?: number }} readings
  * @returns {number} Seconds, never negative.
  */
+/**
+ * Where each viewer of a session is, creating the map when a session was built
+ * without one.
+ *
+ * Every session this class makes carries it, but a session object is also
+ * assembled by hand in a dozen tests, and code that writes a field should not
+ * depend on some other code having created it first.
+ *
+ * @param {HlsSession} session
+ * @returns {Map<string, { segment: number, seconds: number, at: number }>}
+ */
+function headsOf(session) {
+  if (!(session.consumerHeads instanceof Map)) {
+    session.consumerHeads = new Map();
+  }
+  return session.consumerHeads;
+}
+
 export function resolveViewerPosition({ seeked, lastRequestedStart, openedAt }) {
   if (Number.isFinite(seeked) && seeked > 0) {
     return seeked;
@@ -1612,6 +1630,14 @@ export class HlsSessionManager {
     // Gates the tonemap chain for HDR sources on the software path.
     this.tonemapSupported = Boolean(tonemapSupported);
     this.segmentDurationSec = segmentDurationSec;
+    // How far ahead of the viewer this proxy lets an encoder run, in seconds of
+    // playback. Stated rather than kept private, because the browser's forward
+    // buffer is bounded by the same quantity and used to carry a copy of its
+    // own: a hand-written 30 s, justified in a comment by a DIFFERENT constant
+    // (the eight segments that bound a request ahead of the ENCODE HEAD), so
+    // three quarters of what the encoder had already produced was thrown away.
+    // One figure, said by the side that owns it (roadmap item 4).
+    this.lookaheadSeconds = LOOKAHEAD_PAUSE_SECONDS;
     this.sessionTtlMs = sessionTtlMs;
     this.startupWaitMs = startupWaitMs;
     this.localBaseUrl = buildHttpBaseUrl(localBindHost, localPort);
@@ -2269,8 +2295,18 @@ export class HlsSessionManager {
       waitEpoch: 0,
       // Highest segment the viewer has actually asked for, and whether the
       // encoder is currently suspended for running too far past it.
-      // See #enforceLookAhead.
+      // See #enforceLookAhead. With several viewers on one session it is the
+      // FURTHEST of them, derived from `consumerHeads` below.
       lastRequestedSegment: null,
+      // Where each viewer of this session is, separately: the segment they last
+      // asked for and the position that implies, or the position they seeked
+      // to. One session serves everyone watching a copied picture, and the two
+      // fields above can only hold one answer — so a request held for the
+      // viewer who is behind used to be released by a seek made by the viewer
+      // in front. What must stay shared is what the single encoder does; what
+      // must not is the question "is THIS request still wanted".
+      /** @type {Map<string, { segment: number, seconds: number, at: number }>} */
+      consumerHeads: new Map(),
       encoderPauseUnsupported: false,
       seekFirstFarAt: 0,
       // Circuit breaker: consecutive FAST failures (see SEEK_FAST_FAIL_MS) at
@@ -2890,6 +2926,64 @@ export class HlsSessionManager {
       }
     }
     return true;
+  }
+
+  /**
+   * Record where one viewer of this session is, and answer with the furthest
+   * any of them has reached.
+   *
+   * The furthest is what the single encoder is steered by: it has to serve
+   * everyone, and what lies behind the leader has already been produced and is
+   * served from disk without a wait. The individual positions exist for the
+   * opposite question — whether a particular held request is still wanted —
+   * which cannot be answered from a shared field.
+   *
+   * A head is forgotten once it is older than the whole cushion plus a segment:
+   * a viewer who is playing asks for a segment every segment of playback, and
+   * one whose buffer is full asks again by the time it has drained, so a longer
+   * silence than that means they are paused or gone. Neither needs data ahead
+   * of them, so neither should hold the encoder there. The figure is the
+   * proxy's own look-ahead, not a chosen interval.
+   *
+   * @param {HlsSession} session
+   * @param {string} consumerId
+   * @param {number} segment
+   * @param {number} seconds
+   * @returns {{ segment: number, seconds: number }} The furthest live head.
+   */
+  #noteConsumerHead(session, consumerId, segment, seconds) {
+    const now = Date.now();
+    const heads = headsOf(session);
+    heads.set(consumerId, { segment, seconds, at: now });
+    const staleAfterMs = (this.lookaheadSeconds + this.segmentDurationSec) * 1000;
+    let furthest = { segment, seconds };
+    for (const [key, head] of heads) {
+      if (now - head.at > staleAfterMs) {
+        heads.delete(key);
+        continue;
+      }
+      if (head.segment > furthest.segment) {
+        furthest = { segment: head.segment, seconds: head.seconds };
+      }
+    }
+    return furthest;
+  }
+
+  /**
+   * Where one named viewer is, or null when this session has never heard from
+   * them — an older browser, a transport that cannot carry the id, or a viewer
+   * whose head has expired.
+   *
+   * @param {HlsSession} session
+   * @param {string} consumerId
+   * @returns {number | null} Seconds.
+   */
+  #consumerPositionOf(session, consumerId) {
+    if (!consumerId) {
+      return null;
+    }
+    const head = session.consumerHeads?.get(consumerId);
+    return head && Number.isFinite(head.seconds) ? head.seconds : null;
   }
 
   /**
@@ -5503,10 +5597,23 @@ export class HlsSessionManager {
    * @param {number} positionSeconds - Absolute position on the source timeline.
    * @returns {boolean} False when the session is unknown or disposed.
    */
-  requestSeek(sessionId, positionSeconds) {
+  requestSeek(sessionId, positionSeconds, consumerId = "") {
     const named = this.sessionsById.get(sessionId);
     if (!named || named.state === "disposed") {
       return false;
+    }
+    // The seeking viewer's OWN head moves with them. Without this their head
+    // would still hold the segment they asked for before the jump, and the very
+    // next thing they ask for — the segment at the seek target — would be
+    // judged stale against it and refused. That refusal, from the shared field,
+    // is the freeze of 2026-08-18; keeping per-viewer heads without moving them
+    // on a seek would bring it back one viewer at a time.
+    if (consumerId) {
+      headsOf(named).set(consumerId, {
+        segment: this.#segmentIndexForTime(named, positionSeconds),
+        seconds: positionSeconds,
+        at: Date.now()
+      });
     }
     // The browser holds one session id for the whole file and knows nothing of
     // variants, so a seek it reports means the stream on screen.
@@ -8547,11 +8654,27 @@ export class HlsSessionManager {
    * so far ahead that the running encode will not reach it. Anything between is
    * exactly what the viewer is waiting for, and holding it is the point.
    *
+   * "So far ahead" is the encoder's own look-ahead, measured on this session's
+   * own cut grid — the same figure the browser sizes its forward buffer from.
+   * It used to be `MAX_LOOKAHEAD_SEGMENTS`, which is eight segments ahead of
+   * the ENCODE HEAD
+   * and has nothing to do with how far ahead of the VIEWER a request may
+   * legitimately sit; it happened to match a browser holding 30 s, and would
+   * have refused three quarters of the requests of one holding the whole
+   * cushion (roadmap item 4).
+   *
+   * Judged against the position of the viewer who MADE the request, when the
+   * transport carries who that is. A session is shared by everyone watching a
+   * copied picture and the epoch is per session, so a seek by the viewer in
+   * front used to release every request being held for the viewer behind them.
+   *
    * @param {string} sessionId
    * @param {string} fileName
+   * @param {string} [consumerId] - Who is asking. Without it the one shared
+   *   position decides, which is what a single viewer means anyway.
    * @returns {boolean} True when the request should keep waiting.
    */
-  requestStillWanted(sessionId, fileName) {
+  requestStillWanted(sessionId, fileName, consumerId = "") {
     const session = isSafeSessionId(sessionId) ? this.sessionsById.get(sessionId) : null;
     if (!session) {
       return false;
@@ -8560,12 +8683,20 @@ export class HlsSessionManager {
     if (!(index >= 0)) {
       return true; // a playlist or an init segment belongs to no position
     }
-    const position = Number(session.viewerPositionSeconds);
+    const own = this.#consumerPositionOf(session, consumerId);
+    const position = own === null ? Number(session.viewerPositionSeconds) : own;
     if (!Number.isFinite(position)) {
       return true; // nothing said where the viewer is; refusing would be a guess
     }
     const at = this.#segmentIndexForTime(session, position);
-    return index >= at && index <= at + MAX_LOOKAHEAD_SEGMENTS;
+    // The far edge on THIS session's own grid rather than a count of nominal
+    // segments: a copied picture is cut at the source's keyframes, so its
+    // segments are not four seconds long and dividing by that figure would put
+    // the edge somewhere else entirely. The segment CONTAINING the edge is
+    // wanted — it is the one the deepest allowed request lands in, and it
+    // already reaches past the cushion by whatever is left of its own duration.
+    const edge = this.#segmentIndexForTime(session, position + this.lookaheadSeconds);
+    return index >= at && index <= edge;
   }
 
   /**
@@ -8573,8 +8704,12 @@ export class HlsSessionManager {
    *
    * @param {string} sessionId
    * @param {string} fileName - Must match the playlist or segment name pattern.
-   * @param {{ requestSeq?: number }} [options] - `requestSeq` from
-   *   {@link nextRequestSeq}, constant across one request's long-poll loop.
+   * @param {{ requestSeq?: number, consumerId?: string }} [options] -
+   *   `requestSeq` from {@link nextRequestSeq}, constant across one request's
+   *   long-poll loop. `consumerId` says WHICH viewer is asking, so a session
+   *   shared by several of them can tell their positions apart; absent from a
+   *   browser or a transport that does not carry it, and then everything falls
+   *   back to the one shared position.
    * @returns {Promise<
    *   | { kind: "not-found" }
    *   | { kind: "warming-up" }
@@ -8705,7 +8840,17 @@ export class HlsSessionManager {
       // allowed to run — see #enforceLookAhead.
       const requested = session.segmentFormat.segmentIndexFromName(fileName);
       if (requested >= 0) {
-        session.lastRequestedSegment = requested;
+        // This requester's own head, and with it the furthest any viewer of
+        // this session has reached. The encoder is steered by the furthest —
+        // what lies behind it has already been made — while the individual
+        // heads answer whether a particular held request is still wanted.
+        const furthest = this.#noteConsumerHead(
+          session,
+          typeof options.consumerId === "string" ? options.consumerId : "",
+          requested,
+          this.#segmentStartTime(session, requested)
+        );
+        session.lastRequestedSegment = furthest.segment;
         // Where the viewer is, kept current. A reported seek is the only other
         // source of it and playback never issues one, so a position recorded at
         // a seek is stale for as long as the viewer then watches — and it is
@@ -8717,7 +8862,7 @@ export class HlsSessionManager {
         // lost — while a stale request from before the seek can no longer
         // rewrite the viewer's own statement, which is what let the repair
         // below drag the encoder backwards.
-        const requestedStart = this.#segmentStartTime(session, requested);
+        const requestedStart = furthest.seconds;
         const reported = Number(session.viewerReportedSeconds);
         if (!Number.isFinite(reported) || requestedStart >= reported) {
           session.viewerPositionSeconds = requestedStart;

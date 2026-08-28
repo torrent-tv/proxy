@@ -58,6 +58,12 @@ export async function handleTranscodeSessionFileGet(req, reply, { hlsSessionMana
  * @returns {Promise<void>}
  */
 export async function serveSessionFile(req, reply, { hlsSessionManager, sessionId, fileName }) {
+  // Which viewer is asking. One session serves everyone watching a copied
+  // picture, so without it their positions collapse into one and a seek by the
+  // viewer in front releases the requests held for the viewer behind. Absent on
+  // a plain HTTP transport, where no loader of ours builds the URL, and then
+  // the single shared position decides as it always did.
+  const consumerId = typeof req.query?.consumer === "string" ? req.query.consumer : "";
   // Hold the request only briefly, then answer "retry" instead of waiting for
   // the segment. iOS's native HLS player (AVPlayer) enforces a hard ~3.5 s
   // deadline on RESPONSE HEADERS and raises -12889 ("No response for media
@@ -79,7 +85,13 @@ export async function serveSessionFile(req, reply, { hlsSessionManager, sessionI
   const onClientAbort = () => { clientAborted = true; };
   req.raw.on("close", onClientAbort);
 
-  const result = await waitForSessionFile(hlsSessionManager, sessionId, fileName, SEGMENT_WAIT_MS);
+  const result = await waitForSessionFile(
+    hlsSessionManager,
+    sessionId,
+    fileName,
+    SEGMENT_WAIT_MS,
+    consumerId
+  );
 
   req.raw.off("close", onClientAbort);
   const heldMs = Date.now() - holdStartedAt;
@@ -148,9 +160,13 @@ export async function serveSessionFile(req, reply, { hlsSessionManager, sessionI
  * @param {string} sessionId
  * @param {string} fileName
  * @param {number} timeoutMs
+ * @param {string} [consumerId] - Which viewer is asking, where the transport
+ *   carries it. Their own position is what decides whether a held request has
+ *   been made pointless by a seek — a session can have several viewers, and
+ *   the seek epoch belongs to all of them.
  * @returns {Promise<Awaited<ReturnType<import("../../../services/hls-session-manager.js").HlsSessionManager["getFileStream"]>>>}
  */
-export async function waitForSessionFile(hlsSessionManager, sessionId, fileName, timeoutMs) {
+export async function waitForSessionFile(hlsSessionManager, sessionId, fileName, timeoutMs, consumerId = "") {
   const startedAt = Date.now();
   // One sequence number for THIS request, reused by every poll below, so the
   // session can tell a newly-arrived request apart from an old one polling
@@ -165,7 +181,10 @@ export async function waitForSessionFile(hlsSessionManager, sessionId, fileName,
   // for.
   let seekEpoch = hlsSessionManager.seekEpoch(sessionId);
   while (Date.now() - startedAt < timeoutMs) {
-    const result = await hlsSessionManager.getFileStream(sessionId, fileName, { requestSeq });
+    const result = await hlsSessionManager.getFileStream(sessionId, fileName, {
+      requestSeq,
+      consumerId
+    });
     if (result.kind !== "warming-up") {
       return result;
     }
@@ -175,7 +194,7 @@ export async function waitForSessionFile(hlsSessionManager, sessionId, fileName,
       // seek notification and would otherwise be refused at the exact moment it
       // is needed — measured 2026-08-18, two 503s within 80 ms on the segment
       // at the seek target, after which the player never asked for it again.
-      if (!hlsSessionManager.requestStillWanted(sessionId, fileName)) {
+      if (!hlsSessionManager.requestStillWanted(sessionId, fileName, consumerId)) {
         return { kind: "superseded" };
       }
       logger.info(

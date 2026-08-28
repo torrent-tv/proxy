@@ -159,7 +159,7 @@ export function wedgeIsCertain({ queuedBytes, bytesPerSecond, flatForMs, longest
  * @param {DataChannel} channel
  * @returns {() => void} Stops the watch.
  */
-function makeSendQueueWatcher({ log, getTransportSnapshot, witness }) {
+function makeSendQueueWatcher({ log, getTransportSnapshot, witness, usrsctpState }) {
   // Every channel of one connection reads the SAME transport counters — the
   // snapshot describes the peer connection, not the channel — so the heartbeat
   // belongs to the connection and is printed once for it. Printed per channel
@@ -479,6 +479,14 @@ function makeSendQueueWatcher({ log, getTransportSnapshot, witness }) {
           connection.captureStarted = false;
         }
       }
+      if (usrsctpState && verdict.certain && peerStillSending) {
+        // Its own single-flight and cooldown, independent of the witness's —
+        // one gdb attach per wedge is enough, and a refusal here (already
+        // read, cooling down) costs nothing to retry on the next tick.
+        usrsctpState.maybeRead(
+          `send queue stuck ${queued}B, accepted-byte counter unmoved ${Math.round(flatForMs / 1000)}s`
+        );
+      }
     }, SEND_QUEUE_SAMPLE_MS);
 
     if (typeof timer.unref === "function") {
@@ -526,7 +534,18 @@ export function encodeFrame(idBytes, bytes, done) {
   return frame;
 }
 
-export function createDataChannelHandler({ proxyPort, onLog, getTransportSnapshot, sourceRegistry, witness }) {
+export function createDataChannelHandler({
+  proxyPort,
+  onLog,
+  getTransportSnapshot,
+  sourceRegistry,
+  witness,
+  // Reads usrsctp's own association state (services/usrsctp-state.js) the
+  // moment a wedge is declared, from either detector below. Optional: a host
+  // without gdb simply never gets a reading, same as the witness without
+  // tcpdump.
+  usrsctpState
+}) {
   /**
    * Channels currently interested in one file's subtitle cues, keyed by
    * `sourceKey:fileIndex`. Populated the moment a browser asks for an
@@ -608,13 +627,26 @@ export function createDataChannelHandler({ proxyPort, onLog, getTransportSnapsho
   const { watchSendQueue, readDelivery } = makeSendQueueWatcher({
     log: (message) => log(message),
     getTransportSnapshot,
-    witness
+    witness,
+    usrsctpState
   });
   // Numbered probes on every channel, and the browser's echo of what it saw.
   // The proxy's own counters cannot say whether bytes it handed to usrsctp were
   // ever put on the wire; the far end can, and it keeps answering throughout a
   // freeze. See services/delivery-probe.js.
-  const deliveryProbe = createDeliveryProbe({ log: (message) => log(message), readDelivery });
+  //
+  // Also the ONLY wedge signal that does not require a nonzero channel queue —
+  // `wedgeIsCertain` above needs `queuedBytes > 0`, which small, infrequent
+  // traffic never produces (confirmed 2026-08-28: the 2026-08-27 episode's
+  // ring was never saved automatically for exactly this reason). So this is
+  // wired to the same evidence-gathering as the queue watcher.
+  const deliveryProbe = createDeliveryProbe({
+    log: (message) => log(message),
+    readDelivery,
+    getTransportSnapshot,
+    witness,
+    usrsctpState
+  });
 
   /**
    * @param {string} message

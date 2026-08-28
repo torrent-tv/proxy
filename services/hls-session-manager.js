@@ -400,6 +400,10 @@ const READ_WINDOW_SECONDS = 30;
 const READ_WINDOW_MIN_BYTES = 16 * 1024 * 1024;
 const READ_WINDOW_MAX_BYTES = 96 * 1024 * 1024;
 const LOOKAHEAD_PAUSE_SECONDS = 120;
+// How often each session says what its cushion is. Half a minute: the link
+// reports that feed it arrive every ten seconds, and a line per session per
+// ten seconds would drown the log on a host serving several.
+const CUSHION_REPORT_MS = 30_000;
 // How old a viewer's link report may be and still describe where they are. It
 // is sent every 10 s, and a seek in between moves them somewhere this cannot
 // predict — so anything older is treated as no report at all.
@@ -2214,6 +2218,8 @@ export class HlsSessionManager {
       // buffer from another viewer's read head.
       /** @type {Map<string, { linkMbps: number, bufferedAheadSec: number, positionSeconds: number | null, at: number }>} */
       netReports: new Map(),
+      // When this session last said what its cushion is (see #sayCushion).
+      cushionSaidAt: 0,
       linkSlowSince: 0,
       sourceWidth,
       sourceHeight,
@@ -3339,6 +3345,7 @@ export class HlsSessionManager {
     // reached. Reported on its EDGES, because it is a state and not a stream.
     const claimed = Number(session.progress?.processedSeconds);
     const encodedTo = this.#segmentStartTime(session, viewerSegment) + aheadSeconds;
+    this.#sayCushion(session, encodedTo);
     const disagrees =
       Number.isFinite(claimed) && Math.abs(claimed - encodedTo) > LOOKAHEAD_PAUSE_SECONDS;
     if (disagrees && !session.lookAheadDisagreementSince) {
@@ -3375,6 +3382,57 @@ export class HlsSessionManager {
         this.#transitionRun(session, ENCODE_RUN_EVENT.RESUME_ORDERED);
       }
     }
+  }
+
+  /**
+   * What the cushion actually is, said once every half minute per session.
+   *
+   * Three quantities that were never printed together, and could not be
+   * reconstructed afterwards from anything that was:
+   *
+   *   - how far the produced range runs ahead of the EARLIEST viewer's picture,
+   *     which is the protection an interruption would have to exhaust before
+   *     anybody saw it;
+   *   - what that costs the person hosting this proxy, in megabytes of film
+   *     pulled off the swarm ahead of the picture — the read window sits on top
+   *     of it, so this is a floor;
+   *   - what the browsers say they are holding, so the depth asked for on that
+   *     side can be checked against the depth that arrived.
+   *
+   * Every term is measured: the produced range comes from the segments on disk,
+   * the picture from the viewers' own reports, and the byte rate from the
+   * file's length over its duration. Roadmap item 4.
+   *
+   * @param {HlsSession} session
+   * @param {number} encodedTo - Seconds of film produced, contiguously, from
+   *   where the leading viewer is.
+   * @returns {void}
+   */
+  #sayCushion(session, encodedTo) {
+    const now = Date.now();
+    if (now - (session.cushionSaidAt ?? 0) < CUSHION_REPORT_MS) {
+      return;
+    }
+    const { earliestPosition, deepestBuffer, viewers } = this.#reportedPictureOf(session, now);
+    // Nobody has said where they are, so there is no picture to measure
+    // against and the line would be about nothing.
+    if (earliestPosition === null) {
+      return;
+    }
+    session.cushionSaidAt = now;
+    const aheadOfPicture = Math.max(0, encodedTo - earliestPosition);
+    const fileLength = this.#fileLengthByKey.get(`${session.sourceKey}:${session.fileIndex}`);
+    const duration = Number(session.totalDurationSeconds) || Number(session.durationSeconds) || 0;
+    const megabytes =
+      Number.isFinite(fileLength) && fileLength > 0 && duration > 0
+        ? ((aheadOfPicture * fileLength) / duration / 1e6).toFixed(0)
+        : "?";
+    logger.info(
+      `transcode ${session.id.slice(0, 8)} cushion: ${Math.round(aheadOfPicture)}s of film ready ` +
+        `ahead of the picture at ${Math.round(earliestPosition)}s (~${megabytes}MB pulled ahead), ` +
+        `${viewers} viewer(s) holding up to ` +
+        `${deepestBuffer === null ? "?" : deepestBuffer.toFixed(1)}s`
+    );
   }
 
   /**
@@ -7714,21 +7772,29 @@ export class HlsSessionManager {
    * @param {HlsSession} base
    * @returns {number}
    */
-  #audioStartSecondsFor(base) {
-    const watching = this.#activeVariant(base);
-    const readHead = this.#viewerPositionOf(watching);
-    const now = Date.now();
-    let earliestStated = null;
+  /**
+   * Where the earliest viewer's picture is, and the deepest cushion any of them
+   * reports holding — both read from the link reports, both null when nobody
+   * has said recently.
+   *
+   * @param {HlsSession} session
+   * @param {number} now
+   * @returns {{ earliestPosition: number | null, deepestBuffer: number | null, viewers: number }}
+   */
+  #reportedPictureOf(session, now) {
+    let earliestPosition = null;
     let deepestBuffer = null;
-    for (const report of watching.netReports.values()) {
+    let viewers = 0;
+    for (const report of session.netReports.values()) {
       if (now - report.at > NET_REPORT_FRESH_MS) {
         continue;
       }
+      viewers += 1;
       if (Number.isFinite(report.positionSeconds)) {
-        earliestStated =
-          earliestStated === null
+        earliestPosition =
+          earliestPosition === null
             ? report.positionSeconds
-            : Math.min(earliestStated, report.positionSeconds);
+            : Math.min(earliestPosition, report.positionSeconds);
       }
       if (Number.isFinite(report.bufferedAheadSec)) {
         deepestBuffer =
@@ -7737,6 +7803,14 @@ export class HlsSessionManager {
             : Math.max(deepestBuffer, report.bufferedAheadSec);
       }
     }
+    return { earliestPosition, deepestBuffer, viewers };
+  }
+
+  #audioStartSecondsFor(base) {
+    const watching = this.#activeVariant(base);
+    const readHead = this.#viewerPositionOf(watching);
+    const now = Date.now();
+    const { earliestPosition: earliestStated, deepestBuffer } = this.#reportedPictureOf(watching, now);
     if (earliestStated !== null) {
       // Never ahead of the read head: a position claiming to be past what has
       // been asked for is a report that arrived out of order, and acting on it

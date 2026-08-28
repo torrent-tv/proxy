@@ -20,6 +20,7 @@ import { fmp4Format } from "../services/segment-formats/fmp4.js";
 
 const BASE_ID = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
 const VARIANT_ID = "11111111-2222-3333-4444-555555555555";
+const SECOND_VARIANT_ID = "99999999-8888-7777-6666-555555555555";
 const SEGMENT_SECONDS = 4;
 
 /**
@@ -859,4 +860,122 @@ test("the master survives a live offer that has collapsed to one rung", async (t
     [1080, 812, 720, 540, 480, 360, 240],
     "every rung that can be spliced onto this cut grid stays addressable"
   );
+});
+
+test("two heights that clamp onto one picture share a single encoder", async (t) => {
+  const { manager, base, dirPath } = await managerWithBase();
+  const spawnedDirs = [];
+  t.after(async () => {
+    await manager.disposeAll();
+    await Promise.all(spawnedDirs.map((dir) => rm(dir, { recursive: true, force: true })));
+    await rm(dirPath, { recursive: true, force: true });
+  });
+
+  // A host that can hold exactly one rung. Whatever height is asked for, the
+  // clamp inside createOrGetSession lands the encode on 240p — which is what a
+  // CM4 did on 2026-08-28, turning a 360p and a 540p request into two more
+  // ffmpeg processes making the same 426x240 picture as the 240p one.
+  const madeIds = [VARIANT_ID, SECOND_VARIANT_ID];
+  const created = [];
+  manager.createOrGetSession = async (params) => {
+    const id = madeIds[created.length];
+    created.push(params);
+    const variantDir = await mkdtemp(path.join(os.tmpdir(), "quality-variants-clamped-"));
+    spawnedDirs.push(variantDir);
+    const variant = fakeSession({ id, encodeHeight: 240, dirPath: variantDir });
+    variant.consumers = new Set([params.consumerId]);
+    manager.sessionsById.set(id, variant);
+    return variant;
+  };
+
+  const asked360 = await manager.resolveVariantSession(BASE_ID, 360);
+  const asked540 = await manager.resolveVariantSession(BASE_ID, 540);
+
+  assert.equal(asked360.id, VARIANT_ID, "the first request made the encoder");
+  assert.equal(
+    asked540.id,
+    VARIANT_ID,
+    "and the second is served by it, because it produces the very same picture"
+  );
+  assert.equal(
+    manager.sessionsById.has(SECOND_VARIANT_ID),
+    false,
+    "the duplicate was let go as soon as its size was known"
+  );
+  assert.equal(
+    base.variants.get(540),
+    VARIANT_ID,
+    "540p now names the session that serves it"
+  );
+
+  const askedAgain = await manager.resolveVariantSession(BASE_ID, 540);
+
+  assert.equal(askedAgain.id, VARIANT_ID);
+  assert.equal(created.length, 2, "the third request created nothing at all");
+});
+
+test("rungs that really do differ keep their own encoders", async (t) => {
+  const { manager, base, dirPath } = await managerWithBase();
+  const spawnedDirs = [];
+  t.after(async () => {
+    await manager.disposeAll();
+    await Promise.all(spawnedDirs.map((dir) => rm(dir, { recursive: true, force: true })));
+    await rm(dirPath, { recursive: true, force: true });
+  });
+
+  // A host with room: each request is encoded at the height it named, so
+  // nothing may be merged. The sharing above must not become "one encoder for
+  // every rung".
+  const madeIds = [VARIANT_ID, SECOND_VARIANT_ID];
+  const created = [];
+  manager.createOrGetSession = async (params) => {
+    const id = madeIds[created.length];
+    created.push(params);
+    const variantDir = await mkdtemp(path.join(os.tmpdir(), "quality-variants-distinct-"));
+    spawnedDirs.push(variantDir);
+    const variant = fakeSession({ id, encodeHeight: params.targetHeight, dirPath: variantDir });
+    variant.consumers = new Set([params.consumerId]);
+    manager.sessionsById.set(id, variant);
+    return variant;
+  };
+
+  const asked360 = await manager.resolveVariantSession(BASE_ID, 360);
+  const asked540 = await manager.resolveVariantSession(BASE_ID, 540);
+
+  assert.equal(asked360.id, VARIANT_ID);
+  assert.equal(asked540.id, SECOND_VARIANT_ID, "two different pictures, two encoders");
+  assert.equal(base.variants.get(360), VARIANT_ID);
+  assert.equal(base.variants.get(540), SECOND_VARIANT_ID);
+});
+
+test("a rung is never served from the COPY, whatever height the copy happens to be", async (t) => {
+  const { manager, base, dirPath } = await managerWithBase();
+  const spawnedDirs = [];
+  t.after(async () => {
+    await manager.disposeAll();
+    await Promise.all(spawnedDirs.map((dir) => rm(dir, { recursive: true, force: true })));
+    await rm(dirPath, { recursive: true, force: true });
+  });
+
+  // The base is a COPY at 240p — no encoder behind it, and it is the one rung
+  // this host can always serve. Handing it to a request for a re-encoded 360p
+  // would give away exactly that, and a viewer stranded on a rung the machine
+  // cannot hold would have nowhere left to return to.
+  base.transcodeVideo = false;
+  base.encodeHeight = 240;
+  base.variantHeight = 240;
+  const created = [];
+  manager.createOrGetSession = async (params) => {
+    created.push(params);
+    const variantDir = await mkdtemp(path.join(os.tmpdir(), "quality-variants-copy-"));
+    spawnedDirs.push(variantDir);
+    const variant = fakeSession({ id: VARIANT_ID, encodeHeight: 240, dirPath: variantDir });
+    variant.consumers = new Set([params.consumerId]);
+    manager.sessionsById.set(VARIANT_ID, variant);
+    return variant;
+  };
+
+  const asked = await manager.resolveVariantSession(BASE_ID, 360);
+
+  assert.equal(asked.id, VARIANT_ID, "the re-encoded rung is its own session, not the copy");
 });

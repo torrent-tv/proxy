@@ -7740,6 +7740,11 @@ export class HlsSessionManager {
           );
           return null;
         }
+        const incumbent = await this.#adoptIfAlreadyProduced(base, height, variant);
+        if (incumbent) {
+          base.variants.set(height, incumbent.id);
+          return incumbent;
+        }
         variant.variantHeight = height;
         (variant.variantBases ??= new Set()).add(base.id);
         base.variants.set(height, variant.id);
@@ -7750,6 +7755,94 @@ export class HlsSessionManager {
       });
     base.variantPending.set(height, creation);
     return creation;
+  }
+
+  /**
+   * The height a session's encoder is actually producing, or 0 when it produces
+   * no encoded picture of its own (a copy, or a soundtrack).
+   *
+   * A COPY must never be adopted: it costs no encoder at all, so handing it to a
+   * request for a re-encoded rung would give away the one thing this host can
+   * always serve.
+   *
+   * @param {HlsSession} session
+   * @returns {number}
+   */
+  #producedHeightOf(session) {
+    if (!session || session.transcodeVideo !== true || session.audioOnly === true) {
+      return 0;
+    }
+    return Math.round(Number(session.encodeHeight) || 0);
+  }
+
+  /**
+   * A session of this family already making exactly this picture, if there is
+   * one — so that a second request for it does not start a second encoder.
+   *
+   * WHY THIS EXISTS, AND WHY IT COMPARES WHAT IS PRODUCED RATHER THAN WHAT WAS
+   * ASKED FOR. `base.variants` is keyed on the height the browser requested,
+   * while what the session encodes is decided afterwards, by the clamp in
+   * `createOrGetSession`: a manual pick starts at the top of the ladder THIS
+   * host can sustain (`startAtLadderTop`), which on a weak machine is well
+   * below the height named. So a request for 360p and a request for 540p both
+   * become a 426x240 encode, are filed under keys 360 and 540, and neither ever
+   * finds the 240p session already producing that exact picture. Field
+   * 2026-08-28: three ffmpeg processes on a CM4 making one identical picture,
+   * every rung above 240p then measured at 0.04x of realtime, and the viewer
+   * left watching a slideshow that ended in a spinner
+   * (`research/session-pileup-variant-key-2026-08-28.md`).
+   *
+   * The comparison is made on the height PRODUCED because that is the only
+   * figure that cannot be wrong. Predicting the clamp instead would mean a
+   * second copy of the budget arithmetic, and the two would drift: the offer
+   * deliberately prices a rung from the startup measurement
+   * (`observedDecodeCostSec: null`) while the clamp prices it from what this
+   * file has since been seen to cost, so they can and do answer differently.
+   *
+   * The price is one short-lived encoder the first time each requested height
+   * is seen, which replaces one that would otherwise have run beside the others
+   * for the rest of the session. Every later request for that height is
+   * answered from the alias without starting anything.
+   *
+   * @param {HlsSession} base
+   * @param {number} askedHeight
+   * @param {HlsSession} candidate - The session just created for `askedHeight`.
+   * @returns {Promise<HlsSession | null>} The incumbent to use instead, or null
+   *   to keep the one just made.
+   */
+  async #adoptIfAlreadyProduced(base, askedHeight, candidate) {
+    const produced = this.#producedHeightOf(candidate);
+    if (produced <= 0) {
+      return null;
+    }
+    const seen = new Set([candidate.id]);
+    // The base belongs in this scan: it is a rung like any other, and when it
+    // is itself a re-encode the clamp can land a variant right on top of it.
+    for (const other of [base, ...[...base.variants.values()]
+      .map((id) => this.sessionsById.get(id))]) {
+      if (!other || seen.has(other.id) || other.state === "disposed") {
+        continue;
+      }
+      seen.add(other.id);
+      if (this.#producedHeightOf(other) !== produced) {
+        continue;
+      }
+      // Same picture, already being made. Let go of the one just created; the
+      // incumbent already carries this family's claim, because both were made
+      // with the same consumer id.
+      await this.releaseSessionConsumer(
+        candidate.id,
+        variantConsumerId(base.id),
+        `${produced}p is already being produced by ${other.id.slice(0, 8)}`
+      );
+      logger.info(
+        `transcode ${base.id.slice(0, 8)} the ${askedHeight}p rung encodes at ${produced}p on this ` +
+          `machine, which ${other.id.slice(0, 8)} is already producing — serving it from there ` +
+          `instead of starting a second encoder "${base.fileName}"`
+      );
+      return other;
+    }
+    return null;
   }
 
   /**
@@ -9158,8 +9251,16 @@ export class HlsSessionManager {
         if (!base) {
           continue;
         }
-        if (base.variants instanceof Map && base.variants.get(session.variantHeight) === session.id) {
-          base.variants.delete(session.variantHeight);
+        // EVERY key naming it, not just the height it was created under. One
+        // session can be filed under several heights: the clamp lands different
+        // requests on one picture, and each of those requests keeps its own key
+        // pointing at the single session that serves it.
+        if (base.variants instanceof Map) {
+          for (const [height, id] of [...base.variants]) {
+            if (id === session.id) {
+              base.variants.delete(height);
+            }
+          }
         }
         if (base.activeVariantId === session.id) {
           base.activeVariantId = base.id;

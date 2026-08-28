@@ -53,6 +53,7 @@ import {
   parseFfmpegBitrateKbps,
   parseFfmpegDurationSeconds,
   parseFfmpegStartTimeSeconds,
+  parseFfmpegStreamCounts,
   parseFfmpegVideoDimensions,
   parseFfmpegVideoFps,
   parseFfmpegHdr
@@ -854,6 +855,10 @@ async function probeInputMediaInfo(ffmpegBin, inputUrl) {
         height: dims.height,
         fps: parseFfmpegVideoFps(stderr),
         startTime: parseFfmpegStartTimeSeconds(stderr),
+        // Only ever read when a run fails, and read HERE because by then the
+        // banner is long gone: this probe is the one place the source says what
+        // it holds.
+        streamCounts: parseFfmpegStreamCounts(stderr),
         isHdr: parseFfmpegHdr(stderr)
       });
     };
@@ -2109,6 +2114,10 @@ export class HlsSessionManager {
       audioOnly: audioOnly === true,
       audioRenditions: audioRenditions === true,
       outputFps,
+      // What the source declared it holds, kept for a failed run to quote. Null
+      // when the media info came from a cache that predates this field or from
+      // a probe whose banner carried no stream lines.
+      sourceStreamCounts: mediaInfo.streamCounts ?? null,
       // Client-requested target box (the orientation-independent ceiling). Kept
       // for the session key and reference; the actual encode uses encodeWidth/
       // encodeHeight, which the realtime budget may have downscaled below this.
@@ -4806,7 +4815,12 @@ export class HlsSessionManager {
     session.runCounter = (session.runCounter ?? 0) + 1;
     const runLabel = `run#${session.runCounter}`;
     session.runLabel = runLabel;
-    logger.info(`transcode ${session.id} ${runLabel} ffmpeg ${describeFfmpegArgs(args)}`);
+    const describedArgs = describeFfmpegArgs(args);
+    // Kept so a failure can quote the command that produced it instead of
+    // leaving whoever reads the log to find it among the lines of the runs that
+    // succeeded around it.
+    session.lastRunArgsDescribed = describedArgs;
+    logger.info(`transcode ${session.id} ${runLabel} ffmpeg ${describedArgs}`);
 
     const ffmpeg = spawn(this.ffmpegBin, args, {
       cwd: session.runDirPath ?? session.dirPath,
@@ -5108,9 +5122,44 @@ export class HlsSessionManager {
       session.progress.updatedAt = Date.now();
       this.#transitionRun(session, ENCODE_RUN_EVENT.EXITED_FAILED);
       logger.error(
-        `transcode ${session.id} ${session.runLabel ?? "run#?"} encode-run failed: ${session.lastError}`
+        `transcode ${session.id} ${session.runLabel ?? "run#?"} encode-run failed: ${session.lastError}` +
+          ` — ${this.#describeTrackSelection(session)}` +
+          `\n  ffmpeg ${session.lastRunArgsDescribed ?? "(command not recorded)"}`
       );
     });
+  }
+
+  /**
+   * What this run asked the source for, against what the source said it has.
+   *
+   * Written for one failure in particular: every `-map` this proxy builds ends
+   * in `?`, so ffmpeg drops a mapping for an absent stream without complaint,
+   * and a run whose mappings ALL drop produces a file with nothing in it —
+   * reported as `Output file does not contain any stream`, exit 255. Read from
+   * the exit code alone that is indistinguishable from any other refusal. Read
+   * beside the tracks the file actually holds it is unmistakable, and it names
+   * which side is wrong: an audio index past the end of the list is ours, no
+   * streams at all is the source's.
+   *
+   * @param {HlsSession} session
+   * @returns {string}
+   */
+  #describeTrackSelection(session) {
+    const wanted = [];
+    if (session.audioOnly === true) {
+      wanted.push(`audio 0:a:${session.audioTrackIndex ?? 0}`);
+    } else if (this.#servesAudioSeparately(session)) {
+      wanted.push("video 0:v:0");
+    } else {
+      wanted.push("video 0:v:0", `audio 0:a:${session.audioTrackIndex ?? 0}`);
+    }
+    const counts = session.sourceStreamCounts;
+    const held = counts
+      ? `the source holds ${counts.video} video, ${counts.audio} audio, ` +
+        `${counts.subtitle} subtitle` +
+        (counts.other > 0 ? `, ${counts.other} other` : "")
+      : "what the source holds was not recorded";
+    return `this run asked for ${wanted.join(" + ")}, and ${held}`;
   }
 
   /**

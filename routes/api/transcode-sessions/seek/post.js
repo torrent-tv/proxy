@@ -36,7 +36,11 @@ export async function handleApiTranscodeSessionSeekPost(req, reply, { hlsSession
     return reply.send({ error: "positionSeconds must be a non-negative number." });
   }
 
-  const applied = hlsSessionManager.requestSeek(sessionId, positionSeconds);
+  // Who moved. A session can be shared, and the seeking viewer's own position
+  // has to move with them or their next request is judged against where they
+  // were before the jump.
+  const consumerId = typeof body.consumerId === "string" ? body.consumerId.trim() : "";
+  const applied = hlsSessionManager.requestSeek(sessionId, positionSeconds, consumerId);
   if (!applied) {
     // Unknown or disposed session — nothing to steer. Not an error worth
     // surfacing to the viewer: the seek will be handled by whatever session

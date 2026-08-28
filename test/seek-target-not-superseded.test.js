@@ -104,3 +104,79 @@ test("a playlist belongs to no position and is never stale", async () => {
 
   await rm(dirPath, { recursive: true, force: true });
 });
+
+test("a request as deep as the cushion the browser is told to hold is still wanted", async () => {
+  const { manager, dirPath } = await managerAfterSeek();
+
+  // The browser sizes its forward buffer from the proxy's own look-ahead, so
+  // the deepest request it can make is one for the segment at the far edge of
+  // that cushion. Refusing it would be refusing the very depth this proxy
+  // asked for: at the old width — eight segments ahead of the viewer — three
+  // quarters of a full cushion's requests were stale by definition.
+  const edge = Math.floor((SEEK_TO_SECONDS + manager.lookaheadSeconds) / SEGMENT_SECONDS);
+
+  assert.ok(edge - SEGMENT_AT_SEEK > 8, "the case only exists past the old eight-segment width");
+  assert.equal(
+    manager.requestStillWanted(SESSION_ID, `segment-${String(edge).padStart(5, "0")}.mp4`),
+    true,
+    "the far edge of the cushion the proxy itself keeps produced"
+  );
+
+  await rm(dirPath, { recursive: true, force: true });
+});
+
+test("the viewer who made the request is the one it is judged against", async () => {
+  const { manager, dirPath } = await managerAfterSeek();
+  const session = manager.sessionsById.get(SESSION_ID);
+  session.consumerHeads = new Map();
+  // Two people watching one copied picture. The shared position belongs to the
+  // one in front — it is the furthest segment anybody asked for — and the one
+  // behind is a hundred segments back, waiting for a segment there.
+  const behind = SEGMENT_AT_SEEK - 100;
+  session.consumerHeads.set("behind", {
+    segment: behind,
+    seconds: behind * SEGMENT_SECONDS,
+    at: Date.now()
+  });
+
+  assert.equal(
+    manager.requestStillWanted(SESSION_ID, `segment-${String(behind).padStart(5, "0")}.mp4`, "behind"),
+    true,
+    "held for the viewer who is there, whatever the viewer in front is doing"
+  );
+  assert.equal(
+    manager.requestStillWanted(SESSION_ID, `segment-${String(behind).padStart(5, "0")}.mp4`),
+    false,
+    "unnamed, it can only be judged against the shared position — which is the leader's"
+  );
+
+  await rm(dirPath, { recursive: true, force: true });
+});
+
+test("a seek moves the seeking viewer's own head, and nobody else's", async () => {
+  const { manager, dirPath } = await managerAfterSeek();
+  const session = manager.sessionsById.get(SESSION_ID);
+  session.consumerHeads = new Map();
+  const staying = SEGMENT_AT_SEEK - 40;
+  session.consumerHeads.set("staying", {
+    segment: staying,
+    seconds: staying * SEGMENT_SECONDS,
+    at: Date.now()
+  });
+
+  const jumpTo = 120;
+  manager.requestSeek(SESSION_ID, jumpTo, "jumping");
+
+  assert.equal(
+    manager.requestStillWanted(SESSION_ID, `segment-${String(Math.floor(jumpTo / SEGMENT_SECONDS)).padStart(5, "0")}.mp4`, "jumping"),
+    true,
+    "the segment at the seek target — the request that raced the epoch in 2026-08-18"
+  );
+  assert.equal(
+    manager.requestStillWanted(SESSION_ID, `segment-${String(staying).padStart(5, "0")}.mp4`, "staying"),
+    true,
+    "somebody else's seek does not move where this viewer is"
+  );
+
+  await rm(dirPath, { recursive: true, force: true });
+});

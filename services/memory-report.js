@@ -19,7 +19,7 @@
  * runtime already maintains.
  */
 
-import { readFile } from "node:fs/promises";
+import { readFile, statfs } from "node:fs/promises";
 import os from "node:os";
 
 /** How often the reading is taken and written. */
@@ -87,6 +87,55 @@ export async function availableMemory() {
 }
 
 /**
+ * Anonymous memory this process holds, from the kernel's own rollup.
+ *
+ * `process.memoryUsage()` sees what V8 knows about. It cannot see memory the
+ * allocator has taken and not returned, and on musl — which is what the addon
+ * runs on — a heavy churn of 8 MiB pieces leaves exactly that. The rollup's
+ * `Anonymous` counts every mapping backed by nothing but memory, which is
+ * where both a live `SharedArrayBuffer` and a freed-but-retained span sit, so
+ * the difference between it and what the isolates admit to is the size of what
+ * neither can explain (roadmap item 2, step 4).
+ *
+ * @returns {Promise<number | null>} Bytes, or null off Linux.
+ */
+export async function readAnonymousMemory() {
+  try {
+    const text = await readFile("/proc/self/smaps_rollup", "utf8");
+    const match = /^Anonymous:\s+(\d+)\s+kB$/m.exec(text);
+    if (match) {
+      return Number(match[1]) * 1024;
+    }
+  } catch {
+    // silent-ok: not Linux, or the kernel is too old for the rollup. The line
+    // simply leaves the term out rather than printing a worse one.
+  }
+  return null;
+}
+
+/**
+ * How much room is left where this proxy spills pieces and writes segments.
+ *
+ * A budget for memory alone is half a budget: pieces evicted from memory go to
+ * disk, so a store that is well behaved about RAM can still fill the card an
+ * addon host boots from. Both limits are the machine's, and neither was
+ * measured before (roadmap item 2).
+ *
+ * @param {string} directory
+ * @returns {Promise<number | null>} Bytes free, or null where it cannot be read.
+ */
+export async function readDiskFree(directory) {
+  try {
+    const stats = await statfs(directory);
+    return Number(stats.bavail) * Number(stats.bsize);
+  } catch {
+    // silent-ok: `statfs` is not everywhere, and a missing disk figure must not
+    // cost the memory reading beside it.
+  }
+  return null;
+}
+
+/**
  * Render a size the way a person reads one.
  *
  * @param {number} bytes
@@ -104,26 +153,61 @@ function megabytes(bytes) {
  * count is meaningless without the piece size, and the piece size differs per
  * torrent — on the film this proxy died under, 63 pieces meant 504 MB.
  *
+ * Two scopes, because two things are being asked and only one of them is
+ * per-thread. `rss` and the kernel's rollup belong to the PROCESS, so they are
+ * read once, on the main thread. The heap, external and arrayBuffer figures
+ * belong to an ISOLATE, and the torrent worker's are the ones that matter —
+ * the piece pool is a `SharedArrayBuffer` allocated there, which the main
+ * isolate cannot see at all. Reporting only the main thread's was half the
+ * reason 650 MB of a 893 MB process had no explanation on 2026-08-28.
+ *
  * @param {Object} reading
+ * @param {"process" | "thread"} [reading.scope]
+ * @param {string} [reading.label] - Which thread the isolate figures are of.
  * @param {{ rss: number, heapUsed: number, heapTotal: number, external: number, arrayBuffers: number }} reading.process
- * @param {number} reading.availableBytes
- * @param {boolean} reading.availableMeasured
- * @param {{ name: string, residentBytes: number, budgetBytes: number }[]} [reading.stores]
+ * @param {number} [reading.availableBytes]
+ * @param {boolean} [reading.availableMeasured]
+ * @param {number | null} [reading.anonymousBytes]
+ * @param {number | null} [reading.diskFreeBytes]
+ * @param {{ name: string, residentBytes: number, committedBytes: number, spilledBytes: number, budgetBytes: number }[]} [reading.stores]
  * @returns {string}
  */
-export function describeMemory({ process: usage, availableBytes, availableMeasured, stores = [] }) {
-  const storeResident = stores.reduce((total, store) => total + (store.residentBytes || 0), 0);
-  const storeBudget = stores.reduce((total, store) => total + (store.budgetBytes || 0), 0);
+export function describeMemory({
+  scope = "process",
+  label = "",
+  process: usage,
+  availableBytes,
+  availableMeasured,
+  anonymousBytes = null,
+  diskFreeBytes = null,
+  stores = []
+}) {
+  const total = (field) => stores.reduce((sum, store) => sum + (store[field] || 0), 0);
+  const storeResident = total("residentBytes");
+  const storeCommitted = total("committedBytes");
+  const storeSpilled = total("spilledBytes");
+  const storeBudget = total("budgetBytes");
+  // Holding and having taken are different quantities, and the gap between
+  // them is the whole of the growth this series exists to find: the pool only
+  // grows, so a spilled piece frees a slot and no memory.
   const storesPart = stores.length === 0
     ? "no torrent stores"
-    : `${stores.length} torrent store(s) holding ${megabytes(storeResident)} ` +
-      `of ${megabytes(storeBudget)} allowed`;
+    : `${stores.length} torrent store(s) holding ${megabytes(storeResident)}, ` +
+      `committed ${megabytes(storeCommitted)} of ${megabytes(storeBudget)} allowed, ` +
+      `${megabytes(storeSpilled)} spilled to disk`;
+  const isolate =
+    `heap=${megabytes(usage.heapUsed)}/${megabytes(usage.heapTotal)} ` +
+    `external=${megabytes(usage.external)} arrayBuffers=${megabytes(usage.arrayBuffers)}`;
+  if (scope === "thread") {
+    return `memory (${label || "thread"}): ${isolate}; ${storesPart}`;
+  }
   return (
-    `memory: rss=${megabytes(usage.rss)} heap=${megabytes(usage.heapUsed)}/${megabytes(usage.heapTotal)} ` +
-    `external=${megabytes(usage.external)} arrayBuffers=${megabytes(usage.arrayBuffers)}; ` +
+    `memory: rss=${megabytes(usage.rss)} ${isolate}` +
+    `${anonymousBytes === null ? "" : ` anon=${megabytes(anonymousBytes)}`}; ` +
     `${storesPart}; ` +
-    `machine has ${megabytes(availableBytes)} available` +
-    `${availableMeasured ? "" : " (estimated — /proc/meminfo could not be read)"}`
+    `machine has ${megabytes(availableBytes ?? 0)} available` +
+    `${availableMeasured ? "" : " (estimated — /proc/meminfo could not be read)"}` +
+    `${diskFreeBytes === null ? "" : `, ${megabytes(diskFreeBytes)} free on disk`}`
   );
 }
 
@@ -133,13 +217,25 @@ export function describeMemory({ process: usage, availableBytes, availableMeasur
  * @param {Object} options
  * @param {(message: string) => void} options.log
  * @param {() => { name: string, residentBytes: number, budgetBytes: number }[]} [options.readStores]
+ * @param {"process" | "thread"} [options.scope] - `thread` leaves out the
+ *   process-wide figures, so the torrent worker can report its own isolate
+ *   without reading /proc twice.
+ * @param {string} [options.label] - Which thread the isolate figures are of.
+ * @param {string} [options.diskPath] - Where pieces spill, for the free-space
+ *   reading. Omitted, the disk term is left out rather than guessed.
  * @param {number} [options.intervalMs]
  * @returns {{ stop: () => void }}
  */
-export function startMemoryReport({ log, readStores, intervalMs = MEMORY_REPORT_INTERVAL_MS }) {
+export function startMemoryReport({
+  log,
+  readStores,
+  scope = "process",
+  label = "",
+  diskPath = "",
+  intervalMs = MEMORY_REPORT_INTERVAL_MS
+}) {
   const tick = async () => {
     try {
-      const { bytes, measured } = await availableMemory();
       let stores = [];
       try {
         stores = typeof readStores === "function" ? readStores() ?? [] : [];
@@ -147,10 +243,19 @@ export function startMemoryReport({ log, readStores, intervalMs = MEMORY_REPORT_
         // silent-ok: a store list that cannot be read must not stop the reading
         // that matters, which is the process's own.
       }
+      if (scope === "thread") {
+        log(describeMemory({ scope, label, process: readProcessMemory(), stores }));
+        return;
+      }
+      const { bytes, measured } = await availableMemory();
       log(describeMemory({
+        scope,
+        label,
         process: readProcessMemory(),
         availableBytes: bytes,
         availableMeasured: measured,
+        anonymousBytes: await readAnonymousMemory(),
+        diskFreeBytes: diskPath ? await readDiskFree(diskPath) : null,
         stores
       }));
     } catch {

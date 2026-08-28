@@ -156,3 +156,58 @@ test("a stale echo is judged against the peer's cadence, not a fixed half second
   );
   assert.equal(verdict, "reverse-direction-gone");
 });
+
+test("bytes still arriving outrank the probe gaps — the cushion fill is not a wedge", () => {
+  // The field shape of 2026-08-28: every queue at 0 B, so the allowance is
+  // small, the probes are far behind because the browser is busy pulling two
+  // minutes of film, and the association is perfectly healthy. Before the peer's
+  // own byte counter was consulted this read as `association-stopped`, four
+  // times in the first two minutes of a session nobody was troubled by.
+  const state = {
+    seq: 88,
+    seen: { proxy: 78, "proxy-control": 78, "proxy-fast": 78 },
+    labels: ["proxy", "proxy-control", "proxy-fast"],
+    echoes: 40,
+    echoAgeMs: 1305,
+    allowed: { proxy: 9, "proxy-control": 9, "proxy-fast": 9 },
+    echoStaleMs: 6000,
+    peerBytesAdvancing: true
+  };
+  const reading = readProbeState(state);
+  assert.equal(reading.verdict, "flowing");
+  assert.match(reading.detail, /peerBytes=advancing/);
+});
+
+test("the same gaps with the peer's counter STILL are the wedge", () => {
+  // One field changes, and it is the one that says whether anything is
+  // arriving. This is the shape of a real freeze: probes behind, and the far
+  // end receiving nothing.
+  const reading = readProbeState({
+    seq: 88,
+    seen: { proxy: 78, "proxy-control": 78, "proxy-fast": 78 },
+    labels: ["proxy", "proxy-control", "proxy-fast"],
+    echoes: 40,
+    echoAgeMs: 1305,
+    allowed: { proxy: 9, "proxy-control": 9, "proxy-fast": 9 },
+    echoStaleMs: 6000,
+    peerBytesAdvancing: false
+  });
+  assert.equal(reading.verdict, "association-stopped");
+  assert.match(reading.detail, /peerBytes=still/);
+});
+
+test("a browser that does not report its bytes is judged as before", () => {
+  // The term says nothing rather than guessing, and the rule falls back.
+  const reading = readProbeState({
+    seq: 88,
+    seen: { proxy: 78, "proxy-control": 78, "proxy-fast": 78 },
+    labels: ["proxy", "proxy-control", "proxy-fast"],
+    echoes: 40,
+    echoAgeMs: 1305,
+    allowed: { proxy: 9, "proxy-control": 9, "proxy-fast": 9 },
+    echoStaleMs: 6000,
+    peerBytesAdvancing: null
+  });
+  assert.equal(reading.verdict, "association-stopped");
+  assert.doesNotMatch(reading.detail, /peerBytes=/);
+});

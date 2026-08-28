@@ -147,6 +147,8 @@ export function probeWedgeIsCertain({ stuckForMs, longestHealthySeenGapMs, inter
  * @property {number} reportedAt - When the state was last written to the log.
  * @property {number} lastSeenAdvanceAt - When any label's `seen` value last increased (0 = never yet).
  * @property {number} longestHealthySeenGapMs - The longest gap between two advances this connection has shown while not flagged as a wedge.
+ * @property {number | null} peerBytes - The far end's transport-level received total, as last reported.
+ * @property {number | null} peerBytesAtTick - The same, as it stood at the previous tick.
  * @property {boolean} probeCaptureStarted - One evidence-gathering attempt per wedge; reset once `seen` advances again.
  * @property {ReturnType<typeof setInterval> | null} timer
  */
@@ -163,7 +165,27 @@ export function probeWedgeIsCertain({ stuckForMs, longestHealthySeenGapMs, inter
  * entry of null, cannot be judged: with no rate measured there is nothing to
  * divide the queue by, and the verdict says that rather than inventing one.
  *
- * @param {{ seq: number, seen: Map<string, number> | Record<string, number>, labels: string[], echoes: number, echoAgeMs: number | null, allowed?: Map<string, number | null> | Record<string, number | null>, echoStaleMs?: number }} state
+ * `peerBytesAdvancing` is the fact that outranks every gap here. The gaps are
+ * counted against an allowance whose only load-dependent term is OUR OWN
+ * queue — and that queue is empty by construction, because it drains the moment
+ * libdatachannel accepts the bytes, whether or not usrsctp then puts them on
+ * the wire. So a browser filling its cushion as fast as the link allows shows
+ * an empty queue, a small allowance and a large gap, which reads exactly like a
+ * stopped association. Measured 2026-08-28: four `association-stopped` in the
+ * first two minutes of a healthy session, on a connection whose every queue was
+ * at 0 B and whose viewer never saw the picture stop. Deepening the browser's
+ * cushion from 30 s to 120 s (roadmap item 4) made the burst four times longer
+ * and the false verdict correspondingly likelier.
+ *
+ * What separates the two is not the size of the backlog — it is large in both —
+ * but whether bytes are still arriving. The browser reports its own
+ * transport-level received total with every echo, so the question is answered
+ * by a counter rather than by a threshold: while that total is advancing, bytes
+ * ARE crossing and no verdict of a stopped association can stand, however far
+ * behind the probes are. `null` where the far end does not report it, and then
+ * the rule falls back to what it says without the term.
+ *
+ * @param {{ seq: number, seen: Map<string, number> | Record<string, number>, labels: string[], echoes: number, echoAgeMs: number | null, allowed?: Map<string, number | null> | Record<string, number | null>, echoStaleMs?: number, peerBytesAdvancing?: boolean | null }} state
  * @returns {{ verdict: string, detail: string }}
  */
 export function readProbeState(state) {
@@ -196,9 +218,13 @@ export function readProbeState(state) {
       orderedBehind = true;
     }
   }
+  const advancing = state.peerBytesAdvancing === true;
   const detail =
     `sent=${state.seq} ${parts.join(" ")} ` +
-    `echoAge=${state.echoAgeMs === null ? "never" : `${state.echoAgeMs}ms`}`;
+    `echoAge=${state.echoAgeMs === null ? "never" : `${state.echoAgeMs}ms`}` +
+    (state.peerBytesAdvancing === null || state.peerBytesAdvancing === undefined
+      ? ""
+      : ` peerBytes=${advancing ? "advancing" : "still"}`);
 
   if (state.echoes === 0) {
     return { verdict: "no-echo-yet", detail };
@@ -213,6 +239,12 @@ export function readProbeState(state) {
     return { verdict: "reverse-direction-gone", detail };
   }
   if (!orderedBehind && !(unreliableKnown && unreliableBehind)) {
+    return { verdict: "flowing", detail };
+  }
+  // Bytes are still arriving at the far end. Whatever the probe gaps say, this
+  // association has not stopped — the probes are behind a backlog, which is
+  // what filling a cushion looks like from here.
+  if (advancing) {
     return { verdict: "flowing", detail };
   }
   if (orderedBehind && unreliableKnown && !unreliableBehind) {
@@ -309,9 +341,16 @@ export function createDeliveryProbe({
       (most, value) => (Number.isInteger(value) && value > most ? value : most),
       0
     );
+    // Advancing SINCE THE PREVIOUS TICK, not since the connection began: the
+    // question is whether bytes are crossing now.
+    const peerBytesAdvancing = connection.peerBytes === null
+      ? null
+      : connection.peerBytesAtTick === null || connection.peerBytes > connection.peerBytesAtTick;
+    connection.peerBytesAtTick = connection.peerBytes;
     const { verdict, detail } = readProbeState({
       seq: connection.seq,
       seen: connection.seen,
+      peerBytesAdvancing,
       labels: [...new Set(connection.channels.values())],
       echoes: connection.echoes,
       echoAgeMs: connection.echoAt === 0 ? null : now - connection.echoAt,
@@ -385,6 +424,12 @@ export function createDeliveryProbe({
           seen: new Map(),
           echoAt: 0,
           echoes: 0,
+          // The far end's own transport-level received total, and its value at
+          // the previous tick. Null until a browser that reports it has echoed.
+          /** @type {number | null} */
+          peerBytes: null,
+          /** @type {number | null} */
+          peerBytesAtTick: null,
           verdict: "",
           reportedAt: 0,
           lastSeenAdvanceAt: 0,
@@ -456,6 +501,13 @@ export function createDeliveryProbe({
           }
           connection.lastSeenAdvanceAt = now;
         }
+      }
+      // What the far end says it has received at the transport level. It is the
+      // one figure that separates a backlog from a stopped association, and it
+      // arrives on the direction that goes on working through a freeze.
+      const peerBytes = Number(echo?.report?.transportBytesReceived);
+      if (Number.isFinite(peerBytes) && peerBytes >= 0) {
+        connection.peerBytes = peerBytes;
       }
       if (connection.echoAt !== 0) {
         const sinceLast = now - connection.echoAt;

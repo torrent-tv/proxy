@@ -1,3 +1,7 @@
+## 2.62.0
+
+- **New**: Each session says what its cushion actually is, every half minute: how many seconds of film are ready ahead of the EARLIEST viewer's picture, roughly how many megabytes that is off the swarm, and how deep a buffer the browsers say they are holding. The three were never printed together and could not be reconstructed afterwards from anything that was — so whether deepening the browser's buffer (2.61.0) protected anybody, and what it cost the person hosting the proxy, had no answer. Every term is measured: the produced range from the segments on disk, the picture from the viewers' own reports, the byte rate from the file's length over its duration. The read window sits on top of the megabytes figure, so it is a floor.
+
 ## 2.61.0
 
 - **New**: The proxy states how far ahead of the viewer it lets an encoder run — `lookaheadSeconds` on the session-create response. The browser sizes its forward buffer from it, so the two sides agree by construction instead of each carrying a figure of its own: the browser held 30 s, with a ceiling of 60, while this proxy keeps 120 s produced and suspends the encoder there. Three quarters of the protection against every interruption was left on the disk.

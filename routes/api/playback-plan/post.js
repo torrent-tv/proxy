@@ -24,7 +24,7 @@ function getPayload(body) {
   return {};
 }
 
-export async function handleApiPlaybackPlanPost(req, reply, { playbackPlanner }) {
+export async function handleApiPlaybackPlanPost(req, reply, { playbackPlanner, sourceRegistry, torrentPool, ffmpegBin, localBaseUrl }) {
   const payload = getPayload(req.body);
   const sourceKey = typeof payload.sourceKey === "string" ? payload.sourceKey.trim() : "";
   const fileIndex = Number(payload.fileIndex);
@@ -34,12 +34,11 @@ export async function handleApiPlaybackPlanPost(req, reply, { playbackPlanner })
     return reply.code(400).send({ error: "sourceKey and valid fileIndex are required." });
   }
 
+  // Interface delegates to PlaybackController (orchestrator + domain). Keeps route thin.
+  const { PlaybackController } = await import("../../../services/controllers/PlaybackController.js");
+  const controller = new PlaybackController({ torrentPool, sourceRegistry, ffmpegBin, localBaseUrl, playbackPlanner });
   try {
-    // Short per-request budget: if the file header is not downloaded yet the
-    // planner returns quickly with `pending: true` instead of blocking up to
-    // the transport's 60 s request timeout. The browser polls again (the header
-    // keeps downloading, prioritised on each call). Well under that 60 s limit.
-    const plan = await playbackPlanner.getPlan({ sourceKey, fileIndex, userAgent, maxWaitMs: 8_000 });
+    const plan = await controller.getPlan({ sourceKey, fileIndex, userAgent, maxWaitMs: 8_000 });
     return reply.send(plan);
   } catch (error) {
     if (error instanceof Error && error.code === "SOURCE_NOT_FOUND") {

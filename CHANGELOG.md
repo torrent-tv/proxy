@@ -1,6 +1,10 @@
-## 2.63.1
+## 2.64.0
 
 - **Fix**: A reader sizes its window from the memory the store may hold NOW, not from the allowance it was created with. 2.63.0 made the allowance follow the machine but left the `capacity` getter answering the original reservation, and that getter is what `ceilingPieces` reads — so a reader would have gone on claiming pieces against an allowance the machine had already withdrawn.
+- **New**: Container and track domain — `Container` (RFC 9559 / ISO 14496-12) with `MatroskaContainer` / `Mp4Container` / `AviContainer` via `ContainerFactory` (16-byte sniff), and `ContainerTrack` → `VideoTrack` / `AudioTrack` (`FlagOriginal`/`FlagCommentary`/`FlagVisualImpaired`) / `SubtitleTrack` → `TextSubtitleTrack` (`S_TEXT/UTF8`, `tx3g`, `wvtt`) / `ImageSubtitleTrack` (`PGS`, `VobSub`, `subp`) + `ExternalSubtitleFile`. Every class constructed from its spec section: `FlagForced` only on subtitles (RFC 9559 §5.1.4.1 0x55AA), `FlagEnabled`/`FlagDefault` + `LanguageBCP47` MUST on base, `track_enabled`/`alternate_group`/`elng` on MP4, `AVIIF_KEYFRAME` on AVI. `LanguageBCP47` overrides `Language` per MUST, disabled tracks kept for `declaredIndex` alignment with ffmpeg `0:s:N` (roadmap 62).
+- **New**: Application layer — `ContainerOrchestrator` (per-file cache, `getTracks`/`getKeyframeIndex`) and `SubtitleOrchestrator` (wraps `torrent-worker/subtitle-cues.js` cluster walk behind track abstraction).
+- **New**: Interface layer — `PlaybackController` / `SubtitleController`; `routes/api/playback-plan/post.js` and `routes/api/subtitles/get.js` delegate to controllers instead of calling services directly.
+- **Chore**: `proxy/docs/container-architecture.md` with mermaid class/sequence diagrams and flags matrix; `proxy/CLAUDE.md` layout updated; `services/container-index/` marked as internal detail used by `container/*`.
 
 ## 2.63.0
 

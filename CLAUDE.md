@@ -25,6 +25,23 @@ Linux-only host (e.g. POSIX-only signals must degrade elsewhere).
     long-polls while a segment is being produced, returns retryable 503 (never
     202 — hls.js can't consume it).
 - `services/`:
+  - `container/` — domain layer: `Container` (abstract, RFC 9559 / ISO 14496-12),
+    `MatroskaContainer` / `Mp4Container` / `AviContainer`, `ContainerFactory`
+    (sniff 16 bytes → precise subclass). See `docs/container-architecture.md`.
+  - `tracks/` — domain layer: `ContainerTrack` (base: TrackNumber, declaredIndex,
+    language/BCP47, isEnabled/isDefault) → `VideoTrack` / `AudioTrack` /
+    `SubtitleTrack` → `TextSubtitleTrack` / `ImageSubtitleTrack`,
+    `ExternalSubtitleFile`. Spec-accurate flags (FlagForced only on subtitles per
+    RFC 9559 §5.1.4.1, FlagOriginal/Commentary only on audio, tkhd
+    track_enabled / alternate_group, elng BCP47).
+  - `orchestrators/` — application layer: `ContainerOrchestrator` (detect + per-file
+    cache, `getTracks`/`getKeyframeIndex`), `SubtitleOrchestrator` (wraps
+    `torrent-worker/subtitle-cues.js` cluster walk + `Container` tracks, warm/push).
+  - `controllers/` — interface layer: `PlaybackController` / `SubtitleController`
+    (thin adapters over orchestrators; routes depend on controllers, not services).
+    `routes/*` are now thin HTTP translators.
+  - `container-index/` — legacy readers (ebml-reader, matroska/mp4/avi keyframe and
+    subtitle tables) — used internally by `container/*`, deprecated as direct import.
   - `playback-planner.js` — single ffmpeg probe returns audioCodec, videoCodec,
     container, durationSeconds. `mode` is advisory; the browser decides.
   - `hls-session-manager.js` — one ffmpeg per (source, file, settings). Serves a

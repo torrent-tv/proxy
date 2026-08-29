@@ -25,15 +25,12 @@
  */
 
 import { spawn } from "node:child_process";
-import { convertSubtitleToVtt, decodeSubtitleBytes } from "../../../services/subtitle-convert.js";
 import { detectLanguage } from "../../../services/language-detect.js";
-import { finalizeCues } from "../../../services/torrent-worker/subtitle-cues.js";
+import { SubtitleController } from "../../../services/controllers/SubtitleController.js";
 import { logger } from "../../../utils/logger.js";
 
 // Safety cap: no embedded extraction may outlive this.
 const EXTRACTION_TIMEOUT_MS = 30 * 60 * 1000;
-// External subtitle files are small; cap the read to guard against a bad index.
-const EXTERNAL_MAX_BYTES = 8 * 1024 * 1024;
 
 /** Set the detected-language response headers (no-op when detection failed). */
 function setLanguageHeaders(reply, lang) {
@@ -58,90 +55,52 @@ export async function handleApiSubtitlesGet(req, reply, { sourceRegistry, torren
     return reply.code(400).send({ error: "sourceKey and fileIndex are required." });
   }
 
-  const sourceRecord = sourceRegistry.get(sourceKey);
-  if (!sourceRecord) {
-    return reply.code(404).send({ error: "Source key was not found." });
-  }
-  const torrent = await torrentPool.getTorrent(sourceRecord.sourceType, sourceRecord.source);
-  const file = torrent.files[fileIndex];
-  if (!file) {
-    return reply.code(404).send({ error: "File index was not found in torrent." });
-  }
-
-  // ---- External subtitle FILE (no trackIndex) -----------------------------
-  if (!hasTrackIndex) {
-    const name = typeof file.name === "string" ? file.name : "";
-    const ext = name.slice(name.lastIndexOf(".")).toLowerCase();
-    const release = torrentPool.acquireFile(torrent, fileIndex);
-    try {
-      const bytes = await readFileFully(file, EXTERNAL_MAX_BYTES);
-      const text = decodeSubtitleBytes(bytes);
-      const vtt = convertSubtitleToVtt(text, ext);
-      if (!vtt) {
-        return reply.code(422).send({ error: `Unsupported subtitle format: ${ext}` });
-      }
-      setLanguageHeaders(reply, detectLanguage(text));
-      reply.header("content-type", "text/vtt; charset=utf-8");
-      reply.header("cache-control", "no-store");
-      return reply.send(vtt);
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      return reply.code(502).send({ error: `Could not read subtitle file: ${message}` });
-    } finally {
-      release();
-    }
-  }
-
-  // ---- Embedded track (ffmpeg extraction, streamed) -----------------------
-  if (!Number.isInteger(trackIndex) || trackIndex < 0) {
-    return reply.code(400).send({ error: "trackIndex must be a non-negative integer." });
-  }
-
-  // From the clusters the viewer has already downloaded, if this file can be
-  // read that way. Costs no network at all and answers with the part of the
-  // film they are watching; the rest arrives as they watch it. Only when the
-  // container cannot be read this way does the old extraction run.
-  // How many cues this browser has already been sent, counted in the order
-  // they were FOUND. Sending them again is bytes for nothing: measured
-  // 2026-08-19, one track is 76 KB and the browser asked for it every few
-  // seconds while the film downloaded. Absent or unparsable means "send
-  // everything", which is what a browser asking for the first time wants.
-  //
-  // Found-order, not time. A cue's time cannot serve as a cursor here: the
-  // cues are read out of whichever clusters are downloaded, and those are not
-  // contiguous, so the set grows in the middle as well as at the end. The old
-  // `?after=<seconds>` therefore threw away every cue that turned up BEHIND
-  // the furthest one already sent — which is the stretch the viewer is about
-  // to watch. Measured 2026-08-20: a viewer at 272 s was sent cues out to
-  // 1176 s, and from that moment nothing between the two could ever reach
-  // them, with 59 of 276 clusters read. `after` is still honoured so an older
-  // browser keeps working.
+  // Interface layer delegates to SubtitleController (orchestrator + domain),
+  // which owns external-file vs embedded-track branching and the cluster walk.
+  const controller = new SubtitleController({ sourceRegistry, torrentPool });
   const since = Number.parseInt(String(req.query?.since ?? ""), 10);
   const after = Number.parseFloat(String(req.query?.after ?? ""));
-  const held = await cuesFromDownloadedClusters(
-    torrentPool,
-    torrent,
+  const result = await controller.getSubtitle({
+    sourceKey,
     fileIndex,
-    trackIndex,
-    Number.isFinite(after) ? after : null,
-    Number.isInteger(since) ? since : null
-  );
-  if (held !== null) {
-    setLanguageHeaders(reply, held.language);
-    reply.header("content-type", "text/vtt; charset=utf-8");
-    reply.header("cache-control", "no-store");
-    reply.header("access-control-allow-origin", "*");
-    // How much of the film these cues cover, so the browser knows to ask again
-    // as playback moves into clusters that were not downloaded yet.
-    reply.header("X-Subtitle-Covered-Clusters", String(held.coveredClusters));
-    reply.header("X-Subtitle-Indexed-Clusters", String(held.indexedClusters));
-    // What to send back as `?since=` next time.
-    reply.header("X-Subtitle-Cursor", String(held.cursor));
-    reply.raw.setHeader(
-      "Access-Control-Expose-Headers",
-      "X-Subtitle-Language, X-Subtitle-Language-Name, X-Subtitle-Covered-Clusters, X-Subtitle-Indexed-Clusters, X-Subtitle-Cursor"
-    );
-    return reply.send(held.vtt);
+    trackIndex: hasTrackIndex ? trackIndex : undefined,
+    since: Number.isInteger(since) ? since : null,
+    after: Number.isFinite(after) ? after : null
+  });
+
+  if (result.error) {
+    return reply.code(result.status ?? 400).send({ error: result.error });
+  }
+  if (result.vtt !== undefined) {
+    if (result.vtt !== null) {
+      // External file or cluster-held cues — controller already detected language.
+      const lang = result.language ?? null;
+      if (lang) setLanguageHeaders(reply, lang);
+      reply.header("content-type", "text/vtt; charset=utf-8");
+      reply.header("cache-control", "no-store");
+      if (hasTrackIndex) {
+        reply.header("access-control-allow-origin", "*");
+        if (result.headers) {
+          for (const [k, v] of Object.entries(result.headers)) reply.header(k, String(v));
+          reply.raw.setHeader(
+            "Access-Control-Expose-Headers",
+            "X-Subtitle-Language, X-Subtitle-Language-Name, X-Subtitle-Covered-Clusters, X-Subtitle-Indexed-Clusters, X-Subtitle-Cursor"
+          );
+        }
+      }
+      return reply.send(result.vtt);
+    }
+  }
+  // If controller returned pending, fall through to ffmpeg extraction below.
+
+  // ---- Embedded track — controller had no held cues, try cluster path directly for headers compatibility
+  // The controller's getSubtitle already attempted the cluster walk; reaching here means it returned pending.
+  if (!hasTrackIndex) {
+    // Should have been handled above — pending for external is unsupported format
+    return reply.code(422).send({ error: "Unsupported subtitle format" });
+  }
+  if (!Number.isInteger(trackIndex) || trackIndex < 0) {
+    return reply.code(400).send({ error: "trackIndex must be a non-negative integer." });
   }
 
   const inputUrl = new URL("/stream", `${localBaseUrl}/`);
@@ -238,132 +197,4 @@ function startExtraction({ key, ffmpegBin, localBaseUrl, sourceKey, fileIndex, t
   ffmpeg.once("error", settle);
 }
 
-/**
- * Read a torrent file fully into a Buffer, bounded by `maxBytes`.
- *
- * @param {{ createReadStream: () => import("node:stream").Readable, length?: number }} file
- * @param {number} maxBytes
- * @returns {Promise<Buffer>}
- */
-function readFileFully(file, maxBytes) {
-  return new Promise((resolve, reject) => {
-    const stream = file.createReadStream();
-    const chunks = [];
-    let total = 0;
-    stream.on("data", (chunk) => {
-      total += chunk.length;
-      if (total > maxBytes) {
-        stream.destroy();
-        reject(new Error("subtitle file exceeds the size cap"));
-        return;
-      }
-      chunks.push(chunk);
-    });
-    stream.on("end", () => resolve(Buffer.concat(chunks)));
-    stream.on("error", reject);
-  });
-}
 
-/**
- * The cues of a track from clusters already downloaded, as WebVTT.
- *
- * `trackIndex` is the browser's number for the subtitle stream — its position
- * among ALL the subtitle streams, as ffmpeg lists them — while Matroska blocks
- * carry the file's own track number. The plan lists only the tracks that can
- * become text, so it is matched on `declaredIndex`, which each track carries
- * for exactly this: its place in the file's full list of subtitle tracks.
- *
- * @param {object} torrentPool
- * @param {object} torrent
- * @param {number} fileIndex
- * @param {number} trackIndex
- * @returns {Promise<{ vtt: string, language: object | null, coveredClusters: number, indexedClusters: number } | null>}
- *   Null when this file cannot be read this way, and then the caller falls back.
- */
-async function cuesFromDownloadedClusters(torrentPool, torrent, fileIndex, trackIndex, after = null, since = null) {
-  if (typeof torrentPool?.getSubtitleTracks !== "function") {
-    return null;
-  }
-  let tracks;
-  try {
-    tracks = await torrentPool.getSubtitleTracks(torrent, fileIndex);
-  } catch {
-    return null;
-  }
-  // BY the browser's number, not by position in this list. The list holds only
-  // the tracks that can become WebVTT, while the browser counts every subtitle
-  // stream ffmpeg lists — so on a file carrying a PGS or VobSub track the two
-  // ran one apart, and the request either found the wrong track or found none
-  // and fell through to the ffmpeg extraction below, which reads the whole film
-  // (752 s measured, 2026-08-19) for cues already in hand.
-  const track = Array.isArray(tracks)
-    ? tracks.find((candidate) => candidate.declaredIndex === trackIndex) ?? null
-    : null;
-  if (!track) {
-    return null;
-  }
-  let held;
-  try {
-    held = await torrentPool.getSubtitleCues(torrent, fileIndex, track.trackNumber);
-  } catch {
-    return null;
-  }
-  if (!held || !Array.isArray(held.cues)) {
-    return null;
-  }
-  // Only what the browser does not have. The language is still detected from
-  // EVERYTHING held, because three new lines say much less about a language
-  // than the whole track does.
-  const cursor = held.cues.reduce((highest, cue) => Math.max(highest, Number(cue.seq) || 0), 0);
-  const fresh = Number.isInteger(since)
-    ? held.cues.filter((cue) => (Number(cue.seq) || 0) > since)
-    : Number.isFinite(after)
-      ? held.cues.filter((cue) => cue.startSeconds > after)
-      : held.cues;
-  const vtt = cuesToVtt(fresh, held.codecId);
-  const language = held.cues.length > 0
-    ? detectLanguage(held.cues.map((cue) => cue.text).join("\n"))
-    : null;
-  return {
-    vtt,
-    language,
-    cursor,
-    coveredClusters: held.coveredClusters ?? 0,
-    indexedClusters: held.indexedClusters ?? 0
-  };
-}
-
-/**
- * WebVTT from cues read out of the container. The end-time synthesis and ASS
- * stripping are shared with the push path — see `finalizeCues` in
- * `services/torrent-worker/subtitle-cues.js` — so a pulled cue and a pushed
- * one read identically; this function only adds the WebVTT framing.
- *
- * @param {{ startSeconds: number, endSeconds: number | null, text: string }[]} cues
- * @param {string} codecId
- * @returns {string}
- */
-function cuesToVtt(cues, codecId) {
-  const lines = ["WEBVTT", ""];
-  for (const cue of finalizeCues(cues, codecId)) {
-    lines.push(`${vttTime(cue.startSeconds)} --> ${vttTime(cue.endSeconds)}`);
-    lines.push(cue.text);
-    lines.push("");
-  }
-  return lines.join("\n");
-}
-
-/**
- * A time in the form WebVTT requires.
- *
- * @param {number} seconds
- * @returns {string}
- */
-function vttTime(seconds) {
-  const safe = Math.max(0, seconds);
-  const hours = Math.floor(safe / 3600);
-  const minutes = Math.floor((safe % 3600) / 60);
-  const rest = safe % 60;
-  return `${String(hours).padStart(2, "0")}:${String(minutes).padStart(2, "0")}:` +
-    `${rest.toFixed(3).padStart(6, "0")}`;
-}

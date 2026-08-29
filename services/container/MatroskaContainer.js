@@ -136,9 +136,9 @@ export class MatroskaContainer extends Container {
           case ID_LANGUAGE_BCP47: languageBcp47 = readString(head, f); break;
           case ID_NAME: name = readString(head, f); break;
           case ID_FLAG_ENABLED: isEnabled = f.size === 0 || readUint(head, f.dataOffset, f.size) !== 0; break;
-          case ID_FLAG_DEFAULT: isDefault = readUint(head, f.dataOffset, f.size) === 1; declaresDefault = true; break;
+          case ID_FLAG_DEFAULT: isDefault = f.size === 0 || readUint(head, f.dataOffset, f.size) === 1; declaresDefault = true; break;
           case ID_FLAG_FORCED: isForced = f.size > 0 && readUint(head, f.dataOffset, f.size) !== 0; break;
-            case ID_FLAG_HEARING: isHearing = f.size > 0 && readUint(head, f.dataOffset, f.size) !== 0; break;
+          case ID_FLAG_HEARING: isHearing = f.size > 0 && readUint(head, f.dataOffset, f.size) !== 0; break;
           case ID_FLAG_VISUAL: isVisual = f.size > 0 && readUint(head, f.dataOffset, f.size) !== 0; break;
           case ID_FLAG_TEXT_DESCR: break;
           case ID_FLAG_ORIGINAL: isOriginal = f.size > 0 && readUint(head, f.dataOffset, f.size) !== 0; break;

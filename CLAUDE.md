@@ -42,6 +42,9 @@ Linux-only host (e.g. POSIX-only signals must degrade elsewhere).
     `routes/*` are now thin HTTP translators.
   - `container-index/` — legacy readers (ebml-reader, matroska/mp4/avi keyframe and
     subtitle tables) — used internally by `container/*`, deprecated as direct import.
+  - `docs/logs.md` — where to find logs (HA `docker logs` + `/data/proxy.log`, DO
+    `infra-server-1` with forwarded frontend `POST /api/client-logs`). Browser
+    console not needed.
   - `playback-planner.js` — single ffmpeg probe returns audioCodec, videoCodec,
     container, durationSeconds. `mode` is advisory; the browser decides.
   - `hls-session-manager.js` — one ffmpeg per (source, file, settings). Serves a

@@ -411,7 +411,11 @@ export class SharedPieceStore {
 
   /** How many pieces fit in memory at once. */
   get capacity() {
-    return this.#capacity;
+    // What may be held NOW, not the reservation this store was created with.
+    // A reader sizes its window from this (`ceilingPieces` in piece-reader),
+    // and sizing it from an allowance the machine has since withdrawn is how a
+    // reader comes to want more pieces than the store can hold.
+    return this.#growthCeiling;
   }
 
   /** How many pieces are resident right now. */

@@ -1,3 +1,7 @@
+## 2.63.1
+
+- **Fix**: A reader sizes its window from the memory the store may hold NOW, not from the allowance it was created with. 2.63.0 made the allowance follow the machine but left the `capacity` getter answering the original reservation, and that getter is what `ceilingPieces` reads — so a reader would have gone on claiming pieces against an allowance the machine had already withdrawn.
+
 ## 2.63.0
 
 - **New**: The piece store says what it has TAKEN, not only what it holds. `committed` and `on-disk` stand beside `resident` in its line. The two are different quantities and the difference is the growth that had no explanation: the pool only ever grows — `SharedArrayBuffer` has no shrink — so a piece spilled to disk returns its slot to the free list and its memory to nobody. On 2026-08-28 the store reported "144MB" while the process held 893 MB.

@@ -34,7 +34,12 @@ export async function handleApiSourceStatsGet(req, reply, { sourceRegistry, torr
     torrent = await torrentPool.getTorrent(sourceRecord.sourceType, sourceRecord.source);
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
+    logger.warn(`stats: getTorrent failed for ${sourceKey.slice(0, 8)}: ${message} stack=${error instanceof Error ? error.stack?.split("\n")[1]?.trim() ?? "" : ""}`);
     return reply.code(500).send({ error: `Failed to load torrent: ${message}` });
+  }
+  if (!torrent) {
+    logger.warn(`stats: torrent missing for ${sourceKey.slice(0, 8)} (getTorrent returned null/undefined)`);
+    return reply.code(500).send({ error: "Torrent instance not found" });
   }
 
   const fileIndexRaw = typeof req.query.fileIndex === "string" ? req.query.fileIndex : "";

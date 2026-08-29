@@ -1191,7 +1191,7 @@ export class TorrentPool {
           `(~${(freed / (1024 * 1024)).toFixed(0)} MB)`
       );
       this.#cancelIdleRemoval(torrent);
-      this.#removeTorrent(torrent);
+      this.#removeTorrent(torrent, "disk-cap");
       used -= freed;
     }
   }
@@ -1582,15 +1582,20 @@ export class TorrentPool {
       return;
     }
     this.#cancelIdleRemoval(torrent);
+    const name = typeof torrent.name === "string" ? torrent.name : "(unknown)";
+    const ih = String(torrent.infoHash ?? "?").slice(0, 8);
+    logger.info(`torrent-pool: scheduling idle removal for "${name}" [${ih}] in ${TORRENT_IDLE_TTL_MS / 1000}s`);
     const timer = setTimeout(() => {
       this.#idleTimers.delete(torrent);
       // Re-check: a new acquire since scheduling would have cancelled this
       // timer, but guard anyway against a race.
       const usage = this.fileUsageByTorrent.get(torrent);
       if (usage && usage.size > 0) {
+        logger.info(`torrent-pool: idle timer fired for "${name}" [${ih}] but refcount ${usage.size} >0 — keep`);
         return;
       }
-      this.#removeTorrent(torrent);
+      logger.warn(`torrent-pool: idle TTL fired for "${name}" [${ih}] — removing torrent (reason=idle-ttl caller=scheduleIdleRemoval)`);
+      this.#removeTorrent(torrent, "idle-ttl");
     }, TORRENT_IDLE_TTL_MS);
     timer.unref?.();
     this.#idleTimers.set(torrent, timer);
@@ -1615,12 +1620,20 @@ export class TorrentPool {
    * disk while the proxy keeps running. Best-effort.
    *
    * @param {import("webtorrent").Torrent} torrent
+   * @param {string} [reason="unknown"] - Why removal was requested (idle-ttl, disk-cap, evict, api).
    * @returns {void}
    */
-  #removeTorrent(torrent) {
+  #removeTorrent(torrent, reason = "unknown") {
     if (!torrent) {
       return;
     }
+    const infoHash = String(torrent.infoHash ?? "?").slice(0, 8);
+    const name = typeof torrent.name === "string" ? torrent.name : "(unknown)";
+    const usage = this.fileUsageByTorrent.get(torrent);
+    const refcount = usage ? usage.size : 0;
+    const hasData = (() => { try { return torrentDownloadedBytes(torrent); } catch { return -1; } })();
+    // Capture caller for diagnostics — not for control flow.
+    const caller = new Error().stack?.split("\n")[2]?.trim() ?? "";
     // Drop it from the source→torrent map so a later request re-adds it.
     for (const [key, value] of this.torrents) {
       if (value === torrent) {
@@ -1631,14 +1644,14 @@ export class TorrentPool {
     this.fileUsageByTorrent.delete(torrent);
     this.#lastAccess.delete(torrent);
     this.#readPositionByTorrent.delete(torrent);
-    const name = typeof torrent.name === "string" ? torrent.name : "(unknown)";
+    logger.warn(`torrent-pool: removing torrent "${name}" [${infoHash}] reason=${reason} refcount=${refcount} downloaded=${hasData}B caller=${caller}`);
     try {
       torrent.destroy({ destroyStore: true }, () => {
-        logger.info(`torrent-pool: removed idle torrent "${name}" and its store`);
+        logger.info(`torrent-pool: removed torrent "${name}" [${infoHash}] reason=${reason} and its store`);
       });
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      logger.warn(`torrent-pool: failed to remove idle torrent "${name}": ${message}`);
+      logger.warn(`torrent-pool: failed to remove torrent "${name}" [${infoHash}] reason=${reason}: ${message}`);
     }
   }
 

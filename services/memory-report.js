@@ -21,6 +21,8 @@
 
 import { readFile, statfs } from "node:fs/promises";
 import os from "node:os";
+import v8 from "node:v8";
+import path from "node:path";
 
 /** How often the reading is taken and written. */
 export const MEMORY_REPORT_INTERVAL_MS = 60_000;
@@ -234,6 +236,7 @@ export function startMemoryReport({
   diskPath = "",
   intervalMs = MEMORY_REPORT_INTERVAL_MS
 }) {
+  let highWaterRss = 0;
   const tick = async () => {
     try {
       let stores = [];
@@ -243,21 +246,37 @@ export function startMemoryReport({
         // silent-ok: a store list that cannot be read must not stop the reading
         // that matters, which is the process's own.
       }
+      const processMemory = readProcessMemory();
       if (scope === "thread") {
-        log(describeMemory({ scope, label, process: readProcessMemory(), stores }));
+        log(describeMemory({ scope, label, process: processMemory, stores }));
         return;
       }
       const { bytes, measured } = await availableMemory();
+      const anonymousBytes = await readAnonymousMemory();
+      const diskFreeBytes = diskPath ? await readDiskFree(diskPath) : null;
       log(describeMemory({
         scope,
         label,
-        process: readProcessMemory(),
+        process: processMemory,
         availableBytes: bytes,
         availableMeasured: measured,
-        anonymousBytes: await readAnonymousMemory(),
-        diskFreeBytes: diskPath ? await readDiskFree(diskPath) : null,
+        anonymousBytes,
+        diskFreeBytes,
         stores
       }));
+      // High-water and heap snapshot on growth — gives a file to open in Chrome DevTools
+      // when the kernel is about to kill the process. One snapshot per high-water.
+      if (processMemory.rss > highWaterRss + 100 * 1024 * 1024 && processMemory.rss > 500 * 1024 * 1024) {
+        highWaterRss = processMemory.rss;
+        try {
+          const snapPath = path.join(os.tmpdir(), `heap-${Date.now()}-${processMemory.rss}.heapsnapshot`);
+          v8.writeHeapSnapshot(snapPath);
+          log(`memory: wrote heap snapshot to ${snapPath} rss=${Math.round(processMemory.rss / (1024 * 1024))}MB anon=${anonymousBytes ? Math.round(anonymousBytes / (1024 * 1024)) : "?"}MB`);
+        } catch {}
+      }
+      if (anonymousBytes !== null && processMemory.rss > 800 * 1024 * 1024) {
+        log(`memory: high rss=${Math.round(processMemory.rss / (1024 * 1024))}MB anon=${Math.round(anonymousBytes / (1024 * 1024))}MB heap=${Math.round(processMemory.heapUsed / (1024 * 1024))}MB — watch for OOM`);
+      }
     } catch {
       // silent-ok: a reading that fails is not worth ending the series over.
     }

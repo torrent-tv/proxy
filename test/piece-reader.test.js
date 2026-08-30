@@ -63,7 +63,6 @@ async function fakeTorrent({ fileOffset, fileLength, totalLength }) {
 async function readRange(torrent, start, end) {
   const collected = [];
   const positions = [];
-  const pool = Buffer.from(torrent.store.sharedBuffer);
   for await (const fragment of readFragments({
     torrent,
     fileIndex: 0,
@@ -71,7 +70,8 @@ async function readRange(torrent, start, end) {
     end,
     cancellation: { isCancelled: () => false }
   })) {
-    collected.push(Buffer.from(pool.subarray(fragment.offset, fragment.offset + fragment.length)));
+    const source = fragment.buffer ? Buffer.from(fragment.buffer, fragment.offset, fragment.length) : Buffer.alloc(0);
+    collected.push(Buffer.from(source));
     positions.push({ piece: fragment.pieceIndex, length: fragment.length });
     fragment.release();
   }

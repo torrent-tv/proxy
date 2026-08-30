@@ -37,7 +37,7 @@ import { startMemoryReport } from "../memory-report.js";
 // the hook above had a chance to register. Verified the hard way: with a static
 // import the process still aborted, and the stack named the genuine polyfill.
 const { TorrentPool, resolveDhtBootstrap } = await import("../torrent-pool.js");
-const { collectStoreStats, findSharedStore, reviseStoreBudgets } = await import("../piece-store/shared-piece-store.js");
+const { collectStoreStats, reviseStoreBudgets } = await import("../piece-store/shared-piece-store.js");
 
 // Resolved before the client exists, because the client builds its DHT in its
 // own constructor and the addresses have to be in hand by then. Awaiting here
@@ -176,6 +176,7 @@ function sendFragment(id, fragment) {
       type: Event.FRAGMENT,
       id,
       pieceIndex: fragment.pieceIndex,
+      buffer: fragment.buffer,
       offset: fragment.offset,
       length: fragment.length
     });
@@ -304,10 +305,6 @@ async function runCommand(command, params, id) {
       return {
         infoHash: torrent.infoHash,
         name: torrent.name,
-        // The piece pool itself. A `SharedArrayBuffer` crosses as a reference to
-        // the same memory rather than a copy, which is what lets the main thread
-        // read a piece where it already lies instead of being sent its bytes.
-        sharedBuffer: findSharedStore(torrent)?.sharedBuffer ?? null,
         // Files cross as plain data; the objects stay here.
         files: (torrent.files ?? []).map((file, index) => ({
           index,
@@ -502,21 +499,26 @@ const lastReported = new Map();
 
 setInterval(() => {
   // What the machine can spare NOW, not what it could spare when each store was
-  // created. Lowering a ceiling frees nothing already committed — the pool
-  // cannot shrink — but it stops growth into memory the host no longer has, and
-  // those pieces go to disk instead (roadmap item 2).
+  // created. With per-piece buffers a lowered ceiling is honoured immediately:
+  // excess pieces are evicted to disk and their memory is reclaimable.
   for (const revised of reviseStoreBudgets()) {
-    if (revised.committedBytes > revised.ceilingBytes) {
+    if (revised.evicted > 0) {
+      log(
+        `piece-store "${revised.name.slice(0, 40)}": allowance is now ` +
+        `${Math.round(revised.ceilingBytes / 1048576)}MB, evicted ${revised.evicted} piece(s) to meet it — ` +
+        `now ${Math.round(revised.committedBytes / 1048576)}MB committed`
+      );
+    } else if (revised.committedBytes > revised.ceilingBytes) {
       log(
         `piece-store "${revised.name.slice(0, 40)}": allowance is now ` +
         `${Math.round(revised.ceilingBytes / 1048576)}MB and ` +
-        `${Math.round(revised.committedBytes / 1048576)}MB is already committed — ` +
-        `it will not grow further, and cannot give back what it holds`
+        `${Math.round(revised.committedBytes / 1048576)}MB is committed — ` +
+        `all resident pieces are pinned, cannot shrink yet`
       );
     }
   }
   for (const stats of collectStoreStats()) {
-    const signature = `${stats.fromMemory}/${stats.fromDisk}/${stats.spills}/${stats.revivals}/${stats.blockedByPins}`;
+    const signature = `${stats.fromMemory}/${stats.fromDisk}/${stats.spills}/${stats.revivals}/${stats.blockedByPins}/${stats.evictedOnRevise}`;
     if (lastReported.get(stats.name) === signature) {
       continue;
     }
@@ -525,21 +527,15 @@ setInterval(() => {
     const reads = stats.fromMemory + stats.fromDisk;
     const fromMemoryShare = reads > 0 ? ((stats.fromMemory / reads) * 100).toFixed(1) : "—";
     log(
-      // In BYTES as well as in pieces. The count alone says nothing without the
-      // piece size, and the piece size differs per torrent: on the film the
-      // proxy was killed under, 2026-08-28, "63" meant 504 MB.
       `piece-store "${stats.name.slice(0, 40)}": resident=${stats.resident}/${stats.capacity} ` +
       `(${Math.round((stats.residentBytes || 0) / 1048576)}MB of ` +
       `${Math.round((stats.budgetBytes || 0) / 1048576)}MB allowed) ` +
-      // What the machine has actually parted with, which is not what is held:
-      // the pool only grows, so a spilled piece frees its slot and no memory.
-      // Reporting the first without the second is what hid 650 MB on
-      // 2026-08-28 (roadmap item 2).
       `committed=${Math.round((stats.committedBytes || 0) / 1048576)}MB ` +
       `on-disk=${Math.round((stats.spilledBytes || 0) / 1048576)}MB ` +
       `pinned=${stats.pinned} spilled=${stats.spilled} reads=${reads} (${fromMemoryShare}% from memory) ` +
       `spills=${stats.spills} revivals=${stats.revivals}` +
-      (stats.blockedByPins > 0 ? ` blocked-by-pins=${stats.blockedByPins}` : "")
+      (stats.blockedByPins > 0 ? ` blocked-by-pins=${stats.blockedByPins}` : "") +
+      (stats.evictedOnRevise > 0 ? ` evictedOnRevise=${stats.evictedOnRevise}` : "")
     );
   }
 }, STORE_REPORT_INTERVAL_MS).unref();

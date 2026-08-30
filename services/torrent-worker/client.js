@@ -59,11 +59,7 @@ export class TorrentWorkerClient {
    *
    * @type {Map<number, number>}
    */
-  #lastPieceByRead = new Map();
-  /** Each torrent's piece pool, so a fragment can be read where it lies. */
-  #poolBySource = new Map();
-  /** Which pool an in-flight read belongs to, keyed by request id. */
-  #poolByRead = new Map();
+   #lastPieceByRead = new Map();
   /** Reads consuming fragments in place, keyed by request id. */
   #fragmentReaders = new Map();
 
@@ -96,7 +92,6 @@ export class TorrentWorkerClient {
       if (message?.type === Event.ERROR && this.#fragmentReaders.has(message.id)) {
         const reader = this.#fragmentReaders.get(message.id);
         this.#fragmentReaders.delete(message.id);
-        this.#poolByRead.delete(message.id);
         reader.fail(new Error(message.error ?? "Torrent worker read failed."));
         return;
       }
@@ -105,28 +100,17 @@ export class TorrentWorkerClient {
       }
       switch (message?.type) {
         case Event.FRAGMENT: {
-          const pool = this.#poolByRead.get(message.id);
-          if (!pool) {
-            // No pool means no way to read the fragment; confirm it so the
+          const buffer = message.buffer;
+          if (!buffer) {
+            // No buffer means no way to read the fragment; confirm it so the
             // worker is not left waiting, and let the read end short.
             this.#worker.postMessage({ type: Event.FRAGMENT_DONE, id: message.id });
             break;
           }
-          // The pool is a growable SharedArrayBuffer shared with the worker
-          // thread, and an offset is only meaningful against the buffer of the
-          // store that produced it. When the two disagree — a second store
-          // opened for the same torrent, a slot handed out before the buffer
-          // grew — this threw `RangeError: Invalid typed array length`, which
-          // the process-wide handler swallowed. Reads then stopped answering
-          // for good: field 2026-08-09, one segment was held for a minute
-          // eight times running while the audio decoder was fed cut-up frames
-          // and reported them as a broken AC-3 stream. A read that cannot be
-          // satisfied must end short and say so, not take the whole source
-          // down silently.
-          if (message.offset + message.length > pool.byteLength) {
+          if (message.offset + message.length > buffer.byteLength) {
             logger.warn(
               `torrent-worker: fragment ${message.offset}+${message.length} lies outside ` +
-              `its pool of ${pool.byteLength}B (read ${message.id}) — ending the read short`
+              `its buffer of ${buffer.byteLength}B (read ${message.id}) — ending the read short`
             );
             this.#worker.postMessage({ type: Event.FRAGMENT_DONE, id: message.id });
             break;
@@ -150,7 +134,7 @@ export class TorrentWorkerClient {
             );
           }
           this.#lastPieceByRead.set(message.id, message.pieceIndex);
-          const view = new Uint8Array(pool, message.offset, message.length);
+          const view = new Uint8Array(buffer, message.offset, message.length);
 
           const reader = this.#fragmentReaders.get(message.id);
           if (reader) {
@@ -183,7 +167,6 @@ export class TorrentWorkerClient {
           this.#reads.delete(message.id);
           this.#fragmentReaders.get(message.id)?.close();
           this.#fragmentReaders.delete(message.id);
-          this.#poolByRead.delete(message.id);
           break;
         case Event.LOG:
           logger.info(`torrent-worker: ${message.message}`);
@@ -373,17 +356,10 @@ export class TorrentWorkerClient {
       onCancel: () => {
         void this.#caller.call(Command.CANCEL_READ, { readId }).catch(() => undefined);
         this.#reads.delete(readId);
-        this.#poolByRead.delete(readId);
         this.#lastPieceByRead.delete(readId);
       }
     });
     this.#reads.set(readId, receive);
-    // Which pool this read's fragments will point into. Recorded before the
-    // command is sent, because the first fragment can arrive immediately.
-    const pool = this.#poolBySource.get(sourceKey);
-    if (pool) {
-      this.#poolByRead.set(readId, pool);
-    }
 
     // The worker replies to READ_RANGE only once the body is fully sent; a
     // failure before that must surface on the stream, not vanish.
@@ -414,11 +390,6 @@ export class TorrentWorkerClient {
    * @returns {{ [Symbol.asyncIterator]: () => AsyncGenerator<{ bytes: Uint8Array, release: () => void }>, cancel: () => void } | null}
    */
   createFragmentReader({ sourceKey, fileIndex, start = null, end = null, windowBytes }) {
-    const pool = this.#poolBySource.get(sourceKey);
-    if (!pool) {
-      return null;
-    }
-
     const readId = this.#caller.nextId();
     /** @type {{ bytes: Uint8Array, release: () => void }[]} */
     const queue = [];
@@ -447,11 +418,9 @@ export class TorrentWorkerClient {
         notify();
       }
     });
-    this.#poolByRead.set(readId, pool);
 
     const cancel = () => {
       if (this.#fragmentReaders.delete(readId)) {
-        this.#poolByRead.delete(readId);
         void this.#caller.call(Command.CANCEL_READ, { readId }).catch(() => undefined);
       }
       finished = true;
@@ -513,11 +482,6 @@ export class TorrentWorkerClient {
    */
   async getTorrent({ sourceKey, sourceType, source }) {
     const info = await this.addSource({ sourceKey, sourceType, source });
-    // The torrent's piece pool. Both threads now hold the same memory, so a
-    // read can be answered with an offset instead of with bytes.
-    if (info.sharedBuffer) {
-      this.#poolBySource.set(sourceKey, info.sharedBuffer);
-    }
     const client = this;
     return {
       infoHash: info.infoHash,

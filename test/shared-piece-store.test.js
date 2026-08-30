@@ -133,7 +133,7 @@ test("a pinned piece is not evicted to make room", async () => {
 
     const located = store.locate(0);
     assert.ok(located, "the pinned piece was evicted while held");
-    const view = Buffer.from(store.sharedBuffer, located.offset, located.length);
+    const view = Buffer.from(located.buffer, located.offset, located.length);
     assert.deepEqual(view, piece(0), "the pinned piece was overwritten in place");
 
     store.unpin(0);
@@ -175,7 +175,7 @@ test("a piece revived from disk is readable by offset again", async () => {
     await get(store, 0); // brings it back
     const located = store.locate(0);
     assert.ok(located, "piece 0 was not brought back into memory");
-    const view = Buffer.from(store.sharedBuffer, located.offset, located.length);
+    const view = Buffer.from(located.buffer, located.offset, located.length);
     assert.deepEqual(view, piece(0));
   } finally {
     await new Promise((resolve) => store.destroy(resolve));
@@ -215,25 +215,19 @@ test("takes memory as it needs it, not the whole budget up front", async () => {
   const { store, directory } = await makeStore({ pieces: 16, totalPieces: 64 });
   try {
     assert.equal(store.capacity, 16);
-    const initial = store.sharedBuffer.byteLength;
-    assert.ok(initial <= CHUNK * 2, `claimed ${initial} bytes before holding anything`);
+    const initial = store.stats().committedBytes;
+    assert.ok(initial === 0, `claimed ${initial} bytes before holding anything`);
 
     for (let index = 0; index < 5; index += 1) {
       await put(store, index, piece(index));
     }
 
     assert.equal(store.residentCount, 5);
-    assert.ok(
-      store.sharedBuffer.byteLength >= CHUNK * 5,
-      "the pool did not grow to hold what was put in it"
-    );
-    assert.ok(
-      store.sharedBuffer.byteLength <= CHUNK * 6,
-      "the pool grew past what was actually needed"
-    );
+    assert.equal(store.stats().committedBytes, CHUNK * 5, "committed should equal resident");
+    assert.equal(store.stats().residentBytes, CHUNK * 5);
 
-    // Growing must not move bytes already written.
-    assert.deepEqual(await get(store, 0), piece(0), "an early piece was disturbed by growth");
+    // Per-piece buffers must not disturb early pieces.
+    assert.deepEqual(await get(store, 0), piece(0), "an early piece was disturbed");
   } finally {
     await new Promise((resolve) => store.destroy(resolve));
     await fs.rm(directory, { recursive: true, force: true });

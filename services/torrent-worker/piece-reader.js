@@ -1082,6 +1082,7 @@ export async function* readFragments({
       deliveredBytes += toWithinPiece - fromWithinPiece + 1;
       yield {
         pieceIndex,
+        buffer: located.buffer,
         offset: located.offset + fromWithinPiece,
         length: toWithinPiece - fromWithinPiece + 1,
         release() {

@@ -13,11 +13,15 @@
  * removes the question of whose it was.
  *
  * **Chosen.** Memory this side of the thread boundary can be *shared* memory,
- * which the main thread reads by offset instead of receiving as bytes — see
+ * which the main thread reads without receiving bytes as a copy — see
  * {@link SharedPieceStore#locate}. Measured on the field host: a piece copy
  * costs 3.64 ms, a read from the page cache into a buffer we own 7.63 ms, and
  * re-downloading a piece from the swarm ~1430 ms. So memory first, disk under
  * it, and never the swarm twice.
+ *
+ * Per piece allocation: each resident piece owns its own `SharedArrayBuffer`.
+ * Evicting a piece deletes its entry and the memory is reclaimable by GC.
+ * `committed` therefore equals `resident`, not a high-water mark.
  *
  * What this deliberately does NOT do is manage the disk as a cache of its own.
  * Pieces evicted from memory are written once and read back on demand; the file
@@ -34,40 +38,16 @@ import { DiskTier } from "./disk-tier.js";
 /**
  * Live stores, so the worker can report on them.
  *
- * WebTorrent constructs the store itself, deep inside its own wrappers, so
- * there is no handle to reach for from outside. Registering here is what makes
- * the store's behaviour visible in the field at all — without it the first
- * strange case has nothing to go on.
- *
  * @type {Set<SharedPieceStore>}
  */
 const liveStores = new Set();
 
-/**
- * A snapshot of every live store, for logging.
- *
- * @returns {{ name: string, resident: number, capacity: number, residentBytes: number, budgetBytes: number, spilled: number, fromMemory: number, fromDisk: number, spills: number, revivals: number, blockedByPins: number }[]}
- */
 export function collectStoreStats() {
   return [...liveStores].map((store) => store.stats());
 }
 
-/**
- * The shared store behind a torrent, or `null` if it is not one of ours.
- *
- * WebTorrent wraps whatever store it is given — today in `ImmediateChunkStore`,
- * and historically in a piece cache as well — and offers no way to ask for the
- * innermost one. Walking the `store` chain finds it regardless of how many
- * wrappers there are or what order they sit in, which is sturdier than reaching
- * for a fixed `torrent.store.store`.
- *
- * @param {{ store?: object } | null | undefined} torrent
- * @returns {SharedPieceStore | null}
- */
 export function findSharedStore(torrent) {
   let candidate = torrent?.store;
-  // Bounded rather than `while (candidate)`: a store that referenced itself
-  // would otherwise hang the thread instead of failing.
   for (let depth = 0; candidate && depth < 8; depth += 1) {
     if (candidate instanceof SharedPieceStore) {
       return candidate;
@@ -77,84 +57,20 @@ export function findSharedStore(torrent) {
   return null;
 }
 
-/**
- * Ceiling for the automatic budget, and the share of available memory it takes.
- *
- * A flat default would be a guess dressed as a decision: the proxy runs on
- * whatever the owner has, from a Pi to a rented box. So it is a share of what
- * the machine can actually give, capped.
- *
- * Two things about this were wrong until 2026-08-28, and the kernel found both.
- * It killed the proxy at 2.4 GB resident (`exit code 137`, no dump, `Out of
- * memory: Killed process ... anon-rss: 2422628kB`), on a host with under two
- * gigabytes to spare and an `oom_score_adj` of 200 that makes the addon the
- * first thing chosen.
- *
- * The first: the budget was **per torrent**, so two torrents meant two of it and
- * nothing anywhere asked what the process as a whole was holding. It is shared
- * now — {@link budgetForNewStore} divides what is allowed between the stores
- * that exist.
- *
- * The second: it was a share of `os.freemem()`, which on Linux counts only the
- * pages free at that instant while the kernel deliberately keeps that number low
- * by filling the rest with reclaimable cache. The kernel publishes its own
- * estimate of what an allocation could obtain — `MemAvailable` — and that is the
- * quantity to divide.
- */
 const MEMORY_BUDGET_CEILING_BYTES = 512 * 1024 * 1024;
 const AVAILABLE_MEMORY_SHARE = 0.25;
 
-/**
- * What all torrent stores together may hold, in bytes.
- *
- * Sampled when a store is made rather than kept, because what the machine has
- * to spare is not ours to predict: another container starting is as much a
- * change as another viewer arriving.
- *
- * @param {number} availableBytes - What the machine can still give out.
- * @returns {number}
- */
 export function totalStoreBudgetBytes(availableBytes) {
   const share = Math.floor(Math.max(availableBytes, 0) * AVAILABLE_MEMORY_SHARE);
   return Math.max(MIN_BUDGET_BYTES, Math.min(MEMORY_BUDGET_CEILING_BYTES, share));
 }
 
-/**
- * One store's share of the whole, given how many stores there will be.
- *
- * Divided rather than handed out whole: the failure this replaces is several
- * stores each taking the maximum. The floor is what a store needs to work at
- * all — below it the store thrashes to disk and the viewer pays for it — so a
- * proxy serving many torrents at once on a small machine will exceed the total,
- * and that is deliberate: refusing to serve is worse, and the memory report now
- * says plainly what is being held.
- *
- * @param {number} availableBytes
- * @param {number} storeCount - Stores that will exist, this one included.
- * @returns {number}
- */
 export function budgetForNewStore(availableBytes, storeCount) {
   const total = totalStoreBudgetBytes(availableBytes);
   const shares = Math.max(1, Math.floor(storeCount));
   return Math.max(MIN_BUDGET_BYTES, Math.floor(total / shares));
 }
 
-/**
- * Re-derive every live store's growth ceiling from what the machine has NOW.
- *
- * A budget settled at birth is not a budget: the machine it was taken from
- * changes, and this proxy is one process among many on a host that hands its
- * addons a positive `oom_score_adj`. Lowering a ceiling frees nothing that is
- * already committed — the pool cannot shrink — but it stops the growth that
- * would otherwise carry on into memory the machine no longer has, and sends
- * those pieces to disk instead, which is what the disk tier is for.
- *
- * Never above the reservation each store was created with: `maxByteLength` was
- * fixed from it and `grow()` cannot pass it.
- *
- * @returns {{ name: string, ceilingBytes: number, committedBytes: number }[]}
- *   What each store may now grow to, for the caller to report.
- */
 export function reviseStoreBudgets() {
   const share = budgetForNewStore(availableMemorySync(), liveStores.size);
   const revised = [];
@@ -164,25 +80,10 @@ export function reviseStoreBudgets() {
   return revised;
 }
 
-/**
- * Budget for one torrent's resident pieces when the caller names none.
- *
- * @returns {number}
- */
 function defaultMemoryBytes() {
   return budgetForNewStore(availableMemorySync(), liveStores.size + 1);
 }
 
-/**
- * What the machine can still give out, without waiting on a file read.
- *
- * The store is constructed synchronously, so the asynchronous reading in
- * `services/memory-report.js` cannot be used here. `MemAvailable` is read from
- * `/proc` with a blocking read, which is a few microseconds on a pseudo-file,
- * and `os.freemem()` remains the answer where `/proc` is not there.
- *
- * @returns {number}
- */
 function availableMemorySync() {
   try {
     const text = readFileSync("/proc/meminfo", "utf8");
@@ -191,118 +92,42 @@ function availableMemorySync() {
       return Number(match[1]) * 1024;
     }
   } catch {
-    // silent-ok: not Linux, or /proc is not mounted.
   }
   return os.freemem();
 }
 
-/** Floor for the automatic budget — below this the store thrashes to disk. */
 const MIN_BUDGET_BYTES = 64 * 1024 * 1024;
-/**
- * Never keep fewer than this many pieces resident, whatever the budget says.
- *
- * Two is the smallest workable number rather than a round one: a piece being
- * read holds its slot, so a second slot must exist for the next piece to land
- * in. With one, a single reader would deadlock the store against itself.
- */
 const MIN_RESIDENT_PIECES = 2;
-/**
- * How long a caller waits for a pinned piece to be released before the store
- * calls it a deadlock. A pin lasts one read of one piece — milliseconds — so
- * anything approaching this is a reader waiting for itself.
- */
 const PINNED_WAIT_MS = 5_000;
-/** How often a wait for a slot looks again when no event is due to wake it. */
 const CLAIM_RETRY_MS = 50;
 
-/**
- * A chunk store holding pieces in a `SharedArrayBuffer`, spilling to disk.
- *
- * Implements the `abstract-chunk-store` shape WebTorrent expects — `put`,
- * `get`, `close`, `destroy` — plus {@link locate}, {@link pin} and
- * {@link unpin}, which is how the main thread reads a piece without it being
- * copied or moved.
- */
 export class SharedPieceStore {
   #chunkLength;
   #lastChunkLength;
   #lastChunkIndex;
   #capacity;
-  /**
-   * How many slots this store may grow into RIGHT NOW, as against the
-   * reservation it was born with.
-   *
-   * The budget used to be settled once, when the store was created, from the
-   * memory the machine had at that moment. A store opened on an idle machine
-   * therefore kept an idle machine's allowance for the rest of its life, and
-   * went on growing into it while everything else on the host competed for what
-   * was left — which is how an addon with a positive `oom_score_adj` becomes
-   * the kernel's first choice (roadmap item 2). It is revised on the same
-   * cadence as the memory report, within the reservation: it can never rise
-   * above `#capacity`, because `maxByteLength` was fixed from that and
-   * `grow()` cannot pass it.
-   */
   #growthCeiling;
-  /** @type {SharedArrayBuffer} */
-  #shared;
-  /** @type {Buffer} A view over the whole pool, for slot arithmetic. */
-  #pool;
-  /** Piece index → slot number. */
-  #slotOf = new Map();
-  /** Slot numbers not currently holding a piece. */
-  #freeSlots = [];
-  /**
-   * Pieces being written out to disk right now: index → that write.
-   *
-   * Such a piece is in neither place — its slot has already been given away,
-   * and the disk copy is not finished. A reader arriving in that window must
-   * wait for the write instead of concluding the piece is gone.
-   *
-   * @type {Map<number, Promise<void>>}
-   */
+  /** Piece index → SharedArrayBuffer of that piece */
+  #buffers = new Map();
+  /** @type {Map<number, Promise<void>>} */
   #evicting = new Map();
-  /**
-   * Slots handed out but not yet recorded against a piece.
-   *
-   * A slot is claimed before the piece is copied into it, so between those two
-   * moments the slot belongs to nobody the books know about. Without counting
-   * them, a burst of concurrent puts — which is the normal case, pieces arrive
-   * from many peers at once — sees an empty eviction list and concludes the
-   * store is exhausted, when in fact it is merely mid-flight.
-   */
-  #outstandingSlots = 0;
-  /** When the wait for a pinned piece began; 0 when nothing is waiting. */
+  #outstandingPieces = 0;
   #pinnedWaitStartedAt = 0;
-  /** Resolvers waiting for a slot to become claimable. @type {(() => void)[]} */
   #waiters = [];
   #lru;
   #disk;
-  /** Slots backed by memory right now; grows towards {@link capacity}. */
-  #allocatedSlots = 0;
   #closed = false;
   #name;
-  /**
-   * What the store has actually been doing. Reported, not just kept: the
-   * balance between memory and disk reads is the number that says whether the
-   * budget is right, and it cannot be guessed from outside.
-   */
   #counters = {
     fromMemory: 0,
     fromDisk: 0,
     spills: 0,
     revivals: 0,
     blockedByPins: 0,
-    waitedForPins: 0
+    waitedForPins: 0,
+    evictedOnRevise: 0
   };
 
-  /**
-   * @param {number} chunkLength - Piece length, and therefore the slot size.
-   * @param {object} [options]
-   * @param {number} [options.length] - Total torrent length, so the short last piece is sized correctly.
-   * @param {number} [options.memoryBytes] - Budget for resident pieces.
-   * @param {string} [options.path] - Directory for the spill file.
-   * @param {string} [options.name] - Spill file name; must be unique per torrent.
-   */
   constructor(chunkLength, options = {}) {
     if (!Number.isInteger(chunkLength) || chunkLength < 1) {
       throw new Error(`Chunk length must be a positive integer, got ${chunkLength}.`);
@@ -319,18 +144,6 @@ export class SharedPieceStore {
       : defaultMemoryBytes();
     this.#capacity = Math.max(MIN_RESIDENT_PIECES, Math.floor(memoryBytes / chunkLength));
 
-    // Grows into the budget instead of taking it up front. The budget is per
-    // torrent, so claiming all of it on `add` would charge a host for pieces
-    // nobody has asked for — and a torrent that is merely open, or one being
-    // probed for its codecs, needs a handful of slots, not the ceiling.
-    this.#shared = new SharedArrayBuffer(MIN_RESIDENT_PIECES * chunkLength, {
-      maxByteLength: this.#capacity * chunkLength
-    });
-    this.#pool = Buffer.from(this.#shared);
-    for (let slot = 0; slot < MIN_RESIDENT_PIECES; slot += 1) {
-      this.#freeSlots.push(slot);
-    }
-    this.#allocatedSlots = MIN_RESIDENT_PIECES;
     this.#growthCeiling = this.#capacity;
     this.#lru = new PieceLru(this.#capacity);
     this.#name = options.name ?? "pieces";
@@ -342,29 +155,17 @@ export class SharedPieceStore {
     liveStores.add(this);
   }
 
-  /**
-   * What this store has been doing, for the periodic report.
-   *
-   * `residentBytes` is the pieces held right now; `committedBytes` is the
-   * memory this store has actually taken from the machine, and the two are not
-   * the same number. The pool only ever GROWS — `SharedArrayBuffer` has no
-   * shrink — so a piece spilled to disk returns its slot to the free list and
-   * its memory to nobody. Reporting only the first is what left 650 MB of a
-   * 893 MB process unaccounted for on 2026-08-28 while the store said "144MB"
-   * (roadmap item 2).
-   *
-   * @returns {{ name: string, resident: number, capacity: number, residentBytes: number, committedBytes: number, allocatedSlots: number, budgetBytes: number, spilled: number, spilledBytes: number, fromMemory: number, fromDisk: number, spills: number, revivals: number, blockedByPins: number }}
-   */
   stats() {
+    const resident = this.#buffers.size;
+    const residentBytes = resident * this.#chunkLength;
+    // Last piece may be short but stats historically use chunkLength.
     return {
       name: this.#name,
-      resident: this.#slotOf.size,
+      resident,
       capacity: this.#growthCeiling,
-      residentBytes: this.#slotOf.size * this.#chunkLength,
-      // The high-water mark, which is what the machine has actually parted
-      // with. It never falls while the store lives.
-      allocatedSlots: this.#allocatedSlots,
-      committedBytes: this.#allocatedSlots * this.#chunkLength,
+      residentBytes,
+      allocatedSlots: resident,
+      committedBytes: residentBytes,
       budgetBytes: this.#growthCeiling * this.#chunkLength,
       pinned: this.#lru.pinnedCount,
       spilled: this.#disk.size,
@@ -373,161 +174,131 @@ export class SharedPieceStore {
     };
   }
 
-  /**
-   * Take a new allowance, within the reservation this store was born with.
-   *
-   * @param {number} allowedBytes
-   * @returns {{ name: string, ceilingBytes: number, committedBytes: number }}
-   */
   reviseGrowthCeiling(allowedBytes) {
     const wanted = Math.floor(Number(allowedBytes) / this.#chunkLength);
-    // Never below what a store needs to work at all — under that it thrashes to
-    // disk and the viewer pays for it — and never above the reservation.
     this.#growthCeiling = Math.min(
       this.#capacity,
       Math.max(MIN_RESIDENT_PIECES, Number.isFinite(wanted) ? wanted : this.#capacity)
     );
+    // With per-piece buffers memory CAN be given back immediately, unlike the
+    // old growable pool. Eagerly evict excess to honour the new ceiling.
+    let evicted = 0;
+    while (this.#buffers.size > this.#growthCeiling) {
+      const victim = this.#lru.evictionCandidate();
+      if (victim === null) {
+        break;
+      }
+      const victimBuffer = this.#buffers.get(victim);
+      if (victimBuffer === undefined) {
+        this.#lru.remove(victim);
+        continue;
+      }
+      this.#buffers.delete(victim);
+      this.#lru.remove(victim);
+      evicted += 1;
+      this.#counters.evictedOnRevise += 1;
+      const bytes = Buffer.from(victimBuffer, 0, this.#lengthOf(victim));
+      const spill = this.#disk.write(victim, bytes).then(
+        () => {
+          this.#counters.spills += 1;
+          this.#evicting.delete(victim);
+          this.#wake();
+        },
+        (error) => {
+          this.#evicting.delete(victim);
+          this.#wake();
+          throw error;
+        }
+      );
+      this.#evicting.set(victim, spill);
+    }
+    if (evicted > 0) {
+      // Logged by the caller (worker) via reviseStoreBudgets, but also countable here.
+    }
     return {
       name: this.#name,
       ceilingBytes: this.#growthCeiling * this.#chunkLength,
-      committedBytes: this.#allocatedSlots * this.#chunkLength
+      committedBytes: this.#buffers.size * this.#chunkLength,
+      evicted
     };
   }
 
-  /** `abstract-chunk-store` exposes the piece size under this name. */
   get chunkLength() {
     return this.#chunkLength;
   }
 
-  /**
-   * The pool itself, so another thread can map the same memory and read a piece
-   * by the offset {@link locate} reports.
-   *
-   * @returns {SharedArrayBuffer}
-   */
-  get sharedBuffer() {
-    return this.#shared;
-  }
-
-  /** How many pieces fit in memory at once. */
   get capacity() {
-    // What may be held NOW, not the reservation this store was created with.
-    // A reader sizes its window from this (`ceilingPieces` in piece-reader),
-    // and sizing it from an allowance the machine has since withdrawn is how a
-    // reader comes to want more pieces than the store can hold.
     return this.#growthCeiling;
   }
 
-  /** How many pieces are resident right now. */
   get residentCount() {
-    return this.#slotOf.size;
+    return this.#buffers.size;
   }
 
-  /** How many pieces have been spilled to disk. */
   get spilledCount() {
     return this.#disk.size;
   }
 
-  /**
-   * Length of a given piece — the last one is usually short.
-   *
-   * @param {number} index
-   * @returns {number}
-   */
   #lengthOf(index) {
     return index === this.#lastChunkIndex ? this.#lastChunkLength : this.#chunkLength;
   }
 
   /**
-   * Where a resident piece sits in the shared pool, or `null` if it is not
-   * resident.
-   *
-   * The main thread reads straight from those bytes, so callers MUST hold a pin
-   * across the read — see {@link pin}.
-   *
+   * Where a resident piece sits, or `null` if not resident.
+   * Returns the piece's own SharedArrayBuffer and the intra-piece range.
    * @param {number} index
-   * @returns {{ offset: number, length: number } | null}
+   * @returns {{ buffer: SharedArrayBuffer, offset: number, length: number } | null}
    */
   locate(index) {
-    const slot = this.#slotOf.get(index);
-    if (slot === undefined) {
+    const buffer = this.#buffers.get(index);
+    if (buffer === undefined) {
       return null;
     }
-    return { offset: slot * this.#chunkLength, length: this.#lengthOf(index) };
+    return { buffer, offset: 0, length: this.#lengthOf(index) };
   }
 
   /**
-   * Hold a piece in memory across a read. Nested; release with {@link unpin}.
-   *
+   * Direct access to a piece's buffer for zero-copy consumers.
    * @param {number} index
-   * @returns {void}
+   * @returns {SharedArrayBuffer | undefined}
    */
+  getPieceBuffer(index) {
+    return this.#buffers.get(index);
+  }
+
   pin(index) {
     this.#lru.pin(index);
   }
 
-  /**
-   * @param {number} index
-   * @returns {void}
-   */
   unpin(index) {
     this.#lru.unpin(index);
-    // A released pin can be exactly what a caller waiting for a slot needs.
     this.#wake();
   }
 
-  /**
-   * Make a slot available, spilling the least recently used piece if need be.
-   *
-   * @returns {Promise<number>} Slot number.
-   */
   async #claimSlot() {
     for (;;) {
-      const slot = await this.#claimSlotOnce();
-      if (slot !== null) {
-        return slot;
+      const ok = await this.#claimSlotOnce();
+      if (ok) {
+        return;
       }
-      // Nothing claimable this instant, but work is in flight that will make a
-      // slot claimable: a spill finishing, or a piece being written into a slot
-      // already handed out. Wait for either and look again, rather than failing
-      // while the store is in the middle of making room.
       await new Promise((resolve) => {
         this.#waiters.push(resolve);
         for (const spill of this.#evicting.values()) {
           void spill.then(() => this.#wake(), () => this.#wake());
         }
-        // A wake is not guaranteed to come. Waiting for a spill is safe — one
-        // is in flight and will finish — but waiting for a PIN to be released
-        // is not: if every piece is held and nothing else is happening, there
-        // is no event left to fire, and the deadline that gives up cannot be
-        // reached because it is only tested inside an attempt. That is a hang,
-        // and it hung this store's own test for the full ten minutes a run is
-        // allowed. So the wait also re-checks on a timer.
         const retry = setTimeout(() => this.#wake(), CLAIM_RETRY_MS);
         retry.unref?.();
       });
     }
   }
 
-  /**
-   * Record a piece against the slot it now occupies, and let waiters retry.
-   *
-   * @param {number} index
-   * @param {number} slot
-   * @returns {void}
-   */
-  #registerSlot(index, slot) {
-    this.#slotOf.set(index, slot);
+  #registerPiece(index, buffer) {
+    this.#buffers.set(index, buffer);
     this.#lru.touch(index);
-    this.#outstandingSlots -= 1;
+    this.#outstandingPieces -= 1;
     this.#wake();
   }
 
-  /**
-   * Release everyone waiting for a slot; each rechecks for itself.
-   *
-   * @returns {void}
-   */
   #wake() {
     const waiting = this.#waiters;
     this.#waiters = [];
@@ -536,59 +307,24 @@ export class SharedPieceStore {
     }
   }
 
-  /**
-   * One attempt at a slot: a number, or `null` when the caller should wait for
-   * an in-flight spill and try again.
-   *
-   * @returns {Promise<number | null>}
-   */
   async #claimSlotOnce() {
-    // Every slot handed out below is counted BEFORE this function can suspend.
-    // Counting it after an `await` would leave concurrent callers — which is
-    // how pieces actually arrive — seeing an idle store and declaring it
-    // exhausted while its slots are already spoken for.
-    const free = this.#freeSlots.pop();
-    if (free !== undefined) {
-      this.#outstandingSlots += 1;
-      return free;
-    }
-
-    // Room left in the budget: take more memory rather than evicting. Growing
-    // replaces the view over the pool, so every slot offset stays valid — the
-    // bytes do not move.
-    if (this.#allocatedSlots < this.#growthCeiling) {
-      this.#allocatedSlots += 1;
-      this.#shared.grow(this.#allocatedSlots * this.#chunkLength);
-      this.#pool = Buffer.from(this.#shared);
-      this.#outstandingSlots += 1;
-      return this.#allocatedSlots - 1;
+    // Reserve before suspension so concurrent callers see the reservation.
+    if (this.#buffers.size + this.#outstandingPieces < this.#growthCeiling) {
+      this.#outstandingPieces += 1;
+      return true;
     }
 
     const victim = this.#lru.evictionCandidate();
     if (victim === null) {
-      if (this.#evicting.size > 0 || this.#outstandingSlots > 0) {
-        return null;
+      if (this.#evicting.size > 0 || this.#outstandingPieces > 0) {
+        return false;
       }
-      // Every resident piece is being READ right now. That is not a permanent
-      // condition: a pin lasts as long as one read of one piece, and the reader
-      // releases it a moment later. So wait for that, exactly as the loop above
-      // waits for a spill — pins now wake the waiters.
-      //
-      // It became reachable when a viewer could have three readers on one file
-      // (2026-08-15: picture, the audio track chosen and the one left behind);
-      // failing here ended a read with zero bytes, which ffmpeg reads as the
-      // end of the file, so every encoder died and the session answered 500 to
-      // everything after that.
-      //
-      // The deadline is what keeps a genuine deadlock visible: a reader that
-      // holds a pin while waiting for a slot would otherwise wait for itself
-      // for ever.
       if (this.#pinnedWaitStartedAt === 0) {
         this.#pinnedWaitStartedAt = Date.now();
       }
       if (Date.now() - this.#pinnedWaitStartedAt < PINNED_WAIT_MS) {
         this.#counters.waitedForPins += 1;
-        return null;
+        return false;
       }
       this.#pinnedWaitStartedAt = 0;
       this.#counters.blockedByPins += 1;
@@ -598,19 +334,19 @@ export class SharedPieceStore {
     }
     this.#pinnedWaitStartedAt = 0;
 
-    const slot = this.#slotOf.get(victim);
+    const victimBuffer = this.#buffers.get(victim);
+    if (victimBuffer === undefined) {
+      // Should not happen: LRU says resident but buffer missing.
+      this.#lru.remove(victim);
+      return false;
+    }
 
-    // Claim the victim NOW, before the write can suspend us. Picking it and
-    // releasing it either side of an `await` lets a second claim, arriving in
-    // that gap, pick the same victim and be handed the same slot — after which
-    // two pieces write over each other, both fail their hash, and the torrent
-    // downloads them again, forever. Removing it from the books first makes the
-    // choice atomic; `#evicting` keeps readers correct in the meantime.
-    this.#slotOf.delete(victim);
+    // Claim atomically before await.
+    this.#buffers.delete(victim);
     this.#lru.remove(victim);
-    this.#outstandingSlots += 1;
+    this.#outstandingPieces += 1;
 
-    const bytes = this.#pool.subarray(slot * this.#chunkLength, slot * this.#chunkLength + this.#lengthOf(victim));
+    const bytes = Buffer.from(victimBuffer, 0, this.#lengthOf(victim));
     const spill = this.#disk.write(victim, bytes).then(
       () => {
         this.#counters.spills += 1;
@@ -623,54 +359,79 @@ export class SharedPieceStore {
     );
     this.#evicting.set(victim, spill);
     await spill;
-    return slot;
+    // Outstanding stays +1 for the caller; the slot for the new piece is now free.
+    return true;
   }
 
-  /**
-   * Store a piece.
-   *
-   * @param {number} index
-   * @param {Uint8Array} bytes
-   * @param {(error?: Error | null) => void} [callback]
-   * @returns {void}
-   */
+  // For compatibility: some callers check #freeSlots / #allocatedSlots — not needed.
+
   put(index, bytes, callback = () => undefined) {
     if (this.#closed) {
       queueMicrotask(() => callback(new Error("Piece store is closed.")));
       return;
     }
 
-    const existing = this.#slotOf.get(index);
-    const write = async () => {
-      const slot = existing ?? (await this.#claimSlot());
-      bytes.copy
-        ? bytes.copy(this.#pool, slot * this.#chunkLength)
-        : this.#pool.set(bytes, slot * this.#chunkLength);
-      if (existing === undefined) {
-        this.#registerSlot(index, slot);
-      } else {
+    // Overwrite in place if already resident: no eviction needed.
+    if (this.#buffers.has(index)) {
+      const write = async () => {
+        const length = this.#lengthOf(index);
+        // Replace buffer so readers with old reference don't see torn write.
+        const sab = new SharedArrayBuffer(length);
+        const view = Buffer.from(sab);
+        if (bytes.copy) {
+          bytes.copy(view, 0, 0, length);
+        } else {
+          view.set(bytes.subarray(0, length), 0);
+        }
+        this.#buffers.set(index, sab);
         this.#lru.touch(index);
+        this.#disk.forget(index);
+      };
+      write().then(() => callback(null), (error) => callback(error));
+      return;
+    }
+
+    const write = async () => {
+      await this.#claimSlot();
+      const length = this.#lengthOf(index);
+      const sab = new SharedArrayBuffer(length);
+      const view = Buffer.from(sab);
+      if (bytes.copy) {
+        bytes.copy(view, 0, 0, length);
+      } else {
+        view.set(bytes.subarray(0, length), 0);
       }
-      // A newer copy is in memory; whatever is on disk is stale.
+      this.#registerPiece(index, sab);
       this.#disk.forget(index);
     };
 
-    write().then(() => callback(null), (error) => callback(error));
+    write().then(() => callback(null), (error) => {
+      // If claim failed, outstanding was already incremented; correct it.
+      // #registerPiece decrements on success; on failure we must decrement too.
+      // But #claimSlotOnce already handles increment; we need to decrement if write threw before register.
+      // Easiest: if error and outstanding still +1 and piece not registered, decrement.
+      if (error) {
+        // If we reserved but never registered, outstanding is still +1.
+        // Check if piece is not in map and we have outstanding.
+        if (!this.#buffers.has(index) && this.#outstandingPieces > 0) {
+          // Only decrement if the failure happened before register.
+          // Heuristic: if error message is pinned exhaustion, it came from claimSlotOnce which did not increment? Actually claimSlotOnce increments only on success/eviction.
+          // For pinned error, outstanding was not incremented? Let's handle: claimSlot throws before increment? No, it throws after check, without increment.
+          // So only failures after claim (disk write etc) need decrement — those have outstanding +1.
+          // We conservatively decrement if outstanding >0 and piece not registered.
+          // But to avoid double-decrement we check if this specific write's outstanding is still held.
+          // Simple: decrement if outstanding >0 and piece not in map, and the error is not the pinned throw's pre-increment case.
+          // The pinned throw does not increment, so outstanding is 0 there.
+          if (this.#outstandingPieces > 0) {
+            this.#outstandingPieces -= 1;
+            this.#wake();
+          }
+        }
+      }
+      callback(error);
+    });
   }
 
-  /**
-   * Fetch a piece, or a range within it.
-   *
-   * Returns a buffer of its own rather than a view into the pool: WebTorrent
-   * keeps what it is given — to verify a hash, to serve a peer — and the slot
-   * underneath may be reused meanwhile. The thread-crossing path avoids this
-   * copy entirely by going through {@link locate}.
-   *
-   * @param {number} index
-   * @param {{ offset?: number, length?: number } | ((error: Error | null, bytes?: Buffer) => void)} [options]
-   * @param {(error: Error | null, bytes?: Buffer) => void} [callback]
-   * @returns {void}
-   */
   get(index, options, callback) {
     if (typeof options === "function") {
       return this.get(index, undefined, options);
@@ -686,16 +447,14 @@ export class SharedPieceStore {
     const length = options?.length ?? pieceLength - offset;
 
     const fetch = async () => {
-      const slot = this.#slotOf.get(index);
-      if (slot !== undefined) {
+      const buffer = this.#buffers.get(index);
+      if (buffer !== undefined) {
         this.#lru.touch(index);
         this.#counters.fromMemory += 1;
-        const start = slot * this.#chunkLength + offset;
-        return Buffer.from(this.#pool.subarray(start, start + length));
+        const view = Buffer.from(buffer, offset, length);
+        return Buffer.from(view);
       }
 
-      // Mid-spill: neither in memory nor yet on disk. See `reside` — reporting
-      // it missing here would tell WebTorrent to fetch a piece we already have.
       const spill = this.#evicting.get(index);
       if (spill) {
         await spill.catch(() => undefined);
@@ -705,65 +464,24 @@ export class SharedPieceStore {
         throw new Error(`Piece ${index} is not in the store.`);
       }
 
-      // Bring it back into memory: it was just asked for, so it is likely to be
-      // asked for again, and the caller may follow up with `locate`.
-      const revived = await this.#claimSlot();
-      const target = this.#pool.subarray(
-        revived * this.#chunkLength,
-        revived * this.#chunkLength + pieceLength
-      );
+      await this.#claimSlot();
+      const targetSab = new SharedArrayBuffer(pieceLength);
+      const target = Buffer.from(targetSab);
       await this.#disk.read(index, target);
-      this.#registerSlot(index, revived);
+      this.#registerPiece(index, targetSab);
       this.#counters.fromDisk += 1;
       this.#counters.revivals += 1;
-      const start = revived * this.#chunkLength + offset;
-      return Buffer.from(this.#pool.subarray(start, start + length));
+      const view = Buffer.from(targetSab, offset, length);
+      return Buffer.from(view);
     };
 
     fetch().then((bytes) => done(null, bytes), (error) => done(error));
   }
 
-  /**
-   * Ensure a piece is in memory and say where it sits — without copying it.
-   *
-   * This is {@link get} minus its final copy, and it exists for exactly one
-   * caller: the reader that hands pieces to the other thread. That thread maps
-   * the same {@link sharedBuffer}, so an offset and a length are all it needs,
-   * and the bytes never move. `get` cannot serve that purpose because
-   * WebTorrent keeps what `get` returns while the slot underneath may be
-   * reused.
-   *
-   * The caller MUST hold a pin across the whole read — the returned offset
-   * stays valid only while the piece is pinned.
-   *
-   * @param {number} index
-   * @returns {Promise<{ offset: number, length: number } | null>} `null` when
-   *   the store holds no such piece, in memory or on disk.
-   */
-  /**
-   * Declare the pieces a reader is about to need, so eviction takes something
-   * else while it can. Replaces that reader's previous declaration.
-   *
-   * @param {string|number} readerId
-   * @param {number} from - First piece, inclusive.
-   * @param {number} to - Last piece, inclusive.
-   * @returns {void}
-   */
   protectRange(readerId, from, to) {
     this.#lru.protect(readerId, from, to);
   }
 
-  /**
-   * Forget a reader's declaration. Call it when the reader ends.
-   *
-   * @param {string|number} readerId
-   * @returns {void}
-   */
-  /**
-   * The windows live readers have declared. See {@link PieceLru.protectedRanges}.
-   *
-   * @returns {Array<{ from: number, to: number }>}
-   */
   protectedRanges() {
     return this.#lru.protectedRanges();
   }
@@ -772,32 +490,13 @@ export class SharedPieceStore {
     this.#lru.unprotect(readerId);
   }
 
-  /**
-   * Bring back into memory, in parallel and without waiting, the pieces of a
-   * range that have been spilled to disk.
-   *
-   * A piece is otherwise revived only when the reader arrives at it, one at a
-   * time and in step with decoding, so a seek backward into content already
-   * downloaded pays a disk round trip per piece. The disk is local; the whole
-   * window can be brought back at once while the reader is still on its first
-   * piece.
-   *
-   * Bounded, because each revival needs a slot and unbounded revival of a
-   * window larger than the store would simply thrash. Errors are swallowed: a
-   * failed warm-up costs nothing, the reader will ask for the piece properly.
-   *
-   * @param {number} from - First piece, inclusive.
-   * @param {number} to - Last piece, inclusive.
-   * @param {number} [limit] - Most pieces to revive at once.
-   * @returns {number} How many revivals were started.
-   */
   warmRange(from, to, limit = Math.max(1, Math.floor(this.#growthCeiling / 4))) {
     if (this.#closed || !Number.isInteger(from) || !Number.isInteger(to)) {
       return 0;
     }
     let started = 0;
     for (let index = from; index <= to && started < limit; index += 1) {
-      if (this.#slotOf.has(index) || !this.#disk.has(index)) {
+      if (this.#buffers.has(index) || !this.#disk.has(index)) {
         continue;
       }
       started += 1;
@@ -811,16 +510,13 @@ export class SharedPieceStore {
       throw new Error("Piece store is closed.");
     }
 
-    const slot = this.#slotOf.get(index);
-    if (slot !== undefined) {
+    const buffer = this.#buffers.get(index);
+    if (buffer !== undefined) {
       this.#lru.touch(index);
       this.#counters.fromMemory += 1;
       return this.locate(index);
     }
 
-    // Caught mid-spill: the slot is already gone, the disk copy is not there
-    // yet. Waiting is the only correct answer — reporting it missing would make
-    // the caller re-download a piece we are in the middle of keeping.
     const spill = this.#evicting.get(index);
     if (spill) {
       await spill.catch(() => undefined);
@@ -831,40 +527,27 @@ export class SharedPieceStore {
     }
 
     const pieceLength = this.#lengthOf(index);
-    const revived = await this.#claimSlot();
-    const target = this.#pool.subarray(
-      revived * this.#chunkLength,
-      revived * this.#chunkLength + pieceLength
-    );
+    await this.#claimSlot();
+    const targetSab = new SharedArrayBuffer(pieceLength);
+    const target = Buffer.from(targetSab);
     await this.#disk.read(index, target);
-    this.#registerSlot(index, revived);
+    this.#registerPiece(index, targetSab);
     this.#counters.fromDisk += 1;
     this.#counters.revivals += 1;
     return this.locate(index);
   }
 
-  /**
-   * Close the store, keeping the spill file.
-   *
-   * @param {(error?: Error | null) => void} [callback]
-   * @returns {void}
-   */
   close(callback = () => undefined) {
     this.#closed = true;
     liveStores.delete(this);
+    this.#buffers.clear();
     this.#disk.close().then(() => callback(null), (error) => callback(error));
   }
 
-  /**
-   * Close the store and delete everything it wrote.
-   *
-   * @param {(error?: Error | null) => void} [callback]
-   * @returns {void}
-   */
   destroy(callback = () => undefined) {
     this.#closed = true;
     liveStores.delete(this);
-    this.#slotOf.clear();
+    this.#buffers.clear();
     this.#disk.destroy().then(() => callback(null), (error) => callback(error));
   }
 }

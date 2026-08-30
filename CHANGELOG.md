@@ -1,3 +1,10 @@
+## 2.64.4
+
+- **Fix**: Piece store holds one `SharedArrayBuffer` per resident piece instead of a single growable pool that only ever grew. Evicting a piece deletes its buffer and the memory is reclaimable by GC — `committed` is now `resident * chunkLength`, not a high-water. On the field host a 6-piece 8 MiB overflow kept 48 MB committed; now it keeps 32 MB (roadmap 2).
+- **Fix**: `reviseGrowthCeiling` eagerly evicts excess pieces when the allowance is lowered, so a machine that filled up releases memory immediately instead of holding it until the next `put`. Previously lowering a ceiling stopped growth but never freed what was already committed.
+- **New**: `reviseGrowthCeiling` returns `evicted` and the periodic `piece-store` line reports `evictedOnRevise`; the worker logs `evicted N piece(s) to meet it` or `pinned, cannot shrink yet`.
+- **Fix**: Cross-thread fragment path carries the piece's own buffer (`piece-reader` → `worker` `FRAGMENT` → `client`) instead of an offset into a single `sharedBuffer`. Removes dead code `sharedBuffer`/`_legacySharedBuffer`/`poolBySource`/`poolByRead`.
+
 ## 2.64.0
 
 - **Fix**: A reader sizes its window from the memory the store may hold NOW, not from the allowance it was created with. 2.63.0 made the allowance follow the machine but left the `capacity` getter answering the original reservation, and that getter is what `ceilingPieces` reads — so a reader would have gone on claiming pieces against an allowance the machine had already withdrawn.

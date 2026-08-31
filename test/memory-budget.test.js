@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { describeMemory } from "../services/memory-report.js";
+import { describeMemory, readingIsWorthWriting } from "../services/memory-report.js";
 import {
   budgetForNewStore,
   SharedPieceStore,
@@ -153,4 +153,66 @@ test("a store's allowance follows the machine, and never passes its reservation"
     await new Promise((resolve) => store.destroy(resolve));
     await rm(directory, { recursive: true, force: true });
   }
+});
+
+test("the line says how far the heap is from the ceiling it is killed for reaching", () => {
+  // The worker died three times for reaching 2240 MB while its own line said
+  // "heap=30MB" and nothing said what 30 MB was 30 MB of.
+  const line = describeMemory({
+    scope: "thread",
+    label: "torrent worker",
+    process: {
+      rss: 2549 * MEGABYTE,
+      heapUsed: 1800 * MEGABYTE,
+      heapTotal: 1904 * MEGABYTE,
+      external: 40 * MEGABYTE,
+      arrayBuffers: 20 * MEGABYTE,
+      heapLimit: 2240 * MEGABYTE
+    },
+    stores: []
+  });
+  assert.match(line, /heap=1800MB\/1904MB of 2240MB allowed/);
+
+  const withoutLimit = describeMemory({
+    scope: "thread",
+    label: "torrent worker",
+    process: { rss: 0, heapUsed: 12 * MEGABYTE, heapTotal: 20 * MEGABYTE, external: 0, arrayBuffers: 0 },
+    stores: []
+  });
+  assert.match(withoutLimit, /heap=12MB\/20MB external=/, "an unknown ceiling is left out, not printed as zero");
+});
+
+test("a reading is written when it moved, or when the silence has gone on long enough", () => {
+  const changeBytes = 25 * MEGABYTE;
+  const quietMs = 60_000;
+  const still = {
+    watchedBytes: 100 * MEGABYTE,
+    lastWrittenBytes: 100 * MEGABYTE,
+    sinceWrittenMs: 1_000,
+    changeBytes,
+    quietMs
+  };
+
+  assert.equal(readingIsWorthWriting(still), false, "a second of nothing is not worth a line");
+  assert.equal(
+    readingIsWorthWriting({ ...still, sinceWrittenMs: 60_000 }),
+    true,
+    "a quiet minute is still written, so a healthy session reads as it always did"
+  );
+  // The rise that killed the worker: 818 MB to 2203 MB inside one old sample.
+  assert.equal(
+    readingIsWorthWriting({ ...still, watchedBytes: 130 * MEGABYTE }),
+    true,
+    "growth of a quarter of a gigabyte cannot wait for the minute to be up"
+  );
+  assert.equal(
+    readingIsWorthWriting({ ...still, watchedBytes: 70 * MEGABYTE }),
+    true,
+    "memory given back is as interesting as memory taken"
+  );
+  assert.equal(
+    readingIsWorthWriting({ ...still, quietMs: 0 }),
+    true,
+    "no quiet interval means every reading is written, which is the process scope"
+  );
 });

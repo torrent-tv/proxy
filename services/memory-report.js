@@ -19,13 +19,25 @@
  * runtime already maintains.
  */
 
-import { readFile, statfs } from "node:fs/promises";
+import { readdir, readFile, rm, statfs } from "node:fs/promises";
 import os from "node:os";
 import v8 from "node:v8";
 import path from "node:path";
 
 /** How often the reading is taken and written. */
 export const MEMORY_REPORT_INTERVAL_MS = 60_000;
+
+/**
+ * How often the torrent worker takes its own reading.
+ *
+ * A minute cannot see what killed it. Three times — 2026-08-30 14:00 and 23:19,
+ * 2026-08-31 13:27 — the worker's heap read 28-36 MB in one sample and the
+ * thread was dead by the sample after next, with the whole rise from 30 MB to
+ * the 2240 MB heap limit fitting inside a single gap. A second is short enough
+ * that the rise is a curve rather than a step, and the line is only WRITTEN when
+ * something moved, so a quiet session costs what it costs today.
+ */
+export const WORKER_MEMORY_SAMPLE_MS = 1_000;
 
 /**
  * What the process is holding, from the runtime's own counters.
@@ -36,16 +48,30 @@ export const MEMORY_REPORT_INTERVAL_MS = 60_000;
  * since torrent pieces sit in a `SharedArrayBuffer` and segment bodies pass
  * through buffers.
  *
- * @returns {{ rss: number, heapUsed: number, heapTotal: number, external: number, arrayBuffers: number }}
+ * `heapLimit` is this isolate's own ceiling, and it belongs beside the heap
+ * figures because it is what the runtime kills the thread for reaching — a
+ * worker created without `resourceLimits` inherits the main isolate's, 2240 MB
+ * on the addon host. Without it the log said 30 MB and gave no idea how far
+ * that was from the end.
+ *
+ * @returns {{ rss: number, heapUsed: number, heapTotal: number, external: number, arrayBuffers: number, heapLimit: number }}
  */
 export function readProcessMemory() {
   const usage = process.memoryUsage();
+  let heapLimit = 0;
+  try {
+    heapLimit = v8.getHeapStatistics().heap_size_limit ?? 0;
+  } catch {
+    // silent-ok: a missing ceiling leaves the term out, it does not cost the
+    // reading beside it.
+  }
   return {
     rss: usage.rss,
     heapUsed: usage.heapUsed,
     heapTotal: usage.heapTotal,
     external: usage.external,
-    arrayBuffers: usage.arrayBuffers ?? 0
+    arrayBuffers: usage.arrayBuffers ?? 0,
+    heapLimit
   };
 }
 
@@ -198,7 +224,8 @@ export function describeMemory({
       `committed ${megabytes(storeCommitted)} of ${megabytes(storeBudget)} allowed, ` +
       `${megabytes(storeSpilled)} spilled to disk`;
   const isolate =
-    `heap=${megabytes(usage.heapUsed)}/${megabytes(usage.heapTotal)} ` +
+    `heap=${megabytes(usage.heapUsed)}/${megabytes(usage.heapTotal)}` +
+    `${usage.heapLimit ? ` of ${megabytes(usage.heapLimit)} allowed` : ""} ` +
     `external=${megabytes(usage.external)} arrayBuffers=${megabytes(usage.arrayBuffers)}`;
   if (scope === "thread") {
     return `memory (${label || "thread"}): ${isolate}; ${storesPart}`;
@@ -214,6 +241,39 @@ export function describeMemory({
 }
 
 /**
+ * Whether this reading is worth writing down, and why.
+ *
+ * A series taken every second and printed every second is unreadable, and one
+ * printed every minute cannot see a rise that takes forty seconds. So the
+ * cadence of the READING and the cadence of the LINE are separate: the figure
+ * is taken often, and written when it has moved or when the quiet interval has
+ * passed. Pure, so the rule can be pinned without a clock.
+ *
+ * @param {Object} state
+ * @param {number} state.watchedBytes - The figure this scope is watching.
+ * @param {number} state.lastWrittenBytes
+ * @param {number} state.sinceWrittenMs
+ * @param {number} state.changeBytes - Movement that earns a line of its own.
+ * @param {number} state.quietMs - How long silence may last regardless.
+ * @returns {boolean}
+ */
+export function readingIsWorthWriting({
+  watchedBytes,
+  lastWrittenBytes,
+  sinceWrittenMs,
+  changeBytes,
+  quietMs
+}) {
+  if (quietMs <= 0 || sinceWrittenMs >= quietMs) {
+    return true;
+  }
+  if (changeBytes <= 0) {
+    return false;
+  }
+  return Math.abs(watchedBytes - lastWrittenBytes) >= changeBytes;
+}
+
+/**
  * Report memory on a timer until stopped.
  *
  * @param {Object} options
@@ -225,7 +285,17 @@ export function describeMemory({
  * @param {string} [options.label] - Which thread the isolate figures are of.
  * @param {string} [options.diskPath] - Where pieces spill, for the free-space
  *   reading. Omitted, the disk term is left out rather than guessed.
- * @param {number} [options.intervalMs]
+ * @param {number} [options.intervalMs] - How often the figure is READ.
+ * @param {number} [options.quietMs] - How long the line may stay silent while
+ *   nothing moves. Zero writes every reading, which is what the process scope
+ *   has always done.
+ * @param {number} [options.changeBytes] - Movement that earns a line before the
+ *   quiet interval is up.
+ * @param {string} [options.snapshotDir] - Where heap snapshots are written.
+ *   Defaults to the temporary directory, as the process scope always did.
+ * @param {number} [options.snapshotFloorBytes]
+ * @param {number} [options.snapshotGrowthBytes]
+ * @param {number} [options.keepSnapshots] - Newest to keep; zero keeps all.
  * @returns {{ stop: () => void }}
  */
 export function startMemoryReport({
@@ -234,9 +304,62 @@ export function startMemoryReport({
   scope = "process",
   label = "",
   diskPath = "",
-  intervalMs = MEMORY_REPORT_INTERVAL_MS
+  intervalMs = MEMORY_REPORT_INTERVAL_MS,
+  quietMs = 0,
+  changeBytes = 0,
+  snapshotDir = "",
+  snapshotFloorBytes = 500 * 1024 * 1024,
+  snapshotGrowthBytes = 100 * 1024 * 1024,
+  keepSnapshots = 0
 }) {
-  let highWaterRss = 0;
+  let highWater = 0;
+  let lastWrittenBytes = 0;
+  let lastWrittenAt = 0;
+  // The process watches what the kernel kills it for; a thread watches what the
+  // runtime kills IT for, which is its own heap and not the process's resident
+  // memory — the main isolate sat at 26 MB while the worker's heap climbed to
+  // its 2240 MB ceiling.
+  const watchedOf = (memory) => (scope === "thread" ? memory.heapTotal : memory.rss);
+  const slug = (label || scope).replace(/[^a-z0-9]+/gi, "-").toLowerCase();
+  const directory = snapshotDir || os.tmpdir();
+
+  /**
+   * @param {number} watchedBytes
+   * @param {string} why
+   * @returns {Promise<void>}
+   */
+  const takeSnapshot = async (watchedBytes, why) => {
+    let snapPath = "";
+    try {
+      snapPath = path.join(directory, `heap-${slug}-${Date.now()}-${watchedBytes}.heapsnapshot`);
+      // Synchronous and proportional to the heap, so it stops this thread for
+      // as long as it takes to write. That is the price of the only reading
+      // that names what is holding the memory, and it is why it is bounded by
+      // a floor, by a growth step and by how many are kept.
+      v8.writeHeapSnapshot(snapPath);
+      log(`memory: wrote heap snapshot of the ${label || scope} to ${snapPath} (${megabytes(watchedBytes)}, ${why})`);
+    } catch {
+      // silent-ok: no snapshot is worse than a snapshot, and much better than
+      // ending the series that leads to the next one.
+      return;
+    }
+    if (keepSnapshots <= 0) {
+      return;
+    }
+    try {
+      const prefix = `heap-${slug}-`;
+      const mine = (await readdir(directory))
+        .filter((name) => name.startsWith(prefix) && name.endsWith(".heapsnapshot"))
+        .sort();
+      for (const name of mine.slice(0, Math.max(0, mine.length - keepSnapshots))) {
+        await rm(path.join(directory, name), { force: true });
+      }
+    } catch {
+      // silent-ok: a snapshot that could not be pruned is a disk-space problem
+      // for later, not a reason to lose the one just written.
+    }
+  };
+
   const tick = async () => {
     try {
       let stores = [];
@@ -247,35 +370,57 @@ export function startMemoryReport({
         // that matters, which is the process's own.
       }
       const processMemory = readProcessMemory();
+      const watched = watchedOf(processMemory);
+      const now = Date.now();
+      const write = readingIsWorthWriting({
+        watchedBytes: watched,
+        lastWrittenBytes,
+        sinceWrittenMs: lastWrittenAt === 0 ? Number.POSITIVE_INFINITY : now - lastWrittenAt,
+        changeBytes,
+        quietMs
+      });
+
+      let anonymousBytes = null;
       if (scope === "thread") {
-        log(describeMemory({ scope, label, process: processMemory, stores }));
-        return;
+        if (write) {
+          log(describeMemory({ scope, label, process: processMemory, stores }));
+        }
+      } else {
+        const { bytes, measured } = await availableMemory();
+        anonymousBytes = await readAnonymousMemory();
+        const diskFreeBytes = diskPath ? await readDiskFree(diskPath) : null;
+        if (write) {
+          log(describeMemory({
+            scope,
+            label,
+            process: processMemory,
+            availableBytes: bytes,
+            availableMeasured: measured,
+            anonymousBytes,
+            diskFreeBytes,
+            stores
+          }));
+        }
       }
-      const { bytes, measured } = await availableMemory();
-      const anonymousBytes = await readAnonymousMemory();
-      const diskFreeBytes = diskPath ? await readDiskFree(diskPath) : null;
-      log(describeMemory({
-        scope,
-        label,
-        process: processMemory,
-        availableBytes: bytes,
-        availableMeasured: measured,
-        anonymousBytes,
-        diskFreeBytes,
-        stores
-      }));
-      // High-water and heap snapshot on growth — gives a file to open in Chrome DevTools
-      // when the kernel is about to kill the process. One snapshot per high-water.
-      if (processMemory.rss > highWaterRss + 100 * 1024 * 1024 && processMemory.rss > 500 * 1024 * 1024) {
-        highWaterRss = processMemory.rss;
-        try {
-          const snapPath = path.join(os.tmpdir(), `heap-${Date.now()}-${processMemory.rss}.heapsnapshot`);
-          v8.writeHeapSnapshot(snapPath);
-          log(`memory: wrote heap snapshot to ${snapPath} rss=${Math.round(processMemory.rss / (1024 * 1024))}MB anon=${anonymousBytes ? Math.round(anonymousBytes / (1024 * 1024)) : "?"}MB`);
-        } catch {}
+      if (write) {
+        lastWrittenBytes = watched;
+        lastWrittenAt = now;
       }
-      if (anonymousBytes !== null && processMemory.rss > 800 * 1024 * 1024) {
-        log(`memory: high rss=${Math.round(processMemory.rss / (1024 * 1024))}MB anon=${Math.round(anonymousBytes / (1024 * 1024))}MB heap=${Math.round(processMemory.heapUsed / (1024 * 1024))}MB — watch for OOM`);
+
+      // A snapshot per high-water, so there is a file to open when the growth
+      // has to be named rather than described.
+      //
+      // Deliberately NOT one taken as the ceiling is approached: a snapshot is
+      // written by the isolate itself and is about the size of its heap, so
+      // asking for one at 1.9 GB on a machine with 600 MB left is a good way to
+      // cause the kill being studied. Whatever holds 1.6 GB is the same thing
+      // that holds 2.2 GB, and at one reading a second no step is ever missed.
+      if (watched > highWater + snapshotGrowthBytes && watched > snapshotFloorBytes) {
+        highWater = watched;
+        await takeSnapshot(watched, "a new high-water");
+      }
+      if (scope !== "thread" && anonymousBytes !== null && processMemory.rss > 800 * 1024 * 1024) {
+        log(`memory: high rss=${megabytes(processMemory.rss)} anon=${megabytes(anonymousBytes)} heap=${megabytes(processMemory.heapUsed)} — watch for OOM`);
       }
     } catch {
       // silent-ok: a reading that fails is not worth ending the series over.

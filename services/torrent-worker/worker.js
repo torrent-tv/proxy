@@ -29,7 +29,7 @@ import { createFileClaims } from "./file-claims.js";
 import { readFragments, supplyFiguresFor } from "./piece-reader.js";
 import { cuesHeldFor, declaredSubtitleTracksOf, subtitleTracksOf, warmSubtitleCues } from "./subtitle-cues.js";
 import { Command, Event } from "./protocol.js";
-import { startMemoryReport } from "../memory-report.js";
+import { startMemoryReport, WORKER_MEMORY_SAMPLE_MS } from "../memory-report.js";
 
 // Imported dynamically, and that is load-bearing: static imports are RESOLVED
 // during linking, before any module body runs, so a statically imported pool
@@ -485,11 +485,25 @@ parentPort.on("message", async (message) => {
 // a `SharedArrayBuffer` allocated here, so the main thread's counters cannot
 // see it however carefully they are read — which is half the reason 650 MB of a
 // 893 MB process had no explanation on 2026-08-28 (roadmap item 2).
+// A second between readings, a minute between lines unless the heap moved by
+// 25 MB, and a heap snapshot of THIS isolate on every new high-water above
+// 400 MB. Three deaths — 2026-08-30 14:00 and 23:19, and
+// 2026-08-31 13:27 — went from a 30 MB heap to the 2240 MB ceiling inside one
+// sixty-second gap, and the only snapshots ever written were of the main
+// isolate, whose heap is 26 MB. So the isolate that dies has never once been
+// looked at (roadmap item 2, `research/worker-heap-oom-2026-08-31.md`).
 startMemoryReport({
   log,
   readStores: collectStoreStats,
   scope: "thread",
-  label: "torrent worker"
+  label: "torrent worker",
+  intervalMs: WORKER_MEMORY_SAMPLE_MS,
+  quietMs: 60_000,
+  changeBytes: 25 * 1024 * 1024,
+  snapshotDir: workerData?.stateDir || undefined,
+  snapshotFloorBytes: 400 * 1024 * 1024,
+  snapshotGrowthBytes: 400 * 1024 * 1024,
+  keepSnapshots: 3
 });
 
 const STORE_REPORT_INTERVAL_MS = 60_000;

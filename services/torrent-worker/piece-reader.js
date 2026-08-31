@@ -618,6 +618,14 @@ function describeSteering(key) {
 const blockedReaders = new Map();
 
 /**
+ * How many stalls a torrent's readers have had, ever. Only differences between
+ * two readings of it mean anything.
+ *
+ * @type {Map<string, number>}
+ */
+const stallsSeen = new Map();
+
+/**
  * Whether any reader on this torrent is waiting for a piece right now.
  *
  * @param {string} infoHash
@@ -628,6 +636,25 @@ export function readersAreBlockedOn(infoHash) {
 }
 
 /**
+ * How many times a reader on this torrent has been blocked since the process
+ * started.
+ *
+ * Exists so that work of lower importance can ask "did the viewer stall while I
+ * was busy?" — which is a different and stricter question than "is the viewer
+ * stalled right now". On a swarm delivering exactly what the film needs, a
+ * background fetch that only pauses DURING a stall still takes bandwidth
+ * between them, and the stalls are the proof it had none to spare. Field
+ * 2026-08-31: the swarm delivered 200-600 KB/s against the 399 KB/s the film
+ * needs, and the picture stood still 145.6 s.
+ *
+ * @param {string} infoHash
+ * @returns {number}
+ */
+export function stallsSeenOn(infoHash) {
+  return stallsSeen.get(infoHash) ?? 0;
+}
+
+/**
  * @param {string} infoHash
  * @param {number} delta
  * @returns {void}
@@ -635,6 +662,9 @@ export function readersAreBlockedOn(infoHash) {
 function countBlockedReader(infoHash, delta) {
   if (!infoHash) {
     return;
+  }
+  if (delta > 0) {
+    stallsSeen.set(infoHash, (stallsSeen.get(infoHash) ?? 0) + 1);
   }
   const next = (blockedReaders.get(infoHash) ?? 0) + delta;
   if (next > 0) {

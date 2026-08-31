@@ -154,3 +154,37 @@ test("the gate is re-asked before every chunk, not once at the start", async () 
   await waitFor(() => !fillIsRunning("source-f", 0));
   assert.equal(file.reads.length, 3);
 });
+
+test("a stall during a chunk makes the next one wait, not just a stall in progress", async () => {
+  // The case this exists for: a swarm delivering exactly what the film needs.
+  // Nothing is blocked at the moment the gate is asked, but the viewer stalled
+  // while the last chunk was in flight — which is the proof there was no room.
+  const file = fakeFile({ length: 12 });
+  const torrent = { infoHash: "ggg", pieceLength: 4, files: [file] };
+  let stalls = 0;
+  let starving = true;
+  // A stall happens DURING every chunk, exactly as it does on a swarm with no
+  // surplus — and nothing is blocked at the moment the gate is asked.
+  const originalRead = file.createReadStream.bind(file);
+  file.createReadStream = (range) => {
+    if (starving) {
+      stalls += 1;
+    }
+    return originalRead(range);
+  };
+
+  fillFileInBackground(torrent, 0, "source-g", {
+    chunkBytes: 4,
+    isBlocked: () => false,
+    stallsSeen: () => stalls
+  });
+
+  await waitFor(() => file.reads.length === 1);
+  await new Promise((resolve) => setTimeout(resolve, 300));
+  assert.equal(file.reads.length, 1, "a stall during the chunk holds the next one back");
+
+  // The swarm settles: no further stalls, so it may go on.
+  starving = false;
+  await waitFor(() => !fillIsRunning("source-g", 0), 8000);
+  assert.equal(file.reads.length, 3);
+});

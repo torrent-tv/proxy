@@ -28,7 +28,7 @@
  */
 
 import { logger } from "../../utils/logger.js";
-import { readersAreBlockedOn } from "./piece-reader.js";
+import { readersAreBlockedOn, stallsSeenOn } from "./piece-reader.js";
 
 /**
  * How long to stand aside after finding the viewer's own reading blocked.
@@ -101,7 +101,7 @@ function readRange(file, start, end) {
  * @param {object} torrent
  * @param {number} fileIndex
  * @param {string} sourceKey
- * @param {{ chunkBytes?: number, isBlocked?: (infoHash: string) => boolean }} [options]
+ * @param {{ chunkBytes?: number, isBlocked?: (infoHash: string) => boolean, stallsSeen?: (infoHash: string) => number }} [options]
  *   `isBlocked` answers "is the viewer's own reading starving right now"; it is
  *   the tier boundary, and it is a parameter so it can be exercised without a
  *   swarm.
@@ -123,7 +123,8 @@ export function fillFileInBackground(torrent, fileIndex, sourceKey, options = {}
     ? options.chunkBytes
     : (Number(torrent?.pieceLength) || 4 * 1024 * 1024);
   const isBlocked = typeof options.isBlocked === "function" ? options.isBlocked : readersAreBlockedOn;
-  const work = fill(torrent, file, fileIndex, chunkBytes, isBlocked).finally(() => {
+  const stallsSeen = typeof options.stallsSeen === "function" ? options.stallsSeen : stallsSeenOn;
+  const work = fill(torrent, file, fileIndex, chunkBytes, isBlocked, stallsSeen).finally(() => {
     running.delete(key);
   });
   running.set(key, work);
@@ -136,25 +137,41 @@ export function fillFileInBackground(torrent, fileIndex, sourceKey, options = {}
  * @param {number} fileIndex
  * @param {number} chunkBytes
  * @param {(infoHash: string) => boolean} isBlocked
+ * @param {(infoHash: string) => number} stallsSeen
  * @returns {Promise<void>}
  */
-async function fill(torrent, file, fileIndex, chunkBytes, isBlocked) {
+async function fill(torrent, file, fileIndex, chunkBytes, isBlocked, stallsSeen) {
   const startedAt = Date.now();
   const infoHash = String(torrent?.infoHash ?? "");
   let read = 0;
   let stoodAsideMs = 0;
+  // The stall count this fill last saw. A chunk is fetched only when it has not
+  // moved since the previous one.
+  let quietSince = stallsSeen(infoHash);
   logger.info(
     `background-fill: "${String(file.name).slice(0, 40)}" (${(file.length / 1e6).toFixed(1)}MB) will be ` +
       "fetched whole while the viewer's own reading leaves room"
   );
   for (let start = 0; start < file.length; start += chunkBytes) {
-    // Stand aside for as long as anything the viewer is watching is waiting on
-    // the swarm. This is the tier boundary, and it is checked before every
-    // chunk rather than once at the beginning: a torrent that was healthy a
-    // moment ago is not evidence about the next second.
-    while (isBlocked(infoHash)) {
+    // Stand aside while anything the viewer is watching is waiting on the
+    // swarm — AND for as long after it as it takes for a quiet stretch to
+    // pass. Pausing only DURING a stall is not enough: on a swarm delivering
+    // exactly what the film needs, this still takes bandwidth between stalls,
+    // and the stalls themselves are the proof there was none to spare. Field
+    // 2026-08-31, the case that forced this: 200-600 KB/s delivered against
+    // the 399 KB/s the film eats, one piece waited 101 s, and the picture
+    // stood still 145.6 s.
+    //
+    // "A quiet stretch" is measured, not chosen: the stall counter must not
+    // have moved while the previous chunk was being fetched. On a starving
+    // swarm it moves constantly and this stops altogether, which is the right
+    // answer — there is no spare room to use.
+    while (isBlocked(infoHash) || stallsSeen(infoHash) !== quietSince) {
       stoodAsideMs += STAND_ASIDE_MS;
       await pause(STAND_ASIDE_MS);
+      // Re-baselined after the pause, so a stretch that passes without a new
+      // stall lets the fill go on. Without this it could never resume.
+      quietSince = stallsSeen(infoHash);
     }
     // The torrent may have been destroyed under us — a viewer who left, the
     // disk sweep, a restart. Reading a destroyed file throws, and there is
@@ -162,6 +179,11 @@ async function fill(torrent, file, fileIndex, chunkBytes, isBlocked) {
     if (!torrent?.files?.[fileIndex]) {
       return;
     }
+    // Taken BEFORE the read, and deliberately not refreshed after it: a stall
+    // that happens while this chunk is in flight must still be visible to the
+    // next iteration. Refreshing afterwards erased exactly that evidence, which
+    // is the defect a test caught here.
+    quietSince = stallsSeen(infoHash);
     const bytes = await readRange(file, start, Math.min(start + chunkBytes, file.length) - 1);
     if (bytes === 0) {
       logger.info(

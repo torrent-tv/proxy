@@ -321,6 +321,16 @@ export class TorrentWorkerClient {
    * @param {{ sourceKey: string, fileIndex: number }} params
    * @returns {Promise<{ tracks: object[] }>}
    */
+  /**
+   * Fetch one whole file in the room the viewer's own reading leaves.
+   *
+   * @param {{ sourceKey: string, fileIndex: number }} params
+   * @returns {Promise<{ started: boolean }>}
+   */
+  async fillFile({ sourceKey, fileIndex }) {
+    return this.#caller.call(Command.FILL_FILE, { sourceKey, fileIndex });
+  }
+
   async getSubtitleTracks({ sourceKey, fileIndex }) {
     return this.#caller.call(Command.SUBTITLE_TRACKS, { sourceKey, fileIndex });
   }

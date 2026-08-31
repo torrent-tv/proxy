@@ -600,6 +600,50 @@ function describeSteering(key) {
   );
 }
 
+/**
+ * How many readers are blocked on a torrent AT THIS MOMENT, by infohash.
+ *
+ * Not a history and not an average: the question it answers is "is anything the
+ * viewer is watching waiting for the swarm right now", and the only honest
+ * answer is a count of readers currently inside a wait.
+ *
+ * It exists so that work which is NOT what the viewer is watching — fetching a
+ * soundtrack or a subtitle file they may switch to later — can proceed while the
+ * swarm has room and stand aside the instant it does not. That ordering is the
+ * whole of the requirement: the picture and the track being played come first,
+ * the other tracks next, and reading the film far ahead last.
+ *
+ * @type {Map<string, number>}
+ */
+const blockedReaders = new Map();
+
+/**
+ * Whether any reader on this torrent is waiting for a piece right now.
+ *
+ * @param {string} infoHash
+ * @returns {boolean}
+ */
+export function readersAreBlockedOn(infoHash) {
+  return (blockedReaders.get(infoHash) ?? 0) > 0;
+}
+
+/**
+ * @param {string} infoHash
+ * @param {number} delta
+ * @returns {void}
+ */
+function countBlockedReader(infoHash, delta) {
+  if (!infoHash) {
+    return;
+  }
+  const next = (blockedReaders.get(infoHash) ?? 0) + delta;
+  if (next > 0) {
+    blockedReaders.set(infoHash, next);
+    return;
+  }
+  blockedReaders.delete(infoHash);
+}
+
 function noteSupplyWait(key, label, waitedMs) {
   const history = supplyWaits.get(key) ?? [];
   history.push({ waitedMs, at: Date.now() });
@@ -970,9 +1014,16 @@ export async function* readFragments({
         // moment ago may now be the fastest one available.
         pushToFastest();
       }, 500);
+      // Counted for exactly as long as this reader is inside the wait, so that
+      // background work can stand aside while the viewer's own reading is
+      // starving. The `finally` is what makes it safe: a cancelled or failed
+      // read must not leave the torrent looking permanently blocked, which
+      // would stop that background work for the rest of the session.
+      countBlockedReader(torrent?.infoHash, 1);
       try {
         await whenPieceReady(torrent, pieceIndex, cancellation);
       } finally {
+        countBlockedReader(torrent?.infoHash, -1);
         clearInterval(supplyProbe);
       }
       // What a reader spent waiting for data, attributed to the exact piece. A

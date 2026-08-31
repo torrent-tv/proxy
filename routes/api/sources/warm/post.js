@@ -117,6 +117,19 @@ export async function handleApiSourceWarmPost(req, reply, { sourceRegistry, torr
     };
     for (const file of matched.audio) {
       warmOne(file, { tailBytes: 0 });
+      // And then the whole of it, in the room the viewer's own reading leaves.
+      // The head is enough to NAME the track; it is not enough to play one, and
+      // a viewer who switches otherwise waits for the swarm to deliver its
+      // first pieces — 27.7 s in the field on 2026-08-31, longer than the
+      // switch is willing to wait. A soundtrack is about a twentieth of the
+      // picture, and the fill stands aside for every moment the picture's own
+      // reader is blocked, so it uses capacity the viewer is not using.
+      if (typeof torrentPool.fillFileInBackground === "function") {
+        Promise.resolve(torrentPool.fillFileInBackground(torrent, file.fileIndex)).catch((error) => {
+          const message = error instanceof Error ? error.message : String(error);
+          logger.warn(`warm ${sourceKey.slice(0, 8)}: filling "${file.name}" failed: ${message}`);
+        });
+      }
     }
     for (const file of matched.subtitles) {
       warmOne(

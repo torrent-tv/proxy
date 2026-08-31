@@ -134,6 +134,26 @@ export class WorkerTorrentPool {
    * @param {number} fileIndex
    * @returns {Promise<object[]>}
    */
+  /**
+   * Fetch one whole file using only the room the viewer's own reading leaves.
+   *
+   * For a soundtrack or subtitle file shipped beside the picture: small next to
+   * the film, and having it on disk is what turns a later switch into a local
+   * read instead of a wait on the swarm.
+   *
+   * @param {object} torrent
+   * @param {number} fileIndex
+   * @returns {Promise<boolean>} Whether a fill was started by this call.
+   */
+  async fillFileInBackground(torrent, fileIndex) {
+    const sourceKey = torrent?.sourceKey;
+    if (!sourceKey) {
+      return false;
+    }
+    const answer = await this.#client.fillFile({ sourceKey, fileIndex });
+    return answer?.started === true;
+  }
+
   async getSubtitleTracks(torrent, fileIndex) {
     const sourceKey = torrent?.sourceKey;
     if (!sourceKey) {

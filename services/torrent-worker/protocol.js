@@ -65,6 +65,12 @@ export const Command = {
   CANCEL_READ: "cancel-read",
   /** Pre-fetch the head and tail a codec probe needs. */
   PREFETCH_EDGES: "prefetch-edges",
+  /**
+   * Fetch one whole file using only the room the viewer's own reading leaves —
+   * a soundtrack or subtitle file they may switch to later. Returns as soon as
+   * the work is under way.
+   */
+  FILL_FILE: "fill-file",
   /** The text subtitle tracks a file carries, for the viewer's menu. */
   SUBTITLE_TRACKS: "subtitle-tracks",
   /**

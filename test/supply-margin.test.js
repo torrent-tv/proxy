@@ -29,18 +29,65 @@ function evenlySpaced(count, intervalSec, waitSec) {
 }
 
 test("the margin is what the supply's own interruptions demand", () => {
-  // The field torrent: a wait every 2.22 s, the worst of them 3.16 s.
-  const waits = evenlySpaced(10, 2.22, 1.49);
-  waits[4].waitedMs = 3160;
+  // The field torrent: waits of 1.49 s with 0.73 s of running between them, and
+  // the worst of them 3.16 s. Written out rather than generated, because the
+  // point of the test is that these exact spans give that exact answer.
+  const waits = [
+    { waitedMs: 1490, at: 1490 },   // 0.00..1.49
+    { waitedMs: 1490, at: 3710 },   // 2.22..3.71
+    { waitedMs: 1490, at: 5930 },   // 4.44..5.93
+    { waitedMs: 3160, at: 9820 },   // 6.66..9.82  ← the worst
+    { waitedMs: 1490, at: 12_040 }, // 10.55..12.04
+    { waitedMs: 1490, at: 14_260 }  // 12.77..14.26
+  ];
 
   const answer = requiredSpeedFrom(waits);
 
   assert.ok(answer);
   assert.equal(answer.worstWaitSec, 3.16);
-  assert.equal(answer.medianIntervalSec, 2.22);
-  // 1 + 3.16 / 2.22 = 2.42. The step that was admitted by the hand-chosen 1.5
-  // ran at 1.05x and stalled; this is the bar it should have been held to.
-  assert.ok(Math.abs(answer.requiredSpeed - 2.4234) < 0.001, `got ${answer.requiredSpeed}`);
+  // 2.22 s from one wait's end to the next one's END, of which 1.49 s was spent
+  // waiting — so the encoder ran for 0.73 s. That running stretch is what the
+  // derivation calls T: `(v - 1) x T > W` prices what is GAINED between
+  // interruptions, and nothing is gained during one.
+  assert.ok(Math.abs(answer.medianIntervalSec - 0.73) < 0.001, `got ${answer.medianIntervalSec}`);
+  // 1 + 3.16 / 0.73 = 5.33. Measuring end-to-end instead gave 2.42, and the
+  // symptom that this whole file was written against is that a step admitted at
+  // 1.5 ran at 1.05x and stalled — so the bar was too low, not too high.
+  assert.ok(Math.abs(answer.requiredSpeed - 5.3288) < 0.001, `got ${answer.requiredSpeed}`);
+});
+
+test("one stall seen by three readers is one interruption, not three", () => {
+  // The picture and two audio renditions walk the same file, so a piece that
+  // has not arrived blocks all three, and their waits end within milliseconds
+  // of each other. Field 2026-08-31: `worst wait 13.26s, one every 0.00s,
+  // 2 measured` produced a required speed of 4422.00x, and every quality step
+  // was refused against it.
+  const answer = requiredSpeedFrom([
+    { waitedMs: 13_260, at: 1_000_000 },
+    { waitedMs: 13_257, at: 1_000_003 }
+  ]);
+
+  // Two overlapping waits are one interruption, and one interruption shows no
+  // interval — so the honest answer is that it is not known yet.
+  assert.equal(answer, null);
+});
+
+test("overlapping waits merge, and the gap between stalls is what is left", () => {
+  const answer = requiredSpeedFrom([
+    // First stall: 10s..20s, noticed by two readers a moment apart.
+    { waitedMs: 10_000, at: 20_000 },
+    { waitedMs: 9_000, at: 19_500 },
+    // Second stall: 30s..34s, again seen twice.
+    { waitedMs: 4_000, at: 34_000 },
+    { waitedMs: 3_500, at: 33_800 }
+  ]);
+
+  assert.ok(answer);
+  assert.equal(answer.samples, 2, "two interruptions");
+  assert.equal(answer.waits, 4, "from four waits");
+  assert.equal(answer.worstWaitSec, 10, "the merged stall, not one reader's view of it");
+  assert.equal(answer.medianIntervalSec, 10, "20s to 30s is when the encoder ran");
+  assert.equal(answer.requiredSpeed, 2, "1 + 10/10");
 });
 
 test("a copy at 8x clears its own supply with room to spare", () => {
@@ -48,9 +95,10 @@ test("a copy at 8x clears its own supply with room to spare", () => {
   const waits = evenlySpaced(6, 15.5, 4.82);
   const answer = requiredSpeedFrom(waits);
   assert.ok(answer);
-  // 1 + 4.82/15.5 = 1.31, against 8x measured. Which is why a copy is the step
-  // a stranded viewer is always able to return to.
-  assert.ok(answer.requiredSpeed < 1.35, `got ${answer.requiredSpeed}`);
+  // Waits end 15.5 s apart and last 4.82 s, so the encoder runs 10.68 s between
+  // them: 1 + 4.82/10.68 = 1.45, against 8x measured. Which is why a copy is the
+  // step a stranded viewer is always able to return to.
+  assert.ok(answer.requiredSpeed < 1.5, `got ${answer.requiredSpeed}`);
 });
 
 test("with too little evidence it says so instead of inventing a number", () => {
@@ -77,7 +125,7 @@ test("readings that are not measurements are ignored, not averaged in", () => {
     { waitedMs: 1500, at: 7000 }
   ]);
   assert.ok(answer);
-  assert.equal(answer.samples, 3, "only the three real waits count");
+  assert.equal(answer.waits, 3, "only the three real waits count");
 });
 
 test("the buffer is one segment plus the worst interruption, and names which", () => {

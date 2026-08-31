@@ -29,6 +29,7 @@ import { createFileClaims } from "./file-claims.js";
 import { readFragments, supplyFiguresFor } from "./piece-reader.js";
 import { cuesHeldFor, declaredSubtitleTracksOf, subtitleTracksOf, warmSubtitleCues } from "./subtitle-cues.js";
 import { CONTAINER_HEAD_BYTES, containerTracksOf } from "./container-tracks.js";
+import { fillFileInBackground } from "./background-fill.js";
 import { Command, Event } from "./protocol.js";
 import { startMemoryReport, WORKER_MEMORY_SAMPLE_MS } from "../memory-report.js";
 
@@ -368,6 +369,13 @@ async function runCommand(command, params, id) {
       return {
         tracks: await subtitleTracksOf(torrent, params.fileIndex, params.sourceKey),
         declared: await declaredSubtitleTracksOf(torrent, params.fileIndex, params.sourceKey)
+      };
+    }
+
+    case Command.FILL_FILE: {
+      const torrent = await requireTorrent(params.sourceKey);
+      return {
+        started: fillFileInBackground(torrent, params.fileIndex, params.sourceKey)
       };
     }
 

@@ -206,15 +206,13 @@ export async function startProxyServer({
         return;
       }
       const torrent = await torrentPool.getTorrent(record.sourceType, record.source);
-      const file = torrent?.files?.[fileIndex];
-      if (!file || !Number.isFinite(file.length) || file.length <= 0) {
-        return;
-      }
-      await torrentPool.prefetchFileEdges(torrent, fileIndex, {
-        headBytes: file.length,
-        tailBytes: 0,
-        timeoutMs: 600_000
-      });
+      // The same background fill the warm-up starts when a file is chosen, not a
+      // second way of doing it. It is guarded against running twice on one file,
+      // so the two triggers converge instead of putting two readers on the same
+      // soundtrack — and only one of them would have stood aside for the
+      // picture. This trigger remains for the session that never had a warm-up
+      // before it.
+      await torrentPool.fillFileInBackground?.(torrent, fileIndex);
     }
   });
   const playbackPlanner = createPlaybackPlanner({

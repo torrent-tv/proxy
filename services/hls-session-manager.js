@@ -1626,6 +1626,7 @@ export class HlsSessionManager {
     tonemapSupported = false,
     getCachedMediaInfo = null,
     getCachedAudioTracks = null,
+    fetchWholeFile = null,
     segmentFormatId = undefined,
     stateDir = "",
     getTorrentTotals}) {
@@ -1645,6 +1646,12 @@ export class HlsSessionManager {
     // The file's audio tracks, for the master playlist's rendition group. Same
     // inventory the browser's audio menu is built from.
     this.getCachedAudioTracks = typeof getCachedAudioTracks === "function" ? getCachedAudioTracks : null;
+    // Fetch one whole file of a source, as a bounded read rather than a
+    // selection. Used to pull a soundtrack that ships beside the picture onto
+    // the disk while the swarm has capacity to spare — see
+    // `#fetchSpareSoundtracks`. Optional: a proxy wired without it simply reads
+    // such a soundtrack when it is played.
+    this.fetchWholeFile = typeof fetchWholeFile === "function" ? fetchWholeFile : null;
     // Optional async accessor for a source's live download stats, used by the
     // realtime budget to tell a CPU limit from a download-starved input:
     // (sourceKey, fileIndex) => Promise<{ downloadSpeed, fileLength, fileProgress } | null>.
@@ -3588,6 +3595,82 @@ export class HlsSessionManager {
         `${viewers} viewer(s) holding up to ` +
         `${deepestBuffer === null ? "?" : deepestBuffer.toFixed(1)}s`
     );
+    this.#fetchSpareSoundtracks(session, aheadOfPicture);
+  }
+
+  /**
+   * Fetch the soundtracks that ship beside this picture, whole, while the swarm
+   * has capacity to spare.
+   *
+   * WHY IT WAITS FOR THE CUSHION. A soundtrack nobody has chosen is worth having
+   * on disk — it is a twentieth of the picture (30 MB against 566 MB on the
+   * field torrent) and having it makes every later switch instant instead of
+   * paying for its first pieces. But fetching it takes swarm capacity from the
+   * picture, and there is exactly one moment when that capacity is demonstrably
+   * spare: when the encoder is already as far ahead of the viewer as it is
+   * allowed to get. That is not a guess about the swarm — it is the measurement
+   * the line above just printed.
+   *
+   * WHY IT IS A READ AND NOT A SELECTION. `file.select()` claims every piece of
+   * a file at once, and `#syncSelections` in `torrent-pool.js` records what that
+   * cost when it was done alongside the readers' own windows: a claim covering
+   * everything always outranked the window, and a seek to 89.1% of a 4.7 GB film
+   * waited 93 s while the swarm fetched 2.47 GB in file order. So this goes
+   * through the same bounded read the edge warm-up uses, which claims a moving
+   * window like any other reader and gives it back when it ends.
+   *
+   * Once per file, and only for a soundtrack in a file of its own — the
+   * picture's own tracks are already in the bytes being played.
+   *
+   * @param {HlsSession} session
+   * @param {number} aheadOfPicture - Seconds of film ready ahead of the viewer.
+   * @returns {void}
+   */
+  #fetchSpareSoundtracks(session, aheadOfPicture) {
+    if (typeof this.fetchWholeFile !== "function") {
+      return;
+    }
+    // The encoder is held at this distance and no further, so reaching it is the
+    // signal that nothing more is being asked of the swarm on the picture's
+    // behalf.
+    if (!(aheadOfPicture >= this.lookaheadSeconds)) {
+      return;
+    }
+    const inventory = this.getCachedAudioTracks?.({
+      sourceKey: session.sourceKey,
+      fileIndex: session.fileIndex
+    }) ?? [];
+    if (!(this.spareSoundtracksFetched instanceof Set)) {
+      this.spareSoundtracksFetched = new Set();
+    }
+    const wanted = new Set(
+      inventory
+        .filter((entry) => entry?.kind === "sidecar" && Number.isInteger(entry.fileIndex))
+        .map((entry) => entry.fileIndex)
+    );
+    for (const fileIndex of wanted) {
+      const key = `${session.sourceKey}:${fileIndex}`;
+      if (this.spareSoundtracksFetched.has(key)) {
+        continue;
+      }
+      this.spareSoundtracksFetched.add(key);
+      logger.info(
+        `transcode ${session.id.slice(0, 8)} the picture is ${Math.round(aheadOfPicture)}s ahead of ` +
+          `the viewer, so file ${fileIndex} — a soundtrack beside it — is fetched whole now; ` +
+          "a switch to it will not wait for the swarm"
+      );
+      // Not awaited: nothing depends on it finishing, and a failure costs only
+      // that the switch pays for its own pieces, as it did before this existed.
+      Promise.resolve(this.fetchWholeFile({ sourceKey: session.sourceKey, fileIndex })).catch(
+        (error) => {
+          logger.info(
+            `transcode: fetching soundtrack file ${fileIndex} whole failed ` +
+              `(${error instanceof Error ? error.message : String(error)}) — ` +
+              "it will be read when it is played"
+          );
+        }
+      );
+    }
   }
 
   /**

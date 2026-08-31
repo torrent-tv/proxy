@@ -1,3 +1,8 @@
+## 2.66.0
+
+- **New**: A soundtrack that ships beside the picture is fetched WHOLE once the swarm has capacity to spare, so a later switch to it does not wait. It is a twentieth of the picture — 30 MB against 566 MB on the field torrent — and having it on disk is the difference between an instant switch and one that pays for its own first pieces. The moment it starts is not a guess about the swarm: it is when the encoder is already as far ahead of the viewer as `--lookahead` lets it get, which is the cushion figure the session already measures and prints. Once per file, and only for a soundtrack in a file of its own.
+- **Chore**: That fetch is a bounded READ of the file's length, deliberately not `file.select()`. Selecting a whole file alongside the readers' own moving windows is the mistake `#syncSelections` in `torrent-pool.js` was written against — a claim covering everything always outranked the window, and a seek to 89.1 % of a 4.7 GB film waited 93 s while the swarm fetched 2.47 GB in file order. The comment there records it; this goes through the same path the edge warm-up uses.
+
 ## 2.65.0
 
 - **New**: A soundtrack that ships as its own file beside the picture is offered like any other. Releases commonly put a dub in `Rus Sound/<name>.mka` and subtitles in `Sub/[team]/<name>.ass`; until now the video played with its original sound and nothing said the rest of the release existed. The pairing is by name — equal base names, or a shared release hash — and a torrent holding exactly one picture takes every sidecar beside it, since there is nothing else they could belong to. A torrent with several episodes never relaxes that: a wrong pairing would put the sound of one episode over the picture of another, and nothing downstream could notice.

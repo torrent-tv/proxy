@@ -192,7 +192,30 @@ export async function startProxyServer({
     getCachedMediaInfo: (params) => playbackPlanner.getCachedMediaInfo(params),
     // The file's audio tracks, for the master playlist's rendition group. Already
     // probed for the browser's audio menu; read from there rather than probed again.
-    getCachedAudioTracks: (params) => playbackPlanner.getCachedAudioTracks(params)
+    getCachedAudioTracks: (params) => playbackPlanner.getCachedAudioTracks(params),
+    // Pull one whole file onto the disk. Used for a soundtrack that ships beside
+    // the picture, once the encoder is as far ahead of the viewer as it is
+    // allowed to get — the one moment the swarm's capacity is demonstrably
+    // spare. A bounded read of the file's whole length, NOT `file.select()`:
+    // selecting a file alongside the readers' own windows is what made a seek
+    // wait 93 s while the swarm fetched 2.47 GB in file order (see
+    // `#syncSelections` in `torrent-pool.js`).
+    fetchWholeFile: async ({ sourceKey, fileIndex }) => {
+      const record = sourceRegistry.get(sourceKey);
+      if (!record) {
+        return;
+      }
+      const torrent = await torrentPool.getTorrent(record.sourceType, record.source);
+      const file = torrent?.files?.[fileIndex];
+      if (!file || !Number.isFinite(file.length) || file.length <= 0) {
+        return;
+      }
+      await torrentPool.prefetchFileEdges(torrent, fileIndex, {
+        headBytes: file.length,
+        tailBytes: 0,
+        timeoutMs: 600_000
+      });
+    }
   });
   const playbackPlanner = createPlaybackPlanner({
     ffmpegBin,

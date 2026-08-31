@@ -65,6 +65,22 @@ export class PieceLru {
   }
 
   /**
+   * Follow the store's live allowance, which moves with the machine's free
+   * memory. Without this the capacity stayed at whatever the store was created
+   * with, and {@link PieceLru#isFull} answered against a number that had not
+   * been the limit for some time.
+   *
+   * @param {number} capacity
+   * @returns {void}
+   */
+  setCapacity(capacity) {
+    if (!Number.isInteger(capacity) || capacity < 1) {
+      return;
+    }
+    this.#capacity = capacity;
+  }
+
+  /**
    * How many pieces are currently held by a reader.
    *
    * Reported rather than merely tracked: a pin that is never released is

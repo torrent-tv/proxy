@@ -102,6 +102,98 @@ export async function readAvailableMemory() {
 }
 
 /**
+ * Anonymous memory grouped by the SHAPE of the mappings holding it.
+ *
+ * The rollup says how much there is; this says what it looks like, and the
+ * three shapes it can take are three different diagnoses of the same number:
+ *
+ *  - **one growing `[heap]`** — the allocator's break-managed arena. Freed
+ *    blocks stay in it, and on musl there is no `malloc_trim` to ask for them
+ *    back. Nothing above the allocator is holding anything.
+ *  - **many large anonymous mappings** — one per big allocation, which is what
+ *    a 4 MiB piece buffer is. If their count tracks the pieces the store says
+ *    it holds, the memory is accounted for; if it keeps climbing while the
+ *    store's count does not, the buffers are being kept alive by somebody.
+ *  - **many medium ones** — the allocator's own per-thread arenas, taken and
+ *    not returned.
+ *
+ * The field failure of 2026-08-31 is 700 MB that is none of the JavaScript
+ * heaps, none of the piece store, and none of ffmpeg. Which of the three
+ * shapes it has decides what to change, and no reading so far can tell them
+ * apart (roadmap item 2, step 4).
+ *
+ * @param {string} text - The contents of `/proc/self/smaps`.
+ * @returns {{ heapBytes: number, largeBytes: number, largeCount: number,
+ *   largestBytes: number, smallBytes: number, smallCount: number,
+ *   fileBytes: number }}
+ */
+export function summariseMappings(text) {
+  const summary = {
+    heapBytes: 0,
+    largeBytes: 0,
+    largeCount: 0,
+    largestBytes: 0,
+    smallBytes: 0,
+    smallCount: 0,
+    fileBytes: 0
+  };
+  // A mapping is a header line followed by its fields; only `Rss` is wanted,
+  // because a mapping that is reserved and untouched costs no memory.
+  let pathName = null;
+  for (const line of String(text ?? "").split("\n")) {
+    const header = /^[0-9a-f]+-[0-9a-f]+ \S{4} [0-9a-f]+ \S+ \d+\s*(.*)$/.exec(line);
+    if (header) {
+      pathName = header[1].trim();
+      continue;
+    }
+    const rss = /^Rss:\s+(\d+)\s+kB$/.exec(line);
+    if (!rss || pathName === null) {
+      continue;
+    }
+    const bytes = Number(rss[1]) * 1024;
+    if (bytes === 0) {
+      continue;
+    }
+    if (pathName === "[heap]") {
+      summary.heapBytes += bytes;
+    } else if (pathName !== "" && !pathName.startsWith("[")) {
+      // Backed by a file: the executable, the libraries, anything mapped in.
+      // Counted so the anonymous figures can be checked against `rss`.
+      summary.fileBytes += bytes;
+    } else if (bytes >= LARGE_MAPPING_BYTES) {
+      summary.largeBytes += bytes;
+      summary.largeCount += 1;
+      summary.largestBytes = Math.max(summary.largestBytes, bytes);
+    } else {
+      summary.smallBytes += bytes;
+      summary.smallCount += 1;
+    }
+  }
+  return summary;
+}
+
+/**
+ * Where "large" begins. Two megabytes, so a 4 MiB piece buffer is always large
+ * and an allocator's ordinary arena is not.
+ */
+const LARGE_MAPPING_BYTES = 2 * 1024 * 1024;
+
+/**
+ * The mapping summary for this process, or null where /proc is not there.
+ *
+ * @returns {Promise<ReturnType<typeof summariseMappings> | null>}
+ */
+export async function readMappingSummary() {
+  try {
+    return summariseMappings(await readFile("/proc/self/smaps", "utf8"));
+  } catch {
+    // silent-ok: not Linux, or the kernel does not publish it. The line leaves
+    // the term out rather than printing a worse one.
+  }
+  return null;
+}
+
+/**
  * Available memory, falling back to what the runtime can offer.
  *
  * @returns {Promise<{ bytes: number, measured: boolean }>}
@@ -196,6 +288,7 @@ function megabytes(bytes) {
  * @param {number} [reading.availableBytes]
  * @param {boolean} [reading.availableMeasured]
  * @param {number | null} [reading.anonymousBytes]
+ * @param {ReturnType<typeof summariseMappings> | null} [reading.mappings]
  * @param {number | null} [reading.diskFreeBytes]
  * @param {{ name: string, residentBytes: number, committedBytes: number, spilledBytes: number, budgetBytes: number }[]} [reading.stores]
  * @returns {string}
@@ -207,6 +300,7 @@ export function describeMemory({
   availableBytes,
   availableMeasured,
   anonymousBytes = null,
+  mappings = null,
   diskFreeBytes = null,
   stores = []
 }) {
@@ -230,9 +324,16 @@ export function describeMemory({
   if (scope === "thread") {
     return `memory (${label || "thread"}): ${isolate}; ${storesPart}`;
   }
+  const shape = mappings === null
+    ? ""
+    : ` mappings=[heap ${megabytes(mappings.heapBytes)}, ` +
+      `${mappings.largeCount} anon ≥2MB = ${megabytes(mappings.largeBytes)} ` +
+      `(largest ${megabytes(mappings.largestBytes)}), ` +
+      `${mappings.smallCount} anon <2MB = ${megabytes(mappings.smallBytes)}, ` +
+      `files ${megabytes(mappings.fileBytes)}]`;
   return (
     `memory: rss=${megabytes(usage.rss)} ${isolate}` +
-    `${anonymousBytes === null ? "" : ` anon=${megabytes(anonymousBytes)}`}; ` +
+    `${anonymousBytes === null ? "" : ` anon=${megabytes(anonymousBytes)}`}${shape}; ` +
     `${storesPart}; ` +
     `machine has ${megabytes(availableBytes ?? 0)} available` +
     `${availableMeasured ? "" : " (estimated — /proc/meminfo could not be read)"}` +
@@ -397,6 +498,10 @@ export function startMemoryReport({
             availableBytes: bytes,
             availableMeasured: measured,
             anonymousBytes,
+            // Read only when the line is written: `smaps` is one entry per
+            // mapping and a busy process has thousands, which is a different
+            // cost from the rollup's single line.
+            mappings: await readMappingSummary(),
             diskFreeBytes,
             stores
           }));

@@ -28,6 +28,7 @@ import { pruneCoreDumps } from "../services/core-dumps.js";
 import { adoptOrphanRingFiles, createPacketWitness, pruneWitnessCaptures } from "../services/packet-witness.js";
 import { createUsrsctpStateReader } from "../services/usrsctp-state.js";
 import { startMemoryReport } from "../services/memory-report.js";
+import { fragmentBufferCollection } from "../services/torrent-worker/client.js";
 import { collectHealthMetrics } from "../services/health-collector.js";
 import { createPortMapper } from "../services/port-mapper.js";
 import { classifyNat } from "../services/nat-classifier.js";
@@ -355,7 +356,19 @@ try {
   // fill the card an addon host boots from, and neither limit was measured
   // before (roadmap item 2).
   startMemoryReport({
-    log: (message) => logger.info(message),
+    log: (message) => {
+      logger.info(message);
+      // The other half of the piece-buffer question. Shared memory lives until
+      // BOTH isolates let go, so the worker's own count answers only its side;
+      // printed here, beside the process figures the growth shows up in.
+      const fragments = fragmentBufferCollection();
+      if (fragments.seen > 0) {
+        logger.info(
+          `piece buffers handed to this thread: ${fragments.seen} seen, ` +
+          `${fragments.collected} collected, ${fragments.seen - fragments.collected} still alive`
+        );
+      }
+    },
     diskPath: os.tmpdir()
   });
 

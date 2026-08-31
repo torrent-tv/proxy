@@ -107,6 +107,38 @@ function availableMemorySync() {
   return os.freemem();
 }
 
+/**
+ * How many piece buffers this thread has let go of, and how many the collector
+ * has actually taken back.
+ *
+ * The one reading that separates the two explanations of the 700 MB nobody can
+ * account for (roadmap item 2, field 2026-08-31): if the two numbers track each
+ * other, this code is holding nothing and whatever grows is below us, in the
+ * allocator — on musl there is no `malloc_trim` and no way to ask. If the gap
+ * widens, a reference of ours outlives the piece, and then a heap snapshot can
+ * name the holder.
+ *
+ * What it does NOT prove: a `SharedArrayBuffer`'s memory is shared between the
+ * isolates, so this thread's handle going means only that THIS thread let go.
+ * The main thread counts its own (`torrent-worker/client.js`), and the pair is
+ * what answers the question.
+ */
+const released = { count: 0, collected: 0 };
+const collector = typeof FinalizationRegistry === "function"
+  ? new FinalizationRegistry(() => {
+    released.collected += 1;
+  })
+  : null;
+
+/**
+ * What the collector has taken back against what was let go.
+ *
+ * @returns {{ released: number, collected: number }}
+ */
+export function pieceBufferCollection() {
+  return { released: released.count, collected: released.collected };
+}
+
 const MIN_BUDGET_BYTES = 64 * 1024 * 1024;
 const MIN_RESIDENT_PIECES = 2;
 /**
@@ -501,7 +533,7 @@ export class SharedPieceStore {
         this.#counters.fromMemory += 1;
         return already;
       }
-      const target = new SharedArrayBuffer(this.#lengthOf(index));
+      const target = this.#watchForCollection(new SharedArrayBuffer(this.#lengthOf(index)));
       await this.#disk.read(index, Buffer.from(target));
       this.#registerPiece(index, target);
       this.#counters.fromDisk += 1;
@@ -513,6 +545,19 @@ export class SharedPieceStore {
   }
 
   /**
+   * Count this buffer as one this thread will have to let go of, and notice
+   * when the collector takes it. See {@link pieceBufferCollection}.
+   *
+   * @param {SharedArrayBuffer} buffer
+   * @returns {SharedArrayBuffer} The same buffer.
+   */
+  #watchForCollection(buffer) {
+    released.count += 1;
+    collector?.register(buffer, null);
+    return buffer;
+  }
+
+  /**
    * A fresh buffer holding this piece's bytes.
    *
    * @param {number} index
@@ -521,7 +566,7 @@ export class SharedPieceStore {
    */
   #copyIntoNewBuffer(index, bytes) {
     const length = this.#lengthOf(index);
-    const sab = new SharedArrayBuffer(length);
+    const sab = this.#watchForCollection(new SharedArrayBuffer(length));
     const view = Buffer.from(sab);
     if (bytes.copy) {
       bytes.copy(view, 0, 0, length);

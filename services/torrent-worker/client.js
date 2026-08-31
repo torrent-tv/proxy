@@ -41,6 +41,37 @@ const WORKER_EXIT_GRACE_MS = 5_000;
  * queued behind that work, so reading a finished 10 MB file took 12-23 s where
  * handing it to the channel took 125 ms.
  */
+/**
+ * Piece buffers this thread has been handed, and how many the collector has
+ * taken back.
+ *
+ * A `SharedArrayBuffer`'s memory belongs to neither isolate: it lives until
+ * BOTH have let go. So the worker's own count answers only half the question,
+ * and this is the other half — 700 MB grew in the field on 2026-08-31 with the
+ * store's own memory falling, and the two candidates are "a reference of ours
+ * outlives the piece" and "the allocator keeps what we free". These two
+ * counters separate them (roadmap item 2).
+ *
+ * A fragment arrives as a fresh handle onto the same shared memory every time,
+ * so what is counted is handles, not pieces. That is the right quantity anyway:
+ * one handle retained keeps the whole piece alive.
+ */
+const fragmentBuffers = { seen: 0, collected: 0 };
+const fragmentCollector = typeof FinalizationRegistry === "function"
+  ? new FinalizationRegistry(() => {
+    fragmentBuffers.collected += 1;
+  })
+  : null;
+
+/**
+ * What the collector has taken back against what this thread was handed.
+ *
+ * @returns {{ seen: number, collected: number }}
+ */
+export function fragmentBufferCollection() {
+  return { seen: fragmentBuffers.seen, collected: fragmentBuffers.collected };
+}
+
 export class TorrentWorkerClient {
   #worker;
   /**
@@ -138,6 +169,8 @@ export class TorrentWorkerClient {
             );
           }
           this.#lastPieceByRead.set(message.id, message.pieceIndex);
+          fragmentBuffers.seen += 1;
+          fragmentCollector?.register(buffer, null);
           const view = new Uint8Array(buffer, message.offset, message.length);
 
           const reader = this.#fragmentReaders.get(message.id);

@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { describeMemory, readingIsWorthWriting } from "../services/memory-report.js";
+import { describeMemory, readingIsWorthWriting, summariseMappings } from "../services/memory-report.js";
 import {
   budgetForNewStore,
   SharedPieceStore,
@@ -215,4 +215,75 @@ test("a reading is written when it moved, or when the silence has gone on long e
     true,
     "no quiet interval means every reading is written, which is the process scope"
   );
+});
+
+/**
+ * The shape of the anonymous memory, not only its size. Three shapes, three
+ * different diagnoses of the same number — see `summariseMappings`.
+ */
+const SMAPS = [
+  "aaaad4000000-aaaad4c00000 r-xp 00000000 fe:01 1234    /usr/local/bin/node",
+  "Size:              12288 kB",
+  "Rss:               12000 kB",
+  "aaaae0000000-aaaae4000000 rw-p 00000000 00:00 0       [heap]",
+  "Size:              65536 kB",
+  "Rss:               40960 kB",
+  "ffff80000000-ffff80400000 rw-p 00000000 00:00 0 ",
+  "Size:               4096 kB",
+  "Rss:                4096 kB",
+  "ffff81000000-ffff81400000 rw-p 00000000 00:00 0 ",
+  "Size:               4096 kB",
+  "Rss:                4096 kB",
+  "ffff82000000-ffff82100000 rw-p 00000000 00:00 0 ",
+  "Size:               1024 kB",
+  "Rss:                 512 kB",
+  "ffff83000000-ffff84000000 rw-p 00000000 00:00 0 ",
+  "Size:              16384 kB",
+  "Rss:                   0 kB",
+  ""
+].join("\n");
+
+test("the mappings are grouped by the shape that names the cause", () => {
+  const summary = summariseMappings(SMAPS);
+  assert.equal(summary.heapBytes, 40960 * 1024, "the allocator's break-managed arena stands alone");
+  assert.equal(summary.largeCount, 2, "two anonymous mappings of four megabytes");
+  assert.equal(summary.largeBytes, 8192 * 1024);
+  assert.equal(summary.largestBytes, 4096 * 1024);
+  assert.equal(summary.smallCount, 1);
+  assert.equal(summary.smallBytes, 512 * 1024);
+  assert.equal(summary.fileBytes, 12000 * 1024, "the executable is not a leak");
+});
+
+test("a mapping that is reserved but untouched costs nothing and is not counted", () => {
+  // The 16 MB mapping above has Rss 0: address space, not memory. Counting it
+  // would put tens of gigabytes of V8's reservations into the reading.
+  assert.equal(summariseMappings(SMAPS).largeCount, 2);
+});
+
+test("no /proc, or nothing readable, is answered with zeroes rather than a throw", () => {
+  const empty = summariseMappings("");
+  assert.equal(empty.heapBytes, 0);
+  assert.equal(empty.largeCount, 0);
+  assert.deepEqual(summariseMappings(null), empty);
+});
+
+test("the mapping shape is said in the line, and left out when it is not known", () => {
+  const withShape = describeMemory({
+    process: { rss: 900 * MEGABYTE, heapUsed: 27 * MEGABYTE, heapTotal: 30 * MEGABYTE, external: 6 * MEGABYTE, arrayBuffers: 2 * MEGABYTE },
+    availableBytes: 800 * MEGABYTE,
+    availableMeasured: true,
+    anonymousBytes: 870 * MEGABYTE,
+    mappings: summariseMappings(SMAPS),
+    stores: []
+  });
+  assert.match(withShape, /mappings=\[heap 40MB, 2 anon ≥2MB = 8MB \(largest 4MB\), 1 anon <2MB = 1MB, files 12MB\]/);
+
+  const withoutShape = describeMemory({
+    process: { rss: 900 * MEGABYTE, heapUsed: 27 * MEGABYTE, heapTotal: 30 * MEGABYTE, external: 6 * MEGABYTE, arrayBuffers: 2 * MEGABYTE },
+    availableBytes: 800 * MEGABYTE,
+    availableMeasured: true,
+    anonymousBytes: 870 * MEGABYTE,
+    stores: []
+  });
+  assert.ok(!withoutShape.includes("mappings="), "an unread breakdown is absent, not zeroed");
 });

@@ -7529,30 +7529,33 @@ export class HlsSessionManager {
     /** @type {Map<number, number | null>} */
     const predictedByHeight = new Map();
     for (const height of heights) {
-      // The rung ON SCREEN is never withdrawn, whatever anything says about it:
-      // every route guard reads this list, so dropping it would 404 the next
-      // segment of a stream that is playing.
-      if (height === playingHeight) {
-        kept.push(height);
-        continue;
-      }
       // A rung this session has actually been seen running below realtime is
       // withdrawn on that evidence, whatever the prediction says. This is the
-      // one thing a live reading is authority on: itself — and it is asked
-      // BEFORE the exemptions below, which it did not used to be.
-      //
-      // That order was harmless while a step rewrote the encode inside the base
-      // and the viewer never left it: `ownHeight` then always WAS the rung on
-      // screen. Now a step moves the viewer to another variant, and the height
-      // they left goes on being exempt although nothing is producing it — so
-      // the step back up would ask for the one rung this machine has been
-      // measured failing at, then fail again, then step down, for ever. The
-      // copied source height cannot reach this: `#measuredRungSpeeds` records
-      // only sessions that re-encode, so a copy has no reading to be withdrawn
-      // on, which is right — it costs no encoder.
+      // one thing a live reading is authority on: itself. It is asked before
+      // any exemption so a rung measured failing while on screen does not stay
+      // offered because it was on screen when measured — otherwise a step
+      // would ask for the one rung this machine has been measured failing at,
+      // then fail again, then step down, for ever. A copied source height
+      // cannot reach this: `#measuredRungSpeeds` records only sessions that
+      // re-encode, so a copy has no reading to be withdrawn on, which is right
+      // — it costs no encoder.
       const measured = measuredHeights?.get(height) ?? null;
       if (measured !== null && measured < 1) {
+        // Even the rung on screen is withdrawn on measured failure: keeping it
+        // would 404 the next segment, but keeping a rung measured at 0.007x
+        // (field 2026-08-31, 4K HEVC on CM4) stalls the viewer for minutes with
+        // 0.04s buffered and no way to downgrade because every other rung is
+        // also dropped. Withdrawing it lets the offer become empty, which the
+        // caller turns into an error the viewer can act on (try another proxy
+        // or a lower source) instead of an endless spinner.
         dropped.push(`${height}p=${measured.toFixed(2)}x measured`);
+        continue;
+      }
+      // The rung ON SCREEN is kept only when it has not been measured failing
+      // above. Keeping a rung measured at 0.007x would stall the viewer with
+      // no path to a faster rung, which is what the field showed.
+      if (height === playingHeight) {
+        kept.push(height);
         continue;
       }
       // The height an encoder is ALREADY producing, and the source's own height
@@ -7567,9 +7570,13 @@ export class HlsSessionManager {
       // A source height that would have to be RE-ENCODED is a prediction like
       // any other: on a session whose budget stepped down to 480p, the source's
       // 1080p is neither copied nor being produced, and keeping it unpriced
-      // would offer exactly the kind of rung this refuses.
+      // would offer exactly the kind of rung this refuses. Likewise, a rung
+      // this session is already producing at 0.007x (field 2026-08-31, 4K HEVC
+      // on CM4, 0.1x at 23:45 and 0.007x at 06:57) is not sustainable just
+      // because it is running — keeping it offered no path to a faster rung
+      // and left the viewer at 0.04s buffered with no downgrade.
       if (
-        height === ownHeight ||
+        (height === ownHeight && !transcodeVideo) ||
         (height === sourceHeight && !transcodeVideo)
       ) {
         kept.push(height);

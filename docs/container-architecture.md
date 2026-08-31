@@ -2,6 +2,32 @@
 
 Domain → Application → Interface, per RFC 9559 (Matroska) and ISO/IEC 14496-12 (MP4).
 
+## Two axes, and what is NOT a third
+
+Everything here is placed on exactly two axes: **which container** a track lives
+in, and **what kind of track** it is (video / audio / subtitle). A file lying
+beside the video — a dub as `<name>.mka`, subtitles as `<name>.ass` — is not a
+third kind of anything:
+
+- a `.mka` **is** Matroska. `ContainerFactory` sniffs it, `MatroskaContainer`
+  reads its `TrackEntry` list, and out comes an `AudioTrack` with its language,
+  title and flags. It differs from the picture's own file only in having no
+  video track. The same holds for `.m4a` and `Mp4Container`;
+- "external" is therefore not a TYPE. It is the answer to WHERE a track's bytes
+  are, and that is torrent knowledge — which this layer must not have
+  (`ContainerFactory`: no torrent knowledge; `ContainerOrchestrator`:
+  transport-agnostic). The pairing of a sidecar file with a picture lives in
+  `services/sidecar-files.js`, and the numbered list a viewer chooses from lives
+  in `services/audio-inventory.js`. Both are pure and both are application-layer.
+
+A class called `ExternalSubtitleFile` used to sit in `tracks/` asserting the
+opposite. It did not extend `ContainerTrack`, duplicated four of its fields, and
+was imported by nothing; it was deleted rather than extended. Nothing replaced
+it — a subtitle file beside the video is a `TextSubtitleTrack` whose bytes are
+read from another file, and a raw `.srt` needs no `Container` subclass because
+it has no track table and no index to read: the whole file is the payload, and
+`SubtitleController` already reads it as such.
+
 ## Layers
 
 ```mermaid
@@ -26,8 +52,12 @@ flowchart TB
     CF[ContainerFactory<br/>detect 16 bytes]
     CO[ContainerOrchestrator<br/>cache + getTracks/getKeyframeIndex]
     SO[SubtitleOrchestrator<br/>wrap subtitle-cues.js]
+    SF[sidecar-files.js<br/>which file goes with which]
+    AI[audio-inventory.js<br/>one flat numbering]
     CF --> CO
     CO --> SO
+    SF --> AI
+    CO --> AI
   end
   subgraph Interface
     PC[PlaybackController]
@@ -50,6 +80,8 @@ flowchart TB
 | `AudioTrack` | RFC9559 FlagOriginal 0x55AE, FlagCommentary 0x55AF, FlagVisualImpaired 0x55AC | `isOriginal/isCommentary/isVisualImpaired`, `channels/samplingFrequency` | FlagForced |
 | `SubtitleTrack` | RFC9559 FlagForced 0x55AA (subtitle-only), FlagHearingImpaired 0x55AB | `isForced/isHearingImpaired`, `clusterPositions`/`samples` | Video dims |
 | `TextSubtitleTrack` | `S_TEXT/UTF8, S_TEXT/ASS, tx3g, wvtt` | `toVtt()` convertible | Image tracks |
+| `sidecar-files.js` | — (torrent naming) | which files of a torrent are one picture's sound and subtitles | what is inside them |
+| `audio-inventory.js` | RFC9559 audio flags, merged against ffmpeg's numbering | one flat number per soundtrack → `(fileIndex, 0:a:N)` | display labels |
 | `ImageSubtitleTrack` | `S_HDMV/PGS, S_VOBSUB, subp, clcp` | kept for `declaredIndex` alignment | Conversion |
 | `MatroskaContainer` | RFC9559 SeekHead, Tracks, Cues, Clusters | single Tracks walk for all types, EBML via `ebml-reader.js` | HTTP |
 | `Mp4Container` | ISO 14496-12 moov/trak/tkhd/mdhd/hdlr/elng/stbl | `alternate_group` grouping, packed language, `tx3g` forced bits | Torrent |

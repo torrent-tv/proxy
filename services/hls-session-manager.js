@@ -59,6 +59,7 @@ import {
   parseFfmpegHdr
 } from "./ffmpeg-banner.js";
 import { resolveSegmentFormat, SEGMENT_FORMAT_IDS } from "./segment-formats/index.js";
+import { audioRenditionName } from "./audio-inventory.js";
 
 /**
  * Whether an encoder run died because its INPUT went away, rather than because
@@ -842,7 +843,7 @@ function computeProgressMetrics(processedSeconds, totalSeconds, startPositionSec
  * @param {string | URL} inputUrl - URL of the stream to probe.
  * @returns {Promise<{ durationSeconds: number | null, width: number | null, height: number | null, fps: number | null, startTime: number, isHdr: boolean }>}
  */
-async function probeInputMediaInfo(ffmpegBin, inputUrl) {
+async function probeInputMediaInfo(ffmpegBin, inputUrl, { expectVideo = true } = {}) {
   return new Promise((resolve) => {
     const ffmpeg = spawn(ffmpegBin, ["-hide_banner", "-loglevel", "info", "-i", inputUrl, "-f", "null", "-"], {
       stdio: ["ignore", "ignore", "pipe"],
@@ -881,9 +882,15 @@ async function probeInputMediaInfo(ffmpegBin, inputUrl) {
       // The header ("Duration:" then the "Video: … WxH" stream line) is printed
       // before any decoding. Bail as soon as both are present instead of letting
       // `-f null -` decode the whole stream until the 8 s timeout.
+      //
+      // A file with NO picture never prints that stream line, so waiting for it
+      // means waiting out the whole timeout — every time, on the path where a
+      // viewer is changing soundtrack and the browser refuses a switch that is
+      // not ready in time. `Duration:` carries the start time this is asked for,
+      // and it is the last thing such a file has to say about itself.
       const duration = parseFfmpegDurationSeconds(stderr);
       const dims = parseFfmpegVideoDimensions(stderr);
-      if (duration != null && dims.width != null) {
+      if (duration != null && (dims.width != null || !expectVideo)) {
         clearTimeout(timeoutId);
         if (!ffmpeg.killed) {
           ffmpeg.kill("SIGTERM");
@@ -1792,6 +1799,13 @@ export class HlsSessionManager {
         : 0;
     const normalizedAudioTrack =
       Number.isInteger(audioTrackIndex) && audioTrackIndex > 0 ? audioTrackIndex : 0;
+    // Which FILE the chosen soundtrack lives in, and which track it is inside
+    // that file. A release often ships its dub as a file of its own beside the
+    // picture, and the number that travels between the browser, this route and
+    // the `a/<n>/` address is flat across both — see `audio-inventory.js`. This
+    // is the one place that resolves it, so nothing downstream carries two
+    // vocabularies.
+    const audioSource = this.#resolveAudioSource(sourceKey, fileIndex, normalizedAudioTrack);
     const forceManualQuality = manualQuality === true && transcodeVideo;
     const sourceMapKey = [
       sourceKey,
@@ -1852,7 +1866,23 @@ export class HlsSessionManager {
     const sessionDir = createSessionDirPath(sessionId);
     const inputUrl = new URL("/stream", `${this.localBaseUrl}/`);
     inputUrl.searchParams.set("sourceKey", sourceKey);
-    inputUrl.searchParams.set("fileIndex", String(fileIndex));
+    // A soundtrack shipped as its own file is encoded FROM that file, and an
+    // audio rendition carries nothing else — so it reads the sidecar directly and
+    // needs no second input at all. The muxed case, where a browser takes its
+    // audio inside the picture's own stream, is the one that reads two files; its
+    // second input is `audioInputUrl` below.
+    const readsSidecarAlone = audioOnly === true && audioSource.isSidecar;
+    inputUrl.searchParams.set(
+      "fileIndex",
+      String(readsSidecarAlone ? audioSource.fileIndex : fileIndex)
+    );
+    // The second input, for a muxed session whose sound comes from another file.
+    let audioInputUrl = null;
+    if (!readsSidecarAlone && audioSource.isSidecar) {
+      audioInputUrl = new URL("/stream", `${this.localBaseUrl}/`);
+      audioInputUrl.searchParams.set("sourceKey", sourceKey);
+      audioInputUrl.searchParams.set("fileIndex", String(audioSource.fileIndex));
+    }
 
     // Media info (duration/resolution/fps/startTime/HDR) up front, so we can
     // serve a complete VOD playlist (#EXT-X-ENDLIST) with the correct total
@@ -1871,15 +1901,40 @@ export class HlsSessionManager {
       cachedMediaInfo.width > 0 &&
       Number.isFinite(cachedMediaInfo.height) &&
       cachedMediaInfo.height > 0;
+    // Always the PICTURE's, even when this session reads a soundtrack from
+    // another file: the timeline, the duration and the cut grid are the
+    // picture's, and a rendition exists to be played WITH it. Only where the
+    // sidecar's own timeline begins is read from the sidecar, just below.
+    const pictureUrl = readsSidecarAlone
+      ? (() => {
+          const url = new URL("/stream", `${this.localBaseUrl}/`);
+          url.searchParams.set("sourceKey", sourceKey);
+          url.searchParams.set("fileIndex", String(fileIndex));
+          return url;
+        })()
+      : inputUrl;
     const mediaInfo = cachedUsable
       ? cachedMediaInfo
-      : await probeInputMediaInfo(this.ffmpegBin, inputUrl.toString());
+      : await probeInputMediaInfo(this.ffmpegBin, pictureUrl.toString());
     const mediaInfoMs = Date.now() - mediaInfoStartMs;
     const mediaInfoSource = cachedUsable ? "cached" : "probed";
     const durationSeconds = mediaInfo.durationSeconds;
     const sourceWidth = mediaInfo.width;
     const sourceHeight = mediaInfo.height;
     const sourceStartTime = Number.isFinite(mediaInfo.startTime) ? mediaInfo.startTime : 0;
+    // Where the timeline of the file this session actually READS begins.
+    //
+    // For every session until now that was the picture's own file, so one figure
+    // served both purposes. A soundtrack shipped separately has a start time of
+    // its own, and it is the one that must be subtracted when the output is
+    // relabelled onto a zero-based timeline: subtract the picture's instead and
+    // the sound sits at a fixed offset from it for the whole film. Measured from
+    // the file rather than assumed to be zero, because assuming it is exactly
+    // the fault being avoided.
+    const audioFileStartTime = audioSource.isSidecar
+      ? await this.#sidecarStartTimeSeconds(sourceKey, audioSource.fileIndex)
+      : sourceStartTime;
+    const inputStartTime = readsSidecarAlone ? audioFileStartTime : sourceStartTime;
     // Tone-map an HDR source to SDR only when re-encoding video on the software
     // path and this ffmpeg has the filters. Hardware encoders keep their own
     // (untone-mapped) path for now; when unavailable, HDR falls back to a plain
@@ -1900,7 +1955,17 @@ export class HlsSessionManager {
     // the file's own average byte rate, which is size ÷ duration; the size
     // comes from the same stats call the realtime budget uses. Best effort —
     // without it the reader keeps its own byte default.
-    const readWindowBytes = await this.#readWindowBytesFor(sourceKey, fileIndex, durationSeconds);
+    //
+    // Sized for the file being READ, which for a soundtrack shipped separately
+    // is that file: it is a twentieth of the picture's size over the same
+    // duration, so the picture's byte rate would buy a window twenty times
+    // wider than the seconds it is meant to represent, and the piece store
+    // would hold it.
+    const readWindowBytes = await this.#readWindowBytesFor(
+      sourceKey,
+      readsSidecarAlone ? audioSource.fileIndex : fileIndex,
+      durationSeconds
+    );
     if (readWindowBytes > 0) {
       inputUrl.searchParams.set("windowBytes", String(readWindowBytes));
       // This read, and only this read, follows the viewer. The codec probe and
@@ -2169,6 +2234,22 @@ export class HlsSessionManager {
       transcodeVideo,
       transcodeAudio,
       audioTrackIndex: normalizedAudioTrack,
+      // Where that soundtrack actually is. The number above is flat across the
+      // picture's own tracks and the files beside it, and these two are what it
+      // resolves to: which file, and which `0:a:N` inside that file. Equal to
+      // `fileIndex` and to the flat number for an ordinary embedded track, which
+      // is what every session was before soundtracks in their own files existed.
+      audioFileIndex: audioSource.fileIndex,
+      audioSourceTrackIndex: audioSource.sourceTrackIndex,
+      // The second input, present only for a muxed session whose sound is in
+      // another file. An audio rendition reads its sidecar as its only input, so
+      // it has none.
+      audioInputUrl: audioInputUrl ? audioInputUrl.toString() : "",
+      // Where the timeline of the file being READ begins, against the picture's
+      // own `sourceStartTime` below. The two differ only when the sound comes
+      // from a separate file.
+      inputStartTime,
+      audioFileStartTime,
       // What this session's output carries. `audioOnly` is a rendition — one
       // audio track, no picture; `videoOnly` is a stream whose audio the viewer
       // takes from such a rendition. Neither is set on the ordinary muxed
@@ -2373,11 +2454,34 @@ export class HlsSessionManager {
     // torrent's data alive exactly as this one does.
     session.acquireSource = typeof acquireSource === "function" ? acquireSource : null;
     if (typeof acquireSource === "function") {
-      try {
-        session.releaseSource = acquireSource();
-      } catch {
-        session.releaseSource = null;
+      // One claim per file this session READS. Almost always that is one file;
+      // a muxed session whose soundtrack ships beside the picture reads two, and
+      // holding only the picture would leave the sound to be swept off the disk
+      // from under a running encoder.
+      const claim = (heldFileIndex) => {
+        try {
+          const release = acquireSource(heldFileIndex);
+          return typeof release === "function" ? release : null;
+        } catch {
+          return null;
+        }
+      };
+      const releases = [claim(undefined)];
+      if (audioInputUrl) {
+        releases.push(claim(audioSource.fileIndex));
       }
+      const held = releases.filter((release) => typeof release === "function");
+      session.releaseSource = held.length > 0
+        ? () => {
+            for (const release of held) {
+              try {
+                release();
+              } catch {
+                // Best effort — a session must always finish being disposed.
+              }
+            }
+          }
+        : null;
     }
     this.sessionsById.set(sessionId, session);
     this.sessionIdBySource.set(sourceMapKey, sessionId);
@@ -2540,9 +2644,17 @@ export class HlsSessionManager {
     // declare — its warning about a short header would then fire on every one.
     const carriesVideo = session.audioOnly !== true;
     const carriesAudio = !this.#servesAudioSeparately(session);
+    // The soundtrack of this session may not be in the file that was probed. A
+    // release that ships its dub as a separate file often ships the picture with
+    // no sound of its own at all, and then the picture's probe says there is no
+    // audio while the output plainly carries some — which would leave the header
+    // check expecting one track where two arrive, and tell the browser its sound
+    // was lost.
+    const audioFromAnotherFile =
+      Number.isInteger(session.audioFileIndex) && session.audioFileIndex !== session.fileIndex;
     return {
       video: carriesVideo && Boolean(probed?.videoCodec),
-      audio: carriesAudio && Boolean(probed?.audioCodec)
+      audio: carriesAudio && (audioFromAnotherFile || Boolean(probed?.audioCodec))
     };
   }
 
@@ -4821,7 +4933,11 @@ export class HlsSessionManager {
     const startSeconds = Number.isFinite(positionSecondsOverride)
       ? positionSecondsOverride
       : this.runStartTimeFor(session, safeIndex);
-    const sourceStartTime = Number.isFinite(session.sourceStartTime) ? session.sourceStartTime : 0;
+    // The start time of the file this run READS, which is the picture's own for
+    // every session except one whose soundtrack is a separate file.
+    const sourceStartTime = Number.isFinite(session.inputStartTime)
+      ? session.inputStartTime
+      : (Number.isFinite(session.sourceStartTime) ? session.sourceStartTime : 0);
     // Cut where this session's grid says, whoever is producing the frames. The
     // times are measured from the start of THIS run; the same list serves as
     // the cut points and, when re-encoding, as the keyframes to force — one
@@ -4946,12 +5062,69 @@ export class HlsSessionManager {
     const snappedKeyframe = Array.isArray(session.keyframeTimes) && session.keyframeTimes.length > 0
       ? nearestKeyframeAtOrBefore(session.keyframeTimes, seekSeconds)
       : null;
+    // A second input, and it exists for exactly one case: a browser that takes
+    // its audio muxed into the picture, watching a release whose soundtrack is a
+    // file of its own. An audio RENDITION reads that file as its only input and
+    // has none of this — which is why the ordinary path, and every browser that
+    // understands rendition groups, still runs on a single input.
+    const audioInputUrl =
+      typeof session.audioInputUrl === "string" && session.audioInputUrl.length > 0
+        ? session.audioInputUrl
+        : "";
+    // Where the picture's own start sits on the soundtrack file's timeline. Both
+    // files begin at their own container start time, and those need not be the
+    // same number; the difference is what keeps the two aligned.
+    const audioTimelineShift = audioInputUrl
+      ? (Number.isFinite(session.audioFileStartTime) ? session.audioFileStartTime : 0) - sourceStartTime
+      : 0;
+    /**
+     * Add the second input, if there is one, with its own seek.
+     *
+     * Called between the first `-i` and any OUTPUT option, because ffmpeg reads
+     * these positionally: an option written after the last `-i` applies to the
+     * output, and the residual seek below is exactly such an option. Getting the
+     * order wrong would silently turn the audio file's seek into a trim of the
+     * finished stream.
+     *
+     * @param {number} inputSeekSeconds - Where to start, on the PICTURE's
+     *   timeline. Translated to the soundtrack file's own here.
+     */
+    const pushAudioInput = (inputSeekSeconds) => {
+      if (!audioInputUrl) {
+        return;
+      }
+      // `-itsoffset` states the soundtrack's timestamps on the picture's
+      // timeline, so everything after this point — `-copyts`, the output offset,
+      // the cut list — goes on treating the two as one timeline, unchanged.
+      //
+      // ONLY on the branch that keeps the source's own timestamps. Without
+      // `-copyts` ffmpeg rebases each input from its own seek point, and both
+      // inputs are seeked to the same instant just below — so the two are
+      // already aligned and adding the offset would pull them apart by exactly
+      // the amount it exists to remove.
+      if (audioTimelineShift !== 0 && onKeyframeGridFor(session)) {
+        args.push("-itsoffset", ffmpegSeconds(-audioTimelineShift));
+      }
+      const audioSeek = Math.max(0, inputSeekSeconds + audioTimelineShift);
+      if (audioSeek > 0) {
+        // No keyframe to snap to and none needed: every audio frame is a sync
+        // point, so the seek can be accurate outright.
+        args.push("-accurate_seek", "-ss", ffmpegSeconds(audioSeek));
+      }
+      args.push("-i", audioInputUrl);
+    };
+
     if (snappedKeyframe !== null) {
       const residualSeconds = Math.max(0, seekSeconds - snappedKeyframe);
       if (snappedKeyframe > 0) {
         args.push("-ss", ffmpegSeconds(snappedKeyframe + seekLandingOffsetFor(session, snappedKeyframe)));
       }
       args.push("-i", session.inputUrl);
+      // The coarse landing, not the exact target: the residual below is discarded
+      // from the OUTPUT and so takes the same slice off every stream. Seeking the
+      // soundtrack to the exact target as well would take that slice twice and
+      // leave the sound running ahead of the picture by it.
+      pushAudioInput(snappedKeyframe);
       if (residualSeconds > 0) {
         args.push("-ss", ffmpegSeconds(residualSeconds));
       }
@@ -4962,6 +5135,7 @@ export class HlsSessionManager {
         args.push("-accurate_seek", "-ss", ffmpegSeconds(seekSeconds));
       }
       args.push("-i", session.inputUrl);
+      pushAudioInput(seekSeconds);
     }
     // Which timeline the output is labelled on. An audio rendition has no
     // picture of its own to follow, so it follows the grid it was given — the
@@ -4998,7 +5172,9 @@ export class HlsSessionManager {
       // the player switching rendition rather than this proxy rebuilding the
       // session. Cut on the same grid as the video it accompanies, which is
       // what lets the two be played together.
-      args.push("-vn", "-map", `0:a:${session.audioTrackIndex ?? 0}?`, ...audioCodecArgs);
+      // `0:` because a rendition's only input IS the file its track lives in —
+      // the picture's own file, or the one beside it that carries this dub.
+      args.push("-vn", "-map", `0:a:${session.audioSourceTrackIndex ?? session.audioTrackIndex ?? 0}?`, ...audioCodecArgs);
     } else if (this.#servesAudioSeparately(session)) {
       // The other half of the same arrangement: the picture alone, because its
       // audio is published as a rendition and would otherwise play twice.
@@ -5008,8 +5184,12 @@ export class HlsSessionManager {
         "-map",
         "0:v:0?",
         "-map",
-        // Type-relative audio track chosen by the viewer (default 0).
-        `0:a:${session.audioTrackIndex ?? 0}?`,
+        // The audio track the viewer chose: input 1 when their choice is a
+        // soundtrack shipped as its own file, input 0 when it is one of the
+        // picture's own. Type-relative within that input, which is what
+        // `audioSourceTrackIndex` holds — the number the browser sent is flat
+        // across both files and was resolved when the session was made.
+        `${audioInputUrl ? 1 : 0}:a:${session.audioSourceTrackIndex ?? session.audioTrackIndex ?? 0}?`,
         ...videoCodecArgs,
         ...audioCodecArgs
       );
@@ -5419,12 +5599,18 @@ export class HlsSessionManager {
    */
   #describeTrackSelection(session) {
     const wanted = [];
+    // Named exactly as the command line names them, second input included: a
+    // refusal whose message describes a different mapping than the one that was
+    // refused is the reading that cost a wrong diagnosis before.
+    const audioInput =
+      typeof session.audioInputUrl === "string" && session.audioInputUrl.length > 0 ? 1 : 0;
+    const audioTrack = session.audioSourceTrackIndex ?? session.audioTrackIndex ?? 0;
     if (session.audioOnly === true) {
-      wanted.push(`audio 0:a:${session.audioTrackIndex ?? 0}`);
+      wanted.push(`audio 0:a:${audioTrack}`);
     } else if (this.#servesAudioSeparately(session)) {
       wanted.push("video 0:v:0");
     } else {
-      wanted.push("video 0:v:0", `audio 0:a:${session.audioTrackIndex ?? 0}`);
+      wanted.push("video 0:v:0", `audio ${audioInput}:a:${audioTrack}`);
     }
     const counts = session.sourceStreamCounts;
     const held = counts
@@ -8721,7 +8907,14 @@ export class HlsSessionManager {
             containerFormat: base.containerFormat
           }
         : null,
-      acquireSource: base.acquireSource
+      // Hold the file this rendition will READ. For a soundtrack shipped beside
+      // the picture that is a different file of the same torrent, and nothing
+      // else claims it: the base holds the picture, and the disk sweep deletes
+      // what nobody is holding — which is how a film being watched was deleted
+      // on 2026-08-06.
+      acquireSource: () => base.acquireSource?.(
+        this.#resolveAudioSource(base.sourceKey, base.fileIndex, trackIndex).fileIndex
+      )
     });
     if (!rendition) {
       return null;
@@ -8731,6 +8924,82 @@ export class HlsSessionManager {
     }
     base.audioRenditionSessions.set(trackIndex, rendition.id);
     return rendition;
+  }
+
+  /**
+   * Where one numbered soundtrack actually is: which file of the torrent, and
+   * which `0:a:N` inside it.
+   *
+   * The number is flat across the picture's own tracks and every soundtrack
+   * shipped as a file beside it, so that the browser's menu, the
+   * `audioTrackIndex` on a session request and the `a/<n>/` path a rendition is
+   * published at all mean the same thing. This resolves it, once, from the
+   * inventory the playback plan built — the very list the menu was drawn from,
+   * so the two cannot disagree about what a number means.
+   *
+   * A number the inventory does not describe resolves to the picture's own file
+   * at that index, which is exactly what every session did before soundtracks in
+   * their own files existed: a plan cached by an older build carries no
+   * inventory, and a session created against it must keep working.
+   *
+   * @param {string} sourceKey
+   * @param {number} fileIndex - The PICTURE's file.
+   * @param {number} flatIndex
+   * @returns {{ fileIndex: number, sourceTrackIndex: number, isSidecar: boolean, name: string }}
+   */
+  #resolveAudioSource(sourceKey, fileIndex, flatIndex) {
+    const inventory = this.getCachedAudioTracks?.({ sourceKey, fileIndex }) ?? [];
+    const entry = Array.isArray(inventory)
+      ? inventory.find((candidate) => candidate?.index === flatIndex)
+      : null;
+    if (!entry || !Number.isInteger(entry.fileIndex) || !Number.isInteger(entry.sourceTrackIndex)) {
+      return { fileIndex, sourceTrackIndex: flatIndex, isSidecar: false, name: "" };
+    }
+    return {
+      fileIndex: entry.fileIndex,
+      sourceTrackIndex: entry.sourceTrackIndex,
+      isSidecar: entry.fileIndex !== fileIndex,
+      name: typeof entry.fileName === "string" ? entry.fileName : ""
+    };
+  }
+
+  /**
+   * Where a sidecar soundtrack's own timeline begins, in seconds.
+   *
+   * One short probe of that file, kept for as long as the process lives: a
+   * container's start time is a property of the file and cannot change. It is
+   * asked only when such a track is actually chosen, so a torrent whose extra
+   * soundtracks nobody plays costs nothing for them.
+   *
+   * @param {string} sourceKey
+   * @param {number} fileIndex - The SIDECAR's file.
+   * @returns {Promise<number>}
+   */
+  async #sidecarStartTimeSeconds(sourceKey, fileIndex) {
+    if (!(this.sidecarStartTimes instanceof Map)) {
+      this.sidecarStartTimes = new Map();
+    }
+    const key = `${sourceKey}:${fileIndex}`;
+    const held = this.sidecarStartTimes.get(key);
+    if (Number.isFinite(held)) {
+      return held;
+    }
+    const url = new URL("/stream", `${this.localBaseUrl}/`);
+    url.searchParams.set("sourceKey", sourceKey);
+    url.searchParams.set("fileIndex", String(fileIndex));
+    let startTime = 0;
+    try {
+      const info = await probeInputMediaInfo(this.ffmpegBin, url.toString(), { expectVideo: false });
+      startTime = Number.isFinite(info?.startTime) ? info.startTime : 0;
+    } catch (error) {
+      logger.info(
+        `transcode: the start time of soundtrack file ${fileIndex} could not be probed ` +
+        `(${error instanceof Error ? error.message : String(error)}) — taken as 0`
+      );
+      startTime = 0;
+    }
+    this.sidecarStartTimes.set(key, startTime);
+    return startTime;
   }
 
   /**
@@ -8748,20 +9017,40 @@ export class HlsSessionManager {
   #audioRenditionsOf(session) {
     const tracks = this.getCachedAudioTracks?.({
       sourceKey: session.sourceKey,
+      // The PICTURE's file, which is what `fileIndex` is on every session of a
+      // family — a rendition is created with its base's, and only its
+      // `audioFileIndex` points at the file its sound comes from. The inventory
+      // is keyed on the picture and spans the soundtracks beside it.
       fileIndex: session.fileIndex
     }) ?? [];
     if (!Array.isArray(tracks) || tracks.length === 0) {
       return [];
     }
     const chosen = Number(session.audioTrackIndex) || 0;
-    return tracks.map((track, order) => {
-      const language = typeof track?.language === "string" ? track.language : "";
-      const title = typeof track?.title === "string" && track.title.length > 0 ? track.title : "";
+    // One line per entry of the inventory, in its order and without omissions —
+    // including a track the container marks unusable. The player addresses a
+    // rendition by its POSITION in this list, and the browser addresses it by
+    // the number the inventory gave it; leaving anything out would make those two
+    // disagree from that point on. A track the file says not to offer is kept out
+    // of the VIEWER's menu, which is the browser's own business and does not
+    // touch the numbering.
+    return tracks.map((entry, order) => {
+      const index = Number.isInteger(entry?.index) ? entry.index : order;
+      const language = typeof entry?.languageBcp47 === "string" && entry.languageBcp47.length > 0
+        ? entry.languageBcp47
+        : (typeof entry?.language === "string" ? entry.language : "");
       return {
-        trackIndex: order,
-        name: title || language || `Track ${order + 1}`,
+        trackIndex: index,
+        name: audioRenditionName(
+          { ...entry, index, folders: Array.isArray(entry?.folders) ? entry.folders : [] },
+          tracks
+        ),
+        // Only what the container itself states. What a folder name suggests
+        // about a language is derived in the browser, where the language table
+        // and the viewer's own locale already are; writing a guess into
+        // `LANGUAGE` would put it in a playlist as though the file had said it.
         language,
-        isDefault: order === chosen
+        isDefault: index === chosen
       };
     });
   }

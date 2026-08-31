@@ -67,11 +67,15 @@ export class TorrentWorkerClient {
   #onSubtitleCues;
 
   /**
-   * @param {{ maxDiskBytes?: number, memoryBytes?: number, onSubtitleCues?: (event: object) => void }} [options]
+   * @param {{ maxDiskBytes?: number, memoryBytes?: number, stateDir?: string, onSubtitleCues?: (event: object) => void }} [options]
    */
-  constructor({ maxDiskBytes, memoryBytes, onSubtitleCues } = {}) {
+  constructor({ maxDiskBytes, memoryBytes, stateDir, onSubtitleCues } = {}) {
     this.#worker = new Worker(fileURLToPath(WORKER_URL), {
-      workerData: { maxDiskBytes, memoryBytes }
+      // `stateDir` travels because the worker writes heap snapshots of its own
+      // isolate there. It cannot choose a directory any other way: a worker may
+      // not change the process's working directory, and the isolate that has
+      // died three times is the one no snapshot has ever been taken of.
+      workerData: { maxDiskBytes, memoryBytes, stateDir }
     });
     this.#caller = createCaller(this.#worker);
     this.#onSubtitleCues = onSubtitleCues ?? (() => undefined);

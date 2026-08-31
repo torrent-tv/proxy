@@ -67,6 +67,14 @@ export const Command = {
   PREFETCH_EDGES: "prefetch-edges",
   /** The text subtitle tracks a file carries, for the viewer's menu. */
   SUBTITLE_TRACKS: "subtitle-tracks",
+  /**
+   * Every track a file declares, read from its own header by the container
+   * layer. Answers what ffmpeg's `-i` banner cannot: FlagOriginal,
+   * FlagCommentary, FlagVisualImpaired, FlagEnabled and LanguageBCP47 appear
+   * nowhere in it. Asked of the picture AND of a soundtrack shipped as its own
+   * file beside it, which is the same question about a different file.
+   */
+  CONTAINER_TRACKS: "container-tracks",
   /** Cues of one subtitle track, from the clusters already downloaded. */
   SUBTITLE_CUES: "subtitle-cues",
   /** Shut the client down, optionally deleting downloaded data. */

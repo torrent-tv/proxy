@@ -113,7 +113,17 @@ export async function handleApiTranscodeSessionsPost(req, reply, { hlsSessionMan
       // only while they run, and a seek leaves a gap with no read at all — the
       // disk sweep caught that gap on 2026-08-06 and deleted the film being
       // watched.
-      acquireSource: () => holdSource({ sourceRegistry, torrentPool, sourceKey, fileIndex })
+      // Takes the file to hold, because a session does not always read the file
+      // it was created for: a release whose dub ships as its own file gives that
+      // soundtrack a session of its own, reading a different index of the same
+      // torrent. Defaults to the picture, which is every other case.
+      acquireSource: (heldFileIndex = fileIndex) =>
+        holdSource({
+          sourceRegistry,
+          torrentPool,
+          sourceKey,
+          fileIndex: Number.isInteger(heldFileIndex) ? heldFileIndex : fileIndex
+        })
     });
     // The index of quality variants, when this session has more than one to
     // offer. Its presence is what tells the browser it can change quality

@@ -162,6 +162,44 @@ export class WorkerTorrentPool {
   }
 
   /**
+   * Every track one file declares, read from its own header by the container
+   * layer.
+   *
+   * The audio menu is built from ffmpeg's `-i` banner, which carries neither
+   * `FlagOriginal`, `FlagCommentary`, `FlagVisualImpaired`, `FlagEnabled` nor
+   * `LanguageBCP47` — so without this a director's commentary and the film
+   * itself are indistinguishable in it. Also how a soundtrack shipped as its own
+   * file is read: a `.mka` is Matroska and the same reader serves it.
+   *
+   * @param {object} torrent
+   * @param {number} fileIndex
+   * @returns {Promise<object[]>}
+   */
+  async getContainerTracks(torrent, fileIndex) {
+    const sourceKey = torrent?.sourceKey;
+    if (!sourceKey) {
+      return [];
+    }
+    const answer = await this.#client.getContainerTracks({ sourceKey, fileIndex });
+    return Array.isArray(answer?.tracks) ? answer.tracks : [];
+  }
+
+  /**
+   * The audio tracks one file declares, in the order ffmpeg numbers them
+   * `0:a:N`.
+   *
+   * @param {object} torrent
+   * @param {number} fileIndex
+   * @returns {Promise<object[]>}
+   */
+  async getDeclaredAudioTracks(torrent, fileIndex) {
+    const tracks = await this.getContainerTracks(torrent, fileIndex);
+    return tracks
+      .filter((track) => track?.type === "audio")
+      .sort((left, right) => (left.declaredIndex ?? 0) - (right.declaredIndex ?? 0));
+  }
+
+  /**
    * The cues of one subtitle track that the downloaded clusters already carry.
    *
    * @param {object} torrent

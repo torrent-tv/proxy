@@ -1,4 +1,9 @@
 import { logger } from "../../../../utils/logger.js";
+import {
+  countVideoFiles,
+  matchSidecarFiles,
+  TEXT_SUBTITLE_SIDECAR_EXTENSIONS
+} from "../../../../services/sidecar-files.js";
 
 /**
  * Start fetching a source before anyone asks to play it.
@@ -74,10 +79,60 @@ export async function handleApiSourceWarmPost(req, reply, { sourceRegistry, torr
     });
   }
 
+  // The files that carry this episode's OTHER soundtracks and its subtitles.
+  //
+  // Warmed here for the same reason the picture is: none of it depends on the
+  // viewer, and every second of it that happens now is a second they do not
+  // spend waiting later. Without this the first thing to ask for a dub's header
+  // is the playback plan, on the path to the first frame, and the first thing to
+  // ask for a subtitle file is the browser once the film is already running —
+  // which is why a track the container marks default appears after the opening
+  // rather than during it.
+  //
+  // How much of each is fetched follows from what the file IS, not from a size
+  // anyone chose. A text subtitle file is smaller than one piece of this
+  // torrent, so its edges and the whole of it are the same pieces — fetch all of
+  // it. A soundtrack is tens of megabytes and only its header is needed to name
+  // and describe it, so it gets the head and the tail, exactly as the picture
+  // does. The rest of it is fetched when it is played, and nothing here spends
+  // the pool owner's bandwidth on a track nobody chose.
+  let sidecars = 0;
+  if (fileIndex !== null && Array.isArray(torrent.files)) {
+    const matched = matchSidecarFiles({
+      files: torrent.files,
+      videoIndex: fileIndex,
+      torrentName: typeof torrent.name === "string" ? torrent.name : "",
+      videoCount: countVideoFiles(torrent.files)
+    });
+    const warmOne = (file, options) => {
+      sidecars += 1;
+      // Not awaited, like the picture's own edges above: the point of this route
+      // is that the viewer goes on choosing while it happens.
+      Promise.resolve(torrentPool.prefetchFileEdges(torrent, file.fileIndex, options)).catch(
+        (error) => {
+          const message = error instanceof Error ? error.message : String(error);
+          logger.warn(`warm ${sourceKey.slice(0, 8)}: "${file.name}" failed: ${message}`);
+        }
+      );
+    };
+    for (const file of matched.audio) {
+      warmOne(file, { tailBytes: 0 });
+    }
+    for (const file of matched.subtitles) {
+      warmOne(
+        file,
+        TEXT_SUBTITLE_SIDECAR_EXTENSIONS.has(file.extension)
+          ? { headBytes: Math.max(1, file.length), tailBytes: 0 }
+          : { tailBytes: 0 }
+      );
+    }
+  }
+
   logger.info(
     `warm ${sourceKey.slice(0, 8)}: swarm started for "${torrent.name}"` +
-      (edges ? `, fetching the edges of file ${fileIndex}` : ", file not chosen yet")
+      (edges ? `, fetching the edges of file ${fileIndex}` : ", file not chosen yet") +
+      (sidecars > 0 ? ` and of ${sidecars} file(s) beside it` : "")
   );
 
-  return reply.send({ started: true, swarm: true, edges });
+  return reply.send({ started: true, swarm: true, edges, sidecars });
 }

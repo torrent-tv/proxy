@@ -326,6 +326,20 @@ export class TorrentWorkerClient {
   }
 
   /**
+   * Every track one file declares, read from its own header.
+   *
+   * Asked of the picture for the flags ffmpeg's banner does not carry, and of a
+   * soundtrack shipped as its own file beside it — the same question about a
+   * different file, which is why there is one command rather than two.
+   *
+   * @param {{ sourceKey: string, fileIndex: number }} params
+   * @returns {Promise<{ tracks: object[] }>}
+   */
+  async getContainerTracks({ sourceKey, fileIndex }) {
+    return this.#caller.call(Command.CONTAINER_TRACKS, { sourceKey, fileIndex });
+  }
+
+  /**
    * The cues of one subtitle track that can be read from what is downloaded.
    *
    * @param {{ sourceKey: string, fileIndex: number, trackNumber: number }} params

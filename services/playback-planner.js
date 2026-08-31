@@ -9,6 +9,8 @@
 import { spawn } from "node:child_process";
 import { logger } from "../utils/logger.js";
 import { mergeContainerSubtitleFlags } from "./subtitle-defaults.js";
+import { buildAudioInventory, mergeContainerAudioFlags } from "./audio-inventory.js";
+import { countVideoFiles, matchSidecarFiles } from "./sidecar-files.js";
 import {
   parseFfmpegDurationSeconds,
   parseFfmpegStartTimeSeconds,
@@ -27,6 +29,17 @@ const DIRECT_AUDIO_CODECS = new Set(["aac", "mp3", "opus", "vorbis", "flac"]);
 // piece latency at encode time (the edge prefetch only covers head+tail for
 // the codec probe). ~16 MB ≈ the first segments of typical media.
 const BODY_PREFETCH_BYTES = 16 * 1024 * 1024;
+
+/**
+ * How long the plan waits for a file's own header before offering its
+ * soundtrack without what that header would have said.
+ *
+ * Not a measurement, and nothing is derived from it: it is the point past which
+ * holding the viewer costs more than the language and flags being waited for —
+ * which the folder name supplies anyway, from the torrent's file list, at no
+ * cost. The reading itself carries on in the worker and is kept there.
+ */
+const SIDECAR_HEADER_WAIT_MS = 3_000;
 
 /** Subtitle codecs that can be converted to WebVTT (text-based). */
 const TEXT_SUBTITLE_CODECS = new Set(["subrip", "srt", "ass", "ssa", "webvtt", "vtt", "mov_text", "text"]);
@@ -345,6 +358,122 @@ export function createPlaybackPlanner({
     return merged.tracks;
   }
 
+  /**
+   * Every soundtrack this file can be watched with, as one numbered list: its
+   * own tracks and the ones shipped as separate files beside it.
+   *
+   * Built here, in the plan, because the plan is what the viewer's menu is drawn
+   * from — so the offer is complete the moment a file is opened, with nothing
+   * arriving late and nothing measured while the viewer waits. It is also what
+   * the master playlist's rendition group is built from, so the number in the
+   * menu and the number in the `a/<n>/` address are the same number by
+   * construction rather than by agreement.
+   *
+   * @param {object} torrent
+   * @param {number} fileIndex
+   * @param {object[]} bannerAudioTracks - The probe's own audio streams.
+   * @returns {Promise<import("./audio-inventory.js").AudioInventoryEntry[]>}
+   */
+  async function buildInventory(torrent, fileIndex, bannerAudioTracks) {
+    const banner = Array.isArray(bannerAudioTracks) ? bannerAudioTracks : [];
+    /**
+     * Read a file's declared audio tracks, or give up quickly.
+     *
+     * The plan is on the path to the first frame, and reading a sidecar's header
+     * waits on the swarm: that file has usually had nothing downloaded when this
+     * runs, and a header that never arrives would hold the plan — and the
+     * viewer — for the whole of the read's own patience. What a timeout costs is
+     * small and deliberate: the track is still offered, still numbered and still
+     * playable, only without the language and flags its own header would have
+     * given. The language the viewer actually sees is read from the FOLDER the
+     * release put it in, which is in the torrent's file list and needs no bytes
+     * at all.
+     *
+     * @param {number} wantedFileIndex
+     * @param {string} label
+     * @returns {Promise<object[]>}
+     */
+    const declaredAudioOf = async (wantedFileIndex, label) => {
+      if (typeof torrentPool?.getDeclaredAudioTracks !== "function") {
+        return [];
+      }
+      let timer = null;
+      try {
+        return await Promise.race([
+          torrentPool.getDeclaredAudioTracks(torrent, wantedFileIndex),
+          new Promise((resolve) => {
+            timer = setTimeout(() => resolve(null), SIDECAR_HEADER_WAIT_MS);
+            timer.unref?.();
+          })
+        ]).then((tracks) => {
+          if (tracks === null) {
+            logger.info(
+              `audio tracks: "${label}" did not answer within ` +
+              `${SIDECAR_HEADER_WAIT_MS / 1000}s — offered without what its header would say`
+            );
+            return [];
+          }
+          return Array.isArray(tracks) ? tracks : [];
+        });
+      } catch (error) {
+        logger.info(`audio tracks: "${label}" could not be read (${error?.message ?? error})`);
+        return [];
+      } finally {
+        if (timer !== null) {
+          clearTimeout(timer);
+        }
+      }
+    };
+    // The picture's own tracks: ffmpeg numbers them, the container declares what
+    // they are. Both readings, lined up and checked — see `audio-inventory.js`.
+    let embedded = banner.map((track) => ({ ...track, declaresDefault: false }));
+    if (banner.length > 0) {
+      // The picture's head is already downloaded — the codec probe just read it
+      // — so this is a parse and not a wait, but it is bounded like the rest.
+      const declared = await declaredAudioOf(fileIndex, "the picture");
+      const merged = mergeContainerAudioFlags(banner, declared);
+      embedded = merged.tracks;
+      logger.info(
+        merged.aligned
+          ? `audio tracks: the container describes all ${merged.tracks.length}` +
+            `${merged.tracks.some((track) => track.isCommentary) ? ", one of them commentary" : ""}` +
+            `${merged.tracks.some((track) => track.isVisualImpaired) ? ", one of them described" : ""}`
+          : `audio tracks: using the probe's own fields — ${merged.reason}`
+      );
+    }
+
+    const sidecarFiles = matchSidecarFiles({
+      files: torrent?.files ?? [],
+      videoIndex: fileIndex,
+      torrentName: typeof torrent?.name === "string" ? torrent.name : "",
+      videoCount: countVideoFiles(torrent?.files ?? [])
+    });
+    // All of them at once. They are separate files with separate headers, and
+    // read one after another the waits add up on the path to the first frame.
+    const sidecars = await Promise.all(
+      sidecarFiles.audio.map(async (file) => ({
+        file,
+        // A bare elementary stream — `.ac3`, `.dts`, `.mp3` — has no table to
+        // read, so nothing is asked of the swarm for it at all.
+        tracks: file.declaresTracks ? await declaredAudioOf(file.fileIndex, file.name) : []
+      }))
+    );
+    const inventory = buildAudioInventory({ embedded, videoFileIndex: fileIndex, sidecars });
+    if (sidecars.length > 0) {
+      logger.info(
+        `audio tracks: ${sidecars.length} file(s) beside the picture carry sound — ` +
+        inventory
+          .filter((entry) => entry.kind === "sidecar")
+          .map((entry) =>
+            `a:${entry.index}=${entry.folders.join("/") || "."}/${entry.fileName}` +
+            `#${entry.sourceTrackIndex}${entry.codec ? `(${entry.codec})` : ""}`
+          )
+          .join(" ")
+      );
+    }
+    return inventory;
+  }
+
   function withHostTimings(plan) {
     return {
       ...plan,
@@ -516,8 +645,10 @@ export function createPlaybackPlanner({
         // (list of forced resolutions <= source). 0 when unknown.
         videoWidth,
         videoHeight,
-        // Full track inventory for the browser's audio/subtitle menus.
-        audioTracks: audioTracks ?? [],
+        // Full track inventory for the browser's audio/subtitle menus. The audio
+        // half spans the picture's own tracks AND the soundtracks shipped as
+        // files beside it, under one numbering — see `buildInventory`.
+        audioTracks: await buildInventory(torrent, fileIndex, audioTracks ?? []),
         subtitleTracks: await withContainerDefaults(torrent, fileIndex, subtitleTracks ?? []),
         // Both host timings are filled in by `withHostTimings` on the way out,
         // never here: read at build time they would be frozen into the cached

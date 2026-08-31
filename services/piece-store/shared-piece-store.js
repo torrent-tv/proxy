@@ -23,6 +23,17 @@
  * Evicting a piece deletes its entry and the memory is reclaimable by GC.
  * `committed` therefore equals `resident`, not a high-water mark.
  *
+ * **Room for a piece is an owned reservation, not a shared number.**
+ * `#claimSlot` hands back a release the caller runs in a `finally`; nothing
+ * else touches `#outstandingPieces`. It was a counter incremented in one
+ * function and decremented in another, and every consequence of that was a
+ * defect: a failure between the two lost a slot for the life of the process,
+ * `put`'s error path guessed at the correction and could take back a
+ * reservation belonging to a different claim, and one lost reservation made
+ * the five-second "everything is pinned" error permanently unreachable, so a
+ * read retried every 50 ms for ever without completing or failing. Read out of
+ * the field failure of 2026-08-31 (`research/worker-heap-oom-2026-08-31.md`).
+ *
  * What this deliberately does NOT do is manage the disk as a cache of its own.
  * Pieces evicted from memory are written once and read back on demand; the file
  * is discarded whole when the torrent goes away. libtorrent 2.0 and webtor's
@@ -98,6 +109,15 @@ function availableMemorySync() {
 
 const MIN_BUDGET_BYTES = 64 * 1024 * 1024;
 const MIN_RESIDENT_PIECES = 2;
+/**
+ * How long a claim may go without ANYTHING moving before it gives up.
+ *
+ * Measured against progress, not against activity. The earlier rule skipped
+ * this timer entirely while a spill was in flight or a reservation was held —
+ * so one reservation that was never returned made the timer unreachable and a
+ * read retried every 50 ms for the life of the process, never completing and
+ * never failing (field 2026-08-31).
+ */
 const PINNED_WAIT_MS = 5_000;
 const CLAIM_RETRY_MS = 50;
 
@@ -111,8 +131,21 @@ export class SharedPieceStore {
   #buffers = new Map();
   /** @type {Map<number, Promise<void>>} */
   #evicting = new Map();
+  /**
+   * Slots claimed but not yet filled.
+   *
+   * Handed out by {@link SharedPieceStore##claimSlot} as a release function the
+   * caller must call in a `finally`, never as a number one function increments
+   * and another decrements. The counter used to be paired across
+   * `#claimSlot`/`#registerPiece`, so any failure between the two lost a slot
+   * for the life of the process, and `put`'s error path tried to correct that
+   * by guessing — which could take back a reservation belonging to a different
+   * claim and let the store admit past its allowance.
+   */
   #outstandingPieces = 0;
   #pinnedWaitStartedAt = 0;
+  /** When something last actually moved: a piece admitted, spilled or unpinned. */
+  #lastProgressAt = 0;
   #waiters = [];
   #lru;
   #disk;
@@ -125,7 +158,8 @@ export class SharedPieceStore {
     revivals: 0,
     blockedByPins: 0,
     waitedForPins: 0,
-    evictedOnRevise: 0
+    evictedOnRevise: 0,
+    spillFailures: 0
   };
 
   constructor(chunkLength, options = {}) {
@@ -147,7 +181,11 @@ export class SharedPieceStore {
     this.#growthCeiling = this.#capacity;
     this.#lru = new PieceLru(this.#capacity);
     this.#name = options.name ?? "pieces";
-    this.#disk = new DiskTier({
+    // `options.disk` exists so a test can hold a write open or make one fail on
+    // purpose. Four of the defects fixed here live in what happens when the
+    // disk tier does not answer immediately or at all, and none of them is
+    // reachable from outside without saying so.
+    this.#disk = options.disk ?? new DiskTier({
       directory: options.path ?? ".",
       name: `${this.#name}.pieces`,
       chunkLength
@@ -168,6 +206,10 @@ export class SharedPieceStore {
       committedBytes: residentBytes,
       budgetBytes: this.#growthCeiling * this.#chunkLength,
       pinned: this.#lru.pinnedCount,
+      // Slots claimed and not yet filled. Reported because a reservation that
+      // is never returned is invisible until the store cannot admit anything,
+      // and by then the reason is long gone. At rest this is zero.
+      outstanding: this.#outstandingPieces,
       spilled: this.#disk.size,
       spilledBytes: this.#disk.size * this.#chunkLength,
       ...this.#counters
@@ -180,6 +222,11 @@ export class SharedPieceStore {
       this.#capacity,
       Math.max(MIN_RESIDENT_PIECES, Number.isFinite(wanted) ? wanted : this.#capacity)
     );
+    // The LRU is told too. It was constructed with the store's original
+    // capacity and never revised, so `isFull()` answered against a number that
+    // had not been the limit for some time — dormant only because nothing calls
+    // it, which is a trap for whoever calls it next.
+    this.#lru.setCapacity(this.#growthCeiling);
     // With per-piece buffers memory CAN be given back immediately, unlike the
     // old growable pool. Eagerly evict excess to honour the new ceiling.
     let evicted = 0;
@@ -197,23 +244,13 @@ export class SharedPieceStore {
       this.#lru.remove(victim);
       evicted += 1;
       this.#counters.evictedOnRevise += 1;
-      const bytes = Buffer.from(victimBuffer, 0, this.#lengthOf(victim));
-      const spill = this.#disk.write(victim, bytes).then(
-        () => {
-          this.#counters.spills += 1;
-          this.#evicting.delete(victim);
-          this.#wake();
-        },
-        (error) => {
-          this.#evicting.delete(victim);
-          this.#wake();
-          throw error;
-        }
-      );
-      this.#evicting.set(victim, spill);
-    }
-    if (evicted > 0) {
-      // Logged by the caller (worker) via reviseStoreBudgets, but also countable here.
+      // Nobody awaits this spill, so its failure has to end here. Rethrowing
+      // made it an unhandled rejection, and an unhandled rejection in the
+      // torrent worker ends the thread — a second way to lose the torrent
+      // client, on top of the one that already loses it.
+      void this.#spill(victim, victimBuffer).catch(() => {
+        this.#counters.spillFailures += 1;
+      });
     }
     return {
       name: this.#name,
@@ -272,30 +309,102 @@ export class SharedPieceStore {
 
   unpin(index) {
     this.#lru.unpin(index);
-    this.#wake();
+    this.#noteProgress();
   }
 
+  /**
+   * Reserve room for one piece.
+   *
+   * @returns {Promise<() => void>} The release, which the caller MUST call in a
+   *   `finally`. Calling it twice is harmless.
+   */
   async #claimSlot() {
     for (;;) {
+      if (this.#closed) {
+        throw new Error("Piece store is closed.");
+      }
       const ok = await this.#claimSlotOnce();
       if (ok) {
-        return;
+        let released = false;
+        return () => {
+          if (released) {
+            return;
+          }
+          released = true;
+          this.#outstandingPieces -= 1;
+          this.#noteProgress();
+        };
       }
-      await new Promise((resolve) => {
-        this.#waiters.push(resolve);
-        for (const spill of this.#evicting.values()) {
-          void spill.then(() => this.#wake(), () => this.#wake());
-        }
-        const retry = setTimeout(() => this.#wake(), CLAIM_RETRY_MS);
-        retry.unref?.();
-      });
+      await this.#waitForSlot();
     }
+  }
+
+  /**
+   * Sleep until something moves, or until the retry interval, whichever first.
+   *
+   * One handler, idempotent, and its timer is cleared when it is woken. The
+   * earlier version attached a fresh pair of handlers to EVERY pending spill on
+   * every attempt and left a timer running each time, so a claim that could not
+   * be satisfied allocated in proportion to attempts times pending spills. A
+   * settling spill now wakes the store itself, which is where that belongs.
+   *
+   * @returns {Promise<void>}
+   */
+  #waitForSlot() {
+    return new Promise((resolve) => {
+      let settled = false;
+      /** @type {ReturnType<typeof setTimeout> | null} */
+      let retry = null;
+      const finish = () => {
+        if (settled) {
+          return;
+        }
+        settled = true;
+        if (retry !== null) {
+          clearTimeout(retry);
+        }
+        resolve();
+      };
+      this.#waiters.push(finish);
+      retry = setTimeout(finish, CLAIM_RETRY_MS);
+      retry.unref?.();
+    });
   }
 
   #registerPiece(index, buffer) {
     this.#buffers.set(index, buffer);
     this.#lru.touch(index);
-    this.#outstandingPieces -= 1;
+    this.#noteProgress();
+  }
+
+  /**
+   * Write a piece out and account for it, from the one place that does it.
+   *
+   * @param {number} index
+   * @param {SharedArrayBuffer} buffer
+   * @returns {Promise<void>}
+   */
+  #spill(index, buffer) {
+    const bytes = Buffer.from(buffer, 0, this.#lengthOf(index));
+    const spill = this.#disk.write(index, bytes).then(
+      () => {
+        this.#counters.spills += 1;
+        this.#evicting.delete(index);
+        this.#noteProgress();
+      },
+      (error) => {
+        this.#evicting.delete(index);
+        this.#noteProgress();
+        throw error;
+      }
+    );
+    this.#evicting.set(index, spill);
+    return spill;
+  }
+
+  /** Something actually moved: wake whoever is waiting and restart the clock. */
+  #noteProgress() {
+    this.#lastProgressAt = Date.now();
     this.#wake();
   }
 
@@ -311,25 +420,30 @@ export class SharedPieceStore {
     // Reserve before suspension so concurrent callers see the reservation.
     if (this.#buffers.size + this.#outstandingPieces < this.#growthCeiling) {
       this.#outstandingPieces += 1;
+      this.#pinnedWaitStartedAt = 0;
       return true;
     }
 
     const victim = this.#lru.evictionCandidate();
     if (victim === null) {
-      if (this.#evicting.size > 0 || this.#outstandingPieces > 0) {
-        return false;
-      }
+      // Nothing may leave. Wait while the store is still MOVING — a spill
+      // completing, a piece admitted, a pin released — and give up when it has
+      // not moved for PINNED_WAIT_MS, whatever is nominally in flight. The old
+      // rule asked whether anything was in flight rather than whether anything
+      // had happened, which is why one lost reservation could hold a read here
+      // for ever.
       if (this.#pinnedWaitStartedAt === 0) {
         this.#pinnedWaitStartedAt = Date.now();
       }
-      if (Date.now() - this.#pinnedWaitStartedAt < PINNED_WAIT_MS) {
+      const stillFor = Date.now() - Math.max(this.#pinnedWaitStartedAt, this.#lastProgressAt);
+      if (stillFor < PINNED_WAIT_MS) {
         this.#counters.waitedForPins += 1;
         return false;
       }
       this.#pinnedWaitStartedAt = 0;
       this.#counters.blockedByPins += 1;
       throw new Error(
-        `Every resident piece is pinned and none was released in ${PINNED_WAIT_MS}ms; no slot can be freed.`
+        `Every resident piece is pinned and nothing moved for ${PINNED_WAIT_MS}ms; no slot can be freed.`
       );
     }
     this.#pinnedWaitStartedAt = 0;
@@ -346,24 +460,95 @@ export class SharedPieceStore {
     this.#lru.remove(victim);
     this.#outstandingPieces += 1;
 
-    const bytes = Buffer.from(victimBuffer, 0, this.#lengthOf(victim));
-    const spill = this.#disk.write(victim, bytes).then(
-      () => {
-        this.#counters.spills += 1;
-        this.#evicting.delete(victim);
-      },
-      (error) => {
-        this.#evicting.delete(victim);
-        throw error;
-      }
-    );
-    this.#evicting.set(victim, spill);
-    await spill;
+    try {
+      await this.#spill(victim, victimBuffer);
+    } catch (error) {
+      // The caller never received a release for this reservation, so it is
+      // given back here rather than left outstanding for ever.
+      this.#outstandingPieces -= 1;
+      this.#noteProgress();
+      throw error;
+    }
     // Outstanding stays +1 for the caller; the slot for the new piece is now free.
     return true;
   }
 
-  // For compatibility: some callers check #freeSlots / #allocatedSlots — not needed.
+  /**
+   * Bring a spilled piece back into memory, once, however many callers ask.
+   *
+   * @param {number} index
+   * @returns {Promise<SharedArrayBuffer | null>} `null` when the piece is on
+   *   neither tier.
+   */
+  async #revive(index) {
+    const spill = this.#evicting.get(index);
+    if (spill) {
+      await spill.catch(() => undefined);
+    }
+
+    if (!this.#disk.has(index)) {
+      return null;
+    }
+
+    const release = await this.#claimSlot();
+    try {
+      // Another caller may have brought it back while this one waited for a
+      // slot. Registering a second buffer for the same piece would leave
+      // whoever holds the first reading memory nothing evicts.
+      const already = this.#buffers.get(index);
+      if (already !== undefined) {
+        this.#lru.touch(index);
+        this.#counters.fromMemory += 1;
+        return already;
+      }
+      const target = new SharedArrayBuffer(this.#lengthOf(index));
+      await this.#disk.read(index, Buffer.from(target));
+      this.#registerPiece(index, target);
+      this.#counters.fromDisk += 1;
+      this.#counters.revivals += 1;
+      return target;
+    } finally {
+      release();
+    }
+  }
+
+  /**
+   * A fresh buffer holding this piece's bytes.
+   *
+   * @param {number} index
+   * @param {Uint8Array} bytes
+   * @returns {SharedArrayBuffer}
+   */
+  #copyIntoNewBuffer(index, bytes) {
+    const length = this.#lengthOf(index);
+    const sab = new SharedArrayBuffer(length);
+    const view = Buffer.from(sab);
+    if (bytes.copy) {
+      bytes.copy(view, 0, 0, length);
+    } else {
+      view.set(bytes.subarray(0, length), 0);
+    }
+    return sab;
+  }
+
+  /**
+   * Drop the disk copy of a piece that memory now holds — after any spill of
+   * that same piece has finished.
+   *
+   * `DiskTier.write` records the index when it COMPLETES, so forgetting while a
+   * spill of that index is still running let the completing write put it back,
+   * and a later read then returned the stale bytes.
+   *
+   * @param {number} index
+   * @returns {Promise<void>}
+   */
+  async #forgetOnDisk(index) {
+    const spill = this.#evicting.get(index);
+    if (spill) {
+      await spill.catch(() => undefined);
+    }
+    this.#disk.forget(index);
+  }
 
   put(index, bytes, callback = () => undefined) {
     if (this.#closed) {
@@ -371,65 +556,28 @@ export class SharedPieceStore {
       return;
     }
 
-    // Overwrite in place if already resident: no eviction needed.
-    if (this.#buffers.has(index)) {
-      const write = async () => {
-        const length = this.#lengthOf(index);
-        // Replace buffer so readers with old reference don't see torn write.
-        const sab = new SharedArrayBuffer(length);
-        const view = Buffer.from(sab);
-        if (bytes.copy) {
-          bytes.copy(view, 0, 0, length);
-        } else {
-          view.set(bytes.subarray(0, length), 0);
-        }
-        this.#buffers.set(index, sab);
-        this.#lru.touch(index);
-        this.#disk.forget(index);
-      };
-      write().then(() => callback(null), (error) => callback(error));
-      return;
-    }
-
     const write = async () => {
-      await this.#claimSlot();
-      const length = this.#lengthOf(index);
-      const sab = new SharedArrayBuffer(length);
-      const view = Buffer.from(sab);
-      if (bytes.copy) {
-        bytes.copy(view, 0, 0, length);
-      } else {
-        view.set(bytes.subarray(0, length), 0);
+      // Already resident: the buffer is replaced, not added, so no slot is
+      // needed and none is claimed. A fresh buffer rather than a write into the
+      // old one, so a reader holding the old reference cannot see a torn write.
+      if (this.#buffers.has(index)) {
+        this.#buffers.set(index, this.#copyIntoNewBuffer(index, bytes));
+        this.#lru.touch(index);
+        await this.#forgetOnDisk(index);
+        this.#noteProgress();
+        return;
       }
-      this.#registerPiece(index, sab);
-      this.#disk.forget(index);
+
+      const release = await this.#claimSlot();
+      try {
+        this.#registerPiece(index, this.#copyIntoNewBuffer(index, bytes));
+        await this.#forgetOnDisk(index);
+      } finally {
+        release();
+      }
     };
 
-    write().then(() => callback(null), (error) => {
-      // If claim failed, outstanding was already incremented; correct it.
-      // #registerPiece decrements on success; on failure we must decrement too.
-      // But #claimSlotOnce already handles increment; we need to decrement if write threw before register.
-      // Easiest: if error and outstanding still +1 and piece not registered, decrement.
-      if (error) {
-        // If we reserved but never registered, outstanding is still +1.
-        // Check if piece is not in map and we have outstanding.
-        if (!this.#buffers.has(index) && this.#outstandingPieces > 0) {
-          // Only decrement if the failure happened before register.
-          // Heuristic: if error message is pinned exhaustion, it came from claimSlotOnce which did not increment? Actually claimSlotOnce increments only on success/eviction.
-          // For pinned error, outstanding was not incremented? Let's handle: claimSlot throws before increment? No, it throws after check, without increment.
-          // So only failures after claim (disk write etc) need decrement — those have outstanding +1.
-          // We conservatively decrement if outstanding >0 and piece not registered.
-          // But to avoid double-decrement we check if this specific write's outstanding is still held.
-          // Simple: decrement if outstanding >0 and piece not in map, and the error is not the pinned throw's pre-increment case.
-          // The pinned throw does not increment, so outstanding is 0 there.
-          if (this.#outstandingPieces > 0) {
-            this.#outstandingPieces -= 1;
-            this.#wake();
-          }
-        }
-      }
-      callback(error);
-    });
+    write().then(() => callback(null), (error) => callback(error));
   }
 
   get(index, options, callback) {
@@ -451,28 +599,14 @@ export class SharedPieceStore {
       if (buffer !== undefined) {
         this.#lru.touch(index);
         this.#counters.fromMemory += 1;
-        const view = Buffer.from(buffer, offset, length);
-        return Buffer.from(view);
+        return Buffer.from(Buffer.from(buffer, offset, length));
       }
 
-      const spill = this.#evicting.get(index);
-      if (spill) {
-        await spill.catch(() => undefined);
-      }
-
-      if (!this.#disk.has(index)) {
+      const revived = await this.#revive(index);
+      if (revived === null) {
         throw new Error(`Piece ${index} is not in the store.`);
       }
-
-      await this.#claimSlot();
-      const targetSab = new SharedArrayBuffer(pieceLength);
-      const target = Buffer.from(targetSab);
-      await this.#disk.read(index, target);
-      this.#registerPiece(index, targetSab);
-      this.#counters.fromDisk += 1;
-      this.#counters.revivals += 1;
-      const view = Buffer.from(targetSab, offset, length);
-      return Buffer.from(view);
+      return Buffer.from(Buffer.from(revived, offset, length));
     };
 
     fetch().then((bytes) => done(null, bytes), (error) => done(error));
@@ -517,30 +651,20 @@ export class SharedPieceStore {
       return this.locate(index);
     }
 
-    const spill = this.#evicting.get(index);
-    if (spill) {
-      await spill.catch(() => undefined);
-    }
-
-    if (!this.#disk.has(index)) {
+    const revived = await this.#revive(index);
+    if (revived === null) {
       return null;
     }
-
-    const pieceLength = this.#lengthOf(index);
-    await this.#claimSlot();
-    const targetSab = new SharedArrayBuffer(pieceLength);
-    const target = Buffer.from(targetSab);
-    await this.#disk.read(index, target);
-    this.#registerPiece(index, targetSab);
-    this.#counters.fromDisk += 1;
-    this.#counters.revivals += 1;
-    return this.locate(index);
+    return { buffer: revived, offset: 0, length: this.#lengthOf(index) };
   }
 
   close(callback = () => undefined) {
     this.#closed = true;
     liveStores.delete(this);
     this.#buffers.clear();
+    // Whoever is waiting for a slot is woken and finds the store closed, which
+    // is an error they can report. Left asleep they simply never returned.
+    this.#wake();
     this.#disk.close().then(() => callback(null), (error) => callback(error));
   }
 
@@ -548,6 +672,7 @@ export class SharedPieceStore {
     this.#closed = true;
     liveStores.delete(this);
     this.#buffers.clear();
+    this.#wake();
     this.#disk.destroy().then(() => callback(null), (error) => callback(error));
   }
 }

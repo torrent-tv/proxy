@@ -518,7 +518,7 @@ setInterval(() => {
     }
   }
   for (const stats of collectStoreStats()) {
-    const signature = `${stats.fromMemory}/${stats.fromDisk}/${stats.spills}/${stats.revivals}/${stats.blockedByPins}/${stats.evictedOnRevise}`;
+    const signature = `${stats.fromMemory}/${stats.fromDisk}/${stats.spills}/${stats.revivals}/${stats.blockedByPins}/${stats.evictedOnRevise}/${stats.spillFailures}`;
     if (lastReported.get(stats.name) === signature) {
       continue;
     }
@@ -535,7 +535,9 @@ setInterval(() => {
       `pinned=${stats.pinned} spilled=${stats.spilled} reads=${reads} (${fromMemoryShare}% from memory) ` +
       `spills=${stats.spills} revivals=${stats.revivals}` +
       (stats.blockedByPins > 0 ? ` blocked-by-pins=${stats.blockedByPins}` : "") +
-      (stats.evictedOnRevise > 0 ? ` evictedOnRevise=${stats.evictedOnRevise}` : "")
+      (stats.evictedOnRevise > 0 ? ` evictedOnRevise=${stats.evictedOnRevise}` : "") +
+      (stats.spillFailures > 0 ? ` spill-failures=${stats.spillFailures}` : "") +
+      (stats.outstanding > 0 ? ` outstanding=${stats.outstanding}` : "")
     );
   }
 }, STORE_REPORT_INTERVAL_MS).unref();

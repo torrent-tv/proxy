@@ -171,3 +171,21 @@ test("a reader moving its window replaces it instead of accumulating", () => {
   assert.equal(lru.evictionCandidate(), 30, "the pieces already read are free again");
   assert.equal(lru.protectedCount, 1);
 });
+
+test("the capacity follows the store's live allowance", () => {
+  const lru = new PieceLru(4);
+  for (const index of [40, 41]) {
+    lru.touch(index);
+  }
+  assert.equal(lru.isFull(), false, "two of four is not full");
+
+  // The store's allowance moves with the machine's free memory, and the LRU is
+  // told. Before this it kept the capacity it was built with for ever, so
+  // `isFull` answered against a number that had stopped being the limit.
+  lru.setCapacity(2);
+  assert.equal(lru.capacity, 2);
+  assert.equal(lru.isFull(), true, "two of two is full");
+
+  lru.setCapacity(0);
+  assert.equal(lru.capacity, 2, "a capacity below one is refused, not obeyed");
+});

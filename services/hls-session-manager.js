@@ -468,6 +468,10 @@ const BEHIND_HEAD_REPAIR_MS = 400;
 // Generous against that measurement, and far short of the hundreds of segments
 // a scan reaches.
 const BEHIND_HEAD_REPAIR_MAX_SEGMENTS = 60;
+// How far the accounting of a backward restart looks for work about to be done
+// twice. It runs on the restart path and a session an hour in has thousands of
+// segments; the figure is for a comparison, not an inventory.
+const BACKWARD_RESTART_SCAN_SEGMENTS = 300;
 // Hard cap on the total settle wait, measured from the first request of a
 // burst, so a still-moving scrubber cannot delay a genuine seek forever.
 const SEEK_SETTLE_MAX_MS = 1_000;
@@ -4699,6 +4703,10 @@ export class HlsSessionManager {
     // 0.54-1.47 s — does not account for it. Before rebuilding the hottest path
     // in the proxy on a guess, make each stage state its own cost.
     const restartEnteredAt = Date.now();
+    // Reads where the old run began BEFORE the new one overwrites it, and does
+    // not await: everything below is the restart path, which is measured in
+    // milliseconds and has been worked on twice to keep it that way.
+    this.#accountBackwardRestart(session, startIndex);
     // One directory per run. Two runs writing the same segment name at once
     // produce a file that is neither, which is the only reason a restart ever
     // had to wait for its predecessor to die.
@@ -9328,6 +9336,85 @@ export class HlsSessionManager {
       `produced ${produced === null ? "nothing yet — no position reported" : `${produced.toFixed(1)}s`} ` +
       `at ${speed}${produced !== null && produced <= 0 ? " — the encoder has not moved, so it is waiting on its input" : ""})`
     );
+  }
+
+  /**
+   * What moving the encoder BACKWARDS costs, said out loud when it happens.
+   *
+   * Nothing already written is lost — every run keeps its own directory and
+   * {@link HlsSessionManager##findProducedFile} serves the union of all of them
+   * — so the price of a restart is not the files. It is two other things, and
+   * neither was ever counted:
+   *
+   *  - **work done twice.** The new run begins at the target and encodes
+   *    forward through segments the old run had already finished. ffmpeg cannot
+   *    know they exist, so it makes them again.
+   *  - **the viewer in front.** While the run walks back up to where it already
+   *    was, nothing new is being made ahead of them, and their cushion drains.
+   *
+   * Both are what decides whether a session should be allowed a SECOND
+   * concurrent run instead — roadmap item 64. That question cannot be answered
+   * from taste, and this is the reading it needs: how often it happens at all,
+   * how far back, and how much of the walk is a repeat.
+   *
+   * Nothing here is awaited by the caller. Everything below the call site is
+   * the restart path, which is measured in milliseconds and has been worked on
+   * twice to keep it that way; a reading that delays the thing it is reading
+   * about is not a reading. The figures that MUST be taken before the new run
+   * exists are taken synchronously, and only the file counting is left to run
+   * on its own — against the directories that existed at this instant, so what
+   * the new run is about to write cannot be counted as already there.
+   *
+   * @param {HlsSession} session
+   * @param {number} startIndex - Where the new run will begin.
+   * @returns {void}
+   */
+  #accountBackwardRestart(session, startIndex) {
+    const previousStart = session.encodeStartIndex;
+    if (!Number.isInteger(previousStart) || !Number.isInteger(startIndex) || startIndex >= previousStart) {
+      // A first run, or one moving forward. Neither costs anything here: a
+      // forward restart skips material it never made.
+      return;
+    }
+    const processed = Number(session.progress?.processedSeconds);
+    const head = Number.isFinite(processed)
+      ? Math.max(previousStart, this.#segmentIndexForTime(session, processed))
+      : previousStart;
+    // Bounded: a session an hour in has thousands of segments, and the count is
+    // for a comparison, not an inventory.
+    const last = Math.min(head, startIndex + BACKWARD_RESTART_SCAN_SEGMENTS);
+    const dirsBefore = this.#runDirs(session);
+    const accounting = session.backwardRestarts ?? { count: 0, segmentsBack: 0, worstBack: 0, remade: 0 };
+    accounting.count += 1;
+    accounting.segmentsBack += previousStart - startIndex;
+    accounting.worstBack = Math.max(accounting.worstBack, previousStart - startIndex);
+    session.backwardRestarts = accounting;
+
+    void (async () => {
+      let alreadyOnDisk = 0;
+      for (let index = startIndex; index <= last; index += 1) {
+        const fileName = session.segmentFormat.segmentFileName(index);
+        for (const dir of dirsBefore) {
+          try {
+            await access(path.join(dir, fileName));
+            alreadyOnDisk += 1;
+            break;
+          } catch {
+            // Not this run's; try an older one.
+          }
+        }
+      }
+      accounting.remade += alreadyOnDisk;
+      logger.info(
+        `transcode ${session.id} moving the encoder BACK from #${previousStart} to #${startIndex} ` +
+        `(head was #${head}): ${alreadyOnDisk} of the ${last - startIndex + 1} segment(s) it will walk through ` +
+        `are already on disk and will be made again, and nothing is produced ahead of #${head} until it gets ` +
+        `back there — ${accounting.count} backward restart(s) this session, worst ${accounting.worstBack} ` +
+        `segment(s) back, ${accounting.remade} segment(s) remade in total (roadmap 64)`
+      );
+    })().catch(() => {
+      // silent-ok: a reading that fails is not worth ending a restart over.
+    });
   }
 
   /**

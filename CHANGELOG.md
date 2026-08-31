@@ -1,4 +1,4 @@
-## 2.64.10
+## 2.66.1
 
 - **Fix**: When a re-encode cannot keep up and nothing LOWER is on offer, the budget asks for the COPY instead of leaving the viewer where they are. "Cheaper" in that rule meant "fewer pixels", and it had no way to express that a copied rung costs no encoder at all, whatever its size — so it looked down, found every rung below refused, and gave up. Field 2026-08-31 and it cost the whole film: a 444x240 ultrafast encode ran at 0.43-0.94x for fifty minutes while the source's own 1038p sat on offer beside it, copied and free; the line `nothing lower is on offer; leaving the picture alone` printed fifty times and the picture stood still 161 times for 940 seconds. On a copied source the way out is up, and it is both the fastest thing the host can serve and the best picture it has (`research/session-2026-08-31-seeks-and-the-copy.md`).
 

@@ -1,3 +1,7 @@
+## 2.64.5
+
+- **Fix**: A rung measured at 0.007x is no longer kept just because it is on screen. The `playingHeight` exemption is now checked after the `measured < 1` withdrawal, so a 4K HEVC transcode at 0.007x on a CM4 (field 2026-08-31, 0.1x at 23:45 and 0.007x at 06:57, 0.04s buffered) is withdrawn and the offer can become empty instead of stalling the viewer with no way to downgrade. `ownHeight` is kept only for a copied source (`!transcodeVideo`), not for a re-encode already running at 0.18x.
+
 ## 2.64.4
 
 - **Fix**: Piece store holds one `SharedArrayBuffer` per resident piece instead of a single growable pool that only ever grew. Evicting a piece deletes its buffer and the memory is reclaimable by GC — `committed` is now `resident * chunkLength`, not a high-water. On the field host a 6-piece 8 MiB overflow kept 48 MB committed; now it keeps 32 MB (roadmap 2).

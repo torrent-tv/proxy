@@ -4440,6 +4440,27 @@ export class HlsSessionManager {
     const next = this.#splicableHeights(base)
       .find((height) => height < current && offered.includes(height));
     if (next === undefined) {
+      // Nothing lower — but "lower" is not the same question as "cheaper", and
+      // on a source that is COPIED the answer is above, not below. A copied
+      // rung costs no encoder at all, whatever its size, so when a re-encode
+      // cannot keep up it is both the fastest thing this host can serve AND the
+      // best picture it has.
+      //
+      // Field 2026-08-31, and it cost the viewer the whole film: an ultrafast
+      // 444x240 encode ran at 0.43-0.94x for fifty minutes while the source's
+      // own 1038p sat on offer beside it, copied and free. This line printed
+      // fifty times — "nothing lower is on offer; leaving the picture alone" —
+      // and the picture stood still 161 times for 940 seconds. The rescue was
+      // on the screen the whole time and the rule could only look down.
+      const copied = this.#copiedHeightOf(base);
+      if (copied > 0 && copied !== current && offered.includes(copied)) {
+        logger.info(
+          `[budget] transcode ${session.id} ${reasonText} at ${current}p and nothing lower is on offer, ` +
+            `but ${copied}p is COPIED on this file — no encoder at all, and a better picture. ` +
+            `Asking for it instead of leaving the viewer on an encode that cannot keep up`
+        );
+        return this.#askQualityHeight(base, copied, reasonText);
+      }
       logger.info(
         `[budget] transcode ${session.id} ${reasonText} at ${current}p, but nothing lower is on offer ` +
           `for "${session.fileName}"; leaving the picture alone`
@@ -4447,6 +4468,25 @@ export class HlsSessionManager {
       return false;
     }
     return this.#askQualityHeight(base, next, reasonText);
+  }
+
+  /**
+   * The height this family serves by COPY, or zero when every rung is encoded.
+   *
+   * The one rung whose cost does not depend on the machine: the source's own
+   * height, on a base whose video is not re-encoded. `offeredHeights` never
+   * withdraws it for that reason, so it is always available as somewhere to
+   * return to — which is exactly what {@link HlsSessionManager##askLowerHeight}
+   * had no way to say.
+   *
+   * @param {HlsSession} base
+   * @returns {number}
+   */
+  #copiedHeightOf(base) {
+    if (!base || base.transcodeVideo === true) {
+      return 0;
+    }
+    return Math.round(Number(base.sourceHeight) || 0);
   }
 
   /**

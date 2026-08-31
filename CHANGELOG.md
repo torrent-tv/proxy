@@ -1,3 +1,7 @@
+## 2.64.10
+
+- **Fix**: When a re-encode cannot keep up and nothing LOWER is on offer, the budget asks for the COPY instead of leaving the viewer where they are. "Cheaper" in that rule meant "fewer pixels", and it had no way to express that a copied rung costs no encoder at all, whatever its size — so it looked down, found every rung below refused, and gave up. Field 2026-08-31 and it cost the whole film: a 444x240 ultrafast encode ran at 0.43-0.94x for fifty minutes while the source's own 1038p sat on offer beside it, copied and free; the line `nothing lower is on offer; leaving the picture alone` printed fifty times and the picture stood still 161 times for 940 seconds. On a copied source the way out is up, and it is both the fastest thing the host can serve and the best picture it has (`research/session-2026-08-31-seeks-and-the-copy.md`).
+
 ## 2.66.0
 
 - **New**: A soundtrack that ships beside the picture is fetched WHOLE once the swarm has capacity to spare, so a later switch to it does not wait. It is a twentieth of the picture — 30 MB against 566 MB on the field torrent — and having it on disk is the difference between an instant switch and one that pays for its own first pieces. The moment it starts is not a guess about the swarm: it is when the encoder is already as far ahead of the viewer as `--lookahead` lets it get, which is the cushion figure the session already measures and prints. Once per file, and only for a soundtrack in a file of its own.

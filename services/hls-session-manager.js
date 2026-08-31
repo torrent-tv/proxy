@@ -1257,6 +1257,34 @@ function headsOf(session) {
   return session.consumerHeads;
 }
 
+/**
+ * WHICH of the three readings answered, which is a different question from what
+ * the answer was.
+ *
+ * It matters for one thing: `openedAt` is not a request edge. The other two are
+ * — a seek and a requested segment are both places a viewer has moved to while
+ * holding a buffer, so the picture is behind them by however deep that buffer
+ * is. `openedAt` is where a session was created and nothing has been asked for
+ * since, so the picture is exactly there and there is nothing to subtract.
+ * Reading the number without knowing which of the three it was is what started
+ * a cold open's audio two minutes early on 2026-08-31.
+ *
+ * @param {{ seeked?: number, lastRequestedStart?: number | null, openedAt?: number }} readings
+ * @returns {"seeked" | "requested" | "opened" | "none"}
+ */
+export function viewerPositionSource({ seeked, lastRequestedStart, openedAt }) {
+  if (Number.isFinite(seeked) && seeked > 0) {
+    return "seeked";
+  }
+  if (Number.isFinite(lastRequestedStart) && lastRequestedStart > 0) {
+    return "requested";
+  }
+  if (Number.isFinite(openedAt) && openedAt > 0) {
+    return "opened";
+  }
+  return "none";
+}
+
 export function resolveViewerPosition({ seeked, lastRequestedStart, openedAt }) {
   if (Number.isFinite(seeked) && seeked > 0) {
     return seeked;
@@ -2408,8 +2436,19 @@ export class HlsSessionManager {
     // asked for #152, and 45 s later the browser gave up with "no data arrived
     // from the proxy" while the transcode ran happily at 9.9x through the
     // opening credits.
-    const firstIndex = normalizedStartPosition > 0
-      ? this.#segmentIndexForTime(session, normalizedStartPosition)
+    // From what the viewer ASKED for, not from the rounded figure. The rounding
+    // exists to answer one question — is this the same session as somebody
+    // else's — and it is the wrong number for this one, because `Math.round`
+    // can move the position FORWARD: 588s became 590s, which falls in segment
+    // #85 while the viewer at 588s is inside #84. The player then asked for a
+    // segment behind the run, the run was restarted onto it, and the 4.5s it
+    // had produced were thrown away (field 2026-08-31,
+    // `research/cold-open-audio-start-2026-08-31.md`).
+    const requestedStart = Number.isFinite(startPositionSeconds) && startPositionSeconds > 0
+      ? startPositionSeconds
+      : 0;
+    const firstIndex = requestedStart > 0
+      ? this.#segmentIndexForTime(session, requestedStart)
       : 0;
     await this.#startEncodeRun(session, firstIndex);
 
@@ -7824,8 +7863,38 @@ export class HlsSessionManager {
       // would start the run where no request can ever reach it.
       return Math.max(0, Math.min(earliestStated, readHead) - this.segmentDurationSec);
     }
+    if (this.#viewerPositionSourceOf(watching) === "opened") {
+      // The session has not started. Nobody has seeked, nobody has asked for a
+      // segment, and nobody has reported anything — so the read head is not a
+      // request edge at all, it is where the viewer opened, and a browser that
+      // has just opened holds no buffer by construction. Subtracting one here
+      // is not erring "early, the cheap direction": it is the whole of the
+      // start-up cost. Field 2026-08-31: a page opened at 588s started its
+      // sound at 460s, 131 seconds of film nobody would hear, and the segment
+      // the viewer needed took 38.8s to appear against the picture's 8.4s
+      // (`research/cold-open-audio-start-2026-08-31.md`).
+      return Math.max(0, readHead - this.segmentDurationSec);
+    }
     const buffered = deepestBuffer === null ? LOOKAHEAD_PAUSE_SECONDS : deepestBuffer;
     return Math.max(0, readHead - buffered - this.segmentDurationSec);
+  }
+
+  /**
+   * Which reading gave this session's viewer position — see
+   * {@link viewerPositionSource}.
+   *
+   * @param {HlsSession} session
+   * @returns {"seeked" | "requested" | "opened" | "none"}
+   */
+  #viewerPositionSourceOf(session) {
+    const lastRequestedStart = Number.isInteger(session.lastRequestedSegment) && session.lastRequestedSegment > 0
+      ? this.#segmentStartTime(session, session.lastRequestedSegment)
+      : null;
+    return viewerPositionSource({
+      seeked: session.viewerPositionSeconds,
+      lastRequestedStart,
+      openedAt: session.progress?.startPositionSeconds
+    });
   }
 
   #viewerPositionOf(session) {

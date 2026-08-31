@@ -1071,3 +1071,42 @@ test("a rung is never served from the COPY, whatever height the copy happens to 
 
   assert.equal(asked.id, VARIANT_ID, "the re-encoded rung is its own session, not the copy");
 });
+
+test("a file opened at a position starts its sound THERE, not a look-ahead earlier", async (t) => {
+  const { manager, base, dirPath } = await managerWithBase();
+  t.after(async () => {
+    await manager.disposeAll();
+    await rm(dirPath, { recursive: true, force: true });
+  });
+  base.audioSeparate = true;
+  // The state at the instant a page is opened at a position: nothing seeked,
+  // no segment served, no report from anybody. The read head is then not a
+  // request edge — it is where the session was made — and a browser that has
+  // just opened holds no buffer at all.
+  base.viewerPositionSeconds = null;
+  base.lastRequestedSegment = null;
+  base.netReports.clear();
+  base.progress.startPositionSeconds = 588;
+  manager.getCachedAudioTracks = () => [
+    { index: 0, language: "rus", title: "", isDefault: true },
+    { index: 1, language: "eng", title: "", isDefault: false }
+  ];
+  const created = [];
+  manager.createOrGetSession = async (params) => {
+    created.push(params);
+    const rendition = fakeSession({ id: VARIANT_ID, encodeHeight: 0, dirPath });
+    rendition.audioOnly = true;
+    return { sessionId: VARIANT_ID, session: rendition };
+  };
+
+  await manager.resolveAudioRenditionFile(BASE_ID, 1, "segment-00010.mp4");
+
+  // Field 2026-08-31: this answered 460 for a page opened at 588 — the whole
+  // 120 s look-ahead subtracted from a buffer that did not exist — and the
+  // segment the viewer needed took 38.8 s to appear against the picture's 8.4 s.
+  assert.equal(
+    created[0].startPositionSeconds,
+    584,
+    "where the viewer opened, less one segment of margin, and nothing else"
+  );
+});

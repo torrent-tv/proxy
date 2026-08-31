@@ -9,8 +9,22 @@
  *
  * Both follow from the same two measured quantities, and from nothing else:
  *
- *   W — how long a read waits for a piece it needs (the worst recent one);
- *   T — how long there is between such waits (the median recent interval).
+ *   W — how long the supply is INTERRUPTED (the worst recent stall);
+ *   T — how long the encoder RUNS between two stalls (the median recent gap).
+ *
+ * Both words are load-bearing, and getting either wrong is what produced a
+ * demanded speed of 4422x on 2026-08-31.
+ *
+ * A stall is not a wait. Several readers walk one file — the picture and each
+ * audio rendition — so a piece that has not arrived blocks all of them, and
+ * their waits end within milliseconds of each other. Counted as separate
+ * interruptions they gave an interval of 0.00 s. Waits are therefore merged into
+ * the stretches during which the supply was not delivering, however many readers
+ * noticed.
+ *
+ * And T is the RUNNING time, from the end of one stall to the start of the next
+ * — not the spacing between their ends, which includes a stall's own duration
+ * and so credits the encoder with cushion it was not building.
  *
  * **The margin.** A step producing at speed `v` gains `v - 1` seconds of
  * cushion for every second it runs, and an interruption of `W` seconds costs
@@ -19,10 +33,13 @@
  *
  *     (v - 1) × T > W        i.e.        v > 1 + W / T
  *
- * On the field torrent: waits every 2.22 s, worst 3.16 s, so the honest bar is
- * 2.42 — against the 1.5 that was assumed, and the 1.05 that was measured. The
- * same arithmetic explains why a copied stream never stalls: at 8x it gains
- * 15.5 s between interruptions and loses at most 4.8 s.
+ * On the field torrent: stalls of 1.49 s with 0.73 s of running between them,
+ * the worst 3.16 s, so the honest bar is 5.33 — against the 1.5 that was
+ * assumed, and the 1.05 that was measured. (An earlier reading of the same data
+ * gave 2.42 by using the end-to-end spacing; it was too low in the same
+ * direction as the guess it replaced.) The same arithmetic explains why a copied
+ * stream never stalls: at 8x it gains 10.7 s between stalls and loses at most
+ * 4.8 s.
  *
  * **The buffer.** It must cover the worst interruption that can arrive before
  * it can be refilled, whichever source that interruption comes from, plus the
@@ -62,10 +79,26 @@ export function requiredSpeedFrom(waits) {
   if (ordered.length < 2) {
     return null;
   }
-  const worstWaitSec = Math.max(...ordered.map((wait) => wait.waitedMs)) / 1000;
+  // One INTERRUPTION, not one wait. Several readers walk the same file — the
+  // picture and each audio rendition — and a piece that has not arrived blocks
+  // all of them at once. Counted as separate interruptions, those simultaneous
+  // waits gave a near-zero interval and therefore a required speed of thousands:
+  // measured 2026-08-31, `worst wait 13.26s, one every 0.00s, 2 measured` became
+  // 4422.00x, and every quality step was refused against it.
+  const interruptions = mergeOverlapping(ordered);
+  if (interruptions.length < 2) {
+    // One interruption shows no interval, and an interval invented from one
+    // point is exactly what this file exists to remove.
+    return null;
+  }
+  const worstWaitSec = Math.max(...interruptions.map((one) => one.end - one.start)) / 1000;
   const intervals = [];
-  for (let index = 1; index < ordered.length; index += 1) {
-    const gapMs = ordered[index].at - ordered[index - 1].at;
+  for (let index = 1; index < interruptions.length; index += 1) {
+    // From the END of one interruption to the START of the next: that is the
+    // stretch the encoder actually runs for and builds cushion in. Measuring
+    // end-to-end instead counted each interruption's own duration as part of
+    // the recovery it is supposed to be recovered from.
+    const gapMs = interruptions[index].start - interruptions[index - 1].end;
     if (gapMs > 0) {
       intervals.push(gapMs / 1000);
     }
@@ -81,8 +114,39 @@ export function requiredSpeedFrom(waits) {
     requiredSpeed: 1 + worstWaitSec / medianIntervalSec,
     worstWaitSec,
     medianIntervalSec,
-    samples: ordered.length
+    // Interruptions, not waits: what the figure is derived from. The two differ
+    // whenever more than one reader walks the file, and reporting the raw count
+    // is what made the 4422x line look better evidenced than it was — "24
+    // measured" was 24 waits over far fewer actual stalls.
+    samples: interruptions.length,
+    waits: ordered.length
   };
+}
+
+/**
+ * Waits joined into the interruptions they actually were.
+ *
+ * A wait spans `[at - waitedMs, at]`. Two that overlap or touch are one stretch
+ * during which the supply was not delivering, however many readers noticed it.
+ *
+ * @param {SupplyWait[]} ordered - Usable waits, oldest END first.
+ * @returns {Array<{ start: number, end: number }>} Disjoint, in time order.
+ */
+function mergeOverlapping(ordered) {
+  const spans = ordered
+    .map((wait) => ({ start: wait.at - wait.waitedMs, end: wait.at }))
+    .sort((left, right) => left.start - right.start);
+  /** @type {Array<{ start: number, end: number }>} */
+  const merged = [];
+  for (const span of spans) {
+    const last = merged[merged.length - 1];
+    if (last && span.start <= last.end) {
+      last.end = Math.max(last.end, span.end);
+      continue;
+    }
+    merged.push({ ...span });
+  }
+  return merged;
 }
 
 /**

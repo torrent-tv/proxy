@@ -623,8 +623,14 @@ function noteSupplyWait(key, label, waitedMs) {
   });
   logger.info(
     `supply "${label.slice(0, 40)}": a step must run at ${demand.requiredSpeed.toFixed(2)}x ` +
-    `to survive this swarm (worst wait ${demand.worstWaitSec.toFixed(2)}s, one every ` +
-    `${demand.medianIntervalSec.toFixed(2)}s, ${demand.samples} measured) — ` +
+    // "Interruption", not "wait": several readers walk one file — the picture
+    // and each audio rendition — so one missing piece produces one stall and
+    // several waits. Saying how many of each is what makes the figure readable;
+    // reporting the waits alone made `2 measured` look like two interruptions
+    // 3 ms apart, and the demanded speed came out at 4422x.
+    `to survive this swarm (worst stall ${demand.worstWaitSec.toFixed(2)}s, one every ` +
+    `${demand.medianIntervalSec.toFixed(2)}s of running, ${demand.samples} stall(s) ` +
+    `from ${demand.waits} wait(s)) — ` +
     `and the smallest buffer that hides it is ${buffer ? buffer.seconds.toFixed(1) : "?"}s` +
     // What steering the blocked piece onto another peer bought, as the
     // difference between the waits where it placed something and the waits
@@ -890,6 +896,15 @@ export async function* readFragments({
       }
 
       const waitStartedAt = Date.now();
+      // What the WHOLE torrent received while this one piece was missing. It is
+      // the reading that separates the two causes a wait can have, and neither
+      // could be told from the other before: bytes arriving briskly throughout
+      // mean the swarm had capacity and this piece was stuck behind the wire
+      // that reserved it — the blocked-piece tail; bytes barely moving mean
+      // there was nothing to be had, and no reordering of requests would have
+      // helped. Asked of 2026-08-31, when a session with 4-5 peers of 38 known
+      // waited 41.32 s at worst and the log could not say which it was.
+      const downloadedAtWaitStart = Number(torrent?.downloaded) || 0;
       // The reader is blocked, so this piece is now the only thing that matters
       // on this torrent: hand it to the fastest wires that hold it. A block is
       // reserved for exactly one wire, and the read ends when the slowest
@@ -999,11 +1014,21 @@ export async function* readFragments({
       }
       if (waitedMs >= PIECE_WAIT_LOG_MS) {
         const rateKbps = Math.round(pieceLength / 1024 / (waitedMs / 1000));
+        // Two rates, side by side, and no verdict word between them: the swarm's
+        // own delivery during the wait against what this piece managed. Both are
+        // measured; which one a reader calls "the cause" follows from the pair
+        // without a threshold having to be chosen here. Far apart means the
+        // bytes were flowing and this piece was not among them; close together,
+        // or both near zero, means there was nothing to deliver.
+        const swarmBytes = Math.max(0, (Number(torrent?.downloaded) || 0) - downloadedAtWaitStart);
+        const swarmKbps = Math.round(swarmBytes / 1024 / (waitedMs / 1000));
         logger.info(
           `piece-reader: waited ${waitedMs}ms for piece ${pieceIndex} ` +
             `(${pieceIndex - firstPiece + 1} of ${lastPiece - firstPiece + 1} in a read from ` +
             `${(start / 1024 / 1024).toFixed(0)}MB of "${file.name}") ` +
-            `— ${rateKbps}KB/s on this piece; ` +
+            `— ${rateKbps}KB/s on this piece while the swarm delivered ` +
+            `${swarmKbps}KB/s (${(swarmBytes / 1024 / 1024).toFixed(1)}MB) across the torrent, ` +
+            `${Number(torrent?.numPeers) || 0} peers connected; ` +
             (supply
               ? `${supply.holders}/${supply.peers} peers had it, ${supply.askedOf} were asked, ` +
                 `${supply.blocks} blocks (${Math.round((supply.blocks * 16384) / 1024)}KB) in flight at peak`

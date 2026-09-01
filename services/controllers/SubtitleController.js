@@ -9,7 +9,7 @@
 
 import { subtitleOrchestrator } from "../orchestrators/SubtitleOrchestrator.js";
 import { convertSubtitleToVtt, decodeSubtitleBytes } from "../subtitle-convert.js";
-import { detectLanguage } from "../language-detect.js";
+import { detectLanguage, detectLanguageFromVtt } from "../language-detect.js";
 import { finalizeCues } from "../torrent-worker/subtitle-cues.js";
 
 const EXTERNAL_MAX_BYTES = 8 * 1024 * 1024;
@@ -75,7 +75,12 @@ export class SubtitleController {
         const text = decodeSubtitleBytes(bytes);
         const vtt = convertSubtitleToVtt(text, ext);
         if (!vtt) return { error: `Unsupported subtitle format: ${ext}`, status: 422 };
-        return { vtt, language: detectLanguage(text), headers: {} };
+        // The language is read from the CONVERTED document, not from the file.
+        // The conversion has already dropped everything that is not the words —
+        // and on an ASS file that is half of it, in Latin letters, which is what
+        // made a Russian track answer `en` (field 2026-09-01, and the whole of
+        // `research/subtitle-language-ass-markup-2026-09-01.md`).
+        return { vtt, language: detectLanguageFromVtt(vtt), headers: {} };
       } catch (e) {
         return { error: `Could not read subtitle file: ${e?.message ?? e}`, status: 502 };
       } finally {
@@ -105,8 +110,23 @@ export class SubtitleController {
       const cursor = held.cues.reduce((h, c) => Math.max(h, Number(c.seq) || 0), 0);
       const fresh = Number.isInteger(since) ? held.cues.filter((c) => (Number(c.seq) || 0) > since)
         : Number.isFinite(after) ? held.cues.filter((c) => c.startSeconds > after) : held.cues;
-      const vtt = cuesToVtt(fresh, held.track?.codecId ?? track?.codecId ?? "");
-      const language = held.cues.length > 0 ? detectLanguage(held.cues.map((c) => c.text).join("\n")) : null;
+      const codecId = held.track?.codecId ?? track?.codecId ?? "";
+      const vtt = cuesToVtt(fresh, codecId);
+      // Two things this reads, and each of them was wrong before 2.68.1.
+      //
+      // It reads the cues through `finalizeCues`, which is what turns an ASS
+      // dialogue row into the words: a raw cue carries the nine
+      // comma-separated fields of the row and its `{\…}` override groups, and
+      // those are Latin on a Russian track. Detecting on the raw text is the
+      // same fault as detecting on a whole `.ass` file, one layer down.
+      //
+      // And it reads EVERY cue held so far, not the `fresh` subset that is
+      // being sent. A re-subscription after a reconnect asks only for what this
+      // page missed, which can be three lines, and three lines are not a sample
+      // of a language.
+      const language = detectLanguage(
+        finalizeCues(held.cues, codecId).map((cue) => cue.text).join("\n")
+      );
       return {
         vtt,
         language,

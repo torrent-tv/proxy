@@ -20,6 +20,7 @@
 import { readSubtitlePlan, harvestCluster } from "../container-index/matroska-subtitles.js";
 import { decodeSubtitleSample, readMp4SubtitlePlan } from "../container-index/mp4-subtitles.js";
 import { iterateElements } from "../container-index/ebml-reader.js";
+import { detectLanguage } from "../language-detect.js";
 import { logger } from "../../utils/logger.js";
 
 /** Enough to read any cluster's own element header. */
@@ -483,12 +484,23 @@ export async function warmSubtitleCues(torrent, fileIndex, sourceKey) {
     }
     const highest = newCues.reduce((max, cue) => Math.max(max, Number(cue.seq) || 0), since);
     state.pushed.set(track.trackNumber, highest);
-    const cues = finalizeCues(newCues, held.track?.codecId ?? track.codecId);
+    const codecId = held.track?.codecId ?? track.codecId;
+    const cues = finalizeCues(newCues, codecId);
     fresh.push({
       // ffmpeg's own numbering, which is the only one the browser knows.
       trackIndex: Number.isInteger(track.declaredIndex) ? track.declaredIndex : order,
       cues,
       language: held.track?.language ?? "",
+      // What the CUES say the language is, re-read on every push over every cue
+      // held so far rather than over this batch. A track whose container states
+      // no language is unreadable at the start of a session — a handful of cues
+      // is not a sample of a language, and the detector refuses to answer on one
+      // — so the answer has to be re-taken as the film downloads, and the label
+      // moved when it arrives. Costs about 6 ms per push, measured; pushes
+      // arrive about once a second per file being read.
+      detectedLanguage: detectLanguage(
+        finalizeCues(held.cues, codecId).map((cue) => cue.text).join("\n")
+      ),
       // Where the browser should resume from if it has to ask again — after a
       // reconnect, which loses the subscription these pushes ride on.
       cursor: highest,

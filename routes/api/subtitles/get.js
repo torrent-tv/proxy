@@ -25,7 +25,7 @@
  */
 
 import { spawn } from "node:child_process";
-import { detectLanguage } from "../../../services/language-detect.js";
+import { detectLanguageFromVtt } from "../../../services/language-detect.js";
 import { SubtitleController } from "../../../services/controllers/SubtitleController.js";
 import { logger } from "../../../utils/logger.js";
 
@@ -137,7 +137,7 @@ export async function handleApiSubtitlesGet(req, reply, { sourceRegistry, torren
  * Extractions by `sourceKey:fileIndex:trackIndex`, so the scan happens once per
  * track however many times it is asked for.
  *
- * @type {Map<string, { state: "running" | "done" | "failed", body?: Buffer, language?: string, error?: string }>}
+ * @type {Map<string, { state: "running" | "done" | "failed", body?: Buffer, language?: { code: string, name: string } | null, error?: string }>}
  */
 const extractions = new Map();
 
@@ -190,7 +190,12 @@ function startExtraction({ key, ffmpegBin, localBaseUrl, sourceKey, fileIndex, t
       logger.warn(`subtitles ${key}: nothing produced after ${seconds}s`);
       return;
     }
-    extractions.set(key, { state: "done", body, language: detectLanguage(String(body.subarray(0, 4096))) });
+    // The whole document, decoded as one string, and only its cue text.
+    // Detecting on the first 4096 BYTES was wrong twice over: a byte cut lands
+    // mid-character on any non-Latin track, and most of those bytes are
+    // timestamps rather than words. This runs once per track in the background,
+    // so reading all of it costs nothing anybody waits for.
+    extractions.set(key, { state: "done", body, language: detectLanguageFromVtt(body.toString("utf8")) });
     logger.info(`subtitles ${key}: ${body.length} bytes in ${seconds}s`);
   };
   ffmpeg.once("close", settle);

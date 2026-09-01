@@ -193,6 +193,37 @@ test("an embedded ASS cue is read through finalizeCues, not raw", () => {
   assert.deepEqual(detectLanguage(spoken), { code: "ru", name: "Russian" });
 });
 
+test("too little text is answered with nothing, not with a guess", () => {
+  // Measured 2026-09-02 (`research/franc-boundary-2026-09-02.md`): franc's
+  // answer for Russian walks between Bulgarian, Serbian and Russian until about
+  // 650 characters. Below that the honest answer is none — the browser then
+  // shows "Unknown", and the label moves when enough of the file has arrived.
+  const short = RUSSIAN_DIALOGUE.slice(0, 6).join("\n");
+  assert.ok(short.length < 300, `the fixture must be short: ${short.length}`);
+  assert.equal(detectLanguage(short), null);
+
+  const long = RUSSIAN_DIALOGUE.join("\n");
+  assert.ok(long.length > 650, `the fixture must be long enough: ${long.length}`);
+  assert.deepEqual(detectLanguage(long), { code: "ru", name: "Russian" });
+});
+
+test("an answer that does not survive losing half the text is not an answer", () => {
+  // A file carrying two languages — a bilingual release, or a track that turns
+  // into signs-only English partway. franc answers something for the whole; the
+  // halves disagree with it, and that disagreement is the text saying the
+  // answer rests on where it happened to be cut.
+  const english = [
+    "Do you see them out there beyond the wall?",
+    "I do, though not as clearly as I would like to.",
+    "They have been gathering since the morning came.",
+    "We should send word to the southern gate at once.",
+    "The road was cut yesterday and no rider will pass.",
+    "Then we hold what we have and wait for the dawn."
+  ].join("\n");
+  const mixed = `${RUSSIAN_DIALOGUE.slice(0, 13).join("\n")}\n${english}`;
+  assert.equal(detectLanguage(mixed), null);
+});
+
 test("a WebVTT body is decoded whole, so no character is cut in half", () => {
   // The ffmpeg extraction path used to detect on `String(body.subarray(0, 4096))`.
   // Two faults: a byte cut lands mid-character on any non-Latin track, and most

@@ -590,10 +590,12 @@ export function createDataChannelHandler({
    * are tiny (kilobytes at most for a whole track), so this is one message,
    * not a stream.
    *
-   * @param {{ sourceKey: string, fileIndex: number, trackIndex: number, cues: object[], language: string, cursor: number }} event
+   * @param {{ sourceKey: string, fileIndex: number, trackIndex: number, cues: object[],
+   *   language: string, detectedLanguage: { code: string, name: string } | null,
+   *   cursor: number }} event
    * @returns {void}
    */
-  function publishSubtitleCues({ sourceKey, fileIndex, trackIndex, cues, language, cursor }) {
+  function publishSubtitleCues({ sourceKey, fileIndex, trackIndex, cues, language, detectedLanguage, cursor }) {
     const set = subtitleSubscribers.get(`${sourceKey}:${fileIndex}`);
     if (!set || set.size === 0) {
       log(
@@ -602,7 +604,7 @@ export function createDataChannelHandler({
       );
       return;
     }
-    const message = { type: "subtitle-cues", fileIndex, trackIndex, cues, language, cursor };
+    const message = { type: "subtitle-cues", fileIndex, trackIndex, cues, language, detectedLanguage, cursor };
     const total = set.size;
     let sent = 0;
     for (const channel of set) {

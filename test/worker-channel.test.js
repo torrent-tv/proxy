@@ -75,9 +75,17 @@ test("chunks arrive with their contents intact", async () => {
   const { port1, port2 } = new MessageChannel();
   try {
     const received = [];
+    // Waited on rather than slept through. This test used to sleep 50 ms and
+    // then assert, so it failed whenever the run was busy — recorded as flaky in
+    // roadmap items 53 and 54, and it failed again on 2026-09-02 for a reason
+    // that shows exactly how little a chosen interval is worth: the worker had
+    // gained one more module to load, and 50 ms stopped being enough.
+    let arrived;
+    const firstChunk = new Promise((resolve) => { arrived = resolve; });
     port2.on("message", (message) => {
       if (message?.type === "chunk") {
         received.push(Buffer.from(message.bytes));
+        arrived();
       }
     });
 
@@ -86,7 +94,7 @@ test("chunks arrive with their contents intact", async () => {
     await sender.send(piece);
     sender.end();
 
-    await new Promise((resolve) => setTimeout(resolve, 50));
+    await firstChunk;
     assert.equal(received.length, 1);
     assert.equal(received[0].length, 256 * 1024);
     assert.equal(received[0][0], 42);

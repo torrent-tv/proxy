@@ -356,19 +356,30 @@ try {
   // fill the card an addon host boots from, and neither limit was measured
   // before (roadmap item 2).
   startMemoryReport({
-    log: (message) => {
-      logger.info(message);
-      // The other half of the piece-buffer question. Shared memory lives until
-      // BOTH isolates let go, so the worker's own count answers only its side;
-      // printed here, beside the process figures the growth shows up in.
+    log: (message) => logger.info(message),
+    // The other half of the piece-buffer question. Shared memory lives until
+    // BOTH isolates let go, so the worker's own count answers only its side;
+    // read here, on the same line as the process figures the growth shows up
+    // in and at the same instant as them.
+    readExtra: () => {
       const fragments = fragmentBufferCollection();
-      if (fragments.seen > 0) {
-        logger.info(
-          `piece buffers handed to this thread: ${fragments.seen} seen, ` +
-          `${fragments.collected} collected, ${fragments.seen - fragments.collected} still alive`
-        );
-      }
+      return fragments.seen === 0
+        ? ""
+        : `piece buffers handed here ${fragments.seen} seen, ${fragments.collected} collected, ` +
+          `${fragments.seen - fragments.collected} still alive`;
     },
+    // Once a minute cannot see what kills this process. Both out-of-memory
+    // kills of 2026-09-02 happened inside a single gap of the old cadence: the
+    // last line before the first said 602 MB and the kernel measured 1.72 GB
+    // 34 seconds later, and before the second it said 1171 MB and the kernel
+    // measured 1.86 GB nine seconds later. The figure is read every second
+    // now and written when it has moved by a step worth a line, so a rise of a
+    // gigabyte is a curve instead of one number and then a death. Every /proc
+    // read stayed behind the decision to write, so a quiet second costs one
+    // call to `process.memoryUsage()`.
+    intervalMs: 1_000,
+    quietMs: 60_000,
+    changeBytes: 25 * 1024 * 1024,
     diskPath: os.tmpdir()
   });
 

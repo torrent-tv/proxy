@@ -174,11 +174,31 @@ export class PieceLru {
    * @returns {number | null}
    */
   evictionCandidate() {
+    return this.evictionChoice().index;
+  }
+
+  /**
+   * The same choice, with the two facts that say whether the store is working
+   * or thrashing: whether protection had to yield, and how far the victim was
+   * from the nearest piece a reader declared it wants.
+   *
+   * Evicting a stale piece nobody asked for is the store doing its job.
+   * Evicting a piece inside a reader's own declared window is the store being
+   * asked to hold more than it has room for, and it comes back from disk
+   * moments later — 6565 spills and 7575 revivals in 44 minutes on
+   * 2026-09-02, with only 53.6% of reads served from memory. Nothing recorded
+   * which of the two was happening (roadmap item 9).
+   *
+   * @returns {{ index: number | null, protectionYielded: boolean, distance: number }}
+   *   `distance` is in pieces from the nearest declared window, zero when the
+   *   victim is inside one, and -1 when no reader has declared anything.
+   */
+  evictionChoice() {
     // First choice: the least recently used piece nobody is reading and nobody
     // is about to read.
     for (const index of this.#order) {
       if (!this.#pins.has(index) && !this.#isProtected(index)) {
-        return index;
+        return { index, protectionYielded: false, distance: this.#distanceToWindow(index) };
       }
     }
     // Nothing spare left. Protection yields — it is a preference, and refusing
@@ -186,10 +206,66 @@ export class PieceLru {
     // yield: a piece being read now cannot have its memory taken away.
     for (const index of this.#order) {
       if (!this.#pins.has(index)) {
-        return index;
+        return { index, protectionYielded: true, distance: this.#distanceToWindow(index) };
       }
     }
-    return null;
+    return { index: null, protectionYielded: false, distance: -1 };
+  }
+
+  /**
+   * How many pieces the live readers between them are asking to keep, against
+   * how many this store may hold.
+   *
+   * The union, not the sum: two readers of one file overlap, and counting the
+   * overlap twice would say the store is short when it is not. This is the
+   * comparison that decides whether thrashing is a policy fault or arithmetic —
+   * a union wider than the capacity cannot be held however the eviction is
+   * ordered.
+   *
+   * @returns {{ readers: number, unionPieces: number, widestPieces: number, capacity: number }}
+   */
+  demand() {
+    const ranges = [...this.#protected.values()]
+      .map((range) => ({ from: range.from, to: range.to }))
+      .sort((left, right) => left.from - right.from);
+    let unionPieces = 0;
+    let widestPieces = 0;
+    let coveredTo = -Infinity;
+    for (const range of ranges) {
+      const width = range.to - range.from + 1;
+      widestPieces = Math.max(widestPieces, width);
+      const from = Math.max(range.from, coveredTo + 1);
+      if (range.to >= from) {
+        unionPieces += range.to - from + 1;
+        coveredTo = range.to;
+      }
+    }
+    return {
+      readers: ranges.length,
+      unionPieces,
+      widestPieces,
+      capacity: this.#capacity
+    };
+  }
+
+  /**
+   * Pieces from `index` to the nearest declared window, zero inside one and -1
+   * when nothing is declared.
+   *
+   * @param {number} index
+   * @returns {number}
+   */
+  #distanceToWindow(index) {
+    let nearest = -1;
+    for (const range of this.#protected.values()) {
+      const gap = index < range.from
+        ? range.from - index
+        : index > range.to ? index - range.to : 0;
+      if (nearest === -1 || gap < nearest) {
+        nearest = gap;
+      }
+    }
+    return nearest;
   }
 
   /**

@@ -132,3 +132,52 @@ test("pinned pieces are never evicted, and the pin count is reported", async () 
     await fs.rm(directory, { recursive: true, force: true });
   }
 });
+
+test("the store says why it spills: what is asked of it, what it had to take, how soon it came back", async () => {
+  const capacity = 4;
+  const { store, directory } = await makeStore(capacity);
+  try {
+    // A reader declaring more than the store may hold. This is the shape the
+    // field session of 2026-09-02 is suspected of — 88 slots against an
+    // encoder running 120-380 s ahead of a viewer, half the reads missing —
+    // and nothing recorded it (roadmap item 9).
+    store.protectRange("video", 0, 9);
+    for (let index = 0; index < 10; index += 1) {
+      await put(store, index, pieceOf(index));
+    }
+
+    const asked = store.stats();
+    assert.equal(asked.demand.readers, 1);
+    assert.equal(asked.demand.unionPieces, 10);
+    assert.equal(asked.demand.capacity, capacity);
+    assert.ok(
+      asked.demand.unionPieces > asked.demand.capacity,
+      "a reader asking for more than the store holds is arithmetic, not a policy fault"
+    );
+    assert.ok(
+      asked.evictedProtected > 0,
+      "every eviction here had to take a piece the reader had declared"
+    );
+
+    // Read back the pieces that were spilled: each one comes home, and the
+    // store says how long it had been away.
+    for (let index = 0; index < 10; index += 1) {
+      const bytes = await get(store, index);
+      assert.ok(bytes.equals(pieceOf(index)), `piece ${index} came back changed`);
+    }
+
+    const after = store.stats();
+    assert.ok(after.revivalAgeSamples > 0, "pieces came back and their age was recorded");
+    assert.equal(typeof after.revivalAgeMedianMs, "number");
+    assert.ok(
+      after.revivedWithinFiveSeconds > 0,
+      "a piece wanted again seconds after it left should not have left"
+    );
+
+    store.releaseProtection("video");
+    assert.equal(store.stats().demand.readers, 0, "a reader that ends stops being counted");
+  } finally {
+    store.destroy(() => undefined);
+    await fs.rm(directory, { recursive: true, force: true });
+  }
+});

@@ -565,7 +565,10 @@ setInterval(() => {
     }
   }
   for (const stats of collectStoreStats()) {
-    const signature = `${stats.fromMemory}/${stats.fromDisk}/${stats.spills}/${stats.revivals}/${stats.blockedByPins}/${stats.evictedOnRevise}/${stats.spillFailures}`;
+    const signature =
+      `${stats.fromMemory}/${stats.fromDisk}/${stats.spills}/${stats.revivals}/` +
+      `${stats.blockedByPins}/${stats.evictedOnRevise}/${stats.spillFailures}/` +
+      `${stats.evictedProtected}/${stats.demand?.unionPieces ?? 0}`;
     if (lastReported.get(stats.name) === signature) {
       continue;
     }
@@ -586,6 +589,35 @@ setInterval(() => {
       (stats.spillFailures > 0 ? ` spill-failures=${stats.spillFailures}` : "") +
       (stats.outstanding > 0 ? ` outstanding=${stats.outstanding}` : "")
     );
+    // Why it spills, on its own line because it is a different question from
+    // how much it holds. Three facts, and between them they say whether the
+    // thrashing is a policy to fix or arithmetic to accept: what the readers
+    // together are asking to keep against what the store may hold; how many
+    // evictions had to take a piece a reader had declared it wants; and how
+    // long a piece stayed on disk before it was wanted back. On 2026-09-02 a
+    // session did 6565 spills and 7575 revivals with 53.6% of reads served
+    // from memory, and nothing recorded which of the three was the cause
+    // (roadmap item 9).
+    const demand = stats.demand;
+    if (demand && demand.readers > 0) {
+      const age = stats.revivalAgeMedianMs;
+      log(
+        `piece-store "${stats.name.slice(0, 40)}" demand: ${demand.readers} reader(s) want ` +
+        `${demand.unionPieces} piece(s) of ${demand.capacity} the store may hold ` +
+        `(widest window ${demand.widestPieces})` +
+        (stats.evictedProtected > 0
+          ? `; ${stats.evictedProtected} of ${stats.spills} eviction(s) took a piece a reader had declared`
+          : "; no eviction has taken a declared piece") +
+        (stats.evictedWithDistance > 0
+          ? `, a victim lay ${(stats.evictedDistanceSum / stats.evictedWithDistance).toFixed(1)} ` +
+            "piece(s) from the nearest window on average"
+          : "") +
+        (age === null
+          ? "; nothing has come back from disk yet"
+          : `; a revived piece had been on disk ${(age / 1000).toFixed(1)}s (median of ` +
+            `${stats.revivalAgeSamples}, ${stats.revivedWithinFiveSeconds} of them within 5s)`)
+      );
+    }
   }
 }, STORE_REPORT_INTERVAL_MS).unref();
 

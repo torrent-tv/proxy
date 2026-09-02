@@ -189,3 +189,66 @@ test("the capacity follows the store's live allowance", () => {
   lru.setCapacity(0);
   assert.equal(lru.capacity, 2, "a capacity below one is refused, not obeyed");
 });
+
+test("the demand is the union of the readers' windows, not their sum", () => {
+  const lru = new PieceLru(88);
+  // Two readers of one file — picture and sound — overlap by construction.
+  // Summing them would say the store is short when it is not.
+  lru.protect("video", 100, 149);
+  lru.protect("audio", 130, 179);
+
+  const demand = lru.demand();
+  assert.equal(demand.readers, 2);
+  assert.equal(demand.unionPieces, 80, "100..179 is eighty pieces, not a hundred");
+  assert.equal(demand.widestPieces, 50);
+  assert.equal(demand.capacity, 88);
+
+  lru.protect("second-viewer", 900, 979);
+  assert.equal(lru.demand().unionPieces, 160, "windows that do not touch add up");
+
+  lru.unprotect("second-viewer");
+  lru.unprotect("audio");
+  lru.unprotect("video");
+  assert.deepEqual(
+    lru.demand(),
+    { readers: 0, unionPieces: 0, widestPieces: 0, capacity: 88 },
+    "no reader asking for anything is not the same as asking for one piece"
+  );
+});
+
+test("an eviction says whether it had to take a piece a reader declared", () => {
+  const lru = new PieceLru(3);
+  lru.touch(10);
+  lru.touch(11);
+  lru.touch(12);
+  lru.protect("video", 11, 12);
+
+  const spare = lru.evictionChoice();
+  assert.equal(spare.index, 10, "the piece outside every window goes first");
+  assert.equal(spare.protectionYielded, false);
+  assert.equal(spare.distance, 1, "one piece away from the window at 11");
+
+  // Nothing spare left: both survivors are inside the declared window.
+  lru.remove(10);
+  const forced = lru.evictionChoice();
+  assert.equal(forced.index, 11);
+  assert.equal(forced.protectionYielded, true, "the store is holding less than it is asked to");
+  assert.equal(forced.distance, 0, "inside a window");
+
+  assert.equal(lru.evictionCandidate(), 11, "the older answer is the same choice");
+});
+
+test("with nothing declared there is no distance to report", () => {
+  const lru = new PieceLru(2);
+  lru.touch(7);
+  const choice = lru.evictionChoice();
+  assert.equal(choice.index, 7);
+  assert.equal(choice.distance, -1, "-1 is absence, and 0 would read as inside a window");
+
+  lru.pin(7);
+  assert.deepEqual(
+    lru.evictionChoice(),
+    { index: null, protectionYielded: false, distance: -1 },
+    "a pinned piece is never a candidate, and says so without a distance"
+  );
+});

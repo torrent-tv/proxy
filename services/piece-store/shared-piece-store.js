@@ -151,6 +151,32 @@ const MIN_RESIDENT_PIECES = 2;
  * never failing (field 2026-08-31).
  */
 const PINNED_WAIT_MS = 5_000;
+
+/**
+ * How many revival ages are kept for the median. A window, not a history: two
+ * hundred covers several minutes of the busiest session measured (7575
+ * revivals in 44 minutes) and costs two hundred numbers.
+ */
+const REVIVAL_AGE_SAMPLES = 200;
+
+/**
+ * The middle value of a sample, or null when there is nothing to take a middle
+ * of. Null rather than zero: no revivals and instant revivals are different
+ * facts and must not print the same.
+ *
+ * @param {number[]} values
+ * @returns {number | null}
+ */
+function median(values) {
+  if (values.length === 0) {
+    return null;
+  }
+  const sorted = [...values].sort((left, right) => left - right);
+  const middle = Math.floor(sorted.length / 2);
+  return sorted.length % 2 === 0
+    ? Math.round((sorted[middle - 1] + sorted[middle]) / 2)
+    : sorted[middle];
+}
 const CLAIM_RETRY_MS = 50;
 
 export class SharedPieceStore {
@@ -191,8 +217,25 @@ export class SharedPieceStore {
     blockedByPins: 0,
     waitedForPins: 0,
     evictedOnRevise: 0,
-    spillFailures: 0
+    spillFailures: 0,
+    // Whether the store is doing its job or being asked to hold more than it
+    // has room for. An eviction that had to take a piece a reader declared it
+    // wants is the second, and it comes back from disk moments later
+    // (roadmap item 9).
+    evictedProtected: 0,
+    evictedDistanceSum: 0,
+    evictedWithDistance: 0
   };
+  /** Piece index → when it was written out, for the age it comes back at. */
+  #spilledAt = new Map();
+  /**
+   * Ages, in milliseconds, of the last revivals — bounded, because the figure
+   * wanted is a median and not a history. A piece that comes back seconds
+   * after it left should not have left.
+   *
+   * @type {number[]}
+   */
+  #revivalAges = [];
 
   constructor(chunkLength, options = {}) {
     if (!Number.isInteger(chunkLength) || chunkLength < 1) {
@@ -244,6 +287,14 @@ export class SharedPieceStore {
       outstanding: this.#outstandingPieces,
       spilled: this.#disk.size,
       spilledBytes: this.#disk.size * this.#chunkLength,
+      // What the readers between them are asking this store to keep, against
+      // what it may hold. A union wider than the capacity cannot be held
+      // however the eviction is ordered, and that is the difference between a
+      // policy to fix and arithmetic to accept (roadmap item 9).
+      demand: this.#lru.demand(),
+      revivalAgeMedianMs: median(this.#revivalAges),
+      revivalAgeSamples: this.#revivalAges.length,
+      revivedWithinFiveSeconds: this.#revivalAges.filter((age) => age <= 5_000).length,
       ...this.#counters
     };
   }
@@ -263,7 +314,7 @@ export class SharedPieceStore {
     // old growable pool. Eagerly evict excess to honour the new ceiling.
     let evicted = 0;
     while (this.#buffers.size > this.#growthCeiling) {
-      const victim = this.#lru.evictionCandidate();
+      const { index: victim, protectionYielded, distance } = this.#lru.evictionChoice();
       if (victim === null) {
         break;
       }
@@ -276,6 +327,7 @@ export class SharedPieceStore {
       this.#lru.remove(victim);
       evicted += 1;
       this.#counters.evictedOnRevise += 1;
+      this.#noteEviction(protectionYielded, distance);
       // Nobody awaits this spill, so its failure has to end here. Rethrowing
       // made it an unhandled rejection, and an unhandled rejection in the
       // torrent worker ends the thread — a second way to lose the torrent
@@ -421,6 +473,7 @@ export class SharedPieceStore {
     const spill = this.#disk.write(index, bytes).then(
       () => {
         this.#counters.spills += 1;
+        this.#spilledAt.set(index, Date.now());
         this.#evicting.delete(index);
         this.#noteProgress();
       },
@@ -440,6 +493,48 @@ export class SharedPieceStore {
     this.#wake();
   }
 
+  /**
+   * Record how long a piece stayed on disk before it was wanted again.
+   *
+   * A piece that comes back seconds after it left was evicted from a working
+   * set that does not fit, and the write and the read were both waste. Kept as
+   * a bounded window of ages because the figure wanted is a median, not a
+   * history.
+   *
+   * @param {number} index
+   * @returns {void}
+   */
+  #noteRevival(index) {
+    const spilledAt = this.#spilledAt.get(index);
+    if (spilledAt === undefined) {
+      return;
+    }
+    this.#spilledAt.delete(index);
+    this.#revivalAges.push(Date.now() - spilledAt);
+    if (this.#revivalAges.length > REVIVAL_AGE_SAMPLES) {
+      this.#revivalAges.shift();
+    }
+  }
+
+  /**
+   * Record what an eviction had to take.
+   *
+   * @param {boolean} protectionYielded - The victim was inside a window a
+   *   reader had declared, and was taken anyway because nothing else was free.
+   * @param {number} distance - Pieces from the nearest declared window, -1 when
+   *   no reader declared one.
+   * @returns {void}
+   */
+  #noteEviction(protectionYielded, distance) {
+    if (protectionYielded) {
+      this.#counters.evictedProtected += 1;
+    }
+    if (distance >= 0) {
+      this.#counters.evictedDistanceSum += distance;
+      this.#counters.evictedWithDistance += 1;
+    }
+  }
+
   #wake() {
     const waiting = this.#waiters;
     this.#waiters = [];
@@ -456,7 +551,7 @@ export class SharedPieceStore {
       return true;
     }
 
-    const victim = this.#lru.evictionCandidate();
+    const { index: victim, protectionYielded, distance } = this.#lru.evictionChoice();
     if (victim === null) {
       // Nothing may leave. Wait while the store is still MOVING — a spill
       // completing, a piece admitted, a pin released — and give up when it has
@@ -491,6 +586,7 @@ export class SharedPieceStore {
     this.#buffers.delete(victim);
     this.#lru.remove(victim);
     this.#outstandingPieces += 1;
+    this.#noteEviction(protectionYielded, distance);
 
     try {
       await this.#spill(victim, victimBuffer);
@@ -538,6 +634,7 @@ export class SharedPieceStore {
       this.#registerPiece(index, target);
       this.#counters.fromDisk += 1;
       this.#counters.revivals += 1;
+      this.#noteRevival(index);
       return target;
     } finally {
       release();
@@ -593,6 +690,7 @@ export class SharedPieceStore {
       await spill.catch(() => undefined);
     }
     this.#disk.forget(index);
+    this.#spilledAt.delete(index);
   }
 
   put(index, bytes, callback = () => undefined) {
@@ -707,6 +805,7 @@ export class SharedPieceStore {
     this.#closed = true;
     liveStores.delete(this);
     this.#buffers.clear();
+    this.#spilledAt.clear();
     // Whoever is waiting for a slot is woken and finds the store closed, which
     // is an error they can report. Left asleep they simply never returned.
     this.#wake();
@@ -717,6 +816,7 @@ export class SharedPieceStore {
     this.#closed = true;
     liveStores.delete(this);
     this.#buffers.clear();
+    this.#spilledAt.clear();
     this.#wake();
     this.#disk.destroy().then(() => callback(null), (error) => callback(error));
   }

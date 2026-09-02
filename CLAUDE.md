@@ -25,6 +25,14 @@ Linux-only host (e.g. POSIX-only signals must degrade elsewhere).
     long-polls while a segment is being produced, returns retryable 503 (never
     202 — hls.js can't consume it).
 - `services/`:
+  - `demand/` — what anybody wants, in BYTES: `Window` (claimant, file, byte
+    range, urgency), `Urgency` (BLOCKED / NEAR / AHEAD / TAIL / BEHIND),
+    `DemandRegister` (live windows by claimant), `pieces.js` (the one place
+    bytes become piece numbers). No WebTorrent, no piece store, no pieces.
+  - `download/` — `SwarmSelection`, the ONLY thing that calls `select`,
+    `deselect` or `critical`, and `registry.js`, which holds one per torrent and
+    owns the cross-torrent rule that withholds the speculative levels while
+    anything urgent is missing anywhere. See `docs/download-architecture.md`.
   - `container/` — domain layer: `Container` (abstract, RFC 9559 / ISO 14496-12),
     `MatroskaContainer` / `Mp4Container` / `AviContainer`, `ContainerFactory`
     (sniff 16 bytes → precise subclass). See `docs/container-architecture.md`.
@@ -42,6 +50,10 @@ Linux-only host (e.g. POSIX-only signals must degrade elsewhere).
     `routes/*` are now thin HTTP translators.
   - `container-index/` — legacy readers (ebml-reader, matroska/mp4/avi keyframe and
     subtitle tables) — used internally by `container/*`, deprecated as direct import.
+  - `docs/download-architecture.md` — the two axes of downloading: what is
+    wanted (`demand/`) against what the swarm is told (`download/`), why urgency
+    is not a number given to the library, and why the speculative levels are
+    withdrawn rather than lowered.
   - `docs/logs.md` — where to find logs (HA `docker logs` + `/data/proxy.log`, DO
     `infra-server-1` with forwarded frontend `POST /api/client-logs`). Browser
     console not needed.

@@ -7,6 +7,14 @@ All logs are visible via container `docker logs`, no browser console copy-paste 
 Image `b34a1737/aarch64-addon-torrent_tv_proxy:<version>` = `@torrent-tv/proxy` `<version>` (see `ha-addon/torrent_tv_proxy/config.yaml`).
 
 - Console + file are the same: the proxy logs to both `stdout` and `/data/proxy.log` on start (`logging to /data/proxy.log as well as the console`).
+- **Since 2.71.0 that is true of the torrent thread too, and it was not before.**
+  A worker thread loads its own instance of every module, so the logger's file
+  handle — set once, on the main thread — was null in the worker for the life of
+  the process. Measured over a whole 49 938-line file: zero lines from the piece
+  reader (`read "…"`, `supply "…"`, every wait and its cause) and zero from the
+  torrent pool, against 52 and 36 of them in `docker logs`, which every release
+  destroys. The worker now sends its lines to the main thread, which is the only
+  writer; a line from there reads `torrent-worker: …`.
 - Via container:
   ```bash
   ssh ha "sudo docker logs app_b34a1737_torrent_tv_proxy --tail 200"

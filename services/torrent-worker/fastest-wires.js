@@ -87,7 +87,7 @@ function speedOf(wire) {
  * @param {object} torrent
  * @param {number} pieceIndex
  * @param {number} [limit] - How many wires to push it onto.
- * @returns {{ asked: number, attempted: number, considered: number, fastestBytesPerSecond: number }}
+ * @returns {{ asked: number, refusedWhileReserved: number, attempted: number, considered: number, fastestBytesPerSecond: number }}
  *   `asked` counts requests the library actually placed: it refuses when a
  *   wire's pipeline is full or when nothing can be reserved even with hotswap,
  *   and that refusal is information — a piece nobody can be asked for is
@@ -95,10 +95,11 @@ function speedOf(wire) {
  */
 export function askFastestWiresFor(torrent, pieceIndex, limit = 3) {
   if (!canPlaceRequests(torrent) || !Number.isInteger(pieceIndex) || pieceIndex < 0) {
-    return { asked: 0, attempted: 0, considered: 0, fastestBytesPerSecond: 0 };
+    return { asked: 0, refusedWhileReserved: 0, attempted: 0, considered: 0, fastestBytesPerSecond: 0 };
   }
   const candidates = wiresForPiece(torrent, pieceIndex);
   let asked = 0;
+  let refusedWhileReserved = 0;
   for (const wire of candidates.slice(0, Math.max(1, limit))) {
     try {
       // `true` is hotswap: if every block is reserved, take one from the
@@ -106,6 +107,18 @@ export function askFastestWiresFor(torrent, pieceIndex, limit = 3) {
       // precisely because a slow holder has one.
       if (torrent._request(wire, pieceIndex, true) === true) {
         asked += 1;
+      } else {
+        // Refused. Two reasons and they are different: this wire's pipeline is
+        // full, or every block of the piece is reserved and displacement did
+        // not happen. The second is the interesting one, because the thresholds
+        // that decide it are constants inside the library and not settings — a
+        // holder at 50 KB/s is just above the 48 KB/s line and is never
+        // displaced, however long the piece has been waited for. This counter
+        // is what would justify replacing `_hotswap` on the torrent, and
+        // without it that would be a change made on a hunch.
+        if (pieceIsFullyReserved(torrent, pieceIndex)) {
+          refusedWhileReserved += 1;
+        }
       }
     } catch (error) {
       // Internal call: report it once per attempt rather than letting the lever
@@ -115,6 +128,7 @@ export function askFastestWiresFor(torrent, pieceIndex, limit = 3) {
   }
   return {
     asked,
+    refusedWhileReserved,
     considered: candidates.length,
     // How many of the asks the library placed, against how many it was asked
     // for. The caller sums these over the whole wait, and summing `asked`
@@ -276,4 +290,30 @@ export function duplicateTailFor(torrent, pieceIndex) {
     break;
   }
   return { duplicated, missing: missing.length, wires: candidates.length };
+}
+
+/**
+ * Whether every block of a piece is spoken for by some wire.
+ *
+ * The condition under which the library refuses a request and only displacement
+ * could change the answer. Read from the piece's own reservation state, which
+ * is what `_request` consults.
+ *
+ * @param {object} torrent
+ * @param {number} pieceIndex
+ * @returns {boolean}
+ */
+export function pieceIsFullyReserved(torrent, pieceIndex) {
+  const piece = torrent?.pieces?.[pieceIndex];
+  if (!piece || typeof piece.reserve !== "function") {
+    return false;
+  }
+  const reservation = piece.reserve();
+  if (reservation === -1) {
+    return true;
+  }
+  // Taken only to ask the question; give it straight back, or this reader has
+  // quietly claimed a block nobody will ever deliver.
+  piece.cancel?.(reservation);
+  return false;
 }

@@ -91,13 +91,35 @@ test("a refusal is counted as a refusal", () => {
   const result = askFastestWiresFor(torrent, 11);
   assert.equal(result.asked, 0);
   assert.equal(result.considered, 2);
+  // Refused, but not because every block was spoken for — this stub has no
+  // reservations at all. The two reasons are different and only the second is
+  // the one WebTorrent's displacement thresholds decide.
+  assert.equal(result.refusedWhileReserved, 0);
+});
+
+test("a refusal with every block already reserved is counted separately", () => {
+  // The interesting refusal: a fast peer we picked was turned away because
+  // every block belongs to somebody else and displacement did not happen. The
+  // thresholds that decide it are constants in the library — the asker above
+  // 16 KB/s, the holder below 48 KB/s and twice as slow — so a holder at
+  // 50 KB/s is never displaced however long the piece has waited. This number
+  // is what would justify replacing that rule.
+  const { torrent } = torrentWith([wire({ speed: 500 })], { refuse: true });
+  torrent.pieces = [];
+  torrent.pieces[11] = { reserve: () => -1, cancel: () => undefined };
+  const result = askFastestWiresFor(torrent, 11);
+  assert.equal(result.asked, 0);
+  assert.equal(result.refusedWhileReserved, 1);
 });
 
 test("a build without the request entry is reported, not silently skipped", () => {
   assert.equal(canPlaceRequests({ wires: [] }), false);
   assert.equal(canPlaceRequests({ wires: [], _request: () => true }), true);
   const result = askFastestWiresFor({ wires: [wire({ speed: 1 })] }, 1);
-  assert.deepEqual(result, { asked: 0, attempted: 0, considered: 0, fastestBytesPerSecond: 0 });
+  assert.deepEqual(
+    result,
+    { asked: 0, refusedWhileReserved: 0, attempted: 0, considered: 0, fastestBytesPerSecond: 0 }
+  );
 });
 
 test("a wire that cannot say how fast it is ranks last rather than throwing", () => {

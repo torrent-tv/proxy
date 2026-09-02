@@ -62,17 +62,23 @@ async function recordingTorrent({ pieceCount, present = () => true }) {
     bitfield: { get: (index) => present(index) },
     files: [{ offset: 0, length: totalLength, name: "file.bin" }],
     _critical: [],
+    _selections: { _items: [] },
     calls,
     held,
     _select(from, to, _priority, _notify, isStreamSelection) {
       calls.push({ call: "select", from, to, stream: isStreamSelection === true });
       held.push(`${from}-${to}`);
+      this._selections._items.push({ from, to });
     },
     _deselect(from, to, isStreamSelection) {
       calls.push({ call: "deselect", from, to, stream: isStreamSelection === true });
       const at = held.indexOf(`${from}-${to}`);
       if (at >= 0) {
         held.splice(at, 1);
+      }
+      const item = this._selections._items.findIndex((one) => one.from === from && one.to === to);
+      if (item >= 0) {
+        this._selections._items.splice(item, 1);
       }
     },
     critical(from, to) {
@@ -181,7 +187,7 @@ test("an abandoned read leaves nothing selected", async () => {
   }
 });
 
-test("two readers add up, and one leaving takes only its own window", async () => {
+test("two readers add up, and one leaving takes only its own", async () => {
   const { torrent, store, directory } = await recordingTorrent({ pieceCount: 8000 });
   try {
     const head = readFragments({
@@ -195,18 +201,24 @@ test("two readers add up, and one leaving takes only its own window", async () =
     (await head.next()).value.release();
     (await tail.next()).value.release();
 
-    assert.equal(torrent.held.length, 2, "the two readers did not both hold a window");
-    const [headWindow, tailWindow] = torrent.held;
+    // Not a count: each reader states several bands by level, and two readers
+    // wanting the same pieces are one instruction. What matters is that both
+    // are represented and that leaving removes only what leaving should.
+    const pieceOf = (range) => Number(range.split("-")[0]);
+    const held = [...torrent.held];
+    assert.ok(held.some((range) => pieceOf(range) < 4000), "the head reader holds nothing");
+    assert.ok(held.some((range) => pieceOf(range) >= 4000), "the tail reader holds nothing");
 
     await tail.return();
-    assert.deepEqual(
-      torrent.held,
-      [headWindow],
-      `leaving reader took the wrong window (expected to remove ${tailWindow})`
+    const after = [...torrent.held];
+    assert.ok(
+      after.some((range) => pieceOf(range) < 4000),
+      "the head reader's window went with the tail reader"
     );
+    assert.ok(after.length < held.length, "the tail reader took nothing away when it left");
 
     await head.return();
-    assert.deepEqual(torrent.held, []);
+    assert.deepEqual(torrent.held, [], "the last reader left something behind");
   } finally {
     store.destroy(() => undefined);
     await fs.rm(directory, { recursive: true, force: true });

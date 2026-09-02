@@ -1,3 +1,9 @@
+## 2.71.1
+
+- **Fix**: A reader stated the same thing twice — `protectRange` to the piece store for memory, and a window to the torrent for download — and the two were separate lists that could drift. There is one statement now: `SwarmSelection.reconcile` derives both views from the register, so the swarm and the store are told what to do from the same words. Only the urgent levels reach memory: it holds what will be READ soon, and protecting the speculative tail would push out a piece the decoder is about to want.
+- **New**: A file this machine cannot sustain at ANY height is refused rather than served badly. Both offered lists empty means not even copying the picture — which costs no encoder at all — can keep up, so a session made there produces a slideshow and takes the swarm and the processor from whoever is already watching. Field 2026-08-28: five sessions on one file put every rung at 0.04x of realtime. The plan now carries `cannotServe` with the reason, which is a different thing from a spinner that never ends.
+- **Chore**: `SwarmSelection` takes its store lookup as a parameter, so the memory projection is driven by a test without constructing a real piece store.
+
 ## 2.71.0
 
 - **Fix**: The torrent thread's log lines never reached the log file. A worker thread loads its own instance of every module, so the logger's file handle — set once, on the main thread — was null there for the life of the process. Measured over a whole 49 938-line file: zero lines from the piece reader and zero from the torrent pool, against 52 and 36 of them in the container's output, which every release destroys. That is why the comparison of the two claim strategies could never be read: it was being printed into a place we wipe ourselves. The worker now sends its lines to the main thread, which is the only writer — two threads appending to one file would race on the rotation and could interleave mid-line.

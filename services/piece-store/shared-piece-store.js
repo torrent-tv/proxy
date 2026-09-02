@@ -373,6 +373,8 @@ export class SharedPieceStore {
   #blocksAllocated = 0;
   /** Whether a reader has ever declared a window here. See `wantedBytes`. */
   #everHadReader = false;
+  /** Whether the last revision had to exceed the machine's share. */
+  #beyondTheMachine = false;
   /**
    * How long a block sat free before it was taken again, in milliseconds.
    * Bounded, because what is wanted is the longest gap of RECENT work: an
@@ -467,6 +469,19 @@ export class SharedPieceStore {
     };
   }
 
+  /**
+   * Whether the machine's share of memory is smaller than one reader's window.
+   *
+   * The store holds the window anyway — refusing would leave the read it is
+   * serving unable to finish, which is worse — but it is the honest measure of
+   * "this machine cannot take any more", and it is measured rather than
+   * guessed: it is the last revision's own comparison of what the machine
+   * allowed against what the widest reader declared.
+   */
+  get isBeyondTheMachine() {
+    return this.#beyondTheMachine;
+  }
+
   /** What this store holds right now, in bytes. */
   get residentBytes() {
     return this.#buffers.size * this.#chunkLength;
@@ -527,6 +542,7 @@ export class SharedPieceStore {
     const belowAWindow = demand.readers > 0
       && Number.isFinite(wanted)
       && wanted < demand.widestPieces;
+    this.#beyondTheMachine = belowAWindow;
     // The LRU is told too. It was constructed with the store's original
     // capacity and never revised, so `isFull()` answered against a number that
     // had not been the limit for some time — dormant only because nothing calls

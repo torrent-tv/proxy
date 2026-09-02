@@ -475,7 +475,7 @@ export function createPlaybackPlanner({
   }
 
   function withHostTimings(plan) {
-    return {
+    const withOffer = {
       ...plan,
       expectedFirstSegmentMs: expectedFirstSegmentMs?.() ?? null,
       expectedSessionCreateMs: expectedSessionCreateMs?.() ?? null,
@@ -490,6 +490,20 @@ export function createPlaybackPlanner({
         : null,
       mediaInfoForOffer: undefined
     };
+    // Refused rather than served badly. Both lists empty means this machine
+    // cannot sustain this file at ANY height — not even by copying the picture,
+    // which costs no encoder at all — so a session made here would produce a
+    // slideshow and take the swarm and the processor from whoever is already
+    // watching. Field 2026-08-28: five sessions on one file put every rung at
+    // 0.04x of realtime and the viewer watched one before the process was
+    // killed. The viewer is told why, which is a different thing from a spinner
+    // that never ends.
+    const offer = withOffer.offeredHeights;
+    if (offer && offer.copy.length === 0 && offer.transcode.length === 0) {
+      withOffer.cannotServe =
+        "This proxy cannot keep up with this file at any quality right now.";
+    }
+    return withOffer;
   }
 
   return {

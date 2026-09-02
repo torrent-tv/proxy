@@ -29,6 +29,7 @@ import {
   Urgency,
   urgencyName
 } from "../demand/index.js";
+import { findSharedStore } from "../piece-store/shared-piece-store.js";
 
 export class SwarmSelection {
   #torrent;
@@ -37,15 +38,22 @@ export class SwarmSelection {
   #stated = new Map();
   /** Pieces this instance marked for displacement, so it clears only its own. */
   #displacing = null;
+  /** Claimants whose windows are currently protected in memory. */
+  #protectedInMemory = new Set();
+  #findStore;
 
   /**
    * @param {object} params
    * @param {import("webtorrent").Torrent} params.torrent
    * @param {import("../demand/index.js").DemandRegister} params.register
+   * @param {(torrent: object) => object | null} [params.findStore] - How the
+   *   piece store is reached. Injectable so a test can drive the memory
+   *   projection without constructing a real store.
    */
-  constructor({ torrent, register }) {
+  constructor({ torrent, register, findStore = findSharedStore }) {
     this.#torrent = torrent;
     this.#register = register;
+    this.#findStore = findStore;
   }
 
   /**
@@ -107,6 +115,7 @@ export class SwarmSelection {
     }
 
     this.#markDisplacement();
+    this.#projectIntoMemory();
     return { stated, withdrawn };
   }
 
@@ -117,6 +126,11 @@ export class SwarmSelection {
     }
     this.#stated.clear();
     this.#clearDisplacement();
+    const store = this.#findStore(this.#torrent);
+    for (const claimant of this.#protectedInMemory) {
+      store?.releaseProtection?.(claimant);
+    }
+    this.#protectedInMemory.clear();
   }
 
   /**
@@ -180,6 +194,46 @@ export class SwarmSelection {
       // down is not worth failing a read over.
       this.#displacing = null;
     }
+  }
+
+  /**
+   * Tell the piece store which bytes will be read soon, from the same stated
+   * needs the swarm is told about.
+   *
+   * The second half of stating a need once. Until 2026-09-02 a reader said the
+   * same thing twice — `protectRange` to the store for memory and a selection
+   * to the torrent for download — and a third piece of code read the first to
+   * rebuild the second. Now there is one statement and two views of it, both
+   * computed here.
+   *
+   * Only the urgent levels. Memory holds what will be READ soon; the tail and
+   * the gap behind the playhead are fetched speculatively and must not push a
+   * piece the decoder is about to want out of memory.
+   *
+   * @returns {void}
+   */
+  #projectIntoMemory() {
+    const store = this.#findStore(this.#torrent);
+    if (!store || typeof store.protectRange !== "function") {
+      return;
+    }
+    const holding = new Set();
+    for (const urgency of [Urgency.BLOCKED, Urgency.NEAR, Urgency.AHEAD]) {
+      for (const window of this.#register.at(urgency)) {
+        const range = this.#piecesFor(window);
+        if (!range) {
+          continue;
+        }
+        store.protectRange(window.claimant, range.from, range.to);
+        holding.add(window.claimant);
+      }
+    }
+    for (const claimant of this.#protectedInMemory) {
+      if (!holding.has(claimant)) {
+        store.releaseProtection?.(claimant);
+      }
+    }
+    this.#protectedInMemory = holding;
   }
 
   /** @returns {void} */

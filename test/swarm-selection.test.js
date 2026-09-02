@@ -26,6 +26,7 @@ function stubTorrent({ have = [], files = 1 } = {}) {
   const items = [];
   return {
     pieceLength: PIECE,
+    store: null,
     files: Array.from({ length: files }, (unused, index) => ({
       offset: index * 10 * PIECE,
       length: 10 * PIECE
@@ -188,4 +189,32 @@ test("releasing everything leaves the library holding nothing of ours", () => {
   assert.equal(torrent._selections._items.length, 0);
   assert.equal(selection.statedRanges().length, 0);
   assert.equal(torrent._critical.some((marked) => marked === true), false);
+});
+
+test("the store is told what will be read soon, from the same stated needs", () => {
+  const torrent = stubTorrent();
+  const protectedBy = new Map();
+  torrent.store = {
+    protectRange: (claimant, from, to) => protectedBy.set(claimant, `${from}-${to}`),
+    releaseProtection: (claimant) => protectedBy.delete(claimant)
+  };
+  const register = new DemandRegister();
+  const selection = new SwarmSelection({ torrent, register, findStore: () => torrent.store });
+
+  register.state({ claimant: "video", fileIndex: 0, byteStart: 0, byteEnd: PIECE - 1, urgency: Urgency.NEAR });
+  register.state({ claimant: "fill", fileIndex: 0, byteStart: 5 * PIECE, byteEnd: 9 * PIECE - 1, urgency: Urgency.TAIL });
+  selection.reconcile();
+
+  // One statement, two views of it. Until 2026-09-02 a reader said the same
+  // thing twice — once to the store for memory, once to the torrent for
+  // download — and a third piece of code read the first to rebuild the second.
+  assert.equal(protectedBy.get("video"), "0-0");
+  // But only the urgent levels: memory holds what will be READ soon, and the
+  // tail is fetched speculatively. Protecting it would push out a piece the
+  // decoder is about to want.
+  assert.equal(protectedBy.has("fill"), false);
+
+  register.withdraw("video");
+  selection.reconcile();
+  assert.equal(protectedBy.size, 0, "a reader that withdrew still held memory");
 });

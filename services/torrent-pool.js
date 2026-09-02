@@ -15,6 +15,8 @@ import { rmSync, statfsSync } from "node:fs";
 import WebTorrent from "webtorrent";
 import { logger } from "../utils/logger.js";
 import { SharedPieceStore, findSharedStore } from "./piece-store/shared-piece-store.js";
+import { Urgency } from "./demand/index.js";
+import { demandFor, forgetTorrent, reconcileAll } from "./download/registry.js";
 import { deriveSourceKey } from "./torrent-source-key.js";
 
 // The DHT's entry points. Two of the three the library ships answer nothing —
@@ -712,13 +714,6 @@ export class TorrentPool {
    */
   #readPositionByTorrent = new Map();
 
-  /**
-   * The background-fill selection held for each torrent, so it can be withdrawn
-   * again. See #updateBackgroundFill.
-   *
-   * @type {Map<import("webtorrent").Torrent, { from: number, to: number }>}
-   */
-  #backgroundFill = new Map();
 
   /** When each torrent's download first fell below the stall threshold. */
   #stallSince = new Map();
@@ -918,73 +913,6 @@ export class TorrentPool {
    * @returns {void}
    */
   /**
-   * Put back the reader windows WebTorrent has quietly dropped.
-   *
-   * A reader claims its window as a stream selection and releases it when it
-   * ends. That claim is NOT durable: `_gcSelections` deletes a selection the
-   * moment every piece in it is present, so a window that has been satisfied
-   * stops existing — and with it, everything the swarm had been asked for.
-   *
-   * While a reader keeps moving that is invisible, because the next window is
-   * claimed immediately. It becomes fatal when the reader STOPS: the encoder is
-   * held back by the look-ahead cap, ffmpeg stops reading, the reader parks on a
-   * window that is fully downloaded, the selection disappears — and nothing our
-   * code runs can notice, because the reader is parked inside a write. Measured
-   * 2026-08-05: the encoder was suspended at 22:44:51, the download hit zero at
-   * 22:45:05 and stayed there for **eleven minutes** with 150 peer connections
-   * open, `0 selection(s) covering 0 piece(s), 0 being asked, 0 blocks in
-   * flight`. When the encoder was let go there was nothing ahead of it, and the
-   * viewer's picture stopped.
-   *
-   * So the claim is re-asserted from outside, on this timer, using the windows
-   * the store already knows about — those are declared by live readers and
-   * withdrawn when they end, which is exactly the set that should be selected.
-   *
-   * @returns {void}
-   */
-  #reassertReaderWindows() {
-    for (const torrent of this.torrents.values()) {
-      const usage = this.fileUsageByTorrent.get(torrent);
-      if (!usage || usage.size === 0 || torrent?.done === true) {
-        continue;
-      }
-      const store = findSharedStore(torrent);
-      const ranges = typeof store?.protectedRanges === "function" ? store.protectedRanges() : [];
-      if (ranges.length === 0) {
-        continue;
-      }
-      const items = Array.isArray(torrent?._selections?._items) ? torrent._selections._items : [];
-      for (const range of ranges) {
-        const present = items.some((item) => item?.from === range.from && item?.to === range.to);
-        if (present) {
-          continue;
-        }
-        // Only worth re-claiming what is actually missing: re-claiming a window
-        // that is already complete would be deleted again on the next pass and
-        // the two would take turns forever.
-        let missing = false;
-        for (let index = range.from; index <= range.to && !missing; index += 1) {
-          if (!torrent.bitfield?.get(index)) {
-            missing = true;
-          }
-        }
-        if (!missing) {
-          continue;
-        }
-        try {
-          torrent._select(range.from, range.to, 1, null, true);
-          logger.info(
-            `torrent-pool: [${String(torrent.infoHash).slice(0, 8)}] re-claimed reader window ` +
-            `${range.from}-${range.to} — the selection had been dropped once it was satisfied`
-          );
-        } catch {
-          // Best effort: a torrent being torn down is not worth failing over.
-        }
-      }
-    }
-  }
-
-  /**
    * The reader windows of a torrent, and whether any of them still wants
    * something. Two questions with one answer, because both callers below need
    * exactly this: the background fill may only run when nothing is wanted, and
@@ -1012,67 +940,56 @@ export class TorrentPool {
   }
 
   /**
-   * Keep fetching the rest of the file while the viewer needs nothing.
+   * State what is worth fetching once nothing urgent is missing: the rest of
+   * each file being read, from the furthest window in THAT file to its end.
    *
-   * Owned here rather than by the reader, because the reader cannot act while
-   * it is parked — and parked is exactly the state this is for. The encoder is
-   * held back by the look-ahead cap, the viewer is comfortably ahead, the link
-   * is idle: that is the cheapest bandwidth of the whole session and it was
-   * going unused, because the fill was re-evaluated only when a reader window
-   * MOVED. Priority 0 against the window's 1, and withdrawn the moment any
-   * window wants something, so it can never take capacity from the picture.
+   * Per file, and that is a fix rather than a detail. It used to take the
+   * furthest window across ALL files and the last piece across ALL files and
+   * claim everything between: with two viewers on two episodes of one release —
+   * the ordinary case for a season pack — that claimed every episode lying
+   * between them, none of which anybody had asked for.
+   *
+   * Whether it is stated at all is not decided here. It is a level of urgency
+   * like any other, and the swarm layer withholds it while anything urgent, on
+   * ANY torrent, is still missing.
    *
    * @param {import("webtorrent").Torrent} torrent
-   * @param {{ ranges: Array<{ from: number, to: number }>, missing: boolean }} demand
    * @returns {void}
    */
-  #updateBackgroundFill(torrent, demand) {
-    const held = this.#backgroundFill.get(torrent) ?? null;
-    const wanted = !demand.missing && demand.ranges.length > 0
-      ? this.#tailAfterWindows(torrent, demand.ranges)
-      : null;
-    if (held && (!wanted || held.from !== wanted.from || held.to !== wanted.to)) {
-      try {
-        torrent._deselect?.(held.from, held.to, false);
-      } catch {
-        // Best effort.
-      }
-      this.#backgroundFill.delete(torrent);
-    }
-    if (wanted && !this.#backgroundFill.has(torrent)) {
-      try {
-        torrent._select?.(wanted.from, wanted.to, 0, null, false);
-        this.#backgroundFill.set(torrent, wanted);
-      } catch {
-        // Best effort.
-      }
-    }
-  }
-
-  /**
-   * Everything after the furthest reader window, up to the end of the file it
-   * belongs to. Null when there is nothing left.
-   *
-   * @param {import("webtorrent").Torrent} torrent
-   * @param {Array<{ from: number, to: number }>} ranges
-   * @returns {{ from: number, to: number } | null}
-   */
-  #tailAfterWindows(torrent, ranges) {
+  #stateBackgroundFill(torrent) {
+    const { register } = demandFor(torrent);
+    const usage = this.fileUsageByTorrent.get(torrent);
     const pieceLength = Number(torrent.pieceLength);
     if (!Number.isFinite(pieceLength) || pieceLength <= 0) {
-      return null;
+      return;
     }
-    const usage = this.fileUsageByTorrent.get(torrent);
-    let lastPiece = -1;
     for (const [fileIndex, count] of usage ?? []) {
       const file = count > 0 ? torrent.files?.[fileIndex] : null;
+      const claimant = `background-fill:${fileIndex}`;
       if (!file) {
+        register.withdraw(claimant);
         continue;
       }
-      lastPiece = Math.max(lastPiece, Math.floor((file.offset + file.length - 1) / pieceLength));
+      const wanted = register
+        .windows()
+        .filter((window) => window.fileIndex === fileIndex && window.claimant !== claimant);
+      const furthest = wanted.length === 0
+        ? -1
+        : Math.max(...wanted.map((window) => window.byteEnd));
+      const byteStart = furthest + 1;
+      const byteEnd = Number(file.length) - 1;
+      if (wanted.length === 0 || byteStart > byteEnd) {
+        register.withdraw(claimant);
+        continue;
+      }
+      register.state({
+        claimant,
+        fileIndex,
+        byteStart,
+        byteEnd,
+        urgency: Urgency.TAIL
+      });
     }
-    const from = Math.max(...ranges.map((range) => range.to)) + 1;
-    return lastPiece >= from ? { from, to: lastPiece } : null;
   }
 
   #reportStalledDownloads() {
@@ -1124,13 +1041,17 @@ export class TorrentPool {
       this.fileUsageByTorrent,
       Date.now()
     );
-    this.#reassertReaderWindows();
+    // The one place the swarm is told anything: it reads what everybody has
+    // stated and works out for itself what to ask for, including whether the
+    // speculative levels may be stated at all — which is a question about every
+    // torrent at once, because they share the link.
+    reconcileAll();
     for (const torrent of this.torrents.values()) {
       const usage = this.fileUsageByTorrent.get(torrent);
       if (!usage || usage.size === 0 || torrent?.done === true) {
         continue;
       }
-      this.#updateBackgroundFill(torrent, this.#readerDemand(torrent));
+      this.#stateBackgroundFill(torrent);
     }
     this.#reportStalledDownloads();
     const { bytesPerSec, reason } = decideUploadLimit(active);
@@ -1433,7 +1354,8 @@ export class TorrentPool {
                 const addedReplacement = this.client.add(torrentId, {
                   store: SharedPieceStore,
                   storeCacheSlots: 0,
-                  storeOpts: { memoryBytes: this.#memoryBytes }
+                  storeOpts: { memoryBytes: this.#memoryBytes },
+                  deselect: true
                 }, (replacement) => {
                   this.torrents.set(key, replacement);
                   this.#lastAccess.set(replacement, Date.now());
@@ -1465,7 +1387,14 @@ export class TorrentPool {
       const added = this.client.add(torrentId, {
         store: SharedPieceStore,
         storeCacheSlots: 0,
-        storeOpts: { memoryBytes: this.#memoryBytes }
+        storeOpts: { memoryBytes: this.#memoryBytes },
+        // Nothing is fetched until somebody says they want it. WebTorrent's own
+        // default is `this.select(0, this.pieces.length - 1)` — the whole
+        // torrent — and this proxy used to undo that afterwards by deselecting
+        // the files nobody had opened. On a season pack that meant every
+        // episode was being fetched for as long as the viewer took to choose
+        // one. The download set is built up from stated needs instead.
+        deselect: true
       }, (readyTorrent) => {
         this.client.off("error", onError);
         this.torrents.set(key, readyTorrent);
@@ -1495,35 +1424,6 @@ export class TorrentPool {
   }
 
   /**
-   * Mark a single file as active, deselecting all others.
-   * Prefer {@link acquireFile} when the active set may contain multiple files.
-   *
-   * @param {import("webtorrent").Torrent} torrent
-   * @param {number} fileIndex - Zero-based index into `torrent.files`.
-   * @returns {void}
-   */
-  setActiveFile(torrent, fileIndex) {
-    if (!torrent || !Array.isArray(torrent.files)) {
-      return;
-    }
-    for (let index = 0; index < torrent.files.length; index += 1) {
-      const file = torrent.files[index];
-      if (!file) {
-        continue;
-      }
-      if (index === fileIndex) {
-        if (typeof file.select === "function") {
-          file.select();
-        }
-        continue;
-      }
-      if (typeof file.deselect === "function") {
-        file.deselect();
-      }
-    }
-  }
-
-  /**
    * Increment the reference count for a file, selecting it for download.
    * Returns a release function that decrements the count; when it reaches
    * zero the file is automatically deselected.
@@ -1546,7 +1446,6 @@ export class TorrentPool {
     this.#cancelIdleRemoval(torrent);
     this.#lastAccess.set(torrent, Date.now());
     usage.set(fileIndex, (usage.get(fileIndex) ?? 0) + 1);
-    this.#syncSelections(torrent, usage);
 
     let released = false;
     return () => {
@@ -1565,8 +1464,7 @@ export class TorrentPool {
         // No active readers — schedule removal (with store) after an idle TTL.
         this.#scheduleIdleRemoval(torrent);
       }
-      this.#syncSelections(torrent, usage);
-    };
+      };
   }
 
   /**
@@ -1624,6 +1522,8 @@ export class TorrentPool {
    * @returns {void}
    */
   #removeTorrent(torrent, reason = "unknown") {
+    // Everything anybody stated for this torrent goes with it.
+    forgetTorrent(torrent);
     if (!torrent) {
       return;
     }
@@ -1953,52 +1853,19 @@ export class TorrentPool {
     }
   }
 
-  /**
-   * Drop the pieces of files nobody is reading from the download set.
-   *
-   * It does NOT select the files that ARE in use, and that is the point. What a
-   * file needs is decided by the readers walking it: each one claims a moving
-   * window around its own read head and gives it back when it ends (see
-   * `torrent-worker/piece-reader.js`). Selecting the whole file here as well
-   * put a second, contradictory claim on the same pieces — one that covered
-   * everything and therefore always outranked the window — and it was re-made
-   * on every single `/stream` request, so a seek's prioritisation survived at
-   * most until the next one. Measured consequence: a seek to 89.1% of a 4.7 GB
-   * film waited 93 s while the swarm fetched 2.47 GB in file order.
-   *
-   * A file with no reader is deselected outright, which is what stops a torrent
-   * downloading files the viewer never opened.
-   *
-   * @param {import("webtorrent").Torrent} torrent
-   * @param {Map<number, number>} usage - fileIndex → refCount.
-   * @returns {void}
-   */
-  #syncSelections(torrent, usage) {
-    if (!torrent || !Array.isArray(torrent.files)) {
-      return;
-    }
-    for (let index = 0; index < torrent.files.length; index += 1) {
-      const file = torrent.files[index];
-      if (!file || (usage.get(index) ?? 0) > 0) {
-        continue;
-      }
-      if (typeof file.deselect === "function") {
-        file.deselect();
-      }
-    }
-  }
+
 
   /**
    * Record where a file is being read from.
    *
    * This used to also decide what the torrent should download, and that was the
    * mistake: it was one of THREE places claiming pieces for the same file — the
-   * whole-file `file.select()` in `#syncSelections`, this method, and the reader
-   * itself — and they overwrote each other on every request. The claim now
-   * belongs to the reader alone, which holds a moving window around its own read
-   * head and gives it back when it ends
-   * (`torrent-worker/piece-reader.js`); several readers on one file therefore
-   * produce the union of their windows instead of the last caller's opinion.
+   * whole-file selection, a window around the read head, and the reader itself
+   * — and they overwrote each other on every request. Every need is now stated
+   * in one register (`services/demand/`) and one class turns the register into
+   * requests to the swarm (`services/download/SwarmSelection.js`); several
+   * readers on one file therefore produce the union of their windows instead of
+   * the last caller's opinion.
    *
    * What is left here is bookkeeping the readers cannot do: `getFileStats`
    * reports how much of the window ahead of the read head is still missing, so

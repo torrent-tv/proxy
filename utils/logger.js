@@ -38,6 +38,40 @@ let fileStream = null;
 /** @type {string} */
 let filePath = "";
 let writtenBytes = 0;
+/**
+ * Where lines go when this module is running in a worker thread.
+ *
+ * A worker thread is a separate instance of the runtime: it loads its own copy
+ * of every module, so `fileStream` above is a DIFFERENT variable there, and
+ * `logToFile` is only ever called on the main thread. The result was silent:
+ * measured 2026-09-02 over a whole log file of 49 938 lines, every line the
+ * torrent thread wrote through this module — the piece reader's, including the
+ * comparison of the two claim strategies that had been awaited for weeks, and
+ * the torrent pool's — was absent, while the same lines were visible in the
+ * container's output, which is destroyed by every release.
+ *
+ * Two threads cannot both write the file: they would race on the rotation and
+ * could interleave mid-line. So there is one writer, and a worker sends its
+ * lines to it. Set by the worker at startup; unset on the main thread, where
+ * the file is written directly.
+ *
+ * @type {((level: string, message: string) => void) | null}
+ */
+let forward = null;
+
+/**
+ * Send this thread's log lines to the thread that owns the file.
+ *
+ * Called by a worker at startup. Until it is, a worker's lines reach the
+ * console and nothing else — which is what they did for as long as this module
+ * has existed.
+ *
+ * @param {((level: string, message: string) => void) | null} sink
+ * @returns {void}
+ */
+export function forwardLogsTo(sink) {
+  forward = typeof sink === "function" ? sink : null;
+}
 
 /**
  * Return the current time as a compact ISO-8601 (UTC) string, e.g.
@@ -119,24 +153,32 @@ function toFile(line) {
  * @type {ProxyLogger}
  */
 export const logger = {
-  info: (message) => {
-    const line = `${PREFIX} [${ts()}] ${message}`;
-    console.log(chalk.cyan(line));
-    toFile(line);
-  },
-  success: (message) => {
-    const line = `${PREFIX} [${ts()}] ${message}`;
-    console.log(chalk.green(line));
-    toFile(line);
-  },
-  warn: (message) => {
-    const line = `${PREFIX} [${ts()}] ${message}`;
-    console.warn(chalk.yellow(line));
-    toFile(line);
-  },
-  error: (message) => {
-    const line = `${PREFIX} [${ts()}] ${message}`;
-    console.error(chalk.red(line));
-    toFile(line);
-  }
+  info: (message) => write("info", message, chalk.cyan, console.log),
+  success: (message) => write("success", message, chalk.green, console.log),
+  warn: (message) => write("warn", message, chalk.yellow, console.warn),
+  error: (message) => write("error", message, chalk.red, console.error)
 };
+
+/**
+ * One path for every level, so a line cannot reach the console and miss the
+ * file depending on which method was called or which thread called it.
+ *
+ * @param {string} level
+ * @param {string} message
+ * @param {(text: string) => string} colour
+ * @param {(text: string) => void} toConsole
+ * @returns {void}
+ */
+function write(level, message, colour, toConsole) {
+  toConsole(colour(`${PREFIX} [${ts()}] ${message}`));
+  if (forward) {
+    try {
+      forward(level, message);
+    } catch {
+      // silent-ok: a thread whose channel has closed is shutting down, and a
+      // failed log line must not be what ends it.
+    }
+    return;
+  }
+  toFile(`${PREFIX} [${ts()}] ${message}`);
+}

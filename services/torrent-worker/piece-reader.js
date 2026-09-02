@@ -21,6 +21,8 @@
  */
 
 import { findSharedStore } from "../piece-store/shared-piece-store.js";
+import { bytesOf, Urgency, urgencyName } from "../demand/index.js";
+import { demandFor } from "../download/registry.js";
 import { logger } from "../../utils/logger.js";
 import {
   askFastestWiresFor,
@@ -75,9 +77,17 @@ const READ_WINDOW_BYTES = 32 * 1024 * 1024;
  * described above. Anything else — the default — alternates per read, so the two
  * accumulate side by side from real viewing and the log can compare them.
  */
-const READ_MODE_SETTING = process.env.TORRENT_TV_READ_MODE ?? "";
 
-const BAND_PRIORITIES = [4, 3, 2, 1];
+/**
+ * Which level of urgency each band states.
+ *
+ * Not numbers handed to WebTorrent: measured against the vendored 2.8.5, the
+ * library keeps distinct non-zero priorities only until the first wire is
+ * served and round-robins them afterwards. The ordering is kept by WHAT is
+ * stated, in `services/demand/`, and these say which level each band belongs
+ * to (roadmap item 5).
+ */
+const BAND_URGENCY = [Urgency.NEAR, Urgency.AHEAD, Urgency.AHEAD, Urgency.BEHIND];
 
 /**
  * Where each band sits, given the urgent one and how far the trailing bands have
@@ -91,10 +101,10 @@ const BAND_PRIORITIES = [4, 3, 2, 1];
  * picture they are watching.
  *
  * @param {{ urgent: { from: number, to: number }, pieceIndex: number, firstPiece: number, lastPiece: number, widths: { near: number, far: number } }} params
- * @returns {Array<{ from: number, to: number, priority: number }>}
+ * @returns {Array<{ from: number, to: number, urgency: number }>}
  */
 export function bandsFrom({ urgent, pieceIndex, firstPiece, lastPiece, widths }) {
-  const bands = [{ from: urgent.from, to: urgent.to, priority: BAND_PRIORITIES[0] }];
+  const bands = [{ from: urgent.from, to: urgent.to, urgency: BAND_URGENCY[0] }];
   let edge = urgent.to;
   for (let index = 0; index < 2; index += 1) {
     if (edge >= lastPiece) {
@@ -106,13 +116,13 @@ export function bandsFrom({ urgent, pieceIndex, firstPiece, lastPiece, widths })
     }
     const from = edge + 1;
     const to = Math.min(lastPiece, edge + width);
-    bands.push({ from, to, priority: BAND_PRIORITIES[index + 1] });
+    bands.push({ from, to, urgency: BAND_URGENCY[index + 1] });
     edge = to;
   }
   // Only once the lead has nothing left to cover: asking for the past while the
   // future is still missing would take capacity from the picture being watched.
   if (edge >= lastPiece && pieceIndex > firstPiece) {
-    bands.push({ from: firstPiece, to: pieceIndex - 1, priority: BAND_PRIORITIES[3] });
+    bands.push({ from: firstPiece, to: pieceIndex - 1, urgency: BAND_URGENCY[3] });
   }
   return bands;
 }
@@ -172,7 +182,7 @@ export function sameBands(left, right) {
   return left.every((band, index) =>
     band.from === right[index].from &&
     band.to === right[index].to &&
-    band.priority === right[index].priority);
+    band.urgency === right[index].urgency);
 }
 
 /**
@@ -215,100 +225,6 @@ export function nextWindowPieces({ current, base, ceiling, waitedMs, waitThresho
     return Math.min(top, now + 1);
   }
   return Math.max(floor, now - 1);
-}
-
-/**
- * Add this reader's window to the download set as a stream selection.
- *
- * `_select`/`_deselect` with the stream flag are what WebTorrent's own
- * `FileIterator` uses; there is no public call for it, because the public
- * `select` produces the merging, interval-subtracted kind whose bookkeeping
- * cannot express "one of several readers wants this". Falls back to the public
- * call if a future version drops the private one.
- *
- * @param {import("webtorrent").Torrent} torrent
- * @param {{ from: number, to: number }} window
- * @param {number} [priority] - 1 for what a reader needs next, 0 for the
- *   background fill of the rest of the file.
- * @returns {void}
- */
-function claimWindow(torrent, { from, to }, priority = 1) {
-  try {
-    if (typeof torrent._select === "function") {
-      torrent._select(from, to, priority, null, true);
-    } else if (typeof torrent.select === "function") {
-      torrent.select(from, to, priority);
-    }
-  } catch {
-    // Best effort — never fail a read because selection bookkeeping refused.
-  }
-}
-
-/**
- * Take this reader's window back out of the download set.
- *
- * The bounds must match the ones given to {@link claimWindow} exactly: a stream
- * selection is removed by equality, not by overlap.
- *
- * @param {import("webtorrent").Torrent} torrent
- * @param {{ from: number, to: number }} window
- * @returns {void}
- */
-function releaseWindow(torrent, { from, to }) {
-  try {
-    if (typeof torrent._deselect === "function") {
-      torrent._deselect(from, to, true);
-    } else if (typeof torrent.deselect === "function") {
-      torrent.deselect(from, to);
-    }
-  } catch {
-    // Best effort.
-  }
-}
-
-/**
- * Mark the piece a reader is blocked on, clearing the mark it set before.
- *
- * Criticality is never cleared by WebTorrent itself, so a reader that walked a
- * film would leave every piece of it marked. Only the indices this reader set
- * are cleared, so a second reader's mark on the same piece is not stolen — and
- * the flag is advisory anyway.
- *
- * @param {import("webtorrent").Torrent} torrent
- * @param {number} from
- * @param {number} to
- * @param {{ from: number, to: number } | null} previous
- * @returns {{ from: number, to: number } | null}
- */
-function markCritical(torrent, from, to, previous) {
-  if (previous && previous.from === from && previous.to === to) {
-    return previous;
-  }
-  if (previous) {
-    clearCritical(torrent, previous);
-  }
-  try {
-    torrent.critical?.(from, to);
-  } catch {
-    return null;
-  }
-  return { from, to };
-}
-
-/**
- * Drop critical marks this reader set.
- *
- * @param {import("webtorrent").Torrent} torrent
- * @param {{ from: number, to: number }} mark
- * @returns {void}
- */
-function clearCritical(torrent, { from, to }) {
-  if (!Array.isArray(torrent._critical)) {
-    return;
-  }
-  for (let index = from; index <= to; index += 1) {
-    torrent._critical[index] = false;
-  }
 }
 
 /**
@@ -512,58 +428,69 @@ export function supplyFiguresFor(infoHash, fileName, segmentSeconds) {
 const waitsBySteering = new Map();
 
 /**
- * Record one wait against whether anything was steered during it.
+ * Record one wait against the band the reader was stopped in.
+ *
+ * What this replaces: until 2026-09-02 each read was assigned at random to one
+ * of two ways of claiming — one band or four — and the waits were sorted by
+ * which. The comparison never decided anything, and could not: the split halved
+ * the sample for each arm, so on 2026-08-28 there were nine reads in one arm and
+ * three in the other and the ten-wait threshold was never reached in either; on
+ * 2026-08-29 the two arms printed together for the first and only time, as forty
+ * waits against one.
+ *
+ * This is the more useful question anyway. A wait belongs to a LEVEL, and the
+ * level says whether a width is wrong rather than whether the whole scheme is:
+ * long waits in the band being watched mean the urgent window is too narrow,
+ * long waits further out mean the lead is.
  *
  * @param {string} key
  * @param {number} waitedMs
- * @param {boolean} steered
+ * @param {number} urgency
  * @returns {void}
  */
-function noteReadMode(key, waitedMs, mode) {
-  let split = waitsByMode.get(key);
-  if (!split) {
-    split = { flat: [], bands: [] };
-    waitsByMode.set(key, split);
+function noteWaitLevel(key, waitedMs, urgency) {
+  let byLevel = waitsByLevel.get(key);
+  if (!byLevel) {
+    byLevel = new Map();
+    waitsByLevel.set(key, byLevel);
   }
-  const into = mode === "bands" ? split.bands : split.flat;
-  into.push(waitedMs);
-  while (into.length > SUPPLY_WAIT_HISTORY) {
-    into.shift();
+  const waits = byLevel.get(urgency) ?? [];
+  waits.push(waitedMs);
+  while (waits.length > SUPPLY_WAIT_HISTORY) {
+    waits.shift();
   }
+  byLevel.set(urgency, waits);
 }
 
 /**
- * What the two ways of claiming amount to, or null while either has no sample.
- *
- * This is the whole of the comparison: the same file, the same swarm, the same
- * viewer, waits sorted by which arm was in force. It appears in the periodic
- * summary so a session can be read without collecting lines by hand.
+ * Where the waits fell, by level, or null while nothing has waited.
  *
  * @param {string} key
  * @returns {string | null}
  */
-function describeReadModes(key) {
-  const split = waitsByMode.get(key);
-  if (!split || split.flat.length === 0 || split.bands.length === 0) {
+function describeWaitLevels(key) {
+  const byLevel = waitsByLevel.get(key);
+  if (!byLevel || byLevel.size === 0) {
     return null;
   }
   const middle = (values) => {
     const sorted = [...values].sort((left, right) => left - right);
     return sorted[Math.floor(sorted.length / 2)];
   };
-  const worst = (values) => Math.max(...values);
-  return (
-    `flat ${split.flat.length} waits median ${middle(split.flat)}ms worst ${worst(split.flat)}ms, ` +
-    `bands ${split.bands.length} waits median ${middle(split.bands)}ms worst ${worst(split.bands)}ms`
-  );
+  return [...byLevel.entries()]
+    .sort(([left], [right]) => left - right)
+    .map(([urgency, waits]) =>
+      `${urgencyName(urgency)} ${waits.length} waits median ${middle(waits)}ms ` +
+      `worst ${Math.max(...waits)}ms`)
+    .join(", ");
 }
 
 /**
- * Waits split by which way the reader was claiming.
+ * Waits split by the level the reader was stopped in.
  *
- * @type {Map<string, { flat: number[], bands: number[] }>}
+ * @type {Map<string, Map<number, number[]>>}
  */
-const waitsByMode = new Map();
+const waitsByLevel = new Map();
 
 function noteSteeringOutcome(key, waitedMs, steered) {
   let split = waitsBySteering.get(key);
@@ -712,7 +639,7 @@ function noteSupplyWait(key, label, waitedMs) {
     // comparison with one side empty is not a comparison.
     (describeSteering(key) ? ` — ${describeSteering(key)}` : "") +
     // The comparison this release exists to make. Read it first.
-    (describeReadModes(key) ? ` — ${describeReadModes(key)}` : "")
+    (describeWaitLevels(key) ? ` — ${describeWaitLevels(key)}` : "")
   );
 }
 
@@ -735,6 +662,10 @@ export async function* readFragments({
   if (!store) {
     throw new Error("This torrent is not backed by a shared piece store.");
   }
+  // What this reader wants goes here and nowhere else. `SwarmSelection` is the
+  // only thing that turns any of it into a request to the swarm, so a reader
+  // can no longer contradict the background fill or the pool.
+  const { register, selection } = demandFor(torrent);
 
   const file = torrent.files?.[fileIndex];
   if (!file) {
@@ -762,22 +693,6 @@ export async function* readFragments({
   // `bytes 0-<EOF>` left a permanent selection over the entire file, and no
   // later prioritisation could outrank it.
   const basePieces = Math.max(1, Math.ceil(Math.max(1, windowBytes) / pieceLength));
-  /**
-   * How this reader claims what it wants: `flat` is one band of equal urgency,
-   * which is what every release before this did; `bands` puts the pieces the
-   * viewer is about to reach above the fill behind them, anchored at the first
-   * piece not already held.
-   *
-   * Alternated per read unless the deployment names one, so the comparison
-   * accumulates from real viewing instead of from a synthetic swarm — three
-   * such experiments in one day measured regimes the levers were not for and
-   * cost more than they settled.
-   *
-   * @type {"flat" | "bands"}
-   */
-  const readMode = READ_MODE_SETTING === "flat" || READ_MODE_SETTING === "bands"
-    ? READ_MODE_SETTING
-    : (Math.random() < 0.5 ? "flat" : "bands");
   // What the window is RIGHT NOW. It starts at what the caller sized in seconds
   // of playback and grows while the reader keeps being made to wait — see
   // `nextWindowPieces`.
@@ -800,7 +715,7 @@ export async function* readFragments({
   /** @type {{ from: number, to: number } | null} */
   let window = null;
   /** @type {{ from: number, to: number } | null} */
-  let criticalMark = null;
+  let blockedStated = false;
   /**
    * Drops the pin of the fragment currently in the consumer's hands, if it
    * still holds one. See where it is assigned.
@@ -889,35 +804,64 @@ export async function* readFragments({
     return lastWidths;
   };
 
-  const moveWindowTo = (pieceIndex) => {
-    const anchor = readMode === "bands" ? firstMissingFrom(pieceIndex) : pieceIndex;
-    const next = readWindowFor({ pieceIndex: anchor, lastPiece, windowPieces });
-    const sameUrgent = window && window.from === next.from && window.to === next.to;
-    if (sameUrgent && readMode === "flat") {
+  /**
+   * State one band as a need, in bytes.
+   *
+   * The claimant carries the level, so the four bands of one reader are four
+   * claimants and each is replaced on its own — restating the near band does
+   * not disturb what was said about the tail.
+   *
+   * @param {{ from: number, to: number, urgency: number }} band
+   * @returns {void}
+   */
+  const stateBand = (band) => {
+    const range = bytesOf({
+      fileOffset: Number(file.offset),
+      fileLength: Number(file.length),
+      from: band.from,
+      to: band.to,
+      pieceLength
+    });
+    if (!range) {
       return;
     }
+    register.state({
+      claimant: `${readerId}:${urgencyName(band.urgency)}`,
+      fileIndex,
+      byteStart: range.byteStart,
+      byteEnd: range.byteEnd,
+      urgency: band.urgency
+    });
+  };
+
+  const moveWindowTo = (pieceIndex) => {
+    const anchor = firstMissingFrom(pieceIndex);
+    const next = readWindowFor({ pieceIndex: anchor, lastPiece, windowPieces });
+    const sameUrgent = window && window.from === next.from && window.to === next.to;
     const isJump = !window || next.from > window.to || next.from < window.from;
     // A seek makes every width behind the urgent band meaningless: they were
     // grown against a position the viewer has left, and what lies beyond the
     // new one has to be earned from a standing start.
-    const wanted = readMode === "bands"
-      ? bandsFrom({
-        urgent: next,
-        pieceIndex,
-        firstPiece,
-        lastPiece,
-        widths: bandWidths()
-      })
-      : [{ ...next, priority: BAND_PRIORITIES[0] }];
+    const wanted = bandsFrom({
+      urgent: next,
+      pieceIndex,
+      firstPiece,
+      lastPiece,
+      widths: bandWidths()
+    });
     if (sameUrgent && sameBands(claimed, wanted)) {
       return;
     }
+    // Withdrawn by name, so a band that is no longer wanted goes and the rest
+    // stay. The swarm is told nothing here — `reconcile` is the only thing that
+    // speaks to the library, and it reads what is stated.
     for (const band of claimed) {
-      releaseWindow(torrent, band);
+      register.withdraw(`${readerId}:${urgencyName(band.urgency)}`);
     }
     for (const band of wanted) {
-      claimWindow(torrent, band, band.priority);
+      stateBand(band);
     }
+    selection.reconcile();
     claimed = wanted;
     window = next;
     // Tell the store these pieces are wanted, so it evicts something else.
@@ -966,7 +910,12 @@ export async function* readFragments({
         // REQUESTED RANGE, which for ffmpeg's input means every piece to the
         // end of the file — hundreds of them, at which point the flag says
         // nothing. A window is what a reader genuinely needs next.
-        criticalMark = markCritical(torrent, pieceIndex, window.to, criticalMark);
+        // Stated as its own need at the level that is being waited on, which
+        // is what carries the permission to take a block from a slow peer.
+        // Nothing here calls the library: `reconcile` reads what is stated.
+        stateBand({ from: pieceIndex, to: window.to, urgency: Urgency.BLOCKED });
+        blockedStated = true;
+        selection.reconcile();
       }
 
       const waitStartedAt = Date.now();
@@ -1009,6 +958,8 @@ export async function* readFragments({
           }
           pushed = {
             asked: pushed.asked + result.asked,
+            refusedWhileReserved:
+              (pushed.refusedWhileReserved ?? 0) + (result.refusedWhileReserved ?? 0),
             // Summed like the successes, so the line compares two totals over
             // the same attempts instead of a total against a snapshot.
             attempted: (pushed.attempted ?? 0) + result.attempted,
@@ -1078,7 +1029,15 @@ export async function* readFragments({
       } else {
         const supplyKey = `${torrent?.infoHash ?? "?"}/${file?.name ?? "?"}`;
         noteSteeringOutcome(supplyKey, waitedMs, pushed.asked > 0 || duplicated > 0);
-        noteReadMode(supplyKey, waitedMs, readMode);
+        // Which band the reader was stopped in. A wait belongs to a level, and
+        // the level says whether that band is too narrow rather than whether
+        // banding is the wrong idea.
+        noteWaitLevel(
+          supplyKey,
+          waitedMs,
+          claimed.find((band) => pieceIndex >= band.from && pieceIndex <= band.to)?.urgency
+            ?? Urgency.BLOCKED
+        );
         waitCount += 1;
         waitedTotalMs += waitedMs;
         noteSupplyWait(supplyKey, file?.name ?? "", waitedMs);
@@ -1118,6 +1077,15 @@ export async function* readFragments({
             // the piece onto faster holders shortens the tail — by number
             // rather than by impression.
             `; steered onto ${pushed.asked} of ${pushed.attempted} asks (${pushed.considered} peers held it)` +
+            // How often a fast peer we picked was refused because every block
+            // was already spoken for and the library declined to take one from
+            // a slow holder. Its thresholds are constants, not settings: the
+            // asker must be above 16 KB/s, the holder below 48 KB/s and twice
+            // as slow. A number here is what would justify replacing that rule;
+            // a zero says the thresholds are not what we are short of.
+            ((pushed.refusedWhileReserved ?? 0) > 0
+              ? `; ${pushed.refusedWhileReserved} refused with every block reserved`
+              : "") +
             (pushed.fastestBytesPerSecond > 0
               ? `, fastest ${Math.round(pushed.fastestBytesPerSecond / 1024)}KB/s`
               : "") +
@@ -1137,16 +1105,13 @@ export async function* readFragments({
             // What we did about the tail, so the next session says by number
             // whether a second copy of those blocks shortens the wait.
             (duplicated > 0 ? `; duplicated ${duplicated} blocks` : "") +
-            // Which way the reader was claiming while this wait happened, and
-            // the bands themselves. Without it a number in the log belongs to
-            // neither arm and the comparison cannot be made afterwards.
-            `; mode=${readMode}` +
-            (readMode === "bands"
-              ? ` ${claimed.map((band) => `p${band.priority}:${band.from}-${band.to}`).join(" ")}` +
-                (lastWidths.measured
-                  ? ` (near ${lastWidths.near} far ${lastWidths.far} pieces, from the measured wait and surplus)`
-                  : " (widths not measured yet)")
-              : "")
+            // The bands this reader was claiming while the wait happened, by
+            // level. A wait belongs to a level, and that is what says whether a
+            // width is wrong rather than whether the whole scheme is.
+            ` ${claimed.map((band) => `${urgencyName(band.urgency)}:${band.from}-${band.to}`).join(" ")}` +
+            (lastWidths.measured
+              ? ` (near ${lastWidths.near} far ${lastWidths.far} pieces, from the measured wait and surplus)`
+              : " (widths not measured yet)")
         );
       }
 
@@ -1221,7 +1186,7 @@ export async function* readFragments({
     const readSeconds = (Date.now() - readStartedAt) / 1000;
     if (deliveredBytes > 0) {
       logger.info(
-        `read "${String(file?.name ?? "?").slice(0, 40)}" mode=${readMode} ` +
+        `read "${String(file?.name ?? "?").slice(0, 40)}" ` +
         `delivered=${(deliveredBytes / 1e6).toFixed(1)}MB in ${readSeconds.toFixed(1)}s ` +
         `waits=${waitCount} waited=${(waitedTotalMs / 1000).toFixed(1)}s`
       );
@@ -1230,11 +1195,14 @@ export async function* readFragments({
     // stops iterating — a band left behind would keep the swarm fetching for a
     // reader that no longer exists.
     for (const band of claimed) {
-      releaseWindow(torrent, band);
+      register.withdraw(`${readerId}:${urgencyName(band.urgency)}`);
+    }
+    if (blockedStated) {
+      register.withdraw(`${readerId}:${urgencyName(Urgency.BLOCKED)}`);
     }
     store.releaseProtection?.(readerId);
-    if (criticalMark) {
-      clearCritical(torrent, criticalMark);
-    }
+    // The swarm is told once, after everything has been withdrawn, so it is not
+    // asked to reconcile four times on the way out.
+    selection.reconcile();
   }
 }

@@ -32,6 +32,26 @@ import { CONTAINER_HEAD_BYTES, containerTracksOf } from "./container-tracks.js";
 import { fillFileInBackground } from "./background-fill.js";
 import { Command, Event } from "./protocol.js";
 import { startMemoryReport, WORKER_MEMORY_SAMPLE_MS } from "../memory-report.js";
+import { forwardLogsTo, logger } from "../../utils/logger.js";
+
+/**
+ * Everything this thread logs goes to the main thread, which owns the file.
+ *
+ * Two threads cannot both write it — they would race on the rotation and could
+ * interleave mid-line — so there is one writer and this is how everyone else
+ * reaches it. Set before anything else runs, because a line written before this
+ * point reaches the console only, and the console is destroyed by every
+ * release.
+ *
+ * Until 2026-09-02 only the `log` function below took this route. Modules that
+ * called `logger.*` directly — the piece reader, the torrent pool, the
+ * background fill, the container track reader, the subtitle walk — wrote into a
+ * copy of the logger that had no file, and every one of their lines was lost:
+ * measured over a whole 49 938-line file, not one of them was in it.
+ */
+forwardLogsTo((_level, message) => {
+  parentPort.postMessage({ type: Event.LOG, message });
+});
 
 // Imported dynamically, and that is load-bearing: static imports are RESOLVED
 // during linking, before any module body runs, so a statically imported pool
@@ -71,14 +91,14 @@ const fileClaims = createFileClaims();
 const readsById = new Map();
 
 /**
- * Forward a log line to the main thread, so worker output is not lost or
- * interleaved separately from everything else.
+ * Shorthand for this file. The same path as `logger.info` anywhere else in the
+ * thread — kept only because it reads better at the hundred call sites here.
  *
  * @param {string} message
  * @returns {void}
  */
 function log(message) {
-  parentPort.postMessage({ type: Event.LOG, message });
+  logger.info(message);
 }
 
 /**

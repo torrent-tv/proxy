@@ -272,6 +272,12 @@ const REVIVAL_AGE_SAMPLES = 200;
  */
 const REUSE_GAP_SAMPLES = 200;
 
+/** How many write durations are kept for the median. */
+const WRITE_DURATION_SAMPLES = 50;
+/** How many admission times are kept, and how far back they are counted. */
+const ARRIVAL_SAMPLES = 100;
+const ARRIVAL_WINDOW_MS = 10_000;
+
 /**
  * The middle value of a sample, or null when there is nothing to take a middle
  * of. Null rather than zero: no revivals and instant revivals are different
@@ -355,7 +361,29 @@ export class SharedPieceStore {
      */
     returnedWhilePinned: 0,
     /** Spills that found the disk already holding identical bytes. */
-    spillsSkipped: 0
+    spillsSkipped: 0,
+    /**
+     * Blocks a second registration of the same piece displaced. Expected to be
+     * small and non-zero: two callers racing for one piece is ordinary. What is
+     * NOT ordinary is the block going missing when it happens, which is what
+     * killed the process on 2026-09-02.
+     */
+    blocksDisplaced: 0,
+    /** Admissions that waited for the disk instead of evicting another piece. */
+    waitedForDisk: 0,
+    /**
+     * Admissions that grew memory because the disk had stopped answering.
+     * Non-zero means the store exceeded its allowance on purpose, and by how
+     * many pieces.
+     */
+    grewWaitingForDisk: 0,
+    /**
+     * Times a block was wanted, none was free, and the pool was already at its
+     * ceiling. Zero by construction — a block is only taken after a slot has
+     * been claimed, and slots are what the ceiling counts — so a number here
+     * means the two have come apart and the pool is growing past its allowance.
+     */
+    blocksBeyondCeiling: 0
   };
   /**
    * Blocks that hold no piece, most recently freed last.
@@ -384,6 +412,19 @@ export class SharedPieceStore {
    * @type {number[]}
    */
   #reuseGaps = [];
+  /**
+   * How long recent writes to disk took, in milliseconds, and when pieces were
+   * admitted. Together they say how much room the store needs beyond what the
+   * readers ask for: while one write is finishing, more pieces arrive, and each
+   * needs somewhere to go. Without that room every arrival evicts something,
+   * which is what produced 233 evictions against 119 completed writes in a
+   * minute on 2026-09-02.
+   *
+   * @type {number[]}
+   */
+  #writeDurations = [];
+  /** When the last few pieces were admitted, for the arrival rate. */
+  #admittedAt = [];
   /** Piece index → when it was written out, for the age it comes back at. */
   #spilledAt = new Map();
   /**
@@ -460,6 +501,10 @@ export class SharedPieceStore {
       // grows (roadmap item 2).
       blocksAllocated: this.#blocksAllocated,
       blocksFree: this.#freeBlocks.length,
+      blocksDisplaced: this.#counters.blocksDisplaced,
+      blocksInUse: this.#blocksInUse(),
+      blocksInFlight: this.#blocksInFlight(),
+      blocksBeyondCeiling: this.#counters.blocksBeyondCeiling,
       blockBytes: this.#blocksAllocated * this.#chunkLength,
       reuseGapMs: this.#reuseGapCeilingMs(),
       revivalAgeMedianMs: median(this.#revivalAges),
@@ -505,7 +550,12 @@ export class SharedPieceStore {
     if (demand.readers > 0) {
       this.#everHadReader = true;
       const pieces = Math.max(MIN_RESIDENT_PIECES, demand.unionPieces, demand.widestPieces);
-      return pieces * this.#chunkLength;
+      // Plus room to absorb what arrives while a write is finishing. Asking for
+      // exactly what the readers want leaves no free place ever, so every
+      // arrival evicts one of them — measured 2026-09-02: `6 reader(s) want 23
+      // piece(s) of 23 the store may hold`, and 233 evictions in the minute
+      // that followed.
+      return (pieces + this.slackPieces()) * this.#chunkLength;
     }
     // Readers that have GONE are not the same as readers that have not arrived.
     // A store whose readers ended has nothing to hold pieces for — its torrent
@@ -515,7 +565,7 @@ export class SharedPieceStore {
     // reader is being filled for one that is on its way, and asks for what it
     // was opened with until the first read says what it needs.
     return this.#everHadReader
-      ? MIN_RESIDENT_PIECES * this.#chunkLength
+      ? (MIN_RESIDENT_PIECES + this.slackPieces()) * this.#chunkLength
       : this.#growthCeiling * this.#chunkLength;
   }
 
@@ -700,7 +750,21 @@ export class SharedPieceStore {
   }
 
   #registerPiece(index, buffer) {
+    // A piece may already be here. Both paths that register one look first and
+    // then await — `put` waits for a slot, `#revive` waits for the disk — and
+    // in that gap another caller can register the same index. Overwriting the
+    // entry used to drop the previous block on the floor: its memory was not
+    // returned to the pool and the pool's own count was never decremented, so
+    // the count climbed past the ceiling for ever and the pool degenerated into
+    // allocating a fresh block per piece. Field 2026-09-02: a store holding
+    // THREE pieces reported 812 MB committed against 68 MB allowed, 739 blocks
+    // allocated and 676 still alive, and the process was killed at 4.37 GB.
+    const displaced = this.#buffers.get(index);
     this.#buffers.set(index, buffer);
+    if (displaced !== undefined && displaced !== buffer) {
+      this.#counters.blocksDisplaced += 1;
+      this.#returnBlock(displaced);
+    }
     this.#lru.touch(index);
     this.#noteProgress();
   }
@@ -730,8 +794,10 @@ export class SharedPieceStore {
     }
 
     const bytes = Buffer.from(buffer, 0, this.#lengthOf(index));
+    const startedAt = Date.now();
     const spill = this.#disk.write(index, bytes).then(
       () => {
+        this.#noteWriteDuration(Date.now() - startedAt);
         this.#counters.spills += 1;
         this.#spilledAt.set(index, Date.now());
         this.#evicting.delete(index);
@@ -761,6 +827,84 @@ export class SharedPieceStore {
   }
 
   /**
+   * Record how long one write to disk took.
+   *
+   * @param {number} durationMs
+   * @returns {void}
+   */
+  #noteWriteDuration(durationMs) {
+    this.#writeDurations.push(Math.max(0, durationMs));
+    if (this.#writeDurations.length > WRITE_DURATION_SAMPLES) {
+      this.#writeDurations.shift();
+    }
+  }
+
+  /** Record that a piece arrived, for the arrival rate. */
+  #noteArrival() {
+    const now = Date.now();
+    this.#admittedAt.push(now);
+    while (this.#admittedAt.length > ARRIVAL_SAMPLES
+      || (this.#admittedAt.length > 0 && now - this.#admittedAt[0] > ARRIVAL_WINDOW_MS)) {
+      this.#admittedAt.shift();
+    }
+  }
+
+  /**
+   * How many pieces the store needs room for beyond what the readers ask for.
+   *
+   * Measured, not chosen: the pieces that arrive while one write to disk is
+   * finishing. Without this room every arrival must evict something, and each
+   * eviction holds its block until its write completes — so a disk slower than
+   * the swarm turns every admission into one more block held. On 2026-09-02
+   * that was 233 evictions against 119 completed writes in a minute, and 203
+   * blocks held with three pieces resident.
+   *
+   * Zero until both quantities have been seen, because a slack invented before
+   * anything is measured is a chosen number, and this store has been bitten by
+   * those.
+   *
+   * @returns {number} Pieces.
+   */
+  slackPieces() {
+    if (this.#writeDurations.length === 0 || this.#admittedAt.length < 2) {
+      return 0;
+    }
+    const sorted = [...this.#writeDurations].sort((left, right) => left - right);
+    const writeMs = sorted[Math.floor(sorted.length / 2)];
+    const spanMs = this.#admittedAt[this.#admittedAt.length - 1] - this.#admittedAt[0];
+    if (!(spanMs > 0)) {
+      return 0;
+    }
+    const perMs = (this.#admittedAt.length - 1) / spanMs;
+    return Math.ceil(perMs * writeMs);
+  }
+
+  /**
+   * Blocks that are not free: resident pieces, blocks being written out, and
+   * blocks taken but not yet registered.
+   *
+   * This is what the ceiling has to bound, and until 2026-09-02 it bounded
+   * resident pieces instead. The difference is exactly the memory that goes
+   * missing from the count: a piece being spilled leaves `#buffers` the moment
+   * the eviction begins, while its block stays held until the write it feeds
+   * has finished.
+   *
+   * @returns {number}
+   */
+  #blocksInUse() {
+    return this.#blocksAllocated - this.#freeBlocks.length;
+  }
+
+  /**
+   * Blocks held by writes that have not finished.
+   *
+   * @returns {number}
+   */
+  #blocksInFlight() {
+    return Math.max(0, this.#blocksInUse() - this.#buffers.size);
+  }
+
+  /**
    * Whether admitting one more piece would need something evicted first.
    *
    * Reservations count: a slot claimed and not yet filled is as taken as a
@@ -769,7 +913,7 @@ export class SharedPieceStore {
    * @returns {boolean}
    */
   #isFullNow() {
-    return this.#buffers.size + this.#outstandingPieces >= this.#growthCeiling;
+    return this.#blocksInUse() + this.#outstandingPieces >= this.#growthCeiling;
   }
 
   /**
@@ -859,10 +1003,37 @@ export class SharedPieceStore {
 
   async #claimSlotOnce() {
     // Reserve before suspension so concurrent callers see the reservation.
-    if (this.#buffers.size + this.#outstandingPieces < this.#growthCeiling) {
+    if (this.#blocksInUse() + this.#outstandingPieces < this.#growthCeiling) {
       this.#outstandingPieces += 1;
       this.#pinnedWaitStartedAt = 0;
       return true;
+    }
+
+    // Full, and evicting would make it worse rather than better. A piece being
+    // written out has already left `#buffers` while its block is still held —
+    // the write reads from that block — so evicting another one converts a
+    // resident block into an in-flight block and takes a fresh block for the
+    // arrival: the memory in use goes UP by one per admission for as long as
+    // the disk is behind. Field 2026-09-02: 233 evictions against 119 completed
+    // writes in a minute, 203 blocks held with three pieces resident, and the
+    // process killed at 4.37 GB.
+    //
+    // So when the disk is what the store is waiting for, it waits. A completing
+    // write calls `#noteProgress`, which wakes whoever is here.
+    if (this.#blocksInFlight() > 0 && this.#blocksInUse() >= this.#growthCeiling) {
+      if (this.#pinnedWaitStartedAt === 0) {
+        this.#pinnedWaitStartedAt = Date.now();
+      }
+      const stillFor = Date.now() - Math.max(this.#pinnedWaitStartedAt, this.#lastProgressAt);
+      if (stillFor < PINNED_WAIT_MS) {
+        this.#counters.waitedForDisk += 1;
+        return false;
+      }
+      // The disk has stopped answering. Falling through to eviction is the
+      // lesser failure: it grows memory, and the line above says by how much,
+      // where refusing would fail the read outright.
+      this.#pinnedWaitStartedAt = 0;
+      this.#counters.grewWaitingForDisk += 1;
     }
 
     const { index: victim, protectionYielded, distance } = this.#lru.evictionChoice();
@@ -983,6 +1154,19 @@ export class SharedPieceStore {
     if (spare !== undefined) {
       this.#noteReuseGap(Date.now() - spare.freedAt);
       return spare.buffer;
+    }
+    // Nothing spare and the pool is already as large as it is allowed to be.
+    // This cannot happen while the accounting is sound: a block is taken only
+    // after a slot has been claimed, and slots are exactly what the ceiling
+    // counts. It is recorded rather than hidden because when it does happen the
+    // pool grows without bound, and every block it then allocates is used once
+    // and thrown to a collector that has no reason to run — the heap stays at
+    // 50 MB of 2240 while the process reaches four gigabytes.
+    // Strictly greater: reaching the ceiling exactly is what a full store looks
+    // like, and a slot has just been claimed for this block. Being ALREADY past
+    // it and allocating anyway is the state that runs away.
+    if (this.#blocksAllocated > this.#growthCeiling) {
+      this.#counters.blocksBeyondCeiling += 1;
     }
     this.#blocksAllocated += 1;
     return this.#watchForCollection(new SharedArrayBuffer(this.#chunkLength));
@@ -1162,6 +1346,7 @@ export class SharedPieceStore {
         return;
       }
 
+      this.#noteArrival();
       const declared = this.#lru.wants(index);
       if (declared) {
         this.#counters.admittedInsideWindow += 1;
@@ -1169,12 +1354,30 @@ export class SharedPieceStore {
         this.#counters.admittedOutsideWindow += 1;
       }
 
-      // A piece no reader has declared, arriving at a store with no room, goes
-      // straight to disk. It costs the same one write it would have cost when
-      // the next arrival evicted it, and it saves pushing out a piece a reader
-      // is about to read. Only when SOMETHING is declared: before the first
-      // read there is no basis for calling a piece unwanted.
-      if (!declared && this.#lru.protectedCount > 0 && this.#isFullNow()) {
+      // A piece that will be wanted LATER than the one it would displace goes
+      // straight to disk instead of being admitted.
+      //
+      // Two cases, and the second was missing until 2026-09-02. The first: the
+      // arrival is in nobody's window at all. The second: it IS in somebody's
+      // window, but further from every read head than the piece the store would
+      // have to evict to make room for it — so admitting it would write out the
+      // nearer piece and read it back sooner. The field session had six readers
+      // whose windows covered the whole file, so the first case never applied
+      // and `0 of those went straight to disk` while the store spilled 233
+      // pieces in a minute.
+      //
+      // Only when SOMETHING is declared: before the first read there is no
+      // basis for calling one piece more wanted than another.
+      const worseThanTheVictim = () => {
+        const arriving = this.#lru.waitFor(index);
+        if (arriving < 0) {
+          return false;
+        }
+        const victim = this.#lru.nextVictim();
+        return victim.index !== null && victim.wait >= 0 && arriving > victim.wait;
+      };
+      if (this.#lru.protectedCount > 0 && this.#isFullNow()
+        && (!declared || worseThanTheVictim())) {
         this.#counters.admittedToDisk += 1;
         await this.#writeThrough(index, bytes);
         this.#noteProgress();

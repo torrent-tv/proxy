@@ -154,10 +154,15 @@ test("the store says why it spills: what is asked of it, what it had to take, ho
       asked.demand.unionPieces > asked.demand.capacity,
       "a reader asking for more than the store holds is arithmetic, not a policy fault"
     );
-    assert.ok(
-      asked.evictedProtected > 0,
-      "every eviction here had to take a piece the reader had declared"
-    );
+    // And it no longer has to take a declared piece to make room. The reader
+    // asked for ten pieces of a store that holds four, and the arrivals that
+    // will be wanted LATER than what is already resident are written straight
+    // to disk instead of displacing what will be wanted sooner. Before
+    // 2026-09-02 every one of them displaced something and was read back
+    // moments later: 233 evictions against 119 completed writes in a minute.
+    assert.equal(asked.evictedProtected, 0, "a nearer piece was pushed out for a further one");
+    assert.equal(asked.spills, 0, "nothing had to be written out to make room on admission");
+    assert.ok(asked.admittedToDisk > 0, "the further arrivals were supposed to go to disk");
 
     // Read back the pieces that were spilled: each one comes home, and the
     // store says how long it had been away.
@@ -167,12 +172,17 @@ test("the store says why it spills: what is asked of it, what it had to take, ho
     }
 
     const after = store.stats();
-    assert.ok(after.revivalAgeSamples > 0, "pieces came back and their age was recorded");
-    assert.equal(typeof after.revivalAgeMedianMs, "number");
-    assert.ok(
-      after.revivedWithinFiveSeconds > 0,
-      "a piece wanted again seconds after it left should not have left"
-    );
+    // Reading them back does evict, and that is ordinary: a piece brought into
+    // memory has to displace one. What the change of 2026-09-02 removed is the
+    // eviction on ADMISSION — `asked.spills` above is zero, where before it all
+    // six arrivals displaced a nearer piece and were read back moments later.
+    assert.ok(after.fromDisk > 0, "the pieces that went to disk were read back from it");
+    assert.ok(after.revivals > 0, "reading one back brings it into memory");
+    // No age to report, and that is right rather than missing: an age measures
+    // how long an EVICTED piece stayed away, and these were never resident —
+    // they were written on arrival and read back once.
+    assert.equal(after.revivalAgeSamples, 0);
+    assert.equal(after.revivalAgeMedianMs, null);
 
     store.releaseProtection("video");
     assert.equal(store.stats().demand.readers, 0, "a reader that ends stops being counted");
@@ -396,6 +406,84 @@ test("the allowance is never cut below one reader's whole window", async () => {
     const obeyed = store.reviseGrowthCeiling(2 * PIECE);
     assert.equal(obeyed.ceilingBytes, 2 * PIECE);
     assert.equal(obeyed.belowAWindow, false);
+  } finally {
+    store.destroy(() => undefined);
+    await fs.rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("the pool stays the size it is allowed to be, however many pieces pass through it", async () => {
+  // The field failure of 2026-09-02, and the case none of the earlier checks
+  // covered: an allowance far smaller than the number of pieces in flight.
+  // Both paths that register a piece look first and then await — `put` for a
+  // slot, a revival for the disk — and in that gap another caller can register
+  // the same index. Overwriting the entry dropped the previous block without
+  // returning it, so the pool's count climbed past its ceiling for ever and it
+  // degenerated into a fresh block per piece. A store holding THREE pieces
+  // reported 812 MB committed against 68 MB allowed, 739 blocks allocated and
+  // 676 still alive, and the process was killed at 4.37 GB.
+  const capacity = 4;
+  const { store, directory } = await makeStore(capacity);
+  try {
+    // Concurrent, because that is what produces the race: several peers deliver
+    // pieces of one torrent at the same time.
+    for (let round = 0; round < 6; round += 1) {
+      await Promise.all(
+        Array.from({ length: 16 }, (unused, index) => put(store, index, pieceOf(index)))
+      );
+      // And read them back, which revives from disk and races registration the
+      // other way about.
+      await Promise.all([0, 3, 7, 11, 15].map((index) => get(store, index)));
+    }
+
+    const stats = store.stats();
+    assert.equal(stats.blocksBeyondCeiling, 0, "the pool grew past what it is allowed to hold");
+    assert.ok(
+      stats.blocksAllocated <= capacity + stats.blocksFree,
+      `pool of ${stats.blocksAllocated} blocks for ${capacity} slots and ${stats.blocksFree} spare`
+    );
+    assert.equal(stats.committedBytes, stats.blocksAllocated * PIECE);
+
+    // Every piece still reads back as itself: a block returned to the pool
+    // twice, or reused while somebody held it, shows up here as wrong bytes.
+    for (let index = 0; index < 16; index += 1) {
+      const bytes = await get(store, index);
+      assert.ok(bytes.equals(pieceOf(index)), `piece ${index} came back changed`);
+    }
+  } finally {
+    store.destroy(() => undefined);
+    await fs.rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("a piece wanted later than the one it would displace goes to disk instead", async () => {
+  const capacity = 4;
+  const { store, directory } = await makeStore(capacity);
+  try {
+    // A reader is at the start of the file and the store is full of what it
+    // wants. Its window is pieces 0-3.
+    store.protectRange("video", 0, 3);
+    for (let index = 0; index < capacity; index += 1) {
+      await put(store, index, pieceOf(index));
+    }
+    const before = store.stats().admittedToDisk;
+
+    // A piece arrives from far ahead. It IS inside a window in the field case —
+    // six readers covered the whole file — but it lies further from every read
+    // head than the piece the store would have to evict for it. Admitting it
+    // would write out the nearer piece and read that one back sooner.
+    store.protectRange("far", 90, 99);
+    await put(store, 95, pieceOf(95));
+
+    assert.ok(
+      store.stats().admittedToDisk > before,
+      "the further piece was admitted to memory and the nearer one written out"
+    );
+    // And it still reads back as itself, from the disk it was put on.
+    assert.ok((await get(store, 95)).equals(pieceOf(95)));
+    for (let index = 0; index < capacity; index += 1) {
+      assert.ok((await get(store, index)).equals(pieceOf(index)), `piece ${index} was lost`);
+    }
   } finally {
     store.destroy(() => undefined);
     await fs.rm(directory, { recursive: true, force: true });

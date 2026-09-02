@@ -476,6 +476,14 @@ try {
     onHealthRequest() {
       return collectHealthMetrics();
     },
+    // Whether this host could sustain a file it has only been told about. The
+    // same arithmetic the first offer uses, against this host's own startup
+    // benchmarks — no torrent, no bytes, no ffmpeg — so the browser can ask
+    // every proxy in the pool and be sent to one that will work instead of
+    // being shown an error on the one it happened to land on.
+    onCanServeRequest(mediaInfo) {
+      return started?.hlsSessionManager?.predictOfferedHeights?.(mediaInfo) ?? null;
+    },
     onConnect() {
       // Re-register on every tunnel connect/reconnect so the server's
       // in-memory store stays consistent after server restarts.

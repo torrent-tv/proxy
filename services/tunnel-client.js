@@ -34,6 +34,12 @@ import { WebSocket } from "ws";
  *   Called each time the WebSocket connection becomes open (including reconnects).
  *   Use to re-register the proxy so the server's in-memory store stays consistent
  *   after server restarts.
+ * @property {(mediaInfo: object) => { copy: number[], transcode: number[] } | null} [onCanServeRequest]
+ *   Called when the server asks whether this host could sustain a file it has
+ *   been DESCRIBED — height, rate, bitrate, codec — rather than one it holds.
+ *   Answered from this host's startup benchmarks alone: no torrent is added, no
+ *   bytes are fetched and ffmpeg is not run, so it costs milliseconds and can
+ *   be asked of every proxy in the pool at once.
  * @property {() => HealthMetrics} [onHealthRequest]
  *   Called when the server sends a `health-request` message.  The return value is
  *   sent back as `health-response` and used by the server to score this proxy.
@@ -117,6 +123,7 @@ export function createTunnelClient({
   onSignal,
   onConnect,
   onHealthRequest,
+  onCanServeRequest,
   onLog,
   connectionLifetimeMs = CONNECTION_LIFETIME_MS
 }) {
@@ -218,6 +225,26 @@ export function createTunnelClient({
         if (typeof message.sessionId === "string" && message.signal && typeof onSignal === "function") {
           onSignal(message.sessionId, message.signal);
         }
+        return;
+      }
+
+      // Could this host serve a file it is only told ABOUT? Asked when the
+      // proxy a viewer landed on has refused the file, so the browser can be
+      // sent somewhere that will work instead of being shown an error. The
+      // description travels because the refusing proxy has already probed the
+      // file: the expensive half is done once, and every other proxy answers
+      // by arithmetic.
+      if (message.type === "can-serve-request") {
+        let offer = null;
+        try {
+          offer = typeof onCanServeRequest === "function"
+            ? onCanServeRequest(message.mediaInfo ?? {})
+            : null;
+        } catch {
+          // silent-ok: an unanswerable question is answered "no", which is what
+          // a null offer means to the caller.
+        }
+        send({ type: "can-serve-response", requestId: message.requestId, offer });
         return;
       }
 

@@ -181,3 +181,223 @@ test("the store says why it spills: what is asked of it, what it had to take, ho
     await fs.rm(directory, { recursive: true, force: true });
   }
 });
+
+test("a piece nobody has declared does not push out one that is being read", async () => {
+  const capacity = 4;
+  const { store, directory } = await makeStore(capacity);
+  try {
+    // A reader declares the pieces it will need, and they are put in memory.
+    store.protectRange("video", 0, 3);
+    for (let index = 0; index < 4; index += 1) {
+      await put(store, index, pieceOf(index));
+    }
+    assert.equal(store.stats().resident, capacity, "the declared window fills the store");
+
+    // Now pieces arrive that the download fetched ahead of every reader. Before
+    // 2026-09-02 each of them claimed a slot and evicted one of the four above,
+    // which was then read back from disk moments later: 6565 spills and 7575
+    // revivals in 44 minutes, 53.6% of reads served from memory.
+    for (let index = 100; index < 110; index += 1) {
+      await put(store, index, pieceOf(index));
+    }
+
+    const stats = store.stats();
+    assert.equal(stats.admittedToDisk, 10, "every undeclared arrival went straight to disk");
+    assert.equal(stats.admittedOutsideWindow, 10);
+    assert.equal(stats.admittedInsideWindow, 4);
+    assert.equal(stats.spills, 0, "and nothing had to be pushed out to make room");
+
+    // The declared pieces are still in memory, and every piece reads back as
+    // itself from whichever tier holds it.
+    assert.equal(stats.resident, capacity);
+    for (const index of [0, 1, 2, 3, 100, 105, 109]) {
+      const bytes = await get(store, index);
+      assert.ok(bytes.equals(pieceOf(index)), `piece ${index} came back changed`);
+    }
+  } finally {
+    store.destroy(() => undefined);
+    await fs.rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("before any reader has declared anything, an arriving piece still goes to memory", async () => {
+  const { store, directory } = await makeStore(4);
+  try {
+    // No window declared: there is no basis for calling a piece unwanted, so
+    // the store behaves as it always did. This is the initial download, and the
+    // warm-up fetches of the header and the tail.
+    for (let index = 0; index < 8; index += 1) {
+      await put(store, index, pieceOf(index));
+    }
+    const stats = store.stats();
+    assert.equal(stats.admittedToDisk, 0, "nothing was refused memory on a guess");
+    assert.equal(stats.admittedOutsideWindow, 8);
+    assert.ok(stats.spills > 0, "the store filled and evicted, as it did before");
+  } finally {
+    store.destroy(() => undefined);
+    await fs.rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("the store asks for what its readers declared, and for a whole window at least", async () => {
+  const { store, directory } = await makeStore(64);
+  try {
+    // With nobody reading there is no demand to speak of, so the store asks for
+    // what it is already allowed and the first revision after a read begins
+    // brings it down.
+    const idle = store.wantedBytes;
+    assert.equal(idle, store.stats().budgetBytes);
+
+    // Two readers of one file — picture and sound — overlapping by
+    // construction. The ask is their union, not their sum.
+    store.protectRange("video", 10, 29);
+    store.protectRange("audio", 25, 44);
+    assert.equal(store.wantedBytes, 35 * PIECE, "10..44 is thirty-five pieces, not forty");
+
+    // One reader with a window wider than the union of nothing else: the ask
+    // never falls below a single window, or that reader's read cannot complete
+    // at all — every resident piece ends up pinned and the read returns zero
+    // bytes.
+    store.releaseProtection("audio");
+    store.releaseProtection("video");
+    store.protectRange("video", 0, 49);
+    assert.equal(store.wantedBytes, 50 * PIECE);
+  } finally {
+    store.destroy(() => undefined);
+    await fs.rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("a block is re-used instead of a new one being allocated for every piece", async () => {
+  const capacity = 4;
+  const { store, directory } = await makeStore(capacity);
+  try {
+    // Twenty pieces through a store that may hold four. Before 2026-09-02 that
+    // was twenty allocations of a piece each, every one of them released only
+    // when the collector got to it — 7575 of them in 44 minutes in the field,
+    // and 1.86 GB held while the store's own accounting said 352 MB.
+    for (let index = 0; index < 20; index += 1) {
+      await put(store, index, pieceOf(index));
+    }
+
+    const stats = store.stats();
+    assert.ok(
+      stats.blocksAllocated <= capacity,
+      `the pool never exceeds the allowance: ${stats.blocksAllocated} blocks for ${capacity} slots`
+    );
+    assert.equal(stats.committedBytes, stats.blocksAllocated * PIECE);
+    assert.equal(stats.returnedWhilePinned, 0);
+    assert.ok(stats.reuseGapMs !== null, "blocks were taken from the free list, not freshly made");
+
+    // And every piece still reads back as itself: a re-used block must not
+    // carry the last piece's bytes into the next one.
+    for (let index = 0; index < 20; index += 1) {
+      const bytes = await get(store, index);
+      assert.ok(bytes.equals(pieceOf(index)), `piece ${index} came back changed`);
+    }
+  } finally {
+    store.destroy(() => undefined);
+    await fs.rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("a spare block is given up once it has sat longer than the store's own working rhythm", async () => {
+  const { store, directory } = await makeStore(8);
+  try {
+    for (let index = 0; index < 12; index += 1) {
+      await put(store, index, pieceOf(index));
+    }
+    // The allowance falls: pieces are written out and their blocks fall spare.
+    store.reviseGrowthCeiling(2 * PIECE);
+    const spare = store.stats().blocksFree;
+
+    // Nothing is given up while the blocks are younger than the longest wait
+    // this store has actually seen between a block falling free and being
+    // wanted again.
+    assert.equal(store.sweepFreeBlocks(Date.now()), 0, "a block in use moments ago is not spare");
+    assert.equal(store.stats().blocksFree, spare);
+
+    // An hour later they plainly are.
+    const released = store.sweepFreeBlocks(Date.now() + 3_600_000);
+    assert.equal(released, spare);
+    assert.equal(store.stats().blocksFree, 0);
+    assert.equal(store.stats().blocksReleased, released);
+  } finally {
+    store.destroy(() => undefined);
+    await fs.rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("evicting a piece the disk already holds costs no second write", async () => {
+  const { store, directory } = await makeStore(2);
+  try {
+    // Three pieces through two slots: piece 0 is written out.
+    for (let index = 0; index < 3; index += 1) {
+      await put(store, index, pieceOf(index));
+    }
+    const written = store.stats().spills;
+    assert.ok(written > 0);
+    assert.equal(store.stats().spillsSkipped, 0, "the first write of a piece is a real one");
+
+    // Read it back — it returns to memory and the copy stays on disk. Evicting
+    // it again writes bytes that are already there, byte for byte, because only
+    // `put` removes the disk copy and no `put` has happened.
+    assert.ok((await get(store, 0)).equals(pieceOf(0)));
+    for (let index = 10; index < 13; index += 1) {
+      await put(store, index, pieceOf(index));
+    }
+    assert.ok(store.stats().spillsSkipped > 0, "the second write of the same bytes is skipped");
+
+    // And the piece still comes back correctly from the disk copy.
+    assert.ok((await get(store, 0)).equals(pieceOf(0)));
+  } finally {
+    store.destroy(() => undefined);
+    await fs.rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("a store whose readers have gone asks for nothing, one that never had them keeps its opening", async () => {
+  const { store, directory } = await makeStore(16);
+  try {
+    // Never had a reader: this is the initial download and the warm-up fetches
+    // of the header and the tail, with a read on its way.
+    const opening = store.wantedBytes;
+    assert.equal(opening, store.stats().budgetBytes);
+
+    store.protectRange("video", 0, 9);
+    assert.equal(store.wantedBytes, 10 * PIECE);
+
+    // The read ends. Its torrent sits until the pool's idle timer removes it,
+    // and that timer needs a refcount of zero and can be a quarter of an hour
+    // away. Holding the pieces for a reader that has gone is memory taken from
+    // the machine for nothing.
+    store.releaseProtection("video");
+    assert.ok(store.wantedBytes < opening, "a store with no readers left asks for nothing");
+  } finally {
+    store.destroy(() => undefined);
+    await fs.rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("the allowance is never cut below one reader's whole window", async () => {
+  const { store, directory } = await makeStore(16);
+  try {
+    store.protectRange("video", 0, 9);
+    // The machine says this store may have two pieces. Obeying that would leave
+    // it unable to finish the read it is serving: every resident piece pinned,
+    // zero bytes returned, and ffmpeg taking that for the end of the file —
+    // which killed every encoder on that file in the field on 2026-08-15.
+    const revised = store.reviseGrowthCeiling(2 * PIECE);
+    assert.equal(revised.ceilingBytes, 10 * PIECE, "one whole window is the floor");
+    assert.equal(revised.belowAWindow, true, "and the store says the share was smaller than that");
+
+    // With no reader there is no window to protect and the share is obeyed.
+    store.releaseProtection("video");
+    const obeyed = store.reviseGrowthCeiling(2 * PIECE);
+    assert.equal(obeyed.ceilingBytes, 2 * PIECE);
+    assert.equal(obeyed.belowAWindow, false);
+  } finally {
+    store.destroy(() => undefined);
+    await fs.rm(directory, { recursive: true, force: true });
+  }
+});

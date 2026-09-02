@@ -249,6 +249,36 @@ export class PieceLru {
   }
 
   /**
+   * Whether a reader is holding this piece right now.
+   *
+   * Asked before a block is put back for re-use: a pinned piece has a view onto
+   * its memory somewhere, and handing that memory to another piece would let
+   * the holder read bytes that are not its own.
+   *
+   * @param {number} index
+   * @returns {boolean}
+   */
+  isPinned(index) {
+    return this.#pins.has(index);
+  }
+
+  /**
+   * Whether any live reader has declared it will want this piece.
+   *
+   * Asked on admission, not only on eviction: a piece nobody has declared is
+   * being downloaded ahead of every reader, and putting it in memory means
+   * pushing out one that IS declared — which is then read back from disk
+   * moments later. Measured 2026-09-02: 6565 spills and 7575 revivals in 44
+   * minutes with 53.6 % of reads served from memory (roadmap item 9).
+   *
+   * @param {number} index
+   * @returns {boolean}
+   */
+  wants(index) {
+    return this.#isProtected(index);
+  }
+
+  /**
    * Pieces from `index` to the nearest declared window, zero inside one and -1
    * when nothing is declared.
    *

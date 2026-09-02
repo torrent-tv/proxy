@@ -1,7 +1,12 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { describeMemory, readingIsWorthWriting, summariseMappings } from "../services/memory-report.js";
+import {
+  describeMemory,
+  readingIsWorthWriting,
+  summariseMappings,
+  watchedFigures
+} from "../services/memory-report.js";
 import {
   budgetForNewStore,
   SharedPieceStore,
@@ -286,4 +291,56 @@ test("the mapping shape is said in the line, and left out when it is not known",
     stores: []
   });
   assert.ok(!withoutShape.includes("mappings="), "an unread breakdown is absent, not zeroed");
+});
+
+test("a thread's line is earned by any of its three figures, not by the heap alone", () => {
+  // 2026-09-02, the session that ended in two out-of-memory kills: the worker's
+  // heap stood at 33-45 MB for the whole of it while its buffers went from 130
+  // to 950 MB. Watching the heap alone, nothing ever earned a line and every
+  // reading of the quantity that grew came out on the quiet minute.
+  const before = watchedFigures("thread", {
+    rss: 0, heapTotal: 38 * MEGABYTE, external: 14 * MEGABYTE, arrayBuffers: 130 * MEGABYTE
+  });
+  const after = watchedFigures("thread", {
+    rss: 0, heapTotal: 38 * MEGABYTE, external: 14 * MEGABYTE, arrayBuffers: 515 * MEGABYTE
+  });
+  assert.equal(before.heap, after.heap, "the heap is what did NOT move");
+
+  const moved = Object.entries(after).some(([name, bytes]) => readingIsWorthWriting({
+    watchedBytes: bytes,
+    lastWrittenBytes: before[name],
+    sinceWrittenMs: 1_000,
+    changeBytes: 25 * MEGABYTE,
+    quietMs: 60_000
+  }));
+  assert.equal(moved, true, "buffers growing by 385 MB earns a line of its own");
+
+  assert.deepEqual(
+    Object.keys(watchedFigures("process", { rss: 5, heapTotal: 1, external: 2, arrayBuffers: 3 })),
+    ["rss"],
+    "a process is killed for its resident memory and watches that"
+  );
+});
+
+test("figures a caller reads for itself land on the same line as the memory", () => {
+  const line = describeMemory({
+    scope: "thread",
+    label: "torrent worker",
+    process: {
+      rss: 0, heapUsed: 34 * MEGABYTE, heapTotal: 46 * MEGABYTE,
+      external: 54 * MEGABYTE, arrayBuffers: 393 * MEGABYTE, heapLimit: 0
+    },
+    stores: [],
+    extra: "piece buffers 21544 let go, 21482 collected, 62 still alive against 53 the store holds"
+  });
+  assert.match(line, /arrayBuffers=393MB/);
+  assert.match(line, /62 still alive against 53 the store holds$/);
+  assert.doesNotMatch(
+    describeMemory({
+      scope: "thread",
+      process: { rss: 0, heapUsed: 1, heapTotal: 2, external: 3, arrayBuffers: 4, heapLimit: 0 }
+    }),
+    /;\s*$/,
+    "nothing to add leaves no dangling separator"
+  );
 });

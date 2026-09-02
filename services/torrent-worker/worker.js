@@ -522,6 +522,12 @@ parentPort.on("message", async (message) => {
 startMemoryReport({
   log,
   readStores: collectStoreStats,
+  // Beside the isolate's own figures, and on the SAME line, because the
+  // question they answer together is whether the off-heap mass is buffers this
+  // thread still refers to or buffers the collector has not reached yet. On
+  // separate timers the two were up to a minute apart and could not be
+  // compared at all (roadmap item 2).
+  readExtra: describePieceBuffers,
   scope: "thread",
   label: "torrent worker",
   intervalMs: WORKER_MEMORY_SAMPLE_MS,
@@ -581,22 +587,30 @@ setInterval(() => {
       (stats.outstanding > 0 ? ` outstanding=${stats.outstanding}` : "")
     );
   }
-  // Not per store: the collector is per thread, and the question it answers —
-  // is anything of ours outliving a piece — is about the thread. Printed
-  // whenever the two disagree by more than the pieces actually held, which is
-  // the only shape worth looking at (roadmap item 2).
-  const collection = pieceBufferCollection();
-  const outstandingBuffers = collection.released - collection.collected;
-  const heldNow = collectStoreStats().reduce((sum, stats) => sum + (stats.resident || 0), 0);
-  if (outstandingBuffers > heldNow) {
-    log(
-      `piece buffers: ${collection.released} let go, ${collection.collected} collected — ` +
-      `${outstandingBuffers} still alive against ${heldNow} the store holds. ` +
-      "A gap that keeps widening means a reference of ours outlives the piece; " +
-      "a gap that does not means whatever grows is below us, in the allocator"
-    );
-  }
 }, STORE_REPORT_INTERVAL_MS).unref();
+
+/**
+ * The piece buffers this thread has let go of against the ones it still holds.
+ *
+ * Not per store: the collector is per thread, and the question is about the
+ * thread. A gap that keeps widening means a reference of ours outlives the
+ * piece; a gap that does not means whatever grows is below us, in the
+ * allocator or in buffers the collector has not reached.
+ *
+ * @returns {string}
+ */
+function describePieceBuffers() {
+  const collection = pieceBufferCollection();
+  if (collection.released === 0) {
+    return "";
+  }
+  const alive = collection.released - collection.collected;
+  const held = collectStoreStats().reduce((sum, stats) => sum + (stats.resident || 0), 0);
+  return (
+    `piece buffers ${collection.released} let go, ${collection.collected} collected, ` +
+    `${alive} still alive against ${held} the store holds`
+  );
+}
 
 /**
  * Walk subtitle cues for every actively-read file of one torrent, and PUSH

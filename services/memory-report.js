@@ -291,6 +291,12 @@ function megabytes(bytes) {
  * @param {ReturnType<typeof summariseMappings> | null} [reading.mappings]
  * @param {number | null} [reading.diskFreeBytes]
  * @param {{ name: string, residentBytes: number, committedBytes: number, spilledBytes: number, budgetBytes: number }[]} [reading.stores]
+ * @param {string} [reading.extra] - Figures the caller wants on the same line
+ *   rather than on one of its own. The piece-buffer counters are read here so
+ *   that the number of buffers alive and the off-heap mass they should account
+ *   for are the SAME instant: printed on separate timers they were up to a
+ *   minute apart, and 950 MB of `arrayBuffers` could not be checked against the
+ *   62 buffers a reading half a minute away said were alive (roadmap item 2).
  * @returns {string}
  */
 export function describeMemory({
@@ -302,7 +308,8 @@ export function describeMemory({
   anonymousBytes = null,
   mappings = null,
   diskFreeBytes = null,
-  stores = []
+  stores = [],
+  extra = ""
 }) {
   const total = (field) => stores.reduce((sum, store) => sum + (store[field] || 0), 0);
   const storeResident = total("residentBytes");
@@ -321,8 +328,9 @@ export function describeMemory({
     `heap=${megabytes(usage.heapUsed)}/${megabytes(usage.heapTotal)}` +
     `${usage.heapLimit ? ` of ${megabytes(usage.heapLimit)} allowed` : ""} ` +
     `external=${megabytes(usage.external)} arrayBuffers=${megabytes(usage.arrayBuffers)}`;
+  const tail = extra ? `; ${extra}` : "";
   if (scope === "thread") {
-    return `memory (${label || "thread"}): ${isolate}; ${storesPart}`;
+    return `memory (${label || "thread"}): ${isolate}; ${storesPart}${tail}`;
   }
   const shape = mappings === null
     ? ""
@@ -337,8 +345,39 @@ export function describeMemory({
     `${storesPart}; ` +
     `machine has ${megabytes(availableBytes ?? 0)} available` +
     `${availableMeasured ? "" : " (estimated — /proc/meminfo could not be read)"}` +
-    `${diskFreeBytes === null ? "" : `, ${megabytes(diskFreeBytes)} free on disk`}`
+    `${diskFreeBytes === null ? "" : `, ${megabytes(diskFreeBytes)} free on disk`}` +
+    tail
   );
+}
+
+/**
+ * The figures whose movement earns a line, each under its own name.
+ *
+ * Not the same question as what the scope WATCHES for a heap snapshot. A
+ * thread's heap is only one of the three ways its isolate holds memory, and on
+ * 2026-09-02 it was the one that did not move: `heapTotal` stayed at 31-173 MB
+ * through a session where `arrayBuffers` swung between 130 and 950 MB, so the
+ * change trigger was watching the one quantity that stood still and every
+ * reading of the one that grew came out on the quiet interval, a minute apart.
+ *
+ * Each figure is compared against its own last written value and any one of
+ * them moving is enough. Nothing is added together, because `arrayBuffers` is
+ * documented as part of `external` and reads larger than it on this runtime —
+ * a contradiction this code has no business resolving.
+ *
+ * @param {"process" | "thread"} scope
+ * @param {{ rss: number, heapTotal: number, external: number, arrayBuffers: number }} memory
+ * @returns {Record<string, number>}
+ */
+export function watchedFigures(scope, memory) {
+  if (scope === "thread") {
+    return {
+      heap: memory.heapTotal ?? 0,
+      external: memory.external ?? 0,
+      buffers: memory.arrayBuffers ?? 0
+    };
+  }
+  return { rss: memory.rss ?? 0 };
 }
 
 /**
@@ -397,11 +436,14 @@ export function readingIsWorthWriting({
  * @param {number} [options.snapshotFloorBytes]
  * @param {number} [options.snapshotGrowthBytes]
  * @param {number} [options.keepSnapshots] - Newest to keep; zero keeps all.
+ * @param {() => string} [options.readExtra] - Figures to append to the line,
+ *   read at the same instant as the memory itself.
  * @returns {{ stop: () => void }}
  */
 export function startMemoryReport({
   log,
   readStores,
+  readExtra,
   scope = "process",
   label = "",
   diskPath = "",
@@ -414,7 +456,8 @@ export function startMemoryReport({
   keepSnapshots = 0
 }) {
   let highWater = 0;
-  let lastWrittenBytes = 0;
+  /** @type {Record<string, number>} */
+  let lastWritten = {};
   let lastWrittenAt = 0;
   // The process watches what the kernel kills it for; a thread watches what the
   // runtime kills IT for, which is its own heap and not the process's resident
@@ -472,25 +515,35 @@ export function startMemoryReport({
       }
       const processMemory = readProcessMemory();
       const watched = watchedOf(processMemory);
+      const figures = watchedFigures(scope, processMemory);
       const now = Date.now();
-      const write = readingIsWorthWriting({
-        watchedBytes: watched,
-        lastWrittenBytes,
-        sinceWrittenMs: lastWrittenAt === 0 ? Number.POSITIVE_INFINITY : now - lastWrittenAt,
+      const sinceWrittenMs = lastWrittenAt === 0 ? Number.POSITIVE_INFINITY : now - lastWrittenAt;
+      const write = Object.entries(figures).some(([name, bytes]) => readingIsWorthWriting({
+        watchedBytes: bytes,
+        lastWrittenBytes: lastWritten[name] ?? 0,
+        sinceWrittenMs,
         changeBytes,
         quietMs
-      });
+      }));
 
       let anonymousBytes = null;
-      if (scope === "thread") {
-        if (write) {
-          log(describeMemory({ scope, label, process: processMemory, stores }));
+      if (write) {
+        let extra = "";
+        try {
+          extra = typeof readExtra === "function" ? readExtra() ?? "" : "";
+        } catch {
+          // silent-ok: a caller's own figures are worth less than the line they
+          // would have taken down with them.
         }
-      } else {
-        const { bytes, measured } = await availableMemory();
-        anonymousBytes = await readAnonymousMemory();
-        const diskFreeBytes = diskPath ? await readDiskFree(diskPath) : null;
-        if (write) {
+        if (scope === "thread") {
+          log(describeMemory({ scope, label, process: processMemory, stores, extra }));
+        } else {
+          // Read only when the line is written. `smaps` is one entry per
+          // mapping and a busy process has thousands; the rollup and
+          // `/proc/meminfo` are single lines but still walk page tables, and
+          // the reading now happens once a second rather than once a minute.
+          const { bytes, measured } = await availableMemory();
+          anonymousBytes = await readAnonymousMemory();
           log(describeMemory({
             scope,
             label,
@@ -498,17 +551,13 @@ export function startMemoryReport({
             availableBytes: bytes,
             availableMeasured: measured,
             anonymousBytes,
-            // Read only when the line is written: `smaps` is one entry per
-            // mapping and a busy process has thousands, which is a different
-            // cost from the rollup's single line.
             mappings: await readMappingSummary(),
-            diskFreeBytes,
-            stores
+            diskFreeBytes: diskPath ? await readDiskFree(diskPath) : null,
+            stores,
+            extra
           }));
         }
-      }
-      if (write) {
-        lastWrittenBytes = watched;
+        lastWritten = figures;
         lastWrittenAt = now;
       }
 
@@ -524,6 +573,9 @@ export function startMemoryReport({
         highWater = watched;
         await takeSnapshot(watched, "a new high-water");
       }
+      // Under `write` by construction: `anonymousBytes` is only read when the
+      // line is, and at one reading a second an unconditional warning would be
+      // a line a second for as long as the process stayed large.
       if (scope !== "thread" && anonymousBytes !== null && processMemory.rss > 800 * 1024 * 1024) {
         log(`memory: high rss=${megabytes(processMemory.rss)} anon=${megabytes(anonymousBytes)} heap=${megabytes(processMemory.heapUsed)} — watch for OOM`);
       }

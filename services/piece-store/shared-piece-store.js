@@ -68,31 +68,134 @@ export function findSharedStore(torrent) {
   return null;
 }
 
-const MEMORY_BUDGET_CEILING_BYTES = 512 * 1024 * 1024;
-const AVAILABLE_MEMORY_SHARE = 0.25;
+/**
+ * The largest fall in the machine's available memory that this process has
+ * seen and did not cause itself.
+ *
+ * What has to be left for everything else on the machine. It cannot be a share
+ * of what is free — a share is a number chosen out of nothing, which is what
+ * `AVAILABLE_MEMORY_SHARE = 0.25`, `MIN_BUDGET_BYTES` and
+ * `MEMORY_BUDGET_CEILING_BYTES` were until 2026-09-02, all three traceable to
+ * one observation of one host on 2026-08-03. It is measured instead: between
+ * two readings, how much available memory went away beyond what the stores
+ * themselves took. On the field host that quantity is large — while the proxy
+ * held 76-133 MB overnight the machine's available memory fell from 2378 MB to
+ * 306 MB and came back — and on a quiet host it stays near zero, which is the
+ * right answer there.
+ *
+ * Starts at zero: nothing is reserved until somebody else has been seen to
+ * need it.
+ */
+const otherDemand = { falls: [], lastAvailableBytes: 0, lastStoreBytes: 0 };
 
-export function totalStoreBudgetBytes(availableBytes) {
-  const share = Math.floor(Math.max(availableBytes, 0) * AVAILABLE_MEMORY_SHARE);
-  return Math.max(MIN_BUDGET_BYTES, Math.min(MEMORY_BUDGET_CEILING_BYTES, share));
+/**
+ * How many observations of other processes' demand are kept.
+ *
+ * A window rather than a high-water, and for the reason the block re-use gap is
+ * one too: a single spike would otherwise stand for the life of the process and
+ * squeeze the stores against something that happened once, hours ago.
+ */
+const OTHER_DEMAND_SAMPLES = 60;
+
+/**
+ * Note what the machine had, and how much of the change was not ours.
+ *
+ * @param {number} availableBytes
+ * @param {number} storeBytes - What the live stores hold right now.
+ * @returns {number} The reserve, in bytes.
+ */
+export function noteMachineMemory(availableBytes, storeBytes) {
+  if (otherDemand.lastAvailableBytes > 0) {
+    const fell = otherDemand.lastAvailableBytes - availableBytes;
+    const ours = storeBytes - otherDemand.lastStoreBytes;
+    otherDemand.falls.push(Math.max(0, fell - ours));
+    if (otherDemand.falls.length > OTHER_DEMAND_SAMPLES) {
+      otherDemand.falls.shift();
+    }
+  }
+  otherDemand.lastAvailableBytes = availableBytes;
+  otherDemand.lastStoreBytes = storeBytes;
+  return machineReserveBytes();
 }
 
-export function budgetForNewStore(availableBytes, storeCount) {
-  const total = totalStoreBudgetBytes(availableBytes);
-  const shares = Math.max(1, Math.floor(storeCount));
-  return Math.max(MIN_BUDGET_BYTES, Math.floor(total / shares));
+/** What has recently been observed to be needed by everything that is not us. */
+export function machineReserveBytes() {
+  return otherDemand.falls.length === 0 ? 0 : Math.max(...otherDemand.falls);
+}
+
+/** Forget what other processes have needed. For tests, which share a module. */
+export function forgetMachineMemory() {
+  otherDemand.falls = [];
+  otherDemand.lastAvailableBytes = 0;
+  otherDemand.lastStoreBytes = 0;
+}
+
+/**
+ * How much memory the stores may hold between them.
+ *
+ * `MemAvailable` is what could be allocated on top of what is already held, so
+ * the stores' own bytes are added back: the pair is the ceiling the stores
+ * could reach. The reserve is what has been seen to be needed elsewhere.
+ *
+ * @param {number} availableBytes
+ * @param {number} storeBytes
+ * @param {number} reserveBytes
+ * @returns {number}
+ */
+export function machineAllowanceBytes(availableBytes, storeBytes, reserveBytes) {
+  return Math.max(0, Math.max(availableBytes, 0) + Math.max(storeBytes, 0) - Math.max(reserveBytes, 0));
+}
+
+/**
+ * Divide what the machine allows between the stores, by what each is asking
+ * for.
+ *
+ * A store asks for the pieces its readers have declared. When everyone's ask
+ * fits, everyone gets it and the machine's limit never binds — which is the
+ * usual case, since two readers of one film declare 32-192 MB against gigabytes
+ * of free memory. When the asks do not fit, each store is cut in proportion to
+ * what it asked, so a store wanting little is not cut to make room for one
+ * wanting much.
+ *
+ * @param {number[]} wantedBytes - What each store is asking for, in order.
+ * @param {number} allowanceBytes
+ * @returns {number[]} What each store may hold, in the same order.
+ */
+export function divideAllowance(wantedBytes, allowanceBytes) {
+  const total = wantedBytes.reduce((sum, want) => sum + Math.max(0, want), 0);
+  if (total <= allowanceBytes || total === 0) {
+    return wantedBytes.map((want) => Math.max(0, want));
+  }
+  return wantedBytes.map((want) => Math.floor(allowanceBytes * (Math.max(0, want) / total)));
 }
 
 export function reviseStoreBudgets() {
-  const share = budgetForNewStore(availableMemorySync(), liveStores.size);
+  const stores = [...liveStores];
+  const held = stores.reduce((sum, store) => sum + store.residentBytes, 0);
+  const available = availableMemorySync();
+  const reserve = noteMachineMemory(available, held);
+  const allowance = machineAllowanceBytes(available, held, reserve);
+  const shares = divideAllowance(stores.map((store) => store.wantedBytes), allowance);
   const revised = [];
-  for (const store of liveStores) {
-    revised.push(store.reviseGrowthCeiling(share));
+  for (const [position, store] of stores.entries()) {
+    revised.push(store.reviseGrowthCeiling(shares[position]));
   }
   return revised;
 }
 
 function defaultMemoryBytes() {
-  return budgetForNewStore(availableMemorySync(), liveStores.size + 1);
+  const stores = [...liveStores];
+  const held = stores.reduce((sum, store) => sum + store.residentBytes, 0);
+  const available = availableMemorySync();
+  const allowance = machineAllowanceBytes(available, held, machineReserveBytes());
+  // A store being created has no readers, so it has no demand to state and no
+  // basis for asking for more or less than the others. It opens on an equal
+  // share and the first revision — within a minute, and within seconds of a
+  // read starting — replaces that with what its readers actually declare.
+  // Deliberately not the whole allowance: on a machine with gigabytes free that
+  // would let a torrent nobody is reading yet fill memory before the first
+  // revision arrives.
+  return Math.floor(allowance / (stores.length + 1));
 }
 
 function availableMemorySync() {
@@ -108,8 +211,12 @@ function availableMemorySync() {
 }
 
 /**
- * How many piece buffers this thread has let go of, and how many the collector
- * has actually taken back.
+ * How many blocks of piece memory this thread has let go of, and how many the
+ * collector has actually taken back.
+ *
+ * Since the store keeps a pool, one block serves many pieces, so this counts
+ * blocks and not pieces — and a healthy store allocates only as many as its
+ * allowance permits, so both numbers are now small and nearly equal.
  *
  * The one reading that separates the two explanations of the 700 MB nobody can
  * account for (roadmap item 2, field 2026-08-31): if the two numbers track each
@@ -139,7 +246,6 @@ export function pieceBufferCollection() {
   return { released: released.count, collected: released.collected };
 }
 
-const MIN_BUDGET_BYTES = 64 * 1024 * 1024;
 const MIN_RESIDENT_PIECES = 2;
 /**
  * How long a claim may go without ANYTHING moving before it gives up.
@@ -158,6 +264,13 @@ const PINNED_WAIT_MS = 5_000;
  * revivals in 44 minutes) and costs two hundred numbers.
  */
 const REVIVAL_AGE_SAMPLES = 200;
+
+/**
+ * How many block re-use gaps are kept. The same window as the revival ages, and
+ * for the same reason: what is wanted is the rhythm of recent work, not a
+ * history of it.
+ */
+const REUSE_GAP_SAMPLES = 200;
 
 /**
  * The middle value of a sample, or null when there is nothing to take a middle
@@ -183,7 +296,6 @@ export class SharedPieceStore {
   #chunkLength;
   #lastChunkLength;
   #lastChunkIndex;
-  #capacity;
   #growthCeiling;
   /** Piece index → SharedArrayBuffer of that piece */
   #buffers = new Map();
@@ -224,8 +336,52 @@ export class SharedPieceStore {
     // (roadmap item 9).
     evictedProtected: 0,
     evictedDistanceSum: 0,
-    evictedWithDistance: 0
+    evictedWithDistance: 0,
+    // Where an arriving piece went. A piece nobody has declared is being
+    // downloaded ahead of every reader; putting it in memory pushes out one
+    // that IS declared, which is then read back from disk moments later
+    // (roadmap item 9).
+    admittedInsideWindow: 0,
+    admittedOutsideWindow: 0,
+    admittedToDisk: 0,
+    /** Blocks given back to the operating system. */
+    blocksReleased: 0,
+    /**
+     * A block put back for re-use while a reader still held the piece. Zero by
+     * construction — a pinned piece is never evicted, and a re-put of a pinned
+     * one drops its block instead of recycling it. Counted because if it ever
+     * stops being zero, a consumer is reading another piece's bytes, and that
+     * is invisible from anywhere else.
+     */
+    returnedWhilePinned: 0,
+    /** Spills that found the disk already holding identical bytes. */
+    spillsSkipped: 0
   };
+  /**
+   * Blocks that hold no piece, most recently freed last.
+   *
+   * A block is one piece's worth of memory. Allocating a new one for every
+   * piece meant 7575 allocations of 4 MiB in 44 minutes on 2026-09-02, each
+   * released only when the collector got to it — which is why the process held
+   * 1.86 GB while its own accounting said 352 MB. Blocks are taken from here
+   * and put back here instead (roadmap item 2).
+   *
+   * @type {{ buffer: SharedArrayBuffer, freedAt: number }[]}
+   */
+  #freeBlocks = [];
+  /** Blocks that exist at all: free plus holding a piece. */
+  #blocksAllocated = 0;
+  /** Whether a reader has ever declared a window here. See `wantedBytes`. */
+  #everHadReader = false;
+  /**
+   * How long a block sat free before it was taken again, in milliseconds.
+   * Bounded, because what is wanted is the longest gap of RECENT work: an
+   * all-time maximum would be raised by one long pause and then never let a
+   * block go again.
+   *
+   * @type {number[]}
+   */
+  #reuseGaps = [];
   /** Piece index → when it was written out, for the age it comes back at. */
   #spilledAt = new Map();
   /**
@@ -251,10 +407,11 @@ export class SharedPieceStore {
     const memoryBytes = Number.isFinite(options.memoryBytes) && options.memoryBytes > 0
       ? options.memoryBytes
       : defaultMemoryBytes();
-    this.#capacity = Math.max(MIN_RESIDENT_PIECES, Math.floor(memoryBytes / chunkLength));
-
-    this.#growthCeiling = this.#capacity;
-    this.#lru = new PieceLru(this.#capacity);
+    // Only where this store STARTS. It is not kept, so it cannot come back as a
+    // cap on the revision the way `#capacity` did.
+    const openingCeiling = Math.max(MIN_RESIDENT_PIECES, Math.floor(memoryBytes / chunkLength));
+    this.#growthCeiling = openingCeiling;
+    this.#lru = new PieceLru(openingCeiling);
     this.#name = options.name ?? "pieces";
     // `options.disk` exists so a test can hold a write open or make one fail on
     // purpose. Four of the defects fixed here live in what happens when the
@@ -277,8 +434,11 @@ export class SharedPieceStore {
       resident,
       capacity: this.#growthCeiling,
       residentBytes,
-      allocatedSlots: resident,
-      committedBytes: residentBytes,
+      allocatedSlots: this.#blocksAllocated,
+      // What the process HOLDS, which with a pool is the blocks that exist —
+      // not the pieces in them. Holding and using are different quantities and
+      // the difference is the point of the reading.
+      committedBytes: this.#blocksAllocated * this.#chunkLength,
       budgetBytes: this.#growthCeiling * this.#chunkLength,
       pinned: this.#lru.pinnedCount,
       // Slots claimed and not yet filled. Reported because a reservation that
@@ -292,6 +452,14 @@ export class SharedPieceStore {
       // however the eviction is ordered, and that is the difference between a
       // policy to fix and arithmetic to accept (roadmap item 9).
       demand: this.#lru.demand(),
+      // What the process actually holds for this store, which is not the same
+      // as what it is using: blocks are kept for re-use. The difference is the
+      // spare, and it is the whole of the question whether consumption only
+      // grows (roadmap item 2).
+      blocksAllocated: this.#blocksAllocated,
+      blocksFree: this.#freeBlocks.length,
+      blockBytes: this.#blocksAllocated * this.#chunkLength,
+      reuseGapMs: this.#reuseGapCeilingMs(),
       revivalAgeMedianMs: median(this.#revivalAges),
       revivalAgeSamples: this.#revivalAges.length,
       revivedWithinFiveSeconds: this.#revivalAges.filter((age) => age <= 5_000).length,
@@ -299,12 +467,66 @@ export class SharedPieceStore {
     };
   }
 
+  /** What this store holds right now, in bytes. */
+  get residentBytes() {
+    return this.#buffers.size * this.#chunkLength;
+  }
+
+  /**
+   * What this store is asking to be allowed to hold, in bytes.
+   *
+   * The union of its readers' declared windows — what they have said they will
+   * need — never below the widest single window, because a store that cannot
+   * hold one reader's window cannot complete that reader's read at all: every
+   * resident piece ends up pinned, the read returns zero bytes and ffmpeg takes
+   * that for the end of the file (field 2026-08-15, roadmap item 9).
+   *
+   * With no reader declaring anything there is no demand to speak of, so the
+   * store asks for what the machine allows and the first revision after a read
+   * begins brings it down to what that read needs.
+   */
+  get wantedBytes() {
+    const demand = this.#lru.demand();
+    if (demand.readers > 0) {
+      this.#everHadReader = true;
+      const pieces = Math.max(MIN_RESIDENT_PIECES, demand.unionPieces, demand.widestPieces);
+      return pieces * this.#chunkLength;
+    }
+    // Readers that have GONE are not the same as readers that have not arrived.
+    // A store whose readers ended has nothing to hold pieces for — its torrent
+    // sits until the pool's idle timer removes it, which needs a refcount of
+    // zero and can be a quarter of an hour away — so it asks for nothing and
+    // its memory goes back to the machine now. A store that has never had a
+    // reader is being filled for one that is on its way, and asks for what it
+    // was opened with until the first read says what it needs.
+    return this.#everHadReader
+      ? MIN_RESIDENT_PIECES * this.#chunkLength
+      : this.#growthCeiling * this.#chunkLength;
+  }
+
   reviseGrowthCeiling(allowedBytes) {
+    // No cap at what the machine could spare when this store was CREATED.
+    // `#capacity` was computed once in the constructor and used as an upper
+    // bound here, so the allowance could only ever fall: a torrent opened while
+    // the machine was full kept a small allowance for its whole life, however
+    // much memory was freed afterwards (roadmap item 2, 2026-09-02).
     const wanted = Math.floor(Number(allowedBytes) / this.#chunkLength);
-    this.#growthCeiling = Math.min(
-      this.#capacity,
-      Math.max(MIN_RESIDENT_PIECES, Number.isFinite(wanted) ? wanted : this.#capacity)
+    // Never below one reader's whole window while a reader exists, even when
+    // the machine's share says less. A store that cannot hold the window of the
+    // read it is serving cannot complete that read at all: every resident piece
+    // ends up pinned, the read returns zero bytes and ffmpeg takes that for the
+    // end of the file, which killed every encoder on that file in the field on
+    // 2026-08-15. Exceeding the share is the lesser failure, and the line below
+    // says when it happens.
+    const demand = this.#lru.demand();
+    this.#growthCeiling = Math.max(
+      MIN_RESIDENT_PIECES,
+      demand.readers > 0 ? demand.widestPieces : MIN_RESIDENT_PIECES,
+      Number.isFinite(wanted) ? wanted : MIN_RESIDENT_PIECES
     );
+    const belowAWindow = demand.readers > 0
+      && Number.isFinite(wanted)
+      && wanted < demand.widestPieces;
     // The LRU is told too. It was constructed with the store's original
     // capacity and never revised, so `isFull()` answered against a number that
     // had not been the limit for some time — dormant only because nothing calls
@@ -336,11 +558,17 @@ export class SharedPieceStore {
         this.#counters.spillFailures += 1;
       });
     }
+    // Blocks the store is no longer using and has waited long enough to give
+    // up. The allowance falling is the moment to ask, because that is when the
+    // machine has been shown to need the memory.
+    const releasedBlocks = this.sweepFreeBlocks();
     return {
       name: this.#name,
       ceilingBytes: this.#growthCeiling * this.#chunkLength,
-      committedBytes: this.#buffers.size * this.#chunkLength,
-      evicted
+      committedBytes: this.#blocksAllocated * this.#chunkLength,
+      evicted,
+      releasedBlocks,
+      belowAWindow
     };
   }
 
@@ -469,16 +697,39 @@ export class SharedPieceStore {
    * @returns {Promise<void>}
    */
   #spill(index, buffer) {
+    // The disk may already hold these very bytes. `#revive` reads a piece back
+    // into memory and leaves the copy on disk, and only `put` removes it — so a
+    // piece that was revived and not re-put is identical to what is already
+    // written, and writing it again is work for nothing. There were 7575
+    // revivals in one session on 2026-09-02, and every later eviction of one of
+    // them wrote a second time (roadmap item 66: 14.4 GB written in a single
+    // viewing).
+    if (this.#disk.has(index)) {
+      this.#counters.spills += 1;
+      this.#counters.spillsSkipped += 1;
+      this.#spilledAt.set(index, Date.now());
+      this.#returnBlock(buffer);
+      this.#noteProgress();
+      return Promise.resolve();
+    }
+
     const bytes = Buffer.from(buffer, 0, this.#lengthOf(index));
     const spill = this.#disk.write(index, bytes).then(
       () => {
         this.#counters.spills += 1;
         this.#spilledAt.set(index, Date.now());
         this.#evicting.delete(index);
+        // Only now. The write reads out of this block, so a block handed to
+        // another piece before the write finished would put that piece's bytes
+        // into this piece's place in the file.
+        this.#returnBlock(buffer);
         this.#noteProgress();
       },
       (error) => {
         this.#evicting.delete(index);
+        // The block is no longer holding anything either way; keeping it out of
+        // the pool because the write failed would lose it for good.
+        this.#returnBlock(buffer);
         this.#noteProgress();
         throw error;
       }
@@ -491,6 +742,53 @@ export class SharedPieceStore {
   #noteProgress() {
     this.#lastProgressAt = Date.now();
     this.#wake();
+  }
+
+  /**
+   * Whether admitting one more piece would need something evicted first.
+   *
+   * Reservations count: a slot claimed and not yet filled is as taken as a
+   * resident piece.
+   *
+   * @returns {boolean}
+   */
+  #isFullNow() {
+    return this.#buffers.size + this.#outstandingPieces >= this.#growthCeiling;
+  }
+
+  /**
+   * Write an arriving piece straight to disk, without it ever occupying memory.
+   *
+   * Registered in `#evicting` like a spill, so a `get` for this index waits for
+   * the write instead of finding the piece on neither tier. Deliberately NOT
+   * recorded in `#spilledAt`: that clock measures how long an EVICTED piece
+   * stayed away, and a piece that was never resident has no such age.
+   *
+   * @param {number} index
+   * @param {Uint8Array} bytes
+   * @returns {Promise<void>}
+   */
+  #writeThrough(index, bytes) {
+    // Copied, not viewed. `DiskTier.write` opens the file before it reads the
+    // bytes, so a view onto the caller's buffer could be written to in between
+    // and the file would get the wrong data. The spill path may pass a view
+    // because that memory is ours; this buffer belongs to the torrent client.
+    // It costs nothing extra: the piece was being copied into a shared buffer
+    // on this path before, and now it is copied here instead.
+    const copy = Buffer.from(bytes.subarray(0, Math.min(bytes.length, this.#lengthOf(index))));
+    const write = this.#disk.write(index, copy).then(
+      () => {
+        this.#evicting.delete(index);
+        this.#noteProgress();
+      },
+      (error) => {
+        this.#evicting.delete(index);
+        this.#noteProgress();
+        throw error;
+      }
+    );
+    this.#evicting.set(index, write);
+    return write;
   }
 
   /**
@@ -629,8 +927,16 @@ export class SharedPieceStore {
         this.#counters.fromMemory += 1;
         return already;
       }
-      const target = this.#watchForCollection(new SharedArrayBuffer(this.#lengthOf(index)));
-      await this.#disk.read(index, Buffer.from(target));
+      const target = this.#takeBlock();
+      try {
+        // Only this piece's own length: the block is a full piece long and the
+        // last piece of a file is shorter, so reading the whole block would ask
+        // the file for bytes past its end.
+        await this.#disk.read(index, Buffer.from(target, 0, this.#lengthOf(index)));
+      } catch (error) {
+        this.#returnBlock(target);
+        throw error;
+      }
       this.#registerPiece(index, target);
       this.#counters.fromDisk += 1;
       this.#counters.revivals += 1;
@@ -639,6 +945,121 @@ export class SharedPieceStore {
     } finally {
       release();
     }
+  }
+
+  /**
+   * A block to hold one piece: the most recently freed one, or a new one.
+   *
+   * Every block is a full piece long, whatever piece will live in it. The last
+   * piece of a file is shorter, and it occupies a full block with only its own
+   * bytes meaningful — `#lengthOf` is what decides how much is ever read out.
+   * Uniform blocks are what makes them interchangeable at all.
+   *
+   * Most recently freed first, deliberately: a few blocks then carry the whole
+   * of a busy store's traffic and the rest age out of use, which is what makes
+   * {@link SharedPieceStore#sweepFreeBlocks} able to tell a spare block from a
+   * working one.
+   *
+   * @returns {SharedArrayBuffer}
+   */
+  #takeBlock() {
+    const spare = this.#freeBlocks.pop();
+    if (spare !== undefined) {
+      this.#noteReuseGap(Date.now() - spare.freedAt);
+      return spare.buffer;
+    }
+    this.#blocksAllocated += 1;
+    return this.#watchForCollection(new SharedArrayBuffer(this.#chunkLength));
+  }
+
+  /**
+   * Put a block back for re-use, or give it up.
+   *
+   * Given up when the allowance has fallen below the number of blocks that
+   * exist: keeping it would hold memory the machine has just been shown to
+   * need. Otherwise it waits in the free list for the next piece.
+   *
+   * @param {SharedArrayBuffer | undefined} buffer
+   * @returns {void}
+   */
+  #returnBlock(buffer) {
+    if (buffer === undefined) {
+      return;
+    }
+    if (this.#closed || this.#blocksAllocated > this.#growthCeiling) {
+      // Never below zero: `close` gives up every block at once, and a spill
+      // that was already in flight resolves afterwards and arrives here.
+      if (this.#blocksAllocated > 0) {
+        this.#blocksAllocated -= 1;
+        this.#counters.blocksReleased += 1;
+      }
+      return;
+    }
+    this.#freeBlocks.push({ buffer, freedAt: Date.now() });
+  }
+
+  /**
+   * Record how long a block waited to be used again.
+   *
+   * @param {number} gapMs
+   * @returns {void}
+   */
+  #noteReuseGap(gapMs) {
+    this.#reuseGaps.push(Math.max(0, gapMs));
+    if (this.#reuseGaps.length > REUSE_GAP_SAMPLES) {
+      this.#reuseGaps.shift();
+    }
+  }
+
+  /**
+   * The longest a block has recently waited before being wanted again, or null
+   * when no block has yet been re-used.
+   *
+   * This is the store's own working rhythm, measured rather than chosen: while
+   * a film is being watched a block is taken again within milliseconds, because
+   * one is taken for every piece that arrives. A block that has been sitting
+   * longer than the longest of those waits is not part of the work.
+   *
+   * @returns {number | null}
+   */
+  #reuseGapCeilingMs() {
+    if (this.#reuseGaps.length === 0) {
+      return null;
+    }
+    return Math.max(...this.#reuseGaps);
+  }
+
+  /**
+   * Give up blocks that have sat unused longer than this store's own working
+   * rhythm.
+   *
+   * The case it is for: a torrent whose peers have gone. Its readers are still
+   * attached, so nothing removes the torrent — the pool's idle timer needs a
+   * refcount of zero and never starts. Its allowance falls to what those
+   * readers declared, the pieces beyond it are written out, and their blocks
+   * would otherwise wait in the free list for peers that may not return.
+   *
+   * @param {number} [now]
+   * @returns {number} Blocks given up.
+   */
+  sweepFreeBlocks(now = Date.now()) {
+    const ceiling = this.#reuseGapCeilingMs();
+    if (ceiling === null) {
+      return 0;
+    }
+    const keeping = [];
+    let released = 0;
+    for (const spare of this.#freeBlocks) {
+      if (now - spare.freedAt <= ceiling) {
+        keeping.push(spare);
+        continue;
+      }
+      this.#blocksAllocated -= 1;
+      this.#counters.blocksReleased += 1;
+      released += 1;
+    }
+    this.#freeBlocks = keeping;
+    return released;
   }
 
   /**
@@ -663,14 +1084,14 @@ export class SharedPieceStore {
    */
   #copyIntoNewBuffer(index, bytes) {
     const length = this.#lengthOf(index);
-    const sab = this.#watchForCollection(new SharedArrayBuffer(length));
-    const view = Buffer.from(sab);
+    const block = this.#takeBlock();
+    const view = Buffer.from(block, 0, length);
     if (bytes.copy) {
       bytes.copy(view, 0, 0, length);
     } else {
       view.set(bytes.subarray(0, length), 0);
     }
-    return sab;
+    return block;
   }
 
   /**
@@ -704,9 +1125,42 @@ export class SharedPieceStore {
       // needed and none is claimed. A fresh buffer rather than a write into the
       // old one, so a reader holding the old reference cannot see a torn write.
       if (this.#buffers.has(index)) {
+        const previous = this.#buffers.get(index);
+        // A fresh block rather than a write into the old one, so a reader
+        // holding the old reference cannot see a torn write.
         this.#buffers.set(index, this.#copyIntoNewBuffer(index, bytes));
         this.#lru.touch(index);
+        // And the old block goes back for re-use only if nobody is reading it.
+        // A pinned piece has a view onto its memory somewhere; that block is
+        // given up instead, and the pool allocates another when it needs one.
+        if (this.#lru.isPinned(index)) {
+          if (this.#blocksAllocated > 0) {
+            this.#blocksAllocated -= 1;
+            this.#counters.blocksReleased += 1;
+          }
+        } else {
+          this.#returnBlock(previous);
+        }
         await this.#forgetOnDisk(index);
+        this.#noteProgress();
+        return;
+      }
+
+      const declared = this.#lru.wants(index);
+      if (declared) {
+        this.#counters.admittedInsideWindow += 1;
+      } else {
+        this.#counters.admittedOutsideWindow += 1;
+      }
+
+      // A piece no reader has declared, arriving at a store with no room, goes
+      // straight to disk. It costs the same one write it would have cost when
+      // the next arrival evicted it, and it saves pushing out a piece a reader
+      // is about to read. Only when SOMETHING is declared: before the first
+      // read there is no basis for calling a piece unwanted.
+      if (!declared && this.#lru.protectedCount > 0 && this.#isFullNow()) {
+        this.#counters.admittedToDisk += 1;
+        await this.#writeThrough(index, bytes);
         this.#noteProgress();
         return;
       }
@@ -806,6 +1260,9 @@ export class SharedPieceStore {
     liveStores.delete(this);
     this.#buffers.clear();
     this.#spilledAt.clear();
+    this.#counters.blocksReleased += this.#blocksAllocated;
+    this.#blocksAllocated = 0;
+    this.#freeBlocks = [];
     // Whoever is waiting for a slot is woken and finds the store closed, which
     // is an error they can report. Left asleep they simply never returned.
     this.#wake();
@@ -817,6 +1274,9 @@ export class SharedPieceStore {
     liveStores.delete(this);
     this.#buffers.clear();
     this.#spilledAt.clear();
+    this.#counters.blocksReleased += this.#blocksAllocated;
+    this.#blocksAllocated = 0;
+    this.#freeBlocks = [];
     this.#wake();
     this.#disk.destroy().then(() => callback(null), (error) => callback(error));
   }

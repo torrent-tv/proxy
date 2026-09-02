@@ -8,9 +8,12 @@ import {
   watchedFigures
 } from "../services/memory-report.js";
 import {
-  budgetForNewStore,
-  SharedPieceStore,
-  totalStoreBudgetBytes
+  divideAllowance,
+  forgetMachineMemory,
+  machineAllowanceBytes,
+  machineReserveBytes,
+  noteMachineMemory,
+  SharedPieceStore
 } from "../services/piece-store/shared-piece-store.js";
 import { mkdtemp, rm } from "node:fs/promises";
 import os from "node:os";
@@ -19,31 +22,69 @@ import path from "node:path";
 const MEGABYTE = 1024 * 1024;
 const GIGABYTE = 1024 * MEGABYTE;
 
-test("the whole of the torrent stores is bounded, not each one of them", () => {
-  // The failure this replaces: the budget was per torrent, so two torrents took
-  // two of it. Whatever the machine has, the total is one budget.
-  const available = 8 * GIGABYTE;
-  const alone = budgetForNewStore(available, 1);
-  const withThree = budgetForNewStore(available, 3);
-  assert.equal(alone, totalStoreBudgetBytes(available));
-  assert.ok(withThree < alone, "a third store must not be given a first store's share");
-  assert.ok(withThree * 3 <= totalStoreBudgetBytes(available) + 3);
+test("the stores are allowed what the machine has, less what others were seen to need", () => {
+  // Not a share of what is free. A share is a number chosen out of nothing, and
+  // the three that were here until 2026-09-02 — a quarter, a 64 MB floor, a
+  // 512 MB ceiling — all came from one observation of one host on 2026-08-03.
+  // `MemAvailable` is what can be taken ON TOP of what is held, so what the
+  // stores already hold is added back to get the ceiling they could reach.
+  assert.equal(
+    machineAllowanceBytes(2 * GIGABYTE, 300 * MEGABYTE, 0),
+    2 * GIGABYTE + 300 * MEGABYTE
+  );
+  assert.equal(
+    machineAllowanceBytes(2 * GIGABYTE, 300 * MEGABYTE, 500 * MEGABYTE),
+    2 * GIGABYTE - 200 * MEGABYTE
+  );
+  assert.equal(
+    machineAllowanceBytes(100 * MEGABYTE, 0, 4 * GIGABYTE),
+    0,
+    "a reserve larger than everything leaves nothing, and says so rather than going negative"
+  );
 });
 
-test("the budget is a share of what the machine can give, capped", () => {
-  // A quarter of two gigabytes is under the ceiling and is what is taken.
-  assert.equal(totalStoreBudgetBytes(2 * GIGABYTE), 512 * MEGABYTE);
-  // A quarter of one gigabyte is 256 MB — below the ceiling, so not capped.
-  assert.equal(totalStoreBudgetBytes(GIGABYTE), 256 * MEGABYTE);
-  // And it never exceeds the ceiling however much is free.
-  assert.equal(totalStoreBudgetBytes(64 * GIGABYTE), 512 * MEGABYTE);
+test("what to leave for everyone else is measured, starts at nothing, and ages out", () => {
+  // Field 2026-09-02: while this proxy held 76-133 MB the machine's available
+  // memory fell from 2378 MB to 306 MB and came back. That fall was somebody
+  // else's, and it is the quantity to leave room for. On a quiet host the same
+  // reading stays near zero, which is the right answer there.
+  forgetMachineMemory();
+  assert.equal(noteMachineMemory(2378 * MEGABYTE, 100 * MEGABYTE), 0, "nothing is reserved on faith");
+
+  // A fall of 2072 MB while the stores grew by 20 MB: 2052 MB of it was theirs.
+  assert.equal(noteMachineMemory(306 * MEGABYTE, 120 * MEGABYTE), 2052 * MEGABYTE);
+
+  // Memory coming back does not lower what has been seen to be needed — the
+  // spike can happen again, and that is what there has to be room for.
+  assert.equal(noteMachineMemory(3567 * MEGABYTE, 120 * MEGABYTE), 2052 * MEGABYTE);
+
+  // But it does not stand for ever either. A window of observations, not a
+  // high-water: one spike hours ago must stop squeezing the stores, which is
+  // the same mistake the block re-use gap would make with an all-time maximum.
+  for (let quiet = 0; quiet < 60; quiet += 1) {
+    noteMachineMemory(3567 * MEGABYTE, 120 * MEGABYTE);
+  }
+  assert.equal(machineReserveBytes(), 0, "an hour of quiet leaves the spike behind");
 });
 
-test("a machine with almost nothing left still gets a workable floor", () => {
-  // Refusing to serve is worse than exceeding the share, and the memory line
-  // says plainly what is held either way.
-  const tiny = budgetForNewStore(32 * MEGABYTE, 4);
-  assert.equal(tiny, 64 * MEGABYTE);
+test("everyone gets what they asked for while the asks fit", () => {
+  // The usual case by a wide margin: two readers of one film declare 32-192 MB
+  // between them against gigabytes of free memory, so the machine's limit never
+  // binds and the demand is what decides.
+  assert.deepEqual(
+    divideAllowance([100 * MEGABYTE, 50 * MEGABYTE], GIGABYTE),
+    [100 * MEGABYTE, 50 * MEGABYTE]
+  );
+
+  // When they do not fit, each is cut in proportion to what it asked, so a
+  // store wanting little is not cut to make room for one wanting much.
+  const cut = divideAllowance([300 * MEGABYTE, 100 * MEGABYTE], 200 * MEGABYTE);
+  assert.equal(cut[0], 150 * MEGABYTE);
+  assert.equal(cut[1], 50 * MEGABYTE);
+  assert.equal(cut[0] + cut[1], 200 * MEGABYTE);
+
+  assert.deepEqual(divideAllowance([], GIGABYTE), []);
+  assert.deepEqual(divideAllowance([0, 0], 0), [0, 0], "nobody asking takes nothing");
 });
 
 test("the memory line says bytes, and names what it could not measure", () => {
@@ -131,7 +172,7 @@ test("a thread's reading leaves out what belongs to the process", () => {
   assert.doesNotMatch(line, /machine has/);
 });
 
-test("a store's allowance follows the machine, and never passes its reservation", async () => {
+test("a store's allowance follows the machine, in both directions", async () => {
   // The defect: a store created on an idle machine kept an idle machine's
   // allowance for life and went on growing into memory the host no longer had.
   const directory = await mkdtemp(path.join(os.tmpdir(), "budget-revision-"));
@@ -149,11 +190,14 @@ test("a store's allowance follows the machine, and never passes its reservation"
     assert.ok(lowered.ceilingBytes < born, "a busier machine buys fewer slots");
     assert.equal(store.stats().budgetBytes, lowered.ceilingBytes, "the line says what is allowed now");
 
-    // The machine empties again: the ceiling may rise, but never above the
-    // reservation, because `maxByteLength` was fixed from it and `grow()`
-    // cannot pass it.
+    // The machine empties again: the ceiling rises with it, PAST where this
+    // store started. Until 2026-09-02 it could not — the ceiling was capped at
+    // a figure computed once in the constructor, so a torrent opened while the
+    // machine was full kept a small allowance for its whole life however much
+    // memory was freed afterwards.
     const raised = store.reviseGrowthCeiling(1024 * 1024 * 1024);
-    assert.equal(raised.ceilingBytes, born, "the reservation is the hard limit");
+    assert.ok(raised.ceilingBytes > born, "an emptier machine buys more slots than it started with");
+    assert.equal(store.stats().budgetBytes, raised.ceilingBytes);
   } finally {
     await new Promise((resolve) => store.destroy(resolve));
     await rm(directory, { recursive: true, force: true });

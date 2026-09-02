@@ -39,7 +39,8 @@ import { startMemoryReport, WORKER_MEMORY_SAMPLE_MS } from "../memory-report.js"
 // the hook above had a chance to register. Verified the hard way: with a static
 // import the process still aborted, and the stack named the genuine polyfill.
 const { TorrentPool, resolveDhtBootstrap } = await import("../torrent-pool.js");
-const { collectStoreStats, pieceBufferCollection, reviseStoreBudgets } = await import("../piece-store/shared-piece-store.js");
+const { collectStoreStats, machineReserveBytes, pieceBufferCollection, reviseStoreBudgets } =
+  await import("../piece-store/shared-piece-store.js");
 
 // Resolved before the client exists, because the client builds its DHT in its
 // own constructor and the addresses have to be in hand by then. Awaiting here
@@ -541,6 +542,9 @@ startMemoryReport({
 
 const STORE_REPORT_INTERVAL_MS = 60_000;
 
+/** Last reported reserve, so an unchanged one stays silent. */
+let lastReserveBytes = 0;
+
 /** Last reported figures per store, so unchanged ones stay silent. */
 const lastReported = new Map();
 
@@ -548,12 +552,24 @@ setInterval(() => {
   // What the machine can spare NOW, not what it could spare when each store was
   // created. With per-piece buffers a lowered ceiling is honoured immediately:
   // excess pieces are evicted to disk and their memory is reclaimable.
+  // What the machine has been seen to need for everything that is not us. It
+  // starts at nothing and grows only on evidence, so it is worth saying when it
+  // moves — it is the one term of the budget that comes from observation of
+  // other processes rather than from our own readers.
+  const reserveBefore = machineReserveBytes();
   for (const revised of reviseStoreBudgets()) {
     if (revised.evicted > 0) {
       log(
         `piece-store "${revised.name.slice(0, 40)}": allowance is now ` +
-        `${Math.round(revised.ceilingBytes / 1048576)}MB, evicted ${revised.evicted} piece(s) to meet it — ` +
-        `now ${Math.round(revised.committedBytes / 1048576)}MB committed`
+        `${Math.round(revised.ceilingBytes / 1048576)}MB, evicted ${revised.evicted} piece(s) to meet it` +
+        (revised.releasedBlocks > 0 ? `, gave back ${revised.releasedBlocks} block(s) of memory` : "") +
+        ` — now ${Math.round(revised.committedBytes / 1048576)}MB committed`
+      );
+    } else if (revised.belowAWindow) {
+      log(
+        `piece-store "${revised.name.slice(0, 40)}": the machine's share is smaller than one ` +
+        `reader's window, so the allowance is held at ${Math.round(revised.ceilingBytes / 1048576)}MB ` +
+        "anyway — a store that cannot hold the window of the read it is serving cannot finish that read"
       );
     } else if (revised.committedBytes > revised.ceilingBytes) {
       log(
@@ -564,11 +580,20 @@ setInterval(() => {
       );
     }
   }
+  const reserveNow = machineReserveBytes();
+  if (reserveNow !== reserveBefore || reserveNow !== lastReserveBytes) {
+    lastReserveBytes = reserveNow;
+    log(
+      `piece-store: leaving ${Math.round(reserveNow / 1048576)}MB for everything else on this ` +
+      "machine — the largest fall in available memory this process has seen and did not cause"
+    );
+  }
   for (const stats of collectStoreStats()) {
     const signature =
       `${stats.fromMemory}/${stats.fromDisk}/${stats.spills}/${stats.revivals}/` +
       `${stats.blockedByPins}/${stats.evictedOnRevise}/${stats.spillFailures}/` +
-      `${stats.evictedProtected}/${stats.demand?.unionPieces ?? 0}`;
+      `${stats.evictedProtected}/${stats.demand?.unionPieces ?? 0}/${stats.admittedToDisk}/` +
+      `${stats.blocksAllocated}/${stats.blocksFree}/${stats.blocksReleased}`;
     if (lastReported.get(stats.name) === signature) {
       continue;
     }
@@ -581,6 +606,7 @@ setInterval(() => {
       `(${Math.round((stats.residentBytes || 0) / 1048576)}MB of ` +
       `${Math.round((stats.budgetBytes || 0) / 1048576)}MB allowed) ` +
       `committed=${Math.round((stats.committedBytes || 0) / 1048576)}MB ` +
+      `blocks=${stats.blocksAllocated} (${stats.blocksFree} spare) ` +
       `on-disk=${Math.round((stats.spilledBytes || 0) / 1048576)}MB ` +
       `pinned=${stats.pinned} spilled=${stats.spilled} reads=${reads} (${fromMemoryShare}% from memory) ` +
       `spills=${stats.spills} revivals=${stats.revivals}` +
@@ -615,19 +641,34 @@ setInterval(() => {
         (age === null
           ? "; nothing has come back from disk yet"
           : `; a revived piece had been on disk ${(age / 1000).toFixed(1)}s (median of ` +
-            `${stats.revivalAgeSamples}, ${stats.revivedWithinFiveSeconds} of them within 5s)`)
+            `${stats.revivalAgeSamples}, ${stats.revivedWithinFiveSeconds} of them within 5s)`) +
+        `; of ${stats.admittedInsideWindow + stats.admittedOutsideWindow} piece(s) admitted ` +
+        `${stats.admittedOutsideWindow} were in nobody's window, ${stats.admittedToDisk} of those ` +
+        "went straight to disk" +
+        `; ${stats.blocksAllocated} block(s) of memory exist, ${stats.blocksFree} of them spare` +
+        (stats.reuseGapMs === null
+          ? ", none re-used yet"
+          : `, a block waits up to ${(stats.reuseGapMs / 1000).toFixed(1)}s before it is wanted again`) +
+        `, ${stats.blocksReleased} given back` +
+        (stats.spillsSkipped > 0
+          ? `; ${stats.spillsSkipped} of ${stats.spills} eviction(s) needed no write, the disk already had them`
+          : "") +
+        (stats.returnedWhilePinned > 0
+          ? `; ${stats.returnedWhilePinned} BLOCK(S) WERE RECYCLED WHILE STILL BEING READ`
+          : "")
       );
     }
   }
 }, STORE_REPORT_INTERVAL_MS).unref();
 
 /**
- * The piece buffers this thread has let go of against the ones it still holds.
+ * The blocks of piece memory this thread has allocated against the pieces the
+ * stores hold in them.
  *
  * Not per store: the collector is per thread, and the question is about the
- * thread. A gap that keeps widening means a reference of ours outlives the
- * piece; a gap that does not means whatever grows is below us, in the
- * allocator or in buffers the collector has not reached.
+ * thread. With a pool one block serves many pieces, so a number of allocations
+ * that keeps climbing while the stores hold a steady number of pieces means
+ * blocks are being made and thrown away instead of re-used.
  *
  * @returns {string}
  */
@@ -639,8 +680,8 @@ function describePieceBuffers() {
   const alive = collection.released - collection.collected;
   const held = collectStoreStats().reduce((sum, stats) => sum + (stats.resident || 0), 0);
   return (
-    `piece buffers ${collection.released} let go, ${collection.collected} collected, ` +
-    `${alive} still alive against ${held} the store holds`
+    `memory blocks ${collection.released} allocated, ${collection.collected} collected, ` +
+    `${alive} still alive against ${held} piece(s) the stores hold`
   );
 }
 

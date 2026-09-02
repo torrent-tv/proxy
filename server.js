@@ -318,6 +318,10 @@ export async function startProxyServer({
   return {
     app,
     port: selectedPort,
+    // Asked over the tunnel when the proxy a viewer landed on has refused their
+    // file: could THIS host sustain it? Answered from the startup benchmarks
+    // and a description, so it needs no torrent and costs milliseconds.
+    hlsSessionManager,
     // The browser only ever knows a source by its REGISTRY key (a hash of the
     // raw request bytes, scoped to one API session) — never the torrent
     // pool's own key (the content's infohash, shared across a magnet and a

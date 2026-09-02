@@ -502,6 +502,13 @@ export function createPlaybackPlanner({
     if (offer && offer.copy.length === 0 && offer.transcode.length === 0) {
       withOffer.cannotServe =
         "This proxy cannot keep up with this file at any quality right now.";
+      // The description travels with the refusal, and only with it. It is what
+      // lets the browser ask the rest of the pool the same question without
+      // anybody else adding the torrent, fetching a byte or running ffmpeg —
+      // the expensive half of finding out what this file IS has been paid here,
+      // once. Everyone else answers by arithmetic against their own startup
+      // benchmarks.
+      withOffer.mediaInfoForOffer = plan.mediaInfoForOffer;
     }
     return withOffer;
   }

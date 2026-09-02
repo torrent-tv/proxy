@@ -249,6 +249,49 @@ export class PieceLru {
   }
 
   /**
+   * How long this piece will be waited for, in pieces.
+   *
+   * A window starts at what its reader needs NEXT and runs forward, so a piece
+   * near the start of a window is wanted sooner than one at its far end, and
+   * one beyond every window is wanted later still. That is the comparison the
+   * store needs when a piece arrives at a full store: is the arrival wanted
+   * sooner or later than the piece it would displace?
+   *
+   * `#distanceToWindow` cannot answer it — everything inside any window is zero
+   * there, so a piece at the front of the reader's own window and one at the
+   * far end of somebody else's look identical.
+   *
+   * A piece BEHIND every window is counted by how far behind, because a reader
+   * walking forward will not come back to it: behind is late, not early.
+   *
+   * @param {number} index
+   * @returns {number} -1 when nobody has declared anything.
+   */
+  waitFor(index) {
+    let soonest = -1;
+    for (const range of this.#protected.values()) {
+      const wait = index < range.from ? range.from - index : index - range.from;
+      if (soonest === -1 || wait < soonest) {
+        soonest = wait;
+      }
+    }
+    return soonest;
+  }
+
+  /**
+   * The piece that would be evicted next, and how long it will be waited for.
+   *
+   * @returns {{ index: number | null, wait: number }}
+   */
+  nextVictim() {
+    const choice = this.evictionChoice();
+    return {
+      index: choice.index,
+      wait: choice.index === null ? -1 : this.waitFor(choice.index)
+    };
+  }
+
+  /**
    * Whether a reader is holding this piece right now.
    *
    * Asked before a block is put back for re-use: a pinned piece has a view onto

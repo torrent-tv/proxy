@@ -861,14 +861,13 @@ export async function* readFragments({
     for (const band of wanted) {
       stateBand(band);
     }
+    // One call, and it does both: the swarm is told what to fetch and the store
+    // is told what will be read soon, from the same stated needs. The store used
+    // to be told separately here, which made the same intent two lists that
+    // could drift.
     selection.reconcile();
     claimed = wanted;
     window = next;
-    // Tell the store these pieces are wanted, so it evicts something else.
-    // Without it the piece the decoder reads next looks exactly as stale as one
-    // the encoder fetched forty minutes ahead, and the second kind is what
-    // fills the store while the encoder runs ahead of the viewer.
-    store.protectRange?.(readerId, next.from, next.to);
     if (isJump) {
       waitBelongsToJump = true;
       // A jump — a seek, not the window sliding along — can land on pieces that
@@ -1200,9 +1199,8 @@ export async function* readFragments({
     if (blockedStated) {
       register.withdraw(`${readerId}:${urgencyName(Urgency.BLOCKED)}`);
     }
-    store.releaseProtection?.(readerId);
-    // The swarm is told once, after everything has been withdrawn, so it is not
-    // asked to reconcile four times on the way out.
+    // Once, after everything has been withdrawn — and it releases this reader's
+    // hold on memory as well, because both views come from the same statement.
     selection.reconcile();
   }
 }

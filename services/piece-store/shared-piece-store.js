@@ -319,7 +319,6 @@ export class SharedPieceStore {
    * claim and let the store admit past its allowance.
    */
   #outstandingPieces = 0;
-  #pinnedWaitStartedAt = 0;
   /** When something last actually moved: a piece admitted, spilled or unpinned. */
   #lastProgressAt = 0;
   #waiters = [];
@@ -697,11 +696,22 @@ export class SharedPieceStore {
    *   `finally`. Calling it twice is harmless.
    */
   async #claimSlot() {
+    // How long THIS claim has been trying, kept here and not on the store.
+    // It was a field, `#pinnedWaitStartedAt`, shared by the two waits inside
+    // `#claimSlotOnce` — the one for the disk and the one for a piece that may
+    // be evicted — and each of them zeroed it on giving up, which restarted the
+    // other's clock. Measured 2026-09-03: the claim cycled for ever, five
+    // seconds per side, `grewWaitingForDisk` and `waitedForPins` both climbing
+    // once every five seconds while `blockedByPins` stayed at 0 — the refusal
+    // was unreachable. A claim's patience belongs to the claim; with several
+    // claimants a shared field is wrong anyway, since one caller giving up
+    // would reset the wait of every other.
+    const waitingSince = Date.now();
     for (;;) {
       if (this.#closed) {
         throw new Error("Piece store is closed.");
       }
-      const ok = await this.#claimSlotOnce();
+      const ok = await this.#claimSlotOnce(waitingSince);
       if (ok) {
         let released = false;
         return () => {
@@ -1001,13 +1011,22 @@ export class SharedPieceStore {
     }
   }
 
-  async #claimSlotOnce() {
+  /**
+   * One attempt at a reservation.
+   *
+   * @param {number} waitingSince - When the claim this attempt belongs to began
+   *   trying. Both waits below are measured from the later of it and the last
+   *   time the store moved, so neither can restart the other's clock — see
+   *   `#claimSlot`.
+   * @returns {Promise<boolean>} Whether a slot was reserved.
+   */
+  async #claimSlotOnce(waitingSince) {
     // Reserve before suspension so concurrent callers see the reservation.
     if (this.#blocksInUse() + this.#outstandingPieces < this.#growthCeiling) {
       this.#outstandingPieces += 1;
-      this.#pinnedWaitStartedAt = 0;
       return true;
     }
+    const stillFor = () => Date.now() - Math.max(waitingSince, this.#lastProgressAt);
 
     // Full, and evicting would make it worse rather than better. A piece being
     // written out has already left `#buffers` while its block is still held —
@@ -1021,18 +1040,15 @@ export class SharedPieceStore {
     // So when the disk is what the store is waiting for, it waits. A completing
     // write calls `#noteProgress`, which wakes whoever is here.
     if (this.#blocksInFlight() > 0 && this.#blocksInUse() >= this.#growthCeiling) {
-      if (this.#pinnedWaitStartedAt === 0) {
-        this.#pinnedWaitStartedAt = Date.now();
-      }
-      const stillFor = Date.now() - Math.max(this.#pinnedWaitStartedAt, this.#lastProgressAt);
-      if (stillFor < PINNED_WAIT_MS) {
+      if (stillFor() < PINNED_WAIT_MS) {
         this.#counters.waitedForDisk += 1;
         return false;
       }
       // The disk has stopped answering. Falling through to eviction is the
       // lesser failure: it grows memory, and the line above says by how much,
-      // where refusing would fail the read outright.
-      this.#pinnedWaitStartedAt = 0;
+      // where refusing would fail the read outright. The clock is NOT restarted
+      // here: the wait that follows asks the same question of the same claim,
+      // and zeroing it was half of the loop described in `#claimSlot`.
       this.#counters.grewWaitingForDisk += 1;
     }
 
@@ -1044,21 +1060,15 @@ export class SharedPieceStore {
       // rule asked whether anything was in flight rather than whether anything
       // had happened, which is why one lost reservation could hold a read here
       // for ever.
-      if (this.#pinnedWaitStartedAt === 0) {
-        this.#pinnedWaitStartedAt = Date.now();
-      }
-      const stillFor = Date.now() - Math.max(this.#pinnedWaitStartedAt, this.#lastProgressAt);
-      if (stillFor < PINNED_WAIT_MS) {
+      if (stillFor() < PINNED_WAIT_MS) {
         this.#counters.waitedForPins += 1;
         return false;
       }
-      this.#pinnedWaitStartedAt = 0;
       this.#counters.blockedByPins += 1;
       throw new Error(
         `Every resident piece is pinned and nothing moved for ${PINNED_WAIT_MS}ms; no slot can be freed.`
       );
     }
-    this.#pinnedWaitStartedAt = 0;
 
     const victimBuffer = this.#buffers.get(victim);
     if (victimBuffer === undefined) {

@@ -156,7 +156,12 @@ test("a spill that fails gives back the slot the eviction claimed", async () => 
   }
 });
 
-test("a claim that cannot be met ends in an error, not in waiting for ever", async () => {
+// A bound, because the failure this catches is a claim that never ends: without
+// it the check does not fail, it HANGS, and `node --test` then cannot finish at
+// all — which is what happened between 2026-08-31 and 2026-09-03 (roadmap item
+// 54). The store gives up after PINNED_WAIT_MS, so 30 s is ample for the answer
+// and short enough to be a failure rather than a stoppage.
+test("a claim that cannot be met ends in an error, not in waiting for ever", { timeout: 30_000 }, async () => {
   const disk = makeDisk({ holdWrites: true });
   const { store } = makeStore({ pieces: 2, disk });
   try {
@@ -183,7 +188,7 @@ test("a claim that cannot be met ends in an error, not in waiting for ever", asy
   }
 });
 
-test("closing the store fails whoever is waiting for room", async () => {
+test("closing the store fails whoever is waiting for room", { timeout: 30_000 }, async () => {
   const disk = makeDisk({ holdWrites: true });
   const { store } = makeStore({ pieces: 2, disk });
   try {
@@ -194,7 +199,15 @@ test("closing the store fails whoever is waiting for room", async () => {
     store.pin(1);
 
     const waiting = put(store, 3);
-    await until(() => store.stats().waitedForPins > 0, "the claim is waiting");
+    // Either counter: the claim waits for the disk first — a block is in flight
+    // and the store is full, so evicting another piece would only raise the
+    // memory in use — and reaches the pinned wait five seconds later. Asking for
+    // `waitedForPins` alone named one of the two ways of waiting and timed out
+    // while the store was demonstrably doing the other.
+    await until(
+      () => store.stats().waitedForPins + store.stats().waitedForDisk > 0,
+      "the claim is waiting"
+    );
 
     await new Promise((resolve) => store.close(resolve));
     await assert.rejects(() => waiting, /closed/);
@@ -207,20 +220,30 @@ test("closing the store fails whoever is waiting for room", async () => {
   }
 });
 
-test("a piece written back to memory is not resurrected on disk by its own spill", async () => {
+test("a piece written back to memory is not resurrected on disk by its own spill", { timeout: 30_000 }, async () => {
   const disk = makeDisk({ holdWrites: true });
-  const { store } = makeStore({ pieces: 3, disk });
+  const { store } = makeStore({ pieces: 4, disk });
   try {
     await put(store, 0);
     await put(store, 1);
     await put(store, 2);
 
     // Piece 0 leaves memory because the machine's allowance fell; its write is
-    // still in flight. The allowance then recovers, so there is room again
-    // without waiting for that write.
+    // still in flight. The allowance then recovers to MORE than it was, so the
+    // piece coming back needs no eviction and no wait for that write.
+    //
+    // Four blocks, not three, and the reason is what this check is about. A
+    // block being written out is still memory in use, so with a ceiling of three
+    // and one block in flight the store is full, and the claim correctly waits
+    // for the disk — which the earlier setup did not allow for, so the check
+    // timed out on an admission policy it never meant to measure. Whether a
+    // piece arriving while its OWN spill is in flight should be admitted without
+    // taking a second block is a real question about the accounting and is
+    // roadmap item 9, not this check's subject: the subject is that the spill,
+    // when it completes, must not put the stale copy back on disk.
     store.reviseGrowthCeiling(CHUNK * 2);
     await until(() => disk.heldCount > 0, "the spill of piece 0 is in flight");
-    store.reviseGrowthCeiling(CHUNK * 3);
+    store.reviseGrowthCeiling(CHUNK * 4);
 
     // The swarm hands piece 0 back while that write is still going. The store
     // must drop the disk copy AFTER the write has recorded it, not before —

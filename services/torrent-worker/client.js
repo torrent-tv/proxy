@@ -350,6 +350,27 @@ export class TorrentWorkerClient {
   }
 
   /**
+   * What one file declares about itself — format, duration, and where its own
+   * timeline begins.
+   *
+   * @param {{ sourceKey: string, fileIndex: number }} params
+   * @returns {Promise<{ info: import("../container/Container.js").ContainerMediaInfo | null }>}
+   */
+  async getContainerMediaInfo({ sourceKey, fileIndex }) {
+    return this.#caller.call(Command.CONTAINER_MEDIA_INFO, { sourceKey, fileIndex });
+  }
+
+  /**
+   * Start fetching the region a viewer is about to resume at.
+   *
+   * @param {{ sourceKey: string, fileIndex: number, positionSeconds: number }} params
+   * @returns {Promise<{ started: boolean }>}
+   */
+  async warmResumePosition({ sourceKey, fileIndex, positionSeconds }) {
+    return this.#caller.call(Command.WARM_POSITION, { sourceKey, fileIndex, positionSeconds });
+  }
+
+  /**
    * The cues of one subtitle track that can be read from what is downloaded.
    *
    * @param {{ sourceKey: string, fileIndex: number, trackNumber: number }} params

@@ -81,6 +81,18 @@ export const Command = {
    * file beside it, which is the same question about a different file.
    */
   CONTAINER_TRACKS: "container-tracks",
+  /**
+   * What a file declares about itself as a whole — format, duration, and where
+   * its own timeline begins. Read from the same header, by the same reader, as
+   * the track table above; the alternative was a second ffmpeg over the proxy's
+   * own HTTP reading the same bytes again.
+   */
+  CONTAINER_MEDIA_INFO: "container-media-info",
+  /**
+   * Start fetching the region a viewer is about to resume at, named in seconds
+   * and turned into bytes here, where the file's own duration can be read.
+   */
+  WARM_POSITION: "warm-position",
   /** Cues of one subtitle track, from the clusters already downloaded. */
   SUBTITLE_CUES: "subtitle-cues",
   /** Shut the client down, optionally deleting downloaded data. */

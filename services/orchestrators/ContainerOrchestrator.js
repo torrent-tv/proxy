@@ -62,6 +62,28 @@ export class ContainerOrchestrator {
   }
 
   /**
+   * What the file declares about itself as a whole — format, duration, and
+   * where its own timeline begins.
+   *
+   * Read once per file, like the track table beside it, and from the same 64 KB
+   * of header. A `null` field means the container does not declare it, which is
+   * a final answer about the container.
+   *
+   * @param {object} params - same as getContainer
+   * @returns {Promise<import("../container/Container.js").ContainerMediaInfo|null>}
+   */
+  async getMediaInfo(params) {
+    const container = await this.getContainer(params);
+    if (!container) return null;
+    try {
+      return await container.readMediaInfo();
+    } catch (e) {
+      logger.warn(`container: readMediaInfo failed for "${params.label}": ${e?.message ?? e}`);
+      return null;
+    }
+  }
+
+  /**
    * @param {object} params - same as getContainer
    * @returns {Promise<{times:number[],tolerance:number}|null>}
    */

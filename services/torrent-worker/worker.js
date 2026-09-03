@@ -28,7 +28,12 @@ import { createSendStream } from "./channel.js";
 import { createFileClaims } from "./file-claims.js";
 import { readFragments, supplyFiguresFor } from "./piece-reader.js";
 import { cuesHeldFor, declaredSubtitleTracksOf, subtitleTracksOf, warmSubtitleCues } from "./subtitle-cues.js";
-import { CONTAINER_HEAD_BYTES, containerTracksOf } from "./container-tracks.js";
+import {
+  CONTAINER_HEAD_BYTES,
+  containerMediaInfoOf,
+  containerTracksOf,
+  warmResumePosition
+} from "./container-tracks.js";
 import { fillFileInBackground } from "./background-fill.js";
 import { Command, Event } from "./protocol.js";
 import { startMemoryReport, WORKER_MEMORY_SAMPLE_MS } from "../memory-report.js";
@@ -415,6 +420,45 @@ async function runCommand(command, params, id) {
               timeoutMs: 60_000
             })
         })
+      };
+    }
+
+    case Command.CONTAINER_MEDIA_INFO: {
+      const torrent = await requireTorrent(params.sourceKey);
+      return {
+        info: await containerMediaInfoOf(torrent, params.fileIndex, params.sourceKey, {
+          // Same reason as the track table above: the file this is asked about
+          // is often one nobody has played yet, so its head has to be fetched
+          // before there is anything to read.
+          prefetchEdges: () =>
+            pool.prefetchFileEdges(torrent, params.fileIndex, {
+              headBytes: CONTAINER_HEAD_BYTES,
+              tailBytes: 0,
+              timeoutMs: 60_000
+            })
+        })
+      };
+    }
+
+    case Command.WARM_POSITION: {
+      const torrent = await requireTorrent(params.sourceKey);
+      return {
+        started: await warmResumePosition(
+          torrent,
+          params.fileIndex,
+          params.sourceKey,
+          params.positionSeconds,
+          {
+            prefetchEdges: () =>
+              pool.prefetchFileEdges(torrent, params.fileIndex, {
+                headBytes: CONTAINER_HEAD_BYTES,
+                tailBytes: 0,
+                timeoutMs: 60_000
+              }),
+            fetchRegion: (start, bytes) =>
+              pool.prefetchFileRegion(torrent, params.fileIndex, start, bytes)
+          }
+        )
       };
     }
 

@@ -25,6 +25,19 @@
  */
 
 /**
+ * How short a piece's remaining tail must be for a second copy of it to be
+ * worth asking for.
+ *
+ * Sixteen blocks is 256 KB against the 4-16 MB piece they hold up. The figure
+ * comes from what was measured rather than chosen for roundness: the tails a
+ * blocked reader waits on were 2 to 14 blocks of 512 on 2026-08-19, and 3 of
+ * 512 in the field failure of 2026-09-03 that took 46.3 s. Above this the piece
+ * is still arriving normally and duplicating would spend the shared link on
+ * bytes already on their way.
+ */
+const SHORT_TAIL_BLOCKS = 16;
+
+/**
  * The library's own request entry. Internal, so its absence must be noticed
  * rather than swallowed: without it this lever silently does nothing.
  *
@@ -269,6 +282,15 @@ export function duplicateTailFor(torrent, pieceIndex) {
     return { duplicated: 0, missing: missing.length, wires: candidates.length };
   }
 
+  // A tail this short is what a blocked read is actually waiting on, and a
+  // second copy of it costs a few dozen kilobytes. A longer one is a piece
+  // still arriving normally, where duplicating would spend the shared link on
+  // bytes that are already coming — measured 2026-08-19, the tails a reader
+  // waits on are 2 to 14 blocks of 512.
+  if (missing.length > SHORT_TAIL_BLOCKS) {
+    return { duplicated: 0, missing: missing.length, wires: candidates.length };
+  }
+
   let duplicated = 0;
   // One block per wire: that is what the pipelines can usefully take at once,
   // and it needs no number of its own.
@@ -281,13 +303,14 @@ export function duplicateTailFor(torrent, pieceIndex) {
     // or it would free a THIRD wire's block as well.
     if (torrent._request(candidates[index], pieceIndex, false) === true) {
       duplicated += 1;
-      continue;
     }
-    // The wire's pipeline is full. The block stays in the piece's cancellation
-    // stack and will be handed to whoever asks next, which is harmless — it is
-    // already in flight elsewhere — but there is no point asking the remaining
-    // wires, whose pipelines are no emptier.
-    break;
+    // A refusal means THAT wire's pipeline is full, and says nothing about the
+    // next one's — pipelines are per wire. This used to stop the whole pass on
+    // the first refusal, on the stated reasoning that the remaining wires were
+    // "no emptier", which is an assumption about other peers' queues that
+    // nothing here measures. The block whose reservation was freed stays in the
+    // piece's cancellation stack and is handed to whoever asks next, which is
+    // harmless: it is already in flight elsewhere.
   }
   return { duplicated, missing: missing.length, wires: candidates.length };
 }

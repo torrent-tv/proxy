@@ -60,7 +60,7 @@ test("the missing blocks are freed and asked of a second wire", () => {
 });
 
 test("at most one duplicate per wire, however long the tail", () => {
-  const target = piece(512, 40);
+  const target = piece(512, 16);
   const torrent = {
     pieces: [target],
     wires: [wire(), wire()],
@@ -73,7 +73,29 @@ test("at most one duplicate per wire, however long the tail", () => {
   assert.equal(target.cancelled.length, 2, "and no reservation is freed that nobody was asked for");
 });
 
-test("a wire whose pipeline is full ends the attempt", () => {
+test("a piece still arriving normally is not duplicated at all", () => {
+  // Forty blocks outstanding is not a tail, it is a piece in transit. Asking
+  // for a second copy of it would spend the shared link on bytes that are
+  // already on their way — which is the whole difference between this and the
+  // 2-14 blocks a blocked reader was measured waiting on.
+  const target = piece(512, 40);
+  const torrent = {
+    pieces: [target],
+    wires: [wire(), wire()],
+    _request: () => true
+  };
+
+  const result = duplicateTailFor(torrent, 0);
+
+  assert.equal(result.duplicated, 0);
+  assert.equal(target.cancelled.length, 0, "and nothing is freed either");
+});
+
+test("a wire whose pipeline is full does not end the attempt", () => {
+  // Pipelines are per wire, so one wire being full says nothing about the next.
+  // This used to stop the whole pass on the first refusal, on the stated
+  // reasoning that the remaining wires were "no emptier" — an assumption about
+  // other peers' queues that nothing measures.
   const target = piece(512, 5);
   const torrent = {
     pieces: [target],
@@ -88,9 +110,31 @@ test("a wire whose pipeline is full ends the attempt", () => {
   assert.equal(result.duplicated, 0);
   assert.equal(
     target.cancelled.length,
-    1,
-    "only the block that was actually offered is freed; the rest keep their reservations"
+    3,
+    "every wire was offered a block; a freed reservation nobody took is handed to whoever asks next"
   );
+});
+
+test("a refusal by one wire does not cost the block a faster wire would have taken", () => {
+  const target = piece(512, 3);
+  const placed = [];
+  const torrent = {
+    pieces: [target],
+    wires: [wire({ speed: 900_000 }), wire({ speed: 800_000 })],
+    _request: (wireAsked, index) => {
+      // The first wire is full; the second is not.
+      if (wireAsked === torrent.wires[0]) {
+        return false;
+      }
+      placed.push(index);
+      return true;
+    }
+  };
+
+  const result = duplicateTailFor(torrent, 0);
+
+  assert.equal(result.duplicated, 1);
+  assert.deepEqual(placed, [0], "the second wire was still asked");
 });
 
 test("a piece with nothing missing is left alone", () => {

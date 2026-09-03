@@ -225,6 +225,140 @@ export async function containerAudioTracksOf(torrent, fileIndex, sourceKey, opti
 export const CONTAINER_HEAD_BYTES = HEAD_BYTES;
 
 /**
+ * How much of the file to pull in under the viewer's resume position.
+ *
+ * One piece of a video torrent is 4-16 MB and a resume lands anywhere inside
+ * one, so anything smaller would still leave the encoder waiting for the piece
+ * it starts in. Eight megabytes covers that piece and usually the next.
+ */
+const RESUME_REGION_BYTES = 8 * 1024 * 1024;
+
+/**
+ * Where a position in seconds falls in a file, in bytes.
+ *
+ * Proportional, and therefore approximate on a variable bitrate — which is what
+ * it is for: a prefetch that puts the swarm to work on roughly the right place
+ * while the plan and the session are still being built. The encoder's own read
+ * asks for the exact bytes a moment later and corrects it.
+ *
+ * A position past the end is clamped to the end rather than refused: a resume
+ * position can outlive the file it was recorded against, and reading the last
+ * bytes is harmless where reading past them is an error.
+ *
+ * @param {number} fileLength
+ * @param {number} durationSeconds
+ * @param {number} positionSeconds
+ * @returns {number}
+ */
+export function resumeByteOffset(fileLength, durationSeconds, positionSeconds) {
+  if (!(fileLength > 0) || !(durationSeconds > 0) || !(positionSeconds > 0)) {
+    return 0;
+  }
+  const within = Math.min(positionSeconds, durationSeconds);
+  return Math.min(fileLength - 1, Math.floor((fileLength * within) / durationSeconds));
+}
+
+/**
+ * Start fetching the region a viewer is about to resume at.
+ *
+ * Where that region IS can only be worked out from two numbers the file itself
+ * holds — its length and its duration — so this belongs beside the container
+ * read rather than in the route: the route knows a position in seconds and
+ * nothing else. The conversion is proportional and therefore approximate on a
+ * variable bitrate; it is a prefetch, and the encoder's own read corrects it.
+ *
+ * @param {object} torrent
+ * @param {number} fileIndex
+ * @param {string} sourceKey
+ * @param {number} positionSeconds
+ * @param {{ prefetchEdges?: () => Promise<unknown>, fetchRegion?: (start: number, bytes: number) => Promise<unknown> }} options
+ * @returns {Promise<boolean>} Whether a region was asked for.
+ */
+export async function warmResumePosition(torrent, fileIndex, sourceKey, positionSeconds, options = {}) {
+  const file = torrent?.files?.[fileIndex];
+  if (!file || !(positionSeconds > 0) || typeof options.fetchRegion !== "function") {
+    return false;
+  }
+  const info = await containerMediaInfoOf(torrent, fileIndex, sourceKey, options);
+  const duration = info?.durationSeconds;
+  if (!Number.isFinite(duration) || duration <= 0) {
+    logger.info(
+      `warm ${sourceKey.slice(0, 8)}: "${String(file.name).slice(0, 40)}" does not declare its ` +
+      "duration, so where the viewer's position falls in it cannot be worked out — " +
+      "the region under it is left to the encoder's own read"
+    );
+    return false;
+  }
+  const at = resumeByteOffset(file.length, duration, positionSeconds);
+  logger.info(
+    `warm ${sourceKey.slice(0, 8)}: fetching ${(RESUME_REGION_BYTES / (1024 * 1024)).toFixed(0)}MB under the ` +
+    `viewer's position ${positionSeconds.toFixed(1)}s of ${duration.toFixed(1)}s, which is ` +
+    `${(at / (1024 * 1024)).toFixed(1)}MB into "${String(file.name).slice(0, 40)}"`
+  );
+  await options.fetchRegion(at, RESUME_REGION_BYTES);
+  return true;
+}
+
+/**
+ * What one file declares about itself: format, duration, and where its own
+ * timeline begins.
+ *
+ * The same header the track table is read from, and the container instance is
+ * cached per file, so asking for this after the tracks costs no read at all.
+ * It exists because the alternative was a second reader: the session manager
+ * used to spawn an ffmpeg over the proxy's own HTTP to learn where a sidecar
+ * soundtrack's timeline begins, and that read cost 8121 ms in the field on
+ * 2026-09-03 while this layer had read the same header in 8 ms in the same
+ * second.
+ *
+ * @param {object} torrent
+ * @param {number} fileIndex
+ * @param {string} sourceKey
+ * @param {{ prefetchEdges?: () => Promise<unknown> }} [options]
+ * @returns {Promise<import("../container/Container.js").ContainerMediaInfo | null>}
+ */
+export async function containerMediaInfoOf(torrent, fileIndex, sourceKey, options = {}) {
+  const file = torrent?.files?.[fileIndex];
+  if (!file || !Number.isFinite(file.length) || file.length <= 0) {
+    return null;
+  }
+  if (typeof options.prefetchEdges === "function") {
+    try {
+      await options.prefetchEdges();
+    } catch {
+      // A prefetch that failed is not a reason to skip the read: the read
+      // fetches what it needs itself, only more slowly.
+    }
+  }
+  const readRange = async (start, end) =>
+    readFetching(file, start, Math.min(end, file.length - 1));
+  try {
+    const info = await containerOrchestrator.getMediaInfo({
+      sourceKey,
+      fileIndex,
+      readRange,
+      fileSize: file.length,
+      label: String(file.name ?? "")
+    });
+    if (info) {
+      logger.info(
+        `container-info: "${String(file.name).slice(0, 40)}" is ${info.format}, ` +
+        `${info.durationSeconds === null ? "duration not declared" : `${info.durationSeconds.toFixed(3)}s`}, ` +
+        `${info.startTimeSeconds === null
+          ? "start of its timeline not declared"
+          : `its timeline starts at ${info.startTimeSeconds.toFixed(6)}s`}`
+      );
+    }
+    return info;
+  } catch (error) {
+    logger.warn(
+      `container-info: "${String(file.name).slice(0, 40)}" could not be read: ${error?.message ?? error}`
+    );
+    return null;
+  }
+}
+
+/**
  * Forget one file's tracks, or every file of a source.
  *
  * @param {string} sourceKey

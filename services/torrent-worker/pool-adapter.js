@@ -205,6 +205,41 @@ export class WorkerTorrentPool {
   }
 
   /**
+   * Start fetching the region a viewer is about to resume at. Named in seconds
+   * here; the worker turns it into bytes, where the file's duration is readable.
+   *
+   * @param {object} torrent
+   * @param {number} fileIndex
+   * @param {number} positionSeconds
+   * @returns {Promise<boolean>}
+   */
+  async warmResumePosition(torrent, fileIndex, positionSeconds) {
+    const sourceKey = torrent?.sourceKey;
+    if (!sourceKey) {
+      return false;
+    }
+    const answer = await this.#client.warmResumePosition({ sourceKey, fileIndex, positionSeconds });
+    return answer?.started === true;
+  }
+
+  /**
+   * What one file declares about itself: format, duration, and where its own
+   * timeline begins.
+   *
+   * @param {object} torrent
+   * @param {number} fileIndex
+   * @returns {Promise<import("../container/Container.js").ContainerMediaInfo | null>}
+   */
+  async getContainerMediaInfo(torrent, fileIndex) {
+    const sourceKey = torrent?.sourceKey;
+    if (!sourceKey) {
+      return null;
+    }
+    const answer = await this.#client.getContainerMediaInfo({ sourceKey, fileIndex });
+    return answer?.info ?? null;
+  }
+
+  /**
    * The audio tracks one file declares, in the order ffmpeg numbers them
    * `0:a:N`.
    *

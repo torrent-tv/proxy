@@ -84,7 +84,7 @@ export class SubtitleController {
       const target = track ?? domainTracks.find((t) => t.declaredIndex === idx) ?? null;
       const trackNumber = target?.trackNumber ?? track?.trackNumber;
       if (trackNumber != null) {
-        held = await this.orchestrator.getCues(torrent, fileIndex, sourceKey, trackNumber);
+        held = await this.orchestrator.getCues(this.torrentPool, torrent, fileIndex, sourceKey, trackNumber);
       }
     } catch {}
     if (held && Array.isArray(held.cues)) {

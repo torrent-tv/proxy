@@ -311,6 +311,21 @@ function nextSeq(state, trackNumber) {
  */
 export async function cuesHeldFor(torrent, fileIndex, sourceKey, trackNumber) {
   const key = `${sourceKey}:${fileIndex}`;
+  // A torrent that cannot say which pieces it holds makes every range read as
+  // "not downloaded", so the walk reads nothing and returns an empty list —
+  // which is also what a file with no cues yet returns, and that is how this
+  // went unnoticed for a session (2026-09-03: 283 clusters indexed, 0 walked,
+  // the browser served `WEBVTT` and nothing else). The stand-in the main thread
+  // holds is exactly such a torrent; only the thread that owns the object has
+  // the bitfield. Nothing here can repair that, so it says so instead.
+  if (!torrent?.bitfield || !(Number(torrent?.pieceLength) > 0)) {
+    logger.warn(
+      `subtitles: asked for cues of "${String(torrent?.name ?? sourceKey).slice(0, 40)}" ` +
+      "on a torrent that cannot say which pieces it holds — no cluster can be read here, " +
+      "and the answer would be an empty document indistinguishable from a file with no cues"
+    );
+    return { cues: [], coveredClusters: 0, indexedClusters: 0, track: null };
+  }
   const plan = await planFor(torrent, fileIndex, key);
   const state = stateFor(key);
   const track = plan?.tracks?.find((candidate) => candidate.trackNumber === trackNumber) ?? null;

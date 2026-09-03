@@ -344,6 +344,17 @@ export class MatroskaContainer extends Container {
    * @returns {Promise<Map<number, {startSeconds: number, endSeconds: number|null, text: string}[]>>}
    *   Track number to the cues found in THIS pass.
    */
+  async readHeldCues(plan, track, progress) {
+    const found = await this.walkHeldClusters(plan, progress.walked);
+    return {
+      found,
+      // Every track is filled by the same walk, so this is a fact about the
+      // FILE and reads the same whichever track asked.
+      covered: progress.walked.size,
+      indexed: track?.clusterPositions?.length ?? 0
+    };
+  }
+
   async walkHeldClusters(plan, walked) {
     /** @type {Map<number, object[]>} */
     const found = new Map();

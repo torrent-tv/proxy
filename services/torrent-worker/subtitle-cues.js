@@ -17,8 +17,7 @@
  * Reading the clusters costs nothing extra at all.
  */
 
-import { MatroskaContainer } from "../container/MatroskaContainer.js";
-import { Mp4Container } from "../container/Mp4Container.js";
+import { ContainerFactory } from "../container/ContainerFactory.js";
 import { TextSubtitleTrack } from "../tracks/TextSubtitleTrack.js";
 import { detectLanguage } from "../language-detect.js";
 import { logger } from "../../utils/logger.js";
@@ -111,18 +110,25 @@ function readHeld(file, start, end) {
 /**
  * A container over one file of a torrent, told how to read it.
  *
- * The container is given two functions and never the torrent: whether a byte
- * range is already downloaded, and how to read one without asking the swarm for
- * anything. That is the whole of what this layer knows that the container does
- * not, and reducing it to two functions is what lets the reading itself live
- * where the format is specified.
+ * The container is given two readers and a predicate and never the torrent:
+ * whether a byte range is already downloaded, how to read one without asking
+ * the swarm, and how to read one that may need fetching. That is the whole of
+ * what this layer knows and the container does not.
  *
+ * WHICH container is decided from the bytes, by the factory's sniff — the
+ * header is what the muxer wrote, and a file name is what somebody typed. Only
+ * where the head is not downloaded, and so cannot be sniffed without asking the
+ * swarm, does the name answer instead. One choice either way: the caller never
+ * decides a second time from a track's shape, which is two decisions from
+ * different evidence that have to agree.
+ *
+ * @param {object} state - This file's state; the container is kept on it.
  * @param {object} torrent
  * @param {object} file
- * @returns {MatroskaContainer | Mp4Container}
+ * @returns {Promise<import("../container/Container.js").Container | null>}
  */
-function containerOver(state, torrent, file) {
-  if (state.container) {
+async function containerOver(state, torrent, file) {
+  if (state.container !== null) {
     return state.container;
   }
   const held = async (start, end) => readHeld(file, start, Math.min(end, file.length - 1));
@@ -133,8 +139,13 @@ function containerOver(state, torrent, file) {
     fileSize: file.length,
     label: String(file.name ?? "")
   };
-  const name = String(file.name ?? "");
-  state.container = /\.(mp4|m4v)$/i.test(name) ? new Mp4Container(params) : new MatroskaContainer(params);
+  const sniffed = await ContainerFactory.create(params);
+  if (sniffed) {
+    state.container = sniffed;
+    return state.container;
+  }
+  const ByName = ContainerFactory.byName(file.name);
+  state.container = ByName ? new ByName(params) : null;
   return state.container;
 }
 
@@ -251,33 +262,8 @@ async function readPlan(torrent, fileIndex, state) {
     state.plan = empty;
     return state.plan;
   }
-  const container = containerOver(state, torrent, file);
-  const name = String(file.name);
-  if (/\.mp4$/i.test(name) || /\.m4v$/i.test(name)) {
-    // An MP4 states every sample's byte range in its own table, so a cue costs
-    // its own few dozen bytes rather than the cluster around it. The samples
-    // are carried as `clusterPositions` of one byte range each, so the harvest
-    // treats both containers the same way.
-    const mp4 = await container.readSubtitlePlan();
-    state.plan = mp4
-      ? {
-        ...empty,
-        tracks: mp4.tracks.map((track, order) => ({
-          trackNumber: track.trackId,
-          declaredIndex: Number.isInteger(track.declaredIndex) ? track.declaredIndex : order,
-          codecId: track.format,
-          language: track.language,
-          name: "",
-          isDefault: order === 0,
-          codecPrivate: "",
-          clusterPositions: [],
-          samples: track.samples
-        }))
-      }
-      : empty;
-    return state.plan;
-  }
-  if (!/\.mkv$/i.test(name) && !/\.webm$/i.test(name)) {
+  const container = await containerOver(state, torrent, file);
+  if (!container) {
     state.plan = empty;
     return state.plan;
   }
@@ -372,52 +358,33 @@ export async function cuesHeldFor(torrent, fileIndex, sourceKey, trackNumber) {
  */
 async function walkFor(torrent, fileIndex, state, plan, track, trackNumber) {
   const file = torrent.files[fileIndex];
-  const container = containerOver(state, torrent, file);
-  const cuesOf = (number) => {
-    let held = state.cues.get(number);
-    if (!held) {
-      held = [];
-      state.cues.set(number, held);
-    }
-    return held;
-  };
-
-  if (Array.isArray(track.samples)) {
-    // An MP4 states every cue's byte range, so the container reads per sample.
-    let harvested = state.harvested.get(trackNumber);
-    if (!harvested) {
-      harvested = new Set();
-      state.harvested.set(trackNumber, harvested);
-    }
-    const cues = cuesOf(trackNumber);
-    for (const cue of await container.readHeldSamples(track, harvested)) {
-      cues.push({ ...cue, seq: nextSeq(state, trackNumber) });
-    }
-    cues.sort((left, right) => left.startSeconds - right.startSeconds);
-    return {
-      cues,
-      coveredClusters: harvested.size,
-      indexedClusters: track.samples.length,
-      track
-    };
+  const container = await containerOver(state, torrent, file);
+  if (!container) {
+    return { cues: [], coveredClusters: 0, indexedClusters: 0, track };
   }
 
-  // Matroska: one walk of the file fills every track, because a cluster carries
-  // the blocks of every track that has anything to say over its span.
-  const found = await container.walkHeldClusters(plan, state.walked);
+  // One question, whichever container this is. Matroska walks the clusters its
+  // Cues table names and fills every track from one walk; an MP4 reads the
+  // samples its own table states for this track. Nothing here chooses between
+  // them, which is the point: the container was chosen once, from the bytes.
+  const { found, covered, indexed } = await container.readHeldCues(plan, track, state);
+
   for (const [number, cues] of found) {
-    const into = cuesOf(number);
+    let into = state.cues.get(number);
+    if (!into) {
+      into = [];
+      state.cues.set(number, into);
+    }
     for (const cue of cues) {
       into.push({ ...cue, seq: nextSeq(state, number) });
     }
     into.sort((left, right) => left.startSeconds - right.startSeconds);
   }
+
   return {
     cues: state.cues.get(trackNumber) ?? [],
-    // Every track is filled by the same walk, so this is a fact about the FILE
-    // and reads the same whichever track asked.
-    coveredClusters: state.walked.size,
-    indexedClusters: track.clusterPositions.length,
+    coveredClusters: covered,
+    indexedClusters: indexed,
     track
   };
 }

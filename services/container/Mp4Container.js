@@ -118,8 +118,34 @@ export class Mp4Container extends Container {
    *
    * @returns {Promise<object|null>}
    */
-  readSubtitlePlan() {
-    return Mp4Container.readSubtitlePlan(this.readRange, this.fileSize);
+  async readSubtitlePlan() {
+    const plan = await Mp4Container.readSubtitlePlan(this.readRange, this.fileSize);
+    if (!plan) {
+      return null;
+    }
+    // An MP4 states every sample's byte range in its own table, so a cue costs
+    // its own few dozen bytes rather than the cluster around it — which is why
+    // there are `samples` here and no `clusterPositions`.
+    //
+    // An MP4 has no element meaning "show this subtitle track by default", so
+    // `declared` is empty: the container states nothing, and nothing is shown
+    // unasked.
+    return {
+      tracks: plan.tracks.map((track, order) => ({
+        trackNumber: track.trackId,
+        declaredIndex: Number.isInteger(track.declaredIndex) ? track.declaredIndex : order,
+        codecId: track.format,
+        language: track.language,
+        name: "",
+        isDefault: order === 0,
+        codecPrivate: "",
+        clusterPositions: [],
+        samples: track.samples
+      })),
+      declared: [],
+      secondsPerTick: 0.001,
+      segmentDataOffset: 0
+    };
   }
 
 
@@ -138,6 +164,20 @@ export class Mp4Container extends Container {
    * @returns {Promise<{startSeconds: number, endSeconds: number, text: string}[]>}
    *   The cues found in THIS pass.
    */
+  async readHeldCues(_plan, track, progress) {
+    let harvested = progress.harvested.get(track.trackNumber);
+    if (!harvested) {
+      harvested = new Set();
+      progress.harvested.set(track.trackNumber, harvested);
+    }
+    const cues = await this.readHeldSamples(track, harvested);
+    return {
+      found: cues.length > 0 ? new Map([[track.trackNumber, cues]]) : new Map(),
+      covered: harvested.size,
+      indexed: track?.samples?.length ?? 0
+    };
+  }
+
   async readHeldSamples(track, harvested) {
     const found = [];
     for (const sample of track?.samples ?? []) {

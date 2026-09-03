@@ -320,4 +320,3 @@ ${clean}`;
   }
 }
 
-export { EXTENSIONS as SUBTITLE_FILE_EXTENSIONS };

@@ -80,17 +80,3 @@ export function reconcileAll() {
   }
   return { torrents: entries.length, speculativeAllowed, stated, withdrawn };
 }
-
-/**
- * Whether anybody, on any torrent, is still waiting for something urgent.
- *
- * @returns {boolean}
- */
-export function anythingUrgentIsMissing() {
-  return [...live].some((entry) => entry.selection.hasUrgentMissing());
-}
-
-/** Every live register and selection, for the periodic reconcile. */
-export function liveDemand() {
-  return [...live];
-}

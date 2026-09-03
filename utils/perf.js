@@ -21,7 +21,7 @@
  * somewhere specific.
  */
 
-import { monitorEventLoopDelay, performance } from "node:perf_hooks";
+import { monitorEventLoopDelay } from "node:perf_hooks";
 
 const NANOSECONDS_PER_MILLISECOND = 1e6;
 // Sampling interval for the loop-delay histogram. 20 ms is fine enough to catch
@@ -56,66 +56,4 @@ export function eventLoopDelay() {
  */
 export function resetEventLoopDelay() {
   loopDelay.reset();
-}
-
-/**
- * Accumulates how long the parts of one operation took.
- *
- * Usage: `mark()` after each step; `summary()` renders `step=12.3ms` pairs in
- * the order they were marked.
- */
-export class OperationTimer {
-  #startedAt;
-  #lastMarkAt;
-  #marks;
-
-  constructor() {
-    this.#startedAt = performance.now();
-    this.#lastMarkAt = this.#startedAt;
-    this.#marks = [];
-  }
-
-  /**
-   * Record the time since the previous mark under `name`.
-   *
-   * @param {string} name
-   * @returns {number} Milliseconds since the previous mark.
-   */
-  mark(name) {
-    const now = performance.now();
-    const elapsed = now - this.#lastMarkAt;
-    this.#lastMarkAt = now;
-    this.#marks.push([name, elapsed]);
-    return elapsed;
-  }
-
-  /**
-   * Add a figure measured elsewhere (a running total, a count) so it appears in
-   * the same line as the timings.
-   *
-   * @param {string} name
-   * @param {number} value
-   * @returns {void}
-   */
-  add(name, value) {
-    this.#marks.push([name, value]);
-  }
-
-  /**
-   * Total elapsed time since construction, in milliseconds.
-   *
-   * @returns {number}
-   */
-  totalMs() {
-    return performance.now() - this.#startedAt;
-  }
-
-  /**
-   * All marks as `name=12.3ms` pairs, in order.
-   *
-   * @returns {string}
-   */
-  summary() {
-    return this.#marks.map(([name, value]) => `${name}=${value.toFixed(1)}ms`).join(" ");
-  }
 }

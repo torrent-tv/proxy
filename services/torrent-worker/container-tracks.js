@@ -205,22 +205,6 @@ async function readTracks(torrent, fileIndex, sourceKey, options) {
   }
 }
 
-/**
- * The audio tracks of one file, in the order ffmpeg numbers them `0:a:N`.
- *
- * @param {object} torrent
- * @param {number} fileIndex
- * @param {string} sourceKey
- * @param {{ prefetchEdges?: () => Promise<unknown> }} [options]
- * @returns {Promise<object[]>}
- */
-export async function containerAudioTracksOf(torrent, fileIndex, sourceKey, options = {}) {
-  const tracks = await containerTracksOf(torrent, fileIndex, sourceKey, options);
-  return tracks
-    .filter((track) => track.type === "audio")
-    .sort((left, right) => left.declaredIndex - right.declaredIndex);
-}
-
 /** Bytes of a file's head worth fetching before its track table is read. */
 export const CONTAINER_HEAD_BYTES = HEAD_BYTES;
 
@@ -418,22 +402,4 @@ export async function containerMediaInfoOf(torrent, fileIndex, sourceKey, option
     );
     return null;
   }
-}
-
-/**
- * Forget one file's tracks, or every file of a source.
- *
- * @param {string} sourceKey
- * @param {number} [fileIndex]
- */
-export function forgetContainerTracks(sourceKey, fileIndex) {
-  if (fileIndex === undefined) {
-    for (const key of [...byFile.keys()]) {
-      if (key.startsWith(`${sourceKey}:`)) {
-        byFile.delete(key);
-      }
-    }
-    return;
-  }
-  byFile.delete(`${sourceKey}:${fileIndex}`);
 }

@@ -91,9 +91,256 @@ export class Container {
    * @param {object[]} declared - This container's own subtitle tracks, in its order.
    * @returns {object[]}
    */
-  static mergeSubtitleFlags(bannerTracks, declared) {
-    return mergeContainerSubtitleFlags(bannerTracks, declared);
+    /**
+   * The picture's facts, from the two readings that state them.
+   *
+   * Audio and subtitles have had this since the flags were first read from the
+   * file; video never did. Every figure the encode is planned from — the size,
+   * the frame rate, whether it is HDR, how many bits a sample carries — was
+   * taken from ffmpeg's `-i` banner alone, and the `VideoTrack` the container
+   * declares was read and then used for nothing but a line in the log.
+   *
+   * Which reading wins is decided per field by what each one IS, and the rule
+   * is the one `readMediaInfo` already states: a fact the container DECLARES is
+   * read from the container; a fact only the media has is measured from the
+   * media.
+   *
+   * - the coded size and the frame rate are the BANNER's. Both are declared by
+   *   the container as well, but what the encoder receives is what the decoder
+   *   produced, and the ladder and the scale filter have to be sized to that. A
+   *   container that declares something else is mis-declaring, and using its
+   *   numbers would size the encode to a picture that never arrives;
+   * - the bit depth and the HDR signalling are the CONTAINER's where it states
+   *   them. They are not properties of the decoded frames at all — they are the
+   *   file saying how its samples are to be read — and ffmpeg prints them only
+   *   as a side effect of naming a pixel format. HDR is not compared for
+   *   disagreement: both sides give a boolean, and a boolean cannot say "I did
+   *   not look";
+   * - the display size is the container's alone; the banner has no such field.
+   *
+   * Where only one side states a field, that side answers whatever the rule
+   * would have preferred. Where both state it and they DISAGREE, the
+   * disagreement is reported: it is a fact about the file, and until now
+   * nothing could see it.
+   *
+   * @param {{ width?: number|null, height?: number|null, fps?: number|null, isHdr?: boolean, bitDepth?: number|null }} banner
+   * @param {object | null} declared - The container's own `VideoTrack`.
+   * @returns {{ width: number|null, height: number|null, fps: number|null, isHdr: boolean, bitDepth: number|null, displayWidth: number|null, displayHeight: number|null, disagreements: string[] }}
+   */
+  static mergeVideoFacts(banner, declared) {
+    const number = (value) => (Number.isFinite(value) && value > 0 ? Number(value) : null);
+    const fromBanner = {
+      width: number(banner?.width),
+      height: number(banner?.height),
+      fps: number(banner?.fps),
+      isHdr: banner?.isHdr === true,
+      bitDepth: number(banner?.bitDepth)
+    };
+    if (!declared) {
+      return { ...fromBanner, displayWidth: null, displayHeight: null, disagreements: [] };
+    }
+    const fromContainer = {
+      width: number(declared.width),
+      height: number(declared.height),
+      fps: number(declared.fps),
+      isHdr: declared.isHdr === true,
+      bitDepth: number(declared.bitDepth)
+    };
+    const disagreements = [];
+    const note = (field, mine, theirs) => {
+      if (mine !== null && theirs !== null && mine !== theirs) {
+        disagreements.push(`${field} ${theirs} in the container against ${mine} in the probe`);
+      }
+    };
+    note("width", fromBanner.width, fromContainer.width);
+    note("height", fromBanner.height, fromContainer.height);
+    if (fromBanner.bitDepth !== null && fromContainer.bitDepth !== null && fromBanner.bitDepth !== fromContainer.bitDepth) {
+      disagreements.push(
+        `bit depth ${fromContainer.bitDepth} in the container against ${fromBanner.bitDepth} in the probe`
+      );
+    }
+    // HDR is deliberately NOT compared. Both sides give it as a boolean, and a
+    // boolean cannot say "I did not look": a container with no Colour element
+    // and one that states SDR are the same `false`, as are a probe that printed
+    // no colour metadata and one that printed BT.709. Reporting that as a
+    // disagreement would report it on almost every file. Either side saying yes
+    // is taken as yes, which is the safe direction — the cost of tone mapping a
+    // picture that did not need it is smaller than showing a washed-out one.
+    return {
+      width: fromBanner.width ?? fromContainer.width,
+      height: fromBanner.height ?? fromContainer.height,
+      fps: fromBanner.fps ?? fromContainer.fps,
+      // The container declares these; the probe only reflects them.
+      bitDepth: fromContainer.bitDepth ?? fromBanner.bitDepth,
+      isHdr: fromContainer.isHdr || fromBanner.isHdr,
+      displayWidth: number(declared.displayWidth),
+      displayHeight: number(declared.displayHeight),
+      disagreements
+    };
   }
+
+  /**
+   * Line ffmpeg's banner up with what the container declares, and say whether the
+   * two are describing the same thing in the same order.
+   *
+   * ffmpeg numbers a file's streams `0:a:N` / `0:s:N` over every stream of that
+   * kind, in the order the container declares them; the container reading is a
+   * list in that same order. So position is the correspondence — but a position
+   * match that is merely assumed is worth nothing, and it is CHECKED: each pair
+   * has to agree on language or on title. One pair that agrees on neither, or a
+   * length that differs, means the two readings are not about the same thing, and
+   * then the container reading is not used AT ALL. A wrong flag is worse than a
+   * missing one, because `0:a:N` is what the encoder is given.
+   *
+   * One alignment for every media kind, because it is one rule. It was written
+   * twice — once for subtitles, once for audio — down to a `pairingHolds` that
+   * was byte-for-byte the same function under two names.
+   *
+   * @param {object[]} bannerTracks
+   * @param {object[]} declared
+   * @param {string} noun - "subtitle" or "audio"; only for the reason text.
+   * @returns {{ aligned: boolean, reason: string, banner: object[], container: object[] }}
+   */
+  static alignWithBanner(bannerTracks, declared, noun) {
+    const banner = Array.isArray(bannerTracks) ? bannerTracks : [];
+    const container = Array.isArray(declared) ? declared : [];
+    if (banner.length === 0) {
+      return { aligned: false, reason: `the probe found no ${noun} stream`, banner, container };
+    }
+    if (container.length === 0) {
+      return { aligned: false, reason: `the container declares no ${noun} track`, banner, container };
+    }
+    if (container.length !== banner.length) {
+      return {
+        aligned: false,
+        reason: `the container declares ${container.length} ${noun} tracks and the probe found ${banner.length}`,
+        banner,
+        container
+      };
+    }
+    for (const [order, track] of banner.entries()) {
+      if (!Container.pairingHolds(track, container[order])) {
+        return {
+          aligned: false,
+          reason:
+            `${noun} ${order} is "${normalise(track?.title) || "-"}"/${normalise(track?.language) || "-"} ` +
+            `in the probe and "${normalise(container[order]?.name) || "-"}"/` +
+            `${normalise(container[order]?.language) || "-"} in the container`,
+          banner,
+          container
+        };
+      }
+    }
+    return { aligned: true, reason: "", banner, container };
+  }
+
+  /**
+   * What the banner says, with the flags only the container knows added — or the
+   * banner alone where the two could not be lined up.
+   *
+   * `take` says which of the container's fields this kind of track wants, and is
+   * the only part that differs between them.
+   *
+   * @param {object[]} bannerTracks
+   * @param {object[]} declared
+   * @param {string} noun
+   * @param {(containerTrack: object, bannerTrack: object) => object} take
+   * @param {object} absent - The same fields as `take` returns, for a track whose
+   *   container reading could not be used. Not "the container says no" — the
+   *   container has not been heard from.
+   * @returns {{ tracks: object[], aligned: boolean, reason: string }}
+   */
+  static mergeDeclaredFlags(bannerTracks, declared, noun, take, absent) {
+    const { aligned, reason, banner, container } = Container.alignWithBanner(bannerTracks, declared, noun);
+    if (!aligned) {
+      return {
+        tracks: banner.map((track) => ({ ...track, ...absent })),
+        aligned,
+        reason
+      };
+    }
+    return {
+      tracks: banner.map((track, order) => ({ ...track, ...take(container[order], track) })),
+      aligned: true,
+      reason: ""
+    };
+  }
+
+  static mergeSubtitleFlags(bannerTracks, declared) {
+    return Container.mergeDeclaredFlags(
+      bannerTracks,
+      declared,
+      "subtitle",
+      (track) => ({
+        isDefault: track.isDefault === true,
+        declaresDefault: track.declaresDefault === true,
+        // Read from the file rather than guessed from the track's name. Both
+        // are stated by the container itself (RFC 9559 §5.1.4.1) and neither
+        // reaches ffmpeg's `-i` banner, which is where every other field here
+        // comes from.
+        isForced: track.isForced === true,
+        isHearingImpaired: track.isHearingImpaired === true,
+        // FlagEnabled, so the browser can leave an unusable track out of the
+        // menu. It stays in the list and keeps its number: ffmpeg creates a
+        // stream for it either way.
+        isEnabled: track.isEnabled !== false,
+        // The RFC 5646 tag where the file writes one, kept BESIDE the code
+        // rather than replacing it: this list is aligned against ffmpeg's
+        // banner, which prints the three-letter form.
+        languageBcp47: typeof track.languageBcp47 === "string" ? track.languageBcp47 : ""
+      }),
+      {
+        declaresDefault: false,
+        isForced: false,
+        isHearingImpaired: false,
+        isEnabled: true,
+        languageBcp47: ""
+      }
+    );
+  }
+
+  /**
+   * The same for audio, with the flags RFC 9559 §5.1.4.1 defines for it.
+   *
+   * `FlagOriginal`, `FlagCommentary` and `FlagVisualImpaired` do not appear in
+   * the banner at all, so without this the audio menu cannot tell a director's
+   * commentary from the film.
+   *
+   * @param {object[]} bannerTracks
+   * @param {object[]} declared
+   * @returns {{ tracks: object[], aligned: boolean, reason: string }}
+   */
+  static mergeAudioFlags(bannerTracks, declared) {
+    return Container.mergeDeclaredFlags(
+      bannerTracks,
+      declared,
+      "audio",
+      (track, banner) => ({
+        isOriginal: track.isOriginal === true,
+        isCommentary: track.isCommentary === true,
+        isVisualImpaired: track.isVisualImpaired === true,
+        isEnabled: track.isEnabled !== false,
+        isDefault: track.isDefault === true,
+        declaresDefault: track.declaresDefault === true,
+        languageBcp47: typeof track.languageBcp47 === "string" ? track.languageBcp47 : "",
+        channels: Number.isFinite(track.channels) ? track.channels : null,
+        title:
+          typeof banner?.title === "string" && banner.title.length > 0
+            ? banner.title
+            : (typeof track.name === "string" ? track.name : "")
+      }),
+      {
+        declaresDefault: false,
+        isOriginal: false,
+        isCommentary: false,
+        isVisualImpaired: false,
+        isEnabled: true,
+        languageBcp47: "",
+        channels: null
+      }
+    );
+  }
+
 
   /** @returns {string} Human name: "matroska" | "mp4" | "avi" | "unknown" */
   get formatName() {
@@ -320,81 +567,3 @@ function pairingHolds(banner, container) {
   );
 }
 
-/**
- * The banner's subtitle tracks, with what the container says about each.
- *
- * Every returned track gains `declaresDefault`: whether the FILE wrote the flag
- * for it. When the container reading cannot be trusted — no declarations, a
- * different number of them, or a pair that agrees on neither language nor name
- * — every track gets `declaresDefault: false` and its `isDefault` is left as
- * the banner had it. That is the honest answer for a file we cannot read this
- * way: the container has not been heard from, so nothing is shown unasked.
- *
- * @param {Array<{ index?: number, language?: string, title?: string, isDefault?: boolean }>} bannerTracks
- * @param {Array<{ language?: string, name?: string, isDefault?: boolean, declaresDefault?: boolean }>} declared
- * @returns {{ tracks: object[], aligned: boolean, reason: string }}
- */
-function mergeContainerSubtitleFlags(bannerTracks, declared) {
-  const banner = Array.isArray(bannerTracks) ? bannerTracks : [];
-  const container = Array.isArray(declared) ? declared : [];
-  const undecided = () => ({
-    // The container reading could not be lined up, so nothing of it is used —
-    // including the flags, which would otherwise be attributed to the wrong
-    // track.
-    tracks: banner.map((track) => ({
-      ...track,
-      declaresDefault: false,
-      isForced: false,
-      isHearingImpaired: false,
-      // Not "the container says this track is unusable" — nothing of the
-      // container is being used here. A track is offered unless it was read to
-      // say otherwise.
-      isEnabled: true,
-      languageBcp47: ""
-    }))
-  });
-  if (container.length === 0) {
-    return { ...undecided(), aligned: false, reason: "the container declares no subtitle track" };
-  }
-  if (container.length !== banner.length) {
-    return {
-      ...undecided(),
-      aligned: false,
-      reason: `the container declares ${container.length} subtitle tracks and the probe found ${banner.length}`
-    };
-  }
-  for (const [order, track] of banner.entries()) {
-    if (!pairingHolds(track, container[order])) {
-      return {
-        ...undecided(),
-        aligned: false,
-        reason:
-          `subtitle ${order} is "${normalise(track?.title) || "-"}"/${normalise(track?.language) || "-"} ` +
-          `in the probe and "${normalise(container[order]?.name) || "-"}"/` +
-          `${normalise(container[order]?.language) || "-"} in the container`
-      };
-    }
-  }
-  return {
-    tracks: banner.map((track, order) => ({
-      ...track,
-      isDefault: container[order].isDefault === true,
-      declaresDefault: container[order].declaresDefault === true,
-      // Read from the file rather than guessed from the track's name. Both are
-      // stated by the container itself (RFC 9559 §5.1.4.1) and neither reaches
-      // ffmpeg's `-i` banner, which is where every other field here comes from.
-      isForced: container[order].isForced === true,
-      isHearingImpaired: container[order].isHearingImpaired === true,
-      // FlagEnabled, so the browser can leave an unusable track out of the
-      // menu. It stays in this list and keeps its number: ffmpeg creates a
-      // stream for it either way.
-      isEnabled: container[order].isEnabled !== false,
-      // The RFC 5646 tag, where the file writes one. Kept beside the code
-      // rather than replacing it: what this list is aligned against is ffmpeg's
-      // banner, which prints the three-letter form.
-      languageBcp47: typeof container[order].languageBcp47 === "string" ? container[order].languageBcp47 : ""
-    })),
-    aligned: true,
-    reason: ""
-  };
-}

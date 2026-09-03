@@ -9,12 +9,11 @@
 import { spawn } from "node:child_process";
 import { logger } from "../utils/logger.js";
 import { Container } from "./container/Container.js";
-import { buildAudioInventory, mergeContainerAudioFlags } from "./audio-inventory.js";
+import { buildAudioInventory } from "./audio-inventory.js";
 import { countVideoFiles, matchSidecarFiles } from "./sidecar-files.js";
 import {
   parseFfmpegDurationSeconds,
   parseFfmpegStartTimeSeconds,
-  parseFfmpegVideoDimensions,
   parseFfmpegBitDepth,
   parseFfmpegBitrateKbps,
   parseFfmpegVideoFps,
@@ -431,7 +430,7 @@ export function createPlaybackPlanner({
       // The picture's head is already downloaded — the codec probe just read it
       // — so this is a parse and not a wait, but it is bounded like the rest.
       const declared = await declaredAudioOf(fileIndex, "the picture");
-      const merged = mergeContainerAudioFlags(banner, declared);
+      const merged = Container.mergeAudioFlags(banner, declared);
       embedded = merged.tracks;
       logger.info(
         merged.aligned
@@ -650,10 +649,40 @@ export function createPlaybackPlanner({
           `${codecsDetected ? `${videoCodec || "-"}/${audioCodec || "-"}` : "codecs NOT detected (will be polled again)"}`
       );
 
+      // The picture's own facts come from two readings and only one was ever
+      // used: every figure the encode is planned from came from ffmpeg's
+      // banner, while the `VideoTrack` the container declares was read and used
+      // for nothing but a line in the log.
+      let declaredVideo = null;
+      if (typeof torrentPool?.getDeclaredVideoTrack === "function") {
+        try {
+          declaredVideo = await torrentPool.getDeclaredVideoTrack(torrent, fileIndex);
+        } catch (error) {
+          logger.info(`video track: could not be read (${error?.message ?? error})`);
+        }
+      }
       // `mode` is advisory only (audio-codec based). The browser makes the
       // authoritative decision independently per stream via canPlayType /
       // mediaCapabilities, transcoding only what it cannot play.
       const requiresTranscode = audioCodec.length > 0 && !DIRECT_AUDIO_CODECS.has(audioCodec);
+      // The two readings of the picture, lined up. Which one answers is decided
+      // per field by what each IS — see `Container.mergeVideoFacts`.
+      const videoFacts = Container.mergeVideoFacts(
+        {
+          width: videoWidth,
+          height: videoHeight,
+          fps: parseFfmpegVideoFps(probe.stderr),
+          isHdr: parseFfmpegHdr(probe.stderr),
+          bitDepth: parseFfmpegBitDepth(probe.stderr)
+        },
+        declaredVideo
+      );
+      if (videoFacts.disagreements.length > 0) {
+        logger.info(
+          `video track: the file and the probe disagree — ${videoFacts.disagreements.join("; ")}; ` +
+          "the size and frame rate are the probe's, the bit depth and HDR the file's"
+        );
+      }
       const plan = {
         mode: requiresTranscode ? "hls" : "direct",
         directUrl,
@@ -664,8 +693,8 @@ export function createPlaybackPlanner({
         durationSeconds,
         // Source coded resolution — drives the browser's manual quality menu
         // (list of forced resolutions <= source). 0 when unknown.
-        videoWidth,
-        videoHeight,
+        videoWidth: videoFacts.width ?? 0,
+        videoHeight: videoFacts.height ?? 0,
         // Full track inventory for the browser's audio/subtitle menus. The audio
         // half spans the picture's own tracks AND the soundtracks shipped as
         // files beside it, under one numbering — see `buildInventory`.
@@ -683,15 +712,15 @@ export function createPlaybackPlanner({
         // does, as the host learns what this source costs. Stripped on the way
         // out — it is not part of the plan the browser is given.
         mediaInfoForOffer: {
-          width: videoWidth,
-          height: videoHeight,
-          fps: parseFfmpegVideoFps(probe.stderr),
+          width: videoFacts.width,
+          height: videoFacts.height,
+          fps: videoFacts.fps,
           bitrateKbps: parseFfmpegBitrateKbps(probe.stderr),
           // Which family of the decode measurement prices this source. A video
           // that has to be re-encoded is one the browser could not play, so it
           // is usually NOT H.264, and H.264 constants are wrong for it.
           codec: videoCodec,
-          bitDepth: parseFfmpegBitDepth(probe.stderr),
+          bitDepth: videoFacts.bitDepth,
           // Which file this is, so the offer can be answered from what an
           // encoder has already learned about THIS source rather than from the
           // startup clips — the same correction a live session applies.
@@ -708,7 +737,6 @@ export function createPlaybackPlanner({
         cache.set(cacheKey, plan);
         // Cache the full media info from THIS probe's banner (same helpers the
         // session manager uses) so createSession can skip its own probe.
-        const dims = parseFfmpegVideoDimensions(probe.stderr);
         mediaInfoCache.set(cacheKey, {
           // The codecs, because the session manager asks this cache which
           // tracks the output will carry — and they were never stored here. It
@@ -722,13 +750,13 @@ export function createPlaybackPlanner({
           videoCodec: plan.videoCodec,
           audioCodec: plan.audioCodec,
           durationSeconds: parseFfmpegDurationSeconds(probe.stderr),
-          width: dims.width,
-          height: dims.height,
+          width: videoFacts.width,
+          height: videoFacts.height,
           bitrateKbps: parseFfmpegBitrateKbps(probe.stderr),
-          fps: parseFfmpegVideoFps(probe.stderr),
+          fps: videoFacts.fps,
           startTime: parseFfmpegStartTimeSeconds(probe.stderr),
-          isHdr: parseFfmpegHdr(probe.stderr),
-          bitDepth: parseFfmpegBitDepth(probe.stderr)
+          isHdr: videoFacts.isHdr,
+          bitDepth: videoFacts.bitDepth
         });
         // Warm the file-body start for the transcode session that follows.
         // Fire-and-forget: never delays the plan response.

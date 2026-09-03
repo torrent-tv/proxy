@@ -60,6 +60,7 @@ import {
 } from "./ffmpeg-banner.js";
 import { resolveSegmentFormat, SEGMENT_FORMAT_IDS } from "./segment-formats/index.js";
 import { audioRenditionName } from "./audio-inventory.js";
+import { ProducedIndex } from "./produced-index.js";
 
 /**
  * Whether an encoder run died because its INPUT went away, rather than because
@@ -2862,9 +2863,8 @@ export class HlsSessionManager {
     const pieces = new Map();
     let names;
     try {
-      names = (this.#runDirs(session).flatMap((dir) => {
-        try { return readdirSync(dir, { withFileTypes: false }); } catch { return []; }
-      }))
+      names = this.#producedIndex(session)
+        .fileNames()
         .filter((name) => session.segmentFormat.isSegmentFileName(name))
         .sort();
     } catch {
@@ -3439,9 +3439,7 @@ export class HlsSessionManager {
   async #observedStreamMbps(session) {
     let names;
     try {
-      names = this.#runDirs(session).flatMap((dir) => {
-        try { return readdirSync(dir, { withFileTypes: false }); } catch { return []; }
-      });
+      names = this.#producedIndex(session).fileNames();
     } catch {
       return null;
     }
@@ -3858,14 +3856,7 @@ export class HlsSessionManager {
   #contiguousAheadSeconds(session, viewerSegment) {
     let present;
     try {
-      if (!(session.knownNonEmptySegments instanceof Set)) {
-        session.knownNonEmptySegments = new Set();
-      }
-      present = usableSegmentIndices(
-        this.#runDirs(session),
-        this.segmentFormat,
-        session.knownNonEmptySegments
-      );
+      present = this.#producedIndex(session).segmentNumbers();
     } catch {
       return null;
     }
@@ -6669,9 +6660,7 @@ export class HlsSessionManager {
    */
   #latestProducedSegment(session) {
     let highest = null;
-    for (const name of this.#runDirs(session).flatMap((dir) => {
-      try { return readdirSync(dir, { withFileTypes: false }); } catch { return []; }
-    })) {
+    for (const name of this.#producedIndex(session).fileNames()) {
       if (!this.segmentFormat.isSegmentFileName(name)) {
         continue;
       }
@@ -9834,6 +9823,9 @@ export class HlsSessionManager {
             } catch {
               // Already gone, or being rewritten: either way nothing to do.
             }
+            // The index answers from what it read; a file removed on purpose
+            // must not still be an answer in the same tick.
+            this.#producedIndex(session).invalidate();
           }
           return { kind: "warming-up" };
         }
@@ -10111,15 +10103,27 @@ export class HlsSessionManager {
    * @returns {string[]}
    */
   #runDirs(session) {
-    try {
-      return readdirSync(session.dirPath, { withFileTypes: true })
-        .filter((entry) => entry.isDirectory() && entry.name.startsWith("run-"))
-        .map((entry) => entry.name)
-        .sort((a, b) => Number(b.slice(4)) - Number(a.slice(4)))
-        .map((name) => path.join(session.dirPath, name));
-    } catch {
-      return [];
+    return this.#producedIndex(session).runDirs();
+  }
+
+  /**
+   * This session's one statement of what it has produced.
+   *
+   * Made on first use and kept on the session, so the directory times it
+   * remembers survive between requests — which is the whole of what makes it
+   * cheaper than the walk it replaces.
+   *
+   * @param {HlsSession} session
+   * @returns {ProducedIndex}
+   */
+  #producedIndex(session) {
+    if (!(session.producedIndex instanceof ProducedIndex)) {
+      session.producedIndex = new ProducedIndex({
+        dirPath: session.dirPath,
+        segmentFormat: session.segmentFormat ?? this.segmentFormat
+      });
     }
+    return session.producedIndex;
   }
 
   /**
@@ -10130,16 +10134,7 @@ export class HlsSessionManager {
    * @returns {Promise<string | null>}
    */
   async #findProducedFile(session, fileName) {
-    for (const dir of this.#runDirs(session)) {
-      const candidate = path.join(dir, fileName);
-      try {
-        await access(candidate);
-        return candidate;
-      } catch {
-        // Not this run's; try an older one.
-      }
-    }
-    return null;
+    return this.#producedIndex(session).pathOf(fileName);
   }
 
   /**
@@ -10185,6 +10180,8 @@ export class HlsSessionManager {
         : null
     );
     if (removed !== null) {
+      // Removed on purpose, so the index must not go on answering with it.
+      this.#producedIndex(session).invalidate();
       logger.info(
         `transcode ${session.id} discarded segment #${removed}: ` +
           "the run ended while it was open, so it holds no usable piece"

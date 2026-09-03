@@ -69,7 +69,22 @@ export const PROBE_INTERVAL_MS = 500;
  * measurable on the same connection, so it is measured and added rather than
  * assumed.
  *
- * @param {{ queuedBytes: number, bytesPerSecond: number, rttMs: number, echoIntervalMs?: number, intervalMs?: number }} state
+ * There is a fourth term, and without it the third one arrives too late to
+ * help. `echoIntervalMs` is the widest gap between two echoes this connection
+ * has SHOWN, so it can only grow after a late echo has landed — and a browser
+ * whose tab has just been hidden goes quiet before it has taught us anything.
+ * The browser measures its own event-loop delay and puts it in every echo, so
+ * the delay is known BEFORE the silence rather than after it: an echo timer
+ * set for half a second cannot fire until the loop runs, and a loop reported
+ * as 4297 ms behind cannot answer sooner than that. Field 2026-09-03: a viewer
+ * paused at 15:24:21, the tab went hidden at 15:24:35, `loopLag` climbed
+ * 681 → 1881 → 4297 → 5957 ms, and at 15:26:05 the probes read `gap 12 of 11`
+ * and printed `association-stopped` on a connection that was `flowing` again
+ * seven seconds later. Adding the peer's own reported lag makes that allowance
+ * 15 instead of 11, and the gap of 12 is then what it was — a browser whose
+ * timers are frozen, not an association that stopped.
+ *
+ * @param {{ queuedBytes: number, bytesPerSecond: number, rttMs: number, echoIntervalMs?: number, peerLoopLagMs?: number, intervalMs?: number }} state
  * @returns {number | null} Probes that may legitimately be outstanding, or null
  *   when no rate has been measured yet and nothing can be said.
  */
@@ -78,13 +93,18 @@ export function allowedGap({
   bytesPerSecond,
   rttMs,
   echoIntervalMs = 0,
+  peerLoopLagMs = 0,
   intervalMs = PROBE_INTERVAL_MS
 }) {
   if (!(bytesPerSecond > 0) || !(intervalMs > 0)) {
     return null;
   }
   const drainMs = (Math.max(queuedBytes, 0) / bytesPerSecond) * 1000;
-  const waitMs = drainMs + Math.max(rttMs, 0) + Math.max(echoIntervalMs, 0);
+  const waitMs =
+    drainMs +
+    Math.max(rttMs, 0) +
+    Math.max(echoIntervalMs, 0) +
+    Math.max(peerLoopLagMs, 0);
   // At least one: a probe sent and not yet echoed is the ordinary state.
   return Math.max(1, Math.ceil(waitMs / intervalMs));
 }
@@ -149,6 +169,8 @@ export function probeWedgeIsCertain({ stuckForMs, longestHealthySeenGapMs, inter
  * @property {number} longestHealthySeenGapMs - The longest gap between two advances this connection has shown while not flagged as a wedge.
  * @property {number | null} peerBytes - The far end's transport-level received total, as last reported.
  * @property {number | null} peerBytesAtTick - The same, as it stood at the previous tick.
+ * @property {number | null} peerLoopLagMs - The far end's own event-loop delay, as last reported.
+ * @property {string | null} peerVisibility - Whether the far end's tab is visible or hidden, as last reported.
  * @property {boolean} probeCaptureStarted - One evidence-gathering attempt per wedge; reset once `seen` advances again.
  * @property {ReturnType<typeof setInterval> | null} timer
  */
@@ -185,7 +207,12 @@ export function probeWedgeIsCertain({ stuckForMs, longestHealthySeenGapMs, inter
  * behind the probes are. `null` where the far end does not report it, and then
  * the rule falls back to what it says without the term.
  *
- * @param {{ seq: number, seen: Map<string, number> | Record<string, number>, labels: string[], echoes: number, echoAgeMs: number | null, allowed?: Map<string, number | null> | Record<string, number | null>, echoStaleMs?: number, peerBytesAdvancing?: boolean | null }} state
+ * `peerLoopLagMs` and `peerVisibility` are printed but never compared against
+ * anything here: they are what made the allowance as wide as it is, and a
+ * reader of the log cannot check that arithmetic unless the terms are on the
+ * same line as the result.
+ *
+ * @param {{ seq: number, seen: Map<string, number> | Record<string, number>, labels: string[], echoes: number, echoAgeMs: number | null, allowed?: Map<string, number | null> | Record<string, number | null>, echoStaleMs?: number, peerBytesAdvancing?: boolean | null, peerLoopLagMs?: number | null, peerVisibility?: string | null }} state
  * @returns {{ verdict: string, detail: string }}
  */
 export function readProbeState(state) {
@@ -224,7 +251,9 @@ export function readProbeState(state) {
     `echoAge=${state.echoAgeMs === null ? "never" : `${state.echoAgeMs}ms`}` +
     (state.peerBytesAdvancing === null || state.peerBytesAdvancing === undefined
       ? ""
-      : ` peerBytes=${advancing ? "advancing" : "still"}`);
+      : ` peerBytes=${advancing ? "advancing" : "still"}`) +
+    (Number.isFinite(state.peerLoopLagMs) ? ` peerLoopLag=${Math.round(Number(state.peerLoopLagMs))}ms` : "") +
+    (state.peerVisibility ? ` peerTab=${state.peerVisibility}` : "");
 
   if (state.echoes === 0) {
     return { verdict: "no-echo-yet", detail };
@@ -326,6 +355,7 @@ export function createDeliveryProbe({
         bytesPerSecond,
         rttMs,
         echoIntervalMs: connection.echoIntervalMs,
+        peerLoopLagMs: connection.peerLoopLagMs ?? 0,
         intervalMs
       });
       // Several channels can carry one label only in malformed cases; the
@@ -354,10 +384,18 @@ export function createDeliveryProbe({
       labels: [...new Set(connection.channels.values())],
       echoes: connection.echoes,
       echoAgeMs: connection.echoAt === 0 ? null : now - connection.echoAt,
+      peerLoopLagMs: connection.peerLoopLagMs,
+      peerVisibility: connection.peerVisibility,
       allowed,
       // Same arithmetic for the echo's own age: the peer cannot answer sooner
-      // than its own cadence allows, and a hidden tab's is about a second.
-      echoStaleMs: widest > 0 ? widest * intervalMs + rttMs + connection.echoIntervalMs : 0
+      // than its own cadence allows, nor sooner than its own event loop runs.
+      echoStaleMs:
+        widest > 0
+          ? widest * intervalMs +
+            rttMs +
+            connection.echoIntervalMs +
+            Math.max(connection.peerLoopLagMs ?? 0, 0)
+          : 0
     });
     if (verdict !== connection.verdict || now - connection.reportedAt >= REPORT_INTERVAL_MS) {
       connection.verdict = verdict;
@@ -430,6 +468,13 @@ export function createDeliveryProbe({
           peerBytes: null,
           /** @type {number | null} */
           peerBytesAtTick: null,
+          // The far end's own event-loop delay and tab state, as last reported.
+          // The lag is a term in every allowance below; the tab state is only
+          // printed, so that a wide allowance can be read back to its cause.
+          /** @type {number | null} */
+          peerLoopLagMs: null,
+          /** @type {string | null} */
+          peerVisibility: null,
           verdict: "",
           reportedAt: 0,
           lastSeenAdvanceAt: 0,
@@ -508,6 +553,19 @@ export function createDeliveryProbe({
       const peerBytes = Number(echo?.report?.transportBytesReceived);
       if (Number.isFinite(peerBytes) && peerBytes >= 0) {
         connection.peerBytes = peerBytes;
+      }
+      // How far behind the far end's own event loop is running. A browser that
+      // cannot run its timers cannot answer a probe, and every allowance here
+      // is a wait the answer has to fit inside — so this is a term in the
+      // arithmetic, not a note. It is the peer's own measurement, taken on the
+      // peer, and it arrives on the direction that survives a freeze.
+      const peerLoopLag = Number(echo?.report?.loopLagMs);
+      if (Number.isFinite(peerLoopLag) && peerLoopLag >= 0) {
+        connection.peerLoopLagMs = peerLoopLag;
+      }
+      const peerVisibility = echo?.report?.visibility;
+      if (typeof peerVisibility === "string" && peerVisibility.length > 0) {
+        connection.peerVisibility = peerVisibility;
       }
       if (connection.echoAt !== 0) {
         const sinceLast = now - connection.echoAt;

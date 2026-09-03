@@ -116,7 +116,10 @@ export class Mp4Container extends Container {
           isDefault: s.declaredIndex === 0,
           declaresDefault: false,
           codecPrivateB64: "",
-          isForced: false,
+          // The sample entry's own words, read in `mp4-subtitles.js`. Either
+          // bit is enough: a file that sets only "all samples are forced" is
+          // saying what a well-formed one says twice.
+          isForced: s.someSamplesForced === true || s.allSamplesForced === true,
           isHearingImpaired: false,
           clusterPositions: [],
           samples: s.samples

@@ -26,7 +26,8 @@ import assert from "node:assert/strict";
 
 import { cueTextOfVtt, detectLanguage, detectLanguageFromVtt } from "../services/language-detect.js";
 import { convertSubtitleToVtt } from "../services/subtitle-convert.js";
-import { finalizeCues } from "../services/torrent-worker/subtitle-cues.js";
+import { finalizeCues } from "../services/subtitle-convert.js";
+import { MatroskaContainer } from "../services/container/MatroskaContainer.js";
 
 /** Varied Russian dialogue, the length a few minutes of an episode carries. */
 const RUSSIAN_DIALOGUE = [
@@ -176,20 +177,30 @@ test("a document with no cues yields no language rather than a guess", () => {
   assert.equal(detectLanguageFromVtt(null), null);
 });
 
-test("an embedded ASS cue is read through finalizeCues, not raw", () => {
-  // What the cluster walk holds: the dialogue row without its `Dialogue:`
-  // header — nine comma-separated fields, then the text with override groups.
-  const cues = RUSSIAN_DIALOGUE.map((line, index) => ({
+test("an embedded ASS cue is unframed by the container, then read", () => {
+  // What a Matroska block actually holds, per
+  // `matroska.org/technical/subtitles.html`: "Events are stored in the Block in
+  // this order: ReadOrder, Layer, Style, Name, MarginL, MarginR, MarginV,
+  // Effect, Text", with Start and End taken out into the block's own timing.
+  // Eight fields, and the earlier fixture here wrongly carried ten — it kept
+  // the two timestamps a FILE has, which is why it passed while the field
+  // subtitles of a real `.mkv` were shown to the viewer whole.
+  const blocks = RUSSIAN_DIALOGUE.map((line, index) => Buffer.from(
+    `${index + 1},0,Default,,0000,0000,0000,,` +
+    `${index % 5 === 4 ? "{\\pos(640,620)}" : ""}${line}`,
+    "utf8"
+  ));
+
+  const cues = blocks.map((payload, index) => ({
     startSeconds: index * 4,
     endSeconds: index * 4 + 3,
-    text: `0,${assTime(index * 4)},${assTime(index * 4 + 3)},Default,,0,0,0,,` +
-      `${index % 5 === 4 ? "{\\pos(640,620)}" : ""}${line}`
+    text: MatroskaContainer.cueTextOf(payload, "S_TEXT/ASS")
   }));
 
   const spoken = finalizeCues(cues, "S_TEXT/ASS").map((cue) => cue.text).join("\n");
   assert.ok(!spoken.includes("Default"), "the style field survived into the text");
+  assert.ok(!spoken.includes("0000"), "a margin field survived into the text");
   assert.ok(!spoken.includes("pos("), "an override group survived into the text");
-  assert.ok(!spoken.includes("0:00:12"), "a timestamp field survived into the text");
   assert.deepEqual(detectLanguage(spoken), { code: "ru", name: "Russian" });
 });
 

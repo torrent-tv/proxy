@@ -16,7 +16,7 @@
 
 import { Container } from "./Container.js";
 import { isMp4, readMp4KeyframeTimes } from "../container-index/mp4.js";
-import { readMp4SubtitlePlan } from "../container-index/mp4-subtitles.js";
+import { decodeSubtitleSample, readMp4SubtitlePlan } from "../container-index/mp4-subtitles.js";
 import { VideoTrack } from "../tracks/VideoTrack.js";
 import { AudioTrack } from "../tracks/AudioTrack.js";
 import { TextSubtitleTrack, TEXT_FORMATS_MP4 } from "../tracks/TextSubtitleTrack.js";
@@ -231,6 +231,27 @@ export class Mp4Container extends Container {
       }
     }
     return result;
+  }
+
+  /**
+   * The text field of one cue as MP4 frames it.
+   *
+   * A `tx3g`/`text` sample is a 16-bit big-endian length followed by that many
+   * bytes of UTF-8 (ISO/IEC 14496-12 §12.6.3 and Apple's text sample format); a
+   * `wvtt` sample is a sequence of boxes whose `vttc`/`payl` holds the cue text
+   * (§12.6.3.2). Neither carries the subtitle format's own markup, so the
+   * markup step that follows has nothing to take off — it is applied all the
+   * same, because which step applies is decided by the codec and not here.
+   *
+   * The byte reading itself stays in `container-index/mp4-subtitles.js`,
+   * alongside the sample-table walk that found the range.
+   *
+   * @param {Buffer} payload - The sample's own bytes.
+   * @param {string} codecId - Sample entry type: `tx3g`, `text` or `wvtt`.
+   * @returns {string}
+   */
+  static cueTextOf(payload, codecId) {
+    return decodeSubtitleSample(payload, codecId);
   }
 
   async readKeyframeIndex() {

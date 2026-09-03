@@ -359,9 +359,14 @@ export function harvestCluster(bytes, trackNumber, secondsPerTick) {
     trackNumber,
     secondsPerTick
   );
+  // The payload is handed on as BYTES. What those bytes mean — which of them
+  // are the text and which are the eight fields Matroska puts before it — is
+  // stated by the container's specification and answered by
+  // `MatroskaContainer.cueTextOf`, not here: this function's subject is where a
+  // block sits and how long it lasts.
   return blocks.map((block) => ({
     startSeconds: block.startSeconds,
     endSeconds: block.durationSeconds === null ? null : block.startSeconds + block.durationSeconds,
-    text: block.payload.toString("utf8")
+    payload: block.payload
   }));
 }

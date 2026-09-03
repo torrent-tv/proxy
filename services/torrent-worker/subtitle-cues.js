@@ -18,8 +18,11 @@
  */
 
 import { readSubtitlePlan, harvestCluster } from "../container-index/matroska-subtitles.js";
-import { decodeSubtitleSample, readMp4SubtitlePlan } from "../container-index/mp4-subtitles.js";
+import { readMp4SubtitlePlan } from "../container-index/mp4-subtitles.js";
 import { iterateElements } from "../container-index/ebml-reader.js";
+import { MatroskaContainer } from "../container/MatroskaContainer.js";
+import { Mp4Container } from "../container/Mp4Container.js";
+import { finalizeCues } from "../subtitle-convert.js";
 import { detectLanguage } from "../language-detect.js";
 import { logger } from "../../utils/logger.js";
 
@@ -358,7 +361,8 @@ async function walkFor(torrent, fileIndex, state, plan, track, trackNumber) {
         continue;
       }
       harvested.add(sample.offset);
-      const text = decodeSubtitleSample(bytes, track.codecId);
+      // The MP4 has framed this cue and is the one that unframes it.
+      const text = Mp4Container.cueTextOf(bytes, track.codecId);
       if (text) {
         cues.push({
           startSeconds: sample.startSeconds,
@@ -424,9 +428,18 @@ async function walkFor(torrent, fileIndex, state, plan, track, trackNumber) {
         state.cues.set(candidate.trackNumber, into);
       }
       let found = false;
-      for (const cue of harvestCluster(bytes, candidate.trackNumber, plan.secondsPerTick)) {
-        cue.seq = nextSeq(state, candidate.trackNumber);
-        into.push(cue);
+      for (const block of harvestCluster(bytes, candidate.trackNumber, plan.secondsPerTick)) {
+        // The block's bytes become this track's text HERE, where the container
+        // that framed them is known. A cue kept in its framed form and unframed
+        // later cannot be unframed at all: nothing downstream knows which
+        // container it came out of, and guessing from the field count is what
+        // showed the dialogue row's own fields to the viewer.
+        into.push({
+          startSeconds: block.startSeconds,
+          endSeconds: block.endSeconds,
+          text: MatroskaContainer.cueTextOf(block.payload, candidate.codecId),
+          seq: nextSeq(state, candidate.trackNumber)
+        });
         found = true;
       }
       if (found) {
@@ -513,54 +526,6 @@ export async function warmSubtitleCues(torrent, fileIndex, sourceKey) {
     });
   }
   return fresh;
-}
-
-/**
- * Resolve a cue's end time and strip codec-specific formatting, turning a raw
- * block-derived cue into text a player can show directly. The same step
- * `routes/api/subtitles/get.js` applies when building WebVTT for a pull —
- * factored out here so a pushed cue and a pulled one read identically.
- *
- * A cue with no duration — a SimpleBlock, which subtitles rarely use — is
- * given the time until the next one IN THIS LIST, and the last such cue a few
- * seconds. Not an invention about the film: it is what a player does with an
- * open-ended cue, made explicit so every consumer agrees on it.
- *
- * @param {{ startSeconds: number, endSeconds: number | null, text: string }[]} cues
- * @param {string} codecId
- * @returns {{ startSeconds: number, endSeconds: number, text: string }[]}
- */
-export function finalizeCues(cues, codecId) {
-  const isAss = codecId === "S_TEXT/ASS" || codecId === "S_TEXT/SSA";
-  const result = [];
-  cues.forEach((cue, index) => {
-    const next = cues[index + 1];
-    const endSeconds = cue.endSeconds ?? (next ? next.startSeconds : cue.startSeconds + 4);
-    const text = isAss ? assDialogueToText(cue.text) : cue.text.trim();
-    if (!text) {
-      return;
-    }
-    result.push({ startSeconds: cue.startSeconds, endSeconds, text });
-  });
-  return result;
-}
-
-/**
- * The visible text of an ASS dialogue row.
- *
- * A block carries the fields after `Dialogue:` without their header — nine of
- * them, then the text, which itself holds override groups in braces.
- *
- * @param {string} raw
- * @returns {string}
- */
-function assDialogueToText(raw) {
-  const fields = raw.split(",");
-  const text = fields.length > 9 ? fields.slice(9).join(",") : raw;
-  return text
-    .replace(/\{[^}]*\}/g, "")
-    .replace(/\\N/gi, "\n")
-    .trim();
 }
 
 /**

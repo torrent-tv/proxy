@@ -8,29 +8,10 @@
  */
 
 import { subtitleOrchestrator } from "../orchestrators/SubtitleOrchestrator.js";
-import { convertSubtitleToVtt, decodeSubtitleBytes } from "../subtitle-convert.js";
+import { convertSubtitleToVtt, cuesToVtt, decodeSubtitleBytes, finalizeCues } from "../subtitle-convert.js";
 import { detectLanguage, detectLanguageFromVtt } from "../language-detect.js";
-import { finalizeCues } from "../torrent-worker/subtitle-cues.js";
 
 const EXTERNAL_MAX_BYTES = 8 * 1024 * 1024;
-
-function vttTime(s) {
-  const safe = Math.max(0, s);
-  const h = Math.floor(safe / 3600);
-  const m = Math.floor((safe % 3600) / 60);
-  const r = safe % 60;
-  return `${String(h).padStart(2, "0")}:${String(m).padStart(2, "0")}:${r.toFixed(3).padStart(6, "0")}`;
-}
-
-function cuesToVtt(cues, codecId) {
-  const lines = ["WEBVTT", ""];
-  for (const c of finalizeCues(cues, codecId)) {
-    lines.push(`${vttTime(c.startSeconds)} --> ${vttTime(c.endSeconds)}`);
-    lines.push(c.text);
-    lines.push("");
-  }
-  return lines.join("\n");
-}
 
 function readFileFully(file, maxBytes) {
   return new Promise((resolve, reject) => {
@@ -114,11 +95,11 @@ export class SubtitleController {
       const vtt = cuesToVtt(fresh, codecId);
       // Two things this reads, and each of them was wrong before 2.68.1.
       //
-      // It reads the cues through `finalizeCues`, which is what turns an ASS
-      // dialogue row into the words: a raw cue carries the nine
-      // comma-separated fields of the row and its `{\…}` override groups, and
-      // those are Latin on a Russian track. Detecting on the raw text is the
-      // same fault as detecting on a whole `.ass` file, one layer down.
+      // It reads the cues through `finalizeCues`, so what reaches the detector
+      // is the words and not ASS's `{\…}` override groups, which are Latin on a
+      // Russian track. (The dialogue row's own fields are gone earlier now, in
+      // the container that framed them — before 2.72.1 they were not gone at
+      // all, and the detector was reading them too.)
       //
       // And it reads EVERY cue held so far, not the `fresh` subset that is
       // being sent. A re-subscription after a reconnect asks only for what this

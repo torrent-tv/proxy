@@ -5,7 +5,16 @@
  * ASS/SSA (.ass/.ssa) to WebVTT so the browser can attach them to a `<track>`
  * without any client-side conversion. The proxy owns subtitle conversion so it
  * can also run language detection where the full text is available.
+ *
+ * Reading a format's own framing is NOT here — it is `SubtitleFileContainer`
+ * for a file beside the film, and `MatroskaContainer` / `Mp4Container` for a
+ * track inside it. What is here is everything after that: a cue's missing end
+ * time, its codec's markup, and writing the WebVTT document. One writer, so a
+ * pushed cue and a pulled one cannot read differently.
  */
+
+import { SubtitleFileContainer } from "./container/SubtitleFileContainer.js";
+import { plainCueText } from "./tracks/subtitle-markup.js";
 
 /**
  * Decode subtitle bytes to text. Prefers UTF-8 (honouring a BOM); if the UTF-8
@@ -41,93 +50,79 @@ function stripBom(text) {
   return typeof text === "string" && text.charCodeAt(0) === 0xfeff ? text.slice(1) : text;
 }
 
-function srtTsToVtt(ts) {
-  return ts.replace(",", ".");
+/**
+ * One cue's start or end as WebVTT writes it: `hh:mm:ss.mmm`.
+ *
+ * @param {number} seconds
+ * @returns {string}
+ */
+export function vttTime(seconds) {
+  const safe = Math.max(0, Number(seconds) || 0);
+  const hours = Math.floor(safe / 3600);
+  const minutes = Math.floor((safe % 3600) / 60);
+  const rest = safe % 60;
+  return `${String(hours).padStart(2, "0")}:${String(minutes).padStart(2, "0")}:${rest.toFixed(3).padStart(6, "0")}`;
 }
 
 /**
- * Convert SubRip (.srt) text to WebVTT.
+ * Resolve what a cue is missing and take its codec's markup off, so what is
+ * left is what a player shows.
  *
- * @param {string} text
- * @returns {string}
+ * The container's framing is NOT undone here — it is undone where the cue is
+ * read, by the container that framed it, which is the only place the framing is
+ * known. Until 2.72.1 this function tried to do both by counting commas, and
+ * on an embedded ASS track it showed every field of the dialogue row to the
+ * viewer.
+ *
+ * A cue with no duration — a Matroska SimpleBlock, which subtitles rarely use —
+ * is given the time until the next one IN THIS LIST, and the last such cue a
+ * few seconds. Not an invention about the film: it is what a player does with
+ * an open-ended cue, made explicit so every consumer agrees on it.
+ *
+ * @param {{ startSeconds: number, endSeconds?: number | null, text: string }[]} cues
+ * @param {string} codecId
+ * @returns {{ startSeconds: number, endSeconds: number, text: string }[]}
  */
-function srtToVtt(text) {
-  const lines = text.replace(/\r\n/g, "\n").replace(/\r/g, "\n").split("\n");
-  const out = ["WEBVTT", ""];
-  for (const line of lines) {
-    const m = line.match(/^(\d{2}:\d{2}:\d{2},\d{3})\s*-->\s*(\d{2}:\d{2}:\d{2},\d{3})(.*)?$/);
-    out.push(m ? `${srtTsToVtt(m[1])} --> ${srtTsToVtt(m[2])}${m[3] ?? ""}` : line);
-  }
-  return out.join("\n");
-}
-
-function assTsToVtt(ts) {
-  const m = ts.match(/^(\d+):(\d{2}):(\d{2})\.(\d{2})$/);
-  if (!m) {
-    return "00:00:00.000";
-  }
-  const ms = (parseInt(m[4], 10) * 10).toString().padStart(3, "0");
-  return `${m[1].padStart(2, "0")}:${m[2]}:${m[3]}.${ms}`;
-}
-
-function stripAssTags(text) {
-  return text
-    .replace(/\{[^}]*\}/g, "")
-    .replace(/\\N/g, "\n")
-    .replace(/\\n/g, "\n")
-    .replace(/\\h/g, " ")
-    .trim();
+export function finalizeCues(cues, codecId) {
+  const result = [];
+  (Array.isArray(cues) ? cues : []).forEach((cue, index) => {
+    const next = cues[index + 1];
+    const endSeconds = cue.endSeconds ?? (next ? next.startSeconds : cue.startSeconds + 4);
+    const text = plainCueText(cue.text, codecId);
+    if (!text) {
+      return;
+    }
+    result.push({ startSeconds: cue.startSeconds, endSeconds, text });
+  });
+  return result;
 }
 
 /**
- * Convert ASS/SSA text to WebVTT (only the [Events] section; styling dropped).
+ * A WebVTT document from a list of cues — the one writer, used by every path
+ * that produces subtitles: a file beside the film, a track inside it, a pull
+ * and a push.
  *
- * @param {string} text
+ * @param {{ startSeconds: number, endSeconds?: number | null, text: string }[]} cues
+ * @param {string} codecId
  * @returns {string}
  */
-function assToVtt(text) {
-  const lines = text.replace(/\r\n/g, "\n").replace(/\r/g, "\n").split("\n");
-  let inEvents = false;
-  let formatCols = null;
-  const cues = [];
-  for (const line of lines) {
-    const trimmed = line.trim();
-    if (trimmed === "[Events]") {
-      inEvents = true;
-      continue;
-    }
-    if (trimmed.startsWith("[") && trimmed.endsWith("]") && inEvents) {
-      inEvents = false;
-      continue;
-    }
-    if (!inEvents) {
-      continue;
-    }
-    if (trimmed.startsWith("Format:")) {
-      formatCols = trimmed.slice("Format:".length).split(",").map((c) => c.trim().toLowerCase());
-      continue;
-    }
-    if (trimmed.startsWith("Dialogue:") && formatCols) {
-      const parts = trimmed.slice("Dialogue:".length).split(",");
-      const startIdx = formatCols.indexOf("start");
-      const endIdx = formatCols.indexOf("end");
-      const textIdx = formatCols.indexOf("text");
-      if (startIdx < 0 || endIdx < 0 || textIdx < 0) {
-        continue;
-      }
-      const cueText = stripAssTags(parts.slice(textIdx).join(","));
-      if (!cueText) {
-        continue;
-      }
-      cues.push(`${assTsToVtt((parts[startIdx] ?? "").trim())} --> ${assTsToVtt((parts[endIdx] ?? "").trim())}\n${cueText}`);
-    }
+export function cuesToVtt(cues, codecId) {
+  const lines = ["WEBVTT", ""];
+  for (const cue of finalizeCues(cues, codecId)) {
+    lines.push(`${vttTime(cue.startSeconds)} --> ${vttTime(cue.endSeconds)}`);
+    lines.push(cue.text);
+    lines.push("");
   }
-  return cues.length === 0 ? "WEBVTT\n" : `WEBVTT\n\n${cues.join("\n\n")}`;
+  return lines.join("\n");
 }
 
 /**
  * Convert subtitle text to WebVTT by file extension. Returns null for formats
  * that cannot be converted in-place (image-based .sup, ambiguous .sub, .ttml).
+ *
+ * The reading is `SubtitleFileContainer`'s: the file states how its own cues
+ * are framed — SubRip by position, ASS by the `Format:` line of `[Events]` —
+ * and that is a fact about the file, not about this conversion.
  *
  * @param {string} text
  * @param {string} ext - Lowercase extension including the dot, e.g. ".srt".
@@ -135,16 +130,15 @@ function assToVtt(text) {
  */
 export function convertSubtitleToVtt(text, ext) {
   const clean = stripBom(text);
-  switch (ext) {
-    case ".vtt":
-    case ".webvtt":
-      return clean.trimStart().startsWith("WEBVTT") ? clean : `WEBVTT\n\n${clean}`;
-    case ".srt":
-      return srtToVtt(clean);
-    case ".ass":
-    case ".ssa":
-      return assToVtt(clean);
-    default:
-      return null;
+  const extension = String(ext ?? "").toLowerCase();
+  if (extension === ".vtt" || extension === ".webvtt") {
+    // Already what a browser reads. Parsing it to write it back would drop its
+    // styles, its regions and its cue identifiers for nothing.
+    return clean.trimStart().startsWith("WEBVTT") ? clean : `WEBVTT\n\n${clean}`;
   }
+  if (!SubtitleFileContainer.detect(extension)) {
+    return null;
+  }
+  const cues = new SubtitleFileContainer({ extension }).readCues(clean);
+  return cues === null ? null : cuesToVtt(cues, extension);
 }

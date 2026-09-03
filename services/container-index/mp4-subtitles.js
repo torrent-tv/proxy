@@ -234,6 +234,10 @@ function sampleOffsets(moov, stsc, chunkOffsets, sizes) {
  *   ones would shift every track after a TTML one.
  * @property {string} format - `tx3g`, `text` or `wvtt`.
  * @property {string} language - Three letters, as the file declares them.
+ * @property {boolean} someSamplesForced - The sample entry says at least one
+ *   cue carries a forced (`frcd`) atom.
+ * @property {boolean} allSamplesForced - The sample entry says every cue is to
+ *   be treated as forced, whether or not it carries that atom.
  * @property {Mp4SubtitleSample[]} samples - In time order.
  */
 
@@ -317,6 +321,32 @@ export async function readMp4SubtitlePlan(readRange, fileSize) {
     if (!TEXT_FORMATS.has(format)) {
       continue;
     }
+    // Whether the file itself says this track is forced — subtitles shown even
+    // to a viewer who did not ask for subtitles, because the dialogue on screen
+    // is in a language the soundtrack is not.
+    //
+    // Apple's QuickTime File Format, "Display flags" under Subtitle sample
+    // description, defines the two bits read here: `0x40000000` "Some samples
+    // are forced" ("at least one sample contains a forced (`frcd`) atom") and
+    // `0x80000000` "All samples are forced" ("the subtitle media handler treats
+    // all samples as forced subtitles, regardless of the presence or absence of
+    // a `frcd` atom"), with the note that setting the second requires the first
+    // — the pair together being `0xC0000000`. We honour that requirement rather
+    // than trusting a writer to have met it: either bit alone is enough to call
+    // the track forced, because a file that sets only `0x80000000` is saying
+    // exactly what a well-formed one would say twice.
+    //
+    // The field sits at a fixed place in the sample entry. `dataOffset` is
+    // already past the box header, and every sample entry opens with 6 reserved
+    // bytes and a 2-byte data reference index (ISO/IEC 14496-12 §8.5.2.2), so
+    // `displayFlags` is the 32 bits eight bytes in.
+    let someSamplesForced = false;
+    let allSamplesForced = false;
+    if (format === "tx3g" && first && first.dataOffset + 8 + 4 <= first.end) {
+      const displayFlags = moov.readUInt32BE(first.dataOffset + 8);
+      someSamplesForced = (displayFlags & 0x40000000) !== 0;
+      allSamplesForced = (displayFlags & 0x80000000) !== 0;
+    }
     const stts = childOf(moov, stbl.dataOffset, stbl.end, "stts");
     const stsz = childOf(moov, stbl.dataOffset, stbl.end, "stsz");
     const stsc = childOf(moov, stbl.dataOffset, stbl.end, "stsc");
@@ -361,7 +391,15 @@ export async function readMp4SubtitlePlan(readRange, fileSize) {
         });
       }
     }
-    tracks.push({ trackId, declaredIndex, format, language, samples });
+    tracks.push({
+      trackId,
+      declaredIndex,
+      format,
+      language,
+      someSamplesForced,
+      allSamplesForced,
+      samples
+    });
   }
   return { tracks };
 }

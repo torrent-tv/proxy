@@ -211,3 +211,70 @@ test("a browser that does not report its bytes is judged as before", () => {
   assert.equal(reading.verdict, "association-stopped");
   assert.doesNotMatch(reading.detail, /peerBytes=/);
 });
+
+test("a frozen tab's own event-loop delay counts toward the allowance", () => {
+  // Field case 2026-09-03, session 03f211b8. The viewer paused at 15:24:21 with
+  // 121.5 s buffered; the tab went hidden at 15:24:35 and its event loop fell
+  // behind — loopLag 681 → 1881 → 4297 → 5957 ms. At 15:26:05 the probes read
+  // `gap 12 of 11` and printed `association-stopped`, the ring files were kept
+  // and a 180 s capture was taken; seven seconds later the same connection read
+  // `flowing`. Nothing had stopped: the browser simply could not run the timer
+  // that answers a probe.
+  // The line printed `gap 12 of 11`; the queue was empty and the round trip
+  // 162 ms, so the cadence term is whatever makes the allowance 11.
+  const measured = {
+    queuedBytes: 0,
+    bytesPerSecond: 300,
+    rttMs: 162,
+    echoIntervalMs: 5000
+  };
+  const withoutLag = allowedGap(measured);
+  const withLag = allowedGap({ ...measured, peerLoopLagMs: 1881 });
+  assert.equal(withoutLag, 11, `the field allowance was 11, not ${withoutLag}`);
+  assert.ok(withLag > 12, `a gap of 12 must fit inside ${withLag}`);
+  const allowed = Object.fromEntries(ALL.map((label) => [label, withLag]));
+  const { verdict, detail } = readProbeState(
+    state(
+      { proxy: 9547, "proxy-control": 9547, "proxy-fast": 9547 },
+      {
+        seq: 9559,
+        allowed,
+        echoAgeMs: 5963,
+        echoStaleMs: 11 * PROBE_INTERVAL_MS + 162 + 5000 + 1881,
+        peerBytesAdvancing: false,
+        peerLoopLagMs: 1881,
+        peerVisibility: "hidden"
+      }
+    )
+  );
+  assert.equal(verdict, "flowing");
+  assert.match(detail, /peerLoopLag=1881ms/);
+  assert.match(detail, /peerTab=hidden/);
+});
+
+test("the peer's lag widens the bound on a stale echo without removing it", () => {
+  // The same term must not make `reverse-direction-gone` unreachable: a peer
+  // that has genuinely gone silent is still silent for far longer than its own
+  // loop delay explains.
+  const { verdict } = readProbeState(
+    state(
+      { proxy: 99, "proxy-control": 99, "proxy-fast": 99 },
+      {
+        echoAgeMs: 120_000,
+        echoStaleMs: 5500 + 162 + 1000 + 4297,
+        peerLoopLagMs: 4297,
+        peerVisibility: "hidden"
+      }
+    )
+  );
+  assert.equal(verdict, "reverse-direction-gone");
+});
+
+test("a peer that reports no loop delay is judged exactly as before", () => {
+  const reading = readProbeState(
+    state({ proxy: 90, "proxy-control": 90, "proxy-fast": 90 }, { peerBytesAdvancing: false })
+  );
+  assert.equal(reading.verdict, "association-stopped");
+  assert.doesNotMatch(reading.detail, /peerLoopLag=/);
+  assert.doesNotMatch(reading.detail, /peerTab=/);
+});

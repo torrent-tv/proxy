@@ -8,7 +8,7 @@
 
 import { spawn } from "node:child_process";
 import { logger } from "../utils/logger.js";
-import { mergeContainerSubtitleFlags } from "./subtitle-defaults.js";
+import { Container } from "./container/Container.js";
 import { buildAudioInventory, mergeContainerAudioFlags } from "./audio-inventory.js";
 import { countVideoFiles, matchSidecarFiles } from "./sidecar-files.js";
 import {
@@ -347,7 +347,7 @@ export function createPlaybackPlanner({
     } catch (error) {
       logger.info(`subtitle defaults: the container could not be read (${error?.message ?? error})`);
     }
-    const merged = mergeContainerSubtitleFlags(subtitleTracks, declared);
+    const merged = Container.mergeSubtitleFlags(subtitleTracks, declared);
     logger.info(
       merged.aligned
         ? "subtitle defaults: the container wrote FlagDefault on " +

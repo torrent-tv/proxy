@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { mergeContainerSubtitleFlags, pairingHolds } from "../services/subtitle-defaults.js";
+import { Container } from "../services/container/Container.js";
 
 test("a flag the container wrote is carried through, and one it did not is not", () => {
   const banner = [
@@ -11,7 +11,7 @@ test("a flag the container wrote is carried through, and one it did not is not",
     { language: "rus", name: "Forced", isDefault: true, declaresDefault: true },
     { language: "eng", name: "SDH", isDefault: true, declaresDefault: false }
   ];
-  const merged = mergeContainerSubtitleFlags(banner, declared);
+  const merged = Container.mergeSubtitleFlags(banner, declared);
   assert.equal(merged.aligned, true);
   assert.deepEqual(
     merged.tracks.map((track) => [track.isDefault, track.declaresDefault]),
@@ -30,7 +30,7 @@ test("a file that wrote nothing is reported as having written nothing, though ff
     { language: "rus", name: "", isDefault: true, declaresDefault: false },
     { language: "eng", name: "", isDefault: true, declaresDefault: false }
   ];
-  const merged = mergeContainerSubtitleFlags(banner, declared);
+  const merged = Container.mergeSubtitleFlags(banner, declared);
   assert.equal(merged.aligned, true);
   assert.deepEqual(merged.tracks.map((track) => track.declaresDefault), [false, false]);
 });
@@ -44,7 +44,7 @@ test("the container's own answer overrides the banner's, in both directions", ()
     { language: "rus", name: "a", isDefault: false, declaresDefault: true },
     { language: "eng", name: "b", isDefault: true, declaresDefault: true }
   ];
-  const merged = mergeContainerSubtitleFlags(banner, declared);
+  const merged = Container.mergeSubtitleFlags(banner, declared);
   assert.deepEqual(merged.tracks.map((track) => track.isDefault), [false, true]);
 });
 
@@ -56,7 +56,7 @@ test("a count that differs means the two readings are not the same list", () => 
     { language: "rus", name: "", isDefault: false, declaresDefault: true },
     { language: "eng", name: "", isDefault: true, declaresDefault: true }
   ];
-  const merged = mergeContainerSubtitleFlags(banner, declared);
+  const merged = Container.mergeSubtitleFlags(banner, declared);
   assert.equal(merged.aligned, false);
   assert.match(merged.reason, /declares 2 subtitle tracks and the probe found 1/);
   assert.deepEqual(merged.tracks.map((track) => [track.isDefault, track.declaresDefault]), [[true, false]]);
@@ -71,27 +71,27 @@ test("a pair agreeing on neither language nor name refuses the whole alignment",
     { language: "eng", name: "", isDefault: true, declaresDefault: true },
     { language: "rus", name: "", isDefault: false, declaresDefault: true }
   ];
-  const merged = mergeContainerSubtitleFlags(banner, declared);
+  const merged = Container.mergeSubtitleFlags(banner, declared);
   assert.equal(merged.aligned, false);
   assert.deepEqual(merged.tracks.map((track) => track.declaresDefault), [false, false]);
 });
 
 test("a container that declares nothing leaves the banner alone", () => {
   const banner = [{ index: 0, language: "rus", title: "", isDefault: true }];
-  const merged = mergeContainerSubtitleFlags(banner, []);
+  const merged = Container.mergeSubtitleFlags(banner, []);
   assert.equal(merged.aligned, false);
   assert.equal(merged.tracks[0].isDefault, true);
   assert.equal(merged.tracks[0].declaresDefault, false);
 });
 
 test("a name confirms a pairing when the languages are unstated", () => {
-  assert.equal(pairingHolds({ language: "und", title: "Forced" }, { language: "", name: "Forced" }), true);
+  assert.equal(Container.pairingHolds({ language: "und", title: "Forced" }, { language: "", name: "Forced" }), true);
 });
 
 test("two tracks that say nothing about themselves do not break the alignment", () => {
-  assert.equal(pairingHolds({ language: "und", title: "" }, { language: "", name: "" }), true);
+  assert.equal(Container.pairingHolds({ language: "und", title: "" }, { language: "", name: "" }), true);
 });
 
 test("a stated language that differs is a disagreement", () => {
-  assert.equal(pairingHolds({ language: "rus", title: "" }, { language: "eng", name: "" }), false);
+  assert.equal(Container.pairingHolds({ language: "rus", title: "" }, { language: "eng", name: "" }), false);
 });

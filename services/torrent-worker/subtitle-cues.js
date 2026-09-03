@@ -17,23 +17,12 @@
  * Reading the clusters costs nothing extra at all.
  */
 
-import { readSubtitlePlan, harvestCluster } from "../container-index/matroska-subtitles.js";
-import { readMp4SubtitlePlan } from "../container-index/mp4-subtitles.js";
-import { iterateElements } from "../container-index/ebml-reader.js";
 import { MatroskaContainer } from "../container/MatroskaContainer.js";
 import { Mp4Container } from "../container/Mp4Container.js";
-import { finalizeCues } from "../subtitle-convert.js";
+import { TextSubtitleTrack } from "../tracks/TextSubtitleTrack.js";
 import { detectLanguage } from "../language-detect.js";
 import { logger } from "../../utils/logger.js";
 
-/** Enough to read any cluster's own element header. */
-const CLUSTER_HEADER_PROBE = 64;
-/**
- * The largest cluster this will read whole. Real muxers write clusters of a few
- * megabytes; anything past this is not a cluster boundary we recognised and
- * reading it would be a large read for nothing.
- */
-const MAX_CLUSTER_BYTES = 32 * 1024 * 1024;
 /** How long a read of already-held bytes may take before it is given up. */
 const READ_ABANDON_MS = 30_000;
 
@@ -120,6 +109,36 @@ function readHeld(file, start, end) {
 }
 
 /**
+ * A container over one file of a torrent, told how to read it.
+ *
+ * The container is given two functions and never the torrent: whether a byte
+ * range is already downloaded, and how to read one without asking the swarm for
+ * anything. That is the whole of what this layer knows that the container does
+ * not, and reducing it to two functions is what lets the reading itself live
+ * where the format is specified.
+ *
+ * @param {object} torrent
+ * @param {object} file
+ * @returns {MatroskaContainer | Mp4Container}
+ */
+function containerOver(state, torrent, file) {
+  if (state.container) {
+    return state.container;
+  }
+  const held = async (start, end) => readHeld(file, start, Math.min(end, file.length - 1));
+  const params = {
+    readRange: held,
+    readHeld: held,
+    isHeld: (start, end) => rangeIsHeld(torrent, file, start, Math.min(end, file.length - 1)),
+    fileSize: file.length,
+    label: String(file.name ?? "")
+  };
+  const name = String(file.name ?? "");
+  state.container = /\.(mp4|m4v)$/i.test(name) ? new Mp4Container(params) : new MatroskaContainer(params);
+  return state.container;
+}
+
+/**
  * The subtitle tracks of a file, read once and kept.
  *
  * The head and the Cues table are two short reads, and they ARE fetched if
@@ -167,6 +186,10 @@ function stateFor(key) {
       forgotten: false,
       // One walk of a file at a time — see `serialize`.
       chain: Promise.resolve(),
+      // The container over this file, built once. It caches what it has parsed
+      // — a `moov` box is tens of megabytes off a torrent — so building a fresh
+      // one per call would throw that away on every request.
+      container: null,
       harvested: new Map(),
       cues: new Map(),
       seq: new Map(),
@@ -228,14 +251,14 @@ async function readPlan(torrent, fileIndex, state) {
     state.plan = empty;
     return state.plan;
   }
-  const readRange = async (start, end) => readHeld(file, start, Math.min(end, file.length - 1));
+  const container = containerOver(state, torrent, file);
   const name = String(file.name);
   if (/\.mp4$/i.test(name) || /\.m4v$/i.test(name)) {
     // An MP4 states every sample's byte range in its own table, so a cue costs
     // its own few dozen bytes rather than the cluster around it. The samples
     // are carried as `clusterPositions` of one byte range each, so the harvest
     // treats both containers the same way.
-    const mp4 = await readMp4SubtitlePlan(readRange, file.length);
+    const mp4 = await container.readSubtitlePlan();
     state.plan = mp4
       ? {
         ...empty,
@@ -258,7 +281,7 @@ async function readPlan(torrent, fileIndex, state) {
     state.plan = empty;
     return state.plan;
   }
-  const plan = await readSubtitlePlan(readRange, file.length);
+  const plan = await container.readSubtitlePlan();
   state.plan = plan ?? empty;
   if (state.plan.tracks.length > 0) {
     logger.info(
@@ -349,43 +372,26 @@ export async function cuesHeldFor(torrent, fileIndex, sourceKey, trackNumber) {
  */
 async function walkFor(torrent, fileIndex, state, plan, track, trackNumber) {
   const file = torrent.files[fileIndex];
-  let harvested = state.harvested.get(trackNumber);
-  if (!harvested) {
-    harvested = new Set();
-    state.harvested.set(trackNumber, harvested);
-  }
-  let cues = state.cues.get(trackNumber);
-  if (!cues) {
-    cues = [];
-    state.cues.set(trackNumber, cues);
-  }
+  const container = containerOver(state, torrent, file);
+  const cuesOf = (number) => {
+    let held = state.cues.get(number);
+    if (!held) {
+      held = [];
+      state.cues.set(number, held);
+    }
+    return held;
+  };
 
   if (Array.isArray(track.samples)) {
-    // An MP4: every cue's bytes are stated, so only those bytes are read, and
-    // only where they are already downloaded.
-    for (const sample of track.samples) {
-      if (harvested.has(sample.offset)) {
-        continue;
-      }
-      const last = Math.min(file.length - 1, sample.offset + sample.size - 1);
-      if (!rangeIsHeld(torrent, file, sample.offset, last)) {
-        continue;
-      }
-      const bytes = await readHeld(file, sample.offset, last);
-      if (!bytes) {
-        continue;
-      }
-      harvested.add(sample.offset);
-      // The MP4 has framed this cue and is the one that unframes it.
-      const text = Mp4Container.cueTextOf(bytes, track.codecId);
-      if (text) {
-        cues.push({
-          startSeconds: sample.startSeconds,
-          endSeconds: sample.endSeconds,
-          text,
-          seq: nextSeq(state, trackNumber)
-        });
-      }
+    // An MP4 states every cue's byte range, so the container reads per sample.
+    let harvested = state.harvested.get(trackNumber);
+    if (!harvested) {
+      harvested = new Set();
+      state.harvested.set(trackNumber, harvested);
+    }
+    const cues = cuesOf(trackNumber);
+    for (const cue of await container.readHeldSamples(track, harvested)) {
+      cues.push({ ...cue, seq: nextSeq(state, trackNumber) });
     }
     cues.sort((left, right) => left.startSeconds - right.startSeconds);
     return {
@@ -396,71 +402,15 @@ async function walkFor(torrent, fileIndex, state, plan, track, trackNumber) {
     };
   }
 
-  // ONE walk for the whole file, not one per track. A Matroska cluster carries
-  // the blocks of every track that has anything to say over its span, so the
-  // bytes that answer one track answer them all — and reading them once per
-  // track meant the same cluster was fetched and parsed as many times as the
-  // film has subtitle tracks. Measured 2026-08-20 on a film with five: five
-  // requests every fifteen seconds, each costing 0.2-5.2 s of container
-  // reading, for cues that together weigh a few kilobytes.
-  //
-  // The union of the tracks' cluster lists is what gets walked: each track's
-  // list comes from its own Cues entries, so they overlap but do not coincide.
-  const positions = new Set();
-  for (const candidate of plan.tracks) {
-    for (const position of candidate.clusterPositions ?? []) {
-      positions.add(position);
+  // Matroska: one walk of the file fills every track, because a cluster carries
+  // the blocks of every track that has anything to say over its span.
+  const found = await container.walkHeldClusters(plan, state.walked);
+  for (const [number, cues] of found) {
+    const into = cuesOf(number);
+    for (const cue of cues) {
+      into.push({ ...cue, seq: nextSeq(state, number) });
     }
-  }
-  for (const position of [...positions].sort((left, right) => left - right)) {
-    if (state.walked.has(position)) {
-      continue;
-    }
-    // The header first: it says how long the cluster is, and a cluster whose
-    // bytes are not all here is left for the next time round.
-    if (!rangeIsHeld(torrent, file, position, Math.min(file.length - 1, position + CLUSTER_HEADER_PROBE - 1))) {
-      continue;
-    }
-    const probe = await readHeld(file, position, Math.min(file.length - 1, position + CLUSTER_HEADER_PROBE - 1));
-    const header = probe && [...iterateElements(probe, 0, probe.length)][0];
-    if (!header || header.size <= 0 || header.size > MAX_CLUSTER_BYTES) {
-      state.walked.add(position); // not a cluster we can read; do not look again
-      continue;
-    }
-    const last = Math.min(file.length - 1, position + header.dataOffset + header.size - 1);
-    if (!rangeIsHeld(torrent, file, position, last)) {
-      continue;
-    }
-    const bytes = await readHeld(file, position, last);
-    if (!bytes) {
-      continue;
-    }
-    state.walked.add(position);
-    for (const candidate of plan.tracks) {
-      let into = state.cues.get(candidate.trackNumber);
-      if (!into) {
-        into = [];
-        state.cues.set(candidate.trackNumber, into);
-      }
-      let found = false;
-      for (const block of harvestCluster(bytes, candidate.trackNumber, plan.secondsPerTick)) {
-        // The block's bytes become this track's text HERE, where the container
-        // that framed them is known. A cue kept in its framed form and unframed
-        // later cannot be unframed at all: nothing downstream knows which
-        // container it came out of, and guessing from the field count is what
-        // showed the dialogue row's own fields to the viewer.
-        into.push({
-          startSeconds: block.startSeconds,
-          endSeconds: block.endSeconds,
-          text: MatroskaContainer.cueTextOf(block.payload, candidate.codecId),
-          seq: nextSeq(state, candidate.trackNumber)
-        });
-        found = true;
-      }
-      if (found) {
-        into.sort((left, right) => left.startSeconds - right.startSeconds);
-      }
-    }
+    into.sort((left, right) => left.startSeconds - right.startSeconds);
   }
   return {
     cues: state.cues.get(trackNumber) ?? [],
@@ -470,7 +420,6 @@ async function walkFor(torrent, fileIndex, state, plan, track, trackNumber) {
     indexedClusters: track.clusterPositions.length,
     track
   };
-
 }
 
 /**
@@ -513,7 +462,7 @@ export async function warmSubtitleCues(torrent, fileIndex, sourceKey) {
     const highest = newCues.reduce((max, cue) => Math.max(max, Number(cue.seq) || 0), since);
     state.pushed.set(track.trackNumber, highest);
     const codecId = held.track?.codecId ?? track.codecId;
-    const cues = finalizeCues(newCues, codecId);
+    const cues = TextSubtitleTrack.finalizeCues(newCues, codecId);
     fresh.push({
       // ffmpeg's own numbering, which is the only one the browser knows.
       trackIndex: Number.isInteger(track.declaredIndex) ? track.declaredIndex : order,
@@ -527,7 +476,7 @@ export async function warmSubtitleCues(torrent, fileIndex, sourceKey) {
       // moved when it arrives. Costs about 6 ms per push, measured; pushes
       // arrive about once a second per file being read.
       detectedLanguage: detectLanguage(
-        finalizeCues(held.cues, codecId).map((cue) => cue.text).join("\n")
+        TextSubtitleTrack.finalizeCues(held.cues, codecId).map((cue) => cue.text).join("\n")
       ),
       // Where the browser should resume from if it has to ask again — after a
       // reconnect, which loses the subscription these pushes ride on.

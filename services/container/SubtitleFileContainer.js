@@ -18,11 +18,16 @@
  *
  * What this file does NOT do is take off ASS's own markup — `{\pos(…)}`, `\N`,
  * `\h`. That is the same wherever ASS is stored and lives in
- * `tracks/subtitle-markup.js`.
+ * `TextSubtitleTrack`, because it belongs to the codec rather than the store.
  */
 
 import { Container } from "./Container.js";
 import { TextSubtitleTrack } from "../tracks/TextSubtitleTrack.js";
+
+/** A leading UTF-8 BOM, which must never reach the WEBVTT signature or a cue. */
+function stripBom(text) {
+  return typeof text === "string" && text.charCodeAt(0) === 0xfeff ? text.slice(1) : text;
+}
 
 /** The extensions this reads. `.vtt` is included and passes through unparsed. */
 const EXTENSIONS = new Set([".srt", ".ass", ".ssa", ".vtt", ".webvtt"]);
@@ -88,6 +93,63 @@ export class SubtitleFileContainer extends Container {
    * @param {string} extension - Lowercase, including the dot.
    * @returns {boolean}
    */
+
+  /**
+   * Decode a subtitle file's bytes to text.
+   *
+   * UTF-8 is preferred and a BOM settles it. Where the UTF-8 decode produces
+   * many replacement characters the bytes are read again as Windows-1251, which
+   * is what most Russian `.srt` files are written in — otherwise both what the
+   * viewer reads and what the language detector reads would be mojibake.
+   *
+   * @param {Buffer | Uint8Array} bytes
+   * @returns {string}
+   */
+  static decodeBytes(bytes) {
+    const buffer = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
+    if (buffer.length >= 3 && buffer[0] === 0xef && buffer[1] === 0xbb && buffer[2] === 0xbf) {
+      return new TextDecoder("utf-8").decode(buffer);
+    }
+    const utf8 = new TextDecoder("utf-8").decode(buffer);
+    const replacements = (utf8.match(/�/g) || []).length;
+    // More than half a per cent of the text unreadable is not UTF-8 at all.
+    if (replacements > Math.max(2, utf8.length * 0.005)) {
+      try {
+        return new TextDecoder("windows-1251").decode(buffer);
+      } catch {
+        // The decoder needs a full-ICU build; fall back to the UTF-8 attempt.
+      }
+    }
+    return utf8;
+  }
+
+  /**
+   * A subtitle file as a WebVTT document, or null for a format that cannot be
+   * converted in place — image-based `.sup`, ambiguous `.sub`, `.ttml`.
+   *
+   * The reading is this class's, because the file states how its own cues are
+   * framed; the writing is the track's, because what is inside a cue's text
+   * belongs to the codec.
+   *
+   * @param {string} text
+   * @param {string} extension - Lowercase, including the dot.
+   * @returns {string | null}
+   */
+  static toVtt(text, extension) {
+    const clean = stripBom(text);
+    const ext = String(extension ?? "").toLowerCase();
+    if (ext === ".vtt" || ext === ".webvtt") {
+      return clean.trimStart().startsWith("WEBVTT") ? clean : `WEBVTT
+
+${clean}`;
+    }
+    if (!SubtitleFileContainer.detect(ext)) {
+      return null;
+    }
+    const cues = new SubtitleFileContainer({ extension: ext }).readCues(clean);
+    return cues === null ? null : TextSubtitleTrack.cuesToVtt(cues, ext);
+  }
+
   static detect(extension) {
     return EXTENSIONS.has(String(extension ?? "").toLowerCase());
   }
@@ -96,7 +158,7 @@ export class SubtitleFileContainer extends Container {
    * The single track a subtitle file carries.
    *
    * Its `codecId` is the extension, which is the only thing the file says about
-   * its own format, and `subtitle-markup.js` accepts extensions alongside
+   * its own format, and the markup table accepts extensions alongside
    * container codec names for exactly this reason.
    *
    * @returns {Promise<TextSubtitleTrack[]>}

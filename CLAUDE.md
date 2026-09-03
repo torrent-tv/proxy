@@ -44,12 +44,17 @@ Linux-only host (e.g. POSIX-only signals must degrade elsewhere).
     track_enabled / alternate_group, elng BCP47).
   - `orchestrators/` — application layer: `ContainerOrchestrator` (detect + per-file
     cache, `getTracks`/`getKeyframeIndex`), `SubtitleOrchestrator` (wraps
-    `torrent-worker/subtitle-cues.js` cluster walk + `Container` tracks, warm/push).
+    `torrent-worker/subtitle-cues.js` + `Container` tracks, warm/push). The walk
+    itself is `MatroskaContainer.walkHeldClusters` / `Mp4Container.readHeldSamples`;
+    `subtitle-cues.js` supplies the torrent's read policy and keeps the cursor.
   - `controllers/` — interface layer: `PlaybackController` / `SubtitleController`
     (thin adapters over orchestrators; routes depend on controllers, not services).
     `routes/*` are now thin HTTP translators.
-  - `container-index/` — legacy readers (ebml-reader, matroska/mp4/avi keyframe and
-    subtitle tables) — used internally by `container/*`, deprecated as direct import.
+  - `container-index/` — what is not specific to one media kind: EBML element
+    walking and the Matroska/MP4/AVI keyframe tables. Used internally by
+    `container/*`, deprecated as a direct import. Everything a container states
+    about its own SUBTITLES — track table, Cues, blocks in a cluster, sample
+    table, the walk of what is downloaded — lives in the container class.
   - `docs/download-architecture.md` — the two axes of downloading: what is
     wanted (`demand/`) against what the swarm is told (`download/`), why urgency
     is not a number given to the library, and why the speculative levels are

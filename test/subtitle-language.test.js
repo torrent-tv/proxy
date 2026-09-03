@@ -24,9 +24,9 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { cueTextOfVtt, detectLanguage, detectLanguageFromVtt } from "../services/language-detect.js";
-import { convertSubtitleToVtt } from "../services/subtitle-convert.js";
-import { finalizeCues } from "../services/subtitle-convert.js";
+import { detectLanguage } from "../services/language-detect.js";
+import { SubtitleFileContainer } from "../services/container/SubtitleFileContainer.js";
+import { TextSubtitleTrack } from "../services/tracks/TextSubtitleTrack.js";
 import { MatroskaContainer } from "../services/container/MatroskaContainer.js";
 
 /** Varied Russian dialogue, the length a few minutes of an episode carries. */
@@ -110,10 +110,10 @@ ${RUSSIAN_DIALOGUE.map((line, index) => {
 `;
 
 test("a Russian .ass is reported as Russian, and its markup does not reach the detector", () => {
-  const vtt = convertSubtitleToVtt(RUSSIAN_ASS, ".ass");
+  const vtt = SubtitleFileContainer.toVtt(RUSSIAN_ASS, ".ass");
   assert.ok(vtt.startsWith("WEBVTT"), "the conversion produced a WebVTT document");
 
-  const spoken = cueTextOfVtt(vtt);
+  const spoken = TextSubtitleTrack.cueTextOfVtt(vtt);
   // Every one of these is a piece of the file the viewer never reads, and each
   // was competing with the dialogue for the detector's answer.
   for (const markup of [
@@ -125,7 +125,7 @@ test("a Russian .ass is reported as Russian, and its markup does not reach the d
   }
   assert.ok(spoken.includes("Ты видишь их?"), "cue text keeps the dialogue");
 
-  assert.deepEqual(detectLanguageFromVtt(vtt), { code: "ru", name: "Russian" });
+  assert.deepEqual(TextSubtitleTrack.detectLanguageFromVtt(vtt), { code: "ru", name: "Russian" });
 });
 
 test("the fixture is the hard case: the file itself is nearly half Latin", () => {
@@ -164,7 +164,7 @@ test("cue identifiers, NOTE, STYLE and REGION blocks are not text", () => {
     ""
   ].join("\n");
 
-  const spoken = cueTextOfVtt(vtt);
+  const spoken = TextSubtitleTrack.cueTextOfVtt(vtt);
   assert.equal(
     spoken,
     "Ты видишь их?\nНо не столько вижу,\nсколько чувствую   ощущаю."
@@ -172,9 +172,9 @@ test("cue identifiers, NOTE, STYLE and REGION blocks are not text", () => {
 });
 
 test("a document with no cues yields no language rather than a guess", () => {
-  assert.equal(cueTextOfVtt("WEBVTT\n"), "");
-  assert.equal(detectLanguageFromVtt("WEBVTT\n"), null);
-  assert.equal(detectLanguageFromVtt(null), null);
+  assert.equal(TextSubtitleTrack.cueTextOfVtt("WEBVTT\n"), "");
+  assert.equal(TextSubtitleTrack.detectLanguageFromVtt("WEBVTT\n"), null);
+  assert.equal(TextSubtitleTrack.detectLanguageFromVtt(null), null);
 });
 
 test("an embedded ASS cue is unframed by the container, then read", () => {
@@ -197,7 +197,7 @@ test("an embedded ASS cue is unframed by the container, then read", () => {
     text: MatroskaContainer.cueTextOf(payload, "S_TEXT/ASS")
   }));
 
-  const spoken = finalizeCues(cues, "S_TEXT/ASS").map((cue) => cue.text).join("\n");
+  const spoken = TextSubtitleTrack.finalizeCues(cues, "S_TEXT/ASS").map((cue) => cue.text).join("\n");
   assert.ok(!spoken.includes("Default"), "the style field survived into the text");
   assert.ok(!spoken.includes("0000"), "a margin field survived into the text");
   assert.ok(!spoken.includes("pos("), "an override group survived into the text");
@@ -248,5 +248,5 @@ test("a WebVTT body is decoded whole, so no character is cut in half", () => {
   });
   const body = Buffer.from(`WEBVTT\n\n${cues.join("\n\n")}\n`, "utf8");
 
-  assert.deepEqual(detectLanguageFromVtt(body.toString("utf8")), { code: "ru", name: "Russian" });
+  assert.deepEqual(TextSubtitleTrack.detectLanguageFromVtt(body.toString("utf8")), { code: "ru", name: "Russian" });
 });

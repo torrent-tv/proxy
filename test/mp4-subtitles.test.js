@@ -8,7 +8,6 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
-import { decodeSubtitleSample, readMp4SubtitlePlan } from "../services/container-index/mp4-subtitles.js";
 import { Mp4Container } from "../services/container/Mp4Container.js";
 
 function box(type, payload) {
@@ -98,7 +97,7 @@ function readerOver(file) {
 test("a text track's cues are found with their times and their byte ranges", async () => {
   const { file, samples } = buildFile();
 
-  const plan = await readMp4SubtitlePlan(readerOver(file), file.length);
+  const plan = await Mp4Container.readSubtitlePlan(readerOver(file), file.length);
 
   assert.equal(plan.tracks.length, 1);
   const track = plan.tracks[0];
@@ -112,9 +111,9 @@ test("a text track's cues are found with their times and their byte ranges", asy
   );
   // The bytes the plan points at are the ones that hold the text.
   const first = file.subarray(track.samples[0].offset, track.samples[0].offset + track.samples[0].size);
-  assert.equal(decodeSubtitleSample(first, "tx3g"), "First line");
+  assert.equal(Mp4Container.cueTextOf(first, "tx3g"), "First line");
   const second = file.subarray(track.samples[1].offset, track.samples[1].offset + track.samples[1].size);
-  assert.equal(decodeSubtitleSample(second, "tx3g"), "Second line");
+  assert.equal(Mp4Container.cueTextOf(second, "tx3g"), "Second line");
   assert.equal(second.length, samples[2].length);
 });
 
@@ -125,7 +124,7 @@ test("a file with no text track offers nothing", async () => {
   ]))));
   const file = Buffer.concat([moov, box("mdat", Buffer.alloc(4))]);
 
-  const plan = await readMp4SubtitlePlan(readerOver(file), file.length);
+  const plan = await Mp4Container.readSubtitlePlan(readerOver(file), file.length);
 
   assert.deepEqual(plan.tracks, []);
 });
@@ -134,7 +133,7 @@ test("a WebVTT sample gives up the text inside its payload box", () => {
   const payl = box("payl", Buffer.from("Hello there", "utf8"));
   const sample = box("vttc", payl);
 
-  assert.equal(decodeSubtitleSample(sample, "wvtt"), "Hello there");
+  assert.equal(Mp4Container.cueTextOf(sample, "wvtt"), "Hello there");
 });
 
 test("the sample entry's display flags say whether the track is forced", async () => {
@@ -145,7 +144,7 @@ test("the sample entry's display flags say whether the track is forced", async (
   // forcing.
   const readFlags = async (displayFlags) => {
     const { file } = buildFile(displayFlags);
-    const plan = await readMp4SubtitlePlan(readerOver(file), file.length);
+    const plan = await Mp4Container.readSubtitlePlan(readerOver(file), file.length);
     const track = plan.tracks[0];
     return [track.someSamplesForced, track.allSamplesForced];
   };

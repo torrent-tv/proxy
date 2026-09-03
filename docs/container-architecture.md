@@ -76,23 +76,27 @@ bytes — was reviewed on 2026-09-03 and is **not** the right shape:
   cannot cross either, so such a track would be able to read its own bytes only
   on the thread where the container is already at hand.
 
-What IS split, and is worth closing: `SubtitleTrack` carries `clusterPositions`
-and `samples` — byte POSITIONS — while the reading of those positions lives in
-`torrent-worker/subtitle-cues.js`, which builds a `readRange` of its own. Two
-halves of one action in two layers.
+**That split is closed.** `SubtitleTrack` carries `clusterPositions` and
+`samples` — byte POSITIONS — and the reading of those positions is now the
+container's: `MatroskaContainer.walkHeldClusters(plan, walked)` and
+`Mp4Container.readHeldSamples(track, harvested)`, beside `readTracks`,
+`readKeyframeIndex`, `readMediaInfo` and `cueTextOf`.
 
-The shape that closes it is `Container.readCuesOf(track)` — the container already
-holds `readRange`, and the series `readTracks` / `readKeyframeIndex` /
-`readMediaInfo` / `cueTextOf` is exactly where "ask the container" belongs.
+The obstacle was real and this is how it was answered. The two readers want
+different read POLICIES over the same file: the track table fetches what is
+missing from the swarm, while the cue walk deliberately reads only what is
+already downloaded, so that turning subtitles on never pulls bytes the viewer is
+not waiting for. A container is now built with BOTH — `readRange` that fetches,
+`readHeld` that does not, and `isHeld` that says whether a range can be read
+without fetching — so one instance per file serves both readers and the per-file
+cache is kept.
 
-**It is not done yet, and the obstacle is real rather than effort.** The two
-readers want different read POLICIES over the same file: the track table fetches
-what is missing from the swarm (`readFetching`), while the cue walk deliberately
-reads only what is already downloaded (`readHeld`) so that turning subtitles on
-never pulls bytes the viewer is not waiting for. One container instance per file
-holds one `readRange`, so as things stand it cannot serve both. Resolving that —
-a read policy per call, or something else — is the design question to answer
-before the move, and answering it in passing would settle it by accident.
+What the container is NOT given is the torrent. Those three functions are the
+whole of what the caller knows and the container does not, and reducing the
+torrent to them is what lets the reading live where the format is specified.
+`torrent-worker/subtitle-cues.js` supplies them (`containerOver`) and keeps only
+what is genuinely its own: the found-order cursor a browser follows, the
+per-file state, and one walk of a file at a time.
 
 ## Layers
 
@@ -117,7 +121,7 @@ flowchart TB
   subgraph Application
     CF[ContainerFactory<br/>detect 16 bytes]
     CO[ContainerOrchestrator<br/>cache + getTracks/getKeyframeIndex]
-    SO[SubtitleOrchestrator<br/>wrap subtitle-cues.js]
+    SO[SubtitleOrchestrator<br/>cursor + per-file state]
     SF[sidecar-files.js<br/>which file goes with which]
     AI[audio-inventory.js<br/>one flat numbering]
     CF --> CO
@@ -159,12 +163,16 @@ flowchart TB
 
 - `ContainerFactory.create({readRange,fileSize})` — sniffs 16 bytes, returns precise `Container` subclass. No torrent knowledge.
 - `ContainerOrchestrator` — per-file cache (`sourceKey:fileIndex`), `getTracks()` / `getKeyframeIndex()`. Transport-agnostic.
-- `SubtitleOrchestrator` — wraps `torrent-worker/subtitle-cues.js` (`planFor`, `cuesHeldFor`, `warmSubtitleCues`) behind `ContainerTrack` abstraction. Routes depend on this, not on worker directly.
+- `SubtitleOrchestrator` — wraps `torrent-worker/subtitle-cues.js` (`planFor`, `cuesHeldFor`, `warmSubtitleCues`) behind the `ContainerTrack` abstraction. Routes depend on this, not on the worker directly. The reading itself is the containers' — that module supplies the torrent's read policy and keeps the cursor.
 - `PlaybackController` / `SubtitleController` — thin interface adapters; `routes/api/*` delegate to them, handle HTTP headers (`X-Subtitle-Language`, `X-Subtitle-Cursor`) only.
 
 ## Legacy
 
-`services/container-index/` remains as internal detail used by `container/*`. Direct imports from routes are deprecated — use `orchestrators/` and `controllers/` instead.
+`services/container-index/` holds what is NOT specific to one media kind: EBML
+element walking, and the Matroska/MP4/AVI keyframe tables. Everything a container
+states about its own subtitles — the track table, the Cues, the blocks in a
+cluster, the sample table — is in the container class itself. Direct imports from
+routes are deprecated — use `orchestrators/` and `controllers/` instead.
 
 ## Flags matrix
 

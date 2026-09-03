@@ -20,7 +20,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { Readable } from "node:stream";
-import { readSubtitlePlan } from "../services/container-index/matroska-subtitles.js";
+import { MatroskaContainer } from "../services/container/MatroskaContainer.js";
 import { cuesHeldFor, forgetSubtitles } from "../services/torrent-worker/subtitle-cues.js";
 
 const ID_EBML = 0x1a45dfa3;
@@ -211,7 +211,7 @@ function readerOver(file) {
 test("a text track is numbered as ffmpeg numbers it, past the picture ones", async () => {
   const { file } = buildFile();
 
-  const plan = await readSubtitlePlan(readerOver(file), file.length);
+  const plan = await MatroskaContainer.readSubtitlePlan(readerOver(file), file.length);
 
   assert.equal(plan.declared.length, 3, "all three subtitle tracks are declared");
   assert.deepEqual(plan.tracks.map((track) => track.trackNumber), [3, 4], "only the text ones are readable");
@@ -313,7 +313,7 @@ function fileWithFlags() {
 }
 
 test("the flags the file states about a track are read, not guessed from its name", async () => {
-  const plan = await readSubtitlePlan(readerOver(fileWithFlags()), fileWithFlags().length);
+  const plan = await MatroskaContainer.readSubtitlePlan(readerOver(fileWithFlags()), fileWithFlags().length);
 
   const forced = plan.tracks.find((track) => track.trackNumber === 2);
   assert.equal(forced.isForced, true, "FlagForced 0x55AA");
@@ -330,7 +330,7 @@ test("a track the file marks unusable is not offered, but is still counted", asy
   // keeps it: `matroskadec.c` parses MATROSKA_ID_TRACKFLAGENABLED as EBML_NONE,
   // reading the element and storing nothing, so the stream is created and gets
   // its own `0:s:N`. Dropping it here would shift every track after it.
-  const plan = await readSubtitlePlan(readerOver(fileWithFlags()), fileWithFlags().length);
+  const plan = await MatroskaContainer.readSubtitlePlan(readerOver(fileWithFlags()), fileWithFlags().length);
 
   assert.equal(plan.tracks.some((track) => track.trackNumber === 4), false, "not offered for extraction");
   const counted = plan.declared.find((track) => track.trackNumber === 4);
@@ -339,7 +339,7 @@ test("a track the file marks unusable is not offered, but is still counted", asy
 });
 
 test("an unusable track keeps its place, so the tracks after it keep theirs", async () => {
-  const plan = await readSubtitlePlan(readerOver(fileWithFlags()), fileWithFlags().length);
+  const plan = await MatroskaContainer.readSubtitlePlan(readerOver(fileWithFlags()), fileWithFlags().length);
 
   // s:0 forced, s:1 SDH, s:2 the unusable one, s:3 the Brazilian track.
   assert.deepEqual(
@@ -352,7 +352,7 @@ test("the list ffmpeg is lined up against still speaks ffmpeg's language codes",
   // `declared` exists to be paired with the `-i` banner, which prints the
   // three-letter code; reporting "pt-BR" there would break the pairing and cost
   // the FlagDefault reading with it.
-  const plan = await readSubtitlePlan(readerOver(fileWithFlags()), fileWithFlags().length);
+  const plan = await MatroskaContainer.readSubtitlePlan(readerOver(fileWithFlags()), fileWithFlags().length);
 
   const declared = plan.declared.find((track) => track.trackNumber === 5);
   assert.equal(declared.language, "por");
@@ -362,7 +362,7 @@ test("the list ffmpeg is lined up against still speaks ffmpeg's language codes",
 test("where the file writes RFC 5646, that is the language", async () => {
   // "If this element is used, then any Language elements used in the same
   // TrackEntry MUST be ignored."
-  const plan = await readSubtitlePlan(readerOver(fileWithFlags()), fileWithFlags().length);
+  const plan = await MatroskaContainer.readSubtitlePlan(readerOver(fileWithFlags()), fileWithFlags().length);
 
   const track = plan.tracks.find((entry) => entry.trackNumber === 5);
   assert.equal(track.language, "pt-BR", "not the three-letter por");

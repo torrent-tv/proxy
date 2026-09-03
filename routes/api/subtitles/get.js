@@ -25,7 +25,7 @@
  */
 
 import { spawn } from "node:child_process";
-import { detectLanguageFromVtt } from "../../../services/language-detect.js";
+import { TextSubtitleTrack } from "../../../services/tracks/TextSubtitleTrack.js";
 import { SubtitleController } from "../../../services/controllers/SubtitleController.js";
 import { logger } from "../../../utils/logger.js";
 
@@ -195,7 +195,7 @@ function startExtraction({ key, ffmpegBin, localBaseUrl, sourceKey, fileIndex, t
     // mid-character on any non-Latin track, and most of those bytes are
     // timestamps rather than words. This runs once per track in the background,
     // so reading all of it costs nothing anybody waits for.
-    extractions.set(key, { state: "done", body, language: detectLanguageFromVtt(body.toString("utf8")) });
+    extractions.set(key, { state: "done", body, language: TextSubtitleTrack.detectLanguageFromVtt(body.toString("utf8")) });
     logger.info(`subtitles ${key}: ${body.length} bytes in ${seconds}s`);
   };
   ffmpeg.once("close", settle);

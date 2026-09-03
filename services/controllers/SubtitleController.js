@@ -8,8 +8,9 @@
  */
 
 import { subtitleOrchestrator } from "../orchestrators/SubtitleOrchestrator.js";
-import { convertSubtitleToVtt, cuesToVtt, decodeSubtitleBytes, finalizeCues } from "../subtitle-convert.js";
-import { detectLanguage, detectLanguageFromVtt } from "../language-detect.js";
+import { SubtitleFileContainer } from "../container/SubtitleFileContainer.js";
+import { TextSubtitleTrack } from "../tracks/TextSubtitleTrack.js";
+import { detectLanguage } from "../language-detect.js";
 
 const EXTERNAL_MAX_BYTES = 8 * 1024 * 1024;
 
@@ -53,15 +54,15 @@ export class SubtitleController {
       const release = this.torrentPool.acquireFile(torrent, fileIndex);
       try {
         const bytes = await readFileFully(file, EXTERNAL_MAX_BYTES);
-        const text = decodeSubtitleBytes(bytes);
-        const vtt = convertSubtitleToVtt(text, ext);
+        const text = SubtitleFileContainer.decodeBytes(bytes);
+        const vtt = SubtitleFileContainer.toVtt(text, ext);
         if (!vtt) return { error: `Unsupported subtitle format: ${ext}`, status: 422 };
         // The language is read from the CONVERTED document, not from the file.
         // The conversion has already dropped everything that is not the words —
         // and on an ASS file that is half of it, in Latin letters, which is what
         // made a Russian track answer `en` (field 2026-09-01, and the whole of
         // `research/subtitle-language-ass-markup-2026-09-01.md`).
-        return { vtt, language: detectLanguageFromVtt(vtt), headers: {} };
+        return { vtt, language: TextSubtitleTrack.detectLanguageFromVtt(vtt), headers: {} };
       } catch (e) {
         return { error: `Could not read subtitle file: ${e?.message ?? e}`, status: 502 };
       } finally {
@@ -92,7 +93,7 @@ export class SubtitleController {
       const fresh = Number.isInteger(since) ? held.cues.filter((c) => (Number(c.seq) || 0) > since)
         : Number.isFinite(after) ? held.cues.filter((c) => c.startSeconds > after) : held.cues;
       const codecId = held.track?.codecId ?? track?.codecId ?? "";
-      const vtt = cuesToVtt(fresh, codecId);
+      const vtt = TextSubtitleTrack.cuesToVtt(fresh, codecId);
       // Two things this reads, and each of them was wrong before 2.68.1.
       //
       // It reads the cues through `finalizeCues`, so what reaches the detector
@@ -106,7 +107,7 @@ export class SubtitleController {
       // page missed, which can be three lines, and three lines are not a sample
       // of a language.
       const language = detectLanguage(
-        finalizeCues(held.cues, codecId).map((cue) => cue.text).join("\n")
+        TextSubtitleTrack.finalizeCues(held.cues, codecId).map((cue) => cue.text).join("\n")
       );
       return {
         vtt,

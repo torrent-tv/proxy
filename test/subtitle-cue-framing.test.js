@@ -22,9 +22,7 @@ import { AviContainer } from "../services/container/AviContainer.js";
 import { MatroskaContainer } from "../services/container/MatroskaContainer.js";
 import { Mp4Container } from "../services/container/Mp4Container.js";
 import { SubtitleFileContainer } from "../services/container/SubtitleFileContainer.js";
-import { convertSubtitleToVtt, cuesToVtt, finalizeCues } from "../services/subtitle-convert.js";
-import { MarkupKind, markupKindOf, plainCueText } from "../services/tracks/subtitle-markup.js";
-import { TextSubtitleTrack } from "../services/tracks/TextSubtitleTrack.js";
+import { MarkupKind, TextSubtitleTrack } from "../services/tracks/TextSubtitleTrack.js";
 
 /** The line from the field report, as Matroska stores it. */
 const FIELD_BLOCK =
@@ -84,20 +82,20 @@ test("a container with no framing of its own refuses to guess", () => {
 });
 
 test("ASS markup is taken off wherever the text came from", () => {
-  assert.equal(plainCueText("{\\pos(640,620)}Hello{\\i1} there{\\i0}", "S_TEXT/ASS"), "Hello there");
-  assert.equal(plainCueText("First\\NSecond\\nThird", "S_TEXT/ASS"), "First\nSecond\nThird");
-  assert.equal(plainCueText("Wide\\hspace", "S_TEXT/ASS"), "Wide space");
+  assert.equal(TextSubtitleTrack.plainTextOf("{\\pos(640,620)}Hello{\\i1} there{\\i0}", "S_TEXT/ASS"), "Hello there");
+  assert.equal(TextSubtitleTrack.plainTextOf("First\\NSecond\\nThird", "S_TEXT/ASS"), "First\nSecond\nThird");
+  assert.equal(TextSubtitleTrack.plainTextOf("Wide\\hspace", "S_TEXT/ASS"), "Wide space");
   // The same text under a codec that has no such markup keeps its characters.
-  assert.equal(plainCueText("{\\pos(1,2)}Hello", "S_TEXT/UTF8"), "{\\pos(1,2)}Hello");
+  assert.equal(TextSubtitleTrack.plainTextOf("{\\pos(1,2)}Hello", "S_TEXT/UTF8"), "{\\pos(1,2)}Hello");
 });
 
 test("a codec is known by any of its names", () => {
-  assert.equal(markupKindOf("S_TEXT/ASS"), MarkupKind.ASS);
-  assert.equal(markupKindOf(".ASS"), MarkupKind.ASS);
-  assert.equal(markupKindOf("S_TEXT/UTF8"), MarkupKind.NONE);
-  assert.equal(markupKindOf("wvtt"), MarkupKind.NONE);
+  assert.equal(TextSubtitleTrack.markupKindOf("S_TEXT/ASS"), MarkupKind.ASS);
+  assert.equal(TextSubtitleTrack.markupKindOf(".ASS"), MarkupKind.ASS);
+  assert.equal(TextSubtitleTrack.markupKindOf("S_TEXT/UTF8"), MarkupKind.NONE);
+  assert.equal(TextSubtitleTrack.markupKindOf("wvtt"), MarkupKind.NONE);
   // Unknown: shown as it is, rather than refused.
-  assert.equal(markupKindOf("S_TEXT/SOMETHING"), MarkupKind.NONE);
+  assert.equal(TextSubtitleTrack.markupKindOf("S_TEXT/SOMETHING"), MarkupKind.NONE);
 });
 
 test("a text track answers for its own markup", () => {
@@ -164,13 +162,13 @@ test("a SubRip file with no blank line between cues does not swallow the ordinal
 
 test("a WebVTT file is passed through, not taken apart", () => {
   const file = "WEBVTT\n\nSTYLE\n::cue { color: yellow }\n\nintro\n00:00:01.000 --> 00:00:02.000\nHello\n";
-  assert.equal(convertSubtitleToVtt(file, ".vtt"), file);
+  assert.equal(SubtitleFileContainer.toVtt(file, ".vtt"), file);
   assert.equal(new SubtitleFileContainer({ extension: ".vtt" }).readCues(file), null);
 });
 
 test("a format nothing here reads is refused rather than mangled", () => {
-  assert.equal(convertSubtitleToVtt("whatever", ".sup"), null);
-  assert.equal(convertSubtitleToVtt("whatever", ".ttml"), null);
+  assert.equal(SubtitleFileContainer.toVtt("whatever", ".sup"), null);
+  assert.equal(SubtitleFileContainer.toVtt("whatever", ".ttml"), null);
 });
 
 test("one line of dialogue, two framings, one result", () => {
@@ -180,7 +178,7 @@ test("one line of dialogue, two framings, one result", () => {
   const spoken = "Yes, of course, my lord";
   const markup = `{\\pos(640,620)}${spoken}`;
 
-  const fromBlock = finalizeCues(
+  const fromBlock = TextSubtitleTrack.finalizeCues(
     [{
       startSeconds: 1,
       endSeconds: 3,
@@ -197,6 +195,6 @@ test("one line of dialogue, two framings, one result", () => {
   ].join("\n"));
 
   assert.equal(fromBlock[0].text, spoken);
-  assert.equal(finalizeCues(fromFile, ".ass")[0].text, spoken);
-  assert.equal(cuesToVtt(fromBlock, "S_TEXT/ASS"), cuesToVtt(fromFile, ".ass"));
+  assert.equal(TextSubtitleTrack.finalizeCues(fromFile, ".ass")[0].text, spoken);
+  assert.equal(TextSubtitleTrack.cuesToVtt(fromBlock, "S_TEXT/ASS"), TextSubtitleTrack.cuesToVtt(fromFile, ".ass"));
 });

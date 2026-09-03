@@ -16,7 +16,7 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
-import { readMatroskaKeyframeTimes } from "../services/container-index/matroska.js";
+import { MatroskaContainer } from "../services/container/MatroskaContainer.js";
 
 const ID_EBML = 0x1a45dfa3;
 const ID_SEGMENT = 0x18538067;
@@ -155,7 +155,7 @@ function readerOver(file) {
 test("only the picture's entries become cut times", async () => {
   const file = buildFile();
 
-  const times = await readMatroskaKeyframeTimes(readerOver(file), file.length);
+  const times = await MatroskaContainer.readKeyframeTimes(readerOver(file), file.length);
 
   assert.deepEqual(
     times.map((time) => Number(time.toFixed(3))),
@@ -170,7 +170,7 @@ test("a table whose entries name no known track is still used", async () => {
   // picture, the failure this reader exists to prevent.
   const file = buildFile({ cueTrack: 9 });
 
-  const times = await readMatroskaKeyframeTimes(readerOver(file), file.length);
+  const times = await MatroskaContainer.readKeyframeTimes(readerOver(file), file.length);
 
   assert.deepEqual(
     times.map((time) => Number(time.toFixed(3))),
@@ -182,7 +182,7 @@ test("a table whose entries name no known track is still used", async () => {
 test("a file whose tracks cannot be read keeps every entry", async () => {
   const file = buildFile({ withTracks: false });
 
-  const times = await readMatroskaKeyframeTimes(readerOver(file), file.length);
+  const times = await MatroskaContainer.readKeyframeTimes(readerOver(file), file.length);
 
   assert.deepEqual(
     times.map((time) => Number(time.toFixed(3))),

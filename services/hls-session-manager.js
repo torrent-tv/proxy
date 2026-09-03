@@ -17,7 +17,7 @@ import { fileURLToPath } from "node:url";
 import { spawn } from "node:child_process";
 import { createRequire } from "node:module";
 import { logger } from "../utils/logger.js";
-import { readKeyframeIndex } from "./container-index/index.js";
+import { ContainerFactory } from "./container/ContainerFactory.js";
 import { readMachineState, readProcessCpuSeconds, readProxyCpuSeconds, readSystemCpu, shareOfMachine } from "./host-load.js";
 import { speedFromReadings } from "./encoder-readings.js";
 import { availableShareFrom, correctForAvailability } from "./available-share.js";
@@ -2997,7 +2997,7 @@ export class HlsSessionManager {
       }
     };
 
-    const result = await readKeyframeIndex({ readRange, fileSize, label: logName });
+    const result = await ContainerFactory.readKeyframeIndex({ readRange, fileSize, label: logName });
     this.keyframeIndexCache.set(cacheKey, result);
     return result;
   }

@@ -255,6 +255,25 @@ export class WorkerTorrentPool {
   }
 
   /**
+   * The video track one file declares, or null where it declares none.
+   *
+   * One, because ffmpeg's `0:v:0` is what everything downstream is built on and
+   * a second video stream is a cover image far more often than a second film.
+   *
+   * @param {object} torrent
+   * @param {number} fileIndex
+   * @returns {Promise<object | null>}
+   */
+  async getDeclaredVideoTrack(torrent, fileIndex) {
+    const tracks = await this.getContainerTracks(torrent, fileIndex);
+    return (
+      tracks
+        .filter((track) => track?.type === "video")
+        .sort((left, right) => (left.declaredIndex ?? 0) - (right.declaredIndex ?? 0))[0] ?? null
+    );
+  }
+
+  /**
    * The cues of one subtitle track that the downloaded clusters already carry.
    *
    * @param {object} torrent

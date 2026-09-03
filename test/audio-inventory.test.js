@@ -15,30 +15,29 @@
  */
 
 import test from "node:test";
+import { Container } from "../services/container/Container.js";
+import { AudioTrack } from "../services/tracks/AudioTrack.js";
 import assert from "node:assert/strict";
 import {
-  audioPairingHolds,
   audioRenditionName,
   buildAudioInventory,
-  codecNameOf,
-  mergeContainerAudioFlags,
   resolveAudioIndex
 } from "../services/audio-inventory.js";
 
 test("a pair agreeing on language is accepted", () => {
-  assert.equal(audioPairingHolds({ language: "jpn" }, { language: "jpn" }), true);
+  assert.equal(Container.pairingHolds({ language: "jpn" }, { language: "jpn" }), true);
 });
 
 test("a pair disagreeing on language is refused", () => {
-  assert.equal(audioPairingHolds({ language: "jpn" }, { language: "rus" }), false);
+  assert.equal(Container.pairingHolds({ language: "jpn" }, { language: "rus" }), false);
 });
 
 test("two tracks that say nothing about themselves do not break the alignment", () => {
-  assert.equal(audioPairingHolds({ language: "und", title: "" }, { language: "", name: "" }), true);
+  assert.equal(Container.pairingHolds({ language: "und", title: "" }, { language: "", name: "" }), true);
 });
 
 test("the container's own flags reach the merged track", () => {
-  const merged = mergeContainerAudioFlags(
+  const merged = Container.mergeAudioFlags(
     [
       { index: 0, language: "eng", title: "", isDefault: true, codec: "aac" },
       { index: 1, language: "eng", title: "Director", isDefault: true, codec: "ac3" }
@@ -58,7 +57,7 @@ test("the container's own flags reach the merged track", () => {
 });
 
 test("a count that differs drops the container reading whole", () => {
-  const merged = mergeContainerAudioFlags(
+  const merged = Container.mergeAudioFlags(
     [{ index: 0, language: "eng", isDefault: true }],
     [{ language: "eng" }, { language: "rus" }]
   );
@@ -70,7 +69,7 @@ test("a count that differs drops the container reading whole", () => {
 });
 
 test("one pair that agrees on neither language nor title drops it too", () => {
-  const merged = mergeContainerAudioFlags(
+  const merged = Container.mergeAudioFlags(
     [{ index: 0, language: "jpn", title: "" }, { index: 1, language: "rus", title: "" }],
     [{ language: "jpn", name: "" }, { language: "eng", name: "" }]
   );
@@ -140,13 +139,13 @@ test("the flat number resolves back to a file and a track inside it", () => {
 });
 
 test("codec identifiers are translated to the names the browser judges by", () => {
-  assert.equal(codecNameOf({ codec: "AAC" }), "aac");
-  assert.equal(codecNameOf({ codecId: "A_AC3" }), "ac3");
-  assert.equal(codecNameOf({ codecId: "A_AAC/MPEG4/LC" }), "aac");
-  assert.equal(codecNameOf({ codecId: "A_PCM/INT/LIT" }), "pcm");
-  assert.equal(codecNameOf({ codecId: "ec-3" }), "eac3");
-  assert.equal(codecNameOf({}, ".dts"), "dts");
-  assert.equal(codecNameOf({}, ".unknown"), "");
+  assert.equal(AudioTrack.codecNameOf({ codec: "AAC" }), "aac");
+  assert.equal(AudioTrack.codecNameOf({ codecId: "A_AC3" }), "ac3");
+  assert.equal(AudioTrack.codecNameOf({ codecId: "A_AAC/MPEG4/LC" }), "aac");
+  assert.equal(AudioTrack.codecNameOf({ codecId: "A_PCM/INT/LIT" }), "pcm");
+  assert.equal(AudioTrack.codecNameOf({ codecId: "ec-3" }), "eac3");
+  assert.equal(AudioTrack.codecNameOf({}, ".dts"), "dts");
+  assert.equal(AudioTrack.codecNameOf({}, ".unknown"), "");
 });
 
 test("a rendition is named by what the file says, and two never share a name", () => {

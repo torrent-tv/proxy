@@ -40,7 +40,7 @@ async function managerWithSession() {
     segmentCount: 200,
     useSyntheticPlaylist: true,
     // The viewer is at segment #25.
-    viewerPositionSeconds: 100
+    furthestViewerSeconds: 100
   });
   return { manager, dirPath };
 }
@@ -107,7 +107,7 @@ test("a seek by one viewer does not release the request held for another", async
   // The shared field now holds the leader's position, which is what the
   // encoder is steered by and what every earlier release judged BOTH of them
   // against.
-  assert.equal(session.viewerPositionSeconds, 600);
+  assert.equal(session.furthestViewerSeconds, 600);
 
   assert.equal(
     manager.requestStillWanted(SESSION_ID, segment(26), "behind"),

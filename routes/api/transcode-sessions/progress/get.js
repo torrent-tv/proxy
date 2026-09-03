@@ -14,7 +14,11 @@ export async function handleApiTranscodeSessionsProgressGet(req, reply, { hlsSes
     return reply.code(400).send({ error: "sessionId is required." });
   }
 
-  const progress = await hlsSessionManager.getSessionProgress(sessionId);
+  // Whose progress. One picture serves everyone watching it, and after a
+  // quality change the stream on screen is another session — a different one
+  // for each viewer who changed.
+  const consumerId = typeof req.query?.consumer === "string" ? req.query.consumer : "";
+  const progress = await hlsSessionManager.getSessionProgress(sessionId, consumerId);
   if (!progress) {
     return reply.code(404).send({ error: "Transcode session was not found." });
   }

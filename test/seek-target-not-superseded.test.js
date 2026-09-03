@@ -54,7 +54,7 @@ async function managerAfterSeek() {
     segmentCount: 399,
     encodeStartIndex: SEGMENT_AT_SEEK,
     waitEpoch: 1,
-    viewerPositionSeconds: SEEK_TO_SECONDS,
+    furthestViewerSeconds: SEEK_TO_SECONDS,
     runState: "PRODUCING"
   });
   return { manager, dirPath };

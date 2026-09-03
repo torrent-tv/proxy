@@ -36,9 +36,19 @@ export async function handleTranscodeAudioWarmGet(req, reply, { hlsSessionManage
     return reply.code(400).send({ error: "A track index and a non-negative position are required." });
   }
 
+  // Whose track change this is. Another viewer of the same picture may be
+  // listening to something else, and preparing a track must not be read as
+  // everybody moving to it.
+  const consumerId = typeof req.query?.consumer === "string" ? req.query.consumer : "";
+
   let prepared;
   try {
-    prepared = await hlsSessionManager.prepareAudioTrack(baseSessionId, trackIndex, positionSeconds);
+    prepared = await hlsSessionManager.prepareAudioTrack(
+      baseSessionId,
+      trackIndex,
+      positionSeconds,
+      consumerId
+    );
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     reply.header("Retry-After", "1");

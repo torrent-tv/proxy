@@ -117,7 +117,7 @@ export async function serveSessionFile(req, reply, { hlsSessionManager, sessionI
     // where the viewer was.
     logger.info(
       `[hold] ${fileName} refused: the viewer is at ` +
-      `${hlsSessionManager.viewerPositionOf(sessionId).toFixed(1)}s and this is not the segment there`
+      `${hlsSessionManager.viewerPositionOf(sessionId, consumerId).toFixed(1)}s and this is not the segment there`
     );
     reply.header("Retry-After", "0");
     return reply.code(503).send({ error: "Superseded by a seek." });

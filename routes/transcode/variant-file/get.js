@@ -26,7 +26,16 @@ export async function handleTranscodeVariantFileGet(req, reply, { hlsSessionMana
   const height = Number(req.params.height);
   const fileName = typeof req.params.fileName === "string" ? req.params.fileName : "";
 
-  const resolved = await hlsSessionManager.resolveVariantFile(baseSessionId, height, fileName);
+  // Which viewer is asking. Two viewers of one picture can be on two rungs, and
+  // a segment request is what says which rung a viewer is watching — read as
+  // the session's own, one of them would take the other off their step.
+  const consumerId = typeof req.query?.consumer === "string" ? req.query.consumer : "";
+  const resolved = await hlsSessionManager.resolveVariantFile(
+    baseSessionId,
+    height,
+    fileName,
+    consumerId
+  );
   if (resolved.error) {
     // Preparing the variant failed — a probe, a keyframe index, an input that
     // is not there yet. Retryable, like every other not-ready answer on this

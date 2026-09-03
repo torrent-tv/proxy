@@ -162,7 +162,8 @@ flowchart TB
 ## Orchestrators & Controllers
 
 - `ContainerFactory.create({readRange,fileSize})` — sniffs 16 bytes, returns precise `Container` subclass. No torrent knowledge.
-- `ContainerOrchestrator` — per-file cache (`sourceKey:fileIndex`), `getTracks()` / `getKeyframeIndex()`. Transport-agnostic.
+- `ContainerOrchestrator` — per-file cache (`sourceKey:fileIndex`), `getTracks()` / `getMediaInfo()` / `getKeyframeIndex()`. Transport-agnostic.
+- **The keyframe table is read once per file**, like the other two. `Container.readKeyframeIndex` memoizes and each format implements `parseKeyframeIndex`, so the wait belongs to the FILE: two sessions created in the same moment join one read rather than making two, which is exactly what two viewers opening one film do. A read that THREW is not remembered — the bytes it needed may simply not have arrived. Who asks: `torrent-worker/container-tracks.js` `containerKeyframesOf`, over the torrent, reached from the session manager by the `container-keyframes` command. The manager's own HTTP read remains for a manager wired without that path (every unit test).
 - `SubtitleOrchestrator` — wraps `torrent-worker/subtitle-cues.js` (`planFor`, `cuesHeldFor`, `warmSubtitleCues`) behind the `ContainerTrack` abstraction. Routes depend on this, not on the worker directly. The reading itself is the containers' — that module supplies the torrent's read policy and keeps the cursor.
 - `PlaybackController` / `SubtitleController` — thin interface adapters; `routes/api/*` delegate to them, handle HTTP headers (`X-Subtitle-Language`, `X-Subtitle-Cursor`) only.
 

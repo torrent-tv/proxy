@@ -361,6 +361,16 @@ export class TorrentWorkerClient {
   }
 
   /**
+   * Where one file's keyframes are, from the container's own table.
+   *
+   * @param {{ sourceKey: string, fileIndex: number }} params
+   * @returns {Promise<{ index: { times: number[], tolerance: number } | null }>}
+   */
+  async getContainerKeyframes({ sourceKey, fileIndex }) {
+    return this.#caller.call(Command.CONTAINER_KEYFRAMES, { sourceKey, fileIndex });
+  }
+
+  /**
    * Start fetching the region a viewer is about to resume at.
    *
    * @param {{ sourceKey: string, fileIndex: number, positionSeconds: number }} params

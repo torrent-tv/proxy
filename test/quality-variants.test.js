@@ -15,7 +15,12 @@ import assert from "node:assert/strict";
 import { mkdtemp, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { computeSegmentBoundaries, costKindForSession, HlsSessionManager } from "../services/hls-session-manager.js";
+import {
+  audioRenditionKey,
+  computeSegmentBoundaries,
+  costKindForSession,
+  HlsSessionManager
+} from "../services/hls-session-manager.js";
 import { fmp4Format } from "../services/segment-formats/fmp4.js";
 
 const BASE_ID = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
@@ -327,7 +332,7 @@ test("a rung is placed where the player asked it for, not where the other rung h
   // new run past everything the player then asked for, which no request could
   // ever be answered from.
   base.lastRequestedSegment = 70;
-  base.viewerPositionSeconds = 280;
+  base.furthestViewerSeconds = 280;
 
   await manager.resolveVariantFile(BASE_ID, 540, "segment-00056.mp4");
 
@@ -464,7 +469,13 @@ test("the rung on screen fetching its own segments does not cancel a warm-up", a
   await manager.resolveVariantFile(BASE_ID, 812, "segment-00026.mp4");
   await manager.resolveVariantFile(BASE_ID, 812, "segment-00027.mp4");
 
-  assert.equal(base.warmingVariantId, VARIANT_ID, "the rung being prepared is still being prepared");
+  // Kept per viewer, and this one is the unnamed viewer of a transport that
+  // carries no consumer id.
+  assert.equal(
+    base.warmingVariantByConsumer.get(""),
+    VARIANT_ID,
+    "the rung being prepared is still being prepared"
+  );
   assert.deepEqual(
     warmedEncoder.signals,
     [],
@@ -510,12 +521,12 @@ test("the viewer's position is kept current by the segments they ask for", async
   // would place the new variant's encode run back at the seek — and since a
   // segment request steers nothing, the segments the player then asks for would
   // never be produced by anyone.
-  base.viewerPositionSeconds = 40;
+  base.furthestViewerSeconds = 40;
 
   await manager.getFileStream(BASE_ID, "segment-00090.mp4", { requestSeq: 1 });
 
   assert.equal(
-    base.viewerPositionSeconds,
+    base.furthestViewerSeconds,
     360,
     "a request for segment #90 of a four-second grid says where the viewer is now"
   );
@@ -660,7 +671,7 @@ test("a separately published audio track starts where the picture is, from the r
   // Served up to 140 s, and the browser says it holds 40 s ahead of the
   // picture — so the viewer is at 100 s, and that, less a segment of margin,
   // is where the track has to begin.
-  base.viewerPositionSeconds = 140;
+  base.furthestViewerSeconds = 140;
   base.netReports.set("viewer", {
     linkMbps: 20,
     bufferedAheadSec: 40,
@@ -698,7 +709,7 @@ test("with two viewers the audio track starts at the EARLIEST picture, not the r
   base.audioSeparate = true;
   // A copied picture is one session shared by both of them. The read head is
   // the furthest request of EITHER, so it belongs to the viewer in front.
-  base.viewerPositionSeconds = 140;
+  base.furthestViewerSeconds = 140;
   base.netReports.set("ahead", {
     linkMbps: 20,
     bufferedAheadSec: 40,
@@ -740,7 +751,7 @@ test("a position past the read head is clamped rather than acted on", async (t) 
     await rm(dirPath, { recursive: true, force: true });
   });
   base.audioSeparate = true;
-  base.viewerPositionSeconds = 140;
+  base.furthestViewerSeconds = 140;
   // Reports and requests race; a position claiming to be past everything that
   // has been asked for would start the run where no request can reach it.
   base.netReports.set("viewer", {
@@ -777,7 +788,7 @@ test("a stale buffer report is not used to place an audio track", async (t) => {
     await rm(dirPath, { recursive: true, force: true });
   });
   base.audioSeparate = true;
-  base.viewerPositionSeconds = 300;
+  base.furthestViewerSeconds = 300;
   // Sent a minute ago: the viewer may have seeked anywhere since, so neither
   // the buffer nor the position in it says where they are now.
   base.netReports.set("viewer", {
@@ -825,7 +836,9 @@ test("an audio track is prepared at the position the switch will land on", async
   rendition.runState = "PRODUCING";
   rendition.encodeStartIndex = 0;
   manager.sessionsById.set(VARIANT_ID, rendition);
-  base.audioRenditionSessions = new Map([[1, VARIANT_ID]]);
+  // Filed by the track AND by how it is produced: two browsers of one picture
+  // can need the same track copied and re-encoded.
+  base.audioRenditionSessions = new Map([[audioRenditionKey(1, true), VARIANT_ID]]);
 
   const prepared = await manager.prepareAudioTrack(BASE_ID, 1, 240);
 
@@ -1083,7 +1096,7 @@ test("a file opened at a position starts its sound THERE, not a look-ahead earli
   // no segment served, no report from anybody. The read head is then not a
   // request edge — it is where the session was made — and a browser that has
   // just opened holds no buffer at all.
-  base.viewerPositionSeconds = null;
+  base.furthestViewerSeconds = null;
   base.lastRequestedSegment = null;
   base.netReports.clear();
   base.progress.startPositionSeconds = 588;

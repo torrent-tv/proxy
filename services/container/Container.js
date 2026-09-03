@@ -114,6 +114,52 @@ export class Container {
     throw new Error("readTracks not implemented");
   }
 
+
+  /**
+   * This container's subtitle tracks and where their cues are, in ONE shape
+   * whichever container answers.
+   *
+   * `tracks` carries a `clusterPositions` list for a container that stores cues
+   * in clusters and a `samples` list for one that states each cue's own byte
+   * range; a caller reads neither, and asks {@link Container#readHeldCues}
+   * instead. `declared` is what the container says about its subtitle tracks in
+   * its own order, and empty means the container said nothing — a real answer,
+   * not a missing one.
+   *
+   * @returns {Promise<{ tracks: object[], declared: object[], secondsPerTick: number, segmentDataOffset: number } | null>}
+   *   Null where this container declares no subtitles at all.
+   */
+  async readSubtitlePlan() {
+    return null;
+  }
+
+  /**
+   * The cues this container can read RIGHT NOW for one track, without fetching.
+   *
+   * Every container answers this, and each reads what its own specification
+   * says: Matroska walks the clusters its Cues table names, an MP4 reads the
+   * samples its table states. The caller therefore chooses a container once —
+   * from the bytes — and never again. It used to choose twice, once by file
+   * extension for the container and once by whether a track carried a sample
+   * list for the reading, and two choices that must agree and are made from
+   * different evidence are a disagreement waiting to happen.
+   *
+   * `progress` is what has already been read, kept by the caller because it
+   * belongs to the file rather than to one pass: `walked` holds cluster
+   * positions, `harvested` holds sample offsets per track. Each container adds
+   * to the one it uses.
+   *
+   * @param {object} _plan - This file's subtitle plan.
+   * @param {object} _track - The track asked about.
+   * @param {{ walked: Set<number>, harvested: Map<number, Set<number>> }} _progress
+   * @returns {Promise<{ found: Map<number, object[]>, covered: number, indexed: number }>}
+   *   `found` is track number to the cues found in THIS pass — Matroska fills
+   *   every track from one walk, so it is a map and not a list.
+   */
+  async readHeldCues(_plan, _track, _progress) {
+    return { found: new Map(), covered: 0, indexed: 0 };
+  }
+
   /**
    * Keyframe times for the video track, ascending seconds. Null when index absent (MPEG-TS, fragmented MP4, truncated).
    * @returns {Promise<{times:number[],tolerance:number}|null>}

@@ -168,11 +168,31 @@ flowchart TB
 
 ## Legacy
 
-`services/container-index/` holds what is NOT specific to one media kind: EBML
-element walking, and the Matroska/MP4/AVI keyframe tables. Everything a container
-states about its own subtitles — the track table, the Cues, the blocks in a
-cluster, the sample table — is in the container class itself. Direct imports from
-routes are deprecated — use `orchestrators/` and `controllers/` instead.
+Everything a container states about ITSELF is in its own class: the track table,
+the Cues, the keyframe times they name, the cluster positions, the blocks inside
+a cluster, the MP4 sample table. `services/container-index/` no longer exists.
+What was kept apart is `container/ebml-reader.js` — EBML element walking is the
+format's grammar rather than any of its statements.
+
+`ContainerFactory` is the one place that decides what a file IS. It sniffs the
+header, because that is what the muxer wrote while a name is what somebody
+typed, and it answers `readKeyframeIndex` for the same reason: doing it anywhere
+else meant a third place making that decision. `ContainerFactory.byName` exists
+for the one path that cannot sniff — the cue walk asks the swarm for nothing, so
+a file whose head is not downloaded has only its name.
+
+**Two readings of one file, and which answers.** ffmpeg's `-i` banner and the
+container's own table both describe a file's tracks, and the rule is stated once
+per media kind on `Container`. `alignWithBanner` lines them up by position and
+CHECKS each pair on language or title; one pair agreeing on neither, or a length
+that differs, drops the container reading whole, because a wrong flag is worse
+than a missing one. `mergeSubtitleFlags`, `mergeAudioFlags` and
+`mergeVideoFacts` then say which side answers for which field: flags the banner
+cannot express come from the container; the coded size and frame rate come from
+the probe, because the encoder receives what the decoder produced.
+
+Direct imports from routes are deprecated — use `orchestrators/` and
+`controllers/` instead.
 
 ## Flags matrix
 

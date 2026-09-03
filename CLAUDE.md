@@ -50,11 +50,14 @@ Linux-only host (e.g. POSIX-only signals must degrade elsewhere).
   - `controllers/` — interface layer: `PlaybackController` / `SubtitleController`
     (thin adapters over orchestrators; routes depend on controllers, not services).
     `routes/*` are now thin HTTP translators.
-  - `container-index/` — what is not specific to one media kind: EBML element
-    walking and the Matroska/MP4/AVI keyframe tables. Used internally by
-    `container/*`, deprecated as a direct import. Everything a container states
-    about its own SUBTITLES — track table, Cues, blocks in a cluster, sample
-    table, the walk of what is downloaded — lives in the container class.
+  - Everything a container states about ITSELF lives in its own class: the
+    track table, the Cues, the keyframe times they name, the cluster positions,
+    the blocks inside a cluster, the MP4 sample table, and the walk of what is
+    downloaded. `services/container-index/` is gone; `container/ebml-reader.js`
+    is the format's byte-level grammar, not its statements, and is the only
+    piece kept apart. `ContainerFactory` is the ONE place that decides what a
+    file is — by sniffing the header, since that is what the muxer wrote — and
+    it also answers `readKeyframeIndex`.
   - `docs/download-architecture.md` — the two axes of downloading: what is
     wanted (`demand/`) against what the swarm is told (`download/`), why urgency
     is not a number given to the library, and why the speculative levels are

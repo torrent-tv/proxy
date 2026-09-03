@@ -25,7 +25,17 @@ export async function handleTranscodeAudioFileGet(req, reply, { hlsSessionManage
   const trackIndex = Number(req.params.trackIndex);
   const fileName = typeof req.params.fileName === "string" ? req.params.fileName : "";
 
-  const resolved = await hlsSessionManager.resolveAudioRenditionFile(baseSessionId, trackIndex, fileName);
+  // Which viewer is asking. One picture serves everyone watching it, and the
+  // soundtrack each of them chose is their own: without this, a segment request
+  // from one viewer would be read as everybody moving to that track, and the
+  // other viewer's encoder would be stopped once per segment.
+  const consumerId = typeof req.query?.consumer === "string" ? req.query.consumer : "";
+  const resolved = await hlsSessionManager.resolveAudioRenditionFile(
+    baseSessionId,
+    trackIndex,
+    fileName,
+    consumerId
+  );
   if (resolved.error) {
     // Retryable, like every other not-ready answer on this path: a 500 for a
     // rendition playlist would end the stream over something the next attempt

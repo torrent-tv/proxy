@@ -33,6 +33,14 @@ Linux-only host (e.g. POSIX-only signals must degrade elsewhere).
     `deselect` or `critical`, and `registry.js`, which holds one per torrent and
     owns the cross-torrent rule that withholds the speculative levels while
     anything urgent is missing anywhere. See `docs/download-architecture.md`.
+  - `output/` — domain layer: `OutputSpec`, `VideoOutput`, `AudioOutput`,
+    `CutGrid`. What a session PRODUCES — which tracks, in what form, cut how,
+    packaged how — and therefore its identity: two outputs whose parameters
+    agree ARE the same output, and the encoded result is reused by definition.
+    Nothing about a VIEWER appears in it (not the consumer id, not where they
+    started, not their viewport), and nothing about the request that does not
+    change a byte of the result. `hls-session-manager` builds one and keys the
+    session on it.
   - `container/` — domain layer: `Container` (abstract, RFC 9559 / ISO 14496-12),
     `MatroskaContainer` / `Mp4Container` / `AviContainer`, `ContainerFactory`
     (sniff 16 bytes → precise subclass). See `docs/container-architecture.md`.
@@ -43,7 +51,9 @@ Linux-only host (e.g. POSIX-only signals must degrade elsewhere).
     RFC 9559 §5.1.4.1, FlagOriginal/Commentary only on audio, tkhd
     track_enabled / alternate_group, elng BCP47).
   - `orchestrators/` — application layer: `ContainerOrchestrator` (detect + per-file
-    cache, `getTracks`/`getKeyframeIndex`), `SubtitleOrchestrator` (wraps
+    cache, `getTracks`/`getMediaInfo`/`getKeyframeIndex` — the keyframe table is
+    a property of immutable bytes like the other two, memoized on the container
+    and read once per file by whoever asks), `SubtitleOrchestrator` (wraps
     `torrent-worker/subtitle-cues.js` + `Container` tracks, warm/push). The walk
     itself is `MatroskaContainer.walkHeldClusters` / `Mp4Container.readHeldSamples`;
     `subtitle-cues.js` supplies the torrent's read policy and keeps the cursor.

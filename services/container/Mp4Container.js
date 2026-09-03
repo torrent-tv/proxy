@@ -519,7 +519,7 @@ export class Mp4Container extends Container {
     return decodeSubtitleSample(payload, codecId);
   }
 
-  async readKeyframeIndex() {
+  async parseKeyframeIndex() {
     const r = await readMp4KeyframeTimes(this.readRange, this.fileSize);
     if (!r) return null;
     if (Array.isArray(r)) return { times: r, tolerance: 0 };

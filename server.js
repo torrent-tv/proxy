@@ -210,6 +210,23 @@ export async function startProxyServer({
         return null;
       }
     },
+    // Where the file's keyframes are, read by the same container that answered
+    // the two above. It used to be read by the session itself over this proxy's
+    // own HTTP, once per session — so two viewers opening one film read the
+    // same table twice, and each of them could get a different answer about
+    // whether the picture can be copied at all.
+    getContainerKeyframes: async ({ sourceKey, fileIndex }) => {
+      const record = sourceRegistry.get(sourceKey);
+      if (!record || typeof torrentPool.getContainerKeyframes !== "function") {
+        return null;
+      }
+      try {
+        const torrent = await torrentPool.getTorrent(record.sourceType, record.source);
+        return await torrentPool.getContainerKeyframes(torrent, fileIndex);
+      } catch {
+        return null;
+      }
+    },
     // Pull one whole file onto the disk. Used for a soundtrack that ships beside
     // the picture, once the encoder is as far ahead of the viewer as it is
     // allowed to get — the one moment the swarm's capacity is demonstrably

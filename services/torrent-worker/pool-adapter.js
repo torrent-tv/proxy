@@ -240,6 +240,24 @@ export class WorkerTorrentPool {
   }
 
   /**
+   * Where one file's keyframes are, from the container's own table. Null when
+   * this file has no readable index — which is a final answer about the file,
+   * and the reason a copy of it has to be re-encoded instead.
+   *
+   * @param {object} torrent
+   * @param {number} fileIndex
+   * @returns {Promise<{ times: number[], tolerance: number } | null>}
+   */
+  async getContainerKeyframes(torrent, fileIndex) {
+    const sourceKey = torrent?.sourceKey;
+    if (!sourceKey) {
+      return null;
+    }
+    const answer = await this.#client.getContainerKeyframes({ sourceKey, fileIndex });
+    return answer?.index ?? null;
+  }
+
+  /**
    * The audio tracks one file declares, in the order ffmpeg numbers them
    * `0:a:N`.
    *

@@ -89,6 +89,13 @@ export const Command = {
    */
   CONTAINER_MEDIA_INFO: "container-media-info",
   /**
+   * Where a file's keyframes are, from the container's own table. A property of
+   * immutable bytes, read once per file by the same container that answers the
+   * two above — and the answer decides whether a picture can be copied at all,
+   * which must be the same answer for every viewer of that file.
+   */
+  CONTAINER_KEYFRAMES: "container-keyframes",
+  /**
    * Start fetching the region a viewer is about to resume at, named in seconds
    * and turned into bytes here, where the file's own duration can be read.
    */

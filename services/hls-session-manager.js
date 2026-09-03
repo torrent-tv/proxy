@@ -60,6 +60,7 @@ import {
 } from "./ffmpeg-banner.js";
 import { resolveSegmentFormat, SEGMENT_FORMAT_IDS } from "./segment-formats/index.js";
 import { audioRenditionName } from "./audio-inventory.js";
+import { AudioOutput, CutGrid, OutputSpec, VideoOutput } from "./output/index.js";
 import { ProducedIndex } from "./produced-index.js";
 
 /**
@@ -293,6 +294,22 @@ export function usableSegmentIndices(dirs, segmentFormat, knownNonEmpty) {
     }
   }
   return present;
+}
+
+/**
+ * How a base files the audio renditions it has made.
+ *
+ * By the track AND by how it is produced, because those are two different
+ * encodes of it: a browser that can decode the track as it stands is served a
+ * copy, and one that cannot is served AAC. Two viewers of one picture can
+ * legitimately need both.
+ *
+ * @param {number} trackIndex
+ * @param {boolean} transcode
+ * @returns {string}
+ */
+export function audioRenditionKey(trackIndex, transcode) {
+  return `${Number(trackIndex) || 0}:${transcode === true ? "aac" : "copy"}`;
 }
 
 /**
@@ -1760,6 +1777,7 @@ export class HlsSessionManager {
     getCachedMediaInfo = null,
     getCachedAudioTracks = null,
     getContainerMediaInfo = null,
+    getContainerKeyframes = null,
     fetchWholeFile = null,
     segmentFormatId = undefined,
     stateDir = "",
@@ -1787,6 +1805,12 @@ export class HlsSessionManager {
     // it meant reading a header this proxy had already read.
     this.getContainerMediaInfo =
       typeof getContainerMediaInfo === "function" ? getContainerMediaInfo : null;
+    // Where the file's keyframes are, from the same container. A file has one
+    // answer to this and it is read once; without this path the session reads
+    // the table itself over the proxy's own HTTP, which is what every unit test
+    // does and what the field did until 2.76.0.
+    this.getContainerKeyframes =
+      typeof getContainerKeyframes === "function" ? getContainerKeyframes : null;
     // Fetch one whole file of a source, as a bounded read rather than a
     // selection. Used to pull a soundtrack that ships beside the picture onto
     // the disk while the swarm has capacity to spare — see
@@ -1841,6 +1865,10 @@ export class HlsSessionManager {
     // readable index" and is cached too — no point retrying a scan that cannot
     // succeed.
     this.keyframeIndexCache = new Map();
+    // Reads of that table that have not answered yet, one per file. What makes
+    // the wait belong to the FILE rather than to a session: everybody joins the
+    // same one, so two viewers of one film get one answer and one read.
+    this.keyframeIndexPending = new Map();
     this.sessionIdBySource = new Map();
     this.cleanupTimer = setInterval(() => {
       void this.cleanupExpired();
@@ -1955,46 +1983,101 @@ export class HlsSessionManager {
     // vocabularies.
     const audioSource = this.#resolveAudioSource(sourceKey, fileIndex, normalizedAudioTrack);
     const forceManualQuality = manualQuality === true && transcodeVideo;
-    const sourceMapKey = [
+    // Whether this output carries its sound at all — decided HERE, before the
+    // key, and never derived a second time.
+    //
+    // It used to be settled after the session had already been put in the map,
+    // which was survivable only while the key carried the audio parameters
+    // unconditionally: the key could say "no sound in this output" while the
+    // output muxed it, and two viewers who chose different languages would then
+    // have shared one encode and one of them would have heard the other's.
+    const audioSeparate = inheritedAudioSeparate === null
+      ? this.#audioTravelsSeparately({
+          sourceKey,
+          fileIndex,
+          audioRenditions,
+          // The rung this session will be NAMED by. The budget may still
+          // downscale the encode below it, and that cannot change the answer:
+          // what it picks is a rung of the same ladder, already in the set.
+          ownHeight: normalizedTargetHeight
+        })
+      : inheritedAudioSeparate === true;
+    // A rendition IS the sound, so it carries it whatever the arrangement says;
+    // a picture carries it only when the browser is not taking it separately.
+    const carriesAudio = audioOnly === true || !audioSeparate;
+    const carriesVideo = audioOnly !== true;
+    const spec = new OutputSpec({
       sourceKey,
-      String(fileIndex),
-      transcodeVideo ? "video" : "audio",
-      transcodeAudio ? "a1" : "a0",
-      `t${normalizedAudioTrack}`,
-      String(normalizedTargetWidth),
-      String(normalizedTargetHeight),
-      forceManualQuality ? "q-manual" : "q-auto",
-      // What the output CARRIES. A picture without its audio, a single audio
-      // track without a picture, and the two muxed together are three different
-      // encodes of the same file, and nothing about them is interchangeable —
-      // so they cannot share a session, a directory or an encoder.
-      audioOnly === true ? "audio-only" : (audioRenditions === true ? "video-only" : "muxed"),
-      String(normalizedStartPosition),
-      // Two viewers asking for different containers cannot share one ffmpeg.
-      segmentFormat.id,
-      // A re-encoded session is NOT shared between viewers, because a quality
-      // change acts on the session: it stops the encoder of the rung being left
-      // and repositions the one being joined. Shared, one viewer's change would
-      // stop the stream the other is watching, and that viewer's seek would
-      // then be forwarded to a variant they never asked for. Sharing here was
-      // always narrow — it needs two viewers to open the same file, at the same
-      // size, within the same ten seconds — and a shared seek already dragged
-      // both of them. Restoring it needs the active variant to be tracked per
-      // consumer rather than per session, which is a change to three routes and
-      // the variant path; recorded in the roadmap, not attempted here.
-      transcodeVideo ? consumerId : "",
-      // Two sessions at the same height cut on different grids are different
-      // streams: one of them can be spliced into a copy of this file and the
-      // other cannot.
-      inheritedGrid ? "grid-keyframe" : "grid-own"
-    ].join(":");
+      segmentFormatId: segmentFormat.id,
+      // What this session INTENDS to cut on, which is all that can be known
+      // before the file's keyframe table has been read. A copy asks for the
+      // source's own keyframes; a member of a family takes the grid it was
+      // handed; everything else is the even grid. The one case where the intent
+      // is not met is a copy whose container has no readable index — the video
+      // is then re-encoded onto the even grid instead, which is logged where it
+      // happens, and both viewers of that file ask the same thing of it and so
+      // still land on one session.
+      grid: new CutGrid({
+        kind: inheritedGrid || (!transcodeVideo && !audioOnly) ? "keyframe" : "uniform",
+        // Whose grid it is: the picture's file. A soundtrack has no keyframes
+        // of its own and is cut where the picture it accompanies is cut.
+        fileIndex
+      }),
+      video: carriesVideo
+        ? new VideoOutput({
+            fileIndex,
+            encode: transcodeVideo
+              ? {
+                  width: normalizedTargetWidth,
+                  height: normalizedTargetHeight,
+                  manual: forceManualQuality
+                }
+              : null
+          })
+        : null,
+      audio: carriesAudio
+        ? new AudioOutput({
+            fileIndex: audioSource.fileIndex,
+            trackIndex: audioSource.sourceTrackIndex,
+            transcode: transcodeAudio === true
+          })
+        : null
+    });
+    // One field that is not a property of the output and is on its way out:
+    // where production BEGAN. It says nothing about what is produced, and it is
+    // here only because a session cannot yet serve a position behind its
+    // running encode without dragging that encode back — so a viewer joining
+    // far from one would take the picture away from whoever is already
+    // watching. What removes it is a run of their own (roadmap item 61).
+    const sourceMapKey = `${spec.toKey()}:start=${normalizedStartPosition}`;
     const existingId = this.sessionIdBySource.get(sourceMapKey);
     if (existingId) {
       const existing = this.sessionsById.get(existingId);
       if (existing && existing.state !== "failed") {
         existing.fileName = normalizeLogFileName(fileName, fileIndex);
+        const joined = Boolean(consumerId) && !existing.consumers.has(consumerId);
         if (consumerId) {
           existing.consumers.add(consumerId);
+          // What THIS viewer wants of the sound, which the session they are
+          // joining knows nothing about: they may have chosen another language,
+          // and their browser may need a track re-encoded that the first
+          // viewer's could decode as it stands.
+          if (!(existing.audioChoiceByConsumer instanceof Map)) {
+            existing.audioChoiceByConsumer = new Map();
+          }
+          existing.audioChoiceByConsumer.set(consumerId, {
+            trackIndex: normalizedAudioTrack,
+            transcode: transcodeAudio === true
+          });
+        }
+        // Reuse said nothing at all before this, so a session serving two
+        // viewers looked exactly like a session serving one — and the whole
+        // question this key exists to answer is which of the two happened.
+        if (joined) {
+          logger.info(
+            `transcode ${existing.id} joined by ${consumerId} ` +
+            `(${existing.consumers.size} viewer(s)) key=${sourceMapKey}`
+          );
         }
         existing.lastAccessedAt = Date.now();
         try {
@@ -2030,8 +2113,12 @@ export class HlsSessionManager {
       String(readsSidecarAlone ? audioSource.fileIndex : fileIndex)
     );
     // The second input, for a muxed session whose sound comes from another file.
+    // A picture whose sound is published separately reads ONE file: it maps no
+    // audio (`-an`), so a second input would open a read on a file this output
+    // does not carry a frame of, and hold that file against the disk sweep for
+    // the whole session.
     let audioInputUrl = null;
-    if (!readsSidecarAlone && audioSource.isSidecar) {
+    if (carriesAudio && !readsSidecarAlone && audioSource.isSidecar) {
       audioInputUrl = new URL("/stream", `${this.localBaseUrl}/`);
       audioInputUrl.searchParams.set("sourceKey", sourceKey);
       audioInputUrl.searchParams.set("session", sessionId);
@@ -2397,12 +2484,36 @@ export class HlsSessionManager {
       createEntryMs,
       firstSegmentLogged: false,
       consumers: new Set(consumerId ? [consumerId] : []),
+      // What each viewer is listening to: which soundtrack, and whether their
+      // browser can decode it as it stands. Both are properties of a VIEWER and
+      // neither is a property of a picture that carries no sound — which is why
+      // they live in a map instead of in the two fields below, now that two
+      // viewers who chose different languages share one picture. Seeded with
+      // the viewer who created the session, so a browser that names itself
+      // never depends on having asked for a segment first.
+      audioChoiceByConsumer: new Map(
+        consumerId ? [[consumerId, { trackIndex: normalizedAudioTrack, transcode: transcodeAudio === true }]] : []
+      ),
+      // Which quality step each viewer has on screen. A step is a session of
+      // its own, so with one answer per session a step taken by one viewer
+      // moved everybody: their stream stopped, and their next seek was
+      // forwarded to a rung they never chose. That is what used to keep the
+      // consumer id in the session key, and it is what takes it out.
+      activeVariantByConsumer: new Map(),
+      // And which step each of them is having prepared, for the same reason:
+      // what one viewer abandons may be what another is watching.
+      warmingVariantByConsumer: new Map(),
+      warmingAudioByConsumer: new Map(),
       // Transcode parameters retained so the encode run can be restarted at an
       // arbitrary segment when the player seeks (server-side seeking).
       sourceKey,
       fileIndex,
       transcodeVideo,
       transcodeAudio,
+      // The soundtrack this session was CREATED for. Still what an output
+      // carrying sound maps, and, for one that does not, the answer given to a
+      // viewer who cannot name themselves — a transport that carries no
+      // consumer id, which is one viewer by construction.
       audioTrackIndex: normalizedAudioTrack,
       // Where that soundtrack actually is. The number above is flat across the
       // picture's own tracks and the files beside it, and these two are what it
@@ -2660,23 +2771,20 @@ export class HlsSessionManager {
     }
     this.sessionsById.set(sessionId, session);
     this.sessionIdBySource.set(sourceMapKey, sessionId);
-    // Settled ONCE, here, and never derived again. Whether the audio travels
-    // separately decides the ffmpeg arguments, what the master says and whether
-    // the rendition route answers at all, and those three must agree for the
-    // whole life of the session — a session whose picture was encoded without
-    // audio cannot start muxing it in at the next restart without either
-    // playing it twice or refusing the append.
+    // Decided before the key was built and only recorded here. Whether the audio
+    // travels separately decides the ffmpeg arguments, what the master says,
+    // whether the rendition route answers at all AND what the session is keyed
+    // on, and those four must agree for the whole life of the session — a
+    // session whose picture was encoded without audio cannot start muxing it in
+    // at the next restart without either playing it twice or refusing the
+    // append, and one keyed as carrying no sound must never mux somebody else's
+    // language into a picture two viewers share.
     //
-    // It cannot be answered before this point (it asks what heights this
-    // session will be offered at, which needs the record) and it must not be
-    // asked after it, because the answer moves: the offered list is recomputed
-    // as the host learns what this source costs, and crossing "two rungs" would
-    // flip the arrangement under a stream that is playing.
-    session.audioSeparate = inheritedAudioSeparate === null
-      ? audioRenditions === true &&
-        this.#splicableHeights(session).length >= 2 &&
-        this.#audioRenditionsOf(session).length > 0
-      : inheritedAudioSeparate === true;
+    // It must not be asked a second time, because the answer moves: the offered
+    // list is recomputed as the host learns what this source costs, and
+    // crossing "two rungs" would flip the arrangement under a stream that is
+    // playing.
+    session.audioSeparate = audioSeparate;
 
     logger.info(
       // Proxy version on the session-start line: a field report always includes
@@ -2708,7 +2816,14 @@ export class HlsSessionManager {
         // fallback when the filters are missing or on a hardware encoder).
         `${transcodeVideo && mediaInfo.isHdr ? `hdr=1 tonemap=${applyTonemap ? "on" : "off"} ` : ""}` +
         `${sourceStartTime ? `start=${sourceStartTime.toFixed(3)} ` : ""}` +
-        `duration=${hasDuration ? formatSeconds(durationSeconds) : "unknown"} segments=${segmentCount}`
+        `duration=${hasDuration ? formatSeconds(durationSeconds) : "unknown"} segments=${segmentCount} ` +
+        // What this session was keyed on, which is what decides whether the next
+        // viewer joins it or starts a second encoder beside it. Printed because
+        // a fork was undiagnosable without it: on 2026-09-03 two viewers of one
+        // copied picture got two sessions with identical descriptions and
+        // byte-identical output, both create requests were 265 bytes, and
+        // nothing anywhere said what the two had been told apart by.
+        `key=${sourceMapKey}`
     );
 
     // Begin where the viewer asked, not at the top of the file. The position
@@ -2972,6 +3087,51 @@ export class HlsSessionManager {
     if (this.keyframeIndexCache.has(cacheKey)) {
       return this.keyframeIndexCache.get(cacheKey);
     }
+    // One read per file, and one WAIT per file. Two sessions created in the
+    // same moment used to miss the cache together and read the table twice —
+    // which is what two viewers opening one film do, measured 13 ms apart on
+    // 2026-09-03. Whoever asks second joins the read already running.
+    const running = this.keyframeIndexPending.get(cacheKey);
+    if (running) {
+      return running;
+    }
+    const work = this.#readContainerKeyframesOnce({ sourceKey, fileIndex, inputUrl, logName })
+      .then((result) => {
+        this.keyframeIndexCache.set(cacheKey, result);
+        return result;
+      })
+      .finally(() => {
+        this.keyframeIndexPending.delete(cacheKey);
+      });
+    this.keyframeIndexPending.set(cacheKey, work);
+    return work;
+  }
+
+  /**
+   * The read itself, made exactly once per file by the caller above.
+   *
+   * Asked of the container layer, which holds ONE container per file and
+   * already answers the track table and the media info from it — so the table
+   * is read by the same reader as everything else the file states about itself,
+   * over the torrent rather than over this proxy's own HTTP. The HTTP read
+   * below is what happens when nothing supplied that path (a manager built
+   * without it, which is every unit test).
+   *
+   * @returns {Promise<{ times: number[] | null, format: string, tolerance?: number }>}
+   */
+  async #readContainerKeyframesOnce({ sourceKey, fileIndex, inputUrl, logName }) {
+    if (typeof this.getContainerKeyframes === "function") {
+      const index = await this.getContainerKeyframes({ sourceKey, fileIndex });
+      const times = Array.isArray(index?.times) && index.times.length > 0 ? index.times : null;
+      return {
+        times,
+        // Which container answered, whether or not it produced a table: the
+        // refusal that follows names it, and "unknown" would make that line say
+        // nothing about the file it is refusing.
+        format: typeof index?.format === "string" && index.format ? index.format : "unrecognised",
+        tolerance: Number.isFinite(index?.tolerance) ? index.tolerance : 0
+      };
+    }
 
     const url = inputUrl.toString();
     let fileSize = 0;
@@ -2997,9 +3157,7 @@ export class HlsSessionManager {
       }
     };
 
-    const result = await ContainerFactory.readKeyframeIndex({ readRange, fileSize, label: logName });
-    this.keyframeIndexCache.set(cacheKey, result);
-    return result;
+    return ContainerFactory.readKeyframeIndex({ readRange, fileSize, label: logName });
   }
 
   #buildVodPlaylist(boundaries, segmentFormat) {
@@ -3245,7 +3403,9 @@ export class HlsSessionManager {
     }
     // The link carries the stream on screen, so the report belongs to the
     // variant producing it — that is the encoder whose bitrate it can bound.
-    const session = this.#activeVariant(named);
+    // Whose screen, is the reporter's own: with two viewers on two rungs, the
+    // report of one of them says nothing about the other's encoder.
+    const session = this.#activeVariant(named, typeof consumerId === "string" ? consumerId : "");
     const now = Date.now();
     session.netReports.set(typeof consumerId === "string" && consumerId.length > 0 ? consumerId : "", {
       linkMbps,
@@ -3293,7 +3453,13 @@ export class HlsSessionManager {
   #noteConsumerHead(session, consumerId, segment, seconds) {
     const now = Date.now();
     const heads = headsOf(session);
-    heads.set(consumerId, { segment, seconds, at: now });
+    // What this viewer STATED, kept across their requests. A request is
+    // evidence about where their player is reading; a seek is the viewer saying
+    // where they are, and the two answer different questions — see
+    // `viewerPositionSource`. Only a seek writes it, so a request does not erase
+    // it.
+    const seeked = heads.get(consumerId)?.seeked ?? null;
+    heads.set(consumerId, { segment, seconds, at: now, seeked });
     const staleAfterMs = (this.lookaheadSeconds + this.segmentDurationSec) * 1000;
     let furthest = { segment, seconds };
     for (const [key, head] of heads) {
@@ -6206,12 +6372,21 @@ export class HlsSessionManager {
       headsOf(named).set(consumerId, {
         segment: this.#segmentIndexForTime(named, positionSeconds),
         seconds: positionSeconds,
-        at: Date.now()
+        at: Date.now(),
+        // Stated, not inferred. It is what makes this viewer's position a
+        // "seeked" one for as long as they stay there.
+        seeked: positionSeconds
       });
     }
     // The browser holds one session id for the whole file and knows nothing of
     // variants, so a seek it reports means the stream on screen.
-    named.viewerPositionSeconds = positionSeconds;
+    //
+    // The session's own figure, which is what an encode run is placed by. It is
+    // NOT this viewer's position — that is their head above — and the two used
+    // to be one field called `viewerPositionSeconds`: with two viewers the name
+    // was a falsehood, since a session has one of these and as many positions
+    // as it has viewers.
+    named.furthestViewerSeconds = positionSeconds;
     // What the viewer SAID, kept apart from what requests imply. A request is
     // evidence about where the player is reading; a reported seek is the viewer
     // stating where they are, and after one, requests already in flight
@@ -6232,18 +6407,19 @@ export class HlsSessionManager {
     // how a single viewer came to have three ffmpeg processes and three readers
     // on one file (2026-08-15), enough to pin every resident piece and kill the
     // session outright.
-    const listening = named.activeAudioTrackIndex ?? named.audioTrackIndex;
-    for (const [trackIndex, renditionId] of named.audioRenditionSessions ?? []) {
-      if (trackIndex !== listening) {
-        continue;
-      }
-      const rendition = this.sessionsById.get(renditionId);
-      if (rendition && rendition.state !== "disposed") {
-        rendition.lastAccessedAt = Date.now();
-        this.#seekSession(rendition, positionSeconds);
-      }
+    // The seeking viewer's OWN soundtrack, not every soundtrack the session
+    // has: with two viewers, moving the other one's audio to a position they
+    // are not at would take their sound away and produce for nobody.
+    const listening = this.#audioChoiceOf(named, consumerId);
+    const renditionId = named.audioRenditionSessions?.get(
+      audioRenditionKey(listening.trackIndex, listening.transcode)
+    );
+    const rendition = renditionId ? this.sessionsById.get(renditionId) : null;
+    if (rendition && rendition.state !== "disposed") {
+      rendition.lastAccessedAt = Date.now();
+      this.#seekSession(rendition, positionSeconds);
     }
-    return this.#seekSession(this.#activeVariant(named), positionSeconds);
+    return this.#seekSession(this.#activeVariant(named, consumerId), positionSeconds);
   }
 
   /**
@@ -6264,7 +6440,7 @@ export class HlsSessionManager {
     if (!session || session.state === "disposed") {
       return false;
     }
-    session.viewerPositionSeconds = positionSeconds;
+    session.furthestViewerSeconds = positionSeconds;
     session.viewerReportedSeconds = positionSeconds;
     session.lastAccessedAt = Date.now();
     // Every segment request being held right now was made for the position the
@@ -7217,7 +7393,16 @@ export class HlsSessionManager {
     // went on passing every route guard, after the viewer had left it.
     // Everything else is fixed for the session's life.
     const observed = this.#observedDecodeCost.get(`${owner.sourceKey}:${owner.fileIndex}`) ?? null;
-    const playing = this.variantHeightOf(this.#activeVariant(owner));
+    // Every rung a live viewer has on screen. One answer was enough while a
+    // picture had one viewer; two of them can be on two rungs, and withdrawing
+    // either is withdrawing a stream that is playing.
+    const playingHeights = new Set(
+      [...this.#variantsOnScreen(owner)]
+        .map((sessionId) => this.sessionsById.get(sessionId))
+        .filter((member) => member)
+        .map((member) => this.variantHeightOf(member))
+    );
+    const playing = [...playingHeights].sort((left, right) => left - right).join(",");
     // Everything the answer is derived from belongs in what identifies it. The
     // copy's price and the torrent's are inputs now, and left out of this key
     // the menu would keep the answer computed before either was measured — on
@@ -7295,7 +7480,7 @@ export class HlsSessionManager {
     const answer = this.#sustainableHeights({
       heights: ordered,
       ownHeight: own,
-      playingHeight: playing,
+      playingHeights,
       // What each rung was actually seen doing in this session, which is the
       // only thing a live reading may speak for.
       measuredHeights: this.#measuredRungSpeeds(owner),
@@ -8032,7 +8217,10 @@ export class HlsSessionManager {
   #sustainableHeights({
     heights,
     ownHeight,
-    playingHeight = 0,
+    // Every height a viewer has on screen, not one: two viewers of one picture
+    // can be on two rungs, and a rung is never withdrawn while somebody is
+    // watching it — their next segment would 404 on a stream that is playing.
+    playingHeights = new Set(),
     sourceWidth,
     sourceHeight,
     fps,
@@ -8088,7 +8276,7 @@ export class HlsSessionManager {
       // The rung ON SCREEN is kept only when it has not been measured failing
       // above. Keeping a rung measured at 0.007x would stall the viewer with
       // no path to a faster rung, which is what the field showed.
-      if (height === playingHeight) {
+      if (playingHeights.has(height)) {
         kept.push(height);
         continue;
       }
@@ -8238,20 +8426,62 @@ export class HlsSessionManager {
    * holds one session id for the whole file, which is what keeps the switch out
    * of the state machine on that side.
    *
+   * Kept per viewer, because one picture is shared by everyone watching it and
+   * a quality step is a session of its own: with one answer for the session, a
+   * step taken by one viewer would move the other one's stream, and that
+   * viewer's next seek would be forwarded to a rung they never chose. The
+   * session's own field remains the answer for a viewer who cannot name
+   * themselves, and the last one anybody moved to.
+   *
    * @param {HlsSession} base
+   * @param {string} [consumerId]
    * @returns {HlsSession}
    */
-  #activeVariant(base) {
-    const activeId = base.activeVariantId;
+  #activeVariant(base, consumerId = "") {
+    const named = consumerId && base.activeVariantByConsumer instanceof Map
+      ? base.activeVariantByConsumer.get(consumerId)
+      : null;
+    const activeId = named ?? base.activeVariantId;
     if (!activeId || activeId === base.id) {
       return base;
     }
     const active = this.sessionsById.get(activeId);
     if (!active || active.state === "disposed") {
-      base.activeVariantId = base.id;
+      if (named) {
+        base.activeVariantByConsumer.delete(consumerId);
+      }
+      if (base.activeVariantId === activeId) {
+        base.activeVariantId = base.id;
+      }
       return base;
     }
     return active;
+  }
+
+  /**
+   * Every session of this family that a live viewer has on screen.
+   *
+   * The question "may this rung's encoder be stopped" has no single answer once
+   * two viewers watch one picture at two qualities: the rung one of them left is
+   * the rung the other is watching. Nothing may be stopped for being left unless
+   * nobody is left on it.
+   *
+   * @param {HlsSession} base
+   * @returns {Set<string>} Session ids.
+   */
+  #variantsOnScreen(base) {
+    const live = this.#liveConsumers(base);
+    const onScreen = new Set();
+    for (const [consumerId, sessionId] of base.activeVariantByConsumer ?? []) {
+      if (consumerId && live.size > 0 && !live.has(consumerId)) {
+        continue;
+      }
+      onScreen.add(sessionId);
+    }
+    if (onScreen.size === 0) {
+      onScreen.add(this.#activeVariant(base).id);
+    }
+    return onScreen;
   }
 
   /**
@@ -8278,11 +8508,11 @@ export class HlsSessionManager {
    * @param {number} wantedIndex - Segment index asked for, or -1.
    * @returns {number}
    */
-  #variantStartSeconds(base, wantedIndex) {
+  #variantStartSeconds(base, wantedIndex, consumerId = "") {
     if (Number.isInteger(wantedIndex) && wantedIndex >= 0) {
       return this.#segmentStartTime(base, wantedIndex);
     }
-    return this.#viewerPositionOf(this.#activeVariant(base));
+    return this.#viewerPositionOf(this.#activeVariant(base, consumerId));
   }
 
   /**
@@ -8348,17 +8578,45 @@ export class HlsSessionManager {
   }
 
   #audioStartSecondsFor(base) {
-    const watching = this.#activeVariant(base);
-    const readHead = this.#viewerPositionOf(watching);
     const now = Date.now();
-    const { earliestPosition: earliestStated, deepestBuffer } = this.#reportedPictureOf(watching, now);
+    // Read across every rung a viewer has on screen, not just one. A link
+    // report is kept on the session the reporter is watching, so with two
+    // viewers on two rungs each rung holds half the answer — and this needs the
+    // EARLIEST picture of them all, because a soundtrack started at the leader's
+    // position has nothing to give the viewer behind them.
+    const watched = [...this.#variantsOnScreen(base)]
+      .map((sessionId) => this.sessionsById.get(sessionId))
+      .filter((member) => member && member.state !== "disposed");
+    const watching = watched[0] ?? this.#activeVariant(base);
+    let readHead = 0;
+    let earliestStated = null;
+    let deepestBuffer = null;
+    for (const member of watched.length > 0 ? watched : [watching]) {
+      readHead = Math.max(readHead, this.#viewerPositionOf(member));
+      const reported = this.#reportedPictureOf(member, now);
+      if (reported.earliestPosition !== null) {
+        earliestStated = earliestStated === null
+          ? reported.earliestPosition
+          : Math.min(earliestStated, reported.earliestPosition);
+      }
+      if (reported.deepestBuffer !== null) {
+        deepestBuffer = deepestBuffer === null
+          ? reported.deepestBuffer
+          : Math.max(deepestBuffer, reported.deepestBuffer);
+      }
+    }
     if (earliestStated !== null) {
       // Never ahead of the read head: a position claiming to be past what has
       // been asked for is a report that arrived out of order, and acting on it
       // would start the run where no request can ever reach it.
       return Math.max(0, Math.min(earliestStated, readHead) - this.segmentDurationSec);
     }
-    if (this.#viewerPositionSourceOf(watching) === "opened") {
+    // "Opened" only if it is true of EVERY rung anybody is watching: one of
+    // them having served a segment means the film is running, whatever the
+    // others have done.
+    const everyoneJustOpened = (watched.length > 0 ? watched : [watching])
+      .every((member) => this.#viewerPositionSourceOf(member) === "opened");
+    if (everyoneJustOpened) {
       // The session has not started. Nobody has seeked, nobody has asked for a
       // segment, and nobody has reported anything — so the read head is not a
       // request edge at all, it is where the viewer opened, and a browser that
@@ -8375,29 +8633,54 @@ export class HlsSessionManager {
   }
 
   /**
-   * Which reading gave this session's viewer position — see
-   * {@link viewerPositionSource}.
+   * Which reading gave a viewer's position — see {@link viewerPositionSource}.
    *
    * @param {HlsSession} session
+   * @param {string} [consumerId] - Whose position. Without one the answer is
+   *   the session's, which is the FURTHEST viewer of it.
    * @returns {"seeked" | "requested" | "opened" | "none"}
    */
-  #viewerPositionSourceOf(session) {
+  #viewerPositionSourceOf(session, consumerId = "") {
+    const head = consumerId ? session.consumerHeads?.get(consumerId) : null;
+    if (head) {
+      return viewerPositionSource({
+        seeked: head.seeked,
+        lastRequestedStart: head.seconds,
+        openedAt: session.progress?.startPositionSeconds
+      });
+    }
     const lastRequestedStart = Number.isInteger(session.lastRequestedSegment) && session.lastRequestedSegment > 0
       ? this.#segmentStartTime(session, session.lastRequestedSegment)
       : null;
     return viewerPositionSource({
-      seeked: session.viewerPositionSeconds,
+      seeked: session.furthestViewerSeconds,
       lastRequestedStart,
       openedAt: session.progress?.startPositionSeconds
     });
   }
 
-  #viewerPositionOf(session) {
+  /**
+   * Where a viewer is on this session's timeline, in seconds.
+   *
+   * With a viewer named, it is THEIR head: their own seek, or the segment they
+   * last asked for. Without one it is the session's own reading — the furthest
+   * viewer of it — which is what an encode run is placed by, because what lies
+   * behind the furthest has already been made.
+   *
+   * @param {HlsSession} session
+   * @param {string} [consumerId]
+   * @returns {number}
+   */
+  #viewerPositionOf(session, consumerId = "") {
+    const head = consumerId ? session.consumerHeads?.get(consumerId) : null;
+    if (head && Number.isFinite(head.seconds)) {
+      return head.seconds;
+    }
     const lastRequestedStart = Number.isInteger(session.lastRequestedSegment) && session.lastRequestedSegment > 0
       ? this.#segmentStartTime(session, session.lastRequestedSegment)
       : null;
     return resolveViewerPosition({
-      seeked: session.viewerPositionSeconds,
+      seeked: session.furthestViewerSeconds,
       lastRequestedStart,
       openedAt: session.progress?.startPositionSeconds
     });
@@ -8482,7 +8765,7 @@ export class HlsSessionManager {
    * @returns {Promise<HlsSession | null>} Null when the base session is unknown,
    *   or the height is not offered for it.
    */
-  async resolveVariantSession(baseSessionId, height, wantedIndex = -1) {
+  async resolveVariantSession(baseSessionId, height, wantedIndex = -1, consumerId = "") {
     if (!isSafeSessionId(baseSessionId)) {
       return null;
     }
@@ -8549,7 +8832,7 @@ export class HlsSessionManager {
       // rounding is what that bucket does, and a position rounded UP starts the
       // run past the viewer, so the run just spawned is killed and restarted
       // before it has produced anything.
-      startPositionSeconds: Math.floor(this.#variantStartSeconds(base, wantedIndex) / 10) * 10,
+      startPositionSeconds: Math.floor(this.#variantStartSeconds(base, wantedIndex, consumerId) / 10) * 10,
       audioTrackIndex: base.audioTrackIndex,
       // A variant is a resolution the viewer chose, so it is encoded at exactly
       // that size and the realtime budget does not move it — otherwise two
@@ -8720,10 +9003,12 @@ export class HlsSessionManager {
    * @param {string} baseSessionId
    * @param {number} height
    * @param {string} fileName
+   * @param {string} [consumerId] - Which viewer is asking. One picture is shared
+   *   by everyone watching it, and the quality each of them chose is their own.
    * @returns {Promise<{ sessionId: string | null, error?: string }>} The session
    *   to serve the file from; a null id means there is no such variant.
    */
-  async resolveVariantFile(baseSessionId, height, fileName) {
+  async resolveVariantFile(baseSessionId, height, fileName, consumerId = "") {
     if (!isSafeSessionId(baseSessionId)) {
       return { sessionId: null };
     }
@@ -8774,7 +9059,12 @@ export class HlsSessionManager {
     // Only a SEGMENT says the viewer is watching this rung — and it says more
     // than that: it names the exact segment the player wants from it.
     if (isSegment) {
-      this.#noteVariantActive(base, variant, variant.segmentFormat.segmentIndexFromName(fileName));
+      this.#noteVariantActive(
+        base,
+        variant,
+        variant.segmentFormat.segmentIndexFromName(fileName),
+        consumerId
+      );
     }
     return { sessionId: variant.id };
   }
@@ -8815,7 +9105,7 @@ export class HlsSessionManager {
    * @param {number} positionSeconds
    * @returns {Promise<{ sessionId: string, fileName: string } | null>}
    */
-  async prepareAudioTrack(baseSessionId, trackIndex, positionSeconds) {
+  async prepareAudioTrack(baseSessionId, trackIndex, positionSeconds, consumerId = "") {
     const base = this.sessionsById.get(baseSessionId);
     if (!base || base.state === "disposed" || !this.#servesAudioSeparately(base)) {
       return null;
@@ -8823,23 +9113,33 @@ export class HlsSessionManager {
     if (!this.#audioRenditionsOf(base).some((track) => track.trackIndex === trackIndex)) {
       return null;
     }
-    const rendition = await this.#resolveAudioRenditionSession(base, trackIndex);
+    const rendition = await this.#resolveAudioRenditionSession(base, trackIndex, consumerId);
     if (!rendition) {
       return null;
     }
     // A track prepared for a change the viewer did not make would otherwise
     // encode for nobody until its own idle timer noticed — the same trap
-    // warming a quality rung has, and the same answer.
-    const stillWarming = base.warmingAudioSessionId;
+    // warming a quality rung has, and the same answer. Kept per viewer, because
+    // one viewer's abandoned preparation must not stop a track another viewer
+    // is listening to.
+    if (!(base.warmingAudioByConsumer instanceof Map)) {
+      base.warmingAudioByConsumer = new Map();
+    }
+    const stillWarming = base.warmingAudioByConsumer.get(consumerId);
     if (stillWarming && stillWarming !== rendition.id) {
       const abandoned = this.sessionsById.get(stillWarming);
-      const listening = base.activeAudioTrackIndex ?? base.audioTrackIndex;
-      const active = base.audioRenditionSessions?.get(listening);
-      if (abandoned && abandoned.id !== active) {
+      const wanted = this.#liveAudioRenditionKeys(base);
+      const wantedIds = new Set();
+      for (const [renditionKey, sessionId] of base.audioRenditionSessions ?? []) {
+        if (wanted.has(renditionKey)) {
+          wantedIds.add(sessionId);
+        }
+      }
+      if (abandoned && !wantedIds.has(abandoned.id)) {
         this.#stopEncodeRun(abandoned, "prepared for a track change the viewer did not make");
       }
     }
-    base.warmingAudioSessionId = rendition.id;
+    base.warmingAudioByConsumer.set(consumerId, rendition.id);
     // Pointed at the position the switch will land on: an existing track is
     // parked wherever the viewer left it.
     this.#seekSession(rendition, positionSeconds);
@@ -8847,7 +9147,7 @@ export class HlsSessionManager {
     return { sessionId: rendition.id, fileName: rendition.segmentFormat.segmentFileName(index) };
   }
 
-  async prepareVariant(baseSessionId, height, positionSeconds) {
+  async prepareVariant(baseSessionId, height, positionSeconds, consumerId = "") {
     if (!isSafeSessionId(baseSessionId)) {
       return null;
     }
@@ -8859,7 +9159,7 @@ export class HlsSessionManager {
       return null;
     }
     const index = this.#segmentIndexForTime(base, positionSeconds);
-    const variant = await this.resolveVariantSession(baseSessionId, height, index);
+    const variant = await this.resolveVariantSession(baseSessionId, height, index, consumerId);
     if (!variant) {
       return null;
     }
@@ -8868,14 +9168,25 @@ export class HlsSessionManager {
     // trying two rungs in a row would leave the first encoding for nobody until
     // the look-ahead cap suspended it — three encoders at once on a host sized
     // for one, which is the opposite of what warming is for.
-    const stillWarming = base.warmingVariantId;
+    // Kept per viewer, and stopped only if nobody has it on screen: with two
+    // viewers, what one of them abandons may be what the other is watching.
+    if (!(base.warmingVariantByConsumer instanceof Map)) {
+      base.warmingVariantByConsumer = new Map();
+    }
+    const stillWarming = base.warmingVariantByConsumer.get(consumerId);
     if (stillWarming && stillWarming !== variant.id) {
       const abandoned = this.sessionsById.get(stillWarming);
-      if (abandoned && abandoned.id !== this.#activeVariant(base).id) {
+      if (abandoned && !this.#variantsOnScreen(base).has(abandoned.id)) {
         this.#stopEncodeRun(abandoned, "warmed for a switch the viewer did not make");
       }
     }
-    base.warmingVariantId = variant.id === base.id ? null : variant.id;
+    // The base is not a rung being prepared for anybody — it is what the family
+    // is named by — so warming its own height leaves nothing outstanding.
+    if (variant.id === base.id) {
+      base.warmingVariantByConsumer.delete(consumerId);
+    } else {
+      base.warmingVariantByConsumer.set(consumerId, variant.id);
+    }
     // An existing rung may be parked wherever it was left, so it is pointed at
     // the switch position exactly as an activation would — the difference is
     // only that the rung on screen keeps its own encoder meanwhile.
@@ -8886,7 +9197,7 @@ export class HlsSessionManager {
     // its encoder was stopped then. Measured 2026-08-12, warming 400p at
     // 6506.5s found the base still at `run from #0`, so the segment the switch
     // needed was never produced and the viewer got nothing at all.
-    if (variant.id !== this.#activeVariant(base).id) {
+    if (variant.id !== this.#activeVariant(base, consumerId).id) {
       this.#seekSession(variant, this.#segmentStartTime(base, index));
     }
     logger.info(
@@ -8906,10 +9217,11 @@ export class HlsSessionManager {
    * @param {HlsSession} base
    * @param {HlsSession} variant
    * @param {number} wantedIndex - The segment this rung was just asked for.
+   * @param {string} [consumerId] - Which viewer moved.
    * @returns {void}
    */
-  #noteVariantActive(base, variant, wantedIndex = -1) {
-    const previous = this.#activeVariant(base);
+  #noteVariantActive(base, variant, wantedIndex = -1, consumerId = "") {
+    const previous = this.#activeVariant(base, consumerId);
     if (previous.id === variant.id) {
       // The rung on screen asking for more of itself, which it does every few
       // seconds. Nothing is being decided here — and deciding anything was the
@@ -8924,28 +9236,41 @@ export class HlsSessionManager {
     // rung now being switched to, or the viewer went somewhere else and it must
     // stop like any other rung nobody is watching. Nothing else would ever stop
     // it — only the rung being LEFT is stopped below.
-    const warmed = base.warmingVariantId;
-    base.warmingVariantId = null;
+    const warmed = base.warmingVariantByConsumer instanceof Map
+      ? base.warmingVariantByConsumer.get(consumerId)
+      : null;
+    base.warmingVariantByConsumer?.delete(consumerId);
     if (warmed && warmed !== variant.id && warmed !== previous.id) {
       const abandoned = this.sessionsById.get(warmed);
-      if (abandoned) {
+      if (abandoned && !this.#variantsOnScreen(base).has(abandoned.id)) {
         this.#stopEncodeRun(abandoned, "warmed for a switch the viewer did not make");
       }
     }
-    const position = this.#variantStartSeconds(base, wantedIndex);
+    const position = this.#variantStartSeconds(base, wantedIndex, consumerId);
     base.activeVariantId = variant.id;
+    if (!(base.activeVariantByConsumer instanceof Map)) {
+      base.activeVariantByConsumer = new Map();
+    }
+    base.activeVariantByConsumer.set(consumerId, variant.id);
     logger.info(
       `transcode ${base.id} variant now ${this.variantHeightOf(variant)}p ` +
-      `(was ${this.variantHeightOf(previous)}p) at ${position.toFixed(1)}s`
+      `(was ${this.variantHeightOf(previous)}p) at ${position.toFixed(1)}s` +
+      (consumerId ? ` for ${consumerId}` : "")
     );
-    // Every request still held on the old rung is for a segment nobody will
-    // produce now — its encoder is about to be stopped — and the player has
-    // already stopped waiting for them. Answering "retry" at once frees them
-    // instead of holding each for the full minute.
-    previous.waitEpoch = (previous.waitEpoch ?? 0) + 1;
-    this.#stopEncodeRun(previous, `the viewer moved to ${this.variantHeightOf(variant)}p`);
+    // The rung being left is stopped only if it is nobody else's rung. Two
+    // viewers of one picture can be on two steps, and the one this viewer just
+    // left may be the one the other is watching — stopping it there would take
+    // away a stream that is playing, and answer 503 to every request held on it.
+    if (!this.#variantsOnScreen(base).has(previous.id)) {
+      // Every request still held on the old rung is for a segment nobody will
+      // produce now — its encoder is about to be stopped — and the player has
+      // already stopped waiting for them. Answering "retry" at once frees them
+      // instead of holding each for the full minute.
+      previous.waitEpoch = (previous.waitEpoch ?? 0) + 1;
+      this.#stopEncodeRun(previous, `no viewer is watching ${this.variantHeightOf(previous)}p`);
+    }
     if (position > 0) {
-      variant.viewerPositionSeconds = position;
+      variant.furthestViewerSeconds = position;
       // The rung being switched TO, named literally: a warm-up may have left
       // the family pointing elsewhere, and forwarding would move that one
       // instead. A rung just created already starts here and is told so rather
@@ -8984,7 +9309,7 @@ export class HlsSessionManager {
    * @returns {string | null} The playlist text, or null when there is nothing
    *   to choose between, or nothing to align to.
    */
-  buildMasterPlaylist(sessionId) {
+  buildMasterPlaylist(sessionId, consumerId = "") {
     if (!isSafeSessionId(sessionId)) {
       return null;
     }
@@ -9012,7 +9337,13 @@ export class HlsSessionManager {
     // Only for a session that asked for them. A browser that does not know
     // about renditions is served audio in its stream, as before, and gets no
     // `#EXT-X-MEDIA` lines to be confused by.
-    const renditions = this.#servesAudioSeparately(session) ? this.#audioRenditionsOf(session) : [];
+    const renditions = this.#servesAudioSeparately(session)
+      // Which track is marked DEFAULT is the ASKING viewer's business: one
+      // picture is shared by everyone watching it, and each of them may have
+      // chosen a different language. A default written from the session's own
+      // field would start the second viewer in the first viewer's language.
+      ? this.#audioRenditionsOf(session, this.#audioChoiceOf(session, consumerId).trackIndex)
+      : [];
     const audioGroup = renditions.length > 0 ? AUDIO_GROUP_ID : "";
     for (const rendition of renditions) {
       lines.push(
@@ -9068,9 +9399,11 @@ export class HlsSessionManager {
    * @param {string} baseSessionId
    * @param {number} trackIndex
    * @param {string} fileName
+   * @param {string} [consumerId] - Who is asking. One picture serves everyone
+   *   watching it, and which soundtrack they are listening to is theirs alone.
    * @returns {Promise<{ sessionId: string | null, error?: string }>}
    */
-  async resolveAudioRenditionFile(baseSessionId, trackIndex, fileName) {
+  async resolveAudioRenditionFile(baseSessionId, trackIndex, fileName, consumerId = "") {
     if (!isSafeSessionId(baseSessionId) || !Number.isInteger(trackIndex) || trackIndex < 0) {
       return { sessionId: null };
     }
@@ -9097,7 +9430,7 @@ export class HlsSessionManager {
     }
     let rendition;
     try {
-      rendition = await this.#resolveAudioRenditionSession(base, trackIndex);
+      rendition = await this.#resolveAudioRenditionSession(base, trackIndex, consumerId);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       logger.error(
@@ -9107,7 +9440,7 @@ export class HlsSessionManager {
       return { sessionId: null, error: message };
     }
     if (isSegment && rendition) {
-      this.#noteAudioTrackActive(base, rendition, trackIndex);
+      this.#noteAudioTrackActive(base, trackIndex, consumerId);
     }
     return { sessionId: rendition?.id ?? null };
   }
@@ -9129,17 +9462,32 @@ export class HlsSessionManager {
    * position, so switching back does not build it again — the same treatment a
    * quality rung gets when the viewer moves off it.
    *
+   * "Every other track" is every track NO LIVE VIEWER is listening to, which
+   * with one viewer is what it always was. It has to be asked that way now that
+   * two viewers share one picture: each of them fetches the sound they chose,
+   * and stopping "the others" per request would have them switch each other's
+   * soundtrack off in turn, once per segment, for the whole film.
+   *
    * @param {HlsSession} base
-   * @param {HlsSession} active
    * @param {number} trackIndex
+   * @param {string} consumerId - Who is listening. Empty on a transport that
+   *   cannot say, which is one viewer by construction.
    */
-  #noteAudioTrackActive(base, active, trackIndex) {
-    if (base.activeAudioTrackIndex === trackIndex) {
+  #noteAudioTrackActive(base, trackIndex, consumerId) {
+    const previous = this.#audioChoiceOf(base, consumerId);
+    if (previous.trackIndex === trackIndex) {
       return;
     }
+    if (!(base.audioChoiceByConsumer instanceof Map)) {
+      base.audioChoiceByConsumer = new Map();
+    }
+    base.audioChoiceByConsumer.set(consumerId, { ...previous, trackIndex });
+    // Kept for the viewer who cannot name themselves, and for the master's
+    // default rendition when nobody has said anything else.
     base.activeAudioTrackIndex = trackIndex;
-    for (const [otherIndex, sessionId] of base.audioRenditionSessions ?? []) {
-      if (otherIndex === trackIndex) {
+    const wanted = this.#liveAudioRenditionKeys(base);
+    for (const [renditionKey, sessionId] of base.audioRenditionSessions ?? []) {
+      if (wanted.has(renditionKey)) {
         continue;
       }
       const other = this.sessionsById.get(sessionId);
@@ -9149,19 +9497,109 @@ export class HlsSessionManager {
       // Requests held on it are for segments nobody will produce now, and the
       // player stopped waiting for them the moment it changed track.
       other.waitEpoch = (other.waitEpoch ?? 0) + 1;
-      this.#stopEncodeRun(other, `the viewer moved to audio track ${trackIndex}`);
+      this.#stopEncodeRun(other, `no viewer is listening to audio track ${other.audioTrackIndex ?? "?"}`);
     }
+  }
+
+  /**
+   * The viewers this family has heard from recently enough to still be watching.
+   *
+   * Asked of the whole family, not of one session: a viewer on a quality step
+   * asks that step for its segments, so the picture they started on has not
+   * heard from them since they switched. Their head expires by the same rule the
+   * encoder's own steering uses.
+   *
+   * It is what decides whether an encoder is still wanted, and it is needed
+   * because nothing releases a session when a channel closes (roadmap item 54)
+   * — without it a viewer whose tab is gone would hold a soundtrack or a rung
+   * for the session's whole life.
+   *
+   * @param {HlsSession} base
+   * @returns {Set<string>}
+   */
+  #liveConsumers(base) {
+    const staleAfterMs = (this.lookaheadSeconds + this.segmentDurationSec) * 1000;
+    const now = Date.now();
+    const live = new Set();
+    for (const member of this.#familyOf(base)) {
+      for (const [consumerId, head] of member.consumerHeads ?? []) {
+        if (now - head.at <= staleAfterMs) {
+          live.add(consumerId);
+        }
+      }
+    }
+    return live;
+  }
+
+  /**
+   * What one viewer wants of the sound: which soundtrack, and whether their
+   * browser needs it re-encoded.
+   *
+   * @param {HlsSession} base
+   * @param {string} consumerId
+   * @returns {{ trackIndex: number, transcode: boolean }}
+   */
+  #audioChoiceOf(base, consumerId) {
+    const stated = base.audioChoiceByConsumer instanceof Map
+      ? base.audioChoiceByConsumer.get(consumerId)
+      : null;
+    if (stated) {
+      return stated;
+    }
+    // A viewer this session has not heard from by name. The session's own
+    // parameters are the honest fallback: they are what the request that
+    // created it asked for.
+    return {
+      trackIndex: Number(base.activeAudioTrackIndex ?? base.audioTrackIndex) || 0,
+      transcode: base.transcodeAudio === true
+    };
+  }
+
+  /**
+   * The renditions live viewers are listening to, as the keys they are filed
+   * under.
+   *
+   * A viewer counts while their head is fresh on the picture — the same
+   * expiry the encoder's own steering uses. Without that test a viewer whose
+   * tab was closed without releasing the session (roadmap item 54) would hold
+   * an encoder for the session's whole life.
+   *
+   * @param {HlsSession} base
+   * @returns {Set<string>}
+   */
+  #liveAudioRenditionKeys(base) {
+    const wanted = new Set();
+    const live = this.#liveConsumers(base);
+    const choices = base.audioChoiceByConsumer instanceof Map ? base.audioChoiceByConsumer : new Map();
+    for (const [consumerId, choice] of choices) {
+      // The unnamed viewer has no head to expire and is always counted; a named
+      // one counts while some session of the family has heard from them.
+      if (consumerId && live.size > 0 && !live.has(consumerId)) {
+        continue;
+      }
+      wanted.add(audioRenditionKey(choice.trackIndex, choice.transcode));
+    }
+    return wanted;
   }
 
   /**
    * The session producing one audio track of this file, made on first request.
    *
+   * Filed under the track AND how it has to be produced, because those are two
+   * different encodes: a browser that can decode this track as it stands is
+   * served a copy, and one that cannot is served AAC. The base cannot answer
+   * for either of them now that it is shared — its own `transcodeAudio` is
+   * whatever the first viewer's browser needed.
+   *
    * @param {HlsSession} base
    * @param {number} trackIndex
+   * @param {string} consumerId - Who is asking.
    * @returns {Promise<HlsSession | null>}
    */
-  async #resolveAudioRenditionSession(base, trackIndex) {
-    const existingId = base.audioRenditionSessions?.get(trackIndex);
+  async #resolveAudioRenditionSession(base, trackIndex, consumerId = "") {
+    const transcodeAudio = this.#audioChoiceOf(base, consumerId).transcode;
+    const renditionKey = audioRenditionKey(trackIndex, transcodeAudio);
+    const existingId = base.audioRenditionSessions?.get(renditionKey);
     const existing = existingId ? this.sessionsById.get(existingId) : null;
     if (existing && existing.state !== "disposed") {
       existing.lastAccessedAt = Date.now();
@@ -9173,7 +9611,7 @@ export class HlsSessionManager {
       // No picture at all: the video flag says what to do with a video stream
       // this output does not carry.
       transcodeVideo: false,
-      transcodeAudio: base.transcodeAudio,
+      transcodeAudio,
       fileName: base.fileName,
       consumerId: variantConsumerId(base.id),
       audioTrackIndex: trackIndex,
@@ -9231,8 +9669,54 @@ export class HlsSessionManager {
     if (!(base.audioRenditionSessions instanceof Map)) {
       base.audioRenditionSessions = new Map();
     }
-    base.audioRenditionSessions.set(trackIndex, rendition.id);
+    base.audioRenditionSessions.set(renditionKey, rendition.id);
     return rendition;
+  }
+
+  /**
+   * Whether a session created with these parameters publishes its sound as its
+   * own stream rather than muxing it into the picture.
+   *
+   * Asked before the session exists, because the session's KEY depends on the
+   * answer: an output that carries no sound must not be told apart by which
+   * soundtrack was asked for, and an output that carries it must be.
+   *
+   * Three conditions, all of them facts about the request and the file rather
+   * than about the machine's load, so the answer cannot move afterwards:
+   *
+   * 1. the browser said it understands rendition groups. One that did not must
+   *    be sent its sound inside the picture, or it gets silence;
+   * 2. the file has soundtracks to publish;
+   * 3. there is more than one height to move between, because renditions are
+   *    published in a master playlist and a stream served as a single media
+   *    playlist has nowhere to carry an `#EXT-X-MEDIA` line.
+   *
+   * Condition 3 is the reason a source too small for a ladder mixes its sound
+   * in as it always did. It is asked of the same ladder the master's rung list
+   * comes from; the realtime budget may still encode below the height named
+   * here, and cannot change the count, because what it picks is a rung of that
+   * same ladder.
+   *
+   * @param {{ sourceKey: string, fileIndex: number, audioRenditions: boolean, ownHeight: number }} params
+   * @returns {boolean}
+   */
+  #audioTravelsSeparately({ sourceKey, fileIndex, audioRenditions, ownHeight }) {
+    if (audioRenditions !== true) {
+      return false;
+    }
+    const tracks = this.getCachedAudioTracks?.({ sourceKey, fileIndex }) ?? [];
+    if (!Array.isArray(tracks) || tracks.length === 0) {
+      return false;
+    }
+    // The source's own height, from the probe the playback plan already ran.
+    // Absent, this answers "mix it in" — which is what the later computation
+    // answered too, since a session with no source height has an empty ladder.
+    const sourceHeight = Math.round(Number(this.getCachedMediaInfo?.({ sourceKey, fileIndex })?.height) || 0);
+    const heights = new Set(variantHeightsFor(sourceHeight));
+    if (Number.isInteger(ownHeight) && ownHeight > 0) {
+      heights.add(ownHeight);
+    }
+    return heights.size >= 2;
   }
 
   /**
@@ -9363,9 +9847,12 @@ export class HlsSessionManager {
    * something else would change the language on its own.
    *
    * @param {HlsSession} session
+   * @param {number} [chosenTrack] - The track to mark as the default one.
+   *   Defaults to the session's own, which is what a caller that is only
+   *   counting the renditions wants.
    * @returns {Array<{ trackIndex: number, name: string, language: string, isDefault: boolean }>}
    */
-  #audioRenditionsOf(session) {
+  #audioRenditionsOf(session, chosenTrack) {
     const tracks = this.getCachedAudioTracks?.({
       sourceKey: session.sourceKey,
       // The PICTURE's file, which is what `fileIndex` is on every session of a
@@ -9377,7 +9864,7 @@ export class HlsSessionManager {
     if (!Array.isArray(tracks) || tracks.length === 0) {
       return [];
     }
-    const chosen = Number(session.audioTrackIndex) || 0;
+    const chosen = Number.isInteger(chosenTrack) ? chosenTrack : (Number(session.audioTrackIndex) || 0);
     // One line per entry of the inventory, in its order and without omissions —
     // including a track the container marks unusable. The player addresses a
     // rendition by its POSITION in this list, and the browser addresses it by
@@ -9427,12 +9914,22 @@ export class HlsSessionManager {
    * cannot be read afterwards: it does not say what was refused or against what
    * position, which is exactly what the 2026-08-18 investigation lacked.
    *
+   * Named per viewer, because that is what the refusal is about: a request is
+   * refused for being behind where THAT viewer is, and a line naming the
+   * furthest viewer of a shared session would explain a refusal by somebody
+   * else's position.
+   *
    * @param {string} sessionId
+   * @param {string} [consumerId]
    * @returns {number} Zero when the session is gone or nothing has been reported.
    */
-  viewerPositionOf(sessionId) {
+  viewerPositionOf(sessionId, consumerId = "") {
     const session = isSafeSessionId(sessionId) ? this.sessionsById.get(sessionId) : null;
-    const position = Number(session?.viewerPositionSeconds);
+    if (!session) {
+      return 0;
+    }
+    const own = this.#consumerPositionOf(session, consumerId);
+    const position = own === null ? Number(session.furthestViewerSeconds) : own;
     return Number.isFinite(position) ? position : 0;
   }
 
@@ -9482,7 +9979,7 @@ export class HlsSessionManager {
       return true; // a playlist or an init segment belongs to no position
     }
     const own = this.#consumerPositionOf(session, consumerId);
-    const position = own === null ? Number(session.viewerPositionSeconds) : own;
+    const position = own === null ? Number(session.furthestViewerSeconds) : own;
     if (!Number.isFinite(position)) {
       return true; // nothing said where the viewer is; refusing would be a guess
     }
@@ -9516,6 +10013,7 @@ export class HlsSessionManager {
    * >}
    */
   async getFileStream(sessionId, fileName, options = {}) {
+    const consumerId = typeof options.consumerId === "string" ? options.consumerId : "";
     if (!isSafeSessionId(sessionId)) {
       return { kind: "not-found" };
     }
@@ -9543,7 +10041,7 @@ export class HlsSessionManager {
     // The index of variants. Served from here rather than a route of its own,
     // because to a player it is simply another playlist under the session.
     if (fileName === MASTER_PLAYLIST_FILE_NAME) {
-      const masterText = this.buildMasterPlaylist(sessionId);
+      const masterText = this.buildMasterPlaylist(sessionId, consumerId);
       if (!masterText) {
         return { kind: "not-found" };
       }
@@ -9652,7 +10150,7 @@ export class HlsSessionManager {
         // heads answer whether a particular held request is still wanted.
         const furthest = this.#noteConsumerHead(
           session,
-          typeof options.consumerId === "string" ? options.consumerId : "",
+          consumerId,
           requested,
           this.#segmentStartTime(session, requested)
         );
@@ -9671,7 +10169,7 @@ export class HlsSessionManager {
         const requestedStart = furthest.seconds;
         const reported = Number(session.viewerReportedSeconds);
         if (!Number.isFinite(reported) || requestedStart >= reported) {
-          session.viewerPositionSeconds = requestedStart;
+          session.furthestViewerSeconds = requestedStart;
         }
         // A viewer who has caught up must not wait out the monitor's interval —
         // but only if they HAVE caught up, which is why this re-evaluates the
@@ -10404,7 +10902,7 @@ export class HlsSessionManager {
     session.inputBytes = (session.inputBytes ?? 0) + bytes;
   }
 
-  async getSessionProgress(sessionId) {
+  async getSessionProgress(sessionId, consumerId = "") {
     if (!isSafeSessionId(sessionId)) {
       return null;
     }
@@ -10417,7 +10915,7 @@ export class HlsSessionManager {
     // change is another session. Touching the named one as well is what keeps
     // the family alive: only the ACTIVE variant gets segment requests, so
     // without this the base session would idle out from under its own variants.
-    const session = this.#activeVariant(named);
+    const session = this.#activeVariant(named, consumerId);
     session.lastAccessedAt = Date.now();
     const warmupTotalSeconds = this.startupWaitMs / 1000;
     const warmupElapsedSeconds = Math.max(0, (Date.now() - session.startedAt) / 1000);
@@ -10630,6 +11128,14 @@ export class HlsSessionManager {
         }
         if (base.activeVariantId === session.id) {
           base.activeVariantId = base.id;
+        }
+        // And every viewer who was watching it goes back to the picture the
+        // family is named by, or their next request would resolve a session
+        // that no longer exists.
+        for (const [consumerId, id] of base.activeVariantByConsumer ?? []) {
+          if (id === session.id) {
+            base.activeVariantByConsumer.delete(consumerId);
+          }
         }
       }
     }

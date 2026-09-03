@@ -681,7 +681,7 @@ export class MatroskaContainer extends Container {
     return fields.length > ASS_FIELDS_BEFORE_TEXT ? fields.slice(ASS_FIELDS_BEFORE_TEXT).join(",") : "";
   }
 
-  async readKeyframeIndex() {
+  async parseKeyframeIndex() {
     const times = await readMatroskaKeyframeTimes(this.readRange, this.fileSize);
     if (!times) return null;
     if (Array.isArray(times)) return { times, tolerance: 0 };

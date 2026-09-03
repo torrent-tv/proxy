@@ -176,7 +176,7 @@ test("a request cannot move the viewer's position backwards", async (t) => {
   await manager.getFileStream(SESSION_ID, fmp4Format.segmentFileName(BEHIND_INDEX), { requestSeq: 1 });
 
   assert.equal(
-    session.viewerPositionSeconds,
+    session.furthestViewerSeconds,
     2083.4,
     "a stale request must not rewrite what the viewer reported — that is how the repair came to believe it"
   );

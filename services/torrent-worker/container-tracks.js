@@ -300,16 +300,78 @@ export async function warmResumePosition(torrent, fileIndex, sourceKey, position
 }
 
 /**
- * What one file declares about itself: format, duration, and where its own
- * timeline begins.
+ * Where one file's keyframes are, from the container's own table.
  *
- * The same header the track table is read from, and the container instance is
- * cached per file, so asking for this after the tracks costs no read at all.
- * It exists because the alternative was a second reader: the session manager
- * used to spawn an ffmpeg over the proxy's own HTTP to learn where a sidecar
- * soundtrack's timeline begins, and that read cost 8121 ms in the field on
- * 2026-09-03 while this layer had read the same header in 8 ms in the same
- * second.
+ * A property of immutable bytes, like the duration and the track list, and read
+ * here for the same reason they are: the container is cached per file, so the
+ * table is read ONCE however many sessions ask for it, and two sessions created
+ * in the same moment join one read instead of making two. That is the two-viewer
+ * case exactly — measured 2026-09-03, two pictures of one file were created 13 ms
+ * apart, and each read the table for itself over the proxy's own HTTP.
+ *
+ * It decides which branch a copy takes: a picture can only be cut where the
+ * source already has a keyframe, so a file with no readable index is re-encoded
+ * instead. That decision belongs to the FILE, and it is the same for everybody
+ * watching it.
+ *
+ * @param {object} torrent
+ * @param {number} fileIndex
+ * @param {string} sourceKey
+ * @param {{ prefetchEdges?: () => Promise<unknown> }} [options]
+ * @returns {Promise<{ times: number[], tolerance: number } | null>}
+ */
+export async function containerKeyframesOf(torrent, fileIndex, sourceKey, options = {}) {
+  const file = torrent?.files?.[fileIndex];
+  if (!file || !Number.isFinite(file.length) || file.length <= 0) {
+    return null;
+  }
+  if (typeof options.prefetchEdges === "function") {
+    try {
+      await options.prefetchEdges();
+    } catch {
+      // A prefetch that failed is not a reason to skip the read: the read
+      // fetches what it needs itself, only more slowly.
+    }
+  }
+  const readRange = async (start, end) =>
+    readFetching(file, start, Math.min(end, file.length - 1));
+  const startedAt = Date.now();
+  const params = {
+    sourceKey,
+    fileIndex,
+    readRange,
+    fileSize: file.length,
+    label: String(file.name ?? "")
+  };
+  try {
+    const index = await containerOrchestrator.getKeyframeIndex(params);
+    // Which container answered, reported whether or not it produced anything:
+    // how often an index disagrees with its own file is a question about the
+    // CONTAINER, and a measurement that does not say which one cannot answer
+    // it. Free — the container is the cached one that has just read the table.
+    const format = (await containerOrchestrator.getContainer(params))?.formatName ?? "unrecognised";
+    const times = Array.isArray(index?.times) && index.times.length > 0 ? index.times : null;
+    logger.info(
+      `container-keyframes: "${String(file.name).slice(0, 40)}" ` +
+      (times
+        ? `${times.length} keyframes from the ${format} index in ${Date.now() - startedAt}ms`
+        : `has no readable index (${format}, ${Date.now() - startedAt}ms)`)
+    );
+    return {
+      times,
+      format,
+      tolerance: Number.isFinite(index?.tolerance) ? index.tolerance : 0
+    };
+  } catch (error) {
+    logger.warn(
+      `container-keyframes: "${String(file.name).slice(0, 40)}" could not be read: ${error?.message ?? error}`
+    );
+    return null;
+  }
+}
+
+/**
+ * What one file declares about itself as a whole.
  *
  * @param {object} torrent
  * @param {number} fileIndex

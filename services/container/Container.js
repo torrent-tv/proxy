@@ -408,10 +408,42 @@ export class Container {
   }
 
   /**
-   * Keyframe times for the video track, ascending seconds. Null when index absent (MPEG-TS, fragmented MP4, truncated).
+   * Keyframe times for the video track, ascending seconds. Null when index
+   * absent (MPEG-TS, fragmented MP4, truncated).
+   *
+   * Read ONCE per file, like the track table and the media info beside it: this
+   * is a property of immutable bytes, so a second reading could only agree —
+   * and the reading is not cheap, since the table lives at the end of the file
+   * and comes off a torrent. The wait belongs here too: two sessions created in
+   * the same moment join one read instead of making two, which is exactly what
+   * two viewers opening one film do.
+   *
+   * The subclass says how its format states it; this says how often it is
+   * asked.
+   *
    * @returns {Promise<{times:number[],tolerance:number}|null>}
    */
   async readKeyframeIndex() {
+    if (this.keyframeIndexRead) {
+      return this.keyframeIndexRead;
+    }
+    this.keyframeIndexRead = Promise.resolve(this.parseKeyframeIndex()).catch((error) => {
+      // A failed read is not remembered as an answer: the bytes it needed may
+      // simply not have arrived yet.
+      this.keyframeIndexRead = null;
+      throw error;
+    });
+    return this.keyframeIndexRead;
+  }
+
+  /**
+   * How THIS format states where its keyframes are. Overridden by every
+   * container that has such a table; the default is the honest answer for one
+   * that does not.
+   *
+   * @returns {Promise<{times:number[],tolerance:number}|null>}
+   */
+  async parseKeyframeIndex() {
     return null;
   }
 

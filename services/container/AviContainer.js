@@ -85,7 +85,7 @@ export class AviContainer extends Container {
     return info;
   }
 
-  async readKeyframeIndex() {
+  async parseKeyframeIndex() {
     const r = await readAviKeyframeTimes(this.readRange, this.fileSize);
     if (!r) return null;
     if (Array.isArray(r)) return { times: r, tolerance: 0 };

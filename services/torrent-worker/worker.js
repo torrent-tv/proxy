@@ -30,6 +30,7 @@ import { readFragments, supplyFiguresFor } from "./piece-reader.js";
 import { cuesHeldFor, declaredSubtitleTracksOf, subtitleTracksOf, warmSubtitleCues } from "./subtitle-cues.js";
 import {
   CONTAINER_HEAD_BYTES,
+  containerKeyframesOf,
   containerMediaInfoOf,
   containerTracksOf,
   warmResumePosition
@@ -434,6 +435,23 @@ async function runCommand(command, params, id) {
             pool.prefetchFileEdges(torrent, params.fileIndex, {
               headBytes: CONTAINER_HEAD_BYTES,
               tailBytes: 0,
+              timeoutMs: 60_000
+            })
+        })
+      };
+    }
+
+    case Command.CONTAINER_KEYFRAMES: {
+      const torrent = await requireTorrent(params.sourceKey);
+      return {
+        index: await containerKeyframesOf(torrent, params.fileIndex, params.sourceKey, {
+          // Both edges this time. A Matroska file's Cues sit at the END, behind
+          // a SeekHead in the head, so a read that has neither waits for the
+          // swarm twice over.
+          prefetchEdges: () =>
+            pool.prefetchFileEdges(torrent, params.fileIndex, {
+              headBytes: CONTAINER_HEAD_BYTES,
+              tailBytes: CONTAINER_HEAD_BYTES,
               timeoutMs: 60_000
             })
         })

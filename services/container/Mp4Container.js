@@ -22,6 +22,57 @@ import { AudioTrack } from "../tracks/AudioTrack.js";
 import { TextSubtitleTrack, TEXT_FORMATS_MP4 } from "../tracks/TextSubtitleTrack.js";
 import { ImageSubtitleTrack } from "../tracks/ImageSubtitleTrack.js";
 
+/**
+ * One box header, per ISO/IEC 14496-12 §4.2.
+ *
+ * @param {Buffer} buf
+ * @param {number} off
+ * @returns {{ type: string, size: number, dataOffset: number, end: number } | null}
+ */
+function readBox(buf, off) {
+  if (off + 8 > buf.length) return null;
+  let sz = buf.readUInt32BE(off);
+  const tp = buf.toString("latin1", off + 4, off + 8);
+  let hb = 8;
+  if (sz === 1) { if (off + 16 > buf.length) return null; sz = Number(buf.readBigUInt64BE(off + 8)); hb = 16; }
+  if (sz < hb) return null;
+  return { type: tp, size: sz, dataOffset: off + hb, end: off + sz };
+}
+
+/**
+ * Every direct child box of the given type.
+ *
+ * @param {Buffer} buf
+ * @param {number} start
+ * @param {number} end
+ * @param {string} type
+ * @returns {Array<{ type: string, size: number, dataOffset: number, end: number }>}
+ */
+function childrenOf(buf, start, end, type) {
+  const out = [];
+  let p = start;
+  while (p + 8 <= end) {
+    const b = readBox(buf, p);
+    if (!b) break;
+    if (b.type === type) out.push(b);
+    p = b.end;
+  }
+  return out;
+}
+
+/**
+ * The first direct child box of the given type, or null.
+ *
+ * @param {Buffer} buf
+ * @param {number} s
+ * @param {number} e
+ * @param {string} t
+ * @returns {{ type: string, size: number, dataOffset: number, end: number } | null}
+ */
+function childOf(buf, s, e, t) {
+  return childrenOf(buf, s, e, t)[0] ?? null;
+}
+
 export class Mp4Container extends Container {
   get formatName() {
     return "mp4";
@@ -79,12 +130,21 @@ export class Mp4Container extends Container {
     return tracks;
   }
 
-  async #readVideoAudioTracks() {
-    // Lightweight: scan moov for trak with hdlr vide/soun. We reuse readMp4SubtitlePlan's findMoov
-    // by reimplementing a minimal header walk here.
+  /**
+   * The `moov` box, read whole.
+   *
+   * Held on the instance because every question this class answers is inside
+   * it, and the box can be tens of megabytes off a torrent — reading it once
+   * per file is the difference between one fetch and one per question.
+   *
+   * @returns {Promise<{ moov: Buffer, header: number } | null>}
+   */
+  async #moovBuffer() {
+    if (this.moovHeld !== undefined) {
+      return this.moovHeld;
+    }
     const PROBE = 64;
     const MAX_MOOV = 32 * 1024 * 1024;
-    // find moov offset
     let at = 0;
     let moovBox = null;
     while (at < this.fileSize) {
@@ -102,37 +162,106 @@ export class Mp4Container extends Container {
       if (type === "moov") { moovBox = { offset: at, size, header }; break; }
       at += size;
     }
-    if (!moovBox || moovBox.size > MAX_MOOV) return [];
+    if (!moovBox || moovBox.size > MAX_MOOV) {
+      this.moovHeld = null;
+      return null;
+    }
     const moov = await this.readRange(moovBox.offset, Math.min(this.fileSize - 1, moovBox.offset + moovBox.size - 1));
-    if (!moov) return [];
+    this.moovHeld = moov ? { moov, header: moovBox.header } : null;
+    return this.moovHeld;
+  }
+
+  /**
+   * Duration from `mvhd` and the presentation offset from the first track's
+   * edit list, per ISO/IEC 14496-12 §8.2.2 and §8.6.6.
+   *
+   * An edit entry whose `media_time` is -1 is an EMPTY edit: it presents
+   * nothing for `segment_duration`, which shifts everything after it later by
+   * that much. That shift is what a player reports as the file's start, and it
+   * is the only way an MP4 states one — a file without such an edit begins at
+   * zero, which is a declaration, not an absence.
+   *
+   * @returns {Promise<import("./Container.js").ContainerMediaInfo>}
+   */
+  async readMediaInfo() {
+    if (this.mediaInfo) {
+      return this.mediaInfo;
+    }
+    /** @type {import("./Container.js").ContainerMediaInfo} */
+    const info = { format: this.formatName, durationSeconds: null, startTimeSeconds: null };
+    this.mediaInfo = info;
+    const held = await this.#moovBuffer();
+    if (!held) {
+      return info;
+    }
+    const { moov, header } = held;
+    const mvhd = childOf(moov, header, moov.length, "mvhd");
+    let movieTimescale = 0;
+    if (mvhd) {
+      const version = moov[mvhd.dataOffset];
+      // version 0: creation(4) modification(4) timescale(4) duration(4)
+      // version 1: creation(8) modification(8) timescale(4) duration(8)
+      const at = version === 1 ? mvhd.dataOffset + 20 : mvhd.dataOffset + 12;
+      if (at + 8 <= moov.length) {
+        movieTimescale = moov.readUInt32BE(at);
+        const duration = version === 1 ? Number(moov.readBigUInt64BE(at + 4)) : moov.readUInt32BE(at + 4);
+        if (movieTimescale > 0 && duration > 0) {
+          info.durationSeconds = duration / movieTimescale;
+        }
+      }
+    }
+    info.startTimeSeconds = movieTimescale > 0
+      ? Mp4Container.#emptyEditSeconds(moov, header, movieTimescale)
+      : null;
+    return info;
+  }
+
+  /**
+   * The presentation shift of the first empty edit, in seconds; 0 when no track
+   * declares one.
+   *
+   * @param {Buffer} moov
+   * @param {number} header
+   * @param {number} movieTimescale
+   * @returns {number}
+   */
+  static #emptyEditSeconds(moov, header, movieTimescale) {
+    let shift = 0;
+    for (const trak of childrenOf(moov, header, moov.length, "trak")) {
+      const edts = childOf(moov, trak.dataOffset, trak.end, "edts");
+      const elst = edts && childOf(moov, edts.dataOffset, edts.end, "elst");
+      if (!elst) {
+        continue;
+      }
+      const version = moov[elst.dataOffset];
+      const count = moov.readUInt32BE(elst.dataOffset + 4);
+      if (count < 1) {
+        continue;
+      }
+      const entry = elst.dataOffset + 8;
+      const segmentDuration = version === 1
+        ? Number(moov.readBigUInt64BE(entry))
+        : moov.readUInt32BE(entry);
+      const mediaTime = version === 1
+        ? Number(moov.readBigInt64BE(entry + 8))
+        : moov.readInt32BE(entry + 4);
+      if (mediaTime === -1 && segmentDuration > 0) {
+        shift = Math.max(shift, segmentDuration / movieTimescale);
+      }
+    }
+    return shift;
+  }
+
+  async #readVideoAudioTracks() {
+    const held = await this.#moovBuffer();
+    if (!held) return [];
+    const { moov, header: moovHeader } = held;
 
     const result = [];
     let videoIdx = -1;
     let audioIdx = -1;
-    // iterate trak boxes inside moov
-    const readBox = (buf, off) => {
-      if (off + 8 > buf.length) return null;
-      let sz = buf.readUInt32BE(off);
-      const tp = buf.toString("latin1", off + 4, off + 8);
-      let hb = 8;
-      if (sz === 1) { if (off + 16 > buf.length) return null; sz = Number(buf.readBigUInt64BE(off + 8)); hb = 16; }
-      if (sz < hb) return null;
-      return { type: tp, size: sz, dataOffset: off + hb, end: off + sz };
-    };
-    const childrenOf = (buf, start, end, type) => {
-      const out = [];
-      let p = start;
-      while (p + 8 <= end) {
-        const b = readBox(buf, p);
-        if (!b) break;
-        if (b.type === type) out.push(b);
-        p = b.end;
-      }
-      return out;
-    };
-    const childOf = (buf, s, e, t) => childrenOf(buf, s, e, t)[0] ?? null;
 
-    const moovContentStart = moovBox.header;
+    const moovContentStart = moovHeader;
     const moovEnd = moov.length;
     for (const trak of childrenOf(moov, moovContentStart, moovEnd, "trak")) {
       const mdia = childOf(moov, trak.dataOffset, trak.end, "mdia");

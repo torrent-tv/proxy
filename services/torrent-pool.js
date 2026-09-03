@@ -1801,6 +1801,52 @@ export class TorrentPool {
   }
 
   /**
+   * Fetch a bounded region in the MIDDLE of a file.
+   *
+   * The warm-up fetches a file's two edges because the codec probe reads them.
+   * A viewer resuming a film needs neither: they need the region under their own
+   * position, and until now nothing asked for it before the encoder did. Field
+   * 2026-09-03 — a retry after a crash reached the encoder 53 s after the button
+   * was pressed, and only THEN was the piece under the viewer's position first
+   * requested; it took another 46 s, and the browser gave up 0.4 s before it
+   * landed.
+   *
+   * Read as an ordinary bounded read, never as a selection: claiming a whole
+   * region alongside the readers' own windows is the mistake `#syncSelections`
+   * was written against.
+   *
+   * @param {import("webtorrent").Torrent} torrent
+   * @param {number} fileIndex
+   * @param {number} startByte
+   * @param {number} bytes
+   * @param {{ timeoutMs?: number }} [options]
+   * @returns {Promise<void>}
+   */
+  async prefetchFileRegion(torrent, fileIndex, startByte, bytes, { timeoutMs = 300_000 } = {}) {
+    const file = torrent?.files?.[fileIndex];
+    if (!file || typeof file.createReadStream !== "function") {
+      return;
+    }
+    const fileSize = file.length;
+    if (!Number.isFinite(fileSize) || fileSize <= 0 || !(bytes > 0)) {
+      return;
+    }
+    const start = Math.max(0, Math.min(Math.floor(startByte), fileSize - 1));
+    const end = Math.min(fileSize - 1, start + Math.floor(bytes) - 1);
+    if (end <= start) {
+      return;
+    }
+    const drained = new Promise((resolve) => {
+      const stream = file.createReadStream({ start, end });
+      stream.on("data", () => undefined);
+      stream.once("end", resolve);
+      stream.once("error", resolve);
+      stream.once("close", resolve);
+    });
+    await Promise.race([drained, new Promise((resolve) => setTimeout(resolve, timeoutMs))]);
+  }
+
+  /**
    * The body of {@link prefetchFileEdges}, without the de-duplication.
    *
    * @param {import("webtorrent").Torrent} torrent

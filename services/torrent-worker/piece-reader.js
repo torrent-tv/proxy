@@ -950,11 +950,18 @@ export async function* readFragments({
           const result = askFastestWiresFor(torrent, pieceIndex);
           if (result.asked === 0) {
             tailWhenNothingPlaced = describePieceTail(torrent, pieceIndex);
-            // Nothing could be placed the ordinary way, which means every block
-            // is spoken for. That is exactly when a second copy of the last
-            // blocks is worth asking for.
-            duplicated += duplicateTailFor(torrent, pieceIndex).duplicated;
           }
+          // Every attempt, not only the ones where nothing else could be placed.
+          // The ordinary steering asks for whatever blocks are still free; the
+          // read, meanwhile, ends when the LAST block arrives, and that block is
+          // reserved to one wire whether or not other blocks could be asked for.
+          // Field 2026-09-03: 46.3 s on one piece, ordinary requests placed on
+          // 54 of 87 attempts throughout, and a tail of 3 blocks of 512 held by
+          // wires at 51-99 KB/s to the end — while duplication, which ran only
+          // on the 33 attempts that placed nothing, managed 5 blocks in the
+          // whole wait. `duplicateTailFor` bounds itself by the tail's length,
+          // so a piece that is merely still arriving is left alone.
+          duplicated += duplicateTailFor(torrent, pieceIndex).duplicated;
           pushed = {
             asked: pushed.asked + result.asked,
             refusedWhileReserved:

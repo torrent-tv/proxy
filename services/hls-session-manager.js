@@ -974,7 +974,7 @@ function computeProgressMetrics(processedSeconds, totalSeconds, startPositionSec
  * @param {string | URL} inputUrl - URL of the stream to probe.
  * @returns {Promise<{ durationSeconds: number | null, width: number | null, height: number | null, fps: number | null, startTime: number, isHdr: boolean }>}
  */
-async function probeInputMediaInfo(ffmpegBin, inputUrl, { expectVideo = true } = {}) {
+async function probeInputMediaInfo(ffmpegBin, inputUrl) {
   return new Promise((resolve) => {
     const ffmpeg = spawn(ffmpegBin, ["-hide_banner", "-loglevel", "info", "-i", inputUrl, "-f", "null", "-"], {
       stdio: ["ignore", "ignore", "pipe"],
@@ -1014,14 +1014,15 @@ async function probeInputMediaInfo(ffmpegBin, inputUrl, { expectVideo = true } =
       // before any decoding. Bail as soon as both are present instead of letting
       // `-f null -` decode the whole stream until the 8 s timeout.
       //
-      // A file with NO picture never prints that stream line, so waiting for it
-      // means waiting out the whole timeout — every time, on the path where a
-      // viewer is changing soundtrack and the browser refuses a switch that is
-      // not ready in time. `Duration:` carries the start time this is asked for,
-      // and it is the last thing such a file has to say about itself.
+      // This probe asks about the PICTURE and nothing else now: a file with no
+      // video track is read by the container layer, which answers from 64 KB of
+      // header. It used to take an `expectVideo: false` for exactly that case,
+      // and the branch cost 8121 ms of every cold start (2026-09-03) because
+      // the exit still waited for a parsed DURATION, which a partly downloaded
+      // file prints as `N/A`.
       const duration = parseFfmpegDurationSeconds(stderr);
       const dims = parseFfmpegVideoDimensions(stderr);
-      if (duration != null && (dims.width != null || !expectVideo)) {
+      if (duration != null && dims.width != null) {
         clearTimeout(timeoutId);
         if (!ffmpeg.killed) {
           ffmpeg.kill("SIGTERM");
@@ -1757,6 +1758,7 @@ export class HlsSessionManager {
     tonemapSupported = false,
     getCachedMediaInfo = null,
     getCachedAudioTracks = null,
+    getContainerMediaInfo = null,
     fetchWholeFile = null,
     segmentFormatId = undefined,
     stateDir = "",
@@ -1777,6 +1779,13 @@ export class HlsSessionManager {
     // The file's audio tracks, for the master playlist's rendition group. Same
     // inventory the browser's audio menu is built from.
     this.getCachedAudioTracks = typeof getCachedAudioTracks === "function" ? getCachedAudioTracks : null;
+    // What a file declares about itself, read by the container layer from the
+    // same header its track table comes from: format, duration, and where its
+    // own timeline begins. The last of those is why this exists — a soundtrack
+    // shipped as its own file has a timeline of its own, and asking ffmpeg for
+    // it meant reading a header this proxy had already read.
+    this.getContainerMediaInfo =
+      typeof getContainerMediaInfo === "function" ? getContainerMediaInfo : null;
     // Fetch one whole file of a source, as a bounded read rather than a
     // selection. Used to pull a soundtrack that ships beside the picture onto
     // the disk while the swarm has capacity to spare — see
@@ -2004,6 +2013,11 @@ export class HlsSessionManager {
     const sessionDir = createSessionDirPath(sessionId);
     const inputUrl = new URL("/stream", `${this.localBaseUrl}/`);
     inputUrl.searchParams.set("sourceKey", sourceKey);
+    // Whose read this is. The stream route counts the bytes it delivers against
+    // this session, and that count is what tells a waiting browser the proxy is
+    // alive while nothing has been encoded yet — the encoder's own progress
+    // cannot move before its first frame is decoded.
+    inputUrl.searchParams.set("session", sessionId);
     // A soundtrack shipped as its own file is encoded FROM that file, and an
     // audio rendition carries nothing else — so it reads the sidecar directly and
     // needs no second input at all. The muxed case, where a browser takes its
@@ -2019,6 +2033,7 @@ export class HlsSessionManager {
     if (!readsSidecarAlone && audioSource.isSidecar) {
       audioInputUrl = new URL("/stream", `${this.localBaseUrl}/`);
       audioInputUrl.searchParams.set("sourceKey", sourceKey);
+      audioInputUrl.searchParams.set("session", sessionId);
       audioInputUrl.searchParams.set("fileIndex", String(audioSource.fileIndex));
     }
 
@@ -2069,9 +2084,25 @@ export class HlsSessionManager {
     // the sound sits at a fixed offset from it for the whole film. Measured from
     // the file rather than assumed to be zero, because assuming it is exactly
     // the fault being avoided.
+    //
+    // NOT awaited. Creating a session used to stop here until the answer came
+    // back, and on a cold start the answer needs the sidecar's header off the
+    // swarm — 8121 ms of every session created, measured three times out of
+    // three on 2026-09-03. What is known now is used now; the reading runs
+    // behind, and `#startEncodeRun` takes the freshest value at spawn time, the
+    // same way it already re-reads `session.keyframeTimes`.
+    //
+    // Unknown means "no difference between the two timelines", not "the
+    // soundtrack starts at zero". The shift exists to correct a difference
+    // between two containers; asserting one that has not been read is inventing
+    // a number, while assuming none leaves the sound exactly where a release
+    // remuxed from a single source puts it.
     const audioFileStartTime = audioSource.isSidecar
-      ? await this.#sidecarStartTimeSeconds(sourceKey, audioSource.fileIndex)
+      ? (this.#sidecarStartTimeNow(sourceKey, audioSource.fileIndex) ?? sourceStartTime)
       : sourceStartTime;
+    if (audioSource.isSidecar) {
+      this.#warmSidecarStartTime(sourceKey, audioSource.fileIndex);
+    }
     const inputStartTime = readsSidecarAlone ? audioFileStartTime : sourceStartTime;
     // Tone-map an HDR source to SDR only when re-encoding video on the software
     // path and this ffmpeg has the filters. Hardware encoders keep their own
@@ -2388,6 +2419,11 @@ export class HlsSessionManager {
       // from a separate file.
       inputStartTime,
       audioFileStartTime,
+      // Whether this session's ONE input is the sidecar itself, which is what an
+      // audio rendition of a separately shipped soundtrack is. Stored rather
+      // than re-derived, because the derivation needs `audioOnly` and the
+      // sidecar test together and was already written two different ways.
+      readsSidecarAlone,
       // What this session's output carries. `audioOnly` is a rendition — one
       // audio track, no picture; `videoOnly` is a stream whose audio the viewer
       // takes from such a rendition. Neither is set on the ordinary muxed
@@ -5194,11 +5230,26 @@ export class HlsSessionManager {
     const startSeconds = Number.isFinite(positionSecondsOverride)
       ? positionSecondsOverride
       : this.runStartTimeFor(session, safeIndex);
+    // Where a sidecar soundtrack's own timeline begins, taken FRESH: the
+    // session may have been created before that file's header could be read,
+    // and this run is the first moment the answer matters. Same shape as
+    // `session.keyframeTimes`, which is likewise read again on every call so a
+    // background reading that has since finished is picked up.
+    const hasSidecarSound =
+      Number.isInteger(session.audioFileIndex) && session.audioFileIndex !== session.fileIndex;
+    const sidecarStartNow = hasSidecarSound
+      ? this.#sidecarStartTimeNow(session.sourceKey, session.audioFileIndex)
+      : null;
+    const audioFileStartTime = sidecarStartNow !== null
+      ? sidecarStartNow
+      : (Number.isFinite(session.audioFileStartTime) ? session.audioFileStartTime : 0);
     // The start time of the file this run READS, which is the picture's own for
     // every session except one whose soundtrack is a separate file.
-    const sourceStartTime = Number.isFinite(session.inputStartTime)
-      ? session.inputStartTime
-      : (Number.isFinite(session.sourceStartTime) ? session.sourceStartTime : 0);
+    const sourceStartTime = session.readsSidecarAlone === true && sidecarStartNow !== null
+      ? sidecarStartNow
+      : (Number.isFinite(session.inputStartTime)
+        ? session.inputStartTime
+        : (Number.isFinite(session.sourceStartTime) ? session.sourceStartTime : 0));
     // Cut where this session's grid says, whoever is producing the frames. The
     // times are measured from the start of THIS run; the same list serves as
     // the cut points and, when re-encoding, as the keyframes to force — one
@@ -5336,7 +5387,7 @@ export class HlsSessionManager {
     // files begin at their own container start time, and those need not be the
     // same number; the difference is what keeps the two aligned.
     const audioTimelineShift = audioInputUrl
-      ? (Number.isFinite(session.audioFileStartTime) ? session.audioFileStartTime : 0) - sourceStartTime
+      ? audioFileStartTime - sourceStartTime
       : 0;
     /**
      * Add the second input, if there is one, with its own seek.
@@ -9235,40 +9286,82 @@ export class HlsSessionManager {
   /**
    * Where a sidecar soundtrack's own timeline begins, in seconds.
    *
-   * One short probe of that file, kept for as long as the process lives: a
-   * container's start time is a property of the file and cannot change. It is
-   * asked only when such a track is actually chosen, so a torrent whose extra
-   * soundtracks nobody plays costs nothing for them.
+   * What has already been read, without reading anything. The answer to
+   * "is it known yet", which is what a caller who must not wait needs.
    *
    * @param {string} sourceKey
    * @param {number} fileIndex - The SIDECAR's file.
-   * @returns {Promise<number>}
+   * @returns {number | null} Null when nobody has read it yet.
    */
-  async #sidecarStartTimeSeconds(sourceKey, fileIndex) {
+  #sidecarStartTimeNow(sourceKey, fileIndex) {
     if (!(this.sidecarStartTimes instanceof Map)) {
       this.sidecarStartTimes = new Map();
     }
+    const held = this.sidecarStartTimes.get(`${sourceKey}:${fileIndex}`);
+    return Number.isFinite(held) ? held : null;
+  }
+
+  /**
+   * Start reading where a sidecar soundtrack's timeline begins, if nobody has.
+   *
+   * Read by the container layer from the file's own header — the same 64 KB,
+   * the same reader and the same per-file cache the audio menu's track list
+   * comes from. A container states this, so it is read from the container and
+   * not measured from the media.
+   *
+   * Until 2.73.0 the session spawned an ffmpeg against the proxy's own
+   * `/stream` for it and waited up to eight seconds for the banner. Field
+   * 2026-09-03: that read cost 8121 ms of a cold start, three times out of
+   * three, while the container layer had read the same header of the same file
+   * in 8 ms in the same second. The eight seconds were not even spent on the
+   * answer — the early exit was gated on a DURATION, and a partly downloaded
+   * file prints `Duration: N/A` with the start time on that very line.
+   *
+   * Runs behind whoever asked, so no viewer waits for it. Once per file per
+   * process: a container's start time is a property of the file and cannot
+   * change. A reading that comes back without an answer is NOT remembered — the
+   * file may simply not have been downloaded far enough yet, and the next
+   * session asks again.
+   *
+   * @param {string} sourceKey
+   * @param {number} fileIndex - The SIDECAR's file.
+   * @returns {void}
+   */
+  #warmSidecarStartTime(sourceKey, fileIndex) {
+    if (typeof this.getContainerMediaInfo !== "function") {
+      return;
+    }
+    if (!(this.sidecarStartTimes instanceof Map)) {
+      this.sidecarStartTimes = new Map();
+    }
+    if (!(this.sidecarStartTimeReads instanceof Set)) {
+      this.sidecarStartTimeReads = new Set();
+    }
     const key = `${sourceKey}:${fileIndex}`;
-    const held = this.sidecarStartTimes.get(key);
-    if (Number.isFinite(held)) {
-      return held;
+    if (this.sidecarStartTimes.has(key) || this.sidecarStartTimeReads.has(key)) {
+      return;
     }
-    const url = new URL("/stream", `${this.localBaseUrl}/`);
-    url.searchParams.set("sourceKey", sourceKey);
-    url.searchParams.set("fileIndex", String(fileIndex));
-    let startTime = 0;
-    try {
-      const info = await probeInputMediaInfo(this.ffmpegBin, url.toString(), { expectVideo: false });
-      startTime = Number.isFinite(info?.startTime) ? info.startTime : 0;
-    } catch (error) {
-      logger.info(
-        `transcode: the start time of soundtrack file ${fileIndex} could not be probed ` +
-        `(${error instanceof Error ? error.message : String(error)}) — taken as 0`
-      );
-      startTime = 0;
-    }
-    this.sidecarStartTimes.set(key, startTime);
-    return startTime;
+    this.sidecarStartTimeReads.add(key);
+    void Promise.resolve(this.getContainerMediaInfo({ sourceKey, fileIndex }))
+      .then((info) => {
+        if (info && Number.isFinite(info.startTimeSeconds)) {
+          this.sidecarStartTimes.set(key, info.startTimeSeconds);
+          logger.info(
+            `transcode: soundtrack file ${fileIndex}'s own timeline starts at ` +
+            `${info.startTimeSeconds.toFixed(6)}s, read from its header`
+          );
+        }
+      })
+      .catch((error) => {
+        logger.info(
+          `transcode: the start of soundtrack file ${fileIndex}'s timeline could not be read ` +
+          `(${error instanceof Error ? error.message : String(error)}) — the two timelines are ` +
+          "taken to agree until it can be"
+        );
+      })
+      .finally(() => {
+        this.sidecarStartTimeReads.delete(key);
+      });
   }
 
   /**
@@ -10292,6 +10385,28 @@ export class HlsSessionManager {
    * @param {string} sessionId
    * @returns {Promise<object | null>}
    */
+  /**
+   * Count bytes the swarm has delivered to one session's own input read.
+   *
+   * Called by the `/stream` route for every fragment it writes to an encoder.
+   * Cheap on purpose — one addition, no clock, no log — because it runs per
+   * fragment on the path that feeds ffmpeg.
+   *
+   * @param {string} sessionId
+   * @param {number} bytes
+   * @returns {void}
+   */
+  noteInputBytes(sessionId, bytes) {
+    if (!sessionId || !(bytes > 0)) {
+      return;
+    }
+    const session = this.sessionsById.get(sessionId);
+    if (!session) {
+      return;
+    }
+    session.inputBytes = (session.inputBytes ?? 0) + bytes;
+  }
+
   async getSessionProgress(sessionId) {
     if (!isSafeSessionId(sessionId)) {
       return null;
@@ -10344,6 +10459,21 @@ export class HlsSessionManager {
         worstSupplyWaitSec: session.supplyFigures?.worstWaitSec
       })?.seconds ?? null,
       processedSeconds: session.progress.processedSeconds,
+      // Bytes this session's own reads have received from the swarm.
+      //
+      // The second proof that a session is alive, and the only one available
+      // before its first frame exists: `processedSeconds` cannot move until the
+      // decoder has a frame, so on a cold start it stands at the start position
+      // for as long as the first piece takes to arrive. Field 2026-09-03 — one
+      // piece took 46.3 s while the swarm delivered 55.9 MB across the torrent,
+      // `processedSeconds` frozen at 171.3 throughout, and the browser declared
+      // the proxy dead 0.4 s before the piece landed.
+      //
+      // Counted per SESSION and not per torrent, deliberately: in that same
+      // episode the torrent received 55.9 MB while the picture's own reads
+      // received 4.5 MB of it, so a torrent-wide figure would have called a
+      // starved session healthy.
+      inputBytes: session.inputBytes ?? 0,
       startPositionSeconds: session.progress.startPositionSeconds ?? 0,
       totalSeconds: session.progress.totalSeconds,
       percent: session.progress.percent,

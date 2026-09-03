@@ -78,7 +78,7 @@ async function waitForTorrent(torrentPool, sourceType, source) {
  * @param {{ sourceRegistry: ReturnType<import("../../store/source-registry.js").createSourceRegistry>, torrentPool: import("../../services/torrent-pool.js").TorrentPool }} deps
  * @returns {Promise<void>}
  */
-export async function handleStreamGet(req, reply, { sourceRegistry, torrentPool }) {
+export async function handleStreamGet(req, reply, { sourceRegistry, torrentPool, noteInputBytes = null }) {
   const fileIndexRaw = typeof req.query.fileIndex === "string" ? req.query.fileIndex : "";
   const fileIndex = Number(fileIndexRaw);
   const { sourceType, source } = getSourceParams(req.query, sourceRegistry);
@@ -172,6 +172,12 @@ export async function handleStreamGet(req, reply, { sourceRegistry, torrentPool 
   const windowBytes =
     Number.isFinite(windowBytesRaw) && windowBytesRaw > 0 ? windowBytesRaw : undefined;
 
+  // Which transcode session this read feeds, when it feeds one. Put on the URL
+  // by the session that builds it, because this route otherwise knows only a
+  // file — and two sessions can read one file, so the file cannot stand in for
+  // the session.
+  const sessionId = typeof req.query.session === "string" ? req.query.session : "";
+
   const fragments = typeof file.createFragmentReader === "function"
     ? file.createFragmentReader({ start, end, windowBytes })
     : null;
@@ -201,6 +207,17 @@ export async function handleStreamGet(req, reply, { sourceRegistry, torrentPool 
           reply.raw.write(fragment.bytes, (error) => (error ? reject(error) : resolve()));
         });
         sent += fragment.bytes.length;
+        // Say so, if this read belongs to a transcode session. It is the only
+        // proof that a session which has produced nothing yet is nevertheless
+        // being fed: the encoder's own progress cannot move until its first
+        // frame is decoded, and a viewer waiting for that first frame was being
+        // told the proxy had died while the swarm was delivering to it. Field
+        // 2026-09-03: 46.3 s on one piece, `processedSeconds` frozen at the
+        // start position throughout, and the browser gave up 0.4 s before the
+        // piece landed.
+        if (noteInputBytes) {
+          noteInputBytes(sessionId, fragment.bytes.length);
+        }
         // Only now are these bytes gone: the piece can be unpinned, and the
         // slot it occupies reused. Releasing before this point corrupts the
         // response silently.

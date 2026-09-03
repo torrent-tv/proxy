@@ -102,6 +102,36 @@ export function readUint(buffer, offset, size) {
 }
 
 /**
+ * An EBML float, which RFC 9559 §11.3.3 allows to be 4 or 8 bytes, big-endian
+ * IEEE 754, and 0 bytes for the value zero.
+ *
+ * Needed because Matroska writes `Duration` as a float, not as an integer:
+ * reading it with {@link readUint} yields the bit pattern rather than the
+ * number. Any other size is malformed and answered with null rather than a
+ * guess.
+ *
+ * @param {Buffer} buffer
+ * @param {number} offset
+ * @param {number} size
+ * @returns {number | null}
+ */
+export function readFloat(buffer, offset, size) {
+  if (size === 0) {
+    return 0;
+  }
+  if (offset + size > buffer.length) {
+    return null;
+  }
+  if (size === 4) {
+    return buffer.readFloatBE(offset);
+  }
+  if (size === 8) {
+    return buffer.readDoubleBE(offset);
+  }
+  return null;
+}
+
+/**
  * Depth-first search for the first element with `id`, descending only into the
  * container ids listed in `descendInto`.
  *

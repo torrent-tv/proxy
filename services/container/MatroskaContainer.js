@@ -22,9 +22,29 @@ import { AudioTrack } from "../tracks/AudioTrack.js";
 import { TextSubtitleTrack, TEXT_CODECS_MATROSKA } from "../tracks/TextSubtitleTrack.js";
 import { ImageSubtitleTrack } from "../tracks/ImageSubtitleTrack.js";
 import { ContainerTrack } from "../tracks/ContainerTrack.js";
-import { findElement, iterateElements, readUint } from "../container-index/ebml-reader.js";
+import { findElement, iterateElements, readFloat, readUint } from "../container-index/ebml-reader.js";
 
 const HEAD_BYTES = 64 * 1024;
+const ID_SEGMENT = 0x18538067;
+const ID_SEEK_HEAD = 0x114d9b74;
+const ID_SEEK = 0x4dbb;
+const ID_SEEK_ID = 0x53ab;
+const ID_SEEK_POSITION = 0x53ac;
+const ID_INFO = 0x1549a966;
+const ID_TIMESTAMP_SCALE = 0x2ad7b1;
+const ID_DURATION = 0x4489;
+const ID_CLUSTER = 0x1f43b675;
+const ID_TIMESTAMP = 0xe7;
+const ID_SIMPLE_BLOCK = 0xa3;
+const ID_BLOCK_GROUP = 0xa0;
+/** RFC 9559 §5.1.2.1: nanoseconds per tick when Info omits TimestampScale. */
+const DEFAULT_TIMESTAMP_SCALE = 1_000_000;
+/**
+ * How much to read at a cluster whose position came from the SeekHead. A
+ * cluster's Timestamp is the first child every muxer writes, so this only has
+ * to cover the element header and that one field.
+ */
+const CLUSTER_PROBE_BYTES = 4 * 1024;
 const ID_TRACKS = 0x1654ae6b;
 const ID_TRACK_ENTRY = 0xae;
 const ID_TRACK_NUMBER = 0xd7;
@@ -68,6 +88,171 @@ export class MatroskaContainer extends Container {
 
   static detect(head) {
     return isMatroska(head);
+  }
+
+  /**
+   * Duration and the start of this file's own timeline, per RFC 9559 §5.1.2.
+   *
+   * Duration is stated in `Info` as a FLOAT in ticks, so it needs the file's
+   * `TimestampScale` to become seconds. The start of the timeline is not stated
+   * anywhere — Matroska has no such element — so it is the timestamp of the
+   * first Cluster, which is what the first frame is placed against.
+   *
+   * @returns {Promise<import("./Container.js").ContainerMediaInfo>}
+   */
+  async readMediaInfo() {
+    if (this.mediaInfo) {
+      return this.mediaInfo;
+    }
+    /** @type {import("./Container.js").ContainerMediaInfo} */
+    const info = { format: this.formatName, durationSeconds: null, startTimeSeconds: null };
+    this.mediaInfo = info;
+    const head = await this.readRange(0, Math.min(HEAD_BYTES - 1, this.fileSize - 1));
+    if (!head || !isMatroska(head)) {
+      return info;
+    }
+    const segment = findElement(head, ID_SEGMENT, []);
+    if (!segment) {
+      return info;
+    }
+    const scale = MatroskaContainer.#timestampScaleOf(head, segment.dataOffset);
+    const infoElement = findElement(head, ID_INFO, [], segment.dataOffset);
+    if (infoElement) {
+      const infoEnd = Math.min(head.length, infoElement.dataOffset + infoElement.size);
+      for (const field of iterateElements(head, infoElement.dataOffset, infoEnd)) {
+        if (field.id !== ID_DURATION) {
+          continue;
+        }
+        const ticks = readFloat(head, field.dataOffset, field.size);
+        if (ticks !== null && ticks > 0) {
+          info.durationSeconds = (ticks * scale) / 1e9;
+        }
+        break;
+      }
+    }
+    info.startTimeSeconds = await this.#firstClusterSeconds(head, segment.dataOffset, scale);
+    return info;
+  }
+
+  /**
+   * `TimestampScale` from Info, or the specification's default.
+   *
+   * @param {Buffer} head
+   * @param {number} segmentDataOffset
+   * @returns {number} Nanoseconds per tick.
+   */
+  static #timestampScaleOf(head, segmentDataOffset) {
+    const infoElement = findElement(head, ID_INFO, [], segmentDataOffset);
+    if (!infoElement) {
+      return DEFAULT_TIMESTAMP_SCALE;
+    }
+    const infoEnd = Math.min(head.length, infoElement.dataOffset + infoElement.size);
+    for (const field of iterateElements(head, infoElement.dataOffset, infoEnd)) {
+      if (field.id === ID_TIMESTAMP_SCALE) {
+        const scale = readUint(head, field.dataOffset, field.size);
+        return scale > 0 ? scale : DEFAULT_TIMESTAMP_SCALE;
+      }
+    }
+    return DEFAULT_TIMESTAMP_SCALE;
+  }
+
+  /**
+   * The timestamp of the first Cluster, in seconds.
+   *
+   * Tried in the head window first, because a muxer writes the first cluster
+   * straight after Tracks and both usually fit; a file whose Tracks element is
+   * large enough to push it out is answered from the SeekHead instead, with one
+   * short read at the position it names.
+   *
+   * @param {Buffer} head
+   * @param {number} segmentDataOffset
+   * @param {number} scale - Nanoseconds per tick.
+   * @returns {Promise<number | null>} Null when no cluster could be read.
+   */
+  async #firstClusterSeconds(head, segmentDataOffset, scale) {
+    /**
+     * @param {Buffer} buffer
+     * @param {number} dataOffset
+     * @param {number} end
+     * @returns {number | null}
+     */
+    const timestampIn = (buffer, dataOffset, end) => {
+      for (const field of iterateElements(buffer, dataOffset, end)) {
+        if (field.id === ID_TIMESTAMP) {
+          const ticks = readUint(buffer, field.dataOffset, field.size);
+          return Number.isFinite(ticks) ? (ticks * scale) / 1e9 : null;
+        }
+        // Timestamp is written before any frame. Stopping at the first one keeps
+        // this from walking a cluster's whole payload, which is megabytes and
+        // usually not in the buffer at all.
+        if (field.id === ID_SIMPLE_BLOCK || field.id === ID_BLOCK_GROUP) {
+          return null;
+        }
+      }
+      return null;
+    };
+
+    for (const element of iterateElements(head, segmentDataOffset, head.length)) {
+      if (element.id !== ID_CLUSTER) {
+        continue;
+      }
+      return timestampIn(head, element.dataOffset, Math.min(head.length, element.dataOffset + element.size));
+    }
+
+    const position = MatroskaContainer.#seekPositionOf(head, segmentDataOffset, ID_CLUSTER);
+    if (position === null) {
+      return null;
+    }
+    const at = segmentDataOffset + position;
+    if (at >= this.fileSize) {
+      return null;
+    }
+    const chunk = await this.readRange(at, Math.min(this.fileSize - 1, at + CLUSTER_PROBE_BYTES - 1));
+    if (!chunk) {
+      return null;
+    }
+    for (const element of iterateElements(chunk, 0, chunk.length)) {
+      if (element.id !== ID_CLUSTER) {
+        continue;
+      }
+      return timestampIn(chunk, element.dataOffset, Math.min(chunk.length, element.dataOffset + element.size));
+    }
+    return null;
+  }
+
+  /**
+   * Where the SeekHead says an element lives, relative to the Segment's payload.
+   *
+   * @param {Buffer} head
+   * @param {number} segmentDataOffset
+   * @param {number} wantedId
+   * @returns {number | null}
+   */
+  static #seekPositionOf(head, segmentDataOffset, wantedId) {
+    const seekHead = findElement(head, ID_SEEK_HEAD, [], segmentDataOffset);
+    if (!seekHead) {
+      return null;
+    }
+    const seekHeadEnd = Math.min(head.length, seekHead.dataOffset + seekHead.size);
+    for (const seek of iterateElements(head, seekHead.dataOffset, seekHeadEnd)) {
+      if (seek.id !== ID_SEEK) {
+        continue;
+      }
+      const seekEnd = Math.min(seekHeadEnd, seek.dataOffset + seek.size);
+      let targetId = null;
+      let position = null;
+      for (const field of iterateElements(head, seek.dataOffset, seekEnd)) {
+        if (field.id === ID_SEEK_ID) {
+          targetId = readUint(head, field.dataOffset, field.size);
+        } else if (field.id === ID_SEEK_POSITION) {
+          position = readUint(head, field.dataOffset, field.size);
+        }
+      }
+      if (targetId === wantedId && position !== null) {
+        return position;
+      }
+    }
+    return null;
   }
 
   async readTracks() {

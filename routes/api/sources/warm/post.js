@@ -49,6 +49,13 @@ export async function handleApiSourceWarmPost(req, reply, { sourceRegistry, torr
   const body = req.body && typeof req.body === "object" && !Array.isArray(req.body) ? req.body : {};
   const requestedIndex = Number(body.fileIndex);
   const fileIndex = Number.isInteger(requestedIndex) && requestedIndex >= 0 ? requestedIndex : null;
+  // Where the viewer is about to resume, if they are resuming. The edges below
+  // are what the codec probe reads; this is what the VIEWER will read, and until
+  // now nothing asked for it before the encoder did.
+  const requestedPosition = Number(body.positionSeconds);
+  const positionSeconds = Number.isFinite(requestedPosition) && requestedPosition > 0
+    ? requestedPosition
+    : 0;
 
   // Adding the torrent is what announces to the trackers and starts connecting
   // to peers, and it is also what a magnet needs in order to fetch its
@@ -77,6 +84,18 @@ export async function handleApiSourceWarmPost(req, reply, { sourceRegistry, torr
       const message = error instanceof Error ? error.message : String(error);
       logger.warn(`warm ${sourceKey.slice(0, 8)}: file edges failed: ${message}`);
     });
+    // Started AFTER the edges, and not awaited by them either: the edges gate
+    // the playback plan, so they must not queue behind a region nobody is
+    // reading yet. This one only has to arrive before the encoder does, and the
+    // encoder is a plan and a session away.
+    if (positionSeconds > 0 && typeof torrentPool.warmResumePosition === "function") {
+      Promise.resolve(torrentPool.warmResumePosition(torrent, fileIndex, positionSeconds)).catch(
+        (error) => {
+          const message = error instanceof Error ? error.message : String(error);
+          logger.warn(`warm ${sourceKey.slice(0, 8)}: the viewer's position failed: ${message}`);
+        }
+      );
+    }
   }
 
   // The files that carry this episode's OTHER soundtracks and its subtitles.

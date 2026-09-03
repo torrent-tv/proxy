@@ -28,6 +28,72 @@ read from another file, and a raw `.srt` needs no `Container` subclass because
 it has no track table and no index to read: the whole file is the payload, and
 `SubtitleController` already reads it as such.
 
+## Who answers what — the rule
+
+A fact the container DECLARES is read from the container. A fact only the media
+itself has is measured from the media, which means ffmpeg.
+
+That is the whole boundary, and it is not about speed. Speed is a consequence:
+this layer asks for the smallest region that holds the answer — 64 KB of header,
+the Cues block, a sample table — while ffmpeg cannot be asked for a bounded
+region at all. Its input analysis pulls megabytes before it will say anything,
+and over a torrent those megabytes may not exist yet. Measured 2026-09-03 on one
+`.mka`: this layer read its header in **8 ms**, and an ffmpeg reading the same
+header of the same file through the proxy's own `/stream`, in the same second,
+took **8121 ms** — and spent all of it waiting for a DURATION its caller did not
+want, because its early exit is gated on one.
+
+So ffmpeg keeps exactly three jobs, and nothing else:
+
+1. producing media — the encode run;
+2. measuring THIS MACHINE — encoder detection and its strict test, decode
+   calibration, the contention penalty;
+3. answering what the container does not declare — above all keyframe positions
+   in a container with no index, where a packet scan is the only source. Even
+   there the container is asked FIRST: measured, the container index gave 570
+   keyframes in 0.8 s from two point reads of 16 KB, while a scan of the same
+   file found 77 in 45 s and did not finish.
+
+`null` in `ContainerMediaInfo` means the container does not declare the field.
+That is a final answer about the container, and the point at which a caller may
+go to the media — not "unknown, ask again".
+
+## Where byte access lives, and why not on a track
+
+A `ContainerTrack` is a DECLARATION. It carries no `readRange` and no file
+identity, and it should not: byte access is the `Container`'s, injected as
+`readRange(start, end)` and bound to one file.
+
+The obvious-looking improvement — hand the track a reader so it can fetch its own
+bytes — was reviewed on 2026-09-03 and is **not** the right shape:
+
+- for video and audio, this layer never reads the payload at all. It goes to
+  ffmpeg by URL, where seeking and gigabytes belong. A `readRange` on a
+  `VideoTrack` would be a capability with no consumer, inviting reads of a size
+  this path is not built for;
+- tracks cross the worker boundary as PLAIN OBJECTS (`plainTrack()`), because a
+  class instance does not survive it as a class. A back-reference to a container
+  cannot cross either, so such a track would be able to read its own bytes only
+  on the thread where the container is already at hand.
+
+What IS split, and is worth closing: `SubtitleTrack` carries `clusterPositions`
+and `samples` — byte POSITIONS — while the reading of those positions lives in
+`torrent-worker/subtitle-cues.js`, which builds a `readRange` of its own. Two
+halves of one action in two layers.
+
+The shape that closes it is `Container.readCuesOf(track)` — the container already
+holds `readRange`, and the series `readTracks` / `readKeyframeIndex` /
+`readMediaInfo` / `cueTextOf` is exactly where "ask the container" belongs.
+
+**It is not done yet, and the obstacle is real rather than effort.** The two
+readers want different read POLICIES over the same file: the track table fetches
+what is missing from the swarm (`readFetching`), while the cue walk deliberately
+reads only what is already downloaded (`readHeld`) so that turning subtitles on
+never pulls bytes the viewer is not waiting for. One container instance per file
+holds one `readRange`, so as things stand it cannot serve both. Resolving that —
+a read policy per call, or something else — is the design question to answer
+before the move, and answering it in passing would settle it by accident.
+
 ## Layers
 
 ```mermaid

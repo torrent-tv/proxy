@@ -12,6 +12,19 @@
  *  - AVI RIFF §: LIST hdrl, idx1
  */
 
+/**
+ * What one file declares about itself. Every field is either a value the
+ * container states or `null`, which means the container does not state it —
+ * a defined absence, not "nobody has looked yet".
+ *
+ * @typedef {object} ContainerMediaInfo
+ * @property {string} format - "matroska" | "mp4" | "avi" | "unknown".
+ * @property {number | null} durationSeconds
+ * @property {number | null} startTimeSeconds - Where this file's own timeline
+ *   begins. Two files of one release need not agree on it, and the difference
+ *   is what keeps a soundtrack shipped separately aligned with its picture.
+ */
+
 export class Container {
   /**
    * @param {object} params
@@ -50,6 +63,34 @@ export class Container {
    */
   async readKeyframeIndex() {
     return null;
+  }
+
+  /**
+   * What this file DECLARES about itself as a whole, as distinct from what its
+   * individual tracks declare.
+   *
+   * The rule this method exists to hold: a fact the container declares is read
+   * from the container; a fact only the media itself has is measured from the
+   * media. Both halves used to be asked of ffmpeg, so the same header was read
+   * twice — measured 2026-09-03, this layer read one `.mka` header in 8 ms while
+   * a second ffmpeg read the same header over HTTP for 8121 ms, in the same
+   * second, on the same file.
+   *
+   * `null` is not "unknown, ask someone else". It means the container does not
+   * declare the field, which is a final answer about the container and the point
+   * at which a caller may go to the media — see `docs/container-architecture.md`.
+   *
+   * @returns {Promise<import("./Container.js").ContainerMediaInfo>}
+   */
+  async readMediaInfo() {
+    if (!this.mediaInfo) {
+      this.mediaInfo = {
+        format: this.formatName,
+        durationSeconds: null,
+        startTimeSeconds: null
+      };
+    }
+    return this.mediaInfo;
   }
 
   /**

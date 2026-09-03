@@ -193,6 +193,23 @@ export async function startProxyServer({
     // The file's audio tracks, for the master playlist's rendition group. Already
     // probed for the browser's audio menu; read from there rather than probed again.
     getCachedAudioTracks: (params) => playbackPlanner.getCachedAudioTracks(params),
+    // What a file declares about itself, read by the container layer from the
+    // same header its track table comes from. This is how the session learns
+    // where a soundtrack shipped as its own file begins — it used to spawn an
+    // ffmpeg over this proxy's own HTTP to ask the same question of the same
+    // bytes, and that read cost 8.1 s of every cold start (field 2026-09-03).
+    getContainerMediaInfo: async ({ sourceKey, fileIndex }) => {
+      const record = sourceRegistry.get(sourceKey);
+      if (!record || typeof torrentPool.getContainerMediaInfo !== "function") {
+        return null;
+      }
+      try {
+        const torrent = await torrentPool.getTorrent(record.sourceType, record.source);
+        return await torrentPool.getContainerMediaInfo(torrent, fileIndex);
+      } catch {
+        return null;
+      }
+    },
     // Pull one whole file onto the disk. Used for a soundtrack that ships beside
     // the picture, once the encoder is as far ahead of the viewer as it is
     // allowed to get — the one moment the swarm's capacity is demonstrably
@@ -260,7 +277,14 @@ export async function startProxyServer({
     })
   );
   app.get("/stream", async (req, reply) =>
-    handleStreamGet(req, reply, { sourceRegistry, torrentPool })
+    handleStreamGet(req, reply, {
+      sourceRegistry,
+      torrentPool,
+      // So a session that has produced nothing yet can still show it is being
+      // fed. The route knows only files; the session id rides on the URL the
+      // session itself built.
+      noteInputBytes: (sessionId, bytes) => hlsSessionManager.noteInputBytes(sessionId, bytes)
+    })
   );
   app.post("/api/transcode-sessions", async (req, reply) =>
     handleApiTranscodeSessionsPost(req, reply, { hlsSessionManager, sourceRegistry, torrentPool })

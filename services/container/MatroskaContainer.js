@@ -50,6 +50,12 @@ const ID_DISPLAY_WIDTH = 0x54b0;
 const ID_DISPLAY_HEIGHT = 0x54ba;
 const ID_SAMPLING_FREQUENCY = 0xb5;
 const ID_CHANNELS = 0x9f;
+/**
+ * ReadOrder, Layer, Style, Name, MarginL, MarginR, MarginV, Effect — the eight
+ * fields Matroska writes before the text of an SSA/ASS event. See
+ * {@link MatroskaContainer.cueTextOf} for the quotation this comes from.
+ */
+const ASS_FIELDS_BEFORE_TEXT = 8;
 
 function readString(buf, el) {
   return buf.toString("utf8", el.dataOffset, el.dataOffset + el.size).replace(/\0+$/, "");
@@ -278,6 +284,42 @@ export class MatroskaContainer extends Container {
       }
     }
     return result;
+  }
+
+  /**
+   * The text field of one cue as Matroska frames it.
+   *
+   * Two rules, both from `matroska.org/technical/subtitles.html`, "Now, how are
+   * they stored in Matroska?":
+   *
+   * 1. "All text is converted to UTF-8", so the block is decoded as UTF-8 and
+   *    no other encoding is guessed at. A subtitle FILE is a different matter —
+   *    there the bytes may be Windows-1251 and `decodeSubtitleBytes` sniffs for
+   *    it — but a muxer had to convert before writing the block.
+   * 2. "Events are stored in the Block in this order: ReadOrder, Layer, Style,
+   *    Name, MarginL, MarginR, MarginV, Effect, Text", and "Start & End field
+   *    are used to set TimeStamp and the BlockDuration element". So eight fields
+   *    stand before the text, the two timing fields of the file's own row are
+   *    NOT among them, and a read order takes their place at the front. The text
+   *    itself may hold commas, so everything from the ninth field on is joined
+   *    back together.
+   *
+   * `S_TEXT/UTF8` and `S_TEXT/WEBVTT` have no such framing: the block holds the
+   * cue text and nothing else. (A WebVTT cue's settings, identifier and
+   * preceding comments live in a BlockAddition, which this proxy does not read;
+   * losing them costs positioning, not words.)
+   *
+   * @param {Buffer} payload - The block's own bytes.
+   * @param {string} codecId - Matroska CodecID of the track the block belongs to.
+   * @returns {string}
+   */
+  static cueTextOf(payload, codecId) {
+    const text = Buffer.isBuffer(payload) ? payload.toString("utf8") : String(payload ?? "");
+    if (codecId !== "S_TEXT/ASS" && codecId !== "S_TEXT/SSA") {
+      return text;
+    }
+    const fields = text.split(",");
+    return fields.length > ASS_FIELDS_BEFORE_TEXT ? fields.slice(ASS_FIELDS_BEFORE_TEXT).join(",") : "";
   }
 
   async readKeyframeIndex() {

@@ -7,6 +7,7 @@
  */
 
 import { SubtitleTrack } from "./SubtitleTrack.js";
+import { markupKindOf, plainCueText } from "./subtitle-markup.js";
 
 const TEXT_CODECS_MATROSKA = new Set(["S_TEXT/UTF8", "S_TEXT/ASS", "S_TEXT/SSA", "S_TEXT/WEBVTT"]);
 const TEXT_FORMATS_MP4 = new Set(["tx3g", "text", "wvtt"]);
@@ -19,6 +20,23 @@ export class TextSubtitleTrack extends SubtitleTrack {
 
   isTextBased() {
     return true;
+  }
+
+  /** Which markup this track's cue text carries — see `subtitle-markup.js`. */
+  get markupKind() {
+    return markupKindOf(this.textCodec);
+  }
+
+  /**
+   * The visible text of one of this track's cues.
+   *
+   * @param {string} textField - The cue's text field, already out of its
+   *   container's framing. This method knows the codec and not the container,
+   *   which is why it cannot be handed a whole dialogue row.
+   * @returns {string}
+   */
+  plainText(textField) {
+    return plainCueText(textField, this.textCodec);
   }
 
   static isTextCodec(codecId) {

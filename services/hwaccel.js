@@ -35,146 +35,25 @@ import {
   parseFfmpegVideoFps
 } from "./ffmpeg-banner.js";
 
-const SOFTWARE_PRESET = "ultrafast";
-const SOFTWARE_CRF = "24";
-// HDR→SDR tone-map chain (software). Converts a BT.2020 PQ/HLG source to BT.709
-// 8-bit SDR so the re-encode is not washed-out/desaturated. Requires the
-// `zscale` (libzimg) and `tonemap` filters — gated by detectTonemapSupport;
-// when unavailable the encode falls back to a plain 8-bit convert (no tonemap).
-// npl=100 targets ~100-nit SDR; hable is a well-behaved tone-mapping operator.
-const TONEMAP_FILTER_CHAIN =
-  "zscale=t=linear:npl=100,format=gbrpf32le,zscale=p=bt709," +
-  "tonemap=tonemap=hable:desat=0,zscale=t=bt709:m=bt709:r=tv,format=yuv420p";
-// Default output frame rate when the source rate is unknown, and the rate used
-// by the synthetic startup test-encode / preset benchmark. The real encode
-// inherits the source rate (rounded to an integer, capped) — see
-// chooseOutputFps — so 25/30 fps content no longer plays resampled to 24.
-export const TRANSCODE_FPS = 24;
-// Upper bound on the output frame rate: 50/60 fps sources are halved-in-effort
-// by capping to 30, protecting the realtime encode budget on weak hosts.
-export const MAX_OUTPUT_FPS = 30;
-
-/**
- * Choose an INTEGER output frame rate from the (possibly fractional) source
- * rate, for the frame-count-GOP encoders ONLY (software libx264, v4l2m2m).
- * Those place keyframes with `-g = segmentDur × fps` (frame count), so the
- * `fps=` filter value must be an integer that makes seg×fps an exact whole
- * number of frames per segment — otherwise segments drift off the synthetic
- * playlist's uniform grid and seek accuracy degrades over a long file. Film
- * rates (23.976) round to 24, 25 stays 25, 29.97 rounds to 30; the cap clamps
- * high rates (the cap is a SPEED guard for the weak software/v4l2m2m path).
- *
- * Time-based-keyframe encoders (nvenc, vaapi, qsv) do NOT use this — they
- * inherit the exact source rate untouched (their keyframes are forced by
- * output time, so any rate segments correctly).
- *
- * @param {number | null | undefined} sourceFps
- * @param {number} [cap=MAX_OUTPUT_FPS]
- * @returns {number}
- */
-export function chooseOutputFps(sourceFps, cap = MAX_OUTPUT_FPS) {
-  if (!Number.isFinite(sourceFps) || sourceFps <= 0) {
-    return TRANSCODE_FPS;
-  }
-  const rounded = Math.round(sourceFps);
-  if (rounded < 1) {
-    return TRANSCODE_FPS;
-  }
-  return Math.min(cap, rounded);
-}
-// Software x264 on weak ARM hosts is the transcode bottleneck — use all cores.
-const CPU_THREADS = Math.max(1, os.cpus().length);
-
-// Bitrate caps (constrained CRF). CRF stays the quality driver; -maxrate/
-// -bufsize only bound the peaks. Field evidence (iPhone on cellular,
-// 2026-07-10): uncapped complex scenes produced 4 s segments of ~18 Mbit/s
-// against a 1-6 Mbit/s viewer link — 45 s prebuffer, draining buffer.
-// Nominal H.264 rates per rung height; multipliers from webtor's production
-// ladder (content-transcoder): maxrate = 1.3x nominal, bufsize = 1.5x.
-const RUNG_NOMINAL_KBPS = [
-  [1080, 5000],
-  [720, 2800],
-  [480, 1400],
-  [360, 800],
-  [240, 400]
-];
-const CAP_MAXRATE_FACTOR = 1.3;
-const CAP_BUFSIZE_FACTOR = 1.5;
-
-/**
- * Nominal kbps for an encode height: nearest rung wins (odd heights snap to
- * the closest standard rung; anything above the top rung uses the top one).
- *
- * @param {number} height
- * @returns {number}
- */
-export function nominalKbpsForHeight(height) {
-  const h = Number.isFinite(height) && height > 0 ? height : 720;
-  let best = RUNG_NOMINAL_KBPS[0];
-  for (const rung of RUNG_NOMINAL_KBPS) {
-    if (Math.abs(rung[0] - h) < Math.abs(best[0] - h)) {
-      best = rung;
-    }
-  }
-  return best[1];
-}
-
-/**
- * The peak this encode may reach, in kbit/s, for a nominal rate.
- *
- * Exported because the same figure answers a second question: whether a rung
- * fits the viewer's measured link. The budget compares the link against what
- * the encode is ALLOWED to peak at rather than against what it happened to
- * produce in the last few segments, so a rung is judged by the bound we impose
- * on it and not by a quiet stretch of the film.
- *
- * @param {number} nominalKbps
- * @returns {number}
- */
-export function maxrateKbpsFor(nominalKbps) {
-  return Math.round(nominalKbps * CAP_MAXRATE_FACTOR);
-}
-
-/**
- * The nominal rate whose cap is a given peak — the inverse of
- * {@link maxrateKbpsFor}.
- *
- * Used to turn a MEASURED limit into the figure the cap arithmetic takes. The
- * viewer's usable link is a peak the stream must not exceed, and the encoder is
- * configured from a nominal rate, so the two are converted through the one
- * factor rather than through a second constant invented for the purpose.
- *
- * @param {number} maxrateKbps
- * @returns {number}
- */
-export function nominalKbpsForMaxrate(maxrateKbps) {
-  return Math.round(maxrateKbps / CAP_MAXRATE_FACTOR);
-}
-
-/**
- * `-maxrate`/`-bufsize` args for an encode height (constrained CRF).
- *
- * `nominalKbps` overrides the height's own nominal rate. It is how a measured
- * limit — the viewer's link, the only figure that bounds an encode from
- * outside this host — reaches the encoder without touching the picture's SIZE.
- * That distinction is the whole point: `-maxrate`, `-bufsize` and CRF do not
- * appear in the SPS (x264 writes no HRD parameters by default), so they can be
- * moved in the middle of a session while one init segment goes on describing
- * every fragment. The size cannot.
- *
- * @param {number} height
- * @param {number | null} [nominalKbps=null]
- * @returns {string[]}
- */
-function bitrateCapArgs(height, nominalKbps = null) {
-  const nominal = Number.isFinite(nominalKbps) && nominalKbps > 0
-    ? nominalKbps
-    : nominalKbpsForHeight(height);
-  return [
-    "-maxrate", `${maxrateKbpsFor(nominal)}k`,
-    "-bufsize", `${Math.round(nominal * CAP_BUFSIZE_FACTOR)}k`
-  ];
-}
+import { keyFrameArgs, SOFTWARE_CRF, TRANSCODE_FPS } from "./encode/args.js";
+// The five kinds, one class each. Detection and benchmarking stay in this file;
+// how a kind is driven belongs to the kind.
+import {
+  NvencEncoder,
+  QsvEncoder,
+  SoftwareEncoder,
+  V4l2m2mEncoder,
+  VaapiEncoder
+} from "./encode/index.js";
+// Re-exported so every caller goes on importing these figures from here:
+// the same calculation, moved to sit beside the encoder kinds built from it.
+export {
+  chooseOutputFps,
+  maxrateKbpsFor,
+  nominalKbpsForHeight,
+  nominalKbpsForMaxrate,
+  TRANSCODE_FPS
+} from "./encode/args.js";
 
 // libx264 presets to benchmark, ordered slowest/highest-quality → fastest.
 const BENCHMARK_PRESETS = ["fast", "faster", "veryfast", "superfast", "ultrafast"];
@@ -214,115 +93,13 @@ const REALTIME = 1;
 // the most permissive. Where decoding IS priced, nothing chosen remains.
 const UNPRICED_DECODE_BAR = 1.8;
 
-/**
- * @param {number} targetWidth
- * @param {number} targetHeight
- * @returns {{ w: number, h: number }}
- */
-function safeDimensions(targetWidth, targetHeight) {
-  const w = Number.isInteger(targetWidth) && targetWidth > 0 ? targetWidth : 1280;
-  const h = Number.isInteger(targetHeight) && targetHeight > 0 ? targetHeight : 720;
-  return { w, h };
-}
 
-/**
- * Force a keyframe on every segment boundary so each HLS segment is
- * independently decodable.
- *
- * Two grids exist. The usual one is even — a keyframe every
- * `segmentDurationSec` — and the encoder is free to place them because it is
- * producing every frame anyway. The other is the SOURCE's own keyframe times,
- * used when this encode has to be interchangeable with a stream that is
- * COPIED: a copy can only be cut where the source already has a keyframe, so a
- * rung meant to splice into it must be cut at exactly those times and nowhere
- * else. Then the times are given outright.
- *
- * @param {number} segmentDurationSec
- * @param {number[] | null} [forcedTimes] - Run-relative seconds, ascending.
- * @returns {string[]}
- */
-function keyFrameArgs(segmentDurationSec, forcedTimes = null) {
-  if (Array.isArray(forcedTimes) && forcedTimes.length > 0) {
-    return ["-force_key_frames", forcedTimes.join(",")];
-  }
-  return ["-force_key_frames", `expr:gte(t,n_forced*${segmentDurationSec})`];
-}
-
-/**
- * Whether an explicit cut list was supplied.
- *
- * @param {number[] | null | undefined} forcedTimes
- * @returns {boolean}
- */
-function hasForcedTimes(forcedTimes) {
-  return Array.isArray(forcedTimes) && forcedTimes.length > 0;
-}
-
+// The five kinds live in `encode/`, one class each, and these keep the names
+// every caller already uses. A kind states its own arguments and its own
+// ladder of speed settings; detection and benchmarking stay here.
 /** @returns {import("./hwaccel.js").VideoEncoderDescriptor} */
 export function softwareDescriptor() {
-  return {
-    name: "libx264",
-    kind: "software",
-    device: null,
-    inputArgs: [],
-    buildVideoArgs({ targetWidth, targetHeight, segmentDurationSec, preset, fps, tonemap, forcedKeyframeTimes, nominalKbps = null }) {
-      const { w, h } = safeDimensions(targetWidth, targetHeight);
-      const chosenPreset = typeof preset === "string" && preset.length > 0 ? preset : SOFTWARE_PRESET;
-      // Output frame rate: inherited from the source (rounded/capped) by the
-      // session manager, TRANSCODE_FPS by default. MUST be an integer and MUST
-      // equal the value used in the GOP below, or keyframes drift off the grid.
-      const outFps = Number.isInteger(fps) && fps > 0 ? fps : TRANSCODE_FPS;
-      // HDR→SDR tone-map, inserted AFTER the downscale so it runs on the smaller
-      // frame (cheaper on ARM); only when the source is HDR and the filters are
-      // present (session manager gates on both).
-      const tonemapPart = tonemap === true ? `,${TONEMAP_FILTER_CHAIN}` : "";
-      return [
-        // Never upscale: cap the target box to the source size (min with
-        // iw/ih), so a small source (e.g. 720x400) is encoded at its own
-        // resolution instead of being scaled up to the viewport — far fewer
-        // pixels, much faster on ARM. force_original_aspect_ratio keeps aspect.
-        "-vf",
-        `scale='min(${w},iw)':'min(${h},ih)':force_original_aspect_ratio=decrease:force_divisible_by=2${tonemapPart},fps=${outFps}`,
-        "-c:v", "libx264",
-        // Preset is chosen per stream by the session manager from the startup
-        // benchmark (highest quality that still encodes the source resolution
-        // faster than realtime); falls back to the static default.
-        "-preset", chosenPreset,
-        "-crf", SOFTWARE_CRF,
-        // Constrained CRF: bound peak bitrate per rung so a complex scene
-        // cannot produce segments a thin viewer link (cellular) can't
-        // download in time. Sized by the TARGET box height (the rung the
-        // budget/manual selection chose).
-        ...bitrateCapArgs(h, nominalKbps),
-        "-threads", String(CPU_THREADS),
-        "-pix_fmt", "yuv420p",
-        // Fixed GOP: a keyframe exactly every (segmentDurationSec × fps) frames,
-        // scene-cut keyframes disabled. This is frame-count based, so it is
-        // independent of the PTS offset used on seek-restart — every HLS segment
-        // is exactly segmentDurationSec long and starts on a keyframe, so segment
-        // boundaries line up with the synthetic playlist with no gaps. (The old
-        // the OLD `expr:` form of -force_key_frames broke after a seek, because
-        // the `t` it reads is shifted by `-output_ts_offset`.)
-        //
-        // An explicit cut LIST is a different thing and does work: verified by
-        // running it, its times are on the run's own timeline — the same one
-        // `-segment_times` is measured on — so both are given one list and
-        // cannot drift apart. It replaces the frame-count GOP, which cannot
-        // describe the source's keyframes because they are not evenly spaced.
-        // `-g` stays as an upper bound on the interval: an extra keyframe
-        // inside a segment costs a little bitrate and cuts nothing, while
-        // leaving the interval unbounded means a driver that ignores the list
-        // produces one enormous segment instead of a wrong but cut one.
-        // `-keyint_min` goes, since a MINIMUM interval is the one thing that
-        // could argue with a forced keyframe.
-        "-g", String(segmentDurationSec * outFps),
-        ...(hasForcedTimes(forcedKeyframeTimes)
-          ? keyFrameArgs(segmentDurationSec, forcedKeyframeTimes)
-          : ["-keyint_min", String(segmentDurationSec * outFps)]),
-        "-sc_threshold", "0"
-      ];
-    }
-  };
+  return new SoftwareEncoder();
 }
 
 /**
@@ -330,25 +107,7 @@ export function softwareDescriptor() {
  * @returns {import("./hwaccel.js").VideoEncoderDescriptor}
  */
 function vaapiDescriptor(device) {
-  return {
-    name: "h264_vaapi",
-    kind: "vaapi",
-    device,
-    // Decode on the GPU into VAAPI surfaces; scale and encode stay on-GPU.
-    inputArgs: ["-hwaccel", "vaapi", "-hwaccel_output_format", "vaapi", "-vaapi_device", device],
-    // No fps filter: VAAPI inherits the source rate and keeps keyframes on the
-    // grid via time-based -force_key_frames, so it already honours source fps.
-    buildVideoArgs({ targetWidth, targetHeight, segmentDurationSec, forcedKeyframeTimes }) {
-      const { w, h } = safeDimensions(targetWidth, targetHeight);
-      return [
-        "-vf",
-        `scale_vaapi=w=${w}:h=${h}:force_original_aspect_ratio=decrease`,
-        "-c:v", "h264_vaapi",
-        "-qp", "24",
-        ...keyFrameArgs(segmentDurationSec, forcedKeyframeTimes)
-      ];
-    }
-  };
+  return new VaapiEncoder(device);
 }
 
 /**
@@ -356,82 +115,19 @@ function vaapiDescriptor(device) {
  * @returns {import("./hwaccel.js").VideoEncoderDescriptor}
  */
 function qsvDescriptor(device) {
-  return {
-    name: "h264_qsv",
-    kind: "qsv",
-    device,
-    inputArgs: ["-hwaccel", "qsv", "-qsv_device", device],
-    buildVideoArgs({ targetWidth, targetHeight, segmentDurationSec, forcedKeyframeTimes }) {
-      const { w, h } = safeDimensions(targetWidth, targetHeight);
-      return [
-        "-vf", `scale_qsv=w=${w}:h=${h}`,
-        "-c:v", "h264_qsv",
-        "-global_quality", "24",
-        ...keyFrameArgs(segmentDurationSec, forcedKeyframeTimes)
-      ];
-    }
-  };
+  return new QsvEncoder(device);
 }
 
 /** @returns {import("./hwaccel.js").VideoEncoderDescriptor} */
 function nvencDescriptor() {
-  return {
-    name: "h264_nvenc",
-    kind: "nvenc",
-    device: null,
-    inputArgs: [],
-    // No fps filter: NVENC is fast and places keyframes by time-based
-    // -force_key_frames, so it inherits the exact source rate (fractional
-    // included) with no need to round or cap. Same rationale as VAAPI/QSV.
-    buildVideoArgs({ targetWidth, targetHeight, segmentDurationSec, forcedKeyframeTimes }) {
-      const { w, h } = safeDimensions(targetWidth, targetHeight);
-      return [
-        "-vf",
-        `scale=${w}:${h}:force_original_aspect_ratio=decrease:force_divisible_by=2`,
-        "-c:v", "h264_nvenc",
-        "-preset", "p4",
-        "-cq", "24",
-        "-pix_fmt", "yuv420p",
-        ...keyFrameArgs(segmentDurationSec, forcedKeyframeTimes)
-      ];
-    }
-  };
+  return new NvencEncoder();
 }
 
 /** @returns {import("./hwaccel.js").VideoEncoderDescriptor} */
 function v4l2m2mDescriptor() {
-  // ARM SoC (e.g. Raspberry Pi / HA Yellow) stateful M2M encoder. No GPU
-  // scaler — scale in software, hand YUV420 frames to the hardware encoder.
-  // `-g` aligns the GOP to the segment length so an IDR lands on every segment
-  // boundary; this is verified by the keyframe-alignment test before use,
-  // because v4l2m2m does not always honour these hints.
-  return {
-    name: "h264_v4l2m2m",
-    kind: "v4l2m2m",
-    device: null,
-    inputArgs: [],
-    buildVideoArgs({ targetWidth, targetHeight, segmentDurationSec, fps, forcedKeyframeTimes }) {
-      const { w, h } = safeDimensions(targetWidth, targetHeight);
-      const outFps = Number.isInteger(fps) && fps > 0 ? fps : TRANSCODE_FPS;
-      return [
-        "-vf",
-        `scale=${w}:${h}:force_original_aspect_ratio=decrease:force_divisible_by=2,fps=${outFps},format=yuv420p`,
-        "-c:v", "h264_v4l2m2m",
-        // More capture buffers than the default 4 — the default deadlocks /
-        // drops frames on the CM4 encoder ("All capture buffers returned to
-        // userspace").
-        "-num_capture_buffers", "32",
-        "-b:v", "3M",
-        // Kept even with an explicit cut list, as an upper bound on the
-        // interval: this encoder is the one known not always to honour keyframe
-        // hints, and without any bound a list it ignores yields one segment for
-        // the whole file rather than a wrongly-cut one.
-        "-g", String(outFps * segmentDurationSec),
-        ...keyFrameArgs(segmentDurationSec, forcedKeyframeTimes)
-      ];
-    }
-  };
+  return new V4l2m2mEncoder();
 }
+
 
 
 /**

@@ -1,10 +1,11 @@
+// Only what is imported through this file, which is the one type five other
+// modules name in their JSDoc. Every class beside it — `VideoTrack`,
+// `AudioTrack`, `SubtitleTrack`, `TextSubtitleTrack`, `ImageSubtitleTrack` —
+// and the tables `TEXT_CODECS_MATROSKA`, `TEXT_FORMATS_MP4` and `MarkupKind`
+// were re-exported here and taken by nobody: whoever needs one imports the
+// module that declares it.
 export { ContainerTrack } from "./ContainerTrack.js";
-export { VideoTrack } from "./VideoTrack.js";
-export { AudioTrack } from "./AudioTrack.js";
-export { SubtitleTrack } from "./SubtitleTrack.js";
-export { TextSubtitleTrack, TEXT_CODECS_MATROSKA, TEXT_FORMATS_MP4 } from "./TextSubtitleTrack.js";
-export { ImageSubtitleTrack } from "./ImageSubtitleTrack.js";
-export { MarkupKind } from "./TextSubtitleTrack.js";
+
 // There is deliberately no class for a track that lives in a file of its own.
 // `<name>.mka` is a Matroska container holding an `AudioTrack`, and
 // `MatroskaContainer` reads it exactly as it reads the picture's — so "external"

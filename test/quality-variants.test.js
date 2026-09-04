@@ -281,7 +281,8 @@ test("a segment request hands the encoder to the variant the viewer moved to", a
   });
   const variant = fakeSession({ id: VARIANT_ID, encodeHeight: 540, dirPath });
   variant.variantHeight = 540;
-  // A step of the picture: same file, and a height of its own.
+  // A step of the picture: made as one, same file, and a height of its own.
+  variant.isStep = true;
   manager.sessionsById.set(VARIANT_ID, variant);
   base.file.stepHeights.set(540, 540);
   // The viewer is a hundred seconds in, and the base is the one encoding.
@@ -314,7 +315,8 @@ test("a rung is placed where the player asked it for, not where the other rung h
   });
   const variant = fakeSession({ id: VARIANT_ID, encodeHeight: 540, dirPath });
   variant.variantHeight = 540;
-  // A step of the picture: same file, and a height of its own.
+  // A step of the picture: made as one, same file, and a height of its own.
+  variant.isStep = true;
   manager.sessionsById.set(VARIANT_ID, variant);
   base.file.stepHeights.set(540, 540);
   startRunOn(base, { process: fakeEncoder() });
@@ -343,7 +345,8 @@ test("warming a rung prepares it without taking the encoder from the one on scre
   });
   const variant = fakeSession({ id: VARIANT_ID, encodeHeight: 540, dirPath });
   variant.variantHeight = 540;
-  // A step of the picture: same file, and a height of its own.
+  // A step of the picture: made as one, same file, and a height of its own.
+  variant.isStep = true;
   manager.sessionsById.set(VARIANT_ID, variant);
   base.file.stepHeights.set(540, 540);
   const encoder = fakeEncoder();
@@ -369,7 +372,8 @@ test("a rung warmed at the playhead survives the switch that lands just ahead of
   });
   const variant = fakeSession({ id: VARIANT_ID, encodeHeight: 540, dirPath });
   variant.variantHeight = 540;
-  // A step of the picture: same file, and a height of its own.
+  // A step of the picture: made as one, same file, and a height of its own.
+  variant.isStep = true;
   manager.sessionsById.set(VARIANT_ID, variant);
   base.file.stepHeights.set(540, 540);
   startRunOn(base, { process: fakeEncoder() });
@@ -408,7 +412,8 @@ test("a rung warmed PAST the switch is repositioned, which is what warming late 
   });
   const variant = fakeSession({ id: VARIANT_ID, encodeHeight: 540, dirPath });
   variant.variantHeight = 540;
-  // A step of the picture: same file, and a height of its own.
+  // A step of the picture: made as one, same file, and a height of its own.
+  variant.isStep = true;
   manager.sessionsById.set(VARIANT_ID, variant);
   base.file.stepHeights.set(540, 540);
   startRunOn(base, { process: fakeEncoder() });
@@ -438,7 +443,8 @@ test("the rung on screen fetching its own segments does not cancel a warm-up", a
   });
   const variant = fakeSession({ id: VARIANT_ID, encodeHeight: 540, dirPath });
   variant.variantHeight = 540;
-  // A step of the picture: same file, and a height of its own.
+  // A step of the picture: made as one, same file, and a height of its own.
+  variant.isStep = true;
   manager.sessionsById.set(VARIANT_ID, variant);
   base.file.stepHeights.set(540, 540);
   const warmedEncoder = fakeEncoder();

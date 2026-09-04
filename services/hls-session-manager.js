@@ -81,7 +81,8 @@ import {
 // what they pin — where a run begins, where it cuts, which timeline it works on
 // — did not move when the code did.
 export { ffmpegSeconds, onKeyframeGridFor, seekLandingOffsetFor, segmentCutTimesFrom };
-import { viewerOf, viewersOf } from "./viewer/Viewer.js";
+import { viewersOf } from "./viewer/Viewer.js";
+import { Viewers } from "./viewer/Viewers.js";
 import { EncodeOrchestrator } from "./orchestrators/EncodeOrchestrator.js";
 import { readDiskFree } from "./memory-report.js";
 
@@ -458,7 +459,7 @@ function startAtLadderTop(budget, outputFps, benchmark, cost = {}) {
  * @param {string} baseSessionId
  * @returns {string}
  */
-function variantConsumerId(baseSessionId) {
+export function variantConsumerId(baseSessionId) {
   return `variant-of:${baseSessionId}`;
 }
 
@@ -1818,6 +1819,11 @@ export class HlsSessionManager {
     this.startupWaitMs = startupWaitMs;
     this.localBaseUrl = buildHttpBaseUrl(localBindHost, localPort);
     this.sessionsById = new Map();
+    // Everyone watching anything, one object per person rather than one per
+    // person per output. What a viewer chose, where they are and which outputs
+    // they are watching are facts about the person; kept per output they were
+    // three copies of which two were always stale.
+    this.viewers = new Viewers();
     // What this host learned last time it ran. Without it every restart shows
     // the first viewer a figure with no measurement behind it.
     this.#loadHostTimings();
@@ -2071,7 +2077,7 @@ export class HlsSessionManager {
           // joining knows nothing about: they may have chosen another language,
           // and their browser may need a track re-encoded that the first
           // viewer's could decode as it stands.
-          viewerOf(existing, consumerId).audio = {
+          this.viewers.of(existing, consumerId).audio = {
             trackIndex: normalizedAudioTrack,
             transcode: transcodeAudio === true
           };
@@ -2813,7 +2819,7 @@ export class HlsSessionManager {
     // never has to have requested a segment first for its own soundtrack choice
     // to be known.
     if (consumerId) {
-      viewerOf(session, consumerId).audio = {
+      this.viewers.of(session, consumerId).audio = {
         trackIndex: normalizedAudioTrack,
         transcode: transcodeAudio === true
       };
@@ -3441,7 +3447,7 @@ export class HlsSessionManager {
     // report of one of them says nothing about the other's encoder.
     const session = this.#activeVariant(named, typeof consumerId === "string" ? consumerId : "");
     const now = Date.now();
-    viewerOf(session, typeof consumerId === "string" && consumerId.length > 0 ? consumerId : "").netReport = {
+    this.viewers.of(session, typeof consumerId === "string" && consumerId.length > 0 ? consumerId : "").netReport = {
       linkMbps,
       bufferedAheadSec,
       // Where the picture is, said by the viewer rather than worked out from
@@ -3462,9 +3468,10 @@ export class HlsSessionManager {
         viewer.netReport = null;
         // A viewer with nothing left to say about themselves is a viewer this
         // session has not met: one object goes, where six maps each had to be
-        // emptied and none of them was.
+        // emptied and none of them was. Through the one exit, so that what they
+        // had claimed of production goes with them.
         if (viewer.head === null && viewer.activeVariantId === null) {
-          viewersOf(session).delete(key);
+          this.#viewerLeaves(session, key);
         }
       }
     }
@@ -3502,7 +3509,7 @@ export class HlsSessionManager {
     // where they are, and the two answer different questions — see
     // `viewerPositionSource`. Only a seek writes it, so a request does not erase
     // it.
-    const viewer = viewerOf(session, consumerId);
+    const viewer = this.viewers.of(session, consumerId);
     const seeked = viewer.head?.seeked ?? null;
     viewer.head = { segment, seconds, at: now, seeked };
     const staleAfterMs = (this.lookaheadSeconds + this.segmentDurationSec) * 1000;
@@ -3513,8 +3520,10 @@ export class HlsSessionManager {
       }
       if (!other.isLive(now, staleAfterMs)) {
         // A viewer nobody has heard from for longer than the cushion has gone.
-        // One object goes, where six parallel maps each had to be remembered.
-        heads.delete(key);
+        // One object goes, where six parallel maps each had to be remembered —
+        // and it goes through the one exit, which also releases what they had
+        // claimed of production.
+        this.#viewerLeaves(session, key);
         continue;
       }
       if (other.head.segment > furthest.segment) {
@@ -6305,7 +6314,7 @@ export class HlsSessionManager {
     // is the freeze of 2026-08-18; keeping per-viewer heads without moving them
     // on a seek would bring it back one viewer at a time.
     if (consumerId) {
-      viewerOf(named, consumerId).head = {
+      this.viewers.of(named, consumerId).head = {
         segment: this.#segmentIndexForTime(named, positionSeconds),
         seconds: positionSeconds,
         at: Date.now(),
@@ -7147,12 +7156,19 @@ export class HlsSessionManager {
       return session;
     }
     // A step of a picture: the picture is the live session of the same file
-    // that is not a step of one. How a session came to be is a fact about it,
-    // not a link to another session — so a step whose picture has gone answers
-    // for itself rather than following a dead reference, and nothing has to be
-    // cleaned from the other side when one of them ends.
-    for (const other of this.#stepsOf(session)) {
-      if (other.isStep !== true) {
+    // that is neither a step nor a soundtrack. How a session came to be is a
+    // fact about it, not a link to another session — so a step whose picture
+    // has gone answers for itself rather than following a dead reference, and
+    // nothing has to be cleaned from the other side when one of them ends.
+    //
+    // One file can carry two pictures at once — a browser that understands
+    // rendition groups and one that needs the sound muxed in produce two — and
+    // then this returns whichever was made first. Everything asked of the
+    // answer is a fact of the FILE and of this host: what heights can be
+    // offered, what a step costs, when the budget last acted. Two pictures of
+    // one file answer all of those alike.
+    for (const other of this.#familyOf(session)) {
+      if (other.isStep !== true && other.audioOnly !== true) {
         return other;
       }
     }
@@ -7160,116 +7176,89 @@ export class HlsSessionManager {
   }
 
   /**
-   * This viewer is watching this output.
+   * This viewer is no longer watching this output.
    *
-   * One of the two sets that replaced a film object: the viewer holds the
-   * outputs it is watching, and the output holds its viewers. Between them they
-   * answer every question the three link fields were kept for — how many people
-   * need this soundtrack, what belongs to this viewer's playback, whether an
-   * encoder has anybody left — and unlike a chain of links they answer it
-   * without one part of a film deciding another part's lifetime.
+   * Both directions of the relation go together — the output forgets the
+   * viewer, the viewer forgets the output — and so does the claim their
+   * watching had placed on production. That last part is why this is a method
+   * and not a line: the ONLY place a claim is released is the plan's pass over
+   * `viewersOf(session)` (`#planEncoding`), so a viewer deleted from that map
+   * by any other route leaves a claim nothing can ever release, and the plan
+   * goes on making segments for somebody who has gone.
    *
    * @param {HlsSession} output
    * @param {string} consumerId
-   * @param {HlsSession} [instead] - An output this viewer has just left.
-   * @returns {void}
+   * @returns {boolean} Whether they had been watching it.
    */
-  #viewerWatches(output, consumerId, instead = null) {
-    if (!output || !consumerId) {
-      return;
+  #viewerLeaves(output, consumerId) {
+    if (!output) {
+      return false;
     }
-    const viewer = viewerOf(output, consumerId);
-    viewer.outputs.add(output.id);
-    if (instead && instead !== output) {
-      viewerOf(instead, consumerId).outputs.delete(instead.id);
-      viewersOf(instead).delete(consumerId);
+    const left = this.viewers.leaves(output, consumerId);
+    if (left) {
+      this.encodeOrchestrator.release(`${output.id}:${consumerId}`);
     }
+    return left;
   }
 
   /**
-   * The soundtracks published separately for this picture, live ones only.
+   * Every live session of one file: the picture, its quality steps, and the
+   * soundtracks published separately.
    *
-   * Found by what they ARE — audio-only outputs of the same file, cut on the
-   * same grid — and not by a list of ids the picture keeps. A list of ids is a
-   * link between sessions: it ties their lifetimes together, it goes stale when
-   * one of them is disposed, and it has to be cleaned from the other side. What
-   * an output is is enough to find it, which is the rule `OutputSpec` exists
-   * for.
+   * Found by what they ARE and not by a list of ids anybody keeps. A list of
+   * ids is a link between sessions: it ties their lifetimes together, it goes
+   * stale when one of them is disposed, and it has to be cleaned from the other
+   * side. What an output is is enough to find it, which is the rule
+   * `OutputSpec` exists for.
    *
-   * @param {HlsSession} base
-   * @returns {HlsSession[]}
-   */
-  #renditionsOf(base) {
-    const found = [];
-    for (const session of this.sessionsById.values()) {
-      if (
-        session === base ||
-        session.state === "disposed" ||
-        session.audioOnly !== true ||
-        session.file?.key !== base.file?.key
-      ) {
-        continue;
-      }
-      found.push(session);
-    }
-    return found;
-  }
-
-  /**
-   * The quality steps of this picture, live ones only, found the same way.
-   *
-   * @param {HlsSession} base
-   * @returns {HlsSession[]}
-   */
-  #stepsOf(base) {
-    const found = [];
-    for (const session of this.sessionsById.values()) {
-      if (
-        session === base ||
-        session.state === "disposed" ||
-        session.audioOnly === true ||
-        session.file?.key !== base.file?.key
-      ) {
-        continue;
-      }
-      found.push(session);
-    }
-    return found;
-  }
-
-  /**
-   * Every session cut on one grid: a base and its quality rungs.
+   * The file is what they share, so the file is what this asks about. Where the
+   * sums this feeds are concerned that is also the right question: two pictures
+   * of one file are two encoders on one machine whether or not anybody thinks
+   * of them as one film.
    *
    * @param {HlsSession} session
    * @returns {HlsSession[]}
    */
   #familyOf(session) {
-    const family = new Set([session]);
-    // The outputs the viewers of this session are watching, which for any one
-    // of them is the picture, the quality step on their screen and the
-    // soundtrack they chose. Two sets answer it — a viewer holds its outputs,
-    // an output holds its viewers — where three link fields used to stand in
-    // for a film object that cannot exist: the parts of a film are born at
-    // different times, die at different times, and are addressed separately.
-    for (const viewer of viewersOf(session).values()) {
-      for (const outputId of viewer.outputs) {
-        const output = this.sessionsById.get(outputId);
-        if (output && output.state !== "disposed") {
-          family.add(output);
-        }
+    const family = [session];
+    const key = session?.file?.key;
+    for (const other of this.sessionsById.values()) {
+      if (other === session || other.state === "disposed" || other.file?.key !== key) {
+        continue;
       }
+      family.push(other);
     }
-    // What this session has made for its viewers and nobody has watched yet: a
-    // step being warmed for a switch, a soundtrack being prepared. They are
-    // encoders of this family exactly as the rest are, and pricing the family
-    // without them prices a machine as emptier than it is.
-    for (const step of this.#stepsOf(session)) {
-      family.add(step);
-    }
-    for (const rendition of this.#renditionsOf(session)) {
-      family.add(rendition);
-    }
-    return [...family];
+    return family;
+  }
+
+  /**
+   * The soundtracks published separately for this picture, live ones only.
+   *
+   * @param {HlsSession} base
+   * @returns {HlsSession[]}
+   */
+  #renditionsOf(base) {
+    return this.#familyOf(base).filter(
+      (session) => session !== base && session.audioOnly === true
+    );
+  }
+
+  /**
+   * The quality steps of this picture, live ones only.
+   *
+   * A step is a session made as one — `isStep`, written where it is created —
+   * and not merely "another session of this file that carries a picture". The
+   * difference is the second picture above: one file can hold two, and calling
+   * one of them a step of the other would let a switch away from a step stop
+   * the encoder of somebody else's picture.
+   *
+   * @param {HlsSession} base
+   * @returns {HlsSession[]}
+   */
+  #stepsOf(base) {
+    return this.#familyOf(base).filter(
+      (session) => session !== base && session.isStep === true
+    );
   }
 
   /**
@@ -8532,7 +8521,7 @@ export class HlsSessionManager {
     const active = this.sessionsById.get(activeId);
     if (!active || active.state === "disposed") {
       if (named) {
-        viewerOf(base, consumerId).activeVariantId = null;
+        this.viewers.of(base, consumerId).activeVariantId = null;
       }
       if (base.activeVariantId === activeId) {
         base.activeVariantId = base.id;
@@ -9220,7 +9209,7 @@ export class HlsSessionManager {
     // warming a quality rung has, and the same answer. Kept per viewer, because
     // one viewer's abandoned preparation must not stop a track another viewer
     // is listening to.
-    const stillWarming = viewerOf(base, consumerId).warmingAudioId;
+    const stillWarming = this.viewers.of(base, consumerId).warmingAudioId;
     if (stillWarming && stillWarming !== rendition.id) {
       const abandoned = this.sessionsById.get(stillWarming);
       const wanted = this.#liveAudioRenditionKeys(base);
@@ -9233,8 +9222,10 @@ export class HlsSessionManager {
         this.#stopEncodeRun(abandoned, "prepared for a track change the viewer did not make");
       }
     }
-    viewerOf(base, consumerId).warmingAudioId = rendition.id;
-    this.#viewerWatches(rendition, consumerId);
+    this.viewers.of(base, consumerId).warmingAudioId = rendition.id;
+    // Being prepared for them is watching it: it is made for this viewer, and
+    // when they leave it must be let go with everything else of theirs.
+    this.viewers.of(rendition, consumerId);
     // Pointed at the position the switch will land on: an existing track is
     // parked wherever the viewer left it.
     this.#seekSession(rendition, positionSeconds);
@@ -9265,7 +9256,7 @@ export class HlsSessionManager {
     // for one, which is the opposite of what warming is for.
     // Kept per viewer, and stopped only if nobody has it on screen: with two
     // viewers, what one of them abandons may be what the other is watching.
-    const stillWarming = viewerOf(base, consumerId).warmingVariantId;
+    const stillWarming = this.viewers.of(base, consumerId).warmingVariantId;
     if (stillWarming && stillWarming !== variant.id) {
       const abandoned = this.sessionsById.get(stillWarming);
       if (abandoned && !this.#variantsOnScreen(base).has(abandoned.id)) {
@@ -9275,9 +9266,9 @@ export class HlsSessionManager {
     // The base is not a rung being prepared for anybody — it is what the family
     // is named by — so warming its own height leaves nothing outstanding.
     if (variant.id === base.id) {
-      viewerOf(base, consumerId).warmingVariantId = null;
+      this.viewers.of(base, consumerId).warmingVariantId = null;
     } else {
-      viewerOf(base, consumerId).warmingVariantId = variant.id;
+      this.viewers.of(base, consumerId).warmingVariantId = variant.id;
     }
     // An existing rung may be parked wherever it was left, so it is pointed at
     // the switch position exactly as an activation would — the difference is
@@ -9330,7 +9321,7 @@ export class HlsSessionManager {
     // it — only the rung being LEFT is stopped below.
     const warmed = base.viewers?.get(consumerId)?.warmingVariantId ?? null;
     if (base.viewers?.has(consumerId)) {
-      viewerOf(base, consumerId).warmingVariantId = null;
+      this.viewers.of(base, consumerId).warmingVariantId = null;
     }
     if (warmed && warmed !== variant.id && warmed !== previous.id) {
       const abandoned = this.sessionsById.get(warmed);
@@ -9340,15 +9331,18 @@ export class HlsSessionManager {
     }
     const position = this.#variantStartSeconds(base, wantedIndex, consumerId);
     base.activeVariantId = variant.id;
-    const previousId = viewerOf(base, consumerId).activeVariantId;
-    viewerOf(base, consumerId).activeVariantId = variant.id;
-    // The step is an output of this viewer's now, and the one they left is not.
-    this.#viewerWatches(base, consumerId);
-    this.#viewerWatches(
-      variant,
-      consumerId,
-      previousId && previousId !== variant.id ? this.sessionsById.get(previousId) : null
-    );
+    this.viewers.of(base, consumerId).activeVariantId = variant.id;
+    // The step is an output of this viewer's now.
+    this.viewers.of(variant, consumerId);
+    // And the one they came off is not — unless it is the picture itself, which
+    // they never stop watching: the browser addresses the picture, their chosen
+    // soundtrack is recorded on it, and the plan reads their position from it.
+    // Leaving it deleted their whole record, so a viewer who went down a step,
+    // back to the picture's own height and down again lost the soundtrack they
+    // had chosen, and the encoder making it was stopped as unwanted.
+    if (previous !== base && previous !== variant) {
+      this.#viewerLeaves(previous, consumerId);
+    }
     logger.info(
       `transcode ${base.id} variant now ${this.variantHeightOf(variant)}p ` +
       `(was ${this.variantHeightOf(previous)}p) at ${position.toFixed(1)}s` +
@@ -9575,7 +9569,7 @@ export class HlsSessionManager {
     if (previous.trackIndex === trackIndex) {
       return;
     }
-    viewerOf(base, consumerId).audio = { ...previous, trackIndex };
+    this.viewers.of(base, consumerId).audio = { ...previous, trackIndex };
     // Kept for the viewer who cannot name themselves, and for the master's
     // default rendition when nobody has said anything else.
     base.activeAudioTrackIndex = trackIndex;
@@ -9590,10 +9584,10 @@ export class HlsSessionManager {
       // Requests held on it are for segments nobody will produce now, and the
       // player stopped waiting for them the moment it changed track.
       other.waitEpoch = (other.waitEpoch ?? 0) + 1;
-      // Nobody is watching this output any more, and that is what the two sets
-      // say: this viewer's outputs no longer hold it, and it holds no viewers.
-      viewerOf(base, consumerId).outputs.delete(other.id);
-      viewersOf(other).delete(consumerId);
+      // Nobody is listening to it any more: this viewer stops watching that
+      // output, on both sides of the relation, and the claim their listening
+      // placed on it is released with them.
+      this.#viewerLeaves(other, consumerId);
       this.#stopEncodeRun(other, `no viewer is listening to audio track ${other.audioTrackIndex ?? "?"}`);
     }
   }
@@ -11109,12 +11103,19 @@ export class HlsSessionManager {
       session.consumers = new Set();
     }
     session.consumers.delete(consumerId);
-    // And everything that was true of them alone. This is what six parallel
-    // maps made easy to forget, and it WAS forgotten: a viewer who had left
-    // went on counting as wanting their soundtrack until their head expired,
-    // and their entries stayed for the life of the session. One object, one
-    // deletion.
-    viewersOf(session).delete(consumerId);
+    // And everything that was true of them alone, in EVERY output of this film
+    // they were watching — not only in the one the browser addresses. A viewer
+    // watches a picture, a quality step and a soundtrack; the browser knows one
+    // id of the three, so subtracting them here from that one left them counted
+    // as watching the other two. This is the half of the relation the viewer
+    // holds, and it exists for exactly this question.
+    for (const outputId of this.viewers.watching(session, consumerId)) {
+      const output = this.sessionsById.get(outputId);
+      if (output) {
+        this.#viewerLeaves(output, consumerId);
+      }
+    }
+    this.#viewerLeaves(session, consumerId);
     session.lastAccessedAt = Date.now();
     const logReason = typeof reason === "string" && reason.length > 0 ? reason : "unspecified";
     logger.info(
@@ -11124,7 +11125,37 @@ export class HlsSessionManager {
     if (session.consumers.size > 0) {
       return true;
     }
+    // Read before the picture goes, because a family is found through the file
+    // the sessions share and a disposed session is no longer among them.
+    const family = this.#familyOf(session).filter((other) => other !== session);
     await this.disposeSession(sessionId);
+    // The quality steps and the soundtracks this picture had made. Nobody
+    // outside this class knows their ids — the browser holds one id for the
+    // whole film — so nothing else can ever let go of them, and each holds a
+    // consumer, a claim on the torrent, a directory and, until the plan's next
+    // pass, a live encoder. Left alone they would sit until the idle timer
+    // noticed, half an hour later.
+    //
+    // The rule is the viewers and not the picture: an output with somebody
+    // still watching stays, whoever made it. That is what makes this different
+    // from the chain of links it replaced — a picture ending is not what kills
+    // a soundtrack; having no listeners is.
+    const familyConsumer = variantConsumerId(session.id);
+    for (const output of family) {
+      if (
+        !this.sessionsById.has(output.id) ||
+        viewersOf(output).size > 0 ||
+        !(output.consumers instanceof Set) ||
+        !output.consumers.has(familyConsumer)
+      ) {
+        continue;
+      }
+      await this.releaseSessionConsumer(
+        output.id,
+        familyConsumer,
+        "nobody is watching it and the picture it was made for has ended"
+      );
+    }
     return true;
   }
 
@@ -11161,7 +11192,10 @@ export class HlsSessionManager {
     // request builds one. What does have to be forgotten is what a VIEWER was
     // watching, because their next request would resolve a session that no
     // longer exists.
-    for (const other of this.#stepsOf(session)) {
+    for (const [consumerId] of [...viewersOf(session)]) {
+      this.#viewerLeaves(session, consumerId);
+    }
+    for (const other of this.#familyOf(session)) {
       if (other.activeVariantId === session.id) {
         other.activeVariantId = other.id;
       }

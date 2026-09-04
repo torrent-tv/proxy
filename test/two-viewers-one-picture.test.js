@@ -43,7 +43,7 @@ function fakeSession({ id, dirPath, audioTrackIndex = 0, transcodeAudio = true }
       cutGrid: "keyframe"
     }),
     state: "ready",
-    file: new SourceFile({ sourceKey: "torrent:abc", fileIndex: 0, name: "video.mkv" }),
+    file: new SourceFile({ sourceKey: "torrent:abc", fileIndex: 0, name: "video.mkv" }).learn({ width: 1920, height: 1080 }),
     startedAt: Date.now(),
     createEntryMs: Date.now(),
     lastAccessedAt: Date.now(),
@@ -58,8 +58,6 @@ function fakeSession({ id, dirPath, audioTrackIndex = 0, transcodeAudio = true }
     audioTrackIndex,
     audioSourceTrackIndex: audioTrackIndex,
     audioFileIndex: 0,
-    sourceWidth: 1920,
-    sourceHeight: 1080,
     // The shape this output is encoded AS, decided once for the output.
     output: new Output({
       encodeWidth: 0,
@@ -299,13 +297,16 @@ test("a step somebody is watching is never withdrawn from the offer", async (t) 
   base.variantHeight = 1080;
   manager.softwarePresetBenchmark = [{ preset: "ultrafast", pixelsPerSec: 12_000_000 }];
   manager.decodeCostModel = { pixelTerm: 0.00793, bitrateTerm: 0, constantTerm: 0 };
-  base.sourceDecode = { megapixelsPerSecond: 49.766, megabitsPerSecond: 8 };
+  // 1080p24 at 8 Mbit/s, stated as the file's own facts — what decoding costs
+  // is derived from them.
+  base.file.learn({ width: 1920, height: 1080, fps: 24, bitrateKbps: 8000 });
 
   const variant = fakeSession({ id: "variant-720", dirPath });
   variant.transcodeVideo = true;
   variant.output.encodeHeight = 720;
   variant.variantHeight = 720;
-  variant.sourceDecode = base.sourceDecode;
+  // One file, two sessions of it.
+  variant.file = base.file;
   variant.variantBases = new Set([BASE_ID]);
   manager.sessionsById.set(variant.id, variant);
   base.variants = new Map([[720, variant.id]]);

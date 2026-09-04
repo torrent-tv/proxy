@@ -2174,10 +2174,16 @@ export class HlsSessionManager {
       : await probeInputMediaInfo(this.ffmpegBin, pictureUrl.toString());
     const mediaInfoMs = Date.now() - mediaInfoStartMs;
     const mediaInfoSource = cachedUsable ? "cached" : "probed";
-    const durationSeconds = mediaInfo.durationSeconds;
-    const sourceWidth = mediaInfo.width;
-    const sourceHeight = mediaInfo.height;
-    const sourceStartTime = Number.isFinite(mediaInfo.startTime) ? mediaInfo.startTime : 0;
+    // The file takes in what the probe said. It is the same answer for every
+    // session of this file — a quality step, a soundtrack, a second viewer — so
+    // it is kept once instead of being copied into each. A later session with a
+    // fresher reading updates it: on a cold torrent the first probe can come
+    // back without a duration, and the second is the one that has it.
+    file.learn(mediaInfo);
+    const durationSeconds = file.durationSeconds ?? 0;
+    const sourceWidth = file.width;
+    const sourceHeight = file.height;
+    const sourceStartTime = file.startTime;
     // Where the timeline of the file this session actually READS begins.
     //
     // For every session until now that was the picture's own file, so one figure
@@ -2440,8 +2446,9 @@ export class HlsSessionManager {
     // resolution, so encode exactly that box (capped to source by the scale
     // filter) with the default preset.
     // What decoding this source costs, which every re-encode pays on top of
-    // the encoder. Read from the probe; null when it did not say enough.
-    const sourceDecode = sourceDecodeCharacteristics(mediaInfo);
+    // the encoder. Derived from the file's own facts; null when the probe did
+    // not say enough.
+    const sourceDecode = file.decode;
     const chosenBudget = this.#chooseEncodeBudget({
       transcodeVideo,
       targetWidth: normalizedTargetWidth,
@@ -2571,10 +2578,6 @@ export class HlsSessionManager {
       // session, which is what every browser gets until it says otherwise.
       audioOnly: audioOnly === true,
       audioRenditions: audioRenditions === true,
-      // What the source declared it holds, kept for a failed run to quote. Null
-      // when the media info came from a cache that predates this field or from
-      // a probe whose banner carried no stream lines.
-      sourceStreamCounts: mediaInfo.streamCounts ?? null,
       // Client-requested target box (the orientation-independent ceiling). Kept
       // for the session key and reference; the actual encode uses encodeWidth/
       // encodeHeight, which the realtime budget may have downscaled below this.
@@ -2646,13 +2649,6 @@ export class HlsSessionManager {
       // When this session last said what its cushion is (see #sayCushion).
       cushionSaidAt: 0,
       linkSlowSince: 0,
-      sourceWidth,
-      sourceHeight,
-      // Pixel rate and bitrate of the source, for pricing a re-encode of it.
-      sourceDecode,
-      // Container start time (seconds); subtracted on the copy path so the
-      // output timeline is 0-based even when the source starts at e.g. 0.1 s.
-      sourceStartTime,
       inputUrl: inputUrl.toString(),
       // The container this session produces. Per session, not per proxy: the
       // viewer's browser decides, because it is the one that has to decode the
@@ -4145,7 +4141,7 @@ export class HlsSessionManager {
     session.cushionSaidAt = now;
     const aheadOfPicture = Math.max(0, encodedTo - earliestPosition);
     const fileLength = this.#fileLengthByKey.get(session.file.key);
-    const duration = Number(session.timeline.totalDurationSeconds) || Number(session.durationSeconds) || 0;
+    const duration = Number(session.timeline.totalDurationSeconds) || Number(session.file.durationSeconds) || 0;
     const megabytes =
       Number.isFinite(fileLength) && fileLength > 0 && duration > 0
         ? ((aheadOfPicture * fileLength) / duration / 1e6).toFixed(0)
@@ -5036,7 +5032,7 @@ export class HlsSessionManager {
     if (!base || base.transcodeVideo === true) {
       return 0;
     }
-    return Math.round(Number(base.sourceHeight) || 0);
+    return Math.round(Number(base.file.height) || 0);
   }
 
   /**
@@ -5206,7 +5202,7 @@ export class HlsSessionManager {
    * @returns {number | undefined}
    */
   #nextHeightUp(base, current) {
-    const ceiling = Math.round(Number(base.sourceHeight) || 0);
+    const ceiling = Math.round(Number(base.file.height) || 0);
     return this.offeredHeights(base)
       .filter((height) => height > current && height <= ceiling)
       .sort((left, right) => left - right)[0];
@@ -5225,9 +5221,9 @@ export class HlsSessionManager {
    * @returns {number}
    */
   #peakMbpsForHeight(base, height) {
-    const sourceHeight = Math.round(Number(base.sourceHeight) || 0);
+    const sourceHeight = Math.round(Number(base.file.height) || 0);
     if (height === sourceHeight && base.transcodeVideo !== true) {
-      const sourceMbps = Number(base.sourceDecode?.megabitsPerSecond);
+      const sourceMbps = Number(base.file.decode?.megabitsPerSecond);
       if (Number.isFinite(sourceMbps) && sourceMbps > 0) {
         return sourceMbps;
       }
@@ -5374,8 +5370,8 @@ export class HlsSessionManager {
     const producing = computeOutputDimensions(
       session.output.encodeWidth,
       session.output.encodeHeight,
-      session.sourceWidth,
-      session.sourceHeight
+      session.file.width,
+      session.file.height
     );
     if (!producing) {
       return; // the source size is unknown, so nothing can be predicted
@@ -5866,7 +5862,7 @@ export class HlsSessionManager {
       ? sidecarStartNow
       : (Number.isFinite(session.inputStartTime)
         ? session.inputStartTime
-        : (Number.isFinite(session.sourceStartTime) ? session.sourceStartTime : 0));
+        : (Number.isFinite(session.file.startTime) ? session.file.startTime : 0));
     // Cut where this session's grid says, whoever is producing the frames. The
     // times are measured from the start of THIS run; the same list serves as
     // the cut points and, when re-encoding, as the keyframes to force — one
@@ -6505,7 +6501,7 @@ export class HlsSessionManager {
     } else {
       wanted.push("video 0:v:0", `audio ${audioInput}:a:${audioTrack}`);
     }
-    const counts = session.sourceStreamCounts;
+    const counts = session.file.streamCounts;
     const held = counts
       ? `the source holds ${counts.video} video, ${counts.audio} audio, ` +
         `${counts.subtitle} subtitle` +
@@ -7861,7 +7857,7 @@ export class HlsSessionManager {
     const encodeHeight = Number(session.output.encodeHeight) || 0;
     session.variantHeight = encodeHeight > 0
       ? encodeHeight
-      : Math.round(Number(session.sourceHeight) || 0);
+      : Math.round(Number(session.file.height) || 0);
     return session.variantHeight;
   }
 
@@ -7917,7 +7913,7 @@ export class HlsSessionManager {
     if (Array.isArray(owner.splicableHeights)) {
       return owner.splicableHeights;
     }
-    const heights = new Set(variantHeightsFor(Number(owner.sourceHeight) || 0));
+    const heights = new Set(variantHeightsFor(Number(owner.file.height) || 0));
     const own = this.variantHeightOf(owner);
     if (own > 0) {
       heights.add(own);
@@ -8023,7 +8019,7 @@ export class HlsSessionManager {
       owner.file.sourceKey,
       owner.file.fileIndex,
       this.#fileLengthByKey.get(owner.file.key) ?? null,
-      owner.durationSeconds
+      owner.file.durationSeconds
     );
     const version =
       `${observed?.version ?? 0}:${playing}:${copyVersion}:${torrentCost.toFixed(6)}:` +
@@ -8032,7 +8028,7 @@ export class HlsSessionManager {
     if (Array.isArray(owner.offeredHeightsCache) && owner.offeredHeightsVersion === version) {
       return owner.offeredHeightsCache;
     }
-    const heights = new Set(variantHeightsFor(Number(owner.sourceHeight) || 0));
+    const heights = new Set(variantHeightsFor(Number(owner.file.height) || 0));
     const own = this.variantHeightOf(owner);
     if (own > 0) {
       heights.add(own);
@@ -8062,10 +8058,10 @@ export class HlsSessionManager {
       // So a height already being produced is not charged for itself when it is
       // judged. See the subtraction in #sustainableHeights.
       runningCostByHeight: this.#runningCostByHeight(owner),
-      sourceWidth: Number(owner.sourceWidth) || 0,
-      sourceHeight: Math.round(Number(owner.sourceHeight) || 0),
+      sourceWidth: Number(owner.file.width) || 0,
+      sourceHeight: Math.round(Number(owner.file.height) || 0),
       fps: Number(owner.output.outputFps) || TRANSCODE_FPS,
-      source: owner.sourceDecode ?? null,
+      source: owner.file.decode ?? null,
       transcodeVideo: owner.transcodeVideo === true,
       // NOT the learned cost. What a rung is OFFERED on is the startup
       // measurement, which is taken on a quiet machine against known clips and
@@ -8591,7 +8587,7 @@ export class HlsSessionManager {
     const { speed } = canSustainOutput({
       benchmark,
       decodeModel: this.decodeCostModel,
-      source: session.sourceDecode ?? null,
+      source: session.file.decode ?? null,
       outputPixelsPerSec: width * height * fps,
       observedDecodeCostSec: null,
       concurrentCostSec: 0
@@ -8747,7 +8743,7 @@ export class HlsSessionManager {
       session.file.sourceKey,
       session.file.fileIndex,
       this.#fileLengthByKey.get(session.file.key) ?? null,
-      session.durationSeconds
+      session.file.durationSeconds
     );
     if (perMegabyte !== null && megabytesPerSecond !== null) {
       cost += perMegabyte * megabytesPerSecond;
@@ -9893,13 +9889,13 @@ export class HlsSessionManager {
     if (!this.#publishesVariants(session)) {
       return null;
     }
-    const sourceHeight = Number(session.sourceHeight) || 0;
+    const sourceHeight = Number(session.file.height) || 0;
     // What CAN be spliced, not what is worth offering this second. The live
     // judgement travels in `offeredHeights` and in every progress report, which
     // is what the viewer's menu follows; letting it decide the master's
     // existence made a live session answer 404 to its own published address.
     const rungs = this.#splicableHeights(session);
-    const sourceWidth = Number(session.sourceWidth) || 0;
+    const sourceWidth = Number(session.file.width) || 0;
     const lines = ["#EXTM3U", `#EXT-X-VERSION:${session.segmentFormat.playlistVersion}`];
     // The audio tracks, published once for the whole file rather than muxed
     // into every rung. Two things follow from that: the same track is not
@@ -11670,8 +11666,8 @@ export class HlsSessionManager {
       // most sessions copy the video, so the menu read a bare "Auto" almost
       // always, which is exactly the question it was supposed to answer.
       currentHeight: session.transcodeVideo
-        ? (session.output.encodeHeight ?? session.sourceHeight ?? 0)
-        : (session.sourceHeight ?? 0),
+        ? (session.output.encodeHeight ?? session.file.height ?? 0)
+        : (session.file.height ?? 0),
       // The rungs still worth offering, as they stand NOW. The list the browser
       // was given when the file opened came from the startup benchmarks; this
       // one is corrected by what the encoder has since been seen to do with

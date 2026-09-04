@@ -49,7 +49,16 @@ function fakeSession({ id, encodeHeight, dirPath, transcodeVideo = true }) {
       cutGrid: "uniform"
     }),
     state: "ready",
-    file: new SourceFile({ sourceKey: "source-1", fileIndex: 0, name: "video.mkv" }),
+    // The file's own facts, which is where the size and what decoding it costs
+    // both come from: 1080p24 at 8 Mbit/s, the field file of 2026-08-17. A
+    // fixture that assigned a cost object instead was stating an answer the
+    // file now derives, so nothing it said reached the arithmetic.
+    file: new SourceFile({ sourceKey: "source-1", fileIndex: 0, name: "video.mkv" }).learn({
+      width: 1920,
+      height: 1080,
+      fps: 24,
+      bitrateKbps: 8000
+    }),
     startedAt: Date.now(),
     createEntryMs: Date.now(),
     lastAccessedAt: Date.now(),
@@ -60,8 +69,6 @@ function fakeSession({ id, encodeHeight, dirPath, transcodeVideo = true }) {
     transcodeVideo,
     transcodeAudio: true,
     audioTrackIndex: 0,
-    sourceWidth: 1920,
-    sourceHeight: 1080,
     // The shape this output is encoded AS, decided once for the output rather
     // than once per session.
     output: new Output({ encodeWidth: 0, encodeHeight, outputFps: 24, softwarePreset: null, applyTonemap: false }),
@@ -642,15 +649,18 @@ test("a rung served by copy stays offered while a re-encoded rung is on screen",
   // offered and everything between it and the copy was not.
   manager.softwarePresetBenchmark = [{ preset: "ultrafast", pixelsPerSec: 12_000_000 }];
   manager.decodeCostModel = { pixelTerm: 0.00793, bitrateTerm: 0, constantTerm: 0 };
-  base.sourceDecode = { megapixelsPerSecond: 49.766, megabitsPerSecond: 8 };
+  // What decoding this source costs comes from the file's own facts, stated in
+  // the fixture: 49.766 Mpx/s at 8 Mbit/s.
+  assert.ok(base.file.decode, "the fixture must state enough for a decode cost to exist");
 
   const watching = fakeSession({ id: VARIANT_ID, encodeHeight: 240, dirPath });
   watching.variantHeight = 240;
   watching.transcodeVideo = true;
-  // The rung knows the source as well as the base does. Without this it prices
-  // nothing at all — every height comes back "sustainable" for want of a
-  // measurement — and the assertion below would hold for the wrong reason.
-  watching.sourceDecode = base.sourceDecode;
+  // The rung knows the source as well as the base does, because it IS the same
+  // file. Without that it prices nothing at all — every height comes back
+  // "sustainable" for want of a measurement — and the assertion below would
+  // hold for the wrong reason.
+  watching.file = base.file;
   watching.variantBases = new Set([BASE_ID]);
   manager.sessionsById.set(VARIANT_ID, watching);
   base.variants = new Map([[240, VARIANT_ID]]);
@@ -902,14 +912,16 @@ test("a quality step being warmed is not refused by its own cost", async (t) => 
   // which is what every quality change does, two encoders on purpose.
   const base = fakeSession({ id: BASE_ID, encodeHeight: 0, dirPath, transcodeVideo: false });
   base.variantHeight = 1080;
-  // What this source costs to decode — 1080p24 at 8 Mbit/s, the field file.
-  // Without it nothing can be priced and every height comes back offerable for
-  // want of a measurement, which would make the assertion hold for the wrong
-  // reason.
-  base.sourceDecode = { megapixelsPerSecond: (1920 * 1080 * 24) / 1e6, megabitsPerSecond: 8 };
+  // What this source costs to decode comes from the file's own facts, stated in
+  // the fixture: 1080p24 at 8 Mbit/s, the field file. Without them nothing can
+  // be priced and every height comes back offerable for want of a measurement,
+  // which would make the assertion hold for the wrong reason.
+  assert.ok(base.file.decode, "the fixture must state enough for a decode cost to exist");
   const warming = fakeSession({ id: VARIANT_ID, encodeHeight: 240, dirPath });
   warming.variantHeight = 240;
-  warming.sourceDecode = base.sourceDecode;
+  // Two sessions of ONE file share its facts, which is the whole point of the
+  // file being an object: a step warmed beside the picture is not a second file.
+  warming.file = base.file;
   base.variants = new Map([[240, VARIANT_ID]]);
   warming.variantBases = new Set([BASE_ID]);
   // Running, and running well: it says of itself that it holds twice realtime,
@@ -948,7 +960,9 @@ test("the master survives a live offer that has collapsed to one rung", async (t
     decodeCostModel: { pixelTerm: 0.01, bitrateTerm: 0, constantTerm: 0 }
   });
   const base = fakeSession({ id: BASE_ID, encodeHeight: 812, dirPath });
-  base.sourceDecode = { megapixelsPerSecond: 50, megabitsPerSecond: 10 };
+  // A thicker source than the fixture's, stated as the file's own bitrate
+  // rather than as a cost object the file now derives.
+  base.file.learn({ width: 1920, height: 1080, fps: 24, bitrateKbps: 10_000 });
   // What this file's own reader measured: a step must run at eight times
   // realtime to survive this swarm.
   base.supplyFigures = { requiredSpeed: 8 };

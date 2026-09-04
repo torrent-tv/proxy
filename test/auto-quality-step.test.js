@@ -74,7 +74,7 @@ function fakeSession({ dirPath, transcodeVideo = true, cutGrid = transcodeVideo 
       cutGrid
     }),
     state: "ready",
-    file: new SourceFile({ sourceKey: "source-1", fileIndex: 0, name: "video.mkv" }),
+    file: new SourceFile({ sourceKey: "source-1", fileIndex: 0, name: "video.mkv" }).learn({ width: 1920, height: 1080, durationSeconds: 400 }),
     startedAt: Date.now(),
     lastAccessedAt: Date.now(),
     ffmpeg: fakeEncoder(),
@@ -87,8 +87,6 @@ function fakeSession({ dirPath, transcodeVideo = true, cutGrid = transcodeVideo 
     transcodeAudio: true,
     audioOnly: false,
     audioTrackIndex: 0,
-    sourceWidth: 1920,
-    sourceHeight: 1080,
     // The shape this output is encoded AS, decided once for the output.
     output: new Output({
       encodeWidth: transcodeVideo ? 1280 : 0,
@@ -109,7 +107,6 @@ function fakeSession({ dirPath, transcodeVideo = true, cutGrid = transcodeVideo 
     viewers: new Map(),
     linkSlowSince: 0,
     lastAloneSpeed: null,
-    durationSeconds: 400,
     usesExplicitCuts: false,
     useSyntheticPlaylist: true,
     playlistText: "#EXTM3U\n",

@@ -333,7 +333,15 @@ test("the OFFER drops the rungs the host cannot hold, and the master keeps addre
       cutGrid: "keyframe"
     }),
     state: "ready",
-    file: new SourceFile({ sourceKey: "source-1", fileIndex: 0, name: "video.mkv" }),
+    // The file's own facts: the picture's size, and what decoding it costs,
+    // which is derived from them rather than stated beside them. These are the
+    // measured film of MEASURED_FILM above — 1080p24 at 8 Mbit/s.
+    file: new SourceFile({ sourceKey: "source-1", fileIndex: 0, name: "video.mkv" }).learn({
+      width: 1920,
+      height: 1080,
+      fps: 24,
+      bitrateKbps: 8000
+    }),
     startedAt: Date.now(),
     lastAccessedAt: Date.now(),
     ffmpeg: null,
@@ -343,9 +351,6 @@ test("the OFFER drops the rungs the host cannot hold, and the master keeps addre
     transcodeVideo: false,
     transcodeAudio: true,
     audioTrackIndex: 0,
-    sourceWidth: 1920,
-    sourceHeight: 1080,
-    sourceDecode: MEASURED_FILM,
     // A copy can only be cut where the source already has a keyframe, and a
     // master is offered only when that grid is real.
     // The shape this output is encoded AS, decided once for the output.

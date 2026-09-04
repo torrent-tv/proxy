@@ -10,7 +10,7 @@ import { spawn } from "node:child_process";
 import { logger } from "../utils/logger.js";
 import { Container } from "./container/Container.js";
 import { buildAudioInventory } from "./audio-inventory.js";
-import { countVideoFiles, matchSidecarFiles } from "./sidecar-files.js";
+import { countVideoFiles, matchSidecarFiles } from "./torrent/files.js";
 import {
   parseFfmpegDurationSeconds,
   parseFfmpegStartTimeSeconds,

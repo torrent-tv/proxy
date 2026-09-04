@@ -28,7 +28,8 @@
 				"services/output/**",
 				"services/viewer/**",
 				"services/encode/**",
-				"services/source/**"
+				"services/source/**",
+				"services/torrent/**"
 			],
 			"linter": {
 				"rules": {

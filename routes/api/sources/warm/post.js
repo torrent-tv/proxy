@@ -3,7 +3,7 @@ import {
   countVideoFiles,
   matchSidecarFiles,
   TEXT_SUBTITLE_SIDECAR_EXTENSIONS
-} from "../../../../services/sidecar-files.js";
+} from "../../../../services/torrent/files.js";
 
 /**
  * Start fetching a source before anyone asks to play it.

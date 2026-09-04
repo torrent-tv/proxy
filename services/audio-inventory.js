@@ -73,7 +73,7 @@ import { AudioTrack } from "./tracks/AudioTrack.js";
  * @param {object} params
  * @param {object[]} params.embedded - Merged banner+container tracks of the video.
  * @param {number} params.videoFileIndex
- * @param {Array<{ file: import("./sidecar-files.js").SidecarFile, tracks: object[] }>} params.sidecars
+ * @param {Array<{ file: import("./torrent/files.js").SidecarFile, tracks: object[] }>} params.sidecars
  *   Each sidecar file with the audio tracks IT holds. A file whose container
  *   could not be read contributes one track, which is what a bare elementary
  *   stream is.

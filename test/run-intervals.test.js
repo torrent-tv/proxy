@@ -177,3 +177,64 @@ test("a session with no address keeps the old shape: start here, no end", (t) =>
 
   assert.deepEqual(manager.planRunInterval(session, 7), { from: 7, to: -1 });
 });
+
+test("a run without an end does not claim the whole film away from a later viewer", (t) => {
+  const { manager, root, dirPath } = managerWithAnEmptyOutput();
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+
+  // The first viewer's run, at the beginning, with no end — which is every run
+  // whose output was empty when it started.
+  const first = sessionOn({
+    id: "first",
+    dirPath,
+    segmentCount: 1000,
+    runState: "PRODUCING",
+    encodeStartIndex: 0,
+    runEndIndex: -1
+  });
+  manager.sessionsById.set(first.id, first);
+  const second = sessionOn({ id: "second", dirPath, segmentCount: 1000 });
+
+  // A second viewer opens the same film in the middle. Counting the first run's
+  // claim as the whole film would leave them with no encoder at all, waiting for
+  // it to encode its way there — an hour on a long film. It only claims as far
+  // as it will actually get, which is its head plus the look-ahead.
+  const planned = manager.planRunInterval(second, 500);
+  assert.notEqual(planned, null);
+  assert.equal(planned.from, 500);
+});
+
+test("a run stops when it reaches a stretch another run was given", async (t) => {
+  const { manager, root, dirPath } = managerWithAnEmptyOutput();
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+
+  const stopped = [];
+  const ahead = sessionOn({
+    id: "ahead",
+    dirPath,
+    runState: "PRODUCING",
+    encodeStartIndex: 500,
+    runEndIndex: 600
+  });
+  manager.sessionsById.set(ahead.id, ahead);
+  const behind = sessionOn({
+    id: "behind",
+    dirPath,
+    runState: "PRODUCING",
+    encodeStartIndex: 0,
+    runEndIndex: -1
+  });
+  manager.sessionsById.set(behind.id, behind);
+
+  // Its own end was set from the gaps of the moment it began, and the viewer who
+  // opened the film further on was not in that picture. Walking into their
+  // stretch means writing names they are writing.
+  assert.equal(manager.runMakingSegment(behind, 550), "ahead");
+  assert.equal(manager.runMakingSegment(behind, 499), null);
+  assert.equal(
+    manager.runMakingSegment(ahead, 550),
+    null,
+    "a run without an end owns only as far as it has got, not the rest of the film"
+  );
+  void stopped;
+});

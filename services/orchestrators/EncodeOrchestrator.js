@@ -243,6 +243,31 @@ export class EncodeOrchestrator {
   }
 
   /**
+   * Take charge of a run this class did not start.
+   *
+   * The browser asks for a stream and a run begins for it, long before this
+   * class has an opinion. Left unknown, that run would be invisible to the plan
+   * — which would then start a second encoder over the same numbers, believing
+   * nothing was being made there. So whoever starts one hands it over, and from
+   * then on it is planned like any other.
+   *
+   * @param {string} address
+   * @param {{ id: string, from: number, to: number, head: number, speedX: number, isAlive: boolean, stop: (because: string) => void }} run
+   */
+  adopt(address, run) {
+    if (!run || typeof run.id !== "string") {
+      return;
+    }
+    const onThisOutput = this.#runs.get(address) ?? [];
+    if (onThisOutput.some((known) => known.id === run.id)) {
+      return;
+    }
+    onThisOutput.push(run);
+    this.#runs.set(address, onThisOutput);
+    this.coverageOf(address).claim(run.id, run.from, run.to);
+  }
+
+  /**
    * @param {string} address
    * @param {string} runId
    * @param {string} because

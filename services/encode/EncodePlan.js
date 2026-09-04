@@ -38,6 +38,8 @@
  * own answer — the look-ahead, which suspends a run rather than bounding it.
  */
 
+import { endOfRun } from "./EncodeRun.js";
+
 /**
  * One encoder that is running now.
  *
@@ -138,7 +140,7 @@ export function planEncoders({
   for (const run of live) {
     // 1. Is anybody waiting for what this run was given? A run whose stretch
     //    touches no window is making material nobody has asked for.
-    const stillWanted = wanted.some((span) => overlaps(run.from, run.to, span.from, span.to));
+    const stillWanted = wanted.some((span) => overlaps(run.from, endOfRun(run), span.from, span.to));
     if (!stillWanted) {
       stops.push({ type: "stop", run, because: "nothing it was given is wanted" });
       continue;

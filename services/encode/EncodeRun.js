@@ -63,6 +63,26 @@ const MICROSECONDS_PER_SECOND = 1_000_000;
  * @property {string} lastError - The last thing ffmpeg said on stderr.
  */
 
+/**
+ * The last number this run was given, or Infinity when it was given no end.
+ *
+ * ONE reading of one convention. "No end" is written as a `to` below `from` —
+ * the session layer returns -1 for it and the log prints `#-1` — and every place
+ * that has to compare against it read that for itself. One place did not: the
+ * coverage map was handed the raw -1, `Math.max(from, -1)` made the claim one
+ * segment long, and the plan then saw the rest of the film as free. Field,
+ * 2026-09-05: an encoder was started and killed every five seconds, each one
+ * producing 0-2 segments, for as long as anybody watched.
+ *
+ * @param {{ from: number, to: number }} run
+ * @returns {number}
+ */
+export function endOfRun(run) {
+  const from = Number(run?.from);
+  const to = Number(run?.to);
+  return Number.isInteger(to) && to >= from ? to : Number.POSITIVE_INFINITY;
+}
+
 export class EncodeRun {
   /** @type {import("node:child_process").ChildProcess | null} */
   #process = null;
@@ -466,7 +486,7 @@ export class EncodeRun {
     // one, and the end of the film where it was not. A run told to make #10..#14
     // that exits cleanly at #11 has not finished, whatever the film's length;
     // and a run with no end has nothing but the film to be measured against.
-    const endOfWork = this.to >= this.from ? this.to : this.lastSegmentIndex();
+    const endOfWork = Number.isFinite(endOfRun(this)) ? this.to : this.lastSegmentIndex();
     const outcome = classifyEncodeExit({
       code,
       producedThrough: this.#produced.size > 0 ? this.reached : null,

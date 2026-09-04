@@ -68,6 +68,7 @@ import { masterPlaylistText, mediaPlaylistText, segmentIndexForTime } from "./ou
 import { SourceFiles, sourceDecodeCharacteristics } from "./source/SourceFile.js";
 import { ProducedIndex } from "./produced-index.js";
 import { SegmentStore } from "./encode/SegmentStore.js";
+import { endOfRun } from "./encode/EncodeRun.js";
 import {
   buildRunCommand,
   ffmpegSeconds,
@@ -1807,6 +1808,7 @@ export class HlsSessionManager {
       makeRun: ({ address, from }) => this.#makeRunAt(address, from),
       segmentSeconds: this.segmentDurationSec,
       restartCostSec: RUN_RESTART_COST_SEC,
+      lookaheadSegments: Math.ceil(this.lookaheadSeconds / this.segmentDurationSec),
       logger
     });
     // Where each file is cut, held once per file and grid rather than once per
@@ -5495,7 +5497,7 @@ export class HlsSessionManager {
       // the honest extent of its claim, and it is a measured figure rather than
       // a chosen one — the same allowance the browser sizes its cushion from.
       const willReach = run.head + lookaheadSegments;
-      const allowed = Number.isInteger(run.to) && run.to >= run.from ? run.to : lastIndex;
+      const allowed = Number.isFinite(endOfRun(run)) ? run.to : lastIndex;
       claims.push({ from: run.from, to: Math.min(allowed, willReach) });
     }
     const takenAt = (index) =>

@@ -194,3 +194,34 @@ test("nothing wanted anywhere is said plainly", () => {
   const { made } = orchestrator();
   assert.match(made.describe(), /nothing wanted/);
 });
+
+test("a run adopted with no end holds the look-ahead, not the rest of the film", () => {
+  // A session's own encoder is handed to the plan rather than built by it, and
+  // it carries `to = -1` — no end. Claiming the film from there would leave a
+  // viewer further in with no encoder at all: they would wait for this run to
+  // encode its way to them, which on a long film is an hour. What bounds it is
+  // the look-ahead, because a run is suspended once it is that far in front of
+  // its viewer and produces nothing until somebody asks.
+  const { made } = orchestrator({ maxRuns: 2 });
+  made.lookaheadSegments = 30;
+  const adopted = {
+    from: 0,
+    to: -1,
+    head: 3,
+    isAlive: true,
+    isStopping: false,
+    speedX: 8,
+    stop() {
+      this.isAlive = false;
+    }
+  };
+  made.adopt(PICTURE, adopted);
+
+  made.want({ claimant: "far", address: PICTURE, from: 200, to: 230 });
+  made.reconcile();
+
+  const runs = made.runsOn(PICTURE);
+  assert.equal(runs.length, 2, "the viewer further in got an encoder of their own");
+  assert.ok(adopted.isAlive, "and the adopted run was not stopped to make room");
+  assert.equal(runs.some((run) => run.from === 200), true, "started where that viewer is waiting");
+});

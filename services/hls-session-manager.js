@@ -1280,7 +1280,7 @@ export function ffmpegSeconds(value) {
  * One predicate for both callers, because the two used to answer it separately
  * and a disagreement between them is exactly what desynced picture from sound.
  *
- * @param {{ audioOnly?: boolean, cutGrid?: string, transcodeVideo?: boolean }} session
+ * @param {{ audioOnly?: boolean, timeline?: { cutGrid?: string }, transcodeVideo?: boolean }} session
  * @returns {boolean}
  */
 export function onKeyframeGridFor(session) {

@@ -61,6 +61,7 @@ import {
 import { resolveSegmentFormat, SEGMENT_FORMAT_IDS } from "./segment-formats/index.js";
 import { audioRenditionName } from "./audio-inventory.js";
 import { AudioOutput, CutGrid, OutputSpec, VideoOutput } from "./output/index.js";
+import { Timeline, Timelines } from "./output/Timeline.js";
 import { ProducedIndex } from "./produced-index.js";
 import { SegmentStore } from "./encode/SegmentStore.js";
 import { viewerOf, viewersOf } from "./viewer/Viewer.js";
@@ -1928,6 +1929,13 @@ export class HlsSessionManager {
       restartCostSec: RUN_RESTART_COST_SEC,
       logger
     });
+    // Where each file is cut, held once per file and grid rather than once per
+    // session. Two sessions of one film MUST agree about this to the
+    // millisecond — a segment made by either has to be appendable where the
+    // other's would have gone — and until now they agreed by copying, which is
+    // a thing somebody has to remember to do and which drifted twice in the
+    // field. They share the table now.
+    this.timelines = new Timelines();
     this.sessionIdBySource = new Map();
     this.cleanupTimer = setInterval(() => {
       void this.cleanupExpired();
@@ -2441,27 +2449,46 @@ export class HlsSessionManager {
     // wrong, and it is those corrected times the copy actually cuts at. Building
     // it afresh here would put the rung back on the index's fiction and undo the
     // alignment it exists for.
-    const segmentBoundaries = Array.isArray(inheritedGrid?.boundaries) && inheritedGrid.boundaries.length > 1
-      ? [...inheritedGrid.boundaries]
-      : (hasDuration
-        ? computeSegmentBoundaries({
-            useKeyframeGrid,
-            durationSeconds,
-            segDur: this.segmentDurationSec,
-            keyframeTimes,
-            startTime: sourceStartTime
-          })
-        : []);
+    // The file's own table, made once and shared by every session of it. A
+    // quality step is a different OUTPUT and the same cuts — which is exactly
+    // the agreement `inheritedGrid` used to arrange by handing a copy to each
+    // new session — so it is keyed by the file and the kind of grid, and
+    // nothing else.
+    const timeline = this.timelines.get(
+      Timelines.keyFor(sourceKey, fileIndex, useKeyframeGrid ? "keyframe" : "uniform"),
+      () => new Timeline({
+        boundaries: Array.isArray(inheritedGrid?.boundaries) && inheritedGrid.boundaries.length > 1
+          ? [...inheritedGrid.boundaries]
+          : (hasDuration
+            ? computeSegmentBoundaries({
+                useKeyframeGrid,
+                durationSeconds,
+                segDur: this.segmentDurationSec,
+                keyframeTimes,
+                startTime: sourceStartTime
+              })
+            : []),
+        cutGrid: useKeyframeGrid ? "keyframe" : "uniform",
+        totalDurationSeconds: hasDuration ? durationSeconds : 0,
+        keyframeTimes,
+        keyframeTolerance,
+        containerFormat
+      })
+    );
+    // References, not copies. A correction found by one session — a produced
+    // segment showing where the file's cut really is — is a fact about the FILE,
+    // and every session of it must see the same one. Copies are what drifted:
+    // 0.6-2.9 s between two sessions of one film on 2026-08-17, and segments
+    // arriving a uniform 2.002 s early on 2026-08-20.
+    const segmentBoundaries = timeline.boundaries;
     const usingKeyframeBoundaries = useKeyframeGrid;
     // What this session will PUBLISH. A member of a family takes its base's
     // published table verbatim; a session with no base publishes what it cuts
     // at. The two differ exactly by the corrections made since the family's
     // first playlist was written, and that difference is what must never reach
     // the player as two different timelines.
-    const publishedGrid = Array.isArray(inheritedGrid?.published) && inheritedGrid.published.length > 1
-      ? inheritedGrid.published
-      : (hasDuration ? [...segmentBoundaries] : null);
-    const segmentCount = segmentBoundaries.length > 1 ? segmentBoundaries.length - 1 : 0;
+    const publishedGrid = timeline.published.length > 1 ? timeline.published : null;
+    const segmentCount = timeline.segmentCount;
 
     // Realtime budget (software encoder): pick the output resolution + libx264
     // preset this host can encode faster than realtime. On a weak host this
@@ -2695,6 +2722,11 @@ export class HlsSessionManager {
       // session is cut on that grid — always for copied video, and for a
       // re-encoded variant of such a session — otherwise a uniform grid.
       // Drives the playlist and seeking.
+      // The file's own table. `segmentBoundaries` and `publishedBoundaries`
+      // below are references into it, kept under their old names because every
+      // reader of them is asking the same question they always were: where is
+      // this file cut, and what was the player told.
+      timeline,
       segmentBoundaries,
       // Which of the two it is, as a fact about the session rather than
       // something re-derived from "is the video copied" at each call site. The
@@ -5760,6 +5792,97 @@ export class HlsSessionManager {
       return;
     }
 
+    // What to run, worked out from the material and the stretch alone. The
+    // command a run is given is a fact about WHAT is being produced and
+    // WHERE it begins, and about nothing else — not the session it belongs
+    // to, not who is watching. Kept apart so that a run can be built by
+    // whoever needs one, which is what lets an output have more than a single
+    // encoder.
+    const { args, safeIndex, startSeconds, cutTimes } =
+      this.#buildRunCommand(session, startIndex, positionSecondsOverride);
+
+    // The exact command, every run. An encode failure is otherwise reported
+    // with ffmpeg's message and nothing about what it was asked to do, and the
+    // two are not always deducible from each other: 2026-08-04 a run died with
+    // "Cannot write moov atom before AC3 packets" although both muxing paths
+    // were verified to handle a copied AC-3 track on this very host, so the
+    // arguments that run actually received are the missing evidence. One line
+    // per run, and a run happens at most every few seconds.
+    // Numbered, because a burst of seeks starts several runs in one second and
+    // every line about them carries the SESSION id, which is the same for all.
+    // Without a run number the command that failed cannot be told from the two
+    // that succeeded around it — which is exactly the state the unexplained
+    // `Cannot write moov atom before AC3 packets` was found in.
+    session.runCounter = (session.runCounter ?? 0) + 1;
+    const runLabel = `run#${session.runCounter}`;
+    session.runLabel = runLabel;
+    const describedArgs = describeFfmpegArgs(args);
+    // Kept so a failure can quote the command that produced it instead of
+    // leaving whoever reads the log to find it among the lines of the runs that
+    // succeeded around it.
+    session.lastRunArgsDescribed = describedArgs;
+    logger.info(`transcode ${session.id} ${runLabel} ffmpeg ${describedArgs}`);
+
+    const ffmpeg = spawn(this.ffmpegBin, args, {
+      cwd: session.runDirPath ?? session.dirPath,
+      stdio: ["ignore", "pipe", "pipe"]
+    });
+    session.ffmpeg = ffmpeg;
+    this.#transitionRun(session, ENCODE_RUN_EVENT.SPAWNED);
+    // Whether this run cuts at times we gave it. Decides how a segment is
+    // judged finished — see getFileStream.
+    session.usesExplicitCuts = Boolean(cutTimes && cutTimes.length > 0);
+    session.encodeStartIndex = safeIndex;
+    session.pendingRestartIndex = -1;
+    session.lastRestartAt = Date.now();
+    session.progress.processedSeconds = startSeconds;
+    session.progress.startPositionSeconds = startSeconds;
+    session.progress.updatedAt = Date.now();
+    // Any (re)start resets the cumulative `speed` ffmpeg reports, so reset the
+    // realtime-budget slow window too — otherwise warm-up right after a user
+    // seek could be mis-counted as sustained sub-realtime and trigger a
+    // premature downscale.
+    session.budgetSlowSince = 0;
+
+    logger.info(
+      `transcode ${session.id} ${session.runLabel} encode-run from segment #${safeIndex} ` +
+      `(+${Date.now() - restartEnteredAt}ms since the restart was asked for) ` +
+        `(${formatSeconds(startSeconds)}) "${session.fileName}"`
+    );
+    // The four numbers a run is positioned by, said once, because their
+    // disagreement is invisible everywhere else. The two tables are printed
+    // side by side: while they differ, every cut of this run is off by the
+    // difference, and nothing downstream can tell that from a bad index.
+    const liveStart = this.#segmentStartTime(session, safeIndex);
+    logger.info(
+      `transcode ${session.id} ${session.runLabel} positioned at ${startSeconds.toFixed(3)}s ` +
+        `for boundary #${safeIndex} (published ${startSeconds.toFixed(3)}s, ` +
+        `live ${liveStart.toFixed(3)}s, apart ${(liveStart - startSeconds).toFixed(3)}s), ` +
+        `numbering from #${safeIndex}`
+    );
+
+    this.#wireEncodeProcess(session, ffmpeg);
+  }
+
+  /**
+   * The command for one run: what to read, where to start, how to cut, where
+   * to stop.
+   *
+   * Everything here is a question about the material and the stretch — which
+   * file, which tracks, which grid, which keyframe to land on, which segment
+   * numbers — and none of it is a question about the session that happens to
+   * be asking or about anybody watching. It was four hundred lines in the
+   * middle of the function that also owns the process, the restart, the
+   * accounting and the log, which is why a second encoder on one output could
+   * not be built at all: there was no way to ask for a command without also
+   * starting a session's own run.
+   *
+   * @param {HlsSession} session
+   * @param {number} startIndex
+   * @param {number} [positionSecondsOverride]
+   * @returns {{ args: string[], safeIndex: number, startSeconds: number, cutTimes: number[] | null }}
+   */
+  #buildRunCommand(session, startIndex, positionSecondsOverride) {
     const safeIndex = Number.isInteger(startIndex) && startIndex > 0 ? startIndex : 0;
     // 0-based output time of this segment, from the table the PLAYER holds —
     // the same one the cut list below is taken from.
@@ -6144,68 +6267,7 @@ export class HlsSessionManager {
         PLAYLIST_FILE_NAME
       );
     }
-
-    // The exact command, every run. An encode failure is otherwise reported
-    // with ffmpeg's message and nothing about what it was asked to do, and the
-    // two are not always deducible from each other: 2026-08-04 a run died with
-    // "Cannot write moov atom before AC3 packets" although both muxing paths
-    // were verified to handle a copied AC-3 track on this very host, so the
-    // arguments that run actually received are the missing evidence. One line
-    // per run, and a run happens at most every few seconds.
-    // Numbered, because a burst of seeks starts several runs in one second and
-    // every line about them carries the SESSION id, which is the same for all.
-    // Without a run number the command that failed cannot be told from the two
-    // that succeeded around it — which is exactly the state the unexplained
-    // `Cannot write moov atom before AC3 packets` was found in.
-    session.runCounter = (session.runCounter ?? 0) + 1;
-    const runLabel = `run#${session.runCounter}`;
-    session.runLabel = runLabel;
-    const describedArgs = describeFfmpegArgs(args);
-    // Kept so a failure can quote the command that produced it instead of
-    // leaving whoever reads the log to find it among the lines of the runs that
-    // succeeded around it.
-    session.lastRunArgsDescribed = describedArgs;
-    logger.info(`transcode ${session.id} ${runLabel} ffmpeg ${describedArgs}`);
-
-    const ffmpeg = spawn(this.ffmpegBin, args, {
-      cwd: session.runDirPath ?? session.dirPath,
-      stdio: ["ignore", "pipe", "pipe"]
-    });
-    session.ffmpeg = ffmpeg;
-    this.#transitionRun(session, ENCODE_RUN_EVENT.SPAWNED);
-    // Whether this run cuts at times we gave it. Decides how a segment is
-    // judged finished — see getFileStream.
-    session.usesExplicitCuts = Boolean(cutTimes && cutTimes.length > 0);
-    session.encodeStartIndex = safeIndex;
-    session.pendingRestartIndex = -1;
-    session.lastRestartAt = Date.now();
-    session.progress.processedSeconds = startSeconds;
-    session.progress.startPositionSeconds = startSeconds;
-    session.progress.updatedAt = Date.now();
-    // Any (re)start resets the cumulative `speed` ffmpeg reports, so reset the
-    // realtime-budget slow window too — otherwise warm-up right after a user
-    // seek could be mis-counted as sustained sub-realtime and trigger a
-    // premature downscale.
-    session.budgetSlowSince = 0;
-
-    logger.info(
-      `transcode ${session.id} ${session.runLabel} encode-run from segment #${safeIndex} ` +
-      `(+${Date.now() - restartEnteredAt}ms since the restart was asked for) ` +
-        `(${formatSeconds(startSeconds)}) "${session.fileName}"`
-    );
-    // The four numbers a run is positioned by, said once, because their
-    // disagreement is invisible everywhere else. The two tables are printed
-    // side by side: while they differ, every cut of this run is off by the
-    // difference, and nothing downstream can tell that from a bad index.
-    const liveStart = this.#segmentStartTime(session, safeIndex);
-    logger.info(
-      `transcode ${session.id} ${session.runLabel} positioned at ${startSeconds.toFixed(3)}s ` +
-        `for boundary #${safeIndex} (published ${startSeconds.toFixed(3)}s, ` +
-        `live ${liveStart.toFixed(3)}s, apart ${(liveStart - startSeconds).toFixed(3)}s), ` +
-        `numbering from #${safeIndex}`
-    );
-
-    this.#wireEncodeProcess(session, ffmpeg);
+    return { args, safeIndex, startSeconds, cutTimes };
   }
 
   /**
@@ -7623,11 +7685,13 @@ export class HlsSessionManager {
       return;
     }
     const wasAt = boundaries[index];
-    for (const member of this.#familyOf(session)) {
-      if (Array.isArray(member.segmentBoundaries) && member.segmentBoundaries.length === boundaries.length) {
-        member.segmentBoundaries[index] = trueStart;
-      }
-    }
+    // One write, because there is one table. Where a file is cut is a fact
+    // about the FILE, so every session of it holds the same array rather than a
+    // copy of it — which is what this loop used to keep in step, member by
+    // member, and only for members that happened to exist at the time. A
+    // session created afterwards used to inherit a copy taken at that moment;
+    // now it is handed the table itself.
+    boundaries[index] = trueStart;
     logger.info(
       `transcode ${session.id} boundary #${index} corrected ${wasAt.toFixed(3)}s → ` +
       `${trueStart.toFixed(3)}s from the file itself` +
@@ -11496,6 +11560,18 @@ export class HlsSessionManager {
     for (const sessionId of idsToDispose) {
       await this.disposeSession(sessionId);
     }
+    // A timeline nobody is reading any more. It is small — two arrays of a few
+    // thousand numbers — but nothing removed it, and a proxy that has served a
+    // hundred films would have held a hundred of them for the life of the
+    // process. An unbounded map that only ever grows is the shape of half the
+    // memory faults recorded in this repository.
+    const timelinesInUse = new Set();
+    for (const session of this.sessionsById.values()) {
+      if (session.timeline) {
+        timelinesInUse.add(session.timeline);
+      }
+    }
+    this.timelines.forgetUnused(timelinesInUse);
     // The segments outlive every session on them, so what they cost is decided
     // here rather than by anybody's departure: how long ago each output was
     // last read, and how much room the disk has for the lot.

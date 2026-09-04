@@ -17,6 +17,7 @@
  */
 
 import assert from "node:assert/strict";
+import { SourceFile } from "../services/source/SourceFile.js";
 import { Timeline } from "../services/output/Timeline.js";
 import test from "node:test";
 import { mkdtemp, rm } from "node:fs/promises";
@@ -61,7 +62,7 @@ async function sessionWithRunAt373() {
     }),
     state: "ready",
     runState: ENCODE_RUN_STATE.PRODUCING,
-    fileName: "film.mkv",
+    file: new SourceFile({ sourceKey: "source-1", fileIndex: 0, name: "film.mkv" }),
     createEntryMs: Date.now(),
     lastAccessedAt: Date.now(),
     consumers: new Set(),

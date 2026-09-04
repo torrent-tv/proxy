@@ -17,6 +17,7 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
+import { SourceFile } from "../services/source/SourceFile.js";
 import { Timeline } from "../services/output/Timeline.js";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
@@ -140,7 +141,7 @@ async function managerWithReadySegment(overrides = {}) {
       cutGrid: "uniform"
     }),
     state: "ready",
-    fileName: "video.mkv",
+    file: new SourceFile({ sourceKey: "source-1", fileIndex: 0, name: "video.mkv" }),
     startedAt: Date.now(),
     createEntryMs: Date.now(),
     lastAccessedAt: Date.now(),

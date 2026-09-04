@@ -9,6 +9,7 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
+import { SourceFile } from "../services/source/SourceFile.js";
 import { Timeline } from "../services/output/Timeline.js";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
@@ -47,7 +48,7 @@ function sessionOn({ id, dirPath, runState = "PRODUCING", encodeStartIndex = 0, 
       cutGrid: "uniform"
     }),
     state: "ready",
-    fileName: "video.mkv",
+    file: new SourceFile({ sourceKey: "source-1", fileIndex: 0, name: "video.mkv" }),
     segmentFormat: fmp4Format,
     segmentCount: 1000,
     runState,

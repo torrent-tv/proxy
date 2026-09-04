@@ -18,6 +18,7 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
+import { SourceFile } from "../services/source/SourceFile.js";
 import { Timeline } from "../services/output/Timeline.js";
 import { mkdir, mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
@@ -164,7 +165,7 @@ async function sessionWithTwoRuns() {
       cutGrid: "uniform"
     }),
     state: "ready",
-    fileName: "Drifters - 04.mkv",
+    file: new SourceFile({ sourceKey: "source-1", fileIndex: 0, name: "Drifters - 04.mkv" }),
     startedAt: Date.now(),
     createEntryMs: Date.now(),
     lastAccessedAt: Date.now(),

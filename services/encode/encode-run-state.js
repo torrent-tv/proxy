@@ -486,3 +486,70 @@ export function declaredEdges() {
 export function declaredContainment() {
   return Object.entries(PARENT).map(([state, parent]) => ({ state, parent }));
 }
+
+/**
+ * Every run this session has going, earliest first.
+ *
+ * A session holds as many as the machine affords, because one output can be
+ * watched from more than one place: a viewer who jumps back gets a run of their
+ * own rather than dragging the picture away from a viewer watching ahead.
+ *
+ * @param {{ runs?: Set<object> }} session
+ * @returns {object[]}
+ */
+export function runsOf(session) {
+  const runs = session?.runs instanceof Set ? [...session.runs] : [];
+  return runs.sort((left, right) => left.from - right.from);
+}
+
+/**
+ * The runs of this session that still have a process.
+ *
+ * @param {{ runs?: Set<object> }} session
+ * @returns {object[]}
+ */
+export function liveRunsOf(session) {
+  return runsOf(session).filter((run) => run.isAlive);
+}
+
+/**
+ * What this session's encoding is doing, as one state.
+ *
+ * The most advanced state among its live runs: a session with anything
+ * producing IS producing, whatever else it has going. A session that has never
+ * started a run, or whose runs have all ended, is at the table's own initial
+ * state — which is what "nothing is encoding" means.
+ *
+ * @param {{ runs?: Set<object> }} session
+ * @returns {string}
+ */
+export function runStateOf(session) {
+  let answer = INITIAL_RUN_STATE;
+  let rank = -1;
+  for (const run of runsOf(session)) {
+    const at = RUN_STATE_ORDER.indexOf(run.state);
+    if (at > rank) {
+      rank = at;
+      answer = run.state;
+    }
+  }
+  return answer;
+}
+
+/**
+ * How advanced a run state is, for reducing several runs to one answer.
+ *
+ * Producing outranks starting, and both outrank a run that has ended: what a
+ * caller asking "what is this session's encoding doing" wants to know is
+ * whether anything is being made, not what the quietest of them is up to.
+ */
+const RUN_STATE_ORDER = [
+  ENCODE_RUN_STATE.ENDED_FAILED,
+  ENCODE_RUN_STATE.ENDED_COMPLETE,
+  ENCODE_RUN_STATE.STOPPED,
+  ENCODE_RUN_STATE.IDLE,
+  ENCODE_RUN_STATE.RETRY_WAIT,
+  ENCODE_RUN_STATE.SUSPENDED,
+  ENCODE_RUN_STATE.STARTING,
+  ENCODE_RUN_STATE.PRODUCING
+];

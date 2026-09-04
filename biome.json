@@ -50,6 +50,38 @@
 			}
 		},
 		{
+			"includes": ["services/quality/**"],
+			"linter": {
+				"rules": {
+					"style": {
+						"noRestrictedImports": {
+							"level": "error",
+							"options": {
+								"patterns": [
+									{
+										"group": [
+											"../hls-session-manager.js",
+											"../controllers/**",
+											"../orchestrators/**",
+											"../container/**",
+											"../demand/**",
+											"../download/**",
+											"../piece-store/**",
+											"../segment-formats/**",
+											"../torrent-worker/**",
+											"../viewer/**",
+											"../output/**"
+										],
+										"message": "What encoding costs is arithmetic over readings. Which sessions belong to one file, how many encoders run, what a file costs to fetch — all of it is passed in, so this can be asked without a session manager, a torrent or a disk."
+									}
+								]
+							}
+						}
+					}
+				}
+			}
+		},
+		{
 			"includes": ["services/download/**"],
 			"linter": {
 				"rules": {

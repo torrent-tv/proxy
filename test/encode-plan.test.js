@@ -10,6 +10,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { CoverageMap } from "../services/encode/CoverageMap.js";
+import { endOfRun } from "../services/encode/EncodeRun.js";
 import { firstUnmetWant, planEncoders } from "../services/encode/EncodePlan.js";
 
 /** A host that can afford two encoders, four-second segments, a cheap restart. */
@@ -242,4 +243,36 @@ test("the lowest thing a viewer is waiting for is reported, so a stalled plan is
   assert.equal(firstUnmetWant(coverage, [{ from: 40, to: 70 }]), 42);
   coverage.markReadyAll([42, 43, 44]);
   assert.equal(firstUnmetWant(coverage, [{ from: 40, to: 44 }]), null);
+});
+
+test("a run with no end is making what the viewers ahead of it are waiting for", () => {
+  // Field, 2026-09-05: an encoder was started and killed every five seconds,
+  // each producing 0-2 segments, for as long as anybody watched. A run given no
+  // end carries `to = -1`, and two places read that as a number instead of as
+  // "no end": the overlap test called its work unwanted, and the claim it made
+  // in the coverage map was one segment long, so the plan saw the rest of the
+  // film as free and started another encoder there.
+  const coverage = new CoverageMap({ segmentCount: 570 });
+  const run = { from: 0, to: -1, head: 3, speedX: 8, isAlive: true };
+  coverage.claim(run, run.from, endOfRun(run));
+
+  const actions = planEncoders({
+    coverage,
+    live: [run],
+    wanted: [{ from: 0, to: 30 }],
+    maxRuns: 2,
+    segmentSeconds: 4,
+    restartCostSec: 0.12
+  });
+
+  assert.deepEqual(
+    actions.filter((action) => action.type === "stop"),
+    [],
+    "nothing is stopped: it is making exactly what is wanted"
+  );
+  assert.deepEqual(
+    actions.filter((action) => action.type === "start"),
+    [],
+    "and nothing new is started over ground it already holds"
+  );
 });

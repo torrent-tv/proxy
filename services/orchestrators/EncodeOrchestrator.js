@@ -25,6 +25,7 @@
 
 import { CoverageMap } from "../encode/CoverageMap.js";
 import { firstUnmetWant, planEncoders } from "../encode/EncodePlan.js";
+import { endOfRun } from "../encode/EncodeRun.js";
 import { ENCODE_EXIT } from "../encode/encode-exit.js";
 import { SegmentDemand } from "../encode/SegmentDemand.js";
 
@@ -52,12 +53,17 @@ export class EncodeOrchestrator {
    * @param {{ info: (line: string) => void, warn: (line: string) => void }} params.logger
    * @param {() => number} [params.now]
    */
-  constructor({ maxRunsFor, makeRun, segmentSeconds, restartCostSec, logger, now }) {
+  constructor({ maxRunsFor, makeRun, segmentSeconds, restartCostSec, lookaheadSegments = 0, logger, now }) {
     this.demand = new SegmentDemand();
     this.maxRunsFor = maxRunsFor;
     this.makeRun = makeRun;
     this.segmentSeconds = segmentSeconds;
     this.restartCostSec = restartCostSec;
+    // How far in front of its viewer a run is allowed to get. It is what bounds
+    // the claim of a run that was given no end — see #claimFor.
+    this.lookaheadSegments = Number.isFinite(lookaheadSegments) && lookaheadSegments > 0
+      ? Math.ceil(lookaheadSegments)
+      : 0;
     this.logger = logger;
     this.now = typeof now === "function" ? now : Date.now;
   }
@@ -227,7 +233,7 @@ export class EncodeOrchestrator {
       }
       // A run that stays keeps its claim current: the free stretch ahead of it
       // may have shrunk since it was given one.
-      coverage.claim(action.run, action.from, action.to);
+      this.#claimFor(coverage, action.run, action.from, action.to);
     }
   }
 
@@ -278,7 +284,40 @@ export class EncodeOrchestrator {
     }
     onThisOutput.push(run);
     this.#runs.set(address, onThisOutput);
-    this.coverageOf(address).claim(run, run.from, run.to);
+    this.#claimFor(this.coverageOf(address), run, run.from, run.to);
+  }
+
+  /**
+   * What a run holds, as far as the map is concerned.
+   *
+   * A run given an end holds exactly that stretch. A run given NO end — `to`
+   * below `from`, which is how this is written everywhere here — would hold the
+   * rest of the film, and that is what must not be claimed: a second viewer
+   * opening the same film further in would find every number taken and get no
+   * encoder at all, waiting instead for the first run to encode its way there,
+   * which on a long film is an hour.
+   *
+   * What bounds it in practice is the look-ahead: a run is suspended once it is
+   * that far in front of the segment its viewer last asked for, and past that it
+   * produces nothing until somebody asks. So that is the honest extent of the
+   * claim, and it is a measured figure rather than a chosen one — the same
+   * allowance the browser sizes its cushion from. `planRunInterval` has applied
+   * this rule since runs got intervals; this path did not, which is how an
+   * encoder came to be started and killed every five seconds in the field.
+   *
+   * @param {CoverageMap} coverage
+   * @param {object} run
+   * @param {number} from
+   * @param {number} to
+   */
+  #claimFor(coverage, run, from, to) {
+    const end = endOfRun({ from, to });
+    if (Number.isFinite(end)) {
+      coverage.claim(run, from, end);
+      return;
+    }
+    const head = Number.isFinite(run?.head) ? run.head : from;
+    coverage.claim(run, from, Math.max(from, head + this.lookaheadSegments));
   }
 
   /**

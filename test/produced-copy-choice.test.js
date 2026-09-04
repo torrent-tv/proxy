@@ -18,6 +18,7 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
+import { Timeline } from "../services/output/Timeline.js";
 import { mkdir, mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -156,6 +157,12 @@ async function sessionWithTwoRuns() {
     dirPath,
     runDirPath: path.join(dirPath, "run-2"),
     runSerial: 2,
+    // Where this file is cut, held by the file. A fixture that stated it
+    // on the session was describing what production no longer does.
+    timeline: new Timeline({
+      boundaries: [0, SEGMENT_SECONDS, 25, 37.5, 50],
+      cutGrid: "uniform"
+    }),
     state: "ready",
     fileName: "Drifters - 04.mkv",
     startedAt: Date.now(),
@@ -171,7 +178,6 @@ async function sessionWithTwoRuns() {
     usesExplicitCuts: true,
     useSyntheticPlaylist: true,
     playlistText: "#EXTM3U\n",
-    segmentBoundaries: [0, SEGMENT_SECONDS, 25, 37.5, 50],
     initBytes: fmp4Format.extractInit(wholePiece(0)),
     encodeStartIndex: 0,
     firstSegmentLogged: false,

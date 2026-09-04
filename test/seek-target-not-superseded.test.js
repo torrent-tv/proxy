@@ -15,6 +15,7 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
+import { Timeline } from "../services/output/Timeline.js";
 import { mkdtemp, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -43,6 +44,12 @@ async function managerAfterSeek() {
   manager.sessionsById.set(SESSION_ID, {
     id: SESSION_ID,
     dirPath,
+    // Where this file is cut, held by the file. A fixture that stated it
+    // on the session was describing what production no longer does.
+    timeline: new Timeline({
+      boundaries: Array.from({ length: 400 }, (_, index) => index * SEGMENT_SECONDS),
+      cutGrid: "uniform"
+    }),
     state: "ready",
     fileName: "film.mkv",
     startedAt: Date.now(),
@@ -51,7 +58,6 @@ async function managerAfterSeek() {
     segmentFormat: fmp4Format,
     transcodeVideo: false,
     useSyntheticPlaylist: true,
-    segmentBoundaries: Array.from({ length: 400 }, (_, index) => index * SEGMENT_SECONDS),
     segmentCount: 399,
     encodeStartIndex: SEGMENT_AT_SEEK,
     waitEpoch: 1,

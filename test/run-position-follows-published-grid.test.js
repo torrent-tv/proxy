@@ -19,6 +19,7 @@
  */
 
 import assert from "node:assert/strict";
+import { Timeline } from "../services/output/Timeline.js";
 import test from "node:test";
 
 import { HlsSessionManager, describeGridDrift, segmentCutTimesFrom } from "../services/hls-session-manager.js";
@@ -40,8 +41,7 @@ function sessionWithDriftedGrid() {
   });
   const session = {
     id: "picture",
-    segmentBoundaries: [...CORRECTED],
-    publishedBoundaries: [...PUBLISHED]
+    timeline: new Timeline({ boundaries: [...CORRECTED], published: [...PUBLISHED], cutGrid: "uniform" })
   };
   return { manager, session };
 }
@@ -49,7 +49,7 @@ function sessionWithDriftedGrid() {
 test("a run starts at the time the player was told, not at the corrected one", () => {
   const { manager, session } = sessionWithDriftedGrid();
   assert.equal(manager.runStartTimeFor(session, 2), 16.684);
-  assert.notEqual(manager.runStartTimeFor(session, 2), session.segmentBoundaries[2]);
+  assert.notEqual(manager.runStartTimeFor(session, 2), session.timeline.boundaries[2]);
 });
 
 test("position and cut list come from the same table", () => {
@@ -65,7 +65,7 @@ test("position and cut list come from the same table", () => {
 
 test("a session that published no grid positions on the live one", () => {
   const { manager } = sessionWithDriftedGrid();
-  const session = { id: "no-playlist", segmentBoundaries: [...CORRECTED], publishedBoundaries: [] };
+  const session = { id: "no-playlist", timeline: new Timeline({ boundaries: [...CORRECTED], published: [], cutGrid: "uniform" }) };
   assert.equal(manager.runStartTimeFor(session, 2), CORRECTED[2]);
 });
 

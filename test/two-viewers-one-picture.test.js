@@ -11,6 +11,7 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
+import { Timeline } from "../services/output/Timeline.js";
 import { mkdtemp, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -34,6 +35,12 @@ function fakeSession({ id, dirPath, audioTrackIndex = 0, transcodeAudio = true }
   return {
     id,
     dirPath,
+    // Where this file is cut, held by the file. A fixture that stated it
+    // on the session was describing what production no longer does.
+    timeline: new Timeline({
+      boundaries: Array.from({ length: 101 }, (_, index) => index * SEGMENT_SECONDS),
+      cutGrid: "keyframe"
+    }),
     state: "ready",
     fileName: "video.mkv",
     startedAt: Date.now(),
@@ -67,9 +74,7 @@ function fakeSession({ id, dirPath, audioTrackIndex = 0, transcodeAudio = true }
     waitEpoch: 0,
     useSyntheticPlaylist: true,
     playlistText: "#EXTM3U\n",
-    segmentBoundaries: Array.from({ length: 101 }, (_, index) => index * SEGMENT_SECONDS),
     segmentCount: 100,
-    cutGrid: "keyframe",
     progress: { state: "running", processedSeconds: 0, startPositionSeconds: 0, speed: "1.0x" }
   };
 }

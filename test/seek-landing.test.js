@@ -14,6 +14,7 @@
  */
 
 import assert from "node:assert/strict";
+import { Timeline } from "../services/output/Timeline.js";
 import test from "node:test";
 
 import { seekLandingOffsetFor } from "../services/hls-session-manager.js";
@@ -21,26 +22,26 @@ import { seekLandingOffsetFor } from "../services/hls-session-manager.js";
 const OFFSET = 3 / 23;
 
 test("a copied picture is asked for one heuristic later than the keyframe", () => {
-  const session = { transcodeVideo: false, keyframeTimes: [0, 2.002, 4.004, 6.006] };
+  const session = { transcodeVideo: false, timeline: new Timeline({ boundaries: [], cutGrid: "keyframe", keyframeTimes: [0, 2.002, 4.004, 6.006] }) };
   assert.equal(seekLandingOffsetFor(session, 2.002), OFFSET);
 });
 
 test("a re-encode is asked for exactly what it should produce", () => {
   // It decodes from the keyframe and discards frames up to the requested time,
   // so pushing the request later would start its output late.
-  const session = { transcodeVideo: true, keyframeTimes: [0, 2.002, 4.004] };
+  const session = { transcodeVideo: true, timeline: new Timeline({ boundaries: [], cutGrid: "keyframe", keyframeTimes: [0, 2.002, 4.004] }) };
   assert.equal(seekLandingOffsetFor(session, 2.002), 0);
 });
 
 test("the offset never reaches the next keyframe", () => {
   // Keyframes 0.1 s apart: half of that is the most that can be added without
   // risking a landing on the NEXT one where the heuristic does not fire.
-  const session = { transcodeVideo: false, keyframeTimes: [0, 0.1, 0.2, 0.3] };
+  const session = { transcodeVideo: false, timeline: new Timeline({ boundaries: [], cutGrid: "keyframe", keyframeTimes: [0, 0.1, 0.2, 0.3] }) };
   assert.equal(seekLandingOffsetFor(session, 0.1), 0.05);
 });
 
 test("the last keyframe has nothing after it to collide with", () => {
-  const session = { transcodeVideo: false, keyframeTimes: [0, 2.002, 4.004] };
+  const session = { transcodeVideo: false, timeline: new Timeline({ boundaries: [], cutGrid: "keyframe", keyframeTimes: [0, 2.002, 4.004] }) };
   assert.equal(seekLandingOffsetFor(session, 4.004), OFFSET);
 });
 
@@ -57,8 +58,7 @@ test("a grid whose times are approximate is asked for that much later again", ()
   // the one before that, which is the fault this offset exists for.
   const session = {
     transcodeVideo: false,
-    keyframeTolerance: 0.04,
-    keyframeTimes: [0, 4.004, 8.008, 12.012]
+    timeline: new Timeline({ boundaries: [], cutGrid: "keyframe", keyframeTimes: [0, 4.004, 8.008, 12.012], keyframeTolerance: 0.04 })
   };
   assert.equal(seekLandingOffsetFor(session, 4.004), OFFSET + 0.04);
 });
@@ -66,11 +66,11 @@ test("a grid whose times are approximate is asked for that much later again", ()
 test("an exact grid claims no tolerance", () => {
   // Matroska and MP4 state instants outright — measured the same day, nine
   // files and 11 665 keyframes with not one disagreement.
-  const session = { transcodeVideo: false, keyframeTolerance: 0, keyframeTimes: [0, 4.004, 8.008] };
+  const session = { transcodeVideo: false, timeline: new Timeline({ boundaries: [], cutGrid: "keyframe", keyframeTimes: [0, 4.004, 8.008], keyframeTolerance: 0 }) };
   assert.equal(seekLandingOffsetFor(session, 4.004), OFFSET);
 });
 
 test("the bound still holds once a tolerance is added", () => {
-  const session = { transcodeVideo: false, keyframeTolerance: 1, keyframeTimes: [0, 0.1, 0.2] };
+  const session = { transcodeVideo: false, timeline: new Timeline({ boundaries: [], cutGrid: "keyframe", keyframeTimes: [0, 0.1, 0.2], keyframeTolerance: 1 }) };
   assert.equal(seekLandingOffsetFor(session, 0.1), 0.05);
 });

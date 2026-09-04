@@ -20,6 +20,7 @@ import os from "node:os";
 import path from "node:path";
 import { HlsSessionManager } from "../services/hls-session-manager.js";
 import { SegmentStore } from "../services/encode/SegmentStore.js";
+import { Timeline } from "../services/output/Timeline.js";
 import { fmp4Format } from "../services/segment-formats/fmp4.js";
 
 const OUTPUT_KEY = "torrent:abc:fmt=fmp4:grid=kf@0:video-only:v=0/copy";
@@ -55,6 +56,8 @@ function sessionOn({ id, dirPath, outputKey }) {
     state: "ready",
     fileName: "video.mkv",
     segmentFormat: fmp4Format,
+    // Where the file is cut, which every live session holds.
+    timeline: new Timeline({ boundaries: [0, 4, 8], cutGrid: "keyframe" }),
     consumers: new Set(),
     lastAccessedAt: Date.now()
   };

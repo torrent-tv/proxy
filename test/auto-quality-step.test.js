@@ -18,6 +18,7 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
+import { Timeline } from "../services/output/Timeline.js";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -59,6 +60,13 @@ function fakeSession({ dirPath, transcodeVideo = true, cutGrid = "keyframe" }) {
     // is what decides whether it publishes variants at all.
     cutGrid,
     dirPath,
+    // Where this file is cut, held by the file. A fixture that stated it
+    // on the session was describing what production no longer does.
+    timeline: new Timeline({
+      boundaries: Array.from({ length: 101 }, (_, index) => index * SEGMENT_SECONDS),
+      totalDurationSeconds: 400,
+      cutGrid: "uniform"
+    }),
     state: "ready",
     fileName: "video.mkv",
     startedAt: Date.now(),
@@ -98,11 +106,9 @@ function fakeSession({ dirPath, transcodeVideo = true, cutGrid = "keyframe" }) {
     linkSlowSince: 0,
     lastAloneSpeed: null,
     durationSeconds: 400,
-    totalDurationSeconds: 400,
     usesExplicitCuts: false,
     useSyntheticPlaylist: true,
     playlistText: "#EXTM3U\n",
-    segmentBoundaries: Array.from({ length: 101 }, (_, index) => index * SEGMENT_SECONDS),
     segmentCount: 100,
     progress: { state: "running", processedSeconds: 40, startPositionSeconds: 0, speed: "1.0x" }
   };

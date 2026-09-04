@@ -9,6 +9,7 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
+import { Timeline } from "../services/output/Timeline.js";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -39,11 +40,16 @@ function sessionOn({ id, dirPath, runState = "PRODUCING", encodeStartIndex = 0, 
     id,
     outputKey: KEY,
     dirPath,
+    // Where this file is cut, held by the file. A fixture that stated it
+    // on the session was describing what production no longer does.
+    timeline: new Timeline({
+      boundaries: Array.from({ length: 1001 }, (_, index) => index * 4),
+      cutGrid: "uniform"
+    }),
     state: "ready",
     fileName: "video.mkv",
     segmentFormat: fmp4Format,
     segmentCount: 1000,
-    segmentBoundaries: Array.from({ length: 1001 }, (_, index) => index * 4),
     runState,
     encodeStartIndex,
     runEndIndex,

@@ -15,6 +15,7 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
+import { Timeline } from "../services/output/Timeline.js";
 import { newIndexCheck, noteIndexDeviation } from "../services/hls-session-manager.js";
 
 test("an index that describes its file exactly is reported as such", () => {
@@ -74,8 +75,7 @@ test("a boundary the index got wrong is replaced by the time the file really has
     fileName: "film.mkv",
     state: "ready",
     transcodeVideo: false,
-    segmentBoundaries: boundaries,
-    indexCheck: newIndexCheck(),
+    timeline: new Timeline({ boundaries: boundaries, cutGrid: "uniform" }),
     variants: new Map(),
     segmentFormat: { segmentFileName: (index) => `segment-${index}.mp4` }
   };
@@ -84,8 +84,7 @@ test("a boundary the index got wrong is replaced by the time the file really has
     fileName: "film.mkv",
     state: "ready",
     transcodeVideo: true,
-    segmentBoundaries: boundaries,
-    indexCheck: newIndexCheck(),
+    timeline: new Timeline({ boundaries: boundaries, cutGrid: "uniform" }),
     variantBases: new Set([base.id])
   };
   base.variants.set(540, rung.id);
@@ -97,17 +96,17 @@ test("a boundary the index got wrong is replaced by the time the file really has
   manager.correctBoundaryFromSegment(base, 2, 17.4);
 
   assert.equal(
-    base.segmentBoundaries[2],
+    base.timeline.boundaries[2],
     17.4,
     "the grid must describe the file, not the index — a rung forced onto 20 s would not join the copy"
   );
   assert.equal(
-    rung.segmentBoundaries[2],
+    rung.timeline.boundaries[2],
     17.4,
     "the family shares one grid — the same array, so there is nothing to keep in step"
   );
   assert.deepEqual(
-    base.segmentBoundaries,
+    base.timeline.boundaries,
     [0, 10, 17.4, 30, 40],
     "only the boundary that was shown to be wrong moves"
   );
@@ -118,7 +117,7 @@ test("a boundary the index got wrong is replaced by the time the file really has
   manager.correctBoundaryFromSegment(base, 2, 35);
   manager.correctBoundaryFromSegment(base, 2, 5);
   manager.correctBoundaryFromSegment(base, 0, 3);
-  assert.deepEqual(base.segmentBoundaries, [0, 10, 17.4, 30, 40], "out-of-order readings are refused");
+  assert.deepEqual(base.timeline.boundaries, [0, 10, 17.4, 30, 40], "out-of-order readings are refused");
 });
 
 test("a segment requested again is not new evidence", () => {

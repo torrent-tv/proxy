@@ -19,6 +19,7 @@ import os from "node:os";
 import path from "node:path";
 import { HlsSessionManager } from "../services/hls-session-manager.js";
 import { SegmentStore } from "../services/encode/SegmentStore.js";
+import { Timeline } from "../services/output/Timeline.js";
 import { fmp4Format } from "../services/segment-formats/fmp4.js";
 import { viewerOf } from "../services/viewer/Viewer.js";
 
@@ -260,7 +261,7 @@ test("a seek backwards does not drag the picture away from a viewer watching ahe
   });
   shared.sourceKey = "torrent:abc";
   shared.fileIndex = 0;
-  shared.segmentBoundaries = Array.from({ length: 1001 }, (_, index) => index * 4);
+  shared.timeline = new Timeline({ boundaries: Array.from({ length: 1001 }, (_, index) => index * 4), cutGrid: "uniform" });
   shared.acquireSource = null;
   shared.progress = { processedSeconds: 900, startPositionSeconds: 800 };
   manager.sessionsById.set(shared.id, shared);
@@ -298,7 +299,7 @@ test("a seek backwards with nobody else watching still moves the run", (t) => {
     encodeStartIndex: 200,
     runEndIndex: -1
   });
-  alone.segmentBoundaries = Array.from({ length: 1001 }, (_, index) => index * 4);
+  alone.timeline = new Timeline({ boundaries: Array.from({ length: 1001 }, (_, index) => index * 4), cutGrid: "uniform" });
   alone.progress = { processedSeconds: 900, startPositionSeconds: 800 };
   manager.sessionsById.set(alone.id, alone);
   viewerOf(alone, "only").head = { segment: 250, seconds: 1000, at: Date.now() };

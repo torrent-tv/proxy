@@ -11,6 +11,7 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
+import { Timeline } from "../services/output/Timeline.js";
 import { mkdtemp, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -34,9 +35,14 @@ async function managerWithSession() {
   manager.sessionsById.set(SESSION_ID, {
     id: SESSION_ID,
     dirPath,
+    // Where this file is cut, held by the file. A fixture that stated it
+    // on the session was describing what production no longer does.
+    timeline: new Timeline({
+      boundaries: Array.from({ length: 201 }, (_, index) => index * SEGMENT_SECONDS),
+      cutGrid: "uniform"
+    }),
     state: "ready",
     segmentFormat: fmp4Format,
-    segmentBoundaries: Array.from({ length: 201 }, (_, index) => index * SEGMENT_SECONDS),
     segmentCount: 200,
     useSyntheticPlaylist: true,
     // The viewer is at segment #25.

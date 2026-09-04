@@ -17,6 +17,7 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
+import { Timeline } from "../services/output/Timeline.js";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -132,6 +133,12 @@ async function managerWithReadySegment(overrides = {}) {
   const session = {
     id: SESSION_ID,
     dirPath,
+    // Where this file is cut, held by the file. A fixture that stated it
+    // on the session was describing what production no longer does.
+    timeline: new Timeline({
+      boundaries: [0, SEGMENT_START_SECONDS, 25],
+      cutGrid: "uniform"
+    }),
     state: "ready",
     fileName: "video.mkv",
     startedAt: Date.now(),
@@ -144,7 +151,6 @@ async function managerWithReadySegment(overrides = {}) {
     usesExplicitCuts: true,
     useSyntheticPlaylist: true,
     playlistText: "#EXTM3U\n",
-    segmentBoundaries: [0, SEGMENT_START_SECONDS, 25],
     initBytes: fmp4Format.extractInit(piece),
     encodeStartIndex: 0,
     firstSegmentLogged: false,
@@ -163,11 +169,11 @@ test("serving a segment records what its real start says about the container's i
   // The tally is counted in the module tests; what this pins is that serving a
   // segment reaches it at all. A counter nothing increments reports a clean
   // index for every file forever, which is worse than no measurement.
-  session.indexCheck = { checked: 0, disagreed: 0, maxDeviationSec: 0, firstDisagreementIndex: -1, seen: new Set() };
+  session.timeline.indexCheck = { checked: 0, disagreed: 0, maxDeviationSec: 0, firstDisagreementIndex: -1, seen: new Set() };
 
   await manager.getFileStream(SESSION_ID, "segment-00000.mp4", { requestSeq: 1 });
 
-  assert.equal(session.indexCheck.checked, 1, "the boundary that was just produced must have been examined");
+  assert.equal(session.timeline.indexCheck.checked, 1, "the boundary that was just produced must have been examined");
 });
 
 test("a segment that exists is served, not reported as still being produced", async (t) => {
@@ -202,7 +208,7 @@ test("a segment that exists is served, not reported as still being produced", as
     "the segment must be stamped with where it really begins"
   );
   assert.equal(
-    session.indexCheck.checked,
+    session.timeline.indexCheck.checked,
     1,
     "and the piece's own position must still have been read, or nothing measures the index"
   );

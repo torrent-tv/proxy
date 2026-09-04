@@ -13,6 +13,7 @@
  */
 
 import assert from "node:assert/strict";
+import { Timeline } from "../services/output/Timeline.js";
 import test from "node:test";
 
 import { HlsSessionManager } from "../services/hls-session-manager.js";
@@ -40,7 +41,7 @@ function familyAtBoundaryTwo() {
     id: "picture",
     state: "ready",
     runState: ENCODE_RUN_STATE.PRODUCING,
-    segmentBoundaries: boundaries,
+    timeline: new Timeline({ boundaries: boundaries, cutGrid: "uniform" }),
     encodeStartIndex: 2,
     runSerial: 0,
     audioRenditionSessions: new Map([[1, "sound"]]),
@@ -52,7 +53,7 @@ function familyAtBoundaryTwo() {
     runState: ENCODE_RUN_STATE.PRODUCING,
     audioOnly: true,
     baseSessionId: "picture",
-    segmentBoundaries: boundaries,
+    timeline: new Timeline({ boundaries: boundaries, cutGrid: "uniform" }),
     encodeStartIndex: 2,
     runSerial: 0,
     indexCheck: null
@@ -70,12 +71,12 @@ test("a soundtrack follows the picture to the instant the picture really began",
   manager.correctBoundaryFromSegment(picture, 2, 10.5);
 
   assert.deepEqual(
-    picture.segmentBoundaries,
+    picture.timeline.boundaries,
     [0, 4, 10.5, 12, 16, 20],
     "the family's table must hold what the file itself said"
   );
   assert.equal(
-    sound.segmentBoundaries[2],
+    sound.timeline.boundaries[2],
     10.5,
     "and every member's table with it — one film, one table, nothing to keep in step"
   );
@@ -97,12 +98,12 @@ test("a soundtrack follows the picture to the instant the picture really began",
 
 test("a correction the table already holds moves nobody", () => {
   const { manager, picture, sound } = familyAtBoundaryTwo();
-  const before = [...sound.segmentBoundaries];
+  const before = [...sound.timeline.boundaries];
   // Within the tolerance: the reading agrees with the table, so there is
   // nothing to correct and nothing to move. This is what makes the repositioning
   // converge instead of repeating on every produced segment.
   manager.correctBoundaryFromSegment(picture, 2, 8.1);
-  assert.deepEqual(sound.segmentBoundaries, before);
+  assert.deepEqual(sound.timeline.boundaries, before);
 });
 
 test("a member that is not running is left alone", () => {
@@ -119,8 +120,8 @@ test("a member that is not running is left alone", () => {
 
 test("a soundtrack does not move the grid the picture is cut on", () => {
   const { manager, picture, sound } = familyAtBoundaryTwo();
-  const pictureBefore = [...picture.segmentBoundaries];
-  const soundBefore = [...sound.segmentBoundaries];
+  const pictureBefore = [...picture.timeline.boundaries];
+  const soundBefore = [...sound.timeline.boundaries];
 
   // The sound reports where IT began, which is where it was asked to begin, to
   // within one audio frame. The picture's own boundary is a keyframe of the
@@ -135,10 +136,10 @@ test("a soundtrack does not move the grid the picture is cut on", () => {
   manager.correctBoundaryFromSegment(sound, 2, 10.5);
 
   assert.deepEqual(
-    picture.segmentBoundaries,
+    picture.timeline.boundaries,
     pictureBefore,
     "the grid is the picture's cut list and a soundtrack may not move it"
   );
-  assert.deepEqual(sound.segmentBoundaries, soundBefore);
+  assert.deepEqual(sound.timeline.boundaries, soundBefore);
   assert.equal(picture.runSerial, 0, "and nothing is restarted on a soundtrack's say-so");
 });

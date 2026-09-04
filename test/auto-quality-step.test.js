@@ -22,6 +22,7 @@ import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { HlsSessionManager } from "../services/hls-session-manager.js";
+import { Output } from "../services/output/Output.js";
 import { viewerOf } from "../services/viewer/Viewer.js";
 import { fmp4Format } from "../services/segment-formats/fmp4.js";
 import { softwareDescriptor, maxrateKbpsFor, nominalKbpsForHeight } from "../services/hwaccel.js";
@@ -76,9 +77,14 @@ function fakeSession({ dirPath, transcodeVideo = true, cutGrid = "keyframe" }) {
     fileIndex: 0,
     sourceWidth: 1920,
     sourceHeight: 1080,
-    encodeWidth: transcodeVideo ? 1280 : 0,
-    encodeHeight: transcodeVideo ? 720 : 0,
-    outputFps: 24,
+    // The shape this output is encoded AS, decided once for the output.
+    output: new Output({
+      encodeWidth: transcodeVideo ? 1280 : 0,
+      encodeHeight: transcodeVideo ? 720 : 0,
+      outputFps: 24,
+      softwarePreset: null,
+      applyTonemap: false
+    }),
     encodeRunGeneration: 0,
     encodeStartIndex: 0,
     budgetSlowSince: 0,

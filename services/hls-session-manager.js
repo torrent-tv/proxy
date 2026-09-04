@@ -62,6 +62,7 @@ import { resolveSegmentFormat, SEGMENT_FORMAT_IDS } from "./segment-formats/inde
 import { audioRenditionName } from "./audio-inventory.js";
 import { AudioOutput, CutGrid, OutputSpec, VideoOutput } from "./output/index.js";
 import { Timeline, Timelines } from "./output/Timeline.js";
+import { Output, Outputs } from "./output/Output.js";
 import { ProducedIndex } from "./produced-index.js";
 import { SegmentStore } from "./encode/SegmentStore.js";
 import { viewerOf, viewersOf } from "./viewer/Viewer.js";
@@ -1936,6 +1937,13 @@ export class HlsSessionManager {
     // a thing somebody has to remember to do and which drifted twice in the
     // field. They share the table now.
     this.timelines = new Timelines();
+    // The shape each output is encoded AS, decided once. The realtime budget
+    // decides it from what this machine could hold at that moment, so two
+    // sessions of one output made minutes apart could otherwise be given
+    // different sizes while claiming the same identity — and everything
+    // downstream assumes they cannot be, from a segment of one standing in for
+    // a segment of the other to the single RESOLUTION the master names.
+    this.outputs = new Outputs();
     this.sessionIdBySource = new Map();
     this.cleanupTimer = setInterval(() => {
       void this.cleanupExpired();
@@ -2529,11 +2537,19 @@ export class HlsSessionManager {
           requiredSpeed: this.#requiredSpeedFor(sourceKey, fileIndex)
         })
       : chosenBudget;
-    const softwarePreset = encodeBudget?.preset ?? null;
-    // Effective encode box: the budget's downscaled resolution when applied,
-    // otherwise the client target (0 = keep source, handled by buildVideoArgs).
-    const encodeWidth = encodeBudget?.width ?? normalizedTargetWidth;
-    const encodeHeight = encodeBudget?.height ?? normalizedTargetHeight;
+    // Decided once for this output, whoever asks and whenever. The budget above
+    // reads the machine as it is NOW; a second session of the same output
+    // arriving a minute later must not be given a different picture on the
+    // strength of a different moment.
+    const output = this.outputs.get(spec.toKey(), () => new Output({
+      // The budget's downscaled resolution when it applied, otherwise the
+      // client target (0 = keep source, handled by buildVideoArgs).
+      encodeWidth: encodeBudget?.width ?? normalizedTargetWidth,
+      encodeHeight: encodeBudget?.height ?? normalizedTargetHeight,
+      outputFps,
+      softwarePreset: encodeBudget?.preset ?? null,
+      applyTonemap
+    }));
 
     // Only now, when nothing above can still throw. Everything from the probe
     // to the keyframe index used to run with the directory already made, so a
@@ -2624,7 +2640,6 @@ export class HlsSessionManager {
       // session, which is what every browser gets until it says otherwise.
       audioOnly: audioOnly === true,
       audioRenditions: audioRenditions === true,
-      outputFps,
       // What the source declared it holds, kept for a failed run to quote. Null
       // when the media info came from a cache that predates this field or from
       // a probe whose banner carried no stream lines.
@@ -2634,15 +2649,16 @@ export class HlsSessionManager {
       // encodeHeight, which the realtime budget may have downscaled below this.
       targetWidth: normalizedTargetWidth,
       targetHeight: normalizedTargetHeight,
-      // Effective encode resolution handed to ffmpeg (budget-selected on weak
-      // software hosts, else the client target). 0 = keep source.
-      encodeWidth,
-      encodeHeight,
+      // What this output is encoded AS — the box, the frame rate, the speed
+      // setting, the tone map — decided once for the output rather than once
+      // per session, because two sessions of one output must not be given
+      // different pictures on the strength of two different moments.
+      output,
       // What the offer predicted this height would do on this machine, so the
       // field can say what the prediction was worth once the step runs. Null
       // when the step was never judged — a copied stream needs no encoder and
       // is never predicted.
-      predictedSpeedWhenOffered: this.lastPredictedByHeight?.get(encodeHeight) ?? null,
+      predictedSpeedWhenOffered: this.lastPredictedByHeight?.get(output.encodeHeight) ?? null,
       lastPredictionRatio: null,
       // The NAME of this rung, fixed at the height that was asked for. It is
       // deliberately not the height being encoded: a viewer who picked 480p on
@@ -2653,8 +2669,6 @@ export class HlsSessionManager {
       variantHeight: forceManualQuality && normalizedTargetHeight > 0
         ? normalizedTargetHeight
         : undefined,
-      // Whether to insert the HDR→SDR tone-map chain (software path only).
-      applyTonemap,
       // Realtime-budget runtime state. The ladder that chose the STARTING rung
       // is not kept: a step is a change of VARIANT now, and a variant is a
       // session with its own init segment, so there is no per-session rung
@@ -2708,8 +2722,6 @@ export class HlsSessionManager {
       // Container start time (seconds); subtracted on the copy path so the
       // output timeline is 0-based even when the source starts at e.g. 0.1 s.
       sourceStartTime,
-      // Chosen libx264 preset for this stream (software only), or null.
-      softwarePreset,
       inputUrl: inputUrl.toString(),
       // The container this session produces. Per session, not per proxy: the
       // viewer's browser decides, because it is the one that has to decode the
@@ -2898,7 +2910,7 @@ export class HlsSessionManager {
         // while the player asked for #127 and gave up 45.6 s later. Neither
         // side saying what it meant is why that took three attempts to place.
         `start=${Math.round(normalizedStartPosition)}s ` +
-        `video=${transcodeVideo ? `${this.videoEncoder.name}${softwarePreset ? `/${softwarePreset}` : ""}` : "copy"} ` +
+        `video=${transcodeVideo ? `${this.videoEncoder.name}${output.softwarePreset ? `/${output.softwarePreset}` : ""}` : "copy"} ` +
         `audio=${transcodeAudio ? "aac" : "copy"} ` +
         // Branch tag for log correlation: A = video re-encode (fixed GOP, grid
         // aligned, ts-offset); B = video copy (cut at source keyframes, copyts).
@@ -2908,11 +2920,11 @@ export class HlsSessionManager {
         // Effective encode resolution: budget-on (auto downscale from the
         // ceiling), manual (user-forced, budget off), or unset (keep source).
         `${transcodeVideo && encodeBudget
-          ? `enc=${encodeWidth}x${encodeHeight}@${outputFps} ` +
+          ? `enc=${output.encodeWidth}x${output.encodeHeight}@${output.outputFps} ` +
             `quality=${forceManualQuality ? "manual" : "auto"} ` +
             `budget=${encodeBudget.ladder ? `rung ${encodeBudget.rungIndex + 1}/${encodeBudget.ladder.length}` : "off"} `
           : ""}` +
-        `${transcodeVideo && !encodeBudget && forceManualQuality ? `enc=${encodeWidth || "src"}x${encodeHeight || "src"}@${outputFps} quality=manual budget=off ` : ""}` +
+        `${transcodeVideo && !encodeBudget && forceManualQuality ? `enc=${output.encodeWidth || "src"}x${output.encodeHeight || "src"}@${output.outputFps} quality=manual budget=off ` : ""}` +
         // HDR source and whether the tone-map chain was applied (vs washed-out
         // fallback when the filters are missing or on a hardware encoder).
         `${transcodeVideo && mediaInfo.isHdr ? `hdr=1 tonemap=${applyTonemap ? "on" : "off"} ` : ""}` +
@@ -5351,7 +5363,7 @@ export class HlsSessionManager {
     session.recentSpeed = null;
     logger.info(
       `[budget] transcode ${session.id} viewer-link-bound ${reasonText} → capping the picture at ` +
-        `${maxrateKbpsFor(nominal)}kbps peak, size unchanged at ${session.encodeWidth}x${session.encodeHeight} ` +
+        `${maxrateKbpsFor(nominal)}kbps peak, size unchanged at ${session.output.encodeWidth}x${session.output.encodeHeight} ` +
         `"${session.fileName}"`
     );
     await this.#restartAtViewer(session);
@@ -5429,12 +5441,12 @@ export class HlsSessionManager {
     if (!described) {
       return;
     }
-    if (!(session.encodeWidth > 0) || !(session.encodeHeight > 0)) {
+    if (!(session.output.encodeWidth > 0) || !(session.output.encodeHeight > 0)) {
       return; // the run keeps the encoder's own default box; nothing was told
     }
     const producing = computeOutputDimensions(
-      session.encodeWidth,
-      session.encodeHeight,
+      session.output.encodeWidth,
+      session.output.encodeHeight,
       session.sourceWidth,
       session.sourceHeight
     );
@@ -5998,16 +6010,16 @@ export class HlsSessionManager {
       ? this.videoEncoder.buildVideoArgs({
           // Budget-selected encode box (may be below the client target on weak
           // software hosts); falls back to the client target for hardware.
-          targetWidth: session.encodeWidth,
-          targetHeight: session.encodeHeight,
+          targetWidth: session.output.encodeWidth,
+          targetHeight: session.output.encodeHeight,
           segmentDurationSec: this.segmentDurationSec,
           // Source-inherited output rate (integer, capped); descriptors that
           // use time-based keyframes just apply it as the frame rate.
-          fps: session.outputFps,
+          fps: session.output.outputFps,
           // Software-only; hardware descriptors ignore it.
-          preset: session.softwarePreset ?? undefined,
+          preset: session.output.softwarePreset ?? undefined,
           // HDR→SDR tone map (software path only; gated on filter availability).
-          tonemap: session.applyTonemap === true,
+          tonemap: session.output.applyTonemap === true,
           // On the source's grid the cuts are not evenly spaced, so no frame
           // count can describe them: the encoder is told the times outright,
           // the same ones the muxer will cut at.
@@ -7919,7 +7931,7 @@ export class HlsSessionManager {
     if (Number.isInteger(session.variantHeight) && session.variantHeight > 0) {
       return session.variantHeight;
     }
-    const encodeHeight = Number(session.encodeHeight) || 0;
+    const encodeHeight = Number(session.output.encodeHeight) || 0;
     session.variantHeight = encodeHeight > 0
       ? encodeHeight
       : Math.round(Number(session.sourceHeight) || 0);
@@ -8125,7 +8137,7 @@ export class HlsSessionManager {
       runningCostByHeight: this.#runningCostByHeight(owner),
       sourceWidth: Number(owner.sourceWidth) || 0,
       sourceHeight: Math.round(Number(owner.sourceHeight) || 0),
-      fps: Number(owner.outputFps) || TRANSCODE_FPS,
+      fps: Number(owner.output.outputFps) || TRANSCODE_FPS,
       source: owner.sourceDecode ?? null,
       transcodeVideo: owner.transcodeVideo === true,
       // NOT the learned cost. What a rung is OFFERED on is the startup
@@ -8340,7 +8352,7 @@ export class HlsSessionManager {
       if (!Number.isFinite(lastSaid) || Math.abs(ratio - lastSaid) > 0.1) {
         session.lastPredictionRatio = ratio;
         logger.info(
-          `prediction ${session.id.slice(0, 8)} ${session.encodeHeight || "source"}p: ` +
+          `prediction ${session.id.slice(0, 8)} ${session.output.encodeHeight || "source"}p: ` +
           `predicted ${session.predictedSpeedWhenOffered.toFixed(2)}x, measured ${speed.toFixed(2)}x ` +
           `(ratio ${ratio.toFixed(2)}; 1.00 would mean the arithmetic describes this machine)`
         );
@@ -8479,13 +8491,13 @@ export class HlsSessionManager {
     if (!Array.isArray(benchmark) || benchmark.length === 0) {
       return;
     }
-    const entry = benchmark.find((item) => item.preset === session.softwarePreset);
+    const entry = benchmark.find((item) => item.preset === session.output.softwarePreset);
     if (!entry || !(entry.pixelsPerSec > 0)) {
       return;
     }
-    const height = Number(session.encodeHeight) || 0;
-    const width = Number(session.encodeWidth) || 0;
-    const fps = Number(session.outputFps) || TRANSCODE_FPS;
+    const height = Number(session.output.encodeHeight) || 0;
+    const width = Number(session.output.encodeWidth) || 0;
+    const fps = Number(session.output.outputFps) || TRANSCODE_FPS;
     if (height <= 0 || width <= 0) {
       return;
     }
@@ -8513,7 +8525,7 @@ export class HlsSessionManager {
     logger.info(
       `transcode: ${session.fileName} decodes at ${(1 / costSec).toFixed(2)}x on this host ` +
         `(median of ${readings.length}, latest ${(1 / decodeCostSec).toFixed(2)}x from ${height}p ` +
-        `at ${speed.toFixed(2)}x, preset ${session.softwarePreset})`
+        `at ${speed.toFixed(2)}x, preset ${session.output.softwarePreset})`
     );
   }
 
@@ -8643,9 +8655,9 @@ export class HlsSessionManager {
       return 1 / session.lastAloneSpeed;
     }
     const benchmark = this.softwarePresetBenchmark;
-    const width = Number(session.encodeWidth) || 0;
-    const height = Number(session.encodeHeight) || 0;
-    const fps = Number(session.outputFps) || TRANSCODE_FPS;
+    const width = Number(session.output.encodeWidth) || 0;
+    const height = Number(session.output.encodeHeight) || 0;
+    const fps = Number(session.output.outputFps) || TRANSCODE_FPS;
     if (!Array.isArray(benchmark) || benchmark.length === 0 || width <= 0 || height <= 0) {
       return 0;
     }
@@ -9562,7 +9574,7 @@ export class HlsSessionManager {
     if (!session || session.transcodeVideo !== true || session.audioOnly === true) {
       return 0;
     }
-    return Math.round(Number(session.encodeHeight) || 0);
+    return Math.round(Number(session.output.encodeHeight) || 0);
   }
 
   /**
@@ -11572,6 +11584,13 @@ export class HlsSessionManager {
       }
     }
     this.timelines.forgetUnused(timelinesInUse);
+    const outputsInUse = new Set();
+    for (const session of this.sessionsById.values()) {
+      if (session.output) {
+        outputsInUse.add(session.output);
+      }
+    }
+    this.outputs.forgetUnused(outputsInUse);
     // The segments outlive every session on them, so what they cost is decided
     // here rather than by anybody's departure: how long ago each output was
     // last read, and how much room the disk has for the lot.
@@ -11717,7 +11736,7 @@ export class HlsSessionManager {
       // most sessions copy the video, so the menu read a bare "Auto" almost
       // always, which is exactly the question it was supposed to answer.
       currentHeight: session.transcodeVideo
-        ? (session.encodeHeight ?? session.sourceHeight ?? 0)
+        ? (session.output.encodeHeight ?? session.sourceHeight ?? 0)
         : (session.sourceHeight ?? 0),
       // The rungs still worth offering, as they stand NOW. The list the browser
       // was given when the file opened came from the startup benchmarks; this

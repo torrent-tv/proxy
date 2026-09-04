@@ -22,6 +22,7 @@ import {
   HlsSessionManager
 } from "../services/hls-session-manager.js";
 import { fmp4Format } from "../services/segment-formats/fmp4.js";
+import { Output } from "../services/output/Output.js";
 import { viewerOf } from "../services/viewer/Viewer.js";
 
 const BASE_ID = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
@@ -55,8 +56,9 @@ function fakeSession({ id, encodeHeight, dirPath, transcodeVideo = true }) {
     fileIndex: 0,
     sourceWidth: 1920,
     sourceHeight: 1080,
-    encodeWidth: 0,
-    encodeHeight,
+    // The shape this output is encoded AS, decided once for the output rather
+    // than once per session.
+    output: new Output({ encodeWidth: 0, encodeHeight, outputFps: 24, softwarePreset: null, applyTonemap: false }),
     encodeRunGeneration: 0,
     encodeStartIndex: 0,
     lastRestartAt: 0,

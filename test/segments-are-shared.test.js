@@ -56,6 +56,10 @@ function sessionOn({ id, dirPath, outputKey }) {
     dirPath,
     state: "ready",
     file: new SourceFile({ sourceKey: "source-1", fileIndex: 0, name: "video.mkv" }),
+    // An ordinary session reads its own file, and its sound is inside it. The
+    // three differ only for a soundtrack shipped as a file of its own.
+    get inputFile() { return this.file; },
+    get audioFile() { return this.file; },
     segmentFormat: fmp4Format,
     // Where the file is cut, which every live session holds.
     timeline: new Timeline({ boundaries: [0, 4, 8], cutGrid: "keyframe" }),

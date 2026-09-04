@@ -59,6 +59,10 @@ function fakeSession({ id, encodeHeight, dirPath, transcodeVideo = true }) {
       fps: 24,
       bitrateKbps: 8000
     }),
+    // An ordinary session reads its own file, and its sound is inside it. The
+    // three differ only for a soundtrack shipped as a file of its own.
+    get inputFile() { return this.file; },
+    get audioFile() { return this.file; },
     startedAt: Date.now(),
     createEntryMs: Date.now(),
     lastAccessedAt: Date.now(),

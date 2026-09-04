@@ -51,6 +51,10 @@ async function managerWithRunAhead() {
     }),
     state: "ready",
     file: new SourceFile({ sourceKey: "source-1", fileIndex: 0, name: "film.avi" }),
+    // An ordinary session reads its own file, and its sound is inside it. The
+    // three differ only for a soundtrack shipped as a file of its own.
+    get inputFile() { return this.file; },
+    get audioFile() { return this.file; },
     startedAt: Date.now(),
     createEntryMs: Date.now(),
     lastAccessedAt: Date.now(),

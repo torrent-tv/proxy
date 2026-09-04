@@ -63,6 +63,10 @@ async function sessionWithRunAt373() {
     state: "ready",
     runState: ENCODE_RUN_STATE.PRODUCING,
     file: new SourceFile({ sourceKey: "source-1", fileIndex: 0, name: "film.mkv" }),
+    // An ordinary session reads its own file, and its sound is inside it. The
+    // three differ only for a soundtrack shipped as a file of its own.
+    get inputFile() { return this.file; },
+    get audioFile() { return this.file; },
     createEntryMs: Date.now(),
     lastAccessedAt: Date.now(),
     consumers: new Set(),

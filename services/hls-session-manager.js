@@ -2110,35 +2110,28 @@ export class HlsSessionManager {
     // position is deliberately not part of it — segment 42 covers the same span
     // whoever began where.
     const sessionDir = this.segmentStore.pathFor(spec.toKey());
-    const inputUrl = new URL("/stream", `${this.localBaseUrl}/`);
-    inputUrl.searchParams.set("sourceKey", sourceKey);
-    // Whose read this is. The stream route counts the bytes it delivers against
-    // this session, and that count is what tells a waiting browser the proxy is
-    // alive while nothing has been encoded yet — the encoder's own progress
-    // cannot move before its first frame is decoded.
-    inputUrl.searchParams.set("session", sessionId);
-    // A soundtrack shipped as its own file is encoded FROM that file, and an
-    // audio rendition carries nothing else — so it reads the sidecar directly and
-    // needs no second input at all. The muxed case, where a browser takes its
-    // audio inside the picture's own stream, is the one that reads two files; its
-    // second input is `audioInputUrl` below.
-    const readsSidecarAlone = audioOnly === true && audioSource.isSidecar;
-    inputUrl.searchParams.set(
-      "fileIndex",
-      String(readsSidecarAlone ? audioSource.fileIndex : fileIndex)
-    );
+    // The file this session's encoder READS. A soundtrack shipped as its own
+    // file is encoded FROM that file, and an audio rendition carries nothing
+    // else — so it reads the sidecar directly and needs no second input at all.
+    // The muxed case, where a browser takes its audio inside the picture's own
+    // stream, is the one that reads two files.
+    //
+    // Which of the two this is used to be a boolean on the session
+    // (`readsSidecarAlone`) beside a string URL built from it. It is the same
+    // statement as "the file it reads is not the file of the picture", so it is
+    // that comparison now and there is nothing to keep in step.
+    const audioFile = this.sourceFiles.get(sourceKey, audioSource.fileIndex, audioSource.name);
+    const inputFile = audioOnly === true && audioSource.isSidecar ? audioFile : file;
+    const inputUrl = inputFile.streamUrl(this.localBaseUrl, { sessionId });
     // The second input, for a muxed session whose sound comes from another file.
     // A picture whose sound is published separately reads ONE file: it maps no
     // audio (`-an`), so a second input would open a read on a file this output
     // does not carry a frame of, and hold that file against the disk sweep for
     // the whole session.
-    let audioInputUrl = null;
-    if (carriesAudio && !readsSidecarAlone && audioSource.isSidecar) {
-      audioInputUrl = new URL("/stream", `${this.localBaseUrl}/`);
-      audioInputUrl.searchParams.set("sourceKey", sourceKey);
-      audioInputUrl.searchParams.set("session", sessionId);
-      audioInputUrl.searchParams.set("fileIndex", String(audioSource.fileIndex));
-    }
+    const audioInputUrl =
+      carriesAudio && inputFile !== audioFile && audioSource.isSidecar
+        ? audioFile.streamUrl(this.localBaseUrl, { sessionId })
+        : null;
 
     // Media info (duration/resolution/fps/startTime/HDR) up front, so we can
     // serve a complete VOD playlist (#EXT-X-ENDLIST) with the correct total
@@ -2161,14 +2154,10 @@ export class HlsSessionManager {
     // another file: the timeline, the duration and the cut grid are the
     // picture's, and a rendition exists to be played WITH it. Only where the
     // sidecar's own timeline begins is read from the sidecar, just below.
-    const pictureUrl = readsSidecarAlone
-      ? (() => {
-          const url = new URL("/stream", `${this.localBaseUrl}/`);
-          url.searchParams.set("sourceKey", sourceKey);
-          url.searchParams.set("fileIndex", String(fileIndex));
-          return url;
-        })()
-      : inputUrl;
+    // No session id on it: this read is a probe of the picture, not this
+    // session's own delivery, and counting it against the session would tell a
+    // waiting browser that its film is arriving when what arrived was a header.
+    const pictureUrl = inputFile === file ? inputUrl : file.streamUrl(this.localBaseUrl);
     const mediaInfo = cachedUsable
       ? cachedMediaInfo
       : await probeInputMediaInfo(this.ffmpegBin, pictureUrl.toString());
@@ -2184,35 +2173,30 @@ export class HlsSessionManager {
     const sourceWidth = file.width;
     const sourceHeight = file.height;
     const sourceStartTime = file.startTime;
-    // Where the timeline of the file this session actually READS begins.
+    // Where the timeline of a soundtrack shipped as its own file begins.
     //
-    // For every session until now that was the picture's own file, so one figure
-    // served both purposes. A soundtrack shipped separately has a start time of
-    // its own, and it is the one that must be subtracted when the output is
-    // relabelled onto a zero-based timeline: subtract the picture's instead and
-    // the sound sits at a fixed offset from it for the whole film. Measured from
-    // the file rather than assumed to be zero, because assuming it is exactly
-    // the fault being avoided.
+    // A soundtrack in another file has a start time of its own, and it is the
+    // one that must be subtracted when the output is relabelled onto a
+    // zero-based timeline: subtract the picture's instead and the sound sits at
+    // a fixed offset from it for the whole film. Read from the file rather than
+    // assumed to be zero, because assuming it is exactly the fault being
+    // avoided.
     //
     // NOT awaited. Creating a session used to stop here until the answer came
     // back, and on a cold start the answer needs the sidecar's header off the
     // swarm — 8121 ms of every session created, measured three times out of
-    // three on 2026-09-03. What is known now is used now; the reading runs
-    // behind, and `#startEncodeRun` takes the freshest value at spawn time, the
-    // same way it already re-reads `session.timeline.keyframeTimes`.
+    // three on 2026-09-03. What is known now is used now, and the reading runs
+    // behind; when it lands it lands on the FILE, which every session of that
+    // soundtrack shares, so the spawn path sees it without re-reading anything.
     //
     // Unknown means "no difference between the two timelines", not "the
     // soundtrack starts at zero". The shift exists to correct a difference
     // between two containers; asserting one that has not been read is inventing
     // a number, while assuming none leaves the sound exactly where a release
     // remuxed from a single source puts it.
-    const audioFileStartTime = audioSource.isSidecar
-      ? (this.#sidecarStartTimeNow(sourceKey, audioSource.fileIndex) ?? sourceStartTime)
-      : sourceStartTime;
     if (audioSource.isSidecar) {
-      this.#warmSidecarStartTime(sourceKey, audioSource.fileIndex);
+      this.#warmFileStartTime(audioFile);
     }
-    const inputStartTime = readsSidecarAlone ? audioFileStartTime : sourceStartTime;
     // Tone-map an HDR source to SDR only when re-encoding video on the software
     // path and this ffmpeg has the filters. Hardware encoders keep their own
     // (untone-mapped) path for now; when unavailable, HDR falls back to a plain
@@ -2240,8 +2224,8 @@ export class HlsSessionManager {
     // wider than the seconds it is meant to represent, and the piece store
     // would hold it.
     const readWindowBytes = await this.#readWindowBytesFor(
-      sourceKey,
-      readsSidecarAlone ? audioSource.fileIndex : fileIndex,
+      inputFile.sourceKey,
+      inputFile.fileIndex,
       durationSeconds
     );
     if (readWindowBytes > 0) {
@@ -2556,22 +2540,29 @@ export class HlsSessionManager {
       // resolves to: which file, and which `0:a:N` inside that file. Equal to
       // `fileIndex` and to the flat number for an ordinary embedded track, which
       // is what every session was before soundtracks in their own files existed.
-      audioFileIndex: audioSource.fileIndex,
       audioSourceTrackIndex: audioSource.sourceTrackIndex,
+      // The file the chosen soundtrack lives in, and the file this session's
+      // encoder reads. Both are the picture's own file for an ordinary embedded
+      // track, which is what every session was before soundtracks in their own
+      // files existed.
+      //
+      // Four fields came off the session when these two went on: which file the
+      // sound is in, where each of the two timelines begins, and a boolean
+      // saying whether the one input IS the sidecar — which is
+      // `inputFile !== file` and nothing more. Each was a copy of something the
+      // file states, and the start times were worse than copies: they were read
+      // from a map of their own because a file could not be asked.
+      //
+      // The input ADDRESS stays on the session, because it is not a fact about
+      // the file: it carries this session's id, so the stream route can count
+      // the bytes it delivers against it, and the width of the window this
+      // read keeps.
+      audioFile,
+      inputFile,
       // The second input, present only for a muxed session whose sound is in
       // another file. An audio rendition reads its sidecar as its only input, so
       // it has none.
       audioInputUrl: audioInputUrl ? audioInputUrl.toString() : "",
-      // Where the timeline of the file being READ begins, against the picture's
-      // own `sourceStartTime` below. The two differ only when the sound comes
-      // from a separate file.
-      inputStartTime,
-      audioFileStartTime,
-      // Whether this session's ONE input is the sidecar itself, which is what an
-      // audio rendition of a separately shipped soundtrack is. Stored rather
-      // than re-derived, because the derivation needs `audioOnly` and the
-      // sidecar test together and was already written two different ways.
-      readsSidecarAlone,
       // What this session's output carries. `audioOnly` is a rendition — one
       // audio track, no picture; `videoOnly` is a stream whose audio the viewer
       // takes from such a rendition. Neither is set on the ordinary muxed
@@ -2976,8 +2967,7 @@ export class HlsSessionManager {
     // audio while the output plainly carries some — which would leave the header
     // check expecting one track where two arrive, and tell the browser its sound
     // was lost.
-    const audioFromAnotherFile =
-      Number.isInteger(session.audioFileIndex) && session.audioFileIndex !== session.file.fileIndex;
+    const audioFromAnotherFile = session.audioFile !== session.file;
     return {
       video: carriesVideo && Boolean(probed?.videoCodec),
       audio: carriesAudio && (audioFromAnotherFile || Boolean(probed?.audioCodec))
@@ -5843,26 +5833,16 @@ export class HlsSessionManager {
     const startSeconds = Number.isFinite(positionSecondsOverride)
       ? positionSecondsOverride
       : this.runStartTimeFor(session, safeIndex);
-    // Where a sidecar soundtrack's own timeline begins, taken FRESH: the
-    // session may have been created before that file's header could be read,
-    // and this run is the first moment the answer matters. Same shape as
-    // `session.timeline.keyframeTimes`, which is likewise read again on every call so a
-    // background reading that has since finished is picked up.
-    const hasSidecarSound =
-      Number.isInteger(session.audioFileIndex) && session.audioFileIndex !== session.file.fileIndex;
-    const sidecarStartNow = hasSidecarSound
-      ? this.#sidecarStartTimeNow(session.file.sourceKey, session.audioFileIndex)
-      : null;
-    const audioFileStartTime = sidecarStartNow !== null
-      ? sidecarStartNow
-      : (Number.isFinite(session.audioFileStartTime) ? session.audioFileStartTime : 0);
+    // Where each of the two timelines begins, asked of the files themselves.
+    // Fresh by construction: the session may have been created before the
+    // soundtrack file's header could be read, and the reading lands on the file
+    // object this session holds — so there is nothing to re-read and nothing
+    // that can be stale. Same property as `session.timeline.keyframeTimes`,
+    // which is one table shared by every session of the file.
+    const audioFileStartTime = session.audioFile.startTime;
     // The start time of the file this run READS, which is the picture's own for
     // every session except one whose soundtrack is a separate file.
-    const sourceStartTime = session.readsSidecarAlone === true && sidecarStartNow !== null
-      ? sidecarStartNow
-      : (Number.isFinite(session.inputStartTime)
-        ? session.inputStartTime
-        : (Number.isFinite(session.file.startTime) ? session.file.startTime : 0));
+    const sourceStartTime = session.inputFile.startTime;
     // Cut where this session's grid says, whoever is producing the frames. The
     // times are measured from the start of THIS run; the same list serves as
     // the cut points and, when re-encoding, as the keyframes to force — one
@@ -10321,30 +10301,20 @@ export class HlsSessionManager {
   }
 
   /**
-   * Where a sidecar soundtrack's own timeline begins, in seconds.
-   *
-   * What has already been read, without reading anything. The answer to
-   * "is it known yet", which is what a caller who must not wait needs.
-   *
-   * @param {string} sourceKey
-   * @param {number} fileIndex - The SIDECAR's file.
-   * @returns {number | null} Null when nobody has read it yet.
-   */
-  #sidecarStartTimeNow(sourceKey, fileIndex) {
-    if (!(this.sidecarStartTimes instanceof Map)) {
-      this.sidecarStartTimes = new Map();
-    }
-    const held = this.sidecarStartTimes.get(SourceFiles.keyFor(sourceKey, fileIndex));
-    return Number.isFinite(held) ? held : null;
-  }
-
-  /**
-   * Start reading where a sidecar soundtrack's timeline begins, if nobody has.
+   * Start reading where a soundtrack file's own timeline begins, if nobody has.
    *
    * Read by the container layer from the file's own header — the same 64 KB,
    * the same reader and the same per-file cache the audio menu's track list
    * comes from. A container states this, so it is read from the container and
    * not measured from the media.
+   *
+   * The answer goes onto the FILE, which is where it belongs and which is what
+   * removed the pair of maps this used to keep beside it: a start time held per
+   * `sourceKey:fileIndex` is a fact of that file, and a second store of facts
+   * about files is a second thing that can disagree. Every session of the
+   * soundtrack shares the one object, so a reading that lands after a session
+   * has started is seen by that session too — which is what the spawn path
+   * needed and used to re-read a map for.
    *
    * Until 2.73.0 the session spawned an ffmpeg against the proxy's own
    * `/stream` for it and waited up to eight seconds for the banner. Field
@@ -10360,44 +10330,41 @@ export class HlsSessionManager {
    * file may simply not have been downloaded far enough yet, and the next
    * session asks again.
    *
-   * @param {string} sourceKey
-   * @param {number} fileIndex - The SIDECAR's file.
+   * @param {SourceFile} file - The soundtrack's own file.
    * @returns {void}
    */
-  #warmSidecarStartTime(sourceKey, fileIndex) {
+  #warmFileStartTime(file) {
     if (typeof this.getContainerMediaInfo !== "function") {
       return;
     }
-    if (!(this.sidecarStartTimes instanceof Map)) {
-      this.sidecarStartTimes = new Map();
+    if (!(this.fileStartTimeReads instanceof Set)) {
+      this.fileStartTimeReads = new Set();
     }
-    if (!(this.sidecarStartTimeReads instanceof Set)) {
-      this.sidecarStartTimeReads = new Set();
-    }
-    const key = SourceFiles.keyFor(sourceKey, fileIndex);
-    if (this.sidecarStartTimes.has(key) || this.sidecarStartTimeReads.has(key)) {
+    if (file.media?.startTime !== undefined || this.fileStartTimeReads.has(file.key)) {
       return;
     }
-    this.sidecarStartTimeReads.add(key);
-    void Promise.resolve(this.getContainerMediaInfo({ sourceKey, fileIndex }))
+    this.fileStartTimeReads.add(file.key);
+    void Promise.resolve(
+      this.getContainerMediaInfo({ sourceKey: file.sourceKey, fileIndex: file.fileIndex })
+    )
       .then((info) => {
         if (info && Number.isFinite(info.startTimeSeconds)) {
-          this.sidecarStartTimes.set(key, info.startTimeSeconds);
+          file.learn({ startTime: info.startTimeSeconds });
           logger.info(
-            `transcode: soundtrack file ${fileIndex}'s own timeline starts at ` +
+            `transcode: soundtrack file ${file.fileIndex}'s own timeline starts at ` +
             `${info.startTimeSeconds.toFixed(6)}s, read from its header`
           );
         }
       })
       .catch((error) => {
         logger.info(
-          `transcode: the start of soundtrack file ${fileIndex}'s timeline could not be read ` +
+          `transcode: the start of soundtrack file ${file.fileIndex}'s timeline could not be read ` +
           `(${error instanceof Error ? error.message : String(error)}) — the two timelines are ` +
           "taken to agree until it can be"
         );
       })
       .finally(() => {
-        this.sidecarStartTimeReads.delete(key);
+        this.fileStartTimeReads.delete(file.key);
       });
   }
 
@@ -10419,10 +10386,10 @@ export class HlsSessionManager {
   #audioRenditionsOf(session, chosenTrack) {
     const tracks = this.getCachedAudioTracks?.({
       sourceKey: session.file.sourceKey,
-      // The PICTURE's file, which is what `fileIndex` is on every session of a
+      // The PICTURE's file, which is what `file` is on every session of a
       // family — a rendition is created with its base's, and only its
-      // `audioFileIndex` points at the file its sound comes from. The inventory
-      // is keyed on the picture and spans the soundtracks beside it.
+      // `audioFile` points at the file its sound comes from. The inventory is
+      // keyed on the picture and spans the soundtracks beside it.
       fileIndex: session.file.fileIndex
     }) ?? [];
     if (!Array.isArray(tracks) || tracks.length === 0) {

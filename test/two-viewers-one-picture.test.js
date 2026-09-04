@@ -44,6 +44,10 @@ function fakeSession({ id, dirPath, audioTrackIndex = 0, transcodeAudio = true }
     }),
     state: "ready",
     file: new SourceFile({ sourceKey: "torrent:abc", fileIndex: 0, name: "video.mkv" }).learn({ width: 1920, height: 1080 }),
+    // An ordinary session reads its own file, and its sound is inside it. The
+    // three differ only for a soundtrack shipped as a file of its own.
+    get inputFile() { return this.file; },
+    get audioFile() { return this.file; },
     startedAt: Date.now(),
     createEntryMs: Date.now(),
     lastAccessedAt: Date.now(),
@@ -57,7 +61,6 @@ function fakeSession({ id, dirPath, audioTrackIndex = 0, transcodeAudio = true }
     transcodeAudio,
     audioTrackIndex,
     audioSourceTrackIndex: audioTrackIndex,
-    audioFileIndex: 0,
     // The shape this output is encoded AS, decided once for the output.
     output: new Output({
       encodeWidth: 0,

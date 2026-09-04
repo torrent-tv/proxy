@@ -117,11 +117,20 @@ export class ProducedIndex {
       return this.#runDirs;
     }
     try {
-      this.#runDirs = readdirSync(this.#dirPath, { withFileTypes: true })
-        .filter((entry) => entry.isDirectory() && entry.name.startsWith("run-"))
-        .map((entry) => entry.name)
-        .sort((a, b) => Number(b.slice(4)) - Number(a.slice(4)))
-        .map((name) => path.join(this.#dirPath, name));
+      // The output's own directory first, because that is where every run
+      // writes now. Runs used to be kept apart by a directory each; they are
+      // kept apart by their intervals instead, so no two of them can want the
+      // same number and one flat directory is correct. The `run-*` reading
+      // survives only to serve what an older version of this proxy left on the
+      // disk, and it comes second because anything written flat is later.
+      this.#runDirs = [
+        this.#dirPath,
+        ...readdirSync(this.#dirPath, { withFileTypes: true })
+          .filter((entry) => entry.isDirectory() && entry.name.startsWith("run-"))
+          .map((entry) => entry.name)
+          .sort((a, b) => Number(b.slice(4)) - Number(a.slice(4)))
+          .map((name) => path.join(this.#dirPath, name))
+      ];
       this.#runsListedAt = changedAt;
     } catch {
       this.#runDirs = [];

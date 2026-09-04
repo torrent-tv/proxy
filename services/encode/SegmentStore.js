@@ -96,9 +96,6 @@ export class SegmentStore {
    */
   #closed = new Map();
 
-  /** Output key → the last run number handed out for it. @type {Map<string, number>} */
-  #runSerials = new Map();
-
   /** @type {{ info: Function, warn: Function }} */
   #logger;
 
@@ -136,53 +133,6 @@ export class SegmentStore {
    */
   pathFor(key) {
     return path.join(this.#root, directoryNameFor(key));
-  }
-
-  /**
-   * The next run number for this output.
-   *
-   * Held by the OUTPUT and not by a session, because the directory is the
-   * output's: two sessions of one output — two viewers who opened the same film
-   * at different places — both write into it, and a counter of their own would
-   * have them both claim `run-1`. The number also carries the order, since the
-   * index over the directory serves the highest-numbered run's answer first.
-   *
-   * @param {string} key
-   * @returns {number}
-   */
-  nextRunSerial(key) {
-    const next = (this.#runSerials.get(key) ?? this.#highestRunOnDisk(key)) + 1;
-    this.#runSerials.set(key, next);
-    return next;
-  }
-
-  /**
-   * The highest run number already in this output's directory.
-   *
-   * Asked once per output per process, and it is what stops a restarted proxy
-   * from writing `run-1` beside the `run-1` a killed one left: the index reads
-   * the higher number as the later answer, so re-using a number would make an
-   * older segment supersede a newer one.
-   *
-   * @param {string} key
-   * @returns {number}
-   */
-  #highestRunOnDisk(key) {
-    let highest = 0;
-    try {
-      for (const entry of readdirSync(this.pathFor(key), { withFileTypes: true })) {
-        if (!entry.isDirectory() || !entry.name.startsWith("run-")) {
-          continue;
-        }
-        const serial = Number(entry.name.slice(4));
-        if (Number.isFinite(serial) && serial > highest) {
-          highest = serial;
-        }
-      }
-    } catch {
-      // No directory yet, which is the same answer as no runs in it.
-    }
-    return highest;
   }
 
   /**
@@ -380,6 +330,55 @@ export class SegmentStore {
     this.#touched.delete(key);
     this.#closed.delete(key);
     this.#logger.info(`segment-store dropped ${directoryNameFor(key)} (${because})`);
+  }
+
+  /**
+   * Keep only what is still being read, and only as much of it as there is room
+   * for.
+   *
+   * **Not tied to a session.** An output is worth keeping while somebody may
+   * still ask for it, and a session ending says nothing about that: the viewer
+   * who left may come back, and a viewer who never had a session here may open
+   * the same film a minute later and find every segment already made. So the
+   * only question asked is when this output was last READ, and the only bound
+   * is the disk.
+   *
+   * The idle period is deliberately long. Its job is not to reclaim space —
+   * that is the cap's — but to stop an output nobody has touched in hours from
+   * sitting there for the life of the process.
+   *
+   * @param {object} params
+   * @param {number} params.idleMs - Untouched for longer than this, and it goes.
+   * @param {number} params.maxBytes - The most the whole store may hold. What
+   *   was read longest ago goes first.
+   * @returns {{ droppedIdle: number, droppedForRoom: number, bytes: number }}
+   */
+  enforce({ idleMs, maxBytes }) {
+    const now = this.#now();
+    let droppedIdle = 0;
+    for (const [key, touchedAt] of [...this.#touched]) {
+      if (now - touchedAt > idleMs) {
+        this.drop(key, `nothing has read it for ${Math.round((now - touchedAt) / 60000)} minutes`);
+        droppedIdle += 1;
+      }
+    }
+    let droppedForRoom = 0;
+    let held = this.stats().bytes;
+    if (Number.isFinite(maxBytes) && maxBytes > 0 && held > maxBytes) {
+      // Least recently read first: what nobody has asked for in the longest
+      // time is what a viewer is least likely to want next.
+      const byAge = [...this.#touched.entries()].sort((left, right) => left[1] - right[1]);
+      for (const [key] of byAge) {
+        if (held <= maxBytes) {
+          break;
+        }
+        const size = this.refresh(key).bytes;
+        this.drop(key, `the store is over its ${(maxBytes / 1073741824).toFixed(1)}GB allowance`);
+        held -= size;
+        droppedForRoom += 1;
+      }
+    }
+    return { droppedIdle, droppedForRoom, bytes: held };
   }
 
   /**

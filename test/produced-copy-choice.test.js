@@ -319,7 +319,7 @@ test("a run killed with a piece open leaves nothing behind", async (t) => {
   await writeFile(path.join(dirPath, "segment-00000.mp4"), wholePiece(0));
   await writeFile(path.join(dirPath, "segment-00001.mp4"), Buffer.alloc(0));
 
-  assert.equal(await discardOpenPiece(dirPath, fmp4Format, null), 1);
+  assert.equal(await discardOpenPiece(dirPath, fmp4Format, null, null), 1);
   assert.deepEqual(
     await readdir(dirPath),
     ["segment-00000.mp4"],
@@ -336,7 +336,7 @@ test("a run that finished its last piece keeps it", async (t) => {
   await writeFile(path.join(dirPath, "segment-00001.mp4"), wholePiece(SEGMENT_SECONDS));
 
   assert.equal(
-    await discardOpenPiece(dirPath, fmp4Format, () => true),
+    await discardOpenPiece(dirPath, fmp4Format, null, () => true),
     null,
     "a stop between two cuts leaves good output; deleting it means encoding it twice"
   );
@@ -353,7 +353,7 @@ test("a last piece short of a track goes, even though it has bytes", async (t) =
   const init = fmp4Format.extractInit(wholePiece(0));
 
   assert.equal(
-    await discardOpenPiece(dirPath, fmp4Format, (raw) =>
+    await discardOpenPiece(dirPath, fmp4Format, null, (raw) =>
       fmp4Format.hasEveryTrack(fmp4Format.stripInit(raw), init)),
     1,
     "a size above zero is not the same as a piece that can be played"

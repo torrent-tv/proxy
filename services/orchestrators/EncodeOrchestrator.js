@@ -177,6 +177,22 @@ export class EncodeOrchestrator {
    */
   #reconcileOne(address) {
     const coverage = this.coverageOf(address);
+    // A run that has ended and said nothing. One built here reports its own
+    // ending and is released by `noteEnded`; one ADOPTED from elsewhere — a
+    // session whose encoder stopped — has no such promise, and its claim would
+    // otherwise sit in the map for the life of the process, telling the plan
+    // that a stretch nobody is making is being made. Nothing would ever be
+    // started there again.
+    for (const run of this.runsOn(address)) {
+      if (!run.isAlive) {
+        this.noteEnded({
+          address,
+          runId: run.id,
+          ending: RUN_ENDING.GONE,
+          because: "it is no longer running, and it did not say so"
+        });
+      }
+    }
     const windows = this.demand.windowsOn(address).map((window) => ({
       from: window.from,
       to: window.to
@@ -232,7 +248,11 @@ export class EncodeOrchestrator {
     const runId = `${this.#runSerial}`;
     const run = this.makeRun({ address, runId, from, to });
     if (!run) {
-      this.logger.warn(`encode: no run could be built for #${from}..#${to} of ${address}`);
+      // Not necessarily a failure: making an encoder can take a probe and a
+      // keyframe read, and this call is arithmetic that must not wait on
+      // either. Whoever builds one answers with nothing while it is on its way,
+      // and the next pass sees it.
+      this.logger.info(`encode: an encoder for #${from}..#${to} of ${address} is not there yet`);
       return;
     }
     const onThisOutput = this.#runs.get(address) ?? [];

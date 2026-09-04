@@ -41,7 +41,17 @@ export const RUN_ENDING = Object.freeze({
   /** It exited by itself before the end of its stretch. */
   SHORT: "short",
   /** It exited non-zero, or a signal we did not send took it. */
-  FAILED: "failed"
+  FAILED: "failed",
+  /**
+   * It was found to be over without having said so.
+   *
+   * Only an ADOPTED run can end this way: one built here reports its own
+   * ending, while a run handed over from elsewhere — a session whose encoder
+   * stopped — makes no such promise. Counted apart from the rest precisely
+   * because it means nobody watched it end, and a class that is meant to stand
+   * at zero has to be told apart from one that is meant to happen.
+   */
+  GONE: "gone"
 });
 
 /**

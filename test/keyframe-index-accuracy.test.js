@@ -65,12 +65,16 @@ test("a boundary the index got wrong is replaced by the time the file really has
     localPort: 9090
   });
   t.after(() => manager.disposeAll());
+  // ONE table for the film, held by both. It used to be a copy each, kept in
+  // step by writing the correction into every member — which is what the shared
+  // table replaces, and what drifted in the field.
+  const boundaries = [0, 10, 20, 30, 40];
   const base = {
     id: "aaaaaaaa-1111-2222-3333-444444444444",
     fileName: "film.mkv",
     state: "ready",
     transcodeVideo: false,
-    segmentBoundaries: [0, 10, 20, 30, 40],
+    segmentBoundaries: boundaries,
     indexCheck: newIndexCheck(),
     variants: new Map(),
     segmentFormat: { segmentFileName: (index) => `segment-${index}.mp4` }
@@ -80,7 +84,7 @@ test("a boundary the index got wrong is replaced by the time the file really has
     fileName: "film.mkv",
     state: "ready",
     transcodeVideo: true,
-    segmentBoundaries: [0, 10, 20, 30, 40],
+    segmentBoundaries: boundaries,
     indexCheck: newIndexCheck(),
     variantBases: new Set([base.id])
   };
@@ -100,7 +104,7 @@ test("a boundary the index got wrong is replaced by the time the file really has
   assert.equal(
     rung.segmentBoundaries[2],
     17.4,
-    "the family shares one grid, so a correction reaches the rungs cut against it"
+    "the family shares one grid — the same array, so there is nothing to keep in step"
   );
   assert.deepEqual(
     base.segmentBoundaries,

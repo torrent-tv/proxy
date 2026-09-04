@@ -27,6 +27,9 @@ const BOUNDARIES = [0, 4, 8, 12, 16, 20];
  * @returns {{ manager: HlsSessionManager, picture: object, sound: object }}
  */
 function familyAtBoundaryTwo() {
+  // ONE table for the film. Where it is cut is a fact about the FILE, so the
+  // picture and its soundtrack hold the same array rather than a copy each.
+  const boundaries = [...BOUNDARIES];
   const manager = new HlsSessionManager({
     enabled: true,
     ffmpegBin: "ffmpeg",
@@ -37,7 +40,7 @@ function familyAtBoundaryTwo() {
     id: "picture",
     state: "ready",
     runState: ENCODE_RUN_STATE.PRODUCING,
-    segmentBoundaries: [...BOUNDARIES],
+    segmentBoundaries: boundaries,
     encodeStartIndex: 2,
     runSerial: 0,
     audioRenditionSessions: new Map([[1, "sound"]]),
@@ -49,7 +52,7 @@ function familyAtBoundaryTwo() {
     runState: ENCODE_RUN_STATE.PRODUCING,
     audioOnly: true,
     baseSessionId: "picture",
-    segmentBoundaries: [...BOUNDARIES],
+    segmentBoundaries: boundaries,
     encodeStartIndex: 2,
     runSerial: 0,
     indexCheck: null
@@ -74,7 +77,7 @@ test("a soundtrack follows the picture to the instant the picture really began",
   assert.equal(
     sound.segmentBoundaries[2],
     10.5,
-    "and every member's table with it — one film, one timeline"
+    "and every member's table with it — one film, one table, nothing to keep in step"
   );
   // A NEW run, not a seek. A seek decides by index, finds the soundtrack
   // already begins at #2 and answers "already within the running encode" —

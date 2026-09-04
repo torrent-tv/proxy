@@ -157,7 +157,11 @@ test("an unchanged run is not listed again", () => {
 
     index.segmentNumbers();
     const afterFirst = index.directoryReads;
-    assert.equal(afterFirst, 1, "the first question reads the run");
+    // Two: the output's own directory, where every run writes now, and the one
+    // `run-1` this fixture also makes — which only an older version of this
+    // proxy would leave behind. What matters is not the number but that it does
+    // not grow, which the next assertion states.
+    assert.equal(afterFirst, 2, "the first question reads what is there and no more");
 
     for (let asked = 0; asked < 20; asked += 1) {
       index.segmentNumbers();

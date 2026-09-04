@@ -8,7 +8,7 @@
  */
 
 import { createReadStream, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
-import { access, mkdir, readdir, readFile, rm, stat, unlink } from "node:fs/promises";
+import { access, readdir, readFile, rm, stat, unlink } from "node:fs/promises";
 import { Readable } from "node:stream";
 import os from "node:os";
 import path from "node:path";
@@ -63,6 +63,7 @@ import { audioRenditionName } from "./audio-inventory.js";
 import { AudioOutput, CutGrid, OutputSpec, VideoOutput } from "./output/index.js";
 import { ProducedIndex } from "./produced-index.js";
 import { SegmentStore } from "./encode/SegmentStore.js";
+import { readDiskFree } from "./memory-report.js";
 
 /**
  * Whether an encoder run died because its INPUT went away, rather than because
@@ -188,10 +189,17 @@ export function contiguousEnd(present, from) {
  *   empty file is removed.
  * @returns {Promise<number | null>} The segment number removed, or null.
  */
-export async function discardOpenPiece(runDirPath, segmentFormat, judgeUsable) {
+export async function discardOpenPiece(runDirPath, segmentFormat, within, judgeUsable) {
   if (!runDirPath || typeof segmentFormat?.isSegmentFileName !== "function") {
     return null;
   }
+  // Only inside the stretch the ended run was given. Every run of an output
+  // writes into one directory now — they are kept apart by their intervals
+  // rather than by a directory each — so the highest-numbered file in there may
+  // belong to a run that is still going, and removing it would take away a
+  // piece somebody is producing.
+  const from = Number.isInteger(within?.from) ? within.from : 0;
+  const to = Number.isInteger(within?.to) && within.to >= from ? within.to : Number.MAX_SAFE_INTEGER;
   let highest = null;
   try {
     for (const name of await readdir(runDirPath)) {
@@ -199,6 +207,9 @@ export async function discardOpenPiece(runDirPath, segmentFormat, judgeUsable) {
         continue;
       }
       const index = segmentFormat.segmentIndexFromName(name);
+      if (index < from || index > to) {
+        continue;
+      }
       if (index >= 0 && (highest === null || index > highest.index)) {
         highest = { index, name };
       }
@@ -668,6 +679,29 @@ const INPUT_RETRY_MAX_MS = 15_000;
 // disk is already bounded by the pool's 10 GB cap with eviction. Thirty minutes
 // covers a meal, a phone call or a lift ride.
 const DEFAULT_SESSION_TTL_MS = 30 * 60 * 1000;
+/**
+ * How long produced segments are kept after the last request for them.
+ *
+ * Long on purpose, and deliberately not the session TTL: an output outlives
+ * every session on it, and the reason to keep it is that somebody may ask
+ * again — the viewer who closed the tab, or one who has not arrived yet and
+ * will find the film already encoded. Reclaiming space is the allowance below,
+ * not this; this only stops something nobody has touched all day from sitting
+ * there for the life of the process.
+ */
+const SEGMENT_STORE_IDLE_MS = 6 * 60 * 60 * 1000;
+/**
+ * The share of FREE disk the produced segments may take.
+ *
+ * A share of what is free NOW, re-read on every sweep, for the same reason the
+ * piece store re-derives its memory allowance every minute: a machine that
+ * fills up after this proxy started would otherwise go on spending an allowance
+ * taken when it was empty. A Home Assistant install often runs from a 32 GB
+ * card carrying everything else in the house.
+ */
+const SEGMENT_STORE_FREE_SHARE = 0.25;
+/** What the store may hold where the free space cannot be read at all. */
+const SEGMENT_STORE_FALLBACK_BYTES = 2 * 1024 * 1024 * 1024;
 const DEFAULT_STARTUP_WAIT_MS = 5_000;
 // Realtime budget — runtime downswitch (software encoder only). Periodically
 // check each active software-transcode session's ffmpeg `speed`; when it stays
@@ -5264,6 +5298,66 @@ export class HlsSessionManager {
    *   so the player sees both at the time the playlist names.
    * @returns {Promise<void>}
    */
+  /**
+   * The stretch a run should be given, from the gaps in what this output holds.
+   *
+   * Three things decide it, and none of them is who asked. What the store
+   * already has; what another live run of the same output has been given; and
+   * where the request wants to begin. A run starts at the first number nobody
+   * has and nobody is making, and stops before the next number somebody does —
+   * so two runs on one output cannot reach each other's files, which is what
+   * makes one flat directory correct and per-run directories unnecessary.
+   *
+   * @param {HlsSession} session
+   * @param {number} startIndex - Where the caller wants to begin.
+   * @returns {{ from: number, to: number } | null} Null when everything from
+   *   here on is already made or already being made, and a run would only
+   *   repeat somebody else's work.
+   */
+  planRunInterval(session, startIndex) {
+    const key = session.outputKey ?? "";
+    const lastIndex = (Number(session.segmentCount) || 0) - 1;
+    if (!key || lastIndex < 0) {
+      // Nothing to plan against: no address, or no playlist yet. The run keeps
+      // the shape it has always had — start here, no end.
+      return { from: Math.max(0, startIndex), to: -1 };
+    }
+    const ready = new Set(this.segmentStore.provenNumbers(key));
+    /** @type {{from: number, to: number}[]} */
+    const claims = [];
+    for (const other of this.sessionsById.values()) {
+      if (other === session || other.outputKey !== key || other.state === "disposed") {
+        continue;
+      }
+      if (!processCanBeSignalled(other.runState)) {
+        continue;
+      }
+      const from = Number(other.encodeStartIndex);
+      if (!Number.isInteger(from)) {
+        continue;
+      }
+      const to = Number.isInteger(other.runEndIndex) && other.runEndIndex >= from
+        ? other.runEndIndex
+        : lastIndex;
+      claims.push({ from, to });
+    }
+    const takenAt = (index) =>
+      ready.has(index) || claims.some((span) => index >= span.from && index <= span.to);
+
+    let from = Math.max(0, startIndex);
+    while (from <= lastIndex && takenAt(from)) {
+      from += 1;
+    }
+    if (from > lastIndex) {
+      return null;
+    }
+    let to = from;
+    while (to + 1 <= lastIndex && !takenAt(to + 1)) {
+      to += 1;
+    }
+    return { from, to: to >= lastIndex ? -1 : to };
+  }
+
   async #startEncodeRun(session, startIndex, positionSecondsOverride) {
     // A new run starts its own reckoning: a pair spanning the restart would
     // count the gap between two runs as slow encoding.
@@ -5283,9 +5377,42 @@ export class HlsSessionManager {
     // Read before it is overwritten: the run about to be superseded is the one
     // whose open piece has to be discarded once it has actually exited.
     const previousRunDirPath = session.runDirPath ?? null;
-    session.runSerial = this.segmentStore.nextRunSerial(session.outputKey ?? session.sourceMapKey);
-    session.runDirPath = path.join(session.dirPath, `run-${session.runSerial}`);
-    await mkdir(session.runDirPath, { recursive: true });
+    // The stretch the run being replaced was given, read before the new one
+    // overwrites it: with every run of an output writing into one directory,
+    // the piece to discard has to be looked for inside that run own numbers.
+    const previousRunSpan = {
+      from: Number.isInteger(session.encodeStartIndex) ? session.encodeStartIndex : 0,
+      to: Number.isInteger(session.runEndIndex) ? session.runEndIndex : -1
+    };
+    session.runSerial = (session.runSerial ?? 0) + 1;
+    // One directory for the output, and every run writes straight into it.
+    //
+    // Runs used to be kept apart by a directory each, because two of them
+    // writing one segment name at the same time produce a file belonging to
+    // neither — which was also the only reason a restart ever had to wait for
+    // its predecessor to die. Intervals remove that by construction: a run is
+    // given a stretch nobody else holds and stops at the end of it, so no two
+    // runs ever want the same number. What is left of the old reason — a run
+    // killed mid-piece leaving a partial file — is not a correctness problem
+    // either, because the store serves a segment only once its closure is
+    // proven, and it is cleared up when the run ends.
+    session.runDirPath = session.dirPath;
+    const interval = this.planRunInterval(session, startIndex);
+    if (interval === null) {
+      logger.info(
+        `transcode ${session.id} no run started at #${startIndex}: everything from there on is ` +
+        `already made or already being made "${session.fileName}"`
+      );
+      return;
+    }
+    if (interval.from !== startIndex) {
+      logger.info(
+        `transcode ${session.id} run moved forward from #${startIndex} to #${interval.from}: ` +
+        `what lies between is already made "${session.fileName}"`
+      );
+    }
+    startIndex = interval.from;
+    session.runEndIndex = interval.to;
     // The restart backs off a segment or two from what was asked for, so the
     // request that prompted it is recorded under a HIGHER index than the run
     // starts at. Looking it up by the start index alone found nothing and the
@@ -5354,7 +5481,7 @@ export class HlsSessionManager {
         );
         // Only now: while the process lives it may still close the file, and a
         // piece removed from under it would be written on into nothing.
-        await this.#discardUnfinishedPiece(session, previousRunDirPath);
+        await this.#discardUnfinishedPiece(session, previousRunDirPath, previousRunSpan);
       });
       if (!hasChildExited(previousFfmpeg)) {
         try {
@@ -5363,7 +5490,7 @@ export class HlsSessionManager {
           // Best effort.
         }
         await waitForChildExit(previousFfmpeg, ENCODE_RUN_TERMINATE_GRACE_MS);
-        await this.#discardUnfinishedPiece(session, previousRunDirPath);
+        await this.#discardUnfinishedPiece(session, previousRunDirPath, previousRunSpan);
       }
     }
     // A newer restart (or disposal) won the race while we were waiting for the
@@ -5643,6 +5770,31 @@ export class HlsSessionManager {
       args.push("-copyts");
       if (sourceStartTime !== 0) {
         args.push("-output_ts_offset", ffmpegSeconds(-sourceStartTime));
+      }
+    }
+    // Where this run STOPS. Until now a run had a start and no end — neither
+    // `-to` nor `-t` appeared anywhere in the arguments this proxy builds — so
+    // every stop was a kill from outside, and two runs on one output could only
+    // be kept apart by giving each its own directory. With an end they cannot
+    // reach each other's numbers at all, and a run that finishes its stretch
+    // exits by itself instead of having to be noticed and killed.
+    //
+    // WHICH argument states it is a property of the branch, and it is measured
+    // rather than reasoned (2026-09-04, `research/encoder-layer-2026-09-04.md`
+    // §11): `-t` is a duration on the output's own clock, and `-to` a point on
+    // the input's. The copy branch runs with `-copyts`, where the input's clock
+    // IS the source's, so `-to` takes the absolute time; the re-encode branch
+    // has no `-copyts` and takes the duration. Swapping them is not a near
+    // miss — on the copy branch `-t` produced one segment where five were
+    // wanted, because the time it names is already past when the run starts.
+    const endIndex = Number.isInteger(session.runEndIndex) ? session.runEndIndex : -1;
+    const publishedGrid = this.publishedGridFor(session);
+    if (endIndex >= safeIndex && Array.isArray(publishedGrid) && publishedGrid[endIndex + 1] > 0) {
+      const endsAt = publishedGrid[endIndex + 1];
+      if (session.transcodeVideo) {
+        args.push("-t", ffmpegSeconds(Math.max(0.1, endsAt - publishedGrid[safeIndex])));
+      } else {
+        args.push("-to", ffmpegSeconds(endsAt));
       }
     }
     if (session.audioOnly === true) {
@@ -8567,7 +8719,11 @@ export class HlsSessionManager {
     let earliestPosition = null;
     let deepestBuffer = null;
     let viewers = 0;
-    for (const report of session.netReports.values()) {
+    // A session that has never had a link report is the ordinary state at a
+    // cold open, and the answer for it is the same as for one whose reports
+    // have all gone stale: nobody has said where they are.
+    const reports = session.netReports instanceof Map ? session.netReports : new Map();
+    for (const report of reports.values()) {
       if (now - report.at > NET_REPORT_FRESH_MS) {
         continue;
       }
@@ -8755,8 +8911,15 @@ export class HlsSessionManager {
     // — so the piece this run had open must not be left looking like one of
     // them. Not awaited: the caller's own work does not depend on it, and the
     // wait is for a process that has already been told to go.
+    // The stretch this run was given, read now rather than when the process
+    // finally exits: by then the session may have started another run with
+    // another stretch, and the piece to discard belongs to this one.
+    const stoppedSpan = {
+      from: Number.isInteger(session.encodeStartIndex) ? session.encodeStartIndex : 0,
+      to: Number.isInteger(session.runEndIndex) ? session.runEndIndex : -1
+    };
     void waitForChildExit(ffmpeg, ENCODE_RUN_TERMINATE_GRACE_MS).then(() =>
-      this.#discardUnfinishedPiece(session, stoppedRunDirPath)
+      this.#discardUnfinishedPiece(session, stoppedRunDirPath, stoppedSpan)
     );
     logger.info(`transcode ${session.id} encoder stopped: ${reason}`);
   }
@@ -10709,7 +10872,7 @@ export class HlsSessionManager {
    * @param {string | null | undefined} runDirPath
    * @returns {Promise<void>}
    */
-  async #discardUnfinishedPiece(session, runDirPath) {
+  async #discardUnfinishedPiece(session, runDirPath, within = null) {
     const canJudgeTracks =
       typeof session.segmentFormat?.hasEveryTrack === "function" &&
       session.initBytes &&
@@ -10717,6 +10880,7 @@ export class HlsSessionManager {
     const removed = await discardOpenPiece(
       runDirPath,
       session.segmentFormat,
+      within,
       canJudgeTracks
         ? (raw) => {
           const bytes = session.usesExplicitCuts && session.segmentFormat.stripInit
@@ -10920,6 +11084,33 @@ export class HlsSessionManager {
     for (const sessionId of idsToDispose) {
       await this.disposeSession(sessionId);
     }
+    // The segments outlive every session on them, so what they cost is decided
+    // here rather than by anybody's departure: how long ago each output was
+    // last read, and how much room the disk has for the lot.
+    this.segmentStore.enforce({
+      idleMs: SEGMENT_STORE_IDLE_MS,
+      maxBytes: await this.#segmentStoreAllowance()
+    });
+  }
+
+  /**
+   * How much disk the produced segments may hold.
+   *
+   * A share of what is FREE now rather than a figure fixed at startup, for the
+   * same reason the piece store's memory allowance is re-derived every minute:
+   * a machine that fills up after this proxy started would otherwise go on
+   * spending an allowance taken when it was empty. On a Home Assistant install
+   * that disk is often a 32 GB card carrying everything else the household
+   * runs.
+   *
+   * @returns {Promise<number>}
+   */
+  async #segmentStoreAllowance() {
+    const free = await readDiskFree(this.segmentStore.root);
+    if (!Number.isFinite(free) || free <= 0) {
+      return SEGMENT_STORE_FALLBACK_BYTES;
+    }
+    return Math.max(SEGMENT_STORE_FALLBACK_BYTES, Math.floor(free * SEGMENT_STORE_FREE_SHARE));
   }
 
   /**
@@ -11231,29 +11422,25 @@ export class HlsSessionManager {
       session.ffmpeg.kill("SIGTERM");
       await waitForChildExit(session.ffmpeg);
     }
-    // The directory belongs to the OUTPUT, and another session may still be
-    // serving from it — a second viewer of the same film, who joined at a
-    // different place and so has a session of their own. Removing it here would
-    // take away material that viewer is playing, which is exactly the fault
-    // that made produced segments invisible between sessions in the first
-    // place. It goes when nobody is left on that output.
-    const outputKey = session.outputKey ?? "";
-    const stillServed = outputKey
-      ? [...this.sessionsById.values()].some(
-          (other) => other.outputKey === outputKey && other.state !== "disposed"
-        )
-      : false;
-    if (!outputKey) {
+    // The segments are NOT removed here, and that is the point of the address
+    // change. They belong to the output, not to this session: another viewer
+    // may be playing them right now, the viewer who just left may come back,
+    // and a viewer who never had a session on this proxy may open the same film
+    // a minute from now and find the work already done. A session ending says
+    // nothing about any of that.
+    //
+    // What decides instead is when the material was last READ, and how much
+    // room there is — `segmentStore.enforce`, run by the same timer that
+    // expires sessions.
+    if (!session.outputKey) {
+      // A session from before the store — nothing in the tree makes one now,
+      // and this is what would clean up after one if anything did.
       try {
         await rm(session.dirPath, { recursive: true, force: true });
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
         logger.warn(`failed to cleanup HLS temp dir: ${message}`);
       }
-      return;
-    }
-    if (!stillServed) {
-      this.segmentStore.drop(outputKey, `no session is producing or serving it any more`);
     }
   }
 

@@ -15,7 +15,7 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { HlsSessionManager } from "../services/hls-session-manager.js";
@@ -77,19 +77,11 @@ test("each session serves the segments the other one's encoder made", (t) => {
   const dirPath = store.directoryFor(OUTPUT_KEY);
   store.useFormat(OUTPUT_KEY, fmp4Format);
 
-  // One run of each session, numbered from the OUTPUT rather than from the
-  // session, which is what stops them both claiming `run-1`.
-  const first = store.nextRunSerial(OUTPUT_KEY);
-  const second = store.nextRunSerial(OUTPUT_KEY);
-  assert.equal(first, 1);
-  assert.equal(second, 2, "the number is the output's, so the second run is not another run-1");
-
-  const runOne = path.join(dirPath, `run-${first}`);
-  const runTwo = path.join(dirPath, `run-${second}`);
-  mkdirSync(runOne, { recursive: true });
-  mkdirSync(runTwo, { recursive: true });
-  writeFileSync(path.join(runOne, "segment-00000.mp4"), Buffer.alloc(32, 1));
-  writeFileSync(path.join(runTwo, "segment-00100.mp4"), Buffer.alloc(32, 2));
+  // Two runs writing into the ONE directory this output has. They are kept
+  // apart by the stretches they were given, not by a directory each, so neither
+  // can reach the other's numbers and there is nothing to separate.
+  writeFileSync(path.join(dirPath, "segment-00000.mp4"), Buffer.alloc(32, 1));
+  writeFileSync(path.join(dirPath, "segment-00100.mp4"), Buffer.alloc(32, 2));
 
   const viewerOne = sessionOn({ id: "s-one", dirPath, outputKey: OUTPUT_KEY });
   const viewerTwo = sessionOn({ id: "s-two", dirPath, outputKey: OUTPUT_KEY });
@@ -104,7 +96,7 @@ test("each session serves the segments the other one's encoder made", (t) => {
   assert.deepEqual(heldByTwo, [0, 100], "neither viewer's session is the owner of either run");
 });
 
-test("the last session to leave takes the directory with it, and no earlier one does", async (t) => {
+test("a session leaving does not take the segments with it", async (t) => {
   const { manager, store, root } = managerOverATempStore();
   t.after(() => rmSync(root, { recursive: true, force: true }));
 
@@ -118,12 +110,58 @@ test("the last session to leave takes the directory with it, and no earlier one 
   manager.sessionsById.set(viewerTwo.id, viewerTwo);
 
   await manager.disposeSession(viewerOne.id);
-  assert.notEqual(
-    store.pathOf(OUTPUT_KEY, 0),
-    null,
-    "one viewer leaving must not take away material the other is playing"
+  await manager.disposeSession(viewerTwo.id);
+
+  // Both sessions are gone and the material is still here. That is the whole
+  // decoupling: a session ending says nothing about whether anybody will ask
+  // for these segments again — the viewer who left may come back, and a viewer
+  // who never had a session here may open the same film in a minute.
+  assert.notEqual(store.pathOf(OUTPUT_KEY, 0), null);
+});
+
+test("what nobody has read for long enough goes, and time is the only judge", (t) => {
+  const root = mkdtempSync(path.join(os.tmpdir(), "shared-segments-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  let clock = 1_000_000;
+  const store = new SegmentStore({ root, now: () => clock });
+
+  const dirPath = store.directoryFor(OUTPUT_KEY);
+  store.useFormat(OUTPUT_KEY, fmp4Format);
+  writeFileSync(path.join(dirPath, "segment-00000.mp4"), Buffer.alloc(32, 1));
+
+  clock += 60_000;
+  assert.deepEqual(
+    store.enforce({ idleMs: 3_600_000, maxBytes: 1e9 }),
+    { droppedIdle: 0, droppedForRoom: 0, bytes: 32 }
   );
 
-  await manager.disposeSession(viewerTwo.id);
+  clock += 7_200_000;
+  const swept = store.enforce({ idleMs: 3_600_000, maxBytes: 1e9 });
+  assert.equal(swept.droppedIdle, 1);
   assert.equal(store.pathOf(OUTPUT_KEY, 0), null);
+});
+
+test("over the allowance, what was read longest ago goes first", (t) => {
+  const root = mkdtempSync(path.join(os.tmpdir(), "shared-segments-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  let clock = 1_000_000;
+  const store = new SegmentStore({ root, now: () => clock });
+
+  const older = OUTPUT_KEY;
+  const newer = `${OUTPUT_KEY}:second`;
+  for (const key of [older, newer]) {
+    const dir = store.directoryFor(key);
+    store.useFormat(key, fmp4Format);
+    writeFileSync(path.join(dir, "segment-00000.mp4"), Buffer.alloc(1000, 1));
+    clock += 1000;
+  }
+  // Reading the newer one again is what puts the older one at the front of the
+  // queue: the judge is the last REQUEST, not when the file was written.
+  clock += 1000;
+  store.pathOf(newer, 0);
+
+  const swept = store.enforce({ idleMs: 3_600_000, maxBytes: 1500 });
+  assert.equal(swept.droppedForRoom, 1);
+  assert.equal(store.pathOf(older, 0), null);
+  assert.notEqual(store.pathOf(newer, 0), null);
 });

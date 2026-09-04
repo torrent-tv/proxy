@@ -309,6 +309,13 @@ export async function containerKeyframesOf(torrent, fileIndex, sourceKey, option
   if (!file || !Number.isFinite(file.length) || file.length <= 0) {
     return null;
   }
+  // Timed apart from the read below, and reported apart from it, because the
+  // two are different quantities and reading them as one led to a wrong
+  // conclusion on 2026-09-04: this wait is the SWARM delivering the head and
+  // tail of the file, and it reached 60 s on a torrent with one peer, while the
+  // read that follows it is parsing bytes already in hand and never passed
+  // 8.4 s across four containers. A bound belongs on the first, not the second.
+  const edgesStartedAt = Date.now();
   if (typeof options.prefetchEdges === "function") {
     try {
       await options.prefetchEdges();
@@ -317,6 +324,7 @@ export async function containerKeyframesOf(torrent, fileIndex, sourceKey, option
       // fetches what it needs itself, only more slowly.
     }
   }
+  const edgesMs = Date.now() - edgesStartedAt;
   const readRange = async (start, end) =>
     readFetching(file, start, Math.min(end, file.length - 1));
   const startedAt = Date.now();
@@ -339,7 +347,8 @@ export async function containerKeyframesOf(torrent, fileIndex, sourceKey, option
       `container-keyframes: "${String(file.name).slice(0, 40)}" ` +
       (times
         ? `${times.length} keyframes from the ${format} index in ${Date.now() - startedAt}ms`
-        : `has no readable index (${format}, ${Date.now() - startedAt}ms)`)
+        : `has no readable index (${format}, ${Date.now() - startedAt}ms)`) +
+      `, after ${edgesMs}ms waiting for the file's edges`
     );
     return {
       times,

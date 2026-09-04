@@ -64,6 +64,7 @@ import { AudioOutput, CutGrid, OutputSpec, VideoOutput } from "./output/index.js
 import { newIndexCheck, Timeline, Timelines } from "./output/Timeline.js";
 export { newIndexCheck };
 import { Output, Outputs } from "./output/Output.js";
+import { masterPlaylistText, mediaPlaylistText, segmentIndexForTime } from "./output/playlists.js";
 import { SourceFiles, sourceDecodeCharacteristics } from "./source/SourceFile.js";
 import { ProducedIndex } from "./produced-index.js";
 import { SegmentStore } from "./encode/SegmentStore.js";
@@ -118,51 +119,10 @@ export function isInputUnavailable(message) {
 // The index of variants. Served from the same route as the media playlist, so
 // it needs no path of its own.
 const MASTER_PLAYLIST_FILE_NAME = "master.m3u8";
-// Path prefix under a session for one of its variants: `v/<height>/<file>`. A
-// directory level, so every relative name inside a variant's own playlist — its
-// segments and its init — resolves to that variant without any of them changing.
-const VARIANT_PATH_PREFIX = "v";
-// Where an audio rendition lives, and the name the variants refer to it by. One
-// directory level under the base session, exactly as a quality variant is, so
-// every relative name inside its playlist resolves to it unchanged.
-const AUDIO_PATH_PREFIX = "a";
-const AUDIO_GROUP_ID = "aud";
-
-/**
- * Quote a value for an HLS attribute list. Only the quote itself can end the
- * attribute early, and a track title comes from the file, so it is not ours to
- * trust.
- *
- * @param {string} value
- * @returns {string}
- */
-function escapeAttribute(value) {
-  // The quote would end the attribute early; a line break would end the LINE,
-  // splitting one `#EXT-X-MEDIA` into two and corrupting the master. Both come
-  // from the file's own metadata, which is not ours to trust.
-  return String(value ?? "").replace(/"/g, "'").replace(/[\u0000-\u001f\u007f]/g, " ").trim();
-}
-
-// ISO 639-2 codes as ffmpeg reports them, against the RFC 5646 tags HLS asks
-// for. Only the languages this serves in practice; anything else is passed
-// through, which is what players other than iOS accept anyway.
-const LANGUAGE_TAGS = new Map([
-  ["rus", "ru"], ["eng", "en"], ["ukr", "uk"], ["deu", "de"], ["ger", "de"],
-  ["fra", "fr"], ["fre", "fr"], ["spa", "es"], ["ita", "it"], ["jpn", "ja"],
-  ["kor", "ko"], ["zho", "zh"], ["chi", "zh"], ["pol", "pl"], ["por", "pt"],
-  ["tur", "tr"], ["ces", "cs"], ["cze", "cs"], ["nld", "nl"], ["dut", "nl"]
-]);
-
-/**
- * The RFC 5646 tag for a language ffmpeg named, or the name unchanged.
- *
- * @param {string} language
- * @returns {string}
- */
-function languageTag(language) {
-  const code = String(language ?? "").toLowerCase();
-  return LANGUAGE_TAGS.get(code) ?? code;
-}
+// Where a variant and an audio rendition live under a session — `v/<height>/…`
+// and `a/<track>/…` — is stated in `output/playlists.js`, beside the lines that
+// write those addresses into a master playlist. The routes that parse them back
+// are in `server.js`.
 
 /**
  * The last index of the unbroken run of segments starting at `from`.
@@ -448,21 +408,27 @@ export function variantConsumerId(baseSessionId) {
   return `variant-of:${baseSessionId}`;
 }
 
-/**
- * A rough bitrate for a height, in bits per second.
- *
- * `BANDWIDTH` is required on every variant by the HLS specification, and the
- * player uses it to order them. It does not have to be exact — nothing here
- * adapts on it, because the viewer chooses — so it is the usual H.264 rule of
- * thumb rather than a measurement we do not have before encoding starts.
- *
- * @param {number} height
- * @returns {number}
- */
-export function estimatedBitrateFor(height) {
-  return Math.max(400_000, Math.round(height * height * 3.2));
-}
 const CLEANUP_INTERVAL_MS = 30_000;
+
+// How long a session waits for the file's keyframe table before giving up on
+// copying the picture and re-encoding it instead.
+//
+// Measured on the addon host, 2026-09-04, over seventeen files from
+// `Dropbox/trn` — four containers, pieces from 0.25 to 16 MB, files from 0.36 to
+// 20 GB, each torrent registered fresh so nothing of it was downloaded
+// (`research/keyframe-table-read-2026-09-04.md`). Every table that arrived did
+// so within 24.8 s, most within half a second; the two files that answered
+// nothing took 120.9 s and 120.5 s.
+//
+// Those two figures are not a coincidence and they are what fixes this one:
+// they are TWO of the bound the read already has — `READ_ABANDON_MS` in
+// `torrent-worker/container-tracks.js`, one for the wait on the file's edges and
+// one for the read itself, in series. A session waiting for two of them is the
+// defect; waiting for one is the bound, and it leaves 2.4x over the slowest
+// table that did arrive. The line printed when it fires names which case
+// happened, so the field can move it rather than an argument.
+const KEYFRAME_TABLE_BUDGET_MS = 60_000;
+
 const DEFAULT_SEGMENT_DURATION_SEC = 4;
 // How many segments ahead of the current encode head a missing-segment request
 // is allowed to be before we restart ffmpeg at that position (server-side seek).
@@ -1702,6 +1668,11 @@ export class HlsSessionManager {
     segmentDurationSec = DEFAULT_SEGMENT_DURATION_SEC,
     sessionTtlMs = DEFAULT_SESSION_TTL_MS,
     startupWaitMs = DEFAULT_STARTUP_WAIT_MS,
+    // How long a session waits for the file's keyframe table before it
+    // re-encodes the picture instead of copying it. Measured, not chosen —
+    // see KEYFRAME_TABLE_BUDGET_MS. A parameter so a check can name a
+    // shorter one rather than sitting out the real wait.
+    keyframeTableBudgetMs = KEYFRAME_TABLE_BUDGET_MS,
     videoEncoder = null,
     softwarePresetBenchmark = null,
     decodeCostModel = null,
@@ -1722,6 +1693,9 @@ export class HlsSessionManager {
     getTorrentTotals}) {
     this.enabled = Boolean(enabled);
     this.ffmpegBin = ffmpegBin;
+    this.keyframeTableBudgetMs = Number.isFinite(keyframeTableBudgetMs) && keyframeTableBudgetMs > 0
+      ? keyframeTableBudgetMs
+      : KEYFRAME_TABLE_BUDGET_MS;
     // Where measurements about this host are kept between runs. Empty means
     // beside the installed proxy; a deployment with somewhere persistent to
     // write names it (--state-dir).
@@ -2283,15 +2257,12 @@ export class HlsSessionManager {
       // boundaries (the playlist itself), so this MUST block session creation —
       // an incorrect playlist is worse than a slower start.
       //
-      // There is NO bound on this wait. A comment here used to promise a short
-      // timeout and "never more than ~6 s to session start"; nothing in this
-      // path has ever had a timeout, and the fallback below fires when the
-      // index is ABSENT, which is a statement about the file and not about how
-      // long a read ran. The file comes off a torrent, so the bytes the table
-      // lives in may still be arriving and the read waits for them. What the
-      // bound should be has to come from what this read costs on real hosts —
-      // roadmap item 74, and the reading it needs is the line printed by
-      // #readContainerKeyframes.
+      // The wait is bounded (KEYFRAME_TABLE_BUDGET_MS), and the bound is what
+      // the read costs on a real host rather than a figure picked here. A
+      // comment in this place used to promise a short timeout and "never more
+      // than ~6 s to session start" when no timeout existed at all; the file
+      // comes off a torrent, so the bytes the table lives in may still be
+      // arriving, and a session used to wait for them without limit.
       const keyframeStartMs = Date.now();
       // Read the container's OWN keyframe table (Cues/stss) rather than
       // scanning the media. On the copy path ffmpeg can only cut at the
@@ -2303,15 +2274,27 @@ export class HlsSessionManager {
       // the file comes off a torrent, and a full packet scan of 5.5 GB found 77
       // keyframes in 45 s without finishing, while the container index yields
       // all 570 in 0.8 s from two point reads (16 KB).
-      const index = await this.#readContainerKeyframes({ sourceKey, fileIndex, inputUrl, logName });
+      const index = await this.readKeyframeTableWithin({ sourceKey, fileIndex, inputUrl, logName });
       keyframeTimes = index.times;
       containerFormat = index.format;
       keyframeTolerance = Number.isFinite(index.tolerance) ? index.tolerance : 0;
       keyframeMs = Date.now() - keyframeStartMs;
-      // Onto the file: the table is a property of its immutable bytes, like the
-      // duration and the track list, and every session of the file reads the
-      // one answer.
-      file.learn({ keyframeTimes, keyframeTolerance, containerFormat });
+      // Onto the file only when the file has ANSWERED. A read that ran out of
+      // its budget is still running, and writing its absence onto the file would
+      // make a passing shortage of bytes look like a property of the bytes —
+      // every later session of the file would then re-encode a picture that can
+      // be copied.
+      if (index.arrived) {
+        // The table is a property of immutable bytes, like the duration and the
+        // track list, and every session of the file reads the one answer.
+        file.learn({ keyframeTimes, keyframeTolerance, containerFormat });
+      } else {
+        logger.warn(
+          `transcode ${sessionId}: the keyframe table for "${logName}" has not arrived in ` +
+            `${Math.round(this.keyframeTableBudgetMs / 1000)}s, so this session re-encodes the picture ` +
+            "instead of copying it; the read goes on and the next session of this file gets the copy"
+        );
+      }
       if (!keyframeTimes) {
         // No index, so there is no honest grid for a COPY: a copied picture can
         // only be cut at the source's own keyframes, and we do not know where
@@ -2328,11 +2311,13 @@ export class HlsSessionManager {
         // could not be read in the budget lands here too, which is right for
         // the same reason.
         transcodeVideo = true;
-        logger.warn(
-          `transcode ${sessionId}: no keyframe index in the ${containerFormat} container for ` +
-            `"${logName}" — a copied picture has no honest grid without one, so the video is ` +
-            "re-encoded instead and its keyframes are placed on our own cuts"
-        );
+        if (index.arrived) {
+          logger.warn(
+            `transcode ${sessionId}: no keyframe index in the ${containerFormat} container for ` +
+              `"${logName}" — a copied picture has no honest grid without one, so the video is ` +
+              "re-encoded instead and its keyframes are placed on our own cuts"
+          );
+        }
       }
     } else if (hasDuration && transcodeVideo) {
       // Re-encode path: keyframeTimes are ONLY used to snap a LATER seek (see
@@ -2695,7 +2680,7 @@ export class HlsSessionManager {
       // read; this counts them so a session can report what it found. It is
       // what decides whether a re-encoded rung can be cut on this same grid and
       // spliced into the copy (roadmap item 28).
-      playlistText: hasDuration ? this.#buildVodPlaylist(publishedGrid, segmentFormat) : "",
+      playlistText: hasDuration ? mediaPlaylistText({ boundaries: publishedGrid, segmentFormat }) : "",
       // The table AS PUBLISHED — what every playlist of this family states, and
       // what every segment of it is stamped against. Inherited whole from the
       // base when there is one, so a rung or a soundtrack created later
@@ -3137,12 +3122,12 @@ export class HlsSessionManager {
     if (running) {
       return running;
     }
-    // What this read costs is what decides whether a picture can be copied, and
-    // until now nothing recorded it: the one figure printed — `keyframes=` on
-    // the session-create line — is what the SESSION waited for, which is the
-    // remainder of a read the plan had already started, and is zero whenever
-    // the plan finished first. The read itself is a fact of the file and is
-    // timed here, where it is made exactly once per file.
+    // The WHOLE wait, as whoever asked for the table experiences it: the swarm
+    // delivering the head and tail of the file, the parse over those bytes, and
+    // the crossing to the torrent thread and back. The worker's own line
+    // (`container-keyframes:`) reports the last two apart from the first, and
+    // reading the two lines as one figure is what led to a wrong conclusion on
+    // 2026-09-04 — they differ by up to sixty seconds on a thin swarm.
     const startedMs = Date.now();
     const work = this.#readContainerKeyframesOnce({ sourceKey, fileIndex, inputUrl, logName })
       .then((result) => {
@@ -3151,7 +3136,7 @@ export class HlsSessionManager {
         const found = Array.isArray(result?.times) ? result.times.length : 0;
         logger.info(
           `keyframe index "${logName}": ${found > 0 ? `${found} times` : "none"} from the ` +
-            `${result?.format ?? "unrecognised"} container in ${tookMs}ms`
+            `${result?.format ?? "unrecognised"} container, waited ${tookMs}ms`
         );
         return result;
       })
@@ -3167,6 +3152,40 @@ export class HlsSessionManager {
       });
     this.keyframeIndexPending.set(cacheKey, work);
     return work;
+  }
+
+  /**
+   * The same read, with a bound on how long a session will wait for it.
+   *
+   * The read itself is NOT cancelled when the bound is reached — it goes on in
+   * the background, is memoized on the file, and is there for the next session
+   * of it. What the bound decides is only whether THIS session waits: a copied
+   * picture cannot be cut without the table, so the answer to "not yet" is to
+   * re-encode, which needs no table because it places the keyframes itself.
+   *
+   * Public because it is what decides which branch a picture takes, and a
+   * private method cannot be pinned by a check.
+   *
+   * @param {{ sourceKey: string, fileIndex: number, inputUrl?: URL, logName: string }} params
+   * @returns {Promise<{ times: number[] | null, format: string, tolerance?: number, arrived: boolean }>}
+   */
+  async readKeyframeTableWithin(params) {
+    const read = this.#readContainerKeyframes(params);
+    let timer = null;
+    const budget = new Promise((resolve) => {
+      timer = setTimeout(() => resolve(null), this.keyframeTableBudgetMs);
+      // A session must not be held open by this timer alone.
+      timer?.unref?.();
+    });
+    const answer = await Promise.race([read.then((result) => ({ ...result, arrived: true })), budget]);
+    clearTimeout(timer);
+    if (answer) {
+      return answer;
+    }
+    // Nothing is added here to swallow a late rejection: the race is holding a
+    // handler on that promise already, and a second one would only look like it
+    // was doing something.
+    return { times: null, format: "not yet read", tolerance: 0, arrived: false };
   }
 
   /**
@@ -3220,36 +3239,6 @@ export class HlsSessionManager {
     };
 
     return ContainerFactory.readKeyframeIndex({ readRange, fileSize, label: logName });
-  }
-
-  #buildVodPlaylist(boundaries, segmentFormat) {
-    const count = Math.max(0, boundaries.length - 1);
-    let maxDuration = 0;
-    for (let index = 0; index < count; index += 1) {
-      const duration = Math.max(0.1, boundaries[index + 1] - boundaries[index]);
-      if (duration > maxDuration) {
-        maxDuration = duration;
-      }
-    }
-    const lines = [
-      "#EXTM3U",
-      // The container decides the minimum version (fMP4 + `#EXT-X-MAP` needs 7,
-      // MPEG-TS is fine at 3).
-      `#EXT-X-VERSION:${segmentFormat.playlistVersion}`,
-      `#EXT-X-TARGETDURATION:${Math.ceil(maxDuration)}`,
-      "#EXT-X-MEDIA-SEQUENCE:0",
-      "#EXT-X-PLAYLIST-TYPE:VOD",
-      "#EXT-X-INDEPENDENT-SEGMENTS",
-      // Container-specific header lines (e.g. fMP4's `#EXT-X-MAP`).
-      ...segmentFormat.playlistHeaderLines()
-    ];
-    for (let index = 0; index < count; index += 1) {
-      const duration = Math.max(0.1, boundaries[index + 1] - boundaries[index]);
-      lines.push(`#EXTINF:${duration.toFixed(6)},`);
-      lines.push(segmentFormat.segmentFileName(index));
-    }
-    lines.push("#EXT-X-ENDLIST");
-    return `${lines.join("\n")}\n`;
   }
 
   /**
@@ -3357,24 +3346,7 @@ export class HlsSessionManager {
     // The player's grid, for the same reason the cut list uses it: the time
     // being resolved came from the playlist the player holds, so the index it
     // means is the index that playlist gives it.
-    const boundaries = this.publishedGridFor(session);
-    if (boundaries.length < 2) {
-      return Math.max(0, Math.floor(t / this.segmentDurationSec));
-    }
-    // boundaries is sorted ascending; find the last boundary <= t.
-    let lo = 0;
-    let hi = boundaries.length - 1;
-    let result = 0;
-    while (lo <= hi) {
-      const mid = (lo + hi) >> 1;
-      if (boundaries[mid] <= t) {
-        result = mid;
-        lo = mid + 1;
-      } else {
-        hi = mid - 1;
-      }
-    }
-    return Math.min(result, boundaries.length - 2);
+    return segmentIndexForTime(this.publishedGridFor(session), t, this.segmentDurationSec);
   }
 
   /**
@@ -9216,7 +9188,6 @@ export class HlsSessionManager {
     // existence made a live session answer 404 to its own published address.
     const rungs = this.liveOutputs.splicableHeights(session);
     const sourceWidth = Number(session.file.width) || 0;
-    const lines = ["#EXTM3U", `#EXT-X-VERSION:${session.segmentFormat.playlistVersion}`];
     // The audio tracks, published once for the whole file rather than muxed
     // into every rung. Two things follow from that: the same track is not
     // encoded once per rung on a host that struggles to encode it once, and
@@ -9233,27 +9204,14 @@ export class HlsSessionManager {
       // field would start the second viewer in the first viewer's language.
       ? this.#audioRenditionsOf(session, this.#audioChoiceOf(session, consumerId).trackIndex)
       : [];
-    const audioGroup = renditions.length > 0 ? AUDIO_GROUP_ID : "";
-    for (const rendition of renditions) {
-      lines.push(
-        `#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="${audioGroup}",NAME="${escapeAttribute(rendition.name)}"` +
-        (rendition.language ? `,LANGUAGE="${escapeAttribute(languageTag(rendition.language))}"` : "") +
-        `,AUTOSELECT=YES,DEFAULT=${rendition.isDefault ? "YES" : "NO"}` +
-        `,URI="${AUDIO_PATH_PREFIX}/${rendition.trackIndex}/${PLAYLIST_FILE_NAME}"`
-      );
-    }
-    for (const height of rungs) {
-      const width = sourceHeight > 0 && sourceWidth > 0
-        ? Math.round((sourceWidth / sourceHeight) * height / 2) * 2
-        : 0;
-      lines.push(
-        `#EXT-X-STREAM-INF:BANDWIDTH=${estimatedBitrateFor(height)}` +
-        (width > 0 ? `,RESOLUTION=${width}x${height}` : "") +
-        (audioGroup ? `,AUDIO="${audioGroup}"` : "")
-      );
-      lines.push(`${VARIANT_PATH_PREFIX}/${height}/${PLAYLIST_FILE_NAME}`);
-    }
-    return `${lines.join("\n")}\n`;
+    return masterPlaylistText({
+      playlistVersion: session.segmentFormat.playlistVersion,
+      heights: rungs,
+      sourceWidth,
+      sourceHeight,
+      renditions,
+      playlistFileName: PLAYLIST_FILE_NAME
+    });
   }
 
   /**

@@ -18,6 +18,7 @@ import { createRequire } from "node:module";
 import { spawn } from "node:child_process";
 import { mkdtemp, rm } from "node:fs/promises";
 import { decodeCostOf, decodeFamilyOf } from "../services/decode-cost-fit.js";
+import { Output } from "../services/output/Output.js";
 import os from "node:os";
 import path from "node:path";
 import {
@@ -339,12 +340,17 @@ test("the OFFER drops the rungs the host cannot hold, and the master keeps addre
     sourceWidth: 1920,
     sourceHeight: 1080,
     sourceDecode: MEASURED_FILM,
-    outputFps: 24,
     // A copy can only be cut where the source already has a keyframe, and a
     // master is offered only when that grid is real.
     cutGrid: "keyframe",
-    encodeWidth: 0,
-    encodeHeight: 0,
+    // The shape this output is encoded AS, decided once for the output.
+    output: new Output({
+      encodeWidth: 0,
+      encodeHeight: 0,
+      outputFps: 24,
+      softwarePreset: null,
+      applyTonemap: false
+    }),
     usesExplicitCuts: true,
     useSyntheticPlaylist: true,
     playlistText: "#EXTM3U\n",

@@ -17,6 +17,7 @@ import path from "node:path";
 import { audioRenditionKey, HlsSessionManager } from "../services/hls-session-manager.js";
 import { viewerOf } from "../services/viewer/Viewer.js";
 import { fmp4Format } from "../services/segment-formats/fmp4.js";
+import { Output } from "../services/output/Output.js";
 
 const BASE_ID = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
 const SEGMENT_SECONDS = 4;
@@ -53,8 +54,14 @@ function fakeSession({ id, dirPath, audioTrackIndex = 0, transcodeAudio = true }
     fileIndex: 0,
     sourceWidth: 1920,
     sourceHeight: 1080,
-    encodeWidth: 0,
-    encodeHeight: 0,
+    // The shape this output is encoded AS, decided once for the output.
+    output: new Output({
+      encodeWidth: 0,
+      encodeHeight: 0,
+      outputFps: 24,
+      softwarePreset: null,
+      applyTonemap: false
+    }),
     encodeRunGeneration: 0,
     encodeStartIndex: 0,
     waitEpoch: 0,
@@ -247,7 +254,7 @@ test("one viewer changing quality does not take the other off their step", async
     }
     const variant = fakeSession({ id: `variant-${height}`, dirPath });
     variant.transcodeVideo = true;
-    variant.encodeHeight = height;
+    variant.output.encodeHeight = height;
     variant.variantHeight = height;
     variant.variantBases = new Set([BASE_ID]);
     variant.ffmpeg = fakeEncoder();
@@ -284,7 +291,7 @@ test("a step somebody is watching is never withdrawn from the offer", async (t) 
   });
   // A host that can re-encode 240p and nothing above it — the shape of the
   // field case of 2026-08-15.
-  base.encodeHeight = 1080;
+  base.output.encodeHeight = 1080;
   base.variantHeight = 1080;
   manager.softwarePresetBenchmark = [{ preset: "ultrafast", pixelsPerSec: 12_000_000 }];
   manager.decodeCostModel = { pixelTerm: 0.00793, bitrateTerm: 0, constantTerm: 0 };
@@ -292,7 +299,7 @@ test("a step somebody is watching is never withdrawn from the offer", async (t) 
 
   const variant = fakeSession({ id: "variant-720", dirPath });
   variant.transcodeVideo = true;
-  variant.encodeHeight = 720;
+  variant.output.encodeHeight = 720;
   variant.variantHeight = 720;
   variant.sourceDecode = base.sourceDecode;
   variant.variantBases = new Set([BASE_ID]);

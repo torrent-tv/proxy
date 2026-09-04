@@ -1,6 +1,6 @@
 /**
- * Which files of a torrent belong to one video file as its sound or its
- * subtitles.
+ * @file Which files of a torrent belong to one video file — as its sound, its
+ * subtitles or its pictures.
  *
  * Releases often ship a dub or a subtitle set as SEPARATE FILES beside the
  * picture — `Rus Sound/<name>.mka`, `Sub/[group]/<name>.ass` — and a viewer who
@@ -8,6 +8,12 @@
  * This module answers only which file goes with which; what is inside a file is
  * the container layer's business (`services/container/`), and what a viewer is
  * shown is composed in the browser, where the locale is known.
+ *
+ * **Why it lives in `torrent/`.** A container knows only itself, and a track
+ * knows only its container; "the file next to this one" is a notion that exists
+ * only where there is a LIST of files, which is the torrent. So this is the
+ * torrent's own statement about itself, in the layer that holds them, and it is
+ * the reason the folder exists.
  *
  * Nothing here reads bytes, waits on the swarm or knows about ffmpeg. It is a
  * function of the torrent's own list of names, which is why it can be tested
@@ -67,6 +73,29 @@ export const SUBTITLE_SIDECAR_EXTENSIONS = new Set([
   ".ttml",
   ".smi",
   ".txt"
+]);
+
+/**
+ * Still images shipped beside a video: a contact sheet of frames, a cover, a
+ * poster.
+ *
+ * Recognised for two things a viewer can see. A pack of a hundred videos is
+ * unusable as a list of release names, and many such packs ship one contact
+ * sheet per video — so the sheets can BE the picker. And a film with a cover
+ * beside it has something to show while its first frame is being made, which is
+ * otherwise a black rectangle.
+ *
+ * They are served by the byte-range route like anything else in the torrent;
+ * nothing here decodes them.
+ */
+export const IMAGE_SIDECAR_EXTENSIONS = new Set([
+  ".jpg",
+  ".jpeg",
+  ".png",
+  ".webp",
+  ".gif",
+  ".bmp",
+  ".avif"
 ]);
 
 /**
@@ -258,6 +287,35 @@ function hashTokensOf(text) {
  * @returns {boolean}
  */
 export function namesPair(sidecarName, videoName) {
+  return sameRelease(sidecarName, videoName);
+}
+
+/**
+ * The same question for an IMAGE, which has one shape of its own.
+ *
+ * A contact sheet is commonly named by the video's WHOLE name with the image
+ * extension appended — `Movie.mp4.jpg` beside `Movie.mp4` — verified on a pack
+ * of 106 videos with 106 sheets. That is not the base-name rule: the sheet's
+ * base name is `Movie.mp4` and the video's is `Movie`.
+ *
+ * @param {string} imageName
+ * @param {string} videoName
+ * @returns {boolean}
+ */
+export function imageNamesPair(imageName, videoName) {
+  if (sameRelease(imageName, videoName)) {
+    return true;
+  }
+  const imageBase = baseNameOf(imageName).toLowerCase();
+  return imageBase.length > 0 && imageBase === String(videoName ?? "").toLowerCase();
+}
+
+/**
+ * @param {string} sidecarName
+ * @param {string} videoName
+ * @returns {boolean}
+ */
+function sameRelease(sidecarName, videoName) {
   const sidecarBase = baseNameOf(sidecarName).toLowerCase();
   const videoBase = baseNameOf(videoName).toLowerCase();
   if (sidecarBase.length === 0 || videoBase.length === 0) {
@@ -304,13 +362,19 @@ export function namesPair(sidecarName, videoName) {
  * @param {number} [params.videoCount] - How many playable video files the
  *   torrent holds. When 1, the relaxation above applies. Counted by the caller,
  *   which is the side that knows what counts as playable.
- * @returns {{ audio: SidecarFile[], subtitles: SidecarFile[] }}
+ * @returns {{ audio: SidecarFile[], subtitles: SidecarFile[], images: SidecarFile[] }}
+ *   Images are the third group because a contact sheet or a cover is paired by
+ *   the same rule and found in the same one pass. They are matched more
+ *   strictly than sound and subtitles: the one-video relaxation does NOT apply
+ *   to them, since a torrent's stray screenshot is not this film's cover, and
+ *   showing the wrong picture as a poster is a visible mistake where a missing
+ *   one is merely nothing.
  */
 export function matchSidecarFiles({ files, videoIndex, torrentName = "", videoCount = 0 }) {
   const list = Array.isArray(files) ? files : [];
   const video = list[videoIndex];
   if (!video) {
-    return { audio: [], subtitles: [] };
+    return { audio: [], subtitles: [], images: [] };
   }
   const videoPath = splitTorrentPath(video.path ?? video.name ?? "", torrentName);
   const onlyVideo = videoCount === 1;
@@ -318,6 +382,8 @@ export function matchSidecarFiles({ files, videoIndex, torrentName = "", videoCo
   const audio = [];
   /** @type {SidecarFile[]} */
   const subtitles = [];
+  /** @type {SidecarFile[]} */
+  const images = [];
 
   for (const [fileIndex, file] of list.entries()) {
     if (fileIndex === videoIndex) {
@@ -327,10 +393,11 @@ export function matchSidecarFiles({ files, videoIndex, torrentName = "", videoCo
     const extension = extensionOf(name);
     const isAudio = AUDIO_SIDECAR_EXTENSIONS.has(extension);
     const isSubtitle = !isAudio && SUBTITLE_SIDECAR_EXTENSIONS.has(extension);
-    if (!isAudio && !isSubtitle) {
+    const isImage = !isAudio && !isSubtitle && IMAGE_SIDECAR_EXTENSIONS.has(extension);
+    if (!isAudio && !isSubtitle && !isImage) {
       continue;
     }
-    if (!onlyVideo && !namesPair(name, videoPath.name)) {
+    if (isImage ? !imageNamesPair(name, videoPath.name) : !onlyVideo && !namesPair(name, videoPath.name)) {
       continue;
     }
     const entry = {
@@ -343,10 +410,12 @@ export function matchSidecarFiles({ files, videoIndex, torrentName = "", videoCo
     };
     if (isAudio) {
       audio.push(entry);
-    } else {
+    } else if (isSubtitle) {
       subtitles.push(entry);
+    } else {
+      images.push(entry);
     }
   }
 
-  return { audio, subtitles };
+  return { audio, subtitles, images };
 }

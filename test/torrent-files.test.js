@@ -22,7 +22,7 @@ import {
   matchSidecarFiles,
   namesPair,
   splitTorrentPath
-} from "../services/sidecar-files.js";
+} from "../services/torrent/files.js";
 
 /**
  * The Drifters torrent, as WebTorrent reports it: every path prefixed with the
@@ -160,6 +160,49 @@ test("files of no interest are ignored", () => {
   const matched = matchSidecarFiles({ files, videoIndex: 0, torrentName: "X", videoCount: 1 });
   assert.deepEqual(matched.audio, []);
   assert.deepEqual(matched.subtitles, []);
+  assert.deepEqual(
+    matched.images,
+    [],
+    "a stray cover is not THIS film's cover: the one-video relaxation does not reach images, " +
+      "because showing the wrong poster is a visible mistake where showing none is nothing"
+  );
+});
+
+test("a contact sheet named by the video's whole name is paired with it", () => {
+  // The shape a pack of a hundred videos actually ships: one sheet per video,
+  // named `<video file name>.jpg`. Its BASE name is `c0930.com_chijyo0073.wmv`,
+  // which no base-name rule would match against the video's `c0930…`.
+  const files = [
+    { path: "P/c0930.com_chijyo0073.wmv", name: "c0930.com_chijyo0073.wmv", length: 900 },
+    {
+      path: "P/Скринлисты/c0930.com_chijyo0073.wmv.jpg",
+      name: "c0930.com_chijyo0073.wmv.jpg",
+      length: 90
+    },
+    { path: "P/other.wmv", name: "other.wmv", length: 900 },
+    { path: "P/Скринлисты/other.wmv.jpg", name: "other.wmv.jpg", length: 90 }
+  ];
+
+  const matched = matchSidecarFiles({ files, videoIndex: 0, torrentName: "P", videoCount: 2 });
+
+  assert.equal(matched.images.length, 1, "its own sheet, and not the other video's");
+  assert.equal(matched.images[0].fileIndex, 1);
+  assert.deepEqual(matched.images[0].folders, ["Скринлисты"]);
+});
+
+test("a cover named like the film is paired with it, whatever its extension", () => {
+  const files = [
+    { path: "X/Film.2019.mkv", name: "Film.2019.mkv", length: 100 },
+    { path: "X/Film.2019.png", name: "Film.2019.png", length: 10 },
+    { path: "X/Film.2019.webp", name: "Film.2019.webp", length: 10 }
+  ];
+
+  const matched = matchSidecarFiles({ files, videoIndex: 0, torrentName: "X", videoCount: 1 });
+
+  assert.deepEqual(
+    matched.images.map((image) => image.name).sort(),
+    ["Film.2019.png", "Film.2019.webp"]
+  );
 });
 
 test("a raw elementary stream is recognised but declares no tracks of its own", () => {

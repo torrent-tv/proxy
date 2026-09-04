@@ -25,7 +25,7 @@
 
 import { CoverageMap } from "../encode/CoverageMap.js";
 import { firstUnmetWant, planEncoders } from "../encode/EncodePlan.js";
-import { RUN_ENDING } from "../encode/EncodeRun.js";
+import { ENCODE_EXIT } from "../encode/encode-exit.js";
 import { SegmentDemand } from "../encode/SegmentDemand.js";
 
 export class EncodeOrchestrator {
@@ -188,7 +188,7 @@ export class EncodeOrchestrator {
         this.noteEnded({
           address,
           runId: run.id,
-          ending: RUN_ENDING.GONE,
+          ending: ENCODE_EXIT.GONE,
           because: "it is no longer running, and it did not say so"
         });
       }
@@ -331,7 +331,7 @@ export class EncodeOrchestrator {
   endings() {
     /** @type {Record<string, number>} */
     const tally = {};
-    for (const ending of Object.values(RUN_ENDING)) {
+    for (const ending of Object.values(ENCODE_EXIT)) {
       tally[ending] = this.#endings.get(ending) ?? 0;
     }
     return tally;

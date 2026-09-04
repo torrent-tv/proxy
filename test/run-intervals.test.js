@@ -15,6 +15,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { SourceFile } from "../services/source/SourceFile.js";
+import { startRunOn } from "./helpers/encode-run.js";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -49,7 +50,7 @@ function managerWithAnEmptyOutput() {
  * @returns {object}
  */
 function sessionOn({ id, dirPath, segmentCount = 100, runState = null, encodeStartIndex = 0, runEndIndex = -1 }) {
-  return {
+  const session = {
     id,
     outputKey: KEY,
     dirPath,
@@ -61,12 +62,18 @@ function sessionOn({ id, dirPath, segmentCount = 100, runState = null, encodeSta
     get audioFile() { return this.file; },
     segmentFormat: fmp4Format,
     segmentCount,
-    runState,
-    encodeStartIndex,
-    runEndIndex,
+    run: null,
     consumers: new Set(),
     lastAccessedAt: Date.now()
   };
+  if (runState !== null) {
+    const run = startRunOn(session, { id, from: encodeStartIndex, to: runEndIndex });
+    if (runState === "ENDED_FAILED") {
+      // A run that failed, said so, and left what it had made behind.
+      run.process?.exit(255, null);
+    }
+  }
+  return session;
 }
 
 /**
@@ -275,11 +282,11 @@ test("a seek backwards does not drag the picture away from a viewer watching ahe
   viewerOf(shared, "ahead").head = { segment: 250, seconds: 1000, at: Date.now() };
   viewerOf(shared, "back").head = { segment: 250, seconds: 1000, at: Date.now() };
 
-  const startedAt = shared.encodeStartIndex;
+  const startedAt = shared.run.from;
   manager.requestSeek("shared", 40, "back");
 
   assert.equal(
-    shared.encodeStartIndex,
+    shared.run.from,
     startedAt,
     "the run serving the viewer in front is left exactly where it was"
   );

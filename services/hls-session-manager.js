@@ -29,11 +29,11 @@ import {
   ENCODE_RUN_EVENT,
   ENCODE_RUN_STATE,
   INITIAL_RUN_STATE,
-  nextState,
   processCanBeSignalled,
   wireState
 } from "./encode/encode-run-state.js";
-import { ENCODE_EXIT, classifyEncodeExit } from "./encode-exit.js";
+import { ENCODE_EXIT } from "./encode/encode-exit.js";
+import { EncodeRun } from "./encode/EncodeRun.js";
 
 /** Own package version, stamped onto session-start log lines. */
 const PROXY_VERSION = createRequire(import.meta.url)("../package.json").version;
@@ -82,7 +82,6 @@ import {
 // — did not move when the code did.
 export { ffmpegSeconds, onKeyframeGridFor, seekLandingOffsetFor, segmentCutTimesFrom };
 import { viewerOf, viewersOf } from "./viewer/Viewer.js";
-import { sessionAsRun } from "./encode/SessionRun.js";
 import { EncodeOrchestrator } from "./orchestrators/EncodeOrchestrator.js";
 import { readDiskFree } from "./memory-report.js";
 
@@ -746,7 +745,6 @@ const LINK_OBSERVED_SEGMENTS = 5;
 // host: a proxy whose swarm has warmed up, or which has just picked up a second
 // viewer, should stop quoting the numbers from ten minutes ago.
 const FIRST_SEGMENT_SAMPLES = 20;
-const MICROSECONDS_PER_SECOND = 1_000_000;
 const PROGRESS_LOG_INTERVAL_MS = 5_000;
 // Read segment files in large blocks so the body is delivered to the data
 // channel in few, big chunks. On a busy ARM host the in-process WebTorrent
@@ -1397,6 +1395,20 @@ export function describeGridDrift(published, live) {
 
 
 
+/**
+ * What the session's run is doing.
+ *
+ * A session that has never started one, or whose run has been let go, is at the
+ * table's own initial state — which is what "nothing is encoding" means and is
+ * exactly what the field held before a run existed as an object.
+ *
+ * @param {{ run?: { state?: string } | null }} session
+ * @returns {string}
+ */
+function runStateOf(session) {
+  return session?.run?.state ?? INITIAL_RUN_STATE;
+}
+
 function isWarmupTimeoutError(error) {
   if (!(error instanceof Error)) {
     return false;
@@ -1427,13 +1439,14 @@ function isWarmupTimeoutError(error) {
  * @property {"starting" | "ready" | "failed" | "disposed"} state
  * @property {number}  startedAt     - Unix ms timestamp when the session was created.
  * @property {number}  lastAccessedAt - Unix ms timestamp of the last consumer access.
- * @property {import("node:child_process").ChildProcess} ffmpeg
+ * @property {import("./encode/EncodeRun.js").EncodeRun | null} run - The one
+ *   running encoder of this session: its process, the stretch it was given, its
+ *   state, what it has produced and how it ended.
+ * @property {object | null} pendingRun - The attempt whose spawn is still
+ *   pending, so that a newer attempt can tell an older one it was overtaken.
  * @property {string}  lastError
  * @property {Set<string>} consumers  - Consumer IDs currently using this session.
  * @property {object}  progress       - Live progress metrics updated from ffmpeg stdout.
- * @property {number}  encodeRunGeneration - Bumped on every #startEncodeRun call;
- *   lets a call that awaited the previous ffmpeg's exit detect it was superseded
- *   by a newer restart request and abort instead of spawning a second process.
  * @property {number[] | null} keyframeTimes - Real source keyframe times
  *   (sorted seconds), or null when the probe failed/timed out. Used to snap a
  *   source seek onto a known-valid position (see #startEncodeRun).
@@ -2361,7 +2374,14 @@ export class HlsSessionManager {
       startedAt: Date.now(),
       lastAccessedAt: Date.now(),
       ffmpeg: null,
-      encodeRunGeneration: 0,
+      // The attempt whose spawn is still pending, so a newer one can tell it
+      // has been overtaken. It replaced a counter compared against a copy of
+      // itself: the attempt is a thing, and comparing the thing says the same
+      // without a number to keep in step.
+      pendingRun: null,
+      // The one running encoder of this session: its process, its stretch, its
+      // state, what it has produced and how it ended.
+      run: null,
       // What the ENCODER RUN is doing, as one control state from the table in
       // `encode-run-state.js`. Every question about the run is now answered
       // from here: whether a process can be signalled, whether anything is
@@ -2593,7 +2613,7 @@ export class HlsSessionManager {
       // Circuit breaker: consecutive FAST failures (see SEEK_FAST_FAIL_MS) at
       // seekFailureTarget. Reset whenever a run starts at a DIFFERENT target or
       // survives past the fast-fail window. See the exit handler in
-      // #wireEncodeProcess and MAX_SEEK_FAILURES.
+      // the run ending handler and MAX_SEEK_FAILURES.
       seekFailureTarget: -1,
       seekFailureCount: 0,
       progress: {
@@ -2739,7 +2759,7 @@ export class HlsSessionManager {
       await this.waitUntilReady(session);
       return session;
     } catch (error) {
-      if (session.runState === ENCODE_RUN_STATE.ENDED_FAILED) {
+      if (runStateOf(session) === ENCODE_RUN_STATE.ENDED_FAILED) {
         await this.disposeSession(session.id);
         throw error;
       }
@@ -3770,27 +3790,28 @@ export class HlsSessionManager {
   }
 
   /**
-   * This session, as the one running encoder it is.
+   * This session's run, told what the disk holds before it is asked where it
+   * has got to.
+   *
+   * A run learns of its own segments as they are SERVED, which is not when they
+   * are made — a viewer two minutes behind the encoder has asked for none of
+   * what is in front of them. The store knows, so the run is told, and its head
+   * is then the same figure the look-ahead and the plan have always used.
    *
    * @param {HlsSession} session
-   * @returns {object}
+   * @returns {import("./encode/EncodeRun.js").EncodeRun | null}
    */
   #runOf(session) {
-    if (!session.asRun) {
-      session.asRun = sessionAsRun({
-        session,
-        headOf: () => {
-          const produced = this.#latestProducedSegment(session);
-          return Number.isInteger(produced)
-            ? produced + 1
-            : (Number(session.encodeStartIndex) || 0);
-        },
-        speedOf: () => Number(session.recentSpeed?.speed) || 0,
-        aliveOf: () => session.state !== "disposed" && processCanBeSignalled(session.runState),
-        stop: (because) => this.#stopEncodeRun(session, because)
-      });
+    const run = session.run;
+    if (!run) {
+      return null;
     }
-    return session.asRun;
+    for (const index of this.producedSegmentNumbers(session)) {
+      if (index >= run.from) {
+        run.noteProduced(index);
+      }
+    }
+    return run;
   }
 
   /**
@@ -3854,7 +3875,7 @@ export class HlsSessionManager {
    * @returns {void}
    */
   #enforceLookAheadFor(session) {
-    if (!session || session.state === "disposed" || !session.ffmpeg) {
+    if (!session || session.state === "disposed" || !session.run?.process) {
       return;
     }
     // How far the encoder has got, measured by what EXISTS. ffmpeg's own
@@ -3869,7 +3890,7 @@ export class HlsSessionManager {
     // run started at — so a session nobody has read from yet is bounded too.
     const viewerSegment = Number.isInteger(session.lastRequestedSegment)
       ? session.lastRequestedSegment
-      : (session.encodeStartIndex ?? 0);
+      : (session.run?.from ?? 0);
 
     // How much is ready CONTIGUOUSLY FROM WHERE THE VIEWER IS — not the highest
     // segment number lying in the directory. The two are the same only while a
@@ -3887,9 +3908,7 @@ export class HlsSessionManager {
     if (aheadSeconds === null) {
       // The segment the viewer needs does not exist. Whatever else is on disk,
       // this encoder has work to do right now.
-      if (session.runState === ENCODE_RUN_STATE.SUSPENDED && this.#resumeEncoder(session, "the viewer needs a segment nobody has made")) {
-        this.#transitionRun(session, ENCODE_RUN_EVENT.RESUME_ORDERED);
-      }
+      this.#resumeEncoder(session, "the viewer needs a segment nobody has made");
       return;
     }
 
@@ -3916,7 +3935,7 @@ export class HlsSessionManager {
       );
     }
 
-    if (session.runState !== ENCODE_RUN_STATE.SUSPENDED && aheadSeconds > LOOKAHEAD_PAUSE_SECONDS) {
+    if (runStateOf(session) !== ENCODE_RUN_STATE.SUSPENDED && aheadSeconds > LOOKAHEAD_PAUSE_SECONDS) {
       // The decision names what it was taken on. Suspending the encoder stops
       // the only thing that reads the input, so a wrong reading here stops the
       // download too — measured 2026-08-06: the log said "135s ahead" while
@@ -3930,10 +3949,8 @@ export class HlsSessionManager {
           `(viewer at #${viewerSegment}, unbroken through #${reading.lastCovered}, ` +
           `${reading.total} segment file(s) present)`
       );
-    } else if (session.runState === ENCODE_RUN_STATE.SUSPENDED && aheadSeconds <= LOOKAHEAD_RESUME_SECONDS) {
-      if (this.#resumeEncoder(session, `${Math.round(aheadSeconds)}s ahead of the viewer`)) {
-        this.#transitionRun(session, ENCODE_RUN_EVENT.RESUME_ORDERED);
-      }
+    } else if (aheadSeconds <= LOOKAHEAD_RESUME_SECONDS) {
+      this.#resumeEncoder(session, `${Math.round(aheadSeconds)}s ahead of the viewer`);
     }
   }
 
@@ -4113,58 +4130,7 @@ export class HlsSessionManager {
    * @param {string} event - One of {@link ENCODE_RUN_EVENT}.
    * @returns {string} The state now in force.
    */
-  /**
-   * How many of this proxy's encoders are running right now.
-   *
-   * Suspended runs are not counted: a process stopped by the look-ahead cap
-   * competes for nothing, and counting it would price a machine as busier than
-   * it is — the same distinction the host-load line had to learn (2026-08-15,
-   * `ffmpeg=0% system=24%` with both encoders parked).
-   *
-   * @returns {number}
-   */
-  #encodersRunningNow() {
-    let running = 0;
-    for (const session of this.sessionsById.values()) {
-      if (session.runState === ENCODE_RUN_STATE.STARTING || session.runState === ENCODE_RUN_STATE.PRODUCING) {
-        running += 1;
-      }
-    }
-    return running;
-  }
 
-  #transitionRun(session, event) {
-    const from = session.runState ?? INITIAL_RUN_STATE;
-    const to = nextState(from, event);
-    if (to === null) {
-      logger.warn(`run-state ${session.id} ${from} + ${event} — no such edge; ignored`);
-      return from;
-    }
-    session.runState = to;
-    logger.info(`run-state ${session.id} ${from} --${event}--> ${to}`);
-    return to;
-  }
-
-  /**
-   * Does this process's exit still say anything about the session?
-   *
-   * Two conditions, and the second is why this is a method rather than a
-   * comparison. A process is not the session's own run once a NEWER one has
-   * been installed — and also once it has been marked for replacement, which
-   * happens BEFORE the replacement exists. Between those two moments the field
-   * still names the doomed process, so comparing against it alone answers
-   * "yes, this is the current run" about a process we have just killed.
-   *
-   * @param {HlsSession} session
-   * @param {import("node:child_process").ChildProcess} ffmpeg
-   * @returns {boolean}
-   */
-  #isCurrentRun(session, ffmpeg) {
-    if (session.ffmpeg !== ffmpeg) {
-      return false;
-    }
-    return session.supersededRuns?.has(ffmpeg) !== true;
-  }
 
   /**
    * A segment this run made has just been served.
@@ -4186,17 +4152,38 @@ export class HlsSessionManager {
    * @returns {void}
    */
   #noteRunProducedSegment(session, filePath) {
-    if (session.runState !== ENCODE_RUN_STATE.STARTING) {
+    const run = session.run;
+    if (!run || typeof filePath !== "string") {
       return;
     }
-    const runDir = session.runDirPath;
-    if (typeof runDir !== "string" || runDir.length === 0 || typeof filePath !== "string") {
+    if (path.dirname(filePath) !== run.dirPath) {
       return;
     }
-    if (path.dirname(filePath) !== runDir) {
-      return;
+    const index = session.segmentFormat.segmentIndexFromName(path.basename(filePath));
+    if (index !== null) {
+      run.noteProduced(index);
     }
-    this.#transitionRun(session, ENCODE_RUN_EVENT.FIRST_SEGMENT);
+  }
+
+  /**
+   * How many of this proxy's encoders are running right now.
+   *
+   * Suspended runs are not counted: a process stopped by the look-ahead cap
+   * competes for nothing, and counting it would price a machine as busier than
+   * it is — the same distinction the host-load line had to learn (2026-08-15,
+   * `ffmpeg=0% system=24%` with both encoders parked).
+   *
+   * @returns {number}
+   */
+  #encodersRunningNow() {
+    let running = 0;
+    for (const session of this.sessionsById.values()) {
+      const state = runStateOf(session);
+      if (state === ENCODE_RUN_STATE.STARTING || state === ENCODE_RUN_STATE.PRODUCING) {
+        running += 1;
+      }
+    }
+    return running;
   }
 
   /**
@@ -4209,24 +4196,7 @@ export class HlsSessionManager {
   #pauseEncoder(session, reason) {
     // Any pair spanning this would count a stopped encoder as slow.
     session.learnSample = null;
-    if (session.runState === ENCODE_RUN_STATE.SUSPENDED || session.encoderPauseUnsupported || !session.ffmpeg?.pid) {
-      return;
-    }
-    try {
-      process.kill(session.ffmpeg.pid, "SIGSTOP");
-    } catch (error) {
-      session.encoderPauseUnsupported = true;
-      logger.info(
-        `transcode ${session.id} cannot suspend the encoder on this platform ` +
-          `(${error instanceof Error ? error.message : String(error)}); look-ahead stays unbounded`
-      );
-      return;
-    }
-    this.#transitionRun(session, ENCODE_RUN_EVENT.SUSPEND_ORDERED);
-    logger.info(
-      `transcode ${session.id} encoder suspended — ${reason} ` +
-        `"${session.file.name}"`
-    );
+    session.run?.pause(reason);
   }
 
   /**
@@ -4244,27 +4214,7 @@ export class HlsSessionManager {
   #resumeEncoder(session, reason) {
     // Any pair spanning this would count a stopped encoder as slow.
     session.learnSample = null;
-    if (session.runState !== ENCODE_RUN_STATE.SUSPENDED || !session.ffmpeg?.pid) {
-      return false;
-    }
-    let continued = true;
-    try {
-      process.kill(session.ffmpeg.pid, "SIGCONT");
-    } catch {
-      // The process is gone; the exit handler will deal with it. The flag is
-      // cleared either way — but nothing was resumed, and saying so is what
-      // stops a dead run being reported as producing again.
-      continued = false;
-    }
-    // Two records of one moment must not contradict each other: a line saying
-    // the encoder resumed, beside a return value saying nothing was resumed, is
-    // the sort of pair that costs an hour of reading a field log.
-    logger.info(
-      continued
-        ? `transcode ${session.id} encoder resumed — ${reason} "${session.file.name}"`
-        : `transcode ${session.id} could not resume the encoder (the process is gone) — ${reason} "${session.file.name}"`
-    );
-    return continued;
+    return session.run?.resume(reason) === true;
   }
 
   /**
@@ -4518,9 +4468,9 @@ export class HlsSessionManager {
 
   async #reportHostLoad() {
     const encoding = [...this.sessionsById.values()].filter(
-      (session) => processCanBeSignalled(session?.runState) && session.state !== "disposed"
+      (session) => processCanBeSignalled(runStateOf(session)) && session.state !== "disposed"
     );
-    const runningNow = encoding.filter((session) => session.runState !== ENCODE_RUN_STATE.SUSPENDED);
+    const runningNow = encoding.filter((session) => runStateOf(session) !== ENCODE_RUN_STATE.SUSPENDED);
     if (runningNow.length === 0) {
       // No encoder is RUNNING. A suspended one costs nothing, and counting it
       // as work meant this was never reached: measured 2026-08-15, four minutes
@@ -4542,7 +4492,7 @@ export class HlsSessionManager {
     // alone would print something like `ffmpeg=-598%`. Only pids present in
     // BOTH readings are counted, so a process that came or went contributes
     // nothing rather than a lie.
-    const pids = encoding.map((session) => session.ffmpeg?.pid ?? null).filter((pid) => pid !== null);
+    const pids = encoding.map((session) => session.run?.process?.pid ?? null).filter((pid) => pid !== null);
     const [system, ...cpuReadings] = await Promise.all([
       readSystemCpu(),
       ...pids.map((pid) => readProcessCpuSeconds(pid))
@@ -4594,7 +4544,7 @@ export class HlsSessionManager {
     // the addon host actually were (2026-08-15: `ffmpeg=0% system=24%`, both
     // encoders suspended, and the speed beside it a stale figure from before
     // they stopped).
-    const suspended = encoding.filter((session) => session.runState === ENCODE_RUN_STATE.SUSPENDED).length;
+    const suspended = encoding.filter((session) => runStateOf(session) === ENCODE_RUN_STATE.SUSPENDED).length;
     const running = encoding.length - suspended;
     const machine = await readMachineState();
     const asPercent = (value) => (value === null ? "n/a" : `${Math.round(value * 100)}%`);
@@ -4675,12 +4625,12 @@ export class HlsSessionManager {
       if (
         !session ||
         session.state === "disposed" ||
-        session.runState === ENCODE_RUN_STATE.ENDED_FAILED ||
+        runStateOf(session) === ENCODE_RUN_STATE.ENDED_FAILED ||
         // Nothing is encoding, so there is no speed to judge. A variant the
         // viewer has switched away from is left in exactly this state, and its
         // last recorded speed would otherwise buy it a step — which restarts
         // the encoder it was just stopped for.
-        !session.ffmpeg ||
+        !session.run?.process ||
         // A soundtrack published on its own carries no picture, so no quality
         // step is its to make; its price is learned above and that is all.
         session.audioOnly === true
@@ -4727,7 +4677,7 @@ export class HlsSessionManager {
    */
   #recentSpeedOf(session, now) {
     const reading = session.recentSpeed;
-    if (!reading || reading.runSerial !== (session.runSerial ?? 0)) {
+    if (!reading || reading.run !== session.run) {
       return null; // nothing from THIS run
     }
     // Two budget ticks. A reading older than that is not about the machine as
@@ -5154,7 +5104,7 @@ export class HlsSessionManager {
    * @returns {Promise<void>}
    */
   async #restartAtViewer(session) {
-    const head = session.encodeStartIndex;
+    const head = session.run?.from;
     const processed = Number.isFinite(session.progress?.processedSeconds)
       ? session.progress.processedSeconds
       : this.runStartTimeFor(session, head);
@@ -5287,10 +5237,10 @@ export class HlsSessionManager {
    * CPU and the same files on a weak host is what a seek could get "stuck" on.
    *
    * Because this now awaits, a NEWER restart request can arrive while an OLDER
-   * one is still waiting for the previous process to die. `encodeRunGeneration`
-   * resolves that: each call captures its own generation number, and after the
-   * await, a call whose generation was superseded aborts without spawning —
-   * only the LATEST requested target ever actually starts a process.
+   * one is still waiting for the previous process to die. The attempt object
+   * resolves that: each call puts its own on the session, and after the await a
+   * call whose attempt has been replaced returns without spawning — only the
+   * LATEST requested target ever actually starts a process.
    *
    * Segment files are named with a global index (`-start_number`) so they
    * always line up with the synthetic VOD playlist regardless of where
@@ -5344,16 +5294,16 @@ export class HlsSessionManager {
       if (other === session || other.outputKey !== key || other.state === "disposed") {
         continue;
       }
-      if (!processCanBeSignalled(other.runState)) {
+      if (!processCanBeSignalled(runStateOf(other))) {
         continue;
       }
-      const from = Number(other.encodeStartIndex);
+      const from = Number(other.run?.from);
       // A run with an explicit stretch owns the whole of it. One WITHOUT an end
       // owns only as far as it has actually got: claiming the rest of the film
       // would make it the owner of every number in front of it, including the
       // ones another run was expressly given.
-      const to = Number.isInteger(other.runEndIndex) && other.runEndIndex >= from
-        ? other.runEndIndex
+      const to = Number.isInteger(other.run?.to) && other.run?.to >= from
+        ? other.run?.to
         : (this.#latestProducedSegment(other) ?? from);
       if (Number.isInteger(from) && index >= from && index <= to) {
         return other.id;
@@ -5377,10 +5327,10 @@ export class HlsSessionManager {
       if (other === session || other.outputKey !== key || other.state === "disposed") {
         continue;
       }
-      if (!processCanBeSignalled(other.runState)) {
+      if (!processCanBeSignalled(runStateOf(other))) {
         continue;
       }
-      const from = Number(other.encodeStartIndex);
+      const from = Number(other.run?.from);
       if (!Number.isInteger(from)) {
         continue;
       }
@@ -5395,10 +5345,10 @@ export class HlsSessionManager {
       // the honest extent of its claim, and it is a measured figure rather than
       // a chosen one — the same allowance the browser sizes its cushion from.
       const lookaheadSegments = Math.ceil(this.lookaheadSeconds / this.segmentDurationSec);
-      const head = Number.isInteger(other.encodeStartIndex) ? other.encodeStartIndex : from;
+      const head = Number.isInteger(other.run?.from) ? other.run?.from : from;
       const willReach = Math.max(head, this.#latestProducedSegment(other) ?? head) + lookaheadSegments;
-      const allowed = Number.isInteger(other.runEndIndex) && other.runEndIndex >= from
-        ? other.runEndIndex
+      const allowed = Number.isInteger(other.run?.to) && other.run?.to >= from
+        ? other.run?.to
         : lastIndex;
       claims.push({ from, to: Math.min(allowed, willReach) });
     }
@@ -5419,7 +5369,7 @@ export class HlsSessionManager {
     return { from, to: to >= lastIndex ? -1 : to };
   }
 
-  async #startEncodeRun(session, startIndex, positionSecondsOverride) {
+  async #startEncodeRun(session, startIndex, positionSecondsOverride, because = "a viewer needs it") {
     // A new run starts its own reckoning: a pair spanning the restart would
     // count the gap between two runs as slow encoding.
     session.learnSample = null;
@@ -5428,36 +5378,20 @@ export class HlsSessionManager {
     // 0.54-1.47 s — does not account for it. Before rebuilding the hottest path
     // in the proxy on a guess, make each stage state its own cost.
     const restartEnteredAt = Date.now();
-    // Reads where the old run began BEFORE the new one overwrites it, and does
-    // not await: everything below is the restart path, which is measured in
-    // milliseconds and has been worked on twice to keep it that way.
+    // Reads where the old run began BEFORE the new one takes its place, and
+    // does not await: everything below is the restart path, which is measured
+    // in milliseconds and has been worked on twice to keep it that way.
     this.#accountBackwardRestart(session, startIndex);
-    // One directory per run. Two runs writing the same segment name at once
-    // produce a file that is neither, which is the only reason a restart ever
-    // had to wait for its predecessor to die.
-    // Read before it is overwritten: the run about to be superseded is the one
-    // whose open piece has to be discarded once it has actually exited.
-    const previousRunDirPath = session.runDirPath ?? null;
+    const previousRun = session.run ?? null;
+    const previousProcess = previousRun?.process ?? null;
     // The stretch the run being replaced was given, read before the new one
-    // overwrites it: with every run of an output writing into one directory,
-    // the piece to discard has to be looked for inside that run own numbers.
+    // takes over: with every run of an output writing into one directory, the
+    // piece to discard has to be looked for inside that run's own numbers.
+    const previousRunDirPath = previousRun?.dirPath ?? null;
     const previousRunSpan = {
-      from: Number.isInteger(session.encodeStartIndex) ? session.encodeStartIndex : 0,
-      to: Number.isInteger(session.runEndIndex) ? session.runEndIndex : -1
+      from: Number.isInteger(previousRun?.from) ? previousRun.from : 0,
+      to: Number.isInteger(previousRun?.to) ? previousRun.to : -1
     };
-    session.runSerial = (session.runSerial ?? 0) + 1;
-    // One directory for the output, and every run writes straight into it.
-    //
-    // Runs used to be kept apart by a directory each, because two of them
-    // writing one segment name at the same time produce a file belonging to
-    // neither — which was also the only reason a restart ever had to wait for
-    // its predecessor to die. Intervals remove that by construction: a run is
-    // given a stretch nobody else holds and stops at the end of it, so no two
-    // runs ever want the same number. What is left of the old reason — a run
-    // killed mid-piece leaving a partial file — is not a correctness problem
-    // either, because the store serves a segment only once its closure is
-    // proven, and it is cleared up when the run ends.
-    session.runDirPath = session.dirPath;
     const interval = this.planRunInterval(session, startIndex);
     if (interval === null) {
       logger.info(
@@ -5473,7 +5407,6 @@ export class HlsSessionManager {
       );
     }
     startIndex = interval.from;
-    session.runEndIndex = interval.to;
     // The restart backs off a segment or two from what was asked for, so the
     // request that prompted it is recorded under a HIGHER index than the run
     // starts at. Looking it up by the start index alone found nothing and the
@@ -5499,44 +5432,27 @@ export class HlsSessionManager {
     // for the life of a session.
     session.firstWantedAt = new Map();
     session.behindHeadAsks = new Map();
-    const generation = ++session.encodeRunGeneration;
-    const previousFfmpeg = session.ffmpeg;
-    // Marked BEFORE it is killed, and this is not a formality.
-    //
-    // The exit handler decides whether an exit belongs to the current run by
-    // comparing against `session.ffmpeg` — and that field still names the
-    // PREVIOUS process here, because the new one is not spawned for another
-    // few hundred lines. So a predecessor killed for a seek passed the identity
-    // check and was handled as though the session's own run had died: exit code
-    // null with a signal, i.e. the "ffmpeg failed" branch. Consequences, in
-    // rising order of cost — a spurious `state = "failed"` for the moment
-    // between the kill and the spawn, which a segment request landing in that
-    // window is answered 500 for; a fast-failure tally against a target that
-    // never failed; and on any host with a hardware encoder, the runtime safety
-    // net firing on every seek: the proxy downgraded itself to libx264 for good
-    // and started an extra run at the OLD index, which then took the generation
-    // and made the real restart abort. The comment further down claiming this
-    // could not happen ("the old process's exit handler no-ops") described an
-    // earlier arrangement where the field was already reassigned.
-    session.supersededRuns ??= new WeakSet();
-    if (previousFfmpeg) {
-      session.supersededRuns.add(previousFfmpeg);
-    }
-    // A suspended process does not act on SIGTERM until it is continued, so the
-    // wait below would never end. Let it run before asking it to stop.
-    this.#resumeEncoder(session, "terminating for a new run");
-    if (previousFfmpeg && !hasChildExited(previousFfmpeg)) {
-      try {
-        previousFfmpeg.kill("SIGTERM");
-      } catch {
-        // Best effort.
-      }
-      // NOT awaited. The previous run has its own directory, so it cannot
-      // corrupt this one's output by still writing; letting it die in the
+    // This attempt, so that a newer one can tell it has been overtaken. It used
+    // to be a counter compared against a copy of itself; the attempt is a thing,
+    // and comparing the thing says the same without a number to keep in step.
+    const attempt = { startIndex, at: restartEnteredAt };
+    session.pendingRun = attempt;
+    // Stopped BEFORE the wait, and the reason it is a `stop` rather than a kill
+    // is the whole of what this object changed. Every handler used to open by
+    // asking whether the process was still the session's, because one set of
+    // fields served however many processes had lived — and a predecessor dying
+    // after its replacement had spawned passed that check and was handled as the
+    // current run failing. On any host with a hardware encoder that meant a
+    // downgrade to libx264 for good on every seek. A run writes its own state,
+    // so there is nothing left to mistake.
+    if (previousRun && previousProcess && !hasChildExited(previousProcess)) {
+      previousRun.stop("a new run is taking its place");
+      // NOT awaited. Runs are kept apart by their stretches, so the predecessor
+      // cannot corrupt this one's output by still writing; letting it die in the
       // background removes 0.7-1.3 s from every seek (measured 2.9.132, where
       // that wait was essentially the whole cost of a restart).
       const termSentAt = Date.now();
-      void waitForChildExit(previousFfmpeg, ENCODE_RUN_TERMINATE_GRACE_MS).then(async () => {
+      void waitForChildExit(previousProcess, ENCODE_RUN_TERMINATE_GRACE_MS).then(async () => {
         logger.info(
           `transcode ${session.id} restart: previous run took ${Date.now() - termSentAt}ms to exit after SIGTERM`
         );
@@ -5544,44 +5460,22 @@ export class HlsSessionManager {
         // piece removed from under it would be written on into nothing.
         await this.#discardUnfinishedPiece(session, previousRunDirPath, previousRunSpan);
       });
-      if (!hasChildExited(previousFfmpeg)) {
+      if (!hasChildExited(previousProcess)) {
         try {
-          previousFfmpeg.kill("SIGKILL");
+          previousProcess.kill("SIGKILL");
         } catch {
           // Best effort.
         }
-        await waitForChildExit(previousFfmpeg, ENCODE_RUN_TERMINATE_GRACE_MS);
+        await waitForChildExit(previousProcess, ENCODE_RUN_TERMINATE_GRACE_MS);
         await this.#discardUnfinishedPiece(session, previousRunDirPath, previousRunSpan);
       }
     }
     // A newer restart (or disposal) won the race while we were waiting for the
     // old process to die — it either already spawned its own replacement or
     // there is nothing left to start. Do not also spawn from this stale call.
-    if (session.encodeRunGeneration !== generation || session.state === "disposed") {
+    if (session.pendingRun !== attempt || session.state === "disposed") {
       return;
     }
-
-    // What to run, worked out from the material and the stretch alone. The
-    // command a run is given is a fact about WHAT is being produced and
-    // WHERE it begins, and about nothing else — not the session it belongs
-    // to, not who is watching. Kept apart so that a run can be built by
-    // whoever needs one, which is what lets an output have more than a single
-    // encoder.
-    // A second chance for a predecessor that survived the escalation above —
-    // the first block is the one that does the work. Its exit is ignored
-    // because it was marked superseded there, not because the field it is
-    // compared against has changed: the spawn is still below this line.
-    this.#resumeEncoder(session, "terminating");
-    if (session.ffmpeg && !session.ffmpeg.killed) {
-      session.supersededRuns.add(session.ffmpeg);
-      try {
-        session.ffmpeg.kill("SIGTERM");
-      } catch (_error) {
-        // Best effort.
-      }
-    }
-
-    this.#warnIfRunLeavesTheInitBehind(session);
 
     // What is still read off the session for a run. The list is the measure of
     // how far a session still is from being the three things a run is built
@@ -5605,7 +5499,7 @@ export class HlsSessionManager {
       audioSourceTrackIndex: session.audioSourceTrackIndex ?? session.audioTrackIndex ?? 0,
       rateCapKbps: session.rateCapKbps ?? null,
       startIndex,
-      endIndex: session.runEndIndex,
+      endIndex: interval.to,
       positionSecondsOverride,
       videoEncoder: this.videoEncoder,
       segmentDurationSec: this.segmentDurationSec
@@ -5625,24 +5519,49 @@ export class HlsSessionManager {
     // `Cannot write moov atom before AC3 packets` was found in.
     session.runCounter = (session.runCounter ?? 0) + 1;
     const runLabel = `run#${session.runCounter}`;
-    session.runLabel = runLabel;
-    const describedArgs = describeFfmpegArgs(args);
-    // Kept so a failure can quote the command that produced it instead of
-    // leaving whoever reads the log to find it among the lines of the runs that
-    // succeeded around it.
-    session.lastRunArgsDescribed = describedArgs;
-    logger.info(`transcode ${session.id} ${runLabel} ffmpeg ${describedArgs}`);
 
-    const ffmpeg = spawn(this.ffmpegBin, args, {
-      cwd: session.runDirPath ?? session.dirPath,
-      stdio: ["ignore", "pipe", "pipe"]
+    // One directory for the output, and every run writes straight into it.
+    //
+    // Runs used to be kept apart by a directory each, because two of them
+    // writing one segment name at the same time produce a file belonging to
+    // neither — which was also the only reason a restart ever had to wait for
+    // its predecessor to die. Intervals remove that by construction: a run is
+    // given a stretch nobody else holds and stops at the end of it, so no two
+    // runs ever want the same number. What is left of the old reason — a run
+    // killed mid-piece leaving a partial file — is not a correctness problem
+    // either, because the store serves a segment only once its closure is
+    // proven, and it is cleared up when the run ends.
+    const run = new EncodeRun({
+      // Unique per RUN, not per session. The orchestrator files runs by this
+      // and releases a stretch by it, so a restart reusing the session's id
+      // would leave the old run registered with the old stretch and the new one
+      // unknown.
+      id: `${session.id}/${runLabel}`,
+      address: session.outputKey ?? session.id,
+      encoder: this.videoEncoder,
+      from: safeIndex,
+      to: interval.to,
+      dirPath: session.dirPath,
+      buildArgs: () => args,
+      argsDescribed: describeFfmpegArgs(args),
+      // Whether this run cuts at times we gave it. Decides how a segment is
+      // judged finished — see getFileStream.
+      usesExplicitCuts: Boolean(cutTimes && cutTimes.length > 0),
+      spawn: (spawnArgs) =>
+        spawn(this.ffmpegBin, spawnArgs, {
+          cwd: session.dirPath,
+          stdio: ["ignore", "pipe", "pipe"]
+        }),
+      logger,
+      // The film's last segment number, which is what tells "it reached the
+      // end" from "its input dried up": ffmpeg exits zero for both and over a
+      // torrent cannot tell them apart.
+      lastSegmentIndex: () => (session.segmentCount > 0 ? session.segmentCount - 1 : null),
+      inputUnavailable: (message) => isInputUnavailable(message),
+      onProgress: (report) => this.#noteRunProgress(session, run, report),
+      onEnded: (ended) => this.#onRunEnded(session, run, ended)
     });
-    session.ffmpeg = ffmpeg;
-    this.#transitionRun(session, ENCODE_RUN_EVENT.SPAWNED);
-    // Whether this run cuts at times we gave it. Decides how a segment is
-    // judged finished — see getFileStream.
-    session.usesExplicitCuts = Boolean(cutTimes && cutTimes.length > 0);
-    session.encodeStartIndex = safeIndex;
+    session.run = run;
     session.pendingRestartIndex = -1;
     session.lastRestartAt = Date.now();
     session.progress.processedSeconds = startSeconds;
@@ -5654,8 +5573,10 @@ export class HlsSessionManager {
     // premature downscale.
     session.budgetSlowSince = 0;
 
+    run.start(because);
+
     logger.info(
-      `transcode ${session.id} ${session.runLabel} encode-run from segment #${safeIndex} ` +
+      `transcode ${session.id} ${runLabel} encode-run from segment #${safeIndex} ` +
       `(+${Date.now() - restartEnteredAt}ms since the restart was asked for) ` +
         `(${formatSeconds(startSeconds)}) "${session.file.name}"`
     );
@@ -5665,33 +5586,210 @@ export class HlsSessionManager {
     // difference, and nothing downstream can tell that from a bad index.
     const liveStart = this.#segmentStartTime(session, safeIndex);
     logger.info(
-      `transcode ${session.id} ${session.runLabel} positioned at ${startSeconds.toFixed(3)}s ` +
+      `transcode ${session.id} ${runLabel} positioned at ${startSeconds.toFixed(3)}s ` +
         `for boundary #${safeIndex} (published ${startSeconds.toFixed(3)}s, ` +
         `live ${liveStart.toFixed(3)}s, apart ${(liveStart - startSeconds).toFixed(3)}s), ` +
         `numbering from #${safeIndex}`
     );
-
-    this.#wireEncodeProcess(session, ffmpeg);
   }
 
   /**
-   * The command for one run: what to read, where to start, how to cut, where
-   * to stop.
+   * What one run reports about its own progress, put where the session
+   * publishes it.
    *
-   * Everything here is a question about the material and the stretch — which
-   * file, which tracks, which grid, which keyframe to land on, which segment
-   * numbers — and none of it is a question about the session that happens to
-   * be asking or about anybody watching. It was four hundred lines in the
-   * middle of the function that also owns the process, the restart, the
-   * accounting and the log, which is why a second encoder on one output could
-   * not be built at all: there was no way to ask for a command without also
-   * starting a session's own run.
+   * Rebasing belongs here and not in the run: `-progress` counts from the start
+   * of the run on both branches — measured on each separately — and only the
+   * side that knows where this run began can put those seconds back on the
+   * source's timeline.
+   *
+   * A report from a run that is no longer the session's is dropped. It is the
+   * one place the identity question survives, because progress is published per
+   * SESSION while a superseded process may still be emitting.
    *
    * @param {HlsSession} session
-   * @param {number} startIndex
-   * @param {number} [positionSecondsOverride]
-   * @returns {{ args: string[], safeIndex: number, startSeconds: number, cutTimes: number[] | null }}
+   * @param {import("./encode/EncodeRun.js").EncodeRun} run
+   * @param {{ processedSeconds: number | null, speed: string | null, outTime?: string }} report
+   * @returns {void}
    */
+  #noteRunProgress(session, run, report) {
+    if (session.run !== run || session.state === "disposed") {
+      return;
+    }
+    if (Number.isFinite(report.processedSeconds)) {
+      session.progress.processedSeconds = this.#toAbsoluteProcessedSeconds(session, report.processedSeconds);
+    } else if (typeof report.outTime === "string") {
+      const parsed = parseFfmpegTimestamp(report.outTime);
+      if (parsed != null) {
+        session.progress.processedSeconds = this.#toAbsoluteProcessedSeconds(session, parsed);
+      }
+    }
+    if (typeof report.speed === "string") {
+      session.progress.speed = report.speed;
+    }
+    const metrics = computeProgressMetrics(
+      session.progress.processedSeconds,
+      session.progress.totalSeconds,
+      session.progress.startPositionSeconds
+    );
+    session.progress.percent = metrics.percent;
+    session.progress.remainingSeconds = metrics.remainingSeconds;
+    session.progress.updatedAt = Date.now();
+    const shouldLog =
+      session.progress.percent != null &&
+      session.progress.updatedAt - session.progress.lastLoggedAt >= PROGRESS_LOG_INTERVAL_MS;
+    if (shouldLog) {
+      session.progress.lastLoggedAt = session.progress.updatedAt;
+      logger.info(
+        `transcode ${session.id} "${session.file.name}" ${session.progress.percent.toFixed(1)}% ` +
+          `(${formatSeconds(session.progress.processedSeconds)} / ${formatSeconds(session.progress.totalSeconds)})` +
+          ` speed=${session.progress.speed || "n/a"}`
+      );
+    }
+  }
+
+  /**
+   * What to do about a run that has ended.
+   *
+   * The run says how it ended and why; this decides what follows, which is a
+   * question about the SESSION and the machine rather than about the process:
+   * whether to condemn a hardware encoder, whether to wait for the input to
+   * come back, whether a position has failed often enough to stop retrying it.
+   *
+   * An ending from a run the session has already replaced is not ignored — it
+   * is simply not about this session's current run, so nothing that describes
+   * the current run is written from it. That is what the identity check used to
+   * be for, and it is one condition now instead of one at the head of every
+   * handler.
+   *
+   * @param {HlsSession} session
+   * @param {import("./encode/EncodeRun.js").EncodeRun} run
+   * @param {import("./encode/EncodeRun.js").RunEnded} ended
+   * @returns {void}
+   */
+  #onRunEnded(session, run, ended) {
+    // First, and for every run whatever else follows: the stretch it held goes
+    // back to the map. A run whose claim is never released tells the plan that
+    // numbers nobody is making are being made, and nothing is ever started
+    // there again.
+    this.encodeOrchestrator.noteEnded(ended);
+    if (session.state === "disposed") {
+      return;
+    }
+    if (session.run !== run) {
+      // A predecessor finishing after its replacement has started. It has
+      // already logged its own ending; nothing about the session follows from
+      // it.
+      return;
+    }
+    if (ended.lastError) {
+      session.lastError = ended.lastError;
+    }
+    session.progress.updatedAt = Date.now();
+    if (ended.ending === ENCODE_EXIT.STOPPED || ended.ending === ENCODE_EXIT.GONE) {
+      return;
+    }
+    if (ended.ending === ENCODE_EXIT.COMPLETE) {
+      logger.info(`transcode ${session.id} encode-run complete "${session.file.name}"`);
+      return;
+    }
+    if (ended.ending === ENCODE_EXIT.SHORT) {
+      // ffmpeg exits 0 both when it reaches the end of the file and when its
+      // input simply stops producing bytes — over HTTP the two look identical
+      // to it. Field 2026-08-05: the torrent's download died, the read ended,
+      // and a run that had made 188 segments of 624 reported itself complete;
+      // the player then consumed what was on disk and froze on the first
+      // segment nobody was making. So the claim is checked against the playlist
+      // we published, and a run that stopped short is a FAILURE that can be
+      // restarted, not a finished file.
+      session.lastError = ended.because;
+      logger.error(
+        `transcode ${session.id} ${ended.runId} encode-run ended early: ` +
+        `${ended.because} "${session.file.name}"`
+      );
+      return;
+    }
+    // Runtime safety net: if a hardware encode fails, downgrade this proxy to
+    // software encoding for all sessions and restart this one, so playback is
+    // never permanently broken by a hardware/driver issue.
+    //
+    // Asked only of a genuine encoder failure. It used to be asked of every
+    // non-zero exit, so a run whose TORRENT DATA went away — which says nothing
+    // whatever about the encoder — condemned a working NVENC or QuickSync to
+    // software for the life of the process, and started an extra run at the old
+    // index while it was at it.
+    if (ended.ending === ENCODE_EXIT.FAILED && session.transcodeVideo && this.videoEncoder.kind !== "software") {
+      const failedEncoder = this.videoEncoder.name;
+      this.videoEncoder = softwareDescriptor();
+      logger.warn(
+        `transcode ${session.id} hardware encoder ${failedEncoder} failed ` +
+          `(${session.lastError}); falling back to software libx264 and restarting`
+      );
+      void this.#startEncodeRun(session, ended.from, undefined, "the hardware encoder failed");
+      return;
+    }
+    // Losing the INPUT is not the session failing — it is the data not being
+    // there YET. The torrent can be re-added and re-downloaded, so the honest
+    // answer to the viewer is "still working", not an error screen. Field
+    // 2026-08-06: a torrent evicted mid-seek took the film with it, the run
+    // died on `File 0 not found`, the session went terminal and answered 500 to
+    // every request from then on — although the swarm was there and the data
+    // would have come back in seconds. The circuit breaker below stays for what
+    // it was built for, a target that genuinely cannot be encoded; it must not
+    // condemn a session whose data merely went away.
+    if (ended.ending === ENCODE_EXIT.INPUT_LOST) {
+      session.inputRetryCount = (session.inputRetryCount ?? 0) + 1;
+      const delayMs = Math.min(
+        INPUT_RETRY_MAX_MS,
+        INPUT_RETRY_BASE_MS * 2 ** Math.min(session.inputRetryCount - 1, 6)
+      );
+      logger.warn(
+        `transcode ${session.id} ${ended.runId} lost its input ` +
+          `(${session.lastError}); retrying in ${Math.round(delayMs / 1000)}s ` +
+          `(attempt ${session.inputRetryCount})`
+      );
+      session.inputRetryTimer = setTimeout(() => {
+        session.inputRetryTimer = null;
+        if (session.run?.state !== ENCODE_RUN_STATE.RETRY_WAIT) {
+          return;
+        }
+        session.run.retryDue();
+        const at = Number.isInteger(session.lastRequestedSegment)
+          ? session.lastRequestedSegment
+          : ended.from;
+        this.#startEncodeRun(session, at, undefined, "its input came back").catch(() => {});
+      }, delayMs);
+      session.inputRetryTimer.unref?.();
+      return;
+    }
+    // Circuit-breaker bookkeeping: a seek-restart run that exits THIS fast
+    // never did real work — it failed at the seek/open step itself, not
+    // mid-stream (see SEEK_FAST_FAIL_MS). Track consecutive fast failures at
+    // the SAME target so #ensureEncodingFor/#fireSettledSeek (which check this
+    // below) can stop retrying instead of looping forever on a position that
+    // keeps failing even with the keyframe-snapped seek.
+    if (ended.livedMs < SEEK_FAST_FAIL_MS && ended.from > 0) {
+      if (session.seekFailureTarget === ended.from) {
+        session.seekFailureCount += 1;
+      } else {
+        session.seekFailureTarget = ended.from;
+        session.seekFailureCount = 1;
+      }
+      logger.warn(
+        `transcode ${session.id} fast failure at segment #${ended.from} ` +
+          `(${ended.livedMs}ms) — ${session.seekFailureCount}/${MAX_SEEK_FAILURES} consecutive`
+      );
+    } else {
+      // Real progress was made (or this was the very first run) — not a
+      // repeating seek failure. Reset the breaker.
+      session.seekFailureTarget = -1;
+      session.seekFailureCount = 0;
+    }
+    logger.error(
+      `transcode ${session.id} ${ended.runId} encode-run failed: ${session.lastError}` +
+        ` — ${this.#describeTrackSelection(session)}` +
+        `\n  ffmpeg ${run.argsDescribed || "(command not recorded)"}`
+    );
+  }
 
   /**
    * Rebase ffmpeg's `-progress` `out_time`/`out_time_ms` onto the SOURCE
@@ -5734,229 +5832,6 @@ export class HlsSessionManager {
       ? session.progress.startPositionSeconds
       : 0;
     return rawSeconds + offset;
-  }
-
-  /**
-   * Wire stdout (progress), stderr (errors) and exit handlers for an ffmpeg
-   * encode process.  Handlers no-op when the process has been superseded by a
-   * later encode run (identity check against `session.ffmpeg`).
-   *
-   * @param {HlsSession} session
-   * @param {import("node:child_process").ChildProcess} ffmpeg
-   * @returns {void}
-   */
-  #wireEncodeProcess(session, ffmpeg) {
-    ffmpeg.stdout.on("data", (chunk) => {
-      const lines = String(chunk).split(/\r?\n/);
-      for (const line of lines) {
-        const normalized = line.trim();
-        if (!normalized) {
-          continue;
-        }
-        const separator = normalized.indexOf("=");
-        if (separator <= 0) {
-          continue;
-        }
-        const key = normalized.slice(0, separator);
-        const value = normalized.slice(separator + 1);
-
-        if (key === "out_time_ms") {
-          const numeric = Number(value);
-          if (Number.isFinite(numeric) && numeric >= 0) {
-            session.progress.processedSeconds = this.#toAbsoluteProcessedSeconds(session, numeric / MICROSECONDS_PER_SECOND);
-          }
-        } else if (key === "out_time") {
-          const parsed = parseFfmpegTimestamp(value);
-          if (parsed != null) {
-            session.progress.processedSeconds = this.#toAbsoluteProcessedSeconds(session, parsed);
-          }
-        } else if (key === "speed") {
-          session.progress.speed = value;
-        } else if (key === "progress") {
-        }
-        const metrics = computeProgressMetrics(
-          session.progress.processedSeconds,
-          session.progress.totalSeconds,
-          session.progress.startPositionSeconds
-        );
-        session.progress.percent = metrics.percent;
-        session.progress.remainingSeconds = metrics.remainingSeconds;
-        session.progress.updatedAt = Date.now();
-        const shouldLog =
-          session.progress.percent != null &&
-          session.progress.updatedAt - session.progress.lastLoggedAt >= PROGRESS_LOG_INTERVAL_MS;
-        if (shouldLog) {
-          session.progress.lastLoggedAt = session.progress.updatedAt;
-          logger.info(
-            `transcode ${session.id} "${session.file.name}" ${session.progress.percent.toFixed(1)}% ` +
-              `(${formatSeconds(session.progress.processedSeconds)} / ${formatSeconds(session.progress.totalSeconds)})` +
-              ` speed=${session.progress.speed || "n/a"}`
-          );
-        }
-      }
-    });
-
-    ffmpeg.stderr.on("data", (chunk) => {
-      const line = String(chunk).trim();
-      if (line.length > 0) {
-        session.lastError = line;
-        logger.warn(`ffmpeg ${session.id}: ${line}`);
-      }
-    });
-
-    ffmpeg.on("error", (error) => {
-      if (!this.#isCurrentRun(session, ffmpeg)) {
-        return;
-      }
-      session.lastError = error instanceof Error ? error.message : String(error);
-      session.progress.updatedAt = Date.now();
-      this.#transitionRun(session, ENCODE_RUN_EVENT.EXITED_FAILED);
-      logger.error(`ffmpeg ${session.id} process error: ${session.lastError}`);
-    });
-
-    ffmpeg.on("exit", (code, signal) => {
-      // Asked FIRST, before anything is written or read. An exit that belongs
-      // to a replaced run must not touch the session's error, which the viewer
-      // is shown and the next real exit is classified by, and must not send the
-      // handler reading directories on its behalf.
-      if (!this.#isCurrentRun(session, ffmpeg) || session.state === "disposed") {
-        return;
-      }
-      const producedThrough = code === 0 ? this.#latestProducedSegment(session) : null;
-      const expectedLast = session.segmentCount > 0 ? session.segmentCount - 1 : null;
-      if (!session.lastError && code !== 0) {
-        session.lastError = `ffmpeg exited with code ${code ?? -1}${signal ? ` (signal ${signal})` : ""}`;
-      }
-      // What this exit means is decided in one place, from facts, and the
-      // reasoning behind each answer lives with it in `encode-exit.js`.
-      const outcome = classifyEncodeExit({
-        code,
-        producedThrough,
-        lastSegmentIndex: expectedLast,
-        inputUnavailable: isInputUnavailable(session.lastError)
-      });
-      if (outcome === ENCODE_EXIT.IGNORED) {
-        return;
-      }
-      if (outcome === ENCODE_EXIT.SHORT) {
-        // ffmpeg exits 0 both when it reaches the end of the file and when its
-        // input simply stops producing bytes — over HTTP the two look identical
-        // to it. Field 2026-08-05: the torrent's download died, the read ended,
-        // and a run that had made 188 segments of 624 reported itself complete;
-        // the player then consumed what was on disk and froze on the first
-        // segment nobody was making. So the claim is checked against the
-        // playlist we published, and a run that stopped short is a FAILURE that
-        // can be restarted, not a finished file.
-            session.progress.updatedAt = Date.now();
-        session.lastError =
-          `input ended after segment #${producedThrough} of ${expectedLast} — ` +
-          "the source stopped delivering data";
-        this.#transitionRun(session, ENCODE_RUN_EVENT.EXITED_SHORT);
-        logger.error(
-          `transcode ${session.id} ${session.runLabel ?? "run#?"} encode-run ended early: ` +
-          `${session.lastError} "${session.file.name}"`
-        );
-        return;
-      }
-      if (outcome === ENCODE_EXIT.COMPLETE) {
-        session.progress.updatedAt = Date.now();
-        this.#transitionRun(session, ENCODE_RUN_EVENT.EXITED_COMPLETE);
-        logger.info(`transcode ${session.id} encode-run complete "${session.file.name}"`);
-        return;
-      }
-      // Runtime safety net: if a hardware encode fails, downgrade this proxy to
-      // software encoding for all sessions and restart this one, so playback is
-      // never permanently broken by a hardware/driver issue.
-      //
-      // Asked only of a genuine encoder failure. It used to be asked of every
-      // non-zero exit, so a run whose TORRENT DATA went away — which says
-      // nothing whatever about the encoder — condemned a working NVENC or
-      // QuickSync to software for the life of the process, and started an extra
-      // run at the old index while it was at it.
-      if (outcome === ENCODE_EXIT.FAILED && session.transcodeVideo && this.videoEncoder.kind !== "software") {
-        const failedEncoder = this.videoEncoder.name;
-        // The run died before the software one takes its place: the failure is
-        // an event of its own, and the restart below is a separate spawn.
-        this.#transitionRun(session, ENCODE_RUN_EVENT.EXITED_FAILED);
-        this.videoEncoder = softwareDescriptor();
-        logger.warn(
-          `transcode ${session.id} hardware encoder ${failedEncoder} failed ` +
-            `(${session.lastError}); falling back to software libx264 and restarting`
-        );
-        void this.#startEncodeRun(session, session.encodeStartIndex);
-        return;
-      }
-      // Circuit-breaker bookkeeping: a seek-restart run that exits THIS fast
-      // never did real work — it failed at the seek/open step itself, not
-      // mid-stream (see SEEK_FAST_FAIL_MS). Track consecutive fast failures at
-      // the SAME target so #ensureEncodingFor/#fireSettledSeek (which check
-      // this below) can stop retrying instead of looping forever on a position
-      // that keeps failing even with the keyframe-snapped seek.
-      const elapsedMs = Date.now() - session.lastRestartAt;
-      if (elapsedMs < SEEK_FAST_FAIL_MS && session.encodeStartIndex > 0) {
-        if (session.seekFailureTarget === session.encodeStartIndex) {
-          session.seekFailureCount += 1;
-        } else {
-          session.seekFailureTarget = session.encodeStartIndex;
-          session.seekFailureCount = 1;
-        }
-        logger.warn(
-          `transcode ${session.id} fast failure at segment #${session.encodeStartIndex} ` +
-            `(${elapsedMs}ms) — ${session.seekFailureCount}/${MAX_SEEK_FAILURES} consecutive`
-        );
-      } else {
-        // Real progress was made (or this was the very first run) — not a
-        // repeating seek failure. Reset the breaker.
-        session.seekFailureTarget = -1;
-        session.seekFailureCount = 0;
-      }
-      // Losing the INPUT is not the session failing — it is the data not being
-      // there YET. The torrent can be re-added and re-downloaded, so the
-      // honest answer to the viewer is "still working", not an error screen.
-      // Field 2026-08-06: a torrent evicted mid-seek took the film with it, the
-      // run died on `File 0 not found`, the session went terminal and answered
-      // 500 to every request from then on — although the swarm was there and
-      // the data would have come back in seconds. The circuit breaker below
-      // stays for what it was built for, a target that genuinely cannot be
-      // encoded; it must not condemn a session whose data merely went away.
-      if (outcome === ENCODE_EXIT.INPUT_LOST) {
-        // On the wire it is simply "not ready yet" — a state the browser has
-        // always known how to wait through. Only the proxy needs the
-        // distinction between waiting for data and having given up.
-        session.progress.updatedAt = Date.now();
-        this.#transitionRun(session, ENCODE_RUN_EVENT.EXITED_INPUT_LOST);
-        session.inputRetryCount = (session.inputRetryCount ?? 0) + 1;
-        const delayMs = Math.min(
-          INPUT_RETRY_MAX_MS,
-          INPUT_RETRY_BASE_MS * 2 ** Math.min(session.inputRetryCount - 1, 6)
-        );
-        logger.warn(
-          `transcode ${session.id} ${session.runLabel ?? "run#?"} lost its input ` +
-            `(${session.lastError}); retrying in ${Math.round(delayMs / 1000)}s ` +
-            `(attempt ${session.inputRetryCount})`
-        );
-        session.inputRetryTimer = setTimeout(() => {
-          session.inputRetryTimer = null;
-          if (session.runState !== ENCODE_RUN_STATE.RETRY_WAIT) {
-            return;
-          }
-          this.#transitionRun(session, ENCODE_RUN_EVENT.RETRY_DUE);
-          const at = Number.isInteger(session.lastRequestedSegment)
-            ? session.lastRequestedSegment
-            : (session.encodeStartIndex ?? 0);
-          this.#startEncodeRun(session, at).catch(() => {});
-        }, delayMs);
-        session.inputRetryTimer.unref?.();
-        return;
-      }
-      session.progress.updatedAt = Date.now();
-      this.#transitionRun(session, ENCODE_RUN_EVENT.EXITED_FAILED);
-      logger.error(
-        `transcode ${session.id} ${session.runLabel ?? "run#?"} encode-run failed: ${session.lastError}` +
-          ` — ${this.#describeTrackSelection(session)}` +
-          `\n  ffmpeg ${session.lastRunArgsDescribed ?? "(command not recorded)"}`
-      );
-    });
   }
 
   /**
@@ -6022,7 +5897,7 @@ export class HlsSessionManager {
     // a viewer waiting, a dozen asked once each is the player scanning. Kept
     // only for what is behind the head — everything ahead is ordinary
     // read-ahead — and cleared with each run, like the record above.
-    if (index < session.encodeStartIndex) {
+    if (index < session.run?.from) {
       session.behindHeadAsks ??= new Map();
       const asked = session.behindHeadAsks.get(index);
       session.behindHeadAsks.set(index, { count: (asked?.count ?? 0) + 1, at: Date.now() });
@@ -6042,7 +5917,7 @@ export class HlsSessionManager {
     // the start of the file. The ping-pong this tried to fix is real, but the
     // fix has to distinguish a VIEWER seek from the player's own scan — the
     // request's arrival order does not carry that information.
-    const head = session.encodeStartIndex;
+    const head = session.run?.from;
     // Anchor the look-ahead window on the CURRENT encode position (start index +
     // seconds already processed), not the run's start index. Otherwise a long
     // run that has encoded well past `head` would needlessly restart for a
@@ -6076,7 +5951,7 @@ export class HlsSessionManager {
       return;
     }
     // Circuit breaker: this exact target has already failed MAX_SEEK_FAILURES
-    // times in a row (fast failures — see #wireEncodeProcess's exit handler).
+    // times in a row (fast failures — see #onRunEnded).
     // Stop auto-retrying it; session.state stays "failed" so getFileStream
     // reports a clean, retryable error instead of looping forever. A DIFFERENT
     // target (the viewer seeking elsewhere) is unaffected — it gets its own
@@ -6138,7 +6013,7 @@ export class HlsSessionManager {
     }
     // Nothing is encoding: a rung the viewer has switched away from is left
     // exactly so, and its held requests must not bring its encoder back.
-    if (!processCanBeSignalled(session.runState)) {
+    if (!processCanBeSignalled(runStateOf(session))) {
       return;
     }
     // A seek already settling is about to move the encoder to where the VIEWER
@@ -6383,11 +6258,11 @@ export class HlsSessionManager {
    * @returns {boolean}
    */
   #wouldDragAnotherViewerBack(session, consumerId, positionSeconds) {
-    if (!session || !consumerId || !processCanBeSignalled(session.runState)) {
+    if (!session || !consumerId || !processCanBeSignalled(runStateOf(session))) {
       return false;
     }
     const target = this.#segmentIndexForTime(session, positionSeconds);
-    const head = Number(session.encodeStartIndex);
+    const head = Number(session.run?.from);
     if (!Number.isInteger(head) || target >= head) {
       return false;
     }
@@ -6500,19 +6375,19 @@ export class HlsSessionManager {
     // session) in research/hls-seek-prior-art-2026-08-02.md.
     session.waitEpoch = (session.waitEpoch ?? 0) + 1;
     const index = this.#segmentIndexForTime(session, positionSeconds);
-    const head = session.encodeStartIndex;
+    const head = session.run?.from;
     const processed = Number.isFinite(session.progress?.processedSeconds)
       ? session.progress.processedSeconds
       : this.runStartTimeFor(session, head);
     const currentSeg = Math.max(head, this.#segmentIndexForTime(session, processed));
     // Already covered by the running encode — the data is on its way, so
     // restarting would only destroy work the viewer is waiting for. The run has
-    // to be ALIVE for that to hold: after a run died, `session.ffmpeg` still
+    // to be ALIVE for that to hold: after a run died, the handle still
     // pointed at the dead process and every later seek was waved through as
     // "already covered", so nothing could ever restart it. Measured 2026-08-04:
     // one ffmpeg failure turned into a session that answered 500 to every
     // segment for as long as the viewer kept trying.
-    const runIsAlive = processCanBeSignalled(session.runState);
+    const runIsAlive = processCanBeSignalled(runStateOf(session));
     if (runIsAlive && index >= head && index <= currentSeg + MAX_LOOKAHEAD_SEGMENTS) {
       logger.info(
         `transcode ${session.id} seek to ${positionSeconds.toFixed(1)}s (#${index}) ` +
@@ -6566,7 +6441,7 @@ export class HlsSessionManager {
     // ten seconds, each killing a run that was encoding #865. The guard below
     // did not catch it — it only decides whether to let the current run finish,
     // not whether a new run is needed at all.
-    if (target === session.encodeStartIndex && processCanBeSignalled(session.runState)) {
+    if (target === session.run?.from && processCanBeSignalled(runStateOf(session))) {
       logger.info(
         `transcode ${session.id} seek #${target} ignored — the current run already starts there`
       );
@@ -6594,7 +6469,7 @@ export class HlsSessionManager {
     // Holding it was also expensive in the other direction: a genuine second
     // seek could be delayed by the whole grace.
     const producedThisRun = this.#producedSecondsThisRun(session);
-    const runIsAlive = processCanBeSignalled(session.runState);
+    const runIsAlive = processCanBeSignalled(runStateOf(session));
     const allowedBecause = !runIsAlive
       ? "run is dead"
       : `viewer moved; run had produced ${producedThisRun.toFixed(1)}s`;
@@ -6631,7 +6506,7 @@ export class HlsSessionManager {
     // Individual segments are long-polled by the segment route as ffmpeg
     // produces them.
     if (session.useSyntheticPlaylist) {
-      if (session.runState === ENCODE_RUN_STATE.ENDED_FAILED) {
+      if (runStateOf(session) === ENCODE_RUN_STATE.ENDED_FAILED) {
         throw new Error(session.lastError || "ffmpeg failed to start HLS session.");
       }
       return;
@@ -6641,7 +6516,7 @@ export class HlsSessionManager {
     const deadline = Date.now() + this.startupWaitMs;
 
     while (Date.now() < deadline) {
-      if (session.runState === ENCODE_RUN_STATE.ENDED_FAILED) {
+      if (runStateOf(session) === ENCODE_RUN_STATE.ENDED_FAILED) {
         throw new Error(session.lastError || "ffmpeg failed to start HLS session.");
       }
       try {
@@ -6933,7 +6808,7 @@ export class HlsSessionManager {
    * @returns {void}
    */
   #noteRunLanding(session, index, trueStart) {
-    if (session.encodeStartIndex !== index || session.landingReportedForRun === index) {
+    if (session.run?.from !== index || session.landingReportedForRun === index) {
       return;
     }
     session.landingReportedForRun = index;
@@ -7137,10 +7012,10 @@ export class HlsSessionManager {
     // claimed. It converges: once the boundary holds the true time, the next
     // reading agrees with it and the guard above returns before doing anything.
     for (const member of this.#familyOf(session)) {
-      if (member === session || member.encodeStartIndex !== index) {
+      if (member === session || member.run?.from !== index) {
         continue;
       }
-      if (!processCanBeSignalled(member.runState)) {
+      if (!processCanBeSignalled(runStateOf(member))) {
         continue;
       }
       logger.info(
@@ -7466,7 +7341,7 @@ export class HlsSessionManager {
       .map((member) => this.#observedAudioCost.get(this.#audioCostKey(member))?.version ?? 0)
       .reduce((total, one) => total + one, 0);
     const running = [...this.#familyOf(owner)]
-      .filter((member) => processCanBeSignalled(member.runState)).length;
+      .filter((member) => processCanBeSignalled(runStateOf(member))).length;
     // What each running encode was last seen doing, which is BOTH an input to
     // the answer twice over — it withdraws a step measured below realtime, and
     // it prices every running picture in the committed total — and a figure
@@ -7644,9 +7519,9 @@ export class HlsSessionManager {
   #runningEncoders() {
     let running = 0;
     for (const session of this.sessionsById.values()) {
-      if (session?.ffmpeg != null &&
-          !hasChildExited(session.ffmpeg) &&
-          session.runState !== ENCODE_RUN_STATE.SUSPENDED &&
+      if (session.run?.process != null &&
+          !hasChildExited(session.run.process) &&
+          runStateOf(session) !== ENCODE_RUN_STATE.SUSPENDED &&
           session.state !== "disposed") {
         running += 1;
       }
@@ -7658,9 +7533,9 @@ export class HlsSessionManager {
     if (
       !session ||
       session.state === "disposed" ||
-      session.runState === ENCODE_RUN_STATE.ENDED_FAILED ||
-      !session.ffmpeg ||
-      session.runState === ENCODE_RUN_STATE.SUSPENDED
+      runStateOf(session) === ENCODE_RUN_STATE.ENDED_FAILED ||
+      !session.run?.process ||
+      runStateOf(session) === ENCODE_RUN_STATE.SUSPENDED
     ) {
       session.learnSample = null;
       return;
@@ -7685,12 +7560,12 @@ export class HlsSessionManager {
     // admits every quality step there is. Comparing the serials is what the
     // twenty-second wait used to stand in for, and unlike the wait it costs no
     // readings on a short run.
-    const runSerial = session.runSerial ?? 0;
-    session.learnSample = { takenAt, processedSeconds, runSerial };
+    const run = session.run ?? null;
+    session.learnSample = { takenAt, processedSeconds, run };
     if (previous === null || !Number.isFinite(processedSeconds) || !Number.isFinite(previous.processedSeconds)) {
       return;
     }
-    if (previous.runSerial !== runSerial) {
+    if (previous.run !== run) {
       return; // the pair straddles a restart and measures the seek, not the host
     }
     const speed = speedFromReadings(previous, { takenAt, processedSeconds }, LEARN_WINDOW_MIN_SEC);
@@ -7704,7 +7579,7 @@ export class HlsSessionManager {
     // exactly what this run is doing right now, whatever else the machine is
     // doing beside it. Sharing the figure and not the conditions is what lets
     // the budget stop reading ffmpeg's cumulative average.
-    session.recentSpeed = { speed, at: takenAt, runSerial };
+    session.recentSpeed = { speed, at: takenAt, run };
     const kind = costKindForSession(session);
     // A reading taken beside another encoder contains that other encoder's
     // work, and the budget ADDS the same work again when it predicts — so filed
@@ -7801,7 +7676,7 @@ export class HlsSessionManager {
    * @param {number} speed
    */
   async #learnCopyCost(session, speed) {
-    if (session.runState === ENCODE_RUN_STATE.SUSPENDED) {
+    if (runStateOf(session) === ENCODE_RUN_STATE.SUSPENDED) {
       return; // a suspended run reports a cumulative figure that is decaying
     }
     // Always asked, not only below realtime. A re-encode near 1x may be the
@@ -7847,7 +7722,7 @@ export class HlsSessionManager {
    * @param {number} speed
    */
   async #learnAudioCost(session, speed) {
-    if (session.runState === ENCODE_RUN_STATE.SUSPENDED) {
+    if (runStateOf(session) === ENCODE_RUN_STATE.SUSPENDED) {
       return;
     }
     if (await this.#classifyTranscodeBound(session) === "download") {
@@ -8097,7 +7972,7 @@ export class HlsSessionManager {
   #pricedConcurrentCost(session) {
     let cost = 0;
     for (const member of this.#familyOf(session)) {
-      if (member === session || !processCanBeSignalled(member.runState)) {
+      if (member === session || !processCanBeSignalled(runStateOf(member))) {
         continue;
       }
       if (member.audioOnly === true) {
@@ -8126,7 +8001,7 @@ export class HlsSessionManager {
     // price to look up for another film's session — so a reading taken while
     // one is running cannot be attributed either.
     return this.#runningEncoders() > this.#familyOf(session).filter(
-      (member) => processCanBeSignalled(member.runState)
+      (member) => processCanBeSignalled(runStateOf(member))
     ).length
       ? null
       : cost;
@@ -8150,7 +8025,7 @@ export class HlsSessionManager {
       if (member.audioOnly === true || member.transcodeVideo !== true) {
         continue;
       }
-      if (!processCanBeSignalled(member.runState)) {
+      if (!processCanBeSignalled(runStateOf(member))) {
         continue;
       }
       const height = this.variantHeightOf(member);
@@ -8194,7 +8069,7 @@ export class HlsSessionManager {
       // that cost is spread, not a discount on it — and pricing a parked
       // encoder at zero would offer a step on the strength of a pause that ends
       // the moment the viewer catches up.
-      if (!processCanBeSignalled(member.runState)) {
+      if (!processCanBeSignalled(runStateOf(member))) {
         continue;
       }
       if (member.audioOnly === true) {
@@ -8771,42 +8646,34 @@ export class HlsSessionManager {
       clearTimeout(session.inputRetryTimer);
       session.inputRetryTimer = null;
     }
-    const ffmpeg = session.ffmpeg;
-    if (!ffmpeg) {
+    const run = session.run;
+    const ffmpeg = run?.process;
+    if (!run || !ffmpeg) {
       return;
     }
-    // A newer start may be waiting on an await inside #startEncodeRun; bumping
-    // the generation makes it abort instead of spawning into a stopped session.
-    session.encodeRunGeneration += 1;
-    // A suspended process does not act on SIGTERM until it is continued.
-    this.#resumeEncoder(session, reason);
-    // Cleared BEFORE the signal: the exit handler checks identity against this
-    // field, so a deliberate stop must not read as a run that failed.
-    session.ffmpeg = null;
-    // Only a run that was still going is being STOPPED. The handle outlives the
-    // process — nothing nulls it when a run ends — so a rung that had already
+    // A newer start may be waiting on an await inside #startEncodeRun; clearing
+    // the attempt makes it return instead of spawning into a stopped session.
+    session.pendingRun = null;
+    // Only a run that was still going is being STOPPED. A rung that had already
     // finished or failed reaches here too, and calling that a stop would erase
-    // how it actually ended.
-    const stoppedRunDirPath = session.runDirPath ?? null;
-    if (!hasChildExited(ffmpeg)) {
-      this.#transitionRun(session, ENCODE_RUN_EVENT.STOP_ORDERED);
-      try {
-        ffmpeg.kill("SIGTERM");
-      } catch {
-        // Best effort — the process may have exited between the two lines.
-      }
-    }
-    // The session outlives the run — a stopped rung keeps serving what it made
-    // — so the piece this run had open must not be left looking like one of
-    // them. Not awaited: the caller's own work does not depend on it, and the
-    // wait is for a process that has already been told to go.
+    // how it actually ended — which is why the handle is asked for first.
+    const stoppedRunDirPath = run.dirPath;
     // The stretch this run was given, read now rather than when the process
     // finally exits: by then the session may have started another run with
     // another stretch, and the piece to discard belongs to this one.
     const stoppedSpan = {
-      from: Number.isInteger(session.encodeStartIndex) ? session.encodeStartIndex : 0,
-      to: Number.isInteger(session.runEndIndex) ? session.runEndIndex : -1
+      from: Number.isInteger(run.from) ? run.from : 0,
+      to: Number.isInteger(run.to) ? run.to : -1
     };
+    // The run resumes itself if it was suspended — a stopped process does not
+    // act on SIGTERM until it is continued — records the cause, and answers its
+    // own exit. Nothing here has to null a field so that the exit is read
+    // correctly, because there is no shared field left to misread.
+    run.stop(reason);
+    // The session outlives the run — a stopped rung keeps serving what it made
+    // — so the piece this run had open must not be left looking like one of
+    // them. Not awaited: the caller's own work does not depend on it, and the
+    // wait is for a process that has already been told to go.
     void waitForChildExit(ffmpeg, ENCODE_RUN_TERMINATE_GRACE_MS).then(() =>
       this.#discardUnfinishedPiece(session, stoppedRunDirPath, stoppedSpan)
     );
@@ -9539,7 +9406,7 @@ export class HlsSessionManager {
         continue;
       }
       const other = this.sessionsById.get(sessionId);
-      if (!other || other.state === "disposed" || other.ffmpeg == null) {
+      if (!other || other.state === "disposed" || other.run?.process == null) {
         continue;
       }
       // Requests held on it are for segments nobody will produce now, and the
@@ -10055,13 +9922,13 @@ export class HlsSessionManager {
     if (!session || !isSafeFileName(fileName, session.segmentFormat)) {
       return { kind: "not-found" };
     }
-    if (session.runState === ENCODE_RUN_STATE.RETRY_WAIT) {
+    if (runStateOf(session) === ENCODE_RUN_STATE.RETRY_WAIT) {
       // The data went away and is being fetched again. Holding the request is
       // the truthful answer: nothing is broken and there is nothing for the
       // viewer to retry.
       return { kind: "warming-up" };
     }
-    if (session.runState === ENCODE_RUN_STATE.ENDED_FAILED) {
+    if (runStateOf(session) === ENCODE_RUN_STATE.ENDED_FAILED) {
       return {
         kind: "failed",
         message: session.lastError || "ffmpeg failed for this transcode session."
@@ -10129,7 +9996,7 @@ export class HlsSessionManager {
         // With explicit cut times there is no init file: that muxer writes each
         // piece self-contained, header and all. The header is identical in every
         // piece, so the first one to exist supplies it.
-        const bytes = session.usesExplicitCuts
+        const bytes = session.run?.usesExplicitCuts
           ? await this.#initFromFirstSegment(session)
           : await readFile((await this.#findProducedFile(session, initFileName)) ?? path.join(session.dirPath, initFileName));
         if (!bytes || bytes.length === 0) {
@@ -10166,7 +10033,7 @@ export class HlsSessionManager {
     // Which run wrote what is being served. Every question below that used to
     // be asked of a segment's NUMBER — is it finished, is it a leftover — is a
     // question about its run, and the run is known here.
-    const currentRunDir = session.runDirPath ?? session.dirPath;
+    const currentRunDir = session.run?.dirPath ?? session.dirPath;
     const fromCurrentRun = (chosen?.dir ?? currentRunDir) === currentRunDir;
     const isPlaylist = fileName === PLAYLIST_FILE_NAME;
     if (!isPlaylist) {
@@ -10231,7 +10098,7 @@ export class HlsSessionManager {
       // observed as playback dying a few seconds in with the encoder still
       // running happily ahead. A segment is finished once the NEXT one has been
       // started, or once the run producing it has ended.
-      if (!isPlaylist && session.usesExplicitCuts) {
+      if (!isPlaylist && session.run?.usesExplicitCuts) {
         const index = session.segmentFormat.segmentIndexFromName(fileName);
         const isLast = index >= Math.max(0, (session.timeline.boundaries?.length ?? 1) - 2);
         // Only the CURRENT run can have a file open, and only its own next
@@ -10239,7 +10106,7 @@ export class HlsSessionManager {
         // everything it wrote, so its files need no such proof — and taking the
         // proof from whichever run happened to hold the next number is how a
         // file being written came to be read as finished.
-        if (!isLast && session.ffmpeg && fromCurrentRun) {
+        if (!isLast && session.run?.process && fromCurrentRun) {
           const nextName = session.segmentFormat.segmentFileName(index + 1);
           const nextPath = path.join(chosen?.dir ?? session.dirPath, nextName);
           // The FIRST segment of a run cannot be judged by "the next one
@@ -10253,7 +10120,7 @@ export class HlsSessionManager {
           // end of its span. ffmpeg reports the output timestamp of its last
           // encoded frame, so a run whose position is beyond this segment's end
           // has necessarily closed it.
-          const isRunStart = index === (session.encodeStartIndex ?? -1);
+          const isRunStart = index === (session.run?.from ?? -1);
           const encoderPosition = Number(session.progress?.processedSeconds);
           const segmentEnd = this.#segmentStartTime(session, index + 1);
           if (isRunStart && Number.isFinite(encoderPosition) && encoderPosition > segmentEnd) {
@@ -10314,7 +10181,7 @@ export class HlsSessionManager {
         // Already in hand when the choice between copies had to read it.
         const raw = chosen?.raw ?? await readFile(filePath);
         // Self-contained pieces carry the init header; a media segment must not.
-        const bytes = session.usesExplicitCuts && session.segmentFormat.stripInit
+        const bytes = session.run?.usesExplicitCuts && session.segmentFormat.stripInit
           ? session.segmentFormat.stripInit(raw)
           : raw;
         // A segment that is short of a track is not servable, whatever the
@@ -10360,7 +10227,7 @@ export class HlsSessionManager {
           // no process writes into a run directory but that run's own ffmpeg,
           // which is what the first version of this check got wrong when it
           // deleted the file an encoder was writing into (2026-08-06, #225).
-          const stale = session.ffmpeg === null || !fromCurrentRun;
+          const stale = !session.run?.process || !fromCurrentRun;
           logger.warn(
             `transcode ${session.id} segment #${index} is short of a track — ` +
             (stale
@@ -10394,7 +10261,7 @@ export class HlsSessionManager {
         // in an empty edit in the piece's own `moov`, which `stripInit`
         // removes. Identical to the playlist's figure whenever the index is
         // honest, so nothing changes for a well-formed file.
-        const trueStart = session.usesExplicitCuts
+        const trueStart = session.run?.usesExplicitCuts
           ? session.segmentFormat.readSegmentStartSeconds?.(raw) ?? null
           : null;
         const declaredStart = this.#segmentStartTime(session, index);
@@ -10543,14 +10410,14 @@ export class HlsSessionManager {
     // encoder is the subject.
     const runStartSeconds = Number.isFinite(session.progress?.startPositionSeconds)
       ? session.progress.startPositionSeconds
-      : this.runStartTimeFor(session, session.encodeStartIndex ?? 0);
+      : this.runStartTimeFor(session, session.run?.from ?? 0);
     const position = Number(session.progress?.processedSeconds);
     const produced = Number.isFinite(position) ? position - runStartSeconds : null;
     const speed = session.progress?.speed ?? "n/a";
     logger.warn(
       `transcode ${session.id} holding ${fileName}: ${reason} ` +
-      `(run from #${session.encodeStartIndex ?? "?"}, viewer at #${session.lastRequestedSegment ?? "?"}, ` +
-      `encoder ${session.ffmpeg ? "alive" : "stopped"}, index #${index}, ` +
+      `(run from #${session.run?.from ?? "?"}, viewer at #${session.lastRequestedSegment ?? "?"}, ` +
+      `encoder ${session.run?.process ? "alive" : "stopped"}, index #${index}, ` +
       `produced ${produced === null ? "nothing yet — no position reported" : `${produced.toFixed(1)}s`} ` +
       `at ${speed}${produced !== null && produced <= 0 ? " — the encoder has not moved, so it is waiting on its input" : ""})`
     );
@@ -10588,7 +10455,7 @@ export class HlsSessionManager {
    * @returns {void}
    */
   #accountBackwardRestart(session, startIndex) {
-    const previousStart = session.encodeStartIndex;
+    const previousStart = session.run?.from;
     if (!Number.isInteger(previousStart) || !Number.isInteger(startIndex) || startIndex >= previousStart) {
       // A first run, or one moving forward. Neither costs anything here: a
       // forward restart skips material it never made.
@@ -10761,7 +10628,7 @@ export class HlsSessionManager {
       within,
       canJudgeTracks
         ? (raw) => {
-          const bytes = session.usesExplicitCuts && session.segmentFormat.stripInit
+          const bytes = session.run?.usesExplicitCuts && session.segmentFormat.stripInit
             ? session.segmentFormat.stripInit(raw)
             : raw;
           return session.segmentFormat.hasEveryTrack(bytes, session.initBytes);
@@ -10885,7 +10752,7 @@ export class HlsSessionManager {
       } catch {
         continue; // Removed while we were choosing; the next copy answers.
       }
-      const bytes = session.usesExplicitCuts && session.segmentFormat.stripInit
+      const bytes = session.run?.usesExplicitCuts && session.segmentFormat.stripInit
         ? session.segmentFormat.stripInit(raw)
         : raw;
       if (session.segmentFormat.hasEveryTrack(bytes, session.initBytes)) {
@@ -10924,14 +10791,14 @@ export class HlsSessionManager {
       // and it left a viewer retrying a 404 for ever.
       if (
         Number.isFinite(requestedIndex) &&
-        requestedIndex < (session.encodeStartIndex ?? 0) &&
-        (session.encodeStartIndex ?? 0) - requestedIndex > BEHIND_HEAD_REPAIR_MAX_SEGMENTS &&
-        session.ffmpeg != null &&
+        requestedIndex < (session.run?.from ?? 0) &&
+        (session.run?.from ?? 0) - requestedIndex > BEHIND_HEAD_REPAIR_MAX_SEGMENTS &&
+        session.run?.process != null &&
         session.seekTarget == null &&
         session.seekSettleTimer == null
       ) {
         logger.info(
-          `transcode ${session.id} segment #${requestedIndex} is ${(session.encodeStartIndex ?? 0) - requestedIndex} ` +
+          `transcode ${session.id} segment #${requestedIndex} is ${(session.run?.from ?? 0) - requestedIndex} ` +
           `segments behind the run and beyond the repair's reach; answered as absent rather than held`
         );
         return { kind: "not-found" };
@@ -11067,7 +10934,7 @@ export class HlsSessionManager {
     // because neither could answer alone: `session.state` said "starting" from
     // the first spawn until something else overwrote it, and `progress.state`
     // said it again on its own schedule.
-    const isWarmupPhase = wireState(session.runState) === "starting";
+    const isWarmupPhase = wireState(runStateOf(session)) === "starting";
     const warmupPercent = isWarmupPhase
       ? Math.max(0, Math.min(100, (warmupElapsedSeconds / warmupTotalSeconds) * 100))
       : null;
@@ -11085,7 +10952,7 @@ export class HlsSessionManager {
       // The id the caller asked about, not the variant it was answered from —
       // the browser tracks its sessions by the id it was given.
       sessionId: named.id,
-      state: wireState(session.runState),
+      state: wireState(runStateOf(session)),
       // The smallest buffer at which no interruption reaches the viewer, from
       // THIS file's own recent interruptions: one whole segment — the one being
       // played — plus the worst wait that can arrive before the buffer refills.
@@ -11164,7 +11031,7 @@ export class HlsSessionManager {
       expectedSessionCreateMs: this.expectedSessionCreateMs(),
       expectedFirstSegmentMs: this.expectedFirstSegmentMs(),
       updatedAt: session.progress.updatedAt,
-      error: session.runState === ENCODE_RUN_STATE.ENDED_FAILED ? session.lastError : ""
+      error: runStateOf(session) === ENCODE_RUN_STATE.ENDED_FAILED ? session.lastError : ""
     };
   }
 
@@ -11318,19 +11185,20 @@ export class HlsSessionManager {
       session.inputRetryTimer = null;
     }
 
-    this.#resumeEncoder(session, "session disposed");
     // Whether the process is still RUNNING, not whether anyone has called kill
     // on it: `.killed` means only that a signal was sent, and a run that ended
     // by itself — the file watched through, or a failure — was never killed at
     // all. Asked the old way, every idle session on disposal signalled a dead
     // pid and claimed to be stopping a run that had already ended.
-    if (session.ffmpeg && !hasChildExited(session.ffmpeg)) {
-      // The run ends with the session, and the state must say so: left where it
-      // was, it would go on claiming a process that can be signalled and an
-      // input that is being read, about a session that no longer exists.
-      this.#transitionRun(session, ENCODE_RUN_EVENT.STOP_ORDERED);
-      session.ffmpeg.kill("SIGTERM");
-      await waitForChildExit(session.ffmpeg);
+    const disposingProcess = session.run?.process ?? null;
+    if (disposingProcess && !hasChildExited(disposingProcess)) {
+      // The run ends with the session, and it records that itself: left where
+      // it was, its state would go on claiming a process that can be signalled
+      // and an input that is being read, about a session that no longer exists.
+      // `stop` also continues it first, since a suspended process does not act
+      // on SIGTERM until it is let go.
+      session.run.stop("the session was disposed");
+      await waitForChildExit(disposingProcess);
     }
     // The segments are NOT removed here, and that is the point of the address
     // change. They belong to the output, not to this session: another viewer

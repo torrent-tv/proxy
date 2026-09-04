@@ -20,6 +20,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { HlsSessionManager } from "../services/hls-session-manager.js";
+import { startRunOn } from "./helpers/encode-run.js";
 import { fmp4Format } from "../services/segment-formats/fmp4.js";
 
 const SESSION_ID = "bbbbbbbb-cccc-dddd-eeee-ffffffffffff";
@@ -65,8 +66,6 @@ async function managerWithRunAhead() {
     useSyntheticPlaylist: true,
     playlistText: "#EXTM3U\n",
     segmentCount: 1936,
-    encodeStartIndex: RUN_STARTS_AT,
-    encodeRunGeneration: 0,
     lastRestartAt: 0,
     seekFailureTarget: -1,
     seekFailureCount: 0,
@@ -74,11 +73,11 @@ async function managerWithRunAhead() {
     seekTarget: null,
     waitEpoch: 0,
     firstWantedAt: new Map(),
-    runState: "PRODUCING",
-    ffmpeg: { pid: 4321, exitCode: null, signalCode: null, kill() {}, once(event, handler) { if (event === "exit") handler(); } },
+    run: null,
     progress: { state: "running", processedSeconds: RUN_STARTS_AT * SEGMENT_SECONDS + 400, startPositionSeconds: RUN_STARTS_AT * SEGMENT_SECONDS }
   };
   manager.sessionsById.set(SESSION_ID, session);
+  startRunOn(session, { from: RUN_STARTS_AT });
   const restarts = [];
   return { manager, session, dirPath, restarts };
 }
@@ -201,7 +200,7 @@ test("a rung whose encoder was stopped is not brought back by a held request", a
     await rm(dirPath, { recursive: true, force: true });
   });
   // What a quality switch leaves behind: the rung nobody is watching, parked.
-  session.ffmpeg = null;
+  session.run = null;
   session.firstWantedAt.set(WANTED, Date.now() - 4000);
 
   await manager.getFileStream(SESSION_ID, fmp4Format.segmentFileName(WANTED), { requestSeq: 1 });

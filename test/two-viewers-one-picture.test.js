@@ -10,6 +10,7 @@
  */
 
 import test from "node:test";
+import { fakeProcess as fakeEncoder, startRunOn } from "./helpers/encode-run.js";
 import assert from "node:assert/strict";
 import { SourceFile } from "../services/source/SourceFile.js";
 import { Timeline } from "../services/output/Timeline.js";
@@ -79,29 +80,6 @@ function fakeSession({ id, dirPath, audioTrackIndex = 0, transcodeAudio = true }
   };
 }
 
-/**
- * A stand-in for a running ffmpeg: enough of a child process for the signals to
- * be recorded and for teardown to await its exit.
- *
- * @returns {{ pid: number, exitCode: number | null, signalCode: string | null, signals: string[], kill: (signal: string) => void, once: (event: string, handler: () => void) => void }}
- */
-function fakeEncoder() {
-  const signals = [];
-  return {
-    pid: 1234,
-    exitCode: null,
-    signalCode: null,
-    signals,
-    kill(signal) {
-      signals.push(signal);
-    },
-    once(event, handler) {
-      if (event === "exit") {
-        handler();
-      }
-    }
-  };
-}
 
 /**
  * A base picture serving two viewers, with its audio published separately and
@@ -148,7 +126,7 @@ async function pictureWithTwoViewers() {
       transcodeAudio: params.transcodeAudio
     });
     rendition.audioOnly = true;
-    rendition.ffmpeg = fakeEncoder();
+    startRunOn(rendition, { id: `${rendition.id}/run#1`, process: fakeEncoder() });
     manager.sessionsById.set(rendition.id, rendition);
     renditions.set(key, rendition);
     return rendition;
@@ -168,15 +146,15 @@ test("one viewer fetching their soundtrack does not stop the other viewer's", as
 
   assert.notEqual(first.sessionId, second.sessionId, "two soundtracks are two encodes");
   for (const [key, rendition] of renditions) {
-    assert.ok(rendition.ffmpeg, `the encoder of ${key} is still running`);
-    assert.deepEqual(rendition.ffmpeg.signals, [], `nothing signalled ${key}`);
+    assert.ok(rendition.run?.process, `the encoder of ${key} is still running`);
+    assert.deepEqual(rendition.run.process.signals, [], `nothing signalled ${key}`);
   }
 
   // And it holds under the traffic that actually happens: they alternate.
   await manager.resolveAudioRenditionFile(BASE_ID, 0, "segment-00004.mp4", FIRST);
   await manager.resolveAudioRenditionFile(BASE_ID, 1, "segment-00004.mp4", SECOND);
   for (const [key, rendition] of renditions) {
-    assert.deepEqual(rendition.ffmpeg?.signals ?? [], [], `nothing signalled ${key} on the second round`);
+    assert.deepEqual(rendition.run?.process?.signals ?? [], [], `nothing signalled ${key} on the second round`);
   }
 });
 
@@ -197,8 +175,8 @@ test("a soundtrack nobody is listening to any more is stopped", async (t) => {
 
   const left = renditions.get(audioRenditionKey(0, true));
   const moved = renditions.get(audioRenditionKey(1, true));
-  assert.equal(left.ffmpeg, null, "the track the viewer left is not encoding for anybody");
-  assert.ok(moved.ffmpeg, "the track they moved to is");
+  assert.equal(left.run?.process ?? null, null, "the track the viewer left is not encoding for anybody");
+  assert.ok(moved.run?.process, "the track they moved to is");
 });
 
 test("each viewer's browser decides for itself whether its soundtrack is re-encoded", async (t) => {
@@ -220,8 +198,8 @@ test("each viewer's browser decides for itself whether its soundtrack is re-enco
   assert.equal(renditions.get(audioRenditionKey(0, false)).transcodeAudio, false);
   assert.equal(renditions.get(audioRenditionKey(0, true)).transcodeAudio, true);
   // Both are wanted, so neither is stopped.
-  assert.ok(renditions.get(audioRenditionKey(0, false)).ffmpeg);
-  assert.ok(renditions.get(audioRenditionKey(0, true)).ffmpeg);
+  assert.ok(renditions.get(audioRenditionKey(0, false)).run?.process);
+  assert.ok(renditions.get(audioRenditionKey(0, true)).run?.process);
 });
 
 test("the master marks each viewer's own soundtrack as the default one", async (t) => {
@@ -262,8 +240,7 @@ test("one viewer changing quality does not take the other off their step", async
     variant.output.encodeHeight = height;
     variant.variantHeight = height;
     variant.variantBases = new Set([BASE_ID]);
-    variant.ffmpeg = fakeEncoder();
-    variant.runState = "PRODUCING";
+    startRunOn(variant, { id: `${variant.id}/run#1`, process: fakeEncoder() });
     manager.sessionsById.set(variant.id, variant);
     variants.set(height, variant);
     return variant;
@@ -276,16 +253,16 @@ test("one viewer changing quality does not take the other off their step", async
   await manager.resolveVariantFile(BASE_ID, 720, "segment-00004.mp4", FIRST);
   await manager.resolveVariantFile(BASE_ID, 540, "segment-00004.mp4", SECOND);
 
-  assert.ok(variants.get(720).ffmpeg, "the first viewer's step is still encoding");
-  assert.ok(variants.get(540).ffmpeg, "and so is the second viewer's");
+  assert.ok(variants.get(720).run?.process, "the first viewer's step is still encoding");
+  assert.ok(variants.get(540).run?.process, "and so is the second viewer's");
 
   // Now the first viewer steps down. Theirs is left for nobody and stops; the
   // other viewer's is untouched.
   await manager.resolveVariantFile(BASE_ID, 480, "segment-00005.mp4", FIRST);
 
-  assert.equal(variants.get(720).ffmpeg, null, "the step nobody is on stops");
-  assert.ok(variants.get(540).ffmpeg, "the step the other viewer is watching does not");
-  assert.ok(variants.get(480).ffmpeg, "and the one they moved to is encoding");
+  assert.equal(variants.get(720).run?.process ?? null, null, "the step nobody is on stops");
+  assert.ok(variants.get(540).run?.process, "the step the other viewer is watching does not");
+  assert.ok(variants.get(480).run?.process, "and the one they moved to is encoding");
 });
 
 test("a step somebody is watching is never withdrawn from the offer", async (t) => {
@@ -347,7 +324,7 @@ test("a viewer whose picture has gone quiet holds no soundtrack encoder", async 
   await manager.resolveAudioRenditionFile(BASE_ID, 1, "segment-00004.mp4", FIRST);
 
   assert.equal(
-    renditions.get(audioRenditionKey(0, true)).ffmpeg,
+    renditions.get(audioRenditionKey(0, true)).run?.process ?? null,
     null,
     "the first viewer moved on, so their old track is stopped"
   );

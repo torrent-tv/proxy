@@ -10,7 +10,8 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
-import { EncodeRun, RUN_ENDING } from "../services/encode/EncodeRun.js";
+import { EncodeRun } from "../services/encode/EncodeRun.js";
+import { ENCODE_EXIT } from "../services/encode/encode-exit.js";
 import { SoftwareEncoder } from "../services/encode/SoftwareEncoder.js";
 
 /**
@@ -89,7 +90,7 @@ test("reaching the end of its stretch and exiting is the one normal ending", () 
   }
   process.exitWith(0, null);
   assert.equal(ends.length, 1);
-  assert.equal(ends[0].ending, RUN_ENDING.COMPLETED);
+  assert.equal(ends[0].ending, ENCODE_EXIT.COMPLETE);
   assert.equal(ends[0].normal, true);
   assert.equal(lines.at(-1)[0], "info", "a normal ending is not a warning");
 });
@@ -102,7 +103,7 @@ test("exiting cleanly short of its stretch is abnormal and says where it stopped
   run.noteProduced(10);
   run.noteProduced(11);
   process.exitWith(0, null);
-  assert.equal(ends[0].ending, RUN_ENDING.SHORT);
+  assert.equal(ends[0].ending, ENCODE_EXIT.SHORT);
   assert.equal(ends[0].normal, false);
   assert.equal(ends[0].reached, 11);
   assert.match(ends[0].because, /#11 of #14/);
@@ -112,7 +113,7 @@ test("a non-zero exit is a failure carrying its code", () => {
   const { run, process, ends, lines } = makeRun();
   run.start("first");
   process.exitWith(255, null);
-  assert.equal(ends[0].ending, RUN_ENDING.FAILED);
+  assert.equal(ends[0].ending, ENCODE_EXIT.FAILED);
   assert.equal(ends[0].code, 255);
   assert.equal(lines.at(-1)[0], "warn");
 });
@@ -125,7 +126,7 @@ test("our own kill is abnormal too, and carries the reason we gave", () => {
   run.stop("moved past 20 segments that are already made");
   assert.deepEqual(process.signals, ["SIGTERM"]);
   process.exitWith(null, "SIGTERM");
-  assert.equal(ends[0].ending, RUN_ENDING.STOPPED);
+  assert.equal(ends[0].ending, ENCODE_EXIT.STOPPED);
   assert.equal(ends[0].normal, false);
   assert.match(ends[0].because, /already made/);
 });
@@ -147,7 +148,7 @@ test("a process that could not be started ends like any other failure", () => {
   const { run, process, ends } = makeRun();
   run.start("first");
   process.emit("error", new Error("ENOENT"));
-  assert.equal(ends[0].ending, RUN_ENDING.FAILED);
+  assert.equal(ends[0].ending, ENCODE_EXIT.FAILED);
   assert.match(ends[0].because, /ENOENT/);
 });
 

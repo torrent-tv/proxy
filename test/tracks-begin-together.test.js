@@ -13,6 +13,8 @@
  */
 
 import assert from "node:assert/strict";
+import { SourceFile } from "../services/source/SourceFile.js";
+import { startRunOn } from "./helpers/encode-run.js";
 import { Timeline } from "../services/output/Timeline.js";
 import test from "node:test";
 
@@ -40,24 +42,26 @@ function familyAtBoundaryTwo() {
   const picture = {
     id: "picture",
     state: "ready",
-    runState: ENCODE_RUN_STATE.PRODUCING,
     timeline: new Timeline({ boundaries: boundaries, cutGrid: "uniform" }),
-    encodeStartIndex: 2,
-    runSerial: 0,
+    file: new SourceFile({ sourceKey: "source-1", fileIndex: 0, name: "film.mkv" }),
     audioRenditionSessions: new Map([[1, "sound"]]),
+    run: null,
+    pendingRun: null,
     indexCheck: null
   };
   const sound = {
     id: "sound",
     state: "ready",
-    runState: ENCODE_RUN_STATE.PRODUCING,
     audioOnly: true,
     baseSessionId: "picture",
     timeline: new Timeline({ boundaries: boundaries, cutGrid: "uniform" }),
-    encodeStartIndex: 2,
-    runSerial: 0,
+    file: new SourceFile({ sourceKey: "source-1", fileIndex: 0, name: "film.mkv" }),
+    run: null,
+    pendingRun: null,
     indexCheck: null
   };
+  startRunOn(picture, { id: "picture/run#1", from: 2 });
+  startRunOn(sound, { id: "sound/run#1", from: 2 });
   manager.sessionsById.set("picture", picture);
   manager.sessionsById.set("sound", sound);
 
@@ -66,7 +70,7 @@ function familyAtBoundaryTwo() {
 
 test("a soundtrack follows the picture to the instant the picture really began", () => {
   const { manager, picture, sound } = familyAtBoundaryTwo();
-  const runsBefore = sound.runSerial;
+  const runBefore = sound.run;
 
   manager.correctBoundaryFromSegment(picture, 2, 10.5);
 
@@ -85,15 +89,15 @@ test("a soundtrack follows the picture to the instant the picture really began",
   // true about the index, false about the instant. The first version of this
   // fix did exactly that and moved nothing.
   //
-  // `runSerial` is the evidence because it is the first thing a run start
-  // writes, before it awaits anything: the assertion then holds without the
-  // test needing a filesystem, a process, or a guess about how many ticks to
-  // wait for one.
-  assert.equal(
-    sound.runSerial,
-    runsBefore + 1,
+  // The attempt is the evidence because it is what a run start claims before
+  // it awaits anything: the assertion then holds without the test needing a
+  // filesystem, a process, or a guess about how many ticks to wait for one.
+  assert.ok(
+    sound.pendingRun,
     "the soundtrack's run must be started again, at the corrected time"
   );
+  assert.equal(sound.pendingRun.startIndex, 2);
+  assert.equal(sound.run, runBefore, "and the run in force is only replaced once one is built");
 });
 
 test("a correction the table already holds moves nobody", () => {
@@ -110,11 +114,11 @@ test("a member that is not running is left alone", () => {
   const { manager, picture, sound } = familyAtBoundaryTwo();
   // A rung the viewer switched away from has no process. Moving it would start
   // an encoder for nobody — the failure that put three ffmpeg runs on one file.
-  sound.runState = ENCODE_RUN_STATE.STOPPED;
+  sound.run.stop("the viewer switched away");
   manager.correctBoundaryFromSegment(picture, 2, 10.5);
-  assert.equal(sound.runSerial, 0, "a stopped member is not started again for nobody");
-  assert.equal(sound.encodeStartIndex, 2, "a stopped member keeps its place and its silence");
-  assert.equal(sound.runState, ENCODE_RUN_STATE.STOPPED);
+  assert.equal(sound.pendingRun, null, "a stopped member is not started again for nobody");
+  assert.equal(sound.run.from, 2, "a stopped member keeps its place and its silence");
+  assert.equal(sound.run.state, ENCODE_RUN_STATE.STOPPED);
   assert.notEqual(INITIAL_RUN_STATE, ENCODE_RUN_STATE.STOPPED);
 });
 
@@ -141,5 +145,5 @@ test("a soundtrack does not move the grid the picture is cut on", () => {
     "the grid is the picture's cut list and a soundtrack may not move it"
   );
   assert.deepEqual(sound.timeline.boundaries, soundBefore);
-  assert.equal(picture.runSerial, 0, "and nothing is restarted on a soundtrack's say-so");
+  assert.equal(picture.pendingRun, null, "and nothing is restarted on a soundtrack's say-so");
 });

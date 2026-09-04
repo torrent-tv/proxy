@@ -24,6 +24,7 @@ import os from "node:os";
 import path from "node:path";
 import { HlsSessionManager } from "../services/hls-session-manager.js";
 import { ENCODE_RUN_STATE } from "../services/encode/encode-run-state.js";
+import { startRunOn } from "./helpers/encode-run.js";
 import { fmp4Format } from "../services/segment-formats/fmp4.js";
 
 const MOVIE_TIMESCALE = 1000;
@@ -149,19 +150,20 @@ async function managerWithReadySegment(overrides = {}) {
     startedAt: Date.now(),
     createEntryMs: Date.now(),
     lastAccessedAt: Date.now(),
-    ffmpeg: null,
+    run: null,
     lastError: "",
     consumers: new Set(),
     segmentFormat: overrides.segmentFormat ?? fmp4Format,
-    usesExplicitCuts: true,
     useSyntheticPlaylist: true,
     playlistText: "#EXTM3U\n",
     initBytes: fmp4Format.extractInit(piece),
-    encodeStartIndex: 0,
     firstSegmentLogged: false,
     waitEpoch: 0
   };
   manager.sessionsById.set(SESSION_ID, session);
+  // The run in force. The fixture's segments live directly in the session
+  // directory, which is exactly what one run's directory is here.
+  startRunOn(session, { from: 0, usesExplicitCuts: true });
   return { manager, session, dirPath };
 }
 
@@ -252,8 +254,6 @@ test("a run's FIRST segment is served once the encoder has passed it, without wa
   // successor and nothing is producing one. Waiting for that successor is what
   // held #317 for 46 s and then answered 404 to a browser that had given up.
   await rm(path.join(dirPath, "segment-00001.mp4"));
-  session.encodeStartIndex = 0;
-  session.ffmpeg = { killed: true, kill() {} };
   session.progress = { processedSeconds: SEGMENT_START_SECONDS + 10 };
 
   const result = await manager.getFileStream(SESSION_ID, "segment-00000.mp4", { requestSeq: 1 });
@@ -266,7 +266,7 @@ test("a run's FIRST segment is served once the encoder has passed it, without wa
 });
 
 test("a segment is found in the run directory that produced it, newest run first", async (t) => {
-  const { manager, session, dirPath } = await managerWithReadySegment();
+  const { manager, dirPath } = await managerWithReadySegment();
   t.after(async () => {
     await manager.disposeAll();
     await rm(dirPath, { recursive: true, force: true });
@@ -284,7 +284,6 @@ test("a segment is found in the run directory that produced it, newest run first
   await writeFile(path.join(dirPath, "run-2", "segment-00001.mp4"), piece);
   await rm(path.join(dirPath, "segment-00000.mp4"));
   await rm(path.join(dirPath, "segment-00001.mp4"));
-  session.encodeStartIndex = 0;
 
   const result = await manager.getFileStream(SESSION_ID, "segment-00000.mp4", { requestSeq: 1 });
 
@@ -309,15 +308,13 @@ test("serving a run's own segment moves the run out of STARTING", async (t) => {
   // What this pins is that a real serve REACHES it: a state nothing writes
   // describes every run as still starting, for ever, and the log built on it
   // would say so too.
-  session.runState = ENCODE_RUN_STATE.STARTING;
-  // Where the run in force is writing. The fixture's segments live directly in
-  // the session directory, which is exactly what a single run's directory is
-  // here.
-  session.runDirPath = dirPath;
+  // A run that has not yet made anything: starting.
+  startRunOn(session, { from: 0, producing: false, usesExplicitCuts: true });
+  assert.equal(session.run.state, ENCODE_RUN_STATE.STARTING);
 
   await manager.getFileStream(SESSION_ID, "segment-00000.mp4", { requestSeq: 1 });
 
-  assert.equal(session.runState, ENCODE_RUN_STATE.PRODUCING);
+  assert.equal(session.run.state, ENCODE_RUN_STATE.PRODUCING);
 });
 
 test("a segment left by an earlier run does not claim the new run has produced", async (t) => {
@@ -335,11 +332,10 @@ test("a segment left by an earlier run does not claim the new run has produced",
   // Deliberately a segment ABOVE the new run's start index, because that is the
   // case an index comparison gets wrong: after a backward seek the old run's
   // output sits ahead of the new run's beginning.
-  session.runState = ENCODE_RUN_STATE.STARTING;
-  session.encodeStartIndex = 0;
-  session.runDirPath = path.join(dirPath, "run-7");
+  const run = startRunOn(session, { from: 0, producing: false, usesExplicitCuts: true });
+  run.dirPath = path.join(dirPath, "run-7");
 
   await manager.getFileStream(SESSION_ID, "segment-00000.mp4", { requestSeq: 1 });
 
-  assert.equal(session.runState, ENCODE_RUN_STATE.STARTING);
+  assert.equal(session.run.state, ENCODE_RUN_STATE.STARTING);
 });

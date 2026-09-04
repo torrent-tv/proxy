@@ -51,21 +51,26 @@ function fakeEncoder() {
  * A session shaped like a live one, encoding 720p of a 1080p source.
  *
  * @param {{ dirPath: string, transcodeVideo?: boolean, cutGrid?: string }} params
+ *   `cutGrid` goes into the file's cut table; left out, it is what production
+ *   builds for this branch.
  * @returns {object}
  */
-function fakeSession({ dirPath, transcodeVideo = true, cutGrid = "keyframe" }) {
+function fakeSession({ dirPath, transcodeVideo = true, cutGrid = transcodeVideo ? "uniform" : "keyframe" }) {
   return {
     id: BASE_ID,
-    // A copy can only be cut where the source already has a keyframe, so this
-    // is what decides whether it publishes variants at all.
-    cutGrid,
     dirPath,
     // Where this file is cut, held by the file. A fixture that stated it
     // on the session was describing what production no longer does.
+    //
+    // The grid travels in here and nowhere else: a copy can only be cut where
+    // the source already has a keyframe, so this is what decides whether the
+    // stream publishes variants at all, and `#publishesVariants` reads it off
+    // the table. The default is what production builds — a keyframe grid only
+    // where one was read, which is the copy.
     timeline: new Timeline({
       boundaries: Array.from({ length: 101 }, (_, index) => index * SEGMENT_SECONDS),
       totalDurationSeconds: 400,
-      cutGrid: "uniform"
+      cutGrid
     }),
     state: "ready",
     fileName: "video.mkv",
@@ -118,7 +123,7 @@ function fakeSession({ dirPath, transcodeVideo = true, cutGrid = "keyframe" }) {
  * @param {{ transcodeVideo?: boolean, cutGrid?: string }} [options]
  * @returns {Promise<{ manager: HlsSessionManager, session: object, dirPath: string, restarts: number[] }>}
  */
-async function managerWithSession({ transcodeVideo = true, cutGrid = "keyframe" } = {}) {
+async function managerWithSession({ transcodeVideo = true, cutGrid } = {}) {
   const dirPath = await mkdtemp(path.join(os.tmpdir(), "auto-quality-"));
   const manager = new HlsSessionManager({
     enabled: true,

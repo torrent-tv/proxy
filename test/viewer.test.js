@@ -9,6 +9,7 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
+import { SourceFile } from "../services/source/SourceFile.js";
 import { mkdtemp, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -65,7 +66,7 @@ test("releasing a consumer forgets everything that was true of them alone", asyn
     id: SESSION_ID,
     dirPath,
     state: "live",
-    fileName: "video.mkv",
+    file: new SourceFile({ sourceKey: "source-1", fileIndex: 0, name: "video.mkv" }),
     consumers: new Set(["staying", "leaving"]),
     viewers: new Map(),
     lastAccessedAt: Date.now()

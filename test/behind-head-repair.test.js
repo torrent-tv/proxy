@@ -14,6 +14,7 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
+import { SourceFile } from "../services/source/SourceFile.js";
 import { Timeline } from "../services/output/Timeline.js";
 import { mkdtemp, rm } from "node:fs/promises";
 import os from "node:os";
@@ -49,7 +50,7 @@ async function managerWithRunAhead() {
       cutGrid: "uniform"
     }),
     state: "ready",
-    fileName: "film.avi",
+    file: new SourceFile({ sourceKey: "source-1", fileIndex: 0, name: "film.avi" }),
     startedAt: Date.now(),
     createEntryMs: Date.now(),
     lastAccessedAt: Date.now(),

@@ -15,6 +15,7 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
+import { SourceFile } from "../services/source/SourceFile.js";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -54,7 +55,7 @@ function sessionOn({ id, dirPath, outputKey }) {
     outputKey,
     dirPath,
     state: "ready",
-    fileName: "video.mkv",
+    file: new SourceFile({ sourceKey: "source-1", fileIndex: 0, name: "video.mkv" }),
     segmentFormat: fmp4Format,
     // Where the file is cut, which every live session holds.
     timeline: new Timeline({ boundaries: [0, 4, 8], cutGrid: "keyframe" }),

@@ -12,6 +12,7 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
+import { SourceFile } from "../services/source/SourceFile.js";
 import { Timeline } from "../services/output/Timeline.js";
 import { mkdtemp, rm } from "node:fs/promises";
 import os from "node:os";
@@ -48,7 +49,7 @@ function fakeSession({ id, encodeHeight, dirPath, transcodeVideo = true }) {
       cutGrid: "uniform"
     }),
     state: "ready",
-    fileName: "video.mkv",
+    file: new SourceFile({ sourceKey: "source-1", fileIndex: 0, name: "video.mkv" }),
     startedAt: Date.now(),
     createEntryMs: Date.now(),
     lastAccessedAt: Date.now(),
@@ -59,8 +60,6 @@ function fakeSession({ id, encodeHeight, dirPath, transcodeVideo = true }) {
     transcodeVideo,
     transcodeAudio: true,
     audioTrackIndex: 0,
-    sourceKey: "source-1",
-    fileIndex: 0,
     sourceWidth: 1920,
     sourceHeight: 1080,
     // The shape this output is encoded AS, decided once for the output rather

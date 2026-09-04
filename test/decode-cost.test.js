@@ -29,7 +29,8 @@ import {
   predictedRealtimeSpeed,
   speedBar
 } from "../services/hwaccel.js";
-import { HlsSessionManager, sourceDecodeCharacteristics } from "../services/hls-session-manager.js";
+import { HlsSessionManager } from "../services/hls-session-manager.js";
+import { SourceFile, sourceDecodeCharacteristics } from "../services/source/SourceFile.js";
 import { parseFfmpegBitrateKbps, parseFfmpegVideoDimensions, parseFfmpegVideoFps } from "../services/ffmpeg-banner.js";
 import { fmp4Format } from "../services/segment-formats/fmp4.js";
 
@@ -332,7 +333,7 @@ test("the OFFER drops the rungs the host cannot hold, and the master keeps addre
       cutGrid: "keyframe"
     }),
     state: "ready",
-    fileName: "video.mkv",
+    file: new SourceFile({ sourceKey: "source-1", fileIndex: 0, name: "video.mkv" }),
     startedAt: Date.now(),
     lastAccessedAt: Date.now(),
     ffmpeg: null,
@@ -342,8 +343,6 @@ test("the OFFER drops the rungs the host cannot hold, and the master keeps addre
     transcodeVideo: false,
     transcodeAudio: true,
     audioTrackIndex: 0,
-    sourceKey: "source-1",
-    fileIndex: 0,
     sourceWidth: 1920,
     sourceHeight: 1080,
     sourceDecode: MEASURED_FILM,

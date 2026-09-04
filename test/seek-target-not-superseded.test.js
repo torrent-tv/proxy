@@ -15,6 +15,7 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
+import { SourceFile } from "../services/source/SourceFile.js";
 import { Timeline } from "../services/output/Timeline.js";
 import { mkdtemp, rm } from "node:fs/promises";
 import os from "node:os";
@@ -51,7 +52,7 @@ async function managerAfterSeek() {
       cutGrid: "uniform"
     }),
     state: "ready",
-    fileName: "film.mkv",
+    file: new SourceFile({ sourceKey: "source-1", fileIndex: 0, name: "film.mkv" }),
     startedAt: Date.now(),
     lastAccessedAt: Date.now(),
     consumers: new Set(),

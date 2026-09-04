@@ -64,6 +64,7 @@ import { AudioOutput, CutGrid, OutputSpec, VideoOutput } from "./output/index.js
 import { newIndexCheck, Timeline, Timelines } from "./output/Timeline.js";
 export { newIndexCheck };
 import { Output, Outputs } from "./output/Output.js";
+import { SourceFiles, sourceDecodeCharacteristics } from "./source/SourceFile.js";
 import { ProducedIndex } from "./produced-index.js";
 import { SegmentStore } from "./encode/SegmentStore.js";
 import { viewerOf, viewersOf } from "./viewer/Viewer.js";
@@ -343,40 +344,6 @@ export function variantHeightsFor(sourceHeight) {
   const rungs = VARIANT_LADDER.filter((height) => height < sourceHeight);
   return [Math.round(sourceHeight), ...rungs];
 }
-
-/**
- * What a source costs to DECODE, in the two figures the startup fit prices:
- * its pixel rate and its bitrate. Every re-encode of this file pays this,
- * whatever height it is encoded to, because the whole source is decoded first.
- *
- * Returns null when the probe did not report enough — the budget then prices
- * the encoder alone rather than inventing a figure.
- *
- * The codec and bit depth travel with the rates because they decide WHICH
- * measurement of this host applies: the model is fitted per codec family, and a
- * video that has to be re-encoded is by definition one the browser could not
- * play — HEVC, 10-bit — which is exactly where H.264 constants are wrong.
- *
- * @param {{ width: number | null, height: number | null, fps: number | null, bitrateKbps: number | null, codec?: string | null, bitDepth?: number | null }} mediaInfo
- * @returns {{ megapixelsPerSecond: number, megabitsPerSecond: number, codec: string, bitDepth: number | null } | null}
- */
-export function sourceDecodeCharacteristics(mediaInfo) {
-  const width = Number(mediaInfo?.width);
-  const height = Number(mediaInfo?.height);
-  const fps = Number(mediaInfo?.fps);
-  const kbps = Number(mediaInfo?.bitrateKbps);
-  if (!(width > 0) || !(height > 0) || !(fps > 0) || !(kbps > 0)) {
-    return null;
-  }
-  const depth = Number(mediaInfo?.bitDepth);
-  return {
-    megapixelsPerSecond: (width * height * fps) / 1e6,
-    megabitsPerSecond: kbps / 1000,
-    codec: typeof mediaInfo?.codec === "string" ? mediaInfo.codec : "",
-    bitDepth: Number.isFinite(depth) && depth > 0 ? depth : null
-  };
-}
-
 
 /**
  * Add one produced segment's deviation to the tally.
@@ -1583,17 +1550,6 @@ function isWarmupTimeoutError(error) {
   return error.message === "HLS playlist is still warming up.";
 }
 
-function normalizeLogFileName(fileName, fileIndex) {
-  const fallback = `file#${fileIndex}`;
-  if (typeof fileName !== "string") {
-    return fallback;
-  }
-  const value = fileName.trim();
-  if (value.length === 0) {
-    return fallback;
-  }
-  return value;
-}
 
 /**
  * @typedef {Object} HlsSessionManagerOptions
@@ -1917,6 +1873,10 @@ export class HlsSessionManager {
     // downstream assumes they cannot be, from a segment of one standing in for
     // a segment of the other to the single RESOLUTION the master names.
     this.outputs = new Outputs();
+    // The files this proxy is serving, one object per file however many
+    // sessions are of it. It holds the file's key — which every cache about a
+    // file is keyed by — its name, and the facts a probe returned.
+    this.sourceFiles = new SourceFiles();
     this.sessionIdBySource = new Map();
     this.cleanupTimer = setInterval(() => {
       void this.cleanupExpired();
@@ -2030,6 +1990,12 @@ export class HlsSessionManager {
     // is the one place that resolves it, so nothing downstream carries two
     // vocabularies.
     const audioSource = this.#resolveAudioSource(sourceKey, fileIndex, normalizedAudioTrack);
+    // The file itself, held once for every session of it. Its name, its key and
+    // the facts a probe of it returned used to be copied onto each session, so
+    // two viewers of one film held two copies of numbers that cannot differ —
+    // and twenty places assembled its key by hand to reach the caches that are
+    // keyed by a file.
+    const file = this.sourceFiles.get(sourceKey, fileIndex, fileName);
     const forceManualQuality = manualQuality === true && transcodeVideo;
     // Whether this output carries its sound at all — decided HERE, before the
     // key, and never derived a second time.
@@ -2102,7 +2068,6 @@ export class HlsSessionManager {
     if (existingId) {
       const existing = this.sessionsById.get(existingId);
       if (existing && existing.state !== "failed") {
-        existing.fileName = normalizeLogFileName(fileName, fileIndex);
         const joined = Boolean(consumerId) && !existing.consumers.has(consumerId);
         if (consumerId) {
           existing.consumers.add(consumerId);
@@ -2256,7 +2221,7 @@ export class HlsSessionManager {
     // relationship exact; time-based-keyframe encoders just use it as the rate.
     const outputFps = chooseOutputFps(mediaInfo.fps);
     const hasDuration = Number.isFinite(durationSeconds) && durationSeconds > 0;
-    const logName = normalizeLogFileName(fileName, fileIndex);
+    const logName = file.name;
 
     // Size the reader's window in seconds of playback rather than bytes. Needs
     // the file's own average byte rate, which is size ÷ duration; the size
@@ -2499,7 +2464,7 @@ export class HlsSessionManager {
       ? startAtLadderTop(chosenBudget, outputFps, this.softwarePresetBenchmark, {
           decodeModel: this.decodeCostModel,
           source: sourceDecode,
-          observedDecodeCostSec: this.#observedDecodeCost.get(`${sourceKey}:${fileIndex}`)?.costSec ?? null,
+          observedDecodeCostSec: this.#observedDecodeCost.get(SourceFiles.keyFor(sourceKey, fileIndex))?.costSec ?? null,
           requiredSpeed: this.#requiredSpeedFor(sourceKey, fileIndex)
         })
       : chosenBudget;
@@ -2534,7 +2499,9 @@ export class HlsSessionManager {
       // plus the start position, and the start position is a fact about a
       // request rather than about the material.
       outputKey: spec.toKey(),
-      fileName: logName,
+      // The file this session is of: its key, its name and what a probe of it
+      // said. One object per file, shared by every session of it.
+      file,
       dirPath: sessionDir,
       // The SESSION's own lifetime, and nothing else: it exists, or it has been
       // disposed. It used to carry the encoder run's status as well, which is
@@ -2570,8 +2537,6 @@ export class HlsSessionManager {
       // that names itself never depends on having asked for a segment first.
       // Transcode parameters retained so the encode run can be restarted at an
       // arbitrary segment when the player seeks (server-side seeking).
-      sourceKey,
-      fileIndex,
       transcodeVideo,
       transcodeAudio,
       // The soundtrack this session was CREATED for. Still what an output
@@ -2998,8 +2963,8 @@ export class HlsSessionManager {
    */
   declaredTracks(session) {
     const probed = this.getCachedMediaInfo?.({
-      sourceKey: session.sourceKey,
-      fileIndex: session.fileIndex
+      sourceKey: session.file.sourceKey,
+      fileIndex: session.file.fileIndex
     }) ?? null;
     // What the SOURCE has, narrowed to what this session's output carries. A
     // rendition maps only audio and a stream whose audio travels separately
@@ -3016,7 +2981,7 @@ export class HlsSessionManager {
     // check expecting one track where two arrive, and tell the browser its sound
     // was lost.
     const audioFromAnotherFile =
-      Number.isInteger(session.audioFileIndex) && session.audioFileIndex !== session.fileIndex;
+      Number.isInteger(session.audioFileIndex) && session.audioFileIndex !== session.file.fileIndex;
     return {
       video: carriesVideo && Boolean(probed?.videoCodec),
       audio: carriesAudio && (audioFromAnotherFile || Boolean(probed?.audioCodec))
@@ -3158,7 +3123,7 @@ export class HlsSessionManager {
    * @returns {Promise<{ times: number[] | null, format: string }>}
    */
   async #readContainerKeyframes({ sourceKey, fileIndex, inputUrl, logName }) {
-    const cacheKey = `${sourceKey}:${fileIndex}`;
+    const cacheKey = SourceFiles.keyFor(sourceKey, fileIndex);
     if (this.keyframeIndexCache.has(cacheKey)) {
       return this.keyframeIndexCache.get(cacheKey);
     }
@@ -3832,7 +3797,7 @@ export class HlsSessionManager {
     if (!Number.isFinite(fileLength) || fileLength <= 0) {
       return 0;
     }
-    this.#fileLengthByKey.set(`${sourceKey}:${fileIndex}`, fileLength);
+    this.#fileLengthByKey.set(SourceFiles.keyFor(sourceKey, fileIndex), fileLength);
     const bytesPerSecond = fileLength / durationSeconds;
     // Shared between the readers this file already has. The window is stated in
     // seconds of playback and the store's memory is one budget for the whole
@@ -3861,8 +3826,8 @@ export class HlsSessionManager {
   #readersOn(sourceKey, fileIndex) {
     let readers = 0;
     for (const session of this.sessionsById.values()) {
-      if (session?.sourceKey === sourceKey &&
-          session.fileIndex === fileIndex &&
+      if (session?.file.sourceKey === sourceKey &&
+          session.file.fileIndex === fileIndex &&
           session.state !== "disposed") {
         readers += 1;
       }
@@ -4179,7 +4144,7 @@ export class HlsSessionManager {
     }
     session.cushionSaidAt = now;
     const aheadOfPicture = Math.max(0, encodedTo - earliestPosition);
-    const fileLength = this.#fileLengthByKey.get(`${session.sourceKey}:${session.fileIndex}`);
+    const fileLength = this.#fileLengthByKey.get(session.file.key);
     const duration = Number(session.timeline.totalDurationSeconds) || Number(session.durationSeconds) || 0;
     const megabytes =
       Number.isFinite(fileLength) && fileLength > 0 && duration > 0
@@ -4233,8 +4198,8 @@ export class HlsSessionManager {
       return;
     }
     const inventory = this.getCachedAudioTracks?.({
-      sourceKey: session.sourceKey,
-      fileIndex: session.fileIndex
+      sourceKey: session.file.sourceKey,
+      fileIndex: session.file.fileIndex
     }) ?? [];
     if (!(this.spareSoundtracksFetched instanceof Set)) {
       this.spareSoundtracksFetched = new Set();
@@ -4245,7 +4210,7 @@ export class HlsSessionManager {
         .map((entry) => entry.fileIndex)
     );
     for (const fileIndex of wanted) {
-      const key = `${session.sourceKey}:${fileIndex}`;
+      const key = SourceFiles.keyFor(session.file.sourceKey, fileIndex);
       if (this.spareSoundtracksFetched.has(key)) {
         continue;
       }
@@ -4257,7 +4222,7 @@ export class HlsSessionManager {
       );
       // Not awaited: nothing depends on it finishing, and a failure costs only
       // that the switch pays for its own pieces, as it did before this existed.
-      Promise.resolve(this.fetchWholeFile({ sourceKey: session.sourceKey, fileIndex })).catch(
+      Promise.resolve(this.fetchWholeFile({ sourceKey: session.file.sourceKey, fileIndex })).catch(
         (error) => {
           logger.info(
             `transcode: fetching soundtrack file ${fileIndex} whole failed ` +
@@ -4430,7 +4395,7 @@ export class HlsSessionManager {
     this.#transitionRun(session, ENCODE_RUN_EVENT.SUSPEND_ORDERED);
     logger.info(
       `transcode ${session.id} encoder suspended — ${reason} ` +
-        `"${session.fileName}"`
+        `"${session.file.name}"`
     );
   }
 
@@ -4466,8 +4431,8 @@ export class HlsSessionManager {
     // the sort of pair that costs an hour of reading a field log.
     logger.info(
       continued
-        ? `transcode ${session.id} encoder resumed — ${reason} "${session.fileName}"`
-        : `transcode ${session.id} could not resume the encoder (the process is gone) — ${reason} "${session.fileName}"`
+        ? `transcode ${session.id} encoder resumed — ${reason} "${session.file.name}"`
+        : `transcode ${session.id} could not resume the encoder (the process is gone) — ${reason} "${session.file.name}"`
     );
     return continued;
   }
@@ -4575,9 +4540,9 @@ export class HlsSessionManager {
       if (!session || session.state === "disposed") {
         continue;
       }
-      wanted.set(`${session.sourceKey}:${session.fileIndex}`, {
-        sourceKey: session.sourceKey,
-        fileIndex: session.fileIndex
+      wanted.set(session.file.key, {
+        sourceKey: session.file.sourceKey,
+        fileIndex: session.file.fileIndex
       });
     }
     /** @type {Map<string, number>} */
@@ -4606,7 +4571,7 @@ export class HlsSessionManager {
         // so the figures the viewer waits on were minutes old or absent.
         if (stats?.supply) {
           for (const session of this.sessionsById.values()) {
-            if (session?.sourceKey === source.sourceKey && session.fileIndex === source.fileIndex) {
+            if (session?.file.sourceKey === source.sourceKey && session.file.fileIndex === source.fileIndex) {
               session.supplyFigures = stats.supply;
             }
           }
@@ -4628,8 +4593,8 @@ export class HlsSessionManager {
   #filesWatchedOn(sourceKey) {
     const files = new Set();
     for (const session of this.sessionsById.values()) {
-      if (session && session.state !== "disposed" && session.sourceKey === sourceKey) {
-        files.add(session.fileIndex);
+      if (session && session.state !== "disposed" && session.file.sourceKey === sourceKey) {
+        files.add(session.file.fileIndex);
       }
     }
     return Math.max(1, files.size);
@@ -4643,7 +4608,7 @@ export class HlsSessionManager {
    * @returns {number | null}
    */
   #requiredSpeedFor(sourceKey, fileIndex) {
-    return this.#requiredSpeedByKey.get(`${sourceKey}:${fileIndex}`) ?? null;
+    return this.#requiredSpeedByKey.get(SourceFiles.keyFor(sourceKey, fileIndex)) ?? null;
   }
 
   /**
@@ -4980,7 +4945,7 @@ export class HlsSessionManager {
     if (bound === "download") {
       logger.info(
         `[budget] transcode ${session.id} speed=${speed.toFixed(2)}x but download-limited ` +
-          `"${session.fileName}"; not stepping down (torrent is the bottleneck)`
+          `"${session.file.name}"; not stepping down (torrent is the bottleneck)`
       );
       session.budgetSlowSince = 0; // re-evaluate fresh; don't thrash on this
       return false;
@@ -5048,7 +5013,7 @@ export class HlsSessionManager {
       }
       logger.info(
         `[budget] transcode ${session.id} ${reasonText} at ${current}p, but nothing lower is on offer ` +
-          `for "${session.fileName}"; leaving the picture alone`
+          `for "${session.file.name}"; leaving the picture alone`
       );
       return false;
     }
@@ -5113,7 +5078,7 @@ export class HlsSessionManager {
     base.budgetLastActionAt = now;
     logger.info(
       `[budget] transcode ${base.id} asks the player to move ${playing}p → ${height}p: ${reasonText} ` +
-        `"${base.fileName}" (a change of size is a change of variant — its own init describes it)`
+        `"${base.file.name}" (a change of size is a change of variant — its own init describes it)`
     );
     return true;
   }
@@ -5306,7 +5271,7 @@ export class HlsSessionManager {
       logger.info(
         `[budget] transcode ${session.id} the link carries ${maxrateKbpsFor(wanted)}kbps and the ` +
           `smallest picture on offer (${smallest}p) is sized for ${maxrateKbpsFor(floor)}kbps; ` +
-          `capping at the floor rather than below it "${session.fileName}"`
+          `capping at the floor rather than below it "${session.file.name}"`
       );
     }
     const nominal = Math.max(wanted, floor);
@@ -5326,7 +5291,7 @@ export class HlsSessionManager {
     logger.info(
       `[budget] transcode ${session.id} viewer-link-bound ${reasonText} → capping the picture at ` +
         `${maxrateKbpsFor(nominal)}kbps peak, size unchanged at ${session.output.encodeWidth}x${session.output.encodeHeight} ` +
-        `"${session.fileName}"`
+        `"${session.file.name}"`
     );
     await this.#restartAtViewer(session);
     return true;
@@ -5346,7 +5311,7 @@ export class HlsSessionManager {
     this.#baseOf(session).budgetLastActionAt = Date.now();
     logger.info(
       `[budget] transcode ${session.id} the link has carried this picture with room to spare; ` +
-        `lifting the ${maxrateKbpsFor(lifted)}kbps cap "${session.fileName}"`
+        `lifting the ${maxrateKbpsFor(lifted)}kbps cap "${session.file.name}"`
     );
     await this.#restartAtViewer(session);
   }
@@ -5425,7 +5390,7 @@ export class HlsSessionManager {
     session.initSizeSaid = said;
     logger.warn(
       `transcode ${session.id} is about to encode ${producing.w}x${producing.h} while the init segment ` +
-        `the player holds describes ${described.width}x${described.height} "${session.fileName}" — ` +
+        `the player holds describes ${described.width}x${described.height} "${session.file.name}" — ` +
         `every fragment of this run will be decoded against parameter sets for a picture that is not ` +
         `being made. A change of size is a change of variant; nothing here should have moved it.`
     );
@@ -5447,7 +5412,7 @@ export class HlsSessionManager {
     }
     let stats;
     try {
-      stats = await this.getSourceStats(session.sourceKey, session.fileIndex);
+      stats = await this.getSourceStats(session.file.sourceKey, session.file.fileIndex);
     } catch {
       return "unknown";
     }
@@ -5667,14 +5632,14 @@ export class HlsSessionManager {
     if (interval === null) {
       logger.info(
         `transcode ${session.id} no run started at #${startIndex}: everything from there on is ` +
-        `already made or already being made "${session.fileName}"`
+        `already made or already being made "${session.file.name}"`
       );
       return;
     }
     if (interval.from !== startIndex) {
       logger.info(
         `transcode ${session.id} run moved forward from #${startIndex} to #${interval.from}: ` +
-        `what lies between is already made "${session.fileName}"`
+        `what lies between is already made "${session.file.name}"`
       );
     }
     startIndex = interval.from;
@@ -5821,7 +5786,7 @@ export class HlsSessionManager {
     logger.info(
       `transcode ${session.id} ${session.runLabel} encode-run from segment #${safeIndex} ` +
       `(+${Date.now() - restartEnteredAt}ms since the restart was asked for) ` +
-        `(${formatSeconds(startSeconds)}) "${session.fileName}"`
+        `(${formatSeconds(startSeconds)}) "${session.file.name}"`
     );
     // The four numbers a run is positioned by, said once, because their
     // disagreement is invisible everywhere else. The two tables are printed
@@ -5888,9 +5853,9 @@ export class HlsSessionManager {
     // `session.timeline.keyframeTimes`, which is likewise read again on every call so a
     // background reading that has since finished is picked up.
     const hasSidecarSound =
-      Number.isInteger(session.audioFileIndex) && session.audioFileIndex !== session.fileIndex;
+      Number.isInteger(session.audioFileIndex) && session.audioFileIndex !== session.file.fileIndex;
     const sidecarStartNow = hasSidecarSound
-      ? this.#sidecarStartTimeNow(session.sourceKey, session.audioFileIndex)
+      ? this.#sidecarStartTimeNow(session.file.sourceKey, session.audioFileIndex)
       : null;
     const audioFileStartTime = sidecarStartNow !== null
       ? sidecarStartNow
@@ -6339,7 +6304,7 @@ export class HlsSessionManager {
         if (shouldLog) {
           session.progress.lastLoggedAt = session.progress.updatedAt;
           logger.info(
-            `transcode ${session.id} "${session.fileName}" ${session.progress.percent.toFixed(1)}% ` +
+            `transcode ${session.id} "${session.file.name}" ${session.progress.percent.toFixed(1)}% ` +
               `(${formatSeconds(session.progress.processedSeconds)} / ${formatSeconds(session.progress.totalSeconds)})` +
               ` speed=${session.progress.speed || "n/a"}`
           );
@@ -6405,14 +6370,14 @@ export class HlsSessionManager {
         this.#transitionRun(session, ENCODE_RUN_EVENT.EXITED_SHORT);
         logger.error(
           `transcode ${session.id} ${session.runLabel ?? "run#?"} encode-run ended early: ` +
-          `${session.lastError} "${session.fileName}"`
+          `${session.lastError} "${session.file.name}"`
         );
         return;
       }
       if (outcome === ENCODE_EXIT.COMPLETE) {
         session.progress.updatedAt = Date.now();
         this.#transitionRun(session, ENCODE_RUN_EVENT.EXITED_COMPLETE);
-        logger.info(`transcode ${session.id} encode-run complete "${session.fileName}"`);
+        logger.info(`transcode ${session.id} encode-run complete "${session.file.name}"`);
         return;
       }
       // Runtime safety net: if a hardware encode fails, downgrade this proxy to
@@ -6896,14 +6861,14 @@ export class HlsSessionManager {
         logger.info(
           `transcode ${onScreen.id} seek to ${positionSeconds.toFixed(1)}s served by its own run ` +
           `(${own.id.slice(0, 8)}) for ${consumerId}: another viewer is watching ahead ` +
-          `"${onScreen.fileName}"`
+          `"${onScreen.file.name}"`
         );
         return this.#seekSession(own, positionSeconds);
       }
       logger.info(
         `transcode ${onScreen.id} seek to ${positionSeconds.toFixed(1)}s starting a run of its ` +
         `own for ${consumerId}: another viewer is watching ahead, and one run cannot be in two ` +
-        `places "${onScreen.fileName}"`
+        `places "${onScreen.file.name}"`
       );
       // Not awaited: this call answers the browser, and what the viewer waits
       // for afterwards is the segment, which the ordinary loading flow already
@@ -6991,11 +6956,11 @@ export class HlsSessionManager {
       return null;
     }
     return this.createOrGetSession({
-      sourceKey: base.sourceKey,
-      fileIndex: base.fileIndex,
+      sourceKey: base.file.sourceKey,
+      fileIndex: base.file.fileIndex,
       transcodeVideo: base.transcodeVideo === true,
       transcodeAudio: base.transcodeAudio === true,
-      fileName: base.fileName,
+      fileName: base.file.name,
       // The family's own claim, exactly as a quality step is held: nobody
       // outside this class learns its id, so nothing else could ever release
       // it, and it is let go when the session that asked for it ends.
@@ -7854,7 +7819,7 @@ export class HlsSessionManager {
       // that never consulted it.
       `${session.audioOnly === true ? "sound-vs-grid" : "keyframe-index"} ` +
       `${session.id.slice(0, 8)} ${session.audioOnly === true ? "sound" : "picture"} ` +
-      `${session.timeline.containerFormat || "unknown"} "${session.fileName}": ` +
+      `${session.timeline.containerFormat || "unknown"} "${session.file.name}": ` +
       `${check.disagreed} of ${check.checked} produced segments started away from the playlist, ` +
       `median ${median.toFixed(3)}s worst ${check.maxDeviationSec.toFixed(3)}s` +
       (check.firstDisagreementIndex >= 0 ? ` (first at #${check.firstDisagreementIndex})` : "") +
@@ -7994,7 +7959,7 @@ export class HlsSessionManager {
     // outlived the rung: a rung the host cannot hold went on being offered, and
     // went on passing every route guard, after the viewer had left it.
     // Everything else is fixed for the session's life.
-    const observed = this.#observedDecodeCost.get(`${owner.sourceKey}:${owner.fileIndex}`) ?? null;
+    const observed = this.#observedDecodeCost.get(owner.file.key) ?? null;
     // Every rung a live viewer has on screen. One answer was enough while a
     // picture had one viewer; two of them can be on two rungs, and withdrawing
     // either is withdrawing a stream that is playing.
@@ -8010,7 +7975,7 @@ export class HlsSessionManager {
     // the menu would keep the answer computed before either was measured — on
     // a copied picture, which is the case they exist for, the decode version
     // never moves at all, so the cache would never be recomputed.
-    const copyVersion = this.#observedCopyCost.get(`${owner.sourceKey}:${owner.fileIndex}`)?.version ?? 0;
+    const copyVersion = this.#observedCopyCost.get(owner.file.key)?.version ?? 0;
     const torrentCost = this.#observedTorrentCostPerMegabyte ?? 0;
     // The soundtrack's price is an input too, and so is how many encoders of
     // this family are running: both move the answer, and an answer cached
@@ -8053,11 +8018,11 @@ export class HlsSessionManager {
     // about the swarm would stand for the whole film, offering steps that
     // supply cannot support and passing every route guard on the way.
     const demanded = owner.supplyFigures?.requiredSpeed
-      ?? this.#requiredSpeedFor(owner.sourceKey, owner.fileIndex);
+      ?? this.#requiredSpeedFor(owner.file.sourceKey, owner.file.fileIndex);
     const movingMegabytes = this.#torrentMegabytesPerSecond(
-      owner.sourceKey,
-      owner.fileIndex,
-      this.#fileLengthByKey.get(`${owner.sourceKey}:${owner.fileIndex}`) ?? null,
+      owner.file.sourceKey,
+      owner.file.fileIndex,
+      this.#fileLengthByKey.get(owner.file.key) ?? null,
       owner.durationSeconds
     );
     const version =
@@ -8136,7 +8101,7 @@ export class HlsSessionManager {
    * @returns {number | null}
    */
   #observedDecodeCostFor(session) {
-    const entry = this.#observedDecodeCost.get(`${session.sourceKey}:${session.fileIndex}`);
+    const entry = this.#observedDecodeCost.get(session.file.key);
     return entry ? entry.costSec : null;
   }
 
@@ -8370,7 +8335,7 @@ export class HlsSessionManager {
     if (!(costSec > 0) || !Number.isFinite(costSec)) {
       return;
     }
-    const key = `${session.sourceKey}:${session.fileIndex}`;
+    const key = session.file.key;
     const known = this.#observedCopyCost.get(key);
     const readings = [...(known?.readings ?? []), costSec].slice(-DECODE_LEARNING_READINGS);
     const median = medianOf(readings);
@@ -8380,7 +8345,7 @@ export class HlsSessionManager {
     }
     this.#observedCopyCost.set(key, { costSec: median, readings, version: (known?.version ?? 0) + 1 });
     logger.info(
-      `transcode: ${session.fileName} copies at ${(1 / median).toFixed(2)}x on this host ` +
+      `transcode: ${session.file.name} copies at ${(1 / median).toFixed(2)}x on this host ` +
         `(median of ${readings.length}, latest ${speed.toFixed(2)}x)`
     );
   }
@@ -8421,7 +8386,7 @@ export class HlsSessionManager {
     }
     this.#observedAudioCost.set(key, { costSec: median, readings, version: (known?.version ?? 0) + 1 });
     logger.info(
-      `transcode: ${session.fileName} encodes audio track ${session.audioTrackIndex ?? 0} at ` +
+      `transcode: ${session.file.name} encodes audio track ${session.audioTrackIndex ?? 0} at ` +
         `${(1 / median).toFixed(2)}x on this host (median of ${readings.length}, latest ${speed.toFixed(2)}x)`
     );
   }
@@ -8431,7 +8396,7 @@ export class HlsSessionManager {
    * @returns {string}
    */
   #audioCostKey(session) {
-    return `${session.sourceKey}:${session.fileIndex}:${session.audioTrackIndex ?? 0}`;
+    return `${session.file.key}:${session.audioTrackIndex ?? 0}`;
   }
 
   #learnDecodeCost(session, speed) {
@@ -8471,7 +8436,7 @@ export class HlsSessionManager {
       // decoding is free, which is a claim this reading cannot support.
       return;
     }
-    const key = `${session.sourceKey}:${session.fileIndex}`;
+    const key = session.file.key;
     const known = this.#observedDecodeCost.get(key);
     const readings = [...(known?.readings ?? []), decodeCostSec].slice(-DECODE_LEARNING_READINGS);
     const costSec = medianOf(readings);
@@ -8485,7 +8450,7 @@ export class HlsSessionManager {
     }
     this.#observedDecodeCost.set(key, { costSec, readings, version: (known?.version ?? 0) + 1 });
     logger.info(
-      `transcode: ${session.fileName} decodes at ${(1 / costSec).toFixed(2)}x on this host ` +
+      `transcode: ${session.file.name} decodes at ${(1 / costSec).toFixed(2)}x on this host ` +
         `(median of ${readings.length}, latest ${(1 / decodeCostSec).toFixed(2)}x from ${height}p ` +
         `at ${speed.toFixed(2)}x, preset ${session.output.softwarePreset})`
     );
@@ -8663,7 +8628,7 @@ export class HlsSessionManager {
         continue;
       }
       if (member.transcodeVideo !== true) {
-        const copy = this.#observedCopyCost.get(`${member.sourceKey}:${member.fileIndex}`);
+        const copy = this.#observedCopyCost.get(member.file.key);
         if (!copy || !(copy.costSec > 0)) {
           return null;
         }
@@ -8760,7 +8725,7 @@ export class HlsSessionManager {
         continue;
       }
       if (member.transcodeVideo !== true) {
-        const observed = this.#observedCopyCost.get(`${member.sourceKey}:${member.fileIndex}`);
+        const observed = this.#observedCopyCost.get(member.file.key);
         cost += observed && observed.costSec > 0 ? observed.costSec : 0;
         continue;
       }
@@ -8779,9 +8744,9 @@ export class HlsSessionManager {
     // measurements do not contain each other.
     const perMegabyte = this.#observedTorrentCostPerMegabyte;
     const megabytesPerSecond = this.#torrentMegabytesPerSecond(
-      session.sourceKey,
-      session.fileIndex,
-      this.#fileLengthByKey.get(`${session.sourceKey}:${session.fileIndex}`) ?? null,
+      session.file.sourceKey,
+      session.file.fileIndex,
+      this.#fileLengthByKey.get(session.file.key) ?? null,
       session.durationSeconds
     );
     if (perMegabyte !== null && megabytesPerSecond !== null) {
@@ -9423,11 +9388,11 @@ export class HlsSessionManager {
       return pending;
     }
     const creation = this.createOrGetSession({
-      sourceKey: base.sourceKey,
-      fileIndex: base.fileIndex,
+      sourceKey: base.file.sourceKey,
+      fileIndex: base.file.fileIndex,
       transcodeVideo: true,
       transcodeAudio: base.transcodeAudio,
-      fileName: base.fileName,
+      fileName: base.file.name,
       // The family's own claim on it. Sessions are already shared between
       // consumers and disposed when the last one leaves, and a variant is
       // shareable in exactly the same way — two viewers on the same rung of the
@@ -9602,7 +9567,7 @@ export class HlsSessionManager {
       logger.info(
         `transcode ${base.id.slice(0, 8)} the ${askedHeight}p rung encodes at ${produced}p on this ` +
           `machine, which ${other.id.slice(0, 8)} is already producing — serving it from there ` +
-          `instead of starting a second encoder "${base.fileName}"`
+          `instead of starting a second encoder "${base.file.name}"`
       );
       return other;
     }
@@ -10209,13 +10174,13 @@ export class HlsSessionManager {
       return existing;
     }
     const rendition = await this.createOrGetSession({
-      sourceKey: base.sourceKey,
-      fileIndex: base.fileIndex,
+      sourceKey: base.file.sourceKey,
+      fileIndex: base.file.fileIndex,
       // No picture at all: the video flag says what to do with a video stream
       // this output does not carry.
       transcodeVideo: false,
       transcodeAudio,
-      fileName: base.fileName,
+      fileName: base.file.name,
       consumerId: variantConsumerId(base.id),
       audioTrackIndex: trackIndex,
       audioOnly: true,
@@ -10263,7 +10228,7 @@ export class HlsSessionManager {
       // what nobody is holding — which is how a film being watched was deleted
       // on 2026-08-06.
       acquireSource: () => base.acquireSource?.(
-        this.#resolveAudioSource(base.sourceKey, base.fileIndex, trackIndex).fileIndex
+        this.#resolveAudioSource(base.file.sourceKey, base.file.fileIndex, trackIndex).fileIndex
       )
     });
     if (!rendition) {
@@ -10373,7 +10338,7 @@ export class HlsSessionManager {
     if (!(this.sidecarStartTimes instanceof Map)) {
       this.sidecarStartTimes = new Map();
     }
-    const held = this.sidecarStartTimes.get(`${sourceKey}:${fileIndex}`);
+    const held = this.sidecarStartTimes.get(SourceFiles.keyFor(sourceKey, fileIndex));
     return Number.isFinite(held) ? held : null;
   }
 
@@ -10413,7 +10378,7 @@ export class HlsSessionManager {
     if (!(this.sidecarStartTimeReads instanceof Set)) {
       this.sidecarStartTimeReads = new Set();
     }
-    const key = `${sourceKey}:${fileIndex}`;
+    const key = SourceFiles.keyFor(sourceKey, fileIndex);
     if (this.sidecarStartTimes.has(key) || this.sidecarStartTimeReads.has(key)) {
       return;
     }
@@ -10457,12 +10422,12 @@ export class HlsSessionManager {
    */
   #audioRenditionsOf(session, chosenTrack) {
     const tracks = this.getCachedAudioTracks?.({
-      sourceKey: session.sourceKey,
+      sourceKey: session.file.sourceKey,
       // The PICTURE's file, which is what `fileIndex` is on every session of a
       // family — a rendition is created with its base's, and only its
       // `audioFileIndex` points at the file its sound comes from. The inventory
       // is keyed on the picture and spans the soundtracks beside it.
-      fileIndex: session.fileIndex
+      fileIndex: session.file.fileIndex
     }) ?? [];
     if (!Array.isArray(tracks) || tracks.length === 0) {
       return [];
@@ -11553,6 +11518,13 @@ export class HlsSessionManager {
       }
     }
     this.outputs.forgetUnused(outputsInUse);
+    const filesInUse = new Set();
+    for (const session of this.sessionsById.values()) {
+      if (session.file) {
+        filesInUse.add(session.file);
+      }
+    }
+    this.sourceFiles.forgetUnused(filesInUse);
     // The segments outlive every session on them, so what they cost is decided
     // here rather than by anybody's departure: how long ago each output was
     // last read, and how much room the disk has for the lot.

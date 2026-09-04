@@ -27,7 +27,8 @@
 				"services/tracks/**",
 				"services/output/**",
 				"services/viewer/**",
-				"services/encode/**"
+				"services/encode/**",
+				"services/source/**"
 			],
 			"linter": {
 				"rules": {

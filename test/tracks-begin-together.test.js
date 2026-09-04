@@ -44,11 +44,12 @@ function familyAtBoundaryTwo() {
     state: "ready",
     timeline: new Timeline({ boundaries: boundaries, cutGrid: "uniform" }),
     file: new SourceFile({ sourceKey: "source-1", fileIndex: 0, name: "film.mkv" }),
-    audioRenditionSessions: new Map([[1, "sound"]]),
     runs: new Set(),
     pendingRun: null,
     indexCheck: null
   };
+  // The soundtrack of that picture: the same file, published on its own. Found
+  // by what it is, since no list of ids names it any more.
   const sound = {
     id: "sound",
     state: "ready",

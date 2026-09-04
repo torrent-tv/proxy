@@ -6347,11 +6347,12 @@ export class HlsSessionManager {
     // has: with two viewers, moving the other one's audio to a position they
     // are not at would take their sound away and produce for nobody.
     const listening = this.#audioChoiceOf(named, consumerId);
-    const renditionId = named.audioRenditionSessions?.get(
-      audioRenditionKey(listening.trackIndex, listening.transcode)
+    const rendition = this.#renditionsOf(named).find(
+      (other) =>
+        (other.audioTrackIndex ?? 0) === listening.trackIndex &&
+        (other.transcodeAudio === true) === listening.transcode
     );
-    const rendition = renditionId ? this.sessionsById.get(renditionId) : null;
-    if (rendition && rendition.state !== "disposed") {
+    if (rendition) {
       rendition.lastAccessedAt = Date.now();
       this.#seekSession(rendition, positionSeconds);
     }
@@ -7142,16 +7143,98 @@ export class HlsSessionManager {
    * @returns {HlsSession}
    */
   #baseOf(session) {
-    if (!(session?.variantBases instanceof Set)) {
+    if (!session || session.isStep !== true) {
       return session;
     }
-    for (const baseId of session.variantBases) {
-      const base = this.sessionsById.get(baseId);
-      if (base && base !== session && base.state !== "disposed") {
-        return base;
+    // A step of a picture: the picture is the live session of the same file
+    // that is not a step of one. How a session came to be is a fact about it,
+    // not a link to another session — so a step whose picture has gone answers
+    // for itself rather than following a dead reference, and nothing has to be
+    // cleaned from the other side when one of them ends.
+    for (const other of this.#stepsOf(session)) {
+      if (other.isStep !== true) {
+        return other;
       }
     }
     return session;
+  }
+
+  /**
+   * This viewer is watching this output.
+   *
+   * One of the two sets that replaced a film object: the viewer holds the
+   * outputs it is watching, and the output holds its viewers. Between them they
+   * answer every question the three link fields were kept for — how many people
+   * need this soundtrack, what belongs to this viewer's playback, whether an
+   * encoder has anybody left — and unlike a chain of links they answer it
+   * without one part of a film deciding another part's lifetime.
+   *
+   * @param {HlsSession} output
+   * @param {string} consumerId
+   * @param {HlsSession} [instead] - An output this viewer has just left.
+   * @returns {void}
+   */
+  #viewerWatches(output, consumerId, instead = null) {
+    if (!output || !consumerId) {
+      return;
+    }
+    const viewer = viewerOf(output, consumerId);
+    viewer.outputs.add(output.id);
+    if (instead && instead !== output) {
+      viewerOf(instead, consumerId).outputs.delete(instead.id);
+      viewersOf(instead).delete(consumerId);
+    }
+  }
+
+  /**
+   * The soundtracks published separately for this picture, live ones only.
+   *
+   * Found by what they ARE — audio-only outputs of the same file, cut on the
+   * same grid — and not by a list of ids the picture keeps. A list of ids is a
+   * link between sessions: it ties their lifetimes together, it goes stale when
+   * one of them is disposed, and it has to be cleaned from the other side. What
+   * an output is is enough to find it, which is the rule `OutputSpec` exists
+   * for.
+   *
+   * @param {HlsSession} base
+   * @returns {HlsSession[]}
+   */
+  #renditionsOf(base) {
+    const found = [];
+    for (const session of this.sessionsById.values()) {
+      if (
+        session === base ||
+        session.state === "disposed" ||
+        session.audioOnly !== true ||
+        session.file?.key !== base.file?.key
+      ) {
+        continue;
+      }
+      found.push(session);
+    }
+    return found;
+  }
+
+  /**
+   * The quality steps of this picture, live ones only, found the same way.
+   *
+   * @param {HlsSession} base
+   * @returns {HlsSession[]}
+   */
+  #stepsOf(base) {
+    const found = [];
+    for (const session of this.sessionsById.values()) {
+      if (
+        session === base ||
+        session.state === "disposed" ||
+        session.audioOnly === true ||
+        session.file?.key !== base.file?.key
+      ) {
+        continue;
+      }
+      found.push(session);
+    }
+    return found;
   }
 
   /**
@@ -7161,38 +7244,30 @@ export class HlsSessionManager {
    * @returns {HlsSession[]}
    */
   #familyOf(session) {
-    const bases = session.variantBases instanceof Set
-      ? [...session.variantBases]
-      : [];
-    const roots = bases.length > 0 ? bases : [session.id];
     const family = new Set([session]);
-    for (const rootId of roots) {
-      const root = this.sessionsById.get(rootId);
-      if (!root) {
-        continue;
-      }
-      family.add(root);
-      if (root.variants instanceof Map) {
-        for (const variantId of root.variants.values()) {
-          const variant = this.sessionsById.get(variantId);
-          if (variant) {
-            family.add(variant);
-          }
+    // The outputs the viewers of this session are watching, which for any one
+    // of them is the picture, the quality step on their screen and the
+    // soundtrack they chose. Two sets answer it — a viewer holds its outputs,
+    // an output holds its viewers — where three link fields used to stand in
+    // for a film object that cannot exist: the parts of a film are born at
+    // different times, die at different times, and are addressed separately.
+    for (const viewer of viewersOf(session).values()) {
+      for (const outputId of viewer.outputs) {
+        const output = this.sessionsById.get(outputId);
+        if (output && output.state !== "disposed") {
+          family.add(output);
         }
       }
-      // The soundtracks published separately. They are encoders of this family
-      // exactly as the quality steps are — one runs for as long as the picture
-      // does — and they were reachable only through `audioRenditionSessions`,
-      // which nothing here walked. So a family never contained one, and every
-      // sum taken over the family priced the soundtrack at nothing.
-      if (root.audioRenditionSessions instanceof Map) {
-        for (const renditionId of root.audioRenditionSessions.values()) {
-          const rendition = this.sessionsById.get(renditionId);
-          if (rendition) {
-            family.add(rendition);
-          }
-        }
-      }
+    }
+    // What this session has made for its viewers and nobody has watched yet: a
+    // step being warmed for a switch, a soundtrack being prepared. They are
+    // encoders of this family exactly as the rest are, and pricing the family
+    // without them prices a machine as emptier than it is.
+    for (const step of this.#stepsOf(session)) {
+      family.add(step);
+    }
+    for (const rendition of this.#renditionsOf(session)) {
+      family.add(rendition);
     }
     return [...family];
   }
@@ -7391,7 +7466,7 @@ export class HlsSessionManager {
     // the viewer could not go back. Only the base knows what the family can do
     // with the source.
     // Answered ON the base, never recursively: the family is one level deep by
-    // construction, and a `variantBases` cycle would otherwise blow the stack on
+    // construction, and a cycle between a picture and its steps would otherwise blow the stack on
     // the path that serves every playlist, init and segment.
     const owner = this.#baseOf(session);
     // Settled once per session, and re-settled when this file's own decode cost
@@ -8807,15 +8882,19 @@ export class HlsSessionManager {
     if (height === this.variantHeightOf(base)) {
       return base;
     }
-    base.variants ??= new Map();
-    const existingId = base.variants.get(height);
-    if (existingId) {
-      const existing = this.sessionsById.get(existingId);
-      if (existing && existing.state !== "disposed") {
+    // What this height was answered with before, if it has been asked. Kept as
+    // a height and not as a session id: the answer must not move — a player
+    // holding an init for one size cannot be sent another — and a number cannot
+    // go stale, so nothing has to be cleaned from the other side when a session
+    // ends.
+    const answeredWith = base.file.stepHeights.get(height);
+    if (answeredWith) {
+      const serving = this.#stepsOf(base).find((other) => this.#producedHeightOf(other) === answeredWith);
+      const existing = this.#producedHeightOf(base) === answeredWith ? base : serving;
+      if (existing) {
         existing.lastAccessedAt = Date.now();
         return existing;
       }
-      base.variants.delete(height);
     }
     // hls.js asks for a new level's playlist, its init and its first segments
     // within the same moment. Without this every one of them would build its
@@ -8906,12 +8985,15 @@ export class HlsSessionManager {
         }
         const incumbent = await this.#adoptIfAlreadyProduced(base, height, variant);
         if (incumbent) {
-          base.variants.set(height, incumbent.id);
+          base.file.stepHeights.set(height, this.#producedHeightOf(incumbent));
           return incumbent;
         }
         variant.variantHeight = height;
-        (variant.variantBases ??= new Set()).add(base.id);
-        base.variants.set(height, variant.id);
+        // How it came to be: a step of a picture, not a picture a browser
+        // opened. Read where a step needs the facts of the file rather than of
+        // its own encode.
+        variant.isStep = true;
+        base.file.stepHeights.set(height, this.#producedHeightOf(variant));
         return variant;
       })
       .finally(() => {
@@ -8944,7 +9026,7 @@ export class HlsSessionManager {
    * one — so that a second request for it does not start a second encoder.
    *
    * WHY THIS EXISTS, AND WHY IT COMPARES WHAT IS PRODUCED RATHER THAN WHAT WAS
-   * ASKED FOR. `base.variants` is keyed on the height the browser requested,
+   * ASKED FOR. The file's record is keyed on the height the browser requested,
    * while what the session encodes is decided afterwards, by the clamp in
    * `createOrGetSession`: a manual pick starts at the top of the ladder THIS
    * host can sustain (`startAtLadderTop`), which on a weak machine is well
@@ -8982,8 +9064,7 @@ export class HlsSessionManager {
     const seen = new Set([candidate.id]);
     // The base belongs in this scan: it is a rung like any other, and when it
     // is itself a re-encode the clamp can land a variant right on top of it.
-    for (const other of [base, ...[...base.variants.values()]
-      .map((id) => this.sessionsById.get(id))]) {
+    for (const other of [base, ...this.#stepsOf(base)]) {
       if (!other || seen.has(other.id) || other.state === "disposed") {
         continue;
       }
@@ -9143,17 +9224,17 @@ export class HlsSessionManager {
     if (stillWarming && stillWarming !== rendition.id) {
       const abandoned = this.sessionsById.get(stillWarming);
       const wanted = this.#liveAudioRenditionKeys(base);
-      const wantedIds = new Set();
-      for (const [renditionKey, sessionId] of base.audioRenditionSessions ?? []) {
-        if (wanted.has(renditionKey)) {
-          wantedIds.add(sessionId);
-        }
-      }
+      const wantedIds = new Set(
+        this.#renditionsOf(base)
+          .filter((other) => wanted.has(audioRenditionKey(other.audioTrackIndex ?? 0, other.transcodeAudio === true)))
+          .map((other) => other.id)
+      );
       if (abandoned && !wantedIds.has(abandoned.id)) {
         this.#stopEncodeRun(abandoned, "prepared for a track change the viewer did not make");
       }
     }
     viewerOf(base, consumerId).warmingAudioId = rendition.id;
+    this.#viewerWatches(rendition, consumerId);
     // Pointed at the position the switch will land on: an existing track is
     // parked wherever the viewer left it.
     this.#seekSession(rendition, positionSeconds);
@@ -9259,7 +9340,15 @@ export class HlsSessionManager {
     }
     const position = this.#variantStartSeconds(base, wantedIndex, consumerId);
     base.activeVariantId = variant.id;
+    const previousId = viewerOf(base, consumerId).activeVariantId;
     viewerOf(base, consumerId).activeVariantId = variant.id;
+    // The step is an output of this viewer's now, and the one they left is not.
+    this.#viewerWatches(base, consumerId);
+    this.#viewerWatches(
+      variant,
+      consumerId,
+      previousId && previousId !== variant.id ? this.sessionsById.get(previousId) : null
+    );
     logger.info(
       `transcode ${base.id} variant now ${this.variantHeightOf(variant)}p ` +
       `(was ${this.variantHeightOf(previous)}p) at ${position.toFixed(1)}s` +
@@ -9491,17 +9580,20 @@ export class HlsSessionManager {
     // default rendition when nobody has said anything else.
     base.activeAudioTrackIndex = trackIndex;
     const wanted = this.#liveAudioRenditionKeys(base);
-    for (const [renditionKey, sessionId] of base.audioRenditionSessions ?? []) {
-      if (wanted.has(renditionKey)) {
+    for (const other of this.#renditionsOf(base)) {
+      if (wanted.has(audioRenditionKey(other.audioTrackIndex ?? 0, other.transcodeAudio === true))) {
         continue;
       }
-      const other = this.sessionsById.get(sessionId);
-      if (!other || other.state === "disposed" || liveRunsOf(other).length === 0) {
+      if (liveRunsOf(other).length === 0) {
         continue;
       }
       // Requests held on it are for segments nobody will produce now, and the
       // player stopped waiting for them the moment it changed track.
       other.waitEpoch = (other.waitEpoch ?? 0) + 1;
+      // Nobody is watching this output any more, and that is what the two sets
+      // say: this viewer's outputs no longer hold it, and it holds no viewers.
+      viewerOf(base, consumerId).outputs.delete(other.id);
+      viewersOf(other).delete(consumerId);
       this.#stopEncodeRun(other, `no viewer is listening to audio track ${other.audioTrackIndex ?? "?"}`);
     }
   }
@@ -9601,12 +9693,18 @@ export class HlsSessionManager {
    */
   async #resolveAudioRenditionSession(base, trackIndex, consumerId = "") {
     const transcodeAudio = this.#audioChoiceOf(base, consumerId).transcode;
-    const renditionKey = audioRenditionKey(trackIndex, transcodeAudio);
-    const existingId = base.audioRenditionSessions?.get(renditionKey);
-    const existing = existingId ? this.sessionsById.get(existingId) : null;
-    if (existing && existing.state !== "disposed") {
-      existing.lastAccessedAt = Date.now();
-      return existing;
+    // Found by what it IS: a soundtrack of this file, this track, produced this
+    // way. That is what a map from a rendition key to a session id said, at the
+    // price of a link between two sessions' lifetimes — one that had to be
+    // cleaned from the other side when either ended.
+    const already = this.#renditionsOf(base).find(
+      (other) =>
+        (other.audioTrackIndex ?? 0) === trackIndex &&
+        (other.transcodeAudio === true) === transcodeAudio
+    );
+    if (already) {
+      already.lastAccessedAt = Date.now();
+      return already;
     }
     const rendition = await this.createOrGetSession({
       sourceKey: base.file.sourceKey,
@@ -9664,14 +9762,7 @@ export class HlsSessionManager {
         this.#resolveAudioSource(base.file.sourceKey, base.file.fileIndex, trackIndex).fileIndex
       )
     });
-    if (!rendition) {
-      return null;
-    }
-    if (!(base.audioRenditionSessions instanceof Map)) {
-      base.audioRenditionSessions = new Map();
-    }
-    base.audioRenditionSessions.set(renditionKey, rendition.id);
-    return rendition;
+    return rendition ?? null;
   }
 
   /**
@@ -11053,68 +11144,31 @@ export class HlsSessionManager {
     this.sessionIdBySource.delete(session.sourceMapKey);
     this.#logIndexAccuracy(session);
 
-    // A variant serves this session's viewer and nobody learns its id but us,
-    // so it would otherwise encode and occupy disk for no one until its idle
-    // timer noticed. Released rather than disposed: two families can land on
-    // one variant (same file, same rung, same neighbourhood of the timeline),
-    // and the existing consumer count is what already knows whether anyone else
-    // is still watching it.
-    if (session.variants instanceof Map) {
-      const variantIds = [...session.variants.values()];
-      session.variants.clear();
-      for (const variantId of variantIds) {
-        await this.releaseSessionConsumer(
-          variantId,
-          variantConsumerId(sessionId),
-          "the session it was a variant of ended"
-        );
+    // The chain that used to close here is gone. A picture session releasing a
+    // consumer it held on every quality step and every soundtrack was a film
+    // object in disguise: one part of a film deciding when another part dies,
+    // which is exactly what the criterion refuses — the parts are born at
+    // different times, die at different times and are addressed separately.
+    //
+    // What replaces it is the two sets. A step or a soundtrack nobody is
+    // watching has no viewers, so the plan stops its encoders on the next pass
+    // — that rule is `EncodePlan`'s and needs no list here — and what it made
+    // stays servable until the disk budget says otherwise, which is what a
+    // viewer coming back a minute later depends on.
+    // A step that has gone must stop being answered with. Nothing has to reach
+    // back into another session's map to arrange that: what the file records is
+    // a HEIGHT, and the lookup finds no live session producing it, so the next
+    // request builds one. What does have to be forgotten is what a VIEWER was
+    // watching, because their next request would resolve a session that no
+    // longer exists.
+    for (const other of this.#stepsOf(session)) {
+      if (other.activeVariantId === session.id) {
+        other.activeVariantId = other.id;
       }
-    }
-    // The audio renditions of this session, for the same reason and in the same
-    // way. Nobody outside this class knows their ids — the browser holds one id
-    // for the whole file — so nothing else could ever release them, and each
-    // holds a consumer, a claim on the torrent, a directory and a live encoder.
-    if (session.audioRenditionSessions instanceof Map) {
-      const renditionIds = [...session.audioRenditionSessions.values()];
-      session.audioRenditionSessions.clear();
-      for (const renditionId of renditionIds) {
-        await this.releaseSessionConsumer(
-          renditionId,
-          variantConsumerId(sessionId),
-          "the session its audio belonged to ended"
-        );
-      }
-    }
-    // Disposed on its own (idle, or with its last family): it must stop being
-    // offered, or the next request for that height would be answered with a
-    // session that no longer exists.
-    if (session.variantBases instanceof Set) {
-      for (const baseId of session.variantBases) {
-        const base = this.sessionsById.get(baseId);
-        if (!base) {
-          continue;
-        }
-        // EVERY key naming it, not just the height it was created under. One
-        // session can be filed under several heights: the clamp lands different
-        // requests on one picture, and each of those requests keeps its own key
-        // pointing at the single session that serves it.
-        if (base.variants instanceof Map) {
-          for (const [height, id] of [...base.variants]) {
-            if (id === session.id) {
-              base.variants.delete(height);
-            }
-          }
-        }
-        if (base.activeVariantId === session.id) {
-          base.activeVariantId = base.id;
-        }
-        // And every viewer who was watching it goes back to the picture the
-        // family is named by, or their next request would resolve a session
-        // that no longer exists.
-        for (const [, viewer] of base.viewers ?? []) {
-          if (viewer.activeVariantId === session.id) {
-            viewer.activeVariantId = null;
-          }
+      for (const viewer of viewersOf(other).values()) {
+        viewer.outputs.delete(session.id);
+        if (viewer.activeVariantId === session.id) {
+          viewer.activeVariantId = null;
         }
       }
     }

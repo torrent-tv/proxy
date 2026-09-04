@@ -15,6 +15,7 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
+import { SourceFile } from "../services/source/SourceFile.js";
 import { Timeline } from "../services/output/Timeline.js";
 import { newIndexCheck, noteIndexDeviation } from "../services/hls-session-manager.js";
 
@@ -76,7 +77,7 @@ test("a boundary the index got wrong is replaced by the time the file really has
     state: "ready",
     transcodeVideo: false,
     timeline: new Timeline({ boundaries: boundaries, cutGrid: "uniform" }),
-    variants: new Map(),
+    file: new SourceFile({ sourceKey: "source-1", fileIndex: 0, name: "film.mkv" }),
     segmentFormat: { segmentFileName: (index) => `segment-${index}.mp4` }
   };
   const rung = {
@@ -85,9 +86,12 @@ test("a boundary the index got wrong is replaced by the time the file really has
     state: "ready",
     transcodeVideo: true,
     timeline: new Timeline({ boundaries: boundaries, cutGrid: "uniform" }),
-    variantBases: new Set([base.id])
+    // A step of the picture: the same file, and made as a step.
+    file: base.file,
+    variantHeight: 540,
+    isStep: true
   };
-  base.variants.set(540, rung.id);
+  base.file.stepHeights.set(540, 540);
   manager.sessionsById.set(base.id, base);
   manager.sessionsById.set(rung.id, rung);
 

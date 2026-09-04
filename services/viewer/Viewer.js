@@ -54,6 +54,20 @@ export class Viewer {
     this.head = null;
     /** What their link was last measured to carry. @type {object | null} */
     this.netReport = null;
+    /**
+     * Every output this viewer is watching, by session id: the picture, the
+     * quality step on their screen, the soundtrack they chose.
+     *
+     * This is one of the two sets that replaced a film object. There is no
+     * "film" anywhere in this proxy — its parts are born at different times, die
+     * at different times and are addressed separately — and the link fields that
+     * stood in for one could not say how many people were listening to a
+     * soundtrack. A viewer holds its outputs, an output holds its viewers, and
+     * every question about who needs what is answered from those two.
+     *
+     * @type {Set<string>}
+     */
+    this.outputs = new Set();
   }
 
   /**

@@ -47,22 +47,23 @@ function orchestrator({ maxRuns = 2 } = {}) {
     restartCostSec: 0.12,
     now: () => 1000,
     logger: { info: (line) => lines.push(line), warn: (line) => lines.push(line) },
-    makeRun: ({ address, runId, from, to }) => {
+    makeRun: ({ address, from, to }) => {
       const process_ = new FakeProcess();
-      processes.set(runId, process_);
-      return new EncodeRun({
-        id: runId,
+      const run = new EncodeRun({
         address,
         encoder: new SoftwareEncoder(),
         from,
         to,
-        dirPath: `/tmp/${runId}`,
         buildArgs: () => ["-i", "in", "out"],
         spawn: () => process_,
         logger: { info: (line) => lines.push(line), warn: (line) => lines.push(line) },
         now: () => 1000,
         onEnded: (ended) => made.noteEnded(ended)
       });
+      // Named by the run itself, so a test that has to reach its process asks
+      // for it by the name the product uses.
+      processes.set(run.id, process_);
+      return run;
     }
   });
   made.setSegmentCount(PICTURE, 1000);

@@ -38,15 +38,12 @@ export class EncodeOrchestrator {
   /** How runs have ended, by cause. @type {Map<string, number>} */
   #endings = new Map();
 
-  /** @type {number} */
-  #runSerial = 0;
-
   /**
    * @param {object} params
    * @param {(address: string) => number} params.maxRunsFor - How many encoders
    *   this machine can afford on one output. The same arithmetic that decides
    *   the quality offer; measured per host, never chosen here.
-   * @param {(params: { address: string, runId: string, from: number, to: number }) =>
+   * @param {(params: { address: string, from: number, to: number }) =>
    *   import("../encode/EncodeRun.js").EncodeRun} params.makeRun - Build a run
    *   for a stretch. What to read, what to map and how to cut belong to whoever
    *   knows the source.
@@ -244,9 +241,9 @@ export class EncodeOrchestrator {
    * @param {string} because
    */
   #start(address, from, to, because) {
-    this.#runSerial += 1;
-    const runId = `${this.#runSerial}`;
-    const run = this.makeRun({ address, runId, from, to });
+    // The run names itself: identity is a property of the thing, and two
+    // places minting names is how one stops being unique.
+    const run = this.makeRun({ address, from, to });
     if (!run) {
       // Not necessarily a failure: making an encoder can take a probe and a
       // keyframe read, and this call is arithmetic that must not wait on

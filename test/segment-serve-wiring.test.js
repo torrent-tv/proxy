@@ -265,37 +265,26 @@ test("a run's FIRST segment is served once the encoder has passed it, without wa
   );
 });
 
-test("a segment is found in the run directory that produced it, newest run first", async (t) => {
-  const { manager, dirPath } = await managerWithReadySegment();
+test("a segment an earlier run made is served by whatever run is going now", async (t) => {
+  const { manager, session, dirPath } = await managerWithReadySegment();
   t.after(async () => {
     await manager.disposeAll();
     await rm(dirPath, { recursive: true, force: true });
   });
-  // Runs write into a directory each — that is what lets a restart begin
-  // without waiting for its predecessor to die, which measured 0.7-1.3 s of
-  // every seek. A later run's answer supersedes an earlier one's, because the
-  // older file may be the truncated output of a run that was killed mid-write.
-  const { mkdir } = await import("node:fs/promises");
-  const piece = selfContainedPiece(SEGMENT_START_SECONDS);
-  await mkdir(path.join(dirPath, "run-1"), { recursive: true });
-  await mkdir(path.join(dirPath, "run-2"), { recursive: true });
-  await writeFile(path.join(dirPath, "run-1", "segment-00000.mp4"), Buffer.alloc(8));
-  await writeFile(path.join(dirPath, "run-2", "segment-00000.mp4"), piece);
-  await writeFile(path.join(dirPath, "run-2", "segment-00001.mp4"), piece);
-  await rm(path.join(dirPath, "segment-00000.mp4"));
-  await rm(path.join(dirPath, "segment-00001.mp4"));
+  // Every run of an output writes into that output's own directory — there is
+  // one, and runs are kept apart by their stretches instead. So a viewer who
+  // seeks back is served what an earlier run made, with no restart and no
+  // search: the run going now began at #40 and #0 is simply there.
+  startRunOn(session, { from: 40, usesExplicitCuts: true });
 
   const result = await manager.getFileStream(SESSION_ID, "segment-00000.mp4", { requestSeq: 1 });
 
-  assert.equal(result.kind, "file", "a segment produced by a run must be found in that run's directory");
+  assert.equal(result.kind, "file", "what any run of this output made is what this output holds");
   const chunks = [];
   for await (const chunk of result.stream) {
     chunks.push(chunk);
   }
-  assert.ok(
-    Buffer.concat(chunks).length > 8,
-    "the newest run's output must win — the older file here is the 8-byte stub a killed run leaves"
-  );
+  assert.ok(Buffer.concat(chunks).length > 0);
 });
 
 test("serving a run's own segment moves the run out of STARTING", async (t) => {
@@ -317,23 +306,18 @@ test("serving a run's own segment moves the run out of STARTING", async (t) => {
   assert.equal(session.run.state, ENCODE_RUN_STATE.PRODUCING);
 });
 
-test("a segment left by an earlier run does not claim the new run has produced", async (t) => {
+test("a segment behind a run's own start does not claim that run has produced", async (t) => {
   const { manager, session, dirPath } = await managerWithReadySegment();
   t.after(async () => {
     await manager.disposeAll();
     await rm(dirPath, { recursive: true, force: true });
   });
-  // A seek places the new run in a directory of its own; the previous run's
-  // segments stay servable and are served from theirs. They say nothing about
-  // what the run now starting has done — and a run believed to be producing is
-  // one the look-ahead may suspend and the seek path may wave through as
-  // "already covered by the running encode".
-  //
-  // Deliberately a segment ABOVE the new run's start index, because that is the
-  // case an index comparison gets wrong: after a backward seek the old run's
-  // output sits ahead of the new run's beginning.
-  const run = startRunOn(session, { from: 0, producing: false, usesExplicitCuts: true });
-  run.dirPath = path.join(dirPath, "run-7");
+  // What moves a run out of starting is ITS OWN first segment. An earlier run's
+  // output sits in the same directory, and after a backward seek some of it
+  // lies ahead of the new run's beginning — so the question cannot be asked of
+  // the number alone, and a run believed to be producing is one the look-ahead
+  // may suspend and the seek path may wave through as "already covered".
+  startRunOn(session, { from: 5, producing: false, usesExplicitCuts: true });
 
   await manager.getFileStream(SESSION_ID, "segment-00000.mp4", { requestSeq: 1 });
 

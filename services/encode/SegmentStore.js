@@ -3,7 +3,7 @@
  * the segments ARE rather than by who made them.
  *
  * Until now a segment lived under the id of the session whose encoder wrote it
- * — `os.tmpdir()/torrent-tv-hls/<uuid>/run-N/segment-00042.mp4` — and the index
+ * — under that session's own id, in a directory of that run's own — and the index
  * over it was built per session, so a segment was visible only inside the
  * session that made it. Two viewers of one film got two sessions with
  * byte-identical output and neither could see the other's work (measured

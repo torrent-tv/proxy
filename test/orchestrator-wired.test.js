@@ -63,7 +63,7 @@ function sessionOn({ id, dirPath, encodeStartIndex = 0, runEndIndex = -1, speed 
     lastAccessedAt: Date.now()
   };
   if (running) {
-    const run = startRunOn(session, { id, from: encodeStartIndex, to: runEndIndex });
+    const run = startRunOn(session, { from: encodeStartIndex, to: runEndIndex });
     // A speed is a reading taken FROM a run, so it names the run it came from.
     session.recentSpeed = speed > 0 ? { speed, at: Date.now(), run } : null;
     run.noteSpeed(speed);
@@ -84,7 +84,7 @@ test("a session is handed to the plan as the run it is", (t) => {
 
   const runs = manager.encodeOrchestrator.runsOn(KEY);
   assert.equal(runs.length, 1, "the session the browser already has is a run like any other");
-  assert.equal(runs[0].id, "one");
+  assert.equal(runs[0], session.run, "and it is the run the session actually holds");
   assert.equal(runs[0].from, 10);
   assert.equal(runs[0].to, 40);
 });

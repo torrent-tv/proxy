@@ -288,7 +288,7 @@ test("a segment request hands the encoder to the variant the viewer moved to", a
   // The viewer is a hundred seconds in, and the base is the one encoding.
   base.lastRequestedSegment = 25;
   const encoder = fakeEncoder();
-  startRunOn(base, { id: `${base.id}/run#1`, process: encoder });
+  startRunOn(base, { process: encoder });
   const served = await manager.resolveVariantFile(BASE_ID, 540, "segment-00025.mp4");
 
   assert.equal(served.sessionId, VARIANT_ID, "the file must be served from the variant, not the base");
@@ -318,7 +318,7 @@ test("a rung is placed where the player asked it for, not where the other rung h
   variant.variantBases = new Set([BASE_ID]);
   manager.sessionsById.set(VARIANT_ID, variant);
   base.variants = new Map([[540, VARIANT_ID]]);
-  startRunOn(base, { id: `${base.id}/run#1`, process: fakeEncoder() });
+  startRunOn(base, { process: fakeEncoder() });
   // The rung being left had read fourteen segments further than the picture had
   // played — an encoder running at several times realtime fills the buffer far
   // ahead. Measured 2026-08-11: 56 s of gap, and using the read head placed the
@@ -348,7 +348,7 @@ test("warming a rung prepares it without taking the encoder from the one on scre
   manager.sessionsById.set(VARIANT_ID, variant);
   base.variants = new Map([[540, VARIANT_ID]]);
   const encoder = fakeEncoder();
-  startRunOn(base, { id: `${base.id}/run#1`, process: encoder });
+  startRunOn(base, { process: encoder });
   const prepared = await manager.prepareVariant(BASE_ID, 540, 240);
 
   assert.deepEqual(
@@ -373,13 +373,13 @@ test("a rung warmed at the playhead survives the switch that lands just ahead of
   variant.variantBases = new Set([BASE_ID]);
   manager.sessionsById.set(VARIANT_ID, variant);
   base.variants = new Map([[540, VARIANT_ID]]);
-  startRunOn(base, { id: `${base.id}/run#1`, process: fakeEncoder() });
+  startRunOn(base, { process: fakeEncoder() });
   // Warmed AT THE PLAYHEAD (240 s = segment #60), which is what the browser
   // sends from server 0.10.0 onwards, and the run is alive and has produced a
   // few segments past it.
   await manager.prepareVariant(BASE_ID, 540, 240);
 
-  startRunOn(variant, { id: `${variant.id}/run#1`, from: 59, process: fakeEncoder() });
+  startRunOn(variant, { from: 59, process: fakeEncoder() });
   variant.progress = { ...variant.progress, processedSeconds: 268 };
   variant.seekTarget = null;
   variant.seekSettleTimer = null;
@@ -412,12 +412,12 @@ test("a rung warmed PAST the switch is repositioned, which is what warming late 
   variant.variantBases = new Set([BASE_ID]);
   manager.sessionsById.set(VARIANT_ID, variant);
   base.variants = new Map([[540, VARIANT_ID]]);
-  startRunOn(base, { id: `${base.id}/run#1`, process: fakeEncoder() });
+  startRunOn(base, { process: fakeEncoder() });
   // The same session, warmed where the BUFFER ended rather than where the
   // picture was — 60 s further on, which is an ordinary cushion. This is what
   // server 0.9.3 sent and 0.11.0 stopped sending.
   await manager.prepareVariant(BASE_ID, 540, 300);
-  startRunOn(variant, { id: `${variant.id}/run#1`, from: 74, process: fakeEncoder() });
+  startRunOn(variant, { from: 74, process: fakeEncoder() });
   variant.progress = { ...variant.progress, processedSeconds: 310 };
   variant.seekTarget = null;
   variant.seekSettleTimer = null;
@@ -443,8 +443,8 @@ test("the rung on screen fetching its own segments does not cancel a warm-up", a
   manager.sessionsById.set(VARIANT_ID, variant);
   base.variants = new Map([[540, VARIANT_ID]]);
   const warmedEncoder = fakeEncoder();
-  startRunOn(variant, { id: `${variant.id}/run#1`, process: warmedEncoder });
-  startRunOn(base, { id: `${base.id}/run#1`, process: fakeEncoder() });
+  startRunOn(variant, { process: warmedEncoder });
+  startRunOn(base, { process: fakeEncoder() });
   await manager.prepareVariant(BASE_ID, 540, 100);
 
   // The viewer has not moved: the rung they are watching goes on asking for its
@@ -523,7 +523,7 @@ test("a playlist or an init segment does not move the encoder", async (t) => {
   const variant = fakeSession({ id: VARIANT_ID, encodeHeight: 540, dirPath });
   manager.sessionsById.set(VARIANT_ID, variant);
   base.variants = new Map([[540, VARIANT_ID]]);
-  startRunOn(base, { id: `${base.id}/run#1`, process: fakeEncoder() });
+  startRunOn(base, { process: fakeEncoder() });
   base.variants = new Map([[540, VARIANT_ID]]);
   await manager.resolveVariantFile(BASE_ID, 540, "index.m3u8");
   await manager.resolveVariantFile(BASE_ID, 540, "init.mp4");
@@ -815,7 +815,7 @@ test("an audio track is prepared at the position the switch will land on", async
   const rendition = fakeSession({ id: VARIANT_ID, encodeHeight: 0, dirPath });
   rendition.audioOnly = true;
   rendition.audioTrackIndex = 1;
-  startRunOn(rendition, { id: `${rendition.id}/run#1`, process: fakeEncoder() });
+  startRunOn(rendition, { process: fakeEncoder() });
   manager.sessionsById.set(VARIANT_ID, rendition);
   // Filed by the track AND by how it is produced: two browsers of one picture
   // can need the same track copied and re-encoded.
@@ -889,7 +889,7 @@ test("a quality step being warmed is not refused by its own cost", async (t) => 
   warming.variantBases = new Set([BASE_ID]);
   // Running, and running well: it says of itself that it holds twice realtime,
   // i.e. half a second of work per second of video.
-  startRunOn(warming, { id: `${warming.id}/run#1`, process: fakeEncoder() });
+  startRunOn(warming, { process: fakeEncoder() });
   warming.lastAloneSpeed = 2;
   manager.sessionsById.set(BASE_ID, base);
   manager.sessionsById.set(VARIANT_ID, warming);

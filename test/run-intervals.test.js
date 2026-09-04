@@ -67,7 +67,7 @@ function sessionOn({ id, dirPath, segmentCount = 100, runState = null, encodeSta
     lastAccessedAt: Date.now()
   };
   if (runState !== null) {
-    const run = startRunOn(session, { id, from: encodeStartIndex, to: runEndIndex });
+    const run = startRunOn(session, { from: encodeStartIndex, to: runEndIndex });
     if (runState === "ENDED_FAILED") {
       // A run that failed, said so, and left what it had made behind.
       run.process?.exit(255, null);

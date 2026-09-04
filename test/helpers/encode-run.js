@@ -86,7 +86,6 @@ export const silentLogger = { info() {}, warn() {}, error() {} };
  *   segment, which is what moves it out of starting.
  * @param {number | null} [options.lastSegmentIndex] - The film's last number,
  *   for telling a finished file from an input that dried up.
- * @param {string} [options.id]
  * @param {boolean} [options.usesExplicitCuts]
  * @returns {import("../../services/encode/EncodeRun.js").EncodeRun}
  */
@@ -97,16 +96,13 @@ export function startRunOn(session, options = {}) {
     process: child = fakeProcess(),
     producing = true,
     lastSegmentIndex = null,
-    id = `${session.id ?? "session"}/run#1`,
     usesExplicitCuts = false
   } = options;
   const run = new EncodeRun({
-    id,
     address: session.outputKey ?? session.id ?? "output",
     encoder: { name: "libx264", kind: "software" },
     from,
     to,
-    dirPath: session.dirPath ?? "",
     buildArgs: () => [],
     spawn: () => child,
     logger: silentLogger,

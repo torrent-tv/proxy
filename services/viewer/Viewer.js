@@ -58,12 +58,20 @@ export class Viewer {
      * Every output this viewer is watching, by session id: the picture, the
      * quality step on their screen, the soundtrack they chose.
      *
-     * This is one of the two sets that replaced a film object. There is no
-     * "film" anywhere in this proxy — its parts are born at different times, die
-     * at different times and are addressed separately — and the link fields that
-     * stood in for one could not say how many people were listening to a
-     * soundtrack. A viewer holds its outputs, an output holds its viewers, and
-     * every question about who needs what is answered from those two.
+     * WHY THERE ARE TWO SETS AND NOT ONE. There is one relation — this person
+     * watches this output — and it is asked from both ends. An output asks "has
+     * anybody left?", to decide whether to go on producing. A viewer who leaves
+     * asks "what was I watching?", so that each of those outputs can be told.
+     * Neither question can be answered from the other side without walking every
+     * session in the process, so the relation is indexed both ways. It is
+     * written in exactly one place — `Viewers.of` and `Viewers.leaves` write
+     * both directions together — which is what keeps two indexes of one relation
+     * from becoming two different answers.
+     *
+     * This is what replaced a film object. There is no "film" anywhere in this
+     * proxy — its parts are born at different times, die at different times and
+     * are addressed separately — and the three link fields that stood in for one
+     * could not say how many people were listening to a soundtrack.
      *
      * @type {Set<string>}
      */
@@ -115,6 +123,12 @@ export function viewersOf(session) {
 /**
  * The viewer with this id, made if this session has not met them before.
  *
+ * Use `Viewers.of` instead wherever a registry is at hand: this makes ONE
+ * viewer per session, so the same person watching a picture, a quality step and
+ * a soundtrack is three objects, and `outputs` — a fact about the person — is
+ * then three sets that nothing keeps in step. It is kept for a session assembled
+ * by hand in a test that has no registry.
+ *
  * @param {object} session
  * @param {string} consumerId
  * @returns {Viewer}
@@ -126,5 +140,6 @@ export function viewerOf(session, consumerId) {
     viewer = new Viewer(consumerId);
     viewers.set(consumerId, viewer);
   }
+  viewer.outputs.add(session.id);
   return viewer;
 }

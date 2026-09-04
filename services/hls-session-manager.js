@@ -62,6 +62,7 @@ import { resolveSegmentFormat, SEGMENT_FORMAT_IDS } from "./segment-formats/inde
 import { audioRenditionName } from "./audio-inventory.js";
 import { AudioOutput, CutGrid, OutputSpec, VideoOutput } from "./output/index.js";
 import { ProducedIndex } from "./produced-index.js";
+import { SegmentStore } from "./encode/SegmentStore.js";
 
 /**
  * Whether an encoder run died because its INPUT went away, rather than because
@@ -867,16 +868,6 @@ function buildHttpBaseUrl(host, port) {
   url.hostname = toLoopbackHost(host);
   url.port = String(port);
   return url.origin;
-}
-
-/**
- * Return the temporary directory path for a given HLS session.
- *
- * @param {string} sessionId - UUID of the session.
- * @returns {string}
- */
-function createSessionDirPath(sessionId) {
-  return path.join(os.tmpdir(), "torrent-tv-hls", sessionId);
 }
 
 /**
@@ -1781,6 +1772,7 @@ export class HlsSessionManager {
     fetchWholeFile = null,
     segmentFormatId = undefined,
     stateDir = "",
+    segmentStore = null,
     getTorrentTotals}) {
     this.enabled = Boolean(enabled);
     this.ffmpegBin = ffmpegBin;
@@ -1869,6 +1861,14 @@ export class HlsSessionManager {
     // the wait belong to the FILE rather than to a session: everybody joins the
     // same one, so two viewers of one film get one answer and one read.
     this.keyframeIndexPending = new Map();
+    // Where produced segments live, addressed by WHAT they are rather than by
+    // which session's encoder wrote them. Two sessions of one output — two
+    // viewers who opened the same film at different places — write into one
+    // directory and each serves what the other has already made. Injectable so
+    // a test can give it a root of its own.
+    this.segmentStore = segmentStore instanceof SegmentStore
+      ? segmentStore
+      : new SegmentStore({ logger });
     this.sessionIdBySource = new Map();
     this.cleanupTimer = setInterval(() => {
       void this.cleanupExpired();
@@ -2094,7 +2094,12 @@ export class HlsSessionManager {
 
     const sessionId = randomUUID();
     const createEntryMs = Date.now();
-    const sessionDir = createSessionDirPath(sessionId);
+    // The directory belongs to the OUTPUT, not to this session: two sessions
+    // whose parameters agree produce interchangeable segments, so they write
+    // into one place and each serves what the other has already made. The start
+    // position is deliberately not part of it — segment 42 covers the same span
+    // whoever began where.
+    const sessionDir = this.segmentStore.pathFor(spec.toKey());
     const inputUrl = new URL("/stream", `${this.localBaseUrl}/`);
     inputUrl.searchParams.set("sourceKey", sourceKey);
     // Whose read this is. The stream route counts the bytes it delivers against
@@ -2453,11 +2458,17 @@ export class HlsSessionManager {
     // session was never registered, and no sweep looks for one. Proxy
     // 2.9.101-2.9.102 failed here on every single request and the leftovers
     // were the only trace of it on disk.
-    await mkdir(sessionDir, { recursive: true });
+    this.segmentStore.directoryFor(spec.toKey());
+    this.segmentStore.useFormat(spec.toKey(), segmentFormat);
 
     const session = {
       id: sessionId,
       sourceMapKey,
+      // What this session PRODUCES, which is the address of its segments and
+      // the thing another session may share with it. `sourceMapKey` is this
+      // plus the start position, and the start position is a fact about a
+      // request rather than about the material.
+      outputKey: spec.toKey(),
       fileName: logName,
       dirPath: sessionDir,
       // The SESSION's own lifetime, and nothing else: it exists, or it has been
@@ -5272,7 +5283,7 @@ export class HlsSessionManager {
     // Read before it is overwritten: the run about to be superseded is the one
     // whose open piece has to be discarded once it has actually exited.
     const previousRunDirPath = session.runDirPath ?? null;
-    session.runSerial = (session.runSerial ?? 0) + 1;
+    session.runSerial = this.segmentStore.nextRunSerial(session.outputKey ?? session.sourceMapKey);
     session.runDirPath = path.join(session.dirPath, `run-${session.runSerial}`);
     await mkdir(session.runDirPath, { recursive: true });
     // The restart backs off a segment or two from what was asked for, so the
@@ -10605,6 +10616,44 @@ export class HlsSessionManager {
   }
 
   /**
+   * Every segment number this session's OUTPUT holds, whoever produced it.
+   *
+   * Public because it is the one thing worth asserting about the address
+   * change: two sessions of one output answer with the same list, including
+   * segments the other one's encoder made.
+   *
+   * @param {HlsSession} session
+   * @returns {number[]}
+   */
+  producedSegmentNumbers(session) {
+    return this.#producedIndex(session).segmentNumbers();
+  }
+
+  /**
+   * Take back what a previous life of this process left on the disk.
+   *
+   * Called once at startup, and it is the only record there is of an encoder
+   * that ended without anything recording why: when the kernel kills this
+   * process no exit handler runs, nothing is cleared up, and — measured on the
+   * addon host 2026-09-04 — the files survive, because `/tmp` there is on the
+   * overlay filesystem rather than in memory.
+   *
+   * What survived is kept rather than thrown away. A copied segment's bytes
+   * depend only on the source, so it is as good as it was; re-encoding it would
+   * cost the machine that is already the scarce thing.
+   *
+   * @returns {{ adopted: number, dropped: number, unprovenRemoved: number }}
+   */
+  adoptSegmentsLeftBehind() {
+    return this.segmentStore.adoptWhatSurvived((key) => {
+      // Which container the segments are in is stated by the key itself, so a
+      // directory can be read back without any record kept elsewhere.
+      const stated = /(?:^|:)fmt=([a-z0-9]+)(?::|$)/.exec(key)?.[1] ?? "";
+      return SEGMENT_FORMAT_IDS.includes(stated) ? resolveSegmentFormat(stated) : null;
+    });
+  }
+
+  /**
    * This session's one statement of what it has produced.
    *
    * Made on first use and kept on the session, so the directory times it
@@ -11182,11 +11231,29 @@ export class HlsSessionManager {
       session.ffmpeg.kill("SIGTERM");
       await waitForChildExit(session.ffmpeg);
     }
-    try {
-      await rm(session.dirPath, { recursive: true, force: true });
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      logger.warn(`failed to cleanup HLS temp dir: ${message}`);
+    // The directory belongs to the OUTPUT, and another session may still be
+    // serving from it — a second viewer of the same film, who joined at a
+    // different place and so has a session of their own. Removing it here would
+    // take away material that viewer is playing, which is exactly the fault
+    // that made produced segments invisible between sessions in the first
+    // place. It goes when nobody is left on that output.
+    const outputKey = session.outputKey ?? "";
+    const stillServed = outputKey
+      ? [...this.sessionsById.values()].some(
+          (other) => other.outputKey === outputKey && other.state !== "disposed"
+        )
+      : false;
+    if (!outputKey) {
+      try {
+        await rm(session.dirPath, { recursive: true, force: true });
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        logger.warn(`failed to cleanup HLS temp dir: ${message}`);
+      }
+      return;
+    }
+    if (!stillServed) {
+      this.segmentStore.drop(outputKey, `no session is producing or serving it any more`);
     }
   }
 

@@ -20,6 +20,7 @@ import path from "node:path";
 import { HlsSessionManager } from "../services/hls-session-manager.js";
 import { SegmentStore } from "../services/encode/SegmentStore.js";
 import { fmp4Format } from "../services/segment-formats/fmp4.js";
+import { viewerOf } from "../services/viewer/Viewer.js";
 
 const KEY = "torrent:abc:fmt=fmp4:grid=kf@0:video-only:v=0/copy";
 
@@ -237,4 +238,75 @@ test("a run stops when it reaches a stretch another run was given", async (t) =>
     "a run without an end owns only as far as it has got, not the rest of the film"
   );
   void stopped;
+});
+
+test("a seek backwards does not drag the picture away from a viewer watching ahead", (t) => {
+  const { manager, root, dirPath } = managerWithAnEmptyOutput();
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+
+  const asked = [];
+  manager.createOrGetSession = async (params) => {
+    asked.push(params.startPositionSeconds);
+    return null;
+  };
+
+  const shared = sessionOn({
+    id: "shared",
+    dirPath,
+    segmentCount: 1000,
+    runState: "PRODUCING",
+    encodeStartIndex: 200,
+    runEndIndex: -1
+  });
+  shared.sourceKey = "torrent:abc";
+  shared.fileIndex = 0;
+  shared.segmentBoundaries = Array.from({ length: 1001 }, (_, index) => index * 4);
+  shared.acquireSource = null;
+  shared.progress = { processedSeconds: 900, startPositionSeconds: 800 };
+  manager.sessionsById.set(shared.id, shared);
+
+  // One viewer is at segment 250 and being served. The other jumps back an hour.
+  viewerOf(shared, "ahead").head = { segment: 250, seconds: 1000, at: Date.now() };
+  viewerOf(shared, "back").head = { segment: 250, seconds: 1000, at: Date.now() };
+
+  const startedAt = shared.encodeStartIndex;
+  manager.requestSeek("shared", 40, "back");
+
+  assert.equal(
+    shared.encodeStartIndex,
+    startedAt,
+    "the run serving the viewer in front is left exactly where it was"
+  );
+  assert.deepEqual(asked, [40], "and the one who jumped is given a run of their own, there");
+});
+
+test("a seek backwards with nobody else watching still moves the run", (t) => {
+  const { manager, root, dirPath } = managerWithAnEmptyOutput();
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+
+  let created = 0;
+  manager.createOrGetSession = async () => {
+    created += 1;
+    return null;
+  };
+
+  const alone = sessionOn({
+    id: "alone",
+    dirPath,
+    segmentCount: 1000,
+    runState: "PRODUCING",
+    encodeStartIndex: 200,
+    runEndIndex: -1
+  });
+  alone.segmentBoundaries = Array.from({ length: 1001 }, (_, index) => index * 4);
+  alone.progress = { processedSeconds: 900, startPositionSeconds: 800 };
+  manager.sessionsById.set(alone.id, alone);
+  viewerOf(alone, "only").head = { segment: 250, seconds: 1000, at: Date.now() };
+
+  manager.requestSeek("alone", 40, "only");
+
+  // Nobody is left behind, so a second run would be an encoder for one viewer
+  // who is not there any more.
+  assert.equal(created, 0);
+  assert.equal(alone.seekTarget !== undefined, true, "the run itself is repositioned, as before");
 });

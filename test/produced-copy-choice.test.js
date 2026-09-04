@@ -173,7 +173,7 @@ async function sessionOnOneDirectory() {
     startedAt: Date.now(),
     createEntryMs: Date.now(),
     lastAccessedAt: Date.now(),
-    run: null,
+    runs: new Set(),
     lastError: "",
     consumers: new Set(),
     viewers: new Map(),
@@ -201,7 +201,7 @@ test("a leftover of a run that has ended is removed, not waited on", async (t) =
   });
   // Opened by a run that is gone, and nothing is encoding now — so calling it
   // "still being written" waits on a process that will never touch it.
-  session.run = null;
+  session.runs = new Set();
   await writeFile(path.join(dirPath, "segment-00001.mp4"), Buffer.alloc(0));
 
   const result = await manager.getFileStream(SESSION_ID, "segment-00001.mp4", { requestSeq: 1 });

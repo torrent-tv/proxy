@@ -73,7 +73,7 @@ async function sessionWithRunAt373() {
     useSyntheticPlaylist: true,
     playlistText: "#EXTM3U\n",
     segmentCount: boundaries.length - 1,
-    run: null,
+    runs: new Set(),
     behindHeadAsks: new Map(),
     firstWantedAt: new Map(),
     holdExplainedAt: new Map(),

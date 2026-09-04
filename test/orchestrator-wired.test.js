@@ -59,7 +59,7 @@ function sessionOn({ id, dirPath, encodeStartIndex = 0, runEndIndex = -1, speed 
     recentSpeed: null,
     consumers: new Set(),
     viewers: new Map(),
-    run: null,
+    runs: new Set(),
     lastAccessedAt: Date.now()
   };
   if (running) {
@@ -84,7 +84,7 @@ test("a session is handed to the plan as the run it is", (t) => {
 
   const runs = manager.encodeOrchestrator.runsOn(KEY);
   assert.equal(runs.length, 1, "the session the browser already has is a run like any other");
-  assert.equal(runs[0], session.run, "and it is the run the session actually holds");
+  assert.equal(runs[0], [...session.runs][0], "and it is the run the session actually holds");
   assert.equal(runs[0].from, 10);
   assert.equal(runs[0].to, 40);
 });

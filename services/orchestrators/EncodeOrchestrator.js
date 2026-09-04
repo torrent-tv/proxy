@@ -181,7 +181,7 @@ export class EncodeOrchestrator {
     // that a stretch nobody is making is being made. Nothing would ever be
     // started there again.
     for (const run of this.runsOn(address)) {
-      if (!run.isAlive) {
+      if (!run.isAlive && !run.isStopping) {
         this.noteEnded({
           address,
           run,

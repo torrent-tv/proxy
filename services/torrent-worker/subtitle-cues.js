@@ -19,7 +19,7 @@
 
 import { ContainerFactory } from "../container/ContainerFactory.js";
 import { TextSubtitleTrack } from "../tracks/TextSubtitleTrack.js";
-import { detectLanguage } from "../language-detect.js";
+import { detectLanguage } from "../tracks/language-detect.js";
 import { logger } from "../../utils/logger.js";
 
 /** How long a read of already-held bytes may take before it is given up. */

@@ -24,7 +24,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { detectLanguage } from "../services/language-detect.js";
+import { detectLanguage } from "../services/tracks/language-detect.js";
 import { SubtitleFileContainer } from "../services/container/SubtitleFileContainer.js";
 import { TextSubtitleTrack } from "../services/tracks/TextSubtitleTrack.js";
 import { MatroskaContainer } from "../services/container/MatroskaContainer.js";

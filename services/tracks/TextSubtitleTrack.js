@@ -26,7 +26,7 @@
  */
 
 import { SubtitleTrack } from "./SubtitleTrack.js";
-import { detectLanguage } from "../language-detect.js";
+import { detectLanguage } from "./language-detect.js";
 
 const TEXT_CODECS_MATROSKA = new Set(["S_TEXT/UTF8", "S_TEXT/ASS", "S_TEXT/SSA", "S_TEXT/WEBVTT"]);
 const TEXT_FORMATS_MP4 = new Set(["tx3g", "text", "wvtt"]);

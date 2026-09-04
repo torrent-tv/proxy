@@ -1,4 +1,4 @@
-<!-- GENERATED from services/encode-run-state.js by scripts/render-run-graph.js.
+<!-- GENERATED from services/encode/encode-run-state.js by scripts/render-run-graph.js.
      Do not edit by hand: change the table and run `npm run graph`. -->
 
 # The encoder run — states and transitions

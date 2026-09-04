@@ -28,7 +28,7 @@ import {
   mayRestart,
   processCanBeSignalled,
   wireState
-} from "../services/encode-run-state.js";
+} from "../services/encode/encode-run-state.js";
 
 /** Where the rendered document lives. */
 export const GRAPH_DOC_PATH = path.join(
@@ -97,7 +97,7 @@ export function renderRunGraphMarkdown() {
   const lines = [];
 
   lines.push(
-    "<!-- GENERATED from services/encode-run-state.js by scripts/render-run-graph.js.",
+    "<!-- GENERATED from services/encode/encode-run-state.js by scripts/render-run-graph.js.",
     "     Do not edit by hand: change the table and run `npm run graph`. -->",
     "",
     "# The encoder run — states and transitions",

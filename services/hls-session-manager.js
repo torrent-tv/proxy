@@ -1512,9 +1512,9 @@ export function seekLandingOffsetFor(session, keyframe) {
   // A grid whose times are approximate needs that error added on top, or a name
   // sitting just below its real keyframe seeks to before it and lands on the
   // one before that. Only AVI declares one.
-  const tolerance = Number.isFinite(session?.timeline?.keyframeTolerance) ? Math.max(0, session.timeline.keyframeTolerance) : 0;
+  const tolerance = Number.isFinite(session?.file?.keyframeTolerance) ? Math.max(0, session.file.keyframeTolerance) : 0;
   const wanted = SEEK_LANDING_OFFSET_SEC + tolerance;
-  const times = Array.isArray(session?.timeline?.keyframeTimes) ? session.timeline.keyframeTimes : [];
+  const times = Array.isArray(session?.file?.keyframeTimes) ? session.file.keyframeTimes : [];
   const next = times.find((time) => time > keyframe + 0.001);
   if (next === undefined) {
     return wanted;
@@ -2273,15 +2273,15 @@ export class HlsSessionManager {
     let containerFormat = "";
     // A quality variant of a session whose cuts are the source's keyframes must
     // be cut at exactly those same times, or its segments cannot stand where
-    // the other's would have. The grid arrives with the request rather than
-    // being worked out again: it is the same file, so a second reading could
-    // only agree — or, if the index were read differently, disagree silently.
+    // the other's would have. Nothing has to be handed over for that any more:
+    // the table is the FILE's, and a variant is a session of the same file, so
+    // it reads the one answer. What the inherited grid still carries is the
+    // CORRECTED boundaries and the published playlist, which are properties of
+    // the family rather than of the file.
     if (inheritedGrid) {
-      keyframeTimes = inheritedGrid.keyframeTimes;
-      containerFormat = inheritedGrid.containerFormat ?? "";
-      keyframeTolerance = Number.isFinite(inheritedGrid.keyframeTolerance)
-        ? inheritedGrid.keyframeTolerance
-        : 0;
+      keyframeTimes = file.keyframeTimes;
+      containerFormat = file.containerFormat;
+      keyframeTolerance = file.keyframeTolerance;
     } else if (hasDuration && !transcodeVideo && !audioOnly) {
       // Video-COPY path: keyframeTimes are REQUIRED to build correct segment
       // boundaries (the playlist itself), so this MUST block session creation —
@@ -2305,6 +2305,10 @@ export class HlsSessionManager {
       containerFormat = index.format;
       keyframeTolerance = Number.isFinite(index.tolerance) ? index.tolerance : 0;
       keyframeMs = Date.now() - keyframeStartMs;
+      // Onto the file: the table is a property of its immutable bytes, like the
+      // duration and the track list, and every session of the file reads the
+      // one answer.
+      file.learn({ keyframeTimes, keyframeTolerance, containerFormat });
       if (!keyframeTimes) {
         // No index, so there is no honest grid for a COPY: a copied picture can
         // only be cut at the source's own keyframes, and we do not know where
@@ -2335,7 +2339,7 @@ export class HlsSessionManager {
       // the 6 s cap: AVI-class containers need a full packet scan, which 6 s can
       // never afford without delaying playback start — that starved budget is
       // exactly why the probe kept missing on the container where the seek bug
-      // was field-diagnosed. #startEncodeRun reads session.timeline.keyframeTimes fresh
+      // was field-diagnosed. #startEncodeRun reads session.file.keyframeTimes fresh
       // on every call, so a seek that happens AFTER this finishes picks it up
       // automatically; one that happens before falls back to the existing
       // circuit breaker as a safety net (no regression either way).
@@ -2346,7 +2350,11 @@ export class HlsSessionManager {
         if (!liveSession || liveSession.state === "disposed") {
           return; // Session gone before the probe finished — nothing to update.
         }
-        liveSession.timeline.keyframeTimes = times;
+        // Onto the FILE, so every session of it — the picture, its quality
+        // steps, a second viewer's — snaps a seek to the same table. It used to
+        // land on the cut table, which is per file AND grid, so a re-encoded
+        // step of a copied picture never saw what this probe found.
+        liveSession.file.learn({ keyframeTimes: times });
         const elapsedMs = Date.now() - backgroundStartedAt;
         logger.info(
           times
@@ -2404,11 +2412,7 @@ export class HlsSessionManager {
                 startTime: sourceStartTime
               })
             : []),
-        cutGrid: useKeyframeGrid ? "keyframe" : "uniform",
-        totalDurationSeconds: hasDuration ? durationSeconds : 0,
-        keyframeTimes,
-        keyframeTolerance,
-        containerFormat
+        cutGrid: useKeyframeGrid ? "keyframe" : "uniform"
       })
     );
     // What this session will PUBLISH. A member of a family takes its base's
@@ -4131,7 +4135,7 @@ export class HlsSessionManager {
     session.cushionSaidAt = now;
     const aheadOfPicture = Math.max(0, encodedTo - earliestPosition);
     const fileLength = this.#fileLengthByKey.get(session.file.key);
-    const duration = Number(session.timeline.totalDurationSeconds) || Number(session.file.durationSeconds) || 0;
+    const duration = Number(session.file.durationSeconds) || Number(session.file.durationSeconds) || 0;
     const megabytes =
       Number.isFinite(fileLength) && fileLength > 0 && duration > 0
         ? ((aheadOfPicture * fileLength) / duration / 1e6).toFixed(0)
@@ -5415,7 +5419,7 @@ export class HlsSessionManager {
     if (typeof stats.fileProgress === "number" && stats.fileProgress >= 0.999) {
       return "cpu";
     }
-    const duration = Number.isFinite(session.timeline.totalDurationSeconds) ? session.timeline.totalDurationSeconds : 0;
+    const duration = Number.isFinite(session.file.durationSeconds) ? session.file.durationSeconds : 0;
     const length = Number.isFinite(stats.fileLength) && stats.fileLength > 0 ? stats.fileLength : 0;
     const downloadSpeed = Number.isFinite(stats.downloadSpeed) ? stats.downloadSpeed : 0;
     if (duration <= 0 || length <= 0) {
@@ -5837,7 +5841,7 @@ export class HlsSessionManager {
     // Fresh by construction: the session may have been created before the
     // soundtrack file's header could be read, and the reading lands on the file
     // object this session holds — so there is nothing to re-read and nothing
-    // that can be stale. Same property as `session.timeline.keyframeTimes`,
+    // that can be stale. Same property as `session.file.keyframeTimes`,
     // which is one table shared by every session of the file.
     const audioFileStartTime = session.audioFile.startTime;
     // The start time of the file this run READS, which is the picture's own for
@@ -5964,8 +5968,8 @@ export class HlsSessionManager {
     // retry re-tries the SAME bad container-computed position. A keyframe we
     // read directly from the packet list is a position ffmpeg has already
     // proven it can decode.
-    const snappedKeyframe = Array.isArray(session.timeline.keyframeTimes) && session.timeline.keyframeTimes.length > 0
-      ? nearestKeyframeAtOrBefore(session.timeline.keyframeTimes, seekSeconds)
+    const snappedKeyframe = Array.isArray(session.file.keyframeTimes) && session.file.keyframeTimes.length > 0
+      ? nearestKeyframeAtOrBefore(session.file.keyframeTimes, seekSeconds)
       : null;
     // A second input, and it exists for exactly one case: a browser that takes
     // its audio muxed into the picture, watching a release whose soundtrack is a
@@ -6953,10 +6957,7 @@ export class HlsSessionManager {
       inheritedGrid: base.timeline.cutGrid === "keyframe"
         ? {
             boundaries: base.timeline.boundaries,
-            published: base.timeline.published,
-            keyframeTimes: base.timeline.keyframeTimes,
-            keyframeTolerance: base.timeline.keyframeTolerance,
-            containerFormat: base.timeline.containerFormat
+            published: base.timeline.published
           }
         : null,
       acquireSource: base.acquireSource
@@ -7473,8 +7474,8 @@ export class HlsSessionManager {
     // audio frame is the tolerance — anything the list names is exact, so a
     // match is a match. `keyframeTimes` is the list the grid was built from, so
     // this compares the file against the table on the table's own terms.
-    const knownKeyframe = Array.isArray(session.timeline.keyframeTimes)
-      ? session.timeline.keyframeTimes.some((time) => Math.abs(time - trueStart) <= 0.05)
+    const knownKeyframe = Array.isArray(session.file.keyframeTimes)
+      ? session.file.keyframeTimes.some((time) => Math.abs(time - trueStart) <= 0.05)
       : null;
     noteIndexDeviation(session.timeline.indexCheck, index, deviation, knownKeyframe);
     if (deviation > SEGMENT_START_DISAGREEMENT_SEC) {
@@ -7795,7 +7796,7 @@ export class HlsSessionManager {
       // that never consulted it.
       `${session.audioOnly === true ? "sound-vs-grid" : "keyframe-index"} ` +
       `${session.id.slice(0, 8)} ${session.audioOnly === true ? "sound" : "picture"} ` +
-      `${session.timeline.containerFormat || "unknown"} "${session.file.name}": ` +
+      `${session.file.containerFormat || "unknown"} "${session.file.name}": ` +
       `${check.disagreed} of ${check.checked} produced segments started away from the playlist, ` +
       `median ${median.toFixed(3)}s worst ${check.maxDeviationSec.toFixed(3)}s` +
       (check.firstDisagreementIndex >= 0 ? ` (first at #${check.firstDisagreementIndex})` : "") +
@@ -7809,7 +7810,7 @@ export class HlsSessionManager {
         // segment that began at another time the SAME table names was not
         // mis-described by the table — the grid was built over a gap in it.
         : `; ${landed} of them began at another keyframe the table names` +
-          ` [tolerance ${SEGMENT_START_DISAGREEMENT_SEC}s, ${(session.timeline.keyframeTimes?.length ?? 0)} keyframes read]`)
+          ` [tolerance ${SEGMENT_START_DISAGREEMENT_SEC}s, ${(session.file.keyframeTimes?.length ?? 0)} keyframes read]`)
     );
   }
 
@@ -9422,10 +9423,7 @@ export class HlsSessionManager {
             // stamp the same moment differently and the picture and the sound
             // drift apart by exactly the corrections made between their two
             // creations (field 2026-08-17, corrections of 0.6-2.9 s).
-            published: base.timeline.published,
-            keyframeTimes: base.timeline.keyframeTimes,
-            keyframeTolerance: base.timeline.keyframeTolerance,
-            containerFormat: base.timeline.containerFormat
+            published: base.timeline.published
           }
         : null,
       acquireSource: base.acquireSource
@@ -10193,9 +10191,7 @@ export class HlsSessionManager {
       inheritedGrid: base.timeline.cutGrid === "keyframe"
         ? {
             boundaries: base.timeline.boundaries,
-            published: base.timeline.published,
-            keyframeTimes: base.timeline.keyframeTimes,
-            containerFormat: base.timeline.containerFormat
+            published: base.timeline.published
           }
         : null,
       // Hold the file this rendition will READ. For a soundtrack shipped beside

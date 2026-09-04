@@ -17,13 +17,12 @@ import { Timeline, Timelines } from "../services/output/Timeline.js";
  * @returns {Timeline}
  */
 function fourSecondGrid() {
+  // Only what is per grid. The container's own keyframe table, how exact it is,
+  // which container answered and how long the file runs are facts of the FILE
+  // and live on the source file — stating them here stated nothing.
   return new Timeline({
     boundaries: [0, 4, 8, 12, 16],
-    cutGrid: "keyframe",
-    totalDurationSeconds: 16,
-    keyframeTimes: [0, 4, 8, 12],
-    keyframeTolerance: 0.25,
-    containerFormat: "matroska"
+    cutGrid: "keyframe"
   });
 }
 

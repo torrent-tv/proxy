@@ -20,7 +20,9 @@ const HOST = { maxRuns: 2, segmentSeconds: 4, restartCostSec: 0.12 };
  * @returns {import("../services/encode/EncodePlan.js").LiveRun}
  */
 function run(run_) {
-  return { id: "run-a", from: 0, to: 100, head: 0, speedX: 2, ...run_ };
+  // A run has no name: the plan hands back the run itself, so a test compares
+  // the thing rather than a token standing for it.
+  return { from: 0, to: 100, head: 0, speedX: 2, ...run_ };
 }
 
 test("a viewer waiting on nothing made starts one encoder, at what they are waiting for", () => {
@@ -47,11 +49,12 @@ test("a viewer whose cushion reaches past a running encoder starts nothing", () 
   // a second viewer two segments further on was given an encoder of their own
   // to make those two, while the run already there had nowhere left to go.
   const coverage = new CoverageMap({ segmentCount: 1000 });
-  coverage.claim("run-a", 100, 999);
+  const runA = run({ from: 100, to: 999, head: 100 });
+  coverage.claim(runA, 100, 999);
   const actions = planEncoders({
     coverage,
     windows: [{ from: 100, to: 130 }, { from: 102, to: 132 }],
-    runs: [run({ from: 100, to: 999, head: 100 })],
+    runs: [runA],
     ...HOST
   });
   assert.equal(actions.some((action) => action.type === "start"), false);
@@ -72,7 +75,8 @@ test("a run is given an end at the edge of what is free", () => {
   // Handed the rest of the film it would drive straight into another run's
   // ground; handed the free stretch it stops where the covered material starts.
   const coverage = new CoverageMap({ segmentCount: 100 });
-  coverage.claim("run-b", 50, 80);
+  const runB = run({ from: 50, to: 80 });
+  coverage.claim(runB, 50, 80);
   const actions = planEncoders({ coverage, windows: [{ from: 40, to: 90 }], runs: [], ...HOST });
   assert.equal(actions.length, 1);
   assert.deepEqual({ from: actions[0].from, to: actions[0].to }, { from: 40, to: 49 });
@@ -80,19 +84,20 @@ test("a run is given an end at the edge of what is free", () => {
 
 test("a run that has caught up with made material is moved forward, not killed", () => {
   const coverage = new CoverageMap({ segmentCount: 100 });
-  coverage.claim("run-a", 0, 100);
+  const runA = run({ head: 10, from: 0, to: 100 });
+  coverage.claim(runA, 0, 100);
   for (let index = 10; index <= 30; index += 1) {
     coverage.markReady(index);
   }
   const actions = planEncoders({
     coverage,
     windows: [{ from: 0, to: 90 }],
-    runs: [run({ head: 10, from: 0, to: 100 })],
+    runs: [runA],
     ...HOST
   });
   const move = actions.find((action) => action.type === "move");
   assert.ok(move, "it should have been moved");
-  assert.equal(move.runId, "run-a");
+  assert.equal(move.run, runA);
   assert.equal(move.from, 31, "to the first thing nobody has");
   assert.equal(actions.some((action) => action.type === "stop"), false, "and not stopped");
 });
@@ -102,28 +107,30 @@ test("a covered stretch shorter than a restart is driven through instead", () =>
   // by this run's own speed, against what a restart costs. One segment at 50x
   // is 0.08 s of encoding against 0.12 s to move.
   const coverage = new CoverageMap({ segmentCount: 100 });
-  coverage.claim("run-a", 0, 100);
+  const runA = run({ head: 10, speedX: 50 });
+  coverage.claim(runA, 0, 100);
   coverage.markReady(10);
   const actions = planEncoders({
     coverage,
     windows: [{ from: 0, to: 90 }],
-    runs: [run({ head: 10, speedX: 50 })],
+    runs: [runA],
     ...HOST
   });
   assert.equal(actions.some((action) => action.type === "move"), false);
-  assert.ok(actions.some((action) => action.type === "keep" && action.runId === "run-a"));
+  assert.ok(actions.some((action) => action.type === "keep" && action.run === runA));
 });
 
 test("a run whose speed nothing has measured is moved rather than left driving through", () => {
   // Not a default: driving through is work that is certainly wasted, and the
   // restart is a known and small cost. What cannot be done is the comparison.
   const coverage = new CoverageMap({ segmentCount: 100 });
-  coverage.claim("run-a", 0, 100);
+  const runA = run({ head: 10, speedX: 0 });
+  coverage.claim(runA, 0, 100);
   coverage.markReady(10);
   const actions = planEncoders({
     coverage,
     windows: [{ from: 0, to: 90 }],
-    runs: [run({ head: 10, speedX: 0 })],
+    runs: [runA],
     ...HOST
   });
   const move = actions.find((action) => action.type === "move");
@@ -133,14 +140,15 @@ test("a run whose speed nothing has measured is moved rather than left driving t
 
 test("a run with nothing left to make ahead of it is stopped", () => {
   const coverage = new CoverageMap({ segmentCount: 100 });
-  coverage.claim("run-a", 0, 100);
+  const runA = run({ head: 10 });
+  coverage.claim(runA, 0, 100);
   for (let index = 10; index <= 90; index += 1) {
     coverage.markReady(index);
   }
   const actions = planEncoders({
     coverage,
     windows: [{ from: 0, to: 90 }],
-    runs: [run({ head: 10 })],
+    runs: [runA],
     ...HOST
   });
   assert.deepEqual(
@@ -153,28 +161,31 @@ test("every encoder stops when nobody is watching the output", () => {
   // A look-ahead cannot answer this: it asks how far AHEAD of a viewer a run
   // is, and there is no viewer.
   const coverage = new CoverageMap({ segmentCount: 100 });
+  const runA = run();
+  const runB = run();
   const actions = planEncoders({
     coverage,
     windows: [],
-    runs: [run({ id: "run-a" }), run({ id: "run-b" })],
+    runs: [runA, runB],
     ...HOST
   });
   assert.deepEqual(
-    actions.map((action) => [action.type, action.runId]),
-    [["stop", "run-a"], ["stop", "run-b"]]
+    actions.map((action) => [action.type, action.run]),
+    [["stop", runA], ["stop", runB]]
   );
 });
 
 test("a run making material nobody asked for is stopped", () => {
   const coverage = new CoverageMap({ segmentCount: 1000 });
-  coverage.claim("run-a", 500, 600);
+  const runA = run({ from: 500, to: 600, head: 520 });
+  coverage.claim(runA, 500, 600);
   const actions = planEncoders({
     coverage,
     windows: [{ from: 0, to: 40 }],
-    runs: [run({ from: 500, to: 600, head: 520 })],
+    runs: [runA],
     ...HOST
   });
-  assert.ok(actions.some((action) => action.type === "stop" && action.runId === "run-a"));
+  assert.ok(actions.some((action) => action.type === "stop" && action.run === runA));
 });
 
 test("two viewers far apart get an encoder each, when the machine can hold two", () => {
@@ -209,14 +220,15 @@ test("a viewer joining behind a running encoder gets their own, not a dragged on
   // This is what the whole layer is for. The run in front is untouched; the
   // viewer behind is not made to wait for it to be pulled back.
   const coverage = new CoverageMap({ segmentCount: 1000 });
-  coverage.claim("run-a", 500, 600);
+  const runA = run({ from: 500, to: 600, head: 510 });
+  coverage.claim(runA, 500, 600);
   const actions = planEncoders({
     coverage,
     windows: [{ from: 500, to: 530 }, { from: 100, to: 130 }],
-    runs: [run({ from: 500, to: 600, head: 510 })],
+    runs: [runA],
     ...HOST
   });
-  assert.ok(actions.some((action) => action.type === "keep" && action.runId === "run-a"));
+  assert.ok(actions.some((action) => action.type === "keep" && action.run === runA));
   assert.equal(actions.some((action) => action.type === "move"), false);
   const started = actions.filter((action) => action.type === "start");
   assert.equal(started.length, 1);

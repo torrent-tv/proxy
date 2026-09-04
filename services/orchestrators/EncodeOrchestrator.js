@@ -144,12 +144,12 @@ export class EncodeOrchestrator {
 
   /**
    * @param {string} address
-   * @param {string} runId
+   * @param {object} run
    * @param {number} speedX
    */
-  noteSpeed(address, runId, speedX) {
+  noteSpeed(address, wanted, speedX) {
     for (const run of this.runsOn(address)) {
-      if (run.id === runId) {
+      if (run === wanted) {
         run.noteSpeed(speedX);
       }
     }
@@ -184,7 +184,7 @@ export class EncodeOrchestrator {
       if (!run.isAlive) {
         this.noteEnded({
           address,
-          runId: run.id,
+          run,
           ending: ENCODE_EXIT.GONE,
           because: "it is no longer running, and it did not say so"
         });
@@ -198,13 +198,10 @@ export class EncodeOrchestrator {
     const actions = planEncoders({
       coverage,
       windows,
-      runs: live.map((run) => ({
-        id: run.id,
-        from: run.from,
-        to: run.to,
-        head: run.head,
-        speedX: run.speedX
-      })),
+      // The runs themselves. The plan is arithmetic and reads four numbers off
+      // each; what it hands back names the run by BEING it, so nothing has to
+      // invent a token to refer to one by.
+      runs: live,
       maxRuns: Math.max(0, this.maxRunsFor(address)),
       segmentSeconds: this.segmentSeconds,
       restartCostSec: this.restartCostSec
@@ -212,7 +209,7 @@ export class EncodeOrchestrator {
 
     for (const action of actions) {
       if (action.type === "stop") {
-        this.#stop(address, action.runId, action.because);
+        this.#stop(action.run, action.because);
         continue;
       }
       if (action.type === "move") {
@@ -220,7 +217,7 @@ export class EncodeOrchestrator {
         // process starts — so a move is this one ending and another beginning
         // where the material is missing. Both halves are recorded as what they
         // are, which is why the ending of a moved run is not called normal.
-        this.#stop(address, action.runId, action.because);
+        this.#stop(action.run, action.because);
         this.#start(address, action.from, action.to, action.because);
         continue;
       }
@@ -230,7 +227,7 @@ export class EncodeOrchestrator {
       }
       // A run that stays keeps its claim current: the free stretch ahead of it
       // may have shrunk since it was given one.
-      coverage.claim(action.runId, action.from, action.to);
+      coverage.claim(action.run, action.from, action.to);
     }
   }
 
@@ -255,7 +252,7 @@ export class EncodeOrchestrator {
     const onThisOutput = this.#runs.get(address) ?? [];
     onThisOutput.push(run);
     this.#runs.set(address, onThisOutput);
-    this.coverageOf(address).claim(run.id, from, to);
+    this.coverageOf(address).claim(run, from, to);
     run.start(because);
   }
 
@@ -272,29 +269,24 @@ export class EncodeOrchestrator {
    * @param {{ id: string, from: number, to: number, head: number, speedX: number, isAlive: boolean, stop: (because: string) => void }} run
    */
   adopt(address, run) {
-    if (!run || typeof run.id !== "string") {
+    if (!run) {
       return;
     }
     const onThisOutput = this.#runs.get(address) ?? [];
-    if (onThisOutput.some((known) => known.id === run.id)) {
+    if (onThisOutput.includes(run)) {
       return;
     }
     onThisOutput.push(run);
     this.#runs.set(address, onThisOutput);
-    this.coverageOf(address).claim(run.id, run.from, run.to);
+    this.coverageOf(address).claim(run, run.from, run.to);
   }
 
   /**
-   * @param {string} address
-   * @param {string} runId
+   * @param {object} run
    * @param {string} because
    */
-  #stop(address, runId, because) {
-    for (const run of this.runsOn(address)) {
-      if (run.id === runId) {
-        run.stop(because);
-      }
-    }
+  #stop(run, because) {
+    run.stop(because);
   }
 
   /**
@@ -307,8 +299,8 @@ export class EncodeOrchestrator {
    * @param {import("../encode/EncodeRun.js").RunEnded} ended
    */
   noteEnded(ended) {
-    this.coverageOf(ended.address).release(ended.runId);
-    const remaining = this.runsOn(ended.address).filter((run) => run.id !== ended.runId);
+    this.coverageOf(ended.address).release(ended.run);
+    const remaining = this.runsOn(ended.address).filter((run) => run !== ended.run);
     if (remaining.length === 0) {
       this.#runs.delete(ended.address);
     } else {
@@ -350,7 +342,7 @@ export class EncodeOrchestrator {
       const windows = this.demand.windowsOn(address).map((w) => ({ from: w.from, to: w.to }));
       const waiting = firstUnmetWant(coverage, windows);
       const runs = this.runsOn(address)
-        .map((run) => `${run.id}:#${run.head}..#${run.to}@${run.speedX.toFixed(1)}x`)
+        .map((run) => `#${run.head}..#${run.to}@${run.speedX.toFixed(1)}x`)
         .join(" ");
       parts.push(
         `${address.slice(0, 60)} ready=${coverage.stats().ready} ` +

@@ -65,10 +65,9 @@ test("a start says why it is starting and with what", () => {
   run.start("nobody is making #10 and a viewer is waiting for it");
   const [level, line] = lines[0];
   assert.equal(level, "info");
-  // Named by the run itself; the number counts every run this process has made,
-  // so the test asks for the shape rather than for a particular number.
-  assert.match(line, /encode-run run#\d+ start #10\.\.#14/);
-  assert.match(line, new RegExp(`encode-run ${run.id} `));
+  // A run is named by what it produces: the stretch it was given, on the output
+  // it makes segments of. No other live run of that output can hold it.
+  assert.match(line, /encode-run #10\.\.#14 of torrent:abc:/);
   assert.match(line, /nobody is making #10/);
   assert.match(line, /ffmpeg -i in out/);
 });

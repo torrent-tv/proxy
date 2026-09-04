@@ -6686,7 +6686,148 @@ export class HlsSessionManager {
       rendition.lastAccessedAt = Date.now();
       this.#seekSession(rendition, positionSeconds);
     }
-    return this.#seekSession(this.#activeVariant(named, consumerId), positionSeconds);
+    const onScreen = this.#activeVariant(named, consumerId);
+    // A seek backwards while somebody else is watching ahead must not drag
+    // their picture back with it. A session holds ONE run, so repositioning it
+    // is repositioning theirs: field shape of 2026-09-04, two viewers who
+    // opened a film together, one jumps back an hour, and the other's segments
+    // stop being made.
+    //
+    // The answer is not to refuse the seek but to give it a run of its own. A
+    // run at another position is another SESSION of the same output — which
+    // costs nothing extra now that segments are addressed by the output rather
+    // than by the session, so both runs write into one directory and each
+    // viewer is served whatever either of them has made.
+    if (this.#wouldDragAnotherViewerBack(onScreen, consumerId, positionSeconds)) {
+      const own = this.#sessionAtPosition(onScreen, positionSeconds);
+      if (own && own !== onScreen) {
+        logger.info(
+          `transcode ${onScreen.id} seek to ${positionSeconds.toFixed(1)}s served by its own run ` +
+          `(${own.id.slice(0, 8)}) for ${consumerId}: another viewer is watching ahead ` +
+          `"${onScreen.fileName}"`
+        );
+        return this.#seekSession(own, positionSeconds);
+      }
+      logger.info(
+        `transcode ${onScreen.id} seek to ${positionSeconds.toFixed(1)}s starting a run of its ` +
+        `own for ${consumerId}: another viewer is watching ahead, and one run cannot be in two ` +
+        `places "${onScreen.fileName}"`
+      );
+      // Not awaited: this call answers the browser, and what the viewer waits
+      // for afterwards is the segment, which the ordinary loading flow already
+      // knows how to wait for. The other viewer's picture is left alone, which
+      // is the whole point.
+      void this.#startSessionAtPosition(onScreen, positionSeconds).catch((error) => {
+        const message = error instanceof Error ? error.message : String(error);
+        logger.warn(`transcode ${onScreen.id} could not start a run at that position: ${message}`);
+      });
+      return true;
+    }
+    return this.#seekSession(onScreen, positionSeconds);
+  }
+
+  /**
+   * Whether repositioning this session would take the picture away from
+   * somebody else.
+   *
+   * Two things have to hold. The seek has to be one that actually restarts the
+   * run — a position the run already covers going forward costs nobody
+   * anything. And another viewer has to be live and AHEAD of it, since a run
+   * only ever moves forward: what lies behind the furthest viewer has already
+   * been made, and dragging the run back is what stops it being made for them.
+   *
+   * @param {HlsSession} session
+   * @param {string} consumerId - The one seeking, who does not count.
+   * @param {number} positionSeconds
+   * @returns {boolean}
+   */
+  #wouldDragAnotherViewerBack(session, consumerId, positionSeconds) {
+    if (!session || !consumerId || !processCanBeSignalled(session.runState)) {
+      return false;
+    }
+    const target = this.#segmentIndexForTime(session, positionSeconds);
+    const head = Number(session.encodeStartIndex);
+    if (!Number.isInteger(head) || target >= head) {
+      return false;
+    }
+    const staleAfterMs = (this.lookaheadSeconds + this.segmentDurationSec) * 1000;
+    const now = Date.now();
+    for (const [otherId, viewer] of viewersOf(session)) {
+      if (otherId === consumerId || !viewer.isLive(now, staleAfterMs)) {
+        continue;
+      }
+      if (viewer.head.segment > target) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  /**
+   * A session of the same output, positioned where this viewer is going.
+   *
+   * The same material by every parameter that decides what is produced — only
+   * the place it begins differs, which is what the session key still carries
+   * and what decides how many runs there are.
+   *
+   * @param {HlsSession} base
+   * @param {number} positionSeconds
+   * @returns {Promise<HlsSession | null> | HlsSession | null}
+   */
+  #sessionAtPosition(base, positionSeconds) {
+    const key = `${base.outputKey}:start=${Math.round(positionSeconds / 10) * 10}`;
+    const existingId = this.sessionIdBySource.get(key);
+    const existing = existingId ? this.sessionsById.get(existingId) : null;
+    return existing && existing.state !== "disposed" ? existing : null;
+  }
+
+  /**
+   * Make one, with every parameter of the material the same and only the place
+   * it begins different.
+   *
+   * It is held by the family rather than by the browser, which knows one
+   * session id and must go on knowing one: its segment requests keep going to
+   * the session it holds, and that session serves them out of the directory
+   * both runs write into.
+   *
+   * @param {HlsSession} base
+   * @param {number} positionSeconds
+   * @returns {Promise<HlsSession | null>}
+   */
+  async #startSessionAtPosition(base, positionSeconds) {
+    if (typeof base.acquireSource !== "function" && base.acquireSource !== null) {
+      return null;
+    }
+    return this.createOrGetSession({
+      sourceKey: base.sourceKey,
+      fileIndex: base.fileIndex,
+      transcodeVideo: base.transcodeVideo === true,
+      transcodeAudio: base.transcodeAudio === true,
+      fileName: base.fileName,
+      // The family's own claim, exactly as a quality step is held: nobody
+      // outside this class learns its id, so nothing else could ever release
+      // it, and it is let go when the session that asked for it ends.
+      consumerId: variantConsumerId(base.id),
+      targetWidth: 0,
+      targetHeight: base.transcodeVideo === true ? this.variantHeightOf(base) : 0,
+      startPositionSeconds: positionSeconds,
+      audioTrackIndex: base.audioTrackIndex,
+      manualQuality: base.manualQuality === true,
+      audioRenditions: base.audioRenditions === true,
+      inheritedAudioSeparate: base.audioSeparate === true,
+      audioOnly: base.audioOnly === true,
+      segmentFormatId: base.segmentFormat?.id ?? "",
+      inheritedGrid: base.cutGrid === "keyframe"
+        ? {
+            boundaries: base.segmentBoundaries,
+            published: base.publishedBoundaries,
+            keyframeTimes: base.keyframeTimes,
+            keyframeTolerance: base.keyframeTolerance,
+            containerFormat: base.containerFormat
+          }
+        : null,
+      acquireSource: base.acquireSource
+    });
   }
 
   /**

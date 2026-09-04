@@ -64,6 +64,8 @@ import { AudioOutput, CutGrid, OutputSpec, VideoOutput } from "./output/index.js
 import { ProducedIndex } from "./produced-index.js";
 import { SegmentStore } from "./encode/SegmentStore.js";
 import { viewerOf, viewersOf } from "./viewer/Viewer.js";
+import { sessionAsRun } from "./encode/SessionRun.js";
+import { EncodeOrchestrator } from "./orchestrators/EncodeOrchestrator.js";
 import { readDiskFree } from "./memory-report.js";
 
 /**
@@ -703,6 +705,21 @@ const SEGMENT_STORE_IDLE_MS = 6 * 60 * 60 * 1000;
 const SEGMENT_STORE_FREE_SHARE = 0.25;
 /** What the store may hold where the free space cannot be read at all. */
 const SEGMENT_STORE_FALLBACK_BYTES = 2 * 1024 * 1024 * 1024;
+/**
+ * The most encoders that may work on one output at once, whatever the
+ * arithmetic says.
+ *
+ * Not a budget — the budget is `#maxRunsForOutput`, and it is measured. This
+ * is a bound on the SEARCH, so that a host fast enough to keep dividing does
+ * not end up with an encoder per viewer on a film nobody is seeking about.
+ */
+const MAX_CONCURRENT_RUNS = 4;
+/**
+ * What it costs to stop an encoder and start another where the material is
+ * missing. Measured on the addon host 2026-09-04: a spawn with its input open
+ * is 0.12 s there, 0.5-0.6 s on a developer's desktop.
+ */
+const RUN_RESTART_COST_SEC = 0.12;
 const DEFAULT_STARTUP_WAIT_MS = 5_000;
 // Realtime budget — runtime downswitch (software encoder only). Periodically
 // check each active software-transcode session's ffmpeg `speed`; when it stays
@@ -1901,6 +1918,16 @@ export class HlsSessionManager {
     this.segmentStore = segmentStore instanceof SegmentStore
       ? segmentStore
       : new SegmentStore({ logger });
+    // What encoders there should be on each output, and where. Given the two
+    // things only this class can answer: how many this machine can afford, and
+    // how to make one.
+    this.encodeOrchestrator = new EncodeOrchestrator({
+      maxRunsFor: (address) => this.maxRunsForOutput(address),
+      makeRun: ({ address, from }) => this.#makeRunAt(address, from),
+      segmentSeconds: this.segmentDurationSec,
+      restartCostSec: RUN_RESTART_COST_SEC,
+      logger
+    });
     this.sessionIdBySource = new Map();
     this.cleanupTimer = setInterval(() => {
       void this.cleanupExpired();
@@ -3838,49 +3865,178 @@ export class HlsSessionManager {
   }
 
   #enforceLookAhead() {
+    this.planEncodersNow();
     for (const session of this.sessionsById.values()) {
-      this.#stopIfItWalkedIntoAnotherRun(session);
       this.#enforceLookAheadFor(session);
     }
   }
 
   /**
-   * Stop a run that has produced its way into a stretch another run was given.
+   * Ask the plan what encoders there should be, and let it act.
    *
-   * A run's end is an ARGUMENT, fixed when it was spawned: ffmpeg has no
-   * channel by which a running encode can be told to stop somewhere new, so a
-   * run told to go to the end of the file will do exactly that. When a second
-   * viewer opens the same film further on and is given the stretch in front,
-   * the first run is walking towards material somebody else is making.
+   * This is where three separate rules written into this class become one:
+   * where a run belongs, when a run has been overtaken, and how many the
+   * machine can afford. Each of them was a condition among eleven thousand
+   * lines; the plan is a hundred lines of arithmetic over coverage, demand and
+   * a budget, with sixteen checks over it and no ffmpeg, session or route
+   * behind it.
    *
-   * Three ways to deal with that, and this is the cheap one. Restarting the
-   * first run with a new end would make it stop by itself, at the price of a
-   * restart its own viewer pays for — a spawn is 0.12 s on the addon host but
-   * the decode up to its position is not. Leaving it be costs a second copy of
-   * every segment the two of them overlap on. Stopping it where it arrives
-   * costs one segment, made twice, and no restart at all.
+   * What it is given is deliberately anonymous. Which viewer wants a segment
+   * never reaches it — only that somebody does, stated as a span, exactly as
+   * the download layer states what it wants of the swarm.
    *
-   * Asked here rather than only when a segment is served, because a run that
-   * nobody is asking for anything from is exactly the one that walks furthest.
-   *
-   * @param {HlsSession} session
    * @returns {void}
    */
-  #stopIfItWalkedIntoAnotherRun(session) {
-    if (!session || session.state === "disposed" || !processCanBeSignalled(session.runState)) {
-      return;
+  planEncodersNow() {
+    /** @type {Map<string, HlsSession[]>} */
+    const byOutput = new Map();
+    for (const session of this.sessionsById.values()) {
+      const address = session.outputKey ?? "";
+      if (!address || session.state === "disposed") {
+        continue;
+      }
+      byOutput.set(address, [...(byOutput.get(address) ?? []), session]);
     }
-    const produced = this.#latestProducedSegment(session);
-    if (!Number.isInteger(produced)) {
-      return;
+    const staleAfterMs = (this.lookaheadSeconds + this.segmentDurationSec) * 1000;
+    const lookaheadSegments = Math.ceil(this.lookaheadSeconds / this.segmentDurationSec);
+    const now = Date.now();
+    for (const [address, sessions] of byOutput) {
+      const coverage = this.encodeOrchestrator.coverageOf(address);
+      const segmentCount = Number(sessions[0].segmentCount) || 0;
+      if (segmentCount > 0) {
+        coverage.setSegmentCount(segmentCount);
+      }
+      coverage.markReadyAll(this.segmentStore.provenNumbers(address));
+      for (const session of sessions) {
+        this.encodeOrchestrator.adopt(address, this.#runOf(session));
+        // What the viewers of this session are waiting for, as spans. A viewer
+        // wants the segment they are at and the cushion in front of it, which
+        // is what the encoder is steered by everywhere else in this class.
+        for (const [consumerId, viewer] of viewersOf(session)) {
+          if (!viewer.isLive(now, staleAfterMs)) {
+            this.encodeOrchestrator.release(`${session.id}:${consumerId}`);
+            continue;
+          }
+          this.encodeOrchestrator.want({
+            claimant: `${session.id}:${consumerId}`,
+            address,
+            from: viewer.head.segment,
+            to: viewer.head.segment + lookaheadSegments
+          });
+        }
+      }
     }
-    const owner = this.runMakingSegment(session, produced);
-    if (owner !== null) {
-      this.#stopEncodeRun(
+    this.encodeOrchestrator.reconcile();
+  }
+
+  /**
+   * Make an encoder for this output, beginning at this segment.
+   *
+   * A run at another position is another SESSION of the same output — same
+   * material by every parameter that decides what is produced, differing only
+   * in where it begins. That costs nothing extra now that segments are
+   * addressed by the output: both write into one directory and either viewer is
+   * served whatever either has made.
+   *
+   * Answered with a handle straight away and the session made behind it,
+   * because the plan is arithmetic and must not wait on a probe.
+   *
+   * @param {string} address
+   * @param {number} from
+   * @returns {object | null}
+   */
+  #makeRunAt(address, from) {
+    let base = null;
+    for (const session of this.sessionsById.values()) {
+      if (session.outputKey === address && session.state !== "disposed") {
+        base = session;
+        break;
+      }
+    }
+    if (!base) {
+      return null;
+    }
+    const positionSeconds = this.#segmentStartTime(base, from);
+    const existing = this.#sessionAtPosition(base, positionSeconds);
+    if (existing) {
+      return this.#runOf(existing);
+    }
+    void this.#startSessionAtPosition(base, positionSeconds).catch((error) => {
+      const message = error instanceof Error ? error.message : String(error);
+      logger.warn(`transcode could not start a run at #${from} of ${address}: ${message}`);
+    });
+    return null;
+  }
+
+  /**
+   * This session, as the one running encoder it is.
+   *
+   * @param {HlsSession} session
+   * @returns {object}
+   */
+  #runOf(session) {
+    if (!session.asRun) {
+      session.asRun = sessionAsRun({
         session,
-        `it produced #${produced}, which ${owner.slice(0, 8)} was given`
-      );
+        headOf: () => {
+          const produced = this.#latestProducedSegment(session);
+          return Number.isInteger(produced)
+            ? produced + 1
+            : (Number(session.encodeStartIndex) || 0);
+        },
+        speedOf: () => Number(session.recentSpeed?.speed) || 0,
+        aliveOf: () => session.state !== "disposed" && processCanBeSignalled(session.runState),
+        stop: (because) => this.#stopEncodeRun(session, because)
+      });
     }
+    return session.asRun;
+  }
+
+  /**
+   * How many encoders this machine can afford on one output at once.
+   *
+   * Measured rather than chosen, and it is the same arithmetic that decides
+   * which quality steps are offered: what a second job costs here is not
+   * assumed to be nothing. Field 2026-09-03 on the addon host, `testsrc2`
+   * through libx264 `ultrafast` — at 854x480 one run makes 7.12x and two make
+   * 4.20x and 4.16x, so both stay far above realtime and a second is
+   * affordable; at 1920x1080 one makes 1.96x and two make 0.99x and 0.98x, so
+   * the machine is full at one.
+   *
+   * @param {string} address
+   * @returns {number}
+   */
+  maxRunsForOutput(address) {
+    let alone = 0;
+    for (const session of this.sessionsById.values()) {
+      if (session.outputKey !== address || session.state === "disposed") {
+        continue;
+      }
+      const measured = Number(session.recentSpeed?.speed);
+      if (Number.isFinite(measured) && measured > alone) {
+        alone = measured;
+      }
+    }
+    if (!(alone > 0)) {
+      // Nothing measured on this output yet. One encoder is what it has, and
+      // what it has is what it keeps until there is a reading to argue with.
+      return 1;
+    }
+    let affordable = 1;
+    while (affordable < MAX_CONCURRENT_RUNS) {
+      const { penalty, measured } = contentionPenalty(affordable, this.contentionPenalties);
+      // An UNMEASURED penalty is 1, and that is the honest answer to "what does
+      // a second job cost" only in the sense that nothing has been measured —
+      // it is not a statement that a second job is free. Measured on the addon
+      // host it is 1.70x at 854x480 and 1.98x at 1920x1080, so taking 1 would
+      // let a machine that cannot hold two runs start two. Where nothing has
+      // been measured, one is what it has.
+      if (!measured || !(alone / penalty >= 1)) {
+        break;
+      }
+      affordable += 1;
+    }
+    return affordable;
   }
 
   /**

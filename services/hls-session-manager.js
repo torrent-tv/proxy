@@ -63,6 +63,7 @@ import { audioRenditionName } from "./audio-inventory.js";
 import { AudioOutput, CutGrid, OutputSpec, VideoOutput } from "./output/index.js";
 import { ProducedIndex } from "./produced-index.js";
 import { SegmentStore } from "./encode/SegmentStore.js";
+import { viewerOf, viewersOf } from "./viewer/Viewer.js";
 import { readDiskFree } from "./memory-report.js";
 
 /**
@@ -1437,10 +1438,7 @@ export function segmentCutTimesFrom(boundaries, startIndex) {
  * @returns {Map<string, { segment: number, seconds: number, at: number }>}
  */
 function headsOf(session) {
-  if (!(session.consumerHeads instanceof Map)) {
-    session.consumerHeads = new Map();
-  }
-  return session.consumerHeads;
+  return viewersOf(session);
 }
 
 /**
@@ -2096,13 +2094,10 @@ export class HlsSessionManager {
           // joining knows nothing about: they may have chosen another language,
           // and their browser may need a track re-encoded that the first
           // viewer's could decode as it stands.
-          if (!(existing.audioChoiceByConsumer instanceof Map)) {
-            existing.audioChoiceByConsumer = new Map();
-          }
-          existing.audioChoiceByConsumer.set(consumerId, {
+          viewerOf(existing, consumerId).audio = {
             trackIndex: normalizedAudioTrack,
             transcode: transcodeAudio === true
-          });
+          };
         }
         // Reuse said nothing at all before this, so a session serving two
         // viewers looked exactly like a session serving one — and the whole
@@ -2531,24 +2526,12 @@ export class HlsSessionManager {
       consumers: new Set(consumerId ? [consumerId] : []),
       // What each viewer is listening to: which soundtrack, and whether their
       // browser can decode it as it stands. Both are properties of a VIEWER and
-      // neither is a property of a picture that carries no sound — which is why
-      // they live in a map instead of in the two fields below, now that two
-      // viewers who chose different languages share one picture. Seeded with
-      // the viewer who created the session, so a browser that names itself
-      // never depends on having asked for a segment first.
-      audioChoiceByConsumer: new Map(
-        consumerId ? [[consumerId, { trackIndex: normalizedAudioTrack, transcode: transcodeAudio === true }]] : []
-      ),
-      // Which quality step each viewer has on screen. A step is a session of
-      // its own, so with one answer per session a step taken by one viewer
-      // moved everybody: their stream stopped, and their next seek was
-      // forwarded to a rung they never chose. That is what used to keep the
-      // consumer id in the session key, and it is what takes it out.
-      activeVariantByConsumer: new Map(),
-      // And which step each of them is having prepared, for the same reason:
-      // what one viewer abandons may be what another is watching.
-      warmingVariantByConsumer: new Map(),
-      warmingAudioByConsumer: new Map(),
+      // neither is a property of a picture that carries no sound, now that two
+      // viewers who chose different languages share one picture — so they are
+      // fields of the viewer, along with the step on their screen, the step and
+      // the track being warmed for them, where they are and what their link
+      // carries. Seeded with the viewer who created the session, so a browser
+      // that names itself never depends on having asked for a segment first.
       // Transcode parameters retained so the encode run can be restarted at an
       // arbitrary segment when the player seeks (server-side seeking).
       sourceKey,
@@ -2661,7 +2644,6 @@ export class HlsSessionManager {
       // running dry, and the audio rendition's start subtracted one viewer's
       // buffer from another viewer's read head.
       /** @type {Map<string, { linkMbps: number, bufferedAheadSec: number, positionSeconds: number | null, at: number }>} */
-      netReports: new Map(),
       // When this session last said what its cushion is (see #sayCushion).
       cushionSaidAt: 0,
       linkSlowSince: 0,
@@ -2746,7 +2728,7 @@ export class HlsSessionManager {
       // Highest segment the viewer has actually asked for, and whether the
       // encoder is currently suspended for running too far past it.
       // See #enforceLookAhead. With several viewers on one session it is the
-      // FURTHEST of them, derived from `consumerHeads` below.
+      // FURTHEST of them, derived from the viewers below.
       lastRequestedSegment: null,
       // Where each viewer of this session is, separately: the segment they last
       // asked for and the position that implies, or the position they seeked
@@ -2756,7 +2738,13 @@ export class HlsSessionManager {
       // in front. What must stay shared is what the single encoder does; what
       // must not is the question "is THIS request still wanted".
       /** @type {Map<string, { segment: number, seconds: number, at: number }>} */
-      consumerHeads: new Map(),
+      // Everyone watching this session, one object each. It was six parallel
+      // maps keyed by consumer id — what they are listening to, the step on
+      // their screen, the step and the track being warmed for them, where they
+      // are, what their link carries — with six places to remember to update
+      // and six to remember to forget. The forgetting was already wrong:
+      // releasing a consumer emptied none of them.
+      viewers: new Map(),
       encoderPauseUnsupported: false,
       seekFirstFarAt: 0,
       // Circuit breaker: consecutive FAST failures (see SEEK_FAST_FAIL_MS) at
@@ -2813,6 +2801,15 @@ export class HlsSessionManager {
             }
           }
         : null;
+    }
+    // The viewer who asked for this session, so a browser that names itself
+    // never has to have requested a segment first for its own soundtrack choice
+    // to be known.
+    if (consumerId) {
+      viewerOf(session, consumerId).audio = {
+        trackIndex: normalizedAudioTrack,
+        transcode: transcodeAudio === true
+      };
     }
     this.sessionsById.set(sessionId, session);
     this.sessionIdBySource.set(sourceMapKey, sessionId);
@@ -3452,7 +3449,7 @@ export class HlsSessionManager {
     // report of one of them says nothing about the other's encoder.
     const session = this.#activeVariant(named, typeof consumerId === "string" ? consumerId : "");
     const now = Date.now();
-    session.netReports.set(typeof consumerId === "string" && consumerId.length > 0 ? consumerId : "", {
+    viewerOf(session, typeof consumerId === "string" && consumerId.length > 0 ? consumerId : "").netReport = {
       linkMbps,
       bufferedAheadSec,
       // Where the picture is, said by the viewer rather than worked out from
@@ -3460,13 +3457,23 @@ export class HlsSessionManager {
       positionSeconds:
         Number.isFinite(positionSeconds) && positionSeconds >= 0 ? positionSeconds : null,
       at: now
-    });
+    };
     // A viewer who left stops reporting, and their last reading must not go on
     // deciding for the ones still here. Nothing else removes it: a closed data
     // channel does not release consumers today (roadmap item 55).
-    for (const [key, report] of session.netReports) {
+    for (const [key, viewer] of viewersOf(session)) {
+      const report = viewer.netReport;
+      if (report === null) {
+        continue;
+      }
       if (now - report.at > LINK_REPORT_FRESH_MS) {
-        session.netReports.delete(key);
+        viewer.netReport = null;
+        // A viewer with nothing left to say about themselves is a viewer this
+        // session has not met: one object goes, where six maps each had to be
+        // emptied and none of them was.
+        if (viewer.head === null && viewer.activeVariantId === null) {
+          viewersOf(session).delete(key);
+        }
       }
     }
     return true;
@@ -3503,17 +3510,23 @@ export class HlsSessionManager {
     // where they are, and the two answer different questions — see
     // `viewerPositionSource`. Only a seek writes it, so a request does not erase
     // it.
-    const seeked = heads.get(consumerId)?.seeked ?? null;
-    heads.set(consumerId, { segment, seconds, at: now, seeked });
+    const viewer = viewerOf(session, consumerId);
+    const seeked = viewer.head?.seeked ?? null;
+    viewer.head = { segment, seconds, at: now, seeked };
     const staleAfterMs = (this.lookaheadSeconds + this.segmentDurationSec) * 1000;
     let furthest = { segment, seconds };
-    for (const [key, head] of heads) {
-      if (now - head.at > staleAfterMs) {
+    for (const [key, other] of heads) {
+      if (other.head === null) {
+        continue;
+      }
+      if (!other.isLive(now, staleAfterMs)) {
+        // A viewer nobody has heard from for longer than the cushion has gone.
+        // One object goes, where six parallel maps each had to be remembered.
         heads.delete(key);
         continue;
       }
-      if (head.segment > furthest.segment) {
-        furthest = { segment: head.segment, seconds: head.seconds };
+      if (other.head.segment > furthest.segment) {
+        furthest = { segment: other.head.segment, seconds: other.head.seconds };
       }
     }
     return furthest;
@@ -3532,7 +3545,7 @@ export class HlsSessionManager {
     if (!consumerId) {
       return null;
     }
-    const head = session.consumerHeads?.get(consumerId);
+    const head = session.viewers?.get(consumerId)?.head;
     return head && Number.isFinite(head.seconds) ? head.seconds : null;
   }
 
@@ -3553,8 +3566,9 @@ export class HlsSessionManager {
    */
   #worstNetReport(session, now) {
     let worst = null;
-    for (const report of session.netReports.values()) {
-      if (now - report.at > LINK_REPORT_FRESH_MS) {
+    for (const viewer of viewersOf(session).values()) {
+      const report = viewer.netReport;
+      if (report === null || now - report.at > LINK_REPORT_FRESH_MS) {
         continue;
       }
       if (worst === null) {
@@ -6532,14 +6546,14 @@ export class HlsSessionManager {
     // is the freeze of 2026-08-18; keeping per-viewer heads without moving them
     // on a seek would bring it back one viewer at a time.
     if (consumerId) {
-      headsOf(named).set(consumerId, {
+      viewerOf(named, consumerId).head = {
         segment: this.#segmentIndexForTime(named, positionSeconds),
         seconds: positionSeconds,
         at: Date.now(),
         // Stated, not inferred. It is what makes this viewer's position a
         // "seeked" one for as long as they stay there.
         seeked: positionSeconds
-      });
+      };
     }
     // The browser holds one session id for the whole file and knows nothing of
     // variants, so a seek it reports means the stream on screen.
@@ -8601,9 +8615,7 @@ export class HlsSessionManager {
    * @returns {HlsSession}
    */
   #activeVariant(base, consumerId = "") {
-    const named = consumerId && base.activeVariantByConsumer instanceof Map
-      ? base.activeVariantByConsumer.get(consumerId)
-      : null;
+    const named = consumerId ? base.viewers?.get(consumerId)?.activeVariantId ?? null : null;
     const activeId = named ?? base.activeVariantId;
     if (!activeId || activeId === base.id) {
       return base;
@@ -8611,7 +8623,7 @@ export class HlsSessionManager {
     const active = this.sessionsById.get(activeId);
     if (!active || active.state === "disposed") {
       if (named) {
-        base.activeVariantByConsumer.delete(consumerId);
+        viewerOf(base, consumerId).activeVariantId = null;
       }
       if (base.activeVariantId === activeId) {
         base.activeVariantId = base.id;
@@ -8635,11 +8647,14 @@ export class HlsSessionManager {
   #variantsOnScreen(base) {
     const live = this.#liveConsumers(base);
     const onScreen = new Set();
-    for (const [consumerId, sessionId] of base.activeVariantByConsumer ?? []) {
+    for (const [consumerId, viewer] of base.viewers ?? []) {
+      if (viewer.activeVariantId === null) {
+        continue;
+      }
       if (consumerId && live.size > 0 && !live.has(consumerId)) {
         continue;
       }
-      onScreen.add(sessionId);
+      onScreen.add(viewer.activeVariantId);
     }
     if (onScreen.size === 0) {
       onScreen.add(this.#activeVariant(base).id);
@@ -8722,8 +8737,11 @@ export class HlsSessionManager {
     // A session that has never had a link report is the ordinary state at a
     // cold open, and the answer for it is the same as for one whose reports
     // have all gone stale: nobody has said where they are.
-    const reports = session.netReports instanceof Map ? session.netReports : new Map();
-    for (const report of reports.values()) {
+    for (const viewer of viewersOf(session).values()) {
+      const report = viewer.netReport;
+      if (report === null) {
+        continue;
+      }
       if (now - report.at > NET_REPORT_FRESH_MS) {
         continue;
       }
@@ -8808,7 +8826,7 @@ export class HlsSessionManager {
    * @returns {"seeked" | "requested" | "opened" | "none"}
    */
   #viewerPositionSourceOf(session, consumerId = "") {
-    const head = consumerId ? session.consumerHeads?.get(consumerId) : null;
+    const head = consumerId ? session.viewers?.get(consumerId)?.head ?? null : null;
     if (head) {
       return viewerPositionSource({
         seeked: head.seeked,
@@ -8839,7 +8857,7 @@ export class HlsSessionManager {
    * @returns {number}
    */
   #viewerPositionOf(session, consumerId = "") {
-    const head = consumerId ? session.consumerHeads?.get(consumerId) : null;
+    const head = consumerId ? session.viewers?.get(consumerId)?.head ?? null : null;
     if (head && Number.isFinite(head.seconds)) {
       return head.seconds;
     }
@@ -9296,10 +9314,7 @@ export class HlsSessionManager {
     // warming a quality rung has, and the same answer. Kept per viewer, because
     // one viewer's abandoned preparation must not stop a track another viewer
     // is listening to.
-    if (!(base.warmingAudioByConsumer instanceof Map)) {
-      base.warmingAudioByConsumer = new Map();
-    }
-    const stillWarming = base.warmingAudioByConsumer.get(consumerId);
+    const stillWarming = viewerOf(base, consumerId).warmingAudioId;
     if (stillWarming && stillWarming !== rendition.id) {
       const abandoned = this.sessionsById.get(stillWarming);
       const wanted = this.#liveAudioRenditionKeys(base);
@@ -9313,7 +9328,7 @@ export class HlsSessionManager {
         this.#stopEncodeRun(abandoned, "prepared for a track change the viewer did not make");
       }
     }
-    base.warmingAudioByConsumer.set(consumerId, rendition.id);
+    viewerOf(base, consumerId).warmingAudioId = rendition.id;
     // Pointed at the position the switch will land on: an existing track is
     // parked wherever the viewer left it.
     this.#seekSession(rendition, positionSeconds);
@@ -9344,10 +9359,7 @@ export class HlsSessionManager {
     // for one, which is the opposite of what warming is for.
     // Kept per viewer, and stopped only if nobody has it on screen: with two
     // viewers, what one of them abandons may be what the other is watching.
-    if (!(base.warmingVariantByConsumer instanceof Map)) {
-      base.warmingVariantByConsumer = new Map();
-    }
-    const stillWarming = base.warmingVariantByConsumer.get(consumerId);
+    const stillWarming = viewerOf(base, consumerId).warmingVariantId;
     if (stillWarming && stillWarming !== variant.id) {
       const abandoned = this.sessionsById.get(stillWarming);
       if (abandoned && !this.#variantsOnScreen(base).has(abandoned.id)) {
@@ -9357,9 +9369,9 @@ export class HlsSessionManager {
     // The base is not a rung being prepared for anybody — it is what the family
     // is named by — so warming its own height leaves nothing outstanding.
     if (variant.id === base.id) {
-      base.warmingVariantByConsumer.delete(consumerId);
+      viewerOf(base, consumerId).warmingVariantId = null;
     } else {
-      base.warmingVariantByConsumer.set(consumerId, variant.id);
+      viewerOf(base, consumerId).warmingVariantId = variant.id;
     }
     // An existing rung may be parked wherever it was left, so it is pointed at
     // the switch position exactly as an activation would — the difference is
@@ -9410,10 +9422,10 @@ export class HlsSessionManager {
     // rung now being switched to, or the viewer went somewhere else and it must
     // stop like any other rung nobody is watching. Nothing else would ever stop
     // it — only the rung being LEFT is stopped below.
-    const warmed = base.warmingVariantByConsumer instanceof Map
-      ? base.warmingVariantByConsumer.get(consumerId)
-      : null;
-    base.warmingVariantByConsumer?.delete(consumerId);
+    const warmed = base.viewers?.get(consumerId)?.warmingVariantId ?? null;
+    if (base.viewers?.has(consumerId)) {
+      viewerOf(base, consumerId).warmingVariantId = null;
+    }
     if (warmed && warmed !== variant.id && warmed !== previous.id) {
       const abandoned = this.sessionsById.get(warmed);
       if (abandoned && !this.#variantsOnScreen(base).has(abandoned.id)) {
@@ -9422,10 +9434,7 @@ export class HlsSessionManager {
     }
     const position = this.#variantStartSeconds(base, wantedIndex, consumerId);
     base.activeVariantId = variant.id;
-    if (!(base.activeVariantByConsumer instanceof Map)) {
-      base.activeVariantByConsumer = new Map();
-    }
-    base.activeVariantByConsumer.set(consumerId, variant.id);
+    viewerOf(base, consumerId).activeVariantId = variant.id;
     logger.info(
       `transcode ${base.id} variant now ${this.variantHeightOf(variant)}p ` +
       `(was ${this.variantHeightOf(previous)}p) at ${position.toFixed(1)}s` +
@@ -9652,10 +9661,7 @@ export class HlsSessionManager {
     if (previous.trackIndex === trackIndex) {
       return;
     }
-    if (!(base.audioChoiceByConsumer instanceof Map)) {
-      base.audioChoiceByConsumer = new Map();
-    }
-    base.audioChoiceByConsumer.set(consumerId, { ...previous, trackIndex });
+    viewerOf(base, consumerId).audio = { ...previous, trackIndex };
     // Kept for the viewer who cannot name themselves, and for the master's
     // default rendition when nobody has said anything else.
     base.activeAudioTrackIndex = trackIndex;
@@ -9696,8 +9702,8 @@ export class HlsSessionManager {
     const now = Date.now();
     const live = new Set();
     for (const member of this.#familyOf(base)) {
-      for (const [consumerId, head] of member.consumerHeads ?? []) {
-        if (now - head.at <= staleAfterMs) {
+      for (const [consumerId, viewer] of member.viewers ?? []) {
+        if (viewer.isLive(now, staleAfterMs)) {
           live.add(consumerId);
         }
       }
@@ -9714,9 +9720,7 @@ export class HlsSessionManager {
    * @returns {{ trackIndex: number, transcode: boolean }}
    */
   #audioChoiceOf(base, consumerId) {
-    const stated = base.audioChoiceByConsumer instanceof Map
-      ? base.audioChoiceByConsumer.get(consumerId)
-      : null;
+    const stated = base.viewers?.get(consumerId)?.audio ?? null;
     if (stated) {
       return stated;
     }
@@ -9744,8 +9748,8 @@ export class HlsSessionManager {
   #liveAudioRenditionKeys(base) {
     const wanted = new Set();
     const live = this.#liveConsumers(base);
-    const choices = base.audioChoiceByConsumer instanceof Map ? base.audioChoiceByConsumer : new Map();
-    for (const [consumerId, choice] of choices) {
+    for (const [consumerId, viewer] of viewersOf(base)) {
+      const choice = viewer.audio;
       // The unnamed viewer has no head to expire and is always counted; a named
       // one counts while some session of the family has heard from them.
       if (consumerId && live.size > 0 && !live.has(consumerId)) {
@@ -11285,6 +11289,12 @@ export class HlsSessionManager {
       session.consumers = new Set();
     }
     session.consumers.delete(consumerId);
+    // And everything that was true of them alone. This is what six parallel
+    // maps made easy to forget, and it WAS forgotten: a viewer who had left
+    // went on counting as wanting their soundtrack until their head expired,
+    // and their entries stayed for the life of the session. One object, one
+    // deletion.
+    viewersOf(session).delete(consumerId);
     session.lastAccessedAt = Date.now();
     const logReason = typeof reason === "string" && reason.length > 0 ? reason : "unspecified";
     logger.info(
@@ -11372,9 +11382,9 @@ export class HlsSessionManager {
         // And every viewer who was watching it goes back to the picture the
         // family is named by, or their next request would resolve a session
         // that no longer exists.
-        for (const [consumerId, id] of base.activeVariantByConsumer ?? []) {
-          if (id === session.id) {
-            base.activeVariantByConsumer.delete(consumerId);
+        for (const [, viewer] of base.viewers ?? []) {
+          if (viewer.activeVariantId === session.id) {
+            viewer.activeVariantId = null;
           }
         }
       }

@@ -17,6 +17,14 @@
  * named for them, four times what a player will bridge. One table, held once,
  * cannot drift from itself.
  *
+ * **What it does NOT hold, and why.** The container's own keyframe table, how
+ * exact that table is, which container answered, and how long the file runs:
+ * every one of those is a fact of the FILE, and this object is held per file AND
+ * grid — so a file cut two ways kept two copies of one immutable list. They live
+ * on the source file now, which is one object per file whatever grids are cut
+ * from it. What is left here is the two things that really are per grid: where
+ * the cuts are, and what the player was told they are.
+ *
  * **Two tables, and they are not the same thing.** `boundaries` is where the
  * file is cut NOW, corrections included, and it is what a run is told to cut
  * at. `published` is what the player was given, written once and never changed,
@@ -64,24 +72,8 @@ export class Timeline {
    * @param {"keyframe" | "uniform"} params.cutGrid - Whether those times are
    *   the source's own keyframes, which a copied picture has no choice about,
    *   or an even grid the encoder is told to place keyframes on.
-   * @param {number} params.totalDurationSeconds
-   * @param {number[] | null} [params.keyframeTimes] - The container's own
-   *   table, where it has one.
-   * @param {number} [params.keyframeTolerance] - How far a time in that table
-   *   may sit from the instant it names. Only AVI declares anything here.
-   * @param {string} [params.containerFormat] - Which container answered, so a
-   *   summary of how often an index disagrees with its own file can say what it
-   *   is a summary OF.
    */
-  constructor({
-    boundaries,
-    published = null,
-    cutGrid,
-    totalDurationSeconds,
-    keyframeTimes = null,
-    keyframeTolerance = 0,
-    containerFormat = ""
-  }) {
+  constructor({ boundaries, published = null, cutGrid }) {
     this.boundaries = Array.isArray(boundaries) ? boundaries : [];
     // What the player holds. Taken from the boundaries as they stood when the
     // playlist was written, and never touched again. Given outright only when a
@@ -89,10 +81,6 @@ export class Timeline {
     // always published from its own boundaries.
     this.published = Array.isArray(published) ? published : [...this.boundaries];
     this.cutGrid = cutGrid === "keyframe" ? "keyframe" : "uniform";
-    this.totalDurationSeconds = Number.isFinite(totalDurationSeconds) ? totalDurationSeconds : 0;
-    this.keyframeTimes = Array.isArray(keyframeTimes) ? keyframeTimes : null;
-    this.keyframeTolerance = Number.isFinite(keyframeTolerance) ? keyframeTolerance : 0;
-    this.containerFormat = String(containerFormat ?? "");
     // How well this container's keyframe index matches its own file. A fact
     // about the FILE and its index: asked per session it would be answered a
     // different number of times for one film depending on how many people

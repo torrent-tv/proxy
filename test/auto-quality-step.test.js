@@ -70,7 +70,6 @@ function fakeSession({ dirPath, transcodeVideo = true, cutGrid = transcodeVideo 
     // where one was read, which is the copy.
     timeline: new Timeline({
       boundaries: Array.from({ length: 101 }, (_, index) => index * SEGMENT_SECONDS),
-      totalDurationSeconds: 400,
       cutGrid
     }),
     state: "ready",

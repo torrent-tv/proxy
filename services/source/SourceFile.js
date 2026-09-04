@@ -173,6 +173,44 @@ export class SourceFile {
   }
 
   /**
+   * Where this file's picture has its keyframes, in seconds, or null while
+   * nobody has read them.
+   *
+   * A fact of the file in both container formats and by their own
+   * specifications: Matroska's Cues name the track each entry belongs to, and
+   * MP4 keeps the sync-sample table inside the track. It used to live on the
+   * cut table, which is held per file AND grid — so a file cut two ways kept
+   * two copies of one immutable list, and the table's own header said it
+   * belonged to "the file and its grid", which is two things.
+   *
+   * @returns {number[] | null}
+   */
+  get keyframeTimes() {
+    return Array.isArray(this.media?.keyframeTimes) ? this.media.keyframeTimes : null;
+  }
+
+  /**
+   * How far a time in that table may be from the true keyframe. Zero means the
+   * table is exact, which is what a Cues element or a sync-sample table gives.
+   *
+   * @returns {number}
+   */
+  get keyframeTolerance() {
+    const value = Number(this.media?.keyframeTolerance);
+    return Number.isFinite(value) && value > 0 ? value : 0;
+  }
+
+  /**
+   * Which container answered about this file, so a log line can say what was
+   * read rather than what was guessed from the name.
+   *
+   * @returns {string}
+   */
+  get containerFormat() {
+    return typeof this.media?.containerFormat === "string" ? this.media.containerFormat : "";
+  }
+
+  /**
    * What decoding this file costs per second, or null while its facts are
    * incomplete.
    *

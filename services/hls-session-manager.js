@@ -5328,6 +5328,43 @@ export class HlsSessionManager {
    *   here on is already made or already being made, and a run would only
    *   repeat somebody else's work.
    */
+  /**
+   * The run of another session that was given this segment number, if any.
+   *
+   * Only a run that is actually going: a stretch given to a run that has ended
+   * is free again, and nothing has to release it.
+   *
+   * @param {HlsSession} session - The one asking, which does not count itself.
+   * @param {number} index
+   * @returns {string | null} The other session's id.
+   */
+  runMakingSegment(session, index) {
+    const key = session.outputKey ?? "";
+    if (!key) {
+      return null;
+    }
+    for (const other of this.sessionsById.values()) {
+      if (other === session || other.outputKey !== key || other.state === "disposed") {
+        continue;
+      }
+      if (!processCanBeSignalled(other.runState)) {
+        continue;
+      }
+      const from = Number(other.encodeStartIndex);
+      // A run with an explicit stretch owns the whole of it. One WITHOUT an end
+      // owns only as far as it has actually got: claiming the rest of the film
+      // would make it the owner of every number in front of it, including the
+      // ones another run was expressly given.
+      const to = Number.isInteger(other.runEndIndex) && other.runEndIndex >= from
+        ? other.runEndIndex
+        : (this.#latestProducedSegment(other) ?? from);
+      if (Number.isInteger(from) && index >= from && index <= to) {
+        return other.id;
+      }
+    }
+    return null;
+  }
+
   planRunInterval(session, startIndex) {
     const key = session.outputKey ?? "";
     const lastIndex = (Number(session.segmentCount) || 0) - 1;
@@ -5350,10 +5387,23 @@ export class HlsSessionManager {
       if (!Number.isInteger(from)) {
         continue;
       }
-      const to = Number.isInteger(other.runEndIndex) && other.runEndIndex >= from
+      // How far this run will ACTUALLY get, which is not the same as how far it
+      // was allowed to go. A run without an end used to claim the whole film,
+      // and a second viewer opening the same film at another place then found
+      // every number taken and got no encoder at all — they would have waited
+      // for the first run to encode its way there, which on a long film is an
+      // hour. What bounds a run in practice is the look-ahead: it is suspended
+      // once it is that far in front of the segment its viewer last asked for,
+      // and past that point it produces nothing until somebody asks. So that is
+      // the honest extent of its claim, and it is a measured figure rather than
+      // a chosen one — the same allowance the browser sizes its cushion from.
+      const lookaheadSegments = Math.ceil(this.lookaheadSeconds / this.segmentDurationSec);
+      const head = Number.isInteger(other.encodeStartIndex) ? other.encodeStartIndex : from;
+      const willReach = Math.max(head, this.#latestProducedSegment(other) ?? head) + lookaheadSegments;
+      const allowed = Number.isInteger(other.runEndIndex) && other.runEndIndex >= from
         ? other.runEndIndex
         : lastIndex;
-      claims.push({ from, to });
+      claims.push({ from, to: Math.min(allowed, willReach) });
     }
     const takenAt = (index) =>
       ready.has(index) || claims.some((span) => index >= span.from && index <= span.to);
@@ -10418,6 +10468,27 @@ export class HlsSessionManager {
             return { kind: "warming-up" };
           }
           }
+        }
+      }
+      // A run that has walked into a stretch another run was given stops here.
+      //
+      // A run's own end is set when it starts, from the gaps of that moment,
+      // and a viewer who opened the same film somewhere else afterwards is not
+      // in that picture: their run took the stretch in front, and this one is
+      // now producing numbers they are producing too. Nothing may write a name
+      // another run wants — that is the whole reason runs used to be kept in
+      // separate directories, and this is what replaces it now that they share
+      // one.
+      if (!isPlaylist) {
+        const served = session.segmentFormat.segmentIndexFromName(fileName);
+        const madeByAnother = Number.isInteger(served) && served >= 0
+          ? this.runMakingSegment(session, served)
+          : null;
+        if (madeByAnother !== null) {
+          this.#stopEncodeRun(
+            session,
+            `it reached #${served}, which ${madeByAnother.slice(0, 8)} was given`
+          );
         }
       }
       // Cold-start: log the first servable SEGMENT of this session exactly once

@@ -28,6 +28,7 @@ import {
   discardOpenPiece,
   usableSegmentIndices
 } from "../services/hls-session-manager.js";
+import { startRunOn } from "./helpers/encode-run.js";
 import { fmp4Format } from "../services/segment-formats/fmp4.js";
 
 const MOVIE_TIMESCALE = 1000;
@@ -156,8 +157,6 @@ async function sessionWithTwoRuns() {
   const session = {
     id: SESSION_ID,
     dirPath,
-    runDirPath: path.join(dirPath, "run-2"),
-    runSerial: 2,
     // Where this file is cut, held by the file. A fixture that stated it
     // on the session was describing what production no longer does.
     timeline: new Timeline({
@@ -173,22 +172,23 @@ async function sessionWithTwoRuns() {
     startedAt: Date.now(),
     createEntryMs: Date.now(),
     lastAccessedAt: Date.now(),
-    // A run exists and is alive — the state the field case was in, and the one
-    // in which the old test called every leftover "still being written".
-    ffmpeg: { pid: 0, killed: false, kill() {} },
+    run: null,
     lastError: "",
     consumers: new Set(),
     viewers: new Map(),
     segmentFormat: fmp4Format,
-    usesExplicitCuts: true,
     useSyntheticPlaylist: true,
     playlistText: "#EXTM3U\n",
     initBytes: fmp4Format.extractInit(wholePiece(0)),
-    encodeStartIndex: 0,
     firstSegmentLogged: false,
     waitEpoch: 0
   };
   manager.sessionsById.set(SESSION_ID, session);
+  // A run exists and is alive — the state the field case was in, and the one in
+  // which the old test called every leftover "still being written". It writes
+  // into the second run's directory, which is where the newest copies are.
+  const run = startRunOn(session, { from: 0, usesExplicitCuts: true });
+  run.dirPath = path.join(dirPath, "run-2");
   return { manager, session, dirPath };
 }
 
@@ -266,7 +266,10 @@ test("the current run's own unfinished piece is waited for, never deleted", asyn
   // written right now. Deleting it is the 2026-08-06 incident: #225 was removed
   // 14 s into the run producing it, which then wrote on into a file nobody
   // could open, and the segment never appeared.
-  session.encodeStartIndex = 1;
+  //
+  // The live run begins at #1, so #1 is its own first piece.
+  const live = startRunOn(session, { from: 1, producing: false, usesExplicitCuts: true });
+  live.dirPath = path.join(dirPath, "run-2");
   await writeFile(path.join(dirPath, "run-2", "segment-00001.mp4"), Buffer.alloc(0));
 
   const result = await manager.getFileStream(SESSION_ID, "segment-00001.mp4", { requestSeq: 1 });

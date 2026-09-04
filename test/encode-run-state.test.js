@@ -271,7 +271,7 @@ test("the sawtooth of 2.9.93 is not expressible", () => {
 });
 
 test("a dead run cannot be mistaken for one that is covering the seek", () => {
-  // `session.ffmpeg` pointed at a corpse, so every later seek was waved through
+  // the process handle pointed at a corpse, so every later seek was waved through
   // as "already covered by the running encode" and the session answered 500 for
   // as long as the viewer kept trying.
   assert.equal(processCanBeSignalled(ENCODE_RUN_STATE.ENDED_FAILED), false);

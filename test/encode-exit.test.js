@@ -9,7 +9,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { ENCODE_EXIT, classifyEncodeExit } from "../services/encode-exit.js";
+import { ENCODE_EXIT, classifyEncodeExit } from "../services/encode/encode-exit.js";
 
 test("the predecessor a seek kills says nothing about the session", () => {
   // The handler decides "is this exit mine" by comparing against the session's

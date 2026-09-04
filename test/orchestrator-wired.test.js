@@ -18,6 +18,7 @@ import { HlsSessionManager } from "../services/hls-session-manager.js";
 import { SegmentStore } from "../services/encode/SegmentStore.js";
 import { fmp4Format } from "../services/segment-formats/fmp4.js";
 import { viewerOf } from "../services/viewer/Viewer.js";
+import { startRunOn } from "./helpers/encode-run.js";
 
 const KEY = "torrent:abc:fmt=fmp4:grid=kf@0:video-only:v=0/copy";
 
@@ -36,8 +37,8 @@ function managerWithAnOutput() {
   return { manager, store, root, dirPath };
 }
 
-function sessionOn({ id, dirPath, runState = "PRODUCING", encodeStartIndex = 0, runEndIndex = -1, speed = 0 }) {
-  return {
+function sessionOn({ id, dirPath, encodeStartIndex = 0, runEndIndex = -1, speed = 0, running = true }) {
+  const session = {
     id,
     outputKey: KEY,
     dirPath,
@@ -55,15 +56,19 @@ function sessionOn({ id, dirPath, runState = "PRODUCING", encodeStartIndex = 0, 
     get audioFile() { return this.file; },
     segmentFormat: fmp4Format,
     segmentCount: 1000,
-    runState,
-    encodeStartIndex,
-    runEndIndex,
-    recentSpeed: speed > 0 ? { speed } : null,
+    recentSpeed: null,
     consumers: new Set(),
     viewers: new Map(),
-    ffmpeg: null,
+    run: null,
     lastAccessedAt: Date.now()
   };
+  if (running) {
+    const run = startRunOn(session, { id, from: encodeStartIndex, to: runEndIndex });
+    // A speed is a reading taken FROM a run, so it names the run it came from.
+    session.recentSpeed = speed > 0 ? { speed, at: Date.now(), run } : null;
+    run.noteSpeed(speed);
+  }
+  return session;
 }
 
 test("a session is handed to the plan as the run it is", (t) => {

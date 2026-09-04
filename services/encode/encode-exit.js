@@ -29,6 +29,23 @@
 export const ENCODE_EXIT = Object.freeze({
   /** The process was already replaced or the session is gone: it says nothing. */
   IGNORED: "ignored",
+  /**
+   * We stopped it on purpose — moved off covered material, no longer wanted,
+   * the output was dropped.
+   *
+   * Abnormal by the rule this vocabulary exists to serve: exactly one ending is
+   * normal, and our own kill is not it. Hiding it among the normal endings is
+   * what would make the count of abnormal endings useless.
+   */
+  STOPPED: "stopped",
+  /**
+   * It was found to be over without having said so.
+   *
+   * Only a run handed over from elsewhere can end this way; one that owns its
+   * own process reports its own ending. Counted apart precisely because it
+   * means nobody watched it end.
+   */
+  GONE: "gone",
   /** Reached the end of the file. */
   COMPLETE: "complete",
   /** Claimed success, stopped short of the last segment — the input dried up. */

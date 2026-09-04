@@ -11,7 +11,8 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
-import { EncodeRun, RUN_ENDING } from "../services/encode/EncodeRun.js";
+import { EncodeRun } from "../services/encode/EncodeRun.js";
+import { ENCODE_EXIT } from "../services/encode/encode-exit.js";
 import { SoftwareEncoder } from "../services/encode/SoftwareEncoder.js";
 import { EncodeOrchestrator } from "../services/orchestrators/EncodeOrchestrator.js";
 
@@ -139,7 +140,7 @@ test("a viewer who leaves takes the encoder with them", () => {
   made.release("one");
   made.reconcile();
   assert.equal(made.runsOn(PICTURE).length, 0);
-  assert.equal(made.endings()[RUN_ENDING.STOPPED], 1);
+  assert.equal(made.endings()[ENCODE_EXIT.STOPPED], 1);
 });
 
 test("a run that meets material made elsewhere is moved past it", () => {
@@ -170,8 +171,8 @@ test("every ending is counted, and our own kill is not counted as normal", () =>
   made.release("one");
   made.reconcile();
   const tally = made.endings();
-  assert.equal(tally[RUN_ENDING.FAILED], 1);
-  assert.equal(tally[RUN_ENDING.COMPLETED], 0);
+  assert.equal(tally[ENCODE_EXIT.FAILED], 1);
+  assert.equal(tally[ENCODE_EXIT.COMPLETE], 0);
 });
 
 test("the line says whether anybody is still waiting", () => {

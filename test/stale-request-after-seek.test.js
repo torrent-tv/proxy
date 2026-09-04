@@ -25,7 +25,7 @@ import os from "node:os";
 import path from "node:path";
 
 import { HlsSessionManager } from "../services/hls-session-manager.js";
-import { ENCODE_RUN_STATE } from "../services/encode/encode-run-state.js";
+import { startRunOn } from "./helpers/encode-run.js";
 import { fmp4Format } from "../services/segment-formats/fmp4.js";
 
 const SEGMENT_SECONDS = 4;
@@ -61,7 +61,6 @@ async function sessionWithRunAt373() {
       cutGrid: "uniform"
     }),
     state: "ready",
-    runState: ENCODE_RUN_STATE.PRODUCING,
     file: new SourceFile({ sourceKey: "source-1", fileIndex: 0, name: "film.mkv" }),
     // An ordinary session reads its own file, and its sound is inside it. The
     // three differ only for a soundtrack shipped as a file of its own.
@@ -71,15 +70,10 @@ async function sessionWithRunAt373() {
     lastAccessedAt: Date.now(),
     consumers: new Set(),
     segmentFormat: fmp4Format,
-    usesExplicitCuts: true,
     useSyntheticPlaylist: true,
     playlistText: "#EXTM3U\n",
     segmentCount: boundaries.length - 1,
-    encodeStartIndex: RUN_STARTS_AT,
-    // A live process: the repair refuses outright when nothing is encoding.
-    ffmpeg: { pid: 1234, killed: false, exitCode: null, signalCode: null, kill() { this.killed = true; } },
-    encodeRunGeneration: 0,
-    runSerial: 1,
+    run: null,
     behindHeadAsks: new Map(),
     firstWantedAt: new Map(),
     holdExplainedAt: new Map(),
@@ -92,6 +86,8 @@ async function sessionWithRunAt373() {
     progress: { processedSeconds: RUN_STARTS_AT * SEGMENT_SECONDS, speed: "1.0x", startPositionSeconds: RUN_STARTS_AT * SEGMENT_SECONDS }
   };
   manager.sessionsById.set(SESSION_ID, session);
+  // A live run: the repair refuses outright when nothing is encoding.
+  startRunOn(session, { from: RUN_STARTS_AT, usesExplicitCuts: true });
   return { manager, session, dirPath };
 }
 
@@ -136,7 +132,6 @@ test("a request behind where the viewer said they are does not move the encoder"
 
   // The viewer stated their position: 2083.4 s, which is segment #520 here.
   manager.requestSeek(SESSION_ID, 2083.4);
-  session.encodeStartIndex = RUN_STARTS_AT;
   askedTwiceLongEnough(session);
 
   const answer = await manager.getFileStream(

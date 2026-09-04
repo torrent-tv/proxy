@@ -12,6 +12,7 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
+import { Timeline } from "../services/output/Timeline.js";
 import { mkdtemp, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -40,6 +41,12 @@ function fakeSession({ id, encodeHeight, dirPath, transcodeVideo = true }) {
   return {
     id,
     dirPath,
+    // Where this file is cut, held by the file. A fixture that stated it
+    // on the session was describing what production no longer does.
+    timeline: new Timeline({
+      boundaries: Array.from({ length: 101 }, (_, index) => index * SEGMENT_SECONDS),
+      cutGrid: "uniform"
+    }),
     state: "ready",
     fileName: "video.mkv",
     startedAt: Date.now(),
@@ -71,7 +78,6 @@ function fakeSession({ id, encodeHeight, dirPath, transcodeVideo = true }) {
     usesExplicitCuts: false,
     useSyntheticPlaylist: true,
     playlistText: "#EXTM3U\n",
-    segmentBoundaries: Array.from({ length: 101 }, (_, index) => index * SEGMENT_SECONDS),
     segmentCount: 100,
     progress: { state: "running", processedSeconds: 0, startPositionSeconds: 0, speed: "1.0x" }
   };
@@ -204,7 +210,7 @@ test("a copied video is offered variants when its cut grid is real", async (t) =
   // re-encoded rung CAN be cut there too, by being told those times, and then
   // its segments cover the same spans and can stand in the copy's place.
   base.transcodeVideo = false;
-  base.cutGrid = "keyframe";
+  base.timeline = new Timeline({ boundaries: base.timeline?.boundaries ?? [], cutGrid: "keyframe" });
 
   const master = manager.buildMasterPlaylist(BASE_ID);
 
@@ -222,7 +228,7 @@ test("a copied video with no readable keyframe index is offered nothing", async 
   // Its playlist claims an even grid that ffmpeg does not cut on. Aligning a
   // rung to that is aligning it to a fiction.
   base.transcodeVideo = false;
-  base.cutGrid = "uniform";
+  base.timeline = new Timeline({ boundaries: base.timeline?.boundaries ?? [], cutGrid: "uniform" });
 
   assert.equal(manager.buildMasterPlaylist(BASE_ID), null);
 });

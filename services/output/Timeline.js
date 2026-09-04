@@ -25,11 +25,42 @@
  * reveal where the file's cuts really are.
  */
 
+/**
+ * A fresh tally of how well a container's keyframe index matches its file.
+ *
+ * @returns {{ checked: number, disagreed: number, maxDeviationSec: number, firstDisagreementIndex: number, deviations: number[], landedOnAnotherKeyframe: number, seen: Set<number> }}
+ */
+export function newIndexCheck() {
+  return {
+    checked: 0,
+    disagreed: 0,
+    maxDeviationSec: 0,
+    firstDisagreementIndex: -1,
+    // Every deviation, so the summary can report a distribution instead of one
+    // extreme. Bounded by the number of distinct boundaries a file produces.
+    deviations: [],
+    // Of the segments that started away from the playlist, how many began at
+    // ANOTHER time in the very list the grid was built from. This is the
+    // measurement that separates the two explanations: a table that describes
+    // times the file does not have, against a table that lists only SOME
+    // keyframes and a grid built over its gaps. Asked 2026-08-17 by the user,
+    // who was right that the second is far more likely — every deviation
+    // measured that day was positive, 0.58-2.96 s, which is what a cut pushed
+    // forward to the next real keyframe looks like.
+    landedOnAnotherKeyframe: 0,
+    // Which boundaries have been counted. A segment can be requested again, and
+    // a repeat is the same boundary, not new evidence.
+    seen: new Set()
+  };
+}
+
 export class Timeline {
   /**
    * @param {object} params
    * @param {number[]} params.boundaries - Cut times in seconds, ascending, one
    *   more than there are segments.
+   * @param {number[] | null} [params.published] - What the player was told, when
+   *   that differs from the boundaries because corrections have been made since.
    * @param {"keyframe" | "uniform"} params.cutGrid - Whether those times are
    *   the source's own keyframes, which a copied picture has no choice about,
    *   or an even grid the encoder is told to place keyframes on.
@@ -44,6 +75,7 @@ export class Timeline {
    */
   constructor({
     boundaries,
+    published = null,
     cutGrid,
     totalDurationSeconds,
     keyframeTimes = null,
@@ -52,20 +84,20 @@ export class Timeline {
   }) {
     this.boundaries = Array.isArray(boundaries) ? boundaries : [];
     // What the player holds. Taken from the boundaries as they stood when the
-    // playlist was written, and never touched again.
-    this.published = [...this.boundaries];
+    // playlist was written, and never touched again. Given outright only when a
+    // table is being restored with corrections already in it — a live one is
+    // always published from its own boundaries.
+    this.published = Array.isArray(published) ? published : [...this.boundaries];
     this.cutGrid = cutGrid === "keyframe" ? "keyframe" : "uniform";
     this.totalDurationSeconds = Number.isFinite(totalDurationSeconds) ? totalDurationSeconds : 0;
     this.keyframeTimes = Array.isArray(keyframeTimes) ? keyframeTimes : null;
     this.keyframeTolerance = Number.isFinite(keyframeTolerance) ? keyframeTolerance : 0;
     this.containerFormat = String(containerFormat ?? "");
-    /**
-     * How often a produced segment began somewhere the table did not name.
-     * A property of the FILE and its index, which is why it is here: asked per
-     * session it would be answered a different number of times for one film
-     * depending on how many people watched it.
-     */
-    this.indexCheck = { produced: 0, awayFromGrid: 0, atAnotherKeyframe: 0, worst: 0, first: null };
+    // How well this container's keyframe index matches its own file. A fact
+    // about the FILE and its index: asked per session it would be answered a
+    // different number of times for one film depending on how many people
+    // happened to watch it.
+    this.indexCheck = newIndexCheck();
   }
 
   /** @returns {number} How many segments this file is cut into. */
@@ -118,31 +150,6 @@ export class Timeline {
     return Math.max(0, this.segmentCount - 1);
   }
 
-  /**
-   * Record where a produced segment really began, against what the table said.
-   *
-   * @param {number} index
-   * @param {number} realStart
-   */
-  noteProducedStart(index, realStart) {
-    this.indexCheck.produced += 1;
-    const said = this.publishedStartOf(index);
-    const apart = Math.abs(realStart - said);
-    if (apart <= this.keyframeTolerance) {
-      return;
-    }
-    this.indexCheck.awayFromGrid += 1;
-    if (apart > this.indexCheck.worst) {
-      this.indexCheck.worst = apart;
-    }
-    if (this.indexCheck.first === null) {
-      this.indexCheck.first = index;
-    }
-    if (Array.isArray(this.keyframeTimes) &&
-        this.keyframeTimes.some((time) => Math.abs(time - realStart) <= this.keyframeTolerance)) {
-      this.indexCheck.atAnotherKeyframe += 1;
-    }
-  }
 }
 
 /**

@@ -14,6 +14,7 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
+import { Timeline } from "../services/output/Timeline.js";
 import { mkdtemp, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -41,6 +42,12 @@ async function managerWithRunAhead() {
   const session = {
     id: SESSION_ID,
     dirPath,
+    // Where this file is cut, held by the file. A fixture that stated it
+    // on the session was describing what production no longer does.
+    timeline: new Timeline({
+      boundaries: Array.from({ length: 1937 }, (_, index) => index * SEGMENT_SECONDS),
+      cutGrid: "uniform"
+    }),
     state: "ready",
     fileName: "film.avi",
     startedAt: Date.now(),
@@ -52,7 +59,6 @@ async function managerWithRunAhead() {
     transcodeVideo: true,
     useSyntheticPlaylist: true,
     playlistText: "#EXTM3U\n",
-    segmentBoundaries: Array.from({ length: 1937 }, (_, index) => index * SEGMENT_SECONDS),
     segmentCount: 1936,
     encodeStartIndex: RUN_STARTS_AT,
     encodeRunGeneration: 0,

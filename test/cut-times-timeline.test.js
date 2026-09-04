@@ -13,6 +13,7 @@
  */
 
 import assert from "node:assert/strict";
+import { Timeline } from "../services/output/Timeline.js";
 import test from "node:test";
 
 import { onKeyframeGridFor } from "../services/hls-session-manager.js";
@@ -33,10 +34,10 @@ test("a soundtrack follows the grid it was cut on, not its own encoding", () => 
   // A rendition is re-encoded by definition, so asking `transcodeVideo` about
   // it answers nothing. What decides its timeline is the grid it shares with
   // the picture it plays with.
-  assert.equal(onKeyframeGridFor({ audioOnly: true, cutGrid: "keyframe" }), true);
-  assert.equal(onKeyframeGridFor({ audioOnly: true, cutGrid: "uniform" }), false);
+  assert.equal(onKeyframeGridFor({ audioOnly: true, timeline: new Timeline({ boundaries: [], cutGrid: "keyframe" }) }), true);
+  assert.equal(onKeyframeGridFor({ audioOnly: true, timeline: new Timeline({ boundaries: [], cutGrid: "uniform" }) }), false);
   assert.equal(
-    onKeyframeGridFor({ audioOnly: true, cutGrid: "keyframe", transcodeVideo: true }),
+    onKeyframeGridFor({ audioOnly: true, transcodeVideo: true, timeline: new Timeline({ boundaries: [], cutGrid: "keyframe" }) }),
     true,
     "its own encoding must not decide this — that disagreement is the defect"
   );
@@ -48,8 +49,8 @@ test("one predicate answers for every caller", () => {
   for (const session of [
     { transcodeVideo: false },
     { transcodeVideo: true },
-    { audioOnly: true, cutGrid: "keyframe" },
-    { audioOnly: true, cutGrid: "uniform" },
+    { audioOnly: true, timeline: new Timeline({ boundaries: [], cutGrid: "keyframe" }) },
+    { audioOnly: true, timeline: new Timeline({ boundaries: [], cutGrid: "uniform" }) },
     {}
   ]) {
     assert.equal(onKeyframeGridFor(session), onKeyframeGridFor({ ...session }));

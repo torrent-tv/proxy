@@ -15,6 +15,7 @@
  */
 
 import assert from "node:assert/strict";
+import { Timeline } from "../services/output/Timeline.js";
 import test from "node:test";
 
 import { HlsSessionManager, segmentCutTimesFrom } from "../services/hls-session-manager.js";
@@ -38,8 +39,7 @@ function sessionWithDriftedGrid() {
   });
   const session = {
     id: "picture",
-    segmentBoundaries: [...CORRECTED],
-    publishedBoundaries: [...PUBLISHED]
+    timeline: new Timeline({ boundaries: [...CORRECTED], published: [...PUBLISHED], cutGrid: "uniform" })
   };
   return { manager, session };
 }
@@ -58,7 +58,7 @@ test("the cut list is the one the playlist was written from", () => {
 
 test("a corrected grid does not move the cuts of a session already being read", () => {
   const { manager, session } = sessionWithDriftedGrid();
-  const fromCorrected = segmentCutTimesFrom(session.segmentBoundaries, 1);
+  const fromCorrected = segmentCutTimesFrom(session.timeline.boundaries, 1);
   const fromPublished = segmentCutTimesFrom(manager.publishedGridFor(session), 1);
   assert.notDeepEqual(fromCorrected, fromPublished);
   // The gap the field measured: the corrected table would have cut #2 two
@@ -68,6 +68,6 @@ test("a corrected grid does not move the cuts of a session already being read", 
 
 test("a session that published no grid falls back to the live one", () => {
   const { manager } = sessionWithDriftedGrid();
-  const session = { id: "no-playlist", segmentBoundaries: [...CORRECTED], publishedBoundaries: [] };
+  const session = { id: "no-playlist", timeline: new Timeline({ boundaries: [...CORRECTED], published: [], cutGrid: "uniform" }) };
   assert.deepEqual(manager.publishedGridFor(session), CORRECTED);
 });

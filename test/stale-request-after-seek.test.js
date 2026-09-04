@@ -17,6 +17,7 @@
  */
 
 import assert from "node:assert/strict";
+import { Timeline } from "../services/output/Timeline.js";
 import test from "node:test";
 import { mkdtemp, rm } from "node:fs/promises";
 import os from "node:os";
@@ -52,6 +53,12 @@ async function sessionWithRunAt373() {
   const session = {
     id: SESSION_ID,
     dirPath,
+    // Where this file is cut, held by the file. A fixture that stated it
+    // on the session was describing what production no longer does.
+    timeline: new Timeline({
+      boundaries: boundaries,
+      cutGrid: "uniform"
+    }),
     state: "ready",
     runState: ENCODE_RUN_STATE.PRODUCING,
     fileName: "film.mkv",
@@ -62,7 +69,6 @@ async function sessionWithRunAt373() {
     usesExplicitCuts: true,
     useSyntheticPlaylist: true,
     playlistText: "#EXTM3U\n",
-    segmentBoundaries: boundaries,
     segmentCount: boundaries.length - 1,
     encodeStartIndex: RUN_STARTS_AT,
     // A live process: the repair refuses outright when nothing is encoding.

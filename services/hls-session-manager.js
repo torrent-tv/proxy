@@ -61,7 +61,8 @@ import {
 import { resolveSegmentFormat, SEGMENT_FORMAT_IDS } from "./segment-formats/index.js";
 import { audioRenditionName } from "./audio-inventory.js";
 import { AudioOutput, CutGrid, OutputSpec, VideoOutput } from "./output/index.js";
-import { Timeline, Timelines } from "./output/Timeline.js";
+import { newIndexCheck, Timeline, Timelines } from "./output/Timeline.js";
+export { newIndexCheck };
 import { Output, Outputs } from "./output/Output.js";
 import { ProducedIndex } from "./produced-index.js";
 import { SegmentStore } from "./encode/SegmentStore.js";
@@ -376,34 +377,6 @@ export function sourceDecodeCharacteristics(mediaInfo) {
   };
 }
 
-/**
- * A fresh tally of how well a container's keyframe index matches its file.
- *
- * @returns {{ checked: number, disagreed: number, maxDeviationSec: number, firstDisagreementIndex: number, seen: Set<number> }}
- */
-export function newIndexCheck() {
-  return {
-    checked: 0,
-    disagreed: 0,
-    maxDeviationSec: 0,
-    firstDisagreementIndex: -1,
-    // Every deviation, so the summary can report a distribution instead of one
-    // extreme. Bounded by the number of distinct boundaries a session produces.
-    deviations: [],
-    // Of the segments that started away from the playlist, how many began at
-    // ANOTHER time in the very list the grid was built from. This is the
-    // measurement that separates the two explanations: a table that describes
-    // times the file does not have, against a table that lists only SOME
-    // keyframes and a grid built over its gaps. Asked 2026-08-17 by the user,
-    // who was right that the second is far more likely — every deviation
-    // measured that day was positive, 0.58-2.96 s, which is what a cut pushed
-    // forward to the next real keyframe looks like.
-    landedOnAnotherKeyframe: 0,
-    // Which boundaries have been counted. A segment can be requested again, and
-    // a repeat is the same boundary, not new evidence.
-    seen: new Set()
-  };
-}
 
 /**
  * Add one produced segment's deviation to the tally.
@@ -1312,7 +1285,7 @@ export function ffmpegSeconds(value) {
  */
 export function onKeyframeGridFor(session) {
   return session?.audioOnly === true
-    ? session?.cutGrid === "keyframe"
+    ? session?.timeline?.cutGrid === "keyframe"
     : session?.transcodeVideo !== true;
 }
 
@@ -1572,9 +1545,9 @@ export function seekLandingOffsetFor(session, keyframe) {
   // A grid whose times are approximate needs that error added on top, or a name
   // sitting just below its real keyframe seeks to before it and lands on the
   // one before that. Only AVI declares one.
-  const tolerance = Number.isFinite(session?.keyframeTolerance) ? Math.max(0, session.keyframeTolerance) : 0;
+  const tolerance = Number.isFinite(session?.timeline?.keyframeTolerance) ? Math.max(0, session.timeline.keyframeTolerance) : 0;
   const wanted = SEEK_LANDING_OFFSET_SEC + tolerance;
-  const times = Array.isArray(session?.keyframeTimes) ? session.keyframeTimes : [];
+  const times = Array.isArray(session?.timeline?.keyframeTimes) ? session.timeline.keyframeTimes : [];
   const next = times.find((time) => time > keyframe + 0.001);
   if (next === undefined) {
     return wanted;
@@ -2255,7 +2228,7 @@ export class HlsSessionManager {
     // swarm — 8121 ms of every session created, measured three times out of
     // three on 2026-09-03. What is known now is used now; the reading runs
     // behind, and `#startEncodeRun` takes the freshest value at spawn time, the
-    // same way it already re-reads `session.keyframeTimes`.
+    // same way it already re-reads `session.timeline.keyframeTimes`.
     //
     // Unknown means "no difference between the two timelines", not "the
     // soundtrack starts at zero". The shift exists to correct a difference
@@ -2407,7 +2380,7 @@ export class HlsSessionManager {
       // the 6 s cap: AVI-class containers need a full packet scan, which 6 s can
       // never afford without delaying playback start — that starved budget is
       // exactly why the probe kept missing on the container where the seek bug
-      // was field-diagnosed. #startEncodeRun reads session.keyframeTimes fresh
+      // was field-diagnosed. #startEncodeRun reads session.timeline.keyframeTimes fresh
       // on every call, so a seek that happens AFTER this finishes picks it up
       // automatically; one that happens before falls back to the existing
       // circuit breaker as a safety net (no regression either way).
@@ -2418,7 +2391,7 @@ export class HlsSessionManager {
         if (!liveSession || liveSession.state === "disposed") {
           return; // Session gone before the probe finished — nothing to update.
         }
-        liveSession.keyframeTimes = times;
+        liveSession.timeline.keyframeTimes = times;
         const elapsedMs = Date.now() - backgroundStartedAt;
         logger.info(
           times
@@ -2483,13 +2456,6 @@ export class HlsSessionManager {
         containerFormat
       })
     );
-    // References, not copies. A correction found by one session — a produced
-    // segment showing where the file's cut really is — is a fact about the FILE,
-    // and every session of it must see the same one. Copies are what drifted:
-    // 0.6-2.9 s between two sessions of one film on 2026-08-17, and segments
-    // arriving a uniform 2.002 s early on 2026-08-20.
-    const segmentBoundaries = timeline.boundaries;
-    const usingKeyframeBoundaries = useKeyframeGrid;
     // What this session will PUBLISH. A member of a family takes its base's
     // published table verbatim; a session with no base publishes what it cuts
     // at. The two differ exactly by the corrections made since the family's
@@ -2729,7 +2695,6 @@ export class HlsSessionManager {
       segmentFormat,
       // VOD playlist bookkeeping.
       useSyntheticPlaylist: hasDuration,
-      totalDurationSeconds: hasDuration ? durationSeconds : null,
       // Segment start times (0-based). The source's real keyframes when this
       // session is cut on that grid — always for copied video, and for a
       // re-encoded variant of such a session — otherwise a uniform grid.
@@ -2738,22 +2703,22 @@ export class HlsSessionManager {
       // below are references into it, kept under their old names because every
       // reader of them is asking the same question they always were: where is
       // this file cut, and what was the player told.
+      // The file's own table: where it is cut, what the player was told,
+      // the container's keyframe index and how well it has matched. Every
+      // session of one file holds the same one, so a correction found by
+      // any of them is a correction for all — including sessions made
+      // afterwards, which used to inherit a copy taken at that moment.
       timeline,
-      segmentBoundaries,
       // Which of the two it is, as a fact about the session rather than
       // something re-derived from "is the video copied" at each call site. The
       // two questions came apart the moment a re-encode had to be cut like a
       // copy.
-      cutGrid: useKeyframeGrid ? "keyframe" : "uniform",
-      segmentCount,
       // Real source keyframe times (sorted seconds), or null when the probe
       // failed/timed out. Used by #startEncodeRun to snap a source seek onto a
       // KNOWN valid position instead of trusting the container's own on-the-fly
       // seek at an arbitrary target — see the probe call above for why.
-      keyframeTimes,
       // How far those times may sit from the instants they name — nonzero only
       // for AVI, which computes them from frame numbers.
-      keyframeTolerance,
       // Which container the index came from, and how well it has held up. The
       // cut times of a copied video ARE its index, and an index can be wrong —
       // measured 2026-08-06, one claimed a keyframe four seconds from where the
@@ -2762,8 +2727,6 @@ export class HlsSessionManager {
       // read; this counts them so a session can report what it found. It is
       // what decides whether a re-encoded rung can be cut on this same grid and
       // spliced into the copy (roadmap item 28).
-      containerFormat,
-      indexCheck: newIndexCheck(),
       playlistText: hasDuration ? this.#buildVodPlaylist(publishedGrid, segmentFormat) : "",
       // The table AS PUBLISHED — what every playlist of this family states, and
       // what every segment of it is stamped against. Inherited whole from the
@@ -2775,7 +2738,6 @@ export class HlsSessionManager {
       // is what makes a re-encoded rung cut like the copy it joins — and those
       // corrections deliberately do NOT reach this copy: the player's timeline
       // was sent once and cannot be revised.
-      publishedBoundaries: publishedGrid,
       // Segment index the current ffmpeg run started producing from.
       encodeStartIndex: 0,
       // Guards against repeatedly restarting to the same seek position.
@@ -2915,7 +2877,7 @@ export class HlsSessionManager {
         // Branch tag for log correlation: A = video re-encode (fixed GOP, grid
         // aligned, ts-offset); B = video copy (cut at source keyframes, copyts).
         `branch=${transcodeVideo ? "A(reencode,fixed-gop)" : "B(copy,copyts)"} ` +
-        `seg=${usingKeyframeBoundaries ? "keyframe" : "uniform"} ` +
+        `seg=${timeline.cutGrid} ` +
         `${sourceWidth && sourceHeight ? `src=${sourceWidth}x${sourceHeight} ` : ""}` +
         // Effective encode resolution: budget-on (auto downscale from the
         // ceiling), manual (user-forced, budget off), or unset (keep source).
@@ -3312,7 +3274,7 @@ export class HlsSessionManager {
    * @returns {number}
    */
   #segmentStartTime(session, index) {
-    const boundaries = Array.isArray(session.segmentBoundaries) ? session.segmentBoundaries : [];
+    const boundaries = Array.isArray(session.timeline.boundaries) ? session.timeline.boundaries : [];
     if (boundaries.length === 0) {
       return index * this.segmentDurationSec;
     }
@@ -3346,9 +3308,9 @@ export class HlsSessionManager {
    * @returns {number[]}
    */
   publishedGridFor(session) {
-    return Array.isArray(session.publishedBoundaries) && session.publishedBoundaries.length > 0
-      ? session.publishedBoundaries
-      : (session.segmentBoundaries ?? []);
+    return Array.isArray(session.timeline.published) && session.timeline.published.length > 0
+      ? session.timeline.published
+      : (session.timeline.boundaries ?? []);
   }
 
   /**
@@ -3368,8 +3330,8 @@ export class HlsSessionManager {
   }
 
   #publishedStartTime(session, index) {
-    const boundaries = Array.isArray(session.publishedBoundaries) && session.publishedBoundaries.length > 0
-      ? session.publishedBoundaries
+    const boundaries = Array.isArray(session.timeline.published) && session.timeline.published.length > 0
+      ? session.timeline.published
       : null;
     if (!boundaries) {
       // No playlist was published from a table (no duration, so no synthetic
@@ -4218,7 +4180,7 @@ export class HlsSessionManager {
     session.cushionSaidAt = now;
     const aheadOfPicture = Math.max(0, encodedTo - earliestPosition);
     const fileLength = this.#fileLengthByKey.get(`${session.sourceKey}:${session.fileIndex}`);
-    const duration = Number(session.totalDurationSeconds) || Number(session.durationSeconds) || 0;
+    const duration = Number(session.timeline.totalDurationSeconds) || Number(session.durationSeconds) || 0;
     const megabytes =
       Number.isFinite(fileLength) && fileLength > 0 && duration > 0
         ? ((aheadOfPicture * fileLength) / duration / 1e6).toFixed(0)
@@ -5502,7 +5464,7 @@ export class HlsSessionManager {
     if (typeof stats.fileProgress === "number" && stats.fileProgress >= 0.999) {
       return "cpu";
     }
-    const duration = Number.isFinite(session.totalDurationSeconds) ? session.totalDurationSeconds : 0;
+    const duration = Number.isFinite(session.timeline.totalDurationSeconds) ? session.timeline.totalDurationSeconds : 0;
     const length = Number.isFinite(stats.fileLength) && stats.fileLength > 0 ? stats.fileLength : 0;
     const downloadSpeed = Number.isFinite(stats.downloadSpeed) ? stats.downloadSpeed : 0;
     if (duration <= 0 || length <= 0) {
@@ -5923,7 +5885,7 @@ export class HlsSessionManager {
     // Where a sidecar soundtrack's own timeline begins, taken FRESH: the
     // session may have been created before that file's header could be read,
     // and this run is the first moment the answer matters. Same shape as
-    // `session.keyframeTimes`, which is likewise read again on every call so a
+    // `session.timeline.keyframeTimes`, which is likewise read again on every call so a
     // background reading that has since finished is picked up.
     const hasSidecarSound =
       Number.isInteger(session.audioFileIndex) && session.audioFileIndex !== session.fileIndex;
@@ -5968,7 +5930,7 @@ export class HlsSessionManager {
     // created later inherits the corrected table and PUBLISHES it, so its own
     // playlist and its own cuts agree from the start. What they may not do is
     // move the cuts of a session whose playlist is already being read.
-    const gridCutTimes = explicitTimes && (!session.transcodeVideo || session.cutGrid === "keyframe")
+    const gridCutTimes = explicitTimes && (!session.transcodeVideo || session.timeline.cutGrid === "keyframe")
       ? segmentCutTimesFrom(this.publishedGridFor(session), safeIndex)
       : null;
     // Cut times are stated on the grid, for both branches.
@@ -6044,7 +6006,7 @@ export class HlsSessionManager {
     // back on to reach it; on the uniform grid it is a plain offset. This
     // follows the GRID, not whether the video is re-encoded — a variant cut on
     // the source's keyframes has to seek to them like the copy it accompanies.
-    const seekSeconds = session.cutGrid === "keyframe"
+    const seekSeconds = session.timeline.cutGrid === "keyframe"
       ? startSeconds + sourceStartTime
       : startSeconds;
     // Two-step seek when we have a real keyframe map: jump to a KNOWN-valid
@@ -6061,8 +6023,8 @@ export class HlsSessionManager {
     // retry re-tries the SAME bad container-computed position. A keyframe we
     // read directly from the packet list is a position ffmpeg has already
     // proven it can decode.
-    const snappedKeyframe = Array.isArray(session.keyframeTimes) && session.keyframeTimes.length > 0
-      ? nearestKeyframeAtOrBefore(session.keyframeTimes, seekSeconds)
+    const snappedKeyframe = Array.isArray(session.timeline.keyframeTimes) && session.timeline.keyframeTimes.length > 0
+      ? nearestKeyframeAtOrBefore(session.timeline.keyframeTimes, seekSeconds)
       : null;
     // A second input, and it exists for exactly one case: a browser that takes
     // its audio muxed into the picture, watching a release whose soundtrack is a
@@ -7047,13 +7009,13 @@ export class HlsSessionManager {
       inheritedAudioSeparate: base.audioSeparate === true,
       audioOnly: base.audioOnly === true,
       segmentFormatId: base.segmentFormat?.id ?? "",
-      inheritedGrid: base.cutGrid === "keyframe"
+      inheritedGrid: base.timeline.cutGrid === "keyframe"
         ? {
-            boundaries: base.segmentBoundaries,
-            published: base.publishedBoundaries,
-            keyframeTimes: base.keyframeTimes,
-            keyframeTolerance: base.keyframeTolerance,
-            containerFormat: base.containerFormat
+            boundaries: base.timeline.boundaries,
+            published: base.timeline.published,
+            keyframeTimes: base.timeline.keyframeTimes,
+            keyframeTolerance: base.timeline.keyframeTolerance,
+            containerFormat: base.timeline.containerFormat
           }
         : null,
       acquireSource: base.acquireSource
@@ -7553,7 +7515,7 @@ export class HlsSessionManager {
 
   #noteIndexAccuracy(session, index, trueStart, declaredStart) {
     const deviation = Math.abs(trueStart - declaredStart);
-    session.indexCheck ??= newIndexCheck();
+    session.timeline.indexCheck ??= newIndexCheck();
     // Where each produced segment truly began, kept so that a player reporting
     // a stall can be ANSWERED rather than merely believed. Bounded: only the
     // recent past can be the subject of such a report, and an unbounded map on
@@ -7570,10 +7532,10 @@ export class HlsSessionManager {
     // audio frame is the tolerance — anything the list names is exact, so a
     // match is a match. `keyframeTimes` is the list the grid was built from, so
     // this compares the file against the table on the table's own terms.
-    const knownKeyframe = Array.isArray(session.keyframeTimes)
-      ? session.keyframeTimes.some((time) => Math.abs(time - trueStart) <= 0.05)
+    const knownKeyframe = Array.isArray(session.timeline.keyframeTimes)
+      ? session.timeline.keyframeTimes.some((time) => Math.abs(time - trueStart) <= 0.05)
       : null;
-    noteIndexDeviation(session.indexCheck, index, deviation, knownKeyframe);
+    noteIndexDeviation(session.timeline.indexCheck, index, deviation, knownKeyframe);
     if (deviation > SEGMENT_START_DISAGREEMENT_SEC) {
       // Which boundary the true start DOES match, if any. This is what tells
       // the two possible faults apart, and they need opposite fixes: matching
@@ -7630,7 +7592,7 @@ export class HlsSessionManager {
     // and a summary that only ever appears at the end is a summary that is
     // routinely never written. Twenty-five distinct boundaries is enough for
     // the proportion to mean something and rare enough not to repeat itself.
-    if (session.indexCheck.checked > 0 && session.indexCheck.checked % 25 === 0) {
+    if (session.timeline.indexCheck.checked > 0 && session.timeline.indexCheck.checked % 25 === 0) {
       this.#logIndexAccuracy(session);
     }
     this.correctBoundaryFromSegment(session, index, trueStart);
@@ -7681,7 +7643,7 @@ export class HlsSessionManager {
     if (session.audioOnly === true) {
       return;
     }
-    const boundaries = session.segmentBoundaries;
+    const boundaries = session.timeline.boundaries;
     if (!Array.isArray(boundaries) || index <= 0 || index >= boundaries.length - 1) {
       // Index 0 is the start of the file and the last entry is its end; neither
       // is a cut, and neither can be learned from a segment.
@@ -7845,7 +7807,7 @@ export class HlsSessionManager {
     // this a cut the player believes in", which is what a report from the player
     // is about. Answering one with the other prints an index from one grid
     // beside a time from the other.
-    const boundaries = Array.isArray(table) ? table : session.segmentBoundaries;
+    const boundaries = Array.isArray(table) ? table : session.timeline.boundaries;
     if (!Array.isArray(boundaries)) {
       return null;
     }
@@ -7869,7 +7831,7 @@ export class HlsSessionManager {
    * @returns {void}
    */
   #logIndexAccuracy(session) {
-    const check = session.indexCheck;
+    const check = session.timeline?.indexCheck;
     if (!check || check.checked === 0) {
       return;
     }
@@ -7892,7 +7854,7 @@ export class HlsSessionManager {
       // that never consulted it.
       `${session.audioOnly === true ? "sound-vs-grid" : "keyframe-index"} ` +
       `${session.id.slice(0, 8)} ${session.audioOnly === true ? "sound" : "picture"} ` +
-      `${session.containerFormat || "unknown"} "${session.fileName}": ` +
+      `${session.timeline.containerFormat || "unknown"} "${session.fileName}": ` +
       `${check.disagreed} of ${check.checked} produced segments started away from the playlist, ` +
       `median ${median.toFixed(3)}s worst ${check.maxDeviationSec.toFixed(3)}s` +
       (check.firstDisagreementIndex >= 0 ? ` (first at #${check.firstDisagreementIndex})` : "") +
@@ -7906,7 +7868,7 @@ export class HlsSessionManager {
         // segment that began at another time the SAME table names was not
         // mis-described by the table — the grid was built over a gap in it.
         : `; ${landed} of them began at another keyframe the table names` +
-          ` [tolerance ${SEGMENT_START_DISAGREEMENT_SEC}s, ${(session.keyframeTimes?.length ?? 0)} keyframes read]`)
+          ` [tolerance ${SEGMENT_START_DISAGREEMENT_SEC}s, ${(session.timeline.keyframeTimes?.length ?? 0)} keyframes read]`)
     );
   }
 
@@ -7979,7 +7941,7 @@ export class HlsSessionManager {
     // A copy can only be cut where the source already has a keyframe, so a rung
     // meant to splice into it has to be cut at exactly those times. A copy that
     // fell back to an even grid ffmpeg does not cut on has nothing to align to.
-    if (!owner.transcodeVideo && owner.cutGrid !== "keyframe") {
+    if (!owner.transcodeVideo && owner.timeline.cutGrid !== "keyframe") {
       return false;
     }
     return this.#splicableHeights(owner).length >= 2;
@@ -9509,20 +9471,20 @@ export class HlsSessionManager {
       // grid — a copy — where the variant has to land on those exact times to
       // be interchangeable with it. A base on the uniform grid needs nothing
       // passed: the variant computes the same even grid from the same duration.
-      inheritedGrid: base.cutGrid === "keyframe"
+      inheritedGrid: base.timeline.cutGrid === "keyframe"
         ? {
             // The table as it stands NOW, corrections included — not the index
             // it was first built from. This is what the new session CUTS at.
-            boundaries: base.segmentBoundaries,
+            boundaries: base.timeline.boundaries,
             // And this is what it must SAY, which is not the same thing: every
             // member of a family has to publish one timeline, or two sessions
             // stamp the same moment differently and the picture and the sound
             // drift apart by exactly the corrections made between their two
             // creations (field 2026-08-17, corrections of 0.6-2.9 s).
-            published: base.publishedBoundaries,
-            keyframeTimes: base.keyframeTimes,
-            keyframeTolerance: base.keyframeTolerance,
-            containerFormat: base.containerFormat
+            published: base.timeline.published,
+            keyframeTimes: base.timeline.keyframeTimes,
+            keyframeTolerance: base.timeline.keyframeTolerance,
+            containerFormat: base.timeline.containerFormat
           }
         : null,
       acquireSource: base.acquireSource
@@ -10287,12 +10249,12 @@ export class HlsSessionManager {
       // table as it stands now, corrections included. A base on the uniform
       // grid passes nothing: the rendition computes the same even grid from the
       // same duration.
-      inheritedGrid: base.cutGrid === "keyframe"
+      inheritedGrid: base.timeline.cutGrid === "keyframe"
         ? {
-            boundaries: base.segmentBoundaries,
-            published: base.publishedBoundaries,
-            keyframeTimes: base.keyframeTimes,
-            containerFormat: base.containerFormat
+            boundaries: base.timeline.boundaries,
+            published: base.timeline.published,
+            keyframeTimes: base.timeline.keyframeTimes,
+            containerFormat: base.timeline.containerFormat
           }
         : null,
       // Hold the file this rendition will READ. For a soundtrack shipped beside
@@ -10843,7 +10805,7 @@ export class HlsSessionManager {
       // started, or once the run producing it has ended.
       if (!isPlaylist && session.usesExplicitCuts) {
         const index = session.segmentFormat.segmentIndexFromName(fileName);
-        const isLast = index >= Math.max(0, (session.segmentBoundaries?.length ?? 1) - 2);
+        const isLast = index >= Math.max(0, (session.timeline.boundaries?.length ?? 1) - 2);
         // Only the CURRENT run can have a file open, and only its own next
         // piece is evidence that it has moved on. A run that has ended closed
         // everything it wrote, so its files need no such proof — and taking the

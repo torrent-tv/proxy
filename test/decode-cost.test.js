@@ -14,6 +14,7 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
+import { Timeline } from "../services/output/Timeline.js";
 import { createRequire } from "node:module";
 import { spawn } from "node:child_process";
 import { mkdtemp, rm } from "node:fs/promises";
@@ -324,6 +325,12 @@ test("the OFFER drops the rungs the host cannot hold, and the master keeps addre
   const session = {
     id: "cccccccc-dddd-eeee-ffff-000000000000",
     dirPath,
+    // Where this file is cut, held by the file. A fixture that stated it
+    // on the session was describing what production no longer does.
+    timeline: new Timeline({
+      boundaries: Array.from({ length: 101 }, (_, index) => index * 4),
+      cutGrid: "keyframe"
+    }),
     state: "ready",
     fileName: "video.mkv",
     startedAt: Date.now(),
@@ -342,7 +349,6 @@ test("the OFFER drops the rungs the host cannot hold, and the master keeps addre
     sourceDecode: MEASURED_FILM,
     // A copy can only be cut where the source already has a keyframe, and a
     // master is offered only when that grid is real.
-    cutGrid: "keyframe",
     // The shape this output is encoded AS, decided once for the output.
     output: new Output({
       encodeWidth: 0,
@@ -354,7 +360,6 @@ test("the OFFER drops the rungs the host cannot hold, and the master keeps addre
     usesExplicitCuts: true,
     useSyntheticPlaylist: true,
     playlistText: "#EXTM3U\n",
-    segmentBoundaries: Array.from({ length: 101 }, (_, index) => index * 4),
     segmentCount: 100,
     progress: { state: "running", processedSeconds: 0, startPositionSeconds: 0, speed: "1.0x" }
   };

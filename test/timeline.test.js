@@ -74,21 +74,15 @@ test("which segment holds a moment", () => {
   assert.equal(timeline.indexForTime(99), 3, "past the end is the last segment, not an error");
 });
 
-test("a produced segment that began where the table said is not counted against it", () => {
+test("a fresh table starts with an empty tally of how well its index matched", () => {
   const timeline = fourSecondGrid();
 
-  timeline.noteProducedStart(1, 4.1);
-  assert.equal(timeline.indexCheck.produced, 1);
-  assert.equal(timeline.indexCheck.awayFromGrid, 0, "inside the tolerance the file itself declares");
-
-  timeline.noteProducedStart(2, 12);
-  assert.equal(timeline.indexCheck.awayFromGrid, 1);
-  assert.equal(timeline.indexCheck.first, 2);
-  assert.equal(
-    timeline.indexCheck.atAnotherKeyframe,
-    1,
-    "it began at a keyframe the table names, just not the one for its own number"
-  );
+  // The tally is a fact about the FILE and its index: asked per session it
+  // would be answered a different number of times for one film depending on
+  // how many people happened to watch it.
+  assert.equal(timeline.indexCheck.checked, 0);
+  assert.equal(timeline.indexCheck.disagreed, 0);
+  assert.equal(timeline.indexCheck.firstDisagreementIndex, -1);
 });
 
 test("a timeline nobody holds is dropped", () => {

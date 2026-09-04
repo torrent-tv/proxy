@@ -37,6 +37,17 @@ test("facts are absent until a probe answers, and 'absent' is not 'zero'", () =>
   assert.equal(file.decode, null, "and nothing is priced from facts that were never read");
 });
 
+test("readings are merged, because two readers answer about different things", () => {
+  const file = new SourceFile({ sourceKey: "s", fileIndex: 0 });
+  // ffmpeg's banner: the frame size and rate, and no start time.
+  file.learn({ width: 1920, height: 1080, fps: 24 });
+  // The container's own header, read for one field — a sidecar soundtrack is
+  // read for exactly this and nothing else.
+  file.learn({ startTime: 0.083 });
+  assert.equal(file.startTime, 0.083);
+  assert.equal(file.width, 1920, "the second reader must not erase what the first found");
+});
+
 test("a fresher reading replaces the first, because a cold torrent answers incompletely", () => {
   const file = new SourceFile({ sourceKey: "s", fileIndex: 0 });
   file.learn({ width: 1920, height: 1080, fps: 24, durationSeconds: 0, startTime: 1.5 });

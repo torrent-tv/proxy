@@ -93,16 +93,24 @@ export class SourceFile {
   }
 
   /**
-   * Take in what a probe of this file returned. Called again whenever a fresher
-   * reading arrives: on a cold torrent the first answer can be missing the
-   * duration or the frame size, and the second is what has them.
+   * Take in what a reading of this file returned.
+   *
+   * Readings are MERGED rather than replaced, because there is more than one
+   * reader and they answer about different things: ffmpeg's banner states the
+   * frame size, the frame rate and the bitrate, while the container's own
+   * header states where its timeline begins — and a sidecar soundtrack is read
+   * for that one field alone. Replacing would mean the second reader erasing
+   * what the first found.
+   *
+   * Called again whenever a fresher reading arrives: on a cold torrent the
+   * first answer can be missing the duration, and the second is what has it.
    *
    * @param {object | null} mediaInfo
    * @returns {this}
    */
   learn(mediaInfo) {
     if (mediaInfo && typeof mediaInfo === "object") {
-      this.media = mediaInfo;
+      this.media = { ...(this.media ?? {}), ...mediaInfo };
     }
     return this;
   }

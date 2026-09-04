@@ -75,6 +75,10 @@ function fakeSession({ dirPath, transcodeVideo = true, cutGrid = transcodeVideo 
     }),
     state: "ready",
     file: new SourceFile({ sourceKey: "source-1", fileIndex: 0, name: "video.mkv" }).learn({ width: 1920, height: 1080, durationSeconds: 400 }),
+    // An ordinary session reads its own file, and its sound is inside it. The
+    // three differ only for a soundtrack shipped as a file of its own.
+    get inputFile() { return this.file; },
+    get audioFile() { return this.file; },
     startedAt: Date.now(),
     lastAccessedAt: Date.now(),
     ffmpeg: fakeEncoder(),

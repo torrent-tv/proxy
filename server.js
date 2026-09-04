@@ -249,6 +249,14 @@ export async function startProxyServer({
       await torrentPool.fillFileInBackground?.(torrent, fileIndex);
     }
   });
+  // What the last life of this process left on the disk. The kernel kills this
+  // one often enough for that to be an ordinary state rather than an odd one —
+  // twice in a single viewing on 2026-09-02 — and when it does, no exit handler
+  // runs and nothing is cleared up. So this is both the cleanup and the only
+  // record that those encoders ended at all: it says what it found before it
+  // decides anything, keeps the segments whose closure is proven, and removes
+  // the one piece per output that was being written when the process died.
+  hlsSessionManager.adoptSegmentsLeftBehind();
   const playbackPlanner = createPlaybackPlanner({
     ffmpegBin,
     transcodeAudioEnabled: transcodeAudio,

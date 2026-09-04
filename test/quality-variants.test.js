@@ -298,7 +298,7 @@ test("a segment request hands the encoder to the variant the viewer moved to", a
     "SIGTERM",
     "the rung nobody is watching must not go on using the host's one encoder"
   );
-  assert.equal(base.run?.process ?? null, null, "a deliberate stop must not read as a run that died");
+  assert.equal([...base.runs][0]?.process ?? null, null, "a deliberate stop must not read as a run that died");
   assert.equal(
     variant.seekTarget,
     24,
@@ -358,7 +358,7 @@ test("warming a rung prepares it without taking the encoder from the one on scre
   );
   assert.equal(variant.seekTarget, 59, "the rung is pointed at the switch position, one back for the keyframe");
   assert.equal(base.activeVariantId, undefined, "nothing has switched yet");
-  assert.equal(base.run?.process, encoder, "the picture on screen keeps its encoder until the player actually moves");
+  assert.equal([...base.runs][0]?.process, encoder, "the picture on screen keeps its encoder until the player actually moves");
   assert.deepEqual(encoder.signals, [], "stopping it here is what would put the spinner back");
 });
 
@@ -398,7 +398,7 @@ test("a rung warmed at the playhead survives the switch that lands just ahead of
     null,
     "the request is inside the warmed run, so nothing is repositioned and the warm-up is kept"
   );
-  assert.equal(variant.run.from, 59, "the run still begins where it was warmed");
+  assert.equal([...variant.runs][0].from, 59, "the run still begins where it was warmed");
 });
 
 test("a rung warmed PAST the switch is repositioned, which is what warming late costs", async (t) => {
@@ -479,7 +479,7 @@ test("warming the height the base itself serves still points it at the switch", 
   manager.sessionsById.set(VARIANT_ID, variant);
   base.variants = new Map([[540, VARIANT_ID]]);
   base.activeVariantId = VARIANT_ID;
-  base.run = null;
+  base.runs = new Set();
 
   await manager.prepareVariant(BASE_ID, 812, 400);
 
@@ -533,7 +533,7 @@ test("a playlist or an init segment does not move the encoder", async (t) => {
     VARIANT_ID,
     "hls.js fetches a level's playlist and init to decide with, and may never switch to it"
   );
-  assert.ok(base.run?.process, "the stream on screen must keep its encoder while the player is only looking");
+  assert.ok([...base.runs][0]?.process, "the stream on screen must keep its encoder while the player is only looking");
 });
 
 test("the name of a variant is fixed, whatever its encode is later set to", async (t) => {

@@ -11,6 +11,20 @@
 
 import test from "node:test";
 import { fakeProcess as fakeEncoder, startRunOn } from "./helpers/encode-run.js";
+
+/**
+ * Whether anything of this session is encoding.
+ *
+ * A session holds a SET of runs, so the question is about the set and not about
+ * a field: a run told to stop is not encoding, whatever its process is still
+ * doing about the signal.
+ *
+ * @param {object} session
+ * @returns {boolean}
+ */
+function encoding(session) {
+  return [...(session?.runs ?? [])].some((run) => run.isAlive);
+}
 import assert from "node:assert/strict";
 import { SourceFile } from "../services/source/SourceFile.js";
 import { Timeline } from "../services/output/Timeline.js";
@@ -146,15 +160,15 @@ test("one viewer fetching their soundtrack does not stop the other viewer's", as
 
   assert.notEqual(first.sessionId, second.sessionId, "two soundtracks are two encodes");
   for (const [key, rendition] of renditions) {
-    assert.ok(rendition.run?.process, `the encoder of ${key} is still running`);
-    assert.deepEqual(rendition.run.process.signals, [], `nothing signalled ${key}`);
+    assert.ok([...rendition.runs][0]?.process, `the encoder of ${key} is still running`);
+    assert.deepEqual([...rendition.runs][0].process.signals, [], `nothing signalled ${key}`);
   }
 
   // And it holds under the traffic that actually happens: they alternate.
   await manager.resolveAudioRenditionFile(BASE_ID, 0, "segment-00004.mp4", FIRST);
   await manager.resolveAudioRenditionFile(BASE_ID, 1, "segment-00004.mp4", SECOND);
   for (const [key, rendition] of renditions) {
-    assert.deepEqual(rendition.run?.process?.signals ?? [], [], `nothing signalled ${key} on the second round`);
+    assert.deepEqual([...rendition.runs][0]?.process?.signals ?? [], [], `nothing signalled ${key} on the second round`);
   }
 });
 
@@ -175,8 +189,8 @@ test("a soundtrack nobody is listening to any more is stopped", async (t) => {
 
   const left = renditions.get(audioRenditionKey(0, true));
   const moved = renditions.get(audioRenditionKey(1, true));
-  assert.equal(left.run?.process ?? null, null, "the track the viewer left is not encoding for anybody");
-  assert.ok(moved.run?.process, "the track they moved to is");
+  assert.equal(encoding(left), false, "the track the viewer left is not encoding for anybody");
+  assert.ok(encoding(moved), "the track they moved to is");
 });
 
 test("each viewer's browser decides for itself whether its soundtrack is re-encoded", async (t) => {
@@ -198,8 +212,8 @@ test("each viewer's browser decides for itself whether its soundtrack is re-enco
   assert.equal(renditions.get(audioRenditionKey(0, false)).transcodeAudio, false);
   assert.equal(renditions.get(audioRenditionKey(0, true)).transcodeAudio, true);
   // Both are wanted, so neither is stopped.
-  assert.ok(renditions.get(audioRenditionKey(0, false)).run?.process);
-  assert.ok(renditions.get(audioRenditionKey(0, true)).run?.process);
+  assert.ok(encoding(renditions.get(audioRenditionKey(0, false))));
+  assert.ok(encoding(renditions.get(audioRenditionKey(0, true))));
 });
 
 test("the master marks each viewer's own soundtrack as the default one", async (t) => {
@@ -253,16 +267,16 @@ test("one viewer changing quality does not take the other off their step", async
   await manager.resolveVariantFile(BASE_ID, 720, "segment-00004.mp4", FIRST);
   await manager.resolveVariantFile(BASE_ID, 540, "segment-00004.mp4", SECOND);
 
-  assert.ok(variants.get(720).run?.process, "the first viewer's step is still encoding");
-  assert.ok(variants.get(540).run?.process, "and so is the second viewer's");
+  assert.ok(encoding(variants.get(720)), "the first viewer's step is still encoding");
+  assert.ok(encoding(variants.get(540)), "and so is the second viewer's");
 
   // Now the first viewer steps down. Theirs is left for nobody and stops; the
   // other viewer's is untouched.
   await manager.resolveVariantFile(BASE_ID, 480, "segment-00005.mp4", FIRST);
 
-  assert.equal(variants.get(720).run?.process ?? null, null, "the step nobody is on stops");
-  assert.ok(variants.get(540).run?.process, "the step the other viewer is watching does not");
-  assert.ok(variants.get(480).run?.process, "and the one they moved to is encoding");
+  assert.equal(encoding(variants.get(720)), false, "the step nobody is on stops");
+  assert.ok(encoding(variants.get(540)), "the step the other viewer is watching does not");
+  assert.ok(encoding(variants.get(480)), "and the one they moved to is encoding");
 });
 
 test("a step somebody is watching is never withdrawn from the offer", async (t) => {
@@ -324,8 +338,8 @@ test("a viewer whose picture has gone quiet holds no soundtrack encoder", async 
   await manager.resolveAudioRenditionFile(BASE_ID, 1, "segment-00004.mp4", FIRST);
 
   assert.equal(
-    renditions.get(audioRenditionKey(0, true)).run?.process ?? null,
-    null,
+    encoding(renditions.get(audioRenditionKey(0, true))),
+    false,
     "the first viewer moved on, so their old track is stopped"
   );
 });

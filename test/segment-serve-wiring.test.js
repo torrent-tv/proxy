@@ -150,7 +150,7 @@ async function managerWithReadySegment(overrides = {}) {
     startedAt: Date.now(),
     createEntryMs: Date.now(),
     lastAccessedAt: Date.now(),
-    run: null,
+    runs: new Set(),
     lastError: "",
     consumers: new Set(),
     segmentFormat: overrides.segmentFormat ?? fmp4Format,
@@ -297,13 +297,16 @@ test("serving a run's own segment moves the run out of STARTING", async (t) => {
   // What this pins is that a real serve REACHES it: a state nothing writes
   // describes every run as still starting, for ever, and the log built on it
   // would say so too.
-  // A run that has not yet made anything: starting.
-  startRunOn(session, { from: 0, producing: false, usesExplicitCuts: true });
-  assert.equal(session.run.state, ENCODE_RUN_STATE.STARTING);
+  // A run that has not yet made anything: starting. The fixture's own run is
+  // let go first, because this test is about ONE run and what serving does to
+  // it.
+  session.runs.clear();
+  const run = startRunOn(session, { from: 0, producing: false, usesExplicitCuts: true });
+  assert.equal(run.state, ENCODE_RUN_STATE.STARTING);
 
   await manager.getFileStream(SESSION_ID, "segment-00000.mp4", { requestSeq: 1 });
 
-  assert.equal(session.run.state, ENCODE_RUN_STATE.PRODUCING);
+  assert.equal(run.state, ENCODE_RUN_STATE.PRODUCING);
 });
 
 test("a segment behind a run's own start does not claim that run has produced", async (t) => {
@@ -317,9 +320,10 @@ test("a segment behind a run's own start does not claim that run has produced", 
   // lies ahead of the new run's beginning — so the question cannot be asked of
   // the number alone, and a run believed to be producing is one the look-ahead
   // may suspend and the seek path may wave through as "already covered".
-  startRunOn(session, { from: 5, producing: false, usesExplicitCuts: true });
+  session.runs.clear();
+  const run = startRunOn(session, { from: 5, producing: false, usesExplicitCuts: true });
 
   await manager.getFileStream(SESSION_ID, "segment-00000.mp4", { requestSeq: 1 });
 
-  assert.equal(session.run.state, ENCODE_RUN_STATE.STARTING);
+  assert.equal(run.state, ENCODE_RUN_STATE.STARTING);
 });

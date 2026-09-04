@@ -73,7 +73,7 @@ async function managerWithRunAhead() {
     seekTarget: null,
     waitEpoch: 0,
     firstWantedAt: new Map(),
-    run: null,
+    runs: new Set(),
     progress: { state: "running", processedSeconds: RUN_STARTS_AT * SEGMENT_SECONDS + 400, startPositionSeconds: RUN_STARTS_AT * SEGMENT_SECONDS }
   };
   manager.sessionsById.set(SESSION_ID, session);
@@ -200,7 +200,7 @@ test("a rung whose encoder was stopped is not brought back by a held request", a
     await rm(dirPath, { recursive: true, force: true });
   });
   // What a quality switch leaves behind: the rung nobody is watching, parked.
-  session.run = null;
+  session.runs = new Set();
   session.firstWantedAt.set(WANTED, Date.now() - 4000);
 
   await manager.getFileStream(SESSION_ID, fmp4Format.segmentFileName(WANTED), { requestSeq: 1 });

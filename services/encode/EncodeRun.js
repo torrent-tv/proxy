@@ -218,9 +218,30 @@ export class EncodeRun {
     return [...this.#produced].sort((left, right) => left - right);
   }
 
-  /** @returns {boolean} */
+  /**
+   * Whether this run can still produce.
+   *
+   * A run told to stop cannot, whatever its process is still doing about the
+   * signal: the exit arrives a turn or two later, and until then everything
+   * asking "is anything encoding" would be answered yes by a run that is on its
+   * way out — and a caller deciding whether to start one would decide not to.
+   *
+   * @returns {boolean}
+   */
   get isAlive() {
-    return this.#process !== null && !this.#ended;
+    return this.#process !== null && !this.#ended && !this.#stopping;
+  }
+
+  /**
+   * Whether it has been told to stop and its exit has not arrived yet.
+   *
+   * Asked by whoever sweeps for runs that ended without saying so: this one is
+   * going to say so.
+   *
+   * @returns {boolean}
+   */
+  get isStopping() {
+    return this.#stopping && !this.#ended;
   }
 
   /** @returns {boolean} Whether it is stopped where it stands, producing nothing. */

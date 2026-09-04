@@ -62,7 +62,7 @@ function sessionOn({ id, dirPath, segmentCount = 100, runState = null, encodeSta
     get audioFile() { return this.file; },
     segmentFormat: fmp4Format,
     segmentCount,
-    run: null,
+    runs: new Set(),
     consumers: new Set(),
     lastAccessedAt: Date.now()
   };
@@ -243,12 +243,14 @@ test("a run stops when it reaches a stretch another run was given", async (t) =>
   // Its own end was set from the gaps of the moment it began, and the viewer who
   // opened the film further on was not in that picture. Walking into their
   // stretch means writing names they are writing.
-  assert.equal(manager.runMakingSegment(behind, 550), "ahead");
-  assert.equal(manager.runMakingSegment(behind, 499), null);
+  const behindRun = [...behind.runs][0];
+  const aheadRun = [...ahead.runs][0];
+  assert.equal(manager.runMakingSegment(behind, 550, behindRun), aheadRun);
+  assert.equal(manager.runMakingSegment(behind, 499, behindRun), null);
   assert.equal(
-    manager.runMakingSegment(ahead, 550),
+    manager.runMakingSegment(ahead, 550, aheadRun),
     null,
-    "a run without an end owns only as far as it has got, not the rest of the film"
+    "a run without an end owns only as far as it will get, not the rest of the film"
   );
   void stopped;
 });
@@ -256,12 +258,6 @@ test("a run stops when it reaches a stretch another run was given", async (t) =>
 test("a seek backwards does not drag the picture away from a viewer watching ahead", (t) => {
   const { manager, root, dirPath } = managerWithAnEmptyOutput();
   t.after(() => rmSync(root, { recursive: true, force: true }));
-
-  const asked = [];
-  manager.createOrGetSession = async (params) => {
-    asked.push(params.startPositionSeconds);
-    return null;
-  };
 
   const shared = sessionOn({
     id: "shared",
@@ -282,15 +278,23 @@ test("a seek backwards does not drag the picture away from a viewer watching ahe
   viewerOf(shared, "ahead").head = { segment: 250, seconds: 1000, at: Date.now() };
   viewerOf(shared, "back").head = { segment: 250, seconds: 1000, at: Date.now() };
 
-  const startedAt = shared.run.from;
+  const servingAhead = [...shared.runs][0];
+  const startedAt = servingAhead.from;
   manager.requestSeek("shared", 40, "back");
 
   assert.equal(
-    shared.run.from,
+    servingAhead.from,
     startedAt,
     "the run serving the viewer in front is left exactly where it was"
   );
-  assert.deepEqual(asked, [40], "and the one who jumped is given a run of their own, there");
+  assert.ok(shared.runs.has(servingAhead), "and it is not stopped");
+  // A run start claims its attempt before it awaits anything, so the assertion
+  // holds without the test needing an ffmpeg. 40 s is segment #10 on this grid.
+  assert.equal(
+    shared.pendingRun?.startIndex,
+    10,
+    "and the one who jumped is given a run of their own, there"
+  );
 });
 
 test("a seek backwards with nobody else watching still moves the run", (t) => {

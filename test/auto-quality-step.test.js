@@ -67,7 +67,7 @@ function fakeSession({ dirPath, transcodeVideo = true, cutGrid = transcodeVideo 
     get audioFile() { return this.file; },
     startedAt: Date.now(),
     lastAccessedAt: Date.now(),
-    run: null,
+    runs: new Set(),
     runState: "running",
     runSerial: 1,
     lastError: "",
@@ -141,7 +141,7 @@ async function managerWithSession({ transcodeVideo = true, cutGrid } = {}) {
  */
 async function produceSegments(session, bytesEach) {
   // Where the run in force writes.
-  const runDir = session.run?.dirPath ?? session.dirPath;
+  const runDir = session.dirPath;
   await mkdir(runDir, { recursive: true });
   for (let index = 0; index < 4; index += 1) {
     await writeFile(
@@ -162,7 +162,7 @@ test("a picture that cannot be kept up with is asked for as another VARIANT, and
   // Sustained sub-realtime, read as a slope: the run has been slow since well
   // before the window, and the reading is from this very run.
   session.budgetSlowSince = Date.now() - 60_000;
-  session.recentSpeed = { speed: 0.7, at: Date.now(), run: session.run };
+  session.recentSpeed = { speed: 0.7, at: Date.now(), run: [...session.runs][0] };
 
   await manager.runQualityBudgetOnce();
 
@@ -223,7 +223,7 @@ test("a COPIED picture is never asked to slow its encoder, because it has none",
   // Whatever this reading says, a copy has no encoder to make cheaper: moving
   // the viewer to a RE-ENCODED rung costs the machine more, not less.
   session.budgetSlowSince = Date.now() - 60_000;
-  session.recentSpeed = { speed: 0.4, at: Date.now(), run: session.run };
+  session.recentSpeed = { speed: 0.4, at: Date.now(), run: [...session.runs][0] };
 
   await manager.runQualityBudgetOnce();
 
@@ -388,7 +388,7 @@ test("the way BACK UP exists, and a bitrate cap is lifted before the picture is 
   session.variantHeight = 480;
   session.encodeWidth = 854;
   session.encodeHeight = 480;
-  session.recentSpeed = { speed: 2.4, at: Date.now(), run: session.run };
+  session.recentSpeed = { speed: 2.4, at: Date.now(), run: [...session.runs][0] };
   session.budgetUpSince = Date.now() - 120_000;
 
   await manager.runQualityBudgetOnce();
@@ -412,7 +412,7 @@ test("a capped picture gets its own bitrate back before it is asked to grow", as
   session.encodeWidth = 854;
   session.encodeHeight = 480;
   session.rateCapKbps = 700;
-  session.recentSpeed = { speed: 2.4, at: Date.now(), run: session.run };
+  session.recentSpeed = { speed: 2.4, at: Date.now(), run: [...session.runs][0] };
   session.budgetUpSince = Date.now() - 120_000;
   // A restart is what lifting the cap costs, and spawning ffmpeg is not this
   // test's business. The run the fixture gave the session is the one the
@@ -498,7 +498,7 @@ test("a cap is not lifted because there is no higher rung to compare against", a
   session.encodeWidth = 1920;
   session.encodeHeight = 1080;
   session.rateCapKbps = 700;
-  session.recentSpeed = { speed: 2.4, at: Date.now(), run: session.run };
+  session.recentSpeed = { speed: 2.4, at: Date.now(), run: [...session.runs][0] };
   session.budgetUpSince = Date.now() - 120_000;
   viewerOf(session, "viewer").netReport = { linkMbps: 1.0, bufferedAheadSec: 30, positionSeconds: null, at: Date.now() };
 

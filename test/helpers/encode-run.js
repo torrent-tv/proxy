@@ -75,7 +75,10 @@ export function fakeProcess({ pid = null, exitsWhenKilled = true } = {}) {
 export const silentLogger = { info() {}, warn() {}, error() {} };
 
 /**
- * Put a run on a session, started, over a fake process.
+ * Add a run to a session, started, over a fake process.
+ *
+ * A session holds a SET of runs — as many as the machine affords — so a test
+ * that wants two heads on one output calls this twice.
  *
  * @param {object} session - The session under test.
  * @param {object} [options]
@@ -117,6 +120,9 @@ export function startRunOn(session, options = {}) {
     // test asserting a run's position asks for.
     run.noteProduced(from);
   }
-  session.run = run;
+  if (!(session.runs instanceof Set)) {
+    session.runs = new Set();
+  }
+  session.runs.add(run);
   return run;
 }

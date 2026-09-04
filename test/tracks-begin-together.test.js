@@ -45,7 +45,7 @@ function familyAtBoundaryTwo() {
     timeline: new Timeline({ boundaries: boundaries, cutGrid: "uniform" }),
     file: new SourceFile({ sourceKey: "source-1", fileIndex: 0, name: "film.mkv" }),
     audioRenditionSessions: new Map([[1, "sound"]]),
-    run: null,
+    runs: new Set(),
     pendingRun: null,
     indexCheck: null
   };
@@ -56,7 +56,7 @@ function familyAtBoundaryTwo() {
     baseSessionId: "picture",
     timeline: new Timeline({ boundaries: boundaries, cutGrid: "uniform" }),
     file: new SourceFile({ sourceKey: "source-1", fileIndex: 0, name: "film.mkv" }),
-    run: null,
+    runs: new Set(),
     pendingRun: null,
     indexCheck: null
   };
@@ -70,7 +70,7 @@ function familyAtBoundaryTwo() {
 
 test("a soundtrack follows the picture to the instant the picture really began", () => {
   const { manager, picture, sound } = familyAtBoundaryTwo();
-  const runBefore = sound.run;
+  const runBefore = [...sound.runs][0];
 
   manager.correctBoundaryFromSegment(picture, 2, 10.5);
 
@@ -97,7 +97,7 @@ test("a soundtrack follows the picture to the instant the picture really began",
     "the soundtrack's run must be started again, at the corrected time"
   );
   assert.equal(sound.pendingRun.startIndex, 2);
-  assert.equal(sound.run, runBefore, "and the run in force is only replaced once one is built");
+  assert.equal([...sound.runs][0], runBefore, "and the run in force is only replaced once one is built");
 });
 
 test("a correction the table already holds moves nobody", () => {
@@ -114,11 +114,14 @@ test("a member that is not running is left alone", () => {
   const { manager, picture, sound } = familyAtBoundaryTwo();
   // A rung the viewer switched away from has no process. Moving it would start
   // an encoder for nobody — the failure that put three ffmpeg runs on one file.
-  sound.run.stop("the viewer switched away");
+  const soundRun = [...sound.runs][0];
+  soundRun.stop("the viewer switched away");
+  // A stopped run is no longer live, so nothing of this session begins at #2
+  // any more — which is what "left alone" means here.
   manager.correctBoundaryFromSegment(picture, 2, 10.5);
   assert.equal(sound.pendingRun, null, "a stopped member is not started again for nobody");
-  assert.equal(sound.run.from, 2, "a stopped member keeps its place and its silence");
-  assert.equal(sound.run.state, ENCODE_RUN_STATE.STOPPED);
+  assert.equal(soundRun.from, 2, "a stopped member keeps its place and its silence");
+  assert.equal(soundRun.state, ENCODE_RUN_STATE.STOPPED);
   assert.notEqual(INITIAL_RUN_STATE, ENCODE_RUN_STATE.STOPPED);
 });
 

@@ -470,7 +470,7 @@ test("a height this machine has been MEASURED failing at is not what the way bac
 
   const offered = manager.offeredHeights(session);
 
-  assert.ok(!offered.includes(720) || manager.variantHeightOf(session) === 720);
+  assert.ok(!offered.includes(720) || manager.liveOutputs.variantHeightOf(session) === 720);
   // Now on the 480p variant: 720p has a reading of its own and must be gone.
   session.variantHeight = 480;
   session.encodeHeight = 480;

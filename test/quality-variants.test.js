@@ -552,11 +552,11 @@ test("the name of a variant is fixed, whatever its encode is later set to", asyn
   // the proxy changes `encodeHeight` mid-session any more — a change of size is
   // a change of variant now — but the name and the encode are still two
   // different things, and the addressing depends on their staying so.
-  assert.equal(manager.variantHeightOf(base), 812);
+  assert.equal(manager.liveOutputs.variantHeightOf(base), 812);
   base.encodeHeight = 540;
 
   assert.equal(
-    manager.variantHeightOf(base),
+    manager.liveOutputs.variantHeightOf(base),
     812,
     "the name stays; renaming it would leave the player addressing a variant nobody answers for"
   );

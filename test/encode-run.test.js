@@ -41,12 +41,10 @@ function makeRun(span = {}) {
   const ends = [];
   const process_ = new FakeProcess();
   const run = new EncodeRun({
-    id: "run-1",
     address: "torrent:abc:fmt=fmp4:grid=kf@0:video-only:v=0/enc:854x480:auto",
     encoder: new SoftwareEncoder(),
     from: span.from ?? 10,
     to: span.to ?? 14,
-    dirPath: "/tmp/nowhere",
     buildArgs: () => ["-i", "in", "out"],
     spawn: () => process_,
     logger: {
@@ -67,7 +65,10 @@ test("a start says why it is starting and with what", () => {
   run.start("nobody is making #10 and a viewer is waiting for it");
   const [level, line] = lines[0];
   assert.equal(level, "info");
-  assert.match(line, /encode-run run-1 start #10\.\.#14/);
+  // Named by the run itself; the number counts every run this process has made,
+  // so the test asks for the shape rather than for a particular number.
+  assert.match(line, /encode-run run#\d+ start #10\.\.#14/);
+  assert.match(line, new RegExp(`encode-run ${run.id} `));
   assert.match(line, /nobody is making #10/);
   assert.match(line, /ffmpeg -i in out/);
 });

@@ -44,6 +44,18 @@ import { classifyEncodeExit, ENCODE_EXIT } from "./encode-exit.js";
 const MICROSECONDS_PER_SECOND = 1_000_000;
 
 /**
+ * How many runs this process has made.
+ *
+ * A run names itself, and no caller may supply a name. Two places were
+ * numbering runs — the orchestrator for the ones it builds, the session manager
+ * for the ones a session starts — which is two schemes for one thing and the
+ * usual way a name stops being unique. The name has to be unique over the life
+ * of the process rather than within an output: a stretch can be attempted
+ * twice, and a stale release must not free the second attempt's claim.
+ */
+let runsMade = 0;
+
+/**
  * @typedef {object} RunEnded
  * @property {string} runId
  * @property {string} address
@@ -97,16 +109,11 @@ export class EncodeRun {
 
   /**
    * @param {object} params
-   * @param {string} params.id
    * @param {string} params.address - The output this run makes segments of.
    * @param {import("./Encoder.js").Encoder} params.encoder
    * @param {number} params.from - First segment number it is to make.
    * @param {number} params.to - Last segment number it is to make, inclusive;
    *   below `from` means it was given no end.
-   * @param {string} params.dirPath - Where it writes.
-   * @param {string} [params.label] - How the log names it among the runs around
-   *   it. A burst of seeks starts several in one second and every line about
-   *   them carries the same output address.
    * @param {() => string[]} params.buildArgs - The full argument list for this
    *   run. Supplied rather than built here: what to map, where to read from and
    *   how to cut belong to whoever knows the source, and this owns the process.
@@ -131,13 +138,10 @@ export class EncodeRun {
    *   it was given, which decides how a segment is judged finished.
    */
   constructor({
-    id,
     address,
     encoder,
     from,
     to,
-    dirPath,
-    label = "",
     buildArgs,
     spawn,
     logger,
@@ -149,13 +153,13 @@ export class EncodeRun {
     argsDescribed = "",
     usesExplicitCuts = false
   }) {
-    this.id = id;
+    runsMade += 1;
+    /** What names this run in every line about it, and in the coverage map. */
+    this.id = `run#${runsMade}`;
     this.address = address;
     this.encoder = encoder;
     this.from = from;
     this.to = to;
-    this.dirPath = dirPath;
-    this.label = label;
     this.buildArgs = buildArgs;
     this.spawnProcess = spawn;
     this.logger = logger;
@@ -250,7 +254,7 @@ export class EncodeRun {
     const args = this.buildArgs();
     this.#startedAt = this.now();
     this.logger.info(
-      `encode-run ${this.id}${this.label ? ` ${this.label}` : ""} start #${this.from}..#${this.to} ` +
+      `encode-run ${this.id} start #${this.from}..#${this.to} ` +
       `of ${this.address} by ${this.encoder?.name ?? "?"}: ${because} ` +
       `:: ffmpeg ${this.argsDescribed || args.join(" ")}`
     );
@@ -525,8 +529,7 @@ export class EncodeRun {
       lastError: this.lastError
     };
     const line =
-      `encode-run ${this.id}${this.label ? ` ${this.label}` : ""} ${ending} ` +
-      `#${this.from}..#${this.to} of ${this.address}, ` +
+      `encode-run ${this.id} ${ending} #${this.from}..#${this.to} of ${this.address}, ` +
       `reached #${ended.reached} (${this.#produced.size} segment(s)) after ${livedMs}ms` +
       `${code === null ? "" : `, code ${code}`}${signal ? `, signal ${signal}` : ""}: ${because}`;
     if (ended.normal) {

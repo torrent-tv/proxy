@@ -60,8 +60,8 @@ function familyAtBoundaryTwo() {
     pendingRun: null,
     indexCheck: null
   };
-  startRunOn(picture, { id: "picture/run#1", from: 2 });
-  startRunOn(sound, { id: "sound/run#1", from: 2 });
+  startRunOn(picture, { from: 2 });
+  startRunOn(sound, { from: 2 });
   manager.sessionsById.set("picture", picture);
   manager.sessionsById.set("sound", sound);
 

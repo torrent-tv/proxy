@@ -126,7 +126,7 @@ async function pictureWithTwoViewers() {
       transcodeAudio: params.transcodeAudio
     });
     rendition.audioOnly = true;
-    startRunOn(rendition, { id: `${rendition.id}/run#1`, process: fakeEncoder() });
+    startRunOn(rendition, { process: fakeEncoder() });
     manager.sessionsById.set(rendition.id, rendition);
     renditions.set(key, rendition);
     return rendition;
@@ -240,7 +240,7 @@ test("one viewer changing quality does not take the other off their step", async
     variant.output.encodeHeight = height;
     variant.variantHeight = height;
     variant.variantBases = new Set([BASE_ID]);
-    startRunOn(variant, { id: `${variant.id}/run#1`, process: fakeEncoder() });
+    startRunOn(variant, { process: fakeEncoder() });
     manager.sessionsById.set(variant.id, variant);
     variants.set(height, variant);
     return variant;

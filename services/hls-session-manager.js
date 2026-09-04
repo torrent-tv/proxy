@@ -4156,7 +4156,7 @@ export class HlsSessionManager {
     if (!run || typeof filePath !== "string") {
       return;
     }
-    if (path.dirname(filePath) !== run.dirPath) {
+    if (path.dirname(filePath) !== session.dirPath) {
       return;
     }
     const index = session.segmentFormat.segmentIndexFromName(path.basename(filePath));
@@ -5517,8 +5517,6 @@ export class HlsSessionManager {
     // Without a run number the command that failed cannot be told from the two
     // that succeeded around it — which is exactly the state the unexplained
     // `Cannot write moov atom before AC3 packets` was found in.
-    session.runCounter = (session.runCounter ?? 0) + 1;
-    const runLabel = `run#${session.runCounter}`;
 
     // One directory for the output, and every run writes straight into it.
     //
@@ -5532,16 +5530,10 @@ export class HlsSessionManager {
     // either, because the store serves a segment only once its closure is
     // proven, and it is cleared up when the run ends.
     const run = new EncodeRun({
-      // Unique per RUN, not per session. The orchestrator files runs by this
-      // and releases a stretch by it, so a restart reusing the session's id
-      // would leave the old run registered with the old stretch and the new one
-      // unknown.
-      id: `${session.id}/${runLabel}`,
       address: session.outputKey ?? session.id,
       encoder: this.videoEncoder,
       from: safeIndex,
       to: interval.to,
-      dirPath: session.dirPath,
       buildArgs: () => args,
       argsDescribed: describeFfmpegArgs(args),
       // Whether this run cuts at times we gave it. Decides how a segment is
@@ -5576,7 +5568,7 @@ export class HlsSessionManager {
     run.start(because);
 
     logger.info(
-      `transcode ${session.id} ${runLabel} encode-run from segment #${safeIndex} ` +
+      `transcode ${session.id} ${run.id} encode-run from segment #${safeIndex} ` +
       `(+${Date.now() - restartEnteredAt}ms since the restart was asked for) ` +
         `(${formatSeconds(startSeconds)}) "${session.file.name}"`
     );
@@ -5586,7 +5578,7 @@ export class HlsSessionManager {
     // difference, and nothing downstream can tell that from a bad index.
     const liveStart = this.#segmentStartTime(session, safeIndex);
     logger.info(
-      `transcode ${session.id} ${runLabel} positioned at ${startSeconds.toFixed(3)}s ` +
+      `transcode ${session.id} ${run.id} positioned at ${startSeconds.toFixed(3)}s ` +
         `for boundary #${safeIndex} (published ${startSeconds.toFixed(3)}s, ` +
         `live ${liveStart.toFixed(3)}s, apart ${(liveStart - startSeconds).toFixed(3)}s), ` +
         `numbering from #${safeIndex}`
@@ -8657,7 +8649,7 @@ export class HlsSessionManager {
     // Only a run that was still going is being STOPPED. A rung that had already
     // finished or failed reaches here too, and calling that a stop would erase
     // how it actually ended — which is why the handle is asked for first.
-    const stoppedRunDirPath = run.dirPath;
+    const stoppedRunDirPath = session.dirPath;
     // The stretch this run was given, read now rather than when the process
     // finally exits: by then the session may have started another run with
     // another stretch, and the piece to discard belongs to this one.
@@ -10028,13 +10020,7 @@ export class HlsSessionManager {
 
     // Which run's copy answers, when several have written this name. Chosen by
     // what the copies CARRY, not by which run is newest — see #chooseProducedCopy.
-    const chosen = await this.#chooseProducedCopy(session, fileName);
-    const filePath = chosen?.path ?? path.join(session.dirPath, fileName);
-    // Which run wrote what is being served. Every question below that used to
-    // be asked of a segment's NUMBER — is it finished, is it a leftover — is a
-    // question about its run, and the run is known here.
-    const currentRunDir = session.run?.dirPath ?? session.dirPath;
-    const fromCurrentRun = (chosen?.dir ?? currentRunDir) === currentRunDir;
+    const filePath = this.#producedIndex(session).pathOf(fileName) ?? path.join(session.dirPath, fileName);
     const isPlaylist = fileName === PLAYLIST_FILE_NAME;
     if (!isPlaylist) {
       // Where the viewer actually is. Recorded for every segment request,
@@ -10106,9 +10092,9 @@ export class HlsSessionManager {
         // everything it wrote, so its files need no such proof — and taking the
         // proof from whichever run happened to hold the next number is how a
         // file being written came to be read as finished.
-        if (!isLast && session.run?.process && fromCurrentRun) {
+        if (!isLast && session.run?.process) {
           const nextName = session.segmentFormat.segmentFileName(index + 1);
-          const nextPath = path.join(chosen?.dir ?? session.dirPath, nextName);
+          const nextPath = path.join(session.dirPath, nextName);
           // The FIRST segment of a run cannot be judged by "the next one
           // exists": nothing is producing a next one yet, because the run has
           // only just begun here. Waiting for it holds precisely the segment a
@@ -10178,8 +10164,7 @@ export class HlsSessionManager {
       // module; the rest stream straight off disk.
       if (!isPlaylist && session.segmentFormat.needsSegmentRewrite) {
         const index = session.segmentFormat.segmentIndexFromName(fileName);
-        // Already in hand when the choice between copies had to read it.
-        const raw = chosen?.raw ?? await readFile(filePath);
+        const raw = await readFile(filePath);
         // Self-contained pieces carry the init header; a media segment must not.
         const bytes = session.run?.usesExplicitCuts && session.segmentFormat.stripInit
           ? session.segmentFormat.stripInit(raw)
@@ -10209,25 +10194,19 @@ export class HlsSessionManager {
           // yet. Only a segment the CURRENT run has already moved past — the
           // next one exists, or no run is producing at all — is a leftover, and
           // only that one is worth removing so it can be made again.
-          // Whose file is this? The question is about the RUN that wrote it,
-          // and it was asked of the index instead: anything at or above
-          // `encodeStartIndex` while any run was alive counted as being
-          // written. Field 2026-09-03: an empty `#25` left by a run that had
-          // been killed four minutes earlier was called "still being written"
-          // by a run that had produced nothing, so it was never removed and
-          // never remade, and the viewer waited on it for ten minutes. Every
-          // run has a directory of its own, and the copy that was read carries
-          // the one it came from, so the run can simply be named.
+          // A live run may genuinely still be writing this — including one
+          // stopped by the look-ahead, which closes the piece when it is let
+          // go. With no run at all it is a leftover, whatever its number, and
+          // removing it is what lets the next run make it again.
           //
-          // A file in the current run's directory while that run exists may
-          // genuinely be unfinished — including a run stopped by the look-ahead,
-          // which will close the piece when it is released. Everything else is a
-          // leftover, whatever its number, and removing it is what lets the
-          // current run make it again. Deletion is now provably safe as well:
-          // no process writes into a run directory but that run's own ffmpeg,
-          // which is what the first version of this check got wrong when it
-          // deleted the file an encoder was writing into (2026-08-06, #225).
-          const stale = !session.run?.process || !fromCurrentRun;
+          // Field 2026-09-03, before a run was an object: an empty `#25` left
+          // by a run killed four minutes earlier was called "still being
+          // written" by a run that had produced nothing, so it was never
+          // removed and never remade, and the viewer waited on it for ten
+          // minutes. The question was asked of the segment's NUMBER — anything
+          // at or above the start index while any run was alive — and it is a
+          // question about the run.
+          const stale = !session.run?.process;
           logger.warn(
             `transcode ${session.id} segment #${index} is short of a track — ` +
             (stale
@@ -10468,7 +10447,6 @@ export class HlsSessionManager {
     // Bounded: a session an hour in has thousands of segments, and the count is
     // for a comparison, not an inventory.
     const last = Math.min(head, startIndex + BACKWARD_RESTART_SCAN_SEGMENTS);
-    const dirsBefore = this.#runDirs(session);
     const accounting = session.backwardRestarts ?? { count: 0, segmentsBack: 0, worstBack: 0, remade: 0 };
     accounting.count += 1;
     accounting.segmentsBack += previousStart - startIndex;
@@ -10479,14 +10457,11 @@ export class HlsSessionManager {
       let alreadyOnDisk = 0;
       for (let index = startIndex; index <= last; index += 1) {
         const fileName = session.segmentFormat.segmentFileName(index);
-        for (const dir of dirsBefore) {
-          try {
-            await access(path.join(dir, fileName));
-            alreadyOnDisk += 1;
-            break;
-          } catch {
-            // Not this run's; try an older one.
-          }
+        try {
+          await access(path.join(session.dirPath, fileName));
+          alreadyOnDisk += 1;
+        } catch {
+          // Nobody has made it, so this run will not be remaking it.
         }
       }
       accounting.remade += alreadyOnDisk;
@@ -10502,25 +10477,29 @@ export class HlsSessionManager {
     });
   }
 
+
   /**
-   * The directories runs have written into, newest first.
+   * A produced file that has anything in it, or null.
    *
-   * Runs used to share one directory, which is why a restart had to wait for
-   * the previous ffmpeg to die: two processes writing `segment-00042.mp4` at
-   * once produce a file that is neither. Measured 2.9.132, that wait was
-   * 0.7-1.3 s of every seek and essentially the whole cost of a restart.
-   * Given a directory each they cannot collide, so the new run starts at once
-   * and the old one is left to die in the background.
-   *
-   * Newest first because a later run's answer for a segment supersedes an
-   * earlier one's: the older file may be the truncated output of a run that was
-   * killed mid-write, which is exactly what sharing a directory used to hide.
+   * For callers that need a file's CONTENTS and cannot judge them — deriving
+   * the session's header is the case, since the header is what judging would
+   * need. An empty file answers no question, so it is passed over.
    *
    * @param {HlsSession} session
-   * @returns {string[]}
+   * @param {string} fileName
+   * @returns {Promise<string | null>}
    */
-  #runDirs(session) {
-    return this.#producedIndex(session).runDirs();
+  async #firstCopyWithBytes(session, fileName) {
+    const held = this.#producedIndex(session).pathOf(fileName);
+    if (held === null) {
+      return null;
+    }
+    try {
+      const info = await stat(held);
+      return info.size > 0 ? held : null;
+    } catch {
+      return null;
+    }
   }
 
   /**
@@ -10645,125 +10624,8 @@ export class HlsSessionManager {
     }
   }
 
-  /**
-   * Every copy of one produced file, newest run first.
-   *
-   * Several runs of a session write the same segment numbers — a restart begins
-   * at the viewer's position and walks forward through material an earlier run
-   * had already made — so a name can exist two or three times over with
-   * different contents. {@link HlsSessionManager##findProducedFile} answers with
-   * the first of them, which is the right answer to "has anything opened this
-   * number yet" and the wrong one to "what should the viewer be sent".
-   *
-   * The directory each copy came from is carried out with it, because whose run
-   * wrote a file is the only sound way to tell a piece being written now from a
-   * leftover of a run that has ended.
-   *
-   * @param {HlsSession} session
-   * @param {string} fileName
-   * @returns {Promise<{ path: string, dir: string, bytes: number }[]>}
-   */
-  async #producedCopies(session, fileName) {
-    const dirs = this.#runDirs(session);
-    // No run directories at all is the flat layout: one session, one place.
-    const searched = dirs.length > 0 ? dirs : [session.dirPath];
-    const copies = [];
-    for (const dir of searched) {
-      const candidate = path.join(dir, fileName);
-      try {
-        const info = await stat(candidate);
-        copies.push({ path: candidate, dir, bytes: info.size });
-      } catch {
-        // Not this run's.
-      }
-    }
-    return copies;
-  }
 
-  /**
-   * The newest copy of a file that has anything in it.
-   *
-   * For callers that need a file's CONTENTS and cannot judge them — deriving
-   * the session's header is the case, since the header is what judging would
-   * need. An empty file answers no question, so it is passed over.
-   *
-   * @param {HlsSession} session
-   * @param {string} fileName
-   * @returns {Promise<string | null>}
-   */
-  async #firstCopyWithBytes(session, fileName) {
-    for (const copy of await this.#producedCopies(session, fileName)) {
-      if (copy.bytes > 0) {
-        return copy.path;
-      }
-    }
-    return null;
-  }
 
-  /**
-   * Which copy of a segment to serve, when more than one run has written it.
-   *
-   * The newest copy is preferred — it is the one the current run is making — but
-   * preference is not entitlement: a copy that carries fewer tracks than the
-   * session's header declares cannot be played, and an older run's complete copy
-   * of the same number can. Field 2026-09-03: `#25` existed twice, empty in the
-   * run that had just been stopped and whole in the run before it, and the whole
-   * one was never reached because the search returned the first name it found
-   * and stopped. The viewer sat on a frozen frame for ten minutes with the bytes
-   * they needed already on the disk.
-   *
-   * The chosen copy's contents come back with it. The caller reads the file
-   * anyway to stamp it, and reading it twice to answer one question about it
-   * would double the cost of every segment served.
-   *
-   * @param {HlsSession} session
-   * @param {string} fileName
-   * @returns {Promise<{ path: string, dir: string, bytes: number, raw: Buffer | null } | null>}
-   */
-  async #chooseProducedCopy(session, fileName) {
-    const copies = await this.#producedCopies(session, fileName);
-    if (copies.length === 0) {
-      return null;
-    }
-    // A file with nothing in it is never the better copy, and saying so costs
-    // no read. This holds even where the tracks cannot be counted — before the
-    // session has a header, `hasEveryTrack` has nothing to compare against and
-    // waves every piece through, empty ones included.
-    const withBytes = copies.filter((copy) => copy.bytes > 0);
-    const ranked = withBytes.length > 0 ? withBytes : copies;
-    const canJudge =
-      typeof session.segmentFormat?.hasEveryTrack === "function" &&
-      session.segmentFormat.needsSegmentRewrite &&
-      session.segmentFormat.isSegmentFileName(fileName) &&
-      session.initBytes &&
-      session.initBytes.length > 0;
-    if (!canJudge) {
-      // Nothing further can be said about which copy is better, so the newest
-      // that has bytes in it stands.
-      return { ...ranked[0], raw: null };
-    }
-    for (const copy of ranked) {
-      if (copy.bytes === 0) {
-        continue;
-      }
-      let raw;
-      try {
-        raw = await readFile(copy.path);
-      } catch {
-        continue; // Removed while we were choosing; the next copy answers.
-      }
-      const bytes = session.run?.usesExplicitCuts && session.segmentFormat.stripInit
-        ? session.segmentFormat.stripInit(raw)
-        : raw;
-      if (session.segmentFormat.hasEveryTrack(bytes, session.initBytes)) {
-        return { ...copy, raw };
-      }
-    }
-    // None of them is servable. The newest is handed back regardless, so the
-    // readiness path can say WHY and, when it belongs to a run that has ended,
-    // remove it — answering "not produced" here would lose both.
-    return { ...ranked[0], raw: null };
-  }
 
   #holdForProduction(session, fileName, isPlaylist, options) {
     if (!isPlaylist) {

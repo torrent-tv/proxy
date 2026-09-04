@@ -1,6 +1,5 @@
 /**
- * @file When several runs have written the same segment number, which copy
- * answers — and what happens to the one that cannot.
+ * @file A piece that cannot be played: waited for, or removed and made again.
  *
  * Field 2026-09-03. A run was suspended 548 ms after it started with
  * `segment-00025.mp4` newly opened, so the file stayed at zero bytes. From then
@@ -8,19 +7,23 @@
  * other's reason: the look-ahead counted the NAME, found the numbering unbroken
  * through #83, called it `420s ahead of the viewer` and kept the encoder
  * stopped; the serving path read the FILE, found it short of a track, and
- * waited for a run that had produced nothing to finish it. A complete copy of
- * #25 lay in the previous run's directory the whole time and was never reached,
- * because the search returned the first name it found and stopped.
+ * waited for a run that had produced nothing to finish it.
  *
- * The viewer's picture stood still for ten minutes with the bytes they needed
- * already on the disk, on a transport measuring 3-9 ms round trip.
+ * The viewer's picture stood still for ten minutes on a transport measuring
+ * 3-9 ms round trip.
+ *
+ * The question of WHICH copy answers is gone with the directory-per-run scheme:
+ * there is one directory per output, runs are kept apart by their stretches,
+ * and one name is one file. What is left is the question that remains real —
+ * whether a file that cannot be played is being written now or was left by a
+ * run that has ended.
  */
 
 import test from "node:test";
 import assert from "node:assert/strict";
 import { SourceFile } from "../services/source/SourceFile.js";
 import { Timeline } from "../services/output/Timeline.js";
-import { mkdir, mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import {
@@ -140,14 +143,12 @@ function halfPiece(offsetSeconds) {
 }
 
 /**
- * A session whose runs are laid out on disk exactly as the field case was.
+ * A session with the output directory every run writes into.
  *
  * @returns {Promise<{ manager: HlsSessionManager, session: object, dirPath: string }>}
  */
-async function sessionWithTwoRuns() {
+async function sessionOnOneDirectory() {
   const dirPath = await mkdtemp(path.join(os.tmpdir(), "produced-copy-"));
-  await mkdir(path.join(dirPath, "run-1"), { recursive: true });
-  await mkdir(path.join(dirPath, "run-2"), { recursive: true });
   const manager = new HlsSessionManager({
     enabled: true,
     ffmpegBin: "ffmpeg",
@@ -185,70 +186,28 @@ async function sessionWithTwoRuns() {
   };
   manager.sessionsById.set(SESSION_ID, session);
   // A run exists and is alive — the state the field case was in, and the one in
-  // which the old test called every leftover "still being written". It writes
-  // into the second run's directory, which is where the newest copies are.
-  const run = startRunOn(session, { from: 0, usesExplicitCuts: true });
-  run.dirPath = path.join(dirPath, "run-2");
+  // which the old test called every leftover "still being written".
+  startRunOn(session, { from: 0, usesExplicitCuts: true });
   return { manager, session, dirPath };
 }
 
-test("the complete copy answers when the newest run's is empty", async (t) => {
-  const { manager, dirPath } = await sessionWithTwoRuns();
-  t.after(async () => {
-    await manager.disposeAll();
-    await rm(dirPath, { recursive: true, force: true });
-  });
-  // run-1 made this segment and finished it; run-2 opened it and was stopped.
-  await writeFile(path.join(dirPath, "run-1", "segment-00001.mp4"), wholePiece(SEGMENT_SECONDS));
-  await writeFile(path.join(dirPath, "run-1", "segment-00002.mp4"), wholePiece(25));
-  await writeFile(path.join(dirPath, "run-2", "segment-00001.mp4"), Buffer.alloc(0));
 
-  const result = await manager.getFileStream(SESSION_ID, "segment-00001.mp4", { requestSeq: 1 });
-
-  assert.equal(
-    result.kind,
-    "file",
-    "a complete copy exists one run away; holding here is what froze the picture for ten minutes"
-  );
-  const chunks = [];
-  for await (const chunk of result.stream) {
-    chunks.push(chunk);
-  }
-  assert.ok(Buffer.concat(chunks).length > 0, "and it must be the copy with bytes in it");
-});
-
-test("a copy short of a track is passed over for an older one that is whole", async (t) => {
-  const { manager, dirPath } = await sessionWithTwoRuns();
-  t.after(async () => {
-    await manager.disposeAll();
-    await rm(dirPath, { recursive: true, force: true });
-  });
-  // Not empty — a terminated run closes its file properly, with only what it
-  // had muxed by then, which after a seek-restart is routinely one track of two.
-  await writeFile(path.join(dirPath, "run-1", "segment-00001.mp4"), wholePiece(SEGMENT_SECONDS));
-  await writeFile(path.join(dirPath, "run-1", "segment-00002.mp4"), wholePiece(25));
-  await writeFile(path.join(dirPath, "run-2", "segment-00001.mp4"), halfPiece(SEGMENT_SECONDS));
-
-  const result = await manager.getFileStream(SESSION_ID, "segment-00001.mp4", { requestSeq: 1 });
-
-  assert.equal(result.kind, "file", "a piece carrying one track of two is not servable; the whole one is");
-});
 
 test("a leftover of a run that has ended is removed, not waited on", async (t) => {
-  const { manager, dirPath } = await sessionWithTwoRuns();
+  const { manager, session, dirPath } = await sessionOnOneDirectory();
   t.after(async () => {
     await manager.disposeAll();
     await rm(dirPath, { recursive: true, force: true });
   });
-  // The only copy, and it belongs to a run that is gone. The current run —
-  // run-2 — has written nothing, so calling this "still being written" waits on
-  // a process that will never touch it.
-  await writeFile(path.join(dirPath, "run-1", "segment-00001.mp4"), Buffer.alloc(0));
+  // Opened by a run that is gone, and nothing is encoding now — so calling it
+  // "still being written" waits on a process that will never touch it.
+  session.run = null;
+  await writeFile(path.join(dirPath, "segment-00001.mp4"), Buffer.alloc(0));
 
   const result = await manager.getFileStream(SESSION_ID, "segment-00001.mp4", { requestSeq: 1 });
 
   assert.equal(result.kind, "warming-up", "nothing servable exists yet, so the viewer waits");
-  const left = await readdir(path.join(dirPath, "run-1"));
+  const left = (await readdir(dirPath)).filter((name) => name === "segment-00001.mp4");
   assert.deepEqual(
     left,
     [],
@@ -257,7 +216,7 @@ test("a leftover of a run that has ended is removed, not waited on", async (t) =
 });
 
 test("the current run's own unfinished piece is waited for, never deleted", async (t) => {
-  const { manager, session, dirPath } = await sessionWithTwoRuns();
+  const { manager, session, dirPath } = await sessionOnOneDirectory();
   t.after(async () => {
     await manager.disposeAll();
     await rm(dirPath, { recursive: true, force: true });
@@ -268,14 +227,13 @@ test("the current run's own unfinished piece is waited for, never deleted", asyn
   // could open, and the segment never appeared.
   //
   // The live run begins at #1, so #1 is its own first piece.
-  const live = startRunOn(session, { from: 1, producing: false, usesExplicitCuts: true });
-  live.dirPath = path.join(dirPath, "run-2");
-  await writeFile(path.join(dirPath, "run-2", "segment-00001.mp4"), Buffer.alloc(0));
+  startRunOn(session, { from: 1, producing: false, usesExplicitCuts: true });
+  await writeFile(path.join(dirPath, "segment-00001.mp4"), Buffer.alloc(0));
 
   const result = await manager.getFileStream(SESSION_ID, "segment-00001.mp4", { requestSeq: 1 });
 
   assert.equal(result.kind, "warming-up");
-  const left = await readdir(path.join(dirPath, "run-2"));
+  const left = (await readdir(dirPath)).filter((name) => name === "segment-00001.mp4");
   assert.deepEqual(left, ["segment-00001.mp4"], "the live run's own output must be left alone");
 });
 
@@ -284,43 +242,37 @@ test("the look-ahead does not count a file with nothing in it", async (t) => {
   t.after(async () => {
     await rm(dirPath, { recursive: true, force: true });
   });
-  const runTwo = path.join(dirPath, "run-2");
-  const runOne = path.join(dirPath, "run-1");
-  await mkdir(runTwo, { recursive: true });
-  await mkdir(runOne, { recursive: true });
-  await writeFile(path.join(runTwo, "segment-00000.mp4"), wholePiece(0));
-  await writeFile(path.join(runTwo, "segment-00001.mp4"), Buffer.alloc(0));
+  await writeFile(path.join(dirPath, "segment-00000.mp4"), wholePiece(0));
+  await writeFile(path.join(dirPath, "segment-00001.mp4"), Buffer.alloc(0));
 
   assert.deepEqual(
-    [...usableSegmentIndices([runTwo, runOne], fmp4Format, new Set())].sort((a, b) => a - b),
+    [...usableSegmentIndices([dirPath], fmp4Format, new Set())].sort((a, b) => a - b),
     [0],
     "an empty file bridged the hole and bought the encoder a suspension it had not earned"
   );
 
-  // The same number, made properly by an earlier run: now it genuinely is ready.
-  await writeFile(path.join(runOne, "segment-00001.mp4"), wholePiece(SEGMENT_SECONDS));
+  // The same number, made properly: now it genuinely is ready.
+  await writeFile(path.join(dirPath, "segment-00001.mp4"), wholePiece(SEGMENT_SECONDS));
   assert.deepEqual(
-    [...usableSegmentIndices([runTwo, runOne], fmp4Format, new Set())].sort((a, b) => a - b),
+    [...usableSegmentIndices([dirPath], fmp4Format, new Set())].sort((a, b) => a - b),
     [0, 1],
-    "some run holds a copy with bytes in it, which is what the serving path will find"
+    "a copy with bytes in it, which is what the serving path will find"
   );
 });
 
-test("what a run holds is asked of the filesystem once per file", async (t) => {
+test("what the output holds is asked of the filesystem once per file", async (t) => {
   const dirPath = await mkdtemp(path.join(os.tmpdir(), "usable-memo-"));
   t.after(async () => {
     await rm(dirPath, { recursive: true, force: true });
   });
-  const runOne = path.join(dirPath, "run-1");
-  await mkdir(runOne, { recursive: true });
-  await writeFile(path.join(runOne, "segment-00000.mp4"), wholePiece(0));
+  await writeFile(path.join(dirPath, "segment-00000.mp4"), wholePiece(0));
   const known = new Set();
 
-  usableSegmentIndices([runOne], fmp4Format, known);
+  usableSegmentIndices([dirPath], fmp4Format, known);
 
   assert.deepEqual(
     [...known],
-    [path.join(runOne, "segment-00000.mp4")],
+    [path.join(dirPath, "segment-00000.mp4")],
     "a piece that has bytes never loses them, and this runs on the thread carrying the data channel"
   );
 });

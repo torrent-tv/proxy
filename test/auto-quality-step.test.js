@@ -127,7 +127,7 @@ async function managerWithSession({ transcodeVideo = true, cutGrid } = {}) {
   });
   const session = fakeSession({ dirPath, transcodeVideo, cutGrid });
   manager.sessionsById.set(BASE_ID, session);
-  startRunOn(session, { id: `${BASE_ID}/run#1`, process: fakeEncoder() });
+  startRunOn(session, { process: fakeEncoder() });
   return { manager, session, dirPath };
 }
 

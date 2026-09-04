@@ -22,7 +22,7 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { HlsSessionManager } from "../services/hls-session-manager.js";
-import { ENCODE_RUN_STATE } from "../services/encode-run-state.js";
+import { ENCODE_RUN_STATE } from "../services/encode/encode-run-state.js";
 import { fmp4Format } from "../services/segment-formats/fmp4.js";
 
 const MOVIE_TIMESCALE = 1000;
@@ -300,7 +300,7 @@ test("serving a run's own segment moves the run out of STARTING", async (t) => {
     await manager.disposeAll();
     await rm(dirPath, { recursive: true, force: true });
   });
-  // The table lives in `encode-run-state.js` and is tested there as a graph.
+  // The table lives in `encode/encode-run-state.js` and is tested there as a graph.
   // What this pins is that a real serve REACHES it: a state nothing writes
   // describes every run as still starting, for ever, and the log built on it
   // would say so too.

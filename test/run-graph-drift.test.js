@@ -1,7 +1,7 @@
 /**
  * @file The drawing cannot disagree with the table.
  *
- * `docs/encode-run-state.md` is generated from `services/encode-run-state.js`.
+ * `docs/encode-run-state.md` is generated from `services/encode/encode-run-state.js`.
  * A picture kept beside the code drifts — this repository has the receipts —
  * so the check is mechanical: regenerate it and compare. A behavioural change
  * to the table that forgets `npm run graph` fails here, in the same commit.

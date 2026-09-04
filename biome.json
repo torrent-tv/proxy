@@ -17,5 +17,184 @@
 				"noPrivateImports": "error"
 			}
 		}
-	}
+	},
+	"overrides": [
+		{
+			"includes": [
+				"services/demand/**",
+				"services/piece-store/**",
+				"services/segment-formats/**",
+				"services/tracks/**",
+				"services/output/**",
+				"services/viewer/**",
+				"services/encode/**"
+			],
+			"linter": {
+				"rules": {
+					"style": {
+						"noRestrictedImports": {
+							"level": "error",
+							"options": {
+								"patterns": [
+									{
+										"group": ["../**"],
+										"message": "This layer states facts and imports nothing above itself. Anything it needs from outside — a logger, a clock, a way to read bytes — is passed in."
+									}
+								]
+							}
+						}
+					}
+				}
+			}
+		},
+		{
+			"includes": ["services/download/**"],
+			"linter": {
+				"rules": {
+					"style": {
+						"noRestrictedImports": {
+							"level": "error",
+							"options": {
+								"patterns": [
+									{
+										"group": [
+											"../*",
+											"../container/**",
+											"../controllers/**",
+											"../encode/**",
+											"../orchestrators/**",
+											"../output/**",
+											"../segment-formats/**",
+											"../torrent-worker/**",
+											"../tracks/**",
+											"../viewer/**"
+										],
+										"message": "What the swarm is told is decided from what is wanted (demand/) and what is held (piece-store/), and from nothing else."
+									}
+								]
+							}
+						}
+					}
+				}
+			}
+		},
+		{
+			"includes": ["services/container/**"],
+			"linter": {
+				"rules": {
+					"style": {
+						"noRestrictedImports": {
+							"level": "error",
+							"options": {
+								"patterns": [
+									{
+										"group": [
+											"../*",
+											"../controllers/**",
+											"../demand/**",
+											"../download/**",
+											"../encode/**",
+											"../orchestrators/**",
+											"../output/**",
+											"../piece-store/**",
+											"../segment-formats/**",
+											"../torrent-worker/**",
+											"../viewer/**"
+										],
+										"message": "A container answers for itself and hands out tracks/. It knows nothing of torrents, encoders or viewers: the four functions it is built with are its whole outside world."
+									}
+								]
+							}
+						}
+					}
+				}
+			}
+		},
+		{
+			"includes": ["services/orchestrators/**"],
+			"linter": {
+				"rules": {
+					"style": {
+						"noRestrictedImports": {
+							"level": "error",
+							"options": {
+								"patterns": [
+									{
+										"group": [
+											"../*",
+											"../controllers/**",
+											"../demand/**",
+											"../download/**",
+											"../output/**",
+											"../piece-store/**",
+											"../segment-formats/**",
+											"../viewer/**"
+										],
+										"message": "An orchestrator composes the layers below it. Reaching sideways into serving or downloading is what put a scenario in two places before."
+									}
+								]
+							}
+						}
+					}
+				}
+			}
+		},
+		{
+			"includes": ["services/controllers/**"],
+			"linter": {
+				"rules": {
+					"style": {
+						"noRestrictedImports": {
+							"level": "error",
+							"options": {
+								"patterns": [
+									{
+										"group": [
+											"../*",
+											"../demand/**",
+											"../download/**",
+											"../encode/**",
+											"../output/**",
+											"../piece-store/**",
+											"../segment-formats/**",
+											"../torrent-worker/**",
+											"../viewer/**"
+										],
+										"message": "A controller translates a request for an orchestrator. Every layer below the orchestrator is reached through it, never around it."
+									}
+								]
+							}
+						}
+					}
+				}
+			}
+		},
+		{
+			"includes": ["services/torrent-worker/**"],
+			"linter": {
+				"rules": {
+					"style": {
+						"noRestrictedImports": {
+							"level": "error",
+							"options": {
+								"patterns": [
+									{
+										"group": [
+											"../hls-session-manager.js",
+											"../controllers/**",
+											"../encode/**",
+											"../output/**",
+											"../viewer/**",
+											"../segment-formats/**"
+										],
+										"message": "The torrent thread serves bytes. What is produced from them, and for whom, is decided in the main thread and never asked of this one."
+									}
+								]
+							}
+						}
+					}
+				}
+			}
+		}
+	]
 }

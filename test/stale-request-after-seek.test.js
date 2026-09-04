@@ -24,7 +24,7 @@ import os from "node:os";
 import path from "node:path";
 
 import { HlsSessionManager } from "../services/hls-session-manager.js";
-import { ENCODE_RUN_STATE } from "../services/encode-run-state.js";
+import { ENCODE_RUN_STATE } from "../services/encode/encode-run-state.js";
 import { fmp4Format } from "../services/segment-formats/fmp4.js";
 
 const SEGMENT_SECONDS = 4;

@@ -25,7 +25,7 @@ import {
   nextState,
   processCanBeSignalled,
   wireState
-} from "../services/encode-run-state.js";
+} from "../services/encode/encode-run-state.js";
 
 const ALL_STATES = Object.values(ENCODE_RUN_STATE);
 const ALL_EVENTS = Object.values(ENCODE_RUN_EVENT);

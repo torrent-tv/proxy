@@ -10,7 +10,7 @@
 import { subtitleOrchestrator } from "../orchestrators/SubtitleOrchestrator.js";
 import { SubtitleFileContainer } from "../container/SubtitleFileContainer.js";
 import { TextSubtitleTrack } from "../tracks/TextSubtitleTrack.js";
-import { detectLanguage } from "../language-detect.js";
+import { detectLanguage } from "../tracks/language-detect.js";
 
 const EXTERNAL_MAX_BYTES = 8 * 1024 * 1024;
 

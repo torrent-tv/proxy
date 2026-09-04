@@ -17,7 +17,7 @@ import { Timeline } from "../services/output/Timeline.js";
 import test from "node:test";
 
 import { HlsSessionManager } from "../services/hls-session-manager.js";
-import { ENCODE_RUN_STATE, INITIAL_RUN_STATE } from "../services/encode-run-state.js";
+import { ENCODE_RUN_STATE, INITIAL_RUN_STATE } from "../services/encode/encode-run-state.js";
 
 const BOUNDARIES = [0, 4, 8, 12, 16, 20];
 

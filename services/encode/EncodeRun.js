@@ -26,7 +26,7 @@
  * This carries a decision out and reports what happened.
  */
 
-import { ENCODE_RUN_EVENT, ENCODE_RUN_STATE, INITIAL_RUN_STATE, nextState } from "../encode-run-state.js";
+import { ENCODE_RUN_EVENT, ENCODE_RUN_STATE, INITIAL_RUN_STATE, nextState } from "./encode-run-state.js";
 
 /**
  * Why a run ended.

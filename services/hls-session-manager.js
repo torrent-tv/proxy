@@ -32,7 +32,7 @@ import {
   nextState,
   processCanBeSignalled,
   wireState
-} from "./encode-run-state.js";
+} from "./encode/encode-run-state.js";
 import { ENCODE_EXIT, classifyEncodeExit } from "./encode-exit.js";
 
 /** Own package version, stamped onto session-start log lines. */

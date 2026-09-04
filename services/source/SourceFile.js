@@ -71,6 +71,23 @@ export class SourceFile {
      * @type {object | null}
      */
     this.media = null;
+    /**
+     * What this host answered when a quality step was asked for: the height
+     * REQUESTED against the height it turned out to produce.
+     *
+     * A file's own record, not a link between sessions. The realtime budget may
+     * land a request for 540p on a 240p encode, and once it has, that answer
+     * must not move — a player holding an init for one size cannot be sent
+     * another. It used to be kept as a map from a height to a SESSION ID on
+     * whichever session happened to be the picture, which tied two lifetimes
+     * together: disposing one had to reach back and clean the other's map, and
+     * a stale id was a thing that had to be noticed. Two numbers cannot go
+     * stale, and every session of one file answers alike because there is one
+     * file.
+     *
+     * @type {Map<number, number>}
+     */
+    this.stepHeights = new Map();
   }
 
   /**

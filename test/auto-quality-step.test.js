@@ -22,6 +22,7 @@ import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { HlsSessionManager } from "../services/hls-session-manager.js";
+import { viewerOf } from "../services/viewer/Viewer.js";
 import { fmp4Format } from "../services/segment-formats/fmp4.js";
 import { softwareDescriptor, maxrateKbpsFor, nominalKbpsForHeight } from "../services/hwaccel.js";
 import { readVideoSampleSize } from "../services/segment-formats/mp4-boxes.js";
@@ -87,7 +88,7 @@ function fakeSession({ dirPath, transcodeVideo = true, cutGrid = "keyframe" }) {
     initSizeSaid: "",
     recentSpeed: null,
     rateCapKbps: null,
-    netReports: new Map(),
+    viewers: new Map(),
     linkSlowSince: 0,
     lastAloneSpeed: null,
     durationSeconds: 400,
@@ -298,7 +299,7 @@ test("a COPIED picture too thick for the viewer's link is asked for as a smaller
   // Four seconds of segment at 2 MB is ~4 Mbit/s of stream. The viewer reports
   // a link that cannot carry it and a buffer that is running dry.
   await produceSegments(session, 2_000_000);
-  session.netReports.set("viewer", { linkMbps: 1.0, bufferedAheadSec: 1.5, positionSeconds: null, at: Date.now() });
+  viewerOf(session, "viewer").netReport = { linkMbps: 1.0, bufferedAheadSec: 1.5, positionSeconds: null, at: Date.now() };
   session.linkSlowSince = Date.now() - 60_000;
 
   await manager.runQualityBudgetOnce();
@@ -321,18 +322,18 @@ test("with two viewers the budget acts on the WORST link, not on whoever reporte
   // One viewer is comfortable and reported LAST, which under a single field was
   // the whole of what the budget saw. The other cannot carry the stream and is
   // running dry.
-  session.netReports.set("thin", {
+  viewerOf(session, "thin").netReport = {
     linkMbps: 1.0,
     bufferedAheadSec: 1.5,
     positionSeconds: 40,
     at: Date.now() - 1_000
-  });
-  session.netReports.set("fat", {
+  };
+  viewerOf(session, "fat").netReport = {
     linkMbps: 80,
     bufferedAheadSec: 60,
     positionSeconds: 40,
     at: Date.now()
-  });
+  };
   session.linkSlowSince = Date.now() - 60_000;
 
   await manager.runQualityBudgetOnce();
@@ -354,12 +355,12 @@ test("a report from a viewer who has left stops counting", async (t) => {
   // Nothing releases a consumer when a data channel closes (roadmap item 55),
   // so a departed viewer's last reading would otherwise go on deciding for the
   // one still here. It is dropped on the next report rather than kept.
-  session.netReports.set("gone", {
+  viewerOf(session, "gone").netReport = {
     linkMbps: 1.0,
     bufferedAheadSec: 1.5,
     positionSeconds: 40,
     at: Date.now() - 120_000
-  });
+  };
   manager.recordNetReport(session.id, {
     linkMbps: 80,
     bufferedAheadSec: 60,
@@ -370,7 +371,7 @@ test("a report from a viewer who has left stops counting", async (t) => {
 
   await manager.runQualityBudgetOnce();
 
-  assert.equal(session.netReports.size, 1, "the stale entry was removed, not merely ignored");
+  assert.equal(session.viewers.size, 1, "the stale entry was removed, not merely ignored");
   assert.equal(session.qualityAsk, null, "the viewer who is here can carry the picture");
 });
 
@@ -441,7 +442,7 @@ test("a stream that publishes no variants is left alone, and said so once", asyn
   });
 
   await produceSegments(session, 2_000_000);
-  session.netReports.set("viewer", { linkMbps: 1.0, bufferedAheadSec: 1.5, positionSeconds: null, at: Date.now() });
+  viewerOf(session, "viewer").netReport = { linkMbps: 1.0, bufferedAheadSec: 1.5, positionSeconds: null, at: Date.now() };
   session.linkSlowSince = Date.now() - 60_000;
 
   await manager.runQualityBudgetOnce();
@@ -498,7 +499,7 @@ test("a cap is not lifted because there is no higher rung to compare against", a
   session.rateCapKbps = 700;
   session.recentSpeed = { speed: 2.4, at: Date.now(), runSerial: session.runSerial };
   session.budgetUpSince = Date.now() - 120_000;
-  session.netReports.set("viewer", { linkMbps: 1.0, bufferedAheadSec: 30, positionSeconds: null, at: Date.now() });
+  viewerOf(session, "viewer").netReport = { linkMbps: 1.0, bufferedAheadSec: 30, positionSeconds: null, at: Date.now() };
 
   await manager.runQualityBudgetOnce();
 

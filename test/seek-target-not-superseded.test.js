@@ -19,6 +19,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { HlsSessionManager } from "../services/hls-session-manager.js";
+import { viewerOf } from "../services/viewer/Viewer.js";
 import { fmp4Format } from "../services/segment-formats/fmp4.js";
 
 const SESSION_ID = "aaaaaaaa-1111-2222-3333-444444444444";
@@ -128,16 +129,16 @@ test("a request as deep as the cushion the browser is told to hold is still want
 test("the viewer who made the request is the one it is judged against", async () => {
   const { manager, dirPath } = await managerAfterSeek();
   const session = manager.sessionsById.get(SESSION_ID);
-  session.consumerHeads = new Map();
+  session.viewers = new Map();
   // Two people watching one copied picture. The shared position belongs to the
   // one in front — it is the furthest segment anybody asked for — and the one
   // behind is a hundred segments back, waiting for a segment there.
   const behind = SEGMENT_AT_SEEK - 100;
-  session.consumerHeads.set("behind", {
+  viewerOf(session, "behind").head = {
     segment: behind,
     seconds: behind * SEGMENT_SECONDS,
     at: Date.now()
-  });
+  };
 
   assert.equal(
     manager.requestStillWanted(SESSION_ID, `segment-${String(behind).padStart(5, "0")}.mp4`, "behind"),
@@ -156,13 +157,13 @@ test("the viewer who made the request is the one it is judged against", async ()
 test("a seek moves the seeking viewer's own head, and nobody else's", async () => {
   const { manager, dirPath } = await managerAfterSeek();
   const session = manager.sessionsById.get(SESSION_ID);
-  session.consumerHeads = new Map();
+  session.viewers = new Map();
   const staying = SEGMENT_AT_SEEK - 40;
-  session.consumerHeads.set("staying", {
+  viewerOf(session, "staying").head = {
     segment: staying,
     seconds: staying * SEGMENT_SECONDS,
     at: Date.now()
-  });
+  };
 
   const jumpTo = 120;
   manager.requestSeek(SESSION_ID, jumpTo, "jumping");

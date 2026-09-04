@@ -166,7 +166,7 @@ async function sessionWithTwoRuns() {
     ffmpeg: { pid: 0, killed: false, kill() {} },
     lastError: "",
     consumers: new Set(),
-    netReports: new Map(),
+    viewers: new Map(),
     segmentFormat: fmp4Format,
     usesExplicitCuts: true,
     useSyntheticPlaylist: true,

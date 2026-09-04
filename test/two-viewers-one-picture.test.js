@@ -15,6 +15,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { audioRenditionKey, HlsSessionManager } from "../services/hls-session-manager.js";
+import { viewerOf } from "../services/viewer/Viewer.js";
 import { fmp4Format } from "../services/segment-formats/fmp4.js";
 
 const BASE_ID = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
@@ -40,11 +41,8 @@ function fakeSession({ id, dirPath, audioTrackIndex = 0, transcodeAudio = true }
     ffmpeg: null,
     lastError: "",
     consumers: new Set(),
-    consumerHeads: new Map(),
-    audioChoiceByConsumer: new Map(),
-    activeVariantByConsumer: new Map(),
-    warmingVariantByConsumer: new Map(),
-    warmingAudioByConsumer: new Map(),
+    viewers: new Map(),
+
     segmentFormat: fmp4Format,
     transcodeVideo: false,
     transcodeAudio,
@@ -60,7 +58,6 @@ function fakeSession({ id, dirPath, audioTrackIndex = 0, transcodeAudio = true }
     encodeRunGeneration: 0,
     encodeStartIndex: 0,
     waitEpoch: 0,
-    netReports: new Map(),
     useSyntheticPlaylist: true,
     playlistText: "#EXTM3U\n",
     segmentBoundaries: Array.from({ length: 101 }, (_, index) => index * SEGMENT_SECONDS),
@@ -113,10 +110,10 @@ async function pictureWithTwoViewers() {
   base.consumers = new Set([FIRST, SECOND]);
   // Both viewers are watching the picture, which is what keeps their choices
   // alive; a viewer whose head has expired holds no encoder.
-  base.consumerHeads.set(FIRST, { segment: 3, seconds: 12, at: Date.now() });
-  base.consumerHeads.set(SECOND, { segment: 3, seconds: 12, at: Date.now() });
-  base.audioChoiceByConsumer.set(FIRST, { trackIndex: 0, transcode: true });
-  base.audioChoiceByConsumer.set(SECOND, { trackIndex: 1, transcode: true });
+  viewerOf(base, FIRST).head = { segment: 3, seconds: 12, at: Date.now() };
+  viewerOf(base, SECOND).head = { segment: 3, seconds: 12, at: Date.now() };
+  viewerOf(base, FIRST).audio = { trackIndex: 0, transcode: true };
+  viewerOf(base, SECOND).audio = { trackIndex: 1, transcode: true };
   manager.sessionsById.set(BASE_ID, base);
   manager.getCachedAudioTracks = () => [
     { index: 0, language: "rus", title: "Дубляж", isDefault: true, fileIndex: 0, sourceTrackIndex: 0 },
@@ -180,8 +177,8 @@ test("a soundtrack nobody is listening to any more is stopped", async (t) => {
   // One viewer only, so what they leave is left for nobody. This is the case
   // the stop exists for: an encoder AND a reader holding pieces of the torrent.
   base.consumers = new Set([FIRST]);
-  base.consumerHeads.delete(SECOND);
-  base.audioChoiceByConsumer.delete(SECOND);
+  base.viewers.delete(SECOND);
+  base.viewers.delete(SECOND);
 
   await manager.resolveAudioRenditionFile(BASE_ID, 0, "segment-00003.mp4", FIRST);
   await manager.resolveAudioRenditionFile(BASE_ID, 1, "segment-00004.mp4", FIRST);
@@ -201,8 +198,8 @@ test("each viewer's browser decides for itself whether its soundtrack is re-enco
   // The same track, two browsers: one can decode it as it stands, the other
   // cannot. Answering both from the session's own flag would leave the second
   // viewer with silence.
-  base.audioChoiceByConsumer.set(FIRST, { trackIndex: 0, transcode: false });
-  base.audioChoiceByConsumer.set(SECOND, { trackIndex: 0, transcode: true });
+  viewerOf(base, FIRST).audio = { trackIndex: 0, transcode: false };
+  viewerOf(base, SECOND).audio = { trackIndex: 0, transcode: true };
 
   const copied = await manager.resolveAudioRenditionFile(BASE_ID, 0, "segment-00003.mp4", FIRST);
   const encoded = await manager.resolveAudioRenditionFile(BASE_ID, 0, "segment-00003.mp4", SECOND);
@@ -310,7 +307,7 @@ test("a step somebody is watching is never withdrawn from the offer", async (t) 
     `a step nobody is on and that cannot keep up is withdrawn: ${withoutAViewer.join(" ")}`
   );
 
-  base.activeVariantByConsumer.set(SECOND, variant.id);
+  viewerOf(base, SECOND).activeVariantId = variant.id;
   const withAViewer = manager.offeredHeights(base);
 
   assert.ok(
@@ -330,7 +327,7 @@ test("a viewer whose picture has gone quiet holds no soundtrack encoder", async 
   // The second viewer's tab is gone. Nothing releases the session when a
   // channel closes (roadmap item 54), so what expires is their head on the
   // picture — and with it their claim on an encoder.
-  base.consumerHeads.delete(SECOND);
+  base.viewers.delete(SECOND);
 
   await manager.resolveAudioRenditionFile(BASE_ID, 1, "segment-00004.mp4", FIRST);
 

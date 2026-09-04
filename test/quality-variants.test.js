@@ -22,6 +22,7 @@ import {
   HlsSessionManager
 } from "../services/hls-session-manager.js";
 import { fmp4Format } from "../services/segment-formats/fmp4.js";
+import { viewerOf } from "../services/viewer/Viewer.js";
 
 const BASE_ID = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
 const VARIANT_ID = "11111111-2222-3333-4444-555555555555";
@@ -64,7 +65,7 @@ function fakeSession({ id, encodeHeight, dirPath, transcodeVideo = true }) {
     seekSettleTimer: null,
     seekTarget: null,
     waitEpoch: 0,
-    netReports: new Map(),
+    viewers: new Map(),
     usesExplicitCuts: false,
     useSyntheticPlaylist: true,
     playlistText: "#EXTM3U\n",
@@ -472,7 +473,7 @@ test("the rung on screen fetching its own segments does not cancel a warm-up", a
   // Kept per viewer, and this one is the unnamed viewer of a transport that
   // carries no consumer id.
   assert.equal(
-    base.warmingVariantByConsumer.get(""),
+    base.viewers.get("")?.warmingVariantId ?? null,
     VARIANT_ID,
     "the rung being prepared is still being prepared"
   );
@@ -672,12 +673,12 @@ test("a separately published audio track starts where the picture is, from the r
   // picture — so the viewer is at 100 s, and that, less a segment of margin,
   // is where the track has to begin.
   base.furthestViewerSeconds = 140;
-  base.netReports.set("viewer", {
+  viewerOf(base, "viewer").netReport = {
     linkMbps: 20,
     bufferedAheadSec: 40,
     positionSeconds: null,
     at: Date.now()
-  });
+  };
   manager.getCachedAudioTracks = () => [
     { index: 0, language: "rus", title: "", isDefault: true },
     { index: 1, language: "eng", title: "", isDefault: false }
@@ -710,18 +711,18 @@ test("with two viewers the audio track starts at the EARLIEST picture, not the r
   // A copied picture is one session shared by both of them. The read head is
   // the furthest request of EITHER, so it belongs to the viewer in front.
   base.furthestViewerSeconds = 140;
-  base.netReports.set("ahead", {
+  viewerOf(base, "ahead").netReport = {
     linkMbps: 20,
     bufferedAheadSec: 40,
     positionSeconds: 100,
     at: Date.now()
-  });
-  base.netReports.set("behind", {
+  };
+  viewerOf(base, "behind").netReport = {
     linkMbps: 20,
     bufferedAheadSec: 8,
     positionSeconds: 40,
     at: Date.now()
-  });
+  };
   manager.getCachedAudioTracks = () => [
     { index: 0, language: "rus", title: "", isDefault: true },
     { index: 1, language: "eng", title: "", isDefault: false }
@@ -754,12 +755,12 @@ test("a position past the read head is clamped rather than acted on", async (t) 
   base.furthestViewerSeconds = 140;
   // Reports and requests race; a position claiming to be past everything that
   // has been asked for would start the run where no request can reach it.
-  base.netReports.set("viewer", {
+  viewerOf(base, "viewer").netReport = {
     linkMbps: 20,
     bufferedAheadSec: 40,
     positionSeconds: 900,
     at: Date.now()
-  });
+  };
   manager.getCachedAudioTracks = () => [
     { index: 0, language: "rus", title: "", isDefault: true },
     { index: 1, language: "eng", title: "", isDefault: false }
@@ -791,12 +792,12 @@ test("a stale buffer report is not used to place an audio track", async (t) => {
   base.furthestViewerSeconds = 300;
   // Sent a minute ago: the viewer may have seeked anywhere since, so neither
   // the buffer nor the position in it says where they are now.
-  base.netReports.set("viewer", {
+  viewerOf(base, "viewer").netReport = {
     linkMbps: 20,
     bufferedAheadSec: 5,
     positionSeconds: 250,
     at: Date.now() - 60_000
-  });
+  };
   manager.getCachedAudioTracks = () => [
     { index: 0, language: "rus", title: "", isDefault: true },
     { index: 1, language: "eng", title: "", isDefault: false }
@@ -1098,7 +1099,7 @@ test("a file opened at a position starts its sound THERE, not a look-ahead earli
   // just opened holds no buffer at all.
   base.furthestViewerSeconds = null;
   base.lastRequestedSegment = null;
-  base.netReports.clear();
+  base.viewers.clear();
   base.progress.startPositionSeconds = 588;
   manager.getCachedAudioTracks = () => [
     { index: 0, language: "rus", title: "", isDefault: true },

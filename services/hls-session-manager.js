@@ -3856,7 +3856,13 @@ export class HlsSessionManager {
     const now = Date.now();
     for (const [address, sessions] of byOutput) {
       const coverage = this.encodeOrchestrator.coverageOf(address);
-      const segmentCount = Number(sessions[0].segmentCount) || 0;
+      // From the TIMELINE, which is where how a file is cut has lived since
+      // 2.76.0. Read off the session it left, this was `undefined` on every
+      // session ever made: the map then held no length, and the walk that
+      // gives a run its end ran to MAX_SAFE_INTEGER — the main thread spun at
+      // 100% and the proxy answered nothing, measured on the addon host
+      // 2026-09-05 with the stack read out of the live process.
+      const segmentCount = Number(sessions[0].timeline?.segmentCount) || 0;
       if (segmentCount > 0) {
         coverage.setSegmentCount(segmentCount);
       }
@@ -5461,7 +5467,7 @@ export class HlsSessionManager {
 
   planRunInterval(session, startIndex, exceptRun = null) {
     const key = session.outputKey ?? "";
-    const lastIndex = (Number(session.segmentCount) || 0) - 1;
+    const lastIndex = (Number(session.timeline?.segmentCount) || 0) - 1;
     if (!key || lastIndex < 0) {
       // Nothing to plan against: no address, or no playlist yet. The run keeps
       // the shape it has always had — start here, no end.
@@ -5692,7 +5698,8 @@ export class HlsSessionManager {
       // The film's last segment number, which is what tells "it reached the
       // end" from "its input dried up": ffmpeg exits zero for both and over a
       // torrent cannot tell them apart.
-      lastSegmentIndex: () => (session.segmentCount > 0 ? session.segmentCount - 1 : null),
+      lastSegmentIndex: () =>
+        session.timeline?.segmentCount > 0 ? session.timeline.segmentCount - 1 : null,
       inputUnavailable: (message) => isInputUnavailable(message),
       onProgress: (report) => this.#noteRunProgress(session, run, report),
       onEnded: (ended) => this.#onRunEnded(session, run, ended)

@@ -184,7 +184,7 @@ export function planEncoders({
       type: "move",
       run,
       from: gap,
-      to: gap + Math.max(1, free) - 1,
+      to: endOfStretch(gap, free),
       because: driveSec === null
         ? `${coveredAhead} segment(s) ahead are already covered and its speed is not measured`
         : `driving through ${coveredAhead} covered segment(s) costs ${driveSec.toFixed(2)}s ` +
@@ -219,12 +219,27 @@ export function planEncoders({
     starts.push({
       type: "start",
       from: gap,
-      to: gap + free - 1,
+      to: endOfStretch(gap, free),
       because: `#${gap} is wanted and nobody is making it`
     });
   }
 
   return [...stops, ...moves, ...starts, ...keeps];
+}
+
+/**
+ * The last number of a stretch that begins at `from` and is `length` long.
+ *
+ * `-1` when the length is not finite, which is this layer's word for a run with
+ * no end: the film's length is not known, so there is nothing to stop it at, and
+ * a number invented here would be an end nobody measured.
+ *
+ * @param {number} from
+ * @param {number} length
+ * @returns {number}
+ */
+function endOfStretch(from, length) {
+  return Number.isFinite(length) ? from + Math.max(1, length) - 1 : -1;
 }
 
 /**

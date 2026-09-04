@@ -65,7 +65,6 @@ async function managerWithRunAhead() {
     transcodeVideo: true,
     useSyntheticPlaylist: true,
     playlistText: "#EXTM3U\n",
-    segmentCount: 1936,
     lastRestartAt: 0,
     seekFailureTarget: -1,
     seekFailureCount: 0,

@@ -251,7 +251,22 @@ export class CoverageMap {
    */
   freeRunFrom(index, exceptRun = null) {
     const start = Number.isInteger(index) && index > 0 ? index : 0;
-    const last = this.#segmentCount > 0 ? this.#segmentCount - 1 : Number.MAX_SAFE_INTEGER;
+    if (this.#segmentCount <= 0) {
+      // The length is not known, so how far the free stretch reaches is not
+      // known either, and the honest answer is "as far as there is film" — the
+      // caller turns that into a run with no end.
+      //
+      // Never walked one number at a time to find that out. It used to be, up to
+      // MAX_SAFE_INTEGER, with a scan of every claim at each step: on the addon
+      // host, 2026-09-05, the main thread spun at 100% from the look-ahead timer
+      // and the proxy stopped answering anything at all, its own log included.
+      // The length was missing because the field naming it had moved and three
+      // readers were left on the old name — but a walk whose end depends on a
+      // field being present must not be able to do this even then.
+      const covered = this.#firstCoveredFrom(start, exceptRun);
+      return covered === null ? Number.POSITIVE_INFINITY : covered - start;
+    }
+    const last = this.#segmentCount - 1;
     let at = start;
     while (at <= last) {
       if (this.#ready.has(at)) {
@@ -264,6 +279,38 @@ export class CoverageMap {
       at += 1;
     }
     return at - start;
+  }
+
+  /**
+   * The first number at or after `index` that somebody has made or is making,
+   * or null when nobody has touched anything from there on.
+   *
+   * Asked of what the map HOLDS rather than by walking the numbers, so it can be
+   * answered without a length: the map knows every ready number and every claim,
+   * and both are finite however long the film is.
+   *
+   * @param {number} index
+   * @param {object | null} exceptRun
+   * @returns {number | null}
+   */
+  #firstCoveredFrom(index, exceptRun) {
+    let lowest = null;
+    for (const ready of this.#ready) {
+      if (ready >= index && (lowest === null || ready < lowest)) {
+        lowest = ready;
+      }
+    }
+    for (const [run, span] of this.#claims) {
+      if (run === exceptRun) {
+        continue;
+      }
+      // A claim that has already begun covers `index` itself.
+      const covers = span.from <= index && index <= span.to ? index : span.from;
+      if (covers >= index && (lowest === null || covers < lowest)) {
+        lowest = covers;
+      }
+    }
+    return lowest;
   }
 
   /**

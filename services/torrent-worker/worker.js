@@ -375,6 +375,29 @@ async function runCommand(command, params, id) {
       return released;
     }
 
+    case Command.HELD_TORRENTS: {
+      // Which films this proxy has right now, and how much of each. Answered
+      // from the live client rather than from the main thread's map of
+      // stand-ins, which is only cleared on shutdown and would name films this
+      // proxy let go of hours ago.
+      const held = [];
+      for (const torrent of pool.client?.torrents ?? []) {
+        const infoHash = String(torrent?.infoHash ?? "");
+        if (!infoHash) {
+          continue;
+        }
+        held.push({
+          infoHash,
+          // A viewer sent here for a film nobody has downloaded any of gains
+          // nothing, so the share is reported and the decision is made where
+          // the viewer is.
+          progress: Number.isFinite(torrent?.progress) ? torrent.progress : 0,
+          bytes: Number.isFinite(torrent?.downloaded) ? torrent.downloaded : 0
+        });
+      }
+      return { held };
+    }
+
     case Command.TORRENT_TOTALS: {
       // Downloaded and uploaded are counted apart: hashing every downloaded
       // byte is work of a different order from sending one back to the swarm,

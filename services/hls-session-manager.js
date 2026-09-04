@@ -2281,10 +2281,17 @@ export class HlsSessionManager {
     } else if (hasDuration && !transcodeVideo && !audioOnly) {
       // Video-COPY path: keyframeTimes are REQUIRED to build correct segment
       // boundaries (the playlist itself), so this MUST block session creation —
-      // an incorrect playlist is worse than a slower start. Short timeout: mp4
-      // keyframes come from the moov index (fast); containers that force a full
-      // packet scan time out and fall back to a uniform grid, so this never adds
-      // more than ~6 s to session start.
+      // an incorrect playlist is worse than a slower start.
+      //
+      // There is NO bound on this wait. A comment here used to promise a short
+      // timeout and "never more than ~6 s to session start"; nothing in this
+      // path has ever had a timeout, and the fallback below fires when the
+      // index is ABSENT, which is a statement about the file and not about how
+      // long a read ran. The file comes off a torrent, so the bytes the table
+      // lives in may still be arriving and the read waits for them. What the
+      // bound should be has to come from what this read costs on real hosts —
+      // roadmap item 74, and the reading it needs is the line printed by
+      // #readContainerKeyframes.
       const keyframeStartMs = Date.now();
       // Read the container's OWN keyframe table (Cues/stss) rather than
       // scanning the media. On the copy path ffmpeg can only cut at the
@@ -3130,10 +3137,30 @@ export class HlsSessionManager {
     if (running) {
       return running;
     }
+    // What this read costs is what decides whether a picture can be copied, and
+    // until now nothing recorded it: the one figure printed — `keyframes=` on
+    // the session-create line — is what the SESSION waited for, which is the
+    // remainder of a read the plan had already started, and is zero whenever
+    // the plan finished first. The read itself is a fact of the file and is
+    // timed here, where it is made exactly once per file.
+    const startedMs = Date.now();
     const work = this.#readContainerKeyframesOnce({ sourceKey, fileIndex, inputUrl, logName })
       .then((result) => {
         this.keyframeIndexCache.set(cacheKey, result);
+        const tookMs = Date.now() - startedMs;
+        const found = Array.isArray(result?.times) ? result.times.length : 0;
+        logger.info(
+          `keyframe index "${logName}": ${found > 0 ? `${found} times` : "none"} from the ` +
+            `${result?.format ?? "unrecognised"} container in ${tookMs}ms`
+        );
         return result;
+      })
+      .catch((error) => {
+        logger.warn(
+          `keyframe index "${logName}": the read failed after ${Date.now() - startedMs}ms — ` +
+            `${error?.message ?? error}`
+        );
+        throw error;
       })
       .finally(() => {
         this.keyframeIndexPending.delete(cacheKey);

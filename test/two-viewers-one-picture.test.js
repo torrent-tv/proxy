@@ -236,7 +236,7 @@ test("the master marks each viewer's own soundtrack as the default one", async (
 });
 
 test("one viewer changing quality does not take the other off their step", async (t) => {
-  const { manager, dirPath } = await pictureWithTwoViewers();
+  const { manager, base, dirPath } = await pictureWithTwoViewers();
   t.after(async () => {
     await manager.disposeAll();
     await rm(dirPath, { recursive: true, force: true });
@@ -253,7 +253,8 @@ test("one viewer changing quality does not take the other off their step", async
     variant.transcodeVideo = true;
     variant.output.encodeHeight = height;
     variant.variantHeight = height;
-    variant.variantBases = new Set([BASE_ID]);
+    variant.isStep = true;
+    variant.file = base.file;
     startRunOn(variant, { process: fakeEncoder() });
     manager.sessionsById.set(variant.id, variant);
     variants.set(height, variant);
@@ -301,9 +302,10 @@ test("a step somebody is watching is never withdrawn from the offer", async (t) 
   variant.variantHeight = 720;
   // One file, two sessions of it.
   variant.file = base.file;
-  variant.variantBases = new Set([BASE_ID]);
+  variant.isStep = true;
+  variant.file = base.file;
   manager.sessionsById.set(variant.id, variant);
-  base.variants = new Map([[720, variant.id]]);
+  base.file.stepHeights.set(720, 720);
 
   // Nobody on it: measured below realtime, it is withdrawn. This half is the
   // control — without it the other half proves nothing.

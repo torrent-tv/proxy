@@ -378,6 +378,10 @@ export async function startProxyServer({
     // recorded from a browser request and published from the pool's side, so
     // resolving one into the other is what lets the two ends agree on what
     // they are both calling "sourceKey".
-    sourceRegistry
+    sourceRegistry,
+    // Which films this host holds, for the health poll the browser makes before
+    // it picks a proxy. The pool is on the worker thread and this is the way to
+    // it from the process that answers that poll.
+    torrentPool
   };
 }

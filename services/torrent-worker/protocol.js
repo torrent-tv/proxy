@@ -57,6 +57,8 @@ export const Command = {
   FILE_STATS: "file-stats",
   /** Bytes every torrent here has moved, for pricing the torrent's own cost. */
   TORRENT_TOTALS: "torrent-totals",
+  /** Which films this proxy holds right now, for content affinity. */
+  HELD_TORRENTS: "held-torrents",
   /** Reorder piece selection around a read position (seek prioritisation). */
   PRIORITIZE: "prioritize",
   /** Read a byte range; the body arrives as CHUNK messages. */

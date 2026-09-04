@@ -404,6 +404,19 @@ export class TorrentWorkerClient {
   }
 
   /**
+   * Which films this proxy holds right now, and how much of each.
+   *
+   * Asked of the worker rather than of the main thread's map of stand-ins: that
+   * map is only cleared on shutdown, so it names films this proxy let go of
+   * hours ago.
+   *
+   * @returns {Promise<{ held: { infoHash: string, progress: number, bytes: number }[] }>}
+   */
+  async heldTorrents() {
+    return this.#caller.call(Command.HELD_TORRENTS, {});
+  }
+
+  /**
    * Reorder piece selection around a read position (seek prioritisation).
    *
    * @param {{ sourceKey: string, fileIndex: number, byteStart: number, windowBytes?: number, wholeFileRead?: boolean }} params

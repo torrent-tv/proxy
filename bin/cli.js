@@ -473,8 +473,20 @@ try {
     onSignal(sessionId, signal) {
       webRtcManager?.handleSignal(sessionId, signal);
     },
-    onHealthRequest() {
-      return collectHealthMetrics();
+    async onHealthRequest() {
+      // Which films this proxy holds travels with the health poll the browser
+      // already makes before it picks one: a viewer sent to a proxy that is
+      // downloading their film costs it the encode and nothing else, while the
+      // same viewer sent anywhere else starts the download from nothing. Asked
+      // of the worker, so a film this proxy let go of is not claimed.
+      let holds = [];
+      try {
+        holds = (await started?.torrentPool?.heldTorrents?.()) ?? [];
+      } catch {
+        // silent-ok: a proxy that cannot say what it holds is scored on its
+        // machine alone, which is what every proxy was scored on until now.
+      }
+      return { metrics: collectHealthMetrics(), holds };
     },
     // Whether this host could sustain a file it has only been told about. The
     // same arithmetic the first offer uses, against this host's own startup

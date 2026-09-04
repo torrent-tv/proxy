@@ -99,14 +99,6 @@ export class WorkerTorrentPool {
   }
 
   /**
-   * Live download figures for the progress display.
-   *
-   * @param {object} torrent
-   * @param {number | null} [fileIndex]
-   * @param {{ resumeAnchorByteStart?: number | null }} [options]
-   * @returns {Promise<object | null>}
-   */
-  /**
    * Bytes every torrent here has moved.
    *
    * @returns {Promise<{ downloaded: number, uploaded: number }>}
@@ -115,6 +107,14 @@ export class WorkerTorrentPool {
     return this.#client.getTorrentTotals();
   }
 
+  /**
+   * Live download figures for the progress display.
+   *
+   * @param {object} torrent
+   * @param {number | null} [fileIndex]
+   * @param {{ resumeAnchorByteStart?: number | null }} [options]
+   * @returns {Promise<object | null>}
+   */
   async getFileStats(torrent, fileIndex = null, options = {}) {
     const sourceKey = torrent?.sourceKey;
     if (!sourceKey) {
@@ -127,13 +127,6 @@ export class WorkerTorrentPool {
     });
   }
 
-  /**
-   * The text subtitle tracks a file carries, read from its own header.
-   *
-   * @param {object} torrent
-   * @param {number} fileIndex
-   * @returns {Promise<object[]>}
-   */
   /**
    * Fetch one whole file using only the room the viewer's own reading leaves.
    *
@@ -154,6 +147,13 @@ export class WorkerTorrentPool {
     return answer?.started === true;
   }
 
+  /**
+   * The text subtitle tracks a file carries, read from its own header.
+   *
+   * @param {object} torrent
+   * @param {number} fileIndex
+   * @returns {Promise<object[]>}
+   */
   async getSubtitleTracks(torrent, fileIndex) {
     const sourceKey = torrent?.sourceKey;
     if (!sourceKey) {
@@ -356,6 +356,20 @@ export class WorkerTorrentPool {
       return null;
     }
     return this.#client.prefetchFileEdges({ sourceKey, fileIndex, options });
+  }
+
+  /**
+   * Which films this proxy holds right now, and how much of each.
+   *
+   * What content affinity is decided from: a viewer of a film somebody here is
+   * already downloading costs this proxy the encode and nothing else, while the
+   * same viewer sent anywhere else starts the download from nothing.
+   *
+   * @returns {Promise<{ infoHash: string, progress: number, bytes: number }[]>}
+   */
+  async heldTorrents() {
+    const answer = await this.#client.heldTorrents();
+    return Array.isArray(answer?.held) ? answer.held : [];
   }
 
   /**

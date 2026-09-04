@@ -250,8 +250,24 @@ export function createTunnelClient({
 
       // Health check: server requests current metrics for proxy scoring.
       if (message.type === "health-request") {
-        const metrics = typeof onHealthRequest === "function" ? onHealthRequest() : {};
-        send({ type: "health-response", requestId: message.requestId, metrics });
+        // Awaited: the answer now carries which films this proxy holds, and the
+        // truthful list of those lives on the torrent thread.
+        void (async () => {
+          let answer = {};
+          try {
+            answer = typeof onHealthRequest === "function" ? await onHealthRequest() : {};
+          } catch {
+            // silent-ok: a proxy that cannot describe itself is scored on
+            // nothing rather than not answered at all, which would drop it out
+            // of every selection until the next poll.
+          }
+          send({
+            type: "health-response",
+            requestId: message.requestId,
+            metrics: answer?.metrics ?? answer ?? {},
+            holds: Array.isArray(answer?.holds) ? answer.holds : []
+          });
+        })();
         return;
       }
     });

@@ -27,6 +27,8 @@
  * container declares and must stay free of torrent knowledge.
  */
 
+import { nameFollows, sidecarNaming } from "./naming.js";
+
 /**
  * Containers and elementary streams that can carry a soundtrack on their own.
  *
@@ -275,19 +277,39 @@ function hashTokensOf(text) {
 /**
  * Whether a sidecar and a video are the same release of the same episode.
  *
- * Two rules, both taken from what releases actually do, and neither of them
+ * Three rules, all taken from what releases actually do, and none of them
  * involving the folder — a dub lives in a folder of its own by construction, so
  * requiring the folders to match would reject every case this exists for:
  *
  * 1. the base names are equal, which is the common shape (`X.mkv` / `X.mka`);
- * 2. they share a release hash, which anime releases carry.
+ * 2. the sidecar's name CONTINUES the video's at a token boundary, which is what
+ *    every surveyed player reads: `<video base>.<language>[.<flags>].<ext>`, the
+ *    shape Plex, Jellyfin, Kodi, Bazarr and OpenSubtitles all produce;
+ * 3. they share a release hash, which anime releases carry.
+ *
+ * Rule 2 was missing here and present in the browser, as a plain "begins with",
+ * and the two were compared nowhere. Measured 2026-09-04 over the 115 torrents
+ * in `Dropbox/trn`: of 1249 video files the two answers agreed on 1239 and
+ * differed on 10, every one of the ten a `<base>.<language>.ass` name that the
+ * browser paired and this side did not. The consequence reached the viewer,
+ * because the proxy warms what IT paired while the browser offers what IT
+ * paired: a track offered but never warmed waits for its first piece off the
+ * swarm, 27.7 s in the field measurement of 2026-08-31.
+ *
+ * The boundary is what makes rule 2 safe, and a plain "begins with" is not the
+ * same rule: without it `Film.20.rus.srt` pairs with `Film.2.mkv` — measured,
+ * and the grammar then reports the leftover `0` as the track's title, which is
+ * the tell that the remainder is a fragment of another film's name.
  *
  * @param {string} sidecarName
  * @param {string} videoName
  * @returns {boolean}
  */
 export function namesPair(sidecarName, videoName) {
-  return sameRelease(sidecarName, videoName);
+  if (sameRelease(sidecarName, videoName)) {
+    return true;
+  }
+  return nameFollows(baseNameOf(sidecarName), baseNameOf(videoName));
 }
 
 /**
@@ -406,7 +428,12 @@ export function matchSidecarFiles({ files, videoIndex, torrentName = "", videoCo
       folders,
       extension,
       length: Number.isFinite(file?.length) ? file.length : 0,
-      declaresTracks: declaresItsOwnTracks(extension)
+      declaresTracks: declaresItsOwnTracks(extension),
+      // What this file's own path says about the track in it: its language, the
+      // flags a releaser wrote, and who made it. Read HERE, by the same grammar
+      // that decided the pairing, so the two answers cannot disagree — which is
+      // what they did while the browser read the name and this side did not.
+      naming: sidecarNaming({ folders, fileName: name, videoName: videoPath.name })
     };
     if (isAudio) {
       audio.push(entry);

@@ -106,7 +106,12 @@ export function buildAudioInventory({ embedded, videoFileIndex, sidecars }) {
       isEnabled: track?.isEnabled !== false,
       channels: Number.isFinite(track?.channels) ? track.channels : null,
       fileName: kind === "sidecar" ? (file?.name ?? "") : "",
-      folders: kind === "sidecar" && Array.isArray(file?.folders) ? file.folders : []
+      folders: kind === "sidecar" && Array.isArray(file?.folders) ? file.folders : [],
+      // What the file's own path says, for a track that ships as its own file:
+      // read here, by the grammar that also decided this file belongs to this
+      // picture. The browser used to read the same path again to build the
+      // label, which is one name read twice by two rules.
+      naming: kind === "sidecar" ? (file?.naming ?? null) : null
     });
   };
 

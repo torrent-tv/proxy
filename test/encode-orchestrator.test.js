@@ -60,9 +60,9 @@ function orchestrator({ maxRuns = 2 } = {}) {
         now: () => 1000,
         onEnded: (ended) => made.noteEnded(ended)
       });
-      // Named by the run itself, so a test that has to reach its process asks
-      // for it by the name the product uses.
-      processes.set(run.id, process_);
+      // Filed under the run itself: a run has no name, so a test that has to
+      // reach its process asks with the run in hand.
+      processes.set(run, process_);
       return run;
     }
   });
@@ -160,7 +160,7 @@ test("a run that meets material made elsewhere is moved past it", () => {
   const runs = made.runsOn(PICTURE);
   assert.equal(runs.length, 1, "one encoder, moved rather than joined by another");
   assert.equal(runs[0].from, 151);
-  assert.notEqual(runs[0].id, first.id, "a move is this one ending and another beginning");
+  assert.notEqual(runs[0], first, "a move is this one ending and another beginning");
 });
 
 test("every ending is counted, and our own kill is not counted as normal", () => {
@@ -168,7 +168,7 @@ test("every ending is counted, and our own kill is not counted as normal", () =>
   made.want({ claimant: "one", address: PICTURE, from: 100, to: 130 });
   made.reconcile();
   const run = made.runsOn(PICTURE)[0];
-  processes.get(run.id).emit("exit", 255, null);
+  processes.get(run).emit("exit", 255, null);
   made.release("one");
   made.reconcile();
   const tally = made.endings();

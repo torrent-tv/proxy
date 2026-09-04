@@ -61,9 +61,9 @@
 
 /**
  * @typedef {{ type: "start", from: number, to: number, because: string }
- *   | { type: "move", runId: string, from: number, to: number, because: string }
- *   | { type: "stop", runId: string, because: string }
- *   | { type: "keep", runId: string, from: number, to: number }} PlanAction
+ *   | { type: "move", run: object, from: number, to: number, because: string }
+ *   | { type: "stop", run: object, because: string }
+ *   | { type: "keep", run: object, from: number, to: number }} PlanAction
  */
 
 /**
@@ -123,7 +123,7 @@ export function planEncoders({
   // asks how far AHEAD of a viewer a run is and there is no viewer.
   if (wanted.length === 0) {
     for (const run of live) {
-      stops.push({ type: "stop", runId: run.id, because: "nobody is watching this output" });
+      stops.push({ type: "stop", run, because: "nobody is watching this output" });
     }
     return stops;
   }
@@ -132,7 +132,7 @@ export function planEncoders({
   // is waiting for there is nothing to decide about.
   const demandTo = Math.max(...wanted.map((span) => span.to));
 
-  /** Runs that survive this pass, by id. @type {Set<string>} */
+  /** Runs that survive this pass. @type {Set<object>} */
   const surviving = new Set();
 
   for (const run of live) {
@@ -140,26 +140,26 @@ export function planEncoders({
     //    touches no window is making material nobody has asked for.
     const stillWanted = wanted.some((span) => overlaps(run.from, run.to, span.from, span.to));
     if (!stillWanted) {
-      stops.push({ type: "stop", runId: run.id, because: "nothing it was given is wanted" });
+      stops.push({ type: "stop", run, because: "nothing it was given is wanted" });
       continue;
     }
 
     // 2. Has it arrived at material that already exists, or that another run is
     //    making? Its own claim does not count against it.
-    const coveredAhead = coverage.coveredRunFrom(run.head, run.id);
+    const coveredAhead = coverage.coveredRunFrom(run.head, run);
     if (coveredAhead === 0) {
-      surviving.add(run.id);
-      keeps.push({ type: "keep", runId: run.id, from: run.head, to: run.to });
+      surviving.add(run);
+      keeps.push({ type: "keep", run, from: run.head, to: run.to });
       continue;
     }
 
     // Where it would go instead: the first thing nobody has and nobody is
     // making, at or after where it stands.
-    const gap = coverage.firstGapFrom(run.head, demandTo, run.id);
+    const gap = coverage.firstGapFrom(run.head, demandTo, run);
     if (gap === null) {
       stops.push({
         type: "stop",
-        runId: run.id,
+        run,
         because: "everything wanted ahead of it is already made or being made"
       });
       continue;
@@ -173,16 +173,16 @@ export function planEncoders({
     // is certainly wasted, while the restart is a known and small cost.
     const driveSec = run.speedX > 0 ? (coveredAhead * segmentSeconds) / run.speedX : null;
     if (driveSec !== null && driveSec <= restartCostSec) {
-      surviving.add(run.id);
-      keeps.push({ type: "keep", runId: run.id, from: run.head, to: run.to });
+      surviving.add(run);
+      keeps.push({ type: "keep", run, from: run.head, to: run.to });
       continue;
     }
 
-    const free = coverage.freeRunFrom(gap, run.id);
-    surviving.add(run.id);
+    const free = coverage.freeRunFrom(gap, run);
+    surviving.add(run);
     moves.push({
       type: "move",
-      runId: run.id,
+      run,
       from: gap,
       to: gap + Math.max(1, free) - 1,
       because: driveSec === null

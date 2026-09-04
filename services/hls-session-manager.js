@@ -5568,7 +5568,7 @@ export class HlsSessionManager {
     run.start(because);
 
     logger.info(
-      `transcode ${session.id} ${run.id} encode-run from segment #${safeIndex} ` +
+      `transcode ${session.id} encode-run #${safeIndex}..#${interval.to} from segment #${safeIndex} ` +
       `(+${Date.now() - restartEnteredAt}ms since the restart was asked for) ` +
         `(${formatSeconds(startSeconds)}) "${session.file.name}"`
     );
@@ -5578,7 +5578,7 @@ export class HlsSessionManager {
     // difference, and nothing downstream can tell that from a bad index.
     const liveStart = this.#segmentStartTime(session, safeIndex);
     logger.info(
-      `transcode ${session.id} ${run.id} positioned at ${startSeconds.toFixed(3)}s ` +
+      `transcode ${session.id} run #${safeIndex}..#${interval.to} positioned at ${startSeconds.toFixed(3)}s ` +
         `for boundary #${safeIndex} (published ${startSeconds.toFixed(3)}s, ` +
         `live ${liveStart.toFixed(3)}s, apart ${(liveStart - startSeconds).toFixed(3)}s), ` +
         `numbering from #${safeIndex}`
@@ -5695,7 +5695,7 @@ export class HlsSessionManager {
       // restarted, not a finished file.
       session.lastError = ended.because;
       logger.error(
-        `transcode ${session.id} ${ended.runId} encode-run ended early: ` +
+        `transcode ${session.id} encode-run #${ended.from}..#${ended.to} ended early: ` +
         `${ended.because} "${session.file.name}"`
       );
       return;
@@ -5735,7 +5735,7 @@ export class HlsSessionManager {
         INPUT_RETRY_BASE_MS * 2 ** Math.min(session.inputRetryCount - 1, 6)
       );
       logger.warn(
-        `transcode ${session.id} ${ended.runId} lost its input ` +
+        `transcode ${session.id} encode-run #${ended.from}..#${ended.to} lost its input ` +
           `(${session.lastError}); retrying in ${Math.round(delayMs / 1000)}s ` +
           `(attempt ${session.inputRetryCount})`
       );
@@ -5777,7 +5777,7 @@ export class HlsSessionManager {
       session.seekFailureCount = 0;
     }
     logger.error(
-      `transcode ${session.id} ${ended.runId} encode-run failed: ${session.lastError}` +
+      `transcode ${session.id} encode-run #${ended.from}..#${ended.to} failed: ${session.lastError}` +
         ` — ${this.#describeTrackSelection(session)}` +
         `\n  ffmpeg ${run.argsDescribed || "(command not recorded)"}`
     );

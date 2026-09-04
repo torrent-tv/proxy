@@ -43,21 +43,12 @@ import { classifyEncodeExit, ENCODE_EXIT } from "./encode-exit.js";
 /** Microseconds in a second, as ffmpeg's `out_time_ms` counts them. */
 const MICROSECONDS_PER_SECOND = 1_000_000;
 
-/**
- * How many runs this process has made.
- *
- * A run names itself, and no caller may supply a name. Two places were
- * numbering runs — the orchestrator for the ones it builds, the session manager
- * for the ones a session starts — which is two schemes for one thing and the
- * usual way a name stops being unique. The name has to be unique over the life
- * of the process rather than within an output: a stretch can be attempted
- * twice, and a stale release must not free the second attempt's claim.
- */
-let runsMade = 0;
 
 /**
  * @typedef {object} RunEnded
- * @property {string} runId
+ * @property {EncodeRun} run - The run itself. It has no name: what identifies
+ *   it is that it IS itself, and what identifies it in a line is its output and
+ *   the stretch it was given, which no other live run of that output holds.
  * @property {string} address
  * @property {string} ending - One of {@link ENCODE_EXIT}.
  * @property {string} because - Why, in words, including who asked when we did.
@@ -153,9 +144,6 @@ export class EncodeRun {
     argsDescribed = "",
     usesExplicitCuts = false
   }) {
-    runsMade += 1;
-    /** What names this run in every line about it, and in the coverage map. */
-    this.id = `run#${runsMade}`;
     this.address = address;
     this.encoder = encoder;
     this.from = from;
@@ -254,8 +242,8 @@ export class EncodeRun {
     const args = this.buildArgs();
     this.#startedAt = this.now();
     this.logger.info(
-      `encode-run ${this.id} start #${this.from}..#${this.to} ` +
-      `of ${this.address} by ${this.encoder?.name ?? "?"}: ${because} ` +
+      `encode-run #${this.from}..#${this.to} of ${this.address} ` +
+      `by ${this.encoder?.name ?? "?"}: ${because} ` +
       `:: ffmpeg ${this.argsDescribed || args.join(" ")}`
     );
     this.#process = this.spawnProcess(args);
@@ -279,7 +267,7 @@ export class EncodeRun {
       const line = String(chunk).trim();
       if (line.length > 0) {
         this.lastError = line;
-        this.logger.warn(`ffmpeg ${this.id}: ${line}`);
+        this.logger.warn(`ffmpeg #${this.from}..#${this.to} of ${this.address}: ${line}`);
       }
     });
     process.on("error", (error) => {
@@ -390,13 +378,13 @@ export class EncodeRun {
     } catch (error) {
       this.#pauseUnsupported = true;
       this.logger.info(
-        `encode-run ${this.id} cannot suspend the encoder on this platform ` +
+        `encode-run #${this.from}..#${this.to} cannot suspend the encoder on this platform ` +
           `(${error instanceof Error ? error.message : String(error)}); look-ahead stays unbounded`
       );
       return false;
     }
     this.#transition(ENCODE_RUN_EVENT.SUSPEND_ORDERED);
-    this.logger.info(`encode-run ${this.id} suspended — ${reason}`);
+    this.logger.info(`encode-run #${this.from}..#${this.to} suspended — ${reason}`);
     return true;
   }
 
@@ -416,8 +404,8 @@ export class EncodeRun {
     const continued = this.#continue();
     this.logger.info(
       continued
-        ? `encode-run ${this.id} resumed — ${reason}`
-        : `encode-run ${this.id} could not be resumed (the process is gone) — ${reason}`
+        ? `encode-run #${this.from}..#${this.to} resumed — ${reason}`
+        : `encode-run #${this.from}..#${this.to} could not be resumed (the process is gone) — ${reason}`
     );
     return continued;
   }
@@ -515,7 +503,7 @@ export class EncodeRun {
     const livedMs = this.#startedAt > 0 ? this.now() - this.#startedAt : 0;
     /** @type {RunEnded} */
     const ended = {
-      runId: this.id,
+      run: this,
       address: this.address,
       ending,
       because,
@@ -529,7 +517,7 @@ export class EncodeRun {
       lastError: this.lastError
     };
     const line =
-      `encode-run ${this.id} ${ending} #${this.from}..#${this.to} of ${this.address}, ` +
+      `encode-run ${ending} #${this.from}..#${this.to} of ${this.address}, ` +
       `reached #${ended.reached} (${this.#produced.size} segment(s)) after ${livedMs}ms` +
       `${code === null ? "" : `, code ${code}`}${signal ? `, signal ${signal}` : ""}: ${because}`;
     if (ended.normal) {
@@ -568,11 +556,11 @@ export class EncodeRun {
     const from = this.#state;
     const to = nextState(from, event);
     if (to === null) {
-      this.logger.warn(`run-state ${this.id} ${from} + ${event} — no such edge; ignored`);
+      this.logger.warn(`run-state #${this.from}..#${this.to} ${from} + ${event} — no such edge; ignored`);
       return from;
     }
     this.#state = to;
-    this.logger.info(`run-state ${this.id} ${from} --${event}--> ${to}`);
+    this.logger.info(`run-state #${this.from}..#${this.to} of ${this.address} ${from} --${event}--> ${to}`);
     return to;
   }
 }

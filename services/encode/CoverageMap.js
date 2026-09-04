@@ -106,18 +106,21 @@ export class CoverageMap {
    * Replaces whatever that run claimed before, because a run has one stretch at
    * a time: moved forward past ready material, it states the new one.
    *
-   * @param {string} runId
+   * @param {object} run - The run itself. A run has no name and needs none:
+   *   what identifies it here is that it IS itself, and what identifies it in a
+   *   log line is the stretch it was given, which no other live run of this
+   *   output can hold.
    * @param {number} from - First segment number, inclusive.
    * @param {number} to - Last segment number, inclusive. May be
    *   `Number.POSITIVE_INFINITY` for a run with no end yet, which is what every
    *   run was before ends existed.
    */
-  claim(runId, from, to) {
-    if (!runId || !Number.isInteger(from) || from < 0) {
+  claim(run, from, to) {
+    if (!run || !Number.isInteger(from) || from < 0) {
       return;
     }
     const end = Number.isFinite(to) ? Math.max(from, Math.trunc(to)) : Number.POSITIVE_INFINITY;
-    this.#claims.set(runId, { from, to: end });
+    this.#claims.set(run, { from, to: end });
   }
 
   /**
@@ -126,10 +129,10 @@ export class CoverageMap {
    * Nothing is un-marked: what it DID finish stays ready, because a closed file
    * is closed whoever made it and whatever became of them afterwards.
    *
-   * @param {string} runId
+   * @param {object} run
    */
-  release(runId) {
-    this.#claims.delete(runId);
+  release(run) {
+    this.#claims.delete(run);
   }
 
   /**
@@ -144,12 +147,12 @@ export class CoverageMap {
    * The run that was given this number, if any.
    *
    * @param {number} index
-   * @returns {string | null}
+   * @returns {object | null}
    */
   makerOf(index) {
-    for (const [runId, span] of this.#claims) {
+    for (const [run, span] of this.#claims) {
       if (index >= span.from && index <= span.to) {
-        return runId;
+        return run;
       }
     }
     return null;
@@ -174,14 +177,14 @@ export class CoverageMap {
    * @param {number} [bound] - Search no further than this number, inclusive.
    *   Defaults to the last segment of the output; required while the length is
    *   unknown.
-   * @param {string} [exceptRunId] - The run asking. Its own claim does not make
+   * @param {object} [exceptRun] - The run asking. Its own claim does not make
    *   a number taken as far as it is concerned: a run looking for where to move
    *   would otherwise be blocked by the very stretch it is trying to leave, and
    *   a run that had claimed the rest of the film could never move at all.
    * @returns {number | null} Null when there is no gap in range, which is what
    *   "everything ahead is already covered" looks like.
    */
-  firstGapFrom(index, bound = undefined, exceptRunId = "") {
+  firstGapFrom(index, bound = undefined, exceptRun = null) {
     const start = Number.isInteger(index) && index > 0 ? index : 0;
     const last = Number.isInteger(bound) ? bound : this.#segmentCount - 1;
     if (!Number.isInteger(last) || last < start) {
@@ -192,7 +195,7 @@ export class CoverageMap {
         continue;
       }
       const maker = this.makerOf(at);
-      if (maker === null || maker === exceptRunId) {
+      if (maker === null || maker === exceptRun) {
         return at;
       }
     }
@@ -201,7 +204,7 @@ export class CoverageMap {
 
   /**
    * How many numbers from `index` onwards are already covered — ready, or
-   * claimed by a run other than `exceptRunId`.
+   * claimed by a run other than `exceptRun`.
    *
    * This is what prices a decision: a run that has arrived at covered material
    * either drives through it, paying its own encode time for every one of these
@@ -209,11 +212,11 @@ export class CoverageMap {
    * are measured elsewhere; this is the length.
    *
    * @param {number} index
-   * @param {string} [exceptRunId] - The run asking. Its own claim does not
+   * @param {object} [exceptRun] - The run asking. Its own claim does not
    *   count as somebody else's coverage.
    * @returns {number}
    */
-  coveredRunFrom(index, exceptRunId = "") {
+  coveredRunFrom(index, exceptRun = null) {
     const start = Number.isInteger(index) && index > 0 ? index : 0;
     const last = this.#segmentCount > 0 ? this.#segmentCount - 1 : Number.MAX_SAFE_INTEGER;
     let at = start;
@@ -223,7 +226,7 @@ export class CoverageMap {
         continue;
       }
       const maker = this.makerOf(at);
-      if (maker !== null && maker !== exceptRunId) {
+      if (maker !== null && maker !== exceptRun) {
         at += 1;
         continue;
       }
@@ -242,11 +245,11 @@ export class CoverageMap {
    * begins, which is also where it would have been moved to anyway.
    *
    * @param {number} index
-   * @param {string} [exceptRunId] - The run asking, whose own claim does not
+   * @param {object} [exceptRun] - The run asking, whose own claim does not
    *   make a number unfree for it.
    * @returns {number} Zero when `index` itself is not free.
    */
-  freeRunFrom(index, exceptRunId = "") {
+  freeRunFrom(index, exceptRun = null) {
     const start = Number.isInteger(index) && index > 0 ? index : 0;
     const last = this.#segmentCount > 0 ? this.#segmentCount - 1 : Number.MAX_SAFE_INTEGER;
     let at = start;
@@ -255,7 +258,7 @@ export class CoverageMap {
         break;
       }
       const maker = this.makerOf(at);
-      if (maker !== null && maker !== exceptRunId) {
+      if (maker !== null && maker !== exceptRun) {
         break;
       }
       at += 1;

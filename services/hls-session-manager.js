@@ -3839,7 +3839,47 @@ export class HlsSessionManager {
 
   #enforceLookAhead() {
     for (const session of this.sessionsById.values()) {
+      this.#stopIfItWalkedIntoAnotherRun(session);
       this.#enforceLookAheadFor(session);
+    }
+  }
+
+  /**
+   * Stop a run that has produced its way into a stretch another run was given.
+   *
+   * A run's end is an ARGUMENT, fixed when it was spawned: ffmpeg has no
+   * channel by which a running encode can be told to stop somewhere new, so a
+   * run told to go to the end of the file will do exactly that. When a second
+   * viewer opens the same film further on and is given the stretch in front,
+   * the first run is walking towards material somebody else is making.
+   *
+   * Three ways to deal with that, and this is the cheap one. Restarting the
+   * first run with a new end would make it stop by itself, at the price of a
+   * restart its own viewer pays for — a spawn is 0.12 s on the addon host but
+   * the decode up to its position is not. Leaving it be costs a second copy of
+   * every segment the two of them overlap on. Stopping it where it arrives
+   * costs one segment, made twice, and no restart at all.
+   *
+   * Asked here rather than only when a segment is served, because a run that
+   * nobody is asking for anything from is exactly the one that walks furthest.
+   *
+   * @param {HlsSession} session
+   * @returns {void}
+   */
+  #stopIfItWalkedIntoAnotherRun(session) {
+    if (!session || session.state === "disposed" || !processCanBeSignalled(session.runState)) {
+      return;
+    }
+    const produced = this.#latestProducedSegment(session);
+    if (!Number.isInteger(produced)) {
+      return;
+    }
+    const owner = this.runMakingSegment(session, produced);
+    if (owner !== null) {
+      this.#stopEncodeRun(
+        session,
+        `it produced #${produced}, which ${owner.slice(0, 8)} was given`
+      );
     }
   }
 

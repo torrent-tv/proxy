@@ -661,15 +661,6 @@ const SEGMENT_STORE_FREE_SHARE = 0.25;
 /** What the store may hold where the free space cannot be read at all. */
 const SEGMENT_STORE_FALLBACK_BYTES = 2 * 1024 * 1024 * 1024;
 /**
- * The most encoders that may work on one output at once, whatever the
- * arithmetic says.
- *
- * Not a budget — the budget is `#maxRunsForOutput`, and it is measured. This
- * is a bound on the SEARCH, so that a host fast enough to keep dividing does
- * not end up with an encoder per viewer on a film nobody is seeking about.
- */
-const MAX_CONCURRENT_RUNS = 4;
-/**
  * What it costs to stop an encoder and start another where the material is
  * missing. Measured on the addon host 2026-09-04: a spawn with its input open
  * is 0.12 s there, 0.5-0.6 s on a developer's desktop.
@@ -3997,15 +3988,25 @@ export class HlsSessionManager {
       return 1;
     }
     let affordable = 1;
-    while (affordable < MAX_CONCURRENT_RUNS) {
-      const { penalty, measured } = contentionPenalty(affordable, this.contentionPenalties);
+    for (;;) {
+      const { penalty, measured, from } = contentionPenalty(affordable, this.contentionPenalties);
       // An UNMEASURED penalty is 1, and that is the honest answer to "what does
       // a second job cost" only in the sense that nothing has been measured —
       // it is not a statement that a second job is free. Measured on the addon
       // host it is 1.70x at 854x480 and 1.98x at 1920x1080, so taking 1 would
       // let a machine that cannot hold two runs start two. Where nothing has
       // been measured, one is what it has.
-      if (!measured || !(alone / penalty >= 1)) {
+      //
+      // `from` is the concurrency the reading came from, and past the measured
+      // range `contentionPenalty` HOLDS the largest reading rather than continue
+      // a curve two points cannot describe. Held is the right answer to "what
+      // does this cost", and the wrong one to "may I start another": it would
+      // price a fifth encoder at what a second was measured to cost, and a fast
+      // host would keep dividing until some chosen ceiling stopped it. So the
+      // ladder stops where the measurements stop — the bound on how many
+      // encoders may run is measured, like the budget itself, and there is no
+      // constant here to overrule it.
+      if (!measured || from !== affordable || !(alone / penalty >= 1)) {
         break;
       }
       affordable += 1;
@@ -5416,22 +5417,6 @@ export class HlsSessionManager {
    *   is still labelled from the source clock (`-copyts`) and stamped on serve,
    *   so the player sees both at the time the playlist names.
    * @returns {Promise<void>}
-   */
-  /**
-   * The stretch a run should be given, from the gaps in what this output holds.
-   *
-   * Three things decide it, and none of them is who asked. What the store
-   * already has; what another live run of the same output has been given; and
-   * where the request wants to begin. A run starts at the first number nobody
-   * has and nobody is making, and stops before the next number somebody does —
-   * so two runs on one output cannot reach each other's files, which is what
-   * makes one flat directory correct and per-run directories unnecessary.
-   *
-   * @param {HlsSession} session
-   * @param {number} startIndex - Where the caller wants to begin.
-   * @returns {{ from: number, to: number } | null} Null when everything from
-   *   here on is already made or already being made, and a run would only
-   *   repeat somebody else's work.
    */
   /**
    * The run of another session that was given this segment number, if any.

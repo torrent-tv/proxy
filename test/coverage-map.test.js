@@ -151,3 +151,28 @@ test("with the length unknown, a gap search needs its own bound", () => {
   assert.equal(map.firstGapFrom(0), null, "no length and no bound answers nothing");
   assert.equal(map.firstGapFrom(0, 3), 0);
 });
+
+test("with the length unknown, the free stretch is answered without walking to it", () => {
+  // What this pins: on the addon host, 2026-09-05, a map with no length walked
+  // one number at a time to MAX_SAFE_INTEGER, scanning every claim at each step.
+  // The main thread spun at 100% from the look-ahead timer and the proxy stopped
+  // answering anything, its own log included. The length was missing because the
+  // field naming it had moved to the timeline and three readers were left on the
+  // old name — but this walk must not be able to do that even when it is.
+  //
+  // This check cannot FAIL against the old code — a synchronous walk cannot be
+  // interrupted by the runner, so it would hang the whole run instead, which is
+  // worse than no check. What it pins is the contract that replaced the walk:
+  // the answer comes from what the map holds.
+  const map = new CoverageMap();
+
+  assert.equal(map.freeRunFrom(0), Number.POSITIVE_INFINITY, "nothing is covered, so nothing bounds it");
+
+  const run = aRun();
+  map.claim(run, 500, 900);
+  assert.equal(map.freeRunFrom(0), 500, "and a claim ahead is where the free stretch ends");
+  assert.equal(map.freeRunFrom(0, run), Number.POSITIVE_INFINITY, "its own claim does not bound it");
+
+  map.markReady(200);
+  assert.equal(map.freeRunFrom(0), 200, "so is a segment somebody has already made");
+});

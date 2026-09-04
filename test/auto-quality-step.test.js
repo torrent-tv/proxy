@@ -99,7 +99,6 @@ function fakeSession({ dirPath, transcodeVideo = true, cutGrid = transcodeVideo 
     usesExplicitCuts: false,
     useSyntheticPlaylist: true,
     playlistText: "#EXTM3U\n",
-    segmentCount: 100,
     progress: { state: "running", processedSeconds: 40, startPositionSeconds: 0, speed: "1.0x" }
   };
 }

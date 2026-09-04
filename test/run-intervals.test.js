@@ -61,7 +61,14 @@ function sessionOn({ id, dirPath, segmentCount = 100, runState = null, encodeSta
     get inputFile() { return this.file; },
     get audioFile() { return this.file; },
     segmentFormat: fmp4Format,
-    segmentCount,
+    // How the file is cut, held by the TIMELINE. A fixture that stated it on the
+    // session was describing a shape the product had left, and it kept a defect
+    // alive for a release: `session.segmentCount` is undefined on every real
+    // session, so runs were given no end and the coverage map had no length.
+    timeline: new Timeline({
+      boundaries: Array.from({ length: segmentCount + 1 }, (_, index) => index * 4),
+      cutGrid: "uniform"
+    }),
     runs: new Set(),
     consumers: new Set(),
     lastAccessedAt: Date.now()

@@ -70,7 +70,6 @@ import { SourceFiles, sourceDecodeCharacteristics } from "./source/SourceFile.js
 import { ProducedIndex } from "./produced-index.js";
 import { SegmentStore } from "./encode/SegmentStore.js";
 import { EncodeCost } from "./quality/EncodeCost.js";
-import { endOfRun } from "./encode/EncodeRun.js";
 import {
   buildRunCommand,
   ffmpegSeconds,
@@ -498,7 +497,6 @@ const CUSHION_REPORT_MS = 30_000;
 // is sent every 10 s, and a seek in between moves them somewhere this cannot
 // predict — so anything older is treated as no report at all.
 const NET_REPORT_FRESH_MS = 15_000;
-const LOOKAHEAD_RESUME_SECONDS = 60;
 // Seek debounce. A far (out-of-window) segment request is a server-side seek.
 // Rather than restart ffmpeg on the first one, wait a short quiet period:
 // further far requests re-arm it and update the target to the latest index, so
@@ -1780,7 +1778,7 @@ export class HlsSessionManager {
     // benchmark (the only path that can pick/step resolution). Cheap no-op scan
     // otherwise.
     this.budgetTimer = setInterval(() => {
-      this.#enforceLookAhead();
+      this.#reportCushions();
       void this.runQualityBudgetOnce();
     }, BUDGET_CHECK_INTERVAL_MS);
     this.budgetTimer.unref();
@@ -2665,7 +2663,7 @@ export class HlsSessionManager {
       waitEpoch: 0,
       // Highest segment the viewer has actually asked for, and whether the
       // encoder is currently suspended for running too far past it.
-      // See #enforceLookAhead. With several viewers on one session it is the
+      // See #reportCushions. With several viewers on one session it is the
       // FURTHEST of them, derived from the viewers below.
       lastRequestedSegment: null,
       // Where each viewer of this session is, separately: the segment they last
@@ -3772,9 +3770,26 @@ export class HlsSessionManager {
     return readers;
   }
 
-  #enforceLookAhead() {
+  /**
+   * Say what the cushion is, for every session.
+   *
+   * This is all that is left of `#enforceLookAhead`, which also SUSPENDED a run
+   * once it was `LOOKAHEAD_PAUSE_SECONDS` in front of the viewer and woke it at
+   * `LOOKAHEAD_RESUME_SECONDS` — two chosen numbers, and a second authority
+   * over the encoders beside the plan. The two contradicted each other
+   * directly: this one deliberately pushed a run past the window the plan was
+   * asking about, and the plan then killed it for standing there. Measured in
+   * the field 2026-09-05, 350-700ms per cycle, the viewer's picture stopped for
+   * 125 seconds.
+   *
+   * How far ahead a run may get is now a question for the plan alone, which
+   * answers it from the demand map. What remains here is a READING — how much
+   * film is ready in front of the earliest viewer — and a reading commands
+   * nothing.
+   */
+  #reportCushions() {
     for (const session of this.sessionsById.values()) {
-      this.#enforceLookAheadFor(session);
+      this.#reportCushionFor(session);
     }
   }
 
@@ -4098,7 +4113,7 @@ export class HlsSessionManager {
    * @param {HlsSession} session
    * @returns {void}
    */
-  #enforceLookAheadFor(session) {
+  #reportCushionFor(session) {
     if (!session || session.state === "disposed" || liveRunsOf(session).length === 0) {
       return;
     }
@@ -4130,9 +4145,10 @@ export class HlsSessionManager {
     const reading = this.#contiguousAheadSeconds(session, viewerSegment);
     const aheadSeconds = reading === null ? null : reading.seconds;
     if (aheadSeconds === null) {
-      // The segment the viewer needs does not exist. Whatever else is on disk,
-      // this encoder has work to do right now.
-      this.#resumeEncoder(session, "the viewer needs a segment nobody has made");
+      // The segment the viewer needs does not exist, so there is no cushion to
+      // report. Nothing is commanded here any more: whether an encoder should
+      // be working on it is the plan's question, and it is asked the moment
+      // anything the plan depends on changes.
       return;
     }
 
@@ -4159,23 +4175,6 @@ export class HlsSessionManager {
       );
     }
 
-    if (runStateOf(session) !== ENCODE_RUN_STATE.SUSPENDED && aheadSeconds > LOOKAHEAD_PAUSE_SECONDS) {
-      // The decision names what it was taken on. Suspending the encoder stops
-      // the only thing that reads the input, so a wrong reading here stops the
-      // download too — measured 2026-08-06: the log said "135s ahead" while
-      // three segments totalling 31 s lay on disk, and neither figure could be
-      // checked against the other because the line carried no evidence. The
-      // directory holds segments from every run this session has had, so which
-      // ones were counted is the whole question.
-      this.#pauseEncoder(
-        session,
-        `${Math.round(aheadSeconds)}s ahead of the viewer ` +
-          `(viewer at #${viewerSegment}, unbroken through #${reading.lastCovered}, ` +
-          `${reading.total} segment file(s) present)`
-      );
-    } else if (aheadSeconds <= LOOKAHEAD_RESUME_SECONDS) {
-      this.#resumeEncoder(session, `${Math.round(aheadSeconds)}s ahead of the viewer`);
-    }
   }
 
   /**
@@ -5541,54 +5540,48 @@ export class HlsSessionManager {
     return runs;
   }
 
-  planRunInterval(session, startIndex, exceptRun = null) {
+  /**
+   * How far a run starting here may work before it meets somebody else's
+   * material — read off the ONE coverage map, never worked out again here.
+   *
+   * This replaced `planRunInterval`, which was a second authority over the same
+   * question and answered it by different rules: it walked the whole track for
+   * the first free number, MOVED the start there itself, and counted every live
+   * run as claiming up to `head + look-ahead`. Measured in the field
+   * 2026-09-05: the plan commanded a start at #46, this moved it to #78 — the
+   * "run moved forward from #46 to #78" line — and the plan, seeing a run
+   * outside the window it had asked for, killed it as unwanted and commanded
+   * the same start again, 350-700ms per cycle, dozens of times, the viewer's
+   * picture stopped for 125 seconds.
+   *
+   * Where a run STARTS is the plan's decision and arrives here as an argument.
+   * All this answers is where it must stop, and the answer is a fact of the
+   * map: the free stretch from that number on. `-1` means the end of the track,
+   * which is what "no end" is written as everywhere here.
+   *
+   * @param {object} session
+   * @param {number} startIndex
+   * @param {object | null} exceptRun - The run being replaced, whose own claim
+   *   is not somebody else's material.
+   * @returns {number} The last number to work through, or `-1` for the end.
+   */
+  #runEndFrom(session, startIndex, exceptRun = null) {
     const key = session.outputKey ?? "";
-    const lastIndex = (Number(session.timeline?.segmentCount) || 0) - 1;
-    if (!key || lastIndex < 0) {
-      // Nothing to plan against: no address, or no playlist yet. The run keeps
-      // the shape it has always had — start here, no end.
-      return { from: Math.max(0, startIndex), to: -1 };
+    if (!key) {
+      return -1;
     }
-    const ready = new Set(this.segmentStore.provenNumbers(key));
-    const lookaheadSegments = Math.ceil(this.lookaheadSeconds / this.segmentDurationSec);
-    /** @type {{from: number, to: number}[]} */
-    const claims = [];
-    // Every live run of this output, whichever session started it — a session
-    // holds as many as the machine affords, so its OWN runs are claims too. The
-    // one being replaced is not: this is the plan for its replacement.
-    for (const run of this.#runsOnOutput(key)) {
-      if (run === exceptRun) {
-        continue;
-      }
-      // How far this run will ACTUALLY get, which is not the same as how far it
-      // was allowed to go. A run without an end used to claim the whole film,
-      // and a second viewer opening the same film at another place then found
-      // every number taken and got no encoder at all — they would have waited
-      // for the first run to encode its way there, which on a long film is an
-      // hour. What bounds a run in practice is the look-ahead: it is suspended
-      // once it is that far in front of the segment its viewer last asked for,
-      // and past that point it produces nothing until somebody asks. So that is
-      // the honest extent of its claim, and it is a measured figure rather than
-      // a chosen one — the same allowance the browser sizes its cushion from.
-      const willReach = run.head + lookaheadSegments;
-      const allowed = Number.isFinite(endOfRun(run)) ? run.to : lastIndex;
-      claims.push({ from: run.from, to: Math.min(allowed, willReach) });
+    const coverage = this.encodeOrchestrator.coverageOf(key);
+    const segmentCount = Number(session.timeline?.segmentCount) || 0;
+    if (segmentCount > 0) {
+      coverage.setSegmentCount(segmentCount);
     }
-    const takenAt = (index) =>
-      ready.has(index) || claims.some((span) => index >= span.from && index <= span.to);
-
-    let from = Math.max(0, startIndex);
-    while (from <= lastIndex && takenAt(from)) {
-      from += 1;
+    coverage.markReadyAll(this.segmentStore.provenNumbers(key));
+    const free = coverage.freeRunFrom(Math.max(0, startIndex), exceptRun);
+    if (!Number.isFinite(free)) {
+      return -1;
     }
-    if (from > lastIndex) {
-      return null;
-    }
-    let to = from;
-    while (to + 1 <= lastIndex && !takenAt(to + 1)) {
-      to += 1;
-    }
-    return { from, to: to >= lastIndex ? -1 : to };
+    const end = Math.max(0, startIndex) + Math.max(1, free) - 1;
+    return segmentCount > 0 && end >= segmentCount - 1 ? -1 : end;
   }
 
   async #startEncodeRun(session, startIndex, positionSecondsOverride, because = "a viewer needs it") {
@@ -5618,21 +5611,11 @@ export class HlsSessionManager {
       from: Number.isInteger(previousRun?.from) ? previousRun.from : 0,
       to: Number.isInteger(previousRun?.to) ? previousRun.to : -1
     };
-    const interval = this.planRunInterval(session, startIndex, previousRun);
-    if (interval === null) {
-      logger.info(
-        `transcode ${session.id} no run started at #${startIndex}: everything from there on is ` +
-        `already made or already being made "${session.file.name}"`
-      );
-      return;
-    }
-    if (interval.from !== startIndex) {
-      logger.info(
-        `transcode ${session.id} run moved forward from #${startIndex} to #${interval.from}: ` +
-        `what lies between is already made "${session.file.name}"`
-      );
-    }
-    startIndex = interval.from;
+    // WHERE it starts was decided by whoever called, and is not touched here.
+    // Only how far it may work is answered, and it is answered by reading the
+    // one coverage map. Moving the start was the second authority's doing and
+    // is gone with it.
+    const runEnd = this.#runEndFrom(session, startIndex, previousRun);
     // The restart backs off a segment or two from what was asked for, so the
     // request that prompted it is recorded under a HIGHER index than the run
     // starts at. Looking it up by the start index alone found nothing and the
@@ -5725,7 +5708,7 @@ export class HlsSessionManager {
       audioSourceTrackIndex: session.audioSourceTrackIndex ?? session.audioTrackIndex ?? 0,
       rateCapKbps: session.rateCapKbps ?? null,
       startIndex,
-      endIndex: interval.to,
+      endIndex: runEnd,
       positionSecondsOverride,
       videoEncoder: this.videoEncoder,
       segmentDurationSec: this.segmentDurationSec
@@ -5759,7 +5742,7 @@ export class HlsSessionManager {
       address: session.outputKey ?? session.id,
       encoder: this.videoEncoder,
       from: safeIndex,
-      to: interval.to,
+      to: runEnd,
       buildArgs: () => args,
       argsDescribed: describeFfmpegArgs(args),
       // Whether this run cuts at times we gave it. Decides how a segment is
@@ -5795,7 +5778,7 @@ export class HlsSessionManager {
     run.start(because);
 
     logger.info(
-      `transcode ${session.id} encode-run #${safeIndex}..#${interval.to} from segment #${safeIndex} ` +
+      `transcode ${session.id} encode-run #${safeIndex}..#${runEnd} from segment #${safeIndex} ` +
       `(+${Date.now() - restartEnteredAt}ms since the restart was asked for) ` +
         `(${formatSeconds(startSeconds)}) "${session.file.name}"`
     );
@@ -5805,7 +5788,7 @@ export class HlsSessionManager {
     // difference, and nothing downstream can tell that from a bad index.
     const liveStart = this.#segmentStartTime(session, safeIndex);
     logger.info(
-      `transcode ${session.id} run #${safeIndex}..#${interval.to} positioned at ${startSeconds.toFixed(3)}s ` +
+      `transcode ${session.id} run #${safeIndex}..#${runEnd} positioned at ${startSeconds.toFixed(3)}s ` +
         `for boundary #${safeIndex} (published ${startSeconds.toFixed(3)}s, ` +
         `live ${liveStart.toFixed(3)}s, apart ${(liveStart - startSeconds).toFixed(3)}s), ` +
         `numbering from #${safeIndex}`
@@ -9719,7 +9702,7 @@ export class HlsSessionManager {
     if (!isPlaylist) {
       // Where the viewer actually is. Recorded for every segment request,
       // served or not, because it is what bounds how far ahead the encoder is
-      // allowed to run — see #enforceLookAhead.
+      // allowed to run — the plan decides that now.
       const requested = session.segmentFormat.segmentIndexFromName(fileName);
       if (requested >= 0) {
         // This requester's own head, and with it the furthest any viewer of
@@ -9752,7 +9735,7 @@ export class HlsSessionManager {
         // A viewer who has caught up must not wait out the monitor's interval —
         // but only if they HAVE caught up, which is why this re-evaluates the
         // same condition instead of resuming outright.
-        this.#enforceLookAheadFor(session);
+        this.#reportCushionFor(session);
       }
     }
     // Whether the file is there is asked on its own, and nothing else shares

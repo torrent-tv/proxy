@@ -27,15 +27,34 @@
  * So no name of a viewer reaches this file. It is given what is wanted, what
  * exists, what is being made, and what the machine can afford.
  *
- * **What a viewer wants decides WHERE a run starts and WHETHER it is needed,
- * never where it stops.** A run's end comes from the coverage: it runs until it
- * meets material somebody else has made or is making, or until the end of the
- * film. Bounding it by the window instead was tried and is wrong, because a
- * window travels forward as the viewer plays: a second viewer whose cushion
- * reached two segments past the first run's end was given an encoder of their
- * own to make those two, while the run already there had nowhere left to go.
- * How far ahead of the viewers a run may get is a different question with its
- * own answer — the look-ahead, which suspends a run rather than bounding it.
+ * **A viewer decides the ORDER the map is walked in and, through the budget, how
+ * many processes walk it. Nothing else.** Stated by the user 2026-09-05, and it
+ * is the rule the rest of this file now follows: while a file is being encoded
+ * it is encoded WHOLE, in the order the map dictates. Who wants which segment
+ * decides which gap is closed first, never whether a run may go on living.
+ *
+ * **A run is therefore never stopped for standing outside a viewer's window.**
+ * It used to be, and the two decisions that produced that were in direct
+ * contradiction — measured in the field 2026-09-05 on a viewer watching an
+ * episode:
+ *
+ * 1. this file commanded a start inside the window, at #46;
+ * 2. `planRunInterval` in the session manager moved the start to #78, because
+ *    it counted a suspended run's claim as reaching `head + look-ahead`;
+ * 3. this file then saw a run at #78 against a window of [27, 57], found no
+ *    overlap, and killed it as "nothing it was given is wanted";
+ * 4. neither coverage nor demand had changed, so the same start was commanded
+ *    again — 350-700ms per cycle, dozens of times, no segment ever produced,
+ *    the viewer's picture stopped for 125 seconds.
+ *
+ * Both of those other authorities are gone (roadmap item 76, step 5). What is
+ * left is this file, and the only reasons it stops a run are: nobody is
+ * watching the output at all; the machine affords fewer processes; or there is
+ * nothing left unmade anywhere in the track.
+ *
+ * **A run's end comes from the coverage**, never from a window: it runs until
+ * it meets material somebody else has made or is making, or until the end of
+ * the film.
  */
 
 import { endOfRun } from "./EncodeRun.js";

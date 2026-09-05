@@ -27,6 +27,7 @@ import { CoverageMap } from "../encode/CoverageMap.js";
 import { firstUnmetWant, planEncoders } from "../encode/EncodePlan.js";
 import { endOfRun } from "../encode/EncodeRun.js";
 import { ENCODE_EXIT } from "../encode/encode-exit.js";
+import { affordableRuns } from "../encode/run-budget.js";
 import { RunCosts } from "../encode/run-costs.js";
 import { SegmentDemand } from "../encode/SegmentDemand.js";
 
@@ -46,6 +47,9 @@ export class EncodeOrchestrator {
 
   /** What a stop and a start have cost on this host. */
   #costs = new RunCosts();
+
+  /** The last reason a budget was cut, so the same one is not said twice. */
+  #lastBudgetReason = new Map();
 
   /**
    * @param {object} params
@@ -68,7 +72,6 @@ export class EncodeOrchestrator {
     restartCostSec,
     refetchSecPerFilmSecond = () => 0,
     segmentStore = null,
-    lookaheadSegments = 0,
     logger,
     now
   }) {
@@ -87,11 +90,6 @@ export class EncodeOrchestrator {
     this.makeRun = makeRun;
     this.segmentSeconds = segmentSeconds;
     this.restartCostSec = restartCostSec;
-    // How far in front of its viewer a run is allowed to get. It is what bounds
-    // the claim of a run that was given no end — see #claimFor.
-    this.lookaheadSegments = Number.isFinite(lookaheadSegments) && lookaheadSegments > 0
-      ? Math.ceil(lookaheadSegments)
-      : 0;
     this.logger = logger;
     this.now = typeof now === "function" ? now : Date.now;
   }
@@ -259,7 +257,7 @@ export class EncodeOrchestrator {
       // each; what it hands back names the run by BEING it, so nothing has to
       // invent a token to refer to one by.
       runs: live,
-      maxRuns: Math.max(0, this.maxRunsFor(address)),
+      maxRuns: this.#affordableOn(address, live),
       segmentSeconds: this.segmentSeconds,
       restartCostSec: this.restartCostSec,
       // Measured from this host's own runs, rather than written into the code
@@ -332,6 +330,40 @@ export class EncodeOrchestrator {
   }
 
   /**
+   * How many encoders may run on this output, from every limit at once.
+   *
+   * The processor is one of them and is answered from outside, where the
+   * machine is measured. The other two are known here: what the swarm delivers,
+   * through the seconds of swarm time a second of film costs, and — once it is
+   * supplied — the memory the piece store may hold against what one encoder's
+   * reader keeps.
+   *
+   * Said out loud when it is not the processor that decided, because "why is
+   * there only one encoder" is otherwise a question no log can answer.
+   *
+   * @param {string} address
+   * @param {{ speedX: number }[]} live
+   * @returns {number}
+   */
+  #affordableOn(address, live) {
+    const byProcessor = Math.max(0, this.maxRunsFor(address));
+    const fastest = live.reduce((best, run) => Math.max(best, run.speedX || 0), 0);
+    const budget = affordableRuns({
+      byProcessor,
+      speedX: fastest,
+      refetchSecPerFilmSecond: this.refetchSecPerFilmSecond(address)
+    });
+    if (budget.runs !== byProcessor && budget.because !== this.#lastBudgetReason.get(address)) {
+      this.#lastBudgetReason.set(address, budget.because);
+      this.logger.info(
+        `encode: ${budget.runs} encoder(s) on ${address.slice(0, 60)} — ${budget.because} ` +
+        `(the processor alone would allow ${byProcessor})`
+      );
+    }
+    return budget.runs;
+  }
+
+  /**
    * Take charge of a run this class did not start.
    *
    * The browser asks for a stream and a run begins for it, long before this
@@ -385,8 +417,18 @@ export class EncodeOrchestrator {
       coverage.claim(run, from, end);
       return;
     }
+    // A RUN WITH NO END HOLDS WHAT IT HAS MADE, NOT WHAT IT MIGHT MAKE.
+    //
+    // "No end" means the film's length is not known, so there is no last number
+    // to claim towards. Claiming the rest of the film would leave a viewer who
+    // opens the same film further in with every number taken and no encoder at
+    // all. Claiming a fixed distance in front of the head — which is what this
+    // did — needs a number nobody measured, and the number it used was the
+    // suspended-encoder threshold that no longer exists.
+    //
+    // What it has made is a fact, and it is the only one available here.
     const head = Number.isFinite(run?.head) ? run.head : from;
-    coverage.claim(run, from, Math.max(from, head + this.lookaheadSegments));
+    coverage.claim(run, from, Math.max(from, head));
   }
 
   /**

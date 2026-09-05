@@ -14,7 +14,19 @@ import { endOfRun } from "../services/encode/EncodeRun.js";
 import { firstUnmetWant, planEncoders } from "../services/encode/EncodePlan.js";
 
 /** A host that can afford two encoders, four-second segments, a cheap restart. */
-const HOST = { maxRuns: 2, segmentSeconds: 4, restartCostSec: 0.12 };
+// A host that has measured itself: the start and the death from its own runs,
+// and what the swarm charges to fetch a second of film again. All four terms
+// have to be present for the drive-or-move comparison to mean anything, and a
+// host missing any of them keeps its encoders instead — which is its own check
+// below rather than the shape every other check is written against.
+const HOST = {
+  maxRuns: 2,
+  segmentSeconds: 4,
+  restartCostSec: 0.12,
+  killCostSec: 0.5,
+  firstByteWaitSec: 1,
+  refetchSecPerFilmSecond: 0.25
+};
 
 /**
  * @param {Partial<import("../services/encode/EncodePlan.js").LiveRun>} run

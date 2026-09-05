@@ -33,11 +33,16 @@ export async function handleApiTranscodeSessionNetReportPost(req, reply, { hlsSe
   // the proxy uses to tell the viewers of one session apart, and a report
   // without them is still a truthful reading of somebody's link.
   const consumerId = typeof body.consumerId === "string" ? body.consumerId.trim() : "";
+  // Whether the picture is moving. Absent from a page that does not say, and
+  // then the viewer counts as playing, which is what every page meant before it
+  // could say otherwise.
+  const playing = typeof body.playing === "boolean" ? body.playing : undefined;
   const positionSeconds = Number(body.positionSeconds);
   const recorded = hlsSessionManager.recordNetReport(sessionId, {
     linkMbps,
     bufferedAheadSec,
     consumerId,
+    playing,
     positionSeconds:
       Number.isFinite(positionSeconds) && positionSeconds >= 0 ? positionSeconds : undefined
   });

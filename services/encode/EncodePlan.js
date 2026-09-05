@@ -194,9 +194,16 @@ export function planEncoders({
     // loss. This used to answer the other way, and every just-started run was
     // moved the moment anything ahead of it was covered — which, once the whole
     // film ahead had been made, was always.
+    // Both sides have to be known for the comparison to mean anything. The
+    // encoder's own speed is one; what the swarm charges to fetch the same
+    // bytes again is the other, and where nothing has measured it the sum is
+    // not a cost but a fragment of one. Answering from a fragment biases the
+    // decision one way — towards moving, since the missing term is on the
+    // driving side — so an unknown term is a reason to keep, exactly as an
+    // unmeasured speed is.
+    const known = run.speedX > 0 && refetchSecPerFilmSecond > 0;
     const refetchSec = coveredAhead * segmentSeconds * refetchSecPerFilmSecond;
-    const driveSec =
-      run.speedX > 0 ? (coveredAhead * segmentSeconds) / run.speedX + refetchSec : null;
+    const driveSec = known ? (coveredAhead * segmentSeconds) / run.speedX + refetchSec : null;
     const moveSec = restartCostSec + killCostSec + firstByteWaitSec;
     if (driveSec === null || driveSec <= moveSec) {
       surviving.add(run);

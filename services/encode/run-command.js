@@ -620,6 +620,21 @@ export function buildRunCommand({
       "0.05",
       "-segment_start_number",
       String(safeIndex),
+      // THE ENCODER SAYS WHEN A PIECE IS FINISHED, on a channel of its own.
+      //
+      // Measured on the addon host 2026-09-05: a name appears in this list when
+      // the file is CLOSED, not when it is created — at the third sample
+      // `seg-000.mp4` was on disk and absent from the list, and it appeared at
+      // the fourth, in the same moment `seg-001.mp4` came into being. So a name
+      // here is the writer's own statement that the piece is whole.
+      //
+      // Without it, a finished file is indistinguishable from one still being
+      // written, and the only proof available was the existence of the NEXT
+      // one — which never comes for the last piece of every run.
+      "-segment_list",
+      "pipe:3",
+      "-segment_list_flags",
+      "+live",
       ...explicitTimes,
       segmentFormat.segmentFileNameTemplate()
     );

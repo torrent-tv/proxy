@@ -110,7 +110,10 @@ export function planEncoders({
   runs,
   maxRuns,
   segmentSeconds,
-  restartCostSec
+  restartCostSec,
+  killCostSec = 0,
+  firstByteWaitSec = 0,
+  refetchSecPerFilmSecond = 0
 }) {
   /** @type {PlanAction[]} */
   const stops = [];
@@ -174,14 +177,28 @@ export function planEncoders({
       continue;
     }
 
-    // Driving through costs its own encode time for material that exists.
-    // Moving costs one restart. Both are measured; neither is chosen here.
+    // WHICH IS CHEAPER, AND BOTH SIDES COUNTED WHOLE.
     //
-    // A run whose speed nothing has measured yet cannot be compared, and then
-    // moving is the answer rather than a default: driving through is work that
-    // is certainly wasted, while the restart is a known and small cost.
-    const driveSec = run.speedX > 0 ? (coveredAhead * segmentSeconds) / run.speedX : null;
-    if (driveSec !== null && driveSec <= restartCostSec) {
+    // Driving through material that exists costs this run's own encode time for
+    // it, and costs the swarm the same bytes a second time — the film has to be
+    // fetched again to be encoded again.
+    //
+    // Moving costs the death of this run, the start of another, and the wait
+    // for the first bytes at the new position. The last of those is the largest
+    // in the field and the one nothing measures yet; while it is unmeasured it
+    // counts as zero, which makes moving look cheaper than it is.
+    //
+    // A run whose speed nothing has measured yet cannot be compared at all, and
+    // then it is KEPT. Moving costs a known amount for an unknown gain, and a
+    // fresh run has produced nothing, so taking its work away is certainly a
+    // loss. This used to answer the other way, and every just-started run was
+    // moved the moment anything ahead of it was covered — which, once the whole
+    // film ahead had been made, was always.
+    const refetchSec = coveredAhead * segmentSeconds * refetchSecPerFilmSecond;
+    const driveSec =
+      run.speedX > 0 ? (coveredAhead * segmentSeconds) / run.speedX + refetchSec : null;
+    const moveSec = restartCostSec + killCostSec + firstByteWaitSec;
+    if (driveSec === null || driveSec <= moveSec) {
       surviving.add(run);
       keeps.push({ type: "keep", run, from: run.head, to: run.to });
       continue;
@@ -194,10 +211,12 @@ export function planEncoders({
       run,
       from: gap,
       to: endOfStretch(gap, free),
-      because: driveSec === null
-        ? `${coveredAhead} segment(s) ahead are already covered and its speed is not measured`
-        : `driving through ${coveredAhead} covered segment(s) costs ${driveSec.toFixed(2)}s ` +
-          `against ${restartCostSec.toFixed(2)}s to move`
+      because:
+        `driving through ${coveredAhead} covered segment(s) costs ${driveSec.toFixed(2)}s ` +
+        `(encode ${((coveredAhead * segmentSeconds) / run.speedX).toFixed(2)}s + ` +
+        `refetch ${refetchSec.toFixed(2)}s) against ${moveSec.toFixed(2)}s to move ` +
+        `(kill ${killCostSec.toFixed(2)}s + start ${restartCostSec.toFixed(2)}s + ` +
+        `first bytes ${firstByteWaitSec.toFixed(2)}s)`
     });
   }
 

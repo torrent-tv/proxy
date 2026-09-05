@@ -96,6 +96,25 @@ export class EncodeRun {
   /** @type {number} */
   #startedAt = 0;
 
+  /**
+   * When this run was told to stop, so the death itself can be priced.
+   *
+   * The plan weighs moving an encoder against letting it drive on, and dying is
+   * one of the terms. It was measured in the field at 430-729 ms — larger than
+   * the start it is added to — by a log line that lived in the one place that
+   * killed a run. That place is gone, so the run times its own death.
+   */
+  #stopOrderedAt = 0;
+
+  /**
+   * When the first thing this run ever produced appeared.
+   *
+   * The other term the plan needs: a run started where nothing is downloaded
+   * waits for the swarm before it can encode a frame, and that wait is the
+   * largest part of what a restart costs. Nothing measured it before.
+   */
+  #firstOutputAt = 0;
+
   /** @type {number} */
   #speedX = 0;
 
@@ -358,6 +377,9 @@ export class EncodeRun {
   noteProduced(index) {
     if (Number.isInteger(index) && index >= this.from) {
       this.#produced.add(index);
+      if (this.#firstOutputAt === 0) {
+        this.#firstOutputAt = this.now();
+      }
       if (this.#state === ENCODE_RUN_STATE.STARTING) {
         this.#transition(ENCODE_RUN_EVENT.FIRST_SEGMENT);
       }
@@ -389,6 +411,7 @@ export class EncodeRun {
     }
     this.#stopping = true;
     this.#stopReason = because;
+    this.#stopOrderedAt = this.now();
     this.#transition(ENCODE_RUN_EVENT.STOP_ORDERED);
     // A suspended process does not act on SIGTERM until it is continued, so the
     // wait for its exit would never end. Let it run before asking it to stop.
@@ -554,6 +577,14 @@ export class EncodeRun {
       to: this.to,
       reached: this.reached,
       livedMs,
+      // How long dying took, and how long the first output took to appear.
+      // Null where the run was never told to stop, or never produced anything:
+      // an absent measurement says so rather than reading as zero.
+      dyingMs: this.#stopOrderedAt > 0 ? this.now() - this.#stopOrderedAt : null,
+      firstOutputMs:
+        this.#firstOutputAt > 0 && this.#startedAt > 0
+          ? this.#firstOutputAt - this.#startedAt
+          : null,
       normal: ending === ENCODE_EXIT.COMPLETE,
       lastError: this.lastError
     };

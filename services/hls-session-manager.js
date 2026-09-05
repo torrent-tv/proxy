@@ -69,6 +69,7 @@ import { Output, Outputs } from "./output/Output.js";
 import { masterPlaylistText, mediaPlaylistText, segmentIndexForTime } from "./output/playlists.js";
 import { SourceFiles, sourceDecodeCharacteristics } from "./source/SourceFile.js";
 import { ProducedIndex } from "./produced-index.js";
+import { discardOpenPiece } from "./encode/open-piece.js";
 import { SegmentStore } from "./encode/SegmentStore.js";
 import { EncodeCost } from "./quality/EncodeCost.js";
 import {
@@ -146,82 +147,6 @@ export function contiguousEnd(present, from) {
     last += 1;
   }
   return last;
-}
-
-/**
- * Remove the piece a run had open when it ended, if that piece is unusable.
- *
- * The `segment` muxer creates its output file when it OPENS it and writes into
- * it until the next cut, so at any instant exactly one file in a run's
- * directory is unfinished: the highest-numbered one. A run that reaches the end
- * of its work closes that file and it is a good piece; a run killed for a seek
- * does not — measured 2026-09-03, ffmpeg exited 19 ms after SIGTERM and left
- * `segment-00025.mp4` at zero bytes, which then closed the only hole in the
- * numbering and convinced the look-ahead to keep the encoder stopped for having
- * "produced" it.
- *
- * Only an unusable piece goes. A run stopped between two cuts leaves a finished
- * file behind, and deleting good output would mean making it a second time.
- *
- * @param {string | null | undefined} runDirPath
- * @param {{ isSegmentFileName: (name: string) => boolean, segmentIndexFromName: (name: string) => number }} segmentFormat
- * @param {((raw: Buffer) => boolean) | null} judgeUsable - Whether a non-empty
- *   piece carries what it should. Null where nothing can say, and then only an
- *   empty file is removed.
- * @returns {Promise<number | null>} The segment number removed, or null.
- */
-export async function discardOpenPiece(runDirPath, segmentFormat, within, judgeUsable) {
-  if (!runDirPath || typeof segmentFormat?.isSegmentFileName !== "function") {
-    return null;
-  }
-  // Only inside the stretch the ended run was given. Every run of an output
-  // writes into one directory now — they are kept apart by their intervals
-  // rather than by a directory each — so the highest-numbered file in there may
-  // belong to a run that is still going, and removing it would take away a
-  // piece somebody is producing.
-  const from = Number.isInteger(within?.from) ? within.from : 0;
-  const to = Number.isInteger(within?.to) && within.to >= from ? within.to : Number.MAX_SAFE_INTEGER;
-  let highest = null;
-  try {
-    for (const name of await readdir(runDirPath)) {
-      if (!segmentFormat.isSegmentFileName(name)) {
-        continue;
-      }
-      const index = segmentFormat.segmentIndexFromName(name);
-      if (index < from || index > to) {
-        continue;
-      }
-      if (index >= 0 && (highest === null || index > highest.index)) {
-        highest = { index, name };
-      }
-    }
-  } catch {
-    return null; // The run wrote nothing, or its directory is already gone.
-  }
-  if (highest === null) {
-    return null;
-  }
-  const filePath = path.join(runDirPath, highest.name);
-  let unusable = false;
-  try {
-    const info = await stat(filePath);
-    if (info.size === 0) {
-      unusable = true;
-    } else if (typeof judgeUsable === "function") {
-      unusable = !judgeUsable(await readFile(filePath));
-    }
-  } catch {
-    return null; // Gone between the listing and the question.
-  }
-  if (!unusable) {
-    return null;
-  }
-  try {
-    await unlink(filePath);
-    return highest.index;
-  } catch {
-    return null; // Already removed.
-  }
 }
 
 /**
@@ -1746,9 +1671,10 @@ export class HlsSessionManager {
     });
     this.encodeOrchestrator = new EncodeOrchestrator({
       maxRunsFor: (address) => this.maxRunsForOutput(address),
-      makeRun: ({ address, from }) => this.#makeRunAt(address, from),
+      makeRun: ({ address, from, to }) => this.#makeRunAt(address, from, to),
       segmentSeconds: this.segmentDurationSec,
       restartCostSec: RUN_RESTART_COST_SEC,
+      segmentStore: this.segmentStore,
       lookaheadSegments: Math.ceil(this.lookaheadSeconds / this.segmentDurationSec),
       logger
     });
@@ -2006,8 +1932,7 @@ export class HlsSessionManager {
         if (normalizedStartPosition > 0 || existing.runs.size === 0) {
           const at = this.#segmentIndexForTime(existing, normalizedStartPosition);
           if (runStartingAt(existing, at) === null && ownRunMaking(existing, at) === null) {
-            void this.#startEncodeRun(existing, at, normalizedStartPosition, "a viewer opened the film here")
-              .catch(() => {});
+            this.#startEncodeRun(existing, at, normalizedStartPosition, "a viewer opened the film here");
           }
         }
         existing.lastAccessedAt = Date.now();
@@ -4048,7 +3973,7 @@ export class HlsSessionManager {
    * @param {number} from
    * @returns {object | null}
    */
-  #makeRunAt(address, from) {
+  #makeRunAt(address, from, to) {
     let base = null;
     for (const session of this.sessionsById.values()) {
       if (session.outputKey === address && session.state !== "disposed") {
@@ -4079,13 +4004,18 @@ export class HlsSessionManager {
     if (base.failedStartAt === from && base.failedStartCount >= MAX_FAILED_STARTS) {
       return null;
     }
-    // Answered with nothing straight away and the run started behind it,
-    // because the plan is arithmetic and must not wait on a spawn.
-    void this.#startEncodeRun(base, from, undefined, "the plan asked for an encoder here").catch((error) => {
+    // The encoder is built and handed back in this same call. Nothing here
+    // waits: the one thing this path used to wait for was the death of the run
+    // it was replacing, and that killing is gone. Answering with nothing while
+    // the encoder was built behind the answer is what let the same stretch be
+    // started over and over — 684 starts in 482 seconds of field 2026-09-05.
+    try {
+      return this.#startEncodeRun(base, from, undefined, "the plan asked for an encoder here", { to });
+    } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       logger.warn(`transcode could not start a run at #${from} of ${address}: ${message}`);
-    });
-    return null;
+      return null;
+    }
   }
 
   /**
@@ -5657,7 +5587,16 @@ export class HlsSessionManager {
     return segmentCount > 0 && end >= segmentCount - 1 ? -1 : end;
   }
 
-  async #startEncodeRun(session, startIndex, positionSecondsOverride, because = "a viewer needs it") {
+  // Returns the encoder it built, or nothing when there was nothing to build.
+  // It waits for nothing: the one thing it used to wait for was the death of
+  // the run it was replacing, and that killing is gone.
+  #startEncodeRun(
+    session,
+    startIndex,
+    positionSecondsOverride,
+    because = "a viewer needs it",
+    ordered = null
+  ) {
     // A new run starts its own reckoning: a pair spanning the restart would
     // count the gap between two runs as slow encoding.
     session.learnSample = null;
@@ -5670,25 +5609,21 @@ export class HlsSessionManager {
     // does not await: everything below is the restart path, which is measured
     // in milliseconds and has been worked on twice to keep it that way.
     this.#accountBackwardRestart(session, startIndex);
-    // Which run, if any, is being REPLACED. A run is replaced only when the new
-    // one begins at or before it: that is a reposition of the same work. A run
-    // starting further on is a second encoder beside it, which is the whole
-    // point of a session holding a set.
-    const previousRun = liveRunsOf(session).find((run) => run.from >= startIndex) ?? null;
-    const previousProcess = previousRun?.process ?? null;
-    // The stretch the run being replaced was given, read before the new one
-    // takes over: with every run of an output writing into one directory, the
-    // piece to discard has to be looked for inside that run's own numbers.
-    const previousRunDirPath = previousRun ? session.dirPath : null;
-    const previousRunSpan = {
-      from: Number.isInteger(previousRun?.from) ? previousRun.from : 0,
-      to: Number.isInteger(previousRun?.to) ? previousRun.to : -1
-    };
-    // WHERE it starts was decided by whoever called, and is not touched here.
-    // Only how far it may work is answered, and it is answered by reading the
-    // one coverage map. Moving the start was the second authority's doing and
-    // is gone with it.
-    const runEnd = this.#runEndFrom(session, startIndex, previousRun);
+    // STARTING AN ENCODER STOPS NOTHING. It used to stop any live run whose own
+    // start was not below this one's — a rule left over from when a session
+    // held exactly one run and "the previous one" meant "the only one". Once a
+    // session could hold several, that rule began killing runs the plan had
+    // decided to keep: 294 stops for this reason in eight minutes of field
+    // 2026-09-05, against four starts asked for by a viewer. Who is stopped is
+    // decided in one place, and it is not this one.
+    //
+    // HOW FAR IT MAY WORK is decided by the same one place and arrives here as
+    // an argument. Reading it off the coverage map a second time was the last
+    // remaining second answer to that question: the plan computed `to`, passed
+    // it, and the parameter list did not name it.
+    const runEnd = Number.isInteger(ordered?.to)
+      ? ordered.to
+      : this.#runEndFrom(session, startIndex, null);
     // The restart backs off a segment or two from what was asked for, so the
     // request that prompted it is recorded under a HIGHER index than the run
     // starts at. Looking it up by the start index alone found nothing and the
@@ -5727,31 +5662,6 @@ export class HlsSessionManager {
     // current run failing. On any host with a hardware encoder that meant a
     // downgrade to libx264 for good on every seek. A run writes its own state,
     // so there is nothing left to mistake.
-    if (previousRun && previousProcess && !hasChildExited(previousProcess)) {
-      previousRun.stop("a new run is taking its place");
-      // NOT awaited. Runs are kept apart by their stretches, so the predecessor
-      // cannot corrupt this one's output by still writing; letting it die in the
-      // background removes 0.7-1.3 s from every seek (measured 2.9.132, where
-      // that wait was essentially the whole cost of a restart).
-      const termSentAt = Date.now();
-      void waitForChildExit(previousProcess, ENCODE_RUN_TERMINATE_GRACE_MS).then(async () => {
-        logger.info(
-          `transcode ${session.id} restart: previous run took ${Date.now() - termSentAt}ms to exit after SIGTERM`
-        );
-        // Only now: while the process lives it may still close the file, and a
-        // piece removed from under it would be written on into nothing.
-        await this.#discardUnfinishedPiece(session, previousRunDirPath, previousRunSpan);
-      });
-      if (!hasChildExited(previousProcess)) {
-        try {
-          previousProcess.kill("SIGKILL");
-        } catch {
-          // Best effort.
-        }
-        await waitForChildExit(previousProcess, ENCODE_RUN_TERMINATE_GRACE_MS);
-        await this.#discardUnfinishedPiece(session, previousRunDirPath, previousRunSpan);
-      }
-    }
     // A newer restart (or disposal) won the race while we were waiting for the
     // old process to die — it either already spawned its own replacement or
     // there is nothing left to start. Do not also spawn from this stale call.
@@ -5866,6 +5776,7 @@ export class HlsSessionManager {
         `live ${liveStart.toFixed(3)}s, apart ${(liveStart - startSeconds).toFixed(3)}s), ` +
         `numbering from #${safeIndex}`
     );
+    return run;
   }
 
   /**
@@ -6047,7 +5958,7 @@ export class HlsSessionManager {
         const at = Number.isInteger(session.lastRequestedSegment)
           ? session.lastRequestedSegment
           : ended.from;
-        this.#startEncodeRun(session, at, undefined, "its input came back").catch(() => {});
+        this.#startEncodeRun(session, at, undefined, "its input came back");
       }, delayMs);
       session.inputRetryTimer.unref?.();
       return;
@@ -6535,11 +6446,7 @@ export class HlsSessionManager {
       // for afterwards is the segment, which the ordinary loading flow already
       // knows how to wait for. The other viewer's picture is left alone, which
       // is the whole point.
-      void this.#startEncodeRun(onScreen, target, positionSeconds, "a viewer jumped back past another")
-        .catch((error) => {
-          const message = error instanceof Error ? error.message : String(error);
-          logger.warn(`transcode ${onScreen.id} could not start a run at that position: ${message}`);
-        });
+      this.#startEncodeRun(onScreen, target, positionSeconds, "a viewer jumped back past another");
       return true;
     }
     return this.#seekSession(onScreen, positionSeconds);
@@ -7276,7 +7183,7 @@ export class HlsSessionManager {
       // run would be discarded for nothing, which is the shape the field
       // already showed (eleven restarts in four minutes, eight of them dying
       // with `run had produced 0.0s`).
-      void this.#startEncodeRun(member, index, trueStart).catch(() => {});
+      this.#startEncodeRun(member, index, trueStart);
     }
   }
 

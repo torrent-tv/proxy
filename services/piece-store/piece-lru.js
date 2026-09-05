@@ -3,7 +3,14 @@
  *
  * Two responsibilities, deliberately kept apart from any storage:
  *
- *  - **recency**, so the piece evicted is the one least likely to be wanted;
+ *  - **how much a piece is wanted**, so the piece evicted is the one wanted
+ *    least. That number comes from the priority map, which is the one place
+ *    that knows where the viewers are; recency only separates pieces the map
+ *    wants equally. Recency alone cannot answer it: a reader walking a film
+ *    touches each piece once, so the piece the decoder will want in two seconds
+ *    looks exactly as stale as one fetched forty minutes ago and never read
+ *    again — and with the encoder running ahead of the viewer, the second kind
+ *    is what fills the store;
  *  - **pinning**, so a piece being read cannot be evicted at all.
  *
  * The second is not a refinement of the first. webtor's seeder relies on recency
@@ -28,18 +35,16 @@ export class PieceLru {
   /** Piece index → number of readers currently holding it. */
   #pins = new Map();
   /**
-   * Reader id → the piece range it expects to read next.
+   * Claimant → the piece range it states, and how much it wants it.
    *
-   * Recency alone does not describe this. A reader walking a film touches its
-   * pieces once, so the piece the decoder will want in two seconds looks
-   * exactly as stale as one fetched forty minutes ago and never read again —
-   * and with the encoder running ahead of the viewer, the second kind is what
-   * fills the store. Measured 2026-08-04: the hit rate fell from 100% to 45.7%
-   * with 221 pieces read back from disk in one session.
+   * The ranges are the priority map's zones, stated by whoever holds the map,
+   * plus the piece a read is stopped on. The number is the map's own: lower is
+   * more urgent, and a piece no range covers is wanted by nobody at all.
    *
    * A preference, not a pin. At the smallest budget the store guarantees only
-   * two resident pieces, so a hard hold on a window would deadlock it; when
-   * nothing unprotected is left, protection is ignored rather than obeyed.
+   * two resident pieces, so a hard hold on a zone would deadlock it; when
+   * everything resident is wanted, the least wanted of them goes rather than
+   * nothing going at all.
    */
   #protected = new Map();
   #capacity;
@@ -164,8 +169,8 @@ export class PieceLru {
   }
 
   /**
-   * The least recently used piece that is free to go, or `null` when every
-   * resident piece is pinned.
+   * The least wanted piece that is free to go, or `null` when every resident
+   * piece is pinned.
    *
    * Returning `null` rather than evicting a pinned piece is the whole point:
    * the caller must then wait or fail, never take memory out from under a
@@ -194,22 +199,63 @@ export class PieceLru {
    *   victim is inside one, and -1 when no reader has declared anything.
    */
   evictionChoice() {
-    // First choice: the least recently used piece nobody is reading and nobody
-    // is about to read.
+    /** @type {{ index: number, want: number } | null} */
+    let victim = null;
+    // `#order` runs least-recently-used first, so among pieces the map wants
+    // equally the first one seen is the stalest — recency decides the tie and
+    // nothing else. A piece no zone covers is wanted by nobody, which is the
+    // most anything can be un-wanted, so the walk stops at the first of those:
+    // that is the ordinary case and it costs one step.
     for (const index of this.#order) {
-      if (!this.#pins.has(index) && !this.#isProtected(index)) {
-        return { index, protectionYielded: false, distance: this.#distanceToWindow(index) };
+      if (this.#pins.has(index)) {
+        continue;
+      }
+      const want = this.wantAt(index);
+      if (victim === null || want > victim.want) {
+        victim = { index, want };
+        if (want === Number.POSITIVE_INFINITY) {
+          break;
+        }
       }
     }
-    // Nothing spare left. Protection yields — it is a preference, and refusing
-    // here would leave the store unable to admit anything at all. Pins do not
-    // yield: a piece being read now cannot have its memory taken away.
-    for (const index of this.#order) {
-      if (!this.#pins.has(index)) {
-        return { index, protectionYielded: true, distance: this.#distanceToWindow(index) };
+    if (victim === null) {
+      // Every resident piece is being read. The caller must wait or fail; it
+      // may never take memory out from under a reader.
+      return { index: null, protectionYielded: false, distance: -1 };
+    }
+    return {
+      index: victim.index,
+      // The map wanted this piece and it is going anyway — the store is being
+      // asked to hold more than it has room for, and this piece comes back
+      // from disk. Reported so that thrashing is visible as thrashing rather
+      // than as ordinary work: 6565 spills and 7575 revivals in 44 minutes on
+      // 2026-09-02, with only 53.6 % of reads served from memory.
+      protectionYielded: victim.want !== Number.POSITIVE_INFINITY,
+      distance: this.#distanceToWindow(victim.index)
+    };
+  }
+
+  /**
+   * How much the priority map wants this piece, by the most urgent zone that
+   * covers it.
+   *
+   * Public because admission asks it too: whether an arriving piece displaces
+   * a resident one is the same comparison as which resident one goes, and
+   * answering them from two different quantities is how a store evicts what it
+   * has just decided to keep.
+   *
+   * @param {number} index
+   * @returns {number} Lower is more urgent. Infinity when no zone covers it,
+   *   so a piece nobody asked for compares as less wanted than any zone.
+   */
+  wantAt(index) {
+    let want = Number.POSITIVE_INFINITY;
+    for (const range of this.#protected.values()) {
+      if (index >= range.from && index <= range.to && range.urgency < want) {
+        want = range.urgency;
       }
     }
-    return { index: null, protectionYielded: false, distance: -1 };
+    return want;
   }
 
   /**
@@ -279,14 +325,20 @@ export class PieceLru {
   }
 
   /**
-   * The piece that would be evicted next, and how long it will be waited for.
+   * The piece that would be evicted next, how much the map wants it, and how
+   * long it will be waited for.
    *
-   * @returns {{ index: number | null, wait: number }}
+   * Both numbers, because that is the order admission compares them in: the
+   * map's level first, and the distance only between pieces the map wants
+   * equally.
+   *
+   * @returns {{ index: number | null, want: number, wait: number }}
    */
   nextVictim() {
     const choice = this.evictionChoice();
     return {
       index: choice.index,
+      want: choice.index === null ? Number.POSITIVE_INFINITY : this.wantAt(choice.index),
       wait: choice.index === null ? -1 : this.waitFor(choice.index)
     };
   }
@@ -342,20 +394,28 @@ export class PieceLru {
   }
 
   /**
-   * Declare the pieces a reader expects to need next, replacing whatever it
-   * declared before. Ranges from different readers add up.
+   * State a range of pieces and how much they are wanted, replacing whatever
+   * that claimant stated before. Ranges from different claimants add up.
    *
-   * @param {string|number} readerId - Identity of the reader, so its own range
-   *   is replaced rather than accumulated.
+   * @param {string|number} readerId - Identity of the claimant, so its own
+   *   range is replaced rather than accumulated.
    * @param {number} from - First piece, inclusive.
    * @param {number} to - Last piece, inclusive.
+   * @param {number} [urgency] - The priority map's own number, lower being more
+   *   urgent. A caller that states none is treated as wanting these pieces
+   *   least of everyone who did state one, so an unstated range can never
+   *   displace a stated one.
    * @returns {void}
    */
-  protect(readerId, from, to) {
+  protect(readerId, from, to, urgency) {
     if (!Number.isInteger(from) || !Number.isInteger(to) || to < from) {
       return;
     }
-    this.#protected.set(readerId, { from, to });
+    this.#protected.set(readerId, {
+      from,
+      to,
+      urgency: Number.isFinite(urgency) ? Number(urgency) : Number.MAX_SAFE_INTEGER
+    });
   }
 
   /**

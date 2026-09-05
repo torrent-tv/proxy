@@ -85,6 +85,26 @@ export class DemandRegister {
   }
 
   /**
+   * How urgently one byte of one file is wanted, by whoever wants it most.
+   *
+   * The priority map states its zones here like anybody else, so this answers
+   * for a byte nobody is reading yet: it is how a wait is attributed to a level
+   * without the reader keeping a forecast of its own.
+   *
+   * @param {number} fileIndex
+   * @param {number} byteOffset
+   * @returns {number | null} Null when nothing covers that byte.
+   */
+  urgencyAt(fileIndex, byteOffset) {
+    // `windows()` is sorted most urgent first, so the first cover is the answer.
+    const found = this.windows().find((window) =>
+      window.fileIndex === fileIndex &&
+      byteOffset >= window.byteStart &&
+      byteOffset <= window.byteEnd);
+    return found ? found.urgency : null;
+  }
+
+  /**
    * The union of what is wanted of one file at one level, in byte ranges.
    *
    * @param {number} fileIndex

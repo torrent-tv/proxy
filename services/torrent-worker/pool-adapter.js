@@ -336,6 +336,23 @@ export class WorkerTorrentPool {
   }
 
   /**
+   * Hand the download the priority map for one file.
+   *
+   * The map is republished whenever it changes, so a call that fails costs a
+   * moment rather than correctness — which is why the caller lets it go rather
+   * than retrying.
+   *
+   * @param {{ sourceKey: string, fileIndex: number, durationSeconds: number, zones: object[] }} params
+   * @returns {Promise<void>}
+   */
+  async setPriorityMap({ sourceKey, fileIndex, durationSeconds, zones }) {
+    if (!sourceKey) {
+      return;
+    }
+    await this.#client.setPriorityMap({ sourceKey, fileIndex, durationSeconds, zones });
+  }
+
+  /**
    * Pre-fetch the head and tail the codec probe needs.
    *
    * Takes an options object, matching `TorrentPool.prefetchFileEdges` — this

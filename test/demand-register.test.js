@@ -193,3 +193,14 @@ test("the gap behind the playhead is stated nearest first", () => {
   }
   assert.deepEqual(nearestFirst({ byteStart: 10, byteEnd: 5, parts: 2 }), []);
 });
+
+test("a byte is as urgent as the most urgent thing that wants it", () => {
+  const register = new DemandRegister();
+  register.state({ claimant: "map:tail", fileIndex: 0, byteStart: 0, byteEnd: 999, urgency: Urgency.TAIL });
+  register.state({ claimant: "map:near", fileIndex: 0, byteStart: 400, byteEnd: 599, urgency: Urgency.NEAR });
+
+  assert.equal(register.urgencyAt(0, 100), Urgency.TAIL);
+  assert.equal(register.urgencyAt(0, 500), Urgency.NEAR, "the overlap took the less urgent of the two");
+  assert.equal(register.urgencyAt(0, 5000), null, "a byte nobody wants reported a level anyway");
+  assert.equal(register.urgencyAt(1, 500), null, "byte 500 of another file is not this byte");
+});

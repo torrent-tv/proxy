@@ -8,9 +8,17 @@
  * seeks. Nothing after that could outrank it: measured on a 4.7 GB film, a seek
  * to 89.1% waited 93 s while the swarm fetched 2.47 GB in file order.
  *
- * Now a read holds a moving window and returns it when it ends. These tests pin
- * the three properties that matter: the claim is bounded, it is given back, and
- * several readers add up instead of overwriting each other.
+ * Now a read claims only the piece it is STOPPED on, and gives it back when it
+ * ends. What should be downloaded ahead of a viewer is the priority map's
+ * answer, stated once for the whole file by the side that knows where the
+ * viewers are; a read is consumption, not a forecast. Fifteen reads on one file
+ * used to declare fifteen windows on a piece store holding sixteen pieces, and
+ * half of all evictions then took a piece a reader had declared (field
+ * 2026-09-05).
+ *
+ * These tests pin what is left: a read that is not stopped claims nothing, a
+ * read that is stopped claims the pieces it is waiting for and nothing beyond
+ * them, and every claim is given back.
  */
 
 import test from "node:test";
@@ -119,12 +127,13 @@ test("the window is bounded and clamped to the end of the read", () => {
   );
 });
 
-test("an open-ended read does not claim the whole file at once", async () => {
-  // 8000 pieces of 1 KB — far more than the 32 MB window, so a read to the end
-  // of the file is exactly the ffmpeg case.
+test("a read that is not stopped claims nothing", async () => {
+  // 8000 pieces of 1 KB, every one of them present, and the read asks as ffmpeg
+  // does: to the last byte of the file. Nothing is missing, so this read is
+  // waiting for nothing, so it wants nothing of the swarm — what lies ahead of
+  // it belongs to the priority map.
   const { torrent, store, directory } = await recordingTorrent({ pieceCount: 8000 });
   try {
-    // Read only the first two pieces, but ask as ffmpeg does: to the last byte.
     const iterator = readFragments({
       torrent,
       fileIndex: 0,
@@ -136,15 +145,11 @@ test("an open-ended read does not claim the whole file at once", async () => {
     const first = await iterator.next();
     first.value.release();
 
-    const selects = torrent.calls.filter((entry) => entry.call === "select");
-    assert.ok(selects.length >= 1, "the reader claimed nothing");
-    const claimed = selects[0].to - selects[0].from + 1;
-    assert.equal(
-      claimed,
-      WINDOW_PIECES,
-      `the reader claimed ${claimed} pieces of the file instead of its window`
+    assert.deepEqual(
+      torrent.held,
+      [],
+      "the read declared a window of its own, which is the forecast that has to come from the map"
     );
-    assert.equal(selects[0].stream, true, "the claim must be a stream selection, so it can be counted");
 
     await iterator.return();
   } finally {
@@ -187,35 +192,47 @@ test("an abandoned read leaves nothing selected", async () => {
   }
 });
 
-test("two readers add up, and one leaving takes only its own", async () => {
-  const { torrent, store, directory } = await recordingTorrent({ pieceCount: 8000 });
+test("two stopped readers add up, and one leaving takes only its own", async () => {
+  // Nothing has arrived yet, so both readers are stopped on their first piece
+  // and each states it. Two claims, each withdrawn on its own.
+  let arrived = false;
+  const { torrent, store, directory } = await recordingTorrent({
+    pieceCount: 8000,
+    present: () => arrived
+  });
   try {
     const head = readFragments({
       torrent, fileIndex: 0, start: 0, end: 8000 * PIECE - 1,
-      cancellation: { isCancelled: () => false }
+      cancellation: { isCancelled: () => false },
+      windowBytes: WINDOW_PIECES * PIECE
     });
     const tail = readFragments({
       torrent, fileIndex: 0, start: 4000 * PIECE, end: 8000 * PIECE - 1,
-      cancellation: { isCancelled: () => false }
+      cancellation: { isCancelled: () => false },
+      windowBytes: WINDOW_PIECES * PIECE
     });
-    (await head.next()).value.release();
-    (await tail.next()).value.release();
+    const headPending = head.next();
+    const tailPending = tail.next();
+    await new Promise((resolve) => setImmediate(resolve));
 
-    // Not a count: each reader states several bands by level, and two readers
-    // wanting the same pieces are one instruction. What matters is that both
-    // are represented and that leaving removes only what leaving should.
     const pieceOf = (range) => Number(range.split("-")[0]);
     const held = [...torrent.held];
-    assert.ok(held.some((range) => pieceOf(range) < 4000), "the head reader holds nothing");
-    assert.ok(held.some((range) => pieceOf(range) >= 4000), "the tail reader holds nothing");
+    assert.ok(held.some((range) => pieceOf(range) < 4000), "the head reader claimed nothing");
+    assert.ok(held.some((range) => pieceOf(range) >= 4000), "the tail reader claimed nothing");
+
+    // Let both through to a yield, so ending them runs their `finally` at once.
+    arrived = true;
+    torrent.emit("verified", 0);
+    torrent.emit("verified", 4000);
+    (await headPending).value.release();
+    (await tailPending).value.release();
 
     await tail.return();
     const after = [...torrent.held];
     assert.ok(
-      after.some((range) => pieceOf(range) < 4000),
-      "the head reader's window went with the tail reader"
+      after.every((range) => pieceOf(range) < 4000),
+      "the tail reader left its claim behind"
     );
-    assert.ok(after.length < held.length, "the tail reader took nothing away when it left");
 
     await head.return();
     assert.deepEqual(torrent.held, [], "the last reader left something behind");

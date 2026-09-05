@@ -224,7 +224,10 @@ export class SwarmSelection {
         if (!range) {
           continue;
         }
-        store.protectRange(window.claimant, range.from, range.to);
+        // The level goes with the range: it is what eviction compares when
+        // everything resident is wanted by somebody, and dropping it here is
+        // what left the store choosing by recency alone.
+        store.protectRange(window.claimant, range.from, range.to, window.urgency);
         holding.add(window.claimant);
       }
     }

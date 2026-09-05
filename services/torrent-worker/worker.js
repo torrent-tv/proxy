@@ -534,6 +534,17 @@ async function runCommand(command, params, id) {
       };
     }
 
+    case Command.PRIORITY_MAP: {
+      const torrent = await requireTorrent(params.sourceKey);
+      pool.applyPriorityMap(
+        torrent,
+        params.fileIndex,
+        params.zones,
+        params.durationSeconds
+      );
+      return true;
+    }
+
     case Command.PRIORITIZE: {
       const torrent = await requireTorrent(params.sourceKey);
       pool.prioritizeByteRange(torrent, params.fileIndex, params.byteStart, params.windowBytes, {

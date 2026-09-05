@@ -1364,27 +1364,35 @@ export class SharedPieceStore {
         this.#counters.admittedOutsideWindow += 1;
       }
 
-      // A piece that will be wanted LATER than the one it would displace goes
-      // straight to disk instead of being admitted.
+      // A piece wanted LESS than the one it would displace goes straight to
+      // disk instead of being admitted.
+      //
+      // The same comparison eviction makes, in the same order, from the other
+      // end: the priority map's level first, and the distance to a read head
+      // only between pieces the map wants equally. Answering the two from
+      // different quantities would let the store admit a piece by one rule and
+      // evict it again by the other in the same second.
       //
       // Two cases, and the second was missing until 2026-09-02. The first: the
-      // arrival is in nobody's window at all. The second: it IS in somebody's
-      // window, but further from every read head than the piece the store would
-      // have to evict to make room for it — so admitting it would write out the
-      // nearer piece and read it back sooner. The field session had six readers
-      // whose windows covered the whole file, so the first case never applied
-      // and `0 of those went straight to disk` while the store spilled 233
-      // pieces in a minute.
+      // arrival is in nobody's zone at all. The second: it IS in a zone, but
+      // one the map wants less than the zone holding the piece the store would
+      // have to evict for it. The field session had six readers whose windows
+      // covered the whole file, so the first case never applied and `0 of those
+      // went straight to disk` while the store spilled 233 pieces in a minute.
       //
-      // Only when SOMETHING is declared: before the first read there is no
-      // basis for calling one piece more wanted than another.
+      // Only when SOMETHING is stated: before that there is no basis for
+      // calling one piece more wanted than another.
       const worseThanTheVictim = () => {
-        const arriving = this.#lru.waitFor(index);
-        if (arriving < 0) {
+        const victim = this.#lru.nextVictim();
+        if (victim.index === null) {
           return false;
         }
-        const victim = this.#lru.nextVictim();
-        return victim.index !== null && victim.wait >= 0 && arriving > victim.wait;
+        const arrivingWant = this.#lru.wantAt(index);
+        if (arrivingWant !== victim.want) {
+          return arrivingWant > victim.want;
+        }
+        const arriving = this.#lru.waitFor(index);
+        return arriving >= 0 && victim.wait >= 0 && arriving > victim.wait;
       };
       if (this.#lru.protectedCount > 0 && this.#isFullNow()
         && (!declared || worseThanTheVictim())) {
@@ -1438,8 +1446,19 @@ export class SharedPieceStore {
     fetch().then((bytes) => done(null, bytes), (error) => done(error));
   }
 
-  protectRange(readerId, from, to) {
-    this.#lru.protect(readerId, from, to);
+  /**
+   * State a range of pieces and how much they are wanted. The number is the
+   * priority map's own, and it is what eviction compares — see
+   * {@link PieceLru#protect}.
+   *
+   * @param {string|number} readerId
+   * @param {number} from
+   * @param {number} to
+   * @param {number} [urgency]
+   * @returns {void}
+   */
+  protectRange(readerId, from, to, urgency) {
+    this.#lru.protect(readerId, from, to, urgency);
   }
 
   protectedRanges() {

@@ -16,6 +16,15 @@
  * The relation "this person watches this output" is indexed both ways — the
  * output holds its viewers, the viewer holds its outputs — because it is asked
  * from both ends, and both indexes are written here and nowhere else.
+ *
+ * **Every change here announces itself.** What encoders should exist is decided
+ * from what viewers want, so a viewer arriving, moving or leaving is a change
+ * to that decision's input. Until 2026-09-05 the decision was instead re-taken
+ * on a five-second timer, which meant a newly created output waited up to five
+ * seconds for anybody to notice it had a viewer at all — and the timer's period
+ * was also the period of a restart loop that ran for sixteen minutes. The
+ * registry does not know what to do about a change; it only says that one
+ * happened.
  */
 
 import { Viewer, viewersOf } from "./Viewer.js";
@@ -30,33 +39,58 @@ export class Viewers {
    */
   #byId = new Map();
 
+  /** @type {() => void} */
+  #onChange;
+
+  /**
+   * @param {object} [params]
+   * @param {() => void} [params.onChange] - Called after the relation changes:
+   *   a viewer joined an output, or left one. Says only that something moved.
+   */
+  constructor({ onChange } = {}) {
+    this.#onChange = typeof onChange === "function" ? onChange : () => {};
+  }
+
   /**
    * This viewer, watching this output.
    *
    * Both directions of the relation are written here. Asking for a viewer of an
    * output IS the statement that they are watching it: every caller either
    * records where they are, what they chose, or what is being prepared for
-   * them, and each of those is only true of somebody watching.
+   * them, and each of those is only true of somebody watching. It is also
+   * evidence that they are still there, so it refreshes presence.
    *
    * @param {object} output - A session.
    * @param {string} consumerId
+   * @param {number} [now]
    * @returns {Viewer}
    */
-  of(output, consumerId) {
+  of(output, consumerId, now = Date.now()) {
     const viewers = viewersOf(output);
     const known = viewers.get(consumerId);
     if (known) {
+      known.seen(now);
+      // Asking again is not a return from the dead, but it IS evidence, and a
+      // viewer marked gone whose id turns up again is a viewer who came back.
+      known.gone = false;
+      const wasWatching = known.outputs.has(output.id);
       known.outputs.add(output.id);
+      if (!wasWatching) {
+        this.#onChange();
+      }
       return known;
     }
     const viewer = consumerId
-      ? this.#byId.get(consumerId) ?? new Viewer(consumerId)
-      : new Viewer("");
+      ? this.#byId.get(consumerId) ?? new Viewer(consumerId, now)
+      : new Viewer("", now);
+    viewer.seen(now);
+    viewer.gone = false;
     if (consumerId) {
       this.#byId.set(consumerId, viewer);
     }
     viewers.set(consumerId, viewer);
     viewer.outputs.add(output.id);
+    this.#onChange();
     return viewer;
   }
 
@@ -106,9 +140,64 @@ export class Viewers {
     }
     viewers.delete(consumerId);
     viewer.outputs.delete(output.id);
-    if (consumerId && viewer.outputs.size === 0) {
-      this.#byId.delete(consumerId);
+    if (viewer.outputs.size === 0) {
+      // Watching nothing at all: this is a statement that they are gone, and
+      // not merely that this one output is no longer theirs.
+      viewer.gone = true;
+      if (consumerId) {
+        this.#byId.delete(consumerId);
+      }
     }
+    this.#onChange();
+    return true;
+  }
+
+  /**
+   * Everything this viewer is watching, let go of at once, because their
+   * connection said they are gone.
+   *
+   * The transport knows a viewer has left before any output does, and it knows
+   * it about the PERSON rather than about one of the three outputs the browser
+   * happens to hold an id for. This is the door that fact comes through.
+   *
+   * @param {string} consumerId
+   * @param {(outputId: string) => object | null} outputById - How to find an
+   *   output by id. The registry holds ids, not sessions.
+   * @returns {string[]} The outputs they were watching.
+   */
+  hasGone(consumerId, outputById) {
+    const viewer = consumerId ? this.#byId.get(consumerId) : null;
+    if (!viewer) {
+      return [];
+    }
+    const left = [...viewer.outputs];
+    for (const outputId of left) {
+      const output = typeof outputById === "function" ? outputById(outputId) : null;
+      if (output) {
+        viewersOf(output).delete(consumerId);
+      }
+    }
+    viewer.outputs.clear();
+    viewer.gone = true;
+    this.#byId.delete(consumerId);
+    this.#onChange();
+    return left;
+  }
+
+  /**
+   * Note that this viewer has been heard from, wherever the evidence came from
+   * — a request, a link report, an echo of a delivery probe.
+   *
+   * @param {string} consumerId
+   * @param {number} [now]
+   * @returns {boolean} Whether anybody by that name is known.
+   */
+  seen(consumerId, now = Date.now()) {
+    const viewer = consumerId ? this.#byId.get(consumerId) : null;
+    if (!viewer) {
+      return false;
+    }
+    viewer.seen(now);
     return true;
   }
 

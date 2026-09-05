@@ -77,7 +77,7 @@ test("a session is handed to the plan as the run it is", (t) => {
 
   const session = sessionOn({ id: "one", dirPath, encodeStartIndex: 10, runEndIndex: 40 });
   manager.sessionsById.set(session.id, session);
-  viewerOf(session, "watching").head = { segment: 12, seconds: 48, at: Date.now() };
+  viewerOf(session, "watching").position = { segment: 12, seconds: 48, at: Date.now() };
 
   manager.runQualityBudgetOnce;
   manager.planEncodersNow();
@@ -95,7 +95,7 @@ test("what a viewer waits for reaches the plan without their name", (t) => {
 
   const session = sessionOn({ id: "one", dirPath, encodeStartIndex: 0, runEndIndex: -1 });
   manager.sessionsById.set(session.id, session);
-  viewerOf(session, "someone").head = { segment: 5, seconds: 20, at: Date.now() };
+  viewerOf(session, "someone").position = { segment: 5, seconds: 20, at: Date.now() };
 
   manager.planEncodersNow();
 
@@ -105,17 +105,43 @@ test("what a viewer waits for reaches the plan without their name", (t) => {
   assert.ok(wanted[0].to > 5, "and the cushion in front of them");
 });
 
-test("a viewer who has gone quiet stops being waited for", (t) => {
+test("a viewer nothing has been heard from at all stops being waited for", (t) => {
   const { manager, root, dirPath } = managerWithAnOutput();
   t.after(() => rmSync(root, { recursive: true, force: true }));
 
   const session = sessionOn({ id: "one", dirPath });
   manager.sessionsById.set(session.id, session);
-  viewerOf(session, "gone").head = { segment: 5, seconds: 20, at: Date.now() - 10 * 60 * 1000 };
+  const gone = viewerOf(session, "gone");
+  gone.position = { segment: 5, seconds: 20, at: Date.now() - 10 * 60 * 1000 };
+  // What decides it is when they were last HEARD FROM, not when they last
+  // asked for a segment: a viewer holding a full cushion asks for nothing for
+  // as long as it takes to drain, and is no less present for it.
+  gone.seen(Date.now() - 10 * 60 * 1000);
 
   manager.planEncodersNow();
 
   assert.equal(manager.encodeOrchestrator.demand.windowsOn(KEY).length, 0);
+});
+
+test("a viewer who has arrived and asked for nothing is waited for", (t) => {
+  const { manager, root, dirPath } = managerWithAnOutput();
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+
+  const session = sessionOn({ id: "one", dirPath });
+  manager.sessionsById.set(session.id, session);
+  // Nothing places them here on purpose: this is a viewer known to the output
+  // and nothing more, which is what a viewer IS between arriving and asking
+  // for their first file. Answered from the position alone, this viewer read
+  // as absent, and on 2026-09-05 that stopped a soundtrack's encoder 1.25 s
+  // after it started, with nothing produced.
+  const fresh = manager.viewers.of(session, "fresh");
+  assert.equal(fresh.position, null, "nobody has placed them");
+
+  manager.planEncodersNow();
+
+  const wanted = manager.encodeOrchestrator.demand.windowsOn(KEY);
+  assert.equal(wanted.length, 1, "an output with a viewer on it is wanted");
+  assert.equal(wanted[0].from, 0, "and the beginning is where an unplaced viewer is");
 });
 
 test("how many encoders the machine affords is measured, not chosen", (t) => {

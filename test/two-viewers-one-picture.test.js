@@ -114,8 +114,8 @@ async function pictureWithTwoViewers() {
   base.consumers = new Set([FIRST, SECOND]);
   // Both viewers are watching the picture, which is what keeps their choices
   // alive; a viewer whose head has expired holds no encoder.
-  viewerOf(base, FIRST).head = { segment: 3, seconds: 12, at: Date.now() };
-  viewerOf(base, SECOND).head = { segment: 3, seconds: 12, at: Date.now() };
+  viewerOf(base, FIRST).position = { segment: 3, seconds: 12, at: Date.now() };
+  viewerOf(base, SECOND).position = { segment: 3, seconds: 12, at: Date.now() };
   viewerOf(base, FIRST).audio = { trackIndex: 0, transcode: true };
   viewerOf(base, SECOND).audio = { trackIndex: 1, transcode: true };
   manager.sessionsById.set(BASE_ID, base);

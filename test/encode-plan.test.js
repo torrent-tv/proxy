@@ -380,3 +380,68 @@ test("a run with no end is making what the viewers ahead of it are waiting for",
     "and nothing new is started over ground it already holds"
   );
 });
+
+test("the machine's whole budget is used, not one encoder per viewer", () => {
+  // Nothing about a viewer says how many encoders there should be. What says it
+  // is what the machine affords, and the film is divided between them.
+  const coverage = new CoverageMap({ segmentCount: 400 });
+  const actions = planEncoders({
+    coverage,
+    windows: [
+      { from: 0, to: 9, priority: 32 },
+      { from: 10, to: 399, priority: 20 }
+    ],
+    runs: [],
+    ...HOST,
+    maxRuns: 4
+  });
+  const started = actions.filter((action) => action.type === "start");
+
+  assert.equal(started.length, 4, "four encoders where the machine allows four");
+  const from = started.map((action) => action.from).sort((left, right) => left - right);
+  assert.equal(from[0], 0, "the first where the viewer is stopped");
+  assert.ok(from[3] > from[0], "and the rest spread over the film");
+});
+
+test("below realtime the first stretches are what one encoder can hold", () => {
+  // At half speed an encoder holds `(q - p)` of film: the first covers ten
+  // segments, and the next has to be standing where it stops holding.
+  const coverage = new CoverageMap({ segmentCount: 400 });
+  const actions = planEncoders({
+    coverage,
+    windows: [{ from: 10, to: 399, priority: 32 }],
+    runs: [{ from: 0, to: 0, head: 0, speedX: 0.5 }],
+    ...HOST,
+    maxRuns: 3
+  });
+  const started = actions
+    .filter((action) => action.type === "start")
+    .map((action) => action.from)
+    .sort((left, right) => left - right);
+
+  assert.ok(started.length >= 2, "more than one, because one cannot hold the film");
+  assert.ok(started[1] > started[0], "and they grow apart rather than sitting together");
+});
+
+test("two encoders never share a segment number", () => {
+  // The whole of what went wrong in the field: two encoders writing one name.
+  const coverage = new CoverageMap({ segmentCount: 400 });
+  const actions = planEncoders({
+    coverage,
+    windows: [{ from: 0, to: 399, priority: 32 }],
+    runs: [],
+    ...HOST,
+    maxRuns: 4
+  });
+  const spans = actions
+    .filter((action) => action.type === "start")
+    .map((action) => ({ from: action.from, to: action.to }))
+    .sort((left, right) => left.from - right.from);
+
+  for (let index = 0; index < spans.length - 1; index += 1) {
+    assert.ok(
+      spans[index].to < spans[index + 1].from,
+      `#${spans[index].from}..#${spans[index].to} overlaps #${spans[index + 1].from}`
+    );
+  }
+});

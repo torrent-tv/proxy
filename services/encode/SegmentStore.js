@@ -259,6 +259,30 @@ export class SegmentStore {
   }
 
   /**
+   * Whether this piece is finished, and may therefore be served.
+   *
+   * Two proofs, and the first is the good one:
+   *
+   * 1. **the encoder said so** — it names each file on a channel of its own the
+   *    moment it closes it, so the name is the writer's own statement that the
+   *    piece is whole;
+   * 2. **the next file exists** — which only proves it for pieces this process
+   *    did not watch being written, left by an earlier life of it. It is not
+   *    true of the last piece of any run, and that is what used to hold the
+   *    first segment of every run from the viewer.
+   *
+   * @param {string} key
+   * @param {number} index
+   * @returns {boolean}
+   */
+  isClosed(key, index) {
+    if (this.#closed.get(key)?.has(index)) {
+      return true;
+    }
+    return this.refresh(key).byNumber.has(index + 1);
+  }
+
+  /**
    * Say that a segment is closed for a reason the disk cannot show.
    *
    * A run reports what it has finished; the successor rule is only for what

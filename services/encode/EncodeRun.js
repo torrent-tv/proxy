@@ -96,6 +96,9 @@ export class EncodeRun {
   /** @type {number} */
   #startedAt = 0;
 
+  /** Half a name left over from the last chunk of the encoder's own channel. */
+  #closedTail = "";
+
   /**
    * When this run was told to stop, so the death itself can be priced.
    *
@@ -151,6 +154,9 @@ export class EncodeRun {
    * @param {{ info: (line: string) => void, warn: (line: string) => void, error?: (line: string) => void }} params.logger
    * @param {() => number} [params.now]
    * @param {(ended: RunEnded) => void} [params.onEnded]
+   * @param {(name: string) => void} [params.onClosed] - Called with the file name
+   *   of every piece the encoder has FINISHED writing, as the encoder itself
+   *   names it on its own channel.
    * @param {(progress: { processedSeconds: number | null, speed: string | null }) => void} [params.onProgress]
    *   Called for every `-progress` report. Seconds count from the START OF THIS
    *   RUN on both branches — neither `-output_ts_offset` nor `-copyts` changes
@@ -177,6 +183,7 @@ export class EncodeRun {
     logger,
     now,
     onEnded,
+    onClosed,
     onProgress,
     lastSegmentIndex,
     inputUnavailable,
@@ -193,6 +200,9 @@ export class EncodeRun {
     this.now = typeof now === "function" ? now : Date.now;
     this.onEnded = typeof onEnded === "function" ? onEnded : () => {};
     this.onProgress = typeof onProgress === "function" ? onProgress : () => {};
+    // Told the NAME of every piece the encoder has closed. The name is the
+    // proof it is whole; nothing else here can prove that.
+    this.onClosed = typeof onClosed === "function" ? onClosed : () => {};
     this.lastSegmentIndex = typeof lastSegmentIndex === "function" ? lastSegmentIndex : () => null;
     this.inputUnavailable = typeof inputUnavailable === "function" ? inputUnavailable : () => false;
     this.argsDescribed = argsDescribed;
@@ -323,6 +333,16 @@ export class EncodeRun {
    */
   #wire(process) {
     process.stdout?.on("data", (chunk) => this.#readProgress(String(chunk)));
+    // THE CHANNEL THE ENCODER NAMES ITS FINISHED PIECES ON.
+    //
+    // A name arrives here when ffmpeg CLOSES the file, so the name is proof the
+    // piece is whole — measured on the addon host 2026-09-05. Nothing else can
+    // prove it: a file on disk may still be being written, and the only other
+    // evidence available was the existence of the NEXT file, which never comes
+    // for the last piece of a run.
+    //
+    // Lines can arrive split, so what is left over is kept for the next chunk.
+    process.stdio?.[3]?.on("data", (chunk) => this.#readClosedPieces(String(chunk)));
     process.stderr?.on("data", (chunk) => {
       const line = String(chunk).trim();
       if (line.length > 0) {
@@ -391,6 +411,25 @@ export class EncodeRun {
    *
    * @param {number} speedX - Times realtime.
    */
+  /**
+   * Names of finished pieces, as the encoder writes them.
+   *
+   * @param {string} text
+   */
+  #readClosedPieces(text) {
+    this.#closedTail += text;
+    const lines = this.#closedTail.split(/\r?\n/);
+    // The last piece of the chunk may be half a name; it waits for the rest.
+    this.#closedTail = lines.pop() ?? "";
+    for (const line of lines) {
+      const name = line.trim();
+      if (name.length === 0) {
+        continue;
+      }
+      this.onClosed(name);
+    }
+  }
+
   noteSpeed(speedX) {
     if (Number.isFinite(speedX) && speedX > 0) {
       this.#speedX = speedX;

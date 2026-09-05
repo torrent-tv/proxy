@@ -23,7 +23,7 @@ import { speedFromReadings } from "./encoder-readings.js";
 import { availableShareFrom } from "./available-share.js";
 import { contentionPenalty } from "./contention.js";
 import { minimumBufferFrom } from "./supply-margin.js";
-import { mapForViewer } from "./encode/DemandMap.js";
+import { mapForViewer } from "./priority/PriorityMap.js";
 import { baseDrawFrom, costPerMegabyteFrom } from "./torrent-cost.js";
 import { medianOf, movedBeyondScatter, scatterOf } from "./learned-median.js";
 import {
@@ -1675,7 +1675,6 @@ export class HlsSessionManager {
       segmentSeconds: this.segmentDurationSec,
       restartCostSec: RUN_RESTART_COST_SEC,
       segmentStore: this.segmentStore,
-      lookaheadSegments: Math.ceil(this.lookaheadSeconds / this.segmentDurationSec),
       logger
     });
     // Where each file is cut, held once per file and grid rather than once per
@@ -3296,7 +3295,7 @@ export class HlsSessionManager {
    * @param {{ linkMbps: number, bufferedAheadSec: number, consumerId?: string, positionSeconds?: number }} report
    * @returns {boolean}
    */
-  recordNetReport(sessionId, { linkMbps, bufferedAheadSec, consumerId, positionSeconds }) {
+  recordNetReport(sessionId, { linkMbps, bufferedAheadSec, consumerId, positionSeconds, playing }) {
     const named = this.sessionsById.get(sessionId);
     if (!named || named.state === "disposed") {
       return false;
@@ -3312,15 +3311,9 @@ export class HlsSessionManager {
     // report of one of them says nothing about the other's encoder.
     const session = this.#activeVariant(named, typeof consumerId === "string" ? consumerId : "");
     const now = Date.now();
-    this.viewers.of(session, typeof consumerId === "string" && consumerId.length > 0 ? consumerId : "").netReport = {
-      linkMbps,
-      bufferedAheadSec,
-      // Where the picture is, said by the viewer rather than worked out from
-      // their buffer. Null from a browser that does not send it.
-      positionSeconds:
-        Number.isFinite(positionSeconds) && positionSeconds >= 0 ? positionSeconds : null,
-      at: now
-    };
+    this.viewers
+      .of(session, typeof consumerId === "string" && consumerId.length > 0 ? consumerId : "")
+      .report({ linkMbps, bufferedAheadSec, positionSeconds, playing }, now);
     // A stale reading must not go on deciding for the viewers still here: a
     // report describes a link at a moment, and a viewer who seeked since then
     // is somewhere else entirely.
@@ -3370,8 +3363,7 @@ export class HlsSessionManager {
     // `viewerPositionSource`. Only a seek writes it, so a request does not erase
     // it.
     const viewer = this.viewers.of(session, consumerId, now);
-    const seeked = viewer.position?.seeked ?? null;
-    viewer.position = { segment, seconds, at: now, seeked };
+    viewer.moveTo(seconds, now);
     this.planEncodersSoon();
     const staleAfterMs = this.presenceStaleAfterMs();
     let furthest = { segment, seconds };
@@ -3384,8 +3376,9 @@ export class HlsSessionManager {
         this.#viewerLeaves(session, key);
         continue;
       }
-      if (other.position !== null && other.position.segment > furthest.segment) {
-        furthest = { segment: other.position.segment, seconds: other.position.seconds };
+      const theirs = other.positionSeconds();
+      if (theirs !== null && theirs > furthest.seconds) {
+        furthest = { segment: this.#segmentIndexForTime(session, theirs), seconds: theirs };
       }
     }
     return furthest;
@@ -3700,7 +3693,7 @@ export class HlsSessionManager {
    * One viewer's demand map, translated into this output's segment numbers.
    *
    * The map itself is seconds of film and knows nothing about cut grids
-   * (`services/encode/DemandMap.js`). The translation is this output's own
+   * (`services/priority/PriorityMap.js`). The translation is this output's own
    * business, and it is exact: the timeline holds the boundaries.
    *
    * Two measurements feed it, and neither is chosen here:
@@ -3717,9 +3710,13 @@ export class HlsSessionManager {
    * @returns {{from: number, to: number, priority: number}[]} In segment
    *   numbers, both ends inclusive.
    */
-  #demandZonesFor(session, atSegment) {
+  #demandZonesFor(session, atSeconds) {
     const boundaries = session.timeline?.boundaries ?? [];
     const segmentCount = Number(session.timeline?.segmentCount) || 0;
+    // Where they are, in this output's own numbering. The viewer holds seconds;
+    // every cut grid turns them into its own numbers, and two grids of one film
+    // give different numbers for the same second.
+    const atSegment = segmentCount > 0 ? this.#segmentIndexForTime(session, atSeconds) : 0;
     if (segmentCount <= 0) {
       // No playlist yet: the only thing that can be said is that they want
       // where they are.
@@ -3728,7 +3725,7 @@ export class HlsSessionManager {
     const durationSeconds = Number(boundaries[boundaries.length - 1]) ||
       segmentCount * this.segmentDurationSec;
     const zones = mapForViewer({
-      atSeconds: this.#segmentStartTime(session, atSegment),
+      atSeconds,
       durationSeconds,
       allowanceSeconds: minimumBufferFrom({
         segmentSeconds: this.segmentDurationSec,
@@ -3933,7 +3930,11 @@ export class HlsSessionManager {
           // named. A viewer with no position is one assembled by hand outside
           // this class; they want the beginning, which is where an output
           // starts when nobody says otherwise.
-          const at = viewer.position?.segment ?? 0;
+          // SECONDS, and turned into this output's own numbering below. A
+          // segment number taken off the viewer would mean two different
+          // moments of film on the picture and on the soundtrack, which are cut
+          // independently: 454 pieces against 401 on the field file.
+          const at = viewer.positionSeconds() ?? 0;
           // Their own map, in seconds of film, from measurements: how much must
           // be ready before they set off so that they never stop — the observed
           // allowance for this file plus what an encoder at THIS machine's
@@ -5734,7 +5735,9 @@ export class HlsSessionManager {
       spawn: (spawnArgs) =>
         spawn(this.ffmpegBin, spawnArgs, {
           cwd: session.dirPath,
-          stdio: ["ignore", "pipe", "pipe"]
+          // A fourth channel: the encoder names every piece it has CLOSED on it,
+          // which is the only proof a piece is whole.
+          stdio: ["ignore", "pipe", "pipe", "pipe"]
         }),
       logger,
       // The film's last segment number, which is what tells "it reached the
@@ -5744,6 +5747,7 @@ export class HlsSessionManager {
         session.timeline?.segmentCount > 0 ? session.timeline.segmentCount - 1 : null,
       inputUnavailable: (message) => isInputUnavailable(message),
       onProgress: (report) => this.#noteRunProgress(session, run, report),
+      onClosed: (name) => this.segmentStore.markClosed(session.outputKey ?? "", session.segmentFormat.segmentIndexFromName(name)),
       onEnded: (ended) => this.noteRunEnded(session, run, ended)
     });
     session.runs.add(run);
@@ -6360,136 +6364,27 @@ export class HlsSessionManager {
     if (!named || named.state === "disposed") {
       return false;
     }
-    // The seeking viewer's OWN head moves with them. Without this their head
-    // would still hold the segment they asked for before the jump, and the very
-    // next thing they ask for — the segment at the seek target — would be
-    // judged stale against it and refused. That refusal, from the shared field,
-    // is the freeze of 2026-08-18; keeping per-viewer heads without moving them
-    // on a seek would bring it back one viewer at a time.
+    // A SEEK DOES ONE THING: it puts the viewer where they now are.
+    //
+    // It used to do eleven, and wrote that position into five places: two
+    // fields on this session, two more on the soundtrack's, and the viewer. It
+    // also asked whether the jump would drag another viewer back, started an
+    // encoder itself, cancelled outstanding requests, backed off a segment to
+    // the preceding keyframe, and set a timer to restart ffmpeg. So it was a
+    // third authority over the encoders beside the plan and the start path, and
+    // not one of its branches ever asked what had already been made — a viewer
+    // jumping into a stretch that was finished and on disk got a fresh encoder
+    // for it.
+    //
+    // What follows from the move happens by itself: the priority map is built
+    // from where the viewers are, and both orchestrators read the map.
     if (consumerId) {
-      this.viewers.of(named, consumerId).position = {
-        segment: this.#segmentIndexForTime(named, positionSeconds),
-        seconds: positionSeconds,
-        at: Date.now(),
-        // Stated, not inferred. It is what makes this viewer's position a
-        // "seeked" one for as long as they stay there.
-        seeked: positionSeconds
-      };
+      this.viewers.of(named, consumerId).moveTo(positionSeconds);
     }
-    // The browser holds one session id for the whole file and knows nothing of
-    // variants, so a seek it reports means the stream on screen.
-    //
-    // The session's own figure, which is what an encode run is placed by. It is
-    // NOT this viewer's position — that is their head above — and the two used
-    // to be one field called `viewerPositionSeconds`: with two viewers the name
-    // was a falsehood, since a session has one of these and as many positions
-    // as it has viewers.
-    named.furthestViewerSeconds = positionSeconds;
-    // What the viewer SAID, kept apart from what requests imply. A request is
-    // evidence about where the player is reading; a reported seek is the viewer
-    // stating where they are, and after one, requests already in flight
-    // describe a place that no longer exists. Field 2026-08-17: a seek to
-    // 2083.4 s restarted both runs at #373, a request for #371 issued before it
-    // arrived a second later, and the encoder was dragged back to #370 — three
-    // segments behind the viewer, who then waited for it to return.
-    named.viewerReportedSeconds = positionSeconds;
     named.lastAccessedAt = Date.now();
-    // The audio the viewer is listening to moves with them. It is a separate
-    // encoder on a separate session that the browser cannot name, and nothing
-    // else would ever reposition it: a request far AHEAD of its run is not
-    // treated as a seek anywhere in this class, so after a forward jump the
-    // audio would be held, refused, and left grinding forward from where it
-    // was — the picture playing over silence for as long as the jump was.
-    // Only the track being LISTENED to. A track the viewer left keeps its place
-    // but not an encoder, and seeking it would start one for nobody — which is
-    // how a single viewer came to have three ffmpeg processes and three readers
-    // on one file (2026-08-15), enough to pin every resident piece and kill the
-    // session outright.
-    // The seeking viewer's OWN soundtrack, not every soundtrack the session
-    // has: with two viewers, moving the other one's audio to a position they
-    // are not at would take their sound away and produce for nobody.
-    const listening = this.#audioChoiceOf(named, consumerId);
-    const rendition = this.liveOutputs.renditionsOf(named).find(
-      (other) =>
-        (other.audioTrackIndex ?? 0) === listening.trackIndex &&
-        (other.transcodeAudio === true) === listening.transcode
-    );
-    if (rendition) {
-      rendition.lastAccessedAt = Date.now();
-      this.#seekSession(rendition, positionSeconds);
-    }
-    const onScreen = this.#activeVariant(named, consumerId);
-    // A seek backwards while somebody else is watching ahead must not drag
-    // their picture back with it: field shape of 2026-09-04, two viewers who
-    // opened a film together, one jumps back an hour, and the other's segments
-    // stop being made.
-    //
-    // The answer is not to refuse the seek but to give it a run of its own. A
-    // session holds as many runs as the machine affords, they write into the
-    // output's one directory, and each viewer is served whatever any of them
-    // has made.
-    if (this.#wouldDragAnotherViewerBack(onScreen, consumerId, positionSeconds)) {
-      const target = this.#segmentIndexForTime(onScreen, positionSeconds);
-      if (runStartingAt(onScreen, target) !== null || ownRunMaking(onScreen, target) !== null) {
-        logger.info(
-          `transcode ${onScreen.id} seek to ${positionSeconds.toFixed(1)}s for ${consumerId} is ` +
-          `already being made by a run of its own "${onScreen.file.name}"`
-        );
-        return true;
-      }
-      logger.info(
-        `transcode ${onScreen.id} seek to ${positionSeconds.toFixed(1)}s starting a run of its ` +
-        `own for ${consumerId}: another viewer is watching ahead, and one run cannot be in two ` +
-        `places "${onScreen.file.name}"`
-      );
-      // Not awaited: this call answers the browser, and what the viewer waits
-      // for afterwards is the segment, which the ordinary loading flow already
-      // knows how to wait for. The other viewer's picture is left alone, which
-      // is the whole point.
-      this.#startEncodeRun(onScreen, target, positionSeconds, "a viewer jumped back past another");
-      return true;
-    }
-    return this.#seekSession(onScreen, positionSeconds);
+    this.planEncodersSoon();
+    return true;
   }
-
-  /**
-   * Whether repositioning this session would take the picture away from
-   * somebody else.
-   *
-   * Two things have to hold. The seek has to be one that actually restarts the
-   * run — a position the run already covers going forward costs nobody
-   * anything. And another viewer has to be live and AHEAD of it, since a run
-   * only ever moves forward: what lies behind the furthest viewer has already
-   * been made, and dragging the run back is what stops it being made for them.
-   *
-   * @param {HlsSession} session
-   * @param {string} consumerId - The one seeking, who does not count.
-   * @param {number} positionSeconds
-   * @returns {boolean}
-   */
-  #wouldDragAnotherViewerBack(session, consumerId, positionSeconds) {
-    if (!session || !consumerId || !processCanBeSignalled(runStateOf(session))) {
-      return false;
-    }
-    const target = this.#segmentIndexForTime(session, positionSeconds);
-    const head = earliestRunStart(session);
-    if (!Number.isInteger(head) || target >= head) {
-      return false;
-    }
-    const staleAfterMs = this.presenceStaleAfterMs();
-    const now = Date.now();
-    for (const [otherId, viewer] of viewersOf(session)) {
-      if (otherId === consumerId || !viewer.isPresent(now, staleAfterMs)) {
-        continue;
-      }
-      if (viewer.position.segment > target) {
-        return true;
-      }
-    }
-    return false;
-  }
-
-
 
   /**
    * Reposition THIS session, with no forwarding.
@@ -9742,70 +9637,23 @@ export class HlsSessionManager {
       // running happily ahead. A segment is finished once the NEXT one has been
       // started, or once the run producing it has ended.
       if (!isPlaylist && cutsAtGivenTimes(session)) {
+        // WHAT PROVES A PIECE IS WHOLE is the encoder's own word for it: it
+        // names each file on a channel of its own the moment it closes it, and
+        // the store keeps those names.
+        //
+        // What stood here instead was the existence of the NEXT file, with two
+        // exceptions bolted on because it is not true. It is never true of the
+        // last piece of a run — nothing is producing a next one — so the first
+        // segment of every run was held: measured 2026-08-09, #807 held while
+        // it lay on disk, and in August the same shape held #317 for 46 seconds
+        // and then answered 404 to a browser that had given up.
         const index = session.segmentFormat.segmentIndexFromName(fileName);
-        const isLast = index >= Math.max(0, (session.timeline.boundaries?.length ?? 1) - 2);
-        // Only the CURRENT run can have a file open, and only its own next
-        // piece is evidence that it has moved on. A run that has ended closed
-        // everything it wrote, so its files need no such proof — and taking the
-        // proof from whichever run happened to hold the next number is how a
-        // file being written came to be read as finished.
-        if (!isLast && liveRunsOf(session).length > 0) {
-          const nextName = session.segmentFormat.segmentFileName(index + 1);
-          const nextPath = path.join(session.dirPath, nextName);
-          // The FIRST segment of a run cannot be judged by "the next one
-          // exists": nothing is producing a next one yet, because the run has
-          // only just begun here. Waiting for it holds precisely the segment a
-          // resume depends on — measured 2026-08-09, #807 held while it lay on
-          // disk, and in August the same shape held #317 for 46 s and then
-          // answered 404 to a browser that had given up.
-          //
-          // What "finished" means for it is that the encoder has moved PAST the
-          // end of its span. ffmpeg reports the output timestamp of its last
-          // encoded frame, so a run whose position is beyond this segment's end
-          // has necessarily closed it.
-          const isRunStart = runStartingAt(session, index) !== null;
-          const encoderPosition = Number(session.progress?.processedSeconds);
-          const segmentEnd = this.#segmentStartTime(session, index + 1);
-          if (isRunStart && Number.isFinite(encoderPosition) && encoderPosition > segmentEnd) {
-            // Past its end — it is complete, whatever the directory says about
-            // what comes next.
-          } else {
-          try {
-            await access(nextPath);
-          } catch {
-            this.#explainHold(
-              session,
-              fileName,
-              `it exists, but the next segment (#${index + 1}) has not been started yet`
-            );
-            return { kind: "warming-up" };
-          }
-          }
+        if (!this.segmentStore.isClosed(session.outputKey ?? "", index)) {
+          this.#explainHold(session, fileName, "the encoder has not closed it yet");
+          return { kind: "warming-up" };
         }
       }
-      // A run that has walked into a stretch another run was given stops here.
-      //
-      // A run's own end is set when it starts, from the gaps of that moment,
-      // and a viewer who opened the same film somewhere else afterwards is not
-      // in that picture: their run took the stretch in front, and this one is
-      // now producing numbers they are producing too. Nothing may write a name
-      // another run wants — that is the whole reason runs used to be kept in
-      // separate directories, and this is what replaces it now that they share
-      // one.
-      if (!isPlaylist) {
-        const served = session.segmentFormat.segmentIndexFromName(fileName);
-        // The run that made this number, and whether ANOTHER run was given it.
-        // A run may not write a name another run wants — that is the whole
-        // reason runs used to be kept in separate directories — so the one that
-        // walked in stops where it got to.
-        const mine = Number.isInteger(served) && served >= 0 ? ownRunMaking(session, served) : null;
-        const madeByAnother = mine === null
-          ? null
-          : this.runMakingSegment(session, served, mine);
-        if (madeByAnother !== null) {
-          mine.stop(`it reached #${served}, which #${madeByAnother.from}..#${madeByAnother.to} was given`);
-        }
-      }
+
       // Cold-start: log the first servable SEGMENT of this session exactly once
       // — the time from session-create entry to a playable first segment.
       if (!isPlaylist && !session.firstSegmentLogged) {

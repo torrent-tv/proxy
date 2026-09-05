@@ -28,6 +28,7 @@
 				"services/output/**",
 				"services/viewer/**",
 				"services/encode/**",
+				"services/priority/**",
 				"services/source/**",
 				"services/torrent/**"
 			],

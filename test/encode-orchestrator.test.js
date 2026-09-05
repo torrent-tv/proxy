@@ -45,6 +45,12 @@ function orchestrator({ maxRuns = 2 } = {}) {
     maxRunsFor: () => maxRuns,
     segmentSeconds: 4,
     restartCostSec: 0.12,
+    // A host that has measured what the swarm charges to fetch a second of film
+    // again. Without it the drive-or-move comparison has only one side and the
+    // plan keeps the encoder rather than paying an unknown price — which is its
+    // own check in `encode-plan.test.js` rather than the shape every check here
+    // is written against.
+    refetchSecPerFilmSecond: () => 0.25,
     now: () => 1000,
     logger: { info: (line) => lines.push(line), warn: (line) => lines.push(line) },
     makeRun: ({ address, from, to }) => {
@@ -195,22 +201,25 @@ test("nothing wanted anywhere is said plainly", () => {
   assert.match(made.describe(), /nothing wanted/);
 });
 
-test("a run adopted with no end holds the look-ahead, not the rest of the film", () => {
+test("a run adopted with no end holds what it has made, not the rest of the film", () => {
   // A session's own encoder is handed to the plan rather than built by it, and
-  // it carries `to = -1` — no end. Claiming the film from there would leave a
-  // viewer further in with no encoder at all: they would wait for this run to
-  // encode its way to them, which on a long film is an hour. What bounds it is
-  // the look-ahead, because a run is suspended once it is that far in front of
-  // its viewer and produces nothing until somebody asks.
+  // it carries `to = -1` — no end, which means the film's length is not known.
+  // Claiming the film from there would leave a viewer further in with no
+  // encoder at all: they would wait for this run to encode its way to them,
+  // which on a long film is an hour. What it holds is what it has produced,
+  // which is a fact rather than a distance nobody measured.
   const { made } = orchestrator({ maxRuns: 2 });
-  made.lookaheadSegments = 30;
   const adopted = {
     from: 0,
     to: -1,
     head: 3,
     isAlive: true,
     isStopping: false,
-    speedX: 8,
+    // Slow enough that the swarm is not what limits the count here: at 0.25
+    // seconds of swarm time per second of film, one encoder at 1x takes a
+    // quarter of what is delivered and four may run. The swarm's own limit has
+    // its own check below.
+    speedX: 1,
     stop() {
       this.isAlive = false;
     }
@@ -224,4 +233,23 @@ test("a run adopted with no end holds the look-ahead, not the rest of the film",
   assert.equal(runs.length, 2, "the viewer further in got an encoder of their own");
   assert.ok(adopted.isAlive, "and the adopted run was not stopped to make room");
   assert.equal(runs.some((run) => run.from === 200), true, "started where that viewer is waiting");
+});
+
+test("the swarm limits the encoders, whatever the processor allows", () => {
+  // Every encoder reads the same torrent, so together they cannot consume
+  // faster than it is delivered. At 0.25 seconds of swarm time per second of
+  // film, one encoder running at 8x takes twice everything there is — so a
+  // machine whose processor would allow two gets one.
+  const { made, lines } = orchestrator({ maxRuns: 2 });
+  made.want({ claimant: "one", address: PICTURE, from: 100, to: 130 });
+  made.reconcile();
+  made.runsOn(PICTURE)[0].noteSpeed(8);
+  made.want({ claimant: "two", address: PICTURE, from: 500, to: 530 });
+  made.reconcile();
+
+  assert.equal(made.runsOn(PICTURE).length, 1);
+  assert.ok(
+    lines.some((line) => line.includes("what the swarm delivers")),
+    "and the line says which limit decided it"
+  );
 });

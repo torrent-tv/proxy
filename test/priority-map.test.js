@@ -8,7 +8,7 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mapForViewer, mergeMaps, inWorkingOrder } from "../services/encode/DemandMap.js";
+import { mapForViewer, mergeMaps, inWorkingOrder } from "../services/priority/PriorityMap.js";
 
 test("a viewer's own position is the most urgent thing there is", () => {
   const map = mapForViewer({
@@ -25,23 +25,60 @@ test("a viewer's own position is the most urgent thing there is", () => {
   }
 });
 
-test("a machine that cannot keep up must have more ready before the viewer sets off", () => {
-  // 900s of film in front. At 0.25x the encoder loses three seconds of film per
-  // second played, so 675s must exist first, or the viewer stalls partway.
-  const slow = mapForViewer({ atSeconds: 100, durationSeconds: 1000, allowanceSeconds: 0, encodeSpeedX: 0.25 });
-  const fast = mapForViewer({ atSeconds: 100, durationSeconds: 1000, allowanceSeconds: 0, encodeSpeedX: 2 });
+test("a machine that cannot keep up needs more encoders, not a longer first zone", () => {
+  // An encoder starting where the viewer stands stays ahead of them for
+  // `held x s / (1 - s)`, so the SLOWER the machine the shorter that is — and
+  // the film is held by more encoders rather than by one working further.
+  const slow = mapForViewer({
+    atSeconds: 0,
+    durationSeconds: 1000,
+    allowanceSeconds: 10,
+    encodeSpeedX: 0.25
+  });
+  const quicker = mapForViewer({
+    atSeconds: 0,
+    durationSeconds: 1000,
+    allowanceSeconds: 10,
+    encodeSpeedX: 0.5
+  });
 
-  assert.equal(slow[0].to, 775, "100 + 900 x 0.75");
   assert.ok(
-    slow[0].to - slow[0].from > fast[0].to - fast[0].from,
-    "the slower the machine, the more of the film must be made in advance"
+    slow[0].to - slow[0].from < quicker[0].to - quicker[0].from,
+    "the slower machine holds the viewer for less"
   );
+  assert.ok(slow.length > quicker.length, "so more encoders are needed to hold the film");
 });
 
-test("the allowance is added to the shortfall, not chosen instead of it", () => {
-  const map = mapForViewer({ atSeconds: 0, durationSeconds: 100, allowanceSeconds: 10, encodeSpeedX: 0.5 });
+test("the first zone is exactly what one encoder can hold", () => {
+  // `held x s / (1 - s)`: ten seconds held at half speed is ten seconds held,
+  // and the encoder is caught exactly there. A longer first zone would stall
+  // the viewer inside it; a shorter one would start the next encoder nearer,
+  // where its own bound is tighter.
+  const map = mapForViewer({
+    atSeconds: 0,
+    durationSeconds: 100,
+    allowanceSeconds: 10,
+    encodeSpeedX: 0.5
+  });
 
-  assert.equal(map[0].to, 60, "50s of shortfall plus 10s of measured allowance");
+  assert.equal(map[0].to, 10);
+  assert.equal(map[1].to, 30, "the next holds three times as long, because they arrive later");
+  assert.equal(map[2].to, 70);
+});
+
+test("a viewer holding nothing is told the whole of it is urgent", () => {
+  // With nothing held, no partition holds them: the first encoder stays ahead
+  // for zero seconds. Slicing the film into equal slivers would pretend
+  // otherwise.
+  const map = mapForViewer({
+    atSeconds: 0,
+    durationSeconds: 1000,
+    allowanceSeconds: 0,
+    encodeSpeedX: 0.25
+  });
+
+  assert.equal(map.length, 1);
+  assert.equal(map[0].to, 1000);
 });
 
 test("the rest of the track is still wanted, and wanted last", () => {

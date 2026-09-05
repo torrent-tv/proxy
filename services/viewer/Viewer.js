@@ -125,6 +125,89 @@ export class Viewer {
      * @type {Set<string>}
      */
     this.outputs = new Set();
+    // Whether the picture is moving. A viewer who has stopped it consumes
+    // nothing, so nothing in front of them ever becomes due — they have no
+    // deadline at all, and the work goes to whoever is watching. The page knows
+    // this exactly and says it outright; inferring it from a position that has
+    // not moved takes two reports and lies whenever a browser holding a full
+    // cushion goes quiet between segments, which it does.
+    this.playing = true;
+    // Seconds of film held ahead of the picture, as the page last said.
+    this.bufferedSeconds = null;
+  }
+
+  /**
+   * Where they are, in SECONDS of film, and nothing else.
+   *
+   * A segment number cannot live here: the picture and the soundtrack of one
+   * film are cut independently and into different numbers of pieces — 454
+   * against 401 on the field file of 2026-09-05 — so piece 48 of one is not the
+   * same moment as piece 48 of the other. Whoever holds a cut grid turns these
+   * seconds into their own numbers.
+   *
+   * @param {number} seconds
+   * @param {number} [now]
+   */
+  moveTo(seconds, now = Date.now()) {
+    if (!Number.isFinite(seconds) || seconds < 0) {
+      return;
+    }
+    this.position = { seconds, at: now, seeked: seconds };
+    this.lastSeenAt = now;
+  }
+
+  /**
+   * Everything a viewer says about itself, in one statement.
+   *
+   * The page sends four things together — how fast its link measured, how much
+   * film it holds, where the picture is, and whether the picture is moving —
+   * and all four are facts about this viewer. Taking them apart and assigning
+   * them one by one somewhere else is how they came to be spread over five
+   * places, two of them on a session shared with other people.
+   *
+   * @param {object} report
+   * @param {number} report.linkMbps
+   * @param {number} report.bufferedAheadSec
+   * @param {number | null} [report.positionSeconds] - Null from a page that
+   *   does not say; then the position stands as it was.
+   * @param {boolean} [report.playing] - Absent from a page that does not say;
+   *   then the viewer counts as playing, which is what every page meant before
+   *   it could say otherwise.
+   * @param {number} [now]
+   */
+  report({ linkMbps, bufferedAheadSec, positionSeconds = null, playing }, now = Date.now()) {
+    this.netReport = {
+      linkMbps,
+      bufferedAheadSec,
+      positionSeconds:
+        Number.isFinite(positionSeconds) && positionSeconds >= 0 ? positionSeconds : null,
+      at: now
+    };
+    this.bufferedSeconds = bufferedAheadSec;
+    this.playing = playing === undefined ? true : Boolean(playing);
+    if (Number.isFinite(positionSeconds) && positionSeconds >= 0) {
+      this.moveTo(/** @type {number} */ (positionSeconds), now);
+    }
+    this.seen(now);
+  }
+
+  /**
+   * When this viewer runs out of what they hold, in milliseconds.
+   *
+   * Film is consumed at one second per second while the picture moves, so the
+   * moment they run dry is now plus what they hold. Stopped, they consume
+   * nothing and there is no such moment — which is why a pause needs no rule of
+   * its own anywhere: it falls out of this as an absent deadline.
+   *
+   * @param {number} [now]
+   * @returns {number | null}
+   */
+  deadlineAt(now = Date.now()) {
+    if (!this.playing) {
+      return null;
+    }
+    const held = Number.isFinite(this.bufferedSeconds) ? Math.max(0, this.bufferedSeconds) : 0;
+    return now + held * 1000;
   }
 
   /**

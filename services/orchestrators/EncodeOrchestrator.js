@@ -121,9 +121,14 @@ export class EncodeOrchestrator {
    * @param {string} params.address
    * @param {number} params.from
    * @param {number} params.to
+   * @param {number} [params.priority] - Higher is sooner. One viewer states
+   *   several stretches at once — what must be ready before they set off, what
+   *   is reachable while they watch it, the rest of the track — and the filling
+   *   takes them in this order. Absent means one undifferentiated want, which
+   *   is what a caller that knows only a position states.
    */
-  want({ claimant, address, from, to }) {
-    this.demand.state({ claimant, address, from, to, statedAt: this.now() });
+  want({ claimant, address, from, to, priority = 0 }) {
+    this.demand.state({ claimant, address, from, to, priority, statedAt: this.now() });
   }
 
   /**

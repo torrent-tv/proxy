@@ -527,7 +527,20 @@ try {
     // Records the wire when a queue stays wedged — how the rare one-way
     // transmit death (roadmap item 10, 2026-08-24) gets its evidence.
     witness: packetWitness,
-    usrsctpState: usrsctpStateReader
+    usrsctpState: usrsctpStateReader,
+    // Presence, from the one thing that knows it. Late-bound for the same
+    // reason as the transport snapshot above: the manager is built inside
+    // `startProxyServer`, with this handler already in hand.
+    onViewerPresent: (consumerId) => {
+      started?.hlsSessionManager?.viewers?.seen?.(consumerId);
+    },
+    onViewerGone: (consumerId, because) => {
+      void started?.hlsSessionManager?.viewerHasGone?.(consumerId, because)
+        ?.catch?.((error) => {
+          const message = error instanceof Error ? error.message : String(error);
+          logger.warn(`could not let go of viewer ${consumerId}: ${message}`);
+        });
+    }
   });
 
   webRtcManager = createWebRtcManager({

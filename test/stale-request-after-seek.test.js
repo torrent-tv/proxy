@@ -79,8 +79,8 @@ async function sessionWithRunAt373() {
     holdExplainedAt: new Map(),
     seekSettleTimer: null,
     seekTarget: null,
-    seekFailureTarget: -1,
-    seekFailureCount: 0,
+    failedStartAt: -1,
+    failedStartCount: 0,
     waitEpoch: 0,
     firstSegmentLogged: true,
     progress: { processedSeconds: RUN_STARTS_AT * SEGMENT_SECONDS, speed: "1.0x", startPositionSeconds: RUN_STARTS_AT * SEGMENT_SECONDS }

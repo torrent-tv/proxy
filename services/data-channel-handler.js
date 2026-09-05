@@ -159,7 +159,7 @@ export function wedgeIsCertain({ queuedBytes, bytesPerSecond, flatForMs, longest
  * @param {DataChannel} channel
  * @returns {() => void} Stops the watch.
  */
-function makeSendQueueWatcher({ log, getTransportSnapshot, witness, usrsctpState }) {
+function makeSendQueueWatcher({ log, getTransportSnapshot, witness, usrsctpState, onConnectionGone }) {
   // Every channel of one connection reads the SAME transport counters — the
   // snapshot describes the peer connection, not the channel — so the heartbeat
   // belongs to the connection and is printed once for it. Printed per channel
@@ -291,6 +291,12 @@ function makeSendQueueWatcher({ log, getTransportSnapshot, witness, usrsctpState
       // the live one.
       if (connection.channels.size === 0 && connections.get(sessionId) === connection) {
         connections.delete(sessionId);
+        // Every channel of this connection is down, so the person on it is
+        // gone. This is the SECOND way that becomes known, and it exists
+        // because the first does not always come: a peer connection can die
+        // without `onClosed`, which is why this watch was written in the first
+        // place.
+        onConnectionGone?.(sessionId, "the transport stopped answering");
       }
     };
     // Independent of the queue: the transport's own counters, sampled for as
@@ -544,8 +550,52 @@ export function createDataChannelHandler({
   // moment a wedge is declared, from either detector below. Optional: a host
   // without gdb simply never gets a reading, same as the witness without
   // tcpdump.
-  usrsctpState
+  usrsctpState,
+  // Presence, both directions. A viewer is present because their connection
+  // is, and gone because it went — which is a fact about the PERSON and reaches
+  // every output they were watching at once. Before this, nothing anywhere
+  // released a viewer when their connection closed: the only exits were the
+  // browser's own `release` and a silence long enough to be called an absence.
+  onViewerPresent = () => {},
+  onViewerGone = () => {}
 }) {
+  /**
+   * Who is on each connection, by WebRTC session id.
+   *
+   * One connection carries one page, and a page holds one name per film it has
+   * open — so this is normally one id, and more than one only where a page has
+   * opened more than one.
+   *
+   * @type {Map<string, Set<string>>}
+   */
+  const viewersOnConnection = new Map();
+
+  /**
+   * Everyone on this connection has gone, because the connection has.
+   *
+   * Said once per connection: a second call after the set is emptied must not
+   * announce departures a second time, and the two detectors below — the close
+   * event and the transport's own counters — can both fire for one death.
+   *
+   * @param {string} sessionId
+   * @param {string} because
+   * @returns {void}
+   */
+  function connectionGone(sessionId, because) {
+    const viewers = viewersOnConnection.get(sessionId);
+    viewersOnConnection.delete(sessionId);
+    if (!viewers || viewers.size === 0) {
+      return;
+    }
+    for (const consumerId of viewers) {
+      onLog?.(`[dc] Session ${sessionId.slice(0, 8)}: viewer ${consumerId} left — ${because}`);
+      try {
+        onViewerGone(consumerId, because);
+      } catch {
+        // A viewer failing to be let go must not stop the others being let go.
+      }
+    }
+  }
   /**
    * Channels currently interested in one file's subtitle cues, keyed by
    * `sourceKey:fileIndex`. Populated the moment a browser asks for an
@@ -630,7 +680,11 @@ export function createDataChannelHandler({
     log: (message) => log(message),
     getTransportSnapshot,
     witness,
-    usrsctpState
+    usrsctpState,
+    // The watcher is where a connection's death is noticed when no close event
+    // arrives, so it is the second door presence leaves by. Given rather than
+    // reached for: it is a module-level function and cannot see this closure.
+    onConnectionGone: connectionGone
   });
   // Numbered probes on every channel, and the browser's echo of what it saw.
   // The proxy's own counters cannot say whether bytes it handed to usrsctp were
@@ -804,6 +858,27 @@ export function createDataChannelHandler({
         return;
       }
 
+      // WHO is on this connection. Sent once when the page opens its control
+      // channel, and it is what lets a closed connection say that a PERSON has
+      // gone rather than that one output lost a request.
+      //
+      // The name is the page's, not this connection's: it is minted once per
+      // film opened in the tab and survives the reconnect ladder swapping the
+      // transport underneath a running player. A name minted here would make
+      // one person two the first time that happened, each with their own
+      // position.
+      if (message.type === "viewer" && typeof message.consumerId === "string" && message.consumerId) {
+        const known = viewersOnConnection.get(sessionId) ?? new Set();
+        const isNew = !known.has(message.consumerId);
+        known.add(message.consumerId);
+        viewersOnConnection.set(sessionId, known);
+        if (isNew) {
+          log(`[dc] Session ${tag}: viewer ${message.consumerId} is on this connection`);
+        }
+        onViewerPresent(message.consumerId);
+        return;
+      }
+
       // The far end's answer to the numbered probes, plus what it can see of
       // its own receiving. It travels browser to proxy, the direction that goes
       // on working through a freeze, so it arrives when nothing else does.
@@ -836,6 +911,11 @@ export function createDataChannelHandler({
       partials.clear();
       unsubscribeSubtitlesAll(channel);
       log(`[dc] Session ${tag}: channel closed`);
+      // The ordinary way a viewer leaves, and the only one that is immediate.
+      // Everything else — a silence long enough to be called an absence, the
+      // transport's own counters going quiet — is a backstop for this event
+      // failing to arrive.
+      connectionGone(sessionId, "the connection closed");
     });
 
     channel.onError((err) => {

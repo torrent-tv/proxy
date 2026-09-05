@@ -83,8 +83,8 @@ function fakeSession({ id, dirPath, file, encodeHeight = 0, audioOnly = false, i
     }),
     encodeRunGeneration: 0,
     lastRestartAt: 0,
-    seekFailureTarget: -1,
-    seekFailureCount: 0,
+    failedStartAt: -1,
+    failedStartCount: 0,
     seekSettleTimer: null,
     seekTarget: null,
     waitEpoch: 0,
@@ -144,7 +144,7 @@ test("a viewer who steps down, back to the picture's own height and down again k
   startRunOn(base, { process: fakeEncoder() });
   const viewer = manager.viewers.of(base, VIEWER);
   viewer.audio = { trackIndex: 1, transcode: true };
-  viewer.head = { segment: 25, seconds: 100, at: Date.now() };
+  viewer.position = { segment: 25, seconds: 100, at: Date.now() };
 
   await manager.resolveVariantFile(BASE_ID, 540, "segment-00025.mp4", VIEWER);
   await manager.resolveVariantFile(BASE_ID, 812, "segment-00026.mp4", VIEWER);
@@ -165,7 +165,7 @@ test("a viewer leaving is subtracted from every output, and one nobody is left w
   t.after(() => rm(dirPath, { recursive: true, force: true }));
   // Watching all three, which is what a viewer who picked a language and a
   // quality is doing.
-  manager.viewers.of(base, VIEWER).head = { segment: 25, seconds: 100, at: Date.now() };
+  manager.viewers.of(base, VIEWER).position = { segment: 25, seconds: 100, at: Date.now() };
   manager.viewers.of(step, VIEWER);
   manager.viewers.of(audio, VIEWER);
   assert.deepEqual(
@@ -195,12 +195,12 @@ test("an output somebody else is still watching is kept when one viewer leaves",
   t.after(() => rm(dirPath, { recursive: true, force: true }));
   const second = "viewer-two";
   base.consumers.add(second);
-  manager.viewers.of(base, VIEWER).head = { segment: 25, seconds: 100, at: Date.now() };
+  manager.viewers.of(base, VIEWER).position = { segment: 25, seconds: 100, at: Date.now() };
   manager.viewers.of(step, VIEWER);
   manager.viewers.of(audio, VIEWER);
   // The second viewer is listening to the same soundtrack and watching the
   // picture at its own height.
-  manager.viewers.of(base, second).head = { segment: 25, seconds: 100, at: Date.now() };
+  manager.viewers.of(base, second).position = { segment: 25, seconds: 100, at: Date.now() };
   manager.viewers.of(audio, second);
 
   await manager.releaseSessionConsumer(BASE_ID, VIEWER, "the first viewer left");
@@ -227,7 +227,7 @@ test("an output somebody else is still watching is kept when one viewer leaves",
 test("leaving an output releases what the watching claimed of production", async (t) => {
   const { manager, base, step, audio, dirPath, released } = await pictureWithStepAndSoundtrack();
   t.after(() => rm(dirPath, { recursive: true, force: true }));
-  manager.viewers.of(base, VIEWER).head = { segment: 25, seconds: 100, at: Date.now() };
+  manager.viewers.of(base, VIEWER).position = { segment: 25, seconds: 100, at: Date.now() };
   manager.viewers.of(step, VIEWER);
   manager.viewers.of(audio, VIEWER);
 

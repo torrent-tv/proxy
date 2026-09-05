@@ -411,6 +411,22 @@ export function variantConsumerId(baseSessionId) {
   return `variant-of:${baseSessionId}`;
 }
 
+/**
+ * Whether this name belongs to a person or to the family bookkeeping.
+ *
+ * An output made on behalf of a picture — a quality step, a soundtrack — is
+ * created under a made-up name so that the picture ending can let it go. That
+ * name is not somebody watching, and it must not enter the viewer registry: a
+ * viewer is placed the moment they arrive and counts as present until something
+ * says otherwise, so a made-up one would keep its output producing for ever.
+ *
+ * @param {string} consumerId
+ * @returns {boolean}
+ */
+export function isFamilyConsumerId(consumerId) {
+  return typeof consumerId === "string" && consumerId.startsWith("variant-of:");
+}
+
 const CLEANUP_INTERVAL_MS = 30_000;
 
 // How long a session waits for the file's keyframe table before giving up on
@@ -557,7 +573,7 @@ const ENCODE_RUN_TERMINATE_GRACE_MS = 2_000;
 // the seek/open step itself (container demux error, bad audio frame boundary,
 // etc.), not mid-stream. Used to tell a genuine seek failure apart from a
 // later, unrelated crash so the circuit breaker below only counts the former.
-const SEEK_FAST_FAIL_MS = 2_000;
+const START_FAST_FAIL_MS = 2_000;
 // Circuit breaker: consecutive fast failures AT THE SAME target before we stop
 // auto-retrying and leave the session in its terminal "failed" state (surfaced
 // to the client as a clean, retryable error) instead of looping forever. The
@@ -565,7 +581,7 @@ const SEEK_FAST_FAIL_MS = 2_000;
 // mode (an unreliable container-computed seek position); this is a safety net
 // for whatever residual case still fails — not a second competing "fix" that
 // blindly retries the identical command hoping for a different result.
-const MAX_SEEK_FAILURES = 3;
+const MAX_FAILED_STARTS = 3;
 // A run that lost its INPUT is retried rather than condemned: the torrent can
 // be added again and the pieces downloaded again, so the data being gone is a
 // wait, not a verdict. Backed off so a source that is truly unavailable costs a
@@ -1452,9 +1468,9 @@ function isWarmupTimeoutError(error) {
  * @property {number[] | null} keyframeTimes - Real source keyframe times
  *   (sorted seconds), or null when the probe failed/timed out. Used to snap a
  *   source seek onto a known-valid position (see #startEncodeRun).
- * @property {number}  seekFailureTarget - Segment index of the last fast seek
- *   failure, for the consecutive-failure circuit breaker (see MAX_SEEK_FAILURES).
- * @property {number}  seekFailureCount  - Consecutive fast failures at seekFailureTarget.
+ * @property {number}  failedStartAt - Segment index of the last fast seek
+ *   failure, for the consecutive-failure circuit breaker (see MAX_FAILED_STARTS).
+ * @property {number}  failedStartCount  - Consecutive fast failures at failedStartAt.
  */
 
 /**
@@ -1494,6 +1510,13 @@ export class HlsSessionManager {
    *
    * @type {number[]}
    */
+  /**
+   * Whether a re-decision of what encoders should exist is already queued for
+   * the end of this turn. See `planEncodersSoon`.
+   * @type {boolean}
+   */
+  #planScheduled = false;
+
   #firstSegmentLatencies = [];
 
   /**
@@ -1671,7 +1694,11 @@ export class HlsSessionManager {
     // person per output. What a viewer chose, where they are and which outputs
     // they are watching are facts about the person; kept per output they were
     // three copies of which two were always stale.
-    this.viewers = new Viewers();
+    // Every change to who is watching what re-decides which encoders should
+    // exist, because that decision reads nothing else about viewers. It used to
+    // be re-taken on a five-second timer instead, which made a just-created
+    // output wait up to five seconds before anything noticed it had a viewer.
+    this.viewers = new Viewers({ onChange: () => this.planEncodersSoon() });
     // Which outputs of one file exist right now, and what each of them is: the
     // picture a step belongs to, the steps, the soundtracks, the height a
     // session is named by. Read-only over the register above, and the layer the
@@ -1949,10 +1976,18 @@ export class HlsSessionManager {
           // joining knows nothing about: they may have chosen another language,
           // and their browser may need a track re-encoded that the first
           // viewer's could decode as it stands.
-          this.viewers.of(existing, consumerId).audio = {
+          const joining = this.viewers.of(existing, consumerId);
+          joining.audio = {
             trackIndex: normalizedAudioTrack,
             transcode: transcodeAudio === true
           };
+          // And WHERE they are, which their own request names and this session
+          // cannot guess: a viewer joining a session already playing at 40:00
+          // may be opening the film from a link that carries 05:00. Placed now,
+          // because a viewer who has not yet been placed states no want and an
+          // output all of whose viewers state nothing has every encoder on it
+          // stopped.
+          this.#placeViewer(existing, joining, startPositionSeconds);
         }
         // Reuse said nothing at all before this, so a session serving two
         // viewers looked exactly like a session serving one — and the whole
@@ -2650,12 +2685,12 @@ export class HlsSessionManager {
       viewers: new Map(),
       encoderPauseUnsupported: false,
       seekFirstFarAt: 0,
-      // Circuit breaker: consecutive FAST failures (see SEEK_FAST_FAIL_MS) at
-      // seekFailureTarget. Reset whenever a run starts at a DIFFERENT target or
+      // Circuit breaker: consecutive FAST failures (see START_FAST_FAIL_MS) at
+      // failedStartAt. Reset whenever a run starts at a DIFFERENT target or
       // survives past the fast-fail window. See the exit handler in
-      // the run ending handler and MAX_SEEK_FAILURES.
-      seekFailureTarget: -1,
-      seekFailureCount: 0,
+      // the run ending handler and MAX_FAILED_STARTS.
+      failedStartAt: -1,
+      failedStartCount: 0,
       progress: {
         // No `state` here. What the browser is told is `wireState(runState)`,
         // computed where it is sent — a Moore output rather than a field
@@ -2707,12 +2742,21 @@ export class HlsSessionManager {
     }
     // The viewer who asked for this session, so a browser that names itself
     // never has to have requested a segment first for its own soundtrack choice
-    // to be known.
-    if (consumerId) {
-      this.viewers.of(session, consumerId).audio = {
+    // to be known — nor for its own POSITION to be known, which is the same
+    // request's `startPositionSeconds` and is therefore knowledge this process
+    // already has before a single byte is encoded.
+    //
+    // A session made on behalf of the family — a quality step, a soundtrack —
+    // is created under a made-up name, and that name is not a person. It stays
+    // out of the viewer registry: given a position it would count as present
+    // for ever, and nothing would ever stop the output it was created for.
+    if (consumerId && !isFamilyConsumerId(consumerId)) {
+      const first = this.viewers.of(session, consumerId);
+      first.audio = {
         trackIndex: normalizedAudioTrack,
         transcode: transcodeAudio === true
       };
+      this.#placeViewer(session, first, startPositionSeconds);
     }
     this.sessionsById.set(sessionId, session);
     this.sessionIdBySource.set(sourceMapKey, sessionId);
@@ -3353,23 +3397,18 @@ export class HlsSessionManager {
         Number.isFinite(positionSeconds) && positionSeconds >= 0 ? positionSeconds : null,
       at: now
     };
-    // A viewer who left stops reporting, and their last reading must not go on
-    // deciding for the ones still here. Nothing else removes it: a closed data
-    // channel does not release consumers today (roadmap item 55).
-    for (const [key, viewer] of viewersOf(session)) {
+    // A stale reading must not go on deciding for the viewers still here: a
+    // report describes a link at a moment, and a viewer who seeked since then
+    // is somewhere else entirely.
+    //
+    // Only the READING expires. Whether the person is still watching is a
+    // different question with its own answer — their connection — and a viewer
+    // who has simply stopped reporting is not thereby gone. Answering both from
+    // this one place is what stopped a soundtrack's encoder on 2026-09-05.
+    for (const viewer of viewersOf(session).values()) {
       const report = viewer.netReport;
-      if (report === null) {
-        continue;
-      }
-      if (now - report.at > LINK_REPORT_FRESH_MS) {
+      if (report !== null && now - report.at > LINK_REPORT_FRESH_MS) {
         viewer.netReport = null;
-        // A viewer with nothing left to say about themselves is a viewer this
-        // session has not met: one object goes, where six maps each had to be
-        // emptied and none of them was. Through the one exit, so that what they
-        // had claimed of production goes with them.
-        if (viewer.head === null && viewer.activeVariantId === null) {
-          this.#viewerLeaves(session, key);
-        }
       }
     }
     return true;
@@ -3406,25 +3445,23 @@ export class HlsSessionManager {
     // where they are, and the two answer different questions — see
     // `viewerPositionSource`. Only a seek writes it, so a request does not erase
     // it.
-    const viewer = this.viewers.of(session, consumerId);
-    const seeked = viewer.head?.seeked ?? null;
-    viewer.head = { segment, seconds, at: now, seeked };
-    const staleAfterMs = (this.lookaheadSeconds + this.segmentDurationSec) * 1000;
+    const viewer = this.viewers.of(session, consumerId, now);
+    const seeked = viewer.position?.seeked ?? null;
+    viewer.position = { segment, seconds, at: now, seeked };
+    this.planEncodersSoon();
+    const staleAfterMs = this.presenceStaleAfterMs();
     let furthest = { segment, seconds };
     for (const [key, other] of heads) {
-      if (other.head === null) {
-        continue;
-      }
-      if (!other.isLive(now, staleAfterMs)) {
-        // A viewer nobody has heard from for longer than the cushion has gone.
-        // One object goes, where six parallel maps each had to be remembered —
-        // and it goes through the one exit, which also releases what they had
-        // claimed of production.
+      if (!other.isPresent(now, staleAfterMs)) {
+        // Nothing has been heard from them for longer than any silence a
+        // watching viewer can produce — not merely longer than a segment. They
+        // go through the one exit, which also releases what they had claimed of
+        // production.
         this.#viewerLeaves(session, key);
         continue;
       }
-      if (other.head.segment > furthest.segment) {
-        furthest = { segment: other.head.segment, seconds: other.head.seconds };
+      if (other.position !== null && other.position.segment > furthest.segment) {
+        furthest = { segment: other.position.segment, seconds: other.position.seconds };
       }
     }
     return furthest;
@@ -3443,7 +3480,7 @@ export class HlsSessionManager {
     if (!consumerId) {
       return null;
     }
-    const head = session.viewers?.get(consumerId)?.head;
+    const head = session.viewers?.get(consumerId)?.position;
     return head && Number.isFinite(head.seconds) ? head.seconds : null;
   }
 
@@ -3736,10 +3773,98 @@ export class HlsSessionManager {
   }
 
   #enforceLookAhead() {
-    this.planEncodersNow();
     for (const session of this.sessionsById.values()) {
       this.#enforceLookAheadFor(session);
     }
+  }
+
+  /**
+   * Put a viewer where their own request says they are.
+   *
+   * A viewer arrives by asking for a POSITION — zero, or the time an address
+   * bar carried — so "we do not know where they are" is not a state a viewer
+   * can be in. Before 2026-09-05 it was: position was written only by a segment
+   * request, so a viewer counted as placeless until they had asked for a
+   * segment, and an output whose viewers were all placeless had every encoder
+   * on it stopped for having nobody. The soundtrack that failed that day could
+   * not have asked: the segment it would have asked for needed an `init.mp4`
+   * that the stopped encoder was going to make.
+   *
+   * Only ever places a viewer who has none. A viewer already placed is being
+   * kept current by their own requests and seeks, and a fresh create request
+   * carries a default of zero that must not drag them back to the beginning.
+   *
+   * @param {HlsSession} session
+   * @param {import("./viewer/Viewer.js").Viewer} viewer
+   * @param {number} positionSeconds
+   * @returns {void}
+   */
+  #placeViewer(session, viewer, positionSeconds) {
+    if (viewer.position !== null) {
+      return;
+    }
+    const seconds = Number.isFinite(positionSeconds) && positionSeconds > 0 ? positionSeconds : 0;
+    let segment = 0;
+    try {
+      const index = this.#segmentIndexForTime(session, seconds);
+      if (Number.isInteger(index) && index >= 0) {
+        segment = index;
+      }
+    } catch {
+      // A session whose cut table is not built yet places its viewer at the
+      // beginning, which is where the run starts anyway.
+    }
+    viewer.position = { segment, seconds, at: Date.now(), seeked: null };
+    this.planEncodersSoon();
+  }
+
+  /**
+   * How long nothing may be heard from a viewer before this process concludes
+   * they are gone.
+   *
+   * A backstop and nothing more. A viewer leaves by SAYING so — the browser
+   * releases the session, or their connection closes — and this covers only the
+   * case where nothing said it: a data channel's close event does not always
+   * come, and a transport that is not a data channel may have nothing to say at
+   * all.
+   *
+   * The figure is the proxy's own cushion plus a segment, which is the longest
+   * silence a watching viewer can produce: one holding a full cushion asks for
+   * nothing until it has drained, and one playing asks once a segment.
+   *
+   * @returns {number}
+   */
+  presenceStaleAfterMs() {
+    return (this.lookaheadSeconds + this.segmentDurationSec) * 1000;
+  }
+
+  /**
+   * Re-decide what encoders should exist, once, after the change that is being
+   * made now.
+   *
+   * COALESCED, NOT DELAYED. One turn of the event loop may carry several
+   * changes — a viewer arrives and is placed and states their soundtrack — and
+   * each of them is a reason to re-decide, while re-deciding three times in a
+   * row would give the same answer three times and could act on a half-built
+   * state. So the decision is taken once, after the current turn, and no
+   * interval is involved: there is nothing to choose and nothing to tune.
+   *
+   * @returns {void}
+   */
+  planEncodersSoon() {
+    if (this.#planScheduled) {
+      return;
+    }
+    this.#planScheduled = true;
+    queueMicrotask(() => {
+      this.#planScheduled = false;
+      try {
+        this.planEncodersNow();
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        logger.warn(`transcode could not re-plan encoders: ${message}`);
+      }
+    });
   }
 
   /**
@@ -3768,7 +3893,7 @@ export class HlsSessionManager {
       }
       byOutput.set(address, [...(byOutput.get(address) ?? []), session]);
     }
-    const staleAfterMs = (this.lookaheadSeconds + this.segmentDurationSec) * 1000;
+    const staleAfterMs = this.presenceStaleAfterMs();
     const lookaheadSegments = Math.ceil(this.lookaheadSeconds / this.segmentDurationSec);
     const now = Date.now();
     for (const [address, sessions] of byOutput) {
@@ -3791,16 +3916,30 @@ export class HlsSessionManager {
         // What the viewers of this session are waiting for, as spans. A viewer
         // wants the segment they are at and the cushion in front of it, which
         // is what the encoder is steered by everywhere else in this class.
+        //
+        // PRESENCE AND POSITION ARE ASKED SEPARATELY, and that is the whole of
+        // the 2026-09-05 fix. Presence decides whether this viewer states a
+        // want at all; position decides what the want is. Asked as one question
+        // — which is what a single field written only by segment requests
+        // amounted to — a viewer who had just arrived answered "absent", every
+        // encoder on their output was stopped for having nobody, and the
+        // `init.mp4` they were waiting for in order to request their first
+        // segment was therefore never made.
         for (const [consumerId, viewer] of viewersOf(session)) {
-          if (!viewer.isLive(now, staleAfterMs)) {
+          if (!viewer.isPresent(now, staleAfterMs)) {
             this.encodeOrchestrator.release(`${session.id}:${consumerId}`);
             continue;
           }
+          // Placed when they arrived, from the position their own request
+          // named. A viewer with no position is one assembled by hand outside
+          // this class; they want the beginning, which is where an output
+          // starts when nobody says otherwise.
+          const at = viewer.position?.segment ?? 0;
           this.encodeOrchestrator.want({
             claimant: `${session.id}:${consumerId}`,
             address,
-            from: viewer.head.segment,
-            to: viewer.head.segment + lookaheadSegments
+            from: at,
+            to: at + lookaheadSegments
           });
         }
       }
@@ -3830,6 +3969,26 @@ export class HlsSessionManager {
       }
     }
     if (!base) {
+      return null;
+    }
+    // A position that has already failed to start, this many times running,
+    // will fail again: nothing about it has changed between the attempts, which
+    // is exactly why the attempts keep taking the same fraction of a second and
+    // ending the same way.
+    //
+    // The plan is arithmetic over coverage and demand, and neither of them
+    // knows that a process refused to start — so without asking here, the plan
+    // commands the same start, the run ends, the ended stretch goes back to the
+    // map, and the plan commands it again. Measured 2026-09-05 with ffmpeg
+    // absent: fifty passes of the plan in the time a probe took to notice, as
+    // fast as spawning could fail. The five-second timer this decision used to
+    // sit on hid that, at the price of hiding it in the field too — the loop
+    // seen there ran for sixteen minutes and read as "a restart every five
+    // seconds".
+    //
+    // A DIFFERENT position is unaffected and gets its own budget, and the count
+    // resets the moment a run at this one does real work.
+    if (base.failedStartAt === from && base.failedStartCount >= MAX_FAILED_STARTS) {
       return null;
     }
     // Answered with nothing straight away and the run started behind it,
@@ -5619,7 +5778,7 @@ export class HlsSessionManager {
         session.timeline?.segmentCount > 0 ? session.timeline.segmentCount - 1 : null,
       inputUnavailable: (message) => isInputUnavailable(message),
       onProgress: (report) => this.#noteRunProgress(session, run, report),
-      onEnded: (ended) => this.#onRunEnded(session, run, ended)
+      onEnded: (ended) => this.noteRunEnded(session, run, ended)
     });
     session.runs.add(run);
     session.pendingRestartIndex = -1;
@@ -5726,18 +5885,34 @@ export class HlsSessionManager {
    * @param {import("./encode/EncodeRun.js").RunEnded} ended
    * @returns {void}
    */
-  #onRunEnded(session, run, ended) {
+  noteRunEnded(session, run, ended) {
     // First, and for every run whatever else follows: the stretch it held goes
     // back to the map. A run whose claim is never released tells the plan that
     // numbers nobody is making are being made, and nothing is ever started
     // there again.
     this.encodeOrchestrator.noteEnded(ended);
+    // WAS this run still the session's when it ended? Asked before it is
+    // removed, because after the removal the question always answers "no" —
+    // and it was asked after, so every line below this point was unreachable.
+    //
+    // Measured 2026-09-05 over both of the field host's log files: zero
+    // occurrences of this handler's own `encode-run #… failed:` line and zero
+    // of `fast failure at segment`, across every session this proxy has ever
+    // run. So the fallback from a failed hardware encoder to software, the
+    // retry when the torrent data goes away, the limit on retrying a position
+    // that keeps failing, and the error line naming the ffmpeg command have all
+    // been dead code — which is also why nothing ever stopped the restart loop
+    // recorded in the field the same day.
+    const wasCurrent = session.runs?.has(run) ?? false;
     session.runs?.delete(run);
+    // A stretch went back to the map, so what should be running has changed.
+    // Said here rather than waited for: this is the moment it became true.
+    this.planEncodersSoon();
     if (session.state === "disposed") {
       return;
     }
-    if (!session.runs?.has(run)) {
-      // A run that has already been let go. It has logged its own ending;
+    if (!wasCurrent) {
+      // A run the session had already replaced. It has logged its own ending;
       // nothing about the session follows from it.
       return;
     }
@@ -5821,28 +5996,41 @@ export class HlsSessionManager {
       session.inputRetryTimer.unref?.();
       return;
     }
-    // Circuit-breaker bookkeeping: a seek-restart run that exits THIS fast
-    // never did real work — it failed at the seek/open step itself, not
-    // mid-stream (see SEEK_FAST_FAIL_MS). Track consecutive fast failures at
-    // the SAME target so #ensureEncodingFor/#fireSettledSeek (which check this
-    // below) can stop retrying instead of looping forever on a position that
-    // keeps failing even with the keyframe-snapped seek.
-    if (ended.livedMs < SEEK_FAST_FAIL_MS && ended.from > 0) {
-      if (session.seekFailureTarget === ended.from) {
-        session.seekFailureCount += 1;
+    // A run that exits THIS fast never did real work: it failed at the start
+    // itself — opening the input, spawning the process — rather than
+    // mid-stream. Consecutive fast failures at the SAME position are counted so
+    // that whoever commands a start can stop commanding one that keeps failing.
+    //
+    // COUNTED AT EVERY POSITION, #0 included. It used to be counted only past
+    // #0, because it was written for seek restarts and a seek is never to the
+    // beginning. That left the one position the plan commands FIRST with no
+    // count at all, and the plan re-commanding a start that cannot succeed is
+    // an unbounded loop: measured 2026-09-05, ffmpeg failing to spawn produced
+    // fifty passes of the plan before a probe stopped it, as fast as the
+    // failures arrived.
+    if (ended.livedMs < START_FAST_FAIL_MS) {
+      if (session.failedStartAt === ended.from) {
+        session.failedStartCount += 1;
       } else {
-        session.seekFailureTarget = ended.from;
-        session.seekFailureCount = 1;
+        session.failedStartAt = ended.from;
+        session.failedStartCount = 1;
       }
       logger.warn(
         `transcode ${session.id} fast failure at segment #${ended.from} ` +
-          `(${ended.livedMs}ms) — ${session.seekFailureCount}/${MAX_SEEK_FAILURES} consecutive`
+          `(${ended.livedMs}ms) — ${session.failedStartCount}/${MAX_FAILED_STARTS} consecutive`
       );
+      if (session.failedStartCount >= MAX_FAILED_STARTS) {
+        logger.error(
+          `transcode ${session.id} will not be started at #${ended.from} again: ` +
+          `${session.failedStartCount} starts there failed within ${START_FAST_FAIL_MS}ms each ` +
+          `(${session.lastError || ended.because}) "${session.file.name}"`
+        );
+      }
     } else {
       // Real progress was made (or this was the very first run) — not a
       // repeating seek failure. Reset the breaker.
-      session.seekFailureTarget = -1;
-      session.seekFailureCount = 0;
+      session.failedStartAt = -1;
+      session.failedStartCount = 0;
     }
     logger.error(
       `transcode ${session.id} encode-run #${ended.from}..#${ended.to} failed: ${session.lastError}` +
@@ -6010,13 +6198,13 @@ export class HlsSessionManager {
       this.#repairBehindHead(session, index, head);
       return;
     }
-    // Circuit breaker: this exact target has already failed MAX_SEEK_FAILURES
-    // times in a row (fast failures — see #onRunEnded).
+    // Circuit breaker: this exact target has already failed MAX_FAILED_STARTS
+    // times in a row (fast failures — see noteRunEnded).
     // Stop auto-retrying it; session.state stays "failed" so getFileStream
     // reports a clean, retryable error instead of looping forever. A DIFFERENT
     // target (the viewer seeking elsewhere) is unaffected — it gets its own
     // fresh attempt budget.
-    if (index === session.seekFailureTarget && session.seekFailureCount >= MAX_SEEK_FAILURES) {
+    if (index === session.failedStartAt && session.failedStartCount >= MAX_FAILED_STARTS) {
       return;
     }
     // A far request is NOT treated as a seek. Measured 2026-08-02: on a single
@@ -6140,7 +6328,7 @@ export class HlsSessionManager {
     // The breaker has already refused this target repeatedly. Re-arming for it
     // would log and re-arm on every poll for as long as the request is held,
     // and move nothing.
-    if (target === session.seekFailureTarget && session.seekFailureCount >= MAX_SEEK_FAILURES) {
+    if (target === session.failedStartAt && session.failedStartCount >= MAX_FAILED_STARTS) {
       return;
     }
     logger.warn(
@@ -6212,7 +6400,7 @@ export class HlsSessionManager {
     // is the freeze of 2026-08-18; keeping per-viewer heads without moving them
     // on a seek would bring it back one viewer at a time.
     if (consumerId) {
-      this.viewers.of(named, consumerId).head = {
+      this.viewers.of(named, consumerId).position = {
         segment: this.#segmentIndexForTime(named, positionSeconds),
         seconds: positionSeconds,
         at: Date.now(),
@@ -6325,13 +6513,13 @@ export class HlsSessionManager {
     if (!Number.isInteger(head) || target >= head) {
       return false;
     }
-    const staleAfterMs = (this.lookaheadSeconds + this.segmentDurationSec) * 1000;
+    const staleAfterMs = this.presenceStaleAfterMs();
     const now = Date.now();
     for (const [otherId, viewer] of viewersOf(session)) {
-      if (otherId === consumerId || !viewer.isLive(now, staleAfterMs)) {
+      if (otherId === consumerId || !viewer.isPresent(now, staleAfterMs)) {
         continue;
       }
-      if (viewer.head.segment > target) {
+      if (viewer.position.segment > target) {
         return true;
       }
     }
@@ -6424,7 +6612,7 @@ export class HlsSessionManager {
     // Circuit breaker (defense in depth): a timer armed before the cap was hit
     // could still be pending when it was reached — do not fire the restart it
     // was going to make. See the matching check in #ensureEncodingFor.
-    if (target === session.seekFailureTarget && session.seekFailureCount >= MAX_SEEK_FAILURES) {
+    if (target === session.failedStartAt && session.failedStartCount >= MAX_FAILED_STARTS) {
       session.seekTarget = null;
       session.seekFirstFarAt = 0;
       return;
@@ -8059,7 +8247,7 @@ export class HlsSessionManager {
    * @returns {"seeked" | "requested" | "opened" | "none"}
    */
   #viewerPositionSourceOf(session, consumerId = "") {
-    const head = consumerId ? session.viewers?.get(consumerId)?.head ?? null : null;
+    const head = consumerId ? session.viewers?.get(consumerId)?.position ?? null : null;
     if (head) {
       return viewerPositionSource({
         seeked: head.seeked,
@@ -8090,7 +8278,7 @@ export class HlsSessionManager {
    * @returns {number}
    */
   #viewerPositionOf(session, consumerId = "") {
-    const head = consumerId ? session.viewers?.get(consumerId)?.head ?? null : null;
+    const head = consumerId ? session.viewers?.get(consumerId)?.position ?? null : null;
     if (head && Number.isFinite(head.seconds)) {
       return head.seconds;
     }
@@ -8459,6 +8647,13 @@ export class HlsSessionManager {
     }
     if (!variant) {
       return { sessionId: null };
+    }
+    if (consumerId && !isFamilyConsumerId(consumerId)) {
+      // The same circle as a soundtrack's: the init has to be made before a
+      // segment can be asked for, and nothing is made for an output nobody is
+      // watching. Asking for any of its files is watching it.
+      const watcher = this.viewers.of(variant, consumerId);
+      this.#placeViewer(variant, watcher, this.viewerPositionOf(baseSessionId, consumerId));
     }
     // Only a SEGMENT says the viewer is watching this rung — and it says more
     // than that: it names the exact segment the player wants from it.
@@ -8833,6 +9028,19 @@ export class HlsSessionManager {
       );
       return { sessionId: null, error: message };
     }
+    if (rendition && consumerId && !isFamilyConsumerId(consumerId)) {
+      // Asking for ANY file of this soundtrack is this viewer watching it, and
+      // the init is the file they ask for first. Registered here rather than on
+      // the segment alone, because the segment cannot be asked for until the
+      // init has been served, and the init cannot be made unless somebody is
+      // watching: that circle is what left a soundtrack with no encoder, no
+      // init and a viewer waiting sixty seconds on 2026-09-05.
+      //
+      // WHERE they are on it is where they are on the picture: the two are
+      // played together.
+      const listener = this.viewers.of(rendition, consumerId);
+      this.#placeViewer(rendition, listener, this.viewerPositionOf(base.id, consumerId));
+    }
     if (isSegment && rendition) {
       this.#noteAudioTrackActive(base, trackIndex, consumerId);
     }
@@ -8912,12 +9120,12 @@ export class HlsSessionManager {
    * @returns {Set<string>}
    */
   #liveConsumers(base) {
-    const staleAfterMs = (this.lookaheadSeconds + this.segmentDurationSec) * 1000;
+    const staleAfterMs = this.presenceStaleAfterMs();
     const now = Date.now();
     const live = new Set();
     for (const member of this.liveOutputs.familyOf(base)) {
       for (const [consumerId, viewer] of member.viewers ?? []) {
-        if (viewer.isLive(now, staleAfterMs)) {
+        if (viewer.isPresent(now, staleAfterMs)) {
           live.add(consumerId);
         }
       }
@@ -10383,6 +10591,39 @@ export class HlsSessionManager {
       updatedAt: session.progress.updatedAt,
       error: runStateOf(session) === ENCODE_RUN_STATE.ENDED_FAILED ? session.lastError : ""
     };
+  }
+
+  /**
+   * This person has gone, and their connection is what said so.
+   *
+   * Departure is a fact about the PERSON, not about one of the three outputs
+   * the browser happens to hold an id for, and their connection knows it before
+   * any output does. Until 2026-09-05 nothing carried it: the only exits were
+   * the browser's own `release`, which a killed tab never sends, and a silence
+   * long enough to be called an absence, which a paused viewer produces without
+   * having gone anywhere.
+   *
+   * Every output they were watching is told, and one with nobody left is
+   * disposed by the same path a normal release takes.
+   *
+   * @param {string} consumerId
+   * @param {string} [because]
+   * @returns {Promise<number>} How many outputs they were let go of.
+   */
+  async viewerHasGone(consumerId, because = "their connection closed") {
+    if (typeof consumerId !== "string" || consumerId.length === 0) {
+      return 0;
+    }
+    const watched = this.viewers.get(consumerId)?.outputs;
+    if (!watched || watched.size === 0) {
+      return 0;
+    }
+    // Copied before anything is released: releasing walks the same set.
+    const outputs = [...watched];
+    for (const outputId of outputs) {
+      await this.releaseSessionConsumer(outputId, consumerId, because);
+    }
+    return outputs.length;
   }
 
   /**

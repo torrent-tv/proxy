@@ -145,7 +145,7 @@ test("the viewer who made the request is the one it is judged against", async ()
   // one in front — it is the furthest segment anybody asked for — and the one
   // behind is a hundred segments back, waiting for a segment there.
   const behind = SEGMENT_AT_SEEK - 100;
-  viewerOf(session, "behind").head = {
+  viewerOf(session, "behind").position = {
     segment: behind,
     seconds: behind * SEGMENT_SECONDS,
     at: Date.now()
@@ -170,7 +170,7 @@ test("a seek moves the seeking viewer's own head, and nobody else's", async () =
   const session = manager.sessionsById.get(SESSION_ID);
   session.viewers = new Map();
   const staying = SEGMENT_AT_SEEK - 40;
-  viewerOf(session, "staying").head = {
+  viewerOf(session, "staying").position = {
     segment: staying,
     seconds: staying * SEGMENT_SECONDS,
     at: Date.now()

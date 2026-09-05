@@ -282,8 +282,8 @@ test("a seek backwards does not drag the picture away from a viewer watching ahe
   manager.sessionsById.set(shared.id, shared);
 
   // One viewer is at segment 250 and being served. The other jumps back an hour.
-  viewerOf(shared, "ahead").head = { segment: 250, seconds: 1000, at: Date.now() };
-  viewerOf(shared, "back").head = { segment: 250, seconds: 1000, at: Date.now() };
+  viewerOf(shared, "ahead").position = { segment: 250, seconds: 1000, at: Date.now() };
+  viewerOf(shared, "back").position = { segment: 250, seconds: 1000, at: Date.now() };
 
   const servingAhead = [...shared.runs][0];
   const startedAt = servingAhead.from;
@@ -325,7 +325,7 @@ test("a seek backwards with nobody else watching still moves the run", (t) => {
   alone.timeline = new Timeline({ boundaries: Array.from({ length: 1001 }, (_, index) => index * 4), cutGrid: "uniform" });
   alone.progress = { processedSeconds: 900, startPositionSeconds: 800 };
   manager.sessionsById.set(alone.id, alone);
-  viewerOf(alone, "only").head = { segment: 250, seconds: 1000, at: Date.now() };
+  viewerOf(alone, "only").position = { segment: 250, seconds: 1000, at: Date.now() };
 
   manager.requestSeek("alone", 40, "only");
 

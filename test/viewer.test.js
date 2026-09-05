@@ -18,25 +18,42 @@ import { Viewer, viewerOf, viewersOf } from "../services/viewer/Viewer.js";
 
 const SESSION_ID = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
 
-test("a viewer nobody has heard from is not watching", () => {
-  const viewer = new Viewer("someone");
+test("presence and position are two facts, and presence does not wait for a request", () => {
   const now = 1_000_000;
+  const viewer = new Viewer("someone", now);
 
-  assert.equal(viewer.isLive(now, 60_000), false, "no head at all: they have never asked");
-  viewer.head = { segment: 4, seconds: 16, at: now - 10_000 };
-  assert.equal(viewer.isLive(now, 60_000), true);
-  viewer.head = { segment: 4, seconds: 16, at: now - 120_000 };
-  assert.equal(viewer.isLive(now, 60_000), false, "the tab is gone and nothing released it");
+  // The whole of the 2026-09-05 failure in one assertion: a viewer who has
+  // arrived and asked for nothing yet IS watching. Answered from the position
+  // alone — which is written only when a segment is requested — this read
+  // false, every encoder on their output was stopped for having nobody, and
+  // the `init.mp4` they needed in order to request their first segment was
+  // therefore never made.
+  assert.equal(viewer.position, null, "nothing has placed them yet");
+  assert.equal(viewer.isPresent(now, 60_000), true, "and they are still here");
+
+  viewer.seen(now - 10_000);
+  assert.equal(viewer.isPresent(now, 60_000), true);
+
+  // Silence longer than any a watching viewer can produce. This is a backstop
+  // for a connection that failed to say so, not the ordinary way of leaving.
+  viewer.seen(now - 120_000);
+  assert.equal(viewer.isPresent(now, 60_000), false);
+
+  // Something SAID they are gone. Then it does not matter how recently they
+  // were heard from.
+  viewer.seen(now);
+  viewer.gone = true;
+  assert.equal(viewer.isPresent(now, 60_000), false, "a statement outranks silence");
 });
 
 test("a stated position outranks the segment they last asked for", () => {
   const viewer = new Viewer("someone");
   assert.equal(viewer.positionSeconds(), null);
 
-  viewer.head = { segment: 10, seconds: 40, at: 1 };
+  viewer.position = { segment: 10, seconds: 40, at: 1 };
   assert.equal(viewer.positionSeconds(), 40, "where their player is reading");
 
-  viewer.head = { segment: 10, seconds: 40, at: 1, seeked: 900 };
+  viewer.position = { segment: 10, seconds: 40, at: 1, seeked: 900 };
   assert.equal(viewer.positionSeconds(), 900, "a seek is the viewer saying where they are");
 });
 
@@ -80,7 +97,7 @@ test("releasing a consumer forgets everything that was true of them alone", asyn
   const leaving = viewerOf(session, "leaving");
   leaving.audio = { trackIndex: 2, transcode: true };
   leaving.activeVariantId = "some-variant";
-  leaving.head = { segment: 40, seconds: 160, at: Date.now() };
+  leaving.position = { segment: 40, seconds: 160, at: Date.now() };
   viewerOf(session, "staying").audio = { trackIndex: 0, transcode: false };
 
   await manager.releaseSessionConsumer(SESSION_ID, "leaving", "the tab was closed");

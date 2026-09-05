@@ -18,6 +18,23 @@
  *
  * One object, one map, one thing to remove.
  *
+ * **TWO INDEPENDENT FACTS, NOT ONE.** A viewer is somewhere, and a viewer is
+ * either still here or gone. Until 2026-09-05 both were answered by one field —
+ * the position, which is written only when a segment is requested — so a viewer
+ * who had just arrived counted as absent, and an output all of whose viewers
+ * count as absent has every encoder on it stopped. That is exactly what
+ * happened on 2026-09-05: a soundtrack's encoder was stopped 1.25 s after it
+ * started, having produced nothing, its `init.mp4` was therefore never made,
+ * and the picture could not be played without it. The browser could not rescue
+ * itself either, because the only thing that would have marked the viewer
+ * present was a request for a segment — which needs the `init.mp4` that the
+ * stopped encoder was going to make.
+ *
+ * So: **position is known from the moment a viewer arrives** — it is in the
+ * request that created the output, as a time on the source, and it is either
+ * zero or what the address bar carried. And **presence is a fact of the
+ * connection**, not of the last file asked for.
+ *
  * **Nothing here knows about ffmpeg, the disk or the torrent.** A viewer states
  * what they want and where they are; what to make of that is the orchestrator's
  * question, and it reads a union of viewers rather than any one of them.
@@ -27,8 +44,10 @@ export class Viewer {
   /**
    * @param {string} id - The consumer id the browser sends with every request
    *   that means "this viewer".
+   * @param {number} [now] - When they arrived. Presence starts here, so a
+   *   viewer counts as watching from the instant they are known.
    */
-  constructor(id) {
+  constructor(id, now = Date.now()) {
     this.id = String(id ?? "");
     /**
      * Which soundtrack this viewer is listening to and whether their browser
@@ -45,13 +64,43 @@ export class Viewer {
     /** A soundtrack being prepared for the same reason. @type {string | null} */
     this.warmingAudioId = null;
     /**
-     * Where they are: the segment they last asked for, or the position they
-     * stated by seeking. `seeked` holds the stated position for as long as they
-     * stay there, which is the distinction a cold open's soundtrack placement
-     * turns on.
-     * @type {{ segment: number, seconds: number, at: number, seeked?: number } | null}
+     * Where they are.
+     *
+     * Set when they arrive, from the position their own request named, and
+     * moved by the segments they ask for and by the seeks they report. Never
+     * null for a viewer this process has met: "we do not know where they are"
+     * is not a state a viewer can be in, because a viewer arrives by asking for
+     * a position.
+     *
+     * `seeked` holds a position they STATED, for as long as they stay there,
+     * which is the distinction a cold open's soundtrack placement turns on: a
+     * request is evidence about where their player is reading, a seek is the
+     * viewer saying where they are.
+     *
+     * @type {{ segment: number, seconds: number, at: number, seeked?: number | null } | null}
      */
-    this.head = null;
+    this.position = null;
+    /**
+     * When this viewer was last known to be there.
+     *
+     * Every piece of evidence refreshes it: a request of any kind, a link
+     * report, an echo of a delivery probe. It is NOT the position's timestamp —
+     * a viewer with a full buffer legitimately asks for nothing for a minute
+     * and is no less present for it.
+     *
+     * @type {number}
+     */
+    this.lastSeenAt = now;
+    /**
+     * Set when something has SAID this viewer is gone — the browser released
+     * the session, or their connection closed. Silence never sets it: a
+     * paused viewer, a viewer whose tab is hidden and whose timers the browser
+     * has throttled, and a viewer holding two minutes of buffer are all silent
+     * and all still watching.
+     *
+     * @type {boolean}
+     */
+    this.gone = false;
     /** What their link was last measured to carry. @type {object | null} */
     this.netReport = null;
     /**
@@ -79,31 +128,51 @@ export class Viewer {
   }
 
   /**
-   * Whether this viewer has been heard from recently enough to still be
-   * watching.
+   * Whether this viewer is still watching.
    *
-   * Nothing releases a session when a channel closes, so without this a viewer
-   * whose tab is gone would hold a soundtrack or a quality step for the whole
-   * life of the session.
+   * Two ways to stop being present, and neither of them is "asked for nothing
+   * recently". Something must have SAID they are gone, or nothing at all must
+   * have been heard from them for longer than any silence a watching viewer can
+   * produce.
+   *
+   * The second half exists only because the connection cannot always say: an
+   * `onClosed` on a data channel does not always come, and a transport that is
+   * not a data channel at all may have nothing to say. It is a backstop for a
+   * missing statement, not the ordinary way a viewer leaves.
    *
    * @param {number} now
-   * @param {number} staleAfterMs
+   * @param {number} staleAfterMs - Longer than any silence a watching viewer
+   *   can produce. Derived from the cushion, never chosen here.
    * @returns {boolean}
    */
-  isLive(now, staleAfterMs) {
-    return this.head !== null && now - this.head.at <= staleAfterMs;
+  isPresent(now, staleAfterMs) {
+    if (this.gone) {
+      return false;
+    }
+    return now - this.lastSeenAt <= staleAfterMs;
   }
 
   /**
-   * Where this viewer is, in seconds, or null when they have never said.
+   * Note that this viewer has been heard from.
+   *
+   * @param {number} [now]
+   * @returns {void}
+   */
+  seen(now = Date.now()) {
+    this.lastSeenAt = now;
+  }
+
+  /**
+   * Where this viewer is, in seconds, or null when they have somehow never been
+   * placed — which for a viewer created through `Viewers.of` cannot happen.
    *
    * @returns {number | null}
    */
   positionSeconds() {
-    if (this.head === null) {
+    if (this.position === null) {
       return null;
     }
-    return Number.isFinite(this.head.seeked) ? this.head.seeked : this.head.seconds;
+    return Number.isFinite(this.position.seeked) ? this.position.seeked : this.position.seconds;
   }
 }
 

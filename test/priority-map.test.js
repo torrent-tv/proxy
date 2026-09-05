@@ -10,77 +10,6 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { mapForViewer, mergeMaps, inWorkingOrder } from "../services/priority/PriorityMap.js";
 
-test("a viewer's own position is the most urgent thing there is", () => {
-  const map = mapForViewer({
-    atSeconds: 100,
-    durationSeconds: 1000,
-    allowanceSeconds: 8,
-    encodeSpeedX: 2
-  });
-
-  assert.equal(map[0].from, 100);
-  assert.equal(map[0].to, 108, "above realtime, only the measured allowance");
-  for (const zone of map.slice(1)) {
-    assert.ok(zone.priority < map[0].priority);
-  }
-});
-
-test("a machine that cannot keep up needs more encoders, not a longer first zone", () => {
-  // An encoder starting where the viewer stands stays ahead of them for
-  // `held x s / (1 - s)`, so the SLOWER the machine the shorter that is — and
-  // the film is held by more encoders rather than by one working further.
-  const slow = mapForViewer({
-    atSeconds: 0,
-    durationSeconds: 1000,
-    allowanceSeconds: 10,
-    encodeSpeedX: 0.25
-  });
-  const quicker = mapForViewer({
-    atSeconds: 0,
-    durationSeconds: 1000,
-    allowanceSeconds: 10,
-    encodeSpeedX: 0.5
-  });
-
-  assert.ok(
-    slow[0].to - slow[0].from < quicker[0].to - quicker[0].from,
-    "the slower machine holds the viewer for less"
-  );
-  assert.ok(slow.length > quicker.length, "so more encoders are needed to hold the film");
-});
-
-test("the first zone is exactly what one encoder can hold", () => {
-  // `held x s / (1 - s)`: ten seconds held at half speed is ten seconds held,
-  // and the encoder is caught exactly there. A longer first zone would stall
-  // the viewer inside it; a shorter one would start the next encoder nearer,
-  // where its own bound is tighter.
-  const map = mapForViewer({
-    atSeconds: 0,
-    durationSeconds: 100,
-    allowanceSeconds: 10,
-    encodeSpeedX: 0.5
-  });
-
-  assert.equal(map[0].to, 10);
-  assert.equal(map[1].to, 30, "the next holds three times as long, because they arrive later");
-  assert.equal(map[2].to, 70);
-});
-
-test("a viewer holding nothing is told the whole of it is urgent", () => {
-  // With nothing held, no partition holds them: the first encoder stays ahead
-  // for zero seconds. Slicing the film into equal slivers would pretend
-  // otherwise.
-  const map = mapForViewer({
-    atSeconds: 0,
-    durationSeconds: 1000,
-    allowanceSeconds: 0,
-    encodeSpeedX: 0.25
-  });
-
-  assert.equal(map.length, 1);
-  assert.equal(map[0].to, 1000);
-});
-
 test("the rest of the track is still wanted, and wanted last", () => {
   const map = mapForViewer({ atSeconds: 0, durationSeconds: 1000, allowanceSeconds: 4, encodeSpeedX: 2 });
 
@@ -91,12 +20,6 @@ test("the rest of the track is still wanted, and wanted last", () => {
     assert.equal(zone.from, previousEnd, "no gaps and no overlaps");
     previousEnd = zone.to;
   }
-});
-
-test("nothing is measured yet: the middle zone is left out rather than invented", () => {
-  const map = mapForViewer({ atSeconds: 0, durationSeconds: 100, allowanceSeconds: 4, encodeSpeedX: 0 });
-
-  assert.equal(map.length, 2, "what must be ready, and the rest");
 });
 
 test("two viewers merge to the highest priority per second, with no overlaps", () => {
@@ -136,4 +59,54 @@ test("within one priority the earliest film goes first — that is where somebod
   ]);
 
   assert.deepEqual(order.map((zone) => zone.from), [0, 100, 900]);
+});
+
+test("the nearer a viewer is to a second, the higher its number", () => {
+  // The number is a reading of how far they still have to travel, and nothing
+  // else. That is what makes two viewers comparable at all.
+  const map = mapForViewer({ atSeconds: 300, durationSeconds: 3000, allowanceSeconds: 10 });
+  const ahead = map.filter((zone) => zone.from >= 300);
+
+  assert.equal(ahead[0].from, 300, "it starts where they are");
+  assert.equal(ahead[0].to, 310, "and the first band is the measured allowance");
+  for (let index = 1; index < ahead.length; index += 1) {
+    assert.ok(ahead[index].priority < ahead[index - 1].priority, "further off is less urgent");
+  }
+});
+
+test("the bands widen, so any film is described by a handful of them", () => {
+  // Near the viewer the difference between now and ten seconds away decides
+  // what is made first; twenty minutes out it changes nothing.
+  const map = mapForViewer({ atSeconds: 0, durationSeconds: 3000, allowanceSeconds: 10 });
+
+  assert.ok(map.length <= 12, `a fifty-minute film in ${map.length} bands`);
+  assert.equal(map[0].to - map[0].from, 10);
+  assert.equal(map[1].to - map[1].from, 20);
+  assert.equal(map[2].to - map[2].from, 40);
+});
+
+test("what is behind a viewer is wanted, and wanted last", () => {
+  const map = mapForViewer({ atSeconds: 300, durationSeconds: 3000, allowanceSeconds: 10 });
+  const behind = map.find((zone) => zone.from === 0);
+
+  assert.ok(behind, "it is still in the map");
+  assert.equal(behind.to, 300);
+  assert.ok(
+    map.filter((zone) => zone.from >= 300).every((zone) => zone.priority > behind.priority),
+    "and everything anybody is approaching outranks it"
+  );
+});
+
+test("a viewer who has stopped the picture is going nowhere", () => {
+  // Nothing is nearer to them than anything else, so nothing in the film is
+  // wanted sooner than the rest — and the work goes to whoever is watching.
+  const map = mapForViewer({
+    atSeconds: 300,
+    durationSeconds: 3000,
+    allowanceSeconds: 10,
+    playing: false
+  });
+
+  assert.equal(map.length, 1);
+  assert.deepEqual({ from: map[0].from, to: map[0].to }, { from: 0, to: 3000 });
 });

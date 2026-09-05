@@ -53,133 +53,89 @@
  *   zones is meaningful; the numbers themselves are not a scale.
  */
 
-/** Where the viewer stands. Nothing outranks it. */
-const AT_THE_VIEWER = 33;
-
-/** In front of them, within reach while they watch what is already made. */
-const IN_FRONT = 32;
-
-/** The rest of the track: wanted, because the file is encoded whole. */
-const THE_REST = 1;
-
 /**
- * How many zones one viewer's map may hold.
+ * The number a stretch gets when nobody is heading towards it.
  *
- * Below realtime the zones grow geometrically, so their number is the logarithm
- * of the film left over what the viewer holds — five on the addon host's worst
- * measured case, and it grows by one each time the speed halves. The bound is
- * not a policy about how many encoders may run (the machine's budget answers
- * that, and it is far smaller); it stops a speed measured at almost zero from
- * turning a film into thousands of slivers before anything reads the map.
+ * Behind a viewer, and everywhere for a viewer who has stopped the picture: the
+ * film is still wanted — a seek back must be cheap — but nobody is on their way
+ * there, so it yields to everything anybody is approaching.
  */
-const MOST_ZONES = 32;
+const NOBODY_IS_COMING = 1;
 
 /**
- * One viewer's map, and every boundary in it is measured rather than chosen.
+ * The number the second a viewer is about to watch gets. Everything else ahead
+ * of them counts down from here.
  *
- * The shape depends on one measured number — how fast this machine encodes this
- * track against realtime:
+ * One scale for every viewer, because the maps are merged by taking the highest
+ * number per second: two viewers must be comparable, and they are, because the
+ * number depends only on how far each of them still has to travel.
+ */
+const AT_THE_VIEWER = 32;
+
+/**
+ * One viewer's map: seconds of film against a number, and nothing else.
  *
- * - **at or above realtime** the encoder gains on the viewer everywhere, so one
- *   of them holds the whole film. Three zones: the measured allowance in front
- *   of the viewer, what the encoder reaches while they watch it, and the rest;
- * - **below realtime** the encoder loses `1 - speed` of a second for every
- *   second played, so one cannot hold the film and the map says how many can.
- *   An encoder starting at `q` stays ahead of a viewer at `p` for
- *   `(q - p) * s / (1 - s)`, which GROWS with its distance from them — so the
- *   zones grow, each is one encoder's share, and their number is the smallest
- *   that holds this viewer.
+ * **The number is a reading of how soon they will be there.** A viewer moving
+ * forward reaches the second `x` after `x - p` seconds of film. That distance —
+ * not a clock time, not a deadline — is what the number is derived from, and it
+ * is why two viewers can be compared at all: the nearer one wins the second
+ * they both want.
  *
- * The last zone is always the rest of the track, wanted because the file is
- * encoded whole and last because nobody is waiting on it.
+ * **The bands widen as they go.** Near the viewer the difference between now
+ * and ten seconds away decides what is made first; twenty minutes out, the
+ * difference between twenty and twenty-one changes nothing. So the first band
+ * is the measured allowance — the depth below which an interruption reaches
+ * this viewer — and each next band is twice the last. A film of any length is
+ * then described by a handful of bands, fine where it matters.
+ *
+ * **What must NOT be here**, and the boundary is the point: how fast this
+ * machine encodes, how many encoders that takes, what a second weighs in bytes,
+ * where a piece boundary falls. Those are answers the encoding and the
+ * downloading work out for themselves, from this map and from what each knows
+ * about itself.
  *
  * @param {object} params
  * @param {number} params.atSeconds - Where they are watching from.
  * @param {number} params.durationSeconds - How long the film is.
  * @param {number} params.allowanceSeconds - The measured depth below which an
- *   interruption reaches this viewer (`minimumBufferSeconds`).
- * @param {number} params.encodeSpeedX - Measured encode speed against realtime
- *   for this track on this machine. Zero or less means nothing has measured it
- *   yet, and then zone 2 is left out rather than invented.
- * @returns {DemandZone[]} Ascending, without gaps or overlaps, covering
- *   everything from where they are to the end of the film.
+ *   interruption reaches this viewer. The width of the first band.
+ * @param {boolean} [params.playing] - Whether the picture is moving. A viewer
+ *   who has stopped it is going nowhere, so nothing is nearer to them than
+ *   anything else.
+ * @returns {DemandZone[]} Ascending by position, without gaps or overlaps.
  */
-export function mapForViewer({ atSeconds, durationSeconds, allowanceSeconds, encodeSpeedX }) {
+export function mapForViewer({ atSeconds, durationSeconds, allowanceSeconds, playing = true }) {
   const from = Number.isFinite(atSeconds) && atSeconds > 0 ? atSeconds : 0;
   const end = Number.isFinite(durationSeconds) ? durationSeconds : 0;
-  if (!(end > from)) {
+  if (!(end > 0)) {
     return [];
   }
   const allowance = Number.isFinite(allowanceSeconds) && allowanceSeconds > 0 ? allowanceSeconds : 0;
-  const speed = Number.isFinite(encodeSpeedX) && encodeSpeedX > 0 ? encodeSpeedX : 0;
+  if (!playing || allowance <= 0) {
+    // Nobody is on their way anywhere: the film is wanted and nothing in it is
+    // wanted sooner than the rest.
+    return [{ from: 0, to: end, priority: NOBODY_IS_COMING }];
+  }
 
   /** @type {DemandZone[]} */
   const zones = [];
-
-  // AT OR ABOVE REALTIME ONE ENCODER SUFFICES, whatever the film's length.
-  //
-  // From the condition below with `s >= 1`: the encoder gains on the viewer at
-  // every point, so there is no distance at which they catch it. All that has
-  // to exist in front of them is the allowance this file's own interruptions
-  // have shown to be necessary.
-  if (speed === 0 || speed >= 1) {
-    const readyBy = Math.min(end, from + allowance);
-    zones.push({ from, to: readyBy, priority: AT_THE_VIEWER });
-    if (readyBy < end && speed > 0) {
-      // While they watch what the first zone holds, the encoder makes `speed`
-      // times as much again. Beyond that nobody is waiting yet.
-      const reach = Math.min(end, readyBy + (readyBy - from) * speed);
-      if (reach > readyBy) {
-        zones.push({ from: readyBy, to: reach, priority: IN_FRONT });
-      }
-    }
-    const covered = zones[zones.length - 1].to;
-    if (covered < end) {
-      zones.push({ from: covered, to: end, priority: THE_REST });
-    }
-    return zones;
+  if (from > 0) {
+    zones.push({ from: 0, to: from, priority: NOBODY_IS_COMING });
   }
-
-  // BELOW REALTIME THE ZONES GROW, AND EACH IS ONE ENCODER'S SHARE.
-  //
-  // An encoder starting at `q` produces the point `q + y` after `y / s`, and the
-  // viewer reaches it after `q + y - p`. It stays ahead while
-  //
-  //     y <= (q - p) * s / (1 - s)
-  //
-  // so the length one encoder can hold GROWS with its distance from the viewer:
-  // the further off it starts, the later the viewer arrives. Equal shares are
-  // therefore the wrong division, and by a wide margin — on the addon host with
-  // 2400 s of film left, 120 s held and 0.5x, equal shares need twenty encoders
-  // and growing ones need five (120, 240, 480, 960, 1920).
-  //
-  // Each zone is exactly as long as its bound allows, which makes the count the
-  // smallest that can hold this viewer: any zone longer stalls them, and any
-  // shorter leaves the next one starting nearer, where its own bound is tighter.
-  // With nothing held, no partition holds this viewer: the first encoder can
-  // stay ahead for `b * s / (1 - s)`, and that is zero. Saying so plainly beats
-  // slicing the film into equal slivers that pretend otherwise — the whole of
-  // what is left is urgent, and it will still not be enough.
-  if (allowance <= 0) {
-    return [{ from, to: end, priority: AT_THE_VIEWER }];
-  }
-  const growth = speed / (1 - speed);
   let at = from;
-  let held = allowance;
+  let width = allowance;
   let priority = AT_THE_VIEWER;
-  while (at < end && zones.length < MOST_ZONES) {
-    const share = held * growth;
-    const to = Math.min(end, at + share);
+  while (at < end && priority > NOBODY_IS_COMING + 1) {
+    const to = Math.min(end, at + width);
     zones.push({ from: at, to, priority });
-    held += to - at;
     at = to;
-    // The next zone is one step less urgent: the viewer meets the one before it
-    // first. One scale for every viewer, or merging two maps would compare
-    // numbers that mean different things.
-    priority = Math.max(THE_REST + 1, priority - 1);
+    width *= 2;
+    priority -= 1;
   }
   if (at < end) {
-    zones.push({ from: at, to: end, priority: THE_REST });
+    // Everything left is equally far off: at this distance one more band would
+    // not change any decision.
+    zones.push({ from: at, to: end, priority: NOBODY_IS_COMING + 1 });
   }
   return zones;
 }

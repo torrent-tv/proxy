@@ -1,3 +1,7 @@
+## 2.80.0
+
+- **Fix**: The reading of usrsctp's own state is OFF unless `--usrsctp-state` is given, and its deadline is counted by a separate process. On 2026-09-05 a delivery probe declared a wedge that lasted half a second and cleared itself; the reading it triggered attached gdb to this process, which stops every one of its eighty threads for as long as it is attached. The log ended mid-second, `/healthz` stopped answering, and the viewer waited a minute and was told the proxy had sent no video. The fifteen-second guard could not fire — it was a timer inside the process gdb had stopped — and killing gdb left the main thread deadlocked for good, so only restarting the addon recovered it. A means of diagnosis may not stop the product: this one attaches to a live process and is triggered by a verdict with a known history of false positives, so it is switched on deliberately while somebody is watching, and `timeout` counts its seconds from outside.
+
 ## 2.79.0
 
 - **Fix**: Starting an encoder no longer stops another one. The line that did it looked for a live run whose own start was not below the new one's and killed it — a rule left from when a session held exactly one run and "the previous one" meant "the only one". Once a session could hold several, it began killing runs the plan had decided to keep: 294 stops for that reason in eight minutes of field 2026-09-05, against four starts a viewer had asked for. Who is stopped is decided in one place now, and starting is not it.

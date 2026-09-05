@@ -62,7 +62,7 @@ async function waitFor(check) {
   }
 }
 
-test("gdb is invoked attached to this process with the bundled script", async () => {
+test("the deadline is counted outside the process gdb stops", async () => {
   const { spawnProcess, calls } = makeSpawn("state=8 rwnd=95890\n");
   const lines = [];
   const reader = createUsrsctpStateReader({
@@ -74,7 +74,23 @@ test("gdb is invoked attached to this process with the bundled script", async ()
   assert.equal(started, true);
   await waitFor(() => lines.length > 0);
   assert.equal(calls.length, 1);
-  assert.deepEqual(calls[0].args, ["-q", "-batch", "-p", "4242", "-x", SCTPSTATE_SCRIPT_PATH]);
+  // `timeout` is a separate process, so it keeps counting while gdb holds every
+  // thread of this one. A `setTimeout` here cannot fire — measured in the field
+  // on 2026-09-05, where gdb held the proxy for four minutes and the guard set
+  // for fifteen seconds never ran.
+  assert.equal(calls[0].command, "timeout");
+  assert.deepEqual(calls[0].args, [
+    "-s",
+    "KILL",
+    "15",
+    "gdb",
+    "-q",
+    "-batch",
+    "-p",
+    "4242",
+    "-x",
+    SCTPSTATE_SCRIPT_PATH
+  ]);
   assert.match(lines[0], /state=8 rwnd=95890/);
   assert.match(lines[0], /test wedge/);
 });

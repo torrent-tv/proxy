@@ -17,9 +17,14 @@
  * only as long as someone remembers to copy it back after a container is
  * recreated.
  *
- * `gdb` attaching with ptrace pauses every thread of the process for the
- * duration of the read — one `getsockopt` call, measured at a fraction of a
- * second in the manual procedure this automates.
+ * **THIS STOPS THE PRODUCT WHILE IT WORKS, so it is off unless asked for.**
+ * `gdb` attaches with ptrace and pauses every thread of this process for as
+ * long as it is attached. The manual procedure this automates took a fraction
+ * of a second; on 2026-09-05 the automatic one held the proxy for four minutes
+ * and the viewer was told the proxy had sent no video. Two things follow, and
+ * both are in the code below: the deadline is counted by a separate process,
+ * because a timer inside a stopped process never fires; and `--usrsctp-state`
+ * has to be given for any of this to happen at all.
  */
 
 import { spawn } from "node:child_process";
@@ -91,9 +96,29 @@ export function createUsrsctpStateReader({
             resolve();
           };
           try {
+            // THE DEADLINE IS SET OUTSIDE THE PROCESS THAT IS BEING STOPPED.
+            //
+            // gdb attaches with ptrace and stops every thread of this process
+            // while it works — including whichever one would have counted the
+            // seconds. The guard below used to be a `setTimeout` here, and on
+            // 2026-09-05 it did not fire: gdb held the proxy for four minutes,
+            // the log ended mid-second and the viewer was told the proxy had
+            // sent no video. `timeout` is a separate process and keeps counting
+            // whatever happens to this one.
             child = spawnProcess(
-              "gdb",
-              ["-q", "-batch", "-p", String(pid), "-x", scriptPath],
+              "timeout",
+              [
+                "-s",
+                "KILL",
+                String(Math.ceil(GDB_TIMEOUT_MS / 1000)),
+                "gdb",
+                "-q",
+                "-batch",
+                "-p",
+                String(pid),
+                "-x",
+                scriptPath
+              ],
               { stdio: ["ignore", "pipe", "pipe"] }
             );
           } catch (error) {
@@ -112,13 +137,17 @@ export function createUsrsctpStateReader({
             finish();
           });
           child.on("close", finish);
+          // A second guard, for the case where `timeout` itself is not on the
+          // host: it can only fire while this process is running, which is
+          // exactly what cannot be relied on here, so it is a backstop and not
+          // the deadline.
           const killer = setTimeout(() => {
             try {
               child.kill("SIGKILL");
             } catch {
               // already gone
             }
-          }, GDB_TIMEOUT_MS);
+          }, GDB_TIMEOUT_MS * 2);
           if (typeof killer.unref === "function") {
             killer.unref();
           }

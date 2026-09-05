@@ -57,8 +57,6 @@
  * the film.
  */
 
-import { endOfRun } from "./EncodeRun.js";
-
 /**
  * One encoder that is running now.
  *
@@ -86,19 +84,6 @@ import { endOfRun } from "./EncodeRun.js";
  *   | { type: "stop", run: object, because: string }
  *   | { type: "keep", run: object, from: number, to: number }} PlanAction
  */
-
-/**
- * Whether a stretch and a window touch at all.
- *
- * @param {number} fromA
- * @param {number} toA
- * @param {number} fromB
- * @param {number} toB
- * @returns {boolean}
- */
-function overlaps(fromA, toA, fromB, toB) {
-  return fromA <= toB && fromB <= toA;
-}
 
 /**
  * Decide what to do with the encoders on one output.
@@ -157,14 +142,17 @@ export function planEncoders({
   const surviving = new Set();
 
   for (const run of live) {
-    // 1. Is anybody waiting for what this run was given? A run whose stretch
-    //    touches no window is making material nobody has asked for.
-    const stillWanted = wanted.some((span) => overlaps(run.from, endOfRun(run), span.from, span.to));
-    if (!stillWanted) {
-      stops.push({ type: "stop", run, because: "nothing it was given is wanted" });
-      continue;
-    }
-
+    // 1. A RUN IS NEVER STOPPED FOR STANDING OUTSIDE A WINDOW. While a file is
+    //    being encoded it is encoded whole; a viewer decides the ORDER the work
+    //    is taken in and, through the budget, how many processes take it.
+    //
+    //    This used to stop a run whose stretch touched no window, and that
+    //    decision contradicted the one below it: the run was placed by a search
+    //    the retention test did not accept, so it was killed on the pass after
+    //    it started and started again in the same place — 350-700ms per cycle in
+    //    the field on 2026-09-05, no segment ever produced, the viewer's picture
+    //    stopped for 125 seconds.
+    //
     // 2. Has it arrived at material that already exists, or that another run is
     //    making? Its own claim does not count against it.
     const coveredAhead = coverage.coveredRunFrom(run.head, run);
@@ -213,11 +201,15 @@ export function planEncoders({
     });
   }
 
-  // 3. Gaps somebody is waiting for that nobody is making. Taken in the order
-  //    the viewers meet them — the lowest first — because that is the one a
-  //    viewer is stopped at, and the budget may not stretch to all of them.
+  // 3. Gaps somebody is waiting for that nobody is making, IN THE ORDER THE
+  //    DEMAND MAP PUTS THEM: most urgent zone first, and within one zone the
+  //    lowest number, because that is where a viewer is stopped. The budget
+  //    rarely stretches to every gap, so which one is taken first is the whole
+  //    of what a viewer's presence decides.
   const gapsWanted = [];
-  for (const span of wanted) {
+  for (const span of [...wanted].sort(
+    (left, right) => (right.priority ?? 0) - (left.priority ?? 0) || left.from - right.from
+  )) {
     const gap = coverage.firstGapFrom(span.from, span.to);
     if (gap !== null) {
       gapsWanted.push(gap);
@@ -225,7 +217,7 @@ export function planEncoders({
   }
   const alreadyPlanned = new Set(moves.map((action) => /** @type {{from:number}} */ (action).from));
   const budget = Math.max(0, maxRuns - surviving.size);
-  for (const gap of [...new Set(gapsWanted)].sort((left, right) => left - right)) {
+  for (const gap of [...new Set(gapsWanted)]) {
     if (starts.length >= budget) {
       break;
     }

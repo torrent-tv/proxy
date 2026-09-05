@@ -176,7 +176,12 @@ test("every encoder stops when nobody is watching the output", () => {
   );
 });
 
-test("a run making material nobody asked for is stopped", () => {
+test("a run standing outside every window keeps working: the file is encoded whole", () => {
+  // The rule, stated by the user 2026-09-05: while a file is being encoded it
+  // is encoded whole, and a viewer decides the ORDER, not whether a run may
+  // live. Stopping a run for standing outside a window is what produced the
+  // field oscillation of that day — placed by one rule, killed by another,
+  // 350-700ms per cycle, nothing ever produced.
   const coverage = new CoverageMap({ segmentCount: 1000 });
   const runA = run({ from: 500, to: 600, head: 520 });
   coverage.claim(runA, 500, 600);
@@ -186,7 +191,44 @@ test("a run making material nobody asked for is stopped", () => {
     runs: [runA],
     ...HOST
   });
-  assert.ok(actions.some((action) => action.type === "stop" && action.run === runA));
+  assert.ok(
+    !actions.some((action) => action.type === "stop" && action.run === runA),
+    "it is making film that will be wanted, and nothing else is making it"
+  );
+});
+
+test("the same plan run twice on an unchanged state gives the same answer", () => {
+  // What the oscillation actually was: two passes over one state disagreeing
+  // with each other. Nothing about the state changes between them here.
+  const coverage = new CoverageMap({ segmentCount: 1000 });
+  const runA = run({ from: 500, to: 600, head: 520 });
+  coverage.claim(runA, 500, 600);
+  const input = { coverage, windows: [{ from: 0, to: 40 }], runs: [runA], ...HOST };
+
+  const first = planEncoders(input).map((action) => action.type);
+  const second = planEncoders(input).map((action) => action.type);
+
+  assert.deepEqual(first, second);
+  assert.ok(!first.includes("stop"), "and neither pass kills what the other would start");
+});
+
+test("a viewer's most urgent zone is filled before a less urgent one", () => {
+  const coverage = new CoverageMap({ segmentCount: 1000 });
+  const actions = planEncoders({
+    coverage,
+    // The far zone is lower in number and lower in priority: the order must
+    // come from the priority, not from the number.
+    windows: [
+      { from: 0, to: 100, priority: 1 },
+      { from: 500, to: 530, priority: 3 }
+    ],
+    runs: [],
+    ...HOST,
+    maxRuns: 1
+  });
+  const started = actions.filter((action) => action.type === "start").map((action) => action.from);
+
+  assert.deepEqual(started, [500], "the one machine goes where somebody is stopped");
 });
 
 test("two viewers far apart get an encoder each, when the machine can hold two", () => {

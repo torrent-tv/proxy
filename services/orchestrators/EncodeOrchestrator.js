@@ -201,9 +201,14 @@ export class EncodeOrchestrator {
         });
       }
     }
+    // Carrying the priority through, because the filling takes the work in that
+    // order: what a viewer must have before they set off comes before what is
+    // merely in front of them, which comes before the rest of the track. Passed
+    // as a plain number so the plan stays arithmetic.
     const windows = this.demand.windowsOn(address).map((window) => ({
       from: window.from,
-      to: window.to
+      to: window.to,
+      priority: Number(window.priority) || 0
     }));
     const live = this.runsOn(address).filter((run) => run.isAlive);
     const actions = planEncoders({

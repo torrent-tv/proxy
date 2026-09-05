@@ -259,6 +259,35 @@ export class SegmentStore {
   }
 
   /**
+   * A run is about to write these numbers again: forget that they were closed.
+   *
+   * A number closed once is not closed for ever. An encoder started at #N
+   * rewrites #N and everything after it, and while it is doing so the file
+   * under that name is half a segment — but the store remembered the earlier
+   * closing and would call it whole. Field 2026-09-05: seventeen runs were
+   * stopped and none ended normally, so numbers were being rewritten
+   * constantly, and the player met a fatal append error it never recovered
+   * from — an empty picture for the six minutes that followed.
+   *
+   * @param {string} key
+   * @param {number} from
+   */
+  forgetClosedFrom(key, from) {
+    const known = this.#closed.get(key);
+    if (!known || !Number.isInteger(from)) {
+      return;
+    }
+    for (const index of known) {
+      if (index >= from) {
+        known.delete(index);
+      }
+    }
+    // What the directory says has to be read again too: the successor rule
+    // would otherwise prove the rewritten piece from a file made before it.
+    this.#held.delete(key);
+  }
+
+  /**
    * Whether this piece is finished, and may therefore be served.
    *
    * Two proofs, and the first is the good one:

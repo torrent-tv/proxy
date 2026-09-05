@@ -233,12 +233,17 @@ export function planEncoders({
   //    rarely stretches to every gap, so which one is taken first is the whole
   //    of what a viewer's presence decides.
   const gapsWanted = [];
+  /** Where each gap's own zone ends, so the work it starts stops there. */
+  const zoneOf = new Map();
   for (const span of [...wanted].sort(
     (left, right) => (right.priority ?? 0) - (left.priority ?? 0) || left.from - right.from
   )) {
     const gap = coverage.firstGapFrom(span.from, span.to);
     if (gap !== null) {
       gapsWanted.push(gap);
+      if (!zoneOf.has(gap)) {
+        zoneOf.set(gap, span.to);
+      }
     }
   }
   const alreadyPlanned = new Set(moves.map((action) => /** @type {{from:number}} */ (action).from));
@@ -261,6 +266,34 @@ export function planEncoders({
       to: endOfStretch(gap, free),
       because: `#${gap} is wanted and nobody is making it`
     });
+  }
+
+  // ONE ENCODER'S WORK ENDS WHERE THE NEXT ONE'S BEGINS.
+  //
+  // A free stretch may run to the end of the track, and an encoder given all of
+  // it stands in the road of every encoder placed behind it: they write the
+  // same names, and each one's output is the other's "material somebody else
+  // made", so they stop one another. Field 2026-09-05: three encoders started
+  // on one track within 200 ms, each into the road another was already writing.
+  // Fifteen readers on a piece store that holds sixteen pieces followed, half
+  // of all evictions took a piece a reader had declared, and `/stream` began
+  // handing out bytes that were not the file's — twenty-two source-parse
+  // errors, a segment the player could not append, and an empty picture for six
+  // minutes.
+  //
+  // Bounded at the next start, the stretches cannot overlap however the zones
+  // move. Bounding them at a zone's own end was tried and is worse: a zone edge
+  // travels with the viewer, so every step forward leaves a sliver just past
+  // the previous encoder and buys an encoder for it.
+  const placed = [...moves, ...starts].sort(
+    (left, right) => /** @type {any} */ (left).from - /** @type {any} */ (right).from
+  );
+  for (let index = 0; index < placed.length - 1; index += 1) {
+    const here = /** @type {{ from: number, to: number }} */ (placed[index]);
+    const next = /** @type {{ from: number }} */ (placed[index + 1]);
+    if (here.to < 0 || here.to >= next.from) {
+      here.to = next.from - 1;
+    }
   }
 
   return [...stops, ...moves, ...starts, ...keeps];

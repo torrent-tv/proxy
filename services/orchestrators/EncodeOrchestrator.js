@@ -27,6 +27,7 @@ import { CoverageMap } from "../encode/CoverageMap.js";
 import { firstUnmetWant, planEncoders } from "../encode/EncodePlan.js";
 import { endOfRun } from "../encode/EncodeRun.js";
 import { ENCODE_EXIT } from "../encode/encode-exit.js";
+import { mergeMaps } from "../priority/PriorityMap.js";
 import { affordableRuns } from "../encode/run-budget.js";
 import { RunCosts } from "../encode/run-costs.js";
 import { SegmentDemand } from "../encode/SegmentDemand.js";
@@ -244,11 +245,28 @@ export class EncodeOrchestrator {
     // order: what a viewer must have before they set off comes before what is
     // merely in front of them, which comes before the rest of the track. Passed
     // as a plain number so the plan stays arithmetic.
-    const windows = this.demand.windowsOn(address).map((window) => ({
-      from: window.from,
-      to: window.to,
-      priority: Number(window.priority) || 0
-    }));
+    // ONE MAP, NOT ONE WINDOW PER VIEWER PER ZONE.
+    //
+    // Two viewers a few seconds apart state stretches that overlap, and the
+    // plan puts one encoder on each stretch it is given — so unmerged windows
+    // buy an encoder per viewer for film they both want, which is the opposite
+    // of what sharing the output is for. Merged, the highest number per segment
+    // wins and the stretches do not overlap, so one encoder serves everyone
+    // standing in front of it.
+    const windows = mergeMaps([
+      this.demand.windowsOn(address).map((window) => ({
+        from: window.from,
+        // Half-open on the way in and back again: these are whole segment
+        // numbers, and #10..#20 next to #21..#30 must not be read as touching
+        // at 20 and 21 at once.
+        to: window.to + 1,
+        // A window stated without a number is still a want — one
+        // undifferentiated want, which is what a caller that knows only a
+        // position states. Zero would read as "nothing wanted here" and the
+        // merge would drop it.
+        priority: Number(window.priority) || 1
+      }))
+    ]).map((zone) => ({ from: zone.from, to: zone.to - 1, priority: zone.priority }));
     const live = this.runsOn(address).filter((run) => run.isAlive);
     const actions = planEncoders({
       coverage,
@@ -325,6 +343,10 @@ export class EncodeOrchestrator {
     const onThisOutput = this.#runs.get(address) ?? [];
     onThisOutput.push(run);
     this.#runs.set(address, onThisOutput);
+    // This run rewrites everything from here on, so what was closed from here
+    // on is no longer closed. Without this a number closed by an earlier run
+    // stays servable while a later one is halfway through writing it again.
+    this.segmentStore?.forgetClosedFrom(address, from);
     this.coverageOf(address).claim(run, from, endOfRun({ from, to }));
     run.start(because);
   }

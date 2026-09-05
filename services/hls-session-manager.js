@@ -3710,7 +3710,7 @@ export class HlsSessionManager {
    * @returns {{from: number, to: number, priority: number}[]} In segment
    *   numbers, both ends inclusive.
    */
-  #demandZonesFor(session, atSeconds) {
+  #demandZonesFor(session, atSeconds, playing = true) {
     const boundaries = session.timeline?.boundaries ?? [];
     const segmentCount = Number(session.timeline?.segmentCount) || 0;
     // Where they are, in this output's own numbering. The viewer holds seconds;
@@ -3731,12 +3731,7 @@ export class HlsSessionManager {
         segmentSeconds: this.segmentDurationSec,
         worstSupplyWaitSec: session.supplyFigures?.worstWaitSec
       })?.seconds ?? this.segmentDurationSec,
-      // The slope between two progress reports, which is what this class
-      // measures everywhere else it prices an encode. `progress.speed` is
-      // ffmpeg's own cumulative figure and includes the run's start, so it
-      // reads low for the first seconds of every run; `recentSpeed` is the
-      // reading taken over a window and is the one the budget already trusts.
-      encodeSpeedX: Number(session.recentSpeed?.speed) || Number(session.progress?.speed) || 0
+      playing
     });
     /** @type {{from: number, to: number, priority: number}[]} */
     const inSegments = [];
@@ -3943,7 +3938,7 @@ export class HlsSessionManager {
           // consulted: the 120 seconds that used to size this window were the
           // suspended encoder's threshold, one chosen number answering seven
           // different questions.
-          for (const zone of this.#demandZonesFor(session, at)) {
+          for (const zone of this.#demandZonesFor(session, at, viewer.playing !== false)) {
             this.encodeOrchestrator.want({
               // The claimant is the PERSON, without the priority in it: their
               // zones are separate windows, but they leave together, and

@@ -252,3 +252,64 @@ test("with nothing declared there is no distance to report", () => {
     "a pinned piece is never a candidate, and says so without a distance"
   );
 });
+
+test("the least wanted piece goes, however recently it was touched", () => {
+  // Field 2026-09-05: fifteen reads declared fifteen windows on a store holding
+  // sixteen pieces, and with everything resident declared, eviction fell back
+  // to recency — 392 of 780 evictions took a piece a reader had said it wanted.
+  // Recency cannot separate them; the priority map's number can.
+  const lru = new PieceLru(3);
+  for (const index of [10, 20, 30]) {
+    lru.touch(index);
+  }
+  // 10 is the stalest, and the map wants it most: it is where a viewer is.
+  lru.protect("map:blocked", 10, 10, 0);
+  lru.protect("map:ahead", 20, 20, 2);
+  lru.protect("map:tail", 30, 30, 3);
+
+  const choice = lru.evictionChoice();
+  assert.equal(choice.index, 30, "eviction took the piece the map wants most");
+  assert.equal(choice.protectionYielded, true, "every resident piece was wanted, and it said so");
+});
+
+test("recency decides only between pieces the map wants equally", () => {
+  const lru = new PieceLru(3);
+  for (const index of [10, 20, 30]) {
+    lru.touch(index);
+  }
+  lru.protect("map:blocked", 10, 10, 0);
+  lru.protect("map:ahead", 20, 30, 2);
+
+  // 20 and 30 sit in one zone, so the stalest of the two goes.
+  assert.equal(lru.evictionCandidate(), 20);
+  lru.touch(20);
+  assert.equal(lru.evictionCandidate(), 30);
+});
+
+test("a piece no zone covers goes before any piece a zone covers", () => {
+  const lru = new PieceLru(4);
+  for (const index of [10, 20, 30, 40]) {
+    lru.touch(index);
+  }
+  // Only the last-touched piece is outside every zone — and it still goes
+  // first, because nobody has said they will read it.
+  lru.protect("map:tail", 10, 30, 4);
+
+  const choice = lru.evictionChoice();
+  assert.equal(choice.index, 40);
+  assert.equal(choice.protectionYielded, false, "nothing the map wanted was taken");
+});
+
+test("a claimant that states no number cannot displace one that did", () => {
+  const lru = new PieceLru(2);
+  lru.touch(10);
+  lru.touch(20);
+  lru.protect("map:tail", 10, 10, 4);
+  lru.protect("nameless", 20, 20);
+
+  assert.equal(
+    lru.evictionCandidate(),
+    20,
+    "a range with no stated number was treated as more wanted than the map's own"
+  );
+});

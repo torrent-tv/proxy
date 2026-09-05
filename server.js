@@ -172,6 +172,22 @@ export async function startProxyServer({
       }
       return torrentPool.getTorrentTotals();
     },
+    // The priority map, on its way to the downloading. It lives in another
+    // thread, so the map crosses the worker channel; what it does with it —
+    // seconds into bytes, what to ask the swarm for, what to keep in memory —
+    // is its own business.
+    setPriorityMap: async ({ sourceKey, fileIndex, durationSeconds, zones }) => {
+      const record = sourceRegistry.get(sourceKey);
+      if (!record) {
+        return;
+      }
+      try {
+        await torrentPool.setPriorityMap({ sourceKey, fileIndex, durationSeconds, zones });
+      } catch {
+        // Best effort: the map is republished on the next change, and the
+        // downloading goes on serving reads meanwhile.
+      }
+    },
     getSourceStats: async (sourceKey, fileIndex) => {
       const record = sourceRegistry.get(sourceKey);
       if (!record) {

@@ -17,7 +17,11 @@ import { logger } from "../utils/logger.js";
 import { SharedPieceStore, findSharedStore } from "./piece-store/shared-piece-store.js";
 import { Urgency } from "./demand/index.js";
 import { demandFor, forgetTorrent, reconcileAll } from "./download/registry.js";
+import { AT_THE_VIEWER, NOBODY_IS_COMING } from "./priority/PriorityMap.js";
 import { deriveSourceKey } from "./torrent-source-key.js";
+
+/** How a window stated from the priority map names itself. */
+const MAP_CLAIMANT = "priority-map";
 
 // The DHT's entry points. Two of the three the library ships answer nothing —
 // measured 2026-08-21 from the addon host: `router.bittorrent.com` and
@@ -989,6 +993,106 @@ export class TorrentPool {
         byteEnd,
         urgency: Urgency.TAIL
       });
+    }
+  }
+
+  /**
+   * Take the priority map for one file and state what to fetch from it.
+   *
+   * THE MAP IS THE ONLY SOURCE. What used to state demand here was the reads
+   * themselves: every read declared a window around its own head, so fifteen
+   * reads declared fifteen windows on a piece store that holds sixteen pieces —
+   * half of all evictions then took a piece a reader had said it wanted, two
+   * thirds of reads came back from disk, and the bytes handed out stopped being
+   * the file's (field 2026-09-05).
+   *
+   * Seconds become bytes here, because this is the side that knows how the file
+   * is laid out. The map never learns about bytes and the viewer never appears.
+   *
+   * @param {object} torrent
+   * @param {number} fileIndex
+   * @param {{ from: number, to: number, priority: number }[]} zones - Seconds of
+   *   film against a number, highest first in urgency.
+   * @param {number} durationSeconds
+   */
+  applyPriorityMap(torrent, fileIndex, zones, durationSeconds) {
+    const file = Array.isArray(torrent?.files) ? torrent.files[fileIndex] : null;
+    const length = Number(file?.length);
+    const duration = Number(durationSeconds);
+    if (!file || !(length > 0) || !(duration > 0) || !Array.isArray(zones)) {
+      return;
+    }
+    const { register } = demandFor(torrent);
+    // Highest number first, so the stretch a viewer reaches soonest is stated
+    // first and the rest fall in behind it.
+    const ordered = [...zones]
+      .filter((zone) => Number.isFinite(zone?.from) && Number.isFinite(zone?.to) && zone.to > zone.from)
+      .sort((left, right) => (right.priority ?? 0) - (left.priority ?? 0));
+    /**
+     * Which level of urgency one zone is stated at, from the map's own number
+     * and nothing else. The map's numbers are a scale as long as the film needs
+     * — ten bands on a fifty-minute film — while the register has five levels,
+     * and the fit is by meaning:
+     *
+     *  - the top of the scale is where a viewer is standing, so it is the
+     *    cushion being built: {@link Urgency.NEAR}. Never BLOCKED — that level
+     *    means a reader is stopped on those bytes right now, which only a read
+     *    can say;
+     *  - the bottom is what nobody is approaching: behind a viewer moving
+     *    forward, and the whole film of a viewer who has stopped the picture.
+     *    Wanted only if somebody seeks back, which is {@link Urgency.BEHIND};
+     *  - one above the bottom is the far tail — wanted for certain if the
+     *    viewer watches on, and not before: {@link Urgency.TAIL};
+     *  - everything between is the lead being built: {@link Urgency.AHEAD}.
+     *
+     * Read from the scale's own ends rather than from the highest and lowest
+     * number in THIS file's map. The two speculative levels are withheld across
+     * every torrent at once while anything urgent is missing anywhere, so a
+     * paused viewer's film has to compare as wanted-last against another film
+     * somebody is watching — and relative to itself alone it would compare as
+     * the most urgent thing there is.
+     *
+     * @param {{ priority?: number }} zone
+     * @returns {number}
+     */
+    const levelOf = (zone) => {
+      const priority = zone.priority ?? 0;
+      if (priority <= NOBODY_IS_COMING) {
+        return Urgency.BEHIND;
+      }
+      if (priority <= NOBODY_IS_COMING + 1) {
+        return Urgency.TAIL;
+      }
+      return priority >= AT_THE_VIEWER ? Urgency.NEAR : Urgency.AHEAD;
+    };
+    ordered.forEach((zone, index) => {
+      // A second of film sits at that fraction of the file. Constant bitrate is
+      // an approximation, and it is the only one available without an index of
+      // the container — near enough to say which stretch matters more, which is
+      // all this decides.
+      const byteStart = Math.max(0, Math.floor((zone.from / duration) * length));
+      const byteEnd = Math.min(length - 1, Math.ceil((zone.to / duration) * length) - 1);
+      if (byteEnd < byteStart) {
+        return;
+      }
+      register.state({
+        claimant: `${MAP_CLAIMANT}:${fileIndex}:${index}`,
+        fileIndex,
+        byteStart,
+        byteEnd,
+        urgency: levelOf(zone)
+      });
+    });
+    // Bands the map no longer has: a viewer moved on, and what they had wanted
+    // is not wanted by anybody now.
+    for (const window of register.windows()) {
+      if (!String(window.claimant).startsWith(`${MAP_CLAIMANT}:${fileIndex}:`)) {
+        continue;
+      }
+      const index = Number(String(window.claimant).split(":").pop());
+      if (!(index < ordered.length)) {
+        register.withdraw(window.claimant);
+      }
     }
   }
 

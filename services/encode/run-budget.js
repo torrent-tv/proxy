@@ -24,6 +24,14 @@
  *
  * Which of them bound the answer is returned beside it, because "why is there
  * only one encoder" is otherwise a question no log can answer.
+ *
+ * **Only the first is supplied today.** The two readings the others need are
+ * both in the torrent thread — what the swarm delivers against the film's own
+ * byte rate, and the store's allowance against what one reader keeps — and
+ * carrying them across is its own piece of work, deliberately not done here.
+ * Until it is, the swarm and the memory terms are inert: this returns what the
+ * processor allows, and says so. Stated rather than left to be discovered from
+ * a parameter nobody passes.
  */
 
 /**

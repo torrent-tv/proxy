@@ -60,7 +60,7 @@
  * film is still wanted — a seek back must be cheap — but nobody is on their way
  * there, so it yields to everything anybody is approaching.
  */
-const NOBODY_IS_COMING = 1;
+export const NOBODY_IS_COMING = 1;
 
 /**
  * The number the second a viewer is about to watch gets. Everything else ahead
@@ -70,7 +70,7 @@ const NOBODY_IS_COMING = 1;
  * number per second: two viewers must be comparable, and they are, because the
  * number depends only on how far each of them still has to travel.
  */
-const AT_THE_VIEWER = 32;
+export const AT_THE_VIEWER = 32;
 
 /**
  * One viewer's map: seconds of film against a number, and nothing else.

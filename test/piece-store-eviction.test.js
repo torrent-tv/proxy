@@ -489,3 +489,33 @@ test("a piece wanted later than the one it would displace goes to disk instead",
     await fs.rm(directory, { recursive: true, force: true });
   }
 });
+
+test("a piece the map wants more displaces one it wants less, however far away it is", async () => {
+  const capacity = 4;
+  const { store, directory } = await makeStore(capacity);
+  try {
+    // The store is full of the tail — wanted, but last of everything wanted.
+    store.protectRange("map:tail", 0, 3, 3);
+    for (let index = 0; index < capacity; index += 1) {
+      await put(store, index, pieceOf(index));
+    }
+    const before = store.stats().admittedToDisk;
+
+    // A piece arrives from far ahead in the file, so by distance to a read head
+    // it loses to everything resident — and it is where a viewer is stopped, so
+    // by the map it wins. The map decides; the distance separates only pieces
+    // the map wants equally.
+    store.protectRange("map:blocked", 90, 99, 0);
+    await put(store, 95, pieceOf(95));
+
+    assert.equal(
+      store.stats().admittedToDisk,
+      before,
+      "the piece a viewer is stopped on was written to disk to keep the tail in memory"
+    );
+    assert.ok((await get(store, 95)).equals(pieceOf(95)));
+  } finally {
+    store.destroy(() => undefined);
+    await fs.rm(directory, { recursive: true, force: true });
+  }
+});

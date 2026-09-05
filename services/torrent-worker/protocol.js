@@ -61,6 +61,16 @@ export const Command = {
   HELD_TORRENTS: "held-torrents",
   /** Reorder piece selection around a read position (seek prioritisation). */
   PRIORITIZE: "prioritize",
+  /**
+   * The priority map for one file: seconds of film against a number.
+   *
+   * What anybody wants and in what order, stated once by the side that knows
+   * where the viewers are. The download decides what to fetch and what to keep
+   * from this, instead of from the windows the reads themselves used to
+   * declare — fifteen reads declaring fifteen windows on a store that holds
+   * sixteen pieces is what tore a film apart on 2026-09-05.
+   */
+  PRIORITY_MAP: "priority-map",
   /** Read a byte range; the body arrives as CHUNK messages. */
   READ_RANGE: "read-range",
   /** Abandon an in-flight READ_RANGE (viewer gone, seek superseded). */

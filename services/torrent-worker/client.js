@@ -433,6 +433,26 @@ export class TorrentWorkerClient {
   }
 
   /**
+   * Hand the download the priority map for one file.
+   *
+   * Seconds of film against a number, and nothing else: what is wanted and in
+   * what order. Turning that into bytes, into pieces, and into what the swarm
+   * is asked for is the download's own business, and so is what it keeps in
+   * memory.
+   *
+   * @param {{ sourceKey: string, fileIndex: number, durationSeconds: number, zones: { from: number, to: number, priority: number }[] }} params
+   * @returns {Promise<void>}
+   */
+  async setPriorityMap({ sourceKey, fileIndex, zones, durationSeconds }) {
+    await this.#caller.call(Command.PRIORITY_MAP, {
+      sourceKey,
+      fileIndex,
+      zones,
+      durationSeconds
+    });
+  }
+
+  /**
    * Pre-fetch the head and tail the codec probe needs.
    *
    * @param {{ sourceKey: string, fileIndex: number, options?: { headBytes?: number, tailBytes?: number, timeoutMs?: number } }} params

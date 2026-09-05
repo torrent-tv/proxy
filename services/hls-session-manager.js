@@ -24,6 +24,7 @@ import { availableShareFrom } from "./available-share.js";
 import { contentionPenalty } from "./contention.js";
 import { minimumBufferFrom } from "./supply-margin.js";
 import { mapForViewer } from "./priority/PriorityMap.js";
+import { PriorityOrchestrator } from "./priority/PriorityOrchestrator.js";
 import { baseDrawFrom, costPerMegabyteFrom } from "./torrent-cost.js";
 import { medianOf, movedBeyondScatter, scatterOf } from "./learned-median.js";
 import {
@@ -1522,6 +1523,7 @@ export class HlsSessionManager {
     softwarePresetBenchmark = null,
     decodeCostModel = null,
     getSourceStats = null,
+    setPriorityMap = null,
     // What a second job costs on this host, measured at startup. Null when it
     // could not be measured, and then nothing is corrected — the alternative
     // is inventing a penalty, which is the same fault as inventing a fill rate.
@@ -1578,6 +1580,7 @@ export class HlsSessionManager {
     // realtime budget to tell a CPU limit from a download-starved input:
     // (sourceKey, fileIndex) => Promise<{ downloadSpeed, fileLength, fileProgress } | null>.
     this.getSourceStats = typeof getSourceStats === "function" ? getSourceStats : null;
+    this.setPriorityMap = typeof setPriorityMap === "function" ? setPriorityMap : null;
     this.contentionPenalties = contentionPenalties instanceof Map ? contentionPenalties : null;
     // Totals across every torrent this proxy holds, used to price what the
     // torrent itself costs the machine (item 7). Optional: a proxy wired
@@ -1668,6 +1671,21 @@ export class HlsSessionManager {
       runningEncoders: () => this.#runningEncoders(),
       encodersRunningNow: () => this.#encodersRunningNow(),
       torrentCostSecFor: (session) => this.#torrentCostSecFor(session)
+    });
+    // The priority map, built from where the viewers are and handed to both
+    // sides that act on it. The downloading lives in another thread, so its
+    // copy travels over the worker channel.
+    this.priority = new PriorityOrchestrator({
+      publish: ({ sourceKey, fileIndex, durationSeconds, zones }) => {
+        void Promise.resolve(
+          this.setPriorityMap?.({ sourceKey, fileIndex, durationSeconds, zones })
+        ).catch(() => {});
+      },
+      viewersOf: (session) => viewersOf(session),
+      allowanceFor: (session) => minimumBufferFrom({
+        segmentSeconds: this.segmentDurationSec,
+        worstSupplyWaitSec: session.supplyFigures?.worstWaitSec
+      })?.seconds ?? this.segmentDurationSec
     });
     this.encodeOrchestrator = new EncodeOrchestrator({
       maxRunsFor: (address) => this.maxRunsForOutput(address),
@@ -3953,6 +3971,10 @@ export class HlsSessionManager {
         }
       }
     }
+    this.priority.publishFor({
+      sessionGroups: byOutput.values(),
+      staleAfterMs: this.presenceStaleAfterMs()
+    });
     this.encodeOrchestrator.reconcile();
   }
 

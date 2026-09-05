@@ -85,6 +85,10 @@ program
   .option("--no-transcode-audio", "Disable optional HLS AAC audio transcoding")
   .option("--no-port-mapping", "Disable automatic UPnP/NAT-PMP port mapping")
   .option("--delivery-sink", "Serve /api/delivery-sink, a torrent-free byte stream for delivery testing")
+  .option(
+    "--usrsctp-state",
+    "Read usrsctp's association state with gdb when a wedge is declared. OFF by default: gdb attaches to THIS process and stops every thread of it while it works."
+  )
   .option("--max-disk-bytes <bytes>", "Cap total downloaded torrent data (0 = disabled; default min(10GB, half free disk))")
   .option("--memory-bytes <bytes>", "Per-torrent budget for pieces kept in memory before spilling to disk (default 512MB)")
   .option("--ffmpeg-bin <path>", "Path to ffmpeg binary")
@@ -345,7 +349,22 @@ try {
   // declared (roadmap item 11) — no source rebuild, the module ships
   // unstripped. A host without gdb just never gets a reading, the same way a
   // host without tcpdump never gets a packet capture.
-  usrsctpStateReader = createUsrsctpStateReader({ log: (message) => logger.info(message) });
+  // OFF UNLESS ASKED FOR, and the reason is a field incident rather than
+  // caution. On 2026-09-05 a delivery probe declared a wedge that lasted half a
+  // second and cleared itself; the reading it triggered attached gdb to this
+  // process, which stopped all eighty of its threads. The log ended mid-second,
+  // /healthz stopped answering, and the viewer waited a minute and was told the
+  // proxy had sent no video. The fifteen-second guard could not fire — it is a
+  // timer inside the process gdb had stopped — and killing gdb left the main
+  // thread deadlocked for good, so only restarting the addon recovered it.
+  //
+  // A means of diagnosis may not stop the product. This one attaches to a live
+  // process and is triggered by a verdict with a known history of false
+  // positives, so it is a thing to switch on deliberately while watching, not
+  // something that arms itself.
+  usrsctpStateReader = options.usrsctpState === true
+    ? createUsrsctpStateReader({ log: (message) => logger.info(message) })
+    : null;
 
   // What this process holds, once a minute. The kernel killed the proxy on
   // 2026-08-28 at 2.4 GB resident and the log had never said a word about

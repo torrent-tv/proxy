@@ -121,9 +121,13 @@ test("a covered stretch shorter than a restart is driven through instead", () =>
   assert.ok(actions.some((action) => action.type === "keep" && action.run === runA));
 });
 
-test("a run whose speed nothing has measured is moved rather than left driving through", () => {
-  // Not a default: driving through is work that is certainly wasted, and the
-  // restart is a known and small cost. What cannot be done is the comparison.
+test("a run whose speed nothing has measured is kept, not taken away", () => {
+  // Moving costs a known amount for an unknown gain, and a run nothing has
+  // measured has produced nothing yet — so taking its work away is certainly a
+  // loss and the comparison cannot be made. It used to answer the other way,
+  // and then every just-started run was moved the moment anything ahead of it
+  // was covered, which, once the film ahead had been made, was always: 684
+  // starts in 482 seconds in the field on 2026-09-05.
   const coverage = new CoverageMap({ segmentCount: 100 });
   const runA = run({ head: 10, speedX: 0 });
   coverage.claim(runA, 0, 100);
@@ -134,9 +138,55 @@ test("a run whose speed nothing has measured is moved rather than left driving t
     runs: [runA],
     ...HOST
   });
+  assert.equal(actions.some((action) => action.type === "move"), false);
+  assert.ok(actions.some((action) => action.type === "keep" && action.run === runA));
+});
+
+test("both sides of the move are counted, not just the encoder's own time", () => {
+  // Driving through costs this run's encode time AND the swarm the same bytes a
+  // second time; moving costs the death, the start and the wait for the first
+  // bytes. Here driving is dear enough to lose: 20 covered segments of 4 s at
+  // 1x is 80 s of encoding, against a move priced at 0.12 + 0.5 + 3 seconds.
+  const coverage = new CoverageMap({ segmentCount: 200 });
+  const runA = run({ head: 10, speedX: 1 });
+  coverage.claim(runA, 0, 200);
+  for (let at = 10; at < 30; at += 1) {
+    coverage.markReady(at);
+  }
+  const actions = planEncoders({
+    coverage,
+    windows: [{ from: 0, to: 190 }],
+    runs: [runA],
+    ...HOST,
+    killCostSec: 0.5,
+    firstByteWaitSec: 3,
+    refetchSecPerFilmSecond: 0.25
+  });
   const move = actions.find((action) => action.type === "move");
   assert.ok(move);
-  assert.match(move.because, /speed is not measured/);
+  assert.match(move.because, /refetch 20\.00s/);
+  assert.match(move.because, /against 3\.62s to move/);
+});
+
+test("a short covered stretch is driven through rather than paid a restart for", () => {
+  // One covered segment at 1x is 4 s of encoding plus 1 s of refetch, against a
+  // move priced at 0.12 + 0.5 + 30 seconds on a host where the first bytes are
+  // slow to come. The comparison, not a rule, decides it.
+  const coverage = new CoverageMap({ segmentCount: 200 });
+  const runA = run({ head: 10, speedX: 1 });
+  coverage.claim(runA, 0, 200);
+  coverage.markReady(10);
+  const actions = planEncoders({
+    coverage,
+    windows: [{ from: 0, to: 190 }],
+    runs: [runA],
+    ...HOST,
+    killCostSec: 0.5,
+    firstByteWaitSec: 30,
+    refetchSecPerFilmSecond: 0.25
+  });
+  assert.equal(actions.some((action) => action.type === "move"), false);
+  assert.ok(actions.some((action) => action.type === "keep" && action.run === runA));
 });
 
 test("a run with nothing left to make ahead of it is stopped", () => {

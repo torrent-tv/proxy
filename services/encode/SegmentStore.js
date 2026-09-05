@@ -39,6 +39,8 @@ import { rmSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
+import { discardOpenPiece } from "./open-piece.js";
+
 /** Where every output's segments live. One root for the process. */
 export const DEFAULT_STORE_ROOT = path.join(os.tmpdir(), "torrent-tv-hls");
 
@@ -275,6 +277,39 @@ export class SegmentStore {
       this.#closed.set(key, known);
     }
     known.add(index);
+  }
+
+  /**
+   * Throw away the piece a run had open when it ended, if it is unusable.
+   *
+   * The store owns this output's directory and knows how its files are named,
+   * so it is the one place that can answer which file a run left open. The
+   * judging of a NON-EMPTY file — does it carry every track it should — needs
+   * the output's init bytes and belongs to whoever holds them; passed in, and
+   * absent it only an empty file is removed, which is the case that caused this
+   * to be written (a run stopped 548 ms after starting left a zero-byte file
+   * whose name then read as a segment made).
+   *
+   * @param {string} key
+   * @param {{ from: number, to: number } | null} within - The run's own
+   *   numbers: several runs write into one directory, so the piece to discard
+   *   has to be looked for inside the stretch the ended run was given.
+   * @param {((raw: Buffer) => boolean) | null} [judgeUsable]
+   * @returns {Promise<number | null>} The segment number removed, or null.
+   */
+  async discardOpenPieceOf(key, within, judgeUsable = null) {
+    const format = this.#formats.get(key);
+    if (!format) {
+      return null;
+    }
+    const removed = await discardOpenPiece(this.directoryFor(key), format, within, judgeUsable);
+    if (removed !== null) {
+      this.#held.delete(key);
+      this.#logger?.info?.(
+        `segment store: discarded the open piece #${removed} of ${key.slice(0, 60)}`
+      );
+    }
+    return removed;
   }
 
   /**

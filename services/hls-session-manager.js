@@ -23,6 +23,7 @@ import { speedFromReadings } from "./encoder-readings.js";
 import { availableShareFrom } from "./available-share.js";
 import { contentionPenalty } from "./contention.js";
 import { minimumBufferFrom } from "./supply-margin.js";
+import { mapForViewer } from "./encode/DemandMap.js";
 import { baseDrawFrom, costPerMegabyteFrom } from "./torrent-cost.js";
 import { medianOf, movedBeyondScatter, scatterOf } from "./learned-median.js";
 import {
@@ -3771,6 +3772,60 @@ export class HlsSessionManager {
   }
 
   /**
+   * One viewer's demand map, translated into this output's segment numbers.
+   *
+   * The map itself is seconds of film and knows nothing about cut grids
+   * (`services/encode/DemandMap.js`). The translation is this output's own
+   * business, and it is exact: the timeline holds the boundaries.
+   *
+   * Two measurements feed it, and neither is chosen here:
+   *
+   * 1. the allowance below which an interruption reaches the viewer, from this
+   *    file's own recent interruptions (`minimumBufferFrom`). Null until the
+   *    reader has seen two of them, and then only the segment itself counts;
+   * 2. how fast this machine encodes THIS track, from ffmpeg's own progress.
+   *    Below realtime it decides how much has to exist before playback starts;
+   *    above it, nothing beyond the allowance is needed.
+   *
+   * @param {object} session
+   * @param {number} atSegment - Where the viewer is.
+   * @returns {{from: number, to: number, priority: number}[]} In segment
+   *   numbers, both ends inclusive.
+   */
+  #demandZonesFor(session, atSegment) {
+    const boundaries = session.timeline?.boundaries ?? [];
+    const segmentCount = Number(session.timeline?.segmentCount) || 0;
+    if (segmentCount <= 0) {
+      // No playlist yet: the only thing that can be said is that they want
+      // where they are.
+      return [{ from: atSegment, to: atSegment, priority: 3 }];
+    }
+    const durationSeconds = Number(boundaries[boundaries.length - 1]) ||
+      segmentCount * this.segmentDurationSec;
+    const zones = mapForViewer({
+      atSeconds: this.#segmentStartTime(session, atSegment),
+      durationSeconds,
+      allowanceSeconds: minimumBufferFrom({
+        segmentSeconds: this.segmentDurationSec,
+        worstSupplyWaitSec: session.supplyFigures?.worstWaitSec
+      })?.seconds ?? this.segmentDurationSec,
+      encodeSpeedX: Number(session.progress?.speedX) || 0
+    });
+    /** @type {{from: number, to: number, priority: number}[]} */
+    const inSegments = [];
+    for (const zone of zones) {
+      const from = Math.max(atSegment, this.#segmentIndexForTime(session, zone.from));
+      const to = Math.min(segmentCount - 1, this.#segmentIndexForTime(session, zone.to));
+      if (to >= from) {
+        inSegments.push({ from, to, priority: zone.priority });
+      }
+    }
+    return inSegments.length > 0
+      ? inSegments
+      : [{ from: atSegment, to: atSegment, priority: 3 }];
+  }
+
+  /**
    * Say what the cushion is, for every session.
    *
    * This is all that is left of `#enforceLookAhead`, which also SUSPENDED a run
@@ -3909,7 +3964,6 @@ export class HlsSessionManager {
       byOutput.set(address, [...(byOutput.get(address) ?? []), session]);
     }
     const staleAfterMs = this.presenceStaleAfterMs();
-    const lookaheadSegments = Math.ceil(this.lookaheadSeconds / this.segmentDurationSec);
     const now = Date.now();
     for (const [address, sessions] of byOutput) {
       const coverage = this.encodeOrchestrator.coverageOf(address);
@@ -3950,12 +4004,23 @@ export class HlsSessionManager {
           // this class; they want the beginning, which is where an output
           // starts when nobody says otherwise.
           const at = viewer.position?.segment ?? 0;
-          this.encodeOrchestrator.want({
-            claimant: `${session.id}:${consumerId}`,
-            address,
-            from: at,
-            to: at + lookaheadSegments
-          });
+          // Their own map, in seconds of film, from measurements: how much must
+          // be ready before they set off so that they never stop — the observed
+          // allowance for this file plus what an encoder at THIS machine's
+          // measured speed will fail to deliver in time — then what it reaches
+          // while they watch that, then the rest of the track. No constant is
+          // consulted: the 120 seconds that used to size this window were the
+          // suspended encoder's threshold, one chosen number answering seven
+          // different questions.
+          for (const zone of this.#demandZonesFor(session, at)) {
+            this.encodeOrchestrator.want({
+              claimant: `${session.id}:${consumerId}:${zone.priority}`,
+              address,
+              from: zone.from,
+              to: zone.to,
+              priority: zone.priority
+            });
+          }
         }
       }
     }

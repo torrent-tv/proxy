@@ -232,39 +232,23 @@ export function planEncoders({
   //    lowest number, because that is where a viewer is stopped. The budget
   //    rarely stretches to every gap, so which one is taken first is the whole
   //    of what a viewer's presence decides.
-  const gapsWanted = [];
-  /** Where each gap's own zone ends, so the work it starts stops there. */
-  const zoneOf = new Map();
-  for (const span of [...wanted].sort(
-    (left, right) => (right.priority ?? 0) - (left.priority ?? 0) || left.from - right.from
-  )) {
-    const gap = coverage.firstGapFrom(span.from, span.to);
-    if (gap !== null) {
-      gapsWanted.push(gap);
-      if (!zoneOf.has(gap)) {
-        zoneOf.set(gap, span.to);
-      }
-    }
-  }
-  const alreadyPlanned = new Set(moves.map((action) => /** @type {{from:number}} */ (action).from));
   const budget = Math.max(0, maxRuns - surviving.size);
-  for (const gap of [...new Set(gapsWanted)]) {
-    if (starts.length >= budget) {
-      break;
-    }
-    if (alreadyPlanned.has(gap)) {
+  const alreadyPlanned = new Set(moves.map((action) => /** @type {{from:number}} */ (action).from));
+  for (const from of placeEncoders({
+    coverage,
+    windows: wanted,
+    howMany: budget,
+    speedX: live.reduce((best, run) => Math.max(best, run.speedX || 0), 0)
+  })) {
+    if (alreadyPlanned.has(from)) {
       continue;
     }
-    const free = coverage.freeRunFrom(gap);
-    if (free === 0) {
-      continue;
-    }
-    alreadyPlanned.add(gap);
+    alreadyPlanned.add(from);
     starts.push({
       type: "start",
-      from: gap,
-      to: endOfStretch(gap, free),
-      because: `#${gap} is wanted and nobody is making it`
+      from,
+      to: endOfStretch(from, coverage.freeRunFrom(from)),
+      because: `#${from} is wanted and nobody is making it`
     });
   }
 
@@ -277,14 +261,11 @@ export function planEncoders({
   // on one track within 200 ms, each into the road another was already writing.
   // Fifteen readers on a piece store that holds sixteen pieces followed, half
   // of all evictions took a piece a reader had declared, and `/stream` began
-  // handing out bytes that were not the file's — twenty-two source-parse
-  // errors, a segment the player could not append, and an empty picture for six
-  // minutes.
+  // handing out bytes that were not the file's.
   //
-  // Bounded at the next start, the stretches cannot overlap however the zones
-  // move. Bounding them at a zone's own end was tried and is worse: a zone edge
-  // travels with the viewer, so every step forward leaves a sliver just past
-  // the previous encoder and buys an encoder for it.
+  // The bound is taken from the NEXT ENCODER'S START, not from a band edge: a
+  // band edge travels with the viewer, so every step forward would leave a
+  // sliver just past the previous encoder and buy an encoder for it.
   const placed = [...moves, ...starts].sort(
     (left, right) => /** @type {any} */ (left).from - /** @type {any} */ (right).from
   );
@@ -339,4 +320,118 @@ export function firstUnmetWant(coverage, windows) {
     }
   }
   return lowest;
+}
+
+/**
+ * Where to put the encoders this machine can afford.
+ *
+ * Two things are wanted of a division of the film, and they are wanted in this
+ * order:
+ *
+ * 1. **the viewer must not stop.** An encoder starting at `q` stays ahead of a
+ *    viewer at `p` while `y / s <= q + y - p`, so it holds `(q - p) * s / (1-s)`
+ *    of film and no more. Beyond that the viewer catches it, and the next
+ *    encoder has to be standing there. That is where the first ones go, and it
+ *    is why the stretches grow: the further off one starts, the later the
+ *    viewer arrives and the longer it may work;
+ * 2. **the film should be finished as soon as possible.** Once the viewer is
+ *    safe, whatever is left is divided EQUALLY between the encoders that
+ *    remain: equal shares finish together, and any other division finishes when
+ *    its longest share does. That is what makes seeking cheap — the film exists.
+ *
+ * At or above realtime the first requirement is met by one encoder for the
+ * whole film, and every other encoder goes to the second — which is the common
+ * case on a copied picture, and is why "one viewer, one encoder" was never the
+ * rule.
+ *
+ * @param {object} params
+ * @param {import("./CoverageMap.js").CoverageMap} params.coverage
+ * @param {WantedSpan[]} params.windows - The merged map, in this output's own
+ *   numbering. Its highest-numbered band starts where the viewer is.
+ * @param {number} params.howMany - What the machine affords.
+ * @param {number} params.speedX - Measured. Zero when nothing has measured it,
+ *   and then only the first requirement can be served.
+ * @returns {number[]} Where to start each encoder, ascending.
+ */
+export function placeEncoders({ coverage, windows, howMany, speedX }) {
+  if (!(howMany > 0) || windows.length === 0) {
+    return [];
+  }
+  const byUrgency = [...windows].sort(
+    (left, right) => (right.priority ?? 0) - (left.priority ?? 0) || left.from - right.from
+  );
+  const viewer = byUrgency[0].from;
+  const lastWanted = Math.max(...windows.map((span) => span.to));
+
+  /** @type {number[]} */
+  const places = [];
+  const take = (at) => {
+    const gap = coverage.firstGapFrom(at, lastWanted);
+    if (gap !== null && !places.includes(gap)) {
+      places.push(gap);
+    }
+    return gap;
+  };
+
+  // The first one goes where somebody is stopped.
+  let previous = take(viewer);
+  if (previous === null) {
+    // Nothing ahead is missing. Whatever is left anywhere is divided equally.
+    return divideEqually(coverage, byUrgency, howMany, places);
+  }
+
+  const growth = speedX > 0 && speedX < 1 ? speedX / (1 - speedX) : Number.POSITIVE_INFINITY;
+  while (places.length < howMany) {
+    const holds = (previous - viewer) * growth;
+    if (!Number.isFinite(holds) || previous + holds > lastWanted) {
+      // Either it keeps ahead for the rest of the film, or its guarantee runs
+      // past the end of what anybody wants. Nobody is in danger further on, so
+      // the encoders left over go to finishing the film sooner.
+      break;
+    }
+    const next = take(Math.ceil(previous + Math.max(1, holds)));
+    if (next === null || next <= previous) {
+      break;
+    }
+    previous = next;
+  }
+  return divideEqually(coverage, byUrgency, howMany, places);
+}
+
+/**
+ * Spread whatever encoders are left over the film that is still missing.
+ *
+ * Equal shares, because equal shares finish together: any other division is
+ * finished when its longest share is, which is later.
+ *
+ * @param {import("./CoverageMap.js").CoverageMap} coverage
+ * @param {WantedSpan[]} byUrgency
+ * @param {number} howMany
+ * @param {number[]} places
+ * @returns {number[]}
+ */
+function divideEqually(coverage, byUrgency, howMany, places) {
+  for (const span of byUrgency) {
+    if (places.length >= howMany) {
+      break;
+    }
+    const gap = coverage.firstGapFrom(span.from, span.to);
+    if (gap === null) {
+      continue;
+    }
+    // Where this band's missing film would be cut if the encoders left over
+    // shared it. One share per encoder, and the first share is the gap itself.
+    const left = howMany - places.length;
+    const width = Math.max(1, Math.floor((span.to - gap + 1) / left));
+    for (let at = gap; at <= span.to && places.length < howMany; at += width) {
+      const found = coverage.firstGapFrom(at, span.to);
+      if (found === null) {
+        break;
+      }
+      if (!places.includes(found)) {
+        places.push(found);
+      }
+    }
+  }
+  return [...places].sort((left, right) => left - right);
 }

@@ -3809,7 +3809,12 @@ export class HlsSessionManager {
         segmentSeconds: this.segmentDurationSec,
         worstSupplyWaitSec: session.supplyFigures?.worstWaitSec
       })?.seconds ?? this.segmentDurationSec,
-      encodeSpeedX: Number(session.progress?.speedX) || 0
+      // The slope between two progress reports, which is what this class
+      // measures everywhere else it prices an encode. `progress.speed` is
+      // ffmpeg's own cumulative figure and includes the run's start, so it
+      // reads low for the first seconds of every run; `recentSpeed` is the
+      // reading taken over a window and is the one the budget already trusts.
+      encodeSpeedX: Number(session.recentSpeed?.speed) || Number(session.progress?.speed) || 0
     });
     /** @type {{from: number, to: number, priority: number}[]} */
     const inSegments = [];
@@ -4014,7 +4019,10 @@ export class HlsSessionManager {
           // different questions.
           for (const zone of this.#demandZonesFor(session, at)) {
             this.encodeOrchestrator.want({
-              claimant: `${session.id}:${consumerId}:${zone.priority}`,
+              // The claimant is the PERSON, without the priority in it: their
+              // zones are separate windows, but they leave together, and
+              // `release` matches on this name.
+              claimant: `${session.id}:${consumerId}`,
               address,
               from: zone.from,
               to: zone.to,

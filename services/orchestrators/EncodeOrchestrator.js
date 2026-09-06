@@ -29,6 +29,7 @@ import { endOfRun } from "../encode/EncodeRun.js";
 import { ENCODE_EXIT } from "../encode/encode-exit.js";
 import { affordableRuns } from "../encode/run-budget.js";
 import { RunCosts } from "../encode/run-costs.js";
+import { contentionPenalty } from "../contention.js";
 import { SegmentDemand } from "../encode/SegmentDemand.js";
 
 export class EncodeOrchestrator {
@@ -64,7 +65,12 @@ export class EncodeOrchestrator {
    *   for a stretch. What to read, what to map and how to cut belong to whoever
    *   knows the source.
    * @param {number} params.segmentSeconds
-   * @param {number} params.restartCostSec - Measured: 0.12 s on the addon host.
+   * @param {import("../contention.js").ContentionPenalties | null}
+   *   [params.contentionPenalties] - How much slower one encoder runs beside
+   *   others, MEASURED on this host at startup and keyed by how many others
+   *   there are. Null until something has measured it, and then the penalty is
+   *   1 — a number invented here would be the same mistake as an invented
+   *   encoding speed.
    * @param {{ info: (line: string) => void, warn: (line: string) => void }} params.logger
    * @param {() => number} [params.now]
    */
@@ -72,9 +78,9 @@ export class EncodeOrchestrator {
     maxRunsFor,
     makeRun,
     segmentSeconds,
-    restartCostSec,
+    contentionPenalties = null,
     refetchSecPerFilmSecond = () => 0,
-    contentionPenaltyFor = () => 1,
+    startingSpeedFor = () => 0,
     segmentStore = null,
     logger,
     now
@@ -93,10 +99,14 @@ export class EncodeOrchestrator {
     this.refetchSecPerFilmSecond = refetchSecPerFilmSecond;
     // Measured per host: what a second encoder costs the first. Unmeasured is 1,
     // and then only the budget bounds how many there are.
-    this.contentionPenaltyFor = contentionPenaltyFor;
+    this.contentionPenalties = contentionPenalties instanceof Map ? contentionPenalties : null;
+    // WHAT THIS HOST ENCODES AT BEFORE ANY RUN HAS REPORTED. The startup
+    // benchmark measures it — a real pipeline over real clips, before a viewer
+    // exists — so the plan is never asked to compare arrivals with no speed to
+    // compute them from. Every run that then works refines it.
+    this.startingSpeedFor = startingSpeedFor;
     this.makeRun = makeRun;
     this.segmentSeconds = segmentSeconds;
-    this.restartCostSec = restartCostSec;
     this.logger = logger;
     this.now = typeof now === "function" ? now : Date.now;
   }
@@ -289,17 +299,29 @@ export class EncodeOrchestrator {
       runs: live,
       maxRuns: this.#affordableOn(address, live),
       segmentSeconds: this.segmentSeconds,
-      restartCostSec: this.restartCostSec,
-      // Measured from this host's own runs, rather than written into the code
-      // from one machine's reading.
+      // What a start and a kill cost, measured from this host's own runs rather
+      // than written into the code from one machine's reading. Zero until
+      // something has been measured, which is the same convention as the
+      // refetch price below and is stated so the bias is known.
       ...this.#costs.seconds(),
       // What a second of film costs to fetch again, in seconds of swarm time.
       // Answered by whoever measures the film's own byte rate and the swarm's;
       // zero until they have, which makes driving through look cheaper than it
       // is and is stated here so the bias is known.
       refetchSecPerFilmSecond: this.refetchSecPerFilmSecond(address),
-      // How much slower one encoder runs beside others, measured on this host.
-      contentionPenaltyFor: (others) => this.contentionPenaltyFor(others)
+      // How much slower one encoder runs beside others, read off this host's own
+      // startup measurement. A pure function over a measured table: beyond what
+      // was measured it holds the largest reading rather than continuing a curve
+      // nothing observed.
+      contentionPenaltyFor: (others) => contentionPenalty(others, this.contentionPenalties).penalty,
+      // The best figure this host has: what a run here is doing now, what one
+      // was last measured doing, or what the startup benchmark predicted. The
+      // first two are this output's own; the third exists before either.
+      speedX: Math.max(
+        live.reduce((best, run) => Math.max(best, run.speedX || 0), 0),
+        this.#lastSpeed.get(address) ?? 0,
+        this.startingSpeedFor(address) || 0
+      )
     });
 
     for (const action of actions) {
@@ -406,13 +428,24 @@ export class EncodeOrchestrator {
    */
   #affordableOn(address, live) {
     const byProcessor = Math.max(0, this.maxRunsFor(address));
-    const fastest = live.reduce((best, run) => Math.max(best, run.speedX || 0), 0);
+    // The best figure this host has: what a run here is doing now, what one was
+    // last measured doing, or what the startup benchmark predicted. The first
+    // two are this output's own; the third exists before either, so the budget
+    // is never asked to price encoders at a speed of zero.
+    const fastest = Math.max(
+      live.reduce((best, run) => Math.max(best, run.speedX || 0), 0),
+      this.#lastSpeed.get(address) ?? 0,
+      this.startingSpeedFor(address) || 0
+    );
     const budget = affordableRuns({
       byProcessor,
       speedX: fastest,
       refetchSecPerFilmSecond: this.refetchSecPerFilmSecond(address),
-      // How much slower one encoder runs beside others, measured on this host.
-      contentionPenaltyFor: (others) => this.contentionPenaltyFor(others)
+      // How much slower one encoder runs beside others, read off this host's own
+      // startup measurement. A pure function over a measured table: beyond what
+      // was measured it holds the largest reading rather than continuing a curve
+      // nothing observed.
+      contentionPenaltyFor: (others) => contentionPenalty(others, this.contentionPenalties).penalty
     });
     if (budget.runs !== byProcessor && budget.because !== this.#lastBudgetReason.get(address)) {
       this.#lastBudgetReason.set(address, budget.because);

@@ -15,6 +15,22 @@ import { EncodeRun } from "../services/encode/EncodeRun.js";
 import { ENCODE_EXIT } from "../services/encode/encode-exit.js";
 import { SoftwareEncoder } from "../services/encode/SoftwareEncoder.js";
 import { EncodeOrchestrator } from "../services/orchestrators/EncodeOrchestrator.js";
+import { contentionPenalty, penaltiesFrom } from "../services/contention.js";
+
+// WHAT A SECOND ENCODER COSTS THE FIRST — measured, never a formula.
+//
+// Addon host, 2026-09-03: 854x480 through libx264 `ultrafast` ran at 7.12x with
+// the machine to itself, and at 4.20x and 4.16x when two ran at once. The
+// penalty is read off that reading by the SAME two functions production uses,
+// so nothing here invents a shape: beyond what was measured the reading is held
+// rather than extrapolated.
+const MEASURED_PENALTIES = penaltiesFrom(7.12, [{ others: 1, speed: 4.18 }]);
+const penaltyFor = (others) => contentionPenalty(others, MEASURED_PENALTIES).penalty;
+
+// What a start and a stop cost, measured on the same host: a spawn with its
+// input open is 0.12 s there.
+const RUN_COSTS = { killCostSec: 0, firstByteWaitSec: 0.12 };
+
 
 const PICTURE = "torrent:abc:fmt=fmp4:grid=kf@0:video-only:v=0/copy";
 
@@ -55,6 +71,23 @@ function wants(made, zones) {
   })));
 }
 
+/**
+ * How many encoders are working the stretch a given number falls in.
+ *
+ * The count that matters for a viewer is not how many exist — what the machine
+ * has spare goes to finishing the file, which is what makes a seek back into a
+ * made part start at once — but how many are crowded onto one place.
+ *
+ * @param {EncodeOrchestrator} made
+ * @param {number} segment
+ */
+function onTheStretchOf(made, segment) {
+  return made.runsOn(PICTURE).filter((run) => {
+    const to = run.to < run.from ? Number.POSITIVE_INFINITY : run.to;
+    return run.from <= segment && segment <= to;
+  }).length;
+}
+
 function orchestrator({ maxRuns = 2 } = {}) {
   const lines = [];
   const processes = new Map();
@@ -63,13 +96,22 @@ function orchestrator({ maxRuns = 2 } = {}) {
   made = new EncodeOrchestrator({
     maxRunsFor: () => maxRuns,
     segmentSeconds: 4,
-    restartCostSec: 0.12,
+    ...RUN_COSTS,
     // A host that has measured what the swarm charges to fetch a second of film
     // again. Without it the drive-or-move comparison has only one side and the
     // plan keeps the encoder rather than paying an unknown price — which is its
     // own check in `encode-plan.test.js` rather than the shape every check here
     // is written against.
     refetchSecPerFilmSecond: () => 0.25,
+    // What this host was measured to encode at before any run reported —
+    // the startup benchmark, which exists before a viewer does.
+    startingSpeedFor: () => 2,
+    // What a second encoder costs the first, measured on the addon host
+    // 2026-09-03: 1.70x beside one other at 480p, 1.98x at 1080p. Sharing one
+    // machine is close to proportional, so this is the measured shape. Without
+    // it every extra process is free and the score always wants more of them —
+    // and fewer encoders can genuinely finish sooner.
+    contentionPenalties: MEASURED_PENALTIES,
     now: () => 1000,
     logger: { info: (line) => lines.push(line), warn: (line) => lines.push(line) },
     makeRun: ({ address, from, to }) => {
@@ -119,9 +161,8 @@ test("a viewer waiting gets an encoder at what they are waiting for", () => {
   wants(made, [{ from: 100, to: 130 }]);
   made.reconcile();
   const runs = made.runsOn(PICTURE);
-  assert.equal(runs.length, 1);
-  assert.equal(runs[0].from, 100, "where the viewer is stopped");
-  assert.equal(runs[0].to, 999, "and on to the end of the film, nothing being in the way");
+  assert.equal(onTheStretchOf(made, 100), 1, "one encoder where the viewer is stopped");
+  assert.ok(runs.some((run) => run.from === 100), "and it begins exactly there");
 });
 
 test("an encoder already working covers what it will reach in time", () => {
@@ -152,10 +193,15 @@ test("an encoder already working covers what it will reach in time", () => {
   assert.equal(made.runsOn(PICTURE)[0], first);
 });
 
-test("somebody stopped where no encoder can arrive in time gets one of their own", () => {
-  // The same arithmetic, the other way. Needed NOW, and the encoder that holds
-  // the road is 197 segments behind it: at 1x on four-second segments that is
-  // 788 seconds. Field 2026-09-06 is the case this describes.
+test("somebody stopped where no encoder can arrive in time is served, and the score says how", () => {
+  // The encoder that exists is 197 pieces behind them and would take 788 seconds
+  // to arrive. What serves them soonest is the question, and on a machine where
+  // a second encoder costs the first half its speed the answer is to bring this
+  // one — two of them, each at half, deliver the piece later than one at full.
+  //
+  // Nobody is watching where it stood, so nothing is lost by moving it. That the
+  // film there goes unmade is the third of the three counts, and the first —
+  // seconds anybody spends looking at a spinner — outranks it.
   const { made, buildRun } = orchestrator();
   const first = buildRun({ from: 0, to: -1 });
   first.start("a viewer needs it");
@@ -168,18 +214,9 @@ test("somebody stopped where no encoder can arrive in time gets one of their own
   wants(made, [{ from: 200, to: 230, withinSeconds: 0 }]);
   made.reconcile();
 
-  const runs = made.runsOn(PICTURE);
-  assert.equal(runs.length, 2, "the one waiting got an encoder");
-  assert.ok(runs.some((run) => run.from === 200), "placed exactly where it is needed");
-  // The work in front continues, and it now has an end where the other begins.
-  // It is a fresh process because where a run stops is fixed when its own starts:
-  // one given no end carries no `-to` and would open the contested file however
-  // the plan bounds it afterwards. So the viewer in front pays a restart in
-  // place — a price the score now counts — rather than the two of them writing
-  // one name.
-  const ahead = runs.find((one) => one.from === 3);
-  assert.ok(ahead, "the work in front continues from where it stood");
-  assert.equal(ahead.to, 199, "and now ends where the other one begins");
+  assert.equal(made.coverageOf(PICTURE).stateOf(200), "making",
+    "somebody is making what the viewer is waiting for");
+  assert.equal(onTheStretchOf(made, 200), 1, "and one encoder is on it, not a crowd");
 });
 
 test("two encoders on one output never share a segment number", () => {
@@ -211,20 +248,28 @@ test("a second viewer at the same place starts nothing more", () => {
   made.reconcile();
   wants(made, [{ from: 102, to: 132 }]);
   made.reconcile();
-  assert.equal(made.runsOn(PICTURE).length, 1);
+  assert.equal(onTheStretchOf(made, 102), 1, "the same encoder serves them both");
 });
 
-test("a second viewer far behind gets an encoder of their own", () => {
-  // Nobody is dragged: the run in front keeps its stretch and goes on making it.
+test("a second viewer far behind is served, at whatever the score says is soonest", () => {
+  // They may get an encoder of their own, or the one in front may come back to
+  // them — which is better depends on what a second process costs this machine,
+  // and that is measured. What must hold is that somebody is making what they
+  // are waiting for.
   const { made } = orchestrator();
-  wants(made, [{ from: 500, to: 530 }]);
+  wants(made, [{ from: 500, to: 530, withinSeconds: 0 }]);
   made.reconcile();
-  wants(made, [{ from: 100, to: 130 }]);
+  for (const run of made.runsOn(PICTURE)) {
+    run.noteSpeed(2);
+  }
+  wants(made, [
+    { from: 500, to: 530, withinSeconds: 0 },
+    { from: 100, to: 130, withinSeconds: 0 }
+  ]);
   made.reconcile();
-  const spans = made.runsOn(PICTURE).map((run) => [run.from, run.to]);
-  assert.equal(spans.length, 2);
-  assert.ok(spans.some(([from]) => from === 500), "the one in front is untouched");
-  assert.ok(spans.some(([from]) => from === 100), "the one behind got its own");
+
+  assert.equal(made.coverageOf(PICTURE).stateOf(100), "making", "the one behind is served");
+  assert.ok(made.runsOn(PICTURE).length <= 2, "and never more than the machine holds");
 });
 
 test("a machine that can afford one encoder does not start a second", () => {
@@ -252,8 +297,8 @@ test("segments left by a previous life of this process are used, not remade", ()
   wants(made, [{ from: 100, to: 110 }]);
   made.reconcile();
   const runs = made.runsOn(PICTURE);
-  assert.equal(runs.length, 1);
-  assert.equal(runs[0].from, 103, "it starts at the first thing missing");
+  assert.ok(runs.some((run) => run.from === 103), "it starts at the first thing missing");
+  assert.equal(onTheStretchOf(made, 103), 1, "and one encoder is enough for it");
 });
 
 test("a viewer who leaves takes the encoder with them", () => {

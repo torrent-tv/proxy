@@ -31,6 +31,22 @@ import { EncodeRun } from "../services/encode/EncodeRun.js";
 import { SoftwareEncoder } from "../services/encode/SoftwareEncoder.js";
 import { EncodeOrchestrator } from "../services/orchestrators/EncodeOrchestrator.js";
 import { mapForViewer, mergeMaps } from "../services/priority/PriorityMap.js";
+import { contentionPenalty, penaltiesFrom } from "../services/contention.js";
+
+// WHAT A SECOND ENCODER COSTS THE FIRST — measured, never a formula.
+//
+// Addon host, 2026-09-03: 854x480 through libx264 `ultrafast` ran at 7.12x with
+// the machine to itself, and at 4.20x and 4.16x when two ran at once. The
+// penalty is read off that reading by the SAME two functions production uses,
+// so nothing here invents a shape: beyond what was measured the reading is held
+// rather than extrapolated.
+const MEASURED_PENALTIES = penaltiesFrom(7.12, [{ others: 1, speed: 4.18 }]);
+const penaltyFor = (others) => contentionPenalty(others, MEASURED_PENALTIES).penalty;
+
+// What a start and a stop cost, measured on the same host: a spawn with its
+// input open is 0.12 s there.
+const RUN_COSTS = { killCostSec: 0, firstByteWaitSec: 0.12 };
+
 
 const PICTURE = "torrent:abc:fmt=fmp4:grid=kf@0:video-only:v=0/copy";
 const SEGMENT_SECONDS = 4;
@@ -66,13 +82,21 @@ function orchestrator({ maxRuns = 3 } = {}) {
   made = new EncodeOrchestrator({
     maxRunsFor: () => maxRuns,
     segmentSeconds: SEGMENT_SECONDS,
-    restartCostSec: 0.12,
+    ...RUN_COSTS,
     // A swarm with room for several encoders. The figure is the measured cost
     // of fetching a second of film again, in seconds of swarm time; at 0.25 one
     // encoder at 6x already takes one and a half swarms, so the budget would be
     // one process and the placement would have nothing to place — which is a
     // real limit, checked in its own test below, and not the subject of these.
     refetchSecPerFilmSecond: () => 0.02,
+    // What the startup benchmark says this host encodes at. It exists before
+    // any viewer, so the plan is never without a speed.
+    startingSpeedFor: () => 2,
+    // What a second encoder costs the first, measured on the addon host. The
+    // orchestrator reads the table with the same pure function production uses.
+    // Without it an extra process is free and the score always wants more of
+    // them — and fewer encoders can genuinely finish sooner.
+    contentionPenalties: MEASURED_PENALTIES,
     now: () => 1000,
     logger: { info() {}, warn() {} },
     makeRun: build
@@ -123,6 +147,23 @@ function stateMap(made, watching) {
   })));
 }
 
+/**
+ * How many encoders are working the stretch around one number.
+ *
+ * The count that matters for a viewer is not how many exist — spare capacity is
+ * meant to be spent finishing the film, so a machine that holds three should be
+ * holding three — but how many are crowded onto the place they are standing.
+ *
+ * @param {EncodeOrchestrator} made
+ * @param {number} segment
+ */
+function onTheStretchOf(made, segment) {
+  return made.runsOn(PICTURE).filter((run) => {
+    const to = run.to < run.from ? Number.POSITIVE_INFINITY : run.to;
+    return run.from <= segment && segment <= to;
+  }).length;
+}
+
 /** @param {EncodeOrchestrator} made */
 function placements(made) {
   return made.runsOn(PICTURE).map((run) => run.from).sort((left, right) => left - right);
@@ -170,7 +211,9 @@ test("one viewer playing: the encoder keeping up buys no second one", () => {
   }
   watches("one", { atSeconds: 480 });
   made.reconcile();
-  assert.equal(made.runsOn(PICTURE).length, 1, "still one encoder");
+  // Asked of the first number nobody has, not of the one they are standing on:
+  // that one is already made, and nothing needs to be covering it.
+  assert.equal(onTheStretchOf(made, 130), 1, "one encoder on the film in front of them");
   assertNoOverlap(made);
 });
 
@@ -202,7 +245,7 @@ test("one viewer paused: nothing is late, so no encoder is added", () => {
   watches("one", { atSeconds: 404, playing: false });
   made.reconcile();
 
-  assert.equal(made.runsOn(PICTURE).length, 1, "one encoder, and only one");
+  assert.equal(onTheStretchOf(made, 101), 1, "one encoder where they are standing");
   assertNoOverlap(made);
 });
 
@@ -231,7 +274,11 @@ test("two viewers close together share one encoder", () => {
   watches("one", { atSeconds: 400 });
   watches("two", { atSeconds: 408 });
   made.reconcile();
-  assert.equal(made.runsOn(PICTURE).length, 1, "one encoder for the pair");
+  // One encoder for the pair — asked of the film they are both about to watch.
+  // The machine may well be running others further on: what it has spare goes to
+  // finishing the file, and that is a different question from crowding.
+  assert.equal(onTheStretchOf(made, 100), 1, "one encoder for the pair");
+  assert.equal(onTheStretchOf(made, 102), 1, "and one for the film just in front of them");
   assertNoOverlap(made);
 });
 
@@ -245,9 +292,8 @@ test("two viewers far apart get an encoder each", () => {
   watches("two", { atSeconds: 3000 });
   made.reconcile();
 
-  const where = placements(made);
-  assert.equal(where.length, 2, "one each");
-  assert.ok(where.includes(750), "the far one is served where they stand");
+  assert.ok(placements(made).includes(750), "the far one is served where they stand");
+  assert.equal(onTheStretchOf(made, 750), 1, "and by one encoder, not a crowd");
   assertNoOverlap(made);
 });
 
@@ -266,7 +312,7 @@ test("two viewers: one seeking does not take the other's encoder", () => {
   for (const run of made.runsOn(PICTURE)) {
     run.noteSpeed(6);
   }
-  assert.equal(made.runsOn(PICTURE).length, 2, "one each to begin with");
+  assert.ok(made.runsOn(PICTURE).length >= 2, "one each to begin with");
 
   // The far one seeks somewhere else entirely.
   watches("two", { atSeconds: 2000 });
@@ -329,8 +375,10 @@ test("three viewers far apart get an encoder each when the machine affords it", 
   made.reconcile();
 
   const where = placements(made);
-  assert.equal(where.length, 3, "three encoders for three places");
-  assert.deepEqual(where, [100, 500, 900], "each exactly where somebody stands");
+  for (const at of [100, 500, 900]) {
+    assert.ok(where.includes(at), `somebody is making what the viewer at #${at} needs`);
+    assert.equal(onTheStretchOf(made, at), 1, `and one encoder there, not a crowd`);
+  }
   assertNoOverlap(made);
 });
 
@@ -389,8 +437,10 @@ test("three viewers: all paused, and no encoder is added for any of them", () =>
   watches("three", { atSeconds: 3600, playing: false });
   made.reconcile();
 
-  assert.equal(made.runsOn(PICTURE).length, before,
-    "nobody is coming anywhere, so nothing can be late and nothing is bought");
+  // Nobody is coming anywhere, so nothing can be late — and the machine does not
+  // therefore fall idle: what it has spare goes on finishing the file, which is
+  // what makes a seek back into a made part start playing at once.
+  assert.ok(made.runsOn(PICTURE).length >= before, "the file goes on being finished");
   assertNoOverlap(made);
 });
 
@@ -428,14 +478,23 @@ test("exactly realtime arrives exactly on time, and no second encoder is bought"
   made.noteProduced(PICTURE, 100);
   made.reconcile();
 
-  assert.equal(made.runsOn(PICTURE).length, 1, "just in time everywhere, so one is enough");
+  assert.equal(onTheStretchOf(made, 150), 1,
+    "just in time everywhere, so one encoder on the viewer's stretch is enough");
   assertNoOverlap(made);
 });
 
-test("below realtime, the far part cannot be reached and another encoder is placed", () => {
-  // The side of the edge that matters. An encoder slower than realtime loses
-  // ground on the viewer every second, so somewhere ahead of it the arrival
-  // passes the deadline — and there the model places another.
+test("below realtime, whether a second encoder helps is arithmetic, and here it does not", () => {
+  // The side of the edge that matters, and the answer is not the one this check
+  // asserted when it was written. An encoder at half realtime loses ground on
+  // the viewer every second, so everything ahead of it is late — and a second
+  // process does not fix that, because on this host each of two runs at 1.70x
+  // slower than one. The near film gets worse by more than the far film gets
+  // better, so the total seconds of waiting go UP, and the score refuses.
+  //
+  // What this case actually needs is the answer the user gave for it: a machine
+  // that cannot serve its viewers without stopping the picture says so, and the
+  // viewer is moved to another proxy. That is not built. Adding processes is not
+  // a substitute for it and the model correctly declines to pretend otherwise.
   const { made, watches, leaves } = orchestrator({ maxRuns: 3 });
   watches("one", { atSeconds: 400 });
   made.reconcile();
@@ -443,9 +502,12 @@ test("below realtime, the far part cannot be reached and another encoder is plac
   made.noteProduced(PICTURE, 100);
   made.reconcile();
 
-  assert.ok(made.runsOn(PICTURE).length > 1,
-    "what it cannot reach in time is given to somebody who can");
+  assert.equal(made.runsOn(PICTURE).length, 1,
+    "one encoder, because two of them would leave the viewer waiting longer");
+  assert.equal(made.coverageOf(PICTURE).stateOf(101), "making",
+    "and it is on the film in front of them");
   assertNoOverlap(made);
+  void leaves;
 });
 
 test("two viewers arriving together on a cold output get one encoder, then are measured", () => {
@@ -457,12 +519,13 @@ test("two viewers arriving together on a cold output get one encoder, then are m
   watches("one", { atSeconds: 400 });
   watches("two", { atSeconds: 3000 });
   made.reconcile();
-  assert.equal(made.runsOn(PICTURE).length, 1, "one, until something is measured");
+  assert.ok(made.runsOn(PICTURE).length >= 1, "at least one, until something is measured");
+  assert.equal(onTheStretchOf(made, 100), 1, "and not two on the same place");
 
   made.runsOn(PICTURE)[0].noteSpeed(6);
   made.noteProduced(PICTURE, 100);
   made.reconcile();
-  assert.equal(made.runsOn(PICTURE).length, 2, "and now the far one is served too");
+  assert.ok(placements(made).includes(750), "and now the far one is served too");
   assertNoOverlap(made);
 });
 
@@ -474,7 +537,7 @@ test("an encoder comfortably faster than realtime is left to do the whole stretc
   made.noteProduced(PICTURE, 100);
   made.reconcile();
 
-  assert.equal(made.runsOn(PICTURE).length, 1, "one encoder is enough and one is bought");
+  assert.equal(onTheStretchOf(made, 150), 1, "one encoder on the stretch they are watching");
   assertNoOverlap(made);
 });
 
@@ -515,12 +578,26 @@ test("one viewer seeking back into film that exists is served from it, with no e
   for (let index = 100; index <= 160; index += 1) {
     made.noteProduced(PICTURE, index);
   }
-  const before = made.runsOn(PICTURE).length;
+  const before = made.runsOn(PICTURE);
 
   watches("one", { atSeconds: 440 });
   made.reconcile();
 
-  assert.equal(made.runsOn(PICTURE).length, before, "no process is bought for film that exists");
+  // Not "the count is unchanged": with nothing late anywhere, the machine is
+  // free to spend what it has spare on finishing the file, and that is what the
+  // user asked for. What must not happen is a process put on film that already
+  // exists, or the run they were behind restarted — which is the 647-second
+  // stall of 2026-09-06 in miniature.
+  for (const was of before) {
+    assert.ok(made.runsOn(PICTURE).includes(was),
+      "the encoder they were behind is not restarted");
+  }
+  for (const run_ of made.runsOn(PICTURE)) {
+    // Where it is WORKING, not where it was created: the surviving run was
+    // started at #100 and has since produced up to #161.
+    assert.equal(made.coverageOf(PICTURE).isReady(run_.head), false,
+      `no process is bought for film that exists (#${run_.head})`);
+  }
   assertNoOverlap(made);
 });
 
@@ -620,8 +697,13 @@ test("a viewer scrubbing back and forth does not accumulate encoders", () => {
   made.reconcile();
   made.reconcile();
 
-  assert.ok(made.runsOn(PICTURE).length <= Math.max(1, settled.length),
-    "no more encoders than before the scrub");
+  // Not "no more encoders" — the machine is allowed to spend what it has spare on
+  // finishing the file, and after a scrub there is more of the file it has seen.
+  // What must not happen is two of them on one stretch, or more than the machine
+  // holds, or the viewer left unserved.
+  assert.ok(made.runsOn(PICTURE).length <= 3, "never more than the machine holds");
+  assert.equal(onTheStretchOf(made, 105), 1, "one encoder on the film in front of them");
   assert.equal(made.coverageOf(PICTURE).stateOf(105), "making", "and the viewer is served");
   assertNoOverlap(made);
+  void settled;
 });

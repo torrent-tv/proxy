@@ -65,7 +65,28 @@ export async function discardOpenPiece(runDirPath, segmentFormat, within, judgeU
   // belong to a run that is still going, and removing it would take away a
   // piece somebody is producing.
   const from = Number.isInteger(within?.from) ? within.from : 0;
-  const to = Number.isInteger(within?.to) && within.to >= from ? within.to : Number.MAX_SAFE_INTEGER;
+  // THE RUN'S OWN REACH, which is a fact it holds and needs nothing measured.
+  //
+  // A run cannot have opened a file above the one just past the last it named:
+  // ffmpeg names a piece when it closes it and opens the next, so the open piece
+  // is at most `proven + 1`, and where it named nothing at all the open one is
+  // the first it was given.
+  //
+  // Used only where no end was declared — `to` below `from`, which is how "to
+  // the end of the track" is written everywhere here. Such a run had no bound at
+  // all: the search covered the whole directory and took the highest-numbered
+  // file in it. Every run of an output writes into that one
+  // directory, so what it took was a piece a LIVE run had just finished. Field
+  // 2026-09-06: the piece holding 2:47-2:57 went that way, its number is spent
+  // for good because names only grow, and the picture stood still for 647 s.
+  const provenIndex = typeof provenName === "string" && segmentFormat.isSegmentFileName(provenName)
+    ? segmentFormat.segmentIndexFromName(provenName)
+    : null;
+  const reach = Number.isInteger(provenIndex) && provenIndex >= from ? provenIndex + 1 : from;
+  // The declared end is the bound wherever there is one. The run's own reach is
+  // the bound of LAST RESORT, for a run given none: before it, such a run had no
+  // bound at all and the search covered the whole directory.
+  const to = Number.isInteger(within?.to) && within.to >= from ? within.to : reach;
   let highest = null;
   try {
     for (const name of await readdir(runDirPath)) {

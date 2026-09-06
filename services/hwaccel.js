@@ -21,7 +21,7 @@
  */
 
 import { spawn } from "node:child_process";
-import { mkdtempSync, readdirSync, rmSync, statSync } from "node:fs";
+import { mkdtempSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -78,6 +78,15 @@ const ENCODE_BENCHMARK_MAX_PLAUSIBLE_SPEED = 1000;
  * arrive twice a second whatever the encoding speed.
  */
 const ENCODE_BENCHMARK_TIMEOUT_MS = 10_000;
+/**
+ * How many times the calibration clip is joined to itself to measure copying.
+ *
+ * Not a figure about the machine: it is how much film the reading needs to have
+ * in front of it. A copy runs at hundreds of times realtime, and the slope is
+ * taken over a window of one second, so the input has to hold more film than the
+ * fastest plausible host gets through in that second. Forty laps of a five-second
+ * clip is 200 s of film, which covers the ceiling `slopeOf` will accept.
+ */
 /** Progress reports arrive line by line. */
 const NEWLINE = String.fromCharCode(10);
 // Producing one second of video per second of clock. Not a margin and not a
@@ -1712,4 +1721,123 @@ export function chooseSoftwareEncodeSettings(benchmark, ceiling, outputFps, cost
   const chosen = ladder[chosenIndex];
   const preset = pickSoftwarePreset(benchmark, chosen.width * chosen.height * fps, cost);
   return { width: chosen.width, height: chosen.height, preset, ladder, rungIndex: chosenIndex };
+}
+
+/**
+ * How fast this machine COPIES a picture, in seconds of film per second.
+ *
+ * The startup measurements price encoding and decoding, and a copied picture
+ * does neither: it reads packets and writes them out again. That left one whole
+ * branch of what this proxy does with no figure at all, and a figure is what
+ * every decision in the encoding layer is made from — where to put an encoder,
+ * how many to run, whether anybody will be left waiting. Without it a copied
+ * output was planned with no speed until its own run had been running long
+ * enough to report one, which is exactly the moment the plan matters most.
+ *
+ * Measured the same way as the others: ffmpeg's own progress, read as a slope
+ * over a window, so the process starting is outside the figure.
+ *
+ * The clip is joined to itself first rather than looped with `-stream_loop`.
+ * Looping charges a re-initialisation per lap — measured on the addon host at
+ * 0.03 s for 480p and 0.12 s for 1080p — and a copy of a five-second clip laps
+ * many times a second, so the reading would have been mostly re-initialisation.
+ *
+ * @param {{ ffmpegBin: string, logger?: { info: (m: string) => void, warn: (m: string) => void }, clipsDir?: string }} params
+ * @returns {Promise<number | null>} Seconds of film per second, or null where
+ *   the reading could not be taken. Null means unmeasured and is never a
+ *   substitute for a number.
+ */
+export async function benchmarkCopySpeed({ ffmpegBin, logger, clipsDir = CALIBRATION_DIR }) {
+  const log = logger ?? { info: () => {}, warn: () => {} };
+  const startedAt = Date.now();
+  // The largest clip in the set. A copy moves BYTES, so what it can do is a
+  // statement about the biggest pictures this host will be asked to pass
+  // through, and the small ones are covered by the same figure.
+  const clip = path.join(clipsDir, "cal-h264-1080-hi.mp4");
+  const speed = await measureCopySlope(ffmpegBin, clip);
+  if (!(speed > 0)) {
+    log.warn("hwaccel: copying could not be measured; a copied picture will be planned from its own run instead");
+    return null;
+  }
+  log.info(
+    `hwaccel: this host copies a picture at ${speed.toFixed(0)}x realtime ` +
+    `(measured in ${((Date.now() - startedAt) / 1000).toFixed(1)}s)`
+  );
+  return speed;
+}
+
+/**
+ * Seconds of film per second, copying one file, read from ffmpeg's progress.
+ *
+ * @param {string} ffmpegBin
+ * @param {string} filePath
+ * @returns {Promise<number | null>}
+ */
+function measureCopySlope(ffmpegBin, filePath) {
+  return new Promise((resolve) => {
+    const args = [
+      "-hide_banner", "-loglevel", "error", "-nostats",
+      // Played over and over, because a copy gets through a five-second clip in
+      // milliseconds and a slope needs a window to be taken over. Looping
+      // charges the demuxer being re-opened once a lap, so what comes out is a
+      // FLOOR on what this host can copy — the safe direction, since a plan made
+      // from it expects copying to be slower than it is.
+      "-stream_loop", "-1", "-i", filePath,
+      // What a copied output does: packets in, packets out, nothing decoded and
+      // nothing encoded. Written nowhere, so the figure is this machine's own
+      // handling and not the disk under a temp directory.
+      "-c", "copy", "-f", "null", "-",
+      // Progress is reported every half second by default, which over a window
+      // of one second is two readings. This asks for twenty.
+      "-stats_period", "0.05",
+      "-progress", "pipe:1"
+    ];
+    /** @type {Array<{ wallSec: number, outSec: number }>} */
+    const samples = [];
+    let settled = false;
+    let buffered = "";
+    let child;
+    const startedAt = Date.now();
+    const finish = (value) => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      clearTimeout(timer);
+      try {
+        child?.kill("SIGKILL");
+      } catch {
+        // already gone
+      }
+      resolve(value);
+    };
+    const timer = setTimeout(() => finish(null), ENCODE_BENCHMARK_TIMEOUT_MS);
+    try {
+      child = spawn(ffmpegBin, args, { stdio: ["ignore", "pipe", "ignore"], windowsHide: true });
+    } catch {
+      finish(null);
+      return;
+    }
+    child.stdout.on("data", (chunk) => {
+      buffered += String(chunk);
+      let newline = buffered.indexOf(NEWLINE);
+      while (newline >= 0) {
+        const line = buffered.slice(0, newline).trim();
+        buffered = buffered.slice(newline + 1);
+        if (line.startsWith("out_time_ms=")) {
+          const outSec = Number(line.slice("out_time_ms=".length)) / 1e6;
+          if (Number.isFinite(outSec) && outSec >= 0) {
+            samples.push({ wallSec: (Date.now() - startedAt) / 1000, outSec });
+          }
+        }
+        newline = buffered.indexOf(NEWLINE);
+      }
+      const slope = slopeOf(samples);
+      if (slope !== null) {
+        finish(slope);
+      }
+    });
+    child.on("error", () => finish(null));
+    child.on("exit", () => finish(slopeOf(samples, ENCODE_BENCHMARK_MIN_WINDOW_SEC)));
+  });
 }

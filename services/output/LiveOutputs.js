@@ -27,6 +27,26 @@ export class LiveOutputs {
   }
 
   /**
+   * Every live session producing ONE output.
+   *
+   * The output is the address the encoding layer works in: two sessions whose
+   * output parameters agree ARE the same output, so what one of them measured
+   * about the machine is true of the other.
+   *
+   * @param {string} address
+   * @returns {object[]}
+   */
+  sessionsOn(address) {
+    const found = [];
+    for (const session of this.sessionsById.values()) {
+      if (session.outputKey === address && session.state !== "disposed") {
+        found.push(session);
+      }
+    }
+    return found;
+  }
+
+  /**
    * Every live session of one file: the picture, its quality steps, and the
    * soundtracks published separately.
    *

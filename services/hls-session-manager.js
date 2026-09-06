@@ -1468,6 +1468,7 @@ export class HlsSessionManager {
     // could not be measured, and then nothing is corrected — the alternative
     // is inventing a penalty, which is the same fault as inventing a fill rate.
     contentionPenalties = null,
+    copySpeedX = null,
     tonemapSupported = false,
     getCachedMediaInfo = null,
     getCachedAudioTracks = null,
@@ -1522,6 +1523,10 @@ export class HlsSessionManager {
     this.getSourceStats = typeof getSourceStats === "function" ? getSourceStats : null;
     this.setPriorityMap = typeof setPriorityMap === "function" ? setPriorityMap : null;
     this.contentionPenalties = contentionPenalties instanceof Map ? contentionPenalties : null;
+    // Seconds of film per second when the picture is COPIED, measured at
+    // startup. Nothing else prices that branch: the other benchmarks measure
+    // encoding and decoding, and a copy does neither.
+    this.copySpeedX = Number.isFinite(copySpeedX) && copySpeedX > 0 ? copySpeedX : null;
     // Totals across every torrent this proxy holds, used to price what the
     // torrent itself costs the machine (item 7). Optional: a proxy wired
     // without it simply never learns that figure.
@@ -1605,6 +1610,7 @@ export class HlsSessionManager {
         benchmark: this.softwarePresetBenchmark,
         decodeModel: this.decodeCostModel,
         contentionPenalties: this.contentionPenalties,
+        copySpeedX: this.copySpeedX,
         availability: this.hostAvailability
       }),
       audioCostKey: (session) => this.#audioCostKey(session),
@@ -1632,6 +1638,7 @@ export class HlsSessionManager {
       makeRun: ({ address, from, to }) => this.#makeRunAt(address, from, to),
       segmentSeconds: this.segmentDurationSec,
       contentionPenalties: this.contentionPenalties,
+      startingSpeedFor: (address) => this.encodeCost.speedForOutput(address),
       segmentStore: this.segmentStore,
       logger
     });
@@ -3912,19 +3919,10 @@ export class HlsSessionManager {
    * @returns {number}
    */
   maxRunsForOutput(address) {
-    let alone = 0;
-    for (const session of this.sessionsById.values()) {
-      if (session.outputKey !== address || session.state === "disposed") {
-        continue;
-      }
-      const measured = Number(session.recentSpeed?.speed);
-      if (Number.isFinite(measured) && measured > alone) {
-        alone = measured;
-      }
-    }
+    const alone = this.encodeCost.speedForOutput(address);
     if (!(alone > 0)) {
-      // Nothing measured on this output yet. One encoder is what it has, and
-      // what it has is what it keeps until there is a reading to argue with.
+      // The host measured nothing at all, which is a broken startup rather than
+      // a state to plan around. One encoder is what it keeps.
       return 1;
     }
     let affordable = 1;

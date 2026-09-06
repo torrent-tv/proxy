@@ -171,13 +171,13 @@ test("somebody stopped where no encoder can arrive in time gets one of their own
   const runs = made.runsOn(PICTURE);
   assert.equal(runs.length, 2, "the one waiting got an encoder");
   assert.ok(runs.some((run) => run.from === 200), "placed exactly where it is needed");
-  // The one in front keeps working from where it stood, with an end at the new
-  // encoder's start. It is a fresh process because where a run stops is fixed
-  // when its own process starts: one given no end carries no `-to` and would
-  // open the contested file however the plan bounds it afterwards. So the
-  // viewer in front pays a restart in place, which is a cost this layer prices,
-  // rather than the two of them writing one name.
-  const ahead = runs.find((run) => run.from === 3);
+  // The work in front continues, and it now has an end where the other begins.
+  // It is a fresh process because where a run stops is fixed when its own starts:
+  // one given no end carries no `-to` and would open the contested file however
+  // the plan bounds it afterwards. So the viewer in front pays a restart in
+  // place — a price the score now counts — rather than the two of them writing
+  // one name.
+  const ahead = runs.find((one) => one.from === 3);
   assert.ok(ahead, "the work in front continues from where it stood");
   assert.equal(ahead.to, 199, "and now ends where the other one begins");
 });

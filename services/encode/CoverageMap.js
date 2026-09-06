@@ -136,6 +136,31 @@ export class CoverageMap {
   }
 
   /**
+   * How many numbers between two are already made.
+   *
+   * What an encoder driving from one to the other would produce a SECOND time,
+   * and therefore what the swarm would be asked to fetch a second time. It is a
+   * term of when that encoder arrives, not a separate question about whether to
+   * move it: an encoder that has to re-make three hundred pieces on its way is
+   * simply slower to get there, and the model compares arrivals.
+   *
+   * @param {number} from - Inclusive.
+   * @param {number} to - Inclusive.
+   * @returns {number}
+   */
+  madeBetween(from, to) {
+    const first = Number.isInteger(from) && from > 0 ? from : 0;
+    const last = Number.isInteger(to) ? to : -1;
+    let count = 0;
+    for (let index = first; index <= last; index += 1) {
+      if (this.isReady(index)) {
+        count += 1;
+      }
+    }
+    return count;
+  }
+
+  /**
    * @param {number} index
    * @returns {boolean}
    */

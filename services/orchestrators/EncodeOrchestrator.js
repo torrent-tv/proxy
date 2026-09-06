@@ -71,6 +71,7 @@ export class EncodeOrchestrator {
     segmentSeconds,
     restartCostSec,
     refetchSecPerFilmSecond = () => 0,
+    contentionPenaltyFor = () => 1,
     segmentStore = null,
     logger,
     now
@@ -87,6 +88,9 @@ export class EncodeOrchestrator {
     // Injected, because the film's byte rate and the swarm's are measured
     // elsewhere and this class must not reach for them.
     this.refetchSecPerFilmSecond = refetchSecPerFilmSecond;
+    // Measured per host: what a second encoder costs the first. Unmeasured is 1,
+    // and then only the budget bounds how many there are.
+    this.contentionPenaltyFor = contentionPenaltyFor;
     this.makeRun = makeRun;
     this.segmentSeconds = segmentSeconds;
     this.restartCostSec = restartCostSec;
@@ -282,7 +286,9 @@ export class EncodeOrchestrator {
       // Answered by whoever measures the film's own byte rate and the swarm's;
       // zero until they have, which makes driving through look cheaper than it
       // is and is stated here so the bias is known.
-      refetchSecPerFilmSecond: this.refetchSecPerFilmSecond(address)
+      refetchSecPerFilmSecond: this.refetchSecPerFilmSecond(address),
+      // How much slower one encoder runs beside others, measured on this host.
+      contentionPenaltyFor: (others) => this.contentionPenaltyFor(others)
     });
 
     for (const action of actions) {
@@ -385,7 +391,9 @@ export class EncodeOrchestrator {
     const budget = affordableRuns({
       byProcessor,
       speedX: fastest,
-      refetchSecPerFilmSecond: this.refetchSecPerFilmSecond(address)
+      refetchSecPerFilmSecond: this.refetchSecPerFilmSecond(address),
+      // How much slower one encoder runs beside others, measured on this host.
+      contentionPenaltyFor: (others) => this.contentionPenaltyFor(others)
     });
     if (budget.runs !== byProcessor && budget.because !== this.#lastBudgetReason.get(address)) {
       this.#lastBudgetReason.set(address, budget.because);

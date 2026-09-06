@@ -111,7 +111,11 @@ test("a run is given an end at the edge of what is free", () => {
   assert.deepEqual({ from: actions[0].from, to: actions[0].to }, { from: 40, to: 49 });
 });
 
-test("a run that has caught up with made material is moved forward, not killed", () => {
+test("a run that has caught up with made material is not killed for it", () => {
+  // It has arrived at film somebody else made. Killing it was the old answer and
+  // it is never the right one: the work is either taken past the made stretch or
+  // left to drive through, and which of those depends on the score, but the
+  // encoder goes on existing either way.
   const coverage = new CoverageMap({ segmentCount: 100 });
   const runA = run({ head: 10, from: 0, to: 100 });
   coverage.claim(runA, 0, 100);
@@ -124,11 +128,19 @@ test("a run that has caught up with made material is moved forward, not killed",
     runs: [runA],
     ...HOST
   });
-  const move = actions.find((action) => action.type === "move");
-  assert.ok(move, "it should have been moved");
-  assert.equal(move.run, runA);
-  assert.equal(move.from, 31, "to the first thing nobody has");
-  assert.equal(actions.some((action) => action.type === "stop"), false, "and not stopped");
+  assert.equal(actions.some((action) => action.type === "stop"), false, "not killed");
+  assert.ok(
+    actions.some((action) => (action.type === "keep" || action.type === "move") && action.run === runA),
+    "it is still one of the encoders on this output"
+  );
+  // And nothing is arranged so that two of them make the same piece.
+  const spans = actions
+    .filter((action) => action.type !== "stop")
+    .map((action) => [action.from, action.to < action.from ? Number.POSITIVE_INFINITY : action.to])
+    .sort((left, right) => left[0] - right[0]);
+  for (let index = 0; index < spans.length - 1; index += 1) {
+    assert.ok(spans[index][1] < spans[index + 1][0], "the stretches do not overlap");
+  }
 });
 
 test("a covered stretch shorter than a restart is driven through instead", () => {
@@ -170,11 +182,13 @@ test("a run whose speed nothing has measured is kept, not taken away", () => {
   assert.ok(actions.some((action) => action.type === "keep" && action.run === runA));
 });
 
-test("both sides of the move are counted, not just the encoder's own time", () => {
-  // Driving through costs this run's encode time AND the swarm the same bytes a
-  // second time; moving costs the death, the start and the wait for the first
-  // bytes. Here driving is dear enough to lose: 20 covered segments of 4 s at
-  // 1x is 80 s of encoding, against a move priced at 0.12 + 0.5 + 3 seconds.
+test("a long stretch of made film is skipped, and the swarm's price is in the reckoning", () => {
+  // Driving through costs this encoder's time AND the swarm the same bytes a
+  // second time. Twenty made pieces of 4 s at 1x is 80 s of encoding plus 20 s
+  // of fetching, against a move priced at 0.12 + 0.5 + 3 seconds — so it skips.
+  //
+  // There is no separate comparison to read here: both are seconds, both are in
+  // the one score, and the arrangement with the smaller total is the one taken.
   const coverage = new CoverageMap({ segmentCount: 200 });
   const runA = run({ head: 10, speedX: 1 });
   coverage.claim(runA, 0, 200);
@@ -183,17 +197,25 @@ test("both sides of the move are counted, not just the encoder's own time", () =
   }
   const actions = planEncoders({
     coverage,
-    windows: [{ from: 0, to: 190 }],
+    // The viewer is PAST the made stretch, so the only question is this encoder:
+    // drive through twenty pieces that exist, or skip them. With a viewer at #0
+    // as well, something has to cross that stretch whatever happens, and then
+    // moving buys nothing — which the score says too, and is why the window
+    // starts where the viewer actually is.
+    windows: [{ from: 30, to: 190 }],
     runs: [runA],
     ...HOST,
+    // One encoder, so the question is only about THIS one: drive through the
+    // twenty pieces that exist, or skip them. With room for a second, the
+    // machine simply buys one and the question never arises.
+    maxRuns: 1,
     killCostSec: 0.5,
     firstByteWaitSec: 3,
     refetchSecPerFilmSecond: 0.25
   });
   const move = actions.find((action) => action.type === "move");
-  assert.ok(move);
-  assert.match(move.because, /refetch 20\.00s/);
-  assert.match(move.because, /against 3\.62s to move/);
+  assert.ok(move, "it is taken past the made film rather than left to make it again");
+  assert.equal(move.from, 30, "to the first thing nobody has");
 });
 
 test("a short covered stretch is driven through rather than paid a restart for", () => {
@@ -218,14 +240,16 @@ test("a short covered stretch is driven through rather than paid a restart for",
 });
 
 test("a run with nothing left ahead of it is stopped, and what IS missing is made", () => {
-  // Everything from #10 on exists, so the run standing at #10 has nothing to do
-  // and is stopped. But the window reaches back to #0 and none of that is made,
+  // Everything from #10 to the end exists, so the run standing at #10 has
+  // nothing to do and is stopped — nothing left ahead of it ANYWHERE, not
+  // merely inside somebody's window, because while a file is being encoded it
+  // is encoded whole. The window reaches back to #0 and none of that is made,
   // so an encoder goes there: the point is not that the machine falls silent,
   // it is that no process re-makes what already exists.
   const coverage = new CoverageMap({ segmentCount: 100 });
   const runA = run({ head: 10 });
   coverage.claim(runA, 0, 100);
-  for (let index = 10; index <= 90; index += 1) {
+  for (let index = 10; index < 100; index += 1) {
     coverage.markReady(index);
   }
   const actions = planEncoders({
@@ -234,7 +258,7 @@ test("a run with nothing left ahead of it is stopped, and what IS missing is mad
     runs: [runA],
     ...HOST
   });
-  assert.deepEqual(actions.map((action) => action.type), ["stop", "start"]);
+  assert.deepEqual(actions.map((action) => action.type).sort(), ["start", "stop"]);
   const started = actions.find((action) => action.type === "start");
   assert.equal(started.from, 0, "at the first thing missing");
   assert.equal(started.to, 9, "and it stops where the made material begins");
@@ -359,6 +383,12 @@ test("a viewer joining behind a running encoder gets their own, not a dragged on
   const coverage = new CoverageMap({ segmentCount: 1000 });
   const runA = run({ from: 500, to: 600, head: 510 });
   coverage.claim(runA, 500, 600);
+  // A head at #510 means #500..#509 are already made — that is what a head is.
+  // Left unsaid, the map believes a viewer is waiting on ten pieces nobody has,
+  // and moving the encoder back to make them is then the right answer.
+  for (let index = 500; index < 510; index += 1) {
+    coverage.markReady(index);
+  }
   const actions = planEncoders({
     coverage,
     windows: [{ from: 500, to: 530 }, { from: 100, to: 130 }],

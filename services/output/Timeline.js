@@ -159,6 +159,43 @@ export class Timeline {
   }
 
   /**
+   * A map stated in seconds of film, in THIS timeline's own numbering.
+   *
+   * The priority map is one per film, in seconds, because a viewer's position
+   * is a moment of film and nothing else. Two outputs of one film are cut
+   * independently — 454 pieces against 401 on the field file — so the same
+   * second is a different number in each, and the conversion belongs to
+   * whichever cut table is being read.
+   *
+   * It lived in the session manager, which is a place, not a layer. Here it is
+   * beside the table it converts against.
+   *
+   * @param {{ from: number, to: number, priority: number, withinSeconds: number }[]} zones
+   * @param {number} segmentCount - How many pieces this output has.
+   * @returns {{ from: number, to: number, priority: number, withinSeconds: number }[]}
+   *   Empty where nothing is stated, which says nobody is coming anywhere.
+   */
+  inSegments(zones, segmentCount) {
+    if (!(segmentCount > 0) || !Array.isArray(zones) || zones.length === 0) {
+      return [];
+    }
+    const converted = [];
+    for (const zone of zones) {
+      const from = Math.max(0, this.indexForTime(zone.from));
+      const to = Math.min(segmentCount - 1, this.indexForTime(zone.to));
+      if (to >= from) {
+        converted.push({
+          from,
+          to,
+          priority: zone.priority,
+          withinSeconds: zone.withinSeconds
+        });
+      }
+    }
+    return converted;
+  }
+
+  /**
    * Which segment holds this moment.
    *
    * @param {number} seconds

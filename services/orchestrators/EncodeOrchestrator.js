@@ -39,6 +39,9 @@ export class EncodeOrchestrator {
   #runs = new Map();
 
 
+  /** The fastest speed measured on one output, kept across restarts. @type {Map<string, number>} */
+  #lastSpeed = new Map();
+
   /** How runs have ended, by cause. @type {Map<string, number>} */
   #endings = new Map();
 
@@ -204,6 +207,14 @@ export class EncodeOrchestrator {
         run.noteSpeed(speedX);
       }
     }
+    // HOW FAST THIS MACHINE ENCODES THIS OUTPUT is a property of the machine and
+    // the material, not of one process. Read off `run.speedX` alone it was lost
+    // at every restart: a moved encoder is a new object that has measured
+    // nothing, so the plan fell back to "nothing is known" and stopped comparing
+    // arrivals at all — which is every decision in this layer.
+    if (speedX > 0 && speedX > (this.#lastSpeed.get(address) ?? 0)) {
+      this.#lastSpeed.set(address, speedX);
+    }
   }
 
   /**
@@ -357,6 +368,14 @@ export class EncodeOrchestrator {
       // has failed to start too many times running.
       this.logger.warn(`encode: no encoder could be made for #${from}..#${to} of ${address}`);
       return;
+    }
+    // What this machine has been measured to do on this output, carried over.
+    // A restart does not make the machine slower, and without this every moved
+    // encoder began as one whose speed nothing had measured — which the plan
+    // reads as "no arrival can be computed" and answers by comparing nothing.
+    const known = this.#lastSpeed.get(address) ?? 0;
+    if (known > 0) {
+      run.noteSpeed(known);
     }
     const onThisOutput = this.#runs.get(address) ?? [];
     onThisOutput.push(run);

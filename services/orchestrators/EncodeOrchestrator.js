@@ -474,13 +474,13 @@ export class EncodeOrchestrator {
     this.#costs.note(ended);
     // Exactly one ending is normal — the run reached the end of the stretch it
     // was given and closed its last file. Every other leaves a piece open, and
-    // that file's name is indistinguishable from a finished one's: on SIGTERM
-    // ffmpeg writes the open piece out and names it on the ready channel like
-    // any other, so it is a valid file holding less film than its name
-    // promises. The run says which one that was.
+    // that file looks finished however the run ended: stopped, ffmpeg writes it
+    // out and names it like any other; killed harder, it leaves the bytes it
+    // had. Either way it decodes and holds less film than its number promises.
+    // So what is kept is what the run PROVED it finished, and nothing beyond.
     if (ended.ending !== ENCODE_EXIT.COMPLETE && this.segmentStore) {
       void this.segmentStore
-        .discardOpenPieceOf(ended.address, { from: ended.from, to: ended.to }, null, ended.flushedName)
+        .discardOpenPieceOf(ended.address, { from: ended.from, to: ended.to }, null, ended.provenName)
         .catch(() => {});
     }
     this.coverageOf(ended.address).release(ended.run);

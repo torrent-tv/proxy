@@ -23,37 +23,39 @@ import path from "node:path";
  * numbering and convinced the look-ahead to keep the encoder stopped for having
  * "produced" it.
  *
- * Two kinds of file are removed, and the second is the one a viewer feels.
+ * **A piece is whole only if the run PROVED it, and reading it proves nothing.**
  *
- * The first is unreadable — a run that died mid-write. The second READS
- * perfectly and is SHORT: on SIGTERM ffmpeg writes out the piece it had open
- * and names it on the ready channel like any other, so it is a valid fMP4
- * holding film only up to the instant of the stop, under a name that promises
- * the whole span the playlist gives that number. Field 2026-09-06:
+ * The highest-numbered file in a run's stretch is the one it had open. How a
+ * run ends decides what became of that file, and all three outcomes leave it
+ * readable-looking: stopped with SIGTERM, ffmpeg writes it out and names it on
+ * the ready channel exactly as it names a finished one; killed harder, or dying
+ * on its own, it leaves the bytes it had written with no name at all. In every
+ * case the file decodes and holds film only up to the instant the run ended,
+ * under a number whose playlist entry promises a whole span. Field 2026-09-06:
  * `segment-00010.mp4` held 3.92 s of its declared 5.589 s — 96 frames — and the
  * picture jumped 1.5 s at 1:02; the soundtrack did the same at 17.5 s, 2.8 s
- * wide, in the same session. Judging such a file by whether it decodes says
- * yes, which is how both survived.
+ * wide, in the same session. Both decoded, which is how both reached the viewer.
  *
- * Which file that is comes from the run itself — the last name it wrote after
- * being told to stop — and not from reading the pieces, so there is no span to
- * measure and no tolerance to choose.
+ * So the question asked here is not what the file contains but whether the run
+ * named it while it was still running normally. That is a fact the run holds,
+ * so there is no span to measure and no tolerance to choose.
  *
- * A piece that was genuinely finished a moment before the stop can be named
- * here too, and is then made a second time. That is the cheaper error: the
- * other one is a hole the viewer sees.
+ * A piece finished in the moment between the last such name and the end is
+ * then made a second time. That is the cheaper error: the other is a hole the
+ * viewer sees.
  *
  * @param {string | null | undefined} runDirPath
  * @param {{ isSegmentFileName: (name: string) => boolean, segmentIndexFromName: (name: string) => number }} segmentFormat
  * @param {((raw: Buffer) => boolean) | null} judgeUsable - Whether a non-empty
  *   piece carries what it should. Null where nothing can say, and then only an
  *   empty file is removed.
- * @param {string | null} [flushedName] - The piece the encoder wrote out while
- *   shutting down. Removed whether or not it reads, because reading is not the
- *   question about it.
+ * @param {string | null} [provenName] - The last piece the run named while it
+ *   was running normally. A file beyond it was open when the run ended and goes
+ *   whether or not it reads. Null where the run proved nothing, and then every
+ *   piece it left is unproven.
  * @returns {Promise<number | null>} The segment number removed, or null.
  */
-export async function discardOpenPiece(runDirPath, segmentFormat, within, judgeUsable, flushedName = null) {
+export async function discardOpenPiece(runDirPath, segmentFormat, within, judgeUsable, provenName = null) {
   if (!runDirPath || typeof segmentFormat?.isSegmentFileName !== "function") {
     return null;
   }
@@ -85,11 +87,11 @@ export async function discardOpenPiece(runDirPath, segmentFormat, within, judgeU
     return null;
   }
   const filePath = path.join(runDirPath, highest.name);
-  // The encoder named this one on its way out, so it holds film up to the stop
-  // and no further. Nothing about its contents can say that — it decodes — so
-  // nothing about its contents is asked.
-  const wasFlushedOnTheWayOut = typeof flushedName === "string" && flushedName === highest.name;
-  let unusable = wasFlushedOnTheWayOut;
+  // Proven finished only if the run said so while it was running. Anything
+  // beyond that name was open when the run ended, and its contents cannot say
+  // so — it decodes.
+  const proven = typeof provenName === "string" && provenName === highest.name;
+  let unusable = !proven;
   try {
     const info = await stat(filePath);
     if (info.size === 0) {

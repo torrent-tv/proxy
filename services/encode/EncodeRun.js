@@ -61,11 +61,10 @@ const MICROSECONDS_PER_SECOND = 1_000_000;
  * @property {number} livedMs
  * @property {boolean} normal - Whether this ending is the expected one.
  * @property {string} lastError - The last thing ffmpeg said on stderr.
- * @property {string | null} flushedName - The piece the encoder wrote out while
- *   it was shutting down, if it wrote one. It is closed and it is SHORT: it
- *   holds film only up to the instant the run was stopped, while its name
- *   promises the whole span the playlist gives that number. Null where the run
- *   was never told to stop.
+ * @property {string | null} provenName - The last piece this run named while it
+ *   was still running normally, and therefore the last one it is known to have
+ *   finished. Anything on disk beyond it was open when the run ended, whatever
+ *   ended it. Null where the run named nothing.
  */
 
 /**
@@ -105,24 +104,27 @@ export class EncodeRun {
   #closedTail = "";
 
   /**
-   * The last piece named on the ready channel AFTER the run was told to stop.
+   * The last piece named on the ready channel while the run was still running
+   * normally — the last one it is KNOWN to have finished.
    *
-   * On SIGTERM ffmpeg writes out the piece it had open and names it like any
-   * other, so "the encoder closed it" stops meaning "it is whole". Field
-   * 2026-09-06: a run stopped mid-piece left `segment-00010.mp4` holding 3.92 s
-   * of the 5.589 s its name promises, and the viewer's picture jumped 1.5 s at
-   * 1:02. The soundtrack did the same at 17.5 s, 2.8 s wide, in the same
-   * session.
+   * "The encoder named it" was taken to mean "it is whole". That is true of the
+   * file and false of the span. On SIGTERM ffmpeg writes out the piece it had
+   * open and names it like any other; killed harder, or dying on its own, it
+   * leaves that piece unnamed and half-written. Both are readable, and neither
+   * covers the span its number promises. Field 2026-09-06: a run stopped
+   * mid-piece left `segment-00010.mp4` holding 3.92 s of the 5.589 s the
+   * playlist gives #10, and the viewer's picture jumped 1.5 s at 1:02; the
+   * soundtrack did the same at 17.5 s, 2.8 s wide, in the same session.
    *
-   * Distinguished by WHEN the name arrives, which is exact and needs no reading
-   * of the file: a name that arrives after the stop was ordered is the flush.
-   * A piece genuinely closed a moment before the stop can land here too, and
-   * then it is made a second time — the cheaper of the two errors, since the
-   * other one is a hole the viewer sees.
+   * Recorded by WHEN the name arrives, so nothing is read and no span is
+   * measured: a name that arrives after the stop was ordered is the flush and
+   * does not count as proof. A piece genuinely closed in the moment between the
+   * last normal name and the stop is then made a second time — the cheaper of
+   * the two errors, since the other is a hole the viewer sees.
    *
    * @type {string | null}
    */
-  #flushedName = null;
+  #provenName = null;
 
   /**
    * When this run was told to stop, so the death itself can be priced.
@@ -451,8 +453,8 @@ export class EncodeRun {
       if (name.length === 0) {
         continue;
       }
-      if (this.#stopping) {
-        this.#flushedName = name;
+      if (!this.#stopping) {
+        this.#provenName = name;
       }
       this.onClosed(name);
     }
@@ -643,7 +645,7 @@ export class EncodeRun {
       from: this.from,
       to: this.to,
       reached: this.reached,
-      flushedName: this.#flushedName,
+      provenName: this.#provenName,
       livedMs,
       // How long dying took, and how long the first output took to appear.
       // Null where the run was never told to stop, or never produced anything:

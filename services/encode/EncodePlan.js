@@ -293,6 +293,10 @@ export function planEncoders({
   const bodiesOf = (override) => {
     const bodies = [];
     for (const run of live) {
+      if (override.has(run) && override.get(run) === null) {
+        // Asked what the film looks like WITHOUT this one.
+        continue;
+      }
       const at = override.has(run) ? override.get(run) : (placement.get(run) ?? Number(run.head));
       const head = Number(run.head);
       bodies.push({ at, delaySec: at === head ? 0 : moveSec });
@@ -323,6 +327,27 @@ export function planEncoders({
       placement.set(run, gap);
     }
   }
+
+  /**
+   * Would the film be worse off without this body? Asked of the same score.
+   *
+   * @param {object} run
+   * @returns {boolean}
+   */
+  const worseWithout = (run) => {
+    if (!(rate > 0) || live.length < 2) {
+      // Nothing has measured how fast this machine encodes, so what the film
+      // would look like without this encoder cannot be worked out — and an
+      // unmeasured quantity is a reason not to act. The only encoder there is
+      // is never the answer either: taking it away leaves nobody.
+      return true;
+    }
+    const kept = bodiesOf(new Map());
+    const without = bodiesOf(new Map([[run, null]]));
+    const scoreOf_ = (bodies) => latenessOf(bodies, coverage, wanted, untilNeeded,
+      rate / contentionPenaltyFor(Math.max(0, bodies.length - 1)), refetchPerSegment, segmentSeconds);
+    return scoreOf_(without) > scoreOf_(kept);
+  };
 
   const stretchAt = (from) => endOfStretch(from, Math.min(
     coverage.unmadeRunFrom(from),
@@ -356,8 +381,23 @@ export function planEncoders({
       });
       continue;
     }
-    // It stays where it is. Stopped only when there is nothing left ahead of it
-    // to make at all — a run is never stopped for standing outside a window.
+    // It stays where it is — unless holding it changes nothing.
+    //
+    // A body left over from where a viewer used to be goes on costing the
+    // machine a process while another encoder already reaches everything it
+    // would. The score says so directly: take it away and see. Removing it is
+    // refused the moment it makes anything later or leaves film abandoned, so
+    // this cannot quietly drop the encoder somebody is waiting on.
+    if (!placement.has(run) && !worseWithout(run)) {
+      stops.push({
+        type: "stop",
+        run,
+        because: "another encoder reaches everything it would, so holding it changes nothing"
+      });
+      continue;
+    }
+    // Stopped also when there is nothing left ahead of it to make at all — a run
+    // is never stopped merely for standing outside a window.
     if (coverage.firstGapFrom(head, undefined, run) === null) {
       stops.push({
         type: "stop",

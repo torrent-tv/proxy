@@ -500,3 +500,128 @@ test("a swarm that feeds one encoder moves it to whoever is late, rather than se
   assert.deepEqual(placements(made), [750], "and it is where the viewer now stands");
   assertNoOverlap(made);
 });
+
+// ------------------------------------------------------- seeking BACKWARD
+
+test("one viewer seeking back into film that exists is served from it, with no encoder", () => {
+  // The case the whole layer was built for. Everything behind them has been
+  // made, so nothing is late anywhere they are going, and the score says the
+  // cheapest arrangement is the one that changes nothing. A restart here is the
+  // 647-second stall of 2026-09-06 in miniature.
+  const { made, watches } = orchestrator();
+  watches("one", { atSeconds: 400 });
+  made.reconcile();
+  made.runsOn(PICTURE)[0].noteSpeed(6);
+  for (let index = 100; index <= 160; index += 1) {
+    made.noteProduced(PICTURE, index);
+  }
+  const before = made.runsOn(PICTURE).length;
+
+  watches("one", { atSeconds: 440 });
+  made.reconcile();
+
+  assert.equal(made.runsOn(PICTURE).length, before, "no process is bought for film that exists");
+  assertNoOverlap(made);
+});
+
+test("one viewer seeking back into film nobody has gets an encoder there", () => {
+  // Behind them is not the same as made. Where the film was never encoded, going
+  // back is exactly as bare as going forward, and the arithmetic is the same one.
+  const { made, watches } = orchestrator();
+  watches("one", { atSeconds: 3000 });
+  made.reconcile();
+  made.runsOn(PICTURE)[0].noteSpeed(6);
+  made.noteProduced(PICTURE, 750);
+
+  watches("one", { atSeconds: 400 });
+  made.reconcile();
+
+  const coverage = made.coverageOf(PICTURE);
+  assert.equal(coverage.stateOf(100), "making", "somebody is making where they landed");
+  assertNoOverlap(made);
+});
+
+test("two viewers: one seeks back onto film the other already had made", () => {
+  const { made, watches } = orchestrator({ maxRuns: 3 });
+  watches("one", { atSeconds: 400 });
+  made.reconcile();
+  made.runsOn(PICTURE)[0].noteSpeed(6);
+  for (let index = 100; index <= 200; index += 1) {
+    made.noteProduced(PICTURE, index);
+  }
+  watches("two", { atSeconds: 3000 });
+  made.reconcile();
+  for (const run of made.runsOn(PICTURE)) {
+    run.noteSpeed(6);
+  }
+  const before = made.runsOn(PICTURE).length;
+
+  // The far one comes back to where the first one has already been.
+  watches("two", { atSeconds: 500 });
+  made.reconcile();
+
+  assert.ok(made.runsOn(PICTURE).length <= before,
+    "coming back onto made film buys nobody an encoder");
+  assertNoOverlap(made);
+});
+
+test("three viewers: one forward, one back, one paused", () => {
+  // All three motions at once, which is the state a real proxy is in most of the
+  // time. What must hold is what always must: never two encoders on one number,
+  // never more than the machine affords, and somebody making what the moving
+  // viewers are about to need.
+  const { made, watches } = orchestrator({ maxRuns: 3 });
+  watches("one", { atSeconds: 400 });
+  watches("two", { atSeconds: 2000 });
+  watches("three", { atSeconds: 3600 });
+  made.reconcile();
+  for (const run of made.runsOn(PICTURE)) {
+    run.noteSpeed(6);
+  }
+  made.reconcile();
+
+  watches("one", { atSeconds: 800 });
+  watches("two", { atSeconds: 1200 });
+  watches("three", { atSeconds: 3600, playing: false });
+  made.reconcile();
+
+  assert.ok(made.runsOn(PICTURE).length <= 3, "never more than the machine holds");
+  assertNoOverlap(made);
+  const coverage = made.coverageOf(PICTURE);
+  assert.equal(coverage.stateOf(200), "making", "the one who went forward is served");
+  assert.equal(coverage.stateOf(300), "making", "and so is the one who came back");
+});
+
+test("a viewer scrubbing back and forth does not accumulate encoders", () => {
+  // A person dragging the time bar states a new position every few hundred
+  // milliseconds, and each of those is a state the plan answers. What must hold
+  // is that the answers do not pile up: an encoder bought for a place the viewer
+  // passed through is not still running when they have gone back.
+  //
+  // Not that the arrangement is identical to the one before the scrub — the
+  // model does not promise that and nothing here should claim it. What it
+  // promises is that no arrangement costs more than it is worth.
+  const { made, watches } = orchestrator({ maxRuns: 3 });
+  watches("one", { atSeconds: 400 });
+  made.reconcile();
+  made.runsOn(PICTURE)[0].noteSpeed(6);
+  made.noteProduced(PICTURE, 100);
+  made.reconcile();
+  const settled = placements(made);
+
+  watches("one", { atSeconds: 2000 });
+  made.reconcile();
+  for (const run of made.runsOn(PICTURE)) {
+    run.noteSpeed(6);
+  }
+  watches("one", { atSeconds: 404 });
+  made.reconcile();
+  watches("one", { atSeconds: 400 });
+  made.reconcile();
+  made.reconcile();
+
+  assert.ok(made.runsOn(PICTURE).length <= Math.max(1, settled.length),
+    "no more encoders than before the scrub");
+  assert.equal(made.coverageOf(PICTURE).stateOf(105), "making", "and the viewer is served");
+  assertNoOverlap(made);
+});

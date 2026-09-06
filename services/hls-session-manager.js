@@ -65,6 +65,7 @@ import { resolveSegmentFormat, SEGMENT_FORMAT_IDS } from "./segment-formats/inde
 import { audioRenditionName } from "./audio-inventory.js";
 import { AudioOutput, CutGrid, OutputSpec, VideoOutput } from "./output/index.js";
 import { newIndexCheck, Timeline, Timelines } from "./output/Timeline.js";
+import { computeCutGrid } from "./output/cut-grid.js";
 export { newIndexCheck };
 import { Output, Outputs } from "./output/Output.js";
 import { masterPlaylistText, mediaPlaylistText, segmentIndexForTime } from "./output/playlists.js";
@@ -1056,60 +1057,6 @@ async function probeVideoKeyframeTimes(ffmpegBin, inputUrl, timeoutMs = 25_000) 
 }
 
 
-/**
- * Compute segment START times (a 0-based timeline) for a session.
- *
- * - Re-encoded video: a uniform grid (0, segDur, 2·segDur, …) — ffmpeg's fixed
- *   GOP makes the real cuts land exactly here.
- * - Copied video: the source's real keyframes, normalized to 0 (start time
- *   subtracted) and greedily grouped to ≥ segDur — these are exactly where
- *   `-hls_time segDur` cuts a copied stream, so the playlist matches reality.
- *
- * The returned array starts at 0 and ends at `durationSeconds` (so segment i
- * spans `[boundaries[i], boundaries[i+1])`). Falls back to a uniform grid when
- * keyframes are unavailable.
- *
- * Which grid applies is NOT the same question as whether the video is copied.
- * A copy has no choice — it can only be cut where the source already has a
- * keyframe. A re-encode normally takes the even grid, because it is producing
- * every frame and may put keyframes where it likes; but when it has to be
- * INTERCHANGEABLE with a copy — a quality variant of one — it takes the
- * source's grid instead and forces its keyframes onto it. So the caller says
- * which grid, and this stopped asking whether the video is re-encoded.
- *
- * @param {{ useKeyframeGrid: boolean, durationSeconds: number, segDur: number, keyframeTimes: number[] | null, startTime: number }} params
- * @returns {number[]}
- */
-
-export function computeSegmentBoundaries({ useKeyframeGrid, durationSeconds, segDur, keyframeTimes, startTime }) {
-  const total = Number.isFinite(durationSeconds) && durationSeconds > 0 ? durationSeconds : 0;
-  const step = Number.isFinite(segDur) && segDur > 0 ? segDur : 4;
-  const uniform = () => {
-    const boundaries = [];
-    for (let t = 0; t < total - 0.001; t += step) {
-      boundaries.push(Number(t.toFixed(6)));
-    }
-    boundaries.push(total);
-    return boundaries;
-  };
-  if (!useKeyframeGrid || !Array.isArray(keyframeTimes) || keyframeTimes.length === 0 || total <= 0) {
-    return uniform();
-  }
-  const base = Number.isFinite(startTime) ? startTime : 0;
-  const norm = keyframeTimes
-    .map((t) => t - base)
-    .filter((t) => t >= -0.001 && t < total - 0.05)
-    .sort((a, b) => a - b);
-  const boundaries = [0];
-  for (const kf of norm) {
-    if (kf >= boundaries[boundaries.length - 1] + step - 0.05) {
-      boundaries.push(Number(kf.toFixed(6)));
-    }
-  }
-  boundaries.push(total);
-  // Guard against a degenerate probe (e.g. a single keyframe) — fall back.
-  return boundaries.length >= 2 ? boundaries : uniform();
-}
 
 /**
  * The ffmpeg command as one readable line.
@@ -2281,20 +2228,25 @@ export class HlsSessionManager {
     // nothing else.
     const timeline = this.timelines.get(
       Timelines.keyFor(sourceKey, fileIndex, useKeyframeGrid ? "keyframe" : "uniform"),
-      () => new Timeline({
-        boundaries: Array.isArray(inheritedGrid?.boundaries) && inheritedGrid.boundaries.length > 1
-          ? [...inheritedGrid.boundaries]
-          : (hasDuration
-            ? computeSegmentBoundaries({
-                useKeyframeGrid,
-                durationSeconds,
-                segDur: this.segmentDurationSec,
-                keyframeTimes,
-                startTime: sourceStartTime
-              })
-            : []),
-        cutGrid: useKeyframeGrid ? "keyframe" : "uniform"
-      })
+      () => {
+        const cut = hasDuration
+          ? computeCutGrid({
+              useKeyframeGrid,
+              durationSeconds,
+              segDur: this.segmentDurationSec,
+              keyframeTimes,
+              startTime: sourceStartTime
+            })
+          : { boundaries: [], sourceTimes: [] };
+        const inherited = Array.isArray(inheritedGrid?.boundaries) && inheritedGrid.boundaries.length > 1;
+        return new Timeline({
+          boundaries: inherited ? [...inheritedGrid.boundaries] : cut.boundaries,
+          // The file's own clock for those cuts. An inherited table brings its
+          // boundaries and not this, so the seek falls back to searching there.
+          sourceTimes: inherited ? null : cut.sourceTimes,
+          cutGrid: useKeyframeGrid ? "keyframe" : "uniform"
+        });
+      }
     );
     // What this session will PUBLISH. A member of a family takes its base's
     // published table verbatim; a session with no base publishes what it cuts

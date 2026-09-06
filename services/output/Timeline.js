@@ -72,8 +72,10 @@ export class Timeline {
    * @param {"keyframe" | "uniform"} params.cutGrid - Whether those times are
    *   the source's own keyframes, which a copied picture has no choice about,
    *   or an even grid the encoder is told to place keyframes on.
+   * @param {number[] | null} [params.sourceTimes] - The same cuts on the FILE's
+   *   own clock — the keyframe a run must seek to for each boundary.
    */
-  constructor({ boundaries, published = null, cutGrid }) {
+  constructor({ boundaries, published = null, cutGrid, sourceTimes = null }) {
     this.boundaries = Array.isArray(boundaries) ? boundaries : [];
     // What the player holds. Taken from the boundaries as they stood when the
     // playlist was written, and never touched again. Given outright only when a
@@ -81,6 +83,16 @@ export class Timeline {
     // always published from its own boundaries.
     this.published = Array.isArray(published) ? published : [...this.boundaries];
     this.cutGrid = cutGrid === "keyframe" ? "keyframe" : "uniform";
+    // Where each cut is on the FILE's clock, which is what a seek asks for.
+    // Frozen beside `published` and never corrected: a run must land where the
+    // player was told the segment begins, and the corrections belong to the
+    // live table. Empty when the grid was restored without it, and then the
+    // seek falls back to searching the file's keyframe list — which is the
+    // lossy path this exists to replace, kept only so a restored table still
+    // plays.
+    this.sourceTimes = Array.isArray(sourceTimes) && sourceTimes.length === this.published.length
+      ? sourceTimes
+      : [];
     // How well this container's keyframe index matches its own file. A fact
     // about the FILE and its index: asked per session it would be answered a
     // different number of times for one film depending on how many people
@@ -105,6 +117,30 @@ export class Timeline {
     }
     const at = Math.min(index, this.published.length - 1);
     return this.published[at] ?? 0;
+  }
+
+  /**
+   * Where segment `index` begins on the FILE's own clock: the keyframe a run
+   * starting there must seek to.
+   *
+   * Not `publishedStartOf(index) + startTime`. That round trip is lossy, and a
+   * residue of two parts in a quadrillion costs a whole keyframe interval when
+   * the result is looked up in the container's list by value — which is how a
+   * run came to be numbered from #36 while carrying film 17.4 s earlier
+   * (2026-09-05). The number the container stated is carried, not rebuilt.
+   *
+   * @param {number} index
+   * @returns {number | null} Null when this table was restored without the
+   *   source clock, and the caller must fall back to searching.
+   */
+  sourceStartOf(index) {
+    if (this.sourceTimes.length === 0) {
+      return null;
+    }
+    if (!Number.isInteger(index) || index <= 0) {
+      return this.sourceTimes[0] ?? null;
+    }
+    return this.sourceTimes[Math.min(index, this.sourceTimes.length - 1)] ?? null;
   }
 
   /**

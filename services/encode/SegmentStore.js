@@ -350,12 +350,12 @@ export class SegmentStore {
    * @param {((raw: Buffer) => boolean) | null} [judgeUsable]
    * @returns {Promise<number | null>} The segment number removed, or null.
    */
-  async discardOpenPieceOf(key, within, judgeUsable = null, flushedName = null) {
+  async discardOpenPieceOf(key, within, judgeUsable = null, provenName = null) {
     const format = this.#formats.get(key);
     if (!format) {
       return null;
     }
-    const removed = await discardOpenPiece(this.directoryFor(key), format, within, judgeUsable, flushedName);
+    const removed = await discardOpenPiece(this.directoryFor(key), format, within, judgeUsable, provenName);
     if (removed !== null) {
       this.#held.delete(key);
       this.#logger?.info?.(

@@ -1,3 +1,7 @@
+## 2.80.5
+
+- **Fix**: A piece is kept only where the run PROVED it finished, which closes the half 2.80.4 left open. That release recognised the piece ffmpeg writes out on `SIGTERM` and named it by when it arrived on the ready channel — right for our own stop, and blind to every other way a run ends. Killed harder, or dying on its own, a run leaves the same piece half-written and with no name at all; it decodes just as well and is just as short. The question asked of the highest-numbered file in a run's stretch is no longer what it contains but whether the run named it while still running normally, so all three endings are covered by one fact the run already holds.
+
 ## 2.80.4
 
 - **Fix**: The piece an encoder writes out while it is being stopped is thrown away instead of served. `-segment_list pipe:3` was taken as proof that a piece is whole — ffmpeg names a file when it closes it, so a named file is closed. That is true of the FILE and false of the SPAN: on `SIGTERM` ffmpeg writes out the piece it had open and names it like any other, so what lands on disk is a valid, decodable piece holding film only up to the instant of the stop, under a name whose playlist entry promises the whole span. Field 2026-09-06, one session, both tracks: `segment-00010.mp4` held 3.92 s of its declared 5.589 s — 96 frames — and the picture jumped 1.5 s at 1:02, while the soundtrack's own stopped run left the same shape at 17.5 s, 2.8 s wide. Both were the viewer's report of the picture and the sound jerking.

@@ -199,6 +199,10 @@ export class EncodeRun {
    *   kept so a failure can quote what produced it.
    * @param {boolean} [params.usesExplicitCuts] - Whether this run cuts at times
    *   it was given, which decides how a segment is judged finished.
+   * @param {(name: string) => number | null} [params.indexOfName] - The number
+   *   a closed piece's name carries. How a piece is named belongs to the format
+   *   that writes it, so it arrives as a plain function rather than this class
+   *   knowing any naming.
    */
   constructor({
     address,
@@ -215,7 +219,8 @@ export class EncodeRun {
     lastSegmentIndex,
     inputUnavailable,
     argsDescribed = "",
-    usesExplicitCuts = false
+    usesExplicitCuts = false,
+    indexOfName
   }) {
     this.address = address;
     this.encoder = encoder;
@@ -234,6 +239,7 @@ export class EncodeRun {
     this.inputUnavailable = typeof inputUnavailable === "function" ? inputUnavailable : () => false;
     this.argsDescribed = argsDescribed;
     this.usesExplicitCuts = usesExplicitCuts === true;
+    this.indexOfName = typeof indexOfName === "function" ? indexOfName : () => null;
     /** The last thing ffmpeg said on stderr, which is what a failure is explained by. */
     this.lastError = "";
   }
@@ -455,6 +461,18 @@ export class EncodeRun {
       }
       if (!this.#stopping) {
         this.#provenName = name;
+      }
+      // WHAT THIS RUN HAS MADE IS THIS RUN'S OWN FACT, and this channel is where
+      // it learns it. It used to be told from outside, by whoever listed the
+      // output directory — which every run of an output shares — so a run
+      // inherited every number any other run had ever left there. Field
+      // 2026-09-06: a run beginning at the piece for 3:39 reported "reached #20
+      // (483 segment(s))", having produced none of them, and its head therefore
+      // described somebody else's work. Both the claim it holds and the cleanup
+      // after it read that head.
+      const index = this.indexOfName(name);
+      if (Number.isInteger(index)) {
+        this.noteProduced(index);
       }
       this.onClosed(name);
     }

@@ -43,6 +43,8 @@
  * out of them is the encoder's.
  */
 
+import { mergeStretches } from "../interval-merge.js";
+
 /**
  * How urgently a stretch of film is wanted. Higher is sooner.
  *
@@ -51,6 +53,21 @@
  * @property {number} to - Last second of film, inclusive.
  * @property {number} priority - Higher is more urgent. Only the ORDER between
  *   zones is meaningful; the numbers themselves are not a scale.
+ * @property {number} withinSeconds - How long until the soonest of the viewers
+ *   who are coming reaches the NEAR EDGE of this stretch. `Infinity` where
+ *   nobody is coming.
+ *
+ *   This is the same reading as `priority`, said as a quantity instead of a
+ *   rank, and it is here because a rank cannot be scheduled against: whoever
+ *   fills the map has to compare "when will this be needed" with "when would it
+ *   arrive", and only the second of those is theirs to work out. The rank stays
+ *   because ordering the work is a different question from meeting a time, and
+ *   the two are asked by different readers.
+ *
+ *   The NEAR edge, not the far one: a stretch is met at its beginning, so its
+ *   beginning is when it must exist. Reading it off the band index instead —
+ *   `allowance * (2^band - 1)` — would give the same figure and would make the
+ *   filling depend on how this file happens to space its bands.
  */
 
 /**
@@ -113,29 +130,36 @@ export function mapForViewer({ atSeconds, durationSeconds, allowanceSeconds, pla
   const allowance = Number.isFinite(allowanceSeconds) && allowanceSeconds > 0 ? allowanceSeconds : 0;
   if (!playing || allowance <= 0) {
     // Nobody is on their way anywhere: the film is wanted and nothing in it is
-    // wanted sooner than the rest.
-    return [{ from: 0, to: end, priority: NOBODY_IS_COMING }];
+    // wanted sooner than the rest, and no second of it has a time by which it
+    // must exist.
+    return [{ from: 0, to: end, priority: NOBODY_IS_COMING, withinSeconds: Number.POSITIVE_INFINITY }];
   }
 
   /** @type {DemandZone[]} */
   const zones = [];
   if (from > 0) {
-    zones.push({ from: 0, to: from, priority: NOBODY_IS_COMING });
+    // Behind them. They are not going there, so there is no time by which it
+    // must exist — a seek back must be cheap, which is a different want.
+    zones.push({ from: 0, to: from, priority: NOBODY_IS_COMING, withinSeconds: Number.POSITIVE_INFINITY });
   }
   let at = from;
   let width = allowance;
   let priority = AT_THE_VIEWER;
   while (at < end && priority > NOBODY_IS_COMING + 1) {
     const to = Math.min(end, at + width);
-    zones.push({ from: at, to, priority });
+    // A viewer moving forward covers a second of film in a second, so the time
+    // until they are at `at` is the distance to it. That is the whole of the
+    // arithmetic, and it is why a peak moves forward on its own as they watch.
+    zones.push({ from: at, to, priority, withinSeconds: at - from });
     at = to;
     width *= 2;
     priority -= 1;
   }
   if (at < end) {
     // Everything left is equally far off: at this distance one more band would
-    // not change any decision.
-    zones.push({ from: at, to: end, priority: NOBODY_IS_COMING + 1 });
+    // not change any decision. The time is still exact — it is the distance —
+    // even though the rank has stopped dividing.
+    zones.push({ from: at, to: end, priority: NOBODY_IS_COMING + 1, withinSeconds: at - from });
   }
   return zones;
 }
@@ -153,45 +177,7 @@ export function mapForViewer({ atSeconds, durationSeconds, allowanceSeconds, pla
  * @returns {DemandZone[]} Ascending by position.
  */
 export function mergeMaps(maps) {
-  /** @type {DemandZone[]} */
-  const all = [];
-  for (const map of maps ?? []) {
-    for (const zone of map ?? []) {
-      if (Number.isFinite(zone?.from) && Number.isFinite(zone?.to) && zone.to > zone.from) {
-        all.push(zone);
-      }
-    }
-  }
-  if (all.length === 0) {
-    return [];
-  }
-  // Walked by BOUNDARIES rather than by second: a film is thousands of them and
-  // this is asked again on every change.
-  const points = [...new Set(all.flatMap((zone) => [zone.from, zone.to]))].sort(
-    (left, right) => left - right
-  );
-  /** @type {DemandZone[]} */
-  const merged = [];
-  for (let index = 0; index < points.length - 1; index += 1) {
-    const from = points[index];
-    const to = points[index + 1];
-    let priority = 0;
-    for (const zone of all) {
-      if (zone.from <= from && to <= zone.to && zone.priority > priority) {
-        priority = zone.priority;
-      }
-    }
-    if (priority <= 0) {
-      continue;
-    }
-    const previous = merged[merged.length - 1];
-    if (previous && previous.priority === priority && previous.to === from) {
-      previous.to = to;
-      continue;
-    }
-    merged.push({ from, to, priority });
-  }
-  return merged;
+  return /** @type {DemandZone[]} */ (mergeStretches(maps));
 }
 
 /**

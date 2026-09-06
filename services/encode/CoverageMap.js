@@ -195,7 +195,7 @@ export class CoverageMap {
         continue;
       }
       const maker = this.makerOf(at);
-      if (maker === null || maker === exceptRun) {
+      if (maker === null || CoverageMap.#isExcepted(maker, exceptRun)) {
         return at;
       }
     }
@@ -226,13 +226,43 @@ export class CoverageMap {
         continue;
       }
       const maker = this.makerOf(at);
-      if (maker !== null && maker !== exceptRun) {
+      if (maker !== null && !CoverageMap.#isExcepted(maker, exceptRun)) {
         at += 1;
         continue;
       }
       break;
     }
     return at - start;
+  }
+
+  /**
+   * How many numbers from `index` onward have NOT been made, claims ignored.
+   *
+   * The stretch an encoder placed here could work through before it would be
+   * re-making something that exists. Claims are deliberately left out: a claim
+   * says another encoder MEANS to make it, and where two encoders are being
+   * placed in one pass the claims of the moment are about to be re-cut — so
+   * asking about them here gives an answer that was true a step ago. Where one
+   * encoder's road ends because another begins is decided once, over all the
+   * placements together, after they are known.
+   *
+   * @param {number} index
+   * @returns {number} Zero when `index` is already made; the rest of the track
+   *   when nothing ahead is; `Infinity` when the length is not yet known.
+   */
+  unmadeRunFrom(index) {
+    const start = Number.isInteger(index) && index > 0 ? index : 0;
+    if (this.isReady(start)) {
+      return 0;
+    }
+    if (this.#segmentCount <= 0) {
+      return Number.POSITIVE_INFINITY;
+    }
+    let end = start;
+    while (end < this.#segmentCount && !this.isReady(end)) {
+      end += 1;
+    }
+    return end - start;
   }
 
   /**
@@ -273,7 +303,7 @@ export class CoverageMap {
         break;
       }
       const maker = this.makerOf(at);
-      if (maker !== null && maker !== exceptRun) {
+      if (maker !== null && !CoverageMap.#isExcepted(maker, exceptRun)) {
         break;
       }
       at += 1;
@@ -293,6 +323,24 @@ export class CoverageMap {
    * @param {object | null} exceptRun
    * @returns {number | null}
    */
+  /**
+   * Is this claim one of the runs the caller is setting aside?
+   *
+   * A single run or a set of them: a pass that re-cuts several roads at once has
+   * to ask about all of them together, and asking once per run gave an answer
+   * true of no moment.
+   *
+   * @param {object} maker
+   * @param {object | Set<object> | null} except
+   * @returns {boolean}
+   */
+  static #isExcepted(maker, except) {
+    if (except === null || except === undefined) {
+      return false;
+    }
+    return except instanceof Set ? except.has(maker) : maker === except;
+  }
+
   #firstCoveredFrom(index, exceptRun) {
     let lowest = null;
     for (const ready of this.#ready) {
@@ -301,7 +349,7 @@ export class CoverageMap {
       }
     }
     for (const [run, span] of this.#claims) {
-      if (run === exceptRun) {
+      if (CoverageMap.#isExcepted(run, exceptRun)) {
         continue;
       }
       // A claim that has already begun covers `index` itself.

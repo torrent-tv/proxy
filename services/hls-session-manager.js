@@ -3690,7 +3690,7 @@ export class HlsSessionManager {
     if (segmentCount <= 0) {
       // No playlist yet: the only thing that can be said is that they want
       // where they are.
-      return [{ from: atSegment, to: atSegment, priority: 3 }];
+      return [{ from: atSegment, to: atSegment, priority: 3, withinSeconds: 0 }];
     }
     const durationSeconds = Number(boundaries[boundaries.length - 1]) ||
       segmentCount * this.segmentDurationSec;
@@ -3703,13 +3703,13 @@ export class HlsSessionManager {
       })?.seconds ?? this.segmentDurationSec,
       playing
     });
-    /** @type {{from: number, to: number, priority: number}[]} */
+    /** @type {{from: number, to: number, priority: number, withinSeconds: number}[]} */
     const inSegments = [];
     for (const zone of zones) {
       const from = Math.max(atSegment, this.#segmentIndexForTime(session, zone.from));
       const to = Math.min(segmentCount - 1, this.#segmentIndexForTime(session, zone.to));
       if (to >= from) {
-        inSegments.push({ from, to, priority: zone.priority });
+        inSegments.push({ from, to, priority: zone.priority, withinSeconds: zone.withinSeconds });
       }
     }
     return inSegments.length > 0
@@ -3871,7 +3871,7 @@ export class HlsSessionManager {
       }
       coverage.markReadyAll(this.segmentStore.provenNumbers(address));
       for (const session of sessions) {
-        for (const run of this.#runsOfSession(session)) {
+        for (const run of liveRunsOf(session)) {
           this.encodeOrchestrator.adopt(address, run);
         }
         // What the viewers of this session are waiting for, as spans. A viewer
@@ -3917,7 +3917,8 @@ export class HlsSessionManager {
               address,
               from: zone.from,
               to: zone.to,
-              priority: zone.priority
+              priority: zone.priority,
+              withinSeconds: zone.withinSeconds
             });
           }
         }
@@ -3986,34 +3987,6 @@ export class HlsSessionManager {
       logger.warn(`transcode could not start a run at #${from} of ${address}: ${message}`);
       return null;
     }
-  }
-
-  /**
-   * This session's run, told what the disk holds before it is asked where it
-   * has got to.
-   *
-   * A run learns of its own segments as they are SERVED, which is not when they
-   * are made — a viewer two minutes behind the encoder has asked for none of
-   * what is in front of them. The store knows, so the run is told, and its head
-   * is then the same figure the look-ahead and the plan have always used.
-   *
-   * @param {HlsSession} session
-   * @returns {import("./encode/EncodeRun.js").EncodeRun[]}
-   */
-  #runsOfSession(session) {
-    const runs = liveRunsOf(session);
-    if (runs.length === 0) {
-      return runs;
-    }
-    const produced = this.producedSegmentNumbers(session);
-    for (const run of runs) {
-      for (const index of produced) {
-        if (index >= run.from) {
-          run.noteProduced(index);
-        }
-      }
-    }
-    return runs;
   }
 
   /**
@@ -5716,6 +5689,7 @@ export class HlsSessionManager {
         session.timeline?.segmentCount > 0 ? session.timeline.segmentCount - 1 : null,
       inputUnavailable: (message) => isInputUnavailable(message),
       onProgress: (report) => this.#noteRunProgress(session, run, report),
+      indexOfName: (name) => session.segmentFormat.segmentIndexFromName(name),
       onClosed: (name) => this.segmentStore.markClosed(session.outputKey ?? "", session.segmentFormat.segmentIndexFromName(name)),
       onEnded: (ended) => this.noteRunEnded(session, run, ended)
     });

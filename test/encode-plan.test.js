@@ -57,10 +57,18 @@ test("a viewer waiting on nothing made starts one encoder, at what they are wait
   );
 });
 
-test("a viewer whose cushion reaches past a running encoder starts nothing", () => {
-  // Found by the orchestrator's own checks: with the end taken from the window,
-  // a second viewer two segments further on was given an encoder of their own
-  // to make those two, while the run already there had nowhere left to go.
+test("two viewers a couple of numbers apart end up behind ONE encoder", () => {
+  // Found by the orchestrator's own checks. Under the old design the second
+  // viewer was given an encoder of their own while the run already there had
+  // nowhere left to go — two processes side by side for one stretch of film.
+  //
+  // The model answers it by arithmetic instead of by a rule: the number the
+  // second viewer stands on is due now and the encoder behind them needs six
+  // seconds, so it IS late; a new one delivers it in two, so placing one is
+  // worth it; and the one behind is then bounded to the two numbers it can still
+  // make and retires. One encoder, and the second viewer waits four seconds
+  // less. What must never happen — two of them running the same stretch — does
+  // not.
   const coverage = new CoverageMap({ segmentCount: 1000 });
   const runA = run({ from: 100, to: 999, head: 100 });
   coverage.claim(runA, 100, 999);
@@ -70,7 +78,15 @@ test("a viewer whose cushion reaches past a running encoder starts nothing", () 
     runs: [runA],
     ...HOST
   });
-  assert.equal(actions.some((action) => action.type === "start"), false);
+  const spans = actions
+    .filter((action) => action.type !== "stop")
+    .map((action) => [action.from, action.to])
+    .sort((left, right) => left[0] - right[0]);
+  for (let index = 0; index < spans.length - 1; index += 1) {
+    assert.ok(spans[index][1] < spans[index + 1][0],
+      `#${spans[index][0]}..#${spans[index][1]} overlaps #${spans[index + 1][0]}`);
+  }
+  assert.ok(spans.some(([from]) => from === 102), "somebody is making what the second viewer needs");
 });
 
 test("a viewer whose whole window is already made starts nothing", () => {
@@ -201,7 +217,11 @@ test("a short covered stretch is driven through rather than paid a restart for",
   assert.ok(actions.some((action) => action.type === "keep" && action.run === runA));
 });
 
-test("a run with nothing left to make ahead of it is stopped", () => {
+test("a run with nothing left ahead of it is stopped, and what IS missing is made", () => {
+  // Everything from #10 on exists, so the run standing at #10 has nothing to do
+  // and is stopped. But the window reaches back to #0 and none of that is made,
+  // so an encoder goes there: the point is not that the machine falls silent,
+  // it is that no process re-makes what already exists.
   const coverage = new CoverageMap({ segmentCount: 100 });
   const runA = run({ head: 10 });
   coverage.claim(runA, 0, 100);
@@ -214,10 +234,10 @@ test("a run with nothing left to make ahead of it is stopped", () => {
     runs: [runA],
     ...HOST
   });
-  assert.deepEqual(
-    actions.map((action) => action.type),
-    ["stop"]
-  );
+  assert.deepEqual(actions.map((action) => action.type), ["stop", "start"]);
+  const started = actions.find((action) => action.type === "start");
+  assert.equal(started.from, 0, "at the first thing missing");
+  assert.equal(started.to, 9, "and it stops where the made material begins");
 });
 
 test("every encoder stops when nobody is watching the output", () => {
@@ -274,19 +294,22 @@ test("the same plan run twice on an unchanged state gives the same answer", () =
   assert.ok(!first.includes("stop"), "and neither pass kills what the other would start");
 });
 
-test("a viewer's most urgent zone is filled before a less urgent one", () => {
+test("the one machine goes to whoever is due soonest, not to the smallest number", () => {
+  // Urgency is a TIME in this model, so the test states one. The far zone is
+  // lower in number and needed sooner; the order must come from the time.
   const coverage = new CoverageMap({ segmentCount: 1000 });
   const actions = planEncoders({
     coverage,
-    // The far zone is lower in number and lower in priority: the order must
-    // come from the priority, not from the number.
     windows: [
-      { from: 0, to: 100, priority: 1 },
-      { from: 500, to: 530, priority: 3 }
+      { from: 0, to: 100, priority: 1, withinSeconds: 600 },
+      { from: 500, to: 530, priority: 3, withinSeconds: 0 }
     ],
-    runs: [],
+    // A run whose speed has been measured: how long an encoder takes to reach a
+    // number is the whole comparison, and with nothing measured the model has no
+    // ground to prefer one place over another and places once.
+    runs: [run({ from: 900, to: 999, head: 900 })],
     ...HOST,
-    maxRuns: 1
+    maxRuns: 2
   });
   const started = actions.filter((action) => action.type === "start").map((action) => action.from);
 
@@ -294,15 +317,24 @@ test("a viewer's most urgent zone is filled before a less urgent one", () => {
 });
 
 test("two viewers far apart get an encoder each, when the machine can hold two", () => {
+  // Both are due now, and one encoder cannot be in two places: the second is
+  // eight hundred numbers past the first, which at this machine's measured speed
+  // is far beyond when it is wanted.
   const coverage = new CoverageMap({ segmentCount: 1000 });
   const actions = planEncoders({
     coverage,
-    windows: [{ from: 0, to: 30 }, { from: 800, to: 830 }],
-    runs: [],
-    ...HOST
+    windows: [
+      { from: 0, to: 30, withinSeconds: 0 },
+      { from: 800, to: 830, withinSeconds: 0 }
+    ],
+    // A measured speed has to exist for "would it get there in time" to have an
+    // answer at all. Without one the model places once and waits to be told.
+    runs: [run({ from: 900, to: 999, head: 900 })],
+    ...HOST,
+    maxRuns: 3
   });
   const started = actions.filter((action) => action.type === "start").map((action) => action.from);
-  assert.deepEqual(started, [0, 800]);
+  assert.deepEqual(started.sort((left, right) => left - right), [0, 800]);
 });
 
 test("a machine that can hold one gives it to the viewer who is stopped soonest", () => {
@@ -381,15 +413,18 @@ test("a run with no end is making what the viewers ahead of it are waiting for",
   );
 });
 
-test("the machine's whole budget is used, not one encoder per viewer", () => {
-  // Nothing about a viewer says how many encoders there should be. What says it
-  // is what the machine affords, and the film is divided between them.
+test("spare budget is NOT spent on film nobody is waiting for", () => {
+  // The opposite of what this used to assert, and the change is the model. An
+  // encoder is placed to stop a number being late; where nothing can be late,
+  // placing one prevents nothing while taking a process from the people who are
+  // watching. The film is still encoded whole — by the run that exists, which is
+  // never stopped for leaving a window.
   const coverage = new CoverageMap({ segmentCount: 400 });
   const actions = planEncoders({
     coverage,
     windows: [
-      { from: 0, to: 9, priority: 32 },
-      { from: 10, to: 399, priority: 20 }
+      { from: 0, to: 9, priority: 32, withinSeconds: 0 },
+      { from: 10, to: 399, priority: 20, withinSeconds: Number.POSITIVE_INFINITY }
     ],
     runs: [],
     ...HOST,
@@ -397,10 +432,8 @@ test("the machine's whole budget is used, not one encoder per viewer", () => {
   });
   const started = actions.filter((action) => action.type === "start");
 
-  assert.equal(started.length, 4, "four encoders where the machine allows four");
-  const from = started.map((action) => action.from).sort((left, right) => left - right);
-  assert.equal(from[0], 0, "the first where the viewer is stopped");
-  assert.ok(from[3] > from[0], "and the rest spread over the film");
+  assert.equal(started.length, 1, "one encoder, where somebody is actually waiting");
+  assert.equal(started[0].from, 0);
 });
 
 test("below realtime the first stretches are what one encoder can hold", () => {

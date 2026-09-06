@@ -1,5 +1,15 @@
 /**
- * @file What viewers want of an output, stated once each and read as a union.
+ * @file What is wanted of one output, in its own segment numbers.
+ *
+ * The class held a window per viewer per band and merged them itself. That was
+ * the priority layer's work done a second time in the wrong place, and it
+ * carried the viewer's name as the key of a claim — against the rule that the
+ * encoding and the viewer are not connected at all. The behaviours those checks
+ * pinned (a viewer's own bands, two viewers as a union) are the priority map's
+ * and are checked there.
+ *
+ * What is left is a holder: one map per output, replaced whole, and an empty one
+ * meaning nobody is coming.
  */
 
 import test from "node:test";
@@ -7,76 +17,64 @@ import assert from "node:assert/strict";
 import { SegmentDemand } from "../services/encode/SegmentDemand.js";
 
 const PICTURE = "torrent:abc:fmt=fmp4:grid=kf@0:video-only:v=0/copy";
-const SOUND = "torrent:abc:fmt=fmp4:grid=kf@0:audio-only:a=0/1/copy";
+const SOUND = "torrent:abc:fmt=fmp4:grid=kf@0:audio-only:a=0/0/aac";
 
-test("a viewer restating a window replaces it rather than adding to it", () => {
-  // A player restates its window every few seconds. Accumulated, the demand
-  // would grow to the whole film within a minute.
+test("an output nothing has been said about wants nothing", () => {
   const demand = new SegmentDemand();
-  demand.state({ claimant: "one", address: PICTURE, from: 0, to: 10, statedAt: 1 });
-  demand.state({ claimant: "one", address: PICTURE, from: 30, to: 40, statedAt: 2 });
-  assert.deepEqual(demand.spanOn(PICTURE), { from: 30, to: 40 });
-  assert.equal(demand.stats().windows, 1);
+  assert.deepEqual(demand.mapOn(PICTURE), []);
+  assert.deepEqual(demand.addresses(), []);
 });
 
-test("one viewer states a window per output, and both stand", () => {
+test("a map replaces whatever was wanted before, rather than adding to it", () => {
+  // The map is a statement of what is wanted NOW, built fresh each time from
+  // where the viewers are. Accumulating them would keep serving people who have
+  // moved or gone.
   const demand = new SegmentDemand();
-  demand.state({ claimant: "one", address: PICTURE, from: 0, to: 10, statedAt: 1 });
-  demand.state({ claimant: "one", address: SOUND, from: 0, to: 10, statedAt: 1 });
-  assert.equal(demand.stats().windows, 2);
+  demand.state(PICTURE, [{ from: 100, to: 130, priority: 32, withinSeconds: 0 }]);
+  demand.state(PICTURE, [{ from: 500, to: 530, priority: 32, withinSeconds: 0 }]);
+  assert.deepEqual(demand.mapOn(PICTURE), [{ from: 500, to: 530, priority: 32, withinSeconds: 0 }]);
+});
+
+test("an empty map is a statement, and it is kept as one", () => {
+  // It says nobody is coming anywhere in this output, which is what stops the
+  // encoders on it. Dropped instead of stored, the output would look like one
+  // nothing had ever been said about, and the last map with people in it would
+  // stand as current.
+  const demand = new SegmentDemand();
+  demand.state(PICTURE, [{ from: 100, to: 130, priority: 32, withinSeconds: 0 }]);
+  demand.state(PICTURE, []);
+  assert.deepEqual(demand.mapOn(PICTURE), []);
+  assert.deepEqual(demand.addresses(), [PICTURE], "the output is still one that has been spoken about");
+});
+
+test("each output holds its own map", () => {
+  // Two outputs of one film are cut independently — 454 pieces against 401 on
+  // the field file — so the same second is a different number in each, and one
+  // map cannot serve both.
+  const demand = new SegmentDemand();
+  demand.state(PICTURE, [{ from: 100, to: 130, priority: 32, withinSeconds: 0 }]);
+  demand.state(SOUND, [{ from: 88, to: 115, priority: 32, withinSeconds: 0 }]);
+  assert.equal(demand.mapOn(PICTURE)[0].from, 100);
+  assert.equal(demand.mapOn(SOUND)[0].from, 88);
   assert.deepEqual(demand.addresses().sort(), [SOUND, PICTURE].sort());
 });
 
-test("two viewers of one output are a union, not a sum", () => {
-  // Two viewers seconds apart want mostly the same segments; counted twice, a
-  // stretch would look twice as wanted as it is.
+test("an output can be forgotten entirely", () => {
   const demand = new SegmentDemand();
-  demand.state({ claimant: "one", address: PICTURE, from: 10, to: 14, statedAt: 1 });
-  demand.state({ claimant: "two", address: PICTURE, from: 12, to: 16, statedAt: 1 });
-  assert.deepEqual(demand.wantedOn(PICTURE), [10, 11, 12, 13, 14, 15, 16]);
+  demand.state(PICTURE, [{ from: 100, to: 130, priority: 32, withinSeconds: 0 }]);
+  demand.forget(PICTURE);
+  assert.deepEqual(demand.addresses(), []);
 });
 
-test("two viewers far apart make a span that covers the ground between them", () => {
-  // Not so it is all made — so that a search for a gap considers all of it.
+test("nothing about a viewer can be stated, because nothing about one is held", () => {
+  // The check that the rule holds by construction: there is no name to pass and
+  // no way to ask about one.
   const demand = new SegmentDemand();
-  demand.state({ claimant: "one", address: PICTURE, from: 0, to: 5, statedAt: 1 });
-  demand.state({ claimant: "two", address: PICTURE, from: 900, to: 905, statedAt: 1 });
-  assert.deepEqual(demand.spanOn(PICTURE), { from: 0, to: 905 });
-});
-
-test("a viewer who leaves takes every window they stated", () => {
-  const demand = new SegmentDemand();
-  demand.state({ claimant: "one", address: PICTURE, from: 0, to: 5, statedAt: 1 });
-  demand.state({ claimant: "one", address: SOUND, from: 0, to: 5, statedAt: 1 });
-  demand.state({ claimant: "two", address: PICTURE, from: 0, to: 5, statedAt: 1 });
-  assert.equal(demand.forget("one"), 2);
-  assert.equal(demand.stats().claimants, 1);
-  assert.equal(demand.addresses().length, 1);
-});
-
-test("expiry is carried out here and decided elsewhere", () => {
-  // The register has no clock on purpose: the rule that says how stale is too
-  // stale lives with whoever measures it, and this stays exercisable with
-  // numbers alone.
-  const demand = new SegmentDemand();
-  demand.state({ claimant: "one", address: PICTURE, from: 0, to: 5, statedAt: 1000 });
-  demand.state({ claimant: "two", address: PICTURE, from: 0, to: 5, statedAt: 9000 });
-  const dropped = demand.forgetStatedBefore(5000);
-  assert.equal(dropped.length, 1);
-  assert.equal(dropped[0].claimant, "one");
-  assert.equal(demand.stats().windows, 1);
-});
-
-test("a window that is not a window is refused rather than stored", () => {
-  const demand = new SegmentDemand();
-  assert.equal(demand.state({ claimant: "one", address: PICTURE, from: 5, to: 1, statedAt: 1 }), null);
-  assert.equal(demand.state({ claimant: "", address: PICTURE, from: 0, to: 1, statedAt: 1 }), null);
-  assert.equal(demand.state({ claimant: "one", address: "", from: 0, to: 1, statedAt: 1 }), null);
-  assert.equal(demand.stats().windows, 0);
-});
-
-test("nothing wanted on an output answers null rather than an empty span", () => {
-  const demand = new SegmentDemand();
-  assert.equal(demand.spanOn(PICTURE), null);
-  assert.deepEqual(demand.wantedOn(PICTURE), []);
+  assert.equal(typeof (/** @type {any} */ (demand).want), "undefined");
+  assert.equal(typeof (/** @type {any} */ (demand).windowsOn), "undefined");
+  assert.equal(
+    demand.state.length,
+    2,
+    "an address and a map, and nothing else"
+  );
 });

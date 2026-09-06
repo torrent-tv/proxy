@@ -153,17 +153,27 @@ export class EncodeOrchestrator {
    *   takes them in this order. Absent means one undifferentiated want, which
    *   is what a caller that knows only a position states.
    */
-  want({ claimant, address, from, to, priority = 0, withinSeconds = 0 }) {
-    this.demand.state({ claimant, address, from, to, priority, withinSeconds, statedAt: this.now() });
-  }
-
   /**
-   * A viewer has gone.
+   * What is wanted of one output, in its own segment numbers.
    *
-   * @param {string} claimant
+   * ONE MAP, ALREADY MERGED, AND WITH NOBODY'S NAME ON IT. It is built once per
+   * film by the layer that knows where the viewers are; this layer receives it
+   * converted into an output's own numbering and never asks who is in it.
+   *
+   * That replaced a window per viewer per band stated here and merged here,
+   * which was the same work done twice in two layers, with the viewer's name as
+   * the key of a claim — against the rule that the encoding and the viewer are
+   * not connected at all.
+   *
+   * An empty map says nobody is coming anywhere in this output, and the plan
+   * stops its encoders for it. Nothing has to be released when somebody leaves:
+   * the map that arrives next simply does not have them in it.
+   *
+   * @param {string} address
+   * @param {{ from: number, to: number, priority: number, withinSeconds: number }[]} zones
    */
-  release(claimant) {
-    this.demand.forget(claimant);
+  notePriorityMap(address, zones) {
+    this.demand.state(address, zones);
   }
 
   /**
@@ -482,8 +492,8 @@ export class EncodeOrchestrator {
     const parts = [];
     for (const address of new Set([...this.demand.addresses(), ...this.#runs.keys()])) {
       const coverage = this.coverageOf(address);
-      const stated = this.demand.windowsOn(address);
-      const windows = stated.map((w) => ({ from: w.from, to: w.to }));
+      const stated = this.demand.mapOn(address);
+      const windows = stated.map((zone) => ({ from: zone.from, to: zone.to }));
       const waiting = firstUnmetWant(coverage, windows);
       const runs = this.runsOn(address)
         .map((run) => `#${run.head}..#${run.to}@${run.speedX.toFixed(1)}x`)

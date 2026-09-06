@@ -36,6 +36,25 @@ class FakeProcess extends EventEmitter {
 /**
  * @param {{ maxRuns?: number }} [options]
  */
+/**
+ * What is wanted of the picture, as ONE map.
+ *
+ * The encoding receives a map per output, already merged and with nobody's name
+ * on it; these tests state the same thing, so what a viewer's zone becomes is
+ * the priority layer's business and not asserted here.
+ *
+ * @param {EncodeOrchestrator} made
+ * @param {{ from: number, to: number, priority?: number, withinSeconds?: number }[]} zones
+ */
+function wants(made, zones) {
+  made.notePriorityMap(PICTURE, zones.map((zone) => ({
+    from: zone.from,
+    to: zone.to,
+    priority: zone.priority ?? 1,
+    withinSeconds: zone.withinSeconds ?? 0
+  })));
+}
+
 function orchestrator({ maxRuns = 2 } = {}) {
   const lines = [];
   const processes = new Map();
@@ -97,7 +116,7 @@ function orchestrator({ maxRuns = 2 } = {}) {
 
 test("a viewer waiting gets an encoder at what they are waiting for", () => {
   const { made } = orchestrator();
-  made.want({ claimant: "one", address: PICTURE, from: 100, to: 130 });
+  wants(made, [{ from: 100, to: 130 }]);
   made.reconcile();
   const runs = made.runsOn(PICTURE);
   assert.equal(runs.length, 1);
@@ -127,7 +146,7 @@ test("an encoder already working covers what it will reach in time", () => {
   // Wanted fourteen segments ahead of it, and not needed for a hundred seconds.
   // At 8x on four-second segments it makes two a second, so it arrives in about
   // seven — in time, and no second process is bought.
-  made.want({ claimant: "one", address: PICTURE, from: 15, to: 45, withinSeconds: 100 });
+  wants(made, [{ from: 15, to: 45, withinSeconds: 100 }]);
   made.reconcile();
   assert.equal(made.runsOn(PICTURE).length, 1, "one encoder, because one is enough");
   assert.equal(made.runsOn(PICTURE)[0], first);
@@ -146,7 +165,7 @@ test("somebody stopped where no encoder can arrive in time gets one of their own
   made.noteProduced(PICTURE, 1);
   made.noteProduced(PICTURE, 2);
 
-  made.want({ claimant: "far", address: PICTURE, from: 200, to: 230, withinSeconds: 0 });
+  wants(made, [{ from: 200, to: 230, withinSeconds: 0 }]);
   made.reconcile();
 
   const runs = made.runsOn(PICTURE);
@@ -173,7 +192,7 @@ test("two encoders on one output never share a segment number", () => {
   first.noteSpeed(1);
   made.adopt(PICTURE, first);
   made.noteProduced(PICTURE, 0);
-  made.want({ claimant: "far", address: PICTURE, from: 200, to: 230, withinSeconds: 0 });
+  wants(made, [{ from: 200, to: 230, withinSeconds: 0 }]);
   made.reconcile();
   const spans = made.runsOn(PICTURE)
     .map((run) => [run.from, run.to < run.from ? Number.POSITIVE_INFINITY : run.to])
@@ -188,9 +207,9 @@ test("a second viewer at the same place starts nothing more", () => {
   // One encode serves everyone standing in front of it, which is the whole
   // reason the decision is made from a union and not per viewer.
   const { made } = orchestrator();
-  made.want({ claimant: "one", address: PICTURE, from: 100, to: 130 });
+  wants(made, [{ from: 100, to: 130 }]);
   made.reconcile();
-  made.want({ claimant: "two", address: PICTURE, from: 102, to: 132 });
+  wants(made, [{ from: 102, to: 132 }]);
   made.reconcile();
   assert.equal(made.runsOn(PICTURE).length, 1);
 });
@@ -198,9 +217,9 @@ test("a second viewer at the same place starts nothing more", () => {
 test("a second viewer far behind gets an encoder of their own", () => {
   // Nobody is dragged: the run in front keeps its stretch and goes on making it.
   const { made } = orchestrator();
-  made.want({ claimant: "one", address: PICTURE, from: 500, to: 530 });
+  wants(made, [{ from: 500, to: 530 }]);
   made.reconcile();
-  made.want({ claimant: "two", address: PICTURE, from: 100, to: 130 });
+  wants(made, [{ from: 100, to: 130 }]);
   made.reconcile();
   const spans = made.runsOn(PICTURE).map((run) => [run.from, run.to]);
   assert.equal(spans.length, 2);
@@ -210,9 +229,9 @@ test("a second viewer far behind gets an encoder of their own", () => {
 
 test("a machine that can afford one encoder does not start a second", () => {
   const { made } = orchestrator({ maxRuns: 1 });
-  made.want({ claimant: "one", address: PICTURE, from: 100, to: 130 });
+  wants(made, [{ from: 100, to: 130 }]);
   made.reconcile();
-  made.want({ claimant: "two", address: PICTURE, from: 500, to: 530 });
+  wants(made, [{ from: 500, to: 530 }]);
   made.reconcile();
   assert.equal(made.runsOn(PICTURE).length, 1);
 });
@@ -220,7 +239,7 @@ test("a machine that can afford one encoder does not start a second", () => {
 test("a viewer asking for what is already made starts nothing", () => {
   const { made } = orchestrator();
   made.noteAlreadyMade(PICTURE, [100, 101, 102, 103, 104]);
-  made.want({ claimant: "one", address: PICTURE, from: 100, to: 104 });
+  wants(made, [{ from: 100, to: 104 }]);
   made.reconcile();
   assert.equal(made.runsOn(PICTURE).length, 0);
 });
@@ -230,7 +249,7 @@ test("segments left by a previous life of this process are used, not remade", ()
   // like any other, whoever made it and whatever became of them.
   const { made } = orchestrator();
   made.noteAlreadyMade(PICTURE, [100, 101, 102]);
-  made.want({ claimant: "one", address: PICTURE, from: 100, to: 110 });
+  wants(made, [{ from: 100, to: 110 }]);
   made.reconcile();
   const runs = made.runsOn(PICTURE);
   assert.equal(runs.length, 1);
@@ -239,10 +258,12 @@ test("segments left by a previous life of this process are used, not remade", ()
 
 test("a viewer who leaves takes the encoder with them", () => {
   const { made } = orchestrator();
-  made.want({ claimant: "one", address: PICTURE, from: 100, to: 130 });
+  wants(made, [{ from: 100, to: 130 }]);
   made.reconcile();
   assert.equal(made.runsOn(PICTURE).length, 1);
-  made.release("one");
+  // Nobody left watching. An EMPTY map is how that is said: there is no name to
+  // release, because no viewer's name ever reaches this layer.
+  wants(made, []);
   made.reconcile();
   assert.equal(made.runsOn(PICTURE).length, 0);
   assert.equal(made.endings()[ENCODE_EXIT.STOPPED], 1);
@@ -250,7 +271,7 @@ test("a viewer who leaves takes the encoder with them", () => {
 
 test("a run that meets material made elsewhere is moved past it", () => {
   const { made } = orchestrator();
-  made.want({ claimant: "one", address: PICTURE, from: 100, to: 200 });
+  wants(made, [{ from: 100, to: 200 }]);
   made.reconcile();
   const first = made.runsOn(PICTURE)[0];
   // It has made a few, and meanwhile 105..150 arrived from somewhere else.
@@ -269,11 +290,11 @@ test("a run that meets material made elsewhere is moved past it", () => {
 
 test("every ending is counted, and our own kill is not counted as normal", () => {
   const { made, processes } = orchestrator();
-  made.want({ claimant: "one", address: PICTURE, from: 100, to: 130 });
+  wants(made, [{ from: 100, to: 130 }]);
   made.reconcile();
   const run = made.runsOn(PICTURE)[0];
   processes.get(run).emit("exit", 255, null);
-  made.release("one");
+  wants(made, []);
   made.reconcile();
   const tally = made.endings();
   assert.equal(tally[ENCODE_EXIT.FAILED], 1);
@@ -285,7 +306,7 @@ test("the line says whether anybody is still waiting", () => {
   // making is the failure this layer removes; it has to be readable, not
   // inferred.
   const { made } = orchestrator();
-  made.want({ claimant: "one", address: PICTURE, from: 100, to: 130 });
+  wants(made, [{ from: 100, to: 130 }]);
   made.reconcile();
   assert.match(made.describe(), /waiting=#100/);
   for (let index = 100; index <= 130; index += 1) {
@@ -305,10 +326,10 @@ test("the swarm limits the encoders, whatever the processor allows", () => {
   // film, one encoder running at 8x takes twice everything there is — so a
   // machine whose processor would allow two gets one.
   const { made, lines } = orchestrator({ maxRuns: 2 });
-  made.want({ claimant: "one", address: PICTURE, from: 100, to: 130 });
+  wants(made, [{ from: 100, to: 130 }]);
   made.reconcile();
   made.runsOn(PICTURE)[0].noteSpeed(8);
-  made.want({ claimant: "two", address: PICTURE, from: 500, to: 530 });
+  wants(made, [{ from: 500, to: 530 }]);
   made.reconcile();
 
   assert.equal(made.runsOn(PICTURE).length, 1);

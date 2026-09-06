@@ -43,7 +43,6 @@
  * out of them is the encoder's.
  */
 
-import { mergeStretches } from "../interval-merge.js";
 
 /**
  * How urgently a stretch of film is wanted. Higher is sooner.
@@ -178,6 +177,71 @@ export function mapForViewer({ atSeconds, durationSeconds, allowanceSeconds, pla
  */
 export function mergeMaps(maps) {
   return /** @type {DemandZone[]} */ (mergeStretches(maps));
+}
+
+/**
+ * Flatten overlapping stretches into non-overlapping ones.
+ *
+ * Where several cover the same place, the result carries the HIGHEST rank and
+ * the SOONEST time. Those are two readings of one thing and are taken
+ * separately on purpose: ranks are coarse — a band covers a wide stretch of
+ * distance — so two viewers tie on the rank while one of them is genuinely
+ * nearer, and a scheduler comparing times must be given the nearer one.
+ *
+ * Neighbours that agree on both are joined, so the result is as few stretches
+ * as describe it. Walked by BOUNDARIES rather than by second: a film is
+ * thousands of them and this is asked again on every change.
+ *
+ * It lived briefly in a module of its own, so that the encoding could call it
+ * too. That was the wrong cure for the right complaint: the encoding was
+ * merging viewers' maps at all, which is this layer's work, and it no longer
+ * does.
+ *
+ * @param {{ from: number, to: number, priority: number, withinSeconds?: number }[][]} maps
+ * @returns {{ from: number, to: number, priority: number, withinSeconds: number }[]}
+ */
+function mergeStretches(maps) {
+  const all = (maps ?? []).flat().filter((zone) => zone && zone.to > zone.from);
+  if (all.length === 0) {
+    return [];
+  }
+  const points = [...new Set(all.flatMap((zone) => [zone.from, zone.to]))].sort(
+    (left, right) => left - right
+  );
+  /** @type {Stretch[]} */
+  const merged = [];
+  for (let index = 0; index < points.length - 1; index += 1) {
+    const from = points[index];
+    const to = points[index + 1];
+    let priority = 0;
+    let withinSeconds = Number.POSITIVE_INFINITY;
+    for (const zone of all) {
+      if (zone.from <= from && to <= zone.to) {
+        if (zone.priority > priority) {
+          priority = zone.priority;
+        }
+        const within = Number(zone.withinSeconds);
+        if (Number.isFinite(within) && within < withinSeconds) {
+          withinSeconds = within;
+        }
+      }
+    }
+    if (priority <= 0) {
+      continue;
+    }
+    const previous = merged[merged.length - 1];
+    if (
+      previous
+      && previous.priority === priority
+      && previous.to === from
+      && previous.withinSeconds === withinSeconds
+    ) {
+      previous.to = to;
+      continue;
+    }
+    merged.push({ from, to, priority, withinSeconds });
+  }
+  return merged;
 }
 
 /**

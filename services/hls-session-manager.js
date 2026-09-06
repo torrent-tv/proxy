@@ -3658,40 +3658,6 @@ export class HlsSessionManager {
     return readers;
   }
 
-  /**
-   * One film's priority map in THIS output's own segment numbers.
-   *
-   * Conversion and nothing else. The map is built once, in the layer that knows
-   * where the viewers are; this turns its seconds into numbers, because two
-   * outputs of one film are cut independently and the same second is a
-   * different number in each — 454 pieces against 401 on the field file.
-   *
-   * @param {HlsSession} session - Whose cut grid the numbers are in.
-   * @param {{ from: number, to: number, priority: number, withinSeconds: number }[]} zones
-   * @returns {{ from: number, to: number, priority: number, withinSeconds: number }[]}
-   */
-  #zonesInSegments(session, zones) {
-    const segmentCount = Number(session.timeline?.segmentCount) || 0;
-    if (segmentCount <= 0 || !Array.isArray(zones) || zones.length === 0) {
-      // No playlist yet, or nobody is coming anywhere. Both are said by an empty
-      // map: there is no number that could be named, and none that is due.
-      return [];
-    }
-    const inSegments = [];
-    for (const zone of zones) {
-      const from = Math.max(0, this.#segmentIndexForTime(session, zone.from));
-      const to = Math.min(segmentCount - 1, this.#segmentIndexForTime(session, zone.to));
-      if (to >= from) {
-        inSegments.push({
-          from,
-          to,
-          priority: zone.priority,
-          withinSeconds: zone.withinSeconds
-        });
-      }
-    }
-    return inSegments;
-  }
 
   /**
    * Say what the cushion is, for every session.
@@ -3867,9 +3833,13 @@ export class HlsSessionManager {
     // film are cut independently and the same second is a different number in
     // each: 454 pieces against 401 on the field file.
     for (const [address, sessions] of byOutput) {
+      const timeline = sessions[0].timeline;
       this.encodeOrchestrator.notePriorityMap(
         address,
-        this.#zonesInSegments(sessions[0], this.priority.mapFor(sessions[0].sourceKey, sessions[0].fileIndex))
+        timeline?.inSegments?.(
+          this.priority.mapFor(sessions[0].sourceKey, sessions[0].fileIndex),
+          Number(timeline?.segmentCount) || 0
+        ) ?? []
       );
     }
     this.encodeOrchestrator.reconcile();

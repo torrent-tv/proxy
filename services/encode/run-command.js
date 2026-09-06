@@ -425,9 +425,30 @@ export function buildRunCommand({
   // retry re-tries the SAME bad container-computed position. A keyframe we
   // read directly from the packet list is a position ffmpeg has already
   // proven it can decode.
-  const snappedKeyframe = Array.isArray(file.keyframeTimes) && file.keyframeTimes.length > 0
-    ? nearestKeyframeAtOrBefore(file.keyframeTimes, seekSeconds)
+  //
+  // The keyframe is CARRIED from the table that named this boundary, not looked
+  // up by value. A boundary is stored on the player's clock, rounded, and
+  // `seekSeconds` above puts the container's start time back on to reach the
+  // file's clock — a lossy round trip. A keyframe at 26.234 s in a container
+  // starting at 0.083 s comes back as 26.233999999999998, and "the keyframe at
+  // or before that" is then the PREVIOUS one, 8.717 s earlier: two parts in a
+  // quadrillion, one whole keyframe interval. That interval became a trim, the
+  // trim moved every cut of the run backwards by another interval, and the
+  // run's files were numbered from #36 while carrying film 17.4 s before what
+  // the playlist says #36 holds (field 2026-09-05: the picture covered the
+  // playhead, the sound had a 17.4 s hole across it, and the viewer waited two
+  // minutes for a buffer that could never fill).
+  //
+  // The search stays for a grid restored without its source clock, which is the
+  // only case that has nothing to carry.
+  const carriedKeyframe = timeline.cutGrid === "keyframe" && typeof timeline.sourceStartOf === "function"
+    ? timeline.sourceStartOf(safeIndex)
     : null;
+  const snappedKeyframe = Number.isFinite(carriedKeyframe)
+    ? carriedKeyframe
+    : (Array.isArray(file.keyframeTimes) && file.keyframeTimes.length > 0
+      ? nearestKeyframeAtOrBefore(file.keyframeTimes, seekSeconds)
+      : null);
   // A second input, and it exists for exactly one case: a browser that takes
   // its audio muxed into the picture, watching a release whose soundtrack is a
   // file of its own. An audio RENDITION reads that file as its only input and
@@ -491,7 +512,21 @@ export function buildRunCommand({
     // soundtrack to the exact target as well would take that slice twice and
     // leave the sound running ahead of the picture by it.
     pushAudioInput(snappedKeyframe);
-    if (residualSeconds > 0) {
+    // An output-side trim, and ONLY where the output is labelled from zero.
+    //
+    // Beside `-copyts` it does the opposite of what it says. Measured
+    // 2026-09-06 on a file with a 5 s keyframe interval: a run landed at 15 s
+    // and asked to trim to the cut at 20 s produced its first file starting at
+    // 10 s, and a run asked to trim to 17 s produced cuts at 13.129, 18.129,
+    // 23.129 — the whole grid moved back by the trim itself. The muxer's cut
+    // times are absolute under `-copyts` while the trim is not, so every cut of
+    // the run inherits the difference and the numbering, fixed at spawn, is
+    // wrong by however many cuts that is.
+    //
+    // On the keyframe grid the run begins AT a cut, so there is nothing to
+    // trim: the carried keyframe above makes this exactly zero rather than
+    // nearly zero.
+    if (residualSeconds > 0 && !keyframeGrid) {
       args.push("-ss", ffmpegSeconds(residualSeconds));
     }
   } else {

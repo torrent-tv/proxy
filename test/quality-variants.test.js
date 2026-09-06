@@ -19,11 +19,12 @@ import { mkdtemp, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import {
-  computeSegmentBoundaries,
   costKindForSession,
   HlsSessionManager
 } from "../services/hls-session-manager.js";
 import { fmp4Format } from "../services/segment-formats/fmp4.js";
+import { computeCutGrid } from "../services/output/cut-grid.js";
+import { buildRunCommand, nearestKeyframeAtOrBefore } from "../services/encode/run-command.js";
 import { Output } from "../services/output/Output.js";
 import { viewerOf } from "../services/viewer/Viewer.js";
 
@@ -576,13 +577,13 @@ test("the cut grid follows the grid asked for, not who produces the frames", () 
   const shape = { durationSeconds: 100, segDur: SEGMENT_SECONDS, startTime: 0 };
   const keyframeTimes = [0, 3.1, 9.7, 14.2, 21.5, 40, 61.25];
 
-  const even = computeSegmentBoundaries({ ...shape, useKeyframeGrid: false, keyframeTimes });
-  assert.equal(even[1], SEGMENT_SECONDS, "the even grid ignores the source's keyframes");
-  assert.equal(even.at(-1), 100);
+  const even = computeCutGrid({ ...shape, useKeyframeGrid: false, keyframeTimes });
+  assert.equal(even.boundaries[1], SEGMENT_SECONDS, "the even grid ignores the source's keyframes");
+  assert.equal(even.boundaries.at(-1), 100);
 
-  const source = computeSegmentBoundaries({ ...shape, useKeyframeGrid: true, keyframeTimes });
+  const source = computeCutGrid({ ...shape, useKeyframeGrid: true, keyframeTimes });
   assert.deepEqual(
-    source,
+    source.boundaries,
     [0, 9.7, 14.2, 21.5, 40, 61.25, 100],
     "the source's own keyframes, kept only where they are at least a segment apart"
   );
@@ -591,16 +592,108 @@ test("the cut grid follows the grid asked for, not who produces the frames", () 
   // grid, produce the SAME table. Segment N then covers the same span in both,
   // which is what lets one stand where the other would have.
   assert.deepEqual(
-    computeSegmentBoundaries({ ...shape, useKeyframeGrid: true, keyframeTimes }),
-    source,
+    computeCutGrid({ ...shape, useKeyframeGrid: true, keyframeTimes }).boundaries,
+    source.boundaries,
     "a variant inherits the grid, so its boundaries are the same values"
   );
   // And with no index there is nothing to align to — the even grid, whoever asks.
   assert.deepEqual(
-    computeSegmentBoundaries({ ...shape, useKeyframeGrid: true, keyframeTimes: null }),
-    even,
+    computeCutGrid({ ...shape, useKeyframeGrid: true, keyframeTimes: null }).boundaries,
+    even.boundaries,
     "no keyframes means no keyframe grid, however the caller asks"
   );
+});
+
+test("a boundary carries the keyframe it is, exactly as the container stated it", () => {
+  // The fault that stopped a viewing on 2026-09-05. A boundary is kept on the
+  // player's clock, `keyframe - startTime`, rounded; the seek used to add the
+  // start time back and look the result up in the container's list by value.
+  // The round trip is lossy — 26.234 - 0.083 + 0.083 is 26.233999999999998 —
+  // and "the keyframe at or before that" is then the PREVIOUS one, a whole
+  // keyframe interval earlier.
+  const startTime = 0.083;
+  const keyframeTimes = [];
+  for (let index = 0; index < 60; index += 1) {
+    keyframeTimes.push(Number((startTime + index * 8.717).toFixed(3)));
+  }
+  const grid = computeCutGrid({
+    useKeyframeGrid: true, durationSeconds: 500, segDur: SEGMENT_SECONDS, keyframeTimes, startTime
+  });
+
+  assert.equal(grid.sourceTimes[0], startTime, "the first cut is the start of the file");
+  assert.equal(grid.boundaries.length, grid.sourceTimes.length, "an index must name both clocks");
+  for (let index = 1; index < grid.boundaries.length - 1; index += 1) {
+    assert.ok(
+      keyframeTimes.includes(grid.sourceTimes[index]),
+      `cut #${index} carries ${grid.sourceTimes[index]}, which the container never stated`
+    );
+  }
+
+  // What the round trip does, so the reason this table exists cannot be
+  // mistaken for caution: at least one boundary fails to find itself.
+  const lost = grid.boundaries
+    .slice(1, -1)
+    .filter((published, at) => nearestKeyframeAtOrBefore(keyframeTimes, published + startTime)
+      !== grid.sourceTimes[at + 1]);
+  assert.ok(
+    lost.length > 0,
+    "the search agreed everywhere, so this fixture no longer reproduces the fault it was built for"
+  );
+});
+
+test("a run on the keyframe grid is given no trim to apply", () => {
+  // The second half of the same fault. That trim is an output-side `-ss`, and
+  // beside `-copyts` it moves the whole run backwards by its own amount:
+  // measured 2026-09-06 on a 5 s keyframe interval, a run landing at 15 s and
+  // asked to trim to the cut at 20 s produced its first file starting at 10 s.
+  // Every cut of the run inherits it while the numbering, fixed at spawn, does
+  // not — so the files are named for times they do not hold.
+  const startTime = 0.083;
+  const keyframeTimes = [];
+  for (let index = 0; index < 60; index += 1) {
+    keyframeTimes.push(Number((startTime + index * 8.717).toFixed(3)));
+  }
+  const grid = computeCutGrid({
+    useKeyframeGrid: true, durationSeconds: 500, segDur: SEGMENT_SECONDS, keyframeTimes, startTime
+  });
+  const timeline = new Timeline({
+    boundaries: grid.boundaries, sourceTimes: grid.sourceTimes, cutGrid: "keyframe"
+  });
+
+  for (let index = 1; index < grid.boundaries.length - 1; index += 1) {
+    const { args } = buildRunCommand({
+      file: { keyframeTimes },
+      inputFile: { startTime },
+      audioFile: { startTime },
+      inputUrl: "http://127.0.0.1/stream",
+      audioInputUrl: "",
+      outputDir: ".",
+      timeline,
+      segmentFormat: fmp4Format,
+      transcodeVideo: false,
+      transcodeAudio: true,
+      audioOnly: false,
+      audioSeparate: false,
+      audioSourceTrackIndex: 0,
+      rateCapKbps: 0,
+      startIndex: index,
+      endIndex: index,
+      videoEncoder: { name: "libx264" },
+      segmentDurationSec: SEGMENT_SECONDS
+    });
+    // Exactly one `-ss`, and it is the input seek: the trim is not there to be
+    // inherited by the cuts.
+    assert.equal(
+      args.filter((one) => one === "-ss").length,
+      1,
+      `run at #${index} was given a trim beside -copyts`
+    );
+    const seek = Number(args[args.indexOf("-ss") + 1]);
+    assert.ok(
+      Math.abs(seek - grid.sourceTimes[index]) < 0.2,
+      `run at #${index} seeks to ${seek}, not to its own keyframe ${grid.sourceTimes[index]}`
+    );
+  }
 });
 
 test("a rung served by copy stays offered while a re-encoded rung is on screen", async (t) => {

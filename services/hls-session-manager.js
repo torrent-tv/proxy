@@ -555,12 +555,6 @@ const SEGMENT_STORE_IDLE_MS = 6 * 60 * 60 * 1000;
 const SEGMENT_STORE_FREE_SHARE = 0.25;
 /** What the store may hold where the free space cannot be read at all. */
 const SEGMENT_STORE_FALLBACK_BYTES = 2 * 1024 * 1024 * 1024;
-/**
- * What it costs to stop an encoder and start another where the material is
- * missing. Measured on the addon host 2026-09-04: a spawn with its input open
- * is 0.12 s there, 0.5-0.6 s on a developer's desktop.
- */
-const RUN_RESTART_COST_SEC = 0.12;
 const DEFAULT_STARTUP_WAIT_MS = 5_000;
 // Realtime budget — runtime downswitch (software encoder only). Periodically
 // check each active software-transcode session's ffmpeg `speed`; when it stays
@@ -1637,7 +1631,7 @@ export class HlsSessionManager {
       maxRunsFor: (address) => this.maxRunsForOutput(address),
       makeRun: ({ address, from, to }) => this.#makeRunAt(address, from, to),
       segmentSeconds: this.segmentDurationSec,
-      restartCostSec: RUN_RESTART_COST_SEC,
+      contentionPenalties: this.contentionPenalties,
       segmentStore: this.segmentStore,
       logger
     });

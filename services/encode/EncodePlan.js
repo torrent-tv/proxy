@@ -101,6 +101,12 @@
  * @param {number} params.restartCostSec - What it costs to stop an encoder and
  *   start it somewhere else: process start plus opening the input. Measured —
  *   0.12 s on the addon host, 0.5-0.6 s on a desktop.
+ * @param {(others: number) => number} [params.contentionPenaltyFor] - How much
+ *   slower ONE encoder runs with that many others beside it, measured on this
+ *   host. Without it every extra process looks free, and the score then wants an
+ *   encoder per piece: at exactly realtime each next piece is marginally late
+ *   however many are running, so another one always seemed to help a little.
+ *   Unmeasured is 1, and then the budget is the only thing bounding the count.
  * @returns {PlanAction[]} Stops first, then moves, then starts, so that a plan
  *   carried out in order never holds two encoders where it means to hold one.
  */
@@ -113,7 +119,8 @@ export function planEncoders({
   restartCostSec,
   killCostSec = 0,
   firstByteWaitSec = 0,
-  refetchSecPerFilmSecond = 0
+  refetchSecPerFilmSecond = 0,
+  contentionPenaltyFor = () => 1
 }) {
   /** @type {PlanAction[]} */
   const stops = [];
@@ -140,199 +147,233 @@ export function planEncoders({
   // How far a search for a gap needs to look: past the furthest thing anybody
   // is waiting for there is nothing to decide about.
   const demandTo = Math.max(...wanted.map((span) => span.to));
+  const untilNeeded = deadlineReaderFor(wanted, segmentSeconds);
+  // Segments produced per second, from the fastest measured encoder here.
+  const rate = segmentSeconds > 0
+    ? live.reduce((best, run) => Math.max(best, run.speedX || 0), 0) / segmentSeconds
+    : 0;
+  // What a body costs to take away from where it stands and put somewhere else:
+  // its death, the start of another, and the wait for the first bytes there.
+  const moveSec = restartCostSec + killCostSec + firstByteWaitSec;
 
-  /** Runs that survive this pass. @type {Set<object>} */
-  const surviving = new Set();
+  // ------------------------------------------------------------------ WHERE
+  //
+  // A question about the FILM, and about nothing else: which numbers are
+  // missing, when each is needed, how fast this machine encodes, how many
+  // processes it can hold. No encoder that happens to be running enters it,
+  // which is why it can be answered by arithmetic.
+  const positions = placeEncoders({
+    coverage,
+    windows: wanted,
+    howMany: maxRuns,
+    // EVERY LIVE ENCODER IS PRE-PLACED, because that is what "somebody already
+    // gets here in time" means. A number one of them reaches before it is
+    // needed is not a position at all; a number none of them reaches is, and
+    // needs a body brought to it. There is no third case, and in particular no
+    // separate question of whether an encoder should drive on or be moved:
+    // driving is simply its arrival, and its arrival is priced in one place.
+    firstGap: gapFinderFor(coverage, new Set(live), rate, segmentSeconds * refetchSecPerFilmSecond),
+    deadlineAt: untilNeeded
+  });
 
+  // -------------------------------------------------------------------- WHO
+  //
+  // ARGMIN OF THE OBJECTIVE, EVALUATED. Not a rule that approximates it.
+  //
+  // Every way of filling the positions is scored by `latenessOf` and the best is
+  // taken. There are at most a handful of positions and a handful of bodies, so
+  // the enumeration is exact: no local rule stands in for the objective, and
+  // none can therefore disagree with another.
+  //
+  // Four such rules were written before this and all four had to go — "place
+  // where a number is late", "take a body that serves nothing", "take one whose
+  // work is needed later than this", "drive on or move, by cost". Each looked
+  // like a consequence of the model and each approximated it from a different
+  // side, so together they contradicted one another and the answer depended on
+  // which ran first.
+  /** One decision per live encoder, so none can be decided twice. @type {Map<object, PlanAction>} */
+  const decided = new Map();
+  const room = Math.max(0, maxRuns - live.length);
+  const refetchPerSegment = segmentSeconds * refetchSecPerFilmSecond;
+  const startSec = restartCostSec + firstByteWaitSec;
+
+  let arrangements = [{ fill: [], used: new Set(), fresh: 0 }];
+  for (let index = 0; index < positions.length; index += 1) {
+    const next = [];
+    for (const arrangement of arrangements) {
+      next.push({ fill: [...arrangement.fill, null], used: arrangement.used, fresh: arrangement.fresh });
+      // A FRESH PROCESS IS OFFERED BEFORE ANY WORKING BODY, so that when the two
+      // score the same the working one is left alone. Taking it is free in the
+      // arithmetic — its output stays on disk — but it is not free in fact: the
+      // run it belongs to has a position, a warm input and a measured speed, and
+      // all three are thrown away for nothing.
+      if (arrangement.fresh < room) {
+        next.push({
+          fill: [...arrangement.fill, "new"],
+          used: arrangement.used,
+          fresh: arrangement.fresh + 1
+        });
+      }
+      for (const run of live) {
+        if (arrangement.used.has(run)) {
+          continue;
+        }
+        next.push({
+          fill: [...arrangement.fill, run],
+          used: new Set([...arrangement.used, run]),
+          fresh: arrangement.fresh
+        });
+      }
+    }
+    arrangements = next;
+  }
+
+  let best = null;
+  let bestScore = null;
+  for (const arrangement of arrangements) {
+    const bodies = [];
+    for (let index = 0; index < positions.length; index += 1) {
+      const filler = arrangement.fill[index];
+      if (filler === null) {
+        continue;
+      }
+      if (filler === "new") {
+        bodies.push({ at: positions[index], delaySec: startSec });
+        continue;
+      }
+      const head = Number(filler.head);
+      bodies.push({
+        at: positions[index],
+        delaySec: head === positions[index] ? 0 : moveSec
+      });
+    }
+    // Bodies nobody was given a position for go on working where they stand,
+    // and their coverage counts: the file is encoded whole.
+    //
+    // A body given no end pays a restart the moment anybody is placed inside the
+    // road it would drive: where a run stops is fixed when its process starts,
+    // so it has to be cut and begun again at its own head. That price was
+    // invisible here, and an arrangement was scored as free when it was not.
+    for (const run of live) {
+      if (arrangement.used.has(run)) {
+        continue;
+      }
+      const head = Number(run.head);
+      const endless = Number(run.to) < Number(run.from);
+      const cutInFront = arrangement.fill.some((filler, index) =>
+        filler !== null && positions[index] > head
+        && (endless || positions[index] <= Number(run.to)));
+      bodies.push({ at: head, delaySec: cutInFront ? moveSec : 0 });
+    }
+    const scored = latenessOf(bodies, coverage, wanted, untilNeeded, rate / contentionPenaltyFor(Math.max(0, bodies.length - 1)), refetchPerSegment, segmentSeconds);
+    if (bestScore === null || scored < bestScore) {
+      bestScore = scored;
+      best = arrangement;
+    }
+  }
+
+  // A BODY STANDING ON FILM THAT EXISTS is the one arrangement the enumeration
+  // above cannot reach: the gap in front of it is nobody's deadline, so it is
+  // never a position, and the body is left to make three hundred pieces a second
+  // time. Each such body is offered its own first gap and the SAME score decides
+  // — moving costs a restart on everything downstream, staying costs the repeat.
+  //
+  // Offered one at a time rather than folded into the enumeration because the
+  // enumeration is exponential in the number of positions, and this is called
+  // again on every piece produced. One extra evaluation per body against
+  // several thousand arrangements is the difference between arithmetic and a
+  // stalled proxy.
+  const placement = new Map();
+  for (let index = 0; index < positions.length; index += 1) {
+    const filler = best ? best.fill[index] : null;
+    if (filler && filler !== "new") {
+      placement.set(filler, positions[index]);
+    }
+  }
+  const bodiesOf = (override) => {
+    const bodies = [];
+    for (const run of live) {
+      const at = override.has(run) ? override.get(run) : (placement.get(run) ?? Number(run.head));
+      const head = Number(run.head);
+      bodies.push({ at, delaySec: at === head ? 0 : moveSec });
+    }
+    for (let index = 0; index < positions.length; index += 1) {
+      if ((best ? best.fill[index] : null) === "new") {
+        bodies.push({ at: positions[index], delaySec: startSec });
+      }
+    }
+    return bodies;
+  };
+  const scoreOf = (override) => {
+    const bodies = bodiesOf(override);
+    return latenessOf(bodies, coverage, wanted, untilNeeded,
+      rate / contentionPenaltyFor(Math.max(0, bodies.length - 1)), refetchPerSegment, segmentSeconds);
+  };
   for (const run of live) {
-    // 1. A RUN IS NEVER STOPPED FOR STANDING OUTSIDE A WINDOW. While a file is
-    //    being encoded it is encoded whole; a viewer decides the ORDER the work
-    //    is taken in and, through the budget, how many processes take it.
-    //
-    //    This used to stop a run whose stretch touched no window, and that
-    //    decision contradicted the one below it: the run was placed by a search
-    //    the retention test did not accept, so it was killed on the pass after
-    //    it started and started again in the same place — 350-700ms per cycle in
-    //    the field on 2026-09-05, no segment ever produced, the viewer's picture
-    //    stopped for 125 seconds.
-    //
-    // 2. Has it arrived at material that already exists, or that another run is
-    //    making? Its own claim does not count against it.
-    const coveredAhead = coverage.coveredRunFrom(run.head, run);
-    if (coveredAhead === 0) {
-      surviving.add(run);
-      keeps.push({ type: "keep", run, from: run.head, to: run.to });
+    if (placement.has(run)) {
       continue;
     }
+    const gap = coverage.firstGapFrom(run.head, undefined, run);
+    if (gap === null || gap === Number(run.head)) {
+      continue;
+    }
+    const asIs = scoreOf(new Map());
+    const moved = scoreOf(new Map([[run, gap]]));
+    if (moved < asIs) {
+      placement.set(run, gap);
+    }
+  }
 
-    // Where it would go instead: the first thing nobody has and nobody is
-    // making, at or after where it stands.
-    const gap = coverage.firstGapFrom(run.head, demandTo, run);
-    if (gap === null) {
-      stops.push({
-        type: "stop",
+  const stretchAt = (from) => endOfStretch(from, Math.min(
+    coverage.unmadeRunFrom(from),
+    coverage.freeRunFrom(from, new Set(live))
+  ));
+
+  for (let index = 0; index < positions.length; index += 1) {
+    if ((best ? best.fill[index] : null) !== "new") {
+      continue;
+    }
+    const at = positions[index];
+    starts.push({
+      type: "start",
+      from: at,
+      to: stretchAt(at),
+      because: `#${at} is wanted and nobody reaches it in time`
+    });
+  }
+
+  for (const run of live) {
+    const head = Number(run.head);
+    const at = placement.has(run) ? placement.get(run) : head;
+    if (at !== head) {
+      decided.set(run, {
+        type: "move",
         run,
-        because: "everything wanted ahead of it is already made or being made"
+        from: at,
+        to: stretchAt(at),
+        because: `standing at #${head} scores worse than standing at #${at}, counting ` +
+          "both how late the film would be and the work that would be done twice"
       });
       continue;
     }
-
-    // WHICH IS CHEAPER, AND BOTH SIDES COUNTED WHOLE.
-    //
-    // Driving through material that exists costs this run's own encode time for
-    // it, and costs the swarm the same bytes a second time — the film has to be
-    // fetched again to be encoded again.
-    //
-    // Moving costs the death of this run, the start of another, and the wait
-    // for the first bytes at the new position. The last of those is the largest
-    // in the field and the one nothing measures yet; while it is unmeasured it
-    // counts as zero, which makes moving look cheaper than it is.
-    //
-    // A run whose speed nothing has measured yet cannot be compared at all, and
-    // then it is KEPT. Moving costs a known amount for an unknown gain, and a
-    // fresh run has produced nothing, so taking its work away is certainly a
-    // loss. This used to answer the other way, and every just-started run was
-    // moved the moment anything ahead of it was covered — which, once the whole
-    // film ahead had been made, was always.
-    // Both sides have to be known for the comparison to mean anything. The
-    // encoder's own speed is one; what the swarm charges to fetch the same
-    // bytes again is the other, and where nothing has measured it the sum is
-    // not a cost but a fragment of one. Answering from a fragment biases the
-    // decision one way — towards moving, since the missing term is on the
-    // driving side — so an unknown term is a reason to keep, exactly as an
-    // unmeasured speed is.
-    const known = run.speedX > 0 && refetchSecPerFilmSecond > 0;
-    const refetchSec = coveredAhead * segmentSeconds * refetchSecPerFilmSecond;
-    const driveSec = known ? (coveredAhead * segmentSeconds) / run.speedX + refetchSec : null;
-    const moveSec = restartCostSec + killCostSec + firstByteWaitSec;
-    if (driveSec === null || driveSec <= moveSec) {
-      surviving.add(run);
-      keeps.push({ type: "keep", run, from: run.head, to: run.to });
+    // It stays where it is. Stopped only when there is nothing left ahead of it
+    // to make at all — a run is never stopped for standing outside a window.
+    if (coverage.firstGapFrom(head, undefined, run) === null) {
+      stops.push({
+        type: "stop",
+        run,
+        because: "everything ahead of it is already made or being made"
+      });
       continue;
     }
-
-    const free = coverage.freeRunFrom(gap, run);
-    surviving.add(run);
-    moves.push({
-      type: "move",
-      run,
-      from: gap,
-      to: endOfStretch(gap, free),
-      because:
-        `driving through ${coveredAhead} covered segment(s) costs ${driveSec.toFixed(2)}s ` +
-        `(encode ${((coveredAhead * segmentSeconds) / run.speedX).toFixed(2)}s + ` +
-        `refetch ${refetchSec.toFixed(2)}s) against ${moveSec.toFixed(2)}s to move ` +
-        `(kill ${killCostSec.toFixed(2)}s + start ${restartCostSec.toFixed(2)}s + ` +
-        `first bytes ${firstByteWaitSec.toFixed(2)}s)`
-    });
+    decided.set(run, { type: "keep", run, from: head, to: run.to });
   }
 
-  // 3. Gaps somebody is waiting for that nobody is making, IN THE ORDER THE
-  //    DEMAND MAP PUTS THEM: most urgent zone first, and within one zone the
-  //    lowest number, because that is where a viewer is stopped. The budget
-  //    rarely stretches to every gap, so which one is taken first is the whole
-  //    of what a viewer's presence decides.
-  const budget = Math.max(0, maxRuns - surviving.size);
-  const alreadyPlanned = new Set(moves.map((action) => /** @type {{from:number}} */ (action).from));
-  for (const from of placeEncoders({
-    coverage,
-    windows: wanted,
-    howMany: budget,
-    // Segments produced per second, from the fastest measured run: seconds of
-    // film per second, divided by the seconds of film one segment holds.
-    firstGap: gapFinderFor(
-      coverage,
-      surviving,
-      segmentSeconds > 0
-        ? live.reduce((best, run) => Math.max(best, run.speedX || 0), 0) / segmentSeconds
-        : 0,
-      restartCostSec + firstByteWaitSec,
-      // What re-cutting a working encoder costs: killing it, starting it again,
-      // and waiting for its first bytes. The same three terms the drive-or-move
-      // comparison uses, so one price is quoted in both places.
-      killCostSec + restartCostSec + firstByteWaitSec
-    ),
-    deadlineAt: deadlineReaderFor(wanted, segmentSeconds)
-  })) {
-    if (alreadyPlanned.has(from)) {
-      continue;
-    }
-    alreadyPlanned.add(from);
-    starts.push({
-      type: "start",
-      from,
-      // As far as there is material to make, and as far as nobody ELSE holds.
-      //
-      // The runs of this pass are excluded because their roads are re-cut below,
-      // over all the placements at once: asking about a claim that is about to
-      // move answers about a state already gone, and an encoder placed in front
-      // of a run claiming the whole film got a stretch of length zero and was
-      // never started — the viewer who had just seeked was served by nobody. A
-      // claim held by anything else is real and stands.
-      to: endOfStretch(from, Math.min(
-        coverage.unmadeRunFrom(from),
-        coverage.freeRunFrom(from, new Set(live))
-      )),
-      because: `#${from} is wanted and nobody is making it`
-    });
-  }
-
-  // WHEN THE BUDGET IS FULL, THE ENCODERS THERE ARE STAND WHERE SOMETHING IS
-  // DUE — not wherever they happen to have ended up.
-  //
-  // The machine affords what it affords, and the placement above can only use
-  // what is left over. So a viewer who seeks far ahead, or a third viewer on a
-  // host that holds two encoders, would be served by nobody at all: the run that
-  // exists is hundreds of numbers behind them, keeps its road because nothing
-  // covers what lies in front of IT, and the budget leaves nothing to place.
-  // Measured while building this — a viewer seeking from 6:40 to 50:00 got no
-  // encoder, because one at 6:41 was already taking the whole of a swarm that
-  // affords one.
-  //
-  // The remedy is the objective, applied: no late numbers, and where that cannot
-  // be had, lateness as far to the right as possible. A run whose own position
-  // has nothing due at it is doing nothing for anybody's deadline; moving it to
-  // the soonest number that IS due strictly reduces lateness. A run standing
-  // where something is due is left alone — taking it away would only move the
-  // lateness from one person to another.
-  const untilNeeded = deadlineReaderFor(wanted, segmentSeconds);
-  if (budget === 0 && starts.length === 0) {
-    const late = untilNeeded === null ? null : firstLateFrom({
-      coverage,
-      wanted,
-      surviving,
-      rate: segmentSeconds > 0
-        ? live.reduce((best, run) => Math.max(best, run.speedX || 0), 0) / segmentSeconds
-        : 0,
-      untilNeeded
-    });
-    if (late !== null) {
-      // The idlest of them: the one with the least reason to be where it is.
-      let idlest = null;
-      let worst = -1;
-      for (const action of keeps) {
-        const run = /** @type {{ run: { head: number } }} */ (action).run;
-        const due = untilNeeded(run.head);
-        if (due > worst) {
-          worst = due;
-          idlest = action;
-        }
-      }
-      if (idlest !== null && !Number.isFinite(worst)) {
-        // Only when NOTHING is due where it stands. A run with a real deadline
-        // under it is serving somebody, and moving it would trade one viewer's
-        // wait for another's.
-        keeps.splice(keeps.indexOf(idlest), 1);
-        moves.push({
-          type: "move",
-          run: /** @type {{ run: object }} */ (idlest).run,
-          from: late,
-          to: endOfStretch(late, coverage.unmadeRunFrom(late)),
-          because:
-            `nothing is due where it stands and #${late} is late, and the machine ` +
-            "affords no more encoders than it already has"
-        });
-      }
+  for (const action of decided.values()) {
+    if (action.type === "keep") {
+      keeps.push(action);
+    } else {
+      moves.push(action);
     }
   }
 
@@ -392,47 +433,121 @@ export function planEncoders({
   return [...stops, ...moves, ...starts, ...keeps];
 }
 
+
+
 /**
- * The soonest number that is due and that nobody standing behind it can reach in
- * time.
+ * THE OBJECTIVE, as a value that can be compared.
  *
- * The same arithmetic as the placement, asked once over the whole line rather
- * than as a search for somewhere to put a new process: it is what decides
- * whether the encoders that exist are enough, when there is no room for another.
+ * ONE NUMBER, IN SECONDS, and both terms are seconds:
  *
- * @param {object} params
- * @param {import("./CoverageMap.js").CoverageMap} params.coverage
- * @param {WantedSpan[]} params.wanted
- * @param {Set<object>} params.surviving
- * @param {number} params.rate - Segments per second, measured. Zero means
- *   nothing has measured it and no arrival time can be computed.
- * @param {(index: number) => number} params.untilNeeded
- * @returns {number | null}
+ * 1. HOW LATE, summed over every number somebody is waiting for:
+ *    `max(0, arrival - deadline)` for each.
+ *
+ *    It was the earliest missed deadline before, and that is degenerate: a
+ *    number wanted NOW cannot be made instantly by any arrangement, so every
+ *    arrangement missed it and all of them scored the same. The viewer who
+ *    seeked was then served by nobody, because serving them scored no better
+ *    than ignoring them. How late says what where-it-starts cannot: two seconds
+ *    against four hundred is the whole difference between a viewer who waits
+ *    and a viewer who leaves;
+ *
+ * 2. HOW MUCH WORK IS THROWN AWAY: the pieces a body would make a second time,
+ *    priced as the seconds it spends encoding them plus the seconds the swarm
+ *    spends fetching the same film again.
+ *
+ * 3. WHAT IS ABANDONED: unmade film below the lowest body, which no arrangement
+ *    of them will ever reach, priced as the seconds of encoding it represents.
+ *
+ *    Without it the objective is blind to giving up the middle of a film: those
+ *    numbers carry no deadline — nobody is coming to them YET — so leaving them
+ *    unmade cost nothing, and an encoder was taken off two hundred pieces it was
+ *    producing to gain a fraction of a second somewhere ahead. The whole file is
+ *    wanted; only WHEN differs.
+ *
+ * They are ADDED, not ranked. Ranked, any lateness at all outweighed any amount
+ * of repeated work, so an encoder walking into three hundred already-made pieces
+ * was left there rather than moved past them — and the work it repeats is paid
+ * for by the same machine and the same swarm that everybody else is waiting on,
+ * so it becomes somebody's lateness a moment later. One currency is the only
+ * honest way to compare them.
+ *
+ * Every decision in this file is made by comparing this. It replaced four local
+ * rules that each approximated it from a different side and therefore
+ * contradicted one another.
+ *
+ * @param {{ at: number, delaySec: number }[]} bodies - Where each encoder would
+ *   stand, and how long before it produces anything there: nothing where it is
+ *   already standing, a move or a start otherwise.
+ * @param {import("./CoverageMap.js").CoverageMap} coverage
+ * @param {WantedSpan[]} wanted
+ * @param {(index: number) => number} untilNeeded
+ * @param {number} rate - Segments per second, measured.
+ * @param {number} refetchSecPerSegment
+ * @param {number} segmentSeconds
+ * @returns {number} Seconds. Smaller is better; zero is nobody late and nothing
+ *   repeated.
  */
-function firstLateFrom({ coverage, wanted, surviving, rate, untilNeeded }) {
-  if (!(rate > 0)) {
-    return null;
-  }
-  const heads = [...surviving].map((run) => {
-    const head = Number(/** @type {{ head?: number }} */ (run).head);
-    return Number.isFinite(head) ? head : Number(/** @type {{ from: number }} */ (run).from);
-  });
+function latenessOf(bodies, coverage, wanted, untilNeeded, rate, refetchSecPerSegment, segmentSeconds) {
   const first = Math.min(...wanted.map((span) => span.from));
   const last = Math.max(...wanted.map((span) => span.to));
+  // What a number nobody reaches at all counts as. The film's own length is the
+  // honest bound — nothing can be later than never — and a finite figure is what
+  // lets two hopeless arrangements still be told apart by the rest of the sum.
+  const never = (last + 1) * segmentSeconds;
+  let tardiness = 0;
   for (let index = first; index <= last; index += 1) {
     if (coverage.isReady(index)) {
       continue;
     }
     const deadline = untilNeeded(index);
     if (!Number.isFinite(deadline)) {
+      // Nobody is coming here, so nothing about it can be late.
       continue;
     }
-    const reached = heads.some((head) => head <= index && (index - head + 1) / rate <= deadline);
-    if (!reached) {
-      return index;
+    let soonest = Number.POSITIVE_INFINITY;
+    for (const body of bodies) {
+      if (body.at > index) {
+        continue;
+      }
+      if (!(rate > 0)) {
+        // Nothing has measured how fast this machine encodes, so no arrival can
+        // be computed and nothing is claimed late.
+        soonest = 0;
+        break;
+      }
+      const arrival = body.delaySec
+        + (index - body.at + 1) / rate
+        + coverage.madeBetween(body.at, index) * refetchSecPerSegment;
+      if (arrival < soonest) {
+        soonest = arrival;
+      }
+    }
+    tardiness += Number.isFinite(soonest)
+      ? Math.max(0, soonest - deadline)
+      : never;
+  }
+  // A body works until its neighbour's start, so what it would make a second
+  // time is bounded there and not by the end of the film. Counted to the end,
+  // two bodies were charged for the same repeated pieces and arrangements that
+  // differ only in where the repeat happens scored the same.
+  const starts_ = bodies.map((body) => body.at).sort((left, right) => left - right);
+  // Below every body: nothing will make it. The whole file is wanted, so this
+  // is a real loss and not a free one.
+  let abandoned = 0;
+  const lowest = starts_.length > 0 ? starts_[0] : last + 1;
+  for (let index = 0; index < lowest; index += 1) {
+    if (!coverage.isReady(index)) {
+      abandoned += 1;
     }
   }
-  return null;
+  let wasted = rate > 0 ? abandoned / rate : 0;
+  for (const body of bodies) {
+    const after = starts_.find((at) => at > body.at);
+    const until = after === undefined ? last : after - 1;
+    const again = coverage.madeBetween(body.at, until);
+    wasted += rate > 0 ? again / rate + again * refetchSecPerSegment : 0;
+  }
+  return tardiness + wasted;
 }
 
 /**
@@ -553,20 +668,9 @@ function deadlineReaderFor(windows, segmentSeconds) {
  * @param {number} rate - Segments produced per second by one encoder, measured.
  *   Zero when nothing has measured it, and then no arrival time can be computed
  *   and every claimed number is left alone.
- * @param {number} startCostSec - What a NEW encoder costs before it delivers
- *   anything: starting the process and opening its input. Measured, both of
- *   them. Without it a number one second late buys a whole process that takes
- *   longer than that to produce its first piece — measured while building this,
- *   two viewers two numbers apart, one encoder each.
- * @param {number} recutCostSec - What it costs to take the road from a run that
- *   is working through this number: it stops and starts again at its own head,
- *   because where a run ends is fixed when its process starts. Measured. The
- *   original scheduling problem has no such term — its machines are free to
- *   start and stop — and leaving it out let the model call a trade a gain while
- *   somebody watching paid for it with a restart.
  * @returns {(at: number, bound: number, deadlineAt: (index: number) => number, alsoPlaced?: number[]) => number | null}
  */
-function gapFinderFor(coverage, surviving, rate, startCostSec = 0, recutCostSec = 0) {
+function gapFinderFor(coverage, surviving, rate, refetchSecPerSegment = 0) {
   /** Encoders already placed: where each stands, and how far its road runs. */
   const placed = [];
   for (const run of surviving) {
@@ -619,16 +723,6 @@ function gapFinderFor(coverage, surviving, rate, startCostSec = 0, recutCostSec 
       // second and a third on the very next numbers — three processes a segment
       // apart for one person, which is the waste this model exists to refuse.
       let soonest = Number.POSITIVE_INFINITY;
-      // Would placing here cut the road out from under somebody who is working?
-      // A live run whose road covers this number has to stop and start again at
-      // its own head, because where a run ends is fixed when its process starts.
-      let recut = 0;
-      for (const live of placed) {
-        if (live.at < index && live.to >= index) {
-          recut = recutCostSec;
-          break;
-        }
-      }
       for (const a of [...placed.map((live) => live.at), ...(alsoPlaced ?? [])]) {
         if (a > index) {
           // Standing past it. Encoders only move forward, so it never will.
@@ -646,7 +740,17 @@ function gapFinderFor(coverage, surviving, rate, startCostSec = 0, recutCostSec 
           soonest = 0;
           break;
         }
-        const arrival = (index - a + 1) / rate;
+        // WHEN THIS BODY GETS HERE, and both terms of it.
+        //
+        // Its own encoding of everything between, and the swarm's price for the
+        // film it would fetch a SECOND time — every number between that is
+        // already made, it makes again. That second term is why "should this
+        // encoder drive on or be moved" is not a question of its own: an
+        // encoder with three hundred made pieces in front of it is simply slow
+        // to arrive, and the model compares arrivals. Asked separately it was a
+        // second authority over the same encoder, and the two disagreed.
+        const arrival = (index - a + 1) / rate
+          + coverage.madeBetween(a, index) * refetchSecPerSegment;
         if (arrival < soonest) {
           soonest = arrival;
         }
@@ -655,21 +759,13 @@ function gapFinderFor(coverage, surviving, rate, startCostSec = 0, recutCostSec 
         // Somebody gets here in time. Nothing to decide.
         continue;
       }
-      // It IS late. But placing an encoder only helps if a new one would deliver
-      // it SOONER than the best of those already working, and the price of that
-      // is not only the new process:
-      //
-      //   its own start — the process and the opening of its input, measured;
-      //   the RE-CUT it forces on whoever is working through this number, who
-      //   must stop and begin again at their own head, also measured.
-      //
-      // The second was missing, so the model could count a trade a gain while it
-      // was a loss: four seconds saved for somebody far ahead, paid for with a
-      // restart in front of somebody who was watching. Both are paid in the same
-      // coin — seconds before a piece exists — so they simply add.
-      if (rate > 0 && startCostSec + recut + 1 / rate >= soonest) {
-        continue;
-      }
+      // IT IS LATE, AND THAT IS ALL THIS DECIDES. Whether filling it is worth
+      // the price is not asked here: this only proposes candidates, and the
+      // score decides how many of them are taken and by whom. Asked here as
+      // well, it was a second cost model beside the objective — with its own
+      // idea of what a process costs — and the two disagreed at exactly
+      // realtime, where every next piece is marginally late and each looked
+      // worth its own encoder.
       if (deadline < bestDue) {
         best = index;
         bestDue = deadline;

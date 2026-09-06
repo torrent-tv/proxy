@@ -23,7 +23,6 @@ import { speedFromReadings } from "./encoder-readings.js";
 import { availableShareFrom } from "./available-share.js";
 import { contentionPenalty } from "./contention.js";
 import { minimumBufferFrom } from "./supply-margin.js";
-import { mapForViewer } from "./priority/PriorityMap.js";
 import { PriorityOrchestrator } from "./priority/PriorityOrchestrator.js";
 import { baseDrawFrom, costPerMegabyteFrom } from "./torrent-cost.js";
 import { medianOf, movedBeyondScatter, scatterOf } from "./learned-median.js";

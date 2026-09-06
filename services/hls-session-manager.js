@@ -3660,61 +3660,38 @@ export class HlsSessionManager {
   }
 
   /**
-   * One viewer's demand map, translated into this output's segment numbers.
+   * One film's priority map in THIS output's own segment numbers.
    *
-   * The map itself is seconds of film and knows nothing about cut grids
-   * (`services/priority/PriorityMap.js`). The translation is this output's own
-   * business, and it is exact: the timeline holds the boundaries.
+   * Conversion and nothing else. The map is built once, in the layer that knows
+   * where the viewers are; this turns its seconds into numbers, because two
+   * outputs of one film are cut independently and the same second is a
+   * different number in each — 454 pieces against 401 on the field file.
    *
-   * Two measurements feed it, and neither is chosen here:
-   *
-   * 1. the allowance below which an interruption reaches the viewer, from this
-   *    file's own recent interruptions (`minimumBufferFrom`). Null until the
-   *    reader has seen two of them, and then only the segment itself counts;
-   * 2. how fast this machine encodes THIS track, from ffmpeg's own progress.
-   *    Below realtime it decides how much has to exist before playback starts;
-   *    above it, nothing beyond the allowance is needed.
-   *
-   * @param {object} session
-   * @param {number} atSegment - Where the viewer is.
-   * @returns {{from: number, to: number, priority: number}[]} In segment
-   *   numbers, both ends inclusive.
+   * @param {HlsSession} session - Whose cut grid the numbers are in.
+   * @param {{ from: number, to: number, priority: number, withinSeconds: number }[]} zones
+   * @returns {{ from: number, to: number, priority: number, withinSeconds: number }[]}
    */
-  #demandZonesFor(session, atSeconds, playing = true) {
-    const boundaries = session.timeline?.boundaries ?? [];
+  #zonesInSegments(session, zones) {
     const segmentCount = Number(session.timeline?.segmentCount) || 0;
-    // Where they are, in this output's own numbering. The viewer holds seconds;
-    // every cut grid turns them into its own numbers, and two grids of one film
-    // give different numbers for the same second.
-    const atSegment = segmentCount > 0 ? this.#segmentIndexForTime(session, atSeconds) : 0;
-    if (segmentCount <= 0) {
-      // No playlist yet: the only thing that can be said is that they want
-      // where they are.
-      return [{ from: atSegment, to: atSegment, priority: 3, withinSeconds: 0 }];
+    if (segmentCount <= 0 || !Array.isArray(zones) || zones.length === 0) {
+      // No playlist yet, or nobody is coming anywhere. Both are said by an empty
+      // map: there is no number that could be named, and none that is due.
+      return [];
     }
-    const durationSeconds = Number(boundaries[boundaries.length - 1]) ||
-      segmentCount * this.segmentDurationSec;
-    const zones = mapForViewer({
-      atSeconds,
-      durationSeconds,
-      allowanceSeconds: minimumBufferFrom({
-        segmentSeconds: this.segmentDurationSec,
-        worstSupplyWaitSec: session.supplyFigures?.worstWaitSec
-      })?.seconds ?? this.segmentDurationSec,
-      playing
-    });
-    /** @type {{from: number, to: number, priority: number, withinSeconds: number}[]} */
     const inSegments = [];
     for (const zone of zones) {
-      const from = Math.max(atSegment, this.#segmentIndexForTime(session, zone.from));
+      const from = Math.max(0, this.#segmentIndexForTime(session, zone.from));
       const to = Math.min(segmentCount - 1, this.#segmentIndexForTime(session, zone.to));
       if (to >= from) {
-        inSegments.push({ from, to, priority: zone.priority, withinSeconds: zone.withinSeconds });
+        inSegments.push({
+          from,
+          to,
+          priority: zone.priority,
+          withinSeconds: zone.withinSeconds
+        });
       }
     }
-    return inSegments.length > 0
-      ? inSegments
-      : [{ from: atSegment, to: atSegment, priority: 3 }];
+    return inSegments;
   }
 
   /**
@@ -3874,60 +3851,28 @@ export class HlsSessionManager {
         for (const run of liveRunsOf(session)) {
           this.encodeOrchestrator.adopt(address, run);
         }
-        // What the viewers of this session are waiting for, as spans. A viewer
-        // wants the segment they are at and the cushion in front of it, which
-        // is what the encoder is steered by everywhere else in this class.
-        //
-        // PRESENCE AND POSITION ARE ASKED SEPARATELY, and that is the whole of
-        // the 2026-09-05 fix. Presence decides whether this viewer states a
-        // want at all; position decides what the want is. Asked as one question
-        // — which is what a single field written only by segment requests
-        // amounted to — a viewer who had just arrived answered "absent", every
-        // encoder on their output was stopped for having nobody, and the
-        // `init.mp4` they were waiting for in order to request their first
-        // segment was therefore never made.
-        for (const [consumerId, viewer] of viewersOf(session)) {
-          if (!viewer.isPresent(now, staleAfterMs)) {
-            this.encodeOrchestrator.release(`${session.id}:${consumerId}`);
-            continue;
-          }
-          // Placed when they arrived, from the position their own request
-          // named. A viewer with no position is one assembled by hand outside
-          // this class; they want the beginning, which is where an output
-          // starts when nobody says otherwise.
-          // SECONDS, and turned into this output's own numbering below. A
-          // segment number taken off the viewer would mean two different
-          // moments of film on the picture and on the soundtrack, which are cut
-          // independently: 454 pieces against 401 on the field file.
-          const at = viewer.positionSeconds() ?? 0;
-          // Their own map, in seconds of film, from measurements: how much must
-          // be ready before they set off so that they never stop — the observed
-          // allowance for this file plus what an encoder at THIS machine's
-          // measured speed will fail to deliver in time — then what it reaches
-          // while they watch that, then the rest of the track. No constant is
-          // consulted: the 120 seconds that used to size this window were the
-          // suspended encoder's threshold, one chosen number answering seven
-          // different questions.
-          for (const zone of this.#demandZonesFor(session, at, viewer.playing !== false)) {
-            this.encodeOrchestrator.want({
-              // The claimant is the PERSON, without the priority in it: their
-              // zones are separate windows, but they leave together, and
-              // `release` matches on this name.
-              claimant: `${session.id}:${consumerId}`,
-              address,
-              from: zone.from,
-              to: zone.to,
-              priority: zone.priority,
-              withinSeconds: zone.withinSeconds
-            });
-          }
-        }
       }
     }
+    // THE MAP IS BUILT ONCE, IN ITS OWN LAYER, AND BOTH SIDES READ THAT ONE.
+    //
+    // It used to be built twice: once here, per viewer, converted and stated to
+    // the encoding as a window each, and once again inside `publishFor` for the
+    // downloading. Two answers to one question, and the encoding's copy carried
+    // the viewer's NAME as the key of a claim — against the rule that the
+    // encoding and the viewer are not connected at all.
     this.priority.publishFor({
       sessionGroups: byOutput.values(),
       staleAfterMs: this.presenceStaleAfterMs()
     });
+    // Converted into each output's own numbering, because two outputs of one
+    // film are cut independently and the same second is a different number in
+    // each: 454 pieces against 401 on the field file.
+    for (const [address, sessions] of byOutput) {
+      this.encodeOrchestrator.notePriorityMap(
+        address,
+        this.#zonesInSegments(sessions[0], this.priority.mapFor(sessions[0].sourceKey, sessions[0].fileIndex))
+      );
+    }
     this.encodeOrchestrator.reconcile();
   }
 
@@ -7044,11 +6989,11 @@ export class HlsSessionManager {
     if (!output) {
       return false;
     }
-    const left = this.viewers.leaves(output, consumerId);
-    if (left) {
-      this.encodeOrchestrator.release(`${output.id}:${consumerId}`);
-    }
-    return left;
+    // Nothing to release in the encoding: it holds one map per output, built
+    // from where the viewers are, and the map that arrives next simply does not
+    // have this one in it. A name to release was the last place a viewer
+    // appeared inside the encoding at all.
+    return this.viewers.leaves(output, consumerId);
   }
 
   /**

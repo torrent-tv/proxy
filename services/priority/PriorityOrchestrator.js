@@ -25,6 +25,10 @@ export class PriorityOrchestrator {
   /** The last map published per film and file, so an unchanged one is not resent. */
   #last = new Map();
 
+  /** The last map BUILT per film and file, for whoever reads instead of being
+   * handed it. @type {Map<string, object[]>} */
+  #zones = new Map();
+
   /** Who is watching one session. @type {(session: object) => Map<string, object>} */
   #viewersOf;
 
@@ -143,6 +147,24 @@ export class PriorityOrchestrator {
    * @param {string} sourceKey
    * @param {number} fileIndex
    */
+  /**
+   * The map this class last built for one file.
+   *
+   * Read by whoever acts on it and cannot be handed it at the moment it is
+   * made — the encoding decides per output, and one file has several. It is the
+   * SAME map: built once here, from where the viewers are, and neither read
+   * changes it.
+   *
+   * @param {string} sourceKey
+   * @param {number} fileIndex
+   * @returns {import("./PriorityMap.js").DemandZone[]} Empty where none was
+   *   built, which says the same as a map with nothing in it.
+   */
+  mapFor(sourceKey, fileIndex) {
+    const held = this.#zones.get(`${sourceKey}:${fileIndex}`);
+    return held ?? [];
+  }
+
   forget(sourceKey, fileIndex) {
     this.#last.delete(`${sourceKey}:${fileIndex}`);
   }

@@ -16,7 +16,7 @@
  * append, and an empty picture for six minutes (field 2026-09-05).
  */
 
-import { mapForViewer, mergeMaps } from "./PriorityMap.js";
+import { emptyMap, mapForViewer, mergeMaps, runsOf } from "./PriorityMap.js";
 
 export class PriorityOrchestrator {
   /** Where the map goes once it is built. @type {(published: object) => void} */
@@ -26,8 +26,8 @@ export class PriorityOrchestrator {
   #last = new Map();
 
   /** The last map BUILT per film and file, for whoever reads instead of being
-   * handed it. @type {Map<string, object[]>} */
-  #zones = new Map();
+   * handed it. @type {Map<string, import("./PriorityMap.js").PriorityMap>} */
+  #maps = new Map();
 
   /** Who is watching one session. @type {(session: object) => Map<string, object>} */
   #viewersOf;
@@ -62,11 +62,11 @@ export class PriorityOrchestrator {
    * @param {number} params.allowanceSeconds - The measured depth below which an
    *   interruption reaches a viewer of this file.
    * @param {{ atSeconds: number, playing: boolean }[]} params.viewers
-   * @returns {{ from: number, to: number, priority: number }[]} Seconds of film
-   *   against a number, merged over everyone.
+   * @returns {import("./PriorityMap.js").PriorityMap} One number per second of
+   *   film, merged over everyone watching it.
    */
   build({ sourceKey, fileIndex, durationSeconds, allowanceSeconds, viewers }) {
-    const zones = mergeMaps(
+    const map = mergeMaps(
       (viewers ?? []).map((viewer) =>
         mapForViewer({
           atSeconds: viewer.atSeconds,
@@ -77,15 +77,18 @@ export class PriorityOrchestrator {
       )
     );
     const key = `${sourceKey}:${fileIndex}`;
+    this.#maps.set(key, map);
     // Unchanged maps are not republished: the downloading rebuilds what it asks
     // the swarm for on every one, and a viewer sitting still would otherwise
-    // make it do that several times a second.
+    // make it do that several times a second. Compared as stretches rather than
+    // second by second, which is the same comparison over far fewer values.
+    const zones = runsOf(map);
     const shape = JSON.stringify(zones);
     if (this.#last.get(key) !== shape) {
       this.#last.set(key, shape);
       this.#publish({ sourceKey, fileIndex, durationSeconds, zones });
     }
-    return zones;
+    return map;
   }
 
   /**
@@ -157,15 +160,15 @@ export class PriorityOrchestrator {
    *
    * @param {string} sourceKey
    * @param {number} fileIndex
-   * @returns {import("./PriorityMap.js").DemandZone[]} Empty where none was
-   *   built, which says the same as a map with nothing in it.
+   * @returns {import("./PriorityMap.js").PriorityMap} A map of no length where
+   *   none was built, which says the same as a map with nothing in it.
    */
   mapFor(sourceKey, fileIndex) {
-    const held = this.#zones.get(`${sourceKey}:${fileIndex}`);
-    return held ?? [];
+    return this.#maps.get(`${sourceKey}:${fileIndex}`) ?? emptyMap(0);
   }
 
   forget(sourceKey, fileIndex) {
     this.#last.delete(`${sourceKey}:${fileIndex}`);
+    this.#maps.delete(`${sourceKey}:${fileIndex}`);
   }
 }

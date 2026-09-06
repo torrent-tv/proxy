@@ -17,7 +17,7 @@ import { logger } from "../utils/logger.js";
 import { SharedPieceStore, findSharedStore } from "./piece-store/shared-piece-store.js";
 import { Urgency } from "./demand/index.js";
 import { demandFor, forgetTorrent, reconcileAll } from "./download/registry.js";
-import { AT_THE_VIEWER, NOBODY_IS_COMING } from "./priority/PriorityMap.js";
+import { isAtAWatchingViewer, isBehindEverybody, isNobodyComingNow } from "./priority/PriorityMap.js";
 import { deriveSourceKey } from "./torrent-source-key.js";
 
 /** How a window stated from the priority map names itself. */
@@ -1056,14 +1056,19 @@ export class TorrentPool {
      * @returns {number}
      */
     const levelOf = (zone) => {
+      // Read through the map's own words rather than by comparing its numbers.
+      // The scale is that layer's, and the numbers inside a band mean nothing
+      // but their order.
       const priority = zone.priority ?? 0;
-      if (priority <= NOBODY_IS_COMING) {
+      if (isBehindEverybody(priority)) {
         return Urgency.BEHIND;
       }
-      if (priority <= NOBODY_IS_COMING + 1) {
+      if (isNobodyComingNow(priority)) {
+        // In front of somebody who has stopped the picture, and of nobody who is
+        // watching. Wanted, and wanted after everyone who is on their way.
         return Urgency.TAIL;
       }
-      return priority >= AT_THE_VIEWER ? Urgency.NEAR : Urgency.AHEAD;
+      return isAtAWatchingViewer(priority) ? Urgency.NEAR : Urgency.AHEAD;
     };
     ordered.forEach((zone, index) => {
       // A second of film sits at that fraction of the file. Constant bitrate is

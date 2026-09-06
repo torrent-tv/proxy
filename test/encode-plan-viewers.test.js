@@ -30,7 +30,7 @@ import { EventEmitter } from "node:events";
 import { EncodeRun } from "../services/encode/EncodeRun.js";
 import { SoftwareEncoder } from "../services/encode/SoftwareEncoder.js";
 import { EncodeOrchestrator } from "../services/orchestrators/EncodeOrchestrator.js";
-import { mapForViewer, mergeMaps } from "../services/priority/PriorityMap.js";
+import { mapForViewer, mergeMaps, runsOf } from "../services/priority/PriorityMap.js";
 import { contentionPenalty, penaltiesFrom } from "../services/contention.js";
 
 // WHAT A SECOND ENCODER COSTS THE FIRST — measured, never a formula.
@@ -128,7 +128,7 @@ function orchestrator({ maxRuns = 3 } = {}) {
  * @param {Map<string, { atSeconds: number, playing: boolean }>} watching
  */
 function stateMap(made, watching) {
-  const zones = mergeMaps(
+  const map = mergeMaps(
     [...watching.values()].map((viewer) => mapForViewer({
       atSeconds: viewer.atSeconds,
       durationSeconds: FILM_SECONDS,
@@ -136,14 +136,19 @@ function stateMap(made, watching) {
       playing: viewer.playing
     }))
   );
-  made.notePriorityMap(PICTURE, zones.map((zone) => ({
+  // Seconds of film into this output's own piece numbers. The product does it
+  // with the cut table, which knows where the pieces fall; here the pieces are a
+  // uniform grid, so it is a division — and doing it at all is the point, since
+  // the map is per FILM and every consumer numbers differently.
+  made.notePriorityMap(PICTURE, runsOf(map).map((zone) => ({
     from: Math.floor(zone.from / SEGMENT_SECONDS),
     to: Math.max(
       Math.floor(zone.from / SEGMENT_SECONDS),
       Math.ceil(zone.to / SEGMENT_SECONDS) - 1
     ),
     priority: zone.priority,
-    withinSeconds: zone.withinSeconds
+    withinSeconds: zone.withinSeconds,
+    behind: zone.behind
   })));
 }
 
@@ -252,17 +257,22 @@ test("one viewer paused: nothing is late, so no encoder is added", () => {
 test("one viewer paused states no deadline anywhere", () => {
   // The map's own answer, checked directly, because every placement decision
   // below rests on it.
-  const zones = mapForViewer({
+  const map = mapForViewer({
     atSeconds: 400,
     durationSeconds: FILM_SECONDS,
     allowanceSeconds: 8,
     playing: false
   });
-  assert.ok(zones.length > 0, "a paused viewer still wants the film");
-  for (const zone of zones) {
-    assert.equal(zone.withinSeconds, Number.POSITIVE_INFINITY,
+  assert.ok(map.durationSeconds > 0, "a paused viewer still wants the film");
+  for (let second = 0; second < map.durationSeconds; second += 1) {
+    assert.equal(map.secondsUntilPlayed[second], Number.POSITIVE_INFINITY,
       "but no second of it has a time by which it must exist");
   }
+  // Their POSITION survives the pause, and with it the rule that what is in
+  // front of them is made before what is behind.
+  assert.equal(map.behind[399], 1, "what they have watched is behind them");
+  assert.equal(map.behind[400], 0, "and what they have not is in front");
+  assert.ok(map.priority[400] > map.priority[399], "which is what the numbers say");
 });
 
 // --------------------------------------------------------------- two viewers

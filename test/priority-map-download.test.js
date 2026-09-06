@@ -15,7 +15,7 @@ import assert from "node:assert/strict";
 import { TorrentPool } from "../services/torrent-pool.js";
 import { demandFor, forgetTorrent } from "../services/download/registry.js";
 import { Urgency } from "../services/demand/index.js";
-import { mapForViewer } from "../services/priority/PriorityMap.js";
+import { mapForViewer, runsOf } from "../services/priority/PriorityMap.js";
 
 /** A torrent that is nothing but one file of a known length. */
 function torrentOf({ length = 1_000_000, offset = 0 } = {}) {
@@ -58,11 +58,11 @@ test("a zone is stated at the level it means, not at the level of its position",
   try {
     // A viewer 300 s into a 3000 s film: one band behind them that nobody is
     // approaching, then bands of decreasing urgency ahead.
-    const zones = mapForViewer({
+    const zones = runsOf(mapForViewer({
       atSeconds: 300,
       durationSeconds: 3000,
       allowanceSeconds: 10
-    });
+    }));
     assert.ok(zones.length > 5, "the map should be finer than the register's levels");
 
     applyPriorityMap.call(null, torrent, 0, zones, 3000);
@@ -93,23 +93,41 @@ test("a zone is stated at the level it means, not at the level of its position",
 test("a viewer who has stopped the picture makes the whole film wanted last", () => {
   const torrent = torrentOf();
   try {
-    const zones = mapForViewer({
+    const zones = runsOf(mapForViewer({
       atSeconds: 300,
       durationSeconds: 3000,
       allowanceSeconds: 10,
       playing: false
-    });
+    }));
     applyPriorityMap.call(null, torrent, 0, zones, 3000);
 
     const { register } = demandFor(torrent);
     const stated = register.windows().filter((one) => String(one.claimant).startsWith("priority-map:"));
-    assert.equal(stated.length, 1, "a viewer going nowhere makes one band of the whole film");
+    // A PAUSE REMOVES THE TIME, NOT THE DIRECTION. What they have watched is
+    // behind them and what they have not is in front, exactly as while they were
+    // watching; what changes is that nothing has a time any more, so every band
+    // of theirs yields to anybody who is on their way somewhere.
+    assert.ok(stated.length >= 2, "their position survives the pause");
+    for (const one of stated) {
+      assert.ok(
+        one.urgency === Urgency.BEHIND || one.urgency === Urgency.TAIL,
+        "and nothing of theirs is urgent, because nobody is coming"
+      );
+    }
+    const front = stated.filter((one) => one.urgency === Urgency.TAIL);
+    assert.ok(front.length >= 1, "the film in front of them is still in front");
+    assert.ok(
+      front[0].byteStart >= Math.floor((300 / 3000) * 1_000_000),
+      "and it begins where they stopped"
+    );
     // Wanted last ABSOLUTELY, not relative to this film's own map. The two
     // speculative levels are withheld across every torrent at once while
     // anything urgent is missing anywhere, so this has to lose to a film
     // somebody is actually watching — and judged against itself alone it would
     // be the most urgent thing there is.
-    assert.equal(stated[0].urgency, Urgency.BEHIND);
+    const behind = stated.filter((one) => one.urgency === Urgency.BEHIND);
+    assert.equal(behind.length, 1, "what they have already watched is wanted last of all");
+    assert.equal(behind[0].byteStart, 0, "and it is the stretch from the beginning to where they stopped");
   } finally {
     forgetTorrent(torrent);
   }

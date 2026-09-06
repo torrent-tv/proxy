@@ -21,6 +21,7 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
+import { existsSync } from "node:fs";
 import { mkdtemp, rm, writeFile, readdir } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -109,4 +110,43 @@ test("only inside the stretch the ended run was given", async () => {
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
+});
+
+test("a run given no end never reaches past what it made, so a live run's piece is safe", async () => {
+  // Field 2026-09-06. Three encoders wrote into one directory; the first was
+  // stopped, its stretch was `#0..#-1` — "to the end of the track" — and the
+  // cleanup after it took the highest-numbered file anywhere in that directory,
+  // which a LIVE encoder had just finished. The number is spent for good,
+  // because names only grow, and the picture stood still for 647 seconds.
+  const dir = await mkdtemp(path.join(os.tmpdir(), "open-piece-"));
+  // What the stopped run made: #0 and #1, with #2 left open.
+  await writeFile(path.join(dir, "segment-00000.mp4"), Buffer.alloc(1000, 1));
+  await writeFile(path.join(dir, "segment-00001.mp4"), Buffer.alloc(1000, 1));
+  await writeFile(path.join(dir, "segment-00002.mp4"), Buffer.alloc(0));
+  // What a live encoder, working further along the same track, has finished.
+  await writeFile(path.join(dir, "segment-00040.mp4"), Buffer.alloc(9000, 1));
+
+  const removed = await discardOpenPiece(
+    dir,
+    format,
+    { from: 0, to: -1 },
+    null,
+    "segment-00001.mp4"
+  );
+
+  assert.equal(removed, 2, "its own open piece goes");
+  assert.ok(existsSync(path.join(dir, "segment-00040.mp4")), "the live run's piece stays");
+});
+
+test("a run that named nothing leaves only its own first piece", async () => {
+  // It opened one file and died — 548 ms after starting, in the field. Nothing
+  // above that can be its.
+  const dir = await mkdtemp(path.join(os.tmpdir(), "open-piece-"));
+  await writeFile(path.join(dir, "segment-00010.mp4"), Buffer.alloc(0));
+  await writeFile(path.join(dir, "segment-00011.mp4"), Buffer.alloc(9000, 1));
+
+  const removed = await discardOpenPiece(dir, format, { from: 10, to: -1 }, null, null);
+
+  assert.equal(removed, 10, "the one it opened");
+  assert.ok(existsSync(path.join(dir, "segment-00011.mp4")), "and nothing beyond it");
 });

@@ -98,6 +98,10 @@ export class SegmentStore {
    */
   #closed = new Map();
 
+  /** Pieces already reported as taken on the successor rule, so one is said
+   * once. @type {Map<string, Set<number>>} */
+  #unreportedSaid = new Map();
+
   /** @type {{ info: Function, warn: Function }} */
   #logger;
 
@@ -308,7 +312,55 @@ export class SegmentStore {
     if (this.#closed.get(key)?.has(index)) {
       return true;
     }
-    return this.refresh(key).byNumber.has(index + 1);
+    const bySuccessor = this.refresh(key).byNumber.has(index + 1);
+    if (bySuccessor) {
+      this.#noteUnreported(key, index);
+    }
+    return bySuccessor;
+  }
+
+  /**
+   * A piece taken as finished because the NEXT one exists, with nothing from a
+   * run to say so.
+   *
+   * The successor rule is for what this process did not watch being written —
+   * pieces from a previous life of it. It is also the one way an unfinished
+   * piece can be served: a file that stops short still has a successor if
+   * anything wrote one, and then its name promises a whole span while it holds
+   * a fraction. Field 2026-09-06: 110 698 bytes served under a name whose
+   * neighbours are 12 MB, 40 ms of film where the playlist declared 10.4 s, and
+   * the player jumped the hole it left.
+   *
+   * That cannot arise from two encoders any more — their stretches no longer
+   * overlap — so what is left is a piece from a process that died without
+   * clearing up. Said once per piece, with its size, so a return of it is
+   * visible rather than inferred.
+   *
+   * @param {string} key
+   * @param {number} index
+   */
+  #noteUnreported(key, index) {
+    let said = this.#unreportedSaid.get(key);
+    if (!said) {
+      said = new Set();
+      this.#unreportedSaid.set(key, said);
+    }
+    if (said.has(index)) {
+      return;
+    }
+    said.add(index);
+    let bytes = -1;
+    try {
+      bytes = statSync(this.pathOf(key, index)).size;
+    } catch {
+      // Gone between the listing and this: nothing to report about it.
+      return;
+    }
+    this.#logger?.info?.(
+      `segment store: #${index} of ${key.slice(0, 60)} is taken as finished because ` +
+      `#${index + 1} exists — no run reported it (${bytes} bytes). Expected only for ` +
+      "pieces left by a previous life of this process."
+    );
   }
 
   /**

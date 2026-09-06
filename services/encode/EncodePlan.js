@@ -246,7 +246,11 @@ export function planEncoders({
       segmentSeconds > 0
         ? live.reduce((best, run) => Math.max(best, run.speedX || 0), 0) / segmentSeconds
         : 0,
-      restartCostSec + firstByteWaitSec
+      restartCostSec + firstByteWaitSec,
+      // What re-cutting a working encoder costs: killing it, starting it again,
+      // and waiting for its first bytes. The same three terms the drive-or-move
+      // comparison uses, so one price is quoted in both places.
+      killCostSec + restartCostSec + firstByteWaitSec
     ),
     deadlineAt: deadlineReaderFor(wanted, segmentSeconds)
   })) {
@@ -554,14 +558,31 @@ function deadlineReaderFor(windows, segmentSeconds) {
  *   them. Without it a number one second late buys a whole process that takes
  *   longer than that to produce its first piece — measured while building this,
  *   two viewers two numbers apart, one encoder each.
+ * @param {number} recutCostSec - What it costs to take the road from a run that
+ *   is working through this number: it stops and starts again at its own head,
+ *   because where a run ends is fixed when its process starts. Measured. The
+ *   original scheduling problem has no such term — its machines are free to
+ *   start and stop — and leaving it out let the model call a trade a gain while
+ *   somebody watching paid for it with a restart.
  * @returns {(at: number, bound: number, deadlineAt: (index: number) => number, alsoPlaced?: number[]) => number | null}
  */
-function gapFinderFor(coverage, surviving, rate, startCostSec = 0) {
-  /** Encoders already placed, by where each one now stands. @type {number[]} */
+function gapFinderFor(coverage, surviving, rate, startCostSec = 0, recutCostSec = 0) {
+  /** Encoders already placed: where each stands, and how far its road runs. */
   const placed = [];
   for (const run of surviving) {
     const head = Number(/** @type {{ head?: number }} */ (run).head);
-    placed.push(Number.isFinite(head) ? head : Number(/** @type {{ from: number }} */ (run).from));
+    placed.push({
+      at: Number.isFinite(head) ? head : Number(/** @type {{ from: number }} */ (run).from),
+      // A live run's road, so that placing inside it can be priced. A run given
+      // no end drives to the end of the film, which is what makes the price real.
+      // A run given no end drives to the end of the film, which is what makes
+      // the price of cutting in front of it real. Written out rather than
+      // imported: this file depends on nothing, and that is what lets it be
+      // exercised with plain values alone.
+      to: Number(/** @type {{ to: number }} */ (run).to) < Number(/** @type {{ from: number }} */ (run).from)
+        ? Number.POSITIVE_INFINITY
+        : Number(/** @type {{ to: number }} */ (run).to)
+    });
   }
   return (at, bound, deadlineAt, alsoPlaced) => {
     const start = Number.isInteger(at) && at > 0 ? at : 0;
@@ -598,7 +619,17 @@ function gapFinderFor(coverage, surviving, rate, startCostSec = 0) {
       // second and a third on the very next numbers — three processes a segment
       // apart for one person, which is the waste this model exists to refuse.
       let soonest = Number.POSITIVE_INFINITY;
-      for (const a of [...placed, ...(alsoPlaced ?? [])]) {
+      // Would placing here cut the road out from under somebody who is working?
+      // A live run whose road covers this number has to stop and start again at
+      // its own head, because where a run ends is fixed when its process starts.
+      let recut = 0;
+      for (const live of placed) {
+        if (live.at < index && live.to >= index) {
+          recut = recutCostSec;
+          break;
+        }
+      }
+      for (const a of [...placed.map((live) => live.at), ...(alsoPlaced ?? [])]) {
         if (a > index) {
           // Standing past it. Encoders only move forward, so it never will.
           continue;
@@ -625,11 +656,18 @@ function gapFinderFor(coverage, surviving, rate, startCostSec = 0) {
         continue;
       }
       // It IS late. But placing an encoder only helps if a new one would deliver
-      // it SOONER than the best of those already working, and a new one does not
-      // begin at once: its process has to start and its input has to open, and
-      // both of those are measured. A number a second late does not justify a
-      // process that takes longer than a second to produce anything.
-      if (rate > 0 && startCostSec + 1 / rate >= soonest) {
+      // it SOONER than the best of those already working, and the price of that
+      // is not only the new process:
+      //
+      //   its own start — the process and the opening of its input, measured;
+      //   the RE-CUT it forces on whoever is working through this number, who
+      //   must stop and begin again at their own head, also measured.
+      //
+      // The second was missing, so the model could count a trade a gain while it
+      // was a loss: four seconds saved for somebody far ahead, paid for with a
+      // restart in front of somebody who was watching. Both are paid in the same
+      // coin — seconds before a piece exists — so they simply add.
+      if (rate > 0 && startCostSec + recut + 1 / rate >= soonest) {
         continue;
       }
       if (deadline < bestDue) {

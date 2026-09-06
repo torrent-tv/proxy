@@ -72,7 +72,7 @@ export class EncodeCost {
   /**
    * @param {{
    *   liveOutputs: import("../output/LiveOutputs.js").LiveOutputs,
-   *   host: () => { benchmark: object[] | null, decodeModel: object | null, contentionPenalties: object | null, availability: { known: boolean, share: number } | null },
+   *   host: () => { benchmark: object[] | null, decodeModel: object | null, contentionPenalties: object | null, copySpeedX: number | null, availability: { known: boolean, share: number } | null },
    *   audioCostKey: (session: object) => string,
    *   runningEncoders: () => number,
    *   encodersRunningNow: () => number,
@@ -124,6 +124,61 @@ export class EncodeCost {
       concurrentCostSec: 0
     });
     return Number.isFinite(speed) && speed > 0 ? 1 / speed : 0;
+  }
+
+  /**
+   * How fast this machine produces ONE output, in seconds of film per second.
+   *
+   * THERE IS ALWAYS AN ANSWER, and that is the point of this method. Every
+   * decision in the encoding layer is made from arrivals — when would this
+   * encoder reach that piece — and an arrival cannot be computed without a
+   * speed. A speed that is missing is therefore not a smaller answer, it is no
+   * answer at all: the plan then cannot tell a viewer who will be served from
+   * one who will be left waiting, and the moment it happens is the cold start,
+   * which is when the question matters most.
+   *
+   * Three sources, most specific first, and every one of them measured:
+   *
+   * 1. what a run on THIS output has been seen doing. It is this machine, this
+   *    material and these settings, so nothing beats it;
+   * 2. the startup benchmark, for an output whose picture is re-encoded: the
+   *    preset readings and the decode model, applied to this output's own pixel
+   *    rate. It exists before any viewer;
+   * 3. the startup copy measurement, for an output whose picture is copied.
+   *    Copying neither decodes nor encodes, so neither of the above describes
+   *    it, and until it was measured this branch had no figure at all.
+   *
+   * @param {string} address - The output, as the encoding layer names it.
+   * @returns {number} Seconds of film per second. Zero only where the host
+   *   measured nothing at all, which is a broken startup rather than a state to
+   *   plan around.
+   */
+  speedForOutput(address) {
+    const sessions = this.#liveOutputs.sessionsOn(address);
+    let measured = 0;
+    for (const session of sessions) {
+      const speed = Number(session.lastAloneSpeed);
+      if (Number.isFinite(speed) && speed > measured) {
+        measured = speed;
+      }
+    }
+    if (measured > 0) {
+      return measured;
+    }
+    for (const session of sessions) {
+      if (session.transcodeVideo === true) {
+        const cost = this.#pictureCostOf(session);
+        if (cost > 0) {
+          return 1 / cost;
+        }
+        continue;
+      }
+      const copying = Number(this.#host().copySpeedX);
+      if (Number.isFinite(copying) && copying > 0) {
+        return copying;
+      }
+    }
+    return 0;
   }
 
   /**

@@ -348,11 +348,10 @@ export function planEncoders({
    * @returns {boolean}
    */
   const worseWithout = (run) => {
-    if (!(rate > 0) || live.length < 2) {
-      // Nothing has measured how fast this machine encodes, so what the film
-      // would look like without this encoder cannot be worked out — and an
-      // unmeasured quantity is a reason not to act. The only encoder there is
-      // is never the answer either: taking it away leaves nobody.
+    if (live.length < 2) {
+      // The only encoder there is is never the one to take away: nobody would
+      // be left, and the score would be comparing a film being made against a
+      // film nobody is making.
       return true;
     }
     const kept = bodiesOf(new Map());
@@ -644,17 +643,15 @@ function latenessOf(bodies, coverage, wanted, untilNeeded, rate, refetchSecPerSe
       }
       continue;
     }
-    // WHERE NO SPEED IS KNOWN, an arrival cannot be computed at all. That is a
-    // statement about knowledge, not a claim that the piece arrives late: what
-    // is still true is that a piece somebody is working towards is better off
-    // than one nobody is, so a covered piece counts as arriving at once and an
-    // uncovered one as never. Both terms then rank arrangements by COVERAGE
-    // alone, which is the only thing that can be compared without a speed.
-    //
-    // This host measures what it encodes at on startup, before any viewer, so
-    // this is the state of a process whose benchmark has not been handed to this
-    // layer yet rather than a state anyone should stay in.
-    const when = byWhom === null ? never : (rate > 0 ? soonest : 0);
+    // A piece nobody is working towards arrives never. There is no third case:
+    // the host measures what it encodes at, and what it copies at, before any
+    // viewer exists, so a speed is always a real number and an arrival can
+    // always be computed.
+    // Nothing arrives later than never, which is the bound the film's own length
+    // gives. It is a definition rather than a guard: it also makes the score
+    // total on a host whose startup measured nothing at all, where every arrival
+    // is beyond reckoning and every arrangement is therefore equally hopeless.
+    const when = byWhom === null ? never : Math.min(soonest, never);
     if (isBehind(index)) {
       behindDone = Math.max(behindDone, when);
     } else {

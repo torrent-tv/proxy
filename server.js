@@ -39,7 +39,7 @@ import { createSourceRegistry } from "./store/source-registry.js";
 import { WorkerTorrentPool } from "./services/torrent-worker/pool-adapter.js";
 import { HlsSessionManager } from "./services/hls-session-manager.js";
 import { createPlaybackPlanner } from "./services/playback-planner.js";
-import { detectVideoEncoder, benchmarkSoftwarePresets, benchmarkDecodeCost, benchmarkContention, detectTonemapSupport } from "./services/hwaccel.js";
+import { detectVideoEncoder, benchmarkSoftwarePresets, benchmarkDecodeCost, benchmarkContention, benchmarkCopySpeed, detectTonemapSupport } from "./services/hwaccel.js";
 import { logger } from "./utils/logger.js";
 
 const __filename = fileURLToPath(import.meta.url);
@@ -144,6 +144,17 @@ export async function startProxyServer({
   const softwarePresetBenchmark = videoEncoder?.kind === "software"
     ? await benchmarkSoftwarePresets({ ffmpegBin, logger })
     : null;
+  // What this host does with a picture it does NOT re-encode. Every other
+  // startup measurement prices encoding or decoding, and a copied picture does
+  // neither — it reads packets and writes them out again — so that whole branch
+  // had no speed until its own run had been running long enough to report one.
+  // The encoding layer decides where encoders go from arrivals, and an arrival
+  // cannot be computed without a speed, so the moment it mattered most was the
+  // moment nothing was known. Measured whatever the encoder is: copying does not
+  // touch it.
+  const copySpeedX = transcodeAudio
+    ? await benchmarkCopySpeed({ ffmpegBin, logger })
+    : null;
   // Whether this ffmpeg build can tone-map HDR→SDR (zscale + tonemap filters).
   // Detected once; the session manager applies the tonemap chain only for HDR
   // sources on the software path when available.
@@ -159,6 +170,7 @@ export async function startProxyServer({
     softwarePresetBenchmark,
     decodeCostModel,
     contentionPenalties,
+    copySpeedX,
     tonemapSupported,
     segmentFormatId: segmentFormat,
     stateDir,

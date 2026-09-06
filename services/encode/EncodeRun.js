@@ -61,6 +61,11 @@ const MICROSECONDS_PER_SECOND = 1_000_000;
  * @property {number} livedMs
  * @property {boolean} normal - Whether this ending is the expected one.
  * @property {string} lastError - The last thing ffmpeg said on stderr.
+ * @property {string | null} flushedName - The piece the encoder wrote out while
+ *   it was shutting down, if it wrote one. It is closed and it is SHORT: it
+ *   holds film only up to the instant the run was stopped, while its name
+ *   promises the whole span the playlist gives that number. Null where the run
+ *   was never told to stop.
  */
 
 /**
@@ -98,6 +103,26 @@ export class EncodeRun {
 
   /** Half a name left over from the last chunk of the encoder's own channel. */
   #closedTail = "";
+
+  /**
+   * The last piece named on the ready channel AFTER the run was told to stop.
+   *
+   * On SIGTERM ffmpeg writes out the piece it had open and names it like any
+   * other, so "the encoder closed it" stops meaning "it is whole". Field
+   * 2026-09-06: a run stopped mid-piece left `segment-00010.mp4` holding 3.92 s
+   * of the 5.589 s its name promises, and the viewer's picture jumped 1.5 s at
+   * 1:02. The soundtrack did the same at 17.5 s, 2.8 s wide, in the same
+   * session.
+   *
+   * Distinguished by WHEN the name arrives, which is exact and needs no reading
+   * of the file: a name that arrives after the stop was ordered is the flush.
+   * A piece genuinely closed a moment before the stop can land here too, and
+   * then it is made a second time — the cheaper of the two errors, since the
+   * other one is a hole the viewer sees.
+   *
+   * @type {string | null}
+   */
+  #flushedName = null;
 
   /**
    * When this run was told to stop, so the death itself can be priced.
@@ -426,6 +451,9 @@ export class EncodeRun {
       if (name.length === 0) {
         continue;
       }
+      if (this.#stopping) {
+        this.#flushedName = name;
+      }
       this.onClosed(name);
     }
   }
@@ -615,6 +643,7 @@ export class EncodeRun {
       from: this.from,
       to: this.to,
       reached: this.reached,
+      flushedName: this.#flushedName,
       livedMs,
       // How long dying took, and how long the first output took to appear.
       // Null where the run was never told to stop, or never produced anything:

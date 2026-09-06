@@ -73,7 +73,26 @@ function orchestrator({ maxRuns = 2 } = {}) {
     }
   });
   made.setSegmentCount(PICTURE, 1000);
-  return { made, lines, processes };
+  // A run built the way the session builds the FIRST one of an output: outside
+  // the plan, and with no end, because the free stretch reaches the last
+  // segment of the film and `-1` is how that is written everywhere here.
+  const buildRun = ({ address = PICTURE, from = 0, to = -1 } = {}) => {
+    const process_ = new FakeProcess();
+    const run = new EncodeRun({
+      address,
+      encoder: new SoftwareEncoder(),
+      from,
+      to,
+      buildArgs: () => ["-i", "in", "out"],
+      spawn: () => process_,
+      logger: { info: (line) => lines.push(line), warn: (line) => lines.push(line) },
+      now: () => 1000,
+      onEnded: (ended) => made.noteEnded(ended)
+    });
+    processes.set(run, process_);
+    return run;
+  };
+  return { made, lines, processes, buildRun };
 }
 
 test("a viewer waiting gets an encoder at what they are waiting for", () => {
@@ -84,6 +103,85 @@ test("a viewer waiting gets an encoder at what they are waiting for", () => {
   assert.equal(runs.length, 1);
   assert.equal(runs[0].from, 100, "where the viewer is stopped");
   assert.equal(runs[0].to, 999, "and on to the end of the film, nothing being in the way");
+});
+
+test("an encoder already working covers what it will reach in time", () => {
+  // THE MODEL, not a case: a segment is late when it arrives after it is needed,
+  // and an encoder placed at `a` delivers `a + j` at `(j + 1) / r`. So the
+  // question asked of a working encoder is the same one asked of a new one —
+  // when would it get here — and the answer decides whether a second process is
+  // wanted at all.
+  const { made, buildRun } = orchestrator();
+  const first = buildRun({ from: 0, to: -1 });
+  first.start("a viewer needs it");
+  first.noteSpeed(8);
+  made.adopt(PICTURE, first);
+  made.noteProduced(PICTURE, 0);
+  made.noteProduced(PICTURE, 1);
+  assert.equal(first.head, 2, "where it stands");
+
+  const coverage = made.coverageOf(PICTURE);
+  assert.equal(coverage.stateOf(15), "making", "it holds the road it was given");
+  assert.equal(coverage.stateOf(500), "making", "all of it, to the end of the film");
+
+  // Wanted fourteen segments ahead of it, and not needed for a hundred seconds.
+  // At 8x on four-second segments it makes two a second, so it arrives in about
+  // seven — in time, and no second process is bought.
+  made.want({ claimant: "one", address: PICTURE, from: 15, to: 45, withinSeconds: 100 });
+  made.reconcile();
+  assert.equal(made.runsOn(PICTURE).length, 1, "one encoder, because one is enough");
+  assert.equal(made.runsOn(PICTURE)[0], first);
+});
+
+test("somebody stopped where no encoder can arrive in time gets one of their own", () => {
+  // The same arithmetic, the other way. Needed NOW, and the encoder that holds
+  // the road is 197 segments behind it: at 1x on four-second segments that is
+  // 788 seconds. Field 2026-09-06 is the case this describes.
+  const { made, buildRun } = orchestrator();
+  const first = buildRun({ from: 0, to: -1 });
+  first.start("a viewer needs it");
+  first.noteSpeed(1);
+  made.adopt(PICTURE, first);
+  made.noteProduced(PICTURE, 0);
+  made.noteProduced(PICTURE, 1);
+  made.noteProduced(PICTURE, 2);
+
+  made.want({ claimant: "far", address: PICTURE, from: 200, to: 230, withinSeconds: 0 });
+  made.reconcile();
+
+  const runs = made.runsOn(PICTURE);
+  assert.equal(runs.length, 2, "the one waiting got an encoder");
+  assert.ok(runs.some((run) => run.from === 200), "placed exactly where it is needed");
+  // The one in front keeps working from where it stood, with an end at the new
+  // encoder's start. It is a fresh process because where a run stops is fixed
+  // when its own process starts: one given no end carries no `-to` and would
+  // open the contested file however the plan bounds it afterwards. So the
+  // viewer in front pays a restart in place, which is a cost this layer prices,
+  // rather than the two of them writing one name.
+  const ahead = runs.find((run) => run.from === 3);
+  assert.ok(ahead, "the work in front continues from where it stood");
+  assert.equal(ahead.to, 199, "and now ends where the other one begins");
+});
+
+test("two encoders on one output never share a segment number", () => {
+  // Non-overlap is not a rule here, it is a consequence: placements partition
+  // the line, because past its neighbour's start an encoder would only make
+  // what that neighbour makes sooner.
+  const { made, buildRun } = orchestrator();
+  const first = buildRun({ from: 0, to: -1 });
+  first.start("a viewer needs it");
+  first.noteSpeed(1);
+  made.adopt(PICTURE, first);
+  made.noteProduced(PICTURE, 0);
+  made.want({ claimant: "far", address: PICTURE, from: 200, to: 230, withinSeconds: 0 });
+  made.reconcile();
+  const spans = made.runsOn(PICTURE)
+    .map((run) => [run.from, run.to < run.from ? Number.POSITIVE_INFINITY : run.to])
+    .sort((left, right) => left[0] - right[0]);
+  for (let index = 0; index < spans.length - 1; index += 1) {
+    assert.ok(spans[index][1] < spans[index + 1][0],
+      `#${spans[index][0]}..#${spans[index][1]} must end before #${spans[index + 1][0]}`);
+  }
 });
 
 test("a second viewer at the same place starts nothing more", () => {
@@ -199,40 +297,6 @@ test("the line says whether anybody is still waiting", () => {
 test("nothing wanted anywhere is said plainly", () => {
   const { made } = orchestrator();
   assert.match(made.describe(), /nothing wanted/);
-});
-
-test("a run adopted with no end holds what it has made, not the rest of the film", () => {
-  // A session's own encoder is handed to the plan rather than built by it, and
-  // it carries `to = -1` — no end, which means the film's length is not known.
-  // Claiming the film from there would leave a viewer further in with no
-  // encoder at all: they would wait for this run to encode its way to them,
-  // which on a long film is an hour. What it holds is what it has produced,
-  // which is a fact rather than a distance nobody measured.
-  const { made } = orchestrator({ maxRuns: 2 });
-  const adopted = {
-    from: 0,
-    to: -1,
-    head: 3,
-    isAlive: true,
-    isStopping: false,
-    // Slow enough that the swarm is not what limits the count here: at 0.25
-    // seconds of swarm time per second of film, one encoder at 1x takes a
-    // quarter of what is delivered and four may run. The swarm's own limit has
-    // its own check below.
-    speedX: 1,
-    stop() {
-      this.isAlive = false;
-    }
-  };
-  made.adopt(PICTURE, adopted);
-
-  made.want({ claimant: "far", address: PICTURE, from: 200, to: 230 });
-  made.reconcile();
-
-  const runs = made.runsOn(PICTURE);
-  assert.equal(runs.length, 2, "the viewer further in got an encoder of their own");
-  assert.ok(adopted.isAlive, "and the adopted run was not stopped to make room");
-  assert.equal(runs.some((run) => run.from === 200), true, "started where that viewer is waiting");
 });
 
 test("the swarm limits the encoders, whatever the processor allows", () => {

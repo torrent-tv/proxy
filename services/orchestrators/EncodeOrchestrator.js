@@ -27,7 +27,6 @@ import { CoverageMap } from "../encode/CoverageMap.js";
 import { firstUnmetWant, planEncoders } from "../encode/EncodePlan.js";
 import { endOfRun } from "../encode/EncodeRun.js";
 import { ENCODE_EXIT } from "../encode/encode-exit.js";
-import { mergeMaps } from "../priority/PriorityMap.js";
 import { affordableRuns } from "../encode/run-budget.js";
 import { RunCosts } from "../encode/run-costs.js";
 import { SegmentDemand } from "../encode/SegmentDemand.js";
@@ -154,8 +153,8 @@ export class EncodeOrchestrator {
    *   takes them in this order. Absent means one undifferentiated want, which
    *   is what a caller that knows only a position states.
    */
-  want({ claimant, address, from, to, priority = 0 }) {
-    this.demand.state({ claimant, address, from, to, priority, statedAt: this.now() });
+  want({ claimant, address, from, to, priority = 0, withinSeconds = 0 }) {
+    this.demand.state({ claimant, address, from, to, priority, withinSeconds, statedAt: this.now() });
   }
 
   /**
@@ -241,32 +240,20 @@ export class EncodeOrchestrator {
         });
       }
     }
-    // Carrying the priority through, because the filling takes the work in that
-    // order: what a viewer must have before they set off comes before what is
-    // merely in front of them, which comes before the rest of the track. Passed
-    // as a plain number so the plan stays arithmetic.
     // ONE MAP, NOT ONE WINDOW PER VIEWER PER ZONE.
     //
-    // Two viewers a few seconds apart state stretches that overlap, and the
-    // plan puts one encoder on each stretch it is given — so unmerged windows
-    // buy an encoder per viewer for film they both want, which is the opposite
-    // of what sharing the output is for. Merged, the highest number per segment
-    // wins and the stretches do not overlap, so one encoder serves everyone
-    // standing in front of it.
-    const windows = mergeMaps([
-      this.demand.windowsOn(address).map((window) => ({
-        from: window.from,
-        // Half-open on the way in and back again: these are whole segment
-        // numbers, and #10..#20 next to #21..#30 must not be read as touching
-        // at 20 and 21 at once.
-        to: window.to + 1,
-        // A window stated without a number is still a want — one
-        // undifferentiated want, which is what a caller that knows only a
-        // position states. Zero would read as "nothing wanted here" and the
-        // merge would drop it.
-        priority: Number(window.priority) || 1
-      }))
-    ]).map((zone) => ({ from: zone.from, to: zone.to - 1, priority: zone.priority }));
+    // Two viewers a few seconds apart state stretches that overlap, and the plan
+    // puts one encoder on each stretch it is given — so unmerged windows buy an
+    // encoder per viewer for film they both want, which is the opposite of what
+    // sharing the output is for. Merged, the highest rank and the soonest time
+    // per number win and the stretches do not overlap, so one encoder serves
+    // everyone standing in front of it.
+    //
+    // Asked of the register, which is the thing that holds the windows. This
+    // used to reach into the layer that STATES them for the same arithmetic,
+    // which is the coupling the layer rule forbids; the arithmetic itself now
+    // lives where it belongs to nobody.
+    const windows = this.demand.mapOn(address);
     const live = this.runsOn(address).filter((run) => run.isAlive);
     const actions = planEncoders({
       coverage,
@@ -308,7 +295,22 @@ export class EncodeOrchestrator {
       }
       // A run that stays keeps its claim current: the free stretch ahead of it
       // may have shrunk since it was given one.
-      this.#claimFor(coverage, action.run, action.from, action.to);
+      //
+      // THE CLAIM IS THE STRETCH IT WAS GIVEN, and there is one rule for that
+      // everywhere. It used to be narrowed here to what the run had already
+      // MADE whenever the run had no end, which meant a run claimed the single
+      // number it was writing and nothing beyond. The plan then read the road
+      // in front of a working encoder as free and started more encoders on it:
+      // three processes writing one directory with the same names, field
+      // 2026-09-06, and a piece of the film lost for good when the first of
+      // them was cleaned up after.
+      //
+      // The worry that narrowing was written for is real and is answered where
+      // it belongs — a viewer opening the same film further in must not find
+      // every number taken. That is the plan's business, and the plan can take
+      // road away from a run that has no end, because such a run carries no
+      // `-to` and simply stops when its head meets somebody else's claim.
+      coverage.claim(action.run, action.from, endOfRun({ from: action.from, to: action.to }));
     }
   }
 
@@ -407,50 +409,7 @@ export class EncodeOrchestrator {
     }
     onThisOutput.push(run);
     this.#runs.set(address, onThisOutput);
-    this.#claimFor(this.coverageOf(address), run, run.from, run.to);
-  }
-
-  /**
-   * What a run holds, as far as the map is concerned.
-   *
-   * A run given an end holds exactly that stretch. A run given NO end — `to`
-   * below `from`, which is how this is written everywhere here — would hold the
-   * rest of the film, and that is what must not be claimed: a second viewer
-   * opening the same film further in would find every number taken and get no
-   * encoder at all, waiting instead for the first run to encode its way there,
-   * which on a long film is an hour.
-   *
-   * What bounds it in practice is the look-ahead: a run is suspended once it is
-   * that far in front of the segment its viewer last asked for, and past that it
-   * produces nothing until somebody asks. So that is the honest extent of the
-   * claim, and it is a measured figure rather than a chosen one — the same
-   * allowance the browser sizes its cushion from. `planRunInterval` has applied
-   * this rule since runs got intervals; this path did not, which is how an
-   * encoder came to be started and killed every five seconds in the field.
-   *
-   * @param {CoverageMap} coverage
-   * @param {object} run
-   * @param {number} from
-   * @param {number} to
-   */
-  #claimFor(coverage, run, from, to) {
-    const end = endOfRun({ from, to });
-    if (Number.isFinite(end)) {
-      coverage.claim(run, from, end);
-      return;
-    }
-    // A RUN WITH NO END HOLDS WHAT IT HAS MADE, NOT WHAT IT MIGHT MAKE.
-    //
-    // "No end" means the film's length is not known, so there is no last number
-    // to claim towards. Claiming the rest of the film would leave a viewer who
-    // opens the same film further in with every number taken and no encoder at
-    // all. Claiming a fixed distance in front of the head — which is what this
-    // did — needs a number nobody measured, and the number it used was the
-    // suspended-encoder threshold that no longer exists.
-    //
-    // What it has made is a fact, and it is the only one available here.
-    const head = Number.isFinite(run?.head) ? run.head : from;
-    coverage.claim(run, from, Math.max(from, head));
+    this.coverageOf(address).claim(run, run.from, endOfRun(run));
   }
 
   /**

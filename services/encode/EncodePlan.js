@@ -336,7 +336,7 @@ export function planEncoders({
     }
     const asIs = scoreOf(new Map());
     const moved = scoreOf(new Map([[run, gap]]));
-    if (moved < asIs) {
+    if (cheaperThan(moved, asIs)) {
       placement.set(run, gap);
     }
   }
@@ -348,12 +348,6 @@ export function planEncoders({
    * @returns {boolean}
    */
   const worseWithout = (run) => {
-    if (live.length < 2) {
-      // The only encoder there is is never the one to take away: nobody would
-      // be left, and the score would be comparing a film being made against a
-      // film nobody is making.
-      return true;
-    }
     const kept = bodiesOf(new Map());
     const without = bodiesOf(new Map([[run, null]]));
     const scoreOf_ = (bodies) => latenessOf(bodies, coverage, wanted, untilNeeded,
@@ -404,17 +398,7 @@ export function planEncoders({
       stops.push({
         type: "stop",
         run,
-        because: "another encoder reaches everything it would, so holding it changes nothing"
-      });
-      continue;
-    }
-    // Stopped also when there is nothing left ahead of it to make at all — a run
-    // is never stopped merely for standing outside a window.
-    if (coverage.firstGapFrom(head, undefined, run) === null) {
-      stops.push({
-        type: "stop",
-        run,
-        because: "everything ahead of it is already made or being made"
+        because: "the film is no worse off without it"
       });
       continue;
     }
@@ -576,18 +560,28 @@ function latenessOf(bodies, coverage, wanted, untilNeeded, rate, refetchSecPerSe
   // lets two hopeless arrangements still be told apart by the rest of the sum.
   const never = (last + 1) * segmentSeconds;
 
-  // BEHIND is where the map states NO TIME AT ALL. That is what the map means by
-  // it: a viewer moving forward will reach everything in front of them, so every
-  // stretch in front carries a time — the tail included, distant as it is —
-  // while what they have passed carries none, because reaching it needs a seek
-  // and nothing measures how likely that is.
+  // WHICH SIDE OF THE VIEWERS a piece is on. The map states it; nothing here
+  // works it out from positions, and nothing here knows where a viewer stands.
   //
-  // Read off the map rather than worked out from positions here. Taken as "the
-  // lowest rank present" it broke the moment a map had one zone: that zone is
-  // then both the highest rank and the lowest, so the viewer's own position was
-  // classified as behind them and every arrangement was scored inside out.
-  const isBehind = (at) => wanted.some((span) =>
-    at >= span.from && at <= span.to && !Number.isFinite(Number(span.withinSeconds)));
+  // It was read off the deadline before — no time stated meant behind — and that
+  // is true only of a viewer who is playing. A paused viewer has no times
+  // anywhere, so their whole film read as behind them, "ahead before behind"
+  // had nothing to compare, and the encoder was free to wander to the start of
+  // the file. Which side a stretch is on and how soon it is wanted are two
+  // different facts, and the map states both.
+  const isBehind = (at) => {
+    let behind = false;
+    for (const span of wanted) {
+      if (at < span.from || at > span.to) {
+        continue;
+      }
+      if (span.behind !== true) {
+        return false;
+      }
+      behind = true;
+    }
+    return behind;
+  };
 
   // EVERY COUNT IS OVER THE FILM, NOT OVER THE ENCODERS. When a piece is made
   // depends on which encoder reaches it soonest, and the encoder that reaches

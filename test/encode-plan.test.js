@@ -180,7 +180,9 @@ test("a covered stretch shorter than a restart is driven through instead", () =>
   coverage.markReady(10);
   const actions = planEncoders({
     coverage,
-    windows: [{ from: 0, to: 90 }],
+    // From where the run stands, so the only question asked is the covered piece
+    // under it. Beginning at #0 would also be asking who makes #0..#9.
+    windows: [{ from: 10, to: 90 }],
     runs: [runA],
     ...HOST
   });

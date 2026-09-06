@@ -170,29 +170,69 @@ export class Timeline {
    * It lived in the session manager, which is a place, not a layer. Here it is
    * beside the table it converts against.
    *
-   * @param {{ from: number, to: number, priority: number, withinSeconds: number }[]} zones
+   * @param {import("../priority/PriorityMap.js").PriorityMap} map - One number
+   *   per second of film.
    * @param {number} segmentCount - How many pieces this output has.
-   * @returns {{ from: number, to: number, priority: number, withinSeconds: number }[]}
-   *   Empty where nothing is stated, which says nobody is coming anywhere.
+   * @returns {import("../priority/PriorityMap.js").DemandZone[]} Runs of pieces
+   *   that agree. Empty where nothing is stated, which says nobody is coming.
    */
-  inSegments(zones, segmentCount) {
-    if (!(segmentCount > 0) || !Array.isArray(zones) || zones.length === 0) {
+  inSegments(map, segmentCount) {
+    if (!(segmentCount > 0) || !map || !(map.durationSeconds > 0)) {
       return [];
     }
-    const converted = [];
-    for (const zone of zones) {
-      const from = Math.max(0, this.indexForTime(zone.from));
-      const to = Math.min(segmentCount - 1, this.indexForTime(zone.to));
-      if (to >= from) {
-        converted.push({
-          from,
-          to,
-          priority: zone.priority,
-          withinSeconds: zone.withinSeconds
-        });
+    /** @type {import("../priority/PriorityMap.js").DemandZone[]} */
+    const runs = [];
+    for (let index = 0; index < segmentCount; index += 1) {
+      // A PIECE TAKES THE STRONGEST SECOND IT HOLDS. It is made or not made
+      // whole, so it is wanted as soon as the soonest second inside it is
+      // wanted — and the piece a viewer is standing in the middle of is wanted
+      // exactly as much as the second under their feet.
+      const from = Math.max(0, Math.floor(this.publishedStartOf(index)));
+      const until = index + 1 < segmentCount
+        ? Math.max(from + 1, Math.ceil(this.publishedStartOf(index + 1)))
+        : map.durationSeconds;
+      let priority = 0;
+      let withinSeconds = Number.POSITIVE_INFINITY;
+      let behind = true;
+      for (let second = from; second < until && second < map.durationSeconds; second += 1) {
+        if (map.priority[second] > priority) {
+          priority = map.priority[second];
+        }
+        if (map.secondsUntilPlayed[second] < withinSeconds) {
+          withinSeconds = map.secondsUntilPlayed[second];
+        }
+        if (map.behind[second] === 0) {
+          behind = false;
+        }
       }
+      if (priority === 0) {
+        continue;
+      }
+      const previous = runs[runs.length - 1];
+      if (
+        previous
+        && previous.to === index - 1
+        && previous.priority === priority
+        && previous.behind === behind
+      ) {
+        // The time is not compared, only the rank. A run's time is that of its
+        // near edge — a stretch is met at its beginning — and whoever needs the
+        // time of a piece inside it walks forward from there.
+        previous.to = index;
+        continue;
+      }
+      runs.push({
+        from: index,
+        to: index,
+        priority,
+        withinSeconds,
+        // Which side of the viewers this is. Stated by the map and carried
+        // through: converting seconds into piece numbers cannot move a stretch
+        // from in front of somebody to behind them.
+        behind
+      });
     }
-    return converted;
+    return runs;
   }
 
   /**

@@ -65,14 +65,14 @@ test("a tiny queue still waits for one round of probes", () => {
   assert.equal(verdict.needMs, PROBE_INTERVAL_MS);
 });
 
-test("nothing queued is not a wedge however long the counter has been still", () => {
+test("nothing queued is still a wedge when the counter has been flat long enough — the channel queue was 0 on the real wedge while usrsctp held 399 MB", () => {
   const verdict = wedgeIsCertain({
     queuedBytes: 0,
     bytesPerSecond: 16 * MEGABYTE,
     flatForMs: 600_000
   });
-  assert.equal(verdict.certain, false);
-  assert.equal(verdict.needMs, null);
+  assert.equal(verdict.certain, true);
+  assert.equal(verdict.needMs, PROBE_INTERVAL_MS);
 });
 
 test("with no rate measured the answer is that nothing can be said", () => {

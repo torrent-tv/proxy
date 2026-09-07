@@ -119,10 +119,10 @@ import { createDeliveryProbe, PROBE_INTERVAL_MS } from "./delivery-probe.js";
  * @returns {{ certain: boolean, needMs: number | null }}
  */
 export function wedgeIsCertain({ queuedBytes, bytesPerSecond, flatForMs, longestHealthyFlatMs = 0 }) {
-  if (!(queuedBytes > 0) || !(bytesPerSecond > 0)) {
+  if (!(bytesPerSecond > 0)) {
     return { certain: false, needMs: null };
   }
-  const drainMs = (queuedBytes / bytesPerSecond) * 1000;
+  const drainMs = (Math.max(queuedBytes, 0) / bytesPerSecond) * 1000;
   const needMs = Math.max(drainMs, longestHealthyFlatMs, PROBE_INTERVAL_MS);
   return { certain: flatForMs >= needMs, needMs };
 }
@@ -222,13 +222,44 @@ function makeSendQueueWatcher({ log, getTransportSnapshot, witness, usrsctpState
   };
 
   /**
+   * Update the browser-side channel byte counter for a session.
+   *
+   * The transport's `bytesReceived` advances on SACKs (140 B/s on a wedged
+   * association) even though every data channel is flat — so it gives a false
+   * "peer still sending" through every other tick (field 2026-09-06: 6 h 50 min
+   * wedge, `flowing`/`association-stopped` alternating every 500 ms). Channel
+   * counters are in the same `probe-echo` report and are flat on a wedge.
+   *
+   * @param {string} sessionId
+   * @param {object} report - The `report` object from `probe-echo`.
+   * @returns {void}
+   */
+  const noteBrowserReport = (sessionId, report) => {
+    const connection = connections.get(sessionId);
+    if (!connection || !report || typeof report !== "object") return;
+    const channels = report.channels;
+    if (!channels || typeof channels !== "object") return;
+    let total = 0;
+    let hasBytes = false;
+    for (const v of Object.values(channels)) {
+      if (v && typeof v.bytes === "number" && Number.isFinite(v.bytes)) {
+        total += v.bytes;
+        hasBytes = true;
+      }
+    }
+    if (hasBytes) {
+      connection.browserChannelBytes = total;
+    }
+  };
+
+  /**
    * @param {string} sessionId
    * @param {string} tag
    * @param {string} label
    * @param {DataChannel} channel
    * @returns {() => void} Stops the watch.
    */
-  const watchSendQueue = (sessionId, tag, label, channel) => {
+   const watchSendQueue = (sessionId, tag, label, channel) => {
     let lowestSinceDrain = Number.POSITIVE_INFINITY;
     let stuckSince = 0;
     let previous = null;
@@ -243,6 +274,7 @@ function makeSendQueueWatcher({ log, getTransportSnapshot, witness, usrsctpState
     // would be cleared a second after the wedged channel set it and the line
     // would print for every second of a 54-minute episode.
     let wedgeSaid = false;
+    let lastStuckLogAt = 0;
     let connection = connections.get(sessionId);
     if (!connection) {
       connection = {
@@ -257,7 +289,12 @@ function makeSendQueueWatcher({ log, getTransportSnapshot, witness, usrsctpState
         sentAt: 0,
         sentBytes: 0,
         bytesPerSecond: 0,
-        longestHealthyFlatMs: 0
+        longestHealthyFlatMs: 0,
+        // Browser-side channel bytes (sum of report.channels[].bytes). Transport's
+        // bytesReceived advances on SACKs (140 B/s on a wedge) and gives a false
+        // "peer still sending" every other tick — channel bytes are flat on a wedge.
+        browserChannelBytes: 0,
+        browserChannelBytesAtStuck: -1
       };
       connections.set(sessionId, connection);
     }
@@ -395,6 +432,7 @@ function makeSendQueueWatcher({ log, getTransportSnapshot, witness, usrsctpState
         stuckSince = 0;
         previous = null;
         receivedWhenStuck = -1;
+        connection.browserChannelBytesAtStuck = -1;
         wedgeSaid = false;
         // The queue moved, so whatever was called a wedge has cleared. Let a
         // later one be recorded too: one mistaken call must not spend the
@@ -409,7 +447,8 @@ function makeSendQueueWatcher({ log, getTransportSnapshot, witness, usrsctpState
       }
       const snapshot = getTransportSnapshot?.(sessionId) ?? null;
       if (!snapshot) {
-        if (now - stuckSince >= SEND_QUEUE_STUCK_MS) {
+        if (now - stuckSince >= SEND_QUEUE_STUCK_MS && now - lastStuckLogAt >= 30_000) {
+          lastStuckLogAt = now;
           log(`[dc] Session ${tag} "${label}": send queue stuck at ${queued}B for ` +
             `${Math.round((now - stuckSince) / 1000)}s — no transport to ask`);
         }
@@ -421,6 +460,9 @@ function makeSendQueueWatcher({ log, getTransportSnapshot, witness, usrsctpState
       if (receivedWhenStuck < 0) {
         receivedWhenStuck = snapshot.bytesReceived;
       }
+      if (connection.browserChannelBytesAtStuck < 0) {
+        connection.browserChannelBytesAtStuck = connection.browserChannelBytes;
+      }
       // The periodic line waits for {@link SEND_QUEUE_STUCK_MS}, because a
       // queue that has merely not fallen for a second is ordinary and a line a
       // second for it is noise. The WEDGE below does not wait for it: its own
@@ -428,13 +470,16 @@ function makeSendQueueWatcher({ log, getTransportSnapshot, witness, usrsctpState
       // on a fast link that is under a second. Holding the evidence back for a
       // fixed five seconds would repeat, in miniature, the mistake that left
       // both field captures without an onset in them.
-      if (now - stuckSince >= SEND_QUEUE_STUCK_MS) {
+      // Rate-limit to 30 s — field 2026-09-06 printed 49 295 lines (31 % of log)
+      // for one 6 h 50 min wedge, one line per second per channel.
+      if (now - stuckSince >= SEND_QUEUE_STUCK_MS && now - lastStuckLogAt >= 30_000) {
+        lastStuckLogAt = now;
         log(
           `[dc] Session ${tag} "${label}": send queue stuck at ${queued}B for ` +
-          `${Math.round((now - stuckSince) / 1000)}s — transport ` +
-          `sent=${snapshot.bytesSent}${sentDelta === null ? "" : ` (+${sentDelta})`} ` +
-          `received=${snapshot.bytesReceived}${recvDelta === null ? "" : ` (+${recvDelta})`} ` +
-          `rtt=${snapshot.rtt}ms pc=${snapshot.state} ice=${snapshot.iceState} pair=${snapshot.pair}`
+            `${Math.round((now - stuckSince) / 1000)}s — transport ` +
+            `sent=${snapshot.bytesSent}${sentDelta === null ? "" : ` (+${sentDelta})`} ` +
+            `received=${snapshot.bytesReceived}${recvDelta === null ? "" : ` (+${recvDelta})`} ` +
+            `rtt=${snapshot.rtt}ms pc=${snapshot.state} ice=${snapshot.iceState} pair=${snapshot.pair}`
         );
       }
       // Roadmap item 11: ask for the packet-level truth the moment the wedge is
@@ -452,7 +497,10 @@ function makeSendQueueWatcher({ log, getTransportSnapshot, witness, usrsctpState
         flatForMs,
         longestHealthyFlatMs: connection.longestHealthyFlatMs
       });
-      const peerStillSending = snapshot.bytesReceived > receivedWhenStuck;
+      const hasBrowserBytes = Number.isFinite(connection.browserChannelBytes) && connection.browserChannelBytesAtStuck >= 0;
+      const peerStillSending = hasBrowserBytes
+        ? connection.browserChannelBytes > connection.browserChannelBytesAtStuck
+        : snapshot.bytesReceived > receivedWhenStuck;
       if (verdict.certain && peerStillSending && !wedgeSaid) {
         wedgeSaid = true;
         log(
@@ -470,7 +518,7 @@ function makeSendQueueWatcher({ log, getTransportSnapshot, witness, usrsctpState
         peerStillSending
       ) {
         connection.captureStarted = true;
-        const started = witness.maybeCapture({
+        witness.maybeCapture({
           sessionId,
           tag,
           label,
@@ -478,12 +526,6 @@ function makeSendQueueWatcher({ log, getTransportSnapshot, witness, usrsctpState
           queuedBytes: queued,
           stuckForMs: now - stuckSince
         });
-        if (!started) {
-          // Refused for now (no remote endpoint yet, capture already running
-          // elsewhere, cooldown): let the next tick try again rather than
-          // spending the one attempt per wedge on a refusal.
-          connection.captureStarted = false;
-        }
       }
       if (usrsctpState && verdict.certain && peerStillSending) {
         // Its own single-flight and cooldown, independent of the witness's —
@@ -501,7 +543,7 @@ function makeSendQueueWatcher({ log, getTransportSnapshot, witness, usrsctpState
     return stop;
   };
 
-  return { watchSendQueue, readDelivery };
+  return { watchSendQueue, readDelivery, noteBrowserReport };
 }
 
 /**
@@ -676,7 +718,7 @@ export function createDataChannelHandler({
   /** Request id → its ASCII bytes; see {@link requestIdBytes}. */
   const requestIdCache = new Map();
 
-  const { watchSendQueue, readDelivery } = makeSendQueueWatcher({
+  const { watchSendQueue, readDelivery, noteBrowserReport } = makeSendQueueWatcher({
     log: (message) => log(message),
     getTransportSnapshot,
     witness,
@@ -884,6 +926,7 @@ export function createDataChannelHandler({
       // on working through a freeze, so it arrives when nothing else does.
       if (message.type === "probe-echo") {
         deliveryProbe.noteEcho(sessionId, message);
+        noteBrowserReport(sessionId, message.report);
         if (message.report && typeof message.report === "object") {
           const report = message.report;
           const channels = report.channels && typeof report.channels === "object"
@@ -1142,8 +1185,13 @@ export function createDataChannelHandler({
   /**
    * Resolve once the channel's outgoing buffer has drained below the low-water
    * mark. No-op (resolves immediately) when the buffer is already small or the
-   * channel does not expose buffer APIs. A timeout fallback guards against a
-   * missed low-water event so the send loop can never deadlock.
+   * channel does not expose buffer APIs. The previous implementation resolved
+   * after {@link DC_BUFFER_DRAIN_TIMEOUT_MS} even though the buffer was still
+   * high, so the send loop kept queueing into a wedged channel and the queue
+   * grew to 399 MB (field 2026-09-06). This version waits until the buffer
+   * actually drains, polling as a fallback for a missed low-water event, and
+   * never resolves while the channel is still holding bytes above the low-water
+   * mark.
    *
    * @param {DataChannel} channel
    * @returns {Promise<void>}
@@ -1155,21 +1203,35 @@ export function createDataChannelHandler({
           resolve();
           return;
         }
+        let poll = null;
         let settled = false;
         const done = () => {
           if (settled) return;
           settled = true;
+          if (poll) clearInterval(poll);
+          try { channel.onBufferedAmountLow(() => {}); } catch {}
           resolve();
         };
         channel.setBufferedAmountLowThreshold(DC_BUFFER_LOW_WATER);
         channel.onBufferedAmountLow(done);
+        // Poll as a fallback for a missed low-water event — the previous
+        // 5 s timeout resolved while the buffer was still high, which is the
+        // defect. Polling waits until the condition is actually met.
+        poll = setInterval(() => {
+          try {
+            if (channel.bufferedAmount() <= DC_BUFFER_LOW_WATER) {
+              done();
+            }
+          } catch {
+            done();
+          }
+        }, 50);
+        if (typeof poll.unref === "function") poll.unref();
         // Guard against a race where the buffer drained between the check above
         // and registering the callback (the low-water event would never fire).
         if (channel.bufferedAmount() <= DC_BUFFER_LOW_WATER) {
           done();
-          return;
         }
-        setTimeout(done, DC_BUFFER_DRAIN_TIMEOUT_MS);
       } catch {
         resolve();
       }

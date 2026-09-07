@@ -32,11 +32,15 @@ export async function handleApiDeliverySinkGet(req, reply, { enabled } = {}) {
   const total = Number.isFinite(requested)
     ? Math.min(Math.max(Math.trunc(requested), 0), MAX_SINK_BYTES)
     : DEFAULT_SINK_BYTES;
+  const requestedChunk = Number((req.query ?? {}).chunkBytes);
+  const chunkBytes = Number.isFinite(requestedChunk)
+    ? Math.min(Math.max(Math.trunc(requestedChunk), 1024), CHUNK_BYTES)
+    : CHUNK_BYTES;
 
   // One buffer, reused: allocating a fresh chunk per iteration would make this
   // route measure the allocator as much as the transport.
-  const chunk = Buffer.alloc(CHUNK_BYTES);
-  for (let i = 0; i < CHUNK_BYTES; i += 1) {
+  const chunk = Buffer.alloc(chunkBytes);
+  for (let i = 0; i < chunkBytes; i += 1) {
     chunk[i] = i % 251; // 251 is prime, so the pattern does not align to any power of two.
   }
 
@@ -51,8 +55,8 @@ export async function handleApiDeliverySinkGet(req, reply, { enabled } = {}) {
         controller.close();
         return;
       }
-      const size = Math.min(CHUNK_BYTES, total - sent);
-      controller.enqueue(size === CHUNK_BYTES ? chunk : chunk.subarray(0, size));
+      const size = Math.min(chunkBytes, total - sent);
+      controller.enqueue(size === chunkBytes ? chunk : chunk.subarray(0, size));
       sent += size;
     }
   });

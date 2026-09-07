@@ -372,11 +372,22 @@ export function createDeliveryProbe({
       0
     );
     // Advancing SINCE THE PREVIOUS TICK, not since the connection began: the
-    // question is whether bytes are crossing now.
-    const peerBytesAdvancing = connection.peerBytes === null
-      ? null
-      : connection.peerBytesAtTick === null || connection.peerBytes > connection.peerBytesAtTick;
-    connection.peerBytesAtTick = connection.peerBytes;
+    // question is whether bytes are crossing now. Prefer channel bytes —
+    // transport's bytesReceived advances on SACKs (140 B/s on a wedge) and
+    // gives a false "advancing" every other tick, while channel bytes are flat.
+    let peerBytesAdvancing = null;
+    if (connection.peerChannelBytes !== null) {
+      peerBytesAdvancing =
+        connection.peerChannelBytesAtTick === null ||
+        connection.peerChannelBytes > connection.peerChannelBytesAtTick;
+      connection.peerChannelBytesAtTick = connection.peerChannelBytes;
+      // keep transport's tick in sync for fallback logging
+      connection.peerBytesAtTick = connection.peerBytes;
+    } else if (connection.peerBytes !== null) {
+      peerBytesAdvancing =
+        connection.peerBytesAtTick === null || connection.peerBytes > connection.peerBytesAtTick;
+      connection.peerBytesAtTick = connection.peerBytes;
+    }
     const { verdict, detail } = readProbeState({
       seq: connection.seq,
       seen: connection.seen,
@@ -468,6 +479,13 @@ export function createDeliveryProbe({
           peerBytes: null,
           /** @type {number | null} */
           peerBytesAtTick: null,
+          // Sum of per-channel bytes (report.channels[].bytes). Transport's
+          // bytesReceived advances on SACKs (140 B/s on a wedge) and gives a
+          // false "advancing" every other tick — channel bytes are flat on a wedge.
+          /** @type {number | null} */
+          peerChannelBytes: null,
+          /** @type {number | null} */
+          peerChannelBytesAtTick: null,
           // The far end's own event-loop delay and tab state, as last reported.
           // The lag is a term in every allowance below; the tab state is only
           // printed, so that a wide allowance can be read back to its cause.
@@ -553,6 +571,21 @@ export function createDeliveryProbe({
       const peerBytes = Number(echo?.report?.transportBytesReceived);
       if (Number.isFinite(peerBytes) && peerBytes >= 0) {
         connection.peerBytes = peerBytes;
+      }
+      // Sum of per-channel bytes. Transport's bytesReceived advances on SACKs
+      // (140 B/s on a wedge) and gives a false "advancing" every other tick —
+      // channel bytes are flat on a wedge, so they are the correct signal.
+      const ch = echo?.report?.channels;
+      if (ch && typeof ch === "object") {
+        let total = 0;
+        let has = false;
+        for (const v of Object.values(ch)) {
+          if (v && typeof v.bytes === "number" && Number.isFinite(v.bytes)) {
+            total += v.bytes;
+            has = true;
+          }
+        }
+        if (has) connection.peerChannelBytes = total;
       }
       // How far behind the far end's own event loop is running. A browser that
       // cannot run its timers cannot answer a probe, and every allowance here

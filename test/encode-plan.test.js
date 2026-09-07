@@ -440,10 +440,9 @@ test("a viewer joining behind a running encoder gets their own, not a dragged on
 
 test("the lowest thing a viewer is waiting for is reported, so a stalled plan is visible", () => {
   const coverage = new CoverageMap({ segmentCount: 100 });
-  coverage.markReady(40);
-  coverage.markReady(41);
+  coverage.setReady([40, 41]);
   assert.equal(firstUnmetWant(coverage, [{ from: 40, to: 70 }]), 42);
-  coverage.markReadyAll([42, 43, 44]);
+  coverage.setReady([40, 41, 42, 43, 44]);
   assert.equal(firstUnmetWant(coverage, [{ from: 40, to: 44 }]), null);
 });
 

@@ -35,7 +35,7 @@ test("with nothing made, a run gets everything from where it was asked", () => {
 
 test("a run stops before material that is already made", () => {
   const coverage = new CoverageMap({ segmentCount: 100 });
-  coverage.markReadyAll([10, 11, 12, 13, 14, 15, 16, 17, 18, 19]);
+  coverage.setReady([10, 11, 12, 13, 14, 15, 16, 17, 18, 19]);
 
   assert.equal(coverage.freeRunFrom(0), 10, "0..9, and it stops where 10 begins");
 });
@@ -74,7 +74,7 @@ test("what a dead run DID finish stays made", () => {
   const coverage = new CoverageMap({ segmentCount: 100 });
   const dead = run("dead");
   coverage.claim(dead, 40, 60);
-  coverage.markReadyAll([40, 41, 42]);
+  coverage.setReady([40, 41, 42]);
   coverage.release(dead);
 
   assert.equal(coverage.firstGapFrom(40), 43, "a closed file is closed whoever made it");
@@ -82,7 +82,7 @@ test("what a dead run DID finish stays made", () => {
 
 test("nothing left to make is answered with nothing", () => {
   const coverage = new CoverageMap({ segmentCount: 5 });
-  coverage.markReadyAll([0, 1, 2, 3, 4]);
+  coverage.setReady([0, 1, 2, 3, 4]);
 
   assert.equal(coverage.firstGapFrom(0), null, "and a run started here would only repeat somebody's work");
 });

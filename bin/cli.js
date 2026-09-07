@@ -399,7 +399,17 @@ try {
     intervalMs: 1_000,
     quietMs: 60_000,
     changeBytes: 25 * 1024 * 1024,
-    diskPath: os.tmpdir()
+    diskPath: os.tmpdir(),
+    // WHERE A SNAPSHOT SURVIVES THE PROCESS IT IS ABOUT, and how many are kept
+    // — the same answer the torrent worker already had. This scope had neither:
+    // snapshots went to the temporary directory, which the container recreates
+    // on every restart, and all of them were kept. Fifty-four were written on
+    // 2026-09-07 and every one was gone by the time the process that wrote them
+    // died of a heap it had never been possible to look at.
+    snapshotDir: options.stateDir || undefined,
+    snapshotFloorBytes: 400 * 1024 * 1024,
+    snapshotGrowthBytes: 400 * 1024 * 1024,
+    keepSnapshots: 3
   });
 
   logger.info(`Starting @torrent-tv/proxy v${PROXY_VERSION}`);

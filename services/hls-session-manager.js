@@ -3801,7 +3801,6 @@ export class HlsSessionManager {
     const staleAfterMs = this.presenceStaleAfterMs();
     const now = Date.now();
     for (const [address, sessions] of byOutput) {
-      const coverage = this.encodeOrchestrator.coverageOf(address);
       // From the TIMELINE, which is where how a file is cut has lived since
       // 2.76.0. Read off the session it left, this was `undefined` on every
       // session ever made: the map then held no length, and the walk that
@@ -3810,9 +3809,8 @@ export class HlsSessionManager {
       // 2026-09-05 with the stack read out of the live process.
       const segmentCount = Number(sessions[0].timeline?.segmentCount) || 0;
       if (segmentCount > 0) {
-        coverage.setSegmentCount(segmentCount);
+        this.encodeOrchestrator.setSegmentCount(address, segmentCount);
       }
-      coverage.markReadyAll(this.segmentStore.provenNumbers(address));
       for (const session of sessions) {
         for (const run of liveRunsOf(session)) {
           this.encodeOrchestrator.adopt(address, run);
@@ -5418,22 +5416,12 @@ export class HlsSessionManager {
    * @returns {number} The last number to work through, or `-1` for the end.
    */
   #runEndFrom(session, startIndex, exceptRun = null) {
-    const key = session.outputKey ?? "";
-    if (!key) {
-      return -1;
-    }
-    const coverage = this.encodeOrchestrator.coverageOf(key);
-    const segmentCount = Number(session.timeline?.segmentCount) || 0;
-    if (segmentCount > 0) {
-      coverage.setSegmentCount(segmentCount);
-    }
-    coverage.markReadyAll(this.segmentStore.provenNumbers(key));
-    const free = coverage.freeRunFrom(Math.max(0, startIndex), exceptRun);
-    if (!Number.isFinite(free)) {
-      return -1;
-    }
-    const end = Math.max(0, startIndex) + Math.max(1, free) - 1;
-    return segmentCount > 0 && end >= segmentCount - 1 ? -1 : end;
+    return this.encodeOrchestrator.freeStretchEnd({
+      address: session.outputKey ?? "",
+      from: startIndex,
+      exceptRun,
+      segmentCount: Number(session.timeline?.segmentCount) || 0
+    });
   }
 
   // Returns the encoder it built, or nothing when there was nothing to build.

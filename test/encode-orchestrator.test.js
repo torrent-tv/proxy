@@ -15,7 +15,7 @@ import { EncodeRun } from "../services/encode/EncodeRun.js";
 import { ENCODE_EXIT } from "../services/encode/encode-exit.js";
 import { SoftwareEncoder } from "../services/encode/SoftwareEncoder.js";
 import { EncodeOrchestrator } from "../services/orchestrators/EncodeOrchestrator.js";
-import { contentionPenalty, penaltiesFrom } from "../services/contention.js";
+import { penaltiesFrom } from "../services/encode/contention.js";
 
 // WHAT A SECOND ENCODER COSTS THE FIRST — measured, never a formula.
 //
@@ -25,7 +25,6 @@ import { contentionPenalty, penaltiesFrom } from "../services/contention.js";
 // so nothing here invents a shape: beyond what was measured the reading is held
 // rather than extrapolated.
 const MEASURED_PENALTIES = penaltiesFrom(7.12, [{ others: 1, speed: 4.18 }]);
-const penaltyFor = (others) => contentionPenalty(others, MEASURED_PENALTIES).penalty;
 
 // What a start and a stop cost, measured on the same host: a spawn with its
 // input open is 0.12 s there.

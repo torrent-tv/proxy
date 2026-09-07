@@ -295,6 +295,20 @@ export class EncodeRun {
     return this.head - 1;
   }
 
+  /**
+   * The last piece this run named while it was running normally.
+   *
+   * Its own statement that a piece is whole, and the only thing that can say so:
+   * a piece cut short still decodes, so its contents cannot be asked. Whatever
+   * lies beyond this name was open when the run ended, and that is what the
+   * clearing-up after a run reads.
+   *
+   * @returns {string | null}
+   */
+  get provenName() {
+    return this.#provenName;
+  }
+
   /** @returns {number[]} */
   get produced() {
     return [...this.#produced].sort((left, right) => left - right);

@@ -1305,5 +1305,3 @@ const SEND_QUEUE_STUCK_MS = 5_000;
 const DC_BUFFER_HIGH_WATER = 8 * 1024 * 1024;
 /** Resume sending once the channel buffer drains to this many bytes. */
 const DC_BUFFER_LOW_WATER = 1 * 1024 * 1024;
-/** Safety fallback so the send loop cannot deadlock on a missed drain event. */
-const DC_BUFFER_DRAIN_TIMEOUT_MS = 5000;

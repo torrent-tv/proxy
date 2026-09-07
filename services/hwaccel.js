@@ -21,12 +21,12 @@
  */
 
 import { spawn } from "node:child_process";
-import { mkdtempSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readdirSync, rmSync, statSync } from "node:fs";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { fitDecodeCost } from "./decode-cost-fit.js";
-import { penaltiesFrom } from "./contention.js";
+import { penaltiesFrom } from "./encode/contention.js";
 import { fileURLToPath } from "node:url";
 import {
   parseFfmpegBitrateKbps,

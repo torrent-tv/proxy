@@ -49,7 +49,7 @@ function sessionOn({ id, dirPath, encodeStartIndex = 0, runEndIndex = -1, speed 
       cutGrid: "uniform"
     }),
     state: "ready",
-    file: new SourceFile({ sourceKey: "source-1", fileIndex: 0, name: "video.mkv" }),
+    file: new SourceFile({ sourceKey: "source-1", fileIndex: 0, name: "video.mkv" }).learn({ durationSeconds: 4000 }),
     // An ordinary session reads its own file, and its sound is inside it. The
     // three differ only for a soundtrack shipped as a file of its own.
     get inputFile() { return this.file; },
@@ -99,10 +99,14 @@ test("what a viewer waits for reaches the plan without their name", (t) => {
 
   manager.planEncodersNow();
 
-  const wanted = manager.encodeOrchestrator.demand.windowsOn(KEY);
-  assert.equal(wanted.length, 1);
-  assert.equal(wanted[0].from, 5, "where they are");
-  assert.ok(wanted[0].to > 5, "and the cushion in front of them");
+  // THE MAP IS BANDS NOW, not one window per viewer: what a viewer is stopped
+  // on, then what is in front of them band by band, then the rest of the track.
+  // The check is the same question asked of that shape — where the most urgent
+  // band begins, and that there is film in front of it.
+  const wanted = manager.encodeOrchestrator.demand.mapOn(KEY);
+  const first = [...wanted].sort((left, right) => right.priority - left.priority)[0];
+  assert.equal(first.from, 5, "where they are");
+  assert.ok(wanted.some((zone) => zone.to > 5), "and the cushion in front of them");
 });
 
 test("a viewer nothing has been heard from at all stops being waited for", (t) => {
@@ -120,7 +124,7 @@ test("a viewer nothing has been heard from at all stops being waited for", (t) =
 
   manager.planEncodersNow();
 
-  assert.equal(manager.encodeOrchestrator.demand.windowsOn(KEY).length, 0);
+  assert.equal(manager.encodeOrchestrator.demand.mapOn(KEY).length, 0);
 });
 
 test("a viewer who has arrived and asked for nothing is waited for", (t) => {
@@ -139,9 +143,10 @@ test("a viewer who has arrived and asked for nothing is waited for", (t) => {
 
   manager.planEncodersNow();
 
-  const wanted = manager.encodeOrchestrator.demand.windowsOn(KEY);
-  assert.equal(wanted.length, 1, "an output with a viewer on it is wanted");
-  assert.equal(wanted[0].from, 0, "and the beginning is where an unplaced viewer is");
+  const wanted = manager.encodeOrchestrator.demand.mapOn(KEY);
+  assert.ok(wanted.length > 0, "an output with a viewer on it is wanted");
+  const first = [...wanted].sort((left, right) => right.priority - left.priority)[0];
+  assert.equal(first.from, 0, "and the beginning is where an unplaced viewer is");
 });
 
 test("how many encoders the machine affords is measured, not chosen", (t) => {
@@ -155,7 +160,7 @@ test("how many encoders the machine affords is measured, not chosen", (t) => {
 
   // Fast, but what a second job costs on THIS machine has not been measured,
   // and an unmeasured penalty of 1 is not a statement that it is free.
-  cold.recentSpeed = { speed: 7.12 };
+  cold.lastAloneSpeed = 7.12;
   assert.equal(manager.maxRunsForOutput(KEY), 1, "no measurement, no second encoder");
 
   // Measured on the addon host 2026-09-03: at 854x480 one run made 7.12x and
@@ -166,7 +171,7 @@ test("how many encoders the machine affords is measured, not chosen", (t) => {
 
   // The same host at 1920x1080: one made 1.96x, two made 0.99x and 0.98x.
   manager.contentionPenalties = new Map([[1, 1.98]]);
-  cold.recentSpeed = { speed: 1.96 };
+  cold.lastAloneSpeed = 1.96;
   assert.equal(manager.maxRunsForOutput(KEY), 1, "the machine is full at one");
 });
 

@@ -10,7 +10,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { contentionPenalty, costWithContention, penaltiesFrom } from "../services/contention.js";
+import { contentionPenalty, costWithContention, penaltiesFrom } from "../services/encode/contention.js";
 
 /** The addon host's own readings. */
 const ALONE = 2.2;

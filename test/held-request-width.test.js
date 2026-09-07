@@ -101,8 +101,6 @@ test("a seek by one viewer does not release the request held for another", async
   t.after(async () => {
     await rm(dirPath, { recursive: true, force: true });
   });
-  const session = manager.sessionsById.get(SESSION_ID);
-
   // Both are watching the same copied picture, so both are this one session.
   // One is at segment #25, the other far ahead at #150 — inside the fixture's
   // own 200-segment timeline, since a position past the end of the grid is
@@ -110,10 +108,13 @@ test("a seek by one viewer does not release the request held for another", async
   manager.requestSeek(SESSION_ID, 100, "behind");
   manager.requestSeek(SESSION_ID, 600, "ahead");
 
-  // The shared field now holds the leader's position, which is what the
-  // encoder is steered by and what every earlier release judged BOTH of them
-  // against.
-  assert.equal(session.furthestViewerSeconds, 600);
+  // A SEEK DOES ONE THING: it puts the viewer where they now are. It used to
+  // write that position into five places, this session's shared field among
+  // them, and every held request was then judged against whoever moved last —
+  // which is exactly what this test exists to refuse. Each viewer's own
+  // position is what decides, and the two below are asked separately.
+  assert.equal(manager.viewers.get("behind").positionSeconds(), 100);
+  assert.equal(manager.viewers.get("ahead").positionSeconds(), 600);
 
   assert.equal(
     manager.requestStillWanted(SESSION_ID, segment(26), "behind"),

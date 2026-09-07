@@ -149,9 +149,6 @@ export function planEncoders({
     return stops;
   }
 
-  // How far a search for a gap needs to look: past the furthest thing anybody
-  // is waiting for there is nothing to decide about.
-  const demandTo = Math.max(...wanted.map((span) => span.to));
   const untilNeeded = deadlineReaderFor(wanted, segmentSeconds);
   // Segments produced per second, from the fastest measured encoder here.
   // Seconds of film per second, divided by the film one piece holds.

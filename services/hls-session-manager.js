@@ -21,7 +21,7 @@ import { ContainerFactory } from "./container/ContainerFactory.js";
 import { readMachineState, readProcessCpuSeconds, readProxyCpuSeconds, readSystemCpu, shareOfMachine } from "./host-load.js";
 import { speedFromReadings } from "./encoder-readings.js";
 import { availableShareFrom } from "./available-share.js";
-import { contentionPenalty } from "./contention.js";
+import { contentionPenalty } from "./encode/contention.js";
 import { minimumBufferFrom } from "./supply-margin.js";
 import { PriorityOrchestrator } from "./priority/PriorityOrchestrator.js";
 import { baseDrawFrom, costPerMegabyteFrom } from "./torrent-cost.js";
@@ -468,21 +468,16 @@ const SEEK_SETTLE_MS = 300;
 // has waited: repetition is the player saying it still needs this exact
 // segment, while a delay only says time has passed. The floor below stays as a
 // last guard against acting on a single stray poll.
-const BEHIND_HEAD_REPAIR_MIN_ASKS = 2;
 // More distinct indices than this behind the head at once is the player
 // scanning the playlist rather than waiting for a frame.
-const BEHIND_HEAD_SCAN_INDICES = 3;
 // The window the count above is taken over. A player's scan lands inside half a
 // second (field log 2026-08-02); a viewer waiting asks every few seconds.
-const BEHIND_HEAD_SCAN_WINDOW_MS = 2_000;
-const BEHIND_HEAD_REPAIR_MS = 400;
 // How far behind the run a request may be and still be treated as the encoder
 // standing in the wrong place rather than as a player scanning the playlist. A
 // misplaced run is out by at most the buffer the player was holding — measured
 // 2026-08-11 at 14 segments — while a scan probe is out by anything at all.
 // Generous against that measurement, and far short of the hundreds of segments
 // a scan reaches.
-const BEHIND_HEAD_REPAIR_MAX_SEGMENTS = 60;
 // How far the accounting of a backward restart looks for work about to be done
 // twice. It runs on the restart path and a session an hour in has thousands of
 // segments; the figure is for a comparison, not an inventory.
@@ -3798,8 +3793,6 @@ export class HlsSessionManager {
       }
       byOutput.set(address, [...(byOutput.get(address) ?? []), session]);
     }
-    const staleAfterMs = this.presenceStaleAfterMs();
-    const now = Date.now();
     for (const [address, sessions] of byOutput) {
       // From the TIMELINE, which is where how a file is cut has lived since
       // 2.76.0. Read off the session it left, this was `undefined` on every
@@ -5485,7 +5478,6 @@ export class HlsSessionManager {
     // for the seek that should move the encoder. It also stops the map growing
     // for the life of a session.
     session.firstWantedAt = new Map();
-    session.behindHeadAsks = new Map();
     // This attempt, so that a newer one can tell it has been overtaken. It used
     // to be a counter compared against a copy of itself; the attempt is a thing,
     // and comparing the thing says the same without a number to keep in step.
@@ -5948,16 +5940,6 @@ export class HlsSessionManager {
     if (!session.firstWantedAt.has(index)) {
       session.firstWantedAt.set(index, Date.now());
     }
-    // How often each index behind the run has been asked for, and how many
-    // distinct ones there are. The repair reads both: one index asked twice is
-    // a viewer waiting, a dozen asked once each is the player scanning. Kept
-    // only for what is behind the head — everything ahead is ordinary
-    // read-ahead — and cleared with each run, like the record above.
-    if (index < (earliestRunStart(session) ?? 0)) {
-      session.behindHeadAsks ??= new Map();
-      const asked = session.behindHeadAsks.get(index);
-      session.behindHeadAsks.set(index, { count: (asked?.count ?? 0) + 1, at: Date.now() });
-    }
     if (!session || session.state === "disposed" || index < 0) {
       return;
     }
@@ -6003,7 +5985,17 @@ export class HlsSessionManager {
     // should move the encoder. Only a request still unanswerable after that is
     // repaired here.
     if (index < head) {
-      this.#repairBehindHead(session, index, head);
+      // SAID, NOT ACTED ON. What is missing in front of a viewer is stated by
+      // the priority map, and putting encoders on it is the plan's work. This
+      // used to move the encoder itself, from a segment REQUEST — a second
+      // authority over where encoders go, with six chosen constants of its own,
+      // and it survived the pass that removed the other two because it lives in
+      // the path that answers a file rather than in the plan.
+      this.#explainHold(
+        session,
+        session.segmentFormat.segmentFileName(index),
+        `it is behind the run (#${head}); where the viewers are is what places encoders`
+      );
       return;
     }
     // Circuit breaker: this exact target has already failed MAX_FAILED_STARTS
@@ -6035,120 +6027,6 @@ export class HlsSessionManager {
     // when behind the encoder, and the LOWEST outstanding index marks where the
     // viewer is actually stalled — the honest input for what to produce first.
     // See research/hls-seek-prior-art-2026-08-02.md.
-  }
-
-  /**
-   * Move the encoder back to a segment it can no longer produce.
-   *
-   * A run only ever goes forward from where it began, so a request below that
-   * point is not a claim the run may yet reach — it is a hole, and holding it
-   * holds it for ever. Measured 2026-08-11: a run placed at #770 while the
-   * player needed #757 held that request for two minutes forty-one, producing
-   * 409 s of video nobody had asked for.
-   *
-   * Deliberately narrow, because moving the encoder from a segment REQUEST is
-   * exactly what this codebase removed once already: a player that cannot get
-   * what it wants scans the playlist, and those probes are scattered across the
-   * whole file (field log: #178, #681, #725, #807, #74, #245, #387 within half
-   * a second). Steering on the lowest of them put the encoder at the start of
-   * the film and left the viewer's own requests unreachable ahead of it.
-   *
-   * What separates the two: a run placed wrongly is out by at most the buffer
-   * the player had — 14 segments in the measured case — while a scan probe is
-   * out by anything at all. So only a request within reach behind the head is
-   * repaired; the rest are what they always were, claims that answer 503.
-   *
-   * @param {HlsSession} session
-   * @param {number} index - The segment being held.
-   * @param {number} head - Where the current run begins.
-   * @returns {void}
-   */
-  #repairBehindHead(session, index, head) {
-    if (head - index > BEHIND_HEAD_REPAIR_MAX_SEGMENTS) {
-      return;
-    }
-    // Nothing is encoding: a rung the viewer has switched away from is left
-    // exactly so, and its held requests must not bring its encoder back.
-    if (!processCanBeSignalled(runStateOf(session))) {
-      return;
-    }
-    // A seek already settling is about to move the encoder to where the VIEWER
-    // said they are. That statement outranks anything inferred here.
-    if (session.seekSettleTimer != null) {
-      return;
-    }
-    // And it outranks it AFTERWARDS too, which is what was missing. The guard
-    // above only holds while the settle timer is armed — a second later it is
-    // gone, and a request the browser issued BEFORE the seek is then treated as
-    // fresh evidence. Field 2026-08-17: a seek to 2083.4 s put both runs at
-    // #373, a request for #371 from before it arrived a second afterwards, and
-    // this repair moved the encoder to #370 — three segments behind the viewer,
-    // who waited for it to come back. A request BEHIND what the viewer
-    // themselves reported cannot be describing where they are.
-    const reportedSeconds = Number(session.viewerReportedSeconds);
-    if (Number.isFinite(reportedSeconds)) {
-      const reportedIndex = this.#segmentIndexForTime(session, reportedSeconds);
-      if (index < reportedIndex) {
-        this.#explainHold(
-          session,
-          session.segmentFormat.segmentFileName(index),
-          `it is behind #${reportedIndex}, where the viewer said they are — answered, not obeyed`
-        );
-        return;
-      }
-    }
-    // What separates a request the viewer is waiting for from the player
-    // scanning the playlist is not TIME but what else it is asking for. On a
-    // seek hls.js fires dozens of DIFFERENT indices within half a second (field
-    // log: #178, #681, #725, #807, #74, #245, #387) and abandons them all; a
-    // viewer waiting for audio asks for the SAME one, over and over, because it
-    // is the only thing that will let playback continue.
-    //
-    // So: this index has been asked for at least twice, and it is the only
-    // thing behind the head being asked for. Both are facts about the traffic,
-    // available at once, where a delay is a guess about it — and it was three
-    // seconds of the twenty a track change cost on 2026-08-15.
-    const asked = session.behindHeadAsks?.get(index)?.count ?? 0;
-    if (asked < BEHIND_HEAD_REPAIR_MIN_ASKS) {
-      return;
-    }
-    // Counted over a WINDOW, not over the run: a scan is many indices at once,
-    // while the same map left to accumulate would eventually hold every
-    // behind-head request a long run ever saw and switch the repair off for
-    // good.
-    const scanSince = Date.now() - BEHIND_HEAD_SCAN_WINDOW_MS;
-    let distinctBehind = 0;
-    for (const record of session.behindHeadAsks?.values() ?? []) {
-      if (record.at >= scanSince) {
-        distinctBehind += 1;
-      }
-    }
-    if (distinctBehind > BEHIND_HEAD_SCAN_INDICES) {
-      // A scan, not a wait. Moving the encoder to one of these is moving it to
-      // a number the player picked at random.
-      return;
-    }
-    const wantedAt = session.firstWantedAt?.get(index);
-    if (!Number.isFinite(wantedAt) || Date.now() - wantedAt < BEHIND_HEAD_REPAIR_MS) {
-      return;
-    }
-    const target = Math.max(0, index - SEEK_BACKOFF_SEGMENTS);
-    // The breaker has already refused this target repeatedly. Re-arming for it
-    // would log and re-arm on every poll for as long as the request is held,
-    // and move nothing.
-    if (target === session.failedStartAt && session.failedStartCount >= MAX_FAILED_STARTS) {
-      return;
-    }
-    logger.warn(
-      `transcode ${session.id} segment #${index} is behind the run (#${head}) and has waited ` +
-      `${Date.now() - wantedAt}ms — nothing this run does can produce it; moving the encoder there`
-    );
-    // Through the same settle a viewer's own seek goes through, so a burst of
-    // behind-head requests produces one restart and not one each.
-    session.seekTarget = target;
-    session.seekFirstFarAt = Date.now();
-    session.seekSettleTimer = setTimeout(() => this.#fireSettledSeek(session), SEEK_SETTLE_MS);
-    session.seekSettleTimer.unref?.();
   }
 
   /**
@@ -8045,8 +7923,13 @@ export class HlsSessionManager {
       // made — so the piece this one had open must not be left looking like one
       // of them. Not awaited: the caller's own work does not depend on it, and
       // the wait is for a process that has already been told to go.
+      // WHAT THE RUN ITSELF NAMED, which is the only thing that can say a piece
+      // is whole — a piece cut short still decodes. Written 2026-09-06 and never
+      // passed from here, so the clearing-up ran with nothing proven and fell
+      // back to bounding itself by the run's declared stretch alone.
+      const provenName = typeof run.provenName === "string" ? run.provenName : null;
       void waitForChildExit(ffmpeg, ENCODE_RUN_TERMINATE_GRACE_MS).then(() =>
-        this.#discardUnfinishedPiece(session, session.dirPath, stoppedSpan)
+        this.#discardUnfinishedPiece(session, session.dirPath, stoppedSpan, provenName)
       );
     }
     logger.info(`transcode ${session.id} ${running.length} encoder(s) stopped: ${reason}`);
@@ -9940,7 +9823,7 @@ export class HlsSessionManager {
    * @param {string | null | undefined} runDirPath
    * @returns {Promise<void>}
    */
-  async #discardUnfinishedPiece(session, runDirPath, within = null) {
+  async #discardUnfinishedPiece(session, runDirPath, within = null, provenName = null) {
     const canJudgeTracks =
       typeof session.segmentFormat?.hasEveryTrack === "function" &&
       session.initBytes &&
@@ -9956,7 +9839,8 @@ export class HlsSessionManager {
             : raw;
           return session.segmentFormat.hasEveryTrack(bytes, session.initBytes);
         }
-        : null
+        : null,
+      provenName
     );
     if (removed !== null) {
       // Removed on purpose, so the index must not go on answering with it.
@@ -9991,21 +9875,31 @@ export class HlsSessionManager {
       // failed did the player move to the segment it actually needed — 63 s of
       // spinner after a track that had been made ready in 7.
       //
-      // Narrow on purpose. A request behind the head is USUALLY temporary: the
-      // repair moves the encoder back for anything within its reach, and a
-      // reported seek is about to move it anyway. Refusing those was 2.14.1,
-      // and it left a viewer retrying a 404 for ever.
+      // WHETHER ANYBODY IS COMING FOR IT, asked of the priority map rather than
+      // measured in segments. The distance used to decide, against the reach of
+      // a repair that moved the encoder from a request — both are gone. A
+      // number inside somebody's zone will be made, so holding it is holding it
+      // for a viewer; a number in nobody's zone will not, and holding it spends
+      // the player's patience for nothing.
+      // AN EMPTY MAP IS NOT AN ANSWER. It says the map has not been built yet —
+      // a session created a moment ago, before the first pass — and that is a
+      // different thing from "nobody is coming", which is what this refusal
+      // needs. Told apart, because conflating them answers every behind-head
+      // request as absent for as long as a fresh session has no map.
+      const zones = this.encodeOrchestrator.demand.mapOn(session.outputKey ?? "");
+      const nobodyIsComing = zones.length > 0 &&
+        !zones.some((zone) => requestedIndex >= zone.from && requestedIndex <= zone.to);
       if (
         Number.isFinite(requestedIndex) &&
         requestedIndex < (earliestRunStart(session) ?? 0) &&
-        (earliestRunStart(session) ?? 0) - requestedIndex > BEHIND_HEAD_REPAIR_MAX_SEGMENTS &&
+        nobodyIsComing &&
         liveRunsOf(session).length > 0 &&
         session.seekTarget == null &&
         session.seekSettleTimer == null
       ) {
         logger.info(
           `transcode ${session.id} segment #${requestedIndex} is ${(earliestRunStart(session) ?? 0) - requestedIndex} ` +
-          `segments behind the run and beyond the repair's reach; answered as absent rather than held`
+          "segments behind the run and in nobody's zone; answered as absent rather than held"
         );
         return { kind: "not-found" };
       }

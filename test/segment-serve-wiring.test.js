@@ -19,8 +19,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { SourceFile } from "../services/source/SourceFile.js";
 import { Timeline } from "../services/output/Timeline.js";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
-import os from "node:os";
+import { rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { HlsSessionManager } from "../services/hls-session-manager.js";
 import { ENCODE_RUN_STATE } from "../services/encode/encode-run-state.js";
@@ -32,6 +31,9 @@ const VIDEO_TIMESCALE = 90_000;
 const AUDIO_TIMESCALE = 48_000;
 const SEGMENT_START_SECONDS = 12.5;
 const SESSION_ID = "11111111-2222-3333-4444-555555555555";
+// Its own address, so this file's directory in the shared store is nobody
+// else's.
+const OUTPUT_KEY = "serve-wiring:fmt=fmp4:grid=uniform:video-only:v=0/copy";
 
 /**
  * @param {string} type
@@ -120,39 +122,62 @@ function selfContainedPiece(offsetSeconds) {
  * @returns {Promise<{ manager: HlsSessionManager, session: object, dirPath: string }>}
  */
 async function managerWithReadySegment(overrides = {}) {
-  const dirPath = await mkdtemp(path.join(os.tmpdir(), "segment-serve-"));
-  const piece = selfContainedPiece(SEGMENT_START_SECONDS);
-  // Two segments, because a piece is only finished once the next one exists.
-  await writeFile(path.join(dirPath, "segment-00000.mp4"), piece);
-  await writeFile(path.join(dirPath, "segment-00001.mp4"), piece);
-
   const manager = new HlsSessionManager({
     enabled: true,
     ffmpegBin: "ffmpeg",
     localBindHost: "127.0.0.1",
     localPort: 9090
   });
+  // ADDRESSED THE WAY PRODUCTION ADDRESSES IT. A session's segments live in the
+  // store's directory for its OUTPUT, and whether one is finished is asked of
+  // the store by that same address. This fixture used to make a directory of its
+  // own and leave the session with no output address at all, so it described a
+  // proxy that no longer exists and asked for a segment the store had never
+  // heard of.
+  manager.segmentStore.useFormat(OUTPUT_KEY, overrides.segmentFormat ?? fmp4Format);
+  const dirPath = manager.segmentStore.directoryFor(OUTPUT_KEY);
+  const piece = selfContainedPiece(SEGMENT_START_SECONDS);
+  // Two segments, because a piece is only finished once the next one exists.
+  await writeFile(path.join(dirPath, "segment-00000.mp4"), piece);
+  await writeFile(path.join(dirPath, "segment-00001.mp4"), piece);
+
   const session = {
     id: SESSION_ID,
+    outputKey: OUTPUT_KEY,
     dirPath,
     // Where this file is cut, held by the file. A fixture that stated it
     // on the session was describing what production no longer does.
+    // LONGER THAN WHAT IS ON DISK. Two segments exist; the film runs to five, so
+    // there is film left to make and an encoder on it is warranted. With the
+    // whole film already made, an encoder is not — the plan stops it, correctly,
+    // and a fixture that wants a live run has to give it something to do.
     timeline: new Timeline({
-      boundaries: [0, SEGMENT_START_SECONDS, 25],
+      boundaries: [0, SEGMENT_START_SECONDS, 25, 37.5, 50, 62.5],
       cutGrid: "uniform"
     }),
     state: "ready",
-    file: new SourceFile({ sourceKey: "source-1", fileIndex: 0, name: "video.mkv" }),
+    file: new SourceFile({ sourceKey: "source-1", fileIndex: 0, name: "video.mkv" }).learn({ durationSeconds: 62.5 }),
     // An ordinary session reads its own file, and its sound is inside it. The
     // three differ only for a soundtrack shipped as a file of its own.
     get inputFile() { return this.file; },
     get audioFile() { return this.file; },
+    // WHAT THIS HOST ENCODES AT. Every real host measures it before a viewer
+    // exists, and the plan compares arrivals — which cannot be computed without
+    // it. A fixture that leaves it out describes a machine that has never
+    // measured itself: every arrangement is then equally hopeless, they all tie,
+    // and the plan takes the encoder away for changing nothing.
+    lastAloneSpeed: 2,
     startedAt: Date.now(),
     createEntryMs: Date.now(),
     lastAccessedAt: Date.now(),
     runs: new Set(),
     lastError: "",
     consumers: new Set(),
+    // Who is watching this output, and how long it is. Without the first the
+    // output has no viewers to build a priority map from, so it states no zones
+    // at all — which reads as nobody watching and stops every encoder on it.
+    viewers: new Map(),
+    segmentCount: 5,
     segmentFormat: overrides.segmentFormat ?? fmp4Format,
     useSyntheticPlaylist: true,
     playlistText: "#EXTM3U\n",
@@ -161,9 +186,20 @@ async function managerWithReadySegment(overrides = {}) {
     waitEpoch: 0
   };
   manager.sessionsById.set(SESSION_ID, session);
+  // SOMEBODY IS WATCHING IT. A segment is requested by a viewer, so a fixture
+  // that asks for one without stating a viewer describes a state production
+  // never reaches — and an output nobody is watching has every encoder on it
+  // stopped, which is right and is what left the run here reading STOPPED.
+  // NO PLAN RUNS HERE. This file is about the path that answers a request for a
+  // segment. Deciding how many encoders there should be and where is a separate
+  // question with its own checks, and letting it run inside these would spawn
+  // real ffmpeg processes and replace the very run each test is watching — the
+  // test would then be about the plan, and about it at its least stable.
+  manager.planEncodersNow = () => {};
+  manager.planEncodersSoon = () => {};
   // The run in force. The fixture's segments live directly in the session
   // directory, which is exactly what one run's directory is here.
-  startRunOn(session, { from: 0, usesExplicitCuts: true });
+  startRunOn(session, { from: 0, usesExplicitCuts: true, speedX: 2 });
   return { manager, session, dirPath };
 }
 
@@ -245,7 +281,7 @@ test("a fault while preparing an existing segment is named, not turned into a wa
 });
 
 test("a run's FIRST segment is served once the encoder has passed it, without waiting for a next one", async (t) => {
-  const { manager, session, dirPath } = await managerWithReadySegment();
+  const { manager, dirPath } = await managerWithReadySegment();
   t.after(async () => {
     await manager.disposeAll();
     await rm(dirPath, { recursive: true, force: true });
@@ -254,7 +290,12 @@ test("a run's FIRST segment is served once the encoder has passed it, without wa
   // successor and nothing is producing one. Waiting for that successor is what
   // held #317 for 46 s and then answered 404 to a browser that had given up.
   await rm(path.join(dirPath, "segment-00001.mp4"));
-  session.progress = { processedSeconds: SEGMENT_START_SECONDS + 10 };
+  // WHAT PROVES IT INSTEAD: the encoder named it. ffmpeg writes the name of each
+  // piece on a channel of its own as it closes it, so a run's own first piece is
+  // proven the moment it is finished and the absence of a next one says nothing.
+  // This used to be inferred from the encoder's reported position instead, which
+  // is a different question — where it has read to, not what it has closed.
+  manager.segmentStore.markClosed(OUTPUT_KEY, 0);
 
   const result = await manager.getFileStream(SESSION_ID, "segment-00000.mp4", { requestSeq: 1 });
 
@@ -301,12 +342,26 @@ test("serving a run's own segment moves the run out of STARTING", async (t) => {
   // let go first, because this test is about ONE run and what serving does to
   // it.
   session.runs.clear();
-  const run = startRunOn(session, { from: 0, producing: false, usesExplicitCuts: true });
+  // ITS OWN PIECE, AND FILM STILL TO MAKE BEHIND IT. A run standing on material
+  // that already exists is moved forward — correctly — so a fixture that wants a
+  // live run has to put it where the work is. #1 is what it is making; #2..#4
+  // are unmade, so it is wanted; and the encoder has named #1 on its ready
+  // channel, which is what makes the piece servable at all.
+  const run = startRunOn(session, { from: 1, producing: false, usesExplicitCuts: true, speedX: 2 });
+  manager.segmentStore.markClosed(OUTPUT_KEY, 1);
   assert.equal(run.state, ENCODE_RUN_STATE.STARTING);
+  assert.deepEqual(run.produced, [], "it has made nothing yet");
 
-  await manager.getFileStream(SESSION_ID, "segment-00000.mp4", { requestSeq: 1 });
+  await manager.getFileStream(SESSION_ID, "segment-00001.mp4", { requestSeq: 1 });
 
-  assert.equal(run.state, ENCODE_RUN_STATE.PRODUCING);
+  // ASKED OF WHAT THE SERVE WROTE, not of the state that happens to follow it.
+  // The plan owns a run's life and may end it in the same turn for reasons of
+  // its own — the machine's budget, a viewer leaving, nothing left to make —
+  // and a check that reads the state afterwards is really asking what the plan
+  // decided. What the SERVE does is tell the run the piece is finished, and that
+  // is what moves it out of starting.
+  assert.deepEqual(run.produced, [1], "the serve told the run its piece is finished");
+  assert.equal(run.head, 2, "so the run stands one past it");
 });
 
 test("a segment behind a run's own start does not claim that run has produced", async (t) => {
@@ -321,9 +376,10 @@ test("a segment behind a run's own start does not claim that run has produced", 
   // the number alone, and a run believed to be producing is one the look-ahead
   // may suspend and the seek path may wave through as "already covered".
   session.runs.clear();
-  const run = startRunOn(session, { from: 5, producing: false, usesExplicitCuts: true });
+  const run = startRunOn(session, { from: 5, producing: false, usesExplicitCuts: true, speedX: 2 });
 
   await manager.getFileStream(SESSION_ID, "segment-00000.mp4", { requestSeq: 1 });
 
-  assert.equal(run.state, ENCODE_RUN_STATE.STARTING);
+  assert.deepEqual(run.produced, [], "#0 is somebody else's work and says nothing about this run");
+  assert.equal(run.head, 5, "which is still where it began");
 });

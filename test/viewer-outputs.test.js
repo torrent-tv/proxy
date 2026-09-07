@@ -128,14 +128,7 @@ async function pictureWithStepAndSoundtrack() {
     manager.sessionsById.set(session.id, session);
   }
   file.stepHeights.set(540, 540);
-  /** @type {string[]} */
-  const released = [];
-  const realRelease = manager.encodeOrchestrator.release.bind(manager.encodeOrchestrator);
-  manager.encodeOrchestrator.release = (claimant) => {
-    released.push(claimant);
-    return realRelease(claimant);
-  };
-  return { manager, base, step, audio, dirPath, released };
+  return { manager, base, step, audio, dirPath };
 }
 
 test("a viewer who steps down, back to the picture's own height and down again keeps their record", async (t) => {
@@ -224,8 +217,8 @@ test("an output somebody else is still watching is kept when one viewer leaves",
   assert.equal(step.viewers.size, 0, "the step they had is watched by nobody");
 });
 
-test("leaving an output releases what the watching claimed of production", async (t) => {
-  const { manager, base, step, audio, dirPath, released } = await pictureWithStepAndSoundtrack();
+test("nothing is left wanting production once the last viewer has left", async (t) => {
+  const { manager, base, step, audio, dirPath } = await pictureWithStepAndSoundtrack();
   t.after(() => rm(dirPath, { recursive: true, force: true }));
   manager.viewers.of(base, VIEWER).position = { segment: 25, seconds: 100, at: Date.now() };
   manager.viewers.of(step, VIEWER);
@@ -233,10 +226,22 @@ test("leaving an output releases what the watching claimed of production", async
 
   await manager.releaseSessionConsumer(BASE_ID, VIEWER, "the viewer left");
 
+  // NOTHING HAS TO BE RELEASED, and that is the point of the shape. A claim per
+  // viewer per output used to be held in the encoding layer and taken back one
+  // by one when they left — the viewer's own name as the key of a claim, which
+  // is the coupling the layer rule forbids. What the plan is given now is a map
+  // with nobody's name in it, rebuilt from whoever is watching; a viewer who has
+  // left is simply not in the next one.
   for (const id of [BASE_ID, STEP_ID, AUDIO_ID]) {
-    assert.ok(
-      released.includes(`${id}:${VIEWER}`),
-      `the claim on ${id.slice(0, 8)} is released — the plan's own pass cannot do it once the viewer is out of the map`
+    const session = manager.sessionsById.get(id);
+    assert.equal(session, undefined, `${id.slice(0, 8)} is let go with its last viewer`);
+  }
+  manager.planEncodersNow();
+  for (const address of [base.outputKey, step.outputKey, audio.outputKey]) {
+    assert.deepEqual(
+      manager.encodeOrchestrator.demand.mapOn(address),
+      [],
+      "and no output is left asking for an encoder"
     );
   }
 });

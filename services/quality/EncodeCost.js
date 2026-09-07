@@ -23,7 +23,7 @@
  */
 
 import { correctForAvailability } from "../available-share.js";
-import { contentionPenalty } from "../contention.js";
+import { contentionPenalty } from "../encode/contention.js";
 import { TRANSCODE_FPS } from "../encode/args.js";
 import { processCanBeSignalled, runStateOf } from "../encode/encode-run-state.js";
 import { canSustainOutput, speedBar } from "../hwaccel.js";

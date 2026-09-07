@@ -352,9 +352,11 @@ test("a report from a viewer who has left stops counting", async (t) => {
   });
 
   await produceSegments(session, 2_000_000);
-  // Nothing releases a consumer when a data channel closes (roadmap item 55),
-  // so a departed viewer's last reading would otherwise go on deciding for the
-  // one still here. It is dropped on the next report rather than kept.
+  // A reading describes a link at a moment, and one this old cannot decide for
+  // the viewers still here. ONLY THE READING EXPIRES: whether the person is
+  // still watching is a different question with its own answer — their
+  // connection — and answering both from this one place is what stopped a
+  // soundtrack's encoder on 2026-09-05, so silence no longer removes anybody.
   viewerOf(session, "gone").netReport = {
     linkMbps: 1.0,
     bufferedAheadSec: 1.5,
@@ -371,7 +373,12 @@ test("a report from a viewer who has left stops counting", async (t) => {
 
   await manager.runQualityBudgetOnce();
 
-  assert.equal(session.viewers.size, 1, "the stale entry was removed, not merely ignored");
+  assert.equal(session.viewers.size, 2, "the viewer is still known — silence is not leaving");
+  assert.equal(
+    viewerOf(session, "gone").netReport,
+    null,
+    "but their reading has expired, so it decides nothing"
+  );
   assert.equal(session.qualityAsk, null, "the viewer who is here can carry the picture");
 });
 

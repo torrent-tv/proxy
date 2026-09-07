@@ -19,6 +19,26 @@
  *    thread carrying the data channel, 1350 files for a 90-minute film, on
  *    every segment request.
  *
+ * **READINESS IS A PROJECTION, NEVER A MEMORY.** What is ready is a fact of the
+ * disk, and the disk has one owner — the segment store. This map does not
+ * remember what it was once told: {@link CoverageMap#setReady} REPLACES the
+ * whole picture, so every number it calls ready was placed there by that one
+ * authority, whole, immediately before the answer was used.
+ *
+ * It used to accumulate. `markReadyAll` added and nothing ever took away — the
+ * word for taking away existed and was called from no line of the product — so
+ * a number stayed ready for the life of the process after its file had been
+ * discarded, dropped for room, or overwritten by a run restarting on it. Field
+ * 2026-09-07: this map said 482 of 482 segments were made while the directory
+ * held nothing a header could be lifted out of; the plan therefore scored every
+ * arrangement as equally perfect, took the one encoder away as unnecessary — its
+ * own words, "the film is no worse off without it" — and placed none for the
+ * rest of the session. Two sessions in a row ended with the viewer looking at an
+ * error card, and the second one never received a single byte.
+ *
+ * The remedy is not a way to un-mark. A second owner that is kept in step can
+ * fall out of step again; a projection cannot.
+ *
  * **Claims are intervals, not heads.** A run says which stretch it was given,
  * so two runs on one output cannot be sent to the same numbers: the gap finder
  * skips what another run will reach. A run that only announced its current
@@ -83,21 +103,28 @@ export class CoverageMap {
   }
 
   /**
+   * State the WHOLE picture of what is ready, replacing whatever was here.
+   *
+   * The only way readiness enters this map in the product, and the reason it
+   * cannot drift: a number absent from `indexes` is not ready, whatever this map
+   * was told a moment ago. Its file may have been discarded with the run that
+   * had it open, dropped to make room, or reopened by a run restarting on it —
+   * none of which this map can see, and none of which it now has to.
+   *
+   * There is deliberately no way to take one number back. A retraction is a
+   * second owner keeping a copy in step, and a copy kept in step is what this
+   * replaced.
+   *
    * @param {Iterable<number>} indexes
    */
-  markReadyAll(indexes) {
+  setReady(indexes) {
+    const stated = new Set();
     for (const index of indexes) {
-      this.markReady(index);
+      if (Number.isInteger(index) && index >= 0) {
+        stated.add(index);
+      }
     }
-  }
-
-  /**
-   * Forget a segment: its file has gone, or was never closed.
-   *
-   * @param {number} index
-   */
-  markGone(index) {
-    this.#ready.delete(index);
+    this.#ready = stated;
   }
 
   /**

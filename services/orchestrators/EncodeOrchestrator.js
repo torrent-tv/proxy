@@ -55,6 +55,9 @@ export class EncodeOrchestrator {
   /** The last reason a budget was cut, so the same one is not said twice. */
   #lastBudgetReason = new Map();
 
+  /** The last unmet want said out loud, so a stuck one is said once. */
+  #lastUnmet = new Map();
+
   /**
    * @param {object} params
    * @param {(address: string) => number} params.maxRunsFor - How many encoders
@@ -127,6 +130,73 @@ export class EncodeOrchestrator {
   }
 
   /**
+   * Put the map's picture of what is ready back in step with the disk.
+   *
+   * ONE AUTHORITY ON WHAT EXISTS, AND IT IS THE STORE. The map holds no memory
+   * of readiness between calls: it is handed the whole answer, replacing
+   * whatever it had, immediately before anything is decided from it. So a
+   * segment whose file was discarded with the run that had it open, dropped to
+   * make room, or reopened by a run restarting on it stops being ready in the
+   * same breath — without anything having to notice and say so.
+   *
+   * The map used to be filled from outside, by the session manager, with a
+   * method that only ever added. Nothing anywhere took a number back. Field
+   * 2026-09-07: the map claimed all 482 segments of a film while the directory
+   * held nothing, so every arrangement scored perfect, the only encoder was
+   * stopped as unnecessary and none was placed again — two sessions in a row
+   * with no picture at all.
+   *
+   * A store is optional here only in the sense that an authority which was not
+   * supplied cannot be consulted: without one the map keeps what it was told
+   * directly, which is how this class is exercised with plain numbers.
+   *
+   * @param {string} address
+   * @returns {CoverageMap}
+   */
+  #upToDateCoverage(address) {
+    const coverage = this.coverageOf(address);
+    if (this.segmentStore) {
+      coverage.setReady(this.segmentStore.provenNumbers(address));
+    }
+    return coverage;
+  }
+
+  /**
+   * Where a run started here must stop: the free stretch in front of it.
+   *
+   * Asked of the one map, brought up to date first. It used to be worked out by
+   * the session manager, which reached into this layer for the map and into the
+   * store for what was on the disk and put the two together itself — one fact
+   * with two owners and a third party carrying it between them, which is how the
+   * two came to disagree.
+   *
+   * @param {object} params
+   * @param {string} params.address
+   * @param {number} params.from - Where the run will start.
+   * @param {object | null} [params.exceptRun] - The run being replaced, whose
+   *   own claim is not somebody else's material.
+   * @param {number} [params.segmentCount] - The output's length, when known.
+   * @returns {number} The last number to work through, or `-1` for the end of
+   *   the film.
+   */
+  freeStretchEnd({ address, from, exceptRun = null, segmentCount = 0 }) {
+    if (!address) {
+      return -1;
+    }
+    if (segmentCount > 0) {
+      this.coverageOf(address).setSegmentCount(segmentCount);
+    }
+    const coverage = this.#upToDateCoverage(address);
+    const start = Math.max(0, from);
+    const free = coverage.freeRunFrom(start, exceptRun);
+    if (!Number.isFinite(free)) {
+      return -1;
+    }
+    const end = start + Math.max(1, free) - 1;
+    return segmentCount > 0 && end >= segmentCount - 1 ? -1 : end;
+  }
+
+  /**
    * @param {string} address
    * @returns {import("../encode/EncodeRun.js").EncodeRun[]}
    */
@@ -153,7 +223,9 @@ export class EncodeOrchestrator {
    * @param {Iterable<number>} indexes
    */
   noteAlreadyMade(address, indexes) {
-    this.coverageOf(address).markReadyAll(indexes);
+    for (const index of indexes) {
+      this.noteProduced(address, index);
+    }
   }
 
   /**
@@ -200,6 +272,11 @@ export class EncodeOrchestrator {
    * @param {number} index
    */
   noteProduced(address, index) {
+    // TOLD TO THE AUTHORITY, not only to the map. A piece being closed is a fact
+    // about the disk, and the store is what holds those; told to the map alone
+    // it would survive exactly until the next time the map is brought back into
+    // step, and then be gone with no file to show for it.
+    this.segmentStore?.markClosed(address, index);
     this.coverageOf(address).markReady(index);
     for (const run of this.runsOn(address)) {
       run.noteProduced(index);
@@ -258,7 +335,10 @@ export class EncodeOrchestrator {
    * @param {string} address
    */
   #reconcileOne(address) {
-    const coverage = this.coverageOf(address);
+    // WHAT EXISTS IS ASKED OF THE DISK, HERE, EVERY TIME. The plan is arithmetic
+    // over what is made, what is being made and what is wanted, and the first of
+    // those is not this layer's to remember.
+    const coverage = this.#upToDateCoverage(address);
     // A run that has ended and said nothing. One built here reports its own
     // ending and is released by `noteEnded`; one ADOPTED from elsewhere — a
     // session whose encoder stopped — has no such promise, and its claim would
@@ -290,6 +370,10 @@ export class EncodeOrchestrator {
     // lives where it belongs to nobody.
     const windows = this.demand.mapOn(address);
     const live = this.runsOn(address).filter((run) => run.isAlive);
+    // Asked ONCE. It is arithmetic over measurements, but it also says out loud
+    // when the reason it cuts the budget changes, so asking it three times in
+    // one pass is three chances to say a thing that happened once.
+    const maxRuns = this.#affordableOn(address, live);
     const actions = planEncoders({
       coverage,
       windows,
@@ -297,7 +381,7 @@ export class EncodeOrchestrator {
       // each; what it hands back names the run by BEING it, so nothing has to
       // invent a token to refer to one by.
       runs: live,
-      maxRuns: this.#affordableOn(address, live),
+      maxRuns,
       segmentSeconds: this.segmentSeconds,
       // What a start and a kill cost, measured from this host's own runs rather
       // than written into the code from one machine's reading. Zero until
@@ -335,7 +419,7 @@ export class EncodeOrchestrator {
     if (actions.some((action) => action.type === "move")) {
       this.logger.info(
         `encode-plan move on ${address}: windows=${JSON.stringify(windows)} ` +
-        `maxRuns=${this.#affordableOn(address, live)} ` +
+        `maxRuns=${maxRuns} ` +
         `live=${JSON.stringify(live.map((run) => ({ from: run.from, to: run.to, head: run.head, speedX: run.speedX })))}`
       );
     }
@@ -375,6 +459,35 @@ export class EncodeOrchestrator {
       // road away from a run that has no end, because such a run carries no
       // `-to` and simply stops when its head meets somebody else's claim.
       coverage.claim(action.run, action.from, endOfRun({ from: action.from, to: action.to }));
+    }
+
+    // NOBODY IS MAKING WHAT SOMEBODY IS WAITING FOR. Said here, with the numbers
+    // the decision was taken from, because it is the one state in which a viewer
+    // waits for ever and every line above it reads as a healthy proxy.
+    //
+    // Field 2026-09-07, twice in one evening: the last word about an output was
+    // "the film is no worse off without it", and after it nothing — no run, no
+    // refusal, no answer to the browser's request for the header. The wait ended
+    // at the browser's own timeout with a message naming no cause, and the
+    // proxy's log named none either.
+    //
+    // SAID ONCE PER STATE, not once per pass. A stuck output is reconciled on
+    // every event that touches it, and a line repeated for as long as the state
+    // lasts is what buried the last one: 49 295 copies of `send queue stuck` in
+    // a 159 090-line file, 31 % of the log, all of one wedge.
+    const wanting = firstUnmetWant(coverage, windows);
+    const stillRunning = this.runsOn(address).filter((run) => run.isAlive);
+    if (wanting === null || stillRunning.length > 0) {
+      this.#lastUnmet.delete(address);
+    } else if (this.#lastUnmet.get(address) !== wanting) {
+      this.#lastUnmet.set(address, wanting);
+      const held = this.segmentStore ? this.segmentStore.filesHeld(address) : -1;
+      this.logger.warn(
+        `encode: #${wanting} of ${address} is wanted and NO ENCODER IS MAKING IT — ` +
+        `ready=${coverage.stats().ready} of ${coverage.segmentCount} ` +
+        `files=${held < 0 ? "?" : held} maxRuns=${maxRuns} ` +
+        `windows=${JSON.stringify(windows)}`
+      );
     }
   }
 
@@ -417,11 +530,17 @@ export class EncodeOrchestrator {
     const onThisOutput = this.#runs.get(address) ?? [];
     onThisOutput.push(run);
     this.#runs.set(address, onThisOutput);
-    // This run rewrites everything from here on, so what was closed from here
-    // on is no longer closed. Without this a number closed by an earlier run
+    // This run rewrites the stretch it was given, so what was closed inside that
+    // stretch is no longer closed. Without this a number closed by an earlier run
     // stays servable while a later one is halfway through writing it again.
-    this.segmentStore?.forgetClosedFrom(address, from);
-    this.coverageOf(address).claim(run, from, endOfRun({ from, to }));
+    //
+    // Bounded by the run's own end, which is the same number the claim below
+    // carries. Unbounded it unproved the whole film beyond the start of any run,
+    // and readiness is now a projection of what is proven — so a one-segment run
+    // at the beginning would have declared the rest of the output unmade.
+    const runsTo = endOfRun({ from, to });
+    this.segmentStore?.forgetClosed(address, from, runsTo);
+    this.coverageOf(address).claim(run, from, runsTo);
     run.start(because);
   }
 
@@ -579,8 +698,21 @@ export class EncodeOrchestrator {
         .sort((left, right) => (right.priority ?? 0) - (left.priority ?? 0) || left.from - right.from)
         .map((w) => `p${w.priority ?? 0}:#${w.from}..#${w.to}`)
         .join(" ");
+      // THE WHOLE ADDRESS. Cut to sixty characters, every output of one film
+      // printed the same string — the picture, its quality steps and each
+      // soundtrack are told apart only by the tail — so three lines of this
+      // could not be matched to the three things they describe. Read on
+      // 2026-09-07 while accounting for a session that produced nothing, and
+      // the accounting had to be done by which line carried a run.
+      //
+      // And WHAT THE DISK HOLDS beside what is proven closed. They are two
+      // different statements: files with nothing proving them closed reads as a
+      // reporting fault, no files at all reads as an output yet to be made, and
+      // the difference decides where to look.
+      const held = this.segmentStore ? this.segmentStore.filesHeld(address) : -1;
       parts.push(
-        `${address.slice(0, 60)} ready=${coverage.stats().ready} ` +
+        `${address} ready=${coverage.stats().ready}` +
+        `${held < 0 ? "" : ` of ${held} file(s) on disk`} ` +
         `zones=[${zones}] runs=[${runs}] ` +
         `waiting=${waiting === null ? "nobody" : `#${waiting}`}`
       );

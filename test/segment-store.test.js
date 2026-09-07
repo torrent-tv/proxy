@@ -63,8 +63,9 @@ test("a segment is proven closed by the existence of the next one", (t) => {
   writeSegment(dir, 1);
   writeSegment(dir, 2);
 
-  // The `segment` muxer writes no temporary file, so a file that exists may
-  // still be growing; only a run that has moved past it proves otherwise.
+  // The `hls` muxer carries no channel to report on and renames into place when
+  // it closes a piece, so on that branch existence IS the proof; the same
+  // answers for the pieces a previous life of this process left behind.
   assert.deepEqual(store.provenNumbers(KEY), [0, 1]);
   assert.equal(store.unprovenNumber(KEY), 2);
 });
@@ -84,6 +85,34 @@ test("a file of no bytes is not a segment, whatever it is called", (t) => {
   // convinced the look-ahead the encoder had produced it.
   assert.equal(store.pathOf(KEY, 2), null);
   assert.deepEqual(store.provenNumbers(KEY), [0]);
+});
+
+test("a run's own stretch bounds what it unproves", (t) => {
+  const { store, root } = storeInATempRoot();
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+
+  store.useFormat(KEY, fmp4Format);
+  store.directoryFor(KEY);
+  for (let index = 0; index <= 5; index += 1) {
+    store.markClosed(KEY, index);
+  }
+
+  // A run of #0..#0 rewrites #0 and nothing else. Unbounded, this forgot the
+  // whole film beyond it — and with readiness a projection of what is proven,
+  // that is an output declaring itself unmade whenever an encoder starts near
+  // the beginning, which is a fresh encoder for every segment of it.
+  //
+  // Asked with no files on the disk, so the successor rule cannot answer for
+  // the statements and only the statements are under test.
+  store.forgetClosed(KEY, 0, 0);
+  assert.equal(store.isClosed(KEY, 0), false, "the one number it will rewrite");
+  assert.equal(store.isClosed(KEY, 1), true, "and nothing beyond its stretch");
+  assert.equal(store.isClosed(KEY, 5), true);
+
+  store.forgetClosed(KEY, 3);
+  assert.equal(store.isClosed(KEY, 2), true);
+  assert.equal(store.isClosed(KEY, 3), false, "no end given means to the end of the film");
+  assert.equal(store.isClosed(KEY, 5), false);
 });
 
 test("a directory that has not moved is not read again", (t) => {

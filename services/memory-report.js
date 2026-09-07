@@ -459,11 +459,6 @@ export function startMemoryReport({
   /** @type {Record<string, number>} */
   let lastWritten = {};
   let lastWrittenAt = 0;
-  // The process watches what the kernel kills it for; a thread watches what the
-  // runtime kills IT for, which is its own heap and not the process's resident
-  // memory — the main isolate sat at 26 MB while the worker's heap climbed to
-  // its 2240 MB ceiling.
-  const watchedOf = (memory) => (scope === "thread" ? memory.heapTotal : memory.rss);
   const slug = (label || scope).replace(/[^a-z0-9]+/gi, "-").toLowerCase();
   const directory = snapshotDir || os.tmpdir();
 
@@ -514,7 +509,6 @@ export function startMemoryReport({
         // that matters, which is the process's own.
       }
       const processMemory = readProcessMemory();
-      const watched = watchedOf(processMemory);
       const figures = watchedFigures(scope, processMemory);
       const now = Date.now();
       const sinceWrittenMs = lastWrittenAt === 0 ? Number.POSITIVE_INFINITY : now - lastWrittenAt;
@@ -569,9 +563,19 @@ export function startMemoryReport({
       // asking for one at 1.9 GB on a machine with 600 MB left is a good way to
       // cause the kill being studied. Whatever holds 1.6 GB is the same thing
       // that holds 2.2 GB, and at one reading a second no step is ever missed.
-      if (watched > highWater + snapshotGrowthBytes && watched > snapshotFloorBytes) {
-        highWater = watched;
-        await takeSnapshot(watched, "a new high-water");
+      //
+      // AND IT FOLLOWS THE JS HEAP, whatever this scope's LINE is written about.
+      // A snapshot can only ever explain the heap, and the process is killed by
+      // two different things: the kernel reads resident memory, V8 reads the
+      // heap. Taken on resident memory, 54 snapshots were written in one
+      // afternoon on 2026-09-07 for growth that was mostly native — each one
+      // stopping the main thread to write a file about the wrong quantity —
+      // and when V8 did kill the process at 1.99 GB of old space, no snapshot
+      // had ever been taken of the growth that did it.
+      const heapWatched = processMemory.heapTotal;
+      if (heapWatched > highWater + snapshotGrowthBytes && heapWatched > snapshotFloorBytes) {
+        highWater = heapWatched;
+        await takeSnapshot(heapWatched, "a new high-water of the heap");
       }
       // Under `write` by construction: `anonymousBytes` is only read when the
       // line is, and at one reading a second an unconditional warning would be

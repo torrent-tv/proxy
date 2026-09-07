@@ -102,15 +102,32 @@ test("a run's own claim is not counted as somebody else's coverage", () => {
 
 test("nothing free ahead answers null rather than a number past the end", () => {
   const map = new CoverageMap({ segmentCount: 5 });
-  map.markReadyAll([0, 1, 2, 3, 4]);
+  map.setReady([0, 1, 2, 3, 4]);
   assert.equal(map.firstGapFrom(0), null);
 });
 
 test("a file that has gone stops being ready", () => {
+  // THE CHECK THE FIELD FAILURE OF 2026-09-07 NEEDED. Readiness used to
+  // accumulate: a number told once stayed ready for the life of the process
+  // however its file ended, so the map claimed a whole film that was not there,
+  // the plan scored every arrangement as perfect and took the only encoder away.
   const map = new CoverageMap({ segmentCount: 10 });
-  map.markReady(4);
-  map.markGone(4);
-  assert.equal(map.stateOf(4), "free");
+  map.setReady([3, 4]);
+  assert.equal(map.stateOf(4), "ready");
+  map.setReady([3]);
+  assert.equal(map.stateOf(4), "free", "the picture is replaced, not added to");
+  assert.equal(map.stateOf(3), "ready", "and what is still there stays");
+});
+
+test("the whole picture is replaced, so nothing survives that the disk has lost", () => {
+  const map = new CoverageMap({ segmentCount: 500 });
+  for (let index = 0; index < 500; index += 1) {
+    map.markReady(index);
+  }
+  assert.equal(map.stats().ready, 500);
+  map.setReady([]);
+  assert.equal(map.stats().ready, 0, "an empty directory is an empty map");
+  assert.equal(map.firstGapFrom(0), 0, "and the first gap is the beginning again");
 });
 
 test("a run's own claim does not hide the gap it is trying to move into", () => {
@@ -120,7 +137,7 @@ test("a run's own claim does not hide the gap it is trying to move into", () => 
   const map = new CoverageMap({ segmentCount: 100 });
   const runA = aRun();
   map.claim(runA, 0, 99);
-  map.markReadyAll([10, 11, 12]);
+  map.setReady([10, 11, 12]);
   assert.equal(map.firstGapFrom(10, 90), null, "to anybody else its ground is taken");
   assert.equal(map.firstGapFrom(10, 90, runA), 13, "to itself the ground beyond is a gap");
 });

@@ -242,10 +242,26 @@ export class SegmentStore {
   /**
    * The segment numbers this output holds that are PROVEN closed.
    *
-   * The proof is the successor: a segment ffmpeg has moved past is finished,
-   * whatever branch wrote it. The highest number is left out, because nothing
-   * on the disk distinguishes a finished last segment from one that was being
-   * written when its run died.
+   * Two proofs, and they answer for the two ways this proxy writes segments.
+   *
+   * 1. **the writer said so** — the `segment` muxer names each file on a channel
+   *    of its own the moment it closes it;
+   * 2. **the next file exists** — which is all there is for the `hls` muxer,
+   *    which carries no such channel at all. That branch writes under a
+   *    temporary name and renames on close, so a file that exists is whole by
+   *    construction, and it is also what proves the pieces a previous life of
+   *    this process left behind.
+   *
+   * The highest number is left out either way: nothing distinguishes a finished
+   * last piece from one that was being written when its run died.
+   *
+   * WHAT THE SECOND PROOF CANNOT ANSWER, and is left open deliberately: a piece
+   * a LIVE RUN IS REWRITING. Several runs share one directory, so a file left by
+   * an earlier one is a successor to a name the run working now has just
+   * reopened, and the disk cannot know the difference. Whether that has ever
+   * moved a decision is not established from any log we hold, and every remedy
+   * for it changes what "ready" means for five readers with different questions
+   * — so it waits for a session that shows it, rather than being guessed at.
    *
    * @param {string} key
    * @returns {number[]}
@@ -263,6 +279,20 @@ export class SegmentStore {
   }
 
   /**
+   * How many numbered files this output holds, closed or not.
+   *
+   * What the disk has, against what has been proven closed: the two are printed
+   * side by side, so "the files are there and nobody reported them" reads
+   * differently from "there is nothing there".
+   *
+   * @param {string} key
+   * @returns {number}
+   */
+  filesHeld(key) {
+    return this.refresh(key).byNumber.size;
+  }
+
+  /**
    * A run is about to write these numbers again: forget that they were closed.
    *
    * A number closed once is not closed for ever. An encoder started at #N
@@ -274,20 +304,30 @@ export class SegmentStore {
    * from — an empty picture for the six minutes that followed.
    *
    * @param {string} key
-   * @param {number} from
+   * @param {number} from - First number the run will write.
+   * @param {number} [to] - Last one, inclusive. Infinite for a run given no end,
+   *   which does walk to the end of the film.
    */
-  forgetClosedFrom(key, from) {
+  forgetClosed(key, from, to = Number.POSITIVE_INFINITY) {
     const known = this.#closed.get(key);
     if (!known || !Number.isInteger(from)) {
       return;
     }
+    // BOUNDED BY THE RUN'S OWN STRETCH, because that is what it will rewrite.
+    //
+    // It used to forget everything from `from` upwards, on the reading that a
+    // run has no end — which was true until runs were given intervals. A run of
+    // #0..#0 then unproved the whole rest of the film, and with readiness a
+    // projection of what is proven that is an output declaring itself unmade
+    // every time an encoder starts anywhere near the beginning.
+    const last = Number.isFinite(to) ? Math.max(from, Math.trunc(to)) : Number.POSITIVE_INFINITY;
     for (const index of known) {
-      if (index >= from) {
+      if (index >= from && index <= last) {
         known.delete(index);
       }
     }
-    // What the directory says has to be read again too: the successor rule
-    // would otherwise prove the rewritten piece from a file made before it.
+    // What the directory says has to be read again too, so that the size of a
+    // reopened piece is the size it has now and not the one it had before.
     this.#held.delete(key);
   }
 
@@ -296,13 +336,22 @@ export class SegmentStore {
    *
    * Two proofs, and the first is the good one:
    *
-   * 1. **the encoder said so** — it names each file on a channel of its own the
-   *    moment it closes it, so the name is the writer's own statement that the
-   *    piece is whole;
-   * 2. **the next file exists** — which only proves it for pieces this process
-   *    did not watch being written, left by an earlier life of it. It is not
-   *    true of the last piece of any run, and that is what used to hold the
-   *    first segment of every run from the viewer.
+   * 1. **the encoder said so** — the `segment` muxer names each file on a
+   *    channel of its own the moment it closes it, so the name is the writer's
+   *    own statement that the piece is whole;
+   * 2. **the next file exists** — the only proof available on the `hls` branch,
+   *    which has no such channel, and for pieces left by an earlier life of this
+   *    process. On that branch it is sound: the muxer renames into place on
+   *    close, so a file that exists is finished.
+   *
+   * KNOWN AND LEFT ALONE HERE: on the `segment` branch this second proof can
+   * still pass a piece a run is halfway through rewriting, which is how 110 698
+   * bytes came to be served under a name whose neighbours are 12 MB (field
+   * 2026-09-06). Telling the two branches apart is a fact of how a run writes,
+   * it needs a field session of its own to verify, and it is not what stopped
+   * playback on 2026-09-07 — so it stays open rather than being changed blind in
+   * the path that hands bytes to a player. What the PLAN believes is a different
+   * question and is answered: a live run's claim outranks readiness there.
    *
    * @param {string} key
    * @param {number} index
@@ -357,7 +406,7 @@ export class SegmentStore {
       return;
     }
     this.#logger?.info?.(
-      `segment store: #${index} of ${key.slice(0, 60)} is taken as finished because ` +
+      `segment store: #${index} of ${key} is taken as finished because ` +
       `#${index + 1} exists — no run reported it (${bytes} bytes). Expected only for ` +
       "pieces left by a previous life of this process."
     );

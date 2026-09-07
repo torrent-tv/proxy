@@ -99,7 +99,14 @@ export function startRunOn(session, options = {}) {
     process: child = fakeProcess(),
     producing = true,
     lastSegmentIndex = null,
-    usesExplicitCuts = false
+    usesExplicitCuts = false,
+    // WHAT FFMPEG HAS REPORTED IT IS RUNNING AT. It says so on its progress
+    // channel from the first seconds, before any piece closes — so a run can be
+    // starting and already have a speed, and every real one does. Left at zero,
+    // the plan has no speed to compute an arrival from, every arrangement of
+    // encoders is equally hopeless, they all tie, and the encoder is taken away
+    // for changing nothing.
+    speedX = 0
   } = options;
   const run = new EncodeRun({
     address: session.outputKey ?? session.id ?? "output",
@@ -113,6 +120,7 @@ export function startRunOn(session, options = {}) {
     usesExplicitCuts
   });
   run.start("a test asked for it");
+  run.noteSpeed(speedX);
   if (producing) {
     // What moves a run out of starting is its first segment, in the product as
     // here — so a run that is producing has made one, and its head stands one

@@ -19,9 +19,10 @@
     "major": "npm whoami && npm version major && npm publish && git push --follow-tags",
     "start": "node ./bin/cli.js",
     "dev": "node --inspect=0 --experimental-network-inspection ./bin/cli.js",
-    "test": "npm run lint && node --test",
+    "test": "npm run lint && node --test && npm run test:measured",
     "graph": "node scripts/render-run-graph.js",
-    "lint": "biome lint ."
+    "lint": "biome lint .",
+    "test:measured": "node --test --test-concurrency=1 test-measured/decode-cost.measured.js test-measured/decode-measurement.measured.js"
   },
   "dependencies": {
     "@fastify/cors": "^11.2.0",

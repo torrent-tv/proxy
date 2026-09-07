@@ -31,7 +31,7 @@ import { EncodeRun } from "../services/encode/EncodeRun.js";
 import { SoftwareEncoder } from "../services/encode/SoftwareEncoder.js";
 import { EncodeOrchestrator } from "../services/orchestrators/EncodeOrchestrator.js";
 import { mapForViewer, mergeMaps, runsOf } from "../services/priority/PriorityMap.js";
-import { contentionPenalty, penaltiesFrom } from "../services/contention.js";
+import { penaltiesFrom } from "../services/encode/contention.js";
 
 // WHAT A SECOND ENCODER COSTS THE FIRST — measured, never a formula.
 //
@@ -41,7 +41,6 @@ import { contentionPenalty, penaltiesFrom } from "../services/contention.js";
 // so nothing here invents a shape: beyond what was measured the reading is held
 // rather than extrapolated.
 const MEASURED_PENALTIES = penaltiesFrom(7.12, [{ others: 1, speed: 4.18 }]);
-const penaltyFor = (others) => contentionPenalty(others, MEASURED_PENALTIES).penalty;
 
 // What a start and a stop cost, measured on the same host: a spawn with its
 // input open is 0.12 s there.
@@ -195,7 +194,7 @@ function assertNoOverlap(made) {
 // ---------------------------------------------------------------- one viewer
 
 test("one viewer playing: one encoder, exactly where they are", () => {
-  const { made, watches, leaves } = orchestrator();
+  const { made, watches } = orchestrator();
   watches("one", { atSeconds: 400 });
   made.reconcile();
   assert.deepEqual(placements(made), [100], "at their own position, 400s / 4s");
@@ -206,7 +205,7 @@ test("one viewer playing: the encoder keeping up buys no second one", () => {
   // The peak moves forward on its own as they watch, and an encoder that stays
   // in front of it is never late. This is the case that must NOT spend a
   // process, and the one the old head-as-a-barrier rule got wrong.
-  const { made, watches, leaves } = orchestrator();
+  const { made, watches } = orchestrator();
   watches("one", { atSeconds: 400 });
   made.reconcile();
   const [run] = made.runsOn(PICTURE);
@@ -223,7 +222,7 @@ test("one viewer playing: the encoder keeping up buys no second one", () => {
 });
 
 test("one viewer seeking far ahead: an encoder is placed there", () => {
-  const { made, watches, leaves } = orchestrator();
+  const { made, watches } = orchestrator();
   watches("one", { atSeconds: 400 });
   made.reconcile();
   made.runsOn(PICTURE)[0].noteSpeed(6);
@@ -241,7 +240,7 @@ test("one viewer paused: nothing is late, so no encoder is added", () => {
   // A paused viewer states the whole film at one undifferentiated rank and no
   // time by which any of it must exist. The encoder already working goes on
   // encoding the track; nothing justifies a second process.
-  const { made, watches, leaves } = orchestrator();
+  const { made, watches } = orchestrator();
   watches("one", { atSeconds: 400 });
   made.reconcile();
   made.runsOn(PICTURE)[0].noteSpeed(1);
@@ -280,7 +279,7 @@ test("one viewer paused states no deadline anywhere", () => {
 test("two viewers close together share one encoder", () => {
   // Film both of them want is made once. This is what merging the map is for,
   // and it must survive the deadline being carried alongside the rank.
-  const { made, watches, leaves } = orchestrator();
+  const { made, watches } = orchestrator();
   watches("one", { atSeconds: 400 });
   watches("two", { atSeconds: 408 });
   made.reconcile();
@@ -293,7 +292,7 @@ test("two viewers close together share one encoder", () => {
 });
 
 test("two viewers far apart get an encoder each", () => {
-  const { made, watches, leaves } = orchestrator();
+  const { made, watches } = orchestrator();
   watches("one", { atSeconds: 400 });
   made.reconcile();
   made.runsOn(PICTURE)[0].noteSpeed(6);
@@ -308,7 +307,7 @@ test("two viewers far apart get an encoder each", () => {
 });
 
 test("two viewers: one seeking does not take the other's encoder", () => {
-  const { made, watches, leaves } = orchestrator();
+  const { made, watches } = orchestrator();
   watches("one", { atSeconds: 400 });
   made.reconcile();
   // A speed has to be measured before a second encoder can be justified: how
@@ -338,7 +337,7 @@ test("two viewers: one seeking does not take the other's encoder", () => {
 });
 
 test("two viewers: one pausing leaves the other served", () => {
-  const { made, watches, leaves } = orchestrator();
+  const { made, watches } = orchestrator();
   watches("one", { atSeconds: 400 });
   watches("two", { atSeconds: 3000 });
   made.reconcile();
@@ -374,7 +373,7 @@ test("two viewers: the one who leaves takes nothing from the one who stays", () 
 // ------------------------------------------------------------- three viewers
 
 test("three viewers far apart get an encoder each when the machine affords it", () => {
-  const { made, watches, leaves } = orchestrator({ maxRuns: 3 });
+  const { made, watches } = orchestrator({ maxRuns: 3 });
   watches("one", { atSeconds: 400 });
   watches("two", { atSeconds: 2000 });
   watches("three", { atSeconds: 3600 });
@@ -397,7 +396,7 @@ test("three viewers, a machine that affords two: the budget binds, not the map",
   // machine can hold. Which two are served follows from the order the work is
   // taken in; what must not happen is a third process on a host that cannot
   // hold it, or two processes writing one number.
-  const { made, watches, leaves } = orchestrator({ maxRuns: 2 });
+  const { made, watches } = orchestrator({ maxRuns: 2 });
   watches("one", { atSeconds: 400 });
   watches("two", { atSeconds: 2000 });
   watches("three", { atSeconds: 3600 });
@@ -413,7 +412,7 @@ test("three viewers, a machine that affords two: the budget binds, not the map",
 });
 
 test("three viewers: one seeks onto another, and the two of them share", () => {
-  const { made, watches, leaves } = orchestrator({ maxRuns: 3 });
+  const { made, watches } = orchestrator({ maxRuns: 3 });
   watches("one", { atSeconds: 400 });
   made.reconcile();
   made.runsOn(PICTURE)[0].noteSpeed(6);
@@ -436,7 +435,7 @@ test("three viewers: one seeks onto another, and the two of them share", () => {
 });
 
 test("three viewers: all paused, and no encoder is added for any of them", () => {
-  const { made, watches, leaves } = orchestrator({ maxRuns: 3 });
+  const { made, watches } = orchestrator({ maxRuns: 3 });
   watches("one", { atSeconds: 400 });
   made.reconcile();
   made.runsOn(PICTURE)[0].noteSpeed(1);
@@ -457,7 +456,7 @@ test("three viewers: all paused, and no encoder is added for any of them", () =>
 test("the plan is a function of the state: the same state twice gives the same answer", () => {
   // What stops a moving map from becoming a thrash: the decision is arithmetic
   // over the state, so a pass that finds nothing changed changes nothing.
-  const { made, watches, leaves } = orchestrator({ maxRuns: 3 });
+  const { made, watches } = orchestrator({ maxRuns: 3 });
   watches("one", { atSeconds: 400 });
   watches("two", { atSeconds: 2000 });
   made.reconcile();
@@ -481,7 +480,7 @@ test("exactly realtime arrives exactly on time, and no second encoder is bought"
   // something quite different — `speed / (1 - speed)` divides by zero here and
   // claims the encoder stays ahead FOR EVER, which is the same answer arrived
   // at by nonsense.
-  const { made, watches, leaves } = orchestrator({ maxRuns: 3 });
+  const { made, watches } = orchestrator({ maxRuns: 3 });
   watches("one", { atSeconds: 400 });
   made.reconcile();
   made.runsOn(PICTURE)[0].noteSpeed(1);
@@ -525,7 +524,7 @@ test("two viewers arriving together on a cold output get one encoder, then are m
   // would take to reach the second viewer is not a known quantity. Buying a
   // process on that is buying it on no evidence, which is refused; one is placed
   // and the speed it reports is what justifies the next.
-  const { made, watches, leaves } = orchestrator({ maxRuns: 3 });
+  const { made, watches } = orchestrator({ maxRuns: 3 });
   watches("one", { atSeconds: 400 });
   watches("two", { atSeconds: 3000 });
   made.reconcile();
@@ -540,7 +539,7 @@ test("two viewers arriving together on a cold output get one encoder, then are m
 });
 
 test("an encoder comfortably faster than realtime is left to do the whole stretch", () => {
-  const { made, watches, leaves } = orchestrator({ maxRuns: 3 });
+  const { made, watches } = orchestrator({ maxRuns: 3 });
   watches("one", { atSeconds: 400 });
   made.reconcile();
   made.runsOn(PICTURE)[0].noteSpeed(6);
@@ -556,7 +555,7 @@ test("a swarm that feeds one encoder moves it to whoever is late, rather than se
   // the viewer left — so it is moved to the soonest number that IS due. Without
   // this the viewer who seeked was served by nobody at all: the run kept its
   // road because nothing covered what lay in front of IT.
-  const { made, watches, leaves } = orchestrator({ maxRuns: 3 });
+  const { made, watches } = orchestrator({ maxRuns: 3 });
   watches("one", { atSeconds: 400 });
   made.reconcile();
   const [run] = made.runsOn(PICTURE);

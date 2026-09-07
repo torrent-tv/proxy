@@ -12,7 +12,7 @@ import assert from "node:assert/strict";
 import { CoverageMap } from "../services/encode/CoverageMap.js";
 import { endOfRun } from "../services/encode/EncodeRun.js";
 import { firstUnmetWant, planEncoders } from "../services/encode/EncodePlan.js";
-import { contentionPenalty, penaltiesFrom } from "../services/contention.js";
+import { contentionPenalty, penaltiesFrom } from "../services/encode/contention.js";
 
 // WHAT A SECOND ENCODER COSTS THE FIRST — measured, never a formula.
 //

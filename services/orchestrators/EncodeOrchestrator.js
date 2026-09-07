@@ -29,7 +29,7 @@ import { endOfRun } from "../encode/EncodeRun.js";
 import { ENCODE_EXIT } from "../encode/encode-exit.js";
 import { affordableRuns } from "../encode/run-budget.js";
 import { RunCosts } from "../encode/run-costs.js";
-import { contentionPenalty } from "../contention.js";
+import { contentionPenalty } from "../encode/contention.js";
 import { SegmentDemand } from "../encode/SegmentDemand.js";
 
 export class EncodeOrchestrator {
@@ -68,7 +68,7 @@ export class EncodeOrchestrator {
    *   for a stretch. What to read, what to map and how to cut belong to whoever
    *   knows the source.
    * @param {number} params.segmentSeconds
-   * @param {import("../contention.js").ContentionPenalties | null}
+   * @param {import("../encode/contention.js").ContentionPenalties | null}
    *   [params.contentionPenalties] - How much slower one encoder runs beside
    *   others, MEASURED on this host at startup and keyed by how many others
    *   there are. Null until something has measured it, and then the penalty is

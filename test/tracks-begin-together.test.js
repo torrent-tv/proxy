@@ -19,6 +19,7 @@ import { Timeline } from "../services/output/Timeline.js";
 import test from "node:test";
 
 import { HlsSessionManager } from "../services/hls-session-manager.js";
+import { fmp4Format } from "../services/segment-formats/fmp4.js";
 import { ENCODE_RUN_STATE, INITIAL_RUN_STATE } from "../services/encode/encode-run-state.js";
 
 const BOUNDARIES = [0, 4, 8, 12, 16, 20];
@@ -44,6 +45,17 @@ function familyAtBoundaryTwo() {
     state: "ready",
     timeline: new Timeline({ boundaries: boundaries, cutGrid: "uniform" }),
     file: new SourceFile({ sourceKey: "source-1", fileIndex: 0, name: "film.mkv" }),
+    // An ordinary session reads its own file, and its sound is inside it. The
+    // three differ only for a soundtrack shipped as a file of its own — and the
+    // command is built from all three, so a fixture that states only the first
+    // describes a session the product cannot make.
+    get inputFile() { return this.file; },
+    get audioFile() { return this.file; },
+    // How its pieces are packaged. The command asks the format where to cut and
+    // what to name the files, so a session without one is not a session.
+    segmentFormat: fmp4Format,
+    // Where its encoder has got to, which a run writes into as it works.
+    progress: { processedSeconds: 0 },
     runs: new Set(),
     pendingRun: null,
     indexCheck: null
@@ -57,6 +69,17 @@ function familyAtBoundaryTwo() {
     baseSessionId: "picture",
     timeline: new Timeline({ boundaries: boundaries, cutGrid: "uniform" }),
     file: new SourceFile({ sourceKey: "source-1", fileIndex: 0, name: "film.mkv" }),
+    // An ordinary session reads its own file, and its sound is inside it. The
+    // three differ only for a soundtrack shipped as a file of its own — and the
+    // command is built from all three, so a fixture that states only the first
+    // describes a session the product cannot make.
+    get inputFile() { return this.file; },
+    get audioFile() { return this.file; },
+    // How its pieces are packaged. The command asks the format where to cut and
+    // what to name the files, so a session without one is not a session.
+    segmentFormat: fmp4Format,
+    // Where its encoder has got to, which a run writes into as it works.
+    progress: { processedSeconds: 0 },
     runs: new Set(),
     pendingRun: null,
     indexCheck: null

@@ -1,3 +1,7 @@
+## 2.80.7
+
+- **Fix**: The piece store's memory floor, re-derived every time the machine's free memory changes, took the widest single reader's declared window (`demand.widestPieces`) as its lower bound instead of what every live reader together needs (`demand.unionPieces`) — right for one reader, wrong for several. Field 2026-09-07: three concurrent readers of one file — the picture, the sound, and the edge-warming read — each declared their own window; the floor guaranteed room for only the widest of the three, so once residents filled that smaller number, every resident piece belonged to some reader's still-live window and none could be evicted. `Every resident piece is pinned and nothing moved for 5000ms; no slot can be freed`, which is not our own failure — it reaches WebTorrent's own `store.put()` callback, and WebTorrent treats any error there as fatal and destroys the torrent outright: `torrent.files` went to `[]`, every later read answered `File N not found in torrent:<hash>`, and the session never recovered. `wantedBytes` in the same file already asked the machine for the union, correctly; the floor below which the store refuses to shrink now asks for the same thing.
+
 ## 2.80.6
 
 - **Fix**: `waitForBufferDrain` resolved after 5 s while `bufferedAmount` was still above `LOW_WATER` and the send loop kept queueing into a wedged association — `399 MB` in `libdatachannel` `rss 455→982 MB` `drainMs=5000` on every line for 6 h 50 min. Now waits until `LOW_WATER` with `50 ms` polling and never resolves while bytes are still held.

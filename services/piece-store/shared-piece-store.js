@@ -575,22 +575,26 @@ export class SharedPieceStore {
     // the machine was full kept a small allowance for its whole life, however
     // much memory was freed afterwards (roadmap item 2, 2026-09-02).
     const wanted = Math.floor(Number(allowedBytes) / this.#chunkLength);
-    // Never below one reader's whole window while a reader exists, even when
-    // the machine's share says less. A store that cannot hold the window of the
-    // read it is serving cannot complete that read at all: every resident piece
-    // ends up pinned, the read returns zero bytes and ffmpeg takes that for the
-    // end of the file, which killed every encoder on that file in the field on
-    // 2026-08-15. Exceeding the share is the lesser failure, and the line below
-    // says when it happens.
+    // Never below what the live readers together hold, even when the machine's
+    // share says less. A store that cannot hold what its readers are pinning
+    // cannot complete any of their reads at all: every resident piece ends up
+    // pinned, a read returns zero bytes and ffmpeg takes that for the end of
+    // the file, which killed every encoder on that file in the field on
+    // 2026-08-15 (one reader) and again on 2026-09-07 (three readers of one
+    // file at once — picture, sound and the edge-warming read — where this
+    // floor was still computed from only the widest one of them, `wantedBytes`
+    // above already asks for the union and got it right; this is the same
+    // union, used as the floor instead of only as the ask). Exceeding the share
+    // is the lesser failure, and the line below says when it happens.
     const demand = this.#lru.demand();
     this.#growthCeiling = Math.max(
       MIN_RESIDENT_PIECES,
-      demand.readers > 0 ? demand.widestPieces : MIN_RESIDENT_PIECES,
+      demand.readers > 0 ? demand.unionPieces : MIN_RESIDENT_PIECES,
       Number.isFinite(wanted) ? wanted : MIN_RESIDENT_PIECES
     );
     const belowAWindow = demand.readers > 0
       && Number.isFinite(wanted)
-      && wanted < demand.widestPieces;
+      && wanted < demand.unionPieces;
     this.#beyondTheMachine = belowAWindow;
     // The LRU is told too. It was constructed with the store's original
     // capacity and never revised, so `isFull()` answered against a number that

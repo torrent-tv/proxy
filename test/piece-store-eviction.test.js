@@ -278,6 +278,32 @@ test("the store asks for what its readers declared, and for a whole window at le
   }
 });
 
+test("the floor the ceiling will not fall below is the same union, not the widest reader alone", async () => {
+  const { store, directory } = await makeStore(64);
+  try {
+    // The same two overlapping readers as the ask above: picture and sound,
+    // 10..44, thirty-five pieces together. The machine now offers far less
+    // than that (ten pieces) — before this fix the floor here came from
+    // `widestPieces` (twenty, the wider of the two readers alone), fifteen
+    // short of what both of them were actually pinning at once. A field
+    // session with three such readers on one file (video, audio and the
+    // edge-warming read) reached exactly that shortfall on 2026-09-07: every
+    // resident piece ended up pinned and WebTorrent destroyed the torrent
+    // over it.
+    store.protectRange("video", 10, 29);
+    store.protectRange("audio", 25, 44);
+    const revised = store.reviseGrowthCeiling(10 * PIECE);
+    assert.equal(
+      revised.ceilingBytes,
+      35 * PIECE,
+      "the floor is the union of both readers, not the wider one alone"
+    );
+  } finally {
+    store.destroy(() => undefined);
+    await fs.rm(directory, { recursive: true, force: true });
+  }
+});
+
 test("a block is re-used instead of a new one being allocated for every piece", async () => {
   const capacity = 4;
   const { store, directory } = await makeStore(capacity);

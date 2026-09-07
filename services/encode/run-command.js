@@ -208,7 +208,17 @@ export function nearestKeyframeAtOrBefore(keyframeTimes, target) {
 export function seekLandingOffsetFor(material, keyframe) {
   // A re-encode trims to the requested time itself, so it needs no help and
   // must not be pushed past what it was asked for.
-  if (material?.transcodeVideo === true) {
+  //
+  // AN OUTPUT CARRYING ONLY SOUND IS SUCH A RE-ENCODE, and asking about the
+  // picture missed it: the flag says whether the PICTURE is re-encoded, and an
+  // output with no picture answers no. So the whole offset was added to the
+  // soundtrack's own seek, and the sound then played 130 ms ahead of the picture
+  // from every restart onward — reported by the viewer 2026-09-06 as lips out of
+  // step with the voice from two minutes in, and measured: both outputs were
+  // repositioned to the same boundary and both given `-ss 166.963435`, after
+  // which the copied picture landed on the keyframe at 166.833 while the
+  // re-encoded sound began where it was asked.
+  if (material?.transcodeVideo === true || material?.audioOnly === true) {
     return 0;
   }
   // A grid whose times are approximate needs that error added on top, or a name
@@ -504,7 +514,7 @@ export function buildRunCommand({
   if (snappedKeyframe !== null) {
     const residualSeconds = Math.max(0, seekSeconds - snappedKeyframe);
     if (snappedKeyframe > 0) {
-      args.push("-ss", ffmpegSeconds(snappedKeyframe + seekLandingOffsetFor({ transcodeVideo, file }, snappedKeyframe)));
+      args.push("-ss", ffmpegSeconds(snappedKeyframe + seekLandingOffsetFor({ audioOnly, transcodeVideo, file }, snappedKeyframe)));
     }
     args.push("-i", inputUrl);
     // The coarse landing, not the exact target: the residual below is discarded

@@ -74,3 +74,36 @@ test("the bound still holds once a tolerance is added", () => {
   const session = { transcodeVideo: false, file: new SourceFile({ sourceKey: "s", fileIndex: 0 }).learn({ keyframeTimes: [0, 0.1, 0.2], keyframeTolerance: 1 }) };
   assert.equal(seekLandingOffsetFor(session, 0.1), 0.05);
 });
+
+test("an output carrying only sound is not pushed past what it asked for", () => {
+  // The field failure of 2026-09-06: the sound played 130 ms ahead of the
+  // picture from every restart onward, and the viewer saw lips out of step with
+  // the voice from two minutes in.
+  //
+  // The offset exists because ffmpeg's demuxer moves a seek target back for a
+  // container it reads in decode order, after which a COPY lands on the previous
+  // keyframe. A re-encode trims to the requested time itself and is excluded —
+  // and an output with no picture is exactly that, since its one track is
+  // `-c:a aac`. It was not excluded, because the test asked whether the PICTURE
+  // is re-encoded and an output with no picture answers no.
+  const soundtrack = {
+    audioOnly: true,
+    transcodeVideo: false,
+    file: new SourceFile({ sourceKey: "s", fileIndex: 0 })
+      .learn({ keyframeTimes: [0, 4.004, 8.008, 12.012], keyframeTolerance: 0 })
+  };
+  assert.equal(seekLandingOffsetFor(soundtrack, 4.004), 0);
+});
+
+test("the picture of the same film still gets the offset", () => {
+  // The pair to the check above: the two outputs are repositioned to one
+  // boundary and must be given DIFFERENT requests, because one is copied and one
+  // is re-encoded. Given the same request they land 130 ms apart.
+  const picture = {
+    audioOnly: false,
+    transcodeVideo: false,
+    file: new SourceFile({ sourceKey: "s", fileIndex: 0 })
+      .learn({ keyframeTimes: [0, 4.004, 8.008, 12.012], keyframeTolerance: 0 })
+  };
+  assert.equal(seekLandingOffsetFor(picture, 4.004), OFFSET);
+});

@@ -324,6 +324,21 @@ export class EncodeOrchestrator {
       )
     });
 
+    // A move is the plan taking a running encoder away from where it already
+    // stands, which is exactly the decision that was found wandering back and
+    // forth in the field on 2026-09-07 with no way to see why: the "because"
+    // line names the comparison in words, never the numbers it was decided
+    // from. Said here, once per reconcile, and only when a move actually
+    // happens — everything a rerun of the same decision needs: the windows
+    // this call saw (priority, the real time, which side of the viewers),
+    // the budget, and where every live run stood.
+    if (actions.some((action) => action.type === "move")) {
+      this.logger.info(
+        `encode-plan move on ${address}: windows=${JSON.stringify(windows)} ` +
+        `maxRuns=${this.#affordableOn(address, live)} ` +
+        `live=${JSON.stringify(live.map((run) => ({ from: run.from, to: run.to, head: run.head, speedX: run.speedX })))}`
+      );
+    }
     for (const action of actions) {
       if (action.type === "stop") {
         this.#stop(action.run, action.because);

@@ -41,73 +41,145 @@ import { RunCosts } from "../services/encode/run-costs.js";
 import { planEncoders } from "../services/encode/EncodePlan.js";
 import { CoverageMap } from "../services/encode/CoverageMap.js";
 
-test("nothing measured means a move is refused, not priced at zero", () => {
+test("nothing measured is a plain zero, and the floor is derived where the arithmetic is", () => {
   const costs = new RunCosts();
 
-  const { moveCostSec, firstByteWaitSec, killCostSec } = costs.seconds();
-  assert.equal(moveCostSec, Number.POSITIVE_INFINITY, "moving is not free while unpriced");
-  // Placing one where there is none is the OTHER question, and it has no
-  // alternative: the film gets made or it does not.
-  assert.equal(firstByteWaitSec, 0, "placing an encoder is not blocked by an unknown price");
+  const { firstByteWaitSec, killCostSec } = costs.seconds();
+  assert.equal(firstByteWaitSec, 0, "no reading is said as none, not as a guess");
   assert.equal(killCostSec, 0);
+  // There was an `Infinity` here — the cost of a move, made unaffordable until
+  // something had been measured, on the reasoning that an unmeasured price must
+  // not license an irreversible act. It was an exception in a model that needs
+  // none: a first piece cannot appear faster than it takes to ENCODE one, and
+  // how fast this host encodes is measured before any viewer exists, so the
+  // floor belongs where the arithmetic is.
+  assert.equal("moveCostSec" in costs.seconds(), false, "no such figure any more");
 });
 
 test("a run killed before producing anything is a lower bound on the first output", () => {
   const costs = new RunCosts();
 
   // Exactly what a thrash supplies: a run that lived 800 ms and finished
-  // nothing. It says the first output takes AT LEAST that long, which is a fact.
+  // nothing. It says the first output takes AT LEAST that long, which is a fact
+  // and the only reading a thrash can give — every run in one is killed before
+  // it produces.
   costs.note({ livedMs: 800, dyingMs: 40 });
 
-  const { moveCostSec } = costs.seconds();
-  assert.ok(Number.isFinite(moveCostSec), "one killed run is enough to stop the blindness");
-  assert.ok(Math.abs(moveCostSec - 0.84) < 0.001, `got ${moveCostSec}`);
+  const { firstByteWaitSec, killCostSec } = costs.seconds();
+  assert.ok(Math.abs(firstByteWaitSec - 0.8) < 0.001, `got ${firstByteWaitSec}`);
+  assert.ok(Math.abs(killCostSec - 0.04) < 0.001, `got ${killCostSec}`);
 });
 
 test("a run that produced something is measured by its first output, not its life", () => {
   const costs = new RunCosts();
 
-  costs.note({ livedMs: 60_000, firstOutputMs: 900, dyingMs: 100 });
+  costs.note({ livedMs: 60_000, firstOutputMs: 1260, dyingMs: 100 });
 
-  const { moveCostSec, firstByteWaitSec } = costs.seconds();
-  assert.ok(Math.abs(firstByteWaitSec - 0.9) < 0.001, `got ${firstByteWaitSec}`);
-  assert.ok(Math.abs(moveCostSec - 1.0) < 0.001, `got ${moveCostSec}`);
+  const { firstByteWaitSec } = costs.seconds();
+  assert.ok(Math.abs(firstByteWaitSec - 1.26) < 0.001, `got ${firstByteWaitSec}`);
 });
 
-test("the zone sliding one number does not move an encoder that is already reaching it", () => {
-  // The field shape exactly: a run standing at #58 with the viewer's urgent zone
-  // sliding #58..#59 → #59..#60. Driving through one segment costs the encoder a
-  // fraction of a second; moving costs a kill and a cold start.
+/**
+ * The map's real shape: one segment at the viewer, doubling zones ahead down to
+ * p91, and everything behind them at p1 with no deadline. Written out because a
+ * fixture of two zones is not this, and the difference decides the answer: with
+ * nothing stated past the viewer's own zone, a run one segment behind it is
+ * compared on that zone alone and loses by a tenth of a second.
+ *
+ * @param {number} head - The segment the viewer is on.
+ * @param {number} count
+ * @returns {object[]}
+ */
+function mapAt(head, count) {
+  const zones = [];
+  if (head > 0) {
+    zones.push({ from: 0, to: head - 1, priority: 1, withinSeconds: null, behind: true });
+  }
+  let from = head;
+  let width = 1;
+  let rank = 100;
+  while (from < count && rank > 90) {
+    const to = Math.min(count - 1, from + width - 1);
+    zones.push({ from, to, priority: rank, withinSeconds: (from - head) * 4.2, behind: false });
+    from = to + 1;
+    width *= 2;
+    rank -= 1;
+  }
+  if (from < count) {
+    zones.push({ from, to: count - 1, priority: 90, withinSeconds: (from - head) * 4.2, behind: false });
+  }
+  return zones;
+}
+
+test("an encoder is left alone while the viewer is still at or before it", () => {
+  // Every slide of the viewer's zone used to make standing one number behind it
+  // score worse than standing in it — by ten milliseconds, which is nothing but
+  // the double charge for a piece already being made. What holds now is the
+  // narrower and true statement: while the viewer's own zone still contains the
+  // encoder's position, it is left alone. A viewer BEFORE it is a different
+  // case entirely and correctly moves it back — encoders only go forward, so
+  // one standing past a viewer never reaches them.
+  //
+  // Once the viewer has PASSED it, moving forward is correct and happens once: a
+  // run that has produced nothing in 0.8 s of a 1.26 s warm-up owes 0.46 s
+  // before its piece exists, while a fresh one at the viewer's own number owes
+  // 0.32 s of spawn and then the piece — so the viewer is served sooner, and the
+  // number left behind is in nobody's zone.
   const coverage = new CoverageMap();
   coverage.setSegmentCount(482);
-  const run = { from: 58, to: 481, head: 58, speedX: 4.45, isAlive: true };
-  coverage.claim(run, 58, 481);
+  const run = { from: 58, to: -1, head: 58, speedX: 4.45, isAlive: true, startedAt: 1_000_000 };
+  coverage.claim(run, 58, -1);
 
-  const actions = planEncoders({
+  for (const viewerAt of [58]) {
+    const actions = planEncoders({
+      coverage,
+      windows: mapAt(viewerAt, 482),
+      runs: [run],
+      maxRuns: 3,
+      segmentSeconds: 4.2,
+      speedX: 4.45,
+      killCostSec: 0.04,
+      // Measured on the addon host: a run started at 15:50:15.521 and its first
+      // piece existed at 15:50:16.785.
+      firstByteWaitSec: 1.26,
+      refetchSecPerFilmSecond: 0,
+      // 1.98 at 1920x1080, measured: a second encoder takes very nearly all of
+      // the first's speed.
+      contentionPenaltyFor: (others) => (others <= 0 ? 1 : 1.98 ** others),
+      now: 1_000_000 + 800
+    });
+
+    assert.deepEqual(
+      actions.filter((one) => one.type === "move"),
+      [],
+      `the viewer at #${viewerAt} does not cost the encoder its place`
+    );
+  }
+
+  // And once they are past it, exactly one move — not one per slide.
+  const past = [59, 60, 61].map((viewerAt) => planEncoders({
     coverage,
-    windows: [
-      { from: 0, to: 57, priority: 1, withinSeconds: null, behind: true },
-      { from: 59, to: 60, priority: 100, withinSeconds: 0, behind: false }
-    ],
+    windows: mapAt(viewerAt, 482),
     runs: [run],
     maxRuns: 3,
     segmentSeconds: 4.2,
     speedX: 4.45,
-    // Measured on this host: killing takes 40 ms, a fresh encoder's first piece
-    // 900 ms. Against that, driving one segment at 4.45x costs 0.94 s — so the
-    // two are close, and what settles it is that the move ALSO has to encode
-    // the same segment afterwards.
     killCostSec: 0.04,
-    firstByteWaitSec: 0.9,
-    moveCostSec: 0.94,
+    firstByteWaitSec: 1.26,
     refetchSecPerFilmSecond: 0,
-    contentionPenaltyFor: () => 1
-  });
+    contentionPenaltyFor: (others) => (others <= 0 ? 1 : 1.98 ** others),
+    now: 1_000_000 + 800
+  }).filter((one) => one.type === "move"));
 
   assert.deepEqual(
-    actions.filter((one) => one.type === "move"),
-    [],
-    "a run one number behind the zone is already on its way into it"
+    past.map((moves) => moves.length),
+    [1, 1, 1],
+    "one move to where the viewer now is, whichever number that is"
+  );
+  assert.deepEqual(
+    past.map((moves) => moves[0].from),
+    [59, 60, 61],
+    "and it goes to the viewer's own number, not one past it"
   );
 });
 
@@ -128,8 +200,7 @@ test("a move that genuinely saves the viewer time still happens", () => {
     segmentSeconds: 4.2,
     speedX: 4.45,
     killCostSec: 0.04,
-    firstByteWaitSec: 0.9,
-    moveCostSec: 0.94,
+    firstByteWaitSec: 1.26,
     refetchSecPerFilmSecond: 0,
     contentionPenaltyFor: () => 1
   });

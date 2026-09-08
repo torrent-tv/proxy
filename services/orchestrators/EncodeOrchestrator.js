@@ -417,6 +417,22 @@ export class EncodeOrchestrator {
     // happens — everything a rerun of the same decision needs: the windows
     // this call saw (priority, the real time, which side of the viewers),
     // the budget, and where every live run stood.
+    // WHAT WAS DECIDED AND WITH WHAT INTERVAL, said whenever anything is placed
+    // or taken away — not only on a move.
+    //
+    // Field 2026-09-08 could not be diagnosed from this line: it printed the
+    // windows, the budget and where the live runs stood, and NOT the intervals
+    // the actions carried. What the session actually did was give every encoder
+    // an interval of exactly ONE segment — 63 runs, each making one piece and
+    // exiting, twelve of them normally — and the reasons printed beside them
+    // read as moves, so the fault was diagnosed three times as something it was
+    // not. An interval is what a run is, and it was the one thing missing.
+    if (actions.some((action) => action.type !== "keep")) {
+      this.logger.info(
+        `encode-plan on ${address}: ` +
+        `${actions.map((action) => `${action.type} #${action.from ?? "?"}..#${action.to ?? "?"}`).join(", ")}`
+      );
+    }
     if (actions.some((action) => action.type === "move")) {
       this.logger.info(
         `encode-plan move on ${address}: windows=${JSON.stringify(windows)} ` +

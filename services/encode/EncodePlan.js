@@ -102,9 +102,6 @@
  *   measured on this host from its own runs. Zero until something has measured
  *   it, which makes moving one look cheaper than it is and is said here so the
  *   bias is known.
- * @param {number} [params.moveCostSec] - What moving a running encoder costs on
- *   this host, measured. `Infinity` until something has been measured, because a
- *   move is irreversible and leaving the encoder alone is always available.
  * @param {number} [params.now] - The clock, injected. This layer is arithmetic
  *   and reads no clock of its own; how old a run is is one of its inputs.
  * @param {number} [params.firstByteWaitSec] - How long a fresh encoder takes to
@@ -128,7 +125,6 @@ export function planEncoders({
   segmentSeconds,
   killCostSec = 0,
   firstByteWaitSec = 0,
-  moveCostSec = Number.POSITIVE_INFINITY,
   now = Date.now(),
   refetchSecPerFilmSecond = 0,
   contentionPenaltyFor = () => 1,
@@ -185,12 +181,26 @@ export function planEncoders({
   // its death, the start of another, and the wait for the first bytes there.
   // Taking an encoder somewhere else is stopping this one and waiting for the
   // next to produce. Both halves are measured on this host.
-  // WHAT A MOVE COSTS. Killing an encoder and waiting for a fresh one's first
-  // piece is the price; until something has produced anything on this host that
-  // price is unknown, and a move is then refused rather than priced at zero.
-  // Placing one where there is none is the other question and takes the unknown
-  // the other way — see `run-costs.js`.
-  const moveSec = Number.isFinite(moveCostSec) ? moveCostSec : killCostSec + firstByteWaitSec;
+  // WHAT A START AND A MOVE OWE BEFORE THE PIECE THEY STAND ON EXISTS, and
+  // neither is infinite.
+  //
+  // The measured `firstByteWaitSec` is spawn to first piece, so it already
+  // contains one piece's encoding. Separated, because the two scale differently:
+  // the piece costs more when encoders share the machine, the spawn does not.
+  //
+  //   spawn overhead = measured first output - what one piece costs alone
+  //   a fresh encoder owes    spawn overhead + the piece at the rate in force
+  //   a moved one owes        the kill, and then the same
+  //
+  // With nothing measured the overhead is zero and a fresh encoder owes exactly
+  // one piece — which is the honest floor rather than a guess: a piece cannot
+  // appear before it is encoded, and how fast this host encodes is measured
+  // before any viewer exists. There was an `Infinity` here for the cost of a
+  // move, on the reasoning that an unmeasured price must not license an
+  // irreversible act; it was an exception in a model that needs none, and this
+  // is the same statement made by arithmetic.
+  const spawnOverheadSec = Math.max(0, firstByteWaitSec - (rate > 0 ? 1 / rate : 0));
+  const moveSec = killCostSec + spawnOverheadSec;
 
   // WHAT A RUN STILL HAS TO GO BEFORE IT PRODUCES ANYTHING — the measured time
   // to a first piece, less the time it has already been alive.
@@ -393,7 +403,7 @@ export function planEncoders({
       }
       if (filler === "new") {
         // A encoder that does not exist yet owes its own start and then the piece.
-        encoders.push({ at: positions[index], owes: (piece) => firstByteWaitSec + piece });
+        encoders.push({ at: positions[index], owes: (piece) => spawnOverheadSec + piece });
         continue;
       }
       const head = Number(filler.head);
@@ -472,7 +482,7 @@ export function planEncoders({
     }
     for (let index = 0; index < positions.length; index += 1) {
       if ((best ? best.fill[index] : null) === "new") {
-        encoders.push({ at: positions[index], owes: (piece) => firstByteWaitSec + piece });
+        encoders.push({ at: positions[index], owes: (piece) => spawnOverheadSec + piece });
       }
     }
     return priced(encoders);

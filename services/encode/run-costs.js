@@ -98,47 +98,22 @@ export class RunCosts {
    * @returns {{ killCostSec: number, firstByteWaitSec: number, samples: number }}
    */
   seconds() {
-    const dying = middleOf(this.#dying);
-    const first = middleOf(this.#firstOutput);
+    // MEASURED OR ABSENT, and absent is said as zero rather than as a guess.
+    //
+    // There was an `Infinity` here for a while, for the cost of a move, on the
+    // reasoning that an unmeasured price must not license an irreversible act.
+    // It was an exception in a model that needs none, and it is not required: a
+    // first piece cannot appear faster than it takes to ENCODE one, and how fast
+    // this host encodes is measured before any viewer exists. The floor is
+    // derived from that where the arithmetic is, and every figure here stays a
+    // plain reading or a plain zero.
+    //
+    // `firstByteWaitSec` is spawn to first piece, so it already contains one
+    // piece's encoding. Whoever uses it separates the two, because the piece
+    // costs more when encoders share the machine and the spawn does not.
     return {
-      // UNKNOWN IS NOT ZERO, and for a cost it is not a small number either: it
-      // is the figure that makes the act it prices never worth doing. Reported
-      // as 0, an unmeasured move was FREE in the plan's arithmetic, so any gain
-      // however small justified it — and moving an encoder is irreversible,
-      // because the process it kills cannot be un-killed.
-      //
-      // The blindness was self-sustaining: `#firstOutput` only takes a reading
-      // from a run that produced something, and a run killed 0.8 s after
-      // starting produces nothing. So a thrash prevented the measurement that
-      // would have stopped it. Field 2026-09-08: 39 moves in one session, 24 of
-      // them between three adjacent numbers — #58 to #59, #59 to #58, #58 to
-      // #60, #60 to #58, six times each — while the picture stood still for
-      // 116.7 s.
-      //
-      // TWO QUESTIONS, NOT ONE, and they take the unknown differently.
-      //
-      // PLACING an encoder where there is none has no alternative: the film gets
-      // made or it does not. So an unmeasured cost must not stand in the way,
-      // and the honest figure is what has been measured or nothing.
-      //
-      // MOVING one has an alternative — leave it alone — and it is
-      // irreversible, because the process it kills cannot be un-killed. There
-      // an unmeasured cost must not license the act, and `Infinity` is the
-      // identity of the comparison that consumes it: "nobody has measured what
-      // this costs" and "never worth doing" are the same statement about an
-      // action whose price is unknown.
-      //
-      // Reported as 0 for both, an unmeasured move was FREE in the plan's
-      // arithmetic, so a gain of a fraction of a second justified it. And the
-      // blindness was self-sustaining: `#firstOutput` takes a reading only from
-      // a run that produced something, and every run in a thrash is killed
-      // before it finishes anything.
-      killCostSec: (dying ?? 0) / 1000,
-      firstByteWaitSec: (first ?? 0) / 1000,
-      moveCostSec:
-        first === null
-          ? Number.POSITIVE_INFINITY
-          : ((dying ?? 0) + first) / 1000,
+      killCostSec: (middleOf(this.#dying) ?? 0) / 1000,
+      firstByteWaitSec: (middleOf(this.#firstOutput) ?? 0) / 1000,
       samples: Math.min(this.#dying.length, this.#firstOutput.length)
     };
   }

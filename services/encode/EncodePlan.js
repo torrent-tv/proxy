@@ -168,20 +168,20 @@ export function planEncoders({
   const working = live.reduce((best, run) => Math.max(best, run.speedX || 0), 0);
   const rate = segmentSeconds > 0 ? (working > 0 ? working : speedX) / segmentSeconds : 0;
   // How long one piece takes AT THE RATE ACTUALLY IN FORCE. Concurrent encoders
-  // slow each other — measured on this host — so an arrangement's own body count
+  // slow each other — measured on this host — so an arrangement's own encoder count
   // decides it, and the delays below are computed per arrangement for that
   // reason. Taken from the unpenalised rate instead, a piece looked cheaper the
-  // more bodies there were, which made extra bodies look free: the plan bought a
+  // more encoders there were, which made extra encoders look free: the plan bought a
   // second encoder where one served, and the arrivals it was compared on were
   // computed at the slower rate all along.
   //
   // `Infinity` where nothing has been measured, which is what "no speed" means
   // and what makes every arrangement equally hopeless rather than equally free.
-  const pieceAt = (howManyBodies) => {
-    const inForce = rate / contentionPenaltyFor(Math.max(0, howManyBodies - 1));
+  const pieceAt = (howManyEncoders) => {
+    const inForce = rate / contentionPenaltyFor(Math.max(0, howManyEncoders - 1));
     return inForce > 0 ? 1 / inForce : Number.POSITIVE_INFINITY;
   };
-  // What a body costs to take away from where it stands and put somewhere else:
+  // What a encoder costs to take away from where it stands and put somewhere else:
   // its death, the start of another, and the wait for the first bytes there.
   // Taking an encoder somewhere else is stopping this one and waiting for the
   // next to produce. Both halves are measured on this host.
@@ -240,17 +240,75 @@ export function planEncoders({
   // WHAT EACH BODY OWES BEFORE THE PIECE IT STANDS ON EXISTS, priced at the rate
   // the arrangement itself puts in force.
   //
-  // Each body states its own debt where it is created, as a function of what one
-  // piece costs — because only there is it known what the body IS, and here only
+  // Each encoder states its own debt where it is created, as a function of what one
+  // piece costs — because only there is it known what the encoder IS, and here only
   // how many of them there are. So there is nothing to dispatch on: no kind, no
   // tag, no case analysis. The count is known before any debt is needed, which
-  // is why this is one pass over the bodies rather than a figure computed once
+  // is why this is one pass over the encoders rather than a figure computed once
   // outside.
-  const priced = (bodies) => {
-    const perPiece = pieceAt(bodies.length);
-    return bodies.map((body) => ({ at: body.at, delaySec: body.owes(perPiece) }));
+  const priced = (encoders) => {
+    const perPiece = pieceAt(encoders.length);
+    return encoders.map((encoder) => ({ at: encoder.at, delaySec: encoder.owes(perPiece) }));
   };
 
+
+  // WHERE A SECOND ENCODER MEETS THE ONE ALREADY ON A STRETCH, and whether it is
+  // worth having.
+  //
+  // A stretch of unmade film runs from `from` to `to`. Whoever is already on it
+  // stands at `from` and owes `w` before the piece under it exists; a fresh one
+  // placed at `x` owes `d` — its start, and then a whole piece — and both then
+  // work at the rate two encoders leave each other, which is measured on this
+  // host and is not half by assumption.
+  //
+  //   the one already there closes [from, x-1]:  w + (x - 1 - from) / r
+  //   the fresh one closes         [x, to]:      d + (to - x) / r
+  //
+  // The first rises with `x` and the second falls, so the stretch is closed
+  // soonest where they cross:
+  //
+  //   x* = (from + to + 1) / 2  +  (d - w) * r / 2
+  //
+  // The midpoint, shifted forward by half the difference of what the two owe,
+  // expressed in pieces. Halving is the special case `d = w`, which holds when
+  // both are fresh — and it was applied to every case, including the common one
+  // where `d` is a start plus a piece and `w` is the tail of a piece already
+  // being made.
+  //
+  // AND WHETHER TO SPLIT AT ALL, which halving never asked. Two encoders under
+  // contention against one at full speed:
+  //
+  //   one:  w + (to - from - 1) / rate
+  //   two:  w + (x* - 1 - from) / r
+  //
+  // Nothing back where the second does not win. On the addon host at 1920x1080
+  // the measured penalty for a second encoder is 1.98 — it takes very nearly
+  // all of the first's speed — so there a second almost never pays, and it was
+  // being placed regardless.
+  const splitAt = (from, to) => {
+    const pieces = to - from + 1;
+    if (!(pieces > 1) || !(rate > 0)) {
+      return null;
+    }
+    const together = rate / contentionPenaltyFor(live.length);
+    if (!(together > 0)) {
+      return null;
+    }
+    const perPieceTogether = 1 / together;
+    // What the one already on this stretch owes, or a fresh one's debt where
+    // nobody is on it — and then both sides owe the same and the meeting point
+    // is the middle, as it should be.
+    const onIt = live.find((run) => Number(run.head) === from) ?? null;
+    const owedThere = onIt
+      ? finishesItsPieceIn(onIt, perPieceTogether)
+      : firstByteWaitSec + perPieceTogether;
+    const owedFresh = firstByteWaitSec + perPieceTogether;
+    const meeting = (from + to + 1) / 2 + ((owedFresh - owedThere) * together) / 2;
+    const x = Math.min(to, Math.max(from + 1, Math.round(meeting)));
+    const withTwo = owedThere + (x - 1 - from) * perPieceTogether;
+    const withOne = owedThere + (pieces - 1) / rate;
+    return withTwo < withOne ? x : null;
+  };
 
   // ------------------------------------------------------------------ WHERE
   //
@@ -265,11 +323,12 @@ export function planEncoders({
     // EVERY LIVE ENCODER IS PRE-PLACED, because that is what "somebody already
     // gets here in time" means. A number one of them reaches before it is
     // needed is not a position at all; a number none of them reaches is, and
-    // needs a body brought to it. There is no third case, and in particular no
+    // needs a encoder brought to it. There is no third case, and in particular no
     // separate question of whether an encoder should drive on or be moved:
     // driving is simply its arrival, and its arrival is priced in one place.
     firstGap: gapFinderFor(coverage, new Set(live), rate, segmentSeconds * refetchSecPerFilmSecond),
-    deadlineAt: untilNeeded
+    deadlineAt: untilNeeded,
+    splitAt
   });
 
   // -------------------------------------------------------------------- WHO
@@ -277,12 +336,12 @@ export function planEncoders({
   // ARGMIN OF THE OBJECTIVE, EVALUATED. Not a rule that approximates it.
   //
   // Every way of filling the positions is scored by `latenessOf` and the best is
-  // taken. There are at most a handful of positions and a handful of bodies, so
+  // taken. There are at most a handful of positions and a handful of encoders, so
   // the enumeration is exact: no local rule stands in for the objective, and
   // none can therefore disagree with another.
   //
   // Four such rules were written before this and all four had to go — "place
-  // where a number is late", "take a body that serves nothing", "take one whose
+  // where a number is late", "take a encoder that serves nothing", "take one whose
   // work is needed later than this", "drive on or move, by cost". Each looked
   // like a consequence of the model and each approximated it from a different
   // side, so together they contradicted one another and the answer depended on
@@ -326,21 +385,21 @@ export function planEncoders({
   let best = null;
   let bestScore = null;
   for (const arrangement of arrangements) {
-    const bodies = [];
+    const encoders = [];
     for (let index = 0; index < positions.length; index += 1) {
       const filler = arrangement.fill[index];
       if (filler === null) {
         continue;
       }
       if (filler === "new") {
-        // A body that does not exist yet owes its own start and then the piece.
-        bodies.push({ at: positions[index], owes: (piece) => firstByteWaitSec + piece });
+        // A encoder that does not exist yet owes its own start and then the piece.
+        encoders.push({ at: positions[index], owes: (piece) => firstByteWaitSec + piece });
         continue;
       }
       const head = Number(filler.head);
       // Left where it stands it owes what is left of the piece under it; taken
       // somewhere else it owes the killing, the start and a whole piece.
-      bodies.push({
+      encoders.push({
         at: positions[index],
         owes: head === positions[index]
           ? (piece) => finishesItsPieceIn(filler, piece)
@@ -350,7 +409,7 @@ export function planEncoders({
     // Bodies nobody was given a position for go on working where they stand,
     // and their coverage counts: the file is encoded whole.
     //
-    // A body given no end pays a restart the moment anybody is placed inside the
+    // A encoder given no end pays a restart the moment anybody is placed inside the
     // road it would drive: where a run stops is fixed when its process starts,
     // so it has to be cut and begun again at its own head. That price was
     // invisible here, and an arrangement was scored as free when it was not.
@@ -363,14 +422,14 @@ export function planEncoders({
       const cutInFront = arrangement.fill.some((filler, index) =>
         filler !== null && positions[index] > head
         && (endless || positions[index] <= Number(run.to)));
-      bodies.push({
+      encoders.push({
         at: head,
         owes: cutInFront
           ? (piece) => moveSec + piece
           : (piece) => finishesItsPieceIn(run, piece)
       });
     }
-    const scored = latenessOf(priced(bodies), coverage, wanted, untilNeeded, rate / contentionPenaltyFor(Math.max(0, bodies.length - 1)), refetchPerSegment, segmentSeconds);
+    const scored = latenessOf(priced(encoders), coverage, wanted, untilNeeded, rate / contentionPenaltyFor(Math.max(0, encoders.length - 1)), refetchPerSegment, segmentSeconds);
     if (bestScore === null || cheaperThan(scored, bestScore)) {
       bestScore = scored;
       best = arrangement;
@@ -379,13 +438,13 @@ export function planEncoders({
 
   // A BODY STANDING ON FILM THAT EXISTS is the one arrangement the enumeration
   // above cannot reach: the gap in front of it is nobody's deadline, so it is
-  // never a position, and the body is left to make three hundred pieces a second
-  // time. Each such body is offered its own first gap and the SAME score decides
+  // never a position, and the encoder is left to make three hundred pieces a second
+  // time. Each such encoder is offered its own first gap and the SAME score decides
   // — moving costs a restart on everything downstream, staying costs the repeat.
   //
   // Offered one at a time rather than folded into the enumeration because the
   // enumeration is exponential in the number of positions, and this is called
-  // again on every piece produced. One extra evaluation per body against
+  // again on every piece produced. One extra evaluation per encoder against
   // several thousand arrangements is the difference between arithmetic and a
   // stalled proxy.
   const placement = new Map();
@@ -395,8 +454,8 @@ export function planEncoders({
       placement.set(filler, positions[index]);
     }
   }
-  const bodiesOf = (override) => {
-    const bodies = [];
+  const encodersOf = (override) => {
+    const encoders = [];
     for (const run of live) {
       if (override.has(run) && override.get(run) === null) {
         // Asked what the film looks like WITHOUT this one.
@@ -404,7 +463,7 @@ export function planEncoders({
       }
       const at = override.has(run) ? override.get(run) : (placement.get(run) ?? Number(run.head));
       const head = Number(run.head);
-      bodies.push({
+      encoders.push({
         at,
         owes: at === head
           ? (piece) => finishesItsPieceIn(run, piece)
@@ -413,15 +472,15 @@ export function planEncoders({
     }
     for (let index = 0; index < positions.length; index += 1) {
       if ((best ? best.fill[index] : null) === "new") {
-        bodies.push({ at: positions[index], owes: (piece) => firstByteWaitSec + piece });
+        encoders.push({ at: positions[index], owes: (piece) => firstByteWaitSec + piece });
       }
     }
-    return priced(bodies);
+    return priced(encoders);
   };
   const scoreOf = (override) => {
-    const bodies = bodiesOf(override);
-    return latenessOf(bodies, coverage, wanted, untilNeeded,
-      rate / contentionPenaltyFor(Math.max(0, bodies.length - 1)), refetchPerSegment, segmentSeconds);
+    const encoders = encodersOf(override);
+    return latenessOf(encoders, coverage, wanted, untilNeeded,
+      rate / contentionPenaltyFor(Math.max(0, encoders.length - 1)), refetchPerSegment, segmentSeconds);
   };
   for (const run of live) {
     if (placement.has(run)) {
@@ -439,16 +498,16 @@ export function planEncoders({
   }
 
   /**
-   * Would the film be worse off without this body? Asked of the same score.
+   * Would the film be worse off without this encoder? Asked of the same score.
    *
    * @param {object} run
    * @returns {boolean}
    */
   const worseWithout = (run) => {
-    const kept = bodiesOf(new Map());
-    const without = bodiesOf(new Map([[run, null]]));
-    const scoreOf_ = (bodies) => latenessOf(bodies, coverage, wanted, untilNeeded,
-      rate / contentionPenaltyFor(Math.max(0, bodies.length - 1)), refetchPerSegment, segmentSeconds);
+    const kept = encodersOf(new Map());
+    const without = encodersOf(new Map([[run, null]]));
+    const scoreOf_ = (encoders) => latenessOf(encoders, coverage, wanted, untilNeeded,
+      rate / contentionPenaltyFor(Math.max(0, encoders.length - 1)), refetchPerSegment, segmentSeconds);
     return cheaperThan(scoreOf_(kept), scoreOf_(without));
   };
 
@@ -486,7 +545,7 @@ export function planEncoders({
     }
     // It stays where it is — unless holding it changes nothing.
     //
-    // A body left over from where a viewer used to be goes on costing the
+    // A encoder left over from where a viewer used to be goes on costing the
     // machine a process while another encoder already reaches everything it
     // would. The score says so directly: take it away and see. Removing it is
     // refused the moment it makes anything later or leaves film abandoned, so
@@ -514,7 +573,7 @@ export function planEncoders({
       if (action.type !== "keep") {
         continue;
       }
-      const without = latenessOf(bodiesOf(new Map([[run, null]])), coverage, wanted, untilNeeded,
+      const without = latenessOf(encodersOf(new Map([[run, null]])), coverage, wanted, untilNeeded,
         rate / contentionPenaltyFor(Math.max(0, live.length - 2)), refetchPerSegment, segmentSeconds);
       if (cheapestScore === null || cheaperThan(without, cheapestScore)) {
         cheapestScore = without;
@@ -635,7 +694,7 @@ export function planEncoders({
  * quantity says how many of one are worth one of the other. Adding them would
  * mean choosing that exchange rate, which is inventing a number.
  *
- * @param {{ at: number, delaySec: number }[]} bodies - Where each encoder would
+ * @param {{ at: number, delaySec: number }[]} encoders - Where each encoder would
  *   stand, and how long before it produces anything there: nothing where it is
  *   already standing, a move or a start otherwise.
  * @param {import("./CoverageMap.js").CoverageMap} coverage
@@ -649,7 +708,7 @@ export function planEncoders({
  * @returns {{ stall: number, ahead: number, whole: number }} Three counts of
  *   seconds, compared in that order by {@link cheaperThan}.
  */
-function latenessOf(bodies, coverage, wanted, untilNeeded, rate, refetchSecPerSegment, segmentSeconds) {
+function latenessOf(encoders, coverage, wanted, untilNeeded, rate, refetchSecPerSegment, segmentSeconds) {
   const first = Math.min(...wanted.map((span) => span.from));
   const last = Math.max(...wanted.map((span) => span.to));
   // What a number nobody reaches at all counts as. The film's own length is the
@@ -729,8 +788,8 @@ function latenessOf(bodies, coverage, wanted, untilNeeded, rate, refetchSecPerSe
     // already made on the way, which costs its own time and the swarm's.
     let soonest = Number.POSITIVE_INFINITY;
     let byWhom = null;
-    for (const body of bodies) {
-      if (body.at > index) {
+    for (const encoder of encoders) {
+      if (encoder.at > index) {
         continue;
       }
       // WHEN THIS BODY REACHES THIS NUMBER. `delaySec` is when it finishes the
@@ -738,8 +797,8 @@ function latenessOf(bodies, coverage, wanted, untilNeeded, rate, refetchSecPerSe
       // to be encoded at `rate`.
       //
       // It used to be `(index - at + 1) / rate` on top of the delay, which
-      // charges every body a whole piece for the one it is already working on. A
-      // fresh body does start from nothing, so for it that is right — and it is
+      // charges every encoder a whole piece for the one it is already working on. A
+      // fresh encoder does start from nothing, so for it that is right — and it is
       // now inside its own delay. A run 0.8 s into a 0.9 s piece does not, and
       // charging it 0.94 s for that piece is what made moving it look cheaper
       // than leaving it: from #58 it was priced at 1.89 s to reach #59 against
@@ -747,12 +806,12 @@ function latenessOf(bodies, coverage, wanted, untilNeeded, rate, refetchSecPerSe
       // that is nothing but the double charge. Field 2026-09-08: 39 moves in one
       // session, 24 of them between three adjacent numbers, and the picture
       // stood still for 116.7 s.
-      const arrival = body.delaySec
-        + (index - body.at) / rate
-        + coverage.madeBetween(body.at, index) * refetchSecPerSegment;
+      const arrival = encoder.delaySec
+        + (index - encoder.at) / rate
+        + coverage.madeBetween(encoder.at, index) * refetchSecPerSegment;
       if (arrival < soonest) {
         soonest = arrival;
-        byWhom = body;
+        byWhom = encoder;
       }
     }
     if (coverage.isReady(index)) {
@@ -802,7 +861,7 @@ function latenessOf(bodies, coverage, wanted, untilNeeded, rate, refetchSecPerSe
     // the swarm's bill, so it cannot buy one where the map is indifferent — and
     // the map IS indifferent about spare capacity, which is what bought an
     // encoder for film nobody waits for.
-    bodies: bodies.length,
+    encoders: encoders.length,
     // WHAT THE SWARM PAYS for anything fetched twice, which delays everything.
     wasted: wastedSwarm
   };
@@ -846,8 +905,8 @@ function cheaperThan(left, right) {
   // indifferent, so the machine decides: a process, a reader of the piece store
   // and the swarm's bandwidth are all paid by the viewers the ranks above are
   // about.
-  if (left.bodies !== right.bodies) {
-    return left.bodies < right.bodies;
+  if (left.encoders !== right.encoders) {
+    return left.encoders < right.encoders;
   }
   return left.wasted < right.wasted;
 }
@@ -906,7 +965,7 @@ function deadlineReaderFor(windows, segmentSeconds) {
       // the viewers, which the map marks with exactly that, was the most urgent
       // material in the file. Everything followed from it: it bought encoders,
       // it took the run standing in front of the viewer because that run was the
-      // nearest body to it, and it did so again on every pass. Field 2026-09-08:
+      // nearest encoder to it, and it did so again on every pass. Field 2026-09-08:
       // 39 moves in one session, 24 between three adjacent numbers, one viewer
       // on three encoders, and the picture stood still for 116.7 s in three
       // interruptions, the worst of them 91.8 s.
@@ -1176,7 +1235,20 @@ export function firstUnmetWant(coverage, windows) {
  *   stated want is due now.
  * @returns {number[]} Where to start each encoder, ascending.
  */
-export function placeEncoders({ coverage, windows, howMany, firstGap = null, deadlineAt = null }) {
+export function placeEncoders({
+  coverage,
+  windows,
+  howMany,
+  firstGap = null,
+  deadlineAt = null,
+  // WHERE TWO ENCODERS SHARE A STRETCH, and whether a second is worth having at
+  // all. Derived by whoever holds the measurements — the rates, the contention
+  // penalty, what a start costs — because this function is positional and holds
+  // none of them. The default is the midpoint, which IS the answer when both are
+  // fresh and owe the same, and is what a caller with nothing measured falls
+  // back on.
+  splitAt = (from, to) => from + Math.floor((to - from + 1) / 2)
+}) {
   if (!(howMany > 0) || windows.length === 0) {
     return [];
   }
@@ -1249,8 +1321,18 @@ export function placeEncoders({ coverage, windows, howMany, firstGap = null, dea
       const to = index === edges.length ? lastOf(windows) : edges[index] - 1;
       const room_ = coverage.unmadeRunFrom(from);
       if (to >= from && room_ > widest) {
-        widest = room_;
-        widestFrom = from + Math.floor(Math.min(room_, to - from + 1) / 2);
+        // WHERE THE TWO OF THEM MEET, calculated rather than halved. Halving is
+        // the answer only when both encoders are fresh and owe the same, and it
+        // was applied to every case — one already working is partway through a
+        // piece while a new one owes its whole start, so the point where they
+        // finish together lies further on. Nothing back means a second encoder
+        // does not pay for itself here at all: two under this host's measured
+        // contention against one at full speed, a comparison halving never made.
+        const meet = splitAt(from, Math.min(from + room_ - 1, to));
+        if (meet !== null) {
+          widest = room_;
+          widestFrom = meet;
+        }
       }
     }
     if (widestFrom === null) {

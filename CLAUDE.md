@@ -72,6 +72,12 @@ Linux-only host (e.g. POSIX-only signals must degrade elsewhere).
     wanted (`demand/`) against what the swarm is told (`download/`), why urgency
     is not a number given to the library, and why the speculative levels are
     withdrawn rather than lowered.
+  - `docs/encode-architecture.md` — who decides where encoders go, and the
+    answer is one authority: `EncodePlan`, from what is made, what is being
+    made, what is wanted and what the host can hold. Why no viewer reaches it,
+    why the priority map is read at two scopes (per FILE for the swarm, per
+    OUTPUT for the encoders), and what each of the eight other places that used
+    to place or kill an encoder now states instead.
   - `docs/logs.md` — where to find logs (HA `docker logs` + `/data/proxy.log`, DO
     `infra-server-1` with forwarded frontend `POST /api/client-logs`). Browser
     console not needed.

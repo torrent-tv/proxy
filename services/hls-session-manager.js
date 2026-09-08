@@ -1563,7 +1563,11 @@ export class HlsSessionManager {
         ).catch(() => {});
       },
       viewersOf: (session) => viewersOf(session),
-      watchedBy: (session, viewer) => this.liveOutputs.watchedBy(session, viewer),
+      // WHERE THE TWO FACTS MEET, and this is the only place that holds both.
+      // Which step is on somebody's screen belongs to the person; which output
+      // a step supersedes belongs to the film's shape. Neither layer is handed
+      // the other — one gets a plain id, the other is read for one field.
+      watchedBy: (session, viewer) => !this.liveOutputs.supersededBy(session, viewer.activeVariantId ?? null),
       allowanceFor: (session) => minimumBufferFrom({
         segmentSeconds: this.segmentDurationSec,
         worstSupplyWaitSec: session.supplyFigures?.worstWaitSec

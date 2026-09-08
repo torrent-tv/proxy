@@ -37,10 +37,12 @@ flowchart TB
   end
 
   subgraph Claimants["who states needs"]
-    PR[piece-reader<br/>four bands per read]
+    PM[priority map<br/>where the viewers are, per FILE]
+    PR[piece-reader<br/>the piece it is stopped on]
     BF[torrent-pool<br/>background fill, per file]
   end
 
+  PM -->|state / withdraw| R
   PR -->|state / withdraw| R
   BF -->|state / withdraw| R
   W --> R
@@ -50,6 +52,25 @@ flowchart TB
   G --> S
   S -->|the only caller| WT[(WebTorrent)]
 ```
+
+## Who the claimants are, and what each of them knows
+
+**The priority map** states what should be downloaded AHEAD of the viewers, once
+per file, built in `services/priority/` from where they are and from nothing
+else. It is the same map the encoding reads — the encoding reads it per OUTPUT
+and in segment numbers, this layer reads it per FILE and in bytes, and both
+scopes are right for what asks them (`encode-architecture.md`).
+
+**A read** states only the piece it is STOPPED ON. That is not a forecast but the
+fact that somebody is waiting there, and it is what keeps working for the reads
+the viewers' map does not cover: a container header at open, the subtitle walk, a
+soundtrack being fetched whole. Until 2026-09-02 each read built four bands
+around its own head instead, so fifteen reads were fifteen forecasts on a store
+holding sixteen pieces, half of all evictions took a piece a reader had said it
+wanted, and two thirds of reads came back from disk.
+
+**The background fill** states one file at a time — a soundtrack pulled whole
+once the cushion is full, and no further.
 
 ## The five levels
 

@@ -302,13 +302,13 @@ test("a segment request hands the encoder to the variant the viewer moved to", a
   // handed the whole film's priority map — started it again on the very next
   // pass, which this viewer's own move had just triggered.
   assert.equal(
-    manager.liveOutputs.watchedBy(base, viewerOf(base, "")),
-    false,
+    manager.liveOutputs.supersededBy(base, viewerOf(base, "").activeVariantId),
+    true,
     "the picture they stepped off is nobody's now"
   );
   assert.equal(
-    manager.liveOutputs.watchedBy(variant, viewerOf(variant, "")),
-    true,
+    manager.liveOutputs.supersededBy(variant, viewerOf(variant, "").activeVariantId),
+    false,
     "and the rung they moved to is theirs"
   );
   assert.deepEqual(encoder.signals, [], "stopping it is the plan's, from that fact, and not this path's");

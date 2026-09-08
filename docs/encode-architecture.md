@@ -194,7 +194,7 @@ Not three terms in seconds. One pair per rank the map states, most urgent rank
 first, compared position by position:
 
 ```
-[ late(100), done(100), late(99), done(99), … late(1), done(1) ], bodies, wasted
+[ late(100), done(100), late(99), done(99), … late(1), done(1) ], encoders, wasted
 ```
 
 `late(r)` is how long anybody waits past a deadline at rank `r`; `done(r)` is
@@ -210,7 +210,7 @@ source of truth about what matters and it already says so — ten ranks on a fil
 p100 at the number a viewer is stopped on, doubling zones down to p91 for the far
 tail, p1 for what lies behind them.
 
-`bodies` ranks below every rank of the map, so spare capacity cannot buy an
+`encoders` ranks below every rank of the map, so spare capacity cannot buy an
 encoder where the map is indifferent. `wasted` is the swarm's bill for anything
 fetched twice.
 
@@ -266,6 +266,40 @@ Checked by simulation over sixty ticks against the map's real shape — ten zone
 doubling ahead of the viewer, one behind — at both one and three runs: the
 encoder is placed once, left alone, and moved exactly once, at the viewer's own
 seek.
+
+## Where a second encoder joins a stretch
+
+Derived, not halved. A stretch of unmade film runs from `from` to `to`; whoever
+is already on it stands at `from` and owes `w` before the piece under it exists;
+a fresh one placed at `x` owes `d` — its start and then a whole piece — and both
+then work at the rate two encoders leave each other, which is measured here.
+
+```
+the one already there closes [from, x-1]:   w + (x - 1 - from) / r      rises with x
+the fresh one closes         [x, to]:       d + (to - x)     / r        falls with x
+
+x* = (from + to + 1) / 2  +  (d - w) * r / 2
+```
+
+The midpoint, shifted forward by half the difference of what the two owe, in
+pieces. Halving is the special case `d = w`, which holds when both are fresh.
+
+**The shift is under one segment in every measured configuration** — 0.24 of a
+piece at the addon host's 1080p contention — so halving was very nearly right,
+and saying otherwise would be dressing it up.
+
+What the derivation adds is the question halving never asked: **is a second
+encoder worth having at all?**
+
+```
+one:  w + (to - from - 1) / rate
+two:  w + (x* - 1 - from) / r
+```
+
+Nothing is proposed where the second does not win. At 1920x1080 the measured
+penalty for a second encoder on the addon host is 1.98 — it takes very nearly
+all of the first's speed — and the objective keeps one; where a second is free it
+places three.
 
 ## What is checked
 

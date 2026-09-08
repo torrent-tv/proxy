@@ -1,3 +1,9 @@
+## 2.80.17
+
+- **Fix**: Where a second encoder joins a stretch is DERIVED, and whether it is worth having is asked at all. It was the midpoint of the widest unmade run, unconditionally. Both encoders close their halves at a time that rises with the split point for one and falls for the other, so the stretch is closed soonest where they cross: `x* = (from + to + 1)/2 + (d - w) * r / 2` — the midpoint, shifted forward by half the difference between what a fresh encoder owes and what the one already there owes, in pieces. Halving is the special case where both are fresh and owe the same.
+  **The shift is under one segment in every measured configuration** — 0.24 of a piece at the addon host's 1080p penalty — so halving was very nearly right, and this is stated rather than dressed up. What the derivation adds that halving never asked is the other half: two encoders under this host's MEASURED contention against one at full speed. At 1080p the penalty for a second is 1.98, it takes very nearly all of the first's speed, and the objective now refuses it and keeps one; with a free second it still places three.
+- **Chore**: `bodies` in the placement arithmetic is `encoders`. A process is not a body, and in Russian the word reads obscenely.
+
 ## 2.80.16
 
 - **Fix**: THE SPINNER CARAVAN, by arithmetic alone, and the two props 2.80.15 carried are gone with it — the threshold that made a move pay for itself, and the exclusion that kept a live run off a deadline-less zone. Both were propping up a comparison that was wrong rather than indifferent. Three quantities were computed wrongly:

@@ -214,44 +214,58 @@ tail, p1 for what lies behind them.
 encoder where the map is indifferent. `wasted` is the swarm's bill for anything
 fetched twice.
 
-## Three rules that stop an encoder being moved for nothing
+## Why an encoder is not moved for nothing, and it is not a rule
 
-**A zone with no deadline never takes a live run.** Residual work — the film
-behind the viewers, kept in case somebody seeks back — is done with capacity
-that is left over, and a run already standing in front of a viewer is not left
-over.
+There is no threshold here, and there must not be one. What kept an encoder
+moving was three quantities computed wrongly, not a policy that needed tuning.
 
-**An act must pay for itself.** Where an arrangement is only reachable by killing
-a running encoder, a gain smaller than what the killing costs is not a gain. The
-margin is the measured cost of the act.
+**`delaySec` is when a body finishes the piece it STANDS ON.** For a run that has
+produced something, one piece at the rate in force; for one still warming up, the
+measured time to a first piece less the time it has already been alive. The
+arrival of anything further on is that plus the pieces between, and nothing else.
 
-**The plan remembers what it is already carrying out.** A staying run is priced
-at what it still has to go — the measured time to a first piece less the time it
-has been alive — not at zero. A run 0.8 s old has 0.14 s left against 0.94 s to
-move it; one working half a minute has nothing left, and a move then happens
-exactly when the film it would reach sooner is worth the restart.
+It used to be `delay + (index - at + 1) / rate`, which charges every body a whole
+piece for the one it is already making. That is right for a body that does not
+exist yet and wrong for a run 0.8 s into a 0.9 s piece — and the difference is
+the whole fault: from #58, reaching #59 was priced at 1.89 s against 1.88 s for a
+kill and a cold start, a coin flip lost by ten milliseconds. Priced correctly it
+is 1.08 s against 1.88 s.
 
-And what a move costs is `Infinity` until something has been measured: a move is
-irreversible and leaving the encoder alone is always available. Placing one where
-there is none takes the unknown the other way, because the film gets made or it
-does not.
+**One rate, the one the arrangement puts in force.** Concurrent encoders slow
+each other, measured on this host, so a piece costs what it costs at the body
+count the arrangement has. Taken from the unpenalised rate while arrivals used
+the penalised one, an extra body looked cheaper than it is and the plan bought a
+second encoder where one served.
 
-### What all three were for
+**Each body states its own debt** where it is created, as a function of what one
+piece costs — because only there is it known what the body IS, and at the point
+of pricing only how many there are. So there is no kind, no tag and no case
+analysis.
 
-Field 2026-09-08. The map states `withinSeconds: null` for the film behind the
-viewers; `deadlineReaderFor` read it through `Number()`, where `null` is 0, so
-that film was due IMMEDIATELY and was the most urgent material in the file. It
-bought encoders and it took the run standing in front of the viewer, because
-that run was the nearest body to it — 39 moves in one session, 24 of them between
-three adjacent numbers about 0.8 s apart. One viewer on a host affording three
-runs got three. The picture stood still for 116.7 s in three interruptions, the
-worst of them 91.8 s.
+**What a move costs is `Infinity` until something has been measured**, because a
+move is irreversible while leaving the encoder alone is always available. Placing
+one where there is none takes the unknown the other way: the film gets made or it
+does not. And a run killed before producing anything is a measurement too — a
+lower bound on the first output, and the only reading a thrash can supply, since
+every run in one is killed before it finishes anything.
 
-The numbers are worth keeping because they are so close: driving from #58 to #59
-means making TWO pieces, 1.89 s at 4.45x on a 4.2 s grid, against a cold start
-and ONE piece, 0.94 + 0.94 = 1.88 s. Every one of those 39 moves was
-individually the cheapest arrangement it was offered. That is the signature of an
-optimiser with no memory, and the three rules above are what give it one.
+### What that was for
+
+Field 2026-09-08: 39 moves in one session, 24 of them between three adjacent
+numbers about 0.8 s apart. One viewer on a host affording three runs got three.
+The picture stood still for 116.7 s in three interruptions, the worst 91.8 s.
+
+Compounding it, the map states `withinSeconds: null` for the film behind the
+viewers — nobody is waiting there — and `deadlineReaderFor` read that through
+`Number()`, where `null` is 0. So the film a viewer had already passed was due
+IMMEDIATELY and was the most urgent material in the file: it bought encoders, and
+it took the run standing in front of the viewer because that run was the nearest
+body to it.
+
+Checked by simulation over sixty ticks against the map's real shape — ten zones
+doubling ahead of the viewer, one behind — at both one and three runs: the
+encoder is placed once, left alone, and moved exactly once, at the viewer's own
+seek.
 
 ## What is checked
 

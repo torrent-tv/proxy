@@ -24,8 +24,14 @@ export class LiveOutputs {
    * @param {Map<string, object>} params.sessionsById - The live sessions. Read,
    *   never written.
    */
-  constructor({ sessionsById }) {
+  constructor({ sessionsById, fileLengthOf = () => 0, largestPieceOf = () => ({ index: -1, size: 0 }) }) {
     this.sessionsById = sessionsById;
+    // Two facts this layer needs and does not own: how many bytes a source file
+    // is, which the torrent reports, and the biggest piece an output has made,
+    // which the disk knows. Taken as plain functions, so nothing of either layer
+    // is held here.
+    this.fileLengthOf = fileLengthOf;
+    this.largestPieceOf = largestPieceOf;
   }
 
   /**
@@ -278,21 +284,25 @@ export class LiveOutputs {
    * the asking VIEWER'S business, and that belongs to whoever holds viewers.
    *
    * @param {object} session
-   * @param {(address: string) => { index: number, size: number }} largestPiece -
-   *   The biggest piece an output has made, asked of whoever owns the disk. A
-   *   plain function, so this layer holds no store.
    * @returns {object}
    */
-  masterFactsOf(session, largestPiece) {
+  masterFactsOf(session) {
     return {
       playlistVersion: session.segmentFormat.playlistVersion,
       heights: this.splicableHeights(session),
       sourceWidth: Number(session.file?.width) || 0,
       sourceHeight: Number(session.file?.height) || 0,
       ...masterRateArgs({
-        fileLength: Number(session.file?.length) || 0,
+        // FROM WHOEVER KNOWS IT. A source file does not carry its own byte
+        // length — the torrent reports it — and reading a field that does not
+        // exist is what declared every variant at the floor in 2.80.14.
+        fileLength: Number(this.fileLengthOf(session)) || 0,
         durationSeconds: Number(session.file?.durationSeconds) || 0,
-        largest: largestPiece(session.outputKey ?? ""),
+        // The probe's own reading of the video stream, which is known from the
+        // moment the session exists and covers the gap before the torrent has
+        // reported a length.
+        streamBitsPerSecond: (Number(session.file?.decode?.megabitsPerSecond) || 0) * 1_000_000,
+        largest: this.largestPieceOf(session.outputKey ?? ""),
         boundaries: session.timeline?.published ?? session.timeline?.boundaries ?? null,
         producedHeight: this.producedHeightOf(session),
         capKbps: Number(session.rateCapKbps) || 0

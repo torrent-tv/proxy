@@ -188,6 +188,71 @@ was 17.1 s. Inflating it is not the answer either: hls.js compares it against
 its own estimate of the link to decide a level is unplayable, and its recovery
 then moves level by itself, which does not honour our pinning.
 
+## The objective is the map's own rank order
+
+Not three terms in seconds. One pair per rank the map states, most urgent rank
+first, compared position by position:
+
+```
+[ late(100), done(100), late(99), done(99), … late(1), done(1) ], bodies, wasted
+```
+
+`late(r)` is how long anybody waits past a deadline at rank `r`; `done(r)` is
+when the last number of that rank is made. A difference at a higher rank settles
+it and nothing lower can reopen it — which is the stated order: nobody stares at
+a spinner; then the film in front is encoded as fast as it can be, band by band
+as the map ranks them; then, with what is left over and only then, the film
+behind, in case somebody seeks back.
+
+**No weights, and none possible.** A weight would let seconds at one rank buy
+seconds at another, and it would be a figure nobody measured. The map is the
+source of truth about what matters and it already says so — ten ranks on a film,
+p100 at the number a viewer is stopped on, doubling zones down to p91 for the far
+tail, p1 for what lies behind them.
+
+`bodies` ranks below every rank of the map, so spare capacity cannot buy an
+encoder where the map is indifferent. `wasted` is the swarm's bill for anything
+fetched twice.
+
+## Three rules that stop an encoder being moved for nothing
+
+**A zone with no deadline never takes a live run.** Residual work — the film
+behind the viewers, kept in case somebody seeks back — is done with capacity
+that is left over, and a run already standing in front of a viewer is not left
+over.
+
+**An act must pay for itself.** Where an arrangement is only reachable by killing
+a running encoder, a gain smaller than what the killing costs is not a gain. The
+margin is the measured cost of the act.
+
+**The plan remembers what it is already carrying out.** A staying run is priced
+at what it still has to go — the measured time to a first piece less the time it
+has been alive — not at zero. A run 0.8 s old has 0.14 s left against 0.94 s to
+move it; one working half a minute has nothing left, and a move then happens
+exactly when the film it would reach sooner is worth the restart.
+
+And what a move costs is `Infinity` until something has been measured: a move is
+irreversible and leaving the encoder alone is always available. Placing one where
+there is none takes the unknown the other way, because the film gets made or it
+does not.
+
+### What all three were for
+
+Field 2026-09-08. The map states `withinSeconds: null` for the film behind the
+viewers; `deadlineReaderFor` read it through `Number()`, where `null` is 0, so
+that film was due IMMEDIATELY and was the most urgent material in the file. It
+bought encoders and it took the run standing in front of the viewer, because
+that run was the nearest body to it — 39 moves in one session, 24 of them between
+three adjacent numbers about 0.8 s apart. One viewer on a host affording three
+runs got three. The picture stood still for 116.7 s in three interruptions, the
+worst of them 91.8 s.
+
+The numbers are worth keeping because they are so close: driving from #58 to #59
+means making TWO pieces, 1.89 s at 4.45x on a 4.2 s grid, against a cold start
+and ONE piece, 0.94 + 0.94 = 1.88 s. Every one of those 39 moves was
+individually the cheapest arrangement it was offered. That is the signature of an
+optimiser with no memory, and the three rules above are what give it one.
+
 ## What is checked
 
 `test/one-authority.test.js` holds the shape: one caller of `#startEncodeRun`,

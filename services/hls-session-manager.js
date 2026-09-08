@@ -1510,7 +1510,11 @@ export class HlsSessionManager {
     // picture a step belongs to, the steps, the soundtracks, the height a
     // session is named by. Read-only over the register above, and the layer the
     // quality budget and the serving path both stand on.
-    this.liveOutputs = new LiveOutputs({ sessionsById: this.sessionsById });
+    this.liveOutputs = new LiveOutputs({
+      sessionsById: this.sessionsById,
+      fileLengthOf: (session) => this.#fileLengthByKey.get(session.file.key) ?? 0,
+      largestPieceOf: (address) => this.segmentStore.largestPiece(address)
+    });
     // What this host learned last time it ran. Without it every restart shows
     // the first viewer a figure with no measurement behind it.
     this.#loadHostTimings();
@@ -8317,7 +8321,7 @@ export class HlsSessionManager {
       // the live judgement travels in `offeredHeights` and in every progress
       // report, and letting it decide the master's existence made a live session
       // answer 404 to its own published address.
-      ...this.liveOutputs.masterFactsOf(session, (address) => this.segmentStore.largestPiece(address)),
+      ...this.liveOutputs.masterFactsOf(session),
       renditions,
       playlistFileName: PLAYLIST_FILE_NAME
     });

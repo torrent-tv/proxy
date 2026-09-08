@@ -367,9 +367,15 @@ test("the one machine goes to whoever is due soonest, not to the smallest number
     ...HOST,
     maxRuns: 2
   });
-  const started = actions.filter((action) => action.type === "start").map((action) => action.from);
+  // WHERE the machine ends up, not how it got there. A run standing at #900
+  // reaches nothing anybody wants, so it is taken to #500 rather than killed and
+  // replaced — one process instead of a death and a cold start, which is
+  // strictly better and is what the plan now answers.
+  const placed = actions
+    .filter((action) => action.type === "start" || action.type === "move")
+    .map((action) => action.from);
 
-  assert.deepEqual(started, [500], "the one machine goes where somebody is stopped");
+  assert.deepEqual(placed, [500], "the one machine goes where somebody is stopped");
 });
 
 test("two viewers far apart are both served, by however many encoders serve them soonest", () => {

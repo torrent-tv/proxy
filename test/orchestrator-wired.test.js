@@ -190,6 +190,10 @@ test("segments already made are known to the plan, whoever made them", (t) => {
   const coverage = manager.encodeOrchestrator.coverageOf(KEY);
   assert.equal(coverage.isReady(0), true);
   assert.equal(coverage.isReady(2), true);
-  assert.equal(coverage.isReady(3), false, "the highest has no successor to prove it closed");
+  // Including the highest. It used to be excluded for having no successor to
+  // prove it closed, which left the last piece of every run unprovable for ever
+  // — and proved a half-written one whenever the number above it was written by
+  // another run of the same output. A served name is the proof now.
+  assert.equal(coverage.isReady(3), true, "its name says it is closed");
   void store;
 });

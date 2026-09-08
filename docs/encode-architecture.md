@@ -321,10 +321,25 @@ places three.
 
 ```
 encode-plan on <output>: start #58..#481, stop #?..#?
+  [speed=4.45x firstByte=1.26s kill=0.04s refetch=0.000s/s maxRuns=2 live=1]
 ```
 
-Every action with its INTERVAL, which is what a run is. Printed on any pass that
-does something — a session where nothing changes says nothing.
+Every action with its INTERVAL, which is what a run is, and then every term the
+decision was made from. Printed on any pass that does something — a session
+where nothing changes says nothing.
+
+The terms are there because an interval says WHAT was decided and only these say
+WHY. A decision of this plan is
+
+    delay + (index - at) / rate + madeBetween * refetch    against a deadline
+
+so a recorded decision without the rate can be re-read and not recomputed. That
+is not hypothetical: the one-piece intervals of 2026-09-08 were diagnosed by
+substituting the rate from the speeds the session reported elsewhere — six
+different figures, none of which reproduced the answer the plan had given.
+
+A zero in `firstByte`, `kill` or `refetch` is a measurement nobody has taken, not
+a free operation. It is printed so that reading it as free is a choice.
 
 It was missing, and its absence cost three wrong diagnoses of one field session.
 The line printed the windows, the budget and where the live runs stood; the
@@ -335,6 +350,35 @@ reaching the end of its interval and exiting, twelve of them normally. The
 reasons printed beside them read as moves back and forth, so the fault was read
 as an oscillating placement three times over. An interval of one segment turns
 the protection against two encoders writing one name into a mill for processes.
+
+## What proves a segment is finished
+
+Its NAME, and there is nothing else. A piece being written is called
+`making-<from>-00042.mp4` — the tag is the first number of the stretch its run
+was given — and it takes `segment-00042.mp4` when the encoder says it has closed
+it, which it does on a channel of its own (`-segment_list pipe:3`). Making it
+servable is therefore one rename inside one directory, performed by the store
+because the store owns the disk. The `hls` branch needs nothing extra: its muxer
+writes through a temporary name of its own, so its files appear under their final
+name whole.
+
+Three things follow, and each replaced a guess:
+
+1. **a request can never reach a half-written piece.** Closure used to be
+   inferred from the NEXT number existing — sound for one writer walking forward,
+   false the moment two runs share an output, which is what the plan gives an
+   output whenever it places a second encoder. Field 2026-09-08:
+   `segment-00057.mp4` served at 2 268 361 bytes and then at 4 510 940, exactly
+   half; the browser appended the half and refused the whole for the rest of the
+   session, with the picture frozen at 319.66 s;
+2. **the last piece of a run is provable.** Under the successor rule nothing
+   followed it, so it never was — the resume case that held one segment for 46 s
+   and then answered 404;
+3. **clearing up after a dead run is a name match.** Its unfinished pieces are
+   the ones carrying its own tag: no stretch to search, no bytes to judge, and no
+   way to remove a complete piece somebody else closed. `services/encode/
+   open-piece.js` did all three of those by guessing and is gone, along with the
+   session manager's copy of it.
 
 ## What is checked
 
@@ -348,3 +392,8 @@ viewer registry, the real `LiveOutputs` and the real `PriorityOrchestrator`.
 
 `test/encode-plan.test.js` holds the arithmetic, including that every encoder
 stops when nobody is watching the output.
+
+`test/segment-store.test.js` holds the naming rule: a piece under its served
+name is finished — the last one of a run included — one under a working name is
+not and cannot be reached, closing it is one rename, and clearing up after one
+run leaves every other run's work alone.

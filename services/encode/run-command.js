@@ -703,7 +703,22 @@ export function buildRunCommand({
       "-segment_list_flags",
       "+live",
       ...explicitTimes,
-      segmentFormat.segmentFileNameTemplate()
+      // UNDER A WORKING NAME, not the one it is served as. A piece under its
+      // served name is complete by construction then, whoever else is writing
+      // into the same directory — and the name arrives on the channel above the
+      // instant ffmpeg closes it, which is what turns it into the served one.
+      //
+      // The other branch needs none of this: the HLS muxer writes through a
+      // temporary name of its own (`+temp_file`), so its files appear under
+      // their final name whole.
+      //
+      // TAGGED WITH THE STRETCH IT WAS GIVEN, which names the run without any
+      // counter to keep: intervals never overlap, so two live runs of one output
+      // begin at different numbers by construction. That is what makes clearing
+      // up after a dead run a well-formed question — its unfinished pieces are
+      // the ones carrying its own tag — where before it was answered by taking
+      // the highest SERVED name inside its stretch and judging the bytes.
+      segmentFormat.makingFileNameTemplate(String(safeIndex))
     );
   } else {
     args.push(

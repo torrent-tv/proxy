@@ -103,8 +103,12 @@ function aViewerAtTheStart(made) {
  */
 function theWholeFilmIsOnDisk(store, dir) {
   for (let index = 0; index < SEGMENTS; index += 1) {
+    // Under the served name, which is the whole of what says a piece is closed:
+    // it takes that name only when its writer has said so. There used to be a
+    // statement kept beside the disk as well, told by whoever noticed a piece
+    // being produced — a second owner of one fact, and the fault this file's own
+    // subject is.
     writeFileSync(path.join(dir, fmp4Format.segmentFileName(index)), Buffer.alloc(16));
-    store.markClosed(PICTURE, index);
   }
 }
 

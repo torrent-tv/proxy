@@ -19,27 +19,31 @@
  * killed, work out what it is looking at — without it, everything on disk after
  * a kill is unidentifiable and can only be thrown away.
  *
- * **What proves a segment is closed.** On the `hls` output branch ffmpeg
- * renames a temporary file into place, so a file that exists is complete. On
- * the `segment` branch — every copied picture and every rung forced onto the
- * source's keyframes — it does not, and a file appears and grows. So the rule
- * this store applies to the disk is the one the serving path has always used:
- * **a segment is closed when the NEXT number exists.** The highest number in a
- * directory is therefore the only unproven one, which is exactly the file a run
- * killed mid-write leaves behind.
+ * **What proves a segment is closed: its NAME.** A piece being written is called
+ * something else — `making-40-00057.mp4`, tagged with the run writing it — and
+ * takes its served name only when the
+ * encoder has said it is closed, which it does on a channel of its own
+ * (`-segment_list pipe:3`). The `hls` branch needs nothing extra: its muxer
+ * writes through a temporary name of its own, so its files appear under their
+ * final name whole. One rule for both, and true whether or not this process is
+ * alive: **a file under its served name is complete.**
  *
- * **A live run does not need that rule.** While this process is alive the
- * coverage map is told what has been closed as it happens; the disk rule is for
- * what a previous life left behind, and for a run that died without saying so.
+ * It was "a segment is closed when the NEXT number exists". That is true of one
+ * writer walking forward and false the moment two runs share an output, because
+ * the next file is then written by another process while this one is still open
+ * — and two runs on one output is not a rare state, it is what the plan gives an
+ * output whenever it places a second encoder. Field 2026-09-08:
+ * `segment-00057.mp4` served at 2 268 361 bytes and then at 4 510 940, exactly
+ * half; the browser appended the half and refused the whole for the rest of the
+ * session, `bufferAppendError` fourteen times with the picture frozen at
+ * 319.66 s. `segment-00055.mp4` the same, 211 957 against 2 620 617.
  */
 
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, statSync, writeFileSync } from "node:fs";
 import { rmSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
-
-import { discardOpenPiece } from "./open-piece.js";
 
 /** Where every output's segments live. One root for the process. */
 export const DEFAULT_STORE_ROOT = path.join(os.tmpdir(), "torrent-tv-hls");
@@ -85,22 +89,6 @@ export class SegmentStore {
 
   /** Output key → when it was last asked for. @type {Map<string, number>} */
   #touched = new Map();
-
-  /**
-   * Numbers known closed for a reason other than a successor on the disk.
-   *
-   * Two things fill it. A live run says what it has finished as it finishes it.
-   * And adoption records what the successor rule proved BEFORE it removes the
-   * unproven piece — otherwise removing that piece would un-prove the segment
-   * below it, which is a file that was demonstrably closed a moment earlier.
-   *
-   * @type {Map<string, Set<number>>}
-   */
-  #closed = new Map();
-
-  /** Pieces already reported as taken on the successor rule, so one is said
-   * once. @type {Map<string, Set<number>>} */
-  #unreportedSaid = new Map();
 
   /** @type {{ info: Function, warn: Function }} */
   #logger;
@@ -250,42 +238,28 @@ export class SegmentStore {
   }
 
   /**
-   * The segment numbers this output holds that are PROVEN closed.
+   * The segment numbers this output holds that are finished.
    *
-   * Two proofs, and they answer for the two ways this proxy writes segments.
+   * ONE PROOF, AND IT IS THE PIECE'S OWN NAME. A piece being written is called
+   * `making-40-00042.mp4`; it is renamed to `segment-00042.mp4` when its writer
+   * says it has closed it, and on the `hls` branch — which has no such channel —
+   * the muxer's own `+temp_file` does the same rename for the same reason. So a
+   * file under the served name is complete, whoever made it and whenever.
    *
-   * 1. **the writer said so** — the `segment` muxer names each file on a channel
-   *    of its own the moment it closes it;
-   * 2. **the next file exists** — which is all there is for the `hls` muxer,
-   *    which carries no such channel at all. That branch writes under a
-   *    temporary name and renames on close, so a file that exists is whole by
-   *    construction, and it is also what proves the pieces a previous life of
-   *    this process left behind.
-   *
-   * The highest number is left out either way: nothing distinguishes a finished
-   * last piece from one that was being written when its run died.
-   *
-   * WHAT THE SECOND PROOF CANNOT ANSWER, and is left open deliberately: a piece
-   * a LIVE RUN IS REWRITING. Several runs share one directory, so a file left by
-   * an earlier one is a successor to a name the run working now has just
-   * reopened, and the disk cannot know the difference. Whether that has ever
-   * moved a decision is not established from any log we hold, and every remedy
-   * for it changes what "ready" means for five readers with different questions
-   * — so it waits for a session that shows it, rather than being guessed at.
+   * WHAT THIS REPLACED, because the difference is what a viewer felt. Closure
+   * used to be inferred from the NEXT number existing, which is sound for one
+   * writer walking forward and false the moment two runs share an output — and
+   * one-piece intervals guarantee that. Field 2026-09-08:
+   * `segment-00057.mp4` was served at 2 268 361 bytes and then at 4 510 940, the
+   * browser appended the truncated body, and `bufferAppendError` repeated to the
+   * end of the log with the picture frozen at 319.66 s. It also left the last
+   * piece of every run unprovable for ever, since nothing follows it.
    *
    * @param {string} key
    * @returns {number[]}
    */
   provenNumbers(key) {
-    const contents = this.refresh(key);
-    const stated = this.#closed.get(key);
-    const proven = [];
-    for (const index of contents.byNumber.keys()) {
-      if (contents.byNumber.has(index + 1) || stated?.has(index)) {
-        proven.push(index);
-      }
-    }
-    return proven.sort((left, right) => left - right);
+    return [...this.refresh(key).byNumber.keys()].sort((left, right) => left - right);
   }
 
   /**
@@ -317,189 +291,151 @@ export class SegmentStore {
     return this.refresh(key).largest ?? { index: -1, size: 0 };
   }
 
-  /**
-   * A run is about to write these numbers again: forget that they were closed.
-   *
-   * A number closed once is not closed for ever. An encoder started at #N
-   * rewrites #N and everything after it, and while it is doing so the file
-   * under that name is half a segment — but the store remembered the earlier
-   * closing and would call it whole. Field 2026-09-05: seventeen runs were
-   * stopped and none ended normally, so numbers were being rewritten
-   * constantly, and the player met a fatal append error it never recovered
-   * from — an empty picture for the six minutes that followed.
-   *
-   * @param {string} key
-   * @param {number} from - First number the run will write.
-   * @param {number} [to] - Last one, inclusive. Infinite for a run given no end,
-   *   which does walk to the end of the film.
-   */
-  forgetClosed(key, from, to = Number.POSITIVE_INFINITY) {
-    const known = this.#closed.get(key);
-    if (!known || !Number.isInteger(from)) {
-      return;
-    }
-    // BOUNDED BY THE RUN'S OWN STRETCH, because that is what it will rewrite.
-    //
-    // It used to forget everything from `from` upwards, on the reading that a
-    // run has no end — which was true until runs were given intervals. A run of
-    // #0..#0 then unproved the whole rest of the film, and with readiness a
-    // projection of what is proven that is an output declaring itself unmade
-    // every time an encoder starts anywhere near the beginning.
-    const last = Number.isFinite(to) ? Math.max(from, Math.trunc(to)) : Number.POSITIVE_INFINITY;
-    for (const index of known) {
-      if (index >= from && index <= last) {
-        known.delete(index);
-      }
-    }
-    // What the directory says has to be read again too, so that the size of a
-    // reopened piece is the size it has now and not the one it had before.
-    this.#held.delete(key);
-  }
 
   /**
    * Whether this piece is finished, and may therefore be served.
    *
-   * Two proofs, and the first is the good one:
-   *
-   * 1. **the encoder said so** — the `segment` muxer names each file on a
-   *    channel of its own the moment it closes it, so the name is the writer's
-   *    own statement that the piece is whole;
-   * 2. **the next file exists** — the only proof available on the `hls` branch,
-   *    which has no such channel, and for pieces left by an earlier life of this
-   *    process. On that branch it is sound: the muxer renames into place on
-   *    close, so a file that exists is finished.
-   *
-   * KNOWN AND LEFT ALONE HERE: on the `segment` branch this second proof can
-   * still pass a piece a run is halfway through rewriting, which is how 110 698
-   * bytes came to be served under a name whose neighbours are 12 MB (field
-   * 2026-09-06). Telling the two branches apart is a fact of how a run writes,
-   * it needs a field session of its own to verify, and it is not what stopped
-   * playback on 2026-09-07 — so it stays open rather than being changed blind in
-   * the path that hands bytes to a player. What the PLAN believes is a different
-   * question and is answered: a live run's claim outranks readiness there.
+   * Its NAME is the proof, and there is no second one: a piece being written is
+   * called something else until whoever writes it says it is closed. That holds
+   * for a piece a live run is rewriting — the file standing there was closed by
+   * somebody, and it is replaced whole or not at all — and for a piece left by an
+   * earlier life of this process, which the startup sweep answers the same way.
    *
    * @param {string} key
    * @param {number} index
    * @returns {boolean}
    */
   isClosed(key, index) {
-    if (this.#closed.get(key)?.has(index)) {
-      return true;
-    }
-    const bySuccessor = this.refresh(key).byNumber.has(index + 1);
-    if (bySuccessor) {
-      this.#noteUnreported(key, index);
-    }
-    return bySuccessor;
+    return this.refresh(key).byNumber.has(index);
   }
 
   /**
-   * A piece taken as finished because the NEXT one exists, with nothing from a
-   * run to say so.
+   * Remove the pieces an output was in the middle of writing.
    *
-   * The successor rule is for what this process did not watch being written —
-   * pieces from a previous life of it. It is also the one way an unfinished
-   * piece can be served: a file that stops short still has a successor if
-   * anything wrote one, and then its name promises a whole span while it holds
-   * a fraction. Field 2026-09-06: 110 698 bytes served under a name whose
-   * neighbours are 12 MB, 40 ms of film where the playlist declared 10.4 s, and
-   * the player jumped the hole it left.
-   *
-   * That cannot arise from two encoders any more — their stretches no longer
-   * overlap — so what is left is a piece from a process that died without
-   * clearing up. Said once per piece, with its size, so a return of it is
-   * visible rather than inferred.
+   * They are under working names, so they were never servable and nothing has
+   * to be un-proven — this is disk, not correctness. A process killed by the
+   * kernel leaves one per live run, and the kernel takes this process often
+   * enough for that to matter.
    *
    * @param {string} key
-   * @param {number} index
+   * @param {string} dir
+   * @param {{ makingTagOf?: (name: string) => string | null }} format
+   * @param {string | null} [tag] - One run's own tag, or null for every run's.
+   * @returns {number} How many were removed.
    */
-  #noteUnreported(key, index) {
-    let said = this.#unreportedSaid.get(key);
-    if (!said) {
-      said = new Set();
-      this.#unreportedSaid.set(key, said);
-    }
-    if (said.has(index)) {
-      return;
-    }
-    said.add(index);
-    let bytes = -1;
+  #sweepUnfinished(key, dir, format, tag = null) {
+    let removed = 0;
+    let names = [];
     try {
-      bytes = statSync(this.pathOf(key, index)).size;
+      names = readdirSync(dir);
     } catch {
-      // Gone between the listing and this: nothing to report about it.
-      return;
+      return 0;
     }
-    this.#logger?.info?.(
-      `segment store: #${index} of ${key} is taken as finished because ` +
-      `#${index + 1} exists — no run reported it (${bytes} bytes). Expected only for ` +
-      "pieces left by a previous life of this process."
-    );
-  }
-
-  /**
-   * Say that a segment is closed for a reason the disk cannot show.
-   *
-   * A run reports what it has finished; the successor rule is only for what
-   * this process did not watch being written.
-   *
-   * @param {string} key
-   * @param {number} index
-   */
-  markClosed(key, index) {
-    if (!Number.isInteger(index) || index < 0) {
-      return;
+    for (const name of names) {
+      const wroteIt = format?.makingTagOf?.(name) ?? null;
+      if (wroteIt === null || (tag !== null && wroteIt !== tag)) {
+        continue;
+      }
+      try {
+        rmSync(path.join(dir, name), { force: true });
+        removed += 1;
+      } catch {
+        // Then it stays, costing disk and nothing else.
+      }
     }
-    let known = this.#closed.get(key);
-    if (!known) {
-      known = new Set();
-      this.#closed.set(key, known);
-    }
-    known.add(index);
-  }
-
-  /**
-   * Throw away the piece a run had open when it ended, if it is unusable.
-   *
-   * The store owns this output's directory and knows how its files are named,
-   * so it is the one place that can answer which file a run left open. The
-   * judging of a NON-EMPTY file — does it carry every track it should — needs
-   * the output's init bytes and belongs to whoever holds them; passed in, and
-   * absent it only an empty file is removed, which is the case that caused this
-   * to be written (a run stopped 548 ms after starting left a zero-byte file
-   * whose name then read as a segment made).
-   *
-   * @param {string} key
-   * @param {{ from: number, to: number } | null} within - The run's own
-   *   numbers: several runs write into one directory, so the piece to discard
-   *   has to be looked for inside the stretch the ended run was given.
-   * @param {((raw: Buffer) => boolean) | null} [judgeUsable]
-   * @returns {Promise<number | null>} The segment number removed, or null.
-   */
-  async discardOpenPieceOf(key, within, judgeUsable = null, provenName = null) {
-    const format = this.#formats.get(key);
-    if (!format) {
-      return null;
-    }
-    const removed = await discardOpenPiece(this.directoryFor(key), format, within, judgeUsable, provenName);
-    if (removed !== null) {
+    if (removed > 0) {
       this.#held.delete(key);
-      this.#logger?.info?.(
-        `segment store: discarded the open piece #${removed} of ${key.slice(0, 60)}`
-      );
     }
     return removed;
   }
 
   /**
-   * The one number in this output whose closure nothing on disk proves.
+   * The encoder has closed a piece: give it the name it is served under.
+   *
+   * One rename inside the output's own directory — one filesystem operation, and
+   * atomic there. Before it the file is not a segment and no request can reach
+   * it; after it, its existence IS the proof that it is whole, and that is one
+   * rule for every branch whether or not our own process is alive.
+   *
+   * It replaced a rule that served half a segment: a piece was taken as finished
+   * when the NEXT file existed. That is true of one writer walking forward and
+   * false the moment two runs share an output, because the next file is then
+   * written by another process while this one is still open — and two runs on one
+   * output is not a rare state, it is what the plan gives an output whenever it
+   * places a second encoder.
+   *
+   * Field 2026-09-08: `segment-00057.mp4` was served at 2 268 361 bytes and then
+   * at 4 510 940 — exactly half of it. The browser appended the half and refused
+   * the whole for the rest of the session, `bufferAppendError` fourteen times
+   * over with the picture frozen at 319.66 s. `segment-00055.mp4` went the same
+   * way, 211 957 against 2 620 617.
    *
    * @param {string} key
-   * @returns {number} -1 when the directory holds no segments.
+   * @param {string} makingName - What the encoder called it while writing.
+   * @param {{ servedNameOf?: (name: string) => string | null }} format
+   * @returns {string | null} The served name, or null where nothing was renamed.
    */
-  unprovenNumber(key) {
-    return this.refresh(key).unproven;
+  publish(key, makingName, format) {
+    const served = format?.servedNameOf?.(makingName) ?? null;
+    if (!served) {
+      return null;
+    }
+    const dir = path.join(this.#root, directoryNameFor(key));
+    try {
+      renameSync(path.join(dir, makingName), path.join(dir, served));
+    } catch (error) {
+      // The file may already be gone — a process killed between closing the
+      // piece and this line. Said rather than swallowed: a piece the encoder
+      // reported and the disk does not have is worth knowing about.
+      this.#logger?.warn?.(
+        `segment store: could not publish ${makingName} of ${key.slice(0, 60)}: ` +
+        `${error instanceof Error ? error.message : String(error)}`
+      );
+      return null;
+    }
+    // What the directory holds has changed, so the memory of it is stale.
+    this.#held.delete(key);
+    return served;
   }
+
+  /**
+   * Clear up after a run that has ended: remove what it left unfinished.
+   *
+   * Every file it left open carries its own tag, so this is a name match and
+   * nothing else — no stretch to search, no bytes to judge, and no chance of
+   * removing a piece somebody else closed.
+   *
+   * WHAT IT REPLACED, because the difference is the whole of the rename design.
+   * It used to take the highest SERVED name inside the stretch the ended run was
+   * given and judge whether its bytes looked usable — a guess, needed only
+   * because an unfinished piece was indistinguishable from a finished one. Under
+   * the naming rule it would now remove a complete segment: the highest served
+   * name in a dead run's stretch is a piece it closed.
+   *
+   * @param {string} key
+   * @param {number} startedAt - The run's first segment number, which is its tag.
+   * @returns {number} How many unfinished pieces were removed.
+   */
+  clearUpAfter(key, startedAt) {
+    const format = this.#formats.get(key);
+    if (!format) {
+      return 0;
+    }
+    const removed = this.#sweepUnfinished(
+      key,
+      this.directoryFor(key),
+      format,
+      String(Number.isInteger(startedAt) && startedAt > 0 ? startedAt : 0)
+    );
+    if (removed > 0) {
+      this.#logger?.info?.(
+        `segment store: cleared up ${removed} unfinished piece(s) of the run at ` +
+        `#${startedAt} on ${key.slice(0, 60)}`
+      );
+    }
+    return removed;
+  }
+
 
   /**
    * Where a segment is, or null when this output does not hold it.
@@ -542,7 +478,6 @@ export class SegmentStore {
     this.#held.delete(key);
     this.#formats.delete(key);
     this.#touched.delete(key);
-    this.#closed.delete(key);
     this.#logger.info(`segment-store dropped ${directoryNameFor(key)} (${because})`);
   }
 
@@ -712,30 +647,19 @@ export class SegmentStore {
         continue;
       }
       this.#formats.set(entry.key, format);
-      // Recorded BEFORE the unproven piece goes: taking that file away would
-      // otherwise leave the segment below it without a successor, and a file
-      // that was demonstrably closed a moment ago would stop being servable.
-      for (const index of this.provenNumbers(entry.key)) {
-        this.markClosed(entry.key, index);
-      }
-      const unproven = this.unprovenNumber(entry.key);
-      if (unproven >= 0) {
-        const held = this.refresh(entry.key);
-        const filePath = held.byNumber.get(unproven);
-        if (filePath) {
-          try {
-            rmSync(filePath, { force: true });
-            unprovenRemoved += 1;
-          } catch {
-            // Then it stays unproven and is simply never served.
-          }
-        }
-        this.#held.delete(entry.key);
-      }
+      // EVERY SEGMENT FOUND IS COMPLETE, because a piece is given its served
+      // name only once the encoder has said it is closed. So there is nothing to
+      // prove here and nothing to un-prove: what the directory holds under
+      // served names is what a killed process finished.
+      //
+      // What it may also hold is pieces it was in the middle of, under their
+      // working names, and those are swept — the file a run was writing when the
+      // kernel took the process is exactly this.
+      unprovenRemoved += this.#sweepUnfinished(entry.key, entry.dir, format);
       adopted += 1;
       this.#logger.info(
         `segment-store adopted ${path.basename(entry.dir)}: ${this.provenNumbers(entry.key).length} ` +
-        `segments a killed process had already made, ${unproven >= 0 ? "1" : "no"} unfinished piece removed`
+        "segments a killed process had already finished"
       );
     }
     return { adopted, dropped, unprovenRemoved };

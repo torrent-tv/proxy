@@ -181,9 +181,11 @@ export class EncodeRun {
    * @param {{ info: (line: string) => void, warn: (line: string) => void, error?: (line: string) => void }} params.logger
    * @param {() => number} [params.now]
    * @param {(ended: RunEnded) => void} [params.onEnded]
-   * @param {(name: string) => void} [params.onClosed] - Called with the file name
-   *   of every piece the encoder has FINISHED writing, as the encoder itself
-   *   names it on its own channel.
+   * @param {(name: string) => string | null} [params.onClosed] - Called with the
+   *   WORKING name of every piece the encoder has finished writing, as the
+   *   encoder itself names it on its own channel, and answers with the name that
+   *   piece is served under — because making it servable is a rename, and only
+   *   whoever owns the disk can perform one.
    * @param {(progress: { processedSeconds: number | null, speed: string | null }) => void} [params.onProgress]
    *   Called for every `-progress` report. Seconds count from the START OF THIS
    *   RUN on both branches — neither `-output_ts_offset` nor `-copyts` changes
@@ -473,8 +475,13 @@ export class EncodeRun {
       if (name.length === 0) {
         continue;
       }
+      // ITS SERVED NAME, which is what whoever owns the disk gives it in answer.
+      // ffmpeg writes a piece under a working name and reports that; the piece
+      // becomes servable by being renamed, and everything below works in the
+      // name a request can actually ask for.
+      const served = this.onClosed(name) ?? name;
       if (!this.#stopping) {
-        this.#provenName = name;
+        this.#provenName = served;
       }
       // WHAT THIS RUN HAS MADE IS THIS RUN'S OWN FACT, and this channel is where
       // it learns it. It used to be told from outside, by whoever listed the
@@ -484,11 +491,10 @@ export class EncodeRun {
       // (483 segment(s))", having produced none of them, and its head therefore
       // described somebody else's work. Both the claim it holds and the cleanup
       // after it read that head.
-      const index = this.indexOfName(name);
+      const index = this.indexOfName(served);
       if (Number.isInteger(index)) {
         this.noteProduced(index);
       }
-      this.onClosed(name);
     }
   }
 

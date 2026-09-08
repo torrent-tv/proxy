@@ -273,11 +273,10 @@ export class EncodeOrchestrator {
    * @param {number} index
    */
   noteProduced(address, index) {
-    // TOLD TO THE AUTHORITY, not only to the map. A piece being closed is a fact
-    // about the disk, and the store is what holds those; told to the map alone
-    // it would survive exactly until the next time the map is brought back into
-    // step, and then be gone with no file to show for it.
-    this.segmentStore?.markClosed(address, index);
+    // Nothing is told to the store: by the time this is called the piece is
+    // ALREADY under its served name, because the rename is what closing it
+    // means. A statement kept beside the disk would be a second owner of one
+    // fact, which is what item 87 removed from the coverage map.
     this.coverageOf(address).markReady(index);
     for (const run of this.runsOn(address)) {
       run.noteProduced(index);
@@ -375,6 +374,23 @@ export class EncodeOrchestrator {
     // when the reason it cuts the budget changes, so asking it three times in
     // one pass is three chances to say a thing that happened once.
     const maxRuns = this.#affordableOn(address, live);
+    // THE TERMS EVERY ARRIVAL IS COMPUTED FROM, named here so the line below can
+    // print them. A decision of this plan is `delay + (index - at) / rate +
+    // madeBetween * refetch` against a deadline, so without the rate and the two
+    // prices no recorded decision can be reproduced — which is what happened
+    // with the one-piece intervals of 2026-09-08: the rate was substituted six
+    // times from the speeds the session reported elsewhere and none of them gave
+    // the answer the plan had given.
+    const costs = this.#costs.seconds();
+    const refetchSecPerFilmSecond = this.refetchSecPerFilmSecond(address);
+    // The best figure this host has: what a run here is doing now, what one was
+    // last measured doing, or what the startup benchmark predicted. The first
+    // two are this output's own; the third exists before either.
+    const speedX = Math.max(
+      live.reduce((best, run) => Math.max(best, run.speedX || 0), 0),
+      this.#lastSpeed.get(address) ?? 0,
+      this.startingSpeedFor(address) || 0
+    );
     const actions = planEncoders({
       coverage,
       windows,
@@ -387,26 +403,19 @@ export class EncodeOrchestrator {
       // What a start and a kill cost, measured from this host's own runs rather
       // than written into the code from one machine's reading. Zero until
       // something has been measured, which is the same convention as the
-      // refetch price below and is stated so the bias is known.
-      ...this.#costs.seconds(),
+      // refetch price and is stated so the bias is known.
+      ...costs,
       // What a second of film costs to fetch again, in seconds of swarm time.
       // Answered by whoever measures the film's own byte rate and the swarm's;
       // zero until they have, which makes driving through look cheaper than it
       // is and is stated here so the bias is known.
-      refetchSecPerFilmSecond: this.refetchSecPerFilmSecond(address),
+      refetchSecPerFilmSecond,
       // How much slower one encoder runs beside others, read off this host's own
       // startup measurement. A pure function over a measured table: beyond what
       // was measured it holds the largest reading rather than continuing a curve
       // nothing observed.
       contentionPenaltyFor: (others) => contentionPenalty(others, this.contentionPenalties).penalty,
-      // The best figure this host has: what a run here is doing now, what one
-      // was last measured doing, or what the startup benchmark predicted. The
-      // first two are this output's own; the third exists before either.
-      speedX: Math.max(
-        live.reduce((best, run) => Math.max(best, run.speedX || 0), 0),
-        this.#lastSpeed.get(address) ?? 0,
-        this.startingSpeedFor(address) || 0
-      )
+      speedX
     });
 
     // A move is the plan taking a running encoder away from where it already
@@ -427,10 +436,21 @@ export class EncodeOrchestrator {
     // exiting, twelve of them normally — and the reasons printed beside them
     // read as moves, so the fault was diagnosed three times as something it was
     // not. An interval is what a run is, and it was the one thing missing.
+    //
+    // AND THE TERMS, for the same reason one step further: an interval says what
+    // was decided and the terms say why. `speed` is what every arrival is
+    // divided by, so a decision recorded without it can be re-read and not
+    // recomputed; `firstByte` and `kill` are what a start and a stop cost here;
+    // `refetch` is what a second of film costs to fetch again. A zero in the
+    // last three is a measurement nobody has taken, not a free operation, and it
+    // is printed so that reading it as free is a choice rather than an accident.
     if (actions.some((action) => action.type !== "keep")) {
       this.logger.info(
         `encode-plan on ${address}: ` +
-        `${actions.map((action) => `${action.type} #${action.from ?? "?"}..#${action.to ?? "?"}`).join(", ")}`
+        `${actions.map((action) => `${action.type} #${action.from ?? "?"}..#${action.to ?? "?"}`).join(", ")}` +
+        ` [speed=${speedX.toFixed(2)}x firstByte=${costs.firstByteWaitSec.toFixed(2)}s ` +
+        `kill=${costs.killCostSec.toFixed(2)}s refetch=${refetchSecPerFilmSecond.toFixed(3)}s/s ` +
+        `maxRuns=${maxRuns} live=${live.length}]`
       );
     }
     if (actions.some((action) => action.type === "move")) {
@@ -547,17 +567,12 @@ export class EncodeOrchestrator {
     const onThisOutput = this.#runs.get(address) ?? [];
     onThisOutput.push(run);
     this.#runs.set(address, onThisOutput);
-    // This run rewrites the stretch it was given, so what was closed inside that
-    // stretch is no longer closed. Without this a number closed by an earlier run
-    // stays servable while a later one is halfway through writing it again.
-    //
-    // Bounded by the run's own end, which is the same number the claim below
-    // carries. Unbounded it unproved the whole film beyond the start of any run,
-    // and readiness is now a projection of what is proven — so a one-segment run
-    // at the beginning would have declared the rest of the output unmade.
-    const runsTo = endOfRun({ from, to });
-    this.segmentStore?.forgetClosed(address, from, runsTo);
-    this.coverageOf(address).claim(run, from, runsTo);
+    // Nothing has to be un-proved when a run takes a stretch that has already
+    // been written. A piece is only ever NAMED as served once it is closed, and
+    // a run writing that number again writes under a working name until it
+    // closes its own — so the file standing there is a complete piece made by
+    // somebody, and serving it is right until the newer one replaces it whole.
+    this.coverageOf(address).claim(run, from, endOfRun({ from, to }));
     run.start(because);
   }
 
@@ -654,15 +669,11 @@ export class EncodeOrchestrator {
     this.#costs.note(ended);
     // Exactly one ending is normal — the run reached the end of the stretch it
     // was given and closed its last file. Every other leaves a piece open, and
-    // that file looks finished however the run ended: stopped, ffmpeg writes it
-    // out and names it like any other; killed harder, it leaves the bytes it
-    // had. Either way it decodes and holds less film than its number promises.
-    // So what is kept is what the run PROVED it finished, and nothing beyond.
-    if (ended.ending !== ENCODE_EXIT.COMPLETE && this.segmentStore) {
-      void this.segmentStore
-        .discardOpenPieceOf(ended.address, { from: ended.from, to: ended.to }, null, ended.provenName)
-        .catch(() => {});
-    }
+    // that piece is under this run's OWN working name, so clearing up after it
+    // is a name match: no stretch to search and no bytes to judge. Done for
+    // every ending, the normal one included, since a run that finished cleanly
+    // has nothing under a working name and the sweep then removes nothing.
+    this.segmentStore?.clearUpAfter(ended.address, ended.from);
     this.coverageOf(ended.address).release(ended.run);
     const remaining = this.runsOn(ended.address).filter((run) => run !== ended.run);
     if (remaining.length === 0) {

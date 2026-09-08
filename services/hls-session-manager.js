@@ -70,7 +70,6 @@ import { Output, Outputs } from "./output/Output.js";
 import { masterPlaylistText, mediaPlaylistText, segmentIndexForTime } from "./output/playlists.js";
 import { SourceFiles, sourceDecodeCharacteristics } from "./source/SourceFile.js";
 import { ProducedIndex } from "./produced-index.js";
-import { discardOpenPiece } from "./encode/open-piece.js";
 import { SegmentStore } from "./encode/SegmentStore.js";
 import { EncodeCost } from "./quality/EncodeCost.js";
 import {
@@ -425,10 +424,6 @@ const TRUE_START_MEMORY = 200;
 // twice. It runs on the restart path and a session an hour in has thousands of
 // segments; the figure is for a comparison, not an inventory.
 const BACKWARD_RESTART_SCAN_SEGMENTS = 300;
-// Grace period to wait for the PREVIOUS ffmpeg process to exit (per signal
-// escalation step: SIGTERM, then SIGKILL) before spawning its replacement into
-// the same session directory. See #startEncodeRun.
-const ENCODE_RUN_TERMINATE_GRACE_MS = 2_000;
 // A seek-restart run that exits this fast never did real work — it failed at
 // the seek/open step itself (container demux error, bad audio frame boundary,
 // etc.), not mid-stream. Used to tell a genuine seek failure apart from a
@@ -5535,7 +5530,7 @@ export class HlsSessionManager {
       inputUnavailable: (message) => isInputUnavailable(message),
       onProgress: (report) => this.#noteRunProgress(session, run, report),
       indexOfName: (name) => session.segmentFormat.segmentIndexFromName(name),
-      onClosed: (name) => this.segmentStore.markClosed(session.outputKey ?? "", session.segmentFormat.segmentIndexFromName(name)),
+      onClosed: (name) => this.segmentStore.publish(session.outputKey ?? "", name, session.segmentFormat),
       onEnded: (ended) => this.noteRunEnded(session, run, ended)
     });
     session.runs.add(run);
@@ -7692,31 +7687,15 @@ export class HlsSessionManager {
     // disposed. A run that had already finished or failed is not among them,
     // which is what keeps a stop from erasing how it actually ended.
     for (const run of running) {
-      const ffmpeg = run.process;
-      // The stretch it was given, read now rather than when the process finally
-      // exits: by then the session may have started another run with another
-      // stretch, and the piece to discard belongs to this one.
-      const stoppedSpan = {
-        from: Number.isInteger(run.from) ? run.from : 0,
-        to: Number.isInteger(run.to) ? run.to : -1
-      };
       // The run resumes itself if it was suspended — a stopped process does not
       // act on SIGTERM until it is continued — records the cause, and answers
       // its own exit. Nothing here has to null a field so that the exit is read
       // correctly, because there is no shared field left to misread.
       run.stop(reason);
-      // The session outlives its runs — a stopped rung keeps serving what it
-      // made — so the piece this one had open must not be left looking like one
-      // of them. Not awaited: the caller's own work does not depend on it, and
-      // the wait is for a process that has already been told to go.
-      // WHAT THE RUN ITSELF NAMED, which is the only thing that can say a piece
-      // is whole — a piece cut short still decodes. Written 2026-09-06 and never
-      // passed from here, so the clearing-up ran with nothing proven and fell
-      // back to bounding itself by the run's declared stretch alone.
-      const provenName = typeof run.provenName === "string" ? run.provenName : null;
-      void waitForChildExit(ffmpeg, ENCODE_RUN_TERMINATE_GRACE_MS).then(() =>
-        this.#discardUnfinishedPiece(session, session.dirPath, stoppedSpan, provenName)
-      );
+      // Nothing is cleared up from here. What this run left open is under its
+      // own working name, and the encoding layer removes it when the run's
+      // ending reaches it — one place, and it needs neither the stretch nor the
+      // init bytes this method used to fetch to judge a file by its contents.
     }
     logger.info(`transcode ${session.id} ${running.length} encoder(s) stopped: ${reason}`);
   }
@@ -9588,63 +9567,6 @@ export class HlsSessionManager {
   async #findProducedFile(session, fileName) {
     return this.#producedIndex(session).pathOf(fileName);
   }
-
-  /**
-   * Throw away the piece a run was in the middle of when it ended.
-   *
-   * The `segment` muxer creates its output file when it opens it and writes
-   * into it until the next cut, so at any instant exactly one file in a run's
-   * directory is unfinished: the highest-numbered one. A run that reaches the
-   * end of its work closes that file properly and it is a good piece; a run
-   * killed for a seek does not — measured 2026-09-03, ffmpeg exited 19 ms after
-   * SIGTERM and left `segment-00025.mp4` at zero bytes.
-   *
-   * Leaving it is what created the deadlock this method exists to prevent: an
-   * empty file has a name like any other, so it closed the only hole in the
-   * numbering and the look-ahead kept the encoder stopped for having "produced"
-   * it. Removing it at the moment the run ends means the question never has to
-   * be asked again by anyone.
-   *
-   * A piece is removed only when it is unusable. A run that finished its last
-   * file — the ordinary end of a file, or a stop that arrived between two cuts
-   * — has nothing wrong with it, and deleting good output would cost the work
-   * of making it twice.
-   *
-   * @param {HlsSession} session
-   * @param {string | null | undefined} runDirPath
-   * @returns {Promise<void>}
-   */
-  async #discardUnfinishedPiece(session, runDirPath, within = null, provenName = null) {
-    const canJudgeTracks =
-      typeof session.segmentFormat?.hasEveryTrack === "function" &&
-      session.initBytes &&
-      session.initBytes.length > 0;
-    const removed = await discardOpenPiece(
-      runDirPath,
-      session.segmentFormat,
-      within,
-      canJudgeTracks
-        ? (raw) => {
-          const bytes = cutsAtGivenTimes(session) && session.segmentFormat.stripInit
-            ? session.segmentFormat.stripInit(raw)
-            : raw;
-          return session.segmentFormat.hasEveryTrack(bytes, session.initBytes);
-        }
-        : null,
-      provenName
-    );
-    if (removed !== null) {
-      // Removed on purpose, so the index must not go on answering with it.
-      this.#producedIndex(session).invalidate();
-      logger.info(
-        `transcode ${session.id} discarded segment #${removed}: ` +
-          "the run ended while it was open, so it holds no usable piece"
-      );
-    }
-  }
-
-
-
 
   #holdForProduction(session, fileName, isPlaylist, options) {
     /** @type {{ address: string, rank: number, topRank: number } | null} */

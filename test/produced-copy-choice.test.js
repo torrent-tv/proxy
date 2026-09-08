@@ -27,7 +27,6 @@ import { mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { HlsSessionManager, usableSegmentIndices } from "../services/hls-session-manager.js";
-import { discardOpenPiece } from "../services/encode/open-piece.js";
 import { startRunOn } from "./helpers/encode-run.js";
 import { fmp4Format } from "../services/segment-formats/fmp4.js";
 
@@ -116,28 +115,6 @@ function wholePiece(offsetSeconds) {
   ]);
 }
 
-/**
- * The same shape with ONE track in the fragment — what a run killed mid-write
- * leaves when it had muxed the picture and not yet the sound.
- *
- * @param {number} offsetSeconds
- * @returns {Buffer}
- */
-function halfPiece(offsetSeconds) {
-  const mvhdBody = Buffer.alloc(100);
-  mvhdBody.writeUInt32BE(MOVIE_TIMESCALE, 12);
-  const moov = box("moov", Buffer.concat([
-    box("mvhd", mvhdBody),
-    trak(1, VIDEO_TIMESCALE, offsetSeconds),
-    trak(2, AUDIO_TIMESCALE, offsetSeconds)
-  ]));
-  return Buffer.concat([
-    box("ftyp", Buffer.alloc(16, 0)),
-    moov,
-    box("moof", traf(1)),
-    box("mdat", Buffer.alloc(64, 0x5a))
-  ]);
-}
 
 /**
  * A session with the output directory every run writes into.
@@ -209,7 +186,9 @@ test("a leftover of a run that has ended is not served, and answering does not d
   // output share one directory — so what a request removed could be the piece a
   // LIVE run had just finished. Clearing up belongs to the ending of a run,
   // which is the only thing that knows what it left open and what it named
-  // (`discardOpenPiece`, checked directly below). A file with no bytes is
+  // and it knows because the piece is under that run's own working name
+  // (`SegmentStore.clearUpAfter`, checked in `segment-store.test.js`). A file
+  // with no bytes is
   // ignored by everything that reads the directory, so leaving it costs nothing
   // and deleting it from here costs a segment.
   const left = (await readdir(dirPath)).filter((name) => name === "segment-00001.mp4");
@@ -275,84 +254,5 @@ test("what the output holds is asked of the filesystem once per file", async (t)
     [...known],
     [path.join(dirPath, "segment-00000.mp4")],
     "a piece that has bytes never loses them, and this runs on the thread carrying the data channel"
-  );
-});
-
-test("a run killed with a piece open leaves nothing behind", async (t) => {
-  const dirPath = await mkdtemp(path.join(os.tmpdir(), "open-piece-"));
-  t.after(async () => {
-    await rm(dirPath, { recursive: true, force: true });
-  });
-  await writeFile(path.join(dirPath, "segment-00000.mp4"), wholePiece(0));
-  await writeFile(path.join(dirPath, "segment-00001.mp4"), Buffer.alloc(0));
-
-  // WHAT THE RUN NAMED IS WHAT IT FINISHED. It named #0 on the ready channel and
-  // was killed with #1 open, so #1 goes and #0 stays. Asking the file instead
-  // cannot answer: a piece cut short still decodes, which is how 3.92 s of a
-  // declared 5.589 s reached a viewer on 2026-09-06.
-  assert.equal(
-    await discardOpenPiece(dirPath, fmp4Format, { from: 0, to: 1 }, null, "segment-00000.mp4"),
-    1
-  );
-  assert.deepEqual(
-    await readdir(dirPath),
-    ["segment-00000.mp4"],
-    "only the piece that was open goes; everything the run named stays"
-  );
-});
-
-test("a run that named nothing can only have opened the first piece it was given", async (t) => {
-  const dirPath = await mkdtemp(path.join(os.tmpdir(), "open-piece-unnamed-"));
-  t.after(async () => {
-    await rm(dirPath, { recursive: true, force: true });
-  });
-  await writeFile(path.join(dirPath, "segment-00000.mp4"), wholePiece(0));
-  await writeFile(path.join(dirPath, "segment-00001.mp4"), wholePiece(SEGMENT_SECONDS));
-
-  // THE CASE THIS CONTRACT WAS WRITTEN FOR. ffmpeg names a piece as it closes it
-  // and opens the next, so a run that named nothing had only its first open. It
-  // used to search the whole directory and take the highest number in it —
-  // every run of an output writes into that one directory, so what it took was
-  // a piece a LIVE run had just finished. Field 2026-09-06: the piece holding
-  // 2:47-2:57 went that way, its number is spent for good because names only
-  // grow, and the picture stood still for 647 s.
-  assert.equal(await discardOpenPiece(dirPath, fmp4Format, null, null), 0);
-  assert.deepEqual(
-    await readdir(dirPath),
-    ["segment-00001.mp4"],
-    "the piece belonging to somebody else is not touched"
-  );
-});
-
-test("a run that finished its last piece keeps it", async (t) => {
-  const dirPath = await mkdtemp(path.join(os.tmpdir(), "open-piece-good-"));
-  t.after(async () => {
-    await rm(dirPath, { recursive: true, force: true });
-  });
-  await writeFile(path.join(dirPath, "segment-00000.mp4"), wholePiece(0));
-  await writeFile(path.join(dirPath, "segment-00001.mp4"), wholePiece(SEGMENT_SECONDS));
-
-  assert.equal(
-    await discardOpenPiece(dirPath, fmp4Format, { from: 0, to: 1 }, () => true, "segment-00001.mp4"),
-    null,
-    "a stop between two cuts leaves good output; deleting it means encoding it twice"
-  );
-  assert.equal((await readdir(dirPath)).length, 2);
-});
-
-test("a last piece short of a track goes, even though it has bytes", async (t) => {
-  const dirPath = await mkdtemp(path.join(os.tmpdir(), "open-piece-half-"));
-  t.after(async () => {
-    await rm(dirPath, { recursive: true, force: true });
-  });
-  await writeFile(path.join(dirPath, "segment-00000.mp4"), wholePiece(0));
-  await writeFile(path.join(dirPath, "segment-00001.mp4"), halfPiece(SEGMENT_SECONDS));
-  const init = fmp4Format.extractInit(wholePiece(0));
-
-  assert.equal(
-    await discardOpenPiece(dirPath, fmp4Format, { from: 0, to: 1 }, (raw) =>
-      fmp4Format.hasEveryTrack(fmp4Format.stripInit(raw), init), "segment-00001.mp4"),
-    1,
-    "a size above zero is not the same as a piece that can be played"
   );
 });

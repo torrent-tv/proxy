@@ -53,7 +53,7 @@ test("the directory says what it holds, so a later process can tell", (t) => {
   assert.deepEqual(names, ["key.txt"]);
 });
 
-test("a segment is proven closed by the existence of the next one", (t) => {
+test("a piece under its served name is finished, and the last one too", (t) => {
   const { store, root } = storeInATempRoot();
   t.after(() => rmSync(root, { recursive: true, force: true }));
 
@@ -63,11 +63,30 @@ test("a segment is proven closed by the existence of the next one", (t) => {
   writeSegment(dir, 1);
   writeSegment(dir, 2);
 
-  // The `hls` muxer carries no channel to report on and renames into place when
-  // it closes a piece, so on that branch existence IS the proof; the same
-  // answers for the pieces a previous life of this process left behind.
-  assert.deepEqual(store.provenNumbers(KEY), [0, 1]);
-  assert.equal(store.unprovenNumber(KEY), 2);
+  // It was "the NEXT number exists", which left the last piece of every run
+  // unprovable for ever and — the moment two runs share an output — declared a
+  // half-written file finished because somebody else had written the one after
+  // it. The name is the proof now, so all three count.
+  assert.deepEqual(store.provenNumbers(KEY), [0, 1, 2]);
+});
+
+test("a piece still being written is not a piece, and its name says so", (t) => {
+  const { store, root } = storeInATempRoot();
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+
+  const dir = store.directoryFor(KEY);
+  store.useFormat(KEY, fmp4Format);
+  writeSegment(dir, 0);
+  // What ffmpeg is writing into right now, tagged with the run that opened it.
+  writeFileSync(path.join(dir, "making-0-00001.mp4"), Buffer.alloc(64));
+
+  assert.deepEqual(store.provenNumbers(KEY), [0]);
+  assert.equal(store.isClosed(KEY, 1), false);
+  assert.equal(store.pathOf(KEY, 1), null);
+
+  // And closing it is one rename, after which it is servable.
+  assert.equal(store.publish(KEY, "making-0-00001.mp4", fmp4Format), "segment-00001.mp4");
+  assert.equal(store.isClosed(KEY, 1), true);
 });
 
 test("a file of no bytes is not a segment, whatever it is called", (t) => {
@@ -80,39 +99,37 @@ test("a file of no bytes is not a segment, whatever it is called", (t) => {
   writeSegment(dir, 1);
   writeSegment(dir, 2, 0);
 
-  // What a run killed the moment after opening its next piece leaves behind.
-  // Counted as a segment once, it closed the only hole in the numbering and
-  // convinced the look-ahead the encoder had produced it.
+  // A file of no bytes under a served name cannot arise from this proxy any
+  // more — a piece takes that name only on being closed — but a killed process
+  // can leave one, and taking it for a segment once closed the only hole in the
+  // numbering and convinced the look-ahead the encoder had produced it.
   assert.equal(store.pathOf(KEY, 2), null);
-  assert.deepEqual(store.provenNumbers(KEY), [0]);
+  assert.deepEqual(store.provenNumbers(KEY), [0, 1]);
 });
 
-test("a run's own stretch bounds what it unproves", (t) => {
+test("clearing up after one run leaves every other run's work alone", (t) => {
   const { store, root } = storeInATempRoot();
   t.after(() => rmSync(root, { recursive: true, force: true }));
 
+  const dir = store.directoryFor(KEY);
   store.useFormat(KEY, fmp4Format);
-  store.directoryFor(KEY);
-  for (let index = 0; index <= 5; index += 1) {
-    store.markClosed(KEY, index);
-  }
+  // Two live runs, each with a piece open, plus finished pieces of both.
+  writeSegment(dir, 0);
+  writeSegment(dir, 100);
+  writeFileSync(path.join(dir, "making-0-00001.mp4"), Buffer.alloc(64));
+  writeFileSync(path.join(dir, "making-100-00101.mp4"), Buffer.alloc(64));
 
-  // A run of #0..#0 rewrites #0 and nothing else. Unbounded, this forgot the
-  // whole film beyond it — and with readiness a projection of what is proven,
-  // that is an output declaring itself unmade whenever an encoder starts near
-  // the beginning, which is a fresh encoder for every segment of it.
-  //
-  // Asked with no files on the disk, so the successor rule cannot answer for
-  // the statements and only the statements are under test.
-  store.forgetClosed(KEY, 0, 0);
-  assert.equal(store.isClosed(KEY, 0), false, "the one number it will rewrite");
-  assert.equal(store.isClosed(KEY, 1), true, "and nothing beyond its stretch");
-  assert.equal(store.isClosed(KEY, 5), true);
-
-  store.forgetClosed(KEY, 3);
-  assert.equal(store.isClosed(KEY, 2), true);
-  assert.equal(store.isClosed(KEY, 3), false, "no end given means to the end of the film");
-  assert.equal(store.isClosed(KEY, 5), false);
+  // The run that began at #0 ends. Its own unfinished piece goes and nothing
+  // else does — which the old rule could not manage: it took the highest SERVED
+  // name inside the ended run's stretch and judged its bytes, so with the
+  // naming rule above it would have removed #0, a piece that run had closed.
+  assert.equal(store.clearUpAfter(KEY, 0), 1);
+  assert.deepEqual(store.provenNumbers(KEY), [0, 100]);
+  assert.equal(
+    readdirSync(dir).includes("making-100-00101.mp4"),
+    true,
+    "the other run is still writing its own"
+  );
 });
 
 test("a directory that has not moved is not read again", (t) => {
@@ -150,25 +167,30 @@ test("what a killed process left is found, named and counted", (t) => {
   assert.match(lines.join("\n"), /ended\s+without anything recording why/);
 });
 
-test("what survived a kill is taken back, minus the piece nothing proves", (t) => {
+test("what survived a kill is taken back whole, minus what was still being written", (t) => {
   const { store, root } = storeInATempRoot();
   t.after(() => rmSync(root, { recursive: true, force: true }));
 
   const dir = path.join(root, directoryNameFor(KEY));
   mkdirSync(dir, { recursive: true });
-  writeFileSync(path.join(dir, "key.txt"), `${KEY}\n`);
+  writeFileSync(path.join(dir, "key.txt"), `${KEY}
+`);
   for (let index = 0; index <= 5; index += 1) {
     writeSegment(dir, index);
   }
+  // The piece the kernel interrupted. It never had a served name, so it cannot
+  // be mistaken for one — which is what the old rule could only guess at, by
+  // always throwing the highest number away.
+  writeFileSync(path.join(dir, "making-0-00006.mp4"), Buffer.alloc(64));
 
   const taken = store.adoptWhatSurvived(() => fmp4Format);
 
   assert.equal(taken.adopted, 1);
-  assert.equal(taken.unprovenRemoved, 1, "the highest number was being written when the run died");
-  // Five kept rather than six thrown away: a copied segment's bytes depend only
-  // on the source, and re-encoding them costs a machine already short of it.
-  assert.deepEqual(store.provenNumbers(KEY), [0, 1, 2, 3, 4]);
-  assert.equal(store.pathOf(KEY, 5), null);
+  assert.equal(taken.unprovenRemoved, 1, "the one under a working name");
+  // All six kept rather than five: the highest served name used to be thrown
+  // away because nothing could prove it, and on the copy branch that is a piece
+  // whose bytes depend only on the source and cost a short machine to remake.
+  assert.deepEqual(store.provenNumbers(KEY), [0, 1, 2, 3, 4, 5]);
 });
 
 test("a directory that cannot name itself is thrown away rather than served", (t) => {

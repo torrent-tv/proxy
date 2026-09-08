@@ -290,12 +290,12 @@ test("a run's FIRST segment is served once the encoder has passed it, without wa
   // successor and nothing is producing one. Waiting for that successor is what
   // held #317 for 46 s and then answered 404 to a browser that had given up.
   await rm(path.join(dirPath, "segment-00001.mp4"));
-  // WHAT PROVES IT INSTEAD: the encoder named it. ffmpeg writes the name of each
-  // piece on a channel of its own as it closes it, so a run's own first piece is
-  // proven the moment it is finished and the absence of a next one says nothing.
-  // This used to be inferred from the encoder's reported position instead, which
-  // is a different question — where it has read to, not what it has closed.
-  manager.segmentStore.markClosed(OUTPUT_KEY, 0);
+  // WHAT PROVES IT INSTEAD: its own NAME. A piece is called something else while
+  // it is being written and takes its served name when its writer says it is
+  // closed, so a run's first piece is proven the moment it is finished and the
+  // absence of a next one says nothing. This used to be inferred from the
+  // encoder's reported position — a different question, where it has read to
+  // rather than what it has closed.
 
   const result = await manager.getFileStream(SESSION_ID, "segment-00000.mp4", { requestSeq: 1 });
 
@@ -345,10 +345,9 @@ test("serving a run's own segment moves the run out of STARTING", async (t) => {
   // ITS OWN PIECE, AND FILM STILL TO MAKE BEHIND IT. A run standing on material
   // that already exists is moved forward — correctly — so a fixture that wants a
   // live run has to put it where the work is. #1 is what it is making; #2..#4
-  // are unmade, so it is wanted; and the encoder has named #1 on its ready
-  // channel, which is what makes the piece servable at all.
+  // are unmade, so it is wanted; and #1 stands under its served name, which is
+  // what makes the piece servable at all.
   const run = startRunOn(session, { from: 1, producing: false, usesExplicitCuts: true, speedX: 2 });
-  manager.segmentStore.markClosed(OUTPUT_KEY, 1);
   assert.equal(run.state, ENCODE_RUN_STATE.STARTING);
   assert.deepEqual(run.produced, [], "it has made nothing yet");
 

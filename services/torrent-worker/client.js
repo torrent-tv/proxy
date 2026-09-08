@@ -228,12 +228,7 @@ export class TorrentWorkerClient {
       // Fail everything outstanding rather than leaving callers hanging: a dead
       // worker will never answer, and a stalled request is worse than an error
       // the loading flow can retry.
-      const reason = new Error("Torrent worker stopped unexpectedly.");
-      this.#caller.rejectAll(reason);
-      for (const [, read] of this.#reads) {
-        read.fail(reason);
-      }
-      this.#reads.clear();
+      this.#failEverythingOutstanding(new Error("Torrent worker stopped unexpectedly."));
     });
 
     // A worker that ENDS was, until now, not noticed at all: only `message` and
@@ -252,13 +247,33 @@ export class TorrentWorkerClient {
         `torrent-worker: thread ended on its own with code ${code} — nobody asked it to. ` +
         "Everything waiting on it is failed; the proxy has no torrent client until it is rebuilt."
       );
-      const reason = new Error("Torrent worker ended unexpectedly.");
-      this.#caller.rejectAll(reason);
-      for (const [, read] of this.#reads) {
-        read.fail(reason);
-      }
-      this.#reads.clear();
+      this.#failEverythingOutstanding(new Error("Torrent worker ended unexpectedly."));
     });
+  }
+
+  /**
+   * A dead thread will never answer, so everything waiting on it is failed.
+   *
+   * INCLUDING THE FRAGMENT READS, which is what ffmpeg's input is. Both death
+   * handlers walked `#reads` alone and left `#fragmentReaders` untouched, so an
+   * encoder's input neither ended nor errored — it went quiet. Field 2026-08-31,
+   * three times: the thread died, both ffmpeg runs stayed ALIVE and stopped
+   * producing (167 `holding segment-00085.mp4 … encoder alive` lines), the
+   * browser drained its cushion and then retried a segment that would never
+   * exist, for ever, with nothing shown to the viewer.
+   *
+   * @param {Error} reason
+   */
+  #failEverythingOutstanding(reason) {
+    this.#caller.rejectAll(reason);
+    for (const [, read] of this.#reads) {
+      read.fail(reason);
+    }
+    this.#reads.clear();
+    for (const [, reader] of this.#fragmentReaders) {
+      reader.fail(reason);
+    }
+    this.#fragmentReaders.clear();
   }
 
   /**

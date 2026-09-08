@@ -30,6 +30,7 @@ import { ENCODE_EXIT } from "../encode/encode-exit.js";
 import { affordableRuns } from "../encode/run-budget.js";
 import { RunCosts } from "../encode/run-costs.js";
 import { contentionPenalty } from "../encode/contention.js";
+import { waits } from "../priority/WaitLedger.js";
 import { SegmentDemand } from "../encode/SegmentDemand.js";
 
 export class EncodeOrchestrator {
@@ -710,11 +711,19 @@ export class EncodeOrchestrator {
       // reporting fault, no files at all reads as an output yet to be made, and
       // the difference decides where to look.
       const held = this.segmentStore ? this.segmentStore.filesHeld(address) : -1;
+      // AND WHETHER THE MAP IS BEING SERVED IN ITS OWN ORDER. The zones say
+      // what matters most; this says what the viewer actually waited for, by
+      // band. Waits at `now` are the ones that cost a spinner, and until this
+      // existed there was no figure anywhere saying whether the urgent zone was
+      // served first — the map could have been read backwards and every line
+      // above would have looked the same.
+      const served = waits.describe(address);
       parts.push(
         `${address} ready=${coverage.stats().ready}` +
         `${held < 0 ? "" : ` of ${held} file(s) on disk`} ` +
         `zones=[${zones}] runs=[${runs}] ` +
-        `waiting=${waiting === null ? "nobody" : `#${waiting}`}`
+        `waiting=${waiting === null ? "nobody" : `#${waiting}`}` +
+        `${served ? ` served[${served}]` : ""}`
       );
     }
     const tally = this.endings();

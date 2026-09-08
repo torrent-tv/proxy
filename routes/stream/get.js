@@ -223,6 +223,30 @@ export async function handleStreamGet(req, reply, { sourceRegistry, torrentPool,
         // response silently.
         fragment.release();
       }
+      // THE BODY MUST BE AS LONG AS THE HEADER PROMISED, and nothing checked.
+      //
+      // `Content-Length` is committed before the first byte, and the reader can
+      // finish early in silence: its `close()` ends the iteration with no
+      // accounting, and only the `fail()` path is logged. A client then has a
+      // response shorter than declared, and ffmpeg's mp4 demuxer — which holds
+      // the sample table and asks for samples past what arrived — starts
+      // parsing at wrong offsets. That is exactly `Invalid NAL unit size` with
+      // a negative length and `missing picture in access unit`: 2138 of them in
+      // one field session on a COPIED picture, where no encoder touches a frame.
+      //
+      // A single clean read of the same file through this route produced none,
+      // and four concurrent ones produced none; what the field session also had
+      // was a piece store whose readers wanted every piece it could hold, and
+      // 100 of 1395 evictions took a piece a reader had declared. So this says
+      // whether the body was short — which either names the cause or removes
+      // the last candidate.
+      if (sent !== contentLength) {
+        logger.error(
+          `stream: read of "${file.name}" bytes ${start}-${end} ENDED SHORT — ` +
+          `${sent} of ${contentLength} bytes sent under a Content-Length that promised all of them. ` +
+          "Whatever is reading this has a truncated body and no way to know it."
+        );
+      }
       reply.raw.end();
     } catch (error) {
       // The body is already committed by its headers, so there is nothing

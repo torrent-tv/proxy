@@ -1,4 +1,5 @@
 import { logger } from "../../../utils/logger.js";
+import { bandOf, waits } from "../../../services/priority/WaitLedger.js";
 
 /**
  * How long a request for a not-yet-produced file is held before answering with
@@ -99,7 +100,20 @@ export async function serveSessionFile(req, reply, { hlsSessionManager, sessionI
     const outcome = clientAborted
       ? "client-aborted"
       : result.kind === "ok" ? "served" : result.kind;
-    logger.info(`[hold] ${fileName} ${outcome} after ${heldMs}ms`);
+    // AGAINST THE RANK THE MAP GAVE IT. A wait is the only thing that says
+    // whether the prioritisation is being used well, and this is the one place
+    // in the proxy where a viewer is measurably waiting for a named segment.
+    // Recorded even when the segment was served at once: a run of short waits
+    // at the top rank is what "the urgent zone is being served first" looks
+    // like, and without them the table would hold only the failures.
+    const ranked = result.ranked ?? null;
+    if (ranked) {
+      waits.note(ranked.address, heldMs, ranked.rank, ranked.topRank);
+    }
+    logger.info(
+      `[hold] ${fileName} ${outcome} after ${heldMs}ms` +
+      (ranked ? ` (the map wants it ${bandOf(ranked.rank, ranked.topRank)}, rank ${ranked.rank} of ${ranked.topRank})` : "")
+    );
   }
 
   if (result.kind === "not-found") {
@@ -180,6 +194,8 @@ export async function waitForSessionFile(hlsSessionManager, sessionId, fileName,
   // this wait, and the segment the viewer wanted took 15 ms once it was asked
   // for.
   let seekEpoch = hlsSessionManager.seekEpoch(sessionId);
+  /** @type {{ address: string, rank: number, topRank: number } | null} */
+  let lastRanked = null;
   while (Date.now() - startedAt < timeoutMs) {
     const result = await hlsSessionManager.getFileStream(sessionId, fileName, {
       requestSeq,
@@ -202,9 +218,13 @@ export async function waitForSessionFile(hlsSessionManager, sessionId, fileName,
       );
       seekEpoch = hlsSessionManager.seekEpoch(sessionId);
     }
+    // The rank the map last gave this segment, so a request that runs out of
+    // patience is still counted against what it was promised. Kept across the
+    // polls because the timeout path has no result of its own.
+    lastRanked = result.ranked ?? lastRanked;
     await delay(300);
   }
-  return { kind: "warming-up" };
+  return { kind: "warming-up", ranked: lastRanked };
 }
 
 /**

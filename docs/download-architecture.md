@@ -72,6 +72,29 @@ wanted, and two thirds of reads came back from disk.
 **The background fill** states one file at a time — a soundtrack pulled whole
 once the cushion is full, and no further.
 
+## Whether the map reaches the swarm, and in what shape
+
+Applied in silence until 2026-09-08: that the map had been BUILT was visible in
+the encoding's own line, that the download had received it was visible nowhere,
+and a whole field session carried not one line about it. Said now on change, per
+LEVEL rather than per zone — the register has five levels and the map has as many
+bands as the film needs, and the fit between the two is the one thing here that
+could be wrong:
+
+```
+torrent-pool: the swarm is told, for "film.mkv": NEAR 1 zone(s) 42MB,
+AHEAD 4 zone(s) 310MB, TAIL 1 zone(s) 1900MB (7 band(s) of the map, over 1218s of film)
+```
+
+In megabytes, because that is what a swarm delivers. `NEAR` absent while
+somebody is watching means the map is not arriving; every band landing in one
+level means the fit has collapsed.
+
+Beside it, where the waits fell: the reader records each wait against the level
+the map put its piece in, and the `supply` line carries the table. Long waits at
+`blocked` mean the urgent zone is too narrow; long waits further out mean the
+lead is.
+
 ## The five levels
 
 | level | what it is | stated |

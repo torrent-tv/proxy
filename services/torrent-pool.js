@@ -15,7 +15,7 @@ import { rmSync, statfsSync } from "node:fs";
 import WebTorrent from "webtorrent";
 import { logger } from "../utils/logger.js";
 import { SharedPieceStore, findSharedStore } from "./piece-store/shared-piece-store.js";
-import { Urgency } from "./demand/index.js";
+import { Urgency, urgencyName } from "./demand/index.js";
 import { demandFor, forgetTorrent, reconcileAll } from "./download/registry.js";
 import { isAtAWatchingViewer, isBehindEverybody, isNobodyComingNow } from "./priority/PriorityMap.js";
 import { deriveSourceKey } from "./torrent-source-key.js";
@@ -682,6 +682,12 @@ export function dhtNodeCount(client) {
   }
 }
 
+// The last shape said out loud per torrent, so an unchanged one is not
+// repeated. Held here rather than on the pool because `applyPriorityMap`
+// reads nothing but its arguments — which is what lets it be exercised
+// without building a pool, a torrent client or a thread.
+const lastMapSaid = new WeakMap();
+
 export class TorrentPool {
   /**
    * In-flight `client.add()` promises keyed by the same key as `torrents`.
@@ -1098,6 +1104,37 @@ export class TorrentPool {
       if (!(index < ordered.length)) {
         register.withdraw(window.claimant);
       }
+    }
+    // WHAT THE SWARM WAS ACTUALLY TOLD, said on change and never on a timer.
+    // The map was applied in silence: that it had been BUILT was visible in the
+    // encoding's own line, and that the download had received it was visible
+    // nowhere at all — so "is the map reaching the swarm" could only be taken
+    // on trust. Field 2026-09-08: not one line about it in a whole session.
+    //
+    // Per LEVEL rather than per zone, because the register has five levels and
+    // the map has as many bands as the film needs; the fit between them is the
+    // one thing here that could be wrong, and this is what shows it. Megabytes,
+    // because that is what a swarm delivers.
+    const byLevel = new Map();
+    for (const zone of ordered) {
+      const level = levelOf(zone);
+      const seconds = Math.max(0, zone.to - zone.from);
+      const held = byLevel.get(level) ?? { zones: 0, megabytes: 0 };
+      held.zones += 1;
+      held.megabytes += (seconds / duration) * length / 1048576;
+      byLevel.set(level, held);
+    }
+    const shape = [...byLevel.entries()]
+      .sort((left, right) => right[0] - left[0])
+      .map(([level, held]) => `${urgencyName(level)} ${held.zones} zone(s) ${held.megabytes.toFixed(0)}MB`)
+      .join(", ");
+    const said = `${fileIndex}:${shape}`;
+    if (lastMapSaid.get(torrent) !== said) {
+      lastMapSaid.set(torrent, said);
+      logger.info(
+        `torrent-pool: the swarm is told, for "${file.name}": ${shape || "nothing"} ` +
+        `(${ordered.length} band(s) of the map, over ${Math.round(duration)}s of film)`
+      );
     }
   }
 

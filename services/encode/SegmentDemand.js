@@ -58,4 +58,38 @@ export class SegmentDemand {
   mapOn(address) {
     return this.#maps.get(address) ?? [];
   }
+
+  /**
+   * What the map says about one segment, and about the map it sits in.
+   *
+   * Asked by whoever MEASURES how well the map is being served: a wait means
+   * one thing at the top rank and another at the bottom, and telling them apart
+   * needs both the segment's own rank and the highest rank stated — a rank is a
+   * position in this map, not an absolute number.
+   *
+   * AND AN EMPTY MAP IS NOT AN ANSWER, which is why the top rank comes back even
+   * when the segment's own is zero. A top rank of zero says the map has not been
+   * built yet — a session created a moment ago, before the first pass — and that
+   * is a different thing from "nobody is coming". Conflated, every request
+   * behind the run reads as absent for as long as a fresh session has no map.
+   *
+   * @param {string} address
+   * @param {number} index
+   * @returns {{ rank: number, topRank: number }} Rank zero for a number in
+   *   nobody's zone, which is a statement: nothing is coming for it.
+   */
+  rankOf(address, index) {
+    const zones = this.mapOn(address);
+    let rank = 0;
+    let topRank = 0;
+    for (const zone of zones) {
+      if (zone.priority > topRank) {
+        topRank = zone.priority;
+      }
+      if (index >= zone.from && index <= zone.to && zone.priority > rank) {
+        rank = zone.priority;
+      }
+    }
+    return { rank, topRank };
+  }
 }

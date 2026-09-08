@@ -9648,6 +9648,8 @@ export class HlsSessionManager {
 
 
   #holdForProduction(session, fileName, isPlaylist, options) {
+    /** @type {{ address: string, rank: number, topRank: number } | null} */
+    let ranked = null;
     if (!isPlaylist) {
       this.#explainHold(session, fileName, "the file is not on disk");
     }
@@ -9667,20 +9669,16 @@ export class HlsSessionManager {
       // failed did the player move to the segment it actually needed — 63 s of
       // spinner after a track that had been made ready in 7.
       //
-      // WHETHER ANYBODY IS COMING FOR IT, asked of the priority map rather than
-      // measured in segments. The distance used to decide, against the reach of
-      // a repair that moved the encoder from a request — both are gone. A
-      // number inside somebody's zone will be made, so holding it is holding it
-      // for a viewer; a number in nobody's zone will not, and holding it spends
-      // the player's patience for nothing.
-      // AN EMPTY MAP IS NOT AN ANSWER. It says the map has not been built yet —
-      // a session created a moment ago, before the first pass — and that is a
-      // different thing from "nobody is coming", which is what this refusal
-      // needs. Told apart, because conflating them answers every behind-head
-      // request as absent for as long as a fresh session has no map.
-      const zones = this.encodeOrchestrator.demand.mapOn(session.outputKey ?? "");
-      const nobodyIsComing = zones.length > 0 &&
-        !zones.some((zone) => requestedIndex >= zone.from && requestedIndex <= zone.to);
+      // WHETHER ANYBODY IS COMING FOR IT, asked of the map (`SegmentDemand.rankOf`,
+      // which also tells "in nobody's zone" from "no map yet"). The same walk
+      // was written out here and could answer only yes or no, so the RANK was
+      // discarded at the one point where a viewer measurably waits for a named
+      // segment; it goes back out with the answer, because the wait is measured
+      // by whoever holds the request.
+      const address = session.outputKey ?? "";
+      const { rank, topRank } = this.encodeOrchestrator.demand.rankOf(address, requestedIndex);
+      ranked = { address, rank, topRank };
+      const nobodyIsComing = topRank > 0 && rank === 0;
       if (
         Number.isFinite(requestedIndex) &&
         requestedIndex < (earliestRunStart(session) ?? 0) &&
@@ -9691,7 +9689,7 @@ export class HlsSessionManager {
           `transcode ${session.id} segment #${requestedIndex} is ${(earliestRunStart(session) ?? 0) - requestedIndex} ` +
           "segments behind the run and in nobody's zone; answered as absent rather than held"
         );
-        return { kind: "not-found" };
+        return { kind: "not-found", ranked };
       }
       this.#ensureEncodingFor(
         session,
@@ -9699,7 +9697,7 @@ export class HlsSessionManager {
         Number.isFinite(options?.requestSeq) ? options.requestSeq : Number.MAX_SAFE_INTEGER
       );
     }
-    return { kind: "warming-up" };
+    return { kind: "warming-up", ranked };
   }
 
   /**

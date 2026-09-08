@@ -136,6 +136,36 @@ one-segment backoff are gone — a second debounce on a signal the browser had
 already debounced, and every millisecond of it was dead time in front of the
 viewer.
 
+## Whether the map is being served in its own order
+
+The zones say what matters most. What the viewer actually waited for is measured
+where a viewer measurably waits — the one place in the proxy that holds a
+request for a named segment — and recorded against the rank the map gave that
+segment **at the moment it was asked for**. It reaches the `encode:` state line
+as `served[...]`:
+
+```
+served[now 42 wait(s) median 180ms worst 1900ms, soon 6 wait(s) median 90ms worst 240ms, later none]
+```
+
+Read it like this:
+
+| what it says | what is wrong |
+|---|---|
+| long waits at `now` | the urgent zone is not being served first — a fault in whoever acts on the map |
+| long waits at `soon`/`later`, none at `now` | the zones are the wrong width: the urgent one too narrow, so the viewer reaches material only ranked "soon" |
+| `now none` while the viewer is watching | nothing was ever urgent — the map is not reaching this output |
+| a band reading `none` | silence, not a zero, and it is printed as `none` so it cannot be read as "no waits, all good" |
+
+Ranks are collapsed into three bands because the map's own scale is as long as
+the film needs — a hundred ranks on a long file — and a hundred-row table says
+nothing a reader can hold. The width of `soon` is a tenth of the top rank, which
+is the map's own shape (its zones widen geometrically) rather than a threshold
+chosen for the table.
+
+The download half is measured the same way and on the same scale, so the two are
+comparable: `download-architecture.md`.
+
 ## What is checked
 
 `test/one-authority.test.js` holds the shape: one caller of `#startEncodeRun`,

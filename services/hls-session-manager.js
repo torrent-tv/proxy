@@ -81,7 +81,8 @@ import {
   publishedGridFor as publishedGridOf,
   publishedStartTime,
   seekLandingOffsetFor,
-  segmentCutTimesFrom
+  segmentCutTimesFrom,
+  trueStartOf
 } from "./encode/run-command.js";
 // Re-exported because four of them are read by tests that name this module, and
 // what they pin — where a run begins, where it cuts, which timeline it works on
@@ -379,15 +380,6 @@ const DEFAULT_SEGMENT_DURATION_SEC = 4;
 // is allowed to be before we restart ffmpeg at that position (server-side seek).
 // Requests within the window are served by waiting for the running encode.
 const MAX_LOOKAHEAD_SEGMENTS = 8;
-// Floor between actual restarts. It used to be 4 s, from when a far segment
-// REQUEST could steer the encoder and a playlist scan produced a burst of them.
-// Requests no longer steer anything (see #ensureEncodingFor) — every restart
-// now comes from a position the viewer stated — so this is no longer a policy
-// about noise, only a guard against a client that spams the seek endpoint.
-// Measured cost of the old value 2026-08-04: two seeks 1.3 s apart produced two
-// restarts 4.4 s apart, the first encoding 119.5 s of content nobody wanted
-// before the second killed it.
-const RESTART_COOLDOWN_MS = 500;
 // How far ahead of the viewer the encoder may run before it is stopped, and how
 // far it must fall back to before it is let go again.
 //
@@ -424,67 +416,15 @@ const CUSHION_REPORT_MS = 30_000;
 // is sent every 10 s, and a seek in between moves them somewhere this cannot
 // predict — so anything older is treated as no report at all.
 const NET_REPORT_FRESH_MS = 15_000;
-// Seek debounce. A far (out-of-window) segment request is a server-side seek.
-// Rather than restart ffmpeg on the first one, wait a short quiet period:
-// further far requests re-arm it and update the target to the latest index, so
-// a scrub that emits a burst of scattered requests (e.g. iOS native HLS firing
-// 367,732,369,368,370 seconds apart) collapses to ONE restart at the position
-// the player ended on, instead of ping-ponging ffmpeg between positions and
-// producing nothing.
-// How many segments BEFORE the requested position the encoder starts.
-//
-// A player given a position decodes from the nearest keyframe PRECEDING it
-// (Apple HLS authoring guidance), so it fetches segments below the target and
-// an encoder starting exactly on it produces nothing anyone waits for.
-//
-// ONE segment is now enough. Since 2.9.65 every boundary IS a real keyframe
-// (read from the container index), so the segment before the target is
-// guaranteed to start on one. The old value of 12 dates from the invented 4 s
-// grid, where the distance to a usable keyframe was unknown — and it became
-// actively harmful once boundaries turned real: with 10.43 s segments it meant
-// encoding 125 s of content before reaching the viewer's position. Field
-// 2026-08-02: a seek took 56 s, of which ~50 s was this backoff.
-const SEEK_BACKOFF_SEGMENTS = 1;
-
 // How many produced segments' true start times to remember, so a player's
 // report about one of them can be answered. Two hundred is about twenty
 // minutes of playback at these segment lengths — far more than the recent past
 // a stall report can be about, and small enough to be free.
 const TRUE_START_MEMORY = 200;
-// How long to wait for a scrub to stop moving before acting on it. Small,
-// because the browser already collapses a drag into ONE report
-// (`SEEK_REPORT_DEBOUNCE_MS`, 300 ms) and only reports where it settled — this
-// is a second debounce on an already-debounced signal, and every millisecond of
-// it is dead time in front of the viewer. It was 1.2 s when the encoder was
-// also steered by segment requests, which arrive in bursts of dozens; measured
-// 2026-08-04, that cost 1.2 s of every seek.
-const SEEK_SETTLE_MS = 300;
-// How long a segment BELOW the running encode's start may go unanswered before
-// the encoder is moved back to it. Long enough that a burst around a reported
-// seek settles on its own — the seek is what should move the encoder — and
-// short enough that a session cannot sit on an unanswerable request, which
-// measured two minutes forty-one before a viewer gave up.
-// A request behind the run is acted on once it has been REPEATED, not once it
-// has waited: repetition is the player saying it still needs this exact
-// segment, while a delay only says time has passed. The floor below stays as a
-// last guard against acting on a single stray poll.
-// More distinct indices than this behind the head at once is the player
-// scanning the playlist rather than waiting for a frame.
-// The window the count above is taken over. A player's scan lands inside half a
-// second (field log 2026-08-02); a viewer waiting asks every few seconds.
-// How far behind the run a request may be and still be treated as the encoder
-// standing in the wrong place rather than as a player scanning the playlist. A
-// misplaced run is out by at most the buffer the player was holding — measured
-// 2026-08-11 at 14 segments — while a scan probe is out by anything at all.
-// Generous against that measurement, and far short of the hundreds of segments
-// a scan reaches.
 // How far the accounting of a backward restart looks for work about to be done
 // twice. It runs on the restart path and a session an hour in has thousands of
 // segments; the figure is for a comparison, not an inventory.
 const BACKWARD_RESTART_SCAN_SEGMENTS = 300;
-// Hard cap on the total settle wait, measured from the first request of a
-// burst, so a still-moving scrubber cannot delay a genuine seek forever.
-const SEEK_SETTLE_MAX_MS = 1_000;
 // Grace period to wait for the PREVIOUS ffmpeg process to exit (per signal
 // escalation step: SIGTERM, then SIGKILL) before spawning its replacement into
 // the same session directory. See #startEncodeRun.
@@ -1623,6 +1563,7 @@ export class HlsSessionManager {
         ).catch(() => {});
       },
       viewersOf: (session) => viewersOf(session),
+      watchedBy: (session, viewer) => this.liveOutputs.watchedBy(session, viewer),
       allowanceFor: (session) => minimumBufferFrom({
         segmentSeconds: this.segmentDurationSec,
         worstSupplyWaitSec: session.supplyFigures?.worstWaitSec
@@ -1630,7 +1571,7 @@ export class HlsSessionManager {
     });
     this.encodeOrchestrator = new EncodeOrchestrator({
       maxRunsFor: (address) => this.maxRunsForOutput(address),
-      makeRun: ({ address, from, to }) => this.#makeRunAt(address, from, to),
+      makeRun: ({ address, from, to, because }) => this.#makeRunAt(address, from, to, because),
       segmentSeconds: this.segmentDurationSec,
       contentionPenalties: this.contentionPenalties,
       startingSpeedFor: (address) => this.encodeCost.speedForOutput(address),
@@ -1882,18 +1823,12 @@ export class HlsSessionManager {
             `(${existing.consumers.size} viewer(s)) key=${sourceMapKey}`
           );
         }
-        // Where the joining viewer is opening the film. The start position is
-        // no longer part of the key — it changes no byte of what is produced —
-        // so a viewer joining somewhere else joins THIS session and is given a
-        // run of their own there, rather than a second session of the same
-        // output. Nothing is started where something is already being made:
-        // `planRunInterval` answers that, and answers it with nothing.
-        if (normalizedStartPosition > 0 || existing.runs.size === 0) {
-          const at = this.#segmentIndexForTime(existing, normalizedStartPosition);
-          if (runStartingAt(existing, at) === null && ownRunMaking(existing, at) === null) {
-            this.#startEncodeRun(existing, at, normalizedStartPosition, "a viewer opened the film here");
-          }
-        }
+        // A run of their own where they opened the film is the plan's to place:
+        // `#placeViewer` above states where they are and the plan reads it. This
+        // used to start one here, deciding for itself that nothing was being
+        // made there — a second party answering the one question the plan
+        // exists for, and answering it from a session's own runs rather than
+        // from the output's coverage.
         existing.lastAccessedAt = Date.now();
         try {
           await this.waitUntilReady(existing);
@@ -2533,15 +2468,6 @@ export class HlsSessionManager {
       // was sent once and cannot be revised.
       // Segment index the current ffmpeg run started producing from.
       encodeStartIndex: 0,
-      // Guards against repeatedly restarting to the same seek position.
-      pendingRestartIndex: -1,
-      // Timestamp of the last encode (re)start, for the restart cooldown.
-      lastRestartAt: 0,
-      // Seek debounce: pending settle timer, the far segment index to restart
-      // at once the burst settles, and the timestamp of the burst's first far
-      // request (for the SEEK_SETTLE_MAX_MS cap).
-      seekSettleTimer: null,
-      seekTarget: null,
       // Monotonic sequence of INCOMING segment requests (see #ensureEncodingFor
       // and nextRequestSeq): a request is issued one number when it arrives and
       // keeps it across all its long-poll iterations, so a burst of requests
@@ -2572,7 +2498,6 @@ export class HlsSessionManager {
       // releasing a consumer emptied none of them.
       viewers: new Map(),
       encoderPauseUnsupported: false,
-      seekFirstFarAt: 0,
       // Circuit breaker: consecutive FAST failures (see START_FAST_FAIL_MS) at
       // failedStartAt. Reset whenever a run starts at a DIFFERENT target or
       // survives past the fast-fail window. See the exit handler in
@@ -2703,29 +2628,18 @@ export class HlsSessionManager {
         `key=${sourceMapKey}`
     );
 
-    // Begin where the viewer asked, not at the top of the file. The position
-    // was already honoured everywhere EXCEPT here: it went into the session key
-    // and into the log line, and then the first run started at index 0 anyway.
-    // Measured 2026-08-06 on a Retry after the proxy restarted — the session
-    // was created with `start=1580s`, the encoder began at #0, the player
-    // asked for #152, and 45 s later the browser gave up with "no data arrived
-    // from the proxy" while the transcode ran happily at 9.9x through the
-    // opening credits.
-    // From what the viewer ASKED for, not from the rounded figure. The rounding
-    // exists to answer one question — is this the same session as somebody
-    // else's — and it is the wrong number for this one, because `Math.round`
-    // can move the position FORWARD: 588s became 590s, which falls in segment
-    // #85 while the viewer at 588s is inside #84. The player then asked for a
-    // segment behind the run, the run was restarted onto it, and the 4.5s it
-    // had produced were thrown away (field 2026-08-31,
-    // `research/cold-open-audio-start-2026-08-31.md`).
-    const requestedStart = Number.isFinite(startPositionSeconds) && startPositionSeconds > 0
-      ? startPositionSeconds
-      : 0;
-    const firstIndex = requestedStart > 0
-      ? this.#segmentIndexForTime(session, requestedStart)
-      : 0;
-    await this.#startEncodeRun(session, firstIndex);
+    // WHERE THE FIRST ENCODER GOES IS THE PLAN'S, and it is placed by the same
+    // arithmetic as every later one. `#placeViewer` above put this person at the
+    // second they asked for, and where a viewer stands is the whole of what
+    // decides an encoder's position.
+    //
+    // It used to be started here, from the viewer's position worked out a second
+    // time, and the two workings-out did not agree: this one floored the
+    // requested seconds onto the cut grid while the plan read the priority map,
+    // so a session opened mid-film had an encoder placed twice within one turn.
+    // A session created on the family's behalf — a quality step, a soundtrack —
+    // registers no viewer at all, and got one here regardless.
+    this.planEncodersSoon();
 
     try {
       await this.waitUntilReady(session);
@@ -3821,6 +3735,16 @@ export class HlsSessionManager {
       sessionGroups: byOutput.values(),
       staleAfterMs: this.presenceStaleAfterMs()
     });
+    // FROM THE VIEWERS OF THAT OUTPUT, not from the viewers of the film.
+    //
+    // Both scopes are right for what asks them: the swarm is asked for bytes of
+    // a FILE, which every output of it reads, and encoders are placed per
+    // OUTPUT, which a person watching 480p wants nothing of at 1080p. Handed the
+    // film's map, the plan wanted an encoder on every output of it, and what
+    // stopped the unwatched ones was this class killing them by its own
+    // judgement — while the viewer's own move announced itself and had the plan
+    // start them again.
+    //
     // Converted into each output's own numbering, because two outputs of one
     // film are cut independently and the same second is a different number in
     // each: 454 pieces against 401 on the field file.
@@ -3829,7 +3753,7 @@ export class HlsSessionManager {
       this.encodeOrchestrator.notePriorityMap(
         address,
         timeline?.inSegments?.(
-          this.priority.mapFor(sessions[0].sourceKey, sessions[0].fileIndex),
+          this.priority.mapForOutput(address),
           Number(timeline?.segmentCount) || 0
         ) ?? []
       );
@@ -3848,9 +3772,11 @@ export class HlsSessionManager {
    *
    * @param {string} address
    * @param {number} from
+   * @param {number} to
+   * @param {string} because - The plan's own words for why it placed this one.
    * @returns {object | null}
    */
-  #makeRunAt(address, from, to) {
+  #makeRunAt(address, from, to, because) {
     let base = null;
     for (const session of this.sessionsById.values()) {
       if (session.outputKey === address && session.state !== "disposed") {
@@ -3887,7 +3813,7 @@ export class HlsSessionManager {
     // the encoder was built behind the answer is what let the same stretch be
     // started over and over — 684 starts in 482 seconds of field 2026-09-05.
     try {
-      return this.#startEncodeRun(base, from, undefined, "the plan asked for an encoder here", { to });
+      return this.#startEncodeRun(base, from, because, { to });
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       logger.warn(`transcode could not start a run at #${from} of ${address}: ${message}`);
@@ -5145,7 +5071,7 @@ export class HlsSessionManager {
         `${maxrateKbpsFor(nominal)}kbps peak, size unchanged at ${session.output.encodeWidth}x${session.output.encodeHeight} ` +
         `"${session.file.name}"`
     );
-    await this.#restartAtViewer(session);
+    this.#reencodeAtNewRate(session);
     return true;
   }
 
@@ -5165,23 +5091,32 @@ export class HlsSessionManager {
       `[budget] transcode ${session.id} the link has carried this picture with room to spare; ` +
         `lifting the ${maxrateKbpsFor(lifted)}kbps cap "${session.file.name}"`
     );
-    await this.#restartAtViewer(session);
+    this.#reencodeAtNewRate(session);
   }
 
   /**
-   * Restart this session's encode run at the segment the viewer is on, so a
-   * changed setting takes over from where they are watching.
+   * The picture's bitrate has changed, so the encoder producing it at the old
+   * one has to go.
+   *
+   * That is the whole of what is known here, and it is a fact about the OUTPUT:
+   * an argument list is fixed when a process starts, so a run carrying the
+   * previous cap cannot be told about the new one. Where the replacement stands
+   * is a different question, and the plan answers it from where the viewers are.
+   *
+   * It used to answer it too, and by a rule of its own: the segment the encoder
+   * had reached. That is neither where a viewer is nor a gap in the material —
+   * it is where the process being replaced happened to have got to.
+   *
+   * Safe to do to a run that has produced material: the cap lives in rate
+   * control alone, which does not appear in the SPS or the PPS, so pieces made
+   * before it are still described by the header the player holds.
    *
    * @param {HlsSession} session
-   * @returns {Promise<void>}
+   * @returns {void}
    */
-  async #restartAtViewer(session) {
-    const head = earliestRunStart(session);
-    const processed = Number.isFinite(session.progress?.processedSeconds)
-      ? session.progress.processedSeconds
-      : this.runStartTimeFor(session, head);
-    const currentSeg = Math.max(head, this.#segmentIndexForTime(session, processed));
-    await this.#startEncodeRun(session, currentSeg);
+  #reencodeAtNewRate(session) {
+    this.#stopEncodeRun(session, "its bitrate cap changed");
+    this.planEncodersSoon();
   }
 
   /**
@@ -5420,13 +5355,7 @@ export class HlsSessionManager {
   // Returns the encoder it built, or nothing when there was nothing to build.
   // It waits for nothing: the one thing it used to wait for was the death of
   // the run it was replacing, and that killing is gone.
-  #startEncodeRun(
-    session,
-    startIndex,
-    positionSecondsOverride,
-    because = "a viewer needs it",
-    ordered = null
-  ) {
+  #startEncodeRun(session, startIndex, because, ordered = null) {
     // A new run starts its own reckoning: a pair spanning the restart would
     // count the gap between two runs as slow encoding.
     session.learnSample = null;
@@ -5497,6 +5426,28 @@ export class HlsSessionManager {
     if (session.pendingRun !== attempt || session.state === "disposed") {
       return;
     }
+
+    // WHERE THIS NUMBER REALLY BEGINS, when a produced piece has said so and
+    // the table the player holds still says otherwise.
+    //
+    // Only a soundtrack, and only because a soundtrack has no keyframes: it
+    // begins exactly where it is asked to, to within one audio frame, while the
+    // picture can begin nowhere but a real keyframe and so moves forward to the
+    // next one — up to three seconds, measured 2026-08-17. Left at the published
+    // time, the sound of one film starts up to that far from its picture after
+    // every restart, each correctly labelled with where it really is, and the
+    // viewer gets sound with no new picture for the difference.
+    //
+    // DERIVED HERE rather than handed in. It used to arrive as an argument from
+    // the one caller that knew it — the correction that had just measured it —
+    // which meant the instant was only ever right for a run that caller
+    // started. Any run the plan placed at a corrected number got the published
+    // time and landed apart again. It is a fact of the FILE's cutting, held in
+    // the live table every session of the file shares, so it is read from
+    // there.
+    const positionSecondsOverride = session.audioOnly === true
+      ? trueStartOf(session.timeline, startIndex)
+      : undefined;
 
     // What is still read off the session for a run. The list is the measure of
     // how far a session still is from being the three things a run is built
@@ -5580,8 +5531,6 @@ export class HlsSessionManager {
       onEnded: (ended) => this.noteRunEnded(session, run, ended)
     });
     session.runs.add(run);
-    session.pendingRestartIndex = -1;
-    session.lastRestartAt = Date.now();
     session.progress.processedSeconds = startSeconds;
     session.progress.startPositionSeconds = startSeconds;
     session.progress.updatedAt = Date.now();
@@ -5759,7 +5708,11 @@ export class HlsSessionManager {
         `transcode ${session.id} hardware encoder ${failedEncoder} failed ` +
           `(${session.lastError}); falling back to software libx264 and restarting`
       );
-      void this.#startEncodeRun(session, ended.from, undefined, "the hardware encoder failed");
+      // WHAT this host encodes with has changed, which is all that is said here.
+      // Where the replacement stands is the plan's, and the stretch this run
+      // held went back to the map above — so the plan sees a gap in front of the
+      // viewer and fills it with a run built on the new encoder.
+      this.planEncodersSoon();
       return;
     }
     // Losing the INPUT is not the session failing — it is the data not being
@@ -5788,10 +5741,16 @@ export class HlsSessionManager {
           return;
         }
         run.retryDue();
-        const at = Number.isInteger(session.lastRequestedSegment)
-          ? session.lastRequestedSegment
-          : ended.from;
-        this.#startEncodeRun(session, at, undefined, "its input came back");
+        // The data may be back, which is a reason to DECIDE again and not a
+        // decision. Where to start is the plan's, from where the viewers are;
+        // this used to start one at the segment last requested, which is the
+        // player's read head rather than anybody's position, and is a number
+        // requests are explicitly not allowed to steer an encoder by.
+        //
+        // What the delay is for stays: the plan is a function of the state, and
+        // nothing about the state changes while the torrent is away, so it would
+        // command the same start as fast as ffmpeg could fail.
+        this.planEncodersSoon();
       }, delayMs);
       session.inputRetryTimer.unref?.();
       return;
@@ -6030,34 +5989,6 @@ export class HlsSessionManager {
   }
 
   /**
-   * Fire a settled server-side seek: restart the encoder once at the target
-   * recorded during the settle window. Enforces the restart cooldown as a
-   * floor between actual restarts (re-arming for the remainder if still
-   * cooling down). No-op for a disposed session or a cleared target.
-   *
-   * @param {HlsSession} session
-   * @returns {void}
-   */
-  /**
-   * Content-seconds the CURRENT encode run has produced, from ffmpeg's own
-   * progress. Both branches report on the absolute source timeline (the copy
-   * branch via `-copyts`, the re-encode branch rebased by
-   * {@link #toAbsoluteProcessedSeconds}), so subtracting the run's start
-   * position gives what THIS run has made — 0 right after a restart.
-   *
-   * @param {HlsSession} session
-   * @returns {number} Seconds produced by the current run; 0 when unknown.
-   */
-  #producedSecondsThisRun(session) {
-    const processed = session.progress?.processedSeconds;
-    const startPosition = session.progress?.startPositionSeconds;
-    if (!Number.isFinite(processed) || !Number.isFinite(startPosition)) {
-      return 0;
-    }
-    return Math.max(0, processed - startPosition);
-  }
-
-  /**
    * The viewer seeked. Called from POST /api/transcode-sessions/:id/seek with
    * the position the browser read off its own player once the scrub ended.
    *
@@ -6093,161 +6024,16 @@ export class HlsSessionManager {
     //
     // What follows from the move happens by itself: the priority map is built
     // from where the viewers are, and both orchestrators read the map.
-    if (consumerId) {
-      this.viewers.of(named, consumerId).moveTo(positionSeconds);
-    }
+    // A TRANSPORT THAT CANNOT NAME THE VIEWER STILL HAS ONE. Recorded only for
+    // a named viewer, an unnamed one's seek was written nowhere at all: the
+    // registry keeps them under the empty name, on the session they are
+    // watching, and everything that asks where a viewer is already looks there
+    // first. The one difference is that such a viewer belongs to the session
+    // rather than to a person, which is what a transport with no id means.
+    this.viewers.of(named, consumerId).moveTo(positionSeconds);
     named.lastAccessedAt = Date.now();
     this.planEncodersSoon();
     return true;
-  }
-
-  /**
-   * Reposition THIS session, with no forwarding.
-   *
-   * {@link requestSeek} exists for the browser, which names the base session and
-   * means the rung on screen. Everything inside this class means the session it
-   * is holding: warming a rung has to move THAT rung, and forwarding sent the
-   * seek to the one already playing instead — measured 2026-08-12, warming the
-   * base's own height moved the 540p rung and left the base parked at the start,
-   * so the switch had nothing to fetch.
-   *
-   * @param {HlsSession} session
-   * @param {number} positionSeconds
-   * @returns {boolean}
-   */
-  #seekSession(session, positionSeconds) {
-    if (!session || session.state === "disposed") {
-      return false;
-    }
-    session.furthestViewerSeconds = positionSeconds;
-    session.viewerReportedSeconds = positionSeconds;
-    session.lastAccessedAt = Date.now();
-    // Every segment request being held right now was made for the position the
-    // viewer has just left. Release them: hls.js keeps ONE fragment load
-    // outstanding, so until the one in flight answers, the player cannot ask
-    // for the segment it now needs — measured 2026-08-04, a backward seek into
-    // fully-downloaded data waited 57 s for a held request for #609 to time
-    // out, then fetched the segment it wanted in 15 ms. Bumping the epoch makes
-    // those waits answer "retry" on their next poll instead of running out the
-    // 60 s hold. Prescribed by `hls-media-server` (one outstanding wait per
-    // session) in research/hls-seek-prior-art-2026-08-02.md.
-    session.waitEpoch = (session.waitEpoch ?? 0) + 1;
-    const index = this.#segmentIndexForTime(session, positionSeconds);
-    const head = earliestRunStart(session) ?? 0;
-    const processed = Number.isFinite(session.progress?.processedSeconds)
-      ? session.progress.processedSeconds
-      : this.runStartTimeFor(session, head);
-    const currentSeg = Math.max(head, this.#segmentIndexForTime(session, processed));
-    // Already covered by the running encode — the data is on its way, so
-    // restarting would only destroy work the viewer is waiting for. The run has
-    // to be ALIVE for that to hold: after a run died, the handle still
-    // pointed at the dead process and every later seek was waved through as
-    // "already covered", so nothing could ever restart it. Measured 2026-08-04:
-    // one ffmpeg failure turned into a session that answered 500 to every
-    // segment for as long as the viewer kept trying.
-    const runIsAlive = processCanBeSignalled(runStateOf(session));
-    if (runIsAlive && index >= head && index <= currentSeg + MAX_LOOKAHEAD_SEGMENTS) {
-      logger.info(
-        `transcode ${session.id} seek to ${positionSeconds.toFixed(1)}s (#${index}) ` +
-          `already within the running encode (#${head}..#${currentSeg}) — not restarting`
-      );
-      return true;
-    }
-    // Start BEFORE the requested position (see SEEK_BACKOFF_SEGMENTS): the
-    // player needs a segment containing the preceding keyframe, so one that
-    // begins exactly at the target is useless to it.
-    const startIndex = Math.max(0, index - SEEK_BACKOFF_SEGMENTS);
-    logger.info(
-      `transcode ${session.id} viewer seek to ${positionSeconds.toFixed(1)}s → segment #${index}, ` +
-        `starting at #${startIndex} (${SEEK_BACKOFF_SEGMENTS} back for the preceding keyframe)`
-    );
-    session.seekTarget = startIndex;
-    if (session.seekSettleTimer) {
-      clearTimeout(session.seekSettleTimer);
-    } else {
-      session.seekFirstFarAt = Date.now();
-    }
-    const waited = Date.now() - session.seekFirstFarAt;
-    const delay = waited >= SEEK_SETTLE_MAX_MS ? 0 : Math.min(SEEK_SETTLE_MS, SEEK_SETTLE_MAX_MS - waited);
-    session.seekSettleTimer = setTimeout(() => this.#fireSettledSeek(session), delay);
-    session.seekSettleTimer.unref?.();
-    return true;
-  }
-
-  #fireSettledSeek(session) {
-    const target = session.seekTarget;
-    session.seekSettleTimer = null;
-    if (!session || session.state === "disposed" || target == null) {
-      session.seekTarget = null;
-      session.seekFirstFarAt = 0;
-      return;
-    }
-    // Circuit breaker (defense in depth): a timer armed before the cap was hit
-    // could still be pending when it was reached — do not fire the restart it
-    // was going to make. See the matching check in #ensureEncodingFor.
-    if (target === session.failedStartAt && session.failedStartCount >= MAX_FAILED_STARTS) {
-      session.seekTarget = null;
-      session.seekFirstFarAt = 0;
-      return;
-    }
-    // Already encoding exactly this position — there is nothing to seek TO, so
-    // restarting can only destroy the very work being waited for. The player
-    // keeps re-requesting the target segment while it is still being produced,
-    // and every such request looks "far" from where the encoder USED to be, so
-    // without this check each one re-triggered a restart at the position we had
-    // only just moved to: field log 2026-08-02 shows `restart at #865` twice in
-    // ten seconds, each killing a run that was encoding #865. The guard below
-    // did not catch it — it only decides whether to let the current run finish,
-    // not whether a new run is needed at all.
-    if (runStartingAt(session, target) !== null) {
-      logger.info(
-        `transcode ${session.id} seek #${target} ignored — the current run already starts there`
-      );
-      session.seekTarget = null;
-      session.seekFirstFarAt = 0;
-      return;
-    }
-    // Minimum gap between actual restarts (the settle already collapses bursts;
-    // this only guards back-to-back seeks). If still cooling down, re-arm once
-    // for the remaining cooldown instead of restarting now.
-    const sinceLastRestart = Date.now() - (session.lastRestartAt ?? 0);
-    if (sinceLastRestart < RESTART_COOLDOWN_MS) {
-      session.seekSettleTimer = setTimeout(() => this.#fireSettledSeek(session), RESTART_COOLDOWN_MS - sinceLastRestart);
-      session.seekSettleTimer.unref?.();
-      return;
-    }
-    // A run in progress is NOT protected any more. It used to be: a restart was
-    // held for up to 30 s while the current run reached its first segment,
-    // because a far segment REQUEST could steer the encoder and the player's
-    // playlist scan produced dozens of them — restarts at #617 → #717 → #732 →
-    // #732 every 5-7 s, none producing anything (field 2026-08-02). Requests
-    // stopped steering anything when the position became explicit, so the only
-    // thing that can arrive here is a position the viewer has stated, and
-    // finishing a segment for where they no longer are is work nobody wants.
-    // Holding it was also expensive in the other direction: a genuine second
-    // seek could be delayed by the whole grace.
-    const producedThisRun = this.#producedSecondsThisRun(session);
-    const runIsAlive = processCanBeSignalled(runStateOf(session));
-    const allowedBecause = !runIsAlive
-      ? "run is dead"
-      : `viewer moved; run had produced ${producedThisRun.toFixed(1)}s`;
-    // The start is exactly what requestSeek computed — one segment before the
-    // viewer's position — and nothing else may move it.
-    //
-    // An earlier version pulled it down to the lowest segment the player had
-    // outstanding, guessing how far back the preceding keyframe lay. That guess
-    // is unnecessary now (boundaries ARE keyframes since 2.9.65) and was
-    // actively wrong: during a scrub the player loads from wherever the slider
-    // paused on its way, so those requests describe INTERMEDIATE positions, not
-    // the destination. Measured 2026-08-02: dragging from 0 to 23:34 paused at
-    // 863.4 s, the player fetched #82 for it, and a seek correctly resolved to
-    // #134 was dragged back to #82. The browser's 300 ms debounce exists to
-    // discard those intermediate positions — reading them back off the request
-    // stream defeated it.
-    session.seekTarget = null;
-    session.seekFirstFarAt = 0;
-    logger.info(`transcode ${session.id} seek settle → restart at segment #${target} (${allowedBecause})`);
-    void this.#startEncodeRun(session, target);
   }
 
   /**
@@ -6778,23 +6564,21 @@ export class HlsSessionManager {
         `${(trueStart - wasAt).toFixed(3)}s later than the table said — restarting it there ` +
         `so picture and sound begin together`
       );
-      // Restarted at the same INDEX, deliberately, rather than seeked to the
-      // time: a seek decides by index, finds this run already begins at #index,
-      // and answers "already within the running encode" — which is true about
-      // the index and false about the instant, and it is why the first version
-      // of this fix moved nothing at all.
+      // STOPPED, and its replacement is the plan's to place. What has been
+      // learned here is that this run is producing at the wrong instant, which
+      // nothing but the piece it produced could say — the plan reasons about
+      // numbers and cannot know it. So the fact is acted on where it is known,
+      // and only as far as it is known: the run that is wrong goes, the stretch
+      // it held returns to the map, and where the next one stands follows from
+      // where the viewers are.
       //
-      // The instant is passed EXPLICITLY. It used to be smuggled through the
-      // live boundary table — this function had just written `trueStart` into
-      // it, and the run read its position from there — which stopped working
-      // the moment a run began positioning itself on the table the player
-      // holds, as it now must. Smuggled, the restart would land exactly where
-      // it already was: picture and sound would stay apart and a healthy audio
-      // run would be discarded for nothing, which is the shape the field
-      // already showed (eleven restarts in four minutes, eight of them dying
-      // with `run had produced 0.0s`).
-      this.#startEncodeRun(member, index, trueStart);
+      // The corrected instant reaches that replacement through the live table,
+      // which this function has just written it into and which every session of
+      // the file shares. It used to be passed as an argument from here, so only
+      // a run started by this line ever had it.
+      this.#stopEncodeRun(member, `#${index} really begins ${(trueStart - wasAt).toFixed(3)}s later than the table said`);
     }
+    this.planEncodersSoon();
   }
 
   /**
@@ -7880,16 +7664,10 @@ export class HlsSessionManager {
    * @returns {void}
    */
   #stopEncodeRun(session, reason) {
-    // Everything armed to (re)start this session. A stop that leaves them
-    // running is not a stop: the input-retry timer fires seconds later and
-    // spawns a run for a variant nobody is watching — and torrent starvation,
-    // which is what arms it, is routine here. The seek settle timer does the
-    // same on a rapid second switch.
-    if (session.seekSettleTimer) {
-      clearTimeout(session.seekSettleTimer);
-      session.seekSettleTimer = null;
-    }
-    session.seekTarget = null;
+    // Everything armed to re-decide on this session's behalf. A stop that
+    // leaves the input-retry timer running is not a stop: it fires seconds
+    // later and has the plan asked again for a session nobody is watching, and
+    // torrent starvation, which is what arms it, is routine here.
     if (session.inputRetryTimer) {
       clearTimeout(session.inputRetryTimer);
       session.inputRetryTimer = null;
@@ -8309,16 +8087,20 @@ export class HlsSessionManager {
           .map((other) => other.id)
       );
       if (abandoned && !wantedIds.has(abandoned.id)) {
-        this.#stopEncodeRun(abandoned, "prepared for a track change the viewer did not make");
+        // They are not listening to it, so they stop watching it. Its encoder
+        // follows from that and is not commanded here: nobody left on an output
+        // is a map with nothing in it, and the plan stops what is on it.
+        this.#viewerLeaves(abandoned, consumerId);
       }
     }
     this.viewers.of(base, consumerId).warmingAudioId = rendition.id;
     // Being prepared for them is watching it: it is made for this viewer, and
     // when they leave it must be let go with everything else of theirs.
-    this.viewers.of(rendition, consumerId);
-    // Pointed at the position the switch will land on: an existing track is
-    // parked wherever the viewer left it.
-    this.#seekSession(rendition, positionSeconds);
+    // Where the switch will land. An existing track was left wherever the
+    // viewer last was on it; saying where they are now is the whole of pointing
+    // it there, because the encoder follows the person and not the request.
+    this.viewers.of(rendition, consumerId).moveTo(positionSeconds);
+    this.planEncodersSoon();
     const index = this.#segmentIndexForTime(rendition, positionSeconds);
     return { sessionId: rendition.id, fileName: rendition.segmentFormat.segmentFileName(index) };
   }
@@ -8350,7 +8132,7 @@ export class HlsSessionManager {
     if (stillWarming && stillWarming !== variant.id) {
       const abandoned = this.sessionsById.get(stillWarming);
       if (abandoned && !this.#variantsOnScreen(base).has(abandoned.id)) {
-        this.#stopEncodeRun(abandoned, "warmed for a switch the viewer did not make");
+        this.#viewerLeaves(abandoned, consumerId);
       }
     }
     // The base is not a rung being prepared for anybody — it is what the family
@@ -8370,8 +8152,14 @@ export class HlsSessionManager {
     // its encoder was stopped then. Measured 2026-08-12, warming 400p at
     // 6506.5s found the base still at `run from #0`, so the segment the switch
     // needed was never produced and the viewer got nothing at all.
+    // A rung that is not on their screen is parked where they last left it, so
+    // being warmed begins with saying where they are. Their being ON it is what
+    // buys it an encoder, and both halves are said here: a warmed rung is one
+    // this person is watching for as long as the warm-up lasts, which is why
+    // two encoders run through it.
     if (variant.id !== this.#activeVariant(base, consumerId).id) {
-      this.#seekSession(variant, this.#segmentStartTime(base, index));
+      this.viewers.of(variant, consumerId).moveTo(this.#segmentStartTime(base, index));
+      this.planEncodersSoon();
     }
     logger.info(
       `transcode ${base.id} warming ${height}p at ${positionSeconds.toFixed(1)}s (segment #${index})`
@@ -8416,7 +8204,7 @@ export class HlsSessionManager {
     if (warmed && warmed !== variant.id && warmed !== previous.id) {
       const abandoned = this.sessionsById.get(warmed);
       if (abandoned && !this.#variantsOnScreen(base).has(abandoned.id)) {
-        this.#stopEncodeRun(abandoned, "warmed for a switch the viewer did not make");
+        this.#viewerLeaves(abandoned, consumerId);
       }
     }
     const position = this.#variantStartSeconds(base, wantedIndex, consumerId);
@@ -8438,27 +8226,29 @@ export class HlsSessionManager {
       `(was ${this.liveOutputs.variantHeightOf(previous)}p) at ${position.toFixed(1)}s` +
       (consumerId ? ` for ${consumerId}` : "")
     );
-    // The rung being left is stopped only if it is nobody else's rung. Two
-    // viewers of one picture can be on two steps, and the one this viewer just
-    // left may be the one the other is watching — stopping it there would take
-    // away a stream that is playing, and answer 503 to every request held on it.
+    // Requests still held on the rung they came off are for segments nobody
+    // will produce now, and the player stopped waiting for them the moment it
+    // switched. Answering "retry" at once frees them instead of holding each for
+    // the full minute.
+    //
+    // WHETHER ITS ENCODER GOES ON IS NOT DECIDED HERE. It used to be stopped
+    // from this line whenever no viewer had it on screen — the plan, handed the
+    // whole film's priority map, wanted an encoder on every output of it and
+    // started one again on the very next pass, which this viewer's own move had
+    // just triggered. Each output is handed its own map now, so a rung nobody is
+    // on has nothing in it and the plan stops what is on it, once.
     if (!this.#variantsOnScreen(base).has(previous.id)) {
-      // Every request still held on the old rung is for a segment nobody will
-      // produce now — its encoder is about to be stopped — and the player has
-      // already stopped waiting for them. Answering "retry" at once frees them
-      // instead of holding each for the full minute.
       previous.waitEpoch = (previous.waitEpoch ?? 0) + 1;
-      this.#stopEncodeRun(previous, `no viewer is watching ${this.liveOutputs.variantHeightOf(previous)}p`);
     }
     if (position > 0) {
       variant.furthestViewerSeconds = position;
       // The rung being switched TO, named literally: a warm-up may have left
       // the family pointing elsewhere, and forwarding would move that one
-      // instead. A rung just created already starts here and is told so rather
-      // than restarted; one that existed before is parked where it was left,
-      // and this is what brings it to the viewer.
-      this.#seekSession(variant, position);
+      // instead. Saying where this person is on it is the whole of pointing its
+      // encoder there.
+      this.viewers.of(variant, consumerId).moveTo(position);
     }
+    this.planEncodersSoon();
   }
 
   /**
@@ -8675,9 +8465,11 @@ export class HlsSessionManager {
       other.waitEpoch = (other.waitEpoch ?? 0) + 1;
       // Nobody is listening to it any more: this viewer stops watching that
       // output, on both sides of the relation, and the claim their listening
-      // placed on it is released with them.
+      // placed on it is released with them. Its encoder follows from that —
+      // an output with nobody on it has a map with nothing in it — and was
+      // additionally stopped from here, which is the same decision taken twice
+      // by two parties with two rules.
       this.#viewerLeaves(other, consumerId);
-      this.#stopEncodeRun(other, `no viewer is listening to audio track ${other.audioTrackIndex ?? "?"}`);
     }
   }
 
@@ -9311,22 +9103,18 @@ export class HlsSessionManager {
           this.#segmentStartTime(session, requested)
         );
         session.lastRequestedSegment = furthest.segment;
-        // Where the viewer is, kept current. A reported seek is the only other
-        // source of it and playback never issues one, so a position recorded at
-        // a seek is stale for as long as the viewer then watches — and it is
-        // read when a quality change has to place the next variant's first
-        // encode run. The freshest evidence wins: a seek overwrites this, and
-        // the first request after the seek overwrites it back.
-        // A request refines this only FORWARD of what the viewer reported.
-        // Playback always moves forward from a seek, so nothing legitimate is
-        // lost — while a stale request from before the seek can no longer
-        // rewrite the viewer's own statement, which is what let the repair
-        // below drag the encoder backwards.
-        const requestedStart = furthest.seconds;
-        const reported = Number(session.viewerReportedSeconds);
-        if (!Number.isFinite(reported) || requestedStart >= reported) {
-          session.furthestViewerSeconds = requestedStart;
-        }
+        // Where the furthest viewer of this session is, kept current. It is a
+        // FALLBACK and nothing else: everything that asks where a viewer is
+        // takes that viewer's own head first, and this answers only for a
+        // reading about no particular person.
+        //
+        // It used to be guarded against moving backwards, by comparing against
+        // a second field a seek wrote — because a request behind the head could
+        // then drag the encoder there. Nothing does that any more: a request
+        // steers no encoder, and a viewer's own statement is kept on the viewer,
+        // where a request cannot reach it. The guard's field had no writer left,
+        // so the condition was inert.
+        session.furthestViewerSeconds = furthest.seconds;
         // A viewer who has caught up must not wait out the monitor's interval —
         // but only if they HAVE caught up, which is why this re-evaluates the
         // same condition instead of resuming outright.
@@ -9893,9 +9681,7 @@ export class HlsSessionManager {
         Number.isFinite(requestedIndex) &&
         requestedIndex < (earliestRunStart(session) ?? 0) &&
         nobodyIsComing &&
-        liveRunsOf(session).length > 0 &&
-        session.seekTarget == null &&
-        session.seekSettleTimer == null
+        liveRunsOf(session).length > 0
       ) {
         logger.info(
           `transcode ${session.id} segment #${requestedIndex} is ${(earliestRunStart(session) ?? 0) - requestedIndex} ` +
@@ -10310,12 +10096,6 @@ export class HlsSessionManager {
       session.releaseSource = null;
     }
 
-    // Clear any pending seek-settle timer so it cannot fire and restart a
-    // disposed session.
-    if (session.seekSettleTimer) {
-      clearTimeout(session.seekSettleTimer);
-      session.seekSettleTimer = null;
-    }
     if (session.inputRetryTimer) {
       clearTimeout(session.inputRetryTimer);
       session.inputRetryTimer = null;

@@ -138,6 +138,28 @@ export function publishedStartTime(timeline, index, segmentDurationSec) {
 }
 
 /**
+ * Where a segment REALLY begins, when a produced piece has said so.
+ *
+ * The live table is corrected as produced pieces reveal where a file's cuts
+ * truly are; the published one is what the player was told and may never move.
+ * Where the two disagree, the live table is a measurement and the published one
+ * a prediction — and this answers with the measurement, or with nothing when
+ * they agree or nothing has been measured.
+ *
+ * @param {object} timeline
+ * @param {number} index
+ * @returns {number | undefined}
+ */
+export function trueStartOf(timeline, index) {
+  const live = Array.isArray(timeline?.boundaries) ? timeline.boundaries : null;
+  const published = Array.isArray(timeline?.published) ? timeline.published : null;
+  if (!live || !published || index < 0 || index >= live.length || index >= published.length) {
+    return undefined;
+  }
+  return live[index] === published[index] ? undefined : live[index];
+}
+
+/**
  * The cut times to hand ffmpeg for a run that starts at `startIndex`.
  *
  * Two adjustments, both of which cost a broken session to learn:

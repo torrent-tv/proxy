@@ -63,7 +63,7 @@ export class EncodeOrchestrator {
    * @param {(address: string) => number} params.maxRunsFor - How many encoders
    *   this machine can afford on one output. The same arithmetic that decides
    *   the quality offer; measured per host, never chosen here.
-   * @param {(params: { address: string, from: number, to: number }) =>
+   * @param {(params: { address: string, from: number, to: number, because: string }) =>
    *   import("../encode/EncodeRun.js").EncodeRun} params.makeRun - Build a run
    *   for a stretch. What to read, what to map and how to cut belong to whoever
    *   knows the source.
@@ -512,7 +512,7 @@ export class EncodeOrchestrator {
     //
     // The run names itself: identity is a property of the thing, and two
     // places minting names is how one stops being unique.
-    const run = this.makeRun({ address, from, to });
+    const run = this.makeRun({ address, from, to, because });
     if (!run) {
       // A refusal, not a wait: no session serves this output, or this position
       // has failed to start too many times running.

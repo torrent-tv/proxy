@@ -25,6 +25,27 @@ import { fakeProcess as fakeEncoder, startRunOn } from "./helpers/encode-run.js"
 function encoding(session) {
   return [...(session?.runs ?? [])].some((run) => run.isAlive);
 }
+/**
+ * Whether anybody is still watching this output.
+ *
+ * WHAT REPLACED "ITS ENCODER WAS KILLED HERE". Leaving an output is a fact
+ * about a viewer; whether an encoder on it should go on running is the same
+ * question as where encoders belong, and one party answers that — an output
+ * with nobody on it has a priority map with nothing in it, and the plan stops
+ * what is on it (`encode-plan.test.js`, "every encoder stops when nobody is
+ * watching the output"; `priority-map-per-output.test.js` for the map).
+ *
+ * Answered here as well, the two fought: this class killed the run, and the
+ * viewer's own move — which announces itself — had the plan start it again on
+ * the very next pass, several times a second.
+ *
+ * @param {object} session
+ * @returns {boolean}
+ */
+function watched(session) {
+  return [...(session?.viewers ?? new Map()).values()].length > 0;
+}
+
 import assert from "node:assert/strict";
 import { SourceFile } from "../services/source/SourceFile.js";
 import { Timeline } from "../services/output/Timeline.js";
@@ -172,7 +193,7 @@ test("one viewer fetching their soundtrack does not stop the other viewer's", as
   }
 });
 
-test("a soundtrack nobody is listening to any more is stopped", async (t) => {
+test("a soundtrack nobody is listening to any more is let go of", async (t) => {
   const { manager, base, renditions, dirPath } = await pictureWithTwoViewers();
   t.after(async () => {
     await manager.disposeAll();
@@ -189,8 +210,13 @@ test("a soundtrack nobody is listening to any more is stopped", async (t) => {
 
   const left = renditions.get(audioRenditionKey(0, true));
   const moved = renditions.get(audioRenditionKey(1, true));
-  assert.equal(encoding(left), false, "the track the viewer left is not encoding for anybody");
-  assert.ok(encoding(moved), "the track they moved to is");
+  assert.equal(watched(left), false, "the track the viewer left is nobody's now");
+  assert.ok(watched(moved), "and the track they moved to is theirs");
+  assert.deepEqual(
+    [...left.runs][0]?.process?.signals ?? [],
+    [],
+    "and it is not killed from here, which is what the plan then undid"
+  );
 });
 
 test("each viewer's browser decides for itself whether its soundtrack is re-encoded", async (t) => {
@@ -275,9 +301,10 @@ test("one viewer changing quality does not take the other off their step", async
   // other viewer's is untouched.
   await manager.resolveVariantFile(BASE_ID, 480, "segment-00005.mp4", FIRST);
 
-  assert.equal(encoding(variants.get(720)), false, "the step nobody is on stops");
-  assert.ok(encoding(variants.get(540)), "the step the other viewer is watching does not");
-  assert.ok(encoding(variants.get(480)), "and the one they moved to is encoding");
+  assert.equal(watched(variants.get(720)), false, "the step nobody is on is nobody's");
+  assert.ok(watched(variants.get(540)), "the step the other viewer is watching stays theirs");
+  assert.ok(watched(variants.get(480)), "and the one they moved to is now theirs");
+  assert.ok(encoding(variants.get(540)), "and nothing here touched the other viewer's encoder");
 });
 
 test("a step somebody is watching is never withdrawn from the offer", async (t) => {
@@ -340,8 +367,8 @@ test("a viewer whose picture has gone quiet holds no soundtrack encoder", async 
   await manager.resolveAudioRenditionFile(BASE_ID, 1, "segment-00004.mp4", FIRST);
 
   assert.equal(
-    encoding(renditions.get(audioRenditionKey(0, true))),
+    watched(renditions.get(audioRenditionKey(0, true))),
     false,
-    "the first viewer moved on, so their old track is stopped"
+    "the first viewer moved on, so their old track is nobody's"
   );
 });

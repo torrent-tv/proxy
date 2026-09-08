@@ -143,3 +143,60 @@ test("what a model prices a film at", () => {
   // Which is a decode speed of 1/cost — the figure the quality offer rests on.
   assert.ok(1 / cost > 1 && 1 / cost < 10, `decodes at ${(1 / cost).toFixed(2)}x`);
 });
+
+/**
+ * THE ORDERINGS, STATED WHERE THEY ARE DETERMINISTIC.
+ *
+ * What the quality offer needs of this model is not precision but ORDER: a
+ * bigger, richer, dearer-to-decode source must never be priced cheaper, because
+ * the model is asked about rungs nobody has decoded. That is a property of the
+ * fit, and it is a property of the fit whatever machine runs the test.
+ *
+ * These three used to be asserted over LIVE readings — decode two clips through
+ * real ffmpeg and require the smaller to come back faster. That measures the
+ * scheduler, not the code: four failures in one day, and the worst of them read
+ * 480p at 8.4x against 1080p at 20.8x, an inversion of two and a half times
+ * with nothing wrong. The readings themselves are unavailable to a test at all,
+ * since a clip that "said nothing" under load makes the whole benchmark answer
+ * with nothing.
+ */
+
+test("a bigger picture is priced dearer than a smaller one of the same bitrate", () => {
+  const model = fitDecodeCost(wellConditionedSet({ pixel: 0.0055, bitrate: 0.0099, constant: 0.057 }));
+  const big = decodeCostOf(model, { megapixelsPerSecond: (1920 * 1080 * FPS) / 1e6, megabitsPerSecond: 4 });
+  const small = decodeCostOf(model, { megapixelsPerSecond: (854 * 480 * FPS) / 1e6, megabitsPerSecond: 4 });
+
+  assert.ok(big > small, `1080p at ${big.toFixed(4)} s/s against 480p at ${small.toFixed(4)}`);
+});
+
+test("a thicker stream is priced dearer than a thin one of the same size", () => {
+  const model = fitDecodeCost(wellConditionedSet({ pixel: 0.0055, bitrate: 0.0099, constant: 0.057 }));
+  const pixels = (854 * 480 * FPS) / 1e6;
+  const thick = decodeCostOf(model, { megapixelsPerSecond: pixels, megabitsPerSecond: 9.5 });
+  const thin = decodeCostOf(model, { megapixelsPerSecond: pixels, megabitsPerSecond: 1.1 });
+
+  assert.ok(thick > thin, `9.5 Mbit/s at ${thick.toFixed(4)} s/s against 1.1 at ${thin.toFixed(4)}`);
+});
+
+test("a family measured to be dearer prices its own sources dearer", () => {
+  // Why the model is fitted per codec family at all: HEVC costs more than H.264
+  // for the same picture on the same machine, so a source that has to be
+  // re-encoded — which is usually one the browser could not decode — must be
+  // priced by its own family and not by H.264's.
+  const cheap = { pixel: 0.0055, bitrate: 0.0099, constant: 0.057 };
+  const dear = { pixel: 0.011, bitrate: 0.0198, constant: 0.114 };
+  const model = {
+    ...fitDecodeCost(wellConditionedSet(cheap)),
+    families: {
+      h264: fitDecodeCost(wellConditionedSet(cheap)),
+      hevc: fitDecodeCost(wellConditionedSet(dear))
+    }
+  };
+  const source = { megapixelsPerSecond: (854 * 480 * FPS) / 1e6, megabitsPerSecond: 1.1 };
+
+  assert.ok(
+    decodeCostOf(model, { ...source, codec: "hevc" }) >
+      decodeCostOf(model, { ...source, codec: "h264" }),
+    "the family chooses the terms, and the dearer family answers dearer"
+  );
+});

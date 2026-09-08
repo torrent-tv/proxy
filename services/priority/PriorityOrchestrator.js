@@ -29,11 +29,37 @@ export class PriorityOrchestrator {
    * handed it. @type {Map<string, import("./PriorityMap.js").PriorityMap>} */
   #maps = new Map();
 
+  /**
+   * The last map built per OUTPUT, from the viewers of that output alone.
+   *
+   * The same fact answered at two scopes, because the two things that act on it
+   * ask at two scopes and both are right. The swarm is asked for bytes of a
+   * FILE, and the picture, a quality step and a soundtrack of one film read the
+   * same bytes — so every viewer of any of them wants that file's bytes.
+   * Encoders are placed per OUTPUT, and a person watching 480p wants nothing of
+   * the 1080p output at all.
+   *
+   * One map for both was the second authority over encoders. Every output of a
+   * film was handed the whole film's map, so the plan wanted an encoder on every
+   * one of them; what actually stopped the ones nobody was watching was the
+   * session manager killing them by its own judgement — and since a viewer
+   * moving between steps also announces itself, the plan started them again on
+   * the next pass. Two parties answering "should this encoder exist" by different
+   * rules, several times a second.
+   *
+   * @type {Map<string, import("./PriorityMap.js").PriorityMap>}
+   */
+  #byOutput = new Map();
+
   /** Who is watching one session. @type {(session: object) => Map<string, object>} */
   #viewersOf;
 
   /** How wide the first band of one session's file is. @type {(session: object) => number} */
   #allowanceFor;
+
+  /** Whether this output is what that person is consuming, as opposed to one
+   * they merely hold a record on. @type {(session: object, viewer: object) => boolean} */
+  #watchedBy;
 
   /**
    * This layer states facts and imports nothing above itself, so what it needs
@@ -45,11 +71,48 @@ export class PriorityOrchestrator {
    *   zones: { from: number, to: number, priority: number }[] }) => void} params.publish
    * @param {(session: object) => Map<string, object>} [params.viewersOf]
    * @param {(session: object) => number} [params.allowanceFor]
+   * @param {(session: object, viewer: object) => boolean} [params.watchedBy] -
+   *   Whether this output is the one that person is consuming. Which of a film's
+   *   outputs a person has on screen is a fact about the film's shape, which
+   *   this layer does not know; absent, every registered viewer counts, and then
+   *   the per-output map says the same as the per-file one.
    */
-  constructor({ publish, viewersOf, allowanceFor }) {
+  constructor({ publish, viewersOf, allowanceFor, watchedBy }) {
     this.#publish = typeof publish === "function" ? publish : () => {};
     this.#viewersOf = typeof viewersOf === "function" ? viewersOf : () => new Map();
     this.#allowanceFor = typeof allowanceFor === "function" ? allowanceFor : () => 0;
+    this.#watchedBy = typeof watchedBy === "function" ? watchedBy : () => true;
+  }
+
+  /**
+   * A map from a set of viewers, and the ONE statement of how one is built.
+   *
+   * Asked at both scopes — once per film for the swarm, once per output for the
+   * encoders — and written once, because two copies of how a viewer's map is
+   * built is the same two-owners fault this class was split for.
+   *
+   * @param {object} params
+   * @param {number} params.durationSeconds
+   * @param {number} params.allowanceSeconds
+   * @param {{ atSeconds: number, playing: boolean }[]} params.viewers
+   * @returns {import("./PriorityMap.js").PriorityMap} A map of no length where
+   *   nobody is watching or the film's length is unknown, which says the same as
+   *   a map with nothing in it.
+   */
+  #mapFrom({ durationSeconds, allowanceSeconds, viewers }) {
+    if (!(durationSeconds > 0) || !(viewers?.length > 0)) {
+      return emptyMap(0);
+    }
+    return mergeMaps(
+      viewers.map((viewer) =>
+        mapForViewer({
+          atSeconds: viewer.atSeconds,
+          durationSeconds,
+          allowanceSeconds,
+          playing: viewer.playing !== false
+        })
+      )
+    );
   }
 
   /**
@@ -66,16 +129,7 @@ export class PriorityOrchestrator {
    *   film, merged over everyone watching it.
    */
   build({ sourceKey, fileIndex, durationSeconds, allowanceSeconds, viewers }) {
-    const map = mergeMaps(
-      (viewers ?? []).map((viewer) =>
-        mapForViewer({
-          atSeconds: viewer.atSeconds,
-          durationSeconds,
-          allowanceSeconds,
-          playing: viewer.playing !== false
-        })
-      )
-    );
+    const map = this.#mapFrom({ durationSeconds, allowanceSeconds, viewers });
     const key = `${sourceKey}:${fileIndex}`;
     this.#maps.set(key, map);
     // Unchanged maps are not republished: the downloading rebuilds what it asks
@@ -109,30 +163,66 @@ export class PriorityOrchestrator {
   publishFor({ sessionGroups, staleAfterMs, now = Date.now() }) {
     /** @type {Map<string, { sourceKey: string, fileIndex: number, durationSeconds: number, allowanceSeconds: number, viewers: object[] }>} */
     const byFile = new Map();
+    /** @type {Map<string, { durationSeconds: number, allowanceSeconds: number, viewers: object[] }>} */
+    const byOutput = new Map();
     for (const sessions of sessionGroups) {
       for (const session of sessions) {
         const key = `${session.sourceKey}:${session.fileIndex}`;
+        const durationSeconds = Number(session.file?.durationSeconds) || 0;
+        // The first band is as wide as an interruption this file has actually
+        // shown on this swarm, never a chosen number.
+        const allowanceSeconds = this.#allowanceFor(session);
         let held = byFile.get(key);
         if (!held) {
           held = {
             sourceKey: session.sourceKey,
             fileIndex: session.fileIndex,
-            durationSeconds: Number(session.file?.durationSeconds) || 0,
-            // The first band is as wide as an interruption this file has
-            // actually shown on this swarm, never a chosen number.
-            allowanceSeconds: this.#allowanceFor(session),
+            durationSeconds,
+            allowanceSeconds,
             viewers: []
           };
           byFile.set(key, held);
         }
+        // Every output anybody holds a session for, whether or not a viewer is
+        // consuming it — an output with nobody on it must get a map with
+        // nothing in it, which is how the plan is told to stop its encoders.
+        // Left out, it would keep the map it had when somebody was watching.
+        const address = session.outputKey ?? "";
+        let mine = byOutput.get(address);
+        if (!mine) {
+          mine = { durationSeconds, allowanceSeconds, viewers: [] };
+          byOutput.set(address, mine);
+        }
         for (const viewer of this.#viewersOf(session).values()) {
-          if (viewer.isPresent(now, staleAfterMs)) {
-            held.viewers.push({
-              atSeconds: viewer.positionSeconds() ?? 0,
-              playing: viewer.playing !== false
-            });
+          if (!viewer.isPresent(now, staleAfterMs)) {
+            continue;
+          }
+          const stated = {
+            atSeconds: viewer.positionSeconds() ?? 0,
+            playing: viewer.playing !== false
+          };
+          held.viewers.push(stated);
+          if (this.#watchedBy(session, viewer)) {
+            mine.viewers.push(stated);
           }
         }
+      }
+    }
+    // WHAT THIS PASS SAW IS ALL THERE IS. Everything below is derived from the
+    // live sessions, so a file or an output that is not among them is gone —
+    // and these maps are the projection of that, never a memory of it. Left to
+    // accumulate they were three maps that only grew, which is the shape of half
+    // the memory faults recorded in this repository, and `forget` was written
+    // for it and called from nowhere.
+    for (const key of [...this.#maps.keys()]) {
+      if (!byFile.has(key)) {
+        this.#maps.delete(key);
+        this.#last.delete(key);
+      }
+    }
+    for (const address of [...this.#byOutput.keys()]) {
+      if (!byOutput.has(address)) {
+        this.#byOutput.delete(address);
       }
     }
     for (const one of byFile.values()) {
@@ -141,6 +231,9 @@ export class PriorityOrchestrator {
       if (one.durationSeconds > 0 && one.viewers.length > 0) {
         this.build(one);
       }
+    }
+    for (const [address, one] of byOutput) {
+      this.#byOutput.set(address, this.#mapFrom(one));
     }
   }
 
@@ -167,8 +260,19 @@ export class PriorityOrchestrator {
     return this.#maps.get(`${sourceKey}:${fileIndex}`) ?? emptyMap(0);
   }
 
-  forget(sourceKey, fileIndex) {
-    this.#last.delete(`${sourceKey}:${fileIndex}`);
-    this.#maps.delete(`${sourceKey}:${fileIndex}`);
+  /**
+   * The map for ONE output, from the viewers consuming that output.
+   *
+   * What the encoding reads. A map of no length says nobody is on this output,
+   * which is what makes an encoder on it unwanted — and it is a statement, not
+   * an absence: the walk above writes one for every output a session exists
+   * for, including the ones everybody has left.
+   *
+   * @param {string} address
+   * @returns {import("./PriorityMap.js").PriorityMap}
+   */
+  mapForOutput(address) {
+    return this.#byOutput.get(address) ?? emptyMap(0);
   }
+
 }

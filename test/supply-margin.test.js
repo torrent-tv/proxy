@@ -50,10 +50,22 @@ test("the margin is what the supply's own interruptions demand", () => {
   // derivation calls T: `(v - 1) x T > W` prices what is GAINED between
   // interruptions, and nothing is gained during one.
   assert.ok(Math.abs(answer.medianIntervalSec - 0.73) < 0.001, `got ${answer.medianIntervalSec}`);
-  // 1 + 3.16 / 0.73 = 5.33. Measuring end-to-end instead gave 2.42, and the
-  // symptom that this whole file was written against is that a step admitted at
-  // 1.5 ran at 1.05x and stalled — so the bar was too low, not too high.
-  assert.ok(Math.abs(answer.requiredSpeed - 5.3288) < 0.001, `got ${answer.requiredSpeed}`);
+  // THE SHARE OF ITS TIME THE SUPPLY LOST, over whole cycles: from the first
+  // interruption's start to the last one's, 12.77 s, of which 9.12 s was
+  // interruption. So the reading delivered for 3.65 s of every 12.77, and
+  // producing film at that share costs 1/(1 - 0.714) = 3.50x.
+  //
+  // The formula it replaced divided the WORST interruption by the TYPICAL gap —
+  // 1 + 3.16/0.73 = 5.33 — which asks what would happen if the worst recurred
+  // at the typical rate, a case that never occurred in this data, and which
+  // divides by a gap that goes to zero whenever interruptions arrive in a burst.
+  // Field 2026-09-08: 0.79 s over 0.01 s gave 158.60x on a file already
+  // downloaded whole, and every quality step was refused against it.
+  //
+  // The failure this file was written for is still caught: a step admitted at
+  // 1.5 ran at 1.05x and stalled, and 3.91x refuses 1.5 exactly as 5.33x did.
+  assert.ok(Math.abs(answer.lostShare - 0.7142) < 0.001, `got ${answer.lostShare}`);
+  assert.ok(Math.abs(answer.requiredSpeed - 3.4986) < 0.001, `got ${answer.requiredSpeed}`);
 });
 
 test("one stall seen by three readers is one interruption, not three", () => {
@@ -87,7 +99,11 @@ test("overlapping waits merge, and the gap between stalls is what is left", () =
   assert.equal(answer.waits, 4, "from four waits");
   assert.equal(answer.worstWaitSec, 10, "the merged stall, not one reader's view of it");
   assert.equal(answer.medianIntervalSec, 10, "20s to 30s is when the encoder ran");
-  assert.equal(answer.requiredSpeed, 2, "1 + 10/10");
+  // One whole cycle: 10 s to 30 s, of which the 10 s interruption is half. The
+  // supply delivered for the other half, so a step must run at twice realtime.
+  assert.equal(answer.spanSec, 20);
+  assert.equal(answer.lostSec, 10);
+  assert.equal(answer.requiredSpeed, 2);
 });
 
 test("a copy at 8x clears its own supply with room to spare", () => {
@@ -95,9 +111,10 @@ test("a copy at 8x clears its own supply with room to spare", () => {
   const waits = evenlySpaced(6, 15.5, 4.82);
   const answer = requiredSpeedFrom(waits);
   assert.ok(answer);
-  // Waits end 15.5 s apart and last 4.82 s, so the encoder runs 10.68 s between
-  // them: 1 + 4.82/10.68 = 1.45, against 8x measured. Which is why a copy is the
-  // step a stranded viewer is always able to return to.
+  // Waits end 15.5 s apart and last 4.82 s, so the supply delivers for 10.68 s
+  // of every 15.5: 0.311 of its time lost, and 1/(1 - 0.311) = 1.45 against the
+  // 8x measured. Which is why a copy is the step a stranded viewer is always
+  // able to return to.
   assert.ok(answer.requiredSpeed < 1.5, `got ${answer.requiredSpeed}`);
 });
 

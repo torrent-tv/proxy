@@ -199,7 +199,13 @@ export class PriorityOrchestrator {
           }
           const stated = {
             atSeconds: viewer.positionSeconds() ?? 0,
-            playing: viewer.playing !== false
+            // CONSUMING, not merely playing. A page that is not on screen has
+            // its timers throttled and asks for nothing, which is exactly what
+            // a viewer holding a full cushion looks like; the two are told
+            // apart on the page and folded into one question here.
+            playing: typeof viewer.consumesFilm === "function"
+              ? viewer.consumesFilm()
+              : viewer.playing !== false
           };
           held.viewers.push(stated);
           if (this.#watchedBy(session, viewer)) {

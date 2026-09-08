@@ -132,6 +132,21 @@ export class Viewer {
     // not moved takes two reports and lies whenever a browser holding a full
     // cushion goes quiet between segments, which it does.
     this.playing = true;
+    // Whether the page carrying this viewer is ON SCREEN, and whether the
+    // picture has been pulled out of it.
+    //
+    // Two facts, not one, and the second is why the first is not enough: a
+    // hidden tab has its timers throttled by the browser — 800 ms of event-loop
+    // lag measured in the field — so it asks for nothing and looks exactly like
+    // a viewer holding a full cushion. Delivery stood still for the last six
+    // minutes of the session of 2026-09-08 and nothing anywhere said the tab had
+    // gone away. But a picture in picture-in-picture is watched WHILE the tab is
+    // hidden, so hiding alone cannot mean "not watching".
+    //
+    // A page that says nothing is on screen, which is what every page meant
+    // before it could say otherwise.
+    this.onScreen = true;
+    this.inPictureInPicture = false;
     // Seconds of film held ahead of the picture, as the page last said.
     this.bufferedSeconds = null;
   }
@@ -173,9 +188,23 @@ export class Viewer {
    * @param {boolean} [report.playing] - Absent from a page that does not say;
    *   then the viewer counts as playing, which is what every page meant before
    *   it could say otherwise.
+   * @param {boolean} [report.onScreen] - Whether the page is visible, or the
+   *   picture is in picture-in-picture. Absent means on screen.
+   * @param {boolean} [report.inPictureInPicture] - Whether the picture has been
+   *   pulled out of the page, which is watching it with the tab hidden.
    * @param {number} [now]
    */
-  report({ linkMbps, bufferedAheadSec, positionSeconds = null, playing }, now = Date.now()) {
+  report(
+    {
+      linkMbps,
+      bufferedAheadSec,
+      positionSeconds = null,
+      playing,
+      onScreen,
+      inPictureInPicture
+    },
+    now = Date.now()
+  ) {
     this.netReport = {
       linkMbps,
       bufferedAheadSec,
@@ -185,6 +214,8 @@ export class Viewer {
     };
     this.bufferedSeconds = bufferedAheadSec;
     this.playing = playing === undefined ? true : Boolean(playing);
+    this.inPictureInPicture = inPictureInPicture === undefined ? false : Boolean(inPictureInPicture);
+    this.onScreen = onScreen === undefined ? true : Boolean(onScreen);
     if (Number.isFinite(positionSeconds) && positionSeconds >= 0) {
       this.moveTo(/** @type {number} */ (positionSeconds), now);
     }
@@ -228,6 +259,23 @@ export class Viewer {
    *   can produce. Derived from the cushion, never chosen here.
    * @returns {boolean}
    */
+  /**
+   * Whether this viewer is CONSUMING film.
+   *
+   * Two ways of not consuming, and neither is absence: the picture is stopped,
+   * or the page is not on screen. Both mean nothing in front of them ever falls
+   * due, so the work goes to whoever is watching — and both leave them a place
+   * in the priority map, because they are still there and will want it again.
+   *
+   * Picture-in-picture is watching with the tab hidden, and the page folds that
+   * into `onScreen` before it says it, so it needs no case of its own here.
+   *
+   * @returns {boolean}
+   */
+  consumesFilm() {
+    return this.playing !== false && this.onScreen !== false;
+  }
+
   isPresent(now, staleAfterMs) {
     if (this.gone) {
       return false;

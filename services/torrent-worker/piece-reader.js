@@ -243,7 +243,7 @@ const supplyReportedAt = new Map();
  * Record one interruption and, at most twice a minute, say what it implies.
  *
  * The two figures are the whole of roadmap item 3: the speed a step must
- * sustain to survive this supply (`1 + worst wait / median interval`), and the
+ * sustain to survive this supply (`1 / (1 - the share of time lost)`), and the
  * smallest buffer that hides an interruption from the viewer. Both are printed
  * before either is USED, so the field says whether the arithmetic describes
  * reality before anything is decided by it.
@@ -265,7 +265,7 @@ const supplyReportedAt = new Map();
  * @param {string} infoHash
  * @param {string} fileName
  * @param {number} segmentSeconds - The session's own segment duration.
- * @returns {{ requiredSpeed: number, worstWaitSec: number, medianIntervalSec: number, samples: number, minimumBufferSec: number } | null}
+ * @returns {{ requiredSpeed: number, worstWaitSec: number, medianIntervalSec: number, lostShare: number, spanSec: number, lostSec: number, samples: number, minimumBufferSec: number } | null}
  */
 export function supplyFiguresFor(infoHash, fileName, segmentSeconds) {
   const history = supplyWaits.get(`${infoHash ?? "?"}/${fileName ?? "?"}`);
@@ -502,8 +502,13 @@ function noteSupplyWait(key, label, waitedMs) {
     // several waits. Saying how many of each is what makes the figure readable;
     // reporting the waits alone made `2 measured` look like two interruptions
     // 3 ms apart, and the demanded speed came out at 4422x.
-    `to survive this swarm (worst stall ${demand.worstWaitSec.toFixed(2)}s, one every ` +
-    `${demand.medianIntervalSec.toFixed(2)}s of running, ${demand.samples} stall(s) ` +
+    // THE NUMBERS THE FIGURE IS MADE OF, so a wrong one can be seen to be wrong.
+    // The share of time lost is what the speed now comes from; the worst stall
+    // and the typical gap are printed beside it because they are what the
+    // cushion is sized by and what the old formula divided one by the other.
+    `to survive this swarm (lost ${demand.lostSec.toFixed(2)}s of ${demand.spanSec.toFixed(2)}s ` +
+    `= ${(demand.lostShare * 100).toFixed(1)}%, worst stall ${demand.worstWaitSec.toFixed(2)}s, ` +
+    `one every ${demand.medianIntervalSec.toFixed(2)}s of running, ${demand.samples} stall(s) ` +
     `from ${demand.waits} wait(s)) — ` +
     `and the smallest buffer that hides it is ${buffer ? buffer.seconds.toFixed(1) : "?"}s` +
     // What steering the blocked piece onto another peer bought, as the

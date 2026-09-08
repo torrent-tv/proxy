@@ -747,6 +747,11 @@ setInterval(() => {
         `piece-store "${stats.name.slice(0, 40)}" demand: ${demand.readers} reader(s) want ` +
         `${demand.unionPieces} piece(s) of ${demand.capacity} the store may hold ` +
         `(widest window ${demand.widestPieces})` +
+        // NAMED, because the count read as five encoders on a session that had
+        // two: a "reader" is whoever declared a range, and four of the five
+        // were zones of the priority map. Choosing between narrowing the
+        // windows and raising the allowance was guesswork without this.
+        ` [${demand.names.join(" ")}]` +
         (stats.evictedProtected > 0
           ? `; ${stats.evictedProtected} of ${stats.spills} eviction(s) took a piece a reader had declared`
           : "; no eviction has taken a declared piece") +

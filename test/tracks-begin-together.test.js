@@ -19,6 +19,7 @@ import { Timeline } from "../services/output/Timeline.js";
 import test from "node:test";
 
 import { HlsSessionManager } from "../services/hls-session-manager.js";
+import { trueStartOf } from "../services/encode/run-command.js";
 import { fmp4Format } from "../services/segment-formats/fmp4.js";
 import { ENCODE_RUN_STATE, INITIAL_RUN_STATE } from "../services/encode/encode-run-state.js";
 
@@ -108,20 +109,38 @@ test("a soundtrack follows the picture to the instant the picture really began",
     10.5,
     "and every member's table with it — one film, one table, nothing to keep in step"
   );
-  // A NEW run, not a seek. A seek decides by index, finds the soundtrack
-  // already begins at #2 and answers "already within the running encode" —
-  // true about the index, false about the instant. The first version of this
-  // fix did exactly that and moved nothing.
-  //
-  // The attempt is the evidence because it is what a run start claims before
-  // it awaits anything: the assertion then holds without the test needing a
-  // filesystem, a process, or a guess about how many ticks to wait for one.
-  assert.ok(
-    sound.pendingRun,
-    "the soundtrack's run must be started again, at the corrected time"
+  // THE RUN AT THE WRONG INSTANT IS STOPPED, and nothing here places its
+  // replacement. What has been learned is that this run is producing in the
+  // wrong place, which nothing but the piece it produced could say — the plan
+  // reasons about numbers and cannot know it. So the fact is acted on as far as
+  // it is known and no further: the run goes, the stretch it held returns to the
+  // map, and where the next one stands follows from where the viewers are.
+  assert.equal(runBefore.state, ENCODE_RUN_STATE.STOPPED, "the run in the wrong place goes");
+  assert.equal(sound.pendingRun, null, "and this path places nothing");
+  // The corrected instant reaches whatever the plan places there through the
+  // table, which every session of the file shares. It used to be passed as an
+  // argument from this one call site, so only a run started by that line ever
+  // had it — a run the plan placed at the same number landed apart again.
+  assert.equal(
+    trueStartOf(sound.timeline, 2),
+    10.5,
+    "the live table holds the measurement and the published one the prediction"
   );
-  assert.equal(sound.pendingRun.startIndex, 2);
-  assert.equal([...sound.runs][0], runBefore, "and the run in force is only replaced once one is built");
+});
+
+test("where a number really begins is answered only where it has been measured", () => {
+  const { sound } = familyAtBoundaryTwo();
+
+  assert.equal(
+    trueStartOf(sound.timeline, 2),
+    undefined,
+    "the two tables agree, so there is nothing measured to prefer"
+  );
+  sound.timeline.boundaries[2] = 10.5;
+  assert.equal(trueStartOf(sound.timeline, 2), 10.5);
+  assert.equal(trueStartOf(sound.timeline, 3), undefined, "and only about the number measured");
+  assert.equal(trueStartOf(sound.timeline, 99), undefined, "a number the file does not have");
+  assert.equal(trueStartOf(null, 0), undefined, "and no table at all");
 });
 
 test("a correction the table already holds moves nobody", () => {

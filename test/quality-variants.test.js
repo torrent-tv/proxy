@@ -78,11 +78,8 @@ function fakeSession({ id, encodeHeight, dirPath, transcodeVideo = true }) {
     // than once per session.
     output: new Output({ encodeWidth: 0, encodeHeight, outputFps: 24, softwarePreset: null, applyTonemap: false }),
     encodeRunGeneration: 0,
-    lastRestartAt: 0,
     failedStartAt: -1,
     failedStartCount: 0,
-    seekSettleTimer: null,
-    seekTarget: null,
     waitEpoch: 0,
     viewers: new Map(),
     usesExplicitCuts: false,
@@ -295,17 +292,26 @@ test("a segment request hands the encoder to the variant the viewer moved to", a
   assert.equal(served.sessionId, VARIANT_ID, "the file must be served from the variant, not the base");
   assert.equal(base.activeVariantId, VARIANT_ID, "the variant the viewer is watching is the active one");
   assert.equal(
-    encoder.signals.join(","),
-    "SIGTERM",
-    "the rung nobody is watching must not go on using the host's one encoder"
+    viewerOf(variant, "").positionSeconds(),
+    100,
+    "a segment request steers nothing, so where this person stands on the rung is stated outright — " +
+    "segment 25 of a four-second grid"
   );
-  assert.equal([...base.runs][0]?.process ?? null, null, "a deliberate stop must not read as a run that died");
+  // AND THE RUNG THEY CAME OFF IS PRODUCING FOR NOBODY, which is one fact and
+  // not an act. It used to be stopped from this path by hand, and the plan —
+  // handed the whole film's priority map — started it again on the very next
+  // pass, which this viewer's own move had just triggered.
   assert.equal(
-    variant.seekTarget,
-    24,
-    "a segment request steers nothing, so the variant has to be pointed at the viewer explicitly " +
-    "(one segment back, for the preceding keyframe)"
+    manager.liveOutputs.watchedBy(base, viewerOf(base, "")),
+    false,
+    "the picture they stepped off is nobody's now"
   );
+  assert.equal(
+    manager.liveOutputs.watchedBy(variant, viewerOf(variant, "")),
+    true,
+    "and the rung they moved to is theirs"
+  );
+  assert.deepEqual(encoder.signals, [], "stopping it is the plan's, from that fact, and not this path's");
 });
 
 test("a rung is placed where the player asked it for, not where the other rung had read to", async (t) => {
@@ -332,9 +338,10 @@ test("a rung is placed where the player asked it for, not where the other rung h
   await manager.resolveVariantFile(BASE_ID, 540, "segment-00056.mp4");
 
   assert.equal(
-    variant.seekTarget,
-    55,
-    "the segment the player asked this rung for is where it must begin (one back for the keyframe)"
+    viewerOf(variant, "").positionSeconds(),
+    224,
+    "the segment the player asked this rung for is where this person is — 56 on a four-second grid, " +
+    "not the read head fourteen segments further on"
   );
 });
 
@@ -359,7 +366,11 @@ test("warming a rung prepares it without taking the encoder from the one on scre
     { sessionId: VARIANT_ID, fileName: "segment-00060.mp4" },
     "the caller is told which segment to wait for — 240 s on a four-second grid"
   );
-  assert.equal(variant.seekTarget, 59, "the rung is pointed at the switch position, one back for the keyframe");
+  assert.equal(
+    viewerOf(variant, "").positionSeconds(),
+    240,
+    "the rung being warmed is told where this person is, which is what buys it an encoder"
+  );
   assert.equal(base.activeVariantId, undefined, "nothing has switched yet");
   assert.equal([...base.runs][0]?.process, encoder, "the picture on screen keeps its encoder until the player actually moves");
   assert.deepEqual(encoder.signals, [], "stopping it here is what would put the spinner back");
@@ -424,8 +435,6 @@ test("a rung warmed PAST the switch is repositioned, which is what warming late 
   await manager.prepareVariant(BASE_ID, 540, 300);
   startRunOn(variant, { from: 74, process: fakeEncoder() });
   variant.progress = { ...variant.progress, processedSeconds: 310 };
-  variant.seekTarget = null;
-  variant.seekSettleTimer = null;
 
   // hls.js still lands near the playhead, so the request is far BEHIND the
   // warmed run: the proxy reads it as a seek backwards and starts again, and
@@ -433,7 +442,11 @@ test("a rung warmed PAST the switch is repositioned, which is what warming late 
   // 2026-08-14 as 21.8 s of encoded output destroyed by the act of using it.
   await manager.resolveVariantFile(BASE_ID, 540, "segment-00061.mp4");
 
-  assert.equal(variant.seekTarget, 60, "the run is moved back to where the player actually asked");
+  assert.equal(
+    viewerOf(variant, "").positionSeconds(),
+    244,
+    "where the player actually asked, not where the warm-up had run to"
+  );
 });
 
 test("the rung on screen fetching its own segments does not cancel a warm-up", async (t) => {
@@ -492,9 +505,9 @@ test("warming the height the base itself serves still points it at the switch", 
   // 400 s falls on the boundary between #99 and #100, and a run starts one
   // segment back so the player has the preceding keyframe.
   assert.equal(
-    base.seekTarget,
-    98,
-    "the base is parked at the start, so warming its height must reposition it like any other rung"
+    viewerOf(base, "").positionSeconds(),
+    396,
+    "the base is parked where they left it, so warming its height says where they are like any other rung"
   );
 });
 
@@ -929,9 +942,9 @@ test("an audio track is prepared at the position the switch will land on", async
     "the caller is told which segment to wait for — 240 s on a four-second grid"
   );
   assert.equal(
-    rendition.seekTarget,
-    59,
-    "and the track is pointed at the switch position, one back for the preceding keyframe"
+    viewerOf(rendition, "").positionSeconds(),
+    240,
+    "and the track is told where this person is, which is what the switch will land on"
   );
 });
 

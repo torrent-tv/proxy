@@ -24,6 +24,25 @@ import { SharedPieceStore } from "../services/piece-store/shared-piece-store.js"
 const PIECE = 1024;
 
 /**
+ * Wait for the thing being asserted, not for a length of time.
+ *
+ * @param {() => boolean} until
+ * @param {string} what - Named in the failure, since a timeout otherwise says
+ *   only that something did not happen.
+ * @param {number} [limit]
+ * @returns {Promise<void>}
+ */
+async function waitFor(until, what, limit = 10_000) {
+  const deadline = Date.now() + limit;
+  while (!until()) {
+    if (Date.now() > deadline) {
+      throw new Error(`${what} never happened`);
+    }
+    await new Promise((resolve) => { setTimeout(resolve, 5); });
+  }
+}
+
+/**
  * A disk that answers only when the test lets it, so writes can be made slower
  * than arrivals on purpose — which is the whole of the field condition.
  */
@@ -85,8 +104,19 @@ test("memory in use never runs past the allowance while the disk is behind", asy
     for (let index = capacity; index < capacity + 40; index += 1) {
       arrivals.push(put(store, index).catch(() => undefined));
     }
-    // Let them get as far as they can with the disk answering nothing.
-    await new Promise((resolve) => setTimeout(resolve, 200));
+    // Until the state being asserted has been reached: a write is outstanding
+    // and admission has waited for the disk rather than evicting. Waited out as
+    // 200 ms instead, this asserted how far the arrivals had got in that time —
+    // and on a machine slow enough that none of them reached a disk write, both
+    // of those figures are zero and the test fails with nothing wrong.
+    //
+    // The bound below is what the wait must NOT decide, so it is checked after
+    // the state is reached rather than after an interval: the store may never
+    // hold more blocks than it is allowed, however many arrivals are in flight.
+    await waitFor(() => {
+      const now = store.stats();
+      return now.blocksInFlight > 0 && now.waitedForDisk > 0;
+    }, "a held write and an admission that waited for it");
 
     const held = store.stats();
     // The check the field failure would fail: a store allowed four pieces held

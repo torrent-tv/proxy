@@ -79,7 +79,13 @@ test("the read goes on after the budget, so the next session of the file gets th
   assert.equal(first.arrived, false);
 
   answerLate({ times: [0, 5, 10], tolerance: 0, format: "matroska" });
-  await new Promise((resolve) => setTimeout(resolve, 10));
+  // Every microtask this resolution queues, and not a chosen ten milliseconds.
+  // `setImmediate` runs after the whole microtask queue of this turn, so the
+  // answer has been taken in by the time it fires — where the ten milliseconds
+  // were a guess about how long that takes on whatever machine is running.
+  // Asking the reader again instead would have counted as another read, which
+  // is the very thing the last assertion here is about.
+  await new Promise((resolve) => { setImmediate(resolve); });
 
   const second = await sessions.readKeyframeTableWithin(FILE);
   assert.deepEqual(second.times, [0, 5, 10], "the late answer was kept, not thrown away");

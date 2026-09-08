@@ -82,7 +82,6 @@ function fakeSession({ id, dirPath, file, encodeHeight = 0, audioOnly = false, i
       applyTonemap: false
     }),
     encodeRunGeneration: 0,
-    lastRestartAt: 0,
     failedStartAt: -1,
     failedStartCount: 0,
     seekSettleTimer: null,

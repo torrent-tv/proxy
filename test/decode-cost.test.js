@@ -6,10 +6,19 @@
  * claiming the host cleared the bar 2.5 times over — the error on that rung was
  * 209 %. The decode term brings a controlled measurement to within 5 %.
  *
- * The first test runs the real benchmark against the shipped clips with the
- * real ffmpeg, because a fit that only ever runs against invented numbers can
- * be wrong in every way that matters (2.9.124: a module tested only through its
- * own exports missed the caller that never called it).
+ * WHAT IS ASSERTED HERE IS ARITHMETIC, over constants that were measured once
+ * on the addon host and written down. The live benchmark used to run here too —
+ * on the reasoning that a fit which only ever meets invented numbers can be
+ * wrong in every way that matters — and it could not be asserted about: a clip
+ * that "said nothing" under load makes the whole benchmark answer with nothing,
+ * so the very first line of that test failed by luck. The orderings it was for
+ * are held over the fit itself, deterministically, in `decode-cost-fit.test.js`.
+ *
+ * What no test covers as a result is the live path — lifting a clip out of its
+ * container, feeding it through the pipe, reading the slope. That is integration
+ * over real ffmpeg, and it belongs to a stand run before a release rather than
+ * to a check that measures whatever else the machine was doing (roadmap item
+ * 52).
  */
 
 import test from "node:test";
@@ -23,7 +32,6 @@ import { Output } from "../services/output/Output.js";
 import os from "node:os";
 import path from "node:path";
 import {
-  benchmarkDecodeCost,
   canSustainOutput,
   decodeSpeedFor,
   predictedRealtimeSpeed,
@@ -44,37 +52,6 @@ const CALIBRATION_DIR = path.join(import.meta.dirname, "..", "assets", "calibrat
 const ADDON_HOST_MODEL = { pixelTerm: 0.005555, bitrateTerm: 0.00990, constantTerm: 0.0572 };
 // The film measured that day: 1920x1080 at 24 fps, about 8 Mbit/s.
 const MEASURED_FILM = { megapixelsPerSecond: (1920 * 1080 * 24) / 1e6, megabitsPerSecond: 8 };
-
-test("the fit comes out of the real clips, and predicts one of them back", async () => {
-  const model = await benchmarkDecodeCost({ ffmpegBin });
-
-  assert.ok(model, "the clips ship with the package and this host has ffmpeg");
-  assert.ok(model.pixelTerm > 0, "more pixels cannot decode faster");
-  assert.ok(Number.isFinite(model.bitrateTerm) && Number.isFinite(model.constantTerm));
-
-  // What the model must get right is how cost SCALES from one source to
-  // another — that is the whole of its job, since it is asked about rungs
-  // nobody has decoded. So: a bigger, richer source is never cheaper.
-  //
-  // Deliberately not a numeric bound. This suite runs its files in parallel and
-  // the benchmark is a live measurement, so the fit it produces depends on what
-  // else the machine was doing: on this desktop the same clips have solved to
-  // pixels+bitrate+constant, to pixels alone, and — under load — to a
-  // constant-dominated shape whose 720p/1080p ratio was 1.32 rather than the
-  // ~2.4 of a quiet run. That instability is real and is recorded against
-  // roadmap item 1; pinning a number here would only pin how busy the machine
-  // happened to be. What the FIGURES are worth is checked where it is quiet:
-  // against the addon host's recorded constants below, and against the real
-  // film in the field.
-  const clip720 = { megapixelsPerSecond: (1280 * 720 * 24) / 1e6, megabitsPerSecond: 2.248 };
-  const clip1080 = { megapixelsPerSecond: (1920 * 1080 * 24) / 1e6, megabitsPerSecond: 11.375 };
-  const ratio = decodeSpeedFor(model, clip720) / decodeSpeedFor(model, clip1080);
-
-  assert.ok(
-    ratio >= 1,
-    `720p at a fifth of the bitrate cannot decode slower than 1080p; the fit says ${ratio.toFixed(2)}x`
-  );
-});
 
 test("decode cost prices the film it was checked against", () => {
   const speed = decodeSpeedFor(ADDON_HOST_MODEL, MEASURED_FILM);

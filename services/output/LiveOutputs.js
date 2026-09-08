@@ -126,6 +126,55 @@ export class LiveOutputs {
   }
 
   /**
+   * Whether this output is the one that person is CONSUMING.
+   *
+   * A person holds a record on more outputs than they are watching, and the two
+   * are different facts. The picture is where their record lives — the browser
+   * addresses it, their chosen soundtrack is written on it, their position is
+   * read from it — so they never stop being known to it; but the moment they
+   * step down to 480p, the 1080p output is producing for nobody.
+   *
+   * Which is why this exists and why it is here. It is asked when the priority
+   * map of one output is built, and it decides whether an encoder on that output
+   * is wanted at all. Without it every output of a film was handed the film's
+   * whole map: the plan wanted an encoder on each, the session manager killed
+   * the ones it judged unwatched, and the viewer's own move announced itself and
+   * started them again — the two authorities of 2026-09-08.
+   *
+   * The viewer arrives as PLAIN FIELDS. This layer knows the shape of a film — a
+   * picture, its steps, its soundtracks — and the viewer layer knows where a
+   * person stands; neither holds the other.
+   *
+   * STATED AS A REFUSAL, and deliberately only where the refusal is certain.
+   * Being known to an output is watching it everywhere except one case, because
+   * everywhere else a person who stops watching is let go of: a soundtrack
+   * nobody chose, a step nobody is on. The exception is the picture itself,
+   * which they are never let go of — and which therefore had no way at all of
+   * knowing it was producing for nobody.
+   *
+   * So a step, a soundtrack, a step being warmed, a step whose init has just
+   * been asked for: all watched, as before. The picture: watched unless this
+   * person is on a step of it.
+   *
+   * @param {object} session
+   * @param {{ activeVariantId?: string | null, warmingVariantId?: string | null }} viewer
+   * @returns {boolean}
+   */
+  watchedBy(session, viewer) {
+    if (!session || !viewer) {
+      return false;
+    }
+    if (session.isStep === true || session.audioOnly === true) {
+      return true;
+    }
+    // The picture. A step of it on their screen is a statement that they are
+    // not looking at this; a step merely being made ready for them is not, and
+    // during a warm-up both are genuinely being produced.
+    const step = viewer.activeVariantId ?? null;
+    return step === null || step === session.id;
+  }
+
+  /**
    * Which variant a session IS, as a height. Zero encode height means "keep the
    * source", so the source's own height is the answer.
    *

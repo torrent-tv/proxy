@@ -102,6 +102,11 @@
  *   measured on this host from its own runs. Zero until something has measured
  *   it, which makes moving one look cheaper than it is and is said here so the
  *   bias is known.
+ * @param {number} [params.moveCostSec] - What moving a running encoder costs on
+ *   this host, measured. `Infinity` until something has been measured, because a
+ *   move is irreversible and leaving the encoder alone is always available.
+ * @param {number} [params.now] - The clock, injected. This layer is arithmetic
+ *   and reads no clock of its own; how old a run is is one of its inputs.
  * @param {number} [params.firstByteWaitSec] - How long a fresh encoder takes to
  *   produce anything: process start, opening the input, and the first piece.
  *   Measured the same way. It replaced a constant of 0.12 s taken from one
@@ -123,6 +128,8 @@ export function planEncoders({
   segmentSeconds,
   killCostSec = 0,
   firstByteWaitSec = 0,
+  moveCostSec = Number.POSITIVE_INFINITY,
+  now = Date.now(),
   refetchSecPerFilmSecond = 0,
   contentionPenaltyFor = () => 1,
   speedX = 0
@@ -164,7 +171,38 @@ export function planEncoders({
   // its death, the start of another, and the wait for the first bytes there.
   // Taking an encoder somewhere else is stopping this one and waiting for the
   // next to produce. Both halves are measured on this host.
-  const moveSec = killCostSec + firstByteWaitSec;
+  // WHAT A MOVE COSTS. Killing an encoder and waiting for a fresh one's first
+  // piece is the price; until something has produced anything on this host that
+  // price is unknown, and a move is then refused rather than priced at zero.
+  // Placing one where there is none is the other question and takes the unknown
+  // the other way — see `run-costs.js`.
+  const moveSec = Number.isFinite(moveCostSec) ? moveCostSec : killCostSec + firstByteWaitSec;
+
+  // WHAT A RUN STILL HAS TO GO BEFORE IT PRODUCES ANYTHING — the measured time
+  // to a first piece, less the time it has already been alive.
+  //
+  // This is the memory the score was missing. It is computed afresh whenever
+  // anything changes, and every arrangement used to be priced as though it were
+  // the last decision anybody would take: a run that started 10 ms ago was
+  // assumed to produce instantly, so killing it and starting another looked like
+  // a straight gain. A move is justified by a benefit that arrives when the
+  // moved run produces something; taken again before it has, the benefit is
+  // never collected and the cost is paid twice, three times, forty times.
+  //
+  // A run 0.8 s old has 0.14 s left to go against 0.94 s to move it, so it is
+  // left alone; one working for half a minute has nothing left, and a move
+  // happens exactly when the film it would reach sooner is worth the restart. No
+  // state to keep and nothing to choose: one measured figure minus elapsed time.
+  const remainingWarmOf = (run) => {
+    if (Number(run.head) !== Number(run.from)) {
+      return 0; // it has produced something, so its warm-up is spent
+    }
+    const startedAt = Number(run.startedAt);
+    if (!Number.isFinite(startedAt) || startedAt <= 0) {
+      return firstByteWaitSec; // not started yet, so all of it is ahead
+    }
+    return Math.max(0, firstByteWaitSec - (now - startedAt) / 1000);
+  };
 
   // ------------------------------------------------------------------ WHERE
   //
@@ -228,6 +266,28 @@ export function planEncoders({
         if (arrangement.used.has(run)) {
           continue;
         }
+        // A LIVE RUN IS NEVER TAKEN FOR RESIDUAL WORK.
+        //
+        // A zone that states no deadline has nobody waiting in it: it is the
+        // film behind the viewers, kept in case somebody seeks back, and it is
+        // done with capacity that is left over. A run already standing in front
+        // of a viewer is not left over — taking it there means killing it, and
+        // the viewer it was serving waits out a cold start for film nobody had
+        // asked for.
+        //
+        // Field 2026-09-08: on a host affording three runs, one viewer got
+        // three. Two of them came from this residual capacity, and the third was
+        // the run serving the viewer, taken to #30 in the middle of the film
+        // they had already watched. Reaching that film took the third term from
+        // "never" — the film's own length, 2024 s — to a real figure, which
+        // outvotes any price a move can carry. It must not be able to outvote
+        // it, and the reason is not arithmetic: nobody is waiting there.
+        //
+        // Read off the map, which is the one thing that states it. Nothing here
+        // knows that a viewer exists.
+        if (!Number.isFinite(untilNeeded(positions[index]))) {
+          continue;
+        }
         next.push({
           fill: [...arrangement.fill, run],
           used: new Set([...arrangement.used, run]),
@@ -254,7 +314,7 @@ export function planEncoders({
       const head = Number(filler.head);
       bodies.push({
         at: positions[index],
-        delaySec: head === positions[index] ? 0 : moveSec
+        delaySec: head === positions[index] ? remainingWarmOf(filler) : moveSec
       });
     }
     // Bodies nobody was given a position for go on working where they stand,
@@ -273,10 +333,20 @@ export function planEncoders({
       const cutInFront = arrangement.fill.some((filler, index) =>
         filler !== null && positions[index] > head
         && (endless || positions[index] <= Number(run.to)));
-      bodies.push({ at: head, delaySec: cutInFront ? moveSec : 0 });
+      bodies.push({ at: head, delaySec: cutInFront ? moveSec : remainingWarmOf(run) });
     }
     const scored = latenessOf(bodies, coverage, wanted, untilNeeded, rate / contentionPenaltyFor(Math.max(0, bodies.length - 1)), refetchPerSegment, segmentSeconds);
-    if (bestScore === null || cheaperThan(scored, bestScore)) {
+    // WHETHER THIS ARRANGEMENT KILLS A RUNNING ENCODER, which is what has to pay
+    // for itself. An arrangement that leaves every live run where it stands owes
+    // nothing; one that takes a run somewhere else has to be better by what the
+    // taking costs.
+    const disturbs = live.some((run) => {
+      const at = arrangement.used.has(run)
+        ? positions[arrangement.fill.indexOf(run)]
+        : Number(run.head);
+      return at !== Number(run.head);
+    });
+    if (bestScore === null || cheaperThan(scored, bestScore, disturbs ? moveSec : 0)) {
       bestScore = scored;
       best = arrangement;
     }
@@ -309,7 +379,7 @@ export function planEncoders({
       }
       const at = override.has(run) ? override.get(run) : (placement.get(run) ?? Number(run.head));
       const head = Number(run.head);
-      bodies.push({ at, delaySec: at === head ? 0 : moveSec });
+      bodies.push({ at, delaySec: at === head ? remainingWarmOf(run) : moveSec });
     }
     for (let index = 0; index < positions.length; index += 1) {
       if ((best ? best.fill[index] : null) === "new") {
@@ -333,7 +403,7 @@ export function planEncoders({
     }
     const asIs = scoreOf(new Map());
     const moved = scoreOf(new Map([[run, gap]]));
-    if (cheaperThan(moved, asIs)) {
+    if (cheaperThan(moved, asIs, moveSec)) {
       placement.set(run, gap);
     }
   }
@@ -566,19 +636,33 @@ function latenessOf(bodies, coverage, wanted, untilNeeded, rate, refetchSecPerSe
   // had nothing to compare, and the encoder was free to wander to the start of
   // the file. Which side a stretch is on and how soon it is wanted are two
   // different facts, and the map states both.
-  const isBehind = (at) => {
-    let behind = false;
+  // WHAT RANK THE MAP GIVES THIS NUMBER — the highest, where zones overlap,
+  // because a number two viewers want is wanted as much as the more urgent of
+  // them wants it.
+  //
+  // This replaced a boolean, "is it behind everybody", and the boolean was the
+  // whole of what the objective knew about the map's own order. The map states
+  // ten ranks on a film — p100 at the number a viewer is stopped on, doubling
+  // zones down to p91 for the far tail, p1 for what lies behind them — and all
+  // of that was collapsed into two buckets and then converted to seconds, where
+  // "never" for the film behind is the film's own length. On a 48-minute file
+  // that is 2024 s, which outvotes everything: field 2026-09-08, one viewer got
+  // three encoders, two of them on film behind them, and the run serving them
+  // was killed to make room for one.
+  const rankAt = (at) => {
+    let rank = 0;
     for (const span of wanted) {
-      if (at < span.from || at > span.to) {
-        continue;
+      if (at >= span.from && at <= span.to) {
+        rank = Math.max(rank, Number(span.priority) || 0);
       }
-      if (span.behind !== true) {
-        return false;
-      }
-      behind = true;
     }
-    return behind;
+    return rank;
   };
+  // The ranks the map actually states, most urgent first. The comparison is over
+  // these and nothing else, so a rank can never be outvoted by a lower one
+  // however many seconds are at stake there.
+  const ranks = [...new Set(wanted.map((span) => Number(span.priority) || 0))]
+    .sort((left, right) => right - left);
 
   // EVERY COUNT IS OVER THE FILM, NOT OVER THE ENCODERS. When a piece is made
   // depends on which encoder reaches it soonest, and the encoder that reaches
@@ -604,10 +688,11 @@ function latenessOf(bodies, coverage, wanted, untilNeeded, rate, refetchSecPerSe
   // clock forward makes that trade impossible: abandoning the near film delays
   // the far film by at least as much.
   let stalled = 0;
-  let tardiness = 0;
-  let aheadDone = 0;
-  let behindDone = 0;
   let wastedSwarm = 0;
+  /** Seconds anybody waits past a deadline, per rank. @type {Map<number, number>} */
+  const lateAt = new Map(ranks.map((rank) => [rank, 0]));
+  /** When the last number of a rank is made, per rank. @type {Map<number, number>} */
+  const doneAt = new Map(ranks.map((rank) => [rank, 0]));
   for (let index = first; index <= last; index += 1) {
     // Which encoder gets to this piece first, and when. One standing on it is
     // already there; one behind it must work its way up, re-making anything
@@ -643,30 +728,39 @@ function latenessOf(bodies, coverage, wanted, untilNeeded, rate, refetchSecPerSe
     // total on a host whose startup measured nothing at all, where every arrival
     // is beyond reckoning and every arrangement is therefore equally hopeless.
     const when = byWhom === null ? never : Math.min(soonest, never);
-    if (isBehind(index)) {
-      behindDone = Math.max(behindDone, when);
-    } else {
-      aheadDone = Math.max(aheadDone, when);
-    }
+    const rank = rankAt(index);
+    doneAt.set(rank, Math.max(doneAt.get(rank) ?? 0, when));
     const deadline = untilNeeded(index);
     if (Number.isFinite(deadline)) {
       const due = deadline + stalled;
       const waited = Math.max(0, when - due);
-      tardiness += waited;
+      lateAt.set(rank, (lateAt.get(rank) ?? 0) + waited);
       stalled += waited;
     }
   }
 
   return {
-    // 1. SECONDS ANYBODY SPENDS LOOKING AT A SPINNER. Nothing outranks it.
-    stall: tardiness,
-    // 2. WHEN THE FILM IN FRONT OF THEM IS DONE — the last piece of it to be
-    //    made, whichever encoder makes it. Film nobody reaches counts as never,
-    //    which is what stops the front being abandoned.
-    ahead: aheadDone,
-    // 3. WHEN THE WHOLE FILE IS DONE — the film behind included, and the swarm's
-    //    price for anything fetched twice, which delays everything.
-    whole: Math.max(aheadDone, behindDone) + wastedSwarm
+    // THE MAP'S OWN ORDER, AS A VECTOR. One pair per rank the map states, most
+    // urgent rank first: how long anybody waits at that rank, then when the last
+    // number of it is made.
+    //
+    // Compared position by position, so a rank is never outvoted by a lower one
+    // — which is the whole of what was asked for: nobody stares at a spinner;
+    // then the film in front of the viewers is encoded as fast as it can be, band
+    // by band as the map ranks them; then, with whatever is left over and only
+    // then, the film behind them, in case somebody seeks back.
+    //
+    // No weights, and none possible: a weight would let seconds at one rank buy
+    // seconds at another, and it would be a number nobody measured. The map is
+    // the source of truth about what matters, and it already says so.
+    byRank: ranks.flatMap((rank) => [lateAt.get(rank) ?? 0, doneAt.get(rank) ?? 0]),
+    // HOW MANY ENCODERS IT TAKES. Ranked below every rank of the map and above
+    // the swarm's bill, so it cannot buy one where the map is indifferent — and
+    // the map IS indifferent about spare capacity, which is what bought an
+    // encoder for film nobody waits for.
+    bodies: bodies.length,
+    // WHAT THE SWARM PAYS for anything fetched twice, which delays everything.
+    wasted: wastedSwarm
   };
 }
 
@@ -686,14 +780,44 @@ function latenessOf(bodies, coverage, wanted, untilNeeded, rate, refetchSecPerSe
  * @param {{ stall: number, ahead: number, whole: number }} right
  * @returns {boolean}
  */
-function cheaperThan(left, right) {
-  if (left.stall !== right.stall) {
-    return left.stall < right.stall;
+function cheaperThan(left, right, byAtLeast = 0) {
+  // POSITION BY POSITION, in the map's own order of ranks. A difference at a
+  // higher rank settles it, and nothing at a lower one can reopen it.
+  //
+  // `byAtLeast` is what an ACT has to pay for itself. Where the left side is
+  // only reachable by killing a running encoder, a gain smaller than what that
+  // killing costs is not a gain: the arithmetic says the film arrives sooner,
+  // and the machine says a process died for it.
+  //
+  // Field 2026-09-08, and it is worth the exact numbers because they are so
+  // close. A run standing at #58 with the viewer's zone at #59..#60: driving
+  // there means making TWO pieces, 1.89 s at 4.45x on a 4.2 s grid, while
+  // moving means a cold start and ONE piece, 0.94 + 0.94 = 1.88 s. The move is
+  // faster — by ten milliseconds. Every one of 39 moves in that session was
+  // individually correct by this arithmetic, 24 of them between three adjacent
+  // numbers, and the viewer's picture stood still for 116.7 s.
+  //
+  // The margin is measured, never chosen: it is the cost of the act itself, and
+  // an act that does not repay its own cost is not worth taking. It is also
+  // wider than the spread of the figures the comparison is made of, which are
+  // medians of recent runs — so a difference smaller than it is not a difference
+  // this model can see.
+  const size = Math.max(left.byRank.length, right.byRank.length);
+  for (let index = 0; index < size; index += 1) {
+    const here = left.byRank[index] ?? 0;
+    const there = right.byRank[index] ?? 0;
+    if (here !== there) {
+      return here + byAtLeast < there;
+    }
   }
-  if (left.ahead !== right.ahead) {
-    return left.ahead < right.ahead;
+  // Where every rank is served identically, fewer encoders. This is what stops
+  // spare capacity buying one: the map is indifferent, so the machine decides,
+  // and a process, a reader of the piece store and the swarm's bandwidth are all
+  // paid by the viewers the ranks above are about.
+  if (left.bodies !== right.bodies) {
+    return left.bodies < right.bodies;
   }
-  return left.whole < right.whole;
+  return left.wasted < right.wasted;
 }
 
 /**
@@ -742,7 +866,24 @@ function deadlineReaderFor(windows, segmentSeconds) {
       // same as a stated one — read as due all at once instead, a window as wide
       // as a viewer's cushion demanded its far end instantly and bought an
       // encoder to stand beside one already working.
-      const within = stated === undefined ? 0 : Number(stated);
+      // `null` IS A STATEMENT AND IT SAYS NOBODY IS COMING. `undefined` is the
+      // absence of one, and a caller that knows only a position is somebody
+      // waiting at it.
+      //
+      // Read through `Number()`, `null` becomes 0 — due NOW — so the film BEHIND
+      // the viewers, which the map marks with exactly that, was the most urgent
+      // material in the file. Everything followed from it: it bought encoders,
+      // it took the run standing in front of the viewer because that run was the
+      // nearest body to it, and it did so again on every pass. Field 2026-09-08:
+      // 39 moves in one session, 24 between three adjacent numbers, one viewer
+      // on three encoders, and the picture stood still for 116.7 s in three
+      // interruptions, the worst of them 91.8 s.
+      //
+      // The map has always said it plainly — `{"from":0,"to":57,"priority":1,
+      // "withinSeconds":null,"behind":true}` is in the log of every session — and
+      // this line turned it into its opposite. Fourth time in this repository
+      // that the input to a calculation was not what the calculation assumed.
+      const within = stated === undefined ? 0 : (stated === null ? Number.NaN : Number(stated));
       if (!Number.isFinite(within)) {
         // Stated as no time at all: nobody is coming here.
         continue;

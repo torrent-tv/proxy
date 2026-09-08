@@ -110,8 +110,47 @@ export function requiredSpeedFrom(waits) {
   if (!(medianIntervalSec > 0)) {
     return null;
   }
+  // THE SHARE OF ITS TIME THE READING LOST, over the stretch actually observed.
+  //
+  // The model is unchanged and it was always right: if a fraction `f` of the
+  // time is spent not delivering, then producing one second of film takes
+  // `1/(1 - f)` seconds, so a step must run that much faster than realtime.
+  // What was wrong was the two quantities fed into it — the WORST single
+  // interruption divided by the MEDIAN gap between interruptions, a maximum
+  // over a median, from two populations that need not be the same events at
+  // all. It asks what would happen if the worst interruption recurred at the
+  // typical rate, which is a compound case that never occurs, and it divides by
+  // a gap that goes to zero whenever interruptions arrive in a burst.
+  //
+  // Field 2026-09-08: 0.79 s (one jump, on a file already downloaded whole)
+  // over 0.01 s (the gaps inside a burst of microsecond waits) gave 158.60x,
+  // and the quality budget refused every step against it forty times in one
+  // session. The same measurements as a share of time lost give 1.00x, because
+  // that is what a reading of a complete file loses.
+  //
+  // The denominator here cannot vanish: it is the span the interruptions are
+  // spread over, which contains them.
+  // OVER WHOLE CYCLES, from the first interruption's start to the last one's
+  // start. That window holds exactly one running stretch per interruption in
+  // it, so the share does not depend on where the window happens to be cut —
+  // measured to the last interruption's END it counts one interruption more
+  // than it counts running stretches, and the same supply then reads 1.54x or
+  // 1.45x according to nothing but the moment the log line was printed.
+  const last = interruptions.length - 1;
+  const spanSec = (interruptions[last].start - interruptions[0].start) / 1000;
+  const lostSec = interruptions
+    .slice(0, last)
+    .reduce((total, one) => total + (one.end - one.start), 0) / 1000;
+  // A span that is all interruption says the supply delivered nothing at all
+  // while it was watched. There is no speed that survives that, and saying a
+  // huge number is less honest than saying it is not a speed question — so the
+  // largest figure any step is ever compared against is stated and named.
+  const lostShare = spanSec > 0 ? Math.min(0.99, lostSec / spanSec) : 0;
   return {
-    requiredSpeed: 1 + worstWaitSec / medianIntervalSec,
+    requiredSpeed: 1 / (1 - lostShare),
+    lostShare,
+    spanSec,
+    lostSec,
     worstWaitSec,
     medianIntervalSec,
     // Interruptions, not waits: what the figure is derived from. The two differ

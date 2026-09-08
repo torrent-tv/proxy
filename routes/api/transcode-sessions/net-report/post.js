@@ -37,12 +37,23 @@ export async function handleApiTranscodeSessionNetReportPost(req, reply, { hlsSe
   // then the viewer counts as playing, which is what every page meant before it
   // could say otherwise.
   const playing = typeof body.playing === "boolean" ? body.playing : undefined;
+  // Whether the page is on screen, and whether the picture was pulled out of
+  // it. A hidden tab has its timers throttled, so it asks for nothing and looks
+  // exactly like a viewer holding a full cushion; picture-in-picture is the case
+  // that makes the distinction necessary, because there the tab is hidden and
+  // the viewer is watching. Absent from a page that does not say, and then the
+  // viewer is on screen, as every page meant before it could say otherwise.
+  const onScreen = typeof body.onScreen === "boolean" ? body.onScreen : undefined;
+  const inPictureInPicture =
+    typeof body.inPictureInPicture === "boolean" ? body.inPictureInPicture : undefined;
   const positionSeconds = Number(body.positionSeconds);
   const recorded = hlsSessionManager.recordNetReport(sessionId, {
     linkMbps,
     bufferedAheadSec,
     consumerId,
     playing,
+    onScreen,
+    inPictureInPicture,
     positionSeconds:
       Number.isFinite(positionSeconds) && positionSeconds >= 0 ? positionSeconds : undefined
   });

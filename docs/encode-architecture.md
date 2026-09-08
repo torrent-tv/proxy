@@ -166,6 +166,28 @@ chosen for the table.
 The download half is measured the same way and on the same scale, so the two are
 comparable: `download-architecture.md`.
 
+## What the master playlist declares, and why it is not cosmetic
+
+`BANDWIDTH` and `AVERAGE-BANDWIDTH` per variant, both measured
+(`services/output/rates.js`):
+
+- the average is the file's own length over its duration, exact and known when
+  the session is created;
+- the peak is the biggest piece produced over the span it covers, and equals the
+  average until a piece exists — a ratio invented meanwhile would be the
+  fabrication this replaced;
+- a re-encoded height is declared at the cap we impose, which is exact;
+- a smaller height at the pixel share of the source's rate, which errs high, and
+  high is the safe direction.
+
+It used to be `height * height * 3.2`. **The browser sizes its cushion in BYTES
+from `BANDWIDTH`**, so a figure five times low makes the cushion five times
+shallow: field 2026-09-08, 3.73 Mbit/s declared for a file carrying 18.4, 120 s
+asked bought 56 MB — 26 s of that film — and the deepest the browser ever held
+was 17.1 s. Inflating it is not the answer either: hls.js compares it against
+its own estimate of the link to decide a level is unplayable, and its recovery
+then moves level by itself, which does not honour our pinning.
+
 ## What is checked
 
 `test/one-authority.test.js` holds the shape: one caller of `#startEncodeRun`,

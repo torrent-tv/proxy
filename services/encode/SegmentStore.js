@@ -182,7 +182,7 @@ export class SegmentStore {
    */
   refresh(key) {
     const format = this.#formats.get(key);
-    const empty = { readAt: 0, byNumber: new Map(), bytes: 0, unproven: -1 };
+    const empty = { readAt: 0, byNumber: new Map(), bytes: 0, unproven: -1, largest: { index: -1, size: 0 } };
     if (!format) {
       return this.#held.get(key) ?? empty;
     }
@@ -201,6 +201,13 @@ export class SegmentStore {
     const byNumber = new Map();
     let bytes = 0;
     let highest = -1;
+    // The biggest piece and which number it is. What reads it is the figure the
+    // master playlist declares: `BANDWIDTH` is the PEAK a link must carry, and
+    // the peak of a variable-bitrate source is nothing like its average — the
+    // field file of 2026-09-08 ran at 17.1 Mbit/s with a piece at 73. Which
+    // number it is matters because pieces are not all the same length, and only
+    // whoever holds the cut table can turn bytes into bits per second.
+    let largest = { index: -1, size: 0 };
     try {
       for (const name of readdirSync(dir)) {
         if (!format.isSegmentFileName(name)) {
@@ -229,12 +236,15 @@ export class SegmentStore {
         if (index > highest) {
           highest = index;
         }
+        if (size > largest.size) {
+          largest = { index, size };
+        }
       }
     } catch {
       this.#held.delete(key);
       return empty;
     }
-    const contents = { readAt: mtime, byNumber, bytes, unproven: highest };
+    const contents = { readAt: mtime, byNumber, bytes, unproven: highest, largest };
     this.#held.set(key, contents);
     return contents;
   }
@@ -290,6 +300,21 @@ export class SegmentStore {
    */
   filesHeld(key) {
     return this.refresh(key).byNumber.size;
+  }
+
+  /**
+   * The biggest piece this output has made, and which number it is.
+   *
+   * Read by whoever declares the variant's peak rate. Bytes alone cannot say
+   * it — pieces are not all the same length — so the number comes with them and
+   * whoever holds the cut table does the division.
+   *
+   * @param {string} key
+   * @returns {{ index: number, size: number }} An index of `-1` while nothing
+   *   has been made, which is a statement and not a zero.
+   */
+  largestPiece(key) {
+    return this.refresh(key).largest ?? { index: -1, size: 0 };
   }
 
   /**

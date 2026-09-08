@@ -58,19 +58,75 @@ export function escapeAttribute(value) {
   return String(value ?? "").replace(/"/g, "'").replace(/[\u0000-\u001f\u007f]/g, " ").trim();
 }
 
+// The smallest rate the HLS specification tolerates in a `BANDWIDTH` attribute.
+// It is a floor on what may be DECLARED, not a belief about any content: a file
+// whose rate is not yet known is described by it, and so is a variant so small
+// that the arithmetic below would go under it.
+const MINIMUM_DECLARED_BITS_PER_SECOND = 400_000;
+
 /**
- * A rough bitrate for a height, in bits per second.
+ * How many bits of film there are per second of playback, for one height.
  *
- * `BANDWIDTH` is required on every variant by the HLS specification, and the
- * player uses it to order them. It does not have to be exact — nothing here
- * adapts on it, because the viewer chooses — so it is the usual H.264 rule of
- * thumb rather than a measurement we do not have before encoding starts.
+ * MEASURED, and the measurement is available before anything is encoded. The
+ * comment here used to say the opposite — "a measurement we do not have before
+ * encoding starts" — and gave `height * height * 3.2` instead, which for 1080
+ * is 3 732 480. Field 2026-09-08: that was declared for a file carrying
+ * 18.4 Mbit/s, five times more, and the arithmetic that reads it is not
+ * cosmetic.
  *
- * @param {number} height
+ * **What reads it.** The browser sizes its cushion in BYTES from this figure
+ * times the seconds it is asked to hold, so a figure five times low makes the
+ * cushion five times shallow: 120 s asked bought 56 MB, which is 26 s of that
+ * film, and the deepest the browser ever held was 17.1 s. And hls.js compares
+ * it against its own estimate of the link to decide a level is unplayable —
+ * which is why an inflated figure is not the answer either: its own recovery
+ * then moves level, and that path does not honour our pinning (measured, 2.59.3).
+ *
+ * **Where the figure comes from.** Two cases, both exact:
+ *
+ * - a height that is COPIED carries the source's own bits, so it is the file's
+ *   length over its duration;
+ * - a height that is RE-ENCODED carries what the encoder is capped at, which we
+ *   impose ourselves.
+ *
+ * The specification wants the PEAK per segment in `BANDWIDTH` and the average
+ * in `AVERAGE-BANDWIDTH`; both are emitted, and the peak is scaled from the
+ * average by the ratio the largest produced segment has actually shown — never
+ * a chosen multiplier, and equal to the average until a segment exists.
+ *
+ * @param {object} params
+ * @param {number} params.averageBitsPerSecond - The film's own rate, measured.
+ * @param {number} params.height
+ * @param {number} params.sourceHeight
+ * @param {number} [params.capKbps] - What a re-encoded height is capped at.
  * @returns {number}
  */
-export function estimatedBitrateFor(height) {
-  return Math.max(400_000, Math.round(height * height * 3.2));
+export function bitrateFor({ averageBitsPerSecond, height, sourceHeight, capKbps = 0 }) {
+  // ONE EXPRESSION, and each term is a measured quantity or the absence of one
+  // written as the identity of its operation. There is no case analysis here
+  // because there are no cases: the rate a variant carries is what the source
+  // carries, shrunk by how much less picture there is, and never more than what
+  // we cap the encoder at.
+  //
+  //  - what the source carries: `length * 8 / duration`, exact. Unknown is 0,
+  //    and 0 falls to the floor below, which is what "not measured" means;
+  //  - how much less picture: the ratio of pixel counts, and never above 1 —
+  //    a variant at or above the source's height carries the source's bits.
+  //    The pixel count is the one term of the relation that is a fact rather
+  //    than an opinion about the encoder, and it errs HIGH for a small height,
+  //    which is the safe direction: the cushion is sized generously and the
+  //    player does not conclude the level is beyond its link;
+  //  - what we cap it at: exact where we impose one, and `Infinity` where we
+  //    do not, which is the identity of `min` and so states "no cap" without a
+  //    branch;
+  //  - the floor: the smallest figure the specification tolerates, and the
+  //    identity of `max`.
+  const measured = Number(averageBitsPerSecond) > 0 ? Number(averageBitsPerSecond) : 0;
+  const shrink = height > 0 && sourceHeight > 0
+    ? Math.min(1, (height * height) / (sourceHeight * sourceHeight))
+    : 1;
+  const cap = capKbps > 0 ? capKbps * 1000 : Number.POSITIVE_INFINITY;
+  return Math.round(Math.max(MINIMUM_DECLARED_BITS_PER_SECOND, Math.min(measured * shrink, cap)));
 }
 
 /**
@@ -134,7 +190,10 @@ export function mediaPlaylistText({ boundaries, segmentFormat }) {
  *   sourceWidth: number,
  *   sourceHeight: number,
  *   renditions?: Array<{ trackIndex: number, name: string, language: string, isDefault: boolean }>,
- *   playlistFileName: string
+ *   playlistFileName: string,
+ *   averageBitsPerSecond?: number,
+ *   peakOverAverage?: number,
+ *   capKbpsFor?: (height: number) => number
  * }} params
  * @returns {string}
  */
@@ -144,7 +203,10 @@ export function masterPlaylistText({
   sourceWidth,
   sourceHeight,
   renditions = [],
-  playlistFileName
+  playlistFileName,
+  averageBitsPerSecond = 0,
+  peakOverAverage = 1,
+  capKbpsFor = () => 0
 }) {
   const lines = ["#EXTM3U", `#EXT-X-VERSION:${playlistVersion}`];
   const audioGroup = renditions.length > 0 ? AUDIO_GROUP_ID : "";
@@ -160,8 +222,21 @@ export function masterPlaylistText({
     const width = sourceHeight > 0 && sourceWidth > 0
       ? Math.round((sourceWidth / sourceHeight) * height / 2) * 2
       : 0;
+    const average = bitrateFor({
+      averageBitsPerSecond,
+      height,
+      sourceHeight,
+      capKbps: capKbpsFor(height)
+    });
+    // BOTH, because they answer different questions and the specification has a
+    // name for each: the peak is what a link must carry at the worst moment,
+    // the average is what the whole variant costs. hls.js sizes its byte budget
+    // from BANDWIDTH, so the peak is what stops the cushion being sized for a
+    // quiet stretch and running dry on a loud one — measured on the field file,
+    // 17.1 Mbit/s median against 73 Mbit/s at its peak.
+    const peak = Math.round(average * Math.max(1, peakOverAverage));
     lines.push(
-      `#EXT-X-STREAM-INF:BANDWIDTH=${estimatedBitrateFor(height)}` +
+      `#EXT-X-STREAM-INF:BANDWIDTH=${peak},AVERAGE-BANDWIDTH=${average}` +
       (width > 0 ? `,RESOLUTION=${width}x${height}` : "") +
       (audioGroup ? `,AUDIO="${audioGroup}"` : "")
     );

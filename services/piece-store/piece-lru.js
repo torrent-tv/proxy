@@ -268,9 +268,16 @@ export class PieceLru {
    * a union wider than the capacity cannot be held however the eviction is
    * ordered.
    *
-   * @returns {{ readers: number, unionPieces: number, widestPieces: number, capacity: number }}
+   * @returns {{ readers: number, names: string[], unionPieces: number, widestPieces: number, capacity: number }}
    */
   demand() {
+    // WHO THEY ARE, not only how many. A "reader" here is whoever declared a
+    // range, and on 2026-09-08 the field said `5 reader(s) want 24 piece(s) of
+    // 25` on a session with two encoders — because the priority map declares one
+    // range per zone and four of its zones were arriving as four readers. The
+    // count alone could not say that, and choosing between "narrow the windows"
+    // and "raise the allowance" was guesswork until the names were printed.
+    const names = [...this.#protected.keys()].map(String).sort();
     const ranges = [...this.#protected.values()]
       .map((range) => ({ from: range.from, to: range.to }))
       .sort((left, right) => left.from - right.from);
@@ -288,6 +295,7 @@ export class PieceLru {
     }
     return {
       readers: ranges.length,
+      names,
       unionPieces,
       widestPieces,
       capacity: this.#capacity

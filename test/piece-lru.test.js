@@ -199,6 +199,10 @@ test("the demand is the union of the readers' windows, not their sum", () => {
 
   const demand = lru.demand();
   assert.equal(demand.readers, 2);
+  // NAMED, because the count read as five encoders on a session that had two:
+  // four of the five were zones of the priority map, and only the names could
+  // say so.
+  assert.deepEqual(demand.names, ["audio", "video"]);
   assert.equal(demand.unionPieces, 80, "100..179 is eighty pieces, not a hundred");
   assert.equal(demand.widestPieces, 50);
   assert.equal(demand.capacity, 88);
@@ -211,7 +215,7 @@ test("the demand is the union of the readers' windows, not their sum", () => {
   lru.unprotect("video");
   assert.deepEqual(
     lru.demand(),
-    { readers: 0, unionPieces: 0, widestPieces: 0, capacity: 88 },
+    { readers: 0, names: [], unionPieces: 0, widestPieces: 0, capacity: 88 },
     "no reader asking for anything is not the same as asking for one piece"
   );
 });

@@ -16,6 +16,8 @@
 
 import { variantHeightsFor } from "./ladder.js";
 
+import { masterRateArgs } from "./rates.js";
+
 export class LiveOutputs {
   /**
    * @param {object} params
@@ -264,4 +266,38 @@ export class LiveOutputs {
     }
     return this.splicableHeights(owner).length >= 2;
   }
+  /**
+   * Everything the master playlist needs of a session except its soundtracks.
+   *
+   * The shape of the film — which heights can be spliced, how big the source
+   * is, how the pieces are packaged — and the rates it carries. All of it is a
+   * fact about the OUTPUT, and it was assembled at the call site in the session
+   * manager, which is the file that is being taken apart.
+   *
+   * The soundtracks are not here on purpose: which of them is marked default is
+   * the asking VIEWER'S business, and that belongs to whoever holds viewers.
+   *
+   * @param {object} session
+   * @param {(address: string) => { index: number, size: number }} largestPiece -
+   *   The biggest piece an output has made, asked of whoever owns the disk. A
+   *   plain function, so this layer holds no store.
+   * @returns {object}
+   */
+  masterFactsOf(session, largestPiece) {
+    return {
+      playlistVersion: session.segmentFormat.playlistVersion,
+      heights: this.splicableHeights(session),
+      sourceWidth: Number(session.file?.width) || 0,
+      sourceHeight: Number(session.file?.height) || 0,
+      ...masterRateArgs({
+        fileLength: Number(session.file?.length) || 0,
+        durationSeconds: Number(session.file?.durationSeconds) || 0,
+        largest: largestPiece(session.outputKey ?? ""),
+        boundaries: session.timeline?.published ?? session.timeline?.boundaries ?? null,
+        producedHeight: this.producedHeightOf(session),
+        capKbps: Number(session.rateCapKbps) || 0
+      })
+    };
+  }
+
 }

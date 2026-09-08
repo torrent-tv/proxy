@@ -95,6 +95,48 @@ the map put its piece in, and the `supply` line carries the table. Long waits at
 `blocked` mean the urgent zone is too narrow; long waits further out mean the
 lead is.
 
+## What reaches MEMORY is not what reaches the swarm
+
+`BLOCKED` and `NEAR` only. Memory holds what will be READ soon; the swarm is
+told what will be DOWNLOADED soon, and the map states the second over the whole
+rest of the film.
+
+`AHEAD` used to reach memory too, and it is exactly the speculative lead. The
+map states one claimant per zone, so a film with seven zones arrived at the piece
+store as five separate holders — one `NEAR` and four `AHEAD` — each covering tens
+of megabytes. Field 2026-09-08: `5 reader(s) want 24 piece(s) of 25 the store may
+hold (widest window 17)`, on a session with exactly two reads. The union of what
+was declared equalled the whole capacity, so every admission had to evict a piece
+somebody had declared, and 100 of 1395 evictions did; beside that, 6565 spills
+and 7575 revivals in 44 minutes with a median 0.0 s on disk.
+
+Raising the allowance does not touch it: a lead stated over the rest of the film
+grows to fill whatever memory it is given, and the ratio is unchanged.
+
+The store's own line now NAMES its holders (`[priority-map:22:0 read:…]`) rather
+than counting them, because the count read as five encoders on a session that
+had two, and choosing between "narrow the windows" and "raise the allowance" was
+guesswork without the names.
+
+## How much faster than realtime a step must run
+
+`1 / (1 - the share of the reading's time that was lost to waiting)`, over whole
+cycles: from the first interruption's start to the last one's, which holds
+exactly one running stretch per interruption in it.
+
+The model is unchanged and was always right — if a fraction `f` of the time
+delivers nothing, producing one second of film takes `1/(1 - f)` seconds. What
+was wrong were the two quantities fed into it: the WORST single interruption
+divided by the MEDIAN gap between interruptions, a maximum over a median, from
+populations that need not be the same events. It asks what would happen if the
+worst interruption recurred at the typical rate — a compound case that never
+occurs — and it divides by a gap that goes to zero whenever interruptions arrive
+in a burst.
+
+Field 2026-09-08: 0.79 s over 0.01 s gave **158.60x** on a file already
+downloaded whole, and the quality budget refused every step against it forty
+times in one session. The same measurements as a share of time lost give 1.00x.
+
 ## The five levels
 
 | level | what it is | stated |

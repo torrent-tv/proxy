@@ -3178,7 +3178,7 @@ export class HlsSessionManager {
    * @param {{ linkMbps: number, bufferedAheadSec: number, consumerId?: string, positionSeconds?: number }} report
    * @returns {boolean}
    */
-  recordNetReport(sessionId, { linkMbps, bufferedAheadSec, consumerId, positionSeconds, playing }) {
+  recordNetReport(sessionId, { linkMbps, bufferedAheadSec, consumerId, positionSeconds, playing, onScreen, inPictureInPicture }) {
     const named = this.sessionsById.get(sessionId);
     if (!named || named.state === "disposed") {
       return false;
@@ -3196,7 +3196,7 @@ export class HlsSessionManager {
     const now = Date.now();
     this.viewers
       .of(session, typeof consumerId === "string" && consumerId.length > 0 ? consumerId : "")
-      .report({ linkMbps, bufferedAheadSec, positionSeconds, playing }, now);
+      .report({ linkMbps, bufferedAheadSec, positionSeconds, playing, onScreen, inPictureInPicture }, now);
     // A stale reading must not go on deciding for the viewers still here: a
     // report describes a link at a moment, and a viewer who seeked since then
     // is somewhere else entirely.
@@ -8295,13 +8295,6 @@ export class HlsSessionManager {
     if (!this.liveOutputs.publishesVariants(session)) {
       return null;
     }
-    const sourceHeight = Number(session.file.height) || 0;
-    // What CAN be spliced, not what is worth offering this second. The live
-    // judgement travels in `offeredHeights` and in every progress report, which
-    // is what the viewer's menu follows; letting it decide the master's
-    // existence made a live session answer 404 to its own published address.
-    const rungs = this.liveOutputs.splicableHeights(session);
-    const sourceWidth = Number(session.file.width) || 0;
     // The audio tracks, published once for the whole file rather than muxed
     // into every rung. Two things follow from that: the same track is not
     // encoded once per rung on a host that struggles to encode it once, and
@@ -8319,10 +8312,12 @@ export class HlsSessionManager {
       ? this.#audioRenditionsOf(session, this.#audioChoiceOf(session, consumerId).trackIndex)
       : [];
     return masterPlaylistText({
-      playlistVersion: session.segmentFormat.playlistVersion,
-      heights: rungs,
-      sourceWidth,
-      sourceHeight,
+      // The shape of the film and the rates it carries, asked of the layer that
+      // holds both. What CAN be spliced, not what is worth offering this second:
+      // the live judgement travels in `offeredHeights` and in every progress
+      // report, and letting it decide the master's existence made a live session
+      // answer 404 to its own published address.
+      ...this.liveOutputs.masterFactsOf(session, (address) => this.segmentStore.largestPiece(address)),
       renditions,
       playlistFileName: PLAYLIST_FILE_NAME
     });

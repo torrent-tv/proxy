@@ -206,9 +206,25 @@ export class SwarmSelection {
    * rebuild the second. Now there is one statement and two views of it, both
    * computed here.
    *
-   * Only the urgent levels. Memory holds what will be READ soon; the tail and
-   * the gap behind the playhead are fetched speculatively and must not push a
-   * piece the decoder is about to want out of memory.
+   * WHAT WILL BE READ SOON, WHICH IS NOT WHAT WILL BE DOWNLOADED SOON. Memory
+   * holds the first; the swarm is told the second; and the priority map states
+   * the second, over the whole rest of the film.
+   *
+   * `AHEAD` used to reach memory, and it is exactly the speculative lead: the
+   * map states one claimant per zone, so on a film with seven zones one `NEAR`
+   * and four `AHEAD` arrived here as five separate holders, each covering tens
+   * of megabytes. Field 2026-09-08: the store reported `5 reader(s) want 24
+   * piece(s) of 25 the store may hold (widest window 17)` — the union of what
+   * was declared equalled the whole capacity, so every admission had to evict a
+   * piece somebody had declared, and 100 of 1395 evictions did. Beside that,
+   * 6565 spills and 7575 revivals in 44 minutes with a median 0.0 s on disk, and
+   * 2138 h264 parse errors on a picture that was being COPIED.
+   *
+   * Raising the allowance does not touch it: a lead stated over the rest of the
+   * film grows to fill whatever memory it is given, and the ratio is unchanged.
+   * What belongs in memory is what a READ is stopped on and the little in front
+   * of it — the levels a read itself states — and those are `BLOCKED` and
+   * `NEAR`.
    *
    * @returns {void}
    */
@@ -218,7 +234,7 @@ export class SwarmSelection {
       return;
     }
     const holding = new Set();
-    for (const urgency of [Urgency.BLOCKED, Urgency.NEAR, Urgency.AHEAD]) {
+    for (const urgency of [Urgency.BLOCKED, Urgency.NEAR]) {
       for (const window of this.#register.at(urgency)) {
         const range = this.#piecesFor(window);
         if (!range) {

@@ -242,12 +242,28 @@ piece costs — because only there is it known what the body IS, and at the poin
 of pricing only how many there are. So there is no kind, no tag and no case
 analysis.
 
-**What a move costs is `Infinity` until something has been measured**, because a
-move is irreversible while leaving the encoder alone is always available. Placing
-one where there is none takes the unknown the other way: the film gets made or it
-does not. And a run killed before producing anything is a measurement too — a
-lower bound on the first output, and the only reading a thrash can supply, since
-every run in one is killed before it finishes anything.
+**The measured start is separated from the piece it contains**, because the two
+scale differently: a piece costs more when encoders share the machine, a spawn
+does not.
+
+```
+spawn overhead  = measured first output - what one piece costs alone
+a fresh encoder = spawn overhead + the piece at the rate in force
+a moved one     = the kill, and then the same
+```
+
+With nothing measured the overhead is zero and a fresh encoder owes exactly one
+piece. **That is the floor, and it is derived rather than chosen:** a piece
+cannot appear before it is encoded, and how fast this host encodes is measured
+before any viewer exists. There was an `Infinity` here for the cost of a move,
+on the reasoning that an unmeasured price must not license an irreversible act —
+an exception in a model that needs none, and this is the same statement made by
+arithmetic.
+
+And a run killed before producing anything is a measurement too — a lower bound
+on the first output, and the only reading a thrash can supply, since every run in
+one is killed before it finishes anything. So a thrash makes its own moves
+progressively dearer until it stops.
 
 ### What that was for
 
@@ -262,7 +278,7 @@ IMMEDIATELY and was the most urgent material in the file: it bought encoders, an
 it took the run standing in front of the viewer because that run was the nearest
 body to it.
 
-Checked by simulation over sixty ticks against the map's real shape — ten zones
+Checked by simulation over eighty ticks against the map's real shape — ten zones
 doubling ahead of the viewer, one behind — at both one and three runs: the
 encoder is placed once, left alone, and moved exactly once, at the viewer's own
 seek.
@@ -300,6 +316,25 @@ Nothing is proposed where the second does not win. At 1920x1080 the measured
 penalty for a second encoder on the addon host is 1.98 — it takes very nearly
 all of the first's speed — and the objective keeps one; where a second is free it
 places three.
+
+## What the log says when anything is placed or taken away
+
+```
+encode-plan on <output>: start #58..#481, stop #?..#?
+```
+
+Every action with its INTERVAL, which is what a run is. Printed on any pass that
+does something — a session where nothing changes says nothing.
+
+It was missing, and its absence cost three wrong diagnoses of one field session.
+The line printed the windows, the budget and where the live runs stood; the
+intervals the actions carried were the one thing it did not print. What that
+session actually did was give every encoder an interval of exactly ONE segment —
+63 runs, each spending 1.26 s reaching its first piece, making that one piece,
+reaching the end of its interval and exiting, twelve of them normally. The
+reasons printed beside them read as moves back and forth, so the fault was read
+as an oscillating placement three times over. An interval of one segment turns
+the protection against two encoders writing one name into a mill for processes.
 
 ## What is checked
 

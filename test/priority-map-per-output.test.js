@@ -66,7 +66,7 @@ function over(sessions) {
     publish: () => {},
     viewersOf: (session) => viewersOf(session),
     allowanceFor: () => 10,
-    watchedBy: (session, viewer) => live.watchedBy(session, viewer)
+    watchedBy: (session, viewer) => !live.supersededBy(session, viewer.activeVariantId ?? null)
   });
   return {
     priority,
@@ -162,7 +162,7 @@ test("a viewer nothing has been heard from is not watching anything", () => {
     publish: () => {},
     viewersOf: (session) => viewersOf(session),
     allowanceFor: () => 10,
-    watchedBy: (session, viewer) => live.watchedBy(session, viewer)
+    watchedBy: (session, viewer) => !live.supersededBy(session, viewer.activeVariantId ?? null)
   });
   const person = viewers.of(picture, "p");
   person.moveTo(300);
@@ -201,11 +201,11 @@ test("the picture is watched by a person who never moved off it", () => {
   const { viewers, live } = over([picture]);
   const person = viewers.of(picture, "p");
 
-  assert.equal(live.watchedBy(picture, person), true, "no step is active");
+  assert.equal(live.supersededBy(picture, null), false, "no step is active");
   person.activeVariantId = "pic";
   assert.equal(
-    live.watchedBy(picture, person),
-    true,
+    live.supersededBy(picture, person.activeVariantId),
+    false,
     "and naming the picture itself as the step is the same statement"
   );
 });

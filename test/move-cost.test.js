@@ -9,23 +9,30 @@
  * position defines slides forward one number at a time, and every slide made
  * standing one number behind it score worse than standing in it.
  *
- * FOUR THINGS, and the first is the one that mattered.
+ * THREE FAULTS IN THE ARITHMETIC, and no threshold anywhere. There was one for
+ * a while — "a move must beat staying by at least what moving costs" — and it
+ * was a prop under a comparison that was wrong rather than indifferent. It is
+ * gone.
  *
- * 1. The map states `withinSeconds: null` for the film BEHIND the viewers —
- *    nobody is waiting there. `deadlineReaderFor` read it through `Number()`,
- *    where `null` is 0, so that film was due NOW and was the most urgent
+ * 1. **A body was charged a whole piece for the one it was already making.**
+ *    `arrival = delay + (index - at + 1) / rate` is right for a body that does
+ *    not exist yet and wrong for a run 0.8 s into a 0.9 s piece. `delaySec` is
+ *    now when the body finishes the piece it STANDS ON, so from #58 reaching #59
+ *    costs 0.14 + 0.94 = 1.08 s against 1.88 s for a kill and a cold start — a
+ *    decision by eight hundred milliseconds, where the double charge had made it
+ *    a coin flip lost by ten.
+ * 2. **The piece was priced at the unpenalised rate** while arrivals used the
+ *    penalised one, so every extra body looked cheaper than it is and the plan
+ *    bought a second encoder where one served. One rate, the one in force.
+ * 3. **`withinSeconds: null` was read through `Number()`**, where it is 0, so
+ *    the film BEHIND the viewers was due immediately and was the most urgent
  *    material in the file. It bought encoders and it took the run standing in
  *    front of the viewer, because that run was the nearest body to it.
- * 2. Residual work took a live run. A zone with no deadline is done with
- *    capacity that is left over, and a run already serving a viewer is not left
- *    over.
- * 3. `moveSec` was 0 until measured, so a move was free in the arithmetic — and
- *    the blindness sustained itself, because the first-output figure takes a
- *    reading only from a run that produced something and every run in a thrash
- *    is killed before it finishes anything.
- * 4. A staying run was priced as though it would produce instantly, however
- *    recently it had started, so the score had no memory of a decision it was
- *    still carrying out.
+ *
+ * And what a move costs is `Infinity` until something has been measured, because
+ * a move is irreversible while leaving the encoder alone is always available. A
+ * run killed before producing anything is a measurement too — a lower bound on
+ * the first output — which is the only reading a thrash can supply.
  */
 
 import test from "node:test";

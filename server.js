@@ -40,6 +40,7 @@ import { WorkerTorrentPool } from "./services/torrent-worker/pool-adapter.js";
 import { HlsSessionManager } from "./services/hls-session-manager.js";
 import { createPlaybackPlanner } from "./services/playback-planner.js";
 import { detectVideoEncoder, benchmarkSoftwarePresets, benchmarkDecodeCost, benchmarkContention, benchmarkCopySpeed, detectTonemapSupport } from "./services/hwaccel.js";
+import { measureStartAndStop } from "./services/encode/start-stop-cost.js";
 import { logger } from "./utils/logger.js";
 
 const __filename = fileURLToPath(import.meta.url);
@@ -126,23 +127,31 @@ export async function startProxyServer({
   const videoEncoder = transcodeAudio
     ? await detectVideoEncoder({ ffmpegBin, logger })
     : null;
-  // For software libx264, benchmark preset throughput once at startup so the
-  // session manager can pick the highest-quality preset that still encodes each
-  // stream faster than realtime. Hardware encoders use their own fixed preset.
-  // The decode model first, and the preset benchmark second — they are
-  // independent now (the presets are timed on raw frames), but the order costs
-  // nothing and keeps the two figures side by side in the log.
-  const decodeCostModel = videoEncoder?.kind === "software"
+  // WHAT THIS HOST DOES, measured before any viewer exists. Every one of these
+  // was gated on the chosen encoder being SOFTWARE, and two of the three are
+  // not about the encoder at all: a host with a GPU decodes in software just
+  // the same — no hardware decoder is asked for anywhere — and what a second
+  // job costs is a property of the machine. So a GPU host had no decode cost,
+  // no contention penalty and no encoder throughput, and the quality offer,
+  // which is arithmetic over those three, had nothing to compute from.
+  //
+  // The decode model first and the throughput second — they are independent
+  // (the rungs are timed on raw frames), but the order keeps the two figures
+  // side by side in the log.
+  const decodeCostModel = transcodeAudio
     ? await benchmarkDecodeCost({ ffmpegBin, logger })
     : null;
   // What a second job costs on this host. Measured because the budget adds
   // independent prices and this host says two jobs that each fit alone do not
   // fit together — 2.6× on the addon box (2026-08-18).
-  const contentionPenalties = videoEncoder?.kind === "software"
+  const contentionPenalties = transcodeAudio
     ? await benchmarkContention({ ffmpegBin, logger })
     : null;
-  const softwarePresetBenchmark = videoEncoder?.kind === "software"
-    ? await benchmarkSoftwarePresets({ ffmpegBin, logger })
+  // The chosen encoder walked over its OWN speed ladder: libx264's presets,
+  // NVENC's p1…p7, QSV's veryfast…veryslow, VAAPI's quality levels. A kind with
+  // no ladder is measured once, which is still a reading where there was none.
+  const softwarePresetBenchmark = videoEncoder
+    ? await benchmarkSoftwarePresets({ ffmpegBin, logger, encoder: videoEncoder })
     : null;
   // What this host does with a picture it does NOT re-encode. Every other
   // startup measurement prices encoding or decoding, and a copied picture does
@@ -154,6 +163,15 @@ export async function startProxyServer({
   // touch it.
   const copySpeedX = transcodeAudio
     ? await benchmarkCopySpeed({ ffmpegBin, logger })
+    : null;
+  // WHAT A START AND A STOP COST HERE, before any viewer exists. Both decide one
+  // thing — leave an encoder where it stands, or kill it and start another —
+  // and both used to be learned only from runs that had ENDED, so at a cold
+  // open they were zero. Zero does not read as "not measured": it reads as
+  // "free", and a free move is always taken. Field 2026-09-08: an encoder moved
+  // between two adjacent numbers every half second and produced nothing.
+  const startStopCost = transcodeAudio
+    ? await measureStartAndStop({ ffmpegBin, encoder: videoEncoder, logger })
     : null;
   // Whether this ffmpeg build can tone-map HDR→SDR (zscale + tonemap filters).
   // Detected once; the session manager applies the tonemap chain only for HDR
@@ -171,6 +189,7 @@ export async function startProxyServer({
     decodeCostModel,
     contentionPenalties,
     copySpeedX,
+    startStopCost,
     tonemapSupported,
     segmentFormatId: segmentFormat,
     stateDir,

@@ -1399,6 +1399,7 @@ export class HlsSessionManager {
     stateDir = "",
     segmentStore = null,
     getTorrentTotals,
+    startStopCost = null,
     spillDisk = null}) {
     this.enabled = Boolean(enabled);
     this.ffmpegBin = ffmpegBin;
@@ -1576,6 +1577,11 @@ export class HlsSessionManager {
       segmentStore: this.segmentStore,
       logger
     });
+    // What a start and a stop were measured to cost here, before any viewer
+    // existed. Without it both read zero at a cold open, and zero is not
+    // "unmeasured" — it is "free", which is what moved an encoder between two
+    // adjacent numbers every half second in the field.
+    this.encodeOrchestrator.noteStartupCosts(startStopCost);
     // Where each file is cut, held once per file and grid rather than once per
     // session. Two sessions of one film MUST agree about this to the
     // millisecond — a segment made by either has to be appendable where the

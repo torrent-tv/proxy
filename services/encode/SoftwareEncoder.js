@@ -42,6 +42,11 @@ export class SoftwareEncoder extends Encoder {
     };
   }
 
+  /** @param {string | null} rung @returns {string[]} */
+  benchmarkArgs(rung = null) {
+    return ["-c:v", "libx264", "-preset", rung ?? SOFTWARE_PRESET, "-crf", SOFTWARE_CRF, "-pix_fmt", "yuv420p"];
+  }
+
   buildVideoArgs({
     targetWidth,
     targetHeight,

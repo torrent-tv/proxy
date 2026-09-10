@@ -49,6 +49,40 @@ export class RunCosts {
   #firstOutput = [];
 
   /**
+   * What this host was measured to do at startup, before any viewer existed.
+   *
+   * WITHOUT IT BOTH FIGURES ARE ZERO AT A COLD OPEN, and zero does not read as
+   * "not measured" — it reads as "free". The whole comparison the plan makes is
+   * between leaving an encoder where it stands, which costs the remainder of its
+   * warm-up, and moving it, which costs the killing plus a warm-up from the
+   * beginning. Subtract one from the other and what is left is the killing plus
+   * the time the run has already lived — the warm-up a move throws away. Set the
+   * warm-up to zero and that difference collapses to zero as well: keeping and
+   * moving cost exactly the same, the tie falls to position, and any advantage
+   * however small wins. Field 2026-09-08: an encoder moved between two adjacent
+   * numbers every half second, produced nothing, and was killed each time.
+   *
+   * Readings from real runs replace it as they arrive; this is where the plan
+   * starts from, not where it stays.
+   *
+   * @type {{ firstByteWaitSec: number, killCostSec: number } | null}
+   */
+  #atStartup = null;
+
+  /**
+   * Take what the startup measurement found on this host.
+   *
+   * @param {{ firstByteWaitSec: number, killCostSec: number } | null} measured
+   * @returns {void}
+   */
+  noteStartup(measured) {
+    this.#atStartup =
+      Number.isFinite(measured?.firstByteWaitSec) && measured.firstByteWaitSec > 0
+        ? { firstByteWaitSec: measured.firstByteWaitSec, killCostSec: Math.max(0, measured.killCostSec ?? 0) }
+        : null;
+  }
+
+  /**
    * Take the two readings a finished run carries. Either may be absent — a run
    * that was never told to stop did not die on command, and one that produced
    * nothing has no first output — and an absent reading is not a zero.
@@ -112,8 +146,9 @@ export class RunCosts {
     // piece's encoding. Whoever uses it separates the two, because the piece
     // costs more when encoders share the machine and the spawn does not.
     return {
-      killCostSec: (middleOf(this.#dying) ?? 0) / 1000,
-      firstByteWaitSec: (middleOf(this.#firstOutput) ?? 0) / 1000,
+      killCostSec: (middleOf(this.#dying) ?? 0) / 1000 || (this.#atStartup?.killCostSec ?? 0),
+      firstByteWaitSec:
+        (middleOf(this.#firstOutput) ?? 0) / 1000 || (this.#atStartup?.firstByteWaitSec ?? 0),
       samples: Math.min(this.#dying.length, this.#firstOutput.length)
     };
   }

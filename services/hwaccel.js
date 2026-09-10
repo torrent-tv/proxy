@@ -35,7 +35,7 @@ import {
   parseFfmpegVideoFps
 } from "./ffmpeg-banner.js";
 
-import { keyFrameArgs, SOFTWARE_CRF, TRANSCODE_FPS } from "./encode/args.js";
+import { keyFrameArgs, TRANSCODE_FPS } from "./encode/args.js";
 // The five kinds, one class each. Detection and benchmarking stay in this file;
 // how a kind is driven belongs to the kind.
 import {
@@ -55,8 +55,6 @@ export {
   TRANSCODE_FPS
 } from "./encode/args.js";
 
-// libx264 presets to benchmark, ordered slowest/highest-quality → fastest.
-const BENCHMARK_PRESETS = ["fast", "faster", "veryfast", "superfast", "ultrafast"];
 const BENCHMARK_REF_W = 640;
 const BENCHMARK_REF_H = 360;
 const BENCHMARK_DURATION_SEC = 3;
@@ -1322,7 +1320,7 @@ function barFor(cost) {
  * @param {{ ffmpegBin: string, logger?: { info: (m: string) => void, warn: (m: string) => void } }} options
  * @returns {Promise<Array<{ preset: string, pixelsPerSec: number }>>} Ordered slowest→fastest.
  */
-export async function benchmarkSoftwarePresets({ ffmpegBin, logger }) {
+export async function benchmarkSoftwarePresets({ ffmpegBin, logger, encoder = null }) {
   const log = logger ?? { info: () => {}, warn: () => {} };
 
   // REAL footage, decoded ONCE into raw frames, and the presets are then timed
@@ -1353,16 +1351,21 @@ export async function benchmarkSoftwarePresets({ ffmpegBin, logger }) {
   /** @type {Array<{ preset: string, pixelsPerSec: number }>} */
   const results = [];
   try {
-    for (const preset of BENCHMARK_PRESETS) {
-      const speed = await measureEncodeSlope(ffmpegBin, preset, rawFramesPath);
+    // THE CHOSEN ENCODER'S OWN LADDER, whatever kind it is. NVENC walks p1…p7,
+    // QSV veryfast…veryslow, VAAPI its quality levels. A kind with no ladder is
+    // measured once, which is still a reading where there was none at all.
+    const ladder = encoder?.speedLadder;
+    const rungs = Array.isArray(ladder?.values) && ladder.values.length > 0 ? ladder.values : [null];
+    for (const rung of rungs) {
+      const speed = await measureEncodeSlope(ffmpegBin, encoder, rung, rawFramesPath);
       if (speed === null) {
-        log.warn(`hwaccel: preset benchmark "${preset}" produced no usable reading; skipping`);
+        log.warn(`hwaccel: the benchmark of "${rung ?? encoder?.name}" produced no usable reading; skipping`);
         continue;
       }
       const pixelsPerSec = BENCHMARK_REF_W * BENCHMARK_REF_H * TRANSCODE_FPS * speed;
-      results.push({ preset, pixelsPerSec });
+      results.push({ preset: rung ?? encoder?.name, pixelsPerSec });
       log.info(
-        `hwaccel: preset "${preset}" ~= ${(pixelsPerSec / 1e6).toFixed(1)} Mpx/s ` +
+        `hwaccel: ${encoder?.name} "${rung ?? "as it comes"}" ~= ${(pixelsPerSec / 1e6).toFixed(1)} Mpx/s ` +
           `(${speed.toFixed(2)}x @ ${BENCHMARK_REF_W}x${BENCHMARK_REF_H}, real footage)`
       );
     }
@@ -1427,7 +1430,7 @@ export function slopeOf(samples, minimumWindowSec = ENCODE_BENCHMARK_WINDOW_SEC)
   return slope <= ENCODE_BENCHMARK_MAX_PLAUSIBLE_SPEED ? slope : null;
 }
 
-function measureEncodeSlope(ffmpegBin, preset, rawFramesPath) {
+function measureEncodeSlope(ffmpegBin, encoder, rung, rawFramesPath) {
   return new Promise((resolve) => {
     const args = [
       "-hide_banner", "-loglevel", "error", "-nostats",
@@ -1435,7 +1438,11 @@ function measureEncodeSlope(ffmpegBin, preset, rawFramesPath) {
       "-f", "rawvideo", "-pix_fmt", "yuv420p",
       "-s", `${BENCHMARK_REF_W}x${BENCHMARK_REF_H}`, "-r", String(TRANSCODE_FPS),
       "-i", rawFramesPath,
-      "-c:v", "libx264", "-preset", preset, "-crf", SOFTWARE_CRF, "-pix_fmt", "yuv420p",
+      // THE ENCODER SAYS HOW TO MEASURE ITSELF. It was libx264 written here, so
+      // a host with NVENC, QSV, VAAPI or V4L2M2M measured its encoder not at all
+      // and the quality offer, which is arithmetic over pixels per second, had
+      // no pixels per second to work with.
+      ...encoder.benchmarkArgs(rung),
       "-f", "null", "-",
       "-progress", "pipe:1"
     ];

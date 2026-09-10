@@ -81,4 +81,31 @@ export class Encoder {
   buildVideoArgs(_options) {
     throw new Error(`${this.name} does not say how to build its video arguments.`);
   }
+
+  /**
+   * How to encode raw frames at one rung of this kind's speed ladder, for the
+   * startup benchmark and nothing else.
+   *
+   * SEPARATE FROM `buildVideoArgs` on purpose. That one produces a picture from
+   * a film: it scales, it tone-maps, it forces keyframes onto a grid, it caps a
+   * bitrate. The benchmark is fed raw frames of a known size and wants the
+   * encoder and the rung with nothing else in the way — otherwise the reading
+   * prices a scaler as though it were the encoder.
+   *
+   * WHY EVERY KIND MUST ANSWER IT. Until now the throughput benchmark existed
+   * only for libx264 and was gated on the chosen encoder being software, so a
+   * host with NVENC, QSV, VAAPI or V4L2M2M measured its encoder not at all —
+   * and the quality offer, which is arithmetic over pixels per second, had no
+   * pixels per second to work with. NVENC's own ladder is `p1`…`p7` and QSV's
+   * is `veryfast`…`veryslow`; both are declared here and neither was ever run.
+   *
+   * @param {string | null} rung - One value of {@link speedLadder}, or null
+   *   where the kind has no ladder and there is one thing to measure.
+   * @returns {string[]}
+   */
+  benchmarkArgs(rung = null) {
+    const ladder = this.speedLadder;
+    const setting = ladder?.flag && rung ? [ladder.flag, rung] : [];
+    return ["-c:v", this.name, ...setting];
+  }
 }

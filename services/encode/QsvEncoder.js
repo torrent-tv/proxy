@@ -35,6 +35,12 @@ export class QsvEncoder extends Encoder {
     };
   }
 
+  /** @param {string | null} rung @returns {string[]} */
+  benchmarkArgs(rung = null) {
+    const preset = rung ? ["-preset", rung] : [];
+    return ["-c:v", "h264_qsv", "-global_quality", "24", ...preset];
+  }
+
   buildVideoArgs({ targetWidth, targetHeight, segmentDurationSec, forcedKeyframeTimes }) {
     const { w, h } = safeDimensions(targetWidth, targetHeight);
     return [

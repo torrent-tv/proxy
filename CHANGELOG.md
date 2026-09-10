@@ -1,3 +1,7 @@
+## 2.81.1
+
+- **Fix**: The `disk:` line is actually said. 2.81.0 built the reading and called it from nowhere, so the one thing that can answer "why is there no room" was absent from the log. The owner says it itself, once a pass, in the series beside the memory reading.
+
 ## 2.81.0
 
 - **Fix**: EVERY ENCODER RAN TWICE, ON EVERY RUN, SINCE 2026-09-04. Building a run and starting it were two acts, so two owners each performed the second: the session manager built a run and started it, handed it back, and the orchestrator started it again. Field logs of 08-10 September: 207 runs against 414 spawns, no exception. Only the second process was reachable — this line overwrote the reference to the first — so a stop killed one and the other ran on, measured 105 seconds past its own run's death, with eleven processes writing at once on a four-core host whose budget said three. It doubled the processor, doubled the readers of the piece store (which is the pinned-piece deadlock's own trigger), and put two writers on one file name, defeating the rename 2.80.19 had just introduced: 1105 `could not publish … ENOENT` and a fatal `bufferAppendError` on both tracks at once under 2.80.19 itself.

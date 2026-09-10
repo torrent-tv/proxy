@@ -178,6 +178,15 @@ export async function startProxyServer({
     // CPU-bound transcode from a download-starved input before downscaling.
     // What every torrent here has moved, so the proxy can price its own
     // downloading, hashing and delivery against the machine (roadmap item 7).
+    // What the spilled pieces weigh on the torrent thread, and how to tell them
+    // their share of the disk. The owner of the disk is on this side, where the
+    // segments are; the pieces are on the other.
+    spillDisk: typeof torrentPool.allowSpillBytes === "function"
+      ? {
+          held: () => torrentPool.spilledBytes ?? 0,
+          allow: (bytes) => torrentPool.allowSpillBytes(bytes)
+        }
+      : null,
     getTorrentTotals: async () => {
       if (typeof torrentPool.getTorrentTotals !== "function") {
         return null;

@@ -114,6 +114,10 @@ export class DiskSpace {
     for (const [position, consumer] of consumers.entries()) {
       consumer.allow(shares[position]);
     }
+    // SAID, every pass, in the series beside the memory reading. "Why is there
+    // no room" was a question no log could answer: the ceilings were worked out
+    // in three places and not one of them was printed beside the others.
+    this.#logger?.info?.(this.describe());
     return { freeBytes: this.#freeBytes, allowanceBytes: allowance, shares: this.#last };
   }
 

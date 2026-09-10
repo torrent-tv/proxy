@@ -136,3 +136,15 @@ test("it says what the disk has and what each claimant may hold", async () => {
   await space.revise();
   assert.match(space.describe(), /disk: 100MB free; segments 4MB of 8MB/);
 });
+
+test("it says what it decided, every pass", async () => {
+  const lines = [];
+  const space = new DiskSpace({
+    readFree: async () => 100 * MEGABYTE,
+    logger: { info: (line) => lines.push(line) }
+  });
+  space.register(consumerOf("segments", 4 * MEGABYTE, 8 * MEGABYTE).consumer);
+  await space.revise();
+  assert.equal(lines.length, 1, "a pass that decided the shares said nothing about them");
+  assert.match(lines[0], /disk: 100MB free; segments 4MB of 8MB/);
+});

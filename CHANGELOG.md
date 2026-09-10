@@ -1,3 +1,8 @@
+## 2.81.2
+
+- **Fix**: `disk: 0MB free` on a host with 103 GB. The free space was read from the segments’ own directory, which is made when the first session starts and removed when the proxy stops — so at every start, and after every clean exit, the reading failed and answered zero, which means “no room” to everything downstream. It reads the nearest ancestor that exists; the disk is the same disk either way.
+- **Fix**: The spilled pieces were never registered with the owner of the disk, so it divided nothing and they kept the ceiling they had. The session manager holds no torrent pool — it is handed closures over the thread boundary — and 2.81.0 asked it for a field that does not exist. They arrive the same way everything else from that thread does.
+
 ## 2.81.1
 
 - **Fix**: The `disk:` line is actually said. 2.81.0 built the reading and called it from nowhere, so the one thing that can answer "why is there no room" was absent from the log. The owner says it itself, once a pass, in the series beside the memory reading.

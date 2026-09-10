@@ -148,3 +148,18 @@ test("it says what it decided, every pass", async () => {
   assert.equal(lines.length, 1, "a pass that decided the shares said nothing about them");
   assert.match(lines[0], /disk: 100MB free; segments 4MB of 8MB/);
 });
+
+test("the free space is read from the nearest directory that exists", async () => {
+  // The segments' directory is made when the first session starts and removed
+  // when the proxy stops, so at every start `statfs` on it fails. Field
+  // 2026-09-10: the first reading said `disk: 0MB free` on a host with 103 GB,
+  // and zero means "no room" to everything that reads it.
+  const { freeBytesFor } = await import("../services/disk/free.js");
+  const os = await import("node:os");
+  const path = await import("node:path");
+  const missing = path.join(os.tmpdir(), "no-such-directory-here", "nor-here");
+
+  const bytes = await freeBytesFor(missing);
+
+  assert.ok(Number.isFinite(bytes) && bytes > 0, "a directory that does not exist read as no disk");
+});

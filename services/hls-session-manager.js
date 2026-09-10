@@ -93,8 +93,8 @@ import { Viewers } from "./viewer/Viewers.js";
 import { LiveOutputs } from "./output/LiveOutputs.js";
 import { variantHeightsFor } from "./output/ladder.js";
 import { EncodeOrchestrator } from "./orchestrators/EncodeOrchestrator.js";
-import { readDiskFree } from "./memory-report.js";
 import { wireDiskSpace } from "./disk/wire.js";
+import { freeBytesFor } from "./disk/free.js";
 
 /**
  * Whether an encoder run died because its INPUT went away, rather than because
@@ -1398,7 +1398,8 @@ export class HlsSessionManager {
     segmentFormatId = undefined,
     stateDir = "",
     segmentStore = null,
-    getTorrentTotals}) {
+    getTorrentTotals,
+    spillDisk = null}) {
     this.enabled = Boolean(enabled);
     this.ffmpegBin = ffmpegBin;
     this.keyframeTableBudgetMs = Number.isFinite(keyframeTableBudgetMs) && keyframeTableBudgetMs > 0
@@ -1451,6 +1452,10 @@ export class HlsSessionManager {
     // torrent itself costs the machine (item 7). Optional: a proxy wired
     // without it simply never learns that figure.
     this.getTorrentTotals = typeof getTorrentTotals === "function" ? getTorrentTotals : null;
+    // The spilled pieces, as a pair of closures over the torrent thread: what
+    // they weigh and how to tell them their share. Not the pool — the pool is
+    // on the other side of the thread boundary and this side holds none of it.
+    this.spillDisk = spillDisk;
     // Detected H.264 encoder descriptor (hardware or software). Defaults to
     // software libx264 when no detection result is supplied. May be downgraded
     // to software at runtime if a hardware encode fails.
@@ -1597,8 +1602,8 @@ export class HlsSessionManager {
     // One owner of the disk, and the list of what takes it lives with the owner.
     this.diskSpace = wireDiskSpace({
       segmentStore: this.segmentStore,
-      torrentPool: this.torrentPool,
-      readFree: readDiskFree,
+      spill: this.spillDisk,
+      readFree: freeBytesFor,
       logger
     });
     // Realtime-budget monitor: only meaningful for the software encoder with a

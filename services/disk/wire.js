@@ -19,14 +19,16 @@ import { DiskSpace } from "./DiskSpace.js";
  *
  * @param {object} params
  * @param {{ root: string, stats: () => { bytes: number } }} params.segmentStore
- * @param {{ spilledBytes?: number, allowSpillBytes?: (bytes: number) => unknown }} [params.torrentPool]
+ * @param {{ held: () => number, allow: (bytes: number) => unknown }} [params.spill] -
+ *   The pieces the memory store spills. They live on the torrent thread, so
+ *   this is a pair of closures over the channel rather than the pool itself.
  * @param {(directory: string) => Promise<number | null>} params.readFree
  * @param {{ info: Function, warn?: Function }} [params.logger]
  * @returns {{ revise: () => Promise<unknown>, segmentBytes: () => number, describe: () => string }}
  *   What the segments may hold is asked for rather than pushed: zero until the
  *   first revision, and zero stops growth rather than licensing it.
  */
-export function wireDiskSpace({ segmentStore, torrentPool, readFree, logger }) {
+export function wireDiskSpace({ segmentStore, spill, readFree, logger }) {
   const space = new DiskSpace({ readFree: () => readFree(segmentStore.root), logger });
   let segmentBytes = 0;
   space.register({
@@ -39,16 +41,15 @@ export function wireDiskSpace({ segmentStore, torrentPool, readFree, logger }) {
       segmentBytes = bytes;
     }
   });
-  if (typeof torrentPool?.allowSpillBytes === "function") {
-    // The pieces the memory store spills. They live on the torrent thread, so
-    // the share travels the channel that already carries everything else, and
+  if (typeof spill?.allow === "function") {
+    // The share travels the channel that already carries everything else, and
     // the reply says what they hold — one exchange, both directions.
     space.register({
       name: "spilled pieces",
-      held: () => torrentPool.spilledBytes ?? 0,
+      held: () => spill.held?.() ?? 0,
       wanted: () => Number.MAX_SAFE_INTEGER,
       allow: (bytes) => {
-        void torrentPool.allowSpillBytes?.(bytes);
+        void spill.allow(bytes);
       }
     });
   }

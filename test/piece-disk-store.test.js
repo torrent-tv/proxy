@@ -237,3 +237,31 @@ test("destroying it takes the directory with it", async () => {
   await assert.rejects(() => fs.stat(where), /ENOENT/, "the store left its directory behind");
   await fs.rm(directory, { recursive: true, force: true, maxRetries: 10, retryDelay: 20 });
 });
+
+test("the spill ceiling is what the disk's owner said, divided between the stores", async () => {
+  const { reviseSpillBudgets, SharedPieceStore } = await import("../services/piece-store/shared-piece-store.js");
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), "spill-share-"));
+  const stores = [
+    new SharedPieceStore(PIECE, { length: PIECE * 8, memoryBytes: PIECE, path: directory, name: "one" }),
+    new SharedPieceStore(PIECE, { length: PIECE * 8, memoryBytes: PIECE, path: directory, name: "two" })
+  ];
+  try {
+    const revised = reviseSpillBudgets(100 * PIECE, stores);
+    assert.deepEqual(
+      revised.map((store) => store.allowanceBytes),
+      [50 * PIECE, 50 * PIECE],
+      "one thread's share is divided equally between its stores"
+    );
+
+    // Nobody has said yet: nothing is thrown away, which is what it always did.
+    assert.deepEqual(
+      reviseSpillBudgets(null, stores).map((store) => store.allowanceBytes),
+      [null, null]
+    );
+  } finally {
+    for (const store of stores) {
+      await new Promise((resolve) => store.destroy(resolve));
+    }
+    await fs.rm(directory, { recursive: true, force: true, maxRetries: 10, retryDelay: 20 });
+  }
+});

@@ -39,6 +39,25 @@ function makeDisk({ failWrite = false, failRead = false, holdWrites = false } = 
     get size() {
       return stored.size;
     },
+    get bytes() {
+      let total = 0;
+      for (const value of stored.values()) {
+        total += value.length;
+      }
+      return total;
+    },
+    get path() {
+      return ".";
+    },
+    get allowanceBytes() {
+      return null;
+    },
+    reviseAllowance() {
+      return null;
+    },
+    stats() {
+      return { pieces: stored.size, bytes: this.bytes, allowanceBytes: null, evictions: 0 };
+    },
     has(index) {
       return stored.has(index);
     },
@@ -247,7 +266,7 @@ test("a piece written back to memory is not resurrected on disk by its own spill
 
     // The swarm hands piece 0 back while that write is still going. The store
     // must drop the disk copy AFTER the write has recorded it, not before —
-    // `DiskTier.write` adds the index on completion, so an early forget is
+    // `PieceDiskStore.write` adds the index on completion, so an early forget is
     // undone and the next read of piece 0 comes back from before the rewrite.
     let settled = false;
     const rewritten = put(store, 0);

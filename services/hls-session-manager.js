@@ -8,7 +8,7 @@
  */
 
 import { createReadStream, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
-import { access, readdir, readFile, rm, stat, unlink } from "node:fs/promises";
+import { access, readFile, rm, stat, unlink } from "node:fs/promises";
 import { Readable } from "node:stream";
 import os from "node:os";
 import path from "node:path";
@@ -93,6 +93,7 @@ import { LiveOutputs } from "./output/LiveOutputs.js";
 import { variantHeightsFor } from "./output/ladder.js";
 import { EncodeOrchestrator } from "./orchestrators/EncodeOrchestrator.js";
 import { readDiskFree } from "./memory-report.js";
+import { DiskSpace } from "./disk/DiskSpace.js";
 
 /**
  * Whether an encoder run died because its INPUT went away, rather than because
@@ -473,18 +474,6 @@ const DEFAULT_SESSION_TTL_MS = 30 * 60 * 1000;
  * there for the life of the process.
  */
 const SEGMENT_STORE_IDLE_MS = 6 * 60 * 60 * 1000;
-/**
- * The share of FREE disk the produced segments may take.
- *
- * A share of what is free NOW, re-read on every sweep, for the same reason the
- * piece store re-derives its memory allowance every minute: a machine that
- * fills up after this proxy started would otherwise go on spending an allowance
- * taken when it was empty. A Home Assistant install often runs from a 32 GB
- * card carrying everything else in the house.
- */
-const SEGMENT_STORE_FREE_SHARE = 0.25;
-/** What the store may hold where the free space cannot be read at all. */
-const SEGMENT_STORE_FALLBACK_BYTES = 2 * 1024 * 1024 * 1024;
 const DEFAULT_STARTUP_WAIT_MS = 5_000;
 // Realtime budget — runtime downswitch (software encoder only). Periodically
 // check each active software-transcode session's ffmpeg `speed`; when it stays
@@ -1300,6 +1289,16 @@ export function costKindForSession(session) {
 
 export class HlsSessionManager {
   /**
+   * What the produced segments may hold, from the one owner of the disk.
+   *
+   * Zero until the first revision, and zero stops growth rather than licensing
+   * it: a store that has not been told what it may take is not a store with room.
+   *
+   * @type {number}
+   */
+  #segmentAllowanceBytes = 0;
+
+  /**
    * Recent times from session-create to a servable first segment, in ms.
    * See #rememberFirstSegmentLatency.
    *
@@ -1604,6 +1603,43 @@ export class HlsSessionManager {
       void this.cleanupExpired();
     }, CLEANUP_INTERVAL_MS);
     this.cleanupTimer.unref();
+    // ONE OWNER OF THE DISK, read by everything that takes any of it.
+    //
+    // Three things here write to the same disk and each used to read the free
+    // space as though it were alone: the segments (a quarter of what was free,
+    // plus a 2 GB floor, both chosen by hand), the pieces the memory store
+    // spills (nothing at all — 14 400 MB in one fifty-minute viewing, field
+    // 2026-08-31), and the diagnostics we keep on purpose (bounded by a count
+    // and never by a size: two dumps and five snapshots came to 3.2 GB on the
+    // addon host). Three ceilings, each standing for the whole disk.
+    this.diskSpace = new DiskSpace({
+      readFree: () => readDiskFree(this.segmentStore.root),
+      logger
+    });
+    this.diskSpace.register({
+      name: "segments",
+      held: () => this.segmentStore.stats().bytes,
+      // What it would take: the whole of every film anybody is watching. There
+      // is no smaller honest answer, so it asks for everything and is cut in
+      // proportion like everybody else.
+      wanted: () => Number.MAX_SAFE_INTEGER,
+      allow: (bytes) => {
+        this.#segmentAllowanceBytes = bytes;
+      }
+    });
+    // The pieces the memory store spills. They live on the torrent thread, so
+    // the share travels the channel that already carries everything else, and
+    // the reply says what they hold — one exchange, both directions.
+    if (typeof this.torrentPool?.allowSpillBytes === "function") {
+      this.diskSpace.register({
+        name: "spilled pieces",
+        held: () => this.torrentPool.spilledBytes ?? 0,
+        wanted: () => Number.MAX_SAFE_INTEGER,
+        allow: (bytes) => {
+          void this.torrentPool.allowSpillBytes(bytes);
+        }
+      });
+    }
     // Realtime-budget monitor: only meaningful for the software encoder with a
     // benchmark (the only path that can pick/step resolution). Cheap no-op scan
     // otherwise.
@@ -5530,6 +5566,9 @@ export class HlsSessionManager {
       inputUnavailable: (message) => isInputUnavailable(message),
       onProgress: (report) => this.#noteRunProgress(session, run, report),
       indexOfName: (name) => session.segmentFormat.segmentIndexFromName(name),
+      // Why this encoder exists, recorded with its argument list. It used to be
+      // handed to a separate `start` call; there is no separate call now.
+      because,
       onClosed: (name) => this.segmentStore.publish(session.outputKey ?? "", name, session.segmentFormat),
       onEnded: (ended) => this.noteRunEnded(session, run, ended)
     });
@@ -5542,8 +5581,6 @@ export class HlsSessionManager {
     // seek could be mis-counted as sustained sub-realtime and trigger a
     // premature downscale.
     session.budgetSlowSince = 0;
-
-    run.start(because);
 
     logger.info(
       `transcode ${session.id} encode-run #${safeIndex}..#${runEnd} from segment #${safeIndex} ` +
@@ -9667,30 +9704,55 @@ export class HlsSessionManager {
     // The segments outlive every session on them, so what they cost is decided
     // here rather than by anybody's departure: how long ago each output was
     // last read, and how much room the disk has for the lot.
+    //
+    // The room is not worked out here any more. Three things on this proxy write
+    // to one disk, and each used to read the free space as though it were the
+    // only claimant — three ceilings, each standing for the whole disk. The
+    // owner divides one reading between them; this asks it what this store's
+    // share is now.
+    await this.diskSpace.revise();
     this.segmentStore.enforce({
       idleMs: SEGMENT_STORE_IDLE_MS,
-      maxBytes: await this.#segmentStoreAllowance()
+      maxBytes: this.#segmentAllowanceBytes,
+      // WHERE THE VIEWERS ARE, which is what decides the order material leaves
+      // in: behind them first, furthest behind first of all.
+      viewersAt: (key) => this.#viewerSegmentsOn(key)
     });
   }
 
   /**
-   * How much disk the produced segments may hold.
+   * Where the viewers of one output stand, as segment numbers.
    *
-   * A share of what is FREE now rather than a figure fixed at startup, for the
-   * same reason the piece store's memory allowance is re-derived every minute:
-   * a machine that fills up after this proxy started would otherwise go on
-   * spending an allowance taken when it was empty. On a Home Assistant install
-   * that disk is often a 32 GB card carrying everything else the household
-   * runs.
+   * Empty when nobody is on it, which is what makes its segments the first the
+   * store gives up. The number is the segment a viewer last asked for, since
+   * that is the position they are actually consuming from.
    *
-   * @returns {Promise<number>}
+   * @param {string} key - `OutputSpec.toKey()`.
+   * @returns {number[]}
    */
-  async #segmentStoreAllowance() {
-    const free = await readDiskFree(this.segmentStore.root);
-    if (!Number.isFinite(free) || free <= 0) {
-      return SEGMENT_STORE_FALLBACK_BYTES;
+  #viewerSegmentsOn(key) {
+    const at = [];
+    const now = Date.now();
+    const staleAfterMs = this.presenceStaleAfterMs();
+    for (const session of this.sessionsById.values()) {
+      if (session.outputKey !== key) {
+        continue;
+      }
+      for (const viewer of viewersOf(session).values()) {
+        if (!viewer.isPresent(now, staleAfterMs)) {
+          continue;
+        }
+        const seconds = viewer.positionSeconds();
+        if (!Number.isFinite(seconds)) {
+          continue;
+        }
+        const index = this.#segmentIndexForTime(session, /** @type {number} */ (seconds));
+        if (Number.isInteger(index) && index >= 0) {
+          at.push(index);
+        }
+      }
     }
-    return Math.max(SEGMENT_STORE_FALLBACK_BYTES, Math.floor(free * SEGMENT_STORE_FREE_SHARE));
+    return at;
   }
 
   /**
@@ -10078,14 +10140,27 @@ export class HlsSessionManager {
     for (const sessionId of activeIds) {
       await this.disposeSession(sessionId);
     }
-    const rootDir = path.join(os.tmpdir(), "torrent-tv-hls");
-    try {
-      const dirs = await readdir(rootDir);
-      if (dirs.length === 0) {
-        await rm(rootDir, { recursive: true, force: true });
-      }
-    } catch (_error) {
-      // Best effort cleanup.
-    }
+    // EVERYTHING THIS PROCESS OWNS, not the root if it happens to be empty.
+    //
+    // The old rule removed the root only when nothing was left in it, which is
+    // from the first commit of this repository and was never a decision. What it
+    // protected against is a second proxy sharing the root — the addon and one
+    // started by hand — and it took the wrong guard: it left the other process's
+    // directories alone by leaving EVERY directory alone, including this
+    // process's own orphans. So a directory adopted at startup, owned by no
+    // session, survived the exit and was adopted again at the next start. That
+    // is the loop that makes an orphan permanent, and it is why 5.0 GB of
+    // segments from sessions that had ended hours before were on the addon host
+    // on 2026-09-10.
+    //
+    // What this removes is what the store knows about, which is exactly what
+    // this process owns — the adopted directories included, since adopting one
+    // is taking ownership of it. A second proxy's directories are not in it.
+    //
+    // After a clean exit nothing is being watched, by construction: the sessions
+    // above have just been disposed. So what goes is material nobody has asked
+    // for. And it gives the startup sweep its meaning back — whatever is found
+    // then is from a kill, which is the case it was written for.
+    this.segmentStore.dropAll("the proxy is shutting down");
   }
 }

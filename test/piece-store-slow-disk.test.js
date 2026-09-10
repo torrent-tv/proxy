@@ -55,6 +55,21 @@ function heldDisk() {
     get size() {
       return stored.size;
     },
+    get bytes() {
+      return 0;
+    },
+    get path() {
+      return ".";
+    },
+    get allowanceBytes() {
+      return null;
+    },
+    reviseAllowance() {
+      return null;
+    },
+    stats() {
+      return { pieces: stored.size, bytes: 0, allowanceBytes: null, evictions: 0 };
+    },
     has: (index) => stored.has(index),
     forget: (index) => stored.delete(index),
     write(index) {
@@ -139,6 +154,6 @@ test("memory in use never runs past the allowance while the disk is behind", asy
     assert.ok(store.stats().blocksInUse <= capacity + 1, "the pool did not settle");
   } finally {
     store.destroy(() => undefined);
-    await fs.rm(directory, { recursive: true, force: true });
+    await fs.rm(directory, { recursive: true, force: true, maxRetries: 10, retryDelay: 20 });
   }
 });

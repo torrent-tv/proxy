@@ -17,6 +17,8 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { EventEmitter } from "node:events";
+import { EncodeRun } from "../services/encode/EncodeRun.js";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 
@@ -67,6 +69,34 @@ test("nothing outside the encoding layer starts an encoder", () => {
   const manager = statements(source("services/hls-session-manager.js"));
   const builds = manager.filter((line) => line.includes("new EncodeRun("));
   assert.equal(builds.length, 1, "one place builds an encoder");
+});
+
+test("a run exists means its process is running, so nothing can start one twice", () => {
+  // WHAT THIS IS FOR, and why the test above did not catch it. That one counts
+  // where a run is BUILT and asks nothing about where it is STARTED, and until
+  // 2026-09-10 those were two acts: the session manager built a run and started
+  // it, handed it back, and the orchestrator started it again. Every run of
+  // every session therefore had two ffmpeg processes on one output writing one
+  // set of names — 207 runs against 414 spawns in the field logs of 08-10
+  // September, without a single exception — and only the second was reachable,
+  // so a stop killed one and the other ran on, measured 105 seconds past its
+  // own run's death.
+  //
+  // Asserted over the source because the guarantee IS a property of the source:
+  // there is no second act for a second owner to perform.
+  const files = [
+    "services/encode/EncodeRun.js",
+    "services/orchestrators/EncodeOrchestrator.js",
+    "services/hls-session-manager.js"
+  ];
+  for (const file of files) {
+    const starts = statements(source(file)).filter(
+      (line) =>
+        /(?:^|[^a-zA-Z#])start\(/.test(line) &&
+        !/startsWith|startPosition|startIndex|startSeconds|startAt|startNumber/.test(line)
+    );
+    assert.deepEqual(starts, [], "an encoder is started by hand in " + file + ": " + starts.join(" / "));
+  }
 });
 
 test("starting an encoder stops nothing", () => {
@@ -216,5 +246,36 @@ test("each output is handed its own priority map, and the plan is what reads it"
     manager.includes("this.priority.mapFor("),
     false,
     "and never the whole film's, which wanted an encoder on every output of it"
+  );
+});
+
+test("one process per run, and no way to ask for a second", () => {
+  const spawned = [];
+  const run = new EncodeRun({
+    address: "torrent:abc:video-only:v=0/copy",
+    encoder: { name: "libx264", kind: "software" },
+    from: 0,
+    to: 4,
+    buildArgs: () => [],
+    spawn: () => {
+      const child = new EventEmitter();
+      child.stdout = new EventEmitter();
+      child.stderr = new EventEmitter();
+      child.stdio = [null, child.stdout, child.stderr, new EventEmitter()];
+      child.kill = () => undefined;
+      child.pid = 1 + spawned.length;
+      spawned.push(child);
+      return child;
+    },
+    logger: { info: () => undefined, warn: () => undefined },
+    now: () => 1000,
+    because: "a test asked for it"
+  });
+
+  assert.equal(spawned.length, 1, "building a run did not put a process on the machine");
+  assert.equal(
+    Reflect.get(run, "start"),
+    undefined,
+    "a run still offers a way to start it a second time"
   );
 });

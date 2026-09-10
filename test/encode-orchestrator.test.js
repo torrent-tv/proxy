@@ -172,7 +172,6 @@ test("an encoder already working covers what it will reach in time", () => {
   // wanted at all.
   const { made, buildRun } = orchestrator();
   const first = buildRun({ from: 0, to: -1 });
-  first.start("a viewer needs it");
   first.noteSpeed(8);
   made.adopt(PICTURE, first);
   made.noteProduced(PICTURE, 0);
@@ -203,7 +202,6 @@ test("somebody stopped where no encoder can arrive in time is served, and the sc
   // seconds anybody spends looking at a spinner — outranks it.
   const { made, buildRun } = orchestrator();
   const first = buildRun({ from: 0, to: -1 });
-  first.start("a viewer needs it");
   first.noteSpeed(1);
   made.adopt(PICTURE, first);
   made.noteProduced(PICTURE, 0);
@@ -224,7 +222,6 @@ test("two encoders on one output never share a segment number", () => {
   // what that neighbour makes sooner.
   const { made, buildRun } = orchestrator();
   const first = buildRun({ from: 0, to: -1 });
-  first.start("a viewer needs it");
   first.noteSpeed(1);
   made.adopt(PICTURE, first);
   made.noteProduced(PICTURE, 0);

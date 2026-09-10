@@ -70,6 +70,21 @@ export class WorkerTorrentPool {
    * @param {number} fileIndex
    * @returns {() => void}
    */
+  /** What the spilled pieces weigh on the torrent thread, as last revised. */
+  get spilledBytes() {
+    return this.#client.spilledBytes;
+  }
+
+  /**
+   * Say how much disk those spilled pieces may take between them.
+   *
+   * @param {number} bytes
+   * @returns {Promise<number>} What they hold now.
+   */
+  allowSpillBytes(bytes) {
+    return this.#client.allowSpillBytes(bytes);
+  }
+
   acquireFile(torrent, fileIndex) {
     const sourceKey = torrent?.sourceKey;
     if (!sourceKey) {

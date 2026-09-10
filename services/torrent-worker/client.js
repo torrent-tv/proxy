@@ -676,6 +676,38 @@ export class TorrentWorkerClient {
    *
    * @returns {Promise<void>}
    */
+  /**
+   * What the spilled pieces weigh, as of the last revision. Zero until one has
+   * happened, which is what "we have not asked yet" means.
+   *
+   * @type {number}
+   */
+  spilledBytes = 0;
+
+  /**
+   * Say how much disk the spilled pieces on this thread may take between them.
+   *
+   * Best effort and never awaited by anything that matters: a share that does
+   * not arrive leaves the ceiling where it was, and the next revision is a
+   * minute away.
+   *
+   * @param {number} bytes
+   * @returns {Promise<void>}
+   */
+  async allowSpillBytes(bytes) {
+    try {
+      const revised = await this.#caller.call(Command.SPILL_ALLOWANCE, { bytes });
+      // The reply says what those stores actually hold, which is what the owner
+      // of the disk needs for the next division. One exchange, both directions.
+      this.spilledBytes = Array.isArray(revised)
+        ? revised.reduce((sum, store) => sum + (Number(store?.bytes) || 0), 0)
+        : this.spilledBytes;
+    } catch {
+      // The thread is gone or busy; the next revision says it again.
+    }
+    return this.spilledBytes;
+  }
+
   async destroyAll() {
     this.#stopping = true;
     try {

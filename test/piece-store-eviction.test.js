@@ -27,7 +27,7 @@ async function makeStore(capacityPieces) {
   const store = new SharedPieceStore(PIECE, {
     length: PIECE * 64,
     memoryBytes: PIECE * capacityPieces,
-    spillDirectory: directory,
+    path: directory,
     name: "eviction-test"
   });
   return { store, directory };
@@ -89,7 +89,7 @@ test("concurrent puts past capacity never hand two pieces the same slot", async 
     );
   } finally {
     await store.destroy();
-    await fs.rm(directory, { recursive: true, force: true });
+    await fs.rm(directory, { recursive: true, force: true, maxRetries: 10, retryDelay: 20 });
   }
 });
 
@@ -108,7 +108,7 @@ test("a piece caught mid-spill is waited for, not reported missing", async () =>
     assert.ok(bytes.equals(pieceOf(0)), "piece 0 came back wrong while being spilled");
   } finally {
     await store.destroy();
-    await fs.rm(directory, { recursive: true, force: true });
+    await fs.rm(directory, { recursive: true, force: true, maxRetries: 10, retryDelay: 20 });
   }
 });
 
@@ -129,7 +129,7 @@ test("pinned pieces are never evicted, and the pin count is reported", async () 
     assert.equal(store.stats().pinned, 0, "unpin is not reflected in the stats");
   } finally {
     await store.destroy();
-    await fs.rm(directory, { recursive: true, force: true });
+    await fs.rm(directory, { recursive: true, force: true, maxRetries: 10, retryDelay: 20 });
   }
 });
 
@@ -188,7 +188,7 @@ test("the store says why it spills: what is asked of it, what it had to take, ho
     assert.equal(store.stats().demand.readers, 0, "a reader that ends stops being counted");
   } finally {
     store.destroy(() => undefined);
-    await fs.rm(directory, { recursive: true, force: true });
+    await fs.rm(directory, { recursive: true, force: true, maxRetries: 10, retryDelay: 20 });
   }
 });
 
@@ -226,7 +226,7 @@ test("a piece nobody has declared does not push out one that is being read", asy
     }
   } finally {
     store.destroy(() => undefined);
-    await fs.rm(directory, { recursive: true, force: true });
+    await fs.rm(directory, { recursive: true, force: true, maxRetries: 10, retryDelay: 20 });
   }
 });
 
@@ -245,7 +245,7 @@ test("before any reader has declared anything, an arriving piece still goes to m
     assert.ok(stats.spills > 0, "the store filled and evicted, as it did before");
   } finally {
     store.destroy(() => undefined);
-    await fs.rm(directory, { recursive: true, force: true });
+    await fs.rm(directory, { recursive: true, force: true, maxRetries: 10, retryDelay: 20 });
   }
 });
 
@@ -274,7 +274,7 @@ test("the store asks for what its readers declared, and for a whole window at le
     assert.equal(store.wantedBytes, 50 * PIECE);
   } finally {
     store.destroy(() => undefined);
-    await fs.rm(directory, { recursive: true, force: true });
+    await fs.rm(directory, { recursive: true, force: true, maxRetries: 10, retryDelay: 20 });
   }
 });
 
@@ -300,7 +300,7 @@ test("the floor the ceiling will not fall below is the same union, not the wides
     );
   } finally {
     store.destroy(() => undefined);
-    await fs.rm(directory, { recursive: true, force: true });
+    await fs.rm(directory, { recursive: true, force: true, maxRetries: 10, retryDelay: 20 });
   }
 });
 
@@ -333,7 +333,7 @@ test("a block is re-used instead of a new one being allocated for every piece", 
     }
   } finally {
     store.destroy(() => undefined);
-    await fs.rm(directory, { recursive: true, force: true });
+    await fs.rm(directory, { recursive: true, force: true, maxRetries: 10, retryDelay: 20 });
   }
 });
 
@@ -360,7 +360,7 @@ test("a spare block is given up once it has sat longer than the store's own work
     assert.equal(store.stats().blocksReleased, released);
   } finally {
     store.destroy(() => undefined);
-    await fs.rm(directory, { recursive: true, force: true });
+    await fs.rm(directory, { recursive: true, force: true, maxRetries: 10, retryDelay: 20 });
   }
 });
 
@@ -388,7 +388,7 @@ test("evicting a piece the disk already holds costs no second write", async () =
     assert.ok((await get(store, 0)).equals(pieceOf(0)));
   } finally {
     store.destroy(() => undefined);
-    await fs.rm(directory, { recursive: true, force: true });
+    await fs.rm(directory, { recursive: true, force: true, maxRetries: 10, retryDelay: 20 });
   }
 });
 
@@ -411,7 +411,7 @@ test("a store whose readers have gone asks for nothing, one that never had them 
     assert.ok(store.wantedBytes < opening, "a store with no readers left asks for nothing");
   } finally {
     store.destroy(() => undefined);
-    await fs.rm(directory, { recursive: true, force: true });
+    await fs.rm(directory, { recursive: true, force: true, maxRetries: 10, retryDelay: 20 });
   }
 });
 
@@ -434,7 +434,7 @@ test("the allowance is never cut below one reader's whole window", async () => {
     assert.equal(obeyed.belowAWindow, false);
   } finally {
     store.destroy(() => undefined);
-    await fs.rm(directory, { recursive: true, force: true });
+    await fs.rm(directory, { recursive: true, force: true, maxRetries: 10, retryDelay: 20 });
   }
 });
 
@@ -478,7 +478,7 @@ test("the pool stays the size it is allowed to be, however many pieces pass thro
     }
   } finally {
     store.destroy(() => undefined);
-    await fs.rm(directory, { recursive: true, force: true });
+    await fs.rm(directory, { recursive: true, force: true, maxRetries: 10, retryDelay: 20 });
   }
 });
 
@@ -512,7 +512,7 @@ test("a piece wanted later than the one it would displace goes to disk instead",
     }
   } finally {
     store.destroy(() => undefined);
-    await fs.rm(directory, { recursive: true, force: true });
+    await fs.rm(directory, { recursive: true, force: true, maxRetries: 10, retryDelay: 20 });
   }
 });
 
@@ -542,6 +542,6 @@ test("a piece the map wants more displaces one it wants less, however far away i
     assert.ok((await get(store, 95)).equals(pieceOf(95)));
   } finally {
     store.destroy(() => undefined);
-    await fs.rm(directory, { recursive: true, force: true });
+    await fs.rm(directory, { recursive: true, force: true, maxRetries: 10, retryDelay: 20 });
   }
 });

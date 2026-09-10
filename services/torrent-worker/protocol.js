@@ -115,6 +115,15 @@ export const Command = {
   /** Cues of one subtitle track, from the clusters already downloaded. */
   SUBTITLE_CUES: "subtitle-cues",
   /** Shut the client down, optionally deleting downloaded data. */
+  /**
+   * How much disk the spilled pieces may take between them.
+   *
+   * Sent from the main thread, because the disk has one owner and this store is
+   * not its only user: the segments an encoder produces are on the same disk,
+   * and a ceiling one of two users sets for itself is not a ceiling. The worker
+   * divides its share between the stores it holds.
+   */
+  SPILL_ALLOWANCE: "spill-allowance",
   DESTROY_ALL: "destroy-all"
 };
 

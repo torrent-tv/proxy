@@ -572,8 +572,11 @@ export class EncodeOrchestrator {
     // a run writing that number again writes under a working name until it
     // closes its own — so the file standing there is a complete piece made by
     // somebody, and serving it is right until the newer one replaces it whole.
+    // The claim comes after the run exists, and that is not a race: everything
+    // between is synchronous, and a process cannot say a word before the next
+    // tick. What it removes is the second act — building a run and starting it
+    // were two steps, and two owners each performed the second one.
     this.coverageOf(address).claim(run, from, endOfRun({ from, to }));
-    run.start(because);
   }
 
   /**

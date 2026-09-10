@@ -99,7 +99,7 @@ test("a range inside one piece is read from that piece only", async () => {
     assert.deepEqual(bytes, expectedBytes(100, 100));
   } finally {
     store.destroy(() => undefined);
-    await fs.rm(directory, { recursive: true, force: true });
+    await fs.rm(directory, { recursive: true, force: true, maxRetries: 10, retryDelay: 20 });
   }
 });
 
@@ -117,7 +117,7 @@ test("a range spanning pieces reassembles in order", async () => {
     assert.deepEqual(bytes, expectedBytes(start, end - start + 1));
   } finally {
     store.destroy(() => undefined);
-    await fs.rm(directory, { recursive: true, force: true });
+    await fs.rm(directory, { recursive: true, force: true, maxRetries: 10, retryDelay: 20 });
   }
 });
 
@@ -136,7 +136,7 @@ test("a file that does not start at a piece boundary is still read correctly", a
     assert.deepEqual(bytes, expectedBytes(fileOffset, 1500));
   } finally {
     store.destroy(() => undefined);
-    await fs.rm(directory, { recursive: true, force: true });
+    await fs.rm(directory, { recursive: true, force: true, maxRetries: 10, retryDelay: 20 });
   }
 });
 
@@ -157,6 +157,6 @@ test("every fragment releases its pin, so nothing stays held", async () => {
     assert.equal(store.stats().blockedByPins, before, "a pin was left behind");
   } finally {
     store.destroy(() => undefined);
-    await fs.rm(directory, { recursive: true, force: true });
+    await fs.rm(directory, { recursive: true, force: true, maxRetries: 10, retryDelay: 20 });
   }
 });

@@ -154,7 +154,7 @@ test("a read that is not stopped claims nothing", async () => {
     await iterator.return();
   } finally {
     store.destroy(() => undefined);
-    await fs.rm(directory, { recursive: true, force: true });
+    await fs.rm(directory, { recursive: true, force: true, maxRetries: 10, retryDelay: 20 });
   }
 });
 
@@ -165,7 +165,7 @@ test("a finished read leaves nothing selected", async () => {
     assert.deepEqual(torrent.held, [], "the read kept its claim after finishing");
   } finally {
     store.destroy(() => undefined);
-    await fs.rm(directory, { recursive: true, force: true });
+    await fs.rm(directory, { recursive: true, force: true, maxRetries: 10, retryDelay: 20 });
   }
 });
 
@@ -188,7 +188,7 @@ test("an abandoned read leaves nothing selected", async () => {
     assert.deepEqual(torrent.held, [], "an abandoned read kept its claim forever");
   } finally {
     store.destroy(() => undefined);
-    await fs.rm(directory, { recursive: true, force: true });
+    await fs.rm(directory, { recursive: true, force: true, maxRetries: 10, retryDelay: 20 });
   }
 });
 
@@ -238,7 +238,7 @@ test("two stopped readers add up, and one leaving takes only its own", async () 
     assert.deepEqual(torrent.held, [], "the last reader left something behind");
   } finally {
     store.destroy(() => undefined);
-    await fs.rm(directory, { recursive: true, force: true });
+    await fs.rm(directory, { recursive: true, force: true, maxRetries: 10, retryDelay: 20 });
   }
 });
 
@@ -275,7 +275,7 @@ test("criticality marks the window being waited for, not the whole range", async
     await iterator.return();
   } finally {
     store.destroy(() => undefined);
-    await fs.rm(directory, { recursive: true, force: true });
+    await fs.rm(directory, { recursive: true, force: true, maxRetries: 10, retryDelay: 20 });
   }
 });
 
@@ -306,7 +306,7 @@ test("a reader that is abandoned mid-fragment does not keep the piece pinned", a
     );
   } finally {
     store.destroy(() => undefined);
-    await fs.rm(directory, { recursive: true, force: true });
+    await fs.rm(directory, { recursive: true, force: true, maxRetries: 10, retryDelay: 20 });
   }
 });
 

@@ -140,7 +140,7 @@ test("what nobody has read for long enough goes, and time is the only judge", (t
   clock += 60_000;
   assert.deepEqual(
     store.enforce({ idleMs: 3_600_000, maxBytes: 1e9 }),
-    { droppedIdle: 0, droppedForRoom: 0, bytes: 32 }
+    { droppedIdle: 0, droppedForRoom: 0, segmentsRemoved: 0, bytes: 32 }
   );
 
   clock += 7_200_000;

@@ -40,6 +40,14 @@ export class VaapiEncoder extends Encoder {
 
   // No fps filter: VAAPI inherits the source rate and keeps keyframes on the
   // grid via time-based -force_key_frames, so it already honours source fps.
+  /** @param {string | null} rung @returns {string[]} */
+  benchmarkArgs(rung = null) {
+    // Raw frames live in this process; VAAPI encodes what is in the device, so
+    // the upload is part of what this kind costs and belongs in the reading.
+    const quality = rung ? ["-quality", rung] : [];
+    return ["-vf", "format=nv12,hwupload", "-c:v", "h264_vaapi", "-qp", "24", ...quality];
+  }
+
   buildVideoArgs({ targetWidth, targetHeight, segmentDurationSec, forcedKeyframeTimes }) {
     const { w, h } = safeDimensions(targetWidth, targetHeight);
     return [

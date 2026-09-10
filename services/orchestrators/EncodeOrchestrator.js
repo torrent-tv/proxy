@@ -53,6 +53,17 @@ export class EncodeOrchestrator {
   /** What a stop and a start have cost on this host. */
   #costs = new RunCosts();
 
+  /**
+   * What starting and stopping an encoder was measured to cost on this host,
+   * before any viewer existed. Told once; real runs replace it as they end.
+   *
+   * @param {{ firstByteWaitSec: number, killCostSec: number } | null} measured
+   * @returns {void}
+   */
+  noteStartupCosts(measured) {
+    this.#costs.noteStartup(measured);
+  }
+
   /** The last reason a budget was cut, so the same one is not said twice. */
   #lastBudgetReason = new Map();
 

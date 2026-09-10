@@ -8,6 +8,7 @@
  * download.
  */
 
+import { IDLE_KEEP_MS } from "./disk/keep.js";
 import dns from "node:dns/promises";
 import os from "node:os";
 import path from "node:path";
@@ -61,13 +62,13 @@ const DHT_RESOLVE_TIMEOUT_MS = 2000;
 // torrent data lives under here.
 const WEBTORRENT_STORE_ROOT = path.join(os.tmpdir(), "webtorrent");
 
-// How long a torrent may sit with zero active file readers before it is
-// removed (with its on-disk store). Generous so brief gaps between ffmpeg
-// range reads — a pause, a backgrounded tab, or a phone turned off for a few
-// minutes — do not evict an in-use torrent's already-downloaded data, so a
-// resume plays from disk instead of re-downloading. A longer idle (viewer truly
-// gone) frees the disk; the global disk cap still evicts earlier under pressure.
-const TORRENT_IDLE_TTL_MS = 15 * 60 * 1000;
+// How long a torrent may sit with zero active file readers before it is removed
+// with its on-disk store. ONE NUMBER for everything nobody is using, shared with
+// the produced segments — see `services/disk/keep.js` for why it is one and what
+// it stands for. It was fifteen minutes here against thirty for the session it
+// feeds, so a viewer returning at the twentieth minute got a session whose source
+// had gone.
+const TORRENT_IDLE_TTL_MS = IDLE_KEEP_MS;
 
 // Bytes ahead of a read position to mark CRITICAL on each range request. In
 // WebTorrent, `critical` does NOT reorder the sequential piece scan — it enables

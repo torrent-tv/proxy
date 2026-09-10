@@ -40,6 +40,11 @@ export class VaapiEncoder extends Encoder {
 
   // No fps filter: VAAPI inherits the source rate and keeps keyframes on the
   // grid via time-based -force_key_frames, so it already honours source fps.
+  /** @returns {string[]} */
+  benchmarkInputArgs() {
+    return this.device ? ["-vaapi_device", this.device] : [];
+  }
+
   /** @param {string | null} rung @returns {string[]} */
   benchmarkArgs(rung = null) {
     // Raw frames live in this process; VAAPI encodes what is in the device, so

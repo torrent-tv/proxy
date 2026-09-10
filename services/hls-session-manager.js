@@ -94,6 +94,8 @@ import { LiveOutputs } from "./output/LiveOutputs.js";
 import { variantHeightsFor } from "./output/ladder.js";
 import { EncodeOrchestrator } from "./orchestrators/EncodeOrchestrator.js";
 import { wireDiskSpace } from "./disk/wire.js";
+import { IDLE_KEEP_MS } from "./disk/keep.js";
+import { Returns } from "./disk/returns.js";
 import { freeBytesFor } from "./disk/free.js";
 
 /**
@@ -474,7 +476,7 @@ const DEFAULT_SESSION_TTL_MS = 30 * 60 * 1000;
  * not this; this only stops something nobody has touched all day from sitting
  * there for the life of the process.
  */
-const SEGMENT_STORE_IDLE_MS = 6 * 60 * 60 * 1000;
+const SEGMENT_STORE_IDLE_MS = IDLE_KEEP_MS;
 const DEFAULT_STARTUP_WAIT_MS = 5_000;
 // Realtime budget — runtime downswitch (software encoder only). Periodically
 // check each active software-transcode session's ffmpeg `speed`; when it stays
@@ -1605,6 +1607,10 @@ export class HlsSessionManager {
       void this.cleanupExpired();
     }, CLEANUP_INTERVAL_MS);
     this.cleanupTimer.unref();
+    // How long after material stops being read somebody asks for it again — the
+    // one term of the keeping period that is guessed rather than measured, and
+    // the only place it can be measured from.
+    this.returns = new Returns();
     // One owner of the disk, and the list of what takes it lives with the owner.
     this.diskSpace = wireDiskSpace({
       segmentStore: this.segmentStore,
@@ -2257,6 +2263,10 @@ export class HlsSessionManager {
     // session was never registered, and no sweep looks for one. Proxy
     // 2.9.101-2.9.102 failed here on every single request and the leftovers
     // were the only trace of it on disk.
+    // A RETURN, if this output was held before — and its age, which is the one
+    // term of the keeping period that nothing measures. Read BEFORE the
+    // directory is claimed, since claiming it is what marks it read.
+    this.returns.note({ lastReadAt: this.segmentStore.lastReadAt(spec.toKey()), now: Date.now() });
     this.segmentStore.directoryFor(spec.toKey());
     this.segmentStore.useFormat(spec.toKey(), segmentFormat);
 
@@ -9678,6 +9688,12 @@ export class HlsSessionManager {
     // last read, and how much room the disk has for the lot.
     // The room is the disk owner's to divide; this asks what the share is now.
     await this.diskSpace.revise();
+    // What viewers actually do, beside the period that stands in for it. Said
+    // where it can be read against the disk figures rather than on its own.
+    const returns = this.returns.describe(IDLE_KEEP_MS);
+    if (returns !== null) {
+      logger.info(returns);
+    }
     this.segmentStore.enforce({
       idleMs: SEGMENT_STORE_IDLE_MS,
       maxBytes: this.diskSpace.segmentBytes(),

@@ -1434,6 +1434,10 @@ function measureEncodeSlope(ffmpegBin, encoder, rung, rawFramesPath) {
   return new Promise((resolve) => {
     const args = [
       "-hide_banner", "-loglevel", "error", "-nostats",
+      // What a device-backed encoder needs before the input — the device. Not
+      // its decoding setup: this is fed raw frames and there is nothing to
+      // decode, and `-hwaccel vaapi` over rawvideo fails to open.
+      ...(typeof encoder?.benchmarkInputArgs === "function" ? encoder.benchmarkInputArgs() : []),
       "-stream_loop", "-1",
       "-f", "rawvideo", "-pix_fmt", "yuv420p",
       "-s", `${BENCHMARK_REF_W}x${BENCHMARK_REF_H}`, "-r", String(TRANSCODE_FPS),

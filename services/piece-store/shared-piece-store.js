@@ -443,7 +443,10 @@ export class SharedPieceStore {
       // What it may hold is settled by the same revision that settles memory,
       // within a minute of the store existing. Until then it is unbounded, which
       // is what it has always been — the difference is that it now stops.
-      allowanceBytes: null
+      allowanceBytes: null,
+      // Where the live readers stand, so what goes first is decided by them and
+      // not by which piece happened to be touched longest ago.
+      readHeads: () => this.#lru.readHeads()
     });
     liveStores.add(this);
   }
@@ -523,11 +526,6 @@ export class SharedPieceStore {
     return this.#disk.bytes;
   }
 
-  /** Where this store's spilled pieces live, which is the disk they are on. */
-  get spillPath() {
-    return this.#disk.path;
-  }
-
   /**
    * Say how much disk this store's spilled pieces may take.
    *
@@ -538,10 +536,19 @@ export class SharedPieceStore {
    * @returns {{ name: string, allowanceBytes: number | null, bytes: number }}
    */
   reviseSpillCeiling(allowedBytes) {
+    // THE OTHER RULE, and it does not wait for the disk to be short. A piece
+    // behind every read head has been read and will not be read again unless
+    // somebody seeks back, and a seek back re-downloads it — the same bargain
+    // this tier makes whenever it drops a piece for room. Without it the spill
+    // is bounded only by a share of free space, which on a roomy host is tens of
+    // gigabytes against a measured growth of 14 400 MB in one viewing: the
+    // ceiling never binds and nothing is ever removed until the torrent goes.
+    const behind = this.#disk.forgetBehind(this.#lru.readHeads());
     return {
       name: this.#name,
       allowanceBytes: this.#disk.reviseAllowance(allowedBytes),
-      bytes: this.#disk.bytes
+      bytes: this.#disk.bytes,
+      behind
     };
   }
 

@@ -72,9 +72,15 @@ export class PieceDiskStore {
 
   #evictions = 0;
 
+  /** How many were thrown away for being behind every reader. */
+  #behind = 0;
+
   #bytes = 0;
 
   #now;
+
+  /** Where the live readers stand, from whoever holds that fact. @type {() => number[]} */
+  #readHeads;
 
   /**
    * @param {object} params
@@ -88,11 +94,12 @@ export class PieceDiskStore {
    *   means nobody has said yet, and nothing is evicted until somebody does.
    * @param {() => number} [params.now]
    */
-  constructor({ directory, name, chunkLength, allowanceBytes = null, now = Date.now }) {
+  constructor({ directory, name, chunkLength, allowanceBytes = null, now = Date.now, readHeads = () => [] }) {
     this.#directory = path.join(directory, name);
     this.#chunkLength = chunkLength;
     this.#allowanceBytes = Number.isFinite(allowanceBytes) && allowanceBytes >= 0 ? allowanceBytes : null;
     this.#now = now;
+    this.#readHeads = typeof readHeads === "function" ? readHeads : () => [];
   }
 
   /** Where this store's pieces live, for logging and cleanup. */
@@ -137,6 +144,45 @@ export class PieceDiskStore {
    */
   has(index) {
     return this.#stored.has(index);
+  }
+
+  /**
+   * Throw away what no reader will ask for again, without waiting for the disk
+   * to be short.
+   *
+   * THE SECOND RULE, and it answers a different question from the ceiling.
+   * Material nobody needs should not sit on somebody's disk merely because
+   * there is room for it — the ceiling here is a share of what is free, and on
+   * a roomy host that is tens of gigabytes against a measured growth of 14 400
+   * MB in one viewing, so the ceiling alone never binds and nothing is ever
+   * removed until the torrent itself goes.
+   *
+   * A piece BEHIND every read head has been read and will not be read again
+   * unless somebody seeks back — and a seek back re-downloads it, which is the
+   * bargain this tier already makes when it drops a piece for room. Nothing is
+   * thrown away while any reader might still reach it.
+   *
+   * With no reader at all nothing is removed: a store between reads is not a
+   * store nobody wants, and the torrent going idle is what empties it whole.
+   *
+   * @param {number[]} readHeads - The first piece each live reader still wants.
+   * @returns {number} How many pieces were thrown away.
+   */
+  forgetBehind(readHeads) {
+    const heads = (readHeads ?? []).filter((at) => Number.isInteger(at));
+    if (heads.length === 0) {
+      return 0;
+    }
+    const earliest = Math.min(...heads);
+    let removed = 0;
+    for (const index of [...this.#stored.keys()]) {
+      if (index < earliest && !this.#reading.has(index)) {
+        this.forget(index);
+        this.#behind += 1;
+        removed += 1;
+      }
+    }
+    return removed;
   }
 
   /**
@@ -234,14 +280,15 @@ export class PieceDiskStore {
   /**
    * What it holds, what it may hold, and what it has had to throw away.
    *
-   * @returns {{ pieces: number, bytes: number, allowanceBytes: number | null, evictions: number }}
+   * @returns {{ pieces: number, bytes: number, allowanceBytes: number | null, evictions: number, behind: number }}
    */
   stats() {
     return {
       pieces: this.#stored.size,
       bytes: this.#bytes,
       allowanceBytes: this.#allowanceBytes,
-      evictions: this.#evictions
+      evictions: this.#evictions,
+      behind: this.#behind
     };
   }
 
@@ -349,14 +396,32 @@ export class PieceDiskStore {
    * @returns {number | null}
    */
   #leastRecentlyUsed(except) {
+    // WHERE THE READERS STAND DECIDES, and last use only settles ties.
+    //
+    // What lies behind every read head has been read and will not be read again
+    // unless somebody seeks back, so it goes before anything ahead of them,
+    // furthest behind first. It is the order the segments are given one layer
+    // up, and the order the priority map states, read from the other end.
+    // Without the heads there is nothing to order by and last use is all that
+    // is left — which is what this was, and what said nothing about what
+    // anybody is about to read.
+    const heads = this.#readHeads().filter((at) => Number.isInteger(at));
+    const earliest = heads.length > 0 ? Math.min(...heads) : null;
     let victim = null;
-    let oldest = Number.POSITIVE_INFINITY;
+    let worst = null;
     for (const [index, at] of this.#touched) {
       if (index === except || this.#reading.has(index)) {
         continue;
       }
-      if (at < oldest) {
-        oldest = at;
+      const behind = earliest !== null && index < earliest;
+      const score = { behind, distance: behind ? earliest - index : 0, at };
+      if (
+        worst === null
+        || (score.behind && !worst.behind)
+        || (score.behind === worst.behind && score.distance > worst.distance)
+        || (score.behind === worst.behind && score.distance === worst.distance && score.at < worst.at)
+      ) {
+        worst = score;
         victim = index;
       }
     }

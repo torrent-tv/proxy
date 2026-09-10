@@ -35,6 +35,11 @@ export class QsvEncoder extends Encoder {
     };
   }
 
+  /** @returns {string[]} */
+  benchmarkInputArgs() {
+    return this.device ? ["-qsv_device", this.device] : [];
+  }
+
   /** @param {string | null} rung @returns {string[]} */
   benchmarkArgs(rung = null) {
     const preset = rung ? ["-preset", rung] : [];

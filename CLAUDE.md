@@ -72,6 +72,17 @@ Linux-only host (e.g. POSIX-only signals must degrade elsewhere).
     wanted (`demand/`) against what the swarm is told (`download/`), why urgency
     is not a number given to the library, and why the speculative levels are
     withdrawn rather than lowered.
+  - `disk/` — one owner of the disk, read by everything that takes any of it.
+    `DiskSpace` reads the free space once and divides it between claimants by
+    the rule memory already uses; `wire.js` says who the claimants are (the
+    produced segments, and the pieces the memory store spills, which live on the
+    torrent thread and are told their share over its channel); `free.js` reads
+    the nearest directory that exists, because the segments' own is made at the
+    first session and removed at a clean stop.
+  - `docs/disk-architecture.md` — the three things that write to one disk, the
+    two rules that remove material (nobody needs it, or there is no room), the
+    order the viewers give that removal, why a spilled piece is a file of its
+    own, and what is still not solved.
   - `docs/encode-architecture.md` — who decides where encoders go, and the
     answer is one authority: `EncodePlan`, from what is made, what is being
     made, what is wanted and what the host can hold. Why no viewer reaches it,

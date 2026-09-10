@@ -83,6 +83,21 @@ export class Encoder {
   }
 
   /**
+   * What this kind needs BEFORE the input when it is being benchmarked.
+   *
+   * Not `inputArgs`: those set up hardware DECODING, and a benchmark is fed raw
+   * frames — there is nothing to decode. What a device-backed encoder still
+   * needs is the device itself, and without it `h264_vaapi` and `h264_qsv` fail
+   * to open at all, so the benchmark would answer "this host cannot encode"
+   * about a host that encodes perfectly well.
+   *
+   * @returns {string[]}
+   */
+  benchmarkInputArgs() {
+    return [];
+  }
+
+  /**
    * How to encode raw frames at one rung of this kind's speed ladder, for the
    * startup benchmark and nothing else.
    *

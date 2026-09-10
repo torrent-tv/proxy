@@ -252,13 +252,42 @@ a fresh encoder = spawn overhead + the piece at the rate in force
 a moved one     = the kill, and then the same
 ```
 
-With nothing measured the overhead is zero and a fresh encoder owes exactly one
-piece. **That is the floor, and it is derived rather than chosen:** a piece
-cannot appear before it is encoded, and how fast this host encodes is measured
-before any viewer exists. There was an `Infinity` here for the cost of a move,
-on the reasoning that an unmeasured price must not license an irreversible act —
-an exception in a model that needs none, and this is the same statement made by
-arithmetic.
+**Both figures are measured before any viewer exists**, and until 2026-09-10
+neither was. They were learned only from runs that had ENDED, so at a cold open
+both read zero — and zero does not mean "unknown" here, it means "free".
+
+That is not a small bias, it is the whole comparison. Subtract keeping from
+moving and what is left is exactly the killing plus the time the run has already
+lived:
+
+```
+keep a warming run  = firstByteWait - elapsed
+move it             = kill + spawn overhead + one piece
+                    = kill + firstByteWait                (spawn overhead = firstByteWait - one piece)
+move - keep         = kill + elapsed
+```
+
+`elapsed` is the warm-up a move throws away — a process started, an input
+opened, the first bytes fetched, a decoder filled — and it is the term that
+makes moving cost something. Set `firstByteWait` to zero and it cancels out of
+both sides along with the kill: keeping and moving then cost the same figure to
+the millisecond, the tie falls to position, and any advantage however small wins.
+
+Field 2026-09-08, the first fifteen seconds of a session: start at #68, a second
+later kill and start at #69, half a second later kill and start at #68 again,
+each dying having produced nothing. Over two days 153 runs were stopped by the
+plan and 68 of them made no segment at all, median life 9.6 s.
+
+`services/encode/start-stop-cost.js` measures both from **one ffmpeg run at
+startup**: spawn to the first piece the encoder itself announces closed, then
+SIGTERM to exit. 0.68 s and 0.02 s on the developer's desktop. `RunCosts` starts
+from those and replaces them with readings from real runs as they arrive.
+
+There was an `Infinity` here once for the cost of a move, on the reasoning that
+an unmeasured price must not license an irreversible act. It was removed as an
+exception in a model that needs none — correctly, but what replaced it was a
+floor of zero, which licenses the act rather than forbidding it. A measurement
+is what a model like this needs, not an exception and not a floor.
 
 And a run killed before producing anything is a measurement too — a lower bound
 on the first output, and the only reading a thrash can supply, since every run in

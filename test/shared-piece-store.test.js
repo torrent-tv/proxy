@@ -59,7 +59,7 @@ test("a stored piece comes back byte for byte", async () => {
     assert.deepEqual(read, piece(0));
   } finally {
     await new Promise((resolve) => store.destroy(resolve));
-    await fs.rm(directory, { recursive: true, force: true });
+    await fs.rm(directory, { recursive: true, force: true, maxRetries: 10, retryDelay: 20 });
   }
 });
 
@@ -79,7 +79,7 @@ test("pieces past the memory budget spill to disk and read back intact", async (
     }
   } finally {
     await new Promise((resolve) => store.destroy(resolve));
-    await fs.rm(directory, { recursive: true, force: true });
+    await fs.rm(directory, { recursive: true, force: true, maxRetries: 10, retryDelay: 20 });
   }
 });
 
@@ -99,7 +99,7 @@ test("the short last piece keeps its own length", async () => {
     assert.deepEqual(read, tail);
   } finally {
     await new Promise((resolve) => store.destroy(resolve));
-    await fs.rm(directory, { recursive: true, force: true });
+    await fs.rm(directory, { recursive: true, force: true, maxRetries: 10, retryDelay: 20 });
   }
 });
 
@@ -118,7 +118,7 @@ test("a buffer handed out survives later writes to the same slot", async () => {
     assert.deepEqual(held, piece(0), "the buffer changed under its holder");
   } finally {
     await new Promise((resolve) => store.destroy(resolve));
-    await fs.rm(directory, { recursive: true, force: true });
+    await fs.rm(directory, { recursive: true, force: true, maxRetries: 10, retryDelay: 20 });
   }
 });
 
@@ -139,7 +139,7 @@ test("a pinned piece is not evicted to make room", async () => {
     store.unpin(0);
   } finally {
     await new Promise((resolve) => store.destroy(resolve));
-    await fs.rm(directory, { recursive: true, force: true });
+    await fs.rm(directory, { recursive: true, force: true, maxRetries: 10, retryDelay: 20 });
   }
 });
 
@@ -160,7 +160,7 @@ test("refuses to make room when every resident piece is being read", async () =>
     store.unpin(0);
     store.unpin(1);
     await new Promise((resolve) => store.destroy(resolve));
-    await fs.rm(directory, { recursive: true, force: true });
+    await fs.rm(directory, { recursive: true, force: true, maxRetries: 10, retryDelay: 20 });
   }
 });
 
@@ -179,7 +179,7 @@ test("a piece revived from disk is readable by offset again", async () => {
     assert.deepEqual(view, piece(0));
   } finally {
     await new Promise((resolve) => store.destroy(resolve));
-    await fs.rm(directory, { recursive: true, force: true });
+    await fs.rm(directory, { recursive: true, force: true, maxRetries: 10, retryDelay: 20 });
   }
 });
 
@@ -205,7 +205,7 @@ test("a range within a piece is served correctly from memory and from disk", asy
     );
   } finally {
     await new Promise((resolve) => store.destroy(resolve));
-    await fs.rm(directory, { recursive: true, force: true });
+    await fs.rm(directory, { recursive: true, force: true, maxRetries: 10, retryDelay: 20 });
   }
 });
 
@@ -230,7 +230,7 @@ test("takes memory as it needs it, not the whole budget up front", async () => {
     assert.deepEqual(await get(store, 0), piece(0), "an early piece was disturbed");
   } finally {
     await new Promise((resolve) => store.destroy(resolve));
-    await fs.rm(directory, { recursive: true, force: true });
+    await fs.rm(directory, { recursive: true, force: true, maxRetries: 10, retryDelay: 20 });
   }
 });
 
@@ -257,7 +257,7 @@ test("counts where reads were served from, so the budget can be judged", async (
     assert.equal(stats.capacity, 2);
   } finally {
     await new Promise((resolve) => store.destroy(resolve));
-    await fs.rm(directory, { recursive: true, force: true });
+    await fs.rm(directory, { recursive: true, force: true, maxRetries: 10, retryDelay: 20 });
   }
 });
 
@@ -275,7 +275,7 @@ test("counts a refusal caused by pinned pieces", async () => {
     store.unpin(0);
     store.unpin(1);
     await new Promise((resolve) => store.destroy(resolve));
-    await fs.rm(directory, { recursive: true, force: true });
+    await fs.rm(directory, { recursive: true, force: true, maxRetries: 10, retryDelay: 20 });
   }
 });
 
@@ -292,5 +292,5 @@ test("destroy removes the spill file", async () => {
   const after = await fs.readdir(directory);
   assert.equal(after.length, 0, "the spill file outlived the store");
 
-  await fs.rm(directory, { recursive: true, force: true });
+  await fs.rm(directory, { recursive: true, force: true, maxRetries: 10, retryDelay: 20 });
 });

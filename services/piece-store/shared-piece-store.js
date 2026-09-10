@@ -43,8 +43,9 @@
 
 import os from "node:os";
 import { readFileSync } from "node:fs";
+import { divideAllowance, machineAllowanceBytes, OtherDemand } from "./allowance.js";
 import { PieceLru } from "./piece-lru.js";
-import { DiskTier } from "./disk-tier.js";
+import { PieceDiskStore } from "./piece-disk-store.js";
 
 /**
  * Live stores, so the worker can report on them.
@@ -86,16 +87,7 @@ export function findSharedStore(torrent) {
  * Starts at zero: nothing is reserved until somebody else has been seen to
  * need it.
  */
-const otherDemand = { falls: [], lastAvailableBytes: 0, lastStoreBytes: 0 };
-
-/**
- * How many observations of other processes' demand are kept.
- *
- * A window rather than a high-water, and for the reason the block re-use gap is
- * one too: a single spike would otherwise stand for the life of the process and
- * squeeze the stores against something that happened once, hours ago.
- */
-const OTHER_DEMAND_SAMPLES = 60;
+const otherDemand = new OtherDemand();
 
 /**
  * Note what the machine had, and how much of the change was not ours.
@@ -105,69 +97,20 @@ const OTHER_DEMAND_SAMPLES = 60;
  * @returns {number} The reserve, in bytes.
  */
 export function noteMachineMemory(availableBytes, storeBytes) {
-  if (otherDemand.lastAvailableBytes > 0) {
-    const fell = otherDemand.lastAvailableBytes - availableBytes;
-    const ours = storeBytes - otherDemand.lastStoreBytes;
-    otherDemand.falls.push(Math.max(0, fell - ours));
-    if (otherDemand.falls.length > OTHER_DEMAND_SAMPLES) {
-      otherDemand.falls.shift();
-    }
-  }
-  otherDemand.lastAvailableBytes = availableBytes;
-  otherDemand.lastStoreBytes = storeBytes;
-  return machineReserveBytes();
+  return otherDemand.note(availableBytes, storeBytes);
 }
 
 /** What has recently been observed to be needed by everything that is not us. */
 export function machineReserveBytes() {
-  return otherDemand.falls.length === 0 ? 0 : Math.max(...otherDemand.falls);
+  return otherDemand.reserve();
 }
 
 /** Forget what other processes have needed. For tests, which share a module. */
 export function forgetMachineMemory() {
-  otherDemand.falls = [];
-  otherDemand.lastAvailableBytes = 0;
-  otherDemand.lastStoreBytes = 0;
+  otherDemand.forget();
 }
 
-/**
- * How much memory the stores may hold between them.
- *
- * `MemAvailable` is what could be allocated on top of what is already held, so
- * the stores' own bytes are added back: the pair is the ceiling the stores
- * could reach. The reserve is what has been seen to be needed elsewhere.
- *
- * @param {number} availableBytes
- * @param {number} storeBytes
- * @param {number} reserveBytes
- * @returns {number}
- */
-export function machineAllowanceBytes(availableBytes, storeBytes, reserveBytes) {
-  return Math.max(0, Math.max(availableBytes, 0) + Math.max(storeBytes, 0) - Math.max(reserveBytes, 0));
-}
-
-/**
- * Divide what the machine allows between the stores, by what each is asking
- * for.
- *
- * A store asks for the pieces its readers have declared. When everyone's ask
- * fits, everyone gets it and the machine's limit never binds — which is the
- * usual case, since two readers of one film declare 32-192 MB against gigabytes
- * of free memory. When the asks do not fit, each store is cut in proportion to
- * what it asked, so a store wanting little is not cut to make room for one
- * wanting much.
- *
- * @param {number[]} wantedBytes - What each store is asking for, in order.
- * @param {number} allowanceBytes
- * @returns {number[]} What each store may hold, in the same order.
- */
-export function divideAllowance(wantedBytes, allowanceBytes) {
-  const total = wantedBytes.reduce((sum, want) => sum + Math.max(0, want), 0);
-  if (total <= allowanceBytes || total === 0) {
-    return wantedBytes.map((want) => Math.max(0, want));
-  }
-  return wantedBytes.map((want) => Math.floor(allowanceBytes * (Math.max(0, want) / total)));
-}
+export { divideAllowance, machineAllowanceBytes };
 
 export function reviseStoreBudgets() {
   const stores = [...liveStores];
@@ -181,6 +124,40 @@ export function reviseStoreBudgets() {
     revised.push(store.reviseGrowthCeiling(shares[position]));
   }
   return revised;
+}
+
+/**
+ * Say how much disk the spilled pieces may take between them.
+ *
+ * Told rather than worked out. The disk is one and this store is not its only
+ * user — the segments an encoder produces are on it too — so a ceiling one of
+ * two users sets for itself is not a ceiling. Until 2026-09-10 the spill had no
+ * ceiling of any kind: 14 400 MB written in one fifty-minute viewing.
+ *
+ * @param {number | null} allowanceBytes - This thread's whole share, from the
+ *   owner of the disk on the main thread. Null means nobody has said yet, and
+ *   nothing is thrown away until somebody does.
+ * @param {SharedPieceStore[]} [live] - The stores to divide between.
+ * @returns {{ name: string, allowanceBytes: number | null, bytes: number }[]}
+ */
+export function reviseSpillBudgets(allowanceBytes, live = [...liveStores]) {
+  if (live.length === 0) {
+    return [];
+  }
+  // NOT READ HERE. The disk has one owner and it is on the main thread, where
+  // the segments an encoder produces live on the same disk. Reading it here as
+  // well is exactly the fault this replaced: two ceilings, each standing for the
+  // whole disk. What arrives is this thread's whole share.
+  const total = Number.isFinite(allowanceBytes) && allowanceBytes >= 0 ? allowanceBytes : null;
+  if (total === null) {
+    return live.map((store) => store.reviseSpillCeiling(null));
+  }
+  // EQUALLY, unlike memory. A store's memory ask is its readers' declared
+  // windows; the spill has no such statement, because whatever memory evicts
+  // arrives here. Every store's ask is "all of it", nothing distinguishes them,
+  // and an equal share is what that means.
+  const share = Math.floor(total / live.length);
+  return live.map((store) => store.reviseSpillCeiling(share));
 }
 
 function defaultMemoryBytes() {
@@ -459,10 +436,14 @@ export class SharedPieceStore {
     // purpose. Four of the defects fixed here live in what happens when the
     // disk tier does not answer immediately or at all, and none of them is
     // reachable from outside without saying so.
-    this.#disk = options.disk ?? new DiskTier({
+    this.#disk = options.disk ?? new PieceDiskStore({
       directory: options.path ?? ".",
       name: `${this.#name}.pieces`,
-      chunkLength
+      chunkLength,
+      // What it may hold is settled by the same revision that settles memory,
+      // within a minute of the store existing. Until then it is unbounded, which
+      // is what it has always been — the difference is that it now stops.
+      allowanceBytes: null
     });
     liveStores.add(this);
   }
@@ -488,7 +469,13 @@ export class SharedPieceStore {
       // and by then the reason is long gone. At rest this is zero.
       outstanding: this.#outstandingPieces,
       spilled: this.#disk.size,
-      spilledBytes: this.#disk.size * this.#chunkLength,
+      // What the spill file ACTUALLY weighs, piece by piece, rather than the
+      // piece count times a full piece length. The last piece of a torrent is
+      // short, and until 2026-09-10 nothing here counted disk at all — the
+      // figure was a multiplication, and the thing it stood for had no ceiling.
+      spilledBytes: this.#disk.bytes,
+      spillAllowanceBytes: this.#disk.allowanceBytes,
+      spillEvictions: this.#disk.stats().evictions,
       // What the readers between them are asking this store to keep, against
       // what it may hold. A union wider than the capacity cannot be held
       // however the eviction is ordered, and that is the difference between a
@@ -529,6 +516,33 @@ export class SharedPieceStore {
   /** What this store holds right now, in bytes. */
   get residentBytes() {
     return this.#buffers.size * this.#chunkLength;
+  }
+
+  /** What this store's spilled pieces weigh on disk. */
+  get spilledBytes() {
+    return this.#disk.bytes;
+  }
+
+  /** Where this store's spilled pieces live, which is the disk they are on. */
+  get spillPath() {
+    return this.#disk.path;
+  }
+
+  /**
+   * Say how much disk this store's spilled pieces may take.
+   *
+   * The counterpart of `reviseGrowthCeiling`, and settled by the same pass: the
+   * two tiers of one store are two readings of one machine.
+   *
+   * @param {number | null} allowedBytes
+   * @returns {{ name: string, allowanceBytes: number | null, bytes: number }}
+   */
+  reviseSpillCeiling(allowedBytes) {
+    return {
+      name: this.#name,
+      allowanceBytes: this.#disk.reviseAllowance(allowedBytes),
+      bytes: this.#disk.bytes
+    };
   }
 
   /**
@@ -943,7 +957,7 @@ export class SharedPieceStore {
    * @returns {Promise<void>}
    */
   #writeThrough(index, bytes) {
-    // Copied, not viewed. `DiskTier.write` opens the file before it reads the
+    // Copied, not viewed. `PieceDiskStore.write` opens the file before it reads the
     // bytes, so a view onto the caller's buffer could be written to in between
     // and the file would get the wrong data. The spill path may pass a view
     // because that memory is ours; this buffer belongs to the torrent client.
@@ -1312,7 +1326,7 @@ export class SharedPieceStore {
    * Drop the disk copy of a piece that memory now holds — after any spill of
    * that same piece has finished.
    *
-   * `DiskTier.write` records the index when it COMPLETES, so forgetting while a
+   * `PieceDiskStore.write` records the index when it COMPLETES, so forgetting while a
    * spill of that index is still running let the completing write put it back,
    * and a later read then returned the stale bytes.
    *

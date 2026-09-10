@@ -117,9 +117,9 @@ export function startRunOn(session, options = {}) {
     spawn: () => child,
     logger: silentLogger,
     lastSegmentIndex: () => lastSegmentIndex,
-    usesExplicitCuts
+    usesExplicitCuts,
+    because: "a test asked for it"
   });
-  run.start("a test asked for it");
   run.noteSpeed(speedX);
   if (producing) {
     // What moves a run out of starting is its first segment, in the product as

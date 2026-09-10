@@ -52,7 +52,8 @@ function makeRun(span = {}) {
       warn: (line) => lines.push(["warn", line])
     },
     now: () => 1000,
-    onEnded: (ended) => ends.push(ended)
+    onEnded: (ended) => ends.push(ended),
+    because: "nobody is making #10 and a viewer is waiting for it"
   });
   return { run, process: process_, lines, ends };
 }
@@ -61,8 +62,7 @@ test("a start says why it is starting and with what", () => {
   // The argument list alone cannot say whether this was a first open, a seek, a
   // quality step or a move off covered material — and with several runs at once
   // that is the only way to tell one start from another.
-  const { run, lines } = makeRun();
-  run.start("nobody is making #10 and a viewer is waiting for it");
+  const { lines } = makeRun();
   const [level, line] = lines[0];
   assert.equal(level, "info");
   // A run is named by what it produces: the stretch it was given, on the output
@@ -74,7 +74,6 @@ test("a start says why it is starting and with what", () => {
 
 test("its head is the next number it will make, and moves as it makes them", () => {
   const { run } = makeRun();
-  run.start("first");
   assert.equal(run.head, 10);
   run.noteProduced(10);
   run.noteProduced(11);
@@ -84,7 +83,6 @@ test("its head is the next number it will make, and moves as it makes them", () 
 
 test("reaching the end of its stretch and exiting is the one normal ending", () => {
   const { run, process, ends, lines } = makeRun({ from: 10, to: 12 });
-  run.start("first");
   for (const index of [10, 11, 12]) {
     run.noteProduced(index);
   }
@@ -99,7 +97,6 @@ test("exiting cleanly short of its stretch is abnormal and says where it stopped
   // ffmpeg exits zero both at the end of a file and when its input stops
   // producing bytes; over a torrent the two look identical to it.
   const { run, process, ends } = makeRun({ from: 10, to: 14 });
-  run.start("first");
   run.noteProduced(10);
   run.noteProduced(11);
   process.exitWith(0, null);
@@ -110,8 +107,7 @@ test("exiting cleanly short of its stretch is abnormal and says where it stopped
 });
 
 test("a non-zero exit is a failure carrying its code", () => {
-  const { run, process, ends, lines } = makeRun();
-  run.start("first");
+  const { process, ends, lines } = makeRun();
   process.exitWith(255, null);
   assert.equal(ends[0].ending, ENCODE_EXIT.FAILED);
   assert.equal(ends[0].code, 255);
@@ -122,7 +118,6 @@ test("our own kill is abnormal too, and carries the reason we gave", () => {
   // Hiding it among the normal endings would make a count of abnormal endings
   // useless, which is the whole point of counting them.
   const { run, process, ends } = makeRun();
-  run.start("first");
   run.stop("moved past 20 segments that are already made");
   assert.deepEqual(process.signals, ["SIGTERM"]);
   process.exitWith(null, "SIGTERM");
@@ -133,7 +128,6 @@ test("our own kill is abnormal too, and carries the reason we gave", () => {
 
 test("an ending reports the stretch, how far it got and how long it lived", () => {
   const { run, process, ends } = makeRun({ from: 10, to: 14 });
-  run.start("first");
   run.noteProduced(10);
   process.exitWith(1, null);
   const ended = ends[0];
@@ -145,8 +139,7 @@ test("an ending reports the stretch, how far it got and how long it lived", () =
 });
 
 test("a process that could not be started ends like any other failure", () => {
-  const { run, process, ends } = makeRun();
-  run.start("first");
+  const { process, ends } = makeRun();
   process.emit("error", new Error("ENOENT"));
   assert.equal(ends[0].ending, ENCODE_EXIT.FAILED);
   assert.match(ends[0].because, /ENOENT/);

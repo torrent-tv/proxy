@@ -482,6 +482,31 @@ export class SegmentStore {
   }
 
   /**
+   * Throw away everything this store owns, and the root with it.
+   *
+   * For a clean exit. What is left on disk afterwards is by definition from a
+   * kill, which is the case the startup sweep exists for — and without this the
+   * sweep adopts, the exit leaves, and the next start adopts again, for ever.
+   *
+   * @param {string} because
+   * @returns {number} How many outputs went.
+   */
+  dropAll(because) {
+    let dropped = 0;
+    for (const key of [...this.#formats.keys()]) {
+      this.drop(key, because);
+      dropped += 1;
+    }
+    try {
+      rmSync(this.#root, { recursive: true, force: true });
+    } catch {
+      // Another process may share the root and hold a directory open. What is
+      // ours is gone either way.
+    }
+    return dropped;
+  }
+
+  /**
    * Keep only what is still being read, and only as much of it as there is room
    * for.
    *
@@ -496,13 +521,34 @@ export class SegmentStore {
    * that is the cap's — but to stop an output nobody has touched in hours from
    * sitting there for the life of the process.
    *
+   * TWO RULES, ANSWERING TWO QUESTIONS. Kept apart because they were briefly
+   * proposed as one and that was wrong: material nobody needs should not sit on
+   * the owner's disk merely because there is room for it, and material everyone
+   * needs must still go when there is no room. The first is time, the second is
+   * space.
+   *
+   * WHAT GOES FIRST WHEN THERE IS NO ROOM is decided by where the viewers are,
+   * not by when a directory was last read. Behind every viewer of an output is
+   * material that has been played and will not be asked for again unless
+   * somebody seeks back; ahead of the furthest viewer is material that will be
+   * asked for, eventually. So the order is: outputs nobody is watching at all,
+   * then what lies behind the earliest viewer, furthest behind first, then what
+   * lies ahead of the furthest viewer, furthest ahead first. It is the priority
+   * map's own order read from the other end.
+   *
+   * A segment a viewer is standing on is never a victim.
+   *
    * @param {object} params
    * @param {number} params.idleMs - Untouched for longer than this, and it goes.
-   * @param {number} params.maxBytes - The most the whole store may hold. What
-   *   was read longest ago goes first.
-   * @returns {{ droppedIdle: number, droppedForRoom: number, bytes: number }}
+   * @param {number} params.maxBytes - The most the whole store may hold.
+   * @param {(key: string) => number[]} [params.viewersAt] - Where the viewers of
+   *   an output stand, as segment numbers. An empty answer means nobody is
+   *   watching it, which is what makes its segments the first to go. Absent, the
+   *   store has nothing to order by and falls back to the oldest directory —
+   *   which is what it did before it could be told.
+   * @returns {{ droppedIdle: number, droppedForRoom: number, segmentsRemoved: number, bytes: number }}
    */
-  enforce({ idleMs, maxBytes }) {
+  enforce({ idleMs, maxBytes, viewersAt = null }) {
     const now = this.#now();
     let droppedIdle = 0;
     for (const [key, touchedAt] of [...this.#touched]) {
@@ -511,11 +557,12 @@ export class SegmentStore {
         droppedIdle += 1;
       }
     }
-    let droppedForRoom = 0;
     let held = this.stats().bytes;
-    if (Number.isFinite(maxBytes) && maxBytes > 0 && held > maxBytes) {
-      // Least recently read first: what nobody has asked for in the longest
-      // time is what a viewer is least likely to want next.
+    if (!Number.isFinite(maxBytes) || maxBytes <= 0 || held <= maxBytes) {
+      return { droppedIdle, droppedForRoom: 0, segmentsRemoved: 0, bytes: held };
+    }
+    if (typeof viewersAt !== "function") {
+      let droppedForRoom = 0;
       const byAge = [...this.#touched.entries()].sort((left, right) => left[1] - right[1]);
       for (const [key] of byAge) {
         if (held <= maxBytes) {
@@ -526,8 +573,81 @@ export class SegmentStore {
         held -= size;
         droppedForRoom += 1;
       }
+      return { droppedIdle, droppedForRoom, segmentsRemoved: 0, bytes: held };
     }
-    return { droppedIdle, droppedForRoom, bytes: held };
+
+    let segmentsRemoved = 0;
+    for (const victim of this.#leastWantedFirst(viewersAt)) {
+      if (held <= maxBytes) {
+        break;
+      }
+      held -= this.#removeSegment(victim.key, victim.index);
+      segmentsRemoved += 1;
+    }
+    if (segmentsRemoved > 0) {
+      this.#logger.info(
+        `segment-store removed ${segmentsRemoved} segment(s) for room: ` +
+        `${megabytes(held)} of ${megabytes(maxBytes)} allowed`
+      );
+    }
+    return { droppedIdle, droppedForRoom: 0, segmentsRemoved, bytes: held };
+  }
+
+  /**
+   * Every segment in the store, least wanted first.
+   *
+   * @param {(key: string) => number[]} viewersAt
+   * @returns {{ key: string, index: number }[]}
+   */
+  #leastWantedFirst(viewersAt) {
+    const candidates = [];
+    for (const key of this.#formats.keys()) {
+      const positions = (viewersAt(key) ?? []).filter((at) => Number.isInteger(at));
+      const earliest = positions.length > 0 ? Math.min(...positions) : null;
+      const furthest = positions.length > 0 ? Math.max(...positions) : null;
+      for (const index of this.refresh(key).byNumber.keys()) {
+        if (earliest === null) {
+          // Nobody is watching this output at all. Everything it holds is worth
+          // less than anything somebody is on their way to.
+          candidates.push({ key, index, rank: 0, distance: index });
+          continue;
+        }
+        if (positions.includes(index)) {
+          continue;
+        }
+        if (index < earliest) {
+          candidates.push({ key, index, rank: 1, distance: earliest - index });
+        } else {
+          candidates.push({ key, index, rank: 2, distance: index - /** @type {number} */ (furthest) });
+        }
+      }
+    }
+    return candidates
+      .sort((left, right) => (left.rank !== right.rank ? left.rank - right.rank : right.distance - left.distance))
+      .map(({ key, index }) => ({ key, index }));
+  }
+
+  /**
+   * Take one segment off the disk.
+   *
+   * @param {string} key
+   * @param {number} index
+   * @returns {number} What it weighed.
+   */
+  #removeSegment(key, index) {
+    const full = this.refresh(key).byNumber.get(index);
+    if (!full) {
+      return 0;
+    }
+    let size = 0;
+    try {
+      size = statSync(full, { throwIfNoEntry: false })?.size ?? 0;
+      rmSync(full, { force: true });
+    } catch {
+      // Gone already, or refused. The next refresh reports what is really there.
+    }
+    this.#held.delete(key);
+    return size;
   }
 
   /**
@@ -664,4 +784,12 @@ export class SegmentStore {
     }
     return { adopted, dropped, unprovenRemoved };
   }
+}
+
+/**
+ * @param {number} bytes
+ * @returns {string}
+ */
+function megabytes(bytes) {
+  return `${Math.round(Math.max(0, bytes) / (1024 * 1024))}MB`;
 }

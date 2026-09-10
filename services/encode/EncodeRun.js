@@ -201,6 +201,9 @@ export class EncodeRun {
    *   kept so a failure can quote what produced it.
    * @param {boolean} [params.usesExplicitCuts] - Whether this run cuts at times
    *   it was given, which decides how a segment is judged finished.
+   * @param {string} params.because - Why this encoder is being put on the
+   *   machine, in words. Recorded with the argument list: a start whose cause is
+   *   not written down cannot be told from any other when several runs exist.
    * @param {(name: string) => number | null} [params.indexOfName] - The number
    *   a closed piece's name carries. How a piece is named belongs to the format
    *   that writes it, so it arrives as a plain function rather than this class
@@ -222,7 +225,8 @@ export class EncodeRun {
     inputUnavailable,
     argsDescribed = "",
     usesExplicitCuts = false,
-    indexOfName
+    indexOfName,
+    because = "no reason was given"
   }) {
     this.address = address;
     this.encoder = encoder;
@@ -244,6 +248,9 @@ export class EncodeRun {
     this.indexOfName = typeof indexOfName === "function" ? indexOfName : () => null;
     /** The last thing ffmpeg said on stderr, which is what a failure is explained by. */
     this.lastError = "";
+    // EXISTING IS RUNNING. There is no moment at which a built run is not yet a
+    // process, so there is no second act for two owners to perform.
+    this.#begin(because);
   }
 
   /** @returns {string} */
@@ -348,7 +355,22 @@ export class EncodeRun {
   }
 
   /**
-   * Start it, and say why it is being started.
+   * Put the process on the machine, and say why.
+   *
+   * PRIVATE, AND CALLED ONCE, from the constructor. It was public until
+   * 2026-09-10, and two places called it: the session manager built a run and
+   * started it, then handed it back to the orchestrator, which started it
+   * again. Every run of every session therefore had TWO ffmpeg processes on one
+   * output writing one set of names — 207 runs against 414 spawns in the field
+   * logs of 08-10 September, without a single exception. Only the second was
+   * reachable afterwards, because this line overwrote the reference to the
+   * first, so `stop` killed one and the other ran on: measured 105 seconds past
+   * its own run's death, eleven processes writing at once on a four-core host
+   * whose budget said three.
+   *
+   * The guard against that is not a check but the absence of a second act: a
+   * run exists means its process is running, so there is nothing anybody can
+   * call twice.
    *
    * The reason is not decoration: a start whose cause is not recorded cannot be
    * told from any other start when several runs exist at once, and the argument
@@ -357,7 +379,7 @@ export class EncodeRun {
    *
    * @param {string} because
    */
-  start(because) {
+  #begin(because) {
     const args = this.buildArgs();
     this.#startedAt = this.now();
     this.logger.info(

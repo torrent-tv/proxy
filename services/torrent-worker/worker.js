@@ -65,7 +65,7 @@ forwardLogsTo((_level, message) => {
 // the hook above had a chance to register. Verified the hard way: with a static
 // import the process still aborted, and the stack named the genuine polyfill.
 const { TorrentPool, resolveDhtBootstrap } = await import("../torrent-pool.js");
-const { collectStoreStats, machineReserveBytes, pieceBufferCollection, reviseStoreBudgets } =
+const { collectStoreStats, machineReserveBytes, pieceBufferCollection, reviseSpillBudgets, reviseStoreBudgets } =
   await import("../piece-store/shared-piece-store.js");
 
 // Resolved before the client exists, because the client builds its DHT in its
@@ -578,6 +578,13 @@ async function runCommand(command, params, id) {
       // wake it here — otherwise it waits forever with a piece pinned.
       settleFragment(params.readId);
       return true;
+    }
+
+    case Command.SPILL_ALLOWANCE: {
+      // The disk has one owner and it is on the main thread, where the segments
+      // are. What arrives is this thread’s whole share; the stores divide it
+      // between themselves.
+      return reviseSpillBudgets(Number(params.bytes));
     }
 
     case Command.DESTROY_ALL: {

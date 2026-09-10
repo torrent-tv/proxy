@@ -259,6 +259,23 @@ export class PieceLru {
   }
 
   /**
+   * Where the live readers stand, as the first piece each of them still wants.
+   *
+   * A declared range begins at the piece its reader is about to read, so the
+   * earliest of those beginnings is the point behind which nothing will be
+   * asked for again unless somebody seeks back. That is what makes a spilled
+   * piece disposable without waiting for the disk to be short: a piece behind
+   * every reader has been read and will not be read again.
+   *
+   * @returns {number[]} One number per reader, unsorted. Empty when nobody has
+   *   declared anything, which is a stronger statement than any position — no
+   *   piece of this file is spoken for at all.
+   */
+  readHeads() {
+    return [...this.#protected.values()].map((range) => range.from);
+  }
+
+  /**
    * How many pieces the live readers between them are asking to keep, against
    * how many this store may hold.
    *

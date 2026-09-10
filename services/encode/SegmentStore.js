@@ -482,6 +482,20 @@ export class SegmentStore {
   }
 
   /**
+   * When this output was last asked for, or null where it has never been.
+   *
+   * The one reading that makes the keeping period measurable rather than
+   * guessed: a session opened on an output this answers for IS a return, and
+   * this is its age.
+   *
+   * @param {string} key
+   * @returns {number | null}
+   */
+  lastReadAt(key) {
+    return this.#touched.get(key) ?? null;
+  }
+
+  /**
    * Throw away everything this store owns, and the root with it.
    *
    * For a clean exit. What is left on disk afterwards is by definition from a

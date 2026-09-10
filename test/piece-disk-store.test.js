@@ -265,3 +265,91 @@ test("the spill ceiling is what the disk's owner said, divided between the store
     await fs.rm(directory, { recursive: true, force: true, maxRetries: 10, retryDelay: 20 });
   }
 });
+
+test("what lies behind every reader goes without waiting for the disk to be short", async () => {
+  // THE SECOND RULE. The ceiling is a share of free space, and on a roomy host
+  // that is tens of gigabytes against a measured growth of 14 400 MB in one
+  // viewing — so the ceiling alone never binds and nothing is removed until the
+  // torrent itself goes. A piece behind every read head has been read.
+  const { store, directory } = await makeStore(1000 * PIECE);
+  try {
+    for (const index of [0, 1, 2, 3, 4, 5]) {
+      await store.write(index, pieceOf(index));
+    }
+
+    const removed = store.forgetBehind([3, 4]);
+    await store.settled();
+
+    assert.equal(removed, 3, "the three behind the earliest reader should have gone");
+    assert.deepEqual([0, 1, 2].map((index) => store.has(index)), [false, false, false]);
+    assert.deepEqual([3, 4, 5].map((index) => store.has(index)), [true, true, true]);
+    assert.equal(store.stats().behind, 3);
+  } finally {
+    await store.destroy();
+    await fs.rm(directory, { recursive: true, force: true, maxRetries: 10, retryDelay: 20 });
+  }
+});
+
+test("with no reader at all, nothing is thrown away", async () => {
+  // A store between reads is not a store nobody wants. What empties it whole is
+  // the torrent going idle, which removes the store and its directory.
+  const { store, directory } = await makeStore(1000 * PIECE);
+  try {
+    for (const index of [0, 1, 2]) {
+      await store.write(index, pieceOf(index));
+    }
+    assert.equal(store.forgetBehind([]), 0);
+    assert.equal(store.size, 3);
+  } finally {
+    await store.destroy();
+    await fs.rm(directory, { recursive: true, force: true, maxRetries: 10, retryDelay: 20 });
+  }
+});
+
+test("a piece being read is not taken even when it is behind everybody", async () => {
+  const { store, directory } = await makeStore(1000 * PIECE);
+  try {
+    await store.write(0, pieceOf(0));
+    await store.write(5, pieceOf(5));
+    const reading = store.read(0, Buffer.alloc(PIECE));
+    const removed = store.forgetBehind([5]);
+    await reading;
+    await store.settled();
+
+    assert.equal(removed, 0, "a piece under a reader was thrown away");
+    assert.equal(store.has(0), true);
+  } finally {
+    await store.destroy();
+    await fs.rm(directory, { recursive: true, force: true, maxRetries: 10, retryDelay: 20 });
+  }
+});
+
+test("when there is no room, what is behind the readers goes before what is ahead", async () => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), "piece-disk-heads-"));
+  const clock = { at: 1000 };
+  // The reader stands on #5. #4 is behind it and was touched LAST, so under the
+  // old rule — least recently used — it would have been the safest piece there.
+  const store = new PieceDiskStore({
+    directory,
+    name: "pieces",
+    chunkLength: PIECE,
+    allowanceBytes: 3 * PIECE,
+    now: () => clock.at,
+    readHeads: () => [5]
+  });
+  try {
+    for (const index of [8, 7, 4]) {
+      clock.at += 100;
+      await store.write(index, pieceOf(index));
+    }
+    clock.at += 100;
+    await store.write(9, pieceOf(9));
+    await store.settled();
+
+    assert.equal(store.has(4), false, "the piece behind the reader was kept because it was touched last");
+    assert.deepEqual([7, 8, 9].map((index) => store.has(index)), [true, true, true]);
+  } finally {
+    await store.destroy();
+    await fs.rm(directory, { recursive: true, force: true, maxRetries: 10, retryDelay: 20 });
+  }
+});

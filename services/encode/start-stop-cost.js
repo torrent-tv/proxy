@@ -70,6 +70,8 @@ export async function measureStartAndStop({
       "-nostats",
       "-loglevel",
       "error",
+      // The device, where the kind takes one.
+      ...(typeof encoder?.benchmarkInputArgs === "function" ? encoder.benchmarkInputArgs() : []),
       // A generated picture: the reading is of this host's encoder and muxer,
       // and a file would add its own reading and its own download.
       "-f",
@@ -81,8 +83,10 @@ export async function measureStartAndStop({
       // The encoder this proxy has chosen, asked for its own arguments: the
       // reading must be of the thing that will actually run, since what a start
       // costs is mostly the encoder opening.
-      ...(typeof encoder?.buildVideoArgs === "function"
-        ? encoder.buildVideoArgs({ targetWidth: 640, targetHeight: 360, segmentDurationSec, fps: 25 })
+      // The same arguments the throughput benchmark uses, for the same reason:
+      // a start is timed on the encoder itself, not on a scaler in front of it.
+      ...(typeof encoder?.benchmarkArgs === "function"
+        ? encoder.benchmarkArgs(null)
         : ["-c:v", "libx264", "-preset", "ultrafast"]),
       "-an",
       "-f",

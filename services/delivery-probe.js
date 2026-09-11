@@ -292,24 +292,29 @@ export function readProbeState(state) {
     const seen = seenOf(label);
     const gap = Number.isInteger(seen) ? state.seq - Number(seen) : null;
     const allowance = allowedOf(label);
-    const lagText = (() => {
-      const lag = timeOf(state.behindMs, label);
-      const may = timeOf(state.allowedWaitMs, label);
-      return lag === null || may === null ? "" : ` ${Math.round(lag)}ms of ${Math.round(may)}ms`;
-    })();
+    // BY TIME WHERE IT IS KNOWN. The count is what the line prints, because it
+    // is what a reader recognises; what decides is a time.
+    //
+    // The measured one-way delay first: it is the forward direction itself,
+    // with the two clocks reconciled from the exchange. The age of the newest
+    // reported probe is the fallback, and it is larger than the thing itself by
+    // the peer's reporting cadence and the way back — which is why its own
+    // allowance carries both of those and the one-way allowance carries
+    // neither.
+    const oneWay = timeOf(state.oneWayMs, label);
+    const oneWayAllowed = timeOf(state.allowedOneWayMs, label);
+    const lagMs = oneWay !== null && oneWayAllowed !== null ? oneWay : timeOf(state.behindMs, label);
+    const mayWaitMs = oneWay !== null && oneWayAllowed !== null
+      ? oneWayAllowed
+      : timeOf(state.allowedWaitMs, label);
+    const lagText = lagMs === null || mayWaitMs === null
+      ? ""
+      : ` ${Math.round(lagMs)}ms of ${Math.round(mayWaitMs)}ms${oneWay !== null ? " one way" : ""}`;
     parts.push(`${label}=${seen ?? "?"}(gap ${gap ?? "?"} of ${allowance ?? "?"}${lagText})`);
     if (allowance === null) {
       continue;
     }
     judgeable = true;
-    // BY TIME WHERE IT IS KNOWN. The count is what the line prints, because it
-    // is what a reader recognises; what decides is how old the newest probe
-    // this channel has reported is, against how long its own queue is allowed
-    // to take. A burst of film delays the probe behind it and both grow
-    // together, so the comparison stays true; a stopped association grows only
-    // the age.
-    const lagMs = timeOf(state.behindMs, label);
-    const mayWaitMs = timeOf(state.allowedWaitMs, label);
     const behind = lagMs !== null && mayWaitMs !== null
       ? lagMs > mayWaitMs
       : gap === null || gap > allowance;
@@ -432,6 +437,8 @@ export function createDeliveryProbe({
     const allowed = new Map();
     /** How long each channel's newest unreported probe may legitimately be. */
     const allowedWait = new Map();
+    /** The same, for the measured one-way time where the clocks are reconciled. */
+    const allowedOneWay = new Map();
     for (const [channel, label] of connection.channels) {
       let queuedBytes = 0;
       try {
@@ -457,6 +464,15 @@ export function createDeliveryProbe({
       const heldWait = allowedWait.get(label);
       if (!Number.isFinite(heldWait) || waitMs > heldWait) {
         allowedWait.set(label, waitMs);
+      }
+      // What a probe may take ONE WAY: the queue's own drain time and half the
+      // crossing. Neither the peer's reporting cadence nor its loop delay
+      // belongs here — with the clocks reconciled they are no longer in the
+      // measurement they would have to be allowed for.
+      const oneWayAllowed = allowedWaitMs({ queuedBytes, bytesPerSecond, rttMs: rttMs / 2 });
+      const heldOneWay = allowedOneWay.get(label);
+      if (!Number.isFinite(heldOneWay) || oneWayAllowed > heldOneWay) {
+        allowedOneWay.set(label, oneWayAllowed);
       }
       // Several channels can carry one label only in malformed cases; the
       // larger allowance is the safer of the two.
@@ -512,6 +528,11 @@ export function createDeliveryProbe({
         })
       ),
       allowedWaitMs: Object.fromEntries(allowedWait.entries()),
+      // The measured forward delay, where the two clocks have been reconciled.
+      // Preferred over the age above because it is the thing itself: the age
+      // also carries the peer's reporting cadence and the way back.
+      oneWayMs: Object.fromEntries(connection.oneWayMs.entries()),
+      allowedOneWayMs: Object.fromEntries(allowedOneWay.entries()),
       // Same arithmetic for the echo's own age: the peer cannot answer sooner
       // than its own cadence allows, nor sooner than its own event loop runs.
       echoStaleMs:
@@ -625,6 +646,23 @@ export function createDeliveryProbe({
           lastSeenAdvanceAt: 0,
           longestHealthySeenGapMs: 0,
           sentAtBySeq: new Map(),
+          // THE TWO CLOCKS, separated by the exchange rather than assumed to
+          // agree. Every report carries when each channel's newest probe
+          // arrived at the peer and when the report itself left; with the time
+          // this proxy stamped into that probe, and the time the report
+          // arrives, that is the four timestamps an offset is computed from.
+          //
+          // The estimate is kept from the report with the SMALLEST round trip
+          // seen, because that is the one that queued the least — and the two
+          // directions here are as unequal as they get, film one way and almost
+          // nothing the other, which is exactly where an offset taken from a
+          // busy moment is wrong by half the difference.
+          /** @type {number | null} */
+          clockOffsetMs: null,
+          /** @type {number} */
+          offsetFromRoundTripMs: Number.POSITIVE_INFINITY,
+          /** How long the newest probe took to reach the peer, by channel. @type {Map<string, number>} */
+          oneWayMs: new Map(),
           probeCaptureStarted: false,
           timer: null
         };
@@ -691,6 +729,41 @@ export function createDeliveryProbe({
             }
           }
           connection.lastSeenAdvanceAt = now;
+        }
+      }
+      // THE FOUR TIMESTAMPS. `t1` is when this proxy sent the probe the peer
+      // is reporting, `t2` when the peer received it, `t3` when the peer sent
+      // this report, `t4` is now. From them the round trip is
+      // `(t4 - t1) - (t3 - t2)` — the peer's own thinking time removed — and
+      // the difference between the two clocks is `((t2 - t1) + (t3 - t4)) / 2`.
+      //
+      // The offset is kept from the report whose round trip was SMALLEST: that
+      // arithmetic assumes the two directions are equally quick, which here
+      // they are not — film one way, almost nothing the other — and the least
+      // queued sample is the one where the assumption costs least. A fresh
+      // minimum replaces the estimate, so a clock that jumps is followed within
+      // a few reports rather than believed for ever.
+      const peerSentAt = Number(echo?.sentAt);
+      const seenAt = echo?.seenAt;
+      if (Number.isFinite(peerSentAt) && seenAt && typeof seenAt === "object") {
+        for (const [label, at] of Object.entries(seenAt)) {
+          const peerSawAt = Number(at);
+          const seq = connection.seen.get(label);
+          const weSentAt = Number.isInteger(seq) ? connection.sentAtBySeq.get(seq) : undefined;
+          if (!Number.isFinite(peerSawAt) || !Number.isFinite(weSentAt)) {
+            continue;
+          }
+          const roundTrip = (now - weSentAt) - (peerSentAt - peerSawAt);
+          if (roundTrip >= 0 && roundTrip < connection.offsetFromRoundTripMs) {
+            connection.offsetFromRoundTripMs = roundTrip;
+            connection.clockOffsetMs = ((peerSawAt - weSentAt) + (peerSentAt - now)) / 2;
+          }
+          if (connection.clockOffsetMs !== null) {
+            // What the probe itself took, one way, with the clocks reconciled.
+            // Negative only if the offset is stale, and then it says so rather
+            // than being hidden.
+            connection.oneWayMs.set(label, peerSawAt - weSentAt - connection.clockOffsetMs);
+          }
         }
       }
       // What the far end says it has received at the transport level. It is the

@@ -357,3 +357,37 @@ test("with no send time recorded the count still decides", () => {
   );
   assert.equal(verdict, "association-stopped");
 });
+
+test("the measured one-way time is preferred over the age of the report", () => {
+  // With the clocks reconciled, the proxy knows how long the probe itself took
+  // to reach the peer. The age of the newest reported probe is the same thing
+  // plus the peer's reporting cadence and the way back — so where both are
+  // known, the measurement wins and its allowance carries neither.
+  const { verdict } = readProbeState(
+    state(
+      { proxy: 40, "proxy-control": 41, "proxy-fast": 42 },
+      {
+        // The age says far behind against its allowance...
+        behindMs: { proxy: 9000, "proxy-control": 9000, "proxy-fast": 9000 },
+        allowedWaitMs: { proxy: 2000, "proxy-control": 2000, "proxy-fast": 2000 },
+        // ...while the probe itself took 300 ms of the 900 its queue may take.
+        oneWayMs: { proxy: 300, "proxy-control": 300, "proxy-fast": 300 },
+        allowedOneWayMs: { proxy: 900, "proxy-control": 900, "proxy-fast": 900 }
+      }
+    )
+  );
+  assert.equal(verdict, "flowing");
+});
+
+test("a one-way time past what the queue can account for is the association", () => {
+  const { verdict } = readProbeState(
+    state(
+      { proxy: 40, "proxy-control": 41, "proxy-fast": 42 },
+      {
+        oneWayMs: { proxy: 12_000, "proxy-control": 12_000, "proxy-fast": 12_000 },
+        allowedOneWayMs: { proxy: 900, "proxy-control": 900, "proxy-fast": 900 }
+      }
+    )
+  );
+  assert.equal(verdict, "association-stopped");
+});

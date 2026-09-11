@@ -151,11 +151,16 @@ test("refuses to make room when every resident piece is being read", async () =>
     store.pin(0);
     store.pin(1);
 
-    await assert.rejects(
-      () => put(store, 2, piece(2)),
-      /pinned/,
-      "the store took memory from under a reader instead of refusing"
-    );
+    // The pinned pieces stay where they are, and the arrival is kept anyway —
+    // on the disk, which is what it has. Refusing it was how a store short of
+    // memory ended a torrent: the refusal travelled out through the torrent
+    // client's own write callback and the client destroyed the torrent
+    // (field 2026-09-11).
+    await put(store, 2, piece(2));
+    assert.ok(store.locate(0), "the pinned piece was taken from under its reader");
+    assert.ok(store.locate(1), "the pinned piece was taken from under its reader");
+    assert.equal(store.locate(2), null, "and the arrival did not displace either of them");
+    assert.ok((await get(store, 2)).equals(piece(2)), "the arrival is kept, and reads back");
   } finally {
     store.unpin(0);
     store.unpin(1);
@@ -172,7 +177,7 @@ test("a piece revived from disk is readable by offset again", async () => {
     await put(store, 2, piece(2)); // pushes piece 0 out to disk
     assert.equal(store.locate(0), null, "piece 0 should have left memory");
 
-    await get(store, 0); // brings it back
+    await store.reside(0); // brings it back, which is what a playback read does
     const located = store.locate(0);
     assert.ok(located, "piece 0 was not brought back into memory");
     const view = Buffer.from(located.buffer, located.offset, located.length);
@@ -248,11 +253,18 @@ test("counts where reads were served from, so the budget can be judged", async (
     const stats = store.stats();
     assert.equal(stats.fromMemory, 2, "memory reads miscounted");
     assert.equal(stats.fromDisk, 1, "disk reads miscounted");
-    // Two: piece 0 goes out to make room for piece 2, then piece 1 goes out to
-    // make room for piece 0 coming back. Reviving costs a spill of its own, and
-    // that is worth seeing in the figures rather than hiding.
-    assert.equal(stats.spills, 2, "spills miscounted");
-    assert.equal(stats.revivals, 1, "revivals miscounted");
+    // One: piece 0 goes out to make room for piece 2. The read that follows is
+    // the torrent client's, and since 2026-09-11 it is answered from the disk
+    // copy without taking a block — so nothing has to be written out for it and
+    // nothing is revived. A read for PLAYBACK still populates memory, and pays
+    // for it with a spill; that is the next assertion.
+    assert.equal(stats.spills, 1, "spills miscounted");
+    assert.equal(stats.revivals, 0, "the client's own read does not revive");
+
+    await store.reside(0);
+    const afterPlayback = store.stats();
+    assert.equal(afterPlayback.revivals, 1, "a read for playback revives");
+    assert.equal(afterPlayback.spills, 2, "and pays for its block with a spill");
     assert.equal(stats.blockedByPins, 0);
     assert.equal(stats.capacity, 2);
   } finally {
@@ -268,9 +280,11 @@ test("counts a refusal caused by pinned pieces", async () => {
     await put(store, 1, piece(1));
     store.pin(0);
     store.pin(1);
-    await assert.rejects(() => put(store, 2, piece(2)));
+    await put(store, 2, piece(2));
 
-    assert.equal(store.stats().blockedByPins, 1, "a refusal went unrecorded");
+    const stats = store.stats();
+    assert.equal(stats.blockedByPins, 1, "the store not being able to give a block went unrecorded");
+    assert.equal(stats.admittedWithoutSlot, 1, "and what it did instead went unrecorded");
   } finally {
     store.unpin(0);
     store.unpin(1);

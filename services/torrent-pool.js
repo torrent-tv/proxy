@@ -921,8 +921,8 @@ export class TorrentPool {
       ? maxDiskBytes
       : computeDefaultDiskCap(os.tmpdir());
     if (this.#maxDiskBytes > 0) {
-      const gb = (this.#maxDiskBytes / (1024 * 1024 * 1024)).toFixed(1);
-      logger.info(`torrent-pool: disk cap ${gb} GB (LRU eviction of idle torrents above it)`);
+      const gigabytes = (this.#maxDiskBytes / (1024 * 1024 * 1024)).toFixed(1);
+      logger.info(`torrent-pool: disk cap ${gigabytes} GB (LRU eviction of idle torrents above it)`);
       this.#diskSweepTimer = setInterval(() => this.#enforceDiskCap(), DISK_CAP_SWEEP_INTERVAL_MS);
       this.#diskSweepTimer.unref?.();
     }
@@ -1381,11 +1381,14 @@ export class TorrentPool {
     }
     // Candidates: pooled torrents with zero active readers, LRU first.
     const candidates = [...this.torrents.values()]
-      .filter((t) => {
-        const usage = this.fileUsageByTorrent.get(t);
+      .filter((torrent) => {
+        const usage = this.fileUsageByTorrent.get(torrent);
         return !usage || usage.size === 0;
       })
-      .sort((a, b) => (this.#lastAccess.get(a) ?? 0) - (this.#lastAccess.get(b) ?? 0));
+      .sort(
+        (earlier, later) =>
+          (this.#lastAccess.get(earlier) ?? 0) - (this.#lastAccess.get(later) ?? 0)
+      );
 
     for (const torrent of candidates) {
       if (used <= this.#maxDiskBytes) {
@@ -1393,9 +1396,9 @@ export class TorrentPool {
       }
       const freed = Math.max(0, torrentDownloadedBytes(torrent));
       const name = typeof torrent?.name === "string" ? torrent.name : "(unknown)";
-      const gb = (this.#maxDiskBytes / (1024 * 1024 * 1024)).toFixed(1);
+      const gigabytes = (this.#maxDiskBytes / (1024 * 1024 * 1024)).toFixed(1);
       logger.info(
-        `torrent-pool: disk cap ${gb} GB exceeded — evicting idle torrent "${name}" ` +
+        `torrent-pool: disk cap ${gigabytes} GB exceeded — evicting idle torrent "${name}" ` +
           `(~${(freed / (1024 * 1024)).toFixed(0)} MB)`
       );
       this.#cancelIdleRemoval(torrent);
@@ -1592,7 +1595,7 @@ export class TorrentPool {
         const message = error instanceof Error ? error.message : String(error);
         const dupMatch = /duplicate torrent ([0-9a-f]{40})/i.exec(message);
         if (dupMatch) {
-          const existing = this.client.torrents.find((t) => t?.infoHash === dupMatch[1]);
+          const existing = this.client.torrents.find((candidate) => candidate?.infoHash === dupMatch[1]);
           // A torrent already here but WITHOUT metadata is not an answer to a
           // request that carries metadata. A magnet whose swarm never answered
           // leaves exactly that: an entry with the right infohash, no file
@@ -1783,18 +1786,18 @@ export class TorrentPool {
     }
     this.#cancelIdleRemoval(torrent);
     const name = typeof torrent.name === "string" ? torrent.name : "(unknown)";
-    const ih = String(torrent.infoHash ?? "?").slice(0, 8);
-    logger.info(`torrent-pool: scheduling idle removal for "${name}" [${ih}] in ${TORRENT_IDLE_TTL_MS / 1000}s`);
+    const infoHashShort = String(torrent.infoHash ?? "?").slice(0, 8);
+    logger.info(`torrent-pool: scheduling idle removal for "${name}" [${infoHashShort}] in ${TORRENT_IDLE_TTL_MS / 1000}s`);
     const timer = setTimeout(() => {
       this.#idleTimers.delete(torrent);
       // Re-check: a new acquire since scheduling would have cancelled this
       // timer, but guard anyway against a race.
       const usage = this.fileUsageByTorrent.get(torrent);
       if (usage && usage.size > 0) {
-        logger.info(`torrent-pool: idle timer fired for "${name}" [${ih}] but refcount ${usage.size} >0 — keep`);
+        logger.info(`torrent-pool: idle timer fired for "${name}" [${infoHashShort}] but refcount ${usage.size} >0 — keep`);
         return;
       }
-      logger.warn(`torrent-pool: idle TTL fired for "${name}" [${ih}] — removing torrent (reason=idle-ttl caller=scheduleIdleRemoval)`);
+      logger.warn(`torrent-pool: idle TTL fired for "${name}" [${infoHashShort}] — removing torrent (reason=idle-ttl caller=scheduleIdleRemoval)`);
       this.#removeTorrent(torrent, "idle-ttl");
     }, TORRENT_IDLE_TTL_MS);
     timer.unref?.();

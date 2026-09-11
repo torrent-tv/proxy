@@ -180,15 +180,15 @@ export class SwarmSelection {
       this.#clearDisplacement();
       return;
     }
-    const from = Math.min(...blocked.map((range) => range.from));
-    const to = Math.max(...blocked.map((range) => range.to));
-    if (this.#displacing && this.#displacing.from === from && this.#displacing.to === to) {
+    const nearest = Math.min(...blocked.map((range) => range.from));
+    const furthest = Math.max(...blocked.map((range) => range.to));
+    if (this.#displacing && this.#displacing.from === nearest && this.#displacing.to === furthest) {
       return;
     }
     this.#clearDisplacement();
     try {
-      this.#torrent.critical?.(from, to);
-      this.#displacing = { from, to };
+      this.#torrent.critical?.(nearest, furthest);
+      this.#displacing = { from: nearest, to: furthest };
     } catch {
       // silent-ok: displacement is an optimisation, and a torrent being torn
       // down is not worth failing a read over.

@@ -783,8 +783,8 @@ export class SharedPieceStore {
       if (this.#closed) {
         throw new Error("Piece store is closed.");
       }
-      const ok = await this.#claimSlotOnce(waitingSince);
-      if (ok) {
+      const reserved = await this.#claimSlotOnce(waitingSince);
+      if (reserved) {
         let released = false;
         return () => {
           if (released) {

@@ -99,15 +99,45 @@ export function allowedGap({
   if (!(bytesPerSecond > 0) || !(intervalMs > 0)) {
     return null;
   }
-  const drainMs = (Math.max(queuedBytes, 0) / bytesPerSecond) * 1000;
-  const waitMs =
-    drainMs +
-    Math.max(rttMs, 0) +
-    Math.max(echoIntervalMs, 0) +
-    Math.max(peerLoopLagMs, 0);
   // At least one: a probe sent and not yet echoed is the ordinary state.
-  return Math.max(1, Math.ceil(waitMs / intervalMs));
+  return Math.max(1, Math.ceil(allowedWaitMs({ queuedBytes, bytesPerSecond, rttMs, echoIntervalMs, peerLoopLagMs }) / intervalMs));
 }
+
+/**
+ * How long a probe may legitimately take to be reported back, in milliseconds.
+ *
+ * THE QUANTITY {@link allowedGap} COMPUTES AND THEN THROWS AWAY by dividing it
+ * into probes. Probes are the wrong unit and always were: the same probe goes
+ * down every channel INCLUDING the one carrying the film, and SCTP schedules
+ * per association, so a probe waits behind queued video exactly as a segment
+ * does. What is behind is then not the peer's answer but the probe itself —
+ * and the honest measure of that is the age of the newest probe the peer has
+ * seen, which this is compared against.
+ *
+ * Four terms, every one measured: the queue's own drain time at the rate this
+ * connection is achieving, the crossing, the peer's reporting cadence, and how
+ * late the peer's event loop is running.
+ *
+ * @param {{ queuedBytes: number, bytesPerSecond: number, rttMs: number,
+ *   echoIntervalMs?: number, peerLoopLagMs?: number }} state
+ * @returns {number}
+ */
+export function allowedWaitMs({ queuedBytes, bytesPerSecond, rttMs, echoIntervalMs = 0, peerLoopLagMs = 0 }) {
+  if (!(bytesPerSecond > 0)) {
+    return 0;
+  }
+  const drainMs = (Math.max(queuedBytes, 0) / bytesPerSecond) * 1000;
+  return drainMs + Math.max(rttMs, 0) + Math.max(echoIntervalMs, 0) + Math.max(peerLoopLagMs, 0);
+}
+
+/**
+ * How far back the send times of probes are kept.
+ *
+ * A probe older than the point at which the reverse direction is called gone
+ * can say nothing further, and that bound is itself derived per connection —
+ * this is the outer edge of it, kept so the map cannot grow with the session.
+ */
+const PROBE_HISTORY_MS = 10 * 60 * 1000;
 
 /** The label the browser gives the unordered, non-retransmitting channel. */
 export const UNRELIABLE_LABEL = "proxy-fast";
@@ -239,6 +269,15 @@ export function probeWedgeIsCertain({
 export function readProbeState(state) {
   const seenOf = (label) =>
     state.seen instanceof Map ? state.seen.get(label) : state.seen?.[label];
+  /**
+   * @param {unknown} source
+   * @param {string} label
+   * @returns {number | null}
+   */
+  const timeOf = (source, label) => {
+    const value = source instanceof Map ? source.get(label) : /** @type {any} */ (source)?.[label];
+    return Number.isFinite(value) ? Number(value) : null;
+  };
   const allowedOf = (label) => {
     const source = state.allowed;
     const value = source instanceof Map ? source.get(label) : source?.[label];
@@ -253,12 +292,27 @@ export function readProbeState(state) {
     const seen = seenOf(label);
     const gap = Number.isInteger(seen) ? state.seq - Number(seen) : null;
     const allowance = allowedOf(label);
-    parts.push(`${label}=${seen ?? "?"}(gap ${gap ?? "?"} of ${allowance ?? "?"})`);
+    const lagText = (() => {
+      const lag = timeOf(state.behindMs, label);
+      const may = timeOf(state.allowedWaitMs, label);
+      return lag === null || may === null ? "" : ` ${Math.round(lag)}ms of ${Math.round(may)}ms`;
+    })();
+    parts.push(`${label}=${seen ?? "?"}(gap ${gap ?? "?"} of ${allowance ?? "?"}${lagText})`);
     if (allowance === null) {
       continue;
     }
     judgeable = true;
-    const behind = gap === null || gap > allowance;
+    // BY TIME WHERE IT IS KNOWN. The count is what the line prints, because it
+    // is what a reader recognises; what decides is how old the newest probe
+    // this channel has reported is, against how long its own queue is allowed
+    // to take. A burst of film delays the probe behind it and both grow
+    // together, so the comparison stays true; a stopped association grows only
+    // the age.
+    const lagMs = timeOf(state.behindMs, label);
+    const mayWaitMs = timeOf(state.allowedWaitMs, label);
+    const behind = lagMs !== null && mayWaitMs !== null
+      ? lagMs > mayWaitMs
+      : gap === null || gap > allowance;
     if (label === UNRELIABLE_LABEL) {
       unreliableKnown = true;
       unreliableBehind = behind;
@@ -348,6 +402,18 @@ export function createDeliveryProbe({
     const now = Date.now();
     connection.seq += 1;
     connection.sentAt = now;
+    // WHEN each probe went out, so that what the peer reports can be read as a
+    // time rather than as a count of probes. Pruned to the oldest probe any
+    // judgement could still be about: once a probe is older than the point at
+    // which the reverse direction is called gone, its age says nothing further.
+    connection.sentAtBySeq.set(connection.seq, now);
+    for (const [seq, at] of connection.sentAtBySeq) {
+      if (now - at > PROBE_HISTORY_MS) {
+        connection.sentAtBySeq.delete(seq);
+      } else {
+        break;
+      }
+    }
     const message = JSON.stringify({ type: "probe", seq: connection.seq, sentAt: now });
     for (const channel of connection.channels.keys()) {
       try {
@@ -364,6 +430,8 @@ export function createDeliveryProbe({
     const rttMs = Number(delivery?.rttMs) || 0;
     /** @type {Map<string, number | null>} */
     const allowed = new Map();
+    /** How long each channel's newest unreported probe may legitimately be. */
+    const allowedWait = new Map();
     for (const [channel, label] of connection.channels) {
       let queuedBytes = 0;
       try {
@@ -379,6 +447,17 @@ export function createDeliveryProbe({
         peerLoopLagMs: connection.peerLoopLagMs ?? 0,
         intervalMs
       });
+      const waitMs = allowedWaitMs({
+        queuedBytes,
+        bytesPerSecond,
+        rttMs,
+        echoIntervalMs: connection.echoIntervalMs,
+        peerLoopLagMs: connection.peerLoopLagMs ?? 0
+      });
+      const heldWait = allowedWait.get(label);
+      if (!Number.isFinite(heldWait) || waitMs > heldWait) {
+        allowedWait.set(label, waitMs);
+      }
       // Several channels can carry one label only in malformed cases; the
       // larger allowance is the safer of the two.
       const held = allowed.get(label);
@@ -419,6 +498,20 @@ export function createDeliveryProbe({
       peerLoopLagMs: connection.peerLoopLagMs,
       peerVisibility: connection.peerVisibility,
       allowed,
+      // WHAT IS BEHIND, IN TIME. For each channel: how old the newest probe the
+      // peer has reported seeing is. The same probe goes down every channel
+      // including the one carrying the film, and SCTP schedules per
+      // association, so a probe waits behind queued video exactly as a segment
+      // does — which means a count of outstanding probes measures the queue,
+      // not the association. This is the queue's own time, against the time the
+      // queue is allowed to take.
+      behindMs: Object.fromEntries(
+        [...connection.seen.entries()].map(([label, seq]) => {
+          const at = connection.sentAtBySeq.get(seq);
+          return [label, Number.isFinite(at) ? now - at : null];
+        })
+      ),
+      allowedWaitMs: Object.fromEntries(allowedWait.entries()),
       // Same arithmetic for the echo's own age: the peer cannot answer sooner
       // than its own cadence allows, nor sooner than its own event loop runs.
       echoStaleMs:
@@ -531,6 +624,7 @@ export function createDeliveryProbe({
           reportedAt: 0,
           lastSeenAdvanceAt: 0,
           longestHealthySeenGapMs: 0,
+          sentAtBySeq: new Map(),
           probeCaptureStarted: false,
           timer: null
         };

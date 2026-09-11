@@ -440,7 +440,20 @@ export function decideUploadLimit(activeTorrents, opts = {}) {
  * that had been complete for three quarters of an hour.
  *
  * So this is not a new limit — it is the one the library already declares,
- * applied to the path it forgot. Two conditions keep it from costing anything:
+ * applied to the path it forgot.
+ *
+ * A STOPGAP, AND ITS REMOVAL CONDITION IS WRITTEN HERE SO IT DOES NOT BECOME
+ * PERMANENT. The end state is that a proxy which needs nothing from a swarm is
+ * not in that swarm: the connections are let go and the bytes stay as a file
+ * (roadmap item 91, the stage that makes a completed file a file). With that
+ * built there is nothing here to trim, because there are no peers. What this
+ * covers is the gap between "nothing more is wanted" and "the torrent is
+ * released", which today is up to an hour — `IDLE_KEEP_MS` — and was 48 minutes
+ * in the field, long enough for the count to climb from 249 to 596.
+ *
+ * Note the condition is about a FILE, not a torrent: a torrent of five episodes
+ * whose first is complete and whose other four nobody wants is not `done` by
+ * WebTorrent's reckoning and never will be. Two conditions keep it from costing anything:
  * only while the torrent is short of nothing anybody asked for, since a
  * connection that might yet deliver is worth keeping; and what goes is measured
  * rather than guessed — wires that have delivered nothing at all, and no more

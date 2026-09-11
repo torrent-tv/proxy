@@ -129,7 +129,7 @@ test("a torrent short of nothing is not worth uploading for", () => {
   const complete = {
     name: "watched to the end",
     hasActiveReader: true,
-    wantsBytes: false,
+    hasUnmetDemand: false,
     done: false,
     downloadSpeed: 0,
     wires: [
@@ -143,6 +143,6 @@ test("a torrent short of nothing is not worth uploading for", () => {
   assert.match(decided.reason, /buys nothing/);
 
   // And a torrent that IS short of something still earns its unchoke.
-  const short = { ...complete, wantsBytes: true };
+  const short = { ...complete, hasUnmetDemand: true };
   assert.ok(decideUploadLimit([short]).bytesPerSec > 8 * 1024, "a starving torrent still buys reciprocity");
 });

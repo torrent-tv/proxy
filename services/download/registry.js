@@ -56,7 +56,7 @@ export function demandFor(torrent) {
  * @param {object} torrent
  * @returns {boolean}
  */
-export function wantsBytes(torrent) {
+export function hasUnmetDemand(torrent) {
   const held = byTorrent.get(torrent);
   return held ? held.selection.hasUrgentMissing() : false;
 }

@@ -295,14 +295,14 @@ test("a quiet stretch shorter than a legitimate report is not a wedge", () => {
   // a report shows up only in the next one.
   const legitimateReportMs = 500 + 500 + 12 + 0;
   assert.equal(
-    probeWedgeIsCertain({ stuckForMs: 1000, longestHealthySeenGapMs: 0, legitimateReportMs }).certain,
+    probeWedgeIsCertain({ stuckForMs: 1000, longestHealthySeenGapMs: 0, legitimateReportMs }).isCertain,
     false,
     "a second of quiet is shorter than one legitimate report and says nothing"
   );
   // And what the detector exists for is untouched: a counter frozen for
   // minutes is far past any report this connection could legitimately owe.
   assert.equal(
-    probeWedgeIsCertain({ stuckForMs: 60_000, longestHealthySeenGapMs: 0, legitimateReportMs }).certain,
+    probeWedgeIsCertain({ stuckForMs: 60_000, longestHealthySeenGapMs: 0, legitimateReportMs }).isCertain,
     true
   );
   // A peer whose event loop is late is owed that time as well.
@@ -311,7 +311,7 @@ test("a quiet stretch shorter than a legitimate report is not a wedge", () => {
       stuckForMs: 3000,
       longestHealthySeenGapMs: 0,
       legitimateReportMs: 500 + 12 + 5000
-    }).certain,
+    }).isCertain,
     false,
     "a peer frozen for five seconds cannot answer sooner than that"
   );

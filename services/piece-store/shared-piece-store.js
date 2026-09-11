@@ -783,8 +783,8 @@ export class SharedPieceStore {
       if (this.#closed) {
         throw new Error("Piece store is closed.");
       }
-      const reserved = await this.#claimSlotOnce(waitingSince);
-      if (reserved) {
+      const isReserved = await this.#claimSlotOnce(waitingSince);
+      if (isReserved) {
         let released = false;
         return () => {
           if (released) {
@@ -1448,8 +1448,8 @@ export class SharedPieceStore {
       }
 
       this.#noteArrival();
-      const declared = this.#lru.wants(index);
-      if (declared) {
+      const isDeclared = this.#lru.wants(index);
+      if (isDeclared) {
         this.#counters.admittedInsideWindow += 1;
       } else {
         this.#counters.admittedOutsideWindow += 1;
@@ -1473,7 +1473,7 @@ export class SharedPieceStore {
       //
       // Only when SOMETHING is stated: before that there is no basis for
       // calling one piece more wanted than another.
-      const worseThanTheVictim = () => {
+      const isWorseThanTheVictim = () => {
         const victim = this.#lru.nextVictim();
         if (victim.index === null) {
           return false;
@@ -1486,7 +1486,7 @@ export class SharedPieceStore {
         return arriving >= 0 && victim.wait >= 0 && arriving > victim.wait;
       };
       if (this.#lru.protectedCount > 0 && this.#isFullNow()
-        && (!declared || worseThanTheVictim())) {
+        && (!isDeclared || isWorseThanTheVictim())) {
         this.#counters.admittedToDisk += 1;
         await this.#writeThrough(index, bytes);
         this.#noteProgress();

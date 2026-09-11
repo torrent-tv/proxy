@@ -1,7 +1,13 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { allowedGap, readProbeState, PROBE_INTERVAL_MS, UNRELIABLE_LABEL } from "../services/delivery-probe.js";
+import {
+  allowedGap,
+  probeWedgeIsCertain,
+  readProbeState,
+  PROBE_INTERVAL_MS,
+  UNRELIABLE_LABEL
+} from "../services/delivery-probe.js";
 
 const ORDERED = ["proxy", "proxy-control"];
 const ALL = [...ORDERED, UNRELIABLE_LABEL];
@@ -277,4 +283,36 @@ test("a peer that reports no loop delay is judged exactly as before", () => {
   assert.equal(reading.verdict, "association-stopped");
   assert.doesNotMatch(reading.detail, /peerLoopLag=/);
   assert.doesNotMatch(reading.detail, /peerTab=/);
+});
+
+test("a quiet stretch shorter than a legitimate report is not a wedge", () => {
+  // Field 2026-09-11: two captures of 180 s each, triggered at `wedged 1s` and
+  // `wedged 2s`, on a connection with `rtt=5ms`, every queue at 0 B and the
+  // viewer watching. In its first minutes a connection has shown no healthy gap
+  // at all, and the floor under "longer than anything healthy" was a single
+  // probe interval — 500 ms — so any quiet moment beat it.
+  // Both cadences plus the crossing: a probe sent just after the peer composed
+  // a report shows up only in the next one.
+  const legitimateReportMs = 500 + 500 + 12 + 0;
+  assert.equal(
+    probeWedgeIsCertain({ stuckForMs: 1000, longestHealthySeenGapMs: 0, legitimateReportMs }).certain,
+    false,
+    "a second of quiet is shorter than one legitimate report and says nothing"
+  );
+  // And what the detector exists for is untouched: a counter frozen for
+  // minutes is far past any report this connection could legitimately owe.
+  assert.equal(
+    probeWedgeIsCertain({ stuckForMs: 60_000, longestHealthySeenGapMs: 0, legitimateReportMs }).certain,
+    true
+  );
+  // A peer whose event loop is late is owed that time as well.
+  assert.equal(
+    probeWedgeIsCertain({
+      stuckForMs: 3000,
+      longestHealthySeenGapMs: 0,
+      legitimateReportMs: 500 + 12 + 5000
+    }).certain,
+    false,
+    "a peer frozen for five seconds cannot answer sooner than that"
+  );
 });

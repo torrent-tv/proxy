@@ -10,6 +10,9 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
+import fs from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
 import { handleStreamGet } from "../routes/stream/get.js";
 
 /**
@@ -142,4 +145,42 @@ test("a ranged GET is reported as a real read position", async () => {
   await handleStreamGet(req, reply, deps);
 
   assert.deepEqual(state.prioritized, [{ byteStart: 4_390_000_000, wholeFileRead: false }]);
+});
+
+test("a file downloaded whole is served from disk without touching the torrent", async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "stream-whole-"));
+  const where = path.join(root, "0");
+  const bytes = Buffer.from("a film that is a file now", "utf8");
+  await fs.writeFile(where, bytes);
+  try {
+    const { req, reply, sent, deps } = harness({ method: "GET", range: "bytes=2-6" });
+    let asked = false;
+    deps.torrentPool.getTorrent = async () => {
+      asked = true;
+      throw new Error("the torrent was asked for, which is what this avoids");
+    };
+    deps.torrentPool.wholeFiles = new Map([
+      ["abc/0", { path: where, length: bytes.length, name: "film.mkv" }]
+    ]);
+    // The source key IS the identity — `torrent:<infohash>` — and it is all the
+    // route needs to find the file.
+    deps.sourceRegistry = { get: () => ({ sourceType: "torrent", source: "magnet:?xt=urn:btih:abc" }) };
+    req.query = { sourceKey: "torrent:abc", fileIndex: "0" };
+
+    await handleStreamGet(req, reply, deps);
+
+    assert.equal(asked, false, "the torrent was asked for");
+    assert.equal(sent.code, 206);
+    assert.equal(sent.headers["content-range"], `bytes 2-6/${bytes.length}`);
+    assert.equal(sent.headers["content-length"], "5");
+  } finally {
+    await fs.rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 20 });
+  }
+});
+
+test("a file this proxy does not have whole still goes to the torrent", async () => {
+  const { req, reply, state, deps } = harness({ method: "GET", range: "bytes=0-99" });
+  deps.torrentPool.wholeFiles = new Map([["other/7", { path: "/nowhere", length: 1, name: "x" }]]);
+  await handleStreamGet(req, reply, deps);
+  assert.equal(state.claims, 1, "the ordinary path was not taken");
 });

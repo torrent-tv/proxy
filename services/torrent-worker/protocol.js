@@ -164,7 +164,15 @@ export const Event = {
    * {@link Command.SUBTITLE_CUES} call. Lets the main thread PUSH them to
    * whichever browser is watching instead of waiting to be asked.
    */
-  SUBTITLE_CUES_READY: "subtitle-cues-ready"
+  SUBTITLE_CUES_READY: "subtitle-cues-ready",
+  /**
+   * A file has been downloaded whole and written out as a file.
+   *
+   * The main thread serves it from disk after this, without asking this thread
+   * for anything: an ordinary read of an ordinary file, with no piece store
+   * between them and nothing that can refuse it for want of memory.
+   */
+  FILE_COMPLETE: "file-complete"
 };
 
 /**

@@ -12,7 +12,7 @@ test("a seen-counter bounded lag is not a wedge, however long it lasts", () => {
     stuckForMs: 3400,
     longestHealthySeenGapMs: 3500
   });
-  assert.equal(verdict.certain, false);
+  assert.equal(verdict.isCertain, false);
 });
 
 test("a seen-counter frozen past this connection's own worst legitimate gap is a wedge", () => {
@@ -23,7 +23,7 @@ test("a seen-counter frozen past this connection's own worst legitimate gap is a
     stuckForMs: 90_000,
     longestHealthySeenGapMs: 3500
   });
-  assert.equal(verdict.certain, true);
+  assert.equal(verdict.isCertain, true);
 });
 
 test("with no healthy history yet, one probe interval is still required", () => {
@@ -31,7 +31,7 @@ test("with no healthy history yet, one probe interval is still required", () => 
     stuckForMs: PROBE_INTERVAL_MS - 1,
     longestHealthySeenGapMs: 0
   });
-  assert.equal(verdict.certain, false);
+  assert.equal(verdict.isCertain, false);
   assert.equal(verdict.needMs, PROBE_INTERVAL_MS);
 });
 

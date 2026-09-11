@@ -36,6 +36,7 @@ import {
   warmResumePosition
 } from "./container-tracks.js";
 import { fillFileInBackground } from "./background-fill.js";
+import { CompletedFiles, completedFilesRoot } from "../files/CompletedFiles.js";
 import { Command, Event } from "./protocol.js";
 import { startMemoryReport, WORKER_MEMORY_SAMPLE_MS } from "../memory-report.js";
 import { forwardLogsTo, logger } from "../../utils/logger.js";
@@ -923,6 +924,113 @@ setInterval(() => {
     warmActiveFiles(sourceKey, torrent);
   }
 }, SUBTITLE_WARMUP_INTERVAL_MS).unref();
+
+/**
+ * Files this proxy has downloaded whole. One directory, two readers of it: this
+ * thread writes them, the main thread serves them without asking anybody.
+ */
+const completedFiles = new CompletedFiles({ root: completedFilesRoot() });
+void completedFiles.adopt(() => null).then((adopted) => {
+  if (adopted > 0) {
+    logger.info(
+      `whole files: took up ${adopted} file(s) a previous life left in ${completedFiles.root}`
+    );
+  }
+});
+
+/**
+ * How often whole files are looked for.
+ *
+ * The work itself is one pass over the files of each torrent asking a boolean
+ * the library already keeps; writing one out happens at most once per file,
+ * ever.
+ */
+const WHOLE_FILE_SWEEP_MS = 10_000;
+
+/** Files being written out right now, so a sweep does not start a second one. */
+const beingKept = new Set();
+
+/**
+ * Keep every file that is now whole, and let go of a torrent that has nothing
+ * left to fetch.
+ *
+ * The instruction this serves, 2026-09-11: as soon as a torrent is fully
+ * downloaded, downloading stops, the torrent is deleted, and what was
+ * downloaded stays for as long as it is wanted.
+ *
+ * `file.done` is the library's own answer to "is every piece of this file
+ * here", and `torrent.done` to "is that true of every file". The second is a
+ * strong condition and will not fire for a season pack of which one episode is
+ * watched — nothing fetches the other four — and that is right: the instruction
+ * is about a torrent downloaded WHOLE.
+ *
+ * @returns {Promise<void>}
+ */
+async function keepWholeFiles() {
+  for (const [sourceKey, torrent] of [...pool.torrents]) {
+    // Lower case, because that is what the source key carries and the main
+    // thread looks these up by the key alone.
+    const infoHash = String(torrent?.infoHash ?? "").toLowerCase();
+    if (!infoHash || !Array.isArray(torrent.files)) {
+      continue;
+    }
+    const usage = pool.fileUsageByTorrent?.get?.(torrent);
+    for (const [fileIndex, file] of torrent.files.entries()) {
+      const key = `${infoHash}/${fileIndex}`;
+      if (file?.done !== true || completedFiles.find(infoHash, fileIndex) || beingKept.has(key)) {
+        continue;
+      }
+      // NOT WHILE SOMEBODY IS READING IT. Writing a film out is a read of the
+      // whole of it and a write of the whole of it — a gigabyte and a half on
+      // the file this was measured against — and doing that beside a viewer
+      // takes the disk and the piece store from them for nothing they asked
+      // for. The file is complete; it will still be complete when they leave.
+      if (usage?.has?.(fileIndex)) {
+        continue;
+      }
+      beingKept.add(key);
+      try {
+        const kept = await completedFiles.keep({
+          infoHash,
+          fileIndex,
+          length: file.length,
+          name: file.name,
+          open: () => file.createReadStream()
+        });
+        if (kept) {
+          logger.info(
+            `whole files: kept "${file.name}" (${Math.round(kept.length / 1048576)}MB) — ` +
+            "it is a file now, and reading it needs no torrent"
+          );
+          parentPort.postMessage({
+            type: Event.FILE_COMPLETE,
+            infoHash,
+            fileIndex,
+            path: kept.path,
+            length: kept.length,
+            name: kept.name
+          });
+        }
+      } catch (error) {
+        logger.warn(`whole files: could not keep "${file?.name}": ${error?.message ?? error}`);
+      } finally {
+        beingKept.delete(key);
+      }
+    }
+    // REMOVING THE TORRENT ITSELF IS THE NEXT STEP AND NOT THIS ONE. Everything
+    // that still asks this thread about a source — the stats the browser polls
+    // every two seconds, the track table, the subtitle walk — reaches
+    // `requireTorrent`, which adds a destroyed torrent back from its recipe.
+    // Removing it here would therefore not remove it: the next poll would bring
+    // it straight back, and the hashing of everything on disk with it. What has
+    // to come first is those paths answering from the whole files instead.
+    void sourceKey;
+  }
+}
+
+setInterval(() => {
+  void keepWholeFiles();
+}, WHOLE_FILE_SWEEP_MS).unref();
 
 /**
  * Keeps this thread alive ON PURPOSE — the one interval left accounted for

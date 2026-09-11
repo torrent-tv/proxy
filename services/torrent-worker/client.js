@@ -94,6 +94,18 @@ export class TorrentWorkerClient {
   /** Reads consuming fragments in place, keyed by request id. */
   #fragmentReaders = new Map();
 
+  /**
+   * Files downloaded whole, by `${infoHash}/${fileIndex}`.
+   *
+   * Held on THIS thread because it is this thread that serves them: a file that
+   * is whole is read with an ordinary file read, and asking the torrent thread
+   * for anything about it would put back the very hop this removes. The torrent
+   * thread writes the files and says so; this is what it says.
+   *
+   * @type {Map<string, { path: string, length: number, name: string }>}
+   */
+  wholeFiles = new Map();
+
   /** @type {(event: { sourceKey: string, fileIndex: number, trackIndex: number, cues: object[], language: string }) => void} */
   #onSubtitleCues;
 
@@ -207,6 +219,15 @@ export class TorrentWorkerClient {
           break;
         case Event.LOG:
           logger.info(`torrent-worker: ${message.message}`);
+          break;
+        case Event.FILE_COMPLETE:
+          // Recorded here so the stream route can answer from the file without
+          // going near the torrent thread at all.
+          this.wholeFiles.set(`${message.infoHash}/${message.fileIndex}`, {
+            path: message.path,
+            length: message.length,
+            name: message.name
+          });
           break;
         case Event.SUBTITLE_CUES_READY:
           this.#onSubtitleCues({

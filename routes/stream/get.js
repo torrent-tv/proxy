@@ -6,6 +6,7 @@
  * and HTTP 200 for full-file requests.
  */
 
+import { createReadStream } from "node:fs";
 import { parseRange } from "../../utils/parse-range.js";
 import { logger } from "../../utils/logger.js";
 
@@ -15,7 +16,7 @@ import { logger } from "../../utils/logger.js";
  *
  * @param {import("fastify").FastifyRequest["query"]} query
  * @param {ReturnType<import("../../store/source-registry.js").createSourceRegistry>} sourceRegistry
- * @returns {{ sourceType: string, source: string }}
+ * @returns {{ sourceType: string, source: string, sourceKey: string }}
  */
 function getSourceParams(query, sourceRegistry) {
   const sourceKey = typeof query.sourceKey === "string" ? query.sourceKey : "";
@@ -25,7 +26,7 @@ function getSourceParams(query, sourceRegistry) {
   const sourceRecord = sourceKey ? sourceRegistry.get(sourceKey) : null;
   const sourceType = sourceRecord?.sourceType ?? sourceTypeFromQuery;
   const source = sourceRecord?.source ?? sourceFromQuery;
-  return { sourceType, source };
+  return { sourceType, source, sourceKey };
 }
 
 /**
@@ -78,15 +79,85 @@ async function waitForTorrent(torrentPool, sourceType, source) {
  * @param {{ sourceRegistry: ReturnType<import("../../store/source-registry.js").createSourceRegistry>, torrentPool: import("../../services/torrent-pool.js").TorrentPool }} deps
  * @returns {Promise<void>}
  */
+/**
+ * The whole file for this source and index, if this proxy has one.
+ *
+ * The source key IS the identity: `torrent:<infohash>`, the same for a magnet
+ * and for a `.torrent` file of the same content. Nothing the torrent would have
+ * told us is needed to find the file, which is the point — asking the torrent
+ * would add it back.
+ *
+ * @param {{ wholeFiles?: Map<string, { path: string, length: number, name: string }> }} torrentPool
+ * @param {string} sourceKey
+ * @param {number} fileIndex
+ * @returns {{ path: string, length: number, name: string } | null}
+ */
+function wholeFileFor(torrentPool, sourceKey, fileIndex) {
+  const held = torrentPool?.wholeFiles;
+  if (!(held instanceof Map) || held.size === 0 || !sourceKey.startsWith("torrent:")) {
+    return null;
+  }
+  const infoHash = sourceKey.slice("torrent:".length).toLowerCase();
+  return held.get(`${infoHash}/${fileIndex}`) ?? null;
+}
+
+/**
+ * Serve a whole file off the disk, with ranges.
+ *
+ * @param {import("fastify").FastifyRequest} req
+ * @param {import("fastify").FastifyReply} reply
+ * @param {{ path: string, length: number, name: string }} file
+ * @returns {Promise<void> | void}
+ */
+function serveWholeFile(req, reply, file) {
+  const disposition = `inline; filename*=UTF-8''${encodeURIComponent(file.name)}`;
+  if (req.method === "HEAD") {
+    reply.hijack();
+    reply.raw.writeHead(200, {
+      "Accept-Ranges": "bytes",
+      "Content-Type": "application/octet-stream",
+      "Content-Length": String(file.length),
+      "Content-Disposition": disposition
+    });
+    reply.raw.end();
+    return;
+  }
+  reply.header("Accept-Ranges", "bytes");
+  reply.header("Content-Type", "application/octet-stream");
+  reply.header("Content-Disposition", disposition);
+  const range = parseRange(req.headers.range, file.length);
+  if (!range) {
+    reply.header("Content-Length", String(file.length));
+    return reply.send(createReadStream(file.path));
+  }
+  const { start, end } = range;
+  reply.code(206);
+  reply.header("Content-Length", String(end - start + 1));
+  reply.header("Content-Range", `bytes ${start}-${end}/${file.length}`);
+  return reply.send(createReadStream(file.path, { start, end }));
+}
+
 export async function handleStreamGet(req, reply, { sourceRegistry, torrentPool, noteInputBytes = null }) {
   const fileIndexRaw = typeof req.query.fileIndex === "string" ? req.query.fileIndex : "";
   const fileIndex = Number(fileIndexRaw);
-  const { sourceType, source } = getSourceParams(req.query, sourceRegistry);
+  const { sourceType, source, sourceKey } = getSourceParams(req.query, sourceRegistry);
 
   if (!sourceType || !source || !Number.isInteger(fileIndex) || fileIndex < 0) {
     return reply
       .code(400)
       .send({ error: "sourceKey or sourceType+source with fileIndex are required." });
+  }
+
+  // A FILE DOWNLOADED WHOLE IS A FILE, and reading it needs no torrent: no
+  // piece store, no memory ceiling, no eviction, no revival from a spill, and
+  // nothing that can refuse the read for want of memory. The check comes before
+  // the torrent is asked for on purpose — asking would add it back.
+  //
+  // The infohash is in the source key (`torrent:<infohash>`), so this needs
+  // nothing the torrent would have told us.
+  const whole = wholeFileFor(torrentPool, sourceKey, fileIndex);
+  if (whole) {
+    return serveWholeFile(req, reply, whole);
   }
 
   let torrent;

@@ -429,6 +429,83 @@ export function decideUploadLimit(activeTorrents, opts = {}) {
 }
 
 /**
+ * Let go of the swarm of a torrent whose last reader has just left.
+ *
+ * A PROXY THAT NEEDS NOTHING FROM A SWARM SHOULD NOT BE IN THAT SWARM. While a
+ * file is being read every connection is worth keeping — the one that has
+ * delivered nothing yet may deliver next — so this is not a limit on
+ * connections and never fires during playback.
+ *
+ * What that state cost until now: WebTorrent enforces `maxConns` only on peers
+ * it dials (`_drain`), while `_addIncomingPeer` checks that the torrent is
+ * neither destroyed nor paused and registers the peer. A proxy with its port
+ * mapped is reachable, so connections arrive and are never turned away — field
+ * 2026-09-11, 249 connected at the start of one viewing and 596 at the end,
+ * 15 862 more queued, on a file complete for three quarters of an hour.
+ *
+ * CALLED FROM THE DEPARTURE ITSELF, not from a pass over every torrent. The
+ * first version asked every five seconds whether anybody was reading, and a
+ * torrent added three seconds earlier — its edges still being read, its
+ * playback plan still being built — answered no. It was taken out of its swarm
+ * with 741 connections let go, and nothing rejoined it: rejoining waits for a
+ * reader, and the reader was waiting for the header the swarm had been
+ * fetching. Playback did not start at all (2.83.1).
+ *
+ * Asked at the moment the last claim is released, leaving cannot happen
+ * spontaneously: it is a consequence of a departure, and a torrent nobody has
+ * read yet has nothing to depart from.
+ *
+ * `paused` is the library's own word for this and the path it already checks,
+ * so nothing here fights it. The pause alone does not close what is already
+ * open, so the peers are let go by hand; the data stays exactly where it is.
+ *
+ * @param {import("webtorrent").Torrent} torrent
+ * @returns {number} Connections let go.
+ */
+export function leaveSwarm(torrent) {
+  if (!torrent || torrent.destroyed || torrent.paused === true) {
+    return 0;
+  }
+  torrent.pause();
+  const open = Array.isArray(torrent.wires) ? torrent.wires.length : 0;
+  let closed = 0;
+  for (const peer of [...(torrent._peers?.values?.() ?? [])]) {
+    try {
+      peer.destroy();
+      closed += 1;
+    } catch {
+      // A peer already going: nothing to do, and nothing worth failing for.
+    }
+  }
+  logger.info(
+    `torrent-pool: [${String(torrent.infoHash ?? "?").slice(0, 8)}] left the swarm — its last reader went, ` +
+    `${open} connection(s) open, ${closed} let go; the data stays and the next reader rejoins`
+  );
+  return closed;
+}
+
+/**
+ * Take the swarm back for a torrent a reader has just arrived at.
+ *
+ * The other half of the pair: a departure lets a swarm go, an arrival takes it
+ * back. Both are acted on at the moment they happen, and neither is discovered
+ * by asking.
+ *
+ * @param {import("webtorrent").Torrent} torrent
+ * @returns {boolean} Whether it had to be taken back.
+ */
+export function rejoinSwarm(torrent) {
+  if (!torrent || torrent.destroyed || torrent.paused !== true) {
+    return false;
+  }
+  torrent.resume();
+  logger.info(
+    `torrent-pool: [${String(torrent.infoHash ?? "?").slice(0, 8)}] rejoined the swarm — a reader arrived`
+  );
+  return true;
+}
+
+/**
  * Compute the default disk cap: the smaller of a fixed 10 GB and half of the
  * currently free space on the store's filesystem (so a tiny host is never
  * asked to hold more than it can). Best-effort; falls back to the fixed max
@@ -939,88 +1016,6 @@ export class TorrentPool {
   }
 
   /**
-   * Leave the swarm of a torrent nobody is reading, and rejoin it when
-   * somebody is.
-   *
-   * A PROXY THAT NEEDS NOTHING FROM A SWARM SHOULD NOT BE IN THAT SWARM. While
-   * a file is being watched every connection is worth keeping — the one that
-   * has delivered nothing yet may deliver next — so this is not a limit on
-   * connections and never fires during playback. It fires when NOTHING is
-   * stated about this torrent at all: no window from any reader, no file held.
-   *
-   * What that state cost until now: WebTorrent enforces `maxConns` only on
-   * peers it dials (`_drain`), while `_addIncomingPeer` checks that the torrent
-   * is neither destroyed nor paused and registers the peer. A proxy with its
-   * port mapped is reachable, so connections arrive and are never turned away —
-   * field 2026-09-11, 249 connected at the start of one viewing and 596 at the
-   * end, 15 862 more queued, on a file complete for three quarters of an hour,
-   * each of them served by reading a 4 MB piece off the disk for every 16 KB
-   * sent.
-   *
-   * `paused` is the library's own word for this and the path it already checks,
-   * so nothing here fights it. The pause alone does not close what is already
-   * open, so the peers are let go by hand; the data stays exactly where it is,
-   * and the next reader resumes the torrent rather than fetching it again.
-   *
-   * @param {import("webtorrent").Torrent} torrent
-   * @returns {void}
-   */
-  followTheReaders(torrent) {
-    if (!torrent || torrent.destroyed) {
-      return;
-    }
-    const usage = this.fileUsageByTorrent.get(torrent);
-    const isRead = Boolean(usage && usage.size > 0);
-    if (isRead) {
-      // Recorded on the torrent, as `hasActiveReader` and `hasUnmetDemand`
-      // beside it are: it is a fact about this torrent and it lives as long as
-      // the torrent does.
-      torrent.hasBeenRead = true;
-    }
-    const isWanted = isRead || demandFor(torrent).register.windows().length > 0;
-    // A TORRENT NOBODY HAS READ YET IS BEING SET UP, NOT ABANDONED. Field
-    // 2026-09-11, and it broke playback outright: a torrent was added at
-    // 20:57:17, its first peer connected at 20:57:18, and this pass took it out
-    // of the swarm at 20:57:21 — while the read of the file's edges was still
-    // in flight and the playback plan was being built. Nothing rejoined it,
-    // because rejoining waits for a reader and a reader cannot arrive: the
-    // header it needs is downloaded by the swarm that was just let go.
-    //
-    // The condition is a state and not a period: having been read at least once
-    // is what tells a film somebody left from a film nobody has opened yet. One
-    // that is never read at all goes by the pool's own idle removal, which is
-    // where that belongs.
-    if (!isWanted && torrent.hasBeenRead !== true) {
-      return;
-    }
-    if (isWanted && torrent.paused === true) {
-      torrent.resume();
-      logger.info(
-        `torrent-pool: [${String(torrent.infoHash ?? "?").slice(0, 8)}] rejoined the swarm — somebody is reading it again`
-      );
-      return;
-    }
-    if (isWanted || torrent.paused === true) {
-      return;
-    }
-    torrent.pause();
-    const open = Array.isArray(torrent.wires) ? torrent.wires.length : 0;
-    let closed = 0;
-    for (const peer of [...(torrent._peers?.values?.() ?? [])]) {
-      try {
-        peer.destroy();
-        closed += 1;
-      } catch {
-        // A peer already going: nothing to do, and nothing worth failing for.
-      }
-    }
-    logger.info(
-      `torrent-pool: [${String(torrent.infoHash ?? "?").slice(0, 8)}] left the swarm — nobody is reading it, ` +
-      `${open} connection(s) open, ${closed} let go; the data stays and the next reader rejoins`
-    );
-  }
-
-  /**
    * Re-evaluate and apply the client-wide upload limit from current swarm state
    * (see {@link decideUploadLimit}). Runs on a timer; only calls into WebTorrent
    * when the target changes, and logs each change for field tuning.
@@ -1352,9 +1347,6 @@ export class TorrentPool {
       this.#stateBackgroundFill(torrent);
     }
     this.#reportStalledDownloads();
-    for (const torrent of this.torrents.values()) {
-      this.followTheReaders(torrent);
-    }
     const { bytesPerSec, reason } = decideUploadLimit(active);
     if (bytesPerSec === this.#uploadLimit) {
       return;
@@ -1769,15 +1761,10 @@ export class TorrentPool {
     // it recently accessed so LRU eviction keeps it.
     this.#cancelIdleRemoval(torrent);
     this.#lastAccess.set(torrent, Date.now());
-    // And rejoin its swarm HERE rather than at the next five-second pass: a
-    // reader that has just arrived is about to ask for bytes, and a torrent
-    // still paused answers by fetching nothing at all.
-    if (torrent.paused === true) {
-      torrent.resume();
-      logger.info(
-        `torrent-pool: [${String(torrent.infoHash ?? "?").slice(0, 8)}] rejoined the swarm — a reader arrived`
-      );
-    }
+    // AND REJOIN ITS SWARM, which is the other half of the pair: a departure
+    // lets a swarm go, an arrival takes it back. Both are acted on at the
+    // moment they happen, and neither is discovered by asking.
+    rejoinSwarm(torrent);
     usage.set(fileIndex, (usage.get(fileIndex) ?? 0) + 1);
 
     let released = false;
@@ -1796,6 +1783,8 @@ export class TorrentPool {
         this.fileUsageByTorrent.delete(torrent);
         // No active readers — schedule removal (with store) after an idle TTL.
         this.#scheduleIdleRemoval(torrent);
+        // THE READER LEFT, AND THAT IS THE ONLY MOMENT A SWARM MAY BE LET GO.
+        leaveSwarm(torrent);
       }
       };
   }

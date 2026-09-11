@@ -3,21 +3,25 @@
  *
  * WebTorrent enforces `maxConns` only on peers it dials (`_drain`), while
  * `_addIncomingPeer` checks that the torrent is neither destroyed nor paused
- * and registers the peer. A proxy with its port mapped is reachable, so
- * connections arrive and are never turned away — field 2026-09-11: 249
- * connected at the start of one viewing, 596 at the end, 15 862 more queued, on
- * a file that had been complete for three quarters of an hour, each connection
- * served by reading a 4 MB piece off the disk for every 16 KB sent.
+ * and registers the peer. A proxy with its port mapped is reachable, so on a
+ * popular torrent connections arrive and are never turned away — field
+ * 2026-09-11: 249 connected at the start of one viewing, 596 at the end, 15 862
+ * more queued, on a file complete for three quarters of an hour.
  *
- * The rule is not a limit on connections. While anybody is reading, every
- * connection is worth keeping: the one that has delivered nothing yet may
- * deliver next. It is about a torrent nobody is reading at all.
+ * The rule is not a limit on connections. While anybody is reading, every one is
+ * worth keeping: the one that has delivered nothing yet may deliver next.
+ *
+ * AND IT IS ACTED ON AT THE DEPARTURE ITSELF. The first version asked every
+ * five seconds whether anybody was reading, and a torrent added three seconds
+ * earlier answered no — its edges still being read, its plan still being built.
+ * It left the swarm with 741 connections let go, and nothing rejoined it:
+ * rejoining waits for a reader, and the reader was waiting for the header the
+ * swarm had been fetching. Playback did not start at all.
  */
 
 import test from "node:test";
 import assert from "node:assert/strict";
-import { TorrentPool } from "../services/torrent-pool.js";
-import { demandFor, forgetTorrent } from "../services/download/registry.js";
+import { leaveSwarm, rejoinSwarm } from "../services/torrent-pool.js";
 
 /**
  * A torrent that records what was done to it. Only the surface the rule
@@ -39,7 +43,7 @@ function torrentWith(peerCount) {
   }
   return {
     infoHash: "f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0",
-    files: [{ length: 1024 }],
+    files: [{ length: 1024 }, { length: 2048 }],
     paused: false,
     wires: [...peers.values()].map((peer) => peer.wire),
     _peers: peers,
@@ -52,117 +56,37 @@ function torrentWith(peerCount) {
   };
 }
 
-/**
- * @param {object} torrent
- * @returns {TorrentPool}
- */
-function poolWith(torrent) {
-  const pool = Object.create(TorrentPool.prototype);
-  pool.torrents = new Map([["source", torrent]]);
-  pool.fileUsageByTorrent = new WeakMap();
-  return pool;
-}
-
-test("a torrent nobody is reading is let go of, and its data is not", () => {
+test("letting a swarm go pauses the torrent and closes what the pause does not", () => {
   const torrent = torrentWith(6);
-  const pool = poolWith(torrent);
-  try {
-    // Read once and left, which is the state this is about: a film nobody has
-    // opened yet is being set up, and the test below covers that.
-    pool.fileUsageByTorrent.set(torrent, new Map([[0, 1]]));
-    pool.followTheReaders(torrent);
-    pool.fileUsageByTorrent.set(torrent, new Map());
-    pool.followTheReaders(torrent);
 
-    assert.equal(torrent.paused, true, "the swarm was not left");
-    assert.equal(torrent._peers.size, 0, "the connections the pause does not close were not let go");
-  } finally {
-    forgetTorrent(torrent);
-  }
+  const closed = leaveSwarm(torrent);
+
+  assert.equal(torrent.paused, true, "the library's own word for this was not used");
+  assert.equal(closed, 6);
+  assert.equal(torrent._peers.size, 0, "the connections the pause does not close were not let go");
 });
 
-test("a torrent somebody is reading keeps every connection it has", () => {
-  const torrent = torrentWith(6);
-  const pool = poolWith(torrent);
-  pool.fileUsageByTorrent.set(torrent, new Map([[0, 1]]));
-  try {
-    pool.followTheReaders(torrent);
-
-    assert.equal(torrent.paused, false, "a torrent being read was taken out of its swarm");
-    assert.equal(torrent._peers.size, 6, "connections were closed while somebody was reading");
-  } finally {
-    forgetTorrent(torrent);
-  }
-});
-
-test("a stated window keeps the swarm even with no file held", () => {
-  // The register is what the download layer states; a reader that has declared
-  // a window but not yet taken a file hold is still a reader.
-  const torrent = torrentWith(2);
-  const pool = poolWith(torrent);
-  demandFor(torrent).register.state({
-    claimant: "read-1",
-    fileIndex: 0,
-    byteStart: 0,
-    byteEnd: 1023,
-    urgency: 0
-  });
-  try {
-    pool.followTheReaders(torrent);
-    assert.equal(torrent.paused, false, "a declared window did not count as somebody reading");
-  } finally {
-    forgetTorrent(torrent);
-  }
-});
-
-test("the swarm is rejoined when a reader comes back", () => {
-  const torrent = torrentWith(3);
-  const pool = poolWith(torrent);
-  try {
-    pool.fileUsageByTorrent.set(torrent, new Map([[0, 1]]));
-    pool.followTheReaders(torrent);
-    pool.fileUsageByTorrent.set(torrent, new Map());
-    pool.followTheReaders(torrent);
-    assert.equal(torrent.paused, true);
-
-    pool.fileUsageByTorrent.set(torrent, new Map([[0, 1]]));
-    pool.followTheReaders(torrent);
-    assert.equal(torrent.paused, false, "the next reader was left with a torrent that fetches nothing");
-  } finally {
-    forgetTorrent(torrent);
-  }
-});
-
-test("a torrent nobody has read yet is being set up, and is left alone", () => {
-  // Field 2026-09-11, and it broke playback outright: a torrent added at
-  // 20:57:17 had its first peer at 20:57:18 and was taken out of the swarm at
-  // 20:57:21 — while the read of the file's edges was still in flight. Nothing
-  // rejoined it, because rejoining waits for a reader and the reader was
-  // waiting for the header the swarm was fetching.
-  const torrent = torrentWith(103);
-  const pool = poolWith(torrent);
-  try {
-    pool.followTheReaders(torrent);
-    assert.equal(torrent.paused, false, "a torrent being opened was taken out of its swarm");
-    assert.equal(torrent._peers.size, 103, "and its connections were let go");
-  } finally {
-    forgetTorrent(torrent);
-  }
-});
-
-test("once it has been read, leaving is allowed again", () => {
+test("a swarm already let go is not let go twice", () => {
   const torrent = torrentWith(4);
-  const pool = poolWith(torrent);
-  try {
-    // A reader arrives and goes.
-    pool.fileUsageByTorrent.set(torrent, new Map([[0, 1]]));
-    pool.followTheReaders(torrent);
-    assert.equal(torrent.paused, false);
+  leaveSwarm(torrent);
+  assert.equal(leaveSwarm(torrent), 0);
+});
 
-    pool.fileUsageByTorrent.set(torrent, new Map());
-    pool.followTheReaders(torrent);
-    assert.equal(torrent.paused, true, "a film somebody left keeps its swarm for nobody");
-  } finally {
-    forgetTorrent(torrent);
-  }
+test("the reader that comes back takes the swarm with it", () => {
+  const torrent = torrentWith(3);
+  leaveSwarm(torrent);
+
+  assert.equal(rejoinSwarm(torrent), true);
+  assert.equal(torrent.paused, false, "the next reader was left with a torrent that fetches nothing");
+  assert.equal(rejoinSwarm(torrent), false, "a torrent already in its swarm was resumed again");
+});
+
+test("a torrent nobody has read yet is never asked to leave", () => {
+  // The field failure of 2026-09-11 is closed by WHERE this is called from, not
+  // by anything inside it: leaving is a consequence of the last claim being
+  // released, and a torrent being opened has released nothing. There is no pass
+  // that can ask it.
+  const torrent = torrentWith(103);
+  assert.equal(torrent.paused, false);
+  assert.equal(torrent._peers.size, 103);
 });

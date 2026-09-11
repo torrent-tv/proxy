@@ -213,11 +213,18 @@ export class PieceDiskStore {
   /**
    * Read a piece back into a buffer the caller already owns.
    *
+   * PART of a piece, when the caller asks for one. A peer asks for 16 KB at a
+   * time and a piece here is megabytes, so reading the whole of it to answer
+   * one request is the difference between 16 KB and 4 MB off the disk — field
+   * 2026-09-11: 63 416 reads of which 21.6 % came from memory, 49 696 pieces
+   * revived whole, to serve an upload capped at 512 KB/s.
+   *
    * @param {number} index
    * @param {Uint8Array} target - Destination; its length is what gets read.
+   * @param {number} [at] - Offset within the piece to start at.
    * @returns {Promise<number>} Bytes read.
    */
-  async read(index, target) {
+  async read(index, target, at = 0) {
     if (!this.#stored.has(index)) {
       throw new Error(`Piece ${index} is not on disk.`);
     }
@@ -229,7 +236,7 @@ export class PieceDiskStore {
     let handle = null;
     try {
       handle = await fs.open(this.#pathOf(index), "r");
-      const { bytesRead } = await handle.read(target, 0, target.length, 0);
+      const { bytesRead } = await handle.read(target, 0, target.length, Math.max(0, at));
       this.#touched.set(index, this.#now());
       return bytesRead;
     } finally {

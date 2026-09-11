@@ -733,7 +733,9 @@ setInterval(() => {
       `on-disk=${Math.round((stats.spilledBytes || 0) / 1048576)}MB ` +
       `pinned=${stats.pinned} spilled=${stats.spilled} reads=${reads} (${fromMemoryShare}% from memory) ` +
       `spills=${stats.spills} revivals=${stats.revivals}` +
-      (stats.blockedByPins > 0 ? ` blocked-by-pins=${stats.blockedByPins}` : "") +
+      (stats.blockedByPins > 0 ? ` no-block-for=${stats.blockedByPins}` : "") +
+      (stats.admittedWithoutSlot > 0 ? ` to-disk-for-want-of-memory=${stats.admittedWithoutSlot}` : "") +
+      (stats.stillMs > 1000 ? ` nothing-moved-for=${Math.round(stats.stillMs / 1000)}s` : "") +
       (stats.evictedOnRevise > 0 ? ` evictedOnRevise=${stats.evictedOnRevise}` : "") +
       (stats.spillFailures > 0 ? ` spill-failures=${stats.spillFailures}` : "") +
       (stats.outstanding > 0 ? ` outstanding=${stats.outstanding}` : "")

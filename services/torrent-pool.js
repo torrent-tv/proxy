@@ -1330,6 +1330,21 @@ export class TorrentPool {
       logger.warn(`torrent-pool: [${label()}] warning: ${formatWarning(warning)}`);
     });
 
+    // A TORRENT THAT DIED WITHOUT US ASKING LEAVES ITS RECORD BEHIND, and the
+    // record goes on answering. Field 2026-09-11: the store refused a block,
+    // the client destroyed the torrent, and for the rest of the process every
+    // read answered `File 1 not found in torrent:d4022ff4…` while `/stats`
+    // reported `peers=0 connected of 1186 known` — so the browser's own remedy,
+    // adding the source again, returned the corpse and the viewer could not
+    // open anything until the addon was restarted.
+    //
+    // Forgetting the record is the whole fix: the next request builds the
+    // torrent again, from the same magnet, against the same data on disk.
+    torrent.on("error", (error) => {
+      logger.error(`torrent-pool: [${label()}] died: ${formatWarning(error)}`);
+      this.#forgetDeadTorrent(torrent);
+    });
+
     // Everything below needs the torrent to have been PARSED, and `add` returns
     // before that: `announce`, `files` and `private` are all still empty, and
     // `discovery` — which owns the tracker client — is not created until
@@ -1668,6 +1683,44 @@ export class TorrentPool {
    * @param {string} [reason="unknown"] - Why removal was requested (idle-ttl, disk-cap, evict, api).
    * @returns {void}
    */
+  /**
+   * Forget a torrent that died on its own, keeping its bytes.
+   *
+   * NOT `#removeTorrent`: that one destroys the store as well, and the data on
+   * disk is the expensive thing here — re-downloading a film costs the swarm
+   * and the viewer, while re-adding a torrent costs a tracker announce. What
+   * has to go is only the RECORD, which otherwise answers every later request
+   * with a corpse.
+   *
+   * @param {import("webtorrent").Torrent} torrent
+   * @returns {void}
+   */
+  #forgetDeadTorrent(torrent) {
+    if (!torrent) {
+      return;
+    }
+    let forgotten = false;
+    for (const [key, value] of this.torrents) {
+      if (value === torrent) {
+        this.torrents.delete(key);
+        forgotten = true;
+        break;
+      }
+    }
+    if (!forgotten) {
+      return;
+    }
+    forgetTorrent(torrent);
+    this.fileUsageByTorrent.delete(torrent);
+    this.#lastAccess.delete(torrent);
+    this.#readPositionByTorrent.delete(torrent);
+    const name = typeof torrent.name === "string" ? torrent.name : "(unknown)";
+    logger.warn(
+      `torrent-pool: forgot "${name}" [${String(torrent.infoHash ?? "?").slice(0, 8)}] — ` +
+      "it died without being asked to; its data stays on disk and the next request adds it again"
+    );
+  }
+
   #removeTorrent(torrent, reason = "unknown") {
     // Everything anybody stated for this torrent goes with it.
     forgetTorrent(torrent);

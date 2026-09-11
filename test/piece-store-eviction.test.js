@@ -177,7 +177,13 @@ test("the store says why it spills: what is asked of it, what it had to take, ho
     // eviction on ADMISSION — `asked.spills` above is zero, where before it all
     // six arrivals displaced a nearer piece and were read back moments later.
     assert.ok(after.fromDisk > 0, "the pieces that went to disk were read back from it");
-    assert.ok(after.revivals > 0, "reading one back brings it into memory");
+    // Through the reader's own entry point, which is the one that populates
+    // memory. `get` is the torrent client's, and since 2026-09-11 it answers
+    // from disk without taking a block: a peer asks for kilobytes of a piece
+    // that is megabytes, and reviving the whole of it for that was how an
+    // upload capped at 512 KB/s produced 49 696 revivals in one session.
+    await store.reside(9);
+    assert.ok(store.stats().revivals > 0, "a read for playback brings the piece into memory");
     // No age to report, and that is right rather than missing: an age measures
     // how long an EVICTED piece stayed away, and these were never resident —
     // they were written on arrival and read back once.
@@ -252,11 +258,12 @@ test("before any reader has declared anything, an arriving piece still goes to m
 test("the store asks for what its readers declared, and for a whole window at least", async () => {
   const { store, directory } = await makeStore(64);
   try {
-    // With nobody reading there is no demand to speak of, so the store asks for
-    // what it is already allowed and the first revision after a read begins
-    // brings it down.
+    // With nobody reading, the store asks for a floor — one window's worth,
+    // and until it has been asked for anything, the minimum. It does NOT ask
+    // for everything it is allowed: pieces arriving for a reader still on its
+    // way have the disk.
     const idle = store.wantedBytes;
-    assert.equal(idle, store.stats().budgetBytes);
+    assert.ok(idle > 0 && idle < store.stats().budgetBytes, "an idle store asks for a floor, not its whole allowance");
 
     // Two readers of one file — picture and sound — overlapping by
     // construction. The ask is their union, not their sum.
@@ -375,10 +382,11 @@ test("evicting a piece the disk already holds costs no second write", async () =
     assert.ok(written > 0);
     assert.equal(store.stats().spillsSkipped, 0, "the first write of a piece is a real one");
 
-    // Read it back — it returns to memory and the copy stays on disk. Evicting
-    // it again writes bytes that are already there, byte for byte, because only
-    // `put` removes the disk copy and no `put` has happened.
+    // Read it back for playback — it returns to memory and the copy stays on
+    // disk. Evicting it again writes bytes that are already there, byte for
+    // byte, because only `put` removes the disk copy and no `put` has happened.
     assert.ok((await get(store, 0)).equals(pieceOf(0)));
+    await store.reside(0);
     for (let index = 10; index < 13; index += 1) {
       await put(store, index, pieceOf(index));
     }
@@ -396,19 +404,24 @@ test("a store whose readers have gone asks for nothing, one that never had them 
   const { store, directory } = await makeStore(16);
   try {
     // Never had a reader: this is the initial download and the warm-up fetches
-    // of the header and the tail, with a read on its way.
+    // of the header and the tail, with a read on its way. Those pieces have the
+    // disk, so the store asks for the minimum rather than for its opening
+    // allowance — a torrent nobody has read yet held 4180 MB of a machine's
+    // memory on 2026-09-11 while the film being watched was allowed 12 MB.
     const opening = store.wantedBytes;
-    assert.equal(opening, store.stats().budgetBytes);
+    assert.ok(opening < store.stats().budgetBytes, "a store nobody has read keeps the minimum");
 
     store.protectRange("video", 0, 9);
     assert.equal(store.wantedBytes, 10 * PIECE);
 
-    // The read ends. Its torrent sits until the pool's idle timer removes it,
-    // and that timer needs a refcount of zero and can be a quarter of an hour
-    // away. Holding the pieces for a reader that has gone is memory taken from
-    // the machine for nothing.
+    // The read ends, and the store keeps room for ONE window — what the next
+    // read will ask for within seconds. Falling to the minimum here is what
+    // left a store at three blocks when the viewer switched files on
+    // 2026-09-11, with the allowance re-derived a minute later and a claim
+    // giving up after five seconds.
     store.releaseProtection("video");
-    assert.ok(store.wantedBytes < opening, "a store with no readers left asks for nothing");
+    assert.equal(store.wantedBytes, 10 * PIECE, "the floor between readers is the widest window seen");
+    assert.ok(store.wantedBytes > opening, "which is more than a store nobody has read keeps");
   } finally {
     store.destroy(() => undefined);
     await fs.rm(directory, { recursive: true, force: true, maxRetries: 10, retryDelay: 20 });

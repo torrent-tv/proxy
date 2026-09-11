@@ -310,6 +310,11 @@ export class SharedPieceStore {
     revivals: 0,
     blockedByPins: 0,
     waitedForPins: 0,
+    // Pieces that went to disk because no block could be had for them. Not a
+    // failure — the piece is kept and a later read revives it — but it is the
+    // measure of how often the store is asked to hold more than it may, and
+    // before 2026-09-11 this case ended the torrent instead of being counted.
+    admittedWithoutSlot: 0,
     evictedOnRevise: 0,
     spillFailures: 0,
     // Whether the store is doing its job or being asked to hold more than it
@@ -375,8 +380,14 @@ export class SharedPieceStore {
   #freeBlocks = [];
   /** Blocks that exist at all: free plus holding a piece. */
   #blocksAllocated = 0;
-  /** Whether a reader has ever declared a window here. See `wantedBytes`. */
-  #everHadReader = false;
+  /**
+   * The widest window any reader has declared here, in pieces.
+   *
+   * The floor this store asks for between readers: one window is what the next
+   * read will ask for, and it is a measurement rather than a chosen number.
+   * See `wantedBytes`.
+   */
+  #widestSeenPieces = 0;
   /** Whether the last revision had to exceed the machine's share. */
   #beyondTheMachine = false;
   /**
@@ -471,6 +482,13 @@ export class SharedPieceStore {
       // is never returned is invisible until the store cannot admit anything,
       // and by then the reason is long gone. At rest this is zero.
       outstanding: this.#outstandingPieces,
+      // How long since ANYTHING in this store moved — a write finishing, a
+      // piece admitted, a pin released. A claim gives up after
+      // `PINNED_WAIT_MS` of exactly this, so it is the figure that says whether
+      // a refusal was the store being busy or the store being stuck, and until
+      // 2026-09-11 nothing printed it: the field had 152 refusals in 104
+      // seconds and no way to tell which.
+      stillMs: this.#lastProgressAt > 0 ? Date.now() - this.#lastProgressAt : 0,
       spilled: this.#disk.size,
       // What the spill file ACTUALLY weighs, piece by piece, rather than the
       // piece count times a full piece length. The last piece of a torrent is
@@ -568,7 +586,7 @@ export class SharedPieceStore {
   get wantedBytes() {
     const demand = this.#lru.demand();
     if (demand.readers > 0) {
-      this.#everHadReader = true;
+      this.#widestSeenPieces = Math.max(this.#widestSeenPieces, demand.widestPieces);
       const pieces = Math.max(MIN_RESIDENT_PIECES, demand.unionPieces, demand.widestPieces);
       // Plus room to absorb what arrives while a write is finishing. Asking for
       // exactly what the readers want leaves no free place ever, so every
@@ -577,16 +595,23 @@ export class SharedPieceStore {
       // that followed.
       return (pieces + this.slackPieces()) * this.#chunkLength;
     }
-    // Readers that have GONE are not the same as readers that have not arrived.
-    // A store whose readers ended has nothing to hold pieces for — its torrent
-    // sits until the pool's idle timer removes it, which needs a refcount of
-    // zero and can be a quarter of an hour away — so it asks for nothing and
-    // its memory goes back to the machine now. A store that has never had a
-    // reader is being filled for one that is on its way, and asks for what it
-    // was opened with until the first read says what it needs.
-    return this.#everHadReader
-      ? (MIN_RESIDENT_PIECES + this.slackPieces()) * this.#chunkLength
-      : this.#growthCeiling * this.#chunkLength;
+    // WITH NO READER, THE FLOOR IS ONE READER'S WINDOW — the widest this store
+    // has actually been asked for, which is measured rather than chosen, and
+    // `MIN_RESIDENT_PIECES` only until it has been asked for anything.
+    //
+    // It used to fall to the minimum the moment the last reader went, and the
+    // allowance is re-derived once a minute (`STORE_REPORT_INTERVAL_MS`) while
+    // a claim gives up after five seconds. A reader arriving into that minute
+    // met a store of two or three blocks: field 2026-09-11, the viewer switched
+    // to another file of the same torrent and the store was at
+    // `0/3 (0MB of 12MB allowed)` with the machine offering 4.3 GB.
+    //
+    // Holding one window's worth between readers is not waste: it is what the
+    // next read will ask for within seconds, and the pieces in it are the ones
+    // that reader left off at. A store that has never been read keeps nothing
+    // either — its pieces are arriving for a reader on the way, and they have
+    // the disk.
+    return (Math.max(MIN_RESIDENT_PIECES, this.#widestSeenPieces) + this.slackPieces()) * this.#chunkLength;
   }
 
   reviseGrowthCeiling(allowedBytes) {
@@ -720,6 +745,28 @@ export class SharedPieceStore {
    * @returns {Promise<() => void>} The release, which the caller MUST call in a
    *   `finally`. Calling it twice is harmless.
    */
+  /**
+   * The same reservation, answering null instead of throwing.
+   *
+   * For callers that have somewhere else to go: an arriving piece has the disk,
+   * so it writes through rather than failing. Keeping the throwing form for
+   * callers that genuinely have no alternative is what makes the difference
+   * visible at the call site rather than in a catch.
+   *
+   * @returns {Promise<(() => void) | null>}
+   */
+  async #claimSlotOrNull() {
+    try {
+      return await this.#claimSlot();
+    } catch (error) {
+      if (this.#closed) {
+        throw error;
+      }
+      this.#counters.admittedWithoutSlot += 1;
+      return null;
+    }
+  }
+
   async #claimSlot() {
     // How long THIS claim has been trying, kept here and not on the store.
     // It was a field, `#pinnedWaitStartedAt`, shared by the two waits inside
@@ -1064,7 +1111,15 @@ export class SharedPieceStore {
     //
     // So when the disk is what the store is waiting for, it waits. A completing
     // write calls `#noteProgress`, which wakes whoever is here.
-    if (this.#blocksInFlight() > 0 && this.#blocksInUse() >= this.#growthCeiling) {
+    // THE SAME QUANTITY THE GRANT ABOVE TESTS. It used to ask whether
+    // `blocksInUse` alone had reached the ceiling, while what reaches the
+    // ceiling is `blocksInUse + outstanding` — so a store held at its ceiling
+    // by reservations fell past this branch and into the eviction below, which
+    // has nothing to evict when nothing is resident. Field 2026-09-11:
+    // `blocks=2 (0 spare)` with `outstanding=2` against a ceiling of 3, two
+    // writes in flight each of which would have returned a block, and the claim
+    // threw rather than waiting the moment out.
+    if (this.#blocksInFlight() > 0 && this.#blocksInUse() + this.#outstandingPieces >= this.#growthCeiling) {
       if (stillFor() < PINNED_WAIT_MS) {
         this.#counters.waitedForDisk += 1;
         return false;
@@ -1090,8 +1145,19 @@ export class SharedPieceStore {
         return false;
       }
       this.#counters.blockedByPins += 1;
+      // SAY WHICH STATE REFUSED, with the numbers it was read from. The old
+      // text named one state — every resident piece pinned — and the field case
+      // of 2026-09-11 was a different one: `resident=0 pinned=0`, nothing to
+      // evict because nothing was in memory at all, the ceiling held by
+      // reservations and by two writes on their way to disk. A message that
+      // names a state that did not exist costs a day of reading the wrong code.
       throw new Error(
-        `Every resident piece is pinned and nothing moved for ${PINNED_WAIT_MS}ms; no slot can be freed.`
+        `No block can be had for ${PINNED_WAIT_MS}ms: ` +
+        `${this.#buffers.size} resident (${this.#lru.pinnedCount} pinned, ` +
+        `${this.#lru.protectedCount} range(s) declared), ` +
+        `${this.#blocksInUse()} block(s) in use of ${this.#growthCeiling} allowed, ` +
+        `${this.#blocksInFlight()} on their way to disk, ` +
+        `${this.#outstandingPieces} reservation(s) outstanding.`
       );
     }
 
@@ -1427,7 +1493,25 @@ export class SharedPieceStore {
         return;
       }
 
-      const release = await this.#claimSlot();
+      // MEMORY IS NEVER A REASON TO REFUSE A PIECE. The piece is verified and
+      // the disk will take it; failing here fails the torrent client's own
+      // write, and the client answers that by destroying the torrent — field
+      // 2026-09-11, `WebTorrent client error: Every resident piece is pinned`,
+      // after which every read of that torrent answered `File 1 not found` for
+      // the life of the process and the viewer could not open anything.
+      //
+      // The branch above already writes through when the store is full and the
+      // arrival is wanted less than what it would displace. It cannot fire
+      // where nothing is declared (`protectedCount > 0`), which is exactly the
+      // state a store between readers is in — and that state is where the
+      // refusal happened.
+      const release = await this.#claimSlotOrNull();
+      if (release === null) {
+        this.#counters.admittedToDisk += 1;
+        await this.#writeThrough(index, bytes);
+        this.#noteProgress();
+        return;
+      }
       try {
         this.#registerPiece(index, this.#copyIntoNewBuffer(index, bytes));
         await this.#forgetOnDisk(index);
@@ -1461,11 +1545,38 @@ export class SharedPieceStore {
         return Buffer.from(Buffer.from(buffer, offset, length));
       }
 
-      const revived = await this.#revive(index);
-      if (revived === null) {
-        throw new Error(`Piece ${index} is not in the store.`);
+      // NOT revived into memory. This entry point is the torrent client's: it
+      // reads to answer a peer, and a peer asks for 16 KB while a piece here is
+      // megabytes. Reviving would take a whole block for bytes nobody is going
+      // to read again — and it is the ONE read that can be answered without a
+      // block at all, since the caller is handed its own copy either way.
+      //
+      // Field 2026-09-11, and this is the whole reason the store could not
+      // serve anybody: an upload capped at 512 KB/s produced 63 416 reads of
+      // which 78.4 % missed memory, 49 696 pieces revived whole, and every one
+      // of those revivals competed for a ceiling of three blocks. Claiming a
+      // block for an upload is also how this path reached `#claimSlot`, whose
+      // failure the torrent client turns into a destroyed torrent.
+      // A spill that is still being written owns the only copy there is, so
+      // wait for it exactly as `#revive` does before asking the disk.
+      const spill = this.#evicting.get(index);
+      if (spill) {
+        await spill.catch(() => undefined);
       }
-      return Buffer.from(Buffer.from(revived, offset, length));
+      const resident = this.#buffers.get(index);
+      if (resident !== undefined) {
+        this.#lru.touch(index);
+        this.#counters.fromMemory += 1;
+        return Buffer.from(Buffer.from(resident, offset, length));
+      }
+      if (this.#disk.has(index)) {
+        const want = Math.max(0, Math.min(length, this.#lengthOf(index) - offset));
+        const target = Buffer.allocUnsafe(want);
+        await this.#disk.read(index, target, offset);
+        this.#counters.fromDisk += 1;
+        return target;
+      }
+      throw new Error(`Piece ${index} is not in the store.`);
     };
 
     fetch().then((bytes) => done(null, bytes), (error) => done(error));
@@ -1484,6 +1595,18 @@ export class SharedPieceStore {
    */
   protectRange(readerId, from, to, urgency) {
     this.#lru.protect(readerId, from, to, urgency);
+    // A READER DECLARES ITSELF IN A MOMENT; the allowance was re-derived once a
+    // minute. Between the two a read met whatever the store had shrunk to while
+    // nobody was reading, and a claim gives up after five seconds — twelve
+    // times sooner than the store could have grown (field 2026-09-11).
+    //
+    // DELIBERATELY NOT raising the ceiling here. A reader declaring a window
+    // wider than the store may hold is a shortage to absorb, not an instruction
+    // to take more memory: with several viewers on several films the unions add
+    // up across stores, and each store's floor already wins over the machine's
+    // share at the next revision. What the shortage must not do is fail a read,
+    // and that is answered where it arises — no path in this store refuses for
+    // want of memory any more.
   }
 
   protectedRanges() {

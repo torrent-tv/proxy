@@ -129,10 +129,12 @@ const get = (store, index) =>
  *
  * @param {() => boolean} holds
  * @param {string} what
+ * @param {number} [limit] - A backstop, never the measurement: one of the
+ *   conditions here is the store's own patience, which is itself five seconds.
  * @returns {Promise<void>}
  */
-async function until(holds, what) {
-  const deadline = Date.now() + 5_000;
+async function until(holds, what, limit = 5_000) {
+  const deadline = Date.now() + limit;
   while (!holds()) {
     if (Date.now() > deadline) {
       throw new Error(`timed out waiting until ${what}`);
@@ -196,9 +198,20 @@ test("a claim that cannot be met ends in an error, not in waiting for ever", { t
     // other is pinned. The old rule waited while anything was nominally in
     // flight, which here is for ever.
     store.pin(1);
-    await assert.rejects(() => put(store, 3), /nothing moved/);
+    // The claim gives up within its own patience — that is the property. What
+    // the caller does with the refusal is its own business, and since
+    // 2026-09-11 an arriving piece answers it by taking the disk instead of
+    // failing the torrent client's write.
+    const arriving = put(store, 3);
+    await until(
+      () => store.stats().blockedByPins > 0,
+      "the claim gave up rather than waiting for ever",
+      20_000
+    );
 
     store.unpin(1);
+    disk.releaseWrites();
+    await arriving;
     disk.releaseWrites();
     await spilling;
   } finally {

@@ -807,6 +807,30 @@ export class TorrentPool {
    *   disable the cap.
    */
   /**
+   * Sources every file of which this proxy holds whole.
+   *
+   * A torrent added again for one of these has nothing to fetch and nothing to
+   * check: what it would verify was written out of pieces this client had
+   * already hashed, and the file's size was checked against what the torrent
+   * says. So it is added with verification skipped — otherwise a viewer
+   * returning to a film waits for a gigabyte and a half to be hashed to learn
+   * what we wrote down.
+   *
+   * @type {Set<string>}
+   */
+  #wholeSources = new Set();
+
+  /**
+   * Say that every file of a source is held whole.
+   *
+   * @param {string} sourceKey
+   * @returns {void}
+   */
+  addWholeSource(sourceKey) {
+    this.#wholeSources.add(String(sourceKey));
+  }
+
+  /**
    * Anything else every store of this pool is built with.
    *
    * Today: where a piece can be had when neither of the store's own tiers has
@@ -1668,7 +1692,12 @@ export class TorrentPool {
         // the files nobody had opened. On a season pack that meant every
         // episode was being fetched for as long as the viewer took to choose
         // one. The download set is built up from stated needs instead.
-        deselect: true
+        deselect: true,
+        // Nothing to check when every file of this source is already here
+        // whole: what would be verified was written out of pieces this client
+        // had hashed, and the file's size was checked against what the torrent
+        // says. See `#wholeSources`.
+        skipVerify: this.#wholeSources.has(key)
       }, (readyTorrent) => {
         this.client.off("error", onError);
         this.torrents.set(key, readyTorrent);

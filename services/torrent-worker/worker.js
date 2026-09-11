@@ -1078,8 +1078,23 @@ async function keepWholeFiles() {
       logger.info(
         `whole files: "${torrent.name}" is downloaded whole and saved — removing the torrent, keeping the files`
       );
+      // THE RECIPE STAYS, and so does the entry that leads to it. Everything
+      // that asks this thread about a source — the track table, the media
+      // info, the keyframe table, the stats the browser polls — comes through
+      // `requireTorrent`, which adds a torrent back when the one it holds is
+      // no longer usable. Deleting the entry here would turn a viewer
+      // returning to this film into `Unknown source`, which is a worse failure
+      // than the one this removal is for.
+      //
+      // What the torrent finds when it comes back is the whole files: its
+      // store reads pieces from them, so it fetches nothing. It is added with
+      // verification skipped, and that is not a shortcut — the file was
+      // written out of pieces this client had already hashed, and its size was
+      // checked against what the torrent says. Re-hashing a gigabyte and a
+      // half to learn what we wrote down is a minute of a viewer's time for
+      // nothing.
       pool.remove(torrent, "downloaded-whole");
-      torrentsByKey.delete(sourceKey);
+      pool.addWholeSource(sourceKey);
     }
   }
 }

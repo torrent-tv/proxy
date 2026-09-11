@@ -144,11 +144,32 @@ const REPORT_INTERVAL_MS = 5_000;
  * as {@link wedgeIsCertain} in `data-channel-handler.js`, applied to the
  * probe's own counter instead of the transport's byte counter.
  *
- * @param {{ stuckForMs: number, longestHealthySeenGapMs: number, intervalMs?: number }} state
+ * THE FLOOR IS NOT ONE PROBE INTERVAL. "The longest gap this connection has
+ * ever shown" is nothing at all in its first minutes, and the floor under it
+ * was a single interval — 500 ms — so any two-second quiet stretch while the
+ * browser filled its cushion read as longer than anything healthy ever seen.
+ * Field 2026-09-11: two captures of 180 s each, triggered at `wedged 1s` and
+ * `wedged 2s`, on a connection with `rtt=5ms`, every queue at 0 B and the
+ * viewer watching; 65 MB of them were left on the addon's disk.
+ *
+ * What replaces it is the connection's own answer to how long a legitimate
+ * report may take: the peer reports twice a second, the report has to cross,
+ * and the peer's own event loop may be late — all three measured, all three
+ * already summed for `echoStaleMs`. A stretch shorter than that proves nothing
+ * whatever about the association.
+ *
+ * @param {{ stuckForMs: number, longestHealthySeenGapMs: number, intervalMs?: number,
+ *   legitimateReportMs?: number }} state
  * @returns {{ certain: boolean, needMs: number }}
  */
-export function probeWedgeIsCertain({ stuckForMs, longestHealthySeenGapMs, intervalMs = PROBE_INTERVAL_MS }) {
-  const needMs = Math.max(longestHealthySeenGapMs, intervalMs);
+export function probeWedgeIsCertain({
+  stuckForMs,
+  longestHealthySeenGapMs,
+  intervalMs = PROBE_INTERVAL_MS,
+  legitimateReportMs = 0
+}) {
+  const floorMs = Math.max(intervalMs, Number.isFinite(legitimateReportMs) ? legitimateReportMs : 0);
+  const needMs = Math.max(longestHealthySeenGapMs, floorMs);
   return { certain: stuckForMs >= needMs, needMs };
 }
 
@@ -424,7 +445,20 @@ export function createDeliveryProbe({
     if (verdict === "association-stopped") {
       const { certain, needMs } = probeWedgeIsCertain({
         stuckForMs,
-        longestHealthySeenGapMs: connection.longestHealthySeenGapMs
+        longestHealthySeenGapMs: connection.longestHealthySeenGapMs,
+        // The same sum the echo's own staleness is judged by: the peer reports
+        // twice a second, the report has to cross, and the peer's loop may be
+        // late. Nothing shorter than that says anything.
+        // BOTH cadences, because they beat against each other: a probe sent
+        // just after the peer composed a report shows up only in the NEXT one.
+        // So the longest legitimate gap between two advances is one probe
+        // interval plus one report interval plus the crossing plus whatever
+        // the peer's own loop is behind by.
+        legitimateReportMs:
+          intervalMs +
+          connection.echoIntervalMs +
+          rttMs +
+          Math.max(connection.peerLoopLagMs ?? 0, 0)
       });
       if (certain && !connection.probeCaptureStarted) {
         connection.probeCaptureStarted = true;

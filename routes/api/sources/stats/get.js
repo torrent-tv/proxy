@@ -113,10 +113,19 @@ export async function handleApiSourceStatsGet(req, reply, { sourceRegistry, torr
   // The infohash is on EVERY line, not only on the ones that look empty: it is
   // the one identifier the pool's own lines, the worker's and this one share,
   // and a line that carries it can be lined up with them without a guess.
+  // WHAT WE GAVE, which no line has ever carried. Without it "the reads are the
+  // swarm being served" is an inference from two numbers agreeing, and on
+  // 2026-09-11 it was the whole explanation of a store that read 63 416 times
+  // with nothing encoding: 596 peers, a complete file, and an upload nobody
+  // needed.
+  const uploaded = Number.isFinite(torrent.uploaded) ? Math.round(torrent.uploaded / 1048576) : "?";
+  const upKbps = Number.isFinite(torrent.uploadSpeed) ? Math.round(torrent.uploadSpeed / 1024) : "?";
   logger.info(
     `[stats] ${sourceKey.slice(0, 8)} ${String(torrent.infoHash).slice(0, 8)} ` +
-    `peers=${stats.connectedPeers ?? stats.numPeers} connected of ${known} known (${queued} queued, ${offered})` +
-    `${firstPeer} down=${downKbps}KB/s file=${filePct} header=${header}${detail}`
+    `peers=${stats.connectedPeers ?? stats.numPeers} connected of ${known} known ` +
+    `(${stats.deliveringPeers ?? "?"} delivering, ${queued} queued, ${offered})` +
+    `${firstPeer} down=${downKbps}KB/s up=${upKbps}KB/s gave=${uploaded}MB ` +
+    `file=${filePct} header=${header}${detail}`
   );
 
   return reply.send(stats);

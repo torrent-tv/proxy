@@ -31,6 +31,7 @@
  */
 
 import fs from "node:fs/promises";
+import { readdirSync, statSync } from "node:fs";
 import path from "node:path";
 
 /**
@@ -100,6 +101,59 @@ export class PieceDiskStore {
     this.#allowanceBytes = Number.isFinite(allowanceBytes) && allowanceBytes >= 0 ? allowanceBytes : null;
     this.#now = now;
     this.#readHeads = typeof readHeads === "function" ? readHeads : () => [];
+    this.#adoptWhatIsAlreadyHere();
+  }
+
+  /**
+   * Take up the pieces a previous life of this torrent left in this directory.
+   *
+   * The directory is the torrent's own, so what is in it belongs to it — and
+   * without this, nothing ever reads those files again: a torrent that is torn
+   * down and added back gets a store whose index starts empty, answers "not on
+   * disk" for every piece it in fact has, and downloads the film a second time
+   * while the first copy sits beside it. That is what a torrent destroyed by an
+   * error left behind until 2026-09-11, and what the pool's own restart leaves
+   * behind every time.
+   *
+   * Read once, synchronously, because `has()` is answered synchronously and the
+   * torrent asks it immediately — a piece reported missing while a scan is
+   * still running is a piece fetched again. One directory listing per torrent.
+   *
+   * Correctness is not taken on trust: the torrent hashes every piece it means
+   * to use, so a file here that does not match is refused by the layer above
+   * and downloaded again.
+   *
+   * @returns {void}
+   */
+  #adoptWhatIsAlreadyHere() {
+    let entries = [];
+    try {
+      entries = readdirSync(this.#directory, { withFileTypes: true });
+    } catch {
+      // No directory yet: this torrent is new here, which is the ordinary case.
+      return;
+    }
+    const born = this.#now();
+    for (const entry of entries) {
+      if (!entry.isFile() || !entry.name.endsWith(".piece")) {
+        continue;
+      }
+      const index = Number.parseInt(entry.name.slice(0, -".piece".length), 10);
+      if (!Number.isInteger(index) || index < 0) {
+        continue;
+      }
+      try {
+        const { size } = statSync(path.join(this.#directory, entry.name));
+        if (size <= 0) {
+          continue;
+        }
+        this.#stored.set(index, size);
+        this.#touched.set(index, born);
+        this.#bytes += size;
+      } catch {
+        // Gone between the listing and the reading: not ours to worry about.
+      }
+    }
   }
 
   /** Where this store's pieces live, for logging and cleanup. */

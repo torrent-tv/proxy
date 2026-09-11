@@ -25,6 +25,7 @@ test("connected and known are separate numbers", () => {
   const torrent = { wires: [{}, {}], _peersLength: 7, _numQueued: 4 };
   assert.deepEqual(describeSwarmReach(torrent), {
     connectedPeers: 2,
+    deliveringPeers: 0,
     knownPeers: 7,
     queuedPeers: 4
   });
@@ -46,16 +47,19 @@ test("internals that are gone say nothing rather than breaking the poll", () => 
   // cost the field and not the answer.
   assert.deepEqual(describeSwarmReach({ wires: [{}] }), {
     connectedPeers: 1,
+    deliveringPeers: 0,
     knownPeers: null,
     queuedPeers: null
   });
   assert.deepEqual(describeSwarmReach({}), {
     connectedPeers: 0,
+    deliveringPeers: 0,
     knownPeers: null,
     queuedPeers: null
   });
   assert.deepEqual(describeSwarmReach(null), {
     connectedPeers: 0,
+    deliveringPeers: 0,
     knownPeers: null,
     queuedPeers: null
   });
@@ -67,6 +71,7 @@ test("internals that are gone say nothing rather than breaking the poll", () => 
   };
   assert.deepEqual(describeSwarmReach(throwing), {
     connectedPeers: 0,
+    deliveringPeers: 0,
     knownPeers: null,
     queuedPeers: null
   });

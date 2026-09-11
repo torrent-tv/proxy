@@ -119,3 +119,30 @@ test("a torrent nobody is reading is not treated as starving", () => {
     "a reader that IS waiting must still earn unchoke slots"
   );
 });
+
+test("a torrent short of nothing is not worth uploading for", () => {
+  // Field 2026-09-11: the file being watched was complete, its windows all
+  // present, and the proxy went on offering 512 KB/s to 596 peers for
+  // forty-eight minutes — reading a 4 MB piece off the disk for every 16 KB it
+  // sent. Upload is bought with reciprocity, and reciprocity is only worth
+  // buying while somebody is still short of bytes.
+  const complete = {
+    name: "watched to the end",
+    hasActiveReader: true,
+    wantsBytes: false,
+    done: false,
+    downloadSpeed: 0,
+    wires: [
+      { amInterested: true, peerChoking: true },
+      { amInterested: true, peerChoking: true },
+      { amInterested: true, peerChoking: true }
+    ]
+  };
+  const decided = decideUploadLimit([complete]);
+  assert.equal(decided.bytesPerSec, 8 * 1024, "a complete torrent is given the idle floor");
+  assert.match(decided.reason, /buys nothing/);
+
+  // And a torrent that IS short of something still earns its unchoke.
+  const short = { ...complete, wantsBytes: true };
+  assert.ok(decideUploadLimit([short]).bytesPerSec > 8 * 1024, "a starving torrent still buys reciprocity");
+});

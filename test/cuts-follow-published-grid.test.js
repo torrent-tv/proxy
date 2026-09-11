@@ -15,6 +15,7 @@
  */
 
 import assert from "node:assert/strict";
+import { computeCutGrid } from "../services/output/cut-grid.js";
 import { Timeline } from "../services/output/Timeline.js";
 import test from "node:test";
 
@@ -70,4 +71,38 @@ test("a session that published no grid falls back to the live one", () => {
   const { manager } = sessionWithDriftedGrid();
   const session = { id: "no-playlist", timeline: new Timeline({ boundaries: [...CORRECTED], published: [], cutGrid: "uniform" }) };
   assert.deepEqual(manager.publishedGridFor(session), CORRECTED);
+});
+
+test("no segment is left shorter than a segment at the end of the film", () => {
+  // The field case of 2026-09-11, to the millisecond: a 54-minute film whose
+  // last keyframe sits 160 ms before the end. Taking it as a cut leaves a
+  // segment of 0.16 s — one the sound has no data in at all, which is how one
+  // output came to have 542 segments and the other 541.
+  const total = 3246.12;
+  const keyframes = [];
+  for (let at = 0; at < total - 1; at += 2) {
+    keyframes.push(Number(at.toFixed(3)));
+  }
+  keyframes.push(3245.96);
+
+  const grid = computeCutGrid({
+    useKeyframeGrid: true,
+    durationSeconds: total,
+    segDur: 6,
+    keyframeTimes: keyframes,
+    startTime: 0
+  });
+
+  const last = grid.boundaries[grid.boundaries.length - 1];
+  const before = grid.boundaries[grid.boundaries.length - 2];
+  assert.equal(last, total, "the film still ends where it ends");
+  assert.ok(
+    last - before >= 6,
+    `the last segment is ${(last - before).toFixed(3)}s, shorter than the 6s every other cut is held to`
+  );
+  // And the rule is the one every cut obeys, so no segment anywhere is short.
+  for (let index = 1; index < grid.boundaries.length; index += 1) {
+    const span = grid.boundaries[index] - grid.boundaries[index - 1];
+    assert.ok(span >= 6 - 0.05, `segment ${index - 1} lasts ${span.toFixed(3)}s`);
+  }
 });

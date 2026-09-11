@@ -17,7 +17,7 @@ import WebTorrent from "webtorrent";
 import { logger } from "../utils/logger.js";
 import { SharedPieceStore, findSharedStore } from "./piece-store/shared-piece-store.js";
 import { Urgency, urgencyName } from "./demand/index.js";
-import { demandFor, forgetTorrent, reconcileAll } from "./download/registry.js";
+import { demandFor, forgetTorrent, reconcileAll, wantsBytes } from "./download/registry.js";
 import { isAtAWatchingViewer, isBehindEverybody, isNobodyComingNow } from "./priority/PriorityMap.js";
 import { deriveSourceKey } from "./torrent-source-key.js";
 
@@ -164,10 +164,19 @@ const STALL_REPORT_INTERVAL_MS = 30_000;
  * makes every two seconds.
  *
  * @param {import("webtorrent").Torrent} torrent
- * @returns {{ connectedPeers: number, knownPeers: number | null, queuedPeers: number | null }}
+ * @returns {{ connectedPeers: number, deliveringPeers: number, knownPeers: number | null,
+ *   queuedPeers: number | null }}
  */
 export function describeSwarmReach(torrent) {
   const wires = Array.isArray(torrent?.wires) ? torrent.wires.length : 0;
+  // HOW MANY OF THEM ARE DOING ANYTHING. Connections accumulated without bound
+  // in the field — 249 to 596 over one viewing, 15 862 more queued — and
+  // whether that helped or merely cost memory and requests is not answerable
+  // from a count of wires. A wire that has delivered a byte is the measured
+  // unit; the rest are held open for nothing.
+  const delivering = Array.isArray(torrent?.wires)
+    ? torrent.wires.filter((wire) => Number(wire?.downloaded) > 0).length
+    : 0;
   const read = (value) => (typeof value === "number" && Number.isFinite(value) ? value : null);
   let knownPeers = null;
   let queuedPeers = null;
@@ -179,7 +188,7 @@ export function describeSwarmReach(torrent) {
     // destroyed torrent, and the reading is a diagnostic. Nothing here is
     // worth failing a stats poll for.
   }
-  return { connectedPeers: wires, knownPeers, queuedPeers };
+  return { connectedPeers: wires, deliveringPeers: delivering, knownPeers, queuedPeers };
 }
 
 /**
@@ -345,6 +354,11 @@ export function torrentsForUploadPolicy(torrents, usageByTorrent, now) {
       // Recorded so the policy can tell "nothing is arriving and somebody is
       // waiting" from "nothing is arriving because nobody asked".
       torrent.hasActiveReader = hasReader;
+      // Whether anybody is still short of bytes of it. Upload is bought with
+      // reciprocity and reciprocity is only worth buying while something is
+      // missing; a torrent whose declared windows are all present wants nothing
+      // from the swarm, and what it gives it gives for nobody.
+      torrent.wantsBytes = wantsBytes(torrent);
       chosen.push(torrent);
     }
   }
@@ -390,7 +404,8 @@ export function decideUploadLimit(activeTorrents, opts = {}) {
     // 2026-08-04: four cycles of 512 -> 50 KB/s in three minutes, each
     // reported as `earn unchoke ... down=0KB/s`, all of them raising the
     // upload at moments when no byte was wanted by anyone.
-    const starving = notDone && torrent?.hasActiveReader !== false && downloadSpeed < starvingSpeed;
+    const starving = notDone && torrent?.hasActiveReader !== false
+      && torrent?.wantsBytes !== false && downloadSpeed < starvingSpeed;
     if (starving && chokedInterested >= chokedThreshold) {
       const name = typeof torrent?.name === "string" ? torrent.name : "?";
       return {
@@ -402,6 +417,14 @@ export function decideUploadLimit(activeTorrents, opts = {}) {
     }
   }
 
+  // NOTHING TO BUY. Every torrent here has a reader, and not one of them is
+  // short of a byte anybody asked for: the upload would be given for nobody.
+  // Field 2026-09-11 — 512 KB/s held for forty-eight minutes on a file that was
+  // complete, 596 peers connected and climbing, and every 16 KB served read a
+  // 4 MB piece back off the disk.
+  if (activeTorrents.every((torrent) => torrent?.wantsBytes === false)) {
+    return { bytesPerSec: idleFloor, reason: "nothing anybody asked for is missing — upload buys nothing" };
+  }
   return { bytesPerSec: floor, reason: "active readers, not choke-starved" };
 }
 
@@ -1808,6 +1831,7 @@ export class TorrentPool {
       downloadSpeed,
       uploadSpeed,
       connectedPeers: reach.connectedPeers,
+      deliveringPeers: reach.deliveringPeers,
       knownPeers: reach.knownPeers,
       queuedPeers: reach.queuedPeers,
       trackerSeeders: announce.seeders,

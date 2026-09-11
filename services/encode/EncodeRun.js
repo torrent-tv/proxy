@@ -642,6 +642,7 @@ export class EncodeRun {
     const outcome = classifyEncodeExit({
       code,
       producedThrough: this.#produced.size > 0 ? this.reached : null,
+      producedCount: this.#produced.size,
       lastSegmentIndex: endOfWork,
       inputUnavailable: this.inputUnavailable(this.lastError)
     });

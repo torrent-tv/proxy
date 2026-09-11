@@ -74,7 +74,17 @@ export function computeCutGrid({ useKeyframeGrid, durationSeconds, segDur, keyfr
   const kept = keyframeTimes
     .filter((time) => Number.isFinite(time))
     .map((time) => ({ source: time, published: time - base }))
-    .filter((cut) => cut.published >= -0.001 && cut.published < total - 0.05)
+    // THE END IS MEASURED THE SAME WAY AS EVERY OTHER CUT. A keyframe nearer to
+    // the end than one segment leaves a tail too short to be a segment, and the
+    // rule below — no cut closer than a step to the one before it — never looks
+    // at the end at all. It used to be guarded by fifty milliseconds, a number
+    // from nowhere: field 2026-09-11, a keyframe 160 ms before the end of a
+    // 54-minute film passed it and left segment #541 lasting 0.16 s. The sound
+    // has no data in such a tail, so its run made 541 segments where the picture
+    // made 542, was marked short, and the repair that followed was handed a
+    // start later than its own end — 190 bytes that are not a fragment, and a
+    // viewer held 23 s at the last minute of the film for a 404.
+    .filter((cut) => cut.published >= -0.001 && cut.published < total - step)
     .sort((left, right) => left.published - right.published);
   // The first cut is the start of the file, whatever the container's own clock
   // says that is; the last is its end. Neither is a keyframe, and a run never

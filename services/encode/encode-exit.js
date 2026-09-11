@@ -73,6 +73,11 @@ export const ENCODE_EXIT = Object.freeze({
  *   session has on disk, or null when that could not be read.
  * @param {number | null} [facts.lastSegmentIndex] - Index of the file's last
  *   segment according to the published playlist, or null when unknown.
+ * @param {number | null} [facts.producedCount] - How many segments THIS run
+ *   made. Zero and "could not be read" are different facts and were both `null`
+ *   until 2026-09-11: a run that made nothing exited zero and was recorded as
+ *   having finished, which is how a segment that does not exist came to be
+ *   believed present for forty-six minutes.
  * @param {boolean} [facts.inputUnavailable] - The error names a missing input.
  * @returns {string} One of {@link ENCODE_EXIT}.
  */
@@ -81,12 +86,24 @@ export function classifyEncodeExit({
   code = null,
   producedThrough = null,
   lastSegmentIndex = null,
+  producedCount = null,
   inputUnavailable = false
 } = {}) {
   if (superseded) {
     return ENCODE_EXIT.IGNORED;
   }
   if (code === 0) {
+    // PRODUCING NOTHING IS THE CLEAREST CASE OF NOT FINISHING, and it used to be
+    // the one case that read as success: `producedThrough` is null when the run
+    // made no segment at all, null is "unknown", and unknown fell through to
+    // complete. Field 2026-09-11: a run given #541..#541 was handed a start
+    // later than its own end, wrote 190 bytes that are not a fragment, exited
+    // zero — and was recorded as having reached the end of what it was given.
+    // Nothing asked for that segment again for forty-six minutes, until the
+    // viewer arrived at it and waited 23 s for a 404.
+    if (producedCount === 0 && lastSegmentIndex !== null) {
+      return ENCODE_EXIT.SHORT;
+    }
     const stoppedShort =
       lastSegmentIndex !== null &&
       producedThrough !== null &&

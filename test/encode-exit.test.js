@@ -91,3 +91,21 @@ test("every combination answers, and no input produces undefined", () => {
   }
   assert.ok(Object.values(ENCODE_EXIT).includes(classifyEncodeExit()));
 });
+
+test("a run that made nothing has not finished, whatever its exit code", () => {
+  // Field 2026-09-11: a run given #541..#541 was handed a start later than its
+  // own end, wrote 190 bytes that are not a fragment, and exited zero. Making
+  // no segment and being unable to read the directory were the same `null`, and
+  // the second reading — "cannot be contradicted, so it stands" — was applied
+  // to the first.
+  assert.equal(
+    classifyEncodeExit({ code: 0, producedThrough: null, producedCount: 0, lastSegmentIndex: 541 }),
+    ENCODE_EXIT.SHORT
+  );
+  // And the case that reading was written for still stands: nothing readable on
+  // disk is not a claim that nothing was made.
+  assert.equal(
+    classifyEncodeExit({ code: 0, producedThrough: null, producedCount: null, lastSegmentIndex: 623 }),
+    ENCODE_EXIT.COMPLETE
+  );
+});

@@ -353,3 +353,29 @@ test("when there is no room, what is behind the readers goes before what is ahea
     await fs.rm(directory, { recursive: true, force: true, maxRetries: 10, retryDelay: 20 });
   }
 });
+
+test("a store takes up the pieces a previous life left in its directory", async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "adopt-"));
+  try {
+    const first = new PieceDiskStore({ directory: root, name: "film.pieces", chunkLength: 1024 });
+    await first.write(7, Buffer.alloc(1024, 7));
+    await first.write(9, Buffer.alloc(1024, 9));
+    await first.close();
+
+    // A torrent torn down and added again gets a NEW store over the same
+    // directory. Before 2026-09-11 its index started empty, so every piece it
+    // in fact had read as missing and the film was downloaded a second time
+    // while the first copy sat beside it.
+    const second = new PieceDiskStore({ directory: root, name: "film.pieces", chunkLength: 1024 });
+    assert.equal(second.size, 2, "the pieces already on disk were not taken up");
+    assert.equal(second.bytes, 2048, "nor were their bytes counted");
+    assert.ok(second.has(7) && second.has(9));
+
+    const target = Buffer.alloc(1024);
+    await second.read(7, target);
+    assert.ok(target.equals(Buffer.alloc(1024, 7)), "and they read back as themselves");
+    await second.destroy();
+  } finally {
+    await fs.rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 20 });
+  }
+});

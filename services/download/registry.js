@@ -42,6 +42,26 @@ export function demandFor(torrent) {
 }
 
 /**
+ * Whether this torrent is still short of anything anybody asked for.
+ *
+ * Read by the upload policy: while a reader is missing bytes, a little upload
+ * buys the reciprocity that gets them; once nothing declared is missing it buys
+ * nothing at all, and on 2026-09-11 the proxy went on offering 512 KB/s of a
+ * fully downloaded file to 596 peers for forty-eight minutes, reading a 4 MB
+ * piece off the disk for every 16 KB it sent.
+ *
+ * False for a torrent nothing has been stated about, which is the same answer
+ * and the right one: nobody is waiting for it.
+ *
+ * @param {object} torrent
+ * @returns {boolean}
+ */
+export function wantsBytes(torrent) {
+  const held = byTorrent.get(torrent);
+  return held ? held.selection.hasUrgentMissing() : false;
+}
+
+/**
  * Give up everything stated for a torrent that is going.
  *
  * @param {object} torrent

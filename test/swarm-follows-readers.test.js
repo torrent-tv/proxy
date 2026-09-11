@@ -67,6 +67,11 @@ test("a torrent nobody is reading is let go of, and its data is not", () => {
   const torrent = torrentWith(6);
   const pool = poolWith(torrent);
   try {
+    // Read once and left, which is the state this is about: a film nobody has
+    // opened yet is being set up, and the test below covers that.
+    pool.fileUsageByTorrent.set(torrent, new Map([[0, 1]]));
+    pool.followTheReaders(torrent);
+    pool.fileUsageByTorrent.set(torrent, new Map());
     pool.followTheReaders(torrent);
 
     assert.equal(torrent.paused, true, "the swarm was not left");
@@ -114,12 +119,49 @@ test("the swarm is rejoined when a reader comes back", () => {
   const torrent = torrentWith(3);
   const pool = poolWith(torrent);
   try {
+    pool.fileUsageByTorrent.set(torrent, new Map([[0, 1]]));
+    pool.followTheReaders(torrent);
+    pool.fileUsageByTorrent.set(torrent, new Map());
     pool.followTheReaders(torrent);
     assert.equal(torrent.paused, true);
 
     pool.fileUsageByTorrent.set(torrent, new Map([[0, 1]]));
     pool.followTheReaders(torrent);
     assert.equal(torrent.paused, false, "the next reader was left with a torrent that fetches nothing");
+  } finally {
+    forgetTorrent(torrent);
+  }
+});
+
+test("a torrent nobody has read yet is being set up, and is left alone", () => {
+  // Field 2026-09-11, and it broke playback outright: a torrent added at
+  // 20:57:17 had its first peer at 20:57:18 and was taken out of the swarm at
+  // 20:57:21 — while the read of the file's edges was still in flight. Nothing
+  // rejoined it, because rejoining waits for a reader and the reader was
+  // waiting for the header the swarm was fetching.
+  const torrent = torrentWith(103);
+  const pool = poolWith(torrent);
+  try {
+    pool.followTheReaders(torrent);
+    assert.equal(torrent.paused, false, "a torrent being opened was taken out of its swarm");
+    assert.equal(torrent._peers.size, 103, "and its connections were let go");
+  } finally {
+    forgetTorrent(torrent);
+  }
+});
+
+test("once it has been read, leaving is allowed again", () => {
+  const torrent = torrentWith(4);
+  const pool = poolWith(torrent);
+  try {
+    // A reader arrives and goes.
+    pool.fileUsageByTorrent.set(torrent, new Map([[0, 1]]));
+    pool.followTheReaders(torrent);
+    assert.equal(torrent.paused, false);
+
+    pool.fileUsageByTorrent.set(torrent, new Map());
+    pool.followTheReaders(torrent);
+    assert.equal(torrent.paused, true, "a film somebody left keeps its swarm for nobody");
   } finally {
     forgetTorrent(torrent);
   }

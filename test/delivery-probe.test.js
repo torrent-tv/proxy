@@ -316,3 +316,44 @@ test("a quiet stretch shorter than a legitimate report is not a wedge", () => {
     "a peer frozen for five seconds cannot answer sooner than that"
   );
 });
+
+test("what is behind is judged in time, not in probes", () => {
+  // The same probe goes down every channel including the one carrying the film,
+  // and SCTP schedules per association — so a probe waits behind queued video
+  // exactly as a segment does. Counting outstanding probes therefore measures
+  // the queue, not the association, which is why the count is only printed now.
+  const behind = { proxy: 800, "proxy-control": 800, "proxy-fast": 800 };
+  const mayWait = { proxy: 2000, "proxy-control": 2000, "proxy-fast": 2000 };
+
+  // Far behind in probes, well within the time its own queue is allowed.
+  const healthy = readProbeState(
+    state(
+      { proxy: 40, "proxy-control": 41, "proxy-fast": 42 },
+      { behindMs: behind, allowedWaitMs: mayWait }
+    )
+  );
+  assert.equal(healthy.verdict, "flowing");
+  assert.match(healthy.detail, /800ms of 2000ms/, "both readings belong in the line");
+
+  // The same gaps, the same allowance, and the probe is older than the queue
+  // could account for: that is the association and not the burst.
+  const wedged = readProbeState(
+    state(
+      { proxy: 40, "proxy-control": 41, "proxy-fast": 42 },
+      {
+        behindMs: { proxy: 9000, "proxy-control": 9000, "proxy-fast": 9000 },
+        allowedWaitMs: mayWait
+      }
+    )
+  );
+  assert.equal(wedged.verdict, "association-stopped");
+});
+
+test("with no send time recorded the count still decides", () => {
+  // A probe older than the history kept, or a connection that has just begun:
+  // the reading is absent rather than wrong, and the old comparison stands.
+  const { verdict } = readProbeState(
+    state({ proxy: 40, "proxy-control": 41, "proxy-fast": 42 }, { behindMs: {}, allowedWaitMs: {} })
+  );
+  assert.equal(verdict, "association-stopped");
+});

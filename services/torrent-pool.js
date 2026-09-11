@@ -429,6 +429,40 @@ export function decideUploadLimit(activeTorrents, opts = {}) {
 }
 
 /**
+ * Which connections a torrent that wants nothing should let go of.
+ *
+ * WEBTORRENT'S OWN LIMIT IS NOT ENFORCED ON INCOMING CONNECTIONS. `maxConns`
+ * (55 by default) is checked in `_drain`, which governs only peers WE dial;
+ * `_addIncomingPeer` checks that the torrent is neither destroyed nor paused
+ * and registers the peer. With the port mapped and a popular torrent that means
+ * connections arrive and are never turned away: field 2026-09-11, 249 connected
+ * at the start of one viewing and 596 at the end, 15 862 more queued, on a file
+ * that had been complete for three quarters of an hour.
+ *
+ * So this is not a new limit — it is the one the library already declares,
+ * applied to the path it forgot. Two conditions keep it from costing anything:
+ * only while the torrent is short of nothing anybody asked for, since a
+ * connection that might yet deliver is worth keeping; and what goes is measured
+ * rather than guessed — wires that have delivered nothing at all, and no more
+ * of them than the count is over by.
+ *
+ * @param {object} params
+ * @param {Array<{ downloaded?: number }>} params.wires
+ * @param {number} params.allowed - What this client dials up to.
+ * @param {boolean | null} params.wantsBytes - Whether anything declared is
+ *   still missing. Only `false` — measured and negative — allows a close.
+ * @returns {Array<object>} The wires to destroy, in the order they should go.
+ */
+export function connectionsToClose({ wires, allowed, wantsBytes: stillWants }) {
+  const open = Array.isArray(wires) ? wires : [];
+  if (!(allowed > 0) || open.length <= allowed || stillWants !== false) {
+    return [];
+  }
+  const idle = open.filter((wire) => !(Number(wire?.downloaded) > 0));
+  return idle.slice(0, open.length - allowed);
+}
+
+/**
  * Compute the default disk cap: the smaller of a fixed 10 GB and half of the
  * currently free space on the store's filesystem (so a tiny host is never
  * asked to hold more than it can). Best-effort; falls back to the fixed max
@@ -893,6 +927,73 @@ export class TorrentPool {
   }
 
   /**
+   * Close connections a torrent that wants nothing is keeping open.
+   *
+   * WEBTORRENT'S OWN LIMIT IS NOT ENFORCED ON INCOMING CONNECTIONS. `maxConns`
+   * (55 by default) is checked in `_drain`, which only governs peers WE dial;
+   * `_addIncomingPeer` checks that the torrent is neither destroyed nor paused
+   * and registers the peer. With the port mapped and a popular torrent, that
+   * means connections arrive and are never turned away: field 2026-09-11, 249
+   * connected at the start of one viewing and 596 at the end, with 15 862 more
+   * queued, on a file that had been complete for three quarters of an hour.
+   *
+   * So the rule here is not a new limit — it is the one the library already
+   * declares, applied to the path it forgot. And only while the torrent is
+   * short of nothing anybody asked for: a connection that might yet deliver is
+   * worth keeping, which is why what goes first is measured rather than
+   * guessed — a wire that has delivered nothing at all, oldest first among
+   * those.
+   *
+   * @param {import("webtorrent").Torrent} torrent
+   * @returns {void}
+   */
+  #trimIdleConnections(torrent) {
+    const wires = Array.isArray(torrent?.wires) ? torrent.wires : [];
+    const going = connectionsToClose({
+      wires,
+      allowed: Number(this.client?.maxConns),
+      wantsBytes: wantsBytes(torrent)
+    });
+    // THROUGH THE PEER, not the wire. `peer.destroy()` takes the wire out of
+    // `torrent.wires`, destroys the socket under it and unregisters the peer;
+    // destroying the wire alone leaves both the socket open and the wire in the
+    // array, so the count this acts on would not even fall. There is no
+    // back-reference from a wire to its peer, so the peer is found by the one
+    // it holds — read defensively, like every other internal here.
+    const byWire = new Map();
+    try {
+      for (const peer of torrent?._peers?.values?.() ?? []) {
+        if (peer?.wire) {
+          byWire.set(peer.wire, peer);
+        }
+      }
+    } catch {
+      // A destroyed torrent answers its internals with a throw; nothing to trim.
+    }
+    let closed = 0;
+    for (const wire of going) {
+      try {
+        const peer = byWire.get(wire);
+        if (!peer) {
+          continue;
+        }
+        peer.destroy();
+        closed += 1;
+      } catch {
+        // A peer already going: nothing to do, and nothing worth failing for.
+      }
+    }
+    if (closed > 0) {
+      logger.info(
+        `torrent-pool: [${String(torrent.infoHash ?? "?").slice(0, 8)}] closed ${closed} connection(s) ` +
+        `that delivered nothing — ${wires.length} were open, ${Number(this.client?.maxConns)} is what this ` +
+        "client dials up to, and nothing anybody asked for is missing — if the count is back up by the " +
+        "next reading, they are reconnecting and this is costing more than it saves"
+      );
+    }
+  }
+
+  /**
    * Re-evaluate and apply the client-wide upload limit from current swarm state
    * (see {@link decideUploadLimit}). Runs on a timer; only calls into WebTorrent
    * when the target changes, and logs each change for field tuning.
@@ -1224,6 +1325,9 @@ export class TorrentPool {
       this.#stateBackgroundFill(torrent);
     }
     this.#reportStalledDownloads();
+    for (const torrent of this.torrents.values()) {
+      this.#trimIdleConnections(torrent);
+    }
     const { bytesPerSec, reason } = decideUploadLimit(active);
     if (bytesPerSec === this.#uploadLimit) {
       return;

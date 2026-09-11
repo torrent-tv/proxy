@@ -190,7 +190,7 @@ const REPORT_INTERVAL_MS = 5_000;
  *
  * @param {{ stuckForMs: number, longestHealthySeenGapMs: number, intervalMs?: number,
  *   legitimateReportMs?: number }} state
- * @returns {{ certain: boolean, needMs: number }}
+ * @returns {{ isCertain: boolean, needMs: number }}
  */
 export function probeWedgeIsCertain({
   stuckForMs,
@@ -200,7 +200,7 @@ export function probeWedgeIsCertain({
 }) {
   const floorMs = Math.max(intervalMs, Number.isFinite(legitimateReportMs) ? legitimateReportMs : 0);
   const needMs = Math.max(longestHealthySeenGapMs, floorMs);
-  return { certain: stuckForMs >= needMs, needMs };
+  return { isCertain: stuckForMs >= needMs, needMs };
 }
 
 /**
@@ -284,10 +284,10 @@ export function readProbeState(state) {
     return Number.isInteger(value) ? Number(value) : null;
   };
   const parts = [];
-  let orderedBehind = false;
-  let unreliableBehind = false;
-  let unreliableKnown = false;
-  let judgeable = false;
+  let isOrderedBehind = false;
+  let isUnreliableBehind = false;
+  let isUnreliableKnown = false;
+  let isJudgeable = false;
   for (const label of state.labels) {
     const seen = seenOf(label);
     const gap = Number.isInteger(seen) ? state.seq - Number(seen) : null;
@@ -314,31 +314,31 @@ export function readProbeState(state) {
     if (allowance === null) {
       continue;
     }
-    judgeable = true;
-    const behind = lagMs !== null && mayWaitMs !== null
+    isJudgeable = true;
+    const isBehind = lagMs !== null && mayWaitMs !== null
       ? lagMs > mayWaitMs
       : gap === null || gap > allowance;
     if (label === UNRELIABLE_LABEL) {
-      unreliableKnown = true;
-      unreliableBehind = behind;
-    } else if (behind) {
-      orderedBehind = true;
+      isUnreliableKnown = true;
+      isUnreliableBehind = isBehind;
+    } else if (isBehind) {
+      isOrderedBehind = true;
     }
   }
-  const advancing = state.peerBytesAdvancing === true;
+  const isPeerAdvancing = state.peerBytesAdvancing === true;
   const detail =
     `sent=${state.seq} ${parts.join(" ")} ` +
     `echoAge=${state.echoAgeMs === null ? "never" : `${state.echoAgeMs}ms`}` +
     (state.peerBytesAdvancing === null || state.peerBytesAdvancing === undefined
       ? ""
-      : ` peerBytes=${advancing ? "advancing" : "still"}`) +
+      : ` peerBytes=${isPeerAdvancing ? "advancing" : "still"}`) +
     (Number.isFinite(state.peerLoopLagMs) ? ` peerLoopLag=${Math.round(Number(state.peerLoopLagMs))}ms` : "") +
     (state.peerVisibility ? ` peerTab=${state.peerVisibility}` : "");
 
   if (state.echoes === 0) {
     return { verdict: "no-echo-yet", detail };
   }
-  if (!judgeable) {
+  if (!isJudgeable) {
     return { verdict: "no-rate-yet", detail };
   }
   const staleAfterMs = Number.isFinite(state.echoStaleMs) && state.echoStaleMs > 0
@@ -347,21 +347,21 @@ export function readProbeState(state) {
   if (state.echoAgeMs !== null && state.echoAgeMs > staleAfterMs) {
     return { verdict: "reverse-direction-gone", detail };
   }
-  if (!orderedBehind && !(unreliableKnown && unreliableBehind)) {
+  if (!isOrderedBehind && !(isUnreliableKnown && isUnreliableBehind)) {
     return { verdict: "flowing", detail };
   }
   // Bytes are still arriving at the far end. Whatever the probe gaps say, this
   // association has not stopped — the probes are behind a backlog, which is
   // what filling a cushion looks like from here.
-  if (advancing) {
+  if (isPeerAdvancing) {
     return { verdict: "flowing", detail };
   }
-  if (orderedBehind && unreliableKnown && !unreliableBehind) {
+  if (isOrderedBehind && isUnreliableKnown && !isUnreliableBehind) {
     return { verdict: "stream-stuck", detail };
   }
-  if (orderedBehind) {
+  if (isOrderedBehind) {
     return {
-      verdict: unreliableKnown ? "association-stopped" : "ordered-behind-no-comparison",
+      verdict: isUnreliableKnown ? "association-stopped" : "ordered-behind-no-comparison",
       detail
     };
   }
@@ -557,7 +557,7 @@ export function createDeliveryProbe({
     // as a legitimate gap, is the wedge this exists to catch.
     const stuckForMs = connection.lastSeenAdvanceAt === 0 ? 0 : now - connection.lastSeenAdvanceAt;
     if (verdict === "association-stopped") {
-      const { certain, needMs } = probeWedgeIsCertain({
+      const { isCertain, needMs } = probeWedgeIsCertain({
         stuckForMs,
         longestHealthySeenGapMs: connection.longestHealthySeenGapMs,
         // The same sum the echo's own staleness is judged by: the peer reports
@@ -574,7 +574,7 @@ export function createDeliveryProbe({
           rttMs +
           Math.max(connection.peerLoopLagMs ?? 0, 0)
       });
-      if (certain && !connection.probeCaptureStarted) {
+      if (isCertain && !connection.probeCaptureStarted) {
         connection.probeCaptureStarted = true;
         const reasonText =
           `probe seen-counter unmoved ${Math.round(stuckForMs / 1000)}s against the ` +
@@ -781,14 +781,14 @@ export function createDeliveryProbe({
       const peerChannels = echo?.report?.channels;
       if (peerChannels && typeof peerChannels === "object") {
         let bytesAcrossChannels = 0;
-        let anyChannelReported = false;
+        let hasChannelReport = false;
         for (const channelReport of Object.values(peerChannels)) {
           if (channelReport && Number.isFinite(channelReport.bytes)) {
             bytesAcrossChannels += channelReport.bytes;
-            anyChannelReported = true;
+            hasChannelReport = true;
           }
         }
-        if (anyChannelReported) {
+        if (hasChannelReport) {
           connection.peerChannelBytes = bytesAcrossChannels;
         }
       }

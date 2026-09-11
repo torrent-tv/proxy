@@ -161,6 +161,15 @@ export class PieceDiskStore {
     return this.#directory;
   }
 
+  /**
+   * Every piece this tier holds, as numbers.
+   *
+   * @returns {number[]}
+   */
+  indexes() {
+    return [...this.#stored.keys()];
+  }
+
   /** How many pieces are on disk. */
   get size() {
     return this.#stored.size;

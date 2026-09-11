@@ -37,6 +37,7 @@ import {
 } from "./container-tracks.js";
 import { fillFileInBackground } from "./background-fill.js";
 import { CompletedFiles, completedFilesRoot } from "../files/CompletedFiles.js";
+import { pieceFromWholeFiles, pieceIsInWholeFiles } from "../files/piece-from-whole-file.js";
 import { Command, Event } from "./protocol.js";
 import { startMemoryReport, WORKER_MEMORY_SAMPLE_MS } from "../memory-report.js";
 import { forwardLogsTo, logger } from "../../utils/logger.js";
@@ -66,7 +67,7 @@ forwardLogsTo((_level, message) => {
 // the hook above had a chance to register. Verified the hard way: with a static
 // import the process still aborted, and the stack named the genuine polyfill.
 const { TorrentPool, resolveDhtBootstrap } = await import("../torrent-pool.js");
-const { collectStoreStats, machineReserveBytes, pieceBufferCollection, reviseSpillBudgets, reviseStoreBudgets } =
+const { collectStoreStats, findSharedStore, machineReserveBytes, pieceBufferCollection, reviseSpillBudgets, reviseStoreBudgets } =
   await import("../piece-store/shared-piece-store.js");
 
 // Resolved before the client exists, because the client builds its DHT in its
@@ -930,6 +931,40 @@ setInterval(() => {
  * thread writes them, the main thread serves them without asking anybody.
  */
 const completedFiles = new CompletedFiles({ root: completedFilesRoot() });
+
+/**
+ * Which torrent a set of files belongs to.
+ *
+ * The piece store hands its own files back without knowing what they are; this
+ * thread does know, and a file carries its torrent.
+ *
+ * @param {object[]} files
+ * @returns {string}
+ */
+const infoHashOf = (files) => String(files?.[0]?._torrent?.infoHash ?? "").toLowerCase();
+
+// WHERE A PIECE COMES FROM WHEN NEITHER TIER HAS IT. Handed to every store this
+// pool builds, so a film already assembled into a file is read from that file:
+// which is what lets its spilled copy be dropped as the duplicate it has become,
+// and what lets a torrent be destroyed and added again without fetching a byte.
+pool.buildStoresWith({
+  readPieceElsewhere: ({ index, pieceLength, length, files }) =>
+    pieceFromWholeFiles({
+      index,
+      pieceLength,
+      length,
+      files,
+      wholeFileAt: (fileIndex) => completedFiles.find(infoHashOf(files), fileIndex)
+    }),
+  isPieceElsewhere: ({ index, pieceLength, length, files }) =>
+    pieceIsInWholeFiles({
+      index,
+      pieceLength,
+      length,
+      files,
+      wholeFileAt: (fileIndex) => completedFiles.find(infoHashOf(files), fileIndex)
+    })
+});
 void completedFiles.adopt(() => null).then((adopted) => {
   if (adopted > 0) {
     logger.info(
@@ -1002,6 +1037,17 @@ async function keepWholeFiles() {
             `whole files: kept "${file.name}" (${Math.round(kept.length / 1048576)}MB) — ` +
             "it is a file now, and reading it needs no torrent"
           );
+          // The pieces it was built from are a second copy of the same bytes.
+          // Nothing is lost by dropping them: a read that wants one of them is
+          // answered from the file.
+          const store = findSharedStore(torrent);
+          const dropped = store?.dropDuplicatesHeldElsewhere?.() ?? 0;
+          if (dropped > 0) {
+            logger.info(
+              `whole files: dropped ${dropped} spilled piece(s) of "${file.name}" — ` +
+              "the film was on this disk twice and is not any more"
+            );
+          }
           parentPort.postMessage({
             type: Event.FILE_COMPLETE,
             infoHash,
@@ -1017,14 +1063,24 @@ async function keepWholeFiles() {
         beingKept.delete(key);
       }
     }
-    // REMOVING THE TORRENT ITSELF IS THE NEXT STEP AND NOT THIS ONE. Everything
-    // that still asks this thread about a source — the stats the browser polls
-    // every two seconds, the track table, the subtitle walk — reaches
-    // `requireTorrent`, which adds a destroyed torrent back from its recipe.
-    // Removing it here would therefore not remove it: the next poll would bring
-    // it straight back, and the hashing of everything on disk with it. What has
-    // to come first is those paths answering from the whole files instead.
-    void sourceKey;
+    // EVERYTHING, WITHOUT EXCEPTION, AND EVERY BYTE OF IT A FILE ON DISK. The
+    // torrent has no job left: there is nothing to fetch, and this proxy does
+    // not seed what nobody is watching.
+    //
+    // Safe to destroy only because a piece can now be read out of those files:
+    // a path that asks for this source again adds the torrent back, and what it
+    // verifies it reads from the files rather than from the swarm. Not while
+    // anybody is reading it, for the same reason the writing above waits.
+    const isWhole =
+      torrent.done === true &&
+      torrent.files.every((unused, fileIndex) => completedFiles.find(infoHash, fileIndex) !== null);
+    if (isWhole && !(usage?.size > 0)) {
+      logger.info(
+        `whole files: "${torrent.name}" is downloaded whole and saved — removing the torrent, keeping the files`
+      );
+      pool.remove(torrent, "downloaded-whole");
+      torrentsByKey.delete(sourceKey);
+    }
   }
 }
 

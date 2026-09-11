@@ -306,6 +306,10 @@ export class SharedPieceStore {
   #counters = {
     fromMemory: 0,
     fromDisk: 0,
+    // Reads answered from the file this torrent has been assembled into. Not a
+    // miss and not a spill: the bytes were never lost, they are simply kept as
+    // a file now.
+    fromWholeFile: 0,
     spills: 0,
     revivals: 0,
     blockedByPins: 0,
@@ -388,6 +392,27 @@ export class SharedPieceStore {
    * See `wantedBytes`.
    */
   #widestSeenPieces = 0;
+  /** The torrent's files in order, passed through to whoever can read them. @type {object[]} */
+  #files = [];
+
+  /** What the whole torrent weighs, so a last piece is not read past its end. */
+  #torrentLength = 0;
+
+  /**
+   * How to read a piece neither tier has, or null when there is nowhere else.
+   *
+   * @type {((where: object) => Promise<Uint8Array | null>) | null}
+   */
+  #readElsewhere = null;
+
+  /**
+   * Whether a piece can be had elsewhere, asked without reading it — so a
+   * spilled copy that has become a duplicate can be dropped.
+   *
+   * @type {((where: object) => boolean) | null}
+   */
+  #isElsewhere = null;
+
   /** Whether the last revision had to exceed the machine's share. */
   #beyondTheMachine = false;
   /**
@@ -443,6 +468,20 @@ export class SharedPieceStore {
     this.#growthCeiling = openingCeiling;
     this.#lru = new PieceLru(openingCeiling);
     this.#name = options.name ?? "pieces";
+    // THE LAST PLACE A PIECE CAN COME FROM, handed in as two plain functions.
+    // Where those bytes are, and what a file is, is not this store's business:
+    // it holds pieces, and these say whether one can be had elsewhere and how.
+    this.#readElsewhere = typeof options.readPieceElsewhere === "function"
+      ? options.readPieceElsewhere
+      : null;
+    this.#isElsewhere = typeof options.isPieceElsewhere === "function"
+      ? options.isPieceElsewhere
+      : null;
+    // Plain data the layer above needs to answer those two, and which this
+    // store is handed anyway: where each file of the torrent begins and how
+    // long the whole of it is.
+    this.#files = Array.isArray(options.files) ? options.files : [];
+    this.#torrentLength = totalLength;
     // `options.disk` exists so a test can hold a write open or make one fail on
     // purpose. Four of the defects fixed here live in what happens when the
     // disk tier does not answer immediately or at all, and none of them is
@@ -1075,6 +1114,68 @@ export class SharedPieceStore {
     }
   }
 
+  /**
+   * One piece, from wherever else it can be had.
+   *
+   * @param {number} index
+   * @returns {Promise<Buffer | null>}
+   */
+  async #fromWholeFiles(index) {
+    return this.#readElsewhere
+      ? this.#readElsewhere({
+          index,
+          pieceLength: this.#chunkLength,
+          length: this.#torrentLength,
+          files: this.#files
+        })
+      : null;
+  }
+
+  /**
+   * Whether a spilled piece is now a duplicate of bytes held elsewhere.
+   *
+   * @param {number} index
+   * @returns {boolean}
+   */
+  isInWholeFiles(index) {
+    return this.#isElsewhere
+      ? this.#isElsewhere({
+          index,
+          pieceLength: this.#chunkLength,
+          length: this.#torrentLength,
+          files: this.#files
+        }) === true
+      : false;
+  }
+
+  /**
+   * Drop spilled pieces that are now duplicates of bytes held elsewhere.
+   *
+   * A film assembled into a file is on the disk twice until this runs: once as
+   * the file and once as the pieces it was built from. Field 2026-09-11, one
+   * episode: 1417 MB of segments beside 1424 MB of spilled pieces. Nothing is
+   * lost by dropping the second — a read that wants one of those pieces is
+   * answered from the file.
+   *
+   * @returns {number} How many were dropped.
+   */
+  dropDuplicatesHeldElsewhere() {
+    if (!this.#isElsewhere) {
+      return 0;
+    }
+    let dropped = 0;
+    for (const index of this.#disk.indexes()) {
+      if (this.#buffers.has(index) || this.#evicting.has(index)) {
+        continue;
+      }
+      if (this.isInWholeFiles(index)) {
+        this.#disk.forget(index);
+        dropped += 1;
+      }
+    }
+    return dropped;
+  }
+
   #wake() {
     const waiting = this.#waiters;
     this.#waiters = [];
@@ -1201,7 +1302,25 @@ export class SharedPieceStore {
     }
 
     if (!this.#disk.has(index)) {
-      return null;
+      // Not spilled, but the file it belongs to may be here whole — which is
+      // the ordinary case once a film has been assembled and its spilled copy
+      // dropped as the duplicate it had become.
+      const whole = await this.#fromWholeFiles(index);
+      if (!whole) {
+        return null;
+      }
+      this.#counters.fromWholeFile += 1;
+      const release = await this.#claimSlotOrNull();
+      if (release === null) {
+        // No block to put it in. The caller gets the bytes anyway; what it
+        // loses is only that the next read pays for this one again.
+        return whole;
+      }
+      try {
+        return this.#registerPiece(index, this.#copyIntoNewBuffer(index, whole));
+      } finally {
+        release();
+      }
     }
 
     const release = await this.#claimSlot();
@@ -1575,6 +1694,11 @@ export class SharedPieceStore {
         await this.#disk.read(index, target, offset);
         this.#counters.fromDisk += 1;
         return target;
+      }
+      const whole = await this.#fromWholeFiles(index);
+      if (whole) {
+        this.#counters.fromWholeFile += 1;
+        return Buffer.from(whole.subarray(offset, offset + length));
       }
       throw new Error(`Piece ${index} is not in the store.`);
     };

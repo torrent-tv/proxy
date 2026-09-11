@@ -806,6 +806,28 @@ export class TorrentPool {
    *   default is computed from free disk (min(10 GB, half free)). Pass 0 to
    *   disable the cap.
    */
+  /**
+   * Anything else every store of this pool is built with.
+   *
+   * Today: where a piece can be had when neither of the store's own tiers has
+   * it — the files this proxy has assembled. Given to the pool rather than
+   * discovered by the store, which knows nothing about files.
+   *
+   * @type {object}
+   */
+  #storeExtras = {};
+
+  /**
+   * Say where a piece can be had when the store has neither a resident nor a
+   * spilled copy.
+   *
+   * @param {object} extras
+   * @returns {void}
+   */
+  buildStoresWith(extras) {
+    this.#storeExtras = extras && typeof extras === "object" ? extras : {};
+  }
+
   constructor({ maxDiskBytes, memoryBytes, dhtBootstrap } = {}) {
     this.#memoryBytes = Number.isFinite(memoryBytes) && memoryBytes > 0 ? memoryBytes : undefined;
 
@@ -1606,7 +1628,7 @@ export class TorrentPool {
                 const addedReplacement = this.client.add(torrentId, {
                   store: SharedPieceStore,
                   storeCacheSlots: 0,
-                  storeOpts: { memoryBytes: this.#memoryBytes },
+                  storeOpts: { memoryBytes: this.#memoryBytes, ...this.#storeExtras },
                   deselect: true
                 }, (replacement) => {
                   this.torrents.set(key, replacement);
@@ -1639,7 +1661,7 @@ export class TorrentPool {
       const added = this.client.add(torrentId, {
         store: SharedPieceStore,
         storeCacheSlots: 0,
-        storeOpts: { memoryBytes: this.#memoryBytes },
+        storeOpts: { memoryBytes: this.#memoryBytes, ...this.#storeExtras },
         // Nothing is fetched until somebody says they want it. WebTorrent's own
         // default is `this.select(0, this.pieces.length - 1)` — the whole
         // torrent — and this proxy used to undo that afterwards by deselecting
@@ -1818,6 +1840,21 @@ export class TorrentPool {
       `torrent-pool: forgot "${name}" [${String(torrent.infoHash ?? "?").slice(0, 8)}] — ` +
       "it died without being asked to; its data stays on disk and the next request adds it again"
     );
+  }
+
+  /**
+   * Remove a torrent and its store, by name of the reason.
+   *
+   * The public form of what the idle timer and the disk cap already do. Taking
+   * the store with it is the point where a torrent downloaded whole is
+   * concerned: its pieces are a duplicate of the files kept elsewhere.
+   *
+   * @param {import("webtorrent").Torrent} torrent
+   * @param {string} reason
+   * @returns {void}
+   */
+  remove(torrent, reason) {
+    this.#removeTorrent(torrent, reason);
   }
 
   #removeTorrent(torrent, reason = "unknown") {

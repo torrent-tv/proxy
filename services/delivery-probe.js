@@ -412,9 +412,9 @@ export function createDeliveryProbe({
     // judgement could still be about: once a probe is older than the point at
     // which the reverse direction is called gone, its age says nothing further.
     connection.sentAtBySeq.set(connection.seq, now);
-    for (const [seq, at] of connection.sentAtBySeq) {
-      if (now - at > PROBE_HISTORY_MS) {
-        connection.sentAtBySeq.delete(seq);
+    for (const [probeNumber, sentAt] of connection.sentAtBySeq) {
+      if (now - sentAt > PROBE_HISTORY_MS) {
+        connection.sentAtBySeq.delete(probeNumber);
       } else {
         break;
       }
@@ -522,9 +522,9 @@ export function createDeliveryProbe({
       // not the association. This is the queue's own time, against the time the
       // queue is allowed to take.
       behindMs: Object.fromEntries(
-        [...connection.seen.entries()].map(([label, seq]) => {
-          const at = connection.sentAtBySeq.get(seq);
-          return [label, Number.isFinite(at) ? now - at : null];
+        [...connection.seen.entries()].map(([label, newestSeenNumber]) => {
+          const sentAt = connection.sentAtBySeq.get(newestSeenNumber);
+          return [label, Number.isFinite(sentAt) ? now - sentAt : null];
         })
       ),
       allowedWaitMs: Object.fromEntries(allowedWait.entries()),
@@ -746,10 +746,12 @@ export function createDeliveryProbe({
       const peerSentAt = Number(echo?.sentAt);
       const seenAt = echo?.seenAt;
       if (Number.isFinite(peerSentAt) && seenAt && typeof seenAt === "object") {
-        for (const [label, at] of Object.entries(seenAt)) {
-          const peerSawAt = Number(at);
-          const seq = connection.seen.get(label);
-          const weSentAt = Number.isInteger(seq) ? connection.sentAtBySeq.get(seq) : undefined;
+        for (const [label, peerSawAtRaw] of Object.entries(seenAt)) {
+          const peerSawAt = Number(peerSawAtRaw);
+          const newestSeenNumber = connection.seen.get(label);
+          const weSentAt = Number.isInteger(newestSeenNumber)
+            ? connection.sentAtBySeq.get(newestSeenNumber)
+            : undefined;
           if (!Number.isFinite(peerSawAt) || !Number.isFinite(weSentAt)) {
             continue;
           }
@@ -776,17 +778,19 @@ export function createDeliveryProbe({
       // Sum of per-channel bytes. Transport's bytesReceived advances on SACKs
       // (140 B/s on a wedge) and gives a false "advancing" every other tick —
       // channel bytes are flat on a wedge, so they are the correct signal.
-      const ch = echo?.report?.channels;
-      if (ch && typeof ch === "object") {
-        let total = 0;
-        let has = false;
-        for (const v of Object.values(ch)) {
-          if (v && typeof v.bytes === "number" && Number.isFinite(v.bytes)) {
-            total += v.bytes;
-            has = true;
+      const peerChannels = echo?.report?.channels;
+      if (peerChannels && typeof peerChannels === "object") {
+        let bytesAcrossChannels = 0;
+        let anyChannelReported = false;
+        for (const channelReport of Object.values(peerChannels)) {
+          if (channelReport && Number.isFinite(channelReport.bytes)) {
+            bytesAcrossChannels += channelReport.bytes;
+            anyChannelReported = true;
           }
         }
-        if (has) connection.peerChannelBytes = total;
+        if (anyChannelReported) {
+          connection.peerChannelBytes = bytesAcrossChannels;
+        }
       }
       // How far behind the far end's own event loop is running. A browser that
       // cannot run its timers cannot answer a probe, and every allowance here

@@ -60,8 +60,8 @@ export function computeCutGrid({ useKeyframeGrid, durationSeconds, segDur, keyfr
   const base = Number.isFinite(startTime) ? startTime : 0;
   const uniform = () => {
     const boundaries = [];
-    for (let t = 0; t < total - 0.001; t += step) {
-      boundaries.push(Number(t.toFixed(6)));
+    for (let cutAt = 0; cutAt < total - 0.001; cutAt += step) {
+      boundaries.push(Number(cutAt.toFixed(6)));
     }
     boundaries.push(total);
     // One clock: nothing here is a keyframe of the source, so nothing is owed

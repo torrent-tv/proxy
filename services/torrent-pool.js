@@ -971,7 +971,28 @@ export class TorrentPool {
     }
     const usage = this.fileUsageByTorrent.get(torrent);
     const isRead = Boolean(usage && usage.size > 0);
+    if (isRead) {
+      // Recorded on the torrent, as `hasActiveReader` and `hasUnmetDemand`
+      // beside it are: it is a fact about this torrent and it lives as long as
+      // the torrent does.
+      torrent.hasBeenRead = true;
+    }
     const isWanted = isRead || demandFor(torrent).register.windows().length > 0;
+    // A TORRENT NOBODY HAS READ YET IS BEING SET UP, NOT ABANDONED. Field
+    // 2026-09-11, and it broke playback outright: a torrent was added at
+    // 20:57:17, its first peer connected at 20:57:18, and this pass took it out
+    // of the swarm at 20:57:21 — while the read of the file's edges was still
+    // in flight and the playback plan was being built. Nothing rejoined it,
+    // because rejoining waits for a reader and a reader cannot arrive: the
+    // header it needs is downloaded by the swarm that was just let go.
+    //
+    // The condition is a state and not a period: having been read at least once
+    // is what tells a film somebody left from a film nobody has opened yet. One
+    // that is never read at all goes by the pool's own idle removal, which is
+    // where that belongs.
+    if (!isWanted && torrent.hasBeenRead !== true) {
+      return;
+    }
     if (isWanted && torrent.paused === true) {
       torrent.resume();
       logger.info(

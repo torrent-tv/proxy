@@ -1,3 +1,5 @@
+import { contentsOf } from "../../../../services/torrent/Contents.js";
+
 /**
  * List the files of a registered source (torrent file OR magnet).
  *
@@ -70,17 +72,29 @@ export async function handleApiSourceFilesGet(req, reply, { sourceRegistry, torr
   }
 
   const torrent = result;
-  const files = (torrent.files ?? []).map((file, index) => ({
-    index,
-    name: file?.name ?? "",
-    // Path relative to the torrent root (matches the browser's own parser).
-    relativePath: file?.path ?? file?.name ?? "",
-    length: Number.isFinite(file?.length) ? file.length : 0
-  }));
-
+  // WHAT IS IN THIS TORRENT, decided here and nowhere else. The browser used to
+  // decide it again — a list of video extensions in its parser and a second,
+  // shorter pair inside its picker — and the three answers had already diverged
+  // (measured 2026-09-12: `.dat` was offered there and not counted here, which
+  // also decides whether a sidecar whose name matches nothing can belong to the
+  // only video present). It ships the paths already relative to the torrent
+  // root, so there is no stripping rule on the other side either.
+  const contents = contentsOf(torrent);
   return reply.send({
     name: torrent.name ?? "",
     infoHash: torrent.infoHash ?? "",
-    files
+    // In the order a person reads them — by folder, then by name, with runs of
+    // digits compared as numbers. A torrent's own order is whatever the tool
+    // that made it chose, and it is routinely by size.
+    files: contents.files(),
+    // The pictures, each with what belongs to it. By index, because the files
+    // themselves are in the list above and saying them twice is how two copies
+    // of one fact start.
+    items: contents.items.map((item) => ({
+      fileIndex: item.fileIndex,
+      audio: item.audio.map((part) => part.fileIndex),
+      subtitles: item.subtitles.map((part) => part.fileIndex),
+      images: item.images.map((part) => part.fileIndex)
+    }))
   });
 }

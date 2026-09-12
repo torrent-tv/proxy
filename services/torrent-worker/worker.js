@@ -127,6 +127,26 @@ function log(message) {
  * @param {string} sourceKey
  * @returns {Promise<import("webtorrent").Torrent>}
  */
+/**
+ * The torrent for a sourceKey IF there is one, and never one that has to be
+ * built to answer.
+ *
+ * The other half of the pair above, for the questions that are about something
+ * going away: a departure is not a reason to add anything, and the answer
+ * "there is nothing here" is a complete answer to them.
+ *
+ * @param {string} sourceKey
+ * @returns {Promise<import("webtorrent").Torrent | null>}
+ */
+async function knownTorrent(sourceKey) {
+  const pending = torrentsByKey.get(sourceKey);
+  if (!pending) {
+    return null;
+  }
+  const torrent = await pending.catch(() => null);
+  return isUsableTorrentHandle(torrent) ? torrent : null;
+}
+
 async function requireTorrent(sourceKey) {
   const pending = torrentsByKey.get(sourceKey);
   if (!pending) {
@@ -537,13 +557,18 @@ async function runCommand(command, params, id) {
     }
 
     case Command.PRIORITY_MAP: {
-      const torrent = await requireTorrent(params.sourceKey);
-      pool.applyPriorityMap(
-        torrent,
-        params.fileIndex,
-        params.zones,
-        params.durationSeconds
-      );
+      // A MAP WITH NOTHING IN IT MUST NOT BRING A TORRENT BACK. It is what is
+      // said when the last viewer of a file leaves, which is also when the
+      // torrent may be on its way out — and `requireTorrent` rebuilds a dead
+      // handle from its recipe, so asking that way would re-add a torrent in
+      // order to be told that nothing is wanted of it.
+      const zones = Array.isArray(params.zones) ? params.zones : [];
+      const torrent = zones.length === 0
+        ? await knownTorrent(params.sourceKey)
+        : await requireTorrent(params.sourceKey);
+      if (torrent) {
+        pool.applyPriorityMap(torrent, params.fileIndex, zones, params.durationSeconds);
+      }
       return true;
     }
 

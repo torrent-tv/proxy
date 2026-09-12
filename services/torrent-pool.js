@@ -789,6 +789,50 @@ export function dhtNodeCount(client) {
 // without building a pool, a torrent client or a thread.
 const lastMapSaid = new WeakMap();
 
+/**
+ * Take back what the priority map had stated for one file, from a band onwards.
+ *
+ * Every band of a map is a claimant of its own, numbered, so a map that has
+ * shrunk — or emptied — is applied by withdrawing the numbers it no longer
+ * reaches. Written once because both callers need exactly it: the ordinary
+ * application, where the count is how many bands there now are, and a file
+ * nobody wants any more, where it is none.
+ *
+ * A function of a torrent rather than of the pool, like `leaveSwarm` beside it:
+ * it needs nothing the pool holds, and it can be exercised without building one.
+ *
+ * @param {object} torrent
+ * @param {number} fileIndex
+ * @param {number} [keepBelow] - Bands numbered below this are left alone.
+ * @returns {number} How many were withdrawn.
+ */
+function withdrawPriorityMap(torrent, fileIndex, keepBelow = 0) {
+  const { register } = demandFor(torrent);
+  const prefix = `${MAP_CLAIMANT}:${fileIndex}:`;
+  let withdrawn = 0;
+  for (const window of register.windows()) {
+    const claimant = String(window.claimant);
+    if (!claimant.startsWith(prefix)) {
+      continue;
+    }
+    const index = Number(claimant.split(":").pop());
+    if (!(index < keepBelow)) {
+      register.withdraw(claimant);
+      withdrawn += 1;
+    }
+  }
+  if (withdrawn > 0 && keepBelow === 0) {
+    // Said, because it is the one statement that cannot be read from what
+    // follows it: nothing further is stated about this file, so from here on
+    // silence is exactly what it looks like.
+    logger.info(
+      `torrent-pool: [${String(torrent?.infoHash ?? "?").slice(0, 8)}] nobody wants file ${fileIndex} ` +
+      `any more — ${withdrawn} band(s) of the map withdrawn`
+    );
+  }
+  return withdrawn;
+}
+
 export class TorrentPool {
   /**
    * In-flight `client.add()` promises keyed by the same key as `torrents`.
@@ -1169,6 +1213,15 @@ export class TorrentPool {
    * @param {number} durationSeconds
    */
   applyPriorityMap(torrent, fileIndex, zones, durationSeconds) {
+    // A MAP WITH NOTHING IN IT IS A STATEMENT, and it is answered before
+    // anything else is looked at. It says nobody wants any of this file, and
+    // that is true whatever the file's length is or whether the torrent still
+    // holds a list — so making it wait on either would be making the departure
+    // depend on facts that are gone by the time it is said.
+    if (Array.isArray(zones) && zones.length === 0) {
+      withdrawPriorityMap(torrent, fileIndex);
+      return;
+    }
     const file = Array.isArray(torrent?.files) ? torrent.files[fileIndex] : null;
     const length = Number(file?.length);
     const duration = Number(durationSeconds);
@@ -1243,15 +1296,7 @@ export class TorrentPool {
     });
     // Bands the map no longer has: a viewer moved on, and what they had wanted
     // is not wanted by anybody now.
-    for (const window of register.windows()) {
-      if (!String(window.claimant).startsWith(`${MAP_CLAIMANT}:${fileIndex}:`)) {
-        continue;
-      }
-      const index = Number(String(window.claimant).split(":").pop());
-      if (!(index < ordered.length)) {
-        register.withdraw(window.claimant);
-      }
-    }
+    withdrawPriorityMap(torrent, fileIndex, ordered.length);
     // WHAT THE SWARM WAS ACTUALLY TOLD, said on change and never on a timer.
     // The map was applied in silence: that it had been BUILT was visible in the
     // encoding's own line, and that the download had received it was visible

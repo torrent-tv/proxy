@@ -14,7 +14,7 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
-import { logger } from "../utils/logger.js";
+import { logger, writeAlreadyDecided } from "../utils/logger.js";
 
 /** What reached the console while `body` ran. */
 function captured(body) {
@@ -107,6 +107,20 @@ test("when it is said again, it says how many were held back", async () => {
   // count is reported at all, and that it counts every one of them.
   assert.ok(Number(said[1]) >= 9, `held-back count too low: ${later[0]}`);
   assert.ok(Number(said[2]) > 0, `the span it covers must be stated: ${later[0]}`);
+});
+
+test("a line already decided on another thread is written as it is", () => {
+  const message = unique("forwarded");
+  const lines = captured(() => {
+    writeAlreadyDecided("info", message);
+    writeAlreadyDecided("info", message);
+    writeAlreadyDecided("warn", message);
+  });
+  // The worker holds the same rule and applies it before forwarding. Deciding
+  // again here would be one decision taken twice on two different histories,
+  // and the file's own promise is that a line cannot reach the console and miss
+  // the file.
+  assert.equal(lines.length, 3, "a forwarded line is not judged a second time");
 });
 
 test("every level goes through the same rule", () => {

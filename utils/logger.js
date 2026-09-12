@@ -167,6 +167,30 @@ export const logger = {
 };
 
 /**
+ * Write a line that has ALREADY been through the repeat rule on another thread.
+ *
+ * The worker holds the same rule and applies it before forwarding, so running
+ * it again here would be one decision taken twice, on two different histories.
+ * It does not lose lines today — a re-printed line carries its held-back count,
+ * which makes the text unique — but that is an accident of the wording, and the
+ * file's own promise is that a line cannot reach the console and miss the file.
+ * It also filled this thread's bounded map with keys that can never repeat.
+ *
+ * @param {string} level
+ * @param {string} message - Already decided; written as it is.
+ * @returns {void}
+ */
+export function writeAlreadyDecided(level, message) {
+  const colour = level === "error"
+    ? chalk.red
+    : level === "warn" ? chalk.yellow : level === "success" ? chalk.green : chalk.cyan;
+  const toConsole = level === "error" ? console.error : level === "warn" ? console.warn : console.log;
+  const line = `${PREFIX} [${ts()}] ${message}`;
+  toConsole(colour(line));
+  toFile(line);
+}
+
+/**
  * An established fact is said once, then with decreasing frequency.
  *
  * **Why.** A failure that establishes itself and does not change is printed by
@@ -196,6 +220,22 @@ const REPEAT_KEYS = 512;
 const recent = new Map();
 
 /**
+ * What to append when a line is said again after repeats were held back.
+ *
+ * One function because it was written twice, in the two branches that decide to
+ * speak — which is how two statements of one rule drift apart.
+ *
+ * @param {number} heldBack
+ * @param {number} overMs
+ * @returns {string}
+ */
+function heldBackSuffix(heldBack, overMs) {
+  return heldBack > 0
+    ? ` [said ${heldBack} more time(s) in the last ${(overMs / 1000).toFixed(1)}s]`
+    : "";
+}
+
+/**
  * Whether this line is a repeat to hold back, and what to say if it is not.
  *
  * @param {string} message
@@ -223,12 +263,7 @@ function repeatCheck(message) {
       }
     }
     recent.set(message, { suppressed: 0, printedAt: now, interval: REPEAT_FIRST_MS });
-    return {
-      hold: false,
-      suffix: heldBack > 0
-        ? ` [said ${heldBack} more time(s) in the last ${(overMs / 1000).toFixed(1)}s]`
-        : ""
-    };
+    return { hold: false, suffix: heldBackSuffix(heldBack, overMs) };
   }
   if (now - seen.printedAt < seen.interval) {
     seen.suppressed += 1;
@@ -242,14 +277,9 @@ function repeatCheck(message) {
     printedAt: now,
     interval: Math.min(REPEAT_MAX_MS, seen.interval * 2)
   });
-  return {
-    hold: false,
-    // SAID, not merely hidden: the rate is the fact here, and a log that quietly
-    // drops repeats reports a healthy proxy where a loop was spinning.
-    suffix: heldBack > 0
-      ? ` [said ${heldBack} more time(s) in the last ${(overMs / 1000).toFixed(1)}s]`
-      : ""
-  };
+  // SAID, not merely hidden: the rate is the fact here, and a log that quietly
+  // drops repeats reports a healthy proxy where a loop was spinning.
+  return { hold: false, suffix: heldBackSuffix(heldBack, overMs) };
 }
 
 /**

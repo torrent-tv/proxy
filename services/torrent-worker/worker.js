@@ -56,8 +56,12 @@ import { forwardLogsTo, logger } from "../../utils/logger.js";
  * copy of the logger that had no file, and every one of their lines was lost:
  * measured over a whole 49 938-line file, not one of them was in it.
  */
-forwardLogsTo((_level, message) => {
-  parentPort.postMessage({ type: Event.LOG, message });
+forwardLogsTo((level, message) => {
+  // THE LEVEL TRAVELS TOO. It was dropped here, so every line this thread wrote
+  // — a warning about a spill that failed, an error about a torrent that went
+  // away — arrived on the other side as information and was coloured and
+  // recorded as such.
+  parentPort.postMessage({ type: Event.LOG, level, message });
 });
 
 // Imported dynamically, and that is load-bearing: static imports are RESOLVED
@@ -658,6 +662,7 @@ startMemoryReport({
 const STORE_REPORT_INTERVAL_MS = 60_000;
 
 /** Last reported reserve, so an unchanged one stays silent. */
+let lastClaimsWithdrawn = 0;
 let lastReserveBytes = 0;
 
 /** Last reported figures per store, so unchanged ones stay silent. */
@@ -694,6 +699,20 @@ setInterval(() => {
         `all resident pieces are pinned, cannot shrink yet`
       );
     }
+  }
+  // WHAT THE ANNOUNCEMENTS ACTUALLY DID. The stores count every piece they
+  // stopped being able to produce; this counts the ones where the library did
+  // still hold a claim and it was taken back. The GAP between the two is the
+  // reading: announcements far above withdrawals mean the stores are mostly
+  // dropping pieces that were never completed, and a withdrawal count stuck at
+  // zero while announcements climb means the mechanism is not reaching the
+  // torrent at all.
+  if (pool.claimsWithdrawn !== lastClaimsWithdrawn) {
+    lastClaimsWithdrawn = pool.claimsWithdrawn;
+    log(
+      `torrent-pool: ${pool.claimsWithdrawn} piece claim(s) withdrawn — pieces this proxy ` +
+      "had dropped and has now told the swarm it needs again"
+    );
   }
   const reserveNow = machineReserveBytes();
   if (reserveNow !== reserveBefore || reserveNow !== lastReserveBytes) {

@@ -17,7 +17,7 @@
 import { Worker } from "node:worker_threads";
 import { Readable } from "node:stream";
 import { fileURLToPath } from "node:url";
-import { logger } from "../../utils/logger.js";
+import { logger, writeAlreadyDecided } from "../../utils/logger.js";
 import { createCaller, createReceiveStream } from "./channel.js";
 import { Command, Event } from "./protocol.js";
 
@@ -218,7 +218,10 @@ export class TorrentWorkerClient {
           this.#fragmentReaders.delete(message.id);
           break;
         case Event.LOG:
-          logger.info(`torrent-worker: ${message.message}`);
+          // Written as it is: the worker holds the same repeat rule and has
+          // already applied it, and deciding again here would be one decision
+          // taken twice on two different histories.
+          writeAlreadyDecided(message.level ?? "info", `torrent-worker: ${message.message}`);
           break;
         case Event.FILE_COMPLETE:
           // Recorded here so the stream route can answer from the file without

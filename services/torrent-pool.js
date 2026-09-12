@@ -1067,6 +1067,9 @@ export class TorrentPool {
    */
   #wholeSources = new Set();
 
+  /** How many claims this pool has withdrawn, over its whole life. */
+  #claimsWithdrawn = 0;
+
   /**
    * Say that every file of a source is held whole.
    *
@@ -1164,9 +1167,6 @@ export class TorrentPool {
       this.#claimsWithdrawn += 1;
     }
   }
-
-  /** How many claims this pool has withdrawn, over its whole life. */
-  #claimsWithdrawn = 0;
 
   get claimsWithdrawn() {
     return this.#claimsWithdrawn;

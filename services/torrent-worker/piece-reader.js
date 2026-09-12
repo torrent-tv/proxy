@@ -734,6 +734,10 @@ export async function* readFragments({
     }
   };
 
+  // How many times THIS piece has been asked for again after the store
+  // withdrew it. Reset once a piece is in hand, so the allowance is per piece.
+  let withdrawnRetries = 0;
+
   try {
     for (let pieceIndex = firstPiece; pieceIndex <= lastPiece; pieceIndex += 1) {
       if (cancellation.isCancelled()) {
@@ -986,8 +990,33 @@ export async function* readFragments({
 
       if (!located) {
         store.unpin(pieceIndex);
-        throw new Error(`Piece ${pieceIndex} is verified but absent from the store.`);
+        // THE CLAIM HAS JUST BEEN WITHDRAWN, so this is a wait and not a
+        // failure. The store drops a piece behind every read head, and a read
+        // that re-opens an input at byte 0 — which is every encoder restart —
+        // asks for exactly those pieces. Until 2026-09-12 this threw, ffmpeg
+        // read the empty body as the end of the file, and the encoder died and
+        // was restarted into the same emptiness: field, `Piece 0 is verified
+        // but absent from the store` answered every read for 92 minutes while
+        // the viewer looked at a still picture.
+        //
+        // Going back one step re-runs this piece's whole path rather than a
+        // shortened copy of it: the bitfield now says the piece is missing, so
+        // the block above declares it, steers it onto the fastest holders and
+        // waits for it, exactly as it does for a piece that was never here.
+        // Once per piece — a second emptiness means the bytes are not coming
+        // and the caller must hear so.
+        if (withdrawnRetries === 0) {
+          withdrawnRetries += 1;
+          pieceIndex -= 1;
+          continue;
+        }
+        throw new Error(
+          `Piece ${pieceIndex} was withdrawn from the store and did not come back.`
+        );
       }
+      // Counted per piece: a long read may legitimately meet this more than
+      // once, and each piece is entitled to its own second chance.
+      withdrawnRetries = 0;
 
       let releasedThisPiece = false;
       // Remembered so the generator can drop it itself. The pin is taken here

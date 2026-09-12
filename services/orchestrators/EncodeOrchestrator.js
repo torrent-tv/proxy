@@ -33,6 +33,20 @@ import { contentionPenalty } from "../encode/contention.js";
 import { waits } from "../priority/WaitLedger.js";
 import { SegmentDemand } from "../encode/SegmentDemand.js";
 
+/**
+ * How long nothing is placed on an output whose input has just gone, and the
+ * ceiling that doubling reaches.
+ *
+ * Both are chosen, and are named here as chosen rather than dressed as
+ * measurements: what they bound is not how long the data takes to come back —
+ * that is the swarm's business and nobody here can know it — but how often it
+ * is worth asking. They replace the same two figures, with the same values,
+ * that lived in the session manager and governed only the dead run's own retry
+ * while the plan placed fresh runs beside it every half second.
+ */
+const INPUT_QUIET_BASE_MS = 2_000;
+const INPUT_QUIET_MAX_MS = 15_000;
+
 export class EncodeOrchestrator {
   /** Output address to what has been made of it. @type {Map<string, CoverageMap>} */
   #coverage = new Map();
@@ -46,6 +60,20 @@ export class EncodeOrchestrator {
 
   /** How runs have ended, by cause. @type {Map<string, number>} */
   #endings = new Map();
+
+  /**
+   * How many times in a row an output's run has died because its input was not
+   * there. Cleared by any other ending, which is the input answering.
+   *
+   * @type {Map<string, number>}
+   */
+  #inputLostAttempts = new Map();
+
+  /** Output address to the time before which nothing is placed on it. @type {Map<string, number>} */
+  #quietUntil = new Map();
+
+  /** The wake-up per output, so a quiet output is reconsidered. @type {Map<string, NodeJS.Timeout>} */
+  #quietTimers = new Map();
 
   /** The last state said out loud, so an unchanged state is not repeated. */
   #lastDescribed = "";
@@ -97,6 +125,7 @@ export class EncodeOrchestrator {
     refetchSecPerFilmSecond = () => 0,
     startingSpeedFor = () => 0,
     segmentStore = null,
+    planSoon = null,
     logger,
     now
   }) {
@@ -124,6 +153,9 @@ export class EncodeOrchestrator {
     this.segmentSeconds = segmentSeconds;
     this.logger = logger;
     this.now = typeof now === "function" ? now : Date.now;
+    // Asked for, not commanded: this class decides, and something else owns the
+    // loop that calls it. Absent in a test, where the clock is the test's own.
+    this.planSoon = typeof planSoon === "function" ? planSoon : () => undefined;
   }
 
   /**
@@ -365,6 +397,20 @@ export class EncodeOrchestrator {
           because: "it is no longer running, and it did not say so"
         });
       }
+    }
+    // ITS INPUT WAS NOT THERE A MOMENT AGO, so nothing is placed yet. The sweep
+    // above still runs — a claim left by a dead run must be released whatever
+    // the reason — and only the placing waits. This is the one thing that makes
+    // the delay bind: it used to be timed against the dead run, which the plan
+    // does not consult, so a fresh run went to the same place as fast as ffmpeg
+    // could fail there.
+    //
+    // AND ONLY WHILE NOTHING IS PRODUCING THERE. A run still alive on this
+    // output is proof the input can be read, whatever a run beside it met, so
+    // the wait must not silence an output that is working.
+    const quietMs = this.#quietFor(address);
+    if (quietMs > 0 && this.runsOn(address).every((run) => !run.isAlive)) {
+      return;
     }
     // ONE MAP, NOT ONE WINDOW PER VIEWER PER ZONE.
     //
@@ -696,6 +742,93 @@ export class EncodeOrchestrator {
       this.#runs.set(ended.address, remaining);
     }
     this.#endings.set(ended.ending, (this.#endings.get(ended.ending) ?? 0) + 1);
+    this.#noteInputAvailability(ended);
+  }
+
+  /**
+   * Remember, per output, that its input was not there — and until when nothing
+   * is to be placed on it.
+   *
+   * **Why the plan has to hold this.** A run whose input has gone is not alive,
+   * so the plan sees the stretch it held as free and places another run there at
+   * once — and the next one dies the same way, because nothing about the state
+   * has changed. There WAS a delay for exactly this, doubling from 2 s to 15 s,
+   * and it governed only the dead run's own retry while the plan went on placing
+   * fresh ones beside it. The comment beside that timer predicted this in as
+   * many words and the code did not prevent it. Field 2026-09-12: 2432 ffmpeg
+   * starts in 23 minutes, one every 0.57 s, for 61 minutes, against a delay that
+   * had long since reached its 15 s cap.
+   *
+   * So the delay lives where the decision is taken. It is not a cure for the
+   * input being away — that is the store's claim being withdrawn and the piece
+   * being fetched again — it is what stops one absent input from costing a
+   * thousand processes and a quarter of a million log lines while it is away.
+   *
+   * @param {{ address: string, ending: string }} ended
+   * @returns {void}
+   */
+  #noteInputAvailability(ended) {
+    if (ended.ending !== ENCODE_EXIT.INPUT_LOST) {
+      // CLEARED ONLY BY PROOF THAT THE INPUT WAS THERE, which is a segment
+      // having come out of it. Any other ending was nearly the rule here and is
+      // wrong: at the moment of failure several runs end at once, and one of
+      // them ending `gone` or `stopped` without producing a thing says nothing
+      // about the input — it would have lifted the wait the one beside it had
+      // just set, which is the storm again with an extra step.
+      const produced =
+        ended.firstOutputMs !== null && ended.firstOutputMs !== undefined
+          ? true
+          : Number.isFinite(ended.reached) && Number.isFinite(ended.from) && ended.reached >= ended.from;
+      if (produced) {
+        this.#inputLostAttempts.delete(ended.address);
+        this.#quietUntil.delete(ended.address);
+      }
+      return;
+    }
+    const attempts = (this.#inputLostAttempts.get(ended.address) ?? 0) + 1;
+    this.#inputLostAttempts.set(ended.address, attempts);
+    const delayMs = Math.min(
+      INPUT_QUIET_MAX_MS,
+      INPUT_QUIET_BASE_MS * 2 ** Math.min(attempts - 1, 6)
+    );
+    this.#quietUntil.set(ended.address, this.now() + delayMs);
+    this.logger.info(
+      `encode-plan on ${ended.address}: its input was not there (attempt ${attempts}) — ` +
+      `placing nothing for ${Math.round(delayMs / 1000)}s`
+    );
+    // THE WAKE-UP, because a plan that refuses to act needs something to ask it
+    // again: nothing about the state changes while the data is away, so no event
+    // would arrive to reconsider it.
+    const timer = setTimeout(() => {
+      this.#quietTimers.delete(ended.address);
+      this.planSoon();
+    }, delayMs);
+    timer.unref?.();
+    const previous = this.#quietTimers.get(ended.address);
+    if (previous) {
+      clearTimeout(previous);
+    }
+    this.#quietTimers.set(ended.address, timer);
+  }
+
+  /**
+   * How long this output still has to wait before anything is placed on it, in
+   * milliseconds; zero when it may be planned now.
+   *
+   * @param {string} address
+   * @returns {number}
+   */
+  #quietFor(address) {
+    const until = this.#quietUntil.get(address);
+    if (!Number.isFinite(until)) {
+      return 0;
+    }
+    const left = until - this.now();
+    if (left <= 0) {
+      this.#quietUntil.delete(address);
+      return 0;
+    }
+    return left;
   }
 
   /**

@@ -708,7 +708,7 @@ setInterval(() => {
       `${stats.fromMemory}/${stats.fromDisk}/${stats.spills}/${stats.revivals}/` +
       `${stats.blockedByPins}/${stats.evictedOnRevise}/${stats.spillFailures}/` +
       `${stats.evictedProtected}/${stats.demand?.unionPieces ?? 0}/${stats.admittedToDisk}/` +
-      `${stats.blocksAllocated}/${stats.blocksFree}/${stats.blocksReleased}`;
+      `${stats.blocksAllocated}/${stats.blocksFree}/${stats.blocksReleased}/${stats.withdrawn}`;
     if (lastReported.get(stats.name) === signature) {
       continue;
     }
@@ -729,6 +729,13 @@ setInterval(() => {
       (stats.admittedWithoutSlot > 0 ? ` to-disk-for-want-of-memory=${stats.admittedWithoutSlot}` : "") +
       (stats.stillMs > 1000 ? ` nothing-moved-for=${Math.round(stats.stillMs / 1000)}s` : "") +
       (stats.evictedOnRevise > 0 ? ` evictedOnRevise=${stats.evictedOnRevise}` : "") +
+      // How many pieces this store stopped being able to produce and said so,
+      // which is what makes the eviction's own bargain checkable: every one of
+      // these is a piece the torrent has been told to fetch again if it is ever
+      // wanted. A session where this climbs while reads keep succeeding is the
+      // bargain working; before 2026-09-12 the figure did not exist and the
+      // claim was never withdrawn at all.
+      (stats.withdrawn > 0 ? ` withdrawn=${stats.withdrawn}` : "") +
       (stats.spillFailures > 0 ? ` spill-failures=${stats.spillFailures}` : "") +
       (stats.outstanding > 0 ? ` outstanding=${stats.outstanding}` : "")
     );

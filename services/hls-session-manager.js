@@ -441,13 +441,6 @@ const START_FAST_FAIL_MS = 2_000;
 // for whatever residual case still fails — not a second competing "fix" that
 // blindly retries the identical command hoping for a different result.
 const MAX_FAILED_STARTS = 3;
-// A run that lost its INPUT is retried rather than condemned: the torrent can
-// be added again and the pieces downloaded again, so the data being gone is a
-// wait, not a verdict. Backed off so a source that is truly unavailable costs a
-// process every few seconds rather than continuously, and never given up on —
-// the session's own idle TTL is what ends it if the viewer leaves.
-const INPUT_RETRY_BASE_MS = 2_000;
-const INPUT_RETRY_MAX_MS = 15_000;
 // Idle TTL: a session is disposed this long after the last segment/playlist
 // access. Long enough that a viewer who pauses, backgrounds the tab, or briefly
 // turns the phone off can resume WITHOUT a cold ffmpeg restart (the warm session
@@ -1577,6 +1570,11 @@ export class HlsSessionManager {
       contentionPenalties: this.contentionPenalties,
       startingSpeedFor: (address) => this.encodeCost.speedForOutput(address),
       segmentStore: this.segmentStore,
+      // HOW IT ASKS TO DECIDE AGAIN. A plan that refuses to place anything
+      // because an output's input is away needs something to bring it back:
+      // nothing about the state changes while the data is missing, so no event
+      // arrives on its own.
+      planSoon: () => this.planEncodersSoon(),
       logger
     });
     // What a start and a stop were measured to cost here, before any viewer
@@ -5709,33 +5707,19 @@ export class HlsSessionManager {
     // condemn a session whose data merely went away.
     if (ended.ending === ENCODE_EXIT.INPUT_LOST) {
       session.inputRetryCount = (session.inputRetryCount ?? 0) + 1;
-      const delayMs = Math.min(
-        INPUT_RETRY_MAX_MS,
-        INPUT_RETRY_BASE_MS * 2 ** Math.min(session.inputRetryCount - 1, 6)
-      );
       logger.warn(
         `transcode ${session.id} encode-run #${ended.from}..#${ended.to} lost its input ` +
-          `(${session.lastError}); retrying in ${Math.round(delayMs / 1000)}s ` +
-          `(attempt ${session.inputRetryCount})`
+          `(${session.lastError}) (attempt ${session.inputRetryCount})`
       );
-      session.inputRetryTimer = setTimeout(() => {
-        session.inputRetryTimer = null;
-        if (run.state !== ENCODE_RUN_STATE.RETRY_WAIT) {
-          return;
-        }
+      // HOW LONG TO WAIT IS THE PLAN'S, and this says only what happened. The
+      // delay used to be timed here, against the dead run, which the plan never
+      // consults — so it placed a fresh run at the same spot as fast as ffmpeg
+      // could fail there: 2432 starts in 23 minutes in the field 2026-09-12,
+      // against a delay that had reached its 15 s ceiling long before. The
+      // orchestrator holds it now, beside the decision it governs.
+      if (run.state === ENCODE_RUN_STATE.RETRY_WAIT) {
         run.retryDue();
-        // The data may be back, which is a reason to DECIDE again and not a
-        // decision. Where to start is the plan's, from where the viewers are;
-        // this used to start one at the segment last requested, which is the
-        // player's read head rather than anybody's position, and is a number
-        // requests are explicitly not allowed to steer an encoder by.
-        //
-        // What the delay is for stays: the plan is a function of the state, and
-        // nothing about the state changes while the torrent is away, so it would
-        // command the same start as fast as ffmpeg could fail.
-        this.planEncodersSoon();
-      }, delayMs);
-      session.inputRetryTimer.unref?.();
+      }
       return;
     }
     // A run that exits THIS fast never did real work: it failed at the start
@@ -7647,14 +7631,6 @@ export class HlsSessionManager {
    * @returns {void}
    */
   #stopEncodeRun(session, reason) {
-    // Everything armed to re-decide on this session's behalf. A stop that
-    // leaves the input-retry timer running is not a stop: it fires seconds
-    // later and has the plan asked again for a session nobody is watching, and
-    // torrent starvation, which is what arms it, is routine here.
-    if (session.inputRetryTimer) {
-      clearTimeout(session.inputRetryTimer);
-      session.inputRetryTimer = null;
-    }
     const running = liveRunsOf(session);
     if (running.length === 0) {
       return;
@@ -9969,10 +9945,6 @@ export class HlsSessionManager {
       }
     }
 
-    if (session.inputRetryTimer) {
-      clearTimeout(session.inputRetryTimer);
-      session.inputRetryTimer = null;
-    }
 
     // Whether the process is still RUNNING, not whether anyone has called kill
     // on it: `.killed` means only that a signal was sent, and a run that ended

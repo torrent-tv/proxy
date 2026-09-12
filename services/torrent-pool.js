@@ -18,6 +18,7 @@ import { logger } from "../utils/logger.js";
 import { SharedPieceStore, findSharedStore } from "./piece-store/shared-piece-store.js";
 import { Urgency, urgencyName } from "./demand/index.js";
 import { demandFor, forgetTorrent, reconcileAll, hasUnmetDemand } from "./download/registry.js";
+import { withdrawClaim } from "./download/withdraw-claim.js";
 import { isAtAWatchingViewer, isBehindEverybody, isNobodyComingNow } from "./priority/PriorityMap.js";
 import { deriveSourceKey } from "./torrent-source-key.js";
 
@@ -1098,6 +1099,79 @@ export class TorrentPool {
     this.#storeExtras = extras && typeof extras === "object" ? extras : {};
   }
 
+  /**
+   * Everything a store of this pool is built with, in ONE place.
+   *
+   * It was assembled at both `client.add` sites — the ordinary one and the one
+   * that replaces a torrent the client no longer has — and a store built by the
+   * second was missing whatever the first had gained. That is how a store came
+   * to exist without the whole-file reader it needs, and it is why this is a
+   * method rather than a literal.
+   *
+   * @returns {object}
+   */
+  #storeOptions() {
+    return {
+      memoryBytes: this.#memoryBytes,
+      ...this.#storeExtras,
+      // WIRED BY THE POOL ITSELF, not handed in: withdrawing the claim needs
+      // only a torrent, and this class is the one that owns them. Last, so a
+      // caller's extras cannot displace the one thing that keeps the library's
+      // completion bitfield in step with the bytes.
+      onPieceGone: (what) => this.withdrawPieceClaim(what)
+    };
+  }
+
+  /**
+   * Withdraw the claim that this proxy has a piece, because the store that held
+   * it no longer can produce it.
+   *
+   * **Whose job this is.** The store owns the bytes and therefore owns the fact;
+   * the library keeps a second copy of that fact in its completion bitfield, and
+   * this pool is the only thing here that owns a torrent, so reconciling the two
+   * is this class's and nothing else's. The store announces and does not know
+   * who listens.
+   *
+   * **What it costs.** The piece is re-created as incomplete, so the next read
+   * that wants it waits for a download instead of failing. Field 2026-09-12,
+   * which is what this is for: 565 spilled pieces were dropped behind the read
+   * heads — correctly, they were behind every reader — the bitfield went on
+   * saying they were verified, the encoder restarted and re-opened its input at
+   * byte 0, and `Piece 0 is verified but absent from the store` then answered
+   * every read for 92 minutes. Nothing re-downloaded it, because the library
+   * does not fetch what it believes it owns.
+   *
+   * **What it deliberately does not do.** `_markUnverified` would also re-select
+   * the piece, and does not here: every torrent is added with `deselect: true`,
+   * which sets the library's own `_startAsDeselected` and makes it skip that
+   * call. The download set has one owner — `SwarmSelection`, from the priority
+   * map — and a piece withdrawn here is fetched again when a read states it,
+   * which is the same statement every other piece waits on.
+   *
+   * @param {object} what
+   * @param {number} what.index
+   * @param {object[]} what.files - The store's own, from which the torrent that
+   *   owns them is found; the store has no idea what a torrent is.
+   * @returns {void}
+   */
+  withdrawPieceClaim({ index, files }) {
+    const outcome = withdrawClaim({
+      index,
+      files,
+      warn: (line) => logger.warn(`torrent-pool: ${line}`)
+    });
+    if (outcome === "withdrawn") {
+      this.#claimsWithdrawn += 1;
+    }
+  }
+
+  /** How many claims this pool has withdrawn, over its whole life. */
+  #claimsWithdrawn = 0;
+
+  get claimsWithdrawn() {
+    return this.#claimsWithdrawn;
+  }
+
   constructor({ maxDiskBytes, memoryBytes, dhtBootstrap } = {}) {
     this.#memoryBytes = Number.isFinite(memoryBytes) && memoryBytes > 0 ? memoryBytes : undefined;
 
@@ -1842,7 +1916,7 @@ export class TorrentPool {
                 const addedReplacement = this.client.add(torrentId, {
                   store: SharedPieceStore,
                   storeCacheSlots: 0,
-                  storeOpts: { memoryBytes: this.#memoryBytes, ...this.#storeExtras },
+                  storeOpts: this.#storeOptions(),
                   deselect: true
                 }, (replacement) => {
                   this.torrents.set(key, replacement);
@@ -1875,7 +1949,7 @@ export class TorrentPool {
       const added = this.client.add(torrentId, {
         store: SharedPieceStore,
         storeCacheSlots: 0,
-        storeOpts: { memoryBytes: this.#memoryBytes, ...this.#storeExtras },
+        storeOpts: this.#storeOptions(),
         // Nothing is fetched until somebody says they want it. WebTorrent's own
         // default is `this.select(0, this.pieces.length - 1)` — the whole
         // torrent — and this proxy used to undo that afterwards by deselecting

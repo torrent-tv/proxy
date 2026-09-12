@@ -1,0 +1,26 @@
+{
+  "name": "@torrent-tv/torrent-contents",
+  "version": "1.0.0",
+  "description": "What is in one torrent: which of its files carry a picture, and which files belong to which picture. One implementation, used by the proxy and by the browser.",
+  "type": "module",
+  "main": "./Contents.js",
+  "exports": {
+    ".": "./Contents.js",
+    "./Contents.js": "./Contents.js",
+    "./files.js": "./files.js",
+    "./naming.js": "./naming.js"
+  },
+  "files": [
+    "Contents.js",
+    "files.js",
+    "naming.js",
+    "README.md"
+  ],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/torrent-tv/proxy.git",
+    "directory": "services/torrent"
+  },
+  "sideEffects": false
+}

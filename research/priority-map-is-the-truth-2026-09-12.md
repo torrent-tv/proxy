@@ -167,3 +167,41 @@ among them.
 **A torrent is on the idle clock from the moment it exists.** Until now the only
 thing that ever started that clock was a reader letting go, so a file list
 fetched and never played was held for the life of the process.
+
+## What the review of this work caught — READ
+
+Two defects, both found by reading the finished code rather than by a test, and
+both fixed with a check apiece.
+
+1. **A warm-up could take the urgency away from a plan somebody was waiting
+   for.** The two ends of a file are stated by whoever asks for them, and there
+   are two such callers: the playback plan, which a person is watching a loading
+   screen for, and the warm-up, which by its whole purpose nobody is waiting
+   for. The warm-up fires off the files beside the picture without awaiting
+   them, so it can arrive second — and it restated the same claimants at its own
+   lower level. The statement is raise-only now; the one caller entitled to put
+   them back down is the read that has just finished, which says so.
+2. **A departure could be noticed by nobody.** The background fill states a
+   claim of its own per file and withdraws it once nothing else wants that file
+   — but the withdrawal happened inside a pass that nothing acted on, so a
+   torrent everybody had left could be held "wanted" by the fill's own claim at
+   the moment of the departure and then never re-examined: in its swarm, with no
+   idle clock running. The pass acts on what it just said now.
+
+## The shape of the shared statement — DECIDED
+
+The classification is a PACKAGE rather than an answer the proxy returns, and the
+reason is timing: the browser shows the list of episodes the instant a
+`.torrent` is opened, before a proxy has been chosen, let alone connected.
+Making it wait for an answer would trade one defect for a slower first screen.
+
+`@torrent-tv/torrent-contents` is published from the proxy's own
+`services/torrent`, and the browser imports it by the same bare name: Node
+resolves it out of `node_modules`, and an import map in the page points that
+name at `/vendor/torrent-contents/`, which the server serves straight from the
+installed package. Nothing is bundled and nothing is copied.
+
+Verified in a browser 2026-09-12: the page fetched `Contents.js`, `files.js` and
+`naming.js` from that prefix with 200 each, `classifyMediaFiles` ran through the
+package, and the episodes came back in reading order — `ep2` before `ep10` — with
+a paired subtitle on its own episode and an unpaired soundtrack still offered.

@@ -19,11 +19,11 @@ import { handleStreamGet } from "../routes/stream/get.js";
  * Minimal stand-ins for the parts of Fastify and the pool this route touches.
  *
  * @param {{ method: string, range?: string }} request
- * @returns {{ req: object, reply: object, sent: object, opened: string[], claims: number }}
+ * @returns {{ req: object, reply: object, sent: object, opened: string[], state: object }}
  */
 function harness({ method, range }) {
   const opened = [];
-  const state = { claims: 0, prioritized: [] };
+  const state = { prioritized: [] };
 
   const sent = { code: 200, headers: {}, body: undefined, called: false };
   const reply = {
@@ -71,10 +71,6 @@ function harness({ method, range }) {
     async getTorrent() {
       return { files: [file], sourceKey: "key" };
     },
-    acquireFile() {
-      state.claims += 1;
-      return () => undefined;
-    },
     prioritizeByteRange(_torrent, fileIndex, byteStart, _windowBytes, options) {
       state.prioritized.push({ byteStart, wholeFileRead: options?.wholeFileRead === true });
     }
@@ -96,7 +92,7 @@ test("HEAD reports the size without opening a read", async () => {
   await handleStreamGet(req, reply, deps);
 
   assert.deepEqual(opened, [], "HEAD started a read of the file");
-  assert.equal(state.claims, 0, "HEAD claimed the file it never read");
+  assert.deepEqual(state.prioritized, [], "HEAD asked the swarm for a read it never made");
   // The real size, not the zero Fastify substitutes for an empty payload — the
   // keyframe index reads this header and treats 0 as "no index".
   assert.equal(sent.headers["content-length"], "5869669065");
@@ -182,5 +178,5 @@ test("a file this proxy does not have whole still goes to the torrent", async ()
   const { req, reply, state, deps } = harness({ method: "GET", range: "bytes=0-99" });
   deps.torrentPool.wholeFiles = new Map([["other/7", { path: "/nowhere", length: 1, name: "x" }]]);
   await handleStreamGet(req, reply, deps);
-  assert.equal(state.claims, 1, "the ordinary path was not taken");
+  assert.equal(state.prioritized.length, 1, "the ordinary path was not taken");
 });

@@ -25,39 +25,6 @@ function getPayload(body) {
   return {};
 }
 
-/**
- * Claim the source's file so the pool cannot clean it up under a live session.
- *
- * Asynchronous underneath — the torrent lives on another thread — but the
- * caller needs a release function immediately, so the claim is chased and the
- * release waits for it.
- *
- * @param {{ sourceRegistry: object, torrentPool: object, sourceKey: string, fileIndex: number }} params
- * @returns {() => void}
- */
-function holdSource({ sourceRegistry, torrentPool, sourceKey, fileIndex }) {
-  let release = null;
-  let releasedEarly = false;
-  const record = sourceRegistry?.get?.(sourceKey);
-  if (!record) {
-    return () => {};
-  }
-  void Promise.resolve(torrentPool.getTorrent(record.sourceType, record.source))
-    .then((torrent) => {
-      release = torrentPool.acquireFile(torrent, fileIndex);
-      if (releasedEarly) {
-        release();
-      }
-    })
-    .catch(() => {});
-  return () => {
-    releasedEarly = true;
-    if (typeof release === "function") {
-      release();
-      release = null;
-    }
-  };
-}
 
 export async function handleApiTranscodeSessionsPost(req, reply, { hlsSessionManager, sourceRegistry, torrentPool }) {
   const payload = getPayload(req.body);
@@ -108,22 +75,7 @@ export async function handleApiTranscodeSessionsPost(req, reply, { hlsSessionMan
           : 0,
       audioTrackIndex:
         Number.isInteger(audioTrackIndex) && audioTrackIndex > 0 ? audioTrackIndex : 0,
-      segmentFormatId,
-      // Hold the torrent for as long as this session lives. Reads take a claim
-      // only while they run, and a seek leaves a gap with no read at all — the
-      // disk sweep caught that gap on 2026-08-06 and deleted the film being
-      // watched.
-      // Takes the file to hold, because a session does not always read the file
-      // it was created for: a release whose dub ships as its own file gives that
-      // soundtrack a session of its own, reading a different index of the same
-      // torrent. Defaults to the picture, which is every other case.
-      acquireSource: (heldFileIndex = fileIndex) =>
-        holdSource({
-          sourceRegistry,
-          torrentPool,
-          sourceKey,
-          fileIndex: Number.isInteger(heldFileIndex) ? heldFileIndex : fileIndex
-        })
+      segmentFormatId
     });
     // The index of quality variants, when this session has more than one to
     // offer. Its presence is what tells the browser it can change quality

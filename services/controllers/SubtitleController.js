@@ -51,7 +51,6 @@ export class SubtitleController {
     if (!hasTrack) {
       const name = file.name ?? "";
       const ext = name.slice(name.lastIndexOf(".")).toLowerCase();
-      const release = this.torrentPool.acquireFile(torrent, fileIndex);
       try {
         const bytes = await readFileFully(file, EXTERNAL_MAX_BYTES);
         const text = SubtitleFileContainer.decodeBytes(bytes);
@@ -65,8 +64,6 @@ export class SubtitleController {
         return { vtt, language: TextSubtitleTrack.detectLanguageFromVtt(vtt), headers: {} };
       } catch (e) {
         return { error: `Could not read subtitle file: ${e?.message ?? e}`, status: 502 };
-      } finally {
-        release();
       }
     }
 

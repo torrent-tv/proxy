@@ -334,29 +334,25 @@ function describeSwarmDemand(torrent) {
 /**
  * The torrents the upload policy is allowed to see.
  *
- * A torrent with a reader qualifies for the obvious reason. A torrent in a
- * HURRY qualifies even without one, and that case is the important one: the
- * first thing done with a new torrent is fetching the file's head and tail for
- * the codec probe, and that read goes straight to `createReadStream` without
- * registering a reader. Judged by readers alone the torrent looks unused for
- * the whole of that wait — 8.36 s of the 11.46 s before playback in the session
- * measured 2026-08-04 — so the upload stayed at the near-silent idle floor
- * during the exact seconds peers were deciding whether to serve us.
+ * A torrent something is wanted of qualifies for the obvious reason. A torrent
+ * in a HURRY qualifies even without that, and that case is the important one:
+ * the first seconds of a new torrent are when peers decide whether to serve us,
+ * and an upload held at the near-silent idle floor through them costs the whole
+ * ramp — 8.36 s of the 11.46 s before playback in the session measured
+ * 2026-08-04.
  *
  * @param {Iterable<{ hurryUntil?: number }>} torrents
- * @param {Map<object, { size: number }>} usageByTorrent - fileIndex sets, keyed by torrent.
  * @param {number} now
  * @returns {object[]}
  */
-export function torrentsForUploadPolicy(torrents, usageByTorrent, now) {
+export function torrentsForUploadPolicy(torrents, now) {
   const chosen = [];
   for (const torrent of torrents) {
-    const usage = usageByTorrent?.get?.(torrent);
-    const hasReader = Boolean(usage && usage.size > 0);
-    if (hasReader || (torrent?.hurryUntil ?? 0) > now) {
+    const wanted = isWanted(torrent);
+    if (wanted || (torrent?.hurryUntil ?? 0) > now) {
       // Recorded so the policy can tell "nothing is arriving and somebody is
       // waiting" from "nothing is arriving because nobody asked".
-      torrent.hasActiveReader = hasReader;
+      torrent.isWanted = wanted;
       // Whether anybody is still short of bytes of it. Upload is bought with
       // reciprocity and reciprocity is only worth buying while something is
       // missing; a torrent whose declared windows are all present wants nothing
@@ -401,13 +397,13 @@ export function decideUploadLimit(activeTorrents, opts = {}) {
     // iterate the piece array and throw on webtorrent 3.x when a piece is null
     // (deselected / mid-verify), which would crash this timer every cycle.
     const notDone = torrent?.done !== true;
-    // A torrent nobody is reading is not starving, however still its download
-    // looks. The encoder is held back once it is far enough ahead of the
+    // A torrent nothing is wanted of is not starving, however still its
+    // download looks. The encoder is held back once it is far enough ahead of the
     // viewer, and while it is held nothing is requested — measured
     // 2026-08-04: four cycles of 512 -> 50 KB/s in three minutes, each
     // reported as `earn unchoke ... down=0KB/s`, all of them raising the
     // upload at moments when no byte was wanted by anyone.
-    const starving = notDone && torrent?.hasActiveReader !== false
+    const starving = notDone && torrent?.isWanted !== false
       && torrent?.hasUnmetDemand !== false && downloadSpeed < starvingSpeed;
     if (starving && chokedInterested >= chokedThreshold) {
       const name = typeof torrent?.name === "string" ? torrent.name : "?";
@@ -910,6 +906,57 @@ export function withdrawFileEdges(torrent, fileIndex) {
   return withdrawn;
 }
 
+/**
+ * IS ANYTHING WANTED OF THIS TORRENT — the one question asked about a torrent's
+ * life, and it is answered by what has been stated, never by counting who is
+ * reading.
+ *
+ * Everything that wants bytes says so in the register: the priority map for
+ * every file somebody is watching, the ends of a file that is open, the
+ * background fill, and a read that is stopped on a piece. So "nothing is
+ * stated" is the whole of "nobody wants this", and it becomes true exactly when
+ * the last viewer leaves — because that is when the map is published with
+ * nothing in it.
+ *
+ * **A torrent that cannot yet be stated about is wanted.** Until its metadata
+ * arrives it has no files, so nothing can name a byte of it, and it is being
+ * fetched precisely because somebody asked for it. Judged by the register alone
+ * it would look abandoned three seconds after it was added, which is the
+ * failure of 2.83.1 exactly.
+ *
+ * @param {object} torrent
+ * @returns {boolean}
+ */
+export function isWanted(torrent) {
+  if (!torrent || torrent.destroyed) {
+    return false;
+  }
+  if (!Array.isArray(torrent.files) || torrent.files.length === 0) {
+    return true;
+  }
+  return demandFor(torrent).register.size > 0;
+}
+
+/**
+ * WHAT TO DO ABOUT A TORRENT'S SWARM, from the two facts that decide it.
+ *
+ * Separated from the doing because this is the rule that has failed twice in
+ * the field, and a rule that can only be exercised by building a pool with a
+ * live WebTorrent client is a rule nothing checks. Both failures are cases of
+ * it: 2.83.1 let a swarm go for a torrent that had never been wanted, and the
+ * version before that never let one go at all.
+ *
+ * @param {{ wanted: boolean, everWanted: boolean }} facts
+ * @returns {{ swarm: "take" | "let go" | "leave alone", onTheClock: boolean }}
+ *   What to do with the swarm, and whether the idle clock should be running.
+ */
+export function swarmDecisionFor({ wanted, everWanted }) {
+  if (wanted) {
+    return { swarm: "take", onTheClock: false };
+  }
+  return { swarm: everWanted ? "let go" : "leave alone", onTheClock: true };
+}
+
 export class TorrentPool {
   /**
    * In-flight `client.add()` promises keyed by the same key as `torrents`.
@@ -1105,7 +1152,6 @@ export class TorrentPool {
      *
      * @type {WeakMap<import("webtorrent").Torrent, Map<number, number>>}
      */
-    this.fileUsageByTorrent = new WeakMap();
 
     this.client.on("error", (error) => {
       logger.error(`WebTorrent client error: ${error.message}`);
@@ -1236,13 +1282,14 @@ export class TorrentPool {
    */
   #stateBackgroundFill(torrent) {
     const { register } = demandFor(torrent);
-    const usage = this.fileUsageByTorrent.get(torrent);
     const pieceLength = Number(torrent.pieceLength);
     if (!Number.isFinite(pieceLength) || pieceLength <= 0) {
       return;
     }
-    for (const [fileIndex, count] of usage ?? []) {
-      const file = count > 0 ? torrent.files?.[fileIndex] : null;
+    // The files anything is stated for — which is the same list the reader
+    // counts used to give and is one fact rather than two.
+    for (const fileIndex of register.files()) {
+      const file = torrent.files?.[fileIndex] ?? null;
       const claimant = `background-fill:${fileIndex}`;
       if (!file) {
         register.withdraw(claimant);
@@ -1300,6 +1347,10 @@ export class TorrentPool {
       // The ends of the file go with it. They are kept for as long as the file
       // is open, and this is what says it is not.
       withdrawFileEdges(torrent, fileIndex);
+      // And this may have been the last thing anybody wanted of this torrent.
+      // Optional because these two are functions of a torrent and are exercised
+      // as such; called on the pool, the pool also acts on what they said.
+      this?.followTheDemand?.(torrent);
       return;
     }
     const file = Array.isArray(torrent?.files) ? torrent.files[fileIndex] : null;
@@ -1400,6 +1451,9 @@ export class TorrentPool {
       .sort((left, right) => right[0] - left[0])
       .map(([level, held]) => `${urgencyName(level)} ${held.zones} zone(s) ${held.megabytes.toFixed(0)}MB`)
       .join(", ");
+    // Something is wanted of this torrent, which may be news: a map published
+    // for a file of a torrent whose swarm was let go is what takes it back.
+    this?.followTheDemand?.(torrent);
     const said = `${fileIndex}:${shape}`;
     if (lastMapSaid.get(torrent) !== said) {
       lastMapSaid.set(torrent, said);
@@ -1413,8 +1467,7 @@ export class TorrentPool {
   #reportStalledDownloads() {
     const now = Date.now();
     for (const torrent of this.torrents.values()) {
-      const usage = this.fileUsageByTorrent.get(torrent);
-      if (!usage || usage.size === 0 || torrent?.done === true) {
+      if (!isWanted(torrent) || torrent?.done === true) {
         continue;
       }
       const speed = typeof torrent.downloadSpeed === "number" ? torrent.downloadSpeed : 0;
@@ -1454,19 +1507,14 @@ export class TorrentPool {
     if (!this.client || this.client.destroyed || typeof this.client.throttleUpload !== "function") {
       return;
     }
-    const active = torrentsForUploadPolicy(
-      this.torrents.values(),
-      this.fileUsageByTorrent,
-      Date.now()
-    );
+    const active = torrentsForUploadPolicy(this.torrents.values(), Date.now());
     // The one place the swarm is told anything: it reads what everybody has
     // stated and works out for itself what to ask for, including whether the
     // speculative levels may be stated at all — which is a question about every
     // torrent at once, because they share the link.
     reconcileAll();
     for (const torrent of this.torrents.values()) {
-      const usage = this.fileUsageByTorrent.get(torrent);
-      if (!usage || usage.size === 0 || torrent?.done === true) {
+      if (!isWanted(torrent) || torrent?.done === true) {
         continue;
       }
       this.#stateBackgroundFill(torrent);
@@ -1510,12 +1558,10 @@ export class TorrentPool {
     if (used <= this.#maxDiskBytes) {
       return;
     }
-    // Candidates: pooled torrents with zero active readers, LRU first.
+    // Candidates: pooled torrents nothing is wanted of, the longest unwanted
+    // first.
     const candidates = [...this.torrents.values()]
-      .filter((torrent) => {
-        const usage = this.fileUsageByTorrent.get(torrent);
-        return !usage || usage.size === 0;
-      })
+      .filter((torrent) => !isWanted(torrent))
       .sort(
         (earlier, later) =>
           (this.#lastAccess.get(earlier) ?? 0) - (this.#lastAccess.get(later) ?? 0)
@@ -1783,7 +1829,6 @@ export class TorrentPool {
                   this.torrents.delete(otherKey);
                 }
               }
-              this.fileUsageByTorrent.delete(existing);
               this.#lastAccess.delete(existing);
               this.#readPositionByTorrent.delete(existing);
               this.client.remove(existing, { destroyStore: true }, () => {
@@ -1847,6 +1892,11 @@ export class TorrentPool {
         // leave the survivor unwatched. Attaching twice costs nothing — the
         // guard makes the second call a no-op when it is the same object.
         this.#attachSwarmDiagnostics(readyTorrent);
+        // On the clock from the moment it exists. A torrent nobody ever states
+        // anything about — a file list fetched and never played — used to be
+        // held for the life of the process, because the only thing that ever
+        // started the idle timer was a reader letting go.
+        this.followTheDemand(readyTorrent);
         resolve(readyTorrent);
       });
       // Attached to what `add` returns, NOT inside its callback. That callback
@@ -1865,59 +1915,61 @@ export class TorrentPool {
   }
 
   /**
-   * Increment the reference count for a file, selecting it for download.
-   * Returns a release function that decrements the count; when it reaches
-   * zero the file is automatically deselected.
+   * Torrents something has been wanted of at least once, which is what tells a
+   * departure from a beginning.
+   *
+   * @type {WeakSet<object>}
+   */
+  #wasWanted = new WeakSet();
+
+  /**
+   * ACT ON WHAT IS WANTED OF THIS TORRENT, and on nothing else.
+   *
+   * Called wherever what is wanted changes — a priority map applied or emptied,
+   * the ends of a file stated — because those are the moments, and a pass that
+   * asks every torrent every few seconds has the wrong answer between two of
+   * them. That is not a theory: 2.83.1 asked such a question every five seconds
+   * and a torrent added three seconds earlier answered "nobody", so it left its
+   * swarm with 741 connections let go and playback never started.
+   *
+   * What it does NOT do is decide whether a torrent is wanted. That is
+   * {@link isWanted}, which reads what has been stated, and the only reason
+   * this is a method at all is that the idle timer and the eviction order are
+   * the pool's own.
    *
    * @param {import("webtorrent").Torrent} torrent
-   * @param {number} fileIndex - Zero-based index into `torrent.files`.
-   * @returns {() => void} Release function — call it once when done streaming.
+   * @returns {void}
    */
-  acquireFile(torrent, fileIndex) {
-    if (!torrent || !Array.isArray(torrent.files) || !Number.isInteger(fileIndex) || fileIndex < 0) {
-      return () => undefined;
+  followTheDemand(torrent) {
+    if (!torrent || torrent.destroyed) {
+      return;
     }
-    let usage = this.fileUsageByTorrent.get(torrent);
-    if (!usage) {
-      usage = new Map();
-      this.fileUsageByTorrent.set(torrent, usage);
+    const { swarm, onTheClock } = swarmDecisionFor({
+      wanted: isWanted(torrent),
+      everWanted: this.#wasWanted.has(torrent)
+    });
+    if (swarm === "take") {
+      this.#wasWanted.add(torrent);
+      this.#cancelIdleRemoval(torrent);
+      // When it was last wanted, which is the order the disk cap evicts in.
+      this.#lastAccess.set(torrent, Date.now());
+      rejoinSwarm(torrent);
     }
-    // The torrent is in use again — cancel any pending idle removal and mark
-    // it recently accessed so LRU eviction keeps it.
-    this.#cancelIdleRemoval(torrent);
-    this.#lastAccess.set(torrent, Date.now());
-    // AND REJOIN ITS SWARM, which is the other half of the pair: a departure
-    // lets a swarm go, an arrival takes it back. Both are acted on at the
-    // moment they happen, and neither is discovered by asking.
-    rejoinSwarm(torrent);
-    usage.set(fileIndex, (usage.get(fileIndex) ?? 0) + 1);
-
-    let released = false;
-    return () => {
-      if (released) {
-        return;
-      }
-      released = true;
-      const nextCount = (usage.get(fileIndex) ?? 0) - 1;
-      if (nextCount > 0) {
-        usage.set(fileIndex, nextCount);
-      } else {
-        usage.delete(fileIndex);
-      }
-      if (usage.size === 0) {
-        this.fileUsageByTorrent.delete(torrent);
-        // No active readers — schedule removal (with store) after an idle TTL.
-        this.#scheduleIdleRemoval(torrent);
-        // THE READER LEFT, AND THAT IS THE ONLY MOMENT A SWARM MAY BE LET GO.
-        leaveSwarm(torrent);
-      }
-      };
+    // A PROXY THAT NEEDS NOTHING FROM A SWARM SHOULD NOT BE IN THAT SWARM. The
+    // data stays on disk; the next thing that wants a byte of it takes the
+    // swarm back.
+    if (swarm === "let go") {
+      leaveSwarm(torrent);
+    }
+    if (onTheClock) {
+      this.#scheduleIdleRemoval(torrent);
+    }
   }
 
   /**
    * Schedule removal of a torrent (with its on-disk store) after
-   * {@link TORRENT_IDLE_TTL_MS} of zero file refcount. Idempotent — replaces
-   * any existing timer for the torrent.
+   * {@link TORRENT_IDLE_TTL_MS} of nothing being wanted of it. Idempotent —
+   * replaces any existing timer for the torrent.
    *
    * @param {import("webtorrent").Torrent} torrent
    * @returns {void}
@@ -1932,11 +1984,13 @@ export class TorrentPool {
     logger.info(`torrent-pool: scheduling idle removal for "${name}" [${infoHashShort}] in ${TORRENT_IDLE_TTL_MS / 1000}s`);
     const timer = setTimeout(() => {
       this.#idleTimers.delete(torrent);
-      // Re-check: a new acquire since scheduling would have cancelled this
-      // timer, but guard anyway against a race.
-      const usage = this.fileUsageByTorrent.get(torrent);
-      if (usage && usage.size > 0) {
-        logger.info(`torrent-pool: idle timer fired for "${name}" [${infoHashShort}] but refcount ${usage.size} >0 — keep`);
+      // Re-check: anything stated since would have cancelled this timer, but
+      // guard anyway against a race.
+      if (isWanted(torrent)) {
+        logger.info(
+          `torrent-pool: idle timer fired for "${name}" [${infoHashShort}] but ` +
+          `${demandFor(torrent).register.size} thing(s) are stated for it — keep`
+        );
         return;
       }
       logger.warn(`torrent-pool: idle TTL fired for "${name}" [${infoHashShort}] — removing torrent (reason=idle-ttl caller=scheduleIdleRemoval)`);
@@ -1996,7 +2050,6 @@ export class TorrentPool {
       return;
     }
     forgetTorrent(torrent);
-    this.fileUsageByTorrent.delete(torrent);
     this.#lastAccess.delete(torrent);
     this.#readPositionByTorrent.delete(torrent);
     const name = typeof torrent.name === "string" ? torrent.name : "(unknown)";
@@ -2029,8 +2082,7 @@ export class TorrentPool {
     }
     const infoHash = String(torrent.infoHash ?? "?").slice(0, 8);
     const name = typeof torrent.name === "string" ? torrent.name : "(unknown)";
-    const usage = this.fileUsageByTorrent.get(torrent);
-    const refcount = usage ? usage.size : 0;
+    const stated = demandFor(torrent).register.size;
     const hasData = (() => { try { return torrentDownloadedBytes(torrent); } catch { return -1; } })();
     // Capture caller for diagnostics — not for control flow.
     const caller = new Error().stack?.split("\n")[2]?.trim() ?? "";
@@ -2041,10 +2093,9 @@ export class TorrentPool {
         break;
       }
     }
-    this.fileUsageByTorrent.delete(torrent);
     this.#lastAccess.delete(torrent);
     this.#readPositionByTorrent.delete(torrent);
-    logger.warn(`torrent-pool: removing torrent "${name}" [${infoHash}] reason=${reason} refcount=${refcount} downloaded=${hasData}B caller=${caller}`);
+    logger.warn(`torrent-pool: removing torrent "${name}" [${infoHash}] reason=${reason} stated=${stated} downloaded=${hasData}B caller=${caller}`);
     try {
       torrent.destroy({ destroyStore: true }, () => {
         logger.info(`torrent-pool: removed torrent "${name}" [${infoHash}] reason=${reason} and its store`);
@@ -2293,6 +2344,10 @@ export class TorrentPool {
     // it again. Stated before the read rather than by it, and kept afterwards
     // at the level of something nobody is waiting for.
     stateFileEdges(torrent, fileIndex, awaited ? Urgency.NEAR : Urgency.TAIL);
+    // The first thing ever stated about a torrent being opened, and therefore
+    // what keeps it in its swarm through the seconds when nothing else can say
+    // anything about it.
+    this.followTheDemand(torrent);
     // Two callers can ask for the same edges at once: the warm-up that starts
     // when a torrent is picked, and the playback plan a moment later. Reading
     // the same two pieces twice costs nothing in bandwidth — the torrent

@@ -121,3 +121,49 @@ One fact, one owner: the proxy owns the composition and the file-list route
 returns it. The cost is one round trip for a `.torrent` the browser parsed
 locally; the proxy holds those same bytes from registration, so it can answer
 without the swarm.
+
+## What the pool asks now, and the two things it no longer counts — DECIDED
+
+One question: **is anything wanted of this torrent**, answered from the register
+(`isWanted`). It is true from the moment a torrent is opened, because a torrent
+with no file list yet cannot be stated about and is being fetched precisely
+because somebody asked for it; and it becomes false exactly when the last
+viewer leaves, because that is when the map is published with nothing in it.
+
+Two facts decide the swarm, and they are separated from the doing
+(`swarmDecisionFor`) because this is the rule that has failed twice in the
+field:
+
+| wanted | ever wanted | swarm | idle clock |
+|---|---|---|---|
+| yes | — | take | stopped |
+| no | yes | let go | running |
+| no | no | leave alone | running |
+
+The last row is the 2.83.1 failure as a rule rather than as a mechanism: a
+torrent nobody has ever wanted is one being OPENED, and taking its swarm away
+there destroys the connections it will need a minute later.
+
+**Leaving on `done` was considered and NOT built.** A complete torrent can want
+nothing from a swarm, and the field case of 596 connections was exactly that.
+But a piece can be lost after the fact — the disk tier discards pieces under
+its own cap — and rejoining would then need a trigger nothing states today, so
+the failure mode is a read that waits for ever. The complete-file case is
+already answered from two directions: the upload policy refuses to seed when
+nothing anybody asked for is missing, and `keepWholeFiles` destroys a torrent
+whose every file has been written out whole.
+
+**What is accepted as narrowed, and stated so it is not discovered as a
+surprise.** A read that is flowing states nothing — it is reading bytes that
+are present — so a torrent is no longer held by the mere existence of a read.
+Three cases were checked: a `/stream` read belongs to a session whose map is
+live; the subtitle walk reads only what is downloaded; the background fill of a
+sidecar is covered by that file's ends. What is left is the disk cap evicting a
+torrent whose read is in flight during a moment when nothing is stated for it.
+The eviction order is the mitigation rather than a guard: candidates are sorted
+by when they were last WANTED, so a torrent an encoder is reading sorts last
+among them.
+
+**A torrent is on the idle clock from the moment it exists.** Until now the only
+thing that ever started that clock was a reader letting go, so a file list
+fetched and never played was held for the life of the process.

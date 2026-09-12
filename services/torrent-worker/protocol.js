@@ -47,10 +47,6 @@
 export const Command = {
   /** Add (or join) a torrent; resolves when metadata is ready. */
   ADD_SOURCE: "add-source",
-  /** Claim a file for reading, so it is not evicted while in use. */
-  ACQUIRE_FILE: "acquire-file",
-  /** Drop a claim; the worker applies its own idle-removal policy. */
-  RELEASE_FILE: "release-file",
   /** File list and metadata for a source. */
   LIST_FILES: "list-files",
   /** Live download figures for the progress display. */

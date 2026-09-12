@@ -11,17 +11,30 @@
  * The rule is not a limit on connections. While anybody is reading, every one is
  * worth keeping: the one that has delivered nothing yet may deliver next.
  *
- * AND IT IS ACTED ON AT THE DEPARTURE ITSELF. The first version asked every
- * five seconds whether anybody was reading, and a torrent added three seconds
- * earlier answered no — its edges still being read, its plan still being built.
- * It left the swarm with 741 connections let go, and nothing rejoined it:
- * rejoining waits for a reader, and the reader was waiting for the header the
- * swarm had been fetching. Playback did not start at all.
+ * AND IT IS ASKED OF WHAT HAS BEEN STATED, never of a count of readers. The
+ * first version asked every five seconds whether anybody was READING, and a
+ * torrent added three seconds earlier answered no — its edges still being read,
+ * its plan still being built. It left the swarm with 741 connections let go,
+ * and nothing rejoined it: rejoining waited for a reader, and the reader was
+ * waiting for the header the swarm had been fetching. Playback did not start at
+ * all.
+ *
+ * The question now is whether anything is WANTED of it, which the priority map,
+ * the ends of an open file and a stopped read all answer — and which is true
+ * from the moment a torrent is opened.
  */
 
 import test from "node:test";
 import assert from "node:assert/strict";
-import { leaveSwarm, rejoinSwarm } from "../services/torrent-pool.js";
+import {
+  isWanted,
+  leaveSwarm,
+  rejoinSwarm,
+  stateFileEdges,
+  swarmDecisionFor
+} from "../services/torrent-pool.js";
+import { demandFor, forgetTorrent } from "../services/download/registry.js";
+import { Urgency } from "../services/demand/index.js";
 
 /**
  * A torrent that records what was done to it. Only the surface the rule
@@ -81,12 +94,81 @@ test("the reader that comes back takes the swarm with it", () => {
   assert.equal(rejoinSwarm(torrent), false, "a torrent already in its swarm was resumed again");
 });
 
-test("a torrent nobody has read yet is never asked to leave", () => {
-  // The field failure of 2026-09-11 is closed by WHERE this is called from, not
-  // by anything inside it: leaving is a consequence of the last claim being
-  // released, and a torrent being opened has released nothing. There is no pass
-  // that can ask it.
+test("a torrent whose metadata has not arrived is wanted, whatever is stated", () => {
+  // THE FIELD FAILURE OF 2026-09-11, as a question rather than as a mechanism.
+  // A torrent being added has no list of files, so nothing can name a byte of
+  // it — and it is being fetched precisely because somebody asked for it.
   const torrent = torrentWith(103);
-  assert.equal(torrent.paused, false);
-  assert.equal(torrent._peers.size, 103);
+  torrent.files = [];
+  assert.equal(isWanted(torrent), true);
+});
+
+test("a torrent with files and nothing stated for them is wanted by nobody", () => {
+  const torrent = torrentWith(4);
+  try {
+    assert.equal(isWanted(torrent), false);
+  } finally {
+    forgetTorrent(torrent);
+  }
+});
+
+test("anything stated makes it wanted, and the last withdrawal ends that", () => {
+  const torrent = torrentWith(4);
+  try {
+    // The ends of a file being opened, which is the first thing said about a
+    // torrent anybody has picked and the reason it stays in its swarm through
+    // the seconds when nothing else can say anything about it.
+    stateFileEdges(torrent, 0, Urgency.TAIL);
+    assert.equal(isWanted(torrent), true);
+
+    const { register } = demandFor(torrent);
+    register.withdraw("file-edges:0:head");
+    assert.equal(isWanted(torrent), true, "one end of it is still wanted");
+    register.withdraw("file-edges:0:tail");
+    assert.equal(isWanted(torrent), false);
+  } finally {
+    forgetTorrent(torrent);
+  }
+});
+
+test("a torrent that has been destroyed is wanted by nobody", () => {
+  const torrent = torrentWith(1);
+  torrent.destroyed = true;
+  assert.equal(isWanted(torrent), false);
+});
+
+test("a torrent something is wanted of keeps its swarm and is off the clock", () => {
+  assert.deepEqual(
+    swarmDecisionFor({ wanted: true, everWanted: true }),
+    { swarm: "take", onTheClock: false }
+  );
+  assert.deepEqual(
+    swarmDecisionFor({ wanted: true, everWanted: false }),
+    { swarm: "take", onTheClock: false }
+  );
+});
+
+test("a swarm is let go on a DEPARTURE, never on a beginning", () => {
+  // The whole of the 2.83.1 failure in one line: a torrent that has never been
+  // wanted is one being opened — its metadata has just landed, the file list is
+  // on its way to the person choosing, and nothing has had a chance to state
+  // anything about it yet. Taking its swarm away there destroyed 741
+  // connections it needed a minute later.
+  assert.deepEqual(
+    swarmDecisionFor({ wanted: false, everWanted: false }),
+    { swarm: "leave alone", onTheClock: true }
+  );
+  assert.deepEqual(
+    swarmDecisionFor({ wanted: false, everWanted: true }),
+    { swarm: "let go", onTheClock: true }
+  );
+});
+
+test("whatever happens to the swarm, an unwanted torrent is on the idle clock", () => {
+  // Including the one nobody has ever wanted: a file list fetched and never
+  // played used to be held for the life of the process, because the only thing
+  // that started the clock was a reader letting go.
+  for (const everWanted of [true, false]) {
+    assert.equal(swarmDecisionFor({ wanted: false, everWanted }).onTheClock, true);
+  }
 });

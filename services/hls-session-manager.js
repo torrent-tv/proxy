@@ -1680,12 +1680,7 @@ export class HlsSessionManager {
     // keyframe times and which container they were read from. Present only for
     // a variant of a session cut at the source's keyframes, and it is what
     // makes the two interchangeable.
-    inheritedGrid = null,
-    // Called once for a session that is actually created, and expected to
-    // return a function that lets the source go. It is what keeps the torrent's
-    // data alive for as long as a viewer has a session on it — see
-    // disposeSession.
-    acquireSource = null
+    inheritedGrid = null
   }) {
     if (!this.enabled) {
       const error = new Error("Audio transcoding is disabled on this proxy.");
@@ -2540,40 +2535,6 @@ export class HlsSessionManager {
         lastLoggedAt: 0
       }
     };
-    // Kept so a variant of this session can take its own hold on the same
-    // source: a variant is another encode of the same file and must keep the
-    // torrent's data alive exactly as this one does.
-    session.acquireSource = typeof acquireSource === "function" ? acquireSource : null;
-    if (typeof acquireSource === "function") {
-      // One claim per file this session READS. Almost always that is one file;
-      // a muxed session whose soundtrack ships beside the picture reads two, and
-      // holding only the picture would leave the sound to be swept off the disk
-      // from under a running encoder.
-      const claim = (heldFileIndex) => {
-        try {
-          const release = acquireSource(heldFileIndex);
-          return typeof release === "function" ? release : null;
-        } catch {
-          return null;
-        }
-      };
-      const releases = [claim(undefined)];
-      if (audioInputUrl) {
-        releases.push(claim(audioSource.fileIndex));
-      }
-      const held = releases.filter((release) => typeof release === "function");
-      session.releaseSource = held.length > 0
-        ? () => {
-            for (const release of held) {
-              try {
-                release();
-              } catch {
-                // Best effort — a session must always finish being disposed.
-              }
-            }
-          }
-        : null;
-    }
     // The viewer who asked for this session, so a browser that names itself
     // never has to have requested a segment first for its own soundtrack choice
     // to be known — nor for its own POSITION to be known, which is the same
@@ -7839,8 +7800,7 @@ export class HlsSessionManager {
             // creations (field 2026-08-17, corrections of 0.6-2.9 s).
             published: base.timeline.published
           }
-        : null,
-      acquireSource: base.acquireSource
+        : null
     })
       .then(async (variant) => {
         // Making a session takes seconds — a probe and a keyframe index — and
@@ -8628,15 +8588,7 @@ export class HlsSessionManager {
             boundaries: base.timeline.boundaries,
             published: base.timeline.published
           }
-        : null,
-      // Hold the file this rendition will READ. For a soundtrack shipped beside
-      // the picture that is a different file of the same torrent, and nothing
-      // else claims it: the base holds the picture, and the disk sweep deletes
-      // what nobody is holding — which is how a film being watched was deleted
-      // on 2026-08-06.
-      acquireSource: () => base.acquireSource?.(
-        this.#resolveAudioSource(base.file.sourceKey, base.file.fileIndex, trackIndex).fileIndex
-      )
+        : null
     });
     return rendition ?? null;
   }
@@ -10015,23 +9967,6 @@ export class HlsSessionManager {
           viewer.activeVariantId = null;
         }
       }
-    }
-
-    // Let go of the source. While a session exists its torrent must survive
-    // both cleanups the pool runs, and until now neither knew about it: the
-    // only claim on a file is taken by a READ, and during a seek there is no
-    // read at all — the old encoder is dead and the new one has not started.
-    // Field 2026-08-06, that window met the thirty-second disk sweep and the
-    // film being watched was evicted mid-seek, six gigabytes deleted, after
-    // which the new encoder had nothing to read. The session's own thirty
-    // minutes governed the session, never the data under it.
-    if (typeof session.releaseSource === "function") {
-      try {
-        session.releaseSource();
-      } catch {
-        // Best effort — a session must always finish being disposed.
-      }
-      session.releaseSource = null;
     }
 
     if (session.inputRetryTimer) {

@@ -24,6 +24,9 @@ import { deriveSourceKey } from "./torrent-source-key.js";
 /** How a window stated from the priority map names itself. */
 const MAP_CLAIMANT = "priority-map";
 
+/** How the two ends of a file name themselves. */
+const EDGES_CLAIMANT = "file-edges";
+
 // The DHT's entry points. Two of the three the library ships answer nothing —
 // measured 2026-08-21 from the addon host: `router.bittorrent.com` and
 // `router.utorrent.com` did not reply to a hand-written `ping` at all, while a
@@ -833,6 +836,80 @@ function withdrawPriorityMap(torrent, fileIndex, keepBelow = 0) {
   return withdrawn;
 }
 
+/**
+ * WHERE A FILE SAYS WHAT IT IS: the piece at each of its ends.
+ *
+ * A container keeps its directory at one end or the other — `ftyp` and an EBML
+ * header at the front, and for an MP4 that was not written for streaming the
+ * `moov` at the very back. Nothing can be read of such a file until those have
+ * arrived, and they stay wanted for as long as it is open: a player asks for
+ * the file's shape again at every seek.
+ *
+ * **The size is not chosen, and it cannot be.** One byte is claimed at each
+ * end, and the piece is what the swarm delivers — so one byte at each end IS
+ * one piece at each end, with nothing rounded up by a number anybody picked.
+ * The 256 KB and 2 MB the prefetch reads are its own affair; where a directory
+ * is bigger than the piece it starts in, the read that needs it says so itself,
+ * at the level of a reader that is stopped.
+ *
+ * **Stated by the FILE, not by the read that happens to want it.** A read
+ * withdraws what it stated the moment it finishes, so until now the two ends of
+ * an open film were held by nothing at all once the codec probe was done — and
+ * they are exactly the pieces a seek needs and eviction is free to take.
+ *
+ * A function of a torrent rather than of the pool, like `leaveSwarm` beside it,
+ * so both can be exercised without building one.
+ *
+ * @param {object} torrent
+ * @param {number} fileIndex
+ * @param {number} urgency - NEAR while somebody is waiting for them, TAIL to
+ *   keep them afterwards.
+ * @returns {boolean} Whether anything was stated.
+ */
+export function stateFileEdges(torrent, fileIndex, urgency) {
+  const file = Array.isArray(torrent?.files) ? torrent.files[fileIndex] : null;
+  const length = Number(file?.length);
+  if (!file || !(length > 0)) {
+    return false;
+  }
+  const { register } = demandFor(torrent);
+  register.state({
+    claimant: `${EDGES_CLAIMANT}:${fileIndex}:head`,
+    fileIndex,
+    byteStart: 0,
+    byteEnd: 0,
+    urgency
+  });
+  register.state({
+    claimant: `${EDGES_CLAIMANT}:${fileIndex}:tail`,
+    fileIndex,
+    byteStart: length - 1,
+    byteEnd: length - 1,
+    urgency
+  });
+  return true;
+}
+
+/**
+ * Give up the ends of a file nobody has any use for.
+ *
+ * @param {object} torrent
+ * @param {number} fileIndex
+ * @returns {number} How many were withdrawn.
+ */
+export function withdrawFileEdges(torrent, fileIndex) {
+  const { register } = demandFor(torrent);
+  let withdrawn = 0;
+  for (const end of ["head", "tail"]) {
+    const claimant = `${EDGES_CLAIMANT}:${fileIndex}:${end}`;
+    if (register.windows().some((window) => String(window.claimant) === claimant)) {
+      register.withdraw(claimant);
+      withdrawn += 1;
+    }
+  }
+  return withdrawn;
+}
+
 export class TorrentPool {
   /**
    * In-flight `client.add()` promises keyed by the same key as `torrents`.
@@ -1220,6 +1297,9 @@ export class TorrentPool {
     // depend on facts that are gone by the time it is said.
     if (Array.isArray(zones) && zones.length === 0) {
       withdrawPriorityMap(torrent, fileIndex);
+      // The ends of the file go with it. They are kept for as long as the file
+      // is open, and this is what says it is not.
+      withdrawFileEdges(torrent, fileIndex);
       return;
     }
     const file = Array.isArray(torrent?.files) ? torrent.files[fileIndex] : null;
@@ -2192,16 +2272,27 @@ export class TorrentPool {
    * @param {number} [options.headBytes=262144]   - Leading bytes to fetch (default 256 KB).
    * @param {number} [options.tailBytes=2097152]  - Trailing bytes to fetch (default 2 MB).
    * @param {number} [options.timeoutMs=300000]   - Maximum wait time in milliseconds (default 5 min).
+   * @param {boolean} [options.awaited=false] - Whether somebody is waiting for
+   *   these bytes right now. The playback plan is: it cannot answer until the
+   *   file has said what is in it, and a person is watching a loading screen
+   *   meanwhile. The warm-up is NOT, by its whole purpose — it happens while
+   *   the viewer is still choosing, so it must not outrank another film that
+   *   somebody is watching on this proxy this minute.
    * @returns {Promise<void>}
    */
   async prefetchFileEdges(
     torrent,
     fileIndex,
-    { headBytes = 256 * 1024, tailBytes = 2 * 1024 * 1024, timeoutMs = 300_000 } = {}
+    { headBytes = 256 * 1024, tailBytes = 2 * 1024 * 1024, timeoutMs = 300_000, awaited = false } = {}
   ) {
     if (!torrent || !Array.isArray(torrent.files)) {
       return;
     }
+    // THE ENDS OF THIS FILE ARE WANTED, and they go on being wanted after this
+    // read is over: the file's own directory lives there, and a seek asks for
+    // it again. Stated before the read rather than by it, and kept afterwards
+    // at the level of something nobody is waiting for.
+    stateFileEdges(torrent, fileIndex, awaited ? Urgency.NEAR : Urgency.TAIL);
     // Two callers can ask for the same edges at once: the warm-up that starts
     // when a torrent is picked, and the playback plan a moment later. Reading
     // the same two pieces twice costs nothing in bandwidth — the torrent
@@ -2218,6 +2309,7 @@ export class TorrentPool {
       return await prefetch;
     } finally {
       this.#edgePrefetches.delete(inFlightKey);
+      stateFileEdges(torrent, fileIndex, Urgency.TAIL);
     }
   }
 

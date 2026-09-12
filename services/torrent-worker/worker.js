@@ -11,10 +11,9 @@
  * with the torrent for this thread, which is exactly the problem being solved.
  *
  * The existing `TorrentPool` is reused wholesale rather than reimplemented. It
- * already carries the parts that took field failures to get right — refcounted
- * file claims, idle removal, the global disk cap with LRU eviction, seek-aware
- * piece prioritisation, adaptive upload — and none of that changes by moving
- * threads.
+ * already carries the parts that took field failures to get right — idle
+ * removal, the global disk cap with LRU eviction, seek-aware piece
+ * prioritisation, adaptive upload — and none of that changes by moving threads.
  */
 
 // MUST stay first: it redirects `webrtc-polyfill` to a JavaScript WebRTC stack
@@ -25,7 +24,6 @@ import { isUsableTorrentHandle } from "./handle-state.js";
 import "./install-webrtc-shim.js";
 import { parentPort, workerData } from "node:worker_threads";
 import { createSendStream } from "./channel.js";
-import { createFileClaims } from "./file-claims.js";
 import { readFragments, supplyFiguresFor } from "./piece-reader.js";
 import { cuesHeldFor, declaredSubtitleTracksOf, subtitleTracksOf, warmSubtitleCues } from "./subtitle-cues.js";
 import {
@@ -36,6 +34,7 @@ import {
   warmResumePosition
 } from "./container-tracks.js";
 import { fillFileInBackground } from "./background-fill.js";
+import { demandFor } from "../download/registry.js";
 import { CompletedFiles, completedFilesRoot } from "../files/CompletedFiles.js";
 import { pieceFromWholeFiles, pieceIsInWholeFiles } from "../files/piece-from-whole-file.js";
 import { Command, Event } from "./protocol.js";
@@ -93,8 +92,6 @@ const torrentsByKey = new Map();
  * @type {Map<string, { sourceType: string, source: string }>}
  */
 const sourceRecipes = new Map();
-/** File claims, each with its own identity — see `file-claims.js`. */
-const fileClaims = createFileClaims();
 /** In-flight reads, so a cancel can stop one mid-body. */
 const readsById = new Map();
 
@@ -261,15 +258,6 @@ async function streamRange({ id, sourceKey, fileIndex, start, end, windowBytes }
   const sender = createSendStream({ port: parentPort, requestId: id });
   readsById.set(id, sender);
 
-  // Hold the file for as long as this read runs. The caller also acquires it,
-  // but that acquire and its release are separate messages from another thread
-  // and can be reordered; this one cannot, because it lives entirely inside the
-  // read. Without it the idle sweep saw a zero reader count and removed the
-  // torrent AND its store mid-read — field 2026-08-02: "removed idle torrent
-  // ... and its store", after which every subsequent read hung and ffmpeg got
-  // an empty input.
-  const releaseRead = pool.acquireFile(torrent, fileIndex);
-
   const rangeStart = start ?? 0;
   const rangeEnd = end ?? file.length - 1;
 
@@ -310,7 +298,6 @@ async function streamRange({ id, sourceKey, fileIndex, start, end, windowBytes }
     // Any fragment still awaiting confirmation will never get one now; settling
     // it here releases its pin rather than leaking a held slot.
     settleFragment(id);
-    releaseRead();
     if (!failed) {
       sender.end();
     }
@@ -374,27 +361,6 @@ async function runCommand(command, params, id) {
         path: file.path,
         length: file.length
       }));
-    }
-
-    case Command.ACQUIRE_FILE: {
-      const torrent = await requireTorrent(params.sourceKey);
-      // Every acquire is its own claim. Sharing one per file meant the first
-      // reader to finish released the hold while others were still reading.
-      return fileClaims.open(
-        params.sourceKey,
-        params.fileIndex,
-        pool.acquireFile(torrent, params.fileIndex)
-      );
-    }
-
-    case Command.RELEASE_FILE: {
-      const released = fileClaims.close(params.claimId);
-      if (!released) {
-        // Not fatal — but it means a release arrived twice or after teardown,
-        // and silence here is what let the previous scheme look healthy.
-        log(`release for unknown file claim ${params.claimId}`);
-      }
-      return released;
     }
 
     case Command.HELD_TORRENTS: {
@@ -615,7 +581,6 @@ async function runCommand(command, params, id) {
     }
 
     case Command.DESTROY_ALL: {
-      fileClaims.closeAll();
       torrentsByKey.clear();
       sourceRecipes.clear();
       await pool.destroyAll();
@@ -852,11 +817,11 @@ function describePieceBuffers() {
  * @returns {void}
  */
 function warmActiveFiles(sourceKey, torrent) {
-  const usage = pool.fileUsageByTorrent.get(torrent);
-  if (!usage) {
-    return;
-  }
-  for (const fileIndex of usage.keys()) {
+  // The files anything is stated for — a viewer's own picture and soundtrack
+  // through the priority map, and the ends of a file that is open. It replaces
+  // a count of readers, which said the same thing by keeping a second copy of
+  // it.
+  for (const fileIndex of demandFor(torrent).register.files()) {
     const key = `${sourceKey}:${fileIndex}`;
     // A trigger that arrives while the previous pass is still walking is
     // dropped, not queued. `verified` fires per piece, so on a fast download
@@ -1034,18 +999,21 @@ async function keepWholeFiles() {
     if (!infoHash || !Array.isArray(torrent.files)) {
       continue;
     }
-    const usage = pool.fileUsageByTorrent?.get?.(torrent);
+    // What anybody wants of this torrent. A file something is stated for is a
+    // file somebody may be reading, and this is the same list the reader counts
+    // used to give.
+    const wanted = new Set(demandFor(torrent).register.files());
     for (const [fileIndex, file] of torrent.files.entries()) {
       const key = `${infoHash}/${fileIndex}`;
       if (file?.done !== true || completedFiles.find(infoHash, fileIndex) || beingKept.has(key)) {
         continue;
       }
-      // NOT WHILE SOMEBODY IS READING IT. Writing a film out is a read of the
-      // whole of it and a write of the whole of it — a gigabyte and a half on
-      // the file this was measured against — and doing that beside a viewer
-      // takes the disk and the piece store from them for nothing they asked
-      // for. The file is complete; it will still be complete when they leave.
-      if (usage?.has?.(fileIndex)) {
+      // NOT WHILE ANYBODY WANTS IT. Writing a film out is a read of the whole
+      // of it and a write of the whole of it — a gigabyte and a half on the
+      // file this was measured against — and doing that beside a viewer takes
+      // the disk and the piece store from them for nothing they asked for. The
+      // file is complete; it will still be complete when they leave.
+      if (wanted.has(fileIndex)) {
         continue;
       }
       beingKept.add(key);
@@ -1099,7 +1067,7 @@ async function keepWholeFiles() {
     const isWhole =
       torrent.done === true &&
       torrent.files.every((unused, fileIndex) => completedFiles.find(infoHash, fileIndex) !== null);
-    if (isWhole && !(usage?.size > 0)) {
+    if (isWhole && wanted.size === 0) {
       logger.info(
         `whole files: "${torrent.name}" is downloaded whole and saved — removing the torrent, keeping the files`
       );

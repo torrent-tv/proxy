@@ -208,8 +208,6 @@ export async function handleStreamGet(req, reply, { sourceRegistry, torrentPool,
     return;
   }
 
-  const releaseFile = torrentPool.acquireFile(torrent, fileIndex);
-
   const range = parseRange(req.headers.range, file.length);
   // Prioritize the pieces at this read position so a seek (a request at a new
   // byte offset) downloads first instead of waiting behind the sequential
@@ -343,8 +341,6 @@ export async function handleStreamGet(req, reply, { sourceRegistry, torrentPool,
         logger.warn(line);
       }
       reply.raw.destroy();
-    } finally {
-      releaseFile();
     }
     return;
   }
@@ -355,41 +351,11 @@ export async function handleStreamGet(req, reply, { sourceRegistry, torrentPool,
 
   if (!range) {
     reply.header("Content-Length", String(file.length));
-    const stream = file.createReadStream();
-    bindRelease(stream, reply, releaseFile);
-    return reply.send(stream);
+    return reply.send(file.createReadStream());
   }
 
   reply.code(206);
   reply.header("Content-Length", String(contentLength));
   reply.header("Content-Range", `bytes ${start}-${end}/${file.length}`);
-  const stream = file.createReadStream({ start, end });
-  bindRelease(stream, reply, releaseFile);
-  return reply.send(stream);
-}
-
-/**
- * Attach event listeners that release the file reference exactly once when
- * the stream or the underlying HTTP connection closes.
- *
- * @param {import("node:stream").Readable} stream
- * @param {import("fastify").FastifyReply} reply
- * @param {() => void} release
- * @returns {void}
- */
-function bindRelease(stream, reply, release) {
-  let released = false;
-  const releaseOnce = () => {
-    if (released) {
-      return;
-    }
-    released = true;
-    release();
-  };
-
-  stream.on("close", releaseOnce);
-  stream.on("end", releaseOnce);
-  stream.on("error", releaseOnce);
-  reply.raw.once("close", releaseOnce);
-  reply.raw.once("finish", releaseOnce);
+  return reply.send(file.createReadStream({ start, end }));
 }

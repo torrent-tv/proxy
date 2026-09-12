@@ -11,11 +11,9 @@
  *
  * Two accommodations are needed, and both are deliberate:
  *
- *  - **`acquireFile` and `prioritizeByteRange` stay synchronous.** They return
- *    nothing the caller inspects, so the command is dispatched and not awaited.
- *    `acquireFile` hands back a release function exactly as before, which sends
- *    its own command when called. Awaiting them would mean touching every call
- *    site for no observable gain.
+ *  - **`prioritizeByteRange` stays synchronous.** It returns nothing the caller
+ *    inspects, so the command is dispatched and not awaited. Awaiting it would
+ *    mean touching every call site for no observable gain.
  *  - **`getTorrent` needs a `sourceKey`.** Torrent objects cannot cross a
  *    thread, so the worker keys them. Callers that have one pass it; the rest
  *    get one derived from the source itself, so the identity stays stable
@@ -83,34 +81,6 @@ export class WorkerTorrentPool {
    */
   allowSpillBytes(bytes) {
     return this.#client.allowSpillBytes(bytes);
-  }
-
-  acquireFile(torrent, fileIndex) {
-    const sourceKey = torrent?.sourceKey;
-    if (!sourceKey) {
-      return () => undefined;
-    }
-    // Dispatched, not awaited — callers use the result immediately and inspect
-    // nothing. But the release MUST NOT overtake it: both are ordinary messages
-    // to the worker, and if release arrives first the reader count drops to zero
-    // while a read is still running. The idle sweep then removes the torrent AND
-    // its downloaded data out from under the encoder — field 2026-08-02:
-    // "removed idle torrent ... and its store" mid-playback, after which every
-    // read hung and ffmpeg saw an empty input ("Stream ends prematurely at 0").
-    // Chaining the release onto the acquire keeps them in order.
-    const acquired = this.#client.acquireFile(sourceKey, fileIndex).catch(() => null);
-    let released = false;
-    return () => {
-      if (released) {
-        return;
-      }
-      released = true;
-      // Release the claim this call opened, not "the file" — waiting for the
-      // acquire is also what tells us which claim that is.
-      void acquired
-        .then((claimId) => (claimId ? this.#client.releaseFile(claimId) : undefined))
-        .catch(() => undefined);
-    };
   }
 
   /**

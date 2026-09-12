@@ -18,6 +18,40 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { decideUploadLimit, torrentsForUploadPolicy } from "../services/torrent-pool.js";
+import { demandFor, forgetTorrent } from "../services/download/registry.js";
+import { Urgency } from "../services/demand/index.js";
+
+/**
+ * A torrent whose metadata has arrived and which nothing is wanted of.
+ *
+ * The files matter: a torrent with no list of files cannot be stated about at
+ * all, and is wanted for that reason alone — it is still being fetched.
+ *
+ * @param {string} name
+ * @returns {object}
+ */
+function quiet(name) {
+  return { name, files: [{ offset: 0, length: 1_000, name }] };
+}
+
+/**
+ * The same, with something stated for it — which is what "somebody wants this"
+ * means now that nothing counts readers.
+ *
+ * @param {string} name
+ * @returns {object}
+ */
+function wanted(name) {
+  const torrent = quiet(name);
+  demandFor(torrent).register.state({
+    claimant: "priority-map:0:0",
+    fileIndex: 0,
+    byteStart: 0,
+    byteEnd: 999,
+    urgency: Urgency.NEAR
+  });
+  return torrent;
+}
 
 const NOW = 1_000_000;
 const healthy = (extra = {}) => ({
@@ -65,34 +99,38 @@ test("the reciprocity boost still works when no hurry is on", () => {
   assert.match(decision.reason, /earn unchoke/);
 });
 
-test("a torrent with no reader still reaches the policy while it is in a hurry", () => {
+test("a torrent nothing is wanted of still reaches the policy while it is in a hurry", () => {
   // The moment that matters: a torrent has just been added and its head and
-  // tail are being fetched for the codec probe. That read goes straight to
-  // `createReadStream`, so no reader is registered — and the selection only
-  // ever kept torrents that had one, which is where the gap was.
-  const hurrying = { name: "film.mkv", hurryUntil: NOW + 20_000 };
-  const idle = { name: "other.mkv" };
-  const usage = new Map();
+  // tail are being fetched for the codec probe. Nothing is stated for it yet,
+  // and the selection only ever kept torrents something was — which is where
+  // the gap was.
+  const hurrying = quiet("film.mkv");
+  hurrying.hurryUntil = NOW + 20_000;
+  const idle = quiet("other.mkv");
+  const watched = wanted("watched.mkv");
+  try {
+    assert.deepEqual(
+      torrentsForUploadPolicy([hurrying, idle], NOW),
+      [hurrying],
+      "a torrent nothing is stated for yet was ignored"
+    );
 
-  assert.deepEqual(
-    torrentsForUploadPolicy([hurrying, idle], usage, NOW),
-    [hurrying],
-    "a torrent with no reader yet was ignored"
-  );
+    assert.deepEqual(
+      torrentsForUploadPolicy([{ ...hurrying, hurryUntil: NOW - 1 }, idle], NOW),
+      [],
+      "and stops counting once the rush is over"
+    );
 
-  assert.deepEqual(
-    torrentsForUploadPolicy([{ ...hurrying, hurryUntil: NOW - 1 }, idle], usage, NOW),
-    [],
-    "and stops counting once the rush is over"
-  );
-
-  const read = { name: "watched.mkv" };
-  usage.set(read, new Set([0]));
-  assert.deepEqual(
-    torrentsForUploadPolicy([read], usage, NOW),
-    [read],
-    "a torrent being read still counts, hurry or not"
-  );
+    assert.deepEqual(
+      torrentsForUploadPolicy([watched], NOW),
+      [watched],
+      "a torrent somebody wants something of still counts, hurry or not"
+    );
+  } finally {
+    forgetTorrent(hurrying);
+    forgetTorrent(idle);
+    forgetTorrent(watched);
+  }
 });
 
 test("a torrent nobody is reading is not treated as starving", () => {
@@ -102,7 +140,7 @@ test("a torrent nobody is reading is not treated as starving", () => {
   // minutes, every one of them reported as `earn unchoke ... down=0KB/s`.
   const idleButChoked = {
     name: "film.mkv",
-    hasActiveReader: false,
+    isWanted: false,
     wires: [
       { amInterested: true, peerChoking: true },
       { amInterested: true, peerChoking: true }
@@ -112,7 +150,7 @@ test("a torrent nobody is reading is not treated as starving", () => {
   };
   assert.equal(decideUploadLimit([idleButChoked], { now: NOW }).bytesPerSec, 50 * 1024);
 
-  const waiting = { ...idleButChoked, hasActiveReader: true };
+  const waiting = { ...idleButChoked, isWanted: true };
   assert.equal(
     decideUploadLimit([waiting], { now: NOW }).bytesPerSec,
     512 * 1024,
@@ -128,7 +166,7 @@ test("a torrent short of nothing is not worth uploading for", () => {
   // buying while somebody is still short of bytes.
   const complete = {
     name: "watched to the end",
-    hasActiveReader: true,
+    isWanted: true,
     hasUnmetDemand: false,
     done: false,
     downloadSpeed: 0,

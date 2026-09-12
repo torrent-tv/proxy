@@ -318,30 +318,6 @@ export class TorrentWorkerClient {
   }
 
   /**
-   * Claim a file so it is not evicted while being read.
-   *
-   * @param {string} sourceKey
-   * @param {number} fileIndex
-   * @returns {Promise<string>} The claim's identity, for {@link releaseFile}.
-   */
-  async acquireFile(sourceKey, fileIndex) {
-    return this.#caller.call(Command.ACQUIRE_FILE, { sourceKey, fileIndex });
-  }
-
-  /**
-   * Drop one claim taken with {@link acquireFile}.
-   *
-   * Named by claim rather than by file: several readers hold the same file at
-   * once, and releasing "the file" released somebody else's hold.
-   *
-   * @param {string} claimId
-   * @returns {Promise<void>}
-   */
-  async releaseFile(claimId) {
-    await this.#caller.call(Command.RELEASE_FILE, { claimId });
-  }
-
-  /**
    * Live download figures for the progress display.
    *
    * @param {{ sourceKey: string, fileIndex: number, resumeAnchorByteStart?: number | null }} params

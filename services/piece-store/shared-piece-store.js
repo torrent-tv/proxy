@@ -321,6 +321,11 @@ export class SharedPieceStore {
     admittedWithoutSlot: 0,
     evictedOnRevise: 0,
     spillFailures: 0,
+    // Claims withdrawn: pieces this store stopped being able to produce at all,
+    // and said so. It is the figure that says whether the bargain the eviction
+    // states — "a seek back re-downloads it" — is being honoured, and before
+    // 2026-09-12 it was not honoured once, because nothing was ever said.
+    withdrawn: 0,
     // Whether the store is doing its job or being asked to hold more than it
     // has room for. An eviction that had to take a piece a reader declared it
     // wants is the second, and it comes back from disk moments later
@@ -413,6 +418,31 @@ export class SharedPieceStore {
    */
   #isElsewhere = null;
 
+  /**
+   * Said when this store can no longer produce a piece AT ALL — not resident,
+   * not on disk, and not inside a file held whole.
+   *
+   * **Why it has to exist.** This store holds the bytes, so it owns the fact
+   * "this proxy has piece N". Something else kept a second copy of that fact —
+   * the torrent's own completion bitfield — and nothing reconciled them: the
+   * disk tier drops a piece behind every read head, correctly, and the bitfield
+   * goes on saying the piece is verified. A read then concludes the piece is
+   * had, asks for it, is told it is absent, and fails; and it is never
+   * re-downloaded either, because the library does not fetch what it believes
+   * it already owns. Field 2026-09-12: a film played 80 seconds, the encoder
+   * ran on to 725 s, `forgetBehind` dropped some 565 spilled pieces including
+   * piece 0, the encoder restarted and re-opened its input at byte 0, and
+   * `/stream` answered `0 of 2363497962 bytes: Piece 0 is verified but absent
+   * from the store` for 92 minutes while the browser retried one segment.
+   *
+   * So the bitfield becomes a projection of this fact, maintained by this
+   * announcement. This store does not know what a torrent is, who listens, or
+   * what they do about it — the same shape as `readPieceElsewhere` above.
+   *
+   * @type {((what: object) => void) | null}
+   */
+  #onPieceGone = null;
+
   /** Whether the last revision had to exceed the machine's share. */
   #beyondTheMachine = false;
   /**
@@ -477,6 +507,9 @@ export class SharedPieceStore {
     this.#isElsewhere = typeof options.isPieceElsewhere === "function"
       ? options.isPieceElsewhere
       : null;
+    this.#onPieceGone = typeof options.onPieceGone === "function"
+      ? options.onPieceGone
+      : null;
     // Plain data the layer above needs to answer those two, and which this
     // store is handed anyway: where each file of the torrent begins and how
     // long the whole of it is.
@@ -496,7 +529,12 @@ export class SharedPieceStore {
       allowanceBytes: null,
       // Where the live readers stand, so what goes first is decided by them and
       // not by which piece happened to be touched longest ago.
-      readHeads: () => this.#lru.readHeads()
+      readHeads: () => this.#lru.readHeads(),
+      // EVERY WAY A PIECE LEAVES THE DISK COMES THROUGH HERE — behind the read
+      // heads, over the allowance, dropped as a duplicate, or forgotten while a
+      // spill finished. One listener instead of a list of call sites to
+      // remember, which is what let the announcement be missed at three of them.
+      onForgotten: (index) => this.#announceGoneIfNowhere(index)
     });
     liveStores.add(this);
   }
@@ -1129,6 +1167,38 @@ export class SharedPieceStore {
           files: this.#files
         })
       : null;
+  }
+
+  /**
+   * Say a piece has gone, but only once it has gone from everywhere.
+   *
+   * The disk tier announces its own loss, which is not the same statement: a
+   * piece dropped as a duplicate of a file held whole has not been lost at all,
+   * and one still resident is about to be spilled again rather than gone. Only
+   * the third case — neither tier, no whole file — is a withdrawal of the claim
+   * that this proxy has those bytes.
+   *
+   * Nothing is said while the store is closing: the torrent it belongs to is
+   * being torn down, and a claim withdrawn against a dying torrent reaches
+   * either a destroyed object or, worse, one that has already been added back.
+   *
+   * @param {number} index
+   * @returns {void}
+   */
+  #announceGoneIfNowhere(index) {
+    if (this.#closed || this.#onPieceGone === null) {
+      return;
+    }
+    if (this.#buffers.has(index) || this.#disk.has(index) || this.isInWholeFiles(index)) {
+      return;
+    }
+    this.#counters.withdrawn += 1;
+    try {
+      this.#onPieceGone({ index, files: this.#files, name: this.#name });
+    } catch {
+      // silent-ok: whoever listens is diagnosing or bookkeeping, and a listener
+      // that throws must not be what fails an eviction the store needs to make.
+    }
   }
 
   /**

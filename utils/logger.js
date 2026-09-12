@@ -27,11 +27,18 @@ const PREFIX = "[proxy-client]";
 /**
  * When the file is rotated, and how many turns are kept.
  *
- * One turn holds a few hours of a busy session at the current rate; two turns
- * therefore cover a night's worth of restarts, which is the span a morning
- * report asks about. Bounded because the addon's `/data` is the owner's disk.
+ * **Why it is this large.** It was 32 MiB, and that erased the beginning of
+ * the very failure it was needed for. Field 2026-09-12: a session froze at
+ * 17:20 and printed one established fact about 55 times a second, so the file
+ * turned over twice before the session ended — 159 000 lines covering
+ * 17:51-18:29, then 76 385 covering 18:29-18:52. Sixty-one minutes was all
+ * that survived of ninety-two, and the second rotation overwrote the turn that
+ * held the onset. The disk it is bounded for had 91.4 GB free at the time.
+ *
+ * The repetition is a separate fault and is being fixed separately; a log that
+ * cannot hold a session either way is the one that has to go first.
  */
-const MAX_FILE_BYTES = 32 * 1024 * 1024;
+const MAX_FILE_BYTES = 1024 * 1024 * 1024;
 
 /** @type {import("node:fs").WriteStream | null} */
 let fileStream = null;
@@ -160,6 +167,92 @@ export const logger = {
 };
 
 /**
+ * An established fact is said once, then with decreasing frequency.
+ *
+ * **Why.** A failure that establishes itself and does not change is printed by
+ * whatever loop meets it, at that loop's own rate. Field 2026-09-12: one
+ * absent piece produced 235 000 lines in 92 minutes — `Error opening input
+ * file …` 8514 times, `Error opening input files: End of file` 5712, the same
+ * `run-state` transition 2892, the same read failure 2884 — about 55 lines a
+ * second, and it turned the log over twice so the beginning of the failure was
+ * gone before anyone read it. A log is not vitiated by its size alone; it is
+ * vitiated by uniformity, and a bigger file does not fix that.
+ *
+ * **Matched VERBATIM — the whole line, no normalisation of numbers.** Measured
+ * on that log: exact repeats are 52 567 of 76 385 lines, 68.8 %, which is
+ * nearly all of the flood and carries no risk at all of merging two different
+ * statements. Normalising digits would catch a little more and would also merge
+ * the memory series — `rss=327MB`, `rss=726MB` — which exists precisely to
+ * catch a runaway, and suppressing it would be worse than the flood.
+ */
+const REPEAT_FIRST_MS = 1_000;
+const REPEAT_MAX_MS = 60_000;
+/**
+ * How many distinct lines are tracked. Bounded because it is keyed by the full
+ * text: a process that logs unique lines for ever must not grow a map of them.
+ */
+const REPEAT_KEYS = 512;
+/** @type {Map<string, { suppressed: number, printedAt: number, interval: number }>} */
+const recent = new Map();
+
+/**
+ * Whether this line is a repeat to hold back, and what to say if it is not.
+ *
+ * @param {string} message
+ * @returns {{ hold: true } | { hold: false, suffix: string }}
+ */
+function repeatCheck(message) {
+  const now = Date.now();
+  const seen = recent.get(message);
+  // Unseen, or not seen for longer than the longest interval — which makes it
+  // news again rather than a continuing fact.
+  if (!seen || now - seen.printedAt > REPEAT_MAX_MS) {
+    // WHAT WAS HELD BACK IS STILL SAID. A stale entry can carry repeats that
+    // were never reported — a line said just under its interval and then not
+    // again for a while — and dropping the count here would be the quiet lie
+    // this whole rule exists to avoid.
+    const heldBack = seen?.suppressed ?? 0;
+    const overMs = seen ? now - seen.printedAt : 0;
+    recent.delete(message);
+    if (recent.size >= REPEAT_KEYS) {
+      // The least recently printed goes: `Map` keeps insertion order and every
+      // print re-inserts, so the first key is the oldest.
+      const oldest = recent.keys().next();
+      if (!oldest.done) {
+        recent.delete(oldest.value);
+      }
+    }
+    recent.set(message, { suppressed: 0, printedAt: now, interval: REPEAT_FIRST_MS });
+    return {
+      hold: false,
+      suffix: heldBack > 0
+        ? ` [said ${heldBack} more time(s) in the last ${(overMs / 1000).toFixed(1)}s]`
+        : ""
+    };
+  }
+  if (now - seen.printedAt < seen.interval) {
+    seen.suppressed += 1;
+    return { hold: true };
+  }
+  const heldBack = seen.suppressed;
+  const overMs = now - seen.printedAt;
+  recent.delete(message);
+  recent.set(message, {
+    suppressed: 0,
+    printedAt: now,
+    interval: Math.min(REPEAT_MAX_MS, seen.interval * 2)
+  });
+  return {
+    hold: false,
+    // SAID, not merely hidden: the rate is the fact here, and a log that quietly
+    // drops repeats reports a healthy proxy where a loop was spinning.
+    suffix: heldBack > 0
+      ? ` [said ${heldBack} more time(s) in the last ${(overMs / 1000).toFixed(1)}s]`
+      : ""
+  };
+}
+
+/**
  * One path for every level, so a line cannot reach the console and miss the
  * file depending on which method was called or which thread called it.
  *
@@ -170,15 +263,20 @@ export const logger = {
  * @returns {void}
  */
 function write(level, message, colour, toConsole) {
-  toConsole(colour(`${PREFIX} [${ts()}] ${message}`));
+  const repeat = repeatCheck(message);
+  if (repeat.hold) {
+    return;
+  }
+  const line = `${message}${repeat.suffix}`;
+  toConsole(colour(`${PREFIX} [${ts()}] ${line}`));
   if (forward) {
     try {
-      forward(level, message);
+      forward(level, line);
     } catch {
       // silent-ok: a thread whose channel has closed is shutting down, and a
       // failed log line must not be what ends it.
     }
     return;
   }
-  toFile(`${PREFIX} [${ts()}] ${message}`);
+  toFile(`${PREFIX} [${ts()}] ${line}`);
 }

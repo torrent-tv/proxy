@@ -84,6 +84,17 @@ export class PieceDiskStore {
   #readHeads;
 
   /**
+   * Said whenever this tier stops holding a piece, whatever the reason.
+   *
+   * It states THIS tier's own fact and nothing more — not whether the bytes can
+   * still be had elsewhere, which this class has no way of knowing. Whoever
+   * listens decides what the loss means.
+   *
+   * @type {(index: number) => void}
+   */
+  #onForgotten;
+
+  /**
    * @param {object} params
    * @param {string} params.directory - Where this torrent's pieces live.
    * @param {string} params.name - A name unique to the torrent; it becomes the
@@ -95,12 +106,21 @@ export class PieceDiskStore {
    *   means nobody has said yet, and nothing is evicted until somebody does.
    * @param {() => number} [params.now]
    */
-  constructor({ directory, name, chunkLength, allowanceBytes = null, now = Date.now, readHeads = () => [] }) {
+  constructor({
+    directory,
+    name,
+    chunkLength,
+    allowanceBytes = null,
+    now = Date.now,
+    readHeads = () => [],
+    onForgotten = () => undefined
+  }) {
     this.#directory = path.join(directory, name);
     this.#chunkLength = chunkLength;
     this.#allowanceBytes = Number.isFinite(allowanceBytes) && allowanceBytes >= 0 ? allowanceBytes : null;
     this.#now = now;
     this.#readHeads = typeof readHeads === "function" ? readHeads : () => [];
+    this.#onForgotten = typeof onForgotten === "function" ? onForgotten : () => undefined;
     this.#adoptWhatIsAlreadyHere();
   }
 
@@ -345,6 +365,9 @@ export class PieceDiskStore {
         }
       });
     this.#removing.set(index, removal);
+    // SAID AFTER THE FACT IS TRUE, so a listener that asks this tier whether it
+    // holds the piece is told the same thing this method has just made so.
+    this.#onForgotten(index);
   }
 
   /**

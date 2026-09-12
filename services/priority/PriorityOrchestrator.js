@@ -22,7 +22,13 @@ export class PriorityOrchestrator {
   /** Where the map goes once it is built. @type {(published: object) => void} */
   #publish;
 
-  /** The last map published per film and file, so an unchanged one is not resent. */
+  /**
+   * The last map published per film and file, so an unchanged one is not
+   * resent — and what it was about, so that a file everybody has left can be
+   * published as wanting nothing.
+   *
+   * @type {Map<string, { shape: string, sourceKey: string, fileIndex: number, durationSeconds: number }>}
+   */
   #last = new Map();
 
   /** The last map BUILT per film and file, for whoever reads instead of being
@@ -138,11 +144,31 @@ export class PriorityOrchestrator {
     // second by second, which is the same comparison over far fewer values.
     const zones = runsOf(map);
     const shape = JSON.stringify(zones);
-    if (this.#last.get(key) !== shape) {
-      this.#last.set(key, shape);
+    if (this.#last.get(key)?.shape !== shape) {
+      // The length is remembered with the shape, so that a file whose viewers
+      // have all gone can still be spoken for: what is published then is the
+      // same statement with nothing in it, and it has to name the file it is
+      // about.
+      this.#last.set(key, { shape, sourceKey, fileIndex, durationSeconds });
       this.#publish({ sourceKey, fileIndex, durationSeconds, zones });
     }
     return map;
+  }
+
+  /**
+   * NOBODY WANTS ANYTHING OF THIS FILE ANY MORE — said, rather than left to be
+   * inferred from silence.
+   *
+   * The map used to be deleted from this class's memory and published nowhere,
+   * so what had been stated about that file on the swarm's behalf stood until
+   * the torrent itself was removed. Read from the register, a film nobody had
+   * watched for an hour was indistinguishable from one being watched now.
+   *
+   * @param {{ sourceKey: string, fileIndex: number, durationSeconds: number }} what
+   * @returns {void}
+   */
+  #publishNothingFor({ sourceKey, fileIndex, durationSeconds }) {
+    this.#publish({ sourceKey, fileIndex, durationSeconds, zones: [] });
   }
 
   /**
@@ -222,8 +248,12 @@ export class PriorityOrchestrator {
     // for it and called from nowhere.
     for (const key of [...this.#maps.keys()]) {
       if (!byFile.has(key)) {
+        const last = this.#last.get(key);
         this.#maps.delete(key);
         this.#last.delete(key);
+        if (last) {
+          this.#publishNothingFor(last);
+        }
       }
     }
     for (const address of [...this.#byOutput.keys()]) {
@@ -232,9 +262,13 @@ export class PriorityOrchestrator {
       }
     }
     for (const one of byFile.values()) {
-      // A file of unknown length cannot be divided into zones, and a file
-      // nobody is watching has nothing to be urgent about.
-      if (one.durationSeconds > 0 && one.viewers.length > 0) {
+      // A file of unknown length cannot be divided into zones at all. A file
+      // whose viewers have all gone CAN be spoken for, and must be: `build`
+      // with nobody watching produces a map with nothing in it, which is the
+      // truth and is what withdraws what was stated for them. Skipped, as it
+      // was, the last thing said about that file stood for as long as the
+      // torrent did.
+      if (one.durationSeconds > 0) {
         this.build(one);
       }
     }

@@ -188,20 +188,38 @@ both fixed with a check apiece.
    the moment of the departure and then never re-examined: in its swarm, with no
    idle clock running. The pass acts on what it just said now.
 
-## The shape of the shared statement — DECIDED
+## Where the shared statement lives — DECIDED, then REVERSED the same day
 
-The classification is a PACKAGE rather than an answer the proxy returns, and the
-reason is timing: the browser shows the list of episodes the instant a
-`.torrent` is opened, before a proxy has been chosen, let alone connected.
-Making it wait for an answer would trade one defect for a slower first screen.
+It was first published as a package, `@torrent-tv/torrent-contents`, so that
+both runtimes could read the same three files: the proxy states what to fetch
+from them, and the browser showed the list of episodes the instant a `.torrent`
+was dropped, before a proxy had been chosen.
 
-`@torrent-tv/torrent-contents` is published from the proxy's own
-`services/torrent`, and the browser imports it by the same bare name: Node
-resolves it out of `node_modules`, and an import map in the page points that
-name at `/vendor/torrent-contents/`, which the server serves straight from the
-installed package. Nothing is bundled and nothing is copied.
+**Withdrawn within the hour, on the user's question: is the package better than
+moving it all to the proxy, when the torrent has to go there after the choice
+anyway.** It is not. The package bought one property — the instant list — with
+three permanent costs: a third artifact to version and publish, two copies at
+runtime that drift by version (a test was written for that drift, which is an
+admission the risk is real), and three wiring points that break the page at load
+with no error anybody sees (a second test was written for those).
 
-Verified in a browser 2026-09-12: the page fetched `Contents.js`, `files.js` and
-`naming.js` from that prefix with 200 each, `classifyMediaFiles` ran through the
-package, and the episodes came back in reading order — `ep2` before `ep10` — with
-a paired subtitle on its own episode and an unpaired soundtrack still offered.
+The answer is the route that already lists a source's files. For a magnet
+nothing changes at all — that is the path it has always taken — and the dropped
+`.torrent` now takes the same one. What leaves the browser with it is not only
+the classification but the whole notion of deciding anything from a name; what
+stays is what only the browser can see (the trackers and the web seeds in the
+file it holds) and how a name is SHOWN.
+
+**The cost is answered by connecting earlier, which is the user's own point.**
+Everything a viewer does needs a proxy, and choosing one and connecting to it
+used to begin only after a file had been picked. It begins when the page loads
+now, silently and with its failure swallowed, and `#acquireTransport` is
+joinable — so whatever the viewer does next joins that attempt instead of
+starting a second. Verified in a browser 2026-09-12: the page opens, the connect
+runs on its own (`public-only connect failed …; trying local path` on a dev
+server with no proxies registered), nothing is shown for it, and the page's own
+adapter turns the proxy's answer into the three lists with the order preserved,
+the torrent's own numbers kept and the release's repeated part taken off the
+names.
+
+`@torrent-tv/torrent-contents@1.0.0` is deprecated on npm with the reason.

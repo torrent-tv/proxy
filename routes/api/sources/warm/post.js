@@ -1,9 +1,6 @@
 import { logger } from "../../../../utils/logger.js";
-import {
-  countVideoFiles,
-  matchSidecarFiles,
-  TEXT_SUBTITLE_SIDECAR_EXTENSIONS
-} from "../../../../services/torrent/files.js";
+import { TEXT_SUBTITLE_SIDECAR_EXTENSIONS } from "../../../../services/torrent/files.js";
+import { contentsOf } from "../../../../services/torrent/Contents.js";
 
 /**
  * Start fetching a source before anyone asks to play it.
@@ -117,12 +114,7 @@ export async function handleApiSourceWarmPost(req, reply, { sourceRegistry, torr
   // the pool owner's bandwidth on a track nobody chose.
   let sidecars = 0;
   if (fileIndex !== null && Array.isArray(torrent.files)) {
-    const matched = matchSidecarFiles({
-      files: torrent.files,
-      videoIndex: fileIndex,
-      torrentName: typeof torrent.name === "string" ? torrent.name : "",
-      videoCount: countVideoFiles(torrent.files)
-    });
+    const matched = contentsOf(torrent).sidecarsOf(fileIndex);
     const warmOne = (file, options) => {
       sidecars += 1;
       // Not awaited, like the picture's own edges above: the point of this route

@@ -10,7 +10,7 @@ import { spawn } from "node:child_process";
 import { logger } from "../utils/logger.js";
 import { Container } from "./container/Container.js";
 import { buildAudioInventory } from "./audio-inventory.js";
-import { countVideoFiles, matchSidecarFiles } from "./torrent/files.js";
+import { contentsOf } from "./torrent/Contents.js";
 import {
   parseFfmpegDurationSeconds,
   parseFfmpegStartTimeSeconds,
@@ -339,22 +339,18 @@ export function createPlaybackPlanner({
   /**
    * The files beside this picture that belong to it, in three groups.
    *
-   * One call site's worth of arguments, spelled once: the file list, the
-   * torrent's own name (which WebTorrent prefixes to every path) and how many
-   * pictures the torrent holds, which is what decides whether a sidecar with a
-   * name in common with nothing can still belong to the only video there is.
+   * Asked of what the torrent says about itself, which works the grouping out
+   * once and keeps it. It used to be worked out here on every call, and again
+   * on the warm-up's own path over the same list, so one opened film paired the
+   * same files several times and neither side could be sure of the other's
+   * answer.
    *
    * @param {object} torrent
    * @param {number} fileIndex
    * @returns {{ audio: object[], subtitles: object[], images: object[] }}
    */
   function sidecarsOf(torrent, fileIndex) {
-    return matchSidecarFiles({
-      files: torrent?.files ?? [],
-      videoIndex: fileIndex,
-      torrentName: typeof torrent?.name === "string" ? torrent.name : "",
-      videoCount: countVideoFiles(torrent?.files ?? [])
-    });
+    return contentsOf(torrent ?? {}).sidecarsOf(fileIndex);
   }
 
   async function withContainerDefaults(torrent, fileIndex, subtitleTracks) {

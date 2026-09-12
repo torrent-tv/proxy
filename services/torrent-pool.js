@@ -862,27 +862,28 @@ function withdrawPriorityMap(torrent, fileIndex, keepBelow = 0) {
  *   keep them afterwards.
  * @returns {boolean} Whether anything was stated.
  */
-export function stateFileEdges(torrent, fileIndex, urgency) {
+export function stateFileEdges(torrent, fileIndex, urgency, { lower = false } = {}) {
   const file = Array.isArray(torrent?.files) ? torrent.files[fileIndex] : null;
   const length = Number(file?.length);
   if (!file || !(length > 0)) {
     return false;
   }
   const { register } = demandFor(torrent);
-  register.state({
-    claimant: `${EDGES_CLAIMANT}:${fileIndex}:head`,
-    fileIndex,
-    byteStart: 0,
-    byteEnd: 0,
-    urgency
-  });
-  register.state({
-    claimant: `${EDGES_CLAIMANT}:${fileIndex}:tail`,
-    fileIndex,
-    byteStart: length - 1,
-    byteEnd: length - 1,
-    urgency
-  });
+  const ends = [
+    { claimant: `${EDGES_CLAIMANT}:${fileIndex}:head`, byteStart: 0, byteEnd: 0 },
+    { claimant: `${EDGES_CLAIMANT}:${fileIndex}:tail`, byteStart: length - 1, byteEnd: length - 1 }
+  ];
+  for (const end of ends) {
+    // RAISED, NEVER LOWERED, unless the caller is the one putting them back
+    // down. Two things ask for the same ends — a warm-up that nobody is waiting
+    // for and a playback plan that somebody is — and the warm-up's sidecars are
+    // fired off without being awaited, so it can arrive second. Taking the
+    // plan's urgency away there would leave a person watching a loading screen
+    // behind a film somebody else is watching.
+    const stated = register.windows().find((window) => String(window.claimant) === end.claimant);
+    const level = !lower && stated ? Math.min(stated.urgency, urgency) : urgency;
+    register.state({ ...end, fileIndex, urgency: level });
+  }
   return true;
 }
 
@@ -1518,6 +1519,12 @@ export class TorrentPool {
         continue;
       }
       this.#stateBackgroundFill(torrent);
+      // And act on what that just said. The fill withdraws itself once nothing
+      // else wants the file, so a torrent everybody has left can be held by the
+      // fill's own claim until this pass — and without this line the moment it
+      // goes would be noticed by nobody, leaving the torrent in its swarm with
+      // no idle clock running.
+      this.followTheDemand(torrent);
     }
     this.#reportStalledDownloads();
     const { bytesPerSec, reason } = decideUploadLimit(active);
@@ -2364,7 +2371,10 @@ export class TorrentPool {
       return await prefetch;
     } finally {
       this.#edgePrefetches.delete(inFlightKey);
-      stateFileEdges(torrent, fileIndex, Urgency.TAIL);
+      // Nobody is waiting for them now. Said with `lower`, because this is the
+      // one caller entitled to put them back down: the read it belongs to is
+      // over, and there is no other — a file's edges are fetched once at a time.
+      stateFileEdges(torrent, fileIndex, Urgency.TAIL, { lower: true });
     }
   }
 

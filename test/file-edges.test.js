@@ -80,7 +80,7 @@ test("while somebody is waiting for them they are urgent, and afterwards they ar
     // Once it has answered, nobody is waiting — but a seek will want them
     // again, so they stay stated at the level of something nobody is waiting
     // for. Re-stating replaces; it does not pile a second claim on the first.
-    stateFileEdges(torrent, 1, Urgency.TAIL);
+    stateFileEdges(torrent, 1, Urgency.TAIL, { lower: true });
     assert.equal(edges(torrent).length, 2);
     assert.deepEqual(
       edges(torrent).map((one) => one.urgency),
@@ -149,6 +149,41 @@ test("another file's departure leaves these ends alone", () => {
     assert.deepEqual(
       edges(torrent).map((one) => one.fileIndex),
       [1, 1]
+    );
+  } finally {
+    forgetTorrent(torrent);
+  }
+});
+
+test("a warm-up cannot take the urgency away from a plan that is waiting", () => {
+  // The two callers of the same ends: a playback plan, which somebody is
+  // watching a loading screen for, and a warm-up, which by its whole purpose
+  // nobody is waiting for. The warm-up fires off the files beside the picture
+  // without awaiting them, so it can arrive second — and lowering the plan's
+  // level there would put a person behind a film somebody else is watching.
+  const torrent = torrentOf();
+  try {
+    stateFileEdges(torrent, 1, Urgency.NEAR);
+    stateFileEdges(torrent, 1, Urgency.TAIL);
+
+    assert.deepEqual(
+      edges(torrent).map((one) => one.urgency),
+      [Urgency.NEAR, Urgency.NEAR]
+    );
+  } finally {
+    forgetTorrent(torrent);
+  }
+});
+
+test("the read that is over is what puts them back down", () => {
+  const torrent = torrentOf();
+  try {
+    stateFileEdges(torrent, 1, Urgency.NEAR);
+    stateFileEdges(torrent, 1, Urgency.TAIL, { lower: true });
+
+    assert.deepEqual(
+      edges(torrent).map((one) => one.urgency),
+      [Urgency.TAIL, Urgency.TAIL]
     );
   } finally {
     forgetTorrent(torrent);

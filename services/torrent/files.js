@@ -135,7 +135,14 @@ export const VIDEO_FILE_EXTENSIONS = new Set([
   ".m2p",
   ".mxf",
   ".rm",
-  ".rmvb"
+  ".rmvb",
+  // A Video CD's MPEG-1 stream. It was offered by the browser and not counted
+  // here, which is the divergence that made this one list rather than two
+  // (measured 2026-09-12, and the only extension the two disagreed on). The
+  // union is the safe way to settle it: a file that is offered and turns out to
+  // be unplayable is one probe, while a file that is a film and is never
+  // offered cannot be reached at all.
+  ".dat"
 ]);
 
 /**

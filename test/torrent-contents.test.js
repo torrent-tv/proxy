@@ -188,3 +188,48 @@ test("the answer is worked out once per torrent, and again when its files arrive
   assert.equal(full.items.length, 1);
   assert.equal(contentsOf(torrent), full);
 });
+
+test("folders order before names, so seasons stay together", () => {
+  const files = [
+    { path: "Show/Season 2/ep 1.mkv", length: 9 },
+    { path: "Show/Season 10/ep 1.mkv", length: 9 },
+    { path: "Show/Season 1/ep 2.mkv", length: 9 },
+    { path: "Show/Season 1/ep 1.mkv", length: 9 }
+  ];
+  const contents = new TorrentContents({ files, name: "Show" });
+
+  assert.deepEqual(
+    contents.items.map((item) => item.relativePath),
+    ["Season 1/ep 1.mkv", "Season 1/ep 2.mkv", "Season 2/ep 1.mkv", "Season 10/ep 1.mkv"]
+  );
+});
+
+test("every file is described by what it is, in the order a person reads them", () => {
+  // What the browser is given. It used to answer this itself — a list of video
+  // extensions in its parser and a second, shorter pair inside its picker —
+  // against this one, and the three had already diverged.
+  const files = [
+    { path: "Film/notes.nfo", length: 1 },
+    { path: "Film/cover.jpg", length: 2 },
+    { path: "Film/film.mkv", length: 9 },
+    { path: "Film/Rus Sound/dub.mka", length: 3 },
+    { path: "Film/Sub/film.ass", length: 1 }
+  ];
+  const contents = new TorrentContents({ files, name: "Film" });
+
+  assert.deepEqual(
+    contents.files().map((file) => [file.relativePath, file.kind]),
+    [
+      ["cover.jpg", "image"],
+      ["film.mkv", "video"],
+      ["notes.nfo", "other"],
+      ["Rus Sound/dub.mka", "audio"],
+      ["Sub/film.ass", "subtitle"]
+    ]
+  );
+  assert.deepEqual(
+    contents.files().map((file) => file.fileIndex),
+    [1, 2, 0, 3, 4],
+    "the torrent's own numbers travel with them"
+  );
+});

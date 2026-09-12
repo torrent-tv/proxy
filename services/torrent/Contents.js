@@ -40,6 +40,9 @@
  */
 
 import {
+  AUDIO_SIDECAR_EXTENSIONS,
+  IMAGE_SIDECAR_EXTENSIONS,
+  SUBTITLE_SIDECAR_EXTENSIONS,
   VIDEO_FILE_EXTENSIONS,
   extensionOf,
   matchSidecarFiles,
@@ -107,6 +110,9 @@ export class TorrentContents {
   /** @type {TorrentLeftover[]} */
   #leftovers = [];
 
+  /** Every file as this class reads it, in the torrent's own order. @type {object[]} */
+  #described = [];
+
   /**
    * @param {object} params
    * @param {Array<{ path?: string, name?: string, length?: number }>} params.files -
@@ -127,6 +133,7 @@ export class TorrentContents {
         isVideo: VIDEO_FILE_EXTENSIONS.has(extensionOf(fileName))
       };
     });
+    this.#described = described;
     this.#videoCount = described.filter((file) => file.isVideo).length;
 
     const claimed = new Set();
@@ -202,6 +209,59 @@ export class TorrentContents {
    */
   get leftovers() {
     return this.#leftovers;
+  }
+
+  /**
+   * WHAT THIS FILE IS, by its name alone.
+   *
+   * The one place the question is answered for the whole product: the browser
+   * used to answer it again, twice — a list of extensions in its torrent parser
+   * and a second, shorter pair inside its picker — and the three had already
+   * diverged.
+   *
+   * @param {number} fileIndex
+   * @returns {"video" | "audio" | "subtitle" | "image" | "other"}
+   */
+  kindOf(fileIndex) {
+    const file = this.#described[fileIndex];
+    if (!file) {
+      return "other";
+    }
+    if (file.isVideo) {
+      return "video";
+    }
+    const extension = extensionOf(file.name);
+    if (AUDIO_SIDECAR_EXTENSIONS.has(extension)) {
+      return "audio";
+    }
+    if (SUBTITLE_SIDECAR_EXTENSIONS.has(extension)) {
+      return "subtitle";
+    }
+    if (IMAGE_SIDECAR_EXTENSIONS.has(extension)) {
+      return "image";
+    }
+    return "other";
+  }
+
+  /**
+   * Every file of the torrent, in the order a person reads them, with what each
+   * one is and where it sits.
+   *
+   * What the browser is given: it shows this list and asks nothing about the
+   * names itself.
+   *
+   * @returns {{ fileIndex: number, name: string, relativePath: string, length: number, kind: string }[]}
+   */
+  files() {
+    return [...this.#described]
+      .sort(inReadingOrder)
+      .map((file) => ({
+        fileIndex: file.fileIndex,
+        name: file.name,
+        relativePath: file.relativePath,
+        length: file.length,
+        kind: this.kindOf(file.fileIndex)
+      }));
   }
 
   /**

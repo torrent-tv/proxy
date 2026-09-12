@@ -63,7 +63,8 @@ export class EncodeOrchestrator {
 
   /**
    * How many times in a row an output's run has died because its input was not
-   * there. Cleared by any other ending, which is the input answering.
+   * there. Cleared only by a run that PRODUCED something, which is the only
+   * proof that the input can be read — see `#noteInputAvailability`.
    *
    * @type {Map<string, number>}
    */
@@ -307,6 +308,14 @@ export class EncodeOrchestrator {
    */
   notePriorityMap(address, zones) {
     this.demand.state(address, zones);
+    // NOBODY IS COMING HERE, so what was remembered about this output's input
+    // is about nobody. Kept, those three entries would stay for the life of the
+    // process, and the wait they describe would greet whoever opens this output
+    // next — a viewer arriving is new information, and one attempt for them is
+    // right whatever the last one met.
+    if (!Array.isArray(zones) || zones.length === 0) {
+      this.#forgetInputState(address);
+    }
   }
 
   /**
@@ -408,8 +417,7 @@ export class EncodeOrchestrator {
     // AND ONLY WHILE NOTHING IS PRODUCING THERE. A run still alive on this
     // output is proof the input can be read, whatever a run beside it met, so
     // the wait must not silence an output that is working.
-    const quietMs = this.#quietFor(address);
-    if (quietMs > 0 && this.runsOn(address).every((run) => !run.isAlive)) {
+    if (this.#isQuiet(address) && this.runsOn(address).every((run) => !run.isAlive)) {
       return;
     }
     // ONE MAP, NOT ONE WINDOW PER VIEWER PER ZONE.
@@ -812,23 +820,45 @@ export class EncodeOrchestrator {
   }
 
   /**
-   * How long this output still has to wait before anything is placed on it, in
-   * milliseconds; zero when it may be planned now.
+   * Whether this output is still waiting before anything may be placed on it.
+   *
+   * A boolean rather than the milliseconds left: the figure had one reader and
+   * that reader only asked whether it was above zero, so it was a number
+   * computed and thrown away. How long the wait is was said when it began.
    *
    * @param {string} address
-   * @returns {number}
+   * @returns {boolean}
    */
-  #quietFor(address) {
+  #isQuiet(address) {
     const until = this.#quietUntil.get(address);
     if (!Number.isFinite(until)) {
-      return 0;
+      return false;
     }
-    const left = until - this.now();
-    if (left <= 0) {
+    if (until - this.now() <= 0) {
       this.#quietUntil.delete(address);
-      return 0;
+      return false;
     }
-    return left;
+    return true;
+  }
+
+  /**
+   * Forget everything remembered about an output nobody is producing for.
+   *
+   * Three maps are keyed by address, and an output that goes away leaves an
+   * entry in each for the life of the process. Small, and exactly the shape of
+   * accumulation this layer was built to remove from the session.
+   *
+   * @param {string} address
+   * @returns {void}
+   */
+  #forgetInputState(address) {
+    this.#inputLostAttempts.delete(address);
+    this.#quietUntil.delete(address);
+    const timer = this.#quietTimers.get(address);
+    if (timer) {
+      clearTimeout(timer);
+      this.#quietTimers.delete(address);
+    }
   }
 
   /**

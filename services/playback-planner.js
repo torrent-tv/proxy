@@ -626,7 +626,10 @@ export function createPlaybackPlanner({
       // codecs. A transient empty probe must NOT be cached: otherwise the wrong
       // plan (file treated as directly playable) sticks permanently for this
       // file, and an unsupported codec like xvid gets copied → black video.
-      await torrentPool.prefetchFileEdges(torrent, fileIndex);
+      // Awaited in the literal sense: this answer cannot be given until the
+      // file has said what is in it, and a person is watching a loading screen
+      // for as long as that takes.
+      await torrentPool.prefetchFileEdges(torrent, fileIndex, { awaited: true });
       edgesReadyMs = Date.now() - planEntryMs;
       // The keyframe index reads the tail of the file, which the probe has just
       // waited for as well. Started here it overlaps the probe instead of
@@ -649,7 +652,7 @@ export function createPlaybackPlanner({
       ) {
         attempt += 1;
         await delay(Math.min(3_000, 500 + attempt * 250));
-        await torrentPool.prefetchFileEdges(torrent, fileIndex);
+        await torrentPool.prefetchFileEdges(torrent, fileIndex, { awaited: true });
         probe = await probeStreamCodecs({ ffmpegBin, inputUrl: directUrl, userAgent });
       }
       const { audioCodec, videoCodec, container, durationSeconds, videoWidth, videoHeight, audioTracks, subtitleTracks } = probe;

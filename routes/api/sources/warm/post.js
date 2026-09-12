@@ -67,17 +67,26 @@ export async function handleApiSourceWarmPost(req, reply, { sourceRegistry, torr
     return reply.send({ started: false, swarm: false, edges: false });
   }
 
-  // The edges are only worth fetching once it is known WHICH file will be
-  // played: on a season pack, warming twenty episodes' worth would spend the
-  // pool owner's bandwidth on nineteen files nobody opened. The caller passes
-  // an index when the torrent holds a single video, and again later if it
-  // wants to.
+  // WHICH FILE THIS IS ABOUT. The caller names one when it knows — a torrent
+  // with a single video, or an episode the viewer has settled on — and on a
+  // season pack it names none, because nobody has chosen yet.
+  //
+  // Then the first item of the torrent stands in for the choice. One item, not
+  // twenty: warming a whole pack's worth of edges would spend the pool owner's
+  // bandwidth on nineteen files nobody opened, while one item is two pieces and
+  // is also the likeliest pick. It is stated as something nobody is waiting
+  // for, so on a proxy serving somebody else it costs nothing at all until
+  // their own film has everything it needs.
+  const contents = contentsOf(torrent);
+  const named = fileIndex !== null && torrent.files?.[fileIndex] ? fileIndex : null;
+  const candidate = named ?? contents.items[0]?.fileIndex ?? null;
+
   let edges = false;
-  if (fileIndex !== null && torrent.files?.[fileIndex]) {
+  if (candidate !== null) {
     edges = true;
     // Deliberately not awaited: this is the multi-second part, and the point of
     // the whole route is that the viewer goes on choosing while it happens.
-    Promise.resolve(torrentPool.prefetchFileEdges(torrent, fileIndex)).catch((error) => {
+    Promise.resolve(torrentPool.prefetchFileEdges(torrent, candidate)).catch((error) => {
       const message = error instanceof Error ? error.message : String(error);
       logger.warn(`warm ${sourceKey.slice(0, 8)}: file edges failed: ${message}`);
     });
@@ -85,8 +94,8 @@ export async function handleApiSourceWarmPost(req, reply, { sourceRegistry, torr
     // the playback plan, so they must not queue behind a region nobody is
     // reading yet. This one only has to arrive before the encoder does, and the
     // encoder is a plan and a session away.
-    if (positionSeconds > 0 && typeof torrentPool.warmResumePosition === "function") {
-      Promise.resolve(torrentPool.warmResumePosition(torrent, fileIndex, positionSeconds)).catch(
+    if (named !== null && positionSeconds > 0 && typeof torrentPool.warmResumePosition === "function") {
+      Promise.resolve(torrentPool.warmResumePosition(torrent, named, positionSeconds)).catch(
         (error) => {
           const message = error instanceof Error ? error.message : String(error);
           logger.warn(`warm ${sourceKey.slice(0, 8)}: the viewer's position failed: ${message}`);
@@ -113,8 +122,8 @@ export async function handleApiSourceWarmPost(req, reply, { sourceRegistry, torr
   // does. The rest of it is fetched when it is played, and nothing here spends
   // the pool owner's bandwidth on a track nobody chose.
   let sidecars = 0;
-  if (fileIndex !== null && Array.isArray(torrent.files)) {
-    const matched = contentsOf(torrent).sidecarsOf(fileIndex);
+  if (candidate !== null && Array.isArray(torrent.files)) {
+    const matched = contents.sidecarsOf(candidate);
     const warmOne = (file, options) => {
       sidecars += 1;
       // Not awaited, like the picture's own edges above: the point of this route
@@ -154,7 +163,10 @@ export async function handleApiSourceWarmPost(req, reply, { sourceRegistry, torr
 
   logger.info(
     `warm ${sourceKey.slice(0, 8)}: swarm started for "${torrent.name}"` +
-      (edges ? `, fetching the edges of file ${fileIndex}` : ", file not chosen yet") +
+      (edges
+        ? `, fetching the edges of file ${candidate}` +
+          (named === null ? " — the first item, since nothing is chosen yet" : "")
+        : ", and it holds nothing to fetch the edges of") +
       (sidecars > 0 ? ` and of ${sidecars} file(s) beside it` : "")
   );
 

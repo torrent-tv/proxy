@@ -89,9 +89,11 @@ Linux-only host (e.g. POSIX-only signals must degrade elsewhere).
     why the priority map is read at two scopes (per FILE for the swarm, per
     OUTPUT for the encoders), and what each of the eight other places that used
     to place or kill an encoder now states instead.
-  - `docs/logs.md` — where to find logs (HA `docker logs` + `/data/proxy.log`, DO
-    `infra-server-1` with forwarded frontend `POST /api/client-logs`). Browser
-    console not needed.
+  - `docs/logs.md` — where to find logs, and the fact that the BROWSER's own log
+    is in TWO places split by phase: on the droplet while a transport is being
+    acquired and at unload, on THIS proxy for the whole of a viewing
+    (`/data/client-<start>-<session>-<torrent>.log`, one file per session).
+    Read both before concluding anything from a half-session.
   - `playback-planner.js` — single ffmpeg probe returns audioCodec, videoCodec,
     container, durationSeconds. `mode` is advisory; the browser decides.
   - `hls-session-manager.js` — one ffmpeg per (source, file, settings). Serves a

@@ -29,32 +29,39 @@ test("presence and position are two facts, and presence does not wait for a requ
   // the `init.mp4` they needed in order to request their first segment was
   // therefore never made.
   assert.equal(viewer.position, null, "nothing has placed them yet");
-  assert.equal(viewer.isPresent(now, 60_000), true, "and they are still here");
+  assert.equal(viewer.isPresent(), true, "and they are still here");
 
-  viewer.seen(now - 10_000);
-  assert.equal(viewer.isPresent(now, 60_000), true);
+  // SILENCE IS NOT ABSENCE, however long it lasts. A paused viewer, a hidden
+  // tab whose timers the browser has throttled, and one holding two minutes of
+  // cushion all say nothing and are all still watching — so there is no
+  // interval that separates them from someone who has left, and the threshold
+  // that used to try is gone.
+  viewer.seen(now - 600_000);
+  assert.equal(viewer.isPresent(), true, "ten minutes of silence is not leaving");
 
-  // Silence longer than any a watching viewer can produce. This is a backstop
-  // for a connection that failed to say so, not the ordinary way of leaving.
-  viewer.seen(now - 120_000);
-  assert.equal(viewer.isPresent(now, 60_000), false);
-
-  // Something SAID they are gone. Then it does not matter how recently they
-  // were heard from.
-  viewer.seen(now);
+  // Something SAID they are gone: the browser released the session, or their
+  // connection closed. That is the only way out.
   viewer.gone = true;
-  assert.equal(viewer.isPresent(now, 60_000), false, "a statement outranks silence");
+  assert.equal(viewer.isPresent(), false, "a statement is what ends it");
 });
 
-test("a stated position outranks the segment they last asked for", () => {
+test("position is one fact with one writer, and a function of time", () => {
   const viewer = new Viewer("someone");
   assert.equal(viewer.positionSeconds(), null);
 
-  viewer.position = { segment: 10, seconds: 40, at: 1 };
-  assert.equal(viewer.positionSeconds(), 40, "where their player is reading");
+  viewer.moveTo(40, 1_000_000);
+  viewer.playing = false;
+  assert.equal(viewer.positionSeconds(1_000_000), 40);
+  assert.equal(viewer.positionSeconds(1_060_000), 40, "a stopped picture covers no film");
 
-  viewer.position = { segment: 10, seconds: 40, at: 1, seeked: 900 };
-  assert.equal(viewer.positionSeconds(), 900, "a seek is the viewer saying where they are");
+  viewer.playing = true;
+  assert.equal(viewer.positionSeconds(1_010_000), 50, "a playing one covers a second a second");
+
+  // A seek is the same statement, and there is no second field for it to win
+  // against: two writers taking turns on one reading is what made the priority
+  // map jump backwards several times a second in the field on 2026-09-13.
+  viewer.moveTo(900, 1_010_000);
+  assert.equal(viewer.positionSeconds(1_010_000), 900);
 });
 
 test("asking for a viewer twice is the same viewer", () => {

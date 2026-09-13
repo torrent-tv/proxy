@@ -181,12 +181,10 @@ export class PriorityOrchestrator {
    * @param {object} params
    * @param {Iterable<object[]>} params.sessionGroups - The live sessions, in
    *   whatever grouping the caller holds them; they are regrouped by file here.
-   * @param {number} params.staleAfterMs - How long a viewer may be silent and
-   *   still count as watching.
    * @param {number} [params.now]
    * @returns {void}
    */
-  publishFor({ sessionGroups, staleAfterMs, now = Date.now() }) {
+  publishFor({ sessionGroups, now = Date.now() }) {
     /** @type {Map<string, { sourceKey: string, fileIndex: number, durationSeconds: number, allowanceSeconds: number, viewers: object[] }>} */
     const byFile = new Map();
     /** @type {Map<string, { durationSeconds: number, allowanceSeconds: number, viewers: object[] }>} */
@@ -220,11 +218,11 @@ export class PriorityOrchestrator {
           byOutput.set(address, mine);
         }
         for (const viewer of this.#viewersOf(session).values()) {
-          if (!viewer.isPresent(now, staleAfterMs)) {
+          if (!viewer.isPresent()) {
             continue;
           }
           const stated = {
-            atSeconds: viewer.positionSeconds() ?? 0,
+            atSeconds: viewer.positionSeconds(now) ?? 0,
             // CONSUMING, not merely playing. A page that is not on screen has
             // its timers throttled and asks for nothing, which is exactly what
             // a viewer holding a full cushion looks like; the two are told

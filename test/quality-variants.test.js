@@ -291,9 +291,8 @@ test("a segment request hands the encoder to the variant the viewer moved to", a
 
   assert.equal(served.sessionId, VARIANT_ID, "the file must be served from the variant, not the base");
   assert.equal(base.activeVariantId, VARIANT_ID, "the variant the viewer is watching is the active one");
-  assert.equal(
-    viewerOf(variant, "").positionSeconds(),
-    100,
+  assert.ok(
+    Math.abs((viewerOf(variant, "").positionSeconds() ?? -1) - 100) < 1,
     "a segment request steers nothing, so where this person stands on the rung is stated outright — " +
     "segment 25 of a four-second grid"
   );
@@ -333,7 +332,6 @@ test("a rung is placed where the player asked it for, not where the other rung h
   // new run past everything the player then asked for, which no request could
   // ever be answered from.
   base.lastRequestedSegment = 70;
-  base.furthestViewerSeconds = 280;
 
   await manager.resolveVariantFile(BASE_ID, 540, "segment-00056.mp4");
 
@@ -517,19 +515,16 @@ test("the viewer's position is kept current by the segments they ask for", async
     await manager.disposeAll();
     await rm(dirPath, { recursive: true, force: true });
   });
-  // A seek an hour ago is the only thing that ever wrote this field, and
-  // playback reports no position at all. Read as it stood, a quality change
-  // would place the new variant's encode run back at the seek — and since a
-  // segment request steers nothing, the segments the player then asks for would
-  // never be produced by anyone.
-  base.furthestViewerSeconds = 40;
+  // A REQUEST SAYS NOTHING ABOUT WHERE THEY ARE, and asking for one must not
+  // move them. Where they are is what they stated — a seek, or a report
+  // carrying their playhead — and it stands until they state otherwise.
+  viewerOf(base, "").moveTo(40);
 
   await manager.getFileStream(BASE_ID, "segment-00090.mp4", { requestSeq: 1 });
 
-  assert.equal(
-    base.furthestViewerSeconds,
-    360,
-    "a request for segment #90 of a four-second grid says where the viewer is now"
+  assert.ok(
+    Math.abs((viewerOf(base, "").positionSeconds() ?? -1) - 40) < 1,
+    "a request for segment #90 leaves the viewer where they said they were"
   );
 });
 
@@ -763,16 +758,11 @@ test("a separately published audio track starts where the picture is, from the r
     await rm(dirPath, { recursive: true, force: true });
   });
   base.audioSeparate = true;
-  // Served up to 140 s, and the browser says it holds 40 s ahead of the
-  // picture — so the viewer is at 100 s, and that, less a segment of margin,
-  // is where the track has to begin.
-  base.furthestViewerSeconds = 140;
-  viewerOf(base, "viewer").netReport = {
-    linkMbps: 20,
-    bufferedAheadSec: 40,
-    positionSeconds: null,
-    at: Date.now()
-  };
+  // The viewer says where their picture is: 100 s. That, less a segment of
+  // margin, is where the track has to begin — no subtraction of anything,
+  // because the position is the playhead and not the edge of a buffer.
+  viewerOf(base, "viewer").moveTo(100);
+  viewerOf(base, "viewer").playing = false;
   manager.getCachedAudioTracks = () => [
     { index: 0, language: "rus", title: "", isDefault: true },
     { index: 1, language: "eng", title: "", isDefault: false }
@@ -802,21 +792,12 @@ test("with two viewers the audio track starts at the EARLIEST picture, not the r
     await rm(dirPath, { recursive: true, force: true });
   });
   base.audioSeparate = true;
-  // A copied picture is one session shared by both of them. The read head is
-  // the furthest request of EITHER, so it belongs to the viewer in front.
-  base.furthestViewerSeconds = 140;
-  viewerOf(base, "ahead").netReport = {
-    linkMbps: 20,
-    bufferedAheadSec: 40,
-    positionSeconds: 100,
-    at: Date.now()
-  };
-  viewerOf(base, "behind").netReport = {
-    linkMbps: 20,
-    bufferedAheadSec: 8,
-    positionSeconds: 40,
-    at: Date.now()
-  };
+  // A copied picture is one session shared by both of them, and a track begun
+  // at the leader has nothing to give the one behind.
+  viewerOf(base, "ahead").moveTo(100);
+  viewerOf(base, "ahead").playing = false;
+  viewerOf(base, "behind").moveTo(40);
+  viewerOf(base, "behind").playing = false;
   manager.getCachedAudioTracks = () => [
     { index: 0, language: "rus", title: "", isDefault: true },
     { index: 1, language: "eng", title: "", isDefault: false }
@@ -839,22 +820,24 @@ test("with two viewers the audio track starts at the EARLIEST picture, not the r
   );
 });
 
-test("a position past the read head is clamped rather than acted on", async (t) => {
+test("a soundtrack begins where a viewer says they are, whenever they said it", async (t) => {
   const { manager, base, dirPath } = await managerWithBase();
   t.after(async () => {
     await manager.disposeAll();
     await rm(dirPath, { recursive: true, force: true });
   });
   base.audioSeparate = true;
-  base.furthestViewerSeconds = 140;
-  // Reports and requests race; a position claiming to be past everything that
-  // has been asked for would start the run where no request can reach it.
-  viewerOf(base, "viewer").netReport = {
-    linkMbps: 20,
-    bufferedAheadSec: 40,
-    positionSeconds: 900,
-    at: Date.now()
-  };
+  // TWO RULES WENT WHEN THE QUANTITY STOPPED MEANING TWO THINGS. A position
+  // "past the read head" had to be clamped, because the read head was a
+  // request edge and a report could overtake it; and a report older than a few
+  // seconds had to be discarded, because it was being subtracted from that
+  // edge. Neither survives: this is where the viewer's PICTURE is, they are the
+  // only writer of it, and between statements it moves at the rate the film
+  // moves. An old statement from a stopped viewer is exactly as true as a new
+  // one.
+  const viewer = viewerOf(base, "viewer");
+  viewer.moveTo(900, Date.now() - 600_000);
+  viewer.playing = false;
   manager.getCachedAudioTracks = () => [
     { index: 0, language: "rus", title: "", isDefault: true },
     { index: 1, language: "eng", title: "", isDefault: false }
@@ -871,45 +854,8 @@ test("a position past the read head is clamped rather than acted on", async (t) 
 
   assert.equal(
     created[0].startPositionSeconds,
-    136,
-    "clamped to the read head, less one segment of margin"
-  );
-});
-
-test("a stale buffer report is not used to place an audio track", async (t) => {
-  const { manager, base, dirPath } = await managerWithBase();
-  t.after(async () => {
-    await manager.disposeAll();
-    await rm(dirPath, { recursive: true, force: true });
-  });
-  base.audioSeparate = true;
-  base.furthestViewerSeconds = 300;
-  // Sent a minute ago: the viewer may have seeked anywhere since, so neither
-  // the buffer nor the position in it says where they are now.
-  viewerOf(base, "viewer").netReport = {
-    linkMbps: 20,
-    bufferedAheadSec: 5,
-    positionSeconds: 250,
-    at: Date.now() - 60_000
-  };
-  manager.getCachedAudioTracks = () => [
-    { index: 0, language: "rus", title: "", isDefault: true },
-    { index: 1, language: "eng", title: "", isDefault: false }
-  ];
-  const created = [];
-  manager.createOrGetSession = async (params) => {
-    created.push(params);
-    const rendition = fakeSession({ id: VARIANT_ID, encodeHeight: 0, dirPath });
-    rendition.audioOnly = true;
-    return { sessionId: VARIANT_ID, session: rendition };
-  };
-
-  await manager.resolveAudioRenditionFile(BASE_ID, 1, "segment-00010.mp4");
-
-  assert.equal(
-    created[0].startPositionSeconds,
-    176,
-    "the whole look-ahead is subtracted instead — it cannot leave the run ahead of the viewer"
+    896,
+    "ten minutes of silence from a stopped viewer says they are still at 900 s"
   );
 });
 
@@ -1193,7 +1139,6 @@ test("a file opened at a position starts its sound THERE, not a look-ahead earli
   // no segment served, no report from anybody. The read head is then not a
   // request edge — it is where the session was made — and a browser that has
   // just opened holds no buffer at all.
-  base.furthestViewerSeconds = null;
   base.lastRequestedSegment = null;
   base.viewers.clear();
   base.progress.startPositionSeconds = 588;

@@ -362,6 +362,13 @@ function makeSendQueueWatcher({ log, getTransportSnapshot, witness, usrsctpState
         const snapshot = getTransportSnapshot?.(sessionId) ?? null;
         connection.unknown = snapshot ? 0 : connection.unknown + 1;
         if (connection.unknown >= TRANSPORT_UNKNOWN_HEARTBEATS) {
+          // THE SECOND DETECTOR, and it is the one that has to work: `onClosed`
+          // does not always come — a peer connection can die without it — and
+          // presence is the connection and nothing else, so nothing else will
+          // ever say these people have gone. Until now this ended the watch and
+          // left them registered for the life of the process, holding the
+          // outputs they were watching.
+          connectionGone(sessionId, "the transport stopped answering");
           stop();
           return;
         }

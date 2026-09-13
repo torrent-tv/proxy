@@ -28,12 +28,37 @@ It decides from four things and no others:
 name a consumer id, or hold a person. What crosses is a priority map: zones of
 segment numbers with a rank and a real time, and nobody's name on it.
 
+## Where a viewer is, and how it reaches the encoders
+
+A viewer's position has ONE writer — the viewer — and is a function of time:
+
+```
+position(now) = stated + (playing ? 1 : 0) × (now − statedAt)
+```
+
+A viewer whose picture moves covers a second of film every second, so between
+the moments they speak their position is known exactly; one whose picture is
+stopped covers nothing. Nothing else writes it, and in particular a request for
+a segment does not: a request says the viewer is still here, and the segment
+either exists and is served or does not and is waited for.
+
+Held as a stored number instead it was a staircase, flat for the ten seconds
+between reports and then a jump — and with two writers filling it in turn the
+steps went backwards as often as forwards. Field 2026-09-13, one output over one
+second: `p100:#9..#10`, `p100:#18..#20`, `p100:#16..#18`, `p100:#18..#20`, while
+the second viewer sat frozen at 1673.6 s. The placement follows the map, so the
+machine spent six minutes on 77 encoder starts and 141 stops.
+
+PRESENCE IS A SEPARATE FACT and it is the connection: a viewer is here until
+something says otherwise. Silence never says it — a pause, a hidden tab whose
+timers are throttled, and a full cushion are all silent and all still watching.
+
 ## Viewers become a map, and that is the whole crossing
 
 ```mermaid
 flowchart TB
   subgraph V["services/viewer — where people are"]
-    VW[Viewer<br/>position, playing, buffered, chosen track]
+    VW[Viewer<br/>position as a function of time, playing, buffered, chosen track]
     VS[Viewers<br/>the relation, indexed from both ends]
   end
 

@@ -59,7 +59,7 @@ function over(sessions) {
     viewers,
     published,
     publish: (live = sessions) =>
-      priority.publishFor({ sessionGroups: [live], staleAfterMs: STALE_AFTER_MS })
+      priority.publishFor({ sessionGroups: [live] })
   };
 }
 
@@ -71,9 +71,9 @@ test("a file whose viewers have all gone is published as wanting nothing", () =>
   publish();
   assert.ok(published.at(-1).zones.length > 0, "somebody is watching, so something is wanted");
 
-  // They stop answering. The session is still there — it outlives them by half
-  // an hour — so this is the case that used to say nothing at all.
-  person.seen(Date.now() - STALE_AFTER_MS * 2);
+  // They leave. The session is still there — it outlives them by half an hour —
+  // so this is the case that used to say nothing at all.
+  viewers.leaves(picture, "p");
   publish();
 
   const last = published.at(-1);

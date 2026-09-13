@@ -36,10 +36,12 @@ export async function handleApiTranscodeSessionsPost(req, reply, { hlsSessionMan
   const fileName = typeof payload.fileName === "string" ? payload.fileName.trim() : "";
   const targetWidth = Number(payload.targetWidth);
   const targetHeight = Number(payload.targetHeight);
-  // Manual quality: the target box is a user-forced resolution, encoded exactly
-  // (capped to source), with the realtime budget's auto-downscale + runtime
-  // downswitch disabled for the session.
-  const manualQuality = payload.manualQuality === true;
+  // The target box is produced exactly (capped to source), with the realtime
+  // budget's auto-downscale and runtime downswitch off for this session.
+  //
+  // It says nothing about WHO asked — a rung sets it whether the viewer picked
+  // that rung or the player moved itself onto one.
+  const exactSize = payload.exactSize === true;
   // Whether this browser will take its audio from a separate rendition group in
   // the master playlist rather than muxed into the picture. It has to say so:
   // publishing renditions AND muxing the same audio would play it twice, while
@@ -67,7 +69,7 @@ export async function handleApiTranscodeSessionsPost(req, reply, { hlsSessionMan
       fileName,
       targetWidth: Number.isInteger(targetWidth) && targetWidth > 0 ? targetWidth : 0,
       targetHeight: Number.isInteger(targetHeight) && targetHeight > 0 ? targetHeight : 0,
-      manualQuality,
+      exactSize,
       audioRenditions,
       startPositionSeconds:
         Number.isFinite(startPositionSeconds) && startPositionSeconds > 0

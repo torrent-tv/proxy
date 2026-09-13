@@ -45,11 +45,18 @@ export class VideoOutput {
   /**
    * @param {object} params
    * @param {number} params.fileIndex - The file the picture is read from.
-   * @param {{ width: number, height: number, manual: boolean } | null} params.encode
+   * @param {{ width: number, height: number, exactSize: boolean } | null} params.encode
    *   Null when the picture is copied — then the output is the source's own
    *   size and nothing about a target box can change it. The box when it is
-   *   re-encoded, with `manual` saying the viewer forced it and the realtime
-   *   budget must not move it.
+   *   re-encoded, with `exactSize` saying that box is produced exactly as asked
+   *   and the realtime budget must not move it.
+   *
+   *   `exactSize` says NOTHING ABOUT WHO ASKED. Every rung of a master playlist
+   *   sets it, whether the viewer picked that rung or the player moved itself,
+   *   because two rungs allowed to drift would land on one height and the
+   *   choice between them would mean nothing. It was called `manual` until
+   *   2026-09-13, and that name was read as "the viewer did this" four times
+   *   over a few weeks — in field logs where the viewer had touched nothing.
    */
   constructor({ fileIndex, encode = null }) {
     this.fileIndex = Number.isInteger(fileIndex) && fileIndex >= 0 ? fileIndex : 0;
@@ -57,7 +64,7 @@ export class VideoOutput {
       ? {
           width: Number.isInteger(encode.width) && encode.width > 0 ? encode.width : 0,
           height: Number.isInteger(encode.height) && encode.height > 0 ? encode.height : 0,
-          manual: encode.manual === true
+          exactSize: encode.exactSize === true
         }
       : null;
   }
@@ -70,7 +77,7 @@ export class VideoOutput {
       return `v=${this.fileIndex}/copy`;
     }
     const box = `${this.encode.width}x${this.encode.height}`;
-    return `v=${this.fileIndex}/enc:${box}:${this.encode.manual ? "manual" : "auto"}`;
+    return `v=${this.fileIndex}/enc:${box}:${this.encode.exactSize ? "exact" : "budget"}`;
   }
 }
 

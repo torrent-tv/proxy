@@ -39,20 +39,20 @@ test("the viewer's viewport does not fork a picture that is copied", () => {
 
 test("two heights of one picture are two outputs", () => {
   const at720 = copiedPicture({
-    video: new VideoOutput({ fileIndex: 0, encode: { width: 1280, height: 720, manual: true } })
+    video: new VideoOutput({ fileIndex: 0, encode: { width: 1280, height: 720, exactSize: true } })
   });
   const at480 = copiedPicture({
-    video: new VideoOutput({ fileIndex: 0, encode: { width: 854, height: 480, manual: true } })
+    video: new VideoOutput({ fileIndex: 0, encode: { width: 854, height: 480, exactSize: true } })
   });
   assert.notEqual(at720.toKey(), at480.toKey());
 });
 
-test("a height the viewer forced is not the same output as one the budget may move", () => {
+test("a height produced exactly is not the same output as one the budget may move", () => {
   const forced = copiedPicture({
-    video: new VideoOutput({ fileIndex: 0, encode: { width: 1280, height: 720, manual: true } })
+    video: new VideoOutput({ fileIndex: 0, encode: { width: 1280, height: 720, exactSize: true } })
   });
   const chosen = copiedPicture({
-    video: new VideoOutput({ fileIndex: 0, encode: { width: 1280, height: 720, manual: false } })
+    video: new VideoOutput({ fileIndex: 0, encode: { width: 1280, height: 720, exactSize: false } })
   });
   assert.notEqual(forced.toKey(), chosen.toKey());
 });

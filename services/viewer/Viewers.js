@@ -202,6 +202,50 @@ export class Viewers {
   }
 
   /**
+   * This viewer has subtitles switched on for this file.
+   *
+   * Said by the request that turns them on, which is the only place that knows
+   * both the person and the file. Registering it here rather than against a
+   * channel is what makes it survive a reconnect and a deliberate rotation of
+   * the association.
+   *
+   * @param {string} consumerId
+   * @param {string} sourceKey
+   * @param {number} fileIndex
+   * @returns {boolean} Whether anybody by that name is known to want them.
+   */
+  wantsCues(consumerId, sourceKey, fileIndex) {
+    const viewer = consumerId ? this.#byId.get(consumerId) : null;
+    if (!viewer || !sourceKey || !Number.isInteger(fileIndex)) {
+      return false;
+    }
+    viewer.wantsCuesFor.add(`${sourceKey}:${fileIndex}`);
+    return true;
+  }
+
+  /**
+   * Who has subtitles switched on for this file.
+   *
+   * The answer is a list of NAMES. Whoever delivers to them resolves a name to
+   * whatever channel that person is reachable on right now, which is the whole
+   * point: the recipients outlive the connection.
+   *
+   * @param {string} sourceKey
+   * @param {number} fileIndex
+   * @returns {string[]}
+   */
+  wantingCues(sourceKey, fileIndex) {
+    const key = `${sourceKey}:${fileIndex}`;
+    const names = [];
+    for (const [consumerId, viewer] of this.#byId) {
+      if (viewer.wantsCuesFor.has(key)) {
+        names.push(consumerId);
+      }
+    }
+    return names;
+  }
+
+  /**
    * How many named viewers are watching anything. For the log line and for a
    * check that the registry does not grow.
    *

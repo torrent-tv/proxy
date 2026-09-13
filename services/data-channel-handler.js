@@ -45,7 +45,6 @@
 
 /** @import { DataChannel } from 'node-datachannel' */
 
-import { deriveSourceKey } from "./torrent-source-key.js";
 import { createDeliveryProbe, PROBE_INTERVAL_MS } from "./delivery-probe.js";
 
 /**
@@ -649,7 +648,12 @@ export function createDataChannelHandler({
   proxyPort,
   onLog,
   getTransportSnapshot,
-  sourceRegistry,
+  // Who wants pushed subtitle cues for a file, BY NAME. A plain function
+  // returning opaque ids: this layer never learns what a viewer is, and the
+  // subscription it used to hold against a channel — and had to sniff
+  // `/api/subtitles` to build — now belongs to the person and outlives the
+  // channel, a reconnect and a deliberate rotation alike.
+  viewersWantingCues = () => [],
   witness,
   // Reads usrsctp's own association state (services/usrsctp-state.js) the
   // moment a wedge is declared, from either detector below. Optional: a host
@@ -709,40 +713,30 @@ export function createDataChannelHandler({
     }
   }
   /**
-   * Channels currently interested in one file's subtitle cues, keyed by
-   * `sourceKey:fileIndex`. Populated the moment a browser asks for an
-   * embedded track — there is no separate subscribe message on the wire, the
-   * existing `/api/subtitles` request already says which file a viewer opened
-   * subtitles for. Pruned on channel close and, defensively, on a failed send.
+   * The channel each viewer is reachable on right now, by the name the far end
+   * presented when it opened.
    *
-   * @type {Map<string, Set<DataChannel>>}
+   * The transport knows a NAME and nothing else about a viewer: what it means,
+   * who holds it and what they are watching are somebody else's facts. Keeping
+   * only "this name is reachable here" is what lets a subscription made once
+   * outlive the channel it was made on — a reconnect, and a rotation done on
+   * purpose, both just rewrite this entry.
+   *
+   * @type {Map<string, DataChannel>}
    */
-  const subtitleSubscribers = new Map();
+  const channelOfViewer = new Map();
 
   /**
-   * @param {string} sourceKey
-   * @param {number} fileIndex
+   * Forget every name that was reachable on this channel.
+   *
    * @param {DataChannel} channel
    * @returns {void}
    */
-  function subscribeSubtitles(sourceKey, fileIndex, channel) {
-    const key = `${sourceKey}:${fileIndex}`;
-    let set = subtitleSubscribers.get(key);
-    if (!set) {
-      set = new Set();
-      subtitleSubscribers.set(key, set);
-    }
-    const isNew = !set.has(channel);
-    set.add(channel);
-    if (isNew) {
-      log(`[dc] subtitle push: channel subscribed to ${key} (${set.size} channel(s) now)`);
-    }
-  }
-
-  /** @param {DataChannel} channel */
-  function unsubscribeSubtitlesAll(channel) {
-    for (const set of subtitleSubscribers.values()) {
-      set.delete(channel);
+  function forgetChannel(channel) {
+    for (const [consumerId, on] of channelOfViewer) {
+      if (on === channel) {
+        channelOfViewer.delete(consumerId);
+      }
     }
   }
 
@@ -758,30 +752,37 @@ export function createDataChannelHandler({
    * @returns {void}
    */
   function publishSubtitleCues({ sourceKey, fileIndex, trackIndex, cues, language, detectedLanguage, cursor }) {
-    const set = subtitleSubscribers.get(`${sourceKey}:${fileIndex}`);
-    if (!set || set.size === 0) {
+    const names = viewersWantingCues(sourceKey, fileIndex);
+    if (names.length === 0) {
       log(
         `[dc] subtitle push: ${cues.length} cue(s) for ${sourceKey.slice(0, 8)}:${fileIndex} track ${trackIndex} ` +
-        "found no subscribed channel"
+        "found nobody who wants them"
       );
       return;
     }
-    const message = { type: "subtitle-cues", fileIndex, trackIndex, cues, language, detectedLanguage, cursor };
-    const total = set.size;
+    const message = JSON.stringify({
+      type: "subtitle-cues", fileIndex, trackIndex, cues, language, detectedLanguage, cursor
+    });
     let sent = 0;
-    for (const channel of set) {
+    for (const consumerId of names) {
+      const channel = channelOfViewer.get(consumerId);
+      if (!channel) {
+        // Subscribed but not reachable this instant — between connections, or
+        // rotating. Nothing is dropped: they are still subscribed, and the walk
+        // keeps a per-viewer cursor, so what they missed comes on the next ask.
+        continue;
+      }
       try {
-        channel.sendMessage(JSON.stringify(message));
+        channel.sendMessage(message);
         sent += 1;
       } catch {
-        // Closed between the subscription and this send; onClosed will not
-        // fire for a channel that is already gone, so drop it here too.
-        set.delete(channel);
+        // Closed between the lookup and the send. The subscription belongs to
+        // the person and stays; only this delivery is lost.
       }
     }
     log(
       `[dc] subtitle push: sent ${cues.length} cue(s) for ${sourceKey.slice(0, 8)}:${fileIndex} track ${trackIndex} ` +
-      `to ${sent}/${total} channel(s)`
+      `to ${sent}/${names.length} viewer(s)`
     );
   }
 
@@ -984,6 +985,7 @@ export function createDataChannelHandler({
         const isNew = !known.has(message.consumerId);
         known.add(message.consumerId);
         viewersOnConnection.set(sessionId, known);
+        channelOfViewer.set(message.consumerId, channel);
         if (isNew) {
           log(`[dc] Session ${tag}: viewer ${message.consumerId} is on this connection`);
         }
@@ -1022,7 +1024,7 @@ export function createDataChannelHandler({
         clearTimeout(entry.timer);
       }
       partials.clear();
-      unsubscribeSubtitlesAll(channel);
+      forgetChannel(channel);
       log(`[dc] Session ${tag}: channel closed`);
       // The ordinary way a viewer leaves, and the only one that is immediate.
       // Everything else — a silence long enough to be called an absence, the
@@ -1058,45 +1060,6 @@ export function createDataChannelHandler({
       return;
     }
 
-    // Piggy-backs on the browser's own request for an EMBEDDED track — no
-    // separate subscribe message. `trackIndex` is what tells the two request
-    // shapes apart: an external subtitle FILE (no trackIndex) names a
-    // different file's own index in `fileIndex` — the subtitle file's, not the
-    // video's — and subscribing under that would just be a key nothing ever
-    // publishes to (an external file is one whole-file read, not something
-    // this walks incrementally). `fileIndex` alone would also scope this to
-    // the wrong grain for the real case — a torrent can carry several playable
-    // files — so the pair is what a push is ever addressed to.
-    //
-    // The browser's `sourceKey` is a REGISTRY key — a hash of the raw request
-    // bytes, one per (magnet-or-.torrent, this API session). The torrent pool
-    // publishes under its OWN key — the content's infohash, deliberately the
-    // SAME for a magnet and a `.torrent` naming the same film, so the two
-    // share one swarm (item 10). The two are different strings for the same
-    // torrent whenever a source was added by its `.torrent` file (a `.torrent`
-    // and a magnet are different request bytes, same infohash) — subscribing
-    // under the registry key found no publisher for that reason, not because
-    // nothing was ever read: field case 2026-08-22, cues were found and
-    // logged, every push answered "found no subscribed channel". Resolved to
-    // the pool's key here, the one place both are in hand.
-    if (path === "/api/subtitles" && typeof query === "string") {
-      const params = new URLSearchParams(query);
-      const registrySourceKey = params.get("sourceKey");
-      const fileIndex = Number(params.get("fileIndex"));
-      const hasTrackIndex = params.get("trackIndex") !== null && params.get("trackIndex") !== "";
-      if (registrySourceKey && Number.isInteger(fileIndex) && hasTrackIndex) {
-        const record = sourceRegistry?.get(registrySourceKey);
-        if (record) {
-          try {
-            const poolSourceKey = await deriveSourceKey(record.sourceType, record.source);
-            subscribeSubtitles(poolSourceKey, fileIndex, channel);
-          } catch (error) {
-            log(`[dc] subtitle push: could not resolve ${registrySourceKey.slice(0, 8)} to a pool key: ` +
-              `${error instanceof Error ? error.message : error}`);
-          }
-        }
-      }
-    }
 
     const queryInfo = query ? `?${query}` : "";
     const bodyInfo =

@@ -22,6 +22,8 @@ import { handleApiSourceStatsGet } from "./routes/api/sources/stats/get.js";
 import { handleApiSourceFilesGet } from "./routes/api/sources/files/get.js";
 import { handleApiSourceWarmPost } from "./routes/api/sources/warm/post.js";
 import { handleApiPlaybackPlanPost } from "./routes/api/playback-plan/post.js";
+import { handleApiClientLogsPost } from "./routes/api/client-logs/post.js";
+import { createClientLogFiles } from "./utils/client-log-file.js";
 import { handleApiSubtitlesGet } from "./routes/api/subtitles/get.js";
 import { handleApiTranscodeSessionsPost } from "./routes/api/transcode-sessions/post.js";
 import { handleApiTranscodeSessionsProgressGet } from "./routes/api/transcode-sessions/progress/get.js";
@@ -84,7 +86,11 @@ function buildPortCandidates(startPort, maxAttempts = 51) {
  */
 export async function startProxyServer({
   host, port, transcodeAudio, ffmpegBin, maxDiskBytes, memoryBytes, segmentFormat, stateDir, onSubtitleCues,
-  deliverySink = false
+  deliverySink = false,
+  // Where the proxy writes its own log. Its DIRECTORY is what matters here:
+  // the browser's half of every session is written beside it, so the two are
+  // on one durable disk and join by name.
+  logFile = ""
 }) {
   const app = Fastify({
     // No practical body-size limit — the proxy server is localhost-only and
@@ -345,6 +351,12 @@ export async function startProxyServer({
   );
   app.post("/api/sources/:sourceKey/warm", async (req, reply) =>
     handleApiSourceWarmPost(req, reply, { sourceRegistry, torrentPool })
+  );
+  // The browser's own log, kept beside the proxy's. See the route's own file
+  // for why it is here and not only on the registry server.
+  const clientLogs = logFile ? createClientLogFiles(logFile) : null;
+  app.post("/api/client-logs", async (req, reply) =>
+    handleApiClientLogsPost(req, reply, { clientLogs })
   );
   app.post("/api/playback-plan", async (req, reply) =>
     handleApiPlaybackPlanPost(req, reply, { playbackPlanner })

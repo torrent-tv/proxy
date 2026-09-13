@@ -323,6 +323,7 @@ try {
     memoryBytes,
     segmentFormat: options.segmentFormat,
     stateDir: options.stateDir,
+    logFile: options.logFile ?? "",
     deliverySink: options.deliverySink === true,
     // Late-bound the same way `webRtcManager` is below: the torrent pool is
     // built inside `startProxyServer`, before `dataChannelHandler` — the

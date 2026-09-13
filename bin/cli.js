@@ -86,6 +86,10 @@ program
   .option("--no-port-mapping", "Disable automatic UPnP/NAT-PMP port mapping")
   .option("--delivery-sink", "Serve /api/delivery-sink, a torrent-free byte stream for delivery testing")
   .option(
+    "--send-chunk-bytes <bytes>",
+    "Size of one data-channel message when sending a response body (0 = whatever the body read hands over, ~64KB). For measuring whether the delivery wedge depends on that size."
+  )
+  .option(
     "--usrsctp-state",
     "Read usrsctp's association state with gdb when a wedge is declared. OFF by default: gdb attaches to THIS process and stops every thread of it while it works."
   )
@@ -557,6 +561,10 @@ try {
     // transmit death (roadmap item 10, 2026-08-24) gets its evidence.
     witness: packetWitness,
     usrsctpState: usrsctpStateReader,
+    // How large one data-channel message is. The wedge of 2026-09-12 arrived
+    // mid-message, and whether it depends on this size is the one thing no
+    // reading has settled — so it is measured rather than reasoned about.
+    sendChunkBytes: Number.parseInt(options.sendChunkBytes ?? "0", 10) || 0,
     // Presence, from the one thing that knows it. Late-bound for the same
     // reason as the transport snapshot above: the manager is built inside
     // `startProxyServer`, with this handler already in hand.

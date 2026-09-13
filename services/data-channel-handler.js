@@ -582,6 +582,69 @@ export function encodeFrame(idBytes, bytes, done) {
   return frame;
 }
 
+/**
+ * Reshapes a body into messages of `sizeBytes` each, handing every finished one
+ * to `sendOne`. A size of zero passes each body read through untouched, which
+ * is what the field does today — 10 657 210 bytes over 163 messages, so 65 382
+ * each, measured 2026-09-12.
+ *
+ * Only the SIZE changes: the same bytes reach the far end in the same order,
+ * over the same channel. That is what makes a comparison between two sizes a
+ * comparison of one thing, and it is why the wedge's dependence on the size can
+ * be measured at all — the wedge of 2026-09-12 arrived in the middle of one
+ * message, with 63 % of a segment on the wire and then nothing.
+ *
+ * @param {(bytes: Uint8Array) => void} sendOne - Given each finished message.
+ * @param {number}                      sizeBytes - 0 to leave reads as they are.
+ * @returns {{ push: (bytes: Uint8Array) => number, flush: () => number }}
+ *   Both answer how many messages they sent, so a caller counting messages
+ *   counts messages rather than body reads.
+ */
+export function bodySender(sendOne, sizeBytes) {
+  if (!(sizeBytes > 0)) {
+    return {
+      push(bytes) {
+        sendOne(bytes);
+        return 1;
+      },
+      flush() {
+        return 0;
+      }
+    };
+  }
+  /** @type {Uint8Array[]} */
+  let held = [];
+  let heldBytes = 0;
+  const release = () => {
+    const message = held.length === 1 ? held[0] : Buffer.concat(held);
+    held = [];
+    heldBytes = 0;
+    sendOne(message);
+  };
+  return {
+    push(bytes) {
+      let sent = 0;
+      let offset = 0;
+      while (offset < bytes.length) {
+        const take = Math.min(sizeBytes - heldBytes, bytes.length - offset);
+        held.push(bytes.subarray(offset, offset + take));
+        heldBytes += take;
+        offset += take;
+        if (heldBytes === sizeBytes) {
+          release();
+          sent += 1;
+        }
+      }
+      return sent;
+    },
+    flush() {
+      if (heldBytes === 0) return 0;
+      release();
+      return 1;
+    }
+  };
+}
+
 export function createDataChannelHandler({
   proxyPort,
   onLog,
@@ -599,7 +662,14 @@ export function createDataChannelHandler({
   // released a viewer when their connection closed: the only exits were the
   // browser's own `release` and a silence long enough to be called an absence.
   onViewerPresent = () => {},
-  onViewerGone = () => {}
+  onViewerGone = () => {},
+  // The size of one data-channel message carrying body bytes. Zero keeps
+  // whatever the body read hands over, which in the field is 65 382 bytes —
+  // 10 657 210 over 163 chunks, measured 2026-09-12. It is settable because
+  // that day's wedge arrived in the MIDDLE of one message (63 % of a segment
+  // on the wire, then nothing), and whether the fault depends on the size is
+  // the one branch no capture has been able to close.
+  sendChunkBytes = 0
 }) {
   /**
    * Who is on each connection, by WebRTC session id.
@@ -1092,12 +1162,14 @@ export function createDataChannelHandler({
       let readMs = 0;
       let sendMs2 = 0;
       let drainMs = 0;
+      const body = bodySender((bytes) => sendChunk(channel, requestId, bytes, false), sendChunkBytes);
       resetEventLoopDelay();
       while (true) {
         const readStartedAt = performance.now();
         const { done, value } = await reader.read();
         readMs += performance.now() - readStartedAt;
         if (done) {
+          chunks += body.flush();
           sendChunk(channel, requestId, null, true);
           const elapsedMs = Date.now() - sendStartedAt;
           let bufferedNow = 0;
@@ -1107,6 +1179,9 @@ export function createDataChannelHandler({
           log(
             `[net-debug] sent ${path}${queryInfo} bytes=${totalBytes} fetchMs=${fetchMs} ` +
               `ttfbMs=${firstByteMs} sendMs=${elapsedMs} chunks=${chunks} ` +
+              // The size of one message, so a reading can be attributed to the
+              // size it was taken at rather than to the run it came from.
+              `msgBytes=${sendChunkBytes > 0 ? sendChunkBytes : "asread"} ` +
               `maxBuffered=${maxBuffered} bufferedAtEnd=${bufferedNow} ` +
               // Where the time went: reading the body from the local route,
               // handing chunks to the channel, or waiting for its queue. Plus
@@ -1120,14 +1195,13 @@ export function createDataChannelHandler({
           break;
         }
         if (firstByteMs < 0) firstByteMs = Date.now() - sendStartedAt;
-        chunks += 1;
         totalBytes += value.length;
         try {
           const b = typeof channel.bufferedAmount === "function" ? channel.bufferedAmount() : 0;
           if (b > maxBuffered) maxBuffered = b;
         } catch { /* ignore */ }
         const sendStepAt = performance.now();
-        sendChunk(channel, requestId, value, false);
+        chunks += body.push(value);
         sendMs2 += performance.now() - sendStepAt;
         // Backpressure: do not keep queuing chunks once the channel's outgoing
         // buffer is large — wait for it to drain. Prevents the SCTP send buffer

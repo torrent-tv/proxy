@@ -42,7 +42,7 @@ async function managerAfterSeek() {
     localBindHost: "127.0.0.1",
     localPort: 9090
   });
-  manager.sessionsById.set(SESSION_ID, {
+  const session = {
     id: SESSION_ID,
     dirPath,
     // Where this file is cut, held by the file. A fixture that stated it
@@ -66,9 +66,11 @@ async function managerAfterSeek() {
     segmentCount: 399,
     encodeStartIndex: SEGMENT_AT_SEEK,
     waitEpoch: 1,
-    furthestViewerSeconds: SEEK_TO_SECONDS,
     runState: "PRODUCING"
-  });
+  };
+  manager.sessionsById.set(SESSION_ID, session);
+  viewerOf(session, "").moveTo(SEEK_TO_SECONDS);
+  viewerOf(session, "").playing = false;
   return { manager, dirPath };
 }
 
@@ -141,15 +143,15 @@ test("the viewer who made the request is the one it is judged against", async ()
   const { manager, dirPath } = await managerAfterSeek();
   const session = manager.sessionsById.get(SESSION_ID);
   session.viewers = new Map();
-  // Two people watching one copied picture. The shared position belongs to the
-  // one in front — it is the furthest segment anybody asked for — and the one
-  // behind is a hundred segments back, waiting for a segment there.
+  // Two people watching one copied picture: one at the seek target, one a
+  // hundred segments back and waiting for a segment there. Asked about nobody
+  // in particular the answer is the FURTHEST of them, because what lies behind
+  // that one has already been made.
   const behind = SEGMENT_AT_SEEK - 100;
-  viewerOf(session, "behind").position = {
-    segment: behind,
-    seconds: behind * SEGMENT_SECONDS,
-    at: Date.now()
-  };
+  viewerOf(session, "behind").moveTo(behind * SEGMENT_SECONDS);
+  viewerOf(session, "behind").playing = false;
+  viewerOf(session, "ahead").moveTo(SEEK_TO_SECONDS);
+  viewerOf(session, "ahead").playing = false;
 
   assert.equal(
     manager.requestStillWanted(SESSION_ID, `segment-${String(behind).padStart(5, "0")}.mp4`, "behind"),
@@ -159,7 +161,7 @@ test("the viewer who made the request is the one it is judged against", async ()
   assert.equal(
     manager.requestStillWanted(SESSION_ID, `segment-${String(behind).padStart(5, "0")}.mp4`),
     false,
-    "unnamed, it can only be judged against the shared position — which is the leader's"
+    "unnamed, it is judged against the furthest viewer, which is the leader"
   );
 
   await rm(dirPath, { recursive: true, force: true });

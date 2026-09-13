@@ -64,20 +64,30 @@ export class Viewer {
     /** A soundtrack being prepared for the same reason. @type {string | null} */
     this.warmingAudioId = null;
     /**
-     * Where they are.
+     * Where their picture stood when they last said so, and when they said it.
      *
-     * Set when they arrive, from the position their own request named, and
-     * moved by the segments they ask for and by the seeks they report. Never
-     * null for a viewer this process has met: "we do not know where they are"
-     * is not a state a viewer can be in, because a viewer arrives by asking for
+     * ONE FACT WITH ONE WRITER: the viewer. It is set when they arrive — from
+     * the position their own create request named — and moved only by what they
+     * state afterwards, a seek or a report carrying their playhead. Never null
+     * for a viewer this process has met, because a viewer arrives by asking for
      * a position.
      *
-     * `seeked` holds a position they STATED, for as long as they stay there,
-     * which is the distinction a cold open's soundtrack placement turns on: a
-     * request is evidence about where their player is reading, a seek is the
-     * viewer saying where they are.
+     * A REQUEST FOR A SEGMENT IS NOT A POSITION and never writes here. It says
+     * how far their buffer has reached, which is a different quantity and one
+     * nothing in the plan needs: a segment either exists and is served, or does
+     * not and is waited for.
      *
-     * @type {{ segment: number, seconds: number, at: number, seeked?: number | null } | null}
+     * Two writers is what this replaced, and the cost is measured. Until
+     * 2026-09-13 a seek wrote `seeked` while a request wrote `seconds`, and
+     * `positionSeconds` preferred whichever was set — so the two took turns and
+     * the priority map jumped back and forth by one or two segments several
+     * times a second. Field that day, one output over one second:
+     * `p100:#9..#10`, `p100:#18..#20`, `p100:#16..#18`, `p100:#18..#20`, with
+     * the second viewer stopped dead at 1673.6 s throughout. The encoder
+     * placement followed the map, as it must, and the machine spent six minutes
+     * on 77 starts and 141 stops against one normal end.
+     *
+     * @type {{ seconds: number, at: number } | null}
      */
     this.position = null;
     /**
@@ -181,7 +191,7 @@ export class Viewer {
     if (!Number.isFinite(seconds) || seconds < 0) {
       return;
     }
-    this.position = { seconds, at: now, seeked: seconds };
+    this.position = { seconds, at: now };
     this.lastSeenAt = now;
   }
 
@@ -256,21 +266,21 @@ export class Viewer {
   }
 
   /**
-   * Whether this viewer is still watching.
+   * Whether this viewer is here.
    *
-   * Two ways to stop being present, and neither of them is "asked for nothing
-   * recently". Something must have SAID they are gone, or nothing at all must
-   * have been heard from them for longer than any silence a watching viewer can
-   * produce.
+   * PRESENCE IS THE CONNECTION, AND ONLY THE CONNECTION. They are here from the
+   * moment they are known until something SAYS they are gone: the browser
+   * releasing the session, or their connection closing. Nothing else, and in
+   * particular not silence.
    *
-   * The second half exists only because the connection cannot always say: an
-   * `onClosed` on a data channel does not always come, and a transport that is
-   * not a data channel at all may have nothing to say. It is a backstop for a
-   * missing statement, not the ordinary way a viewer leaves.
+   * Silence used to end it, after an interval longer than "any silence a
+   * watching viewer can produce" — and there is no such interval. A viewer who
+   * has paused, whose tab is hidden and whose timers the browser has throttled,
+   * or who holds two minutes of cushion, all say nothing for as long as they
+   * like and are all still watching. Deciding presence from that made it a
+   * guess with a threshold; deciding it from the connection makes it a fact
+   * with an owner.
    *
-   * @param {number} now
-   * @param {number} staleAfterMs - Longer than any silence a watching viewer
-   *   can produce. Derived from the cushion, never chosen here.
    * @returns {boolean}
    */
   /**
@@ -290,11 +300,8 @@ export class Viewer {
     return this.playing !== false && this.onScreen !== false;
   }
 
-  isPresent(now, staleAfterMs) {
-    if (this.gone) {
-      return false;
-    }
-    return now - this.lastSeenAt <= staleAfterMs;
+  isPresent() {
+    return this.gone !== true;
   }
 
   /**
@@ -308,16 +315,36 @@ export class Viewer {
   }
 
   /**
-   * Where this viewer is, in seconds, or null when they have somehow never been
-   * placed — which for a viewer created through `Viewers.of` cannot happen.
+   * Where this viewer is NOW, in seconds of film.
    *
-   * @returns {number | null}
+   * A FUNCTION OF TIME, not a stored number. A viewer whose picture is moving
+   * covers a second of film every second, so between the moments they speak
+   * their position is known exactly — it is where they last were plus the time
+   * since. A viewer whose picture is stopped covers nothing and stays where
+   * they are, which is the same formula with the rate at zero.
+   *
+   *   position(now) = stated + rate * (now - statedAt),   rate = playing ? 1 : 0
+   *
+   * Held as a stored number instead, it was a staircase: flat for the ten
+   * seconds between reports and then a jump, so everything derived from it —
+   * the priority map, and through the map every encoder — changed in steps for
+   * a viewer who was moving smoothly. And because two writers were filling that
+   * number in turn, the steps went backwards as often as forwards.
+   *
+   * There is nothing to tune here and no state to keep: one reading, one clock,
+   * one rate the page itself states.
+   *
+   * @param {number} [now]
+   * @returns {number | null} Null only for a viewer never placed, which for one
+   *   created through `Viewers.of` cannot happen.
    */
-  positionSeconds() {
+  positionSeconds(now = Date.now()) {
     if (this.position === null) {
       return null;
     }
-    return Number.isFinite(this.position.seeked) ? this.position.seeked : this.position.seconds;
+    const rate = this.playing ? 1 : 0;
+    const elapsedSec = Math.max(0, (now - this.position.at) / 1000);
+    return this.position.seconds + rate * elapsedSec;
   }
 }
 

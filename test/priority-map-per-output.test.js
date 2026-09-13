@@ -152,9 +152,10 @@ test("an output everybody has left is stated as empty, not left as it was", () =
   assert.deepEqual(runsOf(priority.mapForOutput("out:1080")), []);
 });
 
-test("a viewer nothing has been heard from is not watching anything", () => {
-  // The backstop for a viewer who never said they were leaving: a browser whose
-  // tab is gone releases nothing, and their own silence is what expires.
+test("a viewer who has gone is not watching anything", () => {
+  // Presence is the connection and nothing else. Silence — however long — is a
+  // paused viewer, a throttled hidden tab, or a full cushion, and none of those
+  // is leaving; what ends it is a statement.
   const picture = outputOf({ id: "pic", outputKey: "out:1080" });
   const live = new LiveOutputs({ sessionsById: new Map([["pic", picture]]) });
   const viewers = new Viewers();
@@ -166,12 +167,9 @@ test("a viewer nothing has been heard from is not watching anything", () => {
   });
   const person = viewers.of(picture, "p");
   person.moveTo(300);
+  viewers.leaves(picture, "p");
 
-  priority.publishFor({
-    sessionGroups: [[picture]],
-    staleAfterMs: STALE_AFTER_MS,
-    now: person.lastSeenAt + STALE_AFTER_MS + 1
-  });
+  priority.publishFor({ sessionGroups: [[picture]], now: Date.now() });
 
   assert.deepEqual(runsOf(priority.mapForOutput("out:1080")), []);
 });

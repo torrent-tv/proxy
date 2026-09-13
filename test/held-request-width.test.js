@@ -17,6 +17,7 @@ import os from "node:os";
 import path from "node:path";
 import { HlsSessionManager } from "../services/hls-session-manager.js";
 import { fmp4Format } from "../services/segment-formats/fmp4.js";
+import { viewerOf } from "../services/viewer/Viewer.js";
 
 const SESSION_ID = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
 const SEGMENT_SECONDS = 4;
@@ -32,7 +33,7 @@ async function managerWithSession() {
     localBindHost: "127.0.0.1",
     localPort: 9090
   });
-  manager.sessionsById.set(SESSION_ID, {
+  const session = {
     id: SESSION_ID,
     dirPath,
     // Where this file is cut, held by the file. A fixture that stated it
@@ -44,10 +45,12 @@ async function managerWithSession() {
     state: "ready",
     segmentFormat: fmp4Format,
     segmentCount: 200,
-    useSyntheticPlaylist: true,
-    // The viewer is at segment #25.
-    furthestViewerSeconds: 100
-  });
+    useSyntheticPlaylist: true
+  };
+  manager.sessionsById.set(SESSION_ID, session);
+  // The viewer is at segment #25, and says so themselves.
+  viewerOf(session, "").moveTo(25 * SEGMENT_SECONDS);
+  viewerOf(session, "").playing = false;
   return { manager, dirPath };
 }
 

@@ -360,3 +360,31 @@ export function inWorkingOrder(runs) {
     (left, right) => right.priority - left.priority || left.from - right.from
   );
 }
+
+/**
+ * The earliest second of film anybody is waiting on, or null when nobody is.
+ *
+ * WHY A SOUNDTRACK ASKS THE MAP AND NOT A VIEWER. Sound is produced for the
+ * same reason a picture is — somebody is about to reach it — and the map is
+ * where that is already stated, in seconds of film, merged over everybody
+ * watching. Reading it from a viewer instead means the encoding layer holds a
+ * person, and then every question about which person it is (the earliest of
+ * two, the one on this rung, the one who has not reported yet) has to be
+ * answered again in a second place. The map answers it once.
+ *
+ * The EARLIEST among the most urgent, because a track started at the leader's
+ * position has nothing to give the viewer behind them, and the map's own order
+ * — most urgent first, earliest film first within a priority — already says
+ * which that is.
+ *
+ * @param {DemandZone[]} runs - From {@link runsOf}.
+ * @returns {number | null} Seconds.
+ */
+export function earliestUrgentSecond(runs) {
+  const wanted = (runs ?? []).filter((zone) => zone && !zone.behind);
+  if (wanted.length === 0) {
+    return null;
+  }
+  const top = Math.max(...wanted.map((zone) => Number(zone.priority) || 0));
+  return Math.min(...wanted.filter((zone) => (Number(zone.priority) || 0) === top).map((zone) => zone.from));
+}

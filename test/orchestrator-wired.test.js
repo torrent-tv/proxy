@@ -109,21 +109,27 @@ test("what a viewer waits for reaches the plan without their name", (t) => {
   assert.ok(wanted.some((zone) => zone.to > 5), "and the cushion in front of them");
 });
 
-test("a viewer nothing has been heard from at all stops being waited for", (t) => {
+test("a viewer who has gone stops being waited for, and silence alone never counts", (t) => {
   const { manager, root, dirPath } = managerWithAnOutput();
   t.after(() => rmSync(root, { recursive: true, force: true }));
 
   const session = sessionOn({ id: "one", dirPath });
   manager.sessionsById.set(session.id, session);
-  const gone = viewerOf(session, "gone");
-  gone.position = { segment: 5, seconds: 20, at: Date.now() - 10 * 60 * 1000 };
-  // What decides it is when they were last HEARD FROM, not when they last
-  // asked for a segment: a viewer holding a full cushion asks for nothing for
-  // as long as it takes to drain, and is no less present for it.
-  gone.seen(Date.now() - 10 * 60 * 1000);
+  const person = viewerOf(session, "gone");
+  person.moveTo(20, Date.now() - 10 * 60 * 1000);
+  person.playing = false;
+  person.seen(Date.now() - 10 * 60 * 1000);
 
+  // TEN MINUTES OF SILENCE IS NOT LEAVING. A paused viewer, a hidden tab whose
+  // timers the browser has throttled, and one holding a full cushion are all
+  // silent and all still watching, so what they want is still wanted.
   manager.planEncodersNow();
+  assert.ok(manager.encodeOrchestrator.demand.mapOn(KEY).length > 0, "still watching");
 
+  // Something SAYS they are gone — the browser released the session, or their
+  // connection closed. That is the only way out.
+  manager.viewers.leaves(session, "gone");
+  manager.planEncodersNow();
   assert.equal(manager.encodeOrchestrator.demand.mapOn(KEY).length, 0);
 });
 

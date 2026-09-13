@@ -23,6 +23,7 @@ import { speedFromReadings } from "./encoder-readings.js";
 import { availableShareFrom } from "./available-share.js";
 import { contentionPenalty } from "./encode/contention.js";
 import { minimumBufferFrom } from "./supply-margin.js";
+import { earliestUrgentSecond, runsOf } from "./priority/PriorityMap.js";
 import { PriorityOrchestrator } from "./priority/PriorityOrchestrator.js";
 import { baseDrawFrom, costPerMegabyteFrom } from "./torrent-cost.js";
 import { medianOf, movedBeyondScatter, scatterOf } from "./learned-median.js";
@@ -88,7 +89,7 @@ import {
 // — did not move when the code did.
 export { ffmpegSeconds, onKeyframeGridFor, seekLandingOffsetFor, segmentCutTimesFrom };
 import { viewersOf } from "./viewer/Viewer.js";
-import { viewerSegmentsOn } from "./viewer/positions.js";
+import { earliestViewerSecondsOn, viewerSecondsOn, viewerSegmentsOn } from "./viewer/positions.js";
 import { Viewers } from "./viewer/Viewers.js";
 import { LiveOutputs } from "./output/LiveOutputs.js";
 import { variantHeightsFor } from "./output/ladder.js";
@@ -1001,91 +1002,7 @@ export function describeFfmpegArgs(args) {
 }
 
 
-/**
- * Where the viewer is, from the three things that can say so.
- *
- * In order, because each is a better answer than the next and each may be
- * absent:
- *
- * 1. a position they seeked to — they said it themselves;
- * 2. the start of the last segment this session actually served — where the
- *    reading is;
- * 3. **the position the file was OPENED at.**
- *
- * The third used to be missing, and its absence made the answer zero at exactly
- * the moment it is asked. Both of the others are written by things that have
- * not happened yet when a file is opened at a position — the first by a seek,
- * the second by a segment served — so a session created to begin at 3130 s
- * answered "the viewer is at the beginning". That is not a cautious default; it
- * is a wrong answer, and the soundtrack acts on it.
- *
- * Field 2026-08-21, `Minions.and.Monsters.1080p.mkv` reopened from the address
- * bar at 52:07: the picture session was created at `start=3130s` and ran from
- * segment #781; half a second later the audio rendition was created from this
- * reading — `start=0s`, no `-ss` at all — and set about re-encoding the film
- * from the beginning. The player asked both for #782. The picture had it. The
- * sound reached 57.5 s of 3130 in the 45 s the request lasted, then answered
- * 404, which the viewer was shown as "the proxy accepted the request but sent
- * no video".
- *
- * @param {{ seeked?: number, lastRequestedStart?: number | null, openedAt?: number }} readings
- * @returns {number} Seconds, never negative.
- */
-/**
- * Where each viewer of a session is, creating the map when a session was built
- * without one.
- *
- * Every session this class makes carries it, but a session object is also
- * assembled by hand in a dozen tests, and code that writes a field should not
- * depend on some other code having created it first.
- *
- * @param {HlsSession} session
- * @returns {Map<string, { segment: number, seconds: number, at: number }>}
- */
-function headsOf(session) {
-  return viewersOf(session);
-}
 
-/**
- * WHICH of the three readings answered, which is a different question from what
- * the answer was.
- *
- * It matters for one thing: `openedAt` is not a request edge. The other two are
- * — a seek and a requested segment are both places a viewer has moved to while
- * holding a buffer, so the picture is behind them by however deep that buffer
- * is. `openedAt` is where a session was created and nothing has been asked for
- * since, so the picture is exactly there and there is nothing to subtract.
- * Reading the number without knowing which of the three it was is what started
- * a cold open's audio two minutes early on 2026-08-31.
- *
- * @param {{ seeked?: number, lastRequestedStart?: number | null, openedAt?: number }} readings
- * @returns {"seeked" | "requested" | "opened" | "none"}
- */
-export function viewerPositionSource({ seeked, lastRequestedStart, openedAt }) {
-  if (Number.isFinite(seeked) && seeked > 0) {
-    return "seeked";
-  }
-  if (Number.isFinite(lastRequestedStart) && lastRequestedStart > 0) {
-    return "requested";
-  }
-  if (Number.isFinite(openedAt) && openedAt > 0) {
-    return "opened";
-  }
-  return "none";
-}
-
-export function resolveViewerPosition({ seeked, lastRequestedStart, openedAt }) {
-  if (Number.isFinite(seeked) && seeked > 0) {
-    return seeked;
-  }
-  if (Number.isFinite(lastRequestedStart) && lastRequestedStart > 0) {
-    return lastRequestedStart;
-  }
-  if (Number.isFinite(openedAt) && openedAt > 0) {
-    return openedAt;
-  }
-  return 0;
-}
 
 /**
  * How far the live boundary table has moved from the one the player holds, said
@@ -1644,7 +1561,7 @@ export class HlsSessionManager {
    * @param {number}  [options.targetHeight=0]           - Target video height (0 = keep source).
    * @param {number}  [options.startPositionSeconds=0]   - Seek start position in seconds.
    * @param {number}  [options.audioTrackIndex=0]        - Type-relative audio track to map (0:a:N).
-   * @param {boolean} [options.manualQuality=false]      - User-forced resolution: encode the target box exactly (capped to source), no budget downscale / runtime downswitch.
+   * @param {boolean} [options.exactSize=false]           - Produce the target box exactly (capped to source), with no budget downscale and no runtime downswitch. Says nothing about who asked: every rung of a master sets it.
    * @returns {Promise<HlsSession>}
    */
   async createOrGetSession({
@@ -1658,7 +1575,7 @@ export class HlsSessionManager {
     targetHeight = 0,
     startPositionSeconds = 0,
     audioTrackIndex = 0,
-    manualQuality = false,
+    exactSize = false,
     // The caller takes its audio from a rendition group, so the picture is
     // encoded without it and each audio track is encoded once for the file
     // instead of once per rung. Off unless asked for: a browser that does not
@@ -1725,7 +1642,7 @@ export class HlsSessionManager {
     // and twenty places assembled its key by hand to reach the caches that are
     // keyed by a file.
     const file = this.sourceFiles.get(sourceKey, fileIndex, fileName);
-    const forceManualQuality = manualQuality === true && transcodeVideo;
+    const forceExactSize = exactSize === true && transcodeVideo;
     // Whether this output carries its sound at all — decided HERE, before the
     // key, and never derived a second time.
     //
@@ -1773,7 +1690,7 @@ export class HlsSessionManager {
               ? {
                   width: normalizedTargetWidth,
                   height: normalizedTargetHeight,
-                  manual: forceManualQuality
+                  exactSize: forceExactSize
                 }
               : null
           })
@@ -2228,7 +2145,7 @@ export class HlsSessionManager {
     // picture that plays beats a correct label that freezes. The rung's NAME is
     // settled separately and does not move with a downshift, so the player goes
     // on addressing it by the height it chose.
-    const encodeBudget = forceManualQuality
+    const encodeBudget = forceExactSize
       ? startAtLadderTop(chosenBudget, outputFps, this.softwarePresetBenchmark, {
           decodeModel: this.decodeCostModel,
           source: sourceDecode,
@@ -2381,7 +2298,7 @@ export class HlsSessionManager {
       // on addressing the rung as 480p — and a request under the old name must
       // not build a second session at a height this host has just refused.
       // Derived from `encodeHeight` when nothing was named, as before.
-      variantHeight: forceManualQuality && normalizedTargetHeight > 0
+      variantHeight: forceExactSize && normalizedTargetHeight > 0
         ? normalizedTargetHeight
         : undefined,
       // Realtime-budget runtime state. The ladder that chose the STARTING rung
@@ -2495,7 +2412,6 @@ export class HlsSessionManager {
       // encoder is currently suspended for running too far past it.
       // See #reportCushions. With several viewers on one session it is the
       // FURTHEST of them, derived from the viewers below.
-      lastRequestedSegment: null,
       // Where each viewer of this session is, separately: the segment they last
       // asked for and the position that implies, or the position they seeked
       // to. One session serves everyone watching a copied picture, and the two
@@ -2590,10 +2506,10 @@ export class HlsSessionManager {
         // ceiling), manual (user-forced, budget off), or unset (keep source).
         `${transcodeVideo && encodeBudget
           ? `enc=${output.encodeWidth}x${output.encodeHeight}@${output.outputFps} ` +
-            `quality=${forceManualQuality ? "manual" : "auto"} ` +
+            `size=${forceExactSize ? "exact" : "budget"} ` +
             `budget=${encodeBudget.ladder ? `rung ${encodeBudget.rungIndex + 1}/${encodeBudget.ladder.length}` : "off"} `
           : ""}` +
-        `${transcodeVideo && !encodeBudget && forceManualQuality ? `enc=${output.encodeWidth || "src"}x${output.encodeHeight || "src"}@${output.outputFps} quality=manual budget=off ` : ""}` +
+        `${transcodeVideo && !encodeBudget && forceExactSize ? `enc=${output.encodeWidth || "src"}x${output.encodeHeight || "src"}@${output.outputFps} size=exact budget=off ` : ""}` +
         // HDR source and whether the tone-map chain was applied (vs washed-out
         // fallback when the filters are missing or on a hardware encoder).
         `${transcodeVideo && mediaInfo.isHdr ? `hdr=1 tonemap=${applyTonemap ? "on" : "off"} ` : ""}` +
@@ -3200,64 +3116,23 @@ export class HlsSessionManager {
    * opposite question — whether a particular held request is still wanted —
    * which cannot be answered from a shared field.
    *
-   * A head is forgotten once it is older than the whole cushion plus a segment:
-   * a viewer who is playing asks for a segment every segment of playback, and
-   * one whose buffer is full asks again by the time it has drained, so a longer
-   * silence than that means they are paused or gone. Neither needs data ahead
-   * of them, so neither should hold the encoder there. The figure is the
-   * proxy's own look-ahead, not a chosen interval.
+   * A REQUEST IS NOT A POSITION. It says the viewer is still here and nothing
+   * more: where they are is what they themselves state, on the viewer, and a
+   * request cannot reach it. Asking for a segment used to write the position,
+   * so two writers filled one field in turn and the priority map jumped
+   * backwards several times a second — measured 2026-09-13, 77 encoder starts
+   * and 141 stops in six minutes while both viewers sat frozen.
+   *
+   * A viewer is forgotten once nothing has been heard from them for longer than
+   * any silence a watching viewer can produce. The figure is the proxy's own
+   * look-ahead, not a chosen interval.
    *
    * @param {HlsSession} session
    * @param {string} consumerId
-   * @param {number} segment
-   * @param {number} seconds
-   * @returns {{ segment: number, seconds: number }} The furthest live head.
+   * @returns {void}
    */
-  #noteConsumerHead(session, consumerId, segment, seconds) {
-    const now = Date.now();
-    const heads = headsOf(session);
-    // What this viewer STATED, kept across their requests. A request is
-    // evidence about where their player is reading; a seek is the viewer saying
-    // where they are, and the two answer different questions — see
-    // `viewerPositionSource`. Only a seek writes it, so a request does not erase
-    // it.
-    const viewer = this.viewers.of(session, consumerId, now);
-    viewer.moveTo(seconds, now);
-    this.planEncodersSoon();
-    const staleAfterMs = this.presenceStaleAfterMs();
-    let furthest = { segment, seconds };
-    for (const [key, other] of heads) {
-      if (!other.isPresent(now, staleAfterMs)) {
-        // Nothing has been heard from them for longer than any silence a
-        // watching viewer can produce — not merely longer than a segment. They
-        // go through the one exit, which also releases what they had claimed of
-        // production.
-        this.#viewerLeaves(session, key);
-        continue;
-      }
-      const theirs = other.positionSeconds();
-      if (theirs !== null && theirs > furthest.seconds) {
-        furthest = { segment: this.#segmentIndexForTime(session, theirs), seconds: theirs };
-      }
-    }
-    return furthest;
-  }
-
-  /**
-   * Where one named viewer is, or null when this session has never heard from
-   * them — an older browser, a transport that cannot carry the id, or a viewer
-   * whose head has expired.
-   *
-   * @param {HlsSession} session
-   * @param {string} consumerId
-   * @returns {number | null} Seconds.
-   */
-  #consumerPositionOf(session, consumerId) {
-    if (!consumerId) {
-      return null;
-    }
-    const head = session.viewers?.get(consumerId)?.position;
-    return head && Number.isFinite(head.seconds) ? head.seconds : null;
+  #noteViewerSeen(session, consumerId) {
+    this.viewers.of(session, consumerId).seen();
   }
 
   /**
@@ -3613,26 +3488,6 @@ export class HlsSessionManager {
   }
 
   /**
-   * How long nothing may be heard from a viewer before this process concludes
-   * they are gone.
-   *
-   * A backstop and nothing more. A viewer leaves by SAYING so — the browser
-   * releases the session, or their connection closes — and this covers only the
-   * case where nothing said it: a data channel's close event does not always
-   * come, and a transport that is not a data channel may have nothing to say at
-   * all.
-   *
-   * The figure is the proxy's own cushion plus a segment, which is the longest
-   * silence a watching viewer can produce: one holding a full cushion asks for
-   * nothing until it has drained, and one playing asks once a segment.
-   *
-   * @returns {number}
-   */
-  presenceStaleAfterMs() {
-    return (this.lookaheadSeconds + this.segmentDurationSec) * 1000;
-  }
-
-  /**
    * Re-decide what encoders should exist, once, after the change that is being
    * made now.
    *
@@ -3677,7 +3532,12 @@ export class HlsSessionManager {
    *
    * @returns {void}
    */
-  planEncodersNow() {
+  /**
+   * The live sessions grouped by the output they produce.
+   *
+   * @returns {Map<string, HlsSession[]>}
+   */
+  #outputsWithSessions() {
     /** @type {Map<string, HlsSession[]>} */
     const byOutput = new Map();
     for (const session of this.sessionsById.values()) {
@@ -3687,6 +3547,11 @@ export class HlsSessionManager {
       }
       byOutput.set(address, [...(byOutput.get(address) ?? []), session]);
     }
+    return byOutput;
+  }
+
+  planEncodersNow() {
+    const byOutput = this.#outputsWithSessions();
     for (const [address, sessions] of byOutput) {
       // From the TIMELINE, which is where how a file is cut has lived since
       // 2.76.0. Read off the session it left, this was `undefined` on every
@@ -3713,7 +3578,6 @@ export class HlsSessionManager {
     // encoding and the viewer are not connected at all.
     this.priority.publishFor({
       sessionGroups: byOutput.values(),
-      staleAfterMs: this.presenceStaleAfterMs()
     });
     // FROM THE VIEWERS OF THAT OUTPUT, not from the viewers of the film.
     //
@@ -3874,11 +3738,8 @@ export class HlsSessionManager {
     // which nobody was now making — was held for 45.7 s until the viewer gave
     // up and seeked. A segment on disk is something the viewer can be served;
     // a number from ffmpeg is not.
-    // Where the viewer is. Before the first segment request, the position the
-    // run started at — so a session nobody has read from yet is bounded too.
-    const viewerSegment = Number.isInteger(session.lastRequestedSegment)
-      ? session.lastRequestedSegment
-      : (earliestRunStart(session) ?? 0);
+    // Where the viewer is, from the one reading there is.
+    const viewerSegment = this.#segmentIndexForTime(session, viewerSecondsOn(session));
 
     // How much is ready CONTIGUOUSLY FROM WHERE THE VIEWER IS — not the highest
     // segment number lying in the directory. The two are the same only while a
@@ -7435,7 +7296,7 @@ export class HlsSessionManager {
     if (Number.isInteger(wantedIndex) && wantedIndex >= 0) {
       return this.#segmentStartTime(base, wantedIndex);
     }
-    return this.#viewerPositionOf(this.#activeVariant(base, consumerId));
+    return viewerSecondsOn(this.#activeVariant(base, consumerId));
   }
 
   /**
@@ -7507,114 +7368,55 @@ export class HlsSessionManager {
     return { earliestPosition, deepestBuffer, viewers };
   }
 
+  /**
+   * Where a soundtrack must begin: at the earliest film anybody is waiting on.
+   *
+   * ASKED OF THE MAP, NOT OF A VIEWER. Sound is produced for the same reason a
+   * picture is, and the map already states it — in seconds of film, merged over
+   * everybody watching, with the map's own order saying which of them is
+   * earliest. Reading it off a viewer put a person inside the encoding layer,
+   * and then every question about WHICH person had to be answered a second time
+   * here: the earliest of two, the one on this rung, the one who has not
+   * reported yet. `earliestUrgentSecond` answers it once, for everything.
+   *
+   * The apparatus this replaced is worth naming so it is not rebuilt: three
+   * position sources ranked by priority, a function saying which had answered,
+   * a subtraction of the deepest reported buffer, and a special case for a
+   * session nobody had asked anything of. Each repaired a quantity that meant
+   * two things. It means one thing now.
+   *
+   * One segment back, and that is not a margin: a cut grid places the
+   * soundtrack's own boundaries where it will, so the piece holding a moment of
+   * film begins at or before it.
+   *
+   * @param {HlsSession} base
+   * @returns {number} Seconds.
+   */
   #audioStartSecondsFor(base) {
-    const now = Date.now();
-    // Read across every rung a viewer has on screen, not just one. A link
-    // report is kept on the session the reporter is watching, so with two
-    // viewers on two rungs each rung holds half the answer — and this needs the
-    // EARLIEST picture of them all, because a soundtrack started at the leader's
-    // position has nothing to give the viewer behind them.
-    const watched = [...this.#variantsOnScreen(base)]
-      .map((sessionId) => this.sessionsById.get(sessionId))
-      .filter((member) => member && member.state !== "disposed");
-    const watching = watched[0] ?? this.#activeVariant(base);
-    let readHead = 0;
-    let earliestStated = null;
-    let deepestBuffer = null;
-    for (const member of watched.length > 0 ? watched : [watching]) {
-      readHead = Math.max(readHead, this.#viewerPositionOf(member));
-      const reported = this.#reportedPictureOf(member, now);
-      if (reported.earliestPosition !== null) {
-        earliestStated = earliestStated === null
-          ? reported.earliestPosition
-          : Math.min(earliestStated, reported.earliestPosition);
-      }
-      if (reported.deepestBuffer !== null) {
-        deepestBuffer = deepestBuffer === null
-          ? reported.deepestBuffer
-          : Math.max(deepestBuffer, reported.deepestBuffer);
-      }
-    }
-    if (earliestStated !== null) {
-      // Never ahead of the read head: a position claiming to be past what has
-      // been asked for is a report that arrived out of order, and acting on it
-      // would start the run where no request can ever reach it.
-      return Math.max(0, Math.min(earliestStated, readHead) - this.segmentDurationSec);
-    }
-    // "Opened" only if it is true of EVERY rung anybody is watching: one of
-    // them having served a segment means the film is running, whatever the
-    // others have done.
-    const everyoneJustOpened = (watched.length > 0 ? watched : [watching])
-      .every((member) => this.#viewerPositionSourceOf(member) === "opened");
-    if (everyoneJustOpened) {
-      // The session has not started. Nobody has seeked, nobody has asked for a
-      // segment, and nobody has reported anything — so the read head is not a
-      // request edge at all, it is where the viewer opened, and a browser that
-      // has just opened holds no buffer by construction. Subtracting one here
-      // is not erring "early, the cheap direction": it is the whole of the
-      // start-up cost. Field 2026-08-31: a page opened at 588s started its
-      // sound at 460s, 131 seconds of film nobody would hear, and the segment
-      // the viewer needed took 38.8s to appear against the picture's 8.4s
-      // (`research/cold-open-audio-start-2026-08-31.md`).
-      return Math.max(0, readHead - this.segmentDurationSec);
-    }
-    const buffered = deepestBuffer === null ? LOOKAHEAD_PAUSE_SECONDS : deepestBuffer;
-    return Math.max(0, readHead - buffered - this.segmentDurationSec);
+    // WHERE THE EARLIEST OF THEM STANDS, across every rung of this picture. A
+    // track begun at the leader has nothing to give the viewer behind them, and
+    // two viewers of one film may be on different rungs.
+    //
+    // NO SUBTRACTION, and that is the whole of the change. A viewer's position
+    // is where their PICTURE is, so the sound belongs exactly there — while the
+    // apparatus this replaced turned a request edge back into a playhead with
+    // three ranked sources, a name for which had answered, a subtraction of the
+    // deepest reported buffer, and a special case for a session nobody had
+    // asked anything of. Field 2026-08-31: a page opened at 588 s started its
+    // sound at 460 s, 131 seconds nobody would hear
+    // (`research/cold-open-audio-start-2026-08-31.md`).
+    //
+    // A fact about people, deciding one parameter of an output. It places no
+    // encoder: where an encoder works is the priority map's answer.
+    const earliest = earliestViewerSecondsOn(this.liveOutputs.familyOf(base));
+    const opened = Number(base.progress?.startPositionSeconds);
+    const from = earliest ?? (Number.isFinite(opened) ? opened : 0);
+    // One segment back, and that is not a margin: a cut grid places the
+    // soundtrack's own boundaries where it will, so the piece holding a moment
+    // of film begins at or before it.
+    return Math.max(0, from - this.segmentDurationSec);
   }
 
-  /**
-   * Which reading gave a viewer's position — see {@link viewerPositionSource}.
-   *
-   * @param {HlsSession} session
-   * @param {string} [consumerId] - Whose position. Without one the answer is
-   *   the session's, which is the FURTHEST viewer of it.
-   * @returns {"seeked" | "requested" | "opened" | "none"}
-   */
-  #viewerPositionSourceOf(session, consumerId = "") {
-    const head = consumerId ? session.viewers?.get(consumerId)?.position ?? null : null;
-    if (head) {
-      return viewerPositionSource({
-        seeked: head.seeked,
-        lastRequestedStart: head.seconds,
-        openedAt: session.progress?.startPositionSeconds
-      });
-    }
-    const lastRequestedStart = Number.isInteger(session.lastRequestedSegment) && session.lastRequestedSegment > 0
-      ? this.#segmentStartTime(session, session.lastRequestedSegment)
-      : null;
-    return viewerPositionSource({
-      seeked: session.furthestViewerSeconds,
-      lastRequestedStart,
-      openedAt: session.progress?.startPositionSeconds
-    });
-  }
-
-  /**
-   * Where a viewer is on this session's timeline, in seconds.
-   *
-   * With a viewer named, it is THEIR head: their own seek, or the segment they
-   * last asked for. Without one it is the session's own reading — the furthest
-   * viewer of it — which is what an encode run is placed by, because what lies
-   * behind the furthest has already been made.
-   *
-   * @param {HlsSession} session
-   * @param {string} [consumerId]
-   * @returns {number}
-   */
-  #viewerPositionOf(session, consumerId = "") {
-    const head = consumerId ? session.viewers?.get(consumerId)?.position ?? null : null;
-    if (head && Number.isFinite(head.seconds)) {
-      return head.seconds;
-    }
-    const lastRequestedStart = Number.isInteger(session.lastRequestedSegment) && session.lastRequestedSegment > 0
-      ? this.#segmentStartTime(session, session.lastRequestedSegment)
-      : null;
-    return resolveViewerPosition({
-      seeked: session.furthestViewerSeconds,
-      lastRequestedStart,
-      openedAt: session.progress?.startPositionSeconds
-    });
-  }
 
   /**
    * Stop this session's encoder without replacing it.
@@ -7744,11 +7546,11 @@ export class HlsSessionManager {
       // before it has produced anything.
       startPositionSeconds: Math.floor(this.#variantStartSeconds(base, wantedIndex, consumerId) / 10) * 10,
       audioTrackIndex: base.audioTrackIndex,
-      // A variant is a resolution the viewer chose, so it is encoded at exactly
-      // that size and the realtime budget does not move it — otherwise two
-      // variants could drift onto the same height and the choice would mean
-      // nothing.
-      manualQuality: true,
+      // A rung is produced at exactly the size it names and the realtime budget
+      // does not move it — otherwise two rungs could drift onto the same height
+      // and the choice between them would mean nothing. True of EVERY rung,
+      // including one the player moved itself onto.
+      exactSize: true,
       // A rung of a session whose audio is published separately carries no
       // audio either — every rung of one master must agree about that, or
       // switching rung would start or stop a second copy of the same track.
@@ -8183,7 +7985,6 @@ export class HlsSessionManager {
       previous.waitEpoch = (previous.waitEpoch ?? 0) + 1;
     }
     if (position > 0) {
-      variant.furthestViewerSeconds = position;
       // The rung being switched TO, named literally: a warm-up may have left
       // the family pointing elsewhere, and forwarding would move that one
       // instead. Saying where this person is on it is the whole of pointing its
@@ -8427,12 +8228,10 @@ export class HlsSessionManager {
    * @returns {Set<string>}
    */
   #liveConsumers(base) {
-    const staleAfterMs = this.presenceStaleAfterMs();
-    const now = Date.now();
     const live = new Set();
     for (const member of this.liveOutputs.familyOf(base)) {
       for (const [consumerId, viewer] of member.viewers ?? []) {
-        if (viewer.isPresent(now, staleAfterMs)) {
+        if (viewer.isPresent()) {
           live.add(consumerId);
         }
       }
@@ -8811,9 +8610,7 @@ export class HlsSessionManager {
     if (!session) {
       return 0;
     }
-    const own = this.#consumerPositionOf(session, consumerId);
-    const position = own === null ? Number(session.furthestViewerSeconds) : own;
-    return Number.isFinite(position) ? position : 0;
+    return viewerSecondsOn(session, consumerId);
   }
 
   /**
@@ -8861,11 +8658,7 @@ export class HlsSessionManager {
     if (!(index >= 0)) {
       return true; // a playlist or an init segment belongs to no position
     }
-    const own = this.#consumerPositionOf(session, consumerId);
-    const position = own === null ? Number(session.furthestViewerSeconds) : own;
-    if (!Number.isFinite(position)) {
-      return true; // nothing said where the viewer is; refusing would be a guess
-    }
+    const position = viewerSecondsOn(session, consumerId);
     const at = this.#segmentIndexForTime(session, position);
     // The far edge on THIS session's own grid rather than a count of nominal
     // segments: a copied picture is cut at the source's keyframes, so its
@@ -9016,34 +8809,13 @@ export class HlsSessionManager {
     const filePath = this.#producedIndex(session).pathOf(fileName) ?? path.join(session.dirPath, fileName);
     const isPlaylist = fileName === PLAYLIST_FILE_NAME;
     if (!isPlaylist) {
-      // Where the viewer actually is. Recorded for every segment request,
-      // served or not, because it is what bounds how far ahead the encoder is
-      // allowed to run — the plan decides that now.
+      // A REQUEST SAYS THE VIEWER IS HERE, AND NOTHING ELSE. It does not say
+      // where they are — that is what they state themselves — and it steers no
+      // encoder: the segment either exists and is served, or does not and is
+      // waited for.
       const requested = session.segmentFormat.segmentIndexFromName(fileName);
       if (requested >= 0) {
-        // This requester's own head, and with it the furthest any viewer of
-        // this session has reached. The encoder is steered by the furthest —
-        // what lies behind it has already been made — while the individual
-        // heads answer whether a particular held request is still wanted.
-        const furthest = this.#noteConsumerHead(
-          session,
-          consumerId,
-          requested,
-          this.#segmentStartTime(session, requested)
-        );
-        session.lastRequestedSegment = furthest.segment;
-        // Where the furthest viewer of this session is, kept current. It is a
-        // FALLBACK and nothing else: everything that asks where a viewer is
-        // takes that viewer's own head first, and this answers only for a
-        // reading about no particular person.
-        //
-        // It used to be guarded against moving backwards, by comparing against
-        // a second field a seek wrote — because a request behind the head could
-        // then drag the encoder there. Nothing does that any more: a request
-        // steers no encoder, and a viewer's own statement is kept on the viewer,
-        // where a request cannot reach it. The guard's field had no writer left,
-        // so the condition was inert.
-        session.furthestViewerSeconds = furthest.seconds;
+        this.#noteViewerSeen(session, consumerId);
         // A viewer who has caught up must not wait out the monitor's interval —
         // but only if they HAVE caught up, which is why this re-evaluates the
         // same condition instead of resuming outright.
@@ -9339,7 +9111,7 @@ export class HlsSessionManager {
     const speed = session.progress?.speed ?? "n/a";
     logger.warn(
       `transcode ${session.id} holding ${fileName}: ${reason} ` +
-      `(runs from #${earliestRunStart(session) ?? "?"}, viewer at #${session.lastRequestedSegment ?? "?"}, ` +
+      `(runs from #${earliestRunStart(session) ?? "?"}, viewer at #${this.#segmentIndexForTime(session, viewerSecondsOn(session))}, ` +
       `encoder ${liveRunsOf(session).length > 0 ? "alive" : "stopped"}, index #${index}, ` +
       `produced ${produced === null ? "nothing yet — no position reported" : `${produced.toFixed(1)}s`} ` +
       `at ${speed}${produced !== null && produced <= 0 ? " — the encoder has not moved, so it is waiting on its input" : ""})`
@@ -9631,7 +9403,6 @@ export class HlsSessionManager {
           outputKey: key,
           segmentAt: (session, seconds) => this.#segmentIndexForTime(session, seconds),
           now: Date.now(),
-          staleAfterMs: this.presenceStaleAfterMs()
         })
     });
   }

@@ -155,9 +155,8 @@ test("a request cannot move the viewer's position backwards", async (t) => {
   manager.requestSeek(SESSION_ID, 2083.4, "viewer-1");
   await manager.getFileStream(SESSION_ID, fmp4Format.segmentFileName(BEHIND_INDEX), { requestSeq: 1 });
 
-  assert.equal(
-    manager.viewers.get("viewer-1")?.positionSeconds(),
-    2083.4,
+  assert.ok(
+    Math.abs((manager.viewers.get("viewer-1")?.positionSeconds() ?? -1) - 2083.4) < 1,
     "a stale request must not rewrite what the viewer said about themselves"
   );
 });

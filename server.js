@@ -354,7 +354,8 @@ export async function startProxyServer({
       sourceRegistry,
       torrentPool,
       ffmpegBin,
-      localBaseUrl: hlsSessionManager.localBaseUrl
+      localBaseUrl: hlsSessionManager.localBaseUrl,
+      viewers: hlsSessionManager.viewers
     })
   );
   app.get("/stream", async (req, reply) =>

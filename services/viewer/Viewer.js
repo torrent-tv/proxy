@@ -125,6 +125,20 @@ export class Viewer {
      * @type {Set<string>}
      */
     this.outputs = new Set();
+    /**
+     * The files this viewer has subtitles switched on for, as
+     * `sourceKey:fileIndex`.
+     *
+     * A subscription is a fact about a PERSON, not about a channel. Held on the
+     * channel — as it was until now — it dies with the channel, so a seamless
+     * reconnect silently lost subtitles for the rest of the session, and a
+     * transport that rotates its association on purpose would lose them every
+     * time it rotated. Held here it survives both by construction: whatever
+     * channel this viewer is reachable on next, they are still subscribed.
+     *
+     * @type {Set<string>}
+     */
+    this.wantsCuesFor = new Set();
     // Whether the picture is moving. A viewer who has stopped it consumes
     // nothing, so nothing in front of them ever becomes due — they have no
     // deadline at all, and the work goes to whoever is watching. The page knows

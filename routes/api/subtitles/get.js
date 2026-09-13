@@ -24,6 +24,7 @@
  * @returns {Promise<void>}
  */
 
+import { deriveSourceKey } from "../../../services/torrent-source-key.js";
 import { spawn } from "node:child_process";
 import { TextSubtitleTrack } from "../../../services/tracks/TextSubtitleTrack.js";
 import { SubtitleController } from "../../../services/controllers/SubtitleController.js";
@@ -44,7 +45,7 @@ function setLanguageHeaders(reply, lang) {
   }
 }
 
-export async function handleApiSubtitlesGet(req, reply, { sourceRegistry, torrentPool, ffmpegBin, localBaseUrl }) {
+export async function handleApiSubtitlesGet(req, reply, { sourceRegistry, torrentPool, ffmpegBin, localBaseUrl, viewers }) {
   const query = req.query ?? {};
   const sourceKey = typeof query.sourceKey === "string" ? query.sourceKey.trim() : "";
   const fileIndex = Number(query.fileIndex);
@@ -53,6 +54,30 @@ export async function handleApiSubtitlesGet(req, reply, { sourceRegistry, torren
 
   if (!sourceKey || !Number.isInteger(fileIndex) || fileIndex < 0) {
     return reply.code(400).send({ error: "sourceKey and fileIndex are required." });
+  }
+
+  // Turning subtitles on is a fact about the VIEWER, and this is the only place
+  // that knows both the person and the file, so this is where it is recorded.
+  //
+  // It used to be recorded in the transport, against the CHANNEL, which the
+  // transport could only do by sniffing this path out of the request and
+  // deriving the torrent key itself. Two costs followed: a reconnect lost the
+  // subscription for the rest of the session, and the layer that carries bytes
+  // held application routing and torrent identity.
+  //
+  // The browser sends its registry key; the push side speaks the pool key, so
+  // the two are reconciled here — the same reconciliation the transport did.
+  const consumerId = typeof query.consumerId === "string" ? query.consumerId.trim() : "";
+  if (consumerId && hasTrackIndex && viewers) {
+    const record = sourceRegistry?.get(sourceKey);
+    if (record) {
+      try {
+        viewers.wantsCues(consumerId, await deriveSourceKey(record.sourceType, record.source), fileIndex);
+      } catch {
+        // A subscription that cannot be resolved costs this viewer pushed cues;
+        // it must not cost them the subtitles they asked for in this request.
+      }
+    }
   }
 
   // Interface layer delegates to SubtitleController (orchestrator + domain),

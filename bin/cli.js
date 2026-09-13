@@ -331,7 +331,6 @@ try {
   });
   app = started.app;
   actualPort = started.port;
-  const sourceRegistry = started.sourceRegistry;
   const directBaseUrl = explicitBaseUrl || `http://${bindHost}:${actualPort}`;
 
   // A native fault writes the whole address space out — 4.18 GB each on the
@@ -550,10 +549,12 @@ try {
   dataChannelHandler = createDataChannelHandler({
     proxyPort: actualPort,
     onLog: (message) => logger.info(message),
-    // Resolves a browser's registry sourceKey to the torrent pool's own key
-    // (the content's infohash) so the subtitle push subscription and the
-    // pool's own publish agree on what a source is called. See server.js.
-    sourceRegistry,
+    // Who wants pushed subtitle cues for a file, by name. Late-bound like the
+    // rest: the registry lives on the manager, built inside `startProxyServer`
+    // with this handler already in hand. The transport gets opaque ids and
+    // never learns what a viewer is.
+    viewersWantingCues: (sourceKey, fileIndex) =>
+      started?.hlsSessionManager?.viewers?.wantingCues?.(sourceKey, fileIndex) ?? [],
     // Lets a stuck send queue ask the transport what it is doing. Late-bound:
     // the manager is created below, with this handler already in hand.
     getTransportSnapshot: (sessionId) => webRtcManager?.getTransportSnapshot(sessionId) ?? null,

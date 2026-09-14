@@ -22,6 +22,7 @@ import {
   costKindForSession,
   HlsSessionManager
 } from "../services/hls-session-manager.js";
+import { managerWithOwnStore } from "./helpers/manager.js";
 import { fmp4Format } from "../services/segment-formats/fmp4.js";
 import { computeCutGrid } from "../services/output/cut-grid.js";
 import { buildRunCommand, nearestKeyframeAtOrBefore } from "../services/encode/run-command.js";
@@ -96,12 +97,8 @@ function fakeSession({ id, encodeHeight, dirPath, transcodeVideo = true }) {
  */
 async function managerWithBase() {
   const dirPath = await mkdtemp(path.join(os.tmpdir(), "quality-variants-"));
-  const manager = new HlsSessionManager({
-    enabled: true,
-    ffmpegBin: "ffmpeg",
-    localBindHost: "127.0.0.1",
-    localPort: 9090
-  });
+  // Its own store root — see `helpers/manager.js` for what sharing one cost.
+  const { manager } = managerWithOwnStore();
   // 812p is what a viewport-sized budget actually produces — deliberately not a
   // ladder rung, because that is the case the master has to carry.
   const base = fakeSession({ id: BASE_ID, encodeHeight: 812, dirPath });
@@ -915,11 +912,7 @@ test("a quality step being warmed is not refused by its own cost", async (t) => 
   // The addon host's own figures, so the arithmetic below is the field's and
   // not an invention. Without a benchmark the check returns every height
   // untouched and a test over it would pass while proving nothing.
-  const manager = new HlsSessionManager({
-    enabled: true,
-    ffmpegBin: "ffmpeg",
-    localBindHost: "127.0.0.1",
-    localPort: 9090,
+  const { manager } = managerWithOwnStore({
     softwarePresetBenchmark: [
       { preset: "fast", pixelsPerSec: 17.0e6 },
       { preset: "ultrafast", pixelsPerSec: 67.5e6 }
@@ -970,11 +963,7 @@ test("the master survives a live offer that has collapsed to one rung", async (t
   // `buildMasterPlaylist` answer null and the route answer 404 to a session
   // that had just published the address.
   const dirPath = await mkdtemp(path.join(os.tmpdir(), "quality-variants-collapse-"));
-  const manager = new HlsSessionManager({
-    enabled: true,
-    ffmpegBin: "ffmpeg",
-    localBindHost: "127.0.0.1",
-    localPort: 9090,
+  const { manager } = managerWithOwnStore({
     // A megapixel a second: every rung below the source costs more than the
     // machine has.
     softwarePresetBenchmark: [{ preset: "veryfast", pixelsPerSec: 1_000_000 }],

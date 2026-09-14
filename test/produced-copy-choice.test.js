@@ -27,6 +27,7 @@ import { mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { HlsSessionManager, usableSegmentIndices } from "../services/hls-session-manager.js";
+import { managerWithOwnStore } from "./helpers/manager.js";
 import { startRunOn } from "./helpers/encode-run.js";
 import { fmp4Format } from "../services/segment-formats/fmp4.js";
 
@@ -123,12 +124,8 @@ function wholePiece(offsetSeconds) {
  */
 async function sessionOnOneDirectory() {
   const dirPath = await mkdtemp(path.join(os.tmpdir(), "produced-copy-"));
-  const manager = new HlsSessionManager({
-    enabled: true,
-    ffmpegBin: "ffmpeg",
-    localBindHost: "127.0.0.1",
-    localPort: 9090
-  });
+  // Its own store root — see `helpers/manager.js` for what sharing one cost.
+  const { manager } = managerWithOwnStore();
   const session = {
     id: SESSION_ID,
     dirPath,

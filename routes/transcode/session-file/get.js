@@ -151,7 +151,15 @@ export async function serveSessionFile(req, reply, { hlsSessionManager, sessionI
     // is the standard, correct way to say "wait, don't look elsewhere", and
     // hls.js already retries the same fragment regardless.
     reply.header("Retry-After", "1");
-    return reply.code(503).send({ error: "Transcode segment is still being produced." });
+    // SAY WHY, to the viewer and not only to the log. The same refusal is
+    // written into `proxy.log` with the rank the priority map gave this
+    // segment; the page had no access to that and told the viewer it did not
+    // know why. Field 2026-09-14: `rank 1 of 100` — nothing was making it —
+    // printed sixty seconds before the page gave up saying the opposite.
+    return reply.code(503).send({
+      error: "Transcode segment is still being produced.",
+      reason: warmingReason(result.ranked ?? null)
+    });
   }
   if (result.kind === "failed") {
     return reply.code(500).send({ error: result.message });
@@ -237,4 +245,24 @@ function delay(ms) {
   return new Promise((resolve) => {
     setTimeout(resolve, ms);
   });
+}
+
+/**
+ * What to tell the VIEWER when a segment is not there yet.
+ *
+ * In their terms — the film, and what is being done about it — never in ours: a
+ * viewer cannot read a log, does not know what a rank is, and is not helped by
+ * being told which of our parts is waiting for which other.
+ *
+ * @param {{ rank: number, topRank: number } | null} ranked - What the priority
+ *   map thought of this segment while the request was held.
+ * @returns {string}
+ */
+function warmingReason(ranked) {
+  if (ranked && ranked.rank < ranked.topRank) {
+    // The map is working somewhere else in the film. That is the answer the
+    // failure of 2026-09-14 needed and nobody was given.
+    return "This part of the film is not being prepared yet — the proxy is working further along.";
+  }
+  return "This part of the film is still being prepared.";
 }

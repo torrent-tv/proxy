@@ -223,13 +223,17 @@ export class PriorityOrchestrator {
           }
           const stated = {
             atSeconds: viewer.positionSeconds(now) ?? 0,
-            // CONSUMING, not merely playing. A page that is not on screen has
-            // its timers throttled and asks for nothing, which is exactly what
-            // a viewer holding a full cushion looks like; the two are told
-            // apart on the page and folded into one question here.
-            playing: typeof viewer.consumesFilm === "function"
-              ? viewer.consumesFilm()
-              : viewer.playing !== false
+            // WATCHING OR WAITING, not merely playing. Three states reach this
+            // one question: a viewer whose picture is advancing, a viewer
+            // blocked on material we owe them, and a viewer who stopped it
+            // themselves. The first two want the film in front of them NOW and
+            // share the upper band; only the third can wait. A page that is not
+            // on screen has its timers throttled and asks for nothing, which is
+            // indistinguishable from a full cushion, so it is not consuming
+            // either — told apart on the page, folded into one question here.
+            playing: typeof viewer.wantsFilmNow === "function"
+              ? viewer.wantsFilmNow()
+              : viewer.playing === true || viewer.waiting === true
           };
           held.viewers.push(stated);
           if (this.#watchedBy(session, viewer)) {

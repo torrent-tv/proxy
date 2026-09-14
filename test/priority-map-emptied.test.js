@@ -22,8 +22,6 @@ import { TorrentPool } from "../services/torrent-pool.js";
 import { demandFor, forgetTorrent } from "../services/download/registry.js";
 import { Urgency } from "../services/demand/index.js";
 
-const STALE_AFTER_MS = 60_000;
-
 /**
  * A session, as much of one as the orchestrator reads.
  *

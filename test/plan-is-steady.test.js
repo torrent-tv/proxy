@@ -64,7 +64,7 @@ function zonesFor(viewers, now) {
         atSeconds: viewer.positionSeconds(now) ?? 0,
         durationSeconds: DURATION,
         allowanceSeconds: ALLOWANCE,
-        playing: viewer.consumesFilm()
+        playing: viewer.wantsFilmNow()
       })
     )
   );
@@ -77,8 +77,13 @@ function zonesFor(viewers, now) {
 
 test("a viewer's position only ever moves the way film moves", () => {
   const viewer = new Viewer("one", 1_000_000);
-  viewer.moveTo(170.8, 1_000_000);
-  viewer.playing = true;
+  // Stated the way a page states it: where they are, what they hold, and that
+  // the picture is advancing. The cushion is what bounds the extrapolation, so
+  // a viewer who has stated none cannot move at all.
+  viewer.report(
+    { bufferedAheadSec: 120, positionSeconds: 170.8, playing: true, waiting: false },
+    1_000_000
+  );
 
   let previous = viewer.positionSeconds(1_000_000);
   for (let tick = 1; tick <= 200; tick += 1) {
@@ -94,8 +99,10 @@ test("a viewer's position only ever moves the way film moves", () => {
 
 test("a segment request does not move a viewer, and a stopped picture does not either", () => {
   const viewer = new Viewer("one", 1_000_000);
-  viewer.moveTo(170.8, 1_000_000);
-  viewer.playing = false;
+  viewer.report(
+    { bufferedAheadSec: 120, positionSeconds: 170.8, playing: false, waiting: false },
+    1_000_000
+  );
 
   // Whatever else happens, only a statement from the viewer moves them. There
   // is no method here a request could call: `seen` is presence and nothing more.
@@ -107,11 +114,9 @@ test("a segment request does not move a viewer, and a stopped picture does not e
 test("the priority map of two viewers is the same whenever it is asked", () => {
   const at = 1_000_000;
   const one = new Viewer("one", at);
-  one.moveTo(170.8, at);
-  one.playing = false;
+  one.report({ bufferedAheadSec: 120, positionSeconds: 170.8, playing: false, waiting: false }, at);
   const two = new Viewer("two", at);
-  two.moveTo(1673.6, at);
-  two.playing = false;
+  two.report({ bufferedAheadSec: 120, positionSeconds: 1673.6, playing: false, waiting: false }, at);
 
   const first = JSON.stringify(zonesFor([one, two], at));
   for (let tick = 1; tick <= 40; tick += 1) {
@@ -123,11 +128,9 @@ test("the priority map of two viewers is the same whenever it is asked", () => {
 test("two viewers far apart settle on one arrangement and stay on it", () => {
   const at = 1_000_000;
   const one = new Viewer("one", at);
-  one.moveTo(170.8, at);
-  one.playing = false;
+  one.report({ bufferedAheadSec: 120, positionSeconds: 170.8, playing: false, waiting: false }, at);
   const two = new Viewer("two", at);
-  two.moveTo(1673.6, at);
-  two.playing = false;
+  two.report({ bufferedAheadSec: 120, positionSeconds: 1673.6, playing: false, waiting: false }, at);
 
   const coverage = new CoverageMap({ segmentCount: 362 });
   /** @type {{ from: number, to: number, head: number, speedX: number, startedAt: number }[]} */
@@ -171,8 +174,7 @@ test("two viewers far apart settle on one arrangement and stay on it", () => {
 test("an encoder keeping ahead of a playing viewer is left alone", () => {
   const at = 1_000_000;
   const one = new Viewer("one", at);
-  one.moveTo(0, at);
-  one.playing = true;
+  one.report({ bufferedAheadSec: 120, positionSeconds: 0, playing: true, waiting: false }, at);
 
   const coverage = new CoverageMap({ segmentCount: 362 });
   const ready = new Set();

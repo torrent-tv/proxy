@@ -23,10 +23,23 @@
 export async function handleApiTranscodeSessionNetReportPost(req, reply, { hlsSessionManager }) {
   const sessionId = typeof req.params.sessionId === "string" ? req.params.sessionId : "";
   const body = req.body && typeof req.body === "object" && !Array.isArray(req.body) ? req.body : {};
+  // WHAT THIS REPORT IS. A statement by one viewer about itself: where the
+  // picture is, how much film it holds, whether it is moving, whether it is
+  // blocked on us, whether the page is on screen — and, when there has been
+  // anything to measure, how fast the link carried it.
+  //
+  // THE LINK FIGURE IS NOT REQUIRED, and requiring it is the fault of
+  // 2026-09-14. A page measures its link from completed transfers, so a page
+  // that has not yet been delivered a segment has no figure; at a cold open
+  // that is every page. Rejected here with 400, the page's own account of
+  // itself never arrived, this proxy filled the silence by assuming the film
+  // was running, and a viewer who had not seen a frame was placed 146 seconds
+  // into it — the soundtrack's encoder went there, and the segment the browser
+  // was actually asking for was ranked last of a hundred and answered 503.
   const linkMbps = Number(body.linkMbps);
   const bufferedAheadSec = Number(body.bufferedAheadSec);
-  if (!sessionId || !Number.isFinite(linkMbps) || linkMbps <= 0 || !Number.isFinite(bufferedAheadSec) || bufferedAheadSec < 0) {
-    return reply.code(400).send({ error: "linkMbps (>0) and bufferedAheadSec (>=0) are required." });
+  if (!sessionId || !Number.isFinite(bufferedAheadSec) || bufferedAheadSec < 0) {
+    return reply.code(400).send({ error: "bufferedAheadSec (>=0) is required." });
   }
 
   // Neither is required, and neither can make a report invalid: they are what
@@ -34,9 +47,15 @@ export async function handleApiTranscodeSessionNetReportPost(req, reply, { hlsSe
   // without them is still a truthful reading of somebody's link.
   const consumerId = typeof body.consumerId === "string" ? body.consumerId.trim() : "";
   // Whether the picture is moving. Absent from a page that does not say, and
-  // then the viewer counts as playing, which is what every page meant before it
-  // could say otherwise.
+  // then nothing is assumed: a statement about somebody else's machine is
+  // theirs to make, and assuming it walked a viewer 146 seconds into a film
+  // they had not begun (2026-09-14).
   const playing = typeof body.playing === "boolean" ? body.playing : undefined;
+  // Whether this viewer is BLOCKED on material we owe them, which is a
+  // different state from having stopped the picture: the first is the most
+  // urgent viewer there is, the second consumes nothing and can wait. One
+  // boolean could not hold three states and read the first as the second.
+  const waiting = typeof body.waiting === "boolean" ? body.waiting : undefined;
   // Whether the page is on screen, and whether the picture was pulled out of
   // it. A hidden tab has its timers throttled, so it asks for nothing and looks
   // exactly like a viewer holding a full cushion; picture-in-picture is the case
@@ -48,7 +67,8 @@ export async function handleApiTranscodeSessionNetReportPost(req, reply, { hlsSe
     typeof body.inPictureInPicture === "boolean" ? body.inPictureInPicture : undefined;
   const positionSeconds = Number(body.positionSeconds);
   const recorded = hlsSessionManager.recordNetReport(sessionId, {
-    linkMbps,
+    linkMbps: Number.isFinite(linkMbps) && linkMbps > 0 ? linkMbps : undefined,
+    waiting,
     bufferedAheadSec,
     consumerId,
     playing,

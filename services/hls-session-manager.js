@@ -23,7 +23,6 @@ import { speedFromReadings } from "./encoder-readings.js";
 import { availableShareFrom } from "./available-share.js";
 import { contentionPenalty } from "./encode/contention.js";
 import { minimumBufferFrom } from "./supply-margin.js";
-import { earliestUrgentSecond, runsOf } from "./priority/PriorityMap.js";
 import { PriorityOrchestrator } from "./priority/PriorityOrchestrator.js";
 import { baseDrawFrom, costPerMegabyteFrom } from "./torrent-cost.js";
 import { medianOf, movedBeyondScatter, scatterOf } from "./learned-median.js";
@@ -90,6 +89,7 @@ import {
 export { ffmpegSeconds, onKeyframeGridFor, seekLandingOffsetFor, segmentCutTimesFrom };
 import { viewersOf } from "./viewer/Viewer.js";
 import { earliestViewerSecondsOn, viewerSecondsOn, viewerSegmentsOn } from "./viewer/positions.js";
+import { takeViewerReport } from "./viewer/report-intake.js";
 import { Viewers } from "./viewer/Viewers.js";
 import { LiveOutputs } from "./output/LiveOutputs.js";
 import { variantHeightsFor } from "./output/ladder.js";
@@ -3070,40 +3070,22 @@ export class HlsSessionManager {
    * @param {{ linkMbps: number, bufferedAheadSec: number, consumerId?: string, positionSeconds?: number }} report
    * @returns {boolean}
    */
-  recordNetReport(sessionId, { linkMbps, bufferedAheadSec, consumerId, positionSeconds, playing, onScreen, inPictureInPicture }) {
+  recordNetReport(sessionId, report) {
     const named = this.sessionsById.get(sessionId);
     if (!named || named.state === "disposed") {
       return false;
     }
-    // A throughput that is not a positive finite number is not a measurement,
-    // and it reaches an encoder's `-maxrate` from here.
-    if (!Number.isFinite(linkMbps) || !(linkMbps > 0) || !Number.isFinite(bufferedAheadSec)) {
-      return false;
-    }
-    // The link carries the stream on screen, so the report belongs to the
-    // variant producing it — that is the encoder whose bitrate it can bound.
-    // Whose screen, is the reporter's own: with two viewers on two rungs, the
-    // report of one of them says nothing about the other's encoder.
-    const session = this.#activeVariant(named, typeof consumerId === "string" ? consumerId : "");
-    const now = Date.now();
-    this.viewers
-      .of(session, typeof consumerId === "string" && consumerId.length > 0 ? consumerId : "")
-      .report({ linkMbps, bufferedAheadSec, positionSeconds, playing, onScreen, inPictureInPicture }, now);
-    // A stale reading must not go on deciding for the viewers still here: a
-    // report describes a link at a moment, and a viewer who seeked since then
-    // is somewhere else entirely.
-    //
-    // Only the READING expires. Whether the person is still watching is a
-    // different question with its own answer — their connection — and a viewer
-    // who has simply stopped reporting is not thereby gone. Answering both from
-    // this one place is what stopped a soundtrack's encoder on 2026-09-05.
-    for (const viewer of viewersOf(session).values()) {
-      const report = viewer.netReport;
-      if (report !== null && now - report.at > LINK_REPORT_FRESH_MS) {
-        viewer.netReport = null;
-      }
-    }
-    return true;
+    const consumerId = typeof report?.consumerId === "string" ? report.consumerId : "";
+    return takeViewerReport({
+      viewers: this.viewers,
+      // The stream on screen is the reporter's own: with two viewers on two
+      // rungs, one report says nothing about the other's encoder.
+      session: this.#activeVariant(named, consumerId),
+      consumerId,
+      report,
+      now: Date.now(),
+      linkFreshMs: LINK_REPORT_FRESH_MS
+    });
   }
 
   /**
@@ -7377,7 +7359,7 @@ export class HlsSessionManager {
    * earliest. Reading it off a viewer put a person inside the encoding layer,
    * and then every question about WHICH person had to be answered a second time
    * here: the earliest of two, the one on this rung, the one who has not
-   * reported yet. `earliestUrgentSecond` answers it once, for everything.
+   * reported yet.
    *
    * The apparatus this replaced is worth naming so it is not rebuilt: three
    * position sources ranked by priority, a function saying which had answered,

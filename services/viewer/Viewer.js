@@ -149,13 +149,35 @@ export class Viewer {
      * @type {Set<string>}
      */
     this.wantsCuesFor = new Set();
-    // Whether the picture is moving. A viewer who has stopped it consumes
-    // nothing, so nothing in front of them ever becomes due — they have no
-    // deadline at all, and the work goes to whoever is watching. The page knows
-    // this exactly and says it outright; inferring it from a position that has
-    // not moved takes two reports and lies whenever a browser holding a full
-    // cushion goes quiet between segments, which it does.
-    this.playing = true;
+    // WHETHER THE PICTURE IS MOVING, and separately WHETHER THIS VIEWER IS
+    // BLOCKED ON US. Two booleans, because there are three states and one
+    // boolean cannot hold them:
+    //
+    //   playing        the picture advances, a second of film per second;
+    //   waiting        it does not advance because we have not delivered;
+    //   neither        the viewer stopped it themselves.
+    //
+    // Collapsed into one, the middle state read as the third: a viewer frozen
+    // for want of a segment counted as somebody who had chosen to stop, so
+    // nothing in front of them fell due and the work went to whoever was
+    // playing. That is backwards — a viewer waiting on us is the most urgent
+    // there is. The page tells the two apart exactly (its element says whether
+    // the picture advances, and the component owns the viewer's own pause) and
+    // states both.
+    //
+    // `playing` STARTS FALSE, and that is the whole of the fault of
+    // 2026-09-14. It used to start true, and the position is carried forward by
+    // the clock at that rate, so a viewer who had never said anything walked
+    // 146 seconds into a film they had not begun: the tab was hidden, the page
+    // deliberately held start-up until it was shown, and this end assumed the
+    // film was running the entire time. A statement about somebody else's
+    // machine is theirs to make. Until they make it the rate is zero.
+    //
+    // `waiting` STARTS TRUE, which is what a viewer arriving is: they have
+    // asked for a film and hold none of it. So their work is made first from
+    // the instant they arrive, without the position ever being invented.
+    this.playing = false;
+    this.waiting = true;
     // Whether the page carrying this viewer is ON SCREEN, and whether the
     // picture has been pulled out of it.
     //
@@ -171,7 +193,9 @@ export class Viewer {
     // before it could say otherwise.
     this.onScreen = true;
     this.inPictureInPicture = false;
-    // Seconds of film held ahead of the picture, as the page last said.
+    // Seconds of film held ahead of the picture, as the page last said. It is
+    // measured at the moment the position beside it was, which is what makes it
+    // the bound on carrying that position forward — see `positionSeconds`.
     this.bufferedSeconds = null;
   }
 
@@ -192,6 +216,13 @@ export class Viewer {
       return;
     }
     this.position = { seconds, at: now };
+    // WHAT THEY HELD AT THE PLACE THEY LEFT SAYS NOTHING ABOUT THE PLACE THEY
+    // ARRIVED AT. A seek empties the buffer by construction — the player
+    // discards what it holds and fetches from the new position — so carrying
+    // the old cushion over would license the position to run forward again from
+    // material that no longer exists. Zero is the truthful floor until they say
+    // otherwise, and a viewer who has just seeked says so within a tick.
+    this.bufferedSeconds = 0;
     this.lastSeenAt = now;
   }
 
@@ -205,13 +236,18 @@ export class Viewer {
    * places, two of them on a session shared with other people.
    *
    * @param {object} report
-   * @param {number} report.linkMbps
+   * @param {number} [report.linkMbps] - What their link last measured. Absent
+   *   until something measurable has crossed it, and then the rest of the
+   *   report still stands: this is a statement about a viewer, not about a link.
    * @param {number} report.bufferedAheadSec
    * @param {number | null} [report.positionSeconds] - Null from a page that
    *   does not say; then the position stands as it was.
-   * @param {boolean} [report.playing] - Absent from a page that does not say;
-   *   then the viewer counts as playing, which is what every page meant before
-   *   it could say otherwise.
+   * @param {boolean} [report.playing] - Whether the picture is advancing.
+   *   Absent means it was not stated, and nothing may be assumed about somebody
+   *   else's machine: the rate is then zero.
+   * @param {boolean} [report.waiting] - Whether this viewer is blocked on
+   *   material we owe them. Absent from a page one release behind; then it is
+   *   derived from the two facts that page does state.
    * @param {boolean} [report.onScreen] - Whether the page is visible, or the
    *   picture is in picture-in-picture. Absent means on screen.
    * @param {boolean} [report.inPictureInPicture] - Whether the picture has been
@@ -224,45 +260,47 @@ export class Viewer {
       bufferedAheadSec,
       positionSeconds = null,
       playing,
+      waiting,
       onScreen,
       inPictureInPicture
     },
     now = Date.now()
   ) {
-    this.netReport = {
-      linkMbps,
-      bufferedAheadSec,
-      positionSeconds:
-        Number.isFinite(positionSeconds) && positionSeconds >= 0 ? positionSeconds : null,
-      at: now
-    };
-    this.bufferedSeconds = bufferedAheadSec;
-    this.playing = playing === undefined ? true : Boolean(playing);
-    this.inPictureInPicture = inPictureInPicture === undefined ? false : Boolean(inPictureInPicture);
-    this.onScreen = onScreen === undefined ? true : Boolean(onScreen);
+    const held = Number.isFinite(bufferedAheadSec) && bufferedAheadSec > 0 ? bufferedAheadSec : 0;
+    // A LINK FIGURE IS ONE FIELD OF THIS REPORT AND NOT ITS TICKET. A page that
+    // has transferred nothing measurable has nothing to say about its link and
+    // everything to say about its viewer, and that is the cold open exactly —
+    // the moment the position matters most. Held as a precondition, in three
+    // places at once, it silenced every statement of the session of 2026-09-14.
+    if (Number.isFinite(linkMbps) && linkMbps > 0) {
+      this.netReport = {
+        linkMbps,
+        bufferedAheadSec: held,
+        positionSeconds:
+          Number.isFinite(positionSeconds) && positionSeconds >= 0 ? positionSeconds : null,
+        at: now
+      };
+    }
+    // The position first, then the cushion: `moveTo` clears what was held at
+    // wherever they were before, and this report's own figure is measured at
+    // the position this report states.
     if (Number.isFinite(positionSeconds) && positionSeconds >= 0) {
       this.moveTo(/** @type {number} */ (positionSeconds), now);
     }
+    this.bufferedSeconds = held;
+    this.playing = playing === true;
+    // A page that states `playing` and not `waiting` is one release behind this
+    // proxy, which is the ordinary state of a rolling pool — the proxy ships
+    // first by rule. It says `false` for both a viewer who stopped the picture
+    // and a viewer starved of material, so the two are told apart by the one
+    // quantity it does state: a stopped viewer holding film chose to stop, a
+    // stopped viewer holding nothing is waiting on us. It errs toward making
+    // material, which is the direction that costs an encoder rather than a
+    // viewer.
+    this.waiting = waiting === undefined ? this.playing === false && held === 0 : waiting === true;
+    this.inPictureInPicture = inPictureInPicture === undefined ? false : Boolean(inPictureInPicture);
+    this.onScreen = onScreen === undefined ? true : Boolean(onScreen);
     this.seen(now);
-  }
-
-  /**
-   * When this viewer runs out of what they hold, in milliseconds.
-   *
-   * Film is consumed at one second per second while the picture moves, so the
-   * moment they run dry is now plus what they hold. Stopped, they consume
-   * nothing and there is no such moment — which is why a pause needs no rule of
-   * its own anywhere: it falls out of this as an absent deadline.
-   *
-   * @param {number} [now]
-   * @returns {number | null}
-   */
-  deadlineAt(now = Date.now()) {
-    if (!this.playing) {
-      return null;
-    }
-    const held = Number.isFinite(this.bufferedSeconds) ? Math.max(0, this.bufferedSeconds) : 0;
-    return now + held * 1000;
   }
 
   /**
@@ -284,20 +322,28 @@ export class Viewer {
    * @returns {boolean}
    */
   /**
-   * Whether this viewer is CONSUMING film.
+   * Whether this viewer wants film NOW — either watching it or waiting for it.
    *
-   * Two ways of not consuming, and neither is absence: the picture is stopped,
-   * or the page is not on screen. Both mean nothing in front of them ever falls
-   * due, so the work goes to whoever is watching — and both leave them a place
-   * in the priority map, because they are still there and will want it again.
+   * The one predicate every reading about urgency asks, and it is a union of
+   * two states rather than the negation of a pause:
    *
+   *   playing        consuming, and will run dry when their cushion does;
+   *   waiting        consuming nothing only because we have delivered nothing;
+   *   neither        they stopped the picture themselves.
+   *
+   * A viewer who has stopped it keeps their place in the priority map — they
+   * are still there and will want the film in front of them again — but nothing
+   * of theirs falls due, so the work goes to whoever is watching or waiting.
+   *
+   * A page that is not on screen is not consuming: its timers are throttled and
+   * it asks for nothing, which is indistinguishable from a full cushion.
    * Picture-in-picture is watching with the tab hidden, and the page folds that
-   * into `onScreen` before it says it, so it needs no case of its own here.
+   * into `onScreen` before saying it, so it needs no case of its own here.
    *
    * @returns {boolean}
    */
-  consumesFilm() {
-    return this.playing !== false && this.onScreen !== false;
+  wantsFilmNow() {
+    return (this.playing === true || this.waiting === true) && this.onScreen !== false;
   }
 
   isPresent() {
@@ -323,7 +369,29 @@ export class Viewer {
    * since. A viewer whose picture is stopped covers nothing and stays where
    * they are, which is the same formula with the rate at zero.
    *
-   *   position(now) = stated + rate * (now - statedAt),   rate = playing ? 1 : 0
+   *   position(now) = stated + rate * min(now - statedAt, held),
+   *                                              rate = playing ? 1 : 0
+   *
+   * **THE SECOND TERM IS BOUNDED BY WHAT THEY HELD**, and the bound is stated
+   * by the viewer rather than chosen here: nobody can play past the end of what
+   * they have. A viewer who said "I hold thirty seconds" and has said nothing
+   * for two minutes has played at most thirty of those seconds; the rest of the
+   * silence is a viewer who ran dry, or one we are no longer hearing from, and
+   * in both cases they are not where the clock alone would put them.
+   *
+   * Unbounded, it walks a viewer off the end of a film they never started. On
+   * 2026-09-14 the tab was hidden for 145 seconds while the page deliberately
+   * held start-up until it was shown, the rate was assumed to be one, and this
+   * end placed the viewer at 145.979 s — the exact `-ss` the soundtrack's
+   * encoder was given, while the browser was asking for segment #0 and getting
+   * 503 for sixty seconds. Their cushion was 0.0 s throughout, so this bound
+   * alone would have held them at zero whatever the rate said.
+   *
+   * The bound binds only where the clock has outrun the cushion — a report lost,
+   * or a viewer starving — and there it under-states the position. That is the
+   * safe direction and deliberately so: under-stating makes material a viewer
+   * has already passed, which costs an encoder; over-stating skips material
+   * they are about to need, which costs the viewer the picture.
    *
    * Held as a stored number instead, it was a staircase: flat for the ten
    * seconds between reports and then a jump, so everything derived from it —
@@ -342,9 +410,10 @@ export class Viewer {
     if (this.position === null) {
       return null;
     }
-    const rate = this.playing ? 1 : 0;
+    const rate = this.playing === true ? 1 : 0;
     const elapsedSec = Math.max(0, (now - this.position.at) / 1000);
-    return this.position.seconds + rate * elapsedSec;
+    const held = Number.isFinite(this.bufferedSeconds) ? Math.max(0, this.bufferedSeconds) : 0;
+    return this.position.seconds + rate * Math.min(elapsedSec, held);
   }
 }
 

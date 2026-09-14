@@ -368,7 +368,12 @@ function makeSendQueueWatcher({ log, getTransportSnapshot, witness, usrsctpState
           // ever say these people have gone. Until now this ended the watch and
           // left them registered for the life of the process, holding the
           // outputs they were watching.
-          connectionGone(sessionId, "the transport stopped answering");
+          // Named for what it is: the watcher is handed this, it does not
+          // hold the registry. Written as a bare `connectionGone` it was a
+          // reference to a function of the FACTORY, which is not in scope here,
+          // so the one detector that has to work threw a `ReferenceError`
+          // inside its own timer instead of releasing the viewer.
+          onConnectionGone?.(sessionId, "the transport stopped answering");
           stop();
           return;
         }

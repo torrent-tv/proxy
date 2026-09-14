@@ -1,3 +1,5 @@
+import { recordViewerReport } from "../../../../services/viewer/report-intake.js";
+
 /**
  * Accept a viewer link report for a transcode session (adaptive bitrate).
  * The browser measures its own data-channel throughput per segment fetch and
@@ -17,10 +19,13 @@
  *
  * @param {import("fastify").FastifyRequest} req
  * @param {import("fastify").FastifyReply} reply
- * @param {{ hlsSessionManager: import("../../../../services/hls-session-manager.js").HlsSessionManager }} deps
+ * @param {{ sessions: { get: (id: string) => object | undefined }, viewers: object }} deps -
+ *   The live sessions and the registry of viewers. The VIEWER layer takes the
+ *   statement from here; this route's whole job is turning a request into that
+ *   one call and its answer into a status code.
  * @returns {Promise<void>}
  */
-export async function handleApiTranscodeSessionNetReportPost(req, reply, { hlsSessionManager }) {
+export async function handleApiTranscodeSessionNetReportPost(req, reply, { sessions, viewers }) {
   const sessionId = typeof req.params.sessionId === "string" ? req.params.sessionId : "";
   const body = req.body && typeof req.body === "object" && !Array.isArray(req.body) ? req.body : {};
   // WHAT THIS REPORT IS. A statement by one viewer about itself: where the
@@ -66,16 +71,21 @@ export async function handleApiTranscodeSessionNetReportPost(req, reply, { hlsSe
   const inPictureInPicture =
     typeof body.inPictureInPicture === "boolean" ? body.inPictureInPicture : undefined;
   const positionSeconds = Number(body.positionSeconds);
-  const recorded = hlsSessionManager.recordNetReport(sessionId, {
-    linkMbps: Number.isFinite(linkMbps) && linkMbps > 0 ? linkMbps : undefined,
-    waiting,
-    bufferedAheadSec,
-    consumerId,
-    playing,
-    onScreen,
-    inPictureInPicture,
-    positionSeconds:
-      Number.isFinite(positionSeconds) && positionSeconds >= 0 ? positionSeconds : undefined
+  const recorded = recordViewerReport({
+    sessions,
+    viewers,
+    sessionId,
+    report: {
+      linkMbps: Number.isFinite(linkMbps) && linkMbps > 0 ? linkMbps : undefined,
+      bufferedAheadSec,
+      consumerId,
+      playing,
+      waiting,
+      onScreen,
+      inPictureInPicture,
+      positionSeconds:
+        Number.isFinite(positionSeconds) && positionSeconds >= 0 ? positionSeconds : undefined
+    }
   });
   if (!recorded) {
     return reply.code(404).send({ error: "Transcode session was not found." });

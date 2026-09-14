@@ -40,6 +40,15 @@
  * question, and it reads a union of viewers rather than any one of them.
  */
 
+/**
+ * How long a link measurement describes the link it was taken on.
+ *
+ * A reading older than this says nothing about now: the viewer may have seeked,
+ * changed network, or stopped. Thirty seconds is three of the page's own
+ * reporting intervals, so a live viewer always has a fresh one.
+ */
+export const LINK_READING_FRESH_MS = 30_000;
+
 export class Viewer {
   /**
    * @param {string} id - The consumer id the browser sends with every request
@@ -321,6 +330,31 @@ export class Viewer {
    *
    * @returns {boolean}
    */
+  /**
+   * What this viewer's link was last measured to carry, or null when nothing
+   * recent measures it.
+   *
+   * HOW LONG A READING DESCRIBES A LINK is a fact about the reading, so it is
+   * answered here and nowhere else. It used to be a constant in the session
+   * manager, consulted in four places — once where a reading is chosen, and
+   * three more times over a figure that had already passed that very filter,
+   * which made those three conditions unreachable.
+   *
+   * A viewer who has stopped reporting is NOT thereby gone: only the reading
+   * expires. Answering both from one place is what stopped a soundtrack's
+   * encoder on 2026-09-05.
+   *
+   * @param {number} [now]
+   * @returns {{ linkMbps: number, bufferedAheadSec: number, positionSeconds: number | null, at: number } | null}
+   */
+  linkReading(now = Date.now()) {
+    const reading = this.netReport;
+    if (reading === null || now - reading.at > LINK_READING_FRESH_MS) {
+      return null;
+    }
+    return reading;
+  }
+
   /**
    * Whether this viewer wants film NOW — either watching it or waiting for it.
    *

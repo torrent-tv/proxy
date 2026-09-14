@@ -345,7 +345,7 @@ test("with two viewers the budget acts on the WORST link, not on whoever reporte
   );
 });
 
-test("a report from a viewer who has left stops counting", async (t) => {
+test("a reading stops counting when the person leaves, not when it gets old", async (t) => {
   const { manager, session, dirPath } = await managerWithSession({ transcodeVideo: false });
   t.after(async () => {
     await manager.disposeAll();
@@ -353,17 +353,15 @@ test("a report from a viewer who has left stops counting", async (t) => {
   });
 
   await produceSegments(session, 2_000_000);
-  // A reading describes a link at a moment, and one this old cannot decide for
-  // the viewers still here. ONLY THE READING EXPIRES: whether the person is
-  // still watching is a different question with its own answer — their
-  // connection — and answering both from this one place is what stopped a
-  // soundtrack's encoder on 2026-09-05, so silence no longer removes anybody.
-  viewerOf(session, "gone").netReport = {
-    linkMbps: 1.0,
-    bufferedAheadSec: 1.5,
-    positionSeconds: 40,
-    at: Date.now() - 120_000
-  };
+  // A LINK READING DOES NOT EXPIRE. It is the last thing known about that link,
+  // and how fast a link is does not change because nobody measured it for a
+  // minute — the page keeps its own last figure for the same reason. What ends
+  // a reading is the person leaving, which is presence, and presence is the
+  // connection: silence removes nobody (2026-09-05, a soundtrack's encoder
+  // stopped because those two questions had one answer).
+  const gone = viewerOf(session, "gone");
+  gone.report({ linkMbps: 1.0, bufferedAheadSec: 1.5, positionSeconds: 40, playing: true }, Date.now() - 120_000);
+  gone.gone = true;
   recordViewerReport({
     sessions: manager.sessionsById,
     viewers: manager.viewers,
@@ -375,13 +373,12 @@ test("a report from a viewer who has left stops counting", async (t) => {
   await manager.runQualityBudgetOnce();
 
   assert.equal(session.viewers.size, 2, "the viewer is still known — silence is not leaving");
-  // The reading is not deleted anywhere: how long one describes a link is a
-  // fact about the reading, answered when it is read. Nulling it on somebody
-  // else's report was a second owner of the same fact.
+  // Their reading is not deleted anywhere: it is simply not theirs to give any
+  // more, because they are not here. Nothing walks it for a decision.
   assert.equal(
-    viewerOf(session, "gone").linkReading(Date.now()),
-    null,
-    "and their reading has expired, so it decides nothing"
+    viewerOf(session, "gone").linkReading()?.linkMbps,
+    1.0,
+    "their last reading stands as the last thing known about that link"
   );
   assert.equal(session.qualityAsk, null, "the viewer who is here can carry the picture");
 });

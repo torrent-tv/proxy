@@ -40,15 +40,6 @@
  * question, and it reads a union of viewers rather than any one of them.
  */
 
-/**
- * How long a link measurement describes the link it was taken on.
- *
- * A reading older than this says nothing about now: the viewer may have seeked,
- * changed network, or stopped. Thirty seconds is three of the page's own
- * reporting intervals, so a live viewer always has a fresh one.
- */
-export const LINK_READING_FRESH_MS = 30_000;
-
 export class Viewer {
   /**
    * @param {string} id - The consumer id the browser sends with every request
@@ -331,28 +322,31 @@ export class Viewer {
    * @returns {boolean}
    */
   /**
-   * What this viewer's link was last measured to carry, or null when nothing
-   * recent measures it.
+   * What this viewer's link was last measured to carry, or null when it has
+   * never been measured.
    *
-   * HOW LONG A READING DESCRIBES A LINK is a fact about the reading, so it is
-   * answered here and nowhere else. It used to be a constant in the session
-   * manager, consulted in four places — once where a reading is chosen, and
-   * three more times over a figure that had already passed that very filter,
-   * which made those three conditions unreachable.
+   * IT DOES NOT EXPIRE, and the reasoning is the correction of 2026-09-14. A
+   * reading older than a chosen thirty seconds used to be discarded here, which
+   * put two facts under one number: how fast the link is, and whether we are
+   * still hearing from this page.
    *
-   * A viewer who has stopped reporting is NOT thereby gone: only the reading
-   * expires. Answering both from one place is what stopped a soundtrack's
-   * encoder on 2026-09-05.
+   * The speed persists. A link does not stop being what it was measured to be
+   * because nobody measured it for a minute, and the page says as much by
+   * keeping its own last figure for ever rather than reporting nothing. It is
+   * measured once when the connection comes up and corrected by every transfer
+   * afterwards — one estimate, continuously refined, never a fact with a
+   * deadline.
    *
-   * @param {number} [now]
+   * Whether the reading is still somebody's is PRESENCE, which has its own
+   * owner: a viewer who has gone is removed from the output, and the readings
+   * walked for a decision are only those of people still there. Answering both
+   * questions in one place is what stopped a soundtrack's encoder on
+   * 2026-09-05.
+   *
    * @returns {{ linkMbps: number, bufferedAheadSec: number, positionSeconds: number | null, at: number } | null}
    */
-  linkReading(now = Date.now()) {
-    const reading = this.netReport;
-    if (reading === null || now - reading.at > LINK_READING_FRESH_MS) {
-      return null;
-    }
-    return reading;
+  linkReading() {
+    return this.netReport;
   }
 
   /**

@@ -2,9 +2,10 @@
  * @file A viewer's statement about itself, taken in.
  *
  * The VIEWER layer's own entry point, and the whole of what happens when a page
- * says where it is: the output the reporter has on screen is resolved, the
- * statement reaches the person it is about, and readings that have gone stale
- * stop deciding for the people still here.
+ * says where it is: the output the reporter has on screen is resolved, and the
+ * statement reaches the person it is about. Nothing expires here — a link
+ * reading is the last thing known about that link, and whether it is still
+ * somebody's is presence's answer (`Viewer.linkReading`).
  *
  * It lived in the session manager, which is a description of an OUTPUT, and the
  * two questions were tangled there: whether this is a measurement of a LINK,

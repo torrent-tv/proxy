@@ -144,16 +144,46 @@ test("the intake hands the statement to the viewer on the output they are watchi
   assert.equal(picture.viewers?.has("one") ?? false, false);
 });
 
-test("a reading decides nothing once it is older than the link it describes", () => {
+test("a link reading does not expire — presence is what decides whose it is", () => {
   const viewer = new Viewer("one", AT);
   viewer.report({ linkMbps: 8, bufferedAheadSec: 10, positionSeconds: 5, playing: true }, AT);
 
-  assert.equal(viewer.linkReading(AT)?.linkMbps, 8);
-  assert.equal(viewer.linkReading(AT + 29_000)?.linkMbps, 8);
-  assert.equal(viewer.linkReading(AT + 31_000), null);
-  // Nothing was deleted: the viewer is still here and still where they said.
+  // A link does not stop being what it was measured to be because nobody
+  // measured it for a while. The page says as much by keeping its own last
+  // figure rather than reporting nothing.
+  assert.equal(viewer.linkReading()?.linkMbps, 8);
+  assert.equal(viewer.linkReading()?.linkMbps, 8, "and an hour later it is still the last thing known");
+
+  // What ends it is the person leaving, which is a different fact with a
+  // different owner.
   assert.equal(viewer.isPresent(), true);
-  assert.equal(viewer.positionSeconds(AT + 31_000), 15);
+});
+
+test("the worst reading is taken across the people who are still here", async () => {
+  const { worstLinkReading } = await import("../services/viewer/link-readings.js");
+  const output = {};
+  const slow = new Viewer("slow", AT);
+  slow.outputs.add("out");
+  const fast = new Viewer("fast", AT);
+  fast.outputs.add("out");
+  output.viewers = new Map([
+    ["slow", slow],
+    ["fast", fast]
+  ]);
+  slow.report({ linkMbps: 2, bufferedAheadSec: 3, playing: true }, AT);
+  fast.report({ linkMbps: 40, bufferedAheadSec: 90, playing: true }, AT);
+
+  // The slowest link and the emptiest buffer, which may belong to two people.
+  const worst = worstLinkReading(output);
+  assert.equal(worst?.linkMbps, 2);
+  assert.equal(worst?.bufferedAheadSec, 3);
+  assert.equal(worst?.viewers, 2);
+
+  // The slow one leaves. Their reading goes with them, however recent it was.
+  slow.gone = true;
+  const left = worstLinkReading(output);
+  assert.equal(left?.linkMbps, 40);
+  assert.equal(left?.viewers, 1);
 });
 
 test("a report into a session that is gone is refused rather than invented", async () => {

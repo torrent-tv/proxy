@@ -89,7 +89,9 @@ import {
 export { ffmpegSeconds, onKeyframeGridFor, seekLandingOffsetFor, segmentCutTimesFrom };
 import { viewersOf } from "./viewer/Viewer.js";
 import { activeOutputFor } from "./viewer/active-output.js";
-import { earliestViewerSecondsOn, viewerSecondsOn, viewerSegmentsOn } from "./viewer/positions.js";
+import { audioStartSecondsFor } from "./viewer/audio-start.js";
+import { worstLinkReading } from "./viewer/link-readings.js";
+import { viewerSecondsOn, viewerSegmentsOn } from "./viewer/positions.js";
 import { Viewers } from "./viewer/Viewers.js";
 import { LiveOutputs } from "./output/LiveOutputs.js";
 import { variantHeightsFor } from "./output/ladder.js";
@@ -3086,44 +3088,6 @@ export class HlsSessionManager {
     this.viewers.of(session, consumerId).seen();
   }
 
-  /**
-   * The worst of what the viewers of this session report, as one reading.
-   *
-   * The budget asks one question — is anybody failing to keep up — so both
-   * terms are the worst case: the slowest link and the emptiest buffer, which
-   * may belong to different people. That is deliberate. Taking the last report
-   * instead meant a session with two viewers acted on whichever of them
-   * happened to report most recently.
-   *
-   * @param {HlsSession} session
-   * @param {number} now
-   * @returns {{ linkMbps: number, bufferedAheadSec: number, at: number, viewers: number } | null}
-   *   Null when nothing fresh measures the link, which is the silence every
-   *   caller already treats as "no opinion".
-   */
-  #worstNetReport(session, now) {
-    let worst = null;
-    for (const viewer of viewersOf(session).values()) {
-      const report = viewer.linkReading(now);
-      if (report === null) {
-        continue;
-      }
-      if (worst === null) {
-        worst = {
-          linkMbps: report.linkMbps,
-          bufferedAheadSec: report.bufferedAheadSec,
-          at: report.at,
-          viewers: 1
-        };
-        continue;
-      }
-      worst.linkMbps = Math.min(worst.linkMbps, report.linkMbps);
-      worst.bufferedAheadSec = Math.min(worst.bufferedAheadSec, report.bufferedAheadSec);
-      worst.at = Math.max(worst.at, report.at);
-      worst.viewers += 1;
-    }
-    return worst;
-  }
 
   /**
    * Answer the player's report that a delivered fragment sits far from the edge
@@ -3243,9 +3207,9 @@ export class HlsSessionManager {
    * @returns {Promise<boolean>}
    */
   async #checkLinkBudget(session, now) {
-    const report = this.#worstNetReport(session, now);
+    const report = worstLinkReading(session);
     if (!report) {
-      session.linkSlowSince = 0; // no fresh data — old clients / stopped reporter
+      session.linkSlowSince = 0; // nobody present has measured their link
       return false;
     }
     if (report.bufferedAheadSec >= LINK_LOW_BUFFER_SEC) {
@@ -4689,7 +4653,7 @@ export class HlsSessionManager {
       // top offered height has no next rung at all, and answering "nothing to
       // step to, so yes" is how a cap came off a link measured at a fifth of
       // what the picture needs.
-      if (!this.#linkCouldCarry(session, this.#peakMbpsForHeight(this.liveOutputs.pictureOf(session), current), now)) {
+      if (!this.#linkCouldCarry(session, this.#peakMbpsForHeight(this.liveOutputs.pictureOf(session), current))) {
         return;
       }
       session.budgetUpSince = 0;
@@ -4733,10 +4697,10 @@ export class HlsSessionManager {
     if (session.linkSlowSince !== 0 || session.budgetSlowSince !== 0) {
       return false;
     }
-    const report = this.#worstNetReport(session, now);
+    const report = worstLinkReading(session);
     if (!report) {
-      // Nothing fresh measures the link, so it has no opinion either way — the
-      // same silence that stops #checkLinkBudget from acting.
+      // Nothing measures the link, so it has no opinion either way — the same
+      // silence that stops #checkLinkBudget from acting.
       return true;
     }
     const base = this.liveOutputs.pictureOf(session);
@@ -4744,24 +4708,23 @@ export class HlsSessionManager {
     if (next === undefined) {
       return true; // nothing to step to; only the cap decision is left
     }
-    return this.#linkCouldCarry(session, this.#peakMbpsForHeight(base, next), now);
+    return this.#linkCouldCarry(session, this.#peakMbpsForHeight(base, next));
   }
 
   /**
    * Whether the viewer's measured link can carry a given number of Mbit/s.
    *
-   * A link nobody has measured recently has no opinion either way — the same
+   * A link nobody has ever measured has no opinion either way — the same
    * silence that stops `#checkLinkBudget` from acting — so it answers yes.
    *
    * @param {HlsSession} session
    * @param {number} wantedMbps
-   * @param {number} now
    * @returns {boolean}
    */
-  #linkCouldCarry(session, wantedMbps, now) {
+  #linkCouldCarry(session, wantedMbps) {
     // The SLOWEST link among the viewers: a step up has to be carried by all of
     // them, not by whichever reported last.
-    const report = this.#worstNetReport(session, now);
+    const report = worstLinkReading(session);
     if (!report) {
       return true;
     }
@@ -7280,54 +7243,6 @@ export class HlsSessionManager {
     return { earliestPosition, deepestBuffer, viewers };
   }
 
-  /**
-   * Where a soundtrack must begin: at the earliest film anybody is waiting on.
-   *
-   * ASKED OF THE MAP, NOT OF A VIEWER. Sound is produced for the same reason a
-   * picture is, and the map already states it — in seconds of film, merged over
-   * everybody watching, with the map's own order saying which of them is
-   * earliest. Reading it off a viewer put a person inside the encoding layer,
-   * and then every question about WHICH person had to be answered a second time
-   * here: the earliest of two, the one on this rung, the one who has not
-   * reported yet.
-   *
-   * The apparatus this replaced is worth naming so it is not rebuilt: three
-   * position sources ranked by priority, a function saying which had answered,
-   * a subtraction of the deepest reported buffer, and a special case for a
-   * session nobody had asked anything of. Each repaired a quantity that meant
-   * two things. It means one thing now.
-   *
-   * One segment back, and that is not a margin: a cut grid places the
-   * soundtrack's own boundaries where it will, so the piece holding a moment of
-   * film begins at or before it.
-   *
-   * @param {HlsSession} base
-   * @returns {number} Seconds.
-   */
-  #audioStartSecondsFor(base) {
-    // WHERE THE EARLIEST OF THEM STANDS, across every rung of this picture. A
-    // track begun at the leader has nothing to give the viewer behind them, and
-    // two viewers of one film may be on different rungs.
-    //
-    // NO SUBTRACTION, and that is the whole of the change. A viewer's position
-    // is where their PICTURE is, so the sound belongs exactly there — while the
-    // apparatus this replaced turned a request edge back into a playhead with
-    // three ranked sources, a name for which had answered, a subtraction of the
-    // deepest reported buffer, and a special case for a session nobody had
-    // asked anything of. Field 2026-08-31: a page opened at 588 s started its
-    // sound at 460 s, 131 seconds nobody would hear
-    // (`research/cold-open-audio-start-2026-08-31.md`).
-    //
-    // A fact about people, deciding one parameter of an output. It places no
-    // encoder: where an encoder works is the priority map's answer.
-    const earliest = earliestViewerSecondsOn(this.liveOutputs.familyOf(base));
-    const opened = Number(base.progress?.startPositionSeconds);
-    const from = earliest ?? (Number.isFinite(opened) ? opened : 0);
-    // One segment back, and that is not a margin: a cut grid places the
-    // soundtrack's own boundaries where it will, so the piece holding a moment
-    // of film begins at or before it.
-    return Math.max(0, from - this.segmentDurationSec);
-  }
 
 
   /**
@@ -8263,7 +8178,11 @@ export class HlsSessionManager {
       // who seeked since then is somewhere else entirely — so an old one is
       // ignored and the whole look-ahead is subtracted instead, which cannot
       // leave the run ahead of them.
-      startPositionSeconds: this.#audioStartSecondsFor(base),
+      startPositionSeconds: audioStartSecondsFor({
+        family: this.liveOutputs.familyOf(base),
+        openedAtSeconds: base.progress?.startPositionSeconds,
+        segmentSeconds: this.segmentDurationSec
+      }),
       segmentFormatId: base.segmentFormat.id,
       // Cut where the picture is cut. Two streams meant to be played together
       // have to be divided at the same times, and the grid is the base's — the

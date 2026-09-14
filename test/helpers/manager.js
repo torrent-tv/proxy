@@ -26,7 +26,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { HlsSessionManager } from "../../services/hls-session-manager.js";
-import { SegmentStore } from "../../services/disk/SegmentStore.js";
+import { SegmentStore } from "../../services/segment-store/SegmentStore.js";
 
 /**
  * A manager whose produced segments live where nothing else can reach them.

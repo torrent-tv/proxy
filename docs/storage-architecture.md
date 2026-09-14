@@ -160,22 +160,49 @@ distribution.
 and never by a size, and they cannot simply be thrown away when space is short: a
 dump is the only evidence of the death it records. That needs a rule of its own.
 
-## The produced segments are here now, and the layer is still three directories
+## One layer, four directories, and under the import rule
 
-`SegmentStore` moved out of `services/encode/` on 2026-09-14. Produced segments
-are bytes on a medium with a limit, which is the same property the torrent's
-pieces have, and the layer plan of 2026-09-13 puts both under one owner — so a
-store of finished pieces living inside the ENCODING layer was the encoder owning
-its own disk.
+`SegmentStore` moved out of `services/encode/` on 2026-09-14 — a store of
+finished pieces inside the ENCODING layer was the encoder owning its own disk.
+It did not move into the room's own directory either: it is a CLAIMANT, and a
+claimant inside the owner of the resource is the same fault one floor down.
 
-**What it cannot yet do is come under the import rule.** `biome.json` restricts a
-layer by DIRECTORY — nothing inside it may import `../**` — and storage is three
-directories: `piece-store/` (memory), `disk/` (the allowance) and `files/`
-(whole files), plus this store. `disk/DiskSpace.js` imports
-`../piece-store/allowance.js`, which is one layer talking to itself and which the
-rule reads as a breach. Adding `services/disk/**` to the list today therefore
-fails on a line that is correct.
+**Four directories, deliberately.** They share one property — bytes on a medium
+with a limit — and that is what makes them one layer. What they are is three
+different things: a torrent piece is born when it is downloaded and addressed by
+`(infohash, number)`; a produced segment is born when an encoder closes it and
+addressed by `(output key, number)`; a whole file is born when its last piece
+lands. Different birth, different death, different name, and two of the three
+live in the torrent WORKER thread while the others are on the main one. Flatten
+them and that thread boundary becomes invisible: code that cannot call code
+looks like a sibling, and no rule catches it.
 
-The rule can be applied the moment the layer is ONE directory, and making it one
-is the layer's own work — the same work that gives memory and disk a single
-allowance and a single eviction order.
+**The rule is written as an exception, not as a list.** `group: ["../**",
+"!../storage/**", "!../piece-store/**", "!../segment-store/**", "!../files/**"]`
+— everything outside the layer, minus the layer. A list of forbidden layers was
+tried first and let `../../utils/logger.js` straight through, because a list
+only catches what somebody remembered to write in it. Checked by breaking it,
+in both directions, in all four directories.
+
+**One reader of how much memory is free** (`machine-memory.js`). It had been
+written three times — the health collector, the memory report and the piece
+store — and the copies had already drifted: the piece store was corrected from
+`os.freemem()` to the kernel's `MemAvailable` on 2026-08-27 and the health
+collector went on publishing the wrong quantity until 2026-09-02.
+
+## What still takes disk without asking this layer
+
+Measured 2026-09-14 by reading every file outside the layer that touches the
+filesystem. Two claimants are wired to the owner (`wire.js`); these are not:
+
+1. **the torrent's own data** — `torrent-pool.js` holds a cap of its own,
+   10 GB, chosen rather than measured, and reads `statfs` itself;
+2. **core dumps** (`core-dumps.js`), **heap snapshots** (`memory-report.js`) and
+   **packet captures** (`packet-witness.js`) — each bounded by a COUNT and none
+   by a size. On the addon host two dumps and five snapshots came to 3.2 GB.
+
+The diagnostics need a rule of their own before they can be claimants, and it is
+not a rule anybody has: a dump is the only evidence of the death it records, so
+"drop it when space is short" is not obviously right. The torrent's data needs
+no new rule — only the share to reach the worker thread, which is the shape
+`wire.js` already uses for the spilled pieces.

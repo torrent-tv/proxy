@@ -20,6 +20,7 @@
  */
 
 import { readdir, readFile, rm, statfs } from "node:fs/promises";
+import { availableMemory } from "./storage/machine-memory.js";
 import os from "node:os";
 import v8 from "node:v8";
 import path from "node:path";
@@ -73,32 +74,6 @@ export function readProcessMemory() {
     arrayBuffers: usage.arrayBuffers ?? 0,
     heapLimit
   };
-}
-
-/**
- * How much memory the machine could still give out, in bytes.
- *
- * `os.freemem()` is the wrong quantity on Linux and the difference is not
- * academic: it counts only pages that are free RIGHT NOW, while the kernel
- * deliberately keeps that number low by filling the rest with reclaimable page
- * cache. `MemAvailable` is the kernel's own estimate of what a new allocation
- * could actually obtain, cache included. Reading the estimate the kernel
- * publishes beats recomputing a worse one.
- *
- * @returns {Promise<number | null>} Bytes, or null where /proc is not there.
- */
-export async function readAvailableMemory() {
-  try {
-    const text = await readFile("/proc/meminfo", "utf8");
-    const match = /^MemAvailable:\s+(\d+)\s+kB$/m.exec(text);
-    if (match) {
-      return Number(match[1]) * 1024;
-    }
-  } catch {
-    // silent-ok: not Linux, or /proc is not mounted. The fallback below is a
-    // worse answer, and saying so is the point of returning it separately.
-  }
-  return null;
 }
 
 /**
@@ -194,17 +169,11 @@ export async function readMappingSummary() {
 }
 
 /**
- * Available memory, falling back to what the runtime can offer.
+ * Available memory, from the one place that reads it.
  *
- * @returns {Promise<{ bytes: number, measured: boolean }>}
+ * @returns {{ bytes: number, measured: boolean }}
  */
-export async function availableMemory() {
-  const fromKernel = await readAvailableMemory();
-  if (fromKernel !== null) {
-    return { bytes: fromKernel, measured: true };
-  }
-  return { bytes: os.freemem(), measured: false };
-}
+export { availableMemory };
 
 /**
  * Anonymous memory this process holds, from the kernel's own rollup.

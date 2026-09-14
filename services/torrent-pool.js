@@ -8,7 +8,7 @@
  * download.
  */
 
-import { IDLE_KEEP_MS } from "./disk/keep.js";
+import { IDLE_KEEP_MS } from "./storage/keep.js";
 import dns from "node:dns/promises";
 import os from "node:os";
 import path from "node:path";

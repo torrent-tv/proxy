@@ -7,7 +7,7 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
-import { DiskSpace } from "../services/disk/DiskSpace.js";
+import { DiskSpace } from "../services/storage/DiskSpace.js";
 
 const MEGABYTE = 1024 * 1024;
 
@@ -154,7 +154,7 @@ test("the free space is read from the nearest directory that exists", async () =
   // when the proxy stops, so at every start `statfs` on it fails. Field
   // 2026-09-10: the first reading said `disk: 0MB free` on a host with 103 GB,
   // and zero means "no room" to everything that reads it.
-  const { freeBytesFor } = await import("../services/disk/free.js");
+  const { freeBytesFor } = await import("../services/storage/free.js");
   const os = await import("node:os");
   const path = await import("node:path");
   const missing = path.join(os.tmpdir(), "no-such-directory-here", "nor-here");

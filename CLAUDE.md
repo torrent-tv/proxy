@@ -72,14 +72,27 @@ Linux-only host (e.g. POSIX-only signals must degrade elsewhere).
     wanted (`demand/`) against what the swarm is told (`download/`), why urgency
     is not a number given to the library, and why the speculative levels are
     withdrawn rather than lowered.
-  - `disk/` — one owner of the disk, read by everything that takes any of it.
-    `DiskSpace` reads the free space once and divides it between claimants by
-    the rule memory already uses; `wire.js` says who the claimants are (the
-    produced segments, and the pieces the memory store spills, which live on the
-    torrent thread and are told their share over its channel); `free.js` reads
-    the nearest directory that exists, because the segments' own is made at the
-    first session and removed at a clean stop.
-  - `docs/disk-architecture.md` — the three things that write to one disk, the
+  - **The storage layer — ONE layer, FOUR directories.** Bytes on a medium with
+    a limit is the property they share; what holds them are three different
+    things with different lifetimes, different addresses and different THREADS,
+    so they are not flattened into one:
+      - `piece-store/` — the torrent's pieces: memory tier, spill tier, and the
+        order they leave in (`shared-piece-store.js`, `piece-lru.js`,
+        `piece-disk-store.js`). Lives in the torrent WORKER thread.
+      - `segment-store/` — the segments an encoder has produced
+        (`SegmentStore.js`), addressed by the output's own key. Main thread.
+      - `files/` — files downloaded whole and kept as files
+        (`CompletedFiles.js`, `piece-from-whole-file.js`). Worker thread.
+      - `storage/` — the one owner of the ROOM all three take, holding no bytes
+        itself: how much of the machine is free (`machine-memory.js`,
+        `free.js`), how a budget is divided (`allowance.js`, `DiskSpace.js`),
+        who the claimants are (`wire.js`), and how long material nobody is using
+        is kept (`keep.js`, `returns.js`).
+    They may import each other and nothing above, which `biome` checks as an
+    EXCEPTION to `../**` rather than as a list of forbidden layers — a layer is
+    not a directory, the blanket form cannot say "my siblings", and a list of
+    names misses whatever it forgets.
+  - `docs/storage-architecture.md` — the three things that write to one disk, the
     two rules that remove material (nobody needs it, or there is no room), the
     order the viewers give that removal, why a spilled piece is a file of its
     own, and what is still not solved.

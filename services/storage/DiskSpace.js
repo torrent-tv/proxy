@@ -21,7 +21,7 @@
  * seen to need. Nothing is a fraction chosen by hand.
  */
 
-import { OtherDemand, divideAllowance } from "../piece-store/allowance.js";
+import { OtherDemand, divideAllowance } from "./allowance.js";
 
 /**
  * A consumer of the disk.

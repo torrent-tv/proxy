@@ -6,8 +6,8 @@
  * All values are cheap to read and require no background work.
  */
 
-import { readFileSync } from "node:fs";
 import os from "node:os";
+import { availableMemoryBytes } from "./storage/machine-memory.js";
 
 /**
  * Snapshot of system health at a point in time.
@@ -31,35 +31,14 @@ import os from "node:os";
  */
 
 /**
- * How much memory the machine could still give out, in bytes.
+ * What the machine could give an allocation right now.
  *
- * NOT `os.freemem()`. On Linux that counts only the pages free at this
- * instant, and the kernel keeps that number low on purpose: what is not in use
- * is filled with cache, which is handed back the moment anything asks. A host
- * with 4 GB of cache and 200 MB genuinely free reports 200 MB and looks full
- * while it has 4.2 GB to give.
- *
- * The kernel publishes its own estimate as `MemAvailable`, and that is what is
- * read here. The same mistake was fixed in the piece store's budget on
- * 2026-08-27 and stayed in this file until 2026-09-02, where it weighed 0.4 of
- * every proxy's score — so every Linux proxy in the pool understated itself,
- * and by a different amount each, according to how much cache it happened to
- * hold.
+ * Re-exported rather than computed: the resource is the storage layer's, and
+ * this reading was written three times over before it had one owner.
  *
  * @returns {number}
  */
-export function availableMemoryBytes() {
-  try {
-    const match = /^MemAvailable:\s+(\d+)\s+kB$/m.exec(readFileSync("/proc/meminfo", "utf8"));
-    if (match) {
-      return Number(match[1]) * 1024;
-    }
-  } catch {
-    // silent-ok: not Linux, or /proc is not readable. `os.freemem()` is then
-    // the best available answer and on those systems it is not misleading.
-  }
-  return os.freemem();
-}
+export { availableMemoryBytes };
 
 /**
  * Collect current system health metrics.

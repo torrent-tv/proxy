@@ -11,8 +11,8 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
-import { IDLE_KEEP_MS } from "../services/disk/keep.js";
-import { Returns } from "../services/disk/returns.js";
+import { IDLE_KEEP_MS } from "../services/storage/keep.js";
+import { Returns } from "../services/storage/returns.js";
 
 const MINUTE = 60 * 1000;
 

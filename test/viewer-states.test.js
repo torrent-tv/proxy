@@ -111,9 +111,14 @@ test("a page that is not on screen wants nothing now, whatever else it says", ()
   assert.equal(viewer.wantsFilmNow(), false);
 });
 
-test("the intake keeps a link reading only while it describes the link", async () => {
-  const { takeViewerReport } = await import("../services/viewer/report-intake.js");
-  const session = {};
+test("the intake hands the statement to the viewer on the output they are watching", async () => {
+  const { recordViewerReport } = await import("../services/viewer/report-intake.js");
+  const picture = { id: "picture", state: "ready", activeVariantId: "rung" };
+  const rung = { id: "rung", state: "ready" };
+  const sessions = new Map([
+    ["picture", picture],
+    ["rung", rung]
+  ]);
   const viewers = {
     of(target, id) {
       target.viewers ??= new Map();
@@ -124,28 +129,44 @@ test("the intake keeps a link reading only while it describes the link", async (
     }
   };
 
-  takeViewerReport({
+  // The page always addresses the PICTURE — it is never told which rung it is
+  // on — and the statement belongs to the rung actually on screen.
+  const taken = recordViewerReport({
+    sessions,
     viewers,
-    session,
-    consumerId: "one",
-    report: { linkMbps: 8, bufferedAheadSec: 10, positionSeconds: 5, playing: true },
-    now: AT,
-    linkFreshMs: 30_000
+    sessionId: "picture",
+    report: { linkMbps: 8, bufferedAheadSec: 10, positionSeconds: 5, playing: true, consumerId: "one" },
+    now: AT
   });
-  assert.equal(session.viewers.get("one").netReport?.linkMbps, 8);
 
-  // A second report, a minute later, from somebody else: the first viewer's
-  // reading has aged past what it describes and stops deciding for them. Who is
-  // still watching is a different question and is not touched.
-  takeViewerReport({
-    viewers,
-    session,
-    consumerId: "two",
-    report: { bufferedAheadSec: 0, playing: false, waiting: true },
-    now: AT + 60_000,
-    linkFreshMs: 30_000
-  });
-  assert.equal(session.viewers.get("one").netReport, null);
-  assert.equal(session.viewers.get("one").isPresent(), true);
-  assert.equal(session.viewers.get("two").waiting, true);
+  assert.equal(taken, true);
+  assert.equal(rung.viewers.get("one").positionSeconds(AT), 5);
+  assert.equal(picture.viewers?.has("one") ?? false, false);
+});
+
+test("a reading decides nothing once it is older than the link it describes", () => {
+  const viewer = new Viewer("one", AT);
+  viewer.report({ linkMbps: 8, bufferedAheadSec: 10, positionSeconds: 5, playing: true }, AT);
+
+  assert.equal(viewer.linkReading(AT)?.linkMbps, 8);
+  assert.equal(viewer.linkReading(AT + 29_000)?.linkMbps, 8);
+  assert.equal(viewer.linkReading(AT + 31_000), null);
+  // Nothing was deleted: the viewer is still here and still where they said.
+  assert.equal(viewer.isPresent(), true);
+  assert.equal(viewer.positionSeconds(AT + 31_000), 15);
+});
+
+test("a report into a session that is gone is refused rather than invented", async () => {
+  const { recordViewerReport } = await import("../services/viewer/report-intake.js");
+  const sessions = new Map([["dead", { id: "dead", state: "disposed" }]]);
+  const viewers = { of() { throw new Error("must not be asked"); } };
+
+  assert.equal(
+    recordViewerReport({ sessions, viewers, sessionId: "dead", report: { bufferedAheadSec: 0 }, now: AT }),
+    false
+  );
+  assert.equal(
+    recordViewerReport({ sessions, viewers, sessionId: "never", report: { bufferedAheadSec: 0 }, now: AT }),
+    false
+  );
 });

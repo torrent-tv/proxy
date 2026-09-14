@@ -88,8 +88,8 @@ import {
 // — did not move when the code did.
 export { ffmpegSeconds, onKeyframeGridFor, seekLandingOffsetFor, segmentCutTimesFrom };
 import { viewersOf } from "./viewer/Viewer.js";
+import { activeOutputFor } from "./viewer/active-output.js";
 import { earliestViewerSecondsOn, viewerSecondsOn, viewerSegmentsOn } from "./viewer/positions.js";
-import { takeViewerReport } from "./viewer/report-intake.js";
 import { Viewers } from "./viewer/Viewers.js";
 import { LiveOutputs } from "./output/LiveOutputs.js";
 import { variantHeightsFor } from "./output/ladder.js";
@@ -524,7 +524,6 @@ const BUDGET_DOWNLOAD_OK_FACTOR = 1.0;
 // instead. Which of the two, and whether a viewer's own pick may be moved at
 // all, is decided where the viewer's choice lives: in the browser, which
 // honours the request only in automatic mode.
-const LINK_REPORT_FRESH_MS = 30_000;
 // Usable share of the reported link (protocol overhead + measurement noise).
 const LINK_SAFETY = 0.8;
 // Deficit must persist this long before acting (absorbs one slow segment).
@@ -3059,36 +3058,6 @@ export class HlsSessionManager {
    * @returns {Promise<void>}
    */
   /**
-   * Record the latest viewer link report for a session (adaptive bitrate).
-   * Returns false for an unknown/disposed session.
-   *
-   * Kept per viewer. A browser that does not say who it is lands under one
-   * shared key, which is exactly the old behaviour for that browser and no
-   * worse: with one viewer the two are the same thing.
-   *
-   * @param {string} sessionId
-   * @param {{ linkMbps: number, bufferedAheadSec: number, consumerId?: string, positionSeconds?: number }} report
-   * @returns {boolean}
-   */
-  recordNetReport(sessionId, report) {
-    const named = this.sessionsById.get(sessionId);
-    if (!named || named.state === "disposed") {
-      return false;
-    }
-    const consumerId = typeof report?.consumerId === "string" ? report.consumerId : "";
-    return takeViewerReport({
-      viewers: this.viewers,
-      // The stream on screen is the reporter's own: with two viewers on two
-      // rungs, one report says nothing about the other's encoder.
-      session: this.#activeVariant(named, consumerId),
-      consumerId,
-      report,
-      now: Date.now(),
-      linkFreshMs: LINK_REPORT_FRESH_MS
-    });
-  }
-
-  /**
    * Record where one viewer of this session is, and answer with the furthest
    * any of them has reached.
    *
@@ -3135,8 +3104,8 @@ export class HlsSessionManager {
   #worstNetReport(session, now) {
     let worst = null;
     for (const viewer of viewersOf(session).values()) {
-      const report = viewer.netReport;
-      if (report === null || now - report.at > LINK_REPORT_FRESH_MS) {
+      const report = viewer.linkReading(now);
+      if (report === null) {
         continue;
       }
       if (worst === null) {
@@ -3186,7 +3155,7 @@ export class HlsSessionManager {
     // run and its own position, and that is exactly the pair this report exists
     // to tell apart. Answering an audio report from the picture's records would
     // state, confidently, something about the wrong stream.
-    const onScreen = this.#activeVariant(named);
+    const onScreen = activeOutputFor({ base: named, sessions: this.sessionsById, viewers: this.viewers });
     const session = track === "audio"
       ? ([...this.liveOutputs.familyOf(onScreen)].find((member) => member.audioOnly === true) ?? onScreen)
       : onScreen;
@@ -3275,7 +3244,7 @@ export class HlsSessionManager {
    */
   async #checkLinkBudget(session, now) {
     const report = this.#worstNetReport(session, now);
-    if (!report || now - report.at > LINK_REPORT_FRESH_MS) {
+    if (!report) {
       session.linkSlowSince = 0; // no fresh data — old clients / stopped reporter
       return false;
     }
@@ -4666,7 +4635,7 @@ export class HlsSessionManager {
       }
       return false;
     }
-    const playing = this.liveOutputs.variantHeightOf(this.#activeVariant(base));
+    const playing = this.liveOutputs.variantHeightOf(activeOutputFor({ base, sessions: this.sessionsById, viewers: this.viewers }));
     if (height === playing) {
       return false;
     }
@@ -4765,7 +4734,7 @@ export class HlsSessionManager {
       return false;
     }
     const report = this.#worstNetReport(session, now);
-    if (!report || now - report.at > LINK_REPORT_FRESH_MS) {
+    if (!report) {
       // Nothing fresh measures the link, so it has no opinion either way — the
       // same silence that stops #checkLinkBudget from acting.
       return true;
@@ -4793,7 +4762,7 @@ export class HlsSessionManager {
     // The SLOWEST link among the viewers: a step up has to be carried by all of
     // them, not by whichever reported last.
     const report = this.#worstNetReport(session, now);
-    if (!report || now - report.at > LINK_REPORT_FRESH_MS) {
+    if (!report) {
       return true;
     }
     return report.linkMbps * LINK_SAFETY >= wantedMbps;
@@ -7167,7 +7136,7 @@ export class HlsSessionManager {
     if (!ask) {
       return 0;
     }
-    if (ask.height === this.liveOutputs.variantHeightOf(this.#activeVariant(base))) {
+    if (ask.height === this.liveOutputs.variantHeightOf(activeOutputFor({ base, sessions: this.sessionsById, viewers: this.viewers }))) {
       base.qualityAsk = null; // the viewer is there; nothing left to ask for
       return 0;
     }
@@ -7180,45 +7149,6 @@ export class HlsSessionManager {
       return 0;
     }
     return ask.height;
-  }
-
-  /**
-   * The variant of a session that the viewer is watching right now.
-   *
-   * Every request that names the base session — seek, progress, link report,
-   * release — means the stream the viewer has on screen, and after a quality
-   * change that is another session. The browser is not told about the swap: it
-   * holds one session id for the whole file, which is what keeps the switch out
-   * of the state machine on that side.
-   *
-   * Kept per viewer, because one picture is shared by everyone watching it and
-   * a quality step is a session of its own: with one answer for the session, a
-   * step taken by one viewer would move the other one's stream, and that
-   * viewer's next seek would be forwarded to a rung they never chose. The
-   * session's own field remains the answer for a viewer who cannot name
-   * themselves, and the last one anybody moved to.
-   *
-   * @param {HlsSession} base
-   * @param {string} [consumerId]
-   * @returns {HlsSession}
-   */
-  #activeVariant(base, consumerId = "") {
-    const named = consumerId ? base.viewers?.get(consumerId)?.activeVariantId ?? null : null;
-    const activeId = named ?? base.activeVariantId;
-    if (!activeId || activeId === base.id) {
-      return base;
-    }
-    const active = this.sessionsById.get(activeId);
-    if (!active || active.state === "disposed") {
-      if (named) {
-        this.viewers.of(base, consumerId).activeVariantId = null;
-      }
-      if (base.activeVariantId === activeId) {
-        base.activeVariantId = base.id;
-      }
-      return base;
-    }
-    return active;
   }
 
   /**
@@ -7245,7 +7175,7 @@ export class HlsSessionManager {
       onScreen.add(viewer.activeVariantId);
     }
     if (onScreen.size === 0) {
-      onScreen.add(this.#activeVariant(base).id);
+      onScreen.add(activeOutputFor({ base, sessions: this.sessionsById, viewers: this.viewers }).id);
     }
     return onScreen;
   }
@@ -7278,7 +7208,7 @@ export class HlsSessionManager {
     if (Number.isInteger(wantedIndex) && wantedIndex >= 0) {
       return this.#segmentStartTime(base, wantedIndex);
     }
-    return viewerSecondsOn(this.#activeVariant(base, consumerId));
+    return viewerSecondsOn(activeOutputFor({ base, consumerId, sessions: this.sessionsById, viewers: this.viewers }));
   }
 
   /**
@@ -7883,7 +7813,7 @@ export class HlsSessionManager {
     // buys it an encoder, and both halves are said here: a warmed rung is one
     // this person is watching for as long as the warm-up lasts, which is why
     // two encoders run through it.
-    if (variant.id !== this.#activeVariant(base, consumerId).id) {
+    if (variant.id !== activeOutputFor({ base, consumerId, sessions: this.sessionsById, viewers: this.viewers }).id) {
       this.viewers.of(variant, consumerId).moveTo(this.#segmentStartTime(base, index));
       this.planEncodersSoon();
     }
@@ -7908,7 +7838,7 @@ export class HlsSessionManager {
    * @returns {void}
    */
   #noteVariantActive(base, variant, wantedIndex = -1, consumerId = "") {
-    const previous = this.#activeVariant(base, consumerId);
+    const previous = activeOutputFor({ base, consumerId, sessions: this.sessionsById, viewers: this.viewers });
     if (previous.id === variant.id) {
       // The rung on screen asking for more of itself, which it does every few
       // seconds. Nothing is being decided here — and deciding anything was the
@@ -9431,7 +9361,7 @@ export class HlsSessionManager {
     // change is another session. Touching the named one as well is what keeps
     // the family alive: only the ACTIVE variant gets segment requests, so
     // without this the base session would idle out from under its own variants.
-    const session = this.#activeVariant(named, consumerId);
+    const session = activeOutputFor({ base: named, consumerId, sessions: this.sessionsById, viewers: this.viewers });
     session.lastAccessedAt = Date.now();
     const warmupTotalSeconds = this.startupWaitMs / 1000;
     const warmupElapsedSeconds = Math.max(0, (Date.now() - session.startedAt) / 1000);

@@ -17,6 +17,7 @@
  */
 
 import test from "node:test";
+import { recordViewerReport } from "../services/viewer/report-intake.js";
 import { fakeProcess as fakeEncoder, startRunOn } from "./helpers/encode-run.js";
 import assert from "node:assert/strict";
 import { SourceFile } from "../services/source/SourceFile.js";
@@ -363,21 +364,24 @@ test("a report from a viewer who has left stops counting", async (t) => {
     positionSeconds: 40,
     at: Date.now() - 120_000
   };
-  manager.recordNetReport(session.id, {
-    linkMbps: 80,
-    bufferedAheadSec: 60,
-    consumerId: "here",
-    positionSeconds: 40
+  recordViewerReport({
+    sessions: manager.sessionsById,
+    viewers: manager.viewers,
+    sessionId: session.id,
+    report: { linkMbps: 80, bufferedAheadSec: 60, consumerId: "here", positionSeconds: 40 }
   });
   session.linkSlowSince = Date.now() - 60_000;
 
   await manager.runQualityBudgetOnce();
 
   assert.equal(session.viewers.size, 2, "the viewer is still known — silence is not leaving");
+  // The reading is not deleted anywhere: how long one describes a link is a
+  // fact about the reading, answered when it is read. Nulling it on somebody
+  // else's report was a second owner of the same fact.
   assert.equal(
-    viewerOf(session, "gone").netReport,
+    viewerOf(session, "gone").linkReading(Date.now()),
     null,
-    "but their reading has expired, so it decides nothing"
+    "and their reading has expired, so it decides nothing"
   );
   assert.equal(session.qualityAsk, null, "the viewer who is here can carry the picture");
 });

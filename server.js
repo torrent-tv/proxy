@@ -393,7 +393,13 @@ export async function startProxyServer({
     handleApiTranscodeSessionsProgressGet(req, reply, { hlsSessionManager })
   );
   app.post("/api/transcode-sessions/:sessionId/net-report", async (req, reply) =>
-    handleApiTranscodeSessionNetReportPost(req, reply, { hlsSessionManager })
+    // A viewer's statement about itself goes to the VIEWER layer, not through
+    // the session manager: what it needs is the live sessions and the registry
+    // of viewers, and nothing about encoding.
+    handleApiTranscodeSessionNetReportPost(req, reply, {
+      sessions: hlsSessionManager.sessionsById,
+      viewers: hlsSessionManager.viewers
+    })
   );
   app.post("/api/transcode-sessions/:sessionId/fragment-far", async (req, reply) =>
     handleApiTranscodeSessionFragmentFarPost(req, reply, { hlsSessionManager })

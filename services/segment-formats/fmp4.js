@@ -306,6 +306,69 @@ export const fmp4Format = {
   },
 
   /**
+   * Whether this piece is whole, judged against ITS OWN header.
+   *
+   * A piece that disagrees with the session's cached header is one of two very
+   * different things, and they call for opposite actions: the piece may be
+   * short, or the HEADER may be the odd one out. A self-contained piece carries
+   * a `moov` of its own, so it can be compared with itself, and that comparison
+   * tells them apart without knowing anything about encoders.
+   *
+   * WHAT THIS REPLACED, because the difference is five minutes of a frozen
+   * picture. The action used to be chosen by "is any run of this session
+   * alive?" — a question about the SESSION, asked about a fact of the BYTES. A
+   * run anywhere in the film meant "still being written; waiting for it", and
+   * nothing re-judged or re-made the piece afterwards, so one misjudgement
+   * became permanent. Field 2026-09-14: `segment-00033.mp4` of a copied
+   * picture, already served whole to one viewer at 5 099 421 bytes, was refused
+   * to a second viewer for five minutes — four holds of sixty seconds each,
+   * then 503 — while the run in force was at #192 and beyond. That viewer's
+   * picture stood still 196.2 s and then a further 56.2 s.
+   *
+   * The run question is also unanswerable and does not need asking: a piece
+   * being written is called `making-<tag>-NNNNN.mp4` and takes its served name
+   * by a rename, which is atomic. A file under its served name is never being
+   * written and never half-read.
+   *
+   * The same file read back off the disk declares one track in its header and
+   * carries one in its fragments, so what fired in the field was not the piece.
+   * Until a reading names what it was, the verdict carries every count it made.
+   *
+   * @param {Buffer} raw - The piece as it is on disk, header and all.
+   * @param {Buffer} bytes - Its media part, the header already removed.
+   * @param {Buffer | null} sessionHeader - What the session serves as its init.
+   * @returns {{ whole: boolean, serve: boolean, fragmentTracks: number,
+   *   ownTracks: number, sessionTracks: number, because: string } | null} Null
+   *   where there is nothing to compare against, which is not a verdict.
+   */
+  judgeTracks(raw, bytes, sessionHeader) {
+    if (!sessionHeader || sessionHeader.length === 0) {
+      return null;
+    }
+    const sessionTracks = readTrackTimescales(sessionHeader).size;
+    if (sessionTracks === 0) {
+      return null;
+    }
+    const fragmentTracks = countFragmentTracks(bytes);
+    if (fragmentTracks >= sessionTracks) {
+      return null;
+    }
+    const ownHeader = this.extractInit(raw);
+    const ownTracks = ownHeader ? readTrackTimescales(ownHeader).size : 0;
+    const agreesWithItself = ownTracks > 0 && fragmentTracks >= ownTracks;
+    return {
+      whole: agreesWithItself,
+      serve: agreesWithItself,
+      fragmentTracks,
+      ownTracks,
+      sessionTracks,
+      because: agreesWithItself
+        ? "it agrees with its own header, so the session's is the odd one out; serving it"
+        : "it disagrees with its own header, so it was closed short; removing it to be made again"
+    };
+  },
+
+  /**
    * How many tracks an init segment declares.
    *
    * The init is extracted from the first self-contained piece and then cached

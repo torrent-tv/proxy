@@ -47,9 +47,16 @@ const WINDOW_PIECES = 4;
 async function recordingTorrent({ pieceCount, present = () => true }) {
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), "read-window-test-"));
   const totalLength = pieceCount * PIECE;
+  // ROOM FOR THE WHOLE FIXTURE, because none of these tests is about eviction.
+  // At 64 pieces of memory an 8000-piece fixture spilled 7936 of them to disk —
+  // a file each — and read most of them back, so four checks about which piece
+  // RANGES a reader claims cost 25-28 seconds apiece and this one file took
+  // 132 s of a 140 s suite. The store's own behaviour under pressure is
+  // measured where that is the subject (`piece-store-eviction`,
+  // `piece-lru`, `piece-disk-store`).
   const store = new SharedPieceStore(PIECE, {
     length: totalLength,
-    memoryBytes: 64 * PIECE,
+    memoryBytes: totalLength,
     path: directory,
     name: "test"
   });

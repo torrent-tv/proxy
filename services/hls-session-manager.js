@@ -8,7 +8,7 @@
  */
 
 import { createReadStream, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
-import { access, readFile, rm, stat, unlink } from "node:fs/promises";
+import { access, readFile, stat, unlink } from "node:fs/promises";
 import { Readable } from "node:stream";
 import os from "node:os";
 import path from "node:path";
@@ -69,8 +69,7 @@ export { newIndexCheck };
 import { Output, Outputs } from "./output/Output.js";
 import { masterPlaylistText, mediaPlaylistText, segmentIndexForTime } from "./output/playlists.js";
 import { SourceFiles, sourceDecodeCharacteristics } from "./source/SourceFile.js";
-import { ProducedIndex } from "./produced-index.js";
-import { SegmentStore } from "./encode/SegmentStore.js";
+import { SegmentStore } from "./disk/SegmentStore.js";
 import { EncodeCost } from "./quality/EncodeCost.js";
 import {
   buildRunCommand,
@@ -1151,7 +1150,6 @@ function isWarmupTimeoutError(error) {
  * @property {string}  id            - UUID of the session.
  * @property {string}  sourceMapKey  - Cache key combining source + transcode settings.
  * @property {string}  fileName      - Display name of the file being transcoded.
- * @property {string}  dirPath       - Temp directory containing HLS output.
  * @property {"starting" | "ready" | "failed" | "disposed"} state
  * @property {number}  startedAt     - Unix ms timestamp when the session was created.
  * @property {number}  lastAccessedAt - Unix ms timestamp of the last consumer access.
@@ -1777,7 +1775,6 @@ export class HlsSessionManager {
     // into one place and each serves what the other has already made. The start
     // position is deliberately not part of it — segment 42 covers the same span
     // whoever began where.
-    const sessionDir = this.segmentStore.pathFor(spec.toKey());
     // The file this session's encoder READS. A soundtrack shipped as its own
     // file is encoded FROM that file, and an audio rendition carries nothing
     // else — so it reads the sidecar directly and needs no second input at all.
@@ -2192,7 +2189,6 @@ export class HlsSessionManager {
       // The file this session is of: its key, its name and what a probe of it
       // said. One object per file, shared by every session of it.
       file,
-      dirPath: sessionDir,
       // The SESSION's own lifetime, and nothing else: it exists, or it has been
       // disposed. It used to carry the encoder run's status as well, which is
       // why one line in the spawn path read `state === "disposed" ? "disposed"
@@ -2665,10 +2661,7 @@ export class HlsSessionManager {
     const pieces = new Map();
     let names;
     try {
-      names = this.#producedIndex(session)
-        .fileNames()
-        .filter((name) => session.segmentFormat.isSegmentFileName(name))
-        .sort();
+      names = this.#producedNumbers(session).map((index) => session.segmentFormat.segmentFileName(index));
     } catch {
       return null;
     }
@@ -3165,7 +3158,7 @@ export class HlsSessionManager {
   async #observedStreamMbps(session) {
     let names;
     try {
-      names = this.#producedIndex(session).fileNames();
+      names = this.#producedNumbers(session).map((index) => session.segmentFormat.segmentFileName(index));
     } catch {
       return null;
     }
@@ -3184,7 +3177,7 @@ export class HlsSessionManager {
     let bytes = 0;
     try {
       for (const index of completed) {
-        const segmentPath = await this.#findProducedFile(session, session.segmentFormat.segmentFileName(index));
+        const segmentPath = this.segmentStore.pathOf(session.outputKey ?? "", index);
         if (!segmentPath) {
           break;
         }
@@ -3843,7 +3836,7 @@ export class HlsSessionManager {
   #contiguousAheadSeconds(session, viewerSegment) {
     let present;
     try {
-      present = this.#producedIndex(session).segmentNumbers();
+      present = new Set(this.#producedNumbers(session));
     } catch {
       return null;
     }
@@ -3900,7 +3893,7 @@ export class HlsSessionManager {
    * @returns {void}
    */
   #noteRunProducedSegment(session, filePath) {
-    if (typeof filePath !== "string" || path.dirname(filePath) !== session.dirPath) {
+    if (typeof filePath !== "string" || path.dirname(filePath) !== this.segmentStore.pathFor(session.outputKey ?? "")) {
       return;
     }
     const index = session.segmentFormat.segmentIndexFromName(path.basename(filePath));
@@ -5268,7 +5261,7 @@ export class HlsSessionManager {
       usesExplicitCuts: Boolean(cutTimes && cutTimes.length > 0),
       spawn: (spawnArgs) =>
         spawn(this.ffmpegBin, spawnArgs, {
-          cwd: session.dirPath,
+          cwd: this.segmentStore.directoryFor(session.outputKey ?? ""),
           // A fourth channel: the encoder names every piece it has CLOSED on it,
           // which is the only proof a piece is whole.
           stdio: ["ignore", "pipe", "pipe", "pipe"]
@@ -5798,7 +5791,7 @@ export class HlsSessionManager {
       return;
     }
 
-    const playlistPath = path.join(session.dirPath, PLAYLIST_FILE_NAME);
+    const playlistPath = path.join(this.segmentStore.pathFor(session.outputKey ?? ""), PLAYLIST_FILE_NAME);
     const deadline = Date.now() + this.startupWaitMs;
 
     while (Date.now() < deadline) {
@@ -6043,12 +6036,8 @@ export class HlsSessionManager {
    */
   #latestProducedSegment(session) {
     let highest = null;
-    for (const name of this.#producedIndex(session).fileNames()) {
-      if (!this.segmentFormat.isSegmentFileName(name)) {
-        continue;
-      }
-      const index = this.segmentFormat.segmentIndexFromName(name);
-      if (index >= 0 && (highest === null || index > highest)) {
+    for (const index of this.#producedNumbers(session)) {
+      if (highest === null || index > highest) {
         highest = index;
       }
     }
@@ -8607,7 +8596,7 @@ export class HlsSessionManager {
         // piece, so the first one to exist supplies it.
         const bytes = cutsAtGivenTimes(session)
           ? await this.#initFromFirstSegment(session)
-          : await readFile((await this.#findProducedFile(session, initFileName)) ?? path.join(session.dirPath, initFileName));
+          : await readFile(path.join(this.segmentStore.pathFor(session.outputKey ?? ""), initFileName));
         if (!bytes || bytes.length === 0) {
           return { kind: "warming-up" };
         }
@@ -8637,7 +8626,8 @@ export class HlsSessionManager {
 
     // Which run's copy answers, when several have written this name. Chosen by
     // what the copies CARRY, not by which run is newest — see #chooseProducedCopy.
-    const filePath = this.#producedIndex(session).pathOf(fileName) ?? path.join(session.dirPath, fileName);
+    const filePath = this.segmentStore.pathOfName(session.outputKey ?? "", fileName) ??
+      path.join(this.segmentStore.pathFor(session.outputKey ?? ""), fileName);
     const isPlaylist = fileName === PLAYLIST_FILE_NAME;
     if (!isPlaylist) {
       // A REQUEST SAYS THE VIEWER IS HERE, AND NOTHING ELSE. It does not say
@@ -8716,61 +8706,30 @@ export class HlsSessionManager {
         const bytes = cutsAtGivenTimes(session) && session.segmentFormat.stripInit
           ? session.segmentFormat.stripInit(raw)
           : raw;
-        // A segment that is short of a track is not servable, whatever the
-        // directory says about it. A terminated run closes its current output
-        // file properly — trailing index and all — but with only what had been
-        // muxed by then, and after a seek-restart that is routinely one track
-        // of two. The file exists and so does the next one, so the readiness
-        // rule calls it done. Measured 2026-08-06: segment #133 held one track
-        // where its neighbours held two, the proxy answered every request for
-        // it in 98 ms, and the viewer's seek never completed. Treated as not
-        // ready, so the encoder makes it again.
-        if (
-          typeof session.segmentFormat.hasEveryTrack === "function" &&
-          !session.segmentFormat.hasEveryTrack(bytes, session.initBytes ?? null)
-        ) {
-          // Short of a track means one of two very different things, and the
-          // first version of this check treated them alike — deleting the file
-          // an encoder was writing INTO, so it went on writing to something
-          // nobody could open and the segment never appeared. Measured
-          // 2026-08-06: segment #225 was deleted 14 s into the run producing
-          // it, and answered 404 thirty-three seconds later.
-          //
-          // The run that is producing this segment right now has simply not
-          // finished it: wait, exactly as for a segment that does not exist
-          // yet. Only a segment the CURRENT run has already moved past — the
-          // next one exists, or no run is producing at all — is a leftover, and
-          // only that one is worth removing so it can be made again.
-          // A live run may genuinely still be writing this — including one
-          // stopped by the look-ahead, which closes the piece when it is let
-          // go. With no run at all it is a leftover, whatever its number, and
-          // removing it is what lets the next run make it again.
-          //
-          // Field 2026-09-03, before a run was an object: an empty `#25` left
-          // by a run killed four minutes earlier was called "still being
-          // written" by a run that had produced nothing, so it was never
-          // removed and never remade, and the viewer waited on it for ten
-          // minutes. The question was asked of the segment's NUMBER — anything
-          // at or above the start index while any run was alive — and it is a
-          // question about the run.
-          const stale = liveRunsOf(session).length === 0;
+        // WHOLE OR SHORT IS A JUDGEMENT ABOUT BYTES, and the format that
+        // knows how to read them makes it (`judgeTracks`). What is done about
+        // the answer is this path's business and stays here: a whole piece is
+        // served, a short one is removed so it can be made again.
+        const verdict = session.segmentFormat.judgeTracks?.(raw, bytes, session.initBytes ?? null) ?? null;
+        if (verdict && !verdict.whole) {
           logger.warn(
             `transcode ${session.id} segment #${index} is short of a track — ` +
-            (stale
-              ? "left behind by a run that was terminated; producing it again"
-              : "still being written; waiting for it")
+            `${filePath}, ${raw.length} bytes on disk, ${bytes.length} of body, ` +
+            `${verdict.fragmentTracks} track(s) in its fragments against ` +
+            `${verdict.sessionTracks} the session's header declares and ` +
+            `${verdict.ownTracks} its own declares — ${verdict.because}`
           );
-          if (stale) {
+          if (!verdict.serve) {
             try {
               await unlink(filePath);
             } catch {
-              // Already gone, or being rewritten: either way nothing to do.
+              // Already gone: either way nothing to do.
             }
-            // The index answers from what it read; a file removed on purpose
-            // must not still be an answer in the same tick.
-            this.#producedIndex(session).invalidate();
+            // What the store remembers of this directory is stale the moment a
+            // file is taken out of it.
+            this.segmentStore.forget(session.outputKey ?? "");
+            return { kind: "warming-up" };
           }
-          return { kind: "warming-up" };
         }
         // Where this segment REALLY begins, taken from the piece itself, and
         // only from the playlist when the piece does not say.
@@ -8953,7 +8912,7 @@ export class HlsSessionManager {
    * What moving the encoder BACKWARDS costs, said out loud when it happens.
    *
    * Nothing already written is lost — every run keeps its own directory and
-   * {@link HlsSessionManager##findProducedFile} serves the union of all of them
+   * {@link SegmentStore#pathOfName} serves the union of all of them
    * — so the price of a restart is not the files. It is two other things, and
    * neither was ever counted:
    *
@@ -9002,13 +8961,9 @@ export class HlsSessionManager {
 
     void (async () => {
       let alreadyOnDisk = 0;
-      for (let index = startIndex; index <= last; index += 1) {
-        const fileName = session.segmentFormat.segmentFileName(index);
-        try {
-          await access(path.join(session.dirPath, fileName));
+      for (const index of this.#producedNumbers(session)) {
+        if (index >= startIndex && index <= last) {
           alreadyOnDisk += 1;
-        } catch {
-          // Nobody has made it, so this run will not be remaking it.
         }
       }
       accounting.remade += alreadyOnDisk;
@@ -9037,7 +8992,7 @@ export class HlsSessionManager {
    * @returns {Promise<string | null>}
    */
   async #firstCopyWithBytes(session, fileName) {
-    const held = this.#producedIndex(session).pathOf(fileName);
+    const held = this.segmentStore.pathOfName(session.outputKey ?? "", fileName);
     if (held === null) {
       return null;
     }
@@ -9060,7 +9015,7 @@ export class HlsSessionManager {
    * @returns {number[]}
    */
   producedSegmentNumbers(session) {
-    return this.#producedIndex(session).segmentNumbers();
+    return new Set(this.#producedNumbers(session));
   }
 
   /**
@@ -9088,34 +9043,18 @@ export class HlsSessionManager {
   }
 
   /**
-   * This session's one statement of what it has produced.
+   * What this session's OUTPUT holds, asked of the one thing that owns it.
    *
-   * Made on first use and kept on the session, so the directory times it
-   * remembers survive between requests — which is the whole of what makes it
-   * cheaper than the walk it replaces.
-   *
-   * @param {HlsSession} session
-   * @returns {ProducedIndex}
-   */
-  #producedIndex(session) {
-    if (!(session.producedIndex instanceof ProducedIndex)) {
-      session.producedIndex = new ProducedIndex({
-        dirPath: session.dirPath,
-        segmentFormat: session.segmentFormat ?? this.segmentFormat
-      });
-    }
-    return session.producedIndex;
-  }
-
-  /**
-   * Where a produced file actually is, or null when no run has written it.
+   * There were two owners of this fact over one directory: the store, addressed
+   * by the output's own key, and a `ProducedIndex` built per SESSION over a
+   * path the store had handed out. Two viewers of one output therefore built
+   * two indexes over one directory, each with its own idea of what was in it.
    *
    * @param {HlsSession} session
-   * @param {string} fileName
-   * @returns {Promise<string | null>}
+   * @returns {number[]} Every segment number it holds, in order.
    */
-  async #findProducedFile(session, fileName) {
-    return this.#producedIndex(session).pathOf(fileName);
+  #producedNumbers(session) {
+    return this.segmentStore.provenNumbers(session.outputKey ?? "");
   }
 
   #holdForProduction(session, fileName, isPlaylist, options) {
@@ -9576,16 +9515,6 @@ export class HlsSessionManager {
     // What decides instead is when the material was last READ, and how much
     // room there is — `segmentStore.enforce`, run by the same timer that
     // expires sessions.
-    if (!session.outputKey) {
-      // A session from before the store — nothing in the tree makes one now,
-      // and this is what would clean up after one if anything did.
-      try {
-        await rm(session.dirPath, { recursive: true, force: true });
-      } catch (error) {
-        const message = error instanceof Error ? error.message : String(error);
-        logger.warn(`failed to cleanup HLS temp dir: ${message}`);
-      }
-    }
   }
 
   /**

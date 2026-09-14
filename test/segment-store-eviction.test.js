@@ -12,7 +12,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { SegmentStore } from "../services/encode/SegmentStore.js";
+import { SegmentStore } from "../services/disk/SegmentStore.js";
 
 const SEGMENT = 1024;
 
@@ -213,19 +213,34 @@ test("told nothing about viewers, it falls back to the oldest directory", async 
   }
 });
 
-test("a clean exit leaves nothing of ours, so what is found next time is from a kill", async () => {
+test("a clean exit leaves nothing of ours, and nothing of anybody else's either", async () => {
   const { store, root } = await makeStore();
   try {
     await fill(store, "one", [0, 1, 2]);
     await fill(store, "two", [0, 1]);
-    // A directory this process adopted at startup and no session owns: the very
-    // thing the old rule left behind, which is how an orphan became permanent.
-    await fs.mkdir(path.join(root, "abandoned"), { recursive: true });
-    await fs.writeFile(path.join(root, "abandoned", "segment-00000.mp4"), Buffer.alloc(SEGMENT));
+    // A directory this store never adopted. It is either an orphan of a killed
+    // process or ANOTHER PROXY'S LIVE OUTPUT, and from here the two are
+    // indistinguishable — the root is a fixed path on the machine, not this
+    // process's property. So it is left alone: an orphan gets an owner at the
+    // next startup sweep and goes with the exit after that, while a live output
+    // of another process must not be taken from under it.
+    //
+    // What this replaced removed the ROOT, recursively, which took both.
+    // Measured 2026-09-14 under `node --test`, where a second process is
+    // ordinary: 2 to 4 checks of a neighbouring file failed per run, never the
+    // same ones, reporting segments missing that they had just written.
+    await fs.mkdir(path.join(root, "not-ours"), { recursive: true });
+    await fs.writeFile(path.join(root, "not-ours", "segment-00000.mp4"), Buffer.alloc(SEGMENT));
 
     assert.equal(store.dropAll("the proxy is shutting down"), 2);
 
-    await assert.rejects(() => fs.stat(root), /ENOENT/, "the store left its root behind");
+    assert.deepEqual(await heldNumbers(store, "one"), [], "what this store made is gone");
+    assert.deepEqual(await heldNumbers(store, "two"), []);
+    assert.ok((await fs.stat(root)).isDirectory(), "the root is the machine's, and it stays");
+    assert.ok(
+      (await fs.stat(path.join(root, "not-ours", "segment-00000.mp4"))).size > 0,
+      "a directory this store never adopted is not its to remove"
+    );
   } finally {
     await fs.rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 20 });
   }

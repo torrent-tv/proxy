@@ -22,8 +22,7 @@ import { fakeProcess as fakeEncoder, startRunOn } from "./helpers/encode-run.js"
 import assert from "node:assert/strict";
 import { SourceFile } from "../services/source/SourceFile.js";
 import { Timeline } from "../services/output/Timeline.js";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
-import os from "node:os";
+import { mkdir, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { HlsSessionManager } from "../services/hls-session-manager.js";
 import { managerWithOwnStore } from "./helpers/manager.js";
@@ -110,9 +109,16 @@ function fakeSession({ dirPath, transcodeVideo = true, cutGrid = transcodeVideo 
  * @returns {Promise<{ manager: HlsSessionManager, session: object, dirPath: string, restarts: number[] }>}
  */
 async function managerWithSession({ transcodeVideo = true, cutGrid } = {}) {
-  const dirPath = await mkdtemp(path.join(os.tmpdir(), "auto-quality-"));
   // Its own store root — see `helpers/manager.js` for what sharing one cost.
   const { manager } = managerWithOwnStore();
+  // ADDRESSED THE WAY PRODUCTION ADDRESSES IT: a session's segments live in the
+  // store's directory for its OUTPUT, and what it has produced is asked of the
+  // store by that same key. A fixture with a directory of its own and no key
+  // describes a proxy that no longer exists — the observed bitrate the link
+  // budget reads would then be taken from files nothing can find.
+  const outputKey = `auto-quality:fmt=fmp4:grid=${transcodeVideo ? "uniform" : "kf@0"}:video-only:v=0/${transcodeVideo ? "enc:1280x720:exact" : "copy"}`;
+  manager.segmentStore.useFormat(outputKey, fmp4Format);
+  const dirPath = manager.segmentStore.directoryFor(outputKey);
   // A software host: the budget's own precondition.
   manager.videoEncoder = { kind: "software", name: "libx264", inputArgs: [] };
   // A fully-downloaded file, so nothing here is ever read as download-bound —
@@ -123,6 +129,7 @@ async function managerWithSession({ transcodeVideo = true, cutGrid } = {}) {
     fileLength: 4e9
   });
   const session = fakeSession({ dirPath, transcodeVideo, cutGrid });
+  session.outputKey = outputKey;
   manager.sessionsById.set(BASE_ID, session);
   startRunOn(session, { process: fakeEncoder() });
   return { manager, session, dirPath };

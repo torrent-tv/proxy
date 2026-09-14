@@ -438,6 +438,42 @@ export class SegmentStore {
 
 
   /**
+   * Where the file of this name is, or null when this output does not hold it.
+   *
+   * By NAME rather than by number, because that is what a request carries. The
+   * conversion is the store's own business: it is told how this output's files
+   * are named (`useFormat`) and therefore needs nobody else to read one.
+   *
+   * @param {string} key
+   * @param {string} fileName
+   * @returns {string | null}
+   */
+  pathOfName(key, fileName) {
+    const format = this.#formats.get(key);
+    const index = format?.segmentIndexFromName?.(fileName) ?? -1;
+    if (!Number.isInteger(index) || index < 0) {
+      return null;
+    }
+    return this.pathOf(key, index);
+  }
+
+  /**
+   * Forget what this output's directory was last seen to hold.
+   *
+   * What is held is re-read when the directory's modification time moves, which
+   * is how a quiet request costs one `stat`. A caller that has just removed a
+   * file and asks again in the same tick would otherwise be told it is still
+   * there — the time has moved, but only by as much as the clock's own
+   * granularity, and that is not something to depend on.
+   *
+   * @param {string} key
+   * @returns {void}
+   */
+  forget(key) {
+    this.#held.delete(key);
+  }
+
+  /**
    * Where a segment is, or null when this output does not hold it.
    *
    * @param {string} key
@@ -496,11 +532,29 @@ export class SegmentStore {
   }
 
   /**
-   * Throw away everything this store owns, and the root with it.
+   * Throw away everything this store owns.
    *
    * For a clean exit. What is left on disk afterwards is by definition from a
    * kill, which is the case the startup sweep exists for — and without this the
    * sweep adopts, the exit leaves, and the next start adopts again, for ever.
+   *
+   * WHAT IT OWNS IS ITS DIRECTORIES, NOT THE ROOT. The root is a fixed path —
+   * `os.tmpdir()/torrent-tv-hls` — so it belongs to the machine and not to any
+   * one process, and this used to remove it whole. The comment that stood here
+   * named the hazard exactly ("another process may share the root") and did it
+   * anyway.
+   *
+   * Measured 2026-09-14, where a second process is ordinary: `node --test` runs
+   * every test file in its own process in parallel, and four files call this
+   * forty times between them. `segment-serve-wiring.test.js` then reported a
+   * segment missing that it had written itself a moment earlier, 2 to 4 checks
+   * per run, never the same ones — because another process had deleted the
+   * directory under it. The same thing happens to two proxies on one machine:
+   * a bare npm run beside the addon, or the wedge stand beside the product, and
+   * one of them exiting takes the other's segments mid-serve.
+   *
+   * A store removes what it made. It does not remove the container it made it
+   * in, and an empty root costs nothing.
    *
    * @param {string} because
    * @returns {number} How many outputs went.
@@ -510,12 +564,6 @@ export class SegmentStore {
     for (const key of [...this.#formats.keys()]) {
       this.drop(key, because);
       dropped += 1;
-    }
-    try {
-      rmSync(this.#root, { recursive: true, force: true });
-    } catch {
-      // Another process may share the root and hold a directory open. What is
-      // ours is gone either way.
     }
     return dropped;
   }

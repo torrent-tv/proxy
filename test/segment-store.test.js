@@ -8,7 +8,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, mkdirSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { directoryNameFor, SegmentStore } from "../services/encode/SegmentStore.js";
+import { directoryNameFor, SegmentStore } from "../services/disk/SegmentStore.js";
 import { fmp4Format } from "../services/segment-formats/fmp4.js";
 
 /**

@@ -159,3 +159,23 @@ distribution.
 **The diagnostics are not a claimant yet.** They are bounded by a count of files
 and never by a size, and they cannot simply be thrown away when space is short: a
 dump is the only evidence of the death it records. That needs a rule of its own.
+
+## The produced segments are here now, and the layer is still three directories
+
+`SegmentStore` moved out of `services/encode/` on 2026-09-14. Produced segments
+are bytes on a medium with a limit, which is the same property the torrent's
+pieces have, and the layer plan of 2026-09-13 puts both under one owner — so a
+store of finished pieces living inside the ENCODING layer was the encoder owning
+its own disk.
+
+**What it cannot yet do is come under the import rule.** `biome.json` restricts a
+layer by DIRECTORY — nothing inside it may import `../**` — and storage is three
+directories: `piece-store/` (memory), `disk/` (the allowance) and `files/`
+(whole files), plus this store. `disk/DiskSpace.js` imports
+`../piece-store/allowance.js`, which is one layer talking to itself and which the
+rule reads as a breach. Adding `services/disk/**` to the list today therefore
+fails on a line that is correct.
+
+The rule can be applied the moment the layer is ONE directory, and making it one
+is the layer's own work — the same work that gives memory and disk a single
+allowance and a single eviction order.

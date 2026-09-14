@@ -20,7 +20,7 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { HlsSessionManager } from "../services/hls-session-manager.js";
-import { SegmentStore } from "../services/encode/SegmentStore.js";
+import { SegmentStore } from "../services/disk/SegmentStore.js";
 import { Timeline } from "../services/output/Timeline.js";
 import { fmp4Format } from "../services/segment-formats/fmp4.js";
 

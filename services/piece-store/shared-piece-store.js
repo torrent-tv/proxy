@@ -41,9 +41,8 @@
  * and nothing here disagrees.
  */
 
-import os from "node:os";
-import { readFileSync } from "node:fs";
-import { divideAllowance, machineAllowanceBytes, OtherDemand } from "./allowance.js";
+import { divideAllowance, machineAllowanceBytes, OtherDemand } from "../storage/allowance.js";
+import { availableMemoryBytes as availableMemorySync } from "../storage/machine-memory.js";
 import { PieceLru } from "./piece-lru.js";
 import { PieceDiskStore } from "./piece-disk-store.js";
 
@@ -173,18 +172,6 @@ function defaultMemoryBytes() {
   // would let a torrent nobody is reading yet fill memory before the first
   // revision arrives.
   return Math.floor(allowance / (stores.length + 1));
-}
-
-function availableMemorySync() {
-  try {
-    const text = readFileSync("/proc/meminfo", "utf8");
-    const match = /^MemAvailable:\s+(\d+)\s+kB$/m.exec(text);
-    if (match) {
-      return Number(match[1]) * 1024;
-    }
-  } catch {
-  }
-  return os.freemem();
 }
 
 /**

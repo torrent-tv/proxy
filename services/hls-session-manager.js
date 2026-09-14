@@ -69,7 +69,7 @@ export { newIndexCheck };
 import { Output, Outputs } from "./output/Output.js";
 import { masterPlaylistText, mediaPlaylistText, segmentIndexForTime } from "./output/playlists.js";
 import { SourceFiles, sourceDecodeCharacteristics } from "./source/SourceFile.js";
-import { SegmentStore } from "./disk/SegmentStore.js";
+import { SegmentStore } from "./segment-store/SegmentStore.js";
 import { EncodeCost } from "./quality/EncodeCost.js";
 import {
   buildRunCommand,
@@ -95,10 +95,10 @@ import { Viewers } from "./viewer/Viewers.js";
 import { LiveOutputs } from "./output/LiveOutputs.js";
 import { variantHeightsFor } from "./output/ladder.js";
 import { EncodeOrchestrator } from "./orchestrators/EncodeOrchestrator.js";
-import { wireDiskSpace } from "./disk/wire.js";
-import { IDLE_KEEP_MS } from "./disk/keep.js";
-import { Returns } from "./disk/returns.js";
-import { freeBytesFor } from "./disk/free.js";
+import { wireDiskSpace } from "./storage/wire.js";
+import { IDLE_KEEP_MS } from "./storage/keep.js";
+import { Returns } from "./storage/returns.js";
+import { freeBytesFor } from "./storage/free.js";
 
 /**
  * Whether an encoder run died because its INPUT went away, rather than because

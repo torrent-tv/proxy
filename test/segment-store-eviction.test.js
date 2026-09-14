@@ -12,7 +12,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { SegmentStore } from "../services/disk/SegmentStore.js";
+import { SegmentStore } from "../services/segment-store/SegmentStore.js";
 
 const SEGMENT = 1024;
 

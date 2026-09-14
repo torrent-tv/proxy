@@ -263,7 +263,7 @@ export function probeWedgeIsCertain({
  * reader of the log cannot check that arithmetic unless the terms are on the
  * same line as the result.
  *
- * @param {{ seq: number, seen: Map<string, number> | Record<string, number>, labels: string[], echoes: number, echoAgeMs: number | null, allowed?: Map<string, number | null> | Record<string, number | null>, echoStaleMs?: number, peerBytesAdvancing?: boolean | null, peerLoopLagMs?: number | null, peerVisibility?: string | null }} state
+ * @param {{ seq: number, seen: Map<string, number> | Record<string, number>, labels: string[], echoes: number, echoAgeMs: number | null, allowed?: Map<string, number | null> | Record<string, number | null>, echoStaleMs?: number, peerBytesAdvancing?: boolean | null, peerLoopLagMs?: number | null, peerVisibility?: string | null, peerPending?: number | null }} state
  * @returns {{ verdict: string, detail: string }}
  */
 export function readProbeState(state) {
@@ -333,7 +333,14 @@ export function readProbeState(state) {
       ? ""
       : ` peerBytes=${isPeerAdvancing ? "advancing" : "still"}`) +
     (Number.isFinite(state.peerLoopLagMs) ? ` peerLoopLag=${Math.round(Number(state.peerLoopLagMs))}ms` : "") +
-    (state.peerVisibility ? ` peerTab=${state.peerVisibility}` : "");
+    (state.peerVisibility ? ` peerTab=${state.peerVisibility}` : "") +
+    // WHAT THE PEER SAYS IT IS STILL WAITING FOR. The far end has sent this
+    // twice a second since the probe echo was built and nothing read it, while
+    // every verdict here was reasoned out from this side alone. It is evidence
+    // and not a verdict: the receiver declares its own transport lost, because
+    // it knows first — on 2026-09-06 the browser said so sixteen minutes before
+    // this end did.
+    (Number.isFinite(state.peerPending) ? ` peerWaiting=${Number(state.peerPending)}` : "");
 
   if (state.echoes === 0) {
     return { verdict: "no-echo-yet", detail };
@@ -508,6 +515,7 @@ export function createDeliveryProbe({
       seq: connection.seq,
       seen: connection.seen,
       peerBytesAdvancing,
+      peerPending: connection.peerPending,
       labels: [...new Set(connection.channels.values())],
       echoes: connection.echoes,
       echoAgeMs: connection.echoAt === 0 ? null : now - connection.echoAt,
@@ -625,6 +633,8 @@ export function createDeliveryProbe({
           // the previous tick. Null until a browser that reports it has echoed.
           /** @type {number | null} */
           peerBytes: null,
+          // Requests the far end says it is still waiting for, as last reported.
+          peerPending: null,
           /** @type {number | null} */
           peerBytesAtTick: null,
           // Sum of per-channel bytes (report.channels[].bytes). Transport's
@@ -771,6 +781,10 @@ export function createDeliveryProbe({
       // What the far end says it has received at the transport level. It is the
       // one figure that separates a backlog from a stopped association, and it
       // arrives on the direction that goes on working through a freeze.
+      // How many requests the far end says it is still waiting for. Theirs to
+      // count: this end knows what it has answered, not what reached them.
+      const peerPending = Number(echo?.report?.pending);
+      connection.peerPending = Number.isFinite(peerPending) && peerPending >= 0 ? peerPending : null;
       const peerBytes = Number(echo?.report?.transportBytesReceived);
       if (Number.isFinite(peerBytes) && peerBytes >= 0) {
         connection.peerBytes = peerBytes;

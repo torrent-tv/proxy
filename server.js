@@ -17,6 +17,7 @@ import { fileURLToPath } from "node:url";
 import { handleHealthGet } from "./routes/health/get.js";
 import { handleHealthzGet } from "./routes/healthz/get.js";
 import { handleApiDeliverySinkGet } from "./routes/api/delivery-sink/get.js";
+import { handleApiLinkProbeGet } from "./routes/api/link-probe/get.js";
 import { handleApiSourcesPost } from "./routes/api/sources/post.js";
 import { handleApiSourceStatsGet } from "./routes/api/sources/stats/get.js";
 import { handleApiSourceFilesGet } from "./routes/api/sources/files/get.js";
@@ -340,6 +341,8 @@ export async function startProxyServer({
   app.get("/api/delivery-sink", async (req, reply) =>
     handleApiDeliverySinkGet(req, reply, { enabled: deliverySink === true })
   );
+  // Bytes a browser can time its link with before any film has been chosen.
+  app.get("/api/link-probe", async (req, reply) => handleApiLinkProbeGet(req, reply));
   app.post("/api/sources", async (req, reply) =>
     handleApiSourcesPost(req, reply, { sourceRegistry })
   );

@@ -49,19 +49,40 @@ test("position is one fact with one writer, and a function of time", () => {
   const viewer = new Viewer("someone");
   assert.equal(viewer.positionSeconds(), null);
 
-  viewer.moveTo(40, 1_000_000);
-  viewer.playing = false;
+  viewer.report({ bufferedAheadSec: 60, positionSeconds: 40, playing: false }, 1_000_000);
   assert.equal(viewer.positionSeconds(1_000_000), 40);
   assert.equal(viewer.positionSeconds(1_060_000), 40, "a stopped picture covers no film");
 
-  viewer.playing = true;
+  viewer.report({ bufferedAheadSec: 60, positionSeconds: 40, playing: true }, 1_000_000);
   assert.equal(viewer.positionSeconds(1_010_000), 50, "a playing one covers a second a second");
+  assert.equal(
+    viewer.positionSeconds(1_600_000),
+    100,
+    "and no further than the film they said they held"
+  );
 
   // A seek is the same statement, and there is no second field for it to win
   // against: two writers taking turns on one reading is what made the priority
   // map jump backwards several times a second in the field on 2026-09-13.
   viewer.moveTo(900, 1_010_000);
   assert.equal(viewer.positionSeconds(1_010_000), 900);
+  assert.equal(
+    viewer.positionSeconds(1_070_000),
+    900,
+    "and a seek carries no cushion from where it left, so nothing is extrapolated"
+  );
+});
+
+test("a viewer who has stated nothing has a position and does not drift from it", () => {
+  const viewer = new Viewer("someone");
+  viewer.moveTo(0, 1_000_000);
+
+  // The whole of the fault of 2026-09-14: `playing` used to start true, and a
+  // page that had measured nothing was never allowed to say otherwise, so a
+  // hidden tab's viewer was carried 146 seconds into a film they had not begun.
+  assert.equal(viewer.playing, false);
+  assert.equal(viewer.waiting, true, "a viewer who has just arrived is waiting on us");
+  assert.equal(viewer.positionSeconds(1_146_000), 0);
 });
 
 test("asking for a viewer twice is the same viewer", () => {

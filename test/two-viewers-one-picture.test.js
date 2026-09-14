@@ -53,6 +53,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { audioRenditionKey, HlsSessionManager } from "../services/hls-session-manager.js";
+import { managerWithOwnStore } from "./helpers/manager.js";
 import { viewerOf } from "../services/viewer/Viewer.js";
 import { fmp4Format } from "../services/segment-formats/fmp4.js";
 import { Output } from "../services/output/Output.js";
@@ -124,12 +125,8 @@ function fakeSession({ id, dirPath, audioTrackIndex = 0, transcodeAudio = true }
  */
 async function pictureWithTwoViewers() {
   const dirPath = await mkdtemp(path.join(os.tmpdir(), "two-viewers-"));
-  const manager = new HlsSessionManager({
-    enabled: true,
-    ffmpegBin: "ffmpeg",
-    localBindHost: "127.0.0.1",
-    localPort: 9090
-  });
+  // Its own store root — see `helpers/manager.js` for what sharing one cost.
+  const { manager } = managerWithOwnStore();
   const base = fakeSession({ id: BASE_ID, dirPath });
   base.audioSeparate = true;
   base.consumers = new Set([FIRST, SECOND]);

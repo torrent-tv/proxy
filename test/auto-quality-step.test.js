@@ -26,6 +26,7 @@ import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { HlsSessionManager } from "../services/hls-session-manager.js";
+import { managerWithOwnStore } from "./helpers/manager.js";
 import { Output } from "../services/output/Output.js";
 import { viewerOf } from "../services/viewer/Viewer.js";
 import { fmp4Format } from "../services/segment-formats/fmp4.js";
@@ -110,12 +111,8 @@ function fakeSession({ dirPath, transcodeVideo = true, cutGrid = transcodeVideo 
  */
 async function managerWithSession({ transcodeVideo = true, cutGrid } = {}) {
   const dirPath = await mkdtemp(path.join(os.tmpdir(), "auto-quality-"));
-  const manager = new HlsSessionManager({
-    enabled: true,
-    ffmpegBin: "ffmpeg",
-    localBindHost: "127.0.0.1",
-    localPort: 9090
-  });
+  // Its own store root — see `helpers/manager.js` for what sharing one cost.
+  const { manager } = managerWithOwnStore();
   // A software host: the budget's own precondition.
   manager.videoEncoder = { kind: "software", name: "libx264", inputArgs: [] };
   // A fully-downloaded file, so nothing here is ever read as download-bound —

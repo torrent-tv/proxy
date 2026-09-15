@@ -685,6 +685,29 @@ export class TorrentWorkerClient {
   spilledBytes = 0;
 
   /**
+   * Tell the piece stores on the torrent thread their share of MEMORY.
+   *
+   * The same owner divides memory and disk, because the two trade: pieces that
+   * do not fit in memory are spilled to disk, so what the stores are given here
+   * decides how much disk they need there.
+   *
+   * @param {number} bytes
+   * @returns {Promise<{ held: number, wanted: number }>}
+   */
+  async allowMemoryBytes(bytes) {
+    try {
+      const claim = await this.#caller.call(Command.MEMORY_ALLOWANCE, { bytes });
+      this.memoryClaim = {
+        held: Number(claim?.held) || 0,
+        wanted: Number(claim?.wanted) || 0
+      };
+    } catch {
+      // The thread is gone or busy; the next revision says it again.
+    }
+    return this.memoryClaim ?? { held: 0, wanted: 0 };
+  }
+
+  /**
    * Tell the whole files on the torrent thread their share of the disk.
    *
    * Same shape as the spilled pieces, and for the same reason: they hold bytes

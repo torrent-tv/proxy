@@ -14,6 +14,7 @@
  */
 
 import { statfs } from "node:fs/promises";
+import { statSync } from "node:fs";
 import path from "node:path";
 
 /**
@@ -35,4 +36,36 @@ export async function freeBytesFor(directory) {
     }
   }
   return null;
+}
+
+/**
+ * Which device holds a directory, so claimants on one disk are told apart from
+ * claimants on another.
+ *
+ * A RESOURCE IS WHAT CANNOT BE SUBSTITUTED, and two filesystems are two of
+ * them. Measured on the addon host 2026-09-05: `/tmp`, where the segments and
+ * the spill live, is the overlay (`dev=68`); `/data`, where the evidence lives,
+ * is ext4 on the nvme (`dev=66305`). Dividing one figure between claimants on
+ * both gives each a share of a disk it does not write to.
+ *
+ * The nearest ancestor that exists, for the same reason `freeBytesFor` walks
+ * up: a claimant's own directory is often made later than this is asked.
+ *
+ * @param {string} directory
+ * @returns {string} A name for the resource, stable for the life of the mount.
+ */
+export function deviceOf(directory) {
+  let at = path.resolve(directory);
+  for (let depth = 0; depth < 16; depth += 1) {
+    try {
+      return `disk:${statSync(at).dev}`;
+    } catch {
+      const up = path.dirname(at);
+      if (up === at) {
+        return "disk:unknown";
+      }
+      at = up;
+    }
+  }
+  return "disk:unknown";
 }

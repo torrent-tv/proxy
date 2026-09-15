@@ -95,7 +95,7 @@ import { Viewers } from "./viewer/Viewers.js";
 import { LiveOutputs } from "./output/LiveOutputs.js";
 import { variantHeightsFor } from "./output/ladder.js";
 import { EncodeOrchestrator } from "./orchestrators/EncodeOrchestrator.js";
-import { wireDiskSpace } from "./storage/wire.js";
+import { wireMachineBudget } from "./storage/wire.js";
 import { IDLE_KEEP_MS } from "./storage/keep.js";
 import { Returns } from "./storage/returns.js";
 import { freeBytesFor } from "./storage/free.js";
@@ -1313,7 +1313,10 @@ export class HlsSessionManager {
     startStopCost = null,
     spillDisk = null,
     wholeFiles = null,
-    diagnostics = null}) {
+    diagnostics = null,
+    diagnosticsRoot = "",
+    memoryClaimant = null,
+    budgetPolicy = null}) {
     this.enabled = Boolean(enabled);
     this.ffmpegBin = ffmpegBin;
     this.keyframeTableBudgetMs = Number.isFinite(keyframeTableBudgetMs) && keyframeTableBudgetMs > 0
@@ -1372,6 +1375,9 @@ export class HlsSessionManager {
     this.spillDisk = spillDisk;
     this.wholeFiles = wholeFiles;
     this.diagnostics = diagnostics;
+    this.diagnosticsRoot = diagnosticsRoot;
+    this.memoryClaimant = memoryClaimant;
+    this.budgetPolicy = budgetPolicy;
     // Detected H.264 encoder descriptor (hardware or software). Defaults to
     // software libx264 when no detection result is supplied. May be downgraded
     // to software at runtime if a hardware encode fails.
@@ -1530,11 +1536,14 @@ export class HlsSessionManager {
     // the only place it can be measured from.
     this.returns = new Returns();
     // One owner of the disk, and the list of what takes it lives with the owner.
-    this.diskSpace = wireDiskSpace({
+    this.machineBudget = wireMachineBudget({
       segmentStore: this.segmentStore,
       spill: this.spillDisk,
       wholeFiles: this.wholeFiles,
       diagnostics: this.diagnostics,
+      diagnosticsRoot: this.diagnosticsRoot,
+      memory: this.memoryClaimant,
+      policy: this.budgetPolicy ?? undefined,
       readFree: freeBytesFor,
       logger
     });
@@ -9163,7 +9172,7 @@ export class HlsSessionManager {
     // here rather than by anybody's departure: how long ago each output was
     // last read, and how much room the disk has for the lot.
     // The room is the disk owner's to divide; this asks what the share is now.
-    await this.diskSpace.revise();
+    await this.machineBudget.revise();
     // What viewers actually do, beside the period that stands in for it. Said
     // where it can be read against the disk figures rather than on its own.
     const returns = this.returns.describe(IDLE_KEEP_MS);
@@ -9172,7 +9181,7 @@ export class HlsSessionManager {
     }
     this.segmentStore.enforce({
       idleMs: SEGMENT_STORE_IDLE_MS,
-      maxBytes: this.diskSpace.segmentBytes(),
+      maxBytes: this.machineBudget.segmentBytes(),
       viewersAt: (key) =>
         viewerSegmentsOn({
           sessions: this.sessionsById.values(),

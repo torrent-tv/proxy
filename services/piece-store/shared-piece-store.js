@@ -111,12 +111,20 @@ export function forgetMachineMemory() {
 
 export { divideAllowance, machineAllowanceBytes };
 
-export function reviseStoreBudgets() {
+export function reviseStoreBudgets(allowanceBytes = null) {
   const stores = [...liveStores];
   const held = stores.reduce((sum, store) => sum + store.residentBytes, 0);
-  const available = availableMemorySync();
-  const reserve = noteMachineMemory(available, held);
-  const allowance = machineAllowanceBytes(available, held, reserve);
+  // TOLD, NOT WORKED OUT. Memory has one owner and it is on the main thread,
+  // where the disk's owner is — and it must be the same one, because the two
+  // resources trade: pieces that do not fit in memory are spilled to disk, so
+  // what this store is given decides how much disk it needs. What arrives is
+  // this thread's whole share; the stores divide it between themselves.
+  //
+  // Null is a thread that has not been told yet, and it works its own share out
+  // for that one pass rather than growing without a bound.
+  const allowance = Number.isFinite(allowanceBytes) && allowanceBytes !== null
+    ? Math.max(0, allowanceBytes)
+    : machineAllowanceBytes(availableMemorySync(), held, noteMachineMemory(availableMemorySync(), held));
   const shares = divideAllowance(stores.map((store) => store.wantedBytes), allowance);
   const revised = [];
   for (const [position, store] of stores.entries()) {
@@ -1857,4 +1865,17 @@ export class SharedPieceStore {
     this.#wake();
     this.#disk.destroy().then(() => callback(null), (error) => callback(error));
   }
+}
+
+/**
+ * What the stores in this thread hold and would take, for the owner of memory.
+ *
+ * @returns {{ held: number, wanted: number }}
+ */
+export function memoryClaim() {
+  const stores = [...liveStores];
+  return {
+    held: stores.reduce((sum, store) => sum + store.residentBytes, 0),
+    wanted: stores.reduce((sum, store) => sum + store.wantedBytes, 0)
+  };
 }

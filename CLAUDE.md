@@ -83,11 +83,27 @@ Linux-only host (e.g. POSIX-only signals must degrade elsewhere).
         (`SegmentStore.js`), addressed by the output's own key. Main thread.
       - `files/` — files downloaded whole and kept as files
         (`CompletedFiles.js`, `piece-from-whole-file.js`). Worker thread.
-      - `storage/` — the one owner of the ROOM all three take, holding no bytes
-        itself: how much of the machine is free (`machine-memory.js`,
-        `free.js`), how a budget is divided (`allowance.js`, `DiskSpace.js`),
-        who the claimants are (`wire.js`), and how long material nobody is using
-        is kept (`keep.js`, `returns.js`).
+      - `storage/` — THE ONE BUDGET: how much of this machine the proxy may
+        take, and how that is divided between everything that holds bytes.
+        `MachineBudget.js` is the single owner; `allowance.js` the rule;
+        `machine-memory.js` and `free.js` read the machine; `wire.js` says who
+        the claimants are and which RESOURCE each takes; `keep.js` and
+        `returns.js` say how long material nobody is using is kept. It holds no
+        bytes itself.
+        **One budget does not mean one number.** Memory cannot be paid for with
+        disk, so what is divided is divided per resource — and "disk" is one
+        resource per DEVICE, read with `statSync(dir).dev`, because two
+        filesystems cannot pay for each other either (`/tmp` and `/data` on the
+        addon host are two). What there is ONE of is the owner, the policy and
+        the place that reads the machine. One owner because the claimants TRADE
+        across resources: pieces that do not fit in memory are spilled to disk,
+        so what memory is given decides how much disk is needed — 14 400 MB
+        spilled in fifty minutes while the store held 312-424 MB.
+        The policy is the operator's, stated once at startup — `--budget
+        adaptive|share|fixed`, `--budget-share`, `--budget-bytes`,
+        `--min-memory-bytes`, `--min-disk-bytes` — and those are the only
+        chosen numbers in the proxy, because they are chosen by the person whose
+        machine it is. The default is the measured one.
     They may import each other and nothing above, which `biome` checks as an
     EXCEPTION to `../**` rather than as a list of forbidden layers — a layer is
     not a directory, the blanket form cannot say "my siblings", and a list of

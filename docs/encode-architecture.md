@@ -24,7 +24,7 @@ It decides from four things and no others:
 | how many the machine can hold | `run-budget.js`, from measurements of this host |
 
 **No viewer reaches it.** `services/encode/` and
-`services/orchestrators/EncodeOrchestrator.js` do not import the viewer layer,
+`services/encode/EncodeOrchestrator.js` do not import the viewer layer,
 name a consumer id, or hold a person. What crosses is a priority map: zones of
 segment numbers with a rank and a real time, and nobody's name on it.
 

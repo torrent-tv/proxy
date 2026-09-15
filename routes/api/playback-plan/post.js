@@ -6,7 +6,7 @@
  *
  * @param {import("fastify").FastifyRequest} req
  * @param {import("fastify").FastifyReply} reply
- * @param {{ playbackPlanner: ReturnType<import("../../../services/playback-planner.js").createPlaybackPlanner> }} deps
+ * @param {{ playbackPlanner: ReturnType<import("../../../services/media/playback-planner.js").createPlaybackPlanner> }} deps
  * @returns {Promise<void>}
  */
 

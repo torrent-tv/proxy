@@ -14,7 +14,7 @@
  */
 
 import assert from "node:assert/strict";
-import { SourceFile } from "../services/source/SourceFile.js";
+import { KeyframeTable } from "../services/media/container/KeyframeTable.js";
 import test from "node:test";
 
 import { seekLandingOffsetFor } from "../services/hls-session-manager.js";
@@ -22,26 +22,26 @@ import { seekLandingOffsetFor } from "../services/hls-session-manager.js";
 const OFFSET = 3 / 23;
 
 test("a copied picture is asked for one heuristic later than the keyframe", () => {
-  const session = { transcodeVideo: false, file: new SourceFile({ sourceKey: "s", fileIndex: 0 }).learn({ keyframeTimes: [0, 2.002, 4.004, 6.006] }) };
+  const session = { transcodeVideo: false, keyframes: new KeyframeTable().learn({ times: [0, 2.002, 4.004, 6.006] }) };
   assert.equal(seekLandingOffsetFor(session, 2.002), OFFSET);
 });
 
 test("a re-encode is asked for exactly what it should produce", () => {
   // It decodes from the keyframe and discards frames up to the requested time,
   // so pushing the request later would start its output late.
-  const session = { transcodeVideo: true, file: new SourceFile({ sourceKey: "s", fileIndex: 0 }).learn({ keyframeTimes: [0, 2.002, 4.004] }) };
+  const session = { transcodeVideo: true, keyframes: new KeyframeTable().learn({ times: [0, 2.002, 4.004] }) };
   assert.equal(seekLandingOffsetFor(session, 2.002), 0);
 });
 
 test("the offset never reaches the next keyframe", () => {
   // Keyframes 0.1 s apart: half of that is the most that can be added without
   // risking a landing on the NEXT one where the heuristic does not fire.
-  const session = { transcodeVideo: false, file: new SourceFile({ sourceKey: "s", fileIndex: 0 }).learn({ keyframeTimes: [0, 0.1, 0.2, 0.3] }) };
+  const session = { transcodeVideo: false, keyframes: new KeyframeTable().learn({ times: [0, 0.1, 0.2, 0.3] }) };
   assert.equal(seekLandingOffsetFor(session, 0.1), 0.05);
 });
 
 test("the last keyframe has nothing after it to collide with", () => {
-  const session = { transcodeVideo: false, file: new SourceFile({ sourceKey: "s", fileIndex: 0 }).learn({ keyframeTimes: [0, 2.002, 4.004] }) };
+  const session = { transcodeVideo: false, keyframes: new KeyframeTable().learn({ times: [0, 2.002, 4.004] }) };
   assert.equal(seekLandingOffsetFor(session, 4.004), OFFSET);
 });
 
@@ -58,7 +58,7 @@ test("a grid whose times are approximate is asked for that much later again", ()
   // the one before that, which is the fault this offset exists for.
   const session = {
     transcodeVideo: false,
-    file: new SourceFile({ sourceKey: "s", fileIndex: 0 }).learn({ keyframeTimes: [0, 4.004, 8.008, 12.012], keyframeTolerance: 0.04 })
+    keyframes: new KeyframeTable().learn({ times: [0, 4.004, 8.008, 12.012], tolerance: 0.04 })
   };
   assert.equal(seekLandingOffsetFor(session, 4.004), OFFSET + 0.04);
 });
@@ -66,12 +66,12 @@ test("a grid whose times are approximate is asked for that much later again", ()
 test("an exact grid claims no tolerance", () => {
   // Matroska and MP4 state instants outright — measured the same day, nine
   // files and 11 665 keyframes with not one disagreement.
-  const session = { transcodeVideo: false, file: new SourceFile({ sourceKey: "s", fileIndex: 0 }).learn({ keyframeTimes: [0, 4.004, 8.008], keyframeTolerance: 0 }) };
+  const session = { transcodeVideo: false, keyframes: new KeyframeTable().learn({ times: [0, 4.004, 8.008], tolerance: 0 }) };
   assert.equal(seekLandingOffsetFor(session, 4.004), OFFSET);
 });
 
 test("the bound still holds once a tolerance is added", () => {
-  const session = { transcodeVideo: false, file: new SourceFile({ sourceKey: "s", fileIndex: 0 }).learn({ keyframeTimes: [0, 0.1, 0.2], keyframeTolerance: 1 }) };
+  const session = { transcodeVideo: false, keyframes: new KeyframeTable().learn({ times: [0, 0.1, 0.2], tolerance: 1 }) };
   assert.equal(seekLandingOffsetFor(session, 0.1), 0.05);
 });
 
@@ -89,8 +89,8 @@ test("an output carrying only sound is not pushed past what it asked for", () =>
   const soundtrack = {
     audioOnly: true,
     transcodeVideo: false,
-    file: new SourceFile({ sourceKey: "s", fileIndex: 0 })
-      .learn({ keyframeTimes: [0, 4.004, 8.008, 12.012], keyframeTolerance: 0 })
+    keyframes: new KeyframeTable()
+      .learn({ times: [0, 4.004, 8.008, 12.012], tolerance: 0 })
   };
   assert.equal(seekLandingOffsetFor(soundtrack, 4.004), 0);
 });
@@ -102,8 +102,8 @@ test("the picture of the same film still gets the offset", () => {
   const picture = {
     audioOnly: false,
     transcodeVideo: false,
-    file: new SourceFile({ sourceKey: "s", fileIndex: 0 })
-      .learn({ keyframeTimes: [0, 4.004, 8.008, 12.012], keyframeTolerance: 0 })
+    keyframes: new KeyframeTable()
+      .learn({ times: [0, 4.004, 8.008, 12.012], tolerance: 0 })
   };
   assert.equal(seekLandingOffsetFor(picture, 4.004), OFFSET);
 });

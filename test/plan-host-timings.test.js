@@ -14,7 +14,7 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
-import { createPlaybackPlanner } from "../services/playback-planner.js";
+import { createPlaybackPlanner } from "../services/media/playback-planner.js";
 
 /**
  * A planner whose host timings can be changed between calls, over a source that

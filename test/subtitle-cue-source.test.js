@@ -1,5 +1,5 @@
 /**
- * @file WHICH THREAD answers a pull for subtitle cues.
+ * @file WHAT answers a pull for subtitle cues — the walk, and nothing else.
  *
  * Field 2026-09-03, on `[HorribleSubs] Drifters - 04 [1080p].mkv`. The file had
  * been downloaded in an earlier sitting, so the torrent worker's cluster walk
@@ -10,25 +10,27 @@
  * indexed. So the viewer watched the first 82 s with no subtitles and the rest
  * of the episode with them.
  *
- * The pull ran on the MAIN thread, where the torrent is a stand-in carrying
- * `infoHash`, `name` and a `files` list — no `bitfield`, no `pieceLength`. The
- * walk decides what it may read from those two, so every range read as "not
- * downloaded", nothing was walked, and an empty document came back. An empty
- * document is also the right answer for a file that holds no cues yet, which is
- * why nothing reported a failure.
+ * The pull was answered by something that could not read pieces. Whatever a
+ * pull is handed, the walk decides what it may read from it, so every range
+ * read as "not downloaded", nothing was walked, and an empty document came
+ * back. An empty document is also the right answer for a file that holds no
+ * cues yet, which is why nothing reported a failure.
  *
- * These checks pin the two halves of the repair: the pull is addressed to the
- * thread that owns the torrent, and a walk asked of a torrent that cannot say
- * what it holds says so rather than answering emptily.
+ * The thread stopped being the distinction on 2026-09-15 — the walk runs beside
+ * the sessions now, handed which byte ranges of a file are downloaded whole —
+ * but the property it was standing for did not: a pull is answered by the SAME
+ * walk that pushes, its own figures travel back, and anything that cannot read
+ * says so rather than answering emptily.
  */
 
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { SubtitleOrchestrator } from "../services/orchestrators/SubtitleOrchestrator.js";
-import { cuesHeldFor } from "../services/torrent-worker/subtitle-cues.js";
+import { SubtitleOrchestrator } from "../services/media/SubtitleOrchestrator.js";
+import { cuesHeldFor } from "../services/media/SubtitleCues.js";
+import { heldFileOver } from "./helpers/held-file.js";
 
-/** The stand-in the main thread holds: a name, a file list, and no pieces. */
+/** A torrent that cannot say which of itself is downloaded. */
 function mainThreadTorrent() {
   return {
     infoHash: "0".repeat(40),
@@ -38,24 +40,22 @@ function mainThreadTorrent() {
   };
 }
 
-test("a pull is answered by the thread that owns the torrent, not walked here", async () => {
+test("a pull is answered by the walk, and the walk's own figures travel back", async () => {
   const asked = [];
-  const pool = {
-    async getSubtitleCues(torrent, fileIndex, trackNumber) {
-      asked.push({ sourceKey: torrent.sourceKey, fileIndex, trackNumber });
+  const cues = {
+    async held(torrent, fileIndex, sourceKey, trackNumber) {
+      asked.push({ sourceKey, fileIndex, trackNumber });
       return {
         cues: [{ startSeconds: 5.4, endSeconds: 9.1, text: "So what if you brought them over?", seq: 1 }],
         coveredClusters: 283,
         indexedClusters: 283,
-        codecId: "S_TEXT/ASS",
-        codecPrivate: "",
-        language: ""
+        track: { codecId: "S_TEXT/ASS", codecPrivate: "", language: "" }
       };
     }
   };
 
-  const orchestrator = new SubtitleOrchestrator({ forget() {} });
-  const held = await orchestrator.getCues(pool, mainThreadTorrent(), 33, "a".repeat(40), 3);
+  const orchestrator = new SubtitleOrchestrator({ forget() {} }, cues);
+  const held = await orchestrator.getCues(mainThreadTorrent(), 33, "a".repeat(40), 3);
 
   assert.deepEqual(asked, [{ sourceKey: "a".repeat(40), fileIndex: 33, trackNumber: 3 }]);
   assert.equal(held.cues.length, 1);
@@ -66,11 +66,11 @@ test("a pull is answered by the thread that owns the torrent, not walked here", 
 });
 
 test("the cursor of a pulled cue is the found-order the worker assigned", async () => {
-  // The browser mixes cursors from pulls and pushes. Walking a second time on
-  // another thread would start a second `seq` counter and the two would not be
-  // comparable, which is the deeper reason the pull is not served locally.
-  const pool = {
-    async getSubtitleCues() {
+  // The browser mixes cursors from pulls and pushes. A second walk would start
+  // a second `seq` counter and the two would not be comparable — which is why
+  // both ends go through the one walk, with one per-file state.
+  const cues = {
+    async held() {
       return {
         cues: [
           { startSeconds: 5.4, endSeconds: 9.1, text: "one", seq: 1 },
@@ -78,27 +78,25 @@ test("the cursor of a pulled cue is the found-order the worker assigned", async 
         ],
         coveredClusters: 12,
         indexedClusters: 283,
-        codecId: "S_TEXT/ASS",
-        codecPrivate: "",
-        language: ""
+        track: { codecId: "S_TEXT/ASS", codecPrivate: "", language: "" }
       };
     }
   };
-  const orchestrator = new SubtitleOrchestrator({ forget() {} });
-  const held = await orchestrator.getCues(pool, mainThreadTorrent(), 33, "a".repeat(40), 3);
+  const orchestrator = new SubtitleOrchestrator({ forget() {} }, cues);
+  const held = await orchestrator.getCues(mainThreadTorrent(), 33, "a".repeat(40), 3);
   assert.deepEqual(held.cues.map((cue) => cue.seq), [1, 31]);
 });
 
-test("a pool with no channel to the worker is refused, not answered emptily", async () => {
+test("an orchestrator with no walk is refused, not answered emptily", async () => {
   const orchestrator = new SubtitleOrchestrator({ forget() {} });
-  const held = await orchestrator.getCues({}, mainThreadTorrent(), 33, "a".repeat(40), 3);
+  const held = await orchestrator.getCues(mainThreadTorrent(), 33, "a".repeat(40), 3);
   assert.deepEqual(held, { cues: [], coveredClusters: 0, indexedClusters: 0, track: null });
 });
 
 test("the walk refuses a torrent that cannot say which pieces it holds", async () => {
-  // Called directly, as the main thread used to call it. Without this guard the
-  // answer is an empty list indistinguishable from a file with no cues, which
-  // is what hid the defect for a whole session.
-  const held = await cuesHeldFor(mainThreadTorrent(), 33, "b".repeat(40), 3);
+  // Called directly. Without this guard the answer is an empty list
+  // indistinguishable from a file with no cues, which is what hid the defect
+  // for a whole session.
+  const held = await cuesHeldFor(heldFileOver(mainThreadTorrent(), 33, "b".repeat(40)), 3);
   assert.deepEqual(held, { cues: [], coveredClusters: 0, indexedClusters: 0, track: null });
 });

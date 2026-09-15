@@ -107,12 +107,13 @@ export class TorrentWorkerClient {
   wholeFiles = new Map();
 
   /** @type {(event: { sourceKey: string, fileIndex: number, trackIndex: number, cues: object[], language: string }) => void} */
-  #onSubtitleCues;
+  /** @type {(event: { sourceKey: string, fileIndexes: number[] }) => void} */
+  #onPiecesArrived;
 
   /**
-   * @param {{ memoryBytes?: number, stateDir?: string, onSubtitleCues?: (event: object) => void }} [options]
+   * @param {{ memoryBytes?: number, stateDir?: string, onPiecesArrived?: (event: object) => void }} [options]
    */
-  constructor({ memoryBytes, stateDir, onSubtitleCues } = {}) {
+  constructor({ memoryBytes, stateDir, onPiecesArrived } = {}) {
     this.#worker = new Worker(fileURLToPath(WORKER_URL), {
       // `stateDir` travels because the worker writes heap snapshots of its own
       // isolate there. It cannot choose a directory any other way: a worker may
@@ -121,7 +122,7 @@ export class TorrentWorkerClient {
       workerData: { memoryBytes, stateDir }
     });
     this.#caller = createCaller(this.#worker);
-    this.#onSubtitleCues = onSubtitleCues ?? (() => undefined);
+    this.#onPiecesArrived = onPiecesArrived ?? (() => undefined);
 
     this.#worker.on("message", (message) => {
       // A failed read must fail its stream. This is checked BEFORE the caller
@@ -232,14 +233,12 @@ export class TorrentWorkerClient {
             name: message.name
           });
           break;
-        case Event.SUBTITLE_CUES_READY:
-          this.#onSubtitleCues({
+        case Event.PIECES_ARRIVED:
+          // ANNOUNCED by the thread that owns the swarm, acted on here: the
+          // subtitle walk is this thread's and needs to know a piece arrived.
+          this.#onPiecesArrived({
             sourceKey: message.sourceKey,
-            fileIndex: message.fileIndex,
-            trackIndex: message.trackIndex,
-            cues: message.cues,
-            language: message.language,
-            cursor: message.cursor
+            fileIndexes: Array.isArray(message.fileIndexes) ? message.fileIndexes : []
           });
           break;
         default:
@@ -336,6 +335,16 @@ export class TorrentWorkerClient {
    * @param {{ sourceKey: string, fileIndex: number }} params
    * @returns {Promise<{ tracks: object[] }>}
    */
+
+
+
+
+  /**
+   * Start fetching the region a viewer is about to resume at.
+   *
+   * @param {{ sourceKey: string, fileIndex: number, positionSeconds: number }} params
+   * @returns {Promise<{ started: boolean }>}
+   */
   /**
    * Fetch one whole file in the room the viewer's own reading leaves.
    *
@@ -346,64 +355,33 @@ export class TorrentWorkerClient {
     return this.#caller.call(Command.FILL_FILE, { sourceKey, fileIndex });
   }
 
-  async getSubtitleTracks({ sourceKey, fileIndex }) {
-    return this.#caller.call(Command.SUBTITLE_TRACKS, { sourceKey, fileIndex });
-  }
-
   /**
-   * Every track one file declares, read from its own header.
-   *
-   * Asked of the picture for the flags ffmpeg's banner does not carry, and of a
-   * soundtrack shipped as its own file beside it — the same question about a
-   * different file, which is why there is one command rather than two.
+   * The byte ranges of one file the torrent holds WHOLE.
    *
    * @param {{ sourceKey: string, fileIndex: number }} params
-   * @returns {Promise<{ tracks: object[] }>}
+   * @returns {Promise<Array<[number, number]>>}
    */
-  async getContainerTracks({ sourceKey, fileIndex }) {
-    return this.#caller.call(Command.CONTAINER_TRACKS, { sourceKey, fileIndex });
+  async heldRanges({ sourceKey, fileIndex }) {
+    const answer = await this.#caller.call(Command.HELD_RANGES, { sourceKey, fileIndex });
+    return Array.isArray(answer?.ranges) ? answer.ranges : [];
   }
 
   /**
-   * What one file declares about itself — format, duration, and where its own
-   * timeline begins.
+   * Bytes of a range the torrent already holds. Never fetched: null where they
+   * are not there.
    *
-   * @param {{ sourceKey: string, fileIndex: number }} params
-   * @returns {Promise<{ info: import("../container/Container.js").ContainerMediaInfo | null }>}
+   * @param {{ sourceKey: string, fileIndex: number, start: number, end: number }} params
+   * @returns {Promise<Buffer | null>}
    */
-  async getContainerMediaInfo({ sourceKey, fileIndex }) {
-    return this.#caller.call(Command.CONTAINER_MEDIA_INFO, { sourceKey, fileIndex });
+  async readHeld({ sourceKey, fileIndex, start, end }) {
+    const answer = await this.#caller.call(Command.READ_HELD, { sourceKey, fileIndex, start, end });
+    return answer?.bytes ? Buffer.from(answer.bytes) : null;
   }
 
-  /**
-   * Where one file's keyframes are, from the container's own table.
-   *
-   * @param {{ sourceKey: string, fileIndex: number }} params
-   * @returns {Promise<{ index: { times: number[], tolerance: number } | null }>}
-   */
-  async getContainerKeyframes({ sourceKey, fileIndex }) {
-    return this.#caller.call(Command.CONTAINER_KEYFRAMES, { sourceKey, fileIndex });
+  async warmResumePosition({ sourceKey, fileIndex, positionSeconds, durationSeconds }) {
+    return this.#caller.call(Command.WARM_POSITION, { sourceKey, fileIndex, positionSeconds, durationSeconds });
   }
 
-  /**
-   * Start fetching the region a viewer is about to resume at.
-   *
-   * @param {{ sourceKey: string, fileIndex: number, positionSeconds: number }} params
-   * @returns {Promise<{ started: boolean }>}
-   */
-  async warmResumePosition({ sourceKey, fileIndex, positionSeconds }) {
-    return this.#caller.call(Command.WARM_POSITION, { sourceKey, fileIndex, positionSeconds });
-  }
-
-  /**
-   * The cues of one subtitle track that can be read from what is downloaded.
-   *
-   * @param {{ sourceKey: string, fileIndex: number, trackNumber: number }} params
-   * @returns {Promise<object>}
-   */
-  async getSubtitleCues({ sourceKey, fileIndex, trackNumber }) {
-    return this.#caller.call(Command.SUBTITLE_CUES, { sourceKey, fileIndex, trackNumber });
-  }
 
   /**
    * Bytes every torrent on the worker has moved, downloaded and uploaded apart.

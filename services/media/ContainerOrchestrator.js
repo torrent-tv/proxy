@@ -7,15 +7,37 @@
  * readRange, knows nothing about torrents or HTTP.
  */
 
-import { ContainerFactory } from "../container/ContainerFactory.js";
+import { ContainerFactory } from "./container/ContainerFactory.js";
+
+/**
+ * How much of a file's head its track table lives in.
+ *
+ * A fact of the FORMATS, not of the torrent: Matroska puts its Tracks element
+ * in the head and MP4's `moov` is there or pointed to from there. Whoever
+ * fetches bytes before asking is told this figure rather than choosing one.
+ */
+export const CONTAINER_HEAD_BYTES = 256 * 1024;
 import { logger } from "../../utils/logger.js";
 
 export class ContainerOrchestrator {
   constructor() {
-    /** @type {Map<string, import("../container/Container.js").Container|null>} */
+    /** @type {Map<string, import("./container/Container.js").Container|null>} */
     this.cache = new Map();
-    /** @type {Map<string, Promise<import("../container/Container.js").Container|null>>} */
+    /** @type {Map<string, Promise<import("./container/Container.js").Container|null>>} */
     this.pending = new Map();
+    /**
+     * What each file's container declares, once it has said anything.
+     *
+     * The container parses on every ask, so without this the header is read
+     * again for each question — and the track table is asked for the audio
+     * menu, the subtitle defaults and the video facts of one file. It used to
+     * be kept in the torrent thread (`torrent-worker/container-tracks.js`), which is where the
+     * parse used to happen; it is the same one cache in its new place, not a
+     * second one.
+     *
+     * @type {Map<string, import("./tracks/index.js").ContainerTrack[]>}
+     */
+    this.tracks = new Map();
   }
 
   /**
@@ -25,7 +47,7 @@ export class ContainerOrchestrator {
    * @param {(start:number,end:number)=>Promise<Buffer|null>} params.readRange
    * @param {number} params.fileSize
    * @param {string} [params.label]
-   * @returns {Promise<import("../container/Container.js").Container|null>}
+   * @returns {Promise<import("./container/Container.js").Container|null>}
    */
   async getContainer({ sourceKey, fileIndex, readRange, fileSize, label = "" }) {
     const key = `${sourceKey}:${fileIndex}`;
@@ -48,13 +70,27 @@ export class ContainerOrchestrator {
 
   /**
    * @param {object} params - same as getContainer
-   * @returns {Promise<import("../tracks/index.js").ContainerTrack[]>}
+   * @returns {Promise<import("./tracks/index.js").ContainerTrack[]>}
    */
   async getTracks(params) {
+    const key = `${params.sourceKey}:${params.fileIndex}`;
+    const known = this.tracks.get(key);
+    if (known) {
+      return known;
+    }
     const container = await this.getContainer(params);
     if (!container) return [];
     try {
-      return await container.readTracks();
+      const tracks = await container.readTracks();
+      // ONLY A NON-EMPTY READING IS KEPT. An empty one usually means the header
+      // has not arrived off the swarm yet, and caching that would answer "this
+      // file declares nothing" for the life of the process — which is what
+      // decides whether the viewer is offered a soundtrack at all.
+      if (Array.isArray(tracks) && tracks.length > 0) {
+        this.tracks.set(key, tracks);
+        return tracks;
+      }
+      return Array.isArray(tracks) ? tracks : [];
     } catch (e) {
       logger.warn(`container: readTracks failed for "${params.label}": ${e?.message ?? e}`);
       return [];
@@ -70,7 +106,7 @@ export class ContainerOrchestrator {
    * a final answer about the container.
    *
    * @param {object} params - same as getContainer
-   * @returns {Promise<import("../container/Container.js").ContainerMediaInfo|null>}
+   * @returns {Promise<import("./container/Container.js").ContainerMediaInfo|null>}
    */
   async getMediaInfo(params) {
     const container = await this.getContainer(params);
@@ -101,10 +137,12 @@ export class ContainerOrchestrator {
     if (fileIndex === undefined) {
       for (const k of [...this.cache.keys()]) if (k.startsWith(`${sourceKey}:`)) this.cache.delete(k);
       for (const k of [...this.pending.keys()]) if (k.startsWith(`${sourceKey}:`)) this.pending.delete(k);
+      for (const k of [...this.tracks.keys()]) if (k.startsWith(`${sourceKey}:`)) this.tracks.delete(k);
       return;
     }
     this.cache.delete(`${sourceKey}:${fileIndex}`);
     this.pending.delete(`${sourceKey}:${fileIndex}`);
+    this.tracks.delete(`${sourceKey}:${fileIndex}`);
   }
 }
 

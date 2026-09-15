@@ -17,7 +17,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { Container } from "../services/container/Container.js";
+import { Container } from "../services/media/container/Container.js";
 
 const banner = (fields) => ({ width: null, height: null, fps: null, isHdr: false, bitDepth: null, ...fields });
 

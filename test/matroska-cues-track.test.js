@@ -16,7 +16,7 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
-import { MatroskaContainer } from "../services/container/MatroskaContainer.js";
+import { MatroskaContainer } from "../services/media/container/MatroskaContainer.js";
 
 const ID_EBML = 0x1a45dfa3;
 const ID_SEGMENT = 0x18538067;

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { Container } from "../services/container/Container.js";
+import { Container } from "../services/media/container/Container.js";
 
 test("a flag the container wrote is carried through, and one it did not is not", () => {
   const banner = [

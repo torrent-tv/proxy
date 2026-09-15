@@ -8,7 +8,7 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
-import { Mp4Container } from "../services/container/Mp4Container.js";
+import { Mp4Container } from "../services/media/container/Mp4Container.js";
 
 function box(type, payload) {
   const header = Buffer.alloc(8);

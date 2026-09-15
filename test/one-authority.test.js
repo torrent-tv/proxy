@@ -48,7 +48,7 @@ test("an encoder is stopped for scheduling reasons in exactly one place", () => 
   // The orchestrator decides; nobody else may. What is left in the session
   // manager is teardown — the session is going away and its encoders with it —
   // which is not a decision about which encoders should exist.
-  const orchestrator = statements(source("services/orchestrators/EncodeOrchestrator.js"));
+  const orchestrator = statements(source("services/encode/EncodeOrchestrator.js"));
   const stopsInOrchestrator = orchestrator.filter((line) => line.includes("run.stop("));
   assert.equal(stopsInOrchestrator.length, 1, "the orchestrator stops runs in one place");
 
@@ -86,7 +86,7 @@ test("a run exists means its process is running, so nothing can start one twice"
   // there is no second act for a second owner to perform.
   const files = [
     "services/encode/EncodeRun.js",
-    "services/orchestrators/EncodeOrchestrator.js",
+    "services/encode/EncodeOrchestrator.js",
     "services/hls-session-manager.js"
   ];
   for (const file of files) {
@@ -130,7 +130,7 @@ test("how far an encoder may work is answered once", () => {
   // The plan computes the stretch and it reaches ffmpeg. A second computation
   // somewhere else is what made the first one pointless: it was passed and then
   // dropped by a parameter list that did not name it.
-  const orchestrator = source("services/orchestrators/EncodeOrchestrator.js");
+  const orchestrator = source("services/encode/EncodeOrchestrator.js");
   assert.match(
     orchestrator,
     /makeRun\(\{ address, from, to, because \}\)/,

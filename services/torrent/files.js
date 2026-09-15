@@ -6,7 +6,7 @@
  * picture — `Rus Sound/<name>.mka`, `Sub/[group]/<name>.ass` — and a viewer who
  * cannot reach them is watching the release without half of what it carries.
  * This module answers only which file goes with which; what is inside a file is
- * the container layer's business (`services/container/`), and what a viewer is
+ * the container layer's business (`services/media/container/`), and what a viewer is
  * shown is composed in the browser, where the locale is known.
  *
  * **Why it lives in `torrent/`.** A container knows only itself, and a track

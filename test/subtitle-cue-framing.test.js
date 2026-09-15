@@ -18,11 +18,11 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { AviContainer } from "../services/container/AviContainer.js";
-import { MatroskaContainer } from "../services/container/MatroskaContainer.js";
-import { Mp4Container } from "../services/container/Mp4Container.js";
-import { SubtitleFileContainer } from "../services/container/SubtitleFileContainer.js";
-import { MarkupKind, TextSubtitleTrack } from "../services/tracks/TextSubtitleTrack.js";
+import { AviContainer } from "../services/media/container/AviContainer.js";
+import { MatroskaContainer } from "../services/media/container/MatroskaContainer.js";
+import { Mp4Container } from "../services/media/container/Mp4Container.js";
+import { SubtitleFileContainer } from "../services/media/container/SubtitleFileContainer.js";
+import { MarkupKind, TextSubtitleTrack } from "../services/media/tracks/TextSubtitleTrack.js";
 
 /** The line from the field report, as Matroska stores it. */
 const FIELD_BLOCK =

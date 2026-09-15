@@ -79,37 +79,28 @@ export const Command = {
    * the work is under way.
    */
   FILL_FILE: "fill-file",
-  /** The text subtitle tracks a file carries, for the viewer's menu. */
-  SUBTITLE_TRACKS: "subtitle-tracks",
-  /**
-   * Every track a file declares, read from its own header by the container
-   * layer. Answers what ffmpeg's `-i` banner cannot: FlagOriginal,
-   * FlagCommentary, FlagVisualImpaired, FlagEnabled and LanguageBCP47 appear
-   * nowhere in it. Asked of the picture AND of a soundtrack shipped as its own
-   * file beside it, which is the same question about a different file.
-   */
-  CONTAINER_TRACKS: "container-tracks",
-  /**
-   * What a file declares about itself as a whole — format, duration, and where
-   * its own timeline begins. Read from the same header, by the same reader, as
-   * the track table above; the alternative was a second ffmpeg over the proxy's
-   * own HTTP reading the same bytes again.
-   */
-  CONTAINER_MEDIA_INFO: "container-media-info",
-  /**
-   * Where a file's keyframes are, from the container's own table. A property of
-   * immutable bytes, read once per file by the same container that answers the
-   * two above — and the answer decides whether a picture can be copied at all,
-   * which must be the same answer for every viewer of that file.
-   */
-  CONTAINER_KEYFRAMES: "container-keyframes",
   /**
    * Start fetching the region a viewer is about to resume at, named in seconds
    * and turned into bytes here, where the file's own duration can be read.
    */
   WARM_POSITION: "warm-position",
-  /** Cues of one subtitle track, from the clusters already downloaded. */
-  SUBTITLE_CUES: "subtitle-cues",
+  /**
+   * The byte ranges of one file the torrent holds WHOLE, so the subtitle walk
+   * can decide what it may read without asking the swarm. A list rather than a
+   * question per cluster: a pass asks about every cluster of the file, and
+   * hundreds of round trips for a walk meant to be free when there is nothing
+   * new would be the cost of the split, not of the work.
+   */
+  HELD_RANGES: "held-ranges",
+
+  /**
+   * Bytes of a range the torrent already holds, read from the store and never
+   * fetched. The ordinary range read declares demand and steers the swarm,
+   * which is right for a viewer waiting on a segment and wrong for a walk that
+   * must pull nothing.
+   */
+  READ_HELD: "read-held",
+
   /** Shut the client down, optionally deleting downloaded data. */
   /**
    * How much disk the spilled pieces may take between them.
@@ -157,12 +148,15 @@ export const Event = {
   /** A log line, so worker output reaches the same place as everything else. */
   LOG: "log",
   /**
-   * New subtitle cues were read for one track, unprompted — the worker found
-   * them off its own `verified`-piece walk, not in answer to a
-   * {@link Command.SUBTITLE_CUES} call. Lets the main thread PUSH them to
-   * whichever browser is watching instead of waiting to be asked.
+   * Pieces of these files have arrived.
+   *
+   * ANNOUNCED, not asked: the torrent is the only thing that knows a piece just
+   * verified, and what anybody does about it — walk a subtitle track's new
+   * clusters, say — is no business of this thread. It used to walk them itself,
+   * which put the cue reading in the thread that owns the swarm.
    */
-  SUBTITLE_CUES_READY: "subtitle-cues-ready",
+  PIECES_ARRIVED: "pieces-arrived",
+
   /**
    * A file has been downloaded whole and written out as a file.
    *

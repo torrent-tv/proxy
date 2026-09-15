@@ -24,10 +24,10 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { detectLanguage } from "../services/tracks/language-detect.js";
-import { SubtitleFileContainer } from "../services/container/SubtitleFileContainer.js";
-import { TextSubtitleTrack } from "../services/tracks/TextSubtitleTrack.js";
-import { MatroskaContainer } from "../services/container/MatroskaContainer.js";
+import { detectLanguage } from "../services/media/tracks/language-detect.js";
+import { SubtitleFileContainer } from "../services/media/container/SubtitleFileContainer.js";
+import { TextSubtitleTrack } from "../services/media/tracks/TextSubtitleTrack.js";
+import { MatroskaContainer } from "../services/media/container/MatroskaContainer.js";
 
 /** Varied Russian dialogue, the length a few minutes of an episode carries. */
 const RUSSIAN_DIALOGUE = [

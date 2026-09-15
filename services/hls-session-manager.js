@@ -17,7 +17,9 @@ import { fileURLToPath } from "node:url";
 import { spawn } from "node:child_process";
 import { createRequire } from "node:module";
 import { logger } from "../utils/logger.js";
-import { ContainerFactory } from "./container/ContainerFactory.js";
+import { KeyframeTables } from "./media/KeyframeTables.js";
+import { waits } from "./priority/WaitLedger.js";
+import { probeVideoKeyframeTimes } from "./media/keyframe-probe.js";
 import { readMachineState, readProcessCpuSeconds, readProxyCpuSeconds, readSystemCpu, shareOfMachine } from "./host-load.js";
 import { speedFromReadings } from "./encoder-readings.js";
 import { availableShareFrom } from "./available-share.js";
@@ -59,9 +61,9 @@ import {
   parseFfmpegVideoDimensions,
   parseFfmpegVideoFps,
   parseFfmpegHdr
-} from "./ffmpeg-banner.js";
+} from "./media/ffmpeg-banner.js";
 import { resolveSegmentFormat, SEGMENT_FORMAT_IDS } from "./segment-formats/index.js";
-import { audioRenditionName } from "./audio-inventory.js";
+import { audioRenditionName } from "./media/audio-inventory.js";
 import { AudioOutput, CutGrid, OutputSpec, VideoOutput } from "./output/index.js";
 import { newIndexCheck, Timeline, Timelines } from "./output/Timeline.js";
 import { computeCutGrid } from "./output/cut-grid.js";
@@ -94,7 +96,7 @@ import { viewerSecondsOn, viewerSegmentsOn } from "./viewer/positions.js";
 import { Viewers } from "./viewer/Viewers.js";
 import { LiveOutputs } from "./output/LiveOutputs.js";
 import { variantHeightsFor } from "./output/ladder.js";
-import { EncodeOrchestrator } from "./orchestrators/EncodeOrchestrator.js";
+import { EncodeOrchestrator } from "./encode/EncodeOrchestrator.js";
 import { wireMachineBudget } from "./storage/wire.js";
 import { IDLE_KEEP_MS } from "./storage/keep.js";
 import { Returns } from "./storage/returns.js";
@@ -360,26 +362,6 @@ export function isFamilyConsumerId(consumerId) {
 }
 
 const CLEANUP_INTERVAL_MS = 30_000;
-
-// How long a session waits for the file's keyframe table before giving up on
-// copying the picture and re-encoding it instead.
-//
-// Measured on the addon host, 2026-09-04, over seventeen files from
-// `Dropbox/trn` — four containers, pieces from 0.25 to 16 MB, files from 0.36 to
-// 20 GB, each torrent registered fresh so nothing of it was downloaded
-// (`research/keyframe-table-read-2026-09-04.md`). Every table that arrived did
-// so within 24.8 s, most within half a second; the two files that answered
-// nothing took 120.9 s and 120.5 s.
-//
-// Those two figures are not a coincidence and they are what fixes this one:
-// they are TWO of the bound the read already has — `READ_ABANDON_MS` in
-// `torrent-worker/container-tracks.js`, one for the wait on the file's edges and
-// one for the read itself, in series. A session waiting for two of them is the
-// defect; waiting for one is the bound, and it leaves 2.4x over the slowest
-// table that did arrive. The line printed when it fires names which case
-// happened, so the field can move it rather than an argument.
-const KEYFRAME_TABLE_BUDGET_MS = 60_000;
-
 const DEFAULT_SEGMENT_DURATION_SEC = 4;
 // How many segments ahead of the current encode head a missing-segment request
 // is allowed to be before we restart ffmpeg at that position (server-side seek).
@@ -851,123 +833,6 @@ function computeOutputDimensions(targetWidth, targetHeight, sourceWidth, sourceH
 }
 
 /**
- * Resolve the ffprobe binary path from the ffmpeg path (same directory / name).
- *
- * @param {string} ffmpegBin
- * @returns {string}
- */
-function ffprobeBinFor(ffmpegBin) {
-  if (typeof ffmpegBin !== "string" || ffmpegBin.length === 0) {
-    return "ffprobe";
-  }
-  if (/ffmpeg(\.exe)?$/i.test(ffmpegBin)) {
-    return ffmpegBin.replace(/ffmpeg(\.exe)?$/i, "ffprobe$1");
-  }
-  return "ffprobe";
-}
-
-/**
- * Probe the source video stream's keyframe timestamps (seconds, in the source
- * timeline) via ffprobe packet flags. Used for the video-copy path, where we
- * cannot insert keyframes: the synthetic playlist's segment boundaries must
- * match the source's real keyframe positions or the player sees gaps on seek.
- *
- * Time-bounded; returns `null` on failure/timeout (caller falls back to a
- * uniform grid). NOTE: reading all video packets streams much of the file from
- * the torrent, so for large files this may time out and fall back.
- *
- * @param {string} ffmpegBin
- * @param {string | URL} inputUrl
- * @param {number} [timeoutMs]
- * @returns {Promise<number[] | null>} Sorted keyframe times, or null.
- */
-async function probeVideoKeyframeTimes(ffmpegBin, inputUrl, timeoutMs = 25_000) {
-  return new Promise((resolve) => {
-    let proc;
-    try {
-      proc = spawn(
-        ffprobeBinFor(ffmpegBin),
-        [
-          "-v", "error",
-          // `-skip_frame nokey` makes the decoder discard non-keyframes, so the
-          // probe reads only what it needs. Without it a full packet scan of a
-          // ~5 GB MKV cannot finish inside any sane budget over a torrent-backed
-          // input, the probe returns nothing, and the playlist falls back to a
-          // uniform grid — which on the COPY path is a lie: cuts land on the
-          // source's real keyframes, not on a 4 s ruler. The player then finds
-          // the declared times do not match the media, stops trusting the
-          // playlist and walks the file from segment #1 to locate the seek
-          // position by hand (field 2026-08-02: a seek to 1:30 produced requests
-          // #1, #2, #45, #86, #123 … #1187, taking minutes and never arriving).
-          "-skip_frame", "nokey",
-          "-select_streams", "v:0",
-          "-show_entries", "packet=pts_time,flags",
-          "-of", "csv=p=0",
-          String(inputUrl)
-        ],
-        { stdio: ["ignore", "pipe", "ignore"], windowsHide: true }
-      );
-    } catch {
-      resolve(null);
-      return;
-    }
-    let stdout = "";
-    let settled = false;
-    const finish = (value) => {
-      if (settled) {
-        return;
-      }
-      settled = true;
-      resolve(value);
-    };
-    const timer = setTimeout(() => {
-      try {
-        if (!proc.killed) {
-          proc.kill("SIGTERM");
-        }
-      } catch {
-        // ignore
-      }
-      finish(null);
-    }, timeoutMs);
-    proc.stdout.on("data", (chunk) => {
-      stdout += String(chunk);
-    });
-    proc.on("error", () => {
-      clearTimeout(timer);
-      finish(null);
-    });
-    proc.on("exit", (code) => {
-      clearTimeout(timer);
-      if (code !== 0) {
-        finish(null);
-        return;
-      }
-      const times = [];
-      for (const line of stdout.split("\n")) {
-        // Each line: "<pts_time>,<flags>" e.g. "12.345000,K__"
-        const comma = line.indexOf(",");
-        if (comma < 0) {
-          continue;
-        }
-        const flags = line.slice(comma + 1);
-        if (!flags.includes("K")) {
-          continue;
-        }
-        const t = Number(line.slice(0, comma));
-        if (Number.isFinite(t)) {
-          times.push(t);
-        }
-      }
-      times.sort((a, b) => a - b);
-      finish(times.length > 0 ? times : null);
-    });
-  });
-}
-
-
-
-/**
  * The ffmpeg command as one readable line.
  *
  * Everything is shown as passed except the list of cut times, which is one
@@ -1161,9 +1026,10 @@ function isWarmupTimeoutError(error) {
  * @property {string}  lastError
  * @property {Set<string>} consumers  - Consumer IDs currently using this session.
  * @property {object}  progress       - Live progress metrics updated from ffmpeg stdout.
- * @property {number[] | null} keyframeTimes - Real source keyframe times
- *   (sorted seconds), or null when the probe failed/timed out. Used to snap a
- *   source seek onto a known-valid position (see #startEncodeRun).
+ * @property {import("./media/container/KeyframeTable.js").KeyframeTable} keyframes -
+ *   Where this file's keyframes are. One object per file, held by every session
+ *   of it, so a table read late still reaches them. Used to snap a source seek
+ *   onto a known-valid position (see #startEncodeRun).
  * @property {number}  failedStartAt - Segment index of the last fast seek
  *   failure, for the consecutive-failure circuit breaker (see MAX_FAILED_STARTS).
  * @property {number}  failedStartCount  - Consecutive fast failures at failedStartAt.
@@ -1285,11 +1151,14 @@ export class HlsSessionManager {
     segmentDurationSec = DEFAULT_SEGMENT_DURATION_SEC,
     sessionTtlMs = DEFAULT_SESSION_TTL_MS,
     startupWaitMs = DEFAULT_STARTUP_WAIT_MS,
-    // How long a session waits for the file's keyframe table before it
-    // re-encodes the picture instead of copying it. Measured, not chosen —
-    // see KEYFRAME_TABLE_BUDGET_MS. A parameter so a check can name a
-    // shorter one rather than sitting out the real wait.
-    keyframeTableBudgetMs = KEYFRAME_TABLE_BUDGET_MS,
+    // Where every file's keyframe table lives, and the only thing that reads
+    // one. A session asks for its file's table and is handed the object every
+    // other reader of that file holds, so a table that arrives late reaches the
+    // sessions created before it. Built here when nothing supplied one, which
+    // is a registry with no reader: it answers "not read" about every file, and
+    // every picture is then re-encoded — the correct behaviour for a proxy
+    // wired without a container reader, and what every unit test gets.
+    keyframeTables = new KeyframeTables(),
     videoEncoder = null,
     softwarePresetBenchmark = null,
     decodeCostModel = null,
@@ -1304,7 +1173,6 @@ export class HlsSessionManager {
     getCachedMediaInfo = null,
     getCachedAudioTracks = null,
     getContainerMediaInfo = null,
-    getContainerKeyframes = null,
     fetchWholeFile = null,
     segmentFormatId = undefined,
     stateDir = "",
@@ -1319,9 +1187,7 @@ export class HlsSessionManager {
     budgetPolicy = null}) {
     this.enabled = Boolean(enabled);
     this.ffmpegBin = ffmpegBin;
-    this.keyframeTableBudgetMs = Number.isFinite(keyframeTableBudgetMs) && keyframeTableBudgetMs > 0
-      ? keyframeTableBudgetMs
-      : KEYFRAME_TABLE_BUDGET_MS;
+    this.keyframeTables = keyframeTables;
     // Where measurements about this host are kept between runs. Empty means
     // beside the installed proxy; a deployment with somewhere persistent to
     // write names it (--state-dir).
@@ -1343,12 +1209,6 @@ export class HlsSessionManager {
     // it meant reading a header this proxy had already read.
     this.getContainerMediaInfo =
       typeof getContainerMediaInfo === "function" ? getContainerMediaInfo : null;
-    // Where the file's keyframes are, from the same container. A file has one
-    // answer to this and it is read once; without this path the session reads
-    // the table itself over the proxy's own HTTP, which is what every unit test
-    // does and what the field did until 2.76.0.
-    this.getContainerKeyframes =
-      typeof getContainerKeyframes === "function" ? getContainerKeyframes : null;
     // Fetch one whole file of a source, as a bounded read rather than a
     // selection. Used to pull a soundtrack that ships beside the picture onto
     // the disk while the swarm has capacity to spare — see
@@ -1430,15 +1290,6 @@ export class HlsSessionManager {
     // What this host learned last time it ran. Without it every restart shows
     // the first viewer a figure with no measurement behind it.
     this.#loadHostTimings();
-    // Container keyframe index per (source, file). Immutable per file, so one
-    // read serves every session, re-open and seek. Null means "this file has no
-    // readable index" and is cached too — no point retrying a scan that cannot
-    // succeed.
-    this.keyframeIndexCache = new Map();
-    // Reads of that table that have not answered yet, one per file. What makes
-    // the wait belong to the FILE rather than to a session: everybody joins the
-    // same one, so two viewers of one film get one answer and one read.
-    this.keyframeIndexPending = new Map();
     // Where produced segments live, addressed by WHAT they are rather than by
     // which session's encoder wrote them. Two sessions of one output — two
     // viewers who opened the same film at different places — write into one
@@ -1490,6 +1341,9 @@ export class HlsSessionManager {
       })?.seconds ?? this.segmentDurationSec
     });
     this.encodeOrchestrator = new EncodeOrchestrator({
+      // What the viewers actually waited for, by band. The ledger is the
+      // priority layer's; the encoding is handed a way to ask it.
+      describeWaits: (address) => waits.describe(address),
       maxRunsFor: (address) => this.maxRunsForOutput(address),
       makeRun: ({ address, from, to, because }) => this.#makeRunAt(address, from, to, because),
       segmentSeconds: this.segmentDurationSec,
@@ -1939,73 +1793,58 @@ export class HlsSessionManager {
     // KNOWN real keyframe (see #startEncodeRun) avoids that. So probe for both
     // branches; on failure both fall back to their current behaviour (uniform
     // grid for boundaries, raw target for seeking) — no regression.
-    let keyframeTimes = null;
-    // How far a time in `keyframeTimes` may sit from the instant it names. Only
-    // AVI has anything to declare here: it stores frame NUMBERS and the time is
-    // that number times the frame duration, which lands 10-44 ms from the
-    // presentation time the demuxer computes (measured 2026-08-21). A seek made
-    // at such a name can fall just BELOW the real keyframe and land on the one
-    // before it, which is the same fault the landing offset exists for.
-    let keyframeTolerance = 0;
+    // The file's own table — the object every reader of this file holds, so a
+    // read that answers after this session was made still reaches it.
+    const keyframes = this.keyframeTables.of({ sourceKey, fileIndex });
     let keyframeMs = -1; // -1 = not run (skipped), -2 = running in the background
-    // Which container supplied the index, carried so the accuracy summary can
-    // say what it is a summary OF.
-    let containerFormat = "";
     // A quality variant of a session whose cuts are the source's keyframes must
     // be cut at exactly those same times, or its segments cannot stand where
-    // the other's would have. Nothing has to be handed over for that any more:
-    // the table is the FILE's, and a variant is a session of the same file, so
-    // it reads the one answer. What the inherited grid still carries is the
-    // CORRECTED boundaries and the published playlist, which are properties of
-    // the family rather than of the file.
+    // the other's would have. Nothing has to be handed over for that: the table
+    // is the FILE's, and a variant is a session of the same file, so it reads
+    // the one answer. What the inherited grid still carries is the CORRECTED
+    // boundaries and the published playlist, which are properties of the family
+    // rather than of the file.
     if (inheritedGrid) {
-      keyframeTimes = file.keyframeTimes;
-      containerFormat = file.containerFormat;
-      keyframeTolerance = file.keyframeTolerance;
+      // Nothing to read: the table above IS the file's, corrections included.
     } else if (hasDuration && !transcodeVideo && !audioOnly) {
-      // Video-COPY path: keyframeTimes are REQUIRED to build correct segment
-      // boundaries (the playlist itself), so this MUST block session creation —
-      // an incorrect playlist is worse than a slower start.
+      // Video-COPY path: the keyframe times are REQUIRED to build correct
+      // segment boundaries (the playlist itself), so this MUST block session
+      // creation — an incorrect playlist is worse than a slower start.
       //
-      // The wait is bounded (KEYFRAME_TABLE_BUDGET_MS), and the bound is what
-      // the read costs on a real host rather than a figure picked here. A
+      // The wait is bounded, and the bound is what the read costs on a real
+      // host rather than a figure picked here (`KEYFRAME_TABLE_BUDGET_MS`). A
       // comment in this place used to promise a short timeout and "never more
       // than ~6 s to session start" when no timeout existed at all; the file
       // comes off a torrent, so the bytes the table lives in may still be
       // arriving, and a session used to wait for them without limit.
-      const keyframeStartMs = Date.now();
-      // Read the container's OWN keyframe table (Cues/stss) rather than
-      // scanning the media. On the copy path ffmpeg can only cut at the
-      // source's existing keyframes, so these times ARE the segment
-      // boundaries — declaring an even grid instead is a falsehood the player
-      // punishes: it walks the whole file to rebuild the timeline, or presents
-      // audio with no picture because a segment starts with nothing decodable
-      // (both field-observed 2026-08-02). Scanning cannot supply them here —
-      // the file comes off a torrent, and a full packet scan of 5.5 GB found 77
+      //
+      // What is read is the container's OWN table (Cues/stss) rather than a
+      // scan of the media. On the copy path ffmpeg can only cut at the source's
+      // existing keyframes, so these times ARE the segment boundaries —
+      // declaring an even grid instead is a falsehood the player punishes: it
+      // walks the whole file to rebuild the timeline, or presents audio with no
+      // picture because a segment starts with nothing decodable (both
+      // field-observed 2026-08-02). Scanning cannot supply them here — the file
+      // comes off a torrent, and a full packet scan of 5.5 GB found 77
       // keyframes in 45 s without finishing, while the container index yields
       // all 570 in 0.8 s from two point reads (16 KB).
-      const index = await this.readKeyframeTableWithin({ sourceKey, fileIndex, inputUrl, logName });
-      keyframeTimes = index.times;
-      containerFormat = index.format;
-      keyframeTolerance = Number.isFinite(index.tolerance) ? index.tolerance : 0;
+      const keyframeStartMs = Date.now();
+      const { arrived } = await this.keyframeTables.within({ sourceKey, fileIndex, logName });
       keyframeMs = Date.now() - keyframeStartMs;
-      // Onto the file only when the file has ANSWERED. A read that ran out of
-      // its budget is still running, and writing its absence onto the file would
-      // make a passing shortage of bytes look like a property of the bytes —
-      // every later session of the file would then re-encode a picture that can
-      // be copied.
-      if (index.arrived) {
-        // The table is a property of immutable bytes, like the duration and the
-        // track list, and every session of the file reads the one answer.
-        file.learn({ keyframeTimes, keyframeTolerance, containerFormat });
-      } else {
+      if (!arrived) {
+        // A read that ran out of its budget is still running, and the table is
+        // still unanswered — which is not the same as a file with no keyframes,
+        // and the distinction is the table's own (`answered` against
+        // `readable`). Recorded as an absence it would make a passing shortage
+        // of bytes look like a property of the bytes, and every later session
+        // of the file would re-encode a picture that can be copied.
         logger.warn(
           `transcode ${sessionId}: the keyframe table for "${logName}" has not arrived in ` +
-            `${Math.round(this.keyframeTableBudgetMs / 1000)}s, so this session re-encodes the picture ` +
+            `${Math.round(this.keyframeTables.budgetMs / 1000)}s, so this session re-encodes the picture ` +
             "instead of copying it; the read goes on and the next session of this file gets the copy"
         );
       }
-      if (!keyframeTimes) {
+      if (!keyframes.readable) {
         // No index, so there is no honest grid for a COPY: a copied picture can
         // only be cut at the source's own keyframes, and we do not know where
         // they are. Declaring an even grid instead is a falsehood the player
@@ -2021,9 +1860,9 @@ export class HlsSessionManager {
         // could not be read in the budget lands here too, which is right for
         // the same reason.
         transcodeVideo = true;
-        if (index.arrived) {
+        if (keyframes.answered) {
           logger.warn(
-            `transcode ${sessionId}: no keyframe index in the ${containerFormat} container for ` +
+            `transcode ${sessionId}: no keyframe index in the ${keyframes.format} container for ` +
               `"${logName}" — a copied picture has no honest grid without one, so the video is ` +
               "re-encoded instead and its keyframes are placed on our own cuts"
           );
@@ -2037,22 +1876,19 @@ export class HlsSessionManager {
       // the 6 s cap: AVI-class containers need a full packet scan, which 6 s can
       // never afford without delaying playback start — that starved budget is
       // exactly why the probe kept missing on the container where the seek bug
-      // was field-diagnosed. #startEncodeRun reads session.file.keyframeTimes fresh
-      // on every call, so a seek that happens AFTER this finishes picks it up
-      // automatically; one that happens before falls back to the existing
-      // circuit breaker as a safety net (no regression either way).
+      // was field-diagnosed. A run reads the file's table on every call, so a
+      // seek that happens AFTER this finishes picks it up automatically; one
+      // that happens before falls back to the existing circuit breaker as a
+      // safety net (no regression either way).
       keyframeMs = -2;
       const backgroundStartedAt = Date.now();
       void probeVideoKeyframeTimes(this.ffmpegBin, inputUrl.toString(), 25_000).then((times) => {
-        const liveSession = this.sessionsById.get(sessionId);
-        if (!liveSession || liveSession.state === "disposed") {
-          return; // Session gone before the probe finished — nothing to update.
-        }
-        // Onto the FILE, so every session of it — the picture, its quality
-        // steps, a second viewer's — snaps a seek to the same table. It used to
-        // land on the cut table, which is per file AND grid, so a re-encoded
-        // step of a copied picture never saw what this probe found.
-        liveSession.file.learn({ keyframeTimes: times });
+        // Into the FILE's table, which the picture, its quality steps and a
+        // second viewer's session all hold — so nothing has to be alive for the
+        // answer to be kept, and the session this probe was started for may
+        // long since have gone. It used to be written onto whichever session
+        // was still there, and dropped outright when none was.
+        this.keyframeTables.learn({ sourceKey, fileIndex }, { times, format: "packet probe" });
         const elapsedMs = Date.now() - backgroundStartedAt;
         logger.info(
           times
@@ -2082,8 +1918,7 @@ export class HlsSessionManager {
     // re-encoded stream on the source's keyframe times while the player was
     // told the even grid, and the two drift further apart with every segment.
     const useKeyframeGrid = hasDuration &&
-      Array.isArray(keyframeTimes) &&
-      keyframeTimes.length > 0 &&
+      keyframes.readable &&
       (audioOnly ? inheritedGrid != null : (!transcodeVideo || inheritedGrid != null));
     // A rung takes the grid it was handed, rather than working one out again
     // from the same index. The two are not the same table: the one it is handed
@@ -2104,7 +1939,7 @@ export class HlsSessionManager {
               useKeyframeGrid,
               durationSeconds,
               segDur: this.segmentDurationSec,
-              keyframeTimes,
+              keyframeTimes: keyframes.times,
               startTime: sourceStartTime
             })
           : { boundaries: [], sourceTimes: [] };
@@ -2204,6 +2039,11 @@ export class HlsSessionManager {
       // The file this session is of: its key, its name and what a probe of it
       // said. One object per file, shared by every session of it.
       file,
+      // Where that file's keyframes are. One object per FILE as well, and held
+      // rather than copied, so a table read after this session was made — the
+      // packet probe, or a container read that outran its budget — reaches it
+      // without anybody having to go round telling the sessions.
+      keyframes,
       // The SESSION's own lifetime, and nothing else: it exists, or it has been
       // disposed. It used to carry the encoder run's status as well, which is
       // why one line in the spawn path read `state === "disposed" ? "disposed"
@@ -2748,166 +2588,6 @@ export class HlsSessionManager {
     return best;
   }
 
-  /**
-   * Read the file's keyframe index into the cache before a session needs it.
-   *
-   * The index lives at the END of a Matroska file, which is also where the
-   * codec probe reads — both wait for the same piece to arrive, and they used
-   * to do it one after the other: measured 2026-08-04, a probe of 722-1206 ms
-   * followed by an index read of 311-430 ms, all of it before the first
-   * segment. Started together, the second costs nothing.
-   *
-   * Never rejects and is never awaited by the caller: a session that finds
-   * nothing cached simply reads it itself, as before.
-   *
-   * @param {{ sourceKey: string, fileIndex: number, inputUrl: URL, logName: string }} params
-   * @returns {Promise<void>}
-   */
-  async warmKeyframeIndex({ sourceKey, fileIndex, inputUrl, logName }) {
-    try {
-      await this.#readContainerKeyframes({ sourceKey, fileIndex, inputUrl, logName });
-    } catch {
-      // Best effort by construction.
-    }
-  }
-
-  /**
-   * The file's keyframe times from its container index, and which container it
-   * turned out to be.
-   *
-   * @returns {Promise<{ times: number[] | null, format: string }>}
-   */
-  async #readContainerKeyframes({ sourceKey, fileIndex, inputUrl, logName }) {
-    const cacheKey = SourceFiles.keyFor(sourceKey, fileIndex);
-    if (this.keyframeIndexCache.has(cacheKey)) {
-      return this.keyframeIndexCache.get(cacheKey);
-    }
-    // One read per file, and one WAIT per file. Two sessions created in the
-    // same moment used to miss the cache together and read the table twice —
-    // which is what two viewers opening one film do, measured 13 ms apart on
-    // 2026-09-03. Whoever asks second joins the read already running.
-    const running = this.keyframeIndexPending.get(cacheKey);
-    if (running) {
-      return running;
-    }
-    // The WHOLE wait, as whoever asked for the table experiences it: the swarm
-    // delivering the head and tail of the file, the parse over those bytes, and
-    // the crossing to the torrent thread and back. The worker's own line
-    // (`container-keyframes:`) reports the last two apart from the first, and
-    // reading the two lines as one figure is what led to a wrong conclusion on
-    // 2026-09-04 — they differ by up to sixty seconds on a thin swarm.
-    const startedMs = Date.now();
-    const work = this.#readContainerKeyframesOnce({ sourceKey, fileIndex, inputUrl, logName })
-      .then((result) => {
-        this.keyframeIndexCache.set(cacheKey, result);
-        const tookMs = Date.now() - startedMs;
-        const found = Array.isArray(result?.times) ? result.times.length : 0;
-        logger.info(
-          `keyframe index "${logName}": ${found > 0 ? `${found} times` : "none"} from the ` +
-            `${result?.format ?? "unrecognised"} container, waited ${tookMs}ms`
-        );
-        return result;
-      })
-      .catch((error) => {
-        logger.warn(
-          `keyframe index "${logName}": the read failed after ${Date.now() - startedMs}ms — ` +
-            `${error?.message ?? error}`
-        );
-        throw error;
-      })
-      .finally(() => {
-        this.keyframeIndexPending.delete(cacheKey);
-      });
-    this.keyframeIndexPending.set(cacheKey, work);
-    return work;
-  }
-
-  /**
-   * The same read, with a bound on how long a session will wait for it.
-   *
-   * The read itself is NOT cancelled when the bound is reached — it goes on in
-   * the background, is memoized on the file, and is there for the next session
-   * of it. What the bound decides is only whether THIS session waits: a copied
-   * picture cannot be cut without the table, so the answer to "not yet" is to
-   * re-encode, which needs no table because it places the keyframes itself.
-   *
-   * Public because it is what decides which branch a picture takes, and a
-   * private method cannot be pinned by a check.
-   *
-   * @param {{ sourceKey: string, fileIndex: number, inputUrl?: URL, logName: string }} params
-   * @returns {Promise<{ times: number[] | null, format: string, tolerance?: number, arrived: boolean }>}
-   */
-  async readKeyframeTableWithin(params) {
-    const read = this.#readContainerKeyframes(params);
-    let timer = null;
-    const budget = new Promise((resolve) => {
-      timer = setTimeout(() => resolve(null), this.keyframeTableBudgetMs);
-      // A session must not be held open by this timer alone.
-      timer?.unref?.();
-    });
-    const answer = await Promise.race([read.then((result) => ({ ...result, arrived: true })), budget]);
-    clearTimeout(timer);
-    if (answer) {
-      return answer;
-    }
-    // Nothing is added here to swallow a late rejection: the race is holding a
-    // handler on that promise already, and a second one would only look like it
-    // was doing something.
-    return { times: null, format: "not yet read", tolerance: 0, arrived: false };
-  }
-
-  /**
-   * The read itself, made exactly once per file by the caller above.
-   *
-   * Asked of the container layer, which holds ONE container per file and
-   * already answers the track table and the media info from it — so the table
-   * is read by the same reader as everything else the file states about itself,
-   * over the torrent rather than over this proxy's own HTTP. The HTTP read
-   * below is what happens when nothing supplied that path (a manager built
-   * without it, which is every unit test).
-   *
-   * @returns {Promise<{ times: number[] | null, format: string, tolerance?: number }>}
-   */
-  async #readContainerKeyframesOnce({ sourceKey, fileIndex, inputUrl, logName }) {
-    if (typeof this.getContainerKeyframes === "function") {
-      const index = await this.getContainerKeyframes({ sourceKey, fileIndex });
-      const times = Array.isArray(index?.times) && index.times.length > 0 ? index.times : null;
-      return {
-        times,
-        // Which container answered, whether or not it produced a table: the
-        // refusal that follows names it, and "unknown" would make that line say
-        // nothing about the file it is refusing.
-        format: typeof index?.format === "string" && index.format ? index.format : "unrecognised",
-        tolerance: Number.isFinite(index?.tolerance) ? index.tolerance : 0
-      };
-    }
-
-    const url = inputUrl.toString();
-    let fileSize = 0;
-    try {
-      const head = await fetch(url, { method: "HEAD" });
-      fileSize = Number(head.headers.get("content-length")) || 0;
-    } catch {
-      return { times: null, format: "unknown" };
-    }
-    if (fileSize <= 0) {
-      return { times: null, format: "unknown" };
-    }
-
-    const readRange = async (start, end) => {
-      try {
-        const response = await fetch(url, { headers: { Range: `bytes=${start}-${end}` } });
-        if (!response.ok && response.status !== 206) {
-          return null;
-        }
-        return Buffer.from(await response.arrayBuffer());
-      } catch {
-        return null;
-      }
-    };
-
-    return ContainerFactory.readKeyframeIndex({ readRange, fileSize, label: logName });
-  }
 
   /**
    * Start time (seconds, 0-based) of segment `index`, from the session's
@@ -5219,7 +4899,7 @@ export class HlsSessionManager {
     // wrapping it: a named adapter with one caller is a thing to remember to
     // delete, and this is a thing that disappears by being emptied.
     const { args, safeIndex, startSeconds, cutTimes } = buildRunCommand({
-      file: session.file,
+      keyframes: session.keyframes,
       inputFile: session.inputFile,
       audioFile: session.audioFile,
       inputUrl: session.inputUrl,
@@ -6143,8 +5823,8 @@ export class HlsSessionManager {
     // audio frame is the tolerance — anything the list names is exact, so a
     // match is a match. `keyframeTimes` is the list the grid was built from, so
     // this compares the file against the table on the table's own terms.
-    const knownKeyframe = Array.isArray(session.file.keyframeTimes)
-      ? session.file.keyframeTimes.some((time) => Math.abs(time - trueStart) <= 0.05)
+    const knownKeyframe = session.keyframes?.readable
+      ? session.keyframes.times.some((time) => Math.abs(time - trueStart) <= 0.05)
       : null;
     noteIndexDeviation(session.timeline.indexCheck, index, deviation, knownKeyframe);
     if (deviation > SEGMENT_START_DISAGREEMENT_SEC) {
@@ -6417,7 +6097,7 @@ export class HlsSessionManager {
       // that never consulted it.
       `${session.audioOnly === true ? "sound-vs-grid" : "keyframe-index"} ` +
       `${session.id.slice(0, 8)} ${session.audioOnly === true ? "sound" : "picture"} ` +
-      `${session.file.containerFormat || "unknown"} "${session.file.name}": ` +
+      `${session.keyframes?.format ?? "unknown"} "${session.file.name}": ` +
       `${check.disagreed} of ${check.checked} produced segments started away from the playlist, ` +
       `median ${median.toFixed(3)}s worst ${check.maxDeviationSec.toFixed(3)}s` +
       (check.firstDisagreementIndex >= 0 ? ` (first at #${check.firstDisagreementIndex})` : "") +
@@ -6431,7 +6111,7 @@ export class HlsSessionManager {
         // segment that began at another time the SAME table names was not
         // mis-described by the table — the grid was built over a gap in it.
         : `; ${landed} of them began at another keyframe the table names` +
-          ` [tolerance ${SEGMENT_START_DISAGREEMENT_SEC}s, ${(session.file.keyframeTimes?.length ?? 0)} keyframes read]`)
+          ` [tolerance ${SEGMENT_START_DISAGREEMENT_SEC}s, ${session.keyframes?.count ?? 0} keyframes read]`)
     );
   }
 
@@ -9162,12 +8842,17 @@ export class HlsSessionManager {
     }
     this.outputs.forgetUnused(outputsInUse);
     const filesInUse = new Set();
+    const keyframesInUse = new Set();
     for (const session of this.sessionsById.values()) {
       if (session.file) {
         filesInUse.add(session.file);
       }
+      if (session.keyframes) {
+        keyframesInUse.add(session.keyframes);
+      }
     }
     this.sourceFiles.forgetUnused(filesInUse);
+    this.keyframeTables.forgetUnused(keyframesInUse);
     // The segments outlive every session on them, so what they cost is decided
     // here rather than by anybody's departure: how long ago each output was
     // last read, and how much room the disk has for the lot.

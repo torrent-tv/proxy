@@ -7,10 +7,9 @@
  */
 
 import { spawn } from "node:child_process";
-import { logger } from "../utils/logger.js";
+import { logger } from "../../utils/logger.js";
 import { Container } from "./container/Container.js";
 import { buildAudioInventory } from "./audio-inventory.js";
-import { contentsOf } from "./torrent/Contents.js";
 import {
   parseFfmpegDurationSeconds,
   parseFfmpegStartTimeSeconds,
@@ -262,8 +261,8 @@ function buildDirectUrl(localBaseUrl, sourceKey, fileIndex) {
  * @property {string}  ffmpegBin
  * @property {boolean} transcodeAudioEnabled
  * @property {string}  localBaseUrl
- * @property {ReturnType<import("../store/source-registry.js").createSourceRegistry>} sourceRegistry
- * @property {import("./torrent-pool.js").TorrentPool} torrentPool
+ * @property {ReturnType<import("../../store/source-registry.js").createSourceRegistry>} sourceRegistry
+ * @property {import("../torrent-pool.js").TorrentPool} torrentPool
  */
 
 /**
@@ -285,10 +284,22 @@ export function createPlaybackPlanner({
   // merely keeps up with realtime, and showed 15 s where 3.8 s were left.
   expectedFirstSegmentMs,
   expectedSessionCreateMs,
+  // What the torrent holds beside this picture — its dubs, its subtitle files,
+  // its contact sheets — grouped by whoever knows what a torrent contains. This
+  // layer answers about ONE file and must not read a torrent's file list.
+  sidecarsFromTorrent = null,
+  // What a file DECLARES about its own tracks, read from its header. Handed in
+  // rather than asked of the torrent pool: this layer used to call
+  // `torrentPool.getDeclaredAudioTracks` and friends, which is the media layer
+  // asking the torrent layer to parse a container on its behalf — the parse
+  // happened in the torrent thread and came back over the channel. It happens
+  // on this thread now, and what is passed here is the ordinary container read.
+  declaredTracksOf = null,
   // Optional. Called once the file's edges are downloaded, so the keyframe
   // index — which reads the same tail of the file — is fetched alongside the
-  // codec probe instead of after it. Late-bound to the HLS session manager,
-  // which owns the cache both of them share.
+  // codec probe instead of after it. It goes straight to `KeyframeTables`,
+  // which owns that table: it used to be routed through the session manager,
+  // which held a second copy of it and a second reader for it.
   warmKeyframeIndex,
   // Optional. The heights this host could actually serve this source at, for
   // both playback branches, so the quality menu is right from the moment the
@@ -339,27 +350,30 @@ export function createPlaybackPlanner({
   /**
    * The files beside this picture that belong to it, in three groups.
    *
-   * Asked of what the torrent says about itself, which works the grouping out
-   * once and keeps it. It used to be worked out here on every call, and again
-   * on the warm-up's own path over the same list, so one opened film paired the
-   * same files several times and neither side could be sure of the other's
-   * answer.
+   * HANDED IN, because what a torrent contains is the torrent layer's to say
+   * and this is the media layer. It works the grouping out once and keeps it;
+   * it used to be worked out here on every call, and again on the warm-up's own
+   * path over the same list, so one opened film paired the same files several
+   * times and neither side could be sure of the other's answer.
+   *
+   * Absent, a file has no companions — which is what a proxy with no torrent
+   * behind it should answer, rather than failing.
    *
    * @param {object} torrent
    * @param {number} fileIndex
    * @returns {{ audio: object[], subtitles: object[], images: object[] }}
    */
   function sidecarsOf(torrent, fileIndex) {
-    return contentsOf(torrent ?? {}).sidecarsOf(fileIndex);
+    return sidecarsFromTorrent?.(torrent ?? {}, fileIndex) ?? { audio: [], subtitles: [], images: [] };
   }
 
-  async function withContainerDefaults(torrent, fileIndex, subtitleTracks) {
-    if (subtitleTracks.length === 0 || typeof torrentPool?.getDeclaredSubtitleTracks !== "function") {
+  async function withContainerDefaults(sourceKey, torrent, fileIndex, subtitleTracks) {
+    if (subtitleTracks.length === 0 || typeof declaredTracksOf !== "function") {
       return subtitleTracks.map((track) => ({ ...track, declaresDefault: false }));
     }
     let declared = [];
     try {
-      declared = await torrentPool.getDeclaredSubtitleTracks(torrent, fileIndex);
+      declared = (await declaredTracksOf({ sourceKey, fileIndex })).filter((track) => track?.type === "subtitle");
     } catch (error) {
       logger.info(`subtitle defaults: the container could not be read (${error?.message ?? error})`);
     }
@@ -385,12 +399,13 @@ export function createPlaybackPlanner({
    * menu and the number in the `a/<n>/` address are the same number by
    * construction rather than by agreement.
    *
+   * @param {string} sourceKey
    * @param {object} torrent
    * @param {number} fileIndex
    * @param {object[]} bannerAudioTracks - The probe's own audio streams.
    * @returns {Promise<import("./audio-inventory.js").AudioInventoryEntry[]>}
    */
-  async function buildInventory(torrent, fileIndex, bannerAudioTracks) {
+  async function buildInventory(sourceKey, torrent, fileIndex, bannerAudioTracks) {
     const banner = Array.isArray(bannerAudioTracks) ? bannerAudioTracks : [];
     /**
      * Read a file's declared audio tracks, or give up quickly.
@@ -410,13 +425,15 @@ export function createPlaybackPlanner({
      * @returns {Promise<object[]>}
      */
     const declaredAudioOf = async (wantedFileIndex, label) => {
-      if (typeof torrentPool?.getDeclaredAudioTracks !== "function") {
+      if (typeof declaredTracksOf !== "function") {
         return [];
       }
       let timer = null;
       try {
         return await Promise.race([
-          torrentPool.getDeclaredAudioTracks(torrent, wantedFileIndex),
+          declaredTracksOf({ sourceKey, fileIndex: wantedFileIndex }).then((tracks) => tracks
+            .filter((track) => track?.type === "audio")
+            .sort((left, right) => (left.declaredIndex ?? 0) - (right.declaredIndex ?? 0))),
           new Promise((resolve) => {
             timer = setTimeout(() => resolve(null), SIDECAR_HEADER_WAIT_MS);
             timer.unref?.();
@@ -634,14 +651,9 @@ export function createPlaybackPlanner({
       // The keyframe index reads the tail of the file, which the probe has just
       // waited for as well. Started here it overlaps the probe instead of
       // following the whole plan — worth 311-430 ms of the time before the
-      // first segment. Fire and forget: the session reads it itself if this has
-      // not finished, and both share one cache entry.
-      warmKeyframeIndex?.({
-        sourceKey,
-        fileIndex,
-        inputUrl: new URL(directUrl),
-        logName: file.name
-      });
+      // first segment. Fire and forget: a session that finds the table
+      // unanswered joins this very read rather than starting a second one.
+      warmKeyframeIndex?.({ sourceKey, fileIndex, logName: file.name });
       let probe = await probeStreamCodecs({ ffmpegBin, inputUrl: directUrl, userAgent });
       const probeDeadline = Date.now() + Math.max(0, maxWaitMs);
       let attempt = 0;
@@ -669,9 +681,14 @@ export function createPlaybackPlanner({
       // banner, while the `VideoTrack` the container declares was read and used
       // for nothing but a line in the log.
       let declaredVideo = null;
-      if (typeof torrentPool?.getDeclaredVideoTrack === "function") {
+      if (typeof declaredTracksOf === "function") {
         try {
-          declaredVideo = await torrentPool.getDeclaredVideoTrack(torrent, fileIndex);
+          // One, because ffmpeg's `0:v:0` is what everything downstream is built
+          // on and a second video stream is a cover image far more often than a
+          // second film.
+          declaredVideo = (await declaredTracksOf({ sourceKey, fileIndex }))
+            .filter((track) => track?.type === "video")
+            .sort((left, right) => (left.declaredIndex ?? 0) - (right.declaredIndex ?? 0))[0] ?? null;
         } catch (error) {
           logger.info(`video track: could not be read (${error?.message ?? error})`);
         }
@@ -714,8 +731,8 @@ export function createPlaybackPlanner({
         // Full track inventory for the browser's audio/subtitle menus. The audio
         // half spans the picture's own tracks AND the soundtracks shipped as
         // files beside it, under one numbering — see `buildInventory`.
-        audioTracks: await buildInventory(torrent, fileIndex, audioTracks ?? []),
-        subtitleTracks: await withContainerDefaults(torrent, fileIndex, subtitleTracks ?? []),
+        audioTracks: await buildInventory(sourceKey, torrent, fileIndex, audioTracks ?? []),
+        subtitleTracks: await withContainerDefaults(sourceKey, torrent, fileIndex, subtitleTracks ?? []),
         // The files BESIDE this picture that belong to it, and what each one's
         // own path says about the track in it. Both answers are made here, by
         // one grammar, because the browser used to make them again: it paired

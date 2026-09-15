@@ -16,7 +16,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 
-const planner = readFileSync(new URL("../services/playback-planner.js", import.meta.url), "utf8");
+const planner = readFileSync(new URL("../services/media/playback-planner.js", import.meta.url), "utf8");
 const sessions = readFileSync(new URL("../services/hls-session-manager.js", import.meta.url), "utf8");
 
 test("every field the declaration reads is a field the cache stores", () => {

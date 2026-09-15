@@ -1,5 +1,5 @@
 /**
- * @file How long a session waits for the file's keyframe table.
+ * @file How long anybody waits for the file's keyframe table.
  *
  * With the table a picture is copied; without it the whole picture is
  * re-encoded, which on a weak host is the difference between almost free and
@@ -16,66 +16,62 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
-import { HlsSessionManager } from "../services/hls-session-manager.js";
+import { KeyframeTables } from "../services/media/KeyframeTables.js";
+
+const QUIET = { info: () => {}, warn: () => {} };
 
 /**
  * @param {number} budgetMs
- * @returns {HlsSessionManager}
+ * @param {(params: object) => Promise<object | null>} readTable
+ * @returns {KeyframeTables}
  */
-function manager(budgetMs) {
-  return new HlsSessionManager({
-    enabled: true,
-    ffmpegBin: "ffmpeg",
-    localBindHost: "127.0.0.1",
-    localPort: 9090,
-    keyframeTableBudgetMs: budgetMs
-  });
+function tables(budgetMs, readTable) {
+  return new KeyframeTables({ readTable, budgetMs, logger: QUIET });
 }
 
 const FILE = { sourceKey: "torrent:abc", fileIndex: 0, logName: "a.mkv" };
 
 test("a table that arrives inside the budget is the answer", async () => {
-  const sessions = manager(1_000);
-  sessions.getContainerKeyframes = async () => ({ times: [0, 4, 8], tolerance: 0, format: "matroska" });
+  const keyframes = tables(1_000, async () => ({ times: [0, 4, 8], tolerance: 0, format: "matroska" }));
 
-  const answer = await sessions.readKeyframeTableWithin(FILE);
+  const { table, arrived } = await keyframes.within(FILE);
 
-  assert.deepEqual(answer.times, [0, 4, 8]);
-  assert.equal(answer.arrived, true, "the file has answered, so what it said may be written onto it");
+  assert.deepEqual(table.times, [0, 4, 8]);
+  assert.equal(arrived, true, "the file has answered, so the picture may be copied");
+  assert.equal(table.readable, true);
 });
 
 test("a table that has not arrived gives up on copying rather than on the session", async () => {
-  const sessions = manager(60);
   // The bytes it needs are still coming off the swarm. On the field host this
   // is a torrent with one peer: the read was still waiting after two minutes.
-  sessions.getContainerKeyframes = () => new Promise(() => {});
+  const keyframes = tables(60, () => new Promise(() => {}));
 
   const startedAt = Date.now();
-  const answer = await sessions.readKeyframeTableWithin(FILE);
+  const { table, arrived } = await keyframes.within(FILE);
   const waited = Date.now() - startedAt;
 
-  assert.equal(answer.times, null, "no table, so this session cannot copy the picture");
+  assert.equal(table.readable, false, "no table, so this session cannot copy the picture");
   assert.equal(
-    answer.arrived,
+    table.answered,
     false,
-    "and it says the file has NOT answered — an absence written onto the file would make " +
-      "a passing shortage of bytes look like a property of the bytes"
+    "and the file has NOT answered — an absence recorded as an answer would make a passing " +
+      "shortage of bytes look like a property of the bytes"
   );
+  assert.equal(arrived, false);
   assert.ok(waited < 2_000, `the wait ended at the bound, not at the read (${waited}ms)`);
 });
 
 test("the read goes on after the budget, so the next session of the file gets the copy", async () => {
-  const sessions = manager(40);
   let reads = 0;
   let answerLate = null;
-  sessions.getContainerKeyframes = () => {
+  const keyframes = tables(40, () => {
     reads += 1;
     return new Promise((resolve) => {
       answerLate = resolve;
     });
-  };
+  });
 
-  const first = await sessions.readKeyframeTableWithin(FILE);
+  const first = await keyframes.within(FILE);
   assert.equal(first.arrived, false);
 
   answerLate({ times: [0, 5, 10], tolerance: 0, format: "matroska" });
@@ -87,20 +83,19 @@ test("the read goes on after the budget, so the next session of the file gets th
   // is the very thing the last assertion here is about.
   await new Promise((resolve) => { setImmediate(resolve); });
 
-  const second = await sessions.readKeyframeTableWithin(FILE);
-  assert.deepEqual(second.times, [0, 5, 10], "the late answer was kept, not thrown away");
+  const second = await keyframes.within(FILE);
+  assert.deepEqual(second.table.times, [0, 5, 10], "the late answer was kept, not thrown away");
   assert.equal(second.arrived, true);
   assert.equal(reads, 1, "and it was not read a second time");
 });
 
 test("a read that fails is not turned into a bounded wait's silence", async () => {
-  const sessions = manager(1_000);
-  sessions.getContainerKeyframes = async () => {
+  const keyframes = tables(1_000, async () => {
     throw new Error("the head is not downloaded");
-  };
+  });
 
   await assert.rejects(
-    () => sessions.readKeyframeTableWithin(FILE),
+    () => keyframes.read(FILE),
     /the head is not downloaded/,
     "a read that threw is a different thing from a read that is still running"
   );

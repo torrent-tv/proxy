@@ -32,7 +32,7 @@ import { contentsOf } from "../../../../services/torrent/Contents.js";
  * }} deps
  * @returns {Promise<void>}
  */
-export async function handleApiSourceWarmPost(req, reply, { sourceRegistry, torrentPool }) {
+export async function handleApiSourceWarmPost(req, reply, { sourceRegistry, torrentPool, durationOf = null }) {
   const sourceKey = typeof req.params.sourceKey === "string" ? req.params.sourceKey.trim() : "";
   if (!sourceKey) {
     return reply.code(400).send({ error: "sourceKey is required." });
@@ -95,7 +95,14 @@ export async function handleApiSourceWarmPost(req, reply, { sourceRegistry, torr
     // reading yet. This one only has to arrive before the encoder does, and the
     // encoder is a plan and a session away.
     if (named !== null && positionSeconds > 0 && typeof torrentPool.warmResumePosition === "function") {
-      Promise.resolve(torrentPool.warmResumePosition(torrent, named, positionSeconds)).catch(
+      Promise.resolve(
+        (typeof durationOf === "function"
+          ? durationOf({ sourceKey, fileIndex: named })
+          : Promise.resolve(null)
+        ).then((durationSeconds) =>
+          torrentPool.warmResumePosition(torrent, named, positionSeconds, durationSeconds)
+        )
+      ).catch(
         (error) => {
           const message = error instanceof Error ? error.message : String(error);
           logger.warn(`warm ${sourceKey.slice(0, 8)}: the viewer's position failed: ${message}`);

@@ -18,7 +18,7 @@ third kind of anything:
   (`ContainerFactory`: no torrent knowledge; `ContainerOrchestrator`:
   transport-agnostic). The pairing of a sidecar file with a picture lives in
   `services/sidecar-files.js`, and the numbered list a viewer chooses from lives
-  in `services/audio-inventory.js`. Both are pure and both are application-layer.
+  in `services/media/audio-inventory.js`. Both are pure and both are application-layer.
 
 A class called `ExternalSubtitleFile` used to sit in `tracks/` asserting the
 opposite. It did not extend `ContainerTrack`, duplicated four of its fields, and
@@ -120,11 +120,13 @@ flowchart TB
   end
   subgraph Application
     CF[ContainerFactory<br/>detect 16 bytes]
+    KT[KeyframeTables<br/>one read per file, bounded wait]
     CO[ContainerOrchestrator<br/>cache + getTracks/getKeyframeIndex]
     SO[SubtitleOrchestrator<br/>cursor + per-file state]
     SF[sidecar-files.js<br/>which file goes with which]
     AI[audio-inventory.js<br/>one flat numbering]
     CF --> CO
+    CO --> KT
     CO --> SO
     SF --> AI
     CO --> AI
@@ -163,7 +165,10 @@ flowchart TB
 
 - `ContainerFactory.create({readRange,fileSize})` — sniffs 16 bytes, returns precise `Container` subclass. No torrent knowledge.
 - `ContainerOrchestrator` — per-file cache (`sourceKey:fileIndex`), `getTracks()` / `getMediaInfo()` / `getKeyframeIndex()`. Transport-agnostic.
-- **The keyframe table is read once per file**, like the other two. `Container.readKeyframeIndex` memoizes and each format implements `parseKeyframeIndex`, so the wait belongs to the FILE: two sessions created in the same moment join one read rather than making two, which is exactly what two viewers opening one film do. A read that THREW is not remembered — the bytes it needed may simply not have arrived. Who asks: `torrent-worker/container-tracks.js` `containerKeyframesOf`, over the torrent, reached from the session manager by the `container-keyframes` command. The manager's own HTTP read remains for a manager wired without that path (every unit test).
+- **The keyframe table is read once per file, and the container is not what remembers it.** `Container.readKeyframeIndex` parses and returns; each format implements `parseKeyframeIndex`. It used to keep the answer, and that made this the one fact stored in two places — here and in the file's `KeyframeTable` on the main thread. That copy had no reader, and since the parse itself moved to the main thread there is no second thread for a second copy to sit in.
+- **`KeyframeTable` / `KeyframeTables` — the answer, and the policy around getting one.** The table is one object per file (`media/container/KeyframeTable.js`), held by everyone who reads that file rather than copied, so a read that lands after a session was made still reaches it. `media/KeyframeTables.js` reads it once per file whoever asks, joins the second asker to the read already running, bounds how long any one caller waits (`KEYFRAME_TABLE_BUDGET_MS`, measured), and never records a read that threw as an answer. Its reader is one function handed in at construction, so it knows nothing of torrents or HTTP. It is not `ContainerOrchestrator` because of the THREAD: that one needs byte ranges and lives in the worker, this one lives beside the sessions and reaches it across the channel.
+- **`answered` and `readable` are different questions.** `answered` says a reader came back; `readable` says it came back with times. A file that answered nothing must be re-encoded for ever (MPEG-TS: 669 real keyframes, no index of any kind); a file that has not answered is a shortage of bytes off the swarm. Held as loose fields in a bag of probe results nothing told them apart, and a passing shortage was written onto the file as a property of the bytes.
+- **The second reader is the packet probe** (`media/keyframe-probe.js`): it finds keyframes by decoding, for containers that state no index. It is never waited for, and `KeyframeTable.learn` keeps the fuller answer whichever arrives second — measured 2026-08-02, a scan found 77 keyframes in 45 s without finishing against all 570 in 0.8 s from the index.
 - `SubtitleOrchestrator` — wraps `torrent-worker/subtitle-cues.js` (`planFor`, `cuesHeldFor`, `warmSubtitleCues`) behind the `ContainerTrack` abstraction. Routes depend on this, not on the worker directly. The reading itself is the containers' — that module supplies the torrent's read policy and keeps the cursor.
 - `PlaybackController` / `SubtitleController` — thin interface adapters; `routes/api/*` delegate to them, handle HTTP headers (`X-Subtitle-Language`, `X-Subtitle-Cursor`) only.
 

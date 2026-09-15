@@ -41,25 +41,83 @@ Linux-only host (e.g. POSIX-only signals must degrade elsewhere).
     started, not their viewport), and nothing about the request that does not
     change a byte of the result. `hls-session-manager` builds one and keys the
     session on it.
-  - `container/` — domain layer: `Container` (abstract, RFC 9559 / ISO 14496-12),
+  - **`media/` — THE MEDIA LAYER, one directory, and it answers ONE question:
+    what does a FILE say about itself.** Its containers, its tracks, where its
+    keyframes are, how long it runs, and the plan for playing it. Every fact in
+    it is born when a header is read, dies when the file is forgotten, and is
+    addressed by the file — which is the test that put them together. It used to
+    be four places at two levels (`container/`, `tracks/`, half of
+    `orchestrators/`, and `playback-planner.js` loose in `services/`), so the
+    layer could not be put under an import rule and the rule was written per
+    directory instead.
+    Inside it, the DOMAIN is `media/container/` and `media/tracks/`: they import
+    nothing but each other, this proxy's own logger included. The application
+    files sit flat beside them — `ContainerOrchestrator`, `KeyframeTables`,
+    `SubtitleOrchestrator`, `playback-planner.js`, `keyframe-probe.js`,
+    `ffmpeg-banner.js`, `audio-inventory.js` — and may reach their own domain and
+    the logger and nothing else. What a torrent CONTAINS, which clusters may be
+    read, where a viewer stands, what an encoder costs: all handed in. Both
+    reaches that existed are gone — `torrent-worker/subtitle-cues.js` is given to
+    `SubtitleOrchestrator` by `server.js`, and `torrent/Contents.js` to the
+    planner — so this layer can be exercised with plain values, no torrent, no
+    thread and no disk. Checked by breaking it in every direction.
+  - **The parse happens on the MAIN thread, and the torrent thread serves
+    bytes.** It used to parse containers too — tracks, media info, keyframe
+    index — and carry each answer back over the channel, on the stated ground
+    that "the main thread cannot open a read stream on one of its files". True
+    of WebTorrent's API, not of the bytes: a container is built from one
+    function, `readRange(start, end)`, the pieces live in shared memory, and
+    `WorkerTorrentPool.readRangeOf` is the read that serves every segment — it
+    waits for what has not arrived and steers the swarm toward it. That split
+    is what made "where is this fact kept" a question at all; with one thread it
+    does not arise. NOTHING in that thread reaches into the media layer now —
+    the subtitle cue walk was the last, and it is handed which byte ranges of a
+    file are downloaded WHOLE (one list per pass, not a question per cluster)
+    plus a store read that never fetches, both in
+    `torrent-worker/held-bytes.js`. A piece arriving is ANNOUNCED
+    (`PIECES_ARRIVED`) rather than acted on there. Pinned by
+    `test/the-torrent-thread-serves-bytes.test.js`.
+  - `media/container/` — domain: `Container` (abstract, RFC 9559 / ISO 14496-12),
     `MatroskaContainer` / `Mp4Container` / `AviContainer`, `ContainerFactory`
-    (sniff 16 bytes → precise subclass). See `docs/container-architecture.md`.
-  - `tracks/` — domain layer: `ContainerTrack` (base: TrackNumber, declaredIndex,
+    (sniff 16 bytes → precise subclass), `KeyframeTable`. See
+    `docs/container-architecture.md`.
+  - `media/tracks/` — domain: `ContainerTrack` (base: TrackNumber, declaredIndex,
     language/BCP47, isEnabled/isDefault) → `VideoTrack` / `AudioTrack` /
     `SubtitleTrack` → `TextSubtitleTrack` / `ImageSubtitleTrack`,
     `ExternalSubtitleFile`. Spec-accurate flags (FlagForced only on subtitles per
     RFC 9559 §5.1.4.1, FlagOriginal/Commentary only on audio, tkhd
     track_enabled / alternate_group, elng BCP47).
-  - `orchestrators/` — application layer: `ContainerOrchestrator` (detect + per-file
-    cache, `getTracks`/`getMediaInfo`/`getKeyframeIndex` — the keyframe table is
-    a property of immutable bytes like the other two, memoized on the container
-    and read once per file by whoever asks), `SubtitleOrchestrator` (wraps
-    `torrent-worker/subtitle-cues.js` + `Container` tracks, warm/push). The walk
+  - `media/` application files: `ContainerOrchestrator` (detect + per-file
+    cache of CONTAINERS, `getTracks`/`getMediaInfo`/`getKeyframeIndex` — it
+    caches the container, never the answers, so nothing here is a second store
+    of a fact somebody else owns), `KeyframeTables`,
+    `SubtitleOrchestrator` (the track list and the cues behind
+    `Container` tracks, warm/push — it is handed the walk, and `server.js` is
+    what puts the two together), `SubtitleCues` (the walk itself: the plan, the
+    found-order cursor, one walk of a file at a time). The walk
     itself is `MatroskaContainer.walkHeldClusters` / `Mp4Container.readHeldSamples`;
-    `subtitle-cues.js` supplies the torrent's read policy and keeps the cursor.
+    what the torrent supplies is `held-bytes.js` — which ranges are downloaded
+    whole, and a read of one that never fetches.
+    **`KeyframeTables` is where a file's keyframe table lives and the only thing
+    that reads one.** The table is `container/KeyframeTable.js`, ONE object per
+    file, handed out rather than copied — so a read that lands after a session
+    was made still reaches it, which a value could not. It answers two questions
+    that a bag of probe fields could not tell apart: `answered` (a reader came
+    back) and `readable` (it came back with times). The first distinguishes a
+    file that must be re-encoded for ever from a passing shortage of bytes off
+    the swarm. One read per file whoever asks, the second asker joins the first,
+    each caller's wait is bounded by the measured `KEYFRAME_TABLE_BUDGET_MS`
+    while the READ is not, and a read that threw is never recorded as an answer.
+    It is the ONLY store of the table: the container reads and does not
+    remember, so there is one object per file and nothing to keep in step. The second reader is the packet probe in
+    `media/keyframe-probe.js`, which decodes rather than parsing; the fuller of the
+    two answers is the one that stands (`media/keyframe-probe.js`).
   - `controllers/` — interface layer: `PlaybackController` / `SubtitleController`
     (thin adapters over orchestrators; routes depend on controllers, not services).
-    `routes/*` are now thin HTTP translators.
+    `routes/*` are now thin HTTP translators. A controller reaches every layer
+    below it THROUGH its orchestrator and never around it, which biome checks —
+    so what an orchestrator needs from another layer is composed in `server.js`
+    and passed in.
   - Everything a container states about ITSELF lives in its own class: the
     track table, the Cues, the keyframe times they name, the cluster positions,
     the blocks inside a cluster, the MP4 sample table, and the walk of what is
@@ -67,7 +125,8 @@ Linux-only host (e.g. POSIX-only signals must degrade elsewhere).
     is the format's byte-level grammar, not its statements, and is the only
     piece kept apart. `ContainerFactory` is the ONE place that decides what a
     file is — by sniffing the header, since that is what the muxer wrote — and
-    it also answers `readKeyframeIndex`.
+    that is it. `ContainerFactory.readKeyframeIndex` is gone: it existed only for
+    the session manager's own HTTP read of a container, which is deleted.
   - `docs/download-architecture.md` — the two axes of downloading: what is
     wanted (`demand/`) against what the swarm is told (`download/`), why urgency
     is not a number given to the library, and why the speculative levels are
@@ -123,8 +182,10 @@ Linux-only host (e.g. POSIX-only signals must degrade elsewhere).
     acquired and at unload, on THIS proxy for the whole of a viewing
     (`/data/client-<start>-<session>-<torrent>.log`, one file per session).
     Read both before concluding anything from a half-session.
-  - `playback-planner.js` — single ffmpeg probe returns audioCodec, videoCodec,
-    container, durationSeconds. `mode` is advisory; the browser decides.
+  - `media/playback-planner.js` — single ffmpeg probe returns audioCodec,
+    videoCodec, container, durationSeconds. `mode` is advisory; the browser
+    decides. `media/keyframe-probe.js` beside it is the OTHER reading of the same
+    file, by decoding rather than by parsing, for containers that state no index.
   - `hls-session-manager.js` — one ffmpeg per (source, file, settings). Serves a
     synthetic full-duration VOD playlist; produces segments on demand; restarts
     ffmpeg at the requested segment for server-side seeking. Short idle TTL.

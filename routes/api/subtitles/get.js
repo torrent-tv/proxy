@@ -26,7 +26,7 @@
 
 import { deriveSourceKey } from "../../../services/torrent-source-key.js";
 import { spawn } from "node:child_process";
-import { TextSubtitleTrack } from "../../../services/tracks/TextSubtitleTrack.js";
+import { TextSubtitleTrack } from "../../../services/media/tracks/TextSubtitleTrack.js";
 import { SubtitleController } from "../../../services/controllers/SubtitleController.js";
 import { logger } from "../../../utils/logger.js";
 
@@ -45,7 +45,7 @@ function setLanguageHeaders(reply, lang) {
   }
 }
 
-export async function handleApiSubtitlesGet(req, reply, { sourceRegistry, torrentPool, ffmpegBin, localBaseUrl, viewers }) {
+export async function handleApiSubtitlesGet(req, reply, { sourceRegistry, torrentPool, ffmpegBin, localBaseUrl, viewers, subtitles }) {
   const query = req.query ?? {};
   const sourceKey = typeof query.sourceKey === "string" ? query.sourceKey.trim() : "";
   const fileIndex = Number(query.fileIndex);
@@ -82,7 +82,7 @@ export async function handleApiSubtitlesGet(req, reply, { sourceRegistry, torren
 
   // Interface layer delegates to SubtitleController (orchestrator + domain),
   // which owns external-file vs embedded-track branching and the cluster walk.
-  const controller = new SubtitleController({ sourceRegistry, torrentPool });
+  const controller = new SubtitleController({ sourceRegistry, torrentPool, subtitles });
   const since = Number.parseInt(String(req.query?.since ?? ""), 10);
   const after = Number.parseFloat(String(req.query?.after ?? ""));
   const result = await controller.getSubtitle({

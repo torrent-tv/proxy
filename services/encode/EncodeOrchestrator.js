@@ -23,15 +23,14 @@
  * result when it is ready.
  */
 
-import { CoverageMap } from "../encode/CoverageMap.js";
-import { firstUnmetWant, planEncoders } from "../encode/EncodePlan.js";
-import { endOfRun } from "../encode/EncodeRun.js";
-import { ENCODE_EXIT } from "../encode/encode-exit.js";
-import { affordableRuns } from "../encode/run-budget.js";
-import { RunCosts } from "../encode/run-costs.js";
-import { contentionPenalty } from "../encode/contention.js";
-import { waits } from "../priority/WaitLedger.js";
-import { SegmentDemand } from "../encode/SegmentDemand.js";
+import { CoverageMap } from "./CoverageMap.js";
+import { firstUnmetWant, planEncoders } from "./EncodePlan.js";
+import { endOfRun } from "./EncodeRun.js";
+import { ENCODE_EXIT } from "./encode-exit.js";
+import { affordableRuns } from "./run-budget.js";
+import { RunCosts } from "./run-costs.js";
+import { contentionPenalty } from "./contention.js";
+import { SegmentDemand } from "./SegmentDemand.js";
 
 /**
  * How long nothing is placed on an output whose input has just gone, and the
@@ -48,6 +47,9 @@ const INPUT_QUIET_BASE_MS = 2_000;
 const INPUT_QUIET_MAX_MS = 15_000;
 
 export class EncodeOrchestrator {
+  /** @type {(address: string) => string} */
+  #describeWaits = () => "";
+
   /** Output address to what has been made of it. @type {Map<string, CoverageMap>} */
   #coverage = new Map();
 
@@ -117,6 +119,11 @@ export class EncodeOrchestrator {
    *   encoding speed.
    * @param {{ info: (line: string) => void, warn: (line: string) => void }} params.logger
    * @param {() => number} [params.now]
+   * @param {(address: string) => string} [params.describeWaits] - What the
+   *   viewers actually waited for on this output, by band, for the state line.
+   *   HANDED IN: what anybody waited for belongs to the priority layer, and
+   *   this one may be asked about encoders with no ledger, no clock and no
+   *   viewer anywhere. Absent, the line simply does not carry it.
    */
   constructor({
     maxRunsFor,
@@ -127,9 +134,11 @@ export class EncodeOrchestrator {
     startingSpeedFor = () => 0,
     segmentStore = null,
     planSoon = null,
+    describeWaits = null,
     logger,
     now
   }) {
+    this.#describeWaits = typeof describeWaits === "function" ? describeWaits : () => "";
     // The store of produced segments — the layer below this one. It is asked to
     // clean up after a run that ended other than by reaching the end of its
     // stretch, which is the one thing an ending must not leave behind: a file
@@ -921,7 +930,7 @@ export class EncodeOrchestrator {
       // existed there was no figure anywhere saying whether the urgent zone was
       // served first — the map could have been read backwards and every line
       // above would have looked the same.
-      const served = waits.describe(address);
+      const served = this.#describeWaits(address);
       parts.push(
         `${address} ready=${coverage.stats().ready}` +
         `${held < 0 ? "" : ` of ${held} file(s) on disk`} ` +

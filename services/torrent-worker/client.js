@@ -110,15 +110,15 @@ export class TorrentWorkerClient {
   #onSubtitleCues;
 
   /**
-   * @param {{ maxDiskBytes?: number, memoryBytes?: number, stateDir?: string, onSubtitleCues?: (event: object) => void }} [options]
+   * @param {{ memoryBytes?: number, stateDir?: string, onSubtitleCues?: (event: object) => void }} [options]
    */
-  constructor({ maxDiskBytes, memoryBytes, stateDir, onSubtitleCues } = {}) {
+  constructor({ memoryBytes, stateDir, onSubtitleCues } = {}) {
     this.#worker = new Worker(fileURLToPath(WORKER_URL), {
       // `stateDir` travels because the worker writes heap snapshots of its own
       // isolate there. It cannot choose a directory any other way: a worker may
       // not change the process's working directory, and the isolate that has
       // died three times is the one no snapshot has ever been taken of.
-      workerData: { maxDiskBytes, memoryBytes, stateDir }
+      workerData: { memoryBytes, stateDir }
     });
     this.#caller = createCaller(this.#worker);
     this.#onSubtitleCues = onSubtitleCues ?? (() => undefined);
@@ -683,6 +683,24 @@ export class TorrentWorkerClient {
    * @type {number}
    */
   spilledBytes = 0;
+
+  /**
+   * Tell the whole files on the torrent thread their share of the disk.
+   *
+   * Same shape as the spilled pieces, and for the same reason: they hold bytes
+   * on this machine and the owner of the disk is on the other thread.
+   *
+   * @param {number} bytes
+   * @returns {Promise<number>} What they hold after it.
+   */
+  async allowWholeFileBytes(bytes) {
+    try {
+      this.wholeFileBytes = Number(await this.#caller.call(Command.WHOLE_FILES_ALLOWANCE, { bytes })) || 0;
+    } catch {
+      // The thread is gone or busy; the next revision says it again.
+    }
+    return this.wholeFileBytes ?? 0;
+  }
 
   /**
    * Say how much disk the spilled pieces on this thread may take between them.

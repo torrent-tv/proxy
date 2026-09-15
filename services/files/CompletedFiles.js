@@ -56,6 +56,26 @@ export class CompletedFiles {
   #writing = new Set();
 
   /**
+   * What this store may hold, handed to it by the owner of the disk.
+   *
+   * It had NO BOUND AT ALL until 2026-09-14 — a 2.8 GB film kept whole on a
+   * host whose disk is often a 32 GB card, with nothing to say when to stop.
+   * The torrent pool's own "disk cap" did not cover it either: that counted
+   * WebTorrent's downloaded bitfield, so a piece held purely in MEMORY told
+   * against a ceiling called disk, and the bytes here told against nothing.
+   *
+   * Null until the owner has divided anything, and null does not license
+   * growth: it is what a store that has not yet been told looks like, and the
+   * first revision is a minute away.
+   *
+   * @type {number | null}
+   */
+  #allowanceBytes = null;
+
+  /** When each held file was last asked for. @type {Map<string, number>} */
+  #lastRead = new Map();
+
+  /**
    * @param {object} params
    * @param {string} params.root - Where whole files live. Outside any torrent's
    *   own store directory, which is removed with the torrent.
@@ -100,7 +120,97 @@ export class CompletedFiles {
    * @returns {{ path: string, length: number, name: string } | null}
    */
   find(infoHash, fileIndex) {
-    return this.#held.get(this.#keyOf(infoHash, fileIndex)) ?? null;
+    const key = this.#keyOf(infoHash, fileIndex);
+    const file = this.#held.get(key) ?? null;
+    if (file) {
+      // WHEN IT WAS LAST WANTED, which is the order it leaves in. A whole file
+      // nobody has asked for in the longest is the one whose loss costs least:
+      // it can be downloaded again, and a read of it falls back to the pieces.
+      this.#lastRead.set(key, Date.now());
+    }
+    return file;
+  }
+
+  /**
+   * Say how much disk these files may take between them.
+   *
+   * Over the share, the longest-unread whole file goes — never one being
+   * written, and never the one just asked for. Losing a whole file is not
+   * losing data: the torrent can fetch it again, and until it does the read
+   * falls back to the pieces, which is what `piece-from-whole-file` exists for.
+   *
+   * @param {number} bytes
+   * @returns {{ bytes: number, removed: number }} What is held after, and how
+   *   many files went.
+   */
+  async allow(bytes) {
+    this.#allowanceBytes = Number.isFinite(bytes) && bytes >= 0 ? bytes : null;
+    let removed = 0;
+    if (this.#allowanceBytes === null) {
+      return { bytes: this.bytes, removed };
+    }
+    while (this.bytes > this.#allowanceBytes) {
+      const victim = this.#longestUnread();
+      if (!victim) {
+        break;
+      }
+      await this.#remove(victim);
+      removed += 1;
+    }
+    return { bytes: this.bytes, removed };
+  }
+
+  /**
+   * Whether there is room for a file of this size.
+   *
+   * Asked BEFORE one is assembled, because assembling it and then removing it
+   * is the same bytes written for nothing.
+   *
+   * @param {number} length
+   * @returns {boolean}
+   */
+  hasRoomFor(length) {
+    if (this.#allowanceBytes === null) {
+      return true;
+    }
+    return this.bytes + Math.max(0, Number(length) || 0) <= this.#allowanceBytes;
+  }
+
+  /**
+   * The key of the whole file nobody has wanted for longest, or null.
+   *
+   * @returns {string | null}
+   */
+  #longestUnread() {
+    let oldest = null;
+    let oldestAt = Number.POSITIVE_INFINITY;
+    for (const key of this.#held.keys()) {
+      if (this.#writing.has(key)) {
+        continue;
+      }
+      const at = this.#lastRead.get(key) ?? 0;
+      if (at < oldestAt) {
+        oldest = key;
+        oldestAt = at;
+      }
+    }
+    return oldest;
+  }
+
+  /**
+   * Take one whole file off the disk.
+   *
+   * @param {string} key
+   * @returns {Promise<void>}
+   */
+  async #remove(key) {
+    const file = this.#held.get(key);
+    this.#held.delete(key);
+    this.#lastRead.delete(key);
+    if (!file) {
+      return;
+    }
+    await fs.rm(file.path, REMOVAL).catch(() => undefined);
   }
 
   /**
@@ -195,6 +305,11 @@ export class CompletedFiles {
       return held;
     }
     if (this.#writing.has(key)) {
+      return null;
+    }
+    if (!this.hasRoomFor(length)) {
+      // Assembling it and then removing it is the same bytes written for
+      // nothing. The pieces still serve the read; this file simply is not kept.
       return null;
     }
     this.#writing.add(key);

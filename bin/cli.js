@@ -25,6 +25,7 @@ import { createTunnelClient } from "../services/tunnel-client.js";
 import { createWebRtcManager } from "../services/webrtc-manager.js";
 import { createDataChannelHandler } from "../services/data-channel-handler.js";
 import { pruneCoreDumps } from "../services/core-dumps.js";
+import { Diagnostics } from "../services/storage/Diagnostics.js";
 import { adoptOrphanRingFiles, createPacketWitness, pruneWitnessCaptures } from "../services/packet-witness.js";
 import { createUsrsctpStateReader } from "../services/usrsctp-state.js";
 import { startMemoryReport } from "../services/memory-report.js";
@@ -93,7 +94,6 @@ program
     "--usrsctp-state",
     "Read usrsctp's association state with gdb when a wedge is declared. OFF by default: gdb attaches to THIS process and stops every thread of it while it works."
   )
-  .option("--max-disk-bytes <bytes>", "Cap total downloaded torrent data (0 = disabled; default min(10GB, half free disk))")
   .option("--memory-bytes <bytes>", "Per-torrent budget for pieces kept in memory before spilling to disk (default 512MB)")
   .option("--ffmpeg-bin <path>", "Path to ffmpeg binary")
   .option(
@@ -131,12 +131,6 @@ const clientName = options.name ? String(options.name) : `proxy-${clientId.slice
 const token = String(options.token ?? "");
 const transcodeAudio = options.transcodeAudio !== false;
 const portMappingEnabled = options.portMapping !== false;
-// Optional disk cap. undefined → the pool computes its own default; a valid
-// non-negative number (0 disables) → passed through.
-const maxDiskBytes =
-  options.maxDiskBytes !== undefined && Number.isFinite(Number(options.maxDiskBytes)) && Number(options.maxDiskBytes) >= 0
-    ? Number(options.maxDiskBytes)
-    : undefined;
 // Per-torrent memory budget for resident pieces. Pieces past it spill to disk
 // rather than being lost, so a small value costs read latency, never data.
 const memoryBytes =
@@ -309,6 +303,28 @@ async function shutdown(signal) {
   }
 }
 
+// WHAT THE EVIDENCE WEIGHS, and what it may weigh. Core dumps, heap snapshots
+// and packet captures were each bounded by a COUNT and none by a size — two
+// dumps and five snapshots came to 3.2 GB on the addon host. One object, built
+// here where the collectors are, registered with the owner of the disk inside
+// the server and consulted by each collector before it writes.
+const diagnostics = new Diagnostics({
+  logger,
+  kinds: [
+    { name: "core dumps", directory: () => options.stateDir || "", matches: (name) => name.startsWith("core.") },
+    {
+      name: "heap snapshots",
+      directory: () => options.stateDir || "",
+      matches: (name) => name.endsWith(".heapsnapshot")
+    },
+    {
+      name: "packet captures",
+      directory: () => options.stateDir || "",
+      matches: (name) => name.startsWith("packet-witness")
+    }
+  ]
+});
+
 try {
   logToFile(options.logFile);
   if (transcodeAudio) {
@@ -319,10 +335,10 @@ try {
     port: localPort,
     transcodeAudio,
     ffmpegBin,
-    maxDiskBytes,
     memoryBytes,
     segmentFormat: options.segmentFormat,
     stateDir: options.stateDir,
+    diagnostics,
     logFile: options.logFile ?? "",
     deliverySink: options.deliverySink === true,
     // Late-bound the same way `webRtcManager` is below: the torrent pool is
@@ -342,7 +358,10 @@ try {
   packetWitness = createPacketWitness({
     log: (message) => logger.info(message),
     dir: options.stateDir || "",
-    port: actualPort
+    port: actualPort,
+    // Evidence takes room from the product, so a capture is asked for rather
+    // than taken. Refused, it is a line and not a silence.
+    mayKeep: (bytes) => diagnostics.mayKeep({ what: "a packet capture", bytes })
   });
   // A process that was KILLED mid-session leaves the ring's last seconds
   // behind, and those seconds contain whatever ended it. Keep them under a name
@@ -380,6 +399,8 @@ try {
   // before (roadmap item 2).
   startMemoryReport({
     log: (message) => logger.info(message),
+    // A snapshot weighs about what the heap weighs. Asked for, not taken.
+    mayKeep: (bytes) => diagnostics.mayKeep({ what: "a heap snapshot", bytes }),
     // The other half of the piece-buffer question. Shared memory lives until
     // BOTH isolates let go, so the worker's own count answers only its side;
     // read here, on the same line as the process figures the growth shows up

@@ -1311,7 +1311,9 @@ export class HlsSessionManager {
     segmentStore = null,
     getTorrentTotals,
     startStopCost = null,
-    spillDisk = null}) {
+    spillDisk = null,
+    wholeFiles = null,
+    diagnostics = null}) {
     this.enabled = Boolean(enabled);
     this.ffmpegBin = ffmpegBin;
     this.keyframeTableBudgetMs = Number.isFinite(keyframeTableBudgetMs) && keyframeTableBudgetMs > 0
@@ -1368,6 +1370,8 @@ export class HlsSessionManager {
     // they weigh and how to tell them their share. Not the pool — the pool is
     // on the other side of the thread boundary and this side holds none of it.
     this.spillDisk = spillDisk;
+    this.wholeFiles = wholeFiles;
+    this.diagnostics = diagnostics;
     // Detected H.264 encoder descriptor (hardware or software). Defaults to
     // software libx264 when no detection result is supplied. May be downgraded
     // to software at runtime if a hardware encode fails.
@@ -1529,6 +1533,8 @@ export class HlsSessionManager {
     this.diskSpace = wireDiskSpace({
       segmentStore: this.segmentStore,
       spill: this.spillDisk,
+      wholeFiles: this.wholeFiles,
+      diagnostics: this.diagnostics,
       readFree: freeBytesFor,
       logger
     });

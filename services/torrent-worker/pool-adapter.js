@@ -35,7 +35,7 @@ export class WorkerTorrentPool {
   #torrents = new Map();
 
   /**
-   * @param {{ maxDiskBytes?: number, memoryBytes?: number, stateDir?: string }} [options]
+   * @param {{ memoryBytes?: number, stateDir?: string }} [options]
    */
   constructor(options = {}) {
     this.#client = new TorrentWorkerClient(options);
@@ -81,6 +81,14 @@ export class WorkerTorrentPool {
    */
   allowSpillBytes(bytes) {
     return this.#client.allowSpillBytes(bytes);
+  }
+
+  get wholeFileBytes() {
+    return this.#client.wholeFileBytes ?? 0;
+  }
+
+  allowWholeFileBytes(bytes) {
+    return this.#client.allowWholeFileBytes(bytes);
   }
 
   /**

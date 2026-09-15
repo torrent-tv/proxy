@@ -80,7 +80,6 @@ const { collectStoreStats, findSharedStore, machineReserveBytes, pieceBufferColl
 const dhtBootstrap = await resolveDhtBootstrap();
 
 const pool = new TorrentPool({
-  maxDiskBytes: workerData?.maxDiskBytes,
   memoryBytes: workerData?.memoryBytes,
   dhtBootstrap
 });
@@ -582,6 +581,14 @@ async function runCommand(command, params, id) {
       // are. What arrives is this thread’s whole share; the stores divide it
       // between themselves.
       return reviseSpillBudgets(Number(params.bytes));
+    }
+
+    case Command.WHOLE_FILES_ALLOWANCE: {
+      // Whole files are held on this thread and the disk has one owner, on the
+      // other. What arrives is their share; what goes back is what they hold
+      // after it, which is what the owner divides by next time.
+      const after = await completedFiles.allow(Number(params.bytes));
+      return after.bytes;
     }
 
     case Command.DESTROY_ALL: {

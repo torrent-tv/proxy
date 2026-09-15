@@ -54,8 +54,6 @@ const REMOVAL = { force: true, maxRetries: 10, retryDelay: 20 };
 export class PieceDiskStore {
   #directory;
 
-  #chunkLength;
-
   /** Piece index → its length on disk. @type {Map<number, number>} */
   #stored = new Map();
 
@@ -99,9 +97,6 @@ export class PieceDiskStore {
    * @param {string} params.directory - Where this torrent's pieces live.
    * @param {string} params.name - A name unique to the torrent; it becomes the
    *   directory inside `directory`.
-   * @param {number} params.chunkLength - The torrent's piece length. Kept for
-   *   the caller's arithmetic; a piece's own length is recorded as it is written,
-   *   because the last piece of a torrent is shorter.
    * @param {number | null} [params.allowanceBytes] - What it may hold. Null
    *   means nobody has said yet, and nothing is evicted until somebody does.
    * @param {() => number} [params.now]
@@ -109,14 +104,12 @@ export class PieceDiskStore {
   constructor({
     directory,
     name,
-    chunkLength,
     allowanceBytes = null,
     now = Date.now,
     readHeads = () => [],
     onForgotten = () => undefined
   }) {
     this.#directory = path.join(directory, name);
-    this.#chunkLength = chunkLength;
     this.#allowanceBytes = Number.isFinite(allowanceBytes) && allowanceBytes >= 0 ? allowanceBytes : null;
     this.#now = now;
     this.#readHeads = typeof readHeads === "function" ? readHeads : () => [];

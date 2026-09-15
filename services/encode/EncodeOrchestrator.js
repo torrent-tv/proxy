@@ -259,6 +259,36 @@ export class EncodeOrchestrator {
   }
 
   /**
+   * How many encoder processes are running on this machine right now, over
+   * every output.
+   *
+   * ONE COUNT, and it is this class's because this class is what makes and
+   * unmakes runs: adopted the moment one exists and forgotten the moment one
+   * ends, both synchronously. The session manager answered the same question
+   * twice by walking its own registry — once per SESSION and once per RUN —
+   * which agreed only while a session held at most one run. It has held several
+   * since the plan was allowed to place them, and the per-session count is the
+   * wrong one of the two wherever they differ: what a second encoder costs was
+   * measured between ffmpeg PROCESSES, not between outputs.
+   *
+   * A SUSPENDED run is not counted. It is stopped where it stands and is using
+   * nothing; a cost measured beside it is a cost measured alone.
+   *
+   * @returns {number}
+   */
+  runningCount() {
+    let running = 0;
+    for (const runs of this.#runs.values()) {
+      for (const run of runs) {
+        if (run.isAlive && !run.isSuspended) {
+          running += 1;
+        }
+      }
+    }
+    return running;
+  }
+
+  /**
    * How long an output is, once its playlist is known.
    *
    * @param {string} address

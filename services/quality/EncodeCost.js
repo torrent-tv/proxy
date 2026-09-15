@@ -59,9 +59,9 @@ import { correctForAvailability } from "../available-share.js";
 import { medianOf, movedBeyondScatter, READINGS_KEPT } from "../learned-median.js";
 import { speedFromReadings } from "../encoder-readings.js";
 import { contentionPenalty } from "../encode/contention.js";
-import { TRANSCODE_FPS } from "../encode/args.js";
 import { ENCODE_RUN_STATE, liveRunsOf, processCanBeSignalled, runStateOf } from "../encode/encode-run-state.js";
-import { canSustainOutput, speedBar } from "../hwaccel.js";
+import { canSustainOutput, chooseSoftwareEncodeSettings, speedBar } from "../hwaccel.js";
+import { computeOutputDimensions, TRANSCODE_FPS } from "../encode/args.js";
 import { logger } from "../../utils/logger.js";
 
 export class EncodeCost {
@@ -900,6 +900,77 @@ export class EncodeCost {
       `transcode: ${session.file.name} decodes at ${(1 / costSec).toFixed(2)}x on this host ` +
         `(median of ${readings.length}, latest ${(1 / decodeCostSec).toFixed(2)}x from ${height}p ` +
         `at ${speed.toFixed(2)}x, preset ${session.output.softwarePreset})`
+    );
+  }
+
+  /**
+   * The speed this run is making RIGHT NOW, or null when nothing recent enough
+   * says.
+   *
+   * Read as the slope between two progress reports, never as ffmpeg's own
+   * `speed=`. That figure is cumulative — output time over wall time since the
+   * run began — so a run starved of torrent data early carries the average of
+   * that starvation for the rest of its life. Measured 2026-08-21: a run whose
+   * progress lines showed 1.30x at that moment (13 s of video in 10.02 s of
+   * clock) still reported a cumulative 0.39x from four minutes on a ~100 KB/s
+   * swarm, and the budget stepped the picture down on it. The same mistake was
+   * found and solved once already — the startup decode benchmark reads the
+   * slope between two progress reports for exactly this reason.
+   *
+   * @param {HlsSession} session
+   * @param {number} now
+   * @returns {number | null}
+   */
+  recentSpeedOf(session, now, withinMs) {
+    const reading = session.recentSpeed;
+    if (!reading || !session.runs?.has(reading.run)) {
+      return null; // nothing from THIS run
+    }
+    // Stale by whatever the asker calls stale — two of its own ticks, for the
+    // budget loop, which takes a fresh reading every pass anyway. A reading
+    // older than that is not about the machine as it stands.
+    if (now - reading.at > withinMs) {
+      return null;
+    }
+    return reading.speed;
+  }
+
+  /**
+   * Realtime budget (software encoder only): choose the output resolution AND
+   * libx264 preset this host can encode faster than realtime, from the startup
+   * benchmark. The ceiling is the client-requested box capped to the source
+   * (never upscaled); the budget picks the highest resolution rung at or below
+   * that ceiling that clears realtime × margin, then the best preset at that
+   * resolution. On a weak host this downscales below the client target instead
+   * of dropping into sub-realtime playback. Returns null when not applicable
+   * (no video transcode, hardware encoder, or missing benchmark/source size) —
+   * the encode then keeps the ceiling resolution and the default preset.
+   *
+   * @param {{ transcodeVideo: boolean, targetWidth: number, targetHeight: number, sourceWidth: number | null, sourceHeight: number | null, outputFps: number, source?: { megapixelsPerSecond: number, megabitsPerSecond: number } | null }} params
+   * @returns {{ width: number, height: number, preset: string } | null}
+   */
+  chooseEncodeBudget({
+    transcodeVideo,
+    targetWidth,
+    targetHeight,
+    sourceWidth,
+    sourceHeight,
+    outputFps,
+    source = null,
+    requiredSpeed = null
+  }) {
+    if (!transcodeVideo || this.#host().encoderKind !== "software" || !this.#host().benchmark) {
+      return null;
+    }
+    const ceiling = computeOutputDimensions(targetWidth, targetHeight, sourceWidth, sourceHeight);
+    if (!ceiling) {
+      return null;
+    }
+    return chooseSoftwareEncodeSettings(
+      this.#host().benchmark,
+      { width: ceiling.w, height: ceiling.h },
+      outputFps,
+      { decodeModel: this.#host().decodeModel, source, requiredSpeed }
     );
   }
 }

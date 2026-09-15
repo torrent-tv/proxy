@@ -32,7 +32,7 @@ import { fmp4Format } from "../services/segment-formats/fmp4.js";
 import { softwareDescriptor, maxrateKbpsFor, nominalKbpsForHeight } from "../services/hwaccel.js";
 import { readVideoSampleSize } from "../services/segment-formats/mp4-boxes.js";
 
-const BASE_ID = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
+const BASE_ID = "aaaaaaaabbbbcccc";
 const SEGMENT_SECONDS = 4;
 
 

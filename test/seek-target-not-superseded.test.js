@@ -24,7 +24,7 @@ import { HlsSessionManager } from "../services/hls-session-manager.js";
 import { viewerOf } from "../services/viewer/Viewer.js";
 import { fmp4Format } from "../services/segment-formats/fmp4.js";
 
-const SESSION_ID = "aaaaaaaa-1111-2222-3333-444444444444";
+const SESSION_ID = "aaaaaaaa11112222";
 const SEGMENT_SECONDS = 10.4;
 const SEEK_TO_SECONDS = 1061;
 const SEGMENT_AT_SEEK = Math.floor(SEEK_TO_SECONDS / SEGMENT_SECONDS);

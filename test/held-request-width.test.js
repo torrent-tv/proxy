@@ -19,7 +19,7 @@ import { HlsSessionManager } from "../services/hls-session-manager.js";
 import { fmp4Format } from "../services/segment-formats/fmp4.js";
 import { viewerOf } from "../services/viewer/Viewer.js";
 
-const SESSION_ID = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
+const SESSION_ID = "aaaaaaaabbbbcccc";
 const SEGMENT_SECONDS = 4;
 
 /**

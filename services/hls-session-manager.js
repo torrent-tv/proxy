@@ -12,7 +12,6 @@ import { access, readFile, stat, unlink } from "node:fs/promises";
 import { Readable } from "node:stream";
 import os from "node:os";
 import path from "node:path";
-import { randomUUID } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { spawn } from "node:child_process";
 import { createRequire } from "node:module";
@@ -63,7 +62,7 @@ import {
 } from "./media/ffmpeg-banner.js";
 import { resolveSegmentFormat, SEGMENT_FORMAT_IDS } from "./segment-formats/index.js";
 import { audioRenditionName } from "./media/audio-inventory.js";
-import { AudioOutput, CutGrid, OutputSpec, VideoOutput } from "./output/index.js";
+import { AudioOutput, CutGrid, isOutputName, OutputSpec, VideoOutput } from "./output/index.js";
 import { Timeline, Timelines } from "./output/Timeline.js";
 import { computeCutGrid } from "./output/cut-grid.js";
 import { Output, Outputs } from "./output/Output.js";
@@ -586,16 +585,6 @@ function buildHttpBaseUrl(host, port) {
 }
 
 /**
- * Guard against path traversal by validating that a session ID is a UUID.
- *
- * @param {unknown} value
- * @returns {boolean}
- */
-function isSafeSessionId(value) {
-  return /^[a-f0-9-]{36}$/i.test(value);
-}
-
-/**
  * Guard against path traversal by restricting file names to the known
  * playlist and segment patterns produced by ffmpeg. Which segment names are
  * legal depends on the active container, so the format decides.
@@ -945,7 +934,7 @@ function isWarmupTimeoutError(error) {
 
 /**
  * @typedef {Object} HlsSession
- * @property {string}  id            - UUID of the session.
+ * @property {string}  id            - The name of the output it produces.
  * @property {string}  sourceMapKey  - Cache key combining source + transcode settings.
  * @property {string}  fileName      - Display name of the file being transcoded.
  * @property {"starting" | "ready" | "failed" | "disposed"} state
@@ -1583,7 +1572,13 @@ export class HlsSessionManager {
       }
     }
 
-    const sessionId = randomUUID();
+    // THE OUTPUT'S OWN NAME, not a fresh one per request. A session is found by
+    // the output key and there is exactly one per output, so a random name was
+    // a second name for a thing that already had one — and it hid the output's
+    // identity from every log and every address. Many viewers of one output now
+    // address one name because the name is the output's, not because anybody
+    // arranged it.
+    const sessionId = spec.toName();
     const createEntryMs = Date.now();
     // The directory belongs to the OUTPUT, not to this session: two sessions
     // whose parameters agree produce interchangeable segments, so they write
@@ -5225,7 +5220,7 @@ export class HlsSessionManager {
    * @returns {number} 0 when the session is unknown (treated as newest).
    */
   nextRequestSeq(sessionId) {
-    const session = isSafeSessionId(sessionId) ? this.sessionsById.get(sessionId) : null;
+    const session = isOutputName(sessionId) ? this.sessionsById.get(sessionId) : null;
     if (!session) {
       return 0;
     }
@@ -6113,7 +6108,7 @@ export class HlsSessionManager {
    *   or the height is not offered for it.
    */
   async resolveVariantSession(baseSessionId, height, wantedIndex = -1, consumerId = "") {
-    if (!isSafeSessionId(baseSessionId)) {
+    if (!isOutputName(baseSessionId)) {
       return null;
     }
     const base = this.sessionsById.get(baseSessionId);
@@ -6340,7 +6335,7 @@ export class HlsSessionManager {
    *   to serve the file from; a null id means there is no such variant.
    */
   async resolveVariantFile(baseSessionId, height, fileName, consumerId = "") {
-    if (!isSafeSessionId(baseSessionId)) {
+    if (!isOutputName(baseSessionId)) {
       return { sessionId: null };
     }
     const base = this.sessionsById.get(baseSessionId);
@@ -6489,7 +6484,7 @@ export class HlsSessionManager {
   }
 
   async prepareVariant(baseSessionId, height, positionSeconds, consumerId = "") {
-    if (!isSafeSessionId(baseSessionId)) {
+    if (!isOutputName(baseSessionId)) {
       return null;
     }
     const base = this.sessionsById.get(baseSessionId);
@@ -6663,7 +6658,7 @@ export class HlsSessionManager {
    *   to choose between, or nothing to align to.
    */
   buildMasterPlaylist(sessionId, consumerId = "") {
-    if (!isSafeSessionId(sessionId)) {
+    if (!isOutputName(sessionId)) {
       return null;
     }
     const session = this.sessionsById.get(sessionId);
@@ -6738,7 +6733,7 @@ export class HlsSessionManager {
    * @returns {Promise<{ sessionId: string | null, error?: string }>}
    */
   async resolveAudioRenditionFile(baseSessionId, trackIndex, fileName, consumerId = "") {
-    if (!isSafeSessionId(baseSessionId) || !Number.isInteger(trackIndex) || trackIndex < 0) {
+    if (!isOutputName(baseSessionId) || !Number.isInteger(trackIndex) || trackIndex < 0) {
       return { sessionId: null };
     }
     const base = this.sessionsById.get(baseSessionId);
@@ -7228,7 +7223,7 @@ export class HlsSessionManager {
    * @returns {number}
    */
   seekEpoch(sessionId) {
-    const session = isSafeSessionId(sessionId) ? this.sessionsById.get(sessionId) : null;
+    const session = isOutputName(sessionId) ? this.sessionsById.get(sessionId) : null;
     return session?.waitEpoch ?? 0;
   }
 
@@ -7249,7 +7244,7 @@ export class HlsSessionManager {
    * @returns {number} Zero when the session is gone or nothing has been reported.
    */
   viewerPositionOf(sessionId, consumerId = "") {
-    const session = isSafeSessionId(sessionId) ? this.sessionsById.get(sessionId) : null;
+    const session = isOutputName(sessionId) ? this.sessionsById.get(sessionId) : null;
     if (!session) {
       return 0;
     }
@@ -7293,7 +7288,7 @@ export class HlsSessionManager {
    * @returns {boolean} True when the request should keep waiting.
    */
   requestStillWanted(sessionId, fileName, consumerId = "") {
-    const session = isSafeSessionId(sessionId) ? this.sessionsById.get(sessionId) : null;
+    const session = isOutputName(sessionId) ? this.sessionsById.get(sessionId) : null;
     if (!session) {
       return false;
     }
@@ -7333,7 +7328,7 @@ export class HlsSessionManager {
    */
   async getFileStream(sessionId, fileName, options = {}) {
     const consumerId = typeof options.consumerId === "string" ? options.consumerId : "";
-    if (!isSafeSessionId(sessionId)) {
+    if (!isOutputName(sessionId)) {
       return { kind: "not-found" };
     }
     const session = this.sessionsById.get(sessionId);
@@ -8035,7 +8030,7 @@ export class HlsSessionManager {
   }
 
   async getSessionProgress(sessionId, consumerId = "") {
-    if (!isSafeSessionId(sessionId)) {
+    if (!isOutputName(sessionId)) {
       return null;
     }
     const named = this.sessionsById.get(sessionId);
@@ -8199,7 +8194,7 @@ export class HlsSessionManager {
    * @returns {Promise<boolean>} `false` if the session was not found.
    */
   async releaseSessionConsumer(sessionId, consumerId = "", reason = "") {
-    if (!isSafeSessionId(sessionId) || typeof consumerId !== "string" || consumerId.length === 0) {
+    if (!isOutputName(sessionId) || typeof consumerId !== "string" || consumerId.length === 0) {
       return false;
     }
     const session = this.sessionsById.get(sessionId);

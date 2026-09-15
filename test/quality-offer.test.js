@@ -20,7 +20,7 @@ import { startRunOn } from "./helpers/encode-run.js";
  */
 function sessionProducing() {
   const session = {
-    id: "11111111-2222-3333-4444-555555555555",
+    id: "1111111122223333",
     state: "ready",
     audioOnly: false,
     transcodeVideo: false,
@@ -129,7 +129,7 @@ test("a step asking for the family's answer does not keep it as its own", () => 
   // made the wrong answer possible in the first place.
   const { offer, picture } = offerOver();
   const step = sessionProducing();
-  step.id = "99999999-8888-7777-6666-555555555555";
+  step.id = "9999999988887777";
   step.transcodeVideo = true;
 
   const answer = offer.offeredHeightsFor(step);

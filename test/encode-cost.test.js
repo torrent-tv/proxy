@@ -49,7 +49,7 @@ function costOn(readings = {}) {
  */
 function sessionProducing(what = {}) {
   const session = {
-    id: "11111111-2222-3333-4444-555555555555",
+    id: "1111111122223333",
     state: "ready",
     audioOnly: what.audioOnly === true,
     transcodeVideo: what.transcodeVideo === true,

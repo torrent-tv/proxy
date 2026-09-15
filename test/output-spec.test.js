@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { AudioOutput, CutGrid, OutputSpec, VideoOutput } from "../services/output/OutputSpec.js";
+import { createHash } from "node:crypto";
+import { AudioOutput, CutGrid, isOutputName, OutputSpec, VideoOutput } from "../services/output/OutputSpec.js";
 
 const TORRENT = "torrent:11f0929918e2b5aa2e5b71ecdbe5c0f1a4bbf7d1";
 
@@ -154,4 +155,41 @@ test("a picture cut at keyframes and the same picture cut on the even grid are t
     copiedPicture().toKey(),
     copiedPicture({ grid: new CutGrid({ kind: "uniform", fileIndex: 0 }) }).toKey()
   );
+});
+
+test("an output's name follows from its identity and from nothing else", () => {
+  // MANY VIEWERS OF ONE OUTPUT address one name because the name is the
+  // output's. Nobody arranges it, and nothing about the request enters it: two
+  // people opening the same film at different moments and at different places
+  // are handed the same name.
+  assert.equal(copiedPicture().toName(), copiedPicture().toName());
+  assert.notEqual(
+    copiedPicture().toName(),
+    copiedPicture({ video: new VideoOutput({ fileIndex: 1, encode: null }) }).toName(),
+    "and two different outputs are two different names"
+  );
+  // Stated against the key itself, which is the one thing that proves nothing
+  // ELSE got mixed in. Two specs built in one test run agree even if the name
+  // secretly carried the clock, because the clock has not moved between them —
+  // and "however far apart they arrive" is the whole property.
+  assert.equal(
+    copiedPicture().toName(),
+    createHash("sha256").update(copiedPicture().toKey()).digest("hex").slice(0, 16)
+  );
+});
+
+test("a name is safe to carry whole, and the guard that admits it agrees", () => {
+  // The name reaches the filesystem: it is what the produced pieces of this
+  // output are found under. So the shape is asserted here AND where a request
+  // is admitted, and the two must be changed together — they were not, the
+  // first time this name was minted, and every guarded route would have refused
+  // every request while no check said a word.
+  const name = copiedPicture().toName();
+
+  assert.ok(isOutputName(name), "the guard admits what the minting produces");
+  assert.equal(encodeURIComponent(name), name, "and it needs no escaping to be carried whole");
+  // What the guard is FOR.
+  assert.equal(isOutputName("../../etc/passwd"), false);
+  assert.equal(isOutputName("aaaaaaaa1111222"), false, "fifteen is not sixteen");
+  assert.equal(isOutputName("11111111-2222-3333-4444-555555555555"), false, "and the old shape is gone");
 });

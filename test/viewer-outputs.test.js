@@ -33,9 +33,9 @@ import { Output } from "../services/output/Output.js";
 import { fmp4Format } from "../services/segment-formats/fmp4.js";
 import { fakeProcess as fakeEncoder, startRunOn } from "./helpers/encode-run.js";
 
-const BASE_ID = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
-const STEP_ID = "11111111-2222-3333-4444-555555555555";
-const AUDIO_ID = "99999999-8888-7777-6666-555555555555";
+const BASE_ID = "aaaaaaaabbbbcccc";
+const STEP_ID = "1111111122223333";
+const AUDIO_ID = "9999999988887777";
 const VIEWER = "viewer-one";
 const SEGMENT_SECONDS = 4;
 

@@ -33,7 +33,7 @@ import { fmp4Format } from "../services/segment-formats/fmp4.js";
 const SEGMENT_SECONDS = 4;
 const RUN_STARTS_AT = 373;
 const BEHIND_INDEX = 371;
-const SESSION_ID = "22222222-3333-4444-5555-666666666666";
+const SESSION_ID = "2222222233334444";
 
 /**
  * A live session whose run begins at #373 and whose directory is empty, so any

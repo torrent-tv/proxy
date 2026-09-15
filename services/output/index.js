@@ -1,1 +1,1 @@
-export { OutputSpec, VideoOutput, AudioOutput, CutGrid } from "./OutputSpec.js";
+export { OutputSpec, VideoOutput, AudioOutput, CutGrid, isOutputName } from "./OutputSpec.js";

@@ -16,7 +16,7 @@ import path from "node:path";
 import { HlsSessionManager } from "../services/hls-session-manager.js";
 import { Viewer, viewerOf, viewersOf } from "../services/viewer/Viewer.js";
 
-const SESSION_ID = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
+const SESSION_ID = "aaaaaaaabbbbcccc";
 
 test("presence and position are two facts, and presence does not wait for a request", () => {
   const now = 1_000_000;

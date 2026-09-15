@@ -1,3 +1,5 @@
+import { createHash } from "node:crypto";
+
 /**
  * @file What a session PRODUCES, stated once and used as its identity.
  *
@@ -199,4 +201,53 @@ export class OutputSpec {
     }
     return parts.join(":");
   }
+
+  /**
+   * The name anybody outside this layer addresses the output by.
+   *
+   * A function of the identity above and of nothing else, so two requests that
+   * would produce the same bytes get the same name however far apart they
+   * arrive, and MANY VIEWERS OF ONE OUTPUT address one name by construction
+   * rather than because somebody arranged it.
+   *
+   * It used to be a fresh `randomUUID()` minted per session. That was a second
+   * name for a thing that already had one — a session is found by `toKey()`, so
+   * there is exactly one per output — and it said nothing the key did not. What
+   * it did do was hide the output's identity from everything outside: two lives
+   * of one output looked like two unrelated things, and no log could be
+   * followed across a restart.
+   *
+   * SHORT AND OPAQUE, so that whoever carries it can carry it whole: the key
+   * itself is a sentence with punctuation in it, and every carrier would have
+   * to agree on how to escape that. Sixteen characters of SHA-256 is about one
+   * chance in ten thousand of two outputs colliding after four billion of them,
+   * which is far beyond what one proxy produces.
+   *
+   * Nothing outside takes it apart, so its shape is ours: it is compared whole,
+   * and shortened only for a log line.
+   *
+   * @returns {string}
+   */
+  toName() {
+    return createHash("sha256").update(this.toKey()).digest("hex").slice(0, 16);
+  }
+}
+
+/**
+ * Whether a string is a name this proxy minted.
+ *
+ * Here, beside the minting, because it is the same fact read backwards, and a
+ * fact stated in two places is one that can disagree with itself. It did, the
+ * day the name stopped being a uuid: the shape changed here while the guard
+ * elsewhere still demanded 36 characters of hex and dashes, and every route
+ * behind that guard would have refused every request.
+ *
+ * It is a guard and not only a test of form: a name reaching the filesystem
+ * must not be able to carry a `/` or a `.`.
+ *
+ * @param {unknown} value
+ * @returns {boolean}
+ */
+export function isOutputName(value) {
+  return typeof value === "string" && /^[a-f0-9]{16}$/.test(value);
 }

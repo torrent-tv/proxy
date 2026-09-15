@@ -41,7 +41,7 @@ function recordingReply() {
 }
 
 const request = (fileName) => ({
-  params: { sessionId: "11111111-2222-3333-4444-555555555555", fileName },
+  params: { sessionId: "1111111122223333", fileName },
   raw: { on() {}, off() {} }
 });
 

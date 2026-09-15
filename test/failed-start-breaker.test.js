@@ -33,7 +33,7 @@ import { HlsSessionManager } from "../services/hls-session-manager.js";
 import { SourceFile } from "../services/source/SourceFile.js";
 import { ENCODE_EXIT } from "../services/encode/encode-exit.js";
 
-const SESSION_ID = "cccccccc-0000-4000-8000-000000000001";
+const SESSION_ID = "cccccccc00004000";
 
 /**
  * A session with one run in it, shaped as the manager expects.

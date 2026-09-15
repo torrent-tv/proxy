@@ -19,7 +19,8 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { Readable } from "node:stream";
 
-import { cuesHeldFor, warmSubtitleCues, forgetSubtitles } from "../services/torrent-worker/subtitle-cues.js";
+import { cuesHeldFor, warmSubtitleCues, forgetSubtitles } from "../services/media/SubtitleCues.js";
+import { heldFileOver } from "./helpers/held-file.js";
 
 const ID_EBML = 0x1a45dfa3;
 const ID_SEGMENT = 0x18538067;
@@ -255,7 +256,7 @@ test("a walk of a downloaded file gives up every cue, unframed, with its times",
   const sourceKey = "a".repeat(40);
   forgetSubtitles(sourceKey);
   try {
-    const plain = await cuesHeldFor(torrent, 0, sourceKey, 2);
+    const plain = await cuesHeldFor(heldFileOver(torrent, 0, sourceKey), 2);
     assert.deepEqual(
       plain.cues.map((cue) => [cue.startSeconds, cue.endSeconds, cue.text]),
       [
@@ -264,7 +265,7 @@ test("a walk of a downloaded file gives up every cue, unframed, with its times",
       ]
     );
 
-    const ass = await cuesHeldFor(torrent, 0, sourceKey, 3);
+    const ass = await cuesHeldFor(heldFileOver(torrent, 0, sourceKey), 3);
     assert.deepEqual(
       ass.cues.map((cue) => [cue.startSeconds, cue.endSeconds, cue.text]),
       [
@@ -284,7 +285,7 @@ test("the cursor is the order cues were FOUND, and it never repeats", async () =
   const sourceKey = "b".repeat(40);
   forgetSubtitles(sourceKey);
   try {
-    const held = await cuesHeldFor(torrent, 0, sourceKey, 2);
+    const held = await cuesHeldFor(heldFileOver(torrent, 0, sourceKey), 2);
     const cursors = held.cues.map((cue) => cue.seq);
     assert.deepEqual(cursors, [1, 2], "two cues found, in the order they were read");
     assert.equal(new Set(cursors).size, cursors.length, "no cue shares a cursor with another");
@@ -300,7 +301,7 @@ test("a cluster whose bytes are not downloaded is left for next time", async () 
   const sourceKey = "c".repeat(40);
   forgetSubtitles(sourceKey);
   try {
-    const held = await cuesHeldFor(torrent, 0, sourceKey, 2);
+    const held = await cuesHeldFor(heldFileOver(torrent, 0, sourceKey), 2);
     assert.deepEqual(
       held.cues.map((cue) => cue.text),
       ["First English line"],
@@ -319,10 +320,10 @@ test("one walk fills every track, and a second call reads no cluster again", asy
   const sourceKey = "d".repeat(40);
   forgetSubtitles(sourceKey);
   try {
-    await cuesHeldFor(torrent, 0, sourceKey, 2);
+    await cuesHeldFor(heldFileOver(torrent, 0, sourceKey), 2);
     const clusterReads = reads.filter((range) => clusterAt.includes(range.start)).length;
 
-    const other = await cuesHeldFor(torrent, 0, sourceKey, 3);
+    const other = await cuesHeldFor(heldFileOver(torrent, 0, sourceKey), 3);
     assert.equal(other.cues.length, 2, "the other track was filled by the same walk");
     assert.equal(
       reads.filter((range) => clusterAt.includes(range.start)).length,
@@ -340,14 +341,14 @@ test("the warm pass reports what is new, by the number the browser knows", async
   const sourceKey = "e".repeat(40);
   forgetSubtitles(sourceKey);
   try {
-    const first = await warmSubtitleCues(torrent, 0, sourceKey);
+    const first = await warmSubtitleCues(heldFileOver(torrent, 0, sourceKey));
     assert.deepEqual(
       first.map((entry) => [entry.trackIndex, entry.cues.length, entry.language]).sort(),
       [[0, 2, "eng"], [1, 2, "rus"]].sort(),
       "both text tracks gained two cues, numbered as ffmpeg numbers them"
     );
 
-    const again = await warmSubtitleCues(torrent, 0, sourceKey);
+    const again = await warmSubtitleCues(heldFileOver(torrent, 0, sourceKey));
     assert.deepEqual(again, [], "nothing is new the second time round");
   } finally {
     forgetSubtitles(sourceKey);
@@ -360,7 +361,7 @@ test("a torrent that cannot say which pieces it holds is refused, not answered e
   const sourceKey = "f".repeat(40);
   forgetSubtitles(sourceKey);
   try {
-    const held = await cuesHeldFor({ ...torrent, bitfield: null }, 0, sourceKey, 2);
+    const held = await cuesHeldFor({ ...heldFileOver(torrent, 0, sourceKey), heldRanges: null }, 2);
     assert.deepEqual(held.cues, []);
     assert.equal(held.track, null, "the answer says nothing was read, not that there is nothing");
   } finally {

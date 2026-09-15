@@ -148,62 +148,8 @@ export class WorkerTorrentPool {
     return answer?.started === true;
   }
 
-  /**
-   * The text subtitle tracks a file carries, read from its own header.
-   *
-   * @param {object} torrent
-   * @param {number} fileIndex
-   * @returns {Promise<object[]>}
-   */
-  async getSubtitleTracks(torrent, fileIndex) {
-    const sourceKey = torrent?.sourceKey;
-    if (!sourceKey) {
-      return [];
-    }
-    const answer = await this.#client.getSubtitleTracks({ sourceKey, fileIndex });
-    return Array.isArray(answer?.tracks) ? answer.tracks : [];
-  }
 
-  /**
-   * What the container itself declares about its subtitle tracks, in its own
-   * order and including the picture-based ones — for lining up against
-   * ffmpeg's own numbering.
-   *
-   * @param {object} torrent
-   * @param {number} fileIndex
-   * @returns {Promise<object[]>}
-   */
-  async getDeclaredSubtitleTracks(torrent, fileIndex) {
-    const sourceKey = torrent?.sourceKey;
-    if (!sourceKey) {
-      return [];
-    }
-    const answer = await this.#client.getSubtitleTracks({ sourceKey, fileIndex });
-    return Array.isArray(answer?.declared) ? answer.declared : [];
-  }
 
-  /**
-   * Every track one file declares, read from its own header by the container
-   * layer.
-   *
-   * The audio menu is built from ffmpeg's `-i` banner, which carries neither
-   * `FlagOriginal`, `FlagCommentary`, `FlagVisualImpaired`, `FlagEnabled` nor
-   * `LanguageBCP47` — so without this a director's commentary and the film
-   * itself are indistinguishable in it. Also how a soundtrack shipped as its own
-   * file is read: a `.mka` is Matroska and the same reader serves it.
-   *
-   * @param {object} torrent
-   * @param {number} fileIndex
-   * @returns {Promise<object[]>}
-   */
-  async getContainerTracks(torrent, fileIndex) {
-    const sourceKey = torrent?.sourceKey;
-    if (!sourceKey) {
-      return [];
-    }
-    const answer = await this.#client.getContainerTracks({ sourceKey, fileIndex });
-    return Array.isArray(answer?.tracks) ? answer.tracks : [];
-  }
 
   /**
    * Start fetching the region a viewer is about to resume at. Named in seconds
@@ -214,99 +160,19 @@ export class WorkerTorrentPool {
    * @param {number} positionSeconds
    * @returns {Promise<boolean>}
    */
-  async warmResumePosition(torrent, fileIndex, positionSeconds) {
+  async warmResumePosition(torrent, fileIndex, positionSeconds, durationSeconds) {
     const sourceKey = torrent?.sourceKey;
     if (!sourceKey) {
       return false;
     }
-    const answer = await this.#client.warmResumePosition({ sourceKey, fileIndex, positionSeconds });
+    const answer = await this.#client.warmResumePosition({ sourceKey, fileIndex, positionSeconds, durationSeconds });
     return answer?.started === true;
   }
 
-  /**
-   * What one file declares about itself: format, duration, and where its own
-   * timeline begins.
-   *
-   * @param {object} torrent
-   * @param {number} fileIndex
-   * @returns {Promise<import("../container/Container.js").ContainerMediaInfo | null>}
-   */
-  async getContainerMediaInfo(torrent, fileIndex) {
-    const sourceKey = torrent?.sourceKey;
-    if (!sourceKey) {
-      return null;
-    }
-    const answer = await this.#client.getContainerMediaInfo({ sourceKey, fileIndex });
-    return answer?.info ?? null;
-  }
 
-  /**
-   * Where one file's keyframes are, from the container's own table. Null when
-   * this file has no readable index — which is a final answer about the file,
-   * and the reason a copy of it has to be re-encoded instead.
-   *
-   * @param {object} torrent
-   * @param {number} fileIndex
-   * @returns {Promise<{ times: number[], tolerance: number } | null>}
-   */
-  async getContainerKeyframes(torrent, fileIndex) {
-    const sourceKey = torrent?.sourceKey;
-    if (!sourceKey) {
-      return null;
-    }
-    const answer = await this.#client.getContainerKeyframes({ sourceKey, fileIndex });
-    return answer?.index ?? null;
-  }
 
-  /**
-   * The audio tracks one file declares, in the order ffmpeg numbers them
-   * `0:a:N`.
-   *
-   * @param {object} torrent
-   * @param {number} fileIndex
-   * @returns {Promise<object[]>}
-   */
-  async getDeclaredAudioTracks(torrent, fileIndex) {
-    const tracks = await this.getContainerTracks(torrent, fileIndex);
-    return tracks
-      .filter((track) => track?.type === "audio")
-      .sort((left, right) => (left.declaredIndex ?? 0) - (right.declaredIndex ?? 0));
-  }
 
-  /**
-   * The video track one file declares, or null where it declares none.
-   *
-   * One, because ffmpeg's `0:v:0` is what everything downstream is built on and
-   * a second video stream is a cover image far more often than a second film.
-   *
-   * @param {object} torrent
-   * @param {number} fileIndex
-   * @returns {Promise<object | null>}
-   */
-  async getDeclaredVideoTrack(torrent, fileIndex) {
-    const tracks = await this.getContainerTracks(torrent, fileIndex);
-    return (
-      tracks
-        .filter((track) => track?.type === "video")
-        .sort((left, right) => (left.declaredIndex ?? 0) - (right.declaredIndex ?? 0))[0] ?? null
-    );
-  }
 
-  /**
-   * The cues of one subtitle track that the downloaded clusters already carry.
-   *
-   * @param {object} torrent
-   * @param {number} fileIndex
-   * @param {number} trackNumber
-   * @returns {Promise<object | null>}
-   */
-  async getSubtitleCues(torrent, fileIndex, trackNumber) {
-    const sourceKey = torrent?.sourceKey;
-    if (!sourceKey) {
-      return null;
-    }
-    return this.#client.getSubtitleCues({ sourceKey, fileIndex, trackNumber });
-  }
 
   /**
    * Reorder piece selection around a read position.
@@ -368,6 +234,88 @@ export class WorkerTorrentPool {
    * @param {{ headBytes?: number, tailBytes?: number, timeoutMs?: number }} [options]
    * @returns {Promise<unknown>}
    */
+  /**
+   * One byte range of one file, as bytes, on THIS thread.
+   *
+   * What the media layer is built from: a container takes `readRange(start,
+   * end)` and nothing else, so with this it can be parsed here instead of in
+   * the torrent thread. It used to be parsed there for one stated reason —
+   * "the main thread cannot open a read stream on one of its files", which is
+   * true of WebTorrent's own API and not of the bytes: the pieces live in
+   * shared memory and this read is the same one that serves every segment,
+   * so it waits for what has not arrived and steers the swarm toward it.
+   *
+   * **It COPIES, deliberately.** The zero-copy path — positions across the
+   * channel, the piece pinned until the far side says it is done — exists for
+   * 10 MB segments on the critical path, where the copy was measured at
+   * 18.84 ms. A container header is 64-256 KB and read once per file, about
+   * 0.12 ms, against a parse of 0.8 s and a swarm wait of up to a minute. The
+   * pinning protocol would buy nothing and is not on this path.
+   *
+   * @param {object} torrent
+   * @param {number} fileIndex
+   * @param {number} start - First byte, inclusive.
+   * @param {number} end - Last byte, inclusive.
+   * @returns {Promise<Buffer | null>} Null when the read failed or was cut
+   *   short, which a container reads as "this file does not say".
+   */
+  /**
+   * The byte ranges of one file the torrent holds WHOLE.
+   *
+   * What the subtitle walk decides from: it may read only what is already
+   * downloaded, and a list taken once per pass replaces a question per cluster.
+   *
+   * @param {object} torrent
+   * @param {number} fileIndex
+   * @returns {Promise<Array<[number, number]>>}
+   */
+  async heldRangesOf(torrent, fileIndex) {
+    const sourceKey = torrent?.sourceKey;
+    return sourceKey ? this.#client.heldRanges({ sourceKey, fileIndex }) : [];
+  }
+
+  /**
+   * Bytes of a range the torrent already holds, never fetched.
+   *
+   * Not `readRangeOf`: that one declares demand and steers the swarm, which is
+   * right for a viewer waiting on a segment and wrong for a walk that must pull
+   * nothing the viewer is not waiting for.
+   *
+   * @param {object} torrent
+   * @param {number} fileIndex
+   * @param {number} start
+   * @param {number} end - Inclusive.
+   * @returns {Promise<Buffer | null>}
+   */
+  async readHeldOf(torrent, fileIndex, start, end) {
+    const sourceKey = torrent?.sourceKey;
+    return sourceKey ? this.#client.readHeld({ sourceKey, fileIndex, start, end }) : null;
+  }
+
+  async readRangeOf(torrent, fileIndex, start, end) {
+    const sourceKey = torrent?.sourceKey;
+    if (!sourceKey || !(end >= start) || !(start >= 0)) {
+      return null;
+    }
+    const stream = this.#client.createReadStream({ sourceKey, fileIndex, start, end });
+    const chunks = [];
+    let total = 0;
+    try {
+      const reader = stream.getReader();
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) {
+          break;
+        }
+        chunks.push(Buffer.from(value));
+        total += value.length;
+      }
+    } catch {
+      return null;
+    }
+    return total > 0 ? Buffer.concat(chunks, total) : null;
+  }
+
   async prefetchFileEdges(torrent, fileIndex, options = {}) {
     const sourceKey = torrent?.sourceKey;
     if (!sourceKey) {

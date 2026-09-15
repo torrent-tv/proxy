@@ -14,7 +14,7 @@ import { EventEmitter } from "node:events";
 import { EncodeRun } from "../services/encode/EncodeRun.js";
 import { ENCODE_EXIT } from "../services/encode/encode-exit.js";
 import { SoftwareEncoder } from "../services/encode/SoftwareEncoder.js";
-import { EncodeOrchestrator } from "../services/orchestrators/EncodeOrchestrator.js";
+import { EncodeOrchestrator } from "../services/encode/EncodeOrchestrator.js";
 import { penaltiesFrom } from "../services/encode/contention.js";
 
 // WHAT A SECOND ENCODER COSTS THE FIRST — measured, never a formula.

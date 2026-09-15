@@ -25,16 +25,12 @@ import "./install-webrtc-shim.js";
 import { parentPort, workerData } from "node:worker_threads";
 import { createSendStream } from "./channel.js";
 import { readFragments, supplyFiguresFor } from "./piece-reader.js";
-import { cuesHeldFor, declaredSubtitleTracksOf, subtitleTracksOf, warmSubtitleCues } from "./subtitle-cues.js";
 import {
-  CONTAINER_HEAD_BYTES,
-  containerKeyframesOf,
-  containerMediaInfoOf,
-  containerTracksOf,
   warmResumePosition
-} from "./container-tracks.js";
+} from "./resume-warm.js";
 import { fillFileInBackground } from "./background-fill.js";
 import { demandFor } from "../download/registry.js";
+import { heldRangesOf, readHeldBytes } from "./held-bytes.js";
 import { CompletedFiles, completedFilesRoot } from "../files/CompletedFiles.js";
 import { pieceFromWholeFiles, pieceIsInWholeFiles } from "../files/piece-from-whole-file.js";
 import { Command, Event } from "./protocol.js";
@@ -405,70 +401,11 @@ async function runCommand(command, params, id) {
       return { downloaded, uploaded };
     }
 
-    case Command.SUBTITLE_TRACKS: {
-      const torrent = await requireTorrent(params.sourceKey);
-      return {
-        tracks: await subtitleTracksOf(torrent, params.fileIndex, params.sourceKey),
-        declared: await declaredSubtitleTracksOf(torrent, params.fileIndex, params.sourceKey)
-      };
-    }
 
     case Command.FILL_FILE: {
       const torrent = await requireTorrent(params.sourceKey);
       return {
         started: fillFileInBackground(torrent, params.fileIndex, params.sourceKey)
-      };
-    }
-
-    case Command.CONTAINER_TRACKS: {
-      const torrent = await requireTorrent(params.sourceKey);
-      return {
-        tracks: await containerTracksOf(torrent, params.fileIndex, params.sourceKey, {
-          // The header of a file nobody is playing has usually not arrived at
-          // all — a sidecar soundtrack is asked about before anyone has chosen
-          // it. Its head is a few hundred kilobytes, and without them there is
-          // nothing to read.
-          prefetchEdges: () =>
-            pool.prefetchFileEdges(torrent, params.fileIndex, {
-              headBytes: CONTAINER_HEAD_BYTES,
-              tailBytes: 0,
-              timeoutMs: 60_000
-            })
-        })
-      };
-    }
-
-    case Command.CONTAINER_MEDIA_INFO: {
-      const torrent = await requireTorrent(params.sourceKey);
-      return {
-        info: await containerMediaInfoOf(torrent, params.fileIndex, params.sourceKey, {
-          // Same reason as the track table above: the file this is asked about
-          // is often one nobody has played yet, so its head has to be fetched
-          // before there is anything to read.
-          prefetchEdges: () =>
-            pool.prefetchFileEdges(torrent, params.fileIndex, {
-              headBytes: CONTAINER_HEAD_BYTES,
-              tailBytes: 0,
-              timeoutMs: 60_000
-            })
-        })
-      };
-    }
-
-    case Command.CONTAINER_KEYFRAMES: {
-      const torrent = await requireTorrent(params.sourceKey);
-      return {
-        index: await containerKeyframesOf(torrent, params.fileIndex, params.sourceKey, {
-          // Both edges this time. A Matroska file's Cues sit at the END, behind
-          // a SeekHead in the head, so a read that has neither waits for the
-          // swarm twice over.
-          prefetchEdges: () =>
-            pool.prefetchFileEdges(torrent, params.fileIndex, {
-              headBytes: CONTAINER_HEAD_BYTES,
-              tailBytes: CONTAINER_HEAD_BYTES,
-              timeoutMs: 60_000
-            })
-        })
       };
     }
 
@@ -481,12 +418,9 @@ async function runCommand(command, params, id) {
           params.sourceKey,
           params.positionSeconds,
           {
-            prefetchEdges: () =>
-              pool.prefetchFileEdges(torrent, params.fileIndex, {
-                headBytes: CONTAINER_HEAD_BYTES,
-                tailBytes: 0,
-                timeoutMs: 60_000
-              }),
+            // Told by the main thread, which is where what a file states about
+            // itself is read.
+            durationSeconds: params.durationSeconds,
             fetchRegion: (start, bytes) =>
               pool.prefetchFileRegion(torrent, params.fileIndex, start, bytes)
           }
@@ -494,18 +428,6 @@ async function runCommand(command, params, id) {
       };
     }
 
-    case Command.SUBTITLE_CUES: {
-      const torrent = await requireTorrent(params.sourceKey);
-      const held = await cuesHeldFor(torrent, params.fileIndex, params.sourceKey, params.trackNumber);
-      return {
-        cues: held.cues,
-        coveredClusters: held.coveredClusters,
-        indexedClusters: held.indexedClusters,
-        codecId: held.track?.codecId ?? "",
-        codecPrivate: held.track?.codecPrivate ?? "",
-        language: held.track?.language ?? ""
-      };
-    }
 
     case Command.FILE_STATS: {
       const torrent = await requireTorrent(params.sourceKey);
@@ -574,6 +496,17 @@ async function runCommand(command, params, id) {
       // wake it here — otherwise it waits forever with a piece pinned.
       settleFragment(params.readId);
       return true;
+    }
+
+    case Command.HELD_RANGES: {
+      const torrent = await requireTorrent(params.sourceKey);
+      return { ranges: heldRangesOf(torrent, params.fileIndex) };
+    }
+
+    case Command.READ_HELD: {
+      const torrent = await requireTorrent(params.sourceKey);
+      const bytes = await readHeldBytes(torrent, params.fileIndex, params.start, params.end, logger);
+      return { bytes };
     }
 
     case Command.SPILL_ALLOWANCE: {
@@ -848,68 +781,30 @@ function describePieceBuffers() {
 }
 
 /**
- * Walk subtitle cues for every actively-read file of one torrent, and PUSH
- * whatever came out new to the main thread — which is what makes a browser's
- * copy current without it having asked.
+ * Say that pieces of the actively-read files of one torrent have arrived.
+ *
+ * It used to WALK them — reading each file's new subtitle clusters and pushing
+ * the cues it found. That put the cue reading, and with it a container parse,
+ * in the thread that owns the swarm; the walk is on the main thread now and
+ * this announces the one fact only this thread can know.
+ *
+ * Which files: the ones anything is stated for — a viewer's own picture and
+ * soundtrack through the priority map, and the ends of a file that is open. It
+ * replaced a count of readers, which said the same thing by keeping a second
+ * copy of it.
  *
  * @param {string} sourceKey
  * @param {object} torrent
  * @returns {void}
  */
-function warmActiveFiles(sourceKey, torrent) {
-  // The files anything is stated for — a viewer's own picture and soundtrack
-  // through the priority map, and the ends of a file that is open. It replaces
-  // a count of readers, which said the same thing by keeping a second copy of
-  // it.
-  for (const fileIndex of demandFor(torrent).register.files()) {
-    const key = `${sourceKey}:${fileIndex}`;
-    // A trigger that arrives while the previous pass is still walking is
-    // dropped, not queued. `verified` fires per piece, so on a fast download
-    // these arrive many times a second; the walk is serialized per file anyway,
-    // and a queue of identical passes would only postpone the one that has
-    // something new to find.
-    if (warmupInFlight.has(key)) {
-      continue;
-    }
-    warmupInFlight.add(key);
-    warmSubtitleCues(torrent, fileIndex, sourceKey)
-      .then((fresh) => {
-        for (const entry of fresh) {
-          const span = entry.spanStartSeconds === null
-            ? "empty"
-            : `${entry.spanStartSeconds.toFixed(1)}-${entry.spanEndSeconds.toFixed(1)}s`;
-          log(
-            `subtitle push ${sourceKey.slice(0, 8)}:${fileIndex} track ${entry.trackIndex}: ` +
-            `${entry.cues.length} new cue(s) covering ${span}, ` +
-            `clusters walked ${entry.walkedClusters}/${entry.indexedClusters}, cursor ${entry.cursor}, ` +
-            "posting to main thread"
-          );
-          parentPort.postMessage({
-            type: Event.SUBTITLE_CUES_READY,
-            sourceKey,
-            fileIndex,
-            trackIndex: entry.trackIndex,
-            cues: entry.cues,
-            language: entry.language,
-            cursor: entry.cursor
-          });
-        }
-      })
-      .catch((error) => {
-        log(`subtitle warmup ${sourceKey}:${fileIndex} failed: ${error instanceof Error ? error.message : error}`);
-      })
-      .finally(() => {
-        warmupInFlight.delete(key);
-      });
+function announceArrivals(sourceKey, torrent) {
+  const fileIndexes = [...demandFor(torrent).register.files()];
+  if (fileIndexes.length === 0) {
+    return;
   }
+  parentPort.postMessage({ type: Event.PIECES_ARRIVED, sourceKey, fileIndexes });
 }
 
-/**
- * Files whose warmup pass has not finished yet, by `sourceKey:fileIndex`.
- *
- * @type {Set<string>}
- */
-const warmupInFlight = new Set();
 
 /**
  * Torrents already wired to warm their subtitle cues the moment a piece
@@ -917,7 +812,7 @@ const warmupInFlight = new Set();
  *
  * @type {WeakSet<object>}
  */
-const subtitleWarmupWired = new WeakSet();
+const arrivalsWired = new WeakSet();
 
 /**
  * A piece becoming readable is the actual event a cue can be pulled from —
@@ -932,29 +827,28 @@ const subtitleWarmupWired = new WeakSet();
  * @param {object} torrent
  * @returns {void}
  */
-function ensureSubtitleWarmupWired(sourceKey, torrent) {
-  if (subtitleWarmupWired.has(torrent)) {
+function ensureArrivalsWired(sourceKey, torrent) {
+  if (arrivalsWired.has(torrent)) {
     return;
   }
-  subtitleWarmupWired.add(torrent);
-  torrent.on("verified", () => warmActiveFiles(sourceKey, torrent));
+  arrivalsWired.add(torrent);
+  torrent.on("verified", () => announceArrivals(sourceKey, torrent));
 }
 
 /**
- * How often an actively-read file's subtitle cues are walked ahead of being
- * asked for, as a fallback beside the per-piece `verified` listener above —
- * catches a listener attached after pieces already verified, and anything the
- * event path might otherwise miss. Cheap once caught up (`warmSubtitleCues`
- * skips clusters it has already read).
+ * How often arrivals are announced regardless, as a fallback beside the
+ * per-piece `verified` listener above — it catches a listener attached after
+ * pieces had already verified, and anything the event path might otherwise
+ * miss. Cheap: the walk it wakes skips clusters it has already read.
  */
-const SUBTITLE_WARMUP_INTERVAL_MS = 3_000;
+const ARRIVAL_ANNOUNCE_INTERVAL_MS = 3_000;
 
 setInterval(() => {
   for (const [sourceKey, torrent] of pool.torrents) {
-    ensureSubtitleWarmupWired(sourceKey, torrent);
-    warmActiveFiles(sourceKey, torrent);
+    ensureArrivalsWired(sourceKey, torrent);
+    announceArrivals(sourceKey, torrent);
   }
-}, SUBTITLE_WARMUP_INTERVAL_MS).unref();
+}, ARRIVAL_ANNOUNCE_INTERVAL_MS).unref();
 
 /**
  * Files this proxy has downloaded whole. One directory, two readers of it: this

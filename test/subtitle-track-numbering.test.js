@@ -20,8 +20,9 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { Readable } from "node:stream";
-import { MatroskaContainer } from "../services/container/MatroskaContainer.js";
-import { cuesHeldFor, forgetSubtitles } from "../services/torrent-worker/subtitle-cues.js";
+import { MatroskaContainer } from "../services/media/container/MatroskaContainer.js";
+import { cuesHeldFor, forgetSubtitles } from "../services/media/SubtitleCues.js";
+import { heldFileOver } from "./helpers/held-file.js";
 
 const ID_EBML = 0x1a45dfa3;
 const ID_SEGMENT = 0x18538067;
@@ -263,8 +264,8 @@ test("two walks of one file at the same time read each cluster once", async () =
   // Both text tracks at once, which is what the warmup does on every verified
   // piece and every three seconds.
   const [first, second] = await Promise.all([
-    cuesHeldFor(torrent, 0, sourceKey, 3),
-    cuesHeldFor(torrent, 0, sourceKey, 4)
+    cuesHeldFor(heldFileOver(torrent, 0, sourceKey), 3),
+    cuesHeldFor(heldFileOver(torrent, 0, sourceKey), 4)
   ]);
 
   assert.equal(first.coveredClusters, 1, "the cluster the table names was walked");

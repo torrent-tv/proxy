@@ -411,29 +411,24 @@ export class Container {
    * Keyframe times for the video track, ascending seconds. Null when index
    * absent (MPEG-TS, fragmented MP4, truncated).
    *
-   * Read ONCE per file, like the track table and the media info beside it: this
-   * is a property of immutable bytes, so a second reading could only agree —
-   * and the reading is not cheap, since the table lives at the end of the file
-   * and comes off a torrent. The wait belongs here too: two sessions created in
-   * the same moment join one read instead of making two, which is exactly what
-   * two viewers opening one film do.
+   * **It reads, and does not remember.** It used to keep the answer, and that
+   * made the table the one fact in this proxy stored in two places: here, and
+   * in the file's `KeyframeTable` on the main thread. Traced 2026-09-15, this
+   * copy had no reader: nothing ever asked a container twice for its keyframes.
+   * The parse itself has since moved to the thread the sessions are on, so
+   * there is no longer a second thread for a second copy to sit in either.
    *
-   * The subclass says how its format states it; this says how often it is
-   * asked.
+   * The remembering lives where the fact is USED, which is also the only place
+   * that can do the rest of the job: bound how long a viewer waits for it
+   * while letting the read go on, join a second asker to a read already
+   * running, and keep the answer reachable by a session created before it
+   * landed. A container cannot do any of those — it does not know there is a
+   * viewer — so a copy here was never the whole answer, only a second one.
    *
    * @returns {Promise<{times:number[],tolerance:number}|null>}
    */
   async readKeyframeIndex() {
-    if (this.keyframeIndexRead) {
-      return this.keyframeIndexRead;
-    }
-    this.keyframeIndexRead = Promise.resolve(this.parseKeyframeIndex()).catch((error) => {
-      // A failed read is not remembered as an answer: the bytes it needed may
-      // simply not have arrived yet.
-      this.keyframeIndexRead = null;
-      throw error;
-    });
-    return this.keyframeIndexRead;
+    return this.parseKeyframeIndex();
   }
 
   /**

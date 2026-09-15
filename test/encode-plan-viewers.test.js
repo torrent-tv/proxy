@@ -29,7 +29,7 @@ import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
 import { EncodeRun } from "../services/encode/EncodeRun.js";
 import { SoftwareEncoder } from "../services/encode/SoftwareEncoder.js";
-import { EncodeOrchestrator } from "../services/orchestrators/EncodeOrchestrator.js";
+import { EncodeOrchestrator } from "../services/encode/EncodeOrchestrator.js";
 import { mapForViewer, mergeMaps, runsOf } from "../services/priority/PriorityMap.js";
 import { penaltiesFrom } from "../services/encode/contention.js";
 

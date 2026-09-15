@@ -11,7 +11,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { parseFfmpegStreamCounts } from "../services/ffmpeg-banner.js";
+import { parseFfmpegStreamCounts } from "../services/media/ffmpeg-banner.js";
 
 const FIELD_BANNER = `
 Input #0, matroska,webm, from 'http://127.0.0.1:9090/stream?sourceKey=b3f08efc':

@@ -15,14 +15,14 @@
  */
 
 import test from "node:test";
-import { Container } from "../services/container/Container.js";
-import { AudioTrack } from "../services/tracks/AudioTrack.js";
+import { Container } from "../services/media/container/Container.js";
+import { AudioTrack } from "../services/media/tracks/AudioTrack.js";
 import assert from "node:assert/strict";
 import {
   audioRenditionName,
   buildAudioInventory,
   resolveAudioIndex
-} from "../services/audio-inventory.js";
+} from "../services/media/audio-inventory.js";
 
 test("a pair agreeing on language is accepted", () => {
   assert.equal(Container.pairingHolds({ language: "jpn" }, { language: "jpn" }), true);

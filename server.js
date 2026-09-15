@@ -41,7 +41,18 @@ import { handleTranscodeAudioWarmGet } from "./routes/transcode/audio-warm/get.j
 import { createSourceRegistry } from "./store/source-registry.js";
 import { WorkerTorrentPool } from "./services/torrent-worker/pool-adapter.js";
 import { HlsSessionManager } from "./services/hls-session-manager.js";
-import { createPlaybackPlanner } from "./services/playback-planner.js";
+import { createPlaybackPlanner } from "./services/media/playback-planner.js";
+import { KeyframeTables } from "./services/media/KeyframeTables.js";
+import { contentsOf } from "./services/torrent/Contents.js";
+import { SubtitleOrchestrator } from "./services/media/SubtitleOrchestrator.js";
+import { containerOrchestrator, CONTAINER_HEAD_BYTES } from "./services/media/ContainerOrchestrator.js";
+import {
+  warmSubtitleCues,
+  cuesHeldFor,
+  subtitleTracksOf,
+  declaredSubtitleTracksOf,
+  forgetSubtitles
+} from "./services/media/SubtitleCues.js";
 import { detectVideoEncoder, benchmarkSoftwarePresets, benchmarkDecodeCost, benchmarkContention, benchmarkCopySpeed, detectTonemapSupport } from "./services/hwaccel.js";
 import { measureStartAndStop } from "./services/encode/start-stop-cost.js";
 import { logger } from "./utils/logger.js";
@@ -124,7 +135,23 @@ export async function startProxyServer({
   // idled. Serving a segment shared that thread, so reading an already-finished
   // 10 MB file took 12-23 s against 125 ms to hand it to the channel. The
   // adapter keeps TorrentPool's interface, so nothing downstream changed.
-  const torrentPool = new WorkerTorrentPool({ memoryBytes, stateDir, onSubtitleCues });
+  const torrentPool = new WorkerTorrentPool({
+    memoryBytes,
+    stateDir,
+    // Pieces arriving is ANNOUNCED by the thread that owns the swarm; what is
+    // done about it — walking a file's new subtitle clusters and pushing what
+    // came out — happens here, because that is a reading of what the file says
+    // about itself. The walk used to run in that thread, which is what put a
+    // container parse there.
+    // The ONE forward reference here, and it is safe by construction: this fires
+    // only once the worker thread is up and a piece has verified, which is long
+    // after the declarations below have run.
+    onPiecesArrived: ({ sourceKey, fileIndexes }) => {
+      for (const fileIndex of fileIndexes) {
+        void pushFreshCues(sourceKey, fileIndex);
+      }
+    }
+  });
   const selectedPort = await getPort({
     port: buildPortCandidates(port)
   });
@@ -186,8 +213,178 @@ export async function startProxyServer({
   const tonemapSupported = transcodeAudio
     ? await detectTonemapSupport({ ffmpegBin, logger })
     : false;
+  // Where every file's keyframe table lives, and the only thing that reads one.
+  // Built here rather than inside the session manager because it is not a fact
+  // about a session: the playback planner warms it while a file is being opened
+  // and no session exists yet, and a session created later is handed the very
+  // object that warm read filled in.
+  // Subtitles are two layers put together, and this is the one place that knows
+  // about both: what a file STATES about its subtitle tracks and how a cue is
+  // written out is the media layer's, while which clusters may be read, where
+  // the cursor stands and what one walk at a time means are the TORRENT's own
+  // rules. The media layer used to import the second directly.
+  /**
+   * One file of one torrent, reduced to what the subtitle walk may know: a
+   * name, a length, which ranges are downloaded whole, and how to read one of
+   * those without asking the swarm. Piece length, file offsets and the bitfield
+   * stay in the torrent's thread.
+   *
+   * @param {string} sourceKey
+   * @param {number} fileIndex
+   * @param {object} [known] - The torrent handle when the caller already has it.
+   * @returns {Promise<import("./services/media/SubtitleCues.js").HeldFile | null>}
+   */
+  const heldFileFor = async (sourceKey, fileIndex, known = null) => {
+    let torrent = known;
+    if (!torrent) {
+      const record = sourceRegistry.get(sourceKey);
+      if (!record) {
+        return null;
+      }
+      torrent = await torrentPool.getTorrent(record.sourceType, record.source);
+    }
+    const file = torrent?.files?.[fileIndex];
+    if (!file || !(file.length > 0)) {
+      return null;
+    }
+    return {
+      sourceKey,
+      fileIndex,
+      name: String(file.name ?? ""),
+      length: file.length,
+      heldRanges: () => torrentPool.heldRangesOf(torrent, fileIndex),
+      readHeld: (start, end) => torrentPool.readHeldOf(torrent, fileIndex, start, end)
+    };
+  };
+  /** @type {Set<string>} */
+  const walksInFlight = new Set();
+  /**
+   * Walk whatever new cues a file now holds and push them to the viewers.
+   *
+   * @param {string} sourceKey
+   * @param {number} fileIndex
+   * @returns {Promise<void>}
+   */
+  const pushFreshCues = async (sourceKey, fileIndex) => {
+    // A pass that arrives while the previous one is still walking is dropped
+    // rather than queued: `verified` fires per piece, so on a fast download
+    // these arrive many times a second, and a queue of identical passes would
+    // only postpone the one that has something new to find. The walk is
+    // serialized per file inside `SubtitleCues` anyway.
+    const key = `${sourceKey}:${fileIndex}`;
+    if (walksInFlight.has(key)) {
+      return;
+    }
+    walksInFlight.add(key);
+    try {
+      const file = await heldFileFor(sourceKey, fileIndex);
+      if (!file) {
+        return;
+      }
+      for (const entry of await warmSubtitleCues(file)) {
+        const span = entry.spanStartSeconds === null
+          ? "empty"
+          : `${entry.spanStartSeconds.toFixed(1)}-${entry.spanEndSeconds.toFixed(1)}s`;
+        logger.info(
+          `subtitle push ${sourceKey.slice(0, 8)}:${fileIndex} track ${entry.trackIndex}: ` +
+          `${entry.cues.length} new cue(s) covering ${span}, ` +
+          `clusters walked ${entry.walkedClusters}/${entry.indexedClusters}, cursor ${entry.cursor}`
+        );
+        onSubtitleCues?.({ sourceKey, fileIndex, ...entry });
+      }
+    } catch (error) {
+      logger.warn(`subtitle push ${sourceKey.slice(0, 8)}:${fileIndex} failed: ${error?.message ?? error}`);
+    } finally {
+      walksInFlight.delete(key);
+    }
+  };
+  const subtitles = new SubtitleOrchestrator(containerOrchestrator, {
+    warm: async (torrent, fileIndex, sourceKey) => {
+      const file = await heldFileFor(sourceKey, fileIndex, torrent);
+      return file ? warmSubtitleCues(file) : [];
+    },
+    held: async (torrent, fileIndex, sourceKey, trackNumber) => {
+      const file = await heldFileFor(sourceKey, fileIndex, torrent);
+      return file ? cuesHeldFor(file, trackNumber) : null;
+    },
+    tracksOf: async (torrent, fileIndex, sourceKey) => {
+      const file = await heldFileFor(sourceKey, fileIndex, torrent);
+      return file ? subtitleTracksOf(file) : [];
+    },
+    declaredTracksOf: async (torrent, fileIndex, sourceKey) => {
+      const file = await heldFileFor(sourceKey, fileIndex, torrent);
+      return file ? declaredSubtitleTracksOf(file) : [];
+    },
+    forget: forgetSubtitles
+  });
+  // WHAT A FILE STATES ABOUT ITSELF IS READ HERE, ON THIS THREAD.
+  //
+  // The container layer is built from one function — `readRange(start, end)` —
+  // and the bytes behind it live in shared memory, so the parse has no reason
+  // to happen anywhere else. It used to happen in the torrent thread for one
+  // stated reason, that "the main thread cannot open a read stream on one of
+  // its files": true of WebTorrent's own API, and not of the bytes. The price
+  // was three commands, a second `ContainerOrchestrator` in that thread, and
+  // every answer carried back across the channel — which is what made "where is
+  // this fact kept" a question at all.
+  //
+  // The edges are fetched first because the file this is asked about is usually
+  // one nobody has played: a sidecar soundtrack is asked about before anyone
+  // has chosen it, and a Matroska file's Cues sit at the END behind a SeekHead
+  // in the head, so a read that has neither waits for the swarm twice over.
+  const containerOver = async ({ sourceKey, fileIndex, tailBytes = 0 }) => {
+    const record = sourceRegistry.get(sourceKey);
+    if (!record) {
+      return null;
+    }
+    const torrent = await torrentPool.getTorrent(record.sourceType, record.source);
+    const file = torrent?.files?.[fileIndex];
+    if (!file || !(file.length > 0)) {
+      return null;
+    }
+    try {
+      await torrentPool.prefetchFileEdges(torrent, fileIndex, {
+        headBytes: CONTAINER_HEAD_BYTES,
+        tailBytes,
+        timeoutMs: 60_000
+      });
+    } catch {
+      // A prefetch that failed is not a reason to skip the read: the read
+      // fetches what it needs itself, only more slowly.
+    }
+    return {
+      sourceKey,
+      fileIndex,
+      readRange: (start, end) =>
+        torrentPool.readRangeOf(torrent, fileIndex, start, Math.min(end, file.length - 1)),
+      fileSize: file.length,
+      label: String(file.name ?? "")
+    };
+  };
+  const keyframeTables = new KeyframeTables({
+    // Read by the same container that answers the track table and the media
+    // info, from the same header, and now in the same thread as the session
+    // that is waiting for it.
+    readTable: async ({ sourceKey, fileIndex }) => {
+      // Both edges: the Cues of a Matroska file are at the end.
+      const params = await containerOver({ sourceKey, fileIndex, tailBytes: CONTAINER_HEAD_BYTES });
+      if (!params) {
+        return null;
+      }
+      const index = await containerOrchestrator.getKeyframeIndex(params);
+      return {
+        times: index?.times ?? null,
+        tolerance: index?.tolerance ?? 0,
+        // Which container answered, whether or not it produced a table: the
+        // refusal that follows names it, and a measurement of how often an
+        // index disagrees with its own file cannot be read without it.
+        format: (await containerOrchestrator.getContainer(params))?.formatName ?? "unrecognised"
+      };
+    }
+  });
   const hlsSessionManager = new HlsSessionManager({
     enabled: transcodeAudio,
+    keyframeTables,
     ffmpegBin,
     localBindHost: host,
     localPort: selectedPort,
@@ -285,30 +482,9 @@ export async function startProxyServer({
     // ffmpeg over this proxy's own HTTP to ask the same question of the same
     // bytes, and that read cost 8.1 s of every cold start (field 2026-09-03).
     getContainerMediaInfo: async ({ sourceKey, fileIndex }) => {
-      const record = sourceRegistry.get(sourceKey);
-      if (!record || typeof torrentPool.getContainerMediaInfo !== "function") {
-        return null;
-      }
       try {
-        const torrent = await torrentPool.getTorrent(record.sourceType, record.source);
-        return await torrentPool.getContainerMediaInfo(torrent, fileIndex);
-      } catch {
-        return null;
-      }
-    },
-    // Where the file's keyframes are, read by the same container that answered
-    // the two above. It used to be read by the session itself over this proxy's
-    // own HTTP, once per session — so two viewers opening one film read the
-    // same table twice, and each of them could get a different answer about
-    // whether the picture can be copied at all.
-    getContainerKeyframes: async ({ sourceKey, fileIndex }) => {
-      const record = sourceRegistry.get(sourceKey);
-      if (!record || typeof torrentPool.getContainerKeyframes !== "function") {
-        return null;
-      }
-      try {
-        const torrent = await torrentPool.getTorrent(record.sourceType, record.source);
-        return await torrentPool.getContainerKeyframes(torrent, fileIndex);
+        const params = await containerOver({ sourceKey, fileIndex });
+        return params ? await containerOrchestrator.getMediaInfo(params) : null;
       } catch {
         return null;
       }
@@ -349,7 +525,17 @@ export async function startProxyServer({
     localBaseUrl: hlsSessionManager.localBaseUrl,
     sourceRegistry,
     torrentPool,
-    warmKeyframeIndex: (params) => hlsSessionManager.warmKeyframeIndex(params),
+    sidecarsFromTorrent: (torrent, fileIndex) => contentsOf(torrent).sidecarsOf(fileIndex),
+    // What a file declares about its own tracks, parsed on this thread from the
+    // header the swarm delivered. The planner used to ask the torrent pool for
+    // this, which meant the media layer asking the torrent layer to parse a
+    // container on its behalf, in the other thread, with the answer carried
+    // back over the channel.
+    declaredTracksOf: async ({ sourceKey, fileIndex }) => {
+      const params = await containerOver({ sourceKey, fileIndex });
+      return params ? await containerOrchestrator.getTracks(params) : [];
+    },
+    warmKeyframeIndex: (params) => keyframeTables.warm(params),
     expectedFirstSegmentMs: () => hlsSessionManager.expectedFirstSegmentMs(),
     expectedSessionCreateMs: () => hlsSessionManager.expectedSessionCreateMs(),
     // The quality menu is on screen from the moment a file is opened, so the
@@ -376,7 +562,17 @@ export async function startProxyServer({
     handleApiSourceFilesGet(req, reply, { sourceRegistry, torrentPool })
   );
   app.post("/api/sources/:sourceKey/warm", async (req, reply) =>
-    handleApiSourceWarmPost(req, reply, { sourceRegistry, torrentPool })
+    handleApiSourceWarmPost(req, reply, {
+      sourceRegistry,
+      torrentPool,
+      // How long the file runs, read on this thread from the header. The warm
+      // turns a position in seconds into a byte offset and needs it; it used to
+      // read the container itself, in the torrent thread, to find out.
+      durationOf: async (params) => {
+        const over = await containerOver(params);
+        return over ? (await containerOrchestrator.getMediaInfo(over))?.durationSeconds ?? null : null;
+      }
+    })
   );
   // The browser's own log, kept beside the proxy's. See the route's own file
   // for why it is here and not only on the registry server.
@@ -393,7 +589,8 @@ export async function startProxyServer({
       torrentPool,
       ffmpegBin,
       localBaseUrl: hlsSessionManager.localBaseUrl,
-      viewers: hlsSessionManager.viewers
+      viewers: hlsSessionManager.viewers,
+      subtitles
     })
   );
   app.get("/stream", async (req, reply) =>

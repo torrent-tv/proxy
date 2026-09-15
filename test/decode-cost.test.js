@@ -39,7 +39,7 @@ import {
 } from "../services/hwaccel.js";
 import { HlsSessionManager } from "../services/hls-session-manager.js";
 import { SourceFile, sourceDecodeCharacteristics } from "../services/source/SourceFile.js";
-import { parseFfmpegBitrateKbps, parseFfmpegVideoDimensions, parseFfmpegVideoFps } from "../services/ffmpeg-banner.js";
+import { parseFfmpegBitrateKbps, parseFfmpegVideoDimensions, parseFfmpegVideoFps } from "../services/media/ffmpeg-banner.js";
 import { fmp4Format } from "../services/segment-formats/fmp4.js";
 
 const require = createRequire(import.meta.url);

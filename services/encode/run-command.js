@@ -223,7 +223,7 @@ export function nearestKeyframeAtOrBefore(keyframeTimes, target) {
  * the bound picks the smaller error, which is then under one keyframe interval
  * and therefore under what a player bridges.
  *
- * @param {{ transcodeVideo?: boolean, file?: { keyframeTimes?: number[], keyframeTolerance?: number } }} material
+ * @param {{ transcodeVideo?: boolean, audioOnly?: boolean, keyframes?: { times?: number[] | null, tolerance?: number } }} material
  * @param {number} keyframe - A real keyframe time the run is to begin at.
  * @returns {number} Seconds to add to the request.
  */
@@ -246,11 +246,11 @@ export function seekLandingOffsetFor(material, keyframe) {
   // A grid whose times are approximate needs that error added on top, or a name
   // sitting just below its real keyframe seeks to before it and lands on the
   // one before that. Only AVI declares one.
-  const tolerance = Number.isFinite(material?.file?.keyframeTolerance)
-    ? Math.max(0, material.file.keyframeTolerance)
+  const tolerance = Number.isFinite(material?.keyframes?.tolerance)
+    ? Math.max(0, material.keyframes.tolerance)
     : 0;
   const wanted = SEEK_LANDING_OFFSET_SEC + tolerance;
-  const times = Array.isArray(material?.file?.keyframeTimes) ? material.file.keyframeTimes : [];
+  const times = Array.isArray(material?.keyframes?.times) ? material.keyframes.times : [];
   const next = times.find((time) => time > keyframe + 0.001);
   if (next === undefined) {
     return wanted;
@@ -262,8 +262,9 @@ export function seekLandingOffsetFor(material, keyframe) {
  * Everything ffmpeg is told for one run.
  *
  * @param {object} params
- * @param {{ keyframeTimes?: number[], keyframeTolerance?: number }} params.file - The
- *   PICTURE's file: whose keyframes a seek snaps to.
+ * @param {{ times?: number[] | null, tolerance?: number }} params.keyframes - Where
+ *   the PICTURE's file has its keyframes: what a seek snaps to. Plain values,
+ *   so this can be asked without a container, a torrent or a session.
  * @param {{ startTime: number }} params.inputFile - The file this run reads.
  * @param {{ startTime: number }} params.audioFile - The file the chosen
  *   soundtrack lives in, which for a dub shipped beside the picture is not the
@@ -291,7 +292,7 @@ export function seekLandingOffsetFor(material, keyframe) {
  * @returns {{ args: string[], safeIndex: number, startSeconds: number, cutTimes: number[] | null }}
  */
 export function buildRunCommand({
-  file,
+  keyframes,
   inputFile,
   audioFile,
   inputUrl,
@@ -340,8 +341,8 @@ export function buildRunCommand({
   // Fresh by construction: the session may have been created before the
   // soundtrack file's header could be read, and the reading lands on the file
   // object this session holds — so there is nothing to re-read and nothing
-  // that can be stale. Same property as `file.keyframeTimes`,
-  // which is one table shared by every session of the file.
+  // that can be stale. Same property as the keyframe table, which is one
+  // object shared by every session of the file.
   // Which timeline this run works on. Asked once, because the closure that
   // adds the second input reads it too, and two readings of one predicate is
   // how the picture and the sound came apart before.
@@ -478,8 +479,8 @@ export function buildRunCommand({
     : null;
   const snappedKeyframe = Number.isFinite(carriedKeyframe)
     ? carriedKeyframe
-    : (Array.isArray(file.keyframeTimes) && file.keyframeTimes.length > 0
-      ? nearestKeyframeAtOrBefore(file.keyframeTimes, seekSeconds)
+    : (Array.isArray(keyframes?.times) && keyframes.times.length > 0
+      ? nearestKeyframeAtOrBefore(keyframes.times, seekSeconds)
       : null);
   // A second input, and it exists for exactly one case: a browser that takes
   // its audio muxed into the picture, watching a release whose soundtrack is a
@@ -536,7 +537,7 @@ export function buildRunCommand({
   if (snappedKeyframe !== null) {
     const residualSeconds = Math.max(0, seekSeconds - snappedKeyframe);
     if (snappedKeyframe > 0) {
-      args.push("-ss", ffmpegSeconds(snappedKeyframe + seekLandingOffsetFor({ audioOnly, transcodeVideo, file }, snappedKeyframe)));
+      args.push("-ss", ffmpegSeconds(snappedKeyframe + seekLandingOffsetFor({ audioOnly, transcodeVideo, keyframes }, snappedKeyframe)));
     }
     args.push("-i", inputUrl);
     // The coarse landing, not the exact target: the residual below is discarded

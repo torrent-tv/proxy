@@ -1,111 +1,76 @@
 /**
- * @file Subtitle cues gathered from the clusters a viewer has already brought
- * in, never from clusters they have not.
+ * @file Reading the subtitle cues a file already holds, and the plan of its
+ * subtitle tracks.
  *
- * The rule this file exists to keep (stated by the user 2026-08-20): subtitles
- * arrive the way the picture does, or they are not offered. So nothing here
- * requests a byte. It looks at what the torrent already holds, reads the
- * clusters inside it, and returns what it found; the region the viewer is
- * watching is downloaded before they reach it, so its cues are ready before
- * they are needed. A region nobody has watched has no cues, and that is
- * correct — there is nobody to show them to.
+ * It walks ONLY what is downloaded: switching subtitles on must never pull
+ * bytes the viewer is not waiting for. The head and the Cues table are the one
+ * exception and are fetched — they are kilobytes, they are needed before
+ * anything can be offered, and the codec probe has already pulled the head for
+ * every file that plays.
  *
- * Why not ffmpeg: measured 2026-08-19, extracting one subtitle track of
- * `Minions.and.Monsters.1080p.mkv` took **752 seconds** and pulled the download
- * from 2.7 % to 81 % of a 6.5 GB film, because a subtitle stream is sparse and
- * the demuxer walks the container to the end whatever range is asked of it.
- * Reading the clusters costs nothing extra at all.
+ * **The torrent is not here, and that is the point.** This layer is handed a
+ * `HeldFile`: a name, a length, which ranges are downloaded whole, and how to
+ * read one of them without fetching. Piece length, file offsets and the
+ * bitfield are the torrent's words and stay in the torrent's thread
+ * (`torrent-worker/held-bytes.js`). Until 2026-09-15 this whole file lived
+ * there, which put a container parse — the media layer's work — in the thread
+ * that owns the swarm, and made every answer something to carry back across a
+ * channel.
+ *
+ * What is genuinely this file's own, and travels with it: the found-order
+ * cursor a browser follows, the per-file state, and one walk of a file at a
+ * time.
  */
 
-import { ContainerFactory } from "../container/ContainerFactory.js";
-import { TextSubtitleTrack } from "../tracks/TextSubtitleTrack.js";
-import { detectLanguage } from "../tracks/language-detect.js";
+import { ContainerFactory } from "./container/ContainerFactory.js";
+import { TextSubtitleTrack } from "./tracks/TextSubtitleTrack.js";
+import { detectLanguage } from "./tracks/language-detect.js";
 import { logger } from "../../utils/logger.js";
 
-/** How long a read of already-held bytes may take before it is given up. */
-const READ_ABANDON_MS = 30_000;
+
+/**
+ * One file of one torrent, as much of it as this layer is allowed to know.
+ *
+ * Four plain values and two functions: what it is called, how long it is, which
+ * of it is downloaded whole, and how to read a range of that without asking the
+ * swarm for anything. No torrent, no bitfield, no piece length — those are the
+ * torrent's words, and turning them into these is its job.
+ *
+ * @typedef {object} HeldFile
+ * @property {string} sourceKey
+ * @property {number} fileIndex
+ * @property {string} name
+ * @property {number} length
+ * @property {() => Promise<Array<[number, number]>>} heldRanges - Ascending,
+ *   non-overlapping, inclusive offsets within the file.
+ * @property {(start: number, end: number) => Promise<Buffer | null>} readHeld -
+ *   Null where those bytes are not there, which is never fetched.
+ */
+
+/**
+ * Whether a range falls entirely inside one of the held runs.
+ *
+ * @param {Array<[number, number]> | null} ranges
+ * @param {number} start
+ * @param {number} end - Inclusive.
+ * @returns {boolean}
+ */
+function rangeHolds(ranges, start, end) {
+  if (!Array.isArray(ranges) || !(end >= start)) {
+    return false;
+  }
+  for (const [from, to] of ranges) {
+    if (start >= from && end <= to) {
+      return true;
+    }
+  }
+  return false;
+}
 
 /** @type {Map<string, { plan: object | null, harvested: Map<number, Set<number>>, cues: Map<number, object[]> }>} */
 const byFile = new Map();
 
-/**
- * Whether every piece covering a byte range is already downloaded.
- *
- * @param {object} torrent
- * @param {object} file
- * @param {number} start - Offset within the FILE.
- * @param {number} end - Inclusive.
- * @returns {boolean}
- */
-function rangeIsHeld(torrent, file, start, end) {
-  const pieceLength = Number(torrent?.pieceLength);
-  const offset = Number(file?.offset) || 0;
-  if (!Number.isFinite(pieceLength) || pieceLength <= 0 || !torrent?.bitfield) {
-    return false;
-  }
-  const first = Math.floor((offset + start) / pieceLength);
-  const last = Math.floor((offset + end) / pieceLength);
-  for (let index = first; index <= last; index += 1) {
-    if (!torrent.bitfield.get(index)) {
-      return false;
-    }
-  }
-  return true;
-}
 
-/**
- * Read a byte range of a file straight from the store, without asking the swarm
- * for anything.
- *
- * @param {object} file
- * @param {number} start
- * @param {number} end - Inclusive.
- * @returns {Promise<Buffer | null>}
- */
-function readHeld(file, start, end) {
-  return new Promise((resolve) => {
-    const chunks = [];
-    let stream;
-    try {
-      stream = file.createReadStream({ start, end });
-    } catch {
-      resolve(null);
-      return;
-    }
-    let settled = false;
-    /** @type {ReturnType<typeof setTimeout> | null} */
-    let abandon = null;
-    const settle = (value) => {
-      if (settled) {
-        return;
-      }
-      settled = true;
-      if (abandon !== null) {
-        clearTimeout(abandon);
-      }
-      if (value === null) {
-        stream.destroy?.();
-      }
-      resolve(value);
-    };
-    // A read of bytes the torrent already holds either answers or it does not.
-    // This is not a measurement of anything and no figure is derived from it:
-    // it is the point past which such a read is presumed lost, so that one
-    // stream which never ends cannot hold this file's walk — and with it the
-    // browser's own request for its subtitles — for the rest of the session.
-    abandon = setTimeout(() => {
-      logger.info(
-        `subtitles: a read of ${start}-${end} in "${String(file.name).slice(0, 40)}" ` +
-        `did not finish in ${READ_ABANDON_MS / 1000}s and was given up`
-      );
-      settle(null);
-    }, READ_ABANDON_MS);
-    abandon.unref?.();
-    stream.on("data", (chunk) => chunks.push(chunk));
-    stream.on("end", () => settle(Buffer.concat(chunks)));
-    stream.on("error", () => settle(null));
-  });
-}
 
 /**
  * A container over one file of a torrent, told how to read it.
@@ -123,28 +88,31 @@ function readHeld(file, start, end) {
  * different evidence that have to agree.
  *
  * @param {object} state - This file's state; the container is kept on it.
- * @param {object} torrent
- * @param {object} file
- * @returns {Promise<import("../container/Container.js").Container | null>}
+ * @param {import("./SubtitleCues.js").HeldFile} source
+ * @returns {Promise<import("./container/Container.js").Container | null>}
  */
-async function containerOver(state, torrent, file) {
+async function containerOver(state, source) {
   if (state.container !== null) {
     return state.container;
   }
-  const held = async (start, end) => readHeld(file, start, Math.min(end, file.length - 1));
+  const last = Number(source.length) - 1;
+  const held = async (start, end) => source.readHeld(start, Math.min(end, last));
   const params = {
     readRange: held,
     readHeld: held,
-    isHeld: (start, end) => rangeIsHeld(torrent, file, start, Math.min(end, file.length - 1)),
-    fileSize: file.length,
-    label: String(file.name ?? "")
+    // Answered from the list of ranges this file has downloaded WHOLE, taken
+    // once per pass rather than asked per cluster: a pass asks about every
+    // cluster of the file, and the torrent that knows is on the other thread.
+    isHeld: (start, end) => rangeHolds(state.held, start, Math.min(end, last)),
+    fileSize: source.length,
+    label: String(source.name ?? "")
   };
   const sniffed = await ContainerFactory.create(params);
   if (sniffed) {
     state.container = sniffed;
     return state.container;
   }
-  const ByName = ContainerFactory.byName(file.name);
+  const ByName = ContainerFactory.byName(source.name);
   state.container = ByName ? new ByName(params) : null;
   return state.container;
 }
@@ -156,12 +124,11 @@ async function containerOver(state, torrent, file) {
  * missing — they are kilobytes, they are needed before anything can be offered,
  * and the codec probe has already pulled the head for every file that plays.
  *
- * @param {object} torrent
- * @param {number} fileIndex
+ * @param {import("./SubtitleCues.js").HeldFile} source
  * @param {string} key - `sourceKey:fileIndex`.
  * @returns {Promise<object | null>}
  */
-async function planFor(torrent, fileIndex, key) {
+async function planFor(source, key) {
   const state = stateFor(key);
   if (state.plan !== null) {
     return state.plan;
@@ -170,7 +137,7 @@ async function planFor(torrent, fileIndex, key) {
   // callers arriving together would both make them. One promise, awaited by
   // whoever asks while it is in flight.
   if (!state.planPromise) {
-    state.planPromise = readPlan(torrent, fileIndex, state).finally(() => {
+    state.planPromise = readPlan(source, state).finally(() => {
       state.planPromise = null;
     });
   }
@@ -201,6 +168,11 @@ function stateFor(key) {
       // — a `moov` box is tens of megabytes off a torrent — so building a fresh
       // one per call would throw that away on every request.
       container: null,
+      // Which byte ranges of this file are downloaded WHOLE, as of the start of
+      // the pass now running. Taken once and read many times: a pass asks about
+      // every cluster of the file, and what knows the answer is on the other
+      // thread.
+      held: null,
       harvested: new Map(),
       cues: new Map(),
       seq: new Map(),
@@ -246,23 +218,22 @@ function serialize(state, work) {
  * holding them are. Called once per file; see `planFor`.
  *
  * @param {object} torrent
- * @param {number} fileIndex
  * @param {object} state
  * @returns {Promise<object>}
  */
-async function readPlan(torrent, fileIndex, state) {
-  const file = torrent?.files?.[fileIndex];
+async function readPlan(source, state) {
   // `declared` is what the container itself says about its subtitle tracks, in
   // its own order. Empty means the container said nothing — which is a real
   // answer and not a missing one: nothing is then shown unasked. An MP4 has no
   // element that means "show this subtitle track by default", so it declares
   // nothing however many tracks it carries.
   const empty = { tracks: [], declared: [], secondsPerTick: 0.001, segmentDataOffset: 0 };
-  if (!file) {
+  if (!source || !(Number(source.length) > 0)) {
     state.plan = empty;
     return state.plan;
   }
-  const container = await containerOver(state, torrent, file);
+  state.held = await source.heldRanges();
+  const container = await containerOver(state, source);
   if (!container) {
     state.plan = empty;
     return state.plan;
@@ -271,7 +242,7 @@ async function readPlan(torrent, fileIndex, state) {
   state.plan = plan ?? empty;
   if (state.plan.tracks.length > 0) {
     logger.info(
-      `subtitles: "${String(file.name).slice(0, 40)}" has ${state.plan.tracks.length} text track(s) ` +
+      `subtitles: "${String(source.name).slice(0, 40)}" has ${state.plan.tracks.length} text track(s) ` +
       `of ${state.plan.declared.length} declared — ` +
       state.plan.tracks
         // `s:N` is the number the browser names (ffmpeg's own), and it differs
@@ -318,47 +289,47 @@ function nextSeq(state, trackNumber) {
  * @param {number} trackNumber
  * @returns {Promise<{ cues: object[], coveredClusters: number, indexedClusters: number, track: object | null }>}
  */
-export async function cuesHeldFor(torrent, fileIndex, sourceKey, trackNumber) {
-  const key = `${sourceKey}:${fileIndex}`;
-  // A torrent that cannot say which pieces it holds makes every range read as
-  // "not downloaded", so the walk reads nothing and returns an empty list —
+export async function cuesHeldFor(source, trackNumber) {
+  const key = `${source.sourceKey}:${source.fileIndex}`;
+  // A source that cannot say which of itself is downloaded makes every range
+  // read as "not there", so the walk reads nothing and returns an empty list —
   // which is also what a file with no cues yet returns, and that is how this
   // went unnoticed for a session (2026-09-03: 283 clusters indexed, 0 walked,
-  // the browser served `WEBVTT` and nothing else). The stand-in the main thread
-  // holds is exactly such a torrent; only the thread that owns the object has
-  // the bitfield. Nothing here can repair that, so it says so instead.
-  if (!torrent?.bitfield || !(Number(torrent?.pieceLength) > 0)) {
+  // the browser served `WEBVTT` and nothing else). It is not repairable here,
+  // so it is said rather than swallowed.
+  if (typeof source.heldRanges !== "function" || typeof source.readHeld !== "function") {
     logger.warn(
-      `subtitles: asked for cues of "${String(torrent?.name ?? sourceKey).slice(0, 40)}" ` +
-      "on a torrent that cannot say which pieces it holds — no cluster can be read here, " +
+      `subtitles: asked for cues of "${String(source.name ?? key).slice(0, 40)}" ` +
+      "on a source that cannot say which of it is downloaded — no cluster can be read, " +
       "and the answer would be an empty document indistinguishable from a file with no cues"
     );
     return { cues: [], coveredClusters: 0, indexedClusters: 0, track: null };
   }
-  const plan = await planFor(torrent, fileIndex, key);
+  const plan = await planFor(source, key);
   const state = stateFor(key);
   const track = plan?.tracks?.find((candidate) => candidate.trackNumber === trackNumber) ?? null;
   if (!track) {
     return { cues: [], coveredClusters: 0, indexedClusters: 0, track: null };
   }
-  return serialize(state, () => walkFor(torrent, fileIndex, state, plan, track, trackNumber));
+  return serialize(state, () => walkFor(source, state, plan, track, trackNumber));
 }
 
 /**
  * The walk itself. Only ever entered through `cuesHeldFor`, which is what keeps
  * one file to one walk at a time.
  *
- * @param {object} torrent
- * @param {number} fileIndex
+ * @param {import("./SubtitleCues.js").HeldFile} source
  * @param {object} state
  * @param {object} plan
  * @param {object} track
  * @param {number} trackNumber
  * @returns {Promise<{ cues: object[], coveredClusters: number, indexedClusters: number, track: object | null }>}
  */
-async function walkFor(torrent, fileIndex, state, plan, track, trackNumber) {
-  const file = torrent.files[fileIndex];
-  const container = await containerOver(state, torrent, file);
+async function walkFor(source, state, plan, track, trackNumber) {
+  // Taken once per pass: pieces keep arriving, and what may be read now is a
+  // different list from what could be read when the plan was built.
+  state.held = await source.heldRanges();
+  const container = await containerOver(state, source);
   if (!container) {
     return { cues: [], coveredClusters: 0, indexedClusters: 0, track };
   }
@@ -412,15 +383,15 @@ async function walkFor(torrent, fileIndex, state, plan, track, trackNumber) {
  *   readable tracks either: counting those alone puts every text track after a
  *   picture-based one in the wrong place.
  */
-export async function warmSubtitleCues(torrent, fileIndex, sourceKey) {
-  const key = `${sourceKey}:${fileIndex}`;
-  const plan = await planFor(torrent, fileIndex, key);
+export async function warmSubtitleCues(source) {
+  const key = `${source.sourceKey}:${source.fileIndex}`;
+  const plan = await planFor(source, key);
   const state = stateFor(key);
   const fresh = [];
   const tracks = plan?.tracks ?? [];
   for (let order = 0; order < tracks.length; order += 1) {
     const track = tracks[order];
-    const held = await cuesHeldFor(torrent, fileIndex, sourceKey, track.trackNumber);
+    const held = await cuesHeldFor(source, track.trackNumber);
     const since = state.pushed.get(track.trackNumber) ?? 0;
     const newCues = held.cues.filter((cue) => (Number(cue.seq) || 0) > since);
     if (newCues.length === 0) {
@@ -467,8 +438,8 @@ export async function warmSubtitleCues(torrent, fileIndex, sourceKey) {
  * @param {string} sourceKey
  * @returns {Promise<object[]>}
  */
-export async function subtitleTracksOf(torrent, fileIndex, sourceKey) {
-  const plan = await planFor(torrent, fileIndex, `${sourceKey}:${fileIndex}`);
+export async function subtitleTracksOf(source) {
+  const plan = await planFor(source, `${source.sourceKey}:${source.fileIndex}`);
   return (plan?.tracks ?? []).map((track, order) => ({
     trackNumber: track.trackNumber,
     declaredIndex: Number.isInteger(track.declaredIndex) ? track.declaredIndex : order,
@@ -494,8 +465,8 @@ export async function subtitleTracksOf(torrent, fileIndex, sourceKey) {
  * @param {string} sourceKey
  * @returns {Promise<object[]>}
  */
-export async function declaredSubtitleTracksOf(torrent, fileIndex, sourceKey) {
-  const plan = await planFor(torrent, fileIndex, `${sourceKey}:${fileIndex}`);
+export async function declaredSubtitleTracksOf(source) {
+  const plan = await planFor(source, `${source.sourceKey}:${source.fileIndex}`);
   return plan?.declared ?? [];
 }
 

@@ -667,7 +667,7 @@ test("a run on the keyframe grid is given no trim to apply", () => {
 
   for (let index = 1; index < grid.boundaries.length - 1; index += 1) {
     const { args } = buildRunCommand({
-      file: { keyframeTimes },
+      keyframes: { times: keyframeTimes },
       inputFile: { startTime },
       audioFile: { startTime },
       inputUrl: "http://127.0.0.1/stream",

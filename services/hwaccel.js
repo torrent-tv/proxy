@@ -33,7 +33,7 @@ import {
   parseFfmpegDurationSeconds,
   parseFfmpegVideoDimensions,
   parseFfmpegVideoFps
-} from "./ffmpeg-banner.js";
+} from "./media/ffmpeg-banner.js";
 
 import { keyFrameArgs, TRANSCODE_FPS } from "./encode/args.js";
 // The five kinds, one class each. Detection and benchmarking stay in this file;

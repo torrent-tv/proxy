@@ -30,7 +30,6 @@
 			"includes": [
 				"services/demand/**",
 				"services/segment-formats/**",
-				"services/tracks/**",
 				"services/output/**",
 				"services/viewer/**",
 				"services/encode/**",
@@ -161,7 +160,8 @@
 		},
 		{
 			"includes": [
-				"services/container/**"
+				"services/media/container/**",
+				"services/media/tracks/**"
 			],
 			"linter": {
 				"rules": {
@@ -172,22 +172,11 @@
 								"patterns": [
 									{
 										"group": [
-											"../*",
-											"../controllers/**",
-											"../demand/**",
-											"../download/**",
-											"../encode/**",
-											"../orchestrators/**",
-											"../output/**",
-											"../storage/**",
-											"../piece-store/**",
-											"../segment-store/**",
-											"../files/**",
-											"../segment-formats/**",
-											"../torrent-worker/**",
-											"../viewer/**"
+											"../**",
+											"!../container/**",
+											"!../tracks/**"
 										],
-										"message": "A container answers for itself and hands out tracks/. It knows nothing of torrents, encoders or viewers: the four functions it is built with are its whole outside world."
+										"message": "THE MEDIA DOMAIN. A container answers for itself and hands out tracks/; a track is one stream inside one. They know nothing of torrents, encoders, viewers or this proxy's own logger: the four functions a container is built with are its whole outside world. Written as an exception to `../**` rather than as a list of forbidden layers — a list only catches what somebody remembered to write in it, and the list that stood here let `../../utils/logger.js` straight through."
 									}
 								]
 							}
@@ -198,7 +187,7 @@
 		},
 		{
 			"includes": [
-				"services/orchestrators/**"
+				"services/media/*.js"
 			],
 			"linter": {
 				"rules": {
@@ -209,19 +198,10 @@
 								"patterns": [
 									{
 										"group": [
-											"../*",
-											"../controllers/**",
-											"../demand/**",
-											"../download/**",
-											"../output/**",
-											"../storage/**",
-											"../piece-store/**",
-											"../segment-store/**",
-											"../files/**",
-											"../segment-formats/**",
-											"../viewer/**"
+											"../**",
+											"!../../utils/**"
 										],
-										"message": "An orchestrator composes the layers below it. Reaching sideways into serving or downloading is what put a scenario in two places before."
+										"message": "THE MEDIA LAYER answers what a FILE says about itself: its containers, its tracks, where its keyframes are, and the plan for playing it. It may reach into its own domain and nothing else. What a torrent contains, which clusters may be read, where a viewer stands, what an encoder costs — all of it is passed in, so this can be asked with plain values and no torrent, no thread and no disk. Both reaches that stood here are gone: `torrent-worker/subtitle-cues.js` is now handed to SubtitleOrchestrator at the seam, and `torrent/Contents.js` is handed to the planner."
 									}
 								]
 							}

@@ -17,9 +17,9 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { MatroskaContainer } from "../services/container/MatroskaContainer.js";
-import { Mp4Container } from "../services/container/Mp4Container.js";
-import { AviContainer } from "../services/container/AviContainer.js";
+import { MatroskaContainer } from "../services/media/container/MatroskaContainer.js";
+import { Mp4Container } from "../services/media/container/Mp4Container.js";
+import { AviContainer } from "../services/media/container/AviContainer.js";
 
 /**
  * An EBML element: its id bytes, a four-byte size, then the payload.

@@ -26,6 +26,7 @@
  */
 
 import { variantHeightsFor } from "../output/ladder.js";
+import { peakMbpsForHeight } from "./link-budget.js";
 import { chooseOutputFps, TRANSCODE_FPS } from "../encode/args.js";
 import { processCanBeSignalled, runStateOf } from "../encode/encode-run-state.js";
 import { sourceDecodeCharacteristics } from "../source/SourceFile.js";
@@ -311,5 +312,59 @@ export class QualityOffer {
         transcodeVideo
       });
     return { copy: forBranch(false), transcode: forBranch(true) };
+  }
+
+  /**
+   * The next offered height above `current`, never above the source.
+   *
+   * @param {HlsSession} base
+   * @param {number} current
+   * @returns {number | undefined}
+   */
+  nextHeightUp(base, current) {
+    const ceiling = Math.round(Number(base.file.height) || 0);
+    return this.offeredHeights(base)
+      .filter((height) => height > current && height <= ceiling)
+      .sort((left, right) => left - right)[0];
+  }
+
+  /**
+   * The height this family serves by COPY, or zero when every rung is encoded.
+   *
+   * The one rung whose cost does not depend on the machine: the source's own
+   * height, on a base whose video is not re-encoded. `offeredHeights` never
+   * withdraws it for that reason, so it is always available as somewhere to
+   * return to — which is exactly what {@link HlsSessionManager##askLowerHeight}
+   * had no way to say.
+   *
+   * @param {HlsSession} base
+   * @returns {number}
+   */
+  copiedHeightOf(base) {
+    if (!base || base.transcodeVideo === true) {
+      return 0;
+    }
+    return Math.round(Number(base.file.height) || 0);
+  }
+
+  /**
+   * The most a stream of this picture at this height would ask of the link.
+   *
+   * The arithmetic is `link-budget.js` and takes three numbers. This is where
+   * a picture is turned INTO those three numbers, in one place: built at each
+   * call site instead, the mapping was written twice and the two could come
+   * apart — which on this particular question means pricing a re-encode at the
+   * bitrate of a file nobody is copying.
+   *
+   * @param {object} base - The family's picture.
+   * @param {number} height
+   * @returns {number} Megabits a second.
+   */
+  peakMbpsFor(base, height) {
+    return peakMbpsForHeight({
+      sourceHeight: Math.round(Number(base.file.height) || 0),
+      transcodeVideo: base.transcodeVideo === true,
+      sourceMbps: base.file.decode?.megabitsPerSecond ?? null
+    }, height);
   }
 }

@@ -43,7 +43,6 @@ import { EncodeRun } from "./encode/EncodeRun.js";
 const PROXY_VERSION = createRequire(import.meta.url)("../package.json").version;
 import {
   softwareDescriptor,
-  chooseSoftwareEncodeSettings,
   pickSoftwarePreset,
   canSustainOutput,
   maxrateKbpsFor,
@@ -52,6 +51,7 @@ import {
   TRANSCODE_FPS,
   chooseOutputFps
 } from "./hwaccel.js";
+import { computeOutputDimensions } from "./encode/args.js";
 import {
   parseFfmpegBitrateKbps,
   parseFfmpegDurationSeconds,
@@ -91,6 +91,7 @@ import { viewersOf } from "./viewer/Viewer.js";
 import { activeOutputFor } from "./viewer/active-output.js";
 import { audioStartSecondsFor } from "./viewer/audio-start.js";
 import { worstLinkReading } from "./viewer/link-readings.js";
+import { linkCouldCarry, LINK_SAFETY } from "./quality/link-budget.js";
 import { viewerSecondsOn, viewerSegmentsOn } from "./viewer/positions.js";
 import { Viewers } from "./viewer/Viewers.js";
 import { LiveOutputs } from "./output/LiveOutputs.js";
@@ -469,8 +470,6 @@ const BUDGET_DOWNLOAD_OK_FACTOR = 1.0;
 // instead. Which of the two, and whether a viewer's own pick may be moved at
 // all, is decided where the viewer's choice lives: in the browser, which
 // honours the request only in automatic mode.
-// Usable share of the reported link (protocol overhead + measurement noise).
-const LINK_SAFETY = 0.8;
 // Deficit must persist this long before acting (absorbs one slow segment).
 const LINK_SLOW_WINDOW_MS = 15_000;
 // Only act while the viewer is actually running dry; a comfortable buffer
@@ -764,34 +763,6 @@ async function probeInputMediaInfo(ffmpegBin, inputUrl) {
       finish();
     });
   });
-}
-
-/**
- * Compute the actual output resolution ffmpeg will produce: the target box
- * capped to the source (never upscaled), preserving aspect, divisible by 2.
- * Mirrors the `scale='min(w,iw)':'min(h,ih)':force_original_aspect_ratio=decrease`
- * filter. Returns `null` when the source size is unknown.
- *
- * @param {number} targetWidth
- * @param {number} targetHeight
- * @param {number | null} sourceWidth
- * @param {number | null} sourceHeight
- * @returns {{ w: number, h: number } | null}
- */
-function computeOutputDimensions(targetWidth, targetHeight, sourceWidth, sourceHeight) {
-  const sw = Number.isFinite(sourceWidth) && sourceWidth > 0 ? sourceWidth : 0;
-  const sh = Number.isFinite(sourceHeight) && sourceHeight > 0 ? sourceHeight : 0;
-  if (!sw || !sh) {
-    return null;
-  }
-  const tw = Number.isInteger(targetWidth) && targetWidth > 0 ? targetWidth : sw;
-  const th = Number.isInteger(targetHeight) && targetHeight > 0 ? targetHeight : sh;
-  const scale = Math.min(tw / sw, th / sh, 1);
-  let w = Math.round(sw * scale);
-  let h = Math.round(sh * scale);
-  w -= w % 2;
-  h -= h % 2;
-  return { w: Math.max(2, w), h: Math.max(2, h) };
 }
 
 /**
@@ -1946,7 +1917,7 @@ export class HlsSessionManager {
     // the encoder. Derived from the file's own facts; null when the probe did
     // not say enough.
     const sourceDecode = file.decode;
-    const chosenBudget = this.#chooseEncodeBudget({
+    const chosenBudget = this.encodeCost.chooseEncodeBudget({
       transcodeVideo,
       targetWidth: normalizedTargetWidth,
       targetHeight: normalizedTargetHeight,
@@ -2668,44 +2639,6 @@ export class HlsSessionManager {
     return segmentIndexForTime(this.publishedGridFor(session), t, this.segmentDurationSec);
   }
 
-  /**
-   * Realtime budget (software encoder only): choose the output resolution AND
-   * libx264 preset this host can encode faster than realtime, from the startup
-   * benchmark. The ceiling is the client-requested box capped to the source
-   * (never upscaled); the budget picks the highest resolution rung at or below
-   * that ceiling that clears realtime × margin, then the best preset at that
-   * resolution. On a weak host this downscales below the client target instead
-   * of dropping into sub-realtime playback. Returns null when not applicable
-   * (no video transcode, hardware encoder, or missing benchmark/source size) —
-   * the encode then keeps the ceiling resolution and the default preset.
-   *
-   * @param {{ transcodeVideo: boolean, targetWidth: number, targetHeight: number, sourceWidth: number | null, sourceHeight: number | null, outputFps: number, source?: { megapixelsPerSecond: number, megabitsPerSecond: number } | null }} params
-   * @returns {{ width: number, height: number, preset: string } | null}
-   */
-  #chooseEncodeBudget({
-    transcodeVideo,
-    targetWidth,
-    targetHeight,
-    sourceWidth,
-    sourceHeight,
-    outputFps,
-    source = null,
-    requiredSpeed = null
-  }) {
-    if (!transcodeVideo || this.videoEncoder?.kind !== "software" || !this.softwarePresetBenchmark) {
-      return null;
-    }
-    const ceiling = computeOutputDimensions(targetWidth, targetHeight, sourceWidth, sourceHeight);
-    if (!ceiling) {
-      return null;
-    }
-    return chooseSoftwareEncodeSettings(
-      this.softwarePresetBenchmark,
-      { width: ceiling.w, height: ceiling.h },
-      outputFps,
-      { decodeModel: this.decodeCostModel, source, requiredSpeed }
-    );
-  }
 
   /**
    * Realtime budget monitor (software encoder only). For each active
@@ -4070,36 +4003,6 @@ export class HlsSessionManager {
     }
   }
 
-  /**
-   * The speed this run is making RIGHT NOW, or null when nothing recent enough
-   * says.
-   *
-   * Read as the slope between two progress reports, never as ffmpeg's own
-   * `speed=`. That figure is cumulative — output time over wall time since the
-   * run began — so a run starved of torrent data early carries the average of
-   * that starvation for the rest of its life. Measured 2026-08-21: a run whose
-   * progress lines showed 1.30x at that moment (13 s of video in 10.02 s of
-   * clock) still reported a cumulative 0.39x from four minutes on a ~100 KB/s
-   * swarm, and the budget stepped the picture down on it. The same mistake was
-   * found and solved once already — the startup decode benchmark reads the
-   * slope between two progress reports for exactly this reason.
-   *
-   * @param {HlsSession} session
-   * @param {number} now
-   * @returns {number | null}
-   */
-  #recentSpeedOf(session, now) {
-    const reading = session.recentSpeed;
-    if (!reading || !session.runs?.has(reading.run)) {
-      return null; // nothing from THIS run
-    }
-    // Two budget ticks. A reading older than that is not about the machine as
-    // it stands, and the loop takes a fresh one every pass anyway.
-    if (now - reading.at > BUDGET_CHECK_INTERVAL_MS * 2) {
-      return null;
-    }
-    return reading.speed;
-  }
 
   /**
    * The encoder-speed check for one session: sustained sub-realtime, and the
@@ -4116,7 +4019,7 @@ export class HlsSessionManager {
       // so the copy path's only lever is the viewer's link, above.
       return false;
     }
-    const speed = this.#recentSpeedOf(session, now);
+    const speed = this.encodeCost.recentSpeedOf(session, now, BUDGET_CHECK_INTERVAL_MS * 2);
     if (speed === null) {
       return false; // no measurement yet
     }
@@ -4195,7 +4098,7 @@ export class HlsSessionManager {
       // fifty times — "nothing lower is on offer; leaving the picture alone" —
       // and the picture stood still 161 times for 940 seconds. The rescue was
       // on the screen the whole time and the rule could only look down.
-      const copied = this.#copiedHeightOf(base);
+      const copied = this.qualityOffer.copiedHeightOf(base);
       if (copied > 0 && copied !== current && offered.includes(copied)) {
         logger.info(
           `[budget] transcode ${session.id} ${reasonText} at ${current}p and nothing lower is on offer, ` +
@@ -4213,24 +4116,6 @@ export class HlsSessionManager {
     return this.#askQualityHeight(base, next, reasonText);
   }
 
-  /**
-   * The height this family serves by COPY, or zero when every rung is encoded.
-   *
-   * The one rung whose cost does not depend on the machine: the source's own
-   * height, on a base whose video is not re-encoded. `offeredHeights` never
-   * withdraws it for that reason, so it is always available as somewhere to
-   * return to — which is exactly what {@link HlsSessionManager##askLowerHeight}
-   * had no way to say.
-   *
-   * @param {HlsSession} base
-   * @returns {number}
-   */
-  #copiedHeightOf(base) {
-    if (!base || base.transcodeVideo === true) {
-      return 0;
-    }
-    return Math.round(Number(base.file.height) || 0);
-  }
 
   /**
    * Record a request to the viewer's player to move to another variant.
@@ -4312,7 +4197,8 @@ export class HlsSessionManager {
       // top offered height has no next rung at all, and answering "nothing to
       // step to, so yes" is how a cap came off a link measured at a fifth of
       // what the picture needs.
-      if (!this.#linkCouldCarry(session, this.#peakMbpsForHeight(this.liveOutputs.pictureOf(session), current))) {
+      const wanted = this.qualityOffer.peakMbpsFor(this.liveOutputs.pictureOf(session), current);
+      if (!linkCouldCarry(worstLinkReading(session)?.linkMbps ?? null, wanted)) {
         return;
       }
       session.budgetUpSince = 0;
@@ -4323,7 +4209,7 @@ export class HlsSessionManager {
     // One rung at a time: the lowest height above the one on screen, never
     // above the source (upscaling invents detail and costs more than the
     // source itself). A second step follows a second unbroken window.
-    const higher = this.#nextHeightUp(base, current);
+    const higher = this.qualityOffer.nextHeightUp(base, current);
     if (higher === undefined) {
       return;
     }
@@ -4347,7 +4233,7 @@ export class HlsSessionManager {
    */
   async #couldCarryMore(session, now, current) {
     if (session.transcodeVideo === true) {
-      const speed = this.#recentSpeedOf(session, now);
+      const speed = this.encodeCost.recentSpeedOf(session, now, BUDGET_CHECK_INTERVAL_MS * 2);
       if (speed === null || speed < BUDGET_SPEED_OK) {
         return false;
       }
@@ -4363,69 +4249,15 @@ export class HlsSessionManager {
       return true;
     }
     const base = this.liveOutputs.pictureOf(session);
-    const next = this.#nextHeightUp(base, current);
+    const next = this.qualityOffer.nextHeightUp(base, current);
     if (next === undefined) {
       return true; // nothing to step to; only the cap decision is left
     }
-    return this.#linkCouldCarry(session, this.#peakMbpsForHeight(base, next));
+    return linkCouldCarry(report.linkMbps, this.qualityOffer.peakMbpsFor(base, next));
   }
 
-  /**
-   * Whether the viewer's measured link can carry a given number of Mbit/s.
-   *
-   * A link nobody has ever measured has no opinion either way — the same
-   * silence that stops `#checkLinkBudget` from acting — so it answers yes.
-   *
-   * @param {HlsSession} session
-   * @param {number} wantedMbps
-   * @returns {boolean}
-   */
-  #linkCouldCarry(session, wantedMbps) {
-    // The SLOWEST link among the viewers: a step up has to be carried by all of
-    // them, not by whichever reported last.
-    const report = worstLinkReading(session);
-    if (!report) {
-      return true;
-    }
-    return report.linkMbps * LINK_SAFETY >= wantedMbps;
-  }
 
-  /**
-   * The next offered height above `current`, never above the source.
-   *
-   * @param {HlsSession} base
-   * @param {number} current
-   * @returns {number | undefined}
-   */
-  #nextHeightUp(base, current) {
-    const ceiling = Math.round(Number(base.file.height) || 0);
-    return this.qualityOffer.offeredHeights(base)
-      .filter((height) => height > current && height <= ceiling)
-      .sort((left, right) => left - right)[0];
-  }
 
-  /**
-   * What a rung is ALLOWED to peak at, in Mbit/s.
-   *
-   * For a re-encoded rung that is the constrained-CRF cap this proxy imposes on
-   * it, which is a figure we set rather than one we hope for. For the height
-   * the family serves by COPY there is no encoder and no cap, so the source's
-   * own bitrate is what will be sent.
-   *
-   * @param {HlsSession} base
-   * @param {number} height
-   * @returns {number}
-   */
-  #peakMbpsForHeight(base, height) {
-    const sourceHeight = Math.round(Number(base.file.height) || 0);
-    if (height === sourceHeight && base.transcodeVideo !== true) {
-      const sourceMbps = Number(base.file.decode?.megabitsPerSecond);
-      if (Number.isFinite(sourceMbps) && sourceMbps > 0) {
-        return sourceMbps;
-      }
-    }
-    return maxrateKbpsFor(nominalKbpsForHeight(height)) / 1000;
-  }
 
   /**
    * Bound this encode's bitrate by the viewer's MEASURED link.

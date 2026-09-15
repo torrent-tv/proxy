@@ -198,3 +198,33 @@ export function keyFrameArgs(segmentDurationSec, forcedTimes = null) {
 export function hasForcedTimes(forcedTimes) {
   return Array.isArray(forcedTimes) && forcedTimes.length > 0;
 }
+
+/**
+ * Compute the actual output resolution ffmpeg will produce: the target box
+ * capped to the source (never upscaled), preserving aspect, divisible by 2.
+ * Mirrors the `scale='min(w,iw)':'min(h,ih)':force_original_aspect_ratio=decrease`
+ * filter built below, which is why it lives beside it: two statements of one
+ * rule, and the day they disagree the quality offer prices a picture ffmpeg is
+ * not making. Returns `null` when the source size is unknown.
+ *
+ * @param {number} targetWidth
+ * @param {number} targetHeight
+ * @param {number | null} sourceWidth
+ * @param {number | null} sourceHeight
+ * @returns {{ w: number, h: number } | null}
+ */
+export function computeOutputDimensions(targetWidth, targetHeight, sourceWidth, sourceHeight) {
+  const sw = Number.isFinite(sourceWidth) && sourceWidth > 0 ? sourceWidth : 0;
+  const sh = Number.isFinite(sourceHeight) && sourceHeight > 0 ? sourceHeight : 0;
+  if (!sw || !sh) {
+    return null;
+  }
+  const tw = Number.isInteger(targetWidth) && targetWidth > 0 ? targetWidth : sw;
+  const th = Number.isInteger(targetHeight) && targetHeight > 0 ? targetHeight : sh;
+  const scale = Math.min(tw / sw, th / sh, 1);
+  let w = Math.round(sw * scale);
+  let h = Math.round(sh * scale);
+  w -= w % 2;
+  h -= h % 2;
+  return { w: Math.max(2, w), h: Math.max(2, h) };
+}

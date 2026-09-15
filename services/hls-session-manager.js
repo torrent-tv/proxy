@@ -935,7 +935,6 @@ function isWarmupTimeoutError(error) {
 /**
  * @typedef {Object} HlsSession
  * @property {string}  id            - The name of the output it produces.
- * @property {string}  sourceMapKey  - Cache key combining source + transcode settings.
  * @property {string}  fileName      - Display name of the file being transcoded.
  * @property {"starting" | "ready" | "failed" | "disposed"} state
  * @property {number}  startedAt     - Unix ms timestamp when the session was created.
@@ -1315,7 +1314,6 @@ export class HlsSessionManager {
     // sessions are of it. It holds the file's key — which every cache about a
     // file is keyed by — its name, and the facts a probe returned.
     this.sourceFiles = new SourceFiles();
-    this.sessionIdBySource = new Map();
     this.cleanupTimer = setInterval(() => {
       void this.cleanupExpired();
     }, CLEANUP_INTERVAL_MS);
@@ -1519,8 +1517,13 @@ export class HlsSessionManager {
     // it here afterwards was that a session held one run, so merging two
     // viewers would leave the one behind stalled or dragging that run back. A
     // session holds as many runs as the machine affords now, so it goes.
-    const sourceMapKey = spec.toKey();
-    const existingId = this.sessionIdBySource.get(sourceMapKey);
+    const outputKey = spec.toKey();
+    // THE NAME FOLLOWS FROM THE KEY, so there is nothing to look it up in. A
+    // second table held key → name, which is a fact that can go out of step
+    // with the thing it points at: a session disposed without the table being
+    // cleared leaves a name pointing at nothing, and the next viewer of that
+    // output is handed it.
+    const existingId = spec.toName();
     if (existingId) {
       const existing = this.sessionsById.get(existingId);
       if (existing && existing.state !== "failed") {
@@ -1550,7 +1553,7 @@ export class HlsSessionManager {
         if (joined) {
           logger.info(
             `transcode ${existing.id} joined by ${consumerId} ` +
-            `(${existing.consumers.size} viewer(s)) key=${sourceMapKey}`
+            `(${existing.consumers.size} viewer(s)) key=${outputKey}`
           );
         }
         // A run of their own where they opened the film is the plan's to place:
@@ -1971,12 +1974,13 @@ export class HlsSessionManager {
 
     const session = {
       id: sessionId,
-      sourceMapKey,
       // What this session PRODUCES, which is the address of its segments and
-      // the thing another session may share with it. `sourceMapKey` is this
-      // plus the start position, and the start position is a fact about a
-      // request rather than about the material.
-      outputKey: spec.toKey(),
+      // the thing another session may share with it. It was here twice, as
+      // `sourceMapKey` as well, with a comment saying that one was this plus
+      // the start position — true once, and not since the start position left
+      // the key. One string under two names is two chances to read the wrong
+      // one.
+      outputKey,
       // The file this session is of: its key, its name and what a probe of it
       // said. One object per file, shared by every session of it.
       file,
@@ -2261,7 +2265,6 @@ export class HlsSessionManager {
       this.#placeViewer(session, first, startPositionSeconds);
     }
     this.sessionsById.set(sessionId, session);
-    this.sessionIdBySource.set(sourceMapKey, sessionId);
     // Decided before the key was built and only recorded here. Whether the audio
     // travels separately decides the ffmpeg arguments, what the master says,
     // whether the rendition route answers at all AND what the session is keyed
@@ -2314,7 +2317,7 @@ export class HlsSessionManager {
         // copied picture got two sessions with identical descriptions and
         // byte-identical output, both create requests were 265 bytes, and
         // nothing anywhere said what the two had been told apart by.
-        `key=${sourceMapKey}`
+        `key=${outputKey}`
     );
 
     // WHERE THE FIRST ENCODER GOES IS THE PLAN'S, and it is placed by the same
@@ -8274,7 +8277,6 @@ export class HlsSessionManager {
     }
     session.state = "disposed";
     this.sessionsById.delete(sessionId);
-    this.sessionIdBySource.delete(session.sourceMapKey);
     this.#logIndexAccuracy(session);
 
     // The chain that used to close here is gone. A picture session releasing a

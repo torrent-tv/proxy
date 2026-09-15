@@ -360,12 +360,24 @@ let logLine = () => {};
  *   releaseRing: () => void
  * }}
  */
-export function createPacketWitness({ log, dir = "", port, spawnProcess = spawn }) {
+export function createPacketWitness({ log, dir = "", port, spawnProcess = spawn, mayKeep = null }) {
   logLine = typeof log === "function" ? log : logLine;
   const resolvedDir = typeof dir === "string" && dir.length > 0 ? dir : os.tmpdir();
 
   /** @type {{ running: boolean, lastStartedAt: number, availability: "unknown" | "yes" | "no" }} */
   const state = { running: false, lastStartedAt: 0, availability: "unknown" };
+
+  /**
+   * Connections already captured, so one wedge is recorded once.
+   *
+   * A capture of a connection already captured adds nothing: the wedge does not
+   * un-wedge, and the second recording of it is the same silence as the first.
+   * Field 2026-09-06: thirteen captures of ONE wedge over six hours, 74 MB, all
+   * saying what the first one said.
+   *
+   * @type {Set<string>}
+   */
+  const captured = new Set();
 
   /**
    * Ask whether tcpdump exists at all — once per process, whichever way it
@@ -544,6 +556,18 @@ export function createPacketWitness({ log, dir = "", port, spawnProcess = spawn 
     if (!shouldStartCapture(state)) {
       return false;
     }
+    const connection = `${address}:${portNumber}`;
+    if (captured.has(connection)) {
+      // Not evidence twice.
+      return false;
+    }
+    // The evidence takes room from the product, so it is asked for. Refused, it
+    // is a line rather than a silence — see `storage/Diagnostics.js`.
+    const expectedBytes = (WITNESS_RING_FILES + 1) * WITNESS_RING_FILE_MB * 1024 * 1024;
+    if (typeof mayKeep === "function" && !mayKeep(expectedBytes)) {
+      return false;
+    }
+    captured.add(connection);
     state.running = true;
     state.lastStartedAt = Date.now();
     const startedAt = state.lastStartedAt;

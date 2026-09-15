@@ -73,7 +73,6 @@ function buildPortCandidates(startPort, maxAttempts = 51) {
  * @property {number}  port           - Preferred listen port.
  * @property {boolean} transcodeAudio - Whether HLS audio transcoding is enabled.
  * @property {string}  ffmpegBin      - Path to the ffmpeg executable.
- * @property {number}  [maxDiskBytes] - Global disk cap for torrent data (undefined = pool default).
  * @property {number}  [memoryBytes]  - Per-torrent budget for pieces held in memory (undefined = store default).
  * @property {string}  [segmentFormat] - HLS output container: "fmp4" (default) or "mpegts".
  * @property {string}  [stateDir] - Where to keep what this host has measured about itself.
@@ -86,7 +85,7 @@ function buildPortCandidates(startPort, maxAttempts = 51) {
  * @returns {Promise<{ app: import("fastify").FastifyInstance, port: number }>}
  */
 export async function startProxyServer({
-  host, port, transcodeAudio, ffmpegBin, maxDiskBytes, memoryBytes, segmentFormat, stateDir, onSubtitleCues,
+  host, port, transcodeAudio, ffmpegBin, memoryBytes, segmentFormat, stateDir, onSubtitleCues, diagnostics,
   deliverySink = false,
   // Where the proxy writes its own log. Its DIRECTORY is what matters here:
   // the browser's half of every session is written beside it, so the two are
@@ -124,7 +123,7 @@ export async function startProxyServer({
   // idled. Serving a segment shared that thread, so reading an already-finished
   // 10 MB file took 12-23 s against 125 ms to hand it to the channel. The
   // adapter keeps TorrentPool's interface, so nothing downstream changed.
-  const torrentPool = new WorkerTorrentPool({ maxDiskBytes, memoryBytes, stateDir, onSubtitleCues });
+  const torrentPool = new WorkerTorrentPool({ memoryBytes, stateDir, onSubtitleCues });
   const selectedPort = await getPort({
     port: buildPortCandidates(port)
   });
@@ -200,6 +199,7 @@ export async function startProxyServer({
     tonemapSupported,
     segmentFormatId: segmentFormat,
     stateDir,
+    diagnostics,
     // Live download stats accessor for the realtime budget: lets it tell a
     // CPU-bound transcode from a download-starved input before downscaling.
     // What every torrent here has moved, so the proxy can price its own
@@ -211,6 +211,15 @@ export async function startProxyServer({
       ? {
           held: () => torrentPool.spilledBytes ?? 0,
           allow: (bytes) => torrentPool.allowSpillBytes(bytes)
+        }
+      : null,
+    // Files downloaded whole, kept as files. They live on the torrent thread
+    // too, and until 2026-09-14 they had no bound of any kind — a 2.8 GB film
+    // on a host whose disk is often a 32 GB card.
+    wholeFiles: typeof torrentPool.allowWholeFileBytes === "function"
+      ? {
+          held: () => torrentPool.wholeFileBytes ?? 0,
+          allow: (bytes) => torrentPool.allowWholeFileBytes(bytes)
         }
       : null,
     getTorrentTotals: async () => {

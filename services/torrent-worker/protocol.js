@@ -120,6 +120,7 @@ export const Command = {
    * divides its share between the stores it holds.
    */
   SPILL_ALLOWANCE: "spill-allowance",
+  WHOLE_FILES_ALLOWANCE: "whole-files-allowance",
   DESTROY_ALL: "destroy-all"
 };
 

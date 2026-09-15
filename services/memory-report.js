@@ -401,6 +401,9 @@ export function readingIsWorthWriting({
  * @param {number} [options.changeBytes] - Movement that earns a line before the
  *   quiet interval is up.
  * @param {string} [options.snapshotDir] - Where heap snapshots are written.
+ * @param {(bytes: number) => boolean} [options.mayKeep] - Whether the evidence
+ *   may take this much room. Absent, it may: a process with no owner of the
+ *   disk — the worker thread, a test — is not told to stop.
  *   Defaults to the temporary directory, as the process scope always did.
  * @param {number} [options.snapshotFloorBytes]
  * @param {number} [options.snapshotGrowthBytes]
@@ -420,6 +423,7 @@ export function startMemoryReport({
   quietMs = 0,
   changeBytes = 0,
   snapshotDir = "",
+  mayKeep = null,
   snapshotFloorBytes = 500 * 1024 * 1024,
   snapshotGrowthBytes = 100 * 1024 * 1024,
   keepSnapshots = 0
@@ -437,6 +441,12 @@ export function startMemoryReport({
    * @returns {Promise<void>}
    */
   const takeSnapshot = async (watchedBytes, why) => {
+    // A snapshot weighs about what the heap weighs, and it takes room from the
+    // product. Asked for rather than taken; refused, it is a line and not a
+    // silence — see `storage/Diagnostics.js`.
+    if (typeof mayKeep === "function" && !mayKeep(watchedBytes)) {
+      return;
+    }
     let snapPath = "";
     try {
       snapPath = path.join(directory, `heap-${slug}-${Date.now()}-${watchedBytes}.heapsnapshot`);

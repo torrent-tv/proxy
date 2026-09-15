@@ -190,19 +190,56 @@ store — and the copies had already drifted: the piece store was corrected from
 `os.freemem()` to the kernel's `MemAvailable` on 2026-08-27 and the health
 collector went on publishing the wrong quantity until 2026-09-02.
 
-## What still takes disk without asking this layer
+## Every claimant is told its share
 
-Measured 2026-09-14 by reading every file outside the layer that touches the
-filesystem. Two claimants are wired to the owner (`wire.js`); these are not:
+A CLAIMANT IS WHOEVER HOLDS BYTES, and by 2026-09-14 all of them are registered
+with the owner (`wire.js`): the segments an encoder produced, the pieces the
+memory store spilled, the files downloaded whole, and the evidence. Two of the
+four live on the torrent thread and arrive as a pair of closures over its
+channel.
 
-1. **the torrent's own data** — `torrent-pool.js` holds a cap of its own,
-   10 GB, chosen rather than measured, and reads `statfs` itself;
-2. **core dumps** (`core-dumps.js`), **heap snapshots** (`memory-report.js`) and
-   **packet captures** (`packet-witness.js`) — each bounded by a COUNT and none
-   by a size. On the addon host two dumps and five snapshots came to 3.2 GB.
+**Whole files had no bound of any kind** until that day — a 2.8 GB film kept
+whole on a host whose disk is often a 32 GB card. They now take a share, and
+over it the whole file nobody has asked for in longest goes. Losing one is not
+losing data: the torrent can fetch it again, and until it does the read falls
+back to the pieces, which is what `piece-from-whole-file.js` exists for. A file
+is also not ASSEMBLED when there is no room for it — writing it and then
+removing it is the same bytes written for nothing.
 
-The diagnostics need a rule of their own before they can be claimants, and it is
-not a rule anybody has: a dump is the only evidence of the death it records, so
-"drop it when space is short" is not obviously right. The torrent's data needs
-no new rule — only the share to reach the worker thread, which is the shape
-`wire.js` already uses for the spilled pieces.
+**The torrent pool's own "disk cap" is gone, and it owned nothing.** It capped
+`torrentDownloadedBytes` — a sum over WebTorrent's bitfield — so a piece held
+purely in MEMORY told against a ceiling called disk, while the bytes it meant to
+bound belong to the spill and to the whole files, each of which has an owner.
+Under it, eviction removed whole idle TORRENTS to free bytes that were not
+necessarily on the disk at all.
+
+**The evidence is a claimant with a rule of its own** (`Diagnostics.js`), and the
+rule is what makes a bound on it safe:
+
+1. over its share, collection STOPS. Nothing already recorded is deleted to make
+   room — a dump is the only evidence of the death it records — and a refusal is
+   a LINE with the figures, so an investigation that finds nothing can tell "it
+   did not happen" from "there was nowhere to put it";
+2. except what is superseded, which is not evidence twice. A capture of a
+   connection already captured adds nothing: the wedge does not un-wedge. Field
+   2026-09-06, thirteen captures of one wedge in six hours, 74 MB, every one
+   saying what the first said;
+3. what it asks for is measured — what it holds plus one more of the largest
+   kind seen — so the claim grows with the evidence and a proxy that has never
+   faulted asks for nothing.
+
+**Core dumps are not ours to refuse, and that is stated rather than papered
+over.** The kernel writes them, whole address space at a time, and no gate of
+ours is consulted. They are counted, so they take room from what the product may
+hold and the figure is visible; the pruning that keeps the newest two is left
+where it is, because changing it is a decision about evidence and not about
+disk.
+
+## What is still not one
+
+The ALLOWANCE. Memory divides its own (`shared-piece-store.js` over
+`allowance.js`), disk divides its own (`DiskSpace.js` over the same
+`allowance.js`) — one rule, two owners, because they are two resources. Whether
+that is right or whether a machine has one budget is the layer's open question,
+and it is not answered by where the files live.
+

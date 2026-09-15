@@ -83,6 +83,14 @@ export class WorkerTorrentPool {
     return this.#client.allowSpillBytes(bytes);
   }
 
+  get memoryClaim() {
+    return this.#client.memoryClaim ?? { held: 0, wanted: 0 };
+  }
+
+  allowMemoryBytes(bytes) {
+    return this.#client.allowMemoryBytes(bytes);
+  }
+
   get wholeFileBytes() {
     return this.#client.wholeFileBytes ?? 0;
   }

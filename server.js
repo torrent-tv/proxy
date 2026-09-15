@@ -45,6 +45,7 @@ import { createPlaybackPlanner } from "./services/playback-planner.js";
 import { detectVideoEncoder, benchmarkSoftwarePresets, benchmarkDecodeCost, benchmarkContention, benchmarkCopySpeed, detectTonemapSupport } from "./services/hwaccel.js";
 import { measureStartAndStop } from "./services/encode/start-stop-cost.js";
 import { logger } from "./utils/logger.js";
+import { completedFilesRoot } from "./services/files/CompletedFiles.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -85,7 +86,7 @@ function buildPortCandidates(startPort, maxAttempts = 51) {
  * @returns {Promise<{ app: import("fastify").FastifyInstance, port: number }>}
  */
 export async function startProxyServer({
-  host, port, transcodeAudio, ffmpegBin, memoryBytes, segmentFormat, stateDir, onSubtitleCues, diagnostics,
+  host, port, transcodeAudio, ffmpegBin, memoryBytes, segmentFormat, stateDir, onSubtitleCues, diagnostics, budgetPolicy,
   deliverySink = false,
   // Where the proxy writes its own log. Its DIRECTORY is what matters here:
   // the browser's half of every session is written beside it, so the two are
@@ -219,9 +220,22 @@ export async function startProxyServer({
     wholeFiles: typeof torrentPool.allowWholeFileBytes === "function"
       ? {
           held: () => torrentPool.wholeFileBytes ?? 0,
-          allow: (bytes) => torrentPool.allowWholeFileBytes(bytes)
+          allow: (bytes) => torrentPool.allowWholeFileBytes(bytes),
+          root: completedFilesRoot()
         }
       : null,
+    // The pieces held IN memory, on the torrent thread. Told their share by the
+    // same owner that divides the disk: what does not fit here is spilled
+    // there, so the two cannot be divided apart.
+    memoryClaimant: typeof torrentPool.allowMemoryBytes === "function"
+      ? {
+          held: () => torrentPool.memoryClaim?.held ?? 0,
+          wanted: () => torrentPool.memoryClaim?.wanted ?? 0,
+          allow: (bytes) => torrentPool.allowMemoryBytes(bytes)
+        }
+      : null,
+    diagnosticsRoot: stateDir || "",
+    budgetPolicy,
     getTorrentTotals: async () => {
       if (typeof torrentPool.getTorrentTotals !== "function") {
         return null;

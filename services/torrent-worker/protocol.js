@@ -121,6 +121,7 @@ export const Command = {
    */
   SPILL_ALLOWANCE: "spill-allowance",
   WHOLE_FILES_ALLOWANCE: "whole-files-allowance",
+  MEMORY_ALLOWANCE: "memory-allowance",
   DESTROY_ALL: "destroy-all"
 };
 

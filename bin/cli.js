@@ -95,6 +95,11 @@ program
     "Read usrsctp's association state with gdb when a wedge is declared. OFF by default: gdb attaches to THIS process and stops every thread of it while it works."
   )
   .option("--memory-bytes <bytes>", "Per-torrent budget for pieces kept in memory before spilling to disk (default 512MB)")
+  .option("--budget <kind>", "How much of this machine the proxy may take: adaptive (default), share or fixed")
+  .option("--budget-share <fraction>", "With --budget share: the fraction of what is free, 0..1")
+  .option("--budget-bytes <bytes>", "With --budget fixed: the ceiling, per resource")
+  .option("--min-memory-bytes <bytes>", "Least memory this proxy should have, whatever the policy says")
+  .option("--min-disk-bytes <bytes>", "Least disk this proxy should have, whatever the policy says")
   .option("--ffmpeg-bin <path>", "Path to ffmpeg binary")
   .option(
     "--state-dir <path>",
@@ -131,6 +136,31 @@ const clientName = options.name ? String(options.name) : `proxy-${clientId.slice
 const token = String(options.token ?? "");
 const transcodeAudio = options.transcodeAudio !== false;
 const portMappingEnabled = options.portMapping !== false;
+// WHAT THE OPERATOR HAS SAID WE MAY TAKE, and the only numbers in this proxy
+// that are chosen rather than derived — because they are chosen by the person
+// whose machine it is. The default is the measured one: what is free now, plus
+// what we already hold, less what everything that is not us has been seen to
+// need. `share` and `fixed` are the owner naming a number instead; the floors
+// are the owner saying "below this it is not worth running".
+//
+// One policy, applied to every resource. Memory and disk are divided apart
+// because they cannot pay for each other, but by ONE owner, because the
+// claimants trade across them: pieces that do not fit in memory are spilled to
+// disk, so what memory is given decides how much disk is needed.
+const budgetFloors = {};
+if (Number.isFinite(Number(options.minMemoryBytes))) {
+  budgetFloors.memory = Number(options.minMemoryBytes);
+}
+const budgetPolicy = {
+  kind: ["adaptive", "share", "fixed"].includes(String(options.budget)) ? String(options.budget) : "adaptive",
+  share: Number(options.budgetShare),
+  bytes: Number(options.budgetBytes),
+  floors: budgetFloors,
+  // Named apart from the per-resource floors because the disk is one resource
+  // per DEVICE and the operator names one figure for all of them.
+  diskFloorBytes: Number.isFinite(Number(options.minDiskBytes)) ? Number(options.minDiskBytes) : 0
+};
+
 // Per-torrent memory budget for resident pieces. Pieces past it spill to disk
 // rather than being lost, so a small value costs read latency, never data.
 const memoryBytes =
@@ -339,6 +369,7 @@ try {
     segmentFormat: options.segmentFormat,
     stateDir: options.stateDir,
     diagnostics,
+    budgetPolicy,
     logFile: options.logFile ?? "",
     deliverySink: options.deliverySink === true,
     // Late-bound the same way `webRtcManager` is below: the torrent pool is

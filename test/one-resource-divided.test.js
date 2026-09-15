@@ -7,7 +7,7 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
-import { DiskSpace } from "../services/storage/DiskSpace.js";
+import { MachineBudget } from "../services/storage/MachineBudget.js";
 
 const MEGABYTE = 1024 * 1024;
 
@@ -31,9 +31,29 @@ function consumerOf(name, held, wanted) {
   };
 }
 
+/**
+ * A budget over ONE resource, which is what this file is about: the division
+ * itself, with the several-resources question asked in `one-budget.test.js`.
+ *
+ * @param {{ readFree: () => Promise<number | null>, logger?: object }} params
+ */
+function diskOf({ readFree, logger }) {
+  const budget = new MachineBudget({ logger });
+  budget.defineResource({ name: "disk", readFree });
+  return {
+    register: (consumer) => budget.register({ ...consumer, resource: "disk" }),
+    forget: (name) => budget.forget(name),
+    describe: () => budget.describe(),
+    revise: async () => {
+      const readings = await budget.revise();
+      return readings.get("disk") ?? { freeBytes: 0, allowanceBytes: 0, shares: [] };
+    }
+  };
+}
+
 test("what everyone may hold together never exceeds what the disk has", async () => {
   const free = 100 * MEGABYTE;
-  const space = new DiskSpace({ readFree: async () => free });
+  const space = diskOf({ readFree: async () => free });
   const segments = consumerOf("segments", 10 * MEGABYTE, 1000 * MEGABYTE);
   const pieces = consumerOf("pieces", 20 * MEGABYTE, 1000 * MEGABYTE);
   const diagnostics = consumerOf("diagnostics", 5 * MEGABYTE, 1000 * MEGABYTE);
@@ -55,7 +75,7 @@ test("what everyone may hold together never exceeds what the disk has", async ()
 });
 
 test("when everyone's ask fits, everyone gets it and the disk never binds", async () => {
-  const space = new DiskSpace({ readFree: async () => 1000 * MEGABYTE });
+  const space = diskOf({ readFree: async () => 1000 * MEGABYTE });
   const small = consumerOf("diagnostics", 0, 5 * MEGABYTE);
   const large = consumerOf("segments", 0, 500 * MEGABYTE);
   space.register(small.consumer);
@@ -70,7 +90,7 @@ test("when everyone's ask fits, everyone gets it and the disk never binds", asyn
 test("when they do not fit, each is cut in proportion to what it asked", async () => {
   // The same rule memory divides by, and the same reason: a share taken from
   // whoever asked most would hand the disk to whoever grew fastest.
-  const space = new DiskSpace({ readFree: async () => 200 * MEGABYTE });
+  const space = diskOf({ readFree: async () => 200 * MEGABYTE });
   const modest = consumerOf("diagnostics", 0, 100 * MEGABYTE);
   const greedy = consumerOf("segments", 0, 300 * MEGABYTE);
   space.register(modest.consumer);
@@ -85,7 +105,7 @@ test("when they do not fit, each is cut in proportion to what it asked", async (
 
 test("a disk that fills lowers every share, rather than keeping one taken when it was empty", async () => {
   let free = 1000 * MEGABYTE;
-  const space = new DiskSpace({ readFree: async () => free });
+  const space = diskOf({ readFree: async () => free });
   const segments = consumerOf("segments", 0, 10_000 * MEGABYTE);
   const pieces = consumerOf("pieces", 0, 10_000 * MEGABYTE);
   space.register(segments.consumer);
@@ -106,7 +126,7 @@ test("what another process took is left for it, not spent", async () => {
   // That is a measurement of somebody else's demand, and it is what the next
   // allowance leaves alone.
   let free = 1000 * MEGABYTE;
-  const space = new DiskSpace({ readFree: async () => free });
+  const space = diskOf({ readFree: async () => free });
   const only = consumerOf("segments", 0, 10_000 * MEGABYTE);
   space.register(only.consumer);
 
@@ -118,7 +138,7 @@ test("what another process took is left for it, not spent", async () => {
 });
 
 test("a disk that cannot be read allows nothing to grow", async () => {
-  const space = new DiskSpace({ readFree: async () => null });
+  const space = diskOf({ readFree: async () => null });
   const segments = consumerOf("segments", 0, 500 * MEGABYTE);
   space.register(segments.consumer);
 
@@ -130,7 +150,7 @@ test("a disk that cannot be read allows nothing to grow", async () => {
 });
 
 test("it says what the disk has and what each claimant may hold", async () => {
-  const space = new DiskSpace({ readFree: async () => 100 * MEGABYTE });
+  const space = diskOf({ readFree: async () => 100 * MEGABYTE });
   assert.match(space.describe(), /nothing has claimed/);
   space.register(consumerOf("segments", 4 * MEGABYTE, 8 * MEGABYTE).consumer);
   await space.revise();
@@ -139,7 +159,7 @@ test("it says what the disk has and what each claimant may hold", async () => {
 
 test("it says what it decided, every pass", async () => {
   const lines = [];
-  const space = new DiskSpace({
+  const space = diskOf({
     readFree: async () => 100 * MEGABYTE,
     logger: { info: (line) => lines.push(line) }
   });

@@ -235,11 +235,33 @@ hold and the figure is visible; the pruning that keeps the newest two is left
 where it is, because changing it is a decision about evidence and not about
 disk.
 
-## What is still not one
+## One budget
 
-The ALLOWANCE. Memory divides its own (`shared-piece-store.js` over
-`allowance.js`), disk divides its own (`DiskSpace.js` over the same
-`allowance.js`) — one rule, two owners, because they are two resources. Whether
-that is right or whether a machine has one budget is the layer's open question,
-and it is not answered by where the files live.
+There is one owner, one policy and one place that reads the machine —
+`MachineBudget.js`. What it divides is divided PER RESOURCE, because memory
+cannot be paid for with disk, and "disk" is one resource per DEVICE: measured on
+the addon host 2026-09-05, `/tmp` (the segments and the spill) is the overlay
+and `/data` (the evidence) is ext4 on the nvme. Dividing one figure between
+claimants on both gave each a share of a disk it does not write to, which is
+what the old `DiskSpace` did — it read the free space of the segment root alone.
+The device is read with `statSync(dir).dev`, from the nearest ancestor that
+exists, for the same reason `freeBytesFor` walks up.
+
+**Why one owner and not two.** The claimants trade across resources: pieces that
+do not fit in memory are spilled to disk, whole files exist so that pieces need
+not be held, segments exist because making them again is dear. Field 2026-08-31:
+14 400 MB spilled in fifty minutes while the memory store held 312-424 MB — give
+it memory and there is no spill to bound. Two owners cannot make that trade,
+because neither sees both sides of it. Memory was divided inside the torrent
+thread and disk on the main one until 2026-09-14; the memory share now travels
+the same channel the spill share already did.
+
+**The policy is the operator's, and it is the only chosen number here.**
+`--budget adaptive|share|fixed` with `--budget-share` / `--budget-bytes`, and
+floors with `--min-memory-bytes` / `--min-disk-bytes`. The default is
+`adaptive`, which is the measured rule of `allowance.js` and chooses nothing. A
+floor lifts what the policy allows and can never invent room the machine does
+not have; a claimant left below its own minimum says so in a line, because
+working below what it needs is a fault of the machine and invisible otherwise.
+
 

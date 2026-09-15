@@ -11,51 +11,113 @@
  * states where it truly begins, and it is already read whole in order to be
  * stamped. Only boundaries that were actually produced are counted — the parts
  * somebody watched.
+ *
+ * Counted ON THE FILE'S OWN TABLE, because that is whose fact it is: the same
+ * finding for every quality step of the film and for every later session of it.
  */
 
 import test from "node:test";
 import assert from "node:assert/strict";
 import { SourceFile } from "../services/source/SourceFile.js";
 import { Timeline } from "../services/output/Timeline.js";
-import { newIndexCheck, noteIndexDeviation } from "../services/hls-session-manager.js";
+import { KeyframeTable } from "../services/media/container/KeyframeTable.js";
+
+const TOLERANCE = 0.25;
+
+/**
+ * A table naming keyframes every four seconds, which is what the grid of a
+ * copied picture is built from.
+ *
+ * @returns {KeyframeTable}
+ */
+function fourSecondKeyframes() {
+  return new KeyframeTable().learn({
+    times: [0, 4, 8, 12, 16, 20],
+    format: "matroska"
+  });
+}
 
 test("an index that describes its file exactly is reported as such", () => {
-  const check = newIndexCheck();
+  const table = fourSecondKeyframes();
 
   for (let index = 0; index < 4; index += 1) {
-    noteIndexDeviation(check, index, 0);
+    table.witness({ index, trueStart: index * 4, deviationSec: 0, toleranceSec: TOLERANCE });
   }
 
-  assert.equal(check.checked, 4);
-  assert.equal(check.disagreed, 0, "nothing disagreed — which is a finding, not silence");
-  assert.equal(check.maxDeviationSec, 0);
+  assert.equal(table.evidence.checked, 4);
+  assert.equal(table.evidence.disagreed, 0, "nothing disagreed — which is a finding, not silence");
+  assert.equal(table.evidence.maxDeviationSec, 0);
 });
 
 test("a boundary the index placed wrongly is counted, with how far out it was", () => {
-  const check = newIndexCheck();
+  const table = fourSecondKeyframes();
 
-  noteIndexDeviation(check, 0, 0);
+  table.witness({ index: 0, trueStart: 0, deviationSec: 0, toleranceSec: TOLERANCE });
   // The measured shape: the playlist said 157.99 s, the file cut at 153.82 s.
-  noteIndexDeviation(check, 2, 4.17);
-  noteIndexDeviation(check, 3, 0.01);
+  table.witness({ index: 2, trueStart: 3.83, deviationSec: 4.17, toleranceSec: TOLERANCE });
+  table.witness({ index: 3, trueStart: 12.01, deviationSec: 0.01, toleranceSec: TOLERANCE });
 
-  assert.equal(check.checked, 3);
-  assert.equal(check.disagreed, 1);
-  assert.equal(check.firstDisagreementIndex, 2);
+  assert.equal(table.evidence.checked, 3);
+  assert.equal(table.evidence.disagreed, 1);
+  assert.equal(table.evidence.firstDisagreementIndex, 2);
   assert.equal(
-    check.maxDeviationSec,
+    table.evidence.maxDeviationSec,
     4.17,
     "the size of the error is what decides whether a rung can be cut on this grid"
   );
 });
 
 test("a deviation within tolerance is not a disagreement, but still shows in the worst case", () => {
-  const check = newIndexCheck();
+  const table = fourSecondKeyframes();
 
-  noteIndexDeviation(check, 0, 0.2);
+  table.witness({ index: 0, trueStart: 0.2, deviationSec: 0.2, toleranceSec: TOLERANCE });
 
-  assert.equal(check.disagreed, 0, "rounding in a container's timestamps is not the index being wrong");
-  assert.equal(check.maxDeviationSec, 0.2, "and it is still worth knowing how close to the line it ran");
+  assert.equal(
+    table.evidence.disagreed,
+    0,
+    "rounding in a container's timestamps is not the index being wrong"
+  );
+  assert.equal(
+    table.evidence.maxDeviationSec,
+    0.2,
+    "and it is still worth knowing how close to the line it ran"
+  );
+});
+
+test("a piece that began at ANOTHER time the table names is told apart from one that began nowhere", () => {
+  // The discriminator, and it decides which of two opposite faults this is. A
+  // piece that began at another keyframe of the same list was not mis-described
+  // by the table: the grid was built over a gap in it. One that began where the
+  // table names nothing is the table describing times the file does not have.
+  // The table answers it itself, because it is the only thing that holds the
+  // list — asked of the caller, it was one more fact travelling by hand.
+  const table = fourSecondKeyframes();
+
+  table.witness({ index: 1, trueStart: 8, deviationSec: 4, toleranceSec: TOLERANCE });
+  table.witness({ index: 2, trueStart: 9.7, deviationSec: 1.7, toleranceSec: TOLERANCE });
+
+  assert.equal(table.evidence.disagreed, 2);
+  assert.equal(table.evidence.landedOnAnotherKeyframe, 1);
+});
+
+test("a table that has read nothing claims no evidence about itself", () => {
+  // It cannot be wrong about a file it has not described. `readable` is false,
+  // every picture of the file is re-encoded, and no copy can witness anything.
+  const table = new KeyframeTable().learn({ times: null, format: "mpegts" });
+
+  assert.equal(table.evidence, null);
+  assert.equal(table.names(4), false);
+});
+
+test("a segment requested again is not new evidence", () => {
+  const table = fourSecondKeyframes();
+
+  for (let repeat = 0; repeat < 3; repeat += 1) {
+    table.witness({ index: 1, trueStart: 4.9, deviationSec: 0.9, toleranceSec: TOLERANCE });
+  }
+
+  assert.equal(table.evidence.checked, 1, "a repeat request is the same boundary, counted once");
+  assert.equal(table.evidence.disagreed, 1);
 });
 
 test("a boundary the index got wrong is replaced by the time the file really has", async (t) => {
@@ -122,15 +184,4 @@ test("a boundary the index got wrong is replaced by the time the file really has
   manager.correctBoundaryFromSegment(base, 2, 5);
   manager.correctBoundaryFromSegment(base, 0, 3);
   assert.deepEqual(base.timeline.boundaries, [0, 10, 17.4, 30, 40], "out-of-order readings are refused");
-});
-
-test("a segment requested again is not new evidence", () => {
-  const check = newIndexCheck();
-
-  noteIndexDeviation(check, 1, 0.9);
-  noteIndexDeviation(check, 1, 0.9);
-  noteIndexDeviation(check, 1, 0.9);
-
-  assert.equal(check.checked, 1, "a repeat request is the same boundary, counted once");
-  assert.equal(check.disagreed, 1);
 });

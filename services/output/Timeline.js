@@ -25,6 +25,15 @@
  * from it. What is left here is the two things that really are per grid: where
  * the cuts are, and what the player was told they are.
  *
+ * **Nor how well produced pieces land**, which it did hold until 2026-09-15 and
+ * had no business holding. One reading is taken off a produced piece and three
+ * different facts are drawn from it — a copy shows where this FILE's keyframes
+ * really are, a step shows whether IT obeyed its grid, a soundtrack shows how
+ * far the picture's grid has moved under its run — and a tally per (file, grid)
+ * mixed all three, because a picture and the soundtrack inside the same file
+ * share one grid by construction. The file's half is on `KeyframeTable`, the
+ * output's half on `Output`.
+ *
  * **Two tables, and they are not the same thing.** `boundaries` is where the
  * file is cut NOW, corrections included, and it is what a run is told to cut
  * at. `published` is what the player was given, written once and never changed,
@@ -32,35 +41,6 @@
  * the playlist it holds; the live table keeps moving as produced segments
  * reveal where the file's cuts really are.
  */
-
-/**
- * A fresh tally of how well a container's keyframe index matches its file.
- *
- * @returns {{ checked: number, disagreed: number, maxDeviationSec: number, firstDisagreementIndex: number, deviations: number[], landedOnAnotherKeyframe: number, seen: Set<number> }}
- */
-export function newIndexCheck() {
-  return {
-    checked: 0,
-    disagreed: 0,
-    maxDeviationSec: 0,
-    firstDisagreementIndex: -1,
-    // Every deviation, so the summary can report a distribution instead of one
-    // extreme. Bounded by the number of distinct boundaries a file produces.
-    deviations: [],
-    // Of the segments that started away from the playlist, how many began at
-    // ANOTHER time in the very list the grid was built from. This is the
-    // measurement that separates the two explanations: a table that describes
-    // times the file does not have, against a table that lists only SOME
-    // keyframes and a grid built over its gaps. Asked 2026-08-17 by the user,
-    // who was right that the second is far more likely — every deviation
-    // measured that day was positive, 0.58-2.96 s, which is what a cut pushed
-    // forward to the next real keyframe looks like.
-    landedOnAnotherKeyframe: 0,
-    // Which boundaries have been counted. A segment can be requested again, and
-    // a repeat is the same boundary, not new evidence.
-    seen: new Set()
-  };
-}
 
 export class Timeline {
   /**
@@ -93,11 +73,6 @@ export class Timeline {
     this.sourceTimes = Array.isArray(sourceTimes) && sourceTimes.length === this.published.length
       ? sourceTimes
       : [];
-    // How well this container's keyframe index matches its own file. A fact
-    // about the FILE and its index: asked per session it would be answered a
-    // different number of times for one film depending on how many people
-    // happened to watch it.
-    this.indexCheck = newIndexCheck();
   }
 
   /** @returns {number} How many segments this file is cut into. */

@@ -65,9 +65,8 @@ import {
 import { resolveSegmentFormat, SEGMENT_FORMAT_IDS } from "./segment-formats/index.js";
 import { audioRenditionName } from "./media/audio-inventory.js";
 import { AudioOutput, CutGrid, OutputSpec, VideoOutput } from "./output/index.js";
-import { newIndexCheck, Timeline, Timelines } from "./output/Timeline.js";
+import { Timeline, Timelines } from "./output/Timeline.js";
 import { computeCutGrid } from "./output/cut-grid.js";
-export { newIndexCheck };
 import { Output, Outputs } from "./output/Output.js";
 import { masterPlaylistText, mediaPlaylistText, segmentIndexForTime } from "./output/playlists.js";
 import { SourceFiles, sourceDecodeCharacteristics } from "./source/SourceFile.js";
@@ -239,37 +238,6 @@ export function audioRenditionKey(trackIndex, transcode) {
   return `${Number(trackIndex) || 0}:${transcode === true ? "aac" : "copy"}`;
 }
 
-
-/**
- * Add one produced segment's deviation to the tally.
- *
- * @param {ReturnType<typeof newIndexCheck>} check
- * @param {number} index - Segment index, so a repeat can be recognised.
- * @param {number} deviationSec - How far the piece's own start fell from the
- *   start the playlist declared for it.
- * @returns {void}
- */
-export function noteIndexDeviation(check, index, deviationSec, landedOnKeyframe = null) {
-  if (check.seen.has(index)) {
-    return;
-  }
-  check.seen.add(index);
-  check.checked += 1;
-  check.deviations ??= [];
-  check.deviations.push(deviationSec);
-  if (landedOnKeyframe === true) {
-    check.landedOnAnotherKeyframe = (check.landedOnAnotherKeyframe ?? 0) + 1;
-  }
-  if (deviationSec > SEGMENT_START_DISAGREEMENT_SEC) {
-    check.disagreed += 1;
-    if (check.firstDisagreementIndex < 0) {
-      check.firstDisagreementIndex = index;
-    }
-  }
-  if (deviationSec > check.maxDeviationSec) {
-    check.maxDeviationSec = deviationSec;
-  }
-}
 
 /**
  * The same budget, starting at the top of its own ladder.
@@ -5806,7 +5774,6 @@ export class HlsSessionManager {
 
   #noteIndexAccuracy(session, index, trueStart, declaredStart) {
     const deviation = Math.abs(trueStart - declaredStart);
-    session.timeline.indexCheck ??= newIndexCheck();
     // Where each produced segment truly began, kept so that a player reporting
     // a stall can be ANSWERED rather than merely believed. Bounded: only the
     // recent past can be the subject of such a report, and an unbounded map on
@@ -5819,14 +5786,27 @@ export class HlsSessionManager {
         session.trueStartByIndex.delete(oldest.value);
       }
     }
-    // Did this segment begin at ANOTHER keyframe from the same list? Half an
-    // audio frame is the tolerance — anything the list names is exact, so a
-    // match is a match. `keyframeTimes` is the list the grid was built from, so
-    // this compares the file against the table on the table's own terms.
-    const knownKeyframe = session.keyframes?.readable
-      ? session.keyframes.times.some((time) => Math.abs(time - trueStart) <= 0.05)
-      : null;
-    noteIndexDeviation(session.timeline.indexCheck, index, deviation, knownKeyframe);
+    // ONE READING, AND WHOSE FACT IT IS DEPENDS ON HOW THIS OUTPUT IS MADE. The
+    // three branches below already say the distinction when they WARN; until
+    // 2026-09-15 what they COUNTED threw it away, into a tally held per (file,
+    // grid) that a picture and the soundtrack inside the same file share.
+    //
+    // Only a COPY can say anything about the file: it is cut at a keyframe of
+    // that file and nowhere else. So a copy's landing goes to the file's own
+    // table, where it outlives this grid and reaches every step and every later
+    // session of the file.
+    if (session.audioOnly !== true && session.transcodeVideo !== true) {
+      session.keyframes?.witness({
+        index,
+        trueStart,
+        deviationSec: deviation,
+        toleranceSec: SEGMENT_START_DISAGREEMENT_SEC
+      });
+    }
+    // And every output records its own landing against its own published grid,
+    // which is what says whether a step will splice and how far a soundtrack
+    // stands from the picture.
+    session.output?.noteLanding({ index, deviationSec: deviation, toleranceSec: SEGMENT_START_DISAGREEMENT_SEC });
     if (deviation > SEGMENT_START_DISAGREEMENT_SEC) {
       // Which boundary the true start DOES match, if any. This is what tells
       // the two possible faults apart, and they need opposite fixes: matching
@@ -5883,7 +5863,8 @@ export class HlsSessionManager {
     // and a summary that only ever appears at the end is a summary that is
     // routinely never written. Twenty-five distinct boundaries is enough for
     // the proportion to mean something and rare enough not to repeat itself.
-    if (session.timeline.indexCheck.checked > 0 && session.timeline.indexCheck.checked % 25 === 0) {
+    const counted = session.output?.piecesLanded ?? 0;
+    if (counted > 0 && counted % 25 === 0) {
       this.#logIndexAccuracy(session);
     }
     this.correctBoundaryFromSegment(session, index, trueStart);
@@ -6063,55 +6044,71 @@ export class HlsSessionManager {
   }
 
   /**
-   * What this session learned about its container's keyframe index, as one
-   * line, at the end.
+   * Where this output's pieces have been landing, and — where this output is a
+   * copy — what that has shown about the FILE's own keyframe table.
+   *
+   * TWO LINES, because they are two facts with two owners and two lifetimes.
+   * The landing is this output's and dies with it. The table's accuracy belongs
+   * to the file, is learned only from a copy, and is the same finding for every
+   * step and every later session of that file — so it names the file and not
+   * the session, and it is written only by the output that can witness it.
    *
    * Written even when nothing disagreed, because that is the finding: with only
-   * the per-boundary warning, silence could not be told from nobody having
-   * watched. Skipped for a session that checked nothing, which says neither.
+   * the per-piece warning, silence could not be told from nobody having
+   * watched. Skipped where nothing was produced, which says neither.
    *
    * @param {HlsSession} session
    * @returns {void}
    */
   #logIndexAccuracy(session) {
-    const check = session.timeline?.indexCheck;
-    if (!check || check.checked === 0) {
+    const copiedPicture = session.audioOnly !== true && session.transcodeVideo !== true;
+    const landing = session.output?.landing ?? null;
+    if (landing) {
+      logger.info(
+        // The session id, because without it this line cannot be attributed. A
+        // family produces one of these per member — the picture, each step,
+        // each soundtrack — and on 2026-08-17 the picture's was read as the
+        // sound's, from a neighbouring log line, and a roadmap item was written
+        // against the wrong half of the stream.
+        `landing ${session.id.slice(0, 8)} ` +
+        `${session.audioOnly === true ? "sound" : copiedPicture ? "copied picture" : "re-encoded picture"} ` +
+        `"${session.file.name}": ${landing.disagreed} of ${landing.checked} produced pieces started ` +
+        `away from this output's own playlist, median ${landing.medianDeviationSec.toFixed(3)}s ` +
+        `worst ${landing.maxDeviationSec.toFixed(3)}s` +
+        (landing.firstDisagreementIndex >= 0 ? ` (first at #${landing.firstDisagreementIndex})` : "") +
+        ` [tolerance ${SEGMENT_START_DISAGREEMENT_SEC}s] — ` +
+        (session.audioOnly === true
+          // A soundtrack is cut exactly where it is asked to be, so this is not
+          // a reading about any keyframe: it is how far this run's cuts stand
+          // from a grid the picture has corrected under it.
+          ? "sound is cut where it is asked to be, so this is the picture's grid having moved"
+          : copiedPicture
+            // A copy cannot be cut anywhere but a real keyframe, so this figure
+            // is also evidence about the file, reported on the line below.
+            ? "a copy is cut at the file's own keyframes, so this is also evidence about its table"
+            // A re-encode was TOLD to put a keyframe at each of these instants.
+            : "this rung was told where to cut; what it missed will not splice cleanly")
+      );
+    }
+    if (!copiedPicture) {
       return;
     }
-    const deviations = [...(check.deviations ?? [])].sort((left, right) => left - right);
-    const median = deviations.length > 0 ? deviations[Math.floor(deviations.length / 2)] : 0;
-    const landed = check.landedOnAnotherKeyframe ?? 0;
+    const evidence = session.keyframes?.evidence ?? null;
+    if (!evidence) {
+      return;
+    }
     logger.info(
-      // The session id, because without it this line cannot be attributed. A
-      // family produces one summary per member — the picture and each
-      // soundtrack — and on 2026-08-17 the picture's was read as the sound's,
-      // from a neighbouring log line, and a roadmap item was written against
-      // the wrong half of the stream. The id is the only thing that says whose
-      // reading this is.
-      // Named for what is being measured, which is not the same thing on the
-      // two halves of a stream. The picture's cuts ARE keyframes of the file,
-      // so its deviations measure the container's keyframe index. A soundtrack
-      // is cut wherever it is asked to be and has no keyframes at all, so its
-      // deviations measure how far the grid has moved since its run was
-      // launched. One name for both said the index was wrong about a session
-      // that never consulted it.
-      `${session.audioOnly === true ? "sound-vs-grid" : "keyframe-index"} ` +
-      `${session.id.slice(0, 8)} ${session.audioOnly === true ? "sound" : "picture"} ` +
-      `${session.keyframes?.format ?? "unknown"} "${session.file.name}": ` +
-      `${check.disagreed} of ${check.checked} produced segments started away from the playlist, ` +
-      `median ${median.toFixed(3)}s worst ${check.maxDeviationSec.toFixed(3)}s` +
-      (check.firstDisagreementIndex >= 0 ? ` (first at #${check.firstDisagreementIndex})` : "") +
-      (session.audioOnly === true
-        // A soundtrack has no keyframes, so there is no "began at another
-        // keyframe" half to state — but the threshold the count was made
-        // against belongs on both lines, or a number stands with nothing to
-        // read it against.
-        ? ` [tolerance ${SEGMENT_START_DISAGREEMENT_SEC}s]`
-        // The discriminator, stated in the same line as the count it explains: a
-        // segment that began at another time the SAME table names was not
-        // mis-described by the table — the grid was built over a gap in it.
-        : `; ${landed} of them began at another keyframe the table names` +
-          ` [tolerance ${SEGMENT_START_DISAGREEMENT_SEC}s, ${session.keyframes?.count ?? 0} keyframes read]`)
+      // Named by the FILE, with no session id in it, because that is what it is
+      // about: the same answer for every step and every viewer of these bytes.
+      `keyframe-index ${session.keyframes?.format ?? "unknown"} "${session.file.name}": ` +
+      `${evidence.disagreed} of ${evidence.checked} copied pieces began away from the table, ` +
+      `median ${evidence.medianDeviationSec.toFixed(3)}s worst ${evidence.maxDeviationSec.toFixed(3)}s` +
+      (evidence.firstDisagreementIndex >= 0 ? ` (first at #${evidence.firstDisagreementIndex})` : "") +
+      // The discriminator, stated in the same line as the count it explains: a
+      // piece that began at another time the SAME table names was not
+      // mis-described by the table — the grid was built over a gap in it.
+      `; ${evidence.landedOnAnotherKeyframe} of them began at another keyframe the table names` +
+      ` [tolerance ${SEGMENT_START_DISAGREEMENT_SEC}s, ${session.keyframes?.count ?? 0} keyframes read]`
     );
   }
 

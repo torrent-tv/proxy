@@ -58,8 +58,7 @@ function familyAtBoundaryTwo() {
     // Where its encoder has got to, which a run writes into as it works.
     progress: { processedSeconds: 0 },
     runs: new Set(),
-    pendingRun: null,
-    indexCheck: null
+    pendingRun: null
   };
   // The soundtrack of that picture: the same file, published on its own. Found
   // by what it is, since no list of ids names it any more.
@@ -82,8 +81,7 @@ function familyAtBoundaryTwo() {
     // Where its encoder has got to, which a run writes into as it works.
     progress: { processedSeconds: 0 },
     runs: new Set(),
-    pendingRun: null,
-    indexCheck: null
+    pendingRun: null
   };
   startRunOn(picture, { from: 2 });
   startRunOn(sound, { from: 2 });

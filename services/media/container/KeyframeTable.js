@@ -32,7 +32,25 @@
  * **What this is NOT.** It is not the reading of the table — who reads, over
  * what transport, how long anybody waits — which is
  * `orchestrators/KeyframeTables.js`, the only thing that may call `learn`.
+ *
+ * **And it holds the evidence AGAINST itself**, which is the one thing that can
+ * only be learned from the file being played. A copied picture can be cut
+ * nowhere but a real keyframe, so where a produced piece truly began is a
+ * reading about THIS table and about nothing else. Kept here, it outlives the
+ * cut table of any one grid and reaches every step and every later session of
+ * the file; kept on a grid, as it was until 2026-09-15, it was mixed with two
+ * other facts that merely shared that grid — a step that was TOLD where to put
+ * a keyframe and did not, and a soundtrack that has no keyframes at all.
  */
+
+/**
+ * How far a produced piece may sit from a time this table names and still be
+ * that time. Zero would be right for a container that states presentation
+ * times; AVI states frame NUMBERS and computes the time from them, landing
+ * 10-44 ms out (measured 2026-08-21), and that is what `tolerance` declares.
+ * The floor is half an audio frame, below which nothing is distinguishable.
+ */
+const NAMES_WITHIN_SEC = 0.05;
 
 export class KeyframeTable {
   /** @type {number[] | null} */
@@ -46,6 +64,32 @@ export class KeyframeTable {
 
   /** @type {boolean} */
   #answered = false;
+
+  /**
+   * What copied pieces of this file have shown about the table above.
+   *
+   * @type {{ checked: number, disagreed: number, maxDeviationSec: number, firstDisagreementIndex: number, deviations: number[], landedOnAnotherKeyframe: number, seen: Set<number> }}
+   */
+  #evidence = {
+    checked: 0,
+    disagreed: 0,
+    maxDeviationSec: 0,
+    firstDisagreementIndex: -1,
+    // Every deviation, so a summary can report a distribution instead of one
+    // extreme. Bounded by the number of distinct cuts the file has.
+    deviations: [],
+    // Of the pieces that began away from where they were told, how many began
+    // at ANOTHER time in this very table. That is the measurement separating
+    // the two explanations: a table describing times the file does not have,
+    // against a table naming only SOME keyframes with a grid built over its
+    // gaps. Asked 2026-08-17 by the user, who was right that the second is far
+    // more likely — every deviation measured that day was positive, 0.58-2.96s,
+    // which is what a cut pushed forward to the next real keyframe looks like.
+    landedOnAnotherKeyframe: 0,
+    // Which cuts have been counted. A piece can be produced and served again,
+    // and a repeat is the same cut, not new evidence.
+    seen: new Set()
+  };
 
   /**
    * Keyframe times in seconds on the FILE's own clock, ascending. Null until
@@ -144,5 +188,85 @@ export class KeyframeTable {
     const declared = Number(reading?.tolerance);
     this.#tolerance = Number.isFinite(declared) && declared > 0 ? declared : 0;
     return this;
+  }
+
+  /**
+   * Whether this table names that instant.
+   *
+   * @param {number} seconds
+   * @returns {boolean} False when nothing has been read, which is not the same
+   *   as "the table does not name it" — but a table with no times makes no
+   *   claim to be wrong about either.
+   */
+  names(seconds) {
+    if (this.#times === null || !Number.isFinite(seconds)) {
+      return false;
+    }
+    const within = Math.max(NAMES_WITHIN_SEC, this.#tolerance);
+    return this.#times.some((time) => Math.abs(time - seconds) <= within);
+  }
+
+  /**
+   * A COPIED piece of this file states where it truly began.
+   *
+   * Only a copy may be witnessed here, and the caller is what knows which it
+   * has: a copy is cut at a keyframe of this file and nowhere else, so its
+   * landing is a reading about this table. A re-encoded step was told where to
+   * put a keyframe — a disagreement there is that step failing to obey, not the
+   * table being wrong — and a soundtrack is cut exactly where it is asked to
+   * be, to within one audio frame, so it says nothing about any keyframe at all.
+   *
+   * @param {object} reading
+   * @param {number} reading.index - Which cut, so a repeat is recognised.
+   * @param {number} reading.trueStart - Where the piece really began, on the
+   *   file's own clock.
+   * @param {number} reading.deviationSec - How far that is from where the grid
+   *   said it would be.
+   * @param {number} reading.toleranceSec - Above which the two are held to
+   *   disagree rather than to have rounded. The judgement's own figure, stated
+   *   by whoever is judging, so that one number decides it everywhere.
+   * @returns {void}
+   */
+  witness({ index, trueStart, deviationSec, toleranceSec }) {
+    if (!Number.isInteger(index) || !Number.isFinite(deviationSec) || this.#evidence.seen.has(index)) {
+      return;
+    }
+    this.#evidence.seen.add(index);
+    this.#evidence.checked += 1;
+    this.#evidence.deviations.push(deviationSec);
+    if (this.names(trueStart)) {
+      this.#evidence.landedOnAnotherKeyframe += 1;
+    }
+    if (deviationSec > toleranceSec) {
+      this.#evidence.disagreed += 1;
+      if (this.#evidence.firstDisagreementIndex < 0) {
+        this.#evidence.firstDisagreementIndex = index;
+      }
+    }
+    if (deviationSec > this.#evidence.maxDeviationSec) {
+      this.#evidence.maxDeviationSec = deviationSec;
+    }
+  }
+
+  /**
+   * What the copied pieces produced so far say about this table.
+   *
+   * @returns {{ checked: number, disagreed: number, maxDeviationSec: number, medianDeviationSec: number, firstDisagreementIndex: number, landedOnAnotherKeyframe: number } | null}
+   *   Null while nothing has been produced from a copy, which says neither that
+   *   the table is right nor that it is wrong.
+   */
+  get evidence() {
+    if (this.#evidence.checked === 0) {
+      return null;
+    }
+    const sorted = [...this.#evidence.deviations].sort((left, right) => left - right);
+    return {
+      checked: this.#evidence.checked,
+      disagreed: this.#evidence.disagreed,
+      maxDeviationSec: this.#evidence.maxDeviationSec,
+      medianDeviationSec: sorted[Math.floor(sorted.length / 2)],
+      firstDisagreementIndex: this.#evidence.firstDisagreementIndex,
+      landedOnAnotherKeyframe: this.#evidence.landedOnAnotherKeyframe
+    };
   }
 }

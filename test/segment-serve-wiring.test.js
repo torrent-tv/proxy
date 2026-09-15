@@ -19,6 +19,8 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { SourceFile } from "../services/source/SourceFile.js";
 import { Timeline } from "../services/output/Timeline.js";
+import { Output } from "../services/output/Output.js";
+import { KeyframeTable } from "../services/media/container/KeyframeTable.js";
 import { rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { HlsSessionManager } from "../services/hls-session-manager.js";
@@ -118,7 +120,7 @@ function selfContainedPiece(offsetSeconds) {
  * A manager holding one session whose segments are already on disk, cut at
  * explicit times — the ordinary keyframe-cut path.
  *
- * @param {{ segmentFormat?: object }} [overrides]
+ * @param {{ segmentFormat?: object, audioOnly?: boolean }} [overrides]
  * @returns {Promise<{ manager: HlsSessionManager, session: object, dirPath: string }>}
  */
 async function managerWithReadySegment(overrides = {}) {
@@ -182,6 +184,16 @@ async function managerWithReadySegment(overrides = {}) {
     useSyntheticPlaylist: true,
     playlistText: "#EXTM3U\n",
     initBytes: fmp4Format.extractInit(piece),
+    // WHAT IS BEING PRODUCED, which is also where a produced piece's landing is
+    // recorded. Per output, so one output's reading of a piece number cannot
+    // silence another output's reading of its own.
+    output: new Output({ encodeWidth: 0, encodeHeight: 0, outputFps: 25, softwarePreset: null, applyTonemap: false }),
+    // WHERE THIS FILE'S KEYFRAMES ARE, held by the file. A copied picture is cut
+    // at these and nowhere else, which is what makes its landing evidence about
+    // this table — and what makes a soundtrack's landing evidence about nothing
+    // of the sort.
+    keyframes: new KeyframeTable().learn({ times: [0, 12.5, 25, 37.5, 50], format: "matroska" }),
+    audioOnly: overrides.audioOnly === true,
     firstSegmentLogged: false,
     waitEpoch: 0
   };
@@ -211,12 +223,44 @@ test("serving a segment records what its real start says about the container's i
   });
   // The tally is counted in the module tests; what this pins is that serving a
   // segment reaches it at all. A counter nothing increments reports a clean
-  // index for every file forever, which is worse than no measurement.
-  session.timeline.indexCheck = { checked: 0, disagreed: 0, maxDeviationSec: 0, firstDisagreementIndex: -1, seen: new Set() };
+  // grid for every output forever, which is worse than no measurement.
+  assert.equal(session.output.landing, null, "nothing has been produced yet");
 
   await manager.getFileStream(SESSION_ID, "segment-00000.mp4", { requestSeq: 1 });
 
-  assert.equal(session.timeline.indexCheck.checked, 1, "the boundary that was just produced must have been examined");
+  assert.equal(session.output.landing.checked, 1, "the piece that was just produced must have been examined");
+});
+
+test("only a copied picture's landing is taken as evidence about the file's keyframe table", async (t) => {
+  // The one reading, sent to the two owners the manager decides between. A
+  // soundtrack is cut exactly where it is asked to be and has no keyframes, so
+  // its landing is about its own output and about nothing else; sent to the
+  // file's table it would report the file's index wrong on the strength of a
+  // stream that never consulted it.
+  const sound = await managerWithReadySegment({ audioOnly: true });
+  t.after(async () => {
+    await sound.manager.disposeAll();
+    await rm(sound.dirPath, { recursive: true, force: true });
+  });
+
+  await sound.manager.getFileStream(SESSION_ID, "segment-00000.mp4", { requestSeq: 1 });
+
+  assert.equal(sound.session.output.landing.checked, 1, "the sound's own landing is recorded");
+  assert.equal(
+    sound.session.keyframes.evidence,
+    null,
+    "and nothing it produced is evidence about where the file's keyframes are"
+  );
+
+  const picture = await managerWithReadySegment();
+  t.after(async () => {
+    await picture.manager.disposeAll();
+    await rm(picture.dirPath, { recursive: true, force: true });
+  });
+
+  await picture.manager.getFileStream(SESSION_ID, "segment-00000.mp4", { requestSeq: 1 });
+
+  assert.equal(picture.session.keyframes.evidence.checked, 1, "a copy's landing does reach the file's table");
 });
 
 test("a segment that exists is served, not reported as still being produced", async (t) => {
@@ -251,9 +295,9 @@ test("a segment that exists is served, not reported as still being produced", as
     "the segment must be stamped with where it really begins"
   );
   assert.equal(
-    session.timeline.indexCheck.checked,
+    session.output.landing.checked,
     1,
-    "and the piece's own position must still have been read, or nothing measures the index"
+    "and the piece's own position must still have been read, or nothing measures the landing"
   );
 });
 

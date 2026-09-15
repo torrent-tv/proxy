@@ -73,17 +73,6 @@ test("which segment holds a moment", () => {
   assert.equal(timeline.indexForTime(99), 3, "past the end is the last segment, not an error");
 });
 
-test("a fresh table starts with an empty tally of how well its index matched", () => {
-  const timeline = fourSecondGrid();
-
-  // The tally is a fact about the FILE and its index: asked per session it
-  // would be answered a different number of times for one film depending on
-  // how many people happened to watch it.
-  assert.equal(timeline.indexCheck.checked, 0);
-  assert.equal(timeline.indexCheck.disagreed, 0);
-  assert.equal(timeline.indexCheck.firstDisagreementIndex, -1);
-});
-
 test("a timeline nobody holds is dropped", () => {
   const timelines = new Timelines();
   const kept = timelines.get(Timelines.keyFor("torrent:abc", 0, "keyframe"), fourSecondGrid);

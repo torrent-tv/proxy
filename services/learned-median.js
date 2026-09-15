@@ -18,6 +18,17 @@
  */
 
 /**
+ * How many of the most recent readings the median is taken over.
+ *
+ * A statement about how much of the past still describes the host, not a
+ * measured quantity, and it is written as one rather than dressed up as one.
+ * It lives here because it is a property of this rule and not of any one cost:
+ * all four learn the same way, and it was declared in the session manager under
+ * a name that claimed it was about decoding while three of the four used it.
+ */
+export const READINGS_KEPT = 7;
+
+/**
  * The middle of a set of readings, or null when there are none.
  *
  * @param {number[]} values

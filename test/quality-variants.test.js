@@ -18,10 +18,8 @@ import { Timeline } from "../services/output/Timeline.js";
 import { mkdtemp, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import {
-  costKindForSession,
-  HlsSessionManager
-} from "../services/hls-session-manager.js";
+import { HlsSessionManager } from "../services/hls-session-manager.js";
+import { costKindForSession } from "../services/quality/EncodeCost.js";
 import { managerWithOwnStore } from "./helpers/manager.js";
 import { fmp4Format } from "../services/segment-formats/fmp4.js";
 import { computeCutGrid } from "../services/output/cut-grid.js";

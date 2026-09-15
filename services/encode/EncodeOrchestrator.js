@@ -259,6 +259,33 @@ export class EncodeOrchestrator {
   }
 
   /**
+   * What the map says about one segment of one output, and about the map it
+   * sits in.
+   *
+   * Asked by whoever is holding a request and measuring the wait: a wait means
+   * one thing at the top rank and another at the bottom, and telling them apart
+   * needs both the segment's own rank and the highest rank stated, since a rank
+   * is a position in this map and not an absolute number.
+   *
+   * AND AN EMPTY MAP IS NOT AN ANSWER. A top rank of zero says the map has not
+   * been built yet — a session created a moment ago, before the first pass —
+   * and that is a different thing from "nobody is coming". Conflated, every
+   * request behind the run reads as absent for as long as a fresh session has
+   * no map.
+   *
+   * It exists because the one caller reached through this object into the store
+   * behind it. A reach like that is how a store becomes the surface: the day it
+   * changes, a caller two layers away breaks for a reason it cannot see.
+   *
+   * @param {string} address
+   * @param {number} index
+   * @returns {{ rank: number, topRank: number }}
+   */
+  rankAt(address, index) {
+    return this.demand.rankOf(address, index);
+  }
+
+  /**
    * How many encoder processes are running on this machine right now, over
    * every output.
    *

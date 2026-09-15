@@ -426,3 +426,36 @@ test("a segment behind a run's own start does not claim that run has produced", 
   assert.deepEqual(run.produced, [], "#0 is somebody else's work and says nothing about this run");
   assert.equal(run.head, 5, "which is still where it began");
 });
+
+test("a request behind the run that nobody is coming for is answered absent, not held", async (t) => {
+  // A HOLD IS ONLY RIGHT WHILE SOMETHING IS COMING. Field 2026-08-15: hls.js
+  // asked a freshly prepared track for segment #0 while the run stood at #354,
+  // the request was held for the whole minute, and only when it failed did the
+  // player ask for the segment it actually needed — 63 s of spinner after a
+  // track that had been ready in 7. Answered absent, the player moves on at
+  // once.
+  //
+  // Whether anybody is coming is the encoding's answer, from the map it was
+  // given. An EMPTY map is not that answer: a session created a moment ago has
+  // no map yet, and read as "nobody is coming" every request behind the run
+  // would be refused for as long as that lasted.
+  const { manager, session, dirPath } = await managerWithReadySegment();
+  t.after(async () => {
+    await manager.disposeAll();
+    await rm(dirPath, { recursive: true, force: true });
+  });
+  session.runs.clear();
+  startRunOn(session, { from: 3, producing: true, usesExplicitCuts: true, speedX: 2 });
+
+  // No map yet: the request is HELD, because nothing has said otherwise.
+  const held = await manager.getFileStream(SESSION_ID, "segment-00002.mp4", { requestSeq: 2 });
+  assert.notEqual(held.kind, "not-found", "a session with no map waits, it does not refuse");
+
+  // Now the map says where the viewers are, and #2 is not in it.
+  manager.encodeOrchestrator.notePriorityMap(OUTPUT_KEY, [
+    { from: 3, to: 4, priority: 100, withinSeconds: 0 }
+  ]);
+  const refused = await manager.getFileStream(SESSION_ID, "segment-00002.mp4", { requestSeq: 3 });
+
+  assert.equal(refused.kind, "not-found");
+});

@@ -7902,14 +7902,14 @@ export class HlsSessionManager {
       // failed did the player move to the segment it actually needed — 63 s of
       // spinner after a track that had been made ready in 7.
       //
-      // WHETHER ANYBODY IS COMING FOR IT, asked of the map (`SegmentDemand.rankOf`,
+      // WHETHER ANYBODY IS COMING FOR IT, asked of the encoding (`rankAt`,
       // which also tells "in nobody's zone" from "no map yet"). The same walk
       // was written out here and could answer only yes or no, so the RANK was
       // discarded at the one point where a viewer measurably waits for a named
       // segment; it goes back out with the answer, because the wait is measured
       // by whoever holds the request.
       const address = session.outputKey ?? "";
-      const { rank, topRank } = this.encodeOrchestrator.demand.rankOf(address, requestedIndex);
+      const { rank, topRank } = this.encodeOrchestrator.rankAt(address, requestedIndex);
       ranked = { address, rank, topRank };
       const nobodyIsComing = topRank > 0 && rank === 0;
       if (

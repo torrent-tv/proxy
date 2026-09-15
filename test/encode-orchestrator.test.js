@@ -155,6 +155,44 @@ function orchestrator({ maxRuns = 2 } = {}) {
   return { made, lines, processes, buildRun };
 }
 
+test("how many encoders are running is answered by the one thing that makes them", () => {
+  // ONE FACT, ONE OWNER. The session manager answered this twice by walking its
+  // own registry — once per SESSION and once per RUN — and the two agreed only
+  // while a session held at most one run. It has held several since the plan was
+  // allowed to place them, and what a second encoder costs the first was
+  // measured between ffmpeg PROCESSES, so the per-session count was the wrong
+  // one of the two exactly where they differed.
+  const { made, buildRun, processes } = orchestrator();
+  assert.equal(made.runningCount(), 0, "nothing is running before anything is made");
+
+  const first = buildRun({ from: 0, to: 99 });
+  const second = buildRun({ from: 100, to: 199 });
+  made.adopt(PICTURE, first);
+  made.adopt(PICTURE, second);
+  assert.equal(made.runningCount(), 2, "two processes on one output are two encoders, not one");
+
+  // And a run that has ended is forgotten as it ends, not at the next pass.
+  processes.get(first).emit("exit", 0, null);
+  assert.equal(made.runningCount(), 1);
+
+  // A SUSPENDED run is stopped where it stands and is using nothing, so a cost
+  // measured beside it is a cost measured alone.
+  //
+  // Stated as a run-shaped value rather than by suspending a real one: `pause`
+  // sends SIGSTOP by pid, which this platform does not have — so a check that
+  // went through it would pass or fail by the machine it ran on, and this
+  // project would rather have no check than one of those.
+  made.adopt(PICTURE, { id: "parked", from: 300, to: 399, head: 300, speedX: 1, isAlive: true, isSuspended: true, stop() {} });
+  assert.equal(made.runningCount(), 1, "a parked encoder is not one that is running");
+
+  // Nor is one on its way out. A run told to stop is still here — its exit
+  // arrives a turn or two later — and counting it makes whoever is deciding
+  // whether to start an encoder decide not to, on the strength of a process
+  // that is leaving.
+  made.adopt(PICTURE, { id: "leaving", from: 400, to: 499, head: 400, speedX: 1, isAlive: false, isSuspended: false, stop() {} });
+  assert.equal(made.runningCount(), 1);
+});
+
 test("a viewer waiting gets an encoder at what they are waiting for", () => {
   const { made } = orchestrator();
   wants(made, [{ from: 100, to: 130 }]);

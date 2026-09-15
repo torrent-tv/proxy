@@ -517,7 +517,6 @@ export class SharedPieceStore {
     this.#disk = options.disk ?? new PieceDiskStore({
       directory: options.path ?? ".",
       name: `${this.#name}.pieces`,
-      chunkLength,
       // What it may hold is settled by the same revision that settles memory,
       // within a minute of the store existing. Until then it is unbounded, which
       // is what it has always been — the difference is that it now stops.

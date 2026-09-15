@@ -1229,8 +1229,12 @@ export class HlsSessionManager {
         // split into its decode and encode halves and is not filed as one.
         encoderKind: this.videoEncoder?.kind ?? null
       }),
-      runningEncoders: () => this.#runningEncoders(),
-      encodersRunningNow: () => this.#encodersRunningNow(),
+      // HOW MANY ENCODER PROCESSES ARE RUNNING, asked of the one thing that
+      // makes and unmakes them. This used to be two counts of one fact, taken
+      // by walking the session registry — one per session, one per run — and
+      // they agreed only while a session held at most one run.
+      runningEncoders: () => this.encodeOrchestrator.runningCount(),
+      encodersRunningNow: () => this.encodeOrchestrator.runningCount(),
       torrentCostSecFor: (session) => this.#torrentCostSecFor(session),
       boundBy: (session) => this.#classifyTranscodeBound(session)
     });
@@ -3505,63 +3509,8 @@ export class HlsSessionManager {
     ownRunMaking(session, index)?.noteProduced(index);
   }
 
-  /**
-   * How many of this proxy's encoders are running right now.
-   *
-   * Suspended runs are not counted: a process stopped by the look-ahead cap
-   * competes for nothing, and counting it would price a machine as busier than
-   * it is — the same distinction the host-load line had to learn (2026-08-15,
-   * `ffmpeg=0% system=24%` with both encoders parked).
-   *
-   * @returns {number}
-   */
-  #encodersRunningNow() {
-    let running = 0;
-    for (const session of this.sessionsById.values()) {
-      const state = runStateOf(session);
-      if (state === ENCODE_RUN_STATE.STARTING || state === ENCODE_RUN_STATE.PRODUCING) {
-        running += 1;
-      }
-    }
-    return running;
-  }
 
-  /**
-   * Suspend a session's encoder. No-op when already paused or unsupported here.
-   *
-   * @param {HlsSession} session
-   * @param {string} reason
-   * @returns {void}
-   */
-  #pauseEncoder(session, reason) {
-    // Any pair spanning this would count a stopped encoder as slow.
-    session.learnSample = null;
-    for (const run of liveRunsOf(session)) {
-      run.pause(reason);
-    }
-  }
 
-  /**
-   * Let a suspended encoder run again.
-   *
-   * Answers whether a process was actually continued, because three of the four
-   * callers do this in order to KILL it — a suspended process ignores SIGTERM
-   * until it is running — and only the two look-ahead callers mean "carry on".
-   * The run's state is theirs to move; a continue-then-kill is not a resume.
-   *
-   * @param {HlsSession} session
-   * @param {string} reason
-   * @returns {boolean} True when a live process was continued.
-   */
-  #resumeEncoder(session, reason) {
-    // Any pair spanning this would count a stopped encoder as slow.
-    session.learnSample = null;
-    let resumed = false;
-    for (const run of liveRunsOf(session)) {
-      resumed = run.resume(reason) || resumed;
-    }
-    return resumed;
-  }
 
   /**
    * One line per interval about the MACHINE, while an encoder is running on it.
@@ -4512,57 +4461,7 @@ export class HlsSessionManager {
    *   so the player sees both at the time the playlist names.
    * @returns {Promise<void>}
    */
-  /**
-   * The run of another session that was given this segment number, if any.
-   *
-   * Only a run that is actually going: a stretch given to a run that has ended
-   * is free again, and nothing has to release it.
-   *
-   * @param {HlsSession} session - The one asking, which does not count itself.
-   * @param {number} index
-   * @returns {string | null} The other session's id.
-   */
-  runMakingSegment(session, index, exceptRun = null) {
-    const key = session.outputKey ?? "";
-    if (!key) {
-      return null;
-    }
-    for (const run of this.#runsOnOutput(key)) {
-      if (run === exceptRun) {
-        continue;
-      }
-      // A run with an explicit stretch owns the whole of it. One WITHOUT an end
-      // owns only as far as it will actually get — its head plus the look-ahead
-      // — because claiming the rest of the film would make it the owner of
-      // every number in front of it, including ones another run was expressly
-      // given, and a viewer opening the same film further on would get no
-      // encoder at all.
-      const to = Number.isInteger(run.to) && run.to >= run.from
-        ? run.to
-        : run.head + Math.ceil(this.lookaheadSeconds / this.segmentDurationSec);
-      if (index >= run.from && index <= to) {
-        return run;
-      }
-    }
-    return null;
-  }
 
-  /**
-   * Every live run of one output, whichever session started it.
-   *
-   * @param {string} key
-   * @returns {import("./encode/EncodeRun.js").EncodeRun[]}
-   */
-  #runsOnOutput(key) {
-    const runs = [];
-    for (const session of this.sessionsById.values()) {
-      if (session.outputKey !== key || session.state === "disposed") {
-        continue;
-      }
-      runs.push(...liveRunsOf(session));
-    }
-    return runs;
-  }
 
   /**
    * How far a run starting here may work before it meets somebody else's
@@ -4780,6 +4679,10 @@ export class HlsSessionManager {
       onEnded: (ended) => this.noteRunEnded(session, run, ended)
     });
     session.runs.add(run);
+    // THE ONE FAULT THAT IS OTHERWISE SILENT, asked before this run produces a
+    // frame. It lost its caller in a refactor on 2026-09-04 and had none until
+    // 2026-09-15 — not by a decision, which is why it is back rather than gone.
+    this.#warnIfRunLeavesTheInitBehind(session);
     session.progress.processedSeconds = startSeconds;
     session.progress.startPositionSeconds = startSeconds;
     session.progress.updatedAt = Date.now();
@@ -5525,22 +5428,6 @@ export class HlsSessionManager {
     return sorted[Math.floor(sorted.length / 2)];
   }
 
-  /**
-   * The highest segment index this session has on disk, or null when it has
-   * none. Used to tell "the file ended" from "the data ran out".
-   *
-   * @param {HlsSession} session
-   * @returns {number | null}
-   */
-  #latestProducedSegment(session) {
-    let highest = null;
-    for (const index of this.#producedNumbers(session)) {
-      if (highest === null || index > highest) {
-        highest = index;
-      }
-    }
-    return highest;
-  }
 
   /**
    * Record how far a produced segment's real start fell from what the playlist
@@ -5971,27 +5858,6 @@ export class HlsSessionManager {
     return this.qualityOffer.predictOfferedHeights(mediaInfo);
   }
 
-  /**
-   * How many encoders are running and not suspended right now.
-   *
-   * A cost measured while two of them share the machine belongs to neither.
-   *
-   * @returns {number}
-   */
-  #runningEncoders() {
-    let running = 0;
-    for (const session of this.sessionsById.values()) {
-      if (session.state === "disposed") {
-        continue;
-      }
-      for (const run of liveRunsOf(session)) {
-        if (run.state !== ENCODE_RUN_STATE.SUSPENDED) {
-          running += 1;
-        }
-      }
-    }
-    return running;
-  }
 
 
 

@@ -35,7 +35,7 @@ import { managerWithOwnStore } from "./helpers/manager.js";
 import { startRunOn } from "./helpers/encode-run.js";
 import { fmp4Format } from "../services/segment-formats/fmp4.js";
 
-const SESSION_ID = "33333333-4444-5555-6666-777777777777";
+const SESSION_ID = "3333333344445555";
 const OUTPUT_KEY = "own-header:fmt=fmp4:grid=kf@0:video-only:v=0/copy";
 const MOVIE_TIMESCALE = 1000;
 

@@ -58,7 +58,7 @@ import { viewerOf } from "../services/viewer/Viewer.js";
 import { fmp4Format } from "../services/segment-formats/fmp4.js";
 import { Output } from "../services/output/Output.js";
 
-const BASE_ID = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
+const BASE_ID = "aaaaaaaabbbbcccc";
 const SEGMENT_SECONDS = 4;
 const FIRST = "viewer-one";
 const SECOND = "viewer-two";

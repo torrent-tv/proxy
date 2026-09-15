@@ -32,7 +32,7 @@ const MOVIE_TIMESCALE = 1000;
 const VIDEO_TIMESCALE = 90_000;
 const AUDIO_TIMESCALE = 48_000;
 const SEGMENT_START_SECONDS = 12.5;
-const SESSION_ID = "11111111-2222-3333-4444-555555555555";
+const SESSION_ID = "1111111122223333";
 // Its own address, so this file's directory in the shared store is nobody
 // else's.
 const OUTPUT_KEY = "serve-wiring:fmt=fmp4:grid=uniform:video-only:v=0/copy";

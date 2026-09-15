@@ -21,8 +21,8 @@ import { HlsSessionManager } from "../services/hls-session-manager.js";
 import { SourceFile } from "../services/source/SourceFile.js";
 import { Viewers } from "../services/viewer/Viewers.js";
 
-const PICTURE = "aaaaaaaa-0000-4000-8000-000000000001";
-const SOUND = "aaaaaaaa-0000-4000-8000-000000000002";
+const PICTURE = "aaaaaaaa00004000";
+const SOUND = "aaaaaaaa00004001";
 
 /**
  * @param {string} id

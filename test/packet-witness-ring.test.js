@@ -175,7 +175,7 @@ test("a wedge keeps the ring's history, and the ring keeps recording afterwards"
     await writeFile(path.join(dir, `${WITNESS_RING_BASENAME}1`), "also-before");
 
     const started = witness.maybeCapture({
-      sessionId: "68296f7d-0000-0000-0000-000000000000",
+      sessionId: "68296f7d00000000",
       tag: "68296f7d",
       label: "proxy",
       remote: { address: "2001:db8::1", port: 61649 },

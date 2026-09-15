@@ -35,7 +35,7 @@ const MOVIE_TIMESCALE = 1000;
 const VIDEO_TIMESCALE = 90_000;
 const AUDIO_TIMESCALE = 48_000;
 const SEGMENT_SECONDS = 12.5;
-const SESSION_ID = "aef21c88-a8d6-4a9a-8e7a-d0a9536351cf";
+const SESSION_ID = "aef21c88a8d64a9a";
 
 /**
  * @param {string} type

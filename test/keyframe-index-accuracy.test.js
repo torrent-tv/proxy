@@ -134,7 +134,7 @@ test("a boundary the index got wrong is replaced by the time the file really has
   // table replaces, and what drifted in the field.
   const boundaries = [0, 10, 20, 30, 40];
   const base = {
-    id: "aaaaaaaa-1111-2222-3333-444444444444",
+    id: "aaaaaaaa11112222",
     fileName: "film.mkv",
     state: "ready",
     transcodeVideo: false,
@@ -143,7 +143,7 @@ test("a boundary the index got wrong is replaced by the time the file really has
     segmentFormat: { segmentFileName: (index) => `segment-${index}.mp4` }
   };
   const rung = {
-    id: "bbbbbbbb-1111-2222-3333-444444444444",
+    id: "bbbbbbbb11112222",
     fileName: "film.mkv",
     state: "ready",
     transcodeVideo: true,

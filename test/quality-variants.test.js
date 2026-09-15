@@ -27,9 +27,9 @@ import { buildRunCommand, nearestKeyframeAtOrBefore } from "../services/encode/r
 import { Output } from "../services/output/Output.js";
 import { viewerOf } from "../services/viewer/Viewer.js";
 
-const BASE_ID = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
-const VARIANT_ID = "11111111-2222-3333-4444-555555555555";
-const SECOND_VARIANT_ID = "99999999-8888-7777-6666-555555555555";
+const BASE_ID = "aaaaaaaabbbbcccc";
+const VARIANT_ID = "1111111122223333";
+const SECOND_VARIANT_ID = "9999999988887777";
 const SEGMENT_SECONDS = 4;
 
 /**

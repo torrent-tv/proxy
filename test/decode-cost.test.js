@@ -301,7 +301,7 @@ test("the OFFER drops the rungs the host cannot hold, and the master keeps addre
   });
 
   const session = {
-    id: "cccccccc-dddd-eeee-ffff-000000000000",
+    id: "ccccccccddddeeee",
     dirPath,
     // Where this file is cut, held by the file. A fixture that stated it
     // on the session was describing what production no longer does.
@@ -371,7 +371,7 @@ test("the OFFER drops the rungs the host cannot hold, and the master keeps addre
   // A host with a little more encoder keeps the rungs it can actually hold. A
   // second session, because the answer is settled once per session.
   manager.softwarePresetBenchmark = [{ preset: "ultrafast", pixelsPerSec: 12e6 }];
-  const stronger = { ...session, id: "dddddddd-eeee-ffff-0000-111111111111", offeredHeightsCache: undefined };
+  const stronger = { ...session, id: "ddddddddeeeeffff", offeredHeightsCache: undefined };
   manager.sessionsById.set(stronger.id, stronger);
   assert.deepEqual(
     manager.offeredHeights(stronger),
@@ -391,7 +391,7 @@ test("the OFFER drops the rungs the host cannot hold, and the master keeps addre
   // 1.67x of any step, and the rungs that only just cleared realtime go.
   const onAThinSwarm = {
     ...stronger,
-    id: "eeeeeeee-ffff-0000-1111-222222222222",
+    id: "eeeeeeeeffff0000",
     offeredHeightsCache: undefined,
     supplyFigures: { requiredSpeed: 1.67, worstWaitSec: 1.49, medianIntervalSec: 2.22, samples: 12 }
   };

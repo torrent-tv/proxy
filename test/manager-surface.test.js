@@ -41,7 +41,7 @@ import { Output } from "../services/output/Output.js";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const PROXY = path.join(HERE, "..");
-const SESSION_ID = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
+const SESSION_ID = "aaaaaaaabbbbcccc";
 
 /**
  * Every `.js` file under a directory, at any depth.
@@ -203,7 +203,7 @@ test("the progress report keeps every figure it carries today", async () => {
 
 test("a session that is not there is answered, not invented", async () => {
   const manager = bareManager();
-  const absent = "ffffffff-ffff-ffff-ffff-ffffffffffff";
+  const absent = "ffffffffffffffff";
 
   assert.equal(await manager.getSessionProgress(absent), null);
   assert.equal((await manager.getFileStream(absent, "segment-00000.mp4")).kind, "not-found");
@@ -250,8 +250,8 @@ test("what a viewer states about themselves is kept and answered", () => {
 
 test("a session nobody has touched is disposed, one that is being watched is not", async () => {
   const manager = bareManager();
-  const stale = fakeSession({ id: "11111111-1111-1111-1111-111111111111" });
-  const fresh = fakeSession({ id: "22222222-2222-2222-2222-222222222222" });
+  const stale = fakeSession({ id: "1111111111111111" });
+  const fresh = fakeSession({ id: "2222222222222222" });
   // Older than any TTL this manager could carry, without naming one here: the
   // period is the manager's business and this test is about the rule.
   stale.lastAccessedAt = Date.now() - (2 * 60 * 60 * 1000);

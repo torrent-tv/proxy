@@ -101,22 +101,19 @@
 								"patterns": [
 									{
 										"group": [
-											"../hls-session-manager.js",
-											"../controllers/**",
-											"../orchestrators/**",
-											"../container/**",
-											"../demand/**",
-											"../download/**",
-											"../storage/**",
-											"../piece-store/**",
-											"../segment-store/**",
-											"../files/**",
-											"../segment-formats/**",
-											"../torrent-worker/**",
-											"../viewer/**",
-											"../output/**"
+											"../**",
+											"!../output/**",
+											"!../source/**",
+											"!../available-share.js",
+											"!../hwaccel.js",
+											"!../learned-median.js",
+											"!../encoder-readings.js",
+											"!../encode/contention.js",
+											"!../encode/args.js",
+											"!../encode/encode-run-state.js",
+											"!../../utils/**"
 										],
-										"message": "What encoding costs is arithmetic over readings. Which sessions belong to one file, how many encoders run, what a file costs to fetch — all of it is passed in, so this can be asked without a session manager, a torrent or a disk."
+										"message": "What encoding costs, and which heights follow, is arithmetic over readings. Which sessions belong to one file, how many encoders run, where the viewers stand, what the swarm is delivering — all of it is passed in, so this can be asked without a session manager, a torrent or a disk. What it MAY reach is named one file at a time, and every name is a plain STATEMENT rather than machinery: the ladder and the cut table (output/, which is the same layer — кодирование), what a source decodes like, the measured shares and penalties, and the states a run can be in. `encode/EncodeRun.js` is deliberately not among them — it spawns processes. An ALLOW list rather than a forbid list, because the two fail in opposite directions: a name forgotten here blocks an import that should have been allowed, and a name forgotten in a forbid list lets a whole layer through. The old forbid list named `../container/**`, a directory that stopped existing when the media layer got its own, and would have let all of it in."
 									}
 								]
 							}

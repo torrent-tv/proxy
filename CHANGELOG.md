@@ -1,5 +1,7 @@
 ## 2.86.1
 
+- **Fix**: The encoder's read of its source is again the playback read, with its read window. When the input address stopped being kept on the session and started being built per run, `reader=playback` and `windowBytes` were left off it, so the stream route treated every encoder read like a probe — it no longer moved the download toward where the viewer is — and the read window fell back to the reader's default. The addresses are built by `encode/run-inputs.js` from the window measured when the output is created.
+
 - **Chore**: The standard heights are one list. The quality menu (`output/ladder.js`) and the realtime budget's resolution ladder (`hwaccel.js`) each declared `[2160, 1440, 1080, 720, 540, 480, 360, 240]`; the budget now reads `LADDER_HEIGHTS` from the ladder module.
 
 - **Fix**: How an output's last encoder ended, its last error and the position that kept failing to start no longer outlive the output. They moved from the session into `EncodeOrchestrator`, keyed by output address, and nothing removed them; since an output's name follows from its key, the next output with the same parameters inherited them. An inherited failed ending made the new output's first wait throw before any encoder was placed, so a film that failed once could not be opened again until the proxy restarted. They are forgotten when the last output on that address is disposed and no run is left on it, including a run that ends after disposal.

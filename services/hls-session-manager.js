@@ -96,6 +96,7 @@ import { LiveOutputs } from "./output/LiveOutputs.js";
 import { OutputRegistry } from "./output/OutputRegistry.js";
 import { variantHeightsFor } from "./output/ladder.js";
 import { EncodeOrchestrator } from "./encode/EncodeOrchestrator.js";
+import { encoderInputs } from "./encode/run-inputs.js";
 import { wireMachineBudget } from "./storage/wire.js";
 import { IDLE_KEEP_MS } from "./storage/keep.js";
 import { Returns } from "./storage/returns.js";
@@ -1644,15 +1645,6 @@ export class HlsSessionManager {
       inputFile.fileIndex,
       durationSeconds
     );
-    if (readWindowBytes > 0) {
-      inputUrl.searchParams.set("windowBytes", String(readWindowBytes));
-      // This read, and only this read, follows the viewer. The codec probe and
-      // the keyframe index also go through `/stream`, and they jump between the
-      // first bytes and the last ones — which is indistinguishable, from byte
-      // offsets alone, from someone dragging the slider. Saying so here is
-      // cheaper and more truthful than guessing from the offsets.
-      inputUrl.searchParams.set("reader", "playback");
-    }
     if (!hasDuration) {
       logger.warn(
         `transcode ${sessionId}: could not probe duration; falling back to ` +
@@ -2075,6 +2067,9 @@ export class HlsSessionManager {
       // and nextRequestSeq): a request is issued one number when it arrives and
       // keeps it across all its long-poll iterations, so a burst of requests
       // from one scrub cannot take turns steering the encoder.
+      // How wide the encoder's read window is, measured once for this output.
+      // Every run's input address is built from it (`encode/run-inputs.js`).
+      readWindowBytes,
       requestSeqCounter: 0,
       latestRequestSeq: 0,
       // Bumped by every viewer seek; a held segment request that started under
@@ -6501,26 +6496,18 @@ export class HlsSessionManager {
     return session.spec.carries !== "audio-only" && session.spec.carriesAudioSeparately;
   }
 
-  /**
-   * The files and stream URLs one output reads.
-   *
-   * `OutputSpec` names the source tracks. `SourceFiles` owns the file objects.
-   * This method joins those two facts only while an encoder command is built;
-   * it does not store either copy on the output lifetime object.
-   *
-   * @param {HlsSession} session
-   * @returns {{ inputFile: SourceFile, audioFile: SourceFile, inputUrl: string, audioInputUrl: string }}
-   */
   #inputOf(session) {
-    const audioFile = session.spec.audio
-      ? this.sourceFiles.get(session.file.sourceKey, session.spec.audioFileIndex)
-      : session.file;
-    const inputFile = session.spec.carries === "audio-only" && audioFile !== session.file ? audioFile : session.file;
-    const inputUrl = inputFile.streamUrl(this.localBaseUrl, { sessionId: session.id }).toString();
-    const audioInputUrl = session.spec.carries !== "audio-only" && !this.#servesAudioSeparately(session) && audioFile !== inputFile
-      ? audioFile.streamUrl(this.localBaseUrl, { sessionId: session.id }).toString()
-      : "";
-    return { inputFile, audioFile, inputUrl, audioInputUrl };
+    return encoderInputs({
+      picture: session.file,
+      soundtrack: session.spec.audio
+        ? this.sourceFiles.get(session.file.sourceKey, session.spec.audioFileIndex)
+        : session.file,
+      carries: session.spec.carries,
+      audioSeparate: this.#servesAudioSeparately(session),
+      sessionId: session.id,
+      readWindowBytes: session.readWindowBytes,
+      baseUrl: this.localBaseUrl
+    });
   }
 
   /**

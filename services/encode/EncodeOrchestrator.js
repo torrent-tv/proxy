@@ -31,6 +31,7 @@ import { affordableRuns } from "./run-budget.js";
 import { RunCosts } from "./run-costs.js";
 import { contentionPenalty } from "./contention.js";
 import { SegmentDemand } from "./SegmentDemand.js";
+import { runStateOf } from "./encode-run-state.js";
 
 /**
  * How long nothing is placed on an output whose input has just gone, and the
@@ -45,6 +46,8 @@ import { SegmentDemand } from "./SegmentDemand.js";
  */
 const INPUT_QUIET_BASE_MS = 2_000;
 const INPUT_QUIET_MAX_MS = 15_000;
+const START_FAST_FAIL_MS = 2_000;
+const MAX_FAILED_STARTS = 3;
 
 export class EncodeOrchestrator {
   /** @type {(address: string) => string} */
@@ -56,6 +59,17 @@ export class EncodeOrchestrator {
   /** Output address to the runs on it. @type {Map<string, import("../encode/EncodeRun.js").EncodeRun[]>} */
   #runs = new Map();
 
+  /** Last state after an output has no registered run. @type {Map<string, string>} */
+  #lastState = new Map();
+
+  /** Last encoder error per output. @type {Map<string, string>} */
+  #lastError = new Map();
+
+  /** Last progress snapshot per output after its run ends. @type {Map<string, object>} */
+  #lastProgress = new Map();
+
+  /** Consecutive fast failures at one position, per output. @type {Map<string, { at: number, count: number }>} */
+  #failedStarts = new Map();
 
   /** The fastest speed measured on one output, kept across restarts. @type {Map<string, number>} */
   #lastSpeed = new Map();
@@ -256,6 +270,109 @@ export class EncodeOrchestrator {
    */
   runsOn(address) {
     return this.#runs.get(address) ?? [];
+  }
+
+  /**
+   * The aggregate state of this output's current runs, or its last ending when
+   * none remain.
+   *
+   * @param {string} address
+   * @returns {string}
+   */
+  stateOf(address) {
+    const runs = this.runsOn(address);
+    return runs.length > 0 ? runStateOf(runs) : (this.#lastState.get(address) ?? runStateOf([]));
+  }
+
+  /** @param {string} address @returns {string} */
+  errorOf(address) {
+    return this.#lastError.get(address) ?? "";
+  }
+
+  /**
+   * Progress of the live run that covers a position, or the most recently
+   * updated run when no position is supplied.
+   *
+   * @param {string} address
+   * @param {number | null} [index]
+   * @returns {object | null}
+   */
+  progressOf(address, index = null) {
+    const live = this.runsOn(address).filter((run) => run.isAlive);
+    const covering = Number.isInteger(index)
+      ? live.filter((run) => run.from <= index && endOfRun(run) >= index)
+      : live;
+    const candidates = covering.length > 0 ? covering : live;
+    const run = [...candidates].sort(
+      (left, right) => (right.progress?.updatedAt ?? 0) - (left.progress?.updatedAt ?? 0)
+    )[0];
+    return run?.progress?.snapshot?.() ?? this.#lastProgress.get(address) ?? null;
+  }
+
+  /**
+   * Whether another start at this position is allowed.
+   *
+   * @param {string} address
+   * @param {number} from
+   * @returns {boolean}
+   */
+  mayStartAt(address, from) {
+    const failed = this.#failedStarts.get(address);
+    return failed?.at !== from || failed.count < MAX_FAILED_STARTS;
+  }
+
+  /**
+   * Record whether a failed run died before it performed sustained work.
+   *
+   * @param {string} address
+   * @param {number} from
+   * @param {number} livedMs
+   * @returns {{ at: number, count: number, blocked: boolean, limit: number, fastMs: number }}
+   */
+  noteStartFailure(address, from, livedMs) {
+    if (!(livedMs < START_FAST_FAIL_MS)) {
+      this.#failedStarts.delete(address);
+      return { at: -1, count: 0, blocked: false, limit: MAX_FAILED_STARTS, fastMs: START_FAST_FAIL_MS };
+    }
+    const previous = this.#failedStarts.get(address);
+    const next = {
+      at: from,
+      count: previous?.at === from ? previous.count + 1 : 1
+    };
+    this.#failedStarts.set(address, next);
+    return {
+      ...next,
+      blocked: next.count >= MAX_FAILED_STARTS,
+      limit: MAX_FAILED_STARTS,
+      fastMs: START_FAST_FAIL_MS
+    };
+  }
+
+  /**
+   * An output that no longer exists and has no run left on it.
+   *
+   * How its last run ended, what went wrong and which position kept failing are
+   * facts about THAT output. The name follows from the key, so the next output
+   * with the same parameters has the same address; kept, those facts would
+   * greet it as its own — a failed ending makes its first wait throw before any
+   * encoder is placed, and nothing would ever clear it.
+   *
+   * @param {string} address
+   */
+  forgetOutput(address) {
+    if (this.runsOn(address).length > 0) {
+      return;
+    }
+    this.#lastState.delete(address);
+    this.#lastError.delete(address);
+    this.#lastProgress.delete(address);
+    this.#failedStarts.delete(address);
+  }
+
+  /** @param {string} address @returns {{ at: number, count: number, blocked: boolean, limit: number }} */
+  startFailureOf(address) {
+    const failure = this.#failedStarts.get(address) ?? { at: -1, count: 0 };
+    return { ...failure, blocked: failure.count >= MAX_FAILED_STARTS, limit: MAX_FAILED_STARTS };
   }
 
   /**
@@ -800,6 +917,16 @@ export class EncodeOrchestrator {
    * @param {import("../encode/EncodeRun.js").RunEnded} ended
    */
   noteEnded(ended) {
+    this.#lastState.set(ended.address, ended.run?.state ?? "IDLE");
+    if (ended.lastError) {
+      this.#lastError.set(ended.address, ended.lastError);
+    } else if (ended.because && ended.ending !== ENCODE_EXIT.COMPLETE) {
+      this.#lastError.set(ended.address, ended.because);
+    }
+    const progress = ended.run?.progress?.snapshot?.();
+    if (progress) {
+      this.#lastProgress.set(ended.address, progress);
+    }
     this.#costs.note(ended);
     // Exactly one ending is normal — the run reached the end of the stretch it
     // was given and closed its last file. Every other leaves a piece open, and

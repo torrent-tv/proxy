@@ -19,13 +19,13 @@ import { recordViewerReport } from "../../../../services/viewer/report-intake.js
  *
  * @param {import("fastify").FastifyRequest} req
  * @param {import("fastify").FastifyReply} reply
- * @param {{ sessions: { get: (id: string) => object | undefined }, viewers: object }} deps -
- *   The live sessions and the registry of viewers. The VIEWER layer takes the
+ * @param {{ outputs: { get: (id: string) => object | undefined }, viewers: object }} deps -
+ *   The live outputs and the registry of viewers. The VIEWER layer takes the
  *   statement from here; this route's whole job is turning a request into that
  *   one call and its answer into a status code.
  * @returns {Promise<void>}
  */
-export async function handleApiTranscodeSessionNetReportPost(req, reply, { sessions, viewers }) {
+export async function handleApiTranscodeSessionNetReportPost(req, reply, { outputs, viewers }) {
   const sessionId = typeof req.params.sessionId === "string" ? req.params.sessionId : "";
   const body = req.body && typeof req.body === "object" && !Array.isArray(req.body) ? req.body : {};
   // WHAT THIS REPORT IS. A statement by one viewer about itself: where the
@@ -72,7 +72,7 @@ export async function handleApiTranscodeSessionNetReportPost(req, reply, { sessi
     typeof body.inPictureInPicture === "boolean" ? body.inPictureInPicture : undefined;
   const positionSeconds = Number(body.positionSeconds);
   const recorded = recordViewerReport({
-    sessions,
+    outputs,
     viewers,
     sessionId,
     report: {

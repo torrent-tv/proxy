@@ -23,6 +23,7 @@ import { HlsSessionManager } from "../services/hls-session-manager.js";
 import { SegmentStore } from "../services/segment-store/SegmentStore.js";
 import { Timeline } from "../services/output/Timeline.js";
 import { fmp4Format } from "../services/segment-formats/fmp4.js";
+import { outputSpec } from "./helpers/output-spec.js";
 
 const OUTPUT_KEY = "torrent:abc:fmt=fmp4:grid=kf@0:video-only:v=0/copy";
 
@@ -52,6 +53,7 @@ function managerOverATempStore() {
 function sessionOn({ id, dirPath, outputKey }) {
   return {
     id,
+    spec: outputSpec({ transcodeVideo: false }),
     outputKey,
     dirPath,
     state: "ready",
@@ -63,7 +65,7 @@ function sessionOn({ id, dirPath, outputKey }) {
     segmentFormat: fmp4Format,
     // Where the file is cut, which every live session holds.
     timeline: new Timeline({ boundaries: [0, 4, 8], cutGrid: "keyframe" }),
-    consumers: new Set(),
+    claims: new Set(),
     lastAccessedAt: Date.now()
   };
 }
@@ -93,8 +95,8 @@ test("each session serves the segments the other one's encoder made", (t) => {
 
   const viewerOne = sessionOn({ id: "s-one", dirPath, outputKey: OUTPUT_KEY });
   const viewerTwo = sessionOn({ id: "s-two", dirPath, outputKey: OUTPUT_KEY });
-  manager.sessionsById.set(viewerOne.id, viewerOne);
-  manager.sessionsById.set(viewerTwo.id, viewerTwo);
+  manager.outputsById.set(viewerOne.id, viewerOne);
+  manager.outputsById.set(viewerTwo.id, viewerTwo);
 
   const sorted = (numbers) => [...numbers].sort((left, right) => left - right);
   const heldByOne = sorted(manager.producedSegmentNumbers(viewerOne));
@@ -114,8 +116,8 @@ test("a session leaving does not take the segments with it", async (t) => {
 
   const viewerOne = sessionOn({ id: "s-one", dirPath, outputKey: OUTPUT_KEY });
   const viewerTwo = sessionOn({ id: "s-two", dirPath, outputKey: OUTPUT_KEY });
-  manager.sessionsById.set(viewerOne.id, viewerOne);
-  manager.sessionsById.set(viewerTwo.id, viewerTwo);
+  manager.outputsById.set(viewerOne.id, viewerOne);
+  manager.outputsById.set(viewerTwo.id, viewerTwo);
 
   await manager.disposeSession(viewerOne.id);
   await manager.disposeSession(viewerTwo.id);

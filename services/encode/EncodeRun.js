@@ -39,6 +39,7 @@
 
 import { ENCODE_RUN_EVENT, ENCODE_RUN_STATE, INITIAL_RUN_STATE, nextState } from "./encode-run-state.js";
 import { classifyEncodeExit, ENCODE_EXIT } from "./encode-exit.js";
+import { RunProgress } from "./RunProgress.js";
 
 /** Microseconds in a second, as ffmpeg's `out_time_ms` counts them. */
 const MICROSECONDS_PER_SECOND = 1_000_000;
@@ -186,12 +187,8 @@ export class EncodeRun {
    *   encoder itself names it on its own channel, and answers with the name that
    *   piece is served under — because making it servable is a rename, and only
    *   whoever owns the disk can perform one.
-   * @param {(progress: { processedSeconds: number | null, speed: string | null }) => void} [params.onProgress]
-   *   Called for every `-progress` report. Seconds count from the START OF THIS
-   *   RUN on both branches — neither `-output_ts_offset` nor `-copyts` changes
-   *   what `-progress` reports, both measured — so rebasing them onto the
-   *   source's timeline is the caller's, which is the only side that knows
-   *   where this run began.
+   * @param {(progress: object) => void} [params.onProgress] - Called with this
+   *   run's progress on the source timeline after every `-progress` report.
    * @param {() => number | null} [params.lastSegmentIndex] - The film's last
    *   segment number, for telling "reached the end" from "the input dried up".
    *   ffmpeg exits zero for both, and over a torrent it cannot tell them apart.
@@ -208,6 +205,8 @@ export class EncodeRun {
    *   a closed piece's name carries. How a piece is named belongs to the format
    *   that writes it, so it arrives as a plain function rather than this class
    *   knowing any naming.
+   * @param {number} [params.startSeconds] - Where this run begins on the source timeline.
+   * @param {number | null} [params.totalSeconds] - Source duration when known.
    */
   constructor({
     address,
@@ -226,6 +225,8 @@ export class EncodeRun {
     argsDescribed = "",
     usesExplicitCuts = false,
     indexOfName,
+    startSeconds = 0,
+    totalSeconds = null,
     because = "no reason was given"
   }) {
     this.address = address;
@@ -236,6 +237,7 @@ export class EncodeRun {
     this.spawnProcess = spawn;
     this.logger = logger;
     this.now = typeof now === "function" ? now : Date.now;
+    this.progress = new RunProgress({ startSeconds, totalSeconds, now: this.now });
     this.onEnded = typeof onEnded === "function" ? onEnded : () => {};
     this.onProgress = typeof onProgress === "function" ? onProgress : () => {};
     // Told the NAME of every piece the encoder has closed. The name is the
@@ -449,15 +451,20 @@ export class EncodeRun {
       if (key === "out_time_ms") {
         const numeric = Number(value);
         if (Number.isFinite(numeric) && numeric >= 0) {
-          this.onProgress({ processedSeconds: numeric / MICROSECONDS_PER_SECOND, speed: null });
+          this.#reportProgress({ processedSeconds: numeric / MICROSECONDS_PER_SECOND, speed: null });
         }
       } else if (key === "out_time") {
-        this.onProgress({ processedSeconds: null, speed: null, outTime: value });
+        this.#reportProgress({ processedSeconds: null, speed: null, outTime: value });
       } else if (key === "speed") {
         this.noteSpeed(Number.parseFloat(value));
-        this.onProgress({ processedSeconds: null, speed: value });
+        this.#reportProgress({ processedSeconds: null, speed: value });
       }
     }
+  }
+
+  #reportProgress(report) {
+    this.progress.note(report);
+    this.onProgress(this.progress.snapshot());
   }
 
   /**

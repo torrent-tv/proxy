@@ -27,6 +27,7 @@ import { HlsSessionManager } from "../services/hls-session-manager.js";
 import { ENCODE_RUN_STATE } from "../services/encode/encode-run-state.js";
 import { startRunOn } from "./helpers/encode-run.js";
 import { fmp4Format } from "../services/segment-formats/fmp4.js";
+import { outputSpec } from "./helpers/output-spec.js";
 
 const MOVIE_TIMESCALE = 1000;
 const VIDEO_TIMESCALE = 90_000;
@@ -120,7 +121,7 @@ function selfContainedPiece(offsetSeconds) {
  * A manager holding one session whose segments are already on disk, cut at
  * explicit times — the ordinary keyframe-cut path.
  *
- * @param {{ segmentFormat?: object, audioOnly?: boolean }} [overrides]
+ * @param {{ segmentFormat?: object, audioOnly?: boolean, withRun?: boolean }} [overrides]
  * @returns {Promise<{ manager: HlsSessionManager, session: object, dirPath: string }>}
  */
 async function managerWithReadySegment(overrides = {}) {
@@ -145,6 +146,11 @@ async function managerWithReadySegment(overrides = {}) {
 
   const session = {
     id: SESSION_ID,
+    spec: outputSpec({
+      transcodeVideo: overrides.transcodeVideo === true,
+      audioOnly: overrides.audioOnly === true,
+      cutGrid: "uniform"
+    }),
     outputKey: OUTPUT_KEY,
     dirPath,
     // Where this file is cut, held by the file. A fixture that stated it
@@ -197,7 +203,7 @@ async function managerWithReadySegment(overrides = {}) {
     firstSegmentLogged: false,
     waitEpoch: 0
   };
-  manager.sessionsById.set(SESSION_ID, session);
+  manager.outputsById.set(SESSION_ID, session);
   // SOMEBODY IS WATCHING IT. A segment is requested by a viewer, so a fixture
   // that asks for one without stating a viewer describes a state production
   // never reaches — and an output nobody is watching has every encoder on it
@@ -211,7 +217,10 @@ async function managerWithReadySegment(overrides = {}) {
   manager.planEncodersSoon = () => {};
   // The run in force. The fixture's segments live directly in the session
   // directory, which is exactly what one run's directory is here.
-  startRunOn(session, { from: 0, usesExplicitCuts: true, speedX: 2 });
+  if (overrides.withRun !== false) {
+    const run = startRunOn(session, { from: 0, usesExplicitCuts: true, speedX: 2 });
+    manager.encodeOrchestrator.adopt(OUTPUT_KEY, run);
+  }
   return { manager, session, dirPath };
 }
 
@@ -360,7 +369,8 @@ test("a segment an earlier run made is served by whatever run is going now", asy
   // one, and runs are kept apart by their stretches instead. So a viewer who
   // seeks back is served what an earlier run made, with no restart and no
   // search: the run going now began at #40 and #0 is simply there.
-  startRunOn(session, { from: 40, usesExplicitCuts: true });
+  const run = startRunOn(session, { from: 40, usesExplicitCuts: true });
+  manager.encodeOrchestrator.adopt(OUTPUT_KEY, run);
 
   const result = await manager.getFileStream(SESSION_ID, "segment-00000.mp4", { requestSeq: 1 });
 
@@ -373,7 +383,7 @@ test("a segment an earlier run made is served by whatever run is going now", asy
 });
 
 test("serving a run's own segment moves the run out of STARTING", async (t) => {
-  const { manager, session, dirPath } = await managerWithReadySegment();
+  const { manager, session, dirPath } = await managerWithReadySegment({ withRun: false });
   t.after(async () => {
     await manager.disposeAll();
     await rm(dirPath, { recursive: true, force: true });
@@ -385,13 +395,13 @@ test("serving a run's own segment moves the run out of STARTING", async (t) => {
   // A run that has not yet made anything: starting. The fixture's own run is
   // let go first, because this test is about ONE run and what serving does to
   // it.
-  session.runs.clear();
   // ITS OWN PIECE, AND FILM STILL TO MAKE BEHIND IT. A run standing on material
   // that already exists is moved forward — correctly — so a fixture that wants a
   // live run has to put it where the work is. #1 is what it is making; #2..#4
   // are unmade, so it is wanted; and #1 stands under its served name, which is
   // what makes the piece servable at all.
   const run = startRunOn(session, { from: 1, producing: false, usesExplicitCuts: true, speedX: 2 });
+  manager.encodeOrchestrator.adopt(OUTPUT_KEY, run);
   assert.equal(run.state, ENCODE_RUN_STATE.STARTING);
   assert.deepEqual(run.produced, [], "it has made nothing yet");
 
@@ -408,7 +418,7 @@ test("serving a run's own segment moves the run out of STARTING", async (t) => {
 });
 
 test("a segment behind a run's own start does not claim that run has produced", async (t) => {
-  const { manager, session, dirPath } = await managerWithReadySegment();
+  const { manager, session, dirPath } = await managerWithReadySegment({ withRun: false });
   t.after(async () => {
     await manager.disposeAll();
     await rm(dirPath, { recursive: true, force: true });
@@ -418,8 +428,8 @@ test("a segment behind a run's own start does not claim that run has produced", 
   // lies ahead of the new run's beginning — so the question cannot be asked of
   // the number alone, and a run believed to be producing is one the look-ahead
   // may suspend and the seek path may wave through as "already covered".
-  session.runs.clear();
   const run = startRunOn(session, { from: 5, producing: false, usesExplicitCuts: true, speedX: 2 });
+  manager.encodeOrchestrator.adopt(OUTPUT_KEY, run);
 
   await manager.getFileStream(SESSION_ID, "segment-00000.mp4", { requestSeq: 1 });
 
@@ -439,13 +449,13 @@ test("a request behind the run that nobody is coming for is answered absent, not
   // given. An EMPTY map is not that answer: a session created a moment ago has
   // no map yet, and read as "nobody is coming" every request behind the run
   // would be refused for as long as that lasted.
-  const { manager, session, dirPath } = await managerWithReadySegment();
+  const { manager, session, dirPath } = await managerWithReadySegment({ withRun: false });
   t.after(async () => {
     await manager.disposeAll();
     await rm(dirPath, { recursive: true, force: true });
   });
-  session.runs.clear();
-  startRunOn(session, { from: 3, producing: true, usesExplicitCuts: true, speedX: 2 });
+  const run = startRunOn(session, { from: 3, producing: true, usesExplicitCuts: true, speedX: 2 });
+  manager.encodeOrchestrator.adopt(OUTPUT_KEY, run);
 
   // No map yet: the request is HELD, because nothing has said otherwise.
   const held = await manager.getFileStream(SESSION_ID, "segment-00002.mp4", { requestSeq: 2 });

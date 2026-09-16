@@ -12,8 +12,8 @@
  * and whether this is a statement by a VIEWER. Required to be both, a page that
  * had measured nothing could say nothing — see `Viewer.report`.
  *
- * Given the sessions and the registry as plain values, so nothing here knows
- * how a session is found, what a variant is, or that there is an encoder.
+ * Given the outputs and the viewer registry as plain values, so nothing here
+ * knows how an output is found, what a variant is, or that there is an encoder.
  */
 
 import { activeOutputFor } from "./active-output.js";
@@ -22,7 +22,7 @@ import { activeOutputFor } from "./active-output.js";
  * Take one report from one viewer.
  *
  * @param {object} params
- * @param {{ get: (id: string) => object | undefined }} params.sessions - Every live session, by id.
+ * @param {{ get: (id: string) => object | undefined }} params.outputs - Every live output, by id.
  * @param {{ of: (session: object, consumerId: string) => import("./Viewer.js").Viewer }} params.viewers
  * @param {string} params.sessionId - The session the page addresses, which is
  *   always the picture's: the browser is not told which rung it is on.
@@ -31,15 +31,15 @@ import { activeOutputFor } from "./active-output.js";
  * @returns {boolean} False when no such session is live, which is the page
  *   reporting into one that has been disposed.
  */
-export function recordViewerReport({ sessions, viewers, sessionId, report, now = Date.now() }) {
-  const named = sessions.get(sessionId);
-  if (!named || named.state === "disposed") {
+export function recordViewerReport({ outputs, viewers, sessionId, report, now = Date.now() }) {
+  const named = outputs.get(sessionId);
+  if (!named) {
     return false;
   }
   const consumerId = typeof report?.consumerId === "string" ? report.consumerId : "";
   // The stream on screen is the reporter's own: with two viewers on two rungs,
   // one report says nothing about the other's encoder.
-  const session = activeOutputFor({ base: named, consumerId, sessions, viewers });
+  const session = activeOutputFor({ base: named, consumerId, outputs });
   viewers.of(session, consumerId).report(report, now);
   return true;
 }

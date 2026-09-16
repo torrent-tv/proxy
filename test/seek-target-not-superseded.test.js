@@ -68,7 +68,7 @@ async function managerAfterSeek() {
     waitEpoch: 1,
     runState: "PRODUCING"
   };
-  manager.sessionsById.set(SESSION_ID, session);
+  manager.outputsById.set(SESSION_ID, session);
   viewerOf(session, "").moveTo(SEEK_TO_SECONDS);
   viewerOf(session, "").playing = false;
   return { manager, dirPath };
@@ -141,7 +141,7 @@ test("a request as deep as the cushion the browser is told to hold is still want
 
 test("the viewer who made the request is the one it is judged against", async () => {
   const { manager, dirPath } = await managerAfterSeek();
-  const session = manager.sessionsById.get(SESSION_ID);
+  const session = manager.outputsById.get(SESSION_ID);
   session.viewers = new Map();
   // Two people watching one copied picture: one at the seek target, one a
   // hundred segments back and waiting for a segment there. Asked about nobody
@@ -169,7 +169,7 @@ test("the viewer who made the request is the one it is judged against", async ()
 
 test("a seek moves the seeking viewer's own head, and nobody else's", async () => {
   const { manager, dirPath } = await managerAfterSeek();
-  const session = manager.sessionsById.get(SESSION_ID);
+  const session = manager.outputsById.get(SESSION_ID);
   session.viewers = new Map();
   const staying = SEGMENT_AT_SEEK - 40;
   viewerOf(session, "staying").position = {

@@ -445,17 +445,22 @@ export class Viewer {
   }
 }
 
+/** @type {WeakMap<object, Map<string, Viewer>>} */
+const viewersByOutput = new WeakMap();
+
 /**
- * The viewers of one session, made on first use.
+ * The viewers of one output, made on first use and owned by the viewer layer.
  *
- * @param {object} session
+ * @param {object} output
  * @returns {Map<string, Viewer>}
  */
-export function viewersOf(session) {
-  if (!(session.viewers instanceof Map)) {
-    session.viewers = new Map();
+export function viewersOf(output) {
+  let viewers = viewersByOutput.get(output);
+  if (!viewers) {
+    viewers = new Map();
+    viewersByOutput.set(output, viewers);
   }
-  return session.viewers;
+  return viewers;
 }
 
 /**

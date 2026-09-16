@@ -34,6 +34,7 @@ import { Timeline } from "../services/output/Timeline.js";
 import { managerWithOwnStore } from "./helpers/manager.js";
 import { startRunOn } from "./helpers/encode-run.js";
 import { fmp4Format } from "../services/segment-formats/fmp4.js";
+import { outputSpec } from "./helpers/output-spec.js";
 
 const SESSION_ID = "3333333344445555";
 const OUTPUT_KEY = "own-header:fmt=fmp4:grid=kf@0:video-only:v=0/copy";
@@ -133,6 +134,7 @@ async function managerHolding({ piece, sessionHeader }) {
 
   const session = {
     id: SESSION_ID,
+    spec: outputSpec({ transcodeVideo: false }),
     outputKey: OUTPUT_KEY,
     dirPath,
     timeline: new Timeline({ boundaries: [0, 12.5, 25, 37.5, 50, 62.5], cutGrid: "uniform" }),
@@ -147,8 +149,7 @@ async function managerHolding({ piece, sessionHeader }) {
     lastAccessedAt: Date.now(),
     runs: new Set(),
     lastError: "",
-    consumers: new Set(),
-    viewers: new Map(),
+    claims: new Set(),
     segmentCount: 5,
     segmentFormat: fmp4Format,
     useSyntheticPlaylist: true,
@@ -157,7 +158,7 @@ async function managerHolding({ piece, sessionHeader }) {
     firstSegmentLogged: false,
     waitEpoch: 0
   };
-  manager.sessionsById.set(SESSION_ID, session);
+  manager.outputsById.set(SESSION_ID, session);
   // No plan runs here: this file is about the path that answers a request.
   manager.planEncodersNow = () => {};
   manager.planEncodersSoon = () => {};
@@ -211,7 +212,7 @@ test("a live run elsewhere in the film does not make a short piece permanent", a
   });
   // The field state exactly: the run in force is hundreds of segments ahead of
   // the piece being asked for.
-  startRunOn(manager.sessionsById.get(SESSION_ID), { from: 192, usesExplicitCuts: true, speedX: 2 });
+  startRunOn(manager.outputsById.get(SESSION_ID), { from: 192, usesExplicitCuts: true, speedX: 2 });
 
   await manager.getFileStream(SESSION_ID, "segment-00000.mp4");
 

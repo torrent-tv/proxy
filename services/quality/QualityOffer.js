@@ -28,7 +28,7 @@
 import { variantHeightsFor } from "../output/ladder.js";
 import { peakMbpsForHeight } from "./link-budget.js";
 import { chooseOutputFps, TRANSCODE_FPS } from "../encode/args.js";
-import { processCanBeSignalled, runStateOf } from "../encode/encode-run-state.js";
+import { processCanBeSignalled } from "../encode/encode-run-state.js";
 import { sourceDecodeCharacteristics } from "../source/SourceFile.js";
 
 export class QualityOffer {
@@ -36,20 +36,23 @@ export class QualityOffer {
   #liveOutputs;
   #heightsOnScreen;
   #supplyFor;
+  #stateFor;
 
   /**
    * @param {{
    *   encodeCost: import("./EncodeCost.js").EncodeCost,
    *   liveOutputs: import("../output/LiveOutputs.js").LiveOutputs,
    *   heightsOnScreen: (owner: object) => number[],
-   *   supplyFor: (file: object) => { requiredSpeed: number | null, megabytesPerSecond: number | null, costPerMegabyte: number | null }
+   *   supplyFor: (file: object) => { requiredSpeed: number | null, megabytesPerSecond: number | null, costPerMegabyte: number | null },
+ *   stateFor: (output: object) => string
    * }} deps
    */
   constructor({
     encodeCost,
     liveOutputs,
     heightsOnScreen = () => [],
-    supplyFor = () => ({ requiredSpeed: null, megabytesPerSecond: null, costPerMegabyte: null })
+    supplyFor = () => ({ requiredSpeed: null, megabytesPerSecond: null, costPerMegabyte: null }),
+    stateFor
   }) {
     this.#cost = encodeCost;
     this.#liveOutputs = liveOutputs;
@@ -63,6 +66,10 @@ export class QualityOffer {
     // megabyte costs this process. Three readings taken by whoever reads the
     // file; here they are three numbers.
     this.#supplyFor = supplyFor;
+    if (typeof stateFor !== "function") {
+      throw new TypeError("QualityOffer requires stateFor");
+    }
+    this.#stateFor = stateFor;
   }
 
   /**
@@ -118,11 +125,11 @@ export class QualityOffer {
     // this family are running: both move the answer, and an answer cached
     // across them is the stale menu this key exists to prevent.
     const audioVersion = [...this.#liveOutputs.familyOf(owner)]
-      .filter((member) => member.audioOnly === true)
+      .filter((member) => member.spec.carries === "audio-only")
       .map((member) => this.#cost.audioVersionFor(member))
       .reduce((total, one) => total + one, 0);
     const running = [...this.#liveOutputs.familyOf(owner)]
-      .filter((member) => processCanBeSignalled(runStateOf(member))).length;
+      .filter((member) => processCanBeSignalled(this.#stateFor(member))).length;
     // What each running encode was last seen doing, which is BOTH an input to
     // the answer twice over — it withdraws a step measured below realtime, and
     // it prices every running picture in the committed total — and a figure
@@ -197,7 +204,7 @@ export class QualityOffer {
       sourceHeight: Math.round(Number(owner.file.height) || 0),
       fps: Number(owner.output.outputFps) || TRANSCODE_FPS,
       source: owner.file.decode ?? null,
-      transcodeVideo: owner.transcodeVideo === true,
+      transcodeVideo: owner.spec.transcodesVideo,
       // NOT the learned cost. What a rung is OFFERED on is the startup
       // measurement, which is taken on a quiet machine against known clips and
       // does not move; the figure learned from a live session moves with
@@ -237,7 +244,7 @@ export class QualityOffer {
    * @returns {number[]}
    */
   offeredHeights(session) {
-    if (!session || session.state === "disposed") {
+    if (!session) {
       return [];
     }
     return this.offeredHeightsFor(session);
@@ -341,7 +348,7 @@ export class QualityOffer {
    * @returns {number}
    */
   copiedHeightOf(base) {
-    if (!base || base.transcodeVideo === true) {
+    if (!base || base.spec.transcodesVideo) {
       return 0;
     }
     return Math.round(Number(base.file.height) || 0);
@@ -363,7 +370,7 @@ export class QualityOffer {
   peakMbpsFor(base, height) {
     return peakMbpsForHeight({
       sourceHeight: Math.round(Number(base.file.height) || 0),
-      transcodeVideo: base.transcodeVideo === true,
+      transcodeVideo: base.spec.transcodesVideo,
       sourceMbps: base.file.decode?.megabitsPerSecond ?? null
     }, height);
   }

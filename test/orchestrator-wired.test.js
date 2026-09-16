@@ -19,6 +19,7 @@ import { SegmentStore } from "../services/segment-store/SegmentStore.js";
 import { fmp4Format } from "../services/segment-formats/fmp4.js";
 import { viewerOf } from "../services/viewer/Viewer.js";
 import { startRunOn } from "./helpers/encode-run.js";
+import { outputSpec } from "./helpers/output-spec.js";
 
 const KEY = "torrent:abc:fmt=fmp4:grid=kf@0:video-only:v=0/copy";
 
@@ -37,9 +38,10 @@ function managerWithAnOutput() {
   return { manager, store, root, dirPath };
 }
 
-function sessionOn({ id, dirPath, encodeStartIndex = 0, runEndIndex = -1, speed = 0, running = true }) {
+function sessionOn({ manager, id, dirPath, encodeStartIndex = 0, runEndIndex = -1, speed = 0, running = true }) {
   const session = {
     id,
+    spec: outputSpec({ transcodeVideo: false }),
     outputKey: KEY,
     dirPath,
     // Where this file is cut, held by the file. A fixture that stated it
@@ -57,13 +59,14 @@ function sessionOn({ id, dirPath, encodeStartIndex = 0, runEndIndex = -1, speed 
     segmentFormat: fmp4Format,
     segmentCount: 1000,
     recentSpeed: null,
-    consumers: new Set(),
-    viewers: new Map(),
+    claims: new Set(),
     runs: new Set(),
     lastAccessedAt: Date.now()
   };
   if (running) {
     const run = startRunOn(session, { from: encodeStartIndex, to: runEndIndex });
+    manager.encodeOrchestrator.adopt(KEY, run);
+    session.testRun = run;
     // A speed is a reading taken FROM a run, so it names the run it came from.
     session.recentSpeed = speed > 0 ? { speed, at: Date.now(), run } : null;
     run.noteSpeed(speed);
@@ -75,8 +78,8 @@ test("a session is handed to the plan as the run it is", (t) => {
   const { manager, root, dirPath } = managerWithAnOutput();
   t.after(() => rmSync(root, { recursive: true, force: true }));
 
-  const session = sessionOn({ id: "one", dirPath, encodeStartIndex: 10, runEndIndex: 40 });
-  manager.sessionsById.set(session.id, session);
+  const session = sessionOn({ manager, id: "one", dirPath, encodeStartIndex: 10, runEndIndex: 40 });
+  manager.outputsById.set(session.id, session);
   viewerOf(session, "watching").position = { segment: 12, seconds: 48, at: Date.now() };
 
   manager.runQualityBudgetOnce;
@@ -84,7 +87,7 @@ test("a session is handed to the plan as the run it is", (t) => {
 
   const runs = manager.encodeOrchestrator.runsOn(KEY);
   assert.equal(runs.length, 1, "the session the browser already has is a run like any other");
-  assert.equal(runs[0], [...session.runs][0], "and it is the run the session actually holds");
+  assert.equal(runs[0], session.testRun, "and it is the run registered for this output");
   assert.equal(runs[0].from, 10);
   assert.equal(runs[0].to, 40);
 });
@@ -93,8 +96,8 @@ test("what a viewer waits for reaches the plan without their name", (t) => {
   const { manager, root, dirPath } = managerWithAnOutput();
   t.after(() => rmSync(root, { recursive: true, force: true }));
 
-  const session = sessionOn({ id: "one", dirPath, encodeStartIndex: 0, runEndIndex: -1 });
-  manager.sessionsById.set(session.id, session);
+  const session = sessionOn({ manager, id: "one", dirPath, encodeStartIndex: 0, runEndIndex: -1 });
+  manager.outputsById.set(session.id, session);
   viewerOf(session, "someone").position = { segment: 5, seconds: 20, at: Date.now() };
 
   manager.planEncodersNow();
@@ -113,8 +116,8 @@ test("a viewer who has gone stops being waited for, and silence alone never coun
   const { manager, root, dirPath } = managerWithAnOutput();
   t.after(() => rmSync(root, { recursive: true, force: true }));
 
-  const session = sessionOn({ id: "one", dirPath });
-  manager.sessionsById.set(session.id, session);
+  const session = sessionOn({ manager, id: "one", dirPath });
+  manager.outputsById.set(session.id, session);
   const person = viewerOf(session, "gone");
   person.moveTo(20, Date.now() - 10 * 60 * 1000);
   person.playing = false;
@@ -137,8 +140,8 @@ test("a viewer who has arrived and asked for nothing is waited for", (t) => {
   const { manager, root, dirPath } = managerWithAnOutput();
   t.after(() => rmSync(root, { recursive: true, force: true }));
 
-  const session = sessionOn({ id: "one", dirPath });
-  manager.sessionsById.set(session.id, session);
+  const session = sessionOn({ manager, id: "one", dirPath });
+  manager.outputsById.set(session.id, session);
   // Nothing places them here on purpose: this is a viewer known to the output
   // and nothing more, which is what a viewer IS between arriving and asking
   // for their first file. Answered from the position alone, this viewer read
@@ -160,8 +163,8 @@ test("how many encoders the machine affords is measured, not chosen", (t) => {
   t.after(() => rmSync(root, { recursive: true, force: true }));
 
   // Nothing measured yet: one is what it has.
-  const cold = sessionOn({ id: "cold", dirPath });
-  manager.sessionsById.set(cold.id, cold);
+  const cold = sessionOn({ manager, id: "cold", dirPath });
+  manager.outputsById.set(cold.id, cold);
   assert.equal(manager.maxRunsForOutput(KEY), 1);
 
   // Fast, but what a second job costs on THIS machine has not been measured,
@@ -188,8 +191,8 @@ test("segments already made are known to the plan, whoever made them", (t) => {
   for (const index of [0, 1, 2, 3]) {
     writeFileSync(path.join(dirPath, fmp4Format.segmentFileName(index)), Buffer.alloc(16, 1));
   }
-  const session = sessionOn({ id: "one", dirPath });
-  manager.sessionsById.set(session.id, session);
+  const session = sessionOn({ manager, id: "one", dirPath });
+  manager.outputsById.set(session.id, session);
 
   manager.planEncodersNow();
 

@@ -21,6 +21,7 @@ import assert from "node:assert/strict";
 import { SourceFile } from "../services/source/SourceFile.js";
 import { Timeline } from "../services/output/Timeline.js";
 import { KeyframeTable } from "../services/media/container/KeyframeTable.js";
+import { outputSpec } from "./helpers/output-spec.js";
 
 const TOLERANCE = 0.25;
 
@@ -135,18 +136,18 @@ test("a boundary the index got wrong is replaced by the time the file really has
   const boundaries = [0, 10, 20, 30, 40];
   const base = {
     id: "aaaaaaaa11112222",
+    spec: outputSpec({ transcodeVideo: false }),
     fileName: "film.mkv",
     state: "ready",
-    transcodeVideo: false,
     timeline: new Timeline({ boundaries: boundaries, cutGrid: "uniform" }),
     file: new SourceFile({ sourceKey: "source-1", fileIndex: 0, name: "film.mkv" }),
     segmentFormat: { segmentFileName: (index) => `segment-${index}.mp4` }
   };
   const rung = {
     id: "bbbbbbbb11112222",
+    spec: outputSpec({ transcodeVideo: true, height: 540 }),
     fileName: "film.mkv",
     state: "ready",
-    transcodeVideo: true,
     timeline: new Timeline({ boundaries: boundaries, cutGrid: "uniform" }),
     // A step of the picture: the same file, and made as a step.
     file: base.file,
@@ -154,8 +155,8 @@ test("a boundary the index got wrong is replaced by the time the file really has
     isStep: true
   };
   base.file.stepHeights.set(540, 540);
-  manager.sessionsById.set(base.id, base);
-  manager.sessionsById.set(rung.id, rung);
+  manager.outputsById.set(base.id, base);
+  manager.outputsById.set(rung.id, rung);
 
   // The copy produced segment #2, and it really begins at 17.4 s — the index
   // said 20. This is the shape reproduced from the field on 2026-08-12.

@@ -11,6 +11,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { EncodeCost } from "../services/quality/EncodeCost.js";
 import { LiveOutputs } from "../services/output/LiveOutputs.js";
+import { outputSpec } from "./helpers/output-spec.js";
 
 const PICTURE = "torrent:abc:fmt=fmp4:grid=kf@0:video-only:v=0/copy";
 
@@ -19,9 +20,12 @@ const PICTURE = "torrent:abc:fmt=fmp4:grid=kf@0:video-only:v=0/copy";
  * @param {{ copySpeedX?: number | null, benchmark?: object[] | null }} host
  */
 function costOf(sessions, host = {}) {
-  const sessionsById = new Map(sessions.map((session, index) => [String(index), session]));
+  const outputsById = new Map(sessions.map((session, index) => [String(index), session]));
   return new EncodeCost({
-    liveOutputs: new LiveOutputs({ sessionsById }),
+    runsFor: () => [],
+    stateFor: () => "IDLE",
+    progressFor: () => null,
+    liveOutputs: new LiveOutputs({ outputsById }),
     host: () => ({
       benchmark: host.benchmark ?? null,
       decodeModel: null,
@@ -40,7 +44,7 @@ test("a run on this output outranks every prediction", () => {
   // It is this machine, this material and these settings. Nothing said before
   // the fact beats something seen happening.
   const cost = costOf(
-    [{ outputKey: PICTURE, state: "ready", transcodeVideo: false, lastAloneSpeed: 9.5 }],
+    [{ outputKey: PICTURE, spec: outputSpec(), lastAloneSpeed: 9.5 }],
     { copySpeedX: 600 }
   );
   assert.equal(cost.speedForOutput(PICTURE), 9.5);
@@ -52,7 +56,7 @@ test("a copied picture is priced by the startup copy measurement", () => {
   // describes it, and a copied output was planned with no speed until its own
   // run had been running long enough to report one.
   const cost = costOf(
-    [{ outputKey: PICTURE, state: "ready", transcodeVideo: false, lastAloneSpeed: null }],
+    [{ outputKey: PICTURE, spec: outputSpec(), lastAloneSpeed: null }],
     { copySpeedX: 602 }
   );
   assert.equal(cost.speedForOutput(PICTURE), 602);
@@ -62,25 +66,22 @@ test("the fastest reading wins where several sessions produce one output", () =>
   // Two sessions whose output parameters agree ARE one output, so what either
   // of them measured about this machine is true of the other.
   const cost = costOf([
-    { outputKey: PICTURE, state: "ready", transcodeVideo: false, lastAloneSpeed: 4 },
-    { outputKey: PICTURE, state: "ready", transcodeVideo: false, lastAloneSpeed: 7 }
+    { outputKey: PICTURE, spec: outputSpec(), lastAloneSpeed: 4 },
+    { outputKey: PICTURE, spec: outputSpec(), lastAloneSpeed: 7 }
   ]);
   assert.equal(cost.speedForOutput(PICTURE), 7);
 });
 
-test("a disposed session says nothing about what the machine is doing", () => {
-  const cost = costOf(
-    [{ outputKey: PICTURE, state: "disposed", transcodeVideo: false, lastAloneSpeed: 4 }],
-    { copySpeedX: 602 }
-  );
-  assert.equal(cost.speedForOutput(PICTURE), 0, "no live session, so nothing to say");
+test("an output absent from the live registry says nothing about what the machine is doing", () => {
+  const cost = costOf([], { copySpeedX: 602 });
+  assert.equal(cost.speedForOutput(PICTURE), 0, "no registered output, so nothing to say");
 });
 
 test("another output's reading is not borrowed", () => {
   // Two outputs are two different pieces of work — a picture re-encoded to 480p
   // and the same picture copied are not the same speed.
   const cost = costOf([
-    { outputKey: "other", state: "ready", transcodeVideo: false, lastAloneSpeed: 40 }
+    { outputKey: "other", spec: outputSpec(), lastAloneSpeed: 40 }
   ]);
   assert.equal(cost.speedForOutput(PICTURE), 0);
 });

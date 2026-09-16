@@ -11,7 +11,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { Viewer } from "../services/viewer/Viewer.js";
+import { Viewer, viewersOf } from "../services/viewer/Viewer.js";
+import { Viewers } from "../services/viewer/Viewers.js";
 
 const AT = 1_000_000;
 
@@ -113,26 +114,19 @@ test("a page that is not on screen wants nothing now, whatever else it says", ()
 
 test("the intake hands the statement to the viewer on the output they are watching", async () => {
   const { recordViewerReport } = await import("../services/viewer/report-intake.js");
-  const picture = { id: "picture", state: "ready", activeVariantId: "rung" };
-  const rung = { id: "rung", state: "ready" };
+  const picture = { id: "picture" };
+  const rung = { id: "rung" };
   const sessions = new Map([
     ["picture", picture],
     ["rung", rung]
   ]);
-  const viewers = {
-    of(target, id) {
-      target.viewers ??= new Map();
-      if (!target.viewers.has(id)) {
-        target.viewers.set(id, new Viewer(id, AT));
-      }
-      return target.viewers.get(id);
-    }
-  };
+  const viewers = new Viewers();
+  viewers.of(picture, "one", AT).activeVariantId = "rung";
 
   // The page always addresses the PICTURE — it is never told which rung it is
   // on — and the statement belongs to the rung actually on screen.
   const taken = recordViewerReport({
-    sessions,
+    outputs: sessions,
     viewers,
     sessionId: "picture",
     report: { linkMbps: 8, bufferedAheadSec: 10, positionSeconds: 5, playing: true, consumerId: "one" },
@@ -140,8 +134,8 @@ test("the intake hands the statement to the viewer on the output they are watchi
   });
 
   assert.equal(taken, true);
-  assert.equal(rung.viewers.get("one").positionSeconds(AT), 5);
-  assert.equal(picture.viewers?.has("one") ?? false, false);
+  assert.equal(viewersOf(rung).get("one").positionSeconds(AT), 5);
+  assert.equal(viewersOf(picture).has("one"), true);
 });
 
 test("a link reading does not expire — presence is what decides whose it is", () => {
@@ -161,15 +155,10 @@ test("a link reading does not expire — presence is what decides whose it is", 
 
 test("the worst reading is taken across the people who are still here", async () => {
   const { worstLinkReading } = await import("../services/viewer/link-readings.js");
-  const output = {};
-  const slow = new Viewer("slow", AT);
-  slow.outputs.add("out");
-  const fast = new Viewer("fast", AT);
-  fast.outputs.add("out");
-  output.viewers = new Map([
-    ["slow", slow],
-    ["fast", fast]
-  ]);
+  const output = { id: "out" };
+  const viewers = new Viewers();
+  const slow = viewers.of(output, "slow", AT);
+  const fast = viewers.of(output, "fast", AT);
   slow.report({ linkMbps: 2, bufferedAheadSec: 3, playing: true }, AT);
   fast.report({ linkMbps: 40, bufferedAheadSec: 90, playing: true }, AT);
 
@@ -186,17 +175,17 @@ test("the worst reading is taken across the people who are still here", async ()
   assert.equal(left?.viewers, 1);
 });
 
-test("a report into a session that is gone is refused rather than invented", async () => {
+test("a report into an output absent from the live registry is refused rather than invented", async () => {
   const { recordViewerReport } = await import("../services/viewer/report-intake.js");
-  const sessions = new Map([["dead", { id: "dead", state: "disposed" }]]);
+  const sessions = new Map();
   const viewers = { of() { throw new Error("must not be asked"); } };
 
   assert.equal(
-    recordViewerReport({ sessions, viewers, sessionId: "dead", report: { bufferedAheadSec: 0 }, now: AT }),
+    recordViewerReport({ outputs: sessions, viewers, sessionId: "dead", report: { bufferedAheadSec: 0 }, now: AT }),
     false
   );
   assert.equal(
-    recordViewerReport({ sessions, viewers, sessionId: "never", report: { bufferedAheadSec: 0 }, now: AT }),
+    recordViewerReport({ outputs: sessions, viewers, sessionId: "never", report: { bufferedAheadSec: 0 }, now: AT }),
     false
   );
 });

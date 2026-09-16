@@ -36,6 +36,7 @@ import {
 } from "./media/ffmpeg-banner.js";
 
 import { keyFrameArgs, TRANSCODE_FPS } from "./encode/args.js";
+import { LADDER_HEIGHTS } from "./output/ladder.js";
 // The five kinds, one class each. Detection and benchmarking stay in this file;
 // how a kind is driven belongs to the kind.
 import {
@@ -1643,18 +1644,12 @@ function isDecodePriced(cost) {
   return Boolean(cost?.decodeModel) && Boolean(cost?.source);
 }
 
-// Resolution-ladder heights (output height rungs), high→low. The ladder is
-// derived per-stream from the ceiling (the client-requested, source-capped
-// output box): only rungs at or below the ceiling height are used, so the
-// budget never upscales past what the client asked for. Standard heights keep
-// the downscaled output at familiar resolutions.
-const RESOLUTION_LADDER_HEIGHTS = [2160, 1440, 1080, 720, 540, 480, 360, 240];
-
 /**
  * Build the resolution ladder for a ceiling box. Returns candidate output
  * dimensions from the ceiling downward, preserving the ceiling's aspect ratio,
- * each even-sized. The ceiling itself is always the top rung; ladder heights
- * at or above it are skipped (never upscale). Deduped by height.
+ * each even-sized. The ceiling itself is always the top rung; the ladder's
+ * standard heights (`LADDER_HEIGHTS`, the same list the quality menu offers) at
+ * or above it are skipped (never upscale). Deduped by height.
  *
  * @param {number} ceilingWidth
  * @param {number} ceilingHeight
@@ -1672,7 +1667,7 @@ export function buildResolutionLadder(ceilingWidth, ceilingHeight) {
   };
   /** @type {Array<{ width: number, height: number }>} */
   const rungs = [{ width: cw, height: ch }];
-  for (const h of RESOLUTION_LADDER_HEIGHTS) {
+  for (const h of LADDER_HEIGHTS) {
     if (h >= ch) {
       continue; // at/above the ceiling — the ceiling rung already covers it
     }

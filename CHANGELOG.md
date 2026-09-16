@@ -1,5 +1,7 @@
 ## 2.86.1
 
+- **Chore**: The standard heights are one list. The quality menu (`output/ladder.js`) and the realtime budget's resolution ladder (`hwaccel.js`) each declared `[2160, 1440, 1080, 720, 540, 480, 360, 240]`; the budget now reads `LADDER_HEIGHTS` from the ladder module.
+
 - **Fix**: How an output's last encoder ended, its last error and the position that kept failing to start no longer outlive the output. They moved from the session into `EncodeOrchestrator`, keyed by output address, and nothing removed them; since an output's name follows from its key, the next output with the same parameters inherited them. An inherited failed ending made the new output's first wait throw before any encoder was placed, so a film that failed once could not be opened again until the proxy restarted. They are forgotten when the last output on that address is disposed and no run is left on it, including a run that ends after disposal.
 
 - **Fix**: Whether the player followed a quality request is judged by what the viewers watching actually have on screen. After the per-output quality choice moved onto each viewer, the check asked about a viewer without a name, which a browser that names itself never is, so a request the viewer had already followed stayed standing until it ran out and was logged as ignored. A viewer who has not chosen a step now counts as watching the picture itself, so the picture is no longer treated as unwatched while another viewer of it is on a step.

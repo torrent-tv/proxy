@@ -22,7 +22,7 @@ function costOn(readings = {}) {
   let asked = 0;
   const host = { share: 1 };
   const cost = new EncodeCost({
-    liveOutputs: {
+    outputs: {
       familyOf: (session) => readings.familyOf?.(session) ?? [],
       variantHeightOf: () => 0
     },

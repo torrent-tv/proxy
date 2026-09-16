@@ -47,7 +47,7 @@ async function managerWithSession() {
     segmentCount: 200,
     useSyntheticPlaylist: true
   };
-  manager.outputsById.set(SESSION_ID, session);
+  manager.outputs.set(SESSION_ID, session);
   // The viewer is at segment #25, and says so themselves.
   viewerOf(session, "").moveTo(25 * SEGMENT_SECONDS);
   viewerOf(session, "").playing = false;

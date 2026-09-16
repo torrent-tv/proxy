@@ -51,7 +51,7 @@ test("when a hardware encoder fails, the outputs it named are closed rather than
   const record = (id, encoder) => {
     const spec = outputSpec({ sourceKey: "torrent:abc", transcodeVideo: true, width: 1280, height: 720, encoder });
     const output = { id, spec, get outputKey() { return this.spec.toKey(); }, file, claims: new Set() };
-    manager.outputsById.set(id, output);
+    manager.outputs.set(id, output);
     return output;
   };
   const failing = record("aaaaaaaa00000001", "h264_vaapi");
@@ -73,6 +73,6 @@ test("when a hardware encoder fails, the outputs it named are closed rather than
   await new Promise((resolve) => setImmediate(resolve));
 
   assert.equal(manager.videoEncoder.kind, "software");
-  assert.equal(manager.outputsById.has(failing.id), false, "an output of the failed encoder is closed");
-  assert.equal(manager.outputsById.has(software.id), true, "an output of another encoder is untouched");
+  assert.equal(manager.outputs.has(failing.id), false, "an output of the failed encoder is closed");
+  assert.equal(manager.outputs.has(software.id), true, "an output of another encoder is untouched");
 });

@@ -16,7 +16,7 @@
  * a term has not been measured it contributes nothing rather than a guess.
  *
  * What it is given, and why each is passed rather than reached for: which
- * sessions belong to one file (`liveOutputs`), the host's own readings, how many
+ * sessions belong to one file (`outputs`), the host's own readings, how many
  * encoders are running, what the file costs merely by being fetched, and whether
  * a slow run is short of the machine or short of the swarm. The learned costs it
  * holds itself: they are what an encoder taught it, and it is their only writer
@@ -93,7 +93,7 @@ export class EncodeCost {
   // asked again.
   #lastOfferLine = "";
 
-  #liveOutputs;
+  #outputs;
   #host;
   #runningEncoders;
   #encodersRunningNow;
@@ -105,7 +105,7 @@ export class EncodeCost {
 
   /**
    * @param {{
-   *   liveOutputs: import("../output/LiveOutputs.js").LiveOutputs,
+   *   outputs: import("../output/OutputCatalog.js").OutputCatalog,
    *   host: () => { benchmark: object[] | null, decodeModel: object | null, contentionPenalties: object | null, copySpeedX: number | null, availability: { known: boolean, share: number } | null, encoderKind: string | null },
    *   runningEncoders: () => number,
    *   encodersRunningNow: () => number,
@@ -116,8 +116,8 @@ export class EncodeCost {
    *   progressFor: (output: object) => object | null
    * }} deps
    */
-  constructor({ liveOutputs, host, runningEncoders, encodersRunningNow, torrentCostSecFor, boundBy, runsFor, stateFor, progressFor }) {
-    this.#liveOutputs = liveOutputs;
+  constructor({ outputs, host, runningEncoders, encodersRunningNow, torrentCostSecFor, boundBy, runsFor, stateFor, progressFor }) {
+    this.#outputs = outputs;
     // Asked at the moment of the question, not copied: the share of the machine
     // that is free is re-read every few seconds, and a copy taken when this was
     // built would price every later rung against a machine that has gone.
@@ -259,7 +259,7 @@ export class EncodeCost {
    *   plan around.
    */
   speedForOutput(address) {
-    const outputs = this.#liveOutputs.outputsOn(address);
+    const outputs = this.#outputs.outputsOn(address);
     let measured = 0;
     for (const session of outputs) {
       const speed = Number(session.lastAloneSpeed);
@@ -302,7 +302,7 @@ export class EncodeCost {
    */
   pricedConcurrentCost(session) {
     let cost = 0;
-    for (const member of this.#liveOutputs.familyOf(session)) {
+    for (const member of this.#outputs.familyOf(session)) {
       if (member === session || !processCanBeSignalled(this.#stateFor(member))) {
         continue;
       }
@@ -331,7 +331,7 @@ export class EncodeCost {
     // Encoders outside this family are counted by number only — there is no
     // price to look up for another film's session — so a reading taken while
     // one is running cannot be attributed either.
-    return this.#runningEncoders() > this.#liveOutputs.familyOf(session).filter(
+    return this.#runningEncoders() > this.#outputs.familyOf(session).filter(
       (member) => processCanBeSignalled(this.#stateFor(member))
     ).length
       ? null
@@ -352,14 +352,14 @@ export class EncodeCost {
   runningCostByHeight(session) {
     /** @type {Map<number, number>} */
     const byHeight = new Map();
-    for (const member of this.#liveOutputs.familyOf(session)) {
+    for (const member of this.#outputs.familyOf(session)) {
       if (member.spec.carries === "audio-only" || !member.spec.transcodesVideo) {
         continue;
       }
       if (!processCanBeSignalled(this.#stateFor(member))) {
         continue;
       }
-      const height = this.#liveOutputs.variantHeightOf(member);
+      const height = this.#outputs.variantHeightOf(member);
       if (height > 0) {
         byHeight.set(height, (byHeight.get(height) ?? 0) + this.#pictureCostOf(member));
       }
@@ -386,7 +386,7 @@ export class EncodeCost {
    */
   committedCostOf(session) {
     let cost = 0;
-    for (const member of this.#liveOutputs.familyOf(session)) {
+    for (const member of this.#outputs.familyOf(session)) {
       // Only what still HAS an encoder. A quality step the viewer left keeps
       // its session and its segments but not a process, and it produces nothing
       // for anybody — charging the machine for it would refuse steps on work
@@ -447,11 +447,11 @@ export class EncodeCost {
   measuredRungSpeeds(base) {
     /** @type {Map<number, number>} */
     const speeds = new Map();
-    for (const session of this.#liveOutputs.familyOf(base)) {
+    for (const session of this.#outputs.familyOf(base)) {
       if (!session.spec.transcodesVideo || !Number.isFinite(session.lastAloneSpeed)) {
         continue;
       }
-      const height = this.#liveOutputs.variantHeightOf(session);
+      const height = this.#outputs.variantHeightOf(session);
       if (height > 0) {
         speeds.set(height, session.lastAloneSpeed);
       }

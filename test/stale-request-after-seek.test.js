@@ -75,7 +75,7 @@ async function sessionWithRunAt373() {
     firstSegmentLogged: false,
     waitEpoch: 0
   };
-  manager.outputsById.set(SESSION_ID, session);
+  manager.outputs.set(SESSION_ID, session);
   startRunOn(session, { from: RUN_STARTS_AT, usesExplicitCuts: true, speedX: 2 });
   return { manager, session, dirPath };
 }
@@ -90,7 +90,7 @@ async function tidy(manager, session, dirPath) {
     clearTimeout(session.seekSettleTimer);
     session.seekSettleTimer = null;
   }
-  manager.outputsById.clear();
+  manager.outputs.clear();
   manager.stop?.();
   await rm(dirPath, { recursive: true, force: true });
 }

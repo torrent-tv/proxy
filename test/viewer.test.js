@@ -121,7 +121,7 @@ test("releasing a consumer forgets everything that was true of them alone", asyn
     claims: new Set(),
     lastAccessedAt: Date.now()
   };
-  manager.outputsById.set(SESSION_ID, session);
+  manager.outputs.set(SESSION_ID, session);
 
   const leaving = manager.viewers.of(session, "leaving");
   leaving.audio = { trackIndex: 2, transcode: true };

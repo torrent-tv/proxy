@@ -95,8 +95,8 @@ test("each session serves the segments the other one's encoder made", (t) => {
 
   const viewerOne = sessionOn({ id: "s-one", dirPath, outputKey: OUTPUT_KEY });
   const viewerTwo = sessionOn({ id: "s-two", dirPath, outputKey: OUTPUT_KEY });
-  manager.outputsById.set(viewerOne.id, viewerOne);
-  manager.outputsById.set(viewerTwo.id, viewerTwo);
+  manager.outputs.set(viewerOne.id, viewerOne);
+  manager.outputs.set(viewerTwo.id, viewerTwo);
 
   const sorted = (numbers) => [...numbers].sort((left, right) => left - right);
   const heldByOne = sorted(manager.producedSegmentNumbers(viewerOne));
@@ -116,8 +116,8 @@ test("a session leaving does not take the segments with it", async (t) => {
 
   const viewerOne = sessionOn({ id: "s-one", dirPath, outputKey: OUTPUT_KEY });
   const viewerTwo = sessionOn({ id: "s-two", dirPath, outputKey: OUTPUT_KEY });
-  manager.outputsById.set(viewerOne.id, viewerOne);
-  manager.outputsById.set(viewerTwo.id, viewerTwo);
+  manager.outputs.set(viewerOne.id, viewerOne);
+  manager.outputs.set(viewerTwo.id, viewerTwo);
 
   await manager.disposeSession(viewerOne.id);
   await manager.disposeSession(viewerTwo.id);

@@ -158,7 +158,7 @@ async function managerHolding({ piece, sessionHeader }) {
     firstSegmentLogged: false,
     waitEpoch: 0
   };
-  manager.outputsById.set(SESSION_ID, session);
+  manager.outputs.set(SESSION_ID, session);
   // No plan runs here: this file is about the path that answers a request.
   manager.planEncodersNow = () => {};
   manager.planEncodersSoon = () => {};
@@ -212,7 +212,7 @@ test("a live run elsewhere in the film does not make a short piece permanent", a
   });
   // The field state exactly: the run in force is hundreds of segments ahead of
   // the piece being asked for.
-  startRunOn(manager.outputsById.get(SESSION_ID), { from: 192, usesExplicitCuts: true, speedX: 2 });
+  startRunOn(manager.outputs.get(SESSION_ID), { from: 192, usesExplicitCuts: true, speedX: 2 });
 
   await manager.getFileStream(SESSION_ID, "segment-00000.mp4");
 

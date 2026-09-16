@@ -16,7 +16,7 @@
  * pass. Field 2026-09-08.
  *
  * Built out of the real classes throughout: the real viewer registry holds real
- * viewers, the real `LiveOutputs` answers what a film's shape is, and the real
+ * viewers, the real `OutputCatalog` answers what a film's shape is, and the real
  * `PriorityOrchestrator` builds the maps. A session is a plain object in this
  * proxy — there is no class for one — so the literals below are the thing
  * itself and not a stand-in for it.
@@ -25,7 +25,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { PriorityOrchestrator } from "../services/priority/PriorityOrchestrator.js";
-import { LiveOutputs } from "../services/output/LiveOutputs.js";
+import { OutputCatalog } from "../services/output/OutputCatalog.js";
 import { Viewers } from "../services/viewer/Viewers.js";
 import { viewersOf } from "../services/viewer/Viewer.js";
 import { runsOf } from "../services/priority/PriorityMap.js";
@@ -62,7 +62,10 @@ function outputOf({ id, outputKey, isStep = false, audioOnly = false }) {
  * @returns {{ priority: PriorityOrchestrator, viewers: Viewers, publish: () => void }}
  */
 function over(sessions) {
-  const live = new LiveOutputs({ outputsById: new Map(sessions.map((one) => [one.id, one])) });
+  const live = new OutputCatalog();
+  for (const one of sessions) {
+    live.set(one.id, one);
+  }
   const viewers = new Viewers();
   const priority = new PriorityOrchestrator({
     publish: () => {},
@@ -159,7 +162,8 @@ test("a viewer who has gone is not watching anything", () => {
   // paused viewer, a throttled hidden tab, or a full cushion, and none of those
   // is leaving; what ends it is a statement.
   const picture = outputOf({ id: "pic", outputKey: "out:1080" });
-  const live = new LiveOutputs({ outputsById: new Map([["pic", picture]]) });
+  const live = new OutputCatalog();
+  live.set("pic", picture);
   const viewers = new Viewers();
   const priority = new PriorityOrchestrator({
     publish: () => {},

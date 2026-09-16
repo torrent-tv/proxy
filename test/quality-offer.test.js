@@ -42,14 +42,14 @@ function sessionProducing() {
  */
 function offerOver(supply = { requiredSpeed: null, megabytesPerSecond: null, costPerMegabyte: null }) {
   const picture = sessionProducing();
-  const liveOutputs = {
+  const outputs = {
     familyOf: () => [picture],
     pictureOf: () => picture,
     variantHeightOf: () => 0,
     sessionsOn: () => []
   };
   const cost = new EncodeCost({
-    liveOutputs,
+    outputs,
     host: () => ({ benchmark: null, decodeModel: null, contentionPenalties: null, availability: null }),
     runningEncoders: () => 0,
     encodersRunningNow: () => 0,
@@ -67,7 +67,7 @@ function offerOver(supply = { requiredSpeed: null, megabytesPerSecond: null, cos
   };
   const offer = new QualityOffer({
     encodeCost: cost,
-    liveOutputs,
+    outputs,
     stateFor: (session) => runStateOf(session.runs),
     heightsOnScreen: () => [],
     supplyFor: () => supply

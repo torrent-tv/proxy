@@ -1,10 +1,10 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { OutputRegistry } from "../services/output/OutputRegistry.js";
+import { OutputCatalog } from "../services/output/OutputCatalog.js";
 
-test("the registry owns creation and access times", () => {
+test("the catalog owns creation and access times", () => {
   let now = 100;
-  const registry = new OutputRegistry({ now: () => now });
+  const registry = new OutputCatalog({ now: () => now });
   const output = { id: "picture" };
   registry.set(output.id, output);
 
@@ -17,9 +17,9 @@ test("the registry owns creation and access times", () => {
   assert.equal("lastAccessedAt" in output, false);
 });
 
-test("expiry is decided from the registry's access time", () => {
+test("expiry is decided from the catalog's access time", () => {
   let now = 100;
-  const registry = new OutputRegistry({ now: () => now });
+  const registry = new OutputCatalog({ now: () => now });
   registry.set("old", { id: "old" });
   now = 200;
   registry.set("fresh", { id: "fresh" });
@@ -28,7 +28,7 @@ test("expiry is decided from the registry's access time", () => {
 });
 
 test("removal deletes both the output and its lifetime", () => {
-  const registry = new OutputRegistry({ now: () => 100 });
+  const registry = new OutputCatalog({ now: () => 100 });
   const output = { id: "picture" };
   registry.set(output.id, output);
   registry.delete(output.id);

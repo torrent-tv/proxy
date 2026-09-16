@@ -350,7 +350,7 @@ test("the OFFER drops the rungs the host cannot hold, and the master keeps addre
     segmentCount: 100,
     progress: { state: "running", processedSeconds: 0, startPositionSeconds: 0, speed: "1.0x" }
   };
-  manager.outputsById.set(session.id, session);
+  manager.outputs.set(session.id, session);
 
   assert.deepEqual(
     manager.offeredHeights(session),
@@ -374,7 +374,7 @@ test("the OFFER drops the rungs the host cannot hold, and the master keeps addre
   // second session, because the answer is settled once per session.
   manager.softwarePresetBenchmark = [{ preset: "ultrafast", pixelsPerSec: 12e6 }];
   const stronger = { ...session, id: "ddddddddeeeeffff", offeredHeightsCache: undefined };
-  manager.outputsById.set(stronger.id, stronger);
+  manager.outputs.set(stronger.id, stronger);
   assert.deepEqual(
     manager.offeredHeights(stronger),
     [1080, 360, 240],
@@ -397,7 +397,7 @@ test("the OFFER drops the rungs the host cannot hold, and the master keeps addre
     offeredHeightsCache: undefined,
     supplyFigures: { requiredSpeed: 1.67, worstWaitSec: 1.49, medianIntervalSec: 2.22, samples: 12 }
   };
-  manager.outputsById.set(onAThinSwarm.id, onAThinSwarm);
+  manager.outputs.set(onAThinSwarm.id, onAThinSwarm);
   assert.deepEqual(
     manager.offeredHeights(onAThinSwarm),
     [1080],

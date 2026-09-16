@@ -96,8 +96,8 @@ test("a viewer whose connection closed is let go of every output they were watch
 
   const picture = outputOn(PICTURE, dirPath);
   const sound = outputOn(SOUND, dirPath);
-  manager.outputsById.set(PICTURE, picture);
-  manager.outputsById.set(SOUND, sound);
+  manager.outputs.set(PICTURE, picture);
+  manager.outputs.set(SOUND, sound);
   manager.viewers.of(picture, "watcher");
   manager.viewers.of(sound, "watcher");
 

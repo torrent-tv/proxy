@@ -168,7 +168,7 @@ test("every call the HTTP layer makes is answered", () => {
 
 test("the progress report keeps every figure it carries today", async () => {
   const manager = bareManager();
-  manager.outputsById.set(SESSION_ID, fakeSession());
+  manager.outputs.set(SESSION_ID, fakeSession());
   const progress = await manager.getSessionProgress(SESSION_ID, "viewer-one");
   assert.ok(progress, "a live session has a progress report");
 
@@ -212,7 +212,7 @@ test("a session that is not there is answered, not invented", async () => {
 
 test("what a viewer states about themselves is kept and answered", () => {
   const manager = bareManager();
-  manager.outputsById.set(SESSION_ID, fakeSession());
+  manager.outputs.set(SESSION_ID, fakeSession());
 
   // Nine public members had no test of any kind before the dismantling began,
   // and six of them are the viewer's own facts — the ones that move into
@@ -237,7 +237,7 @@ test("what a viewer states about themselves is kept and answered", () => {
 
   manager.noteInputBytes(SESSION_ID, 4096);
   manager.noteInputBytes(SESSION_ID, 1024);
-  assert.equal(manager.outputsById.get(SESSION_ID).inputBytes, 5120, "input bytes accumulate");
+  assert.equal(manager.outputs.get(SESSION_ID).inputBytes, 5120, "input bytes accumulate");
 
   // A far fragment is a reading and must never throw, whatever the player says.
   manager.recordFragmentFar(SESSION_ID, {
@@ -252,21 +252,21 @@ test("a session nobody has touched is disposed, one that is being watched is not
   const fresh = fakeSession({ id: "2222222222222222" });
   // Older than any TTL this manager could carry, without naming one here: the
   // period is the manager's business and this test is about the rule.
-  manager.outputsById.set(stale.id, stale);
-  manager.outputsById.set(fresh.id, fresh);
-  manager.outputsById.touch(stale, Date.now() - (2 * 60 * 60 * 1000));
+  manager.outputs.set(stale.id, stale);
+  manager.outputs.set(fresh.id, fresh);
+  manager.outputs.touch(stale, Date.now() - (2 * 60 * 60 * 1000));
 
   await manager.cleanupExpired();
 
-  assert.equal(manager.outputsById.has(stale.id), false, "an untouched session goes");
+  assert.equal(manager.outputs.has(stale.id), false, "an untouched session goes");
   assert.equal("state" in stale, false, "removal from the registry is the only lifetime fact");
-  assert.equal(manager.outputsById.has(fresh.id), true, "a session just read stays");
+  assert.equal(manager.outputs.has(fresh.id), true, "a session just read stays");
 });
 
 test("what a file declares and what this host could offer are answered without a session", () => {
   const manager = bareManager();
   const session = fakeSession();
-  manager.outputsById.set(SESSION_ID, session);
+  manager.outputs.set(SESSION_ID, session);
 
   // `declaredTracks` reads the session's own record and must answer even when
   // nothing has probed the file yet.
@@ -287,7 +287,7 @@ test("what a file declares and what this host could offer are answered without a
 
 test("a segment name that is not one is refused", async () => {
   const manager = bareManager();
-  manager.outputsById.set(SESSION_ID, fakeSession());
+  manager.outputs.set(SESSION_ID, fakeSession());
 
   for (const name of ["../key.txt", "segment-00000.mp4/../../x", "making-0-00000.mp4"]) {
     const answer = await manager.getFileStream(SESSION_ID, name);

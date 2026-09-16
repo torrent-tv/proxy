@@ -129,7 +129,7 @@ handed the other:
 - **which step is on their screen** is a fact about a PERSON, read off the
   viewer as one field;
 - **which output a step supersedes** is a fact about the FILM'S SHAPE, answered
-  by `LiveOutputs.supersededBy(session, stepOnScreen)`, which takes a plain id
+  by `OutputCatalog.supersededBy(session, stepOnScreen)`, which takes a plain id
   and has never seen a viewer.
 
 A step, a soundtrack, and a step being warmed are consumed by whoever is
@@ -442,7 +442,7 @@ reading its own map, and the soundtrack's start instant read off the table
 rather than handed in.
 
 `test/priority-map-per-output.test.js` holds the two scopes, over the real
-viewer registry, the real `LiveOutputs` and the real `PriorityOrchestrator`.
+viewer registry, the real `OutputCatalog` and the real `PriorityOrchestrator`.
 
 `test/encode-plan.test.js` holds the arithmetic, including that every encoder
 stops when nobody is watching the output.

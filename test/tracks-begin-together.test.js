@@ -22,6 +22,7 @@ import { HlsSessionManager } from "../services/hls-session-manager.js";
 import { trueStartOf } from "../services/encode/run-command.js";
 import { fmp4Format } from "../services/segment-formats/fmp4.js";
 import { ENCODE_RUN_STATE, INITIAL_RUN_STATE } from "../services/encode/encode-run-state.js";
+import { outputSpec } from "./helpers/output-spec.js";
 
 const BOUNDARIES = [0, 4, 8, 12, 16, 20];
 
@@ -43,6 +44,8 @@ function familyAtBoundaryTwo() {
   });
   const picture = {
     id: "picture",
+    spec: outputSpec({ transcodeVideo: false }),
+    get outputKey() { return this.spec.toKey(); },
     state: "ready",
     timeline: new Timeline({ boundaries: boundaries, cutGrid: "uniform" }),
     file: new SourceFile({ sourceKey: "source-1", fileIndex: 0, name: "film.mkv" }),
@@ -57,15 +60,15 @@ function familyAtBoundaryTwo() {
     segmentFormat: fmp4Format,
     // Where its encoder has got to, which a run writes into as it works.
     progress: { processedSeconds: 0 },
-    runs: new Set(),
-    pendingRun: null
+    runs: new Set()
   };
   // The soundtrack of that picture: the same file, published on its own. Found
   // by what it is, since no list of ids names it any more.
   const sound = {
     id: "sound",
+    spec: outputSpec({ audioOnly: true }),
+    get outputKey() { return this.spec.toKey(); },
     state: "ready",
-    audioOnly: true,
     baseSessionId: "picture",
     timeline: new Timeline({ boundaries: boundaries, cutGrid: "uniform" }),
     file: new SourceFile({ sourceKey: "source-1", fileIndex: 0, name: "film.mkv" }),
@@ -80,13 +83,14 @@ function familyAtBoundaryTwo() {
     segmentFormat: fmp4Format,
     // Where its encoder has got to, which a run writes into as it works.
     progress: { processedSeconds: 0 },
-    runs: new Set(),
-    pendingRun: null
+    runs: new Set()
   };
-  startRunOn(picture, { from: 2 });
-  startRunOn(sound, { from: 2 });
-  manager.sessionsById.set("picture", picture);
-  manager.sessionsById.set("sound", sound);
+  const pictureRun = startRunOn(picture, { from: 2 });
+  const soundRun = startRunOn(sound, { from: 2 });
+  manager.encodeOrchestrator.adopt(picture.outputKey, pictureRun);
+  manager.encodeOrchestrator.adopt(sound.outputKey, soundRun);
+  manager.outputsById.set("picture", picture);
+  manager.outputsById.set("sound", sound);
 
   return { manager, picture, sound };
 }
@@ -114,7 +118,11 @@ test("a soundtrack follows the picture to the instant the picture really began",
   // it is known and no further: the run goes, the stretch it held returns to the
   // map, and where the next one stands follows from where the viewers are.
   assert.equal(runBefore.state, ENCODE_RUN_STATE.STOPPED, "the run in the wrong place goes");
-  assert.equal(sound.pendingRun, null, "and this path places nothing");
+  assert.equal(
+    manager.encodeOrchestrator.runsOn(sound.outputKey).filter((run) => run.isAlive).length,
+    0,
+    "and this path places nothing"
+  );
   // The corrected instant reaches whatever the plan places there through the
   // table, which every session of the file shares. It used to be passed as an
   // argument from this one call site, so only a run started by that line ever
@@ -160,7 +168,11 @@ test("a member that is not running is left alone", () => {
   // A stopped run is no longer live, so nothing of this session begins at #2
   // any more — which is what "left alone" means here.
   manager.correctBoundaryFromSegment(picture, 2, 10.5);
-  assert.equal(sound.pendingRun, null, "a stopped member is not started again for nobody");
+  assert.equal(
+    manager.encodeOrchestrator.runsOn(sound.outputKey).filter((run) => run.isAlive).length,
+    0,
+    "a stopped member is not started again for nobody"
+  );
   assert.equal(soundRun.from, 2, "a stopped member keeps its place and its silence");
   assert.equal(soundRun.state, ENCODE_RUN_STATE.STOPPED);
   assert.notEqual(INITIAL_RUN_STATE, ENCODE_RUN_STATE.STOPPED);
@@ -189,5 +201,9 @@ test("a soundtrack does not move the grid the picture is cut on", () => {
     "the grid is the picture's cut list and a soundtrack may not move it"
   );
   assert.deepEqual(sound.timeline.boundaries, soundBefore);
-  assert.equal(picture.pendingRun, null, "and nothing is restarted on a soundtrack's say-so");
+  assert.equal(
+    manager.encodeOrchestrator.runsOn(picture.outputKey).filter((run) => run.isAlive).length,
+    1,
+    "and nothing is restarted on a soundtrack's say-so"
+  );
 });

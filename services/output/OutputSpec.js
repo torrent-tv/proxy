@@ -186,6 +186,31 @@ export class OutputSpec {
     return "empty";
   }
 
+  /** @returns {boolean} */
+  get transcodesVideo() {
+    return this.video?.encode !== null && this.video?.encode !== undefined;
+  }
+
+  /** @returns {boolean} */
+  get transcodesAudio() {
+    return this.audio?.transcode === true;
+  }
+
+  /** @returns {boolean} */
+  get carriesAudioSeparately() {
+    return this.carries === "video-only";
+  }
+
+  /** @returns {number} */
+  get audioFileIndex() {
+    return this.audio?.fileIndex ?? -1;
+  }
+
+  /** @returns {number} */
+  get audioSourceTrackIndex() {
+    return this.audio?.trackIndex ?? 0;
+  }
+
   /**
    * The identity. Two outputs with the same one are the same output.
    *

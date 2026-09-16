@@ -29,6 +29,7 @@ import { spawn } from "node:child_process";
 import { mkdtemp, rm } from "node:fs/promises";
 import { decodeCostOf, decodeFamilyOf } from "../services/decode-cost-fit.js";
 import { Output } from "../services/output/Output.js";
+import { outputSpec } from "./helpers/output-spec.js";
 import os from "node:os";
 import path from "node:path";
 import {
@@ -302,6 +303,7 @@ test("the OFFER drops the rungs the host cannot hold, and the master keeps addre
 
   const session = {
     id: "ccccccccddddeeee",
+    spec: outputSpec({ transcodeVideo: false, cutGrid: "keyframe" }),
     dirPath,
     // Where this file is cut, held by the file. A fixture that stated it
     // on the session was describing what production no longer does.
@@ -348,7 +350,7 @@ test("the OFFER drops the rungs the host cannot hold, and the master keeps addre
     segmentCount: 100,
     progress: { state: "running", processedSeconds: 0, startPositionSeconds: 0, speed: "1.0x" }
   };
-  manager.sessionsById.set(session.id, session);
+  manager.outputsById.set(session.id, session);
 
   assert.deepEqual(
     manager.offeredHeights(session),
@@ -372,7 +374,7 @@ test("the OFFER drops the rungs the host cannot hold, and the master keeps addre
   // second session, because the answer is settled once per session.
   manager.softwarePresetBenchmark = [{ preset: "ultrafast", pixelsPerSec: 12e6 }];
   const stronger = { ...session, id: "ddddddddeeeeffff", offeredHeightsCache: undefined };
-  manager.sessionsById.set(stronger.id, stronger);
+  manager.outputsById.set(stronger.id, stronger);
   assert.deepEqual(
     manager.offeredHeights(stronger),
     [1080, 360, 240],
@@ -395,7 +397,7 @@ test("the OFFER drops the rungs the host cannot hold, and the master keeps addre
     offeredHeightsCache: undefined,
     supplyFigures: { requiredSpeed: 1.67, worstWaitSec: 1.49, medianIntervalSec: 2.22, samples: 12 }
   };
-  manager.sessionsById.set(onAThinSwarm.id, onAThinSwarm);
+  manager.outputsById.set(onAThinSwarm.id, onAThinSwarm);
   assert.deepEqual(
     manager.offeredHeights(onAThinSwarm),
     [1080],

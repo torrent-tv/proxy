@@ -7,7 +7,7 @@
  * is the strongest statement there is — everything that output holds is worth
  * less than anything anybody is on their way to.
  *
- * Pure: it is handed the sessions, the clock and a way to turn seconds into a
+ * Pure: it is handed the outputs, the clock and a way to turn seconds into a
  * segment number, and it holds none of them.
  */
 
@@ -15,16 +15,16 @@ import { viewersOf } from "./Viewer.js";
 
 /**
  * @param {object} params
- * @param {Iterable<{ outputKey?: string }>} params.sessions - Every live session.
+ * @param {Iterable<{ outputKey?: string }>} params.outputs - Every live output.
  * @param {string} params.outputKey - The output being asked about.
  * @param {(session: object, seconds: number) => number} params.segmentAt - Which
  *   segment of THAT session's timeline a moment of film falls in.
  * @param {number} params.now
  * @returns {number[]} A segment number per present viewer, unsorted.
  */
-export function viewerSegmentsOn({ sessions, outputKey, segmentAt, now }) {
+export function viewerSegmentsOn({ outputs, outputKey, segmentAt, now }) {
   const at = [];
-  for (const session of sessions) {
+  for (const session of outputs) {
     if (session.outputKey !== outputKey) {
       continue;
     }
@@ -61,7 +61,8 @@ export function viewerSegmentsOn({ sessions, outputKey, segmentAt, now }) {
  *
  * Without a name, the FURTHEST viewer: what lies behind them has already been
  * made, so that is what a reading about no particular person wants. With
- * nobody present at all, where the output was opened.
+ * nobody present at all, zero. Creation registers the requesting viewer and
+ * their initial position before any encoder is planned.
  *
  * @param {object} session
  * @param {string} [consumerId] - Whose position.
@@ -69,7 +70,7 @@ export function viewerSegmentsOn({ sessions, outputKey, segmentAt, now }) {
  * @returns {number} Seconds, never negative.
  */
 export function viewerSecondsOn(session, consumerId = "", now = Date.now()) {
-  const named = consumerId ? session?.viewers?.get(consumerId) ?? null : null;
+  const named = session ? viewersOf(session).get(consumerId) ?? null : null;
   if (named) {
     return Math.max(0, named.positionSeconds(now) ?? 0);
   }
@@ -83,8 +84,7 @@ export function viewerSecondsOn(session, consumerId = "", now = Date.now()) {
       furthest = furthest === null ? seconds : Math.max(furthest, seconds);
     }
   }
-  const opened = Number(session?.progress?.startPositionSeconds);
-  return Math.max(0, furthest ?? (Number.isFinite(opened) ? opened : 0));
+  return Math.max(0, furthest ?? 0);
 }
 
 /**

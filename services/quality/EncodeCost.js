@@ -46,10 +46,10 @@
  * @returns {"audio" | "decode" | "copy"}
  */
 export function costKindForSession(session) {
-  if (session?.audioOnly === true) {
+  if (session?.spec?.carries === "audio-only") {
     return "audio";
   }
-  return session?.transcodeVideo === true ? "decode" : "copy";
+  return session?.spec?.transcodesVideo === true ? "decode" : "copy";
 }
 
 /** The narrowest stretch of uninterrupted encoding a speed may be read from. */
@@ -59,7 +59,7 @@ import { correctForAvailability } from "../available-share.js";
 import { medianOf, movedBeyondScatter, READINGS_KEPT } from "../learned-median.js";
 import { speedFromReadings } from "../encoder-readings.js";
 import { contentionPenalty } from "../encode/contention.js";
-import { ENCODE_RUN_STATE, liveRunsOf, processCanBeSignalled, runStateOf } from "../encode/encode-run-state.js";
+import { ENCODE_RUN_STATE, liveRunsOf, processCanBeSignalled } from "../encode/encode-run-state.js";
 import { canSustainOutput, chooseSoftwareEncodeSettings, speedBar } from "../hwaccel.js";
 import { computeOutputDimensions, TRANSCODE_FPS } from "../encode/args.js";
 import { logger } from "../../utils/logger.js";
@@ -99,6 +99,9 @@ export class EncodeCost {
   #encodersRunningNow;
   #torrentCostSecFor;
   #boundBy;
+  #runsFor;
+  #stateFor;
+  #progressFor;
 
   /**
    * @param {{
@@ -107,10 +110,13 @@ export class EncodeCost {
    *   runningEncoders: () => number,
    *   encodersRunningNow: () => number,
    *   torrentCostSecFor: (session: object) => number,
-   *   boundBy: (session: object) => Promise<"cpu" | "download" | "unknown">
+   *   boundBy: (session: object) => Promise<"cpu" | "download" | "unknown">,
+   *   runsFor: (output: object) => object[],
+   *   stateFor: (output: object) => string,
+   *   progressFor: (output: object) => object | null
    * }} deps
    */
-  constructor({ liveOutputs, host, runningEncoders, encodersRunningNow, torrentCostSecFor, boundBy }) {
+  constructor({ liveOutputs, host, runningEncoders, encodersRunningNow, torrentCostSecFor, boundBy, runsFor, stateFor, progressFor }) {
     this.#liveOutputs = liveOutputs;
     // Asked at the moment of the question, not copied: the share of the machine
     // that is free is re-read every few seconds, and a copy taken when this was
@@ -126,6 +132,18 @@ export class EncodeCost {
     // torrent's readings; passed in, so this can still be exercised with plain
     // values and no swarm.
     this.#boundBy = boundBy;
+    if (typeof runsFor !== "function") {
+      throw new TypeError("EncodeCost requires runsFor");
+    }
+    if (typeof stateFor !== "function") {
+      throw new TypeError("EncodeCost requires stateFor");
+    }
+    if (typeof progressFor !== "function") {
+      throw new TypeError("EncodeCost requires progressFor");
+    }
+    this.#runsFor = runsFor;
+    this.#stateFor = stateFor;
+    this.#progressFor = progressFor;
   }
 
   /**
@@ -139,7 +157,7 @@ export class EncodeCost {
    * @returns {string}
    */
   static audioKeyOf(session) {
-    return `${session.file.key}:${session.audioTrackIndex ?? 0}`;
+    return `${session.file.key}:${session.spec?.audioSourceTrackIndex ?? 0}`;
   }
 
   /**
@@ -241,9 +259,9 @@ export class EncodeCost {
    *   plan around.
    */
   speedForOutput(address) {
-    const sessions = this.#liveOutputs.sessionsOn(address);
+    const outputs = this.#liveOutputs.outputsOn(address);
     let measured = 0;
-    for (const session of sessions) {
+    for (const session of outputs) {
       const speed = Number(session.lastAloneSpeed);
       if (Number.isFinite(speed) && speed > measured) {
         measured = speed;
@@ -252,8 +270,8 @@ export class EncodeCost {
     if (measured > 0) {
       return measured;
     }
-    for (const session of sessions) {
-      if (session.transcodeVideo === true) {
+    for (const session of outputs) {
+      if (session.spec.transcodesVideo) {
         const cost = this.#pictureCostOf(session);
         if (cost > 0) {
           return 1 / cost;
@@ -285,10 +303,10 @@ export class EncodeCost {
   pricedConcurrentCost(session) {
     let cost = 0;
     for (const member of this.#liveOutputs.familyOf(session)) {
-      if (member === session || !processCanBeSignalled(runStateOf(member))) {
+      if (member === session || !processCanBeSignalled(this.#stateFor(member))) {
         continue;
       }
-      if (member.audioOnly === true) {
+      if (member.spec.carries === "audio-only") {
         const audio = this.#audioCost.get(EncodeCost.audioKeyOf(member));
         if (!audio || !(audio.costSec > 0)) {
           return null;
@@ -296,7 +314,7 @@ export class EncodeCost {
         cost += audio.costSec;
         continue;
       }
-      if (member.transcodeVideo !== true) {
+      if (!member.spec.transcodesVideo) {
         const copy = this.#copyCost.get(member.file.key);
         if (!copy || !(copy.costSec > 0)) {
           return null;
@@ -314,7 +332,7 @@ export class EncodeCost {
     // price to look up for another film's session — so a reading taken while
     // one is running cannot be attributed either.
     return this.#runningEncoders() > this.#liveOutputs.familyOf(session).filter(
-      (member) => processCanBeSignalled(runStateOf(member))
+      (member) => processCanBeSignalled(this.#stateFor(member))
     ).length
       ? null
       : cost;
@@ -335,10 +353,10 @@ export class EncodeCost {
     /** @type {Map<number, number>} */
     const byHeight = new Map();
     for (const member of this.#liveOutputs.familyOf(session)) {
-      if (member.audioOnly === true || member.transcodeVideo !== true) {
+      if (member.spec.carries === "audio-only" || !member.spec.transcodesVideo) {
         continue;
       }
-      if (!processCanBeSignalled(runStateOf(member))) {
+      if (!processCanBeSignalled(this.#stateFor(member))) {
         continue;
       }
       const height = this.#liveOutputs.variantHeightOf(member);
@@ -382,10 +400,10 @@ export class EncodeCost {
       // that cost is spread, not a discount on it — and pricing a parked
       // encoder at zero would offer a step on the strength of a pause that ends
       // the moment the viewer catches up.
-      if (!processCanBeSignalled(runStateOf(member))) {
+      if (!processCanBeSignalled(this.#stateFor(member))) {
         continue;
       }
-      if (member.audioOnly === true) {
+      if (member.spec.carries === "audio-only") {
         // A soundtrack encoder, priced from its own measured speed. Nothing is
         // charged for a track nobody has measured: a guess here refuses rungs
         // on arithmetic no one performed.
@@ -393,7 +411,7 @@ export class EncodeCost {
         cost += audio && audio.costSec > 0 ? audio.costSec : 0;
         continue;
       }
-      if (member.transcodeVideo !== true) {
+      if (!member.spec.transcodesVideo) {
         const observed = this.#copyCost.get(member.file.key);
         cost += observed && observed.costSec > 0 ? observed.costSec : 0;
         continue;
@@ -430,7 +448,7 @@ export class EncodeCost {
     /** @type {Map<number, number>} */
     const speeds = new Map();
     for (const session of this.#liveOutputs.familyOf(base)) {
-      if (session.transcodeVideo !== true || !Number.isFinite(session.lastAloneSpeed)) {
+      if (!session.spec.transcodesVideo || !Number.isFinite(session.lastAloneSpeed)) {
         continue;
       }
       const height = this.#liveOutputs.variantHeightOf(session);
@@ -662,10 +680,9 @@ export class EncodeCost {
   async learnFrom(session) {
     if (
       !session ||
-      session.state === "disposed" ||
-      runStateOf(session) === ENCODE_RUN_STATE.ENDED_FAILED ||
-      liveRunsOf(session).length === 0 ||
-      runStateOf(session) === ENCODE_RUN_STATE.SUSPENDED
+      this.#stateFor(session) === ENCODE_RUN_STATE.ENDED_FAILED ||
+      liveRunsOf(this.#runsFor(session)).length === 0 ||
+      this.#stateFor(session) === ENCODE_RUN_STATE.SUSPENDED
     ) {
       session.learnSample = null;
       return;
@@ -678,7 +695,7 @@ export class EncodeCost {
     // that way a copy running at 8x reports 1.6x and falling, which would be
     // filed as the price of copying and refuse rungs on arithmetic that
     // measured a pause.
-    const processedSeconds = Number(session.progress?.processedSeconds);
+    const processedSeconds = Number(this.#progressFor(session)?.processedSeconds);
     const takenAt = Date.now();
     const previous = session.learnSample ?? null;
     // Stamped with the run it was taken from. A restart clears this sample, but
@@ -690,7 +707,7 @@ export class EncodeCost {
     // admits every quality step there is. Comparing the serials is what the
     // twenty-second wait used to stand in for, and unlike the wait it costs no
     // readings on a short run.
-    const run = liveRunsOf(session)[0] ?? null;
+    const run = liveRunsOf(this.#runsFor(session))[0] ?? null;
     session.learnSample = { takenAt, processedSeconds, run };
     if (previous === null || !Number.isFinite(processedSeconds) || !Number.isFinite(previous.processedSeconds)) {
       return;
@@ -790,7 +807,7 @@ export class EncodeCost {
   }
 
   async #learnCopyCost(session, speed) {
-    if (runStateOf(session) === ENCODE_RUN_STATE.SUSPENDED) {
+    if (this.#stateFor(session) === ENCODE_RUN_STATE.SUSPENDED) {
       return; // a suspended run reports a cumulative figure that is decaying
     }
     // Always asked, not only below realtime. A re-encode near 1x may be the
@@ -821,7 +838,7 @@ export class EncodeCost {
   }
 
   async #learnAudioCost(session, speed) {
-    if (runStateOf(session) === ENCODE_RUN_STATE.SUSPENDED) {
+    if (this.#stateFor(session) === ENCODE_RUN_STATE.SUSPENDED) {
       return;
     }
     if (await this.#boundBy(session) === "download") {
@@ -841,7 +858,7 @@ export class EncodeCost {
     }
     this.#audioCost.set(key, { costSec: median, readings, version: (known?.version ?? 0) + 1 });
     logger.info(
-      `transcode: ${session.file.name} encodes audio track ${session.audioTrackIndex ?? 0} at ` +
+      `transcode: ${session.file.name} encodes audio track ${session.spec.audioSourceTrackIndex} at ` +
         `${(1 / median).toFixed(2)}x on this host (median of ${readings.length}, latest ${speed.toFixed(2)}x)`
     );
   }
@@ -850,7 +867,7 @@ export class EncodeCost {
     if (!(speed > 0)) {
       return;
     }
-    if (session.transcodeVideo !== true) {
+    if (!session.spec.transcodesVideo) {
       // Nothing to learn about decoding here, and nothing else either: the
       // caller routes a copy to #learnCopyCost and a rendition to
       // #learnAudioCost before this is ever reached. Routing them from here as
@@ -923,7 +940,7 @@ export class EncodeCost {
    */
   recentSpeedOf(session, now, withinMs) {
     const reading = session.recentSpeed;
-    if (!reading || !session.runs?.has(reading.run)) {
+    if (!reading || !this.#runsFor(session).includes(reading.run)) {
       return null; // nothing from THIS run
     }
     // Stale by whatever the asker calls stale — two of its own ticks, for the

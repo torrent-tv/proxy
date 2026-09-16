@@ -13,9 +13,9 @@
  * That id is minted once per film opened in the page, so one id is one person
  * watching one film, and sharing the object cannot conflate two films.
  *
- * The relation "this person watches this output" is indexed both ways — the
- * output holds its viewers, the viewer holds its outputs — because it is asked
- * from both ends, and both indexes are written here and nowhere else.
+ * The relation "this person watches this output" is indexed both ways. The
+ * viewer layer holds viewers by output in a `WeakMap`, and each viewer holds
+ * output ids. Both indexes are written here and nowhere else in production.
  *
  * **Every change here announces itself.** What encoders should exist is decided
  * from what viewers want, so a viewer arriving, moving or leaving is a change
@@ -33,7 +33,7 @@ export class Viewers {
   /**
    * One object per named viewer. An unnamed one is not in here: a viewer that
    * cannot say who it is is not the same viewer as another that cannot, so it
-   * belongs to the session that met it and to no one else.
+   * belongs to the output that met it and to no one else.
    *
    * @type {Map<string, Viewer>}
    */
@@ -60,7 +60,7 @@ export class Viewers {
    * them, and each of those is only true of somebody watching. It is also
    * evidence that they are still there, so it refreshes presence.
    *
-   * @param {object} output - A session.
+   * @param {object} output
    * @param {string} consumerId
    * @param {number} [now]
    * @returns {Viewer}
@@ -109,8 +109,8 @@ export class Viewers {
    * The outputs this viewer is watching, as ids, copied so that leaving them
    * can be walked without mutating what is being walked.
    *
-   * @param {object} anyOutput - A session they are known to, for an unnamed
-   *   viewer whose record lives on that session alone.
+   * @param {object} anyOutput - An output they are known to, for an unnamed
+   *   viewer whose record is indexed by that output alone.
    * @param {string} consumerId
    * @returns {string[]}
    */
@@ -128,7 +128,7 @@ export class Viewers {
    * watching nothing — otherwise the registry would be a map that only grows,
    * which is the shape of half the memory faults recorded in this repository.
    *
-   * @param {object} output - A session.
+   * @param {object} output
    * @param {string} consumerId
    * @returns {boolean} Whether they were watching it.
    */
@@ -162,7 +162,7 @@ export class Viewers {
    *
    * @param {string} consumerId
    * @param {(outputId: string) => object | null} outputById - How to find an
-   *   output by id. The registry holds ids, not sessions.
+   *   output by id. The registry holds ids, not outputs.
    * @returns {string[]} The outputs they were watching.
    */
   hasGone(consumerId, outputById) {

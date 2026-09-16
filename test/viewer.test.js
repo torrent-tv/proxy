@@ -15,6 +15,7 @@ import os from "node:os";
 import path from "node:path";
 import { HlsSessionManager } from "../services/hls-session-manager.js";
 import { Viewer, viewerOf, viewersOf } from "../services/viewer/Viewer.js";
+import { outputSpec } from "./helpers/output-spec.js";
 
 const SESSION_ID = "aaaaaaaabbbbcccc";
 
@@ -109,6 +110,7 @@ test("releasing a consumer forgets everything that was true of them alone", asyn
   });
   const session = {
     id: SESSION_ID,
+    spec: outputSpec(),
     dirPath,
     state: "live",
     file: new SourceFile({ sourceKey: "source-1", fileIndex: 0, name: "video.mkv" }),
@@ -116,21 +118,20 @@ test("releasing a consumer forgets everything that was true of them alone", asyn
     // three differ only for a soundtrack shipped as a file of its own.
     get inputFile() { return this.file; },
     get audioFile() { return this.file; },
-    consumers: new Set(["staying", "leaving"]),
-    viewers: new Map(),
+    claims: new Set(),
     lastAccessedAt: Date.now()
   };
-  manager.sessionsById.set(SESSION_ID, session);
+  manager.outputsById.set(SESSION_ID, session);
 
-  const leaving = viewerOf(session, "leaving");
+  const leaving = manager.viewers.of(session, "leaving");
   leaving.audio = { trackIndex: 2, transcode: true };
   leaving.activeVariantId = "some-variant";
   leaving.position = { segment: 40, seconds: 160, at: Date.now() };
-  viewerOf(session, "staying").audio = { trackIndex: 0, transcode: false };
+  manager.viewers.of(session, "staying").audio = { trackIndex: 0, transcode: false };
 
   await manager.releaseSessionConsumer(SESSION_ID, "leaving", "the tab was closed");
 
-  assert.equal(session.viewers.has("leaving"), false, "one deletion, not six");
-  assert.equal(session.viewers.has("staying"), true, "and it takes nobody else with it");
-  assert.equal(session.consumers.size, 1);
+  assert.equal(viewersOf(session).has("leaving"), false, "one deletion, not six");
+  assert.equal(viewersOf(session).has("staying"), true, "and it takes nobody else with it");
+  assert.equal(manager.viewers.size, 1);
 });

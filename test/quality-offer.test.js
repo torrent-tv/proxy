@@ -12,6 +12,8 @@ import assert from "node:assert/strict";
 import { EncodeCost } from "../services/quality/EncodeCost.js";
 import { QualityOffer } from "../services/quality/QualityOffer.js";
 import { startRunOn } from "./helpers/encode-run.js";
+import { outputSpec } from "./helpers/output-spec.js";
+import { runStateOf } from "../services/encode/encode-run-state.js";
 
 /**
  * A session with one run going.
@@ -22,9 +24,7 @@ function sessionProducing() {
   const session = {
     id: "1111111122223333",
     state: "ready",
-    audioOnly: false,
-    transcodeVideo: false,
-    audioTrackIndex: 0,
+    spec: outputSpec(),
     file: { key: "torrent:abc:0", name: "film.mkv", width: 1920, height: 1080 },
     output: { encodeWidth: 0, encodeHeight: 0, outputFps: 25, softwarePreset: null },
     progress: { processedSeconds: 0 },
@@ -54,7 +54,10 @@ function offerOver(supply = { requiredSpeed: null, megabytesPerSecond: null, cos
     runningEncoders: () => 0,
     encodersRunningNow: () => 0,
     torrentCostSecFor: () => 0,
-    boundBy: async () => "cpu"
+    boundBy: async () => "cpu",
+    runsFor: (session) => [...(session.runs ?? [])],
+    stateFor: (session) => runStateOf(session.runs),
+    progressFor: (session) => session.progress ?? null
   });
   let computed = 0;
   const real = cost.sustainableHeights.bind(cost);
@@ -65,6 +68,7 @@ function offerOver(supply = { requiredSpeed: null, megabytesPerSecond: null, cos
   const offer = new QualityOffer({
     encodeCost: cost,
     liveOutputs,
+    stateFor: (session) => runStateOf(session.runs),
     heightsOnScreen: () => [],
     supplyFor: () => supply
   });
@@ -130,7 +134,7 @@ test("a step asking for the family's answer does not keep it as its own", () => 
   const { offer, picture } = offerOver();
   const step = sessionProducing();
   step.id = "9999999988887777";
-  step.transcodeVideo = true;
+  step.spec = outputSpec({ transcodeVideo: true });
 
   const answer = offer.offeredHeightsFor(step);
 

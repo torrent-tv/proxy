@@ -38,6 +38,7 @@ import { HlsSessionManager } from "../services/hls-session-manager.js";
 import { managerWithOwnStore } from "./helpers/manager.js";
 import { fmp4Format } from "../services/segment-formats/fmp4.js";
 import { Output } from "../services/output/Output.js";
+import { outputSpec } from "./helpers/output-spec.js";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const PROXY = path.join(HERE, "..");
@@ -111,9 +112,9 @@ function bareManager() {
 function fakeSession({ id = SESSION_ID } = {}) {
   return {
     id,
+    spec: outputSpec({ cutGrid: "keyframe", audioSeparate: true }),
     outputKey: "surface:fmt=fmp4:grid=kf@0:video-only:v=0/copy",
     dirPath: path.join(PROXY, "test", "does-not-exist"),
-    state: "ready",
     file: new SourceFile({ sourceKey: "torrent:abc", fileIndex: 0, name: "video.mkv" })
       .learn({ width: 1920, height: 1080 }),
     get inputFile() { return this.file; },
@@ -134,13 +135,10 @@ function fakeSession({ id = SESSION_ID } = {}) {
     transcodeAudio: true,
     audioTrackIndex: 0,
     audioSourceTrackIndex: 0,
-    startedAt: Date.now(),
     createEntryMs: Date.now(),
-    lastAccessedAt: Date.now(),
     ffmpeg: null,
     lastError: "",
-    consumers: new Set(),
-    viewers: new Map(),
+    claims: new Set(),
     encodeRunGeneration: 0,
     encodeStartIndex: 0,
     requestSeqCounter: 0,
@@ -170,7 +168,7 @@ test("every call the HTTP layer makes is answered", () => {
 
 test("the progress report keeps every figure it carries today", async () => {
   const manager = bareManager();
-  manager.sessionsById.set(SESSION_ID, fakeSession());
+  manager.outputsById.set(SESSION_ID, fakeSession());
   const progress = await manager.getSessionProgress(SESSION_ID, "viewer-one");
   assert.ok(progress, "a live session has a progress report");
 
@@ -214,7 +212,7 @@ test("a session that is not there is answered, not invented", async () => {
 
 test("what a viewer states about themselves is kept and answered", () => {
   const manager = bareManager();
-  manager.sessionsById.set(SESSION_ID, fakeSession());
+  manager.outputsById.set(SESSION_ID, fakeSession());
 
   // Nine public members had no test of any kind before the dismantling began,
   // and six of them are the viewer's own facts — the ones that move into
@@ -239,7 +237,7 @@ test("what a viewer states about themselves is kept and answered", () => {
 
   manager.noteInputBytes(SESSION_ID, 4096);
   manager.noteInputBytes(SESSION_ID, 1024);
-  assert.equal(manager.sessionsById.get(SESSION_ID).inputBytes, 5120, "input bytes accumulate");
+  assert.equal(manager.outputsById.get(SESSION_ID).inputBytes, 5120, "input bytes accumulate");
 
   // A far fragment is a reading and must never throw, whatever the player says.
   manager.recordFragmentFar(SESSION_ID, {
@@ -254,20 +252,21 @@ test("a session nobody has touched is disposed, one that is being watched is not
   const fresh = fakeSession({ id: "2222222222222222" });
   // Older than any TTL this manager could carry, without naming one here: the
   // period is the manager's business and this test is about the rule.
-  stale.lastAccessedAt = Date.now() - (2 * 60 * 60 * 1000);
-  manager.sessionsById.set(stale.id, stale);
-  manager.sessionsById.set(fresh.id, fresh);
+  manager.outputsById.set(stale.id, stale);
+  manager.outputsById.set(fresh.id, fresh);
+  manager.outputsById.touch(stale, Date.now() - (2 * 60 * 60 * 1000));
 
   await manager.cleanupExpired();
 
-  assert.equal(manager.sessionsById.has(stale.id), false, "an untouched session goes");
-  assert.equal(manager.sessionsById.has(fresh.id), true, "a session just read stays");
+  assert.equal(manager.outputsById.has(stale.id), false, "an untouched session goes");
+  assert.equal("state" in stale, false, "removal from the registry is the only lifetime fact");
+  assert.equal(manager.outputsById.has(fresh.id), true, "a session just read stays");
 });
 
 test("what a file declares and what this host could offer are answered without a session", () => {
   const manager = bareManager();
   const session = fakeSession();
-  manager.sessionsById.set(SESSION_ID, session);
+  manager.outputsById.set(SESSION_ID, session);
 
   // `declaredTracks` reads the session's own record and must answer even when
   // nothing has probed the file yet.
@@ -288,7 +287,7 @@ test("what a file declares and what this host could offer are answered without a
 
 test("a segment name that is not one is refused", async () => {
   const manager = bareManager();
-  manager.sessionsById.set(SESSION_ID, fakeSession());
+  manager.outputsById.set(SESSION_ID, fakeSession());
 
   for (const name of ["../key.txt", "segment-00000.mp4/../../x", "making-0-00000.mp4"]) {
     const answer = await manager.getFileStream(SESSION_ID, name);

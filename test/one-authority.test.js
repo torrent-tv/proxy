@@ -206,7 +206,7 @@ test("where a soundtrack begins is read off the table, not handed in", () => {
   const manager = source("services/hls-session-manager.js");
   assert.match(
     manager,
-    /const positionSecondsOverride = session\.audioOnly === true\s*\n?\s*\? trueStartOf\(session\.timeline, startIndex\)/,
+    /const positionSecondsOverride = session\.spec\.carries === "audio-only"\s*\n?\s*\? trueStartOf\(session\.timeline, startIndex\)/,
     "derived where the run is built"
   );
   assert.equal(

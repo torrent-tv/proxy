@@ -30,6 +30,7 @@ import { HlsSessionManager, usableSegmentIndices } from "../services/hls-session
 import { managerWithOwnStore } from "./helpers/manager.js";
 import { startRunOn } from "./helpers/encode-run.js";
 import { fmp4Format } from "../services/segment-formats/fmp4.js";
+import { outputSpec } from "./helpers/output-spec.js";
 
 const MOVIE_TIMESCALE = 1000;
 const VIDEO_TIMESCALE = 90_000;
@@ -128,6 +129,7 @@ async function sessionOnOneDirectory() {
   const { manager } = managerWithOwnStore();
   const session = {
     id: SESSION_ID,
+    spec: outputSpec({ transcodeVideo: false }),
     dirPath,
     // Where this file is cut, held by the file. A fixture that stated it
     // on the session was describing what production no longer does.
@@ -146,8 +148,7 @@ async function sessionOnOneDirectory() {
     lastAccessedAt: Date.now(),
     runs: new Set(),
     lastError: "",
-    consumers: new Set(),
-    viewers: new Map(),
+    claims: new Set(),
     segmentFormat: fmp4Format,
     useSyntheticPlaylist: true,
     playlistText: "#EXTM3U\n",
@@ -155,7 +156,7 @@ async function sessionOnOneDirectory() {
     firstSegmentLogged: false,
     waitEpoch: 0
   };
-  manager.sessionsById.set(SESSION_ID, session);
+  manager.outputsById.set(SESSION_ID, session);
   // A run exists and is alive — the state the field case was in, and the one in
   // which the old test called every leftover "still being written".
   startRunOn(session, { from: 0, usesExplicitCuts: true });

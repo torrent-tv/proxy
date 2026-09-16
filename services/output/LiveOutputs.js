@@ -1,14 +1,14 @@
 /**
  * @file Which outputs of one file exist right now, and what each of them is.
  *
- * Every question here is answered by walking the live sessions and looking at
+ * Every question here is answered by walking the live outputs and looking at
  * what they ARE — the same file, a step, a soundtrack, this height — and not by
  * following a list of ids anybody keeps. A list of ids is a link between
- * sessions: it ties their lifetimes together, it goes stale when one of them is
+ * outputs: it ties their lifetimes together, it goes stale when one of them is
  * disposed, and it has to be cleaned from the other side. What an output is is
  * enough to find it, which is the rule `OutputSpec` exists for.
  *
- * Nothing here writes anything except the two answers a session memoizes about
+ * Nothing here writes anything except the two answers an output memoizes about
  * itself, and nothing here knows about encoders, viewers, the torrent or the
  * disk. It is the layer the quality budget and the serving path both stand on,
  * and it is separated first for that reason.
@@ -21,11 +21,11 @@ import { masterRateArgs } from "./rates.js";
 export class LiveOutputs {
   /**
    * @param {object} params
-   * @param {Map<string, object>} params.sessionsById - The live sessions. Read,
+   * @param {{ values: () => IterableIterator<object> }} params.outputsById - The live outputs. Read,
    *   never written.
    */
-  constructor({ sessionsById, fileLengthOf = () => 0, largestPieceOf = () => ({ index: -1, size: 0 }) }) {
-    this.sessionsById = sessionsById;
+  constructor({ outputsById, fileLengthOf = () => 0, largestPieceOf = () => ({ index: -1, size: 0 }) }) {
+    this.outputsById = outputsById;
     // Two facts this layer needs and does not own: how many bytes a source file
     // is, which the torrent reports, and the biggest piece an output has made,
     // which the disk knows. Taken as plain functions, so nothing of either layer
@@ -35,7 +35,7 @@ export class LiveOutputs {
   }
 
   /**
-   * Every live session producing ONE output.
+   * Every live record producing ONE output.
    *
    * The output is the address the encoding layer works in: two sessions whose
    * output parameters agree ARE the same output, so what one of them measured
@@ -44,10 +44,10 @@ export class LiveOutputs {
    * @param {string} address
    * @returns {object[]}
    */
-  sessionsOn(address) {
+  outputsOn(address) {
     const found = [];
-    for (const session of this.sessionsById.values()) {
-      if (session.outputKey === address && session.state !== "disposed") {
+    for (const session of this.outputsById.values()) {
+      if (session.outputKey === address) {
         found.push(session);
       }
     }
@@ -69,8 +69,8 @@ export class LiveOutputs {
   familyOf(session) {
     const family = [session];
     const key = session?.file?.key;
-    for (const other of this.sessionsById.values()) {
-      if (other === session || other.state === "disposed" || other.file?.key !== key) {
+    for (const other of this.outputsById.values()) {
+      if (other === session || other.file?.key !== key) {
         continue;
       }
       family.push(other);
@@ -85,7 +85,7 @@ export class LiveOutputs {
    * @returns {object[]}
    */
   renditionsOf(base) {
-    return this.familyOf(base).filter((session) => session !== base && session.audioOnly === true);
+    return this.familyOf(base).filter((session) => session !== base && session.spec.carries === "audio-only");
   }
 
   /**
@@ -126,7 +126,7 @@ export class LiveOutputs {
       return session;
     }
     for (const other of this.familyOf(session)) {
-      if (other.isStep !== true && other.audioOnly !== true) {
+      if (other.isStep !== true && other.spec.carries !== "audio-only") {
         return other;
       }
     }
@@ -158,7 +158,7 @@ export class LiveOutputs {
    * @returns {boolean}
    */
   supersededBy(session, stepOnScreen = null) {
-    if (!session || session.isStep === true || session.audioOnly === true) {
+    if (!session || session.isStep === true || session.spec.carries === "audio-only") {
       return false;
     }
     // The picture. A step of it on screen says outright that this is not what
@@ -207,7 +207,7 @@ export class LiveOutputs {
    * @returns {number}
    */
   producedHeightOf(session) {
-    if (!session || session.transcodeVideo !== true || session.audioOnly === true) {
+    if (!session || !session.spec.transcodesVideo || session.spec.carries === "audio-only") {
       return 0;
     }
     return Math.round(Number(session.output.encodeHeight) || 0);
@@ -267,7 +267,7 @@ export class LiveOutputs {
     // A copy can only be cut where the source already has a keyframe, so a rung
     // meant to splice into it has to be cut at exactly those times. A copy that
     // fell back to an even grid ffmpeg does not cut on has nothing to align to.
-    if (!owner.transcodeVideo && owner.timeline.cutGrid !== "keyframe") {
+    if (!owner.spec.transcodesVideo && owner.timeline.cutGrid !== "keyframe") {
       return false;
     }
     return this.splicableHeights(owner).length >= 2;

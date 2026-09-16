@@ -25,7 +25,8 @@ import { fmp4Format } from "../services/segment-formats/fmp4.js";
 import { computeCutGrid } from "../services/output/cut-grid.js";
 import { buildRunCommand, nearestKeyframeAtOrBefore } from "../services/encode/run-command.js";
 import { Output } from "../services/output/Output.js";
-import { viewerOf } from "../services/viewer/Viewer.js";
+import { viewerOf, viewersOf } from "../services/viewer/Viewer.js";
+import { outputSpec } from "./helpers/output-spec.js";
 
 const BASE_ID = "aaaaaaaabbbbcccc";
 const VARIANT_ID = "1111111122223333";
@@ -35,12 +36,28 @@ const SEGMENT_SECONDS = 4;
 /**
  * A session shaped like a live one, without the ffmpeg run behind it.
  *
- * @param {{ id: string, encodeHeight: number, dirPath: string, transcodeVideo?: boolean }} params
+ * @param {{ id: string, encodeHeight: number, dirPath: string, transcodeVideo?: boolean, audioOnly?: boolean, audioSeparate?: boolean, audioSourceTrackIndex?: number }} params
  * @returns {object}
  */
-function fakeSession({ id, encodeHeight, dirPath, transcodeVideo = true }) {
+function fakeSession({
+  id,
+  encodeHeight,
+  dirPath,
+  transcodeVideo = true,
+  audioOnly = false,
+  audioSeparate = false,
+  audioSourceTrackIndex = 0
+}) {
   return {
     id,
+    get outputKey() { return this.spec.toKey(); },
+    spec: outputSpec({
+      transcodeVideo,
+      audioOnly,
+      audioSeparate,
+      audioSourceTrackIndex,
+      height: encodeHeight
+    }),
     dirPath,
     // Where this file is cut, held by the file. A fixture that stated it
     // on the session was describing what production no longer does.
@@ -68,7 +85,7 @@ function fakeSession({ id, encodeHeight, dirPath, transcodeVideo = true }) {
     lastAccessedAt: Date.now(),
     ffmpeg: null,
     lastError: "",
-    consumers: new Set(),
+    claims: new Set(),
     segmentFormat: fmp4Format,
     transcodeVideo,
     transcodeAudio: true,
@@ -80,7 +97,6 @@ function fakeSession({ id, encodeHeight, dirPath, transcodeVideo = true }) {
     failedStartAt: -1,
     failedStartCount: 0,
     waitEpoch: 0,
-    viewers: new Map(),
     usesExplicitCuts: false,
     useSyntheticPlaylist: true,
     playlistText: "#EXTM3U\n",
@@ -100,8 +116,14 @@ async function managerWithBase() {
   // 812p is what a viewport-sized budget actually produces — deliberately not a
   // ladder rung, because that is the case the master has to carry.
   const base = fakeSession({ id: BASE_ID, encodeHeight: 812, dirPath });
-  manager.sessionsById.set(BASE_ID, base);
+  manager.outputsById.set(BASE_ID, base);
   return { manager, base, dirPath };
+}
+
+function startManagedRun(manager, output, options = {}) {
+  const run = startRunOn(output, options);
+  manager.encodeOrchestrator.adopt(output.outputKey, run);
+  return run;
 }
 
 test("the master offers every rung, the session's own height among them", async (t) => {
@@ -142,8 +164,8 @@ test("audio is published once for the file, and every rung points at it", async 
   ];
   // Settled at creation in production; set here directly, since this test
   // builds its session by hand.
-  base.audioSeparate = true;
-  base.audioTrackIndex = 1;
+  base.spec = outputSpec({ transcodeVideo: true, audioSeparate: true, height: base.output.encodeHeight });
+  viewerOf(base, "").audio = { trackIndex: 1, transcode: true };
 
   const master = manager.buildMasterPlaylist(BASE_ID);
 
@@ -188,7 +210,7 @@ test("a copied video is offered variants when its cut grid is real", async (t) =
   // A copy is cut at the source's own keyframes — it has no other choice. A
   // re-encoded rung CAN be cut there too, by being told those times, and then
   // its segments cover the same spans and can stand in the copy's place.
-  base.transcodeVideo = false;
+  base.spec = outputSpec({ transcodeVideo: false, cutGrid: "keyframe" });
   base.timeline = new Timeline({ boundaries: base.timeline?.boundaries ?? [], cutGrid: "keyframe" });
 
   const master = manager.buildMasterPlaylist(BASE_ID);
@@ -206,7 +228,7 @@ test("a copied video with no readable keyframe index is offered nothing", async 
   });
   // Its playlist claims an even grid that ffmpeg does not cut on. Aligning a
   // rung to that is aligning it to a fiction.
-  base.transcodeVideo = false;
+  base.spec = outputSpec({ transcodeVideo: false, cutGrid: "uniform" });
   base.timeline = new Timeline({ boundaries: base.timeline?.boundaries ?? [], cutGrid: "uniform" });
 
   assert.equal(manager.buildMasterPlaylist(BASE_ID), null);
@@ -276,16 +298,17 @@ test("a segment request hands the encoder to the variant the viewer moved to", a
   variant.variantHeight = 540;
   // A step of the picture: made as one, same file, and a height of its own.
   variant.isStep = true;
-  manager.sessionsById.set(VARIANT_ID, variant);
+  manager.outputsById.set(VARIANT_ID, variant);
   base.file.stepHeights.set(540, 540);
   // The viewer is a hundred seconds in, and the base is the one encoding.
   base.lastRequestedSegment = 25;
   const encoder = fakeEncoder();
-  startRunOn(base, { process: encoder });
+  startManagedRun(manager, base, { process: encoder });
+  manager.planEncodersSoon = () => {};
   const served = await manager.resolveVariantFile(BASE_ID, 540, "segment-00025.mp4");
 
   assert.equal(served.sessionId, VARIANT_ID, "the file must be served from the variant, not the base");
-  assert.equal(base.activeVariantId, VARIANT_ID, "the variant the viewer is watching is the active one");
+  assert.equal(viewerOf(base, "").activeVariantId, VARIANT_ID, "the variant the viewer is watching is the active one");
   assert.ok(
     Math.abs((viewerOf(variant, "").positionSeconds() ?? -1) - 100) < 1,
     "a segment request steers nothing, so where this person stands on the rung is stated outright — " +
@@ -318,9 +341,9 @@ test("a rung is placed where the player asked it for, not where the other rung h
   variant.variantHeight = 540;
   // A step of the picture: made as one, same file, and a height of its own.
   variant.isStep = true;
-  manager.sessionsById.set(VARIANT_ID, variant);
+  manager.outputsById.set(VARIANT_ID, variant);
   base.file.stepHeights.set(540, 540);
-  startRunOn(base, { process: fakeEncoder() });
+  startManagedRun(manager, base, { process: fakeEncoder() });
   // The rung being left had read fourteen segments further than the picture had
   // played — an encoder running at several times realtime fills the buffer far
   // ahead. Measured 2026-08-11: 56 s of gap, and using the read head placed the
@@ -348,10 +371,11 @@ test("warming a rung prepares it without taking the encoder from the one on scre
   variant.variantHeight = 540;
   // A step of the picture: made as one, same file, and a height of its own.
   variant.isStep = true;
-  manager.sessionsById.set(VARIANT_ID, variant);
+  manager.outputsById.set(VARIANT_ID, variant);
   base.file.stepHeights.set(540, 540);
   const encoder = fakeEncoder();
-  startRunOn(base, { process: encoder });
+  startManagedRun(manager, base, { process: encoder });
+  manager.planEncodersSoon = () => {};
   const prepared = await manager.prepareVariant(BASE_ID, 540, 240);
 
   assert.deepEqual(
@@ -364,7 +388,7 @@ test("warming a rung prepares it without taking the encoder from the one on scre
     240,
     "the rung being warmed is told where this person is, which is what buys it an encoder"
   );
-  assert.equal(base.activeVariantId, undefined, "nothing has switched yet");
+  assert.equal(viewerOf(base, "").activeVariantId, null, "nothing has switched yet");
   assert.equal([...base.runs][0]?.process, encoder, "the picture on screen keeps its encoder until the player actually moves");
   assert.deepEqual(encoder.signals, [], "stopping it here is what would put the spinner back");
 });
@@ -379,15 +403,15 @@ test("a rung warmed at the playhead survives the switch that lands just ahead of
   variant.variantHeight = 540;
   // A step of the picture: made as one, same file, and a height of its own.
   variant.isStep = true;
-  manager.sessionsById.set(VARIANT_ID, variant);
+  manager.outputsById.set(VARIANT_ID, variant);
   base.file.stepHeights.set(540, 540);
-  startRunOn(base, { process: fakeEncoder() });
+  startManagedRun(manager, base, { process: fakeEncoder() });
   // Warmed AT THE PLAYHEAD (240 s = segment #60), which is what the browser
   // sends from server 0.10.0 onwards, and the run is alive and has produced a
   // few segments past it.
   await manager.prepareVariant(BASE_ID, 540, 240);
 
-  startRunOn(variant, { from: 59, process: fakeEncoder() });
+  startManagedRun(manager, variant, { from: 59, process: fakeEncoder() });
   variant.progress = { ...variant.progress, processedSeconds: 268 };
   variant.seekTarget = null;
   variant.seekSettleTimer = null;
@@ -400,7 +424,7 @@ test("a rung warmed at the playhead survives the switch that lands just ahead of
   // measured 2026-08-14, that killed a run holding 21.8 s of encoded output.
   await manager.resolveVariantFile(BASE_ID, 540, "segment-00061.mp4");
 
-  assert.equal(base.activeVariantId, VARIANT_ID, "the viewer has moved to this rung");
+  assert.equal(viewerOf(base, "").activeVariantId, VARIANT_ID, "the viewer has moved to this rung");
   assert.equal(
     variant.seekTarget,
     null,
@@ -419,14 +443,14 @@ test("a rung warmed PAST the switch is repositioned, which is what warming late 
   variant.variantHeight = 540;
   // A step of the picture: made as one, same file, and a height of its own.
   variant.isStep = true;
-  manager.sessionsById.set(VARIANT_ID, variant);
+  manager.outputsById.set(VARIANT_ID, variant);
   base.file.stepHeights.set(540, 540);
-  startRunOn(base, { process: fakeEncoder() });
+  startManagedRun(manager, base, { process: fakeEncoder() });
   // The same session, warmed where the BUFFER ended rather than where the
   // picture was — 60 s further on, which is an ordinary cushion. This is what
   // server 0.9.3 sent and 0.11.0 stopped sending.
   await manager.prepareVariant(BASE_ID, 540, 300);
-  startRunOn(variant, { from: 74, process: fakeEncoder() });
+  startManagedRun(manager, variant, { from: 74, process: fakeEncoder() });
   variant.progress = { ...variant.progress, processedSeconds: 310 };
 
   // hls.js still lands near the playhead, so the request is far BEHIND the
@@ -452,11 +476,12 @@ test("the rung on screen fetching its own segments does not cancel a warm-up", a
   variant.variantHeight = 540;
   // A step of the picture: made as one, same file, and a height of its own.
   variant.isStep = true;
-  manager.sessionsById.set(VARIANT_ID, variant);
+  manager.outputsById.set(VARIANT_ID, variant);
   base.file.stepHeights.set(540, 540);
   const warmedEncoder = fakeEncoder();
-  startRunOn(variant, { process: warmedEncoder });
-  startRunOn(base, { process: fakeEncoder() });
+  startManagedRun(manager, variant, { process: warmedEncoder });
+  startManagedRun(manager, base, { process: fakeEncoder() });
+  manager.planEncodersSoon = () => {};
   await manager.prepareVariant(BASE_ID, 540, 100);
 
   // The viewer has not moved: the rung they are watching goes on asking for its
@@ -467,7 +492,7 @@ test("the rung on screen fetching its own segments does not cancel a warm-up", a
   // Kept per viewer, and this one is the unnamed viewer of a transport that
   // carries no consumer id.
   assert.equal(
-    base.viewers.get("")?.warmingVariantId ?? null,
+    viewersOf(base).get("")?.warmingVariantId ?? null,
     VARIANT_ID,
     "the rung being prepared is still being prepared"
   );
@@ -488,9 +513,9 @@ test("warming the height the base itself serves still points it at the switch", 
   // its encoder stopped. Warming its height must bring it back.
   const variant = fakeSession({ id: VARIANT_ID, encodeHeight: 540, dirPath });
   variant.variantHeight = 540;
-  manager.sessionsById.set(VARIANT_ID, variant);
+  manager.outputsById.set(VARIANT_ID, variant);
   base.file.stepHeights.set(540, 540);
-  base.activeVariantId = VARIANT_ID;
+  viewerOf(base, "").activeVariantId = VARIANT_ID;
   base.runs = new Set();
 
   await manager.prepareVariant(BASE_ID, 812, 400);
@@ -530,15 +555,16 @@ test("a playlist or an init segment does not move the encoder", async (t) => {
     await rm(dirPath, { recursive: true, force: true });
   });
   const variant = fakeSession({ id: VARIANT_ID, encodeHeight: 540, dirPath });
-  manager.sessionsById.set(VARIANT_ID, variant);
+  manager.outputsById.set(VARIANT_ID, variant);
   base.file.stepHeights.set(540, 540);
-  startRunOn(base, { process: fakeEncoder() });
+  startManagedRun(manager, base, { process: fakeEncoder() });
+  manager.planEncodersSoon = () => {};
   base.file.stepHeights.set(540, 540);
   await manager.resolveVariantFile(BASE_ID, 540, "index.m3u8");
   await manager.resolveVariantFile(BASE_ID, 540, "init.mp4");
 
   assert.notEqual(
-    base.activeVariantId,
+    viewerOf(base, "").activeVariantId,
     VARIANT_ID,
     "hls.js fetches a level's playlist and init to decide with, and may never switch to it"
   );
@@ -707,7 +733,7 @@ test("a rung served by copy stays offered while a re-encoded rung is on screen",
   });
   // The field case of 2026-08-15: a 1080p source served by COPY, the viewer on
   // 240p, and a host too weak to re-encode anything above it.
-  base.transcodeVideo = false;
+  base.spec = outputSpec({ transcodeVideo: false, cutGrid: "keyframe" });
   base.encodeHeight = 1080;
   base.variantHeight = 1080;
   // Enough to re-encode 240p (1.67x combined) and nowhere near enough for
@@ -721,7 +747,6 @@ test("a rung served by copy stays offered while a re-encoded rung is on screen",
 
   const watching = fakeSession({ id: VARIANT_ID, encodeHeight: 240, dirPath });
   watching.variantHeight = 240;
-  watching.transcodeVideo = true;
   // The rung knows the source as well as the base does, because it IS the same
   // file. Without that it prices nothing at all — every height comes back
   // "sustainable" for want of a measurement — and the assertion below would
@@ -729,9 +754,9 @@ test("a rung served by copy stays offered while a re-encoded rung is on screen",
   watching.file = base.file;
   // A step of the picture: same file, and made as a step.
   watching.isStep = true;
-  manager.sessionsById.set(VARIANT_ID, watching);
+  manager.outputsById.set(VARIANT_ID, watching);
   base.file.stepHeights.set(240, 240);
-  base.activeVariantId = VARIANT_ID;
+  viewerOf(base, "").activeVariantId = VARIANT_ID;
 
   const offered = manager.offeredHeights(watching);
 
@@ -752,7 +777,8 @@ test("a separately published audio track starts where the picture is, from the r
     await manager.disposeAll();
     await rm(dirPath, { recursive: true, force: true });
   });
-  base.audioSeparate = true;
+  base.spec = outputSpec({ transcodeVideo: true, audioSeparate: true, height: base.output.encodeHeight });
+  viewerOf(base, "").audio = { trackIndex: 1, transcode: true };
   // The viewer says where their picture is: 100 s. That, less a segment of
   // margin, is where the track has to begin — no subtraction of anything,
   // because the position is the playhead and not the edge of a buffer.
@@ -765,8 +791,7 @@ test("a separately published audio track starts where the picture is, from the r
   const created = [];
   manager.createOrGetSession = async (params) => {
     created.push(params);
-    const rendition = fakeSession({ id: VARIANT_ID, encodeHeight: 0, dirPath });
-    rendition.audioOnly = true;
+    const rendition = fakeSession({ id: VARIANT_ID, encodeHeight: 0, dirPath, audioOnly: true });
     return { sessionId: VARIANT_ID, session: rendition };
   };
 
@@ -786,7 +811,7 @@ test("with two viewers the audio track starts at the EARLIEST picture, not the r
     await manager.disposeAll();
     await rm(dirPath, { recursive: true, force: true });
   });
-  base.audioSeparate = true;
+  base.spec = outputSpec({ transcodeVideo: true, audioSeparate: true, height: base.output.encodeHeight });
   // A copied picture is one session shared by both of them, and a track begun
   // at the leader has nothing to give the one behind.
   viewerOf(base, "ahead").moveTo(100);
@@ -800,8 +825,7 @@ test("with two viewers the audio track starts at the EARLIEST picture, not the r
   const created = [];
   manager.createOrGetSession = async (params) => {
     created.push(params);
-    const rendition = fakeSession({ id: VARIANT_ID, encodeHeight: 0, dirPath });
-    rendition.audioOnly = true;
+    const rendition = fakeSession({ id: VARIANT_ID, encodeHeight: 0, dirPath, audioOnly: true });
     return { sessionId: VARIANT_ID, session: rendition };
   };
 
@@ -821,7 +845,7 @@ test("a soundtrack begins where a viewer says they are, whenever they said it", 
     await manager.disposeAll();
     await rm(dirPath, { recursive: true, force: true });
   });
-  base.audioSeparate = true;
+  base.spec = outputSpec({ transcodeVideo: true, audioSeparate: true, height: base.output.encodeHeight });
   // TWO RULES WENT WHEN THE QUANTITY STOPPED MEANING TWO THINGS. A position
   // "past the read head" had to be clamped, because the read head was a
   // request edge and a report could overtake it; and a report older than a few
@@ -840,8 +864,7 @@ test("a soundtrack begins where a viewer says they are, whenever they said it", 
   const created = [];
   manager.createOrGetSession = async (params) => {
     created.push(params);
-    const rendition = fakeSession({ id: VARIANT_ID, encodeHeight: 0, dirPath });
-    rendition.audioOnly = true;
+    const rendition = fakeSession({ id: VARIANT_ID, encodeHeight: 0, dirPath, audioOnly: true });
     return { sessionId: VARIANT_ID, session: rendition };
   };
 
@@ -860,26 +883,31 @@ test("an audio track is prepared at the position the switch will land on", async
     await manager.disposeAll();
     await rm(dirPath, { recursive: true, force: true });
   });
-  base.audioSeparate = true;
+  base.spec = outputSpec({ transcodeVideo: true, audioSeparate: true, height: base.output.encodeHeight });
+  viewerOf(base, "").audio = { trackIndex: 1, transcode: true };
   manager.getCachedAudioTracks = () => [
     { index: 0, language: "rus", title: "", isDefault: true },
     { index: 1, language: "eng", title: "", isDefault: false }
   ];
-  const rendition = fakeSession({ id: VARIANT_ID, encodeHeight: 0, dirPath });
-  rendition.audioOnly = true;
-  rendition.audioTrackIndex = 1;
-  rendition.transcodeAudio = true;
+  const rendition = fakeSession({
+    id: VARIANT_ID,
+    encodeHeight: 0,
+    dirPath,
+    audioOnly: true,
+    audioSourceTrackIndex: 1
+  });
+  rendition.id = rendition.spec.toName();
   // A soundtrack of THIS picture: the same file, published on its own. Found by
   // what it is — there is no list of ids to put it on.
   rendition.file = base.file;
-  startRunOn(rendition, { process: fakeEncoder() });
-  manager.sessionsById.set(VARIANT_ID, rendition);
+  startManagedRun(manager, rendition, { process: fakeEncoder() });
+  manager.outputsById.set(rendition.id, rendition);
 
   const prepared = await manager.prepareAudioTrack(BASE_ID, 1, 240);
 
   assert.deepEqual(
     prepared,
-    { sessionId: VARIANT_ID, fileName: "segment-00060.mp4" },
+    { sessionId: rendition.id, fileName: "segment-00060.mp4" },
     "the caller is told which segment to wait for — 240 s on a four-second grid"
   );
   assert.equal(
@@ -895,14 +923,14 @@ test("a reading from a soundtrack is priced as one", () => {
   // priced one sat behind a second guard its caller had already made — so a
   // soundtrack ran for the whole film and was charged at nothing, which is the
   // half of roadmap item 6 that was left owing.
-  assert.equal(costKindForSession({ audioOnly: true, transcodeVideo: false }), "audio");
+  assert.equal(costKindForSession({ spec: outputSpec({ audioOnly: true }) }), "audio");
   assert.equal(
-    costKindForSession({ audioOnly: true, transcodeVideo: true }),
+    costKindForSession({ spec: outputSpec({ audioOnly: true, transcodeVideo: true }) }),
     "audio",
     "a rendition carries no picture, whatever the flag it inherited says"
   );
-  assert.equal(costKindForSession({ transcodeVideo: true }), "decode");
-  assert.equal(costKindForSession({ transcodeVideo: false }), "copy");
+  assert.equal(costKindForSession({ spec: outputSpec({ transcodeVideo: true }) }), "decode");
+  assert.equal(costKindForSession({ spec: outputSpec({ transcodeVideo: false }) }), "copy");
 });
 
 test("a quality step being warmed is not refused by its own cost", async (t) => {
@@ -939,10 +967,10 @@ test("a quality step being warmed is not refused by its own cost", async (t) => 
   // A step of the picture: same file, and a height of its own.
   // Running, and running well: it says of itself that it holds twice realtime,
   // i.e. half a second of work per second of video.
-  startRunOn(warming, { process: fakeEncoder() });
+  startManagedRun(manager, warming, { process: fakeEncoder() });
   warming.lastAloneSpeed = 2;
-  manager.sessionsById.set(BASE_ID, base);
-  manager.sessionsById.set(VARIANT_ID, warming);
+  manager.outputsById.set(BASE_ID, base);
+  manager.outputsById.set(VARIANT_ID, warming);
 
   const offered = manager.offeredHeights(base);
 
@@ -974,7 +1002,7 @@ test("the master survives a live offer that has collapsed to one rung", async (t
   // What this file's own reader measured: a step must run at eight times
   // realtime to survive this swarm.
   base.supplyFigures = { requiredSpeed: 8 };
-  manager.sessionsById.set(BASE_ID, base);
+  manager.outputsById.set(BASE_ID, base);
   t.after(async () => {
     await manager.disposeAll();
     await rm(dirPath, { recursive: true, force: true });
@@ -1018,8 +1046,8 @@ test("two heights that clamp onto one picture share a single encoder", async (t)
     const variantDir = await mkdtemp(path.join(os.tmpdir(), "quality-variants-clamped-"));
     spawnedDirs.push(variantDir);
     const variant = fakeSession({ id, encodeHeight: 240, dirPath: variantDir });
-    variant.consumers = new Set([params.consumerId]);
-    manager.sessionsById.set(id, variant);
+    variant.claims = new Set([params.consumerId]);
+    manager.outputsById.set(id, variant);
     return variant;
   };
 
@@ -1033,7 +1061,7 @@ test("two heights that clamp onto one picture share a single encoder", async (t)
     "and the second is served by it, because it produces the very same picture"
   );
   assert.equal(
-    manager.sessionsById.has(SECOND_VARIANT_ID),
+    manager.outputsById.has(SECOND_VARIANT_ID),
     false,
     "the duplicate was let go as soon as its size was known"
   );
@@ -1069,8 +1097,8 @@ test("rungs that really do differ keep their own encoders", async (t) => {
     const variantDir = await mkdtemp(path.join(os.tmpdir(), "quality-variants-distinct-"));
     spawnedDirs.push(variantDir);
     const variant = fakeSession({ id, encodeHeight: params.targetHeight, dirPath: variantDir });
-    variant.consumers = new Set([params.consumerId]);
-    manager.sessionsById.set(id, variant);
+    variant.claims = new Set([params.consumerId]);
+    manager.outputsById.set(id, variant);
     return variant;
   };
 
@@ -1105,8 +1133,8 @@ test("a rung is never served from the COPY, whatever height the copy happens to 
     const variantDir = await mkdtemp(path.join(os.tmpdir(), "quality-variants-copy-"));
     spawnedDirs.push(variantDir);
     const variant = fakeSession({ id: VARIANT_ID, encodeHeight: 240, dirPath: variantDir });
-    variant.consumers = new Set([params.consumerId]);
-    manager.sessionsById.set(VARIANT_ID, variant);
+    variant.claims = new Set([params.consumerId]);
+    manager.outputsById.set(VARIANT_ID, variant);
     return variant;
   };
 
@@ -1121,14 +1149,13 @@ test("a file opened at a position starts its sound THERE, not a look-ahead earli
     await manager.disposeAll();
     await rm(dirPath, { recursive: true, force: true });
   });
-  base.audioSeparate = true;
+  base.spec = outputSpec({ transcodeVideo: true, audioSeparate: true, height: base.output.encodeHeight });
   // The state at the instant a page is opened at a position: nothing seeked,
   // no segment served, no report from anybody. The read head is then not a
   // request edge — it is where the session was made — and a browser that has
   // just opened holds no buffer at all.
   base.lastRequestedSegment = null;
-  base.viewers.clear();
-  base.progress.startPositionSeconds = 588;
+  viewerOf(base, "").moveTo(588);
   manager.getCachedAudioTracks = () => [
     { index: 0, language: "rus", title: "", isDefault: true },
     { index: 1, language: "eng", title: "", isDefault: false }
@@ -1136,8 +1163,7 @@ test("a file opened at a position starts its sound THERE, not a look-ahead earli
   const created = [];
   manager.createOrGetSession = async (params) => {
     created.push(params);
-    const rendition = fakeSession({ id: VARIANT_ID, encodeHeight: 0, dirPath });
-    rendition.audioOnly = true;
+    const rendition = fakeSession({ id: VARIANT_ID, encodeHeight: 0, dirPath, audioOnly: true });
     return { sessionId: VARIANT_ID, session: rendition };
   };
 

@@ -488,45 +488,41 @@ export function declaredContainment() {
 }
 
 /**
- * Every run this session has going, earliest first.
+ * Every run in one output's registered collection, earliest first.
  *
- * A session holds as many as the machine affords, because one output can be
- * watched from more than one place: a viewer who jumps back gets a run of their
- * own rather than dragging the picture away from a viewer watching ahead.
- *
- * @param {{ runs?: Set<object> }} session
+ * @param {object[] | Set<object>} runs
  * @returns {object[]}
  */
-export function runsOf(session) {
-  const runs = session?.runs instanceof Set ? [...session.runs] : [];
-  return runs.sort((left, right) => left.from - right.from);
+export function runsOf(runs) {
+  const listed = Array.isArray(runs) ? runs : runs instanceof Set ? [...runs] : [];
+  return [...listed].sort((left, right) => left.from - right.from);
 }
 
 /**
- * The runs of this session that still have a process.
+ * The runs in one output's registered collection that still have a process.
  *
- * @param {{ runs?: Set<object> }} session
+ * @param {object[] | Set<object>} runs
  * @returns {object[]}
  */
-export function liveRunsOf(session) {
-  return runsOf(session).filter((run) => run.isAlive);
+export function liveRunsOf(runs) {
+  return runsOf(runs).filter((run) => run.isAlive);
 }
 
 /**
- * What this session's encoding is doing, as one state.
+ * What one output's registered encoders are doing, as one state.
  *
- * The most advanced state among its live runs: a session with anything
- * producing IS producing, whatever else it has going. A session that has never
+ * The most advanced state among its live runs: an output with anything
+ * producing IS producing, whatever else it has going. An output that has never
  * started a run, or whose runs have all ended, is at the table's own initial
  * state — which is what "nothing is encoding" means.
  *
- * @param {{ runs?: Set<object> }} session
+ * @param {object[] | Set<object>} runs
  * @returns {string}
  */
-export function runStateOf(session) {
+export function runStateOf(runs) {
   let answer = INITIAL_RUN_STATE;
   let rank = -1;
-  for (const run of runsOf(session)) {
+  for (const run of runsOf(runs)) {
     const at = RUN_STATE_ORDER.indexOf(run.state);
     if (at > rank) {
       rank = at;
@@ -540,7 +536,7 @@ export function runStateOf(session) {
  * How advanced a run state is, for reducing several runs to one answer.
  *
  * Producing outranks starting, and both outrank a run that has ended: what a
- * caller asking "what is this session's encoding doing" wants to know is
+ * caller asking "what is this output's encoding doing" wants to know is
  * whether anything is being made, not what the quietest of them is up to.
  */
 const RUN_STATE_ORDER = [

@@ -20,6 +20,7 @@ import { HlsSessionManager } from "../services/hls-session-manager.js";
 import { AudioOutput, CutGrid, OutputSpec, VideoOutput } from "../services/output/OutputSpec.js";
 import { Timeline } from "../services/output/Timeline.js";
 import { SourceFile } from "../services/source/SourceFile.js";
+import { viewersOf } from "../services/viewer/Viewer.js";
 
 const TORRENT = "torrent:11f0929918e2b5aa2e5b71ecdbe5c0f1a4bbf7d1";
 
@@ -48,14 +49,19 @@ function request(over = {}) {
  *
  * @returns {string}
  */
-function nameOfThatOutput() {
+function specOfThatOutput() {
   return new OutputSpec({
     sourceKey: TORRENT,
     segmentFormatId: "fmp4",
     grid: new CutGrid({ kind: "keyframe", fileIndex: 0 }),
     video: new VideoOutput({ fileIndex: 0, encode: null }),
     audio: new AudioOutput({ fileIndex: 0, trackIndex: 0, transcode: false })
-  }).toName();
+  });
+}
+
+/** @returns {string} */
+function nameOfThatOutput() {
+  return specOfThatOutput().toName();
 }
 
 /**
@@ -65,12 +71,12 @@ function nameOfThatOutput() {
 function seedOneSession(manager) {
   const session = {
     id: nameOfThatOutput(),
+    spec: specOfThatOutput(),
     outputKey: "seeded",
     state: "ready",
     file: new SourceFile({ sourceKey: TORRENT, fileIndex: 0, name: "film.mkv" }),
     timeline: new Timeline({ boundaries: [0, 4, 8], cutGrid: "keyframe" }),
-    consumers: new Set(["viewer-one"]),
-    viewers: new Map(),
+    claims: new Set(),
     runs: new Set(),
     progress: { processedSeconds: 0, startPositionSeconds: 0, updatedAt: Date.now() },
     lastAccessedAt: Date.now(),
@@ -81,7 +87,7 @@ function seedOneSession(manager) {
     // out the warm-up deadline and would be measuring that timer.
     useSyntheticPlaylist: true
   };
-  manager.sessionsById.set(session.id, session);
+  manager.outputsById.set(session.id, session);
   return session;
 }
 
@@ -102,7 +108,7 @@ test("a second viewer of one output is served by the session that exists", async
   const answered = await manager.createOrGetSession(request({ consumerId: "viewer-two" }));
 
   assert.equal(answered, seeded, "one output, one session");
-  assert.ok(seeded.consumers.has("viewer-two"), "and the second viewer is on it");
+  assert.ok(viewersOf(seeded).has("viewer-two"), "and the second viewer is on it");
 });
 
 test("a request whose parameters differ is not that session", async (t) => {
@@ -135,5 +141,5 @@ test("a request whose parameters differ is not that session", async (t) => {
   }
 
   assert.notEqual(answered, seeded);
-  assert.ok(!seeded.consumers.has("viewer-two"), "and nobody was added to somebody else's output");
+  assert.ok(!viewersOf(seeded).has("viewer-two"), "and nobody was added to somebody else's output");
 });

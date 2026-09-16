@@ -27,10 +27,11 @@ import path from "node:path";
 import { HlsSessionManager } from "../services/hls-session-manager.js";
 import { managerWithOwnStore } from "./helpers/manager.js";
 import { Output } from "../services/output/Output.js";
-import { viewerOf } from "../services/viewer/Viewer.js";
+import { viewerOf, viewersOf } from "../services/viewer/Viewer.js";
 import { fmp4Format } from "../services/segment-formats/fmp4.js";
 import { softwareDescriptor, maxrateKbpsFor, nominalKbpsForHeight } from "../services/hwaccel.js";
 import { readVideoSampleSize } from "../services/segment-formats/mp4-boxes.js";
+import { outputSpec } from "./helpers/output-spec.js";
 
 const BASE_ID = "aaaaaaaabbbbcccc";
 const SEGMENT_SECONDS = 4;
@@ -46,6 +47,7 @@ const SEGMENT_SECONDS = 4;
  */
 function fakeSession({ dirPath, transcodeVideo = true, cutGrid = transcodeVideo ? "uniform" : "keyframe" }) {
   return {
+    spec: outputSpec({ transcodeVideo, cutGrid }),
     id: BASE_ID,
     dirPath,
     // Where this file is cut, held by the file. A fixture that stated it
@@ -130,8 +132,9 @@ async function managerWithSession({ transcodeVideo = true, cutGrid } = {}) {
   });
   const session = fakeSession({ dirPath, transcodeVideo, cutGrid });
   session.outputKey = outputKey;
-  manager.sessionsById.set(BASE_ID, session);
-  startRunOn(session, { process: fakeEncoder() });
+  manager.outputsById.set(BASE_ID, session);
+  const run = startRunOn(session, { process: fakeEncoder() });
+  manager.encodeOrchestrator.adopt(outputKey, run);
   return { manager, session, dirPath };
 }
 
@@ -367,7 +370,7 @@ test("a reading stops counting when the person leaves, not when it gets old", as
   gone.report({ linkMbps: 1.0, bufferedAheadSec: 1.5, positionSeconds: 40, playing: true }, Date.now() - 120_000);
   gone.gone = true;
   recordViewerReport({
-    sessions: manager.sessionsById,
+    outputs: manager.outputsById,
     viewers: manager.viewers,
     sessionId: session.id,
     report: { linkMbps: 80, bufferedAheadSec: 60, consumerId: "here", positionSeconds: 40 }
@@ -376,7 +379,7 @@ test("a reading stops counting when the person leaves, not when it gets old", as
 
   await manager.runQualityBudgetOnce();
 
-  assert.equal(session.viewers.size, 2, "the viewer is still known — silence is not leaving");
+  assert.equal(viewersOf(session).size, 2, "the viewer is still known — silence is not leaving");
   // Their reading is not deleted anywhere: it is simply not theirs to give any
   // more, because they are not here. Nothing walks it for a decision.
   assert.equal(
@@ -516,4 +519,25 @@ test("a cap is not lifted because there is no higher rung to compare against", a
   await manager.runQualityBudgetOnce();
 
   assert.equal(session.rateCapKbps, 700, "the link still cannot carry this picture uncapped");
+});
+
+test("a request is answered when the viewers watching are on that height, whoever they are", async (t) => {
+  const { manager, session, dirPath } = await managerWithSession();
+  t.after(async () => {
+    await manager.disposeAll();
+    await rm(dirPath, { recursive: true, force: true });
+  });
+  // A named viewer followed the request to a 480p step. The step is an output
+  // of its own; the picture's own height is still 720.
+  const stepId = "aaaaaaaabbbbdddd";
+  const step = { ...fakeSession({ dirPath }), id: stepId, isStep: true, variantHeight: 480 };
+  step.outputKey = `${session.outputKey}:step480`;
+  manager.outputsById.set(stepId, step);
+  manager.viewers.of(session, "alice").activeVariantId = stepId;
+
+  session.qualityAsk = { height: 480, at: Date.now(), reason: "measured" };
+  const answered = await manager.getSessionProgress(BASE_ID, "alice");
+
+  assert.equal(answered.requestedHeight, 0, "the viewer is on the height asked for");
+  assert.equal(session.qualityAsk, null, "so the request is let go of");
 });

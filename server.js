@@ -617,7 +617,7 @@ export async function startProxyServer({
     // the session manager: what it needs is the live sessions and the registry
     // of viewers, and nothing about encoding.
     handleApiTranscodeSessionNetReportPost(req, reply, {
-      sessions: hlsSessionManager.sessionsById,
+      outputs: hlsSessionManager.outputsById,
       viewers: hlsSessionManager.viewers
     })
   );

@@ -11,6 +11,8 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { EncodeCost } from "../services/quality/EncodeCost.js";
 import { startRunOn } from "./helpers/encode-run.js";
+import { outputSpec } from "./helpers/output-spec.js";
+import { runStateOf } from "../services/encode/encode-run-state.js";
 
 /**
  * @param {object} [readings]
@@ -36,7 +38,10 @@ function costOn(readings = {}) {
     runningEncoders: () => readings.runningEncoders?.() ?? 0,
     encodersRunningNow: () => 0,
     torrentCostSecFor: () => 0,
-    boundBy: async () => readings.boundBy ?? "cpu"
+    boundBy: async () => readings.boundBy ?? "cpu",
+    runsFor: (session) => [...(session.runs ?? [])],
+    stateFor: (session) => runStateOf(session.runs),
+    progressFor: (session) => session.progress ?? null
   });
   return { cost, asked: () => asked, host };
 }
@@ -44,16 +49,18 @@ function costOn(readings = {}) {
 /**
  * A session with one run going, of the kind this file measures.
  *
- * @param {{ audioOnly?: boolean, transcodeVideo?: boolean, key?: string }} [what]
+ * @param {{ audioOnly?: boolean, transcodeVideo?: boolean, audioSourceTrackIndex?: number, key?: string }} [what]
  * @returns {object}
  */
 function sessionProducing(what = {}) {
   const session = {
     id: "1111111122223333",
     state: "ready",
-    audioOnly: what.audioOnly === true,
-    transcodeVideo: what.transcodeVideo === true,
-    audioTrackIndex: 0,
+    spec: outputSpec({
+      audioOnly: what.audioOnly === true,
+      transcodeVideo: what.transcodeVideo === true,
+      audioSourceTrackIndex: what.audioSourceTrackIndex ?? 0
+    }),
     file: { key: what.key ?? "torrent:abc:0", name: "film.mkv" },
     output: { encodeWidth: 0, encodeHeight: 0, outputFps: 25, softwarePreset: null },
     progress: { processedSeconds: 0 },
@@ -215,8 +222,7 @@ test("two soundtracks of one file are priced apart", async () => {
   // for both files each over the other's readings.
   const { cost } = costOn();
   const first = sessionProducing({ audioOnly: true });
-  const second = sessionProducing({ audioOnly: true });
-  second.audioTrackIndex = 1;
+  const second = sessionProducing({ audioOnly: true, audioSourceTrackIndex: 1 });
 
   await watchItRun(cost, first, 40);
 

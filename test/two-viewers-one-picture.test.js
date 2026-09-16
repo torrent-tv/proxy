@@ -22,8 +22,8 @@ import { fakeProcess as fakeEncoder, startRunOn } from "./helpers/encode-run.js"
  * @param {object} session
  * @returns {boolean}
  */
-function encoding(session) {
-  return [...(session?.runs ?? [])].some((run) => run.isAlive);
+function encoding(manager, output) {
+  return manager.encodeOrchestrator.runsOn(output?.outputKey ?? "").some((run) => run.isAlive);
 }
 /**
  * Whether anybody is still watching this output.
@@ -43,7 +43,7 @@ function encoding(session) {
  * @returns {boolean}
  */
 function watched(session) {
-  return [...(session?.viewers ?? new Map()).values()].length > 0;
+  return session ? viewersOf(session).size > 0 : false;
 }
 
 import assert from "node:assert/strict";
@@ -54,9 +54,10 @@ import os from "node:os";
 import path from "node:path";
 import { audioRenditionKey, HlsSessionManager } from "../services/hls-session-manager.js";
 import { managerWithOwnStore } from "./helpers/manager.js";
-import { viewerOf } from "../services/viewer/Viewer.js";
+import { viewerOf, viewersOf } from "../services/viewer/Viewer.js";
 import { fmp4Format } from "../services/segment-formats/fmp4.js";
 import { Output } from "../services/output/Output.js";
+import { outputSpec } from "./helpers/output-spec.js";
 
 const BASE_ID = "aaaaaaaabbbbcccc";
 const SEGMENT_SECONDS = 4;
@@ -66,12 +67,27 @@ const SECOND = "viewer-two";
 /**
  * A session shaped like a live one, without the ffmpeg run behind it.
  *
- * @param {{ id: string, dirPath: string, audioTrackIndex?: number, transcodeAudio?: boolean }} params
+ * @param {{ id: string, dirPath: string, audioTrackIndex?: number, transcodeAudio?: boolean, audioOnly?: boolean, audioSeparate?: boolean }} params
  * @returns {object}
  */
-function fakeSession({ id, dirPath, audioTrackIndex = 0, transcodeAudio = true }) {
+function fakeSession({
+  id,
+  dirPath,
+  audioTrackIndex = 0,
+  transcodeAudio = true,
+  audioOnly = false,
+  audioSeparate = false
+}) {
   return {
     id,
+    spec: outputSpec({
+      transcodeVideo: !audioOnly,
+      transcodeAudio,
+      audioOnly,
+      audioSeparate,
+      audioSourceTrackIndex: audioTrackIndex
+    }),
+    get outputKey() { return this.spec.toKey(); },
     dirPath,
     // Where this file is cut, held by the file. A fixture that stated it
     // on the session was describing what production no longer does.
@@ -90,8 +106,7 @@ function fakeSession({ id, dirPath, audioTrackIndex = 0, transcodeAudio = true }
     lastAccessedAt: Date.now(),
     ffmpeg: null,
     lastError: "",
-    consumers: new Set(),
-    viewers: new Map(),
+    claims: new Set(),
 
     segmentFormat: fmp4Format,
     transcodeVideo: false,
@@ -116,6 +131,12 @@ function fakeSession({ id, dirPath, audioTrackIndex = 0, transcodeAudio = true }
   };
 }
 
+function startManagedRun(manager, output, options = {}) {
+  const run = startRunOn(output, options);
+  manager.encodeOrchestrator.adopt(output.outputKey, run);
+  return run;
+}
+
 
 /**
  * A base picture serving two viewers, with its audio published separately and
@@ -127,16 +148,18 @@ async function pictureWithTwoViewers() {
   const dirPath = await mkdtemp(path.join(os.tmpdir(), "two-viewers-"));
   // Its own store root — see `helpers/manager.js` for what sharing one cost.
   const { manager } = managerWithOwnStore();
-  const base = fakeSession({ id: BASE_ID, dirPath });
-  base.audioSeparate = true;
-  base.consumers = new Set([FIRST, SECOND]);
+  // These checks cover ownership changes made by viewer requests. Encoder
+  // placement is covered by the plan tests and must not run asynchronously in
+  // the middle of an assertion about the request path.
+  manager.planEncodersSoon = () => {};
+  const base = fakeSession({ id: BASE_ID, dirPath, audioSeparate: true });
   // Both viewers are watching the picture, which is what keeps their choices
   // alive; a viewer whose head has expired holds no encoder.
   viewerOf(base, FIRST).position = { segment: 3, seconds: 12, at: Date.now() };
   viewerOf(base, SECOND).position = { segment: 3, seconds: 12, at: Date.now() };
   viewerOf(base, FIRST).audio = { trackIndex: 0, transcode: true };
   viewerOf(base, SECOND).audio = { trackIndex: 1, transcode: true };
-  manager.sessionsById.set(BASE_ID, base);
+  manager.outputsById.set(BASE_ID, base);
   manager.getCachedAudioTracks = () => [
     { index: 0, language: "rus", title: "Дубляж", isDefault: true, fileIndex: 0, sourceTrackIndex: 0 },
     { index: 1, language: "eng", title: "", isDefault: false, fileIndex: 0, sourceTrackIndex: 1 }
@@ -155,11 +178,12 @@ async function pictureWithTwoViewers() {
       id: `rendition-${key}`,
       dirPath,
       audioTrackIndex: params.audioTrackIndex,
-      transcodeAudio: params.transcodeAudio
+      transcodeAudio: params.transcodeAudio,
+      audioOnly: true
     });
-    rendition.audioOnly = true;
-    startRunOn(rendition, { process: fakeEncoder() });
-    manager.sessionsById.set(rendition.id, rendition);
+    rendition.id = rendition.spec.toName();
+    startManagedRun(manager, rendition, { process: fakeEncoder() });
+    manager.outputsById.set(rendition.id, rendition);
     renditions.set(key, rendition);
     return rendition;
   };
@@ -198,9 +222,7 @@ test("a soundtrack nobody is listening to any more is let go of", async (t) => {
   });
   // One viewer only, so what they leave is left for nobody. This is the case
   // the stop exists for: an encoder AND a reader holding pieces of the torrent.
-  base.consumers = new Set([FIRST]);
-  base.viewers.delete(SECOND);
-  base.viewers.delete(SECOND);
+  viewersOf(base).delete(SECOND);
 
   await manager.resolveAudioRenditionFile(BASE_ID, 0, "segment-00003.mp4", FIRST);
   await manager.resolveAudioRenditionFile(BASE_ID, 1, "segment-00004.mp4", FIRST);
@@ -235,8 +257,8 @@ test("each viewer's browser decides for itself whether its soundtrack is re-enco
   assert.equal(renditions.get(audioRenditionKey(0, false)).transcodeAudio, false);
   assert.equal(renditions.get(audioRenditionKey(0, true)).transcodeAudio, true);
   // Both are wanted, so neither is stopped.
-  assert.ok(encoding(renditions.get(audioRenditionKey(0, false))));
-  assert.ok(encoding(renditions.get(audioRenditionKey(0, true))));
+  assert.ok(encoding(manager, renditions.get(audioRenditionKey(0, false))));
+  assert.ok(encoding(manager, renditions.get(audioRenditionKey(0, true))));
 });
 
 test("the master marks each viewer's own soundtrack as the default one", async (t) => {
@@ -278,8 +300,8 @@ test("one viewer changing quality does not take the other off their step", async
     variant.variantHeight = height;
     variant.isStep = true;
     variant.file = base.file;
-    startRunOn(variant, { process: fakeEncoder() });
-    manager.sessionsById.set(variant.id, variant);
+    startManagedRun(manager, variant, { process: fakeEncoder() });
+    manager.outputsById.set(variant.id, variant);
     variants.set(height, variant);
     return variant;
   };
@@ -291,8 +313,8 @@ test("one viewer changing quality does not take the other off their step", async
   await manager.resolveVariantFile(BASE_ID, 720, "segment-00004.mp4", FIRST);
   await manager.resolveVariantFile(BASE_ID, 540, "segment-00004.mp4", SECOND);
 
-  assert.ok(encoding(variants.get(720)), "the first viewer's step is still encoding");
-  assert.ok(encoding(variants.get(540)), "and so is the second viewer's");
+  assert.ok(encoding(manager, variants.get(720)), "the first viewer's step is still encoding");
+  assert.ok(encoding(manager, variants.get(540)), "and so is the second viewer's");
 
   // Now the first viewer steps down. Theirs is left for nobody and stops; the
   // other viewer's is untouched.
@@ -301,7 +323,7 @@ test("one viewer changing quality does not take the other off their step", async
   assert.equal(watched(variants.get(720)), false, "the step nobody is on is nobody's");
   assert.ok(watched(variants.get(540)), "the step the other viewer is watching stays theirs");
   assert.ok(watched(variants.get(480)), "and the one they moved to is now theirs");
-  assert.ok(encoding(variants.get(540)), "and nothing here touched the other viewer's encoder");
+  assert.ok(encoding(manager, variants.get(540)), "and nothing here touched the other viewer's encoder");
 });
 
 test("a step somebody is watching is never withdrawn from the offer", async (t) => {
@@ -328,7 +350,7 @@ test("a step somebody is watching is never withdrawn from the offer", async (t) 
   variant.file = base.file;
   variant.isStep = true;
   variant.file = base.file;
-  manager.sessionsById.set(variant.id, variant);
+  manager.outputsById.set(variant.id, variant);
   base.file.stepHeights.set(720, 720);
 
   // Nobody on it: measured below realtime, it is withdrawn. This half is the
@@ -359,7 +381,7 @@ test("a viewer whose picture has gone quiet holds no soundtrack encoder", async 
   // The second viewer's tab is gone. Nothing releases the session when a
   // channel closes (roadmap item 54), so what expires is their head on the
   // picture — and with it their claim on an encoder.
-  base.viewers.delete(SECOND);
+  viewersOf(base).delete(SECOND);
 
   await manager.resolveAudioRenditionFile(BASE_ID, 1, "segment-00004.mp4", FIRST);
 

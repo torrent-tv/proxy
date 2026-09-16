@@ -29,6 +29,7 @@ import { LiveOutputs } from "../services/output/LiveOutputs.js";
 import { Viewers } from "../services/viewer/Viewers.js";
 import { viewersOf } from "../services/viewer/Viewer.js";
 import { runsOf } from "../services/priority/PriorityMap.js";
+import { outputSpec } from "./helpers/output-spec.js";
 
 const FILM = { sourceKey: "source-1", fileIndex: 0, durationSeconds: 600 };
 const STALE_AFTER_MS = 60_000;
@@ -42,6 +43,7 @@ const STALE_AFTER_MS = 60_000;
 function outputOf({ id, outputKey, isStep = false, audioOnly = false }) {
   return {
     id,
+    spec: outputSpec({ sourceKey: FILM.sourceKey, audioOnly }),
     outputKey,
     isStep,
     audioOnly,
@@ -60,7 +62,7 @@ function outputOf({ id, outputKey, isStep = false, audioOnly = false }) {
  * @returns {{ priority: PriorityOrchestrator, viewers: Viewers, publish: () => void }}
  */
 function over(sessions) {
-  const live = new LiveOutputs({ sessionsById: new Map(sessions.map((one) => [one.id, one])) });
+  const live = new LiveOutputs({ outputsById: new Map(sessions.map((one) => [one.id, one])) });
   const viewers = new Viewers();
   const priority = new PriorityOrchestrator({
     publish: () => {},
@@ -157,7 +159,7 @@ test("a viewer who has gone is not watching anything", () => {
   // paused viewer, a throttled hidden tab, or a full cushion, and none of those
   // is leaving; what ends it is a statement.
   const picture = outputOf({ id: "pic", outputKey: "out:1080" });
-  const live = new LiveOutputs({ sessionsById: new Map([["pic", picture]]) });
+  const live = new LiveOutputs({ outputsById: new Map([["pic", picture]]) });
   const viewers = new Viewers();
   const priority = new PriorityOrchestrator({
     publish: () => {},

@@ -20,6 +20,8 @@ import path from "node:path";
 import { HlsSessionManager } from "../services/hls-session-manager.js";
 import { SourceFile } from "../services/source/SourceFile.js";
 import { Viewers } from "../services/viewer/Viewers.js";
+import { viewersOf } from "../services/viewer/Viewer.js";
+import { outputSpec } from "./helpers/output-spec.js";
 
 const PICTURE = "aaaaaaaa00004000";
 const SOUND = "aaaaaaaa00004001";
@@ -32,13 +34,13 @@ const SOUND = "aaaaaaaa00004001";
 function outputOn(id, dirPath) {
   return {
     id,
+    spec: outputSpec(),
     dirPath,
     state: "live",
     file: new SourceFile({ sourceKey: "source-1", fileIndex: 0, name: "video.mkv" }),
     get inputFile() { return this.file; },
     get audioFile() { return this.file; },
-    consumers: new Set(),
-    viewers: new Map(),
+    claims: new Set(),
     lastAccessedAt: Date.now()
   };
 }
@@ -46,7 +48,7 @@ function outputOn(id, dirPath) {
 test("asking for a viewer of an output is that viewer watching it", () => {
   let changes = 0;
   const viewers = new Viewers({ onChange: () => { changes += 1; } });
-  const output = { id: "out-1", viewers: new Map() };
+  const output = { id: "out-1" };
 
   const first = viewers.of(output, "someone");
   assert.equal(changes, 1, "a new relation is a change");
@@ -55,7 +57,7 @@ test("asking for a viewer of an output is that viewer watching it", () => {
   viewers.of(output, "someone");
   assert.equal(changes, 1, "asking again about the same output changes nothing");
 
-  const second = { id: "out-2", viewers: new Map() };
+  const second = { id: "out-2" };
   viewers.of(second, "someone");
   assert.equal(changes, 2, "a second output is a change");
   assert.equal(viewers.get("someone")?.outputs.size, 2);
@@ -63,8 +65,8 @@ test("asking for a viewer of an output is that viewer watching it", () => {
 
 test("a connection closing takes the person off every output at once", () => {
   const viewers = new Viewers();
-  const picture = { id: "picture", viewers: new Map() };
-  const sound = { id: "sound", viewers: new Map() };
+  const picture = { id: "picture" };
+  const sound = { id: "sound" };
   const byId = new Map([["picture", picture], ["sound", sound]]);
 
   viewers.of(picture, "watcher");
@@ -74,9 +76,9 @@ test("a connection closing takes the person off every output at once", () => {
   const left = viewers.hasGone("watcher", (id) => byId.get(id) ?? null);
 
   assert.deepEqual(left.sort(), ["picture", "sound"], "both, not the one the browser holds an id for");
-  assert.equal(picture.viewers.has("watcher"), false);
-  assert.equal(sound.viewers.has("watcher"), false);
-  assert.equal(picture.viewers.has("other"), true, "and nobody else goes with them");
+  assert.equal(viewersOf(picture).has("watcher"), false);
+  assert.equal(viewersOf(sound).has("watcher"), false);
+  assert.equal(viewersOf(picture).has("other"), true, "and nobody else goes with them");
   assert.equal(viewers.get("watcher"), null, "the registry does not keep what it has let go");
 });
 
@@ -94,10 +96,8 @@ test("a viewer whose connection closed is let go of every output they were watch
 
   const picture = outputOn(PICTURE, dirPath);
   const sound = outputOn(SOUND, dirPath);
-  picture.consumers.add("watcher");
-  sound.consumers.add("watcher");
-  manager.sessionsById.set(PICTURE, picture);
-  manager.sessionsById.set(SOUND, sound);
+  manager.outputsById.set(PICTURE, picture);
+  manager.outputsById.set(SOUND, sound);
   manager.viewers.of(picture, "watcher");
   manager.viewers.of(sound, "watcher");
 

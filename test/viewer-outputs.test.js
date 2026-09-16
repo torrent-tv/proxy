@@ -32,6 +32,8 @@ import { Timeline } from "../services/output/Timeline.js";
 import { Output } from "../services/output/Output.js";
 import { fmp4Format } from "../services/segment-formats/fmp4.js";
 import { fakeProcess as fakeEncoder, startRunOn } from "./helpers/encode-run.js";
+import { outputSpec } from "./helpers/output-spec.js";
+import { viewersOf } from "../services/viewer/Viewer.js";
 
 const BASE_ID = "aaaaaaaabbbbcccc";
 const STEP_ID = "1111111122223333";
@@ -49,6 +51,13 @@ const SEGMENT_SECONDS = 4;
 function fakeSession({ id, dirPath, file, encodeHeight = 0, audioOnly = false, isStep = false }) {
   return {
     id,
+    spec: outputSpec({
+      sourceKey: file.sourceKey,
+      fileIndex: file.fileIndex,
+      transcodeVideo: !audioOnly && encodeHeight > 0,
+      audioOnly,
+      height: encodeHeight
+    }),
     dirPath,
     timeline: new Timeline({
       boundaries: Array.from({ length: 101 }, (_, index) => index * SEGMENT_SECONDS),
@@ -63,7 +72,7 @@ function fakeSession({ id, dirPath, file, encodeHeight = 0, audioOnly = false, i
     lastAccessedAt: Date.now(),
     ffmpeg: null,
     lastError: "",
-    consumers: new Set(),
+    claims: new Set(),
     segmentFormat: fmp4Format,
     transcodeVideo: !audioOnly,
     transcodeAudio: true,
@@ -88,7 +97,6 @@ function fakeSession({ id, dirPath, file, encodeHeight = 0, audioOnly = false, i
     seekTarget: null,
     waitEpoch: 0,
     runs: new Set(),
-    viewers: new Map(),
     usesExplicitCuts: false,
     useSyntheticPlaylist: true,
     playlistText: "#EXTM3U\n",
@@ -118,13 +126,12 @@ async function pictureWithStepAndSoundtrack() {
   const base = fakeSession({ id: BASE_ID, dirPath, file, encodeHeight: 812 });
   const step = fakeSession({ id: STEP_ID, dirPath, file, encodeHeight: 540, isStep: true });
   const audio = fakeSession({ id: AUDIO_ID, dirPath, file, audioOnly: true });
-  base.consumers = new Set([VIEWER]);
   // The family's own claim, which is how a picture holds what it made: the
   // browser never learns these two ids.
-  step.consumers = new Set([variantConsumerId(BASE_ID)]);
-  audio.consumers = new Set([variantConsumerId(BASE_ID)]);
+  step.claims = new Set([variantConsumerId(BASE_ID)]);
+  audio.claims = new Set([variantConsumerId(BASE_ID)]);
   for (const session of [base, step, audio]) {
-    manager.sessionsById.set(session.id, session);
+    manager.outputsById.set(session.id, session);
   }
   file.stepHeights.set(540, 540);
   return { manager, base, step, audio, dirPath };
@@ -142,7 +149,7 @@ test("a viewer who steps down, back to the picture's own height and down again k
   await manager.resolveVariantFile(BASE_ID, 812, "segment-00026.mp4", VIEWER);
   await manager.resolveVariantFile(BASE_ID, 540, "segment-00027.mp4", VIEWER);
 
-  const known = base.viewers.get(VIEWER);
+  const known = viewersOf(base).get(VIEWER);
   assert.ok(known, "the picture is the one id the browser holds — a viewer is never dropped from it");
   assert.deepEqual(
     known.audio,
@@ -168,14 +175,14 @@ test("a viewer leaving is subtracted from every output, and one nobody is left w
 
   await manager.releaseSessionConsumer(BASE_ID, VIEWER, "the viewer left");
 
-  assert.equal(manager.sessionsById.has(BASE_ID), false, "the picture goes with its last consumer");
+  assert.equal(manager.outputsById.has(BASE_ID), false, "the picture goes with its last consumer");
   assert.equal(
-    manager.sessionsById.has(STEP_ID),
+    manager.outputsById.has(STEP_ID),
     false,
     "and so does the quality step: nobody is watching it, and no one outside this class knows its id"
   );
   assert.equal(
-    manager.sessionsById.has(AUDIO_ID),
+    manager.outputsById.has(AUDIO_ID),
     false,
     "and the soundtrack, for the same reason — it used to sit for half an hour holding an encoder, a directory and a claim on the torrent"
   );
@@ -186,7 +193,6 @@ test("an output somebody else is still watching is kept when one viewer leaves",
   const { manager, base, step, audio, dirPath } = await pictureWithStepAndSoundtrack();
   t.after(() => rm(dirPath, { recursive: true, force: true }));
   const second = "viewer-two";
-  base.consumers.add(second);
   manager.viewers.of(base, VIEWER).position = { segment: 25, seconds: 100, at: Date.now() };
   manager.viewers.of(step, VIEWER);
   manager.viewers.of(audio, VIEWER);
@@ -197,23 +203,23 @@ test("an output somebody else is still watching is kept when one viewer leaves",
 
   await manager.releaseSessionConsumer(BASE_ID, VIEWER, "the first viewer left");
 
-  assert.equal(manager.sessionsById.has(BASE_ID), true, "the picture stays: it still has a consumer");
+  assert.equal(manager.outputsById.has(BASE_ID), true, "the picture stays: it still has a consumer");
   assert.equal(
-    manager.sessionsById.has(AUDIO_ID),
+    manager.outputsById.has(AUDIO_ID),
     true,
     "and the soundtrack stays, because having no listeners is what kills it and it has one"
   );
   assert.equal(
-    base.viewers.has(VIEWER),
+    viewersOf(base).has(VIEWER),
     false,
     "the viewer who left is gone from the picture"
   );
   assert.equal(
-    audio.viewers.has(VIEWER),
+    viewersOf(audio).has(VIEWER),
     false,
     "and from the soundtrack, which is the half of the relation the viewer holds"
   );
-  assert.equal(step.viewers.size, 0, "the step they had is watched by nobody");
+  assert.equal(viewersOf(step).size, 0, "the step they had is watched by nobody");
 });
 
 test("nothing is left wanting production once the last viewer has left", async (t) => {
@@ -232,7 +238,7 @@ test("nothing is left wanting production once the last viewer has left", async (
   // with nobody's name in it, rebuilt from whoever is watching; a viewer who has
   // left is simply not in the next one.
   for (const id of [BASE_ID, STEP_ID, AUDIO_ID]) {
-    const session = manager.sessionsById.get(id);
+    const session = manager.outputsById.get(id);
     assert.equal(session, undefined, `${id.slice(0, 8)} is let go with its last viewer`);
   }
   manager.planEncodersNow();
@@ -254,11 +260,11 @@ test("the two indexes of one relation are written together", () => {
   viewers.of(soundtrack, VIEWER);
   assert.equal(viewers.of(soundtrack, VIEWER), viewer, "one person is one object, whatever they are watching");
   assert.deepEqual([...viewer.outputs].sort(), ["picture", "soundtrack"]);
-  assert.equal(picture.viewers.get(VIEWER), viewer);
+  assert.equal(viewersOf(picture).get(VIEWER), viewer);
 
   viewers.leaves(soundtrack, VIEWER);
   assert.deepEqual([...viewer.outputs], ["picture"], "both directions go together");
-  assert.equal(soundtrack.viewers.has(VIEWER), false);
+  assert.equal(viewersOf(soundtrack).has(VIEWER), false);
   assert.equal(viewers.size, 1, "and the person is still known, because they are still watching something");
 
   viewers.leaves(picture, VIEWER);

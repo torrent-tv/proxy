@@ -47,28 +47,42 @@ export class VideoOutput {
   /**
    * @param {object} params
    * @param {number} params.fileIndex - The file the picture is read from.
-   * @param {{ width: number, height: number, exactSize: boolean } | null} params.encode
+   * @param {{ encoder: string, width: number, height: number, fps: number, preset: string | null, tonemap: boolean } | null} params.encode
    *   Null when the picture is copied — then the output is the source's own
-   *   size and nothing about a target box can change it. The box when it is
-   *   re-encoded, with `exactSize` saying that box is produced exactly as asked
-   *   and the realtime budget must not move it.
+   *   picture and nothing asked for can change a byte of it. When it is
+   *   re-encoded, the FORMAT that is actually produced: which encoder, the
+   *   size, the frame rate, the speed setting and whether HDR is tone mapped
+   *   down. Each of those changes what a decoder must be told in the header,
+   *   so pieces that differ in any of them cannot share one init segment.
    *
-   *   `exactSize` says NOTHING ABOUT WHO ASKED. Every rung of a master playlist
-   *   sets it, whether the viewer picked that rung or the player moved itself,
-   *   because two rungs allowed to drift would land on one height and the
-   *   choice between them would mean nothing. It was called `manual` until
-   *   2026-09-13, and that name was read as "the viewer did this" four times
-   *   over a few weeks — in field logs where the viewer had touched nothing.
+   *   What was ASKED for is not here. The key used to carry the viewer's box
+   *   and whether it was to be produced exactly, while the budget chose the
+   *   real size afterwards — so one address could name two formats, and pieces
+   *   of both would be served under the header of one (decided with the user
+   *   2026-09-16).
    */
   constructor({ fileIndex, encode = null }) {
     this.fileIndex = Number.isInteger(fileIndex) && fileIndex >= 0 ? fileIndex : 0;
     this.encode = encode
       ? {
+          encoder: typeof encode.encoder === "string" && encode.encoder.length > 0 ? encode.encoder : "unknown",
           width: Number.isInteger(encode.width) && encode.width > 0 ? encode.width : 0,
           height: Number.isInteger(encode.height) && encode.height > 0 ? encode.height : 0,
-          exactSize: encode.exactSize === true
+          fps: Number.isFinite(encode.fps) && encode.fps > 0 ? encode.fps : 0,
+          preset: typeof encode.preset === "string" && encode.preset.length > 0 ? encode.preset : null,
+          tonemap: encode.tonemap === true
         }
       : null;
+  }
+
+  /**
+   * How many points of picture this output carries, or zero for a copy, which
+   * is the source's own size and is compared by the caller that knows it.
+   *
+   * @returns {number}
+   */
+  get area() {
+    return this.encode ? this.encode.width * this.encode.height : 0;
   }
 
   /**
@@ -78,8 +92,8 @@ export class VideoOutput {
     if (!this.encode) {
       return `v=${this.fileIndex}/copy`;
     }
-    const box = `${this.encode.width}x${this.encode.height}`;
-    return `v=${this.fileIndex}/enc:${box}:${this.encode.exactSize ? "exact" : "budget"}`;
+    const { encoder, width, height, fps, preset, tonemap } = this.encode;
+    return `v=${this.fileIndex}/enc/${encoder}/${width}x${height}@${fps}/${preset ?? "-"}/${tonemap ? "tonemap" : "none"}`;
   }
 }
 
@@ -138,6 +152,12 @@ export class CutGrid {
     return `grid=${this.kind === "keyframe" ? "kf" : "even"}@${this.fileIndex}`;
   }
 }
+
+/**
+ * The shape `OutputSpec.toKey` writes, read back part by part.
+ */
+const KEY_PATTERN =
+  /^(?<source>.+):fmt=(?<format>[a-z0-9]+):grid=(?<grid>kf|even)@(?<gridFile>\d+):(?<carries>video-only|audio-only|muxed)(?::v=(?<videoFile>\d+)\/(?<video>copy|enc\/(?<encoder>[^/:]+)\/(?<width>\d+)x(?<height>\d+)@(?<fps>[0-9.]+)\/(?<preset>[^/:]+)\/(?<tonemap>tonemap|none)))?(?::a=(?<audioFile>\d+)\/(?<audioTrack>\d+)\/(?<audioCodec>aac|copy))?$/;
 
 /**
  * One encode of one torrent's material: which tracks, in what form, cut how,
@@ -225,6 +245,59 @@ export class OutputSpec {
       parts.push(this.audio.toKey());
     }
     return parts.join(":");
+  }
+
+  /**
+   * The identity read back from its own key, or null for a key this version
+   * does not write.
+   *
+   * A directory of produced pieces names its output by the key it was made
+   * under, and that is the only record of what format lies inside it. A key in
+   * an older shape — one that named the box a viewer ASKED for rather than the
+   * format produced — cannot say that, so it answers null and the directory is
+   * not served.
+   *
+   * @param {string} key
+   * @returns {OutputSpec | null}
+   */
+  static fromKey(key) {
+    const match = KEY_PATTERN.exec(String(key ?? ""));
+    if (!match) {
+      return null;
+    }
+    const groups = match.groups;
+    const video = groups.video === undefined
+      ? null
+      : new VideoOutput({
+          fileIndex: Number(groups.videoFile),
+          encode: groups.video === "copy"
+            ? null
+            : {
+                encoder: groups.encoder,
+                width: Number(groups.width),
+                height: Number(groups.height),
+                fps: Number(groups.fps),
+                preset: groups.preset === "-" ? null : groups.preset,
+                tonemap: groups.tonemap === "tonemap"
+              }
+        });
+    const audio = groups.audioFile === undefined
+      ? null
+      : new AudioOutput({
+          fileIndex: Number(groups.audioFile),
+          trackIndex: Number(groups.audioTrack),
+          transcode: groups.audioCodec === "aac"
+        });
+    const spec = new OutputSpec({
+      sourceKey: groups.source,
+      segmentFormatId: groups.format,
+      grid: new CutGrid({ kind: groups.grid === "kf" ? "keyframe" : "uniform", fileIndex: Number(groups.gridFile) }),
+      video,
+      audio
+    });
+    // Read back exactly or not at all: a key that parses into something that
+    // writes a different key is not a key this version made.
+    return spec.toKey() === key ? spec : null;
   }
 
   /**

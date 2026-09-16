@@ -118,7 +118,7 @@ async function managerWithSession({ transcodeVideo = true, cutGrid } = {}) {
   // store by that same key. A fixture with a directory of its own and no key
   // describes a proxy that no longer exists — the observed bitrate the link
   // budget reads would then be taken from files nothing can find.
-  const outputKey = `auto-quality:fmt=fmp4:grid=${transcodeVideo ? "uniform" : "kf@0"}:video-only:v=0/${transcodeVideo ? "enc:1280x720:exact" : "copy"}`;
+  const outputKey = `auto-quality:fmt=fmp4:grid=${transcodeVideo ? "uniform" : "kf@0"}:video-only:v=0/${transcodeVideo ? "enc/libx264/1280x720@24/-/none" : "copy"}`;
   manager.segmentStore.useFormat(outputKey, fmp4Format);
   const dirPath = manager.segmentStore.directoryFor(outputKey);
   // A software host: the budget's own precondition.

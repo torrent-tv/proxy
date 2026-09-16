@@ -41,7 +41,7 @@ function makeRun(span = {}) {
   const ends = [];
   const process_ = new FakeProcess();
   const run = new EncodeRun({
-    address: "torrent:abc:fmt=fmp4:grid=kf@0:video-only:v=0/enc:854x480:auto",
+    address: "torrent:abc:fmt=fmp4:grid=kf@0:video-only:v=0/enc/libx264/854x480@24/veryfast/none",
     encoder: new SoftwareEncoder(),
     from: span.from ?? 10,
     to: span.to ?? 14,
@@ -135,7 +135,7 @@ test("an ending reports the stretch, how far it got and how long it lived", () =
   assert.equal(ended.to, 14);
   assert.equal(ended.reached, 10);
   assert.equal(ended.livedMs, 0, "the clock is injected, so this is exact");
-  assert.equal(ended.address.includes("enc:854x480"), true);
+  assert.equal(ended.address.includes("854x480"), true);
 });
 
 test("a process that could not be started ends like any other failure", () => {

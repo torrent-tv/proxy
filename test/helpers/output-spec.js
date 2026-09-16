@@ -14,7 +14,10 @@ import { AudioOutput, CutGrid, OutputSpec, VideoOutput } from "../../services/ou
  * @param {number} [params.audioSourceTrackIndex]
  * @param {number} [params.width]
  * @param {number} [params.height]
- * @param {boolean} [params.exactSize]
+ * @param {string} [params.encoder]
+ * @param {number} [params.fps]
+ * @param {string | null} [params.preset]
+ * @param {boolean} [params.tonemap]
  * @param {"keyframe" | "uniform"} [params.cutGrid]
  * @param {string} [params.segmentFormatId]
  * @returns {OutputSpec}
@@ -30,7 +33,10 @@ export function outputSpec({
   audioSourceTrackIndex = 0,
   width = 0,
   height = 0,
-  exactSize = false,
+  encoder = "libx264",
+  fps = 24,
+  preset = null,
+  tonemap = false,
   cutGrid = "uniform",
   segmentFormatId = "fmp4"
 } = {}) {
@@ -42,7 +48,7 @@ export function outputSpec({
       ? null
       : new VideoOutput({
           fileIndex,
-          encode: transcodeVideo ? { width, height, exactSize } : null
+          encode: transcodeVideo ? { encoder, width, height, fps, preset, tonemap } : null
         }),
     audio: audioSeparate
       ? null

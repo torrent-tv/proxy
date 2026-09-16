@@ -1,23 +1,19 @@
 /**
- * @file What one output is encoded AS, decided once.
+ * @file One output's format in the terms the encoder is given, and how its
+ * pieces land.
  *
- * `OutputSpec` says what an output is — which tracks, in what form, cut how.
- * This is the other half: the shape the encoder is actually given for it. The
- * box in pixels, the frame rate, the speed setting, whether the picture is tone
- * mapped down from HDR.
+ * The format is the output's identity (`OutputSpec`) and is decided before the
+ * output is named: the size, the frame rate, the speed setting, whether HDR is
+ * tone mapped. This states the same values the way the command builder reads
+ * them. It used to be decided once per output and cached by the output's key,
+ * because the key named what was asked for while the budget chose the format
+ * afterwards; the cache was dropped sooner than the pieces it described, so one
+ * key could come to name two formats. The key is the format now, and there is
+ * nothing left to cache.
  *
- * **Why it is not a fact of a session.** It is decided by the realtime budget
- * at the moment a session is created — what this machine could hold just then —
- * so two sessions of one output, made minutes apart, could be given different
- * shapes while claiming the same identity. Everything downstream assumes
- * otherwise: a segment of one is supposed to be interchangeable with a segment
- * of the other, and the master playlist names one `RESOLUTION` for both.
- *
- * Decided once per output and held here, that cannot happen. What the budget
- * learns afterwards moves the RATE cap, which is deliberately not here: rate
- * control appears in neither the SPS nor the PPS, so it can move under a player
- * that has already cached the init. The size cannot, which is exactly why the
- * size belongs to the output and the cap belongs to the run.
+ * The rate cap is not here, deliberately: rate control appears in neither the
+ * SPS nor the PPS, so it can move under a player that has already cached the
+ * init.
  *
  * **It also holds how well its own pieces land on its own grid.** Where a piece
  * of THIS output truly began, against where its playlist says it begins, is a
@@ -131,59 +127,5 @@ export class Output {
       medianDeviationSec: sorted[Math.floor(sorted.length / 2)],
       firstDisagreementIndex: this.#tally.firstDisagreementIndex
     };
-  }
-}
-
-/**
- * The shapes this proxy has decided, one per output.
- *
- * Keyed by `OutputSpec.toKey()` and by nothing else: the shape is a property of
- * what is being produced, and two requests that produce the same thing must be
- * given the same one however far apart they arrive.
- */
-export class Outputs {
-  /** @type {Map<string, Output>} */
-  #byKey = new Map();
-
-  /**
-   * The shape for this output, decided by `decide` the first time it is asked
-   * for and never again.
-   *
-   * @param {string} key
-   * @param {() => Output} decide
-   * @returns {Output}
-   */
-  get(key, decide) {
-    let output = this.#byKey.get(key);
-    if (!output) {
-      output = decide();
-      this.#byKey.set(key, output);
-    }
-    return output;
-  }
-
-  /**
-   * Drop every shape nobody is holding.
-   *
-   * Same reason the timelines are swept: a map that only grows is the shape of
-   * half the memory faults recorded in this project.
-   *
-   * @param {Set<Output>} inUse
-   * @returns {number}
-   */
-  forgetUnused(inUse) {
-    let dropped = 0;
-    for (const [key, output] of [...this.#byKey]) {
-      if (!inUse.has(output)) {
-        this.#byKey.delete(key);
-        dropped += 1;
-      }
-    }
-    return dropped;
-  }
-
-  /** @returns {number} */
-  get size() {
-    return this.#byKey.size;
   }
 }

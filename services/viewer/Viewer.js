@@ -114,6 +114,13 @@ export class Viewer {
     /** What their link was last measured to carry. @type {object | null} */
     this.netReport = null;
     /**
+     * "manual" while the size on their screen was picked by hand, "auto" while
+     * it is the automatic choice, null until their page has said.
+     *
+     * @type {"auto" | "manual" | null}
+     */
+    this.qualityMode = null;
+    /**
      * Every output this viewer is watching, by session id: the picture, the
      * quality step on their screen, the soundtrack they chose.
      *
@@ -262,10 +269,17 @@ export class Viewer {
       playing,
       waiting,
       onScreen,
-      inPictureInPicture
+      inPictureInPicture,
+      qualityMode
     },
     now = Date.now()
   ) {
+    // Whether the size on their screen was picked by hand or is the automatic
+    // choice. Kept only when stated: a page one release behind says nothing,
+    // and is taken as picking, which is what every page was before.
+    if (qualityMode === "auto" || qualityMode === "manual") {
+      this.qualityMode = qualityMode;
+    }
     const held = Number.isFinite(bufferedAheadSec) && bufferedAheadSec > 0 ? bufferedAheadSec : 0;
     // A LINK FIGURE IS ONE FIELD OF THIS REPORT AND NOT ITS TICKET. A page that
     // has transferred nothing measurable has nothing to say about its link and

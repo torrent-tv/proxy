@@ -70,6 +70,10 @@ export async function handleApiTranscodeSessionNetReportPost(req, reply, { outpu
   const onScreen = typeof body.onScreen === "boolean" ? body.onScreen : undefined;
   const inPictureInPicture =
     typeof body.inPictureInPicture === "boolean" ? body.inPictureInPicture : undefined;
+  // Whether the size on screen was picked by hand or is the automatic choice.
+  // A size picked by hand is served exactly; the automatic choice may be served
+  // by an output of the same quality or better that is already made.
+  const qualityMode = body.qualityMode === "auto" || body.qualityMode === "manual" ? body.qualityMode : undefined;
   const positionSeconds = Number(body.positionSeconds);
   const recorded = recordViewerReport({
     outputs,
@@ -83,6 +87,7 @@ export async function handleApiTranscodeSessionNetReportPost(req, reply, { outpu
       waiting,
       onScreen,
       inPictureInPicture,
+      qualityMode,
       positionSeconds:
         Number.isFinite(positionSeconds) && positionSeconds >= 0 ? positionSeconds : undefined
     }

@@ -293,6 +293,16 @@ export class SegmentStore {
 
 
   /**
+   * Every output whose pieces this store knows how to read: those in use and
+   * those a previous life of the process left.
+   *
+   * @returns {string[]}
+   */
+  addresses() {
+    return [...this.#formats.keys()];
+  }
+
+  /**
    * Whether this piece is finished, and may therefore be served.
    *
    * Its NAME is the proof, and there is no second one: a piece being written is

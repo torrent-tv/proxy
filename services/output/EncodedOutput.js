@@ -67,10 +67,34 @@ export class EncodedOutput {
     /** A bitrate ceiling set by the viewer's measured link, in kbit/s, or null. */
     this.rateCapKbps = null;
     this.initSizeSaid = "";
+    this.learnSample = undefined;
+    this.lastAloneSpeed = undefined;
+    this.saidNoVariants = undefined;
+    this.splicableHeights = undefined;
+    this.offeredHeightsVersion = undefined;
+    this.offeredHeightsCache = undefined;
 
     // TRANSITIONAL — the encoder's input; moves to `encode/run/` (plan step 4).
     /** How wide the encoder's read window is, measured when the output was made. */
     this.readWindowBytes = 0;
+    this.inputRetryCount = undefined;
+    this.backwardRestarts = undefined;
+    this.firstWantedAt = undefined;
+    this.landingReportedForRun = undefined;
+    this.trueStartByIndex = undefined;
+    this.deviationWarnedAt = undefined;
+    this.stampWarnedAt = undefined;
+    this.lookAheadDisagreementSince = undefined;
+
+    // TRANSITIONAL — what the swarm delivers to this output's reads; moves to
+    // the torrent component (plan step 7).
+    this.supplyFigures = undefined;
+    this.inputBytes = undefined;
+
+    // TRANSITIONAL — the family of steps; moves with variants to the encoding
+    // component (plan step 5).
+    this.isStep = undefined;
+    this.variantPending = undefined;
 
     // TRANSITIONAL — serving requests; moves to the server operations (plan
     // step 7).
@@ -79,6 +103,8 @@ export class EncodedOutput {
     this.cushionSaidAt = 0;
     /** Issued to each incoming segment request and kept across its polls. */
     this.requestSeqCounter = 0;
+    this.holdExplainedAt = undefined;
+    this.initBytes = undefined;
     /** Bumped by every seek; a request held under an older value gives up. */
     this.waitEpoch = 0;
   }

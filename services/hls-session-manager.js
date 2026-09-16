@@ -91,6 +91,7 @@ import { linkCouldCarry, LINK_SAFETY } from "./quality/link-budget.js";
 import { viewerSecondsOn, viewerSegmentsOn } from "./viewer/positions.js";
 import { Viewers } from "./viewer/Viewers.js";
 import { OutputCatalog } from "./output/OutputCatalog.js";
+import { EncodedOutput } from "./output/EncodedOutput.js";
 import { variantHeightsFor } from "./output/ladder.js";
 import { EncodeOrchestrator } from "./encode/EncodeOrchestrator.js";
 import { encoderInputs } from "./encode/run-inputs.js";
@@ -1777,176 +1778,22 @@ export class HlsSessionManager {
     this.segmentStore.directoryFor(spec.toKey());
     this.segmentStore.useFormat(spec.toKey(), segmentFormat);
 
-    const session = {
+    const session = new EncodedOutput({
       id: sessionId,
-      // WHAT THIS SESSION PRODUCES, stated once, by the object whose whole job
-      // is to state it. Everything about the output that used to be copied onto
-      // the session beside it could disagree with it — and the comment at the
-      // one place that copied said what disagreement costs: the key says this
-      // output carries no sound while the output muxes it, and two viewers who
-      // chose different languages hear the same one.
       spec,
-      // The address of its segments, and the thing another session may share
-      // with it. Derived, so it cannot say anything the spec does not. It was
-      // here twice before, as `sourceMapKey` as well, with a comment claiming
-      // that one was this plus the start position — true once, and not since
-      // the start position left the key.
-      get outputKey() {
-        return this.spec.toKey();
-      },
-      // The file this session is of: its key, its name and what a probe of it
-      // said. One object per file, shared by every session of it.
       file,
-      // Where that file's keyframes are. One object per FILE as well, and held
-      // rather than copied, so a table read after this session was made — the
-      // packet probe, or a container read that outran its budget — reaches it
-      // without anybody having to go round telling the sessions.
       keyframes,
-      // Cold-start timing: entry timestamp + a once-guard so the first servable
-      // segment logs its latency exactly once.
-      createEntryMs,
-      firstSegmentLogged: false,
-      // Internal ownership claims keep a quality step or soundtrack available
-      // for its picture. Actual viewers are owned by the viewer layer and are
-      // never copied into this set.
-      claims: new Set(isFamilyConsumerId(consumerId) ? [consumerId] : []),
-      // What each viewer is listening to: which soundtrack, and whether their
-      // browser can decode it as it stands. Both are properties of a VIEWER and
-      // neither is a property of a picture that carries no sound, now that two
-      // viewers who chose different languages share one picture — so they are
-      // fields of the viewer, along with the step on their screen, the step and
-      // the track being warmed for them, where they are and what their link
-      // carries. Seeded with the viewer who created the session, so a browser
-      // that names itself never depends on having asked for a segment first.
-      // Client-requested target box (the orientation-independent ceiling). Kept
-      // for the session key and reference; the actual encode uses encodeWidth/
-      // encodeHeight, which the realtime budget may have downscaled below this.
-      targetWidth: normalizedTargetWidth,
-      targetHeight: normalizedTargetHeight,
-      // What this output is encoded AS — the box, the frame rate, the speed
-      // setting, the tone map — decided once for the output rather than once
-      // per session, because two sessions of one output must not be given
-      // different pictures on the strength of two different moments.
-      output,
-      // What the offer predicted this height would do on this machine, so the
-      // field can say what the prediction was worth once the step runs. Null
-      // when the step was never judged — a copied stream needs no encoder and
-      // is never predicted.
-      predictedSpeedWhenOffered: this.encodeCost.lastPredictedByHeight?.get(output.encodeHeight) ?? null,
-      lastPredictionRatio: null,
-      // The height a rung is addressed by: the height it produces, since a size
-      // produced exactly is exactly that. Derived from `encodeHeight` otherwise.
-      variantHeight: forceExactSize && height > 0
-        ? height
-        : undefined,
-      // Realtime-budget runtime state. The ladder that chose the STARTING rung
-      // is not kept: a step is a change of VARIANT now, and a variant is a
-      // session with its own init segment, so there is no per-session rung
-      // index to walk. What is kept is when this session last looked slow, when
-      // it last looked able, and when the family last acted.
-      budgetSlowSince: 0,
-      budgetLastActionAt: 0,
-      // A standing request to the player to move to another variant, or null.
-      // Kept on the family's BASE — it is the base's id the browser polls
-      // progress with, and the request outlives the rung that raised it.
-      qualityAsk: null,
-      // The last disagreement between the size a run encodes and the size the
-      // served init describes, so the same one is not repeated every run.
-      initSizeSaid: "",
-      // The window in which the machine has looked able to carry a HIGHER rung.
-      // The way back up, which for most of this project's life did not exist:
-      // `budgetRungIndex` was written in exactly one place, `+ 1`.
-      budgetUpSince: 0,
-      // The last speed read as a SLOPE between two progress reports, with the
-      // moment it was read. ffmpeg's own `speed=` is cumulative — output time
-      // over wall time since the run began — so a run starved early carries
-      // that average for the rest of its life, and a decision taken on it is
-      // taken on a figure that stopped being true. Measured 2026-08-21: a
-      // cumulative 0.39x bought a downshift on a run whose own progress lines
-      // showed 1.30x at that moment.
-      recentSpeed: null,
-      // A peak this encode must not exceed, in kbit/s of nominal rate, when the
-      // VIEWER's measured link is what cannot carry the stream. Null while
-      // nothing has measured a limit. It moves `-maxrate`/`-bufsize` and
-      // nothing else: they do not appear in the SPS, so one init segment goes
-      // on describing every fragment — which the picture's SIZE cannot do.
-      rateCapKbps: null,
-      // The latest link report of EACH viewer, keyed by consumer id
-      // ({ linkMbps, bufferedAheadSec, positionSeconds, at }), and the
-      // link-deficit slow window (mirrors budgetSlowSince for the CPU path).
-      //
-      // One per viewer rather than one per session, because a copied picture is
-      // shared: the session key carries the consumer id only where the video is
-      // re-encoded. A single field was whichever viewer reported last, so the
-      // budget could act on one viewer's link while the other was the one
-      // running dry, and the audio rendition's start subtracted one viewer's
-      // buffer from another viewer's read head.
-      /** @type {Map<string, { linkMbps: number, bufferedAheadSec: number, positionSeconds: number | null, at: number }>} */
-      // When this session last said what its cushion is (see #sayCushion).
-      cushionSaidAt: 0,
-      linkSlowSince: 0,
-      // The container this session produces. Per session, not per proxy: the
-      // viewer's browser decides, because it is the one that has to decode the
-      // result (see createOrGetSession).
-      segmentFormat,
-      // VOD playlist bookkeeping.
-      useSyntheticPlaylist: hasDuration,
-      // Segment start times (0-based). The source's real keyframes when this
-      // session is cut on that grid — always for copied video, and for a
-      // re-encoded variant of such a session — otherwise a uniform grid.
-      // Drives the playlist and seeking.
-      // The file's own table. `segmentBoundaries` and `publishedBoundaries`
-      // below are references into it, kept under their old names because every
-      // reader of them is asking the same question they always were: where is
-      // this file cut, and what was the player told.
-      // The file's own table: where it is cut, what the player was told,
-      // the container's keyframe index and how well it has matched. Every
-      // session of one file holds the same one, so a correction found by
-      // any of them is a correction for all — including sessions made
-      // afterwards, which used to inherit a copy taken at that moment.
       timeline,
-      // Which of the two it is, as a fact about the session rather than
-      // something re-derived from "is the video copied" at each call site. The
-      // two questions came apart the moment a re-encode had to be cut like a
-      // copy.
-      // Real source keyframe times (sorted seconds), or null when the probe
-      // failed/timed out. Used by #startEncodeRun to snap a source seek onto a
-      // KNOWN valid position instead of trusting the container's own on-the-fly
-      // seek at an arbitrary target — see the probe call above for why.
-      // How far those times may sit from the instants they name — nonzero only
-      // for AVI, which computes them from frame numbers.
-      // Which container the index came from, and how well it has held up. The
-      // cut times of a copied video ARE its index, and an index can be wrong —
-      // measured 2026-08-06, one claimed a keyframe four seconds from where the
-      // real ones were. Each produced segment states where it truly begins, so
-      // the comparison costs a subtraction on a piece that is already being
-      // read; this counts them so a session can report what it found. It is
-      // what decides whether a re-encoded rung can be cut on this same grid and
-      // spliced into the copy (roadmap item 28).
+      segmentFormat,
+      output,
+      useSyntheticPlaylist: hasDuration,
       playlistText: hasDuration ? mediaPlaylistText({ boundaries: publishedGrid, segmentFormat }) : "",
-      // The table AS PUBLISHED — what every playlist of this family states, and
-      // what every segment of it is stamped against. Inherited whole from the
-      // base when there is one, so a rung or a soundtrack created later
-      // publishes the same timeline as the picture it plays with; only a family
-      // with no base freezes a copy of its own.
-      //
-      // `segmentBoundaries` keeps being corrected from produced segments — that
-      // is what makes a re-encoded rung cut like the copy it joins — and those
-      // corrections deliberately do NOT reach this copy: the player's timeline
-      // was sent once and cannot be revised.
-      // Monotonic sequence of INCOMING segment requests (see #ensureEncodingFor
-      // and nextRequestSeq): a request is issued one number when it arrives and
-      // keeps it across all its long-poll iterations, so a burst of requests
-      // from one scrub cannot take turns steering the encoder.
-      // How wide the encoder's read window is, measured once for this output.
-      // Every run's input address is built from it (`encode/run-inputs.js`).
-      readWindowBytes,
-      requestSeqCounter: 0,
-      latestRequestSeq: 0,
-      // Bumped by every viewer seek; a held segment request that started under
-      // an older value gives up at once. See requestSeek.
-      waitEpoch: 0
-    };
+      variantHeight: forceExactSize && height > 0 ? height : undefined,
+      claims: isFamilyConsumerId(consumerId) ? [consumerId] : []
+    });
+    session.createEntryMs = createEntryMs;
+    session.readWindowBytes = readWindowBytes;
+    session.predictedSpeedWhenOffered = this.encodeCost.lastPredictedByHeight?.get(output.encodeHeight) ?? null;
     // The viewer who asked for this session, so a browser that names itself
     // never has to have requested a segment first for its own soundtrack choice
     // to be known — nor for its own POSITION to be known, which is the same

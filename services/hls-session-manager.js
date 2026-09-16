@@ -41,7 +41,6 @@ import { EncodeRun } from "./encode/EncodeRun.js";
 const PROXY_VERSION = createRequire(import.meta.url)("../package.json").version;
 import {
   softwareDescriptor,
-  pickSoftwarePreset,
   maxrateKbpsFor,
   nominalKbpsForHeight,
   nominalKbpsForMaxrate,
@@ -96,6 +95,7 @@ import { OutputRegistry } from "./output/OutputRegistry.js";
 import { variantHeightsFor } from "./output/ladder.js";
 import { EncodeOrchestrator } from "./encode/EncodeOrchestrator.js";
 import { encoderInputs } from "./encode/run-inputs.js";
+import { decideOutputFormat } from "./quality/output-format.js";
 import { wireMachineBudget } from "./storage/wire.js";
 import { IDLE_KEEP_MS } from "./storage/keep.js";
 import { Returns } from "./storage/returns.js";
@@ -1266,7 +1266,13 @@ export class HlsSessionManager {
     // keyframe times and which container they were read from. Present only for
     // a variant of a session cut at the source's keyframes, and it is what
     // makes the two interchangeable.
-    inheritedGrid = null
+    inheritedGrid = null,
+    // "manual" when the viewer chose this size by hand, "auto" when it is the
+    // automatic choice; left out, a size produced exactly counts as chosen by
+    // hand. Decides whether an output already here may serve them instead.
+    servingMode = null,
+    // What the requesting viewer's link measured, or null.
+    viewerLinkMbps = null
   }) {
     if (!this.enabled) {
       const error = new Error("Audio transcoding is disabled on this proxy.");
@@ -1639,68 +1645,49 @@ export class HlsSessionManager {
     const publishedGrid = timeline.published.length > 1 ? timeline.published : null;
     const segmentCount = timeline.segmentCount;
 
-    // THE FORMAT THIS OUTPUT PRODUCES, decided before it is named, because the
-    // name is the format (decided with the user 2026-09-16). A copy is the
-    // source's own picture. A re-encode is: which encoder, the size, the frame
-    // rate, the speed setting and whether HDR is tone mapped.
-    //
-    // A size produced exactly — every rung of a master — is the box asked for,
-    // fitted to the source; the budget chooses only the speed setting for it. A
-    // size left to the budget is the highest rung of the viewer's own ladder this
-    // machine holds, with the speed setting chosen for that rung. On a hardware
-    // encoder, or with no startup measurement, there is no ladder to choose from
-    // and the box asked for is produced.
-    const sourceDecode = file.decode;
-    const encodesPicture = transcodeVideo && carriesVideo;
-    const ceiling = encodesPicture
-      ? computeOutputDimensions(normalizedTargetWidth, normalizedTargetHeight, sourceWidth, sourceHeight)
-      : null;
-    const budget = encodesPicture && !forceExactSize
-      ? this.encodeCost.chooseEncodeBudget({
-          transcodeVideo,
-          targetWidth: normalizedTargetWidth,
-          targetHeight: normalizedTargetHeight,
-          sourceWidth,
-          sourceHeight,
-          outputFps,
-          source: sourceDecode,
-          requiredSpeed: this.#requiredSpeedFor(sourceKey, fileIndex)
-        })
-      : null;
-    const width = budget?.width ?? ceiling?.w ?? 0;
-    const height = budget?.height ?? ceiling?.h ?? 0;
-    const preset = budget
-      ? budget.preset
-      : encodesPicture && this.videoEncoder.kind === "software" && this.softwarePresetBenchmark && width > 0
-        ? pickSoftwarePreset(this.softwarePresetBenchmark, width * height * outputFps, {
-            decodeModel: this.decodeCostModel,
-            source: sourceDecode,
-            observedDecodeCostSec: this.encodeCost.decodeCostFor(SourceFiles.keyFor(sourceKey, fileIndex))?.costSec ?? null,
-            requiredSpeed: this.#requiredSpeedFor(sourceKey, fileIndex)
-          })
-        : null;
-    const spec = new OutputSpec({
-      sourceKey,
-      segmentFormatId: segmentFormat.id,
-      // Where it is ACTUALLY cut. A copy whose container states no keyframes
-      // is re-encoded onto the even grid, and is named so.
-      grid: new CutGrid({ kind: useKeyframeGrid ? "keyframe" : "uniform", fileIndex }),
-      video: carriesVideo
-        ? new VideoOutput({
-            fileIndex,
-            encode: transcodeVideo
-              ? { encoder: this.videoEncoder.name, width, height, fps: outputFps, preset, tonemap: applyTonemap }
-              : null
-          })
-        : null,
-      audio: carriesAudio
-        ? new AudioOutput({
-            fileIndex: audioSource.fileIndex,
-            trackIndex: audioSource.sourceTrackIndex,
-            transcode: transcodeAudio === true
-          })
-        : null
+    // THE FORMAT, decided before the output is named, and possibly an output
+    // already here instead (`quality/output-format.js`).
+    const decided = decideOutputFormat({
+      encodesPicture: transcodeVideo && carriesVideo,
+      exact: forceExactSize,
+      target: { width: normalizedTargetWidth, height: normalizedTargetHeight },
+      source: { width: sourceWidth, height: sourceHeight, megabitsPerSecond: file.decode?.megabitsPerSecond ?? null, decode: file.decode },
+      fps: outputFps,
+      encoder: this.videoEncoder,
+      benchmark: this.softwarePresetBenchmark,
+      cost: {
+        decodeModel: this.decodeCostModel,
+        observedDecodeCostSec: this.encodeCost.decodeCostFor(SourceFiles.keyFor(sourceKey, fileIndex))?.costSec ?? null,
+        requiredSpeed: this.#requiredSpeedFor(sourceKey, fileIndex)
+      },
+      chooseBudget: (params) => this.encodeCost.chooseEncodeBudget(params),
+      tonemap: applyTonemap,
+      specWith: (encode) => new OutputSpec({
+        sourceKey,
+        segmentFormatId: segmentFormat.id,
+        // Where it is ACTUALLY cut: a copy whose container states no keyframes
+        // is re-encoded onto the even grid, and is named so.
+        grid: new CutGrid({ kind: useKeyframeGrid ? "keyframe" : "uniform", fileIndex }),
+        video: carriesVideo ? new VideoOutput({ fileIndex, encode }) : null,
+        audio: carriesAudio
+          ? new AudioOutput({ fileIndex: audioSource.fileIndex, trackIndex: audioSource.sourceTrackIndex, transcode: transcodeAudio === true })
+          : null
+      }),
+      serving: {
+        mode: servingMode ?? (forceExactSize ? "manual" : "auto"),
+        linkMbps: viewerLinkMbps,
+        keys: [...this.outputsById.values()].map((other) => other.outputKey).concat(this.segmentStore.addresses()),
+        readyAt: (key) => this.segmentStore.isClosed(key, timeline.indexForTime(Math.max(0, startPositionSeconds)))
+      }
     });
+    const spec = decided.spec;
+    const budget = decided.budget;
+    if (decided.servedBy) {
+      logger.info(`transcode "${logName}": served by an output already here, ${decided.servedBy}, instead of ${decided.wantedKey}`);
+    }
+    transcodeVideo = carriesVideo ? spec.transcodesVideo : transcodeVideo;
+    const width = spec.video?.encode?.width ?? 0;
+    const height = spec.video?.encode?.height ?? 0;
     const outputKey = spec.toKey();
     // THE NAME FOLLOWS FROM THE KEY, so there is nothing to look it up in. A
     // second table held key → name, which is a fact that can go out of step
@@ -1778,8 +1765,8 @@ export class HlsSessionManager {
       encodeWidth: width,
       encodeHeight: height,
       outputFps,
-      softwarePreset: preset,
-      applyTonemap
+      softwarePreset: spec.video?.encode?.preset ?? null,
+      applyTonemap: spec.video?.encode?.tonemap === true
     });
 
     // Only now, when nothing above can still throw. Everything from the probe
@@ -1852,14 +1839,10 @@ export class HlsSessionManager {
       // is never predicted.
       predictedSpeedWhenOffered: this.encodeCost.lastPredictedByHeight?.get(output.encodeHeight) ?? null,
       lastPredictionRatio: null,
-      // The NAME of this rung, fixed at the height that was asked for. It is
-      // deliberately not the height being encoded: a viewer who picked 480p on
-      // a host that then starts them at 360p, or steps down to it later, goes
-      // on addressing the rung as 480p — and a request under the old name must
-      // not build a second session at a height this host has just refused.
-      // Derived from `encodeHeight` when nothing was named, as before.
-      variantHeight: forceExactSize && normalizedTargetHeight > 0
-        ? normalizedTargetHeight
+      // The height a rung is addressed by: the height it produces, since a size
+      // produced exactly is exactly that. Derived from `encodeHeight` otherwise.
+      variantHeight: forceExactSize && height > 0
+        ? height
         : undefined,
       // Realtime-budget runtime state. The ladder that chose the STARTING rung
       // is not kept: a step is a change of VARIANT now, and a variant is a
@@ -5860,6 +5843,11 @@ export class HlsSessionManager {
       // and the choice between them would mean nothing. True of EVERY rung,
       // including one the player moved itself onto.
       exactSize: true,
+      // Whose request this is decides whether an output already here may serve
+      // it: a size picked by hand is served exactly, the automatic choice by the
+      // quality rules. A viewer whose page does not say is taken as picking.
+      servingMode: viewersOf(base).get(consumerId)?.qualityMode ?? "manual",
+      viewerLinkMbps: viewersOf(base).get(consumerId)?.netReport?.linkMbps ?? null,
       // A rung of a session whose audio is published separately carries no
       // audio either — every rung of one master must agree about that, or
       // switching rung would start or stop a second copy of the same track.
@@ -5904,17 +5892,26 @@ export class HlsSessionManager {
           );
           return null;
         }
+        // Served by the picture itself, which does not become a step.
+        if (variant === base) {
+          return base;
+        }
         const incumbent = await this.#adoptIfAlreadyProduced(base, height, variant);
         if (incumbent) {
           base.file.stepHeights.set(height, this.liveOutputs.producedHeightOf(incumbent));
           return incumbent;
         }
-        variant.variantHeight = height;
+        // A step at its own height. A stand-in of another height chosen for this
+        // viewer is not remembered as the answer for the height asked for.
+        const produced = this.liveOutputs.producedHeightOf(variant);
+        variant.variantHeight ??= produced > 0 ? produced : height;
         // How it came to be: a step of a picture, not a picture a browser
         // opened. Read where a step needs the facts of the file rather than of
         // its own encode.
         variant.isStep = true;
-        base.file.stepHeights.set(height, this.liveOutputs.producedHeightOf(variant));
+        if (produced === height) {
+          base.file.stepHeights.set(height, produced);
+        }
         return variant;
       })
       .finally(() => {

@@ -1,37 +1,121 @@
 /**
- * @file Which outputs of one file exist right now, and what each of them is.
+ * @file The one catalog of the outputs that exist, and every question about
+ * them.
  *
- * Every question here is answered by walking the live outputs and looking at
- * what they ARE — the same file, a step, a soundtrack, this height — and not by
- * following a list of ids anybody keeps. A list of ids is a link between
- * outputs: it ties their lifetimes together, it goes stale when one of them is
- * disposed, and it has to be cleaned from the other side. What an output is is
- * enough to find it, which is the rule `OutputSpec` exists for.
+ * It replaces two classes that held two views of one collection: a registry of
+ * the live outputs and their entry times, and a set of queries walking that
+ * same registry — which outputs belong to one file, which is the picture and
+ * which are its steps and soundtracks, what a step's height is. An output is
+ * found by what it IS, never by a list of ids somebody keeps.
  *
- * Nothing here writes anything except the two answers an output memoizes about
- * itself, and nothing here knows about encoders, viewers, the torrent or the
- * disk. It is the layer the quality budget and the serving path both stand on,
- * and it is separated first for that reason.
+ * Presence is the only statement that an output exists. Creation and access
+ * times describe the catalog entry, not the media, the viewer or the encoder,
+ * so they are kept here and never copied onto the output. What has been
+ * produced is not here either: that is the segment store's, and which runs are
+ * going is the encoding orchestrator's.
  */
 
 import { variantHeightsFor } from "./ladder.js";
 
 import { masterRateArgs } from "./rates.js";
 
-export class LiveOutputs {
+export class OutputCatalog {
+  #byId = new Map();
+  #lifetime = new Map();
+  #now;
+
   /**
-   * @param {object} params
-   * @param {{ values: () => IterableIterator<object> }} params.outputsById - The live outputs. Read,
-   *   never written.
+   * @param {object} [params]
+   * @param {() => number} [params.now]
+   * @param {(output: object) => number} [params.fileLengthOf] - How many bytes a
+   *   source file is, which the torrent reports.
+   * @param {(address: string) => { index: number, size: number }} [params.largestPieceOf]
+   *   The biggest piece an output has made, which the disk knows.
    */
-  constructor({ outputsById, fileLengthOf = () => 0, largestPieceOf = () => ({ index: -1, size: 0 }) }) {
-    this.outputsById = outputsById;
-    // Two facts this layer needs and does not own: how many bytes a source file
-    // is, which the torrent reports, and the biggest piece an output has made,
-    // which the disk knows. Taken as plain functions, so nothing of either layer
-    // is held here.
+  constructor({ now = Date.now, fileLengthOf = () => 0, largestPieceOf = () => ({ index: -1, size: 0 }) } = {}) {
+    this.#now = now;
+    // Two facts this catalog needs and does not own, taken as plain functions
+    // so nothing of either layer is held here.
     this.fileLengthOf = fileLengthOf;
     this.largestPieceOf = largestPieceOf;
+  }
+
+  set(id, output) {
+    const known = this.#byId.get(id);
+    this.#byId.set(id, output);
+    if (known !== output) {
+      const at = this.#now();
+      this.#lifetime.set(id, { startedAt: at, lastAccessedAt: at });
+    }
+    return this;
+  }
+
+  get(id) {
+    return this.#byId.get(id);
+  }
+
+  has(id) {
+    return this.#byId.has(id);
+  }
+
+  delete(id) {
+    this.#lifetime.delete(id);
+    return this.#byId.delete(id);
+  }
+
+  clear() {
+    this.#lifetime.clear();
+    this.#byId.clear();
+  }
+
+  touch(outputOrId, at = this.#now()) {
+    const id = typeof outputOrId === "string" ? outputOrId : outputOrId?.id;
+    const lifetime = this.#lifetime.get(id);
+    if (!lifetime || !Number.isFinite(at)) {
+      return false;
+    }
+    lifetime.lastAccessedAt = at;
+    return true;
+  }
+
+  startedAt(outputOrId) {
+    const id = typeof outputOrId === "string" ? outputOrId : outputOrId?.id;
+    return this.#lifetime.get(id)?.startedAt ?? null;
+  }
+
+  lastAccessedAt(outputOrId) {
+    const id = typeof outputOrId === "string" ? outputOrId : outputOrId?.id;
+    return this.#lifetime.get(id)?.lastAccessedAt ?? null;
+  }
+
+  expiredBefore(cutoff) {
+    const ids = [];
+    for (const [id, lifetime] of this.#lifetime) {
+      if (lifetime.lastAccessedAt < cutoff) {
+        ids.push(id);
+      }
+    }
+    return ids;
+  }
+
+  keys() {
+    return this.#byId.keys();
+  }
+
+  values() {
+    return this.#byId.values();
+  }
+
+  entries() {
+    return this.#byId.entries();
+  }
+
+  get size() {
+    return this.#byId.size;
+  }
+
+  [Symbol.iterator]() {
+    return this.#byId[Symbol.iterator]();
   }
 
   /**
@@ -46,7 +130,7 @@ export class LiveOutputs {
    */
   outputsOn(address) {
     const found = [];
-    for (const session of this.outputsById.values()) {
+    for (const session of this.values()) {
       if (session.outputKey === address) {
         found.push(session);
       }
@@ -69,7 +153,7 @@ export class LiveOutputs {
   familyOf(session) {
     const family = [session];
     const key = session?.file?.key;
-    for (const other of this.outputsById.values()) {
+    for (const other of this.values()) {
       if (other === session || other.file?.key !== key) {
         continue;
       }
@@ -309,5 +393,4 @@ export class LiveOutputs {
       })
     };
   }
-
 }

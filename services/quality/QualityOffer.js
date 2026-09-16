@@ -19,7 +19,7 @@
  * this file's own supply demands, and the megabytes a second it moves.
  *
  * What it is handed, and why each is passed rather than reached for: the
- * arithmetic (`EncodeCost`), which sessions belong to one file (`liveOutputs`),
+ * arithmetic (`EncodeCost`), which sessions belong to one file (`outputs`),
  * which heights a live viewer has on screen — a list of numbers, so the viewer
  * layer does not travel — and what the swarm is doing with this file, as three
  * readings. None of it needs a session manager, a torrent or a disk.
@@ -33,7 +33,7 @@ import { sourceDecodeCharacteristics } from "../source/SourceFile.js";
 
 export class QualityOffer {
   #cost;
-  #liveOutputs;
+  #outputs;
   #heightsOnScreen;
   #supplyFor;
   #stateFor;
@@ -41,7 +41,7 @@ export class QualityOffer {
   /**
    * @param {{
    *   encodeCost: import("./EncodeCost.js").EncodeCost,
-   *   liveOutputs: import("../output/LiveOutputs.js").LiveOutputs,
+   *   outputs: import("../output/OutputCatalog.js").OutputCatalog,
    *   heightsOnScreen: (owner: object) => number[],
    *   supplyFor: (file: object) => { requiredSpeed: number | null, megabytesPerSecond: number | null, costPerMegabyte: number | null },
  *   stateFor: (output: object) => string
@@ -49,13 +49,13 @@ export class QualityOffer {
    */
   constructor({
     encodeCost,
-    liveOutputs,
+    outputs,
     heightsOnScreen = () => [],
     supplyFor = () => ({ requiredSpeed: null, megabytesPerSecond: null, costPerMegabyte: null }),
     stateFor
   }) {
     this.#cost = encodeCost;
-    this.#liveOutputs = liveOutputs;
+    this.#outputs = outputs;
     // WHICH HEIGHTS A LIVE VIEWER HAS ON SCREEN. A height is never withdrawn
     // while somebody is watching it — their next segment would 404 on a stream
     // that is playing — and who is watching what belongs to the viewer layer,
@@ -97,7 +97,7 @@ export class QualityOffer {
     // Answered ON the base, never recursively: the family is one level deep by
     // construction, and a cycle between a picture and its steps would otherwise blow the stack on
     // the path that serves every playlist, init and segment.
-    const owner = this.#liveOutputs.pictureOf(session);
+    const owner = this.#outputs.pictureOf(session);
     // Settled once per session, and re-settled when this file's own decode cost
     // is measured or improves, or when the viewer moves to another rung — the
     // rung on screen is exempt from refusal, so it is an INPUT to this list and
@@ -124,11 +124,11 @@ export class QualityOffer {
     // The soundtrack's price is an input too, and so is how many encoders of
     // this family are running: both move the answer, and an answer cached
     // across them is the stale menu this key exists to prevent.
-    const audioVersion = [...this.#liveOutputs.familyOf(owner)]
+    const audioVersion = [...this.#outputs.familyOf(owner)]
       .filter((member) => member.spec.carries === "audio-only")
       .map((member) => this.#cost.audioVersionFor(member))
       .reduce((total, one) => total + one, 0);
-    const running = [...this.#liveOutputs.familyOf(owner)]
+    const running = [...this.#outputs.familyOf(owner)]
       .filter((member) => processCanBeSignalled(this.#stateFor(member))).length;
     // What each running encode was last seen doing, which is BOTH an input to
     // the answer twice over — it withdraws a step measured below realtime, and
@@ -146,7 +146,7 @@ export class QualityOffer {
     // which is exactly the band a step spends its time in when the host is
     // marginal. The flag carries the crossing, the rounded cost carries the
     // rest.
-    const measured = this.#liveOutputs.familyOf(owner)
+    const measured = this.#outputs.familyOf(owner)
       .map((member) => {
         const speed = member.lastAloneSpeed;
         if (!Number.isFinite(speed) || !(speed > 0)) {
@@ -171,7 +171,7 @@ export class QualityOffer {
       return owner.offeredHeightsCache;
     }
     const heights = new Set(variantHeightsFor(Number(owner.file.height) || 0));
-    const own = this.#liveOutputs.variantHeightOf(owner);
+    const own = this.#outputs.variantHeightOf(owner);
     if (own > 0) {
       heights.add(own);
     }

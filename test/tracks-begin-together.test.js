@@ -89,8 +89,8 @@ function familyAtBoundaryTwo() {
   const soundRun = startRunOn(sound, { from: 2 });
   manager.encodeOrchestrator.adopt(picture.outputKey, pictureRun);
   manager.encodeOrchestrator.adopt(sound.outputKey, soundRun);
-  manager.outputsById.set("picture", picture);
-  manager.outputsById.set("sound", sound);
+  manager.outputs.set("picture", picture);
+  manager.outputs.set("sound", sound);
 
   return { manager, picture, sound };
 }

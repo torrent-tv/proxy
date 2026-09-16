@@ -89,7 +89,7 @@ function seedOneSession(manager) {
     // out the warm-up deadline and would be measuring that timer.
     useSyntheticPlaylist: true
   };
-  manager.outputsById.set(session.id, session);
+  manager.outputs.set(session.id, session);
   return session;
 }
 
@@ -184,8 +184,8 @@ test("two screens that come to the same format share one output, and a different
     audio: new AudioOutput({ fileIndex: 0, trackIndex: 0, transcode: false })
   });
   const seeded = { ...seedOneSession(manager), id: spec.toName(), spec, timeline: new Timeline({ boundaries: [0, 4, 8], cutGrid: "uniform" }) };
-  manager.outputsById.delete(nameOfThatOutput());
-  manager.outputsById.set(seeded.id, seeded);
+  manager.outputs.delete(nameOfThatOutput());
+  manager.outputs.set(seeded.id, seeded);
 
   // A taller window than the film: fitted to the source it is the same 1920x1080.
   const joined = await manager.createOrGetSession(

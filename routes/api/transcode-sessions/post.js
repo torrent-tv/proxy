@@ -96,7 +96,7 @@ export async function handleApiTranscodeSessionsPost(req, reply, { hlsSessionMan
             // the player to it, so loading the master costs nothing: an encoder
             // is already producing that height, and any other rung would be a
             // second cold start before the first frame.
-            variantHeight: hlsSessionManager.liveOutputs.variantHeightOf(session)
+            variantHeight: hlsSessionManager.outputs.variantHeightOf(session)
           }
         : {}),
       // The heights this host will actually serve this file at, largest first

@@ -3,7 +3,7 @@
  *
  * A fact about an output and about nothing else: it takes a source height and
  * answers with heights. What the machine can afford of them is the quality
- * budget's question, and what a player may splice between is `LiveOutputs`.
+ * budget's question, and what a player may splice between is `OutputCatalog`.
  */
 
 /**

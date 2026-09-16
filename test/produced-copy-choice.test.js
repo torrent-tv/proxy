@@ -156,7 +156,7 @@ async function sessionOnOneDirectory() {
     firstSegmentLogged: false,
     waitEpoch: 0
   };
-  manager.outputsById.set(SESSION_ID, session);
+  manager.outputs.set(SESSION_ID, session);
   // A run exists and is alive — the state the field case was in, and the one in
   // which the old test called every leftover "still being written".
   startRunOn(session, { from: 0, usesExplicitCuts: true });

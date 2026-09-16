@@ -55,7 +55,7 @@ function hostWithA1080pOutput(t) {
     claims: new Set(),
     useSyntheticPlaylist: true
   };
-  manager.outputsById.set(made.id, made);
+  manager.outputs.set(made.id, made);
   return { manager, made };
 }
 

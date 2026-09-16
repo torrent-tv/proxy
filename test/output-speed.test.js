@@ -10,7 +10,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { EncodeCost } from "../services/quality/EncodeCost.js";
-import { LiveOutputs } from "../services/output/LiveOutputs.js";
+import { OutputCatalog } from "../services/output/OutputCatalog.js";
 import { outputSpec } from "./helpers/output-spec.js";
 
 const PICTURE = "torrent:abc:fmt=fmp4:grid=kf@0:video-only:v=0/copy";
@@ -20,12 +20,13 @@ const PICTURE = "torrent:abc:fmt=fmp4:grid=kf@0:video-only:v=0/copy";
  * @param {{ copySpeedX?: number | null, benchmark?: object[] | null }} host
  */
 function costOf(sessions, host = {}) {
-  const outputsById = new Map(sessions.map((session, index) => [String(index), session]));
+  const outputs = new OutputCatalog();
+  sessions.forEach((session, index) => outputs.set(String(index), session));
   return new EncodeCost({
     runsFor: () => [],
     stateFor: () => "IDLE",
     progressFor: () => null,
-    liveOutputs: new LiveOutputs({ outputsById }),
+    outputs,
     host: () => ({
       benchmark: host.benchmark ?? null,
       decodeModel: null,

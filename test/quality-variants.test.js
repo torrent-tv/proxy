@@ -116,7 +116,7 @@ async function managerWithBase() {
   // 812p is what a viewport-sized budget actually produces — deliberately not a
   // ladder rung, because that is the case the master has to carry.
   const base = fakeSession({ id: BASE_ID, encodeHeight: 812, dirPath });
-  manager.outputsById.set(BASE_ID, base);
+  manager.outputs.set(BASE_ID, base);
   return { manager, base, dirPath };
 }
 
@@ -298,7 +298,7 @@ test("a segment request hands the encoder to the variant the viewer moved to", a
   variant.variantHeight = 540;
   // A step of the picture: made as one, same file, and a height of its own.
   variant.isStep = true;
-  manager.outputsById.set(VARIANT_ID, variant);
+  manager.outputs.set(VARIANT_ID, variant);
   base.file.stepHeights.set(540, 540);
   // The viewer is a hundred seconds in, and the base is the one encoding.
   base.lastRequestedSegment = 25;
@@ -319,12 +319,12 @@ test("a segment request hands the encoder to the variant the viewer moved to", a
   // handed the whole film's priority map — started it again on the very next
   // pass, which this viewer's own move had just triggered.
   assert.equal(
-    manager.liveOutputs.supersededBy(base, viewerOf(base, "").activeVariantId),
+    manager.outputs.supersededBy(base, viewerOf(base, "").activeVariantId),
     true,
     "the picture they stepped off is nobody's now"
   );
   assert.equal(
-    manager.liveOutputs.supersededBy(variant, viewerOf(variant, "").activeVariantId),
+    manager.outputs.supersededBy(variant, viewerOf(variant, "").activeVariantId),
     false,
     "and the rung they moved to is theirs"
   );
@@ -341,7 +341,7 @@ test("a rung is placed where the player asked it for, not where the other rung h
   variant.variantHeight = 540;
   // A step of the picture: made as one, same file, and a height of its own.
   variant.isStep = true;
-  manager.outputsById.set(VARIANT_ID, variant);
+  manager.outputs.set(VARIANT_ID, variant);
   base.file.stepHeights.set(540, 540);
   startManagedRun(manager, base, { process: fakeEncoder() });
   // The rung being left had read fourteen segments further than the picture had
@@ -371,7 +371,7 @@ test("warming a rung prepares it without taking the encoder from the one on scre
   variant.variantHeight = 540;
   // A step of the picture: made as one, same file, and a height of its own.
   variant.isStep = true;
-  manager.outputsById.set(VARIANT_ID, variant);
+  manager.outputs.set(VARIANT_ID, variant);
   base.file.stepHeights.set(540, 540);
   const encoder = fakeEncoder();
   startManagedRun(manager, base, { process: encoder });
@@ -403,7 +403,7 @@ test("a rung warmed at the playhead survives the switch that lands just ahead of
   variant.variantHeight = 540;
   // A step of the picture: made as one, same file, and a height of its own.
   variant.isStep = true;
-  manager.outputsById.set(VARIANT_ID, variant);
+  manager.outputs.set(VARIANT_ID, variant);
   base.file.stepHeights.set(540, 540);
   startManagedRun(manager, base, { process: fakeEncoder() });
   // Warmed AT THE PLAYHEAD (240 s = segment #60), which is what the browser
@@ -443,7 +443,7 @@ test("a rung warmed PAST the switch is repositioned, which is what warming late 
   variant.variantHeight = 540;
   // A step of the picture: made as one, same file, and a height of its own.
   variant.isStep = true;
-  manager.outputsById.set(VARIANT_ID, variant);
+  manager.outputs.set(VARIANT_ID, variant);
   base.file.stepHeights.set(540, 540);
   startManagedRun(manager, base, { process: fakeEncoder() });
   // The same session, warmed where the BUFFER ended rather than where the
@@ -476,7 +476,7 @@ test("the rung on screen fetching its own segments does not cancel a warm-up", a
   variant.variantHeight = 540;
   // A step of the picture: made as one, same file, and a height of its own.
   variant.isStep = true;
-  manager.outputsById.set(VARIANT_ID, variant);
+  manager.outputs.set(VARIANT_ID, variant);
   base.file.stepHeights.set(540, 540);
   const warmedEncoder = fakeEncoder();
   startManagedRun(manager, variant, { process: warmedEncoder });
@@ -513,7 +513,7 @@ test("warming the height the base itself serves still points it at the switch", 
   // its encoder stopped. Warming its height must bring it back.
   const variant = fakeSession({ id: VARIANT_ID, encodeHeight: 540, dirPath });
   variant.variantHeight = 540;
-  manager.outputsById.set(VARIANT_ID, variant);
+  manager.outputs.set(VARIANT_ID, variant);
   base.file.stepHeights.set(540, 540);
   viewerOf(base, "").activeVariantId = VARIANT_ID;
   base.runs = new Set();
@@ -555,7 +555,7 @@ test("a playlist or an init segment does not move the encoder", async (t) => {
     await rm(dirPath, { recursive: true, force: true });
   });
   const variant = fakeSession({ id: VARIANT_ID, encodeHeight: 540, dirPath });
-  manager.outputsById.set(VARIANT_ID, variant);
+  manager.outputs.set(VARIANT_ID, variant);
   base.file.stepHeights.set(540, 540);
   startManagedRun(manager, base, { process: fakeEncoder() });
   manager.planEncodersSoon = () => {};
@@ -582,11 +582,11 @@ test("the name of a variant is fixed, whatever its encode is later set to", asyn
   // the proxy changes `encodeHeight` mid-session any more — a change of size is
   // a change of variant now — but the name and the encode are still two
   // different things, and the addressing depends on their staying so.
-  assert.equal(manager.liveOutputs.variantHeightOf(base), 812);
+  assert.equal(manager.outputs.variantHeightOf(base), 812);
   base.encodeHeight = 540;
 
   assert.equal(
-    manager.liveOutputs.variantHeightOf(base),
+    manager.outputs.variantHeightOf(base),
     812,
     "the name stays; renaming it would leave the player addressing a variant nobody answers for"
   );
@@ -754,7 +754,7 @@ test("a rung served by copy stays offered while a re-encoded rung is on screen",
   watching.file = base.file;
   // A step of the picture: same file, and made as a step.
   watching.isStep = true;
-  manager.outputsById.set(VARIANT_ID, watching);
+  manager.outputs.set(VARIANT_ID, watching);
   base.file.stepHeights.set(240, 240);
   viewerOf(base, "").activeVariantId = VARIANT_ID;
 
@@ -901,7 +901,7 @@ test("an audio track is prepared at the position the switch will land on", async
   // what it is — there is no list of ids to put it on.
   rendition.file = base.file;
   startManagedRun(manager, rendition, { process: fakeEncoder() });
-  manager.outputsById.set(rendition.id, rendition);
+  manager.outputs.set(rendition.id, rendition);
 
   const prepared = await manager.prepareAudioTrack(BASE_ID, 1, 240);
 
@@ -969,8 +969,8 @@ test("a quality step being warmed is not refused by its own cost", async (t) => 
   // i.e. half a second of work per second of video.
   startManagedRun(manager, warming, { process: fakeEncoder() });
   warming.lastAloneSpeed = 2;
-  manager.outputsById.set(BASE_ID, base);
-  manager.outputsById.set(VARIANT_ID, warming);
+  manager.outputs.set(BASE_ID, base);
+  manager.outputs.set(VARIANT_ID, warming);
 
   const offered = manager.offeredHeights(base);
 
@@ -1002,7 +1002,7 @@ test("the master survives a live offer that has collapsed to one rung", async (t
   // What this file's own reader measured: a step must run at eight times
   // realtime to survive this swarm.
   base.supplyFigures = { requiredSpeed: 8 };
-  manager.outputsById.set(BASE_ID, base);
+  manager.outputs.set(BASE_ID, base);
   t.after(async () => {
     await manager.disposeAll();
     await rm(dirPath, { recursive: true, force: true });
@@ -1047,7 +1047,7 @@ test("two heights that clamp onto one picture share a single encoder", async (t)
     spawnedDirs.push(variantDir);
     const variant = fakeSession({ id, encodeHeight: 240, dirPath: variantDir });
     variant.claims = new Set([params.consumerId]);
-    manager.outputsById.set(id, variant);
+    manager.outputs.set(id, variant);
     return variant;
   };
 
@@ -1061,7 +1061,7 @@ test("two heights that clamp onto one picture share a single encoder", async (t)
     "and the second is served by it, because it produces the very same picture"
   );
   assert.equal(
-    manager.outputsById.has(SECOND_VARIANT_ID),
+    manager.outputs.has(SECOND_VARIANT_ID),
     false,
     "the duplicate was let go as soon as its size was known"
   );
@@ -1098,7 +1098,7 @@ test("rungs that really do differ keep their own encoders", async (t) => {
     spawnedDirs.push(variantDir);
     const variant = fakeSession({ id, encodeHeight: params.targetHeight, dirPath: variantDir });
     variant.claims = new Set([params.consumerId]);
-    manager.outputsById.set(id, variant);
+    manager.outputs.set(id, variant);
     return variant;
   };
 
@@ -1134,7 +1134,7 @@ test("a rung is never served from the COPY, whatever height the copy happens to 
     spawnedDirs.push(variantDir);
     const variant = fakeSession({ id: VARIANT_ID, encodeHeight: 240, dirPath: variantDir });
     variant.claims = new Set([params.consumerId]);
-    manager.outputsById.set(VARIANT_ID, variant);
+    manager.outputs.set(VARIANT_ID, variant);
     return variant;
   };
 

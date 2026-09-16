@@ -90,7 +90,7 @@ test("a run that ended is still recognised as the session's own", (t) => {
     localPort: 9090
   });
   const { session, run } = sessionWithARun(dirPath);
-  manager.outputsById.set(SESSION_ID, session);
+  manager.outputs.set(SESSION_ID, session);
   manager.encodeOrchestrator.adopt(session.outputKey, run);
 
   manager.noteRunEnded(session, run, failedFast(run, 0));
@@ -117,7 +117,7 @@ test("the count runs at segment 0, which is where a first start happens", (t) =>
     localPort: 9090
   });
   const { session } = sessionWithARun(dirPath);
-  manager.outputsById.set(SESSION_ID, session);
+  manager.outputs.set(SESSION_ID, session);
 
   for (let attempt = 1; attempt <= 3; attempt += 1) {
     const run = { from: 0, to: -1, argsDescribed: "ffmpeg …" };
@@ -139,7 +139,7 @@ test("real work resets the count, so a transient failure is not permanent", (t) 
     localPort: 9090
   });
   const { session } = sessionWithARun(dirPath);
-  manager.outputsById.set(SESSION_ID, session);
+  manager.outputs.set(SESSION_ID, session);
 
   const quick = { from: 0, to: -1 };
   manager.encodeOrchestrator.adopt(session.outputKey, quick);
@@ -165,7 +165,7 @@ test("a failure belongs to the output it happened on, not to the next output of 
   });
   t.after(() => manager.disposeAll());
   const { session } = sessionWithARun(dirPath);
-  manager.outputsById.set(SESSION_ID, session);
+  manager.outputs.set(SESSION_ID, session);
   for (let attempt = 1; attempt <= 3; attempt += 1) {
     const run = { from: 0, to: -1, argsDescribed: "ffmpeg …" };
     manager.encodeOrchestrator.adopt(session.outputKey, run);

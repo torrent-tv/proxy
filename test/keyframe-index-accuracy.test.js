@@ -155,8 +155,8 @@ test("a boundary the index got wrong is replaced by the time the file really has
     isStep: true
   };
   base.file.stepHeights.set(540, 540);
-  manager.outputsById.set(base.id, base);
-  manager.outputsById.set(rung.id, rung);
+  manager.outputs.set(base.id, base);
+  manager.outputs.set(rung.id, rung);
 
   // The copy produced segment #2, and it really begins at 17.4 s — the index
   // said 20. This is the shape reproduced from the field on 2026-08-12.

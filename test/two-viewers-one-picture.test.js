@@ -159,7 +159,7 @@ async function pictureWithTwoViewers() {
   viewerOf(base, SECOND).position = { segment: 3, seconds: 12, at: Date.now() };
   viewerOf(base, FIRST).audio = { trackIndex: 0, transcode: true };
   viewerOf(base, SECOND).audio = { trackIndex: 1, transcode: true };
-  manager.outputsById.set(BASE_ID, base);
+  manager.outputs.set(BASE_ID, base);
   manager.getCachedAudioTracks = () => [
     { index: 0, language: "rus", title: "Дубляж", isDefault: true, fileIndex: 0, sourceTrackIndex: 0 },
     { index: 1, language: "eng", title: "", isDefault: false, fileIndex: 0, sourceTrackIndex: 1 }
@@ -183,7 +183,7 @@ async function pictureWithTwoViewers() {
     });
     rendition.id = rendition.spec.toName();
     startManagedRun(manager, rendition, { process: fakeEncoder() });
-    manager.outputsById.set(rendition.id, rendition);
+    manager.outputs.set(rendition.id, rendition);
     renditions.set(key, rendition);
     return rendition;
   };
@@ -301,7 +301,7 @@ test("one viewer changing quality does not take the other off their step", async
     variant.isStep = true;
     variant.file = base.file;
     startManagedRun(manager, variant, { process: fakeEncoder() });
-    manager.outputsById.set(variant.id, variant);
+    manager.outputs.set(variant.id, variant);
     variants.set(height, variant);
     return variant;
   };
@@ -350,7 +350,7 @@ test("a step somebody is watching is never withdrawn from the offer", async (t) 
   variant.file = base.file;
   variant.isStep = true;
   variant.file = base.file;
-  manager.outputsById.set(variant.id, variant);
+  manager.outputs.set(variant.id, variant);
   base.file.stepHeights.set(720, 720);
 
   // Nobody on it: measured below realtime, it is withdrawn. This half is the

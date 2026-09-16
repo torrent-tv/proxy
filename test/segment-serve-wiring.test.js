@@ -203,7 +203,7 @@ async function managerWithReadySegment(overrides = {}) {
     firstSegmentLogged: false,
     waitEpoch: 0
   };
-  manager.outputsById.set(SESSION_ID, session);
+  manager.outputs.set(SESSION_ID, session);
   // SOMEBODY IS WATCHING IT. A segment is requested by a viewer, so a fixture
   // that asks for one without stating a viewer describes a state production
   // never reaches — and an output nobody is watching has every encoder on it

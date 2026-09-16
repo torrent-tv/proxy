@@ -79,7 +79,7 @@ test("a session is handed to the plan as the run it is", (t) => {
   t.after(() => rmSync(root, { recursive: true, force: true }));
 
   const session = sessionOn({ manager, id: "one", dirPath, encodeStartIndex: 10, runEndIndex: 40 });
-  manager.outputsById.set(session.id, session);
+  manager.outputs.set(session.id, session);
   viewerOf(session, "watching").position = { segment: 12, seconds: 48, at: Date.now() };
 
   manager.runQualityBudgetOnce;
@@ -97,7 +97,7 @@ test("what a viewer waits for reaches the plan without their name", (t) => {
   t.after(() => rmSync(root, { recursive: true, force: true }));
 
   const session = sessionOn({ manager, id: "one", dirPath, encodeStartIndex: 0, runEndIndex: -1 });
-  manager.outputsById.set(session.id, session);
+  manager.outputs.set(session.id, session);
   viewerOf(session, "someone").position = { segment: 5, seconds: 20, at: Date.now() };
 
   manager.planEncodersNow();
@@ -117,7 +117,7 @@ test("a viewer who has gone stops being waited for, and silence alone never coun
   t.after(() => rmSync(root, { recursive: true, force: true }));
 
   const session = sessionOn({ manager, id: "one", dirPath });
-  manager.outputsById.set(session.id, session);
+  manager.outputs.set(session.id, session);
   const person = viewerOf(session, "gone");
   person.moveTo(20, Date.now() - 10 * 60 * 1000);
   person.playing = false;
@@ -141,7 +141,7 @@ test("a viewer who has arrived and asked for nothing is waited for", (t) => {
   t.after(() => rmSync(root, { recursive: true, force: true }));
 
   const session = sessionOn({ manager, id: "one", dirPath });
-  manager.outputsById.set(session.id, session);
+  manager.outputs.set(session.id, session);
   // Nothing places them here on purpose: this is a viewer known to the output
   // and nothing more, which is what a viewer IS between arriving and asking
   // for their first file. Answered from the position alone, this viewer read
@@ -164,7 +164,7 @@ test("how many encoders the machine affords is measured, not chosen", (t) => {
 
   // Nothing measured yet: one is what it has.
   const cold = sessionOn({ manager, id: "cold", dirPath });
-  manager.outputsById.set(cold.id, cold);
+  manager.outputs.set(cold.id, cold);
   assert.equal(manager.maxRunsForOutput(KEY), 1);
 
   // Fast, but what a second job costs on THIS machine has not been measured,
@@ -192,7 +192,7 @@ test("segments already made are known to the plan, whoever made them", (t) => {
     writeFileSync(path.join(dirPath, fmp4Format.segmentFileName(index)), Buffer.alloc(16, 1));
   }
   const session = sessionOn({ manager, id: "one", dirPath });
-  manager.outputsById.set(session.id, session);
+  manager.outputs.set(session.id, session);
 
   manager.planEncodersNow();
 

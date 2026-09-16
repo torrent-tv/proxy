@@ -132,7 +132,7 @@ async function managerWithSession({ transcodeVideo = true, cutGrid } = {}) {
   });
   const session = fakeSession({ dirPath, transcodeVideo, cutGrid });
   session.outputKey = outputKey;
-  manager.outputsById.set(BASE_ID, session);
+  manager.outputs.set(BASE_ID, session);
   const run = startRunOn(session, { process: fakeEncoder() });
   manager.encodeOrchestrator.adopt(outputKey, run);
   return { manager, session, dirPath };
@@ -370,7 +370,7 @@ test("a reading stops counting when the person leaves, not when it gets old", as
   gone.report({ linkMbps: 1.0, bufferedAheadSec: 1.5, positionSeconds: 40, playing: true }, Date.now() - 120_000);
   gone.gone = true;
   recordViewerReport({
-    outputs: manager.outputsById,
+    outputs: manager.outputs,
     viewers: manager.viewers,
     sessionId: session.id,
     report: { linkMbps: 80, bufferedAheadSec: 60, consumerId: "here", positionSeconds: 40 }
@@ -484,7 +484,7 @@ test("a height this machine has been MEASURED failing at is not what the way bac
 
   const offered = manager.offeredHeights(session);
 
-  assert.ok(!offered.includes(720) || manager.liveOutputs.variantHeightOf(session) === 720);
+  assert.ok(!offered.includes(720) || manager.outputs.variantHeightOf(session) === 720);
   // Now on the 480p variant: 720p has a reading of its own and must be gone.
   session.variantHeight = 480;
   session.encodeHeight = 480;
@@ -532,7 +532,7 @@ test("a request is answered when the viewers watching are on that height, whoeve
   const stepId = "aaaaaaaabbbbdddd";
   const step = { ...fakeSession({ dirPath }), id: stepId, isStep: true, variantHeight: 480 };
   step.outputKey = `${session.outputKey}:step480`;
-  manager.outputsById.set(stepId, step);
+  manager.outputs.set(stepId, step);
   manager.viewers.of(session, "alice").activeVariantId = stepId;
 
   session.qualityAsk = { height: 480, at: Date.now(), reason: "measured" };

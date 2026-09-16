@@ -131,7 +131,7 @@ async function pictureWithStepAndSoundtrack() {
   step.claims = new Set([variantConsumerId(BASE_ID)]);
   audio.claims = new Set([variantConsumerId(BASE_ID)]);
   for (const session of [base, step, audio]) {
-    manager.outputsById.set(session.id, session);
+    manager.outputs.set(session.id, session);
   }
   file.stepHeights.set(540, 540);
   return { manager, base, step, audio, dirPath };
@@ -175,14 +175,14 @@ test("a viewer leaving is subtracted from every output, and one nobody is left w
 
   await manager.releaseSessionConsumer(BASE_ID, VIEWER, "the viewer left");
 
-  assert.equal(manager.outputsById.has(BASE_ID), false, "the picture goes with its last consumer");
+  assert.equal(manager.outputs.has(BASE_ID), false, "the picture goes with its last consumer");
   assert.equal(
-    manager.outputsById.has(STEP_ID),
+    manager.outputs.has(STEP_ID),
     false,
     "and so does the quality step: nobody is watching it, and no one outside this class knows its id"
   );
   assert.equal(
-    manager.outputsById.has(AUDIO_ID),
+    manager.outputs.has(AUDIO_ID),
     false,
     "and the soundtrack, for the same reason — it used to sit for half an hour holding an encoder, a directory and a claim on the torrent"
   );
@@ -203,9 +203,9 @@ test("an output somebody else is still watching is kept when one viewer leaves",
 
   await manager.releaseSessionConsumer(BASE_ID, VIEWER, "the first viewer left");
 
-  assert.equal(manager.outputsById.has(BASE_ID), true, "the picture stays: it still has a consumer");
+  assert.equal(manager.outputs.has(BASE_ID), true, "the picture stays: it still has a consumer");
   assert.equal(
-    manager.outputsById.has(AUDIO_ID),
+    manager.outputs.has(AUDIO_ID),
     true,
     "and the soundtrack stays, because having no listeners is what kills it and it has one"
   );
@@ -238,7 +238,7 @@ test("nothing is left wanting production once the last viewer has left", async (
   // with nobody's name in it, rebuilt from whoever is watching; a viewer who has
   // left is simply not in the next one.
   for (const id of [BASE_ID, STEP_ID, AUDIO_ID]) {
-    const session = manager.outputsById.get(id);
+    const session = manager.outputs.get(id);
     assert.equal(session, undefined, `${id.slice(0, 8)} is let go with its last viewer`);
   }
   manager.planEncodersNow();

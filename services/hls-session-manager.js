@@ -42,7 +42,6 @@ const PROXY_VERSION = createRequire(import.meta.url)("../package.json").version;
 import {
   softwareDescriptor,
   pickSoftwarePreset,
-  canSustainOutput,
   maxrateKbpsFor,
   nominalKbpsForHeight,
   nominalKbpsForMaxrate,
@@ -64,7 +63,7 @@ import { audioRenditionName } from "./media/audio-inventory.js";
 import { AudioOutput, CutGrid, isOutputName, OutputSpec, VideoOutput } from "./output/index.js";
 import { Timeline, Timelines } from "./output/Timeline.js";
 import { computeCutGrid } from "./output/cut-grid.js";
-import { Output, Outputs } from "./output/Output.js";
+import { Output } from "./output/Output.js";
 import { masterPlaylistText, mediaPlaylistText, segmentIndexForTime } from "./output/playlists.js";
 import { SourceFiles } from "./source/SourceFile.js";
 import { SegmentStore } from "./segment-store/SegmentStore.js";
@@ -240,65 +239,6 @@ export function audioRenditionKey(trackIndex, transcode) {
 }
 
 
-/**
- * The same budget, starting at the top of its own ladder.
- *
- * The automatic choice takes the highest rung this host can encode faster than
- * realtime. A viewer who names a resolution has already made that choice, so
- * the encode starts where they said — and the ladder stays, because a host that
- * turns out unable to keep up must still have somewhere to go.
- *
- * @param {{ ladder: { width: number, height: number }[], rungIndex: number } | null} budget
- * @param {number} outputFps
- * @param {unknown} benchmark
- * @param {{ decodeModel?: object | null, source?: { megapixelsPerSecond: number, megabitsPerSecond: number } | null, requiredSpeed?: number | null }} [cost]
- * @returns {object | null}
- */
-function startAtLadderTop(budget, outputFps, benchmark, cost = {}) {
-  const ladder = budget?.ladder;
-  const top = ladder?.[0];
-  if (!top) {
-    return null;
-  }
-  const fps = Number.isInteger(outputFps) && outputFps > 0 ? outputFps : TRANSCODE_FPS;
-  // The top rung the viewer asked for, unless this host cannot hold it. A
-  // request naming a height arrives from a browser that was told which heights
-  // are on offer — but an older page, a stale tab or a repeated URL can still
-  // name one that was refused, and starting there means the encode never
-  // catches up. The runtime downshift would eventually step down; starting
-  // where the host can hold it means the viewer does not watch that happen.
-  // When NOTHING on the ladder can be held, start at its foot — the smallest
-  // picture this host has, which is the automatic path's answer to the same
-  // question and the best effort available. Starting at the top instead would
-  // hand the weakest hosts, the ones this exists for, the heaviest rung.
-  let startIndex = ladder.length - 1;
-  for (let index = 0; index < ladder.length; index += 1) {
-    const { sustainable } = canSustainOutput({
-      benchmark,
-      decodeModel: cost.decodeModel ?? null,
-      source: cost.source ?? null,
-      outputPixelsPerSec: ladder[index].width * ladder[index].height * fps,
-      observedDecodeCostSec: cost.observedDecodeCostSec ?? null,
-      requiredSpeed: cost.requiredSpeed ?? null
-    });
-    if (sustainable) {
-      startIndex = index;
-      break;
-    }
-  }
-  const start = ladder[startIndex];
-  return {
-    ...budget,
-    width: start.width,
-    height: start.height,
-    // Priced the same way the offer was. Without the cost the preset came from
-    // the encoder alone — so a rung offered on the combined figure was then
-    // encoded with a preset chosen as if decoding were free, which is how the
-    // check and the encode came to disagree on every rung a viewer picks.
-    preset: pickSoftwarePreset(benchmark, start.width * start.height * fps, cost),
-    rungIndex: startIndex
-  };
-}
 
 /**
  * The consumer a base session registers on its variants.
@@ -1240,13 +1180,6 @@ export class HlsSessionManager {
     // a thing somebody has to remember to do and which drifted twice in the
     // field. They share the table now.
     this.timelines = new Timelines();
-    // The shape each output is encoded AS, decided once. The realtime budget
-    // decides it from what this machine could hold at that moment, so two
-    // sessions of one output made minutes apart could otherwise be given
-    // different sizes while claiming the same identity — and everything
-    // downstream assumes they cannot be, from a segment of one standing in for
-    // a segment of the other to the single RESOLUTION the master names.
-    this.outputs = new Outputs();
     // The files this proxy is serving, one object per file however many
     // sessions are of it. It holds the file's key — which every cache about a
     // file is keyed by — its name, and the facts a probe returned.
@@ -1404,133 +1337,6 @@ export class HlsSessionManager {
     // a picture carries it only when the browser is not taking it separately.
     const carriesAudio = audioOnly === true || !audioSeparate;
     const carriesVideo = audioOnly !== true;
-    const spec = new OutputSpec({
-      sourceKey,
-      segmentFormatId: segmentFormat.id,
-      // What this session INTENDS to cut on, which is all that can be known
-      // before the file's keyframe table has been read. A copy asks for the
-      // source's own keyframes; a member of a family takes the grid it was
-      // handed; everything else is the even grid. The one case where the intent
-      // is not met is a copy whose container has no readable index — the video
-      // is then re-encoded onto the even grid instead, which is logged where it
-      // happens, and both viewers of that file ask the same thing of it and so
-      // still land on one session.
-      grid: new CutGrid({
-        kind: inheritedGrid || (!transcodeVideo && !audioOnly) ? "keyframe" : "uniform",
-        // Whose grid it is: the picture's file. A soundtrack has no keyframes
-        // of its own and is cut where the picture it accompanies is cut.
-        fileIndex
-      }),
-      video: carriesVideo
-        ? new VideoOutput({
-            fileIndex,
-            encode: transcodeVideo
-              ? {
-                  width: normalizedTargetWidth,
-                  height: normalizedTargetHeight,
-                  exactSize: forceExactSize
-                }
-              : null
-          })
-        : null,
-      audio: carriesAudio
-        ? new AudioOutput({
-            fileIndex: audioSource.fileIndex,
-            trackIndex: audioSource.sourceTrackIndex,
-            transcode: transcodeAudio === true
-          })
-        : null
-    });
-    // One field that is not a property of the output and is on its way out:
-    // where production BEGAN. It says nothing about what is produced, and it is
-    // here only because a session cannot yet serve a position behind its
-    // running encode without dragging that encode back — so a viewer joining
-    // far from one would take the picture away from whoever is already
-    // watching. What removes it is a run of their own (roadmap item 61).
-    // The output's own parameters, and nothing about the request. The start
-    // position used to be here, and what it was for — that two viewers of one
-    // film should not each make their own copy of the same segments — is
-    // settled in the ADDRESS of the segments, which it never entered. What kept
-    // it here afterwards was that a session held one run, so merging two
-    // viewers would leave the one behind stalled or dragging that run back. A
-    // the encoding layer can place as many runs as the machine affords now, so
-    // it goes.
-    const outputKey = spec.toKey();
-    // THE NAME FOLLOWS FROM THE KEY, so there is nothing to look it up in. A
-    // second table held key → name, which is a fact that can go out of step
-    // with the thing it points at: a session disposed without the table being
-    // cleared leaves a name pointing at nothing, and the next viewer of that
-    // output is handed it.
-    const existingId = spec.toName();
-    if (existingId) {
-      const existing = this.outputsById.get(existingId);
-      if (existing) {
-        const internalClaim = isFamilyConsumerId(consumerId);
-        const joined = Boolean(consumerId) && (internalClaim
-          ? !existing.claims.has(consumerId)
-          : !viewersOf(existing).has(consumerId));
-        if (internalClaim) {
-          existing.claims.add(consumerId);
-        } else if (consumerId) {
-          // What THIS viewer wants of the sound, which the session they are
-          // joining knows nothing about: they may have chosen another language,
-          // and their browser may need a track re-encoded that the first
-          // viewer's could decode as it stands.
-          const joining = this.viewers.of(existing, consumerId);
-          joining.audio = {
-            trackIndex: normalizedAudioTrack,
-            transcode: transcodeAudio === true
-          };
-          // And WHERE they are, which their own request names and this session
-          // cannot guess: a viewer joining a session already playing at 40:00
-          // may be opening the film from a link that carries 05:00. Placed now,
-          // because a viewer who has not yet been placed states no want and an
-          // output all of whose viewers state nothing has every encoder on it
-          // stopped.
-          this.#placeViewer(existing, joining, startPositionSeconds);
-        } else {
-          const joining = this.viewers.of(existing, "");
-          joining.audio = {
-            trackIndex: normalizedAudioTrack,
-            transcode: transcodeAudio === true
-          };
-          this.#placeViewer(existing, joining, startPositionSeconds);
-        }
-        // Reuse said nothing at all before this, so a session serving two
-        // viewers looked exactly like a session serving one — and the whole
-        // question this key exists to answer is which of the two happened.
-        if (joined) {
-          logger.info(
-            `transcode ${existing.id} joined by ${consumerId} ` +
-            `(${viewersOf(existing).size} viewer(s)) key=${outputKey}`
-          );
-        }
-        // A run of their own where they opened the film is the plan's to place:
-        // `#placeViewer` above states where they are and the plan reads it. This
-        // used to start one here, deciding for itself that nothing was being
-        // made there — a second party answering the one question the plan
-        // exists for, and answering it from a session's own runs rather than
-        // from the output's coverage.
-        this.outputsById.touch(existing);
-        try {
-          await this.waitUntilReady(existing);
-        } catch (error) {
-          if (!isWarmupTimeoutError(error)) {
-            throw error;
-          }
-          // Keep session reusable while ffmpeg is still warming up.
-        }
-        return existing;
-      }
-    }
-
-    // THE OUTPUT'S OWN NAME, not a fresh one per request. A session is found by
-    // the output key and there is exactly one per output, so a random name was
-    // a second name for a thing that already had one — and it hid the output's
-    // identity from every log and every address. Many viewers of one output now
-    // address one name because the name is the output's, not because anybody
-    // arranged it.
-    const sessionId = spec.toName();
     const createEntryMs = Date.now();
     // The directory belongs to the OUTPUT, not to this session: two sessions
     // whose parameters agree produce interchangeable segments, so they write
@@ -1549,7 +1355,6 @@ export class HlsSessionManager {
     // that comparison now and there is nothing to keep in step.
     const audioFile = this.sourceFiles.get(sourceKey, audioSource.fileIndex, audioSource.name);
     const inputFile = audioOnly === true && audioSource.isSidecar ? audioFile : file;
-    const inputUrl = inputFile.streamUrl(this.localBaseUrl, { sessionId });
     // Media info (duration/resolution/fps/startTime/HDR) up front, so we can
     // serve a complete VOD playlist (#EXT-X-ENDLIST) with the correct total
     // duration and a fully seekable timeline before a single segment exists.
@@ -1574,7 +1379,7 @@ export class HlsSessionManager {
     // No session id on it: this read is a probe of the picture, not this
     // session's own delivery, and counting it against the session would tell a
     // waiting browser that its film is arriving when what arrived was a header.
-    const pictureUrl = inputFile === file ? inputUrl : file.streamUrl(this.localBaseUrl);
+    const pictureUrl = file.streamUrl(this.localBaseUrl);
     const mediaInfo = cachedUsable
       ? cachedMediaInfo
       : await probeInputMediaInfo(this.ffmpegBin, pictureUrl.toString());
@@ -1647,8 +1452,8 @@ export class HlsSessionManager {
     );
     if (!hasDuration) {
       logger.warn(
-        `transcode ${sessionId}: could not probe duration; falling back to ` +
-          `ffmpeg-managed (growing) playlist for "${logName}"`
+        `transcode "${logName}": could not probe duration; falling back to ` +
+          "ffmpeg-managed (growing) playlist"
       );
     }
 
@@ -1713,7 +1518,7 @@ export class HlsSessionManager {
         // of bytes look like a property of the bytes, and every later session
         // of the file would re-encode a picture that can be copied.
         logger.warn(
-          `transcode ${sessionId}: the keyframe table for "${logName}" has not arrived in ` +
+          `transcode: the keyframe table for "${logName}" has not arrived in ` +
             `${Math.round(this.keyframeTables.budgetMs / 1000)}s, so this session re-encodes the picture ` +
             "instead of copying it; the read goes on and the next session of this file gets the copy"
         );
@@ -1736,7 +1541,7 @@ export class HlsSessionManager {
         transcodeVideo = true;
         if (keyframes.answered) {
           logger.warn(
-            `transcode ${sessionId}: no keyframe index in the ${keyframes.format} container for ` +
+            `transcode: no keyframe index in the ${keyframes.format} container for ` +
               `"${logName}" — a copied picture has no honest grid without one, so the video is ` +
               "re-encoded instead and its keyframes are placed on our own cuts"
           );
@@ -1756,7 +1561,7 @@ export class HlsSessionManager {
       // safety net (no regression either way).
       keyframeMs = -2;
       const backgroundStartedAt = Date.now();
-      void probeVideoKeyframeTimes(this.ffmpegBin, inputUrl.toString(), 25_000).then((times) => {
+      void probeVideoKeyframeTimes(this.ffmpegBin, inputFile.streamUrl(this.localBaseUrl).toString(), 25_000).then((times) => {
         // Into the FILE's table, which the picture, its quality steps and a
         // second viewer's session all hold — so nothing has to be alive for the
         // answer to be kept, and the session this probe was started for may
@@ -1766,16 +1571,15 @@ export class HlsSessionManager {
         const elapsedMs = Date.now() - backgroundStartedAt;
         logger.info(
           times
-            ? `transcode ${sessionId}: background keyframe probe found ${times.length} keyframes ` +
+            ? `transcode: background keyframe probe found ${times.length} keyframes ` +
                 `(${elapsedMs}ms) for "${logName}" — later seeks will snap to them`
-            : `transcode ${sessionId}: background keyframe probe unavailable (${elapsedMs}ms) for "${logName}" ` +
+            : `transcode: background keyframe probe unavailable (${elapsedMs}ms) for "${logName}" ` +
                 `— seeks keep using the raw target (falls back to the circuit breaker on failure)`
         );
       });
     }
-    this.#rememberSessionCreateLatency(Date.now() - createEntryMs);
     logger.info(
-      `cold-start ${sessionId.slice(0, 8)}: media-info=${mediaInfoMs}ms (${mediaInfoSource}) ` +
+      `cold-start "${logName}": media-info=${mediaInfoMs}ms (${mediaInfoSource}) ` +
         `keyframes=${keyframeMs === -1 ? "skipped" : keyframeMs === -2 ? "background" : `${keyframeMs}ms`} ` +
         `create-total=${Date.now() - createEntryMs}ms`
     );
@@ -1835,59 +1639,148 @@ export class HlsSessionManager {
     const publishedGrid = timeline.published.length > 1 ? timeline.published : null;
     const segmentCount = timeline.segmentCount;
 
-    // Realtime budget (software encoder): pick the output resolution + libx264
-    // preset this host can encode faster than realtime. On a weak host this
-    // downscales below the client target (the orientation-independent ceiling)
-    // instead of dropping into sub-realtime playback. Null for hardware
-    // encoders or when the source size / benchmark is unavailable — the encode
-    // then keeps the client target box and buildVideoArgs's default preset.
+    // THE FORMAT THIS OUTPUT PRODUCES, decided before it is named, because the
+    // name is the format (decided with the user 2026-09-16). A copy is the
+    // source's own picture. A re-encode is: which encoder, the size, the frame
+    // rate, the speed setting and whether HDR is tone mapped.
     //
-    // Manual quality bypasses the budget entirely: the user forced a specific
-    // resolution, so encode exactly that box (capped to source by the scale
-    // filter) with the default preset.
-    // What decoding this source costs, which every re-encode pays on top of
-    // the encoder. Derived from the file's own facts; null when the probe did
-    // not say enough.
+    // A size produced exactly — every rung of a master — is the box asked for,
+    // fitted to the source; the budget chooses only the speed setting for it. A
+    // size left to the budget is the highest rung of the viewer's own ladder this
+    // machine holds, with the speed setting chosen for that rung. On a hardware
+    // encoder, or with no startup measurement, there is no ladder to choose from
+    // and the box asked for is produced.
     const sourceDecode = file.decode;
-    const chosenBudget = this.encodeCost.chooseEncodeBudget({
-      transcodeVideo,
-      targetWidth: normalizedTargetWidth,
-      targetHeight: normalizedTargetHeight,
-      sourceWidth,
-      sourceHeight,
-      outputFps,
-      source: sourceDecode,
-      requiredSpeed: this.#requiredSpeedFor(sourceKey, fileIndex)
-    });
-    // A forced resolution starts at exactly that size — the viewer asked for it
-    // — but KEEPS the ladder beneath it. Discarding the ladder is what left a
-    // viewer with no picture at all on 2026-08-11: they picked 480p on a host
-    // that encodes it at 0.27-0.78x, and with the runtime downshift disabled
-    // nothing could step in, so the stream simply never caught up. A smaller
-    // picture that plays beats a correct label that freezes. The rung's NAME is
-    // settled separately and does not move with a downshift, so the player goes
-    // on addressing it by the height it chose.
-    const encodeBudget = forceExactSize
-      ? startAtLadderTop(chosenBudget, outputFps, this.softwarePresetBenchmark, {
-          decodeModel: this.decodeCostModel,
+    const encodesPicture = transcodeVideo && carriesVideo;
+    const ceiling = encodesPicture
+      ? computeOutputDimensions(normalizedTargetWidth, normalizedTargetHeight, sourceWidth, sourceHeight)
+      : null;
+    const budget = encodesPicture && !forceExactSize
+      ? this.encodeCost.chooseEncodeBudget({
+          transcodeVideo,
+          targetWidth: normalizedTargetWidth,
+          targetHeight: normalizedTargetHeight,
+          sourceWidth,
+          sourceHeight,
+          outputFps,
           source: sourceDecode,
-          observedDecodeCostSec: this.encodeCost.decodeCostFor(SourceFiles.keyFor(sourceKey, fileIndex))?.costSec ?? null,
           requiredSpeed: this.#requiredSpeedFor(sourceKey, fileIndex)
         })
-      : chosenBudget;
-    // Decided once for this output, whoever asks and whenever. The budget above
-    // reads the machine as it is NOW; a second session of the same output
-    // arriving a minute later must not be given a different picture on the
-    // strength of a different moment.
-    const output = this.outputs.get(spec.toKey(), () => new Output({
-      // The budget's downscaled resolution when it applied, otherwise the
-      // client target (0 = keep source, handled by buildVideoArgs).
-      encodeWidth: encodeBudget?.width ?? normalizedTargetWidth,
-      encodeHeight: encodeBudget?.height ?? normalizedTargetHeight,
+      : null;
+    const width = budget?.width ?? ceiling?.w ?? 0;
+    const height = budget?.height ?? ceiling?.h ?? 0;
+    const preset = budget
+      ? budget.preset
+      : encodesPicture && this.videoEncoder.kind === "software" && this.softwarePresetBenchmark && width > 0
+        ? pickSoftwarePreset(this.softwarePresetBenchmark, width * height * outputFps, {
+            decodeModel: this.decodeCostModel,
+            source: sourceDecode,
+            observedDecodeCostSec: this.encodeCost.decodeCostFor(SourceFiles.keyFor(sourceKey, fileIndex))?.costSec ?? null,
+            requiredSpeed: this.#requiredSpeedFor(sourceKey, fileIndex)
+          })
+        : null;
+    const spec = new OutputSpec({
+      sourceKey,
+      segmentFormatId: segmentFormat.id,
+      // Where it is ACTUALLY cut. A copy whose container states no keyframes
+      // is re-encoded onto the even grid, and is named so.
+      grid: new CutGrid({ kind: useKeyframeGrid ? "keyframe" : "uniform", fileIndex }),
+      video: carriesVideo
+        ? new VideoOutput({
+            fileIndex,
+            encode: transcodeVideo
+              ? { encoder: this.videoEncoder.name, width, height, fps: outputFps, preset, tonemap: applyTonemap }
+              : null
+          })
+        : null,
+      audio: carriesAudio
+        ? new AudioOutput({
+            fileIndex: audioSource.fileIndex,
+            trackIndex: audioSource.sourceTrackIndex,
+            transcode: transcodeAudio === true
+          })
+        : null
+    });
+    const outputKey = spec.toKey();
+    // THE NAME FOLLOWS FROM THE KEY, so there is nothing to look it up in. A
+    // second table held key → name, which is a fact that can go out of step
+    // with the thing it points at: a session disposed without the table being
+    // cleared leaves a name pointing at nothing, and the next viewer of that
+    // output is handed it.
+    const existingId = spec.toName();
+    if (existingId) {
+      const existing = this.outputsById.get(existingId);
+      if (existing) {
+        const internalClaim = isFamilyConsumerId(consumerId);
+        const joined = Boolean(consumerId) && (internalClaim
+          ? !existing.claims.has(consumerId)
+          : !viewersOf(existing).has(consumerId));
+        if (internalClaim) {
+          existing.claims.add(consumerId);
+        } else if (consumerId) {
+          // What THIS viewer wants of the sound, which the session they are
+          // joining knows nothing about: they may have chosen another language,
+          // and their browser may need a track re-encoded that the first
+          // viewer's could decode as it stands.
+          const joining = this.viewers.of(existing, consumerId);
+          joining.audio = {
+            trackIndex: normalizedAudioTrack,
+            transcode: transcodeAudio === true
+          };
+          // And WHERE they are, which their own request names and this session
+          // cannot guess: a viewer joining a session already playing at 40:00
+          // may be opening the film from a link that carries 05:00. Placed now,
+          // because a viewer who has not yet been placed states no want and an
+          // output all of whose viewers state nothing has every encoder on it
+          // stopped.
+          this.#placeViewer(existing, joining, startPositionSeconds);
+        } else {
+          const joining = this.viewers.of(existing, "");
+          joining.audio = {
+            trackIndex: normalizedAudioTrack,
+            transcode: transcodeAudio === true
+          };
+          this.#placeViewer(existing, joining, startPositionSeconds);
+        }
+        // Reuse said nothing at all before this, so a session serving two
+        // viewers looked exactly like a session serving one — and the whole
+        // question this key exists to answer is which of the two happened.
+        if (joined) {
+          logger.info(
+            `transcode ${existing.id} joined by ${consumerId} ` +
+            `(${viewersOf(existing).size} viewer(s)) key=${outputKey}`
+          );
+        }
+        // A run of their own where they opened the film is the plan's to place:
+        // `#placeViewer` above states where they are and the plan reads it. This
+        // used to start one here, deciding for itself that nothing was being
+        // made there — a second party answering the one question the plan
+        // exists for, and answering it from a session's own runs rather than
+        // from the output's coverage.
+        this.outputsById.touch(existing);
+        try {
+          await this.waitUntilReady(existing);
+        } catch (error) {
+          if (!isWarmupTimeoutError(error)) {
+            throw error;
+          }
+          // Keep session reusable while ffmpeg is still warming up.
+        }
+        return existing;
+      }
+    }
+
+    // Only a session actually made is timed: a viewer joining one costs none
+    // of what this figure predicts for the next viewer who has to wait.
+    this.#rememberSessionCreateLatency(Date.now() - createEntryMs);
+    const sessionId = spec.toName();
+    const output = new Output({
+      encodeWidth: width,
+      encodeHeight: height,
       outputFps,
-      softwarePreset: encodeBudget?.preset ?? null,
+      softwarePreset: preset,
       applyTonemap
-    }));
+    });
 
     // Only now, when nothing above can still throw. Everything from the probe
     // to the keyframe index used to run with the directory already made, so a
@@ -2133,14 +2026,13 @@ export class HlsSessionManager {
         `branch=${transcodeVideo ? "A(reencode,fixed-gop)" : "B(copy,copyts)"} ` +
         `seg=${timeline.cutGrid} ` +
         `${sourceWidth && sourceHeight ? `src=${sourceWidth}x${sourceHeight} ` : ""}` +
-        // Effective encode resolution: budget-on (auto downscale from the
-        // ceiling), manual (user-forced, budget off), or unset (keep source).
-        `${transcodeVideo && encodeBudget
-          ? `enc=${output.encodeWidth}x${output.encodeHeight}@${output.outputFps} ` +
-            `size=${forceExactSize ? "exact" : "budget"} ` +
-            `budget=${encodeBudget.ladder ? `rung ${encodeBudget.rungIndex + 1}/${encodeBudget.ladder.length}` : "off"} `
+        // The size produced, and how it was arrived at: exactly as asked, the
+        // budget's rung of the viewer's own ladder, or the box asked for where
+        // there is no ladder to choose from.
+        `${transcodeVideo
+          ? `enc=${output.encodeWidth || "src"}x${output.encodeHeight || "src"}@${output.outputFps} ` +
+            `size=${forceExactSize ? "exact" : budget ? `budget rung ${budget.rungIndex + 1}/${budget.ladder.length}` : "asked"} `
           : ""}` +
-        `${transcodeVideo && !encodeBudget && forceExactSize ? `enc=${output.encodeWidth || "src"}x${output.encodeHeight || "src"}@${output.outputFps} size=exact budget=off ` : ""}` +
         // HDR source and whether the tone-map chain was applied (vs washed-out
         // fallback when the filters are missing or on a hardware encoder).
         `${transcodeVideo && mediaInfo.isHdr ? `hdr=1 tonemap=${applyTonemap ? "on" : "off"} ` : ""}` +
@@ -4676,12 +4568,17 @@ export class HlsSessionManager {
       this.videoEncoder = softwareDescriptor();
       logger.warn(
         `transcode ${session.id} hardware encoder ${failedEncoder} failed ` +
-          `(${lastError}); falling back to software libx264 and restarting`
+          `(${lastError}); falling back to software libx264, and every output named by ${failedEncoder} is closed`
       );
-      // WHAT this host encodes with has changed, which is all that is said here.
-      // Where the replacement stands is the plan's, and the stretch this run
-      // held went back to the map above — so the plan sees a gap in front of the
-      // viewer and fills it with a run built on the new encoder.
+      // An output IS its format, and the encoder is part of it: pieces from
+      // another encoder cannot be decoded with the header this output's viewers
+      // already hold. So the outputs made by the failed encoder end here, and
+      // the next request for that picture names a format built on the new one.
+      for (const other of [...this.outputsById.values()]) {
+        if (other.spec.video?.encode?.encoder === failedEncoder) {
+          void this.disposeSession(other.id);
+        }
+      }
       this.planEncodersSoon();
       return;
     }
@@ -6031,30 +5928,15 @@ export class HlsSessionManager {
    * A session of this family already making exactly this picture, if there is
    * one — so that a second request for it does not start a second encoder.
    *
-   * WHY THIS EXISTS, AND WHY IT COMPARES WHAT IS PRODUCED RATHER THAN WHAT WAS
-   * ASKED FOR. The file's record is keyed on the height the browser requested,
-   * while what the session encodes is decided afterwards, by the clamp in
-   * `createOrGetSession`: a manual pick starts at the top of the ladder THIS
-   * host can sustain (`startAtLadderTop`), which on a weak machine is well
-   * below the height named. So a request for 360p and a request for 540p both
-   * become a 426x240 encode, are filed under keys 360 and 540, and neither ever
-   * finds the 240p session already producing that exact picture. Field
-   * 2026-08-28: three ffmpeg processes on a CM4 making one identical picture,
-   * every rung above 240p then measured at 0.04x of realtime, and the viewer
-   * left watching a slideshow that ended in a spinner
-   * (`research/session-pileup-variant-key-2026-08-28.md`).
-   *
-   * The comparison is made on the height PRODUCED because that is the only
-   * figure that cannot be wrong. Predicting the clamp instead would mean a
-   * second copy of the budget arithmetic, and the two would drift: the offer
-   * deliberately prices a rung from the startup measurement
-   * (`observedDecodeCostSec: null`) while the clamp prices it from what this
-   * file has since been seen to cost, so they can and do answer differently.
-   *
-   * The price is one short-lived encoder the first time each requested height
-   * is seen, which replaces one that would otherwise have run beside the others
-   * for the rest of the session. Every later request for that height is
-   * answered from the alias without starting anything.
+   * WHY IT COMPARES THE HEIGHT PRODUCED. An output is named by its whole
+   * format, and a rung produced exactly at a height can still differ from one
+   * already running at that height by its speed setting or its encoder. For
+   * the viewer those two are the same picture, so the one already producing it
+   * is used rather than a second encoder beside it. It was written when a
+   * manual pick was clamped below the height named, which put three encoders on
+   * one identical picture on 2026-08-28
+   * (`research/session-pileup-variant-key-2026-08-28.md`); the clamp is gone,
+   * and choosing an existing output by quality replaces this comparison.
    *
    * @param {HlsSession} base
    * @param {number} askedHeight
@@ -7674,8 +7556,11 @@ export class HlsSessionManager {
   adoptSegmentsLeftBehind() {
     return this.segmentStore.adoptWhatSurvived((key) => {
       // Which container the segments are in is stated by the key itself, so a
-      // directory can be read back without any record kept elsewhere.
-      const stated = /(?:^|:)fmt=([a-z0-9]+)(?::|$)/.exec(key)?.[1] ?? "";
+      // directory can be read back without any record kept elsewhere. A key in
+      // a shape this version does not write — one naming the box a viewer
+      // asked for rather than the format produced — cannot say what format is
+      // inside, and the directory goes.
+      const stated = OutputSpec.fromKey(key)?.segmentFormatId ?? "";
       return SEGMENT_FORMAT_IDS.includes(stated) ? resolveSegmentFormat(stated) : null;
     });
   }
@@ -7771,13 +7656,6 @@ export class HlsSessionManager {
       }
     }
     this.timelines.forgetUnused(timelinesInUse);
-    const outputsInUse = new Set();
-    for (const session of this.outputsById.values()) {
-      if (session.output) {
-        outputsInUse.add(session.output);
-      }
-    }
-    this.outputs.forgetUnused(outputsInUse);
     const filesInUse = new Set();
     const keyframesInUse = new Set();
     for (const session of this.outputsById.values()) {

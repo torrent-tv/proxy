@@ -10,8 +10,10 @@
  *
  * What is checked here is the decision, not the creation: a session under the
  * name this request produces already exists, and the request must be answered
- * with it rather than with a new one. Making the FIRST session reaches the
- * probe, the realtime budget and the disk, which is a different subject.
+ * with it rather than with a new one. The name is the format produced, so the
+ * request is first taken as far as the format — the file's facts and its
+ * keyframe table are given as already known — and making the FIRST session,
+ * which reaches the disk, is a different subject.
  */
 
 import test from "node:test";
@@ -91,6 +93,17 @@ function seedOneSession(manager) {
   return session;
 }
 
+/**
+ * What the proxy already knows about the file when a second viewer arrives:
+ * what a probe said, and where its keyframes are.
+ *
+ * @param {HlsSessionManager} manager
+ */
+function knownFile(manager) {
+  manager.getCachedMediaInfo = () => ({ durationSeconds: 8, width: 1920, height: 1080, fps: 24 });
+  manager.keyframeTables.learn({ sourceKey: TORRENT, fileIndex: 0 }, { times: [0, 4], format: "test" });
+}
+
 test("a second viewer of one output is served by the session that exists", async (t) => {
   const manager = new HlsSessionManager({
     enabled: true,
@@ -103,6 +116,7 @@ test("a second viewer of one output is served by the session that exists", async
   // placing encoders would spawn real processes.
   manager.planEncodersNow = () => {};
   manager.planEncodersSoon = () => {};
+  knownFile(manager);
   const seeded = seedOneSession(manager);
 
   const answered = await manager.createOrGetSession(request({ consumerId: "viewer-two" }));
@@ -142,4 +156,51 @@ test("a request whose parameters differ is not that session", async (t) => {
 
   assert.notEqual(answered, seeded);
   assert.ok(!viewersOf(seeded).has("viewer-two"), "and nobody was added to somebody else's output");
+});
+
+test("two screens that come to the same format share one output, and a different format does not", async (t) => {
+  const manager = new HlsSessionManager({
+    enabled: true,
+    ffmpegBin: "ffmpeg",
+    localBindHost: "127.0.0.1",
+    localPort: 9090,
+    startupWaitMs: 0,
+    // A host with no ladder to choose from: the box asked for, fitted to the
+    // source, is what is produced.
+    videoEncoder: { kind: "vaapi", name: "h264_vaapi", inputArgs: [] }
+  });
+  t.after(() => manager.disposeAll());
+  manager.planEncodersNow = () => {};
+  manager.planEncodersSoon = () => {};
+  knownFile(manager);
+  const spec = new OutputSpec({
+    sourceKey: TORRENT,
+    segmentFormatId: "fmp4",
+    grid: new CutGrid({ kind: "uniform", fileIndex: 0 }),
+    video: new VideoOutput({
+      fileIndex: 0,
+      encode: { encoder: "h264_vaapi", width: 1920, height: 1080, fps: 24, preset: null, tonemap: false }
+    }),
+    audio: new AudioOutput({ fileIndex: 0, trackIndex: 0, transcode: false })
+  });
+  const seeded = { ...seedOneSession(manager), id: spec.toName(), spec, timeline: new Timeline({ boundaries: [0, 4, 8], cutGrid: "uniform" }) };
+  manager.outputsById.delete(nameOfThatOutput());
+  manager.outputsById.set(seeded.id, seeded);
+
+  // A taller window than the film: fitted to the source it is the same 1920x1080.
+  const joined = await manager.createOrGetSession(
+    request({ consumerId: "tall-window", transcodeVideo: true, targetWidth: 1920, targetHeight: 1200 })
+  );
+  assert.equal(joined, seeded, "the key names the format produced, not the window it was asked for");
+
+  let other = null;
+  try {
+    other = await manager.createOrGetSession(
+      request({ consumerId: "small-window", transcodeVideo: true, targetWidth: 1280, targetHeight: 720 })
+    );
+  } catch {
+    other = null;
+  }
+  assert.notEqual(other, seeded, "a smaller picture is another output");
+  assert.ok(!viewersOf(seeded).has("small-window"));
 });

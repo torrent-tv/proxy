@@ -38,24 +38,54 @@ test("the viewer's viewport does not fork a picture that is copied", () => {
   assert.ok(!key.includes("x"), `a copied picture states no box: ${key}`);
 });
 
+function encoded(over = {}) {
+  return copiedPicture({
+    video: new VideoOutput({
+      fileIndex: 0,
+      encode: { encoder: "libx264", width: 1280, height: 720, fps: 24, preset: "veryfast", tonemap: false, ...over }
+    })
+  });
+}
+
 test("two heights of one picture are two outputs", () => {
-  const at720 = copiedPicture({
-    video: new VideoOutput({ fileIndex: 0, encode: { width: 1280, height: 720, exactSize: true } })
-  });
-  const at480 = copiedPicture({
-    video: new VideoOutput({ fileIndex: 0, encode: { width: 854, height: 480, exactSize: true } })
-  });
-  assert.notEqual(at720.toKey(), at480.toKey());
+  assert.notEqual(encoded().toKey(), encoded({ width: 854, height: 480 }).toKey());
 });
 
-test("a height produced exactly is not the same output as one the budget may move", () => {
-  const forced = copiedPicture({
-    video: new VideoOutput({ fileIndex: 0, encode: { width: 1280, height: 720, exactSize: true } })
+test("an output is the format produced, and every part of it that reaches the header tells two apart", () => {
+  const base = encoded().toKey();
+  assert.notEqual(base, encoded({ preset: "ultrafast" }).toKey(), "the speed setting changes the PPS");
+  assert.notEqual(base, encoded({ encoder: "h264_nvenc" }).toKey(), "another encoder writes another SPS");
+  assert.notEqual(base, encoded({ fps: 30 }).toKey(), "the frame rate");
+  assert.notEqual(base, encoded({ tonemap: true }).toKey(), "a tone-mapped picture");
+});
+
+test("how the format was asked for is not part of it", () => {
+  const asked = new VideoOutput({
+    fileIndex: 0,
+    encode: { encoder: "libx264", width: 1280, height: 720, fps: 24, preset: "veryfast", tonemap: false, exactSize: true }
   });
-  const chosen = copiedPicture({
-    video: new VideoOutput({ fileIndex: 0, encode: { width: 1280, height: 720, exactSize: false } })
+  assert.equal(copiedPicture({ video: asked }).toKey(), encoded().toKey());
+});
+
+test("a key reads back into the output it names", () => {
+  const muxed = new OutputSpec({
+    sourceKey: TORRENT,
+    segmentFormatId: "mpegts",
+    grid: new CutGrid({ kind: "uniform", fileIndex: 2 }),
+    video: new VideoOutput({
+      fileIndex: 2,
+      encode: { encoder: "libx264", width: 854, height: 480, fps: 25, preset: null, tonemap: true }
+    }),
+    audio: new AudioOutput({ fileIndex: 5, trackIndex: 1, transcode: true })
   });
-  assert.notEqual(forced.toKey(), chosen.toKey());
+  for (const spec of [copiedPicture(), encoded(), muxed]) {
+    assert.equal(OutputSpec.fromKey(spec.toKey())?.toKey(), spec.toKey());
+  }
+});
+
+test("a key naming the box a viewer asked for does not read back, because it cannot say what format is inside", () => {
+  assert.equal(OutputSpec.fromKey(`${TORRENT}:fmt=fmp4:grid=even@0:video-only:v=0/enc:1280x720:exact`), null);
+  assert.equal(OutputSpec.fromKey(`${TORRENT}:fmt=fmp4:grid=even@0:video-only:v=0/enc:1280x720:budget`), null);
 });
 
 test("a soundtrack is named by the file it lives in and the track inside it", () => {

@@ -56,18 +56,24 @@ test("an encoder is stopped for scheduling reasons in exactly one place", () => 
   const stopsInManager = manager.filter((line) => line.includes(".stop("));
   assert.equal(
     stopsInManager.length,
-    2,
+    1,
     "the session manager stops runs only when a session is torn down: " +
       stopsInManager.join(" / ")
   );
+  // And the runs themselves stop one for a stated reason in one place, which is
+  // what a changed bitrate cap and a corrected cut table ask through.
+  const runs = statements(source("services/encode/EncodeRuns.js"));
+  assert.equal(runs.filter((line) => line.includes(".stop(")).length, 1);
 });
 
 test("nothing outside the encoding layer starts an encoder", () => {
   // A run is built in one place. Two places building them is how a start came
   // to kill what the plan had decided to keep — the killing lived in the
   // building.
-  const manager = statements(source("services/hls-session-manager.js"));
-  const builds = manager.filter((line) => line.includes("new EncodeRun("));
+  const builds = [
+    ...statements(source("services/hls-session-manager.js")),
+    ...statements(source("services/encode/EncodeRuns.js"))
+  ].filter((line) => line.includes("new EncodeRun("));
   assert.equal(builds.length, 1, "one place builds an encoder");
 });
 
@@ -87,6 +93,7 @@ test("a run exists means its process is running, so nothing can start one twice"
   const files = [
     "services/encode/EncodeRun.js",
     "services/encode/EncodeOrchestrator.js",
+    "services/encode/EncodeRuns.js",
     "services/hls-session-manager.js"
   ];
   for (const file of files) {
@@ -146,12 +153,12 @@ test("only the plan places an encoder", () => {
   // a settled seek. Each of them chose a position by a rule of its own, and the
   // plan — which is arithmetic over what is made, what is being made and what is
   // wanted — was left to compare its answer against theirs.
-  const manager = source("services/hls-session-manager.js");
+  const manager = source("services/encode/EncodeRuns.js");
   const starts = [...manager.matchAll(/this\.#startEncodeRun\(/g)].length;
   assert.equal(starts, 1, "one caller, and it is the one the plan asks through");
   assert.match(
     manager,
-    /#makeRunAt\(address, from, to, because\)[\s\S]{0,3000}this\.#startEncodeRun\(base, from, because, \{ to \}\)/,
+    /makeRunAt\(address, from, to, because\)[\s\S]{0,3000}this\.#startEncodeRun\(base, from, because, \{ to \}\)/,
     "and that caller is what the plan is given to build runs with"
   );
 });
@@ -203,7 +210,7 @@ test("where a soundtrack begins is read off the table, not handed in", () => {
   // the live table every session of the file shares. Passed as an argument by
   // the one caller that had measured it, only a run started by that caller ever
   // had it, and a run the plan placed at the same number landed apart again.
-  const manager = source("services/hls-session-manager.js");
+  const manager = source("services/encode/EncodeRuns.js");
   assert.match(
     manager,
     /const positionSecondsOverride = session\.spec\.carries === "audio-only"\s*\n?\s*\? trueStartOf\(session\.timeline, startIndex\)/,
@@ -236,7 +243,7 @@ test("each output is handed its own priority map, and the plan is what reads it"
   // them: the swarm is asked for bytes of a FILE, which every output of it
   // reads, and encoders are placed per OUTPUT, which a person watching 480p
   // wants nothing of at 1080p.
-  const manager = source("services/hls-session-manager.js");
+  const manager = source("services/encode/EncodeRuns.js");
   assert.match(
     manager,
     /notePriorityMap\([\s\S]{0,200}mapForOutput\(address\)/,

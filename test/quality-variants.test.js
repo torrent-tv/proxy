@@ -18,7 +18,6 @@ import { Timeline } from "../services/output/Timeline.js";
 import { mkdtemp, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { HlsSessionManager } from "../services/hls-session-manager.js";
 import { costKindForSession } from "../services/quality/EncodeCost.js";
 import { managerWithOwnStore } from "./helpers/manager.js";
 import { fmp4Format } from "../services/segment-formats/fmp4.js";
@@ -107,7 +106,7 @@ function fakeSession({
 
 
 /**
- * @returns {Promise<{ manager: HlsSessionManager, base: object, dirPath: string }>}
+ * @returns {Promise<{ manager: object, base: object, dirPath: string }>}
  */
 async function managerWithBase() {
   const dirPath = await mkdtemp(path.join(os.tmpdir(), "quality-variants-"));
@@ -129,11 +128,11 @@ function startManagedRun(manager, output, options = {}) {
 test("the master offers every rung, the session's own height among them", async (t) => {
   const { manager, dirPath } = await managerWithBase();
   t.after(async () => {
-    await manager.disposeAll();
+    await manager.lifecycle.disposeAll();
     await rm(dirPath, { recursive: true, force: true });
   });
 
-  const master = manager.buildMasterPlaylist(BASE_ID);
+  const master = manager.renditions.buildMasterPlaylist(BASE_ID);
 
   assert.ok(master, "a re-encoded 1080p source has rungs to choose between");
   const heights = [...master.matchAll(/^v\/(\d+)\/index\.m3u8$/gm)].map((match) => Number(match[1]));
@@ -153,7 +152,7 @@ test("the master offers every rung, the session's own height among them", async 
 test("audio is published once for the file, and every rung points at it", async (t) => {
   const { manager, base, dirPath } = await managerWithBase();
   t.after(async () => {
-    await manager.disposeAll();
+    await manager.lifecycle.disposeAll();
     await rm(dirPath, { recursive: true, force: true });
   });
   // The inventory the plan already probed — the same list the browser's audio
@@ -167,7 +166,7 @@ test("audio is published once for the file, and every rung points at it", async 
   base.spec = outputSpec({ transcodeVideo: true, audioSeparate: true, height: base.output.encodeHeight });
   viewerOf(base, "").audio = { trackIndex: 1, transcode: true };
 
-  const master = manager.buildMasterPlaylist(BASE_ID);
+  const master = manager.renditions.buildMasterPlaylist(BASE_ID);
 
   assert.match(
     master,
@@ -190,12 +189,12 @@ test("audio is published once for the file, and every rung points at it", async 
 test("a session that did not ask for renditions gets audio in its stream, as before", async (t) => {
   const { manager, dirPath } = await managerWithBase();
   t.after(async () => {
-    await manager.disposeAll();
+    await manager.lifecycle.disposeAll();
     await rm(dirPath, { recursive: true, force: true });
   });
   manager.getCachedAudioTracks = () => [{ index: 0, language: "rus", title: "", isDefault: true }];
 
-  const master = manager.buildMasterPlaylist(BASE_ID);
+  const master = manager.renditions.buildMasterPlaylist(BASE_ID);
 
   assert.ok(!master.includes("EXT-X-MEDIA"), "a browser that does not know about renditions is not sent any");
   assert.ok(!master.includes("AUDIO="), "and its rungs still carry their own audio");
@@ -204,7 +203,7 @@ test("a session that did not ask for renditions gets audio in its stream, as bef
 test("a copied video is offered variants when its cut grid is real", async (t) => {
   const { manager, base, dirPath } = await managerWithBase();
   t.after(async () => {
-    await manager.disposeAll();
+    await manager.lifecycle.disposeAll();
     await rm(dirPath, { recursive: true, force: true });
   });
   // A copy is cut at the source's own keyframes — it has no other choice. A
@@ -213,7 +212,7 @@ test("a copied video is offered variants when its cut grid is real", async (t) =
   base.spec = outputSpec({ transcodeVideo: false, cutGrid: "keyframe" });
   base.timeline = new Timeline({ boundaries: base.timeline?.boundaries ?? [], cutGrid: "keyframe" });
 
-  const master = manager.buildMasterPlaylist(BASE_ID);
+  const master = manager.renditions.buildMasterPlaylist(BASE_ID);
 
   assert.ok(master, "the obstacle was never the encoder, it was the cut points");
   assert.match(master, /^v\/1080\/index\.m3u8$/m, "the copy itself is the top rung — no encoder, no cost");
@@ -223,7 +222,7 @@ test("a copied video is offered variants when its cut grid is real", async (t) =
 test("a copied video with no readable keyframe index is offered nothing", async (t) => {
   const { manager, base, dirPath } = await managerWithBase();
   t.after(async () => {
-    await manager.disposeAll();
+    await manager.lifecycle.disposeAll();
     await rm(dirPath, { recursive: true, force: true });
   });
   // Its playlist claims an even grid that ffmpeg does not cut on. Aligning a
@@ -231,18 +230,18 @@ test("a copied video with no readable keyframe index is offered nothing", async 
   base.spec = outputSpec({ transcodeVideo: false, cutGrid: "uniform" });
   base.timeline = new Timeline({ boundaries: base.timeline?.boundaries ?? [], cutGrid: "uniform" });
 
-  assert.equal(manager.buildMasterPlaylist(BASE_ID), null);
+  assert.equal(manager.renditions.buildMasterPlaylist(BASE_ID), null);
 });
 
 test("the session's own height resolves to the session itself", async (t) => {
   const { manager, dirPath } = await managerWithBase();
   t.after(async () => {
-    await manager.disposeAll();
+    await manager.lifecycle.disposeAll();
     await rm(dirPath, { recursive: true, force: true });
   });
 
   assert.deepEqual(
-    await manager.resolveVariantFile(BASE_ID, 812, "segment-00000.mp4"),
+    await manager.renditions.resolveVariantFile(BASE_ID, 812, "segment-00000.mp4"),
     { sessionId: BASE_ID },
     "an encoder is already producing this height; making a second one would be a cold start for nothing"
   );
@@ -251,17 +250,17 @@ test("the session's own height resolves to the session itself", async (t) => {
 test("a height the master does not offer is refused", async (t) => {
   const { manager, dirPath } = await managerWithBase();
   t.after(async () => {
-    await manager.disposeAll();
+    await manager.lifecycle.disposeAll();
     await rm(dirPath, { recursive: true, force: true });
   });
 
   assert.deepEqual(
-    await manager.resolveVariantFile(BASE_ID, 999, "index.m3u8"),
+    await manager.renditions.resolveVariantFile(BASE_ID, 999, "index.m3u8"),
     { sessionId: null },
     "honouring an arbitrary height would let a client start encoder runs at will"
   );
   assert.deepEqual(
-    await manager.resolveVariantFile(BASE_ID, 540, "master.m3u8"),
+    await manager.renditions.resolveVariantFile(BASE_ID, 540, "master.m3u8"),
     { sessionId: null },
     "a master under a variant would describe variants of a variant"
   );
@@ -270,11 +269,11 @@ test("a height the master does not offer is refused", async (t) => {
 test("a variant's playlist is answered without starting an encoder for it", async (t) => {
   const { manager, base, dirPath } = await managerWithBase();
   t.after(async () => {
-    await manager.disposeAll();
+    await manager.lifecycle.disposeAll();
     await rm(dirPath, { recursive: true, force: true });
   });
 
-  const resolved = await manager.resolveVariantFile(BASE_ID, 540, "index.m3u8");
+  const resolved = await manager.renditions.resolveVariantFile(BASE_ID, 540, "index.m3u8");
 
   assert.deepEqual(
     resolved,
@@ -291,7 +290,7 @@ test("a variant's playlist is answered without starting an encoder for it", asyn
 test("a segment request hands the encoder to the variant the viewer moved to", async (t) => {
   const { manager, base, dirPath } = await managerWithBase();
   t.after(async () => {
-    await manager.disposeAll();
+    await manager.lifecycle.disposeAll();
     await rm(dirPath, { recursive: true, force: true });
   });
   const variant = fakeSession({ id: VARIANT_ID, encodeHeight: 540, dirPath });
@@ -304,8 +303,8 @@ test("a segment request hands the encoder to the variant the viewer moved to", a
   base.lastRequestedSegment = 25;
   const encoder = fakeEncoder();
   startManagedRun(manager, base, { process: encoder });
-  manager.planEncodersSoon = () => {};
-  const served = await manager.resolveVariantFile(BASE_ID, 540, "segment-00025.mp4");
+  manager.encodeRuns.planEncodersSoon = () => {};
+  const served = await manager.renditions.resolveVariantFile(BASE_ID, 540, "segment-00025.mp4");
 
   assert.equal(served.sessionId, VARIANT_ID, "the file must be served from the variant, not the base");
   assert.equal(viewerOf(base, "").activeVariantId, VARIANT_ID, "the variant the viewer is watching is the active one");
@@ -334,7 +333,7 @@ test("a segment request hands the encoder to the variant the viewer moved to", a
 test("a rung is placed where the player asked it for, not where the other rung had read to", async (t) => {
   const { manager, base, dirPath } = await managerWithBase();
   t.after(async () => {
-    await manager.disposeAll();
+    await manager.lifecycle.disposeAll();
     await rm(dirPath, { recursive: true, force: true });
   });
   const variant = fakeSession({ id: VARIANT_ID, encodeHeight: 540, dirPath });
@@ -351,7 +350,7 @@ test("a rung is placed where the player asked it for, not where the other rung h
   // ever be answered from.
   base.lastRequestedSegment = 70;
 
-  await manager.resolveVariantFile(BASE_ID, 540, "segment-00056.mp4");
+  await manager.renditions.resolveVariantFile(BASE_ID, 540, "segment-00056.mp4");
 
   assert.equal(
     viewerOf(variant, "").positionSeconds(),
@@ -364,7 +363,7 @@ test("a rung is placed where the player asked it for, not where the other rung h
 test("warming a rung prepares it without taking the encoder from the one on screen", async (t) => {
   const { manager, base, dirPath } = await managerWithBase();
   t.after(async () => {
-    await manager.disposeAll();
+    await manager.lifecycle.disposeAll();
     await rm(dirPath, { recursive: true, force: true });
   });
   const variant = fakeSession({ id: VARIANT_ID, encodeHeight: 540, dirPath });
@@ -375,8 +374,8 @@ test("warming a rung prepares it without taking the encoder from the one on scre
   base.file.stepHeights.set(540, 540);
   const encoder = fakeEncoder();
   startManagedRun(manager, base, { process: encoder });
-  manager.planEncodersSoon = () => {};
-  const prepared = await manager.prepareVariant(BASE_ID, 540, 240);
+  manager.encodeRuns.planEncodersSoon = () => {};
+  const prepared = await manager.renditions.prepareVariant(BASE_ID, 540, 240);
 
   assert.deepEqual(
     prepared,
@@ -396,7 +395,7 @@ test("warming a rung prepares it without taking the encoder from the one on scre
 test("a rung warmed at the playhead survives the switch that lands just ahead of it", async (t) => {
   const { manager, base, dirPath } = await managerWithBase();
   t.after(async () => {
-    await manager.disposeAll();
+    await manager.lifecycle.disposeAll();
     await rm(dirPath, { recursive: true, force: true });
   });
   const variant = fakeSession({ id: VARIANT_ID, encodeHeight: 540, dirPath });
@@ -409,7 +408,7 @@ test("a rung warmed at the playhead survives the switch that lands just ahead of
   // Warmed AT THE PLAYHEAD (240 s = segment #60), which is what the browser
   // sends from server 0.10.0 onwards, and the run is alive and has produced a
   // few segments past it.
-  await manager.prepareVariant(BASE_ID, 540, 240);
+  await manager.renditions.prepareVariant(BASE_ID, 540, 240);
 
   startManagedRun(manager, variant, { from: 59, process: fakeEncoder() });
   variant.progress = { ...variant.progress, processedSeconds: 268 };
@@ -422,7 +421,7 @@ test("a rung warmed at the playhead survives the switch that lands just ahead of
   // #59. Warming at the END OF THE BUFFER instead put the run tens of seconds
   // AHEAD of this request, which the proxy then read as a seek backwards:
   // measured 2026-08-14, that killed a run holding 21.8 s of encoded output.
-  await manager.resolveVariantFile(BASE_ID, 540, "segment-00061.mp4");
+  await manager.renditions.resolveVariantFile(BASE_ID, 540, "segment-00061.mp4");
 
   assert.equal(viewerOf(base, "").activeVariantId, VARIANT_ID, "the viewer has moved to this rung");
   assert.equal(
@@ -436,7 +435,7 @@ test("a rung warmed at the playhead survives the switch that lands just ahead of
 test("a rung warmed PAST the switch is repositioned, which is what warming late costs", async (t) => {
   const { manager, base, dirPath } = await managerWithBase();
   t.after(async () => {
-    await manager.disposeAll();
+    await manager.lifecycle.disposeAll();
     await rm(dirPath, { recursive: true, force: true });
   });
   const variant = fakeSession({ id: VARIANT_ID, encodeHeight: 540, dirPath });
@@ -449,7 +448,7 @@ test("a rung warmed PAST the switch is repositioned, which is what warming late 
   // The same session, warmed where the BUFFER ended rather than where the
   // picture was — 60 s further on, which is an ordinary cushion. This is what
   // server 0.9.3 sent and 0.11.0 stopped sending.
-  await manager.prepareVariant(BASE_ID, 540, 300);
+  await manager.renditions.prepareVariant(BASE_ID, 540, 300);
   startManagedRun(manager, variant, { from: 74, process: fakeEncoder() });
   variant.progress = { ...variant.progress, processedSeconds: 310 };
 
@@ -457,7 +456,7 @@ test("a rung warmed PAST the switch is repositioned, which is what warming late 
   // warmed run: the proxy reads it as a seek backwards and starts again, and
   // everything the warm-up produced is thrown away. Measured in the field
   // 2026-08-14 as 21.8 s of encoded output destroyed by the act of using it.
-  await manager.resolveVariantFile(BASE_ID, 540, "segment-00061.mp4");
+  await manager.renditions.resolveVariantFile(BASE_ID, 540, "segment-00061.mp4");
 
   assert.equal(
     viewerOf(variant, "").positionSeconds(),
@@ -469,7 +468,7 @@ test("a rung warmed PAST the switch is repositioned, which is what warming late 
 test("the rung on screen fetching its own segments does not cancel a warm-up", async (t) => {
   const { manager, base, dirPath } = await managerWithBase();
   t.after(async () => {
-    await manager.disposeAll();
+    await manager.lifecycle.disposeAll();
     await rm(dirPath, { recursive: true, force: true });
   });
   const variant = fakeSession({ id: VARIANT_ID, encodeHeight: 540, dirPath });
@@ -481,13 +480,13 @@ test("the rung on screen fetching its own segments does not cancel a warm-up", a
   const warmedEncoder = fakeEncoder();
   startManagedRun(manager, variant, { process: warmedEncoder });
   startManagedRun(manager, base, { process: fakeEncoder() });
-  manager.planEncodersSoon = () => {};
-  await manager.prepareVariant(BASE_ID, 540, 100);
+  manager.encodeRuns.planEncodersSoon = () => {};
+  await manager.renditions.prepareVariant(BASE_ID, 540, 100);
 
   // The viewer has not moved: the rung they are watching goes on asking for its
   // own segments, every few seconds, for as long as they watch.
-  await manager.resolveVariantFile(BASE_ID, 812, "segment-00026.mp4");
-  await manager.resolveVariantFile(BASE_ID, 812, "segment-00027.mp4");
+  await manager.renditions.resolveVariantFile(BASE_ID, 812, "segment-00026.mp4");
+  await manager.renditions.resolveVariantFile(BASE_ID, 812, "segment-00027.mp4");
 
   // Kept per viewer, and this one is the unnamed viewer of a transport that
   // carries no consumer id.
@@ -506,7 +505,7 @@ test("the rung on screen fetching its own segments does not cancel a warm-up", a
 test("warming the height the base itself serves still points it at the switch", async (t) => {
   const { manager, base, dirPath } = await managerWithBase();
   t.after(async () => {
-    await manager.disposeAll();
+    await manager.lifecycle.disposeAll();
     await rm(dirPath, { recursive: true, force: true });
   });
   // The viewer is on another rung; the base is parked where they left it, with
@@ -518,7 +517,7 @@ test("warming the height the base itself serves still points it at the switch", 
   viewerOf(base, "").activeVariantId = VARIANT_ID;
   base.runs = new Set();
 
-  await manager.prepareVariant(BASE_ID, 812, 400);
+  await manager.renditions.prepareVariant(BASE_ID, 812, 400);
 
   // 400 s falls on the boundary between #99 and #100, and a run starts one
   // segment back so the player has the preceding keyframe.
@@ -532,7 +531,7 @@ test("warming the height the base itself serves still points it at the switch", 
 test("the viewer's position is kept current by the segments they ask for", async (t) => {
   const { manager, base, dirPath } = await managerWithBase();
   t.after(async () => {
-    await manager.disposeAll();
+    await manager.lifecycle.disposeAll();
     await rm(dirPath, { recursive: true, force: true });
   });
   // A REQUEST SAYS NOTHING ABOUT WHERE THEY ARE, and asking for one must not
@@ -540,7 +539,7 @@ test("the viewer's position is kept current by the segments they ask for", async
   // carrying their playhead — and it stands until they state otherwise.
   viewerOf(base, "").moveTo(40);
 
-  await manager.getFileStream(BASE_ID, "segment-00090.mp4", { requestSeq: 1 });
+  await manager.serving.getFileStream(BASE_ID, "segment-00090.mp4", { requestSeq: 1 });
 
   assert.ok(
     Math.abs((viewerOf(base, "").positionSeconds() ?? -1) - 40) < 1,
@@ -551,17 +550,17 @@ test("the viewer's position is kept current by the segments they ask for", async
 test("a playlist or an init segment does not move the encoder", async (t) => {
   const { manager, base, dirPath } = await managerWithBase();
   t.after(async () => {
-    await manager.disposeAll();
+    await manager.lifecycle.disposeAll();
     await rm(dirPath, { recursive: true, force: true });
   });
   const variant = fakeSession({ id: VARIANT_ID, encodeHeight: 540, dirPath });
   manager.outputs.set(VARIANT_ID, variant);
   base.file.stepHeights.set(540, 540);
   startManagedRun(manager, base, { process: fakeEncoder() });
-  manager.planEncodersSoon = () => {};
+  manager.encodeRuns.planEncodersSoon = () => {};
   base.file.stepHeights.set(540, 540);
-  await manager.resolveVariantFile(BASE_ID, 540, "index.m3u8");
-  await manager.resolveVariantFile(BASE_ID, 540, "init.mp4");
+  await manager.renditions.resolveVariantFile(BASE_ID, 540, "index.m3u8");
+  await manager.renditions.resolveVariantFile(BASE_ID, 540, "init.mp4");
 
   assert.notEqual(
     viewerOf(base, "").activeVariantId,
@@ -574,7 +573,7 @@ test("a playlist or an init segment does not move the encoder", async (t) => {
 test("the name of a variant is fixed, whatever its encode is later set to", async (t) => {
   const { manager, base, dirPath } = await managerWithBase();
   t.after(async () => {
-    await manager.disposeAll();
+    await manager.lifecycle.disposeAll();
     await rm(dirPath, { recursive: true, force: true });
   });
   // The player fetched the master once and addresses this variant as 812p for
@@ -591,7 +590,7 @@ test("the name of a variant is fixed, whatever its encode is later set to", asyn
     "the name stays; renaming it would leave the player addressing a variant nobody answers for"
   );
   assert.deepEqual(
-    await manager.resolveVariantFile(BASE_ID, 812, "segment-00000.mp4"),
+    await manager.renditions.resolveVariantFile(BASE_ID, 812, "segment-00000.mp4"),
     { sessionId: BASE_ID },
     "a second session at a height the host has already failed to manage is the opposite of what a step is for"
   );
@@ -728,7 +727,7 @@ test("a run on the keyframe grid is given no trim to apply", () => {
 test("a rung served by copy stays offered while a re-encoded rung is on screen", async (t) => {
   const { manager, base, dirPath } = await managerWithBase();
   t.after(async () => {
-    await manager.disposeAll();
+    await manager.lifecycle.disposeAll();
     await rm(dirPath, { recursive: true, force: true });
   });
   // The field case of 2026-08-15: a 1080p source served by COPY, the viewer on
@@ -758,7 +757,7 @@ test("a rung served by copy stays offered while a re-encoded rung is on screen",
   base.file.stepHeights.set(240, 240);
   viewerOf(base, "").activeVariantId = VARIANT_ID;
 
-  const offered = manager.offeredHeights(watching);
+  const offered = manager.quality.offeredHeights(watching);
 
   assert.ok(
     offered.includes(1080),
@@ -766,7 +765,7 @@ test("a rung served by copy stays offered while a re-encoded rung is on screen",
   );
   assert.deepEqual(
     offered,
-    manager.offeredHeights(base),
+    manager.quality.offeredHeights(base),
     "one answer for the family: a rung asked while watching another must not disagree with the base"
   );
 });
@@ -774,7 +773,7 @@ test("a rung served by copy stays offered while a re-encoded rung is on screen",
 test("a separately published audio track starts where the picture is, from the reported buffer", async (t) => {
   const { manager, base, dirPath } = await managerWithBase();
   t.after(async () => {
-    await manager.disposeAll();
+    await manager.lifecycle.disposeAll();
     await rm(dirPath, { recursive: true, force: true });
   });
   base.spec = outputSpec({ transcodeVideo: true, audioSeparate: true, height: base.output.encodeHeight });
@@ -789,13 +788,13 @@ test("a separately published audio track starts where the picture is, from the r
     { index: 1, language: "eng", title: "", isDefault: false }
   ];
   const created = [];
-  manager.createOrGetSession = async (params) => {
+  manager.viewerRequests.createOrGetSession = async (params) => {
     created.push(params);
     const rendition = fakeSession({ id: VARIANT_ID, encodeHeight: 0, dirPath, audioOnly: true });
     return { sessionId: VARIANT_ID, session: rendition };
   };
 
-  await manager.resolveAudioRenditionFile(BASE_ID, 1, "segment-00010.mp4");
+  await manager.renditions.resolveAudioRenditionFile(BASE_ID, 1, "segment-00010.mp4");
 
   assert.equal(created.length, 1, "the track's own session was made");
   assert.equal(
@@ -808,7 +807,7 @@ test("a separately published audio track starts where the picture is, from the r
 test("with two viewers the audio track starts at the EARLIEST picture, not the read head", async (t) => {
   const { manager, base, dirPath } = await managerWithBase();
   t.after(async () => {
-    await manager.disposeAll();
+    await manager.lifecycle.disposeAll();
     await rm(dirPath, { recursive: true, force: true });
   });
   base.spec = outputSpec({ transcodeVideo: true, audioSeparate: true, height: base.output.encodeHeight });
@@ -823,13 +822,13 @@ test("with two viewers the audio track starts at the EARLIEST picture, not the r
     { index: 1, language: "eng", title: "", isDefault: false }
   ];
   const created = [];
-  manager.createOrGetSession = async (params) => {
+  manager.viewerRequests.createOrGetSession = async (params) => {
     created.push(params);
     const rendition = fakeSession({ id: VARIANT_ID, encodeHeight: 0, dirPath, audioOnly: true });
     return { sessionId: VARIANT_ID, session: rendition };
   };
 
-  await manager.resolveAudioRenditionFile(BASE_ID, 1, "segment-00010.mp4");
+  await manager.renditions.resolveAudioRenditionFile(BASE_ID, 1, "segment-00010.mp4");
 
   assert.equal(
     created[0].startPositionSeconds,
@@ -842,7 +841,7 @@ test("with two viewers the audio track starts at the EARLIEST picture, not the r
 test("a soundtrack begins where a viewer says they are, whenever they said it", async (t) => {
   const { manager, base, dirPath } = await managerWithBase();
   t.after(async () => {
-    await manager.disposeAll();
+    await manager.lifecycle.disposeAll();
     await rm(dirPath, { recursive: true, force: true });
   });
   base.spec = outputSpec({ transcodeVideo: true, audioSeparate: true, height: base.output.encodeHeight });
@@ -862,13 +861,13 @@ test("a soundtrack begins where a viewer says they are, whenever they said it", 
     { index: 1, language: "eng", title: "", isDefault: false }
   ];
   const created = [];
-  manager.createOrGetSession = async (params) => {
+  manager.viewerRequests.createOrGetSession = async (params) => {
     created.push(params);
     const rendition = fakeSession({ id: VARIANT_ID, encodeHeight: 0, dirPath, audioOnly: true });
     return { sessionId: VARIANT_ID, session: rendition };
   };
 
-  await manager.resolveAudioRenditionFile(BASE_ID, 1, "segment-00010.mp4");
+  await manager.renditions.resolveAudioRenditionFile(BASE_ID, 1, "segment-00010.mp4");
 
   assert.equal(
     created[0].startPositionSeconds,
@@ -880,7 +879,7 @@ test("a soundtrack begins where a viewer says they are, whenever they said it", 
 test("an audio track is prepared at the position the switch will land on", async (t) => {
   const { manager, base, dirPath } = await managerWithBase();
   t.after(async () => {
-    await manager.disposeAll();
+    await manager.lifecycle.disposeAll();
     await rm(dirPath, { recursive: true, force: true });
   });
   base.spec = outputSpec({ transcodeVideo: true, audioSeparate: true, height: base.output.encodeHeight });
@@ -903,7 +902,7 @@ test("an audio track is prepared at the position the switch will land on", async
   startManagedRun(manager, rendition, { process: fakeEncoder() });
   manager.outputs.set(rendition.id, rendition);
 
-  const prepared = await manager.prepareAudioTrack(BASE_ID, 1, 240);
+  const prepared = await manager.renditions.prepareAudioTrack(BASE_ID, 1, 240);
 
   assert.deepEqual(
     prepared,
@@ -946,7 +945,7 @@ test("a quality step being warmed is not refused by its own cost", async (t) => 
     decodeCostModel: { pixelTerm: 0.007742, bitrateTerm: 0, constantTerm: 0 }
   });
   t.after(async () => {
-    await manager.disposeAll();
+    await manager.lifecycle.disposeAll();
     await rm(dirPath, { recursive: true, force: true });
   });
   // A copied 1080p picture, and a 240p step warmed beside it for a switch —
@@ -972,7 +971,7 @@ test("a quality step being warmed is not refused by its own cost", async (t) => 
   manager.outputs.set(BASE_ID, base);
   manager.outputs.set(VARIANT_ID, warming);
 
-  const offered = manager.offeredHeights(base);
+  const offered = manager.quality.offeredHeights(base);
 
   assert.ok(
     offered.includes(240),
@@ -1004,17 +1003,17 @@ test("the master survives a live offer that has collapsed to one rung", async (t
   base.supplyFigures = { requiredSpeed: 8 };
   manager.outputs.set(BASE_ID, base);
   t.after(async () => {
-    await manager.disposeAll();
+    await manager.lifecycle.disposeAll();
     await rm(dirPath, { recursive: true, force: true });
   });
 
   assert.deepEqual(
-    manager.offeredHeights(base),
+    manager.quality.offeredHeights(base),
     [812],
     "the live judgement is unchanged: nothing but the running height is worth offering"
   );
 
-  const master = manager.buildMasterPlaylist(BASE_ID);
+  const master = manager.renditions.buildMasterPlaylist(BASE_ID);
 
   assert.ok(master, "the master is a published document, not a live figure");
   const heights = [...master.matchAll(/^v\/(\d+)\/index\.m3u8$/gm)].map((match) => Number(match[1]));
@@ -1029,7 +1028,7 @@ test("two heights that clamp onto one picture share a single encoder", async (t)
   const { manager, base, dirPath } = await managerWithBase();
   const spawnedDirs = [];
   t.after(async () => {
-    await manager.disposeAll();
+    await manager.lifecycle.disposeAll();
     await Promise.all(spawnedDirs.map((dir) => rm(dir, { recursive: true, force: true })));
     await rm(dirPath, { recursive: true, force: true });
   });
@@ -1040,7 +1039,7 @@ test("two heights that clamp onto one picture share a single encoder", async (t)
   // ffmpeg processes making the same 426x240 picture as the 240p one.
   const madeIds = [VARIANT_ID, SECOND_VARIANT_ID];
   const created = [];
-  manager.createOrGetSession = async (params) => {
+  manager.viewerRequests.createOrGetSession = async (params) => {
     const id = madeIds[created.length];
     created.push(params);
     const variantDir = await mkdtemp(path.join(os.tmpdir(), "quality-variants-clamped-"));
@@ -1051,8 +1050,8 @@ test("two heights that clamp onto one picture share a single encoder", async (t)
     return variant;
   };
 
-  const asked360 = await manager.resolveVariantSession(BASE_ID, 360);
-  const asked540 = await manager.resolveVariantSession(BASE_ID, 540);
+  const asked360 = await manager.renditions.resolveVariantSession(BASE_ID, 360);
+  const asked540 = await manager.renditions.resolveVariantSession(BASE_ID, 540);
 
   assert.equal(asked360.id, VARIANT_ID, "the first request made the encoder");
   assert.equal(
@@ -1071,7 +1070,7 @@ test("two heights that clamp onto one picture share a single encoder", async (t)
     "540p is recorded as answered with the 240p the machine can hold"
   );
 
-  const askedAgain = await manager.resolveVariantSession(BASE_ID, 540);
+  const askedAgain = await manager.renditions.resolveVariantSession(BASE_ID, 540);
 
   assert.equal(askedAgain.id, VARIANT_ID);
   assert.equal(created.length, 2, "the third request created nothing at all");
@@ -1081,7 +1080,7 @@ test("rungs that really do differ keep their own encoders", async (t) => {
   const { manager, base, dirPath } = await managerWithBase();
   const spawnedDirs = [];
   t.after(async () => {
-    await manager.disposeAll();
+    await manager.lifecycle.disposeAll();
     await Promise.all(spawnedDirs.map((dir) => rm(dir, { recursive: true, force: true })));
     await rm(dirPath, { recursive: true, force: true });
   });
@@ -1091,7 +1090,7 @@ test("rungs that really do differ keep their own encoders", async (t) => {
   // every rung".
   const madeIds = [VARIANT_ID, SECOND_VARIANT_ID];
   const created = [];
-  manager.createOrGetSession = async (params) => {
+  manager.viewerRequests.createOrGetSession = async (params) => {
     const id = madeIds[created.length];
     created.push(params);
     const variantDir = await mkdtemp(path.join(os.tmpdir(), "quality-variants-distinct-"));
@@ -1102,8 +1101,8 @@ test("rungs that really do differ keep their own encoders", async (t) => {
     return variant;
   };
 
-  const asked360 = await manager.resolveVariantSession(BASE_ID, 360);
-  const asked540 = await manager.resolveVariantSession(BASE_ID, 540);
+  const asked360 = await manager.renditions.resolveVariantSession(BASE_ID, 360);
+  const asked540 = await manager.renditions.resolveVariantSession(BASE_ID, 540);
 
   assert.equal(asked360.id, VARIANT_ID);
   assert.equal(asked540.id, SECOND_VARIANT_ID, "two different pictures, two encoders");
@@ -1115,7 +1114,7 @@ test("a rung is never served from the COPY, whatever height the copy happens to 
   const { manager, base, dirPath } = await managerWithBase();
   const spawnedDirs = [];
   t.after(async () => {
-    await manager.disposeAll();
+    await manager.lifecycle.disposeAll();
     await Promise.all(spawnedDirs.map((dir) => rm(dir, { recursive: true, force: true })));
     await rm(dirPath, { recursive: true, force: true });
   });
@@ -1128,7 +1127,7 @@ test("a rung is never served from the COPY, whatever height the copy happens to 
   base.encodeHeight = 240;
   base.variantHeight = 240;
   const created = [];
-  manager.createOrGetSession = async (params) => {
+  manager.viewerRequests.createOrGetSession = async (params) => {
     created.push(params);
     const variantDir = await mkdtemp(path.join(os.tmpdir(), "quality-variants-copy-"));
     spawnedDirs.push(variantDir);
@@ -1138,7 +1137,7 @@ test("a rung is never served from the COPY, whatever height the copy happens to 
     return variant;
   };
 
-  const asked = await manager.resolveVariantSession(BASE_ID, 360);
+  const asked = await manager.renditions.resolveVariantSession(BASE_ID, 360);
 
   assert.equal(asked.id, VARIANT_ID, "the re-encoded rung is its own session, not the copy");
 });
@@ -1146,7 +1145,7 @@ test("a rung is never served from the COPY, whatever height the copy happens to 
 test("a file opened at a position starts its sound THERE, not a look-ahead earlier", async (t) => {
   const { manager, base, dirPath } = await managerWithBase();
   t.after(async () => {
-    await manager.disposeAll();
+    await manager.lifecycle.disposeAll();
     await rm(dirPath, { recursive: true, force: true });
   });
   base.spec = outputSpec({ transcodeVideo: true, audioSeparate: true, height: base.output.encodeHeight });
@@ -1161,13 +1160,13 @@ test("a file opened at a position starts its sound THERE, not a look-ahead earli
     { index: 1, language: "eng", title: "", isDefault: false }
   ];
   const created = [];
-  manager.createOrGetSession = async (params) => {
+  manager.viewerRequests.createOrGetSession = async (params) => {
     created.push(params);
     const rendition = fakeSession({ id: VARIANT_ID, encodeHeight: 0, dirPath, audioOnly: true });
     return { sessionId: VARIANT_ID, session: rendition };
   };
 
-  await manager.resolveAudioRenditionFile(BASE_ID, 1, "segment-00010.mp4");
+  await manager.renditions.resolveAudioRenditionFile(BASE_ID, 1, "segment-00010.mp4");
 
   // Field 2026-08-31: this answered 460 for a page opened at 588 — the whole
   // 120 s look-ahead subtracted from a buffer that did not exist — and the

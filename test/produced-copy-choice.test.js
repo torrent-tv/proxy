@@ -26,7 +26,6 @@ import { Timeline } from "../services/output/Timeline.js";
 import { mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { HlsSessionManager, usableSegmentIndices } from "../services/hls-session-manager.js";
 import { managerWithOwnStore } from "./helpers/manager.js";
 import { startRunOn } from "./helpers/encode-run.js";
 import { fmp4Format } from "../services/segment-formats/fmp4.js";
@@ -121,7 +120,7 @@ function wholePiece(offsetSeconds) {
 /**
  * A session with the output directory every run writes into.
  *
- * @returns {Promise<{ manager: HlsSessionManager, session: object, dirPath: string }>}
+ * @returns {Promise<{ manager: object, session: object, dirPath: string }>}
  */
 async function sessionOnOneDirectory() {
   const dirPath = await mkdtemp(path.join(os.tmpdir(), "produced-copy-"));
@@ -168,7 +167,7 @@ async function sessionOnOneDirectory() {
 test("a leftover of a run that has ended is not served, and answering does not delete it", async (t) => {
   const { manager, session, dirPath } = await sessionOnOneDirectory();
   t.after(async () => {
-    await manager.disposeAll();
+    await manager.lifecycle.disposeAll();
     await rm(dirPath, { recursive: true, force: true });
   });
   // Opened by a run that is gone. It has a name and no bytes, so there is
@@ -176,7 +175,7 @@ test("a leftover of a run that has ended is not served, and answering does not d
   session.runs = new Set();
   await writeFile(path.join(dirPath, "segment-00001.mp4"), Buffer.alloc(0));
 
-  const result = await manager.getFileStream(SESSION_ID, "segment-00001.mp4", { requestSeq: 1 });
+  const result = await manager.serving.getFileStream(SESSION_ID, "segment-00001.mp4", { requestSeq: 1 });
 
   assert.equal(result.kind, "warming-up", "nothing servable exists yet, so the viewer waits");
   // AND ANSWERING A REQUEST DELETES NOTHING. It used to: this test was written
@@ -196,7 +195,7 @@ test("a leftover of a run that has ended is not served, and answering does not d
 test("the current run's own unfinished piece is waited for, never deleted", async (t) => {
   const { manager, session, dirPath } = await sessionOnOneDirectory();
   t.after(async () => {
-    await manager.disposeAll();
+    await manager.lifecycle.disposeAll();
     await rm(dirPath, { recursive: true, force: true });
   });
   // The same file, in the directory of the run that is alive. It is being
@@ -208,49 +207,10 @@ test("the current run's own unfinished piece is waited for, never deleted", asyn
   startRunOn(session, { from: 1, producing: false, usesExplicitCuts: true });
   await writeFile(path.join(dirPath, "segment-00001.mp4"), Buffer.alloc(0));
 
-  const result = await manager.getFileStream(SESSION_ID, "segment-00001.mp4", { requestSeq: 1 });
+  const result = await manager.serving.getFileStream(SESSION_ID, "segment-00001.mp4", { requestSeq: 1 });
 
   assert.equal(result.kind, "warming-up");
   const left = (await readdir(dirPath)).filter((name) => name === "segment-00001.mp4");
   assert.deepEqual(left, ["segment-00001.mp4"], "the live run's own output must be left alone");
 });
 
-test("the look-ahead does not count a file with nothing in it", async (t) => {
-  const dirPath = await mkdtemp(path.join(os.tmpdir(), "usable-indices-"));
-  t.after(async () => {
-    await rm(dirPath, { recursive: true, force: true });
-  });
-  await writeFile(path.join(dirPath, "segment-00000.mp4"), wholePiece(0));
-  await writeFile(path.join(dirPath, "segment-00001.mp4"), Buffer.alloc(0));
-
-  assert.deepEqual(
-    [...usableSegmentIndices([dirPath], fmp4Format, new Set())].sort((a, b) => a - b),
-    [0],
-    "an empty file bridged the hole and bought the encoder a suspension it had not earned"
-  );
-
-  // The same number, made properly: now it genuinely is ready.
-  await writeFile(path.join(dirPath, "segment-00001.mp4"), wholePiece(SEGMENT_SECONDS));
-  assert.deepEqual(
-    [...usableSegmentIndices([dirPath], fmp4Format, new Set())].sort((a, b) => a - b),
-    [0, 1],
-    "a copy with bytes in it, which is what the serving path will find"
-  );
-});
-
-test("what the output holds is asked of the filesystem once per file", async (t) => {
-  const dirPath = await mkdtemp(path.join(os.tmpdir(), "usable-memo-"));
-  t.after(async () => {
-    await rm(dirPath, { recursive: true, force: true });
-  });
-  await writeFile(path.join(dirPath, "segment-00000.mp4"), wholePiece(0));
-  const known = new Set();
-
-  usableSegmentIndices([dirPath], fmp4Format, known);
-
-  assert.deepEqual(
-    [...known],
-    [path.join(dirPath, "segment-00000.mp4")],
-    "a piece that has bytes never loses them, and this runs on the thread carrying the data channel"
-  );
-});

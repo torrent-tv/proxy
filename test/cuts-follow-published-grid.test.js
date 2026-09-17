@@ -19,7 +19,8 @@ import { computeCutGrid } from "../services/output/cut-grid.js";
 import { Timeline } from "../services/output/Timeline.js";
 import test from "node:test";
 
-import { HlsSessionManager, segmentCutTimesFrom } from "../services/hls-session-manager.js";
+import { wireOutputs } from "../services/serving/wire-outputs.js";
+import { segmentCutTimesFrom } from "../services/encode/run-command.js";
 
 /** What the playlist in the player's hands says. */
 const PUBLISHED = [0, 4.004, 8.008, 12.012, 16.016, 20.02];
@@ -29,10 +30,10 @@ const CORRECTED = [0, 4.004, 6.006, 12.012, 14.014, 20.02];
 /**
  * A session that has published one grid and since corrected another.
  *
- * @returns {{ manager: HlsSessionManager, session: object }}
+ * @returns {{ manager: object, session: object }}
  */
 function sessionWithDriftedGrid() {
-  const manager = new HlsSessionManager({
+  const manager = wireOutputs({
     enabled: true,
     ffmpegBin: "ffmpeg",
     localBindHost: "127.0.0.1",
@@ -47,7 +48,7 @@ function sessionWithDriftedGrid() {
 
 test("the cut list is the one the playlist was written from", () => {
   const { manager, session } = sessionWithDriftedGrid();
-  const grid = manager.publishedGridFor(session);
+  const grid = manager.outputTimes.publishedGridFor(session);
   assert.deepEqual(grid, PUBLISHED);
   // Interior cuts of a run starting at #1, rebased on the run's own start
   // (4.004 s), and stopping before the last entry, which is the file's end.
@@ -60,7 +61,7 @@ test("the cut list is the one the playlist was written from", () => {
 test("a corrected grid does not move the cuts of a session already being read", () => {
   const { manager, session } = sessionWithDriftedGrid();
   const fromCorrected = segmentCutTimesFrom(session.timeline.boundaries, 1);
-  const fromPublished = segmentCutTimesFrom(manager.publishedGridFor(session), 1);
+  const fromPublished = segmentCutTimesFrom(manager.outputTimes.publishedGridFor(session), 1);
   assert.notDeepEqual(fromCorrected, fromPublished);
   // The gap the field measured: the corrected table would have cut #2 two
   // seconds early, which is four times what a player bridges.
@@ -70,7 +71,7 @@ test("a corrected grid does not move the cuts of a session already being read", 
 test("a session that published no grid falls back to the live one", () => {
   const { manager } = sessionWithDriftedGrid();
   const session = { id: "no-playlist", timeline: new Timeline({ boundaries: [...CORRECTED], published: [], cutGrid: "uniform" }) };
-  assert.deepEqual(manager.publishedGridFor(session), CORRECTED);
+  assert.deepEqual(manager.outputTimes.publishedGridFor(session), CORRECTED);
 });
 
 test("no segment is left shorter than a segment at the end of the film", () => {

@@ -2,9 +2,9 @@
  * @file Selectable HLS segment container formats.
  *
  * Everything that differs between fMP4/CMAF and MPEG-TS output lives behind one
- * interface, so `hls-session-manager` never branches on the container: it holds
- * a format object and asks it. Adding a container means adding a module here,
- * not editing the session manager.
+ * interface, so the encoding and the serving never branch on the container: they
+ * hold a format object and ask it. Adding a container means adding a module
+ * here, not editing either of them.
  *
  * The choice is per-proxy (CLI `--segment-format`), mirroring how Jellyfin lets
  * the operator pick the transcoding container. fMP4 is the default; MPEG-TS is

@@ -23,11 +23,11 @@ function hostWithA1080pOutput(t) {
     videoEncoder: { kind: "vaapi", name: "h264_vaapi", inputArgs: [] }
   });
   t.after(async () => {
-    await manager.disposeAll();
+    await manager.lifecycle.disposeAll();
     cleanup();
   });
-  manager.planEncodersNow = () => {};
-  manager.planEncodersSoon = () => {};
+  manager.encodeRuns.planEncodersNow = () => {};
+  manager.encodeRuns.planEncodersSoon = () => {};
   manager.getCachedMediaInfo = () => ({ durationSeconds: 400, width: 1920, height: 1080, fps: 24 });
   const spec = outputSpec({
     sourceKey: TORRENT,
@@ -73,7 +73,7 @@ function request(over) {
 
 test("the automatic choice is served by a better output whose piece at the viewer's position is made", async (t) => {
   const { manager, made } = hostWithA1080pOutput(t);
-  const answered = await manager.createOrGetSession(
+  const answered = await manager.viewerRequests.createOrGetSession(
     request({ consumerId: "auto-viewer", targetWidth: 1280, targetHeight: 720 })
   );
   assert.equal(answered, made);
@@ -83,7 +83,7 @@ test("a size picked by hand is not served by another size", async (t) => {
   const { manager, made } = hostWithA1080pOutput(t);
   let answered = null;
   try {
-    answered = await manager.createOrGetSession(
+    answered = await manager.viewerRequests.createOrGetSession(
       request({ consumerId: "picker", targetWidth: 1280, targetHeight: 720, exactSize: true })
     );
   } catch {
@@ -96,7 +96,7 @@ test("a step asked for by an automatic viewer and served by the picture leaves t
   const { manager, made } = hostWithA1080pOutput(t);
   manager.viewers.of(made, "auto-viewer").qualityMode = "auto";
 
-  const variant = await manager.resolveVariantSession(made.id, 720, 0, "auto-viewer");
+  const variant = await manager.renditions.resolveVariantSession(made.id, 720, 0, "auto-viewer");
 
   assert.equal(variant, made, "the picture already made at 1080p serves the 720p request");
   assert.notEqual(made.isStep, true, "and is not turned into a step of itself");

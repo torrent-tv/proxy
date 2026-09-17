@@ -52,7 +52,6 @@ import { Timeline } from "../services/output/Timeline.js";
 import { mkdtemp, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { HlsSessionManager } from "../services/hls-session-manager.js";
 import { audioRenditionKey } from "../services/encode/Renditions.js";
 import { managerWithOwnStore } from "./helpers/manager.js";
 import { viewerOf, viewersOf } from "../services/viewer/Viewer.js";
@@ -143,7 +142,7 @@ function startManagedRun(manager, output, options = {}) {
  * A base picture serving two viewers, with its audio published separately and
  * every rendition created by a stub instead of an encoder.
  *
- * @returns {Promise<{ manager: HlsSessionManager, base: object, dirPath: string, renditions: Map<string, object> }>}
+ * @returns {Promise<{ manager: object, base: object, dirPath: string, renditions: Map<string, object> }>}
  */
 async function pictureWithTwoViewers() {
   const dirPath = await mkdtemp(path.join(os.tmpdir(), "two-viewers-"));
@@ -152,7 +151,7 @@ async function pictureWithTwoViewers() {
   // These checks cover ownership changes made by viewer requests. Encoder
   // placement is covered by the plan tests and must not run asynchronously in
   // the middle of an assertion about the request path.
-  manager.planEncodersSoon = () => {};
+  manager.encodeRuns.planEncodersSoon = () => {};
   const base = fakeSession({ id: BASE_ID, dirPath, audioSeparate: true });
   // Both viewers are watching the picture, which is what keeps their choices
   // alive; a viewer whose head has expired holds no encoder.
@@ -169,7 +168,7 @@ async function pictureWithTwoViewers() {
 
   /** @type {Map<string, object>} */
   const renditions = new Map();
-  manager.createOrGetSession = async (params) => {
+  manager.viewerRequests.createOrGetSession = async (params) => {
     const key = audioRenditionKey(params.audioTrackIndex, params.transcodeAudio);
     const existing = renditions.get(key);
     if (existing) {
@@ -194,12 +193,12 @@ async function pictureWithTwoViewers() {
 test("one viewer fetching their soundtrack does not stop the other viewer's", async (t) => {
   const { manager, renditions, dirPath } = await pictureWithTwoViewers();
   t.after(async () => {
-    await manager.disposeAll();
+    await manager.lifecycle.disposeAll();
     await rm(dirPath, { recursive: true, force: true });
   });
 
-  const first = await manager.resolveAudioRenditionFile(BASE_ID, 0, "segment-00003.mp4", FIRST);
-  const second = await manager.resolveAudioRenditionFile(BASE_ID, 1, "segment-00003.mp4", SECOND);
+  const first = await manager.renditions.resolveAudioRenditionFile(BASE_ID, 0, "segment-00003.mp4", FIRST);
+  const second = await manager.renditions.resolveAudioRenditionFile(BASE_ID, 1, "segment-00003.mp4", SECOND);
 
   assert.notEqual(first.sessionId, second.sessionId, "two soundtracks are two encodes");
   for (const [key, rendition] of renditions) {
@@ -208,8 +207,8 @@ test("one viewer fetching their soundtrack does not stop the other viewer's", as
   }
 
   // And it holds under the traffic that actually happens: they alternate.
-  await manager.resolveAudioRenditionFile(BASE_ID, 0, "segment-00004.mp4", FIRST);
-  await manager.resolveAudioRenditionFile(BASE_ID, 1, "segment-00004.mp4", SECOND);
+  await manager.renditions.resolveAudioRenditionFile(BASE_ID, 0, "segment-00004.mp4", FIRST);
+  await manager.renditions.resolveAudioRenditionFile(BASE_ID, 1, "segment-00004.mp4", SECOND);
   for (const [key, rendition] of renditions) {
     assert.deepEqual([...rendition.runs][0]?.process?.signals ?? [], [], `nothing signalled ${key} on the second round`);
   }
@@ -218,15 +217,15 @@ test("one viewer fetching their soundtrack does not stop the other viewer's", as
 test("a soundtrack nobody is listening to any more is let go of", async (t) => {
   const { manager, base, renditions, dirPath } = await pictureWithTwoViewers();
   t.after(async () => {
-    await manager.disposeAll();
+    await manager.lifecycle.disposeAll();
     await rm(dirPath, { recursive: true, force: true });
   });
   // One viewer only, so what they leave is left for nobody. This is the case
   // the stop exists for: an encoder AND a reader holding pieces of the torrent.
   viewersOf(base).delete(SECOND);
 
-  await manager.resolveAudioRenditionFile(BASE_ID, 0, "segment-00003.mp4", FIRST);
-  await manager.resolveAudioRenditionFile(BASE_ID, 1, "segment-00004.mp4", FIRST);
+  await manager.renditions.resolveAudioRenditionFile(BASE_ID, 0, "segment-00003.mp4", FIRST);
+  await manager.renditions.resolveAudioRenditionFile(BASE_ID, 1, "segment-00004.mp4", FIRST);
 
   const left = renditions.get(audioRenditionKey(0, true));
   const moved = renditions.get(audioRenditionKey(1, true));
@@ -242,7 +241,7 @@ test("a soundtrack nobody is listening to any more is let go of", async (t) => {
 test("each viewer's browser decides for itself whether its soundtrack is re-encoded", async (t) => {
   const { manager, base, renditions, dirPath } = await pictureWithTwoViewers();
   t.after(async () => {
-    await manager.disposeAll();
+    await manager.lifecycle.disposeAll();
     await rm(dirPath, { recursive: true, force: true });
   });
   // The same track, two browsers: one can decode it as it stands, the other
@@ -251,8 +250,8 @@ test("each viewer's browser decides for itself whether its soundtrack is re-enco
   viewerOf(base, FIRST).audio = { trackIndex: 0, transcode: false };
   viewerOf(base, SECOND).audio = { trackIndex: 0, transcode: true };
 
-  const copied = await manager.resolveAudioRenditionFile(BASE_ID, 0, "segment-00003.mp4", FIRST);
-  const encoded = await manager.resolveAudioRenditionFile(BASE_ID, 0, "segment-00003.mp4", SECOND);
+  const copied = await manager.renditions.resolveAudioRenditionFile(BASE_ID, 0, "segment-00003.mp4", FIRST);
+  const encoded = await manager.renditions.resolveAudioRenditionFile(BASE_ID, 0, "segment-00003.mp4", SECOND);
 
   assert.notEqual(copied.sessionId, encoded.sessionId);
   assert.equal(renditions.get(audioRenditionKey(0, false)).transcodeAudio, false);
@@ -265,12 +264,12 @@ test("each viewer's browser decides for itself whether its soundtrack is re-enco
 test("the master marks each viewer's own soundtrack as the default one", async (t) => {
   const { manager, dirPath } = await pictureWithTwoViewers();
   t.after(async () => {
-    await manager.disposeAll();
+    await manager.lifecycle.disposeAll();
     await rm(dirPath, { recursive: true, force: true });
   });
 
-  const forFirst = manager.buildMasterPlaylist(BASE_ID, FIRST);
-  const forSecond = manager.buildMasterPlaylist(BASE_ID, SECOND);
+  const forFirst = manager.renditions.buildMasterPlaylist(BASE_ID, FIRST);
+  const forSecond = manager.renditions.buildMasterPlaylist(BASE_ID, SECOND);
 
   const defaultsOf = (master) =>
     [...master.matchAll(/^#EXT-X-MEDIA:.*?NAME="([^"]+)".*?DEFAULT=(YES|NO)/gm)]
@@ -284,12 +283,12 @@ test("the master marks each viewer's own soundtrack as the default one", async (
 test("one viewer changing quality does not take the other off their step", async (t) => {
   const { manager, base, dirPath } = await pictureWithTwoViewers();
   t.after(async () => {
-    await manager.disposeAll();
+    await manager.lifecycle.disposeAll();
     await rm(dirPath, { recursive: true, force: true });
   });
   /** @type {Map<number, object>} */
   const variants = new Map();
-  manager.createOrGetSession = async (params) => {
+  manager.viewerRequests.createOrGetSession = async (params) => {
     const height = params.targetHeight;
     const existing = variants.get(height);
     if (existing) {
@@ -307,19 +306,19 @@ test("one viewer changing quality does not take the other off their step", async
     return variant;
   };
 
-  await manager.resolveVariantFile(BASE_ID, 720, "segment-00003.mp4", FIRST);
-  await manager.resolveVariantFile(BASE_ID, 540, "segment-00003.mp4", SECOND);
+  await manager.renditions.resolveVariantFile(BASE_ID, 720, "segment-00003.mp4", FIRST);
+  await manager.renditions.resolveVariantFile(BASE_ID, 540, "segment-00003.mp4", SECOND);
   // Both viewers go on watching their own step, which is what a player does
   // every few seconds.
-  await manager.resolveVariantFile(BASE_ID, 720, "segment-00004.mp4", FIRST);
-  await manager.resolveVariantFile(BASE_ID, 540, "segment-00004.mp4", SECOND);
+  await manager.renditions.resolveVariantFile(BASE_ID, 720, "segment-00004.mp4", FIRST);
+  await manager.renditions.resolveVariantFile(BASE_ID, 540, "segment-00004.mp4", SECOND);
 
   assert.ok(encoding(manager, variants.get(720)), "the first viewer's step is still encoding");
   assert.ok(encoding(manager, variants.get(540)), "and so is the second viewer's");
 
   // Now the first viewer steps down. Theirs is left for nobody and stops; the
   // other viewer's is untouched.
-  await manager.resolveVariantFile(BASE_ID, 480, "segment-00005.mp4", FIRST);
+  await manager.renditions.resolveVariantFile(BASE_ID, 480, "segment-00005.mp4", FIRST);
 
   assert.equal(watched(variants.get(720)), false, "the step nobody is on is nobody's");
   assert.ok(watched(variants.get(540)), "the step the other viewer is watching stays theirs");
@@ -330,7 +329,7 @@ test("one viewer changing quality does not take the other off their step", async
 test("a step somebody is watching is never withdrawn from the offer", async (t) => {
   const { manager, base, dirPath } = await pictureWithTwoViewers();
   t.after(async () => {
-    await manager.disposeAll();
+    await manager.lifecycle.disposeAll();
     await rm(dirPath, { recursive: true, force: true });
   });
   // A host that can re-encode 240p and nothing above it — the shape of the
@@ -356,14 +355,14 @@ test("a step somebody is watching is never withdrawn from the offer", async (t) 
 
   // Nobody on it: measured below realtime, it is withdrawn. This half is the
   // control — without it the other half proves nothing.
-  const withoutAViewer = manager.offeredHeights(base);
+  const withoutAViewer = manager.quality.offeredHeights(base);
   assert.ok(
     !withoutAViewer.includes(720),
     `a step nobody is on and that cannot keep up is withdrawn: ${withoutAViewer.join(" ")}`
   );
 
   viewerOf(base, SECOND).activeVariantId = variant.id;
-  const withAViewer = manager.offeredHeights(base);
+  const withAViewer = manager.quality.offeredHeights(base);
 
   assert.ok(
     withAViewer.includes(720),
@@ -374,17 +373,17 @@ test("a step somebody is watching is never withdrawn from the offer", async (t) 
 test("a viewer whose picture has gone quiet holds no soundtrack encoder", async (t) => {
   const { manager, base, renditions, dirPath } = await pictureWithTwoViewers();
   t.after(async () => {
-    await manager.disposeAll();
+    await manager.lifecycle.disposeAll();
     await rm(dirPath, { recursive: true, force: true });
   });
-  await manager.resolveAudioRenditionFile(BASE_ID, 0, "segment-00003.mp4", FIRST);
-  await manager.resolveAudioRenditionFile(BASE_ID, 1, "segment-00003.mp4", SECOND);
+  await manager.renditions.resolveAudioRenditionFile(BASE_ID, 0, "segment-00003.mp4", FIRST);
+  await manager.renditions.resolveAudioRenditionFile(BASE_ID, 1, "segment-00003.mp4", SECOND);
   // The second viewer's tab is gone. Nothing releases the session when a
   // channel closes (roadmap item 54), so what expires is their head on the
   // picture — and with it their claim on an encoder.
   viewersOf(base).delete(SECOND);
 
-  await manager.resolveAudioRenditionFile(BASE_ID, 1, "segment-00004.mp4", FIRST);
+  await manager.renditions.resolveAudioRenditionFile(BASE_ID, 1, "segment-00004.mp4", FIRST);
 
   assert.equal(
     watched(renditions.get(audioRenditionKey(0, true))),

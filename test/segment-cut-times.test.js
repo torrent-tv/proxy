@@ -12,7 +12,7 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
-import { segmentCutTimesFrom } from "../services/hls-session-manager.js";
+import { segmentCutTimesFrom } from "../services/encode/run-command.js";
 
 test("cut times are the interior boundaries, rebased on the run start", () => {
   // Segments 0-10, 10-20, 20-30, 30-40 (file ends at 40).

@@ -3,8 +3,8 @@
  * segment: the recorded medians, the synthetic figure from the startup
  * measurement, and the file that keeps the medians across a restart.
  *
- * Moved out of `hls-session-manager.js` whole. The file is to be deleted once the
- * synthetic figure takes every term of the first-segment time as an input.
+ * Moved out of the session manager whole. The file it keeps is to be deleted once
+ * the synthetic figure takes every term of the first-segment time as an input.
  */
 
 import { readFileSync, writeFileSync } from "node:fs";

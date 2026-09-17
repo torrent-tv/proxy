@@ -17,7 +17,7 @@ import assert from "node:assert/strict";
 import { KeyframeTable } from "../services/media/container/KeyframeTable.js";
 import test from "node:test";
 
-import { seekLandingOffsetFor } from "../services/hls-session-manager.js";
+import { seekLandingOffsetFor } from "../services/encode/run-command.js";
 
 const OFFSET = 3 / 23;
 

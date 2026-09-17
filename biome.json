@@ -281,7 +281,7 @@
 								"patterns": [
 									{
 										"group": [
-											"../hls-session-manager.js",
+											"../serving/**",
 											"../controllers/**",
 											"../encode/**",
 											"../output/**",

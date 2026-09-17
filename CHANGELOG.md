@@ -1,5 +1,7 @@
 ## 2.87.0
 
+- **Chore**: `hls-session-manager.js` is deleted. Every member it had is a method of the component that owns it, and what was left — the constructor — is `serving/wire-outputs.js`, which builds the components and hands each the narrow host it reads. `server.js` gives each route the components that route asks of (`serving`, `viewerRequests`, `renditions`, `lifecycle`, `quality`, `outputs`) instead of one object answering everything; `bin/cli.js` reads them the same way. `usableSegmentIndices`, which nothing in the proxy called since the look-ahead was removed, is gone with its two checks. `test/manager-surface.test.js` now reads what each route asks of each component and fails when a component lacks it, checked by renaming one call.
+
 - **Chore**: What a viewer asks of the proxy — open an output of a file and be placed on it, state a new position, ask how far the material in front of them has got — is `serving/ViewerRequests.js` rather than six members of the session manager. The rules of `test/one-authority.test.js` that something must not come back are now asked of every file under `services/`, not of the session manager alone, where they passed as soon as the code moved; the seek check fails if it cannot find the seek.
 
 - **Chore**: How an output ends — disposed when nobody is left on it and it has stood idle, all at once on shutdown, a viewer released or gone — and the adoption at startup of segments an earlier process left behind are `serving/OutputLifecycle.js` rather than seven members of the session manager.

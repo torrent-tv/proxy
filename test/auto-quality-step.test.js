@@ -24,7 +24,6 @@ import { SourceFile } from "../services/source/SourceFile.js";
 import { Timeline } from "../services/output/Timeline.js";
 import { mkdir, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
-import { HlsSessionManager } from "../services/hls-session-manager.js";
 import { managerWithOwnStore } from "./helpers/manager.js";
 import { Output } from "../services/output/Output.js";
 import { viewerOf, viewersOf } from "../services/viewer/Viewer.js";
@@ -108,7 +107,7 @@ function fakeSession({ dirPath, transcodeVideo = true, cutGrid = transcodeVideo 
 
 /**
  * @param {{ transcodeVideo?: boolean, cutGrid?: string }} [options]
- * @returns {Promise<{ manager: HlsSessionManager, session: object, dirPath: string, restarts: number[] }>}
+ * @returns {Promise<{ manager: object, session: object, dirPath: string, restarts: number[] }>}
  */
 async function managerWithSession({ transcodeVideo = true, cutGrid } = {}) {
   // Its own store root — see `helpers/manager.js` for what sharing one cost.
@@ -161,7 +160,7 @@ async function produceSegments(session, bytesEach) {
 test("a picture that cannot be kept up with is asked for as another VARIANT, and its size is left alone", async (t) => {
   const { manager, session, dirPath } = await managerWithSession();
   t.after(async () => {
-    await manager.disposeAll();
+    await manager.lifecycle.disposeAll();
     await rm(dirPath, { recursive: true, force: true });
   });
 
@@ -171,7 +170,7 @@ test("a picture that cannot be kept up with is asked for as another VARIANT, and
   session.budgetSlowSince = Date.now() - 60_000;
   session.recentSpeed = { speed: 0.7, at: Date.now(), run: [...session.runs][0] };
 
-  await manager.runQualityBudgetOnce();
+  await manager.quality.runQualityBudgetOnce();
 
   assert.equal(
     `${session.encodeWidth}x${session.encodeHeight}`,
@@ -188,17 +187,17 @@ test("a picture that cannot be kept up with is asked for as another VARIANT, and
 test("the request reaches the browser in the progress report, and stops once the viewer is there", async (t) => {
   const { manager, session, dirPath } = await managerWithSession();
   t.after(async () => {
-    await manager.disposeAll();
+    await manager.lifecycle.disposeAll();
     await rm(dirPath, { recursive: true, force: true });
   });
 
   session.qualityAsk = { height: 480, at: Date.now(), reason: "measured" };
-  const asked = await manager.getSessionProgress(BASE_ID);
+  const asked = await manager.viewerRequests.getSessionProgress(BASE_ID);
   assert.equal(asked.requestedHeight, 480, "the request travels with every progress report");
 
   // The player moved: the variant it is now watching IS the height asked for.
   session.variantHeight = 480;
-  const answered = await manager.getSessionProgress(BASE_ID);
+  const answered = await manager.viewerRequests.getSessionProgress(BASE_ID);
   assert.equal(answered.requestedHeight, 0, "a request the viewer has answered is not repeated");
   assert.equal(session.qualityAsk, null, "and it is let go of, not merely hidden");
 });
@@ -206,7 +205,7 @@ test("the request reaches the browser in the progress report, and stops once the
 test("a request the player never follows runs out instead of being repeated for the whole film", async (t) => {
   const { manager, session, dirPath } = await managerWithSession();
   t.after(async () => {
-    await manager.disposeAll();
+    await manager.lifecycle.disposeAll();
     await rm(dirPath, { recursive: true, force: true });
   });
 
@@ -214,7 +213,7 @@ test("a request the player never follows runs out instead of being repeated for 
   // stream with no variants. Neither is an error; both look the same from here.
   session.qualityAsk = { height: 480, at: Date.now() - 120_000, reason: "measured" };
 
-  const progress = await manager.getSessionProgress(BASE_ID);
+  const progress = await manager.viewerRequests.getSessionProgress(BASE_ID);
 
   assert.equal(progress.requestedHeight, 0);
   assert.equal(session.qualityAsk, null, "said once and let go");
@@ -223,7 +222,7 @@ test("a request the player never follows runs out instead of being repeated for 
 test("a COPIED picture is never asked to slow its encoder, because it has none", async (t) => {
   const { manager, session, dirPath } = await managerWithSession({ transcodeVideo: false });
   t.after(async () => {
-    await manager.disposeAll();
+    await manager.lifecycle.disposeAll();
     await rm(dirPath, { recursive: true, force: true });
   });
 
@@ -232,7 +231,7 @@ test("a COPIED picture is never asked to slow its encoder, because it has none",
   session.budgetSlowSince = Date.now() - 60_000;
   session.recentSpeed = { speed: 0.4, at: Date.now(), run: [...session.runs][0] };
 
-  await manager.runQualityBudgetOnce();
+  await manager.quality.runQualityBudgetOnce();
 
   assert.equal(session.qualityAsk, null, "the copy path's lever is the viewer's link, not the CPU");
 });
@@ -300,7 +299,7 @@ test("the size an init segment describes is read from the init, not assumed", ()
 test("a COPIED picture too thick for the viewer's link is asked for as a smaller VARIANT", async (t) => {
   const { manager, session, dirPath } = await managerWithSession({ transcodeVideo: false });
   t.after(async () => {
-    await manager.disposeAll();
+    await manager.lifecycle.disposeAll();
     await rm(dirPath, { recursive: true, force: true });
   });
 
@@ -310,7 +309,7 @@ test("a COPIED picture too thick for the viewer's link is asked for as a smaller
   viewerOf(session, "viewer").netReport = { linkMbps: 1.0, bufferedAheadSec: 1.5, positionSeconds: null, at: Date.now() };
   session.linkSlowSince = Date.now() - 60_000;
 
-  await manager.runQualityBudgetOnce();
+  await manager.quality.runQualityBudgetOnce();
 
   assert.ok(
     session.qualityAsk,
@@ -322,7 +321,7 @@ test("a COPIED picture too thick for the viewer's link is asked for as a smaller
 test("with two viewers the budget acts on the WORST link, not on whoever reported last", async (t) => {
   const { manager, session, dirPath } = await managerWithSession({ transcodeVideo: false });
   t.after(async () => {
-    await manager.disposeAll();
+    await manager.lifecycle.disposeAll();
     await rm(dirPath, { recursive: true, force: true });
   });
 
@@ -344,7 +343,7 @@ test("with two viewers the budget acts on the WORST link, not on whoever reporte
   };
   session.linkSlowSince = Date.now() - 60_000;
 
-  await manager.runQualityBudgetOnce();
+  await manager.quality.runQualityBudgetOnce();
 
   assert.ok(
     session.qualityAsk,
@@ -355,7 +354,7 @@ test("with two viewers the budget acts on the WORST link, not on whoever reporte
 test("a reading stops counting when the person leaves, not when it gets old", async (t) => {
   const { manager, session, dirPath } = await managerWithSession({ transcodeVideo: false });
   t.after(async () => {
-    await manager.disposeAll();
+    await manager.lifecycle.disposeAll();
     await rm(dirPath, { recursive: true, force: true });
   });
 
@@ -377,7 +376,7 @@ test("a reading stops counting when the person leaves, not when it gets old", as
   });
   session.linkSlowSince = Date.now() - 60_000;
 
-  await manager.runQualityBudgetOnce();
+  await manager.quality.runQualityBudgetOnce();
 
   assert.equal(viewersOf(session).size, 2, "the viewer is still known — silence is not leaving");
   // Their reading is not deleted anywhere: it is simply not theirs to give any
@@ -393,7 +392,7 @@ test("a reading stops counting when the person leaves, not when it gets old", as
 test("the way BACK UP exists, and a bitrate cap is lifted before the picture is enlarged", async (t) => {
   const { manager, session, dirPath } = await managerWithSession();
   t.after(async () => {
-    await manager.disposeAll();
+    await manager.lifecycle.disposeAll();
     await rm(dirPath, { recursive: true, force: true });
   });
 
@@ -405,7 +404,7 @@ test("the way BACK UP exists, and a bitrate cap is lifted before the picture is 
   session.recentSpeed = { speed: 2.4, at: Date.now(), run: [...session.runs][0] };
   session.budgetUpSince = Date.now() - 120_000;
 
-  await manager.runQualityBudgetOnce();
+  await manager.quality.runQualityBudgetOnce();
 
   assert.ok(session.qualityAsk, "for most of this project's life there was no step up at all");
   assert.equal(
@@ -418,7 +417,7 @@ test("the way BACK UP exists, and a bitrate cap is lifted before the picture is 
 test("a capped picture gets its own bitrate back before it is asked to grow", async (t) => {
   const { manager, session, dirPath } = await managerWithSession();
   t.after(async () => {
-    await manager.disposeAll();
+    await manager.lifecycle.disposeAll();
     await rm(dirPath, { recursive: true, force: true });
   });
 
@@ -433,7 +432,7 @@ test("a capped picture gets its own bitrate back before it is asked to grow", as
   // reading above came from, and replacing it here would make that reading
   // belong to a run that is gone — which is exactly what the comparison is for.
 
-  await manager.runQualityBudgetOnce().catch(() => undefined);
+  await manager.quality.runQualityBudgetOnce().catch(() => undefined);
 
   assert.equal(session.rateCapKbps, null, "the cap goes first: it is cheaper than enlarging the picture");
   assert.equal(
@@ -452,7 +451,7 @@ test("a stream that publishes no variants is left alone, and said so once", asyn
     cutGrid: "even"
   });
   t.after(async () => {
-    await manager.disposeAll();
+    await manager.lifecycle.disposeAll();
     await rm(dirPath, { recursive: true, force: true });
   });
 
@@ -460,7 +459,7 @@ test("a stream that publishes no variants is left alone, and said so once", asyn
   viewerOf(session, "viewer").netReport = { linkMbps: 1.0, bufferedAheadSec: 1.5, positionSeconds: null, at: Date.now() };
   session.linkSlowSince = Date.now() - 60_000;
 
-  await manager.runQualityBudgetOnce();
+  await manager.quality.runQualityBudgetOnce();
 
   assert.equal(session.qualityAsk, null, "asking a player with no variants to change variant is nothing");
   assert.equal(session.saidNoVariants, true, "and the reason is stated once, not once per window");
@@ -469,7 +468,7 @@ test("a stream that publishes no variants is left alone, and said so once", asyn
 test("a height this machine has been MEASURED failing at is not what the way back up offers", async (t) => {
   const { manager, session, dirPath } = await managerWithSession();
   t.after(async () => {
-    await manager.disposeAll();
+    await manager.lifecycle.disposeAll();
     await rm(dirPath, { recursive: true, force: true });
   });
 
@@ -482,7 +481,7 @@ test("a height this machine has been MEASURED failing at is not what the way bac
   session.lastAloneSpeed = 0.5;
   session.variantHeight = 720;
 
-  const offered = manager.offeredHeights(session);
+  const offered = manager.quality.offeredHeights(session);
 
   assert.ok(!offered.includes(720) || manager.outputs.variantHeightOf(session) === 720);
   // Now on the 480p variant: 720p has a reading of its own and must be gone.
@@ -490,7 +489,7 @@ test("a height this machine has been MEASURED failing at is not what the way bac
   session.encodeHeight = 480;
   session.encodeWidth = 854;
   assert.ok(
-    !manager.offeredHeights(session).includes(720),
+    !manager.quality.offeredHeights(session).includes(720),
     "a rung measured below realtime is withdrawn once the viewer has left it"
   );
 });
@@ -498,7 +497,7 @@ test("a height this machine has been MEASURED failing at is not what the way bac
 test("a cap is not lifted because there is no higher rung to compare against", async (t) => {
   const { manager, session, dirPath } = await managerWithSession();
   t.after(async () => {
-    await manager.disposeAll();
+    await manager.lifecycle.disposeAll();
     await rm(dirPath, { recursive: true, force: true });
   });
 
@@ -516,7 +515,7 @@ test("a cap is not lifted because there is no higher rung to compare against", a
   session.budgetUpSince = Date.now() - 120_000;
   viewerOf(session, "viewer").netReport = { linkMbps: 1.0, bufferedAheadSec: 30, positionSeconds: null, at: Date.now() };
 
-  await manager.runQualityBudgetOnce();
+  await manager.quality.runQualityBudgetOnce();
 
   assert.equal(session.rateCapKbps, 700, "the link still cannot carry this picture uncapped");
 });
@@ -524,7 +523,7 @@ test("a cap is not lifted because there is no higher rung to compare against", a
 test("a request is answered when the viewers watching are on that height, whoever they are", async (t) => {
   const { manager, session, dirPath } = await managerWithSession();
   t.after(async () => {
-    await manager.disposeAll();
+    await manager.lifecycle.disposeAll();
     await rm(dirPath, { recursive: true, force: true });
   });
   // A named viewer followed the request to a 480p step. The step is an output
@@ -536,7 +535,7 @@ test("a request is answered when the viewers watching are on that height, whoeve
   manager.viewers.of(session, "alice").activeVariantId = stepId;
 
   session.qualityAsk = { height: 480, at: Date.now(), reason: "measured" };
-  const answered = await manager.getSessionProgress(BASE_ID, "alice");
+  const answered = await manager.viewerRequests.getSessionProgress(BASE_ID, "alice");
 
   assert.equal(answered.requestedHeight, 0, "the viewer is on the height asked for");
   assert.equal(session.qualityAsk, null, "so the request is let go of");

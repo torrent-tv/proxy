@@ -18,10 +18,10 @@ import { serveSessionFile } from "../session-file/get.js";
 /**
  * @param {import("fastify").FastifyRequest} req
  * @param {import("fastify").FastifyReply} reply
- * @param {{ hlsSessionManager: import("../../../services/hls-session-manager.js").HlsSessionManager }} deps
+ * @param {{ renditions: object, serving: object, viewerRequests: object }} deps
  * @returns {Promise<void>}
  */
-export async function handleTranscodeVariantFileGet(req, reply, { hlsSessionManager }) {
+export async function handleTranscodeVariantFileGet(req, reply, { renditions, serving, viewerRequests }) {
   const baseSessionId = typeof req.params.sessionId === "string" ? req.params.sessionId : "";
   const height = Number(req.params.height);
   const fileName = typeof req.params.fileName === "string" ? req.params.fileName : "";
@@ -30,7 +30,7 @@ export async function handleTranscodeVariantFileGet(req, reply, { hlsSessionMana
   // a segment request is what says which rung a viewer is watching — read as
   // the session's own, one of them would take the other off their step.
   const consumerId = typeof req.query?.consumer === "string" ? req.query.consumer : "";
-  const resolved = await hlsSessionManager.resolveVariantFile(
+  const resolved = await renditions.resolveVariantFile(
     baseSessionId,
     height,
     fileName,
@@ -49,7 +49,8 @@ export async function handleTranscodeVariantFileGet(req, reply, { hlsSessionMana
   }
 
   return serveSessionFile(req, reply, {
-    hlsSessionManager,
+    serving,
+    viewerRequests,
     sessionId: resolved.sessionId,
     fileName
   });

@@ -29,7 +29,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, rmSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { HlsSessionManager } from "../services/hls-session-manager.js";
+import { wireOutputs } from "../services/serving/wire-outputs.js";
 import { SourceFile } from "../services/source/SourceFile.js";
 import { ENCODE_EXIT } from "../services/encode/encode-exit.js";
 import { outputSpec } from "./helpers/output-spec.js";
@@ -83,7 +83,7 @@ function failedFast(run, from) {
 test("a run that ended is still recognised as the session's own", (t) => {
   const dirPath = mkdtempSync(path.join(os.tmpdir(), "breaker-"));
   t.after(() => rmSync(dirPath, { recursive: true, force: true }));
-  const manager = new HlsSessionManager({
+  const manager = wireOutputs({
     enabled: true,
     ffmpegBin: "ffmpeg",
     localBindHost: "127.0.0.1",
@@ -93,7 +93,7 @@ test("a run that ended is still recognised as the session's own", (t) => {
   manager.outputs.set(SESSION_ID, session);
   manager.encodeOrchestrator.adopt(session.outputKey, run);
 
-  manager.noteRunEnded(session, run, failedFast(run, 0));
+  manager.encodeRuns.noteRunEnded(session, run, failedFast(run, 0));
 
   // If the identity were read after the removal, nothing here would have been
   // written: the handler would have returned at its second line.
@@ -110,7 +110,7 @@ test("a run that ended is still recognised as the session's own", (t) => {
 test("the count runs at segment 0, which is where a first start happens", (t) => {
   const dirPath = mkdtempSync(path.join(os.tmpdir(), "breaker-"));
   t.after(() => rmSync(dirPath, { recursive: true, force: true }));
-  const manager = new HlsSessionManager({
+  const manager = wireOutputs({
     enabled: true,
     ffmpegBin: "ffmpeg",
     localBindHost: "127.0.0.1",
@@ -122,7 +122,7 @@ test("the count runs at segment 0, which is where a first start happens", (t) =>
   for (let attempt = 1; attempt <= 3; attempt += 1) {
     const run = { from: 0, to: -1, argsDescribed: "ffmpeg …" };
     manager.encodeOrchestrator.adopt(session.outputKey, run);
-    manager.noteRunEnded(session, run, failedFast(run, 0));
+    manager.encodeRuns.noteRunEnded(session, run, failedFast(run, 0));
     assert.equal(manager.encodeOrchestrator.startFailureOf(session.outputKey).count, attempt);
     assert.equal(manager.encodeOrchestrator.mayStartAt(session.outputKey, 0), attempt < 3);
   }
@@ -132,7 +132,7 @@ test("the count runs at segment 0, which is where a first start happens", (t) =>
 test("real work resets the count, so a transient failure is not permanent", (t) => {
   const dirPath = mkdtempSync(path.join(os.tmpdir(), "breaker-"));
   t.after(() => rmSync(dirPath, { recursive: true, force: true }));
-  const manager = new HlsSessionManager({
+  const manager = wireOutputs({
     enabled: true,
     ffmpegBin: "ffmpeg",
     localBindHost: "127.0.0.1",
@@ -143,12 +143,12 @@ test("real work resets the count, so a transient failure is not permanent", (t) 
 
   const quick = { from: 0, to: -1 };
   manager.encodeOrchestrator.adopt(session.outputKey, quick);
-  manager.noteRunEnded(session, quick, failedFast(quick, 0));
+  manager.encodeRuns.noteRunEnded(session, quick, failedFast(quick, 0));
   assert.equal(manager.encodeOrchestrator.startFailureOf(session.outputKey).count, 1);
 
   const lived = { from: 0, to: -1 };
   manager.encodeOrchestrator.adopt(session.outputKey, lived);
-  manager.noteRunEnded(session, lived, { ...failedFast(lived, 0), livedMs: 30_000 });
+  manager.encodeRuns.noteRunEnded(session, lived, { ...failedFast(lived, 0), livedMs: 30_000 });
 
   assert.equal(manager.encodeOrchestrator.startFailureOf(session.outputKey).count, 0, "a run that did real work is not a failing start");
   assert.equal(manager.encodeOrchestrator.startFailureOf(session.outputKey).at, -1);
@@ -157,23 +157,23 @@ test("real work resets the count, so a transient failure is not permanent", (t) 
 test("a failure belongs to the output it happened on, not to the next output of the same address", async (t) => {
   const dirPath = mkdtempSync(path.join(os.tmpdir(), "breaker-"));
   t.after(() => rmSync(dirPath, { recursive: true, force: true }));
-  const manager = new HlsSessionManager({
+  const manager = wireOutputs({
     enabled: true,
     ffmpegBin: "ffmpeg",
     localBindHost: "127.0.0.1",
     localPort: 9090
   });
-  t.after(() => manager.disposeAll());
+  t.after(() => manager.lifecycle.disposeAll());
   const { session } = sessionWithARun(dirPath);
   manager.outputs.set(SESSION_ID, session);
   for (let attempt = 1; attempt <= 3; attempt += 1) {
     const run = { from: 0, to: -1, argsDescribed: "ffmpeg …" };
     manager.encodeOrchestrator.adopt(session.outputKey, run);
-    manager.noteRunEnded(session, run, failedFast(run, 0));
+    manager.encodeRuns.noteRunEnded(session, run, failedFast(run, 0));
   }
   assert.equal(manager.encodeOrchestrator.mayStartAt(session.outputKey, 0), false, "the first output is blocked");
 
-  await manager.disposeSession(SESSION_ID);
+  await manager.lifecycle.disposeSession(SESSION_ID);
 
   // The same parameters opened again: the name follows from the key, so the
   // new output has the same address. What failed on the disposed one is not a
@@ -186,7 +186,7 @@ test("a failure belongs to the output it happened on, not to the next output of 
 test("a run ending after its output was disposed leaves nothing behind for the next output", (t) => {
   const dirPath = mkdtempSync(path.join(os.tmpdir(), "breaker-"));
   t.after(() => rmSync(dirPath, { recursive: true, force: true }));
-  const manager = new HlsSessionManager({
+  const manager = wireOutputs({
     enabled: true,
     ffmpegBin: "ffmpeg",
     localBindHost: "127.0.0.1",
@@ -195,7 +195,7 @@ test("a run ending after its output was disposed leaves nothing behind for the n
   const { session, run } = sessionWithARun(dirPath);
   manager.encodeOrchestrator.adopt(session.outputKey, run);
   // Disposal removed the output from the registry; its process ends later.
-  manager.noteRunEnded(session, run, failedFast(run, 0));
+  manager.encodeRuns.noteRunEnded(session, run, failedFast(run, 0));
 
   assert.equal(manager.encodeOrchestrator.stateOf(session.outputKey), "IDLE");
   assert.equal(manager.encodeOrchestrator.errorOf(session.outputKey), "");

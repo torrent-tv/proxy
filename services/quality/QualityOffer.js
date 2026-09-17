@@ -341,7 +341,7 @@ export class QualityOffer {
    * The one rung whose cost does not depend on the machine: the source's own
    * height, on a base whose video is not re-encoded. `offeredHeights` never
    * withdraws it for that reason, so it is always available as somewhere to
-   * return to — which is exactly what {@link HlsSessionManager##askLowerHeight}
+   * return to — which is exactly what `QualityController#askLowerHeight`
    * had no way to say.
    *
    * @param {HlsSession} base

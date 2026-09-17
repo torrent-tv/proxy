@@ -6,7 +6,7 @@
  *
  * @param {import("fastify").FastifyRequest} req
  * @param {import("fastify").FastifyReply} reply
- * @param {{ hlsSessionManager: import("../../../../services/hls-session-manager.js").HlsSessionManager }} deps
+ * @param {{ lifecycle: object }} deps
  * @returns {Promise<void>}
  */
 
@@ -24,7 +24,7 @@ function getPayload(body) {
   return {};
 }
 
-export async function handleApiTranscodeSessionReleasePost(req, reply, { hlsSessionManager }) {
+export async function handleApiTranscodeSessionReleasePost(req, reply, { lifecycle }) {
   const sessionId = typeof req.params.sessionId === "string" ? req.params.sessionId : "";
   const payload = getPayload(req.body);
   const consumerId = typeof payload.consumerId === "string" ? payload.consumerId.trim() : "";
@@ -33,7 +33,7 @@ export async function handleApiTranscodeSessionReleasePost(req, reply, { hlsSess
     return reply.code(400).send({ error: "sessionId and consumerId are required." });
   }
 
-  const released = await hlsSessionManager.releaseSessionConsumer(sessionId, consumerId, reason);
+  const released = await lifecycle.releaseSessionConsumer(sessionId, consumerId, reason);
   if (!released) {
     return reply.code(404).send({ error: "Transcode session was not found." });
   }

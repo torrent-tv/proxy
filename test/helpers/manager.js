@@ -25,7 +25,7 @@
 import { mkdtempSync, rmSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { HlsSessionManager } from "../../services/hls-session-manager.js";
+import { wireOutputs } from "../../services/serving/wire-outputs.js";
 import { SegmentStore } from "../../services/segment-store/SegmentStore.js";
 
 /**
@@ -34,13 +34,13 @@ import { SegmentStore } from "../../services/segment-store/SegmentStore.js";
  * @param {object} [options] - Passed to the manager, over the defaults below.
  *   A `segmentStore` given here wins, for a test that wants to watch the store
  *   itself.
- * @returns {{ manager: HlsSessionManager, store: SegmentStore, root: string,
+ * @returns {{ manager: object, store: SegmentStore, root: string,
  *   cleanup: () => void }} `cleanup` removes the root; call it from `t.after`.
  */
 export function managerWithOwnStore(options = {}) {
   const root = mkdtempSync(path.join(os.tmpdir(), "ttv-store-"));
   const store = options.segmentStore ?? new SegmentStore({ root });
-  const manager = new HlsSessionManager({
+  const manager = wireOutputs({
     enabled: true,
     ffmpegBin: "ffmpeg",
     localBindHost: "127.0.0.1",

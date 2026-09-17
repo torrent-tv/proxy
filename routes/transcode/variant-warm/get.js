@@ -21,10 +21,10 @@ const WARM_WAIT_MS = 30_000;
 /**
  * @param {import("fastify").FastifyRequest} req
  * @param {import("fastify").FastifyReply} reply
- * @param {{ hlsSessionManager: import("../../../services/hls-session-manager.js").HlsSessionManager }} deps
+ * @param {{ renditions: object, serving: object, viewerRequests: object }} deps
  * @returns {Promise<void>}
  */
-export async function handleTranscodeVariantWarmGet(req, reply, { hlsSessionManager }) {
+export async function handleTranscodeVariantWarmGet(req, reply, { renditions, serving, viewerRequests }) {
   const baseSessionId = typeof req.params.sessionId === "string" ? req.params.sessionId : "";
   const height = Number(req.params.height);
   const positionSeconds = Number(req.query?.position);
@@ -35,7 +35,7 @@ export async function handleTranscodeVariantWarmGet(req, reply, { hlsSessionMana
 
   let prepared;
   try {
-    prepared = await hlsSessionManager.prepareVariant(baseSessionId, height, positionSeconds);
+    prepared = await renditions.prepareVariant(baseSessionId, height, positionSeconds);
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     reply.header("Retry-After", "1");
@@ -46,7 +46,7 @@ export async function handleTranscodeVariantWarmGet(req, reply, { hlsSessionMana
   }
 
   const result = await waitForSessionFile(
-    hlsSessionManager,
+    serving,
     prepared.sessionId,
     prepared.fileName,
     WARM_WAIT_MS

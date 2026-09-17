@@ -22,7 +22,8 @@ import assert from "node:assert/strict";
 import { Timeline } from "../services/output/Timeline.js";
 import test from "node:test";
 
-import { HlsSessionManager, segmentCutTimesFrom } from "../services/hls-session-manager.js";
+import { wireOutputs } from "../services/serving/wire-outputs.js";
+import { segmentCutTimesFrom } from "../services/encode/run-command.js";
 import { describeGridDrift } from "../services/encode/OutputTimes.js";
 
 /** What the playlist in the player's hands says. */
@@ -31,10 +32,10 @@ const PUBLISHED = [0, 8.342, 16.684, 25.026, 33.368, 41.71];
 const CORRECTED = [0, 8.342, 14.682, 25.026, 31.366, 41.71];
 
 /**
- * @returns {{ manager: HlsSessionManager, session: object }}
+ * @returns {{ manager: object, session: object }}
  */
 function sessionWithDriftedGrid() {
-  const manager = new HlsSessionManager({
+  const manager = wireOutputs({
     enabled: true,
     ffmpegBin: "ffmpeg",
     localBindHost: "127.0.0.1",
@@ -49,14 +50,14 @@ function sessionWithDriftedGrid() {
 
 test("a run starts at the time the player was told, not at the corrected one", () => {
   const { manager, session } = sessionWithDriftedGrid();
-  assert.equal(manager.runStartTimeFor(session, 2), 16.684);
-  assert.notEqual(manager.runStartTimeFor(session, 2), session.timeline.boundaries[2]);
+  assert.equal(manager.outputTimes.runStartTimeFor(session, 2), 16.684);
+  assert.notEqual(manager.outputTimes.runStartTimeFor(session, 2), session.timeline.boundaries[2]);
 });
 
 test("position and cut list come from the same table", () => {
   const { manager, session } = sessionWithDriftedGrid();
-  const grid = manager.publishedGridFor(session);
-  const start = manager.runStartTimeFor(session, 2);
+  const grid = manager.outputTimes.publishedGridFor(session);
+  const start = manager.outputTimes.runStartTimeFor(session, 2);
   // The cut list is stated as offsets from where the run begins. Adding the
   // position back must land on the published boundaries exactly — which is the
   // property that was false while the two came from different tables.
@@ -67,13 +68,13 @@ test("position and cut list come from the same table", () => {
 test("a session that published no grid positions on the live one", () => {
   const { manager } = sessionWithDriftedGrid();
   const session = { id: "no-playlist", timeline: new Timeline({ boundaries: [...CORRECTED], published: [], cutGrid: "uniform" }) };
-  assert.equal(manager.runStartTimeFor(session, 2), CORRECTED[2]);
+  assert.equal(manager.outputTimes.runStartTimeFor(session, 2), CORRECTED[2]);
 });
 
 test("an index beyond the table is clamped rather than returning nothing", () => {
   const { manager, session } = sessionWithDriftedGrid();
-  assert.equal(manager.runStartTimeFor(session, 9999), PUBLISHED[PUBLISHED.length - 1]);
-  assert.equal(manager.runStartTimeFor(session, -3), PUBLISHED[0]);
+  assert.equal(manager.outputTimes.runStartTimeFor(session, 9999), PUBLISHED[PUBLISHED.length - 1]);
+  assert.equal(manager.outputTimes.runStartTimeFor(session, -3), PUBLISHED[0]);
 });
 
 test("the drift between the two tables is stated in full", () => {

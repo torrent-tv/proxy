@@ -14,7 +14,7 @@ import { Timeline } from "../services/output/Timeline.js";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { HlsSessionManager } from "../services/hls-session-manager.js";
+import { wireOutputs } from "../services/serving/wire-outputs.js";
 import { SegmentStore } from "../services/segment-store/SegmentStore.js";
 import { fmp4Format } from "../services/segment-formats/fmp4.js";
 import { viewerOf } from "../services/viewer/Viewer.js";
@@ -26,7 +26,7 @@ const KEY = "torrent:abc:fmt=fmp4:grid=kf@0:video-only:v=0/copy";
 function managerWithAnOutput() {
   const root = mkdtempSync(path.join(os.tmpdir(), "orchestrator-wired-"));
   const store = new SegmentStore({ root });
-  const manager = new HlsSessionManager({
+  const manager = wireOutputs({
     enabled: true,
     ffmpegBin: "ffmpeg",
     localBindHost: "127.0.0.1",
@@ -82,8 +82,8 @@ test("a session is handed to the plan as the run it is", (t) => {
   manager.outputs.set(session.id, session);
   viewerOf(session, "watching").position = { segment: 12, seconds: 48, at: Date.now() };
 
-  manager.runQualityBudgetOnce;
-  manager.planEncodersNow();
+  manager.quality.runQualityBudgetOnce;
+  manager.encodeRuns.planEncodersNow();
 
   const runs = manager.encodeOrchestrator.runsOn(KEY);
   assert.equal(runs.length, 1, "the session the browser already has is a run like any other");
@@ -100,7 +100,7 @@ test("what a viewer waits for reaches the plan without their name", (t) => {
   manager.outputs.set(session.id, session);
   viewerOf(session, "someone").position = { segment: 5, seconds: 20, at: Date.now() };
 
-  manager.planEncodersNow();
+  manager.encodeRuns.planEncodersNow();
 
   // THE MAP IS BANDS NOW, not one window per viewer: what a viewer is stopped
   // on, then what is in front of them band by band, then the rest of the track.
@@ -126,13 +126,13 @@ test("a viewer who has gone stops being waited for, and silence alone never coun
   // TEN MINUTES OF SILENCE IS NOT LEAVING. A paused viewer, a hidden tab whose
   // timers the browser has throttled, and one holding a full cushion are all
   // silent and all still watching, so what they want is still wanted.
-  manager.planEncodersNow();
+  manager.encodeRuns.planEncodersNow();
   assert.ok(manager.encodeOrchestrator.demand.mapOn(KEY).length > 0, "still watching");
 
   // Something SAYS they are gone — the browser released the session, or their
   // connection closed. That is the only way out.
   manager.viewers.leaves(session, "gone");
-  manager.planEncodersNow();
+  manager.encodeRuns.planEncodersNow();
   assert.equal(manager.encodeOrchestrator.demand.mapOn(KEY).length, 0);
 });
 
@@ -150,7 +150,7 @@ test("a viewer who has arrived and asked for nothing is waited for", (t) => {
   const fresh = manager.viewers.of(session, "fresh");
   assert.equal(fresh.position, null, "nobody has placed them");
 
-  manager.planEncodersNow();
+  manager.encodeRuns.planEncodersNow();
 
   const wanted = manager.encodeOrchestrator.demand.mapOn(KEY);
   assert.ok(wanted.length > 0, "an output with a viewer on it is wanted");
@@ -165,23 +165,23 @@ test("how many encoders the machine affords is measured, not chosen", (t) => {
   // Nothing measured yet: one is what it has.
   const cold = sessionOn({ manager, id: "cold", dirPath });
   manager.outputs.set(cold.id, cold);
-  assert.equal(manager.maxRunsForOutput(KEY), 1);
+  assert.equal(manager.encodeRuns.maxRunsForOutput(KEY), 1);
 
   // Fast, but what a second job costs on THIS machine has not been measured,
   // and an unmeasured penalty of 1 is not a statement that it is free.
   cold.lastAloneSpeed = 7.12;
-  assert.equal(manager.maxRunsForOutput(KEY), 1, "no measurement, no second encoder");
+  assert.equal(manager.encodeRuns.maxRunsForOutput(KEY), 1, "no measurement, no second encoder");
 
   // Measured on the addon host 2026-09-03: at 854x480 one run made 7.12x and
   // two made 4.20x and 4.16x, a penalty of 1.70x, and both stayed far above
   // realtime.
   manager.contentionPenalties = new Map([[1, 1.7]]);
-  assert.ok(manager.maxRunsForOutput(KEY) > 1, "measured, and a second fits");
+  assert.ok(manager.encodeRuns.maxRunsForOutput(KEY) > 1, "measured, and a second fits");
 
   // The same host at 1920x1080: one made 1.96x, two made 0.99x and 0.98x.
   manager.contentionPenalties = new Map([[1, 1.98]]);
   cold.lastAloneSpeed = 1.96;
-  assert.equal(manager.maxRunsForOutput(KEY), 1, "the machine is full at one");
+  assert.equal(manager.encodeRuns.maxRunsForOutput(KEY), 1, "the machine is full at one");
 });
 
 test("segments already made are known to the plan, whoever made them", (t) => {
@@ -194,7 +194,7 @@ test("segments already made are known to the plan, whoever made them", (t) => {
   const session = sessionOn({ manager, id: "one", dirPath });
   manager.outputs.set(session.id, session);
 
-  manager.planEncodersNow();
+  manager.encodeRuns.planEncodersNow();
 
   const coverage = manager.encodeOrchestrator.coverageOf(KEY);
   assert.equal(coverage.isReady(0), true);

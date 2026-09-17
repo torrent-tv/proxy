@@ -4,7 +4,7 @@
 # The encoder run — states and transitions
 
 One run of one ffmpeg inside one transcode session. The table this is drawn
-from is executed by `services/hls-session-manager.js`; every transition a real
+from is executed by `services/encode/EncodeRuns.js`; every transition a real
 run makes is logged as state, event and target, so a run that takes an edge
 absent here is a violation the log names.
 

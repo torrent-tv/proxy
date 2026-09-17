@@ -91,9 +91,9 @@ test("the throughput benchmark is given the encoder that will actually run", () 
 test("a start and a stop are measured before any viewer, and reach the plan", () => {
   const server = readFileSync(path.join(HERE, "..", "server.js"), "utf8");
   assert.match(server, /await measureStartAndStop\(/, "nothing measures a start at startup");
-  assert.match(server, /\n    startStopCost,/, "the reading never reaches the session manager");
+  assert.match(server, /\n    startStopCost,/, "the reading never reaches the wiring of the encoding");
 
-  const manager = readFileSync(path.join(HERE, "..", "services", "hls-session-manager.js"), "utf8");
+  const manager = readFileSync(path.join(HERE, "..", "services", "serving", "wire-outputs.js"), "utf8");
   assert.match(
     manager,
     /noteStartupCosts\(startStopCost\)/,

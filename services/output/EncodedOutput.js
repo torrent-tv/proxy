@@ -11,8 +11,8 @@
  * pieces are valid while they exist.
  *
  * The second block of fields is TRANSITIONAL. Each is state of another owner
- * that is still kept here because the code that reads it has not left
- * `hls-session-manager.js` yet, and each names where it goes. The list is the
+ * that is still kept here because the component that reads it has not taken
+ * it over yet, and each names where it goes. The list is the
  * inventory of what is left to move; a field is deleted from here when it
  * moves, never added.
  */

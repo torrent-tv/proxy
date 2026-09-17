@@ -16,7 +16,7 @@ import assert from "node:assert/strict";
 import { Timeline } from "../services/output/Timeline.js";
 import test from "node:test";
 
-import { onKeyframeGridFor } from "../services/hls-session-manager.js";
+import { onKeyframeGridFor } from "../services/encode/run-command.js";
 
 test("a copied picture works on the source's timeline", () => {
   assert.equal(

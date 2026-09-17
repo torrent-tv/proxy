@@ -24,10 +24,10 @@
  *
  * @param {import("fastify").FastifyRequest} req
  * @param {import("fastify").FastifyReply} reply
- * @param {{ hlsSessionManager: import("../../../../services/hls-session-manager.js").HlsSessionManager }} deps
+ * @param {{ serving: object }} deps
  * @returns {Promise<void>}
  */
-export async function handleApiTranscodeSessionFragmentFarPost(req, reply, { hlsSessionManager }) {
+export async function handleApiTranscodeSessionFragmentFarPost(req, reply, { serving }) {
   const sessionId = typeof req.params.sessionId === "string" ? req.params.sessionId : "";
   const body = req.body && typeof req.body === "object" && !Array.isArray(req.body) ? req.body : {};
   const sn = Number(body.sn);
@@ -46,7 +46,7 @@ export async function handleApiTranscodeSessionFragmentFarPost(req, reply, { hls
     return reply.code(400).send({ error: "sn (integer >=0), fragStartSec, bufferEndSec and currentTimeSec are required." });
   }
 
-  const recorded = hlsSessionManager.recordFragmentFar(sessionId, {
+  const recorded = serving.recordFragmentFar(sessionId, {
     sn,
     track,
     fragStartSec,

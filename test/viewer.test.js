@@ -13,7 +13,7 @@ import { SourceFile } from "../services/source/SourceFile.js";
 import { mkdtemp, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { HlsSessionManager } from "../services/hls-session-manager.js";
+import { wireOutputs } from "../services/serving/wire-outputs.js";
 import { Viewer, viewerOf, viewersOf } from "../services/viewer/Viewer.js";
 import { outputSpec } from "./helpers/output-spec.js";
 
@@ -102,7 +102,7 @@ test("releasing a consumer forgets everything that was true of them alone", asyn
   t.after(async () => {
     await rm(dirPath, { recursive: true, force: true });
   });
-  const manager = new HlsSessionManager({
+  const manager = wireOutputs({
     enabled: true,
     ffmpegBin: "ffmpeg",
     localBindHost: "127.0.0.1",
@@ -129,7 +129,7 @@ test("releasing a consumer forgets everything that was true of them alone", asyn
   leaving.position = { segment: 40, seconds: 160, at: Date.now() };
   manager.viewers.of(session, "staying").audio = { trackIndex: 0, transcode: false };
 
-  await manager.releaseSessionConsumer(SESSION_ID, "leaving", "the tab was closed");
+  await manager.lifecycle.releaseSessionConsumer(SESSION_ID, "leaving", "the tab was closed");
 
   assert.equal(viewersOf(session).has("leaving"), false, "one deletion, not six");
   assert.equal(viewersOf(session).has("staying"), true, "and it takes nobody else with it");

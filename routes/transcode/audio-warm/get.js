@@ -20,9 +20,9 @@ const WARM_WAIT_MS = 12_000;
 /**
  * @param {import("fastify").FastifyRequest} req
  * @param {import("fastify").FastifyReply} reply
- * @param {{ hlsSessionManager: import("../../../services/hls-session-manager.js").HlsSessionManager }} deps
+ * @param {{ renditions: object, serving: object, viewerRequests: object }} deps
  */
-export async function handleTranscodeAudioWarmGet(req, reply, { hlsSessionManager }) {
+export async function handleTranscodeAudioWarmGet(req, reply, { renditions, serving, viewerRequests }) {
   const baseSessionId = typeof req.params.sessionId === "string" ? req.params.sessionId : "";
   const trackIndex = Number(req.params.track);
   const positionSeconds = Number(req.query?.position);
@@ -43,7 +43,7 @@ export async function handleTranscodeAudioWarmGet(req, reply, { hlsSessionManage
 
   let prepared;
   try {
-    prepared = await hlsSessionManager.prepareAudioTrack(
+    prepared = await renditions.prepareAudioTrack(
       baseSessionId,
       trackIndex,
       positionSeconds,
@@ -59,7 +59,7 @@ export async function handleTranscodeAudioWarmGet(req, reply, { hlsSessionManage
   }
 
   const result = await waitForSessionFile(
-    hlsSessionManager,
+    serving,
     prepared.sessionId,
     prepared.fileName,
     WARM_WAIT_MS

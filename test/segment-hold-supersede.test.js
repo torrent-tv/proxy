@@ -68,7 +68,7 @@ test("a seek releases a held segment request instead of running out the hold", a
 
   const { reply, sent } = recordingReply();
   const startedAt = Date.now();
-  await handleTranscodeSessionFileGet(request("segment-00609.mp4"), reply, { hlsSessionManager });
+  await handleTranscodeSessionFileGet(request("segment-00609.mp4"), reply, { serving: hlsSessionManager, viewerRequests: hlsSessionManager });
   const heldMs = Date.now() - startedAt;
 
   assert.equal(sent.code, 503, "the player must get a retryable answer, not a stream");
@@ -91,7 +91,7 @@ test("without a seek the request is still held until the segment appears", async
   };
 
   const { reply, sent } = recordingReply();
-  await handleTranscodeSessionFileGet(request("segment-00610.mp4"), reply, { hlsSessionManager });
+  await handleTranscodeSessionFileGet(request("segment-00610.mp4"), reply, { serving: hlsSessionManager, viewerRequests: hlsSessionManager });
 
   assert.equal(sent.body, "bytes", "a segment that arrives late must still be served");
   assert.equal(sent.headers["content-type"], "video/mp4");

@@ -5,7 +5,7 @@
  *
  * @param {import("fastify").FastifyRequest} req
  * @param {import("fastify").FastifyReply} reply
- * @param {{ hlsSessionManager: import("../../../services/hls-session-manager.js").HlsSessionManager, sourceRegistry: object, torrentPool: object }} deps
+ * @param {{ viewerRequests: object, renditions: object, quality: object, outputs: object, lookaheadSeconds: number, sourceRegistry: object, torrentPool: object }} deps
  * @returns {Promise<void>}
  */
 
@@ -26,7 +26,7 @@ function getPayload(body) {
 }
 
 
-export async function handleApiTranscodeSessionsPost(req, reply, { hlsSessionManager, sourceRegistry, torrentPool }) {
+export async function handleApiTranscodeSessionsPost(req, reply, { viewerRequests, renditions, quality, outputs, lookaheadSeconds, sourceRegistry, torrentPool }) {
   const payload = getPayload(req.body);
   const sourceKey = typeof payload.sourceKey === "string" ? payload.sourceKey.trim() : "";
   const fileIndex = Number(payload.fileIndex);
@@ -60,7 +60,7 @@ export async function handleApiTranscodeSessionsPost(req, reply, { hlsSessionMan
   }
 
   try {
-    const session = await hlsSessionManager.createOrGetSession({
+    const session = await viewerRequests.createOrGetSession({
       sourceKey,
       fileIndex,
       transcodeVideo,
@@ -85,7 +85,7 @@ export async function handleApiTranscodeSessionsPost(req, reply, { hlsSessionMan
     // new one after what is already buffered. Absent for a copied video, whose
     // segments are cut at the source's own keyframes and so cannot be spliced
     // with a re-encoded rung.
-    const hasVariants = hlsSessionManager.buildMasterPlaylist(session.id) !== null;
+    const hasVariants = renditions.buildMasterPlaylist(session.id) !== null;
     return reply.send({
       sessionId: session.id,
       playlistPath: `/transcode/${session.id}/index.m3u8`,
@@ -96,7 +96,7 @@ export async function handleApiTranscodeSessionsPost(req, reply, { hlsSessionMan
             // the player to it, so loading the master costs nothing: an encoder
             // is already producing that height, and any other rung would be a
             // second cold start before the first frame.
-            variantHeight: hlsSessionManager.outputs.variantHeightOf(session)
+            variantHeight: outputs.variantHeightOf(session)
           }
         : {}),
       // The heights this host will actually serve this file at, largest first
@@ -105,18 +105,18 @@ export async function handleApiTranscodeSessionsPost(req, reply, { hlsSessionMan
       // it, it fell back to a ladder of its own invention and offered rungs the
       // proxy had just refused, and picking one re-opened the session at a
       // height measured at a third of realtime.
-      offeredHeights: hlsSessionManager.offeredHeights(session),
+      offeredHeights: quality.offeredHeights(session),
       // What this session's output will carry, stated rather than left to be
       // discovered. The browser checks what it actually got against this: a
       // track that never arrives is otherwise noticed only by its absence,
       // minutes later, as a black picture with working sound.
-      tracks: hlsSessionManager.declaredTracks(session),
+      tracks: renditions.declaredTracks(session),
       // How far ahead of the viewer this proxy lets the encoder run, in seconds
       // of playback. The browser sizes its own forward buffer from it, so the
       // two sides agree by construction instead of each carrying a constant of
       // its own — which is how the browser came to hold thirty seconds while
       // two minutes stood produced on disk (roadmap item 4).
-      lookaheadSeconds: hlsSessionManager.lookaheadSeconds
+      lookaheadSeconds: lookaheadSeconds
     });
   } catch (error) {
     if (error instanceof Error && error.code === "TRANSCODE_DISABLED") {

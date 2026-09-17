@@ -25,7 +25,7 @@ import assert from "node:assert/strict";
 import { mkdtemp, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { HlsSessionManager } from "../services/hls-session-manager.js";
+import { wireOutputs } from "../services/serving/wire-outputs.js";
 import { variantConsumerId } from "../services/encode/Renditions.js";
 import { Viewers } from "../services/viewer/Viewers.js";
 import { SourceFile } from "../services/source/SourceFile.js";
@@ -111,12 +111,12 @@ function fakeSession({ id, dirPath, file, encodeHeight = 0, audioOnly = false, i
  * of one file, and one viewer watching all three — which is what an ordinary
  * session looks like once the viewer has picked a language and a quality.
  *
- * @returns {Promise<{ manager: HlsSessionManager, base: object, step: object,
+ * @returns {Promise<{ manager: object, base: object, step: object,
  *   audio: object, dirPath: string, released: string[] }>}
  */
 async function pictureWithStepAndSoundtrack() {
   const dirPath = await mkdtemp(path.join(os.tmpdir(), "viewer-outputs-"));
-  const manager = new HlsSessionManager({
+  const manager = wireOutputs({
     enabled: true,
     ffmpegBin: "ffmpeg",
     localBindHost: "127.0.0.1",
@@ -146,9 +146,9 @@ test("a viewer who steps down, back to the picture's own height and down again k
   viewer.audio = { trackIndex: 1, transcode: true };
   viewer.position = { segment: 25, seconds: 100, at: Date.now() };
 
-  await manager.resolveVariantFile(BASE_ID, 540, "segment-00025.mp4", VIEWER);
-  await manager.resolveVariantFile(BASE_ID, 812, "segment-00026.mp4", VIEWER);
-  await manager.resolveVariantFile(BASE_ID, 540, "segment-00027.mp4", VIEWER);
+  await manager.renditions.resolveVariantFile(BASE_ID, 540, "segment-00025.mp4", VIEWER);
+  await manager.renditions.resolveVariantFile(BASE_ID, 812, "segment-00026.mp4", VIEWER);
+  await manager.renditions.resolveVariantFile(BASE_ID, 540, "segment-00027.mp4", VIEWER);
 
   const known = viewersOf(base).get(VIEWER);
   assert.ok(known, "the picture is the one id the browser holds — a viewer is never dropped from it");
@@ -174,7 +174,7 @@ test("a viewer leaving is subtracted from every output, and one nobody is left w
     "one viewer, one object, and it knows all three outputs it is watching"
   );
 
-  await manager.releaseSessionConsumer(BASE_ID, VIEWER, "the viewer left");
+  await manager.lifecycle.releaseSessionConsumer(BASE_ID, VIEWER, "the viewer left");
 
   assert.equal(manager.outputs.has(BASE_ID), false, "the picture goes with its last consumer");
   assert.equal(
@@ -202,7 +202,7 @@ test("an output somebody else is still watching is kept when one viewer leaves",
   manager.viewers.of(base, second).position = { segment: 25, seconds: 100, at: Date.now() };
   manager.viewers.of(audio, second);
 
-  await manager.releaseSessionConsumer(BASE_ID, VIEWER, "the first viewer left");
+  await manager.lifecycle.releaseSessionConsumer(BASE_ID, VIEWER, "the first viewer left");
 
   assert.equal(manager.outputs.has(BASE_ID), true, "the picture stays: it still has a consumer");
   assert.equal(
@@ -230,7 +230,7 @@ test("nothing is left wanting production once the last viewer has left", async (
   manager.viewers.of(step, VIEWER);
   manager.viewers.of(audio, VIEWER);
 
-  await manager.releaseSessionConsumer(BASE_ID, VIEWER, "the viewer left");
+  await manager.lifecycle.releaseSessionConsumer(BASE_ID, VIEWER, "the viewer left");
 
   // NOTHING HAS TO BE RELEASED, and that is the point of the shape. A claim per
   // viewer per output used to be held in the encoding layer and taken back one
@@ -242,7 +242,7 @@ test("nothing is left wanting production once the last viewer has left", async (
     const session = manager.outputs.get(id);
     assert.equal(session, undefined, `${id.slice(0, 8)} is let go with its last viewer`);
   }
-  manager.planEncodersNow();
+  manager.encodeRuns.planEncodersNow();
   for (const address of [base.outputKey, step.outputKey, audio.outputKey]) {
     assert.deepEqual(
       manager.encodeOrchestrator.demand.mapOn(address),

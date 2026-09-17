@@ -11,7 +11,7 @@ Written to be executed as specified. Read before coding:
   ~854), the segment-ready path (where segment 00000 first becomes
   servable — grep the long-poll the `routes/transcode/session-file/get.js`
   route uses).
-- `services/torrent-pool.js`: `prefetchFileEdges` (~line 608) — signature
+- `services/torrent/torrent-pool.js`: `prefetchFileEdges` (~line 608) — signature
   `(torrent, fileIndex, { headBytes, tailBytes, timeoutMs })`.
 - `server.js`: how `playbackPlanner` and `hlsSessionManager` are constructed
   and injected.

@@ -26,7 +26,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { wireOutputs } from "../../services/serving/wire-outputs.js";
-import { SegmentStore } from "../../services/segment-store/SegmentStore.js";
+import { SegmentStore } from "../../services/storage/segment-store/SegmentStore.js";
 
 /**
  * A manager whose produced segments live where nothing else can reach them.

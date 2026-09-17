@@ -38,7 +38,7 @@ test("one number, and both kinds of material read it", async () => {
   const here = path.dirname(fileURLToPath(import.meta.url));
   const read = (relative) => readFileSync(path.join(here, "..", relative), "utf8");
 
-  assert.match(read("services/torrent-pool.js"), /TORRENT_IDLE_TTL_MS = IDLE_KEEP_MS/);
+  assert.match(read("services/torrent/torrent-pool.js"), /TORRENT_IDLE_TTL_MS = IDLE_KEEP_MS/);
   assert.match(read("services/serving/OutputLifecycle.js"), /SEGMENT_STORE_IDLE_MS = IDLE_KEEP_MS/);
 });
 

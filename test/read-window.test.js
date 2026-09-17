@@ -31,8 +31,8 @@ import {
   nextWindowPieces,
   readFragments,
   readWindowFor
-} from "../services/torrent-worker/piece-reader.js";
-import { SharedPieceStore } from "../services/piece-store/shared-piece-store.js";
+} from "../services/torrent/worker/piece-reader.js";
+import { SharedPieceStore } from "../services/storage/piece-store/shared-piece-store.js";
 
 const PIECE = 1024;
 // The production window is 32 MB against 8 MiB pieces — four of them. Sized

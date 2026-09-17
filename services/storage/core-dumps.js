@@ -14,7 +14,7 @@
 import { readdir, rm, stat } from "node:fs/promises";
 import path from "node:path";
 
-import { logger } from "../utils/logger.js";
+import { logger } from "../../utils/logger.js";
 
 /** How many to keep, newest first. */
 export const CORE_DUMPS_KEPT = 2;

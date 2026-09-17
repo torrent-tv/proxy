@@ -14,7 +14,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { dhtNodeCount, parseBootstrapEntry, resolveDhtBootstrap } from "../services/torrent-pool.js";
+import { dhtNodeCount, parseBootstrapEntry, resolveDhtBootstrap } from "../services/torrent/torrent-pool.js";
 
 test("a bootstrap entry is split into host and port", () => {
   assert.deepEqual(parseBootstrapEntry("dht.libtorrent.org:25401"), {

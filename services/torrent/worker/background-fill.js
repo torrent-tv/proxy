@@ -19,7 +19,7 @@
  * this must not be asking the swarm for anything.
  *
  * WHY IT IS A READ AND NOT A SELECTION. `file.select()` claims every piece of a
- * file at once. `#syncSelections` in `torrent-pool.js` records what that cost
+ * file at once. `#syncSelections` in `torrent/torrent-pool.js` records what that cost
  * when it was done alongside the readers' own moving windows: a claim covering
  * everything always outranked the window, and a seek to 89.1 % of a 4.7 GB film
  * waited 93 s while the swarm fetched 2.47 GB in file order. So this walks the
@@ -27,7 +27,7 @@
  * is reading and gives it back.
  */
 
-import { logger } from "../../utils/logger.js";
+import { logger } from "../../../utils/logger.js";
 import { readersAreBlockedOn, stallsSeenOn } from "./piece-reader.js";
 
 /**

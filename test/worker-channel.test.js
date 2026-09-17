@@ -16,8 +16,8 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { MessageChannel } from "node:worker_threads";
-import { createSendStream, createReceiveStream, createCaller } from "../services/torrent-worker/channel.js";
-import { TorrentWorkerClient } from "../services/torrent-worker/client.js";
+import { createSendStream, createReceiveStream, createCaller } from "../services/torrent/worker/channel.js";
+import { TorrentWorkerClient } from "../services/torrent/worker/client.js";
 
 /**
  * A buffer standing in for one owned by WebTorrent's piece cache: allocated

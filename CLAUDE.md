@@ -27,11 +27,11 @@ Linux-only host (e.g. POSIX-only signals must degrade elsewhere).
     long-polls while a segment is being produced, returns retryable 503 (never
     202 — hls.js can't consume it).
 - `services/`:
-  - `demand/` — what anybody wants, in BYTES: `Window` (claimant, file, byte
+  - `torrent/demand/` — what anybody wants, in BYTES: `Window` (claimant, file, byte
     range, urgency), `Urgency` (BLOCKED / NEAR / AHEAD / TAIL / BEHIND),
     `DemandRegister` (live windows by claimant), `pieces.js` (the one place
     bytes become piece numbers). No WebTorrent, no piece store, no pieces.
-  - `download/` — `SwarmSelection`, the ONLY thing that calls `select`,
+  - `torrent/download/` — `SwarmSelection`, the ONLY thing that calls `select`,
     `deselect` or `critical`, and `registry.js`, which holds one per torrent and
     owns the cross-torrent rule that withholds the speculative levels while
     anything urgent is missing anywhere. See `docs/download-architecture.md`.
@@ -76,7 +76,7 @@ Linux-only host (e.g. POSIX-only signals must degrade elsewhere).
     the subtitle cue walk was the last, and it is handed which byte ranges of a
     file are downloaded WHOLE (one list per pass, not a question per cluster)
     plus a store read that never fetches, both in
-    `torrent-worker/held-bytes.js`. A piece arriving is ANNOUNCED
+    `torrent/worker/held-bytes.js`. A piece arriving is ANNOUNCED
     (`PIECES_ARRIVED`) rather than acted on there. Pinned by
     `test/the-torrent-thread-serves-bytes.test.js`.
   - `media/container/` — domain: `Container` (abstract, RFC 9559 / ISO 14496-12),
@@ -137,12 +137,12 @@ Linux-only host (e.g. POSIX-only signals must degrade elsewhere).
     a limit is the property they share; what holds them are three different
     things with different lifetimes, different addresses and different THREADS,
     so they are not flattened into one:
-      - `piece-store/` — the torrent's pieces: memory tier, spill tier, and the
+      - `storage/piece-store/` — the torrent's pieces: memory tier, spill tier, and the
         order they leave in (`shared-piece-store.js`, `piece-lru.js`,
         `piece-disk-store.js`). Lives in the torrent WORKER thread.
-      - `segment-store/` — the segments an encoder has produced
+      - `storage/segment-store/` — the segments an encoder has produced
         (`SegmentStore.js`), addressed by the output's own key. Main thread.
-      - `files/` — files downloaded whole and kept as files
+      - `storage/files/` — files downloaded whole and kept as files
         (`CompletedFiles.js`, `piece-from-whole-file.js`). Worker thread.
       - `storage/` — THE ONE BUDGET: how much of this machine the proxy may
         take, and how that is divided between everything that holds bytes.

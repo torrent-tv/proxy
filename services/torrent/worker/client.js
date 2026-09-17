@@ -17,7 +17,7 @@
 import { Worker } from "node:worker_threads";
 import { Readable } from "node:stream";
 import { fileURLToPath } from "node:url";
-import { logger, writeAlreadyDecided } from "../../utils/logger.js";
+import { logger, writeAlreadyDecided } from "../../../utils/logger.js";
 import { createCaller, createReceiveStream } from "./channel.js";
 import { Command, Event } from "./protocol.js";
 

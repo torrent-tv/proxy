@@ -10,7 +10,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { minimumBufferFrom, requiredSpeedFrom } from "../services/supply-margin.js";
+import { minimumBufferFrom, requiredSpeedFrom } from "../services/torrent/supply-margin.js";
 
 /**
  * Waits spaced by `intervalSec`, each lasting `waitSec`.

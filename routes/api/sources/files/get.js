@@ -19,7 +19,7 @@ import { contentsOf } from "../../../../services/torrent/Contents.js";
  * @param {import("fastify").FastifyReply} reply
  * @param {{
  *   sourceRegistry: ReturnType<import("../../../../store/source-registry.js").createSourceRegistry>,
- *   torrentPool: import("../../../../services/torrent-pool.js").TorrentPool
+ *   torrentPool: import("../../../../services/torrent/torrent-pool.js").TorrentPool
  * }} deps
  * @returns {Promise<void>}
  */

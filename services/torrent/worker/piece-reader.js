@@ -20,10 +20,10 @@
  *    with those bytes — not when they were sent, because nothing was sent.
  */
 
-import { findSharedStore } from "../piece-store/shared-piece-store.js";
+import { findSharedStore } from "../../storage/piece-store/shared-piece-store.js";
 import { bytesOf, Urgency, urgencyName } from "../demand/index.js";
 import { demandFor } from "../download/registry.js";
-import { logger } from "../../utils/logger.js";
+import { logger } from "../../../utils/logger.js";
 import {
   askFastestWiresFor,
   canPlaceRequests,

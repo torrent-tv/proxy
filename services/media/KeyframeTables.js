@@ -55,7 +55,7 @@ import { logger as defaultLogger } from "../../utils/logger.js";
  *
  * Those two figures are not a coincidence and they are what fixes this one:
  * they are TWO of the bound the read already has — `READ_ABANDON_MS` in
- * `torrent-worker/resume-warm.js`, one for the wait on the file's edges and
+ * `torrent/worker/resume-warm.js`, one for the wait on the file's edges and
  * one for the read itself, in series. A caller waiting for two of them is the
  * defect; waiting for one is the bound, and it leaves 2.4x over the slowest
  * table that did arrive. The line printed when it fires names which case

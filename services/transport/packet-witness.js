@@ -39,7 +39,7 @@ import { copyFile, readdir, rename, rm, stat } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 
-import { dumpsToRemove } from "../core-dumps.js";
+import { dumpsToRemove } from "../storage/core-dumps.js";
 
 /** Per-packet capture length. Small: headers are what the signatures need. */
 export const WITNESS_SNAPLEN_BYTES = 128;

@@ -13,7 +13,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { pieceFromWholeFiles, pieceIsInWholeFiles } from "../services/files/piece-from-whole-file.js";
+import { pieceFromWholeFiles, pieceIsInWholeFiles } from "../services/storage/files/piece-from-whole-file.js";
 
 const PIECE = 16;
 

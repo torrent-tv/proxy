@@ -11,7 +11,7 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
-import { describePieceTail } from "../services/torrent-worker/fastest-wires.js";
+import { describePieceTail } from "../services/torrent/worker/fastest-wires.js";
 
 /** A torrent whose piece has some blocks in hand and some in flight. */
 function torrentWith({ buffer, wires }) {

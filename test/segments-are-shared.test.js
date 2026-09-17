@@ -20,7 +20,7 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { wireOutputs } from "../services/serving/wire-outputs.js";
-import { SegmentStore } from "../services/segment-store/SegmentStore.js";
+import { SegmentStore } from "../services/storage/segment-store/SegmentStore.js";
 import { Timeline } from "../services/output/Timeline.js";
 import { fmp4Format } from "../services/segment-formats/fmp4.js";
 import { outputSpec } from "./helpers/output-spec.js";

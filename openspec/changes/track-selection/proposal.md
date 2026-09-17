@@ -40,6 +40,6 @@ subtitle streams were unreachable by the browser.
 
 - `services/playback-planner.js`, `services/hls-session-manager.js`,
   `routes/api/transcode-sessions/post.js`, new `routes/api/subtitles/get.js`,
-  `server.js` wiring, `services/torrent-pool.js` (log masking).
+  `server.js` wiring, `services/torrent/torrent-pool.js` (log masking).
 - Pairs with the server-side `track-selection-ui` change; requires the usual
   ha-addon bump.

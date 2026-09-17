@@ -39,7 +39,7 @@ import { handleTranscodeAudioFileGet } from "./routes/transcode/audio-file/get.j
 import { handleTranscodeVariantWarmGet } from "./routes/transcode/variant-warm/get.js";
 import { handleTranscodeAudioWarmGet } from "./routes/transcode/audio-warm/get.js";
 import { createSourceRegistry } from "./store/source-registry.js";
-import { WorkerTorrentPool } from "./services/torrent-worker/pool-adapter.js";
+import { WorkerTorrentPool } from "./services/torrent/worker/pool-adapter.js";
 import { wireOutputs } from "./services/serving/wire-outputs.js";
 import { createPlaybackPlanner } from "./services/media/playback-planner.js";
 import { KeyframeTables } from "./services/media/KeyframeTables.js";
@@ -56,7 +56,7 @@ import {
 import { detectVideoEncoder, benchmarkSoftwarePresets, benchmarkDecodeCost, benchmarkContention, benchmarkCopySpeed, detectTonemapSupport } from "./services/hwaccel.js";
 import { measureStartAndStop } from "./services/encode/start-stop-cost.js";
 import { logger } from "./utils/logger.js";
-import { completedFilesRoot } from "./services/files/CompletedFiles.js";
+import { completedFilesRoot } from "./services/storage/files/CompletedFiles.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -495,7 +495,7 @@ export async function startProxyServer({
     // spare. A bounded read of the file's whole length, NOT `file.select()`:
     // selecting a file alongside the readers' own windows is what made a seek
     // wait 93 s while the swarm fetched 2.47 GB in file order (see
-    // `#syncSelections` in `torrent-pool.js`).
+    // `#syncSelections` in `torrent/torrent-pool.js`).
     fetchWholeFile: async ({ sourceKey, fileIndex }) => {
       const record = sourceRegistry.get(sourceKey);
       if (!record) {

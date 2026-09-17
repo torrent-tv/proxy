@@ -19,7 +19,7 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
-import { isUsableTorrentHandle } from "../services/torrent-worker/handle-state.js";
+import { isUsableTorrentHandle } from "../services/torrent/worker/handle-state.js";
 
 test("a live torrent is usable", () => {
   assert.equal(isUsableTorrentHandle({ destroyed: false, files: [{ name: "a.mkv" }] }), true);

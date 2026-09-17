@@ -26,7 +26,7 @@ import { readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
-const WORKER = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../services/torrent-worker");
+const WORKER = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../services/torrent/worker");
 
 /**
  * @param {string} name

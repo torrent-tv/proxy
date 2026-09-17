@@ -262,7 +262,7 @@ function buildDirectUrl(localBaseUrl, sourceKey, fileIndex) {
  * @property {boolean} transcodeAudioEnabled
  * @property {string}  localBaseUrl
  * @property {ReturnType<import("../../store/source-registry.js").createSourceRegistry>} sourceRegistry
- * @property {import("../torrent-pool.js").TorrentPool} torrentPool
+ * @property {import("../torrent/torrent-pool.js").TorrentPool} torrentPool
  */
 
 /**

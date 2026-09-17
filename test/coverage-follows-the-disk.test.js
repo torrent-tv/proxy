@@ -29,7 +29,7 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { EncodeRun } from "../services/encode/EncodeRun.js";
-import { SegmentStore } from "../services/segment-store/SegmentStore.js";
+import { SegmentStore } from "../services/storage/segment-store/SegmentStore.js";
 import { SoftwareEncoder } from "../services/encode/SoftwareEncoder.js";
 import { EncodeOrchestrator } from "../services/encode/EncodeOrchestrator.js";
 import { fmp4Format } from "../services/segment-formats/fmp4.js";

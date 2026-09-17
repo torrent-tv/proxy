@@ -29,7 +29,7 @@ import {
   Urgency,
   urgencyName
 } from "../demand/index.js";
-import { findSharedStore } from "../piece-store/shared-piece-store.js";
+import { findSharedStore } from "../../storage/piece-store/shared-piece-store.js";
 
 export class SwarmSelection {
   #torrent;

@@ -25,7 +25,7 @@ import { readFileSync, readdirSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
-const WORKER = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../services/torrent-worker");
+const WORKER = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../services/torrent/worker");
 
 /**
  * @param {string} name
@@ -61,7 +61,7 @@ test("nothing in that thread reaches into the media layer at all", () => {
   // ranges, and a store read that never fetches (`held-bytes.js`).
   const reaching = readdirSync(WORKER)
     .filter((name) => name.endsWith(".js"))
-    .filter((name) => /from "\.\.\/media\//.test(source(name)));
+    .filter((name) => /from "(?:\.\.\/)+media\//.test(source(name)));
 
   assert.deepEqual(reaching, []);
 });

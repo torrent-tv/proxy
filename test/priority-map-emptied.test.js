@@ -18,9 +18,9 @@ import assert from "node:assert/strict";
 import { PriorityOrchestrator } from "../services/viewer/PriorityOrchestrator.js";
 import { Viewers } from "../services/viewer/Viewers.js";
 import { viewersOf } from "../services/viewer/Viewer.js";
-import { TorrentPool } from "../services/torrent-pool.js";
-import { demandFor, forgetTorrent } from "../services/download/registry.js";
-import { Urgency } from "../services/demand/index.js";
+import { TorrentPool } from "../services/torrent/torrent-pool.js";
+import { demandFor, forgetTorrent } from "../services/torrent/download/registry.js";
+import { Urgency } from "../services/torrent/demand/index.js";
 
 /**
  * A session, as much of one as the orchestrator reads.

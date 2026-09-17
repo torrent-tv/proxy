@@ -6,7 +6,7 @@ import {
   readingIsWorthWriting,
   summariseMappings,
   watchedFigures
-} from "../services/memory-report.js";
+} from "../services/storage/memory-report.js";
 import {
   divideAllowance,
   forgetMachineMemory,
@@ -14,7 +14,7 @@ import {
   machineReserveBytes,
   noteMachineMemory,
   SharedPieceStore
-} from "../services/piece-store/shared-piece-store.js";
+} from "../services/storage/piece-store/shared-piece-store.js";
 import { mkdtemp, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";

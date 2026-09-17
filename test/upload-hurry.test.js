@@ -17,9 +17,9 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
-import { decideUploadLimit, torrentsForUploadPolicy } from "../services/torrent-pool.js";
-import { demandFor, forgetTorrent } from "../services/download/registry.js";
-import { Urgency } from "../services/demand/index.js";
+import { decideUploadLimit, torrentsForUploadPolicy } from "../services/torrent/torrent-pool.js";
+import { demandFor, forgetTorrent } from "../services/torrent/download/registry.js";
+import { Urgency } from "../services/torrent/demand/index.js";
 
 /**
  * A torrent whose metadata has arrived and which nothing is wanted of.

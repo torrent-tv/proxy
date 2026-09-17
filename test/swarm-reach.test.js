@@ -19,7 +19,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { bestAnnounce, describeSwarmReach, secondsToFirstPeer } from "../services/torrent-pool.js";
+import { bestAnnounce, describeSwarmReach, secondsToFirstPeer } from "../services/torrent/torrent-pool.js";
 
 test("connected and known are separate numbers", () => {
   const torrent = { wires: [{}, {}], _peersLength: 7, _numQueued: 4 };

@@ -7,7 +7,7 @@ ceilings, each standing for the whole disk.
 | what | where | what bounded it before |
 |---|---|---|
 | segments an encoder produced | `services/encode/SegmentStore.js` | a quarter of what was free, plus a 2 GB floor — both numbers chosen by hand |
-| pieces the memory store spilled | `services/piece-store/piece-disk-store.js` | **nothing at all** |
+| pieces the memory store spilled | `services/storage/piece-store/piece-disk-store.js` | **nothing at all** |
 | diagnostics kept on purpose | `/data` — core dumps, heap snapshots, packet captures | a count of files, never a size |
 
 The middle row is what it cost: one fifty-minute viewing wrote **14 400 MB** to

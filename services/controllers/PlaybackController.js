@@ -16,7 +16,7 @@
 export class PlaybackController {
   /**
    * @param {object} deps
-   * @param {import("../torrent-pool.js").TorrentPool} deps.torrentPool
+   * @param {import("../torrent/torrent-pool.js").TorrentPool} deps.torrentPool
    * @param {ReturnType<import("../../store/source-registry.js").createSourceRegistry>} deps.sourceRegistry
    * @param {string} deps.ffmpegBin
    * @param {string} deps.localBaseUrl

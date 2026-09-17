@@ -10,7 +10,7 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
-import { SharedPieceStore } from "../services/piece-store/shared-piece-store.js";
+import { SharedPieceStore } from "../services/storage/piece-store/shared-piece-store.js";
 
 const CHUNK = 1024;
 

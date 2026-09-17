@@ -9,9 +9,9 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { DemandRegister } from "../services/demand/DemandRegister.js";
-import { Urgency } from "../services/demand/Urgency.js";
-import { SwarmSelection } from "../services/download/SwarmSelection.js";
+import { DemandRegister } from "../services/torrent/demand/DemandRegister.js";
+import { Urgency } from "../services/torrent/demand/Urgency.js";
+import { SwarmSelection } from "../services/torrent/download/SwarmSelection.js";
 
 const PIECE = 1024;
 

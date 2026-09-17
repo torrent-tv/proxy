@@ -12,7 +12,7 @@
  * `HeldFile`: a name, a length, which ranges are downloaded whole, and how to
  * read one of them without fetching. Piece length, file offsets and the
  * bitfield are the torrent's words and stay in the torrent's thread
- * (`torrent-worker/held-bytes.js`). Until 2026-09-15 this whole file lived
+ * (`torrent/worker/held-bytes.js`). Until 2026-09-15 this whole file lived
  * there, which put a container parse — the media layer's work — in the thread
  * that owns the swarm, and made every answer something to carry back across a
  * channel.

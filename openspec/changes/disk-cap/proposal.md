@@ -32,6 +32,6 @@ Assistant itself. This adds the last missing Level 1 piece: a global cap.
 
 ## Impact
 
-- `services/torrent-pool.js` (access tracking, cap enforcement),
+- `services/torrent/torrent-pool.js` (access tracking, cap enforcement),
   `bin/cli.js` (`--max-disk-bytes`), `server.js` (option pass-through);
   ha-addon bump. Part of the proxy transcode/hygiene batch (2.9.29).

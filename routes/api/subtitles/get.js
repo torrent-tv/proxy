@@ -17,14 +17,14 @@
  * @param {import("fastify").FastifyReply} reply
  * @param {{
  *   sourceRegistry: ReturnType<import("../../../store/source-registry.js").createSourceRegistry>,
- *   torrentPool: import("../../../services/torrent-pool.js").TorrentPool,
+ *   torrentPool: import("../../../services/torrent/torrent-pool.js").TorrentPool,
  *   ffmpegBin: string,
  *   localBaseUrl: string
  * }} deps
  * @returns {Promise<void>}
  */
 
-import { deriveSourceKey } from "../../../services/torrent-source-key.js";
+import { deriveSourceKey } from "../../../services/torrent/torrent-source-key.js";
 import { spawn } from "node:child_process";
 import { TextSubtitleTrack } from "../../../services/media/tracks/TextSubtitleTrack.js";
 import { SubtitleController } from "../../../services/controllers/SubtitleController.js";

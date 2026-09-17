@@ -74,7 +74,7 @@ flowchart TB
     ER[EncodeRun<br/>one process, one interval]
   end
 
-  subgraph D["services/demand + download — what the swarm is told"]
+  subgraph D["services/torrent/demand + torrent/download — what the swarm is told"]
     DR[DemandRegister]
     SS[SwarmSelection]
   end

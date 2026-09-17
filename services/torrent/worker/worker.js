@@ -31,11 +31,11 @@ import {
 import { fillFileInBackground } from "./background-fill.js";
 import { demandFor } from "../download/registry.js";
 import { heldRangesOf, readHeldBytes } from "./held-bytes.js";
-import { CompletedFiles, completedFilesRoot } from "../files/CompletedFiles.js";
-import { pieceFromWholeFiles, pieceIsInWholeFiles } from "../files/piece-from-whole-file.js";
+import { CompletedFiles, completedFilesRoot } from "../../storage/files/CompletedFiles.js";
+import { pieceFromWholeFiles, pieceIsInWholeFiles } from "../../storage/files/piece-from-whole-file.js";
 import { Command, Event } from "./protocol.js";
-import { startMemoryReport, WORKER_MEMORY_SAMPLE_MS } from "../memory-report.js";
-import { forwardLogsTo, logger } from "../../utils/logger.js";
+import { startMemoryReport, WORKER_MEMORY_SAMPLE_MS } from "../../storage/memory-report.js";
+import { forwardLogsTo, logger } from "../../../utils/logger.js";
 
 /**
  * Everything this thread logs goes to the main thread, which owns the file.
@@ -67,7 +67,7 @@ forwardLogsTo((level, message) => {
 // import the process still aborted, and the stack named the genuine polyfill.
 const { TorrentPool, resolveDhtBootstrap } = await import("../torrent-pool.js");
 const { collectStoreStats, findSharedStore, machineReserveBytes, memoryClaim, pieceBufferCollection, reviseSpillBudgets, reviseStoreBudgets } =
-  await import("../piece-store/shared-piece-store.js");
+  await import("../../storage/piece-store/shared-piece-store.js");
 
 // Resolved before the client exists, because the client builds its DHT in its
 // own constructor and the addresses have to be in hand by then. Awaiting here

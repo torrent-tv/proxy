@@ -9,7 +9,7 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
-import { PieceLru } from "../services/piece-store/piece-lru.js";
+import { PieceLru } from "../services/storage/piece-store/piece-lru.js";
 
 test("evicts the least recently used piece", () => {
   const lru = new PieceLru(3);

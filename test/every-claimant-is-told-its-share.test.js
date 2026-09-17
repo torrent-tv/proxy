@@ -21,7 +21,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { CompletedFiles } from "../services/files/CompletedFiles.js";
+import { CompletedFiles } from "../services/storage/files/CompletedFiles.js";
 import { Diagnostics } from "../services/storage/Diagnostics.js";
 
 const KILOBYTE = 1024;

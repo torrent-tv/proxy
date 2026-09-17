@@ -225,8 +225,8 @@ test("a changed bitrate cap stops the encoder carrying the old one and nothing m
   const manager = source("services/hls-session-manager.js");
   assert.equal(manager.includes("#restartAtViewer"), false, "the second answer is gone");
   assert.match(
-    manager,
-    /#reencodeAtNewRate\(session\) \{\s*\n\s*this\.#stopEncodeRun\(session, "its bitrate cap changed"\);\s*\n\s*this\.planEncodersSoon\(\);\s*\n\s*\}/,
+    source("services/quality/QualityController.js"),
+    /#reencodeAtNewRate\(session\) \{\s*\n\s*this\.#host\.stopEncodeRun\(session, "its bitrate cap changed"\);\s*\n\s*this\.#host\.planEncodersSoon\(\);\s*\n\s*\}/,
     "stopped, and then decided again"
   );
 });

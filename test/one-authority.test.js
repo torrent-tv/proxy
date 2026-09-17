@@ -53,12 +53,13 @@ test("an encoder is stopped for scheduling reasons in exactly one place", () => 
   assert.equal(stopsInOrchestrator.length, 1, "the orchestrator stops runs in one place");
 
   const manager = statements(source("services/hls-session-manager.js"));
-  const stopsInManager = manager.filter((line) => line.includes(".stop("));
+  assert.deepEqual(manager.filter((line) => line.includes(".stop(")), [], "the session manager stops nothing");
+  const lifecycle = statements(source("services/serving/OutputLifecycle.js"));
+  const stopsAtTeardown = lifecycle.filter((line) => line.includes(".stop("));
   assert.equal(
-    stopsInManager.length,
+    stopsAtTeardown.length,
     1,
-    "the session manager stops runs only when a session is torn down: " +
-      stopsInManager.join(" / ")
+    "an output's end stops its runs, and nothing else there does: " + stopsAtTeardown.join(" / ")
   );
   // And the runs themselves stop one for a stated reason in one place, which is
   // what a changed bitrate cap and a corrected cut table ask through.

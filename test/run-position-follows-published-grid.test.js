@@ -22,7 +22,8 @@ import assert from "node:assert/strict";
 import { Timeline } from "../services/output/Timeline.js";
 import test from "node:test";
 
-import { HlsSessionManager, describeGridDrift, segmentCutTimesFrom } from "../services/hls-session-manager.js";
+import { HlsSessionManager, segmentCutTimesFrom } from "../services/hls-session-manager.js";
+import { describeGridDrift } from "../services/encode/OutputTimes.js";
 
 /** What the playlist in the player's hands says. */
 const PUBLISHED = [0, 8.342, 16.684, 25.026, 33.368, 41.71];

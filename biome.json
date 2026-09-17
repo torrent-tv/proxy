@@ -108,6 +108,7 @@
 											"!../available-share.js",
 											"!../hwaccel.js",
 											"!../learned-median.js",
+											"!../torrent-cost.js",
 											"!../encoder-readings.js",
 											"!../encode/contention.js",
 											"!../encode/args.js",

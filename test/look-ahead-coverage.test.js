@@ -19,7 +19,7 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
-import { contiguousEnd } from "../services/hls-session-manager.js";
+import { contiguousEnd } from "../services/encode/CushionReport.js";
 
 test("an unbroken run reports its last segment", () => {
   assert.equal(contiguousEnd(new Set([10, 11, 12, 13]), 10), 13);

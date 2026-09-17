@@ -1,5 +1,7 @@
 ## 2.87.0
 
+- **Chore**: What the proxy's own work costs the host — the torrent's CPU per megabyte, the base draw, each watched torrent's rate, the speed each file's supply demands, each file's length, the read window sized from it, and the share of the machine a new encoder could have — is `quality/HostLoad.js` rather than eleven members and nine fields of the session manager. The machine readings of `host-load.js` are handed to it, so the quality layer still reads no machine itself.
+
 - **Chore**: What this host takes to create an output and to produce its first segment — the recorded medians, the synthetic figure from the startup benchmark and the line comparing the two — is `quality/HostTimings.js` rather than nine members of the session manager.
 
 - **Chore**: An output is an `EncodedOutput` rather than a 170-line object literal inside the session manager. It holds what is born with the output — identity and format, file, keyframe table, cut table, container, encoder shape, playlist — and no statement of what has been produced or which encoders run, which belong to the segment store and the encoding orchestrator. The fields still kept there for other owners are listed in the class as transitional, each with where it goes. Three fields nothing read are gone: `targetWidth`, `targetHeight` and `latestRequestSeq`.

@@ -1,5 +1,7 @@
 ## 2.87.0
 
+- **Chore**: What a viewer asks of the proxy — open an output of a file and be placed on it, state a new position, ask how far the material in front of them has got — is `serving/ViewerRequests.js` rather than six members of the session manager. The rules of `test/one-authority.test.js` that something must not come back are now asked of every file under `services/`, not of the session manager alone, where they passed as soon as the code moved; the seek check fails if it cannot find the seek.
+
 - **Chore**: How an output ends — disposed when nobody is left on it and it has stood idle, all at once on shutdown, a viewer released or gone — and the adoption at startup of segments an earlier process left behind are `serving/OutputLifecycle.js` rather than seven members of the session manager.
 
 - **Chore**: Answering a request for a file of an output — the playlist, the init segment cut from the first produced segment, a segment served when whole or held until it is, and the hold that says why — is `serving/SegmentServing.js` rather than fourteen members of the session manager.

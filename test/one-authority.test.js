@@ -14,7 +14,7 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { readFileSync, readdirSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { EventEmitter } from "node:events";
@@ -28,6 +28,21 @@ const HERE = path.dirname(fileURLToPath(import.meta.url));
  */
 function source(relative) {
   return readFileSync(path.join(HERE, "..", relative), "utf8");
+}
+
+/**
+ * Every source file of the proxy's services, read together.
+ *
+ * A rule that something must not come back is asked of all of them: asked of
+ * one file, it passes as soon as the code moves to another.
+ *
+ * @returns {string}
+ */
+function everything() {
+  return readdirSync(path.join(HERE, "..", "services"), { recursive: true })
+    .filter((name) => String(name).endsWith(".js"))
+    .map((name) => source(path.join("services", String(name))))
+    .join("\n");
 }
 
 /**
@@ -71,10 +86,7 @@ test("nothing outside the encoding layer starts an encoder", () => {
   // A run is built in one place. Two places building them is how a start came
   // to kill what the plan had decided to keep — the killing lived in the
   // building.
-  const builds = [
-    ...statements(source("services/hls-session-manager.js")),
-    ...statements(source("services/encode/EncodeRuns.js"))
-  ].filter((line) => line.includes("new EncodeRun("));
+  const builds = statements(everything()).filter((line) => line.includes("new EncodeRun("));
   assert.equal(builds.length, 1, "one place builds an encoder");
 });
 
@@ -111,7 +123,7 @@ test("starting an encoder stops nothing", () => {
   // The rule that broke it: the start path looked for a live run whose own
   // start was not below the new one's and killed it. It is not enough that the
   // line is gone — the words it was written with must not come back.
-  const manager = source("services/hls-session-manager.js");
+  const manager = everything();
   assert.equal(
     manager.includes("previousRun"),
     false,
@@ -124,11 +136,10 @@ test("a seek moves the viewer and nothing else", () => {
   // It used to do eleven things and write the position into five places. What
   // follows from a viewer moving is the map's business, and the orchestrators
   // read the map.
-  const manager = source("services/hls-session-manager.js");
-  const seek = manager.slice(
-    manager.indexOf("requestSeek(sessionId, positionSeconds"),
-    manager.indexOf("requestSeek(sessionId, positionSeconds") + 2000
-  );
+  const manager = source("services/serving/ViewerRequests.js");
+  const at = manager.indexOf("requestSeek(sessionId, positionSeconds");
+  assert.notEqual(at, -1, "the seek is where this reads it");
+  const seek = manager.slice(at, at + 2000);
   const body = seek.slice(0, seek.indexOf("\n  }\n"));
   assert.equal(body.includes("#startEncodeRun"), false, "a seek starts no encoder");
   assert.equal(body.includes("setTimeout"), false, "and waits for nothing");
@@ -170,7 +181,7 @@ test("nobody stops an encoder for being unwatched", () => {
   // with nothing in it. Answered here as well, it was answered twice by two
   // rules — and since a viewer moving between steps announces itself, the plan
   // started again what this class had just killed, several times a second.
-  const manager = source("services/hls-session-manager.js");
+  const manager = everything();
   assert.equal(
     manager.includes("no viewer is watching"),
     false,
@@ -190,7 +201,7 @@ test("the seek settle machinery is gone, whole", () => {
   // second debounce on a signal the browser had already debounced, and every
   // millisecond of it was dead time in front of the viewer; the cooldown behind
   // it existed because segment REQUESTS once steered the encoder.
-  const manager = source("services/hls-session-manager.js");
+  const manager = everything();
   for (const gone of [
     "seekSettleTimer",
     "seekTarget",
@@ -230,7 +241,7 @@ test("a changed bitrate cap stops the encoder carrying the old one and nothing m
   // Where the replacement stands is a different question, and the old answer to
   // it was neither where a viewer is nor a gap in the material: it was the
   // segment the process being replaced happened to have reached.
-  const manager = source("services/hls-session-manager.js");
+  const manager = everything();
   assert.equal(manager.includes("#restartAtViewer"), false, "the second answer is gone");
   assert.match(
     source("services/quality/QualityController.js"),

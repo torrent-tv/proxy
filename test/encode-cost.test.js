@@ -9,7 +9,7 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
-import { EncodeCost } from "../services/quality/EncodeCost.js";
+import { EncodeCost } from "../services/encode/quality/EncodeCost.js";
 import { startRunOn } from "./helpers/encode-run.js";
 import { outputSpec } from "./helpers/output-spec.js";
 import { runStateOf } from "../services/encode/encode-run-state.js";

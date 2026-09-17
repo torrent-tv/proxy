@@ -19,9 +19,9 @@ H.264 High, 24 fps, 2 s each, no audio:
 
 ## Why six, and why this grid
 
-`services/hwaccel.js` decodes them at startup and fits the host's decode cost,
+`services/encode/hwaccel.js` decodes them at startup and fits the host's decode cost,
 `a × Mpixel/s + b × Mbit/s + c`, from the measurements
-(`services/decode-cost-fit.js`).
+(`services/encode/decode-cost-fit.js`).
 
 The set before this one was three clips for three unknowns — an EXACT system,
 with two of the clips sharing a pixel count. Such a system cannot fail visibly:

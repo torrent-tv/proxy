@@ -8,8 +8,8 @@
  */
 
 import { logger } from "../../utils/logger.js";
-import { resolveSegmentFormat, SEGMENT_FORMAT_IDS } from "../segment-formats/index.js";
-import { isOutputName, OutputSpec } from "../output/index.js";
+import { resolveSegmentFormat, SEGMENT_FORMAT_IDS } from "../encode/segment-formats/index.js";
+import { isOutputName, OutputSpec } from "../encode/output/index.js";
 import { viewersOf } from "../viewer/Viewer.js";
 import { viewerSegmentsOn } from "../viewer/positions.js";
 import { variantConsumerId, isFamilyConsumerId } from "../encode/Renditions.js";

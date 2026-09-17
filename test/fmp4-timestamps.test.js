@@ -10,7 +10,7 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
-import { stampSegmentStartTime } from "../services/segment-formats/mp4-boxes.js";
+import { stampSegmentStartTime } from "../services/encode/segment-formats/mp4-boxes.js";
 
 /**
  * @param {string} type

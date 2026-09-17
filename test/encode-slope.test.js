@@ -10,7 +10,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { slopeOf } from "../services/hwaccel.js";
+import { slopeOf } from "../services/encode/hwaccel.js";
 
 const at = (wallSec, outSec) => ({ wallSec, outSec });
 

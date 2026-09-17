@@ -194,7 +194,7 @@ comparable: `download-architecture.md`.
 ## What the master playlist declares, and why it is not cosmetic
 
 `BANDWIDTH` and `AVERAGE-BANDWIDTH` per variant, both measured
-(`services/output/rates.js`):
+(`services/encode/output/rates.js`):
 
 - the average is the file's own length over its duration, exact and known when
   the session is created;

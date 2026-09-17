@@ -9,7 +9,7 @@ import { mkdtempSync, mkdirSync, readdirSync, rmSync, writeFileSync } from "node
 import os from "node:os";
 import path from "node:path";
 import { directoryNameFor, SegmentStore } from "../services/storage/segment-store/SegmentStore.js";
-import { fmp4Format } from "../services/segment-formats/fmp4.js";
+import { fmp4Format } from "../services/encode/segment-formats/fmp4.js";
 
 /**
  * @returns {{ store: SegmentStore, root: string, lines: string[] }}

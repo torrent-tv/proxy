@@ -11,7 +11,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { decodeCostOf, fitDecodeCost } from "../services/decode-cost-fit.js";
+import { decodeCostOf, fitDecodeCost } from "../services/encode/decode-cost-fit.js";
 
 const FPS = 24;
 

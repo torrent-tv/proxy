@@ -1,6 +1,6 @@
 # Design: Adaptive bitrate (proxy)
 
-Read before coding: `services/hwaccel.js` (`chooseSoftwareEncodeSettings`,
+Read before coding: `services/encode/hwaccel.js` (`chooseSoftwareEncodeSettings`,
 the software descriptor's `buildVideoArgs`), `services/hls-session-manager.js`
 (the `BUDGET_*` constants, `#chooseEncodeBudget`, the budget interval check
 `#enforceRealtimeBudget`, `#classifyTranscodeBound`, `#applyBudgetDownshift`,

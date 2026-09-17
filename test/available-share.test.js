@@ -9,7 +9,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { availableShareFrom, correctForAvailability } from "../services/available-share.js";
+import { availableShareFrom, correctForAvailability } from "../services/encode/available-share.js";
 
 test("only the work nobody has been charged for is subtracted", () => {
   // The field reading: the box is saturated, our encoder has more than half of

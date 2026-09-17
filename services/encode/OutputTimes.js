@@ -8,7 +8,7 @@
  * for every output of the file.
  */
 
-import { segmentIndexForTime } from "../output/playlists.js";
+import { segmentIndexForTime } from "./output/playlists.js";
 import { publishedGridFor as publishedGridOf, publishedStartTime } from "./run-command.js";
 import { liveRunsOf } from "./encode-run-state.js";
 // How many produced segments' true start times to remember, so a player's

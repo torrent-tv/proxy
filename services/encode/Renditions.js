@@ -8,10 +8,10 @@
  * read back through the host.
  */
 
-import { isOutputName } from "../output/index.js";
-import { masterPlaylistText } from "../output/playlists.js";
+import { isOutputName } from "./output/index.js";
+import { masterPlaylistText } from "./output/playlists.js";
 import { PLAYLIST_FILE_NAME } from "./run-command.js";
-import { variantHeightsFor } from "../output/ladder.js";
+import { variantHeightsFor } from "./output/ladder.js";
 import { encoderInputs } from "./run-inputs.js";
 /**
  * How a base files the audio renditions it has made.

@@ -9,7 +9,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { readProcessCpuSeconds, readSystemCpu, sampleHost, shareOfMachine } from "../services/host-load.js";
+import { readProcessCpuSeconds, readSystemCpu, sampleHost, shareOfMachine } from "../services/encode/host-load.js";
 
 test("a process using one core of four for a second reports a quarter of the machine", () => {
   const before = { takenAt: 1_000, processCpuSeconds: 10, system: null };

@@ -8,12 +8,12 @@
  */
 
 import os from "node:os";
-import { logger } from "../../utils/logger.js";
+import { logger } from "../../../utils/logger.js";
 import { availableShareFrom } from "../available-share.js";
 import { baseDrawFrom, costPerMegabyteFrom } from "../torrent-cost.js";
 import { medianOf, movedBeyondScatter, READINGS_KEPT, scatterOf } from "../learned-median.js";
-import { ENCODE_RUN_STATE, processCanBeSignalled } from "../encode/encode-run-state.js";
-import { SourceFiles } from "../media/SourceFile.js";
+import { ENCODE_RUN_STATE, processCanBeSignalled } from "../encode-run-state.js";
+import { SourceFiles } from "../../media/SourceFile.js";
 
 // How far ahead of its own read head a reader asks the swarm for, expressed in
 // seconds of PLAYBACK. The torrent thread can only think in bytes, and a fixed
@@ -87,7 +87,7 @@ export class HostLoad {
   #requiredSpeedByKey = new Map();
 
   /**
-   * @param {object} host - `liveRunsOf`, `runStateOf`, the readings of `host-load.js` (`readMachineState`, `readProcessCpuSeconds`, `readProxyCpuSeconds`, `readSystemCpu`, `shareOfMachine`), `getSourceStats`, `getTorrentTotals`, `outputs`
+   * @param {object} host - `liveRunsOf`, `runStateOf`, the readings of `encode/host-load.js` (`readMachineState`, `readProcessCpuSeconds`, `readProxyCpuSeconds`, `readSystemCpu`, `shareOfMachine`), `getSourceStats`, `getTorrentTotals`, `outputs`
    */
   constructor(host) {
     this.#host = host;
@@ -192,7 +192,7 @@ export class HostLoad {
       // Nothing encoding and not one byte moved: whatever this process spent in
       // that interval, it spends whether or not there is a torrent. Measuring
       // it is what lets the next interval be attributed instead of divided
-      // whole — see `torrent-cost.js` for the readings that forced this.
+      // whole — see `encode/torrent-cost.js` for the readings that forced this.
       this.#learnBaseDraw(baseDrawFrom({ cpuSeconds, elapsedSeconds: elapsedSec }));
       return;
     }
@@ -478,7 +478,7 @@ export class HostLoad {
     // Kept for the quality offer, which predicts from a benchmark taken on a
     // QUIET host: the same reading that is printed here says how much of the
     // machine a new encoder could actually have. Only what nobody has been
-    // charged for is subtracted — see `available-share.js`.
+    // charged for is subtracted — see `encode/available-share.js`.
     this.hostAvailability = availableShareFrom({
       systemBusy: share.systemShare,
       encoderShare: share.processShare,

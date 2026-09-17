@@ -15,7 +15,7 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
-import { readSelfContainedStartSeconds } from "../services/segment-formats/mp4-boxes.js";
+import { readSelfContainedStartSeconds } from "../services/encode/segment-formats/mp4-boxes.js";
 
 /**
  * A minimal MP4 carrying `moov > mvhd` and `moov > trak > edts > elst`, with a

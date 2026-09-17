@@ -35,7 +35,7 @@ Linux-only host (e.g. POSIX-only signals must degrade elsewhere).
     `deselect` or `critical`, and `registry.js`, which holds one per torrent and
     owns the cross-torrent rule that withholds the speculative levels while
     anything urgent is missing anywhere. See `docs/download-architecture.md`.
-  - `output/` — domain layer: `OutputSpec`, `VideoOutput`, `AudioOutput`,
+  - `encode/output/` — domain layer: `OutputSpec`, `VideoOutput`, `AudioOutput`,
     `CutGrid`. What a session PRODUCES — which tracks, in what form, cut how,
     packaged how — and therefore its identity: two outputs whose parameters
     agree ARE the same output, and the encoded result is reused by definition.
@@ -202,7 +202,7 @@ Linux-only host (e.g. POSIX-only signals must degrade elsewhere).
     picture and its soundtracks, and the master playlist), `OutputTimes` (where
     each segment begins and how the cut table is corrected), `CushionReport`
     (how much film is ready in front of the viewers).
-  - `hwaccel.js` — detect best H.264 encoder (NVENC/QSV/VAAPI/V4L2M2M) with a
+  - `encode/hwaccel.js` — detect best H.264 encoder (NVENC/QSV/VAAPI/V4L2M2M) with a
     STRICT startup test: encode `testsrc2` through the real HLS pipeline, then
     verify each segment decodes independently (catches non-IDR/corrupted hw
     output). Falls back to software libx264. Runtime fallback to software if a

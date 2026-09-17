@@ -19,7 +19,7 @@
  * and as functions over them.
  */
 
-import { computeOutputDimensions } from "../encode/args.js";
+import { computeOutputDimensions } from "../args.js";
 import { buildResolutionLadder, canSustainOutput, pickSoftwarePreset } from "../hwaccel.js";
 import { OutputSpec } from "../output/OutputSpec.js";
 import { chooseServingOutput, nextRungAreaBelow, servingCandidates } from "./serving-output.js";

@@ -12,7 +12,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { speedFromReadings } from "../services/encoder-readings.js";
+import { speedFromReadings } from "../services/encode/encoder-readings.js";
 
 const at = (seconds, processedSeconds) => ({ takenAt: seconds * 1000, processedSeconds });
 

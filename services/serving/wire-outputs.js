@@ -11,22 +11,22 @@
 import { logger } from "../../utils/logger.js";
 import { KeyframeTables } from "../media/KeyframeTables.js";
 import { waits } from "../viewer/WaitLedger.js";
-import { readMachineState, readProcessCpuSeconds, readProxyCpuSeconds, readSystemCpu, shareOfMachine } from "../host-load.js";
+import { readMachineState, readProcessCpuSeconds, readProxyCpuSeconds, readSystemCpu, shareOfMachine } from "../encode/host-load.js";
 import { minimumBufferFrom } from "../torrent/supply-margin.js";
 import { PriorityOrchestrator } from "../viewer/PriorityOrchestrator.js";
-import { softwareDescriptor } from "../hwaccel.js";
-import { resolveSegmentFormat } from "../segment-formats/index.js";
-import { Timelines } from "../output/Timeline.js";
+import { softwareDescriptor } from "../encode/hwaccel.js";
+import { resolveSegmentFormat } from "../encode/segment-formats/index.js";
+import { Timelines } from "../encode/output/Timeline.js";
 import { SourceFiles } from "../media/SourceFile.js";
 import { SegmentStore } from "../storage/segment-store/SegmentStore.js";
-import { EncodeCost } from "../quality/EncodeCost.js";
-import { QualityOffer } from "../quality/QualityOffer.js";
+import { EncodeCost } from "../encode/quality/EncodeCost.js";
+import { QualityOffer } from "../encode/quality/QualityOffer.js";
 import { viewersOf } from "../viewer/Viewer.js";
 import { activeOutputFor } from "../viewer/active-output.js";
 import { worstLinkReading } from "../viewer/link-readings.js";
 import { viewerSecondsOn } from "../viewer/positions.js";
 import { Viewers } from "../viewer/Viewers.js";
-import { OutputCatalog } from "../output/OutputCatalog.js";
+import { OutputCatalog } from "../encode/output/OutputCatalog.js";
 import { ViewerRequests } from "./ViewerRequests.js";
 import { OutputLifecycle } from "./OutputLifecycle.js";
 import { SegmentServing } from "./SegmentServing.js";
@@ -36,16 +36,16 @@ import { Renditions } from "../encode/Renditions.js";
 import { CushionReport, LOOKAHEAD_PAUSE_SECONDS } from "../encode/CushionReport.js";
 import { EncodeRuns } from "../encode/EncodeRuns.js";
 import { OutputTimes } from "../encode/OutputTimes.js";
-import { HostLoad } from "../quality/HostLoad.js";
-import { HostTimings } from "../quality/HostTimings.js";
-import { BUDGET_CHECK_INTERVAL_MS, QualityController } from "../quality/QualityController.js";
+import { HostLoad } from "../encode/quality/HostLoad.js";
+import { HostTimings } from "../encode/quality/HostTimings.js";
+import { BUDGET_CHECK_INTERVAL_MS, QualityController } from "../encode/quality/QualityController.js";
 import { EncodeOrchestrator } from "../encode/EncodeOrchestrator.js";
 import { wireMachineBudget } from "../storage/wire.js";
 import { Returns } from "../storage/returns.js";
 import { freeBytesFor } from "../storage/free.js";
 
 // Where a variant and an audio rendition live under a session — `v/<height>/…`
-// and `a/<track>/…` — is stated in `output/playlists.js`, beside the lines that
+// and `a/<track>/…` — is stated in `encode/output/playlists.js`, beside the lines that
 // write those addresses into a master playlist. The routes that parse them back
 // are in `server.js`.
 

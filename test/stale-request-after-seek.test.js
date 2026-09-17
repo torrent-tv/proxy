@@ -20,7 +20,7 @@
 
 import assert from "node:assert/strict";
 import { SourceFile } from "../services/media/SourceFile.js";
-import { Timeline } from "../services/output/Timeline.js";
+import { Timeline } from "../services/encode/output/Timeline.js";
 import test from "node:test";
 import { mkdtemp, rm } from "node:fs/promises";
 import os from "node:os";
@@ -28,7 +28,7 @@ import path from "node:path";
 
 import { wireOutputs } from "../services/serving/wire-outputs.js";
 import { startRunOn } from "./helpers/encode-run.js";
-import { fmp4Format } from "../services/segment-formats/fmp4.js";
+import { fmp4Format } from "../services/encode/segment-formats/fmp4.js";
 
 const SEGMENT_SECONDS = 4;
 const RUN_STARTS_AT = 373;

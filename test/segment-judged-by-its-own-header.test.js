@@ -30,10 +30,10 @@ import assert from "node:assert/strict";
 import { access, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { SourceFile } from "../services/media/SourceFile.js";
-import { Timeline } from "../services/output/Timeline.js";
+import { Timeline } from "../services/encode/output/Timeline.js";
 import { managerWithOwnStore } from "./helpers/manager.js";
 import { startRunOn } from "./helpers/encode-run.js";
-import { fmp4Format } from "../services/segment-formats/fmp4.js";
+import { fmp4Format } from "../services/encode/segment-formats/fmp4.js";
 import { outputSpec } from "./helpers/output-spec.js";
 
 const SESSION_ID = "3333333344445555";

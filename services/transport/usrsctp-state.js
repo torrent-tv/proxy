@@ -36,7 +36,7 @@ import { shouldStartCapture, WITNESS_COOLDOWN_MS } from "./packet-witness.js";
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 
 /** The bundled gdb script that performs the usrsctp state walk. */
-export const SCTPSTATE_SCRIPT_PATH = path.join(HERE, "..", "assets", "diagnostics", "sctpstate.gdb");
+export const SCTPSTATE_SCRIPT_PATH = path.join(HERE, "..", "..", "assets", "diagnostics", "sctpstate.gdb");
 
 /** How long gdb may run before it is killed. Generous: this is a rare, one-shot read. */
 export const GDB_TIMEOUT_MS = 15_000;

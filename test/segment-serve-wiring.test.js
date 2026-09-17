@@ -18,15 +18,15 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { SourceFile } from "../services/media/SourceFile.js";
-import { Timeline } from "../services/output/Timeline.js";
-import { Output } from "../services/output/Output.js";
+import { Timeline } from "../services/encode/output/Timeline.js";
+import { Output } from "../services/encode/output/Output.js";
 import { KeyframeTable } from "../services/media/container/KeyframeTable.js";
 import { rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { wireOutputs } from "../services/serving/wire-outputs.js";
 import { ENCODE_RUN_STATE } from "../services/encode/encode-run-state.js";
 import { startRunOn } from "./helpers/encode-run.js";
-import { fmp4Format } from "../services/segment-formats/fmp4.js";
+import { fmp4Format } from "../services/encode/segment-formats/fmp4.js";
 import { outputSpec } from "./helpers/output-spec.js";
 
 const MOVIE_TIMESCALE = 1000;

@@ -5,7 +5,7 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
-import { chooseServingOutput } from "../services/quality/serving-output.js";
+import { chooseServingOutput } from "../services/encode/quality/serving-output.js";
 
 const WANTED = { width: 1824, height: 1026 };
 const NEXT_LOWER = 1280 * 720;

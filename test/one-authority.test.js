@@ -244,7 +244,7 @@ test("a changed bitrate cap stops the encoder carrying the old one and nothing m
   const manager = everything();
   assert.equal(manager.includes("#restartAtViewer"), false, "the second answer is gone");
   assert.match(
-    source("services/quality/QualityController.js"),
+    source("services/encode/quality/QualityController.js"),
     /#reencodeAtNewRate\(session\) \{\s*\n\s*this\.#host\.stopEncodeRun\(session, "its bitrate cap changed"\);\s*\n\s*this\.#host\.planEncodersSoon\(\);\s*\n\s*\}/,
     "stopped, and then decided again"
   );

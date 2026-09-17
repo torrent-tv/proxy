@@ -2,9 +2,9 @@
  * @file The arithmetic every encoder kind is built from: the output frame rate,
  * the bitrate ladder and its caps, the frame box, and the keyframe arguments.
  *
- * Taken out of `hwaccel.js` so the kind classes beside this file do not have to
+ * Taken out of `encode/hwaccel.js` so the kind classes beside this file do not have to
  * import the detection and benchmarking that happen to live there. The
- * dependency runs one way — `hwaccel.js` imports this, never the reverse — and
+ * dependency runs one way — `encode/hwaccel.js` imports this, never the reverse — and
  * everything here is a calculation, with no process, no filesystem and no clock
  * behind it.
  *

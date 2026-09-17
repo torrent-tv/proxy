@@ -11,7 +11,7 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
-import { Timeline, Timelines } from "../services/output/Timeline.js";
+import { Timeline, Timelines } from "../services/encode/output/Timeline.js";
 
 /**
  * @returns {Timeline}

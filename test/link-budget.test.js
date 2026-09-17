@@ -11,7 +11,7 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
-import { linkCouldCarry, LINK_SAFETY, peakMbpsForHeight } from "../services/quality/link-budget.js";
+import { linkCouldCarry, LINK_SAFETY, peakMbpsForHeight } from "../services/encode/quality/link-budget.js";
 import { maxrateKbpsFor, nominalKbpsForHeight } from "../services/encode/args.js";
 
 test("a copied source is priced at the bitrate the file itself states", () => {

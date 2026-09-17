@@ -13,7 +13,7 @@
  * encoding may go and look at.
  */
 
-import { maxrateKbpsFor, nominalKbpsForHeight } from "../encode/args.js";
+import { maxrateKbpsFor, nominalKbpsForHeight } from "../args.js";
 
 /**
  * How much of a measured link may be spent on video.

@@ -20,7 +20,7 @@
  * in the quality offer adds seconds of work per second of content — this
  * encode, plus that decode, plus what is already committed — and these readings
  * say two jobs that each fit alone do not fit together. The availability
- * correction in `available-share.js` does not cover it either: that subtracts
+ * correction in `encode/available-share.js` does not cover it either: that subtracts
  * the share of the machine taken by work nobody has been charged for, while
  * this is our own work colliding with itself.
  *

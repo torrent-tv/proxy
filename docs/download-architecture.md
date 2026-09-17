@@ -56,7 +56,7 @@ flowchart TB
 ## Who the claimants are, and what each of them knows
 
 **The priority map** states what should be downloaded AHEAD of the viewers, once
-per file, built in `services/priority/` from where they are and from nothing
+per file, built in `services/viewer/` (`PriorityOrchestrator`) from where they are and from nothing
 else. It is the same map the encoding reads — the encoding reads it per OUTPUT
 and in segment numbers, this layer reads it per FILE and in bytes, and both
 scopes are right for what asks them (`encode-architecture.md`).

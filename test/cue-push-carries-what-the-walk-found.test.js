@@ -44,7 +44,7 @@ test("the consumer asks for it", () => {
   // The other end has always destructured it, which is what made the loss
   // silent: a field nobody forwards is `undefined` and reads as "not detected".
   assert.match(
-    source("services/data-channel-handler.js"),
+    source("services/transport/data-channel-handler.js"),
     /function publishSubtitleCues\(\{[^}]*detectedLanguage[^}]*\}\)/
   );
 });

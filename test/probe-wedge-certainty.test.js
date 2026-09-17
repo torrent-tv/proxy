@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { probeWedgeIsCertain, readProbeState, PROBE_INTERVAL_MS } from "../services/delivery-probe.js";
+import { probeWedgeIsCertain, readProbeState, PROBE_INTERVAL_MS } from "../services/transport/delivery-probe.js";
 
 test("a seen-counter bounded lag is not a wedge, however long it lasts", () => {
   // Session 4dcac61b, field log 2026-08-28: gap held at 6-7 probes for 95+

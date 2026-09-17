@@ -6,7 +6,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import os from "node:os";
 
-import { availableMemoryBytes, collectHealthMetrics } from "../services/health-collector.js";
+import { availableMemoryBytes, collectHealthMetrics } from "../services/transport/health-collector.js";
 
 test("free memory is what could be given out, not what is idle this instant", () => {
   const available = availableMemoryBytes();

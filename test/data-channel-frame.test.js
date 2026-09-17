@@ -10,7 +10,7 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
-import { encodeFrame } from "../services/data-channel-handler.js";
+import { encodeFrame } from "../services/transport/data-channel-handler.js";
 
 const requestId = Buffer.from("abc123", "ascii");
 

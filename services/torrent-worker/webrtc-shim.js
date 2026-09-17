@@ -9,7 +9,7 @@
  * does not help. The upstream issue about workers (#129) was closed in 0.4.0
  * but only covers use from a worker ALONE, which does work.
  *
- * We need it twice: `webrtc-manager.js` runs the video channel to the browser on
+ * We need it twice: `transport/webrtc-manager.js` runs the video channel to the browser on
  * the main thread, and the torrent client — which is now on its own thread —
  * creates peer connections of its own to announce on `wss://` trackers. Before
  * the thread split both lived in one isolate and nothing was wrong; afterwards

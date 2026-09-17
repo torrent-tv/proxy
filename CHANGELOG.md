@@ -1,5 +1,7 @@
 ## 2.87.0
 
+- **Chore**: The transport is one directory, `services/transport/`: the data channel handler, the delivery probe, the packet witness, the usrsctp state reader, the WebRTC manager, the tunnel client, the registry client, port mapping, NAT classification and the health figures. `thread-pool.js`, which only sets up the process before anything else loads, moved beside the entry point that imports it first (`bin/`).
+
 - **Chore**: The priority map lives with the viewer (`viewer/PriorityMap.js`, `viewer/PriorityOrchestrator.js`, `viewer/WaitLedger.js`), which is where the seven components put it: the map is where the viewers stand, in units of material. A source file's record lives with the media (`media/SourceFile.js`). `priority/` and `source/` are gone.
 
 - **Chore**: `hls-session-manager.js` is deleted. Every member it had is a method of the component that owns it, and what was left — the constructor — is `serving/wire-outputs.js`, which builds the components and hands each the narrow host it reads. `server.js` gives each route the components that route asks of (`serving`, `viewerRequests`, `renditions`, `lifecycle`, `quality`, `outputs`) instead of one object answering everything; `bin/cli.js` reads them the same way. `usableSegmentIndices`, which nothing in the proxy called since the look-ahead was removed, is gone with its two checks. `test/manager-surface.test.js` now reads what each route asks of each component and fails when a component lacks it, checked by renaming one call.

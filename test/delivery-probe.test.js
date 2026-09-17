@@ -7,7 +7,7 @@ import {
   readProbeState,
   PROBE_INTERVAL_MS,
   UNRELIABLE_LABEL
-} from "../services/delivery-probe.js";
+} from "../services/transport/delivery-probe.js";
 
 const ORDERED = ["proxy", "proxy-control"];
 const ALL = [...ORDERED, UNRELIABLE_LABEL];

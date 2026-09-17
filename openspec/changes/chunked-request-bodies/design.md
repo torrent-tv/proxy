@@ -3,7 +3,7 @@
 Written to be executed as specified — the wire format, constants, limits
 and do-NOT list are normative. Read before coding:
 
-- `services/data-channel-handler.js`: the whole file — the wire-protocol
+- `services/transport/data-channel-handler.js`: the whole file — the wire-protocol
   doc comment (~lines 9–37), `handleChannel` (onMessage string handling),
   `handleRequest`, `sendChunk` (the response frame writer whose layout the
   request frames mirror), `send`.

@@ -5,7 +5,7 @@ its top first.
 
 ## 1. Implementation
 
-- [ ] 1.1 `data-channel-handler.js`: factor the execution tail of
+- [ ] 1.1 `transport/data-channel-handler.js`: factor the execution tail of
       `handleRequest` so a legacy `request` message and an assembled
       chunked request run the SAME function. `node --check`.
 - [ ] 1.2 `request-start` + binary inbound frames + per-channel assembly

@@ -207,7 +207,7 @@ Linux-only host (e.g. POSIX-only signals must degrade elsewhere).
     verify each segment decodes independently (catches non-IDR/corrupted hw
     output). Falls back to software libx264. Runtime fallback to software if a
     hw encode later fails. v4l2m2m is gated by this test (fails on HA Yellow).
-  - `data-channel-handler.js` — forwards WebRTC data-channel requests to the
+  - `transport/data-channel-handler.js` — forwards WebRTC data-channel requests to the
     local HTTP server (loopback), so the same routes serve both transports.
 
 ## Gotchas
@@ -222,7 +222,7 @@ Linux-only host (e.g. POSIX-only signals must degrade elsewhere).
 
 Decided direction — full plan in the parent `../CLAUDE.md`. Proxy-side pieces:
 
-- **Auto port mapping** — IMPLEMENTED (`services/port-mapper.js`, changelog
+- **Auto port mapping** — IMPLEMENTED (`services/transport/port-mapper.js`, changelog
   2.9.16). UPnP IGD / NAT-PMP via `@silentbot1/nat-api` (now a direct dep; the
   same lib WebTorrent uses for the torrent port). Maps TCP 9090 with a 2 h
   auto-renewed lease, removed on shutdown (lease expiry covers hard kills).
@@ -230,7 +230,7 @@ Decided direction — full plan in the parent `../CLAUDE.md`. Proxy-side pieces:
   `getMappedEndpoint()` exposes the external endpoint. NOT yet done: mapping the
   **UDP** port WebRTC actually uses (it binds ephemeral UDP ports, so this TCP
   mapping does not yet help WebRTC — roadmap step 3 in the parent CLAUDE.md).
-  Also pending (next iteration): a success log line in `port-mapper.js` `stop()`
+  Also pending (next iteration): a success log line in `transport/port-mapper.js` `stop()`
   (`removed mapping for TCP <port>`) — today stop() only logs on failure, so a
   clean unmap on shutdown is silent.
 - **Report endpoint to server** — ✅ DONE (proxy 2.9.17). The mapped endpoint

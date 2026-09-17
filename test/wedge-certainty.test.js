@@ -1,8 +1,8 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { wedgeIsCertain } from "../services/data-channel-handler.js";
-import { PROBE_INTERVAL_MS } from "../services/delivery-probe.js";
+import { wedgeIsCertain } from "../services/transport/data-channel-handler.js";
+import { PROBE_INTERVAL_MS } from "../services/transport/delivery-probe.js";
 
 const MEGABYTE = 1024 * 1024;
 

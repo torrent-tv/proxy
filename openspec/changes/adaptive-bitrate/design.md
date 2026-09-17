@@ -28,7 +28,7 @@ constrained-CRF). Do NOT touch hardware descriptors in this change.
 ## (b) Net report intake
 
 Route: `POST /api/transcode-sessions/:id/net-report` (data-channel path, so
-add the prefix to the allowlist regex in `data-channel-handler.js` if not
+add the prefix to the allowlist regex in `transport/data-channel-handler.js` if not
 covered by the existing `/api/` rule — verify). Body:
 
     { linkMbps: number, bufferedAheadSec: number }

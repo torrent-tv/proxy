@@ -43,7 +43,7 @@ failures:
 - `routes/healthz/get.js`, `routes/health/get.js` (or their handlers) —
   version field.
 - `services/torrent-pool.js` — warning/announce logging, stats origin tags.
-- `services/port-mapper.js` — SSDP listener fix.
+- `services/transport/port-mapper.js` — SSDP listener fix.
 - CHANGELOG entry at current package.json version + 1 patch (2.9.25);
   requires the usual ha-addon version bump (0.2.47) after `npm run patch`
   (npm publish needs the user's npm key).

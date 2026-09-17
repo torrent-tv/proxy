@@ -171,7 +171,7 @@ const REPORT_INTERVAL_MS = 5_000;
  * climbs unbounded. So the question is not "is there a gap" but "has the
  * highest-seen number stopped moving at all, for longer than it has ever
  * legitimately taken this connection to report an advance" — the same shape
- * as {@link wedgeIsCertain} in `data-channel-handler.js`, applied to the
+ * as {@link wedgeIsCertain} in `transport/data-channel-handler.js`, applied to the
  * probe's own counter instead of the transport's byte counter.
  *
  * THE FLOOR IS NOT ONE PROBE INTERVAL. "The longest gap this connection has

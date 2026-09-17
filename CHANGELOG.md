@@ -1,5 +1,7 @@
 ## 2.87.0
 
+- **Chore**: How an output ends — disposed when nobody is left on it and it has stood idle, all at once on shutdown, a viewer released or gone — and the adoption at startup of segments an earlier process left behind are `serving/OutputLifecycle.js` rather than seven members of the session manager.
+
 - **Chore**: Answering a request for a file of an output — the playlist, the init segment cut from the first produced segment, a segment served when whole or held until it is, and the hold that says why — is `serving/SegmentServing.js` rather than fourteen members of the session manager.
 
 - **Chore**: The steps of a picture and its soundtracks — which output answers each, made the first time it is asked for, an output already producing the same picture adopted instead, which viewer is on which, and the master playlist listing them — are `encode/Renditions.js` rather than twenty-two members of the session manager. `audioRenditionKey`, `variantConsumerId` and `isFamilyConsumerId` moved with them. What a viewer is and where they stand is handed in, so the encoding layer imports no viewer module.

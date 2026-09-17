@@ -1,5 +1,7 @@
 ## 2.87.0
 
+- **Chore**: Answering a request for a file of an output — the playlist, the init segment cut from the first produced segment, a segment served when whole or held until it is, and the hold that says why — is `serving/SegmentServing.js` rather than fourteen members of the session manager.
+
 - **Chore**: The steps of a picture and its soundtracks — which output answers each, made the first time it is asked for, an output already producing the same picture adopted instead, which viewer is on which, and the master playlist listing them — are `encode/Renditions.js` rather than twenty-two members of the session manager. `audioRenditionKey`, `variantConsumerId` and `isFamilyConsumerId` moved with them. What a viewer is and where they stand is handed in, so the encoding layer imports no viewer module.
 
 - **Chore**: The cushion reading — how much film is ready in front of the earliest viewer of each output, what that costs off the swarm, and the fetch of a picture's spare soundtracks once it is full — is `encode/CushionReport.js` rather than six members of the session manager. The set of soundtracks already fetched is its own field instead of one the manager never declared. `contiguousEnd` moved with it.

@@ -740,7 +740,7 @@ export class EncodeRuns {
    * timeline.
    *
    * @param {HlsSession} session
-   * @param {import("./encode/EncodeRun.js").EncodeRun} run
+   * @param {import("./EncodeRun.js").EncodeRun} run
    * @param {object} progress
    * @returns {void}
    */
@@ -772,8 +772,8 @@ export class EncodeRuns {
    * handler.
    *
    * @param {HlsSession} session
-   * @param {import("./encode/EncodeRun.js").EncodeRun} run
-   * @param {import("./encode/EncodeRun.js").RunEnded} ended
+   * @param {import("./EncodeRun.js").EncodeRun} run
+   * @param {import("./EncodeRun.js").RunEnded} ended
    * @returns {void}
    */
   noteRunEnded(session, run, ended) {

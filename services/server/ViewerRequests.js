@@ -831,7 +831,7 @@ export class ViewerRequests {
    * carries a default of zero that must not drag them back to the beginning.
    *
    * @param {HlsSession} session
-   * @param {import("../serving/viewer/Viewer.js").Viewer} viewer
+   * @param {import("../viewer/Viewer.js").Viewer} viewer
    * @param {number} positionSeconds
    * @returns {void}
    */

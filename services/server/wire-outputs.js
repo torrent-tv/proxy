@@ -116,7 +116,7 @@ function buildHttpBaseUrl(host, port) {
  * @typedef {Object} HlsSession
  * @property {string}  id            - The name of the output it produces.
  * @property {string}  fileName      - Display name of the file being transcoded.
- * @property {import("../serving/media/container/KeyframeTable.js").KeyframeTable} keyframes -
+ * @property {import("../media/container/KeyframeTable.js").KeyframeTable} keyframes -
  *   Where this file's keyframes are. One object per file, held by every session
  *   of it, so a table read late still reaches them. Used to snap a source seek
  *   onto a known-valid position (see #startEncodeRun).

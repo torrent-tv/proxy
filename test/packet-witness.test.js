@@ -21,7 +21,7 @@ import {
   WITNESS_RING_FILES,
   WITNESS_RTO_CEILING_SECONDS,
   WITNESS_TAIL_SECONDS
-} from "../services/packet-witness.js";
+} from "../services/transport/packet-witness.js";
 
 test("an IPv4 literal survives unchanged", () => {
   assert.equal(normalizeRemoteAddress("192.168.178.57"), "192.168.178.57");

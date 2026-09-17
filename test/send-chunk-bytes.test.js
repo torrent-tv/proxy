@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { bodySender } from "../services/data-channel-handler.js";
+import { bodySender } from "../services/transport/data-channel-handler.js";
 
 /**
  * Drives the sender over a body arriving in the given read sizes, and answers

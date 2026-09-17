@@ -21,7 +21,7 @@ test("the pool is set, and left alone when the deployment states its own", async
   const previous = process.env.UV_THREADPOOL_SIZE;
   try {
     process.env.UV_THREADPOOL_SIZE = "";
-    await import(`../services/thread-pool.js?first=${Date.now()}`);
+    await import(`../bin/thread-pool.js?first=${Date.now()}`);
     assert.equal(
       Number(process.env.UV_THREADPOOL_SIZE) >= 16,
       true,
@@ -29,7 +29,7 @@ test("the pool is set, and left alone when the deployment states its own", async
     );
 
     process.env.UV_THREADPOOL_SIZE = "8";
-    await import(`../services/thread-pool.js?stated=${Date.now()}`);
+    await import(`../bin/thread-pool.js?stated=${Date.now()}`);
     assert.equal(process.env.UV_THREADPOOL_SIZE, "8", "a stated size is the deployment's to choose");
   } finally {
     if (previous === undefined) {
@@ -47,7 +47,7 @@ test("the entry point imports it before anything that could create the pool", as
 
   assert.equal(
     imports[0],
-    "../services/thread-pool.js",
+    "./thread-pool.js",
     "a module's imports run before its body, so this cannot be a statement in cli.js"
   );
 });

@@ -18,7 +18,7 @@
  */
 
 import NatAPI from "@silentbot1/nat-api";
-import { logger } from "../utils/logger.js";
+import { logger } from "../../utils/logger.js";
 
 // nat-api clamps ttl to a 1200 s minimum; it auto-renews at (ttl - 600) s.
 const DEFAULT_TTL_SECONDS = 7200;

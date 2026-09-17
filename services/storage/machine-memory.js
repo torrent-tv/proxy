@@ -2,7 +2,7 @@
  * @file How much of the machine's memory is available, read once.
  *
  * It was written THREE TIMES, in three layers, with the same body each time:
- * `health-collector.js` for the score a proxy publishes to the registry,
+ * `transport/health-collector.js` for the score a proxy publishes to the registry,
  * `memory-report.js` for the line the process prints every second, and
  * `piece-store/shared-piece-store.js` for the budget the piece store takes.
  * One fact, three owners — and the copies had already drifted once: the piece

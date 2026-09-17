@@ -61,7 +61,7 @@ import { createDeliveryProbe, PROBE_INTERVAL_MS } from "./delivery-probe.js";
  *   remote: { address: string, port: number } | null,
  *   queuedBytes: number, stuckForMs: number
  * }) => boolean }} [witness]
- *   The packet witness (services/packet-witness.js). When {@link wedgeIsCertain}
+ *   The packet witness (services/transport/packet-witness.js). When {@link wedgeIsCertain}
  *   says delivery has stopped, the watcher hands it the transport snapshot's
  *   remote endpoint: the ring's history is kept and a tail capture records what
  *   the wire actually does. Optional; absent means no captures are taken.
@@ -564,7 +564,7 @@ function makeSendQueueWatcher({ log, getTransportSnapshot, witness, usrsctpState
  * @returns {DataChannelHandler}
  */
 import { performance } from "node:perf_hooks";
-import { eventLoopDelay, resetEventLoopDelay } from "../utils/perf.js";
+import { eventLoopDelay, resetEventLoopDelay } from "../../utils/perf.js";
 
 /**
  * Build one body frame: `[flags(1)][idLen(1)][requestId][payload]`.
@@ -667,7 +667,7 @@ export function createDataChannelHandler({
   // channel, a reconnect and a deliberate rotation alike.
   viewersWantingCues = () => [],
   witness,
-  // Reads usrsctp's own association state (services/usrsctp-state.js) the
+  // Reads usrsctp's own association state (services/transport/usrsctp-state.js) the
   // moment a wedge is declared, from either detector below. Optional: a host
   // without gdb simply never gets a reading, same as the witness without
   // tcpdump.
@@ -814,7 +814,7 @@ export function createDataChannelHandler({
   // Numbered probes on every channel, and the browser's echo of what it saw.
   // The proxy's own counters cannot say whether bytes it handed to usrsctp were
   // ever put on the wire; the far end can, and it keeps answering throughout a
-  // freeze. See services/delivery-probe.js.
+  // freeze. See services/transport/delivery-probe.js.
   //
   // Also the ONLY wedge signal that does not require a nonzero channel queue —
   // `wedgeIsCertain` above needs `queuedBytes > 0`, which small, infrequent

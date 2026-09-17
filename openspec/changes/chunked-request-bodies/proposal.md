@@ -46,7 +46,7 @@ the server repo's `chunked-request-bodies` change. Release order: proxy
 
 ## Impact
 
-- `services/data-channel-handler.js` — binary inbound frame parsing;
+- `services/transport/data-channel-handler.js` — binary inbound frame parsing;
   per-channel partial-body assembly with caps/TTL; `request-start`
   handling; shared execution path.
 - Release: folds into the PENDING proxy 2.9.35 (extend its CHANGELOG entry;

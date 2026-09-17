@@ -17,7 +17,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { WebSocketServer } from "ws";
 
-import { createTunnelClient } from "../services/tunnel-client.js";
+import { createTunnelClient } from "../services/transport/tunnel-client.js";
 
 /**
  * Wait for the thing being asserted, not for a length of time.

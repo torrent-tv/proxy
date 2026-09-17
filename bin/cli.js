@@ -12,7 +12,7 @@
 // can have in flight, and a module's imports are evaluated before its body, so
 // anything imported above it would get the default pool. See the file itself
 // for the measurement that made it necessary.
-import "../services/thread-pool.js";
+import "./thread-pool.js";
 import { Command } from "commander";
 import crypto from "node:crypto";
 import os from "node:os";
@@ -20,19 +20,19 @@ import { spawnSync } from "node:child_process";
 import { createRequire } from "node:module";
 import ffmpegStatic from "ffmpeg-static";
 import { startProxyServer } from "../server.js";
-import { registerClient } from "../services/registry-api.js";
-import { createTunnelClient } from "../services/tunnel-client.js";
-import { createWebRtcManager } from "../services/webrtc-manager.js";
-import { createDataChannelHandler } from "../services/data-channel-handler.js";
+import { registerClient } from "../services/transport/registry-api.js";
+import { createTunnelClient } from "../services/transport/tunnel-client.js";
+import { createWebRtcManager } from "../services/transport/webrtc-manager.js";
+import { createDataChannelHandler } from "../services/transport/data-channel-handler.js";
 import { pruneCoreDumps } from "../services/core-dumps.js";
 import { Diagnostics } from "../services/storage/Diagnostics.js";
-import { adoptOrphanRingFiles, createPacketWitness, pruneWitnessCaptures } from "../services/packet-witness.js";
-import { createUsrsctpStateReader } from "../services/usrsctp-state.js";
+import { adoptOrphanRingFiles, createPacketWitness, pruneWitnessCaptures } from "../services/transport/packet-witness.js";
+import { createUsrsctpStateReader } from "../services/transport/usrsctp-state.js";
 import { startMemoryReport } from "../services/memory-report.js";
 import { fragmentBufferCollection } from "../services/torrent-worker/client.js";
-import { collectHealthMetrics } from "../services/health-collector.js";
-import { createPortMapper } from "../services/port-mapper.js";
-import { classifyNat } from "../services/nat-classifier.js";
+import { collectHealthMetrics } from "../services/transport/health-collector.js";
+import { createPortMapper } from "../services/transport/port-mapper.js";
+import { classifyNat } from "../services/transport/nat-classifier.js";
 import { DEFAULT_SEGMENT_FORMAT_ID, SEGMENT_FORMAT_IDS } from "../services/segment-formats/index.js";
 import { logToFile, logger } from "../utils/logger.js";
 
@@ -229,7 +229,7 @@ let usrsctpStateReader = null;
 /** @type {ReturnType<typeof createDataChannelHandler> | null} */
 let dataChannelHandler = null;
 
-/** @type {import("../services/nat-classifier.js").NatClassification | null} Latest NAT classification (for WebRTC port prediction). */
+/** @type {import("../services/transport/nat-classifier.js").NatClassification | null} Latest NAT classification (for WebRTC port prediction). */
 let natInfo = null;
 
 

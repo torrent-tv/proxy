@@ -7,7 +7,7 @@
  */
 
 import os from "node:os";
-import { availableMemoryBytes } from "./storage/machine-memory.js";
+import { availableMemoryBytes } from "../storage/machine-memory.js";
 
 /**
  * Snapshot of system health at a point in time.

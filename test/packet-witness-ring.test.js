@@ -9,7 +9,7 @@ import {
   adoptOrphanRingFiles,
   createPacketWitness,
   WITNESS_RING_BASENAME
-} from "../services/packet-witness.js";
+} from "../services/transport/packet-witness.js";
 
 /**
  * A stand-in for a spawned tcpdump: it records how it was called and stays

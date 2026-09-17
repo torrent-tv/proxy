@@ -5,7 +5,7 @@
  * Receives SDP offers and ICE candidates through the signalling tunnel
  * and responds with SDP answers and its own candidates through the same channel.
  *
- * Data channels for actual streaming are handed off to `data-channel-handler.js`
+ * Data channels for actual streaming are handed off to `transport/data-channel-handler.js`
  * via the `onDataChannel` callback — this module only owns the signalling phase.
  */
 

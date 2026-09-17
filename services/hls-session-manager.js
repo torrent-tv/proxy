@@ -7,12 +7,11 @@
  * immediately when all registered consumers release them.
  */
 
-import { createReadStream, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { createReadStream, readdirSync, statSync, } from "node:fs";
 import { access, readFile, stat, unlink } from "node:fs/promises";
 import { Readable } from "node:stream";
 import os from "node:os";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
 import { spawn } from "node:child_process";
 import { createRequire } from "node:module";
 import { logger } from "../utils/logger.js";
@@ -41,7 +40,6 @@ import { EncodeRun } from "./encode/EncodeRun.js";
 const PROXY_VERSION = createRequire(import.meta.url)("../package.json").version;
 import {
   softwareDescriptor,
-  TRANSCODE_FPS,
   chooseOutputFps
 } from "./hwaccel.js";
 import { computeOutputDimensions } from "./encode/args.js";
@@ -87,6 +85,7 @@ import { worstLinkReading } from "./viewer/link-readings.js";
 import { viewerSecondsOn, viewerSegmentsOn } from "./viewer/positions.js";
 import { Viewers } from "./viewer/Viewers.js";
 import { OutputCatalog } from "./output/OutputCatalog.js";
+import { HostTimings } from "./quality/HostTimings.js";
 import { BUDGET_CHECK_INTERVAL_MS, QualityController } from "./quality/QualityController.js";
 import { EncodedOutput } from "./output/EncodedOutput.js";
 import { variantHeightsFor } from "./output/ladder.js";
@@ -346,13 +345,6 @@ const DEFAULT_SESSION_TTL_MS = 30 * 60 * 1000;
  */
 const SEGMENT_STORE_IDLE_MS = IDLE_KEEP_MS;
 const DEFAULT_STARTUP_WAIT_MS = 5_000;
-// How many recent runs the two cold-start estimates keep. Both the
-// session-create time and the first-segment time are reported to the browser as
-// the median of this many samples, so it has to be long enough that one slow run
-// does not move the figure and short enough that the estimate still follows the
-// host: a proxy whose swarm has warmed up, or which has just picked up a second
-// viewer, should stop quoting the numbers from ten minutes ago.
-const FIRST_SEGMENT_SAMPLES = 20;
 const PROGRESS_LOG_INTERVAL_MS = 5_000;
 // Read segment files in large blocks so the body is delivered to the data
 // channel in few, big chunks. On a busy ARM host the in-process WebTorrent
@@ -787,18 +779,6 @@ export class HlsSessionManager {
    */
   #planScheduled = false;
 
-  #firstSegmentLatencies = [];
-
-  /**
-   * Recent times to create a session, in ms — the second term of the browser's
-   * estimate. Measured for the same reason as the first: it is 116-843 ms
-   * depending on whether the keyframe index is already in hand, and guessing it
-   * was one of the ways the shown figure stopped describing the whole wait.
-   *
-   * @type {number[]}
-   */
-  #sessionCreateLatencies = [];
-
   // What an encoder taught this host — the cost of decoding a file, of
   // copying its picture, of each of its soundtracks — is held by the object
   // that reads it (`quality/EncodeCost.js`), together with the last refusal
@@ -894,6 +874,12 @@ export class HlsSessionManager {
     memoryClaimant = null,
     budgetPolicy = null}) {
     const self = this;
+    // What this host takes to create an output and to produce its first segment, kept across restarts until the synthetic figure can replace it (CLAUDE.md, host timings).
+    this.hostTimings = new HostTimings({
+      get segmentDurationSec() { return self.segmentDurationSec; },
+      get softwarePresetBenchmark() { return self.softwarePresetBenchmark; },
+      get stateDir() { return self.stateDir; },
+    });
     this.enabled = Boolean(enabled);
     this.ffmpegBin = ffmpegBin;
     this.keyframeTables = keyframeTables;
@@ -994,7 +980,7 @@ export class HlsSessionManager {
     });
     // What this host learned last time it ran. Without it every restart shows
     // the first viewer a figure with no measurement behind it.
-    this.#loadHostTimings();
+    this.hostTimings.loadHostTimings();
     // Where produced segments live, addressed by WHAT they are rather than by
     // which session's encoder wrote them. Two sessions of one output — two
     // viewers who opened the same film at different places — write into one
@@ -1711,7 +1697,7 @@ export class HlsSessionManager {
 
     // Only a session actually made is timed: a viewer joining one costs none
     // of what this figure predicts for the next viewer who has to wait.
-    this.#rememberSessionCreateLatency(Date.now() - createEntryMs);
+    this.hostTimings.rememberSessionCreateLatency(Date.now() - createEntryMs);
     const sessionId = spec.toName();
     const output = new Output({
       encodeWidth: width,
@@ -4118,166 +4104,10 @@ export class HlsSessionManager {
    * @param {{ width?: number, height?: number, fps?: number }} [output]
    * @returns {number | null} Milliseconds, or null without a benchmark.
    */
-  /**
-   * Where this host's recorded timings live: `--state-dir` when the deployment
-   * names one, otherwise beside the installed proxy, which is where they have
-   * always been kept.
-   *
-   * The default is deliberately the old location and not the working directory:
-   * measured on the addon, both are inside the container's writable layer and
-   * both are discarded when an update rebuilds it, so moving there bought
-   * nothing — while for an ordinary `npm i -g` install the working directory is
-   * wherever the operator happened to launch from, which splits the history
-   * between runs and drops a file into someone's project.
-   *
-   * A deployment that HAS a persistent directory says so: the addon passes
-   * `/data`, the one path its supervisor keeps across updates. Naming it here
-   * would put Home Assistant into proxy code, which this repo does not do.
-   *
-   * Kept so a proxy that has just restarted is not back to knowing nothing —
-   * the browser was shown an assumed rate for the whole of the first wait after
-   * every restart. It is meant to be TEMPORARY: if the synthetic figure tracks
-   * the measured one closely enough (see #compareSyntheticWithMeasured) this
-   * file can go, and every machine is then right from its first second without
-   * carrying anything between runs.
-   *
-   * @returns {string}
-   */
-  #hostTimingsPath() {
-    const stateDir = typeof this.stateDir === "string" && this.stateDir.length > 0
-      ? this.stateDir
-      : path.join(path.dirname(fileURLToPath(import.meta.url)), "..");
-    return path.join(stateDir, "host-timings.json");
-  }
 
   /** Load them, if any were ever written. Never throws. */
-  #loadHostTimings() {
-    try {
-      const raw = JSON.parse(readFileSync(this.#hostTimingsPath(), "utf8"));
-      if (Array.isArray(raw?.firstSegment)) {
-        this.#firstSegmentLatencies = raw.firstSegment.filter((value) => Number.isFinite(value) && value > 0);
-      }
-      if (Array.isArray(raw?.sessionCreate)) {
-        this.#sessionCreateLatencies = raw.sessionCreate.filter((value) => Number.isFinite(value) && value > 0);
-      }
-      const asMs = (value) => (value === null ? "n/a" : `${value}ms`);
-      logger.info(
-        `host timings loaded from ${this.#hostTimingsPath()}: ` +
-        `first-segment ${asMs(this.expectedFirstSegmentMs())}, ` +
-        `session-create ${asMs(this.expectedSessionCreateMs())}`
-      );
-    } catch {
-      // No file yet, or it is unreadable. The synthetic figure answers instead.
-    }
-  }
 
   /** Write them. Best effort: losing them costs a first estimate, nothing more. */
-  #saveHostTimings() {
-    try {
-      writeFileSync(this.#hostTimingsPath(), JSON.stringify({
-        firstSegment: this.#firstSegmentLatencies,
-        sessionCreate: this.#sessionCreateLatencies
-      }));
-    } catch {
-      // Read-only install, no permission — not worth failing a session over.
-    }
-  }
-
-  syntheticFirstSegmentMs(output = {}) {
-    const benchmark = this.softwarePresetBenchmark;
-    if (!Array.isArray(benchmark) || benchmark.length === 0) {
-      return null;
-    }
-    const width = Number.isFinite(output.width) && output.width > 0 ? output.width : 1920;
-    const height = Number.isFinite(output.height) && output.height > 0 ? output.height : 1080;
-    const fps = Number.isFinite(output.fps) && output.fps > 0 ? output.fps : TRANSCODE_FPS;
-    // The preset actually chosen sits somewhere in the middle of the ladder;
-    // the median entry is the representative one and involves no choice.
-    const sorted = [...benchmark].sort((left, right) => left.pixelsPerSec - right.pixelsPerSec);
-    const pixelsPerSec = sorted[Math.floor(sorted.length / 2)]?.pixelsPerSec;
-    if (!Number.isFinite(pixelsPerSec) || pixelsPerSec <= 0) {
-      return null;
-    }
-    const pixels = this.segmentDurationSec * width * height * fps;
-    return (pixels / pixelsPerSec) * 1000;
-  }
-
-  /**
-   * Say how the synthetic figure compares with what actually happened.
-   *
-   * The point is to learn whether the startup benchmark alone can carry the
-   * estimate. If the two track each other, the recorded history can go and
-   * every machine is right from its first second; if they do not, the log says
-   * by how much and in which direction, which is the beginning of knowing why.
-   *
-   * @param {number} measuredMs
-   * @returns {void}
-   */
-  #compareSyntheticWithMeasured(measuredMs) {
-    const synthetic = this.syntheticFirstSegmentMs();
-    if (synthetic === null) {
-      return;
-    }
-    const ratio = measuredMs / synthetic;
-    logger.info(
-      `first-segment synthetic=${Math.round(synthetic)}ms measured=${Math.round(measuredMs)}ms ` +
-      `ratio=${ratio.toFixed(2)} (1.00 would mean the startup benchmark alone suffices)`
-    );
-  }
-
-  #rememberSessionCreateLatency(latencyMs) {
-    if (!Number.isFinite(latencyMs) || latencyMs <= 0) {
-      return;
-    }
-    this.#sessionCreateLatencies.push(latencyMs);
-    if (this.#sessionCreateLatencies.length > FIRST_SEGMENT_SAMPLES) {
-      this.#sessionCreateLatencies.shift();
-    }
-    this.#saveHostTimings();
-  }
-
-  /**
-   * What this host typically takes to create a session, in ms — the median of
-   * recent ones, or null before any has finished.
-   *
-   * @returns {number | null}
-   */
-  expectedSessionCreateMs() {
-    if (this.#sessionCreateLatencies.length === 0) {
-      return null;
-    }
-    const sorted = [...this.#sessionCreateLatencies].sort((left, right) => left - right);
-    return sorted[Math.floor(sorted.length / 2)];
-  }
-
-  #rememberFirstSegmentLatency(latencyMs) {
-    if (!Number.isFinite(latencyMs) || latencyMs <= 0) {
-      return;
-    }
-    this.#compareSyntheticWithMeasured(latencyMs);
-    this.#firstSegmentLatencies.push(latencyMs);
-    if (this.#firstSegmentLatencies.length > FIRST_SEGMENT_SAMPLES) {
-      this.#firstSegmentLatencies.shift();
-    }
-    this.#saveHostTimings();
-  }
-
-  /**
-   * What this host typically takes to produce a session's first segment, in
-   * milliseconds — the median of recent runs, or null before any has finished.
-   *
-   * @returns {number | null}
-   */
-  expectedFirstSegmentMs() {
-    if (this.#firstSegmentLatencies.length === 0) {
-      // Nothing recorded yet — a machine's first run, or one whose history has
-      // not been written. The startup benchmark answers without any history at
-      // all, which is why the browser was showing an assumed rate here.
-      return this.syntheticFirstSegmentMs();
-    }
-    const sorted = [...this.#firstSegmentLatencies].sort((left, right) => left - right);
-    return sorted[Math.floor(sorted.length / 2)];
-  }
 
   /**
    * Record how far a produced segment's real start fell from what the playlist
@@ -6303,7 +6133,7 @@ export class HlsSessionManager {
         // Data is flowing again, so the next loss starts its backoff afresh
         // rather than inheriting the delay of the last one.
         session.inputRetryCount = 0;
-        this.#rememberFirstSegmentLatency(Date.now() - session.createEntryMs);
+        this.hostTimings.rememberFirstSegmentLatency(Date.now() - session.createEntryMs);
         logger.info(
           `cold-start ${sessionId.slice(0, 8)}: first-segment ready +${Date.now() - session.createEntryMs}ms`
         );
@@ -7154,5 +6984,17 @@ export class HlsSessionManager {
 
   predictOfferedHeights(...args) {
     return this.quality.predictOfferedHeights(...args);
+  }
+
+  syntheticFirstSegmentMs(...args) {
+    return this.hostTimings.syntheticFirstSegmentMs(...args);
+  }
+
+  expectedSessionCreateMs(...args) {
+    return this.hostTimings.expectedSessionCreateMs(...args);
+  }
+
+  expectedFirstSegmentMs(...args) {
+    return this.hostTimings.expectedFirstSegmentMs(...args);
   }
 }

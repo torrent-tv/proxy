@@ -1,5 +1,7 @@
 ## 2.87.0
 
+- **Chore**: What this host takes to create an output and to produce its first segment — the recorded medians, the synthetic figure from the startup benchmark and the line comparing the two — is `quality/HostTimings.js` rather than nine members of the session manager.
+
 - **Chore**: An output is an `EncodedOutput` rather than a 170-line object literal inside the session manager. It holds what is born with the output — identity and format, file, keyframe table, cut table, container, encoder shape, playlist — and no statement of what has been produced or which encoders run, which belong to the segment store and the encoding orchestrator. The fields still kept there for other owners are listed in the class as transitional, each with where it goes. Three fields nothing read are gone: `targetWidth`, `targetHeight` and `latestRequestSeq`.
 
 - **Chore**: `OutputCatalog` is the one owner of the outputs that exist. It replaces `OutputRegistry` (the live outputs and their entry times) and `LiveOutputs` (the questions walking that same registry: a file's family, the picture of a step, the steps and soundtracks, a step's height), which were two views of one collection. The manager, the quality budget, the offer and the routes all hold `outputs`.

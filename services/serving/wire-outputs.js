@@ -10,14 +10,14 @@
 
 import { logger } from "../../utils/logger.js";
 import { KeyframeTables } from "../media/KeyframeTables.js";
-import { waits } from "../priority/WaitLedger.js";
+import { waits } from "../viewer/WaitLedger.js";
 import { readMachineState, readProcessCpuSeconds, readProxyCpuSeconds, readSystemCpu, shareOfMachine } from "../host-load.js";
 import { minimumBufferFrom } from "../supply-margin.js";
-import { PriorityOrchestrator } from "../priority/PriorityOrchestrator.js";
+import { PriorityOrchestrator } from "../viewer/PriorityOrchestrator.js";
 import { softwareDescriptor } from "../hwaccel.js";
 import { resolveSegmentFormat } from "../segment-formats/index.js";
 import { Timelines } from "../output/Timeline.js";
-import { SourceFiles } from "../source/SourceFile.js";
+import { SourceFiles } from "../media/SourceFile.js";
 import { SegmentStore } from "../segment-store/SegmentStore.js";
 import { EncodeCost } from "../quality/EncodeCost.js";
 import { QualityOffer } from "../quality/QualityOffer.js";

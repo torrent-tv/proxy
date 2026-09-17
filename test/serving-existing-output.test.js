@@ -9,7 +9,7 @@ import { writeFileSync } from "node:fs";
 import path from "node:path";
 import { managerWithOwnStore } from "./helpers/manager.js";
 import { outputSpec } from "./helpers/output-spec.js";
-import { SourceFile } from "../services/source/SourceFile.js";
+import { SourceFile } from "../services/media/SourceFile.js";
 import { Timeline } from "../services/output/Timeline.js";
 import { fmp4Format } from "../services/segment-formats/fmp4.js";
 import { Output } from "../services/output/Output.js";

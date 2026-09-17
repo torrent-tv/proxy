@@ -15,7 +15,7 @@ import assert from "node:assert/strict";
 import { TorrentPool } from "../services/torrent-pool.js";
 import { demandFor, forgetTorrent } from "../services/download/registry.js";
 import { Urgency } from "../services/demand/index.js";
-import { mapForViewer, runsOf } from "../services/priority/PriorityMap.js";
+import { mapForViewer, runsOf } from "../services/viewer/PriorityMap.js";
 
 /** A torrent that is nothing but one file of a known length. */
 function torrentOf({ length = 1_000_000, offset = 0 } = {}) {

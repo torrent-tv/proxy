@@ -9,7 +9,7 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
-import { bandOf, WaitLedger } from "../services/priority/WaitLedger.js";
+import { bandOf, WaitLedger } from "../services/viewer/WaitLedger.js";
 import { SegmentDemand } from "../services/encode/SegmentDemand.js";
 
 test("the top rank is its own band, and the rest fall behind it", () => {

@@ -28,7 +28,7 @@ import path from "node:path";
 import { wireOutputs } from "../services/serving/wire-outputs.js";
 import { variantConsumerId } from "../services/encode/Renditions.js";
 import { Viewers } from "../services/viewer/Viewers.js";
-import { SourceFile } from "../services/source/SourceFile.js";
+import { SourceFile } from "../services/media/SourceFile.js";
 import { Timeline } from "../services/output/Timeline.js";
 import { Output } from "../services/output/Output.js";
 import { fmp4Format } from "../services/segment-formats/fmp4.js";

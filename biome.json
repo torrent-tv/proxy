@@ -33,8 +33,6 @@
 				"services/segment-formats/**",
 				"services/output/**",
 				"services/viewer/**",
-				"services/priority/**",
-				"services/source/**",
 				"services/torrent/**"
 			],
 			"linter": {
@@ -128,7 +126,7 @@
 										"group": [
 											"../**",
 											"!../output/**",
-											"!../source/**",
+											"!../media/SourceFile.js",
 											"!../available-share.js",
 											"!../hwaccel.js",
 											"!../learned-median.js",

@@ -12,7 +12,7 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
-import { SourceFile, SourceFiles, sourceDecodeCharacteristics } from "../services/source/SourceFile.js";
+import { SourceFile, SourceFiles, sourceDecodeCharacteristics } from "../services/media/SourceFile.js";
 
 test("a file's key is the pair that identifies it, spelled in one place", () => {
   const file = new SourceFile({ sourceKey: "abc123", fileIndex: 4 });

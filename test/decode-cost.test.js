@@ -39,7 +39,7 @@ import {
   speedBar
 } from "../services/hwaccel.js";
 import { wireOutputs } from "../services/serving/wire-outputs.js";
-import { SourceFile, sourceDecodeCharacteristics } from "../services/source/SourceFile.js";
+import { SourceFile, sourceDecodeCharacteristics } from "../services/media/SourceFile.js";
 import { parseFfmpegBitrateKbps, parseFfmpegVideoDimensions, parseFfmpegVideoFps } from "../services/media/ffmpeg-banner.js";
 import { fmp4Format } from "../services/segment-formats/fmp4.js";
 

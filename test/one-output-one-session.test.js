@@ -21,7 +21,7 @@ import assert from "node:assert/strict";
 import { wireOutputs } from "../services/serving/wire-outputs.js";
 import { AudioOutput, CutGrid, OutputSpec, VideoOutput } from "../services/output/OutputSpec.js";
 import { Timeline } from "../services/output/Timeline.js";
-import { SourceFile } from "../services/source/SourceFile.js";
+import { SourceFile } from "../services/media/SourceFile.js";
 import { viewersOf } from "../services/viewer/Viewer.js";
 
 const TORRENT = "torrent:11f0929918e2b5aa2e5b71ecdbe5c0f1a4bbf7d1";

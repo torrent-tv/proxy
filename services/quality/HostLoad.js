@@ -13,7 +13,7 @@ import { availableShareFrom } from "../available-share.js";
 import { baseDrawFrom, costPerMegabyteFrom } from "../torrent-cost.js";
 import { medianOf, movedBeyondScatter, READINGS_KEPT, scatterOf } from "../learned-median.js";
 import { ENCODE_RUN_STATE, processCanBeSignalled } from "../encode/encode-run-state.js";
-import { SourceFiles } from "../source/SourceFile.js";
+import { SourceFiles } from "../media/SourceFile.js";
 
 // How far ahead of its own read head a reader asks the swarm for, expressed in
 // seconds of PLAYBACK. The torrent thread can only think in bytes, and a fixed

@@ -16,7 +16,7 @@ import path from "node:path";
 import { managerWithOwnStore } from "./helpers/manager.js";
 import { outputSpec } from "./helpers/output-spec.js";
 import { ENCODE_EXIT } from "../services/encode/encode-exit.js";
-import { SourceFile } from "../services/source/SourceFile.js";
+import { SourceFile } from "../services/media/SourceFile.js";
 
 test("a directory whose key names an asked-for box is not adopted, and one naming a format is", (t) => {
   const { store, root, manager, cleanup } = managerWithOwnStore();

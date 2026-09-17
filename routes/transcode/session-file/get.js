@@ -1,5 +1,5 @@
 import { logger } from "../../../utils/logger.js";
-import { bandOf, waits } from "../../../services/priority/WaitLedger.js";
+import { bandOf, waits } from "../../../services/viewer/WaitLedger.js";
 
 /**
  * How long a request for a not-yet-produced file is held before answering with

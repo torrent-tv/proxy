@@ -29,7 +29,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { access, writeFile } from "node:fs/promises";
 import path from "node:path";
-import { SourceFile } from "../services/source/SourceFile.js";
+import { SourceFile } from "../services/media/SourceFile.js";
 import { Timeline } from "../services/output/Timeline.js";
 import { managerWithOwnStore } from "./helpers/manager.js";
 import { startRunOn } from "./helpers/encode-run.js";

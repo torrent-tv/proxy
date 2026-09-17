@@ -39,7 +39,7 @@ test("one number, and both kinds of material read it", async () => {
   const read = (relative) => readFileSync(path.join(here, "..", relative), "utf8");
 
   assert.match(read("services/torrent/torrent-pool.js"), /TORRENT_IDLE_TTL_MS = IDLE_KEEP_MS/);
-  assert.match(read("services/serving/OutputLifecycle.js"), /SEGMENT_STORE_IDLE_MS = IDLE_KEEP_MS/);
+  assert.match(read("services/server/OutputLifecycle.js"), /SEGMENT_STORE_IDLE_MS = IDLE_KEEP_MS/);
 });
 
 test("a session opened on material still held is a return, and its age is kept", () => {

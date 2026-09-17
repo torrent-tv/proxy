@@ -40,7 +40,7 @@ import { handleTranscodeVariantWarmGet } from "./routes/transcode/variant-warm/g
 import { handleTranscodeAudioWarmGet } from "./routes/transcode/audio-warm/get.js";
 import { createSourceRegistry } from "./store/source-registry.js";
 import { WorkerTorrentPool } from "./services/torrent/worker/pool-adapter.js";
-import { wireOutputs } from "./services/serving/wire-outputs.js";
+import { wireOutputs } from "./services/server/wire-outputs.js";
 import { createPlaybackPlanner } from "./services/media/playback-planner.js";
 import { KeyframeTables } from "./services/media/KeyframeTables.js";
 import { contentsOf } from "./services/torrent/Contents.js";

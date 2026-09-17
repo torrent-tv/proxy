@@ -26,7 +26,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 
-import { wireOutputs } from "../services/serving/wire-outputs.js";
+import { wireOutputs } from "../services/server/wire-outputs.js";
 import { startRunOn } from "./helpers/encode-run.js";
 import { fmp4Format } from "../services/encode/segment-formats/fmp4.js";
 

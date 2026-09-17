@@ -122,7 +122,7 @@ test("a segment requested again is not new evidence", () => {
 });
 
 test("a boundary the index got wrong is replaced by the time the file really has", async (t) => {
-  const { wireOutputs } = await import("../services/serving/wire-outputs.js");
+  const { wireOutputs } = await import("../services/server/wire-outputs.js");
   const manager = wireOutputs({
     enabled: true,
     ffmpegBin: "ffmpeg",

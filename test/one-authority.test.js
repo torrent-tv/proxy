@@ -67,9 +67,9 @@ test("an encoder is stopped for scheduling reasons in exactly one place", () => 
   const stopsInOrchestrator = orchestrator.filter((line) => line.includes("run.stop("));
   assert.equal(stopsInOrchestrator.length, 1, "the orchestrator stops runs in one place");
 
-  const wiring = statements(source("services/serving/wire-outputs.js"));
+  const wiring = statements(source("services/server/wire-outputs.js"));
   assert.deepEqual(wiring.filter((line) => line.includes(".stop(")), [], "the wiring stops nothing");
-  const lifecycle = statements(source("services/serving/OutputLifecycle.js"));
+  const lifecycle = statements(source("services/server/OutputLifecycle.js"));
   const stopsAtTeardown = lifecycle.filter((line) => line.includes(".stop("));
   assert.equal(
     stopsAtTeardown.length,
@@ -107,7 +107,7 @@ test("a run exists means its process is running, so nothing can start one twice"
     "services/encode/EncodeRun.js",
     "services/encode/EncodeOrchestrator.js",
     "services/encode/EncodeRuns.js",
-    "services/serving/wire-outputs.js"
+    "services/server/wire-outputs.js"
   ];
   for (const file of files) {
     const starts = statements(source(file)).filter(
@@ -136,7 +136,7 @@ test("a seek moves the viewer and nothing else", () => {
   // It used to do eleven things and write the position into five places. What
   // follows from a viewer moving is the map's business, and the orchestrators
   // read the map.
-  const manager = source("services/serving/ViewerRequests.js");
+  const manager = source("services/server/ViewerRequests.js");
   const at = manager.indexOf("requestSeek(sessionId, positionSeconds");
   assert.notEqual(at, -1, "the seek is where this reads it");
   const seek = manager.slice(at, at + 2000);

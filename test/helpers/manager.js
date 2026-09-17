@@ -25,7 +25,7 @@
 import { mkdtempSync, rmSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { wireOutputs } from "../../services/serving/wire-outputs.js";
+import { wireOutputs } from "../../services/server/wire-outputs.js";
 import { SegmentStore } from "../../services/storage/segment-store/SegmentStore.js";
 
 /**

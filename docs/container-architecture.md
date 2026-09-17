@@ -198,7 +198,7 @@ cannot express come from the container; the coded size and frame rate come from
 the probe, because the encoder receives what the decoder produced.
 
 Direct imports from routes are deprecated — use `orchestrators/` and
-`controllers/` instead.
+`server/controllers/` instead.
 
 ## Flags matrix
 

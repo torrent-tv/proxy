@@ -18,7 +18,7 @@ import { startRunOn } from "./helpers/encode-run.js";
 import { Timeline } from "../services/encode/output/Timeline.js";
 import test from "node:test";
 
-import { wireOutputs } from "../services/serving/wire-outputs.js";
+import { wireOutputs } from "../services/server/wire-outputs.js";
 import { trueStartOf } from "../services/encode/run-command.js";
 import { fmp4Format } from "../services/encode/segment-formats/fmp4.js";
 import { ENCODE_RUN_STATE, INITIAL_RUN_STATE } from "../services/encode/encode-run-state.js";

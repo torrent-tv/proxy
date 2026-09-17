@@ -13,7 +13,7 @@
  * time means are the TORRENT's rules, and they live in
  * `torrent-worker/subtitle-cues.js`. This file used to import them, so the media
  * layer named the torrent's worker — the one direction the layers may not go.
- * Now the wiring puts the two together (`controllers/SubtitleController.js`) and
+ * Now the wiring puts the two together (`server/controllers/SubtitleController.js`) and
  * this can be exercised with four plain functions.
  */
 

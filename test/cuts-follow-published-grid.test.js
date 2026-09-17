@@ -19,7 +19,7 @@ import { computeCutGrid } from "../services/encode/output/cut-grid.js";
 import { Timeline } from "../services/encode/output/Timeline.js";
 import test from "node:test";
 
-import { wireOutputs } from "../services/serving/wire-outputs.js";
+import { wireOutputs } from "../services/server/wire-outputs.js";
 import { segmentCutTimesFrom } from "../services/encode/run-command.js";
 
 /** What the playlist in the player's hands says. */

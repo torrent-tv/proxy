@@ -178,7 +178,7 @@ export async function serveSessionFile(req, reply, { serving, viewerRequests, se
  * Poll `serving.getFileStream()` until the file is available,
  * the session fails, or the timeout elapses.
  *
- * @param {object} serving - `services/serving/SegmentServing.js`
+ * @param {object} serving - `services/server/SegmentServing.js`
  * @param {string} sessionId
  * @param {string} fileName
  * @param {number} timeoutMs
@@ -186,7 +186,7 @@ export async function serveSessionFile(req, reply, { serving, viewerRequests, se
  *   carries it. Their own position is what decides whether a held request has
  *   been made pointless by a seek — a session can have several viewers, and
  *   the seek epoch belongs to all of them.
- * @returns {Promise<Awaited<ReturnType<import("../../../services/serving/SegmentServing.js").SegmentServing["getFileStream"]>>>}
+ * @returns {Promise<Awaited<ReturnType<import("../../../services/server/SegmentServing.js").SegmentServing["getFileStream"]>>>}
  */
 export async function waitForSessionFile(serving, sessionId, fileName, timeoutMs, consumerId = "") {
   const startedAt = Date.now();

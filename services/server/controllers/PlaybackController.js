@@ -16,11 +16,11 @@
 export class PlaybackController {
   /**
    * @param {object} deps
-   * @param {import("../torrent/torrent-pool.js").TorrentPool} deps.torrentPool
-   * @param {ReturnType<import("../../store/source-registry.js").createSourceRegistry>} deps.sourceRegistry
+   * @param {import("../../torrent/torrent-pool.js").TorrentPool} deps.torrentPool
+   * @param {ReturnType<import("../../../store/source-registry.js").createSourceRegistry>} deps.sourceRegistry
    * @param {string} deps.ffmpegBin
    * @param {string} deps.localBaseUrl
-   * @param {ReturnType<import("../media/playback-planner.js").createPlaybackPlanner>} deps.playbackPlanner
+   * @param {ReturnType<import("../../media/playback-planner.js").createPlaybackPlanner>} deps.playbackPlanner
    */
   constructor({ torrentPool, sourceRegistry, ffmpegBin, localBaseUrl, playbackPlanner }) {
     this.torrentPool = torrentPool;

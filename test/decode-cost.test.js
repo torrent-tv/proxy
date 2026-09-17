@@ -38,7 +38,7 @@ import {
   predictedRealtimeSpeed,
   speedBar
 } from "../services/encode/hwaccel.js";
-import { wireOutputs } from "../services/serving/wire-outputs.js";
+import { wireOutputs } from "../services/server/wire-outputs.js";
 import { SourceFile, sourceDecodeCharacteristics } from "../services/media/SourceFile.js";
 import { parseFfmpegBitrateKbps, parseFfmpegVideoDimensions, parseFfmpegVideoFps } from "../services/media/ffmpeg-banner.js";
 import { fmp4Format } from "../services/encode/segment-formats/fmp4.js";

@@ -11,7 +11,7 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
-import { fmp4Format } from "../services/segment-formats/fmp4.js";
+import { fmp4Format } from "../services/encode/segment-formats/fmp4.js";
 
 /**
  * A piece shaped like the muxer's output. Sizes are what matters, not contents.

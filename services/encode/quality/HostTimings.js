@@ -10,7 +10,7 @@
 import { readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { logger } from "../../utils/logger.js";
+import { logger } from "../../../utils/logger.js";
 import { TRANSCODE_FPS } from "../hwaccel.js";
 // How many recent runs the two cold-start estimates keep. Both the
 // session-create time and the first-segment time are reported to the browser as
@@ -19,6 +19,9 @@ import { TRANSCODE_FPS } from "../hwaccel.js";
 // host: a proxy whose swarm has warmed up, or which has just picked up a second
 // viewer, should stop quoting the numbers from ten minutes ago.
 const FIRST_SEGMENT_SAMPLES = 20;
+
+/** The directory of the installed proxy, where its measurements are kept when no state directory is named. */
+export const PROXY_ROOT = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "..", "..");
 
 export class HostTimings {
   /** What this reads and asks of the rest of the proxy, and nothing else. @type {object} */
@@ -71,7 +74,7 @@ export class HostTimings {
   #hostTimingsPath() {
     const stateDir = typeof this.#host.stateDir === "string" && this.#host.stateDir.length > 0
       ? this.#host.stateDir
-      : path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
+      : PROXY_ROOT;
     return path.join(stateDir, "host-timings.json");
   }
 

@@ -11,21 +11,21 @@ import { logger } from "../../utils/logger.js";
 import { probeVideoKeyframeTimes } from "../media/keyframe-probe.js";
 import { minimumBufferFrom } from "../torrent/supply-margin.js";
 import { ENCODE_RUN_STATE, wireState } from "../encode/encode-run-state.js";
-import { chooseOutputFps } from "../hwaccel.js";
-import { resolveSegmentFormat, SEGMENT_FORMAT_IDS } from "../segment-formats/index.js";
-import { AudioOutput, CutGrid, isOutputName, OutputSpec, VideoOutput } from "../output/index.js";
-import { Timeline, Timelines } from "../output/Timeline.js";
-import { computeCutGrid } from "../output/cut-grid.js";
-import { Output } from "../output/Output.js";
-import { mediaPlaylistText } from "../output/playlists.js";
+import { chooseOutputFps } from "../encode/hwaccel.js";
+import { resolveSegmentFormat, SEGMENT_FORMAT_IDS } from "../encode/segment-formats/index.js";
+import { AudioOutput, CutGrid, isOutputName, OutputSpec, VideoOutput } from "../encode/output/index.js";
+import { Timeline, Timelines } from "../encode/output/Timeline.js";
+import { computeCutGrid } from "../encode/output/cut-grid.js";
+import { Output } from "../encode/output/Output.js";
+import { mediaPlaylistText } from "../encode/output/playlists.js";
 import { SourceFiles } from "../media/SourceFile.js";
 import { viewersOf } from "../viewer/Viewer.js";
 import { activeOutputFor } from "../viewer/active-output.js";
 import { viewerSecondsOn } from "../viewer/positions.js";
 import { isFamilyConsumerId } from "../encode/Renditions.js";
 import { formatSeconds } from "../encode/EncodeRuns.js";
-import { EncodedOutput } from "../output/EncodedOutput.js";
-import { decideOutputFormat } from "../quality/output-format.js";
+import { EncodedOutput } from "../encode/output/EncodedOutput.js";
+import { decideOutputFormat } from "../encode/quality/output-format.js";
 import { spawn } from "node:child_process";
 import { createRequire } from "node:module";
 import { parseFfmpegBitrateKbps, parseFfmpegDurationSeconds, parseFfmpegStartTimeSeconds, parseFfmpegStreamCounts, parseFfmpegVideoDimensions, parseFfmpegVideoFps, parseFfmpegHdr } from "../media/ffmpeg-banner.js";
@@ -557,7 +557,7 @@ export class ViewerRequests {
     const segmentCount = timeline.segmentCount;
 
     // THE FORMAT, decided before the output is named, and possibly an output
-    // already here instead (`quality/output-format.js`).
+    // already here instead (`encode/quality/output-format.js`).
     const decided = decideOutputFormat({
       encodesPicture: transcodeVideo && carriesVideo,
       exact: forceExactSize,

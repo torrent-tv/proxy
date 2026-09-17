@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { createHash } from "node:crypto";
-import { AudioOutput, CutGrid, isOutputName, OutputSpec, VideoOutput } from "../services/output/OutputSpec.js";
+import { AudioOutput, CutGrid, isOutputName, OutputSpec, VideoOutput } from "../services/encode/output/OutputSpec.js";
 
 const TORRENT = "torrent:11f0929918e2b5aa2e5b71ecdbe5c0f1a4bbf7d1";
 

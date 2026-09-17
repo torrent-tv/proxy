@@ -53,7 +53,7 @@ import {
   declaredSubtitleTracksOf,
   forgetSubtitles
 } from "./services/media/SubtitleCues.js";
-import { detectVideoEncoder, benchmarkSoftwarePresets, benchmarkDecodeCost, benchmarkContention, benchmarkCopySpeed, detectTonemapSupport } from "./services/hwaccel.js";
+import { detectVideoEncoder, benchmarkSoftwarePresets, benchmarkDecodeCost, benchmarkContention, benchmarkCopySpeed, detectTonemapSupport } from "./services/encode/hwaccel.js";
 import { measureStartAndStop } from "./services/encode/start-stop-cost.js";
 import { logger } from "./utils/logger.js";
 import { completedFilesRoot } from "./services/storage/files/CompletedFiles.js";

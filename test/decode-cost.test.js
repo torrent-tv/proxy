@@ -23,12 +23,12 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
-import { Timeline } from "../services/output/Timeline.js";
+import { Timeline } from "../services/encode/output/Timeline.js";
 import { createRequire } from "node:module";
 import { spawn } from "node:child_process";
 import { mkdtemp, rm } from "node:fs/promises";
-import { decodeCostOf, decodeFamilyOf } from "../services/decode-cost-fit.js";
-import { Output } from "../services/output/Output.js";
+import { decodeCostOf, decodeFamilyOf } from "../services/encode/decode-cost-fit.js";
+import { Output } from "../services/encode/output/Output.js";
 import { outputSpec } from "./helpers/output-spec.js";
 import os from "node:os";
 import path from "node:path";
@@ -37,11 +37,11 @@ import {
   decodeSpeedFor,
   predictedRealtimeSpeed,
   speedBar
-} from "../services/hwaccel.js";
+} from "../services/encode/hwaccel.js";
 import { wireOutputs } from "../services/serving/wire-outputs.js";
 import { SourceFile, sourceDecodeCharacteristics } from "../services/media/SourceFile.js";
 import { parseFfmpegBitrateKbps, parseFfmpegVideoDimensions, parseFfmpegVideoFps } from "../services/media/ffmpeg-banner.js";
-import { fmp4Format } from "../services/segment-formats/fmp4.js";
+import { fmp4Format } from "../services/encode/segment-formats/fmp4.js";
 
 const require = createRequire(import.meta.url);
 const ffmpegBin = require("ffmpeg-static");

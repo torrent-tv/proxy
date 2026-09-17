@@ -2,7 +2,7 @@
 
 ## 1. Caps
 
-- [x] 1.1 `hwaccel.js`: `RUNG_NOMINAL_KBPS` table + nearest-rung lookup;
+- [x] 1.1 `encode/hwaccel.js`: `RUNG_NOMINAL_KBPS` table + nearest-rung lookup;
       software descriptor's video args emit `-maxrate`/`-bufsize`
       (1.3× / 1.5× nominal for the actual encode height). Hardware
       descriptors untouched.

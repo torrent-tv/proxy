@@ -8,7 +8,7 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
-import { EncodedOutput } from "../services/output/EncodedOutput.js";
+import { EncodedOutput } from "../services/encode/output/EncodedOutput.js";
 import { outputSpec } from "./helpers/output-spec.js";
 
 function made() {

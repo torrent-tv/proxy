@@ -19,8 +19,8 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { wireOutputs } from "../services/serving/wire-outputs.js";
-import { AudioOutput, CutGrid, OutputSpec, VideoOutput } from "../services/output/OutputSpec.js";
-import { Timeline } from "../services/output/Timeline.js";
+import { AudioOutput, CutGrid, OutputSpec, VideoOutput } from "../services/encode/output/OutputSpec.js";
+import { Timeline } from "../services/encode/output/Timeline.js";
 import { SourceFile } from "../services/media/SourceFile.js";
 import { viewersOf } from "../services/viewer/Viewer.js";
 

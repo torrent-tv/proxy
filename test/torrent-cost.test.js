@@ -8,7 +8,7 @@
  */
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { baseDrawFrom, costPerMegabyteFrom } from "../services/torrent-cost.js";
+import { baseDrawFrom, costPerMegabyteFrom } from "../services/encode/torrent-cost.js";
 
 test("the base draw is the share of a core spent with nothing to do", () => {
   assert.equal(baseDrawFrom({ cpuSeconds: 0.5, elapsedSeconds: 5 }), 0.1);

@@ -10,8 +10,8 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
-import { declaredRates } from "../services/output/rates.js";
-import { bitrateFor } from "../services/output/playlists.js";
+import { declaredRates } from "../services/encode/output/rates.js";
+import { bitrateFor } from "../services/encode/output/playlists.js";
 
 // The field file: 2 806 246 976 bytes over 20:18, cut into 291 pieces.
 const FIELD = { fileLength: 2_806_246_976, durationSeconds: 1218.73 };

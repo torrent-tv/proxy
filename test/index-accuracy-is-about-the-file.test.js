@@ -25,8 +25,8 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
-import { Timeline, Timelines } from "../services/output/Timeline.js";
-import { Output } from "../services/output/Output.js";
+import { Timeline, Timelines } from "../services/encode/output/Timeline.js";
+import { Output } from "../services/encode/output/Output.js";
 import { KeyframeTable } from "../services/media/container/KeyframeTable.js";
 
 const KEYFRAMES = [0, 4.004, 8.008, 12.012, 16.016];

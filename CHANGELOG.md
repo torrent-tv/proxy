@@ -1,5 +1,9 @@
 ## 2.87.0
 
+- **Chore**: The encoding component is one directory, `services/encode/`, with `output/`, `segment-formats/` and `quality/` inside it and the encoder detection, decode-cost fit, machine readings and learned medians at its root. Its import rule is the component's boundary: nothing outside `encode/` except the ffmpeg banner parsers of the media component, and the quality budget keeps its narrower list.
+
+- **Fix**: The usrsctp state reader looked for its gdb script one directory short of where it is, since the transport moved into `services/transport/` earlier in this release. `test/asset-paths.test.js` now checks that script, the calibration clips and the default place for host timings, and fails with the short path.
+
 - **Chore**: The torrent component is one directory, `services/torrent/`: the pool, the source key and the supply margin at its root, with `demand/`, `download/` and the torrent thread (`worker/`, was `torrent-worker/`) inside it. The storage component likewise holds `piece-store/`, `segment-store/` and `files/`, and the process's memory report and core-dump keeping. The import rules follow the components: the torrent may read the published shape of the priority map and store pieces in storage, storage imports nothing outside itself, and each rule was checked by adding a forbidden import to each directory.
 
 - **Chore**: The transport is one directory, `services/transport/`: the data channel handler, the delivery probe, the packet witness, the usrsctp state reader, the WebRTC manager, the tunnel client, the registry client, port mapping, NAT classification and the health figures. `thread-pool.js`, which only sets up the process before anything else loads, moved beside the entry point that imports it first (`bin/`).

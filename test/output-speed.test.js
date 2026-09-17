@@ -9,8 +9,8 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
-import { EncodeCost } from "../services/quality/EncodeCost.js";
-import { OutputCatalog } from "../services/output/OutputCatalog.js";
+import { EncodeCost } from "../services/encode/quality/EncodeCost.js";
+import { OutputCatalog } from "../services/encode/output/OutputCatalog.js";
 import { outputSpec } from "./helpers/output-spec.js";
 
 const PICTURE = "torrent:abc:fmt=fmp4:grid=kf@0:video-only:v=0/copy";

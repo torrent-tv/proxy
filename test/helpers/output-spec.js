@@ -1,4 +1,4 @@
-import { AudioOutput, CutGrid, OutputSpec, VideoOutput } from "../../services/output/OutputSpec.js";
+import { AudioOutput, CutGrid, OutputSpec, VideoOutput } from "../../services/encode/output/OutputSpec.js";
 
 /**
  * Build the output identity used by production objects in focused tests.

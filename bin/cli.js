@@ -33,7 +33,7 @@ import { fragmentBufferCollection } from "../services/torrent/worker/client.js";
 import { collectHealthMetrics } from "../services/transport/health-collector.js";
 import { createPortMapper } from "../services/transport/port-mapper.js";
 import { classifyNat } from "../services/transport/nat-classifier.js";
-import { DEFAULT_SEGMENT_FORMAT_ID, SEGMENT_FORMAT_IDS } from "../services/segment-formats/index.js";
+import { DEFAULT_SEGMENT_FORMAT_ID, SEGMENT_FORMAT_IDS } from "../services/encode/segment-formats/index.js";
 import { logToFile, logger } from "../utils/logger.js";
 
 const require = createRequire(import.meta.url);

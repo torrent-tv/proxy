@@ -16,13 +16,13 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { SourceFile } from "../services/media/SourceFile.js";
-import { Timeline } from "../services/output/Timeline.js";
+import { Timeline } from "../services/encode/output/Timeline.js";
 import { mkdtemp, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { wireOutputs } from "../services/serving/wire-outputs.js";
 import { viewerOf } from "../services/viewer/Viewer.js";
-import { fmp4Format } from "../services/segment-formats/fmp4.js";
+import { fmp4Format } from "../services/encode/segment-formats/fmp4.js";
 
 const SESSION_ID = "aaaaaaaa11112222";
 const SEGMENT_SECONDS = 10.4;

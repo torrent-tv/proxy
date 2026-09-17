@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { OutputCatalog } from "../services/output/OutputCatalog.js";
+import { OutputCatalog } from "../services/encode/output/OutputCatalog.js";
 
 test("the catalog owns creation and access times", () => {
   let now = 100;

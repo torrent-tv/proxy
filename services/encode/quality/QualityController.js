@@ -8,8 +8,8 @@
  */
 
 import { stat } from "node:fs/promises";
-import { logger } from "../../utils/logger.js";
-import { ENCODE_RUN_STATE } from "../encode/encode-run-state.js";
+import { logger } from "../../../utils/logger.js";
+import { ENCODE_RUN_STATE } from "../encode-run-state.js";
 import { maxrateKbpsFor, nominalKbpsForHeight, nominalKbpsForMaxrate } from "../hwaccel.js";
 import { linkCouldCarry, LINK_SAFETY } from "./link-budget.js";
 

@@ -58,11 +58,11 @@ const LEARN_WINDOW_MIN_SEC = 3;
 import { correctForAvailability } from "../available-share.js";
 import { medianOf, movedBeyondScatter, READINGS_KEPT } from "../learned-median.js";
 import { speedFromReadings } from "../encoder-readings.js";
-import { contentionPenalty } from "../encode/contention.js";
-import { ENCODE_RUN_STATE, liveRunsOf, processCanBeSignalled } from "../encode/encode-run-state.js";
+import { contentionPenalty } from "../contention.js";
+import { ENCODE_RUN_STATE, liveRunsOf, processCanBeSignalled } from "../encode-run-state.js";
 import { canSustainOutput, chooseSoftwareEncodeSettings, speedBar } from "../hwaccel.js";
-import { computeOutputDimensions, TRANSCODE_FPS } from "../encode/args.js";
-import { logger } from "../../utils/logger.js";
+import { computeOutputDimensions, TRANSCODE_FPS } from "../args.js";
+import { logger } from "../../../utils/logger.js";
 
 export class EncodeCost {
   /**

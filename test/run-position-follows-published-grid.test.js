@@ -19,7 +19,7 @@
  */
 
 import assert from "node:assert/strict";
-import { Timeline } from "../services/output/Timeline.js";
+import { Timeline } from "../services/encode/output/Timeline.js";
 import test from "node:test";
 
 import { wireOutputs } from "../services/serving/wire-outputs.js";

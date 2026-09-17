@@ -12,7 +12,7 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
-import { fmp4Format } from "../services/segment-formats/fmp4.js";
+import { fmp4Format } from "../services/encode/segment-formats/fmp4.js";
 // Build a minimal init declaring two tracks, and fragments declaring one/two.
 function box(type, body) {
   const b = Buffer.alloc(8 + body.length);

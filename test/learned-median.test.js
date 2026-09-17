@@ -4,7 +4,7 @@
  */
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { medianOf, movedBeyondScatter, scatterOf } from "../services/learned-median.js";
+import { medianOf, movedBeyondScatter, scatterOf } from "../services/encode/learned-median.js";
 
 test("the median is the middle reading, and the mean of the two middle ones", () => {
   assert.equal(medianOf([3, 1, 2]), 2);

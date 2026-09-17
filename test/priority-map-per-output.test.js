@@ -25,7 +25,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { PriorityOrchestrator } from "../services/viewer/PriorityOrchestrator.js";
-import { OutputCatalog } from "../services/output/OutputCatalog.js";
+import { OutputCatalog } from "../services/encode/output/OutputCatalog.js";
 import { Viewers } from "../services/viewer/Viewers.js";
 import { viewersOf } from "../services/viewer/Viewer.js";
 import { runsOf } from "../services/viewer/PriorityMap.js";

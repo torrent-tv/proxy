@@ -32,7 +32,7 @@ import { EncodeRun } from "../services/encode/EncodeRun.js";
 import { SegmentStore } from "../services/storage/segment-store/SegmentStore.js";
 import { SoftwareEncoder } from "../services/encode/SoftwareEncoder.js";
 import { EncodeOrchestrator } from "../services/encode/EncodeOrchestrator.js";
-import { fmp4Format } from "../services/segment-formats/fmp4.js";
+import { fmp4Format } from "../services/encode/segment-formats/fmp4.js";
 
 const PICTURE = "torrent:abc:fmt=fmp4:grid=kf@0:video-only:v=0/copy";
 const SEGMENTS = 482;

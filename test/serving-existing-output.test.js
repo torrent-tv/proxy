@@ -10,9 +10,9 @@ import path from "node:path";
 import { managerWithOwnStore } from "./helpers/manager.js";
 import { outputSpec } from "./helpers/output-spec.js";
 import { SourceFile } from "../services/media/SourceFile.js";
-import { Timeline } from "../services/output/Timeline.js";
-import { fmp4Format } from "../services/segment-formats/fmp4.js";
-import { Output } from "../services/output/Output.js";
+import { Timeline } from "../services/encode/output/Timeline.js";
+import { fmp4Format } from "../services/encode/segment-formats/fmp4.js";
+import { Output } from "../services/encode/output/Output.js";
 import { viewersOf } from "../services/viewer/Viewer.js";
 
 const TORRENT = "torrent:11f0929918e2b5aa2e5b71ecdbe5c0f1a4bbf7d1";

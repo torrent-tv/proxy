@@ -46,7 +46,7 @@ trigger is skipped.
 
 ## Impact
 
-- `services/hwaccel.js` — nominal-rate table + caps in the software
+- `services/encode/hwaccel.js` — nominal-rate table + caps in the software
   descriptor's video args.
 - `services/hls-session-manager.js` — accept/store net reports per session;
   link trigger in the budget check; log line.

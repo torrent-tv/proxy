@@ -48,15 +48,15 @@ function watched(session) {
 
 import assert from "node:assert/strict";
 import { SourceFile } from "../services/media/SourceFile.js";
-import { Timeline } from "../services/output/Timeline.js";
+import { Timeline } from "../services/encode/output/Timeline.js";
 import { mkdtemp, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { audioRenditionKey } from "../services/encode/Renditions.js";
 import { managerWithOwnStore } from "./helpers/manager.js";
 import { viewerOf, viewersOf } from "../services/viewer/Viewer.js";
-import { fmp4Format } from "../services/segment-formats/fmp4.js";
-import { Output } from "../services/output/Output.js";
+import { fmp4Format } from "../services/encode/segment-formats/fmp4.js";
+import { Output } from "../services/encode/output/Output.js";
 import { outputSpec } from "./helpers/output-spec.js";
 
 const BASE_ID = "aaaaaaaabbbbcccc";

@@ -44,7 +44,7 @@ manual-quality menu also needs the server UI).
 
 ## Impact
 
-- `services/hwaccel.js` (fps, benchmark, tonemap args),
+- `services/encode/hwaccel.js` (fps, benchmark, tonemap args),
   `services/hls-session-manager.js` (fps probe, runtime speed watch),
   `services/playback-planner.js` (HDR/fps in the plan);
   server player UI for the Quality menu; ha-addon bump.

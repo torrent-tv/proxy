@@ -26,16 +26,16 @@ import { mkdtemp, readFile, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { fitDecodeCost } from "./decode-cost-fit.js";
-import { penaltiesFrom } from "./encode/contention.js";
+import { penaltiesFrom } from "./contention.js";
 import { fileURLToPath } from "node:url";
 import {
   parseFfmpegBitrateKbps,
   parseFfmpegDurationSeconds,
   parseFfmpegVideoDimensions,
   parseFfmpegVideoFps
-} from "./media/ffmpeg-banner.js";
+} from "../media/ffmpeg-banner.js";
 
-import { keyFrameArgs, TRANSCODE_FPS } from "./encode/args.js";
+import { keyFrameArgs, TRANSCODE_FPS } from "./args.js";
 import { LADDER_HEIGHTS } from "./output/ladder.js";
 // The five kinds, one class each. Detection and benchmarking stay in this file;
 // how a kind is driven belongs to the kind.
@@ -45,7 +45,7 @@ import {
   SoftwareEncoder,
   V4l2m2mEncoder,
   VaapiEncoder
-} from "./encode/index.js";
+} from "./index.js";
 // Re-exported so every caller goes on importing these figures from here:
 // the same calculation, moved to sit beside the encoder kinds built from it.
 export {
@@ -54,7 +54,7 @@ export {
   nominalKbpsForHeight,
   nominalKbpsForMaxrate,
   TRANSCODE_FPS
-} from "./encode/args.js";
+} from "./args.js";
 
 const BENCHMARK_REF_W = 640;
 const BENCHMARK_REF_H = 360;
@@ -466,7 +466,7 @@ const CALIBRATION_SETS = {
   ]
 };
 const CALIBRATION_CLIPS = CALIBRATION_SETS.h264;
-const CALIBRATION_DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "assets", "calibration");
+export const CALIBRATION_DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "..", "assets", "calibration");
 // How wide the measured window must be before the slope is trusted, and how
 // long to wait for it at most.
 //

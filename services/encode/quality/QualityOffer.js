@@ -27,9 +27,9 @@
 
 import { variantHeightsFor } from "../output/ladder.js";
 import { peakMbpsForHeight } from "./link-budget.js";
-import { chooseOutputFps, TRANSCODE_FPS } from "../encode/args.js";
-import { processCanBeSignalled } from "../encode/encode-run-state.js";
-import { sourceDecodeCharacteristics } from "../media/SourceFile.js";
+import { chooseOutputFps, TRANSCODE_FPS } from "../args.js";
+import { processCanBeSignalled } from "../encode-run-state.js";
+import { sourceDecodeCharacteristics } from "../../media/SourceFile.js";
 
 export class QualityOffer {
   #cost;

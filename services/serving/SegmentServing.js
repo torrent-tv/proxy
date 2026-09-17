@@ -14,7 +14,7 @@ import { Readable } from "node:stream";
 import path from "node:path";
 import { logger } from "../../utils/logger.js";
 import { ENCODE_RUN_STATE } from "../encode/encode-run-state.js";
-import { isOutputName } from "../output/index.js";
+import { isOutputName } from "../encode/output/index.js";
 import { PLAYLIST_FILE_NAME } from "../encode/run-command.js";
 import { activeOutputFor } from "../viewer/active-output.js";
 import { viewerSecondsOn } from "../viewer/positions.js";
@@ -165,7 +165,7 @@ export class SegmentServing {
     // run REWRITES it, so cache the FIRST one and always serve that — the
     // player fetches it once and never re-fetches, so it must stay stable for
     // the session's lifetime. (What that costs, and why segments must therefore
-    // carry their own position, is documented in `segment-formats/mp4-boxes.js`
+    // carry their own position, is documented in `encode/segment-formats/mp4-boxes.js`
     // `stampSegmentStartTime`.)
     //
     // ffmpeg creates init.mp4 before it has finished writing the fMP4 header

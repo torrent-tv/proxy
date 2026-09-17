@@ -7,7 +7,7 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
-import { Output } from "../services/output/Output.js";
+import { Output } from "../services/encode/output/Output.js";
 
 test("a copied picture has no box of its own, and says so with zeroes", () => {
   // Zero means the source's own size, which is what a copy is by definition:

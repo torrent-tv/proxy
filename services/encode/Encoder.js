@@ -3,7 +3,7 @@
  * arguments are built, and what its own setting for speed is.
  *
  * Until 2026-09-04 each kind was an object literal returned by a factory in
- * `hwaccel.js`, and everything a kind knows beyond its arguments was either
+ * `encode/hwaccel.js`, and everything a kind knows beyond its arguments was either
  * absent or spread into conditions elsewhere. The clearest case is the ladder
  * of speed settings: `pickSoftwarePreset` walks one for libx264, and the four
  * hardware kinds have none at all — NVENC is given a hardcoded `-preset p4`,

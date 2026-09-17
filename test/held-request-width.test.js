@@ -11,12 +11,12 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
-import { Timeline } from "../services/output/Timeline.js";
+import { Timeline } from "../services/encode/output/Timeline.js";
 import { mkdtemp, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { wireOutputs } from "../services/serving/wire-outputs.js";
-import { fmp4Format } from "../services/segment-formats/fmp4.js";
+import { fmp4Format } from "../services/encode/segment-formats/fmp4.js";
 import { viewerOf } from "../services/viewer/Viewer.js";
 
 const SESSION_ID = "aaaaaaaabbbbcccc";

@@ -11,7 +11,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { canSustainOutput } from "../services/hwaccel.js";
+import { canSustainOutput } from "../services/encode/hwaccel.js";
 
 // A host that encodes 640x360 at 24 fps about eleven times over, and decodes
 // 1080p24 at 2.6x — the addon host's own figures.

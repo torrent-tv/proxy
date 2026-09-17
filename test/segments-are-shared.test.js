@@ -19,7 +19,7 @@ import { SourceFile } from "../services/source/SourceFile.js";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { HlsSessionManager } from "../services/hls-session-manager.js";
+import { wireOutputs } from "../services/serving/wire-outputs.js";
 import { SegmentStore } from "../services/segment-store/SegmentStore.js";
 import { Timeline } from "../services/output/Timeline.js";
 import { fmp4Format } from "../services/segment-formats/fmp4.js";
@@ -28,12 +28,12 @@ import { outputSpec } from "./helpers/output-spec.js";
 const OUTPUT_KEY = "torrent:abc:fmt=fmp4:grid=kf@0:video-only:v=0/copy";
 
 /**
- * @returns {{ manager: HlsSessionManager, store: SegmentStore, root: string }}
+ * @returns {{ manager: object, store: SegmentStore, root: string }}
  */
 function managerOverATempStore() {
   const root = mkdtempSync(path.join(os.tmpdir(), "shared-segments-"));
   const store = new SegmentStore({ root });
-  const manager = new HlsSessionManager({
+  const manager = wireOutputs({
     enabled: true,
     ffmpegBin: "ffmpeg",
     localBindHost: "127.0.0.1",
@@ -99,8 +99,8 @@ test("each session serves the segments the other one's encoder made", (t) => {
   manager.outputs.set(viewerTwo.id, viewerTwo);
 
   const sorted = (numbers) => [...numbers].sort((left, right) => left - right);
-  const heldByOne = sorted(manager.producedSegmentNumbers(viewerOne));
-  const heldByTwo = sorted(manager.producedSegmentNumbers(viewerTwo));
+  const heldByOne = sorted(manager.serving.producedSegmentNumbers(viewerOne));
+  const heldByTwo = sorted(manager.serving.producedSegmentNumbers(viewerTwo));
 
   assert.deepEqual(heldByOne, [0, 100]);
   assert.deepEqual(heldByTwo, [0, 100], "neither viewer's session is the owner of either run");
@@ -119,8 +119,8 @@ test("a session leaving does not take the segments with it", async (t) => {
   manager.outputs.set(viewerOne.id, viewerOne);
   manager.outputs.set(viewerTwo.id, viewerTwo);
 
-  await manager.disposeSession(viewerOne.id);
-  await manager.disposeSession(viewerTwo.id);
+  await manager.lifecycle.disposeSession(viewerOne.id);
+  await manager.lifecycle.disposeSession(viewerTwo.id);
 
   // Both sessions are gone and the material is still here. That is the whole
   // decoupling: a session ending says nothing about whether anybody will ask

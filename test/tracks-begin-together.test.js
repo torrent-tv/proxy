@@ -18,7 +18,7 @@ import { startRunOn } from "./helpers/encode-run.js";
 import { Timeline } from "../services/output/Timeline.js";
 import test from "node:test";
 
-import { HlsSessionManager } from "../services/hls-session-manager.js";
+import { wireOutputs } from "../services/serving/wire-outputs.js";
 import { trueStartOf } from "../services/encode/run-command.js";
 import { fmp4Format } from "../services/segment-formats/fmp4.js";
 import { ENCODE_RUN_STATE, INITIAL_RUN_STATE } from "../services/encode/encode-run-state.js";
@@ -30,13 +30,13 @@ const BOUNDARIES = [0, 4, 8, 12, 16, 20];
  * A film's family: the picture, and a soundtrack rendition of it. Both runs
  * begin at boundary #2, which the container's table puts at 8 s.
  *
- * @returns {{ manager: HlsSessionManager, picture: object, sound: object }}
+ * @returns {{ manager: object, picture: object, sound: object }}
  */
 function familyAtBoundaryTwo() {
   // ONE table for the film. Where it is cut is a fact about the FILE, so the
   // picture and its soundtrack hold the same array rather than a copy each.
   const boundaries = [...BOUNDARIES];
-  const manager = new HlsSessionManager({
+  const manager = wireOutputs({
     enabled: true,
     ffmpegBin: "ffmpeg",
     localBindHost: "127.0.0.1",
@@ -99,7 +99,7 @@ test("a soundtrack follows the picture to the instant the picture really began",
   const { manager, picture, sound } = familyAtBoundaryTwo();
   const runBefore = [...sound.runs][0];
 
-  manager.correctBoundaryFromSegment(picture, 2, 10.5);
+  manager.outputTimes.correctBoundaryFromSegment(picture, 2, 10.5);
 
   assert.deepEqual(
     picture.timeline.boundaries,
@@ -155,7 +155,7 @@ test("a correction the table already holds moves nobody", () => {
   // Within the tolerance: the reading agrees with the table, so there is
   // nothing to correct and nothing to move. This is what makes the repositioning
   // converge instead of repeating on every produced segment.
-  manager.correctBoundaryFromSegment(picture, 2, 8.1);
+  manager.outputTimes.correctBoundaryFromSegment(picture, 2, 8.1);
   assert.deepEqual(sound.timeline.boundaries, before);
 });
 
@@ -167,7 +167,7 @@ test("a member that is not running is left alone", () => {
   soundRun.stop("the viewer switched away");
   // A stopped run is no longer live, so nothing of this session begins at #2
   // any more — which is what "left alone" means here.
-  manager.correctBoundaryFromSegment(picture, 2, 10.5);
+  manager.outputTimes.correctBoundaryFromSegment(picture, 2, 10.5);
   assert.equal(
     manager.encodeOrchestrator.runsOn(sound.outputKey).filter((run) => run.isAlive).length,
     0,
@@ -193,7 +193,7 @@ test("a soundtrack does not move the grid the picture is cut on", () => {
   // 1.951 s apart, each overwriting the other for as long as the film ran. The
   // table never converged, so the guard that stops a correction the table
   // already holds never fired.
-  manager.correctBoundaryFromSegment(sound, 2, 10.5);
+  manager.outputTimes.correctBoundaryFromSegment(sound, 2, 10.5);
 
   assert.deepEqual(
     picture.timeline.boundaries,

@@ -276,7 +276,7 @@ function buildEncoderTestArgs(descriptor, segmentDurationSec, outDir) {
     "-hls_time", String(segmentDurationSec),
     "-hls_list_size", "0",
     "-hls_flags", "independent_segments",
-    // fMP4 (CMAF) — matches the runtime pipeline (hls-session-manager).
+    // fMP4 (CMAF) — matches the runtime pipeline (`encode/run-command.js`).
     "-hls_segment_type", "fmp4",
     "-hls_fmp4_init_filename", "init.mp4",
     "-hls_segment_filename", path.join(outDir, "seg-%03d.m4s"),

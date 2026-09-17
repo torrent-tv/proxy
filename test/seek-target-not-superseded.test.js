@@ -20,7 +20,7 @@ import { Timeline } from "../services/output/Timeline.js";
 import { mkdtemp, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { HlsSessionManager } from "../services/hls-session-manager.js";
+import { wireOutputs } from "../services/serving/wire-outputs.js";
 import { viewerOf } from "../services/viewer/Viewer.js";
 import { fmp4Format } from "../services/segment-formats/fmp4.js";
 
@@ -32,11 +32,11 @@ const SEGMENT_AT_SEEK = Math.floor(SEEK_TO_SECONDS / SEGMENT_SECONDS);
 /**
  * A session whose viewer has just landed at {@link SEEK_TO_SECONDS}.
  *
- * @returns {Promise<{ manager: HlsSessionManager, dirPath: string }>}
+ * @returns {Promise<{ manager: object, dirPath: string }>}
  */
 async function managerAfterSeek() {
   const dirPath = await mkdtemp(path.join(os.tmpdir(), "seek-target-"));
-  const manager = new HlsSessionManager({
+  const manager = wireOutputs({
     enabled: true,
     ffmpegBin: "ffmpeg",
     localBindHost: "127.0.0.1",
@@ -78,7 +78,7 @@ test("the segment at the seek target is still wanted", async () => {
   const { manager, dirPath } = await managerAfterSeek();
 
   assert.equal(
-    manager.requestStillWanted(SESSION_ID, `segment-${String(SEGMENT_AT_SEEK).padStart(5, "0")}.mp4`),
+    manager.serving.requestStillWanted(SESSION_ID, `segment-${String(SEGMENT_AT_SEEK).padStart(5, "0")}.mp4`),
     true,
     "this is the segment the viewer is waiting for; refusing it is what froze the field session"
   );
@@ -90,7 +90,7 @@ test("a segment behind the viewer is not wanted any more", async () => {
   const { manager, dirPath } = await managerAfterSeek();
 
   assert.equal(
-    manager.requestStillWanted(SESSION_ID, `segment-${String(SEGMENT_AT_SEEK - 3).padStart(5, "0")}.mp4`),
+    manager.serving.requestStillWanted(SESSION_ID, `segment-${String(SEGMENT_AT_SEEK - 3).padStart(5, "0")}.mp4`),
     false,
     "a request for the position the viewer left is exactly what the epoch exists to release"
   );
@@ -102,7 +102,7 @@ test("a segment far beyond what the run will reach is not wanted", async () => {
   const { manager, dirPath } = await managerAfterSeek();
 
   assert.equal(
-    manager.requestStillWanted(SESSION_ID, `segment-${String(SEGMENT_AT_SEEK + 200).padStart(5, "0")}.mp4`),
+    manager.serving.requestStillWanted(SESSION_ID, `segment-${String(SEGMENT_AT_SEEK + 200).padStart(5, "0")}.mp4`),
     false,
     "nothing will produce it before the viewer moves again"
   );
@@ -113,8 +113,8 @@ test("a segment far beyond what the run will reach is not wanted", async () => {
 test("a playlist belongs to no position and is never stale", async () => {
   const { manager, dirPath } = await managerAfterSeek();
 
-  assert.equal(manager.requestStillWanted(SESSION_ID, "index.m3u8"), true);
-  assert.equal(manager.requestStillWanted(SESSION_ID, "init.mp4"), true);
+  assert.equal(manager.serving.requestStillWanted(SESSION_ID, "index.m3u8"), true);
+  assert.equal(manager.serving.requestStillWanted(SESSION_ID, "init.mp4"), true);
 
   await rm(dirPath, { recursive: true, force: true });
 });
@@ -131,7 +131,7 @@ test("a request as deep as the cushion the browser is told to hold is still want
 
   assert.ok(edge - SEGMENT_AT_SEEK > 8, "the case only exists past the old eight-segment width");
   assert.equal(
-    manager.requestStillWanted(SESSION_ID, `segment-${String(edge).padStart(5, "0")}.mp4`),
+    manager.serving.requestStillWanted(SESSION_ID, `segment-${String(edge).padStart(5, "0")}.mp4`),
     true,
     "the far edge of the cushion the proxy itself keeps produced"
   );
@@ -154,12 +154,12 @@ test("the viewer who made the request is the one it is judged against", async ()
   viewerOf(session, "ahead").playing = false;
 
   assert.equal(
-    manager.requestStillWanted(SESSION_ID, `segment-${String(behind).padStart(5, "0")}.mp4`, "behind"),
+    manager.serving.requestStillWanted(SESSION_ID, `segment-${String(behind).padStart(5, "0")}.mp4`, "behind"),
     true,
     "held for the viewer who is there, whatever the viewer in front is doing"
   );
   assert.equal(
-    manager.requestStillWanted(SESSION_ID, `segment-${String(behind).padStart(5, "0")}.mp4`),
+    manager.serving.requestStillWanted(SESSION_ID, `segment-${String(behind).padStart(5, "0")}.mp4`),
     false,
     "unnamed, it is judged against the furthest viewer, which is the leader"
   );
@@ -179,15 +179,15 @@ test("a seek moves the seeking viewer's own head, and nobody else's", async () =
   };
 
   const jumpTo = 120;
-  manager.requestSeek(SESSION_ID, jumpTo, "jumping");
+  manager.viewerRequests.requestSeek(SESSION_ID, jumpTo, "jumping");
 
   assert.equal(
-    manager.requestStillWanted(SESSION_ID, `segment-${String(Math.floor(jumpTo / SEGMENT_SECONDS)).padStart(5, "0")}.mp4`, "jumping"),
+    manager.serving.requestStillWanted(SESSION_ID, `segment-${String(Math.floor(jumpTo / SEGMENT_SECONDS)).padStart(5, "0")}.mp4`, "jumping"),
     true,
     "the segment at the seek target — the request that raced the epoch in 2026-08-18"
   );
   assert.equal(
-    manager.requestStillWanted(SESSION_ID, `segment-${String(staying).padStart(5, "0")}.mp4`, "staying"),
+    manager.serving.requestStillWanted(SESSION_ID, `segment-${String(staying).padStart(5, "0")}.mp4`, "staying"),
     true,
     "somebody else's seek does not move where this viewer is"
   );

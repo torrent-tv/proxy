@@ -67,8 +67,8 @@ test("an encoder is stopped for scheduling reasons in exactly one place", () => 
   const stopsInOrchestrator = orchestrator.filter((line) => line.includes("run.stop("));
   assert.equal(stopsInOrchestrator.length, 1, "the orchestrator stops runs in one place");
 
-  const manager = statements(source("services/hls-session-manager.js"));
-  assert.deepEqual(manager.filter((line) => line.includes(".stop(")), [], "the session manager stops nothing");
+  const wiring = statements(source("services/serving/wire-outputs.js"));
+  assert.deepEqual(wiring.filter((line) => line.includes(".stop(")), [], "the wiring stops nothing");
   const lifecycle = statements(source("services/serving/OutputLifecycle.js"));
   const stopsAtTeardown = lifecycle.filter((line) => line.includes(".stop("));
   assert.equal(
@@ -107,7 +107,7 @@ test("a run exists means its process is running, so nothing can start one twice"
     "services/encode/EncodeRun.js",
     "services/encode/EncodeOrchestrator.js",
     "services/encode/EncodeRuns.js",
-    "services/hls-session-manager.js"
+    "services/serving/wire-outputs.js"
   ];
   for (const file of files) {
     const starts = statements(source(file)).filter(

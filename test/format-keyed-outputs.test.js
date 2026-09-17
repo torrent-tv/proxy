@@ -28,7 +28,7 @@ test("a directory whose key names an asked-for box is not adopted, and one namin
   writeFileSync(path.join(oldDir, "segment-00000.mp4"), Buffer.alloc(10));
   writeFileSync(path.join(newDir, "segment-00000.mp4"), Buffer.alloc(10));
 
-  const result = manager.adoptSegmentsLeftBehind();
+  const result = manager.lifecycle.adoptSegmentsLeftBehind();
 
   assert.equal(result.adopted, 1);
   assert.equal(result.dropped, 1);
@@ -42,11 +42,11 @@ test("when a hardware encoder fails, the outputs it named are closed rather than
     videoEncoder: { kind: "vaapi", name: "h264_vaapi", inputArgs: [] }
   });
   t.after(async () => {
-    await manager.disposeAll();
+    await manager.lifecycle.disposeAll();
     cleanup();
   });
-  manager.planEncodersNow = () => {};
-  manager.planEncodersSoon = () => {};
+  manager.encodeRuns.planEncodersNow = () => {};
+  manager.encodeRuns.planEncodersSoon = () => {};
   const file = new SourceFile({ sourceKey: "torrent:abc", fileIndex: 0, name: "film.mkv" });
   const record = (id, encoder) => {
     const spec = outputSpec({ sourceKey: "torrent:abc", transcodeVideo: true, width: 1280, height: 720, encoder });
@@ -59,7 +59,7 @@ test("when a hardware encoder fails, the outputs it named are closed rather than
   const run = { from: 0, to: -1, argsDescribed: "ffmpeg …" };
   manager.encodeOrchestrator.adopt(failing.outputKey, run);
 
-  manager.noteRunEnded(failing, run, {
+  manager.encodeRuns.noteRunEnded(failing, run, {
     address: failing.outputKey,
     run,
     ending: ENCODE_EXIT.FAILED,

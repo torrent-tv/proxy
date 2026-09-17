@@ -26,7 +26,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 
-import { HlsSessionManager } from "../services/hls-session-manager.js";
+import { wireOutputs } from "../services/serving/wire-outputs.js";
 import { startRunOn } from "./helpers/encode-run.js";
 import { fmp4Format } from "../services/segment-formats/fmp4.js";
 
@@ -39,11 +39,11 @@ const SESSION_ID = "2222222233334444";
  * A live session whose run begins at #373 and whose directory is empty, so any
  * segment request is a request for something not yet produced.
  *
- * @returns {Promise<{ manager: HlsSessionManager, session: object, dirPath: string }>}
+ * @returns {Promise<{ manager: object, session: object, dirPath: string }>}
  */
 async function sessionWithRunAt373() {
   const dirPath = await mkdtemp(path.join(os.tmpdir(), "stale-request-"));
-  const manager = new HlsSessionManager({
+  const manager = wireOutputs({
     enabled: true,
     ffmpegBin: "ffmpeg",
     localBindHost: "127.0.0.1",
@@ -81,7 +81,7 @@ async function sessionWithRunAt373() {
 }
 
 /**
- * @param {HlsSessionManager} manager
+ * @param {object} manager
  * @param {object} session
  * @param {string} dirPath
  */
@@ -102,9 +102,9 @@ test("a request behind where the viewer said they are does not move the encoder"
   });
 
   // The viewer stated their position: 2083.4 s, which is segment #520 here.
-  manager.requestSeek(SESSION_ID, 2083.4, "viewer-1");
+  manager.viewerRequests.requestSeek(SESSION_ID, 2083.4, "viewer-1");
 
-  await manager.getFileStream(
+  await manager.serving.getFileStream(
     SESSION_ID,
     fmp4Format.segmentFileName(BEHIND_INDEX),
     { requestSeq: 1 }
@@ -136,7 +136,7 @@ test("the same traffic moves nothing when the viewer has said nothing either", a
   // spoken. That exception is the thing that was removed: a request is evidence
   // about what a player is reading, never about where a person is, and an
   // encoder placed from it is placed from a number the player picked.
-  await manager.getFileStream(
+  await manager.serving.getFileStream(
     SESSION_ID,
     fmp4Format.segmentFileName(BEHIND_INDEX),
     { requestSeq: 1 }
@@ -152,8 +152,8 @@ test("a request cannot move the viewer's position backwards", async (t) => {
     await tidy(manager, session, dirPath);
   });
 
-  manager.requestSeek(SESSION_ID, 2083.4, "viewer-1");
-  await manager.getFileStream(SESSION_ID, fmp4Format.segmentFileName(BEHIND_INDEX), { requestSeq: 1 });
+  manager.viewerRequests.requestSeek(SESSION_ID, 2083.4, "viewer-1");
+  await manager.serving.getFileStream(SESSION_ID, fmp4Format.segmentFileName(BEHIND_INDEX), { requestSeq: 1 });
 
   assert.ok(
     Math.abs((manager.viewers.get("viewer-1")?.positionSeconds() ?? -1) - 2083.4) < 1,

@@ -17,7 +17,7 @@ import assert from "node:assert/strict";
 import { mkdtemp, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { HlsSessionManager } from "../services/hls-session-manager.js";
+import { wireOutputs } from "../services/serving/wire-outputs.js";
 import { SourceFile } from "../services/source/SourceFile.js";
 import { Viewers } from "../services/viewer/Viewers.js";
 import { viewersOf } from "../services/viewer/Viewer.js";
@@ -87,7 +87,7 @@ test("a viewer whose connection closed is let go of every output they were watch
   t.after(async () => {
     await rm(dirPath, { recursive: true, force: true });
   });
-  const manager = new HlsSessionManager({
+  const manager = wireOutputs({
     enabled: true,
     ffmpegBin: "ffmpeg",
     localBindHost: "127.0.0.1",
@@ -101,19 +101,19 @@ test("a viewer whose connection closed is let go of every output they were watch
   manager.viewers.of(picture, "watcher");
   manager.viewers.of(sound, "watcher");
 
-  const released = await manager.viewerHasGone("watcher", "the connection closed");
+  const released = await manager.lifecycle.viewerHasGone("watcher", "the connection closed");
 
   assert.equal(released, 2, "the picture and the soundtrack, from one statement");
   assert.equal(manager.viewers.get("watcher"), null);
 });
 
 test("a viewer nobody knows costs nothing to let go of", async () => {
-  const manager = new HlsSessionManager({
+  const manager = wireOutputs({
     enabled: true,
     ffmpegBin: "ffmpeg",
     localBindHost: "127.0.0.1",
     localPort: 9090
   });
-  assert.equal(await manager.viewerHasGone("never-seen"), 0);
-  assert.equal(await manager.viewerHasGone(""), 0);
+  assert.equal(await manager.lifecycle.viewerHasGone("never-seen"), 0);
+  assert.equal(await manager.lifecycle.viewerHasGone(""), 0);
 });

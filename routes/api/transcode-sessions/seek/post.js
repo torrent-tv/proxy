@@ -23,10 +23,10 @@
 /**
  * @param {import("fastify").FastifyRequest} req
  * @param {import("fastify").FastifyReply} reply
- * @param {{ hlsSessionManager: import("../../../../services/hls-session-manager.js").HlsSessionManager }} deps
+ * @param {{ viewerRequests: object }} deps
  * @returns {Promise<void>}
  */
-export async function handleApiTranscodeSessionSeekPost(req, reply, { hlsSessionManager }) {
+export async function handleApiTranscodeSessionSeekPost(req, reply, { viewerRequests }) {
   const sessionId = req.params?.sessionId;
   const body = req.body && typeof req.body === "object" ? req.body : {};
   const positionSeconds = Number(body.positionSeconds);
@@ -40,7 +40,7 @@ export async function handleApiTranscodeSessionSeekPost(req, reply, { hlsSession
   // has to move with them or their next request is judged against where they
   // were before the jump.
   const consumerId = typeof body.consumerId === "string" ? body.consumerId.trim() : "";
-  const applied = hlsSessionManager.requestSeek(sessionId, positionSeconds, consumerId);
+  const applied = viewerRequests.requestSeek(sessionId, positionSeconds, consumerId);
   if (!applied) {
     // Unknown or disposed session — nothing to steer. Not an error worth
     // surfacing to the viewer: the seek will be handled by whatever session

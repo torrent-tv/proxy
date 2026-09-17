@@ -18,7 +18,7 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
-import { HlsSessionManager } from "../services/hls-session-manager.js";
+import { wireOutputs } from "../services/serving/wire-outputs.js";
 import { AudioOutput, CutGrid, OutputSpec, VideoOutput } from "../services/output/OutputSpec.js";
 import { Timeline } from "../services/output/Timeline.js";
 import { SourceFile } from "../services/source/SourceFile.js";
@@ -67,7 +67,7 @@ function nameOfThatOutput() {
 }
 
 /**
- * @param {HlsSessionManager} manager
+ * @param {object} manager
  * @returns {object} The session it is seeded with.
  */
 function seedOneSession(manager) {
@@ -97,7 +97,7 @@ function seedOneSession(manager) {
  * What the proxy already knows about the file when a second viewer arrives:
  * what a probe said, and where its keyframes are.
  *
- * @param {HlsSessionManager} manager
+ * @param {object} manager
  */
 function knownFile(manager) {
   manager.getCachedMediaInfo = () => ({ durationSeconds: 8, width: 1920, height: 1080, fps: 24 });
@@ -105,21 +105,21 @@ function knownFile(manager) {
 }
 
 test("a second viewer of one output is served by the session that exists", async (t) => {
-  const manager = new HlsSessionManager({
+  const manager = wireOutputs({
     enabled: true,
     ffmpegBin: "ffmpeg",
     localBindHost: "127.0.0.1",
     localPort: 9090
   });
-  t.after(() => manager.disposeAll());
+  t.after(() => manager.lifecycle.disposeAll());
   // No plan runs here: this file is about which session answers a request, and
   // placing encoders would spawn real processes.
-  manager.planEncodersNow = () => {};
-  manager.planEncodersSoon = () => {};
+  manager.encodeRuns.planEncodersNow = () => {};
+  manager.encodeRuns.planEncodersSoon = () => {};
   knownFile(manager);
   const seeded = seedOneSession(manager);
 
-  const answered = await manager.createOrGetSession(request({ consumerId: "viewer-two" }));
+  const answered = await manager.viewerRequests.createOrGetSession(request({ consumerId: "viewer-two" }));
 
   assert.equal(answered, seeded, "one output, one session");
   assert.ok(viewersOf(seeded).has("viewer-two"), "and the second viewer is on it");
@@ -130,7 +130,7 @@ test("a request whose parameters differ is not that session", async (t) => {
   // the output's, so a request producing something else must not find it. Here
   // the sound is to be re-encoded, which is a different output and a different
   // set of bytes.
-  const manager = new HlsSessionManager({
+  const manager = wireOutputs({
     enabled: true,
     ffmpegBin: "ffmpeg",
     localBindHost: "127.0.0.1",
@@ -140,14 +140,14 @@ test("a request whose parameters differ is not that session", async (t) => {
     // about — the deadline has its own subject elsewhere.
     startupWaitMs: 0
   });
-  t.after(() => manager.disposeAll());
-  manager.planEncodersNow = () => {};
-  manager.planEncodersSoon = () => {};
+  t.after(() => manager.lifecycle.disposeAll());
+  manager.encodeRuns.planEncodersNow = () => {};
+  manager.encodeRuns.planEncodersSoon = () => {};
   const seeded = seedOneSession(manager);
 
   let answered = null;
   try {
-    answered = await manager.createOrGetSession(request({ consumerId: "viewer-two", transcodeAudio: true }));
+    answered = await manager.viewerRequests.createOrGetSession(request({ consumerId: "viewer-two", transcodeAudio: true }));
   } catch {
     // Making a session for real needs a probe and a disk, which this file does
     // not give it. Failing there is the proof: it did not take the seeded one.
@@ -159,7 +159,7 @@ test("a request whose parameters differ is not that session", async (t) => {
 });
 
 test("two screens that come to the same format share one output, and a different format does not", async (t) => {
-  const manager = new HlsSessionManager({
+  const manager = wireOutputs({
     enabled: true,
     ffmpegBin: "ffmpeg",
     localBindHost: "127.0.0.1",
@@ -169,9 +169,9 @@ test("two screens that come to the same format share one output, and a different
     // source, is what is produced.
     videoEncoder: { kind: "vaapi", name: "h264_vaapi", inputArgs: [] }
   });
-  t.after(() => manager.disposeAll());
-  manager.planEncodersNow = () => {};
-  manager.planEncodersSoon = () => {};
+  t.after(() => manager.lifecycle.disposeAll());
+  manager.encodeRuns.planEncodersNow = () => {};
+  manager.encodeRuns.planEncodersSoon = () => {};
   knownFile(manager);
   const spec = new OutputSpec({
     sourceKey: TORRENT,
@@ -188,14 +188,14 @@ test("two screens that come to the same format share one output, and a different
   manager.outputs.set(seeded.id, seeded);
 
   // A taller window than the film: fitted to the source it is the same 1920x1080.
-  const joined = await manager.createOrGetSession(
+  const joined = await manager.viewerRequests.createOrGetSession(
     request({ consumerId: "tall-window", transcodeVideo: true, targetWidth: 1920, targetHeight: 1200 })
   );
   assert.equal(joined, seeded, "the key names the format produced, not the window it was asked for");
 
   let other = null;
   try {
-    other = await manager.createOrGetSession(
+    other = await manager.viewerRequests.createOrGetSession(
       request({ consumerId: "small-window", transcodeVideo: true, targetWidth: 1280, targetHeight: 720 })
     );
   } catch {

@@ -160,8 +160,8 @@ async function managerHolding({ piece, sessionHeader }) {
   };
   manager.outputs.set(SESSION_ID, session);
   // No plan runs here: this file is about the path that answers a request.
-  manager.planEncodersNow = () => {};
-  manager.planEncodersSoon = () => {};
+  manager.encodeRuns.planEncodersNow = () => {};
+  manager.encodeRuns.planEncodersSoon = () => {};
   // A LIVE RUN, deliberately. Under the rule this replaced, a live run anywhere
   // was what turned a refusal into a permanent one — so both cases below are
   // asked with one running, which is the state the field failure happened in.
@@ -179,7 +179,7 @@ test("a piece that agrees with its own header is served, whatever the session's 
     sessionHeader: moovOf(3)
   });
 
-  const answer = await manager.getFileStream(SESSION_ID, "segment-00000.mp4");
+  const answer = await manager.serving.getFileStream(SESSION_ID, "segment-00000.mp4");
 
   assert.equal(answer.kind, "file", "the piece is whole and must reach the viewer");
   await access(path.join(dirPath, "segment-00000.mp4"));
@@ -194,7 +194,7 @@ test("a piece that disagrees with its own header is removed, so it can be made a
     sessionHeader: moovOf(2)
   });
 
-  const answer = await manager.getFileStream(SESSION_ID, "segment-00000.mp4");
+  const answer = await manager.serving.getFileStream(SESSION_ID, "segment-00000.mp4");
 
   assert.equal(answer.kind, "warming-up", "a short piece is not servable");
   await assert.rejects(
@@ -214,7 +214,7 @@ test("a live run elsewhere in the film does not make a short piece permanent", a
   // the piece being asked for.
   startRunOn(manager.outputs.get(SESSION_ID), { from: 192, usesExplicitCuts: true, speedX: 2 });
 
-  await manager.getFileStream(SESSION_ID, "segment-00000.mp4");
+  await manager.serving.getFileStream(SESSION_ID, "segment-00000.mp4");
 
   await assert.rejects(
     () => access(path.join(dirPath, "segment-00000.mp4")),

@@ -23,7 +23,7 @@ import { Output } from "../services/output/Output.js";
 import { KeyframeTable } from "../services/media/container/KeyframeTable.js";
 import { rm, writeFile } from "node:fs/promises";
 import path from "node:path";
-import { HlsSessionManager } from "../services/hls-session-manager.js";
+import { wireOutputs } from "../services/serving/wire-outputs.js";
 import { ENCODE_RUN_STATE } from "../services/encode/encode-run-state.js";
 import { startRunOn } from "./helpers/encode-run.js";
 import { fmp4Format } from "../services/segment-formats/fmp4.js";
@@ -122,10 +122,10 @@ function selfContainedPiece(offsetSeconds) {
  * explicit times — the ordinary keyframe-cut path.
  *
  * @param {{ segmentFormat?: object, audioOnly?: boolean, withRun?: boolean }} [overrides]
- * @returns {Promise<{ manager: HlsSessionManager, session: object, dirPath: string }>}
+ * @returns {Promise<{ manager: object, session: object, dirPath: string }>}
  */
 async function managerWithReadySegment(overrides = {}) {
-  const manager = new HlsSessionManager({
+  const manager = wireOutputs({
     enabled: true,
     ffmpegBin: "ffmpeg",
     localBindHost: "127.0.0.1",
@@ -213,8 +213,8 @@ async function managerWithReadySegment(overrides = {}) {
   // question with its own checks, and letting it run inside these would spawn
   // real ffmpeg processes and replace the very run each test is watching — the
   // test would then be about the plan, and about it at its least stable.
-  manager.planEncodersNow = () => {};
-  manager.planEncodersSoon = () => {};
+  manager.encodeRuns.planEncodersNow = () => {};
+  manager.encodeRuns.planEncodersSoon = () => {};
   // The run in force. The fixture's segments live directly in the session
   // directory, which is exactly what one run's directory is here.
   if (overrides.withRun !== false) {
@@ -227,7 +227,7 @@ async function managerWithReadySegment(overrides = {}) {
 test("serving a segment records what its real start says about the container's index", async (t) => {
   const { manager, session, dirPath } = await managerWithReadySegment();
   t.after(async () => {
-    await manager.disposeAll();
+    await manager.lifecycle.disposeAll();
     await rm(dirPath, { recursive: true, force: true });
   });
   // The tally is counted in the module tests; what this pins is that serving a
@@ -235,7 +235,7 @@ test("serving a segment records what its real start says about the container's i
   // grid for every output forever, which is worse than no measurement.
   assert.equal(session.output.landing, null, "nothing has been produced yet");
 
-  await manager.getFileStream(SESSION_ID, "segment-00000.mp4", { requestSeq: 1 });
+  await manager.serving.getFileStream(SESSION_ID, "segment-00000.mp4", { requestSeq: 1 });
 
   assert.equal(session.output.landing.checked, 1, "the piece that was just produced must have been examined");
 });
@@ -248,11 +248,11 @@ test("only a copied picture's landing is taken as evidence about the file's keyf
   // stream that never consulted it.
   const sound = await managerWithReadySegment({ audioOnly: true });
   t.after(async () => {
-    await sound.manager.disposeAll();
+    await sound.manager.lifecycle.disposeAll();
     await rm(sound.dirPath, { recursive: true, force: true });
   });
 
-  await sound.manager.getFileStream(SESSION_ID, "segment-00000.mp4", { requestSeq: 1 });
+  await sound.manager.serving.getFileStream(SESSION_ID, "segment-00000.mp4", { requestSeq: 1 });
 
   assert.equal(sound.session.output.landing.checked, 1, "the sound's own landing is recorded");
   assert.equal(
@@ -263,11 +263,11 @@ test("only a copied picture's landing is taken as evidence about the file's keyf
 
   const picture = await managerWithReadySegment();
   t.after(async () => {
-    await picture.manager.disposeAll();
+    await picture.manager.lifecycle.disposeAll();
     await rm(picture.dirPath, { recursive: true, force: true });
   });
 
-  await picture.manager.getFileStream(SESSION_ID, "segment-00000.mp4", { requestSeq: 1 });
+  await picture.manager.serving.getFileStream(SESSION_ID, "segment-00000.mp4", { requestSeq: 1 });
 
   assert.equal(picture.session.keyframes.evidence.checked, 1, "a copy's landing does reach the file's table");
 });
@@ -275,11 +275,11 @@ test("only a copied picture's landing is taken as evidence about the file's keyf
 test("a segment that exists is served, not reported as still being produced", async (t) => {
   const { manager, dirPath, session } = await managerWithReadySegment();
   t.after(async () => {
-    await manager.disposeAll();
+    await manager.lifecycle.disposeAll();
     await rm(dirPath, { recursive: true, force: true });
   });
 
-  const result = await manager.getFileStream(SESSION_ID, "segment-00000.mp4", { requestSeq: 1 });
+  const result = await manager.serving.getFileStream(SESSION_ID, "segment-00000.mp4", { requestSeq: 1 });
 
   assert.equal(result.kind, "file", "a finished segment on disk must come back as bytes");
   assert.equal(result.contentType, fmp4Format.segmentContentType);
@@ -319,11 +319,11 @@ test("a fault while preparing an existing segment is named, not turned into a wa
   };
   const { manager, dirPath } = await managerWithReadySegment({ segmentFormat: broken });
   t.after(async () => {
-    await manager.disposeAll();
+    await manager.lifecycle.disposeAll();
     await rm(dirPath, { recursive: true, force: true });
   });
 
-  const result = await manager.getFileStream(SESSION_ID, "segment-00000.mp4", { requestSeq: 1 });
+  const result = await manager.serving.getFileStream(SESSION_ID, "segment-00000.mp4", { requestSeq: 1 });
 
   assert.equal(
     result.kind,
@@ -336,7 +336,7 @@ test("a fault while preparing an existing segment is named, not turned into a wa
 test("a run's FIRST segment is served once the encoder has passed it, without waiting for a next one", async (t) => {
   const { manager, dirPath } = await managerWithReadySegment();
   t.after(async () => {
-    await manager.disposeAll();
+    await manager.lifecycle.disposeAll();
     await rm(dirPath, { recursive: true, force: true });
   });
   // The shape a resume takes: a run begun mid-file, so its first segment has no
@@ -350,7 +350,7 @@ test("a run's FIRST segment is served once the encoder has passed it, without wa
   // encoder's reported position — a different question, where it has read to
   // rather than what it has closed.
 
-  const result = await manager.getFileStream(SESSION_ID, "segment-00000.mp4", { requestSeq: 1 });
+  const result = await manager.serving.getFileStream(SESSION_ID, "segment-00000.mp4", { requestSeq: 1 });
 
   assert.equal(
     result.kind,
@@ -362,7 +362,7 @@ test("a run's FIRST segment is served once the encoder has passed it, without wa
 test("a segment an earlier run made is served by whatever run is going now", async (t) => {
   const { manager, session, dirPath } = await managerWithReadySegment();
   t.after(async () => {
-    await manager.disposeAll();
+    await manager.lifecycle.disposeAll();
     await rm(dirPath, { recursive: true, force: true });
   });
   // Every run of an output writes into that output's own directory — there is
@@ -372,7 +372,7 @@ test("a segment an earlier run made is served by whatever run is going now", asy
   const run = startRunOn(session, { from: 40, usesExplicitCuts: true });
   manager.encodeOrchestrator.adopt(OUTPUT_KEY, run);
 
-  const result = await manager.getFileStream(SESSION_ID, "segment-00000.mp4", { requestSeq: 1 });
+  const result = await manager.serving.getFileStream(SESSION_ID, "segment-00000.mp4", { requestSeq: 1 });
 
   assert.equal(result.kind, "file", "what any run of this output made is what this output holds");
   const chunks = [];
@@ -385,7 +385,7 @@ test("a segment an earlier run made is served by whatever run is going now", asy
 test("serving a run's own segment moves the run out of STARTING", async (t) => {
   const { manager, session, dirPath } = await managerWithReadySegment({ withRun: false });
   t.after(async () => {
-    await manager.disposeAll();
+    await manager.lifecycle.disposeAll();
     await rm(dirPath, { recursive: true, force: true });
   });
   // The table lives in `encode/encode-run-state.js` and is tested there as a graph.
@@ -405,7 +405,7 @@ test("serving a run's own segment moves the run out of STARTING", async (t) => {
   assert.equal(run.state, ENCODE_RUN_STATE.STARTING);
   assert.deepEqual(run.produced, [], "it has made nothing yet");
 
-  await manager.getFileStream(SESSION_ID, "segment-00001.mp4", { requestSeq: 1 });
+  await manager.serving.getFileStream(SESSION_ID, "segment-00001.mp4", { requestSeq: 1 });
 
   // ASKED OF WHAT THE SERVE WROTE, not of the state that happens to follow it.
   // The plan owns a run's life and may end it in the same turn for reasons of
@@ -420,7 +420,7 @@ test("serving a run's own segment moves the run out of STARTING", async (t) => {
 test("a segment behind a run's own start does not claim that run has produced", async (t) => {
   const { manager, session, dirPath } = await managerWithReadySegment({ withRun: false });
   t.after(async () => {
-    await manager.disposeAll();
+    await manager.lifecycle.disposeAll();
     await rm(dirPath, { recursive: true, force: true });
   });
   // What moves a run out of starting is ITS OWN first segment. An earlier run's
@@ -431,7 +431,7 @@ test("a segment behind a run's own start does not claim that run has produced", 
   const run = startRunOn(session, { from: 5, producing: false, usesExplicitCuts: true, speedX: 2 });
   manager.encodeOrchestrator.adopt(OUTPUT_KEY, run);
 
-  await manager.getFileStream(SESSION_ID, "segment-00000.mp4", { requestSeq: 1 });
+  await manager.serving.getFileStream(SESSION_ID, "segment-00000.mp4", { requestSeq: 1 });
 
   assert.deepEqual(run.produced, [], "#0 is somebody else's work and says nothing about this run");
   assert.equal(run.head, 5, "which is still where it began");
@@ -451,21 +451,21 @@ test("a request behind the run that nobody is coming for is answered absent, not
   // would be refused for as long as that lasted.
   const { manager, session, dirPath } = await managerWithReadySegment({ withRun: false });
   t.after(async () => {
-    await manager.disposeAll();
+    await manager.lifecycle.disposeAll();
     await rm(dirPath, { recursive: true, force: true });
   });
   const run = startRunOn(session, { from: 3, producing: true, usesExplicitCuts: true, speedX: 2 });
   manager.encodeOrchestrator.adopt(OUTPUT_KEY, run);
 
   // No map yet: the request is HELD, because nothing has said otherwise.
-  const held = await manager.getFileStream(SESSION_ID, "segment-00002.mp4", { requestSeq: 2 });
+  const held = await manager.serving.getFileStream(SESSION_ID, "segment-00002.mp4", { requestSeq: 2 });
   assert.notEqual(held.kind, "not-found", "a session with no map waits, it does not refuse");
 
   // Now the map says where the viewers are, and #2 is not in it.
   manager.encodeOrchestrator.notePriorityMap(OUTPUT_KEY, [
     { from: 3, to: 4, priority: 100, withinSeconds: 0 }
   ]);
-  const refused = await manager.getFileStream(SESSION_ID, "segment-00002.mp4", { requestSeq: 3 });
+  const refused = await manager.serving.getFileStream(SESSION_ID, "segment-00002.mp4", { requestSeq: 3 });
 
   assert.equal(refused.kind, "not-found");
 });

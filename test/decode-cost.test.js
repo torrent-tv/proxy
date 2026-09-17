@@ -38,7 +38,7 @@ import {
   predictedRealtimeSpeed,
   speedBar
 } from "../services/hwaccel.js";
-import { HlsSessionManager } from "../services/hls-session-manager.js";
+import { wireOutputs } from "../services/serving/wire-outputs.js";
 import { SourceFile, sourceDecodeCharacteristics } from "../services/source/SourceFile.js";
 import { parseFfmpegBitrateKbps, parseFfmpegVideoDimensions, parseFfmpegVideoFps } from "../services/media/ffmpeg-banner.js";
 import { fmp4Format } from "../services/segment-formats/fmp4.js";
@@ -286,7 +286,7 @@ test("the source's decode figures come off the probe, or not at all", () => {
 
 test("the OFFER drops the rungs the host cannot hold, and the master keeps addressing them", async (t) => {
   const dirPath = await mkdtemp(path.join(os.tmpdir(), "decode-cost-"));
-  const manager = new HlsSessionManager({
+  const manager = wireOutputs({
     enabled: true,
     ffmpegBin: "ffmpeg",
     localBindHost: "127.0.0.1",
@@ -297,7 +297,7 @@ test("the OFFER drops the rungs the host cannot hold, and the master keeps addre
     decodeCostModel: ADDON_HOST_MODEL
   });
   t.after(async () => {
-    await manager.disposeAll();
+    await manager.lifecycle.disposeAll();
     await rm(dirPath, { recursive: true, force: true });
   });
 
@@ -353,7 +353,7 @@ test("the OFFER drops the rungs the host cannot hold, and the master keeps addre
   manager.outputs.set(session.id, session);
 
   assert.deepEqual(
-    manager.offeredHeights(session),
+    manager.quality.offeredHeights(session),
     [1080],
     "every rung under the copy runs below realtime here, so there is nothing to switch to"
   );
@@ -362,7 +362,7 @@ test("the OFFER drops the rungs the host cannot hold, and the master keeps addre
   // session's life: the browser is handed its address at creation, and a live
   // figure that withdrew it left a session answering 404 to itself (field
   // 2026-08-18, "Moana (2016).mkv" — nothing played at all).
-  const weakMaster = manager.buildMasterPlaylist(session.id);
+  const weakMaster = manager.renditions.buildMasterPlaylist(session.id);
   assert.ok(weakMaster, "published once, whatever the host is managing this second");
   assert.deepEqual(
     [...weakMaster.matchAll(/^v\/(\d+)\/index\.m3u8$/gm)].map((match) => Number(match[1])),
@@ -376,11 +376,11 @@ test("the OFFER drops the rungs the host cannot hold, and the master keeps addre
   const stronger = { ...session, id: "ddddddddeeeeffff", offeredHeightsCache: undefined };
   manager.outputs.set(stronger.id, stronger);
   assert.deepEqual(
-    manager.offeredHeights(stronger),
+    manager.quality.offeredHeights(stronger),
     [1080, 360, 240],
     "nothing is known about this swarm, so the bar is realtime"
   );
-  const master = manager.buildMasterPlaylist(stronger.id);
+  const master = manager.renditions.buildMasterPlaylist(stronger.id);
   assert.ok(master, "1080p copied plus every rung that can be spliced beside it");
   assert.deepEqual(
     [...master.matchAll(/^v\/(\d+)\/index\.m3u8$/gm)].map((match) => Number(match[1])),
@@ -399,7 +399,7 @@ test("the OFFER drops the rungs the host cannot hold, and the master keeps addre
   };
   manager.outputs.set(onAThinSwarm.id, onAThinSwarm);
   assert.deepEqual(
-    manager.offeredHeights(onAThinSwarm),
+    manager.quality.offeredHeights(onAThinSwarm),
     [1080],
     "the copied height costs no encoder and stays; nothing re-encoded survives that supply"
   );

@@ -122,14 +122,14 @@ test("a segment requested again is not new evidence", () => {
 });
 
 test("a boundary the index got wrong is replaced by the time the file really has", async (t) => {
-  const { HlsSessionManager } = await import("../services/hls-session-manager.js");
-  const manager = new HlsSessionManager({
+  const { wireOutputs } = await import("../services/serving/wire-outputs.js");
+  const manager = wireOutputs({
     enabled: true,
     ffmpegBin: "ffmpeg",
     localBindHost: "127.0.0.1",
     localPort: 9090
   });
-  t.after(() => manager.disposeAll());
+  t.after(() => manager.lifecycle.disposeAll());
   // ONE table for the film, held by both. It used to be a copy each, kept in
   // step by writing the correction into every member — which is what the shared
   // table replaces, and what drifted in the field.
@@ -160,7 +160,7 @@ test("a boundary the index got wrong is replaced by the time the file really has
 
   // The copy produced segment #2, and it really begins at 17.4 s — the index
   // said 20. This is the shape reproduced from the field on 2026-08-12.
-  manager.correctBoundaryFromSegment(base, 2, 17.4);
+  manager.outputTimes.correctBoundaryFromSegment(base, 2, 17.4);
 
   assert.equal(
     base.timeline.boundaries[2],
@@ -181,8 +181,8 @@ test("a boundary the index got wrong is replaced by the time the file really has
   // A reading that cannot be a boundary is not evidence about one. It comes
   // from a run that started somewhere else, and applying it would leave the
   // table describing nothing.
-  manager.correctBoundaryFromSegment(base, 2, 35);
-  manager.correctBoundaryFromSegment(base, 2, 5);
-  manager.correctBoundaryFromSegment(base, 0, 3);
+  manager.outputTimes.correctBoundaryFromSegment(base, 2, 35);
+  manager.outputTimes.correctBoundaryFromSegment(base, 2, 5);
+  manager.outputTimes.correctBoundaryFromSegment(base, 0, 3);
   assert.deepEqual(base.timeline.boundaries, [0, 10, 17.4, 30, 40], "out-of-order readings are refused");
 });

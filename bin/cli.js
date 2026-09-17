@@ -579,7 +579,7 @@ try {
     // every proxy in the pool and be sent to one that will work instead of
     // being shown an error on the one it happened to land on.
     onCanServeRequest(mediaInfo) {
-      return started?.hlsSessionManager?.predictOfferedHeights?.(mediaInfo) ?? null;
+      return started?.outputParts?.quality?.predictOfferedHeights?.(mediaInfo) ?? null;
     },
     onConnect() {
       // Re-register on every tunnel connect/reconnect so the server's
@@ -607,7 +607,7 @@ try {
     // with this handler already in hand. The transport gets opaque ids and
     // never learns what a viewer is.
     viewersWantingCues: (sourceKey, fileIndex) =>
-      started?.hlsSessionManager?.viewers?.wantingCues?.(sourceKey, fileIndex) ?? [],
+      started?.outputParts?.viewers?.wantingCues?.(sourceKey, fileIndex) ?? [],
     // Lets a stuck send queue ask the transport what it is doing. Late-bound:
     // the manager is created below, with this handler already in hand.
     getTransportSnapshot: (sessionId) => webRtcManager?.getTransportSnapshot(sessionId) ?? null,
@@ -623,10 +623,10 @@ try {
     // reason as the transport snapshot above: the manager is built inside
     // `startProxyServer`, with this handler already in hand.
     onViewerPresent: (consumerId) => {
-      started?.hlsSessionManager?.viewers?.seen?.(consumerId);
+      started?.outputParts?.viewers?.seen?.(consumerId);
     },
     onViewerGone: (consumerId, because) => {
-      void started?.hlsSessionManager?.viewerHasGone?.(consumerId, because)
+      void started?.outputParts?.lifecycle?.viewerHasGone?.(consumerId, because)
         ?.catch?.((error) => {
           const message = error instanceof Error ? error.message : String(error);
           logger.warn(`could not let go of viewer ${consumerId}: ${message}`);

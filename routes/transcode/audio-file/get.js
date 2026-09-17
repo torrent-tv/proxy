@@ -17,10 +17,10 @@ import { serveSessionFile } from "../session-file/get.js";
 /**
  * @param {import("fastify").FastifyRequest} req
  * @param {import("fastify").FastifyReply} reply
- * @param {{ hlsSessionManager: import("../../../services/hls-session-manager.js").HlsSessionManager }} deps
+ * @param {{ renditions: object, serving: object, viewerRequests: object }} deps
  * @returns {Promise<void>}
  */
-export async function handleTranscodeAudioFileGet(req, reply, { hlsSessionManager }) {
+export async function handleTranscodeAudioFileGet(req, reply, { renditions, serving, viewerRequests }) {
   const baseSessionId = typeof req.params.sessionId === "string" ? req.params.sessionId : "";
   const trackIndex = Number(req.params.trackIndex);
   const fileName = typeof req.params.fileName === "string" ? req.params.fileName : "";
@@ -30,7 +30,7 @@ export async function handleTranscodeAudioFileGet(req, reply, { hlsSessionManage
   // from one viewer would be read as everybody moving to that track, and the
   // other viewer's encoder would be stopped once per segment.
   const consumerId = typeof req.query?.consumer === "string" ? req.query.consumer : "";
-  const resolved = await hlsSessionManager.resolveAudioRenditionFile(
+  const resolved = await renditions.resolveAudioRenditionFile(
     baseSessionId,
     trackIndex,
     fileName,
@@ -48,7 +48,8 @@ export async function handleTranscodeAudioFileGet(req, reply, { hlsSessionManage
   }
 
   return serveSessionFile(req, reply, {
-    hlsSessionManager,
+    serving,
+    viewerRequests,
     sessionId: resolved.sessionId,
     fileName
   });

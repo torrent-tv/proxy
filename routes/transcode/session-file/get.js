@@ -35,13 +35,13 @@ const SEGMENT_WAIT_MS = 60_000;
  *
  * @param {import("fastify").FastifyRequest} req
  * @param {import("fastify").FastifyReply} reply
- * @param {{ hlsSessionManager: import("../../../services/hls-session-manager.js").HlsSessionManager }} deps
+ * @param {{ serving: object, viewerRequests: object }} deps
  * @returns {Promise<void>}
  */
-export async function handleTranscodeSessionFileGet(req, reply, { hlsSessionManager }) {
+export async function handleTranscodeSessionFileGet(req, reply, { serving, viewerRequests }) {
   const sessionId = typeof req.params.sessionId === "string" ? req.params.sessionId : "";
   const fileName = typeof req.params.fileName === "string" ? req.params.fileName : "";
-  return serveSessionFile(req, reply, { hlsSessionManager, sessionId, fileName });
+  return serveSessionFile(req, reply, { serving, viewerRequests, sessionId, fileName });
 }
 
 /**
@@ -55,10 +55,10 @@ export async function handleTranscodeSessionFileGet(req, reply, { hlsSessionMana
  *
  * @param {import("fastify").FastifyRequest} req
  * @param {import("fastify").FastifyReply} reply
- * @param {{ hlsSessionManager: import("../../../services/hls-session-manager.js").HlsSessionManager, sessionId: string, fileName: string }} params
+ * @param {{ serving: object, viewerRequests: object, sessionId: string, fileName: string }} params
  * @returns {Promise<void>}
  */
-export async function serveSessionFile(req, reply, { hlsSessionManager, sessionId, fileName }) {
+export async function serveSessionFile(req, reply, { serving, viewerRequests, sessionId, fileName }) {
   // Which viewer is asking. One session serves everyone watching a copied
   // picture, so without it their positions collapse into one and a seek by the
   // viewer in front releases the requests held for the viewer behind. Absent on
@@ -87,7 +87,7 @@ export async function serveSessionFile(req, reply, { hlsSessionManager, sessionI
   req.raw.on("close", onClientAbort);
 
   const result = await waitForSessionFile(
-    hlsSessionManager,
+    serving,
     sessionId,
     fileName,
     SEGMENT_WAIT_MS,
@@ -131,7 +131,7 @@ export async function serveSessionFile(req, reply, { hlsSessionManager, sessionI
     // where the viewer was.
     logger.info(
       `[hold] ${fileName} refused: the viewer is at ` +
-      `${hlsSessionManager.viewerPositionOf(sessionId, consumerId).toFixed(1)}s and this is not the segment there`
+      `${viewerRequests.viewerPositionOf(sessionId, consumerId).toFixed(1)}s and this is not the segment there`
     );
     reply.header("Retry-After", "0");
     return reply.code(503).send({ error: "Superseded by a seek." });
@@ -175,10 +175,10 @@ export async function serveSessionFile(req, reply, { hlsSessionManager, sessionI
 }
 
 /**
- * Poll `hlsSessionManager.getFileStream()` until the file is available,
+ * Poll `serving.getFileStream()` until the file is available,
  * the session fails, or the timeout elapses.
  *
- * @param {import("../../../services/hls-session-manager.js").HlsSessionManager} hlsSessionManager
+ * @param {object} serving - `services/serving/SegmentServing.js`
  * @param {string} sessionId
  * @param {string} fileName
  * @param {number} timeoutMs
@@ -186,45 +186,45 @@ export async function serveSessionFile(req, reply, { hlsSessionManager, sessionI
  *   carries it. Their own position is what decides whether a held request has
  *   been made pointless by a seek — a session can have several viewers, and
  *   the seek epoch belongs to all of them.
- * @returns {Promise<Awaited<ReturnType<import("../../../services/hls-session-manager.js").HlsSessionManager["getFileStream"]>>>}
+ * @returns {Promise<Awaited<ReturnType<import("../../../services/serving/SegmentServing.js").SegmentServing["getFileStream"]>>>}
  */
-export async function waitForSessionFile(hlsSessionManager, sessionId, fileName, timeoutMs, consumerId = "") {
+export async function waitForSessionFile(serving, sessionId, fileName, timeoutMs, consumerId = "") {
   const startedAt = Date.now();
   // One sequence number for THIS request, reused by every poll below, so the
   // session can tell a newly-arrived request apart from an old one polling
-  // again — see HlsSessionManager#ensureEncodingFor for the encoder ping-pong
+  // again — see SegmentServing#ensureEncodingFor for the encoder ping-pong
   // this prevents when one seek-bar scrub fires several segment requests.
-  const requestSeq = hlsSessionManager.nextRequestSeq(sessionId);
+  const requestSeq = serving.nextRequestSeq(sessionId);
   // The viewer's position when this request was made. A seek makes every held
   // request stale — it asks for a segment nobody is going to watch — and hls.js
   // keeps only ONE fragment load outstanding, so holding on blocks the request
   // the player actually needs now. Measured: 57 s of a 58 s backward seek was
   // this wait, and the segment the viewer wanted took 15 ms once it was asked
   // for.
-  let seekEpoch = hlsSessionManager.seekEpoch(sessionId);
+  let seekEpoch = serving.seekEpoch(sessionId);
   /** @type {{ address: string, rank: number, topRank: number } | null} */
   let lastRanked = null;
   while (Date.now() - startedAt < timeoutMs) {
-    const result = await hlsSessionManager.getFileStream(sessionId, fileName, {
+    const result = await serving.getFileStream(sessionId, fileName, {
       requestSeq,
       consumerId
     });
     if (result.kind !== "warming-up") {
       return result;
     }
-    if (hlsSessionManager.seekEpoch(sessionId) !== seekEpoch) {
+    if (serving.seekEpoch(sessionId) !== seekEpoch) {
       // A seek moved the epoch. Whether THIS request is stale depends on which
       // segment it asks for: the one the viewer has just landed on races the
       // seek notification and would otherwise be refused at the exact moment it
       // is needed — measured 2026-08-18, two 503s within 80 ms on the segment
       // at the seek target, after which the player never asked for it again.
-      if (!hlsSessionManager.requestStillWanted(sessionId, fileName, consumerId)) {
+      if (!serving.requestStillWanted(sessionId, fileName, consumerId)) {
         return { kind: "superseded" };
       }
       logger.info(
         `[hold] ${fileName} kept across a seek: it is the segment the viewer now needs`
       );
-      seekEpoch = hlsSessionManager.seekEpoch(sessionId);
+      seekEpoch = serving.seekEpoch(sessionId);
     }
     // The rank the map last gave this segment, so a request that runs out of
     // patience is still counted against what it was promised. Kept across the

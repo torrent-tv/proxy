@@ -40,7 +40,7 @@ import { handleTranscodeVariantWarmGet } from "./routes/transcode/variant-warm/g
 import { handleTranscodeAudioWarmGet } from "./routes/transcode/audio-warm/get.js";
 import { createSourceRegistry } from "./store/source-registry.js";
 import { WorkerTorrentPool } from "./services/torrent-worker/pool-adapter.js";
-import { HlsSessionManager } from "./services/hls-session-manager.js";
+import { wireOutputs } from "./services/serving/wire-outputs.js";
 import { createPlaybackPlanner } from "./services/media/playback-planner.js";
 import { KeyframeTables } from "./services/media/KeyframeTables.js";
 import { contentsOf } from "./services/torrent/Contents.js";
@@ -382,7 +382,7 @@ export async function startProxyServer({
       };
     }
   });
-  const hlsSessionManager = new HlsSessionManager({
+  const outputParts = wireOutputs({
     enabled: transcodeAudio,
     keyframeTables,
     ffmpegBin,
@@ -518,11 +518,11 @@ export async function startProxyServer({
   // record that those encoders ended at all: it says what it found before it
   // decides anything, keeps the segments whose closure is proven, and removes
   // the one piece per output that was being written when the process died.
-  hlsSessionManager.adoptSegmentsLeftBehind();
+  outputParts.lifecycle.adoptSegmentsLeftBehind();
   const playbackPlanner = createPlaybackPlanner({
     ffmpegBin,
     transcodeAudioEnabled: transcodeAudio,
-    localBaseUrl: hlsSessionManager.localBaseUrl,
+    localBaseUrl: outputParts.localBaseUrl,
     sourceRegistry,
     torrentPool,
     sidecarsFromTorrent: (torrent, fileIndex) => contentsOf(torrent).sidecarsOf(fileIndex),
@@ -536,12 +536,12 @@ export async function startProxyServer({
       return params ? await containerOrchestrator.getTracks(params) : [];
     },
     warmKeyframeIndex: (params) => keyframeTables.warm(params),
-    expectedFirstSegmentMs: () => hlsSessionManager.expectedFirstSegmentMs(),
-    expectedSessionCreateMs: () => hlsSessionManager.expectedSessionCreateMs(),
+    expectedFirstSegmentMs: () => outputParts.hostTimings.expectedFirstSegmentMs(),
+    expectedSessionCreateMs: () => outputParts.hostTimings.expectedSessionCreateMs(),
     // The quality menu is on screen from the moment a file is opened, so the
     // heights this host can actually serve have to be answerable before any
     // encoder exists — from the probe and the startup benchmarks alone.
-    predictOfferedHeights: (mediaInfo) => hlsSessionManager.predictOfferedHeights(mediaInfo)
+    predictOfferedHeights: (mediaInfo) => outputParts.quality.predictOfferedHeights(mediaInfo)
   });
 
   app.get("/health", async (req, reply) => handleHealthGet(req, reply, { version }));
@@ -588,8 +588,8 @@ export async function startProxyServer({
       sourceRegistry,
       torrentPool,
       ffmpegBin,
-      localBaseUrl: hlsSessionManager.localBaseUrl,
-      viewers: hlsSessionManager.viewers,
+      localBaseUrl: outputParts.localBaseUrl,
+      viewers: outputParts.viewers,
       subtitles
     })
   );
@@ -600,35 +600,35 @@ export async function startProxyServer({
       // So a session that has produced nothing yet can still show it is being
       // fed. The route knows only files; the session id rides on the URL the
       // session itself built.
-      noteInputBytes: (sessionId, bytes) => hlsSessionManager.noteInputBytes(sessionId, bytes)
+      noteInputBytes: (sessionId, bytes) => outputParts.viewerRequests.noteInputBytes(sessionId, bytes)
     })
   );
   app.post("/api/transcode-sessions", async (req, reply) =>
-    handleApiTranscodeSessionsPost(req, reply, { hlsSessionManager, sourceRegistry, torrentPool })
+    handleApiTranscodeSessionsPost(req, reply, { viewerRequests: outputParts.viewerRequests, renditions: outputParts.renditions, quality: outputParts.quality, outputs: outputParts.outputs, lookaheadSeconds: outputParts.lookaheadSeconds, sourceRegistry, torrentPool })
   );
   app.post("/api/transcode-sessions/:sessionId/release", async (req, reply) =>
-    handleApiTranscodeSessionReleasePost(req, reply, { hlsSessionManager })
+    handleApiTranscodeSessionReleasePost(req, reply, { lifecycle: outputParts.lifecycle })
   );
   app.get("/api/transcode-sessions/:sessionId/progress", async (req, reply) =>
-    handleApiTranscodeSessionsProgressGet(req, reply, { hlsSessionManager })
+    handleApiTranscodeSessionsProgressGet(req, reply, { viewerRequests: outputParts.viewerRequests })
   );
   app.post("/api/transcode-sessions/:sessionId/net-report", async (req, reply) =>
     // A viewer's statement about itself goes to the VIEWER layer, not through
     // the session manager: what it needs is the live sessions and the registry
     // of viewers, and nothing about encoding.
     handleApiTranscodeSessionNetReportPost(req, reply, {
-      outputs: hlsSessionManager.outputs,
-      viewers: hlsSessionManager.viewers
+      outputs: outputParts.outputs,
+      viewers: outputParts.viewers
     })
   );
   app.post("/api/transcode-sessions/:sessionId/fragment-far", async (req, reply) =>
-    handleApiTranscodeSessionFragmentFarPost(req, reply, { hlsSessionManager })
+    handleApiTranscodeSessionFragmentFarPost(req, reply, { serving: outputParts.serving })
   );
   app.post("/api/transcode-sessions/:sessionId/seek", async (req, reply) =>
-    handleApiTranscodeSessionSeekPost(req, reply, { hlsSessionManager })
+    handleApiTranscodeSessionSeekPost(req, reply, { viewerRequests: outputParts.viewerRequests })
   );
   app.get("/transcode/:sessionId/:fileName", async (req, reply) =>
-    handleTranscodeSessionFileGet(req, reply, { hlsSessionManager })
+    handleTranscodeSessionFileGet(req, reply, { serving: outputParts.serving, viewerRequests: outputParts.viewerRequests })
   );
   // A quality variant's files. Registered before the static handler for the
   // same reason as the line above, and kept a separate route rather than a
@@ -637,16 +637,16 @@ export async function startProxyServer({
   // Fastify matches a static segment ahead of a parameter either way — stated
   // here so the order is not "tidied" into a bug.
   app.get("/transcode/:sessionId/v/:height/warm", async (req, reply) =>
-    handleTranscodeVariantWarmGet(req, reply, { hlsSessionManager })
+    handleTranscodeVariantWarmGet(req, reply, { renditions: outputParts.renditions, serving: outputParts.serving, viewerRequests: outputParts.viewerRequests })
   );
   app.get("/transcode/:sessionId/a/:track/warm", async (req, reply) =>
-    handleTranscodeAudioWarmGet(req, reply, { hlsSessionManager })
+    handleTranscodeAudioWarmGet(req, reply, { renditions: outputParts.renditions, serving: outputParts.serving, viewerRequests: outputParts.viewerRequests })
   );
   app.get("/transcode/:sessionId/a/:trackIndex/:fileName", async (req, reply) =>
-    handleTranscodeAudioFileGet(req, reply, { hlsSessionManager })
+    handleTranscodeAudioFileGet(req, reply, { renditions: outputParts.renditions, serving: outputParts.serving, viewerRequests: outputParts.viewerRequests })
   );
   app.get("/transcode/:sessionId/v/:height/:fileName", async (req, reply) =>
-    handleTranscodeVariantFileGet(req, reply, { hlsSessionManager })
+    handleTranscodeVariantFileGet(req, reply, { renditions: outputParts.renditions, serving: outputParts.serving, viewerRequests: outputParts.viewerRequests })
   );
   await app.register(fastifyStatic, {
     root: publicRoot,
@@ -657,7 +657,7 @@ export async function startProxyServer({
   app.addHook("onClose", async () => {
     // Order matters: stop the ffmpeg readers (HLS sessions) before destroying
     // the torrents whose files they read from, then remove the torrent data.
-    await hlsSessionManager.disposeAll();
+    await outputParts.lifecycle.disposeAll();
     await torrentPool.destroyAll();
   });
 
@@ -668,7 +668,7 @@ export async function startProxyServer({
     // Asked over the tunnel when the proxy a viewer landed on has refused their
     // file: could THIS host sustain it? Answered from the startup benchmarks
     // and a description, so it needs no torrent and costs milliseconds.
-    hlsSessionManager,
+    outputParts,
     // The browser only ever knows a source by its REGISTRY key (a hash of the
     // raw request bytes, scoped to one API session) — never the torrent
     // pool's own key (the content's infohash, shared across a magnet and a

@@ -15,7 +15,7 @@ import { Timeline } from "../services/output/Timeline.js";
 import { mkdtemp, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { HlsSessionManager } from "../services/hls-session-manager.js";
+import { wireOutputs } from "../services/serving/wire-outputs.js";
 import { fmp4Format } from "../services/segment-formats/fmp4.js";
 import { viewerOf } from "../services/viewer/Viewer.js";
 
@@ -23,11 +23,11 @@ const SESSION_ID = "aaaaaaaabbbbcccc";
 const SEGMENT_SECONDS = 4;
 
 /**
- * @returns {Promise<{ manager: HlsSessionManager, dirPath: string }>}
+ * @returns {Promise<{ manager: object, dirPath: string }>}
  */
 async function managerWithSession() {
   const dirPath = await mkdtemp(path.join(os.tmpdir(), "held-request-"));
-  const manager = new HlsSessionManager({
+  const manager = wireOutputs({
     enabled: true,
     ffmpegBin: "ffmpeg",
     localBindHost: "127.0.0.1",
@@ -70,9 +70,9 @@ test("the width is the encoder's own look-ahead, in segments", async (t) => {
 
   const width = Math.ceil(manager.lookaheadSeconds / manager.segmentDurationSec);
   assert.equal(width, 30, "120 s of look-ahead over 4 s segments");
-  assert.equal(manager.requestStillWanted(SESSION_ID, segment(25 + width)), true, "the far edge");
+  assert.equal(manager.serving.requestStillWanted(SESSION_ID, segment(25 + width)), true, "the far edge");
   assert.equal(
-    manager.requestStillWanted(SESSION_ID, segment(25 + width + 1)),
+    manager.serving.requestStillWanted(SESSION_ID, segment(25 + width + 1)),
     false,
     "past everything the encoder is allowed to have produced"
   );
@@ -87,7 +87,7 @@ test("a request the old eight-segment width would have refused is kept", async (
   // #34 is nine segments ahead of the viewer — inside a 120 s cushion and
   // outside the eight the width used to be. This is the request a browser
   // holding the whole cushion makes constantly.
-  assert.equal(manager.requestStillWanted(SESSION_ID, segment(34)), true);
+  assert.equal(manager.serving.requestStillWanted(SESSION_ID, segment(34)), true);
 });
 
 test("a segment behind the viewer is still released", async (t) => {
@@ -96,7 +96,7 @@ test("a segment behind the viewer is still released", async (t) => {
     await rm(dirPath, { recursive: true, force: true });
   });
 
-  assert.equal(manager.requestStillWanted(SESSION_ID, segment(24)), false);
+  assert.equal(manager.serving.requestStillWanted(SESSION_ID, segment(24)), false);
 });
 
 test("a seek by one viewer does not release the request held for another", async (t) => {
@@ -108,8 +108,8 @@ test("a seek by one viewer does not release the request held for another", async
   // One is at segment #25, the other far ahead at #150 — inside the fixture's
   // own 200-segment timeline, since a position past the end of the grid is
   // clamped to it and would prove nothing about the width.
-  manager.requestSeek(SESSION_ID, 100, "behind");
-  manager.requestSeek(SESSION_ID, 600, "ahead");
+  manager.viewerRequests.requestSeek(SESSION_ID, 100, "behind");
+  manager.viewerRequests.requestSeek(SESSION_ID, 600, "ahead");
 
   // A SEEK DOES ONE THING: it puts the viewer where they now are. It used to
   // write that position into five places, this session's shared field among
@@ -120,12 +120,12 @@ test("a seek by one viewer does not release the request held for another", async
   assert.equal(manager.viewers.get("ahead").positionSeconds(), 600);
 
   assert.equal(
-    manager.requestStillWanted(SESSION_ID, segment(26), "behind"),
+    manager.serving.requestStillWanted(SESSION_ID, segment(26), "behind"),
     true,
     "the segment the viewer behind is waiting for is still theirs to wait for"
   );
   assert.equal(
-    manager.requestStillWanted(SESSION_ID, segment(26), "ahead"),
+    manager.serving.requestStillWanted(SESSION_ID, segment(26), "ahead"),
     false,
     "and for the one in front it is a place they have left"
   );
@@ -140,9 +140,9 @@ test("a viewer's own head moves with their seek", async (t) => {
   // Their last request was at #25; they jump to 600 s, which is #150. The
   // segment at the target must be wanted — refusing it there is the freeze of
   // 2026-08-18.
-  manager.requestSeek(SESSION_ID, 600, "viewer");
-  assert.equal(manager.requestStillWanted(SESSION_ID, segment(150), "viewer"), true);
-  assert.equal(manager.requestStillWanted(SESSION_ID, segment(25), "viewer"), false);
+  manager.viewerRequests.requestSeek(SESSION_ID, 600, "viewer");
+  assert.equal(manager.serving.requestStillWanted(SESSION_ID, segment(150), "viewer"), true);
+  assert.equal(manager.serving.requestStillWanted(SESSION_ID, segment(25), "viewer"), false);
 });
 
 test("a viewer nobody can name is judged against the one shared position", async (t) => {
@@ -153,6 +153,6 @@ test("a viewer nobody can name is judged against the one shared position", async
 
   // A plain HTTP transport builds its own URLs and carries no id. The old
   // behaviour is what remains, which for a single viewer is the same thing.
-  assert.equal(manager.requestStillWanted(SESSION_ID, segment(26), ""), true);
-  assert.equal(manager.requestStillWanted(SESSION_ID, segment(24), ""), false);
+  assert.equal(manager.serving.requestStillWanted(SESSION_ID, segment(26), ""), true);
+  assert.equal(manager.serving.requestStillWanted(SESSION_ID, segment(24), ""), false);
 });

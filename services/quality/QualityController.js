@@ -3,7 +3,7 @@
  * move to another height, when its bitrate is capped by a viewer's measured link,
  * and what the player is told to follow.
  *
- * Moved out of `hls-session-manager.js` whole (plan step 3). What it needs of the
+ * Moved out of the session manager whole (plan step 3). What it needs of the
  * rest of the proxy is the host object it is built with, and nothing else.
  */
 

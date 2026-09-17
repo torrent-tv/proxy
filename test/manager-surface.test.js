@@ -1,8 +1,9 @@
 /**
- * @file The net under the dismantling of `hls-session-manager.js`.
+ * @file What the HTTP layer asks of the components, checked from the HTTP layer.
  *
- * The file is 9608 lines and 142 methods, and it is being taken apart into the
- * seven layers. Twenty-one tests already construct it, but every one of them
+ * Written as the net under the dismantling of `hls-session-manager.js`, which
+ * was 9608 lines and 142 methods and is now gone: its members are methods of
+ * the components that own them, wired by `services/serving/wire-outputs.js`. Twenty-one tests already construct it, but every one of them
  * names something INSIDE it — a private field, a fake session shaped the way
  * the manager happens to shape one — so every one of them moves when the code
  * moves, and a test that moves with the code cannot say the code still works.
@@ -34,7 +35,6 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { SourceFile } from "../services/source/SourceFile.js";
 import { Timeline } from "../services/output/Timeline.js";
-import { HlsSessionManager } from "../services/hls-session-manager.js";
 import { managerWithOwnStore } from "./helpers/manager.js";
 import { fmp4Format } from "../services/segment-formats/fmp4.js";
 import { Output } from "../services/output/Output.js";
@@ -43,6 +43,8 @@ import { outputSpec } from "./helpers/output-spec.js";
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const PROXY = path.join(HERE, "..");
 const SESSION_ID = "aaaaaaaabbbbcccc";
+/** The components the HTTP layer is handed. */
+const COMPONENTS = ["serving", "viewerRequests", "renditions", "lifecycle", "quality", "outputs", "hostTimings", "viewers"];
 
 /**
  * Every `.js` file under a directory, at any depth.
@@ -67,26 +69,27 @@ function jsFilesUnder(dir) {
 }
 
 /**
- * What the HTTP layer asks of the session manager, read from the HTTP layer.
+ * What the HTTP layer asks of each component, read from the HTTP layer.
  *
  * Deliberately not a list kept here: a list is a second statement of the same
- * fact, and the two drift. The callers are the statement.
+ * fact, and the two drift. The callers are the statement. A route names the
+ * component it was handed (`serving.getFileStream`); `server.js` names it
+ * through what the wiring returned (`outputParts.serving.getFileStream`).
  *
- * @returns {Map<string, string[]>} Member name to the files that ask for it.
+ * @returns {Map<string, string[]>} `component.member` to the files that ask for it.
  */
 function membersTheHttpLayerCalls() {
   /** @type {Map<string, string[]>} */
   const asked = new Map();
   const sources = [path.join(PROXY, "server.js"), ...jsFilesUnder(path.join(PROXY, "routes"))];
+  const pattern = new RegExp(String.raw`\b(${COMPONENTS.join("|")})\.([A-Za-z][A-Za-z0-9]*)\(`, "g");
   for (const file of sources) {
     const text = readFileSync(file, "utf8");
-    for (const match of text.matchAll(/hlsSessionManager\.([A-Za-z][A-Za-z0-9]*)/g)) {
-      const member = match[1];
-      // A JSDoc `@param` names the type, not a call. Counting those would put
-      // the class's own name into the requirement.
-      const where = asked.get(member) ?? [];
+    for (const match of text.matchAll(pattern)) {
+      const asking = `${match[1]}.${match[2]}`;
+      const where = asked.get(asking) ?? [];
       where.push(path.relative(PROXY, file));
-      asked.set(member, where);
+      asked.set(asking, where);
     }
   }
   return asked;
@@ -97,7 +100,7 @@ function membersTheHttpLayerCalls() {
  *
  * Its two timers are unref'd, so nothing here keeps the process alive.
  *
- * @returns {HlsSessionManager}
+ * @returns {object}
  */
 function bareManager() {
   return managerWithOwnStore().manager;
@@ -151,25 +154,26 @@ function fakeSession({ id = SESSION_ID } = {}) {
 }
 
 test("every call the HTTP layer makes is answered", () => {
-  const manager = bareManager();
+  const parts = bareManager();
   const asked = membersTheHttpLayerCalls();
   // If this ever reads zero the extraction has broken, and the test would then
   // pass by asking nothing at all.
   assert.ok(asked.size >= 15, `expected the HTTP layer to ask for members, found ${asked.size}`);
 
   const missing = [];
-  for (const [member, callers] of asked) {
-    if (!(member in manager)) {
-      missing.push(`${member} (asked by ${[...new Set(callers)].join(", ")})`);
+  for (const [asking, callers] of asked) {
+    const [component, member] = asking.split(".");
+    if (!(parts[component] && member in parts[component])) {
+      missing.push(`${asking} (asked by ${[...new Set(callers)].join(", ")})`);
     }
   }
-  assert.deepEqual(missing, [], `the HTTP layer calls members the manager does not have:\n${missing.join("\n")}`);
+  assert.deepEqual(missing, [], `the HTTP layer calls members no component has:\n${missing.join("\n")}`);
 });
 
 test("the progress report keeps every figure it carries today", async () => {
   const manager = bareManager();
   manager.outputs.set(SESSION_ID, fakeSession());
-  const progress = await manager.getSessionProgress(SESSION_ID, "viewer-one");
+  const progress = await manager.viewerRequests.getSessionProgress(SESSION_ID, "viewer-one");
   assert.ok(progress, "a live session has a progress report");
 
   // A characteristic record: what the page is given now. The claim is "a move
@@ -203,11 +207,11 @@ test("a session that is not there is answered, not invented", async () => {
   const manager = bareManager();
   const absent = "ffffffffffffffff";
 
-  assert.equal(await manager.getSessionProgress(absent), null);
-  assert.equal((await manager.getFileStream(absent, "segment-00000.mp4")).kind, "not-found");
+  assert.equal(await manager.viewerRequests.getSessionProgress(absent), null);
+  assert.equal((await manager.serving.getFileStream(absent, "segment-00000.mp4")).kind, "not-found");
   // A name no session could have must be refused before anything touches the
   // disk with it.
-  assert.equal((await manager.getFileStream("../../etc", "segment-00000.mp4")).kind, "not-found");
+  assert.equal((await manager.serving.getFileStream("../../etc", "segment-00000.mp4")).kind, "not-found");
 });
 
 test("what a viewer states about themselves is kept and answered", () => {
@@ -217,33 +221,33 @@ test("what a viewer states about themselves is kept and answered", () => {
   // Nine public members had no test of any kind before the dismantling began,
   // and six of them are the viewer's own facts — the ones that move into
   // `viewer/`. They are cheap to state and were simply never stated.
-  const first = manager.nextRequestSeq(SESSION_ID);
-  const second = manager.nextRequestSeq(SESSION_ID);
+  const first = manager.serving.nextRequestSeq(SESSION_ID);
+  const second = manager.serving.nextRequestSeq(SESSION_ID);
   assert.ok(second > first, "each request is told apart from the one before it");
 
   // A SEEK DOES ONE THING: it puts the viewer where they now are. Recorded
   // here because it used to do eleven, and because the one remaining effect is
   // what every reading of a viewer's position now rests on.
-  assert.equal(manager.requestSeek(SESSION_ID, 120, "viewer-one"), true);
-  assert.equal(manager.viewerPositionOf(SESSION_ID, "viewer-one"), 120);
-  assert.equal(manager.requestSeek("no-such-session", 120, "viewer-one"), false);
+  assert.equal(manager.viewerRequests.requestSeek(SESSION_ID, 120, "viewer-one"), true);
+  assert.equal(manager.viewerRequests.viewerPositionOf(SESSION_ID, "viewer-one"), 120);
+  assert.equal(manager.viewerRequests.requestSeek("no-such-session", 120, "viewer-one"), false);
 
   // `seekEpoch` is NOT moved by a seek, whatever its name says: its two writers
   // are the variant switch and the soundtrack switch, and they move it on the
   // output the viewer has LEFT. Recorded as it is, so the dismantling can give
   // the fact its real name instead of discovering this by breaking it.
-  assert.equal(manager.seekEpoch(SESSION_ID), 0, "a seek leaves the wait epoch alone");
-  assert.equal(manager.seekEpoch("no-such-session"), 0);
+  assert.equal(manager.serving.seekEpoch(SESSION_ID), 0, "a seek leaves the wait epoch alone");
+  assert.equal(manager.serving.seekEpoch("no-such-session"), 0);
 
-  manager.noteInputBytes(SESSION_ID, 4096);
-  manager.noteInputBytes(SESSION_ID, 1024);
+  manager.viewerRequests.noteInputBytes(SESSION_ID, 4096);
+  manager.viewerRequests.noteInputBytes(SESSION_ID, 1024);
   assert.equal(manager.outputs.get(SESSION_ID).inputBytes, 5120, "input bytes accumulate");
 
   // A far fragment is a reading and must never throw, whatever the player says.
-  manager.recordFragmentFar(SESSION_ID, {
+  manager.serving.recordFragmentFar(SESSION_ID, {
     sn: 40, track: "video", fragStartSec: 200, bufferEndSec: 130, currentTimeSec: 128
   });
-  manager.recordFragmentFar("no-such-session", { sn: 1, track: "video" });
+  manager.serving.recordFragmentFar("no-such-session", { sn: 1, track: "video" });
 });
 
 test("a session nobody has touched is disposed, one that is being watched is not", async () => {
@@ -256,7 +260,7 @@ test("a session nobody has touched is disposed, one that is being watched is not
   manager.outputs.set(fresh.id, fresh);
   manager.outputs.touch(stale, Date.now() - (2 * 60 * 60 * 1000));
 
-  await manager.cleanupExpired();
+  await manager.lifecycle.cleanupExpired();
 
   assert.equal(manager.outputs.has(stale.id), false, "an untouched session goes");
   assert.equal("state" in stale, false, "removal from the registry is the only lifetime fact");
@@ -270,12 +274,12 @@ test("what a file declares and what this host could offer are answered without a
 
   // `declaredTracks` reads the session's own record and must answer even when
   // nothing has probed the file yet.
-  assert.doesNotThrow(() => manager.declaredTracks(session));
+  assert.doesNotThrow(() => manager.renditions.declaredTracks(session));
 
   // The offer is predicted before any session exists — that is its whole point,
   // the menu being complete from the moment a file is opened.
-  assert.equal(manager.predictOfferedHeights({ height: 0, width: 0 }), null, "an unknown picture offers nothing");
-  const offered = manager.predictOfferedHeights({
+  assert.equal(manager.quality.predictOfferedHeights({ height: 0, width: 0 }), null, "an unknown picture offers nothing");
+  const offered = manager.quality.predictOfferedHeights({
     height: 1080, width: 1920, fps: 24, sourceKey: "torrent:abc", fileIndex: 0
   });
   // TWO ANSWERS, not one: what this host can hold when the picture is copied,
@@ -290,7 +294,7 @@ test("a segment name that is not one is refused", async () => {
   manager.outputs.set(SESSION_ID, fakeSession());
 
   for (const name of ["../key.txt", "segment-00000.mp4/../../x", "making-0-00000.mp4"]) {
-    const answer = await manager.getFileStream(SESSION_ID, name);
+    const answer = await manager.serving.getFileStream(SESSION_ID, name);
     assert.equal(answer.kind, "not-found", `${name} must not be servable`);
   }
 });

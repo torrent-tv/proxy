@@ -1,5 +1,7 @@
 ## 2.87.0
 
+- **Chore**: The steps of a picture and its soundtracks — which output answers each, made the first time it is asked for, an output already producing the same picture adopted instead, which viewer is on which, and the master playlist listing them — are `encode/Renditions.js` rather than twenty-two members of the session manager. `audioRenditionKey`, `variantConsumerId` and `isFamilyConsumerId` moved with them. What a viewer is and where they stand is handed in, so the encoding layer imports no viewer module.
+
 - **Chore**: The cushion reading — how much film is ready in front of the earliest viewer of each output, what that costs off the swarm, and the fetch of a picture's spare soundtracks once it is full — is `encode/CushionReport.js` rather than six members of the session manager. The set of soundtracks already fetched is its own field instead of one the manager never declared. `contiguousEnd` moved with it.
 
 - **Chore**: The encoders of this proxy — built where the plan places them, followed while they run, stopped for a stated reason, accounted when they end — are `encode/EncodeRuns.js` rather than twenty-one members of the session manager. `isInputUnavailable` and `describeFfmpegArgs` moved with them. The logger, the software encoder's descriptor and a viewer's position are handed in, so the encoding layer still imports nothing above itself. The checks of `test/one-authority.test.js` read the new file: still one place builds a run, one caller starts it, and the session manager stops runs only at teardown.

@@ -1,5 +1,7 @@
 ## 2.87.0
 
+- **Chore**: Where each segment of an output begins, and how the cut table is corrected from what the encoder produced — the published grid, a run's landing, the index accuracy and its correction — is `encode/OutputTimes.js` rather than eleven members of the session manager. `describeGridDrift` moved with it. Encoding may now import `output/`, which is the same component; everything else above it is still refused.
+
 - **Chore**: What the proxy's own work costs the host — the torrent's CPU per megabyte, the base draw, each watched torrent's rate, the speed each file's supply demands, each file's length, the read window sized from it, and the share of the machine a new encoder could have — is `quality/HostLoad.js` rather than eleven members and nine fields of the session manager. The machine readings of `host-load.js` are handed to it, so the quality layer still reads no machine itself.
 
 - **Chore**: What this host takes to create an output and to produce its first segment — the recorded medians, the synthetic figure from the startup benchmark and the line comparing the two — is `quality/HostTimings.js` rather than nine members of the session manager.

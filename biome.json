@@ -33,7 +33,6 @@
 				"services/segment-formats/**",
 				"services/output/**",
 				"services/viewer/**",
-				"services/encode/**",
 				"services/priority/**",
 				"services/source/**",
 				"services/torrent/**"
@@ -50,6 +49,31 @@
 											"../**"
 										],
 										"message": "This layer states facts and imports nothing above itself. Anything it needs from outside — a logger, a clock, a way to read bytes — is passed in."
+									}
+								]
+							}
+						}
+					}
+				}
+			}
+		},
+		{
+			"includes": [
+				"services/encode/**"
+			],
+			"linter": {
+				"rules": {
+					"style": {
+						"noRestrictedImports": {
+							"level": "error",
+							"options": {
+								"patterns": [
+									{
+										"group": [
+											"../**",
+											"!../output/**"
+										],
+										"message": "Encoding imports nothing above itself. `output/` is not above it: an output's identity, its cut table and its playlist are the same component (кодирование, see CLAUDE.md «Семь компонентов»). Anything else it needs — a logger, a clock, a way to read bytes — is passed in."
 									}
 								]
 							}

@@ -14,7 +14,7 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
-import { isInputUnavailable } from "../services/hls-session-manager.js";
+import { isInputUnavailable } from "../services/encode/EncodeRuns.js";
 
 test("the messages the field produced when data went away are all temporary", () => {
   for (const message of [

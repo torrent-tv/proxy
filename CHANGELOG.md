@@ -1,5 +1,7 @@
 ## 2.87.0
 
+- **Chore**: The encoders of this proxy — built where the plan places them, followed while they run, stopped for a stated reason, accounted when they end — are `encode/EncodeRuns.js` rather than twenty-one members of the session manager. `isInputUnavailable` and `describeFfmpegArgs` moved with them. The logger, the software encoder's descriptor and a viewer's position are handed in, so the encoding layer still imports nothing above itself. The checks of `test/one-authority.test.js` read the new file: still one place builds a run, one caller starts it, and the session manager stops runs only at teardown.
+
 - **Chore**: Where each segment of an output begins, and how the cut table is corrected from what the encoder produced — the published grid, a run's landing, the index accuracy and its correction — is `encode/OutputTimes.js` rather than eleven members of the session manager. `describeGridDrift` moved with it. Encoding may now import `output/`, which is the same component; everything else above it is still refused.
 
 - **Chore**: What the proxy's own work costs the host — the torrent's CPU per megabyte, the base draw, each watched torrent's rate, the speed each file's supply demands, each file's length, the read window sized from it, and the share of the machine a new encoder could have — is `quality/HostLoad.js` rather than eleven members and nine fields of the session manager. The machine readings of `host-load.js` are handed to it, so the quality layer still reads no machine itself.

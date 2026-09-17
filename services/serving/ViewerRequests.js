@@ -18,7 +18,7 @@ import { Timeline, Timelines } from "../output/Timeline.js";
 import { computeCutGrid } from "../output/cut-grid.js";
 import { Output } from "../output/Output.js";
 import { mediaPlaylistText } from "../output/playlists.js";
-import { SourceFiles } from "../source/SourceFile.js";
+import { SourceFiles } from "../media/SourceFile.js";
 import { viewersOf } from "../viewer/Viewer.js";
 import { activeOutputFor } from "../viewer/active-output.js";
 import { viewerSecondsOn } from "../viewer/positions.js";

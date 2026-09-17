@@ -19,7 +19,7 @@ import { SharedPieceStore, findSharedStore } from "./piece-store/shared-piece-st
 import { Urgency, urgencyName } from "./demand/index.js";
 import { demandFor, forgetTorrent, reconcileAll, hasUnmetDemand } from "./download/registry.js";
 import { withdrawClaim } from "./download/withdraw-claim.js";
-import { isAtAWatchingViewer, isBehindEverybody, isNobodyComingNow } from "./priority/PriorityMap.js";
+import { isAtAWatchingViewer, isBehindEverybody, isNobodyComingNow } from "./viewer/PriorityMap.js";
 import { deriveSourceKey } from "./torrent-source-key.js";
 
 /** How a window stated from the priority map names itself. */

@@ -15,7 +15,7 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
-import { PriorityOrchestrator } from "../services/priority/PriorityOrchestrator.js";
+import { PriorityOrchestrator } from "../services/viewer/PriorityOrchestrator.js";
 import { Viewers } from "../services/viewer/Viewers.js";
 import { viewersOf } from "../services/viewer/Viewer.js";
 import { TorrentPool } from "../services/torrent-pool.js";

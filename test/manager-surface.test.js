@@ -3,13 +3,14 @@
  *
  * Written as the net under the dismantling of `hls-session-manager.js`, which
  * was 9608 lines and 142 methods and is now gone: its members are methods of
- * the components that own them, wired by `services/serving/wire-outputs.js`. Twenty-one tests already construct it, but every one of them
- * names something INSIDE it — a private field, a fake session shaped the way
- * the manager happens to shape one — so every one of them moves when the code
- * moves, and a test that moves with the code cannot say the code still works.
+ * the components that own them, wired by `services/serving/wire-outputs.js`.
+ * Most tests that build those components name something INSIDE them — a field,
+ * a fake output shaped the way one happens to be shaped — so they move when the
+ * code moves, and a test that moves with the code cannot say the code still
+ * works.
  *
- * This one is derived from the other side: from what the HTTP layer asks of it.
- * That contract does not move. A route calling a member that no longer exists
+ * This one is derived from the other side: from what the HTTP layer asks of
+ * the components. That contract does not move. A route calling a member that no longer exists
  * is the exact failure a nine-step move risks, and it is silent — Fastify
  * answers 500 at runtime, months later, on a path no unit test walks.
  *
@@ -33,7 +34,7 @@ import assert from "node:assert/strict";
 import { readFileSync, readdirSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { SourceFile } from "../services/source/SourceFile.js";
+import { SourceFile } from "../services/media/SourceFile.js";
 import { Timeline } from "../services/output/Timeline.js";
 import { managerWithOwnStore } from "./helpers/manager.js";
 import { fmp4Format } from "../services/segment-formats/fmp4.js";

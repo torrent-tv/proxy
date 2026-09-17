@@ -31,7 +31,7 @@ import assert from "node:assert/strict";
 import { CoverageMap } from "../services/encode/CoverageMap.js";
 import { planEncoders } from "../services/encode/EncodePlan.js";
 import { contentionPenalty, penaltiesFrom } from "../services/encode/contention.js";
-import { mapForViewer, mergeMaps, runsOf } from "../services/priority/PriorityMap.js";
+import { mapForViewer, mergeMaps, runsOf } from "../services/viewer/PriorityMap.js";
 import { Viewer } from "../services/viewer/Viewer.js";
 
 // Measured on the addon host 2026-09-03: 7.12x alone, 4.18x with a second.

@@ -20,7 +20,7 @@ import {
   mapForViewer,
   mergeMaps,
   runsOf
-} from "../services/priority/PriorityMap.js";
+} from "../services/viewer/PriorityMap.js";
 
 const FILM = 3600;
 const ALLOWANCE = 8;

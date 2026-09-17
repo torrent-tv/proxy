@@ -20,7 +20,7 @@ import test from "node:test";
 import { recordViewerReport } from "../services/viewer/report-intake.js";
 import { fakeProcess as fakeEncoder, startRunOn } from "./helpers/encode-run.js";
 import assert from "node:assert/strict";
-import { SourceFile } from "../services/source/SourceFile.js";
+import { SourceFile } from "../services/media/SourceFile.js";
 import { Timeline } from "../services/output/Timeline.js";
 import { mkdir, rm, writeFile } from "node:fs/promises";
 import path from "node:path";

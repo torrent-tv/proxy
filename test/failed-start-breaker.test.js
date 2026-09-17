@@ -30,7 +30,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { wireOutputs } from "../services/serving/wire-outputs.js";
-import { SourceFile } from "../services/source/SourceFile.js";
+import { SourceFile } from "../services/media/SourceFile.js";
 import { ENCODE_EXIT } from "../services/encode/encode-exit.js";
 import { outputSpec } from "./helpers/output-spec.js";
 

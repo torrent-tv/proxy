@@ -145,17 +145,17 @@ export class Timeline {
    * It lived in the session manager, which is a place, not a layer. Here it is
    * beside the table it converts against.
    *
-   * @param {import("../priority/PriorityMap.js").PriorityMap} map - One number
+   * @param {import("../viewer/PriorityMap.js").PriorityMap} map - One number
    *   per second of film.
    * @param {number} segmentCount - How many pieces this output has.
-   * @returns {import("../priority/PriorityMap.js").DemandZone[]} Runs of pieces
+   * @returns {import("../viewer/PriorityMap.js").DemandZone[]} Runs of pieces
    *   that agree. Empty where nothing is stated, which says nobody is coming.
    */
   inSegments(map, segmentCount) {
     if (!(segmentCount > 0) || !map || !(map.durationSeconds > 0)) {
       return [];
     }
-    /** @type {import("../priority/PriorityMap.js").DemandZone[]} */
+    /** @type {import("../viewer/PriorityMap.js").DemandZone[]} */
     const runs = [];
     for (let index = 0; index < segmentCount; index += 1) {
       // A PIECE TAKES THE STRONGEST SECOND IT HOLDS. It is made or not made

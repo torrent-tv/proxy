@@ -18,7 +18,7 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
-import { SourceFile } from "../services/source/SourceFile.js";
+import { SourceFile } from "../services/media/SourceFile.js";
 import { Timeline } from "../services/output/Timeline.js";
 import { KeyframeTable } from "../services/media/container/KeyframeTable.js";
 import { outputSpec } from "./helpers/output-spec.js";

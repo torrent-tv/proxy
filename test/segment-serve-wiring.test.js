@@ -23,7 +23,7 @@ import { Output } from "../services/encode/output/Output.js";
 import { KeyframeTable } from "../services/media/container/KeyframeTable.js";
 import { rm, writeFile } from "node:fs/promises";
 import path from "node:path";
-import { wireOutputs } from "../services/serving/wire-outputs.js";
+import { wireOutputs } from "../services/server/wire-outputs.js";
 import { ENCODE_RUN_STATE } from "../services/encode/encode-run-state.js";
 import { startRunOn } from "./helpers/encode-run.js";
 import { fmp4Format } from "../services/encode/segment-formats/fmp4.js";

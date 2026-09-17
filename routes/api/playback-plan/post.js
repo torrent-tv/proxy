@@ -35,7 +35,7 @@ export async function handleApiPlaybackPlanPost(req, reply, { playbackPlanner, s
   }
 
   // Interface delegates to PlaybackController (orchestrator + domain). Keeps route thin.
-  const { PlaybackController } = await import("../../../services/controllers/PlaybackController.js");
+  const { PlaybackController } = await import("../../../services/server/controllers/PlaybackController.js");
   const controller = new PlaybackController({ torrentPool, sourceRegistry, ffmpegBin, localBaseUrl, playbackPlanner });
   try {
     const plan = await controller.getPlan({ sourceKey, fileIndex, userAgent, maxWaitMs: 8_000 });

@@ -18,7 +18,7 @@ Linux-only host (e.g. POSIX-only signals must degrade elsewhere).
   else bundled ffmpeg-static, else PATH `ffmpeg`).
 - `server.js` — Fastify setup; detects the video encoder at startup
   (`detectVideoEncoder`), builds the outputs, viewers and encoding with
-  `services/serving/wire-outputs.js`, and hands each route the components it
+  `services/server/wire-outputs.js`, and hands each route the components it
   asks of.
 - `routes/<path>/<method>.js` — same convention as the server repo.
   - `routes/stream/get.js` — byte-range torrent file streaming (HTTP 206).
@@ -41,7 +41,7 @@ Linux-only host (e.g. POSIX-only signals must degrade elsewhere).
     agree ARE the same output, and the encoded result is reused by definition.
     Nothing about a VIEWER appears in it (not the consumer id, not where they
     started, not their viewport), and nothing about the request that does not
-    change a byte of the result. `serving/ViewerRequests.js` builds one and keys
+    change a byte of the result. `server/ViewerRequests.js` builds one and keys
     the output on it.
   - **`media/` — THE MEDIA LAYER, one directory, and it answers ONE question:
     what does a FILE say about itself.** Its containers, its tracks, where its
@@ -114,7 +114,7 @@ Linux-only host (e.g. POSIX-only signals must degrade elsewhere).
     remember, so there is one object per file and nothing to keep in step. The second reader is the packet probe in
     `media/keyframe-probe.js`, which decodes rather than parsing; the fuller of the
     two answers is the one that stands (`media/keyframe-probe.js`).
-  - `controllers/` — interface layer: `PlaybackController` / `SubtitleController`
+  - `server/controllers/` — interface layer: `PlaybackController` / `SubtitleController`
     (thin adapters over orchestrators; routes depend on controllers, not services).
     `routes/*` are now thin HTTP translators. A controller reaches every layer
     below it THROUGH its orchestrator and never around it, which biome checks —
@@ -188,7 +188,7 @@ Linux-only host (e.g. POSIX-only signals must degrade elsewhere).
     videoCodec, container, durationSeconds. `mode` is advisory; the browser
     decides. `media/keyframe-probe.js` beside it is the OTHER reading of the same
     file, by decoding rather than by parsing, for containers that state no index.
-  - `serving/` — what a request does, one operation at a time, and nothing
+  - `server/` — what a request does, one operation at a time, and nothing
     that lives longer than the operation: `ViewerRequests` (open an output of a
     file and be placed on it, state a position, report progress),
     `SegmentServing` (answer a playlist, init or segment request from the store,
@@ -257,7 +257,7 @@ All of this must stay deployment-agnostic (HA addon, bare npm, Docker).
 
 ## Disk hygiene (open item — torrent data is NOT cleaned up today)
 
-HLS segments are handled (`serving/OutputLifecycle.js`: idle TTL, `disposeSession`,
+HLS segments are handled (`server/OutputLifecycle.js`: idle TTL, `disposeSession`,
 `disposeAll`). Torrent data is **partially** handled: shutdown cleanup is done
 (`TorrentPool.destroyAll()` with `destroyStore: true`, wired into the `onClose`
 hook — proxy 2.9.15), but `deselect()` only stops further download and nothing

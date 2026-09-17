@@ -7,9 +7,9 @@
  * language detection) stays in orchestrator/domain.
  */
 
-import { SubtitleFileContainer } from "../media/container/SubtitleFileContainer.js";
-import { TextSubtitleTrack } from "../media/tracks/TextSubtitleTrack.js";
-import { detectLanguage } from "../media/tracks/language-detect.js";
+import { SubtitleFileContainer } from "../../media/container/SubtitleFileContainer.js";
+import { TextSubtitleTrack } from "../../media/tracks/TextSubtitleTrack.js";
+import { detectLanguage } from "../../media/tracks/language-detect.js";
 
 const EXTERNAL_MAX_BYTES = 8 * 1024 * 1024;
 
@@ -33,7 +33,7 @@ export class SubtitleController {
    * @param {object} deps
    * @param {object} deps.sourceRegistry
    * @param {object} deps.torrentPool
-   * @param {import("../media/SubtitleOrchestrator.js").SubtitleOrchestrator} deps.subtitles -
+   * @param {import("../../media/SubtitleOrchestrator.js").SubtitleOrchestrator} deps.subtitles -
    *   HANDED IN rather than built here. A controller translates a request for
    *   an orchestrator and reaches every layer below it THROUGH that one; putting
    *   the media layer and the torrent's cue reading together is composition, and

@@ -27,7 +27,7 @@
 import { deriveSourceKey } from "../../../services/torrent/torrent-source-key.js";
 import { spawn } from "node:child_process";
 import { TextSubtitleTrack } from "../../../services/media/tracks/TextSubtitleTrack.js";
-import { SubtitleController } from "../../../services/controllers/SubtitleController.js";
+import { SubtitleController } from "../../../services/server/controllers/SubtitleController.js";
 import { logger } from "../../../utils/logger.js";
 
 // Safety cap: no embedded extraction may outlive this.

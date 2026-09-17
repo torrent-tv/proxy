@@ -273,7 +273,7 @@
 		},
 		{
 			"includes": [
-				"services/controllers/**"
+				"services/server/controllers/**"
 			],
 			"linter": {
 				"rules": {
@@ -284,13 +284,13 @@
 								"patterns": [
 									{
 										"group": [
-											"../*",
-											"../torrent/demand/**",
-											"../torrent/download/**",
-											"../encode/**",
-											"../storage/**",
-											"../torrent/worker/**",
-											"../viewer/**"
+											"../../*",
+											"../../torrent/demand/**",
+											"../../torrent/download/**",
+											"../../encode/**",
+											"../../storage/**",
+											"../../torrent/worker/**",
+											"../../viewer/**"
 										],
 										"message": "A controller translates a request for an orchestrator. Every layer below the orchestrator is reached through it, never around it."
 									}
@@ -314,8 +314,7 @@
 								"patterns": [
 									{
 										"group": [
-											"../../serving/**",
-											"../../controllers/**",
+											"../../server/**",
 											"../../encode/**",
 											"../../viewer/**"
 										],

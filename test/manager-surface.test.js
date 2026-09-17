@@ -3,7 +3,7 @@
  *
  * Written as the net under the dismantling of `hls-session-manager.js`, which
  * was 9608 lines and 142 methods and is now gone: its members are methods of
- * the components that own them, wired by `services/serving/wire-outputs.js`.
+ * the components that own them, wired by `services/server/wire-outputs.js`.
  * Most tests that build those components name something INSIDE them — a field,
  * a fake output shaped the way one happens to be shaped — so they move when the
  * code moves, and a test that moves with the code cannot say the code still

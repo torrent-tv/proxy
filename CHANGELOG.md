@@ -1,5 +1,7 @@
 ## 2.87.0
 
+- **Chore**: The server component's operations and controllers are `services/server/` (`ViewerRequests`, `SegmentServing`, `OutputLifecycle`, `wire-outputs.js`, and `controllers/`). `services/` now holds exactly the seven components' directories — `transport`, `server`, `torrent`, `storage`, `media`, `encode`, `viewer` — and no loose files. A proxy started from this tree answers its health, session and progress routes.
+
 - **Chore**: The encoding component is one directory, `services/encode/`, with `output/`, `segment-formats/` and `quality/` inside it and the encoder detection, decode-cost fit, machine readings and learned medians at its root. Its import rule is the component's boundary: nothing outside `encode/` except the ffmpeg banner parsers of the media component, and the quality budget keeps its narrower list.
 
 - **Fix**: The usrsctp state reader looked for its gdb script one directory short of where it is, since the transport moved into `services/transport/` earlier in this release. `test/asset-paths.test.js` now checks that script, the calibration clips and the default place for host timings, and fails with the short path.

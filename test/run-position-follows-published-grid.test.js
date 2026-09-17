@@ -22,7 +22,7 @@ import assert from "node:assert/strict";
 import { Timeline } from "../services/encode/output/Timeline.js";
 import test from "node:test";
 
-import { wireOutputs } from "../services/serving/wire-outputs.js";
+import { wireOutputs } from "../services/server/wire-outputs.js";
 import { segmentCutTimesFrom } from "../services/encode/run-command.js";
 import { describeGridDrift } from "../services/encode/OutputTimes.js";
 

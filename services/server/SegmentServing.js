@@ -49,7 +49,7 @@ function delay(ms) {
  * legal depends on the active container, so the format decides.
  *
  * @param {string} fileName
- * @param {import("./segment-formats/index.js").SegmentFormat} segmentFormat
+ * @param {import("../serving/segment-formats/index.js").SegmentFormat} segmentFormat
  * @returns {boolean}
  */
 function isSafeFileName(fileName, segmentFormat) {

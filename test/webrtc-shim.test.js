@@ -18,7 +18,7 @@ import { Worker } from "node:worker_threads";
 import {
   RTCPeerConnection,
   RTCSessionDescription
-} from "../services/torrent-worker/webrtc-shim.js";
+} from "../services/torrent/worker/webrtc-shim.js";
 
 /**
  * Run a snippet on a worker thread and return what it reports.
@@ -39,7 +39,7 @@ function onWorker(source) {
 }
 
 test("the worker resolves webrtc-polyfill to the JavaScript stack", async () => {
-  const installUrl = new URL("../services/torrent-worker/install-webrtc-shim.js", import.meta.url).href;
+  const installUrl = new URL("../services/torrent/worker/install-webrtc-shim.js", import.meta.url).href;
   const reported = await onWorker(`
     import { parentPort } from "node:worker_threads";
     await import(${JSON.stringify(installUrl)});
@@ -69,7 +69,7 @@ test("a native connection on this thread does not stop the worker's stack", asyn
   native.createDataChannel("keepalive");
 
   try {
-    const installUrl = new URL("../services/torrent-worker/install-webrtc-shim.js", import.meta.url).href;
+    const installUrl = new URL("../services/torrent/worker/install-webrtc-shim.js", import.meta.url).href;
     const reported = await onWorker(`
       import { parentPort } from "node:worker_threads";
       await import(${JSON.stringify(installUrl)});

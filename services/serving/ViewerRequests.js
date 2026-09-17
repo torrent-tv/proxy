@@ -9,7 +9,7 @@
 
 import { logger } from "../../utils/logger.js";
 import { probeVideoKeyframeTimes } from "../media/keyframe-probe.js";
-import { minimumBufferFrom } from "../supply-margin.js";
+import { minimumBufferFrom } from "../torrent/supply-margin.js";
 import { ENCODE_RUN_STATE, wireState } from "../encode/encode-run-state.js";
 import { chooseOutputFps } from "../hwaccel.js";
 import { resolveSegmentFormat, SEGMENT_FORMAT_IDS } from "../segment-formats/index.js";

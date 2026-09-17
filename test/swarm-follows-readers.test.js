@@ -32,9 +32,9 @@ import {
   rejoinSwarm,
   stateFileEdges,
   swarmDecisionFor
-} from "../services/torrent-pool.js";
-import { demandFor, forgetTorrent } from "../services/download/registry.js";
-import { Urgency } from "../services/demand/index.js";
+} from "../services/torrent/torrent-pool.js";
+import { demandFor, forgetTorrent } from "../services/torrent/download/registry.js";
+import { Urgency } from "../services/torrent/demand/index.js";
 
 /**
  * A torrent that records what was done to it. Only the surface the rule

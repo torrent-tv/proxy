@@ -11,7 +11,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { EventEmitter } from "node:events";
-import { fillFileInBackground, fillIsRunning } from "../services/torrent-worker/background-fill.js";
+import { fillFileInBackground, fillIsRunning } from "../services/torrent/worker/background-fill.js";
 
 /**
  * A file whose reads resolve when the test says so, recording what was asked

@@ -13,7 +13,7 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { Readable } from "node:stream";
-import { CompletedFiles } from "../services/files/CompletedFiles.js";
+import { CompletedFiles } from "../services/storage/files/CompletedFiles.js";
 
 const INFO_HASH = "abcdef0123456789abcdef0123456789abcdef01";
 

@@ -2,24 +2,24 @@
  * @file WebTorrent client pool.
  *
  * Manages a shared WebTorrent client instance and a map of active torrents
- * keyed by their own infohash (see `torrent-source-key.js`), so a magnet and
+ * keyed by their own infohash (see `torrent/torrent-source-key.js`), so a magnet and
  * a `.torrent` file for the same content share one entry. Tracks file-level
  * usage so that only the pieces needed by active streams are selected for
  * download.
  */
 
-import { IDLE_KEEP_MS } from "./storage/keep.js";
+import { IDLE_KEEP_MS } from "../storage/keep.js";
 import dns from "node:dns/promises";
 import os from "node:os";
 import path from "node:path";
 import { rmSync } from "node:fs";
 import WebTorrent from "webtorrent";
-import { logger } from "../utils/logger.js";
-import { SharedPieceStore, findSharedStore } from "./piece-store/shared-piece-store.js";
+import { logger } from "../../utils/logger.js";
+import { SharedPieceStore, findSharedStore } from "../storage/piece-store/shared-piece-store.js";
 import { Urgency, urgencyName } from "./demand/index.js";
 import { demandFor, forgetTorrent, reconcileAll, hasUnmetDemand } from "./download/registry.js";
 import { withdrawClaim } from "./download/withdraw-claim.js";
-import { isAtAWatchingViewer, isBehindEverybody, isNobodyComingNow } from "./viewer/PriorityMap.js";
+import { isAtAWatchingViewer, isBehindEverybody, isNobodyComingNow } from "../viewer/PriorityMap.js";
 import { deriveSourceKey } from "./torrent-source-key.js";
 
 /** How a window stated from the priority map names itself. */
@@ -2458,7 +2458,7 @@ export class TorrentPool {
    * whole-file selection, a window around the read head, and the reader itself
    * — and they overwrote each other on every request. Every need is now stated
    * in one register (`services/demand/`) and one class turns the register into
-   * requests to the swarm (`services/download/SwarmSelection.js`); several
+   * requests to the swarm (`services/torrent/download/SwarmSelection.js`); several
    * readers on one file therefore produce the union of their windows instead of
    * the last caller's opinion.
    *

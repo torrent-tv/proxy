@@ -1,5 +1,7 @@
 ## 2.87.0
 
+- **Chore**: The torrent component is one directory, `services/torrent/`: the pool, the source key and the supply margin at its root, with `demand/`, `download/` and the torrent thread (`worker/`, was `torrent-worker/`) inside it. The storage component likewise holds `piece-store/`, `segment-store/` and `files/`, and the process's memory report and core-dump keeping. The import rules follow the components: the torrent may read the published shape of the priority map and store pieces in storage, storage imports nothing outside itself, and each rule was checked by adding a forbidden import to each directory.
+
 - **Chore**: The transport is one directory, `services/transport/`: the data channel handler, the delivery probe, the packet witness, the usrsctp state reader, the WebRTC manager, the tunnel client, the registry client, port mapping, NAT classification and the health figures. `thread-pool.js`, which only sets up the process before anything else loads, moved beside the entry point that imports it first (`bin/`).
 
 - **Chore**: The priority map lives with the viewer (`viewer/PriorityMap.js`, `viewer/PriorityOrchestrator.js`, `viewer/WaitLedger.js`), which is where the seven components put it: the map is where the viewers stand, in units of material. A source file's record lives with the media (`media/SourceFile.js`). `priority/` and `source/` are gone.

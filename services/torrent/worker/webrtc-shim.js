@@ -17,7 +17,7 @@
  *
  * So the native stack stays where it earns its keep — the main thread, carrying
  * video — and the torrent's trackers get a JavaScript implementation, where the
- * traffic is a handful of signalling messages. `services/torrent-worker/worker.js`
+ * traffic is a handful of signalling messages. `services/torrent/worker/worker.js`
  * installs a module resolution hook that points `webrtc-polyfill` here; nothing
  * outside the worker thread is affected, and no dependency is patched (the addon
  * installs with `--ignore-scripts`, so a postinstall patch would never run).

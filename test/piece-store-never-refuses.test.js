@@ -24,7 +24,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { SharedPieceStore } from "../services/piece-store/shared-piece-store.js";
+import { SharedPieceStore } from "../services/storage/piece-store/shared-piece-store.js";
 
 const PIECE = 1024;
 

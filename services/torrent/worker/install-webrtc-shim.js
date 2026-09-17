@@ -3,7 +3,7 @@
  *
  * Imported for its side effect, and imported FIRST by `worker.js` — ES module
  * bodies run in import order, so registering the hook here happens before
- * `torrent-pool.js` pulls in WebTorrent, which is what reaches
+ * `torrent/torrent-pool.js` pulls in WebTorrent, which is what reaches
  * `@thaunknown/simple-peer` and, through it, `webrtc-polyfill`.
  *
  * Scope is deliberately narrow. The hook lives in the worker's isolate, so the

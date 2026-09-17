@@ -45,7 +45,7 @@ const TORRENT_READY_TIMEOUT_MS = 10_000;
  * The underlying add is NOT cancelled: it keeps running and warms the pool, so
  * the client's next attempt is likely to find it ready.
  *
- * @param {import("../../services/torrent-pool.js").TorrentPool} torrentPool
+ * @param {import("../../services/torrent/torrent-pool.js").TorrentPool} torrentPool
  * @param {string} sourceType
  * @param {string} source
  * @returns {Promise<import("webtorrent").Torrent>}
@@ -76,7 +76,7 @@ async function waitForTorrent(torrentPool, sourceType, source) {
  *
  * @param {import("fastify").FastifyRequest} req
  * @param {import("fastify").FastifyReply} reply
- * @param {{ sourceRegistry: ReturnType<import("../../store/source-registry.js").createSourceRegistry>, torrentPool: import("../../services/torrent-pool.js").TorrentPool }} deps
+ * @param {{ sourceRegistry: ReturnType<import("../../store/source-registry.js").createSourceRegistry>, torrentPool: import("../../services/torrent/torrent-pool.js").TorrentPool }} deps
  * @returns {Promise<void>}
  */
 /**

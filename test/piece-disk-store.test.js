@@ -14,7 +14,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { PieceDiskStore } from "../services/piece-store/piece-disk-store.js";
+import { PieceDiskStore } from "../services/storage/piece-store/piece-disk-store.js";
 
 const PIECE = 4096;
 
@@ -239,7 +239,7 @@ test("destroying it takes the directory with it", async () => {
 });
 
 test("the spill ceiling is what the disk's owner said, divided between the stores", async () => {
-  const { reviseSpillBudgets, SharedPieceStore } = await import("../services/piece-store/shared-piece-store.js");
+  const { reviseSpillBudgets, SharedPieceStore } = await import("../services/storage/piece-store/shared-piece-store.js");
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), "spill-share-"));
   const stores = [
     new SharedPieceStore(PIECE, { length: PIECE * 8, memoryBytes: PIECE, path: directory, name: "one" }),

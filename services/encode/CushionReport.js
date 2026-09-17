@@ -215,7 +215,7 @@ export class CushionReport {
    * the line above just printed.
    *
    * WHY IT IS A READ AND NOT A SELECTION. `file.select()` claims every piece of
-   * a file at once, and `#syncSelections` in `torrent-pool.js` records what that
+   * a file at once, and `#syncSelections` in `torrent/torrent-pool.js` records what that
    * cost when it was done alongside the readers' own windows: a claim covering
    * everything always outranked the window, and a seek to 89.1% of a 4.7 GB film
    * waited 93 s while the swarm fetched 2.47 GB in file order. So this goes

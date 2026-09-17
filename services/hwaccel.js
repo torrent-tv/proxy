@@ -1279,7 +1279,7 @@ export function canSustainOutput({
  * swarm, so it survives its own supply only if what it gains between
  * interruptions covers what one interruption costs. That is measured per file
  * and per swarm by the reader — `1 + worst wait / median interval`, in
- * `supply-margin.js` — and on the field torrent of 2026-08-17 it came to 1.67
+ * `torrent/supply-margin.js` — and on the field torrent of 2026-08-17 it came to 1.67
  * against the 1.5 that used to stand here, and to 4.04-8.14 on a torrent whose
  * swarm no encoder could have kept up with.
  *

@@ -10,8 +10,8 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
-import { readFragments } from "../services/torrent-worker/piece-reader.js";
-import { SharedPieceStore } from "../services/piece-store/shared-piece-store.js";
+import { readFragments } from "../services/torrent/worker/piece-reader.js";
+import { SharedPieceStore } from "../services/storage/piece-store/shared-piece-store.js";
 import os from "node:os";
 import path from "node:path";
 import fs from "node:fs/promises";

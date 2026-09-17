@@ -2,12 +2,12 @@
  * @file A torrent reduced to what the subtitle walk may know about one file.
  *
  * Built from the REAL two functions the torrent thread answers with
- * (`torrent-worker/held-bytes.js`), so a check that walks cues exercises both
+ * (`torrent/worker/held-bytes.js`), so a check that walks cues exercises both
  * sides of the seam rather than a stand-in for one of them: the bitfield
  * becoming a list of ranges, and a range read that never fetches.
  */
 
-import { heldRangesOf, readHeldBytes } from "../../services/torrent-worker/held-bytes.js";
+import { heldRangesOf, readHeldBytes } from "../../services/torrent/worker/held-bytes.js";
 
 /**
  * @param {object} torrent - The fake a check builds: `pieceLength`, `bitfield`,

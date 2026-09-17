@@ -20,8 +20,8 @@ import assert from "node:assert/strict";
 import os from "node:os";
 import path from "node:path";
 import fs from "node:fs/promises";
-import { SharedPieceStore } from "../services/piece-store/shared-piece-store.js";
-import { withdrawClaim } from "../services/download/withdraw-claim.js";
+import { SharedPieceStore } from "../services/storage/piece-store/shared-piece-store.js";
+import { withdrawClaim } from "../services/torrent/download/withdraw-claim.js";
 
 const PIECE = 1024;
 

@@ -29,11 +29,10 @@
 	"overrides": [
 		{
 			"includes": [
-				"services/demand/**",
+				"services/torrent/demand/**",
 				"services/segment-formats/**",
 				"services/output/**",
-				"services/viewer/**",
-				"services/torrent/**"
+				"services/viewer/**"
 			],
 			"linter": {
 				"rules": {
@@ -47,6 +46,34 @@
 											"../**"
 										],
 										"message": "This layer states facts and imports nothing above itself. Anything it needs from outside — a logger, a clock, a way to read bytes — is passed in."
+									}
+								]
+							}
+						}
+					}
+				}
+			}
+		},
+		{
+			"includes": [
+				"services/torrent/*.js"
+			],
+			"linter": {
+				"rules": {
+					"style": {
+						"noRestrictedImports": {
+							"level": "error",
+							"options": {
+								"patterns": [
+									{
+										"group": [
+											"../**",
+											"!../../utils/**",
+											"!../storage/keep.js",
+											"!../storage/piece-store/**",
+											"!../viewer/PriorityMap.js"
+										],
+										"message": "THE TORRENT COMPONENT: the swarm, its pieces, what to ask for and in what order, and what a torrent contains. It reads the priority map the viewers publish (`viewer/PriorityMap.js`, the shape of the map and nothing of the viewer) and stores pieces in the storage component; everything else it needs is passed in."
 									}
 								]
 							}
@@ -82,10 +109,7 @@
 		},
 		{
 			"includes": [
-				"services/storage/**",
-				"services/piece-store/**",
-				"services/segment-store/**",
-				"services/files/**"
+				"services/storage/*.js"
 			],
 			"linter": {
 				"rules": {
@@ -97,10 +121,32 @@
 									{
 										"group": [
 											"../**",
-											"!../storage/**",
-											"!../piece-store/**",
-											"!../segment-store/**",
-											"!../files/**"
+											"!../../utils/**"
+										],
+										"message": "ONE LAYER, FOUR DIRECTORIES — bytes on a medium with a limit. What is held in memory (piece-store/), the produced segments (segment-store/), whole downloaded files (files/), and the one owner of the room all three take (storage/). They may reach each other and nothing above. Written as an exception to `../**` rather than as a list of forbidden layers, because a layer is not a directory: the blanket form cannot say \"my siblings\", and a list of names misses everything it forgets — `../../utils/logger.js` went straight through one on 2026-09-14."
+									}
+								]
+							}
+						}
+					}
+				}
+			}
+		},
+		{
+			"includes": [
+				"services/storage/*/**"
+			],
+			"linter": {
+				"rules": {
+					"style": {
+						"noRestrictedImports": {
+							"level": "error",
+							"options": {
+								"patterns": [
+									{
+										"group": [
+											"../../**",
+											"!../../../utils/**"
 										],
 										"message": "ONE LAYER, FOUR DIRECTORIES — bytes on a medium with a limit. What is held in memory (piece-store/), the produced segments (segment-store/), whole downloaded files (files/), and the one owner of the room all three take (storage/). They may reach each other and nothing above. Written as an exception to `../**` rather than as a list of forbidden layers, because a layer is not a directory: the blanket form cannot say \"my siblings\", and a list of names misses everything it forgets — `../../utils/logger.js` went straight through one on 2026-09-14."
 									}
@@ -148,7 +194,7 @@
 		},
 		{
 			"includes": [
-				"services/download/**"
+				"services/torrent/download/**"
 			],
 			"linter": {
 				"rules": {
@@ -159,16 +205,9 @@
 								"patterns": [
 									{
 										"group": [
-											"../*",
-											"../container/**",
-											"../controllers/**",
-											"../encode/**",
-											"../orchestrators/**",
-											"../output/**",
-											"../segment-formats/**",
-											"../torrent-worker/**",
-											"../tracks/**",
-											"../viewer/**"
+											"../../**",
+											"!../../storage/**",
+											"../worker/**"
 										],
 										"message": "What the swarm is told is decided from what is wanted (demand/) and what is held (storage/), and from nothing else."
 									}
@@ -245,16 +284,13 @@
 									{
 										"group": [
 											"../*",
-											"../demand/**",
-											"../download/**",
+											"../torrent/demand/**",
+											"../torrent/download/**",
 											"../encode/**",
 											"../output/**",
 											"../storage/**",
-											"../piece-store/**",
-											"../segment-store/**",
-											"../files/**",
 											"../segment-formats/**",
-											"../torrent-worker/**",
+											"../torrent/worker/**",
 											"../viewer/**"
 										],
 										"message": "A controller translates a request for an orchestrator. Every layer below the orchestrator is reached through it, never around it."
@@ -268,7 +304,7 @@
 		},
 		{
 			"includes": [
-				"services/torrent-worker/**"
+				"services/torrent/worker/**"
 			],
 			"linter": {
 				"rules": {
@@ -279,12 +315,12 @@
 								"patterns": [
 									{
 										"group": [
-											"../serving/**",
-											"../controllers/**",
-											"../encode/**",
-											"../output/**",
-											"../viewer/**",
-											"../segment-formats/**"
+											"../../serving/**",
+											"../../controllers/**",
+											"../../encode/**",
+											"../../output/**",
+											"../../viewer/**",
+											"../../segment-formats/**"
 										],
 										"message": "The torrent thread serves bytes. What is produced from them, and for whom, is decided in the main thread and never asked of this one."
 									}

@@ -5,11 +5,11 @@ Two questions, kept apart, and neither of them is "which file".
 ## Two axes, and what is NOT a third
 
 **What somebody needs** — a claimant, a file, a byte range, a level of urgency.
-Stated in `services/demand/`. Knows nothing about WebTorrent, nothing about
+Stated in `services/torrent/demand/`. Knows nothing about WebTorrent, nothing about
 pieces, nothing about the piece store: it is numbers and rules, and it is
 testable without a torrent.
 
-**What the swarm is told** — one class, `services/download/SwarmSelection.js`,
+**What the swarm is told** — one class, `services/torrent/download/SwarmSelection.js`,
 which reads the register and calls `select`, `deselect` and `critical`. It is
 the only thing in this proxy that calls them.
 
@@ -24,14 +24,14 @@ being fetched for as long as the viewer took to choose one.
 
 ```mermaid
 flowchart TB
-  subgraph Statements["services/demand — what is wanted"]
+  subgraph Statements["services/torrent/demand — what is wanted"]
     W[Window<br/>claimant, file, bytes, urgency]
     U[Urgency<br/>BLOCKED NEAR AHEAD TAIL BEHIND]
     R[DemandRegister<br/>live windows by claimant]
     P[pieces.js<br/>the one bytes to pieces conversion]
   end
 
-  subgraph Swarm["services/download — what the swarm is told"]
+  subgraph Swarm["services/torrent/download — what the swarm is told"]
     S[SwarmSelection<br/>select / deselect / critical]
     G[registry<br/>one per torrent + the cross-torrent rule]
   end
@@ -189,7 +189,7 @@ throughput at a time (`PIPELINE_MAX_DURATION = 1`).
 A withdrawn window is not in the download set at all, so there is nothing to
 fall through to.
 
-The condition is **global**, in `services/download/registry.js`, and not per
+The condition is **global**, in `services/torrent/download/registry.js`, and not per
 torrent: two films on one proxy share the link, so filling the tail of one while
 a viewer of the other has a still picture spends the same bandwidth twice over.
 
@@ -234,7 +234,7 @@ object; a zero says the thresholds are not what we are short of.
 
 - `claimWindow`, `releaseWindow`, `markCritical`, `clearCritical` in
   `piece-reader.js` — the reader no longer speaks to the library.
-- `#reassertReaderWindows` in `torrent-pool.js` — it read the piece store's
+- `#reassertReaderWindows` in `torrent/torrent-pool.js` — it read the piece store's
   MEMORY claims and rebuilt download claims from them, because WebTorrent
   deletes a selection once satisfied. `SwarmSelection.reconcile` does that from
   the register, which is where the statement lives.

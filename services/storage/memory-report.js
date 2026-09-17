@@ -20,7 +20,7 @@
  */
 
 import { readdir, readFile, rm, statfs } from "node:fs/promises";
-import { availableMemory } from "./storage/machine-memory.js";
+import { availableMemory } from "./machine-memory.js";
 import os from "node:os";
 import v8 from "node:v8";
 import path from "node:path";

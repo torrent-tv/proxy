@@ -9,7 +9,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { dumpsToRemove, isCoreDump } from "../services/core-dumps.js";
+import { dumpsToRemove, isCoreDump } from "../services/storage/core-dumps.js";
 
 const dumps = [
   { name: "core.WorkerThread.81.1787176646", writtenAt: 1787176646000 },

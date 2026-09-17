@@ -17,7 +17,7 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
-import { duplicateAddDecision } from "../services/torrent-pool.js";
+import { duplicateAddDecision } from "../services/torrent/torrent-pool.js";
 
 test("a ready torrent is adopted, whatever the new source carries", () => {
   assert.equal(

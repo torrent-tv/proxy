@@ -9,15 +9,15 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { DemandRegister } from "../services/demand/DemandRegister.js";
-import { unionOf, Window } from "../services/demand/Window.js";
+import { DemandRegister } from "../services/torrent/demand/DemandRegister.js";
+import { unionOf, Window } from "../services/torrent/demand/Window.js";
 import {
   isConditional,
   mayDisplaceSlowPeer,
   selectionPriority,
   Urgency
-} from "../services/demand/Urgency.js";
-import { nearestFirst, piecesNeededFor, piecesOf, piecesWithin } from "../services/demand/pieces.js";
+} from "../services/torrent/demand/Urgency.js";
+import { nearestFirst, piecesNeededFor, piecesOf, piecesWithin } from "../services/torrent/demand/pieces.js";
 
 const MEGABYTE = 1024 * 1024;
 

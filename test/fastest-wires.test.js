@@ -10,7 +10,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { askFastestWiresFor, canPlaceRequests, wiresForPiece } from "../services/torrent-worker/fastest-wires.js";
+import { askFastestWiresFor, canPlaceRequests, wiresForPiece } from "../services/torrent/worker/fastest-wires.js";
 
 /**
  * @param {{ speed: number, has?: boolean, choking?: boolean, destroyed?: boolean }} options

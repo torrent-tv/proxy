@@ -41,8 +41,8 @@
  * and nothing here disagrees.
  */
 
-import { divideAllowance, machineAllowanceBytes, OtherDemand } from "../storage/allowance.js";
-import { availableMemoryBytes as availableMemorySync } from "../storage/machine-memory.js";
+import { divideAllowance, machineAllowanceBytes, OtherDemand } from "../allowance.js";
+import { availableMemoryBytes as availableMemorySync } from "../machine-memory.js";
 import { PieceLru } from "./piece-lru.js";
 import { PieceDiskStore } from "./piece-disk-store.js";
 
@@ -199,7 +199,7 @@ function defaultMemoryBytes() {
  *
  * What it does NOT prove: a `SharedArrayBuffer`'s memory is shared between the
  * isolates, so this thread's handle going means only that THIS thread let go.
- * The main thread counts its own (`torrent-worker/client.js`), and the pair is
+ * The main thread counts its own (`torrent/worker/client.js`), and the pair is
  * what answers the question.
  */
 const released = { count: 0, collected: 0 };

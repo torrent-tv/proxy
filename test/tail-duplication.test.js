@@ -11,7 +11,7 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
-import { duplicateTailFor } from "../services/torrent-worker/fastest-wires.js";
+import { duplicateTailFor } from "../services/torrent/worker/fastest-wires.js";
 
 /** A piece with `chunks` blocks, of which `missing` at the end are absent. */
 function piece(chunks, missing) {

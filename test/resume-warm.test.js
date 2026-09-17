@@ -12,7 +12,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { resumeByteOffset } from "../services/torrent-worker/resume-warm.js";
+import { resumeByteOffset } from "../services/torrent/worker/resume-warm.js";
 
 test("a position halfway through a film is halfway through its file", () => {
   assert.equal(resumeByteOffset(1000, 100, 50), 500);

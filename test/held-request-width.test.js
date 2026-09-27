@@ -17,7 +17,6 @@ import os from "node:os";
 import path from "node:path";
 import { wireOutputs } from "../services/server/wire-outputs.js";
 import { fmp4Format } from "../services/encode/segment-formats/fmp4.js";
-import { viewerOf } from "../services/viewer/Viewer.js";
 
 const SESSION_ID = "aaaaaaaabbbbcccc";
 const SEGMENT_SECONDS = 4;
@@ -49,8 +48,8 @@ async function managerWithSession() {
   };
   manager.outputs.set(SESSION_ID, session);
   // The viewer is at segment #25, and says so themselves.
-  viewerOf(session, "").moveTo(25 * SEGMENT_SECONDS);
-  viewerOf(session, "").playing = false;
+  manager.viewers.of(session, "viewer").moveTo(25 * SEGMENT_SECONDS);
+  manager.viewers.of(session, "viewer").playing = false;
   return { manager, dirPath };
 }
 

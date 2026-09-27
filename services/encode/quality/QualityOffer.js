@@ -26,10 +26,11 @@
  */
 
 import { variantHeightsFor } from "../output/ladder.js";
-import { peakMbpsForHeight } from "./link-budget.js";
-import { chooseOutputFps, TRANSCODE_FPS } from "../args.js";
+import { videoLoadForFrame } from "./link-budget.js";
+import { chooseOutputFps, computeOutputDimensions, TRANSCODE_FPS } from "../args.js";
 import { processCanBeSignalled } from "../encode-run-state.js";
 import { sourceDecodeCharacteristics } from "../../media/SourceFile.js";
+import { qualityStateOf } from "./OutputQualityState.js";
 
 export class QualityOffer {
   #cost;
@@ -37,6 +38,7 @@ export class QualityOffer {
   #heightsOnScreen;
   #supplyFor;
   #stateFor;
+  #occupancyKnownFor;
 
   /**
    * @param {{
@@ -44,16 +46,33 @@ export class QualityOffer {
    *   outputs: import("../output/OutputCatalog.js").OutputCatalog,
    *   heightsOnScreen: (owner: object) => number[],
    *   supplyFor: (file: object) => { requiredSpeed: number | null, megabytesPerSecond: number | null, costPerMegabyte: number | null },
- *   stateFor: (output: object) => string
+   *   stateFor: (output: object) => string,
+   *   occupancyKnownFor: (fileKey: string | null) => boolean
    * }} deps
    */
+  /** @type {(fileKey: string | null) => number} */
+  #occupiedCostSec;
+
   constructor({
     encodeCost,
     outputs,
     heightsOnScreen = () => [],
     supplyFor = () => ({ requiredSpeed: null, megabytesPerSecond: null, costPerMegabyte: null }),
-    stateFor
+    stateFor,
+    // WHAT THIS MACHINE IS ALREADY SPENDING, in seconds of work per second of
+    // film, on everything that holds a place on it except the file asked
+    // about (roadmap item 97, step 14). A question about a file this host does
+    // not yet serve is priced BESIDE that, so the pool is not sent to a
+    // machine whose every place is taken. Handed in as a number: the admission
+    // owns what holds a place.
+    occupiedCostSec = () => 0,
+    // Whether every other output holding a place has a measured price. The
+    // pool must not be told this host can serve a file while existing work is
+    // unpriced (roadmap item 97, step 14).
+    occupancyKnownFor = () => true
   }) {
+    this.#occupiedCostSec = occupiedCostSec;
+    this.#occupancyKnownFor = occupancyKnownFor;
     this.#cost = encodeCost;
     this.#outputs = outputs;
     // WHICH HEIGHTS A LIVE VIEWER HAS ON SCREEN. A height is never withdrawn
@@ -148,7 +167,7 @@ export class QualityOffer {
     // rest.
     const measured = this.#outputs.familyOf(owner)
       .map((member) => {
-        const speed = member.lastAloneSpeed;
+        const speed = qualityStateOf(member).lastAloneSpeed;
         if (!Number.isFinite(speed) || !(speed > 0)) {
           return "-";
         }
@@ -161,14 +180,15 @@ export class QualityOffer {
     // other term of this key. Left out, a menu computed while nothing was known
     // about the swarm would stand for the whole film, offering steps that
     // supply cannot support and passing every route guard on the way.
-    const demanded = owner.supplyFigures?.requiredSpeed ?? supply.requiredSpeed;
+    const demanded = supply.requiredSpeed;
     const movingMegabytes = supply.megabytesPerSecond;
     const version =
       `${observed?.version ?? 0}:${playing}:${copyVersion}:${torrentCost.toFixed(6)}:` +
       `${audioVersion}:${running}:${measured}:${(demanded ?? 0).toFixed(2)}:` +
       `${(movingMegabytes ?? 0).toFixed(2)}`;
-    if (Array.isArray(owner.offeredHeightsCache) && owner.offeredHeightsVersion === version) {
-      return owner.offeredHeightsCache;
+    const state = qualityStateOf(owner);
+    if (Array.isArray(state.offeredHeightsCache) && state.offeredHeightsVersion === version) {
+      return state.offeredHeightsCache;
     }
     const heights = new Set(variantHeightsFor(Number(owner.file.height) || 0));
     const own = this.#outputs.variantHeightOf(owner);
@@ -226,8 +246,8 @@ export class QualityOffer {
       // place.
       return answer;
     }
-    owner.offeredHeightsVersion = version;
-    owner.offeredHeightsCache = answer;
+    state.offeredHeightsVersion = version;
+    state.offeredHeightsCache = answer;
     return answer;
   }
 
@@ -301,10 +321,15 @@ export class QualityOffer {
     const torrentCostSec = plannedSupply.costPerMegabyte !== null && plannedSupply.megabytesPerSecond !== null
       ? plannedSupply.costPerMegabyte * plannedSupply.megabytesPerSecond
       : 0;
+    const fileKey = mediaInfo?.sourceKey !== undefined ? `${mediaInfo.sourceKey}:${mediaInfo.fileIndex}` : null;
+    if (!this.#occupancyKnownFor(fileKey)) {
+      return null;
+    }
+    const occupied = Number(this.#occupiedCostSec(fileKey));
     const forBranch = (transcodeVideo) =>
       this.#cost.sustainableHeights({
         heights,
-        concurrentCostSec: torrentCostSec,
+        concurrentCostSec: torrentCostSec + (Number.isFinite(occupied) && occupied > 0 ? occupied : 0),
         // What this file's swarm demanded the last time it was read. Absent on
         // a first open, and then the bar is realtime.
         requiredSpeed: plannedSupply.requiredSpeed,
@@ -355,23 +380,37 @@ export class QualityOffer {
   }
 
   /**
-   * The most a stream of this picture at this height would ask of the link.
+   * The picture part of the load a stream of this picture at this height
+   * would put on a link, with how far its figure can be trusted.
    *
-   * The arithmetic is `link-budget.js` and takes three numbers. This is where
-   * a picture is turned INTO those three numbers, in one place: built at each
-   * call site instead, the mapping was written twice and the two could come
-   * apart — which on this particular question means pricing a re-encode at the
-   * bitrate of a file nobody is copying.
+   * The arithmetic is `link-budget.js`. This is where a picture is turned INTO
+   * its inputs, in one place: built at each call site instead, the mapping was
+   * written twice and the two could come apart — which on this question means
+   * pricing a re-encode at the bitrate of a file nobody is copying.
    *
    * @param {object} base - The family's picture.
    * @param {number} height
-   * @returns {number} Megabits a second.
+   * @param {string} encoderKind - What this host would encode it with.
+   * @returns {import("./link-budget.js").LoadPart}
    */
-  peakMbpsFor(base, height) {
-    return peakMbpsForHeight({
-      sourceHeight: Math.round(Number(base.file.height) || 0),
-      transcodeVideo: base.spec.transcodesVideo,
-      sourceMbps: base.file.decode?.megabitsPerSecond ?? null
-    }, height);
+  videoLoadFor(base, height, encoderKind) {
+    const sourceWidth = Number(base.file.width) || 0;
+    const sourceHeight = Math.round(Number(base.file.height) || 0);
+    // The frame a step of this height is opened at: no width asked, the height
+    // asked, from this source — exactly the box `Renditions` opens a step with,
+    // so the row priced here is the row the step will be encoded in.
+    const dimensions = computeOutputDimensions(0, height, sourceWidth, sourceHeight);
+    const frame = dimensions ? { width: dimensions.w, height: dimensions.h } : { width: 0, height };
+    if (!(frame.width > 0)) {
+      // No source size read yet: the frame, and so its row, cannot be named,
+      // and a load that cannot be named is unknown rather than a guess.
+      return videoLoadForFrame({ sourceHeight, copiesAtSource: false, sourceMbps: null, encoderKind: "" }, frame);
+    }
+    return videoLoadForFrame({
+      sourceHeight,
+      copiesAtSource: !base.spec.transcodesVideo,
+      sourceMbps: base.file.decode?.megabitsPerSecond ?? null,
+      encoderKind
+    }, frame);
   }
 }

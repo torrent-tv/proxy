@@ -11,7 +11,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { Viewer, viewersOf } from "../services/viewer/Viewer.js";
+import { Viewer } from "../services/viewer/Viewer.js";
 import { Viewers } from "../services/viewer/Viewers.js";
 
 const AT = 1_000_000;
@@ -134,8 +134,8 @@ test("the intake hands the statement to the viewer on the output they are watchi
   });
 
   assert.equal(taken, true);
-  assert.equal(viewersOf(rung).get("one").positionSeconds(AT), 5);
-  assert.equal(viewersOf(picture).has("one"), true);
+  assert.equal(viewers.forOutput(rung).get("one").positionSeconds(AT), 5);
+  assert.equal(viewers.forOutput(picture).has("one"), true);
 });
 
 test("a link reading does not expire — presence is what decides whose it is", () => {
@@ -153,8 +153,10 @@ test("a link reading does not expire — presence is what decides whose it is", 
   assert.equal(viewer.isPresent(), true);
 });
 
-test("the worst reading is taken across the people who are still here", async () => {
-  const { worstLinkReading } = await import("../services/viewer/link-readings.js");
+test("each viewer's link is read for that viewer alone, never as a worst over several", async () => {
+  // Roadmap item 97, step 11: a thin link decides for the person on it. The
+  // worst reading across everybody watching used to decide for all of them.
+  const { linkReportOf, presentOn } = await import("../services/viewer/choices.js");
   const output = { id: "out" };
   const viewers = new Viewers();
   const slow = viewers.of(output, "slow", AT);
@@ -162,17 +164,13 @@ test("the worst reading is taken across the people who are still here", async ()
   slow.report({ linkMbps: 2, bufferedAheadSec: 3, playing: true }, AT);
   fast.report({ linkMbps: 40, bufferedAheadSec: 90, playing: true }, AT);
 
-  // The slowest link and the emptiest buffer, which may belong to two people.
-  const worst = worstLinkReading(output);
-  assert.equal(worst?.linkMbps, 2);
-  assert.equal(worst?.bufferedAheadSec, 3);
-  assert.equal(worst?.viewers, 2);
+  assert.equal(linkReportOf(viewers, output, "slow")?.linkMbps, 2);
+  assert.equal(linkReportOf(viewers, output, "fast")?.linkMbps, 40, "the slow link says nothing about this one");
+  assert.equal(linkReportOf(viewers, output, "nobody"), null);
 
-  // The slow one leaves. Their reading goes with them, however recent it was.
+  // The slow one leaves: they are no longer among the viewers asked about.
   slow.gone = true;
-  const left = worstLinkReading(output);
-  assert.equal(left?.linkMbps, 40);
-  assert.equal(left?.viewers, 1);
+  assert.deepEqual(presentOn(viewers, output), ["fast"]);
 });
 
 test("a report into an output absent from the live registry is refused rather than invented", async () => {

@@ -40,6 +40,9 @@ export async function handleTranscodeAudioWarmGet(req, reply, { renditions, serv
   // listening to something else, and preparing a track must not be read as
   // everybody moving to it.
   const consumerId = typeof req.query?.consumer === "string" ? req.query.consumer : "";
+  if (!consumerId) {
+    return reply.code(400).send({ error: "A consumer is required." });
+  }
 
   let prepared;
   try {
@@ -62,7 +65,7 @@ export async function handleTranscodeAudioWarmGet(req, reply, { renditions, serv
     serving,
     prepared.sessionId,
     prepared.fileName,
-    WARM_WAIT_MS
+    { holdMs: WARM_WAIT_MS }
   );
   if (result.kind === "file") {
     // The bytes are the player's to fetch; the handle opened to reach them is

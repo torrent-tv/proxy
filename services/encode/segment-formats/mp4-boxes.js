@@ -25,9 +25,14 @@ const CONTAINER_BOXES = new Set(["moov", "trak", "mdia", "minf", "stbl", "edts",
  *   `bodyStart`/`bodyEnd` delimit the box payload (header excluded).
  * @param {number} [start=0]
  * @param {number} [end=buffer.length]
+ * @param {(type: string) => boolean} [descend] - Whether to walk into a box's
+ *   payload. The default is the container list above, which is what every
+ *   reader of a whole tree wants. A caller that needs to know WHOSE child a box
+ *   is passes `() => false` and recurses itself, because a walk that descends
+ *   for you cannot say which parent it descended from.
  * @returns {void}
  */
-export function walkBoxes(buffer, visit, start = 0, end = buffer.length) {
+export function walkBoxes(buffer, visit, start = 0, end = buffer.length, descend = (type) => CONTAINER_BOXES.has(type)) {
   let offset = start;
   while (offset + 8 <= end) {
     let size = buffer.readUInt32BE(offset);
@@ -48,8 +53,8 @@ export function walkBoxes(buffer, visit, start = 0, end = buffer.length) {
       return; // truncated or malformed — stop rather than read out of bounds
     }
     visit(type, offset + headerSize, offset + size);
-    if (CONTAINER_BOXES.has(type)) {
-      walkBoxes(buffer, visit, offset + headerSize, offset + size);
+    if (descend(type)) {
+      walkBoxes(buffer, visit, offset + headerSize, offset + size, descend);
     }
     offset += size;
   }

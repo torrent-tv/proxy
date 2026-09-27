@@ -11,8 +11,6 @@
  * segment number, and it holds none of them.
  */
 
-import { viewersOf } from "./Viewer.js";
-
 /**
  * @param {object} params
  * @param {Iterable<{ outputKey?: string }>} params.outputs - Every live output.
@@ -20,15 +18,17 @@ import { viewersOf } from "./Viewer.js";
  * @param {(session: object, seconds: number) => number} params.segmentAt - Which
  *   segment of THAT session's timeline a moment of film falls in.
  * @param {number} params.now
+ * @param {{ forOutput: (output: object) => Map<string, object> }} params.viewers - The registry that
+ *   holds who watches what.
  * @returns {number[]} A segment number per present viewer, unsorted.
  */
-export function viewerSegmentsOn({ outputs, outputKey, segmentAt, now }) {
+export function viewerSegmentsOn({ outputs, outputKey, segmentAt, now, viewers }) {
   const at = [];
   for (const session of outputs) {
     if (session.outputKey !== outputKey) {
       continue;
     }
-    for (const viewer of viewersOf(session).values()) {
+    for (const viewer of viewers.forOutput(session).values()) {
       if (!viewer.isPresent()) {
         continue;
       }
@@ -64,18 +64,23 @@ export function viewerSegmentsOn({ outputs, outputKey, segmentAt, now }) {
  * nobody present at all, zero. Creation registers the requesting viewer and
  * their initial position before any encoder is planned.
  *
+ * @param {{ forOutput: (output: object) => Map<string, object> }} viewers - The registry.
  * @param {object} session
  * @param {string} [consumerId] - Whose position.
  * @param {number} [now]
  * @returns {number} Seconds, never negative.
  */
-export function viewerSecondsOn(session, consumerId = "", now = Date.now()) {
-  const named = session ? viewersOf(session).get(consumerId) ?? null : null;
+export function viewerSecondsOn(viewers, session, consumerId = "", now = Date.now()) {
+  if (!session) {
+    return 0;
+  }
+  const watching = viewers.forOutput(session);
+  const named = watching.get(consumerId) ?? null;
   if (named) {
     return Math.max(0, named.positionSeconds(now) ?? 0);
   }
   let furthest = null;
-  for (const viewer of viewersOf(session).values()) {
+  for (const viewer of watching.values()) {
     if (!viewer.isPresent()) {
       continue;
     }
@@ -99,14 +104,15 @@ export function viewerSecondsOn(session, consumerId = "", now = Date.now()) {
  * does not place encoders: which encoder works where is the priority map's
  * answer and nothing here is consulted for it.
  *
+ * @param {{ forOutput: (output: object) => Map<string, object> }} viewers - The registry.
  * @param {Iterable<object>} sessions
  * @param {number} [now]
  * @returns {number | null} Seconds, or null when nobody is present.
  */
-export function earliestViewerSecondsOn(sessions, now = Date.now()) {
+export function earliestViewerSecondsOn(viewers, sessions, now = Date.now()) {
   let earliest = null;
   for (const session of sessions ?? []) {
-    for (const viewer of viewersOf(session).values()) {
+    for (const viewer of viewers.forOutput(session).values()) {
       if (!viewer.isPresent()) {
         continue;
       }

@@ -13,7 +13,14 @@
  * no variant is ever asked for unless the viewer picked it.
  */
 
-import { serveSessionFile } from "../session-file/get.js";
+import {
+  consumerOf,
+  refusedAsStale,
+  replyAssignmentLost,
+  replyOutputUnavailable,
+  serveSessionFile,
+  statedGenerationOf
+} from "../session-file/get.js";
 
 /**
  * @param {import("fastify").FastifyRequest} req
@@ -29,13 +36,45 @@ export async function handleTranscodeVariantFileGet(req, reply, { renditions, se
   // Which viewer is asking. Two viewers of one picture can be on two rungs, and
   // a segment request is what says which rung a viewer is watching — read as
   // the session's own, one of them would take the other off their step.
-  const consumerId = typeof req.query?.consumer === "string" ? req.query.consumer : "";
+  const consumerId = consumerOf(req);
+  // Before resolving: resolving can make a step and registers this viewer on
+  // it, which a request for a viewing they have already left must not do.
+  if (refusedAsStale(req, reply, viewerRequests, fileName)) {
+    return reply;
+  }
   const resolved = await renditions.resolveVariantFile(
     baseSessionId,
     height,
     fileName,
-    consumerId
+    consumerId,
+    // Which viewing this request was made in: a repeat within it is answered
+    // by whatever answered it the first time.
+    statedGenerationOf(req)
   );
+  if (resolved.unavailable) {
+    return replyOutputUnavailable(reply, resolved.unavailable);
+  }
+  if (resolved.lost) {
+    return replyAssignmentLost(reply, resolved.lost);
+  }
+  if (resolved.recover) {
+    // The very piece that was given, from what its gone output left in the
+    // store — held for as long as it is being sent, like any other answer.
+    const stored = await serving.storedPieceOf(resolved.recover.key, resolved.recover.likeId, fileName);
+    if (!stored) {
+      return replyAssignmentLost(reply, { reason: "the stored piece went while it was being fetched" });
+    }
+    const release = viewerRequests.holdResponseForKey(resolved.recover.key, consumerId);
+    reply.raw?.once?.("finish", release);
+    reply.raw?.once?.("close", release);
+    reply.raw?.once?.("error", release);
+    if (!reply.raw || reply.raw.destroyed || reply.raw.writableEnded) {
+      release();
+    }
+    reply.header("Cache-Control", "public, max-age=60");
+    reply.header("Content-Type", stored.contentType);
+    return reply.send(stored.stream);
+  }
   if (resolved.error) {
     // Preparing the variant failed — a probe, a keyframe index, an input that
     // is not there yet. Retryable, like every other not-ready answer on this

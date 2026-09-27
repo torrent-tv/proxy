@@ -13,6 +13,7 @@ import { EncodeCost } from "../services/encode/quality/EncodeCost.js";
 import { startRunOn } from "./helpers/encode-run.js";
 import { outputSpec } from "./helpers/output-spec.js";
 import { runStateOf } from "../services/encode/encode-run-state.js";
+import { qualityStateOf } from "../services/encode/quality/OutputQualityState.js";
 
 /**
  * @param {object} [readings]
@@ -84,7 +85,7 @@ async function watchItRun(cost, session, speedX) {
   // The pair is a DELTA, and the first reading has nothing to be a delta from.
   // Backdated rather than waited for: the window a speed may be read over is
   // seconds, and a test that sleeps through it measures the clock.
-  session.learnSample.takenAt -= 10_000;
+  qualityStateOf(session).learnSample.takenAt -= 10_000;
   session.progress.processedSeconds = 10 * speedX;
   await cost.learnFrom(session);
 }
@@ -156,7 +157,7 @@ test("a copy is priced from what it was seen doing", async () => {
 
   assert.equal(cost.copyVersionFor("torrent:abc:0"), 1, "the price is published, so every offer recomputes");
   assert.equal(
-    session.lastAloneSpeed.toFixed(2),
+    qualityStateOf(session).lastAloneSpeed.toFixed(2),
     "8.00",
     "and what it did with the machine to itself is on the session, which withdraws a step seen failing"
   );
@@ -172,7 +173,7 @@ test("a reading taken while the swarm is short is not filed as the price of this
   await watchItRun(cost, session, 0.3);
 
   assert.equal(cost.copyVersionFor("torrent:abc:0"), 0, "nothing was learned about the machine");
-  assert.equal(session.lastAloneSpeed, undefined, "and nothing claims this rung was seen failing");
+  assert.equal(qualityStateOf(session).lastAloneSpeed, undefined, "and nothing claims this rung was seen failing");
 });
 
 test("a picture's reading taken beside another encoder is not filed", async () => {
@@ -196,14 +197,14 @@ test("one reading is not a speed", async () => {
   await cost.learnFrom(session);
 
   assert.equal(cost.copyVersionFor("torrent:abc:0"), 0, "a delta needs two readings of one run");
-  assert.ok(session.learnSample, "and the first is kept to be the other half of the next");
+  assert.ok(qualityStateOf(session).learnSample, "and the first is kept to be the other half of the next");
 });
 
 test("a pair that straddles a restart measures the seek, not the host", async () => {
   const { cost } = costOn();
   const session = sessionProducing({ transcodeVideo: false });
   await cost.learnFrom(session);
-  session.learnSample.takenAt -= 10_000;
+  qualityStateOf(session).learnSample.takenAt -= 10_000;
   // A new run, at another place in the film: twenty minutes of film against five
   // seconds of clock is a seek, and filed as a price it admits every step there
   // is.

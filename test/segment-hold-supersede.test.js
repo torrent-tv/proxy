@@ -10,6 +10,13 @@
  * `research/hls-seek-prior-art-2026-08-02.md` prescribed this guard from
  * `hls-media-server` — one outstanding wait per session — and it was never
  * built.
+ *
+ * WHAT IS LEFT HERE IS THE ROUTE'S OWN BEHAVIOUR: a segment that arrives while
+ * a request is held must still be served. The release itself moved to
+ * `test/seek-frees-the-viewers-requests.test.js`, and the check that stood here
+ * is why: it replaced `waitForSegment` with a function returning true and moved
+ * the epoch by hand, so it described the route against a stand-in and passed
+ * for months while no seek moved that epoch at all.
  */
 
 import test from "node:test";
@@ -40,47 +47,33 @@ function recordingReply() {
   return { reply, sent };
 }
 
+/**
+ * What the file route asks of the viewer operations besides the hold itself:
+ * whether the request's generation is still taken, the record of what answered
+ * it, and the hold a response keeps. Everything is taken and recorded nowhere,
+ * because these checks are about the hold.
+ *
+ * @param {object} serving
+ * @returns {object}
+ */
+const routeViewerRequests = (serving) => ({
+  ...serving,
+  acceptsRequest: () => true,
+  noteAnsweredDirectly: () => {},
+  holdResponse: () => () => {}
+});
+
 const request = (fileName) => ({
   params: { sessionId: "1111111122223333", fileName },
   raw: { on() {}, off() {} }
 });
 
-test("a seek releases a held segment request instead of running out the hold", async () => {
-  let epoch = 0;
-  let polls = 0;
-  const hlsSessionManager = {
-    nextRequestSeq: () => 1,
-    seekEpoch: () => epoch,
-    // The viewer seeked AWAY from this segment, so it is genuinely stale. A
-    // request for the segment they seeked TO is kept instead — see
-    // `test/seek-target-not-superseded.test.js`.
-    requestStillWanted: () => false,
-    viewerPositionOf: () => 0,
-    async getFileStream() {
-      polls += 1;
-      // The viewer moves while this request is being held.
-      if (polls === 2) {
-        epoch += 1;
-      }
-      return { kind: "warming-up" };
-    }
-  };
-
-  const { reply, sent } = recordingReply();
-  const startedAt = Date.now();
-  await handleTranscodeSessionFileGet(request("segment-00609.mp4"), reply, { serving: hlsSessionManager, viewerRequests: hlsSessionManager });
-  const heldMs = Date.now() - startedAt;
-
-  assert.equal(sent.code, 503, "the player must get a retryable answer, not a stream");
-  assert.equal(sent.headers["retry-after"], "0", "nothing to wait for — this segment is not being watched");
-  assert.ok(heldMs < 5_000, `the request was held ${heldMs}ms after the seek`);
-});
-
 test("without a seek the request is still held until the segment appears", async () => {
   let polls = 0;
-  const hlsSessionManager = {
-    nextRequestSeq: () => 1,
+  const serving = {
     seekEpoch: () => 7,
+    // The segment is published between polls.
+    waitForSegment: async () => true,
     async getFileStream() {
       polls += 1;
       if (polls < 3) {
@@ -91,7 +84,7 @@ test("without a seek the request is still held until the segment appears", async
   };
 
   const { reply, sent } = recordingReply();
-  await handleTranscodeSessionFileGet(request("segment-00610.mp4"), reply, { serving: hlsSessionManager, viewerRequests: hlsSessionManager });
+  await handleTranscodeSessionFileGet(request("segment-00610.mp4"), reply, { serving: serving, viewerRequests: routeViewerRequests(serving) });
 
   assert.equal(sent.body, "bytes", "a segment that arrives late must still be served");
   assert.equal(sent.headers["content-type"], "video/mp4");

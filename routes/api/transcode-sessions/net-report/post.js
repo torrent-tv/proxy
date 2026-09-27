@@ -7,25 +7,26 @@ import { recordViewerReport } from "../../../../services/viewer/report-intake.js
  * loop uses the latest report as the link-deficit downshift trigger.
  *
  * POST /api/transcode-sessions/:sessionId/net-report
- * Body: { linkMbps: number, bufferedAheadSec: number,
- *         consumerId?: string, positionSeconds?: number }
+ * Body: { consumerId: string, bufferedAheadSec: number, linkMbps?: number,
+ *         positionSeconds?: number, playingHeight?: number, … }
  *
  * `consumerId` and `positionSeconds` say WHO is reporting and WHERE they are.
  * A copied picture is one session shared by every viewer of it, so without them
- * the proxy could only act on whichever viewer reported last. Both are
- * optional: a browser that sends neither is treated exactly as before.
+ * the proxy could only act on whichever viewer reported last. The viewer is
+ * required; the position is not.
  *
  * Best-effort telemetry: invalid body → 400, unknown session → 404, ok → 204.
  *
  * @param {import("fastify").FastifyRequest} req
  * @param {import("fastify").FastifyReply} reply
- * @param {{ outputs: { get: (id: string) => object | undefined }, viewers: object }} deps -
- *   The live outputs and the registry of viewers. The VIEWER layer takes the
- *   statement from here; this route's whole job is turning a request into that
- *   one call and its answer into a status code.
+ * @param {{ outputs: { get: (id: string) => object | undefined }, viewers: object, renditions: { viewerPlays: Function, noteViewerReported: Function }, quality: { noteViewerReported: Function } }} deps -
+ *   The live outputs, the registry of viewers, and the rungs of a picture. The
+ *   VIEWER component takes the statement; which rung a stated height is, is the
+ *   encoding component's. This route's whole job is turning a request into
+ *   those calls and their answer into a status code.
  * @returns {Promise<void>}
  */
-export async function handleApiTranscodeSessionNetReportPost(req, reply, { outputs, viewers }) {
+export async function handleApiTranscodeSessionNetReportPost(req, reply, { outputs, viewers, renditions, quality }) {
   const sessionId = typeof req.params.sessionId === "string" ? req.params.sessionId : "";
   const body = req.body && typeof req.body === "object" && !Array.isArray(req.body) ? req.body : {};
   // WHAT THIS REPORT IS. A statement by one viewer about itself: where the
@@ -47,10 +48,13 @@ export async function handleApiTranscodeSessionNetReportPost(req, reply, { outpu
     return reply.code(400).send({ error: "bufferedAheadSec (>=0) is required." });
   }
 
-  // Neither is required, and neither can make a report invalid: they are what
-  // the proxy uses to tell the viewers of one session apart, and a report
-  // without them is still a truthful reading of somebody's link.
+  // WHO is reporting is required: a viewer always has a name, and a reading of
+  // a link that belongs to nobody cannot be kept anywhere. The position is not
+  // required — a report without one is still a truthful reading of that link.
   const consumerId = typeof body.consumerId === "string" ? body.consumerId.trim() : "";
+  if (!consumerId) {
+    return reply.code(400).send({ error: "consumerId is required." });
+  }
   // Whether the picture is moving. Absent from a page that does not say, and
   // then nothing is assumed: a statement about somebody else's machine is
   // theirs to make, and assuming it walked a viewer 146 seconds into a film
@@ -75,6 +79,24 @@ export async function handleApiTranscodeSessionNetReportPost(req, reply, { outpu
   // by an output of the same quality or better that is already made.
   const qualityMode = body.qualityMode === "auto" || body.qualityMode === "manual" ? body.qualityMode : undefined;
   const positionSeconds = Number(body.positionSeconds);
+  // The picture as the viewer sees it, in physical pixels: the upper bound of
+  // the height of a re-encoded output made for them (roadmap item 98). Sent the
+  // moment it changes; a page that does not say leaves the size as it was.
+  const visiblePicture = body.visiblePicture && typeof body.visiblePicture === "object"
+    ? { width: Number(body.visiblePicture.width), height: Number(body.visiblePicture.height) }
+    : undefined;
+  // WHICH RUNG THE PLAYER IS PLAYING, stated by the page the moment it
+  // switched. Stated before the report is recorded, because the report belongs
+  // to the rung on screen. A page that does not say leaves the rung as it was.
+  const playingHeight = Number(body.playingHeight);
+  if (Number.isInteger(playingHeight) && playingHeight > 0) {
+    renditions.viewerPlays(
+      sessionId,
+      consumerId,
+      playingHeight,
+      Number.isFinite(positionSeconds) && positionSeconds >= 0 ? positionSeconds : undefined
+    );
+  }
   const recorded = recordViewerReport({
     outputs,
     viewers,
@@ -88,6 +110,7 @@ export async function handleApiTranscodeSessionNetReportPost(req, reply, { outpu
       onScreen,
       inPictureInPicture,
       qualityMode,
+      visiblePicture,
       positionSeconds:
         Number.isFinite(positionSeconds) && positionSeconds >= 0 ? positionSeconds : undefined
     }
@@ -95,5 +118,12 @@ export async function handleApiTranscodeSessionNetReportPost(req, reply, { outpu
   if (!recorded) {
     return reply.code(404).send({ error: "Transcode session was not found." });
   }
+  // After the statement is recorded, so what is judged is what they just said:
+  // a move of theirs to another limit may no longer be wanted.
+  renditions.noteViewerReported(sessionId, consumerId);
+  // And the quality budget judges this viewer now, on what they just said —
+  // their buffer's trend, their link, the picture they see — rather than at
+  // the next tick of a timer.
+  void quality.noteViewerReported(sessionId, consumerId);
   return reply.code(204).send();
 }

@@ -10,6 +10,8 @@
  */
 
 import { logger } from "../../../utils/logger.js";
+import { OUTPUT_NO_CAPACITY, OUTPUT_UNAVAILABLE } from "../../../services/encode/output/index.js";
+import { replyNoCapacity, replyOutputUnavailable } from "../../transcode/session-file/get.js";
 
 /**
  * Extract a plain object from the request body, guarding against
@@ -36,6 +38,14 @@ export async function handleApiTranscodeSessionsPost(req, reply, { viewerRequest
   const fileName = typeof payload.fileName === "string" ? payload.fileName.trim() : "";
   const targetWidth = Number(payload.targetWidth);
   const targetHeight = Number(payload.targetHeight);
+  // The picture as the viewer sees it, in physical pixels. For a re-encoded
+  // picture the height made is the smallest rung whose frame is not smaller
+  // than this (roadmap item 98); it takes the place of a target box.
+  const visibleWidth = Number(payload.visiblePicture?.width);
+  const visibleHeight = Number(payload.visiblePicture?.height);
+  const visiblePicture = visibleWidth > 0 && visibleHeight > 0
+    ? { width: Math.round(visibleWidth), height: Math.round(visibleHeight) }
+    : null;
   // The target box is produced exactly (capped to source), with the realtime
   // budget's auto-downscale and runtime downswitch off for this session.
   //
@@ -58,6 +68,10 @@ export async function handleApiTranscodeSessionsPost(req, reply, { viewerRequest
   if (!sourceKey || !Number.isInteger(fileIndex) || fileIndex < 0) {
     return reply.code(400).send({ error: "sourceKey and valid fileIndex are required." });
   }
+  // The output is opened FOR somebody, and a viewer always has a name.
+  if (!consumerId) {
+    return reply.code(400).send({ error: "consumerId is required." });
+  }
 
   try {
     const session = await viewerRequests.createOrGetSession({
@@ -70,6 +84,7 @@ export async function handleApiTranscodeSessionsPost(req, reply, { viewerRequest
       targetWidth: Number.isInteger(targetWidth) && targetWidth > 0 ? targetWidth : 0,
       targetHeight: Number.isInteger(targetHeight) && targetHeight > 0 ? targetHeight : 0,
       exactSize,
+      visiblePicture,
       audioRenditions,
       startPositionSeconds:
         Number.isFinite(startPositionSeconds) && startPositionSeconds > 0
@@ -121,6 +136,12 @@ export async function handleApiTranscodeSessionsPost(req, reply, { viewerRequest
   } catch (error) {
     if (error instanceof Error && error.code === "TRANSCODE_DISABLED") {
       return reply.code(409).send({ error: error.message });
+    }
+    if (error?.code === OUTPUT_UNAVAILABLE) {
+      return replyOutputUnavailable(reply, error.details);
+    }
+    if (error?.code === OUTPUT_NO_CAPACITY) {
+      return replyNoCapacity(reply, error.details);
     }
     const message = error instanceof Error ? error.message : String(error);
     // Say why on the proxy's own log, not only in the answer. This route

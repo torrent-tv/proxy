@@ -14,6 +14,7 @@ import { QualityOffer } from "../services/encode/quality/QualityOffer.js";
 import { startRunOn } from "./helpers/encode-run.js";
 import { outputSpec } from "./helpers/output-spec.js";
 import { runStateOf } from "../services/encode/encode-run-state.js";
+import { qualityStateOf } from "../services/encode/quality/OutputQualityState.js";
 
 /**
  * A session with one run going.
@@ -40,7 +41,10 @@ function sessionProducing() {
  * @param {object} [supply]
  * @returns {{ offer: QualityOffer, picture: object, computed: () => number, supply: object }}
  */
-function offerOver(supply = { requiredSpeed: null, megabytesPerSecond: null, costPerMegabyte: null }) {
+function offerOver(
+  supply = { requiredSpeed: null, megabytesPerSecond: null, costPerMegabyte: null },
+  occupancyKnownFor = () => true
+) {
   const picture = sessionProducing();
   const outputs = {
     familyOf: () => [picture],
@@ -70,10 +74,20 @@ function offerOver(supply = { requiredSpeed: null, megabytesPerSecond: null, cos
     outputs,
     stateFor: (session) => runStateOf(session.runs),
     heightsOnScreen: () => [],
-    supplyFor: () => supply
+    supplyFor: () => supply,
+    occupancyKnownFor
   });
   return { offer, picture, computed: () => computed, supply };
 }
+
+test("the pool gets no positive answer while another occupied output has no measured cost", () => {
+  const { offer } = offerOver(undefined, () => false);
+
+  assert.equal(
+    offer.predictOfferedHeights({ width: 1920, height: 1080, fps: 25, bitrateKbps: 5000 }),
+    null
+  );
+});
 
 test("the offer is computed once and then answered from the cache", () => {
   // It is asked on the path that serves every playlist, every init and every
@@ -117,7 +131,7 @@ test("and so is what each running encode was last seen doing", () => {
   const { offer, picture, computed } = offerOver();
   offer.offeredHeightsFor(picture);
 
-  picture.lastAloneSpeed = 0.4;
+  qualityStateOf(picture).lastAloneSpeed = 0.4;
   offer.offeredHeightsFor(picture);
 
   assert.equal(computed(), 2);
@@ -139,9 +153,9 @@ test("a step asking for the family's answer does not keep it as its own", () => 
   const answer = offer.offeredHeightsFor(step);
 
   assert.ok(Array.isArray(answer), "the step is still answered — its viewer is watching it");
-  assert.equal(step.offeredHeightsCache, undefined, "and nothing is filed on the asker");
+  assert.equal(qualityStateOf(step).offeredHeightsCache, undefined, "and nothing is filed on the asker");
   assert.equal(
-    picture.offeredHeightsCache,
+    qualityStateOf(picture).offeredHeightsCache,
     undefined,
     "nor on the picture, whose own key was never the one this answer was computed against"
   );

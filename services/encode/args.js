@@ -13,6 +13,7 @@
  */
 
 import os from "node:os";
+import { LADDER_HEIGHTS } from "./output/ladder.js";
 
 export const SOFTWARE_PRESET = "ultrafast";
 export const SOFTWARE_CRF = "24";
@@ -68,34 +69,122 @@ export const CPU_THREADS = Math.max(1, os.cpus().length);
 // -bufsize only bound the peaks. Field evidence (iPhone on cellular,
 // 2026-07-10): uncapped complex scenes produced 4 s segments of ~18 Mbit/s
 // against a 1-6 Mbit/s viewer link — 45 s prebuffer, draining buffer.
-// Nominal H.264 rates per rung height; multipliers from webtor's production
-// ladder (content-transcoder): maxrate = 1.3x nominal, bufsize = 1.5x.
-const RUNG_NOMINAL_KBPS = [
+// Nominal H.264 rates per row; multipliers from webtor's production ladder
+// (content-transcoder): maxrate = 1.3x nominal, bufsize = 1.5x. The nominal
+// figures themselves came with no source when they were written (2026-07-10,
+// openspec `adaptive-bitrate`) and stand as an assumption until roadmap item
+// 97, step 14 measures them.
+const NOMINAL_KBPS_BY_ROW = new Map([
   [1080, 5000],
   [720, 2800],
   [480, 1400],
   [360, 800],
   [240, 400]
-];
+]);
+// The picture every row is named after: a 16:9 frame of the row's height, as
+// the encode itself would size one (`computeOutputDimensions` from a 16:9
+// source), so the reference is the frame the product makes and not a width
+// written down beside it.
+const ROW_REFERENCE_SOURCE = Object.freeze({ width: 3840, height: 2160 });
+/**
+ * The rate a re-encoded soundtrack is produced at, in kbit/s: stereo AAC,
+ * constant. Stated once because two places need the same figure — the ffmpeg
+ * arguments that produce it, and the viewer's link that has to carry it.
+ */
+export const AUDIO_TRANSCODE_KBPS = 128;
 const CAP_MAXRATE_FACTOR = 1.3;
 const CAP_BUFSIZE_FACTOR = 1.5;
 
 /**
- * Nominal kbps for an encode height: nearest rung wins (odd heights snap to
- * the closest standard rung; anything above the top rung uses the top one).
+ * The rows of limits, one per height of the ladder, each with the area of the
+ * frame it is named after.
  *
- * @param {number} height
- * @returns {number}
+ * @type {{ height: number, area: number }[] | null}
  */
-export function nominalKbpsForHeight(height) {
-  const h = Number.isFinite(height) && height > 0 ? height : 720;
-  let best = RUNG_NOMINAL_KBPS[0];
-  for (const rung of RUNG_NOMINAL_KBPS) {
-    if (Math.abs(rung[0] - h) < Math.abs(best[0] - h)) {
-      best = rung;
+let limitRows = null;
+
+/**
+ * @returns {{ height: number, area: number }[]}
+ */
+function rows() {
+  if (limitRows === null) {
+    limitRows = LADDER_HEIGHTS.map((height) => {
+      const frame = computeOutputDimensions(
+        ROW_REFERENCE_SOURCE.width,
+        height,
+        ROW_REFERENCE_SOURCE.width,
+        ROW_REFERENCE_SOURCE.height
+      );
+      return { height, area: frame.w * frame.h };
+    });
+  }
+  return limitRows;
+}
+
+/**
+ * The row whose frame area is nearest to this one, measured as a ratio rather
+ * than a difference (decided with the user 2026-09-24): a rate grows with the
+ * number of points multiplicatively, and the rows stand at uneven distances, so
+ * the border between two rows is the geometric mean of their areas. On the
+ * border itself the row with the larger area wins, so the choice has one answer.
+ *
+ * Keyed by area and not by height because a height alone names the wrong
+ * frame for any picture that is not 16:9: a 2.4:1 film in a 1080 box is
+ * encoded at about 1920x800, 1.54 million points, which a height puts in the
+ * 720 row (0.92 million) although it is nearer the 1080 row (2.07 million).
+ *
+ * @param {{ width: number, height: number }} frame
+ * @returns {number} The height the row is named after.
+ */
+export function limitRowFor({ width, height }) {
+  const area = Number(width) * Number(height);
+  if (!(Number.isFinite(area) && area > 0)) {
+    throw new RangeError(`a limit row is chosen for a frame, not for ${width}x${height}`);
+  }
+  return nearestByArea(rows(), area).height;
+}
+
+/**
+ * @param {{ height: number, area: number }[]} candidates
+ * @param {number} area
+ * @returns {{ height: number, area: number }}
+ */
+function nearestByArea(candidates, area) {
+  // The larger area over the smaller: the same order as the distance of the
+  // logarithms, without a logarithm. Taken as log(a / b) the two sides of a
+  // border come out one last digit apart — log(2/3) is not exactly -log(3/2) —
+  // and the tie rule below would never be reached.
+  const ratioTo = (rowArea) => Math.max(area, rowArea) / Math.min(area, rowArea);
+  let best = candidates[0];
+  let bestDistance = ratioTo(best.area);
+  for (const row of candidates.slice(1)) {
+    const distance = ratioTo(row.area);
+    if (distance < bestDistance || (distance === bestDistance && row.area > best.area)) {
+      best = row;
+      bestDistance = distance;
     }
   }
-  return best[1];
+  return best;
+}
+
+/**
+ * Nominal kbps for a frame: the nominal of the row its area falls in. A row
+ * that has no nominal of its own yet (540, 1440 and 2160 today) takes the one
+ * of the nearest row by area that has one, by the same rule, until step 14
+ * measures it.
+ *
+ * @param {{ width: number, height: number }} frame
+ * @returns {number}
+ */
+export function nominalKbpsFor(frame) {
+  const row = limitRowFor(frame);
+  const own = NOMINAL_KBPS_BY_ROW.get(row);
+  if (own !== undefined) {
+    return own;
+  }
+  const named = rows().filter((candidate) => NOMINAL_KBPS_BY_ROW.has(candidate.height));
+  const rowArea = rows().find((candidate) => candidate.height === row).area;
+  return NOMINAL_KBPS_BY_ROW.get(nearestByArea(named, rowArea).height);
 }
 
 /**
@@ -115,43 +204,140 @@ export function maxrateKbpsFor(nominalKbps) {
 }
 
 /**
- * The nominal rate whose cap is a given peak — the inverse of
- * {@link maxrateKbpsFor}.
- *
- * Used to turn a MEASURED limit into the figure the cap arithmetic takes. The
- * viewer's usable link is a peak the stream must not exceed, and the encoder is
- * configured from a nominal rate, so the two are converted through the one
- * factor rather than through a second constant invented for the purpose.
- *
- * @param {number} maxrateKbps
- * @returns {number}
+ * H.264 levels, Table A-1 of ITU-T H.264: the level name, then MaxMBPS
+ * (macroblocks per second), MaxFS (macroblocks per frame), MaxBR (kbit/s) and
+ * MaxCPB (kbit). The bit rate and buffer limits are the Baseline/Main figures;
+ * the High profile, which libx264 produces for 8-bit 4:2:0, allows 1.25 times
+ * both (Table A-2, `cpbBrVclFactor` 1250 against 1000).
  */
-export function nominalKbpsForMaxrate(maxrateKbps) {
-  return Math.round(maxrateKbps / CAP_MAXRATE_FACTOR);
+const H264_LEVELS = [
+  ["1", 1485, 99, 64, 175],
+  ["1.1", 3000, 396, 192, 500],
+  ["1.2", 6000, 396, 384, 1000],
+  ["1.3", 11880, 396, 768, 2000],
+  ["2", 11880, 396, 2000, 2000],
+  ["2.1", 19800, 792, 4000, 4000],
+  ["2.2", 20250, 1620, 4000, 4000],
+  ["3", 40500, 1620, 10000, 10000],
+  ["3.1", 108000, 3600, 14000, 14000],
+  ["3.2", 216000, 5120, 20000, 20000],
+  ["4", 245760, 8192, 20000, 25000],
+  ["4.1", 245760, 8192, 50000, 62500],
+  ["4.2", 522240, 8704, 50000, 62500],
+  ["5", 589824, 22080, 135000, 135000],
+  ["5.1", 983040, 36864, 240000, 240000],
+  ["5.2", 2073600, 36864, 240000, 240000],
+  ["6", 4177920, 139264, 240000, 240000],
+  ["6.1", 8355840, 139264, 480000, 480000],
+  ["6.2", 16711680, 139264, 800000, 800000]
+];
+const HIGH_PROFILE_RATE_FACTOR = 1.25;
+
+/**
+ * The lowest H.264 level whose limits hold this picture and this rate control,
+ * or null when none does.
+ *
+ * What the DPB needs is not checked here: it depends on the reference count,
+ * which the speed setting decides, and at the presets this proxy runs (one or
+ * two references) no size it produces reaches that limit. Whether this answer
+ * is the level x264 would pick by itself is checked before a release
+ * (`stand/segment-compat/level-check.mjs`), which is the check that would catch
+ * the DPB, or anything else, deciding differently.
+ *
+ * @param {{ width: number, height: number, fps: number, maxrateKbps: number, bufsizeKbps: number }} picture
+ * @returns {string | null}
+ */
+export function h264LevelFor({ width, height, fps, maxrateKbps, bufsizeKbps }) {
+  const frameMbs = Math.ceil(width / 16) * Math.ceil(height / 16);
+  for (const [name, maxMbps, maxFs, maxBr, maxCpb] of H264_LEVELS) {
+    if (
+      frameMbs <= maxFs &&
+      frameMbs * fps <= maxMbps &&
+      maxrateKbps <= maxBr * HIGH_PROFILE_RATE_FACTOR &&
+      bufsizeKbps <= maxCpb * HIGH_PROFILE_RATE_FACTOR
+    ) {
+      return name;
+    }
+  }
+  return null;
 }
 
 /**
- * `-maxrate`/`-bufsize` args for an encode height (constrained CRF).
+ * The rate control of a software encode at this size, and the level it is
+ * declared at.
  *
- * `nominalKbps` overrides the height's own nominal rate. It is how a measured
- * limit — the viewer's link, the only figure that bounds an encode from
- * outside this host — reaches the encoder without touching the picture's SIZE.
- * That distinction is the whole point: `-maxrate`, `-bufsize` and CRF do not
- * appear in the SPS (x264 writes no HRD parameters by default), so they can be
- * moved in the middle of a session while one init segment goes on describing
- * every fragment. The size cannot.
+ * THE LEVEL BELONGS TO THE NOMINAL OUTPUT OF THIS SIZE, not to the limit asked
+ * for (decided with the user 2026-09-23). A level is a ceiling a decoder must
+ * be able to handle, not a description of the stream, so a stream held below
+ * the nominal limit is correctly declared at the nominal output's level. What
+ * that buys is the whole point: every limit at one size then writes the same
+ * header, so moving a viewer between two of them is serving another output's
+ * pieces under the address they already play, with nothing asked of the
+ * player. Declared by the stream's own limit, a lower limit could land on a
+ * lower level, the header would differ, and the move would need a new address.
  *
- * @param {number} height
- * @param {number | null} [nominalKbps=null]
+ * A limit ABOVE the nominal one is refused rather than lowered: it would need a
+ * higher level than the one every other output of this size declares, and the
+ * request would then be answered with something other than what it asked for.
+ *
+ * @param {{ width: number, height: number, fps: number, capKbps?: number | null }} params
+ *   `capKbps` is the nominal rate asked for; absent, the size's own.
+ * @returns {{ maxrateKbps: number, bufsizeKbps: number, level: string | null }}
+ */
+export function softwareRateControlFor({ width, height, fps, capKbps = null }) {
+  const nominal = nominalKbpsFor({ width, height });
+  const asked = capKbps === null || capKbps === undefined ? nominal : Number(capKbps);
+  if (!(Number.isFinite(asked) && asked > 0)) {
+    throw new RangeError(`a bitrate limit must be a positive number of kbit/s, not ${capKbps}`);
+  }
+  if (asked > nominal) {
+    throw new RangeError(
+      `a bitrate limit of ${asked}kbps is above the ${nominal}kbps a ${width}x${height} picture is sized for, ` +
+      "and would need a higher level than every other output of this size declares"
+    );
+  }
+  return {
+    maxrateKbps: maxrateKbpsFor(asked),
+    bufsizeKbps: bufsizeKbpsFor(asked),
+    level: h264LevelFor({
+      width,
+      height,
+      fps,
+      maxrateKbps: maxrateKbpsFor(nominal),
+      bufsizeKbps: bufsizeKbpsFor(nominal)
+    })
+  };
+}
+
+/**
+ * The buffer an encode may fill, in kbit, for a nominal rate.
+ *
+ * @param {number} nominalKbps
+ * @returns {number}
+ */
+export function bufsizeKbpsFor(nominalKbps) {
+  return Math.round(nominalKbps * CAP_BUFSIZE_FACTOR);
+}
+
+/**
+ * `-maxrate`/`-bufsize`/`-level` for an encode, exactly as its output states
+ * them (constrained CRF: CRF drives quality, these bound the peaks).
+ *
+ * Nothing is computed here: the figures are part of what the output IS, and
+ * its key names them, so the arguments are read off the output rather than
+ * worked out again beside it.
+ *
+ * @param {{ maxrateKbps: number, bufsizeKbps: number, level: string | null } | null} rateControl
  * @returns {string[]}
  */
-export function bitrateCapArgs(height, nominalKbps = null) {
-  const nominal = Number.isFinite(nominalKbps) && nominalKbps > 0
-    ? nominalKbps
-    : nominalKbpsForHeight(height);
+export function rateControlArgs(rateControl) {
+  if (!rateControl) {
+    return [];
+  }
   return [
-    "-maxrate", `${maxrateKbpsFor(nominal)}k`,
-    "-bufsize", `${Math.round(nominal * CAP_BUFSIZE_FACTOR)}k`
+    "-maxrate", `${rateControl.maxrateKbps}k`,
+    "-bufsize", `${rateControl.bufsizeKbps}k`,
+    ...(rateControl.level ? ["-level:v", rateControl.level] : [])
   ];
 }
 

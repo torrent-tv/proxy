@@ -13,7 +13,8 @@
  * knowing there is something to fetch.
  */
 
-import { waitForSessionFile } from "../session-file/get.js";
+import { replyOutputUnavailable, waitForSessionFile } from "../session-file/get.js";
+import { OUTPUT_UNAVAILABLE } from "../../../services/encode/output/index.js";
 
 /** How long to hold the warm-up request before telling the caller to retry. */
 const WARM_WAIT_MS = 30_000;
@@ -32,11 +33,22 @@ export async function handleTranscodeVariantWarmGet(req, reply, { renditions, se
   if (!Number.isInteger(height) || height <= 0 || !Number.isFinite(positionSeconds) || positionSeconds < 0) {
     return reply.code(400).send({ error: "A height and a non-negative position are required." });
   }
+  // Whose warm-up this is. It was not passed at all, so every warm-up was
+  // written onto a nameless viewer instead of the person who asked for it.
+  const consumerId = typeof req.query?.consumer === "string" ? req.query.consumer : "";
+  if (!consumerId) {
+    return reply.code(400).send({ error: "A consumer is required." });
+  }
 
   let prepared;
   try {
-    prepared = await renditions.prepareVariant(baseSessionId, height, positionSeconds);
+    prepared = await renditions.prepareVariant(baseSessionId, height, positionSeconds, consumerId);
   } catch (error) {
+    if (error?.code === OUTPUT_UNAVAILABLE) {
+      // Nothing at that height suits this viewer's link. Said at once and not
+      // as "retry": the page tells the viewer and keeps what is playing.
+      return replyOutputUnavailable(reply, error.details);
+    }
     const message = error instanceof Error ? error.message : String(error);
     reply.header("Retry-After", "1");
     return reply.code(503).send({ error: `Could not prepare the quality variant: ${message}` });
@@ -49,7 +61,7 @@ export async function handleTranscodeVariantWarmGet(req, reply, { renditions, se
     serving,
     prepared.sessionId,
     prepared.fileName,
-    WARM_WAIT_MS
+    { holdMs: WARM_WAIT_MS }
   );
   if (result.kind === "file") {
     // The bytes are not sent — the player fetches them itself the moment it

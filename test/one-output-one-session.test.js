@@ -22,7 +22,6 @@ import { wireOutputs } from "../services/server/wire-outputs.js";
 import { AudioOutput, CutGrid, OutputSpec, VideoOutput } from "../services/encode/output/OutputSpec.js";
 import { Timeline } from "../services/encode/output/Timeline.js";
 import { SourceFile } from "../services/media/SourceFile.js";
-import { viewersOf } from "../services/viewer/Viewer.js";
 
 const TORRENT = "torrent:11f0929918e2b5aa2e5b71ecdbe5c0f1a4bbf7d1";
 
@@ -78,7 +77,6 @@ function seedOneSession(manager) {
     state: "ready",
     file: new SourceFile({ sourceKey: TORRENT, fileIndex: 0, name: "film.mkv" }),
     timeline: new Timeline({ boundaries: [0, 4, 8], cutGrid: "keyframe" }),
-    claims: new Set(),
     runs: new Set(),
     progress: { processedSeconds: 0, startPositionSeconds: 0, updatedAt: Date.now() },
     lastAccessedAt: Date.now(),
@@ -122,7 +120,7 @@ test("a second viewer of one output is served by the session that exists", async
   const answered = await manager.viewerRequests.createOrGetSession(request({ consumerId: "viewer-two" }));
 
   assert.equal(answered, seeded, "one output, one session");
-  assert.ok(viewersOf(seeded).has("viewer-two"), "and the second viewer is on it");
+  assert.ok(manager.viewers.forOutput(seeded).has("viewer-two"), "and the second viewer is on it");
 });
 
 test("a request whose parameters differ is not that session", async (t) => {
@@ -155,7 +153,7 @@ test("a request whose parameters differ is not that session", async (t) => {
   }
 
   assert.notEqual(answered, seeded);
-  assert.ok(!viewersOf(seeded).has("viewer-two"), "and nobody was added to somebody else's output");
+  assert.ok(!manager.viewers.forOutput(seeded).has("viewer-two"), "and nobody was added to somebody else's output");
 });
 
 test("two screens that come to the same format share one output, and a different format does not", async (t) => {
@@ -202,5 +200,5 @@ test("two screens that come to the same format share one output, and a different
     other = null;
   }
   assert.notEqual(other, seeded, "a smaller picture is another output");
-  assert.ok(!viewersOf(seeded).has("small-window"));
+  assert.ok(!manager.viewers.forOutput(seeded).has("small-window"));
 });

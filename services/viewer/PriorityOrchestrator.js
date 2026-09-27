@@ -57,8 +57,8 @@ export class PriorityOrchestrator {
    */
   #byOutput = new Map();
 
-  /** Who is watching one session. @type {(session: object) => Map<string, object>} */
-  #viewersOf;
+  /** The registry of this component that knows who watches each output. @type {{ forOutput: (output: object) => Map<string, object> }} */
+  #viewers;
 
   /** How wide the first band of one session's file is. @type {(session: object) => number} */
   #allowanceFor;
@@ -68,14 +68,16 @@ export class PriorityOrchestrator {
   #watchedBy;
 
   /**
-   * This layer states facts and imports nothing above itself, so what it needs
-   * of a session — who is watching it, and how wide an interruption this file
-   * has shown on this swarm — is passed in.
+   * Who watches an output is this component's own registry, handed in as the
+   * registry. What it needs from elsewhere — how wide an interruption this file
+   * has shown on this swarm, and which output a person has on screen — is
+   * passed in as functions.
    *
    * @param {object} params
    * @param {(published: { sourceKey: string, fileIndex: number, durationSeconds: number,
    *   zones: { from: number, to: number, priority: number }[] }) => void} params.publish
-   * @param {(session: object) => Map<string, object>} [params.viewersOf]
+   * @param {{ forOutput: (output: object) => Map<string, object> }} params.viewers - Required:
+   *   without it every output would read as unwatched and every encoder would stop.
    * @param {(session: object) => number} [params.allowanceFor]
    * @param {(session: object, viewer: object) => boolean} [params.watchedBy] -
    *   Whether this output is the one that person is consuming. Which of a film's
@@ -83,9 +85,12 @@ export class PriorityOrchestrator {
    *   this layer does not know; absent, every registered viewer counts, and then
    *   the per-output map says the same as the per-file one.
    */
-  constructor({ publish, viewersOf, allowanceFor, watchedBy }) {
+  constructor({ publish, viewers, allowanceFor, watchedBy }) {
+    if (typeof viewers?.forOutput !== "function") {
+      throw new TypeError("PriorityOrchestrator needs the viewer registry");
+    }
     this.#publish = typeof publish === "function" ? publish : () => {};
-    this.#viewersOf = typeof viewersOf === "function" ? viewersOf : () => new Map();
+    this.#viewers = viewers;
     this.#allowanceFor = typeof allowanceFor === "function" ? allowanceFor : () => 0;
     this.#watchedBy = typeof watchedBy === "function" ? watchedBy : () => true;
   }
@@ -217,7 +222,7 @@ export class PriorityOrchestrator {
           mine = { durationSeconds, allowanceSeconds, viewers: [] };
           byOutput.set(address, mine);
         }
-        for (const viewer of this.#viewersOf(session).values()) {
+        for (const viewer of this.#viewers.forOutput(session).values()) {
           if (!viewer.isPresent()) {
             continue;
           }

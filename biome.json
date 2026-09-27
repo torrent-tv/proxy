@@ -1,331 +1,411 @@
 {
-	"$schema": "https://biomejs.dev/schemas/2.5.7/schema.json",
-	"files": {
-		"includes": [
-			"**/*.js",
-			"!**/node_modules/**"
-		]
-	},
-	"formatter": {
-		"enabled": false
-	},
-	"assist": {
-		"enabled": false
-	},
-	"linter": {
-		"enabled": true,
-		"rules": {
-			"preset": "none",
-			"correctness": {
-				"noUndeclaredVariables": "error",
-				"noUnusedImports": "error",
-				"noUnusedVariables": "error",
-				"noUnusedPrivateClassMembers": "error",
-				"noInvalidUseBeforeDeclaration": "error",
-				"noPrivateImports": "error"
-			}
-		}
-	},
-	"overrides": [
-		{
-			"includes": [
-				"services/torrent/demand/**",
-				"services/encode/segment-formats/**",
-				"services/encode/output/**",
-				"services/viewer/**"
-			],
-			"linter": {
-				"rules": {
-					"style": {
-						"noRestrictedImports": {
-							"level": "error",
-							"options": {
-								"patterns": [
-									{
-										"group": [
-											"../**"
-										],
-										"message": "This layer states facts and imports nothing above itself. Anything it needs from outside — a logger, a clock, a way to read bytes — is passed in."
-									}
-								]
-							}
-						}
-					}
-				}
-			}
-		},
-		{
-			"includes": [
-				"services/torrent/*.js"
-			],
-			"linter": {
-				"rules": {
-					"style": {
-						"noRestrictedImports": {
-							"level": "error",
-							"options": {
-								"patterns": [
-									{
-										"group": [
-											"../**",
-											"!../../utils/**",
-											"!../storage/keep.js",
-											"!../storage/piece-store/**",
-											"!../viewer/PriorityMap.js"
-										],
-										"message": "THE TORRENT COMPONENT: the swarm, its pieces, what to ask for and in what order, and what a torrent contains. It reads the priority map the viewers publish (`viewer/PriorityMap.js`, the shape of the map and nothing of the viewer) and stores pieces in the storage component; everything else it needs is passed in."
-									}
-								]
-							}
-						}
-					}
-				}
-			}
-		},
-		{
-			"includes": [
-				"services/encode/*.js"
-			],
-			"linter": {
-				"rules": {
-					"style": {
-						"noRestrictedImports": {
-							"level": "error",
-							"options": {
-								"patterns": [
-									{
-										"group": [
-											"../**",
-											"!../media/ffmpeg-banner.js"
-										],
-										"message": "THE ENCODING COMPONENT imports nothing outside itself: its outputs, cut tables, playlists, container formats and quality budget are directories of it. Anything else it needs — a logger, a viewer's position, a way to read bytes — is passed in."
-									}
-								]
-							}
-						}
-					}
-				}
-			}
-		},
-		{
-			"includes": [
-				"services/storage/*.js"
-			],
-			"linter": {
-				"rules": {
-					"style": {
-						"noRestrictedImports": {
-							"level": "error",
-							"options": {
-								"patterns": [
-									{
-										"group": [
-											"../**",
-											"!../../utils/**"
-										],
-										"message": "ONE LAYER, FOUR DIRECTORIES — bytes on a medium with a limit. What is held in memory (piece-store/), the produced segments (segment-store/), whole downloaded files (files/), and the one owner of the room all three take (storage/). They may reach each other and nothing above. Written as an exception to `../**` rather than as a list of forbidden layers, because a layer is not a directory: the blanket form cannot say \"my siblings\", and a list of names misses everything it forgets — `../../utils/logger.js` went straight through one on 2026-09-14."
-									}
-								]
-							}
-						}
-					}
-				}
-			}
-		},
-		{
-			"includes": [
-				"services/storage/*/**"
-			],
-			"linter": {
-				"rules": {
-					"style": {
-						"noRestrictedImports": {
-							"level": "error",
-							"options": {
-								"patterns": [
-									{
-										"group": [
-											"../../**",
-											"!../../../utils/**"
-										],
-										"message": "ONE LAYER, FOUR DIRECTORIES — bytes on a medium with a limit. What is held in memory (piece-store/), the produced segments (segment-store/), whole downloaded files (files/), and the one owner of the room all three take (storage/). They may reach each other and nothing above. Written as an exception to `../**` rather than as a list of forbidden layers, because a layer is not a directory: the blanket form cannot say \"my siblings\", and a list of names misses everything it forgets — `../../utils/logger.js` went straight through one on 2026-09-14."
-									}
-								]
-							}
-						}
-					}
-				}
-			}
-		},
-		{
-			"includes": [
-				"services/encode/quality/**"
-			],
-			"linter": {
-				"rules": {
-					"style": {
-						"noRestrictedImports": {
-							"level": "error",
-							"options": {
-								"patterns": [
-									{
-										"group": [
-											"../**",
-											"../../**",
-											"!../output/**",
-											"!../../media/SourceFile.js",
-											"!../available-share.js",
-											"!../hwaccel.js",
-											"!../learned-median.js",
-											"!../torrent-cost.js",
-											"!../encoder-readings.js",
-											"!../contention.js",
-											"!../args.js",
-											"!../encode-run-state.js",
-											"!../../../utils/**"
-										],
-										"message": "What encoding costs, and which heights follow, is arithmetic over readings. Which sessions belong to one file, how many encoders run, where the viewers stand, what the swarm is delivering — all of it is passed in, so this can be asked without a session manager, a torrent or a disk. What it MAY reach is named one file at a time, and every name is a plain STATEMENT rather than machinery: the ladder and the cut table (output/, which is the same layer — кодирование), what a source decodes like, the measured shares and penalties, and the states a run can be in. `encode/EncodeRun.js` is deliberately not among them — it spawns processes. An ALLOW list rather than a forbid list, because the two fail in opposite directions: a name forgotten here blocks an import that should have been allowed, and a name forgotten in a forbid list lets a whole layer through. The old forbid list named `../container/**`, a directory that stopped existing when the media layer got its own, and would have let all of it in."
-									}
-								]
-							}
-						}
-					}
-				}
-			}
-		},
-		{
-			"includes": [
-				"services/torrent/download/**"
-			],
-			"linter": {
-				"rules": {
-					"style": {
-						"noRestrictedImports": {
-							"level": "error",
-							"options": {
-								"patterns": [
-									{
-										"group": [
-											"../../**",
-											"!../../storage/**",
-											"../worker/**"
-										],
-										"message": "What the swarm is told is decided from what is wanted (demand/) and what is held (storage/), and from nothing else."
-									}
-								]
-							}
-						}
-					}
-				}
-			}
-		},
-		{
-			"includes": [
-				"services/media/container/**",
-				"services/media/tracks/**"
-			],
-			"linter": {
-				"rules": {
-					"style": {
-						"noRestrictedImports": {
-							"level": "error",
-							"options": {
-								"patterns": [
-									{
-										"group": [
-											"../**",
-											"!../container/**",
-											"!../tracks/**"
-										],
-										"message": "THE MEDIA DOMAIN. A container answers for itself and hands out tracks/; a track is one stream inside one. They know nothing of torrents, encoders, viewers or this proxy's own logger: the four functions a container is built with are its whole outside world. Written as an exception to `../**` rather than as a list of forbidden layers — a list only catches what somebody remembered to write in it, and the list that stood here let `../../utils/logger.js` straight through."
-									}
-								]
-							}
-						}
-					}
-				}
-			}
-		},
-		{
-			"includes": [
-				"services/media/*.js"
-			],
-			"linter": {
-				"rules": {
-					"style": {
-						"noRestrictedImports": {
-							"level": "error",
-							"options": {
-								"patterns": [
-									{
-										"group": [
-											"../**",
-											"!../../utils/**"
-										],
-										"message": "THE MEDIA LAYER answers what a FILE says about itself: its containers, its tracks, where its keyframes are, and the plan for playing it. It may reach into its own domain and nothing else. What a torrent contains, which clusters may be read, where a viewer stands, what an encoder costs — all of it is passed in, so this can be asked with plain values and no torrent, no thread and no disk. Both reaches that stood here are gone: `torrent-worker/subtitle-cues.js` is now handed to SubtitleOrchestrator at the seam, and `torrent/Contents.js` is handed to the planner."
-									}
-								]
-							}
-						}
-					}
-				}
-			}
-		},
-		{
-			"includes": [
-				"services/server/controllers/**"
-			],
-			"linter": {
-				"rules": {
-					"style": {
-						"noRestrictedImports": {
-							"level": "error",
-							"options": {
-								"patterns": [
-									{
-										"group": [
-											"../../*",
-											"../../torrent/demand/**",
-											"../../torrent/download/**",
-											"../../encode/**",
-											"../../storage/**",
-											"../../torrent/worker/**",
-											"../../viewer/**"
-										],
-										"message": "A controller translates a request for an orchestrator. Every layer below the orchestrator is reached through it, never around it."
-									}
-								]
-							}
-						}
-					}
-				}
-			}
-		},
-		{
-			"includes": [
-				"services/torrent/worker/**"
-			],
-			"linter": {
-				"rules": {
-					"style": {
-						"noRestrictedImports": {
-							"level": "error",
-							"options": {
-								"patterns": [
-									{
-										"group": [
-											"../../server/**",
-											"../../encode/**",
-											"../../viewer/**"
-										],
-										"message": "The torrent thread serves bytes. What is produced from them, and for whom, is decided in the main thread and never asked of this one."
-									}
-								]
-							}
-						}
-					}
-				}
-			}
-		}
-	]
+  "$schema": "https://biomejs.dev/schemas/2.5.7/schema.json",
+  "files": {
+    "includes": [
+      "**/*.js",
+      "!**/node_modules/**"
+    ]
+  },
+  "formatter": {
+    "enabled": false
+  },
+  "assist": {
+    "enabled": false
+  },
+  "linter": {
+    "enabled": true,
+    "rules": {
+      "preset": "none",
+      "correctness": {
+        "noUndeclaredVariables": "error",
+        "noUnusedImports": "error",
+        "noUnusedVariables": "error",
+        "noUnusedPrivateClassMembers": "error",
+        "noInvalidUseBeforeDeclaration": "error",
+        "noPrivateImports": "error"
+      }
+    }
+  },
+  "overrides": [
+    {
+      "includes": [
+        "services/torrent/demand/**",
+        "services/encode/segment-formats/**",
+        "services/encode/output/**",
+        "services/viewer/**"
+      ],
+      "linter": {
+        "rules": {
+          "style": {
+            "noRestrictedImports": {
+              "level": "error",
+              "options": {
+                "patterns": [
+                  {
+                    "group": [
+                      "../**"
+                    ],
+                    "message": "This layer states facts and imports nothing above itself. Anything it needs from outside — a logger, a clock, a way to read bytes — is passed in."
+                  }
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "includes": [
+        "services/torrent/*.js"
+      ],
+      "linter": {
+        "rules": {
+          "style": {
+            "noRestrictedImports": {
+              "level": "error",
+              "options": {
+                "patterns": [
+                  {
+                    "group": [
+                      "../**",
+                      "!../../utils/**",
+                      "!../storage/keep.js",
+                      "!../viewer/PriorityMap.js"
+                    ],
+                    "message": "THE TORRENT COMPONENT: the swarm, its pieces, what to ask for and in what order, and what a torrent contains. It reads the shape of the priority map (`viewer/PriorityMap.js`) and the keeping period (`storage/keep.js`); the piece store is reached through what it does (`piece-store-of.js`) and is handed in where the thread is assembled (`worker/worker.js`)."
+                  }
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "includes": [
+        "services/encode/*.js"
+      ],
+      "linter": {
+        "rules": {
+          "style": {
+            "noRestrictedImports": {
+              "level": "error",
+              "options": {
+                "patterns": [
+                  {
+                    "group": [
+                      "../**",
+                      "!../media/ffmpeg-banner.js"
+                    ],
+                    "message": "THE ENCODING COMPONENT imports nothing outside itself: its outputs, cut tables, playlists, container formats and quality budget are directories of it. Anything else it needs — a logger, a viewer's position, a way to read bytes — is passed in."
+                  }
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "includes": [
+        "services/storage/*.js"
+      ],
+      "linter": {
+        "rules": {
+          "style": {
+            "noRestrictedImports": {
+              "level": "error",
+              "options": {
+                "patterns": [
+                  {
+                    "group": [
+                      "../**",
+                      "!../../utils/**"
+                    ],
+                    "message": "ONE LAYER, FOUR DIRECTORIES — bytes on a medium with a limit. What is held in memory (piece-store/), the produced segments (segment-store/), whole downloaded files (files/), and the one owner of the room all three take (storage/). They may reach each other and nothing above. Written as an exception to `../**` rather than as a list of forbidden layers, because a layer is not a directory: the blanket form cannot say \"my siblings\", and a list of names misses everything it forgets — `../../utils/logger.js` went straight through one on 2026-09-14."
+                  }
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "includes": [
+        "services/storage/*/**"
+      ],
+      "linter": {
+        "rules": {
+          "style": {
+            "noRestrictedImports": {
+              "level": "error",
+              "options": {
+                "patterns": [
+                  {
+                    "group": [
+                      "../../**",
+                      "!../../../utils/**"
+                    ],
+                    "message": "ONE LAYER, FOUR DIRECTORIES — bytes on a medium with a limit. What is held in memory (piece-store/), the produced segments (segment-store/), whole downloaded files (files/), and the one owner of the room all three take (storage/). They may reach each other and nothing above. Written as an exception to `../**` rather than as a list of forbidden layers, because a layer is not a directory: the blanket form cannot say \"my siblings\", and a list of names misses everything it forgets — `../../utils/logger.js` went straight through one on 2026-09-14."
+                  }
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "includes": [
+        "services/encode/quality/**"
+      ],
+      "linter": {
+        "rules": {
+          "style": {
+            "noRestrictedImports": {
+              "level": "error",
+              "options": {
+                "patterns": [
+                  {
+                    "group": [
+                      "../**",
+                      "../../**",
+                      "!../output/**",
+                      "!../../media/SourceFile.js",
+                      "!../available-share.js",
+                      "!../hwaccel.js",
+                      "!../learned-median.js",
+                      "!../torrent-cost.js",
+                      "!../encoder-readings.js",
+                      "!../contention.js",
+                      "!../args.js",
+                      "!../encode-run-state.js",
+                      "!../throughput.js",
+                      "!../../../utils/**"
+                    ],
+                    "message": "What encoding costs, and which heights follow, is arithmetic over readings. Which sessions belong to one file, how many encoders run, where the viewers stand, what the swarm is delivering — all of it is passed in, so this can be asked without a session manager, a torrent or a disk. What it MAY reach is named one file at a time, and every name is a plain STATEMENT rather than machinery: the ladder and the cut table (output/, which is the same layer — кодирование), what a source decodes like, the measured shares and penalties, and the states a run can be in. `encode/EncodeRun.js` is deliberately not among them — it spawns processes. An ALLOW list rather than a forbid list, because the two fail in opposite directions: a name forgotten here blocks an import that should have been allowed, and a name forgotten in a forbid list lets a whole layer through. The old forbid list named `../container/**`, a directory that stopped existing when the media layer got its own, and would have let all of it in."
+                  }
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "includes": [
+        "services/torrent/download/**"
+      ],
+      "linter": {
+        "rules": {
+          "style": {
+            "noRestrictedImports": {
+              "level": "error",
+              "options": {
+                "patterns": [
+                  {
+                    "group": [
+                      "../../**",
+                      "../worker/**"
+                    ],
+                    "message": "What the swarm is told is decided from what is wanted (demand/) and what is held (storage/), and from nothing else."
+                  }
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "includes": [
+        "services/media/container/**",
+        "services/media/tracks/**"
+      ],
+      "linter": {
+        "rules": {
+          "style": {
+            "noRestrictedImports": {
+              "level": "error",
+              "options": {
+                "patterns": [
+                  {
+                    "group": [
+                      "../**",
+                      "!../container/**",
+                      "!../tracks/**"
+                    ],
+                    "message": "THE MEDIA DOMAIN. A container answers for itself and hands out tracks/; a track is one stream inside one. They know nothing of torrents, encoders, viewers or this proxy's own logger: the four functions a container is built with are its whole outside world. Written as an exception to `../**` rather than as a list of forbidden layers — a list only catches what somebody remembered to write in it, and the list that stood here let `../../utils/logger.js` straight through."
+                  }
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "includes": [
+        "services/media/*.js"
+      ],
+      "linter": {
+        "rules": {
+          "style": {
+            "noRestrictedImports": {
+              "level": "error",
+              "options": {
+                "patterns": [
+                  {
+                    "group": [
+                      "../**",
+                      "!../../utils/**"
+                    ],
+                    "message": "THE MEDIA LAYER answers what a FILE says about itself: its containers, its tracks, where its keyframes are, and the plan for playing it. It may reach into its own domain and nothing else. What a torrent contains, which clusters may be read, where a viewer stands, what an encoder costs — all of it is passed in, so this can be asked with plain values and no torrent, no thread and no disk. Both reaches that stood here are gone: `torrent-worker/subtitle-cues.js` is now handed to SubtitleOrchestrator at the seam, and `torrent/Contents.js` is handed to the planner."
+                  }
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "includes": [
+        "services/server/controllers/**"
+      ],
+      "linter": {
+        "rules": {
+          "style": {
+            "noRestrictedImports": {
+              "level": "error",
+              "options": {
+                "patterns": [
+                  {
+                    "group": [
+                      "../../**"
+                    ],
+                    "message": "A controller translates a request for an orchestrator it is handed. It imports nothing of any component: parsing a file, converting it and naming its language are the media component's."
+                  }
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "includes": [
+        "services/torrent/worker/**",
+        "!services/torrent/worker/worker.js"
+      ],
+      "linter": {
+        "rules": {
+          "style": {
+            "noRestrictedImports": {
+              "level": "error",
+              "options": {
+                "patterns": [
+                  {
+                    "group": [
+                      "../../server/**",
+                      "../../encode/**",
+                      "../../viewer/**",
+                      "../../storage/**",
+                      "../../transport/**",
+                      "../../media/**"
+                    ],
+                    "message": "The torrent thread serves bytes. What is produced from them, and for whom, is decided in the main thread; what stores them is handed in by `worker.js`, where this thread is assembled."
+                  }
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "includes": [
+        "services/torrent/worker/worker.js"
+      ],
+      "linter": {
+        "rules": {
+          "style": {
+            "noRestrictedImports": {
+              "level": "error",
+              "options": {
+                "patterns": [
+                  {
+                    "group": [
+                      "../../server/**",
+                      "../../encode/**",
+                      "../../viewer/**",
+                      "../../transport/**",
+                      "../../media/**"
+                    ],
+                    "message": "`worker.js` assembles the torrent thread: it may build the storage component's stores and hand them in, and nothing else outside the torrent component."
+                  }
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "includes": [
+        "services/server/*.js",
+        "!services/server/wire-outputs.js"
+      ],
+      "linter": {
+        "rules": {
+          "style": {
+            "noRestrictedImports": {
+              "level": "error",
+              "options": {
+                "patterns": [
+                  {
+                    "group": [
+                      "../**",
+                      "!../encode/output/index.js",
+                      "!../storage/keep.js",
+                      "!../../utils/**",
+                      "!../../../utils/**"
+                    ],
+                    "message": "THE SERVER COMPONENT coordinates one request at a time through the narrow interfaces `wire-outputs.js` hands it. It imports no component's implementation: only the name of an output and of its playlist (`encode/output/index.js`) and the keeping period (`storage/keep.js`), which are definitions shared by both sides of an interface."
+                  }
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "includes": [
+        "services/transport/**"
+      ],
+      "linter": {
+        "rules": {
+          "style": {
+            "noRestrictedImports": {
+              "level": "error",
+              "options": {
+                "patterns": [
+                  {
+                    "group": [
+                      "../**",
+                      "!../../utils/**",
+                      "!../../../utils/**"
+                    ],
+                    "message": "THE TRANSPORT COMPONENT delivers bytes to a peer and takes requests from it. It imports nothing of another component: what it reports about the machine, and which files of evidence to keep, are handed in by `bin/cli.js`."
+                  }
+                ]
+              }
+            }
+          }
+        }
+      }
+    }
+  ]
 }

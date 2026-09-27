@@ -63,7 +63,6 @@ async function sessionWithRunAt373() {
     segmentFormat: fmp4Format,
     segmentCount: 900,
     startedAt: Date.now(),
-    createEntryMs: Date.now(),
     lastAccessedAt: Date.now(),
     runs: new Set(),
     consumers: new Set(),
@@ -72,7 +71,6 @@ async function sessionWithRunAt373() {
     useSyntheticPlaylist: true,
     playlistText: "#EXTM3U\n",
     lastError: "",
-    firstSegmentLogged: false,
     waitEpoch: 0
   };
   manager.outputs.set(SESSION_ID, session);
@@ -106,8 +104,7 @@ test("a request behind where the viewer said they are does not move the encoder"
 
   await manager.serving.getFileStream(
     SESSION_ID,
-    fmp4Format.segmentFileName(BEHIND_INDEX),
-    { requestSeq: 1 }
+    fmp4Format.segmentFileName(BEHIND_INDEX)
   );
 
   // The field log's line was `seek settle → restart at segment #370`. Nothing
@@ -138,8 +135,7 @@ test("the same traffic moves nothing when the viewer has said nothing either", a
   // encoder placed from it is placed from a number the player picked.
   await manager.serving.getFileStream(
     SESSION_ID,
-    fmp4Format.segmentFileName(BEHIND_INDEX),
-    { requestSeq: 1 }
+    fmp4Format.segmentFileName(BEHIND_INDEX)
   );
 
   assert.equal(session.seekTarget ?? null, null);
@@ -153,7 +149,7 @@ test("a request cannot move the viewer's position backwards", async (t) => {
   });
 
   manager.viewerRequests.requestSeek(SESSION_ID, 2083.4, "viewer-1");
-  await manager.serving.getFileStream(SESSION_ID, fmp4Format.segmentFileName(BEHIND_INDEX), { requestSeq: 1 });
+  await manager.serving.getFileStream(SESSION_ID, fmp4Format.segmentFileName(BEHIND_INDEX));
 
   assert.ok(
     Math.abs((manager.viewers.get("viewer-1")?.positionSeconds() ?? -1) - 2083.4) < 1,

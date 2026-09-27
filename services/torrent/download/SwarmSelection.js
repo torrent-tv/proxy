@@ -29,7 +29,7 @@ import {
   Urgency,
   urgencyName
 } from "../demand/index.js";
-import { findSharedStore } from "../../storage/piece-store/shared-piece-store.js";
+import { pieceStoreOf } from "../piece-store-of.js";
 
 export class SwarmSelection {
   #torrent;
@@ -50,7 +50,7 @@ export class SwarmSelection {
    *   piece store is reached. Injectable so a test can drive the memory
    *   projection without constructing a real store.
    */
-  constructor({ torrent, register, findStore = findSharedStore }) {
+  constructor({ torrent, register, findStore = pieceStoreOf }) {
     this.#torrent = torrent;
     this.#register = register;
     this.#findStore = findStore;

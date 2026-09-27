@@ -93,6 +93,7 @@ export function describeGridDrift(published, live) {
 }
 
 export class OutputTimes {
+  #state = new WeakMap();
   /** What this reads and asks of the rest of the proxy, and nothing else. @type {object} */
   #host;
 
@@ -101,6 +102,24 @@ export class OutputTimes {
    */
   constructor(host) {
     this.#host = host;
+  }
+
+  #stateFor(output) {
+    let state = this.#state.get(output);
+    if (!state) {
+      state = {
+        stampWarnedAt: new Map(),
+        landingReportedForRun: undefined,
+        trueStartByIndex: new Map(),
+        deviationWarnedAt: new Map()
+      };
+      this.#state.set(output, state);
+    }
+    return state;
+  }
+
+  trueStartAt(output, index) {
+    return this.#stateFor(output).trueStartByIndex.get(index);
   }
 
   /**
@@ -166,12 +185,16 @@ export class OutputTimes {
    * @returns {void}
    */
   notePlaylistDisagreement(session, index, trueStart, publishedStart) {
-    const now = Date.now();
-    session.stampWarnedAt ??= new Map();
-    if (now - (session.stampWarnedAt.get(index) ?? 0) < 5_000) {
+    // Within what the player bridges it is no disagreement worth a line.
+    if (!(Math.abs(trueStart - publishedStart) > PLAYER_BUFFER_HOLE_SEC)) {
       return;
     }
-    session.stampWarnedAt.set(index, now);
+    const now = Date.now();
+    const state = this.#stateFor(session);
+    if (now - (state.stampWarnedAt.get(index) ?? 0) < 5_000) {
+      return;
+    }
+    state.stampWarnedAt.set(index, now);
     this.#host.logger.warn(
       `transcode ${session.id} segment #${index} carries ${trueStart.toFixed(3)}s while the playlist ` +
       `the player holds says ${publishedStart.toFixed(3)}s — a gap of ` +
@@ -214,10 +237,11 @@ export class OutputTimes {
    * @returns {void}
    */
   noteRunLanding(session, index, trueStart) {
-    if (runStartingAt(this.#host.runsOf(session), index) === null || session.landingReportedForRun === index) {
+    const state = this.#stateFor(session);
+    if (runStartingAt(this.#host.runsOf(session), index) === null || state.landingReportedForRun === index) {
       return;
     }
-    session.landingReportedForRun = index;
+    state.landingReportedForRun = index;
     // What the run was ASKED for, taken from the run itself rather than looked
     // up again in a table. The two used to be the same lookup; they stopped
     // being so when a run began positioning on the published grid while this
@@ -245,12 +269,12 @@ export class OutputTimes {
     // a stall can be ANSWERED rather than merely believed. Bounded: only the
     // recent past can be the subject of such a report, and an unbounded map on
     // a two-hour film is a leak.
-    session.trueStartByIndex ??= new Map();
-    session.trueStartByIndex.set(index, trueStart);
-    if (session.trueStartByIndex.size > TRUE_START_MEMORY) {
-      const oldest = session.trueStartByIndex.keys().next();
+    const state = this.#stateFor(session);
+    state.trueStartByIndex.set(index, trueStart);
+    if (state.trueStartByIndex.size > TRUE_START_MEMORY) {
+      const oldest = state.trueStartByIndex.keys().next();
       if (!oldest.done) {
-        session.trueStartByIndex.delete(oldest.value);
+        state.trueStartByIndex.delete(oldest.value);
       }
     }
     // ONE READING, AND WHOSE FACT IT IS DEPENDS ON HOW THIS OUTPUT IS MADE. The
@@ -289,10 +313,10 @@ export class OutputTimes {
       // launched with — a soundtrack whose grid has moved under it deviates on
       // EVERY segment for the life of that run. A line each time buries the
       // first one, which is the one somebody is reading the log for.
-      session.deviationWarnedAt ??= new Map();
-      const lastWarnedAt = session.deviationWarnedAt.get(index) ?? 0;
+      const state = this.#stateFor(session);
+      const lastWarnedAt = state.deviationWarnedAt.get(index) ?? 0;
       if (Date.now() - lastWarnedAt >= 5_000) {
-        session.deviationWarnedAt.set(index, Date.now());
+        state.deviationWarnedAt.set(index, Date.now());
         this.#host.logger.warn(
         `transcode ${session.id} segment #${index} really starts at ` +
         `${trueStart.toFixed(3)}s (boundary ${at === null ? "none" : `#${at}`}), ` +

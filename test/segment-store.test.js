@@ -37,7 +37,14 @@ const KEY = "torrent:abc:fmt=fmp4:grid=kf@0:video-only:v=0/copy";
 
 test("two viewers of one output are given the same directory", (t) => {
   const { store, root } = storeInATempRoot();
-  t.after(() => rmSync(root, { recursive: true, force: true }));
+  t.after(() => {
+    // The store lets its directories go, and only then is the root removed: it
+    // holds a watch on each of them — that is how a piece closed by a muxer
+    // with no channel of its own becomes an event — and a directory with an
+    // open watch cannot be removed on Windows.
+    store.dropAll("the check is over");
+    rmSync(root, { recursive: true, force: true });
+  });
 
   // Which viewer asked never enters it — the address is what the segments are.
   assert.equal(store.directoryFor(KEY), store.directoryFor(KEY));
@@ -46,7 +53,14 @@ test("two viewers of one output are given the same directory", (t) => {
 
 test("the directory says what it holds, so a later process can tell", (t) => {
   const { store, root } = storeInATempRoot();
-  t.after(() => rmSync(root, { recursive: true, force: true }));
+  t.after(() => {
+    // The store lets its directories go, and only then is the root removed: it
+    // holds a watch on each of them — that is how a piece closed by a muxer
+    // with no channel of its own becomes an event — and a directory with an
+    // open watch cannot be removed on Windows.
+    store.dropAll("the check is over");
+    rmSync(root, { recursive: true, force: true });
+  });
 
   const dir = store.directoryFor(KEY);
   const names = readdirSync(dir);
@@ -55,7 +69,14 @@ test("the directory says what it holds, so a later process can tell", (t) => {
 
 test("a piece under its served name is finished, and the last one too", (t) => {
   const { store, root } = storeInATempRoot();
-  t.after(() => rmSync(root, { recursive: true, force: true }));
+  t.after(() => {
+    // The store lets its directories go, and only then is the root removed: it
+    // holds a watch on each of them — that is how a piece closed by a muxer
+    // with no channel of its own becomes an event — and a directory with an
+    // open watch cannot be removed on Windows.
+    store.dropAll("the check is over");
+    rmSync(root, { recursive: true, force: true });
+  });
 
   const dir = store.directoryFor(KEY);
   store.useFormat(KEY, fmp4Format);
@@ -72,7 +93,14 @@ test("a piece under its served name is finished, and the last one too", (t) => {
 
 test("a piece still being written is not a piece, and its name says so", (t) => {
   const { store, root } = storeInATempRoot();
-  t.after(() => rmSync(root, { recursive: true, force: true }));
+  t.after(() => {
+    // The store lets its directories go, and only then is the root removed: it
+    // holds a watch on each of them — that is how a piece closed by a muxer
+    // with no channel of its own becomes an event — and a directory with an
+    // open watch cannot be removed on Windows.
+    store.dropAll("the check is over");
+    rmSync(root, { recursive: true, force: true });
+  });
 
   const dir = store.directoryFor(KEY);
   store.useFormat(KEY, fmp4Format);
@@ -91,7 +119,14 @@ test("a piece still being written is not a piece, and its name says so", (t) => 
 
 test("a file of no bytes is not a segment, whatever it is called", (t) => {
   const { store, root } = storeInATempRoot();
-  t.after(() => rmSync(root, { recursive: true, force: true }));
+  t.after(() => {
+    // The store lets its directories go, and only then is the root removed: it
+    // holds a watch on each of them — that is how a piece closed by a muxer
+    // with no channel of its own becomes an event — and a directory with an
+    // open watch cannot be removed on Windows.
+    store.dropAll("the check is over");
+    rmSync(root, { recursive: true, force: true });
+  });
 
   const dir = store.directoryFor(KEY);
   store.useFormat(KEY, fmp4Format);
@@ -109,7 +144,14 @@ test("a file of no bytes is not a segment, whatever it is called", (t) => {
 
 test("clearing up after one run leaves every other run's work alone", (t) => {
   const { store, root } = storeInATempRoot();
-  t.after(() => rmSync(root, { recursive: true, force: true }));
+  t.after(() => {
+    // The store lets its directories go, and only then is the root removed: it
+    // holds a watch on each of them — that is how a piece closed by a muxer
+    // with no channel of its own becomes an event — and a directory with an
+    // open watch cannot be removed on Windows.
+    store.dropAll("the check is over");
+    rmSync(root, { recursive: true, force: true });
+  });
 
   const dir = store.directoryFor(KEY);
   store.useFormat(KEY, fmp4Format);
@@ -134,7 +176,14 @@ test("clearing up after one run leaves every other run's work alone", (t) => {
 
 test("a directory that has not moved is not read again", (t) => {
   const { store, root } = storeInATempRoot();
-  t.after(() => rmSync(root, { recursive: true, force: true }));
+  t.after(() => {
+    // The store lets its directories go, and only then is the root removed: it
+    // holds a watch on each of them — that is how a piece closed by a muxer
+    // with no channel of its own becomes an event — and a directory with an
+    // open watch cannot be removed on Windows.
+    store.dropAll("the check is over");
+    rmSync(root, { recursive: true, force: true });
+  });
 
   const dir = store.directoryFor(KEY);
   store.useFormat(KEY, fmp4Format);
@@ -148,7 +197,14 @@ test("a directory that has not moved is not read again", (t) => {
 
 test("what a killed process left is found, named and counted", (t) => {
   const { store, root, lines } = storeInATempRoot();
-  t.after(() => rmSync(root, { recursive: true, force: true }));
+  t.after(() => {
+    // The store lets its directories go, and only then is the root removed: it
+    // holds a watch on each of them — that is how a piece closed by a muxer
+    // with no channel of its own becomes an event — and a directory with an
+    // open watch cannot be removed on Windows.
+    store.dropAll("the check is over");
+    rmSync(root, { recursive: true, force: true });
+  });
 
   const dir = path.join(root, directoryNameFor(KEY));
   mkdirSync(dir, { recursive: true });
@@ -169,7 +225,14 @@ test("what a killed process left is found, named and counted", (t) => {
 
 test("what survived a kill is taken back whole, minus what was still being written", (t) => {
   const { store, root } = storeInATempRoot();
-  t.after(() => rmSync(root, { recursive: true, force: true }));
+  t.after(() => {
+    // The store lets its directories go, and only then is the root removed: it
+    // holds a watch on each of them — that is how a piece closed by a muxer
+    // with no channel of its own becomes an event — and a directory with an
+    // open watch cannot be removed on Windows.
+    store.dropAll("the check is over");
+    rmSync(root, { recursive: true, force: true });
+  });
 
   const dir = path.join(root, directoryNameFor(KEY));
   mkdirSync(dir, { recursive: true });
@@ -195,7 +258,14 @@ test("what survived a kill is taken back whole, minus what was still being writt
 
 test("a directory that cannot name itself is thrown away rather than served", (t) => {
   const { store, root } = storeInATempRoot();
-  t.after(() => rmSync(root, { recursive: true, force: true }));
+  t.after(() => {
+    // The store lets its directories go, and only then is the root removed: it
+    // holds a watch on each of them — that is how a piece closed by a muxer
+    // with no channel of its own becomes an event — and a directory with an
+    // open watch cannot be removed on Windows.
+    store.dropAll("the check is over");
+    rmSync(root, { recursive: true, force: true });
+  });
 
   const orphan = path.join(root, "0123456789abcdef");
   mkdirSync(orphan, { recursive: true });
@@ -210,7 +280,14 @@ test("a directory that cannot name itself is thrown away rather than served", (t
 
 test("an output this proxy can no longer serve is thrown away too", (t) => {
   const { store, root } = storeInATempRoot();
-  t.after(() => rmSync(root, { recursive: true, force: true }));
+  t.after(() => {
+    // The store lets its directories go, and only then is the root removed: it
+    // holds a watch on each of them — that is how a piece closed by a muxer
+    // with no channel of its own becomes an event — and a directory with an
+    // open watch cannot be removed on Windows.
+    store.dropAll("the check is over");
+    rmSync(root, { recursive: true, force: true });
+  });
 
   const dir = path.join(root, directoryNameFor(KEY));
   mkdirSync(dir, { recursive: true });
@@ -225,7 +302,14 @@ test("an output this proxy can no longer serve is thrown away too", (t) => {
 
 test("what the store weighs is reported, and dropping one output frees it", (t) => {
   const { store, root } = storeInATempRoot();
-  t.after(() => rmSync(root, { recursive: true, force: true }));
+  t.after(() => {
+    // The store lets its directories go, and only then is the root removed: it
+    // holds a watch on each of them — that is how a piece closed by a muxer
+    // with no channel of its own becomes an event — and a directory with an
+    // open watch cannot be removed on Windows.
+    store.dropAll("the check is over");
+    rmSync(root, { recursive: true, force: true });
+  });
 
   const dir = store.directoryFor(KEY);
   store.useFormat(KEY, fmp4Format);

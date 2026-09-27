@@ -14,7 +14,8 @@ import { mkdtemp, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { wireOutputs } from "../services/server/wire-outputs.js";
-import { Viewer, viewerOf, viewersOf } from "../services/viewer/Viewer.js";
+import { Viewer } from "../services/viewer/Viewer.js";
+import { Viewers } from "../services/viewer/Viewers.js";
 import { outputSpec } from "./helpers/output-spec.js";
 
 const SESSION_ID = "aaaaaaaabbbbcccc";
@@ -87,14 +88,15 @@ test("a viewer who has stated nothing has a position and does not drift from it"
 });
 
 test("asking for a viewer twice is the same viewer", () => {
-  const session = {};
-  const first = viewerOf(session, "one");
+  const session = { id: "session" };
+  const viewers = new Viewers();
+  const first = viewers.of(session, "one");
   first.audio = { trackIndex: 3, transcode: false };
 
-  assert.equal(viewerOf(session, "one"), first);
-  assert.equal(viewerOf(session, "one").audio.trackIndex, 3);
-  assert.notEqual(viewerOf(session, "two"), first);
-  assert.equal(viewersOf(session).size, 2);
+  assert.equal(viewers.of(session, "one"), first);
+  assert.equal(viewers.of(session, "one").audio.trackIndex, 3);
+  assert.notEqual(viewers.of(session, "two"), first);
+  assert.equal(viewers.forOutput(session).size, 2);
 });
 
 test("releasing a consumer forgets everything that was true of them alone", async (t) => {
@@ -131,7 +133,7 @@ test("releasing a consumer forgets everything that was true of them alone", asyn
 
   await manager.lifecycle.releaseSessionConsumer(SESSION_ID, "leaving", "the tab was closed");
 
-  assert.equal(viewersOf(session).has("leaving"), false, "one deletion, not six");
-  assert.equal(viewersOf(session).has("staying"), true, "and it takes nobody else with it");
+  assert.equal(manager.viewers.forOutput(session).has("leaving"), false, "one deletion, not six");
+  assert.equal(manager.viewers.forOutput(session).has("staying"), true, "and it takes nobody else with it");
   assert.equal(manager.viewers.size, 1);
 });

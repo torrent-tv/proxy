@@ -53,7 +53,9 @@ import {
   declaredSubtitleTracksOf,
   forgetSubtitles
 } from "./services/media/SubtitleCues.js";
-import { detectVideoEncoder, benchmarkSoftwarePresets, benchmarkDecodeCost, benchmarkContention, benchmarkCopySpeed, detectTonemapSupport } from "./services/encode/hwaccel.js";
+import { detectVideoEncoder, benchmarkDecodeCost, benchmarkContention, benchmarkCopySpeed, detectTonemapSupport, softwareDescriptor } from "./services/encode/hwaccel.js";
+import { calibrateEncoder, HostCalibration } from "./services/encode/calibration.js";
+import { readHostFingerprint } from "./services/encode/fingerprint.js";
 import { measureStartAndStop } from "./services/encode/start-stop-cost.js";
 import { logger } from "./utils/logger.js";
 import { completedFilesRoot } from "./services/storage/files/CompletedFiles.js";
@@ -158,7 +160,7 @@ export async function startProxyServer({
   // Auto-detect the best available H.264 encoder (hardware-accelerated or
   // software) once at startup, with a real test-encode and graceful fallback.
   // Only needed when transcoding can occur.
-  const videoEncoder = transcodeAudio
+  let videoEncoder = transcodeAudio
     ? await detectVideoEncoder({ ffmpegBin, logger })
     : null;
   // WHAT THIS HOST DOES, measured before any viewer exists. Every one of these
@@ -181,12 +183,43 @@ export async function startProxyServer({
   const contentionPenalties = transcodeAudio
     ? await benchmarkContention({ ffmpegBin, logger })
     : null;
-  // The chosen encoder walked over its OWN speed ladder: libx264's presets,
-  // NVENC's p1…p7, QSV's veryfast…veryslow, VAAPI's quality levels. A kind with
-  // no ladder is measured once, which is still a reading where there was none.
-  const softwarePresetBenchmark = videoEncoder
-    ? await benchmarkSoftwarePresets({ ffmpegBin, logger, encoder: videoEncoder })
+  // WHICH MODES THIS HOST MAY ENCODE WITH, AND WHAT EACH COSTS AT EVERY SIZE
+  // (roadmap item 97, step 14). Every setting an output can actually be
+  // encoded at is put through the product's own arguments and its segments
+  // decoded, then timed at the sizes of the ladder; a mode that fails either is
+  // not used, and a size nothing was timed at is not offered. Software is
+  // calibrated too when detection chose a device: it is what a failing device
+  // falls back to for the rest of the process, and it must not be priced by
+  // the device's figures.
+  //
+  // And WHICH CONFIGURATION all of it describes — the ffmpeg and x264 builds,
+  // the processor and the threads, the device and its driver — which is what
+  // decides whether anything kept from an earlier run still applies.
+  const fingerprint = videoEncoder
+    ? await readHostFingerprint({ ffmpegBin, encoder: videoEncoder })
     : null;
+  /** @type {Record<string, object[]>} */
+  const calibratedModes = {};
+  if (videoEncoder) {
+    calibratedModes[videoEncoder.kind] =
+      (await calibrateEncoder({ ffmpegBin, encoder: videoEncoder, logger })).modes;
+    if (videoEncoder.kind !== "software") {
+      calibratedModes.software =
+        (await calibrateEncoder({ ffmpegBin, encoder: softwareDescriptor(), logger })).modes;
+      // A device that passed detection's own test and then none of whose modes
+      // passed the product's is not used: detection encodes a synthetic pattern
+      // with arguments of its own, and it is the product's arguments a viewer
+      // is served with.
+      if (calibratedModes[videoEncoder.kind].length === 0) {
+        logger.warn(
+          `calibration: ${videoEncoder.name} passed detection but none of its modes produced correct segments ` +
+          "through the product's own arguments; encoding in software instead"
+        );
+        videoEncoder = softwareDescriptor();
+      }
+    }
+  }
+  const calibration = videoEncoder ? new HostCalibration({ byKind: calibratedModes, fingerprint }) : null;
   // What this host does with a picture it does NOT re-encode. Every other
   // startup measurement prices encoding or decoding, and a copied picture does
   // neither — it reads packets and writes them out again — so that whole branch
@@ -389,7 +422,7 @@ export async function startProxyServer({
     localBindHost: host,
     localPort: selectedPort,
     videoEncoder,
-    softwarePresetBenchmark,
+    calibration,
     decodeCostModel,
     contentionPenalties,
     copySpeedX,
@@ -600,7 +633,7 @@ export async function startProxyServer({
       // So a session that has produced nothing yet can still show it is being
       // fed. The route knows only files; the session id rides on the URL the
       // session itself built.
-      noteInputBytes: (sessionId, bytes) => outputParts.viewerRequests.noteInputBytes(sessionId, bytes)
+      noteInputBytes: (sessionId, bytes) => outputParts.encodeRuns.noteInputBytes(sessionId, bytes)
     })
   );
   app.post("/api/transcode-sessions", async (req, reply) =>
@@ -618,7 +651,9 @@ export async function startProxyServer({
     // of viewers, and nothing about encoding.
     handleApiTranscodeSessionNetReportPost(req, reply, {
       outputs: outputParts.outputs,
-      viewers: outputParts.viewers
+      viewers: outputParts.viewers,
+      renditions: outputParts.renditions,
+      quality: outputParts.quality
     })
   );
   app.post("/api/transcode-sessions/:sessionId/fragment-far", async (req, reply) =>

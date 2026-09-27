@@ -114,7 +114,15 @@ function theWholeFilmIsOnDisk(store, dir) {
 
 test("a film that is entirely made needs no encoder", (t) => {
   const { made, store, dir, root } = orchestratorWithAStore();
-  t.after(() => rmSync(root, { recursive: true, force: true }));
+  t.after(() => {
+    // THE STORE LETS ITS DIRECTORIES GO, and only then is the root removed. It
+    // holds a watch on each of them — that is how a piece closed by a muxer
+    // with no channel of its own becomes an event — and a directory with an
+    // open watch on it cannot be removed on Windows: `rmSync` retries until it
+    // gives up, and the check reads as a hang.
+    store.dropAll("the check is over");
+    rmSync(root, { recursive: true, force: true });
+  });
 
   theWholeFilmIsOnDisk(store, dir);
   aViewerAtTheStart(made);
@@ -128,7 +136,15 @@ test("a film that is entirely made needs no encoder", (t) => {
 
 test("segments the store has lost stop being ready, and an encoder is placed again", (t) => {
   const { made, store, dir, root } = orchestratorWithAStore();
-  t.after(() => rmSync(root, { recursive: true, force: true }));
+  t.after(() => {
+    // THE STORE LETS ITS DIRECTORIES GO, and only then is the root removed. It
+    // holds a watch on each of them — that is how a piece closed by a muxer
+    // with no channel of its own becomes an event — and a directory with an
+    // open watch on it cannot be removed on Windows: `rmSync` retries until it
+    // gives up, and the check reads as a hang.
+    store.dropAll("the check is over");
+    rmSync(root, { recursive: true, force: true });
+  });
 
   theWholeFilmIsOnDisk(store, dir);
   aViewerAtTheStart(made);
@@ -151,7 +167,15 @@ test("segments the store has lost stop being ready, and an encoder is placed aga
 
 test("a piece discarded with the run that had it open is not ready either", (t) => {
   const { made, store, dir, root } = orchestratorWithAStore();
-  t.after(() => rmSync(root, { recursive: true, force: true }));
+  t.after(() => {
+    // THE STORE LETS ITS DIRECTORIES GO, and only then is the root removed. It
+    // holds a watch on each of them — that is how a piece closed by a muxer
+    // with no channel of its own becomes an event — and a directory with an
+    // open watch on it cannot be removed on Windows: `rmSync` retries until it
+    // gives up, and the check reads as a hang.
+    store.dropAll("the check is over");
+    rmSync(root, { recursive: true, force: true });
+  });
 
   theWholeFilmIsOnDisk(store, dir);
   aViewerAtTheStart(made);
@@ -169,8 +193,16 @@ test("a piece discarded with the run that had it open is not ready either", (t) 
 });
 
 test("nobody making what somebody waits for is said out loud", (t) => {
-  const { made, root, lines } = orchestratorWithAStore();
-  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const { made, store, root, lines } = orchestratorWithAStore();
+  t.after(() => {
+    // THE STORE LETS ITS DIRECTORIES GO, and only then is the root removed. It
+    // holds a watch on each of them — that is how a piece closed by a muxer
+    // with no channel of its own becomes an event — and a directory with an
+    // open watch on it cannot be removed on Windows: `rmSync` retries until it
+    // gives up, and the check reads as a hang.
+    store.dropAll("the check is over");
+    rmSync(root, { recursive: true, force: true });
+  });
 
   // A HOST THAT CANNOT BUILD AN ENCODER. Whatever the reason — and there are
   // several — the state it leaves is the one that cost two sessions on

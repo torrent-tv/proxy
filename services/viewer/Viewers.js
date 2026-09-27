@@ -13,9 +13,9 @@
  * That id is minted once per film opened in the page, so one id is one person
  * watching one film, and sharing the object cannot conflate two films.
  *
- * The relation "this person watches this output" is indexed both ways. The
- * viewer layer holds viewers by output in a `WeakMap`, and each viewer holds
- * output ids. Both indexes are written here and nowhere else in production.
+ * The relation "this person watches this output" is stored once, as output ids
+ * on the viewer. Queries in the opposite direction scan the small viewer
+ * registry instead of maintaining a second value that can disagree.
  *
  * **Every change here announces itself.** What encoders should exist is decided
  * from what viewers want, so a viewer arriving, moving or leaving is a change
@@ -27,13 +27,12 @@
  * happened.
  */
 
-import { Viewer, viewersOf } from "./Viewer.js";
+import { Viewer } from "./Viewer.js";
 
 export class Viewers {
   /**
-   * One object per named viewer. An unnamed one is not in here: a viewer that
-   * cannot say who it is is not the same viewer as another that cannot, so it
-   * belongs to the output that met it and to no one else.
+   * One object per viewer, by name. Every viewer has one: a request that names
+   * nobody makes no viewer (see `of`).
    *
    * @type {Map<string, Viewer>}
    */
@@ -54,20 +53,27 @@ export class Viewers {
   /**
    * This viewer, watching this output.
    *
-   * Both directions of the relation are written here. Asking for a viewer of an
-   * output IS the statement that they are watching it: every caller either
+   * Asking for a viewer of an output IS the statement that they are watching
+   * it: every caller either
    * records where they are, what they chose, or what is being prepared for
    * them, and each of those is only true of somebody watching. It is also
    * evidence that they are still there, so it refreshes presence.
    *
+   * A VIEWER HAS A NAME, always. A request that names nobody states nothing
+   * about anybody and makes no viewer: a viewer without a name used to belong
+   * to whichever output met it, so the same person was a different object on
+   * each output, and two nameless people on one output were one object.
+   *
    * @param {object} output
-   * @param {string} consumerId
+   * @param {string} consumerId - Required, non-empty.
    * @param {number} [now]
    * @returns {Viewer}
    */
   of(output, consumerId, now = Date.now()) {
-    const viewers = viewersOf(output);
-    const known = viewers.get(consumerId);
+    if (typeof consumerId !== "string" || consumerId.length === 0) {
+      throw new TypeError(`a viewer of ${output?.id ?? "an output"} needs a name`);
+    }
+    const known = this.getForOutput(output, consumerId);
     if (known) {
       known.seen(now);
       // Asking again is not a return from the dead, but it IS evidence, and a
@@ -80,15 +86,10 @@ export class Viewers {
       }
       return known;
     }
-    const viewer = consumerId
-      ? this.#byId.get(consumerId) ?? new Viewer(consumerId, now)
-      : new Viewer("", now);
+    const viewer = this.#byId.get(consumerId) ?? new Viewer(consumerId, now);
     viewer.seen(now);
     viewer.gone = false;
-    if (consumerId) {
-      this.#byId.set(consumerId, viewer);
-    }
-    viewers.set(consumerId, viewer);
+    this.#byId.set(consumerId, viewer);
     viewer.outputs.add(output.id);
     this.#onChange();
     return viewer;
@@ -106,47 +107,148 @@ export class Viewers {
   }
 
   /**
+   * A viewer of one output, without creating one.
+   *
+   * @param {object} output
+   * @param {string} consumerId
+   * @returns {Viewer | null}
+   */
+  getForOutput(output, consumerId) {
+    if (!output || !consumerId) return null;
+    const viewer = this.#byId.get(consumerId);
+    return viewer?.outputs.has(output.id) ? viewer : null;
+  }
+
+  /**
+   * A derived view of who watches one output. The stored relation exists only
+   * in `Viewer.outputs`.
+   *
+   * @param {object} output
+   * @returns {Map<string, Viewer>}
+   */
+  forOutput(output) {
+    const found = new Map();
+    for (const [consumerId, viewer] of this.#byId) {
+      if (viewer.outputs.has(output.id)) found.set(consumerId, viewer);
+    }
+    return found;
+  }
+
+  /**
+   * Whether anything still stands on this output.
+   *
+   * TWO REASONS, AND THE SECOND IS WHY THIS EXISTS. Somebody watching it is the
+   * obvious one. The other is an assignment: a response already begun is still
+   * being sent from this output, or a request made moments ago may still be
+   * repeated and must be answered by whatever answered it the first time. Both
+   * outlive the instant a viewer stops being registered on the output, and a
+   * disposal that asked only the first would take the output away while its
+   * bytes were going out.
+   *
+   * Asked BEFORE an output is let go, which is the whole point: the standing
+   * assignments were otherwise discovered afterwards, as a request for a
+   * segment of something that no longer exists.
+   *
+   * @param {object} output
+   * @param {number} [now]
+   * @returns {boolean}
+   */
+  stillNeeded(output, now = Date.now()) {
+    if (!output) {
+      return false;
+    }
+    return this.forOutput(output).size > 0 || this.assignmentsHold(output, now);
+  }
+
+  /**
+   * Whether an assignment of anybody's holds this output: a response still
+   * being sent from it, or a request that may still be repeated and must be
+   * answered by it.
+   *
+   * The second half of {@link stillNeeded}, asked on its own where presence is
+   * NOT the question. Expiry after a long idle is that place: an output a paused
+   * viewer is registered on still goes when it has not been read for the whole
+   * keeping period — that is roadmap item 75's decision, not this one's — but
+   * it does not go while its bytes are going out.
+   *
+   * @param {object} output
+   * @param {number} [now]
+   * @returns {boolean}
+   */
+  assignmentsHold(output, now = Date.now()) {
+    const key = output?.outputKey ?? "";
+    if (!key) {
+      return false;
+    }
+    for (const viewer of this.#byId.values()) {
+      if (viewer.assignments.heldKeys(now).has(key)) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  /**
+   * Every output a present viewer is being prepared onto, as ids: a step being
+   * warmed for them, and an output of another limit of the height on their
+   * screen.
+   *
+   * Read by the machine-wide admission as the places preparations hold. A
+   * projection of the viewers' own records and nothing kept beside them, so a
+   * place ends with the record that holds it, on whichever path that record is
+   * cleared.
+   *
+   * @returns {Set<string>}
+   */
+  outputsBeingPrepared() {
+    const ids = new Set();
+    for (const viewer of this.#byId.values()) {
+      if (!viewer.isPresent()) {
+        continue;
+      }
+      if (viewer.warmingVariantId) {
+        ids.add(viewer.warmingVariantId);
+      }
+      if (viewer.sameHeightSwitch?.outputId) {
+        ids.add(viewer.sameHeightSwitch.outputId);
+      }
+    }
+    return ids;
+  }
+
+  /**
    * The outputs this viewer is watching, as ids, copied so that leaving them
    * can be walked without mutating what is being walked.
    *
-   * @param {object} anyOutput - An output they are known to, for an unnamed
-   *   viewer whose record is indexed by that output alone.
    * @param {string} consumerId
    * @returns {string[]}
    */
-  watching(anyOutput, consumerId) {
-    const viewer = consumerId
-      ? this.#byId.get(consumerId)
-      : viewersOf(anyOutput).get("");
+  watching(consumerId) {
+    const viewer = consumerId ? this.#byId.get(consumerId) : null;
     return viewer ? [...viewer.outputs] : [];
   }
 
   /**
    * This viewer is no longer watching this output.
    *
-   * Both directions again, and the viewer itself is forgotten once it is
-   * watching nothing — otherwise the registry would be a map that only grows,
-   * which is the shape of half the memory faults recorded in this repository.
+   * The viewer itself is forgotten once it is watching nothing — otherwise the
+   * registry would be a map that only grows.
    *
    * @param {object} output
    * @param {string} consumerId
    * @returns {boolean} Whether they were watching it.
    */
   leaves(output, consumerId) {
-    const viewers = viewersOf(output);
-    const viewer = viewers.get(consumerId);
+    const viewer = this.getForOutput(output, consumerId);
     if (!viewer) {
       return false;
     }
-    viewers.delete(consumerId);
     viewer.outputs.delete(output.id);
     if (viewer.outputs.size === 0) {
       // Watching nothing at all: this is a statement that they are gone, and
       // not merely that this one output is no longer theirs.
-      viewer.gone = true;
-      if (consumerId) {
-        this.#byId.delete(consumerId);
-      }
+      viewer.markGone();
+      this.#byId.delete(consumerId);
     }
     this.#onChange();
     return true;
@@ -161,27 +263,36 @@ export class Viewers {
    * happens to hold an id for. This is the door that fact comes through.
    *
    * @param {string} consumerId
-   * @param {(outputId: string) => object | null} outputById - How to find an
-   *   output by id. The registry holds ids, not outputs.
    * @returns {string[]} The outputs they were watching.
    */
-  hasGone(consumerId, outputById) {
+  hasGone(consumerId) {
     const viewer = consumerId ? this.#byId.get(consumerId) : null;
     if (!viewer) {
       return [];
     }
     const left = [...viewer.outputs];
-    for (const outputId of left) {
-      const output = typeof outputById === "function" ? outputById(outputId) : null;
-      if (output) {
-        viewersOf(output).delete(consumerId);
-      }
-    }
     viewer.outputs.clear();
-    viewer.gone = true;
+    viewer.markGone();
     this.#byId.delete(consumerId);
     this.#onChange();
     return left;
+  }
+
+  /**
+   * Remove a disposed output from every viewer.
+   *
+   * @param {string} outputId
+   */
+  outputGone(outputId) {
+    for (const [consumerId, viewer] of this.#byId) {
+      if (!viewer.outputs.delete(outputId)) continue;
+      if (viewer.activeVariantId === outputId) viewer.activeVariantId = null;
+      if (viewer.outputs.size === 0) {
+        viewer.markGone();
+        this.#byId.delete(consumerId);
+      }
+    }
+    this.#onChange();
   }
 
   /**

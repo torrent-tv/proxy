@@ -8,11 +8,7 @@
  */
 
 import { logger } from "../../utils/logger.js";
-import { resolveSegmentFormat, SEGMENT_FORMAT_IDS } from "../encode/segment-formats/index.js";
-import { isOutputName, OutputSpec } from "../encode/output/index.js";
-import { viewersOf } from "../viewer/Viewer.js";
-import { viewerSegmentsOn } from "../viewer/positions.js";
-import { variantConsumerId, isFamilyConsumerId } from "../encode/Renditions.js";
+import { isOutputName } from "../encode/output/index.js";
 import { IDLE_KEEP_MS } from "../storage/keep.js";
 /**
  * How long produced segments are kept after the last request for them.
@@ -61,11 +57,14 @@ function hasChildExited(child) {
 }
 
 export class OutputLifecycle {
+  /** Whether a room check is already queued for this turn. */
+  #roomCheckQueued = false;
+
   /** What this reads and asks of the rest of the proxy, and nothing else. @type {object} */
   #host;
 
   /**
-   * @param {object} host - `budgetTimer`, `cleanupTimer`, `encodeRuns`, `keyframeTables`, `machineBudget`, `outputTimes`, `outputs`, `returns`, `segmentStore`, `sessionTtlMs`, `sourceFiles`, `timelines`, `viewers`
+   * @param {object} host - `invalidateWaits`, `segmentFormatOfKey`, `viewerSegmentsOn`, `budgetTimer`, `cleanupTimer`, `encodeRuns`, `keyframeTables`, `machineBudget`, `outputTimes`, `outputs`, `returns`, `segmentStore`, `sessionTtlMs`, `sourceFiles`, `timelines`, `viewers`
    */
   constructor(host) {
     this.#host = host;
@@ -82,6 +81,7 @@ export class OutputLifecycle {
     if (!session) {
       return;
     }
+    this.#host.invalidateWaits(session);
     this.#host.outputs.delete(sessionId);
     this.#host.outputTimes.logIndexAccuracy(session);
 
@@ -102,17 +102,10 @@ export class OutputLifecycle {
     // request builds one. What does have to be forgotten is what a VIEWER was
     // watching, because their next request would resolve a session that no
     // longer exists.
-    for (const [consumerId] of [...viewersOf(session)]) {
+    for (const [consumerId] of [...this.#host.viewers.forOutput(session)]) {
       this.viewerLeaves(session, consumerId);
     }
-    for (const other of this.#host.outputs.familyOf(session)) {
-      for (const viewer of viewersOf(other).values()) {
-        viewer.outputs.delete(session.id);
-        if (viewer.activeVariantId === session.id) {
-          viewer.activeVariantId = null;
-        }
-      }
-    }
+    this.#host.viewers.outputGone(session.id);
 
     // Whether the process is still RUNNING, not whether anyone has called kill
     // on it: `.killed` means only that a signal was sent, and a run that ended
@@ -154,6 +147,17 @@ export class OutputLifecycle {
   async cleanupExpired() {
     const idsToDispose = this.#host.outputs.expiredBefore(Date.now() - this.#host.sessionTtlMs);
     for (const sessionId of idsToDispose) {
+      // ASSIGNMENTS ONLY, NOT PRESENCE. An output nobody has read for the whole
+      // idle period goes even when a paused viewer is still registered on it —
+      // whether a pause should hold it longer is roadmap item 75's question, and
+      // asking `stillNeeded` here would answer it by accident. What must not
+      // happen is taking the output away while a response is still being sent
+      // from it, or while a request made against it may still be repeated.
+      const output = this.#host.outputs.get(sessionId);
+      if (output && this.#host.viewers.assignmentsHold(output)) {
+        logger.info(`transcode ${sessionId} idle past its time, kept: assignments still hold it`);
+        continue;
+      }
       await this.disposeSession(sessionId);
     }
     // A timeline nobody is reading any more. It is small — two arrays of a few
@@ -194,16 +198,42 @@ export class OutputLifecycle {
     if (returns !== null) {
       logger.info(returns);
     }
+    this.keepWithinRoom();
+  }
+
+  /**
+   * Keep the produced segments within the share of the disk they are given,
+   * removing what the viewers want least, and drop what nobody has read for
+   * the keeping period.
+   *
+   * Asked when a segment is published — that is the moment the store grows —
+   * and on the cleanup pass, which is what notices time passing. Asked only on
+   * the timer, the store could run past its share by half a minute of encoding.
+   *
+   * @returns {void}
+   */
+  keepWithinRoom() {
     this.#host.segmentStore.enforce({
       idleMs: SEGMENT_STORE_IDLE_MS,
       maxBytes: this.#host.machineBudget.segmentBytes(),
-      viewersAt: (key) =>
-        viewerSegmentsOn({
-          outputs: this.#host.outputs.values(),
-          outputKey: key,
-          segmentAt: (session, seconds) => this.#host.outputTimes.segmentIndexForTime(session, seconds),
-          now: Date.now(),
-        })
+      viewersAt: (key) => this.#host.viewerSegmentsOn(key)
+    });
+  }
+
+  /**
+   * {@link keepWithinRoom} once for a burst of publications: several outputs
+   * closing a segment in the same turn ask once.
+   *
+   * @returns {void}
+   */
+  keepWithinRoomSoon() {
+    if (this.#roomCheckQueued) {
+      return;
+    }
+    this.#roomCheckQueued = true;
+    setImmediate(() => {
+      this.#roomCheckQueued = false;
+      this.keepWithinRoom();
     });
   }
 
@@ -241,15 +271,9 @@ export class OutputLifecycle {
    * @returns {{ adopted: number, dropped: number, unprovenRemoved: number }}
    */
   adoptSegmentsLeftBehind() {
-    return this.#host.segmentStore.adoptWhatSurvived((key) => {
-      // Which container the segments are in is stated by the key itself, so a
-      // directory can be read back without any record kept elsewhere. A key in
-      // a shape this version does not write — one naming the box a viewer
-      // asked for rather than the format produced — cannot say what format is
-      // inside, and the directory goes.
-      const stated = OutputSpec.fromKey(key)?.segmentFormatId ?? "";
-      return SEGMENT_FORMAT_IDS.includes(stated) ? resolveSegmentFormat(stated) : null;
-    });
+    // Which container the segments are in is stated by the key itself; a key
+    // that cannot say is a directory that goes (`encode/output-key-format.js`).
+    return this.#host.segmentStore.adoptWhatSurvived((key) => this.#host.segmentFormatOfKey(key));
   }
 
   /**
@@ -269,27 +293,21 @@ export class OutputLifecycle {
     if (!session) {
       return false;
     }
-    const internalClaim = isFamilyConsumerId(consumerId);
-    if (internalClaim) {
-      session.claims?.delete(consumerId);
-    }
     // And everything that was true of them alone, in EVERY output of this film
     // they were watching — not only in the one the browser addresses. A viewer
     // watches a picture, a quality step and a soundtrack; the browser knows one
     // id of the three, so subtracting them here from that one left them counted
     // as watching the other two. This is the half of the relation the viewer
     // holds, and it exists for exactly this question.
-    if (!internalClaim) {
-      for (const outputId of this.#host.viewers.watching(session, consumerId)) {
-        const output = this.#host.outputs.get(outputId);
-        if (output) {
-          this.viewerLeaves(output, consumerId);
-        }
+    for (const outputId of this.#host.viewers.watching(consumerId)) {
+      const output = this.#host.outputs.get(outputId);
+      if (output) {
+        this.viewerLeaves(output, consumerId);
       }
-      this.viewerLeaves(session, consumerId);
     }
+    this.viewerLeaves(session, consumerId);
     this.#host.outputs.touch(session);
-    const remaining = viewersOf(session).size + (session.claims?.size ?? 0);
+    const remaining = this.#host.viewers.forOutput(session).size;
     const logReason = typeof reason === "string" && reason.length > 0 ? reason : "unspecified";
     logger.info(
       `consumer released (${logReason}) session=${session.id} consumer=${consumerId} ` +
@@ -301,7 +319,21 @@ export class OutputLifecycle {
     // Read before the picture goes, because a family is found through the file
     // the sessions share and a disposed session is no longer among them.
     const family = this.#host.outputs.familyOf(session).filter((other) => other !== session);
-    await this.disposeSession(sessionId);
+    // Nobody is watching it, but that is only half of whether it is needed: a
+    // response already begun is still being sent from it, and another viewer's
+    // request made against it moments ago may still be repeated. The same
+    // question every other disposal asks, asked here too — this was the one
+    // ordinary release that did not. Kept, it goes by the idle expiry once the
+    // assignments lapse; its steps and soundtracks are still asked below, each
+    // on its own, because this picture being held says nothing about them.
+    if (this.#host.viewers.stillNeeded(session)) {
+      logger.info(
+        `transcode ${session.id} kept after its last viewer left: assignments still hold it ` +
+        `(it goes by the idle expiry once they lapse)`
+      );
+    } else {
+      await this.disposeSession(sessionId);
+    }
     // The quality steps and the soundtracks this picture had made. Nobody
     // outside this class knows their ids — the browser holds one id for the
     // whole film — so nothing else can ever let go of them, and each holds a
@@ -312,22 +344,19 @@ export class OutputLifecycle {
     // The rule is the viewers and not the picture: an output with somebody
     // still watching stays, whoever made it. That is what makes this different
     // from the chain of links it replaced — a picture ending is not what kills
-    // a soundtrack; having no listeners is.
-    const familyConsumer = variantConsumerId(session.id);
+    // a soundtrack; having no listeners is. Whether anybody is left is asked of
+    // the viewer registry alone: the family's own made-up claim on what it made
+    // was a second answer to that question and is gone. What an output
+    // produced stays in the segment store under its key, so disposing it here
+    // loses no made segment.
     for (const output of family) {
-      if (
-        !this.#host.outputs.has(output.id) ||
-        viewersOf(output).size > 0 ||
-        !(output.claims instanceof Set) ||
-        !output.claims.has(familyConsumer)
-      ) {
+      if (!this.#host.outputs.has(output.id) || this.#host.viewers.stillNeeded(output)) {
         continue;
       }
-      await this.releaseSessionConsumer(
-        output.id,
-        familyConsumer,
-        "nobody is watching it and the picture it was made for has ended"
+      logger.info(
+        `transcode ${output.id} disposed: nobody is watching it and the picture it belongs to has ended`
       );
+      await this.disposeSession(output.id);
     }
     return true;
   }
@@ -368,13 +397,9 @@ export class OutputLifecycle {
   /**
    * This viewer is no longer watching this output.
    *
-   * Both directions of the relation go together — the output forgets the
-   * viewer, the viewer forgets the output — and so does the claim their
-   * watching had placed on production. That last part is why this is a method
-   * and not a line: the ONLY place a claim is released is the plan's pass over
-   * `viewersOf(session)` (`#planEncoding`), so a viewer deleted from that map
-   * by any other route leaves a claim nothing can ever release, and the plan
-   * goes on making segments for somebody who has gone.
+   * The relation is removed from `Viewer.outputs`, its only stored form. The
+   * next plan derives who still watches the output from that set, so production
+   * no longer contains a claim for this viewer.
    *
    * @param {HlsSession} output
    * @param {string} consumerId

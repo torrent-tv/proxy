@@ -45,7 +45,7 @@ const HERE = path.dirname(fileURLToPath(import.meta.url));
 const PROXY = path.join(HERE, "..");
 const SESSION_ID = "aaaaaaaabbbbcccc";
 /** The components the HTTP layer is handed. */
-const COMPONENTS = ["serving", "viewerRequests", "renditions", "lifecycle", "quality", "outputs", "hostTimings", "viewers"];
+const COMPONENTS = ["serving", "viewerRequests", "renditions", "lifecycle", "quality", "outputs", "hostTimings", "viewers", "encodeRuns"];
 
 /**
  * Every `.js` file under a directory, at any depth.
@@ -139,14 +139,6 @@ function fakeSession({ id = SESSION_ID } = {}) {
     transcodeAudio: true,
     audioTrackIndex: 0,
     audioSourceTrackIndex: 0,
-    createEntryMs: Date.now(),
-    ffmpeg: null,
-    lastError: "",
-    claims: new Set(),
-    encodeRunGeneration: 0,
-    encodeStartIndex: 0,
-    requestSeqCounter: 0,
-    waitEpoch: 0,
     useSyntheticPlaylist: true,
     playlistText: "#EXTM3U\n",
     segmentCount: 10,
@@ -222,9 +214,6 @@ test("what a viewer states about themselves is kept and answered", () => {
   // Nine public members had no test of any kind before the dismantling began,
   // and six of them are the viewer's own facts — the ones that move into
   // `viewer/`. They are cheap to state and were simply never stated.
-  const first = manager.serving.nextRequestSeq(SESSION_ID);
-  const second = manager.serving.nextRequestSeq(SESSION_ID);
-  assert.ok(second > first, "each request is told apart from the one before it");
 
   // A SEEK DOES ONE THING: it puts the viewer where they now are. Recorded
   // here because it used to do eleven, and because the one remaining effect is
@@ -240,9 +229,13 @@ test("what a viewer states about themselves is kept and answered", () => {
   assert.equal(manager.serving.seekEpoch(SESSION_ID), 0, "a seek leaves the wait epoch alone");
   assert.equal(manager.serving.seekEpoch("no-such-session"), 0);
 
-  manager.viewerRequests.noteInputBytes(SESSION_ID, 4096);
-  manager.viewerRequests.noteInputBytes(SESSION_ID, 1024);
-  assert.equal(manager.outputs.get(SESSION_ID).inputBytes, 5120, "input bytes accumulate");
+  manager.encodeRuns.noteInputBytes(SESSION_ID, 4096);
+  manager.encodeRuns.noteInputBytes(SESSION_ID, 1024);
+  assert.equal(
+    manager.encodeRuns.inputBytesOf(manager.outputs.get(SESSION_ID)),
+    5120,
+    "input bytes accumulate at their owner"
+  );
 
   // A far fragment is a reading and must never throw, whatever the player says.
   manager.serving.recordFragmentFar(SESSION_ID, {

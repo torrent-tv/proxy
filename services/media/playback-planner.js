@@ -49,6 +49,18 @@ const TEXT_SUBTITLE_CODECS = new Set(["subrip", "srt", "ass", "ssa", "webvtt", "
  * @param {string} ffmpegOutput
  * @returns {Array<{ streamIndex: number, type: string, codec: string, language: string, title: string, isDefault: boolean }>}
  */
+/**
+ * The bitrate a stream line states for that stream, in kbit/s, or null.
+ *
+ * @param {string} line
+ * @returns {number | null}
+ */
+function kbpsFromStreamLine(line) {
+  const match = line.match(/,\s*(\d+)\s*kb\/s/);
+  const kbps = match ? Number(match[1]) : Number.NaN;
+  return Number.isFinite(kbps) && kbps > 0 ? kbps : null;
+}
+
 function parseStreams(ffmpegOutput) {
   // Only the Input section: ffmpeg prints Stream lines for the null OUTPUT
   // too (wrapped_avframe / pcm_s16le), which would duplicate every track.
@@ -67,12 +79,21 @@ function parseStreams(ffmpegOutput) {
         codec: String(streamMatch[4]).toLowerCase(),
         language: (streamMatch[2] ?? "").toLowerCase(),
         title: "",
-        isDefault: /\(default\)/.test(line)
+        isDefault: /\(default\)/.test(line),
+        // What the stream line states for THIS stream, e.g. "…, 128 kb/s". A
+        // Matroska stream usually states none here and carries its rate as a
+        // statistics tag instead (`BPS`, read below). Never the file's total.
+        bitrateKbps: kbpsFromStreamLine(line)
       };
       streams.push(current);
       continue;
     }
     if (current) {
+      const bpsMatch = line.match(/^\s+BPS(?:-[A-Za-z]+)?\s*:\s*(\d+)\s*$/);
+      if (bpsMatch && current.bitrateKbps === null) {
+        current.bitrateKbps = Math.round(Number(bpsMatch[1]) / 1000);
+        continue;
+      }
       const titleMatch = line.match(/^\s+title\s*:\s*(.+)$/);
       if (titleMatch && current.title.length === 0) {
         current.title = titleMatch[1].trim();
@@ -93,7 +114,7 @@ function parseStreams(ffmpegOutput) {
  * @param {string} ffmpegOutput
  * @returns {{ audioCodec: string, videoCodec: string }}
  */
-function parseStreamCodecs(ffmpegOutput) {
+export function parseStreamCodecs(ffmpegOutput) {
   const audioMatch = ffmpegOutput.match(/Audio:\s*([A-Za-z0-9_]+)/i);
   const videoMatch = ffmpegOutput.match(/Video:\s*([A-Za-z0-9_]+)/i);
   // Coded resolution from the video Stream line ("Video: h264 …, 1280x720, …").
@@ -126,7 +147,8 @@ function parseStreamCodecs(ffmpegOutput) {
       codec: s.codec,
       language: s.language,
       title: s.title,
-      isDefault: s.isDefault
+      isDefault: s.isDefault,
+      bitrateKbps: s.bitrateKbps
     }));
   const subtitleTracks = streams
     .filter((s) => s.type === "subtitle")
@@ -516,7 +538,12 @@ export function createPlaybackPlanner({
       offeredHeights: plan.mediaInfoForOffer
         ? (predictOfferedHeights?.(plan.mediaInfoForOffer) ?? null)
         : null,
-      mediaInfoForOffer: undefined
+      // The description the rest of the pool answers by arithmetic. Carried
+      // on every plan, not only on a refusal here: the output opened next can
+      // still be refused for want of a place on this machine (roadmap item 97,
+      // step 14), and the page then asks the pool the same question before
+      // anything plays — which it can only do with this in hand.
+      mediaInfoForOffer: plan.mediaInfoForOffer
     };
     // Refused rather than served badly. Both lists empty means this machine
     // cannot sustain this file at ANY height — not even by copying the picture,
@@ -530,13 +557,12 @@ export function createPlaybackPlanner({
     if (offer && offer.copy.length === 0 && offer.transcode.length === 0) {
       withOffer.cannotServe =
         "This proxy cannot keep up with this file at any quality right now.";
-      // The description travels with the refusal, and only with it. It is what
-      // lets the browser ask the rest of the pool the same question without
-      // anybody else adding the torrent, fetching a byte or running ffmpeg —
-      // the expensive half of finding out what this file IS has been paid here,
+      // The description travels with the plan (above). It is what lets the
+      // browser ask the rest of the pool the same question without anybody
+      // else adding the torrent, fetching a byte or running ffmpeg — the
+      // expensive half of finding out what this file IS has been paid here,
       // once. Everyone else answers by arithmetic against their own startup
       // benchmarks.
-      withOffer.mediaInfoForOffer = plan.mediaInfoForOffer;
     }
     return withOffer;
   }

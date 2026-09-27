@@ -77,7 +77,7 @@ test("an encoder is stopped for scheduling reasons in exactly one place", () => 
     "an output's end stops its runs, and nothing else there does: " + stopsAtTeardown.join(" / ")
   );
   // And the runs themselves stop one for a stated reason in one place, which is
-  // what a changed bitrate cap and a corrected cut table ask through.
+  // what a corrected cut table asks through.
   const runs = statements(source("services/encode/EncodeRuns.js"));
   assert.equal(runs.filter((line) => line.includes(".stop(")).length, 1);
 });
@@ -232,21 +232,6 @@ test("where a soundtrack begins is read off the table, not handed in", () => {
     manager.includes("this.#startEncodeRun(member, index, trueStart)"),
     false,
     "and not carried in from the correction that measured it"
-  );
-});
-
-test("a changed bitrate cap stops the encoder carrying the old one and nothing more", () => {
-  // An argument list is fixed when a process starts, so a run carrying the
-  // previous cap cannot be told about the new one — that is what is known here.
-  // Where the replacement stands is a different question, and the old answer to
-  // it was neither where a viewer is nor a gap in the material: it was the
-  // segment the process being replaced happened to have reached.
-  const manager = everything();
-  assert.equal(manager.includes("#restartAtViewer"), false, "the second answer is gone");
-  assert.match(
-    source("services/encode/quality/QualityController.js"),
-    /#reencodeAtNewRate\(session\) \{\s*\n\s*this\.#host\.stopEncodeRun\(session, "its bitrate cap changed"\);\s*\n\s*this\.#host\.planEncodersSoon\(\);\s*\n\s*\}/,
-    "stopped, and then decided again"
   );
 });
 

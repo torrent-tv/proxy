@@ -188,15 +188,22 @@ test("an observation prices a host whose clips were never fitted", () => {
   assert.ok(priced.speed < 1, `priced ${priced.speed?.toFixed(2)}x`);
 });
 
-test("nothing measured means nothing refused", () => {
-  const verdict = canSustainOutput({
+test("not calibrated means nothing judged; calibrated with nothing qualified means refused", () => {
+  const uncalibrated = canSustainOutput({
+    benchmark: null,
+    decodeModel: null,
+    source: null,
+    outputPixelsPerSec: 1920 * 1080 * 24
+  });
+  assert.deepEqual(uncalibrated, { speed: null, sustainable: true });
+
+  const nothingQualified = canSustainOutput({
     benchmark: [],
     decodeModel: null,
     source: null,
     outputPixelsPerSec: 1920 * 1080 * 24
   });
-
-  assert.deepEqual(verdict, { speed: null, sustainable: true });
+  assert.deepEqual(nothingQualified, { speed: null, sustainable: false });
 });
 
 test("a real ffmpeg banner reads into the figures the budget prices", async () => {

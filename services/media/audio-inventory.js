@@ -56,6 +56,7 @@ import { AudioTrack } from "./tracks/AudioTrack.js";
  * @property {boolean} isVisualImpaired
  * @property {boolean} isEnabled
  * @property {number | null} channels
+ * @property {number | null} bitrateKbps - The rate the file states for this track; an average, not a bound.
  * @property {string} fileName - For a sidecar: its own file name. "" otherwise.
  * @property {string[]} folders - For a sidecar: the folders above it, relative
  *   to the torrent root. What the browser reads a language and a releaser from.
@@ -105,6 +106,11 @@ export function buildAudioInventory({ embedded, videoFileIndex, sidecars }) {
       isVisualImpaired: track?.isVisualImpaired === true,
       isEnabled: track?.isEnabled !== false,
       channels: Number.isFinite(track?.channels) ? track.channels : null,
+      // The rate the file STATES for this track, in kbit/s — an average, not a
+      // bound — or null where nothing states one (a sidecar read from its
+      // container table, a Matroska stream without statistics tags). What a
+      // viewer's link is asked to carry for a copied soundtrack is this.
+      bitrateKbps: Number.isFinite(track?.bitrateKbps) && track.bitrateKbps > 0 ? track.bitrateKbps : null,
       fileName: kind === "sidecar" ? (file?.name ?? "") : "",
       folders: kind === "sidecar" && Array.isArray(file?.folders) ? file.folders : [],
       // What the file's own path says, for a track that ships as its own file:

@@ -75,7 +75,7 @@ test("a viewer who has gone is no longer listed", () => {
   viewers.of(picture, "alice");
   viewers.wantsCues("alice", "src-1", 3);
 
-  viewers.hasGone("alice", (id) => (id === "picture" ? picture : null));
+  viewers.hasGone("alice");
 
   assert.deepEqual(viewers.wantingCues("src-1", 3), []);
 });

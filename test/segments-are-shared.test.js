@@ -65,7 +65,6 @@ function sessionOn({ id, dirPath, outputKey }) {
     segmentFormat: fmp4Format,
     // Where the file is cut, which every live session holds.
     timeline: new Timeline({ boundaries: [0, 4, 8], cutGrid: "keyframe" }),
-    claims: new Set(),
     lastAccessedAt: Date.now()
   };
 }

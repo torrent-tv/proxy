@@ -69,7 +69,7 @@ stateDiagram-v2
 ## What each state answers
 
 Outputs depend on the state alone — computed here by calling the same
-functions the session manager calls.
+functions the encoding component (`EncodeRuns`) calls.
 
 | state | reads its input | can be signalled | a missing segment | on the wire | may restart |
 |---|---|---|---|---|---|

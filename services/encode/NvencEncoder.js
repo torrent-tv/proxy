@@ -27,6 +27,11 @@ export class NvencEncoder extends Encoder {
     };
   }
 
+  /** The one setting `buildVideoArgs` passes. */
+  get selectableRungs() {
+    return ["p4"];
+  }
+
   // No fps filter: NVENC is fast and places keyframes by time-based
   // -force_key_frames, so it inherits the exact source rate (fractional
   // included) with no need to round or cap. Same rationale as VAAPI/QSV.

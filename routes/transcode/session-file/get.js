@@ -2,26 +2,18 @@ import { logger } from "../../../utils/logger.js";
 import { bandOf, waits } from "../../../services/viewer/WaitLedger.js";
 
 /**
- * How long a request for a not-yet-produced file is held before answering with
- * a retryable 503.
+ * How long a request for a file not yet produced is held: AS LONG AS THE
+ * REQUESTER SAYS IT WILL WAIT, and no longer than it stays.
  *
- * MEASUREMENT MODE (2026-08-02): deliberately far above any plausible player
- * deadline, so OUR limit never fires first. Whatever ends the wait is then the
- * player's own behaviour — which is exactly what we need to observe. The
- * `[hold]` log line at the call site records, per request, whether the segment
- * arrived, whether we gave up, or whether the CLIENT aborted, and after how
- * long.
- *
- * The previous value (2 s) was chosen to dodge a reported iOS AVPlayer ~3.5 s
- * response-header deadline. That deadline never appears in our own logs (no
- * -12889 across six hours of production logs), and every reference project
- * holds rather than refusing: Jellyfin and hls-vod-too hold unbounded,
- * hls-media-server holds 10 s. The early refusal is what made the player probe
- * scattered positions, which then steered the encoder off target. Choose the
- * final value from what this measurement shows, not from a number read
- * elsewhere.
+ * The patience is the requester's. It used to be a figure of this route's own,
+ * 60 s, beside the page's own 60 s — two chosen numbers that happened to agree,
+ * so the "retry" this route sent at its deadline reached a page that had given
+ * up at the same instant. The page now states how long it will hold the answer
+ * open (`X-Hold-Ms`, its own deadline less the round trip it has measured), and
+ * this route answers by then. A requester that states nothing is held until it
+ * closes the connection, which every HTTP client does when it stops waiting.
  */
-const SEGMENT_WAIT_MS = 60_000;
+const HOLD_HEADER = "x-hold-ms";
 
 /**
  * Serve HLS playlist and segment files from an active transcode session.
@@ -41,7 +33,137 @@ const SEGMENT_WAIT_MS = 60_000;
 export async function handleTranscodeSessionFileGet(req, reply, { serving, viewerRequests }) {
   const sessionId = typeof req.params.sessionId === "string" ? req.params.sessionId : "";
   const fileName = typeof req.params.fileName === "string" ? req.params.fileName : "";
+  if (refusedAsStale(req, reply, viewerRequests, fileName)) {
+    return reply;
+  }
+  // This route names its output outright, so the answer is recorded rather
+  // than chosen — under the height the output is named after, which is where
+  // the step route answers with the picture itself.
+  viewerRequests.noteAnsweredDirectly(
+    sessionId,
+    consumerOf(req),
+    statedGenerationOf(req),
+    fileName
+  );
   return serveSessionFile(req, reply, { serving, viewerRequests, sessionId, fileName });
+}
+
+/**
+ * The answer given when no output suits this viewer: nothing this proxy holds
+ * or could produce is admitted by their link. Machine-readable, because the
+ * page has to explain it to the viewer and offer what they can do; the
+ * figures are the ones the decision was made on.
+ *
+ * 409 and not a 5xx: nothing is wrong with the proxy, and repeating the same
+ * request against the same link gives the same answer.
+ *
+ * @param {import("fastify").FastifyReply} reply
+ * @param {{ reason: string, figures: object | null, wantedKey?: string }} details
+ * @returns {import("fastify").FastifyReply}
+ */
+export function replyOutputUnavailable(reply, details) {
+  return reply.code(409).send({
+    error: `No output suits this viewer: ${details?.reason ?? "unknown"}.`,
+    outcome: "output-unavailable",
+    reason: details?.reason ?? "",
+    figures: details?.figures ?? null
+  });
+}
+
+/**
+ * The answer given when this machine cannot take the output asked for: nothing
+ * it has shown it can encode fits, or it has no place for one more encoder.
+ * The page answers it by asking the rest of the pool before anything plays.
+ *
+ * @param {import("fastify").FastifyReply} reply
+ * @param {{ reason: string, figures?: object | null }} details
+ * @returns {import("fastify").FastifyReply}
+ */
+export function replyNoCapacity(reply, details) {
+  return reply.code(409).send({
+    error: `This proxy cannot take this video now: ${details?.reason ?? "unknown"}.`,
+    outcome: "no-capacity",
+    reason: details?.reason ?? "",
+    figures: details?.figures ?? null
+  });
+}
+
+/**
+ * The answer given when an address this viewer was already given cannot be
+ * given again without risking a piece under a header it may not match. The
+ * page answers it by starting a new viewing where the picture is — which is
+ * why it is not a "retry": the same request would be answered the same way.
+ *
+ * @param {import("fastify").FastifyReply} reply
+ * @param {{ reason: string }} details
+ * @returns {import("fastify").FastifyReply}
+ */
+export function replyAssignmentLost(reply, details) {
+  return reply.code(409).send({
+    error: `This part was answered by an output that has gone: ${details?.reason ?? "unknown"}.`,
+    outcome: "assignment-lost",
+    reason: details?.reason ?? ""
+  });
+}
+
+/**
+ * Which viewer is asking, or an empty string where the transport names nobody.
+ *
+ * @param {import("fastify").FastifyRequest} req
+ * @returns {string}
+ */
+export function consumerOf(req) {
+  return typeof req.query?.consumer === "string" ? req.query.consumer : "";
+}
+
+/**
+ * The generation the request says it was made in, or NaN when it says none.
+ *
+ * STAMPED BY THE PAGE when the request was SENT (`webrtc-hls-loader.js`), not
+ * when it arrived: a request made before a seek and delivered after it still
+ * says it belongs to the viewing that was left. Only a stated non-negative
+ * integer counts; anything else is "nothing stated".
+ *
+ * @param {import("fastify").FastifyRequest} req
+ * @returns {number}
+ */
+export function statedGenerationOf(req) {
+  const raw = req.query?.generation;
+  if (typeof raw !== "string" || !/^\d+$/.test(raw)) {
+    return Number.NaN;
+  }
+  return Number(raw);
+}
+
+/**
+ * Answer at once, and do nothing else, when the request belongs to a viewing
+ * its viewer has left and whose window for new requests has passed.
+ *
+ * BEFORE ANY OTHER STEP OF THE ROUTE. Resolving a quality step or a soundtrack
+ * can create an output and registers the viewer on it; a stale request that got
+ * that far would leave both behind and be refused only afterwards. The answer
+ * is the same one a request made pointless by a seek already gets — 503 with
+ * `Retry-After: 0` — because it is the same situation seen from the other end.
+ *
+ * @param {import("fastify").FastifyRequest} req
+ * @param {import("fastify").FastifyReply} reply
+ * @param {{ acceptsRequest: Function }} viewerRequests
+ * @param {string} fileName - For the log line.
+ * @returns {boolean} Whether the request was answered here.
+ */
+export function refusedAsStale(req, reply, viewerRequests, fileName) {
+  const consumerId = consumerOf(req);
+  const stated = statedGenerationOf(req);
+  if (viewerRequests.acceptsRequest(consumerId, stated)) {
+    return false;
+  }
+  logger.info(
+    `[hold] ${fileName} refused: made in generation ${stated} of ${consumerId}, ` +
+    `a viewing they have left and whose window for new requests has passed`
+  );
+  reply.header("Retry-After", "0");
+  reply.code(503).send({ error: "Made for a viewing that has been left." });
+  return true;
 }
 
 /**
@@ -64,7 +186,7 @@ export async function serveSessionFile(req, reply, { serving, viewerRequests, se
   // viewer in front releases the requests held for the viewer behind. Absent on
   // a plain HTTP transport, where no loader of ours builds the URL, and then
   // the single shared position decides as it always did.
-  const consumerId = typeof req.query?.consumer === "string" ? req.query.consumer : "";
+  const consumerId = consumerOf(req);
   // Hold the request only briefly, then answer "retry" instead of waiting for
   // the segment. iOS's native HLS player (AVPlayer) enforces a hard ~3.5 s
   // deadline on RESPONSE HEADERS and raises -12889 ("No response for media
@@ -83,16 +205,21 @@ export async function serveSessionFile(req, reply, { serving, viewerRequests, se
   // signal about its real patience, and observable only from this side.
   const holdStartedAt = Date.now();
   let clientAborted = false;
-  const onClientAbort = () => { clientAborted = true; };
+  let onClientAbort = () => {};
+  const clientGone = new Promise((resolve) => {
+    onClientAbort = () => {
+      clientAborted = true;
+      resolve();
+    };
+  });
   req.raw.on("close", onClientAbort);
+  const statedHoldMs = Number(req.headers?.[HOLD_HEADER]);
 
-  const result = await waitForSessionFile(
-    serving,
-    sessionId,
-    fileName,
-    SEGMENT_WAIT_MS,
+  const result = await waitForSessionFile(serving, sessionId, fileName, {
+    holdMs: Number.isFinite(statedHoldMs) && statedHoldMs > 0 ? statedHoldMs : Number.POSITIVE_INFINITY,
+    until: clientGone,
     consumerId
-  );
+  });
 
   req.raw.off("close", onClientAbort);
   const heldMs = Date.now() - holdStartedAt;
@@ -169,32 +296,64 @@ export async function serveSessionFile(req, reply, { serving, viewerRequests, se
     reply.header("Cache-Control", "no-store");
   } else {
     reply.header("Cache-Control", "public, max-age=60");
+    holdWhileSending(reply, result.stream, viewerRequests.holdResponse(sessionId, consumerId));
   }
   reply.header("Content-Type", result.contentType);
   return reply.send(result.stream);
 }
 
 /**
- * Poll `serving.getFileStream()` until the file is available,
- * the session fails, or the timeout elapses.
+ * Keep the output this response comes from held until the response is over.
+ *
+ * Over means any of `finish`, `close` or `error` of the response, or `error`
+ * of the stream being sent — whichever comes first, and usually more than one
+ * of them comes: a response that finishes also closes. `release` is safe to
+ * call any number of times, which is what makes listening to all of them
+ * correct rather than a leak or a double release.
+ *
+ * A response already over before it began (the requester went during the
+ * hold) is released at once: none of its events will fire again.
+ *
+ * @param {import("fastify").FastifyReply} reply
+ * @param {import("node:stream").Readable | undefined} stream
+ * @param {() => void} release
+ * @returns {void}
+ */
+function holdWhileSending(reply, stream, release) {
+  const response = reply.raw;
+  if (!response || response.destroyed || response.writableEnded) {
+    release();
+    return;
+  }
+  response.once("finish", release);
+  response.once("close", release);
+  response.once("error", release);
+  stream?.once?.("error", release);
+}
+
+/**
+ * Ask `serving.getFileStream()` again each time the file may have become
+ * available — a segment's publication, or a waited-on invalidation — until it
+ * is, the session fails, the requester's stated wait runs out, or the
+ * requester goes.
  *
  * @param {object} serving - `services/server/SegmentServing.js`
  * @param {string} sessionId
  * @param {string} fileName
- * @param {number} timeoutMs
- * @param {string} [consumerId] - Which viewer is asking, where the transport
- *   carries it. Their own position is what decides whether a held request has
- *   been made pointless by a seek — a session can have several viewers, and
- *   the seek epoch belongs to all of them.
+ * @param {object} hold
+ * @param {number} hold.holdMs - How long the requester will wait; may be
+ *   infinite when it stated nothing.
+ * @param {Promise<void>} [hold.until] - Settles when the requester has gone.
+ * @param {string} [hold.consumerId] - Which viewer is asking, where the
+ *   transport carries it. Their own position is what decides whether a held
+ *   request has been made pointless by a seek — a session can have several
+ *   viewers, and the seek epoch belongs to all of them.
  * @returns {Promise<Awaited<ReturnType<import("../../../services/server/SegmentServing.js").SegmentServing["getFileStream"]>>>}
  */
-export async function waitForSessionFile(serving, sessionId, fileName, timeoutMs, consumerId = "") {
+export async function waitForSessionFile(serving, sessionId, fileName, { holdMs, until = null, consumerId = "" }) {
   const startedAt = Date.now();
-  // One sequence number for THIS request, reused by every poll below, so the
-  // session can tell a newly-arrived request apart from an old one polling
-  // again — see SegmentServing#ensureEncodingFor for the encoder ping-pong
-  // this prevents when one seek-bar scrub fires several segment requests.
-  const requestSeq = serving.nextRequestSeq(sessionId);
+  let gone = false;
+  const requesterGone = until ? until.then(() => { gone = true; }) : new Promise(() => {});
   // The viewer's position when this request was made. A seek makes every held
   // request stale — it asks for a segment nobody is going to watch — and hls.js
   // keeps only ONE fragment load outstanding, so holding on blocks the request
@@ -204,11 +363,8 @@ export async function waitForSessionFile(serving, sessionId, fileName, timeoutMs
   let seekEpoch = serving.seekEpoch(sessionId);
   /** @type {{ address: string, rank: number, topRank: number } | null} */
   let lastRanked = null;
-  while (Date.now() - startedAt < timeoutMs) {
-    const result = await serving.getFileStream(sessionId, fileName, {
-      requestSeq,
-      consumerId
-    });
+  while (!gone && Date.now() - startedAt < holdMs) {
+    const result = await serving.getFileStream(sessionId, fileName, { consumerId });
     if (result.kind !== "warming-up") {
       return result;
     }
@@ -230,7 +386,12 @@ export async function waitForSessionFile(serving, sessionId, fileName, timeoutMs
     // patience is still counted against what it was promised. Kept across the
     // polls because the timeout path has no result of its own.
     lastRanked = result.ranked ?? lastRanked;
-    await delay(300);
+    const remaining = Math.max(0, holdMs - (Date.now() - startedAt));
+    const waitedForSegment = await serving.waitForSegment(sessionId, fileName, remaining, until);
+    if (!waitedForSegment && !gone) {
+      // Playlists and init files are not segment publications.
+      await Promise.race([delay(Math.min(300, remaining)), requesterGone]);
+    }
   }
   return { kind: "warming-up", ranked: lastRanked };
 }

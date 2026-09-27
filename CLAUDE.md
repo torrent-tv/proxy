@@ -196,12 +196,31 @@ Linux-only host (e.g. POSIX-only signals must degrade elsewhere).
     nobody is on, all of them at shutdown, adopt what an earlier process left),
     and `wire-outputs.js`, which builds the components and hands each the narrow
     host it reads. `hls-session-manager.js` is gone (2.87.0): each of its members
-    is a method of the component that owns it.
-  - `encode/` beside the orchestrator: `EncodeRuns` (build a run where the plan
-    places it, follow it, account for its end), `Renditions` (the steps of a
-    picture and its soundtracks, and the master playlist), `OutputTimes` (where
-    each segment begins and how the cut table is corrected), `CushionReport`
-    (how much film is ready in front of the viewers).
+    is a method of the component that owns it. The operations own no long-lived
+    fact: the init served for an output is kept by `SegmentStore`, the bytes read
+    for an output by `EncodeRuns`, the cold-start measurement by `HostTimings`.
+    They import no component's implementation — only the name of an output and
+    of its playlist (`encode/output/index.js`) and the keeping period
+    (`storage/keep.js`); biome checks it. A held request waits for the store's
+    publication event, as long as the requester states (`X-Hold-Ms`) and no
+    longer than it stays.
+  - `encode/` beside the orchestrator: `OutputOpening` (which output answers a
+    request for a file, made if it is not here yet — without knowing who asked),
+    `EncodeRuns` (build a run where the plan places it, follow it, account for
+    its end, and what its input has received), `EncoderSelection` (the encoder
+    in use and the move to software), `Renditions` (the steps of a picture and
+    its soundtracks, the master playlist, and which rung a viewer's page says it
+    plays), `OutputTimes` (where each segment begins and how the cut table is
+    corrected), `CushionReport` (how much film is ready in front of the
+    viewers), `output-key-format.js` (which container a key names).
+  - `viewer/`: every viewer has a name (`Viewers.of` refuses an empty one); the
+    relation to outputs is stored only in `Viewer.outputs` and read the other way
+    by `Viewers.forOutput`. A quality request belongs to one viewer and exists
+    only in AUTO (`Viewer.askQuality`).
+  - `torrent/` reaches the piece store by what it does (`piece-store-of.js`) and
+    is handed the store's class by `torrent/worker/worker.js`, where that thread
+    is assembled. `transport/` imports nothing of another component; `bin/cli.js`
+    hands it the memory reading and the rule for which captures are kept.
   - `encode/hwaccel.js` — detect best H.264 encoder (NVENC/QSV/VAAPI/V4L2M2M) with a
     STRICT startup test: encode `testsrc2` through the real HLS pipeline, then
     verify each segment decodes independently (catches non-IDR/corrupted hw

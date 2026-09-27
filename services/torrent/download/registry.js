@@ -2,11 +2,11 @@
  * @file One demand register and one swarm selection per torrent, found from the
  * torrent itself.
  *
- * The same shape the piece store already uses — `findSharedStore(torrent)`
+ * The same shape the piece store already uses — `pieceStoreOf(torrent)`
  * reaches the store without it being threaded through every call — and for the
  * same reason: the reader, the pool and the background fill all need the same
  * instance, and passing it through six layers of arguments would make the
- * plumbing bigger than the thing.
+ * argument lists bigger than the thing they carry.
  *
  * Kept in a live set as well as a weak map, because one question cannot be
  * answered per torrent: whether ANYTHING anywhere is still missing something

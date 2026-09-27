@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { softwareRateControlFor } from "../services/encode/args.js";
 import test from "node:test";
 import { createHash } from "node:crypto";
 import { AudioOutput, CutGrid, isOutputName, OutputSpec, VideoOutput } from "../services/encode/output/OutputSpec.js";
@@ -86,6 +87,31 @@ test("a key reads back into the output it names", () => {
 test("a key naming the box a viewer asked for does not read back, because it cannot say what format is inside", () => {
   assert.equal(OutputSpec.fromKey(`${TORRENT}:fmt=fmp4:grid=even@0:video-only:v=0/enc:1280x720:exact`), null);
   assert.equal(OutputSpec.fromKey(`${TORRENT}:fmt=fmp4:grid=even@0:video-only:v=0/enc:1280x720:budget`), null);
+});
+
+test("the bitrate limit is part of the output: two limits are two outputs, and the key reads back", () => {
+  // Roadmap item 97, step 10. A limit changes the bytes of every piece, so it
+  // names the output; the level is the nominal output's, so it is the same for
+  // both limits of one size and their headers agree.
+  const nominal = softwareRateControlFor({ width: 1280, height: 720, fps: 24 });
+  const lower = softwareRateControlFor({ width: 1280, height: 720, fps: 24, capKbps: 1400 });
+  const atNominal = encoded({ rateControl: nominal });
+  const atLower = encoded({ rateControl: lower });
+
+  assert.notEqual(atNominal.toKey(), atLower.toKey());
+  assert.notEqual(atNominal.toKey(), encoded().toKey(), "a limit and none are two outputs too");
+  assert.equal(nominal.level, lower.level);
+  for (const spec of [atNominal, atLower, encoded()]) {
+    assert.equal(OutputSpec.fromKey(spec.toKey())?.toKey(), spec.toKey());
+  }
+  assert.deepEqual(OutputSpec.fromKey(atLower.toKey()).video.encode.rateControl, lower);
+});
+
+test("a key written before the limit was part of it does not read back", () => {
+  // Its directory could hold pieces made under any limit the budget had moved
+  // it to, so nothing can say what is inside, and it is not served.
+  const current = encoded().toKey();
+  assert.equal(OutputSpec.fromKey(current.replace("/vbv=-", "")), null);
 });
 
 test("a soundtrack is named by the file it lives in and the track inside it", () => {

@@ -30,6 +30,16 @@ export class HostTimings {
   #firstSegmentLatencies = [];
 
   /**
+   * Output → when the request that created it arrived, until its first segment
+   * is served. Taken out on that first segment, so each output is measured once
+   * and an output nobody created in this process (adopted at startup) is never
+   * measured at all.
+   *
+   * @type {WeakMap<object, number>}
+   */
+  #createdAt = new WeakMap();
+
+  /**
    * Recent times to create a session, in ms — the second term of the browser's
    * estimate. Measured for the same reason as the first: it is 116-843 ms
    * depending on whether the keyframe index is already in hand, and guessing it
@@ -174,6 +184,38 @@ export class HostTimings {
     }
     const sorted = [...this.#sessionCreateLatencies].sort((left, right) => left - right);
     return sorted[Math.floor(sorted.length / 2)];
+  }
+
+  /**
+   * An output was created by a request that arrived at `at`.
+   *
+   * @param {object} output
+   * @param {number} at
+   * @returns {void}
+   */
+  noteOutputCreated(output, at) {
+    if (Number.isFinite(at) && at > 0) {
+      this.#createdAt.set(output, at);
+    }
+  }
+
+  /**
+   * A segment of this output has just been served. The first one closes the
+   * cold-start measurement and is remembered; every later one is nothing.
+   *
+   * @param {object} output
+   * @param {number} [now]
+   * @returns {number | null} The cold-start latency when this was the first.
+   */
+  noteSegmentServed(output, now = Date.now()) {
+    const at = this.#createdAt.get(output);
+    if (at === undefined) {
+      return null;
+    }
+    this.#createdAt.delete(output);
+    const latencyMs = now - at;
+    this.rememberFirstSegmentLatency(latencyMs);
+    return latencyMs;
   }
 
   rememberFirstSegmentLatency(latencyMs) {

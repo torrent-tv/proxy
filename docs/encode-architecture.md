@@ -23,10 +23,89 @@ It decides from four things and no others:
 | what is wanted | the priority map of that output |
 | how many the machine can hold | `run-budget.js`, from measurements of this host |
 
-**No viewer reaches it.** `services/encode/` and
-`services/encode/EncodeOrchestrator.js` do not import the viewer layer,
-name a consumer id, or hold a person. What crosses is a priority map: zones of
-segment numbers with a rank and a real time, and nobody's name on it.
+**No viewer reaches the decision.** `EncodePlan` and `EncodeOrchestrator` do not
+import the viewer layer, name a consumer id or hold a person. What crosses is a
+priority map: zones of segment numbers with a rank and a real time, and nobody's
+name on it.
+
+**The rest of `services/encode/` names people, and holds none.** A step and a
+soundtrack are chosen, warmed and left per person, so `Renditions`,
+`QualityController` and `CushionReport` say WHOSE — by consumer id, which is a
+name and not an object. What they may ask about that name and what they may
+tell the viewer layer about it is `services/viewer/choices.js`: the mode a size
+was picked in, what a link measured, the soundtrack chosen, the step on screen,
+what is being warmed, who is present, and the standing quality ask. Values in,
+values out. No `Viewer` crosses the boundary and nothing outside the viewer
+layer writes a viewer's record — which is the rule a position cost 77 encoder
+starts for breaking (field 2026-09-13).
+
+This paragraph used to claim the whole directory named nobody, which was never
+true of `Renditions` and could not be: which soundtrack to make is a fact about
+a person. What matters is that it is a NAME, so the viewer's record stays in
+one place with one writer.
+
+**What answered a request is the viewer's, per viewing** (roadmap item 97,
+step 9). The page stamps every request with the GENERATION of its viewing — a
+number it raises on the viewer's own seek, before it sends anything — and the
+proxy reads it rather than counting one, so a request made before a seek and
+delivered after it still says which viewing it belongs to. Three things follow,
+and each is asked through `choices.js`, by name:
+
+1. every file route asks FIRST whether that viewer still takes requests of that
+   generation, before a step or a soundtrack is resolved — resolving can create
+   an output and registers the viewer on it, which a request of a viewing
+   already left must not do;
+2. a repeat of a request within one viewing is answered by the output that
+   answered it: the step route records the height asked for and the segment
+   (the init as −1), the picture's own route records under the height that
+   output is named after. A soundtrack records nothing of this kind;
+3. a response holds its output from its first byte to its end, and no output is
+   disposed while an assignment holds it — except on a hardware encoder's
+   failure, where nothing can go on making what it made. The idle expiry asks
+   only the assignments, not whether anybody is registered, so a paused
+   viewer's claim on an output stays a separate decision.
+
+**Which output serves a viewer is one rule, asked by every path, and the
+choice is the viewer's own** (step 11). A request for a piece is answered, in
+order, by what already answered that address in this viewing (`given`), by the
+output chosen for this viewer at that height (`chosen`), and only then by the
+rule — and a repeat whose output has gone is served from its stored piece or by
+an output with a proven-compatible header, or answered `assignment-lost`. The
+rule (`serving-output.js`, `outputSuits`) asks the picture's material, the size
+a viewer who picked by hand requires, and what the viewer's OWN link does with
+the output's whole load: the picture and the soundtrack they chose, each part
+`known` (a limit), `estimated` (a stated average) or `unknown` (no bound), the
+load as trustworthy as its worst part (`link-budget.js`). `unknown` is refused
+against a measured link; `estimated` is admitted by estimate and reported to
+the page as not confirmed; a bound is taken before an average. When nothing
+suits, nothing is handed over: the answer is `output-unavailable`, with the
+figures, and the page explains it. The shared `OutputCatalog.servedBy` record
+and the worst link over all viewers are gone; the quality budget asks each
+viewer's link for that viewer alone.
+
+**A bitrate limit is part of an output, not a figure moved under it** (step
+10). A software encode's `-maxrate`/`-bufsize` are named by its key
+(`vbv=<maxrate>k-<bufsize>k@<level>`), so two limits are two outputs and a
+slow viewer's limit can no longer land on every viewer of a picture — which is
+what it did while it was a field of the output set by the worst of their links.
+The level is pinned (`-level:v`) to the level of the NOMINAL output of that
+size and frame rate, so every limit at one size writes the same header
+and a viewer can be moved between them under the address they already play.
+A limit above the nominal one is refused. Hardware encoders are given no limit
+and state none (`vbv=-`). Whether the pinned level is the one x264 would choose
+for the nominal output is checked before a release
+(`stand/segment-compat/level-check.mjs`).
+
+**Which limits a frame has is decided by its AREA** (step 14, decided with the
+user 2026-09-24). The rows of limits are the ladder's frames at 16:9, sized by
+the same function that sizes an encode; a frame takes the row nearest by the
+ratio of areas, the larger row on the exact border, and a row with no nominal
+of its own borrows the nearest row that has one (`limitRowFor`,
+`nominalKbpsFor`). Every place that picks a row — opening an output, the move
+between limits, the offer's price of a step and the link rule — is handed the
+whole frame, so all of them name the same row. By height alone a 1920x800 film
+fell in the 720 row although it is nearer the 1080 one. Inside a row the limit
+is not scaled by area until the measurement of step 14 says it must be.
 
 ## Where a viewer is, and how it reaches the encoders
 
@@ -127,16 +206,158 @@ That distinction is answered where the two facts meet, and neither layer is
 handed the other:
 
 - **which step is on their screen** is a fact about a PERSON, read off the
-  viewer as one field;
+  viewer as one field. The page STATES it (`playingHeight` on the viewer's
+  report, sent the moment hls.js has switched), and `Renditions.viewerPlays`
+  records it. It used to be inferred from the first segment requested of a
+  rung, which is the player fetching rather than the picture having moved;
 - **which output a step supersedes** is a fact about the FILM'S SHAPE, answered
   by `OutputCatalog.supersededBy(session, stepOnScreen)`, which takes a plain id
   and has never seen a viewer.
 
 A step, a soundtrack, and a step being warmed are consumed by whoever is
 registered on them — everywhere but the picture, a person who stops watching is
-let go of, so being known to an output is consuming it. Through a warm-up both
+let go of, so being known to an output is consuming it. Whether an output is
+wanted at all is asked of the viewer registry and nothing else: an output a
+picture made on its own behalf once carried a made-up "family" claim that kept
+it alive, which was a second answer to the same question and is gone. Every
+viewer has a name; a request that names nobody makes no viewer. Through a warm-up both
 the step on screen and the step being made ready are genuinely produced, which
 is the price of the switch not being visible.
+
+## A move between two limits of one height
+
+A bitrate limit is part of an output, so a viewer whose link cannot carry the
+limit on their screen is given ANOTHER output of the same height at a lower
+limit — for them alone, and without their player being told (roadmap item 97,
+step 12). The address `v/<height>/…` does not change; what changes is which
+output this side answers it with.
+
+1. **Prepared, not switched.** `Renditions.prepareSameHeightSwitch` opens (or
+   finds, by its key) the output of the same size at the next limit of
+   `limitsFor(height)` that the viewer's link admits, marks it a step of the
+   picture, and registers the viewer on it — that is what buys it an encoder.
+   The choice (`Assignments.choose`) is not touched: until the move is made they
+   are given what they were given. The move being prepared is a field of the
+   viewer, `Viewer.sameHeightSwitch`, and not `warmingVariantId`, which is a
+   step their player will switch to itself.
+2. **Made on the store's own event.** `SegmentStore.onPublished` is filtered by
+   the prepared output's key. The move is made when the segment the viewer will
+   ask for NEXT is closed on it: one past the highest they were given in the
+   viewing they are in now, or — with nothing given in it, straight after a
+   seek — the one where they stand. It is read at the moment of the event, so a
+   segment closed behind that one, or an event that arrives after a seek, moves
+   nothing.
+3. **One synchronous stretch.** The choice under each height it was chosen
+   under, the verdict, the step on screen, the registration on the new output
+   and off the old one change with no `await` between them.
+4. **The output left is not disposed.** The picture is never left. A step that
+   is left loses the viewer, the plan stops its encoder by its empty map, and the
+   idle expiry removes it once no assignment holds it; a repeat of an address it
+   answered is still answered by it, because `given` is read before `chosen`.
+5. **Cancelled when not wanted.** When the link carries the output on screen
+   again, when the prepared output no longer suits, when the player moves to
+   another rung, when encoding the prepared output has failed for good, or when
+   nothing of the film is left to give from it: the viewer stops watching the
+   prepared output and nothing else changes for anybody.
+6. **Asked again on three events, never on a timer.** A segment closed on the
+   prepared output (`SegmentStore.onPublished`); the viewer's own report
+   (`Renditions.noteViewerReported`, from the net-report route), which is what
+   carries a change of their link; and encoding the prepared output failing for
+   good (`Renditions.noteProductionFailed`, told by `EncodeRuns`). Without the
+   last two, a move onto an output that closes nothing stood for ever, and the
+   quality budget — which leaves a viewer with a move pending alone — never
+   decided for them again. Each event may also make the move, on the same one
+   condition: the segment they will ask for next is closed. A move is not
+   prepared onto an output whose encoding has failed. The fourth way a move can
+   wait — no encoder placed on the output — does not arise until the admission
+   of step 13 can refuse, and that refusal will be its event.
+
+The quality budget uses this lever first, in both directions: down to the
+highest lower limit the link admits, up one limit at a time, and another height
+only where the height on screen has no limit left to move to. A copy has no
+limit and a hardware encode is given none, so for them the lever is still the
+height. Until a set of lower limits is decided (step 14) `limitsFor` holds only
+the nominal one, so in the field the move has nowhere to go yet.
+
+7. **A move up waits for the cushion; a move down does not** (roadmap item
+   98). Once the piece asked for next is closed, a move UP is made only when
+   the viewer holds the cushion this file needs (`minimumBufferSeconds`), and
+   their next report asks again until they do. A move DOWN was started because
+   their buffer would run dry, so it is made the moment the piece is ready.
+
+## When the quality budget moves a viewer (roadmap item 98)
+
+The page has no quality control: the quality is always automatic. What moves a
+viewer is decided here, per viewer, and each part of it is a measurement.
+
+1. **Judged on the viewer's report, not on a timer.** `QualityController.noteViewerReported`
+   runs from the net-report route. The chosen fifteen-second window of a slow
+   link, the ten-second buffer threshold and the thirty-second wait after every
+   action are gone.
+2. **Down when the buffer would run dry first.** Their link does not carry the
+   stream they are given AND, on the buffer's trend, it ends sooner than another
+   output could close the piece they need, counting the time until their next
+   report (`quality/drain-threat.js`). The trend is a least-squares fit over the
+   shortest run of their reports spanning one segment
+   (`viewer/buffer-trend.js`), because the buffer rises a segment at a time and
+   two readings catch only the rise or the fall. The time to readiness is this
+   host's measured first-segment time. The levers: a lower limit of the same
+   height, then a lower height asked of the player as URGENT — their page
+   switches as soon as the rung is ready, without waiting for a cushion. Where
+   neither can be prepared they stay on what they are given, with no message.
+3. **The picture the viewer sees bounds a re-encode.** The page sends the
+   frame it would show without enlarging, in physical pixels; it is kept on
+   `Viewer.visiblePicture`. The bound is the smallest rung of the source's
+   ladder whose frame is not smaller (`quality/visible-rung.js`). It sets the
+   box an output is opened at (`OutputOpening`), the ceiling of every step up,
+   and the rung a step down prefers. A copy of the source is never re-encoded
+   for being taller than that.
+4. **A smaller picture moves the viewer only onto a READY rung**
+   (`Renditions.heightReadyFor`: the piece they ask for next closed on it);
+   with none ready, the next judgement of their link or of the machine applies
+   the bound. **A larger picture** asks one rung up when the machine and their
+   link have room.
+5. **A step up is let go when its conditions go back**: a draining buffer, a
+   link that no longer carries the stream, or no room for the output. The page
+   drops the move it was preparing when the proxy stops asking for it.
+6. **The page switches a variant when the rung is ready**, and for a request
+   that is not urgent only once it holds `minimumBufferSeconds`.
+
+## A place on the machine
+
+How many encoders ONE output may run is answered per output
+(`EncodeRuns.maxRunsForOutput`) and is always at least one. What refuses the
+encoder that would slow everybody is `EncodeAdmission`, across every output at
+once (roadmap item 97, step 13).
+
+1. **The unit is seconds of work per second of film**, the one the quality
+   offer judges steps in (`EncodeCost.loadOfOutput`). Costs add, and a set of
+   encoders is affordable when the machine, corrected for the share of it
+   nobody has priced, still makes a second of film per second. A soundtrack is
+   a small fraction of a picture; counting processes would refuse a viewer
+   their sound. On the addon host the sum reproduces the measurement: two 1080p
+   encodes at 1.96x alone cost 1.02 s/s and make 0.98x, measured 0.99x and
+   0.98x.
+2. **A place is held by an OUTPUT**: by every live encoder at its output's
+   cost, and by every output a present viewer is being prepared onto — a step
+   being warmed or a move to another limit — once however many wait for it.
+   The second is read off the viewers' own records (`Viewers.outputsBeingPrepared`),
+   so a place ends with its record on whichever path that record is cleared,
+   and there is no register of its own to keep in step.
+3. **Asked before a preparation is recorded**, in the same synchronous stretch
+   as the record: two preparations onto two different outputs with room for
+   one cannot both be admitted, because the second is asked after the first is
+   written. Refused, a move answers `noPlace` and the budget goes to a lower
+   height (never a higher one); a warm-up answers `output-unavailable`.
+4. **The plan is bounded by it** (`EncodeOrchestrator.#withinMachine`): an
+   output may run no more encoders than still fit, and a new one on a full
+   machine gets none until one elsewhere ends.
+5. **An admitted encoder is never taken away**, and a place promised to a
+   preparation is kept: the machine's answer is never below what already runs
+   on an output, nor below one for an output a preparation holds.
+
+Not solved: places go to whoever asks first, so a second encoder catching up on
+one output can hold the place a viewer opening another film waits for.
 
 ## What each of the eight other places used to do
 
@@ -153,7 +374,7 @@ killed encoders by a rule of its own; each now states the fact it knows.
 | the hardware encoder failed | start a run at the dead one's start | what this host encodes with has changed |
 | the input came back | start a run at the last requested segment | decide again |
 | the cut table was corrected | restart the members at the measured instant | this run is producing in the wrong place; the instant is in the file's table |
-| the bitrate cap changed | restart at where the encoder had got to | this run's arguments are stale |
+| the bitrate cap changed | restart at where the encoder had got to | nothing: a limit is part of an output since 2.87.0, so another limit is another output and no running encoder is ever told a new one |
 
 A **seek** is not in that list because it was already reduced to one thing: it
 puts the viewer where they are. The settle timer behind it, its cooldown and its
@@ -434,6 +655,21 @@ Three things follow, and each replaced a guess:
    open-piece.js` did all three of those by guessing and is gone, along with the
    session manager's copy of it.
 
+## How a request for a segment ends
+
+A request steers no encoder. The file is served if the store holds it whole;
+otherwise the request waits for the store's own announcement that the segment
+was published (`SegmentStore.waitFor`), for the waits of that output to be
+invalidated (a viewer left the rung), or for the requester to go. How long it
+may wait is the requester's: the page states it (`X-Hold-Ms`, its own deadline
+less the round trip it has measured) and the route answers "retry" by then. A
+requester that states nothing is held until it closes the connection. There is
+no poll and no hold time chosen by the proxy.
+
+Which output a request is answered by is decided in the encoding component
+(`encode/OutputOpening.js`), without knowing who asked; the server operation
+(`server/ViewerRequests.js`) places the requester on it.
+
 ## What is checked
 
 `test/one-authority.test.js` holds the shape: one caller of `#startEncodeRun`,
@@ -451,3 +687,39 @@ stops when nobody is watching the output.
 name is finished — the last one of a run included — one under a working name is
 not and cannot be reached, closing it is one rename, and clearing up after one
 run leaves every other run's work alone.
+
+## Per-machine calibration and admission (roadmap item 97, step 14)
+
+At startup, `encode/calibration.js` qualifies every mode the proxy may select,
+including the software encoder kept for runtime fallback. Each mode uses the
+production arguments on a generated test clip, and every segment must decode
+independently. `encode/fingerprint.js` keys the results to the FFmpeg and x264
+versions, CPU model and thread count for software, or FFmpeg version, device
+model and driver for hardware. A changed key does not reuse measurements from
+the previous configuration.
+
+`encode/throughput.js` measures qualified modes at five frame sizes from
+256×144 through 3840×2160. Between measured sizes it interpolates and subtracts
+the measured interpolation error; it does not offer a size outside the measured
+range. Calibration stops measuring slower modes and larger sizes once a faster
+mode cannot sustain realtime. If a detected device has no qualified mode, the
+proxy uses software encoding.
+
+`encode/LocalObservations.js` stores observations from admitted encodes in the
+proxy's `local-observations.json`. It keeps speed without competing encodes,
+average and peak segment rates, output preparation time and the viewer buffer at
+a transition. A matching fingerprint is required. These observations refine
+output cost, the peak estimate of an unbounded hardware encoder and transition
+preparation timing; an empty or stale file leaves the base policy in force.
+
+`encode/EncodeAdmission.js` counts running encoders and outputs that viewers are
+being placed on or prepared to use. Opening an output checks capacity and
+records the viewer in one synchronous call through `OutputOpening` and
+`ViewerRequests`; a second simultaneous opening sees the first reservation. If
+no measured mode or remaining capacity is available, the proxy answers 409
+`no-capacity` before playback. Unknown costs on occupied outputs count as
+unknown capacity, not free capacity. The health report exposes safe encoding
+headroom, and the pool's file-specific answer uses the same occupied-cost data.
+If the opening is refused, the page asks the pool and prepares the file again
+through an eligible proxy before showing video. Each refused proxy is excluded
+for that opening attempt, so stale pool answers cannot make the page cycle.

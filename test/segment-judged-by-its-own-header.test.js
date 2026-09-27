@@ -145,17 +145,14 @@ async function managerHolding({ piece, sessionHeader }) {
     get audioFile() { return this.file; },
     lastAloneSpeed: 2,
     startedAt: Date.now(),
-    createEntryMs: Date.now(),
     lastAccessedAt: Date.now(),
     runs: new Set(),
     lastError: "",
-    claims: new Set(),
     segmentCount: 5,
     segmentFormat: fmp4Format,
     useSyntheticPlaylist: true,
     playlistText: "#EXTM3U\n",
     initBytes: sessionHeader,
-    firstSegmentLogged: false,
     waitEpoch: 0
   };
   manager.outputs.set(SESSION_ID, session);

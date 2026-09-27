@@ -15,8 +15,8 @@
  * killing and resuming belong to whoever owns the process.
  */
 
-/** The name ffmpeg writes its own playlist to, and the name that is served. */
-export const PLAYLIST_FILE_NAME = "index.m3u8";
+import { PLAYLIST_FILE_NAME } from "./output/playlists.js";
+import { AUDIO_TRANSCODE_KBPS } from "./args.js";
 
 /**
  * What ffmpeg's own CLI subtracts from an input seek, and therefore what has to
@@ -281,7 +281,8 @@ export function seekLandingOffsetFor(material, keyframe) {
  * @param {boolean} params.audioSeparate - The picture's sound is published as a
  *   rendition, so this output carries none.
  * @param {number} params.audioSourceTrackIndex - `0:a:N` within its own file.
- * @param {number | null} params.rateCapKbps
+ * @param {{ maxrateKbps: number, bufsizeKbps: number, level: string | null } | null} params.rateControl
+ *   The output's own, as its key names it; null where nothing bounds the rate.
  * @param {number} params.startIndex - First segment number this run makes.
  * @param {number} params.endIndex - Last it makes, inclusive; below the start
  *   means it has no end.
@@ -305,7 +306,7 @@ export function buildRunCommand({
   audioOnly,
   audioSeparate,
   audioSourceTrackIndex,
-  rateCapKbps,
+  rateControl,
   startIndex,
   endIndex,
   positionSecondsOverride,
@@ -421,13 +422,14 @@ export function buildRunCommand({
         // count can describe them: the encoder is told the times outright,
         // the same ones the muxer will cut at.
         forcedKeyframeTimes: cutTimes,
-        // A ceiling the VIEWER's measured link put on this picture, when one
-        // has been measured. Null means the rung's own nominal rate stands.
-        nominalKbps: rateCapKbps ?? null
+        // The output's own rate control and level. Read off the output, whose
+        // key names them: two limits are two outputs, and nothing moves a
+        // limit under an output that already exists.
+        rateControl: rateControl ?? null
       })
     : ["-c:v", "copy"];
   const audioCodecArgs = transcodeAudio
-    ? ["-c:a", "aac", "-ac", "2", "-b:a", "128k"]
+    ? ["-c:a", "aac", "-ac", "2", "-b:a", `${AUDIO_TRANSCODE_KBPS}k`]
     : ["-c:a", "copy"];
 
   const args = ["-hide_banner", "-nostats", "-loglevel", "error", "-progress", "pipe:1"];

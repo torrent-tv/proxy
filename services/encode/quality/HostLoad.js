@@ -86,6 +86,9 @@ export class HostLoad {
    */
   #requiredSpeedByKey = new Map();
 
+  /** Last complete supply reading for each source file. @type {Map<string, object>} */
+  #supplyByKey = new Map();
+
   /**
    * @param {object} host - `liveRunsOf`, `runStateOf`, the readings of `encode/host-load.js` (`readMachineState`, `readProcessCpuSeconds`, `readProxyCpuSeconds`, `readSystemCpu`, `shareOfMachine`), `getSourceStats`, `getTorrentTotals`, `outputs`
    */
@@ -268,16 +271,8 @@ export class HostLoad {
         if (Number.isFinite(demanded) && demanded > 0) {
           this.#requiredSpeedByKey.set(key, demanded);
         }
-        // And onto the sessions themselves, which is where the browser's
-        // minimum buffer is read from. Set only by the downshift check until
-        // now, it stood still on every session that never fell below realtime,
-        // so the figures the viewer waits on were minutes old or absent.
         if (stats?.supply) {
-          for (const session of this.#host.outputs.values()) {
-            if (session?.file.sourceKey === source.sourceKey && session.file.fileIndex === source.fileIndex) {
-              session.supplyFigures = stats.supply;
-            }
-          }
+          this.#supplyByKey.set(key, stats.supply);
         }
       } catch {
         // The pool is busy or gone. A reading missed is not a fault, and the
@@ -312,6 +307,11 @@ export class HostLoad {
    */
   requiredSpeedFor(sourceKey, fileIndex) {
     return this.#requiredSpeedByKey.get(SourceFiles.keyFor(sourceKey, fileIndex)) ?? null;
+  }
+
+  /** Last complete supply reading for a source file. */
+  supplyFor(file) {
+    return this.#supplyByKey.get(SourceFiles.keyFor(file.sourceKey, file.fileIndex)) ?? null;
   }
 
   /**

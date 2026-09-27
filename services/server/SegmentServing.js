@@ -13,20 +13,10 @@ import { access, readFile, stat, unlink } from "node:fs/promises";
 import { Readable } from "node:stream";
 import path from "node:path";
 import { logger } from "../../utils/logger.js";
-import { ENCODE_RUN_STATE } from "../encode/encode-run-state.js";
-import { isOutputName } from "../encode/output/index.js";
-import { PLAYLIST_FILE_NAME } from "../encode/run-command.js";
-import { activeOutputFor } from "../viewer/active-output.js";
-import { viewerSecondsOn } from "../viewer/positions.js";
-import { earliestRunStart } from "../encode/EncodeRuns.js";
-import { PLAYER_BUFFER_HOLE_SEC } from "../encode/OutputTimes.js";
+import { isOutputName, PLAYLIST_FILE_NAME } from "../encode/output/index.js";
 // The index of variants. Served from the same route as the media playlist, so
 // it needs no path of its own.
 export const MASTER_PLAYLIST_FILE_NAME = "master.m3u8";
-// How many segments ahead of the current encode head a missing-segment request
-// is allowed to be before we restart ffmpeg at that position (server-side seek).
-// Requests within the window are served by waiting for the running encode.
-const MAX_LOOKAHEAD_SEGMENTS = 8;
 // Read segment files in large blocks so the body is delivered to the data
 // channel in few, big chunks. On a busy ARM host the in-process WebTorrent
 // hashing starves the event loop in bursts, so fewer read iterations means
@@ -80,6 +70,8 @@ function cutsAtGivenTimes(session) {
 }
 
 export class SegmentServing {
+  /** Serving state keyed by the output object it belongs to. */
+  #states = new WeakMap();
   /** What this reads and asks of the rest of the proxy, and nothing else. @type {object} */
   #host;
 
@@ -90,14 +82,33 @@ export class SegmentServing {
     this.#host = host;
   }
 
+  #stateFor(output) {
+    let state = this.#states.get(output);
+    if (!state) {
+      state = {
+        holdExplainedAt: new Map(),
+        waitEpoch: 0,
+        waitListeners: new Set()
+      };
+      this.#states.set(output, state);
+    }
+    return state;
+  }
+
+  invalidateWaits(output) {
+    const state = this.#stateFor(output);
+    state.waitEpoch += 1;
+    for (const wake of state.waitListeners) wake(true);
+    state.waitListeners.clear();
+  }
+
   /**
    * Open a read stream for an HLS segment or playlist file from a session.
    *
    * @param {string} sessionId
    * @param {string} fileName - Must match the playlist or segment name pattern.
-   * @param {{ requestSeq?: number, consumerId?: string }} [options] -
-   *   `requestSeq` from {@link nextRequestSeq}, constant across one request's
-   *   long-poll loop. `consumerId` says WHICH viewer is asking, so a session
+   * @param {{ consumerId?: string }} [options] -
+   *   `consumerId` says WHICH viewer is asking, so a session
    *   shared by several of them can tell their positions apart; absent from a
    *   browser or a transport that does not carry it, and then everything falls
    *   back to the one shared position.
@@ -120,18 +131,15 @@ export class SegmentServing {
     if (!session || !isSafeFileName(fileName, session.segmentFormat)) {
       return { kind: "not-found" };
     }
-    if (this.#host.encodeRuns.runStateOf(session) === ENCODE_RUN_STATE.RETRY_WAIT) {
-      // The data went away and is being fetched again. Holding the request is
-      // the truthful answer: nothing is broken and there is nothing for the
-      // viewer to retry.
-      return { kind: "warming-up" };
-    }
-    if (this.#host.encodeRuns.runStateOf(session) === ENCODE_RUN_STATE.ENDED_FAILED) {
-      return {
-        kind: "failed",
-        message: this.#host.encodeRuns.lastErrorOf(session) || "ffmpeg failed for this transcode session."
-      };
-    }
+    // WHETHER PRODUCTION FAILED IS NOT ASKED HERE. It explains a piece that is
+    // ABSENT and says nothing about one that is on disk: a segment under its
+    // served name is whole by construction, whoever wrote it and whatever has
+    // become of the encoder since. Asked at the door, as it was, a failed run
+    // answered 500 to every request for material it had already finished — the
+    // viewer lost what was made as well as what was not, and a seek back into
+    // it could not be served either. It is asked where the answer is needed:
+    // where the file is not there (`#holdForProduction`, and the init's own
+    // absent branch).
     this.#host.outputs.touch(session);
 
     // The index of variants. Served from here rather than a route of its own,
@@ -172,8 +180,8 @@ export class SegmentServing {
     // boxes into it (unlike segments, its write is not gated behind an atomic
     // rename), so a read can race a moment where the file EXISTS but is still
     // EMPTY. Root cause of a real incident: that empty read used to be cached
-    // as `session.initBytes` — a zero-length Buffer is still a truthy object,
-    // so `if (session.initBytes)` treated it as "already resolved" and served
+    // as the output's init — a zero-length Buffer is still a truthy object,
+    // so a check on its presence treated it as "already resolved" and served
     // the empty file for the rest of the session's life, permanently breaking
     // playback (hls.js can never initialize its SourceBuffer from an empty
     // init segment) while the transcode itself kept encoding normally. Guard
@@ -182,10 +190,11 @@ export class SegmentServing {
     // retrying until ffmpeg has actually written the header.
     const { initFileName } = session.segmentFormat;
     if (initFileName !== null && fileName === initFileName) {
-      if (session.initBytes && session.initBytes.length > 0) {
+      const kept = this.#host.segmentStore.initOf(session.outputKey ?? "");
+      if (kept) {
         return {
           kind: "file",
-          stream: Readable.from([session.initBytes]),
+          stream: Readable.from([kept]),
           contentType: session.segmentFormat.initContentType,
           isPlaylist: false
         };
@@ -197,21 +206,29 @@ export class SegmentServing {
         const bytes = cutsAtGivenTimes(session)
           ? await this.#initFromFirstSegment(session)
           : await readFile(path.join(this.#host.segmentStore.pathFor(session.outputKey ?? ""), initFileName));
-        if (!bytes || bytes.length === 0) {
-          return { kind: "warming-up" };
+        const standing = this.#host.segmentStore.keepInit(session.outputKey ?? "", bytes);
+        if (!standing) {
+          // Nothing usable yet. On the branch that lifts the header out of the
+          // first piece there is no file to be missing, so "not produced yet"
+          // arrives HERE and not in the catch below: `#initFromFirstSegment`
+          // answers null rather than throwing `ENOENT`. A production that has
+          // ended in an error is not going to produce one either, and saying
+          // "still warming up" to that holds the request for its whole deadline.
+          return this.#failedOrWarming(session);
         }
-        session.initBytes = bytes;
         return {
           kind: "file",
-          stream: Readable.from([bytes]),
+          stream: Readable.from([standing]),
           contentType: session.segmentFormat.initContentType,
           isPlaylist: false
         };
       } catch (error) {
         if (error?.code === "ENOENT") {
           // Not produced yet — the encode run started at session creation
-          // writes it early; the caller long-polls until it appears.
-          return { kind: "warming-up" };
+          // writes it early; the caller long-polls until it appears. Unless
+          // production has ended in an error, in which case nothing is going to
+          // write it and holding the request only spends the viewer's patience.
+          return this.#failedOrWarming(session);
         }
         logger.error(
           `transcode ${session.id} could not serve ${initFileName}: ${error?.message ?? error}` +
@@ -284,17 +301,14 @@ export class SegmentServing {
         }
       }
 
-      // Cold-start: log the first servable SEGMENT of this session exactly once
-      // — the time from session-create entry to a playable first segment.
-      if (!isPlaylist && !session.firstSegmentLogged) {
-        session.firstSegmentLogged = true;
+      // Cold-start: the time from the create request to a playable first
+      // segment, measured once per output by the owner of host timings.
+      const coldStartMs = isPlaylist ? null : this.#host.hostTimings.noteSegmentServed(session);
+      if (coldStartMs !== null) {
         // Data is flowing again, so the next loss starts its backoff afresh
         // rather than inheriting the delay of the last one.
-        session.inputRetryCount = 0;
-        this.#host.hostTimings.rememberFirstSegmentLatency(Date.now() - session.createEntryMs);
-        logger.info(
-          `cold-start ${sessionId.slice(0, 8)}: first-segment ready +${Date.now() - session.createEntryMs}ms`
-        );
+        this.#host.encodeRuns.resetInputRetry(session);
+        logger.info(`cold-start ${sessionId.slice(0, 8)}: first-segment ready +${coldStartMs}ms`);
       }
       // Formats whose segments need correcting before they are valid against
       // the session's cached init are read whole and passed through the format
@@ -310,7 +324,7 @@ export class SegmentServing {
         // knows how to read them makes it (`judgeTracks`). What is done about
         // the answer is this path's business and stays here: a whole piece is
         // served, a short one is removed so it can be made again.
-        const verdict = session.segmentFormat.judgeTracks?.(raw, bytes, session.initBytes ?? null) ?? null;
+        const verdict = session.segmentFormat.judgeTracks?.(raw, bytes, this.#host.segmentStore.initOf(session.outputKey ?? "")) ?? null;
         if (verdict && !verdict.whole) {
           logger.warn(
             `transcode ${session.id} segment #${index} is short of a track — ` +
@@ -400,12 +414,12 @@ export class SegmentServing {
         // grid agree with where the runs really begin — not to relabel the
         // media. Recorded as its own roadmap item rather than guessed at here.
         const stampStart = trueStart ?? publishedStart;
-        if (trueStart !== null && Math.abs(trueStart - publishedStart) > PLAYER_BUFFER_HOLE_SEC) {
+        if (trueStart !== null) {
           this.#host.outputTimes.notePlaylistDisagreement(session, index, trueStart, publishedStart);
         }
         const prepared = session.segmentFormat.prepareSegmentBytes(bytes, {
           startSeconds: stampStart,
-          initBytes: session.initBytes ?? null
+          initBytes: this.#host.segmentStore.initOf(session.outputKey ?? "")
         });
         this.#host.encodeRuns.noteRunProducedSegment(session, filePath);
         return {
@@ -450,6 +464,108 @@ export class SegmentServing {
   }
 
   /**
+   * Whether a piece already given to a viewer can still be served from what is
+   * stored under the key of the output that made it, after that output has
+   * gone.
+   *
+   * WHY THIS EXISTS (roadmap item 97, step 11). A repeat of an address must be
+   * answered by what answered it the first time: the player holds that
+   * output's header, and a piece of another output under the same address may
+   * not decode under it. When the output itself has been disposed, its pieces
+   * and its header stay in the store until the disk needs the room — so the
+   * very bytes that were given can be given again.
+   *
+   * @param {string} goneKey
+   * @param {string} fileName
+   * @returns {boolean}
+   */
+  hasStoredPiece(goneKey, fileName) {
+    const format = this.#host.segmentFormatOfKey(goneKey);
+    if (!format) {
+      return false;
+    }
+    if (format.initFileName !== null && fileName === format.initFileName) {
+      return Boolean(this.#host.segmentStore.initOf(goneKey));
+    }
+    if (!format.isSegmentFileName(fileName)) {
+      return false;
+    }
+    const index = format.segmentIndexFromName(fileName);
+    return this.#host.segmentStore.isClosed(goneKey, index) &&
+      Boolean(this.#host.segmentStore.pathOfName(goneKey, fileName));
+  }
+
+  /**
+   * That stored piece, prepared exactly as it would have been served while its
+   * output lived: its header stripped where the piece carries one, and stamped
+   * with where it truly begins or, where it does not say, where the playlist
+   * the player holds puts it.
+   *
+   * `like` is the picture the address belongs to. Every output interchangeable
+   * with it publishes one timeline, so its playlist is the gone output's too.
+   *
+   * @param {string} goneKey
+   * @param {string} likeId - The picture the address belongs to.
+   * @param {string} fileName
+   * @returns {Promise<{ kind: "file", stream: Readable, contentType: string, isPlaylist: false } | null>}
+   */
+  async storedPieceOf(goneKey, likeId, fileName) {
+    const like = isOutputName(likeId) ? this.#host.outputs.get(likeId) : null;
+    const format = this.#host.segmentFormatOfKey(goneKey);
+    const spec = this.#host.specOfKey(goneKey);
+    if (!format || !spec || !like || !this.hasStoredPiece(goneKey, fileName)) {
+      return null;
+    }
+    const answer = (bytes, contentType) => ({
+      kind: "file",
+      stream: Readable.from([bytes]),
+      contentType,
+      isPlaylist: false
+    });
+    if (format.initFileName !== null && fileName === format.initFileName) {
+      return answer(this.#host.segmentStore.initOf(goneKey), format.initContentType);
+    }
+    const index = format.segmentIndexFromName(fileName);
+    let raw;
+    try {
+      raw = await readFile(this.#host.segmentStore.pathOfName(goneKey, fileName));
+    } catch {
+      return null;
+    }
+    if (!format.needsSegmentRewrite) {
+      return answer(raw, format.segmentContentType);
+    }
+    const view = { segmentFormat: format, spec, timeline: like.timeline };
+    const selfContained = cutsAtGivenTimes(view);
+    const bytes = selfContained && format.stripInit ? format.stripInit(raw) : raw;
+    const trueStart = selfContained ? format.readSegmentStartSeconds?.(raw) ?? null : null;
+    const prepared = format.prepareSegmentBytes(bytes, {
+      startSeconds: trueStart ?? this.#host.outputTimes.publishedStartTime(like, index),
+      initBytes: this.#host.segmentStore.initOf(goneKey)
+    });
+    logger.info(`[hold] ${fileName} served from the stored pieces of ${goneKey}, the output that first answered it`);
+    return answer(prepared, format.segmentContentType);
+  }
+
+  /**
+   * Whether a piece of `liveKey` may stand where a piece of `goneKey` was
+   * given: the two headers compared by the product's own rule
+   * (`init-compat.js`), which refuses anything it cannot show a decoder
+   * ignores. A header not yet made is no proof, and so is a refusal.
+   *
+   * @param {string} goneKey
+   * @param {string} liveKey
+   * @returns {{ compatible: boolean, differences: string[] }}
+   */
+  headersCompatible(goneKey, liveKey) {
+    const verdict = this.#host.compareInits(
+      this.#host.segmentStore.initOf(goneKey),
+      this.#host.segmentStore.initOf(liveKey)
+    );
+    return { compatible: verdict.compatible === true, differences: verdict.differences ?? [] };
+  }
+
+  /**
    * Say WHY a segment is being held, at most once every few seconds per file.
    *
    * A hold is silent today, and that silence has now cost three releases: a
@@ -466,12 +582,12 @@ export class SegmentServing {
    */
   #explainHold(session, fileName, reason) {
     const now = Date.now();
-    session.holdExplainedAt ??= new Map();
-    const last = session.holdExplainedAt.get(fileName) ?? 0;
+    const state = this.#stateFor(session);
+    const last = state.holdExplainedAt.get(fileName) ?? 0;
     if (now - last < 5_000) {
       return;
     }
-    session.holdExplainedAt.set(fileName, now);
+    state.holdExplainedAt.set(fileName, now);
     const index = session.segmentFormat.segmentIndexFromName(fileName);
     // What the encoder has actually DONE since it restarted. "Alive at the right
     // index" was as far as the old line went, and it left the two possible
@@ -486,20 +602,48 @@ export class SegmentServing {
     const progress = this.#host.encodeRuns.progressOf(session, index);
     const runStartSeconds = Number.isFinite(progress?.startPositionSeconds)
       ? progress.startPositionSeconds
-      : this.#host.runStartTimeFor(session, earliestRunStart(this.#host.encodeRuns.runsOf(session)) ?? 0);
+      : this.#host.runStartTimeFor(session, this.#host.encodeRuns.earliestStartOf(session) ?? 0);
     const position = Number(progress?.processedSeconds);
     const produced = Number.isFinite(position) ? position - runStartSeconds : null;
     const speed = progress?.speed || "n/a";
     logger.warn(
       `transcode ${session.id} holding ${fileName}: ${reason} ` +
-      `(runs from #${earliestRunStart(this.#host.encodeRuns.runsOf(session)) ?? "?"}, viewer at #${this.#host.outputTimes.segmentIndexForTime(session, viewerSecondsOn(session))}, ` +
+      `(runs from #${this.#host.encodeRuns.earliestStartOf(session) ?? "?"}, viewer at #${this.#host.outputTimes.segmentIndexForTime(session, this.#host.viewerSecondsOn(session))}, ` +
       `encoder ${this.#host.encodeRuns.liveRunsOf(session).length > 0 ? "alive" : "stopped"}, index #${index}, ` +
       `produced ${produced === null ? "nothing yet — no position reported" : `${produced.toFixed(1)}s`} ` +
       `at ${speed}${produced !== null && produced <= 0 ? " — the encoder has not moved, so it is waiting on its input" : ""})`
     );
   }
 
+  /**
+   * What an absent file answers when production has failed.
+   *
+   * @param {object} session
+   * @returns {{ kind: "failed", message: string } | { kind: "warming-up" }}
+   */
+  #failedOrWarming(session) {
+    if (!this.#host.encodeRuns.hasFailed(session)) {
+      return { kind: "warming-up" };
+    }
+    return {
+      kind: "failed",
+      message: this.#host.encodeRuns.lastErrorOf(session) || "ffmpeg failed for this transcode session."
+    };
+  }
+
   #holdForProduction(session, fileName, isPlaylist, options) {
+    // The file is not there and production has ended in an error: nothing is
+    // going to write it, so the viewer is told instead of held.
+    if (this.#host.encodeRuns.hasFailed(session)) {
+      return this.#failedOrWarming(session);
+    }
+    if (this.#host.encodeRuns.isWaitingForInput(session)) {
+      // The data went away and is being fetched again. Holding the request is
+      // the truthful answer: nothing is broken and there is nothing for the
+      // viewer to retry. Only what is NOT on disk is held for it — a piece that
+      // exists is whole, and it is served whatever the encoder is doing.
+      return { kind: "warming-up" };
+    }
     /** @type {{ address: string, rank: number, topRank: number } | null} */
     let ranked = null;
     if (!isPlaylist) {
@@ -533,132 +677,55 @@ export class SegmentServing {
       const nobodyIsComing = topRank > 0 && rank === 0;
       if (
         Number.isFinite(requestedIndex) &&
-        requestedIndex < (earliestRunStart(this.#host.encodeRuns.runsOf(session)) ?? 0) &&
+        requestedIndex < (this.#host.encodeRuns.earliestStartOf(session) ?? 0) &&
         nobodyIsComing &&
         this.#host.encodeRuns.liveRunsOf(session).length > 0
       ) {
         logger.info(
-          `transcode ${session.id} segment #${requestedIndex} is ${(earliestRunStart(this.#host.encodeRuns.runsOf(session)) ?? 0) - requestedIndex} ` +
+          `transcode ${session.id} segment #${requestedIndex} is ${(this.#host.encodeRuns.earliestStartOf(session) ?? 0) - requestedIndex} ` +
           "segments behind the run and in nobody's zone; answered as absent rather than held"
         );
         return { kind: "not-found", ranked };
       }
-      this.#ensureEncodingFor(
-        session,
-        requestedIndex,
-        Number.isFinite(options?.requestSeq) ? options.requestSeq : Number.MAX_SAFE_INTEGER
-      );
+      this.#noteWanted(session, requestedIndex);
     }
     return { kind: "warming-up", ranked };
   }
 
   /**
-   * Ensure the encoder is producing (or will soon produce) the requested
-   * segment.  If the segment is far ahead of the current encode head, or
-   * behind it, restart ffmpeg at that segment (server-side seek).  Requests
-   * within the look-ahead window are served by waiting for the running encode.
+   * Record that a segment nobody has made yet is wanted, and say so when it lies
+   * behind every encoder of this output.
+   *
+   * A REQUEST STEERS NO ENCODER. This used to be where one did: a request far
+   * from the encode head restarted ffmpeg there, and in the field one seek
+   * produced nine restarts in a minute, because a player holds a couple of
+   * dozen requests open at once and none of them is "the one the viewer ended
+   * on". What is missing in front of a viewer is stated by the priority map,
+   * and placing encoders on it is the plan's work. What is left here is a
+   * record for the restart accounting and a line for whoever reads the log.
    *
    * @param {HlsSession} session
    * @param {number} index
    * @returns {void}
    */
-  #ensureEncodingFor(session, index, requestSeq = Number.MAX_SAFE_INTEGER) {
+  #noteWanted(session, index) {
     // When this segment was FIRST asked for and nobody was producing it. The
     // restart itself costs 0.7-1.3 s (measured 2.9.132), while a seek costs
     // 5-8 s end to end — so most of the wait happens before a restart is even
     // decided on, and that is what this records.
-    session.firstWantedAt ??= new Map();
-    if (!session.firstWantedAt.has(index)) {
-      session.firstWantedAt.set(index, Date.now());
-    }
+    this.#host.encodeRuns.noteWanted(session, index);
     if (!this.#host.encodeRuns.isLive(session) || index < 0) {
       return;
     }
-    // NOTE (2026-08-01): a "only the newest request may steer the encoder"
-    // guard was tried here and REVERTED — it made seeking worse, not better.
-    // The premise (the newest request is the one the viewer wants) does not
-    // hold: when the player cannot get its target segment it starts SCANNING
-    // the playlist, firing dozens of requests across the whole file within
-    // half a second (field log: #178, #681, #725, #807, #74, #245, #387 …).
-    // Under that traffic the newest request is an arbitrary scan probe, so
-    // the guard steered the encoder away from the actual seek target, the
-    // target segment was never produced, and the player gave up and reset to
-    // the start of the file. The ping-pong this tried to fix is real, but the
-    // fix has to distinguish a VIEWER seek from the player's own scan — the
-    // request's arrival order does not carry that information.
-    const head = earliestRunStart(this.#host.encodeRuns.runsOf(session)) ?? 0;
-    // Anchor the look-ahead window on the CURRENT encode position (start index +
-    // seconds already processed), not the run's start index. Otherwise a long
-    // run that has encoded well past `head` would needlessly restart for a
-    // request just ahead of the live edge.
-    const progress = this.#host.encodeRuns.progressOf(session, index);
-    const processed = Number.isFinite(progress?.processedSeconds)
-      ? progress.processedSeconds
-      : this.#host.runStartTimeFor(session, head);
-    const currentSeg = Math.max(head, this.#host.outputTimes.segmentIndexForTime(session, processed));
-    const withinWindow = index >= head && index <= currentSeg + MAX_LOOKAHEAD_SEGMENTS;
-    if (withinWindow) {
-      return;
-    }
-    // A request BELOW where the run begins is not noise and never will be
-    // satisfied: this encoder only ever moves forward from `head`, so nothing
-    // it does can produce this segment. Every other far request is a claim that
-    // the running encode may yet reach — this one is a hole, and holding it is
-    // holding it for ever.
-    //
-    // Measured 2026-08-11: a run repositioned to #770 while the player needed
-    // #757 held that request for two minutes forty-one, producing 409 s of
-    // video nobody had asked for at 2.48x, until the viewer gave up. That was a
-    // quality switch placing the run wrongly; the placement is fixed, but the
-    // shape must not be able to hang a session again whatever puts it there.
-    //
-    // Waited on rather than acted on at once: a burst that arrives around a
-    // reported seek settles by itself within a moment, and the seek is what
-    // should move the encoder. Only a request still unanswerable after that is
-    // repaired here.
+    const head = this.#host.encodeRuns.earliestStartOf(session) ?? 0;
     if (index < head) {
-      // SAID, NOT ACTED ON. What is missing in front of a viewer is stated by
-      // the priority map, and putting encoders on it is the plan's work. This
-      // used to move the encoder itself, from a segment REQUEST — a second
-      // authority over where encoders go, with six chosen constants of its own,
-      // and it survived the pass that removed the other two because it lives in
-      // the path that answers a file rather than in the plan.
+      // Nothing running goes backwards, so nothing running will make it.
       this.#explainHold(
         session,
         session.segmentFormat.segmentFileName(index),
         `it is behind the run (#${head}); where the viewers are is what places encoders`
       );
-      return;
     }
-    // Circuit breaker: this exact target has exhausted the encoding layer's
-    // consecutive fast-start budget (see noteRunEnded).
-    // Stop auto-retrying it so getFileStream reports a clean, retryable error
-    // instead of looping forever. A DIFFERENT
-    // target (the viewer seeking elsewhere) is unaffected — it gets its own
-    // fresh attempt budget.
-    if (!this.#host.encodeOrchestrator.mayStartAt(session.outputKey, index)) {
-      return;
-    }
-    // A far request is NOT treated as a seek. Measured 2026-08-02: on a single
-    // viewer seek the player opens ~25 CONCURRENT requests spanning #904..#1101
-    // and holds them all for the full 60 s without aborting any — normal
-    // read-ahead, not probing. There is therefore no such thing as "the segment
-    // the player ended on": at any instant a couple of dozen different indices
-    // are outstanding, so any rule picking one of them picks noise. Doing so
-    // produced NINE encoder restarts in one minute (#576→#885→#609→#591→#673→
-    // #833→#624→#1071→#1101), each killed 5-8 s in, turning a seek into a
-    // ~70 s ordeal.
-    //
-    // The seek target now arrives explicitly from the browser (requestSeek,
-    // POST /api/transcode-sessions/:id/seek) — the only place the viewer's
-    // intent actually exists. Same split as Jellyfin (startTimeTicks) and
-    // webtor (?t=): requests fetch data, they do not steer the encoder.
-    //
-    // Requests are still valuable, just not as commands: they are a queue of
-    // claims. Held open until produced (the player waits), served from disk
-    // when behind the encoder, and the LOWEST outstanding index marks where the
-    // viewer is actually stalled — the honest input for what to produce first.
-    // See research/hls-seek-prior-art-2026-08-02.md.
   }
 
   /**
@@ -824,26 +891,11 @@ export class SegmentServing {
    * @returns {void}
    */
   #noteViewerSeen(session, consumerId) {
-    this.#host.viewers.of(session, consumerId).seen();
-  }
-
-  /**
-   * Issue the sequence number an incoming segment request keeps for all of its
-   * long-poll iterations. The caller (the route) takes ONE number when the
-   * request arrives and passes it back on every poll, which is what lets
-   * #ensureEncodingFor tell "a newer request arrived" apart from "the same
-   * request polled again" — see the ping-pong it prevents there.
-   *
-   * @param {string} sessionId
-   * @returns {number} 0 when the session is unknown (treated as newest).
-   */
-  nextRequestSeq(sessionId) {
-    const session = isOutputName(sessionId) ? this.#host.outputs.get(sessionId) : null;
-    if (!session) {
-      return 0;
+    // A request that names nobody is evidence about nobody.
+    if (!consumerId) {
+      return;
     }
-    session.requestSeqCounter += 1;
-    return session.requestSeqCounter;
+    this.#host.viewers.of(session, consumerId).seen();
   }
 
   /**
@@ -891,7 +943,7 @@ export class SegmentServing {
     if (!(index >= 0)) {
       return true; // a playlist or an init segment belongs to no position
     }
-    const position = viewerSecondsOn(session, consumerId);
+    const position = this.#host.viewerSecondsOn(session, consumerId);
     const at = this.#host.outputTimes.segmentIndexForTime(session, position);
     // The far edge on THIS session's own grid rather than a count of nominal
     // segments: a copied picture is cut at the source's keyframes, so its
@@ -914,7 +966,48 @@ export class SegmentServing {
    */
   seekEpoch(sessionId) {
     const session = isOutputName(sessionId) ? this.#host.outputs.get(sessionId) : null;
-    return session?.waitEpoch ?? 0;
+    return session ? this.#stateFor(session).waitEpoch : 0;
+  }
+
+  /**
+   * Wait for the requested segment to be published, without polling the disk.
+   *
+   * Ends on the publication, on the waits of this output being invalidated, on
+   * the deadline, or when the requester goes — and whichever ends it, the
+   * waiter is taken out of the store, so a wait with no deadline cannot outlive
+   * the request it was for. Returns false at once for playlists and init files,
+   * whose readiness has a different owner.
+   *
+   * @param {string} sessionId
+   * @param {string} fileName
+   * @param {number} timeoutMs - May be infinite.
+   * @param {Promise<unknown> | null} [requesterGone]
+   * @returns {Promise<boolean>} Whether it is worth asking for the file again.
+   */
+  async waitForSegment(sessionId, fileName, timeoutMs, requesterGone = null) {
+    const session = isOutputName(sessionId) ? this.#host.outputs.get(sessionId) : null;
+    const index = session?.segmentFormat?.segmentIndexFromName?.(fileName) ?? -1;
+    if (!session || index < 0) return false;
+    const state = this.#stateFor(session);
+    let wake;
+    const invalidated = new Promise((resolve) => {
+      wake = resolve;
+      state.waitListeners.add(resolve);
+    });
+    let finished = () => {};
+    const over = new Promise((resolve) => {
+      finished = resolve;
+    });
+    try {
+      return await Promise.race([
+        this.#host.segmentStore.waitFor(session.outputKey ?? "", index, timeoutMs, over),
+        invalidated,
+        ...(requesterGone ? [requesterGone.then(() => false)] : [])
+      ]);
+    } finally {
+      state.waitListeners.delete(wake);
+      finished();
+    }
   }
 
   /**
@@ -931,7 +1024,7 @@ export class SegmentServing {
     // Individual segments are long-polled by the segment route as ffmpeg
     // produces them.
     if (session.useSyntheticPlaylist) {
-      if (this.#host.encodeRuns.runStateOf(session) === ENCODE_RUN_STATE.ENDED_FAILED) {
+      if (this.#host.encodeRuns.hasFailed(session)) {
         throw new Error(this.#host.encodeRuns.lastErrorOf(session) || "ffmpeg failed to start HLS session.");
       }
       return;
@@ -941,7 +1034,7 @@ export class SegmentServing {
     const deadline = Date.now() + this.#host.startupWaitMs;
 
     while (Date.now() < deadline) {
-      if (this.#host.encodeRuns.runStateOf(session) === ENCODE_RUN_STATE.ENDED_FAILED) {
+      if (this.#host.encodeRuns.hasFailed(session)) {
         throw new Error(this.#host.encodeRuns.lastErrorOf(session) || "ffmpeg failed to start HLS session.");
       }
       try {
@@ -989,13 +1082,13 @@ export class SegmentServing {
     // run and its own position, and that is exactly the pair this report exists
     // to tell apart. Answering an audio report from the picture's records would
     // state, confidently, something about the wrong stream.
-    const onScreen = activeOutputFor({ base: named, outputs: this.#host.outputs });
+    const onScreen = this.#host.activeOutputFor({ base: named, outputs: this.#host.outputs });
     const session = track === "audio"
       ? ([...this.#host.outputs.familyOf(onScreen)].find((member) => member.spec.carries === "audio-only") ?? onScreen)
       : onScreen;
     const gap = fragStartSec - bufferEndSec;
     const declared = this.#host.outputTimes.publishedStartTime(session, sn);
-    const trueStart = session.trueStartByIndex instanceof Map ? session.trueStartByIndex.get(sn) : undefined;
+    const trueStart = this.#host.outputTimes.trueStartAt(session, sn);
     const verdict = trueStart === undefined
       // Where a segment truly began is only ever read off one that was cut on
       // an explicit list — a uniform grid has nothing to read back — so this is

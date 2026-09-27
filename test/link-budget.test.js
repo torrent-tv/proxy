@@ -1,60 +1,111 @@
 /**
- * @file What the viewer's link can carry, asked with plain numbers.
+ * @file What a viewer's link does with an output's whole load — roadmap item
+ * 97, step 11.
  *
- * Both of these lived in the session manager, and the first reached for the
- * worst reading among the viewers itself — which is the reach the layer table
- * forbids in as many words: the link is an INPUT to the quality budget, a
- * number, never a thing encoding may go and look at. Here they are two pure
- * functions, which is what makes this file possible at all: no session, no
- * viewer, no clock.
+ * Pure functions over plain numbers: no session, no viewer, no clock.
  */
 
 import test from "node:test";
 import assert from "node:assert/strict";
-import { linkCouldCarry, LINK_SAFETY, peakMbpsForHeight } from "../services/encode/quality/link-budget.js";
-import { maxrateKbpsFor, nominalKbpsForHeight } from "../services/encode/args.js";
+import {
+  admissionRank,
+  audioLoadOf,
+  LINK_SAFETY,
+  LINK_VERDICT,
+  linkCouldCarry,
+  loadOf,
+  PEAK_CLASS,
+  videoLoadForFrame,
+  videoLoadOfSpec
+} from "../services/encode/quality/link-budget.js";
+import { AUDIO_TRANSCODE_KBPS, maxrateKbpsFor, nominalKbpsFor, softwareRateControlFor } from "../services/encode/args.js";
+import { outputSpec } from "./helpers/output-spec.js";
 
-test("a copied source is priced at the bitrate the file itself states", () => {
-  // The one case where the answer is known rather than predicted: copying does
-  // not change a stream's bitrate, and the file says what it is.
-  const carried = peakMbpsForHeight(
-    { sourceHeight: 1080, transcodeVideo: false, sourceMbps: 3.73 },
-    1080
+const known = (mbps) => ({ mbps, peakClass: PEAK_CLASS.KNOWN });
+const estimated = (mbps) => ({ mbps, peakClass: PEAK_CLASS.ESTIMATED });
+const unknown = () => ({ mbps: null, peakClass: PEAK_CLASS.UNKNOWN });
+
+test("a copied source at its own height is its stated average — an estimate, not a bound", () => {
+  const part = videoLoadForFrame({ sourceHeight: 1080, copiesAtSource: true, sourceMbps: 3.73, encoderKind: "software" }, { width: 1920, height: 1080 });
+  assert.deepEqual(part, estimated(3.73));
+});
+
+test("a height the software encoder makes is bounded by the nominal limit of that height", () => {
+  const part = videoLoadForFrame({ sourceHeight: 1080, copiesAtSource: true, sourceMbps: 3.73, encoderKind: "software" }, { width: 1280, height: 720 });
+  assert.deepEqual(part, known(maxrateKbpsFor(nominalKbpsFor({ width: 1280, height: 720 })) / 1000));
+});
+
+test("a height a hardware encoder makes has no bound at all", () => {
+  // It is given a quality figure and no -maxrate, so there is nothing to
+  // compare a link against.
+  const part = videoLoadForFrame({ sourceHeight: 1080, copiesAtSource: false, sourceMbps: 3.73, encoderKind: "nvenc" }, { width: 1280, height: 720 });
+  assert.deepEqual(part, unknown());
+});
+
+test("an output's picture is read off its own rate control", () => {
+  const rateControl = softwareRateControlFor({ width: 1280, height: 720, fps: 24, capKbps: 1400 });
+  const limited = outputSpec({ transcodeVideo: true, width: 1280, height: 720, rateControl });
+  const unlimited = outputSpec({ transcodeVideo: true, width: 1280, height: 720 });
+  assert.deepEqual(videoLoadOfSpec(limited, 3.73), known(rateControl.maxrateKbps / 1000));
+  assert.deepEqual(videoLoadOfSpec(unlimited, 3.73), unknown(), "no limit, no bound");
+  assert.deepEqual(videoLoadOfSpec(outputSpec(), 3.73), estimated(3.73), "a copy is its source's average");
+});
+
+test("a soundtrack is known when re-encoded, estimated when copied, unknown when nothing states its rate", () => {
+  assert.deepEqual(audioLoadOf({ transcode: true, bitrateKbps: null }, AUDIO_TRANSCODE_KBPS), known(AUDIO_TRANSCODE_KBPS / 1000));
+  assert.deepEqual(audioLoadOf({ transcode: false, bitrateKbps: 640 }, AUDIO_TRANSCODE_KBPS), estimated(0.64));
+  assert.deepEqual(audioLoadOf({ transcode: false, bitrateKbps: null }, AUDIO_TRANSCODE_KBPS), unknown());
+  assert.equal(audioLoadOf(null, AUDIO_TRANSCODE_KBPS), null, "no sound, no part");
+});
+
+test("a load is as trustworthy as its least trustworthy part", () => {
+  assert.equal(loadOf(known(3), known(0.128)).peakClass, PEAK_CLASS.KNOWN);
+  assert.equal(loadOf(known(3), estimated(0.64)).peakClass, PEAK_CLASS.ESTIMATED);
+  assert.equal(loadOf(known(3), unknown()).peakClass, PEAK_CLASS.UNKNOWN);
+  assert.equal(loadOf(known(3), unknown()).totalMbps, null, "an unknown part leaves no total");
+  assert.ok(Math.abs(loadOf(known(3), known(0.128)).totalMbps - 3.128) < 1e-9, "the sound is added to the picture");
+});
+
+test("the sound is counted before the link's usable share is applied", () => {
+  // The picture alone fits the usable share exactly; with the soundtrack the
+  // viewer hears, it does not.
+  const link = 10;
+  const picture = known(link * LINK_SAFETY);
+  assert.equal(linkCouldCarry(link, loadOf(picture, null)).verdict, LINK_VERDICT.FITS, "without sound it would pass");
+  assert.equal(
+    linkCouldCarry(link, loadOf(picture, known(AUDIO_TRANSCODE_KBPS / 1000))).verdict,
+    LINK_VERDICT.DOES_NOT_FIT,
+    "with the 128 kbit/s soundtrack it does not"
   );
-
-  assert.equal(carried, 3.73);
 });
 
-test("every other height is priced at the cap its encoder would be held to", () => {
-  // Not the nominal rate: the encoder is allowed to peak, and the link has to
-  // carry the peak or the picture stops while it catches up.
-  const at720 = peakMbpsForHeight({ sourceHeight: 1080, transcodeVideo: true, sourceMbps: 3.73 }, 720);
-
-  assert.equal(at720, maxrateKbpsFor(nominalKbpsForHeight(720)) / 1000);
-  assert.notEqual(at720, 3.73, "the source's own bitrate says nothing about a height it is not");
+test("a known load that passes fits and is confirmed; an estimated one is admitted and not confirmed", () => {
+  const fits = linkCouldCarry(10, loadOf(known(5), null));
+  assert.equal(fits.verdict, LINK_VERDICT.FITS);
+  assert.equal(fits.confirmed, true);
+  const byEstimate = linkCouldCarry(10, loadOf(estimated(5), null));
+  assert.equal(byEstimate.verdict, LINK_VERDICT.ESTIMATED_TO_FIT);
+  assert.equal(byEstimate.admitted, true);
+  assert.equal(byEstimate.confirmed, false, "an average is not a bound");
 });
 
-test("a picture being re-encoded at the source height is predicted, not taken from the file", () => {
-  // Its bytes are not the file's bytes. Pricing it at the source's bitrate was
-  // how a re-encode came to be judged against a figure describing a stream
-  // nobody was producing.
-  const reencoded = peakMbpsForHeight({ sourceHeight: 1080, transcodeVideo: true, sourceMbps: 3.73 }, 1080);
-
-  assert.equal(reencoded, maxrateKbpsFor(nominalKbpsForHeight(1080)) / 1000);
+test("an unknown load is refused against a measured link, and admitted while nothing measured it", () => {
+  const measured = linkCouldCarry(50, loadOf(unknown(), null));
+  assert.equal(measured.verdict, LINK_VERDICT.NO_SAFE_BOUND);
+  assert.equal(measured.admitted, false, "there is no number to compare, however fast the link");
+  for (const unmeasured of [null, 0, Number.NaN]) {
+    const answer = linkCouldCarry(unmeasured, loadOf(unknown(), null));
+    assert.equal(answer.verdict, LINK_VERDICT.NO_MEASUREMENT);
+    assert.equal(answer.admitted, true, "the link gave no ground to refuse");
+    assert.equal(answer.confirmed, false);
+  }
 });
 
-test("only part of a measured link is spent on video", () => {
-  // The rest is what a link does when it is not being perfect. A step sized to
-  // the whole reading stalls on the first retransmission.
-  assert.equal(linkCouldCarry(10, 10 * LINK_SAFETY), true, "exactly the usable share fits");
-  assert.equal(linkCouldCarry(10, 10 * LINK_SAFETY + 0.01), false, "and a hair more does not");
-});
-
-test("a link nothing has measured has no opinion, which is a yes", () => {
-  // The same silence that stops the budget acting at all. A no here would
-  // refuse every step on every session until the first report arrives — which
-  // is exactly the cold open, when the viewer is choosing.
-  assert.equal(linkCouldCarry(null, 6), true);
-  assert.equal(linkCouldCarry(0, 6), true);
-  assert.equal(linkCouldCarry(Number.NaN, 6), true);
+test("a bound ranks before an average, and a refusal ranks nowhere", () => {
+  const knownAnswer = linkCouldCarry(null, loadOf(known(5), null));
+  const estimatedAnswer = linkCouldCarry(null, loadOf(estimated(5), null));
+  const unknownAnswer = linkCouldCarry(null, loadOf(unknown(), null));
+  assert.ok(admissionRank(knownAnswer) > admissionRank(estimatedAnswer));
+  assert.ok(admissionRank(estimatedAnswer) > admissionRank(unknownAnswer));
+  assert.equal(admissionRank(linkCouldCarry(1, loadOf(known(5), null))), 0);
 });

@@ -11,9 +11,9 @@
  * key could come to name two formats. The key is the format now, and there is
  * nothing left to cache.
  *
- * The rate cap is not here, deliberately: rate control appears in neither the
- * SPS nor the PPS, so it can move under a player that has already cached the
- * init.
+ * The bitrate limit is not here: it is part of the output's identity
+ * (`OutputSpec`), so two limits are two outputs and nothing moves a limit under
+ * one that exists.
  *
  * **It also holds how well its own pieces land on its own grid.** Where a piece
  * of THIS output truly began, against where its playlist says it begins, is a

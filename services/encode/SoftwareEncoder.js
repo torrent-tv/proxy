@@ -5,10 +5,10 @@
 
 import { Encoder } from "./Encoder.js";
 import {
-  bitrateCapArgs,
   CPU_THREADS,
   hasForcedTimes,
   keyFrameArgs,
+  rateControlArgs,
   safeDimensions,
   SOFTWARE_CRF,
   SOFTWARE_PRESET,
@@ -42,6 +42,11 @@ export class SoftwareEncoder extends Encoder {
     };
   }
 
+  /** Every preset: `buildVideoArgs` passes whichever the offer chose. */
+  get selectableRungs() {
+    return PRESETS;
+  }
+
   /** @param {string | null} rung @returns {string[]} */
   benchmarkArgs(rung = null) {
     return ["-c:v", "libx264", "-preset", rung ?? SOFTWARE_PRESET, "-crf", SOFTWARE_CRF, "-pix_fmt", "yuv420p"];
@@ -55,7 +60,7 @@ export class SoftwareEncoder extends Encoder {
     fps,
     tonemap,
     forcedKeyframeTimes,
-    nominalKbps = null
+    rateControl = null
   }) {
     const { w, h } = safeDimensions(targetWidth, targetHeight);
     const chosenPreset = typeof preset === "string" && preset.length > 0 ? preset : SOFTWARE_PRESET;
@@ -80,11 +85,11 @@ export class SoftwareEncoder extends Encoder {
       // faster than realtime); falls back to the static default.
       "-preset", chosenPreset,
       "-crf", SOFTWARE_CRF,
-      // Constrained CRF: bound peak bitrate per rung so a complex scene
-      // cannot produce segments a thin viewer link (cellular) can't
-      // download in time. Sized by the TARGET box height (the rung the
-      // budget/manual selection chose).
-      ...bitrateCapArgs(h, nominalKbps),
+      // Constrained CRF: bound peak bitrate so a complex scene cannot produce
+      // segments a thin viewer link (cellular) can't download in time. The
+      // figures and the level are the OUTPUT's own, named by its key
+      // (`OutputSpec`), and are not worked out again here.
+      ...rateControlArgs(rateControl),
       "-threads", String(CPU_THREADS),
       "-pix_fmt", "yuv420p",
       // Fixed GOP: a keyframe exactly every (segmentDurationSec × fps) frames,

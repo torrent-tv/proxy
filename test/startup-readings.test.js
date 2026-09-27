@@ -79,12 +79,17 @@ test("nothing about the machine is asked only of a software encoder", () => {
   }
 });
 
-test("the throughput benchmark is given the encoder that will actually run", () => {
+test("the calibration is given the encoder that will actually run, and software beside it", () => {
   const server = readFileSync(path.join(HERE, "..", "server.js"), "utf8");
   assert.match(
     server,
-    /benchmarkSoftwarePresets\(\{[^}]*encoder: videoEncoder/,
-    "the benchmark is not told which encoder to measure"
+    /calibrateEncoder\(\{[^}]*encoder: videoEncoder/,
+    "the calibration is not told which encoder to measure"
+  );
+  assert.match(
+    server,
+    /calibrateEncoder\(\{[^}]*encoder: softwareDescriptor\(\)/,
+    "software, which a failing device falls back to, is not calibrated"
   );
 });
 

@@ -61,8 +61,10 @@ import { speedFromReadings } from "../encoder-readings.js";
 import { contentionPenalty } from "../contention.js";
 import { ENCODE_RUN_STATE, liveRunsOf, processCanBeSignalled } from "../encode-run-state.js";
 import { canSustainOutput, chooseSoftwareEncodeSettings, speedBar } from "../hwaccel.js";
+import { throughputAt } from "../throughput.js";
 import { computeOutputDimensions, TRANSCODE_FPS } from "../args.js";
 import { logger } from "../../../utils/logger.js";
+import { qualityStateOf } from "./OutputQualityState.js";
 
 export class EncodeCost {
   /**
@@ -86,6 +88,10 @@ export class EncodeCost {
    * @type {Map<number, number | null> | null}
    */
   lastPredictedByHeight = null;
+
+  notePredictionFor(session, height) {
+    qualityStateOf(session).predictedSpeedWhenOffered = this.lastPredictedByHeight?.get(height) ?? null;
+  }
 
   // The last refusal printed. The offer is recomputed on the path that serves
   // every playlist, init and segment, and the figures behind it move every few
@@ -113,7 +119,7 @@ export class EncodeCost {
    *   boundBy: (session: object) => Promise<"cpu" | "download" | "unknown">,
    *   runsFor: (output: object) => object[],
    *   stateFor: (output: object) => string,
-   *   progressFor: (output: object) => object | null
+   *   progressFor: (output: object, run: object | null) => object | null - The progress of that one run.
    * }} deps
    */
   constructor({ outputs, host, runningEncoders, encodersRunningNow, torrentCostSecFor, boundBy, runsFor, stateFor, progressFor }) {
@@ -210,8 +216,17 @@ export class EncodeCost {
    * @returns {number}
    */
   #pictureCostOf(session) {
-    if (Number.isFinite(session.lastAloneSpeed) && session.lastAloneSpeed > 0) {
-      return 1 / session.lastAloneSpeed;
+    const state = qualityStateOf(session);
+    if (Number.isFinite(state.lastAloneSpeed) && state.lastAloneSpeed > 0) {
+      return 1 / state.lastAloneSpeed;
+    }
+    // WHAT AN ENCODE OF THIS MODE WAS SEEN DOING HERE BEFORE, alone, on
+    // material no easier than this (roadmap item 97, step 14): the slowest
+    // such reading, on this configuration only. It refines the startup
+    // prediction; with nothing seen, the prediction stands.
+    const seen = Number(this.#host().observedAloneSpeed?.(session));
+    if (Number.isFinite(seen) && seen > 0) {
+      return 1 / seen;
     }
     const benchmark = this.#host().benchmark;
     const width = Number(session.output.encodeWidth) || 0;
@@ -226,7 +241,8 @@ export class EncodeCost {
       source: session.file.decode ?? null,
       outputPixelsPerSec: width * height * fps,
       observedDecodeCostSec: null,
-      concurrentCostSec: 0
+      concurrentCostSec: 0,
+      frame: { width, height }
     });
     return Number.isFinite(speed) && speed > 0 ? 1 / speed : 0;
   }
@@ -262,7 +278,7 @@ export class EncodeCost {
     const outputs = this.#outputs.outputsOn(address);
     let measured = 0;
     for (const session of outputs) {
-      const speed = Number(session.lastAloneSpeed);
+      const speed = Number(qualityStateOf(session).lastAloneSpeed);
       if (Number.isFinite(speed) && speed > measured) {
         measured = speed;
       }
@@ -284,6 +300,56 @@ export class EncodeCost {
       }
     }
     return 0;
+  }
+
+  /**
+   * What one encoder on this output costs the machine, in seconds of work per
+   * second of film, and what its file costs simply by being fetched.
+   *
+   * The unit the quality offer already judges every step in, so that "may one
+   * more encoder run" and "may this height be offered" are the same arithmetic
+   * and cannot disagree. Three kinds, priced from what each was seen doing:
+   *
+   * 1. a soundtrack, from its own measured speed;
+   * 2. a copied picture, from its own measured speed, and otherwise from the
+   *    startup copy measurement;
+   * 3. a re-encoded picture, from what it did alone, and otherwise from the
+   *    encode model applied to its own pixel rate.
+   *
+   * NULL WHEN NOTHING HAS PRICED IT, and never a guess: a soundtrack nobody has
+   * measured yet contributes nothing, as it does to the offer. The caller says
+   * so rather than inventing a figure.
+   *
+   * @param {string} address - The output, as the encoding layer names it.
+   * @returns {{ costSec: number | null, fileKey: string, fileCostSec: number } | null}
+   *   Null when no output of that address is here.
+   */
+  loadOfOutput(address) {
+    const session = this.#outputs.outputsOn(address)[0] ?? null;
+    if (!session) {
+      return null;
+    }
+    const fileKey = session.file?.key ?? "";
+    const fileCost = Number(this.#torrentCostSecFor(session));
+    const fileCostSec = Number.isFinite(fileCost) && fileCost > 0 ? fileCost : 0;
+    const measured = Number(qualityStateOf(session).lastAloneSpeed);
+    if (Number.isFinite(measured) && measured > 0) {
+      return { costSec: 1 / measured, fileKey, fileCostSec };
+    }
+    if (session.spec.carries === "audio-only") {
+      const audio = this.#audioCost.get(EncodeCost.audioKeyOf(session));
+      return { costSec: audio && audio.costSec > 0 ? audio.costSec : null, fileKey, fileCostSec };
+    }
+    if (!session.spec.transcodesVideo) {
+      const copy = this.#copyCost.get(session.file.key);
+      if (copy && copy.costSec > 0) {
+        return { costSec: copy.costSec, fileKey, fileCostSec };
+      }
+      const copying = Number(this.#host().copySpeedX);
+      return { costSec: Number.isFinite(copying) && copying > 0 ? 1 / copying : null, fileKey, fileCostSec };
+    }
+    const picture = this.#pictureCostOf(session);
+    return { costSec: picture > 0 ? picture : null, fileKey, fileCostSec };
   }
 
   /**
@@ -448,12 +514,13 @@ export class EncodeCost {
     /** @type {Map<number, number>} */
     const speeds = new Map();
     for (const session of this.#outputs.familyOf(base)) {
-      if (!session.spec.transcodesVideo || !Number.isFinite(session.lastAloneSpeed)) {
+      const speed = qualityStateOf(session).lastAloneSpeed;
+      if (!session.spec.transcodesVideo || !Number.isFinite(speed)) {
         continue;
       }
       const height = this.#outputs.variantHeightOf(session);
       if (height > 0) {
-        speeds.set(height, session.lastAloneSpeed);
+        speeds.set(height, speed);
       }
     }
     return speeds;
@@ -499,6 +566,10 @@ export class EncodeCost {
     // reports a refusal names the figure it refused against.
     const bar = speedBar(requiredSpeed);
     const benchmark = this.#host().benchmark;
+    // CALIBRATED WITH NOTHING QUALIFIED is not the same as not calibrated at
+    // all (roadmap item 97, step 14): with no mode of this encoder shown to
+    // work, nothing re-encoded is offered.
+    const nothingQualified = Array.isArray(benchmark) && benchmark.length === 0;
     if (!Array.isArray(benchmark) || benchmark.length === 0 || sourceHeight <= 0 || sourceWidth <= 0) {
       // Nothing to predict WITH, so nothing is predicted. What has been SEEN
       // still counts: a rung measured running below realtime is withdrawn here
@@ -509,9 +580,17 @@ export class EncodeCost {
       // The rung on screen is not exempt, for the same reason it is not exempt
       // below: keeping one measured at 0.007x stalls the viewer with no path to
       // a faster rung, which is what the field showed on 2026-08-31.
+      //
+      // What nothing has priced is not offered either (roadmap item 97, step
+      // 14): with no mode of this encoder qualified at startup, only a height
+      // that needs no encoder — the copied source — or one an encoder is
+      // already seen holding stays.
       return heights.filter((height) => {
         const measured = measuredHeights?.get(height) ?? null;
-        return measured === null || measured >= 1;
+        if (measured !== null) {
+          return measured >= 1;
+        }
+        return !nothingQualified || (!transcodeVideo && (height === sourceHeight || height === ownHeight));
       });
     }
     /** @type {number[]} */
@@ -596,7 +675,8 @@ export class EncodeCost {
         source,
         outputPixelsPerSec: width * height * fps,
         observedDecodeCostSec,
-        concurrentCostSec: concurrentBesideThis
+        concurrentCostSec: concurrentBesideThis,
+        frame: { width, height }
       });
       // The benchmark behind that figure was taken on a QUIET host — one
       // ffmpeg and nothing else. The machine a step will actually run on is
@@ -678,13 +758,15 @@ export class EncodeCost {
    * @returns {Promise<void>}
    */
   async learnFrom(session) {
+    if (!session) {
+      return;
+    }
     if (
-      !session ||
       this.#stateFor(session) === ENCODE_RUN_STATE.ENDED_FAILED ||
       liveRunsOf(this.#runsFor(session)).length === 0 ||
       this.#stateFor(session) === ENCODE_RUN_STATE.SUSPENDED
     ) {
-      session.learnSample = null;
+      qualityStateOf(session).learnSample = null;
       return;
     }
     // Measured as a DELTA between two readings of a run that was going for the
@@ -695,9 +777,16 @@ export class EncodeCost {
     // that way a copy running at 8x reports 1.6x and falling, which would be
     // filed as the price of copying and refuse rungs on arithmetic that
     // measured a pause.
-    const processedSeconds = Number(this.#progressFor(session)?.processedSeconds);
+    const run = liveRunsOf(this.#runsFor(session))[0] ?? null;
+    // The position is THAT run's own, read from the same process the sample is
+    // stamped with. It used to be the output's progress, which is whichever
+    // live run covers the viewer and updated last — so with two encoders on
+    // one output a pair of readings could be two processes' positions filed
+    // under one run, and the difference between them read as a speed.
+    const processedSeconds = Number(this.#progressFor(session, run)?.processedSeconds);
     const takenAt = Date.now();
-    const previous = session.learnSample ?? null;
+    const state = qualityStateOf(session);
+    const previous = state.learnSample ?? null;
     // Stamped with the run it was taken from. A restart clears this sample, but
     // it then spends up to a second and a half making its directory and burying
     // its predecessor, and through that window the session still carries the
@@ -707,8 +796,7 @@ export class EncodeCost {
     // admits every quality step there is. Comparing the serials is what the
     // twenty-second wait used to stand in for, and unlike the wait it costs no
     // readings on a short run.
-    const run = liveRunsOf(this.#runsFor(session))[0] ?? null;
-    session.learnSample = { takenAt, processedSeconds, run };
+    state.learnSample = { takenAt, processedSeconds, run };
     if (previous === null || !Number.isFinite(processedSeconds) || !Number.isFinite(previous.processedSeconds)) {
       return;
     }
@@ -726,7 +814,7 @@ export class EncodeCost {
     // exactly what this run is doing right now, whatever else the machine is
     // doing beside it. Sharing the figure and not the conditions is what lets
     // the budget stop reading ffmpeg's cumulative average.
-    session.recentSpeed = { speed, at: takenAt, run };
+    state.recentSpeed = { speed, at: takenAt, run };
     const kind = costKindForSession(session);
     // A reading taken beside another encoder contains that other encoder's
     // work, and the budget ADDS the same work again when it predicts — so filed
@@ -768,7 +856,7 @@ export class EncodeCost {
     // swarm. Stored first, as it was, that figure became this encode's price —
     // 0.3x reads as 3.33 s of work per second of video, more than the machine
     // has — and every other quality step was refused on the download's account.
-    session.lastAloneSpeed = speed;
+    state.lastAloneSpeed = speed;
     // What the offer predicted for this very step, against what it then did
     // with the machine to itself. The prediction is corrected for the share of
     // the machine that was free at the time, so this ratio is the error that
@@ -776,14 +864,14 @@ export class EncodeCost {
     // stage of roadmap item 3 moved anything. Written when it changes by more
     // than a tenth, so a steady step says it once rather than every five
     // seconds.
-    if (Number.isFinite(session.predictedSpeedWhenOffered) && session.predictedSpeedWhenOffered > 0) {
-      const ratio = speed / session.predictedSpeedWhenOffered;
-      const lastSaid = session.lastPredictionRatio;
+    if (Number.isFinite(state.predictedSpeedWhenOffered) && state.predictedSpeedWhenOffered > 0) {
+      const ratio = speed / state.predictedSpeedWhenOffered;
+      const lastSaid = state.lastPredictionRatio;
       if (!Number.isFinite(lastSaid) || Math.abs(ratio - lastSaid) > 0.1) {
-        session.lastPredictionRatio = ratio;
+        state.lastPredictionRatio = ratio;
         logger.info(
           `prediction ${session.id.slice(0, 8)} ${session.output.encodeHeight || "source"}p: ` +
-          `predicted ${session.predictedSpeedWhenOffered.toFixed(2)}x, measured ${speed.toFixed(2)}x ` +
+          `predicted ${state.predictedSpeedWhenOffered.toFixed(2)}x, measured ${speed.toFixed(2)}x ` +
           `(ratio ${ratio.toFixed(2)}; 1.00 would mean the arithmetic describes this machine)`
         );
       }
@@ -883,16 +971,18 @@ export class EncodeCost {
       return;
     }
     const entry = benchmark.find((item) => item.preset === session.output.softwarePreset);
-    if (!entry || !(entry.pixelsPerSec > 0)) {
-      return;
-    }
     const height = Number(session.output.encodeHeight) || 0;
     const width = Number(session.output.encodeWidth) || 0;
     const fps = Number(session.output.outputFps) || TRANSCODE_FPS;
-    if (height <= 0 || width <= 0) {
+    if (!entry || height <= 0 || width <= 0) {
       return;
     }
-    const encodeCostSec = (width * height * fps) / entry.pixelsPerSec;
+    // The preset's throughput AT THIS SIZE, as the startup calibration read it.
+    const pixelsPerSec = throughputAt(entry, { width, height });
+    if (!(pixelsPerSec > 0)) {
+      return;
+    }
+    const encodeCostSec = (width * height * fps) / pixelsPerSec;
     const decodeCostSec = 1 / speed - encodeCostSec;
     if (!(decodeCostSec > 0)) {
       // The encode half already accounts for everything measured. Nothing is
@@ -939,7 +1029,7 @@ export class EncodeCost {
    * @returns {number | null}
    */
   recentSpeedOf(session, now, withinMs) {
-    const reading = session.recentSpeed;
+    const reading = qualityStateOf(session).recentSpeed;
     if (!reading || !this.#runsFor(session).includes(reading.run)) {
       return null; // nothing from THIS run
     }

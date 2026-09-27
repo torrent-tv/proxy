@@ -18,7 +18,7 @@
  *
  * It decides ONE PARAMETER of an output and places no encoder: where an encoder
  * works is the priority map's answer. Pure over plain values — the outputs of
- * one picture, where it was opened, and how long a piece is — so it knows
+ * one picture, the viewer registry, where it was opened, and how long a piece is — so it knows
  * nothing of ffmpeg, cut grids or the disk.
  */
 
@@ -31,10 +31,11 @@ import { earliestViewerSecondsOn } from "./positions.js";
  * @param {number} params.openedAtSeconds - Where the picture was opened, which
  *   is the answer while nobody has stated a position yet.
  * @param {number} params.segmentSeconds - How long one piece is.
+ * @param {{ forOutput: (output: object) => Map<string, object> }} params.viewers - The registry.
  * @returns {number} Seconds, never negative.
  */
-export function audioStartSecondsFor({ family, openedAtSeconds, segmentSeconds }) {
-  const earliest = earliestViewerSecondsOn(family);
+export function audioStartSecondsFor({ family, openedAtSeconds, segmentSeconds, viewers }) {
+  const earliest = earliestViewerSecondsOn(viewers, family, Date.now());
   const opened = Number(openedAtSeconds);
   const from = earliest ?? (Number.isFinite(opened) ? opened : 0);
   // ONE PIECE BACK, and that is not a margin: a cut grid places the

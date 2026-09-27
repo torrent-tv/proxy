@@ -40,7 +40,16 @@ export async function handleApiTranscodeSessionSeekPost(req, reply, { viewerRequ
   // has to move with them or their next request is judged against where they
   // were before the jump.
   const consumerId = typeof body.consumerId === "string" ? body.consumerId.trim() : "";
-  const applied = viewerRequests.requestSeek(sessionId, positionSeconds, consumerId);
+  if (!consumerId) {
+    reply.code(400);
+    return reply.send({ error: "consumerId is required." });
+  }
+  // Which viewing their requests now belong to. The page raises this before it
+  // sends anything and stamps every request with it, so a request that crosses
+  // this message is still read against the viewing it was made in. A page that
+  // states nothing leaves the generation where it is.
+  const generation = Number(body.generation);
+  const applied = viewerRequests.requestSeek(sessionId, positionSeconds, consumerId, generation);
   if (!applied) {
     // Unknown or disposed session — nothing to steer. Not an error worth
     // surfacing to the viewer: the seek will be handled by whatever session

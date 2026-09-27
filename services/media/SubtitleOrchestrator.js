@@ -18,6 +18,9 @@
  */
 
 import { logger } from "../../utils/logger.js";
+import { SubtitleFileContainer } from "./container/SubtitleFileContainer.js";
+import { TextSubtitleTrack } from "./tracks/TextSubtitleTrack.js";
+import { detectLanguage } from "./tracks/language-detect.js";
 
 export class SubtitleOrchestrator {
   /**
@@ -110,6 +113,51 @@ export class SubtitleOrchestrator {
     } catch {
       return [];
     }
+  }
+
+  /**
+   * A subtitle FILE as WebVTT, and the language its words are in.
+   *
+   * The language is read from the CONVERTED document, not from the file. The
+   * conversion has already dropped everything that is not the words — and on
+   * an ASS file that is half of it, in Latin letters, which is what made a
+   * Russian track answer `en` (field 2026-09-01,
+   * `research/subtitle-language-ass-markup-2026-09-01.md`).
+   *
+   * @param {Buffer} bytes
+   * @param {string} extension - With its dot, lower case.
+   * @returns {{ vtt: string, language: string | null } | null} Null for a
+   *   format this cannot convert.
+   */
+  fileAsVtt(bytes, extension) {
+    const text = SubtitleFileContainer.decodeBytes(bytes);
+    const vtt = SubtitleFileContainer.toVtt(text, extension);
+    if (!vtt) {
+      return null;
+    }
+    return { vtt, language: TextSubtitleTrack.detectLanguageFromVtt(vtt) };
+  }
+
+  /**
+   * Cues held for an embedded track as WebVTT, and the language of the track.
+   *
+   * Two things this reads, and each of them was wrong before 2.68.1. It reads
+   * the cues through `finalizeCues`, so what reaches the detector is the words
+   * and not ASS's `{\…}` override groups, which are Latin on a Russian track.
+   * And it reads EVERY cue held so far, not the subset being sent: a
+   * re-subscription after a reconnect asks only for what the page missed,
+   * which can be three lines, and three lines are not a sample of a language.
+   *
+   * @param {object[]} sending - The cues this answer carries.
+   * @param {object[]} held - Every cue held for the track so far.
+   * @param {string} codecId
+   * @returns {{ vtt: string, language: string | null }}
+   */
+  cuesAsVtt(sending, held, codecId) {
+    return {
+      vtt: TextSubtitleTrack.cuesToVtt(sending, codecId),
+      language: detectLanguage(TextSubtitleTrack.finalizeCues(held, codecId).map((cue) => cue.text).join("\n"))
+    };
   }
 
   forget(sourceKey, fileIndex) {

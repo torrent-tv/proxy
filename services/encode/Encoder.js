@@ -73,9 +73,25 @@ export class Encoder {
   }
 
   /**
+   * The settings of {@link speedLadder} a real output can actually be encoded
+   * at, slowest first — what `buildVideoArgs` honours. The startup calibration
+   * qualifies and measures exactly these and nothing else (roadmap item 97,
+   * step 14): a setting the arguments never pass is not a mode of this host,
+   * and pricing one would price something no output is ever encoded with.
+   *
+   * `[null]` for a kind driven at one fixed setting: there is one mode, and it
+   * is the one its arguments state.
+   *
+   * @returns {Array<string | null>}
+   */
+  get selectableRungs() {
+    return [null];
+  }
+
+  /**
    * The arguments that produce the picture. Every kind states its own.
    *
-   * @param {{ targetWidth: number, targetHeight: number, segmentDurationSec: number, preset?: string, fps?: number, tonemap?: boolean, forcedKeyframeTimes?: number[] | null, nominalKbps?: number | null }} _options
+   * @param {{ targetWidth: number, targetHeight: number, segmentDurationSec: number, preset?: string, fps?: number, tonemap?: boolean, forcedKeyframeTimes?: number[] | null, rateControl?: { maxrateKbps: number, bufsizeKbps: number, level: string | null } | null }} _options
    * @returns {string[]}
    */
   buildVideoArgs(_options) {

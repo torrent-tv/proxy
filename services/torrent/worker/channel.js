@@ -172,12 +172,14 @@ export function createReceiveStream({ port, requestId, onCancel }) {
  * @param {object} params
  * @param {import("node:worker_threads").MessagePort} params.port
  * @param {number} params.requestId
- * @returns {{ send: (bytes: Buffer) => Promise<void>, end: () => void, ack: () => void, cancel: () => void, isCancelled: () => boolean }}
+ * @returns {{ send: (bytes: Buffer) => Promise<void>, end: () => void, ack: () => void, cancel: () => void, isCancelled: () => boolean, onCancel: (listener: () => void) => () => void }}
  */
 export function createSendStream({ port, requestId }) {
   let inFlight = 0;
   let cancelled = false;
   let wake = null;
+  /** Told the moment the read is cancelled. @type {Set<() => void>} */
+  const cancelListeners = new Set();
 
   const waitForCapacity = () => {
     if (cancelled || inFlight < STREAM_HIGH_WATER_CHUNKS) {
@@ -241,10 +243,29 @@ export function createSendStream({ port, requestId }) {
         wake = null;
         resume();
       }
+      for (const listener of [...cancelListeners]) {
+        listener();
+      }
+      cancelListeners.clear();
     },
 
     isCancelled() {
       return cancelled;
+    },
+
+    /**
+     * Be told when this read is cancelled — at once if it already has been.
+     *
+     * @param {() => void} listener
+     * @returns {() => void} Stop being told.
+     */
+    onCancel(listener) {
+      if (cancelled) {
+        listener();
+        return () => {};
+      }
+      cancelListeners.add(listener);
+      return () => cancelListeners.delete(listener);
     }
   };
 }

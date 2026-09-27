@@ -50,7 +50,7 @@ test("when a hardware encoder fails, the outputs it named are closed rather than
   const file = new SourceFile({ sourceKey: "torrent:abc", fileIndex: 0, name: "film.mkv" });
   const record = (id, encoder) => {
     const spec = outputSpec({ sourceKey: "torrent:abc", transcodeVideo: true, width: 1280, height: 720, encoder });
-    const output = { id, spec, get outputKey() { return this.spec.toKey(); }, file, claims: new Set() };
+    const output = { id, spec, get outputKey() { return this.spec.toKey(); }, file };
     manager.outputs.set(id, output);
     return output;
   };

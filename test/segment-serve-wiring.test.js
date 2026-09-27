@@ -176,7 +176,6 @@ async function managerWithReadySegment(overrides = {}) {
     // and the plan takes the encoder away for changing nothing.
     lastAloneSpeed: 2,
     startedAt: Date.now(),
-    createEntryMs: Date.now(),
     lastAccessedAt: Date.now(),
     runs: new Set(),
     lastError: "",
@@ -189,7 +188,6 @@ async function managerWithReadySegment(overrides = {}) {
     segmentFormat: overrides.segmentFormat ?? fmp4Format,
     useSyntheticPlaylist: true,
     playlistText: "#EXTM3U\n",
-    initBytes: fmp4Format.extractInit(piece),
     // WHAT IS BEING PRODUCED, which is also where a produced piece's landing is
     // recorded. Per output, so one output's reading of a piece number cannot
     // silence another output's reading of its own.
@@ -200,9 +198,15 @@ async function managerWithReadySegment(overrides = {}) {
     // of the sort.
     keyframes: new KeyframeTable().learn({ times: [0, 12.5, 25, 37.5, 50], format: "matroska" }),
     audioOnly: overrides.audioOnly === true,
-    firstSegmentLogged: false,
     waitEpoch: 0
   };
+  // THE INIT IS THE STORE'S, and a player fetches it before any segment — so a
+  // fixture that wants segments served as production serves them has to put it
+  // there first. It used to sit on the session, which nothing reads any more:
+  // `prepareSegmentBytes` has no timescales without it and hands the piece back
+  // unstamped, which is silent and is exactly the fault stamping exists to
+  // prevent.
+  manager.segmentStore.keepInit(OUTPUT_KEY, fmp4Format.extractInit(piece));
   manager.outputs.set(SESSION_ID, session);
   // SOMEBODY IS WATCHING IT. A segment is requested by a viewer, so a fixture
   // that asks for one without stating a viewer describes a state production
@@ -235,7 +239,7 @@ test("serving a segment records what its real start says about the container's i
   // grid for every output forever, which is worse than no measurement.
   assert.equal(session.output.landing, null, "nothing has been produced yet");
 
-  await manager.serving.getFileStream(SESSION_ID, "segment-00000.mp4", { requestSeq: 1 });
+  await manager.serving.getFileStream(SESSION_ID, "segment-00000.mp4");
 
   assert.equal(session.output.landing.checked, 1, "the piece that was just produced must have been examined");
 });
@@ -252,7 +256,7 @@ test("only a copied picture's landing is taken as evidence about the file's keyf
     await rm(sound.dirPath, { recursive: true, force: true });
   });
 
-  await sound.manager.serving.getFileStream(SESSION_ID, "segment-00000.mp4", { requestSeq: 1 });
+  await sound.manager.serving.getFileStream(SESSION_ID, "segment-00000.mp4");
 
   assert.equal(sound.session.output.landing.checked, 1, "the sound's own landing is recorded");
   assert.equal(
@@ -267,7 +271,7 @@ test("only a copied picture's landing is taken as evidence about the file's keyf
     await rm(picture.dirPath, { recursive: true, force: true });
   });
 
-  await picture.manager.serving.getFileStream(SESSION_ID, "segment-00000.mp4", { requestSeq: 1 });
+  await picture.manager.serving.getFileStream(SESSION_ID, "segment-00000.mp4");
 
   assert.equal(picture.session.keyframes.evidence.checked, 1, "a copy's landing does reach the file's table");
 });
@@ -279,7 +283,7 @@ test("a segment that exists is served, not reported as still being produced", as
     await rm(dirPath, { recursive: true, force: true });
   });
 
-  const result = await manager.serving.getFileStream(SESSION_ID, "segment-00000.mp4", { requestSeq: 1 });
+  const result = await manager.serving.getFileStream(SESSION_ID, "segment-00000.mp4");
 
   assert.equal(result.kind, "file", "a finished segment on disk must come back as bytes");
   assert.equal(result.contentType, fmp4Format.segmentContentType);
@@ -323,7 +327,7 @@ test("a fault while preparing an existing segment is named, not turned into a wa
     await rm(dirPath, { recursive: true, force: true });
   });
 
-  const result = await manager.serving.getFileStream(SESSION_ID, "segment-00000.mp4", { requestSeq: 1 });
+  const result = await manager.serving.getFileStream(SESSION_ID, "segment-00000.mp4");
 
   assert.equal(
     result.kind,
@@ -350,7 +354,7 @@ test("a run's FIRST segment is served once the encoder has passed it, without wa
   // encoder's reported position — a different question, where it has read to
   // rather than what it has closed.
 
-  const result = await manager.serving.getFileStream(SESSION_ID, "segment-00000.mp4", { requestSeq: 1 });
+  const result = await manager.serving.getFileStream(SESSION_ID, "segment-00000.mp4");
 
   assert.equal(
     result.kind,
@@ -372,7 +376,7 @@ test("a segment an earlier run made is served by whatever run is going now", asy
   const run = startRunOn(session, { from: 40, usesExplicitCuts: true });
   manager.encodeOrchestrator.adopt(OUTPUT_KEY, run);
 
-  const result = await manager.serving.getFileStream(SESSION_ID, "segment-00000.mp4", { requestSeq: 1 });
+  const result = await manager.serving.getFileStream(SESSION_ID, "segment-00000.mp4");
 
   assert.equal(result.kind, "file", "what any run of this output made is what this output holds");
   const chunks = [];
@@ -405,7 +409,7 @@ test("serving a run's own segment moves the run out of STARTING", async (t) => {
   assert.equal(run.state, ENCODE_RUN_STATE.STARTING);
   assert.deepEqual(run.produced, [], "it has made nothing yet");
 
-  await manager.serving.getFileStream(SESSION_ID, "segment-00001.mp4", { requestSeq: 1 });
+  await manager.serving.getFileStream(SESSION_ID, "segment-00001.mp4");
 
   // ASKED OF WHAT THE SERVE WROTE, not of the state that happens to follow it.
   // The plan owns a run's life and may end it in the same turn for reasons of
@@ -431,7 +435,7 @@ test("a segment behind a run's own start does not claim that run has produced", 
   const run = startRunOn(session, { from: 5, producing: false, usesExplicitCuts: true, speedX: 2 });
   manager.encodeOrchestrator.adopt(OUTPUT_KEY, run);
 
-  await manager.serving.getFileStream(SESSION_ID, "segment-00000.mp4", { requestSeq: 1 });
+  await manager.serving.getFileStream(SESSION_ID, "segment-00000.mp4");
 
   assert.deepEqual(run.produced, [], "#0 is somebody else's work and says nothing about this run");
   assert.equal(run.head, 5, "which is still where it began");
@@ -458,14 +462,14 @@ test("a request behind the run that nobody is coming for is answered absent, not
   manager.encodeOrchestrator.adopt(OUTPUT_KEY, run);
 
   // No map yet: the request is HELD, because nothing has said otherwise.
-  const held = await manager.serving.getFileStream(SESSION_ID, "segment-00002.mp4", { requestSeq: 2 });
+  const held = await manager.serving.getFileStream(SESSION_ID, "segment-00002.mp4");
   assert.notEqual(held.kind, "not-found", "a session with no map waits, it does not refuse");
 
   // Now the map says where the viewers are, and #2 is not in it.
   manager.encodeOrchestrator.notePriorityMap(OUTPUT_KEY, [
     { from: 3, to: 4, priority: 100, withinSeconds: 0 }
   ]);
-  const refused = await manager.serving.getFileStream(SESSION_ID, "segment-00002.mp4", { requestSeq: 3 });
+  const refused = await manager.serving.getFileStream(SESSION_ID, "segment-00002.mp4");
 
   assert.equal(refused.kind, "not-found");
 });

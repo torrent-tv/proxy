@@ -33,13 +33,14 @@ import { activeOutputFor } from "./active-output.js";
  */
 export function recordViewerReport({ outputs, viewers, sessionId, report, now = Date.now() }) {
   const named = outputs.get(sessionId);
-  if (!named) {
+  const consumerId = typeof report?.consumerId === "string" ? report.consumerId : "";
+  // A report that names nobody is a reading of nobody's link.
+  if (!named || !consumerId) {
     return false;
   }
-  const consumerId = typeof report?.consumerId === "string" ? report.consumerId : "";
   // The stream on screen is the reporter's own: with two viewers on two rungs,
   // one report says nothing about the other's encoder.
-  const session = activeOutputFor({ base: named, consumerId, outputs });
+  const session = activeOutputFor({ base: named, consumerId, outputs, viewers });
   viewers.of(session, consumerId).report(report, now);
   return true;
 }

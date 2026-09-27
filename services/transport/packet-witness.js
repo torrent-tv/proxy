@@ -39,8 +39,6 @@ import { copyFile, readdir, rename, rm, stat } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 
-import { dumpsToRemove } from "../storage/core-dumps.js";
-
 /** Per-packet capture length. Small: headers are what the signatures need. */
 export const WITNESS_SNAPLEN_BYTES = 128;
 
@@ -238,11 +236,13 @@ export function isWitnessRingFile(name) {
  * Mirrors `pruneCoreDumps`: best-effort, never fatal, one summary line.
  *
  * @param {string} dir
+ * @param {(files: Array<{ name: string, writtenAt: number }>, keep: number) => string[]} chooseRemovals -
+ *   Which files go, given what is there: the storage component's rule, handed in.
  * @param {number} [keep]
  * @returns {Promise<void>}
  */
-export async function pruneWitnessCaptures(dir, keep = WITNESS_CAPTURES_KEPT) {
-  if (typeof dir !== "string" || dir.length === 0) {
+export async function pruneWitnessCaptures(dir, chooseRemovals, keep = WITNESS_CAPTURES_KEPT) {
+  if (typeof dir !== "string" || dir.length === 0 || typeof chooseRemovals !== "function") {
     return;
   }
   /** @type {Array<{ name: string, writtenAt: number, bytes: number }>} */
@@ -267,7 +267,7 @@ export async function pruneWitnessCaptures(dir, keep = WITNESS_CAPTURES_KEPT) {
   if (captures.length === 0) {
     return;
   }
-  const doomed = dumpsToRemove(captures, keep);
+  const doomed = chooseRemovals(captures, keep);
   const freed = captures
     .filter((capture) => doomed.includes(capture.name))
     .reduce((total, capture) => total + capture.bytes, 0);
@@ -360,7 +360,7 @@ let logLine = () => {};
  *   releaseRing: () => void
  * }}
  */
-export function createPacketWitness({ log, dir = "", port, spawnProcess = spawn, mayKeep = null }) {
+export function createPacketWitness({ log, dir = "", port, spawnProcess = spawn, mayKeep = null, chooseRemovals = null }) {
   logLine = typeof log === "function" ? log : logLine;
   const resolvedDir = typeof dir === "string" && dir.length > 0 ? dir : os.tmpdir();
 
@@ -594,7 +594,7 @@ export function createPacketWitness({ log, dir = "", port, spawnProcess = spawn,
         // The disk bound has to hold between restarts too: one episode writes
         // up to four ring copies and two tail files, and the cooldown allows
         // six episodes an hour. Pruning only at startup let that accumulate.
-        await pruneWitnessCaptures(resolvedDir);
+        await pruneWitnessCaptures(resolvedDir, chooseRemovals);
       } finally {
         state.running = false;
         // Keep the requested spacing honest even when the capture ended early.

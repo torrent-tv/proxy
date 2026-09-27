@@ -44,6 +44,8 @@ export class CushionReport {
 
   /** Files whose spare soundtracks have been fetched whole, once each. @type {Set<string>} */
   #spareSoundtracksFetched = new Set();
+  #lastSaidAt = new WeakMap();
+  #lookAheadDisagreementSince = new WeakMap();
 
   /**
    * @param {object} host - `viewerSecondsOn`, `viewersOf`, `SourceFiles`, `logger`, `producedNumbers`, `encodeRuns`, `fetchWholeFile`, `getCachedAudioTracks`, `hostLoad`, `lookaheadSeconds`, `outputTimes`, `outputs`
@@ -132,15 +134,16 @@ export class CushionReport {
     this.#sayCushion(session, encodedTo);
     const disagrees =
       Number.isFinite(claimed) && Math.abs(claimed - encodedTo) > LOOKAHEAD_PAUSE_SECONDS;
-    if (disagrees && !session.lookAheadDisagreementSince) {
-      session.lookAheadDisagreementSince = Date.now();
+    const disagreementSince = this.#lookAheadDisagreementSince.get(session) ?? 0;
+    if (disagrees && !disagreementSince) {
+      this.#lookAheadDisagreementSince.set(session, Date.now());
       this.#host.logger.info(
         `transcode ${session.id} ffmpeg claims ${Math.round(claimed)}s processed ` +
           `but the viewer's own run of segments ends at ${Math.round(encodedTo)}s`
       );
-    } else if (!disagrees && session.lookAheadDisagreementSince) {
-      const lastedMs = Date.now() - session.lookAheadDisagreementSince;
-      session.lookAheadDisagreementSince = 0;
+    } else if (!disagrees && disagreementSince) {
+      const lastedMs = Date.now() - disagreementSince;
+      this.#lookAheadDisagreementSince.delete(session);
       this.#host.logger.info(
         `transcode ${session.id} ffmpeg's position and the segments on disk agree again ` +
           `after ${(lastedMs / 1000).toFixed(1)}s (ready through ${Math.round(encodedTo)}s)`
@@ -175,7 +178,7 @@ export class CushionReport {
    */
   #sayCushion(session, encodedTo) {
     const now = Date.now();
-    if (now - (session.cushionSaidAt ?? 0) < CUSHION_REPORT_MS) {
+    if (now - (this.#lastSaidAt.get(session) ?? 0) < CUSHION_REPORT_MS) {
       return;
     }
     const { earliestPosition, deepestBuffer, viewers } = this.#reportedPictureOf(session, now);
@@ -184,7 +187,7 @@ export class CushionReport {
     if (earliestPosition === null) {
       return;
     }
-    session.cushionSaidAt = now;
+    this.#lastSaidAt.set(session, now);
     const aheadOfPicture = Math.max(0, encodedTo - earliestPosition);
     const fileLength = this.#host.hostLoad.fileLengthByKey.get(session.file.key);
     const duration = Number(session.file.durationSeconds) || Number(session.file.durationSeconds) || 0;
@@ -319,11 +322,7 @@ export class CushionReport {
     // A session that has never had a link report is the ordinary state at a
     // cold open, and the answer for it is the same as for one whose reports
     // have all gone stale: nobody has said where they are.
-    for (const viewer of this.#host.viewersOf(session).values()) {
-      const report = viewer.netReport;
-      if (report === null) {
-        continue;
-      }
+    for (const report of this.#host.linkReportsOn(session)) {
       if (now - report.at > NET_REPORT_FRESH_MS) {
         continue;
       }

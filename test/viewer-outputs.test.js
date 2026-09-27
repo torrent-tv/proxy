@@ -1,9 +1,8 @@
 /**
  * @file What a viewer is watching, and what happens to it when they leave.
  *
- * The relation "this person watches this output" is indexed both ways — the
- * output holds its viewers, the viewer holds its outputs — and these checks
- * hold the three things that go wrong when the two indexes come apart.
+ * The relation "this person watches this output" is stored on the viewer, and
+ * these checks hold the operations that derive the opposite direction.
  *
  * 1. The viewer must never be dropped from the PICTURE. Their chosen
  *    soundtrack, their position and their step are recorded there, and the
@@ -20,13 +19,13 @@
  *    leaves a claim that nothing can reach.
  */
 
+import { chooseOutput } from "../services/viewer/choices.js";
 import test from "node:test";
 import assert from "node:assert/strict";
 import { mkdtemp, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { wireOutputs } from "../services/server/wire-outputs.js";
-import { variantConsumerId } from "../services/encode/Renditions.js";
 import { Viewers } from "../services/viewer/Viewers.js";
 import { SourceFile } from "../services/media/SourceFile.js";
 import { Timeline } from "../services/encode/output/Timeline.js";
@@ -34,7 +33,6 @@ import { Output } from "../services/encode/output/Output.js";
 import { fmp4Format } from "../services/encode/segment-formats/fmp4.js";
 import { fakeProcess as fakeEncoder, startRunOn } from "./helpers/encode-run.js";
 import { outputSpec } from "./helpers/output-spec.js";
-import { viewersOf } from "../services/viewer/Viewer.js";
 
 const BASE_ID = "aaaaaaaabbbbcccc";
 const STEP_ID = "1111111122223333";
@@ -69,11 +67,9 @@ function fakeSession({ id, dirPath, file, encodeHeight = 0, audioOnly = false, i
     get inputFile() { return this.file; },
     get audioFile() { return this.file; },
     startedAt: Date.now(),
-    createEntryMs: Date.now(),
     lastAccessedAt: Date.now(),
     ffmpeg: null,
     lastError: "",
-    claims: new Set(),
     segmentFormat: fmp4Format,
     transcodeVideo: !audioOnly,
     transcodeAudio: true,
@@ -127,14 +123,12 @@ async function pictureWithStepAndSoundtrack() {
   const base = fakeSession({ id: BASE_ID, dirPath, file, encodeHeight: 812 });
   const step = fakeSession({ id: STEP_ID, dirPath, file, encodeHeight: 540, isStep: true });
   const audio = fakeSession({ id: AUDIO_ID, dirPath, file, audioOnly: true });
-  // The family's own claim, which is how a picture holds what it made: the
-  // browser never learns these two ids.
-  step.claims = new Set([variantConsumerId(BASE_ID)]);
-  audio.claims = new Set([variantConsumerId(BASE_ID)]);
+  // The browser never learns these two ids: what keeps them is who watches
+  // them, and nothing else.
   for (const session of [base, step, audio]) {
     manager.outputs.set(session.id, session);
   }
-  file.stepHeights.set(540, 540);
+  manager.outputs.markStep(step);
   return { manager, base, step, audio, dirPath };
 }
 
@@ -145,12 +139,17 @@ test("a viewer who steps down, back to the picture's own height and down again k
   const viewer = manager.viewers.of(base, VIEWER);
   viewer.audio = { trackIndex: 1, transcode: true };
   viewer.position = { segment: 25, seconds: 100, at: Date.now() };
+  // The rule chose the step for them at 540p; the record is theirs.
+  chooseOutput(manager.viewers, VIEWER, 540, manager.outputs.get(STEP_ID).outputKey);
 
   await manager.renditions.resolveVariantFile(BASE_ID, 540, "segment-00025.mp4", VIEWER);
+  manager.renditions.viewerPlays(BASE_ID, VIEWER, 540, 100);
   await manager.renditions.resolveVariantFile(BASE_ID, 812, "segment-00026.mp4", VIEWER);
+  manager.renditions.viewerPlays(BASE_ID, VIEWER, 812, 104);
   await manager.renditions.resolveVariantFile(BASE_ID, 540, "segment-00027.mp4", VIEWER);
+  manager.renditions.viewerPlays(BASE_ID, VIEWER, 540, 108);
 
-  const known = viewersOf(base).get(VIEWER);
+  const known = manager.viewers.forOutput(base).get(VIEWER);
   assert.ok(known, "the picture is the one id the browser holds — a viewer is never dropped from it");
   assert.deepEqual(
     known.audio,
@@ -211,16 +210,16 @@ test("an output somebody else is still watching is kept when one viewer leaves",
     "and the soundtrack stays, because having no listeners is what kills it and it has one"
   );
   assert.equal(
-    viewersOf(base).has(VIEWER),
+    manager.viewers.forOutput(base).has(VIEWER),
     false,
     "the viewer who left is gone from the picture"
   );
   assert.equal(
-    viewersOf(audio).has(VIEWER),
+    manager.viewers.forOutput(audio).has(VIEWER),
     false,
     "and from the soundtrack, which is the half of the relation the viewer holds"
   );
-  assert.equal(viewersOf(step).size, 0, "the step they had is watched by nobody");
+  assert.equal(manager.viewers.forOutput(step).size, 0, "the step they had is watched by nobody");
 });
 
 test("nothing is left wanting production once the last viewer has left", async (t) => {
@@ -245,14 +244,14 @@ test("nothing is left wanting production once the last viewer has left", async (
   manager.encodeRuns.planEncodersNow();
   for (const address of [base.outputKey, step.outputKey, audio.outputKey]) {
     assert.deepEqual(
-      manager.encodeOrchestrator.demand.mapOn(address),
+      manager.encodeOrchestrator.wantedSegmentsOn(address),
       [],
       "and no output is left asking for an encoder"
     );
   }
 });
 
-test("the two indexes of one relation are written together", () => {
+test("the reverse view is derived from the relation stored on the viewer", () => {
   const viewers = new Viewers();
   const picture = { id: "picture" };
   const soundtrack = { id: "soundtrack" };
@@ -261,24 +260,26 @@ test("the two indexes of one relation are written together", () => {
   viewers.of(soundtrack, VIEWER);
   assert.equal(viewers.of(soundtrack, VIEWER), viewer, "one person is one object, whatever they are watching");
   assert.deepEqual([...viewer.outputs].sort(), ["picture", "soundtrack"]);
-  assert.equal(viewersOf(picture).get(VIEWER), viewer);
+  assert.equal(viewers.forOutput(picture).get(VIEWER), viewer);
 
   viewers.leaves(soundtrack, VIEWER);
-  assert.deepEqual([...viewer.outputs], ["picture"], "both directions go together");
-  assert.equal(viewersOf(soundtrack).has(VIEWER), false);
+  assert.deepEqual([...viewer.outputs], ["picture"], "the stored relation changes once");
+  assert.equal(viewers.forOutput(soundtrack).has(VIEWER), false);
   assert.equal(viewers.size, 1, "and the person is still known, because they are still watching something");
 
   viewers.leaves(picture, VIEWER);
   assert.equal(viewers.size, 0, "watching nothing, they are forgotten");
 });
 
-test("a viewer that cannot name itself belongs to the session that met it", () => {
+test("a request that names nobody makes no viewer", () => {
+  // A nameless viewer used to belong to whichever output met it: the same
+  // person was a different object on each output, and two nameless people on
+  // one output were one object. Every viewer has a name now.
   const viewers = new Viewers();
   const oneFilm = { id: "one" };
-  const another = { id: "another" };
 
-  const first = viewers.of(oneFilm, "");
-  const second = viewers.of(another, "");
-  assert.notEqual(first, second, "two anonymous viewers of two films are not one person");
-  assert.equal(viewers.size, 0, "and neither is in the registry, which is keyed by a name they do not have");
+  assert.throws(() => viewers.of(oneFilm, ""), TypeError);
+  assert.equal(viewers.size, 0, "nothing was registered");
+  assert.equal(viewers.forOutput(oneFilm).size, 0, "and nobody watches the output");
+  assert.equal(viewers.getForOutput(oneFilm, ""), null);
 });

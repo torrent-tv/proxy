@@ -24,7 +24,8 @@ import { registerClient } from "../services/transport/registry-api.js";
 import { createTunnelClient } from "../services/transport/tunnel-client.js";
 import { createWebRtcManager } from "../services/transport/webrtc-manager.js";
 import { createDataChannelHandler } from "../services/transport/data-channel-handler.js";
-import { pruneCoreDumps } from "../services/storage/core-dumps.js";
+import { dumpsToRemove, pruneCoreDumps } from "../services/storage/core-dumps.js";
+import { availableMemoryBytes } from "../services/storage/machine-memory.js";
 import { Diagnostics } from "../services/storage/Diagnostics.js";
 import { adoptOrphanRingFiles, createPacketWitness, pruneWitnessCaptures } from "../services/transport/packet-witness.js";
 import { createUsrsctpStateReader } from "../services/transport/usrsctp-state.js";
@@ -392,12 +393,15 @@ try {
     port: actualPort,
     // Evidence takes room from the product, so a capture is asked for rather
     // than taken. Refused, it is a line and not a silence.
-    mayKeep: (bytes) => diagnostics.mayKeep({ what: "a packet capture", bytes })
+    mayKeep: (bytes) => diagnostics.mayKeep({ what: "a packet capture", bytes }),
+    // Which of the kept captures go is the storage component's rule, the same
+    // one core dumps are pruned by.
+    chooseRemovals: dumpsToRemove
   });
   // A process that was KILLED mid-session leaves the ring's last seconds
   // behind, and those seconds contain whatever ended it. Keep them under a name
   // the pruner recognises BEFORE anything starts a new ring over them.
-  void adoptOrphanRingFiles(packetWitness.dir).then(() => pruneWitnessCaptures(packetWitness.dir));
+  void adoptOrphanRingFiles(packetWitness.dir).then(() => pruneWitnessCaptures(packetWitness.dir, dumpsToRemove));
 
   // Reads usrsctp's own association state via gdb the moment a wedge is
   // declared (roadmap item 11) — no source rebuild, the module ships
@@ -571,7 +575,19 @@ try {
         // silent-ok: a proxy that cannot say what it holds is scored on its
         // machine alone, which is what every proxy was scored on until now.
       }
-      return { metrics: collectHealthMetrics(), holds };
+      // WHETHER THIS MACHINE HAS ROOM FOR ONE MORE ENCODE, read by the pool
+      // before any film is chosen (roadmap item 97, step 14): what holds a
+      // place on it now, and the speed that leaves every output at. The load
+      // average cannot say this — an encoder admitted a moment ago has not
+      // raised it yet.
+      const encode = started?.outputParts?.admission?.headroom?.() ?? null;
+      return {
+        metrics: {
+          ...collectHealthMetrics({ availableMemoryBytes }),
+          ...(encode ? { encodeSpeedX: encode.encodeSpeedX, encodeOccupiedCostSec: encode.occupiedCostSec } : {})
+        },
+        holds
+      };
     },
     // Whether this host could sustain a file it has only been told about. The
     // same arithmetic the first offer uses, against this host's own startup

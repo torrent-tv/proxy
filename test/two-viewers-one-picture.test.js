@@ -42,8 +42,8 @@ function encoding(manager, output) {
  * @param {object} session
  * @returns {boolean}
  */
-function watched(session) {
-  return session ? viewersOf(session).size > 0 : false;
+function watched(manager, session) {
+  return session ? manager.viewers.forOutput(session).size > 0 : false;
 }
 
 import assert from "node:assert/strict";
@@ -54,7 +54,6 @@ import os from "node:os";
 import path from "node:path";
 import { audioRenditionKey } from "../services/encode/Renditions.js";
 import { managerWithOwnStore } from "./helpers/manager.js";
-import { viewerOf, viewersOf } from "../services/viewer/Viewer.js";
 import { fmp4Format } from "../services/encode/segment-formats/fmp4.js";
 import { Output } from "../services/encode/output/Output.js";
 import { outputSpec } from "./helpers/output-spec.js";
@@ -76,7 +75,13 @@ function fakeSession({
   audioTrackIndex = 0,
   transcodeAudio = true,
   audioOnly = false,
-  audioSeparate = false
+  audioSeparate = false,
+  // THE SIZE IS PART OF THE IDENTITY, so two steps of different sizes are two
+  // addresses. Left out, every step of this fixture shared one key and the
+  // record of which output answers a height could not tell them apart — which
+  // is the fixture describing something production does not do, not a rule
+  // being too strict.
+  encodeHeight = 0
 }) {
   return {
     id,
@@ -85,7 +90,9 @@ function fakeSession({
       transcodeAudio,
       audioOnly,
       audioSeparate,
-      audioSourceTrackIndex: audioTrackIndex
+      audioSourceTrackIndex: audioTrackIndex,
+      height: encodeHeight,
+      width: encodeHeight > 0 ? Math.round((encodeHeight * 16) / 9) : 0
     }),
     get outputKey() { return this.spec.toKey(); },
     dirPath,
@@ -102,11 +109,9 @@ function fakeSession({
     get inputFile() { return this.file; },
     get audioFile() { return this.file; },
     startedAt: Date.now(),
-    createEntryMs: Date.now(),
     lastAccessedAt: Date.now(),
     ffmpeg: null,
     lastError: "",
-    claims: new Set(),
 
     segmentFormat: fmp4Format,
     transcodeVideo: false,
@@ -155,10 +160,10 @@ async function pictureWithTwoViewers() {
   const base = fakeSession({ id: BASE_ID, dirPath, audioSeparate: true });
   // Both viewers are watching the picture, which is what keeps their choices
   // alive; a viewer whose head has expired holds no encoder.
-  viewerOf(base, FIRST).position = { segment: 3, seconds: 12, at: Date.now() };
-  viewerOf(base, SECOND).position = { segment: 3, seconds: 12, at: Date.now() };
-  viewerOf(base, FIRST).audio = { trackIndex: 0, transcode: true };
-  viewerOf(base, SECOND).audio = { trackIndex: 1, transcode: true };
+  manager.viewers.of(base, FIRST).position = { segment: 3, seconds: 12, at: Date.now() };
+  manager.viewers.of(base, SECOND).position = { segment: 3, seconds: 12, at: Date.now() };
+  manager.viewers.of(base, FIRST).audio = { trackIndex: 0, transcode: true };
+  manager.viewers.of(base, SECOND).audio = { trackIndex: 1, transcode: true };
   manager.outputs.set(BASE_ID, base);
   manager.getCachedAudioTracks = () => [
     { index: 0, language: "rus", title: "Дубляж", isDefault: true, fileIndex: 0, sourceTrackIndex: 0 },
@@ -222,15 +227,15 @@ test("a soundtrack nobody is listening to any more is let go of", async (t) => {
   });
   // One viewer only, so what they leave is left for nobody. This is the case
   // the stop exists for: an encoder AND a reader holding pieces of the torrent.
-  viewersOf(base).delete(SECOND);
+  manager.viewers.leaves(base, SECOND);
 
   await manager.renditions.resolveAudioRenditionFile(BASE_ID, 0, "segment-00003.mp4", FIRST);
   await manager.renditions.resolveAudioRenditionFile(BASE_ID, 1, "segment-00004.mp4", FIRST);
 
   const left = renditions.get(audioRenditionKey(0, true));
   const moved = renditions.get(audioRenditionKey(1, true));
-  assert.equal(watched(left), false, "the track the viewer left is nobody's now");
-  assert.ok(watched(moved), "and the track they moved to is theirs");
+  assert.equal(watched(manager, left), false, "the track the viewer left is nobody's now");
+  assert.ok(watched(manager, moved), "and the track they moved to is theirs");
   assert.deepEqual(
     [...left.runs][0]?.process?.signals ?? [],
     [],
@@ -247,8 +252,8 @@ test("each viewer's browser decides for itself whether its soundtrack is re-enco
   // The same track, two browsers: one can decode it as it stands, the other
   // cannot. Answering both from the session's own flag would leave the second
   // viewer with silence.
-  viewerOf(base, FIRST).audio = { trackIndex: 0, transcode: false };
-  viewerOf(base, SECOND).audio = { trackIndex: 0, transcode: true };
+  manager.viewers.of(base, FIRST).audio = { trackIndex: 0, transcode: false };
+  manager.viewers.of(base, SECOND).audio = { trackIndex: 0, transcode: true };
 
   const copied = await manager.renditions.resolveAudioRenditionFile(BASE_ID, 0, "segment-00003.mp4", FIRST);
   const encoded = await manager.renditions.resolveAudioRenditionFile(BASE_ID, 0, "segment-00003.mp4", SECOND);
@@ -294,11 +299,17 @@ test("one viewer changing quality does not take the other off their step", async
     if (existing) {
       return existing;
     }
-    const variant = fakeSession({ id: `variant-${height}`, dirPath });
+    // A STEP CARRIES WHAT ITS PICTURE CARRIES. This picture publishes its
+    // soundtrack separately, so its steps do too — which is what production
+    // passes (`audioRenditions: servesAudioSeparately(base)`). Built muxed, a
+    // step is not the same material as the picture it is a step of, and is
+    // rightly refused.
+    const variant = fakeSession({ id: `variant-${height}`, dirPath, encodeHeight: height, audioSeparate: true });
     variant.transcodeVideo = true;
     variant.output.encodeHeight = height;
     variant.variantHeight = height;
     variant.isStep = true;
+    manager.outputs.markStep(variant);
     variant.file = base.file;
     startManagedRun(manager, variant, { process: fakeEncoder() });
     manager.outputs.set(variant.id, variant);
@@ -307,7 +318,9 @@ test("one viewer changing quality does not take the other off their step", async
   };
 
   await manager.renditions.resolveVariantFile(BASE_ID, 720, "segment-00003.mp4", FIRST);
+  manager.renditions.viewerPlays(BASE_ID, FIRST, 720, 12);
   await manager.renditions.resolveVariantFile(BASE_ID, 540, "segment-00003.mp4", SECOND);
+  manager.renditions.viewerPlays(BASE_ID, SECOND, 540, 12);
   // Both viewers go on watching their own step, which is what a player does
   // every few seconds.
   await manager.renditions.resolveVariantFile(BASE_ID, 720, "segment-00004.mp4", FIRST);
@@ -319,10 +332,11 @@ test("one viewer changing quality does not take the other off their step", async
   // Now the first viewer steps down. Theirs is left for nobody and stops; the
   // other viewer's is untouched.
   await manager.renditions.resolveVariantFile(BASE_ID, 480, "segment-00005.mp4", FIRST);
+  manager.renditions.viewerPlays(BASE_ID, FIRST, 480, 20);
 
-  assert.equal(watched(variants.get(720)), false, "the step nobody is on is nobody's");
-  assert.ok(watched(variants.get(540)), "the step the other viewer is watching stays theirs");
-  assert.ok(watched(variants.get(480)), "and the one they moved to is now theirs");
+  assert.equal(watched(manager, variants.get(720)), false, "the step nobody is on is nobody's");
+  assert.ok(watched(manager, variants.get(540)), "the step the other viewer is watching stays theirs");
+  assert.ok(watched(manager, variants.get(480)), "and the one they moved to is now theirs");
   assert.ok(encoding(manager, variants.get(540)), "and nothing here touched the other viewer's encoder");
 });
 
@@ -349,9 +363,9 @@ test("a step somebody is watching is never withdrawn from the offer", async (t) 
   // One file, two sessions of it.
   variant.file = base.file;
   variant.isStep = true;
+  manager.outputs.markStep(variant);
   variant.file = base.file;
   manager.outputs.set(variant.id, variant);
-  base.file.stepHeights.set(720, 720);
 
   // Nobody on it: measured below realtime, it is withdrawn. This half is the
   // control — without it the other half proves nothing.
@@ -361,7 +375,7 @@ test("a step somebody is watching is never withdrawn from the offer", async (t) 
     `a step nobody is on and that cannot keep up is withdrawn: ${withoutAViewer.join(" ")}`
   );
 
-  viewerOf(base, SECOND).activeVariantId = variant.id;
+  manager.viewers.of(base, SECOND).activeVariantId = variant.id;
   const withAViewer = manager.quality.offeredHeights(base);
 
   assert.ok(
@@ -381,12 +395,12 @@ test("a viewer whose picture has gone quiet holds no soundtrack encoder", async 
   // The second viewer's tab is gone. Nothing releases the session when a
   // channel closes (roadmap item 54), so what expires is their head on the
   // picture — and with it their claim on an encoder.
-  viewersOf(base).delete(SECOND);
+  manager.viewers.leaves(base, SECOND);
 
   await manager.renditions.resolveAudioRenditionFile(BASE_ID, 1, "segment-00004.mp4", FIRST);
 
   assert.equal(
-    watched(renditions.get(audioRenditionKey(0, true))),
+    watched(manager, renditions.get(audioRenditionKey(0, true))),
     false,
     "the first viewer moved on, so their old track is nobody's"
   );

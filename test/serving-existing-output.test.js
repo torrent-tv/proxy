@@ -13,7 +13,6 @@ import { SourceFile } from "../services/media/SourceFile.js";
 import { Timeline } from "../services/encode/output/Timeline.js";
 import { fmp4Format } from "../services/encode/segment-formats/fmp4.js";
 import { Output } from "../services/encode/output/Output.js";
-import { viewersOf } from "../services/viewer/Viewer.js";
 
 const TORRENT = "torrent:11f0929918e2b5aa2e5b71ecdbe5c0f1a4bbf7d1";
 
@@ -52,7 +51,6 @@ function hostWithA1080pOutput(t) {
     timeline: new Timeline({ boundaries: Array.from({ length: 101 }, (_, index) => index * 4), cutGrid: "uniform" }),
     output: new Output({ encodeWidth: 1920, encodeHeight: 1080, outputFps: 24 }),
     segmentFormat: fmp4Format,
-    claims: new Set(),
     useSyntheticPlaylist: true
   };
   manager.outputs.set(made.id, made);
@@ -100,5 +98,5 @@ test("a step asked for by an automatic viewer and served by the picture leaves t
 
   assert.equal(variant, made, "the picture already made at 1080p serves the 720p request");
   assert.notEqual(made.isStep, true, "and is not turned into a step of itself");
-  assert.ok(viewersOf(made).has("auto-viewer"));
+  assert.ok(manager.viewers.forOutput(made).has("auto-viewer"));
 });

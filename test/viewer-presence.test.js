@@ -20,7 +20,6 @@ import path from "node:path";
 import { wireOutputs } from "../services/server/wire-outputs.js";
 import { SourceFile } from "../services/media/SourceFile.js";
 import { Viewers } from "../services/viewer/Viewers.js";
-import { viewersOf } from "../services/viewer/Viewer.js";
 import { outputSpec } from "./helpers/output-spec.js";
 
 const PICTURE = "aaaaaaaa00004000";
@@ -67,18 +66,16 @@ test("a connection closing takes the person off every output at once", () => {
   const viewers = new Viewers();
   const picture = { id: "picture" };
   const sound = { id: "sound" };
-  const byId = new Map([["picture", picture], ["sound", sound]]);
-
   viewers.of(picture, "watcher");
   viewers.of(sound, "watcher");
   viewers.of(picture, "other");
 
-  const left = viewers.hasGone("watcher", (id) => byId.get(id) ?? null);
+  const left = viewers.hasGone("watcher");
 
   assert.deepEqual(left.sort(), ["picture", "sound"], "both, not the one the browser holds an id for");
-  assert.equal(viewersOf(picture).has("watcher"), false);
-  assert.equal(viewersOf(sound).has("watcher"), false);
-  assert.equal(viewersOf(picture).has("other"), true, "and nobody else goes with them");
+  assert.equal(viewers.forOutput(picture).has("watcher"), false);
+  assert.equal(viewers.forOutput(sound).has("watcher"), false);
+  assert.equal(viewers.forOutput(picture).has("other"), true, "and nobody else goes with them");
   assert.equal(viewers.get("watcher"), null, "the registry does not keep what it has let go");
 });
 

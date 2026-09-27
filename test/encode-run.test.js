@@ -41,7 +41,7 @@ function makeRun(span = {}) {
   const ends = [];
   const process_ = new FakeProcess();
   const run = new EncodeRun({
-    address: "torrent:abc:fmt=fmp4:grid=kf@0:video-only:v=0/enc/libx264/854x480@24/veryfast/none",
+    address: "torrent:abc:fmt=fmp4:grid=kf@0:video-only:v=0/enc/libx264/854x480@24/veryfast/none/vbv=-",
     encoder: new SoftwareEncoder(),
     from: span.from ?? 10,
     to: span.to ?? 14,

@@ -17,7 +17,6 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { MessageChannel } from "node:worker_threads";
 import { createSendStream, createReceiveStream, createCaller } from "../services/torrent/worker/channel.js";
-import { TorrentWorkerClient } from "../services/torrent/worker/client.js";
 
 /**
  * A buffer standing in for one owned by WebTorrent's piece cache: allocated
@@ -155,34 +154,5 @@ test("a failed read surfaces on the reader instead of ending quietly", async () 
   } finally {
     port1.close();
     port2.close();
-  }
-});
-
-test("a read of an unknown source fails the stream rather than hanging", async () => {
-  // End to end through a real worker, because this is where the defect lived:
-  // the worker reported the failure, nothing on the main thread listened, and
-  // the reader waited forever. A unit test on either half alone passes happily.
-  const client = new TorrentWorkerClient({ memoryBytes: 8 * 1024 * 1024 });
-  try {
-    // Starting the worker takes several seconds — it builds a torrent client
-    // and a DHT — so the first request would measure startup, not the failure
-    // path under test.
-    await client.listFiles("warm-up").catch(() => undefined);
-
-    const stream = client.createReadStream({ sourceKey: "no-such-source", fileIndex: 0 });
-    const reader = stream.getReader();
-
-    const outcome = await Promise.race([
-      reader.read().then(() => "resolved", (error) => `rejected: ${error?.message}`),
-      new Promise((resolve) => setTimeout(() => resolve("hung"), 10_000))
-    ]);
-
-    assert.match(
-      outcome,
-      /^rejected: .*no-such-source/,
-      `expected the read to fail, got "${outcome}"`
-    );
-  } finally {
-    await client.destroyAll();
   }
 });

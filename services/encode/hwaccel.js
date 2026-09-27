@@ -36,6 +36,7 @@ import {
 } from "../media/ffmpeg-banner.js";
 
 import { keyFrameArgs, TRANSCODE_FPS } from "./args.js";
+import { throughputAt } from "./throughput.js";
 import { LADDER_HEIGHTS } from "./output/ladder.js";
 // The five kinds, one class each. Detection and benchmarking stay in this file;
 // how a kind is driven belongs to the kind.
@@ -51,14 +52,31 @@ import {
 export {
   chooseOutputFps,
   maxrateKbpsFor,
-  nominalKbpsForHeight,
-  nominalKbpsForMaxrate,
+  limitRowFor,
+  nominalKbpsFor,
   TRANSCODE_FPS
 } from "./args.js";
 
 const BENCHMARK_REF_W = 640;
 const BENCHMARK_REF_H = 360;
 const BENCHMARK_DURATION_SEC = 3;
+/**
+ * How many raw frames a throughput reading at this size is taken over.
+ *
+ * The reference size keeps the three seconds it has always had. A larger frame
+ * gets as many frames as the same number of bytes buys, but never fewer than
+ * one second of film: the frames are looped, and a loop shorter than the
+ * encoder's reach — its reference frames and its B-frames — would let it find
+ * an identical frame to predict from and read far faster than any film.
+ *
+ * @param {{ width: number, height: number }} frame
+ * @returns {number}
+ */
+export function rawFrameCountFor(frame) {
+  const referenceBytes = BENCHMARK_REF_W * BENCHMARK_REF_H * 1.5 * TRANSCODE_FPS * BENCHMARK_DURATION_SEC;
+  const frameBytes = frame.width * frame.height * 1.5;
+  return Math.max(TRANSCODE_FPS, Math.floor(referenceBytes / frameBytes));
+}
 /**
  * The narrowest window a slope may be taken over. Measured 2026-08-15: at a
  * fifth of a second the readings were noisy enough to put `faster` and
@@ -144,7 +162,7 @@ function v4l2m2mDescriptor() {
  * @property {"software"|"vaapi"|"qsv"|"nvenc"|"v4l2m2m"} kind
  * @property {string|null} device
  * @property {string[]} inputArgs
- * @property {(opts: { targetWidth: number, targetHeight: number, segmentDurationSec: number, preset?: string, fps?: number, tonemap?: boolean, forcedKeyframeTimes?: number[] | null, nominalKbps?: number | null }) => string[]} buildVideoArgs
+ * @property {(opts: { targetWidth: number, targetHeight: number, segmentDurationSec: number, preset?: string, fps?: number, tonemap?: boolean, forcedKeyframeTimes?: number[] | null, rateControl?: { maxrateKbps: number, bufsizeKbps: number, level: string | null } | null }) => string[]} buildVideoArgs
  */
 
 /**
@@ -155,7 +173,7 @@ function v4l2m2mDescriptor() {
  * @param {number} [timeoutMs=12000]
  * @returns {Promise<{ code: number, stdout: string, stderr: string }>}
  */
-function runFfmpeg(ffmpegBin, args, timeoutMs = 12000) {
+export function runFfmpeg(ffmpegBin, args, timeoutMs = 12000) {
   return new Promise((resolve) => {
     let stdout = "";
     let stderr = "";
@@ -295,7 +313,7 @@ function buildEncoderTestArgs(descriptor, segmentDurationSec, outDir) {
  * @param {string} outDir
  * @returns {Promise<boolean>}
  */
-async function verifySegmentsDecodeCleanly(ffmpegBin, outDir) {
+export async function verifySegmentsDecodeCleanly(ffmpegBin, outDir) {
   let files;
   try {
     files = readdirSync(outDir).filter((n) => /^seg-\d+\.m4s$/.test(n));
@@ -465,7 +483,7 @@ const CALIBRATION_SETS = {
     "cal-hevc10-480-lo.mp4"
   ]
 };
-const CALIBRATION_CLIPS = CALIBRATION_SETS.h264;
+export const CALIBRATION_REFERENCE_CLIP = "cal-h264-1080-hi.mp4";
 export const CALIBRATION_DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "..", "assets", "calibration");
 // How wide the measured window must be before the slope is trusted, and how
 // long to wait for it at most.
@@ -1227,12 +1245,28 @@ export function canSustainOutput({
   outputPixelsPerSec,
   observedDecodeCostSec = null,
   concurrentCostSec = 0,
-  requiredSpeed = null
+  requiredSpeed = null,
+  // The frame this output is encoded at. Given, the encoder's figure is the
+  // one measured AT that size (`throughput.js`), and a size nothing was
+  // measured at is not sustainable: this host has not shown it can do it.
+  frame = null
 }) {
-  if (!Array.isArray(benchmark) || benchmark.length === 0) {
-    // Nothing measured on this host: the budget cannot refuse what it cannot
-    // price, and refusing everything would leave a viewer with no rung at all.
+  if (!Array.isArray(benchmark)) {
+    // Not calibrated at all: a wiring made without the startup calibration,
+    // which the proxy itself never is when it re-encodes (`server.js`). There is
+    // nothing to judge by, and nothing is judged.
     return { speed: null, sustainable: true };
+  }
+  if (benchmark.length === 0) {
+    // CALIBRATED, and no mode of this encoder qualified (roadmap item 97, step
+    // 14). Unknown capacity is not capacity: nothing has shown this machine can
+    // hold a re-encode at all. The copied picture needs no encoder and is not
+    // asked here.
+    return { speed: null, sustainable: false };
+  }
+  const encodePixelsPerSec = cheapestPresetPixelsPerSec(benchmark, frame);
+  if (encodePixelsPerSec === null) {
+    return { speed: null, sustainable: false };
   }
   const observed = Number.isFinite(observedDecodeCostSec) && observedDecodeCostSec > 0
     ? observedDecodeCostSec
@@ -1245,7 +1279,7 @@ export function canSustainOutput({
   }
   const alone = predictedRealtimeSpeed({
     decodeModel,
-    encodePixelsPerSec: cheapestPresetPixelsPerSec(benchmark),
+    encodePixelsPerSec,
     outputPixelsPerSec,
     source,
     observedDecodeCostSec: observed
@@ -1431,7 +1465,7 @@ export function slopeOf(samples, minimumWindowSec = ENCODE_BENCHMARK_WINDOW_SEC)
   return slope <= ENCODE_BENCHMARK_MAX_PLAUSIBLE_SPEED ? slope : null;
 }
 
-function measureEncodeSlope(ffmpegBin, encoder, rung, rawFramesPath) {
+export function measureEncodeSlope(ffmpegBin, encoder, rung, rawFramesPath, frame = { width: BENCHMARK_REF_W, height: BENCHMARK_REF_H }) {
   return new Promise((resolve) => {
     const args = [
       "-hide_banner", "-loglevel", "error", "-nostats",
@@ -1441,7 +1475,7 @@ function measureEncodeSlope(ffmpegBin, encoder, rung, rawFramesPath) {
       ...(typeof encoder?.benchmarkInputArgs === "function" ? encoder.benchmarkInputArgs() : []),
       "-stream_loop", "-1",
       "-f", "rawvideo", "-pix_fmt", "yuv420p",
-      "-s", `${BENCHMARK_REF_W}x${BENCHMARK_REF_H}`, "-r", String(TRANSCODE_FPS),
+      "-s", `${frame.width}x${frame.height}`, "-r", String(TRANSCODE_FPS),
       "-i", rawFramesPath,
       // THE ENCODER SAYS HOW TO MEASURE ITSELF. It was libx264 written here, so
       // a host with NVENC, QSV, VAAPI or V4L2M2M measured its encoder not at all
@@ -1524,7 +1558,7 @@ function measureEncodeSlope(ffmpegBin, encoder, rung, rawFramesPath) {
  * @param {{ info: (m: string) => void, warn: (m: string) => void }} log
  * @returns {Promise<string | null>} Path to the raw frames, or null.
  */
-async function decodeToRawFrames(ffmpegBin, log) {
+export async function decodeToRawFrames(ffmpegBin, log, frame = { width: BENCHMARK_REF_W, height: BENCHMARK_REF_H }) {
   // A benchmark may leave a host unmeasured; it may never stop it from
   // starting. Before this the temp directory was made outside any guard, so a
   // read-only or missing TMPDIR rejected the promise that starts the proxy.
@@ -1542,13 +1576,13 @@ async function decodeToRawFrames(ffmpegBin, log) {
   const args = [
     "-hide_banner", "-loglevel", "error",
     "-stream_loop", "-1",
-    "-i", path.join(CALIBRATION_DIR, CALIBRATION_CLIPS[0]),
-    "-t", String(BENCHMARK_DURATION_SEC),
-    "-vf", `scale=${BENCHMARK_REF_W}:${BENCHMARK_REF_H},fps=${TRANSCODE_FPS}`,
+    "-i", path.join(CALIBRATION_DIR, CALIBRATION_REFERENCE_CLIP),
+    "-frames:v", String(rawFrameCountFor(frame)),
+    "-vf", `scale=${frame.width}:${frame.height},fps=${TRANSCODE_FPS}`,
     "-an", "-f", "rawvideo", "-pix_fmt", "yuv420p", "-y", rawPath
   ];
   const { code } = await runFfmpeg(ffmpegBin, args, 30000);
-  const expectedBytes = BENCHMARK_REF_W * BENCHMARK_REF_H * 1.5 * TRANSCODE_FPS * BENCHMARK_DURATION_SEC;
+  const expectedBytes = frame.width * frame.height * 1.5 * rawFrameCountFor(frame);
   let written = 0;
   try {
     written = statSync(rawPath).size;
@@ -1595,11 +1629,12 @@ async function decodeToRawFrames(ffmpegBin, log) {
  * @param {Array<{ preset: string, pixelsPerSec: number }>} benchmark
  * @returns {number}
  */
-function cheapestPresetPixelsPerSec(benchmark) {
-  return benchmark[benchmark.length - 1]?.pixelsPerSec ?? 0;
+function cheapestPresetPixelsPerSec(benchmark, frame = null) {
+  const cheapest = benchmark[benchmark.length - 1];
+  return cheapest ? throughputAt(cheapest, frame) : null;
 }
 
-export function pickSoftwarePreset(benchmark, pixelsPerSecNeeded, cost = {}) {
+export function pickSoftwarePreset(benchmark, pixelsPerSecNeeded, cost = {}, frame = null) {
   if (!Array.isArray(benchmark) || benchmark.length === 0) {
     return "ultrafast";
   }
@@ -1613,9 +1648,15 @@ export function pickSoftwarePreset(benchmark, pixelsPerSecNeeded, cost = {}) {
   // always ascend with the list: on a busy machine on 2026-08-15 `faster` read
   // below `fast` twice.
   for (const entry of benchmark) {
+    // At the size this output is encoded at: a preset not measured there is
+    // not a mode this host has shown it can hold there.
+    const encodePixelsPerSec = throughputAt(entry, frame);
+    if (encodePixelsPerSec === null) {
+      continue;
+    }
     const speed = predictedRealtimeSpeed({
       decodeModel: cost.decodeModel ?? null,
-      encodePixelsPerSec: entry.pixelsPerSec,
+      encodePixelsPerSec,
       outputPixelsPerSec: pixelsPerSecNeeded,
       source: cost.source ?? null,
       observedDecodeCostSec: observed
@@ -1709,10 +1750,14 @@ export function chooseSoftwareEncodeSettings(benchmark, ceiling, outputFps, cost
   if (ladder.length === 0) {
     return null;
   }
-  const fastest = cheapestPresetPixelsPerSec(benchmark); // the cheapest preset's throughput
   const bar = barFor(cost);
   let chosenIndex = ladder.length - 1; // default: lowest rung (best effort)
   for (let i = 0; i < ladder.length; i += 1) {
+    // The cheapest preset's throughput AT THIS RUNG's size.
+    const fastest = cheapestPresetPixelsPerSec(benchmark, ladder[i]);
+    if (fastest === null) {
+      continue;
+    }
     const speed = predictedRealtimeSpeed({
       decodeModel: cost.decodeModel ?? null,
       encodePixelsPerSec: fastest,
@@ -1725,7 +1770,7 @@ export function chooseSoftwareEncodeSettings(benchmark, ceiling, outputFps, cost
     }
   }
   const chosen = ladder[chosenIndex];
-  const preset = pickSoftwarePreset(benchmark, chosen.width * chosen.height * fps, cost);
+  const preset = pickSoftwarePreset(benchmark, chosen.width * chosen.height * fps, cost, chosen);
   return { width: chosen.width, height: chosen.height, preset, ladder, rungIndex: chosenIndex };
 }
 

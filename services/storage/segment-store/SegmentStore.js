@@ -40,7 +40,7 @@
  */
 
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, statSync, watch, writeFileSync } from "node:fs";
 import { rmSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -89,6 +89,27 @@ export class SegmentStore {
 
   /** Output key → when it was last asked for. @type {Map<string, number>} */
   #touched = new Map();
+
+  /**
+   * Output key → the init segment served for it, once one has been read whole.
+   *
+   * A property of the output's produced material, so it lives with that
+   * material and goes when it goes. The player fetches it once and never again,
+   * so the first whole one is kept and every later request gets the same bytes,
+   * even though a re-encoding run rewrites the file on disk.
+   *
+   * @type {Map<string, Buffer>}
+   */
+  #inits = new Map();
+
+  /** Told of every segment published, whatever it is. @type {Set<(key: string, index: number) => void>} */
+  #publishedListeners = new Set();
+
+  /** Segment publication waiters by output key and segment number. @type {Map<string, Map<number, Set<Function>>>} */
+  #waiters = new Map();
+
+  /** Output key → the watch on its directory. @type {Map<string, import("node:fs").FSWatcher>} */
+  #watchers = new Map();
 
   /** @type {{ info: Function, warn: Function }} */
   #logger;
@@ -144,6 +165,9 @@ export class SegmentStore {
       writeFileSync(path.join(dir, KEY_FILE), `${key}\n`, "utf8");
     }
     this.#touched.set(key, this.#now());
+    // Production is about to begin here, and a piece closing in this directory
+    // is what every held request is waiting for.
+    this.#watch(key);
     return dir;
   }
 
@@ -187,6 +211,7 @@ export class SegmentStore {
       return known;
     }
     const byNumber = new Map();
+    const sizes = new Map();
     let bytes = 0;
     let highest = -1;
     // The biggest piece and which number it is. What reads it is the figure the
@@ -220,6 +245,7 @@ export class SegmentStore {
           continue;
         }
         byNumber.set(index, full);
+        sizes.set(index, size);
         bytes += size;
         if (index > highest) {
           highest = index;
@@ -232,7 +258,7 @@ export class SegmentStore {
       this.#held.delete(key);
       return empty;
     }
-    const contents = { readAt: mtime, byNumber, bytes, unproven: highest, largest };
+    const contents = { readAt: mtime, byNumber, sizes, bytes, unproven: highest, largest };
     this.#held.set(key, contents);
     return contents;
   }
@@ -274,6 +300,20 @@ export class SegmentStore {
    */
   filesHeld(key) {
     return this.refresh(key).byNumber.size;
+  }
+
+  /**
+   * The size in bytes of every finished piece of this output, by number.
+   *
+   * Read by whoever keeps what an output's segments carried (roadmap item 97,
+   * step 14). A reading, not a request: it does not mark the output as read,
+   * so it does not keep an output nobody is watching.
+   *
+   * @param {string} key
+   * @returns {Map<number, number>}
+   */
+  sizesOf(key) {
+    return new Map(this.refresh(key).sizes ?? []);
   }
 
   /**
@@ -405,7 +445,285 @@ export class SegmentStore {
     }
     // What the directory holds has changed, so the memory of it is stale.
     this.#held.delete(key);
+    const index = format?.segmentIndexFromName?.(served) ?? -1;
+    if (index >= 0) {
+      this.announce(key, index);
+      for (const listener of this.#publishedListeners) {
+        listener(key, index);
+      }
+    }
     return served;
+  }
+
+  /**
+   * The init segment kept for this output, or null until one was read whole.
+   *
+   * @param {string} key
+   * @returns {Buffer | null}
+   */
+  initOf(key) {
+    return this.#inits.get(key) ?? null;
+  }
+
+  /**
+   * Keep the init segment served for this output. The first whole one stands;
+   * an empty read is not an init (ffmpeg creates the file before it writes the
+   * header into it) and is refused.
+   *
+   * @param {string} key
+   * @param {Buffer | null} bytes
+   * @returns {Buffer | null} The init that now stands for this output.
+   */
+  keepInit(key, bytes) {
+    if (!this.#inits.has(key) && bytes && bytes.length > 0) {
+      this.#inits.set(key, bytes);
+    }
+    return this.initOf(key);
+  }
+
+  /**
+   * Be told of every segment published: what the store holds has grown, which
+   * is when whether it still fits its share is worth asking.
+   *
+   * @param {(key: string, index: number) => void} listener
+   * @returns {() => void} Stop being told.
+   */
+  onPublished(listener) {
+    this.#publishedListeners.add(listener);
+    return () => this.#publishedListeners.delete(listener);
+  }
+
+  /**
+   * Watch this output's directory, so a piece closed by ANY writer is an event.
+   *
+   * WHY IT EXISTS, and it is one fault rather than a precaution. A piece is
+   * finished in one of two ways, and only one of them said so. The `segment`
+   * muxer writes under a working name and reports the closure on a channel of
+   * its own (`publish`); the `hls` muxer writes through a temporary name of its
+   * own (`+temp_file`) and reports nothing, so the file simply appears under the
+   * name it is served as. That branch is taken by every re-encoded output on the
+   * even grid — the ordinary quality step — and for those `waitFor` could only
+   * end on its deadline: the segment was on disk and the request that wanted it
+   * went on waiting, up to a full minute, and was then answered 503.
+   *
+   * So the store watches what it owns. The rename into place moves the
+   * directory's modification time, the kernel says so, and both branches reach
+   * one statement: this number is now present. Nothing polls.
+   *
+   * Idempotent, and started from the two places that need it — the directory
+   * being made for a run, and a wait beginning on an output this process has
+   * adopted rather than made.
+   *
+   * WHOEVER REMOVES ONE OF THESE DIRECTORIES GOES THROUGH `drop`, which stops
+   * the watch first. On Linux, where this runs, an open watch does not prevent
+   * a directory being removed; on Windows it does, and `rmSync` then retries
+   * until it gives up — measured, a check that removed a store's directory
+   * behind its back took 110 s instead of 3.
+   *
+   * @param {string} key
+   * @returns {void}
+   */
+  #watch(key) {
+    if (this.#watchers.has(key)) {
+      return;
+    }
+    const dir = path.join(this.#root, directoryNameFor(key));
+    // Nothing has been made for this output yet. A wait that begins first will
+    // ask again — `directoryFor` is what a run calls before it writes — and
+    // asking the kernel to watch what is not there throws, once for every wait
+    // that begins meanwhile.
+    if (!existsSync(dir)) {
+      return;
+    }
+    try {
+      const watcher = watch(dir, { persistent: false }, (_event, name) => {
+        this.#noticed(key, typeof name === "string" ? name : null);
+      });
+      // A directory that goes away takes its watch with it rather than leaving
+      // an error nobody reads.
+      watcher.on("error", () => this.#unwatch(key));
+      this.#watchers.set(key, watcher);
+    } catch (error) {
+      // Watching is how a wait ends early, not how a segment is found: every
+      // reader still reads the disk. Said rather than swallowed, because a
+      // store that cannot watch holds each request for its whole deadline, and
+      // that is worth knowing before the field says it.
+      this.#logger?.warn?.(
+        `segment store: cannot watch ${key.slice(0, 60)}: ` +
+        `${error instanceof Error ? error.message : String(error)}`
+      );
+    }
+  }
+
+  /**
+   * Stop watching one output's directory.
+   *
+   * @param {string} key
+   * @returns {void}
+   */
+  #unwatch(key) {
+    const watcher = this.#watchers.get(key);
+    if (!watcher) {
+      return;
+    }
+    this.#watchers.delete(key);
+    try {
+      watcher.close();
+    } catch {
+      // Already closed with its directory.
+    }
+  }
+
+  /**
+   * The directory moved: say what is now there.
+   *
+   * A REMOVAL MOVES IT TOO, so the name is checked against the disk before
+   * anything is announced — otherwise clearing up after a dead run would read
+   * as that run's pieces arriving.
+   *
+   * @param {string} key
+   * @param {string | null} name - What changed, where the platform says.
+   * @returns {void}
+   */
+  #noticed(key, name) {
+    // WHAT WAS READ OF THIS DIRECTORY IS STALE. Dropped rather than re-read:
+    // re-reading HERE is quadratic in the pieces of a film — one listing per
+    // file written, of a directory that grows with every file, measured at 110 s
+    // against 3 s over 482 pieces — while dropping costs one listing to whoever
+    // asks next, which is bounded by the questions and not by the writes.
+    //
+    // IT IS NOT ENOUGH TO LET `refresh` NOTICE BY ITSELF. It re-reads when the
+    // directory's modification time has moved, and that time is stated in
+    // milliseconds: a file written in the same millisecond as the last reading
+    // leaves it unmoved, and the piece is then reported absent although it is
+    // there. That is the hazard `refresh` documents and `publish` has always
+    // guarded against by dropping the memory.
+    this.#held.delete(key);
+    const format = this.#formats.get(key);
+    const dir = path.join(this.#root, directoryNameFor(key));
+    const index = name && format?.isSegmentFileName?.(name)
+      ? (format.segmentIndexFromName?.(name) ?? -1)
+      : -1;
+    if (index >= 0) {
+      // A REMOVAL MOVES THE DIRECTORY TOO, so the one file is asked about
+      // before anything is announced — otherwise clearing up after a dead run
+      // would read as that run's pieces arriving.
+      if (!existsSync(path.join(dir, name))) {
+        return;
+      }
+      this.#announceArrival(key, index);
+      return;
+    }
+    if (name) {
+      return;
+    }
+    // The platform named nothing. Then whoever is waiting asks about their own
+    // piece, which is the same question with the same answer and no guessing.
+    const byIndex = this.#waiters.get(key);
+    if (!byIndex || !format?.segmentFileName) {
+      return;
+    }
+    for (const waiting of [...byIndex.keys()]) {
+      if (existsSync(path.join(dir, format.segmentFileName(waiting)))) {
+        this.#announceArrival(key, waiting);
+      }
+    }
+  }
+
+  /**
+   * One statement that a number is now present here.
+   *
+   * @param {string} key
+   * @param {number} index
+   * @returns {void}
+   */
+  #announceArrival(key, index) {
+    this.announce(key, index);
+    for (const listener of this.#publishedListeners) {
+      listener(key, index);
+    }
+  }
+
+  /**
+   * Announce that a segment is now present. This stores no readiness state;
+   * the file under its served name remains the only fact.
+   *
+   * @param {string} key
+   * @param {number} index
+   */
+  announce(key, index) {
+    const byIndex = this.#waiters.get(key);
+    const waiting = byIndex?.get(index);
+    if (!waiting) return;
+    byIndex.delete(index);
+    if (byIndex.size === 0) this.#waiters.delete(key);
+    for (const resolve of waiting) resolve(true);
+  }
+
+  /**
+   * How many requests are waiting on this output right now.
+   *
+   * The store's own state, and the one fact that says a wait EXISTS rather than
+   * is about to: a check that ends a wait it has not yet registered proves
+   * nothing, and passes just as well without the thing it is checking.
+   *
+   * @param {string} key
+   * @returns {number}
+   */
+  waitingFor(key) {
+    let waiting = 0;
+    for (const holders of this.#waiters.get(key)?.values() ?? []) {
+      waiting += holders.size;
+    }
+    return waiting;
+  }
+
+  /**
+   * Wait for a segment publication event or one deadline. This does not poll
+   * the filesystem.
+   *
+   * @param {string} key
+   * @param {number} index
+   * @param {number} timeoutMs - May be infinite: then only the publication or
+   *   `cancelled` ends the wait.
+   * @param {Promise<unknown> | null} [cancelled] - Settles when whoever waits
+   *   has gone, so the waiter does not outlive them.
+   * @returns {Promise<boolean>}
+   */
+  waitFor(key, index, timeoutMs, cancelled = null) {
+    if (this.pathOf(key, index)) return Promise.resolve(true);
+    // An output adopted from a previous process has a directory nobody made in
+    // this one, so the wait itself is the first moment it is watched.
+    this.#watch(key);
+    return new Promise((resolve) => {
+      const byIndex = this.#waiters.get(key) ?? new Map();
+      const waiting = byIndex.get(index) ?? new Set();
+      this.#waiters.set(key, byIndex);
+      byIndex.set(index, waiting);
+      let settled = false;
+      const finish = (published) => {
+        if (settled) return;
+        settled = true;
+        if (timer) clearTimeout(timer);
+        waiting.delete(finish);
+        // Removed only if they are still the sets this waiter joined: an
+        // announcement takes the set out before calling its waiters, and a new
+        // waiter may have registered a fresh one under the same number since.
+        if (waiting.size === 0 && byIndex.get(index) === waiting) byIndex.delete(index);
+        if (byIndex.size === 0 && this.#waiters.get(key) === byIndex) this.#waiters.delete(key);
+        resolve(published);
+      };
+      waiting.add(finish);
+      // No deadline is a wait that ends only on the publication: a timer given
+      // an infinite delay fires at once, which would turn the wait into a poll.
+      const timer = Number.isFinite(timeoutMs) ? setTimeout(() => finish(false), Math.max(0, timeoutMs)) : null;
+      timer?.unref?.();
+      cancelled?.then(() => finish(false));
+      // Publication may have landed after the first path check and before this
+      // waiter was registered. Recheck once after registration so that window
+      // cannot turn a present segment into a full-deadline wait.
+      if (this.pathOf(key, index)) finish(true);
+    });
   }
 
   /**
@@ -521,9 +839,11 @@ export class SegmentStore {
     } catch {
       // Already gone, or in use; the next sweep sees it either way.
     }
+    this.#unwatch(key);
     this.#held.delete(key);
     this.#formats.delete(key);
     this.#touched.delete(key);
+    this.#inits.delete(key);
     this.#logger.info(`segment-store dropped ${directoryNameFor(key)} (${because})`);
   }
 
@@ -574,6 +894,15 @@ export class SegmentStore {
     for (const key of [...this.#formats.keys()]) {
       this.drop(key, because);
       dropped += 1;
+    }
+    // EVERY WATCH GOES, not only the watches of outputs that named their file
+    // format. A directory is made before anything says how its files are named
+    // — `directoryFor` is what a run calls, `useFormat` is a separate statement
+    // — so a store can hold a watch on a key that is in no format list, and
+    // dropping by that list left it open: on Windows the process then does not
+    // exit, which is how this was found.
+    for (const key of [...this.#watchers.keys()]) {
+      this.#unwatch(key);
     }
     return dropped;
   }

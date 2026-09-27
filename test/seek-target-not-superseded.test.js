@@ -21,7 +21,6 @@ import { mkdtemp, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { wireOutputs } from "../services/server/wire-outputs.js";
-import { viewerOf } from "../services/viewer/Viewer.js";
 import { fmp4Format } from "../services/encode/segment-formats/fmp4.js";
 
 const SESSION_ID = "aaaaaaaa11112222";
@@ -69,8 +68,8 @@ async function managerAfterSeek() {
     runState: "PRODUCING"
   };
   manager.outputs.set(SESSION_ID, session);
-  viewerOf(session, "").moveTo(SEEK_TO_SECONDS);
-  viewerOf(session, "").playing = false;
+  manager.viewers.of(session, "viewer").moveTo(SEEK_TO_SECONDS);
+  manager.viewers.of(session, "viewer").playing = false;
   return { manager, dirPath };
 }
 
@@ -148,10 +147,10 @@ test("the viewer who made the request is the one it is judged against", async ()
   // in particular the answer is the FURTHEST of them, because what lies behind
   // that one has already been made.
   const behind = SEGMENT_AT_SEEK - 100;
-  viewerOf(session, "behind").moveTo(behind * SEGMENT_SECONDS);
-  viewerOf(session, "behind").playing = false;
-  viewerOf(session, "ahead").moveTo(SEEK_TO_SECONDS);
-  viewerOf(session, "ahead").playing = false;
+  manager.viewers.of(session, "behind").moveTo(behind * SEGMENT_SECONDS);
+  manager.viewers.of(session, "behind").playing = false;
+  manager.viewers.of(session, "ahead").moveTo(SEEK_TO_SECONDS);
+  manager.viewers.of(session, "ahead").playing = false;
 
   assert.equal(
     manager.serving.requestStillWanted(SESSION_ID, `segment-${String(behind).padStart(5, "0")}.mp4`, "behind"),
@@ -172,7 +171,7 @@ test("a seek moves the seeking viewer's own head, and nobody else's", async () =
   const session = manager.outputs.get(SESSION_ID);
   session.viewers = new Map();
   const staying = SEGMENT_AT_SEEK - 40;
-  viewerOf(session, "staying").position = {
+  manager.viewers.of(session, "staying").position = {
     segment: staying,
     seconds: staying * SEGMENT_SECONDS,
     at: Date.now()

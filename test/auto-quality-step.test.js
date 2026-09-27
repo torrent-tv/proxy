@@ -11,9 +11,9 @@
  * `size=1280x720` for three and a half minutes over macroblock garbage, the
  * other errored on the first mismatched fragment and sat at `size=0x0`.
  *
- * A change of resolution is a change of VARIANT. So the proxy ASKS, the request
- * travels in every progress report, and the browser — where the viewer's own
- * choice lives — decides whether to follow it.
+ * A change of resolution is a change of VARIANT. The proxy asks only a viewer
+ * in automatic mode, and the request travels only in that viewer's progress
+ * report.
  */
 
 import test from "node:test";
@@ -26,9 +26,10 @@ import { mkdir, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { managerWithOwnStore } from "./helpers/manager.js";
 import { Output } from "../services/encode/output/Output.js";
-import { viewerOf, viewersOf } from "../services/viewer/Viewer.js";
+import { qualityStateOf } from "../services/encode/quality/OutputQualityState.js";
 import { fmp4Format } from "../services/encode/segment-formats/fmp4.js";
-import { softwareDescriptor, maxrateKbpsFor, nominalKbpsForHeight } from "../services/encode/hwaccel.js";
+import { softwareDescriptor, maxrateKbpsFor, nominalKbpsFor } from "../services/encode/hwaccel.js";
+import { softwareRateControlFor } from "../services/encode/args.js";
 import { readVideoSampleSize } from "../services/encode/segment-formats/mp4-boxes.js";
 import { outputSpec } from "./helpers/output-spec.js";
 
@@ -88,16 +89,6 @@ function fakeSession({ dirPath, transcodeVideo = true, cutGrid = transcodeVideo 
       applyTonemap: false
     }),
     encodeRunGeneration: 0,
-    budgetSlowSince: 0,
-    budgetUpSince: 0,
-    budgetLastActionAt: 0,
-    qualityAsk: null,
-    initSizeSaid: "",
-    recentSpeed: null,
-    rateCapKbps: null,
-    viewers: new Map(),
-    linkSlowSince: 0,
-    lastAloneSpeed: null,
     usesExplicitCuts: false,
     useSyntheticPlaylist: true,
     playlistText: "#EXTM3U\n",
@@ -117,11 +108,10 @@ async function managerWithSession({ transcodeVideo = true, cutGrid } = {}) {
   // store by that same key. A fixture with a directory of its own and no key
   // describes a proxy that no longer exists — the observed bitrate the link
   // budget reads would then be taken from files nothing can find.
-  const outputKey = `auto-quality:fmt=fmp4:grid=${transcodeVideo ? "uniform" : "kf@0"}:video-only:v=0/${transcodeVideo ? "enc/libx264/1280x720@24/-/none" : "copy"}`;
+  const outputKey = `auto-quality:fmt=fmp4:grid=${transcodeVideo ? "uniform" : "kf@0"}:video-only:v=0/${transcodeVideo ? "enc/libx264/1280x720@24/-/none/vbv=-" : "copy"}`;
   manager.segmentStore.useFormat(outputKey, fmp4Format);
   const dirPath = manager.segmentStore.directoryFor(outputKey);
   // A software host: the budget's own precondition.
-  manager.videoEncoder = { kind: "software", name: "libx264", inputArgs: [] };
   // A fully-downloaded file, so nothing here is ever read as download-bound —
   // the distinction is tested elsewhere and would only obscure these.
   manager.getSourceStats = async () => ({
@@ -132,7 +122,14 @@ async function managerWithSession({ transcodeVideo = true, cutGrid } = {}) {
   const session = fakeSession({ dirPath, transcodeVideo, cutGrid });
   session.outputKey = outputKey;
   manager.outputs.set(BASE_ID, session);
-  const run = startRunOn(session, { process: fakeEncoder() });
+  manager.viewers.of(session, "viewer").qualityMode = "auto";
+  // A run that states its speed, as every real one does from its first
+  // seconds, and covers the whole film to its last segment, as the plan gives a
+  // run: without a speed the plan cannot tell arrangements apart and takes the
+  // encoder away, and with an open end it moves the run to a bounded one —
+  // which starts a real ffmpeg in the output's directory, and on Windows that
+  // directory then cannot be removed while the process lives.
+  const run = startRunOn(session, { process: fakeEncoder(), speedX: 1, to: session.timeline.segmentCount - 1, producing: false });
   manager.encodeOrchestrator.adopt(outputKey, run);
   return { manager, session, dirPath };
 }
@@ -145,6 +142,36 @@ async function managerWithSession({ transcodeVideo = true, cutGrid } = {}) {
  * @param {number} bytesEach
  * @returns {Promise<void>}
  */
+/**
+ * This viewer's page reports a buffer that falls a second per second over two
+ * segments' time, on the link named: what, on its trend, runs dry before
+ * another output could have the piece they need (roadmap item 98).
+ *
+ * @param {object} viewer
+ * @param {number} linkMbps
+ * @returns {void}
+ */
+function drainingReports(viewer, linkMbps) {
+  const now = Date.now();
+  for (const [ago, held] of [[8_000, 9], [4_000, 5], [0, 1.5]]) {
+    viewer.report({ linkMbps, bufferedAheadSec: held, positionSeconds: 40, playing: true }, now - ago);
+  }
+}
+
+/**
+ * This viewer's page reports a buffer that grows, on the link named.
+ *
+ * @param {object} viewer
+ * @param {number} linkMbps
+ * @returns {void}
+ */
+function fillingReports(viewer, linkMbps) {
+  const now = Date.now();
+  for (const [ago, held] of [[8_000, 40], [4_000, 50], [0, 60]]) {
+    viewer.report({ linkMbps, bufferedAheadSec: held, positionSeconds: 40, playing: true }, now - ago);
+  }
+}
+
 async function produceSegments(session, bytesEach) {
   // Where the run in force writes.
   const runDir = session.dirPath;
@@ -161,14 +188,17 @@ test("a picture that cannot be kept up with is asked for as another VARIANT, and
   const { manager, session, dirPath } = await managerWithSession();
   t.after(async () => {
     await manager.lifecycle.disposeAll();
+    // The store closes its watch on the directory as it drops the output, and
+    // on Windows the directory stays held until the event loop has turned.
+    await new Promise((resolve) => setImmediate(resolve));
     await rm(dirPath, { recursive: true, force: true });
   });
 
   const sizeBefore = `${session.encodeWidth}x${session.encodeHeight}`;
   // Sustained sub-realtime, read as a slope: the run has been slow since well
   // before the window, and the reading is from this very run.
-  session.budgetSlowSince = Date.now() - 60_000;
-  session.recentSpeed = { speed: 0.7, at: Date.now(), run: [...session.runs][0] };
+  qualityStateOf(session).budgetSlowSince = Date.now() - 60_000;
+  qualityStateOf(session).recentSpeed = { speed: 0.7, at: Date.now(), run: [...session.runs][0] };
 
   await manager.quality.runQualityBudgetOnce();
 
@@ -177,94 +207,125 @@ test("a picture that cannot be kept up with is asked for as another VARIANT, and
     sizeBefore,
     "the size the init segment describes must survive the step — that is the whole fault"
   );
-  assert.ok(session.qualityAsk, "the step is a request to the player to move variant");
+  assert.ok(manager.viewers.get("viewer").qualityAsk, "the step is a request to the AUTO viewer to move variant");
   assert.ok(
-    session.qualityAsk.height < 720,
-    `a step DOWN, and 720p was on screen (asked for ${session.qualityAsk?.height}p)`
+    manager.viewers.get("viewer").qualityAsk.height < 720,
+    `a step DOWN, and 720p was on screen (asked for ${manager.viewers.get("viewer").qualityAsk?.height}p)`
   );
+});
+
+test("a manual viewer is never sent an automatic quality request", async (t) => {
+  const { manager, session, dirPath } = await managerWithSession();
+  t.after(async () => {
+    await manager.lifecycle.disposeAll();
+    // The store closes its watch on the directory as it drops the output, and
+    // on Windows the directory stays held until the event loop has turned.
+    await new Promise((resolve) => setImmediate(resolve));
+    await rm(dirPath, { recursive: true, force: true });
+  });
+  manager.viewers.get("viewer").qualityMode = "manual";
+  qualityStateOf(session).budgetSlowSince = Date.now() - 60_000;
+  qualityStateOf(session).recentSpeed = { speed: 0.7, at: Date.now(), run: [...session.runs][0] };
+
+  await manager.quality.runQualityBudgetOnce();
+
+  assert.equal(manager.viewers.get("viewer").qualityAsk, null);
+  const progress = await manager.viewerRequests.getSessionProgress(BASE_ID, "viewer");
+  assert.equal(progress.requestedHeight, 0);
 });
 
 test("the request reaches the browser in the progress report, and stops once the viewer is there", async (t) => {
   const { manager, session, dirPath } = await managerWithSession();
   t.after(async () => {
     await manager.lifecycle.disposeAll();
+    // The store closes its watch on the directory as it drops the output, and
+    // on Windows the directory stays held until the event loop has turned.
+    await new Promise((resolve) => setImmediate(resolve));
     await rm(dirPath, { recursive: true, force: true });
   });
 
-  session.qualityAsk = { height: 480, at: Date.now(), reason: "measured" };
-  const asked = await manager.viewerRequests.getSessionProgress(BASE_ID);
+  manager.viewers.get("viewer").qualityAsk = { height: 480, at: Date.now(), reason: "measured" };
+  const asked = await manager.viewerRequests.getSessionProgress(BASE_ID, "viewer");
   assert.equal(asked.requestedHeight, 480, "the request travels with every progress report");
 
   // The player moved: the variant it is now watching IS the height asked for.
   session.variantHeight = 480;
-  const answered = await manager.viewerRequests.getSessionProgress(BASE_ID);
+  const answered = await manager.viewerRequests.getSessionProgress(BASE_ID, "viewer");
   assert.equal(answered.requestedHeight, 0, "a request the viewer has answered is not repeated");
-  assert.equal(session.qualityAsk, null, "and it is let go of, not merely hidden");
+  assert.equal(manager.viewers.get("viewer").qualityAsk, null, "and it is let go of, not merely hidden");
 });
 
 test("a request the player never follows runs out instead of being repeated for the whole film", async (t) => {
-  const { manager, session, dirPath } = await managerWithSession();
+  const { manager, dirPath } = await managerWithSession();
   t.after(async () => {
     await manager.lifecycle.disposeAll();
+    // The store closes its watch on the directory as it drops the output, and
+    // on Windows the directory stays held until the event loop has turned.
+    await new Promise((resolve) => setImmediate(resolve));
     await rm(dirPath, { recursive: true, force: true });
   });
 
   // A viewer on a manual pick ignores every request by design, and so does a
   // stream with no variants. Neither is an error; both look the same from here.
-  session.qualityAsk = { height: 480, at: Date.now() - 120_000, reason: "measured" };
+  manager.viewers.get("viewer").qualityAsk = { height: 480, at: Date.now() - 120_000, reason: "measured" };
 
-  const progress = await manager.viewerRequests.getSessionProgress(BASE_ID);
+  const progress = await manager.viewerRequests.getSessionProgress(BASE_ID, "viewer");
 
   assert.equal(progress.requestedHeight, 0);
-  assert.equal(session.qualityAsk, null, "said once and let go");
+  assert.equal(manager.viewers.get("viewer").qualityAsk, null, "said once and let go");
 });
 
 test("a COPIED picture is never asked to slow its encoder, because it has none", async (t) => {
   const { manager, session, dirPath } = await managerWithSession({ transcodeVideo: false });
   t.after(async () => {
     await manager.lifecycle.disposeAll();
+    // The store closes its watch on the directory as it drops the output, and
+    // on Windows the directory stays held until the event loop has turned.
+    await new Promise((resolve) => setImmediate(resolve));
     await rm(dirPath, { recursive: true, force: true });
   });
 
   // Whatever this reading says, a copy has no encoder to make cheaper: moving
   // the viewer to a RE-ENCODED rung costs the machine more, not less.
-  session.budgetSlowSince = Date.now() - 60_000;
-  session.recentSpeed = { speed: 0.4, at: Date.now(), run: [...session.runs][0] };
+  qualityStateOf(session).budgetSlowSince = Date.now() - 60_000;
+  qualityStateOf(session).recentSpeed = { speed: 0.4, at: Date.now(), run: [...session.runs][0] };
 
   await manager.quality.runQualityBudgetOnce();
 
-  assert.equal(session.qualityAsk, null, "the copy path's lever is the viewer's link, not the CPU");
+  assert.equal(manager.viewers.get("viewer").qualityAsk, null, "the copy path's lever is the viewer's link, not the CPU");
 });
 
-test("a measured link becomes the encoder's own bitrate ceiling, and nothing else moves", () => {
-  // The one lever that reduces what is sent without touching the picture:
-  // -maxrate/-bufsize and CRF do not appear in the SPS, so the init segment
-  // already in the player's hands goes on describing every fragment.
-  const uncapped = softwareDescriptor().buildVideoArgs({
-    targetWidth: 1280,
-    targetHeight: 720,
-    segmentDurationSec: 4,
-    fps: 24
-  });
-  const capped = softwareDescriptor().buildVideoArgs({
+test("the output's own rate control is what reaches ffmpeg, and nothing about the size moves with it", () => {
+  // Two limits are two outputs (roadmap item 97, step 10): the figures are
+  // read off the output's identity and handed to the encoder as they are. The
+  // level is the nominal output's, so every limit at one size declares the
+  // same one.
+  const nominal = softwareRateControlFor({ width: 1280, height: 720, fps: 24 });
+  const lower = softwareRateControlFor({ width: 1280, height: 720, fps: 24, capKbps: 1200 });
+  const build = (rateControl) => softwareDescriptor().buildVideoArgs({
     targetWidth: 1280,
     targetHeight: 720,
     segmentDurationSec: 4,
     fps: 24,
-    nominalKbps: 1200
+    rateControl
   });
+  const atNominal = build(nominal);
+  const atLower = build(lower);
 
-  assert.equal(
-    uncapped[uncapped.indexOf("-maxrate") + 1],
-    `${maxrateKbpsFor(nominalKbpsForHeight(720))}k`,
-    "with nothing measured the rung's own nominal rate stands"
-  );
-  assert.equal(capped[capped.indexOf("-maxrate") + 1], `${maxrateKbpsFor(1200)}k`);
-  // Everything that decides the SIZE must be identical in the two.
+  assert.equal(atNominal[atNominal.indexOf("-maxrate") + 1], `${maxrateKbpsFor(nominalKbpsFor({ width: 1280, height: 720 }))}k`);
+  assert.equal(atLower[atLower.indexOf("-maxrate") + 1], `${maxrateKbpsFor(1200)}k`);
+  assert.equal(lower.level, nominal.level, "a lower limit is declared at the nominal output's level");
+  assert.equal(atLower[atLower.indexOf("-level:v") + 1], nominal.level);
   assert.deepEqual(
-    uncapped.slice(0, uncapped.indexOf("-maxrate")),
-    capped.slice(0, capped.indexOf("-maxrate")),
-    "the scale filter, the codec and the preset are untouched by a rate cap"
+    atNominal.slice(0, atNominal.indexOf("-maxrate")),
+    atLower.slice(0, atLower.indexOf("-maxrate")),
+    "the scale filter, the codec and the preset are untouched by the limit"
+  );
+  assert.equal(build(null).includes("-maxrate"), false, "an output that states no limit is given none");
+  assert.throws(
+    () => softwareRateControlFor({ width: 1280, height: 720, fps: 24, capKbps: nominalKbpsFor({ width: 1280, height: 720 }) + 1 }),
+    RangeError,
+    "a limit above the size's own is refused, not lowered"
   );
 });
 
@@ -300,28 +361,34 @@ test("a COPIED picture too thick for the viewer's link is asked for as a smaller
   const { manager, session, dirPath } = await managerWithSession({ transcodeVideo: false });
   t.after(async () => {
     await manager.lifecycle.disposeAll();
+    // The store closes its watch on the directory as it drops the output, and
+    // on Windows the directory stays held until the event loop has turned.
+    await new Promise((resolve) => setImmediate(resolve));
     await rm(dirPath, { recursive: true, force: true });
   });
 
   // Four seconds of segment at 2 MB is ~4 Mbit/s of stream. The viewer reports
   // a link that cannot carry it and a buffer that is running dry.
   await produceSegments(session, 2_000_000);
-  viewerOf(session, "viewer").netReport = { linkMbps: 1.0, bufferedAheadSec: 1.5, positionSeconds: null, at: Date.now() };
-  session.linkSlowSince = Date.now() - 60_000;
+  drainingReports(manager.viewers.of(session, "viewer"), 1.0);
 
-  await manager.quality.runQualityBudgetOnce();
+  await manager.quality.noteViewerReported(session.id, "viewer");
 
   assert.ok(
-    session.qualityAsk,
+    manager.viewers.get("viewer").qualityAsk,
     "a copy has no encoder to bound, so the only way to send fewer bits is another rendering of the film"
   );
-  assert.ok(session.qualityAsk.height < 1080, `a step down (asked for ${session.qualityAsk?.height}p)`);
+  assert.equal(manager.viewers.get("viewer").qualityAsk.urgent, true, "their buffer runs dry first: no cushion is waited for");
+  assert.ok(manager.viewers.get("viewer").qualityAsk.height < 1080, `a step down (asked for ${manager.viewers.get("viewer").qualityAsk?.height}p)`);
 });
 
-test("with two viewers the budget acts on the WORST link, not on whoever reported last", async (t) => {
+test("with two viewers each link decides for its own viewer, not the worst for both", async (t) => {
   const { manager, session, dirPath } = await managerWithSession({ transcodeVideo: false });
   t.after(async () => {
     await manager.lifecycle.disposeAll();
+    // The store closes its watch on the directory as it drops the output, and
+    // on Windows the directory stays held until the event loop has turned.
+    await new Promise((resolve) => setImmediate(resolve));
     await rm(dirPath, { recursive: true, force: true });
   });
 
@@ -329,25 +396,22 @@ test("with two viewers the budget acts on the WORST link, not on whoever reporte
   // One viewer is comfortable and reported LAST, which under a single field was
   // the whole of what the budget saw. The other cannot carry the stream and is
   // running dry.
-  viewerOf(session, "thin").netReport = {
-    linkMbps: 1.0,
-    bufferedAheadSec: 1.5,
-    positionSeconds: 40,
-    at: Date.now() - 1_000
-  };
-  viewerOf(session, "fat").netReport = {
-    linkMbps: 80,
-    bufferedAheadSec: 60,
-    positionSeconds: 40,
-    at: Date.now()
-  };
-  session.linkSlowSince = Date.now() - 60_000;
+  manager.viewers.of(session, "thin").qualityMode = "auto";
+  drainingReports(manager.viewers.of(session, "thin"), 1.0);
+  manager.viewers.of(session, "fat").qualityMode = "auto";
+  fillingReports(manager.viewers.of(session, "fat"), 80);
 
-  await manager.quality.runQualityBudgetOnce();
+  await manager.quality.noteViewerReported(session.id, "thin");
+  await manager.quality.noteViewerReported(session.id, "fat");
 
   assert.ok(
-    session.qualityAsk,
-    "the viewer who cannot keep up decides, whichever of them reported most recently"
+    manager.viewers.get("thin").qualityAsk,
+    "the viewer who cannot keep up is asked, whichever of them reported most recently"
+  );
+  assert.equal(
+    manager.viewers.get("fat").qualityAsk,
+    null,
+    "and ONLY them: a thin link is its owner's, and the viewer beside them keeps their picture"
   );
 });
 
@@ -355,6 +419,9 @@ test("a reading stops counting when the person leaves, not when it gets old", as
   const { manager, session, dirPath } = await managerWithSession({ transcodeVideo: false });
   t.after(async () => {
     await manager.lifecycle.disposeAll();
+    // The store closes its watch on the directory as it drops the output, and
+    // on Windows the directory stays held until the event loop has turned.
+    await new Promise((resolve) => setImmediate(resolve));
     await rm(dirPath, { recursive: true, force: true });
   });
 
@@ -365,7 +432,8 @@ test("a reading stops counting when the person leaves, not when it gets old", as
   // a reading is the person leaving, which is presence, and presence is the
   // connection: silence removes nobody (2026-09-05, a soundtrack's encoder
   // stopped because those two questions had one answer).
-  const gone = viewerOf(session, "gone");
+  const gone = manager.viewers.of(session, "gone");
+  gone.qualityMode = "auto";
   gone.report({ linkMbps: 1.0, bufferedAheadSec: 1.5, positionSeconds: 40, playing: true }, Date.now() - 120_000);
   gone.gone = true;
   recordViewerReport({
@@ -374,72 +442,72 @@ test("a reading stops counting when the person leaves, not when it gets old", as
     sessionId: session.id,
     report: { linkMbps: 80, bufferedAheadSec: 60, consumerId: "here", positionSeconds: 40 }
   });
-  session.linkSlowSince = Date.now() - 60_000;
+  manager.viewers.get("here").qualityMode = "auto";
 
-  await manager.quality.runQualityBudgetOnce();
+  await manager.quality.noteViewerReported(session.id, "here");
 
-  assert.equal(viewersOf(session).size, 2, "the viewer is still known — silence is not leaving");
+  assert.equal(manager.viewers.forOutput(session).size, 3, "the viewer is still known — silence is not leaving");
   // Their reading is not deleted anywhere: it is simply not theirs to give any
   // more, because they are not here. Nothing walks it for a decision.
   assert.equal(
-    viewerOf(session, "gone").linkReading()?.linkMbps,
+    manager.viewers.get("gone").linkReading()?.linkMbps,
     1.0,
     "their last reading stands as the last thing known about that link"
   );
-  assert.equal(session.qualityAsk, null, "the viewer who is here can carry the picture");
+  assert.equal(manager.viewers.get("here").qualityAsk, null, "the viewer who is here can carry the picture");
 });
 
-test("the way BACK UP exists, and a bitrate cap is lifted before the picture is enlarged", async (t) => {
+test("the way BACK UP exists, one rung at a time", async (t) => {
   const { manager, session, dirPath } = await managerWithSession();
   t.after(async () => {
     await manager.lifecycle.disposeAll();
+    // The store closes its watch on the directory as it drops the output, and
+    // on Windows the directory stays held until the event loop has turned.
+    await new Promise((resolve) => setImmediate(resolve));
     await rm(dirPath, { recursive: true, force: true });
   });
 
-  // The viewer is on 480p, the machine has been ahead of realtime for longer
-  // than the up window, and nothing is capping the bitrate.
+  // The viewer is on 480p and the machine has been ahead of realtime for longer
+  // than the up window.
   session.variantHeight = 480;
   session.encodeWidth = 854;
   session.encodeHeight = 480;
-  session.recentSpeed = { speed: 2.4, at: Date.now(), run: [...session.runs][0] };
-  session.budgetUpSince = Date.now() - 120_000;
+  qualityStateOf(session).recentSpeed = { speed: 2.4, at: Date.now(), run: [...session.runs][0] };
+  qualityStateOf(session).budgetUpSince = Date.now() - 120_000;
 
   await manager.quality.runQualityBudgetOnce();
 
-  assert.ok(session.qualityAsk, "for most of this project's life there was no step up at all");
+  assert.ok(manager.viewers.get("viewer").qualityAsk, "for most of this project's life there was no step up at all");
   assert.equal(
-    session.qualityAsk.height,
+    manager.viewers.get("viewer").qualityAsk.height,
     540,
     "one rung at a time: the lowest height above the one on screen, never above the source"
   );
 });
 
-test("a capped picture gets its own bitrate back before it is asked to grow", async (t) => {
+test("a re-encoded picture too thick for the viewer's link is asked for as a smaller VARIANT, and its output is left as it is", async (t) => {
+  // The limit on a picture's bitrate is part of the output now, so a thin link
+  // no longer lowers the limit of the output every viewer of it is watching.
+  // Until each viewer is served an output of their own (roadmap item 97, steps
+  // 11-12), the one lever is a lower height, asked of a viewer in AUTO.
   const { manager, session, dirPath } = await managerWithSession();
   t.after(async () => {
     await manager.lifecycle.disposeAll();
+    // The store closes its watch on the directory as it drops the output, and
+    // on Windows the directory stays held until the event loop has turned.
+    await new Promise((resolve) => setImmediate(resolve));
     await rm(dirPath, { recursive: true, force: true });
   });
+  const keyBefore = session.outputKey;
 
-  session.variantHeight = 480;
-  session.encodeWidth = 854;
-  session.encodeHeight = 480;
-  session.rateCapKbps = 700;
-  session.recentSpeed = { speed: 2.4, at: Date.now(), run: [...session.runs][0] };
-  session.budgetUpSince = Date.now() - 120_000;
-  // A restart is what lifting the cap costs, and spawning ffmpeg is not this
-  // test's business. The run the fixture gave the session is the one the
-  // reading above came from, and replacing it here would make that reading
-  // belong to a run that is gone — which is exactly what the comparison is for.
+  await produceSegments(session, 2_000_000);
+  manager.viewers.of(session, "viewer").qualityMode = "auto";
+  drainingReports(manager.viewers.of(session, "viewer"), 1.0);
 
-  await manager.quality.runQualityBudgetOnce().catch(() => undefined);
+  await manager.quality.noteViewerReported(session.id, "viewer");
 
-  assert.equal(session.rateCapKbps, null, "the cap goes first: it is cheaper than enlarging the picture");
-  assert.equal(
-    session.qualityAsk,
-    null,
-    "and the height is left for a second unbroken window, so the two do not move at once"
-  );
+  assert.ok(manager.viewers.get("viewer").qualityAsk, "the viewer is asked to move to a smaller variant");
+  assert.equal(session.outputKey, keyBefore, "and the output they were on is not altered under anybody");
 });
 
 test("a stream that publishes no variants is left alone, and said so once", async (t) => {
@@ -452,23 +520,28 @@ test("a stream that publishes no variants is left alone, and said so once", asyn
   });
   t.after(async () => {
     await manager.lifecycle.disposeAll();
+    // The store closes its watch on the directory as it drops the output, and
+    // on Windows the directory stays held until the event loop has turned.
+    await new Promise((resolve) => setImmediate(resolve));
     await rm(dirPath, { recursive: true, force: true });
   });
 
   await produceSegments(session, 2_000_000);
-  viewerOf(session, "viewer").netReport = { linkMbps: 1.0, bufferedAheadSec: 1.5, positionSeconds: null, at: Date.now() };
-  session.linkSlowSince = Date.now() - 60_000;
+  drainingReports(manager.viewers.of(session, "viewer"), 1.0);
 
-  await manager.quality.runQualityBudgetOnce();
+  await manager.quality.noteViewerReported(session.id, "viewer");
 
-  assert.equal(session.qualityAsk, null, "asking a player with no variants to change variant is nothing");
-  assert.equal(session.saidNoVariants, true, "and the reason is stated once, not once per window");
+  assert.equal(manager.viewers.get("viewer").qualityAsk, null, "asking a player with no variants to change variant is nothing");
+  assert.equal(qualityStateOf(session).saidNoVariants, true, "and the reason is stated once, not once per window");
 });
 
 test("a height this machine has been MEASURED failing at is not what the way back up offers", async (t) => {
   const { manager, session, dirPath } = await managerWithSession();
   t.after(async () => {
     await manager.lifecycle.disposeAll();
+    // The store closes its watch on the directory as it drops the output, and
+    // on Windows the directory stays held until the event loop has turned.
+    await new Promise((resolve) => setImmediate(resolve));
     await rm(dirPath, { recursive: true, force: true });
   });
 
@@ -478,7 +551,7 @@ test("a height this machine has been MEASURED failing at is not what the way bac
   // back up would have asked for 720p again, failed again, and stepped down
   // again, about every hundred seconds for the length of the film.
   manager.softwarePresetBenchmark = [{ preset: "ultrafast", pixelsPerSec: 1e6 }];
-  session.lastAloneSpeed = 0.5;
+  qualityStateOf(session).lastAloneSpeed = 0.5;
   session.variantHeight = 720;
 
   const offered = manager.quality.offeredHeights(session);
@@ -494,36 +567,13 @@ test("a height this machine has been MEASURED failing at is not what the way bac
   );
 });
 
-test("a cap is not lifted because there is no higher rung to compare against", async (t) => {
-  const { manager, session, dirPath } = await managerWithSession();
-  t.after(async () => {
-    await manager.lifecycle.disposeAll();
-    await rm(dirPath, { recursive: true, force: true });
-  });
-
-  // At the top offered height, so there is no NEXT rung — and the question of
-  // whether to lift the cap is about THIS one. Deciding it on "nothing to step
-  // to, so yes" took the cap off a link measured at a fifth of what the picture
-  // needs, after which #checkLinkBudget put it straight back: two ffmpeg
-  // restarts a minute and a half, on exactly the thin cellular viewer the cap
-  // exists for.
-  session.variantHeight = 1080;
-  session.encodeWidth = 1920;
-  session.encodeHeight = 1080;
-  session.rateCapKbps = 700;
-  session.recentSpeed = { speed: 2.4, at: Date.now(), run: [...session.runs][0] };
-  session.budgetUpSince = Date.now() - 120_000;
-  viewerOf(session, "viewer").netReport = { linkMbps: 1.0, bufferedAheadSec: 30, positionSeconds: null, at: Date.now() };
-
-  await manager.quality.runQualityBudgetOnce();
-
-  assert.equal(session.rateCapKbps, 700, "the link still cannot carry this picture uncapped");
-});
-
 test("a request is answered when the viewers watching are on that height, whoever they are", async (t) => {
   const { manager, session, dirPath } = await managerWithSession();
   t.after(async () => {
     await manager.lifecycle.disposeAll();
+    // The store closes its watch on the directory as it drops the output, and
+    // on Windows the directory stays held until the event loop has turned.
+    await new Promise((resolve) => setImmediate(resolve));
     await rm(dirPath, { recursive: true, force: true });
   });
   // A named viewer followed the request to a 480p step. The step is an output
@@ -532,11 +582,126 @@ test("a request is answered when the viewers watching are on that height, whoeve
   const step = { ...fakeSession({ dirPath }), id: stepId, isStep: true, variantHeight: 480 };
   step.outputKey = `${session.outputKey}:step480`;
   manager.outputs.set(stepId, step);
+  manager.outputs.markStep(step);
+  manager.viewers.of(session, "alice").qualityMode = "auto";
   manager.viewers.of(session, "alice").activeVariantId = stepId;
 
-  session.qualityAsk = { height: 480, at: Date.now(), reason: "measured" };
+  manager.viewers.get("alice").qualityAsk = { height: 480, at: Date.now(), reason: "measured" };
   const answered = await manager.viewerRequests.getSessionProgress(BASE_ID, "alice");
 
   assert.equal(answered.requestedHeight, 0, "the viewer is on the height asked for");
-  assert.equal(session.qualityAsk, null, "so the request is let go of");
+  assert.equal(manager.viewers.get("alice").qualityAsk, null, "so the request is let go of");
+});
+
+test("a thin link whose buffer is filling moves nothing: the trend, not the reading, decides", async (t) => {
+  const { manager, session, dirPath } = await managerWithSession({ transcodeVideo: false });
+  t.after(async () => {
+    await manager.lifecycle.disposeAll();
+    // The store closes its watch on the directory as it drops the output, and
+    // on Windows the directory stays held until the event loop has turned.
+    await new Promise((resolve) => setImmediate(resolve));
+    await rm(dirPath, { recursive: true, force: true });
+  });
+  await produceSegments(session, 2_000_000);
+  fillingReports(manager.viewers.of(session, "viewer"), 1.0);
+
+  await manager.quality.noteViewerReported(session.id, "viewer");
+
+  assert.equal(manager.viewers.get("viewer").qualityAsk, null);
+});
+
+test("a step up being prepared is dropped once the viewer's buffer starts running dry", async (t) => {
+  const { manager, session, dirPath } = await managerWithSession();
+  t.after(async () => {
+    await manager.lifecycle.disposeAll();
+    // The store closes its watch on the directory as it drops the output, and
+    // on Windows the directory stays held until the event loop has turned.
+    await new Promise((resolve) => setImmediate(resolve));
+    await rm(dirPath, { recursive: true, force: true });
+  });
+  session.variantHeight = 480;
+  await produceSegments(session, 200_000);
+  const viewer = manager.viewers.get("viewer");
+  viewer.askQuality(540, "room to spare", Date.now());
+  drainingReports(viewer, 80);
+
+  await manager.quality.noteViewerReported(session.id, "viewer");
+
+  assert.equal(viewer.qualityAsk, null, "the conditions it was asked under have gone back");
+});
+
+test("a picture seen larger than the rung on screen is asked one rung up, when there is room", async (t) => {
+  const { manager, session, dirPath } = await managerWithSession();
+  t.after(async () => {
+    await manager.lifecycle.disposeAll();
+    // The store closes its watch on the directory as it drops the output, and
+    // on Windows the directory stays held until the event loop has turned.
+    await new Promise((resolve) => setImmediate(resolve));
+    await rm(dirPath, { recursive: true, force: true });
+  });
+  session.variantHeight = 480;
+  session.encodeWidth = 854;
+  session.encodeHeight = 480;
+  qualityStateOf(session).recentSpeed = { speed: 2.4, at: Date.now(), run: [...session.runs][0] };
+  manager.viewers.get("viewer").noteVisiblePicture({ width: 1920, height: 1080 });
+
+  await manager.quality.noteViewerReported(session.id, "viewer");
+
+  assert.equal(manager.viewers.get("viewer").qualityAsk?.height, 540);
+  assert.equal(manager.viewers.get("viewer").qualityAsk?.urgent, false, "a step up waits for the cushion");
+});
+
+test("a picture seen smaller than the rung on screen moves nothing until a rung of its height is ready", async (t) => {
+  const { manager, session, dirPath } = await managerWithSession();
+  t.after(async () => {
+    await manager.lifecycle.disposeAll();
+    // The store closes its watch on the directory as it drops the output, and
+    // on Windows the directory stays held until the event loop has turned.
+    await new Promise((resolve) => setImmediate(resolve));
+    await rm(dirPath, { recursive: true, force: true });
+  });
+  manager.viewers.get("viewer").noteVisiblePicture({ width: 640, height: 360 });
+
+  await manager.quality.noteViewerReported(session.id, "viewer");
+
+  assert.equal(manager.viewers.get("viewer").qualityAsk, null, "no 360p rung is made yet; nothing is started for this alone");
+});
+
+test("a COPY taller than the picture seen is left alone", async (t) => {
+  const { manager, session, dirPath } = await managerWithSession({ transcodeVideo: false });
+  t.after(async () => {
+    await manager.lifecycle.disposeAll();
+    // The store closes its watch on the directory as it drops the output, and
+    // on Windows the directory stays held until the event loop has turned.
+    await new Promise((resolve) => setImmediate(resolve));
+    await rm(dirPath, { recursive: true, force: true });
+  });
+  manager.viewers.get("viewer").noteVisiblePicture({ width: 640, height: 360 });
+  // Every smaller rung is ready for them: what stops the move is the rule
+  // about copies, and nothing else.
+  manager.renditions.heightReadyFor = () => true;
+
+  await manager.quality.noteViewerReported(session.id, "viewer");
+
+  assert.equal(manager.viewers.get("viewer").qualityAsk, null, "a copy is never re-encoded for being taller than the screen");
+});
+
+test("a step down for the machine goes to the rung the picture seen bounds, where that is lower", async (t) => {
+  const { manager, session, dirPath } = await managerWithSession();
+  t.after(async () => {
+    await manager.lifecycle.disposeAll();
+    // The store closes its watch on the directory as it drops the output, and
+    // on Windows the directory stays held until the event loop has turned.
+    await new Promise((resolve) => setImmediate(resolve));
+    await rm(dirPath, { recursive: true, force: true });
+  });
+  manager.viewers.get("viewer").noteVisiblePicture({ width: 640, height: 360 });
+  qualityStateOf(session).budgetSlowSince = Date.now() - 60_000;
+  qualityStateOf(session).recentSpeed = { speed: 0.7, at: Date.now(), run: [...session.runs][0] };
+
+  await manager.quality.runQualityBudgetOnce();
+
+  const asked = manager.viewers.get("viewer").qualityAsk?.height;
+  assert.ok(asked, "the machine cannot keep up: a step down is asked");
+  assert.ok(asked <= 360, `not a rung between that the screen cannot show (asked for ${asked}p)`);
 });

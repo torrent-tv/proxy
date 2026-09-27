@@ -33,6 +33,9 @@ const LANGUAGE_TAGS = new Map([
   ["tur", "tr"], ["ces", "cs"], ["cze", "cs"], ["nld", "nl"], ["dut", "nl"]
 ]);
 
+/** The name ffmpeg writes its own playlist to, and the name that is served. */
+export const PLAYLIST_FILE_NAME = "index.m3u8";
+
 /**
  * The RFC 5646 tag for a language ffmpeg named, or the name unchanged.
  *

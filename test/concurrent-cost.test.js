@@ -59,13 +59,23 @@ test("nothing else running leaves the answer exactly as it was", () => {
   assert.equal(withZero.speed, without.speed);
 });
 
-test("a host with nothing measured still refuses nothing", () => {
+test("a wiring made without the startup calibration judges nothing", () => {
+  const answer = canSustainOutput({
+    benchmark: null,
+    outputPixelsPerSec: RUNG_240P,
+    concurrentCostSec: 0.125
+  });
+  assert.equal(answer.sustainable, true);
+  assert.equal(answer.speed, null);
+});
+
+test("a host calibrated with no mode qualified refuses a re-encode (roadmap item 97, step 14)", () => {
   const answer = canSustainOutput({
     benchmark: [],
     outputPixelsPerSec: RUNG_240P,
     concurrentCostSec: 0.125
   });
-  assert.equal(answer.sustainable, true);
+  assert.equal(answer.sustainable, false, "unknown capacity is not capacity");
   assert.equal(answer.speed, null);
 });
 

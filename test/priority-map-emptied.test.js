@@ -17,7 +17,6 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { PriorityOrchestrator } from "../services/viewer/PriorityOrchestrator.js";
 import { Viewers } from "../services/viewer/Viewers.js";
-import { viewersOf } from "../services/viewer/Viewer.js";
 import { TorrentPool } from "../services/torrent/torrent-pool.js";
 import { demandFor, forgetTorrent } from "../services/torrent/download/registry.js";
 import { Urgency } from "../services/torrent/demand/index.js";
@@ -49,7 +48,7 @@ function over(sessions) {
   const viewers = new Viewers();
   const priority = new PriorityOrchestrator({
     publish: (one) => published.push(one),
-    viewersOf: (session) => viewersOf(session),
+    viewers,
     allowanceFor: () => 10
   });
   return {

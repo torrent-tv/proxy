@@ -12,7 +12,7 @@
  * instead of it: both encoders run, one for the rung and one for the audio.
  */
 
-import { serveSessionFile } from "../session-file/get.js";
+import { consumerOf, refusedAsStale, serveSessionFile } from "../session-file/get.js";
 
 /**
  * @param {import("fastify").FastifyRequest} req
@@ -29,7 +29,15 @@ export async function handleTranscodeAudioFileGet(req, reply, { renditions, serv
   // soundtrack each of them chose is their own: without this, a segment request
   // from one viewer would be read as everybody moving to that track, and the
   // other viewer's encoder would be stopped once per segment.
-  const consumerId = typeof req.query?.consumer === "string" ? req.query.consumer : "";
+  const consumerId = consumerOf(req);
+  // Before resolving, for the same reason as a step's: resolving can make the
+  // soundtrack and registers this viewer on it. A soundtrack keeps no record of
+  // what answered a repeat — it is not a height — but a request for a viewing
+  // that has been left is refused here like any other, and the response that
+  // does go out holds its output while it is being sent (`serveSessionFile`).
+  if (refusedAsStale(req, reply, viewerRequests, fileName)) {
+    return reply;
+  }
   const resolved = await renditions.resolveAudioRenditionFile(
     baseSessionId,
     trackIndex,

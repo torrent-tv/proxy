@@ -53,7 +53,6 @@ function sessionWithARun(dirPath) {
     get inputFile() { return this.file; },
     get audioFile() { return this.file; },
     outputKey: "output-under-test",
-    claims: new Set(),
     lastRequestedSegment: 0,
     progress: { updatedAt: 0, processedSeconds: 0, totalSeconds: 100, startPositionSeconds: 0 },
     lastAccessedAt: Date.now()

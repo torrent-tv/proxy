@@ -15,7 +15,7 @@ import path from "node:path";
 import { rmSync } from "node:fs";
 import WebTorrent from "webtorrent";
 import { logger } from "../../utils/logger.js";
-import { SharedPieceStore, findSharedStore } from "../storage/piece-store/shared-piece-store.js";
+import { pieceStoreOf } from "./piece-store-of.js";
 import { Urgency, urgencyName } from "./demand/index.js";
 import { demandFor, forgetTorrent, reconcileAll, hasUnmetDemand } from "./download/registry.js";
 import { withdrawClaim } from "./download/withdraw-claim.js";
@@ -1130,11 +1130,26 @@ export class TorrentPool {
     }
   }
 
+  /** The chunk store class every torrent is built with. @type {Function} */
+  #pieceStore;
+
   get claimsWithdrawn() {
     return this.#claimsWithdrawn;
   }
 
-  constructor({ memoryBytes, dhtBootstrap } = {}) {
+  /**
+   * @param {object} params
+   * @param {number} [params.memoryBytes]
+   * @param {string[]} [params.dhtBootstrap]
+   * @param {Function} params.pieceStore - The chunk store WebTorrent builds per
+   *   torrent: the storage component's implementation, handed in where the
+   *   thread is assembled.
+   */
+  constructor({ memoryBytes, dhtBootstrap, pieceStore } = {}) {
+    if (typeof pieceStore !== "function") {
+      throw new TypeError("TorrentPool needs the piece store to build torrents with");
+    }
+    this.#pieceStore = pieceStore;
     this.#memoryBytes = Number.isFinite(memoryBytes) && memoryBytes > 0 ? memoryBytes : undefined;
 
     // Sweep orphaned torrent data left by a previous hard kill (no graceful
@@ -1273,7 +1288,7 @@ export class TorrentPool {
    * @returns {{ ranges: Array<{ from: number, to: number }>, missing: boolean }}
    */
   #readerDemand(torrent) {
-    const store = findSharedStore(torrent);
+    const store = pieceStoreOf(torrent);
     const ranges = typeof store?.protectedRanges === "function" ? store.protectedRanges() : [];
     let missing = false;
     for (const range of ranges) {
@@ -1811,7 +1826,7 @@ export class TorrentPool {
               this.#readPositionByTorrent.delete(existing);
               this.client.remove(existing, { destroyStore: true }, () => {
                 const addedReplacement = this.client.add(torrentId, {
-                  store: SharedPieceStore,
+                  store: this.#pieceStore,
                   storeCacheSlots: 0,
                   storeOpts: this.#storeOptions(),
                   deselect: true
@@ -1844,7 +1859,7 @@ export class TorrentPool {
       // hands out, holds pieces in shared memory the main thread can read
       // directly, and spills to disk instead of losing them.
       const added = this.client.add(torrentId, {
-        store: SharedPieceStore,
+        store: this.#pieceStore,
         storeCacheSlots: 0,
         storeOpts: this.#storeOptions(),
         // Nothing is fetched until somebody says they want it. WebTorrent's own

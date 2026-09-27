@@ -7,7 +7,6 @@
  */
 
 import os from "node:os";
-import { availableMemoryBytes } from "../storage/machine-memory.js";
 
 /**
  * Snapshot of system health at a point in time.
@@ -18,8 +17,8 @@ import { availableMemoryBytes } from "../storage/machine-memory.js";
  *   normalised "CPU availability" score.
  *
  * `memFree`  — fraction of total system RAM that could still be given out
- *   (0–1). See {@link availableMemoryBytes} for why that is not the same as
- *   free memory.
+ *   (0–1). The reading is the storage component's (`storage/machine-memory.js`
+ *   says why that is not the same as free memory), handed in.
  *
  * `uptime`   — process uptime in whole seconds (useful for preferring
  *   already-warmed proxies over freshly started ones).
@@ -31,24 +30,17 @@ import { availableMemoryBytes } from "../storage/machine-memory.js";
  */
 
 /**
- * What the machine could give an allocation right now.
- *
- * Re-exported rather than computed: the resource is the storage layer's, and
- * this reading was written three times over before it had one owner.
- *
- * @returns {number}
- */
-export { availableMemoryBytes };
-
-/**
  * Collect current system health metrics.
  *
  * All three values are rounded to three decimal places to avoid unnecessary
  * diff noise when serialising to JSON across the tunnel.
  *
+ * @param {object} params
+ * @param {() => number} params.availableMemoryBytes - What the machine could
+ *   give an allocation right now; the storage component's reading.
  * @returns {HealthMetrics}
  */
-export function collectHealthMetrics() {
+export function collectHealthMetrics({ availableMemoryBytes }) {
   const cpuCount = os.cpus().length || 1;
   const cpuLoad = os.loadavg()[0] / cpuCount;
   const memFree = availableMemoryBytes() / os.totalmem();

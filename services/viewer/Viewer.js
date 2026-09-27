@@ -40,6 +40,26 @@
  * question, and it reads a union of viewers rather than any one of them.
  */
 
+import { Assignments } from "./Assignments.js";
+import { bufferTrend, trendRunStart } from "./buffer-trend.js";
+
+/**
+ * How long a generation this viewer has left behind goes on accepting NEW
+ * requests.
+ *
+ * A CHOSEN NUMBER, and it is named here rather than buried so that it reads as
+ * one. It cannot be derived today: it should come from the player's own retry
+ * policy, and this product overrides that policy on its own page while the
+ * native path in Safari has none at all that can be read. Until the retries a
+ * real player actually makes are measured, the value is given and the checks
+ * are written against what is given.
+ *
+ * What it protects: a request made just before a seek, still in flight when the
+ * seek lands, is answered by the output it was made against instead of being
+ * decided again against a position the viewer has already left.
+ */
+export const ACCEPT_WINDOW_MS = 30_000;
+
 export class Viewer {
   /**
    * @param {string} id - The consumer id the browser sends with every request
@@ -61,8 +81,29 @@ export class Viewer {
     this.activeVariantId = null;
     /** A step being prepared for a switch they have not made yet. @type {string | null} */
     this.warmingVariantId = null;
+    /**
+     * When the warming of that step began, so the time a move takes to be
+     * ready can be kept (roadmap item 97, step 14). @type {number | null}
+     */
+    this.warmingSince = null;
     /** A soundtrack being prepared for the same reason. @type {string | null} */
     this.warmingAudioId = null;
+    /**
+     * An output of the height on their screen, at another bitrate limit, being
+     * prepared so that their NEXT segments come from it (roadmap item 97, step
+     * 12). Not `warmingVariantId`: that is a step their player will switch to,
+     * and the page says when it has. Here the address does not change, the
+     * player is never told, and the switch is made on this side once the
+     * segment they will ask for next is closed on the new output.
+     *
+     * `askedHeights` are the heights their player asks for under which the
+     * output on screen is chosen — a step is chosen under the height asked and
+     * named after the height produced, so there can be more than one — and the
+     * move replaces the choice under each; `direction` is why it was started.
+     *
+     * @type {{ askedHeights: number[], outputId: string, outputKey: string, direction: "down" | "up", reason: string, since: number } | null}
+     */
+    this.sameHeightSwitch = null;
     /**
      * Where their picture stood when they last said so, and when they said it.
      *
@@ -121,18 +162,27 @@ export class Viewer {
      */
     this.qualityMode = null;
     /**
+     * The height the quality budget last asked THIS viewer's player to move
+     * to, while the request stands. Created only in AUTO (`askQuality`), read
+     * back only by this viewer's own progress poll, and let go once they are
+     * there, once it has run out, or once they are no longer in AUTO.
+     *
+     * `urgent` when their buffer would run dry before anything else could
+     * arrive: their page then switches without waiting for a cushion.
+     *
+     * @type {{ height: number, at: number, reason: string, urgent: boolean } | null}
+     */
+    this.qualityAsk = null;
+    /**
      * Every output this viewer is watching, by session id: the picture, the
      * quality step on their screen, the soundtrack they chose.
      *
-     * WHY THERE ARE TWO SETS AND NOT ONE. There is one relation — this person
-     * watches this output — and it is asked from both ends. An output asks "has
-     * anybody left?", to decide whether to go on producing. A viewer who leaves
-     * asks "what was I watching?", so that each of those outputs can be told.
-     * Neither question can be answered from the other side without walking every
-     * session in the process, so the relation is indexed both ways. It is
-     * written in exactly one place — `Viewers.of` and `Viewers.leaves` write
-     * both directions together — which is what keeps two indexes of one relation
-     * from becoming two different answers.
+     * THE ONLY STORED FORM of the relation "this person watches this output".
+     * The question from the other end — who watches this output — is answered
+     * by `Viewers.forOutput`, which derives it from these sets. It used to be a
+     * second index kept beside this one, and two stored copies of one relation
+     * are two answers that can disagree. The registry is small, so deriving is
+     * cheaper than keeping the copies in step.
      *
      * This is what replaced a film object. There is no "film" anywhere in this
      * proxy — its parts are born at different times, die at different times and
@@ -142,6 +192,25 @@ export class Viewer {
      * @type {Set<string>}
      */
     this.outputs = new Set();
+    /**
+     * Which output answers THIS viewer, and for how long that stands.
+     *
+     * Their own, which is the whole of roadmap item 97: the record it replaces
+     * — one entry per file and height, read by everybody — meant a viewer on a
+     * thin link decided for a viewer on a thick one. What it holds and why each
+     * fact is there is in `Assignments.js`.
+     *
+     * @type {Assignments}
+     */
+    this.assignments = new Assignments({ acceptWindowMs: ACCEPT_WINDOW_MS });
+    /**
+     * On what the output this viewer was last given was judged: the verdict of
+     * their own link against its whole load, and the figures. `estimated to
+     * fit` is admitted and NOT confirmed — the figure is an average, not a
+     * bound — and the page is told so rather than left to assume it.
+     * @type {object | null}
+     */
+    this.servingVerdict = null;
     /**
      * The files this viewer has subtitles switched on for, as
      * `sourceKey:fileIndex`.
@@ -204,6 +273,26 @@ export class Viewer {
     // measured at the moment the position beside it was, which is what makes it
     // the bound on carrying that position forward — see `positionSeconds`.
     this.bufferedSeconds = null;
+    /**
+     * What the page said it held, and when, since this viewer last moved to
+     * another place in the film — what the buffer's trend is read from
+     * (`buffer-trend.js`). A seek empties the buffer, so what came before it
+     * says nothing about what comes after.
+     *
+     * @type {Array<{ at: number, seconds: number }>}
+     */
+    this.bufferReadings = [];
+    /** The span the trend was last asked over; readings older than its run are let go. @type {number} */
+    this.trendSpanSec = 0;
+    /**
+     * The picture as this viewer sees it, in physical pixels: the frame that
+     * would be shown without being enlarged, as their page measured it. The
+     * upper bound of the height of a re-encoded output made for them (roadmap
+     * item 98). Null until their page has said.
+     *
+     * @type {{ width: number, height: number } | null}
+     */
+    this.visiblePicture = null;
   }
 
   /**
@@ -222,7 +311,9 @@ export class Viewer {
     if (!Number.isFinite(seconds) || seconds < 0) {
       return;
     }
-    this.position = { seconds, at: now };
+    this.#place(seconds, now);
+    // The buffer's history belongs to the place they left.
+    this.bufferReadings = [];
     // WHAT THEY HELD AT THE PLACE THEY LEFT SAYS NOTHING ABOUT THE PLACE THEY
     // ARRIVED AT. A seek empties the buffer by construction — the player
     // discards what it holds and fetches from the new position — so carrying
@@ -230,7 +321,35 @@ export class Viewer {
     // material that no longer exists. Zero is the truthful floor until they say
     // otherwise, and a viewer who has just seeked says so within a tick.
     this.bufferedSeconds = 0;
+  }
+
+  /**
+   * Where they are, stated — without anything a move to another place means.
+   *
+   * @param {number} seconds
+   * @param {number} now
+   * @returns {void}
+   */
+  #place(seconds, now) {
+    this.position = { seconds, at: now };
     this.lastSeenAt = now;
+  }
+
+  /**
+   * Which way their buffer is going, over the shortest run of their reports
+   * that spans `spanSec`, and the interval between their last two reports.
+   * Readings older than that run are let go: the run only ever moves forward.
+   *
+   * @param {number} spanSec - The segment duration of the output they watch.
+   * @returns {{ slope: number, reportGapSec: number } | null}
+   */
+  bufferTrend(spanSec) {
+    this.trendSpanSec = spanSec;
+    const start = trendRunStart(this.bufferReadings, spanSec);
+    if (start > 0) {
+      this.bufferReadings = this.bufferReadings.slice(start);
+    }
+    return bufferTrend(this.bufferReadings, spanSec);
   }
 
   /**
@@ -270,10 +389,12 @@ export class Viewer {
       waiting,
       onScreen,
       inPictureInPicture,
-      qualityMode
+      qualityMode,
+      visiblePicture
     },
     now = Date.now()
   ) {
+    this.noteVisiblePicture(visiblePicture);
     // Whether the size on their screen was picked by hand or is the automatic
     // choice. Kept only when stated: a page one release behind says nothing,
     // and is taken as picking, which is what every page was before.
@@ -295,13 +416,21 @@ export class Viewer {
         at: now
       };
     }
-    // The position first, then the cushion: `moveTo` clears what was held at
-    // wherever they were before, and this report's own figure is measured at
-    // the position this report states.
+    // Where the picture is now. A report states a place the viewer has played
+    // to, not a place they moved to: their buffer's history stands.
     if (Number.isFinite(positionSeconds) && positionSeconds >= 0) {
-      this.moveTo(/** @type {number} */ (positionSeconds), now);
+      this.#place(/** @type {number} */ (positionSeconds), now);
     }
     this.bufferedSeconds = held;
+    this.bufferReadings.push({ at: now, seconds: held });
+    // Kept only as far back as the last trend asked needs: its run only moves
+    // forward. Before a trend has been asked for, nothing is let go.
+    if (this.trendSpanSec > 0) {
+      const start = trendRunStart(this.bufferReadings, this.trendSpanSec);
+      if (start > 0) {
+        this.bufferReadings = this.bufferReadings.slice(start);
+      }
+    }
     this.playing = playing === true;
     // A page that states `playing` and not `waiting` is one release behind this
     // proxy, which is the ordinary state of a rolling pool — the proxy ships
@@ -393,6 +522,74 @@ export class Viewer {
   }
 
   /**
+   * This viewer has gone, and everything that means.
+   *
+   * ONE STATEMENT rather than a field three callers set, because it is no
+   * longer only a field: the outputs their assignments were holding must stop
+   * being held, and a caller that set `gone` alone would leave an output alive
+   * with nobody left to serve. A response still in flight goes with them —
+   * the connection it was being sent over is what went.
+   *
+   * @returns {void}
+   */
+  markGone() {
+    this.gone = true;
+    this.assignments.clear();
+  }
+
+  /**
+   * Ask this viewer's player to move to another height.
+   *
+   * Refused outside AUTO, and that refusal is the rule itself rather than a
+   * check at each caller: a height picked by hand is never moved by the budget,
+   * and a page that has not said its mode is treated as a manual one.
+   *
+   * @param {number} height
+   * @param {string} reason
+   * @param {number} now
+   * @param {boolean} [urgent] - Their buffer would run dry before anything else
+   *   could arrive.
+   * @returns {boolean} Whether a request now stands.
+   */
+  askQuality(height, reason, now, urgent = false) {
+    if (this.qualityMode !== "auto") {
+      this.qualityAsk = null;
+      return false;
+    }
+    this.qualityAsk = { height, at: now, reason, urgent: urgent === true };
+    return true;
+  }
+
+  /**
+   * Take the picture as their page measured it. A size that is not a positive
+   * width and height leaves the one they had.
+   *
+   * @param {unknown} value
+   * @returns {boolean} Whether it changed.
+   */
+  noteVisiblePicture(value) {
+    const width = Math.round(Number(/** @type {{ width?: unknown }} */ (value)?.width));
+    const height = Math.round(Number(/** @type {{ height?: unknown }} */ (value)?.height));
+    if (!(width > 0 && height > 0)) {
+      return false;
+    }
+    if (this.visiblePicture && this.visiblePicture.width === width && this.visiblePicture.height === height) {
+      return false;
+    }
+    this.visiblePicture = { width, height };
+    return true;
+  }
+
+  /**
+   * Let the standing request go.
+   *
+   * @returns {void}
+   */
+  dropQualityAsk() {
+    this.qualityAsk = null;
+  }
+
+  /**
    * Note that this viewer has been heard from.
    *
    * @param {number} [now]
@@ -457,46 +654,4 @@ export class Viewer {
     const held = Number.isFinite(this.bufferedSeconds) ? Math.max(0, this.bufferedSeconds) : 0;
     return this.position.seconds + rate * Math.min(elapsedSec, held);
   }
-}
-
-/** @type {WeakMap<object, Map<string, Viewer>>} */
-const viewersByOutput = new WeakMap();
-
-/**
- * The viewers of one output, made on first use and owned by the viewer layer.
- *
- * @param {object} output
- * @returns {Map<string, Viewer>}
- */
-export function viewersOf(output) {
-  let viewers = viewersByOutput.get(output);
-  if (!viewers) {
-    viewers = new Map();
-    viewersByOutput.set(output, viewers);
-  }
-  return viewers;
-}
-
-/**
- * The viewer with this id, made if this session has not met them before.
- *
- * Use `Viewers.of` instead wherever a registry is at hand: this makes ONE
- * viewer per session, so the same person watching a picture, a quality step and
- * a soundtrack is three objects, and `outputs` — a fact about the person — is
- * then three sets that nothing keeps in step. It is kept for a session assembled
- * by hand in a test that has no registry.
- *
- * @param {object} session
- * @param {string} consumerId
- * @returns {Viewer}
- */
-export function viewerOf(session, consumerId) {
-  const viewers = viewersOf(session);
-  let viewer = viewers.get(consumerId);
-  if (!viewer) {
-    viewer = new Viewer(consumerId);
-    viewers.set(consumerId, viewer);
-  }
-  viewer.outputs.add(session.id);
-  return viewer;
 }

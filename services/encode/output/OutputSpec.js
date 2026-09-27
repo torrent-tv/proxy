@@ -26,28 +26,54 @@ import { createHash } from "node:crypto";
  *
  * 1. the viewer, in any form. Not the consumer id, not where they started, not
  *    their viewport. A viewer is not a property of the material;
- * 2. the bitrate ceiling the viewer's measured link puts on a re-encode. It is
- *    a runtime parameter of a SHARED session — the worst link among the live
- *    consumers decides — so two viewers on one encode is the design, not a
- *    collision. Rate control appears in neither the SPS nor the PPS, which is
- *    why it can move under a player that has already cached the init;
- * 3. the video track number. Only `0:v:0` is ever mapped, so the file names the
+ * 2. the video track number. Only `0:v:0` is ever mapped, so the file names the
  *    picture. Add it here the day a second video track can be chosen.
  *
  * A limit worth stating: two specs that agree name interchangeable output
  * within ONE proxy. A copied picture's bytes depend only on the source, but a
- * re-encoded one's depend on this host's encoder, its preset and its rate cap —
+ * re-encoded one's depend on this host's encoder, its preset and its rate control —
  * so this is not enough to reuse segments BETWEEN proxies (roadmap item 41).
  */
 
 /**
+ * A rate control as an output states it, or null where there is none.
+ *
+ * @param {unknown} given
+ * @returns {{ maxrateKbps: number, bufsizeKbps: number, level: string | null } | null}
+ */
+function rateControlOf(given) {
+  if (!given || typeof given !== "object") {
+    return null;
+  }
+  const maxrateKbps = Number(given.maxrateKbps);
+  const bufsizeKbps = Number(given.bufsizeKbps);
+  if (!(Number.isInteger(maxrateKbps) && maxrateKbps > 0 && Number.isInteger(bufsizeKbps) && bufsizeKbps > 0)) {
+    return null;
+  }
+  return {
+    maxrateKbps,
+    bufsizeKbps,
+    level: typeof given.level === "string" && /^[0-9.]+$/.test(given.level) ? given.level : null
+  };
+}
+
+/**
  * The picture an output carries.
+ *
+ * ITS RATE CONTROL IS PART OF IT (roadmap item 97, step 10, decided with the
+ * user 2026-09-18 and 2026-09-23). A bitrate limit changes the bytes of every
+ * piece, so two limits are two outputs; it was once a runtime field of a
+ * shared output that the worst link among its viewers moved, which took a
+ * slow viewer's limit onto every viewer of that picture. The level the stream
+ * is declared at is part of it too: it is written into the header. It is the
+ * level of the NOMINAL output of this size, so every limit at one size writes
+ * the same header (`softwareRateControlFor`).
  */
 export class VideoOutput {
   /**
    * @param {object} params
    * @param {number} params.fileIndex - The file the picture is read from.
-   * @param {{ encoder: string, width: number, height: number, fps: number, preset: string | null, tonemap: boolean } | null} params.encode
+   * @param {{ encoder: string, width: number, height: number, fps: number, preset: string | null, tonemap: boolean, rateControl?: { maxrateKbps: number, bufsizeKbps: number, level: string | null } | null } | null} params.encode
    *   Null when the picture is copied — then the output is the source's own
    *   picture and nothing asked for can change a byte of it. When it is
    *   re-encoded, the FORMAT that is actually produced: which encoder, the
@@ -70,7 +96,10 @@ export class VideoOutput {
           height: Number.isInteger(encode.height) && encode.height > 0 ? encode.height : 0,
           fps: Number.isFinite(encode.fps) && encode.fps > 0 ? encode.fps : 0,
           preset: typeof encode.preset === "string" && encode.preset.length > 0 ? encode.preset : null,
-          tonemap: encode.tonemap === true
+          tonemap: encode.tonemap === true,
+          // Null where nothing bounds the rate — a hardware encoder, which is
+          // given a quality figure and no `-maxrate` at all.
+          rateControl: rateControlOf(encode.rateControl)
         }
       : null;
   }
@@ -92,8 +121,11 @@ export class VideoOutput {
     if (!this.encode) {
       return `v=${this.fileIndex}/copy`;
     }
-    const { encoder, width, height, fps, preset, tonemap } = this.encode;
-    return `v=${this.fileIndex}/enc/${encoder}/${width}x${height}@${fps}/${preset ?? "-"}/${tonemap ? "tonemap" : "none"}`;
+    const { encoder, width, height, fps, preset, tonemap, rateControl } = this.encode;
+    const rate = rateControl
+      ? `vbv=${rateControl.maxrateKbps}k-${rateControl.bufsizeKbps}k@${rateControl.level ?? "-"}`
+      : "vbv=-";
+    return `v=${this.fileIndex}/enc/${encoder}/${width}x${height}@${fps}/${preset ?? "-"}/${tonemap ? "tonemap" : "none"}/${rate}`;
   }
 }
 
@@ -157,7 +189,7 @@ export class CutGrid {
  * The shape `OutputSpec.toKey` writes, read back part by part.
  */
 const KEY_PATTERN =
-  /^(?<source>.+):fmt=(?<format>[a-z0-9]+):grid=(?<grid>kf|even)@(?<gridFile>\d+):(?<carries>video-only|audio-only|muxed)(?::v=(?<videoFile>\d+)\/(?<video>copy|enc\/(?<encoder>[^/:]+)\/(?<width>\d+)x(?<height>\d+)@(?<fps>[0-9.]+)\/(?<preset>[^/:]+)\/(?<tonemap>tonemap|none)))?(?::a=(?<audioFile>\d+)\/(?<audioTrack>\d+)\/(?<audioCodec>aac|copy))?$/;
+  /^(?<source>.+):fmt=(?<format>[a-z0-9]+):grid=(?<grid>kf|even)@(?<gridFile>\d+):(?<carries>video-only|audio-only|muxed)(?::v=(?<videoFile>\d+)\/(?<video>copy|enc\/(?<encoder>[^/:]+)\/(?<width>\d+)x(?<height>\d+)@(?<fps>[0-9.]+)\/(?<preset>[^/:]+)\/(?<tonemap>tonemap|none)\/vbv=(?<vbv>-|(?<maxrate>\d+)k-(?<bufsize>\d+)k@(?<level>-|[0-9.]+))))?(?::a=(?<audioFile>\d+)\/(?<audioTrack>\d+)\/(?<audioCodec>aac|copy))?$/;
 
 /**
  * One encode of one torrent's material: which tracks, in what form, cut how,
@@ -278,7 +310,14 @@ export class OutputSpec {
                 height: Number(groups.height),
                 fps: Number(groups.fps),
                 preset: groups.preset === "-" ? null : groups.preset,
-                tonemap: groups.tonemap === "tonemap"
+                tonemap: groups.tonemap === "tonemap",
+                rateControl: groups.vbv === "-"
+                  ? null
+                  : {
+                      maxrateKbps: Number(groups.maxrate),
+                      bufsizeKbps: Number(groups.bufsize),
+                      level: groups.level === "-" ? null : groups.level
+                    }
               }
         });
     const audio = groups.audioFile === undefined

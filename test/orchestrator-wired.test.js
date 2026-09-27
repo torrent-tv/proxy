@@ -17,7 +17,7 @@ import path from "node:path";
 import { wireOutputs } from "../services/server/wire-outputs.js";
 import { SegmentStore } from "../services/storage/segment-store/SegmentStore.js";
 import { fmp4Format } from "../services/encode/segment-formats/fmp4.js";
-import { viewerOf } from "../services/viewer/Viewer.js";
+import { qualityStateOf } from "../services/encode/quality/OutputQualityState.js";
 import { startRunOn } from "./helpers/encode-run.js";
 import { outputSpec } from "./helpers/output-spec.js";
 
@@ -58,8 +58,6 @@ function sessionOn({ manager, id, dirPath, encodeStartIndex = 0, runEndIndex = -
     get audioFile() { return this.file; },
     segmentFormat: fmp4Format,
     segmentCount: 1000,
-    recentSpeed: null,
-    claims: new Set(),
     runs: new Set(),
     lastAccessedAt: Date.now()
   };
@@ -68,7 +66,7 @@ function sessionOn({ manager, id, dirPath, encodeStartIndex = 0, runEndIndex = -
     manager.encodeOrchestrator.adopt(KEY, run);
     session.testRun = run;
     // A speed is a reading taken FROM a run, so it names the run it came from.
-    session.recentSpeed = speed > 0 ? { speed, at: Date.now(), run } : null;
+    qualityStateOf(session).recentSpeed = speed > 0 ? { speed, at: Date.now(), run } : null;
     run.noteSpeed(speed);
   }
   return session;
@@ -80,7 +78,7 @@ test("a session is handed to the plan as the run it is", (t) => {
 
   const session = sessionOn({ manager, id: "one", dirPath, encodeStartIndex: 10, runEndIndex: 40 });
   manager.outputs.set(session.id, session);
-  viewerOf(session, "watching").position = { segment: 12, seconds: 48, at: Date.now() };
+  manager.viewers.of(session, "watching").position = { segment: 12, seconds: 48, at: Date.now() };
 
   manager.quality.runQualityBudgetOnce;
   manager.encodeRuns.planEncodersNow();
@@ -98,7 +96,7 @@ test("what a viewer waits for reaches the plan without their name", (t) => {
 
   const session = sessionOn({ manager, id: "one", dirPath, encodeStartIndex: 0, runEndIndex: -1 });
   manager.outputs.set(session.id, session);
-  viewerOf(session, "someone").position = { segment: 5, seconds: 20, at: Date.now() };
+  manager.viewers.of(session, "someone").position = { segment: 5, seconds: 20, at: Date.now() };
 
   manager.encodeRuns.planEncodersNow();
 
@@ -106,7 +104,7 @@ test("what a viewer waits for reaches the plan without their name", (t) => {
   // on, then what is in front of them band by band, then the rest of the track.
   // The check is the same question asked of that shape — where the most urgent
   // band begins, and that there is film in front of it.
-  const wanted = manager.encodeOrchestrator.demand.mapOn(KEY);
+  const wanted = manager.encodeOrchestrator.wantedSegmentsOn(KEY);
   const first = [...wanted].sort((left, right) => right.priority - left.priority)[0];
   assert.equal(first.from, 5, "where they are");
   assert.ok(wanted.some((zone) => zone.to > 5), "and the cushion in front of them");
@@ -118,7 +116,7 @@ test("a viewer who has gone stops being waited for, and silence alone never coun
 
   const session = sessionOn({ manager, id: "one", dirPath });
   manager.outputs.set(session.id, session);
-  const person = viewerOf(session, "gone");
+  const person = manager.viewers.of(session, "gone");
   person.moveTo(20, Date.now() - 10 * 60 * 1000);
   person.playing = false;
   person.seen(Date.now() - 10 * 60 * 1000);
@@ -127,13 +125,13 @@ test("a viewer who has gone stops being waited for, and silence alone never coun
   // timers the browser has throttled, and one holding a full cushion are all
   // silent and all still watching, so what they want is still wanted.
   manager.encodeRuns.planEncodersNow();
-  assert.ok(manager.encodeOrchestrator.demand.mapOn(KEY).length > 0, "still watching");
+  assert.ok(manager.encodeOrchestrator.wantedSegmentsOn(KEY).length > 0, "still watching");
 
   // Something SAYS they are gone — the browser released the session, or their
   // connection closed. That is the only way out.
   manager.viewers.leaves(session, "gone");
   manager.encodeRuns.planEncodersNow();
-  assert.equal(manager.encodeOrchestrator.demand.mapOn(KEY).length, 0);
+  assert.equal(manager.encodeOrchestrator.wantedSegmentsOn(KEY).length, 0);
 });
 
 test("a viewer who has arrived and asked for nothing is waited for", (t) => {
@@ -152,7 +150,7 @@ test("a viewer who has arrived and asked for nothing is waited for", (t) => {
 
   manager.encodeRuns.planEncodersNow();
 
-  const wanted = manager.encodeOrchestrator.demand.mapOn(KEY);
+  const wanted = manager.encodeOrchestrator.wantedSegmentsOn(KEY);
   assert.ok(wanted.length > 0, "an output with a viewer on it is wanted");
   const first = [...wanted].sort((left, right) => right.priority - left.priority)[0];
   assert.equal(first.from, 0, "and the beginning is where an unplaced viewer is");
@@ -169,7 +167,7 @@ test("how many encoders the machine affords is measured, not chosen", (t) => {
 
   // Fast, but what a second job costs on THIS machine has not been measured,
   // and an unmeasured penalty of 1 is not a statement that it is free.
-  cold.lastAloneSpeed = 7.12;
+  qualityStateOf(cold).lastAloneSpeed = 7.12;
   assert.equal(manager.encodeRuns.maxRunsForOutput(KEY), 1, "no measurement, no second encoder");
 
   // Measured on the addon host 2026-09-03: at 854x480 one run made 7.12x and
@@ -180,7 +178,7 @@ test("how many encoders the machine affords is measured, not chosen", (t) => {
 
   // The same host at 1920x1080: one made 1.96x, two made 0.99x and 0.98x.
   manager.contentionPenalties = new Map([[1, 1.98]]);
-  cold.lastAloneSpeed = 1.96;
+  qualityStateOf(cold).lastAloneSpeed = 1.96;
   assert.equal(manager.encodeRuns.maxRunsForOutput(KEY), 1, "the machine is full at one");
 });
 

@@ -10,7 +10,7 @@
 import path from "node:path";
 import { spawn } from "node:child_process";
 import { contentionPenalty } from "./contention.js";
-import { ENCODE_RUN_STATE, liveRunsOf, runStateOf } from "./encode-run-state.js";
+import { ENCODE_RUN_STATE, liveRunsOf, runStateOf, wireState } from "./encode-run-state.js";
 import { ENCODE_EXIT } from "./encode-exit.js";
 import { EncodeRun } from "./EncodeRun.js";
 import { computeOutputDimensions } from "./args.js";
@@ -135,6 +135,7 @@ export function describeFfmpegArgs(args) {
 }
 
 export class EncodeRuns {
+  #inputState = new WeakMap();
   /** What this reads and asks of the rest of the proxy, and nothing else. @type {object} */
   #host;
 
@@ -146,14 +147,88 @@ export class EncodeRuns {
   #planScheduled = false;
 
   /**
-   * @param {object} host - `logger`, `softwareDescriptor`, `viewerSecondsOn`, `inputOf`, `producedNumbers`, `servesAudioSeparately`, `disposeSession`, `contentionPenalties`, `encodeCost`, `encodeOrchestrator`, `ffmpegBin`, `outputTimes`, `outputs`, `priority`, `segmentDurationSec`, `segmentStore`, `videoEncoder`
+   * @param {object} host - `logger`, `viewerSecondsOn`, `noteRunStarting`, `inputOf`, `producedNumbers`, `servesAudioSeparately`, `disposeSession`, `contentionPenalties`, `encodeCost`, `encodeOrchestrator`, `encoders`, `ffmpegBin`, `outputTimes`, `outputs`, `priority`, `segmentDurationSec`, `segmentStore`, `videoEncoder`
    */
   constructor(host) {
     this.#host = host;
   }
 
+  #inputStateFor(output) {
+    let state = this.#inputState.get(output);
+    if (!state) {
+      state = {
+        readWindowBytes: 0,
+        inputRetryCount: 0,
+        backwardRestarts: { count: 0, segmentsBack: 0, worstBack: 0, remade: 0 },
+        firstWantedAt: new Map(),
+        /** Bytes the swarm has delivered to this output's own input reads. */
+        inputBytes: 0,
+        /** The mismatch between the held init and the run's size last said, so it is said once. */
+        initSizeSaid: ""
+      };
+      this.#inputState.set(output, state);
+    }
+    return state;
+  }
+
+  setReadWindow(output, bytes) {
+    this.#inputStateFor(output).readWindowBytes = Number.isFinite(bytes) ? bytes : 0;
+  }
+
+  readWindowFor(output) {
+    return this.#inputStateFor(output).readWindowBytes;
+  }
+
+  noteWanted(output, index, at = Date.now()) {
+    const wanted = this.#inputStateFor(output).firstWantedAt;
+    if (!wanted.has(index)) wanted.set(index, at);
+  }
+
+  resetInputRetry(output) {
+    this.#inputStateFor(output).inputRetryCount = 0;
+  }
+
+  /**
+   * Count bytes the swarm has delivered to one output's own input read.
+   *
+   * Called by the `/stream` route for every fragment it writes to an encoder.
+   * Cheap on purpose — one addition, no clock, no log — because it runs per
+   * fragment on the path that feeds ffmpeg.
+   *
+   * @param {string} outputId
+   * @param {number} bytes
+   * @returns {void}
+   */
+  noteInputBytes(outputId, bytes) {
+    if (!outputId || !(bytes > 0)) {
+      return;
+    }
+    const output = this.#host.outputs.get(outputId);
+    if (output) {
+      this.#inputStateFor(output).inputBytes += bytes;
+    }
+  }
+
+  /**
+   * @param {object} output
+   * @returns {number}
+   */
+  inputBytesOf(output) {
+    return output ? this.#inputStateFor(output).inputBytes : 0;
+  }
+
   runsOf(output) {
     return output ? this.#host.encodeOrchestrator.runsOn(output.outputKey) : [];
+  }
+
+  /**
+   * Where the earliest live encoder of this output began, or null with none.
+   *
+   * @param {object} output
+   * @returns {number | null}
+   */
+  earliestStartOf(output) {
+    return earliestRunStart(this.runsOf(output));
   }
 
   isLive(output) {
@@ -170,6 +245,46 @@ export class EncodeRuns {
 
   lastErrorOf(output) {
     return output ? this.#host.encodeOrchestrator.errorOf(output.outputKey) : "";
+  }
+
+  /**
+   * Whether this output's encoding has failed for good.
+   *
+   * @param {object} output
+   * @returns {boolean}
+   */
+  hasFailed(output) {
+    return this.runStateOf(output) === ENCODE_RUN_STATE.ENDED_FAILED;
+  }
+
+  /**
+   * Whether this output's input went away and is being fetched again.
+   *
+   * @param {object} output
+   * @returns {boolean}
+   */
+  isWaitingForInput(output) {
+    return this.runStateOf(output) === ENCODE_RUN_STATE.RETRY_WAIT;
+  }
+
+  /**
+   * The run state in the words the browser is told.
+   *
+   * @param {object} output
+   * @returns {string}
+   */
+  wireStateOf(output) {
+    return wireState(this.runStateOf(output));
+  }
+
+  /**
+   * What went wrong, when this output's encoding has failed; empty otherwise.
+   *
+   * @param {object} output
+   * @returns {string}
+   */
+  failureOf(output) {
+    return this.hasFailed(output) ? this.lastErrorOf(output) : "";
   }
 
   progressOf(output, index = null) {
@@ -465,14 +580,15 @@ export class EncodeRuns {
    * @returns {void}
    */
   #warnIfRunLeavesTheInitBehind(session) {
-    if (!session.spec.transcodesVideo || !session.initBytes || session.initBytes.length === 0) {
+    const initBytes = this.#host.segmentStore.initOf(session.outputKey ?? "");
+    if (!session.spec.transcodesVideo || !initBytes || initBytes.length === 0) {
       return; // nothing served yet, or nothing being encoded
     }
     const format = session.segmentFormat;
     if (typeof format?.initVideoSize !== "function") {
       return; // a self-describing container (MPEG-TS) cannot have this fault
     }
-    const described = format.initVideoSize(session.initBytes);
+    const described = format.initVideoSize(initBytes);
     if (!described) {
       return;
     }
@@ -492,10 +608,11 @@ export class EncodeRuns {
       return;
     }
     const said = `${described.width}x${described.height}->${producing.w}x${producing.h}`;
-    if (session.initSizeSaid === said) {
+    const inputState = this.#inputStateFor(session);
+    if (inputState.initSizeSaid === said) {
       return;
     }
-    session.initSizeSaid = said;
+    inputState.initSizeSaid = said;
     this.#host.logger.warn(
       `transcode ${session.id} is about to encode ${producing.w}x${producing.h} while the init segment ` +
         `the player holds describes ${described.width}x${described.height} "${session.file.name}" — ` +
@@ -545,9 +662,10 @@ export class EncodeRuns {
     if (!this.isLive(session)) {
       return null;
     }
-    // A new run starts its own reckoning: a pair spanning the restart would
-    // count the gap between two runs as slow encoding.
-    session.learnSample = null;
+    // A new run starts the quality budget's reckoning afresh: a pair of
+    // readings spanning the restart would count the gap between two runs as
+    // slow encoding. Told, not written: those readings are the budget's.
+    this.#host.noteRunStarting(session);
     // Where a restart's seconds go. A seek costs 5-8 s in the field and the
     // recorded reason — waiting for the previous ffmpeg to exit, measured at
     // 0.54-1.47 s — does not account for it. Before rebuilding the hottest path
@@ -577,7 +695,8 @@ export class EncodeRuns {
     // starts at. Looking it up by the start index alone found nothing and the
     // line never printed once.
     let wantedAt = null;
-    for (const [index, at] of session.firstWantedAt ?? []) {
+    const inputState = this.#inputStateFor(session);
+    for (const [index, at] of inputState.firstWantedAt) {
       if (index >= startIndex && (wantedAt === null || at < wantedAt)) {
         wantedAt = at;
       }
@@ -595,7 +714,7 @@ export class EncodeRuns {
     // behind-head repair came to fire on the very first poll instead of waiting
     // for the seek that should move the encoder. It also stops the map growing
     // for the life of a session.
-    session.firstWantedAt = new Map();
+    inputState.firstWantedAt.clear();
     // WHERE THIS NUMBER REALLY BEGINS, when a produced piece has said so and
     // the table the player holds still says otherwise.
     //
@@ -639,7 +758,7 @@ export class EncodeRuns {
       audioOnly: session.spec.carries === "audio-only",
       audioSeparate: this.#host.servesAudioSeparately(session),
       audioSourceTrackIndex: session.spec.audioSourceTrackIndex,
-      rateCapKbps: session.rateCapKbps ?? null,
+      rateControl: session.spec.video?.encode?.rateControl ?? null,
       startIndex,
       endIndex: runEnd,
       positionSecondsOverride,
@@ -709,11 +828,6 @@ export class EncodeRuns {
     // frame. It lost its caller in a refactor on 2026-09-04 and had none until
     // 2026-09-15 — not by a decision, which is why it is back rather than gone.
     this.#warnIfRunLeavesTheInitBehind(session);
-    // Any (re)start resets the cumulative `speed` ffmpeg reports, so reset the
-    // realtime-budget slow window too — otherwise warm-up right after a user
-    // seek could be mis-counted as sustained sub-realtime and trigger a
-    // premature downscale.
-    session.budgetSlowSince = 0;
 
     this.#host.logger.info(
       `transcode ${session.id} encode-run #${safeIndex}..#${runEnd} from segment #${safeIndex} ` +
@@ -795,9 +909,37 @@ export class EncodeRuns {
     // recorded in the field the same day.
     const wasCurrent = this.runsOf(session).includes(run);
     this.#host.encodeOrchestrator.noteEnded(ended);
+    // What this admitted encode was seen to do, kept for the next time this
+    // host prices the same mode (roadmap item 97, step 14). Whatever the
+    // ending: a run that failed still ran at the speed it ran at, and the
+    // segments it closed still carried what they carried.
+    this.#host.observeEncodeEnded?.(session);
     // A stretch went back to the map, so what should be running has changed.
     // Said here rather than waited for: this is the moment it became true.
     this.planEncodersSoon();
+    // ANYBODY ALREADY WAITING IS TOLD, and it is asked HERE because every
+    // ending passes this line while the handlers below return one by one. It
+    // used to be the last statement of this method, which the `SHORT` branch —
+    // ffmpeg exiting 0 having produced less than the playlist promises —
+    // returns before reaching. That ending is terminal (`ENDED_FAILED`), so a
+    // request arriving after it is answered with the failure at once while a
+    // wait that BEGAN before it sat out its whole deadline, or, where the page
+    // states none, until the viewer disconnected.
+    //
+    // THE CONDITION IS THE OUTPUT'S ACTUAL STATE, not this run's ending.
+    // `stateOf` answers from the LIVE runs and falls back to the last ending
+    // only when none remain, so one run of several ending in failure wakes
+    // nobody — something is still making it — and the last one does. Asked
+    // after `noteEnded` has recorded the ending, so the woken request reads the
+    // final state; and it re-reads the disk first, because a piece already made
+    // is served whatever became of the encoder.
+    if (this.hasFailed(session)) {
+      this.#host.invalidateWaits(session);
+      // A move to this output being prepared for a viewer waits for a segment
+      // that nothing will now make, and no publication will ever end that wait.
+      // This is the event that does (roadmap item 97, step 12).
+      this.#host.productionFailed(session);
+    }
     if (!this.isLive(session)) {
       this.forgetEncodingOfGone(session);
       return;
@@ -840,8 +982,8 @@ export class EncodeRuns {
     // software for the life of the process, and started an extra run at the old
     // index while it was at it.
     if (ended.ending === ENCODE_EXIT.FAILED && session.spec.transcodesVideo && this.#host.videoEncoder.kind !== "software") {
-      const failedEncoder = this.#host.videoEncoder.name;
-      this.#host.videoEncoder = this.#host.softwareDescriptor();
+      const failed = this.#host.encoders.useSoftware();
+      const failedEncoder = failed?.name ?? this.#host.videoEncoder.name;
       this.#host.logger.warn(
         `transcode ${session.id} hardware encoder ${failedEncoder} failed ` +
           `(${lastError}); falling back to software libx264, and every output named by ${failedEncoder} is closed`
@@ -850,6 +992,13 @@ export class EncodeRuns {
       // another encoder cannot be decoded with the header this output's viewers
       // already hold. So the outputs made by the failed encoder end here, and
       // the next request for that picture names a format built on the new one.
+      //
+      // THE ONE DISPOSAL THAT DOES NOT ASK WHETHER ASSIGNMENTS STILL HOLD IT, and
+      // deliberately. Every other one asks, because a repeat of a request must be
+      // answered by what answered it first. Here what answered it first has no
+      // encoder that can go on making it: holding the output keeps only a name
+      // whose next segment nobody will produce. A response already being sent is
+      // not cut short by this — it reads from a file already opened.
       for (const other of [...this.#host.outputs.values()]) {
         if (other.spec.video?.encode?.encoder === failedEncoder) {
           void this.#host.disposeSession(other.id);
@@ -868,10 +1017,11 @@ export class EncodeRuns {
     // it was built for, a target that genuinely cannot be encoded; it must not
     // condemn a session whose data merely went away.
     if (ended.ending === ENCODE_EXIT.INPUT_LOST) {
-      session.inputRetryCount = (session.inputRetryCount ?? 0) + 1;
+      const inputState = this.#inputStateFor(session);
+      inputState.inputRetryCount += 1;
       this.#host.logger.warn(
         `transcode ${session.id} encode-run #${ended.from}..#${ended.to} lost its input ` +
-          `(${lastError}) (attempt ${session.inputRetryCount})`
+          `(${lastError}) (attempt ${inputState.inputRetryCount})`
       );
       // HOW LONG TO WAIT IS THE PLAN'S, and this says only what happened. The
       // delay used to be timed here, against the dead run, which the plan never
@@ -1042,11 +1192,10 @@ export class EncodeRuns {
     // Bounded: a session an hour in has thousands of segments, and the count is
     // for a comparison, not an inventory.
     const last = Math.min(head, startIndex + BACKWARD_RESTART_SCAN_SEGMENTS);
-    const accounting = session.backwardRestarts ?? { count: 0, segmentsBack: 0, worstBack: 0, remade: 0 };
+    const accounting = this.#inputStateFor(session).backwardRestarts;
     accounting.count += 1;
     accounting.segmentsBack += previousStart - startIndex;
     accounting.worstBack = Math.max(accounting.worstBack, previousStart - startIndex);
-    session.backwardRestarts = accounting;
 
     void (async () => {
       let alreadyOnDisk = 0;

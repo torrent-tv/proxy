@@ -66,7 +66,7 @@ forwardLogsTo((level, message) => {
 // the hook above had a chance to register. Verified the hard way: with a static
 // import the process still aborted, and the stack named the genuine polyfill.
 const { TorrentPool, resolveDhtBootstrap } = await import("../torrent-pool.js");
-const { collectStoreStats, findSharedStore, machineReserveBytes, memoryClaim, pieceBufferCollection, reviseSpillBudgets, reviseStoreBudgets } =
+const { SharedPieceStore, collectStoreStats, findSharedStore, machineReserveBytes, memoryClaim, pieceBufferCollection, reviseSpillBudgets, reviseStoreBudgets } =
   await import("../../storage/piece-store/shared-piece-store.js");
 
 // Resolved before the client exists, because the client builds its DHT in its
@@ -77,7 +77,8 @@ const dhtBootstrap = await resolveDhtBootstrap();
 
 const pool = new TorrentPool({
   memoryBytes: workerData?.memoryBytes,
-  dhtBootstrap
+  dhtBootstrap,
+  pieceStore: SharedPieceStore
 });
 
 /** Torrents by sourceKey — the main thread names them, this thread owns them. */

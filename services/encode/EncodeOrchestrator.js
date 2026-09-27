@@ -50,6 +50,8 @@ const START_FAST_FAIL_MS = 2_000;
 const MAX_FAILED_STARTS = 3;
 
 export class EncodeOrchestrator {
+  /** Derived priority maps. Discardable and rebuilt from viewer state. */
+  #demand = new SegmentDemand();
   /** @type {(address: string) => string} */
   #describeWaits = () => "";
 
@@ -109,11 +111,19 @@ export class EncodeOrchestrator {
     this.#costs.noteStartup(measured);
   }
 
+  /** Derived segment demand for one output, copied from the discardable cache. */
+  wantedSegmentsOn(address) {
+    return [...this.#demand.mapOn(address)];
+  }
+
   /** The last reason a budget was cut, so the same one is not said twice. */
   #lastBudgetReason = new Map();
 
   /** The last unmet want said out loud, so a stuck one is said once. */
   #lastUnmet = new Map();
+
+  /** The last time the machine bound an output's encoders, so it is said once. */
+  #lastMachineBound = new Map();
 
   /**
    * @param {object} params
@@ -149,16 +159,21 @@ export class EncodeOrchestrator {
     segmentStore = null,
     planSoon = null,
     describeWaits = null,
+    admission = null,
     logger,
     now
   }) {
+    // HOW MANY ENCODERS THE WHOLE MACHINE HOLDS, across outputs. `maxRunsFor`
+    // answers for one output as though it were alone; this is what refuses the
+    // encoder that would slow everybody below realtime. Absent in a check that
+    // is about one output, and then only the per-output limit binds.
+    this.admission = admission && typeof admission.placesFor === "function" ? admission : null;
     this.#describeWaits = typeof describeWaits === "function" ? describeWaits : () => "";
     // The store of produced segments — the layer below this one. It is asked to
     // clean up after a run that ended other than by reaching the end of its
     // stretch, which is the one thing an ending must not leave behind: a file
     // under a name that promises a whole segment.
     this.segmentStore = segmentStore;
-    this.demand = new SegmentDemand();
     this.maxRunsFor = maxRunsFor;
     // Seconds of swarm time per second of film: what re-encoding material that
     // already exists costs the download, over and above the encoder's own time.
@@ -399,7 +414,7 @@ export class EncodeOrchestrator {
    * @returns {{ rank: number, topRank: number }}
    */
   rankAt(address, index) {
-    return this.demand.rankOf(address, index);
+    return this.#demand.rankOf(address, index);
   }
 
   /**
@@ -420,6 +435,29 @@ export class EncodeOrchestrator {
    *
    * @returns {number}
    */
+  /**
+   * How many encoders are alive on each output, suspended ones included.
+   *
+   * What the machine-wide admission counts as holding a place. A suspended
+   * encoder is counted here, unlike in {@link runningCount}: that one answers
+   * what is competing for the processor this instant, this one what the
+   * machine is committed to — and a parked encoder resumes the moment the
+   * viewer catches up.
+   *
+   * @returns {Map<string, number>}
+   */
+  liveRunsByAddress() {
+    /** @type {Map<string, number>} */
+    const byAddress = new Map();
+    for (const [address, runs] of this.#runs) {
+      const alive = runs.filter((run) => run.isAlive).length;
+      if (alive > 0) {
+        byAddress.set(address, alive);
+      }
+    }
+    return byAddress;
+  }
+
   runningCount() {
     let running = 0;
     for (const runs of this.#runs.values()) {
@@ -490,7 +528,7 @@ export class EncodeOrchestrator {
    * @param {{ from: number, to: number, priority: number, withinSeconds: number }[]} zones
    */
   notePriorityMap(address, zones) {
-    this.demand.state(address, zones);
+    this.#demand.state(address, zones);
     // NOBODY IS COMING HERE, so what was remembered about this output's input
     // is about nobody. Kept, those three entries would stay for the life of the
     // process, and the wait they describe would greet whoever opens this output
@@ -513,6 +551,7 @@ export class EncodeOrchestrator {
     // means. A statement kept beside the disk would be a second owner of one
     // fact, which is what item 87 removed from the coverage map.
     this.coverageOf(address).markReady(index);
+    this.segmentStore?.announce?.(address, index);
     for (const run of this.runsOn(address)) {
       run.noteProduced(index);
     }
@@ -547,7 +586,7 @@ export class EncodeOrchestrator {
    * state, so a pass that finds nothing to change does nothing.
    */
   reconcile() {
-    const addresses = new Set([...this.demand.addresses(), ...this.#runs.keys()]);
+    const addresses = new Set([...this.#demand.addresses(), ...this.#runs.keys()]);
     for (const address of addresses) {
       this.#reconcileOne(address);
     }
@@ -616,12 +655,12 @@ export class EncodeOrchestrator {
     // used to reach into the layer that STATES them for the same arithmetic,
     // which is the coupling the layer rule forbids; the arithmetic itself now
     // lives where it belongs to nobody.
-    const windows = this.demand.mapOn(address);
+    const windows = this.#demand.mapOn(address);
     const live = this.runsOn(address).filter((run) => run.isAlive);
     // Asked ONCE. It is arithmetic over measurements, but it also says out loud
     // when the reason it cuts the budget changes, so asking it three times in
     // one pass is three chances to say a thing that happened once.
-    const maxRuns = this.#affordableOn(address, live);
+    const maxRuns = this.#withinMachine(address, live, this.#affordableOn(address, live));
     // THE TERMS EVERY ARRIVAL IS COMPUTED FROM, named here so the line below can
     // print them. A decision of this plan is `delay + (index - at) / rate +
     // madeBetween * refetch` against a deadline, so without the rate and the two
@@ -875,6 +914,42 @@ export class EncodeOrchestrator {
   }
 
   /**
+   * The per-output limit, bounded by what the whole machine can still hold.
+   *
+   * The per-output answer is at least one whatever else is running; the
+   * machine's may be none, and that is the refusal: the output gets no encoder
+   * until one elsewhere ends. It is never below what already runs here, so a
+   * refusal stops a start and never takes an encoder away.
+   *
+   * Said out loud when the machine is what bound it, once per change.
+   *
+   * @param {string} address
+   * @param {object[]} live
+   * @param {number} perOutput
+   * @returns {number}
+   */
+  #withinMachine(address, live, perOutput) {
+    if (!this.admission) {
+      return perOutput;
+    }
+    const machine = this.admission.placesFor(address, live.length);
+    const runs = Math.min(perOutput, machine.runs);
+    const said = runs < perOutput ? `${runs}:${machine.because}` : "";
+    if (said !== (this.#lastMachineBound.get(address) ?? "")) {
+      if (said) {
+        this.logger.info(
+          `encode: ${runs} encoder(s) on ${address} — the whole machine holds no more ` +
+          `(${machine.because}; this output alone would be allowed ${perOutput})`
+        );
+        this.#lastMachineBound.set(address, said);
+      } else {
+        this.#lastMachineBound.delete(address);
+      }
+    }
+    return runs;
+  }
+
+  /**
    * Take charge of a run this class did not start.
    *
    * The browser asks for a stream and a run begins for it, long before this
@@ -1082,9 +1157,9 @@ export class EncodeOrchestrator {
    */
   describe() {
     const parts = [];
-    for (const address of new Set([...this.demand.addresses(), ...this.#runs.keys()])) {
+    for (const address of new Set([...this.#demand.addresses(), ...this.#runs.keys()])) {
       const coverage = this.coverageOf(address);
-      const stated = this.demand.mapOn(address);
+      const stated = this.#demand.mapOn(address);
       const windows = stated.map((zone) => ({ from: zone.from, to: zone.to }));
       const waiting = firstUnmetWant(coverage, windows);
       const runs = this.runsOn(address)

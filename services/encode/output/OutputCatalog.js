@@ -20,6 +20,10 @@ import { variantHeightsFor } from "./ladder.js";
 import { masterRateArgs } from "./rates.js";
 
 export class OutputCatalog {
+  #steps = new WeakSet();
+  /** The heights each picture can be spliced to, derived once from its file. @type {WeakMap<object, number[]>} */
+  #splicable = new WeakMap();
+
   #byId = new Map();
   #lifetime = new Map();
   #now;
@@ -32,10 +36,16 @@ export class OutputCatalog {
    * @param {(address: string) => { index: number, size: number }} [params.largestPieceOf]
    *   The biggest piece an output has made, which the disk knows.
    */
-  constructor({ now = Date.now, fileLengthOf = () => 0, largestPieceOf = () => ({ index: -1, size: 0 }) } = {}) {
+  constructor({
+    now = Date.now,
+    fileLengthOf = () => 0,
+    largestPieceOf = () => ({ index: -1, size: 0 })
+  } = {}) {
     this.#now = now;
     // Two facts this catalog needs and does not own, taken as plain functions
-    // so nothing of either layer is held here.
+    // so nothing of their layers is held here: the torrent's byte length and
+    // the store's largest piece. The bitrate limit is not among them any more:
+    // it is part of the output itself (`OutputSpec`).
     this.fileLengthOf = fileLengthOf;
     this.largestPieceOf = largestPieceOf;
   }
@@ -186,7 +196,11 @@ export class OutputCatalog {
    * @returns {object[]}
    */
   stepsOf(base) {
-    return this.familyOf(base).filter((session) => session !== base && session.isStep === true);
+    return this.familyOf(base).filter((session) => session !== base && this.#steps.has(session));
+  }
+
+  markStep(output) {
+    this.#steps.add(output);
   }
 
   /**
@@ -206,11 +220,11 @@ export class OutputCatalog {
    * @returns {object}
    */
   pictureOf(session) {
-    if (!session || session.isStep !== true) {
+    if (!session || !this.#steps.has(session)) {
       return session;
     }
     for (const other of this.familyOf(session)) {
-      if (other.isStep !== true && other.spec.carries !== "audio-only") {
+      if (!this.#steps.has(other) && other.spec.carries !== "audio-only") {
         return other;
       }
     }
@@ -242,7 +256,7 @@ export class OutputCatalog {
    * @returns {boolean}
    */
   supersededBy(session, stepOnScreen = null) {
-    if (!session || session.isStep === true || session.spec.carries === "audio-only") {
+    if (!session || this.#steps.has(session) || session.spec.carries === "audio-only") {
       return false;
     }
     // The picture. A step of it on screen says outright that this is not what
@@ -320,16 +334,18 @@ export class OutputCatalog {
    */
   splicableHeights(session) {
     const owner = this.pictureOf(session);
-    if (Array.isArray(owner.splicableHeights)) {
-      return owner.splicableHeights;
+    const known = this.#splicable.get(owner);
+    if (known) {
+      return known;
     }
     const heights = new Set(variantHeightsFor(Number(owner.file.height) || 0));
     const own = this.variantHeightOf(owner);
     if (own > 0) {
       heights.add(own);
     }
-    owner.splicableHeights = [...heights].sort((left, right) => right - left);
-    return owner.splicableHeights;
+    const sorted = [...heights].sort((left, right) => right - left);
+    this.#splicable.set(owner, sorted);
+    return sorted;
   }
 
   /**
@@ -389,7 +405,9 @@ export class OutputCatalog {
         largest: this.largestPieceOf(session.outputKey ?? ""),
         boundaries: session.timeline?.published ?? session.timeline?.boundaries ?? null,
         producedHeight: this.producedHeightOf(session),
-        capKbps: Number(session.rateCapKbps) || 0
+        // The peak the encoder is held to, which is what BANDWIDTH declares.
+        // Zero where nothing bounds it — a copy, or a hardware encoder.
+        capKbps: Number(session.spec?.video?.encode?.rateControl?.maxrateKbps) || 0
       })
     };
   }

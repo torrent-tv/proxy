@@ -27,7 +27,6 @@ import assert from "node:assert/strict";
 import { PriorityOrchestrator } from "../services/viewer/PriorityOrchestrator.js";
 import { OutputCatalog } from "../services/encode/output/OutputCatalog.js";
 import { Viewers } from "../services/viewer/Viewers.js";
-import { viewersOf } from "../services/viewer/Viewer.js";
 import { runsOf } from "../services/viewer/PriorityMap.js";
 import { outputSpec } from "./helpers/output-spec.js";
 
@@ -65,11 +64,12 @@ function over(sessions) {
   const live = new OutputCatalog();
   for (const one of sessions) {
     live.set(one.id, one);
+    if (one.isStep) live.markStep(one);
   }
   const viewers = new Viewers();
   const priority = new PriorityOrchestrator({
     publish: () => {},
-    viewersOf: (session) => viewersOf(session),
+    viewers,
     allowanceFor: () => 10,
     watchedBy: (session, viewer) => !live.supersededBy(session, viewer.activeVariantId ?? null)
   });
@@ -167,7 +167,7 @@ test("a viewer who has gone is not watching anything", () => {
   const viewers = new Viewers();
   const priority = new PriorityOrchestrator({
     publish: () => {},
-    viewersOf: (session) => viewersOf(session),
+    viewers,
     allowanceFor: () => 10,
     watchedBy: (session, viewer) => !live.supersededBy(session, viewer.activeVariantId ?? null)
   });

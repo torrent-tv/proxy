@@ -18,6 +18,7 @@ import { AudioOutput, CutGrid, OutputSpec, VideoOutput } from "../../services/en
  * @param {number} [params.fps]
  * @param {string | null} [params.preset]
  * @param {boolean} [params.tonemap]
+ * @param {{ maxrateKbps: number, bufsizeKbps: number, level: string | null } | null} [params.rateControl]
  * @param {"keyframe" | "uniform"} [params.cutGrid]
  * @param {string} [params.segmentFormatId]
  * @returns {OutputSpec}
@@ -37,6 +38,7 @@ export function outputSpec({
   fps = 24,
   preset = null,
   tonemap = false,
+  rateControl = null,
   cutGrid = "uniform",
   segmentFormatId = "fmp4"
 } = {}) {
@@ -48,7 +50,7 @@ export function outputSpec({
       ? null
       : new VideoOutput({
           fileIndex,
-          encode: transcodeVideo ? { encoder, width, height, fps, preset, tonemap } : null
+          encode: transcodeVideo ? { encoder, width, height, fps, preset, tonemap, rateControl } : null
         }),
     audio: audioSeparate
       ? null

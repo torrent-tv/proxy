@@ -21,10 +21,48 @@ import { SourceFiles } from "../media/SourceFile.js";
 import { SegmentStore } from "../storage/segment-store/SegmentStore.js";
 import { EncodeCost } from "../encode/quality/EncodeCost.js";
 import { QualityOffer } from "../encode/quality/QualityOffer.js";
-import { viewersOf } from "../viewer/Viewer.js";
 import { activeOutputFor } from "../viewer/active-output.js";
-import { worstLinkReading } from "../viewer/link-readings.js";
-import { viewerSecondsOn } from "../viewer/positions.js";
+import {
+  acceptsGeneration,
+  askQualityOf,
+  audioBeingWarmedOf,
+  audioChoiceOf,
+  chooseAudioTrack,
+  chooseOutput,
+  chosenOutputOf,
+  consumersOn,
+  dropAskOf,
+  generationOfRequest,
+  givenOutputOf,
+  heightsChosenAs,
+  highestGivenSegmentOf,
+  holdForResponse,
+  linkMbpsOf,
+  linkReportOf,
+  bufferOf,
+  bufferedSecondsOf,
+  visiblePictureOf,
+  linkReportsOn,
+  noteAudioBeingWarmed,
+  noteGivenOutput,
+  noteSameHeightSwitch,
+  noteServingVerdict,
+  noteStepBeingWarmed,
+  noteStepOnScreen,
+  outputsBeingPrepared,
+  placeOn,
+  presentOn,
+  qualityModeOf,
+  sameHeightSwitchOf,
+  servingVerdictOf,
+  standingAskOf,
+  stepBeingWarmedOf,
+  stepBeingWarmedSinceOf,
+  stepOnScreenOf,
+  switchingOnto,
+  watches
+} from "../viewer/choices.js";
+import { viewerSecondsOn, viewerSegmentsOn } from "../viewer/positions.js";
 import { Viewers } from "../viewer/Viewers.js";
 import { OutputCatalog } from "../encode/output/OutputCatalog.js";
 import { ViewerRequests } from "./ViewerRequests.js";
@@ -40,9 +78,23 @@ import { HostLoad } from "../encode/quality/HostLoad.js";
 import { HostTimings } from "../encode/quality/HostTimings.js";
 import { BUDGET_CHECK_INTERVAL_MS, QualityController } from "../encode/quality/QualityController.js";
 import { EncodeOrchestrator } from "../encode/EncodeOrchestrator.js";
+import { EncodeAdmission } from "../encode/EncodeAdmission.js";
+import { EncoderSelection } from "../encode/EncoderSelection.js";
+import { OutputOpening } from "../encode/OutputOpening.js";
+import { segmentFormatOfKey } from "../encode/output-key-format.js";
+import { OutputSpec } from "../encode/output/OutputSpec.js";
+import { compareInits } from "../encode/segment-formats/init-compat.js";
+import { nominalKbpsFor } from "../encode/args.js";
+import { probeInputMediaInfo } from "../media/media-info-probe.js";
+import { probeVideoKeyframeTimes } from "../media/keyframe-probe.js";
 import { wireMachineBudget } from "../storage/wire.js";
 import { Returns } from "../storage/returns.js";
 import { freeBytesFor } from "../storage/free.js";
+import path from "node:path";
+import { contentOf, LocalObservations } from "../encode/LocalObservations.js";
+import { configurationKeyOf } from "../encode/fingerprint.js";
+import { PROXY_ROOT } from "../encode/quality/HostTimings.js";
+import { qualityStateOf } from "../encode/quality/OutputQualityState.js";
 
 // Where a variant and an audio rendition live under a session — `v/<height>/…`
 // and `a/<track>/…` — is stated in `encode/output/playlists.js`, beside the lines that
@@ -146,6 +198,10 @@ export function wireOutputs({
     keyframeTables = new KeyframeTables(),
     videoEncoder = null,
     softwarePresetBenchmark = null,
+    // What every encoder this host may use was qualified and measured to do at
+    // startup, by kind (`encode/calibration.js`). Takes the place of the one
+    // array above, which a test may still hand in on its own.
+    calibration = null,
     decodeCostModel = null,
     getSourceStats = null,
     setPriorityMap = null,
@@ -171,6 +227,25 @@ export function wireOutputs({
     memoryClaimant = null,
     budgetPolicy = null}) {
   const parts = {};
+  /**
+   * Whether everything this output will ever serve is made: every segment of
+   * its timeline closed in the store. Such an output needs no encoder and
+   * holds no place, however many watch it.
+   *
+   * @param {object} session
+   * @returns {boolean}
+   */
+  const finishedOutput = (session) => {
+    const count = Number(session?.timeline?.segmentCount) || 0;
+    return count > 0 && parts.segmentStore.provenNumbers(session.outputKey).length >= count;
+  };
+  // The nominal limits a size may be produced at, highest first. ONE list, read
+  // by the opening of an output and by the move between limits of a height, so
+  // the two cannot disagree about which limits exist. Only the size's own until
+  // a set of lower limits is decided (roadmap item 97, step 14): a lower limit
+  // handed to a viewer must come with the page saying so. Asked with the whole
+  // frame, because the row is chosen by area (`limitRowFor`).
+  parts.limitsFor = (frame) => [nominalKbpsFor(frame)];
   // What the torrent and the proxy itself spend on this host, and how fast each watched torrent moves.
   parts.hostLoad = new HostLoad({
     readMachineState,
@@ -196,8 +271,21 @@ export function wireOutputs({
   // The encoders of this proxy: built where the plan places them, followed while they run, accounted when they end.
   parts.encodeRuns = new EncodeRuns({
     logger,
-    softwareDescriptor,
-    viewerSecondsOn,
+    // What an admitted encode was seen to do, filed under its configuration.
+    observeEncodeEnded: (session) => {
+      if (!parts.localObservations || !session?.spec?.video?.encode) {
+        return;
+      }
+      const alone = Number(qualityStateOf(session).lastAloneSpeed);
+      parts.localObservations.noteEncode({
+        spec: session.spec,
+        content: contentOf(session.file),
+        aloneSpeedX: Number.isFinite(alone) && alone > 0 ? alone : null,
+        segmentKbps: segmentRatesOf(session)
+      });
+    },
+    viewerSecondsOn: (output, consumerId, now) => viewerSecondsOn(parts.viewers, output, consumerId, now),
+    noteRunStarting: (output) => parts.quality.noteRunStarting(output),
     inputOf: (...args) => parts.renditions.inputOf(...args),
     producedNumbers: (...args) => parts.serving.producedNumbers(...args),
     servesAudioSeparately: (...args) => parts.renditions.servesAudioSeparately(...args),
@@ -211,13 +299,15 @@ export function wireOutputs({
     get priority() { return parts.priority; },
     get segmentDurationSec() { return parts.segmentDurationSec; },
     get segmentStore() { return parts.segmentStore; },
-    get videoEncoder() { return parts.videoEncoder; },
-    set videoEncoder(value) { parts.videoEncoder = value; },
+    get videoEncoder() { return parts.encoders.current; },
+    get encoders() { return parts.encoders; },
+    invalidateWaits: (output) => parts.serving.invalidateWaits(output),
+    productionFailed: (output) => parts.renditions.noteProductionFailed(output),
   });
   // How much film is ready in front of the viewers, said; and the spare soundtracks fetched once it is full.
   parts.cushion = new CushionReport({
-    viewerSecondsOn,
-    viewersOf,
+    viewerSecondsOn: (output, consumerId, now) => viewerSecondsOn(parts.viewers, output, consumerId, now),
+    linkReportsOn: (output) => linkReportsOn(parts.viewers, output),
     SourceFiles,
     logger,
     producedNumbers: (...args) => parts.serving.producedNumbers(...args),
@@ -230,18 +320,92 @@ export function wireOutputs({
     get outputs() { return parts.outputs; },
   });
   // The steps of a picture and its soundtracks: which output answers each, made when first asked for, and the master playlist listing them.
+  // The cushion this file needs, from its segment length and the worst
+  // interruption its supply has shown — one statement read by every operation
+  // that asks it.
+  const minimumBufferSecondsOf = (output) => minimumBufferFrom({
+    segmentSeconds: parts.segmentDurationSec,
+    worstSupplyWaitSec: parts.hostLoad.supplyFor(output.file)?.worstWaitSec
+  })?.seconds ?? null;
   parts.renditions = new Renditions({
-    viewerSecondsOn,
-    audioStartSecondsFor,
-    activeOutputFor,
-    viewersOf,
+    observedPeakMbps: (spec) => parts.localObservations?.peakMbps(spec) ?? null,
+    // A viewer has been moved onto an output prepared for them: how long it
+    // took, and what they held.
+    notePreparation: (output, seconds, bufferedSec) =>
+      parts.localObservations?.notePreparation({ spec: output?.spec, seconds, bufferedSec }),
+    viewerSecondsOn: (output, consumerId, now) => viewerSecondsOn(parts.viewers, output, consumerId, now),
+    audioStartSecondsFor: (args) => audioStartSecondsFor({ ...args, viewers: parts.viewers }),
+    activeOutputFor: (args) => activeOutputFor({ ...args, viewers: parts.viewers }),
+    // WHAT ENCODING IS TOLD ABOUT A PERSON, and what it may tell the viewer
+    // layer about them: values and names, never the viewer itself. Steps and
+    // soundtracks are chosen, warmed and left per person, so this is the widest
+    // of the three sets — and every one of them is a call on the owner, which
+    // is what keeps one writer per fact.
+    viewerCountOn: (output) => parts.viewers.forOutput(output).size,
+    // Whether anything still stands on it — somebody watching, or an
+    // assignment not yet released. See `Viewers.stillNeeded`.
+    outputStillNeeded: (output) => parts.viewers.stillNeeded(output),
+    consumersOn: (output) => consumersOn(parts.viewers, output),
+    presentOn: (output) => presentOn(parts.viewers, output),
+    qualityModeOf: (output, consumerId) => qualityModeOf(parts.viewers, output, consumerId),
+    linkMbpsOf: (output, consumerId) => linkMbpsOf(parts.viewers, output, consumerId),
+    audioChoiceOf: (output, consumerId) => audioChoiceOf(parts.viewers, output, consumerId),
+    chooseAudioTrack: (output, consumerId, choice) =>
+      chooseAudioTrack(parts.viewers, output, consumerId, choice),
+    stepOnScreenOf: (output, consumerId) => stepOnScreenOf(parts.viewers, output, consumerId),
+    noteStepOnScreen: (output, consumerId, stepId) =>
+      noteStepOnScreen(parts.viewers, output, consumerId, stepId),
+    stepBeingWarmedOf: (output, consumerId) => stepBeingWarmedOf(parts.viewers, output, consumerId),
+    stepBeingWarmedSinceOf: (output, consumerId) => stepBeingWarmedSinceOf(parts.viewers, output, consumerId),
+    noteStepBeingWarmed: (output, consumerId, stepId) =>
+      noteStepBeingWarmed(parts.viewers, output, consumerId, stepId),
+    audioBeingWarmedOf: (output, consumerId) => audioBeingWarmedOf(parts.viewers, output, consumerId),
+    noteAudioBeingWarmed: (output, consumerId, renditionId) =>
+      noteAudioBeingWarmed(parts.viewers, output, consumerId, renditionId),
+    watches: (output, consumerId) => watches(parts.viewers, output, consumerId),
+    placeOn: (output, consumerId, seconds) => placeOn(parts.viewers, output, consumerId, seconds),
+    // A viewer's own assignments: which output answered a height and segment in
+    // one generation of their viewing, so a repeat is answered the same way.
+    // Values in and out, like everything above.
+    generationOfRequest: (consumerId, stated) => generationOfRequest(parts.viewers, consumerId, stated),
+    givenOutputOf: (consumerId, generation, askedHeight, segmentIndex) =>
+      givenOutputOf(parts.viewers, consumerId, generation, askedHeight, segmentIndex),
+    noteGivenOutput: (consumerId, generation, askedHeight, segmentIndex, outputKey) =>
+      noteGivenOutput(parts.viewers, consumerId, generation, askedHeight, segmentIndex, outputKey),
+    // The output this viewer was chosen at a height, and the rule's choice of
+    // it — the viewer's own record, never one per file.
+    chosenOutputOf: (consumerId, askedHeight) => chosenOutputOf(parts.viewers, consumerId, askedHeight),
+    chooseOutput: (consumerId, askedHeight, outputKey) => chooseOutput(parts.viewers, consumerId, askedHeight, outputKey),
+    noteServingVerdict: (consumerId, verdict) => noteServingVerdict(parts.viewers, consumerId, verdict),
+    // A move between two limits of the height on a viewer's screen (roadmap
+    // item 97, step 12): which heights their choice is the output on screen
+    // under, the segment they were last given, the move being prepared, and
+    // whether a segment is closed on the output being prepared.
+    limitsFor: (frame) => parts.limitsFor(frame),
+    heightsChosenAs: (consumerId, outputKey) => heightsChosenAs(parts.viewers, consumerId, outputKey),
+    highestGivenSegmentOf: (consumerId, askedHeight) => highestGivenSegmentOf(parts.viewers, consumerId, askedHeight),
+    sameHeightSwitchOf: (consumerId) => sameHeightSwitchOf(parts.viewers, consumerId),
+    noteSameHeightSwitch: (consumerId, value) => noteSameHeightSwitch(parts.viewers, consumerId, value),
+    switchingOnto: (output) => switchingOnto(parts.viewers, output),
+    // What a viewer holds, and the cushion this file needs before a move that
+    // is not urgent is made (roadmap item 98).
+    bufferedSecondsOf: (consumerId) => bufferedSecondsOf(parts.viewers, consumerId),
+    minimumBufferSecondsFor: (output) => minimumBufferSecondsOf(output),
+    // Whether the whole machine has a place for one more encoder on this output,
+    // asked before a preparation is recorded.
+    admitsPreparation: (output) => parts.admission.admitsPreparation(output?.outputKey ?? ""),
+    segmentClosed: (key, index) => parts.segmentStore.isClosed(key, index),
+    // What a gone output left in the store, and whether another output's header
+    // may stand in for its own.
+    storedPieceReady: (key, fileName) => parts.serving.hasStoredPiece(key, fileName),
+    headersCompatible: (goneKey, liveKey) => parts.serving.headersCompatible(goneKey, liveKey),
+    placeViewerOn: (...args) => parts.viewerRequests.placeViewerOn(...args),
     audioRenditionName,
     logger,
-    placeViewer: (...args) => parts.viewerRequests.placeViewer(...args),
     viewerLeaves: (...args) => parts.lifecycle.viewerLeaves(...args),
     createOrGetSession: (...args) => parts.viewerRequests.createOrGetSession(...args),
     planEncodersSoon: (...args) => parts.encodeRuns.planEncodersSoon(...args),
-    releaseSessionConsumer: (...args) => parts.lifecycle.releaseSessionConsumer(...args),
+    disposeSession: (...args) => parts.lifecycle.disposeSession(...args),
     viewerPositionOf: (...args) => parts.viewerRequests.viewerPositionOf(...args),
     get encodeRuns() { return parts.encodeRuns; },
     get fileStartTimeReads() { return parts.fileStartTimeReads; },
@@ -256,10 +420,17 @@ export function wireOutputs({
     get qualityOffer() { return parts.qualityOffer; },
     get segmentDurationSec() { return parts.segmentDurationSec; },
     get sourceFiles() { return parts.sourceFiles; },
-    get viewers() { return parts.viewers; },
+    invalidateWaits: (output) => parts.serving.invalidateWaits(output),
   });
   // Answering a request for a playlist, an init segment or a segment: from the store when the piece is made and whole, otherwise held until it is.
   parts.serving = new SegmentServing({
+    // What a key names, read back from the key: how to find a gone output's
+    // stored pieces and whether they are cut at given times.
+    segmentFormatOfKey,
+    specOfKey: (key) => OutputSpec.fromKey(key),
+    compareInits,
+    activeOutputFor: (args) => activeOutputFor({ ...args, viewers: parts.viewers }),
+    viewerSecondsOn: (output, consumerId, now) => viewerSecondsOn(parts.viewers, output, consumerId, now),
     buildMasterPlaylist: (...args) => parts.renditions.buildMasterPlaylist(...args),
     declaredTracks: (...args) => parts.renditions.declaredTracks(...args),
     publishedGridFor: (...args) => parts.outputTimes.publishedGridFor(...args),
@@ -277,6 +448,17 @@ export function wireOutputs({
   });
   // How an output ends: disposed when nobody is left on it and it has been idle, or all at once on shutdown; and the segments an earlier process left behind adopted at startup.
   parts.lifecycle = new OutputLifecycle({
+    invalidateWaits: (output) => parts.serving.invalidateWaits(output),
+    segmentFormatOfKey,
+    // Where the viewers of one output stand, in its segments: what the store
+    // reads to give disk back in the right order.
+    viewerSegmentsOn: (key) => viewerSegmentsOn({
+      outputs: parts.outputs.values(),
+      outputKey: key,
+      segmentAt: (output, seconds) => parts.outputTimes.segmentIndexForTime(output, seconds),
+      now: Date.now(),
+      viewers: parts.viewers
+    }),
     get budgetTimer() { return parts.budgetTimer; },
     get cleanupTimer() { return parts.cleanupTimer; },
     get encodeRuns() { return parts.encodeRuns; },
@@ -291,27 +473,25 @@ export function wireOutputs({
     get timelines() { return parts.timelines; },
     get viewers() { return parts.viewers; },
   });
-  // What a viewer asks for: an output of a file, a position, a report of progress.
-  parts.viewerRequests = new ViewerRequests({
-    disposeSession: (...args) => parts.lifecycle.disposeSession(...args),
-    expectedFirstSegmentMs: (...args) => parts.hostTimings.expectedFirstSegmentMs(...args),
-    expectedSessionCreateMs: (...args) => parts.hostTimings.expectedSessionCreateMs(...args),
-    planEncodersSoon: (...args) => parts.encodeRuns.planEncodersSoon(...args),
-    waitUntilReady: (...args) => parts.serving.waitUntilReady(...args),
+  // Which output answers a request for a file, made if it is not here yet: the encoding component's decision, made without knowing who asked.
+  parts.opening = new OutputOpening({
+    logger,
+    // The largest peak an output of this mode and rate control has been seen
+    // carrying here: the only figure an encoder with no bound of its own has.
+    observedPeakMbps: (spec) => parts.localObservations?.peakMbps(spec) ?? null,
+    limitsFor: (frame) => parts.limitsFor(frame),
+    probeMediaInfo: (url) => probeInputMediaInfo(parts.ffmpegBin, url),
+    probeKeyframeTimes: (url, budgetMs) => probeVideoKeyframeTimes(parts.ffmpegBin, url, budgetMs),
     get decodeCostModel() { return parts.decodeCostModel; },
     get enabled() { return parts.enabled; },
     get encodeCost() { return parts.encodeCost; },
     get encodeRuns() { return parts.encodeRuns; },
-    get ffmpegBin() { return parts.ffmpegBin; },
     get getCachedMediaInfo() { return parts.getCachedMediaInfo; },
     get hostLoad() { return parts.hostLoad; },
     get hostTimings() { return parts.hostTimings; },
     get keyframeTables() { return parts.keyframeTables; },
     get localBaseUrl() { return parts.localBaseUrl; },
-    get outputTimes() { return parts.outputTimes; },
     get outputs() { return parts.outputs; },
-    get quality() { return parts.quality; },
-    get qualityOffer() { return parts.qualityOffer; },
     get renditions() { return parts.renditions; },
     get returns() { return parts.returns; },
     get segmentDurationSec() { return parts.segmentDurationSec; },
@@ -319,11 +499,42 @@ export function wireOutputs({
     get segmentStore() { return parts.segmentStore; },
     get softwarePresetBenchmark() { return parts.softwarePresetBenchmark; },
     get sourceFiles() { return parts.sourceFiles; },
-    get startupWaitMs() { return parts.startupWaitMs; },
     get timelines() { return parts.timelines; },
     get tonemapSupported() { return parts.tonemapSupported; },
-    get videoEncoder() { return parts.videoEncoder; },
+    get videoEncoder() { return parts.encoders.current; },
+  });
+  // What a viewer asks for: an output of a file, a position, a report of progress.
+  parts.viewerRequests = new ViewerRequests({
+    // Whether this machine has a place for one more viewer on this output —
+    // asked in the same synchronous stretch as they are put on it.
+    admitsWatching: (output) => parts.admission.admitsWatching(output?.outputKey ?? ""),
+    activeOutputFor: (args) => activeOutputFor({ ...args, viewers: parts.viewers }),
+    viewerSecondsOn: (output, consumerId, now) => viewerSecondsOn(parts.viewers, output, consumerId, now),
+    minimumBufferSecondsFor: (output) => minimumBufferSecondsOf(output),
+    disposeSession: (...args) => parts.lifecycle.disposeSession(...args),
+    expectedFirstSegmentMs: (...args) => parts.hostTimings.expectedFirstSegmentMs(...args),
+    expectedSessionCreateMs: (...args) => parts.hostTimings.expectedSessionCreateMs(...args),
+    planEncodersSoon: (...args) => parts.encodeRuns.planEncodersSoon(...args),
+    waitUntilReady: (...args) => parts.serving.waitUntilReady(...args),
+    get encodeRuns() { return parts.encodeRuns; },
+    get opening() { return parts.opening; },
+    get outputTimes() { return parts.outputTimes; },
+    get outputs() { return parts.outputs; },
+    get quality() { return parts.quality; },
+    get qualityOffer() { return parts.qualityOffer; },
+    get segmentDurationSec() { return parts.segmentDurationSec; },
+    get startupWaitMs() { return parts.startupWaitMs; },
     get viewers() { return parts.viewers; },
+    invalidateWaits: (output) => parts.serving.invalidateWaits(output),
+    // Whether a request of this generation is still taken, what it belongs to,
+    // what answered it, and the hold a response keeps while it is being sent.
+    acceptsGeneration: (consumerId, stated) => acceptsGeneration(parts.viewers, consumerId, stated),
+    generationOfRequest: (consumerId, stated) => generationOfRequest(parts.viewers, consumerId, stated),
+    noteGivenOutput: (consumerId, generation, askedHeight, segmentIndex, outputKey) =>
+      noteGivenOutput(parts.viewers, consumerId, generation, askedHeight, segmentIndex, outputKey),
+    holdForResponse: (consumerId, outputKey) => holdForResponse(parts.viewers, consumerId, outputKey),
+    noteServingVerdict: (consumerId, verdict) => noteServingVerdict(parts.viewers, consumerId, verdict),
+    servingVerdictOf: (consumerId) => servingVerdictOf(parts.viewers, consumerId),
   });
   // What this host takes to create an output and to produce its first segment, kept across restarts until the synthetic figure can replace it (CLAUDE.md, host timings).
   parts.hostTimings = new HostTimings({
@@ -387,11 +598,67 @@ export function wireOutputs({
   // Detected H.264 encoder descriptor (hardware or software). Defaults to
   // software libx264 when no detection result is supplied. May be downgraded
   // to software at runtime if a hardware encode fails.
-  parts.videoEncoder = videoEncoder ?? softwareDescriptor();
-  // Per-preset software encode throughput (pixels/sec) measured at startup,
-  // used to pick the best preset per stream. Null when unavailable (hardware
-  // encoder, or benchmark skipped/failed).
-  parts.softwarePresetBenchmark = Array.isArray(softwarePresetBenchmark) ? softwarePresetBenchmark : null;
+  parts.encoders = new EncoderSelection({ detected: videoEncoder, softwareDescriptor });
+  // WHAT THIS HOST HAS SEEN ITS OWN ADMITTED ENCODES DO, kept between runs and
+  // used only on the configuration it was seen on (roadmap item 97, step 14).
+  // A refinement of figures that exist without it: nothing is selected,
+  // admitted or served differently when it is empty. Absent where the startup
+  // calibration was not run, which is only a wiring made without it.
+  parts.localObservations = null;
+  if (calibration?.fingerprint) {
+    parts.localObservations = new LocalObservations({
+      fingerprint: calibration.fingerprint,
+      filePath: path.join(typeof stateDir === "string" && stateDir.length > 0 ? stateDir : PROXY_ROOT, "local-observations.json"),
+      logger
+    });
+    parts.localObservations.load(calibration.kinds().map((kind) => configurationKeyOf(calibration.fingerprint, {
+      kind,
+      name: kind === "software" ? softwareDescriptor().name : (videoEncoder?.kind === kind ? videoEncoder.name : kind)
+    })));
+  }
+  /**
+   * What the segments an output has closed carried, from their sizes and the
+   * spans its timeline gives them: the average over all of them and the
+   * largest one.
+   *
+   * @param {object} session
+   * @returns {{ averageKbps: number, peakKbps: number } | null}
+   */
+  const segmentRatesOf = (session) => {
+    const sizes = parts.segmentStore.sizesOf(session.outputKey);
+    const timeline = session.timeline;
+    if (!timeline || sizes.size === 0) {
+      return null;
+    }
+    let bits = 0;
+    let seconds = 0;
+    let peakKbps = 0;
+    for (const [index, size] of sizes) {
+      const start = timeline.publishedStartOf(index);
+      const end = index < timeline.segmentCount ? timeline.publishedStartOf(index + 1) : null;
+      if (!(Number.isFinite(start) && Number.isFinite(end) && end > start) || !(size > 0)) {
+        continue;
+      }
+      bits += size * 8;
+      seconds += end - start;
+      peakKbps = Math.max(peakKbps, (size * 8) / (end - start) / 1000);
+    }
+    return seconds > 0 ? { averageKbps: bits / seconds / 1000, peakKbps } : null;
+  };
+  // The modes of the encoder IN USE NOW, as measured at startup: slowest
+  // first, each with its throughput by size. Read through the selection rather
+  // than copied, because the encoder in use can change — a failing device
+  // moves this host to software for the rest of the process, and from then on
+  // it is software's own modes that price and choose, not the device's.
+  // Null where nothing was measured, and then nothing is re-encoded here.
+  parts.calibration = calibration ?? null;
+  const givenModes = Array.isArray(softwarePresetBenchmark) ? softwarePresetBenchmark : null;
+  Object.defineProperty(parts, "softwarePresetBenchmark", {
+    get: () => (parts.calibration
+      ? parts.calibration.modesFor(parts.encoders.current?.kind)
+      : givenModes),
+    enumerable: true
+  });
   // Host decode cost solved at startup from the calibration clips:
   // `a × Mpixel/s + b × Mbit/s + c` seconds of decoding per second of video.
   // A re-encode pays for this as well as for the encoder, and leaving it out
@@ -440,6 +707,12 @@ export function wireOutputs({
   parts.segmentStore = segmentStore instanceof SegmentStore
     ? segmentStore
     : new SegmentStore({ logger });
+  // The store has grown: whether it still fits its share is asked now rather
+  // than on the next cleanup pass.
+  parts.segmentStore.onPublished(() => parts.lifecycle.keepWithinRoomSoon());
+  // A segment closed may be the one a viewer's move between two limits of a
+  // height is waiting for.
+  parts.segmentStore.onPublished((key, index) => parts.renditions.noteSegmentPublished(key, index));
   // What encoders there should be on each output, and where. Given the two
   // things only this class can answer: how many this machine can afford, and
   // how to make one.
@@ -459,7 +732,10 @@ export function wireOutputs({
       // WHICH encoder this host settled on. Only the software ladder is
       // benchmarked, so a reading taken off a hardware encoder cannot be
       // split into its decode and encode halves and is not filed as one.
-      encoderKind: parts.videoEncoder?.kind ?? null
+      encoderKind: parts.encoders.current?.kind ?? null,
+      // The slowest this output's mode has been seen running alone on
+      // comparable material on this configuration, or null.
+      observedAloneSpeed: (session) => parts.localObservations?.slowestAloneSpeed(session.spec, contentOf(session.file)) ?? null
     }),
     // HOW MANY ENCODER PROCESSES ARE RUNNING, asked of the one thing that
     // makes and unmakes them. This used to be two counts of one fact, taken
@@ -471,13 +747,16 @@ export function wireOutputs({
     boundBy: (session) => parts.quality.classifyTranscodeBound(session),
     runsFor: (session) => parts.encodeRuns.runsOf(session),
     stateFor: (session) => parts.encodeRuns.runStateOf(session),
-    progressFor: (session) => parts.encodeRuns.progressOf(session)
+    // The run's OWN progress: a speed is a pair of readings of one process.
+    progressFor: (_session, run) => run?.progress?.snapshot?.() ?? null
   });
   // WHICH HEIGHTS ARE ON THE MENU, which is the arithmetic above plus three
   // things that are nothing to do with it: whose answer it is, what may never
   // be withdrawn, and when the answer may be reused.
   parts.qualityOffer = new QualityOffer({
     encodeCost: parts.encodeCost,
+    occupiedCostSec: (fileKey) => parts.admission?.occupiedCost({ exceptFileKey: fileKey }).costSec ?? 0,
+    occupancyKnownFor: (fileKey) => (parts.admission?.occupiedCost({ exceptFileKey: fileKey }).unpriced ?? 0) === 0,
     outputs: parts.outputs,
     stateFor: (session) => parts.encodeRuns.runStateOf(session),
     // WHICH HEIGHTS A LIVE VIEWER HAS ON SCREEN, as numbers. Who is watching
@@ -508,7 +787,7 @@ export function wireOutputs({
         parts.setPriorityMap?.({ sourceKey, fileIndex, durationSeconds, zones })
       ).catch(() => {});
     },
-    viewersOf: (session) => viewersOf(session),
+    get viewers() { return parts.viewers; },
     // WHERE THE TWO FACTS MEET, and this is the only place that holds both.
     // Which step is on somebody's screen belongs to the person; which output
     // a step supersedes belongs to the film's shape. Neither layer is handed
@@ -516,10 +795,51 @@ export function wireOutputs({
     watchedBy: (session, viewer) => !parts.outputs.supersededBy(session, viewer.activeVariantId ?? null),
     allowanceFor: (session) => minimumBufferFrom({
       segmentSeconds: parts.segmentDurationSec,
-      worstSupplyWaitSec: session.supplyFigures?.worstWaitSec
+      worstSupplyWaitSec: parts.hostLoad.supplyFor(session.file)?.worstWaitSec
     })?.seconds ?? parts.segmentDurationSec
   });
+  // WHETHER THE WHOLE MACHINE HAS A PLACE for one more encoder, across outputs.
+  // Given what it cannot hold itself: what runs (the orchestrator's), what is
+  // being prepared (the viewers' records), what an output costs (the encoding
+  // cost) and how much of the machine nobody has priced (the host's reading).
+  parts.admission = new EncodeAdmission({
+    liveRunsByAddress: () => parts.encodeOrchestrator.liveRunsByAddress(),
+    preparedAddresses: () => {
+      const addresses = new Set();
+      for (const id of outputsBeingPrepared(parts.viewers)) {
+        const key = parts.outputs.get(id)?.outputKey;
+        if (key) {
+          addresses.add(key);
+        }
+      }
+      return addresses;
+    },
+    // Every output a present viewer RECEIVES — by the same rule the per-output
+    // priority map is built by — that still has something left to make. The
+    // place an output is opened on is held from the moment its viewer is put
+    // on it, not from when the plan gets round to its first encoder.
+    watchedAddresses: () => {
+      const addresses = new Set();
+      for (const session of parts.outputs.values()) {
+        const address = session.outputKey;
+        if (!address || addresses.has(address) || finishedOutput(session)) {
+          continue;
+        }
+        for (const viewer of parts.viewers.forOutput(session).values()) {
+          if (viewer.isPresent() && !parts.outputs.supersededBy(session, viewer.activeVariantId ?? null)) {
+            addresses.add(address);
+            break;
+          }
+        }
+      }
+      return addresses;
+    },
+    finished: (address) => parts.outputs.outputsOn(address).some((session) => finishedOutput(session)),
+    loadOf: (address) => parts.encodeCost.loadOfOutput(address),
+    availability: () => parts.hostLoad.hostAvailability ?? null
+  });
   parts.encodeOrchestrator = new EncodeOrchestrator({
+    admission: parts.admission,
     // What the viewers actually waited for, by band. The ledger is the
     // priority layer's; the encoding is handed a way to ask it.
     describeWaits: (address) => waits.describe(address),
@@ -577,8 +897,43 @@ export function wireOutputs({
   // otherwise.
   // The quality budget: what each output is asked to step to, and the bitrate ceiling a viewer's link sets. Everything it reads of the rest of the proxy is listed here.
   parts.quality = new QualityController({
-    viewersOf: (output) => viewersOf(output),
-    worstLinkReading: (output) => worstLinkReading(output),
+    // The longest an output of this mode has been seen taking to be ready for
+    // a viewer moving onto it, in milliseconds, or null.
+    observedPreparationMs: (output) => {
+      const seconds = parts.localObservations?.longestPreparationSec(output?.spec) ?? null;
+      return seconds === null ? null : seconds * 1000;
+    },
+    // WHAT ENCODING IS TOLD ABOUT A PERSON: values, by name. Not the viewer,
+    // whose record belongs to the viewer layer and is written only there.
+    consumersOn: (output) => consumersOn(parts.viewers, output),
+    qualityModeOf: (output, consumerId) => qualityModeOf(parts.viewers, output, consumerId),
+    stepOnScreenOf: (output, consumerId) => stepOnScreenOf(parts.viewers, output, consumerId),
+    standingAskOf: (output, consumerId) => standingAskOf(parts.viewers, output, consumerId),
+    askQualityOf: (output, consumerId, height, reason, now, urgent) =>
+      askQualityOf(parts.viewers, output, consumerId, height, reason, now, urgent),
+    // What a viewer's page said about their buffer and the picture they see
+    // (roadmap item 98), as values.
+    bufferOf: (output, consumerId, spanSec) => bufferOf(parts.viewers, output, consumerId, spanSec),
+    visiblePictureOf: (output, consumerId) => visiblePictureOf(parts.viewers, output, consumerId),
+    // How long this host takes to close a first segment: how soon another
+    // output could have the piece a viewer needs.
+    expectedFirstSegmentMs: () => parts.hostTimings.expectedFirstSegmentMs(),
+    dropAskOf: (output, consumerId) => dropAskOf(parts.viewers, output, consumerId),
+    // EACH viewer's own link and who is present: a thin link decides for the
+    // person on it and for nobody else (roadmap item 97, step 11), so the
+    // budget asks per viewer instead of taking the worst over all of them.
+    presentOn: (output) => presentOn(parts.viewers, output),
+    linkReportOf: (output, consumerId) => linkReportOf(parts.viewers, output, consumerId),
+    // The soundtrack a viewer receives, as part of the load their link carries.
+    viewerAudioLoadOf: (base, consumerId) => parts.renditions.viewerAudioLoadOf(base, consumerId),
+    // The first lever on a viewer's link: another limit of the height on their
+    // screen, prepared and moved to without their player being told.
+    prepareSameHeightSwitch: (output, consumerId, direction, reason) =>
+      parts.renditions.prepareSameHeightSwitch(output, consumerId, direction, reason),
+    sameHeightSwitchPending: (consumerId) => parts.renditions.sameHeightSwitchPending(consumerId),
+    sameHeightSwitchDirection: (consumerId) => parts.renditions.sameHeightSwitchDirection(consumerId),
+    cancelSameHeightSwitch: (consumerId, reason) => parts.renditions.cancelSameHeightSwitch(consumerId, reason),
+    heightReadyFor: (base, consumerId, height) => parts.renditions.heightReadyFor(base, consumerId, height),
     isLive: (...args) => parts.encodeRuns.isLive(...args),
     liveConsumers: (...args) => parts.renditions.liveConsumers(...args),
     liveRunsOf: (...args) => parts.encodeRuns.liveRunsOf(...args),
@@ -586,15 +941,13 @@ export function wireOutputs({
     reportHostLoad: (...args) => parts.hostLoad.reportHostLoad(...args),
     runStateOf: (...args) => parts.encodeRuns.runStateOf(...args),
     sampleDownloadRates: (...args) => parts.hostLoad.sampleDownloadRates(...args),
-    stopEncodeRun: (...args) => parts.encodeRuns.stopEncodeRun(...args),
-    planEncodersSoon: (...args) => parts.encodeRuns.planEncodersSoon(...args),
     get encodeCost() { return parts.encodeCost; },
     get getSourceStats() { return parts.getSourceStats; },
     get outputs() { return parts.outputs; },
     get qualityOffer() { return parts.qualityOffer; },
     get segmentDurationSec() { return parts.segmentDurationSec; },
     get segmentStore() { return parts.segmentStore; },
-    get videoEncoder() { return parts.videoEncoder; },
+    get videoEncoder() { return parts.encoders.current; },
   });
   parts.budgetTimer = setInterval(() => {
     parts.cushion.reportCushions();

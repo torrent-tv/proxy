@@ -143,16 +143,13 @@ async function sessionOnOneDirectory() {
     get inputFile() { return this.file; },
     get audioFile() { return this.file; },
     startedAt: Date.now(),
-    createEntryMs: Date.now(),
     lastAccessedAt: Date.now(),
     runs: new Set(),
     lastError: "",
-    claims: new Set(),
     segmentFormat: fmp4Format,
     useSyntheticPlaylist: true,
     playlistText: "#EXTM3U\n",
     initBytes: fmp4Format.extractInit(wholePiece(0)),
-    firstSegmentLogged: false,
     waitEpoch: 0
   };
   manager.outputs.set(SESSION_ID, session);
@@ -175,7 +172,7 @@ test("a leftover of a run that has ended is not served, and answering does not d
   session.runs = new Set();
   await writeFile(path.join(dirPath, "segment-00001.mp4"), Buffer.alloc(0));
 
-  const result = await manager.serving.getFileStream(SESSION_ID, "segment-00001.mp4", { requestSeq: 1 });
+  const result = await manager.serving.getFileStream(SESSION_ID, "segment-00001.mp4");
 
   assert.equal(result.kind, "warming-up", "nothing servable exists yet, so the viewer waits");
   // AND ANSWERING A REQUEST DELETES NOTHING. It used to: this test was written
@@ -207,7 +204,7 @@ test("the current run's own unfinished piece is waited for, never deleted", asyn
   startRunOn(session, { from: 1, producing: false, usesExplicitCuts: true });
   await writeFile(path.join(dirPath, "segment-00001.mp4"), Buffer.alloc(0));
 
-  const result = await manager.serving.getFileStream(SESSION_ID, "segment-00001.mp4", { requestSeq: 1 });
+  const result = await manager.serving.getFileStream(SESSION_ID, "segment-00001.mp4");
 
   assert.equal(result.kind, "warming-up");
   const left = (await readdir(dirPath)).filter((name) => name === "segment-00001.mp4");

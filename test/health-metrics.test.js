@@ -6,7 +6,8 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import os from "node:os";
 
-import { availableMemoryBytes, collectHealthMetrics } from "../services/transport/health-collector.js";
+import { collectHealthMetrics } from "../services/transport/health-collector.js";
+import { availableMemoryBytes } from "../services/storage/machine-memory.js";
 
 test("free memory is what could be given out, not what is idle this instant", () => {
   const available = availableMemoryBytes();
@@ -27,7 +28,7 @@ test("free memory is what could be given out, not what is idle this instant", ()
 });
 
 test("the health report is three bounded numbers", () => {
-  const metrics = collectHealthMetrics();
+  const metrics = collectHealthMetrics({ availableMemoryBytes });
   assert.ok(metrics.cpuLoad >= 0);
   assert.ok(metrics.memFree > 0 && metrics.memFree <= 1);
   assert.ok(Number.isInteger(metrics.uptime) && metrics.uptime >= 0);

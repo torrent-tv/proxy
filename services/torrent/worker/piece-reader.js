@@ -20,7 +20,7 @@
  *    with those bytes — not when they were sent, because nothing was sent.
  */
 
-import { findSharedStore } from "../../storage/piece-store/shared-piece-store.js";
+import { pieceStoreOf } from "../piece-store-of.js";
 import { bytesOf, Urgency, urgencyName } from "../demand/index.js";
 import { demandFor } from "../download/registry.js";
 import { logger } from "../../../utils/logger.js";
@@ -144,7 +144,7 @@ export function pieceSupply(torrent, pieceIndex) {
  *
  * @param {import("webtorrent").Torrent} torrent
  * @param {number} index
- * @param {{ isCancelled: () => boolean }} cancellation
+ * @param {{ isCancelled: () => boolean, onCancel?: (listener: () => void) => () => void }} cancellation
  * @returns {Promise<void>}
  */
 function whenPieceReady(torrent, index, cancellation) {
@@ -164,17 +164,21 @@ function whenPieceReady(torrent, index, cancellation) {
       cleanup();
       reject(new Error(`Torrent went away while waiting for piece ${index}.`));
     };
-    // Cancellation is polled rather than pushed: a superseded seek destroys the
-    // read, and without this the wait would outlive it and hold a pin.
-    const poll = setInterval(() => {
-      if (cancellation.isCancelled()) {
-        cleanup();
-        reject(new Error(`Read cancelled while waiting for piece ${index}.`));
-      }
-    }, 250);
+    // A superseded seek destroys the read, and without this the wait would
+    // outlive it and hold a pin. The read's own stream says so the moment it
+    // happens; it was polled every 250 ms before. A cancellation that cannot
+    // announce itself is one that is never cancelled (a test's plain object).
+    if (cancellation.isCancelled()) {
+      reject(new Error(`Read cancelled while waiting for piece ${index}.`));
+      return;
+    }
+    const stopListening = cancellation.onCancel?.(() => {
+      cleanup();
+      reject(new Error(`Read cancelled while waiting for piece ${index}.`));
+    }) ?? (() => {});
 
     function cleanup() {
-      clearInterval(poll);
+      stopListening();
       torrent.removeListener("verified", onVerified);
       torrent.removeListener("close", onDestroyed);
     }
@@ -536,7 +540,7 @@ export async function* readFragments({
   cancellation,
   windowBytes = READ_WINDOW_BYTES
 }) {
-  const store = findSharedStore(torrent);
+  const store = pieceStoreOf(torrent);
   if (!store) {
     throw new Error("This torrent is not backed by a shared piece store.");
   }

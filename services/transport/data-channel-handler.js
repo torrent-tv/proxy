@@ -312,7 +312,7 @@ function makeSendQueueWatcher({ log, getTransportSnapshot, witness, usrsctpState
      *
      * @returns {void}
      */
-    const stop = () => {
+    const stop = (because = "the transport stopped answering") => {
       if (stopped) {
         return;
       }
@@ -332,7 +332,7 @@ function makeSendQueueWatcher({ log, getTransportSnapshot, witness, usrsctpState
         // because the first does not always come: a peer connection can die
         // without `onClosed`, which is why this watch was written in the first
         // place.
-        onConnectionGone?.(sessionId, "the transport stopped answering");
+        onConnectionGone?.(sessionId, because);
       }
     };
     // Independent of the queue: the transport's own counters, sampled for as
@@ -697,6 +697,16 @@ export function createDataChannelHandler({
    * @type {Map<string, Set<string>>}
    */
   const viewersOnConnection = new Map();
+  /**
+   * The newest connection currently carrying each viewer's identity.
+   *
+   * A reconnect can open its channels before the old connection finishes
+   * closing. The old connection must not release a viewer who has already
+   * identified themselves on the replacement.
+   *
+   * @type {Map<string, string>}
+   */
+  const connectionOfViewer = new Map();
 
   /**
    * Everyone on this connection has gone, because the connection has.
@@ -716,6 +726,10 @@ export function createDataChannelHandler({
       return;
     }
     for (const consumerId of viewers) {
+      if (connectionOfViewer.get(consumerId) !== sessionId) {
+        continue;
+      }
+      connectionOfViewer.delete(consumerId);
       onLog?.(`[dc] Session ${sessionId.slice(0, 8)}: viewer ${consumerId} left — ${because}`);
       try {
         onViewerGone(consumerId, because);
@@ -997,6 +1011,7 @@ export function createDataChannelHandler({
         const isNew = !known.has(message.consumerId);
         known.add(message.consumerId);
         viewersOnConnection.set(sessionId, known);
+        connectionOfViewer.set(message.consumerId, sessionId);
         channelOfViewer.set(message.consumerId, channel);
         if (isNew) {
           log(`[dc] Session ${tag}: viewer ${message.consumerId} is on this connection`);
@@ -1030,7 +1045,7 @@ export function createDataChannelHandler({
     });
 
     channel.onClosed(() => {
-      stopWatchdog();
+      stopWatchdog("the connection closed");
       deliveryProbe.detach(sessionId, channel);
       for (const entry of partials.values()) {
         clearTimeout(entry.timer);
@@ -1038,11 +1053,9 @@ export function createDataChannelHandler({
       partials.clear();
       forgetChannel(channel);
       log(`[dc] Session ${tag}: channel closed`);
-      // The ordinary way a viewer leaves, and the only one that is immediate.
-      // Everything else — a silence long enough to be called an absence, the
-      // transport's own counters going quiet — is a backstop for this event
-      // failing to arrive.
-      connectionGone(sessionId, "the connection closed");
+      // One closed data channel does not mean the peer connection is gone:
+      // media, control and probe channels can close independently. The shared
+      // transport watcher calls `connectionGone` when its last channel closes.
     });
 
     channel.onError((err) => {

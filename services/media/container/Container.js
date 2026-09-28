@@ -272,6 +272,13 @@ export class Container {
       declared,
       "subtitle",
       (track) => ({
+        // Matroska applies `eng` when Language is absent, and ffmpeg reports
+        // that default as if the file had stated it. Preserve only an explicit
+        // container value; otherwise let cue-text detection decide later.
+        language: track.declaresLanguage === true
+          ? (track.languageBcp47 || track.language || "")
+          : "",
+        declaresLanguage: track.declaresLanguage === true,
         isDefault: track.isDefault === true,
         declaresDefault: track.declaresDefault === true,
         // Read from the file rather than guessed from the track's name. Both

@@ -834,12 +834,12 @@ export class SegmentStore {
    */
   drop(key, because) {
     const dir = path.join(this.#root, directoryNameFor(key));
+    this.#unwatch(key);
     try {
       rmSync(dir, { recursive: true, force: true });
     } catch {
       // Already gone, or in use; the next sweep sees it either way.
     }
-    this.#unwatch(key);
     this.#held.delete(key);
     this.#formats.delete(key);
     this.#touched.delete(key);

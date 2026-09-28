@@ -319,4 +319,5 @@ test("what the store weighs is reported, and dropping one output frees it", (t) 
   assert.equal(store.stats().bytes, 2000);
   store.drop(KEY, "nobody is watching it");
   assert.equal(store.stats().outputs, 0);
+  assert.equal(readdirSync(root).length, 0, "the watched output directory was removed");
 });

@@ -14,7 +14,6 @@
 // for the measurement that made it necessary.
 import "./thread-pool.js";
 import { Command } from "commander";
-import crypto from "node:crypto";
 import os from "node:os";
 import { spawnSync } from "node:child_process";
 import { createRequire } from "node:module";
@@ -33,6 +32,7 @@ import { startMemoryReport } from "../services/storage/memory-report.js";
 import { fragmentBufferCollection } from "../services/torrent/worker/client.js";
 import { collectHealthMetrics } from "../services/transport/health-collector.js";
 import { createPortMapper } from "../services/transport/port-mapper.js";
+import { installationId } from "../services/identity/installation-id.js";
 import { classifyNat } from "../services/transport/nat-classifier.js";
 import { DEFAULT_SEGMENT_FORMAT_ID, SEGMENT_FORMAT_IDS } from "../services/encode/segment-formats/index.js";
 import { logToFile, logger } from "../utils/logger.js";
@@ -132,7 +132,7 @@ const bindHost = String(options.host);
 const explicitBaseUrl = options.publicBaseUrl
   ? String(options.publicBaseUrl).replace(/\/+$/, "")
   : "";
-const clientId = options.id ? String(options.id) : crypto.randomUUID();
+const clientId = installationId({ stateDir: options.stateDir, explicitId: options.id });
 const clientName = options.name ? String(options.name) : `proxy-${clientId.slice(0, 8)}`;
 const token = String(options.token ?? "");
 const transcodeAudio = options.transcodeAudio !== false;

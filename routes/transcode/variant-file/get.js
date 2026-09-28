@@ -13,14 +13,13 @@
  * no variant is ever asked for unless the viewer picked it.
  */
 
+import { replyAssignmentLost, replyOutputUnavailable } from "../../../services/server/http-responses.js";
 import {
   consumerOf,
   refusedAsStale,
-  replyAssignmentLost,
-  replyOutputUnavailable,
   serveSessionFile,
   statedGenerationOf
-} from "../session-file/get.js";
+} from "../../../services/server/transcode-session-files.js";
 
 /**
  * @param {import("fastify").FastifyRequest} req

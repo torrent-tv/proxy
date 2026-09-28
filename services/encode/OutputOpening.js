@@ -28,6 +28,14 @@ import { rungForVisiblePicture } from "./quality/visible-rung.js";
 import { audioLoadOf, linkAnswerFigures as linkFiguresOf } from "./quality/link-budget.js";
 import { AUDIO_TRANSCODE_KBPS } from "./args.js";
 
+/**
+ * @typedef {Object} SegmentOutputFiles
+ * @property {() => string[]} addresses
+ * @property {(address: string, index: number) => boolean} isClosed
+ * @property {(address: string) => number | null} lastReadAt
+ * @property {(address: string) => string} directoryFor
+ * @property {(address: string, format: object) => void} useFormat
+ */
 
 /** Own package version, stamped onto output-start log lines. */
 const PROXY_VERSION = createRequire(import.meta.url)("../../package.json").version;
@@ -37,7 +45,9 @@ export class OutputOpening {
   #host;
 
   /**
-   * @param {object} host - `logger`, `probeMediaInfo`, `probeKeyframeTimes`, `enabled`, `segmentFormat`, `renditions`, `sourceFiles`, `getCachedMediaInfo`, `localBaseUrl`, `tonemapSupported`, `videoEncoder`, `hostLoad`, `keyframeTables`, `timelines`, `segmentDurationSec`, `softwarePresetBenchmark`, `decodeCostModel`, `encodeCost`, `outputs`, `segmentStore`, `hostTimings`, `returns`, `encodeRuns`
+   * @param {object} host - `logger`, `probeMediaInfo`, `probeKeyframeTimes`, `enabled`, `segmentFormat`, `renditions`, `sourceFiles`, `getCachedMediaInfo`, `localBaseUrl`, `tonemapSupported`, `videoEncoder`, `hostLoad`, `keyframeTables`, `timelines`, `segmentDurationSec`, `softwarePresetBenchmark`, `decodeCostModel`, `encodeCost`, `outputs`, `segmentOutputFiles`, `hostTimings`, `returns`, `encodeRuns`
+   * @param {SegmentOutputFiles} host.segmentOutputFiles - The storage
+   *   operations needed while selecting or opening an output.
    */
   constructor(host) {
     this.#host = host;
@@ -586,8 +596,8 @@ export class OutputOpening {
       serving: {
         mode: servingMode ?? (forceExactSize ? "manual" : "auto"),
         linkMbps: viewerLinkMbps,
-        keys: [...this.#host.outputs.values()].map((other) => other.outputKey).concat(this.#host.segmentStore.addresses()),
-        readyAt: (key) => this.#host.segmentStore.isClosed(key, timeline.indexForTime(Math.max(0, startPositionSeconds))),
+        keys: [...this.#host.outputs.values()].map((other) => other.outputKey).concat(this.#host.segmentOutputFiles.addresses()),
+        readyAt: (key) => this.#host.segmentOutputFiles.isClosed(key, timeline.indexForTime(Math.max(0, startPositionSeconds))),
         observedPeakMbps: (candidate) => this.#host.observedPeakMbps?.(candidate) ?? null
       }
     });
@@ -679,9 +689,9 @@ export class OutputOpening {
     // A RETURN, if this output was held before — and its age, which is the one
     // term of the keeping period that nothing measures. Read BEFORE the
     // directory is claimed, since claiming it is what marks it read.
-    this.#host.returns.note({ lastReadAt: this.#host.segmentStore.lastReadAt(spec.toKey()), now: Date.now() });
-    this.#host.segmentStore.directoryFor(spec.toKey());
-    this.#host.segmentStore.useFormat(spec.toKey(), segmentFormat);
+    this.#host.returns.note({ lastReadAt: this.#host.segmentOutputFiles.lastReadAt(spec.toKey()), now: Date.now() });
+    this.#host.segmentOutputFiles.directoryFor(spec.toKey());
+    this.#host.segmentOutputFiles.useFormat(spec.toKey(), segmentFormat);
     this.#host.hostTimings.noteOutputCreated(session, createEntryMs);
     this.#host.encodeRuns.setReadWindow(session, readWindowBytes);
     this.#host.encodeCost.notePredictionFor(session, output.encodeHeight);

@@ -11,7 +11,7 @@
 
 import { logger } from "../../../utils/logger.js";
 import { OUTPUT_NO_CAPACITY, OUTPUT_UNAVAILABLE } from "../../../services/encode/output/index.js";
-import { replyNoCapacity, replyOutputUnavailable } from "../../transcode/session-file/get.js";
+import { replyNoCapacity, replyOutputUnavailable } from "../../../services/server/http-responses.js";
 
 /**
  * Extract a plain object from the request body, guarding against

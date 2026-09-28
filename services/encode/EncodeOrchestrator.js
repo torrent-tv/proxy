@@ -34,6 +34,14 @@ import { SegmentDemand } from "./SegmentDemand.js";
 import { runStateOf } from "./encode-run-state.js";
 
 /**
+ * @typedef {Object} SegmentCoverage
+ * @property {(address: string) => number[]} provenNumbers
+ * @property {(address: string, index: number) => void} announce
+ * @property {(address: string) => number} filesHeld
+ * @property {(address: string, startedAt: number) => number} clearUpAfter
+ */
+
+/**
  * How long nothing is placed on an output whose input has just gone, and the
  * ceiling that doubling reaches.
  *
@@ -57,6 +65,9 @@ export class EncodeOrchestrator {
 
   /** Output address to what has been made of it. @type {Map<string, CoverageMap>} */
   #coverage = new Map();
+
+  /** @type {SegmentCoverage | null} */
+  #segmentCoverage = null;
 
   /** Output address to the runs on it. @type {Map<string, import("../encode/EncodeRun.js").EncodeRun[]>} */
   #runs = new Map();
@@ -148,6 +159,7 @@ export class EncodeOrchestrator {
    *   HANDED IN: what anybody waited for belongs to the priority layer, and
    *   this one may be asked about encoders with no ledger, no clock and no
    *   viewer anywhere. Absent, the line simply does not carry it.
+   * @param {SegmentCoverage | null} [params.segmentCoverage]
    */
   constructor({
     maxRunsFor,
@@ -156,7 +168,7 @@ export class EncodeOrchestrator {
     contentionPenalties = null,
     refetchSecPerFilmSecond = () => 0,
     startingSpeedFor = () => 0,
-    segmentStore = null,
+    segmentCoverage = null,
     planSoon = null,
     describeWaits = null,
     admission = null,
@@ -169,11 +181,9 @@ export class EncodeOrchestrator {
     // is about one output, and then only the per-output limit binds.
     this.admission = admission && typeof admission.placesFor === "function" ? admission : null;
     this.#describeWaits = typeof describeWaits === "function" ? describeWaits : () => "";
-    // The store of produced segments — the layer below this one. It is asked to
-    // clean up after a run that ended other than by reaching the end of its
-    // stretch, which is the one thing an ending must not leave behind: a file
-    // under a name that promises a whole segment.
-    this.segmentStore = segmentStore;
+    // Only the segment facts and operations this planner needs cross the
+    // storage boundary; the concrete storage remains in the server assembly.
+    this.#segmentCoverage = segmentCoverage;
     this.maxRunsFor = maxRunsFor;
     // Seconds of swarm time per second of film: what re-encoding material that
     // already exists costs the download, over and above the encoder's own time.
@@ -238,8 +248,8 @@ export class EncodeOrchestrator {
    */
   #upToDateCoverage(address) {
     const coverage = this.coverageOf(address);
-    if (this.segmentStore) {
-      coverage.setReady(this.segmentStore.provenNumbers(address));
+    if (this.#segmentCoverage) {
+      coverage.setReady(this.#segmentCoverage.provenNumbers(address));
     }
     return coverage;
   }
@@ -549,9 +559,9 @@ export class EncodeOrchestrator {
     // Nothing is told to the store: by the time this is called the piece is
     // ALREADY under its served name, because the rename is what closing it
     // means. A statement kept beside the disk would be a second owner of one
-    // fact, which is what item 87 removed from the coverage map.
+    // fact, which removed the stale second owner from the coverage map.
     this.coverageOf(address).markReady(index);
-    this.segmentStore?.announce?.(address, index);
+    this.#segmentCoverage?.announce?.(address, index);
     for (const run of this.runsOn(address)) {
       run.noteProduced(index);
     }
@@ -805,7 +815,7 @@ export class EncodeOrchestrator {
       this.#lastUnmet.delete(address);
     } else if (this.#lastUnmet.get(address) !== wanting) {
       this.#lastUnmet.set(address, wanting);
-      const held = this.segmentStore ? this.segmentStore.filesHeld(address) : -1;
+      const held = this.#segmentCoverage ? this.#segmentCoverage.filesHeld(address) : -1;
       this.logger.warn(
         `encode: #${wanting} of ${address} is wanted and NO ENCODER IS MAKING IT — ` +
         `ready=${coverage.stats().ready} of ${coverage.segmentCount} ` +
@@ -1009,7 +1019,7 @@ export class EncodeOrchestrator {
     // is a name match: no stretch to search and no bytes to judge. Done for
     // every ending, the normal one included, since a run that finished cleanly
     // has nothing under a working name and the sweep then removes nothing.
-    this.segmentStore?.clearUpAfter(ended.address, ended.from);
+    this.#segmentCoverage?.clearUpAfter(ended.address, ended.from);
     this.coverageOf(ended.address).release(ended.run);
     const remaining = this.runsOn(ended.address).filter((run) => run !== ended.run);
     if (remaining.length === 0) {
@@ -1182,7 +1192,7 @@ export class EncodeOrchestrator {
       // different statements: files with nothing proving them closed reads as a
       // reporting fault, no files at all reads as an output yet to be made, and
       // the difference decides where to look.
-      const held = this.segmentStore ? this.segmentStore.filesHeld(address) : -1;
+      const held = this.#segmentCoverage ? this.#segmentCoverage.filesHeld(address) : -1;
       // AND WHETHER THE MAP IS BEING SERVED IN ITS OWN ORDER. The zones say
       // what matters most; this says what the viewer actually waited for, by
       // band. Waits at `now` are the ones that cost a spinner, and until this

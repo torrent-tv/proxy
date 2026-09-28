@@ -12,7 +12,7 @@
  * instead of it: both encoders run, one for the rung and one for the audio.
  */
 
-import { consumerOf, refusedAsStale, serveSessionFile } from "../session-file/get.js";
+import { consumerOf, refusedAsStale, serveSessionFile } from "../../../services/server/transcode-session-files.js";
 
 /**
  * @param {import("fastify").FastifyRequest} req

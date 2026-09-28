@@ -59,6 +59,8 @@ const BUDGET_DOWNLOAD_OK_FACTOR = 1.0;
 // segments (the newest file on disk may still be written and is excluded).
 const LINK_OBSERVED_SEGMENTS = 5;
 
+/** @typedef {{ pathOf: (address: string, index: number) => string | null }} SegmentPathLookup */
+
 export class QualityController {
   /** What this reads and asks of the rest of the proxy, and nothing else. @type {object} */
   #host;
@@ -70,7 +72,9 @@ export class QualityController {
   #judging = new Set();
 
   /**
-   * @param {object} host - `isLive`, `liveConsumers`, `liveRunsOf`, `producedNumbers`, `reportHostLoad`, `runStateOf`, `sampleDownloadRates`, `encodeCost`, `getSourceStats`, `outputs`, `qualityOffer`, `segmentDurationSec`, `segmentStore`, `videoEncoder`, `prepareSameHeightSwitch`, `sameHeightSwitchPending`, `sameHeightSwitchDirection`, `cancelSameHeightSwitch`, `heightReadyFor`, `bufferOf`, `visiblePictureOf`, `expectedFirstSegmentMs`
+   * @param {object} host - `isLive`, `liveConsumers`, `liveRunsOf`, `producedNumbers`, `reportHostLoad`, `runStateOf`, `sampleDownloadRates`, `encodeCost`, `getSourceStats`, `outputs`, `qualityOffer`, `segmentDurationSec`, `segmentPaths`, `videoEncoder`, `prepareSameHeightSwitch`, `sameHeightSwitchPending`, `sameHeightSwitchDirection`, `cancelSameHeightSwitch`, `heightReadyFor`, `bufferOf`, `visiblePictureOf`, `expectedFirstSegmentMs`
+   * @param {SegmentPathLookup} host.segmentPaths - Lookup for completed
+   *   segment paths needed by quality decisions.
    */
   constructor(host) {
     this.#host = host;
@@ -751,7 +755,7 @@ export class QualityController {
     let bytes = 0;
     try {
       for (const index of completed) {
-        const segmentPath = this.#host.segmentStore.pathOf(session.outputKey ?? "", index);
+        const segmentPath = this.#host.segmentPaths.pathOf(session.outputKey ?? "", index);
         if (!segmentPath) {
           break;
         }

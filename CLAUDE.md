@@ -14,12 +14,16 @@ Linux-only host (e.g. POSIX-only signals must degrade elsewhere).
 
 ## Layout
 
+Browser request and response fields, compatibility defaults, and status meanings
+are recorded in `docs/browser-proxy-contract.md`.
+
 - `bin/cli.js` — CLI entry; resolves `ffmpegBin` (uses `--ffmpeg-bin` if given,
   else bundled ffmpeg-static, else PATH `ffmpeg`).
-- `server.js` — Fastify setup; detects the video encoder at startup
-  (`detectVideoEncoder`), builds the outputs, viewers and encoding with
-  `services/server/wire-outputs.js`, and hands each route the components it
-  asks of.
+- `server.js` — the composition root: creates Fastify, initializes process-wide
+  resources, calls `services/server/wire-outputs.js` for the output and encode
+  service graph, registers each route explicitly, and passes its dependencies.
+  `wire-outputs.js` is a subordinate assembler for that graph; it does not
+  create the HTTP server or register routes.
 - `routes/<path>/<method>.js` — same convention as the server repo.
   - `routes/stream/get.js` — byte-range torrent file streaming (HTTP 206).
   - `routes/api/playback-plan/post.js` — codec/container/duration probe result.

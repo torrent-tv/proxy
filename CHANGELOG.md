@@ -1,3 +1,7 @@
+## 2.87.9
+
+- **Fix**: Stop refreshing late sidecar metadata when the completed header read reports no audio tracks.
+
 ## 2.87.8
 
 - **Fix**: Keep a viewer registered until every data channel on its WebRTC connection closes, and ignore a closing connection after the viewer has identified themselves on a replacement connection.

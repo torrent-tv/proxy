@@ -9,7 +9,7 @@
 import { spawn } from "node:child_process";
 import { logger } from "../../utils/logger.js";
 import { Container } from "./container/Container.js";
-import { buildAudioInventory } from "./audio-inventory.js";
+import { buildAudioInventory, enrichAudioInventoryFromSidecar } from "./audio-inventory.js";
 import {
   parseFfmpegDurationSeconds,
   parseFfmpegStartTimeSeconds,
@@ -35,7 +35,8 @@ const BODY_PREFETCH_BYTES = 16 * 1024 * 1024;
  * Not a measurement, and nothing is derived from it: it is the point past which
  * holding the viewer costs more than the language and flags being waited for —
  * which the folder name supplies anyway, from the torrent's file list, at no
- * cost. The reading itself carries on in the worker and is kept there.
+ * cost. The read continues asynchronously after this response and is shared
+ * with the refresh request, so a later answer can use the same container read.
  */
 const SIDECAR_HEADER_WAIT_MS = 3_000;
 
@@ -276,6 +277,7 @@ function buildDirectUrl(localBaseUrl, sourceKey, fileIndex) {
  * @property {number} durationSeconds   - Total media duration in seconds (0 if unknown).
  * @property {number} videoWidth        - Source coded width (0 if unknown).
  * @property {number} videoHeight       - Source coded height (0 if unknown).
+ * @property {boolean} audioTracksPending - At least one sidecar header timed out and can be refreshed later.
  */
 
 /**
@@ -292,7 +294,7 @@ function buildDirectUrl(localBaseUrl, sourceKey, fileIndex) {
  * a torrent file. Plans are cached per (sourceKey, fileIndex) pair.
  *
  * @param {PlaybackPlannerOptions} options
- * @returns {{ getPlan: (params: { sourceKey: string, fileIndex: number, userAgent?: string }) => Promise<PlaybackPlan> }}
+ * @returns {{ getPlan: (params: { sourceKey: string, fileIndex: number, userAgent?: string }) => Promise<PlaybackPlan>, refreshAudioTracks: (params: { sourceKey: string, fileIndex: number }) => Promise<{ audioTracks: object[], pending: boolean }> }}
  */
 export function createPlaybackPlanner({
   ffmpegBin,
@@ -330,6 +332,8 @@ export function createPlaybackPlanner({
 }) {
   /** @type {Map<string, PlaybackPlan>} */
   const cache = new Map();
+  const pendingSidecarHeaders = new Map();
+  const declaredAudioReads = new Map();
   /**
    * Full media info parsed from the SAME probe that produced the plan, cached
    * under the same key so a transcode session can reuse it instead of running
@@ -415,8 +419,9 @@ export function createPlaybackPlanner({
    * own tracks and the ones shipped as separate files beside it.
    *
    * Built here, in the plan, because the plan is what the viewer's menu is drawn
-   * from — so the offer is complete the moment a file is opened, with nothing
-   * arriving late and nothing measured while the viewer waits. It is also what
+   * from — so every playable track gets a stable number before the file opens.
+   * Sidecar header fields may arrive later; they enrich an existing numbered
+   * entry without changing the inventory length. It is also what
    * the master playlist's rendition group is built from, so the number in the
    * menu and the number in the `a/<n>/` address are the same number by
    * construction rather than by agreement.
@@ -425,67 +430,72 @@ export function createPlaybackPlanner({
    * @param {object} torrent
    * @param {number} fileIndex
    * @param {object[]} bannerAudioTracks - The probe's own audio streams.
-   * @returns {Promise<import("./audio-inventory.js").AudioInventoryEntry[]>}
+   * @returns {Promise<{ audioTracks: import("./audio-inventory.js").AudioInventoryEntry[], pendingFileIndexes: number[] }>}
    */
+  async function declaredAudioOf(sourceKey, wantedFileIndex, label) {
+    if (typeof declaredTracksOf !== "function") {
+      return { tracks: [], complete: false, timedOut: false };
+    }
+    const readKey = `${sourceKey}:${wantedFileIndex}`;
+    let readPromise = declaredAudioReads.get(readKey);
+    if (!readPromise) {
+      readPromise = Promise.resolve()
+        .then(() => declaredTracksOf({ sourceKey, fileIndex: wantedFileIndex }))
+        .then((tracks) => ({
+          tracks: tracks
+            .filter((track) => track?.type === "audio")
+            .sort((left, right) => (left.declaredIndex ?? 0) - (right.declaredIndex ?? 0)),
+          complete: Array.isArray(tracks) && tracks.length > 0
+        }))
+        .catch((error) => {
+          logger.info(`audio tracks: "${label}" could not be read (${error?.message ?? error})`);
+          return { tracks: [], complete: false };
+        });
+      declaredAudioReads.set(readKey, readPromise);
+      readPromise.then(
+        () => { if (declaredAudioReads.get(readKey) === readPromise) declaredAudioReads.delete(readKey); },
+        () => { if (declaredAudioReads.get(readKey) === readPromise) declaredAudioReads.delete(readKey); }
+      );
+    }
+    let timer = null;
+    try {
+      return await Promise.race([
+        readPromise,
+        new Promise((resolve) => {
+          timer = setTimeout(() => resolve(null), SIDECAR_HEADER_WAIT_MS);
+          timer.unref?.();
+        })
+      ]).then((tracks) => {
+        if (tracks === null) {
+          logger.info(
+            `audio tracks: "${label}" did not answer within ${SIDECAR_HEADER_WAIT_MS / 1000}s — ` +
+            "offered without what its header would say"
+          );
+          return { tracks: [], complete: false, timedOut: true };
+        }
+        return {
+          tracks: Array.isArray(tracks?.tracks) ? tracks.tracks : [],
+          complete: tracks?.complete === true,
+          timedOut: false
+        };
+      });
+    } catch (error) {
+      logger.info(`audio tracks: "${label}" could not be read (${error?.message ?? error})`);
+      return { tracks: [], complete: false, timedOut: false };
+    } finally {
+      if (timer !== null) clearTimeout(timer);
+    }
+  }
+
   async function buildInventory(sourceKey, torrent, fileIndex, bannerAudioTracks) {
     const banner = Array.isArray(bannerAudioTracks) ? bannerAudioTracks : [];
-    /**
-     * Read a file's declared audio tracks, or give up quickly.
-     *
-     * The plan is on the path to the first frame, and reading a sidecar's header
-     * waits on the swarm: that file has usually had nothing downloaded when this
-     * runs, and a header that never arrives would hold the plan — and the
-     * viewer — for the whole of the read's own patience. What a timeout costs is
-     * small and deliberate: the track is still offered, still numbered and still
-     * playable, only without the language and flags its own header would have
-     * given. The language the viewer actually sees is read from the FOLDER the
-     * release put it in, which is in the torrent's file list and needs no bytes
-     * at all.
-     *
-     * @param {number} wantedFileIndex
-     * @param {string} label
-     * @returns {Promise<object[]>}
-     */
-    const declaredAudioOf = async (wantedFileIndex, label) => {
-      if (typeof declaredTracksOf !== "function") {
-        return [];
-      }
-      let timer = null;
-      try {
-        return await Promise.race([
-          declaredTracksOf({ sourceKey, fileIndex: wantedFileIndex }).then((tracks) => tracks
-            .filter((track) => track?.type === "audio")
-            .sort((left, right) => (left.declaredIndex ?? 0) - (right.declaredIndex ?? 0))),
-          new Promise((resolve) => {
-            timer = setTimeout(() => resolve(null), SIDECAR_HEADER_WAIT_MS);
-            timer.unref?.();
-          })
-        ]).then((tracks) => {
-          if (tracks === null) {
-            logger.info(
-              `audio tracks: "${label}" did not answer within ` +
-              `${SIDECAR_HEADER_WAIT_MS / 1000}s — offered without what its header would say`
-            );
-            return [];
-          }
-          return Array.isArray(tracks) ? tracks : [];
-        });
-      } catch (error) {
-        logger.info(`audio tracks: "${label}" could not be read (${error?.message ?? error})`);
-        return [];
-      } finally {
-        if (timer !== null) {
-          clearTimeout(timer);
-        }
-      }
-    };
     // The picture's own tracks: ffmpeg numbers them, the container declares what
     // they are. Both readings, lined up and checked — see `audio-inventory.js`.
     let embedded = banner.map((track) => ({ ...track, declaresDefault: false }));
     if (banner.length > 0) {
       // The picture's head is already downloaded — the codec probe just read it
       // — so this is a parse and not a wait, but it is bounded like the rest.
-      const declared = await declaredAudioOf(fileIndex, "the picture");
+      const { tracks: declared } = await declaredAudioOf(sourceKey, fileIndex, "the picture");
       const merged = Container.mergeAudioFlags(banner, declared);
       embedded = merged.tracks;
       logger.info(
@@ -505,7 +515,9 @@ export function createPlaybackPlanner({
         file,
         // A bare elementary stream — `.ac3`, `.dts`, `.mp3` — has no table to
         // read, so nothing is asked of the swarm for it at all.
-        tracks: file.declaresTracks ? await declaredAudioOf(file.fileIndex, file.name) : []
+        ...(file.declaresTracks
+          ? await declaredAudioOf(sourceKey, file.fileIndex, file.name)
+          : { tracks: [], timedOut: false })
       }))
     );
     const inventory = buildAudioInventory({ embedded, videoFileIndex: fileIndex, sidecars });
@@ -521,7 +533,61 @@ export function createPlaybackPlanner({
           .join(" ")
       );
     }
-    return inventory;
+    return {
+      audioTracks: inventory,
+      pendingFileIndexes: sidecars.filter((sidecar) => sidecar.timedOut).map((sidecar) => sidecar.file.fileIndex)
+    };
+  }
+
+  async function refreshAudioTracks({ sourceKey, fileIndex }) {
+    const cacheKey = `${sourceKey}:${fileIndex}`;
+    const plan = cache.get(cacheKey);
+    if (!plan) {
+      return { audioTracks: Array.isArray(plan?.audioTracks) ? plan.audioTracks : [], pending: false };
+    }
+    const pendingIndexes = new Set(pendingSidecarHeaders.get(cacheKey) ?? []);
+    if (pendingIndexes.size === 0 || typeof declaredTracksOf !== "function") {
+      return { audioTracks: plan.audioTracks, pending: false };
+    }
+    const sourceRecord = sourceRegistry.get(sourceKey);
+    if (!sourceRecord) {
+      const error = new Error("Source key was not found.");
+      error.code = "SOURCE_NOT_FOUND";
+      throw error;
+    }
+    const torrent = await torrentPool.getTorrent(sourceRecord.sourceType, sourceRecord.source);
+    const sidecarFiles = sidecarsOf(torrent, fileIndex).audio;
+    for (const sidecar of sidecarFiles) {
+      if (!pendingIndexes.has(sidecar.fileIndex)) continue;
+      const read = await declaredAudioOf(sourceKey, sidecar.fileIndex, sidecar.name);
+      if (read.timedOut) continue;
+      if (read.tracks.length === 0) {
+        if (read.complete) pendingIndexes.delete(sidecar.fileIndex);
+        continue;
+      }
+      const audio = read.tracks
+        .filter((track) => track?.type === "audio")
+        .sort((left, right) => (left.declaredIndex ?? 0) - (right.declaredIndex ?? 0));
+      if (audio.length === 0) continue;
+      if (!enrichAudioInventoryFromSidecar(plan.audioTracks, sidecar, audio[0])) {
+        pendingIndexes.delete(sidecar.fileIndex);
+        continue;
+      }
+      // Keep the published inventory length and every address stable for this
+      // session. A late header enriches the offered first track; adding tracks
+      // would require replacing the HLS master playlist already loaded by the
+      // browser.
+      pendingIndexes.delete(sidecar.fileIndex);
+      if (audio.length > 1) {
+        logger.info(
+          `audio tracks: late header for "${sidecar.name}" describes ${audio.length} tracks; ` +
+          "the active inventory keeps its published track count"
+        );
+      }
+    }
+    pendingSidecarHeaders.set(cacheKey, [...pendingIndexes]);
+    plan.audioTracksPending = pendingIndexes.size > 0;
+    return { audioTracks: plan.audioTracks, pending: pendingIndexes.size > 0 };
   }
 
   function withHostTimings(plan) {
@@ -588,6 +654,8 @@ export function createPlaybackPlanner({
       const plan = cache.get(`${sourceKey}:${fileIndex}`);
       return Array.isArray(plan?.audioTracks) ? plan.audioTracks : [];
     },
+
+    refreshAudioTracks,
 
     getCachedMediaInfo({ sourceKey, fileIndex }) {
       return mediaInfoCache.get(`${sourceKey}:${fileIndex}`) ?? null;
@@ -657,6 +725,7 @@ export function createPlaybackPlanner({
           videoWidth: 0,
           videoHeight: 0,
           audioTracks: [],
+          audioTracksPending: false,
           subtitleTracks: []
         };
         cache.set(cacheKey, plan);
@@ -750,6 +819,7 @@ export function createPlaybackPlanner({
         );
       }
       const sidecars = sidecarsOf(torrent, fileIndex);
+      const inventory = await buildInventory(sourceKey, torrent, fileIndex, audioTracks ?? []);
       const plan = {
         mode: requiresTranscode ? "hls" : "direct",
         directUrl,
@@ -765,7 +835,8 @@ export function createPlaybackPlanner({
         // Full track inventory for the browser's audio/subtitle menus. The audio
         // half spans the picture's own tracks AND the soundtracks shipped as
         // files beside it, under one numbering — see `buildInventory`.
-        audioTracks: await buildInventory(sourceKey, torrent, fileIndex, audioTracks ?? []),
+        audioTracks: inventory.audioTracks,
+        audioTracksPending: inventory.pendingFileIndexes.length > 0,
         subtitleTracks: await withContainerDefaults(sourceKey, torrent, fileIndex, subtitleTracks ?? []),
         // The files BESIDE this picture that belong to it, and what each one's
         // own path says about the track in it. Both answers are made here, by
@@ -816,6 +887,7 @@ export function createPlaybackPlanner({
       // prioritised by the prefetch above).
       if (codecsDetected) {
         cache.set(cacheKey, plan);
+        pendingSidecarHeaders.set(cacheKey, inventory.pendingFileIndexes);
         // Cache the full media info from THIS probe's banner (same helpers the
         // session manager uses) so createSession can skip its own probe.
         mediaInfoCache.set(cacheKey, {

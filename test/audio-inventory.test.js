@@ -21,6 +21,7 @@ import assert from "node:assert/strict";
 import {
   audioRenditionName,
   buildAudioInventory,
+  enrichAudioInventoryFromSidecar,
   resolveAudioIndex
 } from "../services/media/audio-inventory.js";
 
@@ -99,6 +100,41 @@ test("embedded tracks keep the numbers they have always had, sidecars follow", (
   assert.equal(inventory[2].codec, "ac3");
   assert.deepEqual(inventory[2].folders, ["Rus Sound"]);
   assert.equal(inventory[2].fileName, "ep.mka");
+});
+
+test("late sidecar metadata enriches the existing entry without changing its address", () => {
+  const file = { fileIndex: 12, name: "ep.mka", folders: ["Rus Sound"], extension: ".mka" };
+  const inventory = buildAudioInventory({
+    embedded: [{ language: "jpn", codec: "aac" }],
+    videoFileIndex: 24,
+    sidecars: [{ file, tracks: [] }]
+  });
+  const addresses = inventory.map(({ index, fileIndex, sourceTrackIndex, kind }) => ({
+    index,
+    fileIndex,
+    sourceTrackIndex,
+    kind
+  }));
+
+  assert.equal(enrichAudioInventoryFromSidecar(inventory, file, {
+    language: "rus",
+    languageBcp47: "ru",
+    codecId: "A_AC3",
+    channels: 6,
+    isOriginal: true
+  }), true);
+
+  assert.deepEqual(inventory.map(({ index, fileIndex, sourceTrackIndex, kind }) => ({
+    index,
+    fileIndex,
+    sourceTrackIndex,
+    kind
+  })), addresses);
+  assert.equal(inventory.length, 2);
+  assert.equal(inventory[1].codec, "ac3");
+  assert.equal(inventory[1].languageBcp47, "ru");
+  assert.equal(inventory[1].channels, 6);
+  assert.equal(inventory[1].isOriginal, true);
 });
 
 test("a sidecar whose table could not be read is still offered, as one track", () => {

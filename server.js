@@ -23,6 +23,7 @@ import { handleApiSourceStatsGet } from "./routes/api/sources/stats/get.js";
 import { handleApiSourceFilesGet } from "./routes/api/sources/files/get.js";
 import { handleApiSourceWarmPost } from "./routes/api/sources/warm/post.js";
 import { handleApiPlaybackPlanPost } from "./routes/api/playback-plan/post.js";
+import { handleApiPlaybackPlanAudioTracksPost } from "./routes/api/playback-plan/audio-tracks/post.js";
 import { handleApiClientLogsPost } from "./routes/api/client-logs/post.js";
 import { createClientLogFiles } from "./utils/client-log-file.js";
 import { handleApiSubtitlesGet } from "./routes/api/subtitles/get.js";
@@ -616,6 +617,9 @@ export async function startProxyServer({
   );
   app.post("/api/playback-plan", async (req, reply) =>
     handleApiPlaybackPlanPost(req, reply, { playbackPlanner })
+  );
+  app.post("/api/playback-plan/audio-tracks", async (req, reply) =>
+    handleApiPlaybackPlanAudioTracksPost(req, reply, { playbackPlanner })
   );
   app.get("/api/subtitles", async (req, reply) =>
     handleApiSubtitlesGet(req, reply, {

@@ -154,6 +154,39 @@ export function resolveAudioIndex(inventory, index) {
 }
 
 /**
+ * Enrich the already-published first entry for a sidecar without changing the
+ * inventory's length or any address used by a player.
+ *
+ * A late container read can reveal language, codec and flags after the HLS
+ * master playlist has been loaded. Adding entries here would make the browser's
+ * rendition order disagree with the playlist it already holds.
+ *
+ * @param {AudioInventoryEntry[]} inventory
+ * @param {import("../torrent/files.js").SidecarFile} file
+ * @param {object} declaredTrack
+ * @returns {boolean} Whether an existing entry was updated.
+ */
+export function enrichAudioInventoryFromSidecar(inventory, file, declaredTrack) {
+  if (!Array.isArray(inventory) || !file || !declaredTrack) return false;
+  const current = inventory.find(
+    (entry) => entry.kind === "sidecar" && entry.fileIndex === file.fileIndex && entry.sourceTrackIndex === 0
+  );
+  if (!current) return false;
+  const enriched = buildAudioInventory({
+    embedded: [],
+    videoFileIndex: -1,
+    sidecars: [{ file, tracks: [declaredTrack] }]
+  })[0];
+  Object.assign(current, enriched, {
+    index: current.index,
+    fileIndex: current.fileIndex,
+    sourceTrackIndex: current.sourceTrackIndex,
+    kind: current.kind
+  });
+  return true;
+}
+
+/**
  * The name an `#EXT-X-MEDIA` line carries for one soundtrack.
  *
  * Deliberately plain, and deliberately NOT localised: this is the name inside a

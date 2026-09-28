@@ -79,6 +79,8 @@ export const Command = {
    * the work is under way.
    */
   FILL_FILE: "fill-file",
+  /** Claim every remaining file as conditional TAIL demand for one torrent. */
+  FILL_TORRENT: "fill-torrent",
   /**
    * Start fetching the region a viewer is about to resume at, named in seconds
    * and turned into bytes here, where the file's own duration can be read.

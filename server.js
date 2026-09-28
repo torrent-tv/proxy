@@ -598,6 +598,7 @@ export async function startProxyServer({
     handleApiSourceWarmPost(req, reply, {
       sourceRegistry,
       torrentPool,
+      playbackPlanner,
       // How long the file runs, read on this thread from the header. The warm
       // turns a position in seconds into a byte offset and needs it; it used to
       // read the container itself, in the torrent thread, to find out.

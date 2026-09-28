@@ -410,6 +410,11 @@ async function runCommand(command, params, id) {
       };
     }
 
+    case Command.FILL_TORRENT: {
+      const torrent = await requireTorrent(params.sourceKey);
+      return { started: pool.fillTorrentAsCapacityAllows(torrent) };
+    }
+
     case Command.WARM_POSITION: {
       const torrent = await requireTorrent(params.sourceKey);
       return {
@@ -937,7 +942,15 @@ async function keepWholeFiles() {
     // What anybody wants of this torrent. A file something is stated for is a
     // file somebody may be reading, and this is the same list the reader counts
     // used to give.
-    const wanted = new Set(demandFor(torrent).register.files());
+    const wanted = new Set(
+      demandFor(torrent).register.windows()
+        .filter((window) =>
+          !String(window.claimant).startsWith("file-edges:") &&
+          !String(window.claimant).startsWith("torrent-fill:") &&
+          !String(window.claimant).startsWith("background-fill:")
+        )
+        .map((window) => window.fileIndex)
+    );
     for (const [fileIndex, file] of torrent.files.entries()) {
       const key = `${infoHash}/${fileIndex}`;
       if (file?.done !== true || completedFiles.find(infoHash, fileIndex) || beingKept.has(key)) {

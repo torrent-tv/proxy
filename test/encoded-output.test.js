@@ -3,7 +3,7 @@
  *
  * Decided with the user 2026-09-16: which pieces are made is the segment
  * store's, and which encoders run is the encoding orchestrator's. A second
- * holder of either is how item 87 stopped playback outright.
+ * holder of either is how the stale second owner stopped playback outright.
  */
 
 import test from "node:test";

@@ -15,6 +15,14 @@ import { ENCODE_EXIT } from "./encode-exit.js";
 import { EncodeRun } from "./EncodeRun.js";
 import { computeOutputDimensions } from "./args.js";
 import { buildRunCommand, trueStartOf } from "./run-command.js";
+
+/**
+ * @typedef {Object} SegmentFiles
+ * @property {(address: string) => string} pathFor
+ * @property {(address: string) => Buffer | null} initOf
+ * @property {(address: string) => string} directoryFor
+ * @property {(address: string, makingName: string, format: object) => string | null} publish
+ */
 // How far the accounting of a backward restart looks for work about to be done
 // twice. It runs on the restart path and a session an hour in has thousands of
 // segments; the figure is for a comparison, not an inventory.
@@ -147,7 +155,9 @@ export class EncodeRuns {
   #planScheduled = false;
 
   /**
-   * @param {object} host - `logger`, `viewerSecondsOn`, `noteRunStarting`, `inputOf`, `producedNumbers`, `servesAudioSeparately`, `disposeSession`, `contentionPenalties`, `encodeCost`, `encodeOrchestrator`, `encoders`, `ffmpegBin`, `outputTimes`, `outputs`, `priority`, `segmentDurationSec`, `segmentStore`, `videoEncoder`
+   * @param {object} host - `logger`, `viewerSecondsOn`, `noteRunStarting`, `inputOf`, `producedNumbers`, `servesAudioSeparately`, `disposeSession`, `contentionPenalties`, `encodeCost`, `encodeOrchestrator`, `encoders`, `ffmpegBin`, `outputTimes`, `outputs`, `priority`, `segmentDurationSec`, `segmentFiles`, `videoEncoder`
+   * @param {SegmentFiles} host.segmentFiles - The storage operations used to
+   *   write and inspect output files.
    */
   constructor(host) {
     this.#host = host;
@@ -542,7 +552,7 @@ export class EncodeRuns {
    * @returns {void}
    */
   noteRunProducedSegment(session, filePath) {
-    if (typeof filePath !== "string" || path.dirname(filePath) !== this.#host.segmentStore.pathFor(session.outputKey ?? "")) {
+    if (typeof filePath !== "string" || path.dirname(filePath) !== this.#host.segmentFiles.pathFor(session.outputKey ?? "")) {
       return;
     }
     const index = session.segmentFormat.segmentIndexFromName(path.basename(filePath));
@@ -580,7 +590,7 @@ export class EncodeRuns {
    * @returns {void}
    */
   #warnIfRunLeavesTheInitBehind(session) {
-    const initBytes = this.#host.segmentStore.initOf(session.outputKey ?? "");
+    const initBytes = this.#host.segmentFiles.initOf(session.outputKey ?? "");
     if (!session.spec.transcodesVideo || !initBytes || initBytes.length === 0) {
       return; // nothing served yet, or nothing being encoded
     }
@@ -804,7 +814,7 @@ export class EncodeRuns {
       totalSeconds: Number(session.file.durationSeconds) || null,
       spawn: (spawnArgs) =>
         spawn(this.#host.ffmpegBin, spawnArgs, {
-          cwd: this.#host.segmentStore.directoryFor(session.outputKey ?? ""),
+          cwd: this.#host.segmentFiles.directoryFor(session.outputKey ?? ""),
           // A fourth channel: the encoder names every piece it has CLOSED on it,
           // which is the only proof a piece is whole.
           stdio: ["ignore", "pipe", "pipe", "pipe"]
@@ -821,7 +831,7 @@ export class EncodeRuns {
       // Why this encoder exists, recorded with its argument list. It used to be
       // handed to a separate `start` call; there is no separate call now.
       because,
-      onClosed: (name) => this.#host.segmentStore.publish(session.outputKey ?? "", name, session.segmentFormat),
+      onClosed: (name) => this.#host.segmentFiles.publish(session.outputKey ?? "", name, session.segmentFormat),
       onEnded: (ended) => this.noteRunEnded(session, run, ended)
     });
     // THE ONE FAULT THAT IS OTHERWISE SILENT, asked before this run produces a

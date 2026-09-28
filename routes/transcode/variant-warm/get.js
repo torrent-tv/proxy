@@ -13,7 +13,8 @@
  * knowing there is something to fetch.
  */
 
-import { replyOutputUnavailable, waitForSessionFile } from "../session-file/get.js";
+import { replyOutputUnavailable } from "../../../services/server/http-responses.js";
+import { waitForSessionFile } from "../../../services/server/transcode-session-files.js";
 import { OUTPUT_UNAVAILABLE } from "../../../services/encode/output/index.js";
 
 /** How long to hold the warm-up request before telling the caller to retry. */

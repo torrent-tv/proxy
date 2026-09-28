@@ -1,3 +1,7 @@
+## 2.87.1
+
+- **Chore**: Keep HTTP route modules independent by moving shared response and transcode-file handling into server services. Pass encoding components narrow segment-storage interfaces and document the browser-facing HTTP contract.
+
 ## 2.87.0
 
 - **New**: Each proxy qualifies its selectable software and detected hardware encoder modes at startup with production arguments and independent segment decoding (`encode/calibration.js`). The configuration key includes the encoder build and machine or device details; speed is measured at five frame sizes, interpolated only within that range, with the measured error taken off. Software remains qualified for runtime fallback, and a device with no qualified mode uses software.

@@ -70,7 +70,12 @@ function orchestratorWithAStore() {
     firstByteWaitSec: 0.12,
     refetchSecPerFilmSecond: () => 0.25,
     startingSpeedFor: () => 2,
-    segmentStore: store,
+    segmentCoverage: {
+      provenNumbers: (address) => store.provenNumbers(address),
+      announce: (address, index) => store.announce(address, index),
+      filesHeld: (address) => store.filesHeld(address),
+      clearUpAfter: (address, startedAt) => store.clearUpAfter(address, startedAt)
+    },
     now: () => 1000,
     logger,
     makeRun: ({ address, from, to }) => new EncodeRun({

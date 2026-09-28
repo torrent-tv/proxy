@@ -227,6 +227,31 @@ export function wireOutputs({
     memoryClaimant = null,
     budgetPolicy = null}) {
   const parts = {};
+  // Encode components receive only the storage operations they use. The
+  // concrete SegmentStore remains owned by this assembly and is never handed
+  // to the encode layer.
+  const segmentCoverage = {
+    provenNumbers: (address) => parts.segmentStore.provenNumbers(address),
+    announce: (address, index) => parts.segmentStore.announce(address, index),
+    filesHeld: (address) => parts.segmentStore.filesHeld(address),
+    clearUpAfter: (address, startedAt) => parts.segmentStore.clearUpAfter(address, startedAt)
+  };
+  const segmentFiles = {
+    pathFor: (address) => parts.segmentStore.pathFor(address),
+    initOf: (address) => parts.segmentStore.initOf(address),
+    directoryFor: (address) => parts.segmentStore.directoryFor(address),
+    publish: (address, makingName, format) => parts.segmentStore.publish(address, makingName, format)
+  };
+  const segmentOutputFiles = {
+    addresses: () => parts.segmentStore.addresses(),
+    isClosed: (address, index) => parts.segmentStore.isClosed(address, index),
+    lastReadAt: (address) => parts.segmentStore.lastReadAt(address),
+    directoryFor: (address) => parts.segmentStore.directoryFor(address),
+    useFormat: (address, format) => parts.segmentStore.useFormat(address, format)
+  };
+  const segmentPaths = {
+    pathOf: (address, index) => parts.segmentStore.pathOf(address, index)
+  };
   /**
    * Whether everything this output will ever serve is made: every segment of
    * its timeline closed in the store. Such an output needs no encoder and
@@ -298,7 +323,7 @@ export function wireOutputs({
     get outputs() { return parts.outputs; },
     get priority() { return parts.priority; },
     get segmentDurationSec() { return parts.segmentDurationSec; },
-    get segmentStore() { return parts.segmentStore; },
+    segmentFiles,
     get videoEncoder() { return parts.encoders.current; },
     get encoders() { return parts.encoders; },
     invalidateWaits: (output) => parts.serving.invalidateWaits(output),
@@ -496,7 +521,7 @@ export function wireOutputs({
     get returns() { return parts.returns; },
     get segmentDurationSec() { return parts.segmentDurationSec; },
     get segmentFormat() { return parts.segmentFormat; },
-    get segmentStore() { return parts.segmentStore; },
+    segmentOutputFiles,
     get softwarePresetBenchmark() { return parts.softwarePresetBenchmark; },
     get sourceFiles() { return parts.sourceFiles; },
     get timelines() { return parts.timelines; },
@@ -848,7 +873,7 @@ export function wireOutputs({
     segmentSeconds: parts.segmentDurationSec,
     contentionPenalties: parts.contentionPenalties,
     startingSpeedFor: (address) => parts.encodeCost.speedForOutput(address),
-    segmentStore: parts.segmentStore,
+    segmentCoverage,
     // HOW IT ASKS TO DECIDE AGAIN. A plan that refuses to place anything
     // because an output's input is away needs something to bring it back:
     // nothing about the state changes while the data is missing, so no event
@@ -946,7 +971,7 @@ export function wireOutputs({
     get outputs() { return parts.outputs; },
     get qualityOffer() { return parts.qualityOffer; },
     get segmentDurationSec() { return parts.segmentDurationSec; },
-    get segmentStore() { return parts.segmentStore; },
+    segmentPaths,
     get videoEncoder() { return parts.encoders.current; },
   });
   parts.budgetTimer = setInterval(() => {

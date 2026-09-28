@@ -12,7 +12,7 @@
  * switch into bytes that already exist; 503 while it is still being made.
  */
 
-import { waitForSessionFile } from "../session-file/get.js";
+import { waitForSessionFile } from "../../../services/server/transcode-session-files.js";
 
 /** How long to hold the request before telling the caller to retry. */
 const WARM_WAIT_MS = 12_000;

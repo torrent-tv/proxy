@@ -148,6 +148,21 @@ export class WorkerTorrentPool {
     return answer?.started === true;
   }
 
+  /**
+   * Ask the torrent to fetch all remaining files at conditional TAIL urgency.
+   *
+   * @param {object} torrent
+   * @returns {Promise<boolean>}
+   */
+  async fillTorrent(torrent) {
+    const sourceKey = torrent?.sourceKey;
+    if (!sourceKey) {
+      return false;
+    }
+    const answer = await this.#client.fillTorrent(sourceKey);
+    return answer?.started === true;
+  }
+
 
 
 

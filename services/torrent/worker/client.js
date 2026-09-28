@@ -409,6 +409,11 @@ export class TorrentWorkerClient {
     return this.#caller.call(Command.HELD_TORRENTS, {});
   }
 
+  /** State conditional demand for every file in a selected torrent. */
+  async fillTorrent(sourceKey) {
+    return this.#caller.call(Command.FILL_TORRENT, { sourceKey });
+  }
+
   /**
    * Reorder piece selection around a read position (seek prioritisation).
    *
@@ -448,7 +453,7 @@ export class TorrentWorkerClient {
   /**
    * Pre-fetch the head and tail the codec probe needs.
    *
-   * @param {{ sourceKey: string, fileIndex: number, options?: { headBytes?: number, tailBytes?: number, timeoutMs?: number } }} params
+   * @param {{ sourceKey: string, fileIndex: number, options?: { headBytes?: number, tailBytes?: number, timeoutMs?: number, awaited?: boolean } }} params
    * @returns {Promise<unknown>}
    */
   async prefetchFileEdges({ sourceKey, fileIndex, options = {} }) {

@@ -613,7 +613,7 @@ export function createPlaybackPlanner({
      * @param {number} [params.maxWaitMs=60000] - Max time to wait for the header within ONE call.
      * @returns {Promise<PlaybackPlan & { pending?: boolean }>}
      */
-    async getPlan({ sourceKey, fileIndex, userAgent = "", maxWaitMs = 60_000 }) {
+    async getPlan({ sourceKey, fileIndex, userAgent = "", maxWaitMs = 60_000, background = false }) {
       const cacheKey = `${sourceKey}:${fileIndex}`;
       const cached = cache.get(cacheKey);
       if (cached) {
@@ -672,14 +672,19 @@ export function createPlaybackPlanner({
       // Awaited in the literal sense: this answer cannot be given until the
       // file has said what is in it, and a person is watching a loading screen
       // for as long as that takes.
-      await torrentPool.prefetchFileEdges(torrent, fileIndex, { awaited: true });
+      await torrentPool.prefetchFileEdges(torrent, fileIndex, {
+        awaited: !background,
+        timeoutMs: background ? 10_000 : 300_000
+      });
       edgesReadyMs = Date.now() - planEntryMs;
       // The keyframe index reads the tail of the file, which the probe has just
       // waited for as well. Started here it overlaps the probe instead of
       // following the whole plan — worth 311-430 ms of the time before the
       // first segment. Fire and forget: a session that finds the table
       // unanswered joins this very read rather than starting a second one.
-      warmKeyframeIndex?.({ sourceKey, fileIndex, logName: file.name });
+      if (!background) {
+        warmKeyframeIndex?.({ sourceKey, fileIndex, logName: file.name });
+      }
       let probe = await probeStreamCodecs({ ffmpegBin, inputUrl: directUrl, userAgent });
       const probeDeadline = Date.now() + Math.max(0, maxWaitMs);
       let attempt = 0;
@@ -690,7 +695,10 @@ export function createPlaybackPlanner({
       ) {
         attempt += 1;
         await delay(Math.min(3_000, 500 + attempt * 250));
-        await torrentPool.prefetchFileEdges(torrent, fileIndex, { awaited: true });
+        await torrentPool.prefetchFileEdges(torrent, fileIndex, {
+          awaited: !background,
+          timeoutMs: background ? 10_000 : 300_000
+        });
         probe = await probeStreamCodecs({ ffmpegBin, inputUrl: directUrl, userAgent });
       }
       const { audioCodec, videoCodec, container, durationSeconds, videoWidth, videoHeight, audioTracks, subtitleTracks } = probe;

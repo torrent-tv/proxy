@@ -2,10 +2,94 @@ import { logger } from "../../../../utils/logger.js";
 import { TEXT_SUBTITLE_SIDECAR_EXTENSIONS } from "../../../../services/torrent/files.js";
 import { contentsOf } from "../../../../services/torrent/Contents.js";
 
+const metadataWarmups = new Map();
+const METADATA_RETRY_MS = 2500;
+
+function startMetadataWarmup({ sourceKey, items, preferredFileIndex, userAgent, playbackPlanner, torrentPool, torrent }) {
+  if (!playbackPlanner || !Array.isArray(items) || items.length === 0) {
+    return false;
+  }
+  let state = metadataWarmups.get(sourceKey);
+  if (!state) {
+    state = { pending: new Set(), preferredFileIndex: null, running: false, items: [] };
+    metadataWarmups.set(sourceKey, state);
+  }
+  state.items = items;
+  for (const item of items) {
+    if (Number.isInteger(item?.fileIndex)) {
+      state.pending.add(item.fileIndex);
+    }
+  }
+  if (Number.isInteger(preferredFileIndex) && state.pending.has(preferredFileIndex)) {
+    state.preferredFileIndex = preferredFileIndex;
+  }
+  if (state.running) {
+    return true;
+  }
+  state.running = true;
+  void (async () => {
+    try {
+      while (state.pending.size > 0) {
+        const fileIndex = state.preferredFileIndex !== null && state.pending.has(state.preferredFileIndex)
+          ? state.preferredFileIndex
+          : state.pending.values().next().value;
+        state.preferredFileIndex = null;
+        if (!Number.isInteger(fileIndex)) {
+          break;
+        }
+        const item = state.items.find((entry) => entry.fileIndex === fileIndex);
+        if (!item) {
+          state.pending.delete(fileIndex);
+          continue;
+        }
+        const sidecars = contentsOf(torrent).sidecarsOf(fileIndex);
+        const sidecarFiles = [...sidecars.audio, ...sidecars.subtitles];
+        await Promise.all(sidecarFiles.map((file) =>
+          torrentPool.prefetchFileEdges(torrent, file.fileIndex, {
+            tailBytes: 0,
+            headBytes: TEXT_SUBTITLE_SIDECAR_EXTENSIONS.has(file.extension)
+              ? Math.max(1, file.length)
+              : undefined,
+            timeoutMs: 10_000
+          }).catch((error) => {
+            logger.info(`warm ${sourceKey.slice(0, 8)}:${fileIndex}: sidecar metadata not ready for "${file.name}": ${error?.message ?? error}`);
+          })
+        ));
+        const plan = await playbackPlanner.getPlan({
+          sourceKey,
+          fileIndex,
+          userAgent,
+          maxWaitMs: 0,
+          background: true
+        }).catch((error) => {
+          logger.info(`warm ${sourceKey.slice(0, 8)}:${fileIndex}: media metadata not ready: ${error?.message ?? error}`);
+          return null;
+        });
+        if (plan && !plan.pending) {
+          state.pending.delete(fileIndex);
+        } else if (torrent.files?.[fileIndex]?.done === true) {
+          state.pending.delete(fileIndex);
+        }
+        if (state.pending.size > 0) {
+          await new Promise((resolve) => setTimeout(resolve, METADATA_RETRY_MS));
+        }
+      }
+    } catch (error) {
+      logger.warn(`warm ${sourceKey.slice(0, 8)}: metadata queue stopped: ${error?.message ?? error}`);
+    } finally {
+      state.running = false;
+      if (state.pending.size === 0) {
+        metadataWarmups.delete(sourceKey);
+      }
+    }
+  })();
+  return true;
+}
+
 /**
  * Start fetching a source before anyone asks to play it.
  *
- * POST /api/sources/:sourceKey/warm   { fileIndex?: number }
+ * POST /api/sources/:sourceKey/warm   { fileIndex?: number, positionSeconds?: number, userAgent?: string }
  *
  * Everything a torrent must do before the first byte of video can be served
  * takes seconds and none of it depends on the viewer: announce to the
@@ -28,11 +112,13 @@ import { contentsOf } from "../../../../services/torrent/Contents.js";
  * @param {import("fastify").FastifyReply} reply
  * @param {{
  *   sourceRegistry: ReturnType<import("../../../../store/source-registry.js").createSourceRegistry>,
- *   torrentPool: import("../../../../services/torrent/torrent-pool.js").TorrentPool
+ *   torrentPool: import("../../../../services/torrent/torrent-pool.js").TorrentPool,
+ *   playbackPlanner?: ReturnType<import("../../../../services/media/playback-planner.js").createPlaybackPlanner>,
+ *   durationOf?: ({ sourceKey: string, fileIndex: number }) => Promise<number | null>
  * }} deps
  * @returns {Promise<void>}
  */
-export async function handleApiSourceWarmPost(req, reply, { sourceRegistry, torrentPool, durationOf = null }) {
+export async function handleApiSourceWarmPost(req, reply, { sourceRegistry, torrentPool, playbackPlanner = null, durationOf = null }) {
   const sourceKey = typeof req.params.sourceKey === "string" ? req.params.sourceKey.trim() : "";
   if (!sourceKey) {
     return reply.code(400).send({ error: "sourceKey is required." });
@@ -53,6 +139,7 @@ export async function handleApiSourceWarmPost(req, reply, { sourceRegistry, torr
   const positionSeconds = Number.isFinite(requestedPosition) && requestedPosition > 0
     ? requestedPosition
     : 0;
+  const userAgent = typeof body.userAgent === "string" ? body.userAgent : "";
 
   // Adding the torrent is what announces to the trackers and starts connecting
   // to peers, and it is also what a magnet needs in order to fetch its
@@ -67,115 +154,64 @@ export async function handleApiSourceWarmPost(req, reply, { sourceRegistry, torr
     return reply.send({ started: false, swarm: false, edges: false });
   }
 
-  // WHICH FILE THIS IS ABOUT. The caller names one when it knows — a torrent
-  // with a single video, or an episode the viewer has settled on — and on a
-  // season pack it names none, because nobody has chosen yet.
-  //
-  // Then the first item of the torrent stands in for the choice. One item, not
-  // twenty: warming a whole pack's worth of edges would spend the pool owner's
-  // bandwidth on nineteen files nobody opened, while one item is two pieces and
-  // is also the likeliest pick. It is stated as something nobody is waiting
-  // for, so on a proxy serving somebody else it costs nothing at all until
-  // their own film has everything it needs.
   const contents = contentsOf(torrent);
   const named = fileIndex !== null && torrent.files?.[fileIndex] ? fileIndex : null;
-  const candidate = named ?? contents.items[0]?.fileIndex ?? null;
-
-  let edges = false;
-  if (candidate !== null) {
-    edges = true;
-    // Deliberately not awaited: this is the multi-second part, and the point of
-    // the whole route is that the viewer goes on choosing while it happens.
-    Promise.resolve(torrentPool.prefetchFileEdges(torrent, candidate)).catch((error) => {
-      const message = error instanceof Error ? error.message : String(error);
-      logger.warn(`warm ${sourceKey.slice(0, 8)}: file edges failed: ${message}`);
-    });
-    // Started AFTER the edges, and not awaited by them either: the edges gate
-    // the playback plan, so they must not queue behind a region nobody is
-    // reading yet. This one only has to arrive before the encoder does, and the
-    // encoder is a plan and a session away.
-    if (named !== null && positionSeconds > 0 && typeof torrentPool.warmResumePosition === "function") {
-      Promise.resolve(
-        (typeof durationOf === "function"
-          ? durationOf({ sourceKey, fileIndex: named })
-          : Promise.resolve(null)
-        ).then((durationSeconds) =>
-          torrentPool.warmResumePosition(torrent, named, positionSeconds, durationSeconds)
-        )
-      ).catch(
-        (error) => {
-          const message = error instanceof Error ? error.message : String(error);
-          logger.warn(`warm ${sourceKey.slice(0, 8)}: the viewer's position failed: ${message}`);
-        }
-      );
+  if (named !== null) {
+    const selectedSidecars = contents.sidecarsOf(named);
+    for (const file of [...selectedSidecars.audio, ...selectedSidecars.subtitles]) {
+      void torrentPool.prefetchFileEdges(torrent, file.fileIndex, {
+        tailBytes: 0,
+        headBytes: TEXT_SUBTITLE_SIDECAR_EXTENSIONS.has(file.extension)
+          ? Math.max(1, file.length)
+          : undefined,
+        timeoutMs: 10_000,
+        awaited: true
+      }).catch((error) => {
+        logger.info(`warm ${sourceKey.slice(0, 8)}:${named}: selected sidecar metadata not ready for "${file.name}": ${error?.message ?? error}`);
+      });
     }
   }
-
-  // The files that carry this episode's OTHER soundtracks and its subtitles.
-  //
-  // Warmed here for the same reason the picture is: none of it depends on the
-  // viewer, and every second of it that happens now is a second they do not
-  // spend waiting later. Without this the first thing to ask for a dub's header
-  // is the playback plan, on the path to the first frame, and the first thing to
-  // ask for a subtitle file is the browser once the film is already running —
-  // which is why a track the container marks default appears after the opening
-  // rather than during it.
-  //
-  // How much of each is fetched follows from what the file IS, not from a size
-  // anyone chose. A text subtitle file is smaller than one piece of this
-  // torrent, so its edges and the whole of it are the same pieces — fetch all of
-  // it. A soundtrack is tens of megabytes and only its header is needed to name
-  // and describe it, so it gets the head and the tail, exactly as the picture
-  // does. The rest of it is fetched when it is played, and nothing here spends
-  // the pool owner's bandwidth on a track nobody chose.
-  let sidecars = 0;
-  if (candidate !== null && Array.isArray(torrent.files)) {
-    const matched = contents.sidecarsOf(candidate);
-    const warmOne = (file, options) => {
-      sidecars += 1;
-      // Not awaited, like the picture's own edges above: the point of this route
-      // is that the viewer goes on choosing while it happens.
-      Promise.resolve(torrentPool.prefetchFileEdges(torrent, file.fileIndex, options)).catch(
-        (error) => {
-          const message = error instanceof Error ? error.message : String(error);
-          logger.warn(`warm ${sourceKey.slice(0, 8)}: "${file.name}" failed: ${message}`);
-        }
-      );
-    };
-    for (const file of matched.audio) {
-      warmOne(file, { tailBytes: 0 });
-      // And then the whole of it, in the room the viewer's own reading leaves.
-      // The head is enough to NAME the track; it is not enough to play one, and
-      // a viewer who switches otherwise waits for the swarm to deliver its
-      // first pieces — 27.7 s in the field on 2026-08-31, longer than the
-      // switch is willing to wait. A soundtrack is about a twentieth of the
-      // picture, and the fill stands aside for every moment the picture's own
-      // reader is blocked, so it uses capacity the viewer is not using.
-      if (typeof torrentPool.fillFileInBackground === "function") {
-        Promise.resolve(torrentPool.fillFileInBackground(torrent, file.fileIndex)).catch((error) => {
-          const message = error instanceof Error ? error.message : String(error);
-          logger.warn(`warm ${sourceKey.slice(0, 8)}: filling "${file.name}" failed: ${message}`);
-        });
-      }
-    }
-    for (const file of matched.subtitles) {
-      warmOne(
-        file,
-        TEXT_SUBTITLE_SIDECAR_EXTENSIONS.has(file.extension)
-          ? { headBytes: Math.max(1, file.length), tailBytes: 0 }
-          : { tailBytes: 0 }
-      );
-    }
+  const orderedItems = named === null
+    ? contents.items
+    : [...contents.items.filter((item) => item.fileIndex === named), ...contents.items.filter((item) => item.fileIndex !== named)];
+  const metadataStarted = startMetadataWarmup({
+    sourceKey,
+    items: orderedItems,
+    preferredFileIndex: named,
+    userAgent,
+    playbackPlanner,
+    torrentPool,
+    torrent
+  });
+  const sidecarCount = new Set(orderedItems.flatMap((item) => {
+    const matched = contents.sidecarsOf(item.fileIndex);
+    return [...matched.audio, ...matched.subtitles].map((file) => file.fileIndex);
+  })).size;
+  const fillStarted = typeof torrentPool.fillTorrent === "function"
+    ? await torrentPool.fillTorrent(torrent).catch((error) => {
+      logger.warn(`warm ${sourceKey.slice(0, 8)}: whole-torrent fill could not start: ${error?.message ?? error}`);
+      return false;
+    })
+    : false;
+  if (named !== null && positionSeconds > 0 && typeof torrentPool.warmResumePosition === "function") {
+    void Promise.resolve(
+      (typeof durationOf === "function"
+        ? durationOf({ sourceKey, fileIndex: named })
+        : Promise.resolve(null)
+      ).then((durationSeconds) =>
+        torrentPool.warmResumePosition(torrent, named, positionSeconds, durationSeconds)
+      )
+    ).catch((error) => {
+      logger.warn(`warm ${sourceKey.slice(0, 8)}: the viewer's position failed: ${error?.message ?? error}`);
+    });
   }
 
   logger.info(
     `warm ${sourceKey.slice(0, 8)}: swarm started for "${torrent.name}"` +
-      (edges
-        ? `, fetching the edges of file ${candidate}` +
-          (named === null ? " — the first item, since nothing is chosen yet" : "")
-        : ", and it holds nothing to fetch the edges of") +
-      (sidecars > 0 ? ` and of ${sidecars} file(s) beside it` : "")
+      `, metadata for ${contents.items.length} video file(s) ${metadataStarted ? "queued" : "unavailable"}` +
+      `, ${sidecarCount} related audio/subtitle file(s)` +
+      (fillStarted ? ", whole-torrent fill enabled at TAIL urgency" : ", whole-torrent fill unavailable")
   );
 
-  return reply.send({ started: true, swarm: true, edges, sidecars });
+  return reply.send({ started: true, swarm: true, edges: metadataStarted, sidecars: sidecarCount, fill: fillStarted });
 }

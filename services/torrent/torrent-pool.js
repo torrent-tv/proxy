@@ -25,6 +25,12 @@ import { deriveSourceKey } from "./torrent-source-key.js";
 /** How a window stated from the priority map names itself. */
 const MAP_CLAIMANT = "priority-map";
 
+/** Files of a selected torrent requested for background completion. */
+const torrentFillEnabled = new WeakSet();
+
+/** Claimant prefix for conditional whole-torrent fill demand. */
+const TORRENT_FILL_CLAIMANT = "torrent-fill:";
+
 /** How the two ends of a file name themselves. */
 const EDGES_CLAIMANT = "file-edges";
 
@@ -1328,6 +1334,23 @@ export class TorrentPool {
     if (!Number.isFinite(pieceLength) || pieceLength <= 0) {
       return;
     }
+    if (torrentFillEnabled.has(torrent)) {
+      for (const [fileIndex, file] of (torrent.files ?? []).entries()) {
+        const claimant = `${TORRENT_FILL_CLAIMANT}${fileIndex}`;
+        const length = Number(file?.length);
+        if (!(length > 0) || file.done === true) {
+          register.withdraw(claimant);
+          continue;
+        }
+        register.state({
+          claimant,
+          fileIndex,
+          byteStart: 0,
+          byteEnd: length - 1,
+          urgency: Urgency.TAIL
+        });
+      }
+    }
     // The files anything is stated for — which is the same list the reader
     // counts used to give and is one fact rather than two.
     for (const fileIndex of register.files()) {
@@ -1504,6 +1527,23 @@ export class TorrentPool {
         `(${ordered.length} band(s) of the map, over ${Math.round(duration)}s of film)`
       );
     }
+  }
+
+  /**
+   * Enable conditional whole-torrent download for a selected source.
+   *
+   * @param {import("webtorrent").Torrent} torrent
+   * @returns {boolean}
+   */
+  fillTorrentAsCapacityAllows(torrent) {
+    if (!torrent || !Array.isArray(torrent.files) || torrent.destroyed) {
+      return false;
+    }
+    torrentFillEnabled.add(torrent);
+    this.#stateBackgroundFill(torrent);
+    this.followTheDemand(torrent);
+    reconcileAll();
+    return true;
   }
 
   #reportStalledDownloads() {

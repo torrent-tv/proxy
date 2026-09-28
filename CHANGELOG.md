@@ -1,3 +1,7 @@
+## 2.87.4
+
+- **New**: Start metadata reads for every video and its matched external audio and subtitle files when a torrent is selected. A subsequently selected video takes priority through the existing demand map; remaining torrent data fills only at conditional TAIL urgency, and complete files are kept on disk so the torrent can be removed when all files are saved.
+
 ## 2.87.3
 
 - **Chore**: Update Fastify and other lockfile dependencies while keeping WebTorrent pinned to 2.8.5. The remaining `ip` advisory has no fixed npm release and is reachable through WebTorrent's tracker dependencies.

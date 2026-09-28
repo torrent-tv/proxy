@@ -31,6 +31,6 @@ export async function handleApiSourcesPost(req, reply, { sourceRegistry }) {
     return reply.code(400).send({ error: "sourceType and source are required." });
   }
 
-  const sourceKey = sourceRegistry.upsert(sourceType, source);
+  const sourceKey = await sourceRegistry.upsert(sourceType, source);
   return reply.send({ sourceKey });
 }

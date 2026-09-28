@@ -1,12 +1,13 @@
 /**
  * @file In-memory registry of torrent sources.
  *
- * Sources are stored under a SHA-1 key derived from their type and content.
+ * Sources are stored under the torrent infohash, independent of magnet URI
+ * names or tracker lists.
  * The registry is bounded: when `maxSources` is exceeded, the oldest entries
  * are evicted to keep memory usage predictable.
  */
 
-import crypto from "node:crypto";
+import { deriveSourceKey } from "../services/torrent/torrent-source-key.js";
 
 /**
  * @typedef {Object} SourceRecord
@@ -20,7 +21,7 @@ import crypto from "node:crypto";
  *
  * @param {number} [maxSources=200] - Maximum number of entries to retain.
  * @returns {{
- *   upsert: (sourceType: string, source: string) => string,
+ *   upsert: (sourceType: string, source: string) => Promise<string>,
  *   get:    (sourceKey: string) => SourceRecord | null
  * }}
  */
@@ -35,13 +36,10 @@ export function createSourceRegistry(maxSources = 200) {
      *
      * @param {string} sourceType
      * @param {string} source
-     * @returns {string} Stable SHA-1 hex key for this source.
+     * @returns {Promise<string>} Canonical `torrent:<infohash>` key.
      */
-    upsert(sourceType, source) {
-      const sourceKey = crypto
-        .createHash("sha1")
-        .update(`${sourceType}:${source}`)
-        .digest("hex");
+    async upsert(sourceType, source) {
+      const sourceKey = await deriveSourceKey(sourceType, source);
 
       sources.set(sourceKey, {
         sourceType,

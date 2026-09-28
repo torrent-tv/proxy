@@ -1,3 +1,7 @@
+## 2.87.10
+
+- **Fix**: Keep sidecar metadata refresh pending when the container returns an empty track list before its header is available.
+
 ## 2.87.9
 
 - **Fix**: Stop refreshing late sidecar metadata when the completed header read reports no audio tracks.

@@ -445,7 +445,10 @@ export function createPlaybackPlanner({
           tracks: tracks
             .filter((track) => track?.type === "audio")
             .sort((left, right) => (left.declaredIndex ?? 0) - (right.declaredIndex ?? 0)),
-          complete: Array.isArray(tracks)
+          // ContainerOrchestrator leaves empty reads uncached because the file
+          // header may not have arrived yet. Only a non-empty table proves the
+          // read reached the container's track list.
+          complete: Array.isArray(tracks) && tracks.length > 0
         }))
         .catch((error) => {
           logger.info(`audio tracks: "${label}" could not be read (${error?.message ?? error})`);

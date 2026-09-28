@@ -25,6 +25,7 @@ export class ContainerTrack {
    * @param {string} params.codecId - Matroska CodecID or MP4 sample entry type (e.g. "S_TEXT/UTF8", "avc1", "mp4a").
    * @param {string} params.language - Three-letter code or packed mdhd code; empty when absent. For Matroska, when LanguageBCP47 is present this is the BCP47 value ignored per MUST — caller stores both, but `language` here is the resolved one.
    * @param {string} params.languageBcp47 - RFC 5646 tag from LanguageBCP47 / elng, or "".
+   * @param {boolean} params.declaresLanguage - Whether the file explicitly supplies a language rather than relying on a container default.
    * @param {string} params.name - Track Name / title, or "".
    * @param {boolean} params.isEnabled - FlagEnabled / tkhd track_enabled. Default true per both specs. Matroska zero-length element means default, not disabled.
    * @param {boolean} params.isDefault - FlagDefault / tkhd? For MP4, derived from handler default? For Matroska, after applying default 1.
@@ -39,6 +40,7 @@ export class ContainerTrack {
     codecId,
     language,
     languageBcp47,
+    declaresLanguage,
     name,
     isEnabled,
     isDefault,
@@ -52,6 +54,7 @@ export class ContainerTrack {
     this.codecId = codecId ?? "";
     this.language = language ?? "";
     this.languageBcp47 = languageBcp47 ?? "";
+    this.declaresLanguage = declaresLanguage === true;
     this.name = name ?? "";
     this.isEnabled = isEnabled !== false;
     this.isDefault = isDefault === true;

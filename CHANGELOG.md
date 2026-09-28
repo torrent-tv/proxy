@@ -1,3 +1,9 @@
+## 2.87.2
+
+- **Fix**: Close an output directory's file-system watch before removing the directory, so `SegmentStore.drop` actually frees it on Windows.
+- **Fix**: Keep the proxy's registry id in `--state-dir` across restarts. An explicit `--id` remains authoritative; without a state directory, ids remain ephemeral.
+- **Fix**: Do not present Matroska's implicit `eng` language default as a language stated by the subtitle track; let the measured cue-text detector answer when enough text is available.
+
 ## 2.87.1
 
 - **Chore**: Keep HTTP route modules independent by moving shared response and transcode-file handling into server services. Pass encoding components narrow segment-storage interfaces and document the browser-facing HTTP contract.

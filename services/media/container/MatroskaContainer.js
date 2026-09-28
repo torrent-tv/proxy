@@ -538,6 +538,7 @@ export class MatroskaContainer extends Container {
       // RFC 9559 LanguageBCP47 MUST — when present, Language ignored
       const resolvedLang = languageBcp47 || language;
       const bcpTag = languageBcp47;
+      const declaresLanguage = resolvedLang.length > 0;
 
       if (typeNum === 1) {
         videoDeclaredIndex += 1;
@@ -547,6 +548,7 @@ export class MatroskaContainer extends Container {
           codecId,
           language: resolvedLang,
           languageBcp47: bcpTag,
+          declaresLanguage,
           name,
           isEnabled,
           isDefault,
@@ -565,6 +567,7 @@ export class MatroskaContainer extends Container {
           codecId,
           language: resolvedLang,
           languageBcp47: bcpTag,
+          declaresLanguage,
           name,
           isEnabled,
           isDefault,
@@ -597,6 +600,7 @@ export class MatroskaContainer extends Container {
             codecId,
             language: resolvedLang,
             languageBcp47: bcpTag,
+            declaresLanguage,
             name,
             isEnabled: finalEnabled,
             isDefault: finalDefault,
@@ -615,6 +619,7 @@ export class MatroskaContainer extends Container {
             codecId,
             language: resolvedLang,
             languageBcp47: bcpTag,
+            declaresLanguage,
             name,
             isEnabled: finalEnabled,
             isDefault: finalDefault,
@@ -634,6 +639,7 @@ export class MatroskaContainer extends Container {
           codecId,
           language: resolvedLang,
           languageBcp47: bcpTag,
+          declaresLanguage,
           name,
           isEnabled,
           isDefault,
@@ -1047,11 +1053,13 @@ async function readSubtitlePlan(readRange, fileSize) {
     // `language` here stays the three-letter code, because this list exists to
     // be lined up against ffmpeg's banner, which prints that code. The RFC 5646
     // tag rides beside it for whoever displays the track.
+    const declaresLanguage = languageBcp47.length > 0 || language.length > 0;
     declared.push({
       trackNumber,
       codecId,
       language,
       languageBcp47,
+      declaresLanguage,
       name,
       isDefault,
       declaresDefault,
@@ -1071,6 +1079,7 @@ async function readSubtitlePlan(readRange, fileSize) {
       // three-letter code MUST be ignored.
       language: languageBcp47 || language,
       languageBcp47,
+      declaresLanguage,
       name,
       isDefault,
       isForced,

@@ -104,9 +104,11 @@ function trackEntry({ number, type, codecId, language, flags = {}, languageBcp47
   const parts = [
     uintElement(ID_TRACK_NUMBER, number),
     uintElement(ID_TRACK_TYPE, type),
-    stringElement(ID_CODEC_ID, codecId),
-    stringElement(ID_LANGUAGE, language)
+    stringElement(ID_CODEC_ID, codecId)
   ];
+  if (language !== undefined && language !== null) {
+    parts.push(stringElement(ID_LANGUAGE, language));
+  }
   if (languageBcp47 !== null) {
     parts.push(stringElement(ID_LANGUAGE_BCP47, languageBcp47));
   }
@@ -281,8 +283,9 @@ test("two walks of one file at the same time read each cluster once", async () =
 
 /**
  * A file whose subtitle tracks carry the flags RFC 9559 defines for them: one
- * forced, one for viewers who cannot hear, one the file marks unusable, and one
- * writing its language as RFC 5646 alongside the three-letter code.
+ * forced, one for viewers who cannot hear, one the file marks unusable, one
+ * writing its language as RFC 5646 alongside the three-letter code, and one
+ * relying on Matroska's default language.
  *
  * @returns {Buffer}
  */
@@ -293,7 +296,8 @@ function fileWithFlags() {
     trackEntry({ number: 2, type: 17, codecId: "S_TEXT/UTF8", language: "rus", flags: { forced: true } }),
     trackEntry({ number: 3, type: 17, codecId: "S_TEXT/UTF8", language: "eng", flags: { hearingImpaired: true } }),
     trackEntry({ number: 4, type: 17, codecId: "S_TEXT/UTF8", language: "fre", flags: { enabled: false } }),
-    trackEntry({ number: 5, type: 17, codecId: "S_TEXT/ASS", language: "por", languageBcp47: "pt-BR" })
+    trackEntry({ number: 5, type: 17, codecId: "S_TEXT/ASS", language: "por", languageBcp47: "pt-BR" }),
+    trackEntry({ number: 6, type: 17, codecId: "S_TEXT/UTF8", language: null })
   ]));
   const seekEntry = (targetId, position) => element(ID_SEEK, Buffer.concat([
     element(ID_SEEK_ID, idBytes(targetId)),
@@ -345,7 +349,7 @@ test("an unusable track keeps its place, so the tracks after it keep theirs", as
   // s:0 forced, s:1 SDH, s:2 the unusable one, s:3 the Brazilian track.
   assert.deepEqual(
     plan.tracks.map((track) => [track.trackNumber, track.declaredIndex]),
-    [[2, 0], [3, 1], [5, 3]]
+    [[2, 0], [3, 1], [5, 3], [6, 4]]
   );
 });
 
@@ -368,4 +372,15 @@ test("where the file writes RFC 5646, that is the language", async () => {
   const track = plan.tracks.find((entry) => entry.trackNumber === 5);
   assert.equal(track.language, "pt-BR", "not the three-letter por");
   assert.equal(track.languageBcp47, "pt-BR");
+});
+
+test("an omitted Matroska Language element stays unstated rather than becoming the RFC default", async () => {
+  const file = fileWithFlags();
+  const plan = await MatroskaContainer.readSubtitlePlan(readerOver(file), file.length);
+
+  const track = plan.tracks.find((entry) => entry.trackNumber === 6);
+  const declared = plan.declared.find((entry) => entry.trackNumber === 6);
+  assert.equal(track.language, "");
+  assert.equal(track.declaresLanguage, false);
+  assert.equal(declared.declaresLanguage, false);
 });

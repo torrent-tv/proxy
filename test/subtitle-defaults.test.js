@@ -84,6 +84,27 @@ test("a container that declares nothing leaves the banner alone", () => {
   assert.equal(merged.tracks[0].declaresDefault, false);
 });
 
+test("an implicit Matroska English default does not become the subtitle language", () => {
+  const banner = [{ index: 0, language: "eng", title: "", isDefault: true }];
+  const declared = [{ language: "", languageBcp47: "", declaresLanguage: false, name: "" }];
+
+  const merged = Container.mergeSubtitleFlags(banner, declared);
+
+  assert.equal(merged.aligned, true);
+  assert.equal(merged.tracks[0].language, "");
+  assert.equal(merged.tracks[0].declaresLanguage, false);
+});
+
+test("an explicitly declared subtitle language is retained", () => {
+  const banner = [{ index: 0, language: "rus", title: "", isDefault: true }];
+  const declared = [{ language: "rus", languageBcp47: "", declaresLanguage: true, name: "" }];
+
+  const merged = Container.mergeSubtitleFlags(banner, declared);
+
+  assert.equal(merged.tracks[0].language, "rus");
+  assert.equal(merged.tracks[0].declaresLanguage, true);
+});
+
 test("a name confirms a pairing when the languages are unstated", () => {
   assert.equal(Container.pairingHolds({ language: "und", title: "Forced" }, { language: "", name: "Forced" }), true);
 });

@@ -445,7 +445,7 @@ export function createPlaybackPlanner({
           tracks: tracks
             .filter((track) => track?.type === "audio")
             .sort((left, right) => (left.declaredIndex ?? 0) - (right.declaredIndex ?? 0)),
-          complete: Array.isArray(tracks) && tracks.length > 0
+          complete: Array.isArray(tracks)
         }))
         .catch((error) => {
           logger.info(`audio tracks: "${label}" could not be read (${error?.message ?? error})`);

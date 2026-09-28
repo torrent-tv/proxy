@@ -305,20 +305,8 @@ export function supplyFiguresFor(infoHash, fileName, segmentSeconds) {
 const waitsBySteering = new Map();
 
 /**
- * Record one wait against the band the reader was stopped in.
- *
- * What this replaces: until 2026-09-02 each read was assigned at random to one
- * of two ways of claiming — one band or four — and the waits were sorted by
- * which. The comparison never decided anything, and could not: the split halved
- * the sample for each arm, so on 2026-08-28 there were nine reads in one arm and
- * three in the other and the ten-wait threshold was never reached in either; on
- * 2026-08-29 the two arms printed together for the first and only time, as forty
- * waits against one.
- *
- * This is the more useful question anyway. A wait belongs to a LEVEL, and the
- * level says whether a width is wrong rather than whether the whole scheme is:
- * long waits in the band being watched mean the urgent window is too narrow,
- * long waits further out mean the lead is.
+ * Record one wait against the priority level of the requested piece. The level
+ * identifies which part of the priority map needs more lead time.
  *
  * @param {string} key
  * @param {number} waitedMs
@@ -653,9 +641,8 @@ export async function* readFragments({
   /**
    * State one band as a need, in bytes.
    *
-   * The claimant carries the level, so the four bands of one reader are four
-   * claimants and each is replaced on its own — restating the near band does
-   * not disturb what was said about the tail.
+   * The urgency is part of the claimant key, so this blocked-read claim can be
+   * withdrawn without changing the priority map's claims for the same file.
    *
    * @param {{ from: number, to: number, urgency: number }} band
    * @returns {void}

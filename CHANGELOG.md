@@ -1,3 +1,7 @@
+## 2.87.6
+
+- **Chore**: Move torrent infohash key derivation into a shared utility so the source registry does not depend on the torrent service layer.
+
 ## 2.87.5
 
 - **Fix**: Identify registered torrent sources by infohash so magnet links with different names or tracker lists share the same produced output.

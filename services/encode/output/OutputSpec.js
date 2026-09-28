@@ -200,7 +200,7 @@ export class OutputSpec {
    * @param {object} params
    * @param {string} params.sourceKey - `torrent:<infohash>`, the canonical
    *   identity of the torrent itself: a magnet and a `.torrent` file for the
-   *   same content produce the same one (`torrent/torrent-source-key.js`). Nothing
+ *   same content produce the same one (`utils/torrent-source-key.js`). Nothing
    *   further is needed to say WHICH film this is.
    * @param {string} params.segmentFormatId - fMP4 or MPEG-TS. Two viewers
    *   asking for different containers cannot share one ffmpeg.

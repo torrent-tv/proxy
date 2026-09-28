@@ -7,7 +7,7 @@
  * are evicted to keep memory usage predictable.
  */
 
-import { deriveSourceKey } from "../services/torrent/torrent-source-key.js";
+import { deriveSourceKey } from "../utils/torrent-source-key.js";
 
 /**
  * @typedef {Object} SourceRecord

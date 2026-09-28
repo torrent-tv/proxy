@@ -10,8 +10,8 @@
  * The infohash is the one thing both forms carry for the same content, and
  * both carry it synchronously — a magnet's `btih` needs no network, and a
  * `.torrent` file's SHA-1 of its own `info` dictionary needs no metadata
- * exchange either. `parse-torrent` (already in the dependency tree via
- * `webtorrent`) reads either form without touching the network.
+ * exchange either. `parse-torrent` reads either form without touching the
+ * network.
  */
 
 import parseTorrent from "parse-torrent";

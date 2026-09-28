@@ -24,7 +24,7 @@
  * @returns {Promise<void>}
  */
 
-import { deriveSourceKey } from "../../../services/torrent/torrent-source-key.js";
+import { deriveSourceKey } from "../../../utils/torrent-source-key.js";
 import { spawn } from "node:child_process";
 import { TextSubtitleTrack } from "../../../services/media/tracks/TextSubtitleTrack.js";
 import { SubtitleController } from "../../../services/server/controllers/SubtitleController.js";

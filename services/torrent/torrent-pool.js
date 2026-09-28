@@ -2,7 +2,7 @@
  * @file WebTorrent client pool.
  *
  * Manages a shared WebTorrent client instance and a map of active torrents
- * keyed by their own infohash (see `torrent/torrent-source-key.js`), so a magnet and
+ * keyed by their own infohash (see `utils/torrent-source-key.js`), so a magnet and
  * a `.torrent` file for the same content share one entry. Tracks file-level
  * usage so that only the pieces needed by active streams are selected for
  * download.
@@ -20,7 +20,7 @@ import { Urgency, urgencyName } from "./demand/index.js";
 import { demandFor, forgetTorrent, reconcileAll, hasUnmetDemand } from "./download/registry.js";
 import { withdrawClaim } from "./download/withdraw-claim.js";
 import { isAtAWatchingViewer, isBehindEverybody, isNobodyComingNow } from "../viewer/PriorityMap.js";
-import { deriveSourceKey } from "./torrent-source-key.js";
+import { deriveSourceKey } from "../../utils/torrent-source-key.js";
 
 /** How a window stated from the priority map names itself. */
 const MAP_CLAIMANT = "priority-map";

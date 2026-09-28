@@ -21,7 +21,7 @@
  */
 
 import { TorrentWorkerClient } from "./client.js";
-import { deriveSourceKey } from "../torrent-source-key.js";
+import { deriveSourceKey } from "../../../utils/torrent-source-key.js";
 
 /**
  * A torrent pool whose work happens on another thread.

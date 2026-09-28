@@ -33,3 +33,11 @@ test("every field the declaration reads is a field the cache stores", () => {
     );
   }
 });
+
+test("an empty container track list remains pending for late sidecar metadata", () => {
+  assert.match(
+    planner,
+    /complete: Array\.isArray\(tracks\) && tracks\.length > 0/,
+    "ContainerOrchestrator leaves empty track reads uncached while the header is unavailable"
+  );
+});

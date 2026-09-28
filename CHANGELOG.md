@@ -1,3 +1,7 @@
+## 2.87.5
+
+- **Fix**: Identify registered torrent sources by infohash so magnet links with different names or tracker lists share the same produced output.
+
 ## 2.87.4
 
 - **New**: Start metadata reads for every video and its matched external audio and subtitle files when a torrent is selected. A subsequently selected video takes priority through the existing demand map; remaining torrent data fills only at conditional TAIL urgency, and complete files are kept on disk so the torrent can be removed when all files are saved.

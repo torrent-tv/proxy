@@ -1,3 +1,8 @@
+## 2.87.3
+
+- **Chore**: Update Fastify and other lockfile dependencies while keeping WebTorrent pinned to 2.8.5. The remaining `ip` advisory has no fixed npm release and is reachable through WebTorrent's tracker dependencies.
+- **Chore**: Keep the wait ledger in the server service layer and align the manager surface test with the existing seek invalidation behavior.
+
 ## 2.87.2
 
 - **Fix**: Close an output directory's file-system watch before removing the directory, so `SegmentStore.drop` actually frees it on Windows.

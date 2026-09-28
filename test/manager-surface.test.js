@@ -222,11 +222,9 @@ test("what a viewer states about themselves is kept and answered", () => {
   assert.equal(manager.viewerRequests.viewerPositionOf(SESSION_ID, "viewer-one"), 120);
   assert.equal(manager.viewerRequests.requestSeek("no-such-session", 120, "viewer-one"), false);
 
-  // `seekEpoch` is NOT moved by a seek, whatever its name says: its two writers
-  // are the variant switch and the soundtrack switch, and they move it on the
-  // output the viewer has LEFT. Recorded as it is, so the dismantling can give
-  // the fact its real name instead of discovering this by breaking it.
-  assert.equal(manager.serving.seekEpoch(SESSION_ID), 0, "a seek leaves the wait epoch alone");
+  // A seek wakes requests held on each output this viewer watches so each one
+  // can check whether it is still the segment this viewer needs.
+  assert.equal(manager.serving.seekEpoch(SESSION_ID), 1, "a seek invalidates waits on the watched output");
   assert.equal(manager.serving.seekEpoch("no-such-session"), 0);
 
   manager.encodeRuns.noteInputBytes(SESSION_ID, 4096);

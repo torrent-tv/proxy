@@ -10,7 +10,7 @@
 
 import { logger } from "../../utils/logger.js";
 import { KeyframeTables } from "../media/KeyframeTables.js";
-import { waits } from "../viewer/WaitLedger.js";
+import { waits } from "./WaitLedger.js";
 import { readMachineState, readProcessCpuSeconds, readProxyCpuSeconds, readSystemCpu, shareOfMachine } from "../encode/host-load.js";
 import { minimumBufferFrom } from "../torrent/supply-margin.js";
 import { PriorityOrchestrator } from "../viewer/PriorityOrchestrator.js";

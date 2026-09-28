@@ -104,8 +104,9 @@ of its own borrows the nearest row that has one (`limitRowFor`,
 `nominalKbpsFor`). Every place that picks a row — opening an output, the move
 between limits, the offer's price of a step and the link rule — is handed the
 whole frame, so all of them name the same row. By height alone a 1920x800 film
-fell in the 720 row although it is nearer the 1080 one. Inside a row the limit
-is not scaled by area until the measurement of step 14 says it must be.
+fell in the 720 row although it is nearer the 1080 one. The proposed measured
+table of lower limits was dropped on 2026-09-27. Step 14 now qualifies this
+machine's encoder modes and does not set lower bitrate limits.
 
 ## Where a viewer is, and how it reaches the encoders
 
@@ -276,8 +277,11 @@ The quality budget uses this lever first, in both directions: down to the
 highest lower limit the link admits, up one limit at a time, and another height
 only where the height on screen has no limit left to move to. A copy has no
 limit and a hardware encode is given none, so for them the lever is still the
-height. Until a set of lower limits is decided (step 14) `limitsFor` holds only
-the nominal one, so in the field the move has nowhere to go yet.
+height. The measured table of lower bitrate limits was dropped on 2026-09-27;
+the product currently supplies only the nominal limit through `limitsFor`.
+Per-machine calibration (step 14) qualifies encoder modes and does not create
+lower bitrate limits, so same-height bitrate moves have no target in the current
+product configuration.
 
 7. **A move up waits for the cushion; a move down does not** (roadmap item
    98). Once the piece asked for next is closed, a move UP is made only when

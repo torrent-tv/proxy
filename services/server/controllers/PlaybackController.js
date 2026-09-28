@@ -33,4 +33,8 @@ export class PlaybackController {
   async getPlan(params) {
     return this.playbackPlanner.getPlan(params);
   }
+
+  async refreshAudioTracks(params) {
+    return this.playbackPlanner.refreshAudioTracks(params);
+  }
 }

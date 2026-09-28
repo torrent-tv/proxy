@@ -24,9 +24,16 @@ the browser must keep those indices when opening a file.
 
 `POST /api/playback-plan` takes `{ sourceKey, fileIndex, userAgent }`. Its answer
 contains `mode`, `directUrl`, codec and container names, duration and source
-dimensions, track inventories, paired sidecar files, `offeredHeights`, and
-`pending`. The browser uses the codec fields to make the direct-versus-transcode
-decision itself; `mode` is advisory.
+dimensions, track inventories, paired sidecar files, `offeredHeights`,
+`audioTracksPending`, and `pending`. The browser uses the codec fields to make
+the direct-versus-transcode decision itself; `mode` is advisory.
+
+When `audioTracksPending` is `true`, one or more sidecar headers were still
+unavailable. The browser may call `POST /api/playback-plan/audio-tracks` with
+`{ sourceKey, fileIndex }`; the answer contains the current `audioTracks` and
+`pending`. A resolved header updates metadata on the already-published first
+track for that sidecar. It never changes track indices or the number of HLS
+renditions in the active plan.
 
 `sidecarSubtitles` lists subtitle files the proxy paired with this video. Each
 entry carries the torrent `fileIndex` and the proxy's filename-derived language

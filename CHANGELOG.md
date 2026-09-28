@@ -1,3 +1,7 @@
+## 2.87.7
+
+- **Fix**: Refresh audio metadata for sidecar tracks after a delayed container-header read, keeping the existing track numbers and rendition count stable.
+
 ## 2.87.6
 
 - **Chore**: Move torrent infohash key derivation into a shared utility so the source registry does not depend on the torrent service layer.

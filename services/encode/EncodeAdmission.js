@@ -69,6 +69,7 @@ import { correctForAvailability } from "./available-share.js";
  * @property {() => Set<string>} [watchedAddresses] - Every output a present
  *   viewer is watching that still has something left to make.
  * @property {(address: string) => OutputLoad | null} loadOf
+ * @property {(spec: object, file: object) => OutputLoad | null} [loadForCandidate]
  * @property {() => ({ share: number, known: boolean } | null)} availability
  */
 
@@ -189,7 +190,50 @@ export class EncodeAdmission {
     if (this.#heldWithoutRun().has(address)) {
       return { admitted: true, reason: "it already holds a place for another viewer", speedX: null };
     }
-    const load = this.#host.loadOf(address);
+    return this.#assessCandidate(address, this.#host.loadOf(address));
+  }
+
+  /**
+   * Whether a not-yet-opened format can take a place on the whole machine.
+   * The output choice calls this for each candidate rung; the final claim uses
+   * `admitsWatching` with the same arithmetic after registering the output.
+   *
+   * @param {object} spec
+   * @param {object} file
+   * @returns {{ admitted: boolean, reason: string, speedX: number | null }}
+   */
+  previewCandidate(spec, file) {
+    const address = typeof spec?.toKey === "function" ? spec.toKey() : "";
+    if (!address) {
+      return { admitted: false, reason: "the output has no address", speedX: null };
+    }
+    if ((this.#host.liveRunsByAddress().get(address) ?? 0) > 0) {
+      return { admitted: true, reason: "an encoder already runs there", speedX: null };
+    }
+    if (this.#heldWithoutRun().has(address)) {
+      return { admitted: true, reason: "it already holds a place for another viewer", speedX: null };
+    }
+    const load = this.#host.loadForCandidate?.(spec, file) ?? null;
+    return this.#assessCandidate(address, load);
+  }
+
+  /**
+   * Projected production rate for outputs currently holding machine capacity.
+   * A live encoder reading takes precedence; this measured-cost projection
+   * supplies the playback trajectory before its first run sample arrives.
+   *
+   * @returns {number | null}
+   */
+  projectedSpeedX() {
+    const occupied = this.#occupied(null);
+    if (occupied.unpriced.length > 0) {
+      return null;
+    }
+    const speedX = this.#speedAt(occupied.costSec);
+    return Number.isFinite(speedX) && speedX > 0 ? speedX : null;
+  }
+
+  #assessCandidate(address, load) {
     if (!load || load.costSec === null) {
       return { admitted: false, reason: "the output has no measured encoding cost", speedX: null };
     }

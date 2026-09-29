@@ -365,6 +365,8 @@ export class Viewer {
    * @param {number} [report.linkMbps] - What their link last measured. Absent
    *   until something measurable has crossed it, and then the rest of the
    *   report still stands: this is a statement about a viewer, not about a link.
+   * @param {number} [report.linkSampleAgeMs] - How old the newest raw link
+   *   sample was when this report was made.
    * @param {number} report.bufferedAheadSec
    * @param {number} [report.bufferLimitSeconds] - The largest forward buffer
    *   this browser accepted for the current player.
@@ -387,6 +389,7 @@ export class Viewer {
       linkMbps,
       linkSampleMbps = null,
       linkSampleAt = null,
+      linkSampleAgeMs = null,
       bufferedAheadSec,
       bufferLimitSeconds,
       positionSeconds = null,
@@ -425,7 +428,11 @@ export class Viewer {
       linkMeasuredAt,
       linkSampleAt: newerPlaybackSample ? sampleAt : this.netReport?.linkSampleAt ?? null,
       linkSampleMbps: newerPlaybackSample ? sampleMbps : this.netReport?.linkSampleMbps ?? null,
-      linkSampleMeasuredAt: newerPlaybackSample ? now : this.netReport?.linkSampleMeasuredAt ?? null,
+      linkSampleMeasuredAt: newerPlaybackSample
+        ? Number.isFinite(linkSampleAgeMs) && linkSampleAgeMs >= 0
+          ? now - linkSampleAgeMs
+          : now
+        : this.netReport?.linkSampleMeasuredAt ?? null,
       bufferedAheadSec: held,
       bufferLimitSeconds: Number.isFinite(bufferLimitSeconds) && bufferLimitSeconds > 0
         ? bufferLimitSeconds

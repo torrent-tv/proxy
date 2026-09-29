@@ -58,6 +58,12 @@ export async function handleApiTranscodeSessionsPost(req, reply, { viewerRequest
   // a browser that does not know about them would get no sound at all.
   const audioRenditions = payload.audioRenditions === true;
   const startPositionSeconds = Number(payload.startPositionSeconds);
+  const viewerLinkMbps = Number(payload.viewerLinkMbps);
+  const linkSampleMbps = Number(payload.linkSampleMbps);
+  const linkSampleAt = Number(payload.linkSampleAt);
+  const linkSampleAgeMs = Number(payload.linkSampleAgeMs);
+  const bufferedAheadSec = Number(payload.bufferedAheadSec);
+  const bufferLimitSeconds = Number(payload.bufferLimitSeconds);
   const audioTrackIndex = Number(payload.audioTrackIndex);
   // Which container to produce. The browser knows what its media stack will
   // accept for the tracks it asked to be copied; an absent or unknown value
@@ -90,6 +96,13 @@ export async function handleApiTranscodeSessionsPost(req, reply, { viewerRequest
         Number.isFinite(startPositionSeconds) && startPositionSeconds > 0
           ? startPositionSeconds
           : 0,
+      viewerLinkMbps: Number.isFinite(viewerLinkMbps) && viewerLinkMbps > 0 ? viewerLinkMbps : null,
+      linkSampleMbps: Number.isFinite(linkSampleMbps) && linkSampleMbps > 0 ? linkSampleMbps : null,
+      linkSampleAt: Number.isFinite(linkSampleAt) && linkSampleAt > 0 ? linkSampleAt : null,
+      linkSampleAgeMs: Number.isFinite(linkSampleAgeMs) && linkSampleAgeMs >= 0 ? linkSampleAgeMs : null,
+      bufferedAheadSec: Number.isFinite(bufferedAheadSec) && bufferedAheadSec >= 0 ? bufferedAheadSec : 0,
+      bufferLimitSeconds:
+        Number.isFinite(bufferLimitSeconds) && bufferLimitSeconds > 0 ? bufferLimitSeconds : null,
       audioTrackIndex:
         Number.isInteger(audioTrackIndex) && audioTrackIndex > 0 ? audioTrackIndex : 0,
       segmentFormatId

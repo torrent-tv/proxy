@@ -1,3 +1,8 @@
+## 2.87.12
+
+- **Fix**: Check each automatic output against whole-machine encoding occupancy before opening it, so a rejected size can resolve to a lower admissible rung instead of failing the request.
+- **Fix**: Seed the proxy readiness forecast with the browser's initial link measurement and buffer ceiling, and use the measured-cost machine projection until a live encode reading arrives.
+
 ## 2.87.11
 
 - **Fix**: Calculate proxy-side playback readiness from measured source-download, encoding, and client-delivery rates; account for prepared segments, selected audio tracks, and the browser's measured buffer capacity.

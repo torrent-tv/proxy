@@ -366,6 +366,8 @@ export class Viewer {
    *   until something measurable has crossed it, and then the rest of the
    *   report still stands: this is a statement about a viewer, not about a link.
    * @param {number} report.bufferedAheadSec
+   * @param {number} [report.bufferLimitSeconds] - The largest forward buffer
+   *   this browser accepted for the current player.
    * @param {number | null} [report.positionSeconds] - Null from a page that
    *   does not say; then the position stands as it was.
    * @param {boolean} [report.playing] - Whether the picture is advancing.
@@ -383,7 +385,10 @@ export class Viewer {
   report(
     {
       linkMbps,
+      linkSampleMbps = null,
+      linkSampleAt = null,
       bufferedAheadSec,
+      bufferLimitSeconds,
       positionSeconds = null,
       playing,
       waiting,
@@ -407,15 +412,28 @@ export class Viewer {
     // everything to say about its viewer, and that is the cold open exactly —
     // the moment the position matters most. Held as a precondition, in three
     // places at once, it silenced every statement of the session of 2026-09-14.
-    if (Number.isFinite(linkMbps) && linkMbps > 0) {
-      this.netReport = {
-        linkMbps,
-        bufferedAheadSec: held,
-        positionSeconds:
-          Number.isFinite(positionSeconds) && positionSeconds >= 0 ? positionSeconds : null,
-        at: now
-      };
-    }
+    const hasLinkMeasurement = Number.isFinite(linkMbps) && linkMbps > 0;
+    const lastLinkMbps = hasLinkMeasurement ? linkMbps : this.netReport?.linkMbps ?? null;
+    const linkMeasuredAt = hasLinkMeasurement ? now : this.netReport?.linkMeasuredAt ?? null;
+    const sampleMbps = Number(linkSampleMbps);
+    const sampleAt = Number(linkSampleAt);
+    const hasPlaybackSample = Number.isFinite(sampleMbps) && sampleMbps > 0 &&
+      Number.isFinite(sampleAt) && sampleAt > 0;
+    const newerPlaybackSample = hasPlaybackSample && sampleAt > (this.netReport?.linkSampleAt ?? 0);
+    this.netReport = {
+      linkMbps: lastLinkMbps,
+      linkMeasuredAt,
+      linkSampleAt: newerPlaybackSample ? sampleAt : this.netReport?.linkSampleAt ?? null,
+      linkSampleMbps: newerPlaybackSample ? sampleMbps : this.netReport?.linkSampleMbps ?? null,
+      linkSampleMeasuredAt: newerPlaybackSample ? now : this.netReport?.linkSampleMeasuredAt ?? null,
+      bufferedAheadSec: held,
+      bufferLimitSeconds: Number.isFinite(bufferLimitSeconds) && bufferLimitSeconds > 0
+        ? bufferLimitSeconds
+        : this.netReport?.bufferLimitSeconds ?? null,
+      positionSeconds:
+        Number.isFinite(positionSeconds) && positionSeconds >= 0 ? positionSeconds : null,
+      at: now
+    };
     // Where the picture is now. A report states a place the viewer has played
     // to, not a place they moved to: their buffer's history stands.
     if (Number.isFinite(positionSeconds) && positionSeconds >= 0) {
@@ -486,7 +504,7 @@ export class Viewer {
    * questions in one place is what stopped a soundtrack's encoder on
    * 2026-09-05.
    *
-   * @returns {{ linkMbps: number, bufferedAheadSec: number, positionSeconds: number | null, at: number } | null}
+   * @returns {{ linkMbps: number | null, bufferedAheadSec: number, bufferLimitSeconds: number | null, positionSeconds: number | null, at: number } | null}
    */
   linkReading() {
     return this.netReport;

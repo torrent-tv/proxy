@@ -9,6 +9,7 @@
 
 import { logger } from "../../utils/logger.js";
 import { isOutputName } from "../encode/output/index.js";
+import { predictPlaybackReadiness, RateTrend } from "./playback-readiness.js";
 
 function isWarmupTimeoutError(error) {
   if (!(error instanceof Error)) {
@@ -42,9 +43,11 @@ function segmentAddressOf(output, fileName) {
 export class ViewerRequests {
   /** What this reads and asks of the rest of the proxy, and nothing else. @type {object} */
   #host;
+  /** @type {WeakMap<object, Map<string, object>>} */
+  #rateStateBySession = new WeakMap();
 
   /**
-   * @param {object} host - `opening`, `activeOutputFor`, `viewerSecondsOn`, `minimumBufferSecondsFor`, `disposeSession`, `expectedFirstSegmentMs`, `expectedSessionCreateMs`, `planEncodersSoon`, `waitUntilReady`, `encodeRuns`, `outputTimes`, `outputs`, `quality`, `qualityOffer`, `segmentDurationSec`, `startupWaitMs`, `viewers`, `acceptsGeneration`, `generationOfRequest`, `noteGivenOutput`, `holdForResponse`, `noteServingVerdict`, `servingVerdictOf`
+   * @param {object} host - `opening`, `activeOutputFor`, `viewerSecondsOn`, `minimumBufferSecondsFor`, `getSourceStats`, `disposeSession`, `expectedFirstSegmentMs`, `expectedSessionCreateMs`, `planEncodersSoon`, `waitUntilReady`, `encodeRuns`, `encodeSpeedReadingOf`, `outputTimes`, `outputs`, `lookaheadSeconds`, `quality`, `qualityOffer`, `renditions`, `segmentDurationSec`, `segmentStore`, `sourceFiles`, `startupWaitMs`, `viewers`, `acceptsGeneration`, `generationOfRequest`, `noteGivenOutput`, `holdForResponse`, `noteServingVerdict`, `servingVerdictOf`
    */
   constructor(host) {
     this.#host = host;
@@ -419,14 +422,11 @@ export class ViewerRequests {
     const warmupRemainingSeconds = isWarmupPhase
       ? Math.max(0, warmupTotalSeconds - warmupElapsedSeconds)
       : null;
-    // Observed OUTPUT bitrate (Mbit/s) from recently completed segment sizes —
-    // already computed for the viewer-link budget check (#checkLinkBudget); also
-    // exposed here so the browser can turn its OWN measured link throughput into
-    // a "content-seconds delivered per wall-clock second" rate for the unified
-    // three-stage ETA (download / transcode / delivery), the same way the
-    // transcode's own `speed` already is one. Null when not enough segments yet.
+    // Observed output bitrate (Mbit/s) from recently completed segments. The
+    // proxy uses it for the viewer-link budget and the readiness forecast.
     const outputMbps = await this.#host.quality.observedStreamMbps(session);
     const progress = this.#host.encodeRuns.progressOf(session);
+    const playbackReadiness = await this.#playbackReadinessFor(session, consumerId, progress, outputMbps);
     return {
       // The id the caller asked about, not the variant it was answered from —
       // the browser tracks its sessions by the id it was given.
@@ -468,6 +468,7 @@ export class ViewerRequests {
       segmentDurationSec: this.#host.segmentDurationSec,
       speed: progress.speed,
       outputMbps,
+      playbackReadiness,
       // The height the viewer is WATCHING right now, which is what the menu
       // has to say next to "Auto". When the video is re-encoded that is the
       // rung the proxy has settled on — it steps down when the host cannot keep
@@ -518,5 +519,185 @@ export class ViewerRequests {
       updatedAt: progress.updatedAt,
       error: this.#host.encodeRuns.failureOf(session)
     };
+  }
+
+  async #playbackReadinessFor(session, consumerId, progress, outputMbps) {
+    const now = Date.now();
+    const viewer = consumerId ? this.#host.viewers.get(consumerId) : null;
+    const viewerReading = viewer?.linkReading() ?? null;
+    const measurement = this.#rateStateFor(session, consumerId);
+    const linkAt = Number(viewerReading?.linkSampleMeasuredAt);
+    if (Number.isFinite(viewerReading?.linkSampleMbps) && viewerReading.linkSampleMbps > 0 && Number.isFinite(linkAt)) {
+      measurement.link.add(linkAt, viewerReading.linkSampleMbps * 1_000_000);
+    }
+
+    const outputs = [session];
+    const requiresSeparateAudio = this.#host.renditions.servesAudioSeparately(session);
+    const audioOutput = requiresSeparateAudio
+      ? this.#host.renditions.playbackAudioOutputFor(session, consumerId)
+      : null;
+    if (audioOutput) {
+      outputs.push(audioOutput);
+    }
+
+    const sourceMeasurements = new Map();
+    const tracks = [];
+    for (const output of outputs) {
+      const trackProgress = output === session ? progress : this.#host.encodeRuns.progressOf(output);
+      const trackRates = this.#trackRateReadings(measurement, output, now);
+      const timeline = output.timeline;
+      const segments = Array.from({ length: timeline?.segmentCount ?? 0 }, (_, index) => ({
+        index,
+        startSeconds: timeline.publishedStartOf(index),
+        endSeconds: timeline.publishedStartOf(index + 1)
+      }));
+      const sourceIndexes = [output.spec.video?.fileIndex, output.spec.audio?.fileIndex]
+        .filter((fileIndex) => Number.isInteger(fileIndex) && fileIndex >= 0);
+      if (sourceIndexes.length === 0) {
+        sourceIndexes.push(output.file.fileIndex);
+      }
+      const sourceIds = [];
+      for (const fileIndex of new Set(sourceIndexes)) {
+        const sourceId = `${output.file.sourceKey}:${fileIndex}`;
+        sourceIds.push(sourceId);
+        if (sourceMeasurements.has(sourceId)) {
+          continue;
+        }
+        const sourceFile = fileIndex === output.file.fileIndex
+          ? output.file
+          : this.#host.sourceFiles.get(output.file.sourceKey, fileIndex);
+        let stats = null;
+        try {
+          stats = await this.#host.getSourceStats?.(output.file.sourceKey, fileIndex) ?? null;
+        } catch {
+          stats = null;
+        }
+        const sourceTrend = this.#downloadRateReadings(
+          measurement,
+          output.file.sourceKey,
+          stats?.downloadSpeed,
+          now
+        );
+        const fileLength = Number(stats?.fileLength);
+        const downloaded = Number(stats?.fileDownloaded);
+        const sourceDuration = Number(sourceFile?.durationSeconds);
+        sourceMeasurements.set(sourceId, {
+          id: sourceId,
+          serviceId: output.file.sourceKey,
+          complete: Number.isFinite(fileLength) && fileLength > 0 && downloaded >= fileLength,
+          bytesPerMediaSecond: Number.isFinite(fileLength) && fileLength > 0 &&
+            Number.isFinite(sourceDuration) && sourceDuration > 0
+            ? fileLength / sourceDuration
+            : 0,
+          readings: sourceTrend
+        });
+      }
+
+      const inventory = this.#host.segmentStore.sizesOf(output.outputKey);
+      const observedMbps = output === session
+        ? outputMbps
+        : await this.#host.quality.observedStreamMbps(output);
+      tracks.push({
+        id: output.outputKey,
+        sourceIds,
+        processedSeconds: trackProgress?.processedSeconds,
+        bitsPerMediaSecond: Number.isFinite(observedMbps) && observedMbps > 0 ? observedMbps * 1_000_000 : 0,
+        readings: trackRates,
+        segments,
+        readySegmentIndices: [...inventory.keys()],
+        segmentSizesBytes: inventory
+      });
+    }
+
+    const activeTrackIds = new Set(tracks.map(({ id }) => id));
+    for (const id of measurement.tracks.keys()) {
+      if (!activeTrackIds.has(id)) {
+        measurement.tracks.delete(id);
+      }
+    }
+    const activeDownloadServices = new Set([...sourceMeasurements.values()].map(({ serviceId }) => serviceId));
+    for (const id of measurement.downloads.keys()) {
+      if (!activeDownloadServices.has(id)) {
+        measurement.downloads.delete(id);
+      }
+    }
+    const bufferedAheadSeconds = Number(viewerReading?.bufferedAheadSec);
+    const positionSeconds = Number.isFinite(viewerReading?.positionSeconds)
+      ? viewerReading.positionSeconds
+      : this.#host.viewerSecondsOn(session, consumerId, now);
+    // Both separately delivered tracks can run short independently. Use the
+    // largest measured supply interruption across the tracks the viewer needs;
+    // when a track has no interruption history yet, its actual next segment
+    // duration is the observed floor for that track.
+    const reserveSeconds = Math.max(...outputs.map((output, index) => {
+      const measured = Number(this.#host.minimumBufferSecondsFor(output));
+      if (Number.isFinite(measured) && measured > 0) {
+        return measured;
+      }
+      const trackSegments = tracks[index]?.segments ?? [];
+      const nextSegment = trackSegments.find((segment) =>
+        segment.startSeconds <= positionSeconds && segment.endSeconds > positionSeconds
+      ) ?? trackSegments.find((segment) => segment.startSeconds >= positionSeconds);
+      const segmentSeconds = nextSegment
+        ? nextSegment.endSeconds - nextSegment.startSeconds
+        : Number(this.#host.segmentDurationSec);
+      return Number.isFinite(segmentSeconds) && segmentSeconds > 0 ? segmentSeconds : 0;
+    }));
+
+    return predictPlaybackReadiness({
+      now,
+      positionSeconds,
+      durationSeconds: session.file.durationSeconds,
+      bufferedAheadSeconds,
+      bufferLimitSeconds: viewerReading?.bufferLimitSeconds,
+      reserveSeconds,
+      lookaheadSeconds: this.#host.lookaheadSeconds,
+      requiredAudio: requiresSeparateAudio,
+      sources: [...sourceMeasurements.values()],
+      tracks,
+      linkReadings: measurement.link.snapshot()
+    });
+  }
+
+  #rateStateFor(session, consumerId) {
+    let byViewer = this.#rateStateBySession.get(session);
+    if (!byViewer) {
+      byViewer = new Map();
+      this.#rateStateBySession.set(session, byViewer);
+    }
+    const id = typeof consumerId === "string" ? consumerId : "";
+    let state = byViewer.get(id);
+    if (!state) {
+      state = { link: new RateTrend(), downloads: new Map(), tracks: new Map() };
+      byViewer.set(id, state);
+    }
+    return state;
+  }
+
+  #downloadRateReadings(state, serviceId, downloadSpeed, now) {
+    let trend = state.downloads.get(serviceId);
+    if (!trend) {
+      trend = new RateTrend();
+      state.downloads.set(serviceId, trend);
+    }
+    const speed = Number(downloadSpeed);
+    if (Number.isFinite(speed) && speed >= 0) {
+      trend.add(now, speed);
+    }
+    return trend.snapshot();
+  }
+
+  #trackRateReadings(state, output, now) {
+    const id = output.outputKey;
+    let trend = state.tracks.get(id);
+    if (!trend) {
+      trend = new RateTrend();
+      state.tracks.set(id, trend);
+    }
+    const reading = this.#host.encodeSpeedReadingOf?.(output, now) ?? null;
+    if (Number.isFinite(reading?.speed) && reading.speed > 0 && Number.isFinite(reading.at)) {
+      trend.add(reading.at, reading.speed);
+    }
+    return trend.snapshot();
   }
 }

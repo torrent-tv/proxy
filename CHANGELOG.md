@@ -1,3 +1,8 @@
+## 2.87.11
+
+- **Fix**: Calculate proxy-side playback readiness from measured source-download, encoding, and client-delivery rates; account for prepared segments, selected audio tracks, and the browser's measured buffer capacity.
+- **Fix**: Share source-download capacity for distinct files in one torrent and count the same source file only once when video and audio use it.
+
 ## 2.87.10
 
 - **Fix**: Keep sidecar metadata refresh pending when the container returns an empty track list before its header is available.

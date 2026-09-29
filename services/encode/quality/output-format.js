@@ -51,6 +51,8 @@ import { linkAnswerFigures, linkCouldCarry, loadOf, videoLoadOfSpec } from "./li
  * @param {unknown} params.benchmark - The startup measurement of the software encoder, or null.
  * @param {{ decodeModel: object | null, observedDecodeCostSec: number | null, requiredSpeed: number | null }} params.cost
  * @param {(params: object) => object | null} params.chooseBudget - The realtime budget's ladder choice.
+ * @param {(spec: OutputSpec) => { admitted: boolean, reason: string, speedX: number | null }} [params.machineAdmission] -
+ *   The proxy's machine-wide capacity decision for a candidate output.
  * @param {boolean} params.tonemap
  * @param {number | null} [params.capKbps] - A nominal limit asked for outright;
  *   above the size's own it is refused (`softwareRateControlFor`).
@@ -86,7 +88,8 @@ export function decideOutputFormat({
   limitsFor = (frame) => [nominalKbpsFor(frame)],
   audioLoad = null,
   specWith,
-  serving
+  serving,
+  machineAdmission = null
 }) {
   const judge = (spec) => linkCouldCarry(
     serving.linkMbps,
@@ -170,6 +173,22 @@ export function decideOutputFormat({
     : measured && w > 0
       ? pickSoftwarePreset(benchmark, w * h * fps, priced, { width: w, height: h })
       : null);
+  const budgetFor = (spec) => {
+    const encode = spec.video?.encode;
+    if (!budget || !encode) {
+      return budget;
+    }
+    const rungIndex = budget.ladder?.findIndex((rung) =>
+      rung.width === encode.width && rung.height === encode.height
+    ) ?? budget.rungIndex;
+    return {
+      ...budget,
+      width: encode.width,
+      height: encode.height,
+      preset: encode.preset,
+      rungIndex: rungIndex >= 0 ? rungIndex : budget.rungIndex
+    };
+  };
   // Every format at one size this viewer could be given, highest limit first.
   // A hardware encoder is given no limit, so it has exactly one.
   const formatsAt = (w, h) => {
@@ -220,12 +239,28 @@ export function decideOutputFormat({
     }
   }
 
-  let anySizeHeld = machineCan(width, height);
-  if (anySizeHeld) {
+  let anySizeHeld = false;
+  let machineRefusal = null;
+  const admittedByMachine = (spec) => {
+    if (!machineCan(spec.video?.encode?.width ?? 0, spec.video?.encode?.height ?? 0)) {
+      return false;
+    }
+    const answer = typeof machineAdmission === "function" ? machineAdmission(spec) : null;
+    if (answer?.admitted === false) {
+      machineRefusal ??= answer;
+      return false;
+    }
+    return true;
+  };
+  if (machineCan(width, height)) {
     for (const spec of wantedFormats) {
+      if (!admittedByMachine(spec)) {
+        continue;
+      }
+      anySizeHeld = true;
       const answer = judge(spec);
       if (answer.admitted) {
-        return given(spec, answer, { budget, wantedKey });
+        return given(spec, answer, { budget: budgetFor(spec), wantedKey });
       }
     }
   }
@@ -234,11 +269,14 @@ export function decideOutputFormat({
       if (!machineCan(rung.width, rung.height)) {
         continue;
       }
-      anySizeHeld = true;
       for (const spec of formatsAt(rung.width, rung.height)) {
+        if (!admittedByMachine(spec)) {
+          continue;
+        }
+        anySizeHeld = true;
         const answer = judge(spec);
         if (answer.admitted) {
-          return given(spec, answer, { wantedKey });
+          return given(spec, answer, { budget: budgetFor(spec), wantedKey });
         }
       }
     }
@@ -247,10 +285,21 @@ export function decideOutputFormat({
     // Not the viewer's link: this machine. Said apart, because the answer to
     // it is another proxy, found before anything plays.
     return {
-      ...refused(wantedSpec, null, `this machine has not shown it can re-encode this picture at ${width}x${height}@${fps} or any size below it`, { budget, wantedKey }),
+      ...refused(
+        wantedSpec,
+        null,
+        machineRefusal?.reason ?? `this machine has not shown it can re-encode this picture at ${width}x${height}@${fps} or any size below it`,
+        { budget, wantedKey }
+      ),
       unavailable: {
-        reason: `this machine has not shown it can re-encode this picture at ${width}x${height}@${fps} or any size below it`,
-        figures: { width, height, fps, encoder: encoder.name },
+        reason: machineRefusal?.reason ?? `this machine has not shown it can re-encode this picture at ${width}x${height}@${fps} or any size below it`,
+        figures: {
+          width,
+          height,
+          fps,
+          encoder: encoder.name,
+          ...(Number.isFinite(machineRefusal?.speedX) ? { speedX: Number(machineRefusal.speedX.toFixed(3)) } : {})
+        },
         bound: "machine"
       }
     };

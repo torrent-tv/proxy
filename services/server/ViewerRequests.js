@@ -72,10 +72,12 @@ export class ViewerRequests {
    * @returns {Promise<import("../encode/output/EncodedOutput.js").EncodedOutput>}
    */
   async createOrGetSession({ consumerId = "", ...request }) {
+    const requestStartedAt = Date.now();
     // What this viewer's link last measured, where the request does not say:
     // a viewer who comes back to open another film has a link this proxy has
     // already measured, and the output they are given is judged by it.
     const known = consumerId ? this.#host.viewers.get(consumerId) : null;
+    const viewerLinkMbps = request.viewerLinkMbps ?? known?.linkReading()?.linkMbps ?? null;
     const startPositionSeconds = request.startPositionSeconds ?? 0;
     // Whether they were already on the output this request lands on, read at
     // the moment they are put on it.
@@ -101,7 +103,7 @@ export class ViewerRequests {
       : null;
     const { output, existed, audio, verdict } = await this.#host.opening.open({
       ...request,
-      viewerLinkMbps: request.viewerLinkMbps ?? known?.linkReading()?.linkMbps ?? null,
+      viewerLinkMbps,
       claim
     });
     if (consumerId) {
@@ -115,6 +117,23 @@ export class ViewerRequests {
       // The picture as their page sees it, which bounds the height made for
       // them from here on (roadmap item 98).
       viewer.noteVisiblePicture(request.visiblePicture);
+      if (!alreadyOn) {
+        const measuredAge = Number(request.linkSampleAgeMs);
+        viewer.report({
+          linkMbps: viewerLinkMbps,
+          linkSampleMbps: request.linkSampleMbps,
+          linkSampleAt: request.linkSampleAt,
+          linkSampleAgeMs: Number.isFinite(measuredAge) && measuredAge >= 0
+            ? measuredAge + Date.now() - requestStartedAt
+            : null,
+          bufferedAheadSec: request.bufferedAheadSec,
+          bufferLimitSeconds: request.bufferLimitSeconds,
+          positionSeconds: startPositionSeconds,
+          waiting: true,
+          playing: false,
+          visiblePicture: request.visiblePicture
+        });
+      }
       // On what their output was judged. Recorded where the output is opened
       // for them; a step opened on their behalf is recorded by `Renditions`.
       this.#host.noteServingVerdict(consumerId, verdict ? { ...verdict, outputKey: output.outputKey } : null);
@@ -697,6 +716,11 @@ export class ViewerRequests {
     const reading = this.#host.encodeSpeedReadingOf?.(output, now) ?? null;
     if (Number.isFinite(reading?.speed) && reading.speed > 0 && Number.isFinite(reading.at)) {
       trend.add(reading.at, reading.speed);
+    } else if (!trend.snapshot()) {
+      const projected = Number(this.#host.projectedEncodeSpeedOf?.(output));
+      if (Number.isFinite(projected) && projected > 0) {
+        trend.add(now, projected);
+      }
     }
     return trend.snapshot();
   }

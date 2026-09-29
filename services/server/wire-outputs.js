@@ -511,6 +511,7 @@ export function wireOutputs({
     get enabled() { return parts.enabled; },
     get encodeCost() { return parts.encodeCost; },
     get encodeRuns() { return parts.encodeRuns; },
+    get admission() { return parts.admission; },
     get getCachedMediaInfo() { return parts.getCachedMediaInfo; },
     get hostLoad() { return parts.hostLoad; },
     get hostTimings() { return parts.hostTimings; },
@@ -544,6 +545,7 @@ export function wireOutputs({
     waitUntilReady: (...args) => parts.serving.waitUntilReady(...args),
     get encodeRuns() { return parts.encodeRuns; },
     encodeSpeedReadingOf: (output) => parts.encodeCost.latestSpeedReadingOf(output),
+    projectedEncodeSpeedOf: () => parts.admission.projectedSpeedX(),
     get opening() { return parts.opening; },
     get outputTimes() { return parts.outputTimes; },
     get outputs() { return parts.outputs; },
@@ -867,6 +869,7 @@ export function wireOutputs({
     },
     finished: (address) => parts.outputs.outputsOn(address).some((session) => finishedOutput(session)),
     loadOf: (address) => parts.encodeCost.loadOfOutput(address),
+    loadForCandidate: (spec, file) => parts.encodeCost.loadForCandidate(spec, file),
     availability: () => parts.hostLoad.hostAvailability ?? null
   });
   parts.encodeOrchestrator = new EncodeOrchestrator({

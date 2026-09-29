@@ -329,6 +329,37 @@ export class EncodeCost {
     if (!session) {
       return null;
     }
+    return this.#loadOfSession(session);
+  }
+
+  /**
+   * What a not-yet-opened output would cost, priced by the same readings and
+   * rules as an output already in the catalogue. This lets the machine-wide
+   * admission answer before the format is committed, so AUTO can select a
+   * lower rung that the whole host can sustain.
+   *
+   * @param {object} spec
+   * @param {object} file
+   * @returns {{ costSec: number | null, fileKey: string, fileCostSec: number } | null}
+   */
+  loadForCandidate(spec, file) {
+    if (!spec || !file) {
+      return null;
+    }
+    const encode = spec.video?.encode ?? null;
+    const candidate = {
+      spec,
+      file,
+      output: {
+        encodeWidth: Number(encode?.width) || 0,
+        encodeHeight: Number(encode?.height) || 0,
+        outputFps: Number(encode?.fps) || TRANSCODE_FPS
+      }
+    };
+    return this.#loadOfSession(candidate);
+  }
+
+  #loadOfSession(session) {
     const fileKey = session.file?.key ?? "";
     const fileCost = Number(this.#torrentCostSecFor(session));
     const fileCostSec = Number.isFinite(fileCost) && fileCost > 0 ? fileCost : 0;

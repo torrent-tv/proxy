@@ -45,7 +45,7 @@ export class OutputOpening {
   #host;
 
   /**
-   * @param {object} host - `logger`, `probeMediaInfo`, `probeKeyframeTimes`, `enabled`, `segmentFormat`, `renditions`, `sourceFiles`, `getCachedMediaInfo`, `localBaseUrl`, `tonemapSupported`, `videoEncoder`, `hostLoad`, `keyframeTables`, `timelines`, `segmentDurationSec`, `softwarePresetBenchmark`, `decodeCostModel`, `encodeCost`, `outputs`, `segmentOutputFiles`, `hostTimings`, `returns`, `encodeRuns`
+   * @param {object} host - `logger`, `probeMediaInfo`, `probeKeyframeTimes`, `enabled`, `segmentFormat`, `renditions`, `sourceFiles`, `getCachedMediaInfo`, `localBaseUrl`, `tonemapSupported`, `videoEncoder`, `hostLoad`, `keyframeTables`, `timelines`, `segmentDurationSec`, `softwarePresetBenchmark`, `decodeCostModel`, `encodeCost`, `admission`, `outputs`, `segmentOutputFiles`, `hostTimings`, `returns`, `encodeRuns`
    * @param {SegmentOutputFiles} host.segmentOutputFiles - The storage
    *   operations needed while selecting or opening an output.
    */
@@ -573,6 +573,9 @@ export class OutputOpening {
         requiredSpeed: this.#host.hostLoad.requiredSpeedFor(sourceKey, fileIndex)
       },
       chooseBudget: (params) => this.#host.encodeCost.chooseEncodeBudget(params),
+      machineAdmission: this.#host.admission
+        ? (candidate) => this.#host.admission.previewCandidate(candidate, file)
+        : null,
       tonemap: applyTonemap,
       capKbps,
       limitsFor: (frame) => this.#host.limitsFor(frame),

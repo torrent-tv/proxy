@@ -1029,17 +1029,44 @@ export class EncodeCost {
    * @returns {number | null}
    */
   recentSpeedOf(session, now, withinMs) {
+    return this.recentSpeedReadingOf(session, now, withinMs)?.speed ?? null;
+  }
+
+  /**
+   * The newest measured speed from the output's current or most recent run.
+   * Its measurement time lets the playback model project the observed trend
+   * without imposing a separate freshness window.
+   *
+   * @param {HlsSession} session
+   * @returns {{ speed: number, at: number } | null}
+   */
+  latestSpeedReadingOf(session) {
     const reading = qualityStateOf(session).recentSpeed;
     if (!reading || !this.#runsFor(session).includes(reading.run)) {
-      return null; // nothing from THIS run
+      return null;
     }
+    return { speed: reading.speed, at: reading.at };
+  }
+
+  /**
+   * The current output's measured production speed, with the time it was
+   * measured. The caller can use the same observation in a trend without
+   * treating repeated progress polls as new samples.
+   *
+   * @param {HlsSession} session
+   * @param {number} now
+   * @param {number} withinMs
+   * @returns {{ speed: number, at: number } | null}
+   */
+  recentSpeedReadingOf(session, now, withinMs) {
+    const reading = this.latestSpeedReadingOf(session);
     // Stale by whatever the asker calls stale — two of its own ticks, for the
     // budget loop, which takes a fresh reading every pass anyway. A reading
     // older than that is not about the machine as it stands.
-    if (now - reading.at > withinMs) {
+    if (!reading || now - reading.at > withinMs) {
       return null;
     }
-    return reading.speed;
+    return reading;
   }
 
   /**

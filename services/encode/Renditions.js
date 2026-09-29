@@ -1555,6 +1555,28 @@ export class Renditions {
     return session.spec.carries !== "audio-only" && session.spec.carriesAudioSeparately;
   }
 
+  /**
+   * The selected live soundtrack output for a viewer, when sound travels as a
+   * separate rendition.
+   *
+   * @param {HlsSession} base
+   * @param {string} consumerId
+   * @returns {HlsSession | null}
+   */
+  playbackAudioOutputFor(base, consumerId) {
+    if (!base || !this.servesAudioSeparately(base)) {
+      return null;
+    }
+    const choice = this.#audioChoiceOf(base, consumerId);
+    if (!choice) {
+      return null;
+    }
+    return this.#host.outputs.renditionsOf(base).find((output) =>
+      this.#flatAudioTrackOf(output) === choice.trackIndex &&
+      output.spec.transcodesAudio === (choice.transcode === true)
+    ) ?? null;
+  }
+
   inputOf(session) {
     return encoderInputs({
       picture: session.file,

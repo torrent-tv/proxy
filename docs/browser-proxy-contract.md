@@ -70,13 +70,36 @@ display detail and is not required for status handling.
 | Request | Meaning |
 |---|---|
 | `POST /api/transcode-sessions/:id/seek` | `{ positionSeconds, consumerId, generation }` reports the viewer's seek. A successful answer is `204`; the proxy handles the seek server side. |
-| `GET /api/transcode-sessions/:id/progress?consumer=:id` | Reads current session progress and also keeps the viewer's session alive. The browser consumes available progress fields; an unreadable or failed answer does not imply that playback has ended. |
-| `POST /api/transcode-sessions/:id/net-report` | `{ consumerId, bufferedAheadSec, ... }` reports the viewer's buffer and optional state/link measurements. `consumerId` and non-negative `bufferedAheadSec` are required; missing `linkMbps` does not reject the report and leaves the last link reading intact. Missing `playing` becomes `false`; missing `waiting` is derived from the playback and buffer state. Missing `positionSeconds` leaves the position unchanged, missing `qualityMode` leaves the prior mode, `onScreen` defaults to `true`, and `inPictureInPicture` defaults to `false`. Success is `204`. |
+| `GET /api/transcode-sessions/:id/progress?consumer=:id` | Reads current session progress and also keeps the viewer's session alive. `playbackReadiness` is the proxy's versioned forecast used to release the startup wait; missing or unsupported versions do not authorize playback. An unreadable or failed answer does not imply that playback has ended. |
+| `POST /api/transcode-sessions/:id/net-report` | `{ consumerId, bufferedAheadSec, ... }` reports the viewer's buffer and optional state/link measurements. `consumerId` and non-negative `bufferedAheadSec` are required. `linkMbps` is the smoothed estimate used by the quality budget; `linkSampleMbps` and `linkSampleAt` carry the newest raw delivery measurement and its sample time for the readiness forecast. `bufferLimitSeconds` states the browser's accepted forward-buffer ceiling. Missing optional values do not reject the report or erase the last known value. Missing `playing` becomes `false`; missing `waiting` is derived from the playback and buffer state. Missing `positionSeconds` leaves the position unchanged, missing `qualityMode` leaves the prior mode, `onScreen` defaults to `true`, and `inPictureInPicture` defaults to `false`. Success is `204`. |
 | `POST /api/transcode-sessions/:id/fragment-far` | Diagnostic fragment and buffer positions; does not change encoding. Best effort, success `204`. |
 | `POST /api/transcode-sessions/:id/release` | `{ consumerId, reason }` releases this viewer's session assignment. |
 | `GET /transcode/:id/:fileName` | HLS playlist, init, or media segment. A file that is still being produced is answered with retryable `503`, not `202`. |
 | `GET /transcode/:id/v/:height/warm` and `/transcode/:id/a/:track/warm` | Prepare the requested video height or audio track at a position. `204` means ready. Audio warm-up `404` means the proxy does not support this operation for that session. |
 | `GET /stream?sourceKey=…&fileIndex=N` | Direct file bytes with HTTP range support. |
+
+### Playback readiness forecast
+
+The progress response may include `playbackReadiness`:
+
+| Field | Meaning |
+|---|---|
+| `version` | Forecast contract version. The browser releases its startup wait only for version `1` with `ready: true`. |
+| `ready` | The proxy's simulated buffer trajectory can cover the remaining playback while preserving the measured interruption reserve, starting now. |
+| `delaySeconds` | When `ready` is false, the predicted minimum delay from now to a safe start; `null` means the current measurements do not support a finite forecast. |
+| `bufferedSeconds` | Client buffer reported to the proxy. |
+| `reserveSeconds` | Maximum interruption reserve across the required video and selected audio outputs, derived from each output's measured supply waits and next segment duration. |
+| `neededSeconds` | Reserve shortfall at the current client buffer. |
+| `reason` | Machine-readable result of the forecast. |
+| `preparedSegments` | Number of already-produced output segments available across required tracks. |
+| `bufferedAtStartSeconds` | Forecast playable buffer at the proposed start time, when a finite delay is available. |
+
+The forecast considers the video output and the selected audio output when audio
+is delivered separately. A mixed output can depend on more than one source
+file. Repeated source files are counted once; distinct files keep separate
+remaining-work estimates and share the measured download rate of their torrent.
+The browser reports buffer state and delivery measurements, but does not
+calculate or override readiness.
 
 ## Subtitles
 

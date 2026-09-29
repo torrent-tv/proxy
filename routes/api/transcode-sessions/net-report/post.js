@@ -43,7 +43,10 @@ export async function handleApiTranscodeSessionNetReportPost(req, reply, { outpu
   // into it — the soundtrack's encoder went there, and the segment the browser
   // was actually asking for was ranked last of a hundred and answered 503.
   const linkMbps = Number(body.linkMbps);
+  const linkSampleMbps = Number(body.linkSampleMbps);
+  const linkSampleAt = Number(body.linkSampleAt);
   const bufferedAheadSec = Number(body.bufferedAheadSec);
+  const bufferLimitSeconds = Number(body.bufferLimitSeconds);
   if (!sessionId || !Number.isFinite(bufferedAheadSec) || bufferedAheadSec < 0) {
     return reply.code(400).send({ error: "bufferedAheadSec (>=0) is required." });
   }
@@ -103,7 +106,11 @@ export async function handleApiTranscodeSessionNetReportPost(req, reply, { outpu
     sessionId,
     report: {
       linkMbps: Number.isFinite(linkMbps) && linkMbps > 0 ? linkMbps : undefined,
+      linkSampleMbps: Number.isFinite(linkSampleMbps) && linkSampleMbps > 0 ? linkSampleMbps : undefined,
+      linkSampleAt: Number.isFinite(linkSampleAt) && linkSampleAt > 0 ? linkSampleAt : undefined,
       bufferedAheadSec,
+      bufferLimitSeconds:
+        Number.isFinite(bufferLimitSeconds) && bufferLimitSeconds > 0 ? bufferLimitSeconds : undefined,
       consumerId,
       playing,
       waiting,

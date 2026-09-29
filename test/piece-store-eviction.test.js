@@ -428,6 +428,41 @@ test("a store whose readers have gone asks for nothing, one that never had them 
   }
 });
 
+test("live piece pins set memory demand when no priority-map range is declared", async () => {
+  const { store, directory } = await makeStore(2);
+  try {
+    await put(store, 0, pieceOf(0));
+    await put(store, 1, pieceOf(1));
+
+    store.pin(0);
+    store.pin(1);
+    store.pin(2);
+
+    assert.equal(store.stats().demand.readers, 0, "this read has no priority-map range");
+    assert.equal(store.stats().pinned, 3, "the three distinct live pieces are measured");
+    assert.equal(store.capacity, 3, "the active read demand expands capacity immediately");
+    assert.equal(store.wantedBytes, 3 * PIECE, "the budget owner sees the same measured demand");
+
+    const revised = store.reviseGrowthCeiling(2 * PIECE);
+    assert.equal(revised.ceilingBytes, 3 * PIECE, "a budget pass preserves pieces in active reads");
+    assert.equal(revised.belowActiveDemand, true, "the store reports that the machine share was short");
+
+    await put(store, 2, pieceOf(2));
+    assert.ok(store.locate(0), "the first active piece remains resident");
+    assert.ok(store.locate(1), "the second active piece remains resident");
+    assert.ok(store.locate(2), "the pending active piece obtains a memory slot");
+
+    store.unpin(0);
+    store.unpin(1);
+    store.unpin(2);
+    const released = store.reviseGrowthCeiling(2 * PIECE);
+    assert.equal(released.ceilingBytes, 2 * PIECE, "the measured floor falls after the reads release their pieces");
+  } finally {
+    await store.destroy();
+    await fs.rm(directory, { recursive: true, force: true, maxRetries: 10, retryDelay: 20 });
+  }
+});
+
 test("the allowance is never cut below one reader's whole window", async () => {
   const { store, directory } = await makeStore(16);
   try {
@@ -438,13 +473,13 @@ test("the allowance is never cut below one reader's whole window", async () => {
     // which killed every encoder on that file in the field on 2026-08-15.
     const revised = store.reviseGrowthCeiling(2 * PIECE);
     assert.equal(revised.ceilingBytes, 10 * PIECE, "one whole window is the floor");
-    assert.equal(revised.belowAWindow, true, "and the store says the share was smaller than that");
+    assert.equal(revised.belowActiveDemand, true, "and the store says the share was smaller than that");
 
     // With no reader there is no window to protect and the share is obeyed.
     store.releaseProtection("video");
     const obeyed = store.reviseGrowthCeiling(2 * PIECE);
     assert.equal(obeyed.ceilingBytes, 2 * PIECE);
-    assert.equal(obeyed.belowAWindow, false);
+    assert.equal(obeyed.belowActiveDemand, false);
   } finally {
     store.destroy(() => undefined);
     await fs.rm(directory, { recursive: true, force: true, maxRetries: 10, retryDelay: 20 });

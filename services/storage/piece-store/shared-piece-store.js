@@ -593,13 +593,13 @@ export class SharedPieceStore {
   }
 
   /**
-   * Whether the machine's share of memory is smaller than one reader's window.
+   * Whether the machine's share is smaller than current read demand.
    *
    * The store holds the window anyway — refusing would leave the read it is
    * serving unable to finish, which is worse — but it is the honest measure of
    * "this machine cannot take any more", and it is measured rather than
-   * guessed: it is the last revision's own comparison of what the machine
-   * allowed against what the widest reader declared.
+   * guessed: it is the last revision's comparison of the machine's share
+   * against declared windows and distinct pieces pinned by live reads.
    */
   get isBeyondTheMachine() {
     return this.#beyondTheMachine;
@@ -650,15 +650,17 @@ export class SharedPieceStore {
    * resident piece ends up pinned, the read returns zero bytes and ffmpeg takes
    * that for the end of the file (field 2026-08-15, roadmap item 9).
    *
-   * With no reader declaring anything there is no demand to speak of, so the
-   * store asks for what the machine allows and the first revision after a read
-   * begins brings it down to what that read needs.
+   * A declared window is not the only evidence of demand: a live reader pins
+   * each piece it is waiting on or handing to its consumer. Include those
+   * distinct pins as well, because some byte reads do not have a priority-map
+   * range to declare.
    */
   get wantedBytes() {
     const demand = this.#lru.demand();
+    const pinned = this.#lru.pinnedCount;
     if (demand.readers > 0) {
       this.#widestSeenPieces = Math.max(this.#widestSeenPieces, demand.widestPieces);
-      const pieces = Math.max(MIN_RESIDENT_PIECES, demand.unionPieces, demand.widestPieces);
+      const pieces = Math.max(MIN_RESIDENT_PIECES, demand.unionPieces, demand.widestPieces, pinned);
       // Plus room to absorb what arrives while a write is finishing. Asking for
       // exactly what the readers want leaves no free place ever, so every
       // arrival evicts one of them — measured 2026-09-02: `6 reader(s) want 23
@@ -666,9 +668,9 @@ export class SharedPieceStore {
       // that followed.
       return (pieces + this.slackPieces()) * this.#chunkLength;
     }
-    // WITH NO READER, THE FLOOR IS ONE READER'S WINDOW — the widest this store
-    // has actually been asked for, which is measured rather than chosen, and
-    // `MIN_RESIDENT_PIECES` only until it has been asked for anything.
+    // WITH NO DECLARED RANGE, the floor is the widest prior window or the
+    // distinct pieces pinned by current reads, both measured rather than
+    // chosen. `MIN_RESIDENT_PIECES` applies until either has been observed.
     //
     // It used to fall to the minimum the moment the last reader went, and the
     // allowance is re-derived once a minute (`STORE_REPORT_INTERVAL_MS`) while
@@ -677,12 +679,11 @@ export class SharedPieceStore {
     // to another file of the same torrent and the store was at
     // `0/3 (0MB of 12MB allowed)` with the machine offering 4.3 GB.
     //
-    // Holding one window's worth between readers is not waste: it is what the
-    // next read will ask for within seconds, and the pieces in it are the ones
-    // that reader left off at. A store that has never been read keeps nothing
-    // either — its pieces are arriving for a reader on the way, and they have
-    // the disk.
-    return (Math.max(MIN_RESIDENT_PIECES, this.#widestSeenPieces) + this.slackPieces()) * this.#chunkLength;
+    // Retaining the last declared window between reads avoids dropping back to
+    // the minimum; current pins cover reads that have no declared window. A
+    // store that has never been read keeps only the measured minimum.
+    const pieces = Math.max(MIN_RESIDENT_PIECES, this.#widestSeenPieces, pinned);
+    return (pieces + this.slackPieces()) * this.#chunkLength;
   }
 
   reviseGrowthCeiling(allowedBytes) {
@@ -692,27 +693,33 @@ export class SharedPieceStore {
     // the machine was full kept a small allowance for its whole life, however
     // much memory was freed afterwards (roadmap item 2, 2026-09-02).
     const wanted = Math.floor(Number(allowedBytes) / this.#chunkLength);
-    // Never below what the live readers together hold, even when the machine's
-    // share says less. A store that cannot hold what its readers are pinning
-    // cannot complete any of their reads at all: every resident piece ends up
-    // pinned, a read returns zero bytes and ffmpeg takes that for the end of
-    // the file, which killed every encoder on that file in the field on
+    // Never below what the live readers together need, even when the machine's
+    // share says less. That is the union of declared windows, or the distinct
+    // pieces pinned by direct reads that have no declared window. A store that
+    // cannot hold what its readers are pinning cannot complete those reads:
+    // every resident piece ends up pinned, a read returns zero bytes and
+    // ffmpeg takes that for the end of the file, which killed every encoder on
+    // that file in the field on
     // 2026-08-15 (one reader) and again on 2026-09-07 (three readers of one
     // file at once — picture, sound and the edge-warming read — where this
     // floor was still computed from only the widest one of them, `wantedBytes`
     // above already asks for the union and got it right; this is the same
-    // union, used as the floor instead of only as the ask). Exceeding the share
-    // is the lesser failure, and the line below says when it happens.
+    // union, used as the floor instead of only as the ask). A live read can
+    // also pin pieces without a priority-map range, so those measured pins are
+    // part of the same minimum. Exceeding the share is the lesser failure, and
+    // the line below says when it happens.
     const demand = this.#lru.demand();
-    this.#growthCeiling = Math.max(
+    const activeDemandPieces = Math.max(
       MIN_RESIDENT_PIECES,
-      demand.readers > 0 ? demand.unionPieces : MIN_RESIDENT_PIECES,
+      demand.readers > 0 ? demand.unionPieces : 0,
+      this.#lru.pinnedCount
+    );
+    this.#growthCeiling = Math.max(
+      activeDemandPieces,
       Number.isFinite(wanted) ? wanted : MIN_RESIDENT_PIECES
     );
-    const belowAWindow = demand.readers > 0
-      && Number.isFinite(wanted)
-      && wanted < demand.unionPieces;
-    this.#beyondTheMachine = belowAWindow;
+    const belowActiveDemand = Number.isFinite(wanted) && wanted < activeDemandPieces;
+    this.#beyondTheMachine = belowActiveDemand;
     // The LRU is told too. It was constructed with the store's original
     // capacity and never revised, so `isFull()` answered against a number that
     // had not been the limit for some time — dormant only because nothing calls
@@ -754,7 +761,7 @@ export class SharedPieceStore {
       committedBytes: this.#blocksAllocated * this.#chunkLength,
       evicted,
       releasedBlocks,
-      belowAWindow
+      belowActiveDemand
     };
   }
 
@@ -803,6 +810,19 @@ export class SharedPieceStore {
 
   pin(index) {
     this.#lru.pin(index);
+    // A piece reader pins before it waits for the bytes to arrive or return
+    // from disk. That is the only live record of some reads; the priority map
+    // can have no declared range for them (for example, a verified piece that
+    // was spilled). Include the measured set of distinct active pins in the
+    // immediate floor so a claim does not wait for the next budget pass to get
+    // a slot. `wantedBytes` carries the same demand to the machine-wide owner.
+    const pinned = this.#lru.pinnedCount;
+    if (pinned > this.#growthCeiling) {
+      this.#growthCeiling = pinned;
+      this.#lru.setCapacity(pinned);
+      this.#beyondTheMachine = true;
+      this.#wake();
+    }
   }
 
   unpin(index) {

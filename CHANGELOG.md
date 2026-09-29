@@ -1,3 +1,7 @@
+## 2.87.13
+
+- **Fix**: Include distinct active piece reads in memory demand and preserve their slots immediately, so reads without priority-map ranges cannot deadlock the torrent piece store.
+
 ## 2.87.12
 
 - **Fix**: Check each automatic output against whole-machine encoding occupancy before opening it, so a rejected size can resolve to a lower admissible rung instead of failing the request.

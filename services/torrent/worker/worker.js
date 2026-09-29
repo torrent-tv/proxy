@@ -638,11 +638,11 @@ setInterval(() => {
         (revised.releasedBlocks > 0 ? `, gave back ${revised.releasedBlocks} block(s) of memory` : "") +
         ` — now ${Math.round(revised.committedBytes / 1048576)}MB committed`
       );
-    } else if (revised.belowAWindow) {
+    } else if (revised.belowActiveDemand) {
       log(
-        `piece-store "${revised.name.slice(0, 40)}": the machine's share is smaller than one ` +
-        `reader's window, so the allowance is held at ${Math.round(revised.ceilingBytes / 1048576)}MB ` +
-        "anyway — a store that cannot hold the window of the read it is serving cannot finish that read"
+        `piece-store "${revised.name.slice(0, 40)}": the machine's share is smaller than active read demand, ` +
+        `so the allowance is held at ${Math.round(revised.ceilingBytes / 1048576)}MB ` +
+        "— a store cannot finish a read if it cannot hold the pieces that read is using"
       );
     } else if (revised.committedBytes > revised.ceilingBytes) {
       log(

@@ -17,7 +17,10 @@
  *  - nothing about a FILM. A poster, a title, a description are answers from a
  *    third party about an identity, and that identity comes from a file's own
  *    bytes rather than from the torrent's list of names. They are keyed by the
- *    picture's file, arrive late or not at all, and must never delay playback;
+ *    picture's file, arrive late or not at all, and must never delay playback.
+ *    What IS held is what the names state — an episode marker in the release's
+ *    own numbering — because that is a fact of this list and of nothing else;
+ *    which episode of the show a file really is is answered elsewhere;
  *  - no reference to another layer. Not a container, whose life is a file's and
  *    which reads bytes; not a priority map, which is built from viewers and
  *    lives above this; not a viewer. What leaves here is plain values — indices
@@ -39,6 +42,7 @@
  * functions it is built on, it is a function of the list of names.
  */
 
+import { readEpisodeMarker } from "./episode-naming.js";
 import {
   AUDIO_SIDECAR_EXTENSIONS,
   IMAGE_SIDECAR_EXTENSIONS,
@@ -61,6 +65,22 @@ import {
  * @property {import("./files.js").SidecarFile[]} audio - Soundtracks beside it.
  * @property {import("./files.js").SidecarFile[]} subtitles - Subtitle files beside it.
  * @property {import("./files.js").SidecarFile[]} images - Contact sheets and covers.
+ * @property {import("./episode-naming.js").EpisodeMarker | null} episode - Which
+ *   episode its name says it is, in the release's own numbering.
+ */
+
+/**
+ * What the pictures of a torrent are, taken together.
+ *
+ * - `single` — one picture;
+ * - `series` — at least two pictures carry an episode marker and every stated
+ *   show name agrees. Pictures without a marker stay in it: a special or an
+ *   extra is still part of the release, it just cannot be numbered;
+ * - `undetermined` — anything else. Pictures without markers are a lack of
+ *   information, not proof of a collection of different films, so nothing is
+ *   concluded about the release as a whole.
+ *
+ * @typedef {"single" | "series" | "undetermined"} ContentsShape
  */
 
 /**
@@ -95,6 +115,20 @@ function inReadingOrder(left, right) {
     numeric: true,
     sensitivity: "base"
   });
+}
+
+/**
+ * A show name reduced to what two spellings of it share: bracketed tags (the
+ * release group) removed, letters and digits only, case folded.
+ *
+ * @param {string} text
+ * @returns {string}
+ */
+function showKey(text) {
+  return String(text ?? "")
+    .replace(/\[[^\]]*\]|\([^)]*\)/g, " ")
+    .toLowerCase()
+    .replace(/[^\p{L}\p{N}]+/gu, "");
 }
 
 export class TorrentContents {
@@ -153,7 +187,8 @@ export class TorrentContents {
         length: file.length,
         audio,
         subtitles,
-        images
+        images,
+        episode: readEpisodeMarker({ name: file.name, folders: file.folders })
       };
       this.#items.push(item);
       claimed.add(file.fileIndex);
@@ -190,6 +225,29 @@ export class TorrentContents {
    */
   get items() {
     return this.#items;
+  }
+
+  /**
+   * What the pictures are taken together — one film, a series, or not known.
+   *
+   * @returns {ContentsShape}
+   */
+  get shape() {
+    if (this.#items.length === 1) {
+      return "single";
+    }
+    const marked = this.#items.filter((item) => item.episode !== null);
+    if (marked.length < 2) {
+      return "undetermined";
+    }
+    // Two differently named shows under one torrent are two works, whatever
+    // their numbers say. Only the names that state a show are compared.
+    const shows = new Set(
+      marked
+        .map((item) => showKey(item.episode.showHint))
+        .filter((key) => key.length > 0)
+    );
+    return shows.size <= 1 ? "series" : "undetermined";
   }
 
   /**

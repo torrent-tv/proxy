@@ -128,7 +128,7 @@ export function predictPlaybackReadiness(input = {}) {
     curve: rateCurve(track.readings, now),
     bitsPerMediaSecond: averageBitsPerMediaSecond(track, track.segments,
       new Set(Array.isArray(track.readySegmentIndices) ? track.readySegmentIndices : [])),
-    segments: track.segments
+    segments: predictedMediaSegments(track.segments)
       .filter((segment) => Number.isInteger(segment?.index) &&
         Number.isFinite(segment?.startSeconds) && Number.isFinite(segment?.endSeconds) &&
         segment.endSeconds > segment.startSeconds && segment.endSeconds > position)
@@ -386,6 +386,25 @@ export function predictPlaybackReadiness(input = {}) {
   const readiness = schedule(high);
   return result(false, high, buffered, reserve, immediate.neededSeconds,
     "minimum-safe-delay", preparedSegments, readiness.bufferedAtStart);
+}
+
+/** Predict only unknown cuts in the same clock as the measured track. */
+function predictedMediaSegments(segments) {
+  const anchors = segments.filter(({ mediaRanges }) => mediaRanges?.length > 0);
+  return segments.map((segment) => {
+    if (segment.mediaRanges !== undefined && segment.mediaRanges !== null || anchors.length === 0) return segment;
+    const previous = anchors.findLast(({ index }) => index < segment.index);
+    const next = anchors.find(({ index }) => index > segment.index);
+    const nominalLeft = previous?.endSeconds ?? next.startSeconds;
+    const actualLeft = previous?.mediaRanges.at(-1).end ?? next.mediaRanges[0].start;
+    const nominalRight = next?.startSeconds ?? nominalLeft;
+    const actualRight = next?.mediaRanges[0].start ?? actualLeft;
+    const scale = nominalRight > nominalLeft ? (actualRight - actualLeft) / (nominalRight - nominalLeft) : 1;
+    return { ...segment, mediaRanges: [{
+      start: actualLeft + (segment.startSeconds - nominalLeft) * scale,
+      end: actualLeft + (segment.endSeconds - nominalLeft) * scale
+    }] };
+  });
 }
 
 function rateCurve(readings, now) {

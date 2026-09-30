@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { fmp4Format } from "../services/encode/segment-formats/fmp4.js";
-import { readPresentationRanges, walkBoxes } from "../services/encode/segment-formats/mp4-boxes.js";
+import { continuePresentationRanges, readPresentationRanges, walkBoxes } from "../services/encode/segment-formats/mp4-boxes.js";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -125,6 +125,17 @@ test("client clock projection accounts for shared edits and audio initPTS", () =
     initBytes: videoHeader, timestampOffsetSeconds: -2000 / 24000
   });
   assert.deepEqual(projected, video);
+});
+
+test("a variable-rate frame crosses a cut only with continuous decode samples", () => {
+  const first = readPresentationRanges(Buffer.concat([init(0, 0), fragment(0, 0)]));
+  const continuous = readPresentationRanges(Buffer.concat([init(0, 0), fragment(1000, 72000)]));
+  assert.equal(continuePresentationRanges(first, continuous)[0].end, continuous[0].start);
+  const missing = readPresentationRanges(Buffer.concat([init(0, 0), fragment(24000, 72000)]));
+  assert.deepEqual(continuePresentationRanges(first, missing), first);
+  const audioFirst = readPresentationRanges(Buffer.concat([init(0, 0, "soun"), fragment(0, 0)]));
+  const audioNext = readPresentationRanges(Buffer.concat([init(0, 0, "soun"), fragment(1000, 72000)]));
+  assert.deepEqual(continuePresentationRanges(audioFirst, audioNext), audioFirst);
 });
 
 test("a viewer retains only finite per-track player clock offsets", () => {

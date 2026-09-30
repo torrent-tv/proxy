@@ -53,7 +53,7 @@ import { mpegtsFormat } from "./mpegts.js";
  *   { start: number, end: number }[] | undefined} [readMediaRanges] - Actual
  *   served presentation intervals, or undefined until their header is available.
  * @property {(ranges: { start: number, end: number }[], context: {
- *   initBytes: Buffer | null, timestampOffsetSeconds?: number }) =>
+ *   initBytes: Buffer | null, timestampOffsetSeconds?: number, nextRanges?: Array<{ start: number, end: number }> }) =>
  *   { start: number, end: number }[]} [clientMediaRanges] - Project parsed
  *   presentation intervals onto the clock reported by this viewer's player.
  */

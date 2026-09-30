@@ -358,6 +358,11 @@ export function buildRunCommand({
   // the cut points and, when re-encoding, as the keyframes to force — one
   // list, so the two cannot drift apart.
   const explicitTimes = segmentFormat.explicitTimesMuxerArgs?.() ?? null;
+  // Matroska seeks begin without the preceding decode timestamps. Copy one
+  // preceding cut privately so reordered frames have established DTS before
+  // the first requested cut. It is never published over another run's output.
+  const inputIndex = !transcodeVideo && !audioOnly && explicitTimes && safeIndex > 0
+    ? safeIndex - 1 : safeIndex;
   // A COPY is cut by this list whatever grid it ended up on. Even when no
   // keyframe index could be read and the boundaries are a plain grid, saying
   // them outright is what keeps the playlist and the muxer agreeing — ffmpeg
@@ -382,7 +387,7 @@ export function buildRunCommand({
   // playlist and its own cuts agree from the start. What they may not do is
   // move the cuts of a session whose playlist is already being read.
   const gridCutTimes = explicitTimes && (!transcodeVideo || timeline.cutGrid === "keyframe")
-    ? segmentCutTimesFrom(publishedGridFor(timeline), safeIndex)
+    ? segmentCutTimesFrom(publishedGridFor(timeline), inputIndex)
     : null;
   // Cut times are stated on the grid, for both branches.
   //
@@ -443,9 +448,11 @@ export function buildRunCommand({
   // back on to reach it; on the uniform grid it is a plain offset. This
   // follows the GRID, not whether the video is re-encoded — a variant cut on
   // the source's keyframes has to seek to them like the copy it accompanies.
+  const inputStartSeconds = inputIndex === safeIndex ? startSeconds :
+    publishedStartTime(timeline, inputIndex, segmentDurationSec);
   const seekSeconds = timeline.cutGrid === "keyframe"
-    ? startSeconds + sourceStartTime
-    : startSeconds;
+    ? inputStartSeconds + sourceStartTime
+    : inputStartSeconds;
   // Two-step seek when we have a real keyframe map: jump to a KNOWN-valid
   // keyframe (coarse, before -i — safe because WE sourced it from ffprobe,
   // not the container's own on-the-fly seek/index) and trim the short
@@ -477,7 +484,7 @@ export function buildRunCommand({
   // The search stays for a grid restored without its source clock, which is the
   // only case that has nothing to carry.
   const carriedKeyframe = timeline.cutGrid === "keyframe" && typeof timeline.sourceStartOf === "function"
-    ? timeline.sourceStartOf(safeIndex)
+    ? timeline.sourceStartOf(inputIndex)
     : null;
   const snappedKeyframe = Number.isFinite(carriedKeyframe)
     ? carriedKeyframe
@@ -689,7 +696,7 @@ export function buildRunCommand({
       "-segment_time_delta",
       "0.05",
       "-segment_start_number",
-      String(safeIndex),
+      String(inputIndex),
       // THE ENCODER SAYS WHEN A PIECE IS FINISHED, on a channel of its own.
       //
       // Measured on the addon host 2026-09-05: a name appears in this list when

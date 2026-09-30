@@ -832,7 +832,12 @@ export class EncodeRuns {
       // Why this encoder exists, recorded with its argument list. It used to be
       // handed to a separate `start` call; there is no separate call now.
       because,
-      onClosed: (name) => this.#host.segmentFiles.publish(session.outputKey ?? "", name, session.segmentFormat),
+      onClosed: (name) => {
+        const index = session.segmentFormat.segmentIndexFromName(
+          session.segmentFormat.servedNameOf?.(name) ?? name);
+        if (Number.isInteger(index) && index < safeIndex) return null;
+        return this.#host.segmentFiles.publish(session.outputKey ?? "", name, session.segmentFormat);
+      },
       onEnded: (ended) => this.noteRunEnded(session, run, ended)
     });
     // THE ONE FAULT THAT IS OTHERWISE SILENT, asked before this run produces a

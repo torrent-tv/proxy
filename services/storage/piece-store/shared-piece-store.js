@@ -933,13 +933,19 @@ export class SharedPieceStore {
     // THREE pieces reported 812 MB committed against 68 MB allowed, 739 blocks
     // allocated and 676 still alive, and the process was killed at 4.37 GB.
     const displaced = this.#buffers.get(index);
-    this.#buffers.set(index, buffer);
     if (displaced !== undefined && displaced !== buffer) {
       this.#counters.blocksDisplaced += 1;
-      this.#returnBlock(displaced);
+      // A reader may still hold the existing buffer pinned. Verified bytes for
+      // this index are identical, so retain that buffer and return the duplicate.
+      this.#returnBlock(buffer);
+      this.#lru.touch(index);
+      this.#noteProgress();
+      return displaced;
     }
+    this.#buffers.set(index, buffer);
     this.#lru.touch(index);
     this.#noteProgress();
+    return buffer;
   }
 
   /**
@@ -1394,12 +1400,9 @@ export class SharedPieceStore {
         return null;
       }
       this.#counters.fromWholeFile += 1;
-      const release = await this.#claimSlotOrNull();
-      if (release === null) {
-        // No block to put it in. The caller gets the bytes anyway; what it
-        // loses is only that the next read pays for this one again.
-        return whole;
-      }
+      // Fragment readers require shared memory, including when the bytes now
+      // live in an assembled file. Wait for the same reservation as disk reads.
+      const release = await this.#claimSlot();
       try {
         return this.#registerPiece(index, this.#copyIntoNewBuffer(index, whole));
       } finally {
@@ -1432,11 +1435,11 @@ export class SharedPieceStore {
         this.#returnBlock(target);
         throw error;
       }
-      this.#registerPiece(index, target);
+      const registered = this.#registerPiece(index, target);
       this.#counters.fromDisk += 1;
       this.#counters.revivals += 1;
       this.#noteRevival(index);
-      return target;
+      return registered;
     } finally {
       release?.();
       releaseDisk();

@@ -761,8 +761,7 @@ test("a run on the keyframe grid is given no trim to apply", () => {
       videoEncoder: { name: "libx264" },
       segmentDurationSec: SEGMENT_SECONDS
     });
-    // Exactly one `-ss`, and it is the input seek: the trim is not there to be
-    // inherited by the cuts.
+    // One input seek establishes decode order in the preceding private cut.
     assert.equal(
       args.filter((one) => one === "-ss").length,
       1,
@@ -770,9 +769,10 @@ test("a run on the keyframe grid is given no trim to apply", () => {
     );
     const seek = Number(args[args.indexOf("-ss") + 1]);
     assert.ok(
-      Math.abs(seek - grid.sourceTimes[index]) < 0.2,
-      `run at #${index} seeks to ${seek}, not to its own keyframe ${grid.sourceTimes[index]}`
+      Math.abs(seek - grid.sourceTimes[index - 1]) < 0.2,
+      `run at #${index} seeks to ${seek}, not to the preceding keyframe ${grid.sourceTimes[index - 1]}`
     );
+    assert.equal(Number(args[args.indexOf("-segment_start_number") + 1]), index - 1);
   }
 });
 

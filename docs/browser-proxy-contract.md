@@ -101,6 +101,15 @@ remaining-work estimates and share the measured download rate of their torrent.
 The browser reports buffer state and delivery measurements, but does not
 calculate or override readiness.
 
+Service work is the integral of a nonnegative measured-rate forecast. The latest
+rate relaxes over the observed measurement span toward the lower of its latest
+value and the recent mean; the measurement history covers the output look-ahead.
+A positive measured rate cannot become permanently zero from an old declining
+linear fit. A measured zero remains zero until a new measurement arrives.
+The reported loader limit is bounded below by the browser buffer already held.
+During startup waiting the browser refreshes stale delivery measurements through
+the existing link probe and reports their age to avoid clock-offset errors.
+
 ## Subtitles
 
 `GET /api/subtitles` requires `sourceKey` and `fileIndex`. Without `trackIndex`

@@ -6,14 +6,15 @@
  * measurements and physical limits: source bytes and download rate, encoded
  * media and encoder rate, segment sizes and client-link rate, the existing
  * browser buffer, its capacity, the proxy look-ahead, and the measured reserve
- * for interruptions. Rates are extrapolated from their measured linear trend;
- * there are no fitted weights or rate multipliers.
+ * for interruptions. A measured rate relaxes toward the lower of its latest
+ * value and its observed mean over the measurement span. Its integral remains
+ * unbounded for a positive measured rate; an old slope cannot invent a permanent
+ * cessation of service. There are no fitted weights or rate multipliers.
  */
 
 /**
- * The mean rate predicted over a horizon by the trend in all supplied
- * measurements. With no trend this is the measured rate. The regression treats
- * every measurement equally.
+ * The mean rate predicted over a horizon by the integral of the measured rate.
+ * Every supplied measurement contributes equally to the observed mean.
  *
  * @param {Array<{ at: number, value: number }>} readings
  * @param {number} now
@@ -30,48 +31,36 @@ export function forecastRate(readings, now = Date.now(), horizonSeconds = 0) {
 }
 
 /**
- * Constant-space measurements for one rate trend. Linear regression can be
- * evaluated from these sums without retaining every poll for the life of a
- * film.
+ * Measurements over the output's existing look-ahead horizon. The oldest
+ * boundary sample is retained until another sample replaces it, so a repeated
+ * report never changes the history or invents a new measurement.
  */
 export class RateTrend {
-  #originAt = null;
-  #lastAt = null;
-  #count = 0;
-  #sumTime = 0;
-  #sumTimeSquared = 0;
-  #sumValue = 0;
-  #sumTimeValue = 0;
+  #readings = [];
+  #horizonMs;
+
+  constructor(horizonSeconds = Number.POSITIVE_INFINITY) {
+    this.#horizonMs = Math.max(0, horizonSeconds) * 1000;
+  }
 
   add(at, value) {
     if (!Number.isFinite(at) || !Number.isFinite(value) || value < 0 ||
-      (this.#lastAt !== null && at <= this.#lastAt)) {
+      at <= (this.#readings.at(-1)?.at ?? Number.NEGATIVE_INFINITY)) {
       return false;
     }
-    this.#originAt ??= at;
-    const elapsed = (at - this.#originAt) / 1000;
-    this.#count += 1;
-    this.#sumTime += elapsed;
-    this.#sumTimeSquared += elapsed ** 2;
-    this.#sumValue += value;
-    this.#sumTimeValue += elapsed * value;
-    this.#lastAt = at;
+    this.#readings.push({ at, value });
+    const cutoff = at - this.#horizonMs;
+    while (this.#readings.length > 1 && this.#readings[1].at <= cutoff) {
+      this.#readings.shift();
+    }
     return true;
   }
 
   snapshot() {
-    if (this.#count === 0) {
+    if (this.#readings.length === 0) {
       return null;
     }
-    return {
-      count: this.#count,
-      originAt: this.#originAt,
-      lastAt: this.#lastAt,
-      sumTime: this.#sumTime,
-      sumTimeSquared: this.#sumTimeSquared,
-      sumValue: this.#sumValue,
-      sumTimeValue: this.#sumTimeValue
-    };
+    return summarizeRate(this.#readings);
   }
 }
 
@@ -100,7 +89,9 @@ export function predictPlaybackReadiness(input = {}) {
   const duration = finiteNonNegative(input.durationSeconds);
   const remaining = Math.max(0, duration - position);
   const buffered = finiteNonNegative(input.bufferedAheadSeconds);
-  const capacity = finiteNonNegative(input.bufferLimitSeconds);
+  // A loader target can be lowered after a fragment retry. Bytes already held
+  // prove a larger capacity, even when an older page reports only that target.
+  const capacity = Math.max(buffered, finiteNonNegative(input.bufferLimitSeconds));
   const reserve = Math.min(remaining, finiteNonNegative(input.reserveSeconds));
   const lookahead = finiteNonNegative(input.lookaheadSeconds);
   const tracks = Array.isArray(input.tracks) ? input.tracks : [];
@@ -237,32 +228,6 @@ export function predictPlaybackReadiness(input = {}) {
     }
   }
 
-  const rateRecoveryDelays = [];
-  const sourceDemandByService = new Map();
-  for (const sourceId of new Set(jobs.flatMap(({ sourceIntervals }) => [...sourceIntervals.keys()]))) {
-    const source = sourceState.get(sourceId);
-    const demand = sourceDemandByService.get(source.serviceId) ?? new Map();
-    demand.set(sourceId, Number(source.source.bytesPerMediaSecond));
-    sourceDemandByService.set(source.serviceId, demand);
-  }
-  for (const [serviceId, demandBySource] of sourceDemandByService) {
-    const demand = [...demandBySource.values()].reduce((sum, value) => sum + value, 0);
-    rateRecoveryDelays.push(downloadServices.get(serviceId).curve.timeAtLeast(demand));
-  }
-  for (const { track, curve } of trackState) {
-    if (jobs.some((job) => job.track === track && !job.produced)) {
-      rateRecoveryDelays.push(curve.timeAtLeast(1));
-    }
-  }
-  const linkDemand = trackState.reduce((sum, { track, bitsPerMediaSecond }) =>
-    sum + (jobs.some((job) => job.track === track) ? bitsPerMediaSecond : 0), 0);
-  if (linkDemand > 0) {
-    rateRecoveryDelays.push(link.timeAtLeast(linkDemand));
-  }
-  const rateRecoveryDelay = rateRecoveryDelays
-    .filter(Number.isFinite)
-    .reduce((latest, delay) => Math.max(latest, delay), 0);
-
   jobs.sort((left, right) => left.segment.startSeconds - right.segment.startSeconds ||
     left.segment.endSeconds - right.segment.endSeconds || left.trackIndex - right.trackIndex);
 
@@ -353,6 +318,7 @@ export function predictPlaybackReadiness(input = {}) {
     return { safe: safety.safe,
       bufferedAtStart: safety.bufferedAtStart,
       neededSeconds: safety.neededSeconds,
+      completionTimes: usefulCompletions.map(({ at }) => at),
       finishAt: usefulCompletions.reduce((latest, item) => Math.max(latest, item.at), 0) };
   };
 
@@ -366,7 +332,7 @@ export function predictPlaybackReadiness(input = {}) {
   if (immediate.safe) {
     return result(true, 0, buffered, reserve, 0, "trajectory-safe-now", preparedSegments);
   }
-  const searchLimit = Math.max(maximumUsefulDelay, rateRecoveryDelay);
+  const searchLimit = maximumUsefulDelay;
   if (!(searchLimit > 0)) {
     return result(false, null, buffered, reserve, null, "no-safe-start-found", preparedSegments);
   }
@@ -376,7 +342,7 @@ export function predictPlaybackReadiness(input = {}) {
   const breakpoints = [...new Set([
     maximumUsefulDelay,
     searchLimit,
-    ...rateRecoveryDelays.filter(Number.isFinite)
+    ...prefillSchedule.completionTimes
   ])]
     .filter((delay) => delay > 0 && delay <= searchLimit)
     .sort((left, right) => left - right);
@@ -412,17 +378,9 @@ export function predictPlaybackReadiness(input = {}) {
 
 function rateCurve(readings, now) {
   if (readings && Number.isFinite(readings.count) && readings.count > 0 &&
-    Number.isFinite(readings.originAt) && Number.isFinite(readings.lastAt) &&
-    Number.isFinite(readings.sumTime) && Number.isFinite(readings.sumTimeSquared) &&
-    Number.isFinite(readings.sumValue) && Number.isFinite(readings.sumTimeValue)) {
-    const { count, originAt, sumTime, sumTimeSquared, sumValue, sumTimeValue } = readings;
-    const meanAt = sumTime / count;
-    const meanValue = sumValue / count;
-    const denominator = sumTimeSquared - count * meanAt ** 2;
-    const numerator = sumTimeValue - count * meanAt * meanValue;
-    const slope = denominator > 0 ? numerator / denominator : 0;
-    const current = Math.max(0, meanValue + slope * ((now - originAt) / 1000 - meanAt));
-    return rateCurveFrom(current, slope);
+    Number.isFinite(readings.lastAt) && Number.isFinite(readings.lastValue) &&
+    Number.isFinite(readings.meanValue) && Number.isFinite(readings.spanSeconds)) {
+    return rateCurveFrom(readings, now);
   }
   const ordered = (Array.isArray(readings) ? readings : [])
     .filter((reading) => Number.isFinite(reading?.at) && Number.isFinite(reading?.value) && reading.value >= 0)
@@ -433,69 +391,68 @@ function rateCurve(readings, now) {
     return null;
   }
 
-  const points = ordered.map((reading) => ({
-    at: (reading.at - now) / 1000,
-    value: reading.value
-  }));
-  const meanAt = points.reduce((sum, point) => sum + point.at, 0) / points.length;
-  const meanValue = points.reduce((sum, point) => sum + point.value, 0) / points.length;
-  const numerator = points.reduce((sum, point) =>
-    sum + (point.at - meanAt) * (point.value - meanValue), 0);
-  const denominator = points.reduce((sum, point) =>
-    sum + (point.at - meanAt) ** 2, 0);
-  const slope = denominator > 0 ? numerator / denominator : 0;
-  const current = Math.max(0, meanValue - slope * meanAt);
-  return rateCurveFrom(current, slope);
+  return rateCurveFrom(summarizeRate(ordered), now);
 }
 
-function rateCurveFrom(current, slope) {
-  const zeroAt = slope < 0 ? -current / slope : Number.POSITIVE_INFINITY;
-
-  const workBy = (seconds) => {
-    const span = Math.min(Math.max(0, seconds), zeroAt);
-    return Math.max(0, current * span + (slope * span ** 2) / 2);
-  };
-  const timeFor = (work) => {
-    if (!(work > 0)) {
-      return 0;
-    }
-    if (!(current > 0) && !(slope > 0)) {
-      return Number.POSITIVE_INFINITY;
-    }
-    const discriminant = current ** 2 + 2 * slope * work;
-    if (discriminant < 0) {
-      return Number.POSITIVE_INFINITY;
-    }
-    if (slope < 0 && work > workBy(zeroAt)) {
-      return Number.POSITIVE_INFINITY;
-    }
-    if (slope === 0) {
-      return current > 0 ? work / current : Number.POSITIVE_INFINITY;
-    }
-    const root = Math.sqrt(discriminant);
-    const denominator = current + root;
-    return denominator > 0 ? (2 * work) / denominator : Number.POSITIVE_INFINITY;
-  };
+function summarizeRate(readings) {
+  const latest = readings.at(-1);
   return {
-    timeAtLeast: (target) => {
-      if (!Number.isFinite(target) || target < 0) {
-        return Number.POSITIVE_INFINITY;
-      }
-      if (current >= target) {
-        return 0;
-      }
-      return slope > 0 ? (target - current) / slope : Number.POSITIVE_INFINITY;
-    },
-    rateAt: (seconds) => Math.max(0, current + slope * Math.min(Math.max(0, seconds), zeroAt)),
+    count: readings.length,
+    lastAt: latest.at,
+    lastValue: latest.value,
+    meanValue: readings.reduce((sum, reading) => sum + reading.value, 0) / readings.length,
+    spanSeconds: (latest.at - readings[0].at) / 1000
+  };
+}
+
+function rateCurveFrom({ lastAt, lastValue, meanValue, spanSeconds }, now) {
+  const baseline = Math.max(0, Math.min(lastValue, meanValue));
+  const span = Math.max(Number.EPSILON, spanSeconds);
+  const age = Math.max(0, (now - lastAt) / 1000);
+  const excess = Math.max(0, lastValue - baseline) * Math.exp(-age / span);
+  // r(t) = baseline + excess * exp(-t/span).
+  // W(t) = integral(0..t, r(u)du). Positive measured service has no finite
+  // total-work ceiling merely because an old sample was faster.
+  const workBy = (seconds) => rateIntegral(Math.max(0, seconds), baseline, excess, span);
+  return {
+    rateAt: (seconds) => baseline + excess * Math.exp(-Math.max(0, seconds) / span),
     workBy,
     finish: (work, startAt) => {
-      if (!(work > 0)) {
-        return Math.max(0, startAt);
-      }
       const start = Math.max(0, startAt);
-      return start + (timeFor(work + workBy(start)) - start);
+      return start + invertRateIntegral(Math.max(0, work), baseline,
+        excess * Math.exp(-start / span), span);
     }
   };
+}
+
+function rateIntegral(seconds, baseline, excess, span) {
+  return baseline * seconds - excess * span * Math.expm1(-seconds / span);
+}
+
+/** Invert the strictly increasing service integral, with no playback rule. */
+function invertRateIntegral(work, baseline, excess, span) {
+  if (work === 0) {
+    return 0;
+  }
+  if (!(baseline > 0) || !Number.isFinite(work)) {
+    return Number.POSITIVE_INFINITY;
+  }
+  let low = 0;
+  let high = work / baseline;
+  if (excess === 0) {
+    return high;
+  }
+  while (true) {
+    const middle = (low + high) / 2;
+    if (middle === low || middle === high) {
+      return high;
+    }
+    if (rateIntegral(middle, baseline, excess, span) >= work) {
+      high = middle;
+    } else {
+      low = middle;
+    }
+  }
 }
 
 function averageBitsPerMediaSecond(track, segments, ready) {

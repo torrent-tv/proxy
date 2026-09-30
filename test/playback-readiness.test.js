@@ -107,12 +107,14 @@ test("does not produce an ETA without a client-link measurement", () => {
   assert.equal(forecast.reason, "link-rate-unavailable");
 });
 
-test("rate trend projects the measured linear trend without a fitted weight", () => {
+test("rate forecast does not extrapolate acceleration beyond observed service", () => {
   const trend = new RateTrend();
   trend.add(9_000, 2);
   trend.add(10_000, 4);
 
-  assert.equal(forecastRate(trend.snapshot(), 10_000, 2), 6);
+  const predicted = forecastRate(trend.snapshot(), 10_000, 2);
+  assert.ok(predicted > 3 && predicted < 4);
+  assert.ok(forecastRate(trend.snapshot(), 100_000, 2) >= 3);
 });
 
 test("uses each track's own segment boundaries and requires continuous coverage on both tracks", () => {
@@ -331,7 +333,7 @@ test("shares one torrent download rate across distinct video and audio files", (
   assert.ok(Math.abs(forecast.delaySeconds - 4.032) < 1e-8);
 });
 
-test("finds a safe interval when rising encode speed and falling link speed make the forecast non-monotonic", () => {
+test("does not invent future encode acceleration to start an unsustainable output", () => {
   const now = 1_000;
   const forecast = predictPlaybackReadiness({
     now,
@@ -360,7 +362,81 @@ test("finds a safe interval when rising encode speed and falling link speed make
   });
 
   assert.equal(forecast.ready, false);
-  assert.equal(forecast.reason, "minimum-safe-delay");
-  assert.ok(Number.isFinite(forecast.delaySeconds));
-  assert.ok(forecast.delaySeconds > 4 && forecast.delaySeconds < 5);
+  assert.equal(forecast.reason, "no-safe-start-found");
+  assert.equal(forecast.delaySeconds, null);
+});
+
+test("a faster old probe cannot turn positive delivery into a permanent zero rate", () => {
+  const trend = new RateTrend(120);
+  trend.add(0, 112_400_000);
+  trend.add(66_757, 37_640_000);
+  assert.equal(forecastRate(trend.snapshot(), 20 * 60_000, 1443.97), 37_640_000);
+  assert.equal(trend.add(66_757, 37_640_000), false);
+});
+
+test("the measurement window retains one boundary sample and discards older history", () => {
+  const trend = new RateTrend(2);
+  trend.add(0, 100);
+  trend.add(1_000, 40);
+  trend.add(4_000, 20);
+  assert.equal(trend.snapshot().count, 2);
+  assert.equal(trend.snapshot().meanValue, 30);
+});
+
+function preparedEpisode(bufferLimitSeconds, linkReadings) {
+  const durationSeconds = 1443.97;
+  const boundaries = [0, 10.01, 18.977, 29.488];
+  for (let index = 4; index <= 197; index += 1) {
+    boundaries.push(29.488 + (durationSeconds - 29.488) * (index - 3) / 194);
+  }
+  const segments = boundaries.slice(0, -1).map((startSeconds, index) => ({
+    index, startSeconds, endSeconds: boundaries[index + 1]
+  }));
+  const tracks = [9_257_176.8, 189_000].map((bitsPerMediaSecond, index) => ({
+    id: String(index),
+    sourceIds: ["source"],
+    processedSeconds: 1437.269,
+    bitsPerMediaSecond,
+    readings: [],
+    segments,
+    readySegmentIndices: segments.map(({ index }) => index),
+    segmentSizesBytes: new Map(segments.map((segment) => [segment.index,
+      (segment.endSeconds - segment.startSeconds) * bitsPerMediaSecond / 8]))
+  }));
+  return {
+    now: 20 * 60_000,
+    positionSeconds: 0,
+    durationSeconds,
+    bufferedAheadSeconds: 19.187,
+    bufferLimitSeconds,
+    reserveSeconds: 5.674,
+    lookaheadSeconds: 120,
+    requiredAudio: true,
+    sources: [{ id: "source", complete: false, bytesPerMediaSecond: 1, readings: [{ at: 0, value: 0 }] }],
+    tracks,
+    linkReadings
+  };
+}
+
+test("starts a prepared episode despite an old declining link measurement", () => {
+  const forecast = predictPlaybackReadiness(preparedEpisode(120, [
+    { at: 0, value: 112_400_000 }, { at: 66_757, value: 37_640_000 }
+  ]));
+  assert.equal(forecast.preparedSegments, 394);
+  assert.equal(forecast.ready, true);
+  assert.equal(forecast.reason, "trajectory-safe-now");
+});
+
+test("the measured buffer proves capacity even when the loader reports a smaller target", () => {
+  const forecast = predictPlaybackReadiness(preparedEpisode(9.092, [{ at: 0, value: 37_640_000 }]));
+  assert.equal(forecast.ready, true);
+});
+
+test("a measured source stop is not replaced by hypothetical future recovery", () => {
+  const forecast = predictPlaybackReadiness(input({ sources: [{
+    id: "source", complete: false, bytesPerMediaSecond: 1,
+    readings: [{ at: 9_000, value: 10 }, { at: 10_000, value: 0 }]
+  }] }));
+  assert.equal(forecast.ready, false);
+  assert.equal(forecast.delaySeconds, null);
 });

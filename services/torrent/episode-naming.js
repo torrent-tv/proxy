@@ -158,9 +158,10 @@ export function readEpisodeMarker({ name, folders = [] }) {
     }
     episodes = [Number(match[1])];
   }
-  // A four-digit number after a dash is a year far more often than an
-  // episode: `Film - 2024 [1080p]`.
-  if (dash && /^(?:19|20)\d\d$/.test(dash[1])) {
+  // A year where an episode number would be is a year far more often than an
+  // episode: `Film - 2024 [1080p]`, and `WALL-E.2008.mkv` reads as `E` then
+  // `2008`. Only the markers without a season can be fooled this way.
+  if ((dash || episodeOnly) && /^(?:19|20)\d\d$/.test(match[1])) {
     return null;
   }
   if (!episodes) {

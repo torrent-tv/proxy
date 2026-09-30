@@ -34,6 +34,10 @@ function makeDisk({ failWrite = false, failRead = false, holdWrites = false } = 
         resume();
       }
     },
+    finishWrites() {
+      holdWrites = false;
+      this.releaseWrites();
+    },
     get heldCount() {
       return held.length;
     },
@@ -150,15 +154,20 @@ test("a revival holds disk bytes across the asynchronous memory reservation", as
 
 test("an assembled-file revival returns shared bytes and preserves a concurrent pinned reader", async () => {
   const disk = makeDisk();
+  let reads = 0;
   const store = new SharedPieceStore(CHUNK, {
     length: CHUNK * 16, memoryBytes: CHUNK * 4, disk,
-    readPieceElsewhere: async ({ index }) => piece(index), name: "whole-file-read"
+    readPieceElsewhere: async ({ index }) => {
+      reads += 1;
+      return piece(index);
+    }, name: "whole-file-read"
   });
   try {
     store.pin(0);
     const [first, second] = await Promise.all([store.reside(0), store.reside(0)]);
     assert.ok(first.buffer instanceof SharedArrayBuffer);
     assert.equal(first.buffer, second.buffer);
+    assert.equal(reads, 1, "concurrent readers repeated the whole-file allocation and read");
     await put(store, 1);
     await put(store, 2);
     assert.deepEqual(Buffer.from(first.buffer, first.offset, first.length), piece(0));
@@ -166,6 +175,35 @@ test("an assembled-file revival returns shared bytes and preserves a concurrent 
     assert.equal(store.stats().outstanding, 0);
     store.unpin(0);
   } finally {
+    await new Promise((resolve) => store.destroy(resolve));
+  }
+});
+
+test("a waiting source reader receives a released slot before queued arrivals", async () => {
+  const disk = makeDisk({ holdWrites: true });
+  const { store } = makeStore({ pieces: 2, disk });
+  let arrived = false;
+  try {
+    await put(store, 0);
+    await put(store, 1);
+    store.pin(1);
+    disk.stored.set(4, piece(4));
+    const spilling = put(store, 2);
+    await until(() => disk.heldCount > 0, "an arriving piece occupies the spill slot");
+    const arrival = put(store, 3).then(() => { arrived = true; });
+    store.pin(4);
+    const reading = store.reside(4);
+    await until(() => store.stats().waitedForDisk >= 2, "both claims wait behind the spill");
+    disk.finishWrites();
+    const located = await reading;
+    assert.deepEqual(Buffer.from(located.buffer, located.offset, located.length), piece(4));
+    assert.equal(arrived, false, "an arriving piece overtook an already waiting reader");
+    store.unpin(1);
+    store.unpin(4);
+    await Promise.all([spilling, arrival]);
+    assert.equal(store.stats().outstanding, 0);
+  } finally {
+    disk.finishWrites();
     await new Promise((resolve) => store.destroy(resolve));
   }
 });

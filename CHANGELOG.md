@@ -1,3 +1,7 @@
+## 2.87.21
+
+- **Fix**: Give waiting source reads ordered memory reservations ahead of new piece arrivals, share concurrent revival work for one piece, and reserve memory before allocating assembled-file bytes.
+
 ## 2.87.20
 
 - **Fix**: Expose completed files through the worker pool adapter so source HTTP reads use the assembled file; open it before sending headers and return to torrent reads if it has already been removed.

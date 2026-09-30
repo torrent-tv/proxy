@@ -405,6 +405,12 @@ export class SharedPieceStore {
    */
   #readElsewhere = null;
 
+  /** Reads waiting for a reservation, in arrival order. */
+  #readerClaims = [];
+
+  /** One revival per piece, shared by concurrent readers. */
+  #revivals = new Map();
+
   /**
    * Whether a piece can be had elsewhere, asked without reading it — so a
    * spilled copy that has become a duplicate can be dropped.
@@ -858,7 +864,7 @@ export class SharedPieceStore {
     }
   }
 
-  async #claimSlot() {
+  async #claimSlot(forReader = false) {
     // How long THIS claim has been trying, kept here and not on the store.
     // It was a field, `#pinnedWaitStartedAt`, shared by the two waits inside
     // `#claimSlotOnce` — the one for the disk and the one for a piece that may
@@ -870,23 +876,36 @@ export class SharedPieceStore {
     // claimants a shared field is wrong anyway, since one caller giving up
     // would reset the wait of every other.
     const waitingSince = Date.now();
-    for (;;) {
-      if (this.#closed) {
-        throw new Error("Piece store is closed.");
+    const claimant = forReader ? {} : null;
+    if (claimant) this.#readerClaims.push(claimant);
+    try {
+      for (;;) {
+        if (this.#closed) {
+          throw new Error("Piece store is closed.");
+        }
+        // New arrivals must not take every released block ahead of an encoder
+        // already waiting to read. Readers share one ordered reservation queue.
+        const hasTurn = this.#readerClaims.length === 0 || this.#readerClaims[0] === claimant;
+        const isReserved = hasTurn && await this.#claimSlotOnce(waitingSince);
+        if (isReserved) {
+          let released = false;
+          return () => {
+            if (released) {
+              return;
+            }
+            released = true;
+            this.#outstandingPieces -= 1;
+            this.#noteProgress();
+          };
+        }
+        await this.#waitForSlot();
       }
-      const isReserved = await this.#claimSlotOnce(waitingSince);
-      if (isReserved) {
-        let released = false;
-        return () => {
-          if (released) {
-            return;
-          }
-          released = true;
-          this.#outstandingPieces -= 1;
-          this.#noteProgress();
-        };
+    } finally {
+      if (claimant) {
+        const at = this.#readerClaims.indexOf(claimant);
+        if (at >= 0) this.#readerClaims.splice(at, 1);
+        this.#wake();
       }
-      await this.#waitForSlot();
     }
   }
 
@@ -1395,15 +1414,14 @@ export class SharedPieceStore {
       // Not spilled, but the file it belongs to may be here whole — which is
       // the ordinary case once a film has been assembled and its spilled copy
       // dropped as the duplicate it had become.
-      const whole = await this.#fromWholeFiles(index);
-      if (!whole) {
-        return null;
-      }
-      this.#counters.fromWholeFile += 1;
+      if (this.#isElsewhere && !this.isInWholeFiles(index)) return null;
       // Fragment readers require shared memory, including when the bytes now
-      // live in an assembled file. Wait for the same reservation as disk reads.
-      const release = await this.#claimSlot();
+      // live in an assembled file. Reserve before allocating ordinary bytes.
+      const release = await this.#claimSlot(true);
       try {
+        const whole = await this.#fromWholeFiles(index);
+        if (!whole) return null;
+        this.#counters.fromWholeFile += 1;
         return this.#registerPiece(index, this.#copyIntoNewBuffer(index, whole));
       } finally {
         release();
@@ -1415,7 +1433,7 @@ export class SharedPieceStore {
     const releaseDisk = this.#disk.hold?.(index) ?? (() => {});
     let release = null;
     try {
-      release = await this.#claimSlot();
+      release = await this.#claimSlot(true);
       // Another caller may have brought it back while this one waited for a
       // slot. Registering a second buffer for the same piece would leave
       // whoever holds the first reading memory nothing evicts.
@@ -1860,7 +1878,12 @@ export class SharedPieceStore {
       return this.locate(index);
     }
 
-    const revived = await this.#revive(index);
+    let revival = this.#revivals.get(index);
+    if (!revival) {
+      revival = this.#revive(index).finally(() => this.#revivals.delete(index));
+      this.#revivals.set(index, revival);
+    }
+    const revived = await revival;
     if (revived === null) {
       return null;
     }

@@ -1,3 +1,7 @@
+## 2.87.18
+
+- **Fix**: Interpret variable-rate video sample presentation holds and movie-clock resolution as media coverage; project prepared intervals onto the browser's reported HLS timestamp offsets per track.
+
 ## 2.87.17
 
 - **Fix**: Measure re-encoded HLS fragment intervals against their separate init and served timestamp position, without caching an absent header as empty media.

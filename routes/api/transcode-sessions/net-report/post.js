@@ -110,6 +110,7 @@ export async function handleApiTranscodeSessionNetReportPost(req, reply, { outpu
       linkSampleAt: Number.isFinite(linkSampleAt) && linkSampleAt > 0 ? linkSampleAt : undefined,
       bufferedAheadSec,
       bufferedRanges: body.bufferedRanges,
+      timestampOffsets: body.bufferedRanges?.timestampOffsets,
       bufferLimitSeconds:
         Number.isFinite(bufferLimitSeconds) && bufferLimitSeconds > 0 ? bufferLimitSeconds : undefined,
       consumerId,

@@ -36,9 +36,10 @@ export class WorkerTorrentPool {
 
   /**
    * @param {{ memoryBytes?: number, stateDir?: string }} [options]
+   * @param {object | null} [client] - The worker interface; tests supply a fake.
    */
-  constructor(options = {}) {
-    this.#client = new TorrentWorkerClient(options);
+  constructor(options = {}, client = null) {
+    this.#client = client ?? new TorrentWorkerClient(options);
   }
 
   /**
@@ -93,6 +94,11 @@ export class WorkerTorrentPool {
 
   get wholeFileBytes() {
     return this.#client.wholeFileBytes ?? 0;
+  }
+
+  /** Completed files announced by the worker, shared with the HTTP reader. */
+  get wholeFiles() {
+    return this.#client.wholeFiles;
   }
 
   allowWholeFileBytes(bytes) {

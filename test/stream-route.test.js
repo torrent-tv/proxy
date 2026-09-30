@@ -14,6 +14,7 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { handleStreamGet } from "../routes/stream/get.js";
+import { WorkerTorrentPool } from "../services/torrent/worker/pool-adapter.js";
 
 /**
  * Minimal stand-ins for the parts of Fastify and the pool this route touches.
@@ -151,13 +152,18 @@ test("a file downloaded whole is served from disk without touching the torrent",
   try {
     const { req, reply, sent, deps } = harness({ method: "GET", range: "bytes=2-6" });
     let asked = false;
-    deps.torrentPool.getTorrent = async () => {
-      asked = true;
-      throw new Error("the torrent was asked for, which is what this avoids");
-    };
-    deps.torrentPool.wholeFiles = new Map([
+    const wholeFiles = new Map([
       ["abc/0", { path: where, length: bytes.length, name: "film.mkv" }]
     ]);
+    // Supply the worker boundary explicitly: no Worker or torrent is started.
+    deps.torrentPool = new WorkerTorrentPool({}, {
+      wholeFiles,
+      async getTorrent() {
+        asked = true;
+        throw new Error("the worker must not be asked for completed bytes");
+      }
+    });
+    assert.equal(deps.torrentPool.wholeFiles, wholeFiles);
     // The source key IS the identity — `torrent:<infohash>` — and it is all the
     // route needs to find the file.
     deps.sourceRegistry = { get: () => ({ sourceType: "torrent", source: "magnet:?xt=urn:btih:abc" }) };
@@ -169,8 +175,29 @@ test("a file downloaded whole is served from disk without touching the torrent",
     assert.equal(sent.code, 206);
     assert.equal(sent.headers["content-range"], `bytes 2-6/${bytes.length}`);
     assert.equal(sent.headers["content-length"], "5");
+    const chunks = [];
+    for await (const chunk of sent.body) chunks.push(chunk);
+    assert.deepEqual(Buffer.concat(chunks), bytes.subarray(2, 7));
   } finally {
     await fs.rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 20 });
+  }
+});
+
+test("an announced file removed before opening falls back to the torrent before headers", async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "stream-removed-"));
+  try {
+    const { req, reply, sent, opened, deps } = harness({ method: "GET", range: "bytes=2-6" });
+    deps.torrentPool.wholeFiles = new Map([
+      ["abc/0", { path: path.join(root, "missing"), length: 10, name: "gone.mkv" }]
+    ]);
+    deps.sourceRegistry = { get: () => ({ sourceType: "magnet", source: "magnet:?xt=urn:btih:abc" }) };
+    req.query = { sourceKey: "torrent:abc", fileIndex: "0" };
+    await handleStreamGet(req, reply, deps);
+    assert.deepEqual(opened, ["2-6"]);
+    assert.equal(deps.torrentPool.wholeFiles.size, 0);
+    assert.equal(sent.headers["content-range"], "bytes 2-6/5869669065");
+  } finally {
+    await fs.rm(root, { recursive: true, force: true });
   }
 });
 

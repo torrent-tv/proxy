@@ -1,3 +1,7 @@
+## 2.87.20
+
+- **Fix**: Expose completed files through the worker pool adapter so source HTTP reads use the assembled file; open it before sending headers and return to torrent reads if it has already been removed.
+
 ## 2.87.19
 
 - **Fix**: Return shared source bytes after whole-file assembly and retain the buffer held by concurrent readers instead of replacing it; fail malformed fragments explicitly rather than skipping source bytes.

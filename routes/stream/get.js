@@ -6,7 +6,7 @@
  * and HTTP 200 for full-file requests.
  */
 
-import { createReadStream } from "node:fs";
+import { open } from "node:fs/promises";
 import { parseRange } from "../../utils/parse-range.js";
 import { logger } from "../../utils/logger.js";
 
@@ -107,9 +107,10 @@ function wholeFileFor(torrentPool, sourceKey, fileIndex) {
  * @param {import("fastify").FastifyRequest} req
  * @param {import("fastify").FastifyReply} reply
  * @param {{ path: string, length: number, name: string }} file
+ * @param {import("node:fs/promises").FileHandle} handle - Already open; closed for HEAD.
  * @returns {Promise<void> | void}
  */
-function serveWholeFile(req, reply, file) {
+function serveWholeFile(req, reply, file, handle) {
   const disposition = `inline; filename*=UTF-8''${encodeURIComponent(file.name)}`;
   if (req.method === "HEAD") {
     reply.hijack();
@@ -128,13 +129,13 @@ function serveWholeFile(req, reply, file) {
   const range = parseRange(req.headers.range, file.length);
   if (!range) {
     reply.header("Content-Length", String(file.length));
-    return reply.send(createReadStream(file.path));
+    return reply.send(handle.createReadStream());
   }
   const { start, end } = range;
   reply.code(206);
   reply.header("Content-Length", String(end - start + 1));
   reply.header("Content-Range", `bytes ${start}-${end}/${file.length}`);
-  return reply.send(createReadStream(file.path, { start, end }));
+  return reply.send(handle.createReadStream({ start, end }));
 }
 
 export async function handleStreamGet(req, reply, { sourceRegistry, torrentPool, noteInputBytes = null }) {
@@ -157,7 +158,25 @@ export async function handleStreamGet(req, reply, { sourceRegistry, torrentPool,
   // nothing the torrent would have told us.
   const whole = wholeFileFor(torrentPool, sourceKey, fileIndex);
   if (whole) {
-    return serveWholeFile(req, reply, whole);
+    let handle;
+    try {
+      // Open before committing headers: the disk owner may have removed an
+      // announced file. An open descriptor also preserves a live POSIX read.
+      handle = await open(whole.path, "r");
+    } catch (error) {
+      if (error.code !== "ENOENT") throw error;
+      const key = `${sourceKey.slice("torrent:".length).toLowerCase()}/${fileIndex}`;
+      if (torrentPool.wholeFiles.get(key) === whole) torrentPool.wholeFiles.delete(key);
+    }
+    if (handle) {
+      if (req.method === "HEAD") await handle.close();
+      try {
+        return serveWholeFile(req, reply, whole, handle);
+      } catch (error) {
+        await handle.close().catch(() => undefined);
+        throw error;
+      }
+    }
   }
 
   let torrent;

@@ -1,3 +1,7 @@
+## 2.88.0
+
+- **New**: `GET /api/sources/:key/files` states, per picture, which episode its name says it is — season, the release's episode numbers, part, special, and the text before and after the marker — and whether the pictures are one work, a series or not known (`shape`). The page uses it to ask the metadata service which episode of a show each file is.
+
 ## 2.87.21
 
 - **Fix**: Give waiting source reads ordered memory reservations ahead of new piece arrivals, share concurrent revival work for one piece, and reserve memory before allocating assembled-file bytes.

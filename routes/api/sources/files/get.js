@@ -94,7 +94,13 @@ export async function handleApiSourceFilesGet(req, reply, { sourceRegistry, torr
       fileIndex: item.fileIndex,
       audio: item.audio.map((part) => part.fileIndex),
       subtitles: item.subtitles.map((part) => part.fileIndex),
-      images: item.images.map((part) => part.fileIndex)
-    }))
+      images: item.images.map((part) => part.fileIndex),
+      // What the name says about which episode this is, in the release's own
+      // numbering — read by the page to ask which episode of the show it is.
+      episode: item.episode
+    })),
+    // One film, a series, or not known — whether one identification of the
+    // whole release applies to its pictures at all.
+    shape: contents.shape
   });
 }

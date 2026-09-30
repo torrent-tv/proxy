@@ -59,7 +59,7 @@ class FakeProcess extends EventEmitter {
   }
 
   kill(signal) {
-    this.emit("exit", null, signal);
+    this.emit("close", null, signal);
   }
 }
 

@@ -11,6 +11,9 @@
  */
 
 import {
+  rebaseSegmentDecodeTimes,
+  neutralizeEmptyEdits,
+  readPresentationRanges,
   readSelfContainedStartSeconds,
   readTrackTimescales,
   readVideoSampleSize,
@@ -210,6 +213,7 @@ export const fmp4Format = {
     const { firstFragment } = findFragmentBounds(bytes);
     return firstFragment > 0 ? bytes.subarray(0, firstFragment) : null;
   },
+  prepareSharedInit: neutralizeEmptyEdits,
 
   /**
    * A piece with its init header removed, and the trailing random-access index
@@ -275,6 +279,7 @@ export const fmp4Format = {
    * transcode itself; the box walk never descends into `mdat`.
    */
   needsSegmentRewrite: true,
+  readMediaRanges: readPresentationRanges,
 
   /**
    * Whether a segment carries every track the init promises.
@@ -425,13 +430,16 @@ export const fmp4Format = {
     return readVideoSampleSize(initBytes);
   },
 
-  prepareSegmentBytes(bytes, { startSeconds, initBytes }) {
+  prepareSegmentBytes(bytes, { startSeconds, initBytes, rawBytes }) {
     if (!initBytes || initBytes.length === 0) {
       // No init cached yet — nothing to read timescales from. The player always
       // fetches `#EXT-X-MAP` before any segment, so this is not reachable in
       // practice; serve unmodified rather than guess a timescale.
       return bytes;
     }
-    return stampSegmentStartTime(bytes, startSeconds, readTrackTimescales(initBytes));
+    const ownInit = rawBytes ? this.extractInit(rawBytes) : null;
+    return ownInit
+      ? rebaseSegmentDecodeTimes(bytes, ownInit, initBytes)
+      : stampSegmentStartTime(bytes, startSeconds, readTrackTimescales(initBytes));
   }
 };

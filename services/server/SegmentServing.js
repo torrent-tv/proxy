@@ -419,6 +419,7 @@ export class SegmentServing {
         }
         const prepared = session.segmentFormat.prepareSegmentBytes(bytes, {
           startSeconds: stampStart,
+          rawBytes: raw,
           initBytes: this.#host.segmentStore.initOf(session.outputKey ?? "")
         });
         this.#host.encodeRuns.noteRunProducedSegment(session, filePath);
@@ -541,6 +542,7 @@ export class SegmentServing {
     const trueStart = selfContained ? format.readSegmentStartSeconds?.(raw) ?? null : null;
     const prepared = format.prepareSegmentBytes(bytes, {
       startSeconds: trueStart ?? this.#host.outputTimes.publishedStartTime(like, index),
+      rawBytes: raw,
       initBytes: this.#host.segmentStore.initOf(goneKey)
     });
     logger.info(`[hold] ${fileName} served from the stored pieces of ${goneKey}, the output that first answered it`);
@@ -802,7 +804,9 @@ export class SegmentServing {
         if (!found) {
           continue;
         }
-        const init = session.segmentFormat.extractInit(cached ?? await readFile(found));
+        const ownInit = session.segmentFormat.extractInit(cached ?? await readFile(found));
+        const init = ownInit && session.segmentFormat.prepareSharedInit ?
+          session.segmentFormat.prepareSharedInit(ownInit) : ownInit;
         if (!init || init.length === 0) {
           continue;
         }

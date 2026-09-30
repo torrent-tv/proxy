@@ -300,6 +300,26 @@ export class PieceDiskStore {
    * @param {number} [at] - Offset within the piece to start at.
    * @returns {Promise<number>} Bytes read.
    */
+  hold(index) {
+    if (!this.#stored.has(index)) {
+      return null;
+    }
+    this.#reading.set(index, (this.#reading.get(index) ?? 0) + 1);
+    let held = true;
+    return () => {
+      if (!held) {
+        return;
+      }
+      held = false;
+      const outstanding = (this.#reading.get(index) ?? 1) - 1;
+      if (outstanding > 0) {
+        this.#reading.set(index, outstanding);
+      } else {
+        this.#reading.delete(index);
+      }
+    };
+  }
+
   async read(index, target, at = 0) {
     if (!this.#stored.has(index)) {
       throw new Error(`Piece ${index} is not on disk.`);
@@ -338,6 +358,9 @@ export class PieceDiskStore {
    * @returns {void}
    */
   forget(index) {
+    if (this.#reading.has(index)) {
+      return;
+    }
     const length = this.#stored.get(index);
     if (length === undefined) {
       return;

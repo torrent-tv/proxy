@@ -44,7 +44,7 @@ class FakeProcess extends EventEmitter {
     this.signals.push(signal);
     // A real ffmpeg dies a moment later; the test wants the bookkeeping to
     // happen where it can be seen, so the exit is immediate and synchronous.
-    this.emit("exit", null, signal);
+    this.emit("close", null, signal);
   }
 }
 
@@ -172,7 +172,7 @@ test("how many encoders are running is answered by the one thing that makes them
   assert.equal(made.runningCount(), 2, "two processes on one output are two encoders, not one");
 
   // And a run that has ended is forgotten as it ends, not at the next pass.
-  processes.get(first).emit("exit", 0, null);
+  processes.get(first).emit("close", 0, null);
   assert.equal(made.runningCount(), 1);
 
   // A SUSPENDED run is stopped where it stands and is using nothing, so a cost
@@ -372,7 +372,7 @@ test("every ending is counted, and our own kill is not counted as normal", () =>
   wants(made, [{ from: 100, to: 130 }]);
   made.reconcile();
   const run = made.runsOn(PICTURE)[0];
-  processes.get(run).emit("exit", 255, null);
+  processes.get(run).emit("close", 255, null);
   wants(made, []);
   made.reconcile();
   const tally = made.endings();

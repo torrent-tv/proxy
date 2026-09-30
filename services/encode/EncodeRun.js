@@ -103,6 +103,10 @@ export class EncodeRun {
 
   /** Half a name left over from the last chunk of the encoder's own channel. */
   #closedTail = "";
+  #pendingClosed = null;
+  #inputTruncated = false;
+  #stderrReadTail = "";
+  #processExited = false;
 
   /**
    * The last piece named on the ready channel while the run was still running
@@ -242,7 +246,7 @@ export class EncodeRun {
     this.onProgress = typeof onProgress === "function" ? onProgress : () => {};
     // Told the NAME of every piece the encoder has closed. The name is the
     // proof it is whole; nothing else here can prove that.
-    this.onClosed = typeof onClosed === "function" ? onClosed : () => {};
+    this.onClosed = typeof onClosed === "function" ? onClosed : (name) => name;
     this.lastSegmentIndex = typeof lastSegmentIndex === "function" ? lastSegmentIndex : () => null;
     this.inputUnavailable = typeof inputUnavailable === "function" ? inputUnavailable : () => false;
     this.argsDescribed = argsDescribed;
@@ -420,6 +424,9 @@ export class EncodeRun {
       const line = String(chunk).trim();
       if (line.length > 0) {
         this.lastError = line;
+        const errorText = this.#stderrReadTail + String(chunk);
+        this.#inputTruncated ||= /Stream ends prematurely|Input\/output error|Error during demuxing/i.test(errorText);
+        this.#stderrReadTail = errorText.slice(-512);
         this.logger.warn(`ffmpeg #${this.from}..#${this.to} of ${this.address}: ${line}`);
       }
     });
@@ -428,7 +435,9 @@ export class EncodeRun {
       this.lastError = message;
       this.#finish(ENCODE_EXIT.FAILED, `the process could not be started: ${message}`, null, null);
     });
-    process.on("exit", (code, signal) => this.#onExit(code, signal));
+    // `close` follows drained stdio; `exit` can precede the final filename.
+    process.on("exit", () => { this.#processExited = true; });
+    process.on("close", (code, signal) => this.#onExit(code, signal));
   }
 
   /**
@@ -504,11 +513,23 @@ export class EncodeRun {
       if (name.length === 0) {
         continue;
       }
+      if (this.#stopping) continue;
+      // A subsequent closed file proves the previous one reached a cut.
+      // The last file can instead have been flushed by an input failure.
+      if (this.#pendingClosed !== null) {
+        this.#publishClosed(this.#pendingClosed);
+      }
+      this.#pendingClosed = name;
+    }
+  }
+
+  #publishClosed(name) {
       // ITS SERVED NAME, which is what whoever owns the disk gives it in answer.
       // ffmpeg writes a piece under a working name and reports that; the piece
       // becomes servable by being renamed, and everything below works in the
       // name a request can actually ask for.
-      const served = this.onClosed(name) ?? name;
+      const served = this.onClosed(name);
+      if (!served) return false;
       if (!this.#stopping) {
         this.#provenName = served;
       }
@@ -524,7 +545,7 @@ export class EncodeRun {
       if (Number.isInteger(index)) {
         this.noteProduced(index);
       }
-    }
+      return true;
   }
 
   noteSpeed(speedX) {
@@ -544,6 +565,12 @@ export class EncodeRun {
   stop(because) {
     if (this.#process === null || this.#ended) {
       return;
+    }
+    // A cut closed before our stop stays complete; the file flushed by the
+    // subsequent signal must never be published as that same proof.
+    if (this.#pendingClosed !== null && !this.#processExited && !this.#inputTruncated) {
+      this.#publishClosed(this.#pendingClosed);
+      this.#pendingClosed = null;
     }
     this.#stopping = true;
     this.#stopReason = because;
@@ -646,14 +673,24 @@ export class EncodeRun {
     // that exits cleanly at #11 has not finished, whatever the film's length;
     // and a run with no end has nothing but the film to be measured against.
     const endOfWork = Number.isFinite(endOfRun(this)) ? this.to : this.lastSegmentIndex();
+    const pendingIndex = this.#pendingClosed === null ? null :
+      this.indexOfName(this.#pendingClosed);
     const outcome = classifyEncodeExit({
       code,
-      producedThrough: this.#produced.size > 0 ? this.reached : null,
-      producedCount: this.#produced.size,
+      producedThrough: this.#inputTruncated ? this.reached :
+        (pendingIndex === this.head ? pendingIndex : this.reached),
+      producedCount: this.#produced.size + Number(pendingIndex === this.head && !this.#inputTruncated),
       lastSegmentIndex: endOfWork,
       inputUnavailable: this.inputUnavailable(this.lastError)
     });
     if (outcome === ENCODE_EXIT.COMPLETE) {
+      if (this.#pendingClosed !== null && !this.#inputTruncated) {
+        if (!this.#publishClosed(this.#pendingClosed)) {
+          this.#finish(ENCODE_EXIT.SHORT, "its final file could not be published", code, signal);
+          return;
+        }
+        this.#pendingClosed = null;
+      }
       this.#finish(ENCODE_EXIT.COMPLETE, "it reached the end of what it was given", code, signal);
       return;
     }

@@ -1,3 +1,10 @@
+## 2.87.16
+
+- **Fix**: Hold spilled source bytes across memory reservation so concurrent eviction cannot terminate ffmpeg input with a missing disk piece.
+- **Fix**: Publish a run's final closed segment only after complete input termination, retain earlier completed cuts, and drain output notifications before classifying an exit.
+- **Fix**: Preserve copied media presentation times when replacing per-segment headers with one shared init, including backward seeks after opening at a later position.
+- **Fix**: Feed measured segment intervals and separate browser track ranges into the service integral; retain media beyond holes, avoid duplicate transfer estimates, and price missing segments independently of another run's progress.
+
 ## 2.87.15
 
 - **Fix**: Integrate a bounded, nonnegative forecast of recent measured service rates, so an old faster link sample cannot predict permanent delivery failure and prevent playback of fully prepared media.

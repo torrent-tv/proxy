@@ -568,7 +568,8 @@ export class ViewerRequests {
       const segments = Array.from({ length: timeline?.segmentCount ?? 0 }, (_, index) => ({
         index,
         startSeconds: timeline.publishedStartOf(index),
-        endSeconds: timeline.publishedStartOf(index + 1)
+        endSeconds: timeline.publishedStartOf(index + 1),
+        mediaRanges: this.#host.segmentStore.mediaRangesOf(output.outputKey, index)
       }));
       const sourceIndexes = [output.spec.video?.fileIndex, output.spec.audio?.fileIndex]
         .filter((fileIndex) => Number.isInteger(fileIndex) && fileIndex >= 0);
@@ -618,6 +619,8 @@ export class ViewerRequests {
         : await this.#host.quality.observedStreamMbps(output);
       tracks.push({
         id: output.outputKey,
+        clientRanges: viewerReading?.bufferedRanges?.[output === session ? "video" : "audio"] ??
+          viewerReading?.bufferedRanges?.media,
         sourceIds,
         processedSeconds: trackProgress?.processedSeconds,
         bitsPerMediaSecond: Number.isFinite(observedMbps) && observedMbps > 0 ? observedMbps * 1_000_000 : 0,

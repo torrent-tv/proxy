@@ -109,6 +109,7 @@ export async function handleApiTranscodeSessionNetReportPost(req, reply, { outpu
       linkSampleMbps: Number.isFinite(linkSampleMbps) && linkSampleMbps > 0 ? linkSampleMbps : undefined,
       linkSampleAt: Number.isFinite(linkSampleAt) && linkSampleAt > 0 ? linkSampleAt : undefined,
       bufferedAheadSec,
+      bufferedRanges: body.bufferedRanges,
       bufferLimitSeconds:
         Number.isFinite(bufferLimitSeconds) && bufferLimitSeconds > 0 ? bufferLimitSeconds : undefined,
       consumerId,

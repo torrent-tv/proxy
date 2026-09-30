@@ -827,7 +827,8 @@ export class EncodeRuns {
         session.timeline?.segmentCount > 0 ? session.timeline.segmentCount - 1 : null,
       inputUnavailable: (message) => isInputUnavailable(message),
       onProgress: (report) => this.#noteRunProgress(session, run, report),
-      indexOfName: (name) => session.segmentFormat.segmentIndexFromName(name),
+      indexOfName: (name) => session.segmentFormat.segmentIndexFromName(
+        session.segmentFormat.servedNameOf?.(name) ?? name),
       // Why this encoder exists, recorded with its argument list. It used to be
       // handed to a separate `start` call; there is no separate call now.
       because,

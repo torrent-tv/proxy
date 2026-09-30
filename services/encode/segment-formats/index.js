@@ -20,6 +20,7 @@ import { mpegtsFormat } from "./mpegts.js";
  *   output timeline, from the session's segment-boundary table.
  * @property {Buffer | null} initBytes - The init segment being served for this
  *   session, when the format has one (fMP4 needs it to read track timescales).
+ * @property {Buffer} [rawBytes] - Self-contained bytes before removing their init.
  */
 
 /**

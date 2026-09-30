@@ -392,6 +392,7 @@ export class Viewer {
       linkSampleAgeMs = null,
       bufferedAheadSec,
       bufferedRanges,
+      timestampOffsets,
       bufferLimitSeconds,
       positionSeconds = null,
       playing,
@@ -435,6 +436,8 @@ export class Viewer {
           : now
         : this.netReport?.linkSampleMeasuredAt ?? null,
       bufferedAheadSec: held,
+      timestampOffsets: Object.fromEntries(["video", "audio"].filter((key) =>
+        Number.isFinite(timestampOffsets?.[key])).map((key) => [key, timestampOffsets[key]])),
       bufferedRanges: bufferedRanges && typeof bufferedRanges === "object" ?
         Object.fromEntries(["video", "audio", "media"].filter((key) => Array.isArray(bufferedRanges[key]))
           .map((key) => [key, bufferedRanges[key].slice(0, 256).filter((range) =>

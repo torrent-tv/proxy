@@ -16,6 +16,7 @@
  * @type {ReadonlySet<string>}
  */
 const CONTAINER_BOXES = new Set(["moov", "mvex", "trak", "mdia", "minf", "stbl", "edts", "moof", "traf"]);
+const presentationTracks = new WeakMap();
 
 /**
  * Walk the box tree, invoking `visit` for every box encountered.
@@ -179,8 +180,19 @@ export function readPresentationRanges(raw) {
   let trackId = null;
   let decodeTime = 0;
   let defaultDuration = 0;
+  let movieScale = 0;
+  let declaredTrack = null;
+  const kinds = new Map();
   walkBoxes(raw, (type, start, end) => {
-    if (type === "trex" && start + 20 <= end) {
+    if (type === "mvhd") {
+      const at = start + (raw[start] === 1 ? 20 : 12);
+      if (at + 4 <= end) movieScale = raw.readUInt32BE(at);
+    } else if (type === "tkhd") {
+      const at = start + (raw[start] === 1 ? 20 : 12);
+      if (at + 4 <= end) declaredTrack = raw.readUInt32BE(at);
+    } else if (type === "hdlr" && start + 12 <= end) {
+      kinds.set(declaredTrack, raw.toString("latin1", start + 8, start + 12));
+    } else if (type === "trex" && start + 20 <= end) {
       defaultDurations.set(raw.readUInt32BE(start + 4), raw.readUInt32BE(start + 12));
     } else if (type === "tfhd" && start + 8 <= end) {
       const flags = raw.readUIntBE(start + 1, 3);
@@ -215,20 +227,48 @@ export function readPresentationRanges(raw) {
     }
   });
   // Merge in presentation order: B frames arrive in decode order.
-  const mergedTracks = [...byTrack.values()].map((samples) => {
+  const mergedTracks = [...byTrack].map(([id, samples]) => {
     const merged = [];
-    for (const sample of samples.sort((left, right) => left.start - right.start)) {
+    // Sample durations are decode durations. A displayed video frame remains
+    // present until the next presentation sample, including variable-rate holds.
+    const ordered = samples.sort((left, right) => left.start - right.start);
+    const precision = 1 / (movieScale || scales.get(id));
+    for (const sample of ordered) {
       const previous = merged.at(-1);
-      if (previous && sample.start - previous.end <= Number.EPSILON * Math.max(1, sample.end) * 8) {
+      if (previous && (kinds.get(id) === "vide" ||
+        sample.start - previous.end <= precision + Number.EPSILON * Math.max(1, sample.end) * 8)) {
         previous.end = Math.max(previous.end, sample.end);
       } else merged.push({ ...sample });
     }
-    return merged;
+    // Movie edits quantize independent pieces to movie ticks. Preserve that
+    // declared resolution at joins; it is not a playback buffer threshold.
+    for (const range of merged) range.end += precision;
+    return { id, ranges: merged };
   });
   // A multiplexed segment is playable only where every declared track exists.
-  return mergedTracks.reduce((common, ranges) => common.flatMap((left) => ranges
+  const result = intersectPresentationTracks(mergedTracks);
+  presentationTracks.set(result, mergedTracks);
+  return result;
+}
+
+function intersectPresentationTracks(tracks) {
+  return tracks.map(({ ranges }) => ranges).reduce((common, ranges) => common.flatMap((left) => ranges
     .map((right) => ({ start: Math.max(left.start, right.start), end: Math.min(left.end, right.end) }))
-    .filter(({ start, end }) => end > start)), mergedTracks[0] ?? []);
+    .filter(({ start, end }) => end > start)), tracks[0]?.ranges ?? []);
+}
+
+/** Project the same parsed samples onto the media player's reported clock. */
+export function translatePresentationRanges(ranges, initBytes, timestampOffsetSeconds) {
+  const tracks = presentationTracks.get(ranges);
+  if (!tracks || !initBytes?.length || !Number.isFinite(timestampOffsetSeconds)) return ranges;
+  const edits = readTrackEditOffsets(initBytes);
+  return intersectPresentationTracks(tracks.map(({ id, ranges: held }) => ({
+    id,
+    ranges: held.map(({ start, end }) => ({
+      start: Math.max(0, start + timestampOffsetSeconds - (edits.get(id) ?? 0)),
+      end: end + timestampOffsetSeconds - (edits.get(id) ?? 0)
+    })).filter(({ start, end }) => end > start)
+  })));
 }
 
 /**

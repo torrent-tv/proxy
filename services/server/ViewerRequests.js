@@ -565,14 +565,22 @@ export class ViewerRequests {
       const trackProgress = output === session ? progress : this.#host.encodeRuns.progressOf(output);
       const trackRates = this.#trackRateReadings(measurement, output, now);
       const timeline = output.timeline;
-      const segments = Array.from({ length: timeline?.segmentCount ?? 0 }, (_, index) => ({
-        index,
-        startSeconds: timeline.publishedStartOf(index),
-        endSeconds: timeline.publishedStartOf(index + 1),
-        mediaRanges: this.#host.segmentStore.mediaRangesOf(output.outputKey, index, {
+      const trackName = output === session ? "video" : "audio";
+      const segments = Array.from({ length: timeline?.segmentCount ?? 0 }, (_, index) => {
+        const ranges = this.#host.segmentStore.mediaRangesOf(output.outputKey, index, {
           startSeconds: timeline.publishedStartOf(index)
-        })
-      }));
+        });
+        return {
+          index,
+          startSeconds: timeline.publishedStartOf(index),
+          endSeconds: timeline.publishedStartOf(index + 1),
+          mediaRanges: ranges && output.segmentFormat?.clientMediaRanges ?
+            output.segmentFormat.clientMediaRanges(ranges, {
+              initBytes: this.#host.segmentStore.initOf(output.outputKey),
+              timestampOffsetSeconds: viewerReading?.timestampOffsets?.[trackName]
+            }) : ranges
+        };
+      });
       const sourceIndexes = [output.spec.video?.fileIndex, output.spec.audio?.fileIndex]
         .filter((fileIndex) => Number.isInteger(fileIndex) && fileIndex >= 0);
       if (sourceIndexes.length === 0) {

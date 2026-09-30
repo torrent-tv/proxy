@@ -52,6 +52,10 @@ import { mpegtsFormat } from "./mpegts.js";
  * @property {(bytes: Buffer, context?: Partial<PrepareSegmentContext>) =>
  *   { start: number, end: number }[] | undefined} [readMediaRanges] - Actual
  *   served presentation intervals, or undefined until their header is available.
+ * @property {(ranges: { start: number, end: number }[], context: {
+ *   initBytes: Buffer | null, timestampOffsetSeconds?: number }) =>
+ *   { start: number, end: number }[]} [clientMediaRanges] - Project parsed
+ *   presentation intervals onto the clock reported by this viewer's player.
  */
 
 /** @type {Readonly<Record<string, SegmentFormat>>} */

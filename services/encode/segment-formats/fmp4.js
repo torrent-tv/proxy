@@ -18,6 +18,7 @@ import {
   readTrackTimescales,
   readVideoSampleSize,
   stampSegmentStartTime,
+  translatePresentationRanges,
   walkBoxes
 } from "./mp4-boxes.js";
 
@@ -284,6 +285,9 @@ export const fmp4Format = {
     if (!initBytes?.length) return undefined;
     const served = this.prepareSegmentBytes(raw, { initBytes, startSeconds, rawBytes: raw });
     return readPresentationRanges(Buffer.concat([initBytes, served]));
+  },
+  clientMediaRanges(ranges, context) {
+    return translatePresentationRanges(ranges, context.initBytes, context.timestampOffsetSeconds);
   },
 
   /**

@@ -279,7 +279,12 @@ export const fmp4Format = {
    * transcode itself; the box walk never descends into `mdat`.
    */
   needsSegmentRewrite: true,
-  readMediaRanges: readPresentationRanges,
+  readMediaRanges(raw, { initBytes = null, startSeconds = 0 } = {}) {
+    if (this.extractInit(raw)) return readPresentationRanges(raw);
+    if (!initBytes?.length) return undefined;
+    const served = this.prepareSegmentBytes(raw, { initBytes, startSeconds, rawBytes: raw });
+    return readPresentationRanges(Buffer.concat([initBytes, served]));
+  },
 
   /**
    * Whether a segment carries every track the init promises.

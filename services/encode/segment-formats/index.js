@@ -49,6 +49,9 @@ import { mpegtsFormat } from "./mpegts.js";
  * @property {(bytes: Buffer, context: PrepareSegmentContext) => Buffer}
  *   prepareSegmentBytes - Correct a segment before serving. Identity for
  *   formats that need nothing.
+ * @property {(bytes: Buffer, context?: Partial<PrepareSegmentContext>) =>
+ *   { start: number, end: number }[] | undefined} [readMediaRanges] - Actual
+ *   served presentation intervals, or undefined until their header is available.
  */
 
 /** @type {Readonly<Record<string, SegmentFormat>>} */

@@ -82,10 +82,20 @@ test("each picture is named with what belongs to it, by index", () => {
   ]);
 
   return handleApiSourceFilesGet(req, reply, deps).then(() => {
+    const episode = (number) => ({
+      season: null,
+      episodes: [number],
+      part: null,
+      special: false,
+      showHint: "",
+      titleHint: ""
+    });
     assert.deepEqual(sent.body.items, [
-      { fileIndex: 0, audio: [1], subtitles: [2], images: [] },
-      { fileIndex: 3, audio: [], subtitles: [], images: [] }
+      { fileIndex: 0, audio: [1], subtitles: [2], images: [], episode: episode(1) },
+      { fileIndex: 3, audio: [], subtitles: [], images: [], episode: episode(2) }
     ]);
+    // Two numbered pictures of one show: the release is a series.
+    assert.equal(sent.body.shape, "series");
     // The files themselves are in the list above; saying them twice is how two
     // copies of one fact start.
     assert.ok(sent.body.items.every((item) => item.audio.every((one) => Number.isInteger(one))));

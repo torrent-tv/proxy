@@ -82,6 +82,7 @@ test("names that state no episode say nothing", () => {
   for (const name of [
     "Despicable.Me.4.2024.1080p.BluRay.x264-EniaHD.mkv",
     "Movie - 2024 [1080p].mkv",
+    "WALL-E.2008.1080p.mkv",
     "Mortal.Kombat.II.1080p.rus.LostFilm.TV.mkv",
     "Video.1920x1080.mkv",
     "VTS_01_1.VOB"

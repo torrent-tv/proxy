@@ -81,7 +81,7 @@ export class RateTrend {
  * @param {number} input.durationSeconds
  * @param {number} input.bufferedAheadSeconds
  * @param {number} input.bufferLimitSeconds
- * @param {number} input.reserveSeconds
+ * @param {number} input.reserveSeconds - Measured source-stall coverage, in media seconds.
  * @param {number} input.lookaheadSeconds
  * @param {number} input.now
  * @param {boolean} [input.requiredAudio]
@@ -110,11 +110,8 @@ export function predictPlaybackReadiness(input = {}) {
   if (remaining <= buffered) {
     return result(true, 0, buffered, reserve, 0, "client-buffer-covers-end", 0);
   }
-  if (!(duration > 0) || !(capacity > 0) || !(reserve > 0) || tracks.length === 0) {
+  if (!(duration > 0) || !(capacity > 0) || tracks.length === 0) {
     return result(false, null, buffered, reserve, null, "incomplete-state", 0);
-  }
-  if (reserve > capacity) {
-    return result(false, null, buffered, reserve, null, "reserve-exceeds-client-capacity", 0);
   }
   const requiredTracks = input.requiredAudio === true ? 2 : 1;
   if (tracks.length < requiredTracks) {
@@ -166,7 +163,7 @@ export function predictPlaybackReadiness(input = {}) {
 
   for (let trackIndex = 0; trackIndex < trackState.length; trackIndex += 1) {
     const state = trackState[trackIndex];
-    const { track, ready, segments } = state;
+    const { track, segments } = state;
     const measuredBitsPerMediaSecond = state.bitsPerMediaSecond;
     for (const segment of segments) {
       if (segment.endSeconds <= position + buffered) {
@@ -277,6 +274,7 @@ export function predictPlaybackReadiness(input = {}) {
     const trackFinish = trackState.map(() => 0);
     let transferFinish = 0;
     const completions = [];
+    const productions = [];
     for (const job of jobs) {
       const { track, trackIndex, segment, ahead, sizeBits, encodeWork, sourceIntervals } = job;
       if (prefillOnly && (ahead > prefillReach || segment.endSeconds - position > capacity)) {
@@ -322,7 +320,14 @@ export function predictPlaybackReadiness(input = {}) {
       if (!job.produced) {
         trackFinish[trackIndex] = encodedAt;
       }
-      const producedAt = Math.max(sourceReadyAtLatest, encodedAt);
+      const producedAt = job.produced ? 0 : Math.max(sourceReadyAtLatest, encodedAt);
+      productions.push({
+        at: producedAt,
+        sourceReadyAt: sourceReadyAtLatest,
+        trackIndex,
+        segment,
+        requiresSource: sourceIntervals.size > 0
+      });
       const roomAt = segment.endSeconds - position <= capacity
         ? 0
         : startDelaySeconds + segment.endSeconds - position - capacity;
@@ -339,12 +344,16 @@ export function predictPlaybackReadiness(input = {}) {
       ? completions.filter(({ segment }) => segment.startSeconds - position <= prefillReach &&
         segment.endSeconds - position <= capacity)
       : completions;
-    const safety = isSafeSchedule(usefulCompletions, trackState, position, duration,
+    const usefulProductions = prefillOnly
+      ? productions.filter(({ segment }) => segment.startSeconds - position <= prefillReach &&
+        segment.endSeconds - position <= capacity)
+      : productions;
+    const safety = isSafeSchedule(usefulCompletions, usefulProductions, trackState, position, duration,
       buffered, capacity, reserve, startDelaySeconds);
     return { safe: safety.safe,
       bufferedAtStart: safety.bufferedAtStart,
-      finishAt: usefulCompletions.reduce((latest, item) => Math.max(latest, item.at), 0),
-      completions: usefulCompletions };
+      neededSeconds: safety.neededSeconds,
+      finishAt: usefulCompletions.reduce((latest, item) => Math.max(latest, item.at), 0) };
   };
 
   const prefillReach = Math.min(capacity, lookahead, remaining);
@@ -353,7 +362,8 @@ export function predictPlaybackReadiness(input = {}) {
   if (!Number.isFinite(maximumUsefulDelay)) {
     return result(false, null, buffered, reserve, null, "prefill-cannot-complete", preparedSegments);
   }
-  if (schedule(0).safe) {
+  const immediate = schedule(0);
+  if (immediate.safe) {
     return result(true, 0, buffered, reserve, 0, "trajectory-safe-now", preparedSegments);
   }
   const searchLimit = Math.max(maximumUsefulDelay, rateRecoveryDelay);
@@ -396,7 +406,7 @@ export function predictPlaybackReadiness(input = {}) {
     }
   }
   const readiness = schedule(high);
-  return result(false, high, buffered, reserve, Math.max(0, reserve - buffered),
+  return result(false, high, buffered, reserve, immediate.neededSeconds,
     "minimum-safe-delay", preparedSegments, readiness.bufferedAtStart);
 }
 
@@ -508,53 +518,104 @@ function averageBitsPerMediaSecond(track, segments, ready) {
   return finiteNonNegative(track.bitsPerMediaSecond);
 }
 
-function isSafeSchedule(completions, trackState, position, duration, buffered, capacity, reserve, startDelay) {
-  const ranges = trackState.map(() => [{ start: position, end: position + buffered }]);
-  const ordered = [...completions]
+function isSafeSchedule(completions, productions, trackState, position, duration, buffered, capacity, reserve,
+  startDelay) {
+  // Client continuity is constrained by its buffer limit; source-stall reserve
+  // is covered by the larger union of client data and output already prepared here.
+  const clientRanges = trackState.map(() => [{ start: position, end: position + buffered }]);
+  const preparedRanges = trackState.map(() => [{ start: position, end: position + buffered }]);
+  const orderedCompletions = [...completions]
     .filter(({ at }) => Number.isFinite(at))
     .sort((left, right) => left.at - right.at || left.trackIndex - right.trackIndex);
+  const orderedProductions = [...productions]
+    .filter(({ at }) => Number.isFinite(at))
+    .sort((left, right) => left.at - right.at || left.trackIndex - right.trackIndex);
+  const reserveUntil = trackState.map(() => Number.NEGATIVE_INFINITY);
+  // The measured reserve applies only until this track's last required source
+  // interval has arrived; encoding and client delivery stay in the schedule.
+  for (const production of productions) {
+    if (production.requiresSource) {
+      reserveUntil[production.trackIndex] = Math.max(reserveUntil[production.trackIndex],
+        production.sourceReadyAt);
+    }
+  }
   let completionIndex = 0;
+  let productionIndex = 0;
 
   const addThrough = (time) => {
-    while (completionIndex < ordered.length && ordered[completionIndex].at <= time) {
-      const { trackIndex, segment } = ordered[completionIndex];
-      addRange(ranges[trackIndex], segment.startSeconds, segment.endSeconds);
+    while (productionIndex < orderedProductions.length && orderedProductions[productionIndex].at <= time) {
+      const { trackIndex, segment } = orderedProductions[productionIndex];
+      addRange(preparedRanges[trackIndex], segment.startSeconds, segment.endSeconds);
+      productionIndex += 1;
+    }
+    while (completionIndex < orderedCompletions.length && orderedCompletions[completionIndex].at <= time) {
+      const { trackIndex, segment } = orderedCompletions[completionIndex];
+      addRange(clientRanges[trackIndex], segment.startSeconds, segment.endSeconds);
+      addRange(preparedRanges[trackIndex], segment.startSeconds, segment.endSeconds);
       completionIndex += 1;
     }
   };
-  const safeAt = (time) => {
+  const safeAt = (time, checkClient = true) => {
     const playerPosition = position + Math.max(0, time - startDelay);
-    const available = Math.min(capacity, ...ranges.map((trackRanges) =>
+    if (playerPosition >= duration) {
+      return { safe: true, stockSafe: true, available: 0, neededSeconds: 0 };
+    }
+    const available = Math.min(capacity, ...clientRanges.map((trackRanges) =>
       Math.max(0, contiguousEnd(trackRanges, playerPosition) - playerPosition)));
-    const required = Math.min(reserve, Math.max(0, duration - playerPosition));
-    return { safe: available >= required, available };
+    let neededSeconds = 0;
+    let stockSafe = true;
+    for (let trackIndex = 0; trackIndex < trackState.length; trackIndex += 1) {
+      const required = time <= reserveUntil[trackIndex]
+        ? Math.min(reserve, Math.max(0, duration - playerPosition))
+        : 0;
+      const preparedAhead = Math.max(0,
+        contiguousEnd(preparedRanges[trackIndex], playerPosition) - playerPosition);
+      const deficit = Math.max(0, required - preparedAhead);
+      neededSeconds = Math.max(neededSeconds, deficit);
+      stockSafe &&= deficit === 0;
+    }
+    return {
+      safe: (!checkClient || available > 0) && stockSafe,
+      stockSafe,
+      available,
+      neededSeconds
+    };
   };
 
   addThrough(startDelay);
   const atStart = safeAt(startDelay);
   if (!atStart.safe) {
-    return { safe: false, bufferedAtStart: atStart.available };
+    return { safe: false, bufferedAtStart: atStart.available, neededSeconds: atStart.neededSeconds };
   }
 
-  while (completionIndex < ordered.length) {
-    const time = ordered[completionIndex].at;
-    if (time > startDelay) {
-      const beforeArrival = safeAt(time);
-      if (!beforeArrival.safe) {
-        return { safe: false, bufferedAtStart: atStart.available };
-      }
+  const playbackEnd = startDelay + Math.max(0, duration - position);
+  const playbackBoundaries = [position + buffered,
+    ...trackState.flatMap(({ segments }) => segments.map(({ endSeconds }) => endSeconds))]
+    .filter((boundary) => boundary > position && boundary < duration)
+    .map((boundary) => startDelay + boundary - position);
+  const sourceReadyTimes = productions
+    .filter(({ requiresSource }) => requiresSource)
+    .map(({ sourceReadyAt }) => sourceReadyAt);
+  const eventTimes = [...orderedCompletions.map(({ at }) => at),
+    ...orderedProductions.map(({ at }) => at), ...playbackBoundaries, ...sourceReadyTimes]
+    .filter((time) => Number.isFinite(time) && time > startDelay && time < playbackEnd)
+    .sort((left, right) => left - right)
+    .filter((time, index, all) => index === 0 || time !== all[index - 1]);
+
+  for (const time of eventTimes) {
+    const beforeArrival = safeAt(time, false);
+    if (!beforeArrival.stockSafe) {
+      return { safe: false, bufferedAtStart: atStart.available, neededSeconds: beforeArrival.neededSeconds };
     }
     addThrough(time);
-    if (time > startDelay) {
-      const afterArrival = safeAt(time);
-      if (!afterArrival.safe) {
-        return { safe: false, bufferedAtStart: atStart.available };
-      }
+    const afterArrival = safeAt(time);
+    if (!afterArrival.safe) {
+      return { safe: false, bufferedAtStart: atStart.available, neededSeconds: afterArrival.neededSeconds };
     }
   }
 
-  const atEnd = safeAt(startDelay + Math.max(0, duration - position));
-  return { safe: atEnd.safe, bufferedAtStart: atStart.available };
+  const atEnd = safeAt(playbackEnd);
+  return { safe: atEnd.safe, bufferedAtStart: atStart.available, neededSeconds: atStart.neededSeconds };
 }
 
 function addRange(ranges, start, end) {

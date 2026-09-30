@@ -36,7 +36,50 @@ test("finds the first safe start from segments delivered before playback", () =>
 
   assert.equal(forecast.ready, false);
   assert.equal(forecast.reason, "minimum-safe-delay");
-  assert.ok(Math.abs(forecast.delaySeconds - 3) < 1e-8);
+  assert.ok(Math.abs(forecast.delaySeconds - 1) < 1e-8);
+});
+
+test("keeps source-stall reserve in the proxy's prepared timeline, not the capped browser buffer", () => {
+  const now = 10_000;
+  const forecast = predictPlaybackReadiness({
+    now,
+    positionSeconds: 0,
+    durationSeconds: 12,
+    bufferedAheadSeconds: 2,
+    bufferLimitSeconds: 4,
+    reserveSeconds: 6,
+    lookaheadSeconds: 12,
+    sources: [{
+      id: "source",
+      complete: false,
+      bytesPerMediaSecond: 1,
+      readings: [{ at: now - 1_000, value: 2 }, { at: now, value: 2 }]
+    }],
+    tracks: [{
+      id: "video",
+      sourceIds: ["source"],
+      processedSeconds: 8,
+      bitsPerMediaSecond: 80,
+      readings: [{ at: now - 1_000, value: 2 }, { at: now, value: 2 }],
+      segments: [
+        { index: 0, startSeconds: 0, endSeconds: 2 },
+        { index: 1, startSeconds: 2, endSeconds: 4 },
+        { index: 2, startSeconds: 4, endSeconds: 6 },
+        { index: 3, startSeconds: 6, endSeconds: 8 },
+        { index: 4, startSeconds: 8, endSeconds: 10 },
+        { index: 5, startSeconds: 10, endSeconds: 12 }
+      ],
+      readySegmentIndices: [0, 1, 2, 3],
+      segmentSizesBytes: new Map([[0, 20], [1, 20], [2, 20], [3, 20], [4, 20], [5, 20]])
+    }],
+    linkReadings: [{ at: now - 1_000, value: 80_000 }, { at: now, value: 80_000 }]
+  });
+
+  assert.equal(forecast.ready, true);
+  assert.equal(forecast.reason, "trajectory-safe-now");
+  assert.equal(forecast.reserveSeconds, 6);
+  assert.equal(forecast.bufferedSeconds, 2);
+  assert.equal(forecast.preparedSegments, 4);
 });
 
 test("overlaps source reads and encoding, then waits for the slower stage and delivery", () => {
@@ -53,7 +96,7 @@ test("overlaps source reads and encoding, then waits for the slower stage and de
   const forecast = predictPlaybackReadiness(input({ sources: [source], tracks: [track] }));
 
   assert.equal(forecast.ready, false);
-  assert.ok(Math.abs(forecast.delaySeconds - 3) < 1e-8);
+  assert.ok(Math.abs(forecast.delaySeconds - 2) < 1e-8);
 });
 
 test("does not produce an ETA without a client-link measurement", () => {
@@ -177,7 +220,7 @@ test("downloads an overlapping source interval once when two tracks use the same
 
   assert.equal(forecast.ready, false);
   assert.equal(forecast.reason, "minimum-safe-delay");
-  assert.ok(Math.abs(forecast.delaySeconds - 2.048) < 1e-8);
+  assert.ok(Math.abs(forecast.delaySeconds - 2.032) < 1e-8);
 });
 
 test("downloads sources on separate torrents concurrently", () => {
@@ -319,5 +362,5 @@ test("finds a safe interval when rising encode speed and falling link speed make
   assert.equal(forecast.ready, false);
   assert.equal(forecast.reason, "minimum-safe-delay");
   assert.ok(Number.isFinite(forecast.delaySeconds));
-  assert.ok(forecast.delaySeconds > 7 && forecast.delaySeconds < 10);
+  assert.ok(forecast.delaySeconds > 4 && forecast.delaySeconds < 5);
 });

@@ -1,3 +1,7 @@
+## 2.87.14
+
+- **Fix**: Evaluate source-stall coverage against the continuous timeline already prepared on the proxy, while independently checking client-buffer continuity and delivery capacity.
+
 ## 2.87.13
 
 - **Fix**: Include distinct active piece reads in memory demand and preserve their slots immediately, so reads without priority-map ranges cannot deadlock the torrent piece store.

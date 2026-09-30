@@ -391,6 +391,7 @@ export class Viewer {
       linkSampleAt = null,
       linkSampleAgeMs = null,
       bufferedAheadSec,
+      bufferedRanges,
       bufferLimitSeconds,
       positionSeconds = null,
       playing,
@@ -434,6 +435,11 @@ export class Viewer {
           : now
         : this.netReport?.linkSampleMeasuredAt ?? null,
       bufferedAheadSec: held,
+      bufferedRanges: bufferedRanges && typeof bufferedRanges === "object" ?
+        Object.fromEntries(["video", "audio", "media"].filter((key) => Array.isArray(bufferedRanges[key]))
+          .map((key) => [key, bufferedRanges[key].slice(0, 256).filter((range) =>
+            Number.isFinite(range?.start) && Number.isFinite(range?.end) && range.start >= 0 && range.end > range.start)
+            .map(({ start, end }) => ({ start, end }))])) : null,
       bufferLimitSeconds: Number.isFinite(bufferLimitSeconds) && bufferLimitSeconds > 0
         ? bufferLimitSeconds
         : this.netReport?.bufferLimitSeconds ?? null,

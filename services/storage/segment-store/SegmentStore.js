@@ -83,6 +83,7 @@ export class SegmentStore {
 
   /** Output key → what its directory holds. @type {Map<string, HeldContents>} */
   #held = new Map();
+  #mediaRanges = new Map();
 
   /** Output key → how to read its file names. @type {Map<string, object>} */
   #formats = new Map();
@@ -431,6 +432,17 @@ export class SegmentStore {
       return null;
     }
     const dir = path.join(this.#root, directoryNameFor(key));
+    const index = format?.segmentIndexFromName?.(served) ?? -1;
+    let mediaRanges = null;
+    if (format?.readMediaRanges && index >= 0) {
+      try {
+        mediaRanges = format.readMediaRanges(readFileSync(path.join(dir, makingName)));
+        if (mediaRanges.length === 0) throw new Error("The closed file contains no playable media intervals.");
+      } catch (error) {
+        this.#logger?.warn?.(`segment store: could not read media coverage of ${makingName}: ${error.message}`);
+        return null;
+      }
+    }
     try {
       renameSync(path.join(dir, makingName), path.join(dir, served));
     } catch (error) {
@@ -445,14 +457,36 @@ export class SegmentStore {
     }
     // What the directory holds has changed, so the memory of it is stale.
     this.#held.delete(key);
-    const index = format?.segmentIndexFromName?.(served) ?? -1;
     if (index >= 0) {
+      if (mediaRanges) {
+        const byIndex = this.#mediaRanges.get(key) ?? new Map();
+        byIndex.set(index, mediaRanges);
+        this.#mediaRanges.set(key, byIndex);
+      }
       this.announce(key, index);
       for (const listener of this.#publishedListeners) {
         listener(key, index);
       }
     }
     return served;
+  }
+
+  mediaRangesOf(key, index) {
+    const known = this.#mediaRanges.get(key)?.get(index);
+    if (known) return known;
+    const format = this.#formats.get(key);
+    if (!format?.readMediaRanges) return undefined;
+    const filePath = this.pathOf(key, index);
+    if (!filePath) return undefined;
+    try {
+      const ranges = format.readMediaRanges(readFileSync(filePath));
+      const byIndex = this.#mediaRanges.get(key) ?? new Map();
+      byIndex.set(index, ranges);
+      this.#mediaRanges.set(key, byIndex);
+      return ranges;
+    } catch {
+      return [];
+    }
   }
 
   /**
@@ -842,6 +876,7 @@ export class SegmentStore {
     }
     this.#held.delete(key);
     this.#formats.delete(key);
+    this.#mediaRanges.delete(key);
     this.#touched.delete(key);
     this.#inits.delete(key);
     this.#logger.info(`segment-store dropped ${directoryNameFor(key)} (${because})`);

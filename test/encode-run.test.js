@@ -30,6 +30,7 @@ class FakeProcess extends EventEmitter {
 
   exitWith(code, signal = null) {
     this.emit("exit", code, signal);
+    this.emit("close", code, signal);
   }
 }
 

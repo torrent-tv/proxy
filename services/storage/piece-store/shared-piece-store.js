@@ -1407,8 +1407,12 @@ export class SharedPieceStore {
       }
     }
 
-    const release = await this.#claimSlot();
+    // Hold the disk bytes before waiting for memory: another reader may move
+    // the eviction boundary while this read is waiting for a slot.
+    const releaseDisk = this.#disk.hold?.(index) ?? (() => {});
+    let release = null;
     try {
+      release = await this.#claimSlot();
       // Another caller may have brought it back while this one waited for a
       // slot. Registering a second buffer for the same piece would leave
       // whoever holds the first reading memory nothing evicts.
@@ -1434,7 +1438,8 @@ export class SharedPieceStore {
       this.#noteRevival(index);
       return target;
     } finally {
-      release();
+      release?.();
+      releaseDisk();
     }
   }
 

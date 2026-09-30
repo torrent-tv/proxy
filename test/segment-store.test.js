@@ -113,7 +113,7 @@ test("a piece still being written is not a piece, and its name says so", (t) => 
   assert.equal(store.pathOf(KEY, 1), null);
 
   // And closing it is one rename, after which it is servable.
-  assert.equal(store.publish(KEY, "making-0-00001.mp4", fmp4Format), "segment-00001.mp4");
+  assert.equal(store.publish(KEY, "making-0-00001.mp4", { ...fmp4Format, readMediaRanges: undefined }), "segment-00001.mp4");
   assert.equal(store.isClosed(KEY, 1), true);
 });
 

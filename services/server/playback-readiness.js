@@ -85,16 +85,24 @@ export class RateTrend {
  */
 export function predictPlaybackReadiness(input = {}) {
   const now = Number.isFinite(input.now) ? input.now : Date.now();
-  const position = finiteNonNegative(input.positionSeconds);
+  const tracks = Array.isArray(input.tracks) ? input.tracks : [];
+  const mediaOrigin = Math.max(0, ...tracks.map((track) =>
+    track.segments?.find(({ index }) => index === 0)?.mediaRanges?.[0]?.start ?? 0));
+  const position = Math.max(mediaOrigin, finiteNonNegative(input.positionSeconds));
   const duration = finiteNonNegative(input.durationSeconds);
   const remaining = Math.max(0, duration - position);
-  const buffered = finiteNonNegative(input.bufferedAheadSeconds);
+  const measuredRanges = tracks.map((track) => Array.isArray(track.clientRanges) ?
+    normalizedRanges(track.clientRanges) : null);
+  const buffered = measuredRanges.length > 0 && measuredRanges.every(Boolean) ?
+    Math.max(0, Math.min(...measuredRanges.map((ranges) => contiguousEnd(ranges, position) - position))) :
+    finiteNonNegative(input.bufferedAheadSeconds);
   // A loader target can be lowered after a fragment retry. Bytes already held
   // prove a larger capacity, even when an older page reports only that target.
-  const capacity = Math.max(buffered, finiteNonNegative(input.bufferLimitSeconds));
+  const capacity = Math.max(buffered, finiteNonNegative(input.bufferLimitSeconds),
+    ...measuredRanges.map((ranges) => ranges ? ranges.reduce((total, range) =>
+      total + Math.max(0, range.end - Math.max(position, range.start)), 0) : 0));
   const reserve = Math.min(remaining, finiteNonNegative(input.reserveSeconds));
   const lookahead = finiteNonNegative(input.lookaheadSeconds);
-  const tracks = Array.isArray(input.tracks) ? input.tracks : [];
   const sources = new Map((Array.isArray(input.sources) ? input.sources : [])
     .filter((source) => typeof source?.id === "string")
     .map((source) => [source.id, source]));
@@ -114,6 +122,8 @@ export function predictPlaybackReadiness(input = {}) {
 
   const trackState = tracks.map((track) => ({
     track,
+    clientRanges: Array.isArray(track.clientRanges) ? normalizedRanges(track.clientRanges) :
+      [{ start: position, end: position + buffered }],
     ready: new Set(Array.isArray(track.readySegmentIndices) ? track.readySegmentIndices : []),
     curve: rateCurve(track.readings, now),
     bitsPerMediaSecond: averageBitsPerMediaSecond(track, track.segments,
@@ -157,11 +167,13 @@ export function predictPlaybackReadiness(input = {}) {
     const { track, segments } = state;
     const measuredBitsPerMediaSecond = state.bitsPerMediaSecond;
     for (const segment of segments) {
-      if (segment.endSeconds <= position + buffered) {
+      if (coveredSeconds(state.clientRanges, Math.max(position, segment.startSeconds), segment.endSeconds) >=
+        segment.endSeconds - Math.max(position, segment.startSeconds) - Number.EPSILON * duration) {
         continue;
       }
       const exactBytes = sizeOf(track.segmentSizesBytes, segment.index);
       const segmentSeconds = segment.endSeconds - segment.startSeconds;
+      // HLS fetches the complete file when any required part is absent.
       const sizeBits = exactBytes > 0
         ? exactBytes * 8
         : measuredBitsPerMediaSecond * segmentSeconds;
@@ -170,9 +182,9 @@ export function predictPlaybackReadiness(input = {}) {
       }
 
       const produced = state.ready.has(segment.index);
-      const processed = Number(track.processedSeconds);
-      const workStart = Math.max(position, segment.startSeconds,
-        Number.isFinite(processed) ? processed : segment.startSeconds);
+      // Global encode progress may belong to another run beyond a missing
+      // segment. Only publication proves this segment's work is complete.
+      const workStart = Math.max(position, segment.startSeconds);
       const encodeWork = produced ? 0 : Math.max(0, segment.endSeconds - workStart);
       if (!produced && !(encodeWork > 0)) {
         unknownReason ??= "segment-production-delay-unavailable";
@@ -479,8 +491,8 @@ function isSafeSchedule(completions, productions, trackState, position, duration
   startDelay) {
   // Client continuity is constrained by its buffer limit; source-stall reserve
   // is covered by the larger union of client data and output already prepared here.
-  const clientRanges = trackState.map(() => [{ start: position, end: position + buffered }]);
-  const preparedRanges = trackState.map(() => [{ start: position, end: position + buffered }]);
+  const clientRanges = trackState.map((state) => state.clientRanges.map((range) => ({ ...range })));
+  const preparedRanges = trackState.map((state) => state.clientRanges.map((range) => ({ ...range })));
   const orderedCompletions = [...completions]
     .filter(({ at }) => Number.isFinite(at))
     .sort((left, right) => left.at - right.at || left.trackIndex - right.trackIndex);
@@ -502,13 +514,17 @@ function isSafeSchedule(completions, productions, trackState, position, duration
   const addThrough = (time) => {
     while (productionIndex < orderedProductions.length && orderedProductions[productionIndex].at <= time) {
       const { trackIndex, segment } = orderedProductions[productionIndex];
-      addRange(preparedRanges[trackIndex], segment.startSeconds, segment.endSeconds);
+      for (const range of segment.mediaRanges ?? [{ start: segment.startSeconds, end: segment.endSeconds }]) {
+        addRange(preparedRanges[trackIndex], range.start, range.end);
+      }
       productionIndex += 1;
     }
     while (completionIndex < orderedCompletions.length && orderedCompletions[completionIndex].at <= time) {
       const { trackIndex, segment } = orderedCompletions[completionIndex];
-      addRange(clientRanges[trackIndex], segment.startSeconds, segment.endSeconds);
-      addRange(preparedRanges[trackIndex], segment.startSeconds, segment.endSeconds);
+      for (const range of segment.mediaRanges ?? [{ start: segment.startSeconds, end: segment.endSeconds }]) {
+        addRange(clientRanges[trackIndex], range.start, range.end);
+        addRange(preparedRanges[trackIndex], range.start, range.end);
+      }
       completionIndex += 1;
     }
   };
@@ -517,13 +533,18 @@ function isSafeSchedule(completions, productions, trackState, position, duration
     if (playerPosition >= duration) {
       return { safe: true, stockSafe: true, available: 0, neededSeconds: 0 };
     }
-    const available = Math.min(capacity, ...clientRanges.map((trackRanges) =>
-      Math.max(0, contiguousEnd(trackRanges, playerPosition) - playerPosition)));
+    const trackEnd = (index) => {
+      const last = trackState[index].segments.at(-1);
+      return last?.mediaRanges?.at(-1)?.end ?? duration;
+    };
+    const available = Math.min(capacity, ...clientRanges.map((trackRanges, index) =>
+      playerPosition >= trackEnd(index) ? Number.POSITIVE_INFINITY :
+        Math.max(0, contiguousEnd(trackRanges, playerPosition) - playerPosition)));
     let neededSeconds = 0;
     let stockSafe = true;
     for (let trackIndex = 0; trackIndex < trackState.length; trackIndex += 1) {
       const required = time <= reserveUntil[trackIndex]
-        ? Math.min(reserve, Math.max(0, duration - playerPosition))
+        ? Math.min(reserve, Math.max(0, trackEnd(trackIndex) - playerPosition))
         : 0;
       const preparedAhead = Math.max(0,
         contiguousEnd(preparedRanges[trackIndex], playerPosition) - playerPosition);
@@ -547,6 +568,9 @@ function isSafeSchedule(completions, productions, trackState, position, duration
 
   const playbackEnd = startDelay + Math.max(0, duration - position);
   const playbackBoundaries = [position + buffered,
+    ...trackState.flatMap(({ clientRanges }) => clientRanges.flatMap(({ start, end }) => [start, end])),
+    ...trackState.flatMap(({ segments }) => segments.flatMap((segment) =>
+      (segment.mediaRanges ?? []).flatMap(({ start, end }) => [start, end]))),
     ...trackState.flatMap(({ segments }) => segments.map(({ endSeconds }) => endSeconds))]
     .filter((boundary) => boundary > position && boundary < duration)
     .map((boundary) => startDelay + boundary - position);
@@ -596,6 +620,21 @@ function addRange(ranges, start, end) {
     merged.push(next);
   }
   ranges.splice(0, ranges.length, ...merged);
+}
+
+function normalizedRanges(ranges) {
+  const result = [];
+  for (const range of ranges) {
+    if (Number.isFinite(range?.start) && Number.isFinite(range?.end) && range.end > range.start) {
+      addRange(result, range.start, range.end);
+    }
+  }
+  return result;
+}
+
+function coveredSeconds(ranges, start, end) {
+  return ranges.reduce((total, range) => total + Math.max(0,
+    Math.min(end, range.end) - Math.max(start, range.start)), 0);
 }
 
 function contiguousEnd(ranges, position) {

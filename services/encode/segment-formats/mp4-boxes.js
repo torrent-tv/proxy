@@ -15,7 +15,7 @@
  *
  * @type {ReadonlySet<string>}
  */
-const CONTAINER_BOXES = new Set(["moov", "trak", "mdia", "minf", "stbl", "edts", "moof", "traf"]);
+const CONTAINER_BOXES = new Set(["moov", "mvex", "trak", "mdia", "minf", "stbl", "edts", "moof", "traf"]);
 
 /**
  * Walk the box tree, invoking `visit` for every box encountered.
@@ -93,6 +93,142 @@ export function readTrackTimescales(initSegment) {
     }
   });
   return timescales;
+}
+
+/** Movie presentation time minus track media time, in seconds per track. */
+export function readTrackEditOffsets(initSegment) {
+  const scales = readTrackTimescales(initSegment);
+  const offsets = new Map([...scales.keys()].map((id) => [id, 0]));
+  let movieScale = 0;
+  let trackId = null;
+  walkBoxes(initSegment, (type, start, end) => {
+    const version = initSegment[start];
+    if (type === "mvhd") {
+      const at = start + (version === 1 ? 20 : 12);
+      if (at + 4 <= end) movieScale = initSegment.readUInt32BE(at);
+    } else if (type === "tkhd") {
+      const at = start + (version === 1 ? 20 : 12);
+      if (at + 4 <= end) trackId = initSegment.readUInt32BE(at);
+    } else if (type === "elst" && scales.has(trackId) && movieScale > 0 && start + 8 <= end) {
+      const count = initSegment.readUInt32BE(start + 4);
+      const width = version === 1 ? 20 : 12;
+      let movieStart = 0;
+      for (let entry = 0, at = start + 8; entry < count && at + width <= end; entry++, at += width) {
+        const duration = version === 1 ? Number(initSegment.readBigUInt64BE(at)) : initSegment.readUInt32BE(at);
+        const mediaTime = version === 1 ? Number(initSegment.readBigInt64BE(at + 8)) : initSegment.readInt32BE(at + 4);
+        if (mediaTime === -1) {
+          movieStart += duration / movieScale;
+        } else {
+          offsets.set(trackId, movieStart - mediaTime / scales.get(trackId));
+          break;
+        }
+      }
+    }
+  });
+  return offsets;
+}
+
+/** An init shared across seeks has no segment-specific empty edit. */
+export function neutralizeEmptyEdits(initSegment) {
+  const neutral = Buffer.from(initSegment);
+  walkBoxes(neutral, (type, start, end) => {
+    if (type !== "elst" || start + 8 > end) return;
+    const version = neutral[start];
+    const width = version === 1 ? 20 : 12;
+    const count = neutral.readUInt32BE(start + 4);
+    for (let entry = 0, at = start + 8; entry < count && at + width <= end; entry++, at += width) {
+      const mediaTime = version === 1 ? neutral.readBigInt64BE(at + 8) : BigInt(neutral.readInt32BE(at + 4));
+      if (mediaTime !== -1n) continue;
+      if (version === 1) neutral.writeBigUInt64BE(0n, at);
+      else neutral.writeUInt32BE(0, at);
+    }
+  });
+  return neutral;
+}
+
+/** Preserve sample presentation times when replacing a piece's own init. */
+export function rebaseSegmentDecodeTimes(segment, ownInit, sessionInit) {
+  const scales = readTrackTimescales(sessionInit);
+  const ownOffsets = readTrackEditOffsets(ownInit);
+  const sessionOffsets = readTrackEditOffsets(sessionInit);
+  const stamped = Buffer.from(segment);
+  let trackId = null;
+  walkBoxes(stamped, (type, start, end) => {
+    if (type === "tfhd" && start + 8 <= end) {
+      trackId = stamped.readUInt32BE(start + 4);
+    } else if (type === "tfdt" && scales.has(trackId) && ownOffsets.has(trackId)) {
+      const version = stamped[start];
+      if (start + (version === 1 ? 12 : 8) > end) return;
+      const existing = version === 1 ? Number(stamped.readBigUInt64BE(start + 4)) : stamped.readUInt32BE(start + 4);
+      const value = existing + Math.round((ownOffsets.get(trackId) - sessionOffsets.get(trackId)) * scales.get(trackId));
+      if (value < 0) throw new Error("A fragment cannot be placed before its shared init's decode origin.");
+      if (version === 1) stamped.writeBigUInt64BE(BigInt(value), start + 4);
+      else if (value <= 0xffffffff) stamped.writeUInt32BE(value, start + 4);
+      else throw new Error("Fragment decode time exceeds its 32-bit field.");
+    }
+  });
+  return stamped;
+}
+
+/** Presentation intervals from the durations and composition times of samples. */
+export function readPresentationRanges(raw) {
+  const scales = readTrackTimescales(raw);
+  const edits = readTrackEditOffsets(raw);
+  const byTrack = new Map();
+  const defaultDurations = new Map();
+  let trackId = null;
+  let decodeTime = 0;
+  let defaultDuration = 0;
+  walkBoxes(raw, (type, start, end) => {
+    if (type === "trex" && start + 20 <= end) {
+      defaultDurations.set(raw.readUInt32BE(start + 4), raw.readUInt32BE(start + 12));
+    } else if (type === "tfhd" && start + 8 <= end) {
+      const flags = raw.readUIntBE(start + 1, 3);
+      trackId = raw.readUInt32BE(start + 4);
+      const at = start + 8 + ((flags & 1) ? 8 : 0) + ((flags & 2) ? 4 : 0);
+      defaultDuration = (flags & 8) && at + 4 <= end ? raw.readUInt32BE(at) :
+        defaultDurations.get(trackId) ?? 0;
+    } else if (type === "tfdt" && start + (raw[start] === 1 ? 12 : 8) <= end) {
+      decodeTime = raw[start] === 1 ? Number(raw.readBigUInt64BE(start + 4)) : raw.readUInt32BE(start + 4);
+    } else if (type === "trun" && scales.has(trackId) && start + 8 <= end) {
+      const scale = scales.get(trackId);
+      const flags = raw.readUIntBE(start + 1, 3);
+      const count = raw.readUInt32BE(start + 4);
+      let at = start + 8 + ((flags & 1) ? 4 : 0) + ((flags & 4) ? 4 : 0);
+      const width = Number(Boolean(flags & 0x100)) * 4 + Number(Boolean(flags & 0x200)) * 4 +
+        Number(Boolean(flags & 0x400)) * 4 + Number(Boolean(flags & 0x800)) * 4;
+      const ranges = byTrack.get(trackId) ?? [];
+      for (let sample = 0; sample < count && at + width <= end; sample++) {
+        const duration = flags & 0x100 ? raw.readUInt32BE(at) : defaultDuration;
+        if (flags & 0x100) at += 4;
+        if (flags & 0x200) at += 4;
+        if (flags & 0x400) at += 4;
+        const composition = flags & 0x800 ?
+          (raw[start] === 1 ? raw.readInt32BE(at) : raw.readUInt32BE(at)) : 0;
+        if (flags & 0x800) at += 4;
+        if (!(duration > 0)) return;
+        const position = (decodeTime + composition) / scale + (edits.get(trackId) ?? 0);
+        ranges.push({ start: position, end: position + duration / scale });
+        decodeTime += duration;
+      }
+      byTrack.set(trackId, ranges);
+    }
+  });
+  // Merge in presentation order: B frames arrive in decode order.
+  const mergedTracks = [...byTrack.values()].map((samples) => {
+    const merged = [];
+    for (const sample of samples.sort((left, right) => left.start - right.start)) {
+      const previous = merged.at(-1);
+      if (previous && sample.start - previous.end <= Number.EPSILON * Math.max(1, sample.end) * 8) {
+        previous.end = Math.max(previous.end, sample.end);
+      } else merged.push({ ...sample });
+    }
+    return merged;
+  });
+  // A multiplexed segment is playable only where every declared track exists.
+  return mergedTracks.reduce((common, ranges) => common.flatMap((left) => ranges
+    .map((right) => ({ start: Math.max(left.start, right.start), end: Math.min(left.end, right.end) }))
+    .filter(({ start, end }) => end > start)), mergedTracks[0] ?? []);
 }
 
 /**

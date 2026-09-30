@@ -18,6 +18,26 @@ import { PieceDiskStore } from "../services/storage/piece-store/piece-disk-store
 
 const PIECE = 4096;
 
+test("bytes held before a memory wait cannot be forgotten or evicted", async () => {
+  const { store } = await makeStore(PIECE);
+  try {
+    await store.write(0, Buffer.alloc(PIECE, 7));
+    const release = store.hold(0);
+    store.forget(0);
+    store.forgetBehind([1]);
+    await store.write(1, Buffer.alloc(PIECE, 8));
+    const target = Buffer.alloc(PIECE);
+    assert.equal(await store.read(0, target), PIECE);
+    assert.equal(target[0], 7);
+    release();
+    release();
+    store.forget(0);
+    assert.equal(store.has(0), false);
+  } finally {
+    await store.destroy();
+  }
+});
+
 /**
  * @param {number | null} allowanceBytes
  * @returns {Promise<{ store: PieceDiskStore, directory: string, clock: { at: number } }>}

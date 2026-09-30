@@ -22,6 +22,7 @@ const CHUNK = 1024;
  */
 function makeDisk({ failWrite = false, failRead = false, holdWrites = false } = {}) {
   const stored = new Map();
+  const reading = new Map();
   /** @type {Array<() => void>} */
   const held = [];
   return {
@@ -61,6 +62,15 @@ function makeDisk({ failWrite = false, failRead = false, holdWrites = false } = 
     has(index) {
       return stored.has(index);
     },
+    hold(index) {
+      if (!stored.has(index)) return null;
+      reading.set(index, (reading.get(index) ?? 0) + 1);
+      return () => {
+        const count = reading.get(index) - 1;
+        if (count > 0) reading.set(index, count);
+        else reading.delete(index);
+      };
+    },
     async write(index, bytes) {
       if (holdWrites) {
         await new Promise((resolve) => held.push(resolve));
@@ -82,7 +92,7 @@ function makeDisk({ failWrite = false, failRead = false, holdWrites = false } = 
       return bytes.length;
     },
     forget(index) {
-      stored.delete(index);
+      if (!reading.has(index)) stored.delete(index);
     },
     async close() {},
     async destroy() {
@@ -122,6 +132,21 @@ const get = (store, index) =>
   new Promise((resolve, reject) =>
     store.get(index, undefined, (error, bytes) => (error ? reject(error) : resolve(bytes)))
   );
+
+test("a revival holds disk bytes across the asynchronous memory reservation", async () => {
+  const { store, disk } = makeStore();
+  disk.stored.set(0, piece(0));
+  try {
+    const revival = store.reside(0);
+    disk.forget(0);
+    const located = await revival;
+    assert.deepEqual(Buffer.from(located.buffer, located.offset, located.length), piece(0));
+    disk.forget(0);
+    assert.equal(disk.has(0), false);
+  } finally {
+    await new Promise((resolve) => store.destroy(resolve));
+  }
+});
 
 /**
  * Wait until a condition holds, rather than for a chosen interval — a test that

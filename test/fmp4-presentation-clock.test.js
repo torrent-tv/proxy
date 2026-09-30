@@ -2,6 +2,10 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { fmp4Format } from "../services/encode/segment-formats/fmp4.js";
 import { readPresentationRanges, walkBoxes } from "../services/encode/segment-formats/mp4-boxes.js";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import { SegmentStore } from "../services/storage/segment-store/SegmentStore.js";
 
 function box(type, body) {
   const header = Buffer.alloc(8);
@@ -69,4 +73,25 @@ test("a shared init first read after a seek also supports returning to the begin
     startSeconds: 0.083, initBytes: shared, rawBytes: raw
   });
   assert.deepEqual(readPresentationRanges(Buffer.concat([shared, prepared])), readPresentationRanges(raw));
+});
+
+test("HLS fragments use the separate init and the same timeline translation as serving", (t) => {
+  const root = mkdtempSync(path.join(os.tmpdir(), "presentation-ranges-"));
+  const store = new SegmentStore({ root });
+  t.after(() => {
+    store.dropAll("the check is over");
+    rmSync(root, { recursive: true, force: true });
+  });
+  const key = "encoded-video";
+  store.useFormat(key, fmp4Format);
+  const dir = store.directoryFor(key);
+  const media = fragment(0, 2000);
+  writeFileSync(path.join(dir, fmp4Format.segmentFileName(1)), media);
+  assert.equal(store.mediaRangesOf(key, 1, { startSeconds: 4 }), undefined);
+  const header = init(0, 0);
+  writeFileSync(path.join(dir, fmp4Format.initFileName), header);
+  const served = fmp4Format.prepareSegmentBytes(media, { initBytes: header, startSeconds: 4 });
+  assert.deepEqual(store.mediaRangesOf(key, 1, { startSeconds: 4 }),
+    readPresentationRanges(Buffer.concat([header, served])));
+  assert.ok(store.mediaRangesOf(key, 1)[0].start > 4);
 });

@@ -1,3 +1,7 @@
+## 2.87.17
+
+- **Fix**: Measure re-encoded HLS fragment intervals against their separate init and served timestamp position, without caching an absent header as empty media.
+
 ## 2.87.16
 
 - **Fix**: Hold spilled source bytes across memory reservation so concurrent eviction cannot terminate ffmpeg input with a missing disk piece.

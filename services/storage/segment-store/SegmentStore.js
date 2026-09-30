@@ -471,7 +471,7 @@ export class SegmentStore {
     return served;
   }
 
-  mediaRangesOf(key, index) {
+  mediaRangesOf(key, index, { startSeconds = 0 } = {}) {
     const known = this.#mediaRanges.get(key)?.get(index);
     if (known) return known;
     const format = this.#formats.get(key);
@@ -479,7 +479,16 @@ export class SegmentStore {
     const filePath = this.pathOf(key, index);
     if (!filePath) return undefined;
     try {
-      const ranges = format.readMediaRanges(readFileSync(filePath));
+      let initBytes = this.initOf(key);
+      if (!initBytes && format.initFileName) {
+        try {
+          initBytes = readFileSync(path.join(this.pathFor(key), format.initFileName));
+        } catch {
+          // A header not yet produced is not an empty media interval.
+        }
+      }
+      const ranges = format.readMediaRanges(readFileSync(filePath), { initBytes, startSeconds });
+      if (!ranges) return undefined;
       const byIndex = this.#mediaRanges.get(key) ?? new Map();
       byIndex.set(index, ranges);
       this.#mediaRanges.set(key, byIndex);

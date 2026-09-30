@@ -569,7 +569,9 @@ export class ViewerRequests {
         index,
         startSeconds: timeline.publishedStartOf(index),
         endSeconds: timeline.publishedStartOf(index + 1),
-        mediaRanges: this.#host.segmentStore.mediaRangesOf(output.outputKey, index)
+        mediaRanges: this.#host.segmentStore.mediaRangesOf(output.outputKey, index, {
+          startSeconds: timeline.publishedStartOf(index)
+        })
       }));
       const sourceIndexes = [output.spec.video?.fileIndex, output.spec.audio?.fileIndex]
         .filter((fileIndex) => Number.isInteger(fileIndex) && fileIndex >= 0);

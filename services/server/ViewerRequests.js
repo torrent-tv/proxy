@@ -663,7 +663,7 @@ export class ViewerRequests {
       return Number.isFinite(segmentSeconds) && segmentSeconds > 0 ? segmentSeconds : 0;
     }));
 
-    return predictPlaybackReadiness({
+    const input = {
       now,
       positionSeconds,
       durationSeconds: session.file.durationSeconds,
@@ -675,7 +675,24 @@ export class ViewerRequests {
       sources: [...sourceMeasurements.values()],
       tracks,
       linkReadings: measurement.link.snapshot()
-    });
+    };
+    const forecast = predictPlaybackReadiness(input);
+    if (measurement.forecastReason !== forecast.reason) {
+      measurement.forecastReason = forecast.reason;
+      logger.info(`playback readiness ${session.id} consumer=${consumerId} ${JSON.stringify({
+        ...forecast,
+        positionSeconds,
+        durationSeconds: input.durationSeconds,
+        bufferLimitSeconds: input.bufferLimitSeconds,
+        lookaheadSeconds: input.lookaheadSeconds,
+        link: input.linkReadings,
+        sources: input.sources,
+        tracks: tracks.map(({ id, processedSeconds, readings, segments, readySegmentIndices }) => ({
+          id, processedSeconds, readings, segments: segments.length, prepared: readySegmentIndices.length
+        }))
+      })}`);
+    }
+    return forecast;
   }
 
   #rateStateFor(session, consumerId) {
@@ -687,7 +704,7 @@ export class ViewerRequests {
     const id = typeof consumerId === "string" ? consumerId : "";
     let state = byViewer.get(id);
     if (!state) {
-      state = { link: new RateTrend(), downloads: new Map(), tracks: new Map() };
+      state = { link: new RateTrend(this.#host.lookaheadSeconds), downloads: new Map(), tracks: new Map() };
       byViewer.set(id, state);
     }
     return state;
@@ -696,7 +713,7 @@ export class ViewerRequests {
   #downloadRateReadings(state, serviceId, downloadSpeed, now) {
     let trend = state.downloads.get(serviceId);
     if (!trend) {
-      trend = new RateTrend();
+      trend = new RateTrend(this.#host.lookaheadSeconds);
       state.downloads.set(serviceId, trend);
     }
     const speed = Number(downloadSpeed);
@@ -710,7 +727,7 @@ export class ViewerRequests {
     const id = output.outputKey;
     let trend = state.tracks.get(id);
     if (!trend) {
-      trend = new RateTrend();
+      trend = new RateTrend(this.#host.lookaheadSeconds);
       state.tracks.set(id, trend);
     }
     const reading = this.#host.encodeSpeedReadingOf?.(output, now) ?? null;

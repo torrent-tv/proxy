@@ -1,3 +1,9 @@
+## 2.87.15
+
+- **Fix**: Integrate a bounded, nonnegative forecast of recent measured service rates, so an old faster link sample cannot predict permanent delivery failure and prevent playback of fully prepared media.
+- **Fix**: Treat the already-held browser buffer as a measured lower bound on capacity when its loader target has been reduced by fragment retries.
+- **Chore**: Record forecast measurements when the playback-readiness reason changes.
+
 ## 2.87.14
 
 - **Fix**: Evaluate source-stall coverage against the continuous timeline already prepared on the proxy, while independently checking client-buffer continuity and delivery capacity.

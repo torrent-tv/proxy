@@ -1,3 +1,9 @@
+## 2.87.19
+
+- **Fix**: Return shared source bytes after whole-file assembly and retain the buffer held by concurrent readers instead of replacing it; fail malformed fragments explicitly rather than skipping source bytes.
+- **Fix**: Establish decode timestamp ordering in a private preceding cut before a copied-video restart, preserving leading reordered frames at the requested boundary.
+- **Fix**: Carry variable-rate video presentation across cuts only when decode timestamps prove continuity, and predict unproduced cuts in the measured track clock within the readiness integral.
+
 ## 2.87.18
 
 - **Fix**: Interpret variable-rate video sample presentation holds and movie-clock resolution as media coverage; project prepared intervals onto the browser's reported HLS timestamp offsets per track.

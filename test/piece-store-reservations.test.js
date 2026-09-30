@@ -148,6 +148,28 @@ test("a revival holds disk bytes across the asynchronous memory reservation", as
   }
 });
 
+test("an assembled-file revival returns shared bytes and preserves a concurrent pinned reader", async () => {
+  const disk = makeDisk();
+  const store = new SharedPieceStore(CHUNK, {
+    length: CHUNK * 16, memoryBytes: CHUNK * 4, disk,
+    readPieceElsewhere: async ({ index }) => piece(index), name: "whole-file-read"
+  });
+  try {
+    store.pin(0);
+    const [first, second] = await Promise.all([store.reside(0), store.reside(0)]);
+    assert.ok(first.buffer instanceof SharedArrayBuffer);
+    assert.equal(first.buffer, second.buffer);
+    await put(store, 1);
+    await put(store, 2);
+    assert.deepEqual(Buffer.from(first.buffer, first.offset, first.length), piece(0));
+    assert.equal(store.locate(0).buffer, first.buffer);
+    assert.equal(store.stats().outstanding, 0);
+    store.unpin(0);
+  } finally {
+    await new Promise((resolve) => store.destroy(resolve));
+  }
+});
+
 /**
  * Wait until a condition holds, rather than for a chosen interval — a test that
  * sleeps samples, it does not check (roadmap item 54).

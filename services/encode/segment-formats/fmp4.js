@@ -11,6 +11,7 @@
  */
 
 import {
+  continuePresentationRanges,
   rebaseSegmentDecodeTimes,
   neutralizeEmptyEdits,
   readPresentationRanges,
@@ -287,7 +288,8 @@ export const fmp4Format = {
     return readPresentationRanges(Buffer.concat([initBytes, served]));
   },
   clientMediaRanges(ranges, context) {
-    return translatePresentationRanges(ranges, context.initBytes, context.timestampOffsetSeconds);
+    return translatePresentationRanges(continuePresentationRanges(ranges, context.nextRanges),
+      context.initBytes, context.timestampOffsetSeconds);
   },
 
   /**

@@ -39,6 +39,17 @@ test("finds the first safe start from segments delivered before playback", () =>
   assert.ok(Math.abs(forecast.delaySeconds - 1) < 1e-8);
 });
 
+test("future cuts follow measured track time without inventing a permanent clock gap", () => {
+  const state = input({ bufferedAheadSeconds: 3.9, reserveSeconds: 0 });
+  state.tracks[0].clientRanges = [{ start: 0, end: 3.9 }];
+  state.tracks[0].segments[0].mediaRanges = [{ start: 0, end: 3.9 }];
+  const forecast = predictPlaybackReadiness(state);
+  assert.notEqual(forecast.reason, "no-safe-start-found");
+  state.tracks[0].segments[1].mediaRanges = [{ start: 4, end: 8 }];
+  state.tracks[0].readySegmentIndices = [0, 1];
+  assert.equal(predictPlaybackReadiness(state).reason, "no-safe-start-found");
+});
+
 test("keeps source-stall reserve in the proxy's prepared timeline, not the capped browser buffer", () => {
   const now = 10_000;
   const forecast = predictPlaybackReadiness({

@@ -566,10 +566,12 @@ export class ViewerRequests {
       const trackRates = this.#trackRateReadings(measurement, output, now);
       const timeline = output.timeline;
       const trackName = output === session ? "video" : "audio";
-      const segments = Array.from({ length: timeline?.segmentCount ?? 0 }, (_, index) => {
-        const ranges = this.#host.segmentStore.mediaRangesOf(output.outputKey, index, {
+      const nativeRanges = Array.from({ length: timeline?.segmentCount ?? 0 }, (_, index) =>
+        this.#host.segmentStore.mediaRangesOf(output.outputKey, index, {
           startSeconds: timeline.publishedStartOf(index)
-        });
+        }));
+      const segments = Array.from({ length: timeline?.segmentCount ?? 0 }, (_, index) => {
+        const ranges = nativeRanges[index];
         return {
           index,
           startSeconds: timeline.publishedStartOf(index),
@@ -577,6 +579,7 @@ export class ViewerRequests {
           mediaRanges: ranges && output.segmentFormat?.clientMediaRanges ?
             output.segmentFormat.clientMediaRanges(ranges, {
               initBytes: this.#host.segmentStore.initOf(output.outputKey),
+              nextRanges: nativeRanges[index + 1],
               timestampOffsetSeconds: viewerReading?.timestampOffsets?.[trackName]
             }) : ranges
         };

@@ -149,18 +149,18 @@ export class TorrentWorkerClient {
       switch (message?.type) {
         case Event.FRAGMENT: {
           const buffer = message.buffer;
-          if (!buffer) {
-            // No buffer means no way to read the fragment; confirm it so the
-            // worker is not left waiting, and let the read end short.
+          if (!buffer || !Number.isInteger(message.offset) || message.offset < 0 ||
+            !Number.isInteger(message.length) || message.length <= 0 ||
+            message.offset + message.length > buffer.byteLength) {
+            const error = new Error(`Invalid source fragment ${message.offset}+${message.length} ` +
+              `in a buffer of ${buffer?.byteLength ?? 0}B (read ${message.id}).`);
+            logger.warn(`torrent-worker: ${error.message}`);
+            this.#fragmentReaders.get(message.id)?.fail(error);
+            this.#fragmentReaders.delete(message.id);
+            this.#reads.get(message.id)?.fail(error);
+            this.#reads.delete(message.id);
             this.#worker.postMessage({ type: Event.FRAGMENT_DONE, id: message.id });
-            break;
-          }
-          if (message.offset + message.length > buffer.byteLength) {
-            logger.warn(
-              `torrent-worker: fragment ${message.offset}+${message.length} lies outside ` +
-              `its buffer of ${buffer.byteLength}B (read ${message.id}) — ending the read short`
-            );
-            this.#worker.postMessage({ type: Event.FRAGMENT_DONE, id: message.id });
+            void this.#caller.call(Command.CANCEL_READ, { readId: message.id }).catch(() => undefined);
             break;
           }
           // A sequential read walks the file forwards, so each fragment either

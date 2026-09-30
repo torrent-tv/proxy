@@ -176,6 +176,7 @@ export function readPresentationRanges(raw) {
   const scales = readTrackTimescales(raw);
   const edits = readTrackEditOffsets(raw);
   const byTrack = new Map();
+  const decodeRanges = new Map();
   const defaultDurations = new Map();
   let trackId = null;
   let decodeTime = 0;
@@ -221,6 +222,10 @@ export function readPresentationRanges(raw) {
         if (!(duration > 0)) return;
         const position = (decodeTime + composition) / scale + (edits.get(trackId) ?? 0);
         ranges.push({ start: position, end: position + duration / scale });
+        const decode = decodeRanges.get(trackId) ?? [];
+        decode.push({ start: decodeTime / scale + (edits.get(trackId) ?? 0),
+          end: (decodeTime + duration) / scale + (edits.get(trackId) ?? 0) });
+        decodeRanges.set(trackId, decode);
         decodeTime += duration;
       }
       byTrack.set(trackId, ranges);
@@ -243,11 +248,34 @@ export function readPresentationRanges(raw) {
     // Movie edits quantize independent pieces to movie ticks. Preserve that
     // declared resolution at joins; it is not a playback buffer threshold.
     for (const range of merged) range.end += precision;
-    return { id, ranges: merged };
+    const decoded = decodeRanges.get(id);
+    return { id, ranges: merged, kind: kinds.get(id), precision,
+      decodeStart: Math.min(...decoded.map(({ start }) => start)),
+      decodeEnd: Math.max(...decoded.map(({ end }) => end)) };
   });
   // A multiplexed segment is playable only where every declared track exists.
   const result = intersectPresentationTracks(mergedTracks);
   presentationTracks.set(result, mergedTracks);
+  return result;
+}
+
+/** A video frame can cross a file boundary when decoding remains continuous. */
+export function continuePresentationRanges(ranges, nextRanges) {
+  const tracks = presentationTracks.get(ranges);
+  const next = presentationTracks.get(nextRanges);
+  if (!tracks || !next) return ranges;
+  const continued = tracks.map((track) => {
+    const following = next.find(({ id }) => id === track.id);
+    const held = track.ranges.map((range) => ({ ...range }));
+    if (track.kind === "vide" && following && held.length > 0 && following.ranges.length > 0 &&
+      Math.abs(track.decodeEnd - following.decodeStart) <= track.precision + following.precision +
+        Number.EPSILON * Math.max(1, following.decodeStart) * 8) {
+      held.at(-1).end = Math.max(held.at(-1).end, following.ranges[0].start);
+    }
+    return { ...track, ranges: held };
+  });
+  const result = intersectPresentationTracks(continued);
+  presentationTracks.set(result, continued);
   return result;
 }
 

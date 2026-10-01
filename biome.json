@@ -178,6 +178,7 @@
                       "!../learned-median.js",
                       "!../torrent-cost.js",
                       "!../encoder-readings.js",
+                      "!../audio-work-rate.js",
                       "!../contention.js",
                       "!../args.js",
                       "!../encode-run-state.js",

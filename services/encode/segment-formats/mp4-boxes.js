@@ -268,6 +268,14 @@ export function readPresentationRanges(raw) {
 }
 
 /** A video frame can cross a file boundary when decoding remains continuous. */
+export function presentationCoverageEnd(ranges) {
+  const tracks = presentationTracks.get(ranges);
+  if (!tracks?.length) return null;
+  return Math.min(...tracks.map(({ frameRanges, precision }) => Math.max(...frameRanges.map((range) =>
+    range.lastFrameStart + 2 * range.maxFrameDuration + precision))));
+}
+
+/** A video frame can cross a file boundary when decoding remains continuous. */
 export function continuePresentationRanges(ranges, nextRanges) {
   const tracks = presentationTracks.get(ranges);
   const next = presentationTracks.get(nextRanges);
@@ -306,7 +314,10 @@ export function translatePresentationRanges(ranges, initBytes, timestampOffsetSe
     ranges: held.map(({ start, end }, index) => ({
       start: Math.max(0, start + timestampOffsetSeconds - (edits.get(id) ?? 0)),
       end: end + timestampOffsetSeconds - (edits.get(id) ?? 0),
-      ...(kind === "soun" ? {
+      // Chromium joins continuous audio and video within twice the measured
+      // frame distance. This is a coded-frame rule, not an ETA tolerance.
+      // https://chromium.googlesource.com/chromium/src/+/refs/heads/main/media/filters/source_buffer_stream.cc
+      ...(["soun", "vide"].includes(kind) ? {
         joinEnd: frameRanges[index].lastFrameStart + 2 * frameRanges[index].maxFrameDuration +
           timestampOffsetSeconds - (edits.get(id) ?? 0)
       } : {})

@@ -84,7 +84,8 @@ import { OutputOpening } from "../encode/OutputOpening.js";
 import { segmentFormatOfKey } from "../encode/output-key-format.js";
 import { OutputSpec } from "../encode/output/OutputSpec.js";
 import { compareInits } from "../encode/segment-formats/init-compat.js";
-import { nominalKbpsFor } from "../encode/args.js";
+import { nominalKbpsFor, AUDIO_TRANSCODE_KBPS } from "../encode/args.js";
+import { audioReadingFor } from "../encode/audio-work-rate.js";
 import { probeInputMediaInfo } from "../media/media-info-probe.js";
 import { probeVideoKeyframeTimes } from "../media/keyframe-probe.js";
 import { wireMachineBudget } from "../storage/wire.js";
@@ -210,6 +211,7 @@ export function wireOutputs({
     // is inventing a penalty, which is the same fault as inventing a fill rate.
     contentionPenalties = null,
     copySpeedX = null,
+    audioCalibration = [],
     tonemapSupported = false,
     getCachedMediaInfo = null,
     getCachedAudioTracks = null,
@@ -227,6 +229,10 @@ export function wireOutputs({
     memoryClaimant = null,
     budgetPolicy = null}) {
   const parts = {};
+  const audioDescriptionOf = (output) => (getCachedAudioTracks?.({
+    sourceKey: output.file.sourceKey, fileIndex: output.spec.grid?.fileIndex ?? output.file.fileIndex
+  }) ?? []).find((track) => track.fileIndex === output.spec.audio?.fileIndex &&
+    track.sourceTrackIndex === output.spec.audio?.trackIndex) ?? null;
   // Encode components receive only the storage operations they use. The
   // concrete SegmentStore remains owned by this assembly and is never handed
   // to the encode layer.
@@ -240,7 +246,7 @@ export function wireOutputs({
     pathFor: (address) => parts.segmentStore.pathFor(address),
     initOf: (address) => parts.segmentStore.initOf(address),
     directoryFor: (address) => parts.segmentStore.directoryFor(address),
-    publish: (address, makingName, format) => parts.segmentStore.publish(address, makingName, format)
+    publish: (address, makingName, format, coverage) => parts.segmentStore.publish(address, makingName, format, coverage)
   };
   const segmentOutputFiles = {
     addresses: () => parts.segmentStore.addresses(),
@@ -545,7 +551,24 @@ export function wireOutputs({
     waitUntilReady: (...args) => parts.serving.waitUntilReady(...args),
     get encodeRuns() { return parts.encodeRuns; },
     encodeSpeedReadingOf: (output) => parts.encodeCost.latestSpeedReadingOf(output),
-    projectedEncodeSpeedOf: () => parts.admission.projectedSpeedX(),
+    projectedEncodeSpeedOf: (output) => parts.encodeCost.projectedSpeedOf(output),
+    audioDescriptionOf,
+    processingStartupSecondsOf: (output) => output.spec.carries === "audio-only" ?
+      audioReadingFor(audioCalibration, { ...audioDescriptionOf(output),
+        codec: audioDescriptionOf(output)?.codec ?? output.file.media?.audioCodec,
+        transcode: output.spec.audio?.transcode })?.startupSeconds ?? 0 :
+      Math.max(0, (startStopCost?.firstByteWaitSec ?? 0) - parts.segmentDurationSec /
+        parts.encodeCost.projectedSpeedOf(output)),
+    initialOutputBitsPerMediaSecondOf: (output) => {
+      const description = audioDescriptionOf(output);
+      const reference = audioReadingFor(audioCalibration, { codec: description?.codec, transcode: false });
+      const audio = output.spec.audio ? output.spec.audio.transcode ? AUDIO_TRANSCODE_KBPS * 1000 :
+        description?.bitrateKbps > 0 ? description.bitrateKbps * 1000 :
+          reference ? reference.bytes * 8 / reference.durationSeconds : 0 : 0;
+      const video = output.spec.video ? (output.spec.video.encode?.rateControl?.maxrateKbps ??
+        output.file.media?.bitrateKbps ?? 0) * 1000 : 0;
+      return video + audio;
+    },
     get opening() { return parts.opening; },
     get outputTimes() { return parts.outputTimes; },
     get outputs() { return parts.outputs; },
@@ -761,6 +784,8 @@ export function wireOutputs({
       decodeModel: parts.decodeCostModel,
       contentionPenalties: parts.contentionPenalties,
       copySpeedX: parts.copySpeedX,
+      audioCalibration,
+      audioDescriptionOf,
       availability: parts.hostLoad.hostAvailability,
       // WHICH encoder this host settled on. Only the software ladder is
       // benchmarked, so a reading taken off a hardware encoder cannot be

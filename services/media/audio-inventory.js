@@ -106,6 +106,7 @@ export function buildAudioInventory({ embedded, videoFileIndex, sidecars }) {
       isVisualImpaired: track?.isVisualImpaired === true,
       isEnabled: track?.isEnabled !== false,
       channels: Number.isFinite(track?.channels) ? track.channels : null,
+      samplingFrequency: Number.isFinite(track?.samplingFrequency) ? track.samplingFrequency : null,
       // The rate the file STATES for this track, in kbit/s — an average, not a
       // bound — or null where nothing states one (a sidecar read from its
       // container table, a Matroska stream without statistics tags). What a

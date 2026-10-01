@@ -94,7 +94,7 @@ const ENCODE_BENCHMARK_MAX_PLAUSIBLE_SPEED = 1000;
  * A preset that has not reported twice in this long is hung, not slow: reports
  * arrive twice a second whatever the encoding speed.
  */
-const ENCODE_BENCHMARK_TIMEOUT_MS = 10_000;
+export const ENCODE_BENCHMARK_TIMEOUT_MS = 10_000;
 /**
  * How many times the calibration clip is joined to itself to measure copying.
  *

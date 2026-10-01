@@ -69,6 +69,14 @@ test("a shared init preserves presentation times without adding composition dela
   assert.deepEqual(times, [98000, 146000]);
 });
 
+test("video exposes its coded-frame join boundary without changing its measured end", () => {
+  const header = init(0, 0, "vide");
+  const ranges = readPresentationRanges(Buffer.concat([header, fragment(24000, 0)]));
+  const translated = fmp4Format.clientMediaRanges(ranges, { initBytes: header, timestampOffsetSeconds: 0 });
+  assert.equal(translated[0].end, ranges[0].end);
+  assert.ok(Math.abs(translated[0].joinEnd - (1 + 2 * (1000 / 24000))) <= Number.EPSILON);
+});
+
 test("a shared init first read after a seek also supports returning to the beginning", () => {
   const shared = fmp4Format.prepareSharedInit(init(304083, 2000));
   const media = fragment(0, 2000);
@@ -124,7 +132,8 @@ test("client clock projection accounts for shared edits and audio initPTS", () =
   const projected = fmp4Format.clientMediaRanges(video, {
     initBytes: videoHeader, timestampOffsetSeconds: -2000 / 24000
   });
-  assert.deepEqual(projected, video);
+  assert.deepEqual(projected.map(({ start, end }) => ({ start, end })), video);
+  assert.ok(projected[0].joinEnd > projected[0].end);
 });
 
 test("a variable-rate frame crosses a cut only with continuous decode samples", () => {

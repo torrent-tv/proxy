@@ -1,20 +1,20 @@
 /**
  * Predict the minimum delay before playback can run to the end without
- * exhausting the browser buffer.
+ * exhausting the continuous media available for the required tracks.
  *
  * This module contains the playback decision's only model. Its inputs are
  * measurements and physical limits: source bytes and download rate, encoded
- * media and encoder rate, segment sizes and client-link rate, the existing
- * browser buffer, its capacity, the proxy look-ahead, and the measured reserve
- * for interruptions. A measured rate relaxes toward the lower of its latest
- * value and its observed mean over the measurement span. Its integral remains
- * unbounded for a positive measured rate; an old slope cannot invent a permanent
- * cessation of service. There are no fitted weights or rate multipliers.
+ * media and encoder rate, segment sizes and client-link rate, existing
+ * continuous media, and measured supply interruptions. Each service integral
+ * extends its latest measured rate until the next observation. The forecast
+ * is conditional on these measured services continuing. Browser storage
+ * capacity is not an admission condition. There are no fitted weights or
+ * rate multipliers, and no search over candidate start times.
  */
 
 /**
  * The mean rate predicted over a horizon by the integral of the measured rate.
- * Every supplied measurement contributes equally to the observed mean.
+ * Polling does not change the last measured service rate.
  *
  * @param {Array<{ at: number, value: number }>} readings
  * @param {number} now
@@ -96,25 +96,19 @@ export function predictPlaybackReadiness(input = {}) {
   const buffered = measuredRanges.length > 0 && measuredRanges.every(Boolean) ?
     Math.max(0, Math.min(...measuredRanges.map((ranges) => contiguousEnd(ranges, position) - position))) :
     finiteNonNegative(input.bufferedAheadSeconds);
-  // A loader target can be lowered after a fragment retry. Bytes already held
-  // prove a larger capacity, even when an older page reports only that target.
-  const capacity = Math.max(buffered, finiteNonNegative(input.bufferLimitSeconds),
-    ...measuredRanges.map((ranges) => ranges ? ranges.reduce((total, range) =>
-      total + Math.max(0, range.end - Math.max(position, range.start)), 0) : 0));
   const reserve = Math.min(remaining, finiteNonNegative(input.reserveSeconds));
-  const lookahead = finiteNonNegative(input.lookaheadSeconds);
   const sources = new Map((Array.isArray(input.sources) ? input.sources : [])
     .filter((source) => typeof source?.id === "string")
     .map((source) => [source.id, source]));
-  if (remaining <= buffered) {
-    return result(true, 0, buffered, reserve, 0, "client-buffer-covers-end", 0);
-  }
-  if (!(duration > 0) || !(capacity > 0) || tracks.length === 0) {
+  if (!(duration > 0) || tracks.length === 0) {
     return result(false, null, buffered, reserve, null, "incomplete-state", 0);
   }
   const requiredTracks = input.requiredAudio === true ? 2 : 1;
   if (tracks.length < requiredTracks) {
     return result(false, null, buffered, reserve, null, "separate-audio-not-observed", 0);
+  }
+  if (remaining <= buffered) {
+    return result(true, 0, buffered, reserve, 0, "client-buffer-covers-end", 0);
   }
   if (tracks.some((track) => !Array.isArray(track.segments) || track.segments.length === 0)) {
     return result(false, null, buffered, reserve, null, "timeline-unavailable", 0);
@@ -182,13 +176,12 @@ export function predictPlaybackReadiness(input = {}) {
       }
 
       const produced = state.ready.has(segment.index);
-      // Global encode progress may belong to another run beyond a missing
-      // segment. Only publication proves this segment's work is complete.
-      const workStart = Math.max(position, segment.startSeconds);
-      const encodeWork = produced ? 0 : Math.max(0, segment.endSeconds - workStart);
-      if (!produced && !(encodeWork > 0)) {
-        unknownReason ??= "segment-production-delay-unavailable";
-      }
+      // Attribute unfinished work to the actual run interval. A global
+      // position from another run must not erase a missing earlier segment.
+      const workStart = segment.startSeconds;
+      const remainingProcessing = uncoveredIntervals({ start: workStart, end: segment.endSeconds },
+        normalizedRanges(Array.isArray(track.processingRanges) ? track.processingRanges : []));
+      const encodeWork = produced ? 0 : remainingProcessing.reduce((sum, part) => sum + part.end - part.start, 0);
 
       const sourceIntervals = new Map();
       if (!produced && encodeWork > 0) {
@@ -201,10 +194,7 @@ export function predictPlaybackReadiness(input = {}) {
             if (!(bytesPerMediaSecond > 0)) {
               unknownReason ??= "download-rate-unavailable";
             } else {
-              sourceIntervals.set(sourceId, {
-                start: workStart,
-                end: segment.endSeconds
-              });
+              sourceIntervals.set(sourceId, remainingProcessing);
             }
           }
         }
@@ -219,6 +209,7 @@ export function predictPlaybackReadiness(input = {}) {
         ahead: Math.max(0, segment.startSeconds - position),
         sizeBits,
         encodeWork,
+        remainingProcessing,
         sourceIntervals,
         produced
       });
@@ -227,12 +218,6 @@ export function predictPlaybackReadiness(input = {}) {
 
   if (unknownReason) {
     return result(false, null, buffered, reserve, null, unknownReason, preparedSegments);
-  }
-  for (const sourceId of new Set(jobs.flatMap(({ sourceIntervals }) => [...sourceIntervals.keys()]))) {
-    const source = sourceState.get(sourceId);
-    if (!source || !downloadServices.get(source.serviceId)?.curve) {
-      return result(false, null, buffered, reserve, null, "download-rate-unavailable", preparedSegments);
-    }
   }
   for (const { track, curve } of trackState) {
     if (jobs.some((job) => job.track === track && !job.produced) && !curve) {
@@ -243,149 +228,125 @@ export function predictPlaybackReadiness(input = {}) {
   jobs.sort((left, right) => left.segment.startSeconds - right.segment.startSeconds ||
     left.segment.endSeconds - right.segment.endSeconds || left.trackIndex - right.trackIndex);
 
-  const schedule = (startDelaySeconds, prefillOnly = false, prefillReach = 0) => {
-    const sourceFinish = new Map([...downloadServices.keys()].map((id) => [id, {
-      finishAt: 0
-    }]));
-    const sourceMediaEnd = new Map();
-    const trackFinish = trackState.map(() => 0);
-    let transferFinish = 0;
-    const completions = [];
-    const productions = [];
-    for (const job of jobs) {
-      const { track, trackIndex, segment, ahead, sizeBits, encodeWork, sourceIntervals } = job;
-      if (prefillOnly && (ahead > prefillReach || segment.endSeconds - position > capacity)) {
-        continue;
+  // Each resource has one service integral and one queue. Production is
+  // scheduled in media order, independently of browser storage capacity.
+  // The earliest legal start is the supremum of completion lateness against
+  // presentation deadlines, not a search over guessed delay candidates.
+  const sourceFinish = new Map([...downloadServices.keys()].map((id) => [id, 0]));
+  const sourceMediaService = new Map();
+  for (const [id, { source }] of sourceState) {
+    const density = Number(source.bytesPerMediaSecond);
+    if (density > 0 && Array.isArray(source.residence)) {
+      // Initial time-to-byte mapping uses measured file-average density.
+      // Held bytes are not downloaded again. Reading costs are already
+      // included in effective processing speed, rather than charged twice.
+      sourceMediaService.set(id, source.residence.filter(({ location, start, end }) =>
+        location !== "missing" && Number.isFinite(start) && Number.isFinite(end) && end > start)
+        .map(({ start, end }) => ({ start: start / density, end: end / density, begin: 0, finish: 0 })));
+    }
+  }
+  const trackFinish = trackState.map(({ track }) => finiteNonNegative(track.startupRemainingSeconds));
+  let transferFinish = 0;
+  const completions = [];
+  const productions = [];
+  for (const job of jobs) {
+    const { track, trackIndex, segment, sizeBits, encodeWork, sourceIntervals, remainingProcessing } = job;
+    const sourceArrivals = [];
+    for (const [sourceId, interval] of [...sourceIntervals].flatMap(([id, ranges]) =>
+      ranges.map((range) => [id, range]))) {
+      const source = sourceState.get(sourceId);
+      const served = sourceMediaService.get(sourceId) ?? [];
+      for (const part of uncoveredIntervals(interval, served)) {
+        const supply = downloadServices.get(source.serviceId)?.curve;
+        if (!supply) return result(false, null, buffered, reserve, null, "download-rate-unavailable", preparedSegments);
+        const begin = sourceFinish.get(source.serviceId) ?? 0;
+        const end = supply.finish(
+          (part.end - part.start) * Number(source.source.bytesPerMediaSecond), begin);
+        sourceFinish.set(source.serviceId, end);
+        served.push({ ...part, begin, finish: end });
       }
-      const requestAt = ahead <= lookahead
-        ? 0
-        : startDelaySeconds + ahead - lookahead;
-      const sourceWorkByService = new Map();
-      for (const [sourceId, interval] of sourceIntervals) {
-        const source = sourceState.get(sourceId);
-        const previousMediaEnd = sourceMediaEnd.get(sourceId) ?? position;
-        const mediaWork = Math.max(0, interval.end - Math.max(interval.start, previousMediaEnd));
-        const byteWork = mediaWork * Number(source.source.bytesPerMediaSecond);
-        const serviceWork = sourceWorkByService.get(source.serviceId) ?? {
-          bytes: 0,
-          mediaEnds: new Map()
-        };
-        serviceWork.bytes += byteWork;
-        serviceWork.mediaEnds.set(sourceId, Math.max(previousMediaEnd, interval.end));
-        sourceWorkByService.set(source.serviceId, serviceWork);
+      sourceMediaService.set(sourceId, served);
+      sourceArrivals.push(...served.filter((part) => part.end > interval.start && part.start < interval.end)
+        .flatMap((part) => [Math.max(part.start, interval.start), Math.min(part.end, interval.end)]
+          .map((media) => ({ media, at: media === part.start ? part.begin : part.begin +
+            (part.finish - part.begin) * (media - part.start) / (part.end - part.start) }))));
+    }
+    // Max-plus composition of fluid arrival and processing. Between measured
+    // boundaries both are linear, so their supremum occurs at an endpoint.
+    // Reused input keeps its original arrival times; it is neither downloaded
+    // twice nor charged the queue start of a later request.
+    const processing = trackState[trackIndex].curve;
+    const producedAt = job.produced || encodeWork === 0 ? 0 : Math.max(
+      processing.finish(encodeWork, trackFinish[trackIndex]),
+      ...sourceArrivals.map(({ media, at }) => processing.finish(
+        remainingProcessing.reduce((sum, part) => sum + Math.max(0, part.end - Math.max(part.start, media)), 0), at)));
+    trackFinish[trackIndex] = Math.max(trackFinish[trackIndex], producedAt);
+    productions.push({ at: producedAt, trackIndex, segment, requiresSource: sourceArrivals.some(({ at }) => at > 0) });
+    const deliveryAt = link.finish(sizeBits, Math.max(transferFinish, producedAt));
+    transferFinish = deliveryAt;
+    completions.push({ at: deliveryAt + finiteNonNegative(track.appendSeconds), trackIndex, segment });
+  }
+
+  const constraints = [];
+  for (let trackIndex = 0; trackIndex < trackState.length; trackIndex += 1) {
+    const state = trackState[trackIndex];
+    const delivered = state.clientRanges.map((range) => ({ ...range }));
+    const prepared = state.clientRanges.map((range) => ({ ...range }));
+    const trackEnd = Math.min(duration, state.segments.at(-1).mediaRanges?.at(-1)?.end ?? duration);
+    for (const completion of completions.filter((item) => item.trackIndex === trackIndex)) {
+      const before = contiguousEnd(delivered, position);
+      const ranges = completion.segment.mediaRanges ?? [{
+        start: completion.segment.startSeconds, end: completion.segment.endSeconds
+      }];
+      for (const range of ranges) addRange(delivered, range.start, range.end, range.joinEnd);
+      const after = contiguousEnd(delivered, position);
+      constraints.push(completion.at - Math.max(0, Math.min(before, trackEnd) - position));
+      if (!(after > before) && ranges.some(({ start }) => start > before)) {
+        // A timestamp hole cannot be repaired by waiting longer. Keep it
+        // distinct from an unavailable rate or a slow but finite service.
+        return result(false, null, buffered, reserve, null, 'media-continuity-unavailable', preparedSegments);
       }
-      const sourceReadyAt = new Map();
-      for (const [serviceId, work] of sourceWorkByService) {
-        const previous = sourceFinish.get(serviceId) ?? { finishAt: 0 };
-        const service = downloadServices.get(serviceId);
-        const serviceStart = Math.max(requestAt, previous.finishAt);
-        const readyAt = work.bytes > 0
-          ? service.curve.finish(work.bytes, serviceStart)
-          : previous.finishAt;
-        sourceFinish.set(serviceId, { finishAt: readyAt });
-        for (const [sourceId, mediaEnd] of work.mediaEnds) {
-          sourceMediaEnd.set(sourceId, mediaEnd);
-          sourceReadyAt.set(sourceId, readyAt);
+    }
+    for (const production of productions.filter((item) => item.trackIndex === trackIndex)) {
+      const before = contiguousEnd(prepared, position);
+      const ranges = production.segment.mediaRanges ?? [{
+        start: production.segment.startSeconds, end: production.segment.endSeconds
+      }];
+      for (const range of ranges) addRange(prepared, range.start, range.end, range.joinEnd);
+      // Supply interruption coverage is stock held by the proxy as well as
+      // the browser. It is not a browser buffer-size admission rule.
+      constraints.push(production.at - Math.max(0, before - position -
+        Math.min(reserve, Math.max(0, trackEnd - before)) * Number(production.requiresSource)));
+    }
+  }
+  const delay = Math.max(0, ...constraints);
+  const originReady = trackState.every(({ clientRanges }) => contiguousEnd(clientRanges, position) > position);
+  const ready = delay === 0 && originReady;
+  const forecast = result(ready, Number.isFinite(delay) ? delay : null, buffered, reserve,
+    Math.max(0, reserve - buffered), ready ? 'trajectory-safe-now' :
+      Number.isFinite(delay) ? 'minimum-safe-delay' : 'service-not-advancing', preparedSegments);
+  return { ...forecast, measuredAt: now, predictedStartAt: Number.isFinite(delay) ? now + delay * 1000 : null,
+    preparedUntilSeconds: Math.min(duration, ...trackState.map((state, index) => {
+      const ranges = state.clientRanges.map((range) => ({ ...range }));
+      for (const item of productions.filter((item) => item.trackIndex === index && item.at <= delay)) {
+        for (const range of item.segment.mediaRanges ?? [{ start: item.segment.startSeconds, end: item.segment.endSeconds }]) {
+          addRange(ranges, range.start, range.end, range.joinEnd);
         }
       }
-      const sourceReadyAtLatest = (Array.isArray(track.sourceIds) ? [...new Set(track.sourceIds)] : [])
-        .reduce((latest, sourceId) => Math.max(latest, sourceReadyAt.get(sourceId) ?? requestAt), requestAt);
-      const encodeStart = Math.max(requestAt, trackFinish[trackIndex]);
-      const encodedAt = job.produced
-        ? requestAt
-        : trackState[trackIndex].curve.finish(encodeWork, encodeStart);
-      if (!job.produced) {
-        trackFinish[trackIndex] = encodedAt;
-      }
-      const producedAt = job.produced ? 0 : Math.max(sourceReadyAtLatest, encodedAt);
-      productions.push({
-        at: producedAt,
-        sourceReadyAt: sourceReadyAtLatest,
-        trackIndex,
-        segment,
-        requiresSource: sourceIntervals.size > 0
-      });
-      const roomAt = segment.endSeconds - position <= capacity
-        ? 0
-        : startDelaySeconds + segment.endSeconds - position - capacity;
-      const transferStart = Math.max(transferFinish, producedAt, roomAt, requestAt);
-      const transferEnd = link.finish(sizeBits, transferStart);
-      if (!Number.isFinite(transferEnd)) {
-        return { safe: false, finishAt: Number.POSITIVE_INFINITY, completions };
-      }
-      transferFinish = transferEnd;
-      completions.push({ at: transferEnd, trackIndex, segment });
-    }
+      return contiguousEnd(ranges, position);
+    })) };
 
-    const usefulCompletions = prefillOnly
-      ? completions.filter(({ segment }) => segment.startSeconds - position <= prefillReach &&
-        segment.endSeconds - position <= capacity)
-      : completions;
-    const usefulProductions = prefillOnly
-      ? productions.filter(({ segment }) => segment.startSeconds - position <= prefillReach &&
-        segment.endSeconds - position <= capacity)
-      : productions;
-    const safety = isSafeSchedule(usefulCompletions, usefulProductions, trackState, position, duration,
-      buffered, capacity, reserve, startDelaySeconds);
-    return { safe: safety.safe, failure: safety.failure,
-      bufferedAtStart: safety.bufferedAtStart,
-      neededSeconds: safety.neededSeconds,
-      completionTimes: usefulCompletions.map(({ at }) => at),
-      finishAt: usefulCompletions.reduce((latest, item) => Math.max(latest, item.at), 0) };
-  };
+}
 
-  const prefillReach = Math.min(capacity, lookahead, remaining);
-  const prefillSchedule = schedule(0, true, prefillReach);
-  const maximumUsefulDelay = prefillSchedule.finishAt;
-  if (!Number.isFinite(maximumUsefulDelay)) {
-    return result(false, null, buffered, reserve, null, "prefill-cannot-complete", preparedSegments);
+function uncoveredIntervals(interval, served) {
+  let remaining = [{ ...interval }];
+  for (const held of served) {
+    remaining = remaining.flatMap((part) => held.end <= part.start || held.start >= part.end ? [part] : [
+      { start: part.start, end: Math.min(part.end, held.start) },
+      { start: Math.max(part.start, held.end), end: part.end }
+    ].filter(({ start, end }) => end > start));
   }
-  const immediate = schedule(0);
-  if (immediate.safe) {
-    return result(true, 0, buffered, reserve, 0, "trajectory-safe-now", preparedSegments);
-  }
-  const searchLimit = maximumUsefulDelay;
-  if (!(searchLimit > 0)) {
-    return { ...result(false, null, buffered, reserve, null, "no-safe-start-found", preparedSegments), failure: immediate.failure };
-  }
-
-  let low = 0;
-  let high = null;
-  const breakpoints = [...new Set([
-    maximumUsefulDelay,
-    searchLimit,
-    ...prefillSchedule.completionTimes
-  ])]
-    .filter((delay) => delay > 0 && delay <= searchLimit)
-    .sort((left, right) => left - right);
-  const candidates = new Set(breakpoints);
-  for (let index = 1; index < breakpoints.length; index += 1) {
-    candidates.add((breakpoints[index - 1] + breakpoints[index]) / 2);
-  }
-  for (const delay of [...candidates].sort((left, right) => left - right)) {
-    if (schedule(delay).safe) {
-      high = delay;
-      break;
-    }
-  }
-  if (high === null) {
-    return { ...result(false, null, buffered, reserve, null, "no-safe-start-found", preparedSegments), failure: immediate.failure };
-  }
-
-  while (true) {
-    const middle = (low + high) / 2;
-    if (middle === low || middle === high) {
-      break;
-    }
-    if (schedule(middle).safe) {
-      high = middle;
-    } else {
-      low = middle;
-    }
-  }
-  const readiness = schedule(high);
-  return result(false, high, buffered, reserve, immediate.neededSeconds,
-    "minimum-safe-delay", preparedSegments, readiness.bufferedAtStart);
+  return remaining;
 }
 
 /** Predict only unknown cuts in the same clock as the measured track. */
@@ -436,54 +397,20 @@ function summarizeRate(readings) {
   };
 }
 
-function rateCurveFrom({ lastAt, lastValue, meanValue, spanSeconds }, now) {
-  const baseline = Math.max(0, Math.min(lastValue, meanValue));
-  const span = Math.max(Number.EPSILON, spanSeconds);
-  const age = Math.max(0, (now - lastAt) / 1000);
-  const excess = Math.max(0, lastValue - baseline) * Math.exp(-age / span);
-  // r(t) = baseline + excess * exp(-t/span).
-  // W(t) = integral(0..t, r(u)du). Positive measured service has no finite
-  // total-work ceiling merely because an old sample was faster.
-  const workBy = (seconds) => rateIntegral(Math.max(0, seconds), baseline, excess, span);
+function rateCurveFrom({ lastValue }) {
+  // Conditional projection of the current measured service. No exponential
+  // relaxation, smoothing time, slope extrapolation or guessed recovery.
+  // A new measurement changes the integral; polling does not change its rate.
+  const rate = Math.max(0, lastValue);
+  const workBy = (seconds) => rate * Math.max(0, seconds);
   return {
-    rateAt: (seconds) => baseline + excess * Math.exp(-Math.max(0, seconds) / span),
+    rateAt: () => rate,
     workBy,
     finish: (work, startAt) => {
       const start = Math.max(0, startAt);
-      return start + invertRateIntegral(Math.max(0, work), baseline,
-        excess * Math.exp(-start / span), span);
+      return start + (work > 0 ? work / rate : 0);
     }
   };
-}
-
-function rateIntegral(seconds, baseline, excess, span) {
-  return baseline * seconds - excess * span * Math.expm1(-seconds / span);
-}
-
-/** Invert the strictly increasing service integral, with no playback rule. */
-function invertRateIntegral(work, baseline, excess, span) {
-  if (work === 0) {
-    return 0;
-  }
-  if (!(baseline > 0) || !Number.isFinite(work)) {
-    return Number.POSITIVE_INFINITY;
-  }
-  let low = 0;
-  let high = work / baseline;
-  if (excess === 0) {
-    return high;
-  }
-  while (true) {
-    const middle = (low + high) / 2;
-    if (middle === low || middle === high) {
-      return high;
-    }
-    if (rateIntegral(middle, baseline, excess, span) >= work) {
-      high = middle;
-    } else {
-      low = middle;
-    }
-  }
 }
 
 function averageBitsPerMediaSecond(track, segments, ready) {
@@ -504,125 +431,6 @@ function averageBitsPerMediaSecond(track, segments, ready) {
     return bits / mediaSeconds;
   }
   return finiteNonNegative(track.bitsPerMediaSecond);
-}
-
-function isSafeSchedule(completions, productions, trackState, position, duration, buffered, capacity, reserve,
-  startDelay) {
-  // Client continuity is constrained by its buffer limit; source-stall reserve
-  // is covered by the larger union of client data and output already prepared here.
-  const clientRanges = trackState.map((state) => state.clientRanges.map((range) => ({ ...range })));
-  const preparedRanges = trackState.map((state) => state.clientRanges.map((range) => ({ ...range })));
-  const orderedCompletions = [...completions]
-    .filter(({ at }) => Number.isFinite(at))
-    .sort((left, right) => left.at - right.at || left.trackIndex - right.trackIndex);
-  const orderedProductions = [...productions]
-    .filter(({ at }) => Number.isFinite(at))
-    .sort((left, right) => left.at - right.at || left.trackIndex - right.trackIndex);
-  const reserveUntil = trackState.map(() => Number.NEGATIVE_INFINITY);
-  // The measured reserve applies only until this track's last required source
-  // interval has arrived; encoding and client delivery stay in the schedule.
-  for (const production of productions) {
-    if (production.requiresSource) {
-      reserveUntil[production.trackIndex] = Math.max(reserveUntil[production.trackIndex],
-        production.sourceReadyAt);
-    }
-  }
-  let completionIndex = 0;
-  let productionIndex = 0;
-
-  const addThrough = (time) => {
-    while (productionIndex < orderedProductions.length && orderedProductions[productionIndex].at <= time) {
-      const { trackIndex, segment } = orderedProductions[productionIndex];
-      for (const range of segment.mediaRanges ?? [{ start: segment.startSeconds, end: segment.endSeconds }]) {
-        addRange(preparedRanges[trackIndex], range.start, range.end, range.joinEnd);
-      }
-      productionIndex += 1;
-    }
-    while (completionIndex < orderedCompletions.length && orderedCompletions[completionIndex].at <= time) {
-      const { trackIndex, segment } = orderedCompletions[completionIndex];
-      for (const range of segment.mediaRanges ?? [{ start: segment.startSeconds, end: segment.endSeconds }]) {
-        addRange(clientRanges[trackIndex], range.start, range.end, range.joinEnd);
-        addRange(preparedRanges[trackIndex], range.start, range.end, range.joinEnd);
-      }
-      completionIndex += 1;
-    }
-  };
-  const safeAt = (time, checkClient = true) => {
-    const playerPosition = position + Math.max(0, time - startDelay);
-    if (playerPosition >= duration) {
-      return { safe: true, stockSafe: true, available: 0, neededSeconds: 0 };
-    }
-    const trackEnd = (index) => {
-      const last = trackState[index].segments.at(-1);
-      return last?.mediaRanges?.at(-1)?.end ?? duration;
-    };
-    const available = Math.min(capacity, ...clientRanges.map((trackRanges, index) =>
-      playerPosition >= trackEnd(index) ? Number.POSITIVE_INFINITY :
-        Math.max(0, contiguousEnd(trackRanges, playerPosition) - playerPosition)));
-    const trackStatus = clientRanges.map((ranges, index) => ({
-      track: trackState[index].track.id,
-      end: contiguousEnd(ranges, playerPosition),
-      next: ranges.find(range => range.start > playerPosition)?.start ?? null,
-      last: trackEnd(index)
-    }));
-    let neededSeconds = 0;
-    let stockSafe = true;
-    for (let trackIndex = 0; trackIndex < trackState.length; trackIndex += 1) {
-      const required = time <= reserveUntil[trackIndex]
-        ? Math.min(reserve, Math.max(0, trackEnd(trackIndex) - playerPosition))
-        : 0;
-      const preparedAhead = Math.max(0,
-        contiguousEnd(preparedRanges[trackIndex], playerPosition) - playerPosition);
-      const deficit = Math.max(0, required - preparedAhead);
-      neededSeconds = Math.max(neededSeconds, deficit);
-      stockSafe &&= deficit === 0;
-    }
-    return {
-      safe: (!checkClient || available > 0) && stockSafe,
-      stockSafe,
-      available,
-      neededSeconds,
-      failure: { time, playerPosition, available, stockSafe, tracks: trackStatus }
-    };
-  };
-
-  addThrough(startDelay);
-  const atStart = safeAt(startDelay);
-  if (!atStart.safe) {
-    return { safe: false, bufferedAtStart: atStart.available, neededSeconds: atStart.neededSeconds, failure: atStart.failure };
-  }
-
-  const playbackEnd = startDelay + Math.max(0, duration - position);
-  const playbackBoundaries = [position + buffered,
-    ...trackState.flatMap(({ clientRanges }) => clientRanges.flatMap(({ start, end }) => [start, end])),
-    ...trackState.flatMap(({ segments }) => segments.flatMap((segment) =>
-      (segment.mediaRanges ?? []).flatMap(({ start, end }) => [start, end]))),
-    ...trackState.flatMap(({ segments }) => segments.map(({ endSeconds }) => endSeconds))]
-    .filter((boundary) => boundary > position && boundary < duration)
-    .map((boundary) => startDelay + boundary - position);
-  const sourceReadyTimes = productions
-    .filter(({ requiresSource }) => requiresSource)
-    .map(({ sourceReadyAt }) => sourceReadyAt);
-  const eventTimes = [...orderedCompletions.map(({ at }) => at),
-    ...orderedProductions.map(({ at }) => at), ...playbackBoundaries, ...sourceReadyTimes]
-    .filter((time) => Number.isFinite(time) && time > startDelay && time < playbackEnd)
-    .sort((left, right) => left - right)
-    .filter((time, index, all) => index === 0 || time !== all[index - 1]);
-
-  for (const time of eventTimes) {
-    const beforeArrival = safeAt(time, false);
-    if (!beforeArrival.stockSafe) {
-      return { safe: false, bufferedAtStart: atStart.available, neededSeconds: beforeArrival.neededSeconds, failure: beforeArrival.failure };
-    }
-    addThrough(time);
-    const afterArrival = safeAt(time);
-    if (!afterArrival.safe) {
-      return { safe: false, bufferedAtStart: atStart.available, neededSeconds: afterArrival.neededSeconds, failure: afterArrival.failure };
-    }
-  }
-
-  const atEnd = safeAt(playbackEnd);
-  return { safe: atEnd.safe, bufferedAtStart: atStart.available, neededSeconds: atStart.neededSeconds, failure: atStart.failure };
 }
 
 function addRange(ranges, start, end, joinEnd) {

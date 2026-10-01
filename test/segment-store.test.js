@@ -35,6 +35,21 @@ function writeSegment(dir, index, bytes = 16) {
 
 const KEY = "torrent:abc:fmt=fmp4:grid=kf@0:video-only:v=0/copy";
 
+test("a closed but truncated non-final piece is not published or reused", (t) => {
+  const { store, root } = storeInATempRoot();
+  t.after(() => { store.dropAll("the check is over"); rmSync(root, { recursive: true, force: true }); });
+  const format = { ...fmp4Format, readMediaRanges: () => [{ start: 456, end: 456.084 }],
+    mediaCoverageEnd: (ranges) => ranges.at(-1).end };
+  const dir = store.directoryFor(KEY);
+  store.useFormat(KEY, format);
+  writeFileSync(path.join(dir, "making-0-00071.mp4"), Buffer.alloc(16));
+  assert.equal(store.publish(KEY, "making-0-00071.mp4", format, { endSeconds: 466 }), null);
+  writeSegment(dir, 71);
+  assert.ok(store.mediaRangesOf(KEY, 71));
+  assert.equal(store.mediaRangesOf(KEY, 71, { endSeconds: 466 }), undefined);
+  assert.equal(store.pathOf(KEY, 71), null);
+});
+
 test("two viewers of one output are given the same directory", (t) => {
   const { store, root } = storeInATempRoot();
   t.after(() => {

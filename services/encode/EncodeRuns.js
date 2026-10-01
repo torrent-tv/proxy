@@ -836,7 +836,9 @@ export class EncodeRuns {
         const index = session.segmentFormat.segmentIndexFromName(
           session.segmentFormat.servedNameOf?.(name) ?? name);
         if (Number.isInteger(index) && index < safeIndex) return null;
-        return this.#host.segmentFiles.publish(session.outputKey ?? "", name, session.segmentFormat);
+        return this.#host.segmentFiles.publish(session.outputKey ?? "", name, session.segmentFormat, {
+          endSeconds: index < session.timeline.segmentCount - 1 ? session.timeline.publishedStartOf(index + 1) : undefined
+        });
       },
       onEnded: (ended) => this.noteRunEnded(session, run, ended)
     });

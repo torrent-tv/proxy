@@ -2233,12 +2233,25 @@ export class TorrentPool {
     // deselected null piece — see fileDownloadedBytes).
     const fileLength = typeof file.length === "number" ? file.length : 0;
     const fileDownloaded = fileDownloadedBytes(torrent, file);
+    const residence = [];
+    const store = pieceStoreOf(torrent);
+    const firstPiece = Math.floor(file.offset / torrent.pieceLength);
+    const lastPiece = Math.ceil((file.offset + fileLength) / torrent.pieceLength);
+    for (let index = firstPiece; index < lastPiece; index += 1) {
+      const start = Math.max(0, index * torrent.pieceLength - file.offset);
+      const end = Math.min(fileLength, (index + 1) * torrent.pieceLength - file.offset);
+      const location = store?.locationOf?.(index) ?? (torrent.bitfield?.get(index) ? "available" : "missing");
+      const previous = residence.at(-1);
+      if (previous?.location === location && previous.end === start) previous.end = end;
+      else residence.push({ start, end, location });
+    }
 
     return {
       ...base,
       fileProgress: fileLength > 0 ? Math.max(0, Math.min(1, fileDownloaded / fileLength)) : 0,
       fileDownloaded,
       fileLength,
+      residence,
       // Resume window (ahead of the anchor): bytes needed vs downloaded, plus
       // the anchor itself so the caller can pin it for the rest of one episode.
       resumeNeededBytes: resume ? resume.totalBytes : null,

@@ -17,6 +17,7 @@
 
 import { PLAYLIST_FILE_NAME } from "./output/playlists.js";
 import { AUDIO_TRANSCODE_KBPS } from "./args.js";
+import { SEGMENT_CUT_TIME_DELTA_SECONDS } from "./output/index.js";
 
 /**
  * What ffmpeg's own CLI subtracts from an input seek, and therefore what has to
@@ -694,7 +695,7 @@ export function buildRunCommand({
       // recorded a hair late would skip to the next one and double the
       // segment. The tolerance absorbs that rounding.
       "-segment_time_delta",
-      "0.05",
+      String(SEGMENT_CUT_TIME_DELTA_SECONDS),
       "-segment_start_number",
       String(inputIndex),
       // THE ENCODER SAYS WHEN A PIECE IS FINISHED, on a channel of its own.

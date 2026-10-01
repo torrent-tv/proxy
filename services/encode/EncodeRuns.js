@@ -15,6 +15,7 @@ import { ENCODE_EXIT } from "./encode-exit.js";
 import { EncodeRun } from "./EncodeRun.js";
 import { computeOutputDimensions } from "./args.js";
 import { buildRunCommand, trueStartOf } from "./run-command.js";
+import { SEGMENT_CUT_TIME_DELTA_SECONDS } from "./output/index.js";
 
 /**
  * @typedef {Object} SegmentFiles
@@ -837,7 +838,8 @@ export class EncodeRuns {
           session.segmentFormat.servedNameOf?.(name) ?? name);
         if (Number.isInteger(index) && index < safeIndex) return null;
         return this.#host.segmentFiles.publish(session.outputKey ?? "", name, session.segmentFormat, {
-          endSeconds: index < session.timeline.segmentCount - 1 ? session.timeline.publishedStartOf(index + 1) : undefined
+          endSeconds: index < session.timeline.segmentCount - 1 ?
+            session.timeline.publishedStartOf(index + 1) - SEGMENT_CUT_TIME_DELTA_SECONDS : undefined
         });
       },
       onEnded: (ended) => this.noteRunEnded(session, run, ended)

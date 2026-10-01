@@ -10,6 +10,7 @@ import os from "node:os";
 import path from "node:path";
 import { directoryNameFor, SegmentStore } from "../services/storage/segment-store/SegmentStore.js";
 import { fmp4Format } from "../services/encode/segment-formats/fmp4.js";
+import { SEGMENT_CUT_TIME_DELTA_SECONDS } from "../services/encode/output/index.js";
 
 /**
  * @returns {{ store: SegmentStore, root: string, lines: string[] }}
@@ -34,6 +35,19 @@ function writeSegment(dir, index, bytes = 16) {
 }
 
 const KEY = "torrent:abc:fmt=fmp4:grid=kf@0:video-only:v=0/copy";
+
+test("a complete audio cut within the configured muxer delta remains usable", (t) => {
+  const { store, root } = storeInATempRoot();
+  t.after(() => { store.dropAll("the check is over"); rmSync(root, { recursive: true, force: true }); });
+  const format = { ...fmp4Format, readMediaRanges: () => [{ start: 0, end: 4.738913832199547 }],
+    mediaCoverageEnd: (ranges) => ranges.at(-1).end };
+  const dir = store.directoryFor(KEY);
+  store.useFormat(KEY, format);
+  const endSeconds = 4.755 - SEGMENT_CUT_TIME_DELTA_SECONDS;
+  writeFileSync(path.join(dir, "making-0-00000.mp4"), Buffer.alloc(16));
+  assert.equal(store.publish(KEY, "making-0-00000.mp4", format, { endSeconds }), "segment-00000.mp4");
+  assert.ok(store.mediaRangesOf(KEY, 0, { endSeconds }));
+});
 
 test("a closed but truncated non-final piece is not published or reused", (t) => {
   const { store, root } = storeInATempRoot();

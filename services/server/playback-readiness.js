@@ -534,15 +534,15 @@ function isSafeSchedule(completions, productions, trackState, position, duration
     while (productionIndex < orderedProductions.length && orderedProductions[productionIndex].at <= time) {
       const { trackIndex, segment } = orderedProductions[productionIndex];
       for (const range of segment.mediaRanges ?? [{ start: segment.startSeconds, end: segment.endSeconds }]) {
-        addRange(preparedRanges[trackIndex], range.start, range.end);
+        addRange(preparedRanges[trackIndex], range.start, range.end, range.joinEnd);
       }
       productionIndex += 1;
     }
     while (completionIndex < orderedCompletions.length && orderedCompletions[completionIndex].at <= time) {
       const { trackIndex, segment } = orderedCompletions[completionIndex];
       for (const range of segment.mediaRanges ?? [{ start: segment.startSeconds, end: segment.endSeconds }]) {
-        addRange(clientRanges[trackIndex], range.start, range.end);
-        addRange(preparedRanges[trackIndex], range.start, range.end);
+        addRange(clientRanges[trackIndex], range.start, range.end, range.joinEnd);
+        addRange(preparedRanges[trackIndex], range.start, range.end, range.joinEnd);
       }
       completionIndex += 1;
     }
@@ -625,21 +625,26 @@ function isSafeSchedule(completions, productions, trackState, position, duration
   return { safe: atEnd.safe, bufferedAtStart: atStart.available, neededSeconds: atStart.neededSeconds, failure: atStart.failure };
 }
 
-function addRange(ranges, start, end) {
+function addRange(ranges, start, end, joinEnd) {
   const merged = [];
-  let next = { start, end };
+  let next = { start, end, ...(Number.isFinite(joinEnd) ? { joinEnd } : {}) };
   let inserted = false;
   for (const range of ranges) {
-    if (range.end < next.start) {
+    // The declared coded-frame join boundary connects two ranges only after
+    // both have arrived. It never extends an isolated range's playable end.
+    if (Math.max(range.end, range.joinEnd ?? range.end) < next.start) {
       merged.push(range);
-    } else if (next.end < range.start) {
+    } else if (Math.max(next.end, next.joinEnd ?? next.end) < range.start) {
       if (!inserted) {
         merged.push(next);
         inserted = true;
       }
       merged.push(range);
     } else {
-      next = { start: Math.min(next.start, range.start), end: Math.max(next.end, range.end) };
+      next = { start: Math.min(next.start, range.start), end: Math.max(next.end, range.end),
+        ...(next.joinEnd !== undefined || range.joinEnd !== undefined ? {
+          joinEnd: Math.max(next.joinEnd ?? next.end, range.joinEnd ?? range.end)
+        } : {}) };
     }
   }
   if (!inserted) {

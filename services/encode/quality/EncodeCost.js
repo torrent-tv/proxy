@@ -65,6 +65,7 @@ import { throughputAt } from "../throughput.js";
 import { computeOutputDimensions, TRANSCODE_FPS } from "../args.js";
 import { logger } from "../../../utils/logger.js";
 import { qualityStateOf } from "./OutputQualityState.js";
+import { audioReadingFor } from "../audio-work-rate.js";
 
 export class EncodeCost {
   /**
@@ -369,7 +370,14 @@ export class EncodeCost {
     }
     if (session.spec.carries === "audio-only") {
       const audio = this.#audioCost.get(EncodeCost.audioKeyOf(session));
-      return { costSec: audio && audio.costSec > 0 ? audio.costSec : null, fileKey, fileCostSec };
+      const initial = audioReadingFor(this.#host().audioCalibration, {
+        ...this.#host().audioDescriptionOf?.(session),
+        codec: this.#host().audioDescriptionOf?.(session)?.codec ?? session.file.media?.audioCodec,
+        transcode: session.spec.audio?.transcode === true
+      });
+      const initialSpeed = initial?.speed;
+      return { costSec: audio && audio.costSec > 0 ? audio.costSec :
+        initialSpeed > 0 ? 1 / initialSpeed : null, fileKey, fileCostSec };
     }
     if (!session.spec.transcodesVideo) {
       const copy = this.#copyCost.get(session.file.key);
@@ -381,6 +389,15 @@ export class EncodeCost {
     }
     const picture = this.#pictureCostOf(session);
     return { costSec: picture > 0 ? picture : null, fileKey, fileCostSec };
+  }
+
+  /** A prediction for this operation, using its measured cost and actual contention. */
+  projectedSpeedOf(session) {
+    const load = this.#loadOfSession(session);
+    const others = Math.max(0, this.#runningEncoders() - this.#runsFor(session).length);
+    const { penalty } = contentionPenalty(others, this.#host().contentionPenalties);
+    return load.costSec > 0 ? correctForAvailability(1 / (load.costSec * penalty),
+      this.#host().availability) : null;
   }
 
   /**

@@ -426,7 +426,7 @@ export class SegmentStore {
    * @param {{ servedNameOf?: (name: string) => string | null }} format
    * @returns {string | null} The served name, or null where nothing was renamed.
    */
-  publish(key, makingName, format) {
+  publish(key, makingName, format, { endSeconds } = {}) {
     const served = format?.servedNameOf?.(makingName) ?? null;
     if (!served) {
       return null;
@@ -438,6 +438,11 @@ export class SegmentStore {
       try {
         mediaRanges = format.readMediaRanges(readFileSync(path.join(dir, makingName)));
         if (mediaRanges.length === 0) throw new Error("The closed file contains no playable media intervals.");
+        const end = format.mediaCoverageEnd?.(mediaRanges);
+        if (Number.isFinite(endSeconds) && Number.isFinite(end) && end < endSeconds) {
+          this.#logger?.warn?.(`segment store: refusing short segment ${index}: coverage=${end}s cut=${endSeconds}s`);
+          return null;
+        }
       } catch (error) {
         this.#logger?.warn?.(`segment store: could not read media coverage of ${makingName}: ${error.message}`);
         return null;
@@ -471,11 +476,20 @@ export class SegmentStore {
     return served;
   }
 
-  mediaRangesOf(key, index, { startSeconds = 0 } = {}) {
+  mediaRangesOf(key, index, { startSeconds = 0, endSeconds } = {}) {
     const known = this.#mediaRanges.get(key)?.get(index);
-    if (known) return known;
     const format = this.#formats.get(key);
     if (!format?.readMediaRanges) return undefined;
+    const checked = (ranges) => {
+      const end = format.mediaCoverageEnd?.(ranges);
+      if (Number.isFinite(endSeconds) && Number.isFinite(end) && end < endSeconds) {
+        this.#logger?.warn?.(`segment store: removing short cached segment ${index}: coverage=${end}s cut=${endSeconds}s`);
+        this.#removeSegment(key, index);
+        return undefined;
+      }
+      return ranges;
+    };
+    if (known) return checked(known);
     const filePath = this.pathOf(key, index);
     if (!filePath) return undefined;
     try {
@@ -492,7 +506,7 @@ export class SegmentStore {
       const byIndex = this.#mediaRanges.get(key) ?? new Map();
       byIndex.set(index, ranges);
       this.#mediaRanges.set(key, byIndex);
-      return ranges;
+      return checked(ranges);
     } catch {
       return [];
     }
@@ -1092,6 +1106,7 @@ export class SegmentStore {
       // Gone already, or refused. The next refresh reports what is really there.
     }
     this.#held.delete(key);
+    this.#mediaRanges.get(key)?.delete(index);
     return size;
   }
 

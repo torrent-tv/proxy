@@ -1,3 +1,10 @@
+## 2.88.4
+
+- **Fix**: Reject closed non-final fragments that do not reach their next declared cut, using measured coded-frame coverage. Remove such previously cached fragments from the inventory so missing media can be produced again instead of indefinitely blocking startup.
+- **Fix**: Compute playback start from measured download, remaining per-run processing and client delivery deadlines, without browser-capacity admission, speculative rate recovery or a capped search. Slow positive service returns a finite delay and locally held input is not downloaded again.
+- **New**: Ship short audio samples and measure per-codec copying and AAC processing at startup. Initial audio sample/byte-work rates and output sizes are refined by actual progress and segment measurements.
+- **Fix**: Apply measured coded-frame join boundaries to video as well as audio, and expose current per-track operations for the waiting overlay.
+
 ## 2.88.3
 
 - **Fix**: Forecast audio continuity from coded-frame timestamps and durations using the browser's frame-join boundary. Adjacent AAC fragments that Chrome buffers continuously no longer cause an impossible-start forecast; actual gaps and missing deliveries still prevent an unsafe start. Verified against captured segment metadata and independent Chrome SourceBuffer appends.

@@ -14,6 +14,7 @@ import {
   continuePresentationRanges,
   rebaseSegmentDecodeTimes,
   neutralizeEmptyEdits,
+  presentationCoverageEnd,
   readPresentationRanges,
   readSelfContainedStartSeconds,
   readTrackTimescales,
@@ -281,6 +282,7 @@ export const fmp4Format = {
    * transcode itself; the box walk never descends into `mdat`.
    */
   needsSegmentRewrite: true,
+  mediaCoverageEnd: presentationCoverageEnd,
   readMediaRanges(raw, { initBytes = null, startSeconds = 0 } = {}) {
     if (this.extractInit(raw)) return readPresentationRanges(raw);
     if (!initBytes?.length) return undefined;

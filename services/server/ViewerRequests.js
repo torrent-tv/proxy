@@ -9,7 +9,7 @@
 
 import { logger } from "../../utils/logger.js";
 import { isOutputName } from "../encode/output/index.js";
-import { predictPlaybackReadiness, RateTrend } from "./playback-readiness.js";
+import { predictPlaybackReadiness, RateTrend, forecastRate as forecastRateOf } from "./playback-readiness.js";
 
 function isWarmupTimeoutError(error) {
   if (!(error instanceof Error)) {
@@ -568,7 +568,8 @@ export class ViewerRequests {
       const trackName = output === session ? "video" : "audio";
       const nativeRanges = Array.from({ length: timeline?.segmentCount ?? 0 }, (_, index) =>
         this.#host.segmentStore.mediaRangesOf(output.outputKey, index, {
-          startSeconds: timeline.publishedStartOf(index)
+          startSeconds: timeline.publishedStartOf(index),
+          endSeconds: index < timeline.segmentCount - 1 ? timeline.publishedStartOf(index + 1) : undefined
         }));
       const segments = Array.from({ length: timeline?.segmentCount ?? 0 }, (_, index) => {
         const ranges = nativeRanges[index];
@@ -622,7 +623,8 @@ export class ViewerRequests {
             Number.isFinite(sourceDuration) && sourceDuration > 0
             ? fileLength / sourceDuration
             : 0,
-          readings: sourceTrend
+          readings: sourceTrend,
+          residence: stats?.residence,
         });
       }
 
@@ -630,13 +632,22 @@ export class ViewerRequests {
       const observedMbps = output === session
         ? outputMbps
         : await this.#host.quality.observedStreamMbps(output);
+      const liveRuns = this.#host.encodeRuns.liveRunsOf?.(output) ?? [];
+      const processingStarted = liveRuns.some(({ progress }) => progress.processedSeconds > progress.startPositionSeconds);
+      const startedAt = liveRuns.find(({ startedAt }) => startedAt > 0)?.startedAt ?? now;
       tracks.push({
         id: output.outputKey,
         clientRanges: viewerReading?.bufferedRanges?.[output === session ? "video" : "audio"] ??
           viewerReading?.bufferedRanges?.media,
         sourceIds,
         processedSeconds: trackProgress?.processedSeconds,
-        bitsPerMediaSecond: Number.isFinite(observedMbps) && observedMbps > 0 ? observedMbps * 1_000_000 : 0,
+        startupRemainingSeconds: processingStarted ? 0 : Math.max(0,
+          (this.#host.processingStartupSecondsOf?.(output) ?? 0) - Math.max(0, (now - startedAt) / 1000)),
+        processingRanges: liveRuns.map(({ progress }) => ({
+          start: progress.startPositionSeconds, end: progress.processedSeconds
+        })),
+        bitsPerMediaSecond: Number.isFinite(observedMbps) && observedMbps > 0 ? observedMbps * 1_000_000 :
+          this.#host.initialOutputBitsPerMediaSecondOf?.(output) ?? 0,
         readings: trackRates,
         segments,
         readySegmentIndices: [...inventory.keys()],
@@ -693,6 +704,20 @@ export class ViewerRequests {
       linkReadings: measurement.link.snapshot()
     };
     const forecast = predictPlaybackReadiness(input);
+    forecast.operations = outputs.flatMap((output, index) => {
+      const common = { speed: forecastRateOf(tracks[index].readings), processedSeconds: tracks[index].processedSeconds };
+      return [
+        ...(output.spec.video ? [{ ...common, track: "video",
+          operation: output.spec.transcodesVideo ? "encode" : "copy",
+          inputCodec: output.file.media?.videoCodec ?? output.file.media?.codec,
+          outputCodec: output.spec.transcodesVideo ? "h264" : null,
+          height: output.spec.video.encode?.height ?? output.file.media?.height }] : []),
+        ...(output.spec.audio ? [{ ...common, track: "audio",
+          operation: output.spec.audio.transcode ? "encode" : "copy",
+          inputCodec: this.#host.audioDescriptionOf?.(output)?.codec ?? output.file.media?.audioCodec,
+          outputCodec: output.spec.audio.transcode ? "aac" : null }] : [])
+      ];
+    });
     if (measurement.forecastReason !== forecast.reason) {
       measurement.forecastReason = forecast.reason;
       logger.info(`playback readiness ${session.id} consumer=${consumerId} ${JSON.stringify({
@@ -749,7 +774,7 @@ export class ViewerRequests {
     const reading = this.#host.encodeSpeedReadingOf?.(output, now) ?? null;
     if (Number.isFinite(reading?.speed) && reading.speed > 0 && Number.isFinite(reading.at)) {
       trend.add(reading.at, reading.speed);
-    } else if (!trend.snapshot()) {
+    } else {
       const projected = Number(this.#host.projectedEncodeSpeedOf?.(output));
       if (Number.isFinite(projected) && projected > 0) {
         trend.add(now, projected);

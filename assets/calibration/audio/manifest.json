@@ -1,0 +1,98 @@
+[
+  {
+    "codec": "aac",
+    "file": "aac.m4a",
+    "durationSeconds": 4,
+    "channels": 2,
+    "samplingFrequency": 48000,
+    "bytes": 66060
+  },
+  {
+    "codec": "ac3",
+    "file": "ac3.ac3",
+    "durationSeconds": 4,
+    "channels": 2,
+    "samplingFrequency": 48000,
+    "bytes": 96000
+  },
+  {
+    "codec": "eac3",
+    "file": "eac3.eac3",
+    "durationSeconds": 4,
+    "channels": 2,
+    "samplingFrequency": 48000,
+    "bytes": 96000
+  },
+  {
+    "codec": "dts",
+    "file": "dts.dts",
+    "durationSeconds": 4.0051,
+    "channels": 2,
+    "samplingFrequency": 48000,
+    "bytes": 706500
+  },
+  {
+    "codec": "flac",
+    "file": "flac.flac",
+    "durationSeconds": 4,
+    "channels": 2,
+    "samplingFrequency": 48000,
+    "bytes": 723158
+  },
+  {
+    "codec": "opus",
+    "file": "opus.opus",
+    "durationSeconds": 4.0065,
+    "channels": 2,
+    "samplingFrequency": 48000,
+    "bytes": 32457
+  },
+  {
+    "codec": "vorbis",
+    "file": "vorbis.ogg",
+    "durationSeconds": 4,
+    "channels": 2,
+    "samplingFrequency": 48000,
+    "bytes": 42108
+  },
+  {
+    "codec": "truehd",
+    "file": "truehd.thd",
+    "durationSeconds": null,
+    "channels": 2,
+    "samplingFrequency": 48000,
+    "bytes": 589492
+  },
+  {
+    "codec": "mp3",
+    "file": "mp3.mp3",
+    "durationSeconds": 4,
+    "channels": 2,
+    "samplingFrequency": 48000,
+    "bytes": 64748
+  },
+  {
+    "codec": "mp2",
+    "file": "mp2.mp2",
+    "durationSeconds": 4.008,
+    "channels": 2,
+    "samplingFrequency": 48000,
+    "bytes": 192384
+  },
+  {
+    "codec": "alac",
+    "file": "alac.m4a",
+    "durationSeconds": 4,
+    "channels": 2,
+    "samplingFrequency": 48000,
+    "bytes": 712871
+  },
+  {
+    "codec": "pcm",
+    "file": "pcm.wav",
+    "durationSeconds": 4,
+    "channels": 2,
+    "samplingFrequency": 48000,
+    "bytes": 768078
+  }
+]

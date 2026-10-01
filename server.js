@@ -58,6 +58,7 @@ import { detectVideoEncoder, benchmarkDecodeCost, benchmarkContention, benchmark
 import { calibrateEncoder, HostCalibration } from "./services/encode/calibration.js";
 import { readHostFingerprint } from "./services/encode/fingerprint.js";
 import { measureStartAndStop } from "./services/encode/start-stop-cost.js";
+import { benchmarkAudio } from "./services/encode/audio-calibration.js";
 import { logger } from "./utils/logger.js";
 import { completedFilesRoot } from "./services/storage/files/CompletedFiles.js";
 
@@ -232,6 +233,9 @@ export async function startProxyServer({
   const copySpeedX = transcodeAudio
     ? await benchmarkCopySpeed({ ffmpegBin, logger })
     : null;
+  const audioCalibration = transcodeAudio
+    ? await benchmarkAudio({ ffmpegBin, logger })
+    : [];
   // WHAT A START AND A STOP COST HERE, before any viewer exists. Both decide one
   // thing — leave an encoder where it stands, or kill it and start another —
   // and both used to be learned only from runs that had ENDED, so at a cold
@@ -424,6 +428,7 @@ export async function startProxyServer({
     localPort: selectedPort,
     videoEncoder,
     calibration,
+    audioCalibration,
     decodeCostModel,
     contentionPenalties,
     copySpeedX,

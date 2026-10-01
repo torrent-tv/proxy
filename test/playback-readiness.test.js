@@ -39,6 +39,36 @@ test("finds the first safe start from segments delivered before playback", () =>
   assert.ok(Math.abs(forecast.delaySeconds - 1) < 1e-8);
 });
 
+test("startup delay is independent of browser capacity and proxy lookahead", () => {
+  for (const bufferLimitSeconds of [undefined, null, 0, 1, 120]) {
+    for (const lookaheadSeconds of [undefined, 0, 4, 120]) {
+      assert.equal(predictPlaybackReadiness(input({ bufferLimitSeconds, lookaheadSeconds })).delaySeconds, 1);
+    }
+  }
+});
+
+test("missing duration or required audio cannot be reported as fully buffered", () => {
+  assert.equal(predictPlaybackReadiness(input({ durationSeconds: 0 })).reason, "incomplete-state");
+  assert.equal(predictPlaybackReadiness(input({ requiredAudio: true, bufferedAheadSeconds: 8 })).ready, false);
+});
+
+test("held input does not require a second download or a download rate", () => {
+  const state = input();
+  state.sources[0] = { id: "source", complete: false, bytesPerMediaSecond: 1, readings: [],
+    residence: [{ start: 0, end: 8, location: "disk" }] };
+  assert.equal(predictPlaybackReadiness(state).delaySeconds, 1);
+});
+
+test("subtracts progress only inside the actual processing run interval", () => {
+  const state = input({ reserveSeconds: 0 });
+  state.tracks[0].readySegmentIndices = [];
+  state.tracks[0].readings = [{ at: state.now, value: 1 }];
+  state.tracks[0].processingRanges = [{ start: 0, end: 3 }];
+  assert.equal(predictPlaybackReadiness(state).delaySeconds, 2);
+  state.tracks[0].processingRanges = [{ start: 40, end: 50 }];
+  assert.equal(predictPlaybackReadiness(state).delaySeconds, 5);
+});
+
 test("future cuts follow measured track time without inventing a permanent clock gap", () => {
   const state = input({ bufferedAheadSeconds: 3.9, reserveSeconds: 0 });
   state.tracks[0].clientRanges = [{ start: 0, end: 3.9 }];
@@ -47,7 +77,7 @@ test("future cuts follow measured track time without inventing a permanent clock
   assert.notEqual(forecast.reason, "no-safe-start-found");
   state.tracks[0].segments[1].mediaRanges = [{ start: 4, end: 8 }];
   state.tracks[0].readySegmentIndices = [0, 1];
-  assert.equal(predictPlaybackReadiness(state).reason, "no-safe-start-found");
+  assert.equal(predictPlaybackReadiness(state).reason, "media-continuity-unavailable");
 });
 
 test("keeps source-stall reserve in the proxy's prepared timeline, not the capped browser buffer", () => {
@@ -124,8 +154,8 @@ test("rate forecast does not extrapolate acceleration beyond observed service", 
   trend.add(10_000, 4);
 
   const predicted = forecastRate(trend.snapshot(), 10_000, 2);
-  assert.ok(predicted > 3 && predicted < 4);
-  assert.ok(forecastRate(trend.snapshot(), 100_000, 2) >= 3);
+  assert.equal(predicted, 4);
+  assert.equal(forecastRate(trend.snapshot(), 100_000, 2), 4);
 });
 
 test("uses each track's own segment boundaries and requires continuous coverage on both tracks", () => {
@@ -181,7 +211,7 @@ test("does not start when only one required track has continuous coverage", () =
 
   assert.equal(forecast.ready, false);
   assert.equal(forecast.delaySeconds, null);
-  assert.equal(forecast.reason, "no-safe-start-found");
+  assert.equal(forecast.reason, "media-continuity-unavailable");
 });
 
 test("downloads an overlapping source interval once when two tracks use the same file", () => {
@@ -373,8 +403,8 @@ test("does not invent future encode acceleration to start an unsustainable outpu
   });
 
   assert.equal(forecast.ready, false);
-  assert.equal(forecast.reason, "no-safe-start-found");
-  assert.equal(forecast.delaySeconds, null);
+  assert.equal(forecast.reason, "minimum-safe-delay");
+  assert.ok(Math.abs(forecast.delaySeconds - (4 / 0.15 + 8 / 100 - 6)) < 1e-8);
 });
 
 test("a faster old probe cannot turn positive delivery into a permanent zero rate", () => {

@@ -814,6 +814,12 @@ export class SharedPieceStore {
     return this.#buffers.get(index);
   }
 
+  /** Availability belongs to the store, not to a second cached bitfield. */
+  locationOf(index) {
+    return this.#buffers.has(index) ? "memory" : this.#evicting.has(index) ? "writing" :
+      this.#disk.has(index) ? "disk" : this.isInWholeFiles(index) ? "whole-file" : "missing";
+  }
+
   pin(index) {
     this.#lru.pin(index);
     // A piece reader pins before it waits for the bytes to arrive or return

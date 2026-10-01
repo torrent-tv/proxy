@@ -244,12 +244,20 @@ export function readPresentationRanges(raw) {
         sample.start - previous.end <= precision + Number.EPSILON * Math.max(1, sample.end) * 8)) {
         previous.end = Math.max(previous.end, sample.end);
       } else merged.push({ ...sample });
+      // Preserve coded-frame timing separately from the presentation interval.
+      // Chromium joins an adjacent frame within twice the maximum coded-frame
+      // duration of the stream (SourceBufferRange::GetFudgeRoom), measured from
+      // the last frame's timestamp, not from the segment's nominal cut.
+      const range = merged.at(-1);
+      range.lastFrameStart = Math.max(range.lastFrameStart ?? sample.start, sample.start);
+      range.maxFrameDuration = Math.max(range.maxFrameDuration ?? 0, sample.end - sample.start);
     }
     // Movie edits quantize independent pieces to movie ticks. Preserve that
     // declared resolution at joins; it is not a playback buffer threshold.
     for (const range of merged) range.end += precision;
     const decoded = decodeRanges.get(id);
-    return { id, ranges: merged, kind: kinds.get(id), precision,
+    return { id, ranges: merged.map(({ start, end }) => ({ start, end })),
+      frameRanges: merged, kind: kinds.get(id), precision,
       decodeStart: Math.min(...decoded.map(({ start }) => start)),
       decodeEnd: Math.max(...decoded.map(({ end }) => end)) };
   });
@@ -280,8 +288,11 @@ export function continuePresentationRanges(ranges, nextRanges) {
 }
 
 function intersectPresentationTracks(tracks) {
-  return tracks.map(({ ranges }) => ranges).reduce((common, ranges) => common.flatMap((left) => ranges
-    .map((right) => ({ start: Math.max(left.start, right.start), end: Math.min(left.end, right.end) }))
+  return tracks.slice(1).map(({ ranges }) => ranges).reduce((common, ranges) => common.flatMap((left) => ranges
+    .map((right) => ({ start: Math.max(left.start, right.start), end: Math.min(left.end, right.end),
+      ...(left.joinEnd !== undefined || right.joinEnd !== undefined ? {
+        joinEnd: Math.min(left.joinEnd ?? left.end, right.joinEnd ?? right.end)
+      } : {}) }))
     .filter(({ start, end }) => end > start)), tracks[0]?.ranges ?? []);
 }
 
@@ -290,11 +301,15 @@ export function translatePresentationRanges(ranges, initBytes, timestampOffsetSe
   const tracks = presentationTracks.get(ranges);
   if (!tracks || !initBytes?.length || !Number.isFinite(timestampOffsetSeconds)) return ranges;
   const edits = readTrackEditOffsets(initBytes);
-  return intersectPresentationTracks(tracks.map(({ id, ranges: held }) => ({
+  return intersectPresentationTracks(tracks.map(({ id, ranges: held, frameRanges, kind }) => ({
     id,
-    ranges: held.map(({ start, end }) => ({
+    ranges: held.map(({ start, end }, index) => ({
       start: Math.max(0, start + timestampOffsetSeconds - (edits.get(id) ?? 0)),
-      end: end + timestampOffsetSeconds - (edits.get(id) ?? 0)
+      end: end + timestampOffsetSeconds - (edits.get(id) ?? 0),
+      ...(kind === "soun" ? {
+        joinEnd: frameRanges[index].lastFrameStart + 2 * frameRanges[index].maxFrameDuration +
+          timestampOffsetSeconds - (edits.get(id) ?? 0)
+      } : {})
     })).filter(({ start, end }) => end > start)
   })));
 }

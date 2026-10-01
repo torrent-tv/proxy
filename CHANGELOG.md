@@ -1,3 +1,7 @@
+## 2.88.3
+
+- **Fix**: Forecast audio continuity from coded-frame timestamps and durations using the browser's frame-join boundary. Adjacent AAC fragments that Chrome buffers continuously no longer cause an impossible-start forecast; actual gaps and missing deliveries still prevent an unsafe start. Verified against captured segment metadata and independent Chrome SourceBuffer appends.
+
 ## 2.88.2
 
 - **Fix**: Report the first failing playback forecast boundary and per-track ranges instead of only a generic no-safe-start result.

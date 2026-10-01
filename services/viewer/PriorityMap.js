@@ -258,6 +258,37 @@ export function mapForViewer({ atSeconds, durationSeconds, allowanceSeconds, pla
 }
 
 /**
+ * Where viewers stand, read off a map: every second whose priority rises above
+ * the second before it.
+ *
+ * A viewer's own map is highest where they stand and falls away in front of
+ * them, so in a merged map each viewer's position is a step UP — the one place
+ * a value is higher than the value just behind it. A viewer standing inside the
+ * stretch somebody else is walking towards adds nothing that map does not
+ * already ask for, and is not a step; neither is somebody behind everybody.
+ *
+ * Read by whoever orders work by where people are and must not know what a
+ * viewer is — the subtitle walk reads the clusters at these times first.
+ *
+ * @param {PriorityMap | null | undefined} map
+ * @returns {number[]} Seconds, ascending.
+ */
+export function viewerStartsOn(map) {
+  const starts = [];
+  if (!map || !(map.durationSeconds > 0)) {
+    return starts;
+  }
+  for (let second = 0; second < map.durationSeconds; second += 1) {
+    const value = map.priority[second];
+    const before = second === 0 ? NOBODY_IS_COMING : map.priority[second - 1];
+    if (value > before && value > NOBODY_IS_COMING) {
+      starts.push(second);
+    }
+  }
+  return starts;
+}
+
+/**
  * Every viewer's map as one.
  *
  * The highest priority per second wins, and the soonest time: film two people

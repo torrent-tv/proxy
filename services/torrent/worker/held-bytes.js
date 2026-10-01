@@ -88,19 +88,56 @@ function rangeWithin(firstPiece, lastPiece, pieceLength, offset, length) {
 }
 
 /**
- * How long a read of bytes the torrent already holds may take before it is
- * given up.
+ * Whether every piece under an inclusive range of a file has arrived.
  *
- * Not a measurement and nothing is derived from it: such a read either answers
- * or it does not, and this is the point past which it is presumed lost — so
- * that one stream which never ends cannot hold a file's walk, and with it the
- * browser's own request for its subtitles, for the rest of the session.
+ * @param {object} torrent
+ * @param {number} fileIndex
+ * @param {number} start
+ * @param {number} end - Inclusive.
+ * @returns {boolean}
+ */
+export function isRangeHeld(torrent, fileIndex, start, end) {
+  const file = torrent?.files?.[fileIndex];
+  const pieceLength = Number(torrent?.pieceLength);
+  if (!file || !Number.isFinite(pieceLength) || pieceLength <= 0 || !torrent?.bitfield) {
+    return false;
+  }
+  const offset = Number(file.offset) || 0;
+  const first = Math.floor((offset + start) / pieceLength);
+  const last = Math.floor((offset + end) / pieceLength);
+  for (let index = first; index <= last; index += 1) {
+    if (!torrent.bitfield.get(index)) {
+      return false;
+    }
+  }
+  return true;
+}
+
+/**
+ * How long a read of bytes the torrent HOLDS may take before it is taken to be
+ * a fault.
+ *
+ * Not a measurement and nothing is derived from it: the bytes are checked to be
+ * held before the read starts, so a read that does not finish is a store that
+ * failed to serve what it has, and the line it writes says so. Until 2026-10-01
+ * this read was started on bytes that had NOT arrived, the stream waited for
+ * them, and this was the bound that gave it up — 36 such reads gave up at once
+ * at a torrent's open, and one of them was the Cues table of the file being
+ * watched.
  */
 const READ_ABANDON_MS = 30_000;
 
 /**
  * Read a byte range of a file straight from the store, without asking the swarm
  * for anything.
+ *
+ * Answered at once with null where any piece under the range has not arrived:
+ * "not here" is the whole answer, and nothing is waited for or requested.
+ *
+ * The bytes come back in a buffer that owns its whole memory — not a slice of
+ * Node's shared pool and not a view of the store's own blocks — so the reply can
+ * hand that memory to the other thread instead of copying it, and nothing the
+ * store or another read still uses goes with it.
  *
  * @param {object} torrent
  * @param {number} fileIndex
@@ -115,6 +152,9 @@ export function readHeldBytes(torrent, fileIndex, start, end, logger = null) {
     return Promise.resolve(null);
   }
   const last = Math.min(end, Number(file.length) - 1);
+  if (!isRangeHeld(torrent, fileIndex, start, last)) {
+    return Promise.resolve(null);
+  }
   return new Promise((resolve) => {
     const chunks = [];
     let stream;
@@ -143,13 +183,49 @@ export function readHeldBytes(torrent, fileIndex, start, end, logger = null) {
     abandon = setTimeout(() => {
       logger?.info(
         `subtitles: a read of ${start}-${last} in "${String(file.name).slice(0, 40)}" ` +
-        `did not finish in ${READ_ABANDON_MS / 1000}s and was given up`
+        `was held but not served in ${READ_ABANDON_MS / 1000}s and was given up — the store failed to serve bytes it has`
       );
       settle(null);
     }, READ_ABANDON_MS);
     abandon.unref?.();
     stream.on("data", (chunk) => chunks.push(chunk));
-    stream.on("end", () => settle(Buffer.concat(chunks)));
+    stream.on("end", () => settle(ownedCopyOf(chunks)));
     stream.on("error", () => settle(null));
   });
+}
+
+/**
+ * The chunks as one buffer over memory of its own.
+ *
+ * @param {Uint8Array[]} chunks
+ * @returns {Buffer}
+ */
+function ownedCopyOf(chunks) {
+  const total = chunks.reduce((sum, chunk) => sum + chunk.length, 0);
+  // `allocUnsafeSlow` never takes from the shared pool, so the buffer is the
+  // whole of its ArrayBuffer and may be transferred.
+  const owned = Buffer.allocUnsafeSlow(total);
+  let at = 0;
+  for (const chunk of chunks) {
+    owned.set(chunk, at);
+    at += chunk.length;
+  }
+  return owned;
+}
+
+/**
+ * Whether a buffer may be TRANSFERRED to another thread: it must be the whole of
+ * a plain ArrayBuffer. A slice of the shared pool would take every other
+ * buffer in the pool with it, and shared memory cannot be transferred at all.
+ *
+ * @param {unknown} bytes
+ * @returns {boolean}
+ */
+export function ownsItsMemory(bytes) {
+  return (
+    bytes instanceof Uint8Array &&
+    bytes.buffer instanceof ArrayBuffer &&
+    bytes.byteOffset === 0 &&
+    bytes.byteLength === bytes.buffer.byteLength
+  );
 }

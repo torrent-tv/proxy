@@ -772,12 +772,16 @@ export function createDataChannelHandler({
    * are tiny (kilobytes at most for a whole track), so this is one message,
    * not a stream.
    *
+   * `withdrawn` names, by their found-order numbers, cues sent earlier that the
+   * proxy has taken back — read from a stretch that turned out not to be a
+   * cluster. Each cue carries its own number (`seq`) for that purpose.
+   *
    * @param {{ sourceKey: string, fileIndex: number, trackIndex: number, cues: object[],
-   *   language: string, detectedLanguage: { code: string, name: string } | null,
+   *   withdrawn?: number[], language: string, detectedLanguage: { code: string, name: string } | null,
    *   cursor: number }} event
    * @returns {void}
    */
-  function publishSubtitleCues({ sourceKey, fileIndex, trackIndex, cues, language, detectedLanguage, cursor }) {
+  function publishSubtitleCues({ sourceKey, fileIndex, trackIndex, cues, withdrawn = [], language, detectedLanguage, cursor }) {
     const names = viewersWantingCues(sourceKey, fileIndex);
     if (names.length === 0) {
       log(
@@ -787,7 +791,7 @@ export function createDataChannelHandler({
       return;
     }
     const message = JSON.stringify({
-      type: "subtitle-cues", fileIndex, trackIndex, cues, language, detectedLanguage, cursor
+      type: "subtitle-cues", fileIndex, trackIndex, cues, withdrawn, language, detectedLanguage, cursor
     });
     let sent = 0;
     for (const consumerId of names) {

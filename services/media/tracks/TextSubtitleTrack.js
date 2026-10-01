@@ -164,7 +164,9 @@ export class TextSubtitleTrack extends SubtitleTrack {
       if (!text) {
         return;
       }
-      result.push({ startSeconds: cue.startSeconds, endSeconds, text });
+      // The found-order number travels with the cue where it has one: it is
+      // how a browser names a cue it may be asked to take back.
+      result.push(Number.isInteger(cue.seq) ? { startSeconds: cue.startSeconds, endSeconds, text, seq: cue.seq } : { startSeconds: cue.startSeconds, endSeconds, text });
     });
     return result;
   }
@@ -181,6 +183,12 @@ export class TextSubtitleTrack extends SubtitleTrack {
   static cuesToVtt(cues, codecId) {
     const lines = ["WEBVTT", ""];
     for (const cue of TextSubtitleTrack.finalizeCues(cues, codecId)) {
+      // WebVTT's cue identifier (W3C WebVTT §4.1): the found-order number,
+      // where the cue has one, so a cue delivered in a document can be named
+      // later exactly as a pushed one is.
+      if (Number.isInteger(cue.seq)) {
+        lines.push(String(cue.seq));
+      }
       lines.push(`${TextSubtitleTrack.vttTime(cue.startSeconds)} --> ${TextSubtitleTrack.vttTime(cue.endSeconds)}`);
       lines.push(cue.text);
       lines.push("");

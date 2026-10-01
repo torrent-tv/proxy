@@ -34,7 +34,7 @@ export class AviContainer extends Container {
 
   async readTracks() {
     const head = await this.readRange(0, Math.min(4095, this.fileSize - 1));
-    if (!head || !isAvi(head)) return [];
+    if (!isAvi(head)) return [];
     // AVI track table is minimal — expose one video track for uniformity.
     return [new VideoTrack({
       trackNumber: 1,
@@ -65,9 +65,11 @@ export class AviContainer extends Container {
     }
     /** @type {import("./Container.js").ContainerMediaInfo} */
     const info = { format: this.formatName, durationSeconds: null, startTimeSeconds: 0 };
-    this.mediaInfo = info;
     const head = await this.readRange(0, Math.min(4095, this.fileSize - 1));
-    if (!head || !isAvi(head)) {
+    // Kept only once the head has been read: one that had not arrived used to
+    // leave an empty answer here for the life of the container.
+    this.mediaInfo = info;
+    if (!isAvi(head)) {
       return info;
     }
     // RIFF("AVI ") -> LIST("hdrl") -> avih. The avih chunk's payload begins with

@@ -41,6 +41,8 @@ export class ContainerTrack {
     language,
     languageBcp47,
     declaresLanguage,
+    languageSource = "",
+    languageCode = "",
     name,
     isEnabled,
     isDefault,
@@ -55,6 +57,13 @@ export class ContainerTrack {
     this.language = language ?? "";
     this.languageBcp47 = languageBcp47 ?? "";
     this.declaresLanguage = declaresLanguage === true;
+    // Where `language` came from: "bcp47", "language", "default" (the format's
+    // own default, RFC 8794 §11.1.19), or "" where the container has no say.
+    this.languageSource = typeof languageSource === "string" ? languageSource : "";
+    // The three-letter form the file states, or its default — what ffmpeg's
+    // banner prints, and so what a list lined up against it has to carry even
+    // where an RFC 5646 tag is the track's language.
+    this.languageCode = typeof languageCode === "string" ? languageCode : "";
     this.name = name ?? "";
     this.isEnabled = isEnabled !== false;
     this.isDefault = isDefault === true;

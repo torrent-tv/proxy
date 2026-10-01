@@ -16,7 +16,12 @@
  *    it. Cancelling it would make every later viewer pay the whole wait again;
  * 3. **a read that THREW is not an answer.** "The head is not downloaded" says
  *    nothing about the file; turning it into "this file has no keyframes" makes
- *    every picture of it a re-encode for as long as the process lives.
+ *    every picture of it a re-encode for as long as the process lives. Bytes
+ *    that have not arrived reach here as `BytesUnavailable` — until 2026-10-01
+ *    they came back as a reading of no times, which `KeyframeTable.learn`
+ *    records as answered, so point 3 held only for reads that crashed. When
+ *    pieces of such a file arrive the read is made again
+ *    (`readAgainIfUnanswered`), and its answer lands in the same table.
  *
  * **What it does NOT know.** Where the bytes come from. The reader is one
  * function handed in at construction — on this proxy it crosses to the torrent
@@ -27,20 +32,16 @@
  * transport inside a layer that must not have one, and a second answer to a
  * question with one owner.
  *
- * **Why this is not `ContainerOrchestrator`, which is the same shape and sits
- * in this directory: the THREAD, not the responsibility.** That one holds a
- * container per file and needs byte ranges to build it, so it can only live
- * where the torrent is — the worker. This lives on the main thread, where the
- * sessions are, and reaches the other across the channel. The table is
- * therefore held twice, once per thread, and the two are not equals: the
- * worker's is the parse, memoized on the container it parsed, and the main
- * thread's is the answer, which nothing in the worker ever reads back. Three
- * directories of the storage layer are kept apart for the same reason, and it
- * is stated here for the same reason too — an unexplained second home reads as
- * a second owner.
+ * **Why this is not `ContainerOrchestrator`.** Both live on the main thread
+ * (the parse moved there on 2026-09-15). That one holds the file's one
+ * container, which keeps its own reading of the Cues table; this keeps the
+ * ANSWER the sessions hold — the keyframe times taken from that reading, and
+ * the wait around it, which a container cannot have because it does not know
+ * there is a viewer.
  */
 
 import { KeyframeTable } from "./container/KeyframeTable.js";
+import { isUnavailable } from "./container/unavailable.js";
 import { logger as defaultLogger } from "../../utils/logger.js";
 
 /**
@@ -187,10 +188,17 @@ export class KeyframeTables {
         return table;
       })
       .catch((error) => {
-        this.#logger.warn(
-          `keyframe index "${logName}": the read failed after ${Date.now() - startedMs}ms — ` +
-            `${error?.message ?? error}`
-        );
+        if (isUnavailable(error)) {
+          this.#logger.info(
+            `keyframe index "${logName}": not downloaded yet after ${Date.now() - startedMs}ms — ` +
+              "read again when pieces of the file arrive"
+          );
+        } else {
+          this.#logger.warn(
+            `keyframe index "${logName}": the read failed after ${Date.now() - startedMs}ms — ` +
+              `${error?.message ?? error}`
+          );
+        }
         throw error;
       })
       .finally(() => {
@@ -221,6 +229,25 @@ export class KeyframeTables {
   }
 
   /**
+   * Read again a table somebody asked for and nobody has answered.
+   *
+   * Called when pieces of the file arrive. A table nobody asked for is left
+   * alone — this is not a reason to read every file of a torrent — and one
+   * already read, or being read, is not touched.
+   *
+   * @param {{ sourceKey: string, fileIndex: number, logName?: string }} params
+   * @returns {void}
+   */
+  readAgainIfUnanswered(params) {
+    const key = KeyframeTables.keyFor(params.sourceKey, params.fileIndex);
+    const table = this.#byFile.get(key);
+    if (!table || table.answered || this.#reading.has(key)) {
+      return;
+    }
+    void this.warm(params);
+  }
+
+  /**
    * The same read, with a bound on how long THIS caller waits for it.
    *
    * The read is not cancelled when the bound is reached — it goes on, and it
@@ -232,7 +259,8 @@ export class KeyframeTables {
    * @param {{ sourceKey: string, fileIndex: number, logName?: string }} params
    * @returns {Promise<{ table: KeyframeTable, arrived: boolean }>} `arrived` is
    *   about THIS wait. False with an unanswered table means the read is still
-   *   running, which is not the same as a file with no keyframes.
+   *   running, or found the bytes not downloaded yet and will be made again
+   *   when they arrive — neither is the same as a file with no keyframes.
    */
   async within(params) {
     const read = this.read(params);
@@ -242,11 +270,23 @@ export class KeyframeTables {
       // A caller must not be held open by this timer alone.
       timer?.unref?.();
     });
-    const answer = await Promise.race([read.then((table) => ({ table, arrived: true })), budget]);
+    // Bytes not downloaded yet are "not arrived" to this caller: the table
+    // stays unanswered and is read again when pieces of the file arrive.
+    // Thrown out of here, a shortage of bytes would fail the opening of an
+    // output. Any other failure is still the caller's to see.
+    const answer = await Promise.race([
+      read.then(
+        (table) => ({ table, arrived: true }),
+        (error) => {
+          if (isUnavailable(error)) {
+            return { table: this.of(params), arrived: false };
+          }
+          throw error;
+        }
+      ),
+      budget
+    ]);
     clearTimeout(timer);
-    // Nothing is added here to swallow a late rejection: the race is holding a
-    // handler on that promise already, and a second one would only look like it
-    // was doing something.
     return answer ?? { table: this.of(params), arrived: false };
   }
 

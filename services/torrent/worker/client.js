@@ -375,7 +375,10 @@ export class TorrentWorkerClient {
    */
   async readHeld({ sourceKey, fileIndex, start, end }) {
     const answer = await this.#caller.call(Command.READ_HELD, { sourceKey, fileIndex, start, end });
-    return answer?.bytes ? Buffer.from(answer.bytes) : null;
+    const bytes = answer?.bytes;
+    // The memory was handed over by the worker, so it is this thread's alone:
+    // viewed, not copied a second time.
+    return bytes ? Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength) : null;
   }
 
   async warmResumePosition({ sourceKey, fileIndex, positionSeconds, durationSeconds }) {
@@ -601,7 +604,7 @@ export class TorrentWorkerClient {
    * not reachable from here.
    *
    * @param {{ sourceKey: string, sourceType: "magnet" | "torrent", source: string }} params
-   * @returns {Promise<{ infoHash: string, name: string, sourceKey: string, files: object[] }>}
+   * @returns {Promise<{ infoHash: string, name: string, pieceLength: number, sourceKey: string, files: object[] }>}
    */
   async getTorrent({ sourceKey, sourceType, source }) {
     const info = await this.addSource({ sourceKey, sourceType, source });
@@ -609,6 +612,7 @@ export class TorrentWorkerClient {
     return {
       infoHash: info.infoHash,
       name: info.name,
+      pieceLength: Number(info.pieceLength) || 0,
       // Carried so helpers that receive only the torrent can still name it to
       // the worker.
       sourceKey,

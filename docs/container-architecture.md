@@ -58,6 +58,35 @@ So ffmpeg keeps exactly three jobs, and nothing else:
 That is a final answer about the container, and the point at which a caller may
 go to the media — not "unknown, ask again".
 
+## A read that has not arrived is not an answer
+
+Every read a container makes goes through `strictReader` (`container/unavailable.js`):
+it answers with every byte asked for, or throws `BytesUnavailable`. A reading has
+therefore four outcomes — the value; a proven absence ("this file has no Cues");
+a refusal of ours, stated with its reason and size (an MP4 `moov` larger than
+this program reads whole: `moovRefused`); and "not here yet". Only the first
+three are facts about the file, and only they are kept — by the container, by
+`ContainerOrchestrator`, by `KeyframeTables` and by `SubtitleCues`.
+
+Until 2026-10-01 "not here yet" came back as `null`, the value the readers
+return for an absent element. A subtitle plan read while its Cues table was
+downloading was kept as "no clusters", and an embedded track showed nothing for
+a whole session; the keyframe table, the container choice, the track table,
+MP4's `moov` and AVI's `idx1` had the same shape
+(`research/subtitles-never-appear-2026-10-01.md`).
+
+## Elements are read where they lie
+
+Matroska's top-level elements are found by walking their HEADERS from the
+Segment's start to the first cluster, each costing only its header, and from the
+SeekHead for what lies after the clusters — so a Cues element stored before the
+clusters with no SeekHead entry (RFC 9559 §6.4) is found. Elements are then read
+by their own size through `container/ebml-stream.js`, one portion at a time; the
+portion is the torrent's piece length, handed in, never chosen here. Data that
+is not needed is skipped without being assembled; a needed element larger than
+one portion is refused by name. There is no fixed window for the Cues table,
+the Tracks element or a cluster any more.
+
 ## Where byte access lives, and why not on a track
 
 A `ContainerTrack` is a DECLARATION. It carries no `readRange` and no file
@@ -77,26 +106,41 @@ bytes — was reviewed on 2026-09-03 and is **not** the right shape:
   on the thread where the container is already at hand.
 
 **That split is closed.** `SubtitleTrack` carries `clusterPositions` and
-`samples` — byte POSITIONS — and the reading of those positions is now the
-container's: `MatroskaContainer.walkHeldClusters(plan, walked)` and
-`Mp4Container.readHeldSamples(track, harvested)`, beside `readTracks`,
-`readKeyframeIndex`, `readMediaInfo` and `cueTextOf`.
+`samples` — byte POSITIONS — and the reading of those positions is the
+container's: `MatroskaContainer.readHeldCues` (over `container/matroska-clusters.js`)
+and `Mp4Container.readHeldSamples`, beside `readTracks`, `readKeyframeIndex`,
+`readMediaInfo` and `cueTextOf`.
 
-The obstacle was real and this is how it was answered. The two readers want
-different read POLICIES over the same file: the track table fetches what is
-missing from the swarm, while the cue walk deliberately reads only what is
-already downloaded, so that turning subtitles on never pulls bytes the viewer is
-not waiting for. A container is now built with BOTH — `readRange` that fetches,
-`readHeld` that does not, and `isHeld` that says whether a range can be read
-without fetching — so one instance per file serves both readers and the per-file
-cache is kept.
+The two readers want different read POLICIES over the same file: the track
+table fetches what is missing from the swarm, while the cue walk reads only
+what is already downloaded, so that turning subtitles on never pulls bytes the
+viewer is not waiting for. **One container per file serves both**: it is built
+with the fetching `readRange`, and the walk's reader of downloaded bytes — which
+ranges are whole, a strict read of them, the portion, where viewers stand — is
+handed to `readHeldCues` on every pass (`HeldReader`), because what is
+downloaded changes between passes. The walk used to build a second container of
+its own over the same file and read the head and the Cues table again, under a
+different rule for a read that had not arrived.
 
-What the container is NOT given is the torrent. Those three functions are the
-whole of what the caller knows and the container does not, and reducing the
-torrent to them is what lets the reading live where the format is specified.
-`torrent-worker/subtitle-cues.js` supplies them (`containerOver`) and keeps only
-what is genuinely its own: the found-order cursor a browser follows, the
-per-file state, and one walk of a file at a time.
+What the container is NOT given is the torrent. `media/SubtitleCues.js` is
+handed a `HeldFile` of plain functions by `server.js` and keeps only what is
+genuinely its own: the found-order cursor a browser follows, the per-file
+state, one walk of a file at a time, and taking back the cues of a cluster the
+container withdraws.
+
+## Where a cluster is, when the Cues table does not say
+
+RFC 9559 §22.1 only recommends that each subtitle frame be referenced by the
+Cues table, and a file may have none. `container/matroska-clusters.js` finds
+clusters from the downloaded bytes: positions the file establishes (the first
+cluster, every `CueClusterPosition` of every track), a chain of top-level
+elements from each established one, and — only where the file has no Cues — a
+search for the Cluster id. What the search finds is a candidate; it is used only
+once every child is one §5.1.3 allows, exactly one Timestamp is present, the
+children fill it exactly, every block names a declared track, and any CRC-32 or
+PrevSize matches. A candidate that an established cluster turns out to contain
+is withdrawn with its cues, and the browser removes them by number. The cluster
+a viewer stands in is read first, then the one before it, and pushed at once.
 
 ## Layers
 
@@ -166,10 +210,10 @@ flowchart TB
 - `ContainerFactory.create({readRange,fileSize})` — sniffs 16 bytes, returns precise `Container` subclass. No torrent knowledge.
 - `ContainerOrchestrator` — per-file cache (`sourceKey:fileIndex`), `getTracks()` / `getMediaInfo()` / `getKeyframeIndex()`. Transport-agnostic.
 - **The keyframe table is read once per file, and the container is not what remembers it.** `Container.readKeyframeIndex` parses and returns; each format implements `parseKeyframeIndex`. It used to keep the answer, and that made this the one fact stored in two places — here and in the file's `KeyframeTable` on the main thread. That copy had no reader, and since the parse itself moved to the main thread there is no second thread for a second copy to sit in.
-- **`KeyframeTable` / `KeyframeTables` — the answer, and the policy around getting one.** The table is one object per file (`media/container/KeyframeTable.js`), held by everyone who reads that file rather than copied, so a read that lands after a session was made still reaches it. `media/KeyframeTables.js` reads it once per file whoever asks, joins the second asker to the read already running, bounds how long any one caller waits (`KEYFRAME_TABLE_BUDGET_MS`, measured), and never records a read that threw as an answer. Its reader is one function handed in at construction, so it knows nothing of torrents or HTTP. It is not `ContainerOrchestrator` because of the THREAD: that one needs byte ranges and lives in the worker, this one lives beside the sessions and reaches it across the channel.
+- **`KeyframeTable` / `KeyframeTables` — the answer, and the policy around getting one.** The table is one object per file (`media/container/KeyframeTable.js`), held by everyone who reads that file rather than copied, so a read that lands after a session was made still reaches it. `media/KeyframeTables.js` reads it once per file whoever asks, joins the second asker to the read already running, bounds how long any one caller waits (`KEYFRAME_TABLE_BUDGET_MS`, measured), and never records a read that threw as an answer. Its reader is one function handed in at construction, so it knows nothing of torrents or HTTP. It is not `ContainerOrchestrator`: both live on the main thread, but that one keeps the file's container — which keeps its own Cues reading — and this keeps the answer the sessions hold and the wait around it. A read that has not arrived rejects with `BytesUnavailable` and is read again when pieces of the file arrive (`readAgainIfUnanswered`).
 - **`answered` and `readable` are different questions.** `answered` says a reader came back; `readable` says it came back with times. A file that answered nothing must be re-encoded for ever (MPEG-TS: 669 real keyframes, no index of any kind); a file that has not answered is a shortage of bytes off the swarm. Held as loose fields in a bag of probe results nothing told them apart, and a passing shortage was written onto the file as a property of the bytes.
 - **The second reader is the packet probe** (`media/keyframe-probe.js`): it finds keyframes by decoding, for containers that state no index. It is never waited for, and `KeyframeTable.learn` keeps the fuller answer whichever arrives second — measured 2026-08-02, a scan found 77 keyframes in 45 s without finishing against all 570 in 0.8 s from the index.
-- `SubtitleOrchestrator` — wraps `torrent-worker/subtitle-cues.js` (`planFor`, `cuesHeldFor`, `warmSubtitleCues`) behind the `ContainerTrack` abstraction. Routes depend on this, not on the worker directly. The reading itself is the containers' — that module supplies the torrent's read policy and keeps the cursor.
+- `SubtitleOrchestrator` — wraps `media/SubtitleCues.js` (`cuesHeldFor`, `warmSubtitleCues`, `subtitleTracksOf`) behind the `ContainerTrack` abstraction, handed in by `server.js`. Routes depend on this. The reading itself is the file's one container's; `SubtitleCues` keeps the cursor and the per-file state.
 - `PlaybackController` / `SubtitleController` — thin interface adapters; `routes/api/*` delegate to them, handle HTTP headers (`X-Subtitle-Language`, `X-Subtitle-Cursor`) only.
 
 ## Legacy

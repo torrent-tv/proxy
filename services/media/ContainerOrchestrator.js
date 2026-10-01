@@ -1,13 +1,23 @@
 /**
  * @file Container orchestrator — application layer over Container domain.
  *
- * Holds a per-file cache of Container instances (key sourceKey:fileIndex) so
- * Tracks and keyframe index are read once per file, not per request.
- * Delegates format detection to ContainerFactory. Transport-agnostic — takes
- * readRange, knows nothing about torrents or HTTP.
+ * Holds ONE Container per file (key sourceKey:fileIndex), and every reader of a
+ * file's statements — the track table, the media info, the keyframe table, the
+ * subtitle plan and the cue walk — goes through that one. The subtitle walk used
+ * to build a second container over the same file with readers of its own, which
+ * read the head and the Cues table a second time under a different rule for a
+ * read that had not arrived (`research/subtitles-never-appear-2026-10-01.md`).
+ *
+ * What is kept, and what is not: a container is kept once the bytes have said
+ * what format they are (including "none this proxy knows"); a head that has not
+ * arrived throws `BytesUnavailable` and leaves nothing behind, so the next ask
+ * reads again. Delegates format detection to ContainerFactory. Transport-
+ * agnostic — takes readRange, knows nothing about torrents or HTTP.
  */
 
 import { ContainerFactory } from "./container/ContainerFactory.js";
+import { isUnavailable } from "./container/unavailable.js";
+import { logger } from "../../utils/logger.js";
 
 /**
  * How much of a file's head its track table lives in.
@@ -17,7 +27,6 @@ import { ContainerFactory } from "./container/ContainerFactory.js";
  * fetches bytes before asking is told this figure rather than choosing one.
  */
 export const CONTAINER_HEAD_BYTES = 256 * 1024;
-import { logger } from "../../utils/logger.js";
 
 export class ContainerOrchestrator {
   constructor() {
@@ -26,14 +35,11 @@ export class ContainerOrchestrator {
     /** @type {Map<string, Promise<import("./container/Container.js").Container|null>>} */
     this.pending = new Map();
     /**
-     * What each file's container declares, once it has said anything.
+     * What each file's container declares, once it has said it.
      *
-     * The container parses on every ask, so without this the header is read
-     * again for each question — and the track table is asked for the audio
-     * menu, the subtitle defaults and the video facts of one file. It used to
-     * be kept in the torrent thread (`torrent-worker/container-tracks.js`), which is where the
-     * parse used to happen; it is the same one cache in its new place, not a
-     * second one.
+     * The track table is asked for the audio menu, the subtitle defaults and
+     * the video facts of one file; the container keeps its own reading, and
+     * this keeps the answer so the question costs nothing the second time.
      *
      * @type {Map<string, import("./tracks/index.js").ContainerTrack[]>}
      */
@@ -41,36 +47,78 @@ export class ContainerOrchestrator {
   }
 
   /**
+   * The container already built for a file, if any — without reading anything.
+   *
+   * `undefined` means none has been built yet; `null` means the bytes were read
+   * and are no format this proxy knows.
+   *
+   * @param {string} sourceKey
+   * @param {number} fileIndex
+   * @returns {import("./container/Container.js").Container | null | undefined}
+   */
+  known(sourceKey, fileIndex) {
+    return this.cache.get(`${sourceKey}:${fileIndex}`);
+  }
+
+  /**
+   * The file's one container, built on first ask.
+   *
    * @param {object} params
    * @param {string} params.sourceKey
    * @param {number} params.fileIndex
    * @param {(start:number,end:number)=>Promise<Buffer|null>} params.readRange
    * @param {number} params.fileSize
    * @param {string} [params.label]
+   * @param {number} [params.portionBytes]
    * @returns {Promise<import("./container/Container.js").Container|null>}
+   * @throws {import("./container/unavailable.js").BytesUnavailable} While the
+   *   head has not arrived. Nothing is kept for it.
    */
-  async getContainer({ sourceKey, fileIndex, readRange, fileSize, label = "" }) {
+  async containerFor({ sourceKey, fileIndex, readRange, fileSize, label = "", portionBytes }) {
     const key = `${sourceKey}:${fileIndex}`;
     if (this.cache.has(key)) return this.cache.get(key);
     if (this.pending.has(key)) return this.pending.get(key);
-    const p = ContainerFactory.create({ readRange, fileSize, label }).then((c) => {
-      this.cache.set(key, c);
-      this.pending.delete(key);
-      if (c) logger.info(`container: ${c.formatName} for "${label}"`);
-      else logger.info(`container: unknown for "${label}"`);
-      return c;
-    }).catch((e) => {
-      this.pending.delete(key);
-      logger.warn(`container: failed for "${label}": ${e?.message ?? e}`);
-      return null;
-    });
+    const p = ContainerFactory.create({ readRange, fileSize, label, portionBytes })
+      .then((c) => {
+        this.cache.set(key, c);
+        if (c) logger.info(`container: ${c.formatName} for "${label}"`);
+        else logger.info(`container: unknown for "${label}"`);
+        return c;
+      })
+      .catch((e) => {
+        if (!isUnavailable(e)) {
+          logger.warn(`container: failed for "${label}": ${e?.message ?? e}`);
+        }
+        throw e;
+      })
+      .finally(() => {
+        this.pending.delete(key);
+      });
     this.pending.set(key, p);
     return p;
   }
 
   /**
-   * @param {object} params - same as getContainer
-   * @returns {Promise<import("./tracks/index.js").ContainerTrack[]>}
+   * The same, answering null rather than throwing while the head is not here —
+   * for the callers whose own answer to "not yet" is "nothing yet".
+   *
+   * @param {object} params - same as containerFor
+   * @returns {Promise<import("./container/Container.js").Container|null>}
+   */
+  async getContainer(params) {
+    try {
+      return await this.containerFor(params);
+    } catch {
+      // `containerFor` has already said what failed, where it was not a
+      // shortage of bytes; either way nothing was kept.
+      return null;
+    }
+  }
+
+  /**
+   * @param {object} params - same as containerFor
+   * @returns {Promise<import("./tracks/index.js").ContainerTrack[]>} Empty while
+   *   the bytes have not arrived; that empty answer is not kept.
    */
   async getTracks(params) {
     const key = `${params.sourceKey}:${params.fileIndex}`;
@@ -78,21 +126,19 @@ export class ContainerOrchestrator {
     if (known) {
       return known;
     }
-    const container = await this.getContainer(params);
-    if (!container) return [];
     try {
+      const container = await this.containerFor(params);
+      if (!container) return [];
       const tracks = await container.readTracks();
-      // ONLY A NON-EMPTY READING IS KEPT. An empty one usually means the header
-      // has not arrived off the swarm yet, and caching that would answer "this
-      // file declares nothing" for the life of the process — which is what
-      // decides whether the viewer is offered a soundtrack at all.
-      if (Array.isArray(tracks) && tracks.length > 0) {
+      if (Array.isArray(tracks)) {
         this.tracks.set(key, tracks);
         return tracks;
       }
-      return Array.isArray(tracks) ? tracks : [];
+      return [];
     } catch (e) {
-      logger.warn(`container: readTracks failed for "${params.label}": ${e?.message ?? e}`);
+      if (!isUnavailable(e)) {
+        logger.warn(`container: readTracks failed for "${params.label}": ${e?.message ?? e}`);
+      }
       return [];
     }
   }
@@ -101,34 +147,41 @@ export class ContainerOrchestrator {
    * What the file declares about itself as a whole — format, duration, and
    * where its own timeline begins.
    *
-   * Read once per file, like the track table beside it, and from the same 64 KB
-   * of header. A `null` field means the container does not declare it, which is
-   * a final answer about the container.
+   * A `null` field means the container does not declare it, which is a final
+   * answer about the container. A null RESULT means the bytes have not arrived,
+   * or the format is unknown; neither is kept here.
    *
-   * @param {object} params - same as getContainer
+   * @param {object} params - same as containerFor
    * @returns {Promise<import("./container/Container.js").ContainerMediaInfo|null>}
    */
   async getMediaInfo(params) {
-    const container = await this.getContainer(params);
-    if (!container) return null;
     try {
+      const container = await this.containerFor(params);
+      if (!container) return null;
       return await container.readMediaInfo();
     } catch (e) {
-      logger.warn(`container: readMediaInfo failed for "${params.label}": ${e?.message ?? e}`);
+      if (!isUnavailable(e)) {
+        logger.warn(`container: readMediaInfo failed for "${params.label}": ${e?.message ?? e}`);
+      }
       return null;
     }
   }
 
   /**
-   * @param {object} params - same as getContainer
-   * @returns {Promise<{times:number[],tolerance:number}|null>}
+   * @param {object} params - same as containerFor
+   * @returns {Promise<{times:number[],tolerance:number}|null>} Null where the
+   *   file has no usable index, or is of no known format.
+   * @throws {import("./container/unavailable.js").BytesUnavailable} While the
+   *   bytes the index needs have not arrived — so that the keyframe table does
+   *   not record "no keyframes" for a file whose index is still downloading.
    */
   async getKeyframeIndex(params) {
-    const container = await this.getContainer(params);
+    const container = await this.containerFor(params);
     if (!container) return null;
     try {
       return await container.readKeyframeIndex();
-    } catch {
+    } catch (e) {
+      if (isUnavailable(e)) throw e;
       return null;
     }
   }

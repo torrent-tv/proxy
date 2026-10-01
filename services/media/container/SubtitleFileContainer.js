@@ -147,7 +147,24 @@ ${clean}`;
       return null;
     }
     const cues = new SubtitleFileContainer({ extension: ext }).readCues(clean);
-    return cues === null ? null : TextSubtitleTrack.cuesToVtt(cues, ext);
+    if (cues === null) return null;
+    const vtt = TextSubtitleTrack.cuesToVtt(cues, ext);
+    if (ext !== ".ass" && ext !== ".ssa") return vtt;
+    const header = clean.slice(0, 16384).match(/\[Script Info\]([^]*?)(?=\n\[|$)/iu)?.[1] ?? "";
+    const metadata = { titles: [], genericTitles: [], years: [] };
+    for (const line of header.split(/\r?\n/u)) {
+      const field = line.match(/^\s*(Title|Movie Title|Series Title|Original Title|Year|Release Year)\s*:\s*(.{1,160})$/iu);
+      if (!field) continue;
+      const key = field[1].toLowerCase();
+      const value = field[2].trim();
+      if (key.includes("year")) {
+        if (/^(18|19|20)\d{2}$/u.test(value)) metadata.years.push(Number(value));
+      } else if (key === "title") metadata.genericTitles.push(value);
+      else metadata.titles.push(value);
+    }
+    for (const key of Object.keys(metadata)) metadata[key] = [...new Set(metadata[key])].slice(0, 4);
+    if (!Object.values(metadata).some(values => values.length)) return vtt;
+    return vtt.replace(/^WEBVTT\r?\n\r?\n/u, `WEBVTT\n\nNOTE TORRENT-TV-METADATA\n${JSON.stringify(metadata)}\n\n`);
   }
 
   static detect(extension) {

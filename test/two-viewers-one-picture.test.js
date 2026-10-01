@@ -405,3 +405,100 @@ test("a viewer whose picture has gone quiet holds no soundtrack encoder", async 
     "the first viewer moved on, so their old track is nobody's"
   );
 });
+
+/**
+ * The soundtracks of the field case of 2026-10-01: the picture's own track
+ * states its rate, and the dub shipped beside it states nothing.
+ *
+ * @param {object} manager
+ * @param {{ dubRate?: number | null }} [what]
+ */
+function withAStatedAndASilentTrack(manager, { dubRate = null } = {}) {
+  const inventory = [
+    { index: 0, language: "jpn", title: "", isDefault: true, fileIndex: 0, sourceTrackIndex: 0, bitrateKbps: 128 },
+    { index: 1, language: "rus", title: "", isDefault: false, fileIndex: 0, sourceTrackIndex: 1, bitrateKbps: dubRate }
+  ];
+  manager.getCachedAudioTracks = () => inventory;
+  return inventory;
+}
+
+test("a track nothing states a rate for is sent as AAC even to a browser that plays it, and another viewer's copy is left alone", async (t) => {
+  const { manager, base, renditions, dirPath } = await pictureWithTwoViewers();
+  t.after(async () => {
+    await manager.lifecycle.disposeAll();
+    await rm(dirPath, { recursive: true, force: true });
+  });
+  withAStatedAndASilentTrack(manager);
+  manager.viewers.of(base, FIRST).audio = { trackIndex: 0, transcode: false };
+  manager.viewers.of(base, SECOND).audio = { trackIndex: 0, transcode: false };
+  const copy = await manager.renditions.resolveAudioRenditionFile(BASE_ID, 0, "segment-00003.mp4", FIRST);
+
+  // The second viewer's page says its browser plays the dub as it is.
+  const prepared = await manager.renditions.prepareAudioTrack(BASE_ID, 1, 12, SECOND, true);
+  const sent = await manager.renditions.resolveAudioRenditionFile(BASE_ID, 1, "segment-00003.mp4", SECOND);
+
+  assert.equal(prepared.sessionId, renditions.get(audioRenditionKey(1, true)).id, "prepared as AAC");
+  assert.equal(sent.sessionId, prepared.sessionId, "and its segments come from that same output");
+  assert.deepEqual(
+    manager.viewers.of(base, SECOND).audio,
+    { trackIndex: 1, transcode: true },
+    "the viewer is recorded as receiving what they are sent"
+  );
+  assert.equal(
+    (await manager.renditions.resolveAudioRenditionFile(BASE_ID, 0, "segment-00004.mp4", FIRST)).sessionId,
+    copy.sessionId,
+    "the other viewer's copy is the same output it was"
+  );
+  assert.deepEqual(manager.viewers.of(base, FIRST).audio, { trackIndex: 0, transcode: false });
+});
+
+test("the page's statement about the track it moves to decides, and silence keeps what it needed before", async (t) => {
+  const { manager, base, renditions, dirPath } = await pictureWithTwoViewers();
+  t.after(async () => {
+    await manager.lifecycle.disposeAll();
+    await rm(dirPath, { recursive: true, force: true });
+  });
+  withAStatedAndASilentTrack(manager, { dubRate: 192 });
+  manager.viewers.of(base, FIRST).audio = { trackIndex: 0, transcode: false };
+  manager.viewers.of(base, SECOND).audio = { trackIndex: 0, transcode: false };
+
+  await manager.renditions.prepareAudioTrack(BASE_ID, 1, 12, FIRST, false);
+  await manager.renditions.prepareAudioTrack(BASE_ID, 1, 12, SECOND, null);
+
+  assert.ok(renditions.has(audioRenditionKey(1, true)), "a browser that cannot play it gets AAC");
+  assert.ok(renditions.has(audioRenditionKey(1, false)), "one that says nothing is taken to play it, as it played the track it was on");
+});
+
+test("the soundtrack's load counts what is sent, not a figure learned after it was chosen", async (t) => {
+  const { manager, base, dirPath } = await pictureWithTwoViewers();
+  t.after(async () => {
+    await manager.lifecycle.disposeAll();
+    await rm(dirPath, { recursive: true, force: true });
+  });
+  const inventory = withAStatedAndASilentTrack(manager);
+  manager.viewers.of(base, SECOND).audio = { trackIndex: 0, transcode: false };
+  await manager.renditions.prepareAudioTrack(BASE_ID, 1, 12, SECOND, true);
+  await manager.renditions.resolveAudioRenditionFile(BASE_ID, 1, "segment-00003.mp4", SECOND);
+
+  // The dub's header arrives late and states a bound after all.
+  inventory[1].peakKbps = 576;
+
+  assert.deepEqual(
+    manager.renditions.viewerAudioLoadOf(base, SECOND),
+    { mbps: 0.128, peakClass: "estimated" },
+    "still the AAC being sent, not a copy nobody is receiving"
+  );
+});
+
+test("a copied track's codec bound reaches the link's question through the viewer's choice", async (t) => {
+  const { manager, base, dirPath } = await pictureWithTwoViewers();
+  t.after(async () => {
+    await manager.lifecycle.disposeAll();
+    await rm(dirPath, { recursive: true, force: true });
+  });
+  const inventory = withAStatedAndASilentTrack(manager);
+  inventory[0].peakKbps = 576;
+  manager.viewers.of(base, FIRST).audio = { trackIndex: 0, transcode: false };
+
+  assert.deepEqual(manager.renditions.viewerAudioLoadOf(base, FIRST), { mbps: 0.576, peakClass: "known" });
+});

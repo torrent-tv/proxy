@@ -25,8 +25,7 @@ import { formatSeconds } from "./EncodeRuns.js";
 import { EncodedOutput } from "./output/EncodedOutput.js";
 import { decideOutputFormat } from "./quality/output-format.js";
 import { rungForVisiblePicture } from "./quality/visible-rung.js";
-import { audioLoadOf, linkAnswerFigures as linkFiguresOf } from "./quality/link-budget.js";
-import { AUDIO_TRANSCODE_KBPS } from "./args.js";
+import { SOUNDTRACK_MODE_CAUSE, chooseSoundtrackMode, linkAnswerFigures as linkFiguresOf, soundtrackLoadOf } from "./quality/link-budget.js";
 
 /**
  * @typedef {Object} SegmentOutputFiles
@@ -166,7 +165,7 @@ export class OutputOpening {
     // own. Part of the output's identity: another limit is another output.
     capKbps = null,
     // The soundtrack THIS viewer receives with the picture — from this output
-    // or beside it — as `{ transcode, bitrateKbps }`. Left out, the one this
+    // or beside it — as `{ transcode, entry }`. Left out, the one this
     // request names is theirs. A step opened on a viewer's behalf passes the
     // track they chose, which need not be the one the picture was opened with.
     viewerAudio = undefined,
@@ -215,9 +214,6 @@ export class OutputOpening {
         : 0;
     const normalizedAudioTrack =
       Number.isInteger(audioTrackIndex) && audioTrackIndex > 0 ? audioTrackIndex : 0;
-    // What the requester wants of the sound, handed back so the viewer who
-    // asked can be told apart from another viewer of the same output.
-    const audio = { trackIndex: normalizedAudioTrack, transcode: transcodeAudio === true };
     // Which FILE the chosen soundtrack lives in, and which track it is inside
     // that file. A release often ships its dub as a file of its own beside the
     // picture, and the number that travels between the browser, this route and
@@ -225,6 +221,30 @@ export class OutputOpening {
     // is the one place that resolves it, so nothing downstream carries two
     // vocabularies.
     const audioSource = this.#host.renditions.resolveAudioSource(sourceKey, fileIndex, normalizedAudioTrack);
+    // HOW the soundtrack is produced, decided here, before anything is named by
+    // it, by the rule every choice of a track uses (`chooseSoundtrackMode`):
+    // the request says whether the browser plays the track as it is, and the
+    // inventory whether anything states what a copy of it weighs. A track with
+    // no figure is re-encoded even for a browser that would play it, because a
+    // copy of it is a load no link can be asked about. Whatever is decided is
+    // what the output IS — its key, its ffmpeg arguments, the link's question —
+    // and what the viewer is recorded as receiving.
+    const soundtrackMode = chooseSoundtrackMode({
+      entry: audioSource.entry,
+      browserPlays: transcodeAudio !== true,
+      // Nothing reaches this line on a proxy whose transcoding is off: the
+      // opening refuses every request above, so here re-encoding is allowed.
+      transcodeAllowed: true
+    });
+    const audioTranscoded = soundtrackMode.transcode === true;
+    if (soundtrackMode.cause === SOUNDTRACK_MODE_CAUSE.NO_FIGURE) {
+      this.#host.logger.info(
+        `transcode "${fileName || `file ${fileIndex}`}": audio track ${normalizedAudioTrack} — ${soundtrackMode.cause}; it is sent as AAC`
+      );
+    }
+    // What the requester receives of the sound, handed back so the viewer who
+    // asked can be told apart from another viewer of the same output.
+    const audio = { trackIndex: normalizedAudioTrack, transcode: audioTranscoded };
     // The file itself, held once for every session of it. Its name, its key and
     // the facts a probe of it returned used to be copied onto each session, so
     // two viewers of one film held two copies of numbers that cannot differ —
@@ -579,12 +599,9 @@ export class OutputOpening {
       tonemap: applyTonemap,
       capKbps,
       limitsFor: (frame) => this.#host.limitsFor(frame),
-      audioLoad: audioLoadOf(
-        viewerAudio !== undefined
-          ? viewerAudio
-          : { transcode: transcodeAudio === true, bitrateKbps: audioSource.bitrateKbps ?? null },
-        AUDIO_TRANSCODE_KBPS
-      ),
+      audioLoad: viewerAudio !== undefined
+        ? soundtrackLoadOf(viewerAudio?.entry ?? null, viewerAudio ? viewerAudio.transcode : null)
+        : soundtrackLoadOf(audioSource.entry, audioTranscoded),
       specWith: (encode) => new OutputSpec({
         sourceKey,
         segmentFormatId: segmentFormat.id,
@@ -593,7 +610,7 @@ export class OutputOpening {
         grid: new CutGrid({ kind: useKeyframeGrid ? "keyframe" : "uniform", fileIndex }),
         video: carriesVideo ? new VideoOutput({ fileIndex, encode }) : null,
         audio: carriesAudio
-          ? new AudioOutput({ fileIndex: audioSource.fileIndex, trackIndex: audioSource.sourceTrackIndex, transcode: transcodeAudio === true })
+          ? new AudioOutput({ fileIndex: audioSource.fileIndex, trackIndex: audioSource.sourceTrackIndex, transcode: audioTranscoded })
           : null
       }),
       serving: {
@@ -617,7 +634,15 @@ export class OutputOpening {
       error.code = decided.unavailable.bound === "machine" && typeof claim === "function"
         ? OUTPUT_NO_CAPACITY
         : OUTPUT_UNAVAILABLE;
-      error.details = { reason: decided.unavailable.reason, figures: decided.unavailable.figures, wantedKey: decided.wantedKey };
+      error.details = {
+        reason: decided.unavailable.reason,
+        // How many soundtracks the viewer could choose instead, so the page can
+        // offer another one only where there is one to offer.
+        figures: decided.unavailable.figures
+          ? { ...decided.unavailable.figures, soundtracks: this.#host.renditions.offeredSoundtrackCount(sourceKey, fileIndex) }
+          : null,
+        wantedKey: decided.wantedKey
+      };
       throw error;
     }
     if (decided.answer) {
@@ -723,7 +748,7 @@ export class OutputOpening {
         // side saying what it meant is why that took three attempts to place.
         `start=${Math.round(normalizedStartPosition)}s ` +
         `video=${transcodeVideo ? `${this.#host.videoEncoder.name}${output.softwarePreset ? `/${output.softwarePreset}` : ""}` : "copy"} ` +
-        `audio=${transcodeAudio ? "aac" : "copy"} ` +
+        `audio=${audioTranscoded ? "aac" : "copy"} ` +
         // Branch tag for log correlation: A = video re-encode (fixed GOP, grid
         // aligned, ts-offset); B = video copy (cut at source keyframes, copyts).
         `branch=${transcodeVideo ? "A(reencode,fixed-gop)" : "B(copy,copyts)"} ` +

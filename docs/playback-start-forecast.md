@@ -48,3 +48,9 @@ Zero service, missing media facts and a genuine timestamp gap remain explicit
 noncomputable states. The UI reports their causes instead of an estimating
 placeholder or a fabricated duration. Small coded-frame joins follow measured
 frame durations and Chromium's continuous-track rule, not a hand-picked margin.
+
+A closed non-final fragment is reusable only if its measured coded-frame
+coverage reaches its next declared cut. Interrupted one-frame fragments are
+excluded on publication and when reading an existing cache, so the production
+schedule treats their media as unfinished work. The final fragment uses its
+actual media end rather than the container's approximate duration.

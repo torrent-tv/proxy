@@ -88,6 +88,98 @@ function childOf(buf, s, e, t) {
   return childrenOf(buf, s, e, t)[0] ?? null;
 }
 
+/**
+ * The channel count, sampling frequency and decoder configuration one audio
+ * sample entry states (ISO/IEC 14496-12 §12.2.3, AudioSampleEntry).
+ *
+ * After the 8 bytes every SampleEntry begins with come 8 reserved bytes —
+ * whose first two QuickTime uses as a version that lengthens the entry by 16
+ * (version 1) or 36 (version 2) bytes — then `channelcount`, `samplesize`, two
+ * reserved fields and `samplerate` as 16.16 fixed point. Child boxes follow.
+ * For `mp4a` the child `esds` holds the AudioSpecificConfig (ISO/IEC 14496-1
+ * §7.2.6: ES_Descriptor, then DecoderConfigDescriptor, then
+ * DecoderSpecificInfo).
+ *
+ * @param {Buffer} buf
+ * @param {{ type: string, dataOffset: number, end: number }} entry
+ * @returns {{ channels: number | null, sampleRate: number | null, decoderConfig: Buffer | null } | null}
+ */
+function readAudioSampleEntry(buf, entry) {
+  const base = entry.dataOffset;
+  if (base + 28 > entry.end || base + 28 > buf.length) {
+    return null;
+  }
+  const version = buf.readUInt16BE(base + 8);
+  const channels = buf.readUInt16BE(base + 16);
+  const sampleRate = buf.readUInt32BE(base + 24) / 65536;
+  const childrenStart = base + 28 + (version === 1 ? 16 : version === 2 ? 36 : 0);
+  let decoderConfig = null;
+  if (entry.type === "mp4a" && childrenStart < entry.end) {
+    const esds = childOf(buf, childrenStart, Math.min(entry.end, buf.length), "esds");
+    if (esds) {
+      decoderConfig = decoderSpecificInfoOf(buf, esds.dataOffset + 4, Math.min(esds.end, buf.length));
+    }
+  }
+  return {
+    channels: channels > 0 ? channels : null,
+    sampleRate: sampleRate > 0 ? sampleRate : null,
+    decoderConfig
+  };
+}
+
+/**
+ * The DecoderSpecificInfo inside an `esds` payload, or null.
+ *
+ * Descriptors are a tag byte and a size of one to four bytes, seven bits each,
+ * the high bit saying another follows (ISO/IEC 14496-1 §8.3.3).
+ *
+ * @param {Buffer} buf
+ * @param {number} start
+ * @param {number} end
+ * @returns {Buffer | null}
+ */
+function decoderSpecificInfoOf(buf, start, end) {
+  const descriptorAt = (offset) => {
+    if (offset >= end) return null;
+    const tag = buf[offset];
+    let size = 0;
+    let cursor = offset + 1;
+    for (let i = 0; i < 4 && cursor < end; i += 1) {
+      const byte = buf[cursor];
+      cursor += 1;
+      size = (size * 128) + (byte & 0x7f);
+      if ((byte & 0x80) === 0) break;
+    }
+    return { tag, dataOffset: cursor, end: Math.min(end, cursor + size) };
+  };
+  const es = descriptorAt(start);
+  if (!es || es.tag !== 0x03 || es.dataOffset + 3 > es.end) return null;
+  const flags = buf[es.dataOffset + 2];
+  let cursor = es.dataOffset + 3;
+  if (flags & 0x80) cursor += 2;
+  if (flags & 0x40) cursor += 1 + (buf[cursor] ?? 0);
+  if (flags & 0x20) cursor += 2;
+  while (cursor < es.end) {
+    const descriptor = descriptorAt(cursor);
+    if (!descriptor) return null;
+    if (descriptor.tag === 0x04) {
+      // objectTypeIndication, streamType, bufferSizeDB, maxBitrate, avgBitrate.
+      let inner = descriptor.dataOffset + 13;
+      while (inner < descriptor.end) {
+        const child = descriptorAt(inner);
+        if (!child) return null;
+        if (child.tag === 0x05) {
+          return child.end > child.dataOffset ? Buffer.from(buf.subarray(child.dataOffset, child.end)) : null;
+        }
+        inner = child.end;
+      }
+      return null;
+    }
+    cursor = descriptor.end;
+  }
+  return null;
+}
+
 export class Mp4Container extends Container {
   get formatName() {
     return "mp4";
@@ -470,12 +562,16 @@ export class Mp4Container extends Container {
       } else if (handler === "soun") {
         audioIdx += 1;
         let codecId = "";
+        let sampleEntry = null;
         const minf = childOf(moov, mdia.dataOffset, mdia.end, "minf");
         const stbl = minf && childOf(moov, minf.dataOffset, minf.end, "stbl");
         const stsd = stbl && childOf(moov, stbl.dataOffset, stbl.end, "stsd");
         if (stsd) {
           const first = readBox(moov, stsd.dataOffset + 8);
-          if (first) codecId = first.type;
+          if (first) {
+            codecId = first.type;
+            sampleEntry = readAudioSampleEntry(moov, first);
+          }
         }
         result.push(new AudioTrack({
           trackNumber: trackId,
@@ -487,11 +583,15 @@ export class Mp4Container extends Container {
           isEnabled,
           isDefault: true,
           declaresDefault: false,
-          codecPrivateB64: "",
+          // The AudioSpecificConfig an `mp4a` entry carries in its `esds`, which
+          // is what Matroska writes as CodecPrivate for the same codec.
+          codecPrivateB64: sampleEntry?.decoderConfig ? sampleEntry.decoderConfig.toString("base64") : "",
           alternateGroup,
           isOriginal: false,
           isCommentary: false,
-          isVisualImpaired: false
+          isVisualImpaired: false,
+          channels: sampleEntry?.channels ?? null,
+          samplingFrequency: sampleEntry?.sampleRate ?? null
         }));
       }
     }

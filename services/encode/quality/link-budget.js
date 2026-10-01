@@ -10,18 +10,19 @@
  * picture's own stream, or as a separate one — so both are added before the
  * link is asked. And each part says how much its figure can be trusted:
  *
- * 1. `known` — a bound the encoder is held to: a re-encode's `maxrate`, or the
- *    constant rate a re-encoded soundtrack is produced at;
- * 2. `estimated` — a figure the FILE states: a copied picture's average rate,
- *    a copied soundtrack's stated rate. An average is not a bound, so a load
- *    built on it is admitted only by estimate and is never confirmed;
+ * 1. `known` — a bound the stream is held to: a re-encode's `maxrate`, or the
+ *    most a copied soundtrack's codec allows it to carry;
+ * 2. `estimated` — an average: a copied picture's or soundtrack's rate as the
+ *    FILE states it, or the target a re-encoded soundtrack is asked for. An
+ *    average is not a bound, so a load built on it is admitted only by
+ *    estimate and is never confirmed;
  * 3. `unknown` — no figure at all: a hardware encoder given no limit, a copied
  *    soundtrack whose rate nothing states.
  *
  * A load is as trustworthy as its least trustworthy part.
  */
 
-import { maxrateKbpsFor, nominalKbpsFor } from "../args.js";
+import { AUDIO_TRANSCODE_KBPS, maxrateKbpsFor, nominalKbpsFor } from "../args.js";
 
 /**
  * How much of a measured link may be spent on the stream.
@@ -142,22 +143,92 @@ export function videoLoadOfLimit(nominalKbps) {
 }
 
 /**
- * The soundtrack part of a load: the track THIS viewer chose.
+ * The soundtrack part of a load: the track THIS viewer receives, in the mode
+ * it is actually produced in.
  *
- * @param {{ transcode: boolean, bitrateKbps: number | null } | null} track -
- *   Null when the viewer receives no sound from this output or beside it.
- * @param {number} transcodeKbps - What a re-encoded track is produced at.
+ * Copied, the track weighs what its codec allows it to — the bound its
+ * configuration is held to, `known` — and where no such bound is confirmed, the
+ * average the file states for it, `estimated`. Re-encoded, it weighs the rate
+ * the encoder is asked for, and that is `estimated` too: ffmpeg's AAC encoder
+ * treats `-b:a` as a target its rate control drifts towards, not a limit
+ * (`libavcodec/aacenc.c`, 8.1.2), and the 6144-bit frame limit it does hold
+ * cannot be turned into a rate without the output's sampling frequency, which
+ * the command does not fix. `research/soundtrack-rate-bound-2026-10-01.md`.
+ *
+ * @param {import("../../media/audio-inventory.js").AudioInventoryEntry | null | undefined} entry -
+ *   The inventory entry of the track; null when nothing describes it.
+ * @param {boolean | null} transcode - How it reaches the viewer; null when the
+ *   viewer receives no sound from this output or beside it.
  * @returns {LoadPart | null}
  */
-export function audioLoadOf(track, transcodeKbps) {
-  if (!track) {
+export function soundtrackLoadOf(entry, transcode) {
+  if (transcode === null || transcode === undefined) {
     return null;
   }
-  if (track.transcode === true) {
-    return part(transcodeKbps / 1000, PEAK_CLASS.KNOWN);
+  if (transcode === true) {
+    return part(AUDIO_TRANSCODE_KBPS / 1000, PEAK_CLASS.ESTIMATED);
   }
-  return part((Number(track.bitrateKbps) || 0) / 1000, PEAK_CLASS.ESTIMATED);
+  const peakKbps = Number(entry?.peakKbps);
+  if (Number.isFinite(peakKbps) && peakKbps > 0) {
+    return part(peakKbps / 1000, PEAK_CLASS.KNOWN);
+  }
+  return part((Number(entry?.bitrateKbps) || 0) / 1000, PEAK_CLASS.ESTIMATED);
 }
+
+/**
+ * Whether a copied track has a figure for the link to be asked about: a
+ * confirmed bound, or a rate the file states.
+ *
+ * @param {import("../../media/audio-inventory.js").AudioInventoryEntry | null | undefined} entry
+ * @returns {boolean}
+ */
+export function soundtrackHasFigure(entry) {
+  const peakKbps = Number(entry?.peakKbps);
+  const bitrateKbps = Number(entry?.bitrateKbps);
+  return (Number.isFinite(peakKbps) && peakKbps > 0) || (Number.isFinite(bitrateKbps) && bitrateKbps > 0);
+}
+
+/**
+ * How a soundtrack is produced for a viewer, decided once, when they choose it.
+ *
+ * 1. the browser plays the track as it is and the track has a figure — copied;
+ * 2. the browser cannot play it, or it has no figure at all — re-encoded to AAC,
+ *    where re-encoding is allowed. Without a figure the link cannot be asked
+ *    whether a copy fits it, and the re-encode is the soundtrack that does have
+ *    one;
+ * 3. re-encoding not allowed: a track the browser plays is copied, figure or
+ *    not, and the link's own answer about it stands; a track it cannot play
+ *    cannot be served at all.
+ *
+ * @param {object} params
+ * @param {import("../../media/audio-inventory.js").AudioInventoryEntry | null | undefined} params.entry
+ * @param {boolean} params.browserPlays - Whether the viewer's browser can play
+ *   this track's codec as it stands.
+ * @param {boolean} params.transcodeAllowed
+ * @returns {{ transcode: boolean | null, cause: string }} `transcode: null`
+ *   when the track cannot be served. `cause` is one of {@link SOUNDTRACK_MODE_CAUSE}.
+ */
+export function chooseSoundtrackMode({ entry, browserPlays, transcodeAllowed }) {
+  const hasFigure = soundtrackHasFigure(entry);
+  if (browserPlays && hasFigure) {
+    return { transcode: false, cause: SOUNDTRACK_MODE_CAUSE.COPY };
+  }
+  if (transcodeAllowed) {
+    return { transcode: true, cause: browserPlays ? SOUNDTRACK_MODE_CAUSE.NO_FIGURE : SOUNDTRACK_MODE_CAUSE.UNPLAYABLE };
+  }
+  return browserPlays
+    ? { transcode: false, cause: SOUNDTRACK_MODE_CAUSE.COPY_WITHOUT_FIGURE }
+    : { transcode: null, cause: SOUNDTRACK_MODE_CAUSE.CANNOT_SERVE };
+}
+
+/** Why a soundtrack is produced the way {@link chooseSoundtrackMode} decided. */
+export const SOUNDTRACK_MODE_CAUSE = Object.freeze({
+  COPY: "copied: the browser plays it and its rate is stated",
+  NO_FIGURE: "re-encoded: nothing states how much a copy of it would carry",
+  UNPLAYABLE: "re-encoded: the browser cannot play it as it is",
+  COPY_WITHOUT_FIGURE: "copied without a stated rate: re-encoding is not allowed here",
+  CANNOT_SERVE: "the browser cannot play it and re-encoding is not allowed here"
+});
 
 /**
  * The whole load: the parts added, and the class of the least trustworthy.
@@ -214,6 +285,30 @@ export function linkCouldCarry(linkMbps, load) {
   return load.peakClass === PEAK_CLASS.KNOWN
     ? answer(LINK_VERDICT.FITS, true, true)
     : answer(LINK_VERDICT.ESTIMATED_TO_FIT, true, false);
+}
+
+/**
+ * Why a link refused a load, in words naming what was missing or too much.
+ *
+ * `no safe bound` names every part that has no figure — the picture, the
+ * soundtrack or both — because that, and not the link, is what the refusal is
+ * about. Any other refusal is about the size of the load and is described by
+ * the caller, who knows which outputs were weighed.
+ *
+ * @param {{ verdict: string, load: Load }} answer
+ * @param {string} otherwise - The words for a load that is too large.
+ * @returns {string}
+ */
+export function linkRefusalReason(answer, otherwise) {
+  if (answer?.verdict !== LINK_VERDICT.NO_SAFE_BOUND) {
+    return otherwise;
+  }
+  const missing = [
+    answer.load?.video?.peakClass === PEAK_CLASS.UNKNOWN ? "the picture" : "",
+    answer.load?.audio?.peakClass === PEAK_CLASS.UNKNOWN ? "the soundtrack" : ""
+  ].filter(Boolean);
+  return `nothing states how much ${missing.length > 0 ? missing.join(" or ") : "this output"} would send, ` +
+    "so this viewer's link cannot be asked whether it fits";
 }
 
 /**

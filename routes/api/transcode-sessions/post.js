@@ -139,6 +139,11 @@ export async function handleApiTranscodeSessionsPost(req, reply, { viewerRequest
       // track that never arrives is otherwise noticed only by its absence,
       // minutes later, as a black picture with working sound.
       tracks: renditions.declaredTracks(session),
+      // The soundtrack this viewer is sent and whether it is re-encoded — the
+      // proxy's decision, which can differ from what the page asked for: a
+      // track no figure states a rate for is re-encoded even for a browser that
+      // would play it, so its load on the viewer's link can be asked about.
+      soundtrack: renditions.soundtrackOf(session, consumerId),
       // How far ahead of the viewer this proxy lets the encoder run, in seconds
       // of playback. The browser sizes its own forward buffer from it, so the
       // two sides agree by construction instead of each carrying a constant of

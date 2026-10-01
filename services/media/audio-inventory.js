@@ -30,6 +30,7 @@
 
 
 import { AudioTrack } from "./tracks/AudioTrack.js";
+import { codecParametersComplete, codecParametersConflict, peakKbpsOf } from "./tracks/audio-bound.js";
 
 
 
@@ -57,6 +58,12 @@ import { AudioTrack } from "./tracks/AudioTrack.js";
  * @property {boolean} isEnabled
  * @property {number | null} channels
  * @property {number | null} bitrateKbps - The rate the file states for this track; an average, not a bound.
+ * @property {import("./tracks/audio-bound.js").CodecParameters | null} codecParameters -
+ *   The codec's configuration as the container states it, or null where no
+ *   track table was read.
+ * @property {number | null} peakKbps - The most the codec, so configured, allows
+ *   this track to carry — a bound, not an average — or null where no confirmed
+ *   bound exists for that configuration (`tracks/audio-bound.js`).
  * @property {string} fileName - For a sidecar: its own file name. "" otherwise.
  * @property {string[]} folders - For a sidecar: the folders above it, relative
  *   to the torrent root. What the browser reads a language and a releaser from.
@@ -112,6 +119,8 @@ export function buildAudioInventory({ embedded, videoFileIndex, sidecars }) {
       // container table, a Matroska stream without statistics tags). What a
       // viewer's link is asked to carry for a copied soundtrack is this.
       bitrateKbps: Number.isFinite(track?.bitrateKbps) && track.bitrateKbps > 0 ? track.bitrateKbps : null,
+      codecParameters: track?.codecParameters ?? null,
+      peakKbps: Number.isFinite(track?.peakKbps) && track.peakKbps > 0 ? track.peakKbps : null,
       fileName: kind === "sidecar" ? (file?.name ?? "") : "",
       folders: kind === "sidecar" && Array.isArray(file?.folders) ? file.folders : [],
       // What the file's own path says, for a track that ships as its own file:
@@ -178,13 +187,57 @@ export function enrichAudioInventoryFromSidecar(inventory, file, declaredTrack) 
     videoFileIndex: -1,
     sidecars: [{ file, tracks: [declaredTrack] }]
   })[0];
-  Object.assign(current, enriched, {
-    index: current.index,
-    fileIndex: current.fileIndex,
-    sourceTrackIndex: current.sourceTrackIndex,
-    kind: current.kind
-  });
+  Object.assign(current, mergeInventoryEntry(current, enriched));
   return true;
+}
+
+/**
+ * One entry of the inventory with what a later reading of the same track adds.
+ *
+ * Two rules, because the fields are of two kinds:
+ *
+ * 1. a single fact — a language, a title, a flag, a stated average rate — is
+ *    taken from the new reading where it states one, and otherwise the value
+ *    already known stands. A reading that says nothing about a field is not a
+ *    statement that the field is empty;
+ * 2. the codec's configuration is one statement, and the bound is computed from
+ *    it, so its fields are never mixed between readings. A complete set that
+ *    agrees with what is known replaces it whole; an incomplete one that agrees
+ *    leaves it standing; any contradiction — a field both readings state,
+ *    stated differently — withdraws the configuration and the bound, even
+ *    when the new reading is complete, since two readings that disagree
+ *    establish neither. The next complete reading then stands on its own.
+ *
+ * Where the track IS — its number, its file, its position in that file and
+ * whether it is a sidecar — is never changed: a player addresses it by them.
+ *
+ * @param {AudioInventoryEntry} current
+ * @param {AudioInventoryEntry} next
+ * @returns {AudioInventoryEntry}
+ */
+export function mergeInventoryEntry(current, next) {
+  const stated = (value) =>
+    value !== null && value !== undefined && !(typeof value === "string" && value.length === 0);
+  const merged = { ...current };
+  for (const [field, value] of Object.entries(next)) {
+    if (field === "codecParameters" || field === "peakKbps") continue;
+    if (stated(value)) merged[field] = value;
+  }
+  const known = current.codecParameters ?? null;
+  const read = next.codecParameters ?? null;
+  if (codecParametersConflict(known, read)) {
+    merged.codecParameters = null;
+  } else if (codecParametersComplete(read)) {
+    merged.codecParameters = read;
+  } else {
+    merged.codecParameters = known;
+  }
+  merged.peakKbps = peakKbpsOf(merged.codecParameters);
+  merged.index = current.index;
+  merged.fileIndex = current.fileIndex;
+  merged.sourceTrackIndex = current.sourceTrackIndex;
+  merged.kind = current.kind;
+  return merged;
 }
 
 /**

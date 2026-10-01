@@ -10,6 +10,7 @@
  * MP4 ISO/IEC 14496-12: tkhd alternate_group groups alternate audio tracks.
  */
 
+import { codecParametersOf, peakKbpsOf } from "./audio-bound.js";
 import { ContainerTrack } from "./ContainerTrack.js";
 
 /**
@@ -85,6 +86,17 @@ export class AudioTrack extends ContainerTrack {
     this.isVisualImpaired = params.isVisualImpaired === true;
     this.channels = Number.isFinite(params.channels) ? params.channels : null;
     this.samplingFrequency = Number.isFinite(params.samplingFrequency) ? params.samplingFrequency : null;
+    // What the codec is configured as, and the most that configuration allows
+    // the track to carry — a statement of the file, read with the rest of the
+    // track table (`audio-bound.js`). Own properties rather than getters, so a
+    // copy of the track made field by field keeps them.
+    this.codecParameters = codecParametersOf({
+      codec: AudioTrack.codecNameOf(params),
+      codecPrivateB64: params.codecPrivateB64,
+      channels: this.channels,
+      samplingFrequency: this.samplingFrequency
+    });
+    this.peakKbps = peakKbpsOf(this.codecParameters);
   }
 
   /**

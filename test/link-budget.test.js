@@ -9,12 +9,12 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {
   admissionRank,
-  audioLoadOf,
   LINK_SAFETY,
   LINK_VERDICT,
   linkCouldCarry,
   loadOf,
   PEAK_CLASS,
+  soundtrackLoadOf,
   videoLoadForFrame,
   videoLoadOfSpec
 } from "../services/encode/quality/link-budget.js";
@@ -51,11 +51,12 @@ test("an output's picture is read off its own rate control", () => {
   assert.deepEqual(videoLoadOfSpec(outputSpec(), 3.73), estimated(3.73), "a copy is its source's average");
 });
 
-test("a soundtrack is known when re-encoded, estimated when copied, unknown when nothing states its rate", () => {
-  assert.deepEqual(audioLoadOf({ transcode: true, bitrateKbps: null }, AUDIO_TRANSCODE_KBPS), known(AUDIO_TRANSCODE_KBPS / 1000));
-  assert.deepEqual(audioLoadOf({ transcode: false, bitrateKbps: 640 }, AUDIO_TRANSCODE_KBPS), estimated(0.64));
-  assert.deepEqual(audioLoadOf({ transcode: false, bitrateKbps: null }, AUDIO_TRANSCODE_KBPS), unknown());
-  assert.equal(audioLoadOf(null, AUDIO_TRANSCODE_KBPS), null, "no sound, no part");
+test("a soundtrack is estimated when re-encoded or copied at a stated rate, known at its codec's bound, unknown when nothing states one", () => {
+  assert.deepEqual(soundtrackLoadOf({ bitrateKbps: null }, true), estimated(AUDIO_TRANSCODE_KBPS / 1000));
+  assert.deepEqual(soundtrackLoadOf({ bitrateKbps: 640 }, false), estimated(0.64));
+  assert.deepEqual(soundtrackLoadOf({ bitrateKbps: 640, peakKbps: 640 }, false), known(0.64));
+  assert.deepEqual(soundtrackLoadOf({ bitrateKbps: null }, false), unknown());
+  assert.equal(soundtrackLoadOf(null, null), null, "no sound, no part");
 });
 
 test("a load is as trustworthy as its least trustworthy part", () => {

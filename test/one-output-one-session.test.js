@@ -50,30 +50,33 @@ function request(over = {}) {
  *
  * @returns {string}
  */
-function specOfThatOutput() {
+function specOfThatOutput({ trackIndex = 0, transcode = false } = {}) {
   return new OutputSpec({
     sourceKey: TORRENT,
     segmentFormatId: "fmp4",
     grid: new CutGrid({ kind: "keyframe", fileIndex: 0 }),
     video: new VideoOutput({ fileIndex: 0, encode: null }),
-    audio: new AudioOutput({ fileIndex: 0, trackIndex: 0, transcode: false })
+    audio: new AudioOutput({ fileIndex: 0, trackIndex, transcode })
   });
 }
 
 /** @returns {string} */
-function nameOfThatOutput() {
-  return specOfThatOutput().toName();
+function nameOfThatOutput(sound) {
+  return specOfThatOutput(sound).toName();
 }
 
 /**
  * @param {object} manager
+ * @param {{ trackIndex?: number, transcode?: boolean }} [sound] - The soundtrack
+ *   the seeded output carries; the file's own, copied, when left out.
  * @returns {object} The session it is seeded with.
  */
-function seedOneSession(manager) {
+function seedOneSession(manager, sound = {}) {
   const session = {
-    id: nameOfThatOutput(),
-    spec: specOfThatOutput(),
-    outputKey: "seeded",
+    id: nameOfThatOutput(sound),
+    spec: specOfThatOutput(sound),
+    // Its own address, so two seeded outputs are two places for viewers.
+    outputKey: specOfThatOutput(sound).toKey(),
     state: "ready",
     file: new SourceFile({ sourceKey: TORRENT, fileIndex: 0, name: "film.mkv" }),
     timeline: new Timeline({ boundaries: [0, 4, 8], cutGrid: "keyframe" }),
@@ -99,6 +102,13 @@ function seedOneSession(manager) {
  */
 function knownFile(manager) {
   manager.getCachedMediaInfo = () => ({ durationSeconds: 8, width: 1920, height: 1080, fps: 24 });
+  // The soundtracks the plan listed: the file's own, at the rate it states, and
+  // a dub beside it that states nothing — which no link can be asked about as a
+  // copy, so it is sent re-encoded.
+  manager.getCachedAudioTracks = () => [
+    { index: 0, fileIndex: 0, sourceTrackIndex: 0, bitrateKbps: 128 },
+    { index: 1, fileIndex: 0, sourceTrackIndex: 1, bitrateKbps: null, peakKbps: null }
+  ];
   manager.keyframeTables.learn({ sourceKey: TORRENT, fileIndex: 0 }, { times: [0, 4], format: "test" });
 }
 
@@ -201,4 +211,60 @@ test("two screens that come to the same format share one output, and a different
   }
   assert.notEqual(other, seeded, "a smaller picture is another output");
   assert.ok(!manager.viewers.forOutput(seeded).has("small-window"));
+});
+
+test("a remembered dub with no stated rate opens on the output that sends it as AAC, not on its copy", async (t) => {
+  // The field case of 2026-10-01: the next episode opened on a dub the page
+  // remembered, which its browser plays as it stands and nothing states a rate
+  // for. Opened as a copy, no link could be asked about it and the episode was
+  // refused; it is the AAC output that answers.
+  const manager = wireOutputs({
+    enabled: true,
+    ffmpegBin: "ffmpeg",
+    localBindHost: "127.0.0.1",
+    localPort: 9090,
+    // A measured copy speed, so this machine can price the output and the
+    // admission answers on room rather than on knowing nothing.
+    copySpeedX: 20
+  });
+  t.after(() => manager.lifecycle.disposeAll());
+  manager.encodeRuns.planEncodersNow = () => {};
+  manager.encodeRuns.planEncodersSoon = () => {};
+  knownFile(manager);
+  const copied = seedOneSession(manager, { trackIndex: 1, transcode: false });
+  const encoded = seedOneSession(manager, { trackIndex: 1, transcode: true });
+
+  const answered = await manager.viewerRequests.createOrGetSession(
+    request({ consumerId: "viewer-two", audioTrackIndex: 1, transcodeAudio: false })
+  );
+
+  assert.equal(answered, encoded, "the dub is re-encoded");
+  assert.notEqual(answered, copied);
+  assert.deepEqual(
+    manager.renditions.soundtrackOf(answered, "viewer-two"),
+    { trackIndex: 1, transcode: true },
+    "and the viewer is recorded as receiving AAC"
+  );
+});
+
+test("a track whose rate is stated is still copied for a browser that plays it", async (t) => {
+  const manager = wireOutputs({
+    enabled: true,
+    ffmpegBin: "ffmpeg",
+    localBindHost: "127.0.0.1",
+    localPort: 9090,
+    // A measured copy speed, so this machine can price the output and the
+    // admission answers on room rather than on knowing nothing.
+    copySpeedX: 20
+  });
+  t.after(() => manager.lifecycle.disposeAll());
+  manager.encodeRuns.planEncodersNow = () => {};
+  manager.encodeRuns.planEncodersSoon = () => {};
+  knownFile(manager);
+  const copied = seedOneSession(manager);
+  seedOneSession(manager, { trackIndex: 0, transcode: true });
+
+  const answered = await manager.viewerRequests.createOrGetSession(request({ consumerId: "viewer-two" }));
+
+  assert.equal(answered, copied);
 });

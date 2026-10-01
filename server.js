@@ -47,6 +47,8 @@ import { KeyframeTables } from "./services/media/KeyframeTables.js";
 import { contentsOf } from "./services/torrent/Contents.js";
 import { SubtitleOrchestrator } from "./services/media/SubtitleOrchestrator.js";
 import { containerOrchestrator, CONTAINER_HEAD_BYTES } from "./services/media/ContainerOrchestrator.js";
+import { viewerStartsOn } from "./services/viewer/PriorityMap.js";
+import { coalescing } from "./utils/coalesce.js";
 import {
   warmSubtitleCues,
   cuesHeldFor,
@@ -152,7 +154,10 @@ export async function startProxyServer({
     // after the declarations below have run.
     onPiecesArrived: ({ sourceKey, fileIndexes }) => {
       for (const fileIndex of fileIndexes) {
-        void pushFreshCues(sourceKey, fileIndex);
+        void pushFreshCues(`${sourceKey}:${fileIndex}`, sourceKey, fileIndex);
+        // A keyframe table somebody asked for while its bytes had not arrived
+        // is read again now; nothing was recorded for that wait.
+        keyframeTables.readAgainIfUnanswered({ sourceKey, fileIndex, logName: String(fileIndex) });
       }
     }
   });
@@ -263,9 +268,10 @@ export async function startProxyServer({
   // rules. The media layer used to import the second directly.
   /**
    * One file of one torrent, reduced to what the subtitle walk may know: a
-   * name, a length, which ranges are downloaded whole, and how to read one of
-   * those without asking the swarm. Piece length, file offsets and the bitfield
-   * stay in the torrent's thread.
+   * name, a length, its one container, which ranges are downloaded whole, how
+   * to read one of those without asking the swarm, the portion one read may
+   * span, and where the viewers stand. File offsets and the bitfield stay in
+   * the torrent's thread; the piece length crosses as a plain number.
    *
    * @param {string} sourceKey
    * @param {number} fileIndex
@@ -290,30 +296,39 @@ export async function startProxyServer({
       fileIndex,
       name: String(file.name ?? ""),
       length: file.length,
+      portionBytes: Number(torrent.pieceLength) > 0 ? Number(torrent.pieceLength) : undefined,
+      // The file's ONE container — the one the track table, the media info and
+      // the keyframe table are read from. Built here only when nobody has built
+      // it yet, so a pass of the walk does not fetch the file's edges again.
+      container: async () => {
+        const known = containerOrchestrator.known(sourceKey, fileIndex);
+        if (known !== undefined) {
+          return known;
+        }
+        const params = await containerOver({ sourceKey, fileIndex, tailBytes: CONTAINER_HEAD_BYTES });
+        return params ? containerOrchestrator.containerFor(params) : null;
+      },
       heldRanges: () => torrentPool.heldRangesOf(torrent, fileIndex),
-      readHeld: (start, end) => torrentPool.readHeldOf(torrent, fileIndex, start, end)
+      readHeld: (start, end) => torrentPool.readHeldOf(torrent, fileIndex, start, end),
+      // Where the viewers of this file stand: the start of every urgent stretch
+      // of its priority map, which is where each viewer's own need begins.
+      wantedSeconds: () => viewerStartsOn(outputParts.priority?.mapFor(sourceKey, fileIndex)),
+      // A pass left readable clusters for the next one: run it.
+      askAgain: () => {
+        void pushFreshCues(`${sourceKey}:${fileIndex}`, sourceKey, fileIndex);
+      }
     };
   };
-  /** @type {Set<string>} */
-  const walksInFlight = new Set();
   /**
    * Walk whatever new cues a file now holds and push them to the viewers.
    *
-   * @param {string} sourceKey
-   * @param {number} fileIndex
-   * @returns {Promise<void>}
+   * One walk of a file at a time, and one more after it whenever pieces
+   * arrived meanwhile (`coalescing`): `verified` fires per piece, so a queue of
+   * identical passes would only postpone the one with something new to find,
+   * and dropping them — as this used to — lost the pass that would have found
+   * the last pieces of a file.
    */
-  const pushFreshCues = async (sourceKey, fileIndex) => {
-    // A pass that arrives while the previous one is still walking is dropped
-    // rather than queued: `verified` fires per piece, so on a fast download
-    // these arrive many times a second, and a queue of identical passes would
-    // only postpone the one that has something new to find. The walk is
-    // serialized per file inside `SubtitleCues` anyway.
-    const key = `${sourceKey}:${fileIndex}`;
-    if (walksInFlight.has(key)) {
-      return;
-    }
-    walksInFlight.add(key);
+  const pushFreshCues = coalescing(async (sourceKey, fileIndex) => {
     try {
       const file = await heldFileFor(sourceKey, fileIndex);
       if (!file) {
@@ -325,17 +340,16 @@ export async function startProxyServer({
           : `${entry.spanStartSeconds.toFixed(1)}-${entry.spanEndSeconds.toFixed(1)}s`;
         logger.info(
           `subtitle push ${sourceKey.slice(0, 8)}:${fileIndex} track ${entry.trackIndex}: ` +
-          `${entry.cues.length} new cue(s) covering ${span}, ` +
-          `clusters walked ${entry.walkedClusters}/${entry.indexedClusters}, cursor ${entry.cursor}`
+          `${entry.cues.length} new cue(s) covering ${span}` +
+          (entry.withdrawn.length > 0 ? `, ${entry.withdrawn.length} taken back` : "") +
+          `, clusters walked ${entry.walkedClusters}/${entry.indexedClusters}, cursor ${entry.cursor}`
         );
         onSubtitleCues?.({ sourceKey, fileIndex, ...entry });
       }
     } catch (error) {
       logger.warn(`subtitle push ${sourceKey.slice(0, 8)}:${fileIndex} failed: ${error?.message ?? error}`);
-    } finally {
-      walksInFlight.delete(key);
     }
-  };
+  });
   const subtitles = new SubtitleOrchestrator(containerOrchestrator, {
     warm: async (torrent, fileIndex, sourceKey) => {
       const file = await heldFileFor(sourceKey, fileIndex, torrent);
@@ -396,7 +410,8 @@ export async function startProxyServer({
       readRange: (start, end) =>
         torrentPool.readRangeOf(torrent, fileIndex, start, Math.min(end, file.length - 1)),
       fileSize: file.length,
-      label: String(file.name ?? "")
+      label: String(file.name ?? ""),
+      portionBytes: Number(torrent.pieceLength) > 0 ? Number(torrent.pieceLength) : undefined
     };
   };
   const keyframeTables = new KeyframeTables({

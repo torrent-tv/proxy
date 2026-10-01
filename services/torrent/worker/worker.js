@@ -30,7 +30,7 @@ import {
 } from "./resume-warm.js";
 import { fillFileInBackground } from "./background-fill.js";
 import { demandFor } from "../download/registry.js";
-import { heldRangesOf, readHeldBytes } from "./held-bytes.js";
+import { heldRangesOf, ownsItsMemory, readHeldBytes } from "./held-bytes.js";
 import { CompletedFiles, completedFilesRoot } from "../../storage/files/CompletedFiles.js";
 import { pieceFromWholeFiles, pieceIsInWholeFiles } from "../../storage/files/piece-from-whole-file.js";
 import { Command, Event } from "./protocol.js";
@@ -343,6 +343,10 @@ async function runCommand(command, params, id) {
       return {
         infoHash: torrent.infoHash,
         name: torrent.name,
+        // The unit the swarm delivers and the store keeps. Said to the main
+        // thread as a number so a reading there can size its portions to it
+        // without knowing what a piece is.
+        pieceLength: Number(torrent.pieceLength) || 0,
         // Files cross as plain data; the objects stay here.
         files: (torrent.files ?? []).map((file, index) => ({
           index,
@@ -567,7 +571,11 @@ parentPort.on("message", async (message) => {
   const { command, id, params } = message ?? {};
   try {
     const result = await runCommand(command, params ?? {}, id);
-    parentPort.postMessage({ type: Event.RESULT, id, result });
+    // A held read's bytes are handed over rather than copied, and only when
+    // the buffer is the whole of its own memory (`ownsItsMemory`): anything
+    // else would take memory the store or another read still uses with it.
+    const transfer = command === Command.READ_HELD && ownsItsMemory(result?.bytes) ? [result.bytes.buffer] : [];
+    parentPort.postMessage({ type: Event.RESULT, id, result }, transfer);
   } catch (error) {
     parentPort.postMessage({ type: Event.ERROR, id, error: error?.message ?? String(error) });
   }

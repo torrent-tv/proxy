@@ -12,6 +12,8 @@
  *  - AVI RIFF §: LIST hdrl, idx1
  */
 
+import { strictReader } from "./unavailable.js";
+
 /**
  * What one file declares about itself. Every field is either a value the
  * container states or `null`, which means the container does not state it —
@@ -27,41 +29,35 @@
 
 export class Container {
   /**
-   * Two ways of reading, because two readers of one file want different things
-   * and the file is opened once.
+   * One reader, the one that fetches what is missing, and one container per
+   * file — the one `ContainerOrchestrator` keeps.
    *
-   * `readRange` fetches what is missing: the head and the track table are
-   * kilobytes, they are needed before anything can be offered, and the codec
-   * probe has already pulled the head of every file that plays. `readHeld`
-   * reads only what is already downloaded and asks the swarm for nothing, which
-   * is what the cue walk needs — turning subtitles on must not pull bytes the
-   * viewer is not waiting for. `isHeld` says whether a range can be read that
-   * way at all, so the walk can leave a cluster for next time instead of
-   * blocking on it.
+   * `readRange` is made strict here: it answers with every byte asked for or
+   * throws `BytesUnavailable`, so no reading in any subclass can mistake a read
+   * that has not arrived for an element that is not there. What a subclass keeps
+   * it keeps only after a reading succeeded (see `unavailable.js`).
    *
-   * They are given per container rather than per call because a container is
-   * cached per file and both readers want the same parsed head. Where the
-   * caller supplies only `readRange`, the held reader is that one and every
-   * range counts as held — which is the right answer for a local file, and for
-   * a torrent it is the caller's job to say otherwise.
+   * The cue walk reads only what is already downloaded and asks the swarm for
+   * nothing. That reader is NOT given here: it is handed to
+   * {@link Container#readHeldCues} on every pass, because what is downloaded
+   * changes between passes and the container is kept for the life of the file.
+   * It used to be given here, which is why the walk had to build a second
+   * container over the same file and read its head and Cues a second time.
    *
-   * The torrent is NOT passed in and must not be: `readHeld` and `isHeld` are
-   * the only two facts about it this layer needs, and reducing it to two
-   * functions is what keeps the container ignorant of where its bytes live.
+   * `portionBytes` is the largest read a reading makes, stated by whoever knows
+   * the medium — a torrent's piece length. Absent, an element is read in one go.
    *
    * @param {object} params
-   * @param {(start:number,end:number)=>Promise<Buffer|null>} params.readRange
-   * @param {number} params.fileSize
+   * @param {(start:number,end:number)=>Promise<Buffer|null>} [params.readRange]
+   * @param {number} [params.fileSize]
    * @param {string} [params.label]
-   * @param {(start:number,end:number)=>Promise<Buffer|null>} [params.readHeld]
-   * @param {(start:number,end:number)=>boolean} [params.isHeld]
+   * @param {number} [params.portionBytes]
    */
-  constructor({ readRange, fileSize, label = "", readHeld, isHeld }) {
-    this.readRange = readRange;
+  constructor({ readRange, fileSize, label = "", portionBytes } = {}) {
     this.fileSize = fileSize;
+    this.readRange = typeof readRange === "function" ? strictReader(readRange, fileSize) : readRange;
     this.label = label;
-    this.readHeld = typeof readHeld === "function" ? readHeld : readRange;
-    this.isHeld = typeof isHeld === "function" ? isHeld : () => true;
+    this.portionBytes = Number.isFinite(portionBytes) && portionBytes > 0 ? portionBytes : Number.POSITIVE_INFINITY;
   }
 
 
@@ -272,13 +268,17 @@ export class Container {
       declared,
       "subtitle",
       (track) => ({
-        // Matroska applies `eng` when Language is absent, and ffmpeg reports
-        // that default as if the file had stated it. Preserve only an explicit
-        // container value; otherwise let cue-text detection decide later.
-        language: track.declaresLanguage === true
-          ? (track.languageBcp47 || track.language || "")
-          : "",
+        // The language the container states, its default included. RFC 9559
+        // §5.1.4.1.19 gives `Language` the default `eng`, and RFC 8794
+        // §11.1.19 says an element equal to its default need not be written
+        // and that a reader MUST then read the default — so a track with no
+        // Language element is English by the file's own statement. Until
+        // 2026-10-01 that was treated as "says nothing", and an English track
+        // was offered as Unknown. Where the language came from travels beside
+        // it, so a reading of the text that disagrees can be reported.
+        language: track.languageBcp47 || track.language || "",
         declaresLanguage: track.declaresLanguage === true,
+        languageSource: typeof track.languageSource === "string" ? track.languageSource : "",
         isDefault: track.isDefault === true,
         declaresDefault: track.declaresDefault === true,
         // Read from the file rather than guessed from the track's name. Both
@@ -405,19 +405,27 @@ export class Container {
    * different evidence are a disagreement waiting to happen.
    *
    * `progress` is what has already been read, kept by the caller because it
-   * belongs to the file rather than to one pass: `walked` holds cluster
-   * positions, `harvested` holds sample offsets per track. Each container adds
-   * to the one it uses.
+   * belongs to the file rather than to one pass. Each container keeps its own
+   * part of it under its own name; nothing else reads inside.
+   *
+   * `held` is how to read what is downloaded NOW, handed in per pass: which
+   * ranges are whole, a read of one that never fetches (strict: every byte or
+   * `BytesUnavailable`), the portion a read may span, and where the viewers
+   * stand, in seconds, so the work nearest them is taken first.
    *
    * @param {object} _plan - This file's subtitle plan.
    * @param {object} _track - The track asked about.
-   * @param {{ walked: Set<number>, harvested: Map<number, Set<number>> }} _progress
-   * @returns {Promise<{ found: Map<number, object[]>, covered: number, indexed: number }>}
+   * @param {object} _progress
+   * @param {HeldReader} _held
+   * @returns {Promise<{ found: Map<number, object[]>, covered: number, indexed: number, withdrawn: number[] }>}
    *   `found` is track number to the cues found in THIS pass — Matroska fills
-   *   every track from one walk, so it is a map and not a list.
+   *   every track from one walk, so it is a map and not a list. Each cue may
+   *   carry `source`, the position it was read from; `withdrawn` lists sources
+   *   found in an earlier pass that turned out not to be what they were taken
+   *   for, whose cues the caller must take back.
    */
-  async readHeldCues(_plan, _track, _progress) {
-    return { found: new Map(), covered: 0, indexed: 0 };
+  async readHeldCues(_plan, _track, _progress, _held) {
+    return { found: new Map(), covered: 0, indexed: 0, withdrawn: [] };
   }
 
   /**
@@ -523,6 +531,21 @@ export class Container {
     return /** @type {typeof Container} */ (this.constructor).cueTextOf(payload, codecId);
   }
 }
+
+/**
+ * What the cue walk may read on one pass.
+ *
+ * @typedef {object} HeldReader
+ * @property {(start: number, end: number) => boolean} isHeld - Whether the whole
+ *   inclusive range is downloaded.
+ * @property {Array<[number, number]>} ranges - The downloaded ranges, ascending.
+ * @property {(start: number, end: number) => Promise<Buffer>} read - Every byte
+ *   of a downloaded range, or `BytesUnavailable`; never fetches.
+ * @property {number} portionBytes - The largest read one step may make.
+ * @property {(() => number[]) | number[]} wantedSeconds - Where viewers stand,
+ *   in film seconds — a function, read again between clusters, so a pass can
+ *   stop when a viewer has moved.
+ */
 
 // ---------------------------------------------------------------------------
 // Lining ffmpeg's banner up with what a container declares. Here because the

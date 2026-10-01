@@ -449,15 +449,16 @@ export class OutputOpening {
       const { arrived } = await this.#host.keyframeTables.within({ sourceKey, fileIndex, logName });
       keyframeMs = Date.now() - keyframeStartMs;
       if (!arrived) {
-        // A read that ran out of its budget is still running, and the table is
-        // still unanswered — which is not the same as a file with no keyframes,
+        // A read that ran out of its budget is still running, and one that
+        // found its bytes not downloaded yet is made again when they arrive;
+        // either way the table is still unanswered — which is not the same as a file with no keyframes,
         // and the distinction is the table's own (`answered` against
         // `readable`). Recorded as an absence it would make a passing shortage
         // of bytes look like a property of the bytes, and every later session
         // of the file would re-encode a picture that can be copied.
         this.#host.logger.warn(
-          `transcode: the keyframe table for "${logName}" has not arrived in ` +
-            `${Math.round(this.#host.keyframeTables.budgetMs / 1000)}s, so this session re-encodes the picture ` +
+          `transcode: the keyframe table for "${logName}" has not arrived after ${keyframeMs}ms ` +
+            `(budget ${Math.round(this.#host.keyframeTables.budgetMs / 1000)}s), so this session re-encodes the picture ` +
             "instead of copying it; the read goes on and the next session of this file gets the copy"
         );
       }

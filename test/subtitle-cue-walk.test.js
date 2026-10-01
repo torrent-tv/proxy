@@ -19,7 +19,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { Readable } from "node:stream";
 
-import { cuesHeldFor, warmSubtitleCues, forgetSubtitles } from "../services/media/SubtitleCues.js";
+import { cuesHeldFor, warmSubtitleCues, forgetSubtitles, subtitleTracksOf } from "../services/media/SubtitleCues.js";
 import { heldFileOver } from "./helpers/held-file.js";
 
 const ID_EBML = 0x1a45dfa3;
@@ -335,12 +335,27 @@ test("one walk fills every track, and a second call reads no cluster again", asy
   }
 });
 
+test("the warm pass walks nothing for a file nobody has asked about", async () => {
+  const { file } = buildFile();
+  const { torrent, reads } = torrentOver(file);
+  const sourceKey = "9".repeat(40);
+  forgetSubtitles(sourceKey);
+  try {
+    assert.deepEqual(await warmSubtitleCues(heldFileOver(torrent, 0, sourceKey)), []);
+    assert.equal(reads.length, 0, "neither its head nor its Cues table was read for it");
+  } finally {
+    forgetSubtitles(sourceKey);
+  }
+});
+
 test("the warm pass reports what is new, by the number the browser knows", async () => {
   const { file } = buildFile();
   const { torrent } = torrentOver(file);
   const sourceKey = "e".repeat(40);
   forgetSubtitles(sourceKey);
   try {
+    // A browser asking for a track is what makes a file one the walk follows.
+    await subtitleTracksOf(heldFileOver(torrent, 0, sourceKey));
     const first = await warmSubtitleCues(heldFileOver(torrent, 0, sourceKey));
     assert.deepEqual(
       first.map((entry) => [entry.trackIndex, entry.cues.length, entry.language]).sort(),

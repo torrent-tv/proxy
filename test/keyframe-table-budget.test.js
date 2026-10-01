@@ -17,6 +17,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { KeyframeTables } from "../services/media/KeyframeTables.js";
+import { BytesUnavailable } from "../services/media/container/unavailable.js";
 
 const QUIET = { info: () => {}, warn: () => {} };
 
@@ -99,4 +100,24 @@ test("a read that fails is not turned into a bounded wait's silence", async () =
     /the head is not downloaded/,
     "a read that threw is a different thing from a read that is still running"
   );
+});
+
+test("bytes not downloaded yet are a table that has not arrived, and the next arrival reads again", async () => {
+  let calls = 0;
+  const keyframes = tables(1_000, async () => {
+    calls += 1;
+    if (calls === 1) {
+      throw new BytesUnavailable(100, 199, 0);
+    }
+    return { times: [0, 4], tolerance: 0, format: "matroska" };
+  });
+
+  const { table, arrived } = await keyframes.within(FILE);
+  assert.equal(arrived, false, "the opening goes on and re-encodes; it is not failed over a shortage of bytes");
+  assert.equal(table.answered, false, "missing bytes say nothing about the file's keyframes");
+
+  keyframes.readAgainIfUnanswered(FILE);
+  await keyframes.read(FILE);
+  assert.equal(calls, 2);
+  assert.deepEqual(keyframes.of(FILE).times, [0, 4]);
 });

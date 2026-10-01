@@ -374,13 +374,18 @@ test("where the file writes RFC 5646, that is the language", async () => {
   assert.equal(track.languageBcp47, "pt-BR");
 });
 
-test("an omitted Matroska Language element stays unstated rather than becoming the RFC default", async () => {
+test("an omitted Matroska Language element is the format's default, `eng`, and says it was not written", async () => {
+  // RFC 9559 §5.1.4.1.19 gives Language the default `eng`; RFC 8794 §11.1.19
+  // says an element equal to its default need not be written, and a reader MUST
+  // read the default. Until 2026-10-01 such a track was offered as Unknown.
   const file = fileWithFlags();
   const plan = await MatroskaContainer.readSubtitlePlan(readerOver(file), file.length);
 
   const track = plan.tracks.find((entry) => entry.trackNumber === 6);
   const declared = plan.declared.find((entry) => entry.trackNumber === 6);
-  assert.equal(track.language, "");
-  assert.equal(track.declaresLanguage, false);
+  assert.equal(track.language, "eng");
+  assert.equal(track.languageSource, "default");
+  assert.equal(track.declaresLanguage, false, "the element itself was not written");
+  assert.equal(declared.language, "eng");
   assert.equal(declared.declaresLanguage, false);
 });

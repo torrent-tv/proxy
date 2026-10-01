@@ -5,47 +5,57 @@
  * It walks ONLY what is downloaded: switching subtitles on must never pull
  * bytes the viewer is not waiting for. The head and the Cues table are the one
  * exception and are fetched — they are kilobytes, they are needed before
- * anything can be offered, and the codec probe has already pulled the head for
- * every file that plays.
+ * anything can be offered — and they are read by the file's ONE container, the
+ * one `ContainerOrchestrator` keeps. This file used to build a second container
+ * of its own over the same file and read both again; when its read of the Cues
+ * table had not arrived it kept "no clusters" for the life of the process, and
+ * an embedded track showed nothing for a whole session
+ * (`research/subtitles-never-appear-2026-10-01.md`).
+ *
+ * **A plan is kept only once it has been read.** While the bytes it needs have
+ * not arrived the plan is "not ready": nothing is kept, the walk does nothing,
+ * and the next pass — on the next arrival of pieces — reads again.
  *
  * **The torrent is not here, and that is the point.** This layer is handed a
- * `HeldFile`: a name, a length, which ranges are downloaded whole, and how to
- * read one of them without fetching. Piece length, file offsets and the
- * bitfield are the torrent's words and stay in the torrent's thread
- * (`torrent/worker/held-bytes.js`). Until 2026-09-15 this whole file lived
- * there, which put a container parse — the media layer's work — in the thread
- * that owns the swarm, and made every answer something to carry back across a
- * channel.
+ * `HeldFile`: a name, a length, the file's container, which ranges are
+ * downloaded whole, how to read one of them without fetching, the portion a
+ * read may span, and where the viewers stand. Piece length, file offsets and
+ * the bitfield are the torrent's words and stay in the torrent's thread.
  *
- * What is genuinely this file's own, and travels with it: the found-order
- * cursor a browser follows, the per-file state, and one walk of a file at a
- * time.
+ * What is genuinely this file's own: the found-order cursor a browser follows,
+ * the per-file state, one walk of a file at a time, and taking back the cues of
+ * a cluster the container withdraws.
  */
 
-import { ContainerFactory } from "./container/ContainerFactory.js";
 import { TextSubtitleTrack } from "./tracks/TextSubtitleTrack.js";
 import { detectLanguage } from "./tracks/language-detect.js";
+import { isUnavailable, strictReader } from "./container/unavailable.js";
 import { logger } from "../../utils/logger.js";
-
 
 /**
  * One file of one torrent, as much of it as this layer is allowed to know.
- *
- * Four plain values and two functions: what it is called, how long it is, which
- * of it is downloaded whole, and how to read a range of that without asking the
- * swarm for anything. No torrent, no bitfield, no piece length — those are the
- * torrent's words, and turning them into these is its job.
  *
  * @typedef {object} HeldFile
  * @property {string} sourceKey
  * @property {number} fileIndex
  * @property {string} name
  * @property {number} length
+ * @property {() => Promise<import("./container/Container.js").Container | null>} container -
+ *   The file's one container. Throws `BytesUnavailable` while its head has not
+ *   arrived; null where the bytes are no format this proxy knows.
  * @property {() => Promise<Array<[number, number]>>} heldRanges - Ascending,
  *   non-overlapping, inclusive offsets within the file.
  * @property {(start: number, end: number) => Promise<Buffer | null>} readHeld -
  *   Null where those bytes are not there, which is never fetched.
+ * @property {number} [portionBytes] - The largest read one step may make.
+ * @property {() => number[]} [wantedSeconds] - Where viewers stand, in seconds.
+ * @property {() => void} [askAgain] - Run the walk again: said when a pass left
+ *   readable clusters for the next one, so they are read without waiting for
+ *   another arrival of pieces — the file may be downloaded whole.
  */
+
+/** How often one file's walk says what it has done, at most. */
+const WALK_REPORT_INTERVAL_MS = 60_000;
 
 /**
  * Whether a range falls entirely inside one of the held runs.
@@ -67,79 +77,43 @@ function rangeHolds(ranges, start, end) {
   return false;
 }
 
-/** @type {Map<string, { plan: object | null, harvested: Map<number, Set<number>>, cues: Map<number, object[]> }>} */
+/** @type {Map<string, object>} */
 const byFile = new Map();
 
-
-
 /**
- * A container over one file of a torrent, told how to read it.
+ * The subtitle plan of a file, read once it can be.
  *
- * The container is given two readers and a predicate and never the torrent:
- * whether a byte range is already downloaded, how to read one without asking
- * the swarm, and how to read one that may need fetching. That is the whole of
- * what this layer knows and the container does not.
- *
- * WHICH container is decided from the bytes, by the factory's sniff — the
- * header is what the muxer wrote, and a file name is what somebody typed. Only
- * where the head is not downloaded, and so cannot be sniffed without asking the
- * swarm, does the name answer instead. One choice either way: the caller never
- * decides a second time from a track's shape, which is two decisions from
- * different evidence that have to agree.
- *
- * @param {object} state - This file's state; the container is kept on it.
- * @param {import("./SubtitleCues.js").HeldFile} source
- * @returns {Promise<import("./container/Container.js").Container | null>}
- */
-async function containerOver(state, source) {
-  if (state.container !== null) {
-    return state.container;
-  }
-  const last = Number(source.length) - 1;
-  const held = async (start, end) => source.readHeld(start, Math.min(end, last));
-  const params = {
-    readRange: held,
-    readHeld: held,
-    // Answered from the list of ranges this file has downloaded WHOLE, taken
-    // once per pass rather than asked per cluster: a pass asks about every
-    // cluster of the file, and the torrent that knows is on the other thread.
-    isHeld: (start, end) => rangeHolds(state.held, start, Math.min(end, last)),
-    fileSize: source.length,
-    label: String(source.name ?? "")
-  };
-  const sniffed = await ContainerFactory.create(params);
-  if (sniffed) {
-    state.container = sniffed;
-    return state.container;
-  }
-  const ByName = ContainerFactory.byName(source.name);
-  state.container = ByName ? new ByName(params) : null;
-  return state.container;
-}
-
-/**
- * The subtitle tracks of a file, read once and kept.
- *
- * The head and the Cues table are two short reads, and they ARE fetched if
- * missing — they are kilobytes, they are needed before anything can be offered,
- * and the codec probe has already pulled the head for every file that plays.
- *
- * @param {import("./SubtitleCues.js").HeldFile} source
+ * @param {HeldFile} source
  * @param {string} key - `sourceKey:fileIndex`.
- * @returns {Promise<object | null>}
+ * @returns {Promise<object | null>} Null while the plan's bytes have not
+ *   arrived — "not ready", not "no subtitles".
  */
 async function planFor(source, key) {
   const state = stateFor(key);
   if (state.plan !== null) {
     return state.plan;
   }
-  // The head and the Cues table are two reads that DO wait on the swarm, so two
+  // The head and the Cues table are reads that DO wait on the swarm, so two
   // callers arriving together would both make them. One promise, awaited by
   // whoever asks while it is in flight.
   if (!state.planPromise) {
-    state.planPromise = readPlan(source, state).finally(() => {
-      state.planPromise = null;
-    });
+    state.planPromise = readPlan(source, state)
+      .catch((error) => {
+        if (!isUnavailable(error)) {
+          throw error;
+        }
+        if (!state.waitingSaid) {
+          state.waitingSaid = true;
+          logger.info(
+            `subtitles: the plan of "${String(source.name).slice(0, 40)}" waits for its bytes ` +
+              `(${error.message}); read again when pieces arrive`
+          );
+        }
+        return null;
+      })
+      .finally(() => {
+        state.planPromise = null;
+      });
   }
   return state.planPromise;
 }
@@ -161,26 +135,26 @@ function stateFor(key) {
     state = {
       plan: null,
       planPromise: null,
+      waitingSaid: false,
       forgotten: false,
       // One walk of a file at a time — see `serialize`.
       chain: Promise.resolve(),
-      // The container over this file, built once. It caches what it has parsed
-      // — a `moov` box is tens of megabytes off a torrent — so building a fresh
-      // one per call would throw that away on every request.
-      container: null,
-      // Which byte ranges of this file are downloaded WHOLE, as of the start of
-      // the pass now running. Taken once and read many times: a pass asks about
-      // every cluster of the file, and what knows the answer is on the other
-      // thread.
-      held: null,
-      harvested: new Map(),
+      // What the container has read of this file between passes. Each
+      // container keeps its own part under its own name.
+      progress: {},
       cues: new Map(),
       seq: new Map(),
-      walked: new Set(),
       // The found-order cursor of the last cue PUSHED for each track, so a
-      // second warmup pass sends only what a first one did not — the same
-      // found-order idea `?since=` uses for a browser's own pull.
-      pushed: new Map()
+      // second warmup pass sends only what a first one did not.
+      pushed: new Map(),
+      // Cues taken back since the last push, by track: their found-order
+      // numbers, which is how a browser names the cues it holds.
+      withdrawn: new Map(),
+      // The tracks whose container-default language the text was seen to
+      // contradict — said once each.
+      disagreementSaid: new Set(),
+      lastReportMs: 0,
+      lastStats: null
     };
     byFile.set(key, state);
   }
@@ -193,12 +167,9 @@ function stateFor(key) {
  *
  * Both entry points here — a browser's own pull and the warmup that runs ahead
  * of it — mark a cluster as walked only AFTER reading and parsing it, which is
- * two suspension points later. Until 2.56.0 nothing stopped a second call
- * arriving in between: `warmActiveFiles` runs on every verified piece AND on a
- * 3 s timer, so on a fast download the same cluster was read and parsed several
- * times over and the same line could be pushed twice under different `seq`
- * numbers. Each of those reads is a WebTorrent file stream, which selects and
- * deselects its pieces, so the repetition reached the piece picker as well.
+ * several suspension points later; without one walk at a time, two calls
+ * arriving in between read and parsed the same cluster and could push the
+ * same line twice under different `seq` numbers.
  *
  * @template T
  * @param {object} state
@@ -214,41 +185,43 @@ function serialize(state, work) {
 }
 
 /**
- * Read one file's subtitle plan — the tracks it declares and where the clusters
- * holding them are. Called once per file; see `planFor`.
+ * Read one file's subtitle plan — the tracks it declares and where the cues
+ * holding them are. Throws `BytesUnavailable` while those bytes are not here.
  *
- * @param {object} torrent
+ * @param {HeldFile} source
  * @param {object} state
  * @returns {Promise<object>}
  */
 async function readPlan(source, state) {
   // `declared` is what the container itself says about its subtitle tracks, in
   // its own order. Empty means the container said nothing — which is a real
-  // answer and not a missing one: nothing is then shown unasked. An MP4 has no
-  // element that means "show this subtitle track by default", so it declares
-  // nothing however many tracks it carries.
+  // answer and not a missing one.
   const empty = { tracks: [], declared: [], secondsPerTick: 0.001, segmentDataOffset: 0 };
-  if (!source || !(Number(source.length) > 0)) {
+  if (!source || !(Number(source.length) > 0) || typeof source.container !== "function") {
     state.plan = empty;
     return state.plan;
   }
-  state.held = await source.heldRanges();
-  const container = await containerOver(state, source);
+  const container = await source.container();
   if (!container) {
+    // The bytes were read and are no format this proxy knows.
     state.plan = empty;
     return state.plan;
   }
   const plan = await container.readSubtitlePlan();
+  state.container = container;
   state.plan = plan ?? empty;
   if (state.plan.tracks.length > 0) {
     logger.info(
       `subtitles: "${String(source.name).slice(0, 40)}" has ${state.plan.tracks.length} text track(s) ` +
-      `of ${state.plan.declared.length} declared — ` +
+      `of ${state.plan.declared.length} declared` +
+      (state.plan.cuesState ? `, Cues ${state.plan.cuesState}` : "") +
+      " — " +
       state.plan.tracks
         // `s:N` is the number the browser names (ffmpeg's own), and it differs
         // from the file's track number whenever a picture track sits among them.
         .map((track) => `s:${track.declaredIndex}=${track.trackNumber}:${track.language || "?"}` +
-          `${track.name ? `/${track.name}` : ""}(${track.clusterPositions.length} indexed)`)
+          `${track.languageSource === "default" ? "(default)" : ""}` +
+          `${track.name ? `/${track.name}` : ""}(${(track.clusterPositions ?? track.samples ?? []).length} indexed)`)
         .join(" ")
     );
   }
@@ -260,15 +233,8 @@ async function readPlan(source, state) {
  *
  * A cue's TIME cannot serve as one. Cues are harvested out of whichever
  * clusters happen to be downloaded, and those are not contiguous, so the set
- * grows in the middle as well as at the end. A browser that remembered "the
- * latest time I hold" and asked for everything past it would never be sent the
- * cues that turn up BEHIND that mark afterwards — which is exactly the stretch
- * it is about to play. Measured 2026-08-20 on a viewer at 272 s: one answer
- * carried cues out to 1176 s, and from then on every cue between the two was
- * filtered away for the rest of the session, with 59 of 276 clusters read.
- *
- * Found-order is monotonic by construction, so `?since=<n>` is exact however
- * the file arrives.
+ * grows in the middle as well as at the end. Found-order is monotonic by
+ * construction, so `?since=<n>` is exact however the file arrives.
  *
  * @param {{ seq: Map<number, number> }} state
  * @param {number} trackNumber
@@ -281,11 +247,38 @@ function nextSeq(state, trackNumber) {
 }
 
 /**
+ * What may be read on this pass: the held ranges taken once, a strict read of
+ * them, the portion a read may span, and where the viewers stand.
+ *
+ * @param {HeldFile} source
+ * @returns {Promise<import("./container/Container.js").HeldReader>}
+ */
+async function heldReaderOf(source) {
+  const ranges = await source.heldRanges();
+  const last = Number(source.length) - 1;
+  const read = strictReader((start, end) => source.readHeld(start, Math.min(end, last)), Number(source.length));
+  // Read again between clusters, so a pass can stop when a viewer has moved.
+  const wantedSeconds = () => {
+    try {
+      const stated = source.wantedSeconds?.();
+      return Array.isArray(stated) ? stated.filter((value) => Number.isFinite(value)) : [];
+    } catch {
+      return [];
+    }
+  };
+  return {
+    ranges,
+    isHeld: (start, end) => rangeHolds(ranges, start, Math.min(end, last)),
+    read,
+    portionBytes: Number.isFinite(source.portionBytes) && source.portionBytes > 0 ? source.portionBytes : Number.POSITIVE_INFINITY,
+    wantedSeconds
+  };
+}
+
+/**
  * Every cue of one track that can be read from what is already downloaded.
  *
- * @param {object} torrent
- * @param {number} fileIndex
- * @param {string} sourceKey
+ * @param {HeldFile} source
  * @param {number} trackNumber
  * @returns {Promise<{ cues: object[], coveredClusters: number, indexedClusters: number, track: object | null }>}
  */
@@ -294,9 +287,8 @@ export async function cuesHeldFor(source, trackNumber) {
   // A source that cannot say which of itself is downloaded makes every range
   // read as "not there", so the walk reads nothing and returns an empty list —
   // which is also what a file with no cues yet returns, and that is how this
-  // went unnoticed for a session (2026-09-03: 283 clusters indexed, 0 walked,
-  // the browser served `WEBVTT` and nothing else). It is not repairable here,
-  // so it is said rather than swallowed.
+  // went unnoticed for a session (2026-09-03). It is not repairable here, so it
+  // is said rather than swallowed.
   if (typeof source.heldRanges !== "function" || typeof source.readHeld !== "function") {
     logger.warn(
       `subtitles: asked for cues of "${String(source.name ?? key).slice(0, 40)}" ` +
@@ -318,7 +310,7 @@ export async function cuesHeldFor(source, trackNumber) {
  * The walk itself. Only ever entered through `cuesHeldFor`, which is what keeps
  * one file to one walk at a time.
  *
- * @param {import("./SubtitleCues.js").HeldFile} source
+ * @param {HeldFile} source
  * @param {object} state
  * @param {object} plan
  * @param {object} track
@@ -326,20 +318,24 @@ export async function cuesHeldFor(source, trackNumber) {
  * @returns {Promise<{ cues: object[], coveredClusters: number, indexedClusters: number, track: object | null }>}
  */
 async function walkFor(source, state, plan, track, trackNumber) {
-  // Taken once per pass: pieces keep arriving, and what may be read now is a
-  // different list from what could be read when the plan was built.
-  state.held = await source.heldRanges();
-  const container = await containerOver(state, source);
+  const container = state.container;
   if (!container) {
     return { cues: [], coveredClusters: 0, indexedClusters: 0, track };
   }
+  // Taken once per pass: pieces keep arriving, and what may be read now is a
+  // different list from what could be read when the plan was built.
+  const held = await heldReaderOf(source);
+  const { found, covered, indexed, withdrawn, more, stats } = await container.readHeldCues(plan, track, state.progress, held);
+  if (more) {
+    // Readable clusters were left for the next pass — the ones viewers stand in
+    // were read first and are pushed now. Asked for here, and not by a timer:
+    // nothing else would run the walk again on a file downloaded whole.
+    source.askAgain?.();
+  }
 
-  // One question, whichever container this is. Matroska walks the clusters its
-  // Cues table names and fills every track from one walk; an MP4 reads the
-  // samples its own table states for this track. Nothing here chooses between
-  // them, which is the point: the container was chosen once, from the bytes.
-  const { found, covered, indexed } = await container.readHeldCues(plan, track, state);
-
+  for (const at of withdrawn ?? []) {
+    takeBack(state, at);
+  }
   for (const [number, cues] of found) {
     let into = state.cues.get(number);
     if (!into) {
@@ -351,6 +347,7 @@ async function walkFor(source, state, plan, track, trackNumber) {
     }
     into.sort((left, right) => left.startSeconds - right.startSeconds);
   }
+  reportWalk(source, state, stats, covered, indexed);
 
   return {
     cues: state.cues.get(trackNumber) ?? [],
@@ -361,30 +358,79 @@ async function walkFor(source, state, plan, track, trackNumber) {
 }
 
 /**
+ * Take back every cue read from one position the container has withdrawn.
+ *
+ * @param {object} state
+ * @param {number} at
+ * @returns {void}
+ */
+function takeBack(state, at) {
+  for (const [number, cues] of state.cues) {
+    const kept = [];
+    for (const cue of cues) {
+      if (cue.source === at) {
+        const list = state.withdrawn.get(number) ?? [];
+        list.push(cue.seq);
+        state.withdrawn.set(number, list);
+      } else {
+        kept.push(cue);
+      }
+    }
+    state.cues.set(number, kept);
+  }
+}
+
+/**
+ * One line per file at most once a minute: what the walk has read, how, and
+ * what it could not.
+ *
+ * @param {HeldFile} source
+ * @param {object} state
+ * @param {object | undefined} stats
+ * @param {number} covered
+ * @param {number} indexed
+ * @returns {void}
+ */
+function reportWalk(source, state, stats, covered, indexed) {
+  if (!stats) {
+    return;
+  }
+  const now = Date.now();
+  const summary = JSON.stringify({ covered, indexed, ...stats });
+  if (summary === state.lastStats || now - state.lastReportMs < WALK_REPORT_INTERVAL_MS) {
+    return;
+  }
+  state.lastStats = summary;
+  state.lastReportMs = now;
+  logger.info(
+    `subtitles: walk of "${String(source.name).slice(0, 40)}" — ${covered} of ${indexed} known cluster(s) read, ` +
+      `${stats.fromSearch ?? 0} found by searching the bytes, ${stats.rejectedCandidates ?? 0} candidate(s) refused, ` +
+      `${stats.pendingCandidates ?? 0} waiting for bytes, ${stats.contradictions ?? 0} withdrawn, ` +
+      `${stats.unreadable ?? 0} unreadable, ${stats.refusedElements ?? 0} block(s) over one read, ` +
+      `${Math.round((stats.bytesWalked ?? 0) / 1048576)}MB read`
+  );
+}
+
+/**
  * Walk whatever clusters have newly arrived, for every text track a file
  * carries, and report what is new since the last call — so the cues can be
  * PUSHED to a browser rather than left for it to come back and ask.
  *
- * `cuesHeldFor` already skips positions it has walked before (`state.walked`),
- * so calling this on a timer or on every verified piece is cheap once a file
- * is caught up: the only cost is deciding there is nothing new to read. It is
- * `getSubtitleCues` run ahead of being asked, on the same state that call
- * itself would build — nothing is duplicated, and a file nobody has opened
- * costs nothing beyond this.
+ * Only for a file somebody has asked about: its plan, its tracks or its cues.
+ * A file of the torrent nobody has opened costs nothing, and its head and Cues
+ * table are not fetched for this.
  *
- * @param {object} torrent
- * @param {number} fileIndex
- * @param {string} sourceKey
- * @returns {Promise<{ trackIndex: number, cues: object[], language: string }[]>}
- *   One entry per track that gained at least one cue since the last call.
- *   `trackIndex` is `declaredIndex` — the track's position among ALL the file's
- *   subtitle tracks, which is ffmpeg's `0:s:N` and the only number the browser
- *   knows. NOT the container's own track number, and not the position among the
- *   readable tracks either: counting those alone puts every text track after a
- *   picture-based one in the wrong place.
+ * @param {HeldFile} source
+ * @returns {Promise<{ trackIndex: number, cues: object[], withdrawn: number[], language: string }[]>}
+ *   One entry per track that gained or lost a cue since the last call.
+ *   `trackIndex` is `declaredIndex` — ffmpeg's `0:s:N`, the only number the
+ *   browser knows.
  */
 export async function warmSubtitleCues(source) {
   const key = `${source.sourceKey}:${source.fileIndex}`;
+  if (!byFile.has(key) || byFile.get(key).forgotten === true) {
+    return [];
+  }
   const plan = await planFor(source, key);
   const state = stateFor(key);
   const fresh = [];
@@ -394,49 +440,75 @@ export async function warmSubtitleCues(source) {
     const held = await cuesHeldFor(source, track.trackNumber);
     const since = state.pushed.get(track.trackNumber) ?? 0;
     const newCues = held.cues.filter((cue) => (Number(cue.seq) || 0) > since);
-    if (newCues.length === 0) {
+    const withdrawn = state.withdrawn.get(track.trackNumber) ?? [];
+    state.withdrawn.delete(track.trackNumber);
+    if (newCues.length === 0 && withdrawn.length === 0) {
       continue;
     }
     const highest = newCues.reduce((max, cue) => Math.max(max, Number(cue.seq) || 0), since);
     state.pushed.set(track.trackNumber, highest);
     const codecId = held.track?.codecId ?? track.codecId;
     const cues = TextSubtitleTrack.finalizeCues(newCues, codecId);
-    fresh.push({
+    const entry = {
       // ffmpeg's own numbering, which is the only one the browser knows.
       trackIndex: Number.isInteger(track.declaredIndex) ? track.declaredIndex : order,
       cues,
+      withdrawn,
       language: held.track?.language ?? "",
       // What the CUES say the language is, re-read on every push over every cue
-      // held so far rather than over this batch. A track whose container states
-      // no language is unreadable at the start of a session — a handful of cues
-      // is not a sample of a language, and the detector refuses to answer on one
-      // — so the answer has to be re-taken as the film downloads, and the label
-      // moved when it arrives. Costs about 6 ms per push, measured; pushes
-      // arrive about once a second per file being read.
+      // held so far. Used by the browser only where the container states none.
       detectedLanguage: detectLanguage(
         TextSubtitleTrack.finalizeCues(held.cues, codecId).map((cue) => cue.text).join("\n")
       ),
       // Where the browser should resume from if it has to ask again — after a
       // reconnect, which loses the subscription these pushes ride on.
       cursor: highest,
-      // What this batch is ABOUT, in film time, so a log can be read against
-      // the position being played.
       spanStartSeconds: cues.length > 0 ? cues[0].startSeconds : null,
       spanEndSeconds: cues.length > 0 ? cues[cues.length - 1].endSeconds : null,
       walkedClusters: held.coveredClusters ?? 0,
       indexedClusters: held.indexedClusters ?? 0
-    });
+    };
+    noteDisagreement(source, state, track, entry.detectedLanguage);
+    fresh.push(entry);
   }
   return fresh;
 }
 
 /**
+ * Say once when the text reads as another language than the format's default
+ * the container fell back to.
+ *
+ * The label does not move: RFC 8794 §11.1.19 makes the default the file's own
+ * statement. A disagreement is a muxer that left the element out for a track
+ * that is not English, and this line is what counts how often that happens.
+ *
+ * @param {HeldFile} source
+ * @param {object} state
+ * @param {object} track
+ * @param {{ code: string } | null} detected
+ * @returns {void}
+ */
+function noteDisagreement(source, state, track, detected) {
+  if (track.languageSource !== "default" || !detected?.code || state.disagreementSaid.has(track.trackNumber)) {
+    return;
+  }
+  const stated = String(track.language || "").toLowerCase();
+  const read = String(detected.code).toLowerCase();
+  if (stated === read || stated.startsWith(`${read}-`) || (stated === "eng" && read === "en")) {
+    return;
+  }
+  state.disagreementSaid.add(track.trackNumber);
+  logger.info(
+    `subtitles: "${String(source.name).slice(0, 40)}" track ${track.trackNumber} has no Language element, ` +
+      `so the file states ${track.language} by default, and its text reads as ${detected.code}`
+  );
+}
+
+/**
  * The text subtitle tracks of a file, for the menu the viewer sees.
  *
- * @param {object} torrent
- * @param {number} fileIndex
- * @param {string} sourceKey
- * @returns {Promise<object[]>}
+ * @param {HeldFile} source
+ * @returns {Promise<object[]>} Empty while the plan's bytes have not arrived.
  */
 export async function subtitleTracksOf(source) {
   const plan = await planFor(source, `${source.sourceKey}:${source.fileIndex}`);
@@ -445,24 +517,18 @@ export async function subtitleTracksOf(source) {
     declaredIndex: Number.isInteger(track.declaredIndex) ? track.declaredIndex : order,
     codecId: track.codecId,
     language: track.language,
+    languageSource: track.languageSource ?? "",
     name: track.name,
     isDefault: track.isDefault,
-    indexedClusters: track.clusterPositions.length
+    indexedClusters: (track.clusterPositions ?? track.samples ?? []).length
   }));
 }
 
 /**
  * What the container itself says about its subtitle tracks, in its own order
- * and including the picture-based ones.
+ * and including the picture-based ones — lined up against ffmpeg's `0:s:N`.
  *
- * Separate from `subtitleTracksOf`, which lists only what can be turned into
- * WebVTT and is indexed by position in the subtitle API. This one exists to be
- * lined up against ffmpeg's `0:s:N` numbering, which counts every subtitle
- * stream, so leaving the picture ones out would shift it.
- *
- * @param {object} torrent
- * @param {number} fileIndex
- * @param {string} sourceKey
+ * @param {HeldFile} source
  * @returns {Promise<object[]>}
  */
 export async function declaredSubtitleTracksOf(source) {
@@ -491,10 +557,7 @@ export function forgetSubtitles(sourceKey, fileIndex) {
 }
 
 /**
- * Drop one file's state, but not while a walk of it is still running: the
- * record of which clusters have been read lives in that state, and a walk left
- * writing into a discarded copy while a new one starts beside it is the one
- * path that defeats the serialization above.
+ * Drop one file's state, but not while a walk of it is still running.
  *
  * @param {string} key
  * @returns {void}
@@ -504,9 +567,6 @@ function forgetOne(key) {
   if (!state) {
     return;
   }
-  // Held, so that a walk started before this call is not left orphaned; the
-  // entry is dropped the moment the queue empties, and nothing is handed this
-  // state in the meantime.
   state.forgotten = true;
   void state.chain.then(() => {
     if (byFile.get(key) === state) {

@@ -93,17 +93,25 @@ are recorded in `docs/browser-proxy-contract.md`.
     `ExternalSubtitleFile`. Spec-accurate flags (FlagForced only on subtitles per
     RFC 9559 §5.1.4.1, FlagOriginal/Commentary only on audio, tkhd
     track_enabled / alternate_group, elng BCP47).
-  - `media/` application files: `ContainerOrchestrator` (detect + per-file
-    cache of CONTAINERS, `getTracks`/`getMediaInfo`/`getKeyframeIndex` — it
-    caches the container, never the answers, so nothing here is a second store
-    of a fact somebody else owns), `KeyframeTables`,
+  - `media/` application files: `ContainerOrchestrator` (detect + the ONE
+    container per file, `containerFor`/`getTracks`/`getMediaInfo`/`getKeyframeIndex`;
+    the container keeps its own reading of each element it states — the Segment
+    layout, Tracks, Cues, MP4's `moov` — once it has been read), `KeyframeTables`,
     `SubtitleOrchestrator` (the track list and the cues behind
     `Container` tracks, warm/push — it is handed the walk, and `server.js` is
-    what puts the two together), `SubtitleCues` (the walk itself: the plan, the
-    found-order cursor, one walk of a file at a time). The walk
-    itself is `MatroskaContainer.walkHeldClusters` / `Mp4Container.readHeldSamples`;
-    what the torrent supplies is `held-bytes.js` — which ranges are downloaded
-    whole, and a read of one that never fetches.
+    what puts the two together), `SubtitleCues` (the plan, the found-order
+    cursor, one walk of a file at a time, taking back withdrawn cues). It uses
+    the file's one container — it no longer builds its own. The walk itself is
+    `MatroskaContainer.readHeldCues` over `container/matroska-clusters.js` (which
+    also finds clusters the Cues table does not name) and
+    `Mp4Container.readHeldSamples`; what the torrent supplies is `held-bytes.js`
+    — which ranges are downloaded whole, and a read of one that never fetches
+    and answers at once with nothing where the range is not whole.
+  - **A read whose bytes have not arrived is not an answer about the file.**
+    Every container read is strict (`container/unavailable.js`): every byte, or
+    `BytesUnavailable`. A value, a proven absence, or a refusal of ours with its
+    reason may be kept; "not here yet" never is — not by a container, not by
+    `ContainerOrchestrator`, not by `KeyframeTables`, not by `SubtitleCues`.
     **`KeyframeTables` is where a file's keyframe table lives and the only thing
     that reads one.** The table is `container/KeyframeTable.js`, ONE object per
     file, handed out rather than copied — so a read that lands after a session
@@ -113,9 +121,10 @@ are recorded in `docs/browser-proxy-contract.md`.
     file that must be re-encoded for ever from a passing shortage of bytes off
     the swarm. One read per file whoever asks, the second asker joins the first,
     each caller's wait is bounded by the measured `KEYFRAME_TABLE_BUDGET_MS`
-    while the READ is not, and a read that threw is never recorded as an answer.
-    It is the ONLY store of the table: the container reads and does not
-    remember, so there is one object per file and nothing to keep in step. The second reader is the packet probe in
+    while the READ is not, and a read that threw — `BytesUnavailable` included —
+    is never recorded as an answer; it is read again when pieces of the file
+    arrive (`readAgainIfUnanswered`). It is the ONLY store of the keyframe
+    answer; the container keeps the Cues reading the times are taken from. The second reader is the packet probe in
     `media/keyframe-probe.js`, which decodes rather than parsing; the fuller of the
     two answers is the one that stands (`media/keyframe-probe.js`).
   - `server/controllers/` — interface layer: `PlaybackController` / `SubtitleController`

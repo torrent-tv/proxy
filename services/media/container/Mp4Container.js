@@ -20,6 +20,7 @@ import { VideoTrack } from "../tracks/VideoTrack.js";
 import { AudioTrack } from "../tracks/AudioTrack.js";
 import { TextSubtitleTrack, TEXT_FORMATS_MP4 } from "../tracks/TextSubtitleTrack.js";
 import { ImageSubtitleTrack } from "../tracks/ImageSubtitleTrack.js";
+import { isUnavailable } from "./unavailable.js";
 
 /** A box header is eight bytes, or sixteen when the size field says 1 (§4.2). */
 const HEADER_BYTES = 8;
@@ -199,8 +200,9 @@ export class Mp4Container extends Container {
    * @param {number} fileSize
    * @returns {Promise<number[]|null>} Null where the container has no index.
    */
-  static readKeyframeTimes(readRange, fileSize) {
-    return readMp4KeyframeTimes(readRange, fileSize);
+  static async readKeyframeTimes(readRange, fileSize) {
+    const index = await new Mp4Container({ readRange, fileSize }).parseKeyframeIndex();
+    return index ? index.times : null;
   }
 
   /**
@@ -211,8 +213,9 @@ export class Mp4Container extends Container {
    * @param {number} fileSize
    * @returns {Promise<{ tracks: object[] } | null>}
    */
-  static readSubtitlePlan(readRange, fileSize) {
-    return readMp4SubtitlePlan(readRange, fileSize);
+  static async readSubtitlePlan(readRange, fileSize) {
+    const held = await new Mp4Container({ readRange, fileSize }).#moovBuffer();
+    return held ? subtitlePlanFromMoov(held.moov) : null;
   }
 
   /**
@@ -224,7 +227,8 @@ export class Mp4Container extends Container {
    * @returns {Promise<object|null>}
    */
   async readSubtitlePlan() {
-    const plan = await Mp4Container.readSubtitlePlan(this.readRange, this.fileSize);
+    const held = await this.#moovBuffer();
+    const plan = held ? subtitlePlanFromMoov(held.moov) : null;
     if (!plan) {
       return null;
     }
@@ -241,6 +245,7 @@ export class Mp4Container extends Container {
         declaredIndex: Number.isInteger(track.declaredIndex) ? track.declaredIndex : order,
         codecId: track.format,
         language: track.language,
+        languageSource: "language",
         name: "",
         isDefault: order === 0,
         codecPrivate: "",
@@ -262,46 +267,63 @@ export class Mp4Container extends Container {
    * reads per sample where Matroska reads per cluster.
    *
    * Nothing is fetched: a sample whose bytes are not downloaded is left for the
-   * next call.
+   * next call, and so is one whose read did not complete — a sample is marked
+   * read only once its bytes are in hand.
    *
-   * @param {{ codecId: string, samples: {offset: number, size: number, startSeconds: number, endSeconds: number}[] }} track
-   * @param {Set<number>} harvested - Sample offsets already read; added to.
-   * @returns {Promise<{startSeconds: number, endSeconds: number, text: string}[]>}
-   *   The cues found in THIS pass.
+   * @param {object} _plan
+   * @param {{ trackNumber: number, codecId: string, samples: {offset: number, size: number, startSeconds: number, endSeconds: number}[] }} track
+   * @param {object} progress
+   * @param {import("./Container.js").HeldReader} held
+   * @returns {Promise<{ found: Map<number, object[]>, covered: number, indexed: number, withdrawn: number[] }>}
    */
-  async readHeldCues(_plan, track, progress) {
-    let harvested = progress.harvested.get(track.trackNumber);
+  async readHeldCues(_plan, track, progress, held) {
+    if (!progress.mp4) {
+      progress.mp4 = { harvested: new Map() };
+    }
+    let harvested = progress.mp4.harvested.get(track.trackNumber);
     if (!harvested) {
       harvested = new Set();
-      progress.harvested.set(track.trackNumber, harvested);
+      progress.mp4.harvested.set(track.trackNumber, harvested);
     }
-    const cues = await this.readHeldSamples(track, harvested);
+    const cues = await this.readHeldSamples(track, harvested, held);
     return {
       found: cues.length > 0 ? new Map([[track.trackNumber, cues]]) : new Map(),
       covered: harvested.size,
-      indexed: track?.samples?.length ?? 0
+      indexed: track?.samples?.length ?? 0,
+      withdrawn: []
     };
   }
 
-  async readHeldSamples(track, harvested) {
+  /**
+   * @param {object} track
+   * @param {Set<number>} harvested
+   * @param {import("./Container.js").HeldReader} held
+   * @returns {Promise<{startSeconds: number, endSeconds: number, text: string, source: number}[]>}
+   */
+  async readHeldSamples(track, harvested, held) {
     const found = [];
     for (const sample of track?.samples ?? []) {
       if (harvested.has(sample.offset)) {
         continue;
       }
       const last = Math.min(this.fileSize - 1, sample.offset + sample.size - 1);
-      if (!this.isHeld(sample.offset, last)) {
+      if (!held.isHeld(sample.offset, last)) {
         continue;
       }
-      const bytes = await this.readHeld(sample.offset, last);
-      if (!bytes) {
-        continue;
+      let bytes;
+      try {
+        bytes = await held.read(sample.offset, last);
+      } catch (error) {
+        if (isUnavailable(error)) {
+          continue;
+        }
+        throw error;
       }
       harvested.add(sample.offset);
       // The MP4 has framed this cue and is the one that unframes it.
       const text = Mp4Container.cueTextOf(bytes, track.codecId);
       if (text) {
-        found.push({ startSeconds: sample.startSeconds, endSeconds: sample.endSeconds, text });
+        found.push({ startSeconds: sample.startSeconds, endSeconds: sample.endSeconds, text, source: sample.offset });
       }
     }
     return found;
@@ -309,13 +331,14 @@ export class Mp4Container extends Container {
 
   async readTracks() {
     const head = await this.readRange(0, Math.min(64 - 1, this.fileSize - 1));
-    if (!head || !isMp4(head)) return [];
+    if (!isMp4(head)) return [];
 
-    // Use the subtitle plan reader's moov parsing as source for subtitle tracks,
-    // and a direct moov walk for video/audio to collect tkhd/mdhd/hdlr/elng uniformly.
-    // For simplicity, delegate entirely to readMp4SubtitlePlan for subtitles and
-    // do a lightweight moov walk for video/audio here — then merge.
-    const subtitlePlan = await readMp4SubtitlePlan(this.readRange, this.fileSize).catch(() => null);
+    // Subtitle tracks from the subtitle reading of the one `moov`, video and
+    // audio from a walk of the same buffer — the box is read once per file.
+    // A read that has not arrived is not swallowed here: it is not an answer
+    // about the file, and the caller keeps nothing for it.
+    const held = await this.#moovBuffer();
+    const subtitlePlan = held ? subtitlePlanFromMoov(held.moov) : null;
     const subtitleByDecl = new Map();
     if (subtitlePlan?.tracks) {
       for (const t of subtitlePlan.tracks) subtitleByDecl.set(t.declaredIndex, t);
@@ -336,6 +359,7 @@ export class Mp4Container extends Container {
           codecId: s.format,
           language: s.language,
           languageBcp47: "",
+          languageSource: "language",
           name: "",
           isEnabled: true,
           isDefault: s.declaredIndex === 0,
@@ -359,11 +383,18 @@ export class Mp4Container extends Container {
   }
 
   /**
-   * The `moov` box, read whole.
+   * The `moov` box, read whole — the ONE reading of it every question here is
+   * answered from.
    *
    * Held on the instance because every question this class answers is inside
-   * it, and the box can be tens of megabytes off a torrent — reading it once
-   * per file is the difference between one fetch and one per question.
+   * it, and the box can be tens of megabytes off a torrent. Until 2026-10-01 it
+   * was read by three functions besides this one, each with its own rule for a
+   * read that failed.
+   *
+   * Three outcomes are kept: the box; null where the file has no `moov`; and
+   * null with `moovRefused` set where the box is larger than this program reads
+   * whole — a limit of ours, said as one, not an absence. A read whose bytes
+   * have not arrived throws `BytesUnavailable` and keeps nothing.
    *
    * @returns {Promise<{ moov: Buffer, header: number } | null>}
    */
@@ -371,31 +402,18 @@ export class Mp4Container extends Container {
     if (this.moovHeld !== undefined) {
       return this.moovHeld;
     }
-    const PROBE = 64;
-    const MAX_MOOV = 32 * 1024 * 1024;
-    let at = 0;
-    let moovBox = null;
-    while (at < this.fileSize) {
-      const probe = await this.readRange(at, Math.min(this.fileSize - 1, at + PROBE - 1));
-      if (!probe || probe.length < 8) break;
-      let size = probe.readUInt32BE(0);
-      const type = probe.toString("latin1", 4, 8);
-      let header = 8;
-      if (size === 1) {
-        if (probe.length < 16) break;
-        size = Number(probe.readBigUInt64BE(8));
-        header = 16;
-      }
-      if (size <= 0) break;
-      if (type === "moov") { moovBox = { offset: at, size, header }; break; }
-      at += size;
-    }
-    if (!moovBox || moovBox.size > MAX_MOOV) {
+    const found = await findMoov(this.readRange, this.fileSize);
+    if (!found) {
       this.moovHeld = null;
       return null;
     }
-    const moov = await this.readRange(moovBox.offset, Math.min(this.fileSize - 1, moovBox.offset + moovBox.size - 1));
-    this.moovHeld = moov ? { moov, header: moovBox.header } : null;
+    if (found.size > MAX_MOOV_BYTES) {
+      this.moovRefused = { size: found.size, limit: MAX_MOOV_BYTES };
+      this.moovHeld = null;
+      return null;
+    }
+    const moov = await this.readRange(found.offset, found.offset + found.size - 1);
+    this.moovHeld = { moov, header: found.headerBytes };
     return this.moovHeld;
   }
 
@@ -417,8 +435,10 @@ export class Mp4Container extends Container {
     }
     /** @type {import("./Container.js").ContainerMediaInfo} */
     const info = { format: this.formatName, durationSeconds: null, startTimeSeconds: null };
-    this.mediaInfo = info;
     const held = await this.#moovBuffer();
+    // Kept only once the `moov` reading has an outcome: a read that had not
+    // arrived used to leave an empty answer here for the life of the container.
+    this.mediaInfo = info;
     if (!held) {
       return info;
     }
@@ -620,7 +640,8 @@ export class Mp4Container extends Container {
   }
 
   async parseKeyframeIndex() {
-    const r = await readMp4KeyframeTimes(this.readRange, this.fileSize);
+    const held = await this.#moovBuffer();
+    const r = held ? keyframeTimesFromMoov(held.moov, held.header) : null;
     if (!r) return null;
     if (Array.isArray(r)) return { times: r, tolerance: 0 };
     return r;
@@ -788,16 +809,10 @@ function sampleOffsets(moov, stsc, chunkOffsets, sizes) {
 /**
  * The text subtitle tracks of an MP4, with every cue's time and byte range.
  *
- * @param {(start: number, end: number) => Promise<Buffer | null>} readRange
- * @param {number} fileSize
- * @returns {Promise<{ tracks: Mp4SubtitleTrack[] } | null>}
+ * @param {Buffer} moov - The whole `moov` box, its header included.
+ * @returns {{ tracks: Mp4SubtitleTrack[] } | null}
  */
-async function readMp4SubtitlePlan(readRange, fileSize) {
-  const found = await findMoov(readRange, fileSize);
-  if (!found || found.size > MAX_MOOV_BYTES) {
-    return null;
-  }
-  const moov = await readRange(found.offset, Math.min(fileSize - 1, found.offset + found.size - 1));
+function subtitlePlanFromMoov(moov) {
   if (!moov || moov.length < HEADER_BYTES) {
     return null;
   }
@@ -1254,20 +1269,15 @@ function isVideoTrack(buffer, mdia) {
 }
 
 /**
- * Read the keyframe times of an MP4/MOV file.
+ * Read the keyframe times of an MP4/MOV file from its `moov` box.
  *
- * @param {(start: number, end: number) => Promise<Buffer | null>} readRange
- * @param {number} fileSize
- * @returns {Promise<number[] | null>} Ascending seconds, or null when the file
+ * @param {Buffer} moov - The whole `moov` box, its header included.
+ * @param {number} headerBytes - The box header's length.
+ * @returns {number[] | null} Ascending seconds, or null when the file
  *   carries no usable index (fragmented MP4, truncated or damaged `moov`).
  */
-async function readMp4KeyframeTimes(readRange, fileSize) {
-  const moovBox = await findMoov(readRange, fileSize);
-  if (!moovBox || moovBox.size > MAX_MOOV_BYTES) {
-    return null;
-  }
-
-  const moov = await readRange(moovBox.offset, Math.min(fileSize - 1, moovBox.offset + moovBox.size - 1));
+function keyframeTimesFromMoov(moov, headerBytes) {
+  const moovBox = { headerBytes };
   if (!moov || moov.length < moovBox.headerBytes) {
     return null;
   }

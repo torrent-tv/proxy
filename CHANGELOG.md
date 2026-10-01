@@ -1,3 +1,7 @@
+## 2.88.2
+
+- **Fix**: Report the first failing playback forecast boundary and per-track ranges instead of only a generic no-safe-start result.
+
 ## 2.88.1
 
 - **New**: Preserve bounded ASS/SSA work-title and release-year header fields in a WebVTT metadata note, without additional subtitle reads.

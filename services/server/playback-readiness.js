@@ -327,7 +327,7 @@ export function predictPlaybackReadiness(input = {}) {
       : productions;
     const safety = isSafeSchedule(usefulCompletions, usefulProductions, trackState, position, duration,
       buffered, capacity, reserve, startDelaySeconds);
-    return { safe: safety.safe,
+    return { safe: safety.safe, failure: safety.failure,
       bufferedAtStart: safety.bufferedAtStart,
       neededSeconds: safety.neededSeconds,
       completionTimes: usefulCompletions.map(({ at }) => at),
@@ -346,7 +346,7 @@ export function predictPlaybackReadiness(input = {}) {
   }
   const searchLimit = maximumUsefulDelay;
   if (!(searchLimit > 0)) {
-    return result(false, null, buffered, reserve, null, "no-safe-start-found", preparedSegments);
+    return { ...result(false, null, buffered, reserve, null, "no-safe-start-found", preparedSegments), failure: immediate.failure };
   }
 
   let low = 0;
@@ -369,7 +369,7 @@ export function predictPlaybackReadiness(input = {}) {
     }
   }
   if (high === null) {
-    return result(false, null, buffered, reserve, null, "no-safe-start-found", preparedSegments);
+    return { ...result(false, null, buffered, reserve, null, "no-safe-start-found", preparedSegments), failure: immediate.failure };
   }
 
   while (true) {
@@ -559,6 +559,12 @@ function isSafeSchedule(completions, productions, trackState, position, duration
     const available = Math.min(capacity, ...clientRanges.map((trackRanges, index) =>
       playerPosition >= trackEnd(index) ? Number.POSITIVE_INFINITY :
         Math.max(0, contiguousEnd(trackRanges, playerPosition) - playerPosition)));
+    const trackStatus = clientRanges.map((ranges, index) => ({
+      track: trackState[index].track.id,
+      end: contiguousEnd(ranges, playerPosition),
+      next: ranges.find(range => range.start > playerPosition)?.start ?? null,
+      last: trackEnd(index)
+    }));
     let neededSeconds = 0;
     let stockSafe = true;
     for (let trackIndex = 0; trackIndex < trackState.length; trackIndex += 1) {
@@ -575,14 +581,15 @@ function isSafeSchedule(completions, productions, trackState, position, duration
       safe: (!checkClient || available > 0) && stockSafe,
       stockSafe,
       available,
-      neededSeconds
+      neededSeconds,
+      failure: { time, playerPosition, available, stockSafe, tracks: trackStatus }
     };
   };
 
   addThrough(startDelay);
   const atStart = safeAt(startDelay);
   if (!atStart.safe) {
-    return { safe: false, bufferedAtStart: atStart.available, neededSeconds: atStart.neededSeconds };
+    return { safe: false, bufferedAtStart: atStart.available, neededSeconds: atStart.neededSeconds, failure: atStart.failure };
   }
 
   const playbackEnd = startDelay + Math.max(0, duration - position);
@@ -605,17 +612,17 @@ function isSafeSchedule(completions, productions, trackState, position, duration
   for (const time of eventTimes) {
     const beforeArrival = safeAt(time, false);
     if (!beforeArrival.stockSafe) {
-      return { safe: false, bufferedAtStart: atStart.available, neededSeconds: beforeArrival.neededSeconds };
+      return { safe: false, bufferedAtStart: atStart.available, neededSeconds: beforeArrival.neededSeconds, failure: beforeArrival.failure };
     }
     addThrough(time);
     const afterArrival = safeAt(time);
     if (!afterArrival.safe) {
-      return { safe: false, bufferedAtStart: atStart.available, neededSeconds: afterArrival.neededSeconds };
+      return { safe: false, bufferedAtStart: atStart.available, neededSeconds: afterArrival.neededSeconds, failure: afterArrival.failure };
     }
   }
 
   const atEnd = safeAt(playbackEnd);
-  return { safe: atEnd.safe, bufferedAtStart: atStart.available, neededSeconds: atStart.neededSeconds };
+  return { safe: atEnd.safe, bufferedAtStart: atStart.available, neededSeconds: atStart.neededSeconds, failure: atStart.failure };
 }
 
 function addRange(ranges, start, end) {

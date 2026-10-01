@@ -101,6 +101,9 @@ function seedOneSession(manager, sound = {}) {
  * @param {object} manager
  */
 function knownFile(manager) {
+  // This check exercises output identity. Machine admission has its own tests.
+  manager.admission.admitsWatching = () => ({ admitted: true, reason: "", speedX: 8 });
+  manager.admission.previewCandidate = () => ({ admitted: true, reason: "", speedX: 8 });
   manager.getCachedMediaInfo = () => ({ durationSeconds: 8, width: 1920, height: 1080, fps: 24 });
   // The soundtracks the plan listed: the file's own, at the rate it states, and
   // a dub beside it that states nothing — which no link can be asked about as a

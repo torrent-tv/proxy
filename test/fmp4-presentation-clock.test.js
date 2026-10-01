@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { fmp4Format } from "../services/encode/segment-formats/fmp4.js";
-import { continuePresentationRanges, readPresentationRanges, walkBoxes } from "../services/encode/segment-formats/mp4-boxes.js";
+import { continuePresentationRanges, presentationCoverageEnd, readPresentationRanges, walkBoxes } from "../services/encode/segment-formats/mp4-boxes.js";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -52,6 +52,12 @@ function fragment(decodeTime, composition) {
     box("tfhd", tfhd), box("tfdt", tfdt), box("trun", trun)
   ])));
 }
+
+test("an interrupted frame cannot prove coverage of a full future cut", () => {
+  const ranges = readPresentationRanges(Buffer.concat([init(456000, 0), fragment(0, 0)]));
+  assert.ok(presentationCoverageEnd(ranges) > 456);
+  assert.ok(presentationCoverageEnd(ranges) < 456.1);
+});
 
 test("a shared init preserves presentation times without adding composition delay twice", () => {
   const shared = fmp4Format.prepareSharedInit(init(83, 2000));

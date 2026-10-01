@@ -267,7 +267,7 @@ export function readPresentationRanges(raw) {
   return result;
 }
 
-/** A video frame can cross a file boundary when decoding remains continuous. */
+/** Last continuous coded-frame boundary on every track in a closed piece. */
 export function presentationCoverageEnd(ranges) {
   const tracks = presentationTracks.get(ranges);
   if (!tracks?.length) return null;

@@ -85,6 +85,42 @@ test("with no Cues, the chain reads what is joined up and the search finds what 
   assert.deepEqual(second.withdrawn, [], "the search was right, so nothing is taken back");
 });
 
+test("the walk reads the structure of a cluster, not the frames of its picture", async () => {
+  // Pictures of 64 KB: a walk that read them would move them all.
+  const picture = Buffer.alloc(64 * 1024, 7);
+  const { file } = buildMatroska({
+    tracks: TRACKS,
+    cues: [1],
+    clusters: [plainCluster(0, "a", picture), plainCluster(10_000, "b", picture), plainCluster(20_000, "c", picture)]
+  });
+  const { container, plan } = await planOf(file);
+  const reads = [];
+  const held = heldOver(file, [[0, file.length - 1]], { portionBytes: 4 * 1024 * 1024, reads });
+  const result = await pass(container, plan, {}, held);
+  assert.deepEqual(result.texts.sort(), ["a", "b", "c"]);
+  const moved = reads.reduce((sum, { start, end }) => sum + (end - start + 1), 0);
+  assert.ok(moved < picture.length, `${moved} bytes read for three clusters of ${picture.length}-byte pictures`);
+});
+
+test("with no Cues, the search stops at the first cluster it accepts and the chain knows the rest", async () => {
+  const picture = Buffer.alloc(64 * 1024, 7);
+  const { file, clusterAt } = buildMatroska({
+    tracks: TRACKS,
+    cues: null,
+    clusters: [0, 10_000, 20_000, 30_000, 40_000].map((ticks, index) => plainCluster(ticks, String(index), picture))
+  });
+  const { container, plan } = await planOf(file);
+  const reads = [];
+  // The first cluster's header is not here, so nothing establishes the chain:
+  // only the search can start it.
+  const held = heldOver(file, [[0, clusterAt[0] - 1], [clusterAt[0] + 12, file.length - 1]], { portionBytes: 32 * 1024, reads });
+  const result = await pass(container, plan, {}, held);
+  assert.deepEqual(result.texts.sort(), ["1", "2", "3", "4"]);
+  assert.equal(result.stats.fromSearch, 4, "found by the search, then by its chain");
+  const searchedPast = reads.filter(({ start }) => start > clusterAt[2]).reduce((sum, { start, end }) => sum + (end - start + 1), 0);
+  assert.ok(searchedPast < picture.length, `${searchedPast} bytes read past the third cluster`);
+});
+
 test("a Cluster id inside a picture's bytes is checked and refused, and gives no line", async () => {
   // An id, a plausible size and some bytes — inside a SimpleBlock's payload.
   const fake = Buffer.concat([idBytes(ID.CLUSTER), Buffer.from([0x88]), Buffer.alloc(8, 0x41)]);

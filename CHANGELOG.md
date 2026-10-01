@@ -8,6 +8,9 @@
 - **Fix**: A Matroska track with no `Language` element is English, as RFC 9559 §5.1.4.1.19 and RFC 8794 §11.1.19 require. `LanguageBCP47` still wins, an explicit `und` stays unknown, and where the language came from travels as `languageSource`.
 - **Fix**: A read of what is downloaded answers at once with nothing when the range is not wholly downloaded. It used to open the torrent's own file stream, which selects pieces outside the demand register and waited up to 30 s. At a torrent's open, 36 such reads competed with the file being watched. The bytes it returns are handed to the main thread with their memory transferred instead of copied.
 - **Fix**: A subtitle walk asked for while one is running runs once more afterwards instead of being dropped.
+- **Fix**: The walk reads a cluster's structure — headers and the first bytes of each block — and a subtitle block's data by its own size, so a picture's frames never cross into the main thread, and each read hands the loop back before the next. Measured on the addon host over a 287 MB file: memory growth 10-15 MB instead of 75-95 MB, and the main loop's 99th-percentile delay 13-17 ms against 12-13 ms with no walk (20-32 ms before).
+- **Fix**: The search for clusters in a file with no Cues decides each candidate as it finds it and follows an accepted one by its chain, so a file whose clusters follow one another is no longer searched whole and then read a second time to check each cluster. The first pass on that file took 0.3-0.7 s instead of 4-6 s.
+- **Fix**: A keyframe table whose bytes have not arrived makes an opening re-encode instead of failing it; the table is read again when pieces of the file arrive.
 
 ## 2.88.6
 

@@ -142,6 +142,17 @@ PrevSize matches. A candidate that an established cluster turns out to contain
 is withdrawn with its cues, and the browser removes them by number. The cluster
 a viewer stands in is read first, then the one before it, and pushed at once.
 
+The walk reads a cluster's STRUCTURE — every child's header and the first bytes
+of each block, which name its track — and a subtitle block's data by its own
+size. It never moves a picture's frames into the main thread: measured on the
+addon host 2026-10-01, reading clusters a portion at a time moved every frame
+of the film across the thread boundary, and the collector then took three times
+as long as the walk. Each read also hands the loop back before the walk goes on,
+because the torrent thread replies faster than the message port empties. The
+search decides each candidate as it finds it; one accepted is followed by its
+chain, and the search resumes where the chain ends, so a file whose clusters
+follow one another is searched only up to the first cluster after each gap.
+
 ## Layers
 
 ```mermaid

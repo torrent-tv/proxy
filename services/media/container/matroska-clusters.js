@@ -92,6 +92,15 @@ const CLUSTER_CHILDREN = new Set([
  */
 const CLUSTER_START_PROBE = 64;
 
+/**
+ * The bytes one read of a cluster's structure takes: an element header and the
+ * start of a block's data, which names the block's track — a track number is a
+ * vint of at most 8 bytes (RFC 9559 §10.1). Reading a cluster this way moves
+ * the headers of its video and audio blocks across the thread boundary and
+ * none of their frames.
+ */
+const STRUCTURE_READ_BYTES = MAX_HEADER_BYTES + 8;
+
 /** Bits 1-2 of a block's flags byte say how it is laced, or that it is not. */
 const LACING_MASK = 0x06;
 const LACING_NONE = 0x00;
@@ -424,52 +433,117 @@ function subtract(from, to, taken) {
  * unfinished: an id and a size cut by the end of the run are found when the run
  * grows, by searching those bytes again.
  *
+ * Each position found is decided at once ({@link settleCandidate}); one that is
+ * accepted is followed by its chain, and the search goes on after the chain
+ * ends. A file whose clusters follow one another is therefore searched only up
+ * to its first cluster after each gap, and the rest is known by its headers.
+ *
  * @param {object} state
  * @param {object} plan
  * @param {import("./Container.js").HeldReader} held
+ * @param {{ whole: ElementReader, structure: ElementReader }} readers
  * @returns {Promise<void>}
  */
-async function searchForClusters(state, plan, held) {
+async function searchForClusters(state, plan, held, readers) {
   const portion = Number.isFinite(held.portionBytes) && held.portionBytes > 0 ? held.portionBytes : plan.fileSize;
-  const spans = knownSpans(state);
+  const idLength = CLUSTER_ID_BYTES.length;
   for (const [runFrom, runTo] of held.ranges) {
     const from = Math.max(runFrom, plan.firstClusterAt);
     const to = Math.min(runTo, plan.segmentEnd - 1);
-    if (to - from + 1 < CLUSTER_ID_BYTES.length) {
-      continue;
-    }
-    const taken = [...state.scanned, ...spans].sort((left, right) => left[0] - right[0]);
-    for (const [start, end] of subtract(from, to, taken)) {
-      let at = start;
-      while (at + CLUSTER_ID_BYTES.length - 1 <= end) {
-        const last = Math.min(end, at + portion - 1);
-        const bytes = await held.read(at, last);
-        state.stats.bytesWalked += bytes.length;
-        let found = bytes.indexOf(CLUSTER_ID_BYTES);
-        while (found >= 0) {
-          const position = at + found;
-          if (!state.starts.has(position) && !state.rejected.has(position)) {
-            state.candidates.add(position);
+    let at = from;
+    while (at + idLength - 1 <= to) {
+      // What is left to look at is worked out afresh at every step: a cluster
+      // accepted below starts a chain, and the bytes the chain covers are
+      // stepped over rather than searched. They are not marked as searched, so
+      // if the chain is ever taken back they are searched then.
+      const taken = [...state.scanned, ...knownSpans(state)].sort((left, right) => left[0] - right[0]);
+      const next = subtract(at, to, taken)[0];
+      if (!next || next[1] - next[0] + 1 < idLength) {
+        break;
+      }
+      const [start, end] = next;
+      const last = Math.min(end, start + portion - 1);
+      const bytes = await held.read(start, last);
+      state.stats.bytesWalked += bytes.length;
+      let accepted = null;
+      let found = bytes.indexOf(CLUSTER_ID_BYTES);
+      while (found >= 0) {
+        const position = start + found;
+        if (!state.starts.has(position) && !state.rejected.has(position)) {
+          const outcome = await settleCandidate(state, plan, held, readers, position);
+          if (outcome === "accepted") {
+            accepted = position;
+            break;
           }
-          found = bytes.indexOf(CLUSTER_ID_BYTES, found + 1);
         }
-        if (last >= end) {
-          break;
+        found = bytes.indexOf(CLUSTER_ID_BYTES, found + 1);
+      }
+      if (accepted !== null) {
+        if (accepted - 1 >= start) {
+          state.scanned = mergeIntervals([...state.scanned, [start, accepted - 1]]);
         }
-        // Overlap by the id's length, so an id cut by the portion boundary is
-        // found in the next portion.
-        at = last - (CLUSTER_ID_BYTES.length - 2);
+        at = accepted;
+        continue;
+      }
+      if (last < end) {
+        // Every position whose whole id lies in this portion has been looked
+        // at; the next portion overlaps by the id's length less one, so an id
+        // cut by the boundary is found there.
+        state.scanned = mergeIntervals([...state.scanned, [start, last - idLength + 1]]);
+        at = last - idLength + 2;
+        continue;
       }
       // Held back only where the RUN ends here: a span that ends at a known
       // element's boundary has nothing after it that could complete an id.
       const runEndsHere = end === to && runTo < plan.segmentEnd - 1;
       const finished = runEndsHere ? end - (MAX_HEADER_BYTES - 1) : end;
       if (finished >= start) {
-        state.scanned.push([start, finished]);
+        state.scanned = mergeIntervals([...state.scanned, [start, finished]]);
       }
+      at = end + 1;
     }
   }
-  state.scanned = mergeIntervals(state.scanned);
+}
+
+/**
+ * Decide one position the search found the Cluster ID at.
+ *
+ * Accepted, it becomes a start and its chain is followed at once, so the
+ * clusters after it are known by their headers and never searched for.
+ *
+ * @param {object} state
+ * @param {object} plan
+ * @param {import("./Container.js").HeldReader} held
+ * @param {{ whole: ElementReader, structure: ElementReader }} readers
+ * @param {number} at
+ * @returns {Promise<"accepted" | "rejected" | "pending">}
+ */
+async function settleCandidate(state, plan, held, readers, at) {
+  if (knownSpans(state).some(([from, to]) => at > from && at <= to)) {
+    // Inside an element whose bounds are known: not a cluster start.
+    state.candidates.delete(at);
+    state.rejected.add(at);
+    return "rejected";
+  }
+  const verdict = await verifyCandidate(readers.whole, at, plan, state, held);
+  if (verdict.status === "pending") {
+    state.candidates.add(at);
+    return "pending";
+  }
+  state.candidates.delete(at);
+  if (verdict.status === "rejected") {
+    state.rejected.add(at);
+    state.stats.rejectedCandidates += 1;
+    return "rejected";
+  }
+  addStart(state, at, plan, { source: "search", parent: null, seconds: verdict.seconds });
+  const start = state.starts.get(at);
+  if (start) {
+    start.kind = "cluster";
+    start.end = verdict.end;
+  }
+  await extendChains(state, plan, held, readers.structure);
+  return "accepted";
 }
 
 /**
@@ -820,7 +894,9 @@ function readableNow(starts, at, held) {
 /**
  * Read one cluster's subtitle blocks.
  *
- * @param {ElementReader} reader
+ * @param {{ structure: ElementReader, exact: ElementReader }} readers - Headers
+ *   and track numbers through `structure`; a subtitle block's data through
+ *   `exact`, which reads that element and nothing more.
  * @param {number} at
  * @param {ClusterStart} start
  * @param {object} plan
@@ -828,7 +904,7 @@ function readableNow(starts, at, held) {
  * @param {import("./Container.js").HeldReader} held
  * @returns {Promise<{ status: "pending" } | { status: "unreadable", reason: string } | { status: "done", blocks: object[], end: number }>}
  */
-async function readCluster(reader, at, start, plan, state, held) {
+async function readCluster({ structure: reader, exact }, at, start, plan, state, held) {
   try {
     if (start.end !== null && !held.isHeld(at, start.end - 1)) {
       return { status: "pending" };
@@ -866,7 +942,7 @@ async function readCluster(reader, at, start, plan, state, held) {
       } else if (child.id === ID_SIMPLE_BLOCK || child.id === ID_BLOCK_GROUP) {
         const track = await blockTrackOf(reader, child);
         if (track !== null && wanted.has(track)) {
-          const data = await reader.data(child);
+          const data = await exact.data(child);
           if (data === null) {
             state.stats.refusedElements += 1;
           } else {
@@ -990,40 +1066,35 @@ export async function walkHeldClusters({ plan, progress, held }) {
     }
   }
 
-  await extendChains(state, plan, held, reader);
+  // The structure of clusters is read a header at a time, and a subtitle
+  // block's data by its own size. The reader above takes a whole portion per
+  // read and is for checking a candidate the search found, whose every byte is
+  // needed; used for structure, it moved every frame of the film into this
+  // thread — measured on the addon host 2026-10-01, the collector then spent
+  // three times as long as the walk itself, and the loop's 99th-percentile
+  // delay doubled.
+  const structure = new ElementReader({
+    read: held.read,
+    fileSize: plan.fileSize,
+    portionBytes: STRUCTURE_READ_BYTES,
+    prefetch: true,
+    readableUntil: (start) => runEndFrom(held.ranges, start)
+  });
+  const exact = new ElementReader({ read: held.read, fileSize: plan.fileSize, portionBytes: held.portionBytes });
+  await extendChains(state, plan, held, structure);
 
   if (plan.cuesState === "absent") {
-    await searchForClusters(state, plan, held);
-    const spans = knownSpans(state);
-    for (const at of [...state.candidates]) {
+    const readers = { whole: reader, structure };
+    // Candidates left waiting for bytes by an earlier pass, then the bytes not
+    // yet looked at.
+    for (const at of [...state.candidates].sort((left, right) => left - right)) {
       if (state.starts.has(at)) {
         state.candidates.delete(at);
         continue;
       }
-      if (spans.some(([from, to]) => at > from && at <= to)) {
-        // Inside an element whose bounds are known: not a cluster start.
-        state.candidates.delete(at);
-        state.rejected.add(at);
-        continue;
-      }
-      const verdict = await verifyCandidate(reader, at, plan, state, held);
-      if (verdict.status === "pending") {
-        continue;
-      }
-      state.candidates.delete(at);
-      if (verdict.status === "rejected") {
-        state.rejected.add(at);
-        state.stats.rejectedCandidates += 1;
-        continue;
-      }
-      addStart(state, at, plan, { source: "search", parent: null, seconds: verdict.seconds });
-      const start = state.starts.get(at);
-      if (start) {
-        start.kind = "cluster";
-        start.end = verdict.end;
-      }
+      await settleCandidate(state, plan, held, readers, at);
     }
-    await extendChains(state, plan, held, reader);
+    await searchForClusters(state, plan, held, readers);
   }
 
   const withdrawn = withdrawContradicted(state);
@@ -1055,7 +1126,7 @@ export async function walkHeldClusters({ plan, progress, held }) {
     if (!start) {
       continue;
     }
-    const result = await readCluster(reader, at, start, plan, state, held);
+    const result = await readCluster({ structure, exact }, at, start, plan, state, held);
     if (result.status === "pending") {
       continue;
     }

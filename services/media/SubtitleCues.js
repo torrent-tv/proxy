@@ -256,7 +256,19 @@ function nextSeq(state, trackNumber) {
 async function heldReaderOf(source) {
   const ranges = await source.heldRanges();
   const last = Number(source.length) - 1;
-  const read = strictReader((start, end) => source.readHeld(start, Math.min(end, last)), Number(source.length));
+  // Each read hands the loop back before the walk goes on. The answer comes from
+  // the torrent's thread, which replies faster than this thread empties its
+  // message port, and without the turn the port takes reply after reply in one
+  // go: measured on the addon host 2026-10-01, timers then fired 8-12 ms late
+  // at the 99th percentile during a walk, against 2-5 ms with it and 0-3 ms
+  // with no walk at all.
+  const read = strictReader(async (start, end) => {
+    try {
+      return await source.readHeld(start, Math.min(end, last));
+    } finally {
+      await new Promise((resolve) => setImmediate(resolve));
+    }
+  }, Number(source.length));
   // Read again between clusters, so a pass can stop when a viewer has moved.
   const wantedSeconds = () => {
     try {

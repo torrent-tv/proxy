@@ -28,6 +28,9 @@ function hostWithA1080pOutput(t) {
   manager.encodeRuns.planEncodersNow = () => {};
   manager.encodeRuns.planEncodersSoon = () => {};
   manager.getCachedMediaInfo = () => ({ durationSeconds: 400, width: 1920, height: 1080, fps: 24 });
+  // The soundtrack the plan listed, at the rate the file states: a copy of it
+  // has a figure, so it stays a copy.
+  manager.getCachedAudioTracks = () => [{ index: 0, fileIndex: 0, sourceTrackIndex: 0, bitrateKbps: 128 }];
   const spec = outputSpec({
     sourceKey: TORRENT,
     transcodeVideo: true,

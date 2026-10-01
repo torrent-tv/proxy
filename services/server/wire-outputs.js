@@ -353,6 +353,9 @@ export function wireOutputs({
     worstSupplyWaitSec: parts.hostLoad.supplyFor(output.file)?.worstWaitSec
   })?.seconds ?? null;
   parts.renditions = new Renditions({
+    // Whether this proxy re-encodes at all: a soundtrack with no stated rate is
+    // re-encoded where it may be, and copied where it may not.
+    get transcodeEnabled() { return parts.enabled; },
     observedPeakMbps: (spec) => parts.localObservations?.peakMbps(spec) ?? null,
     // A viewer has been moved onto an output prepared for them: how long it
     // took, and what they held.

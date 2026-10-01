@@ -331,6 +331,10 @@ export class Container {
         declaresDefault: track.declaresDefault === true,
         languageBcp47: typeof track.languageBcp47 === "string" ? track.languageBcp47 : "",
         channels: Number.isFinite(track.channels) ? track.channels : null,
+        // The codec's configuration and the most it allows the track to
+        // carry, both as the container states them (`tracks/audio-bound.js`).
+        codecParameters: track.codecParameters ?? null,
+        peakKbps: Number.isFinite(track.peakKbps) && track.peakKbps > 0 ? track.peakKbps : null,
         title:
           typeof banner?.title === "string" && banner.title.length > 0
             ? banner.title
@@ -343,7 +347,9 @@ export class Container {
         isVisualImpaired: false,
         isEnabled: true,
         languageBcp47: "",
-        channels: null
+        channels: null,
+        codecParameters: null,
+        peakKbps: null
       }
     );
   }

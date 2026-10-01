@@ -38,7 +38,7 @@ import { computeOutputDimensions, nominalKbpsFor, softwareRateControlFor } from 
 import { buildResolutionLadder, canSustainOutput, pickSoftwarePreset } from "../hwaccel.js";
 import { OutputSpec } from "../output/OutputSpec.js";
 import { chooseServingOutput, nextRungAreaBelow, servingCandidates } from "./serving-output.js";
-import { linkAnswerFigures, linkCouldCarry, loadOf, videoLoadOfSpec } from "./link-budget.js";
+import { linkAnswerFigures, linkCouldCarry, linkRefusalReason, loadOf, videoLoadOfSpec } from "./link-budget.js";
 
 /**
  * @param {object} params
@@ -124,7 +124,7 @@ export function decideOutputFormat({
     const answer = judge(spec);
     return answer.admitted
       ? given(spec, answer)
-      : refused(spec, answer, "the source's own picture is more than this viewer's link carries");
+      : refused(spec, answer, linkRefusalReason(answer, "the source's own picture is more than this viewer's link carries"));
   }
 
   const ceiling = computeOutputDimensions(target.width, target.height, source.width, source.height);
@@ -304,12 +304,16 @@ export function decideOutputFormat({
       }
     };
   }
+  const wantedAnswer = judge(wantedSpec);
   return refused(
     wantedSpec,
-    judge(wantedSpec),
-    serving.mode === "manual"
-      ? "no limit of the size picked is admitted by this viewer's link"
-      : "no size and limit this viewer's ladder offers is admitted by their link",
+    wantedAnswer,
+    linkRefusalReason(
+      wantedAnswer,
+      serving.mode === "manual"
+        ? "no limit of the size picked is admitted by this viewer's link"
+        : "no size and limit this viewer's ladder offers is admitted by their link"
+    ),
     { budget, wantedKey }
   );
 }

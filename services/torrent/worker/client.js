@@ -16,6 +16,7 @@
 
 import { Worker } from "node:worker_threads";
 import { Readable } from "node:stream";
+import { open } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import { logger, writeAlreadyDecided } from "../../../utils/logger.js";
 import { createCaller, createReceiveStream } from "./channel.js";
@@ -362,6 +363,10 @@ export class TorrentWorkerClient {
    * @returns {Promise<Array<[number, number]>>}
    */
   async heldRanges({ sourceKey, fileIndex }) {
+    const whole = this.#wholeFileOf(sourceKey, fileIndex);
+    if (whole) {
+      return whole.length > 0 ? [[0, whole.length - 1]] : [];
+    }
     const answer = await this.#caller.call(Command.HELD_RANGES, { sourceKey, fileIndex });
     return Array.isArray(answer?.ranges) ? answer.ranges : [];
   }
@@ -374,11 +379,48 @@ export class TorrentWorkerClient {
    * @returns {Promise<Buffer | null>}
    */
   async readHeld({ sourceKey, fileIndex, start, end }) {
+    const whole = this.#wholeFileOf(sourceKey, fileIndex);
+    if (whole) {
+      try {
+        return await readWholeFile(whole, start, end);
+      } catch (error) {
+        // The file is gone — removed for space, as the stream route also finds.
+        // Forgotten here too, so the torrent answers from now on.
+        const key = `${String(sourceKey).slice("torrent:".length).toLowerCase()}/${fileIndex}`;
+        if (this.wholeFiles.get(key) === whole) {
+          this.wholeFiles.delete(key);
+        }
+        logger.info(`whole files: "${whole.name}" could not be read (${error?.code ?? error?.message ?? error}); the torrent answers for it now`);
+        return null;
+      }
+    }
     const answer = await this.#caller.call(Command.READ_HELD, { sourceKey, fileIndex, start, end });
     const bytes = answer?.bytes;
     // The memory was handed over by the worker, so it is this thread's alone:
     // viewed, not copied a second time.
     return bytes ? Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength) : null;
+  }
+
+  /**
+   * The file kept whole on disk for this source and index, if there is one.
+   *
+   * Once a file is kept whole its pieces leave the torrent's store, while the
+   * torrent's bitfield still says they are held: a read through the torrent
+   * then waits on a store that no longer has them. Field 2026-10-01: every read
+   * of the subtitle walk on such a file was given up after 30 s. The file
+   * itself is what holds the bytes, so it is what answers — as the stream route
+   * already does.
+   *
+   * @param {string} sourceKey
+   * @param {number} fileIndex
+   * @returns {{ path: string, length: number, name: string } | null}
+   */
+  #wholeFileOf(sourceKey, fileIndex) {
+    if (this.wholeFiles.size === 0 || !String(sourceKey).startsWith("torrent:")) {
+      return null;
+    }
+    const infoHash = String(sourceKey).slice("torrent:".length).toLowerCase();
+    return this.wholeFiles.get(`${infoHash}/${fileIndex}`) ?? null;
   }
 
   async warmResumePosition({ sourceKey, fileIndex, positionSeconds, durationSeconds }) {
@@ -765,5 +807,30 @@ export class TorrentWorkerClient {
         resolve();
       });
     });
+  }
+}
+
+/**
+ * Bytes of a file kept whole, read from the disk.
+ *
+ * @param {{ path: string, length: number }} whole
+ * @param {number} start
+ * @param {number} end - Inclusive.
+ * @returns {Promise<Buffer | null>} Null where the range is not inside the
+ *   file or the file is shorter than it was kept as. Rejects when the file
+ *   cannot be opened.
+ */
+export async function readWholeFile(whole, start, end) {
+  const last = Math.min(end, whole.length - 1);
+  if (!(start >= 0) || !(last >= start)) {
+    return null;
+  }
+  const handle = await open(whole.path, "r");
+  try {
+    const bytes = Buffer.allocUnsafe(last - start + 1);
+    const { bytesRead } = await handle.read(bytes, 0, bytes.length, start);
+    return bytesRead === bytes.length ? bytes : null;
+  } finally {
+    await handle.close();
   }
 }

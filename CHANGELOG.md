@@ -1,3 +1,7 @@
+## 2.88.6
+
+- **Fix**: Validate closed segment coverage against the same cut-time delta passed to FFmpeg. Complete audio segments that close before the requested grid boundary remain usable; truncated segments still fail validation.
+
 ## 2.88.5
 
 - **Fix**: Reject closed non-final fragments that do not reach their next declared cut, using measured coded-frame coverage. Remove such previously cached fragments from the inventory so missing media can be produced again instead of indefinitely blocking startup.

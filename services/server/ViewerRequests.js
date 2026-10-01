@@ -8,7 +8,7 @@
  */
 
 import { logger } from "../../utils/logger.js";
-import { isOutputName } from "../encode/output/index.js";
+import { isOutputName, SEGMENT_CUT_TIME_DELTA_SECONDS } from "../encode/output/index.js";
 import { predictPlaybackReadiness, RateTrend, forecastRate as forecastRateOf } from "./playback-readiness.js";
 
 function isWarmupTimeoutError(error) {
@@ -569,7 +569,8 @@ export class ViewerRequests {
       const nativeRanges = Array.from({ length: timeline?.segmentCount ?? 0 }, (_, index) =>
         this.#host.segmentStore.mediaRangesOf(output.outputKey, index, {
           startSeconds: timeline.publishedStartOf(index),
-          endSeconds: index < timeline.segmentCount - 1 ? timeline.publishedStartOf(index + 1) : undefined
+          endSeconds: index < timeline.segmentCount - 1 ?
+            timeline.publishedStartOf(index + 1) - SEGMENT_CUT_TIME_DELTA_SECONDS : undefined
         }));
       const segments = Array.from({ length: timeline?.segmentCount ?? 0 }, (_, index) => {
         const ranges = nativeRanges[index];

@@ -1,6 +1,10 @@
 export { OutputSpec, VideoOutput, AudioOutput, CutGrid, isOutputName } from "./OutputSpec.js";
 export { PLAYLIST_FILE_NAME } from "./playlists.js";
 
+// FFmpeg may close a segment this far before its requested cut. Both the
+// command and coverage validation use this existing muxer configuration.
+export const SEGMENT_CUT_TIME_DELTA_SECONDS = 0.05;
+
 /**
  * The code an error carries when no output suits the viewer: nothing this proxy
  * could produce or already holds is admitted by their link. Its `details` say

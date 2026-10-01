@@ -1,3 +1,7 @@
+## 2.89.1
+
+- **Fix**: The subtitle walk reads a file kept whole from the disk. Once a file is kept whole its pieces leave the torrent's store while the bitfield still says they are held, and every read the walk made through the torrent waited on a store that no longer had them and was given up after 30 s — one structure read every 30 s, field 2026-10-01 on proxy 2.89.0. What of such a file is held is now the whole file, and a file removed for space is forgotten so the torrent answers again.
+
 ## 2.89.0
 
 - **Fix**: A read whose bytes have not arrived is no longer kept as a statement about the file. Every container read is strict — every byte asked for, or `BytesUnavailable` — and only a value or a proven absence is kept. This applies to the container choice, the track table, Matroska's Cues table, MP4's `moov`, AVI's `idx1`, the media info, the keyframe table and the subtitle plan. An embedded subtitle track whose Cues table was still downloading used to be planned with no clusters for the life of the process and show nothing for a whole session. The keyframe table had the same defect and lost the copy branch for such a file; it is now read again when pieces of the file arrive.

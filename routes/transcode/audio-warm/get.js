@@ -1,6 +1,13 @@
 /**
- * @file GET /transcode/:sessionId/a/:track/warm?position=<seconds> — prepare an
- * audio track before the player is told to change to it.
+ * @file GET /transcode/:sessionId/a/:track/warm?position=<seconds>[&transcode=0|1]
+ * — prepare an audio track before the player is told to change to it.
+ *
+ * `transcode` is the page's statement about THIS track: `1` when its browser
+ * cannot play the track's codec as it stands, `0` when it can. The proxy then
+ * decides how the track is produced by the same rule as when a file is opened
+ * — a track nothing states a rate for is re-encoded even for a browser that
+ * would play it. Left out, the page is taken to need what it needs for the
+ * track it is on.
  *
  * The picture keeps playing while a quality rung is warmed (`variant-warm`),
  * and a track change deserves the same: the player discards the audio it holds
@@ -44,13 +51,17 @@ export async function handleTranscodeAudioWarmGet(req, reply, { renditions, serv
     return reply.code(400).send({ error: "A consumer is required." });
   }
 
+  const statedNeed = req.query?.transcode;
+  const browserPlays = statedNeed === "0" ? true : statedNeed === "1" ? false : null;
+
   let prepared;
   try {
     prepared = await renditions.prepareAudioTrack(
       baseSessionId,
       trackIndex,
       positionSeconds,
-      consumerId
+      consumerId,
+      browserPlays
     );
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);

@@ -35,6 +35,14 @@ unavailable. The browser may call `POST /api/playback-plan/audio-tracks` with
 track for that sidecar. It never changes track indices or the number of HLS
 renditions in the active plan.
 
+Each `audioTracks` entry may carry `bitrateKbps`, the average rate the file
+states for the track, and `peakKbps`, the most the track's codec configuration
+allows it to carry (AAC-LC with 1024-sample frames, and AC-3; any other
+configuration has none). Both may be `null`. The browser does not need them;
+the proxy uses them to decide how the track is produced. A late header keeps a
+known value and withdraws `peakKbps` only when it contradicts the configuration
+it was computed from.
+
 `sidecarSubtitles` lists subtitle files the proxy paired with this video. Each
 entry carries the torrent `fileIndex` and the proxy's filename-derived language
 and release metadata. The browser uses these entries to fetch subtitle files
@@ -57,13 +65,24 @@ explicitly offer no heights for their respective playback branch. Only
 the visible picture size, whether audio is requested as separate renditions,
 the start position, selected audio track, and segment format when known. The
 answer contains `sessionId`, `playlistPath`, `offeredHeights`, declared `tracks`,
-and `lookaheadSeconds`. `masterPath` and `variantHeight` are present only when
-the session has quality variants.
+`soundtrack`, and `lookaheadSeconds`. `masterPath` and `variantHeight` are
+present only when the session has quality variants.
+
+`transcodeAudio` states whether the browser can play the selected track as it
+is. The proxy decides the actual mode: it copies a track the browser plays
+when the track has a `peakKbps` or a `bitrateKbps`, and otherwise re-encodes it
+to stereo AAC at 128 kbit/s, including a track the browser could play.
+`soundtrack` is `{ trackIndex, transcode }`, the track this viewer is sent and
+whether it is re-encoded. Older proxies omit it.
 
 The browser interprets `409` with `outcome: "output-unavailable"` as a refusal
 for this viewer's link and `outcome: "no-capacity"` as a proxy capacity
 refusal. Other non-success statuses remain errors; an error body only adds
-display detail and is not required for status handling.
+display detail and is not required for status handling. For
+`output-unavailable`, `figures.verdict` is `"no safe bound"` when a part of the
+load has no figure; `figures.videoClass` and `figures.audioClass` are
+`"unknown"` for that part, and `figures.soundtracks` is the number of
+soundtracks the viewer can choose from.
 
 ## Session control and media files
 
@@ -75,7 +94,7 @@ display detail and is not required for status handling.
 | `POST /api/transcode-sessions/:id/fragment-far` | Diagnostic fragment and buffer positions; does not change encoding. Best effort, success `204`. |
 | `POST /api/transcode-sessions/:id/release` | `{ consumerId, reason }` releases this viewer's session assignment. |
 | `GET /transcode/:id/:fileName` | HLS playlist, init, or media segment. A file that is still being produced is answered with retryable `503`, not `202`. |
-| `GET /transcode/:id/v/:height/warm` and `/transcode/:id/a/:track/warm` | Prepare the requested video height or audio track at a position. `204` means ready. Audio warm-up `404` means the proxy does not support this operation for that session. |
+| `GET /transcode/:id/v/:height/warm` and `/transcode/:id/a/:track/warm` | Prepare the requested video height or audio track at a position. `204` means ready. Audio warm-up `404` means the proxy does not support this operation for that session. Audio warm-up takes an optional `transcode=0\|1`: whether the browser cannot play THAT track's codec as it is. The proxy decides the track's mode by the rule used when a file is opened; without the parameter it assumes the browser needs what it needed for its current track. |
 | `GET /stream?sourceKey=…&fileIndex=N` | Direct file bytes with HTTP range support. |
 
 ### Playback readiness forecast

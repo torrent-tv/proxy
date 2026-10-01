@@ -87,9 +87,11 @@ const NOMINAL_KBPS_BY_ROW = new Map([
 // written down beside it.
 const ROW_REFERENCE_SOURCE = Object.freeze({ width: 3840, height: 2160 });
 /**
- * The rate a re-encoded soundtrack is produced at, in kbit/s: stereo AAC,
- * constant. Stated once because two places need the same figure — the ffmpeg
- * arguments that produce it, and the viewer's link that has to carry it.
+ * The rate a re-encoded soundtrack is asked for, in kbit/s: stereo AAC. A
+ * TARGET, not a bound — ffmpeg's AAC encoder lets single frames run above it
+ * from its bit reservoir. Stated once because two places need the same figure —
+ * the ffmpeg arguments that ask for it, and the viewer's link that has to carry
+ * it, which counts it as an estimate (`quality/link-budget.js`).
  */
 export const AUDIO_TRANSCODE_KBPS = 128;
 const CAP_MAXRATE_FACTOR = 1.3;

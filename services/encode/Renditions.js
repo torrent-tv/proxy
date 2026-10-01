@@ -12,8 +12,8 @@ import { isOutputName, OUTPUT_UNAVAILABLE } from "./output/index.js";
 import { masterPlaylistText, PLAYLIST_FILE_NAME } from "./output/playlists.js";
 import { variantHeightsFor } from "./output/ladder.js";
 import { isSameMaterial, outputSuits } from "./quality/serving-output.js";
-import { audioLoadOf, linkAnswerFigures, linkCouldCarry, loadOf, videoLoadOfLimit, videoLoadOfSpec } from "./quality/link-budget.js";
-import { AUDIO_TRANSCODE_KBPS, maxrateKbpsFor } from "./args.js";
+import { SOUNDTRACK_MODE_CAUSE, chooseSoundtrackMode, linkAnswerFigures, linkCouldCarry, loadOf, soundtrackLoadOf, videoLoadOfLimit, videoLoadOfSpec } from "./quality/link-budget.js";
+import { maxrateKbpsFor } from "./args.js";
 import { encoderInputs } from "./run-inputs.js";
 /**
  * How a base files the audio renditions it has made.
@@ -120,7 +120,7 @@ export class Renditions {
    */
   #suitsViewer(output, base, consumerId, wanted = null) {
     const linkMbps = this.#host.linkMbpsOf(base, consumerId);
-    const audioLoad = audioLoadOf(this.#viewerAudioOf(base, consumerId), AUDIO_TRANSCODE_KBPS);
+    const audioLoad = this.viewerAudioLoadOf(base, consumerId);
     const encode = output.spec?.video?.encode ?? null;
     return outputSuits({
       spec: output.spec,
@@ -145,33 +145,114 @@ export class Renditions {
    * @returns {import("./quality/link-budget.js").LoadPart | null}
    */
   viewerAudioLoadOf(base, consumerId) {
-    return audioLoadOf(this.#viewerAudioOf(base, consumerId), AUDIO_TRANSCODE_KBPS);
+    const audio = this.#viewerAudioOf(base, consumerId);
+    return soundtrackLoadOf(audio.entry, audio.transcode);
   }
 
   /**
    * The soundtrack THIS viewer receives with the picture, as the link sees it:
-   * whether it is re-encoded, and the rate the file states for it.
+   * the mode it is produced in, and the inventory entry that says what it
+   * weighs.
    *
    * Their own choice where they have made one, else the picture's own track.
-   * Counted whether it travels inside the picture or as a stream of its own:
-   * it crosses the same link either way.
+   * The mode is the one recorded when they chose it — what they are actually
+   * sent — and is NOT decided again here: a later reading that gives a track a
+   * figure changes the decision for the next choice, not the soundtrack
+   * already reaching them. Counted whether it travels inside the picture or as
+   * a stream of its own: it crosses the same link either way.
    *
    * @param {HlsSession} base
    * @param {string} consumerId
-   * @returns {{ transcode: boolean, bitrateKbps: number | null }}
+   * @returns {{ transcode: boolean, entry: object | null }}
    */
   #viewerAudioOf(base, consumerId) {
     const choice = this.#host.audioChoiceOf(base, consumerId) ??
       { trackIndex: this.#flatAudioTrackOf(base), transcode: base.spec.transcodesAudio };
+    return {
+      transcode: choice.transcode === true,
+      entry: this.#audioEntryOf(base, choice.trackIndex)
+    };
+  }
+
+  /**
+   * The soundtrack this viewer is recorded as receiving with this picture, and
+   * whether it reaches them re-encoded.
+   *
+   * @param {HlsSession} base
+   * @param {string} consumerId
+   * @returns {{ trackIndex: number, transcode: boolean }}
+   */
+  soundtrackOf(base, consumerId) {
+    const choice = this.#audioChoiceOf(base, consumerId);
+    return { trackIndex: choice.trackIndex, transcode: choice.transcode === true };
+  }
+
+  /**
+   * How many soundtracks a viewer of this file can choose between: the
+   * inventory's tracks, less those the container marks unusable, which the
+   * page leaves out of its menu.
+   *
+   * @param {string} sourceKey
+   * @param {number} fileIndex - The PICTURE's file.
+   * @returns {number}
+   */
+  offeredSoundtrackCount(sourceKey, fileIndex) {
+    const inventory = this.#host.getCachedAudioTracks?.({ sourceKey, fileIndex }) ?? [];
+    return Array.isArray(inventory) ? inventory.filter((entry) => entry?.isEnabled !== false).length : 0;
+  }
+
+  /**
+   * One soundtrack's entry in the inventory of this picture's file, or null.
+   *
+   * @param {HlsSession} base
+   * @param {number} trackIndex
+   * @returns {object | null}
+   */
+  #audioEntryOf(base, trackIndex) {
     const inventory = this.#host.getCachedAudioTracks?.({
       sourceKey: base.file.sourceKey,
       fileIndex: base.file.fileIndex
     }) ?? [];
-    const entry = Array.isArray(inventory) ? inventory.find((one) => one?.index === choice.trackIndex) : null;
-    return {
-      transcode: choice.transcode === true,
-      bitrateKbps: Number.isFinite(entry?.bitrateKbps) ? entry.bitrateKbps : null
-    };
+    return Array.isArray(inventory) ? (inventory.find((one) => one?.index === trackIndex) ?? null) : null;
+  }
+
+  /**
+   * How a soundtrack is produced for this viewer, when they move to it.
+   *
+   * Decided by the rule every choice of a track uses (`chooseSoundtrackMode`).
+   * What their browser can play is what the page states for THAT track when it
+   * prepares the switch; a page that states nothing is taken to need what it
+   * needed for the track it is on — what every switch assumed before a page
+   * could say. A track being prepared for them, or already theirs, keeps the
+   * mode it was given, so the files of one switch all come from one output.
+   *
+   * @param {HlsSession} base
+   * @param {string} consumerId
+   * @param {number} trackIndex
+   * @param {boolean | null} [browserPlays] - What the page stated, or null.
+   * @returns {boolean | null} Whether to re-encode it; null when it cannot be
+   *   served.
+   */
+  #audioModeFor(base, consumerId, trackIndex, browserPlays = null) {
+    const choice = this.#audioChoiceOf(base, consumerId);
+    if (browserPlays === null) {
+      const warming = this.#host.outputs.get(this.#host.audioBeingWarmedOf(base, consumerId) ?? "");
+      if (warming && this.#flatAudioTrackOf(warming) === trackIndex) {
+        return warming.spec.transcodesAudio;
+      }
+      if (choice.trackIndex === trackIndex) {
+        return choice.transcode;
+      }
+    }
+    const decided = chooseSoundtrackMode({
+      entry: this.#audioEntryOf(base, trackIndex),
+      browserPlays: browserPlays ?? !choice.transcode,
+      transcodeAllowed: this.#host.transcodeEnabled !== false
+    });
+    if (decided.cause === SOUNDTRACK_MODE_CAUSE.NO_FIGURE) {
+      this.#host.logger.info(`transcode ${base.id} audio track ${trackIndex}: ${decided.cause}; it is sent as AAC`);
+    }
+    return decided.transcode;
   }
 
   async resolveVariantSession(baseSessionId, height, wantedIndex = -1, consumerId = "") {
@@ -1206,9 +1287,12 @@ export class Renditions {
    * @param {string} baseSessionId
    * @param {number} trackIndex
    * @param {number} positionSeconds
+   * @param {string} consumerId
+   * @param {boolean | null} [browserPlays] - Whether the page states its browser
+   *   plays this track as it is; null when it does not say.
    * @returns {Promise<{ sessionId: string, fileName: string } | null>}
    */
-  async prepareAudioTrack(baseSessionId, trackIndex, positionSeconds, consumerId) {
+  async prepareAudioTrack(baseSessionId, trackIndex, positionSeconds, consumerId, browserPlays = null) {
     const base = this.#host.outputs.get(baseSessionId);
     // A track is prepared FOR somebody; a request naming nobody prepares nothing.
     if (!consumerId || !base || !this.servesAudioSeparately(base)) {
@@ -1217,7 +1301,7 @@ export class Renditions {
     if (!this.#audioRenditionsOf(base).some((track) => track.trackIndex === trackIndex)) {
       return null;
     }
-    const rendition = await this.#resolveAudioRenditionSession(base, trackIndex, consumerId);
+    const rendition = await this.#resolveAudioRenditionSession(base, trackIndex, consumerId, browserPlays);
     if (!rendition) {
       return null;
     }
@@ -1657,7 +1741,7 @@ export class Renditions {
       this.#host.placeViewerOn(rendition, consumerId, this.#host.viewerPositionOf(base.id, consumerId));
     }
     if (isSegment && rendition) {
-      this.#noteAudioTrackActive(base, trackIndex, consumerId);
+      this.#noteAudioTrackActive(base, rendition, consumerId);
     }
     return { sessionId: rendition?.id ?? null };
   }
@@ -1685,20 +1769,26 @@ export class Renditions {
    * and stopping "the others" per request would have them switch each other's
    * soundtrack off in turn, once per segment, for the whole film.
    *
+   * What is recorded is the soundtrack they are SENT — its track and the mode
+   * the output that serves it is produced in — so every later reading of
+   * their load counts the output that actually reaches them.
+   *
    * @param {HlsSession} base
-   * @param {number} trackIndex
+   * @param {HlsSession} rendition - The output the segment came from.
    * @param {string} consumerId - Who is listening. A request that names
    *   nobody changes nobody's track.
    */
-  #noteAudioTrackActive(base, trackIndex, consumerId) {
+  #noteAudioTrackActive(base, rendition, consumerId) {
     if (!consumerId) {
       return;
     }
+    const trackIndex = this.#flatAudioTrackOf(rendition);
+    const transcode = rendition.spec.transcodesAudio === true;
     const previous = this.#audioChoiceOf(base, consumerId);
-    if (previous.trackIndex === trackIndex) {
+    if (previous.trackIndex === trackIndex && previous.transcode === transcode) {
       return;
     }
-    this.#host.chooseAudioTrack(base, consumerId, { ...previous, trackIndex });
+    this.#host.chooseAudioTrack(base, consumerId, { trackIndex, transcode });
     // Every soundtrack nobody present is listening to any more stops being
     // waited on.
     const wanted = this.#liveAudioRenditionKeys(base);
@@ -1800,17 +1890,23 @@ export class Renditions {
    *
    * Filed under the track AND how it has to be produced, because those are two
    * different encodes: a browser that can decode this track as it stands is
-   * served a copy, and one that cannot is served AAC. The base cannot answer
-   * for either of them now that it is shared — its own `transcodeAudio` is
-   * whatever the first viewer's browser needed.
+   * served a copy, and one that cannot is served AAC — and so is a track with
+   * no stated rate, whose copy the viewer's link could not be asked about. The
+   * base cannot answer for either of them now that it is shared — its own
+   * `transcodeAudio` is whatever the first viewer's browser needed.
    *
    * @param {HlsSession} base
    * @param {number} trackIndex
    * @param {string} consumerId - Who is asking.
-   * @returns {Promise<HlsSession | null>}
+   * @param {boolean | null} [browserPlays] - What the page stated, or null.
+   * @returns {Promise<HlsSession | null>} Null as well when the track cannot be
+   *   served to this viewer at all.
    */
-  async #resolveAudioRenditionSession(base, trackIndex, consumerId = "") {
-    const transcodeAudio = this.#audioChoiceOf(base, consumerId).transcode;
+  async #resolveAudioRenditionSession(base, trackIndex, consumerId = "", browserPlays = null) {
+    const transcodeAudio = this.#audioModeFor(base, consumerId, trackIndex, browserPlays);
+    if (transcodeAudio === null) {
+      return null;
+    }
     // Found by what it IS: a soundtrack of this file, this track, produced this
     // way. That is what a map from a rendition key to a session id said, at the
     // price of a link between two sessions' lifetimes — one that had to be
@@ -1945,7 +2041,7 @@ export class Renditions {
    * @param {string} sourceKey
    * @param {number} fileIndex - The PICTURE's file.
    * @param {number} flatIndex
-   * @returns {{ fileIndex: number, sourceTrackIndex: number, isSidecar: boolean, name: string }}
+   * @returns {{ fileIndex: number, sourceTrackIndex: number, isSidecar: boolean, name: string, entry: object | null }}
    */
   resolveAudioSource(sourceKey, fileIndex, flatIndex) {
     const inventory = this.#host.getCachedAudioTracks?.({ sourceKey, fileIndex }) ?? [];
@@ -1953,16 +2049,18 @@ export class Renditions {
       ? inventory.find((candidate) => candidate?.index === flatIndex)
       : null;
     if (!entry || !Number.isInteger(entry.fileIndex) || !Number.isInteger(entry.sourceTrackIndex)) {
-      return { fileIndex, sourceTrackIndex: flatIndex, isSidecar: false, name: "" };
+      return { fileIndex, sourceTrackIndex: flatIndex, isSidecar: false, name: "", entry: null };
     }
     return {
       fileIndex: entry.fileIndex,
       sourceTrackIndex: entry.sourceTrackIndex,
       isSidecar: entry.fileIndex !== fileIndex,
       name: typeof entry.fileName === "string" ? entry.fileName : "",
-      // The rate the file states for this track, or null; what a viewer's link
-      // is asked to carry for it when it is copied.
-      bitrateKbps: Number.isFinite(entry.bitrateKbps) ? entry.bitrateKbps : null
+      // The whole entry, which is what says what the track weighs on a link —
+      // the bound its codec allows, the rate the file states — and decides how
+      // it is produced. Handed on whole, so no conversion between here and the
+      // link's question can drop a field of it.
+      entry
     };
   }
 

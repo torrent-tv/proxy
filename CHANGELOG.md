@@ -1,3 +1,12 @@
+## 2.88.4
+
+- **Fix**: A copied soundtrack whose rate no figure states no longer refuses the video on any measured link. The container now states each audio track's codec configuration (Matroska `CodecPrivate`, MP4 `esds`), and a copied AAC-LC or AC-3 track weighs the bound its codec allows (`known`); without one it weighs the rate the file states (`estimated`); and a track with neither is re-encoded to stereo AAC even for a browser that plays it. Field case: the next episode opened on a remembered `Rus Sound` dub was refused at 80 Mbit/s.
+- **Fix**: The soundtrack's mode is decided when it is chosen — when a file is opened, including the next episode with a remembered track, and when the page prepares a switch, where `transcode=0|1` now says whether its browser plays that track — and the viewer is recorded as receiving the output actually sent. Switching no longer carries the previous track's mode onto the new track, and a later reading of the file does not change a soundtrack already being sent.
+- **Fix**: A re-encoded soundtrack counts as 128 kbit/s `estimated` rather than `known`: ffmpeg's AAC encoder treats `-b:a` as a target, and the output frequency is not fixed.
+- **Fix**: A late sidecar header merges into its inventory entry by rule: a stated field replaces the old one, an empty one keeps it, and the codec configuration is replaced only whole, kept when the new reading says less, and withdrawn on a contradiction.
+- **Fix**: The learned cost of a soundtrack is keyed by its file, track and mode, so a copy's speed no longer prices an encode and a sidecar's first track no longer shares the picture's first track's price.
+- **Fix**: A refusal names the part of the load that has no figure, and carries the number of soundtracks the viewer can choose from.
+
 ## 2.88.3
 
 - **Fix**: Forecast audio continuity from coded-frame timestamps and durations using the browser's frame-join boundary. Adjacent AAC fragments that Chrome buffers continuously no longer cause an impossible-start forecast; actual gaps and missing deliveries still prevent an unsafe start. Verified against captured segment metadata and independent Chrome SourceBuffer appends.

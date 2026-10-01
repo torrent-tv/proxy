@@ -843,8 +843,15 @@ test("a separately published audio track starts where the picture is, from the r
   const created = [];
   manager.viewerRequests.createOrGetSession = async (params) => {
     created.push(params);
-    const rendition = fakeSession({ id: VARIANT_ID, encodeHeight: 0, dirPath, audioOnly: true });
-    return { sessionId: VARIANT_ID, session: rendition };
+    // The output itself, which is what `createOrGetSession` answers, carrying
+    // the track it was asked for.
+    return fakeSession({
+      id: VARIANT_ID,
+      encodeHeight: 0,
+      dirPath,
+      audioOnly: true,
+      audioSourceTrackIndex: params.audioTrackIndex
+    });
   };
 
   await manager.renditions.resolveAudioRenditionFile(BASE_ID, 1, "segment-00010.mp4", VIEWER);
@@ -877,8 +884,15 @@ test("with two viewers the audio track starts at the EARLIEST picture, not the r
   const created = [];
   manager.viewerRequests.createOrGetSession = async (params) => {
     created.push(params);
-    const rendition = fakeSession({ id: VARIANT_ID, encodeHeight: 0, dirPath, audioOnly: true });
-    return { sessionId: VARIANT_ID, session: rendition };
+    // The output itself, which is what `createOrGetSession` answers, carrying
+    // the track it was asked for.
+    return fakeSession({
+      id: VARIANT_ID,
+      encodeHeight: 0,
+      dirPath,
+      audioOnly: true,
+      audioSourceTrackIndex: params.audioTrackIndex
+    });
   };
 
   await manager.renditions.resolveAudioRenditionFile(BASE_ID, 1, "segment-00010.mp4", VIEWER);
@@ -916,8 +930,15 @@ test("a soundtrack begins where a viewer says they are, whenever they said it", 
   const created = [];
   manager.viewerRequests.createOrGetSession = async (params) => {
     created.push(params);
-    const rendition = fakeSession({ id: VARIANT_ID, encodeHeight: 0, dirPath, audioOnly: true });
-    return { sessionId: VARIANT_ID, session: rendition };
+    // The output itself, which is what `createOrGetSession` answers, carrying
+    // the track it was asked for.
+    return fakeSession({
+      id: VARIANT_ID,
+      encodeHeight: 0,
+      dirPath,
+      audioOnly: true,
+      audioSourceTrackIndex: params.audioTrackIndex
+    });
   };
 
   await manager.renditions.resolveAudioRenditionFile(BASE_ID, 1, "segment-00010.mp4", VIEWER);
@@ -1212,8 +1233,15 @@ test("a file opened at a position starts its sound THERE, not a look-ahead earli
   const created = [];
   manager.viewerRequests.createOrGetSession = async (params) => {
     created.push(params);
-    const rendition = fakeSession({ id: VARIANT_ID, encodeHeight: 0, dirPath, audioOnly: true });
-    return { sessionId: VARIANT_ID, session: rendition };
+    // The output itself, which is what `createOrGetSession` answers, carrying
+    // the track it was asked for.
+    return fakeSession({
+      id: VARIANT_ID,
+      encodeHeight: 0,
+      dirPath,
+      audioOnly: true,
+      audioSourceTrackIndex: params.audioTrackIndex
+    });
   };
 
   await manager.renditions.resolveAudioRenditionFile(BASE_ID, 1, "segment-00010.mp4", VIEWER);

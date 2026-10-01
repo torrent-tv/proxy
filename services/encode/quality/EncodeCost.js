@@ -159,11 +159,20 @@ export class EncodeCost {
    * about the machine — and because the offer's cache key needs it too, so a
    * caller that has a session can ask without holding an instance.
    *
-   * @param {{ file: { key: string }, audioTrackIndex?: number }} session
+   * Named by everything that changes what producing it costs: the file the
+   * sound is read from, the track inside that file, and whether it is copied
+   * or re-encoded. One track may be copied for one viewer and re-encoded for
+   * another, and a copy's speed priced an encode it says nothing about; and a
+   * soundtrack shipped as its own file is track 0 of THAT file, which without
+   * the file in the name shared a price with the picture's own track 0.
+   *
+   * @param {{ file: { key: string }, spec?: { audioFileIndex?: number, audioSourceTrackIndex?: number, transcodesAudio?: boolean } }} session
    * @returns {string}
    */
   static audioKeyOf(session) {
-    return `${session.file.key}:${session.spec?.audioSourceTrackIndex ?? 0}`;
+    const spec = session.spec ?? {};
+    return `${session.file.key}:a${spec.audioFileIndex ?? ""}:${spec.audioSourceTrackIndex ?? 0}:` +
+      `${spec.transcodesAudio === true ? "aac" : "copy"}`;
   }
 
   /**

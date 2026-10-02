@@ -10,7 +10,6 @@ import os from "node:os";
 import path from "node:path";
 import { directoryNameFor, SegmentStore } from "../services/storage/segment-store/SegmentStore.js";
 import { fmp4Format } from "../services/encode/segment-formats/fmp4.js";
-import { SEGMENT_CUT_TIME_DELTA_SECONDS } from "../services/encode/output/index.js";
 
 /**
  * @returns {{ store: SegmentStore, root: string, lines: string[] }}
@@ -36,32 +35,33 @@ function writeSegment(dir, index, bytes = 16) {
 
 const KEY = "torrent:abc:fmt=fmp4:grid=kf@0:video-only:v=0/copy";
 
-test("a complete audio cut within the configured muxer delta remains usable", (t) => {
+test("a published piece keeps the media intervals the encoding read from it", (t) => {
+  // The store does not judge a piece; whether it is whole is the encoding's
+  // decision (`encode/piece-completeness.js`), taken before it is published.
   const { store, root } = storeInATempRoot();
   t.after(() => { store.dropAll("the check is over"); rmSync(root, { recursive: true, force: true }); });
-  const format = { ...fmp4Format, readMediaRanges: () => [{ start: 0, end: 4.738913832199547 }],
-    producedThroughSeconds: (ranges) => ranges.at(-1).end };
+  const format = { ...fmp4Format, readMediaRanges: () => assert.fail("the store does not read a piece it was handed") };
   const dir = store.directoryFor(KEY);
   store.useFormat(KEY, format);
-  const endSeconds = 4.755 - SEGMENT_CUT_TIME_DELTA_SECONDS;
-  writeFileSync(path.join(dir, "making-0-00000.mp4"), Buffer.alloc(16));
-  assert.equal(store.publish(KEY, "making-0-00000.mp4", format, { endSeconds }), "segment-00000.mp4");
-  assert.ok(store.mediaRangesOf(KEY, 0, { endSeconds }));
+  writeFileSync(path.join(dir, "making-0-00000.mp4"), Buffer.from("closed"));
+  assert.deepEqual(store.closedBytesOf(KEY, "making-0-00000.mp4"), Buffer.from("closed"));
+  const mediaRanges = { tracks: [] };
+  assert.equal(store.publish(KEY, "making-0-00000.mp4", format, { mediaRanges }), "segment-00000.mp4");
+  assert.equal(store.mediaRangesOf(KEY, 0), mediaRanges);
 });
 
-test("a closed but truncated non-final piece is not published or reused", (t) => {
-  const { store, root } = storeInATempRoot();
+test("a stored piece is taken off the disk at its owner's word", (t) => {
+  const { store, root, lines } = storeInATempRoot();
   t.after(() => { store.dropAll("the check is over"); rmSync(root, { recursive: true, force: true }); });
-  const format = { ...fmp4Format, readMediaRanges: () => [{ start: 456, end: 456.084 }],
-    producedThroughSeconds: (ranges) => ranges.at(-1).end };
+  const format = { ...fmp4Format, readMediaRanges: () => ({ tracks: [] }) };
   const dir = store.directoryFor(KEY);
   store.useFormat(KEY, format);
-  writeFileSync(path.join(dir, "making-0-00071.mp4"), Buffer.alloc(16));
-  assert.equal(store.publish(KEY, "making-0-00071.mp4", format, { endSeconds: 466 }), null);
   writeSegment(dir, 71);
   assert.ok(store.mediaRangesOf(KEY, 71));
-  assert.equal(store.mediaRangesOf(KEY, 71, { endSeconds: 466 }), undefined);
+  store.remove(KEY, 71, "short of its cut");
   assert.equal(store.pathOf(KEY, 71), null);
+  assert.equal(store.mediaRangesOf(KEY, 71), undefined);
+  assert.ok(lines.some((line) => line.includes("segment 71") && line.includes("short of its cut")));
 });
 
 test("two viewers of one output are given the same directory", (t) => {

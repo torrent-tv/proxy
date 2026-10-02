@@ -355,7 +355,7 @@ test("the OFFER drops the rungs the host cannot hold, and the master keeps addre
     useSyntheticPlaylist: true,
     playlistText: "#EXTM3U\n",
     segmentCount: 100,
-    progress: { state: "running", processedSeconds: 0, startPositionSeconds: 0, speed: "1.0x" }
+    progress: { state: "running", processedSeconds: 0, startPositionSeconds: 0 }
   };
   manager.outputs.set(session.id, session);
 

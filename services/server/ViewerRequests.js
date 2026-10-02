@@ -8,7 +8,7 @@
  */
 
 import { logger } from "../../utils/logger.js";
-import { isOutputName, SEGMENT_CUT_TIME_DELTA_SECONDS } from "../encode/output/index.js";
+import { isOutputName } from "../encode/output/index.js";
 
 function isWarmupTimeoutError(error) {
   if (!(error instanceof Error)) {
@@ -484,7 +484,6 @@ export class ViewerRequests {
       // segment (the only thing it waits for before playback starts) instead
       // of a percentage of the whole-file transcode.
       segmentDurationSec: this.#host.segmentDurationSec,
-      speed: progress.speed,
       outputMbps,
       playbackReadiness,
       // The height the viewer is WATCHING right now, which is what the menu
@@ -566,11 +565,7 @@ export class ViewerRequests {
       const timeline = output.timeline;
       const trackName = output === session ? "video" : "audio";
       const nativeRanges = Array.from({ length: timeline?.segmentCount ?? 0 }, (_, index) =>
-        this.#host.segmentStore.mediaRangesOf(output.outputKey, index, {
-          startSeconds: timeline.publishedStartOf(index),
-          endSeconds: index < timeline.segmentCount - 1 ?
-            timeline.publishedStartOf(index + 1) - SEGMENT_CUT_TIME_DELTA_SECONDS : undefined
-        }));
+        this.#host.encodeRuns.finishedMediaRangesOf(output, index));
       // The page states the offset its player applied to this track, and the
       // init it applied it to is the session's. Until both are known, the
       // pieces stay on their own presentation timeline: there is nothing yet

@@ -421,33 +421,24 @@ export class SegmentStore {
    * over with the picture frozen at 319.66 s. `segment-00055.mp4` went the same
    * way, 211 957 against 2 620 617.
    *
+   * Whether the piece is whole is decided before this, by the encoding
+   * (`encode/piece-completeness.js`): the store keeps bytes and what is read
+   * from them, and does not judge them.
+   *
    * @param {string} key
    * @param {string} makingName - What the encoder called it while writing.
-   * @param {{ servedNameOf?: (name: string) => string | null }} format
+   * @param {{ servedNameOf?: (name: string) => string | null, segmentIndexFromName?: (name: string) => number }} format
+   * @param {{ mediaRanges?: object | null }} [read] - The piece's media
+   *   intervals as its format read them from the closed file, kept with it.
    * @returns {string | null} The served name, or null where nothing was renamed.
    */
-  publish(key, makingName, format, { endSeconds } = {}) {
+  publish(key, makingName, format, { mediaRanges = null } = {}) {
     const served = format?.servedNameOf?.(makingName) ?? null;
     if (!served) {
       return null;
     }
     const dir = path.join(this.#root, directoryNameFor(key));
     const index = format?.segmentIndexFromName?.(served) ?? -1;
-    let mediaRanges = null;
-    if (format?.readMediaRanges && index >= 0) {
-      try {
-        mediaRanges = format.readMediaRanges(readFileSync(path.join(dir, makingName)));
-        const end = format.producedThroughSeconds?.(mediaRanges);
-        if (end === null) throw new Error("The closed file contains no playable media intervals.");
-        if (Number.isFinite(endSeconds) && Number.isFinite(end) && end < endSeconds) {
-          this.#logger?.warn?.(`segment store: refusing short segment ${index}: produced through ${end}s, cut ${endSeconds}s`);
-          return null;
-        }
-      } catch (error) {
-        this.#logger?.warn?.(`segment store: could not read media coverage of ${makingName}: ${error.message}`);
-        return null;
-      }
-    }
     try {
       renameSync(path.join(dir, makingName), path.join(dir, served));
     } catch (error) {
@@ -476,20 +467,32 @@ export class SegmentStore {
     return served;
   }
 
-  mediaRangesOf(key, index, { startSeconds = 0, endSeconds } = {}) {
+  /**
+   * The bytes of a file the encoder has closed under its working name, for the
+   * encoding to judge before it is published.
+   *
+   * @param {string} key
+   * @param {string} makingName
+   * @returns {Buffer}
+   */
+  closedBytesOf(key, makingName) {
+    return readFileSync(path.join(this.#root, directoryNameFor(key), makingName));
+  }
+
+  /**
+   * The media intervals a stored piece holds, read once from its bytes and kept
+   * with them, or undefined where its format reads none or it is not here.
+   *
+   * @param {string} key
+   * @param {number} index
+   * @param {{ startSeconds?: number }} [where] - Where its cut puts it.
+   * @returns {object | undefined}
+   */
+  mediaRangesOf(key, index, { startSeconds = 0 } = {}) {
     const known = this.#mediaRanges.get(key)?.get(index);
     const format = this.#formats.get(key);
     if (!format?.readMediaRanges) return undefined;
-    const checked = (ranges) => {
-      const end = format.producedThroughSeconds?.(ranges);
-      if (Number.isFinite(endSeconds) && Number.isFinite(end) && end < endSeconds) {
-        this.#logger?.warn?.(`segment store: removing short cached segment ${index}: produced through ${end}s, cut ${endSeconds}s`);
-        this.#removeSegment(key, index);
-        return undefined;
-      }
-      return ranges;
-    };
-    if (known) return checked(known);
+    if (known) return known;
     const filePath = this.pathOf(key, index);
     if (!filePath) return undefined;
     try {
@@ -506,7 +509,7 @@ export class SegmentStore {
       const byIndex = this.#mediaRanges.get(key) ?? new Map();
       byIndex.set(index, ranges);
       this.#mediaRanges.set(key, byIndex);
-      return checked(ranges);
+      return ranges;
     } catch {
       return [];
     }
@@ -1084,6 +1087,20 @@ export class SegmentStore {
     return candidates
       .sort((left, right) => (left.rank !== right.rank ? left.rank - right.rank : right.distance - left.distance))
       .map(({ key, index }) => ({ key, index }));
+  }
+
+  /**
+   * Take one segment off the disk because its owner says it is not usable.
+   *
+   * @param {string} key
+   * @param {number} index
+   * @param {string} because
+   * @returns {void}
+   */
+  remove(key, index, because) {
+    if (this.#removeSegment(key, index) > 0) {
+      this.#logger?.warn?.(`segment store: removed segment ${index} of ${key.slice(0, 60)}: ${because}`);
+    }
   }
 
   /**

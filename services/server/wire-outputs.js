@@ -247,7 +247,10 @@ export function wireOutputs({
     pathFor: (address) => parts.segmentStore.pathFor(address),
     initOf: (address) => parts.segmentStore.initOf(address),
     directoryFor: (address) => parts.segmentStore.directoryFor(address),
-    publish: (address, makingName, format, coverage) => parts.segmentStore.publish(address, makingName, format, coverage)
+    publish: (address, makingName, format, read) => parts.segmentStore.publish(address, makingName, format, read),
+    closedBytesOf: (address, makingName) => parts.segmentStore.closedBytesOf(address, makingName),
+    mediaRangesOf: (address, index, where) => parts.segmentStore.mediaRangesOf(address, index, where),
+    remove: (address, index, because) => parts.segmentStore.remove(address, index, because)
   };
   const segmentOutputFiles = {
     addresses: () => parts.segmentStore.addresses(),
@@ -304,10 +307,10 @@ export function wireOutputs({
   // The encoders of this proxy: built where the plan places them, followed while they run, accounted when they end.
   parts.encodeRuns = new EncodeRuns({
     logger,
-    // What this host is doing with an encode is learned each time it closes a
-    // piece, on every host: the forecast's processing rate is that reading.
-    notePiecePublished: (session) => {
-      void parts.encodeCost.learnFrom(session);
+    // What this host is doing with an encode is learned each time a run has
+    // measured its processing speed, on every host.
+    noteRunSpeedMeasured: (session, run) => {
+      void parts.encodeCost.learnFrom(session, run);
     },
     // What an admitted encode was seen to do, filed under its configuration.
     observeEncodeEnded: (session) => {
@@ -323,7 +326,6 @@ export function wireOutputs({
       });
     },
     viewerSecondsOn: (output, consumerId, now) => viewerSecondsOn(parts.viewers, output, consumerId, now),
-    noteRunStarting: (output) => parts.quality.noteRunStarting(output),
     inputOf: (...args) => parts.renditions.inputOf(...args),
     producedNumbers: (...args) => parts.serving.producedNumbers(...args),
     servesAudioSeparately: (...args) => parts.renditions.servesAudioSeparately(...args),
@@ -816,10 +818,7 @@ export function wireOutputs({
     encodersRunningNow: () => parts.encodeOrchestrator.runningCount(),
     torrentCostSecFor: (session) => parts.hostLoad.torrentCostSecFor(session),
     runsFor: (session) => parts.encodeRuns.runsOf(session),
-    stateFor: (session) => parts.encodeRuns.runStateOf(session),
-    // The run's OWN work: a speed is a pair of samples of one process, over
-    // the time it worked rather than the time its input waited.
-    workSampleFor: (_session, run) => run?.workSample ?? null
+    stateFor: (session) => parts.encodeRuns.runStateOf(session)
   });
   // WHICH HEIGHTS ARE ON THE MENU, which is the arithmetic above plus three
   // things that are nothing to do with it: whose answer it is, what may never

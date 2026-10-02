@@ -18,7 +18,7 @@ import { wireOutputs } from "../services/server/wire-outputs.js";
 import { SegmentStore } from "../services/storage/segment-store/SegmentStore.js";
 import { fmp4Format } from "../services/encode/segment-formats/fmp4.js";
 import { qualityStateOf } from "../services/encode/quality/OutputQualityState.js";
-import { startRunOn } from "./helpers/encode-run.js";
+import { measureSpeed, startRunOn } from "./helpers/encode-run.js";
 import { outputSpec } from "./helpers/output-spec.js";
 
 const KEY = "torrent:abc:fmt=fmp4:grid=kf@0:video-only:v=0/copy";
@@ -65,9 +65,10 @@ function sessionOn({ manager, id, dirPath, encodeStartIndex = 0, runEndIndex = -
     const run = startRunOn(session, { from: encodeStartIndex, to: runEndIndex });
     manager.encodeOrchestrator.adopt(KEY, run);
     session.testRun = run;
-    // A speed is a reading taken FROM a run, so it names the run it came from.
-    qualityStateOf(session).recentSpeed = speed > 0 ? { speed, at: Date.now(), run } : null;
-    run.noteSpeed(speed);
+    // A speed is the run's own reading, measured from its closed pieces.
+    if (speed > 0) {
+      measureSpeed(run, speed);
+    }
   }
   return session;
 }

@@ -59,8 +59,7 @@ function offerOver(
     encodersRunningNow: () => 0,
     torrentCostSecFor: () => 0,
     runsFor: (session) => [...(session.runs ?? [])],
-    stateFor: (session) => runStateOf(session.runs),
-    workSampleFor: (session) => session.work ?? null
+    stateFor: (session) => runStateOf(session.runs)
   });
   let computed = 0;
   const real = cost.sustainableHeights.bind(cost);

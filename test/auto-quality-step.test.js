@@ -18,7 +18,7 @@
 
 import test from "node:test";
 import { recordViewerReport } from "../services/viewer/report-intake.js";
-import { fakeProcess as fakeEncoder, startRunOn } from "./helpers/encode-run.js";
+import { fakeProcess as fakeEncoder, measureSpeed, startRunOn } from "./helpers/encode-run.js";
 import assert from "node:assert/strict";
 import { SourceFile } from "../services/media/SourceFile.js";
 import { Timeline } from "../services/encode/output/Timeline.js";
@@ -92,7 +92,7 @@ function fakeSession({ dirPath, transcodeVideo = true, cutGrid = transcodeVideo 
     usesExplicitCuts: false,
     useSyntheticPlaylist: true,
     playlistText: "#EXTM3U\n",
-    progress: { state: "running", processedSeconds: 40, startPositionSeconds: 0, speed: "1.0x" }
+    progress: { state: "running", processedSeconds: 40, startPositionSeconds: 0 }
   };
 }
 
@@ -197,7 +197,7 @@ test("a picture that cannot be kept up with is asked for as another VARIANT, and
   const sizeBefore = `${session.encodeWidth}x${session.encodeHeight}`;
   // Below realtime over its own working time, and the viewer's buffer runs
   // dry on its trend although their link carries the stream.
-  qualityStateOf(session).recentSpeed = { speed: 0.7, at: Date.now(), run: [...session.runs][0] };
+  measureSpeed([...session.runs][0], 0.7);
   drainingReports(manager.viewers.get("viewer"), 80);
 
   await manager.quality.noteViewerReported(session.id, "viewer");
@@ -224,7 +224,7 @@ test("a manual viewer is never sent an automatic quality request", async (t) => 
     await rm(dirPath, { recursive: true, force: true });
   });
   manager.viewers.get("viewer").qualityMode = "manual";
-  qualityStateOf(session).recentSpeed = { speed: 0.7, at: Date.now(), run: [...session.runs][0] };
+  measureSpeed([...session.runs][0], 0.7);
   drainingReports(manager.viewers.get("viewer"), 80);
 
   await manager.quality.noteViewerReported(session.id, "viewer");
@@ -271,6 +271,8 @@ test("a request stands while its conditions hold, and the next report that does 
   assert.equal(standing.requestedHeight, 480, "two minutes on, it still stands: nothing has said otherwise");
 
   // Their next report shows a buffer that grows: what it was asked for is gone.
+  // The machine has no room to spare, so nothing else is asked in its place.
+  measureSpeed([...session.runs][0], 0.9);
   fillingReports(manager.viewers.get("viewer"), null);
   await manager.quality.noteViewerReported(session.id, "viewer");
 
@@ -286,7 +288,7 @@ test("a request the next report asks for again stands", async (t) => {
     await new Promise((resolve) => setImmediate(resolve));
     await rm(dirPath, { recursive: true, force: true });
   });
-  qualityStateOf(session).recentSpeed = { speed: 0.7, at: Date.now(), run: [...session.runs][0] };
+  measureSpeed([...session.runs][0], 0.7);
   drainingReports(manager.viewers.get("viewer"), 80);
   await manager.quality.noteViewerReported(session.id, "viewer");
   const asked = manager.viewers.get("viewer").qualityAsk;
@@ -310,7 +312,7 @@ test("a COPIED picture is never asked to slow its encoder, because it has none",
 
   // Whatever this reading says, a copy has no encoder to make cheaper: moving
   // the viewer to a RE-ENCODED rung costs the machine more, not less.
-  qualityStateOf(session).recentSpeed = { speed: 0.4, at: Date.now(), run: [...session.runs][0] };
+  measureSpeed([...session.runs][0], 0.4);
   drainingReports(manager.viewers.get("viewer"), 80);
 
   await manager.quality.noteViewerReported(session.id, "viewer");
@@ -496,7 +498,7 @@ test("the way BACK UP exists, one rung at a time", async (t) => {
   session.variantHeight = 480;
   session.encodeWidth = 854;
   session.encodeHeight = 480;
-  qualityStateOf(session).recentSpeed = { speed: 2.4, at: Date.now(), run: [...session.runs][0] };
+  measureSpeed([...session.runs][0], 2.4);
   // Their link is not measured here: what is under test is the room, and a
   // measured link would also weigh a soundtrack this fixture states no rate for.
   fillingReports(manager.viewers.get("viewer"), null);
@@ -668,7 +670,7 @@ test("a picture seen larger than the rung on screen is asked one rung up, when t
   session.variantHeight = 480;
   session.encodeWidth = 854;
   session.encodeHeight = 480;
-  qualityStateOf(session).recentSpeed = { speed: 2.4, at: Date.now(), run: [...session.runs][0] };
+  measureSpeed([...session.runs][0], 2.4);
   manager.viewers.get("viewer").noteVisiblePicture({ width: 1920, height: 1080 });
   fillingReports(manager.viewers.get("viewer"), null);
 
@@ -723,7 +725,7 @@ test("a step down for the machine goes to the rung the picture seen bounds, wher
     await rm(dirPath, { recursive: true, force: true });
   });
   manager.viewers.get("viewer").noteVisiblePicture({ width: 640, height: 360 });
-  qualityStateOf(session).recentSpeed = { speed: 0.7, at: Date.now(), run: [...session.runs][0] };
+  measureSpeed([...session.runs][0], 0.7);
   drainingReports(manager.viewers.get("viewer"), 80);
 
   await manager.quality.noteViewerReported(session.id, "viewer");
@@ -742,7 +744,7 @@ test("a machine below realtime whose viewer's buffer is filling moves nothing", 
   });
   // What the cushion already holds covers the shortfall: no chosen window of
   // slowness decides, the viewer's own buffer trend does.
-  qualityStateOf(session).recentSpeed = { speed: 0.7, at: Date.now(), run: [...session.runs][0] };
+  measureSpeed([...session.runs][0], 0.7);
   fillingReports(manager.viewers.get("viewer"), 80);
 
   await manager.quality.noteViewerReported(session.id, "viewer");

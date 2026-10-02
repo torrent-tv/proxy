@@ -84,9 +84,6 @@ export class EncodeOrchestrator {
   /** Consecutive fast failures at one position, per output. @type {Map<string, { at: number, count: number }>} */
   #failedStarts = new Map();
 
-  /** The fastest speed measured on one output, kept across restarts. @type {Map<string, number>} */
-  #lastSpeed = new Map();
-
   /** How runs have ended, by cause. @type {Map<string, number>} */
   #endings = new Map();
 
@@ -568,27 +565,6 @@ export class EncodeOrchestrator {
   }
 
   /**
-   * @param {string} address
-   * @param {object} run
-   * @param {number} speedX
-   */
-  noteSpeed(address, wanted, speedX) {
-    for (const run of this.runsOn(address)) {
-      if (run === wanted) {
-        run.noteSpeed(speedX);
-      }
-    }
-    // HOW FAST THIS MACHINE ENCODES THIS OUTPUT is a property of the machine and
-    // the material, not of one process. Read off `run.speedX` alone it was lost
-    // at every restart: a moved encoder is a new object that has measured
-    // nothing, so the plan fell back to "nothing is known" and stopped comparing
-    // arrivals at all — which is every decision in this layer.
-    if (speedX > 0 && speedX > (this.#lastSpeed.get(address) ?? 0)) {
-      this.#lastSpeed.set(address, speedX);
-    }
-  }
-
-  /**
    * Decide and act, for every output anybody wants anything of and every output
    * that still has an encoder on it.
    *
@@ -680,14 +656,7 @@ export class EncodeOrchestrator {
     // the answer the plan had given.
     const costs = this.#costs.seconds();
     const refetchSecPerFilmSecond = this.refetchSecPerFilmSecond(address);
-    // The best figure this host has: what a run here is doing now, what one was
-    // last measured doing, or what the startup benchmark predicted. The first
-    // two are this output's own; the third exists before either.
-    const speedX = Math.max(
-      live.reduce((best, run) => Math.max(best, run.speedX || 0), 0),
-      this.#lastSpeed.get(address) ?? 0,
-      this.startingSpeedFor(address) || 0
-    );
+    const speedX = this.#speedOn(address, live);
     const actions = planEncoders({
       coverage,
       windows,
@@ -853,14 +822,6 @@ export class EncodeOrchestrator {
       this.logger.warn(`encode: no encoder could be made for #${from}..#${to} of ${address}`);
       return;
     }
-    // What this machine has been measured to do on this output, carried over.
-    // A restart does not make the machine slower, and without this every moved
-    // encoder began as one whose speed nothing had measured — which the plan
-    // reads as "no arrival can be computed" and answers by comparing nothing.
-    const known = this.#lastSpeed.get(address) ?? 0;
-    if (known > 0) {
-      run.noteSpeed(known);
-    }
     const onThisOutput = this.#runs.get(address) ?? [];
     onThisOutput.push(run);
     this.#runs.set(address, onThisOutput);
@@ -874,6 +835,28 @@ export class EncodeOrchestrator {
     // tick. What it removes is the second act — building a run and starting it
     // were two steps, and two owners each performed the second one.
     this.coverageOf(address).claim(run, from, endOfRun({ from, to }));
+  }
+
+  /**
+   * The best figure this host has for one encoder on this output: the
+   * processing speed a run here has measured (`EncodeRun.speedX`), or what this
+   * output was last measured doing and the startup measurements predict
+   * (`startingSpeedFor`), which exists before any run has closed two pieces and
+   * after a restart. The run owns its speed; nothing here keeps a copy.
+   *
+   * It is the MACHINE's speed: input waits for the swarm are not in it. What
+   * the swarm delivers is the separate supply term
+   * (`refetchSecPerFilmSecond`).
+   *
+   * @param {string} address
+   * @param {{ speedX: number }[]} live
+   * @returns {number}
+   */
+  #speedOn(address, live) {
+    return Math.max(
+      live.reduce((best, run) => Math.max(best, run.speedX || 0), 0),
+      this.startingSpeedFor(address) || 0
+    );
   }
 
   /**
@@ -894,15 +877,7 @@ export class EncodeOrchestrator {
    */
   #affordableOn(address, live) {
     const byProcessor = Math.max(0, this.maxRunsFor(address));
-    // The best figure this host has: what a run here is doing now, what one was
-    // last measured doing, or what the startup benchmark predicted. The first
-    // two are this output's own; the third exists before either, so the budget
-    // is never asked to price encoders at a speed of zero.
-    const fastest = Math.max(
-      live.reduce((best, run) => Math.max(best, run.speedX || 0), 0),
-      this.#lastSpeed.get(address) ?? 0,
-      this.startingSpeedFor(address) || 0
-    );
+    const fastest = this.#speedOn(address, live);
     const budget = affordableRuns({
       byProcessor,
       speedX: fastest,

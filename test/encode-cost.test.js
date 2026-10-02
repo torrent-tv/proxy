@@ -10,7 +10,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { EncodeCost } from "../services/encode/quality/EncodeCost.js";
-import { startRunOn } from "./helpers/encode-run.js";
+import { measureSpeed, startRunOn } from "./helpers/encode-run.js";
 import { outputSpec } from "./helpers/output-spec.js";
 import { runStateOf } from "../services/encode/encode-run-state.js";
 import { qualityStateOf } from "../services/encode/quality/OutputQualityState.js";
@@ -40,8 +40,7 @@ function costOn(readings = {}) {
     encodersRunningNow: () => 0,
     torrentCostSecFor: () => 0,
     runsFor: (session) => [...(session.runs ?? [])],
-    stateFor: (session) => runStateOf(session.runs),
-    workSampleFor: (session) => session.work ?? null
+    stateFor: (session) => runStateOf(session.runs)
   });
   return { cost, asked: () => asked, host };
 }
@@ -63,29 +62,28 @@ function sessionProducing(what = {}) {
     }),
     file: { key: what.key ?? "torrent:abc:0", name: "film.mkv" },
     output: { encodeWidth: 0, encodeHeight: 0, outputFps: 25, softwarePreset: null },
-    work: { at: 0, producedSeconds: 0, workingMs: 0 },
+    clock: { at: 1000 },
     runs: new Set()
   };
-  startRunOn(session, { from: 0, speedX: 1 });
+  startRunOn(session, { from: 0, clock: session.clock });
   return session;
 }
 
 /**
- * Two work samples of one run.
+ * The session's run measures its speed, and is learned from as the product
+ * learns: once the run has a reading.
  *
  * @param {EncodeCost} cost
  * @param {object} session
  * @param {number} speedX - Seconds of film produced per second of the run's own work.
- * @param {number} [waitedMs] - Of the ten seconds between the samples, how long
- *   the run's input waited for the swarm.
+ * @param {number} [waitedMs] - How long the run's input waits for the swarm
+ *   between two closed pieces.
  * @returns {Promise<void>}
  */
 async function watchItRun(cost, session, speedX, waitedMs = 0) {
-  session.work = { at: 0, producedSeconds: 0, workingMs: 0 };
-  await cost.learnFrom(session);
-  // The pair is a DELTA, and the first sample has nothing to be a delta from.
-  session.work = { at: 10_000, producedSeconds: (10_000 - waitedMs) / 1000 * speedX, workingMs: 10_000 - waitedMs };
-  await cost.learnFrom(session);
+  const run = [...session.runs][0];
+  measureSpeed(run, speedX, session.clock, waitedMs);
+  await cost.learnFrom(session, run);
 }
 
 test("the host is asked at the moment of the question, not when this was built", () => {
@@ -186,29 +184,27 @@ test("a picture's reading taken beside another encoder is not filed", async () =
   assert.equal(cost.copyVersionFor("torrent:abc:0"), 0);
 });
 
-test("one reading is not a speed", async () => {
+test("a run that has measured nothing teaches nothing", async () => {
   const { cost } = costOn();
   const session = sessionProducing({ transcodeVideo: false });
-  session.work = { at: 5_000, producedSeconds: 40, workingMs: 5_000 };
+  const run = [...session.runs][0];
 
-  await cost.learnFrom(session);
+  await cost.learnFrom(session, run);
 
-  assert.equal(cost.copyVersionFor("torrent:abc:0"), 0, "a delta needs two readings of one run");
-  assert.ok(qualityStateOf(session).learnSample, "and the first is kept to be the other half of the next");
+  assert.equal(run.speedReading, null, "a speed needs two closed pieces of one run");
+  assert.equal(cost.copyVersionFor("torrent:abc:0"), 0);
 });
 
-test("a pair that straddles a restart measures the seek, not the host", async () => {
+test("a restarted run starts its own reckoning, so a seek is never read as speed", async () => {
+  // Twenty minutes of film against five seconds of work is a seek, and filed as
+  // a price it admits every step there is. The reading belongs to the run that
+  // made it, so a new run at another place has none until its own pieces close.
   const { cost } = costOn();
   const session = sessionProducing({ transcodeVideo: false });
-  await cost.learnFrom(session);
-  // A new run, at another place in the film: twenty minutes of film against five
-  // seconds of work is a seek, and filed as a price it admits every step there
-  // is.
   session.runs = new Set();
-  startRunOn(session, { from: 300, speedX: 1 });
-  session.work = { at: 5_000, producedSeconds: 1200, workingMs: 5_000 };
+  const moved = startRunOn(session, { from: 300, clock: session.clock });
 
-  await cost.learnFrom(session);
+  await cost.learnFrom(session, moved);
 
   assert.equal(cost.copyVersionFor("torrent:abc:0"), 0);
 });

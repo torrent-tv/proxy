@@ -15,14 +15,17 @@ import { ENCODE_EXIT } from "./encode-exit.js";
 import { EncodeRun } from "./EncodeRun.js";
 import { computeOutputDimensions } from "./args.js";
 import { buildRunCommand, trueStartOf } from "./run-command.js";
-import { SEGMENT_CUT_TIME_DELTA_SECONDS } from "./output/index.js";
+import { cutOf, judgePiece } from "./piece-completeness.js";
 
 /**
  * @typedef {Object} SegmentFiles
  * @property {(address: string) => string} pathFor
  * @property {(address: string) => Buffer | null} initOf
  * @property {(address: string) => string} directoryFor
- * @property {(address: string, makingName: string, format: object) => string | null} publish
+ * @property {(address: string, makingName: string, format: object, read?: { mediaRanges?: object | null }) => string | null} publish
+ * @property {(address: string, makingName: string) => Buffer} closedBytesOf
+ * @property {(address: string, index: number, where?: { startSeconds?: number }) => object | undefined} mediaRangesOf
+ * @property {(address: string, index: number, because: string) => void} remove
  */
 // How far the accounting of a backward restart looks for work about to be done
 // twice. It runs on the restart path and a session an hour in has thousands of
@@ -166,9 +169,9 @@ export class EncodeRuns {
   #planScheduled = false;
 
   /**
-   * @param {object} host - `logger`, `viewerSecondsOn`, `noteRunStarting`, `notePiecePublished`, `inputOf`, `producedNumbers`, `servesAudioSeparately`, `disposeSession`, `contentionPenalties`, `encodeCost`, `encodeOrchestrator`, `encoders`, `ffmpegBin`, `outputTimes`, `outputs`, `priority`, `segmentDurationSec`, `segmentFiles`, `videoEncoder`
-   * @param {(session: object) => void} [host.notePiecePublished] - A run of
-   *   this output has closed a piece: the moment its work is read.
+   * @param {object} host - `logger`, `viewerSecondsOn`, `noteRunSpeedMeasured`, `inputOf`, `producedNumbers`, `servesAudioSeparately`, `disposeSession`, `contentionPenalties`, `encodeCost`, `encodeOrchestrator`, `encoders`, `ffmpegBin`, `outputTimes`, `outputs`, `priority`, `segmentDurationSec`, `segmentFiles`, `videoEncoder`
+   * @param {(session: object, run: object) => void} [host.noteRunSpeedMeasured] -
+   *   A run of this output has measured its processing speed.
    * @param {(session: object, runToken: number) => object} host.inputOf - The
    *   addresses a run reads; `runToken` marks them as that run's.
    * @param {SegmentFiles} host.segmentFiles - The storage operations used to
@@ -333,6 +336,67 @@ export class EncodeRuns {
     return this.hasFailed(output) ? this.lastErrorOf(output) : "";
   }
 
+  /**
+   * The media intervals of a closed file that holds the whole of its piece,
+   * null where its format reads none, or false where it is not to be published:
+   * short of its cut, without playable media, or unreadable.
+   *
+   * @param {HlsSession} session
+   * @param {string} name - The working name the encoder closed it under.
+   * @param {number} index
+   * @returns {object | null | false}
+   */
+  #wholeClosedPiece(session, name, index) {
+    const format = session.segmentFormat;
+    if (!format?.readMediaRanges || !Number.isInteger(index) || index < 0) {
+      return null;
+    }
+    const address = session.outputKey ?? "";
+    try {
+      const mediaRanges = format.readMediaRanges(this.#host.segmentFiles.closedBytesOf(address, name));
+      const cut = cutOf(session.timeline, index);
+      const { whole, throughSeconds } = judgePiece(format, mediaRanges, cut);
+      if (!whole) {
+        this.#host.logger.warn(
+          `encode: not publishing piece ${index} of ${address.slice(0, 60)}: ` +
+            (throughSeconds === null ? "it holds no playable media" : `produced through ${throughSeconds}s, cut ${cut}s`)
+        );
+        return false;
+      }
+      return mediaRanges;
+    } catch (error) {
+      this.#host.logger.warn(`encode: could not read the media of ${name}: ${error instanceof Error ? error.message : String(error)}`);
+      return false;
+    }
+  }
+
+  /**
+   * The media intervals of a stored piece of this output that holds the whole
+   * of its stretch, or undefined. A stored piece short of its cut — left by an
+   * earlier process — is taken off the disk here, where its cut is known.
+   *
+   * @param {HlsSession} output
+   * @param {number} index
+   * @returns {object | undefined}
+   */
+  finishedMediaRangesOf(output, index) {
+    const address = output.outputKey ?? "";
+    const timeline = output.timeline;
+    const ranges = this.#host.segmentFiles.mediaRangesOf(address, index, {
+      startSeconds: timeline.publishedStartOf(index)
+    });
+    if (!ranges || !output.segmentFormat?.producedThroughSeconds) {
+      return ranges;
+    }
+    const cut = cutOf(timeline, index);
+    const { whole, throughSeconds } = judgePiece(output.segmentFormat, ranges, cut);
+    if (whole || throughSeconds === null) {
+      return ranges;
+    }
+    this.#host.segmentFiles.remove(address, index, `produced through ${throughSeconds}s, short of its cut at ${cut}s`);
+    return undefined;
+  }
+
   progressOf(output, index = null) {
     if (!output) {
       return null;
@@ -352,7 +416,6 @@ export class EncodeRuns {
       totalSeconds: Number.isFinite(total) && total > 0 ? total : null,
       percent: 0,
       remainingSeconds: Number.isFinite(total) && total > 0 ? Math.max(0, total - start) : null,
-      speed: "",
       updatedAt: this.#host.outputs.startedAt(output) ?? Date.now()
     };
   }
@@ -708,10 +771,6 @@ export class EncodeRuns {
     if (!this.isLive(session)) {
       return null;
     }
-    // A new run starts the quality budget's reckoning afresh: a pair of
-    // readings spanning the restart would count the gap between two runs as
-    // slow encoding. Told, not written: those readings are the budget's.
-    this.#host.noteRunStarting(session);
     // Where a restart's seconds go. A seek costs 5-8 s in the field and the
     // recorded reason — waiting for the previous ffmpeg to exit, measured at
     // 0.54-1.47 s — does not account for it. Before rebuilding the hottest path
@@ -874,17 +933,11 @@ export class EncodeRuns {
         const index = session.segmentFormat.segmentIndexFromName(
           session.segmentFormat.servedNameOf?.(name) ?? name);
         if (Number.isInteger(index) && index < safeIndex) return null;
-        const served = this.#host.segmentFiles.publish(session.outputKey ?? "", name, session.segmentFormat, {
-          endSeconds: index < session.timeline.segmentCount - 1 ?
-            session.timeline.publishedStartOf(index + 1) - SEGMENT_CUT_TIME_DELTA_SECONDS : undefined
-        });
-        // A closed piece is the moment this run's work can be read: what it has
-        // made against its own working time since the last one.
-        if (served) {
-          this.#host.notePiecePublished?.(session);
-        }
-        return served;
+        const mediaRanges = this.#wholeClosedPiece(session, name, index);
+        if (mediaRanges === false) return null;
+        return this.#host.segmentFiles.publish(session.outputKey ?? "", name, session.segmentFormat, { mediaRanges });
       },
+      onSpeedMeasured: () => this.#host.noteRunSpeedMeasured?.(session, run),
       onEnded: (ended) => {
         this.#runsByInputToken.delete(inputToken);
         this.noteRunEnded(session, run, ended);
@@ -933,7 +986,7 @@ export class EncodeRuns {
       this.#host.logger.info(
         `transcode ${session.id} "${session.file.name}" ${progress.percent.toFixed(1)}% ` +
           `(${formatSeconds(progress.processedSeconds)} / ${formatSeconds(progress.totalSeconds)})` +
-          ` speed=${progress.speed || "n/a"}`
+          ` speed=${run.speedX > 0 ? `${run.speedX.toFixed(2)}x` : "n/a"}`
       );
     }
   }

@@ -653,21 +653,6 @@ export class QualityController {
   }
 
   /**
-   * An encoder is about to start on this output.
-   *
-   * A new run is a new process, so the work sample its speed is learned from
-   * starts again: a pair of samples straddling two runs measures the seek, not
-   * the machine.
-   *
-   * @param {object} output
-   * @returns {void}
-   */
-  noteRunStarting(output) {
-    const state = qualityStateOf(output);
-    state.learnSample = null;
-  }
-
-  /**
    * The height this proxy is asking the player to move to, or 0.
    *
    * Cleared the moment the viewer is on it — the request has been answered —

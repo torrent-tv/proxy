@@ -28,6 +28,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
 import { EncodeRun } from "../services/encode/EncodeRun.js";
+import { measureSpeed } from "./helpers/encode-run.js";
 import { SoftwareEncoder } from "../services/encode/SoftwareEncoder.js";
 import { EncodeOrchestrator } from "../services/encode/EncodeOrchestrator.js";
 import { mapForViewer, mergeMaps, runsOf } from "../services/viewer/PriorityMap.js";
@@ -52,10 +53,16 @@ const SEGMENT_SECONDS = 4;
 const FILM_SECONDS = 4000;
 const SEGMENTS = FILM_SECONDS / SEGMENT_SECONDS;
 
+/** What every run of these tests reads as now; a measurement advances it. */
+const clock = { at: 1000 };
+
 class FakeProcess extends EventEmitter {
   constructor() {
     super();
     this.pid = 1;
+    // The progress channel and the channel closed pieces are named on.
+    this.stdout = new EventEmitter();
+    this.stdio = [null, this.stdout, null, new EventEmitter()];
   }
 
   kill(signal) {
@@ -75,7 +82,7 @@ function orchestrator({ maxRuns = 3 } = {}) {
     buildArgs: () => ["-i", "in", "out"],
     spawn: () => new FakeProcess(),
     logger: { info() {}, warn() {} },
-    now: () => 1000,
+    now: () => clock.at,
     onEnded: (ended) => made.noteEnded(ended)
   });
   made = new EncodeOrchestrator({
@@ -209,7 +216,7 @@ test("one viewer playing: the encoder keeping up buys no second one", () => {
   watches("one", { atSeconds: 400 });
   made.reconcile();
   const [run] = made.runsOn(PICTURE);
-  run.noteSpeed(6);
+  measureSpeed(run, 6, clock);
   for (let index = 100; index < 130; index += 1) {
     made.noteProduced(PICTURE, index);
   }
@@ -225,7 +232,7 @@ test("one viewer seeking far ahead: an encoder is placed there", () => {
   const { made, watches } = orchestrator();
   watches("one", { atSeconds: 400 });
   made.reconcile();
-  made.runsOn(PICTURE)[0].noteSpeed(6);
+  measureSpeed(made.runsOn(PICTURE)[0], 6, clock);
   made.noteProduced(PICTURE, 100);
 
   // The peak JUMPS. Nothing about the old place is wanted now.
@@ -243,7 +250,7 @@ test("one viewer paused: nothing is late, so no encoder is added", () => {
   const { made, watches } = orchestrator();
   watches("one", { atSeconds: 400 });
   made.reconcile();
-  made.runsOn(PICTURE)[0].noteSpeed(1);
+  measureSpeed(made.runsOn(PICTURE)[0], 1, clock);
   made.noteProduced(PICTURE, 100);
 
   watches("one", { atSeconds: 404, playing: false });
@@ -295,7 +302,7 @@ test("two viewers far apart get an encoder each", () => {
   const { made, watches } = orchestrator();
   watches("one", { atSeconds: 400 });
   made.reconcile();
-  made.runsOn(PICTURE)[0].noteSpeed(6);
+  measureSpeed(made.runsOn(PICTURE)[0], 6, clock);
   made.noteProduced(PICTURE, 100);
 
   watches("two", { atSeconds: 3000 });
@@ -314,12 +321,12 @@ test("two viewers: one seeking does not take the other's encoder", () => {
   // long one takes to reach a number is the whole comparison. Real life
   // measures it from the first run; a test that stated both viewers before any
   // run existed would be asking the plan to buy a process on no evidence.
-  made.runsOn(PICTURE)[0].noteSpeed(6);
+  measureSpeed(made.runsOn(PICTURE)[0], 6, clock);
   made.noteProduced(PICTURE, 100);
   watches("two", { atSeconds: 3000 });
   made.reconcile();
   for (const run of made.runsOn(PICTURE)) {
-    run.noteSpeed(6);
+    measureSpeed(run, 6, clock);
   }
   assert.ok(made.runsOn(PICTURE).length >= 2, "one each to begin with");
 
@@ -342,7 +349,7 @@ test("two viewers: one pausing leaves the other served", () => {
   watches("two", { atSeconds: 3000 });
   made.reconcile();
   for (const run of made.runsOn(PICTURE)) {
-    run.noteSpeed(1);
+    measureSpeed(run, 1, clock);
   }
 
   watches("two", { atSeconds: 3000, playing: false });
@@ -359,7 +366,7 @@ test("two viewers: the one who leaves takes nothing from the one who stays", () 
   watches("two", { atSeconds: 3000 });
   made.reconcile();
   for (const run of made.runsOn(PICTURE)) {
-    run.noteSpeed(1);
+    measureSpeed(run, 1, clock);
   }
 
   leaves("two");
@@ -379,7 +386,7 @@ test("three viewers far apart get an encoder each when the machine affords it", 
   watches("three", { atSeconds: 3600 });
   made.reconcile();
   for (const run of made.runsOn(PICTURE)) {
-    run.noteSpeed(6);
+    measureSpeed(run, 6, clock);
   }
   made.reconcile();
 
@@ -402,7 +409,7 @@ test("three viewers, a machine that affords two: the budget binds, not the map",
   watches("three", { atSeconds: 3600 });
   made.reconcile();
   for (const run of made.runsOn(PICTURE)) {
-    run.noteSpeed(1);
+    measureSpeed(run, 1, clock);
   }
   made.reconcile();
 
@@ -415,13 +422,13 @@ test("three viewers: one seeks onto another, and the two of them share", () => {
   const { made, watches } = orchestrator({ maxRuns: 3 });
   watches("one", { atSeconds: 400 });
   made.reconcile();
-  made.runsOn(PICTURE)[0].noteSpeed(6);
+  measureSpeed(made.runsOn(PICTURE)[0], 6, clock);
   made.noteProduced(PICTURE, 100);
   watches("two", { atSeconds: 2000 });
   watches("three", { atSeconds: 3600 });
   made.reconcile();
   for (const run of made.runsOn(PICTURE)) {
-    run.noteSpeed(6);
+    measureSpeed(run, 6, clock);
   }
   made.reconcile();
   assert.equal(made.runsOn(PICTURE).length, 3);
@@ -438,7 +445,7 @@ test("three viewers: all paused, and no encoder is added for any of them", () =>
   const { made, watches } = orchestrator({ maxRuns: 3 });
   watches("one", { atSeconds: 400 });
   made.reconcile();
-  made.runsOn(PICTURE)[0].noteSpeed(1);
+  measureSpeed(made.runsOn(PICTURE)[0], 1, clock);
   const before = made.runsOn(PICTURE).length;
 
   watches("one", { atSeconds: 400, playing: false });
@@ -461,7 +468,7 @@ test("the plan is a function of the state: the same state twice gives the same a
   watches("two", { atSeconds: 2000 });
   made.reconcile();
   for (const run of made.runsOn(PICTURE)) {
-    run.noteSpeed(1);
+    measureSpeed(run, 1, clock);
   }
   made.reconcile();
   const first = placements(made);
@@ -483,7 +490,7 @@ test("exactly realtime arrives exactly on time, and no second encoder is bought"
   const { made, watches } = orchestrator({ maxRuns: 3 });
   watches("one", { atSeconds: 400 });
   made.reconcile();
-  made.runsOn(PICTURE)[0].noteSpeed(1);
+  measureSpeed(made.runsOn(PICTURE)[0], 1, clock);
   made.noteProduced(PICTURE, 100);
   made.reconcile();
 
@@ -507,7 +514,7 @@ test("below realtime, whether a second encoder helps is arithmetic, and here it 
   const { made, watches, leaves } = orchestrator({ maxRuns: 3 });
   watches("one", { atSeconds: 400 });
   made.reconcile();
-  made.runsOn(PICTURE)[0].noteSpeed(0.5);
+  measureSpeed(made.runsOn(PICTURE)[0], 0.5, clock);
   made.noteProduced(PICTURE, 100);
   made.reconcile();
 
@@ -531,7 +538,7 @@ test("two viewers arriving together on a cold output get one encoder, then are m
   assert.ok(made.runsOn(PICTURE).length >= 1, "at least one, until something is measured");
   assert.equal(onTheStretchOf(made, 100), 1, "and not two on the same place");
 
-  made.runsOn(PICTURE)[0].noteSpeed(6);
+  measureSpeed(made.runsOn(PICTURE)[0], 6, clock);
   made.noteProduced(PICTURE, 100);
   made.reconcile();
   assert.ok(placements(made).includes(750), "and now the far one is served too");
@@ -542,7 +549,7 @@ test("an encoder comfortably faster than realtime is left to do the whole stretc
   const { made, watches } = orchestrator({ maxRuns: 3 });
   watches("one", { atSeconds: 400 });
   made.reconcile();
-  made.runsOn(PICTURE)[0].noteSpeed(6);
+  measureSpeed(made.runsOn(PICTURE)[0], 6, clock);
   made.noteProduced(PICTURE, 100);
   made.reconcile();
 
@@ -561,7 +568,7 @@ test("a swarm that feeds one encoder moves it to whoever is late, rather than se
   const [run] = made.runsOn(PICTURE);
   // 6x against a swarm charging 0.25 s per second of film: one encoder already
   // takes one and a half of what is delivered, so the budget is one.
-  run.noteSpeed(6);
+  measureSpeed(run, 6, clock);
   made.refetchSecPerFilmSecond = () => 0.25;
   made.noteProduced(PICTURE, 100);
 
@@ -583,7 +590,7 @@ test("one viewer seeking back into film that exists is served from it, with no e
   const { made, watches } = orchestrator();
   watches("one", { atSeconds: 400 });
   made.reconcile();
-  made.runsOn(PICTURE)[0].noteSpeed(6);
+  measureSpeed(made.runsOn(PICTURE)[0], 6, clock);
   for (let index = 100; index <= 160; index += 1) {
     made.noteProduced(PICTURE, index);
   }
@@ -616,7 +623,7 @@ test("one viewer seeking back into film nobody has gets an encoder there", () =>
   const { made, watches } = orchestrator();
   watches("one", { atSeconds: 3000 });
   made.reconcile();
-  made.runsOn(PICTURE)[0].noteSpeed(6);
+  measureSpeed(made.runsOn(PICTURE)[0], 6, clock);
   made.noteProduced(PICTURE, 750);
 
   watches("one", { atSeconds: 400 });
@@ -631,14 +638,14 @@ test("two viewers: one seeks back onto film the other already had made", () => {
   const { made, watches } = orchestrator({ maxRuns: 3 });
   watches("one", { atSeconds: 400 });
   made.reconcile();
-  made.runsOn(PICTURE)[0].noteSpeed(6);
+  measureSpeed(made.runsOn(PICTURE)[0], 6, clock);
   for (let index = 100; index <= 200; index += 1) {
     made.noteProduced(PICTURE, index);
   }
   watches("two", { atSeconds: 3000 });
   made.reconcile();
   for (const run of made.runsOn(PICTURE)) {
-    run.noteSpeed(6);
+    measureSpeed(run, 6, clock);
   }
   const before = made.runsOn(PICTURE).length;
 
@@ -662,7 +669,7 @@ test("three viewers: one forward, one back, one paused", () => {
   watches("three", { atSeconds: 3600 });
   made.reconcile();
   for (const run of made.runsOn(PICTURE)) {
-    run.noteSpeed(6);
+    measureSpeed(run, 6, clock);
   }
   made.reconcile();
 
@@ -690,7 +697,7 @@ test("a viewer scrubbing back and forth does not accumulate encoders", () => {
   const { made, watches } = orchestrator({ maxRuns: 3 });
   watches("one", { atSeconds: 400 });
   made.reconcile();
-  made.runsOn(PICTURE)[0].noteSpeed(6);
+  measureSpeed(made.runsOn(PICTURE)[0], 6, clock);
   made.noteProduced(PICTURE, 100);
   made.reconcile();
   const settled = placements(made);
@@ -698,7 +705,7 @@ test("a viewer scrubbing back and forth does not accumulate encoders", () => {
   watches("one", { atSeconds: 2000 });
   made.reconcile();
   for (const run of made.runsOn(PICTURE)) {
-    run.noteSpeed(6);
+    measureSpeed(run, 6, clock);
   }
   watches("one", { atSeconds: 404 });
   made.reconcile();

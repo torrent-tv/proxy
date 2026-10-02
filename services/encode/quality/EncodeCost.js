@@ -54,7 +54,6 @@ export function costKindForSession(session) {
 
 import { correctForAvailability } from "../available-share.js";
 import { medianOf, movedBeyondScatter, READINGS_KEPT } from "../learned-median.js";
-import { speedFromWork } from "../encoder-readings.js";
 import { contentionPenalty } from "../contention.js";
 import { ENCODE_RUN_STATE, liveRunsOf, processCanBeSignalled } from "../encode-run-state.js";
 import { canSustainOutput, chooseSoftwareEncodeSettings, speedBar } from "../hwaccel.js";
@@ -104,7 +103,6 @@ export class EncodeCost {
   #torrentCostSecFor;
   #runsFor;
   #stateFor;
-  #workSampleFor;
 
   /**
    * @param {{
@@ -114,12 +112,10 @@ export class EncodeCost {
    *   encodersRunningNow: () => number,
    *   torrentCostSecFor: (session: object) => number,
    *   runsFor: (output: object) => object[],
-   *   stateFor: (output: object) => string,
-   *   workSampleFor: (output: object, run: object | null) => import("../encoder-readings.js").WorkSample | null
-   *     - The film that one run has made and its own working time.
+   *   stateFor: (output: object) => string
    * }} deps
    */
-  constructor({ outputs, host, runningEncoders, encodersRunningNow, torrentCostSecFor, runsFor, stateFor, workSampleFor }) {
+  constructor({ outputs, host, runningEncoders, encodersRunningNow, torrentCostSecFor, runsFor, stateFor }) {
     this.#outputs = outputs;
     // Asked at the moment of the question, not copied: the share of the machine
     // that is free is re-read every few seconds, and a copy taken when this was
@@ -134,16 +130,8 @@ export class EncodeCost {
     if (typeof stateFor !== "function") {
       throw new TypeError("EncodeCost requires stateFor");
     }
-    if (typeof workSampleFor !== "function") {
-      throw new TypeError("EncodeCost requires workSampleFor");
-    }
     this.#runsFor = runsFor;
     this.#stateFor = stateFor;
-    // WHETHER A SLOW RUN IS SHORT OF THE MACHINE OR SHORT OF THE SWARM is not
-    // guessed at: the work sample states the run's own working time, with the
-    // time its input waited for the swarm and the time it was stopped taken
-    // out, so a speed read from two samples is the machine's.
-    this.#workSampleFor = workSampleFor;
   }
 
   /**
@@ -798,16 +786,16 @@ export class EncodeCost {
    * ladder, a step whose ladder is one rung long, a picture that is copied.
    * Measuring has no such preconditions.
    *
-   * What it does refuse: a reading that has not moved since the last one, and
-   * a pair taken across a restart. A suspended encoder and a starved input are
-   * not refused but subtracted: the speed is read over the run's own working
-   * time (`RunClock`), so neither the time it was stopped nor the time its
-   * input waited for the swarm enters it.
+   * The reading is the run's own (`EncodeRun.speedReading`), told once, when
+   * the run has measured it: film made between two closed pieces over the
+   * run's own working time (`RunClock`), so neither the time it was stopped
+   * nor the time its input waited for the swarm enters it.
    *
    * @param {HlsSession} session
+   * @param {import("../EncodeRun.js").EncodeRun} run - The run that measured it.
    * @returns {Promise<void>}
    */
-  async learnFrom(session) {
+  async learnFrom(session, run) {
     if (!session) {
       return;
     }
@@ -816,42 +804,13 @@ export class EncodeCost {
       liveRunsOf(this.#runsFor(session)).length === 0 ||
       this.#stateFor(session) === ENCODE_RUN_STATE.SUSPENDED
     ) {
-      qualityStateOf(session).learnSample = null;
       return;
     }
-    // Measured as a DELTA between two work samples of ONE run: the film it
-    // made over its own working time (`RunClock`). ffmpeg's cumulative `speed=`
-    // divides by every second the encoder was stopped or its input waited for
-    // the swarm; field 2026-10-01, a copy read 0.21x after waiting 32.93 s and
-    // 43.91 s for two pieces. The samples come from that run's own progress
-    // reports, so with two encoders on one output the pair is never two
-    // processes' positions filed under one run.
-    const run = liveRunsOf(this.#runsFor(session))[0] ?? null;
-    const sample = this.#workSampleFor(session, run);
-    const state = qualityStateOf(session);
-    const previous = state.learnSample ?? null;
-    if (!sample) {
-      return;
-    }
-    // Stamped with the run it was taken from: a pair that straddles a restart
-    // measures the seek, not the host.
-    state.learnSample = { sample, run };
-    if (previous === null || previous.run !== run || !(sample.at > previous.sample.at)) {
-      return;
-    }
-    const speed = speedFromWork(previous.sample, sample);
+    const speed = run?.speedReading?.speed ?? null;
     if (speed === null) {
       return;
     }
-    const takenAt = sample.at;
-    // Recorded HERE, before any of the conditions below can discard the
-    // reading, because the budget and the learning ask different questions of
-    // it. Learning refuses a reading taken beside another encoder, since it
-    // would file that encoder's work as this file's price; the budget wants
-    // exactly what this run is doing right now, whatever else the machine is
-    // doing beside it. Sharing the figure and not the conditions is what lets
-    // the budget stop reading ffmpeg's cumulative average.
-    state.recentSpeed = { speed, at: takenAt, run };
+    const state = qualityStateOf(session);
     const kind = costKindForSession(session);
     // A reading taken beside another encoder contains that other encoder's
     // work, and the budget ADDS the same work again when it predicts — so filed
@@ -925,9 +884,6 @@ export class EncodeCost {
   }
 
   async #learnCopyCost(session, speed) {
-    if (this.#stateFor(session) === ENCODE_RUN_STATE.SUSPENDED) {
-      return; // a suspended run reports a cumulative figure that is decaying
-    }
     const costSec = 1 / speed;
     if (!(costSec > 0) || !Number.isFinite(costSec)) {
       return;
@@ -948,9 +904,6 @@ export class EncodeCost {
   }
 
   async #learnAudioCost(session, speed) {
-    if (this.#stateFor(session) === ENCODE_RUN_STATE.SUSPENDED) {
-      return;
-    }
     const costSec = 1 / speed;
     if (!(costSec > 0) || !Number.isFinite(costSec)) {
       return;
@@ -1030,62 +983,23 @@ export class EncodeCost {
   }
 
   /**
-   * The speed this run is making RIGHT NOW, or null when nothing recent enough
-   * says.
-   *
-   * Read as the slope between two progress reports, never as ffmpeg's own
-   * `speed=`. That figure is cumulative — output time over wall time since the
-   * run began — so a run starved of torrent data early carries the average of
-   * that starvation for the rest of its life. Measured 2026-08-21: a run whose
-   * progress lines showed 1.30x at that moment (13 s of video in 10.02 s of
-   * clock) still reported a cumulative 0.39x from four minutes on a ~100 KB/s
-   * swarm, and the budget stepped the picture down on it. The same mistake was
-   * found and solved once already — the startup decode benchmark reads the
-   * slope between two progress reports for exactly this reason.
-   *
-   * @param {HlsSession} session
-   * @param {number} now
-   * @returns {number | null}
-   */
-  recentSpeedOf(session, now, withinMs) {
-    return this.recentSpeedReadingOf(session, now, withinMs)?.speed ?? null;
-  }
-
-  /**
-   * The newest measured speed from the output's current or most recent run.
-   * Its measurement time lets the playback model project the observed trend
-   * without imposing a separate freshness window.
+   * The newest processing speed measured by a run of this output, with the
+   * time it was measured. Read from the runs, which own it; the measurement
+   * time lets the playback model project the observed trend without imposing
+   * a separate freshness window.
    *
    * @param {HlsSession} session
    * @returns {{ speed: number, at: number } | null}
    */
   latestSpeedReadingOf(session) {
-    const reading = qualityStateOf(session).recentSpeed;
-    if (!reading || !this.#runsFor(session).includes(reading.run)) {
-      return null;
+    let newest = null;
+    for (const run of this.#runsFor(session)) {
+      const reading = run?.speedReading ?? null;
+      if (reading !== null && (newest === null || reading.at > newest.at)) {
+        newest = reading;
+      }
     }
-    return { speed: reading.speed, at: reading.at };
-  }
-
-  /**
-   * The current output's measured production speed, with the time it was
-   * measured. The caller can use the same observation in a trend without
-   * treating repeated progress polls as new samples.
-   *
-   * @param {HlsSession} session
-   * @param {number} now
-   * @param {number} withinMs
-   * @returns {{ speed: number, at: number } | null}
-   */
-  recentSpeedReadingOf(session, now, withinMs) {
-    const reading = this.latestSpeedReadingOf(session);
-    // Stale by whatever the asker calls stale — two of its own ticks, for the
-    // budget loop, which takes a fresh reading every pass anyway. A reading
-    // older than that is not about the machine as it stands.
-    if (!reading || now - reading.at > withinMs) {
-      return null;
-    }
-    return reading;
+    return newest;
   }
 
   /**

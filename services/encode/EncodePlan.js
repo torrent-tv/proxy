@@ -65,9 +65,11 @@
  * @property {number} from - The first number it was given.
  * @property {number} to - The last number it was given, inclusive.
  * @property {number} head - The next number it will produce. Its position.
- * @property {number} speedX - Measured encode speed against realtime, from
- *   ffmpeg's own progress. Zero or less means nothing has measured it yet, and
- *   then no comparison involving its speed can be made.
+ * @property {number} speedX - The run's processing speed against realtime:
+ *   film made between closed pieces over its own working time
+ *   (`EncodeRun.speedX`), with input waits and stops taken out. Zero or less
+ *   means nothing has measured it yet, and then no comparison involving its
+ *   speed can be made.
  */
 
 /**

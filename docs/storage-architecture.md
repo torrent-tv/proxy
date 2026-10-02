@@ -167,6 +167,12 @@ finished pieces inside the ENCODING layer was the encoder owning its own disk.
 It did not move into the room's own directory either: it is a CLAIMANT, and a
 claimant inside the owner of the resource is the same fault one floor down.
 
+The store keeps a produced piece's bytes and the media intervals read from them;
+it does not judge whether a piece is whole. That is a fact of production, read
+against the output's cut table, and the encoding decides it
+(`encode/piece-completeness.js`): before a piece is published, and for a stored
+piece left by an earlier process, which it asks the store to `remove`.
+
 **Four directories, deliberately.** They share one property — bytes on a medium
 with a limit — and that is what makes them one layer. What they are is three
 different things: a torrent piece is born when it is downloaded and addressed by

@@ -338,9 +338,12 @@ viewer is decided here, per viewer, and each part of it is a measurement.
    next height, and the picture they see is not already served. A rung this
    host has been measured failing at is not offered, so the step back up cannot
    return to it; no window has to pass.
-6. **A step up is let go when its conditions go back**: a draining buffer, a
-   link that no longer carries the stream, or no room for the output. The page
-   drops the move it was preparing when the proxy stops asking for it.
+6. **A request stands for as long as its conditions hold**: each judgement
+   of the viewer's report asks for what it needs again, and a request it does
+   not repeat is let go — a draining buffer for a step up, a buffer that no
+   longer drains for a step down, no room for the output, a picture that is no
+   longer smaller. No chosen time ends a request. The page drops the move it
+   was preparing when the proxy stops asking for it.
 7. **The page switches a variant when the rung is ready**, and for a request
    that is not urgent only once it holds `minimumBufferSeconds`.
 

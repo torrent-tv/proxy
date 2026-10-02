@@ -255,8 +255,8 @@ test("the request reaches the browser in the progress report, and stops once the
   assert.equal(manager.viewers.get("viewer").qualityAsk, null, "and it is let go of, not merely hidden");
 });
 
-test("a request the player never follows runs out instead of being repeated for the whole film", async (t) => {
-  const { manager, dirPath } = await managerWithSession();
+test("a request stands while its conditions hold, and the next report that does not ask for it lets it go", async (t) => {
+  const { manager, session, dirPath } = await managerWithSession();
   t.after(async () => {
     await manager.lifecycle.disposeAll();
     // The store closes its watch on the directory as it drops the output, and
@@ -265,14 +265,37 @@ test("a request the player never follows runs out instead of being repeated for 
     await rm(dirPath, { recursive: true, force: true });
   });
 
-  // A viewer on a manual pick ignores every request by design, and so does a
-  // stream with no variants. Neither is an error; both look the same from here.
+  // Asked when their buffer was running dry; no chosen time ends it.
   manager.viewers.get("viewer").qualityAsk = { height: 480, at: Date.now() - 120_000, reason: "measured" };
+  const standing = await manager.viewerRequests.getSessionProgress(BASE_ID, "viewer");
+  assert.equal(standing.requestedHeight, 480, "two minutes on, it still stands: nothing has said otherwise");
+
+  // Their next report shows a buffer that grows: what it was asked for is gone.
+  fillingReports(manager.viewers.get("viewer"), null);
+  await manager.quality.noteViewerReported(session.id, "viewer");
 
   const progress = await manager.viewerRequests.getSessionProgress(BASE_ID, "viewer");
-
   assert.equal(progress.requestedHeight, 0);
-  assert.equal(manager.viewers.get("viewer").qualityAsk, null, "said once and let go");
+  assert.equal(manager.viewers.get("viewer").qualityAsk, null, "let go by the judgement that did not repeat it");
+});
+
+test("a request the next report asks for again stands", async (t) => {
+  const { manager, session, dirPath } = await managerWithSession();
+  t.after(async () => {
+    await manager.lifecycle.disposeAll();
+    await new Promise((resolve) => setImmediate(resolve));
+    await rm(dirPath, { recursive: true, force: true });
+  });
+  qualityStateOf(session).recentSpeed = { speed: 0.7, at: Date.now(), run: [...session.runs][0] };
+  drainingReports(manager.viewers.get("viewer"), 80);
+  await manager.quality.noteViewerReported(session.id, "viewer");
+  const asked = manager.viewers.get("viewer").qualityAsk;
+  assert.ok(asked, "the machine cannot keep up and the buffer runs dry");
+
+  drainingReports(manager.viewers.get("viewer"), 80);
+  await manager.quality.noteViewerReported(session.id, "viewer");
+
+  assert.equal(manager.viewers.get("viewer").qualityAsk, asked, "the same request, not let go and not made again");
 });
 
 test("a COPIED picture is never asked to slow its encoder, because it has none", async (t) => {

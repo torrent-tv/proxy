@@ -145,6 +145,16 @@ export function describeFfmpegArgs(args) {
 
 export class EncodeRuns {
   #inputState = new WeakMap();
+
+  /**
+   * Live runs by the number their input reads carry, so the stream route can
+   * say which run's input is waiting.
+   *
+   * @type {Map<number, import("./EncodeRun.js").EncodeRun>}
+   */
+  #runsByInputToken = new Map();
+
+  #lastInputToken = 0;
   /** What this reads and asks of the rest of the proxy, and nothing else. @type {object} */
   #host;
 
@@ -217,6 +227,27 @@ export class EncodeRuns {
     const output = this.#host.outputs.get(outputId);
     if (output) {
       this.#inputStateFor(output).inputBytes += bytes;
+    }
+  }
+
+  /**
+   * An input read of one run starts or stops waiting for bytes. Called by the
+   * `/stream` route around every wait for the next part of the file; see
+   * `RunClock` for what the time is used for.
+   *
+   * @param {number} runToken - From the read's own URL.
+   * @param {boolean} waiting
+   * @returns {void}
+   */
+  noteInputWaiting(runToken, waiting) {
+    const run = this.#runsByInputToken.get(runToken);
+    if (!run) {
+      return;
+    }
+    if (waiting) {
+      run.inputWaitBegins();
+    } else {
+      run.inputWaitEnds();
     }
   }
 
@@ -754,7 +785,9 @@ export class EncodeRuns {
     // shrinks in place as those are taken off. There is deliberately no method
     // wrapping it: a named adapter with one caller is a thing to remember to
     // delete, and this is a thing that disappears by being emptied.
-    const inputs = this.#host.inputOf(session);
+    this.#lastInputToken += 1;
+    const inputToken = this.#lastInputToken;
+    const inputs = this.#host.inputOf(session, inputToken);
     const { args, safeIndex, startSeconds, cutTimes } = buildRunCommand({
       keyframes: session.keyframes,
       inputFile: inputs.inputFile,
@@ -842,8 +875,12 @@ export class EncodeRuns {
             session.timeline.publishedStartOf(index + 1) - SEGMENT_CUT_TIME_DELTA_SECONDS : undefined
         });
       },
-      onEnded: (ended) => this.noteRunEnded(session, run, ended)
+      onEnded: (ended) => {
+        this.#runsByInputToken.delete(inputToken);
+        this.noteRunEnded(session, run, ended);
+      }
     });
+    this.#runsByInputToken.set(inputToken, run);
     // THE ONE FAULT THAT IS OTHERWISE SILENT, asked before this run produces a
     // frame. It lost its caller in a refactor on 2026-09-04 and had none until
     // 2026-09-15 — not by a decision, which is why it is back rather than gone.

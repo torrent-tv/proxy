@@ -1,3 +1,8 @@
+## 2.89.4
+
+- **Fix**: An encoder's speed is read over its own working time. The stream route says when a run's input starts and stops waiting for bytes, each input read carries the number of the run it feeds, and a run's clock (`RunClock`) takes out that waiting and the time it was stopped. Field 2026-10-01: a copy waited 32.93 s and 43.91 s for two pieces and read 0.21x, which the start forecast then carried over the whole remaining film while it charged the same download separately. The forecast's processing rate and the learned price of copying, decoding and soundtracks now measure the machine.
+- **Chore**: The three-second shortest window a speed was read over is gone: a speed is the difference of two samples taken at the encoder's own progress reports. So is the check that kept a starved reading out of the learned price, which judged starvation by two chosen numbers (`fileProgress >= 0.999` and a download rate against the file's byte rate); the waiting is now subtracted instead of guessed at.
+
 ## 2.89.3
 
 - **Chore**: The same release as 2.89.2, which the registry accepted as a staged version and never published (`409 Cannot publish over previously staged version` with no staged version listed).

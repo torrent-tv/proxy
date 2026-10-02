@@ -1,46 +1,68 @@
 /**
- * @file What two readings of a running encoder say about its speed.
+ * @file What two work samples of a running encoder say about its speed.
  *
- * The case this exists for is a COPY. ffmpeg's own cumulative `speed=` counts
- * the seconds the look-ahead cap keeps the encoder stopped, and a copy is
- * stopped for most of its life — reaching the cap in about fifteen seconds and
- * then waiting a minute. Read cumulatively, a copy running at 8x reports 1.6x,
- * which filed as the price of copying would refuse rungs on a measurement of a
- * pause.
+ * The cases this exists for: a copy whose cumulative speed counts the time it
+ * was stopped, and a run whose input waited for the swarm (field 2026-10-01: a
+ * copy read 0.21x after waiting 32.93 s and 43.91 s for two pieces). A work
+ * sample states the run's own working time, so neither enters the speed.
  */
 
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { speedFromReadings } from "../services/encode/encoder-readings.js";
+import { RunClock } from "../services/encode/RunClock.js";
+import { speedFromWork } from "../services/encode/encoder-readings.js";
 
-const at = (seconds, processedSeconds) => ({ takenAt: seconds * 1000, processedSeconds });
+const sample = (at, producedSeconds, workingMs) => ({ at, producedSeconds, workingMs });
 
-test("a copy producing eight seconds of video per second reads as eight", () => {
-  assert.equal(speedFromReadings(at(10, 100), at(15, 140), 3), 8);
+test("film made over the run's own work is the speed", () => {
+  assert.equal(speedFromWork(sample(10_000, 100, 5_000), sample(15_000, 140, 10_000)), 8);
 });
 
-test("a stretch too short to divide by says nothing", () => {
-  assert.equal(speedFromReadings(at(10, 100), at(11, 108), 3), null);
+test("a stretch with nothing made says nothing", () => {
+  assert.equal(speedFromWork(sample(10_000, 100, 5_000), sample(20_000, 100, 15_000)), null);
 });
 
-test("a run that produced nothing between the readings says nothing", () => {
-  // What a repositioned run looks like before it reaches its new start.
-  assert.equal(speedFromReadings(at(10, 100), at(20, 100), 3), null);
+test("a run that went backwards says nothing rather than a negative speed", () => {
+  assert.equal(speedFromWork(sample(10_000, 200, 5_000), sample(20_000, 100, 15_000)), null);
 });
 
-test("a run that went BACKWARDS says nothing rather than a negative speed", () => {
-  assert.equal(speedFromReadings(at(10, 200), at(20, 100), 3), null);
+test("a missing sample is not an answer", () => {
+  assert.equal(speedFromWork(null, sample(20_000, 100, 1_000)), null);
+  assert.equal(speedFromWork(sample(10_000, 100, 1_000), null), null);
 });
 
-test("a missing reading is not an answer", () => {
-  assert.equal(speedFromReadings(null, at(20, 100), 3), null);
-  assert.equal(speedFromReadings(at(10, 100), null, 3), null);
+test("waiting for the input and being stopped are not working time", () => {
+  let now = 0;
+  const clock = new RunClock({ now: () => now });
+  now = 2_000;
+  clock.inputWaitBegins();
+  now = 34_930; // the field's 32.93 s wait for one piece
+  clock.inputWaitEnds();
+  now = 36_000;
+  clock.stopped();
+  now = 50_000;
+  clock.continued();
+  now = 51_000;
+  assert.equal(clock.workingMs(), 2_000 + 1_070 + 1_000);
 });
 
-test("the pair is judged on wall clock, so a pause between them is the caller's problem", () => {
-  // Deliberate: this function cannot see a pause. The session drops its
-  // previous reading whenever the encoder is stopped or restarted, which is
-  // what makes every surviving pair an uninterrupted stretch.
-  assert.equal(speedFromReadings(at(0, 0), at(60, 60), 3), 1);
+test("two inputs waiting at once, or a wait while stopped, are idle once", () => {
+  let now = 0;
+  const clock = new RunClock({ now: () => now });
+  clock.inputWaitBegins();
+  now = 1_000;
+  clock.inputWaitBegins();
+  clock.stopped();
+  now = 3_000;
+  clock.inputWaitEnds();
+  clock.continued();
+  now = 4_000;
+  clock.inputWaitEnds();
+  now = 5_000;
+  assert.equal(clock.workingMs(), 1_000);
+  // An ongoing wait is idle up to the moment asked.
+  clock.inputWaitBegins();
+  now = 6_000;
+  assert.equal(clock.workingMs(), 1_000);
 });

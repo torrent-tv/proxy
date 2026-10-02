@@ -25,7 +25,7 @@ function costOf(sessions, host = {}) {
   return new EncodeCost({
     runsFor: () => [],
     stateFor: () => "IDLE",
-    progressFor: () => null,
+    workSampleFor: () => null,
     outputs,
     host: () => ({
       benchmark: host.benchmark ?? null,

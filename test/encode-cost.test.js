@@ -39,10 +39,9 @@ function costOn(readings = {}) {
     runningEncoders: () => readings.runningEncoders?.() ?? 0,
     encodersRunningNow: () => 0,
     torrentCostSecFor: () => 0,
-    boundBy: async () => readings.boundBy ?? "cpu",
     runsFor: (session) => [...(session.runs ?? [])],
     stateFor: (session) => runStateOf(session.runs),
-    progressFor: (session) => session.progress ?? null
+    workSampleFor: (session) => session.work ?? null
   });
   return { cost, asked: () => asked, host };
 }
@@ -64,7 +63,7 @@ function sessionProducing(what = {}) {
     }),
     file: { key: what.key ?? "torrent:abc:0", name: "film.mkv" },
     output: { encodeWidth: 0, encodeHeight: 0, outputFps: 25, softwarePreset: null },
-    progress: { processedSeconds: 0 },
+    work: { at: 0, producedSeconds: 0, workingMs: 0 },
     runs: new Set()
   };
   startRunOn(session, { from: 0, speedX: 1 });
@@ -72,21 +71,20 @@ function sessionProducing(what = {}) {
 }
 
 /**
- * Two readings of one run, far enough apart to be a speed.
+ * Two work samples of one run.
  *
  * @param {EncodeCost} cost
  * @param {object} session
- * @param {number} speedX - Seconds of film produced per second of clock.
+ * @param {number} speedX - Seconds of film produced per second of the run's own work.
+ * @param {number} [waitedMs] - Of the ten seconds between the samples, how long
+ *   the run's input waited for the swarm.
  * @returns {Promise<void>}
  */
-async function watchItRun(cost, session, speedX) {
-  session.progress.processedSeconds = 0;
+async function watchItRun(cost, session, speedX, waitedMs = 0) {
+  session.work = { at: 0, producedSeconds: 0, workingMs: 0 };
   await cost.learnFrom(session);
-  // The pair is a DELTA, and the first reading has nothing to be a delta from.
-  // Backdated rather than waited for: the window a speed may be read over is
-  // seconds, and a test that sleeps through it measures the clock.
-  qualityStateOf(session).learnSample.takenAt -= 10_000;
-  session.progress.processedSeconds = 10 * speedX;
+  // The pair is a DELTA, and the first sample has nothing to be a delta from.
+  session.work = { at: 10_000, producedSeconds: (10_000 - waitedMs) / 1000 * speedX, workingMs: 10_000 - waitedMs };
   await cost.learnFrom(session);
 }
 
@@ -163,17 +161,16 @@ test("a copy is priced from what it was seen doing", async () => {
   );
 });
 
-test("a reading taken while the swarm is short is not filed as the price of this host", async () => {
-  // A run starved of torrent data reports a speed that measures the swarm. Filed
-  // as a price it reads as more work per second than the machine has, and every
-  // quality step is then refused on the download's account.
-  const { cost } = costOn({ boundBy: "download" });
+test("the time a run's input waited for the swarm is not in the price of this host", async () => {
+  // Field 2026-10-01: a copy waited 32.93 s and 43.91 s for two pieces and read
+  // 0.21x over the clock. Over its own working time it is the machine's speed.
+  const { cost } = costOn();
   const session = sessionProducing({ transcodeVideo: false });
 
-  await watchItRun(cost, session, 0.3);
+  await watchItRun(cost, session, 8, 9_000);
 
-  assert.equal(cost.copyVersionFor("torrent:abc:0"), 0, "nothing was learned about the machine");
-  assert.equal(qualityStateOf(session).lastAloneSpeed, undefined, "and nothing claims this rung was seen failing");
+  assert.equal(qualityStateOf(session).lastAloneSpeed, 8, "the speed is the run's own, not the swarm's");
+  assert.equal(cost.copyVersionFor("torrent:abc:0"), 1, "and it is filed as what copying costs here");
 });
 
 test("a picture's reading taken beside another encoder is not filed", async () => {
@@ -192,7 +189,7 @@ test("a picture's reading taken beside another encoder is not filed", async () =
 test("one reading is not a speed", async () => {
   const { cost } = costOn();
   const session = sessionProducing({ transcodeVideo: false });
-  session.progress.processedSeconds = 40;
+  session.work = { at: 5_000, producedSeconds: 40, workingMs: 5_000 };
 
   await cost.learnFrom(session);
 
@@ -204,13 +201,12 @@ test("a pair that straddles a restart measures the seek, not the host", async ()
   const { cost } = costOn();
   const session = sessionProducing({ transcodeVideo: false });
   await cost.learnFrom(session);
-  qualityStateOf(session).learnSample.takenAt -= 10_000;
   // A new run, at another place in the film: twenty minutes of film against five
-  // seconds of clock is a seek, and filed as a price it admits every step there
+  // seconds of work is a seek, and filed as a price it admits every step there
   // is.
   session.runs = new Set();
   startRunOn(session, { from: 300, speedX: 1 });
-  session.progress.processedSeconds = 1200;
+  session.work = { at: 5_000, producedSeconds: 1200, workingMs: 5_000 };
 
   await cost.learnFrom(session);
 

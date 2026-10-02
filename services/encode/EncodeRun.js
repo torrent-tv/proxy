@@ -39,6 +39,7 @@
 
 import { ENCODE_RUN_EVENT, ENCODE_RUN_STATE, INITIAL_RUN_STATE, nextState } from "./encode-run-state.js";
 import { classifyEncodeExit, ENCODE_EXIT } from "./encode-exit.js";
+import { RunClock } from "./RunClock.js";
 import { RunProgress } from "./RunProgress.js";
 
 /** Microseconds in a second, as ffmpeg's `out_time_ms` counts them. */
@@ -153,6 +154,9 @@ export class EncodeRun {
   /** @type {number} */
   #speedX = 0;
 
+  /** The film made and the run's own working time, as of the last progress report. */
+  #workSample = null;
+
   /** @type {boolean} */
   #stopping = false;
 
@@ -242,6 +246,8 @@ export class EncodeRun {
     this.logger = logger;
     this.now = typeof now === "function" ? now : Date.now;
     this.progress = new RunProgress({ startSeconds, totalSeconds, now: this.now });
+    /** Where this run's time went: its own work, or waiting, or stopped. */
+    this.clock = new RunClock({ now: this.now });
     this.onEnded = typeof onEnded === "function" ? onEnded : () => {};
     this.onProgress = typeof onProgress === "function" ? onProgress : () => {};
     // Told the NAME of every piece the encoder has closed. The name is the
@@ -353,6 +359,28 @@ export class EncodeRun {
    */
   get isStopping() {
     return this.#stopping && !this.#ended;
+  }
+
+  /**
+   * The film this run has made and the milliseconds of its own work it took,
+   * both as of its last progress report, so the two belong to one moment. The
+   * difference of two samples of one run is its processing speed, free of the
+   * time its input waited and the time it was stopped.
+   *
+   * @returns {{ at: number, producedSeconds: number, workingMs: number } | null}
+   */
+  get workSample() {
+    return this.#workSample;
+  }
+
+  /** An input read of this run starts waiting for bytes; see {@link RunClock}. */
+  inputWaitBegins() {
+    this.clock.inputWaitBegins();
+  }
+
+  /** An input read of this run has its bytes. */
+  inputWaitEnds() {
+    this.clock.inputWaitEnds();
   }
 
   /** @returns {boolean} Whether it is stopped where it stands, producing nothing. */
@@ -473,6 +501,14 @@ export class EncodeRun {
 
   #reportProgress(report) {
     this.progress.note(report);
+    if (Number.isFinite(report.processedSeconds) || typeof report.outTime === "string") {
+      const at = this.now();
+      this.#workSample = {
+        at,
+        producedSeconds: Math.max(0, this.progress.processedSeconds - this.progress.startPositionSeconds),
+        workingMs: this.clock.workingMs(at)
+      };
+    }
     this.onProgress(this.progress.snapshot());
   }
 
@@ -611,6 +647,7 @@ export class EncodeRun {
       return false;
     }
     this.#transition(ENCODE_RUN_EVENT.SUSPEND_ORDERED);
+    this.clock.stopped();
     this.logger.info(`encode-run #${this.from}..#${this.to} suspended — ${reason}`);
     return true;
   }
@@ -656,6 +693,7 @@ export class EncodeRun {
       continued = false;
     }
     this.#transition(ENCODE_RUN_EVENT.RESUMED);
+    this.clock.continued();
     return continued;
   }
 

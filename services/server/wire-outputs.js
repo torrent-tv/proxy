@@ -809,11 +809,11 @@ export function wireOutputs({
     runningEncoders: () => parts.encodeOrchestrator.runningCount(),
     encodersRunningNow: () => parts.encodeOrchestrator.runningCount(),
     torrentCostSecFor: (session) => parts.hostLoad.torrentCostSecFor(session),
-    boundBy: (session) => parts.quality.classifyTranscodeBound(session),
     runsFor: (session) => parts.encodeRuns.runsOf(session),
     stateFor: (session) => parts.encodeRuns.runStateOf(session),
-    // The run's OWN progress: a speed is a pair of readings of one process.
-    progressFor: (_session, run) => run?.progress?.snapshot?.() ?? null
+    // The run's OWN work: a speed is a pair of samples of one process, over
+    // the time it worked rather than the time its input waited.
+    workSampleFor: (_session, run) => run?.workSample ?? null
   });
   // WHICH HEIGHTS ARE ON THE MENU, which is the arithmetic above plus three
   // things that are nothing to do with it: whose answer it is, what may never

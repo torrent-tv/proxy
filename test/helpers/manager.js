@@ -45,6 +45,11 @@ export function managerWithOwnStore(options = {}) {
     ffmpegBin: "ffmpeg",
     localBindHost: "127.0.0.1",
     localPort: 9090,
+    // What this host has measured about itself is kept beside the store, not
+    // beside the installed proxy: read from there, one run's figures became
+    // the next run's premises, and a check passed only on a machine that had
+    // run the suite before.
+    stateDir: root,
     ...options,
     segmentStore: store
   });

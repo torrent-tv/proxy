@@ -13,6 +13,7 @@ import { SourceFile } from "../services/media/SourceFile.js";
 import { Timeline } from "../services/encode/output/Timeline.js";
 import { fmp4Format } from "../services/encode/segment-formats/fmp4.js";
 import { Output } from "../services/encode/output/Output.js";
+import { qualityStateOf } from "../services/encode/quality/OutputQualityState.js";
 
 const TORRENT = "torrent:11f0929918e2b5aa2e5b71ecdbe5c0f1a4bbf7d1";
 
@@ -57,6 +58,11 @@ function hostWithA1080pOutput(t) {
     useSyntheticPlaylist: true
   };
   manager.outputs.set(made.id, made);
+  // WHAT ITS ENCODER WAS SEEN DOING. Its first piece is made, so an encoder ran
+  // on it here; a viewer put on it now needs one again, and a place for one is
+  // asked by what one costs — with no measured cost the proxy refuses (roadmap
+  // item 97, step 14).
+  qualityStateOf(made).lastAloneSpeed = 2;
   return { manager, made };
 }
 

@@ -1,3 +1,14 @@
+## 2.89.6
+
+- **Chore**: Seventeen checks that failed on an unmodified checkout are brought in line with the system they check; no service code changes. Each followed a change of the system that its test did not follow:
+  - the encoder's measured modes are read through the encoder in use since 2.87.0 and cannot be assigned afterwards, so the checks state them when the manager is built, and a second host is built where a check compares two (`auto-quality-step`, `quality-variants`, `two-viewers-one-picture`, `decode-cost`). The speed a file's supply demands is the file's, asked of the host's load, not a field on a session;
+  - a viewer is placed on an output only when its encoding cost is measured (2.87.0): fixtures that open or prepare an output state what one encoder costs, or what the output's own encoder was seen doing (`quality-variants`, `serving-existing-output`);
+  - checks that keep the plan out of the path under test do so before a viewer is registered, because registering one now asks for a plan (`quality-variants`);
+  - an output is named by its format, so a request clamped onto a picture already made is answered by that output; the fake opening honours it (`quality-variants`);
+  - the encoder in use is `encoders.current` (`format-keyed-outputs`), an output's header is the segment store's (`segment-judged-by-its-own-header`), the opening path reports to the viewer (`viewer-requests-admission`), and serving a session file lives in `services/server/transcode-session-files.js` (`viewing-generations`);
+  - the self-contained piece of `segment-serve-wiring` carries a whole version 0 `elst` entry (ISO/IEC 14496-12: twelve bytes, with the media rate), and the store keeps the header production keeps, prepared by `prepareSharedInit`. Without either the piece's position was read as zero on both sides;
+  - managers built by `test/helpers/manager.js` keep host measurements beside their own store instead of beside the installed proxy. Two checks passed only on a machine whose earlier runs had left `host-timings.json` there; they now state the first-segment time they rely on (8.4 s, field 2026-08-31).
+
 ## 2.89.5
 
 - **Fix**: A segment store's watch on an output's directory ends when that directory is removed by anything other than `drop`. On Windows the watch emits no `error` for it, and reports `rename` for the removed directory without end — measured 2026-10-02 on Node 24.2, 232 618 events in eight seconds — which kept the process alive; `test/segments-are-shared.test.js` and `test/segment-store-eviction.test.js` passed every check and never exited. A directory made again under the same name is watched again: the dead watch used to stay registered and stop a new one being made, so a wait for a piece there ended only on its deadline.

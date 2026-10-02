@@ -7,7 +7,6 @@
  * rest of the proxy is the host object it is built with, and nothing else.
  */
 
-import { stat } from "node:fs/promises";
 import { logger } from "../../../utils/logger.js";
 import { linkCouldCarry, loadOf } from "./link-budget.js";
 import { qualityStateOf } from "./OutputQualityState.js";
@@ -30,11 +29,8 @@ export const BUDGET_CHECK_INTERVAL_MS = 5_000;
 // times as long before stepping back up, a safety share of the link and a
 // chosen test for a download-starved input stood here; all are gone. A manual
 // viewer is never sent an automatic quality request.
-// Observed produced bitrate: average over this many recently completed
-// segments (the newest file on disk may still be written and is excluded).
-const LINK_OBSERVED_SEGMENTS = 5;
 
-/** @typedef {{ pathOf: (address: string, index: number) => string | null }} SegmentPathLookup */
+/** @typedef {{ pathOf: (address: string, index: number) => string | null, sizesOf: (address: string) => Map<number, number> }} SegmentPathLookup */
 
 export class QualityController {
   /** What this reads and asks of the rest of the proxy, and nothing else. @type {object} */
@@ -629,48 +625,31 @@ export class QualityController {
   }
 
   /**
-   * Observed produced bitrate (Mbit/s) averaged over the last few COMPLETED
-   * segment files (the newest file may still be being written and is
-   * excluded). Transcode sessions only — their segment grid is uniform, so
-   * bytes / (count × segDur) is exact. Returns null when there is not enough
-   * material to measure.
+   * Observed produced bitrate (Mbit/s): every finished piece of this output,
+   * its bytes over its own length on the cut table. A published piece is
+   * closed, so none is excluded, and no chosen number of recent pieces stands
+   * in for the stream. Null while nothing is finished.
    *
    * @param {HlsSession} session
    * @returns {Promise<number | null>}
    */
   async observedStreamMbps(session) {
-    let names;
-    try {
-      names = this.#host.producedNumbers(session).map((index) => session.segmentFormat.segmentFileName(index));
-    } catch {
-      return null;
-    }
-    const indices = [];
-    for (const name of names) {
-      const index = session.segmentFormat.segmentIndexFromName(name);
-      if (index >= 0) {
-        indices.push(index);
-      }
-    }
-    if (indices.length < 3) {
-      return null; // need ≥2 completed segments after dropping the newest
-    }
-    indices.sort((a, b) => a - b);
-    const completed = indices.slice(0, -1).slice(-LINK_OBSERVED_SEGMENTS);
+    // Every finished piece, each over its own length on the output's cut
+    // table: a copy is cut at the source's keyframes, so its pieces are not
+    // one length. The store knows their sizes; nothing is read from the disk.
+    const sizes = this.#host.segmentPaths.sizesOf(session.outputKey ?? "");
     let bytes = 0;
-    try {
-      for (const index of completed) {
-        const segmentPath = this.#host.segmentPaths.pathOf(session.outputKey ?? "", index);
-        if (!segmentPath) {
-          break;
-        }
-        const st = await stat(segmentPath);
-        bytes += st.size;
+    let seconds = 0;
+    for (const [index, size] of sizes) {
+      const length = session.timeline
+        ? session.timeline.publishedStartOf(index + 1) - session.timeline.publishedStartOf(index)
+        : this.#host.segmentDurationSec;
+      if (size > 0 && length > 0) {
+        bytes += size;
+        seconds += length;
       }
-    } catch {
-      return null; // a segment vanished mid-measure (seek-restart cleanup)
     }
-    return (bytes * 8) / (completed.length * this.#host.segmentDurationSec) / 1e6;
+    return seconds > 0 ? (bytes * 8) / seconds / 1e6 : null;
   }
 
   /**

@@ -1,3 +1,7 @@
+## 2.89.3
+
+- **Chore**: The same release as 2.89.2, which the registry accepted as a staged version and never published (`409 Cannot publish over previously staged version` with no staged version listed).
+
 ## 2.89.2
 
 - **Fix**: Whether buffered media is continuous is decided in exact time. A piece's media is read as integer ticks of its track's timescale, and the page's seconds are converted to the exact binary fractions they are. Measured 2026-10-02 on a served film: seven joins whose ticks were equal read as `88.67299999999999` against `88.673` and were taken for holes.

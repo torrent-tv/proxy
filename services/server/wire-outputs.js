@@ -257,7 +257,8 @@ export function wireOutputs({
     useFormat: (address, format) => parts.segmentStore.useFormat(address, format)
   };
   const segmentPaths = {
-    pathOf: (address, index) => parts.segmentStore.pathOf(address, index)
+    pathOf: (address, index) => parts.segmentStore.pathOf(address, index),
+    sizesOf: (address) => parts.segmentStore.sizesOf(address)
   };
   /**
    * Whether everything this output will ever serve is made: every segment of

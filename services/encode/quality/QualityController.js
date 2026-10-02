@@ -18,13 +18,6 @@ import { visibleHeightCap } from "./visible-rung.js";
 // A sampling period of the machine, not a quality decision: every decision
 // about a viewer's quality is taken on that viewer's report.
 export const BUDGET_CHECK_INTERVAL_MS = 5_000;
-// How long a request to the player to change variant stands before it is
-// treated as unanswered. A progress report is polled about every 1.5 s and the
-// switch itself needs the rung warmed, which is the cold start this host
-// measures; this is long enough for both and short enough that a browser which
-// cannot honour the request (no master playlist, a viewer on a manual pick) is
-// not chased for the rest of the film.
-const QUALITY_ASK_TTL_MS = 45_000;
 // Every quality step is judged on a report a viewer makes, for that viewer
 // alone (roadmap item 98). DOWN: their buffer, on its present trend, would run
 // dry before another output could have the piece they need (`drain-threat.js`),
@@ -52,6 +45,14 @@ export class QualityController {
 
   /** Viewers whose report is being judged now (`noteViewerReported`). @type {Set<string>} */
   #judging = new Set();
+
+  /**
+   * Viewers whose standing request the judgement of their current report asked
+   * for again. A request stands for as long as the conditions it was asked
+   * under hold, and only a judgement can say they do; one it did not repeat is
+   * let go. @type {Set<string>}
+   */
+  #affirmed = new Set();
 
   /**
    * @param {object} host - `isLive`, `liveConsumers`, `liveRunsOf`, `producedNumbers`, `reportHostLoad`, `runStateOf`, `sampleDownloadRates`, `encodeCost`, `outputs`, `qualityOffer`, `segmentDurationSec`, `segmentPaths`, `videoEncoder`, `prepareSameHeightSwitch`, `sameHeightSwitchPending`, `sameHeightSwitchDirection`, `cancelSameHeightSwitch`, `heightReadyFor`, `bufferOf`, `visiblePictureOf`, `expectedFirstSegmentMs`
@@ -226,6 +227,7 @@ export class QualityController {
     }
     const now = Date.now();
     const asked = [];
+    const affirmed = [];
     const playing = [];
     for (const consumerId of this.#host.consumersOn(base)) {
       if (this.#host.qualityModeOf(base, consumerId) !== "auto") {
@@ -243,15 +245,20 @@ export class QualityController {
         continue;
       }
       const standing = this.#host.standingAskOf(base, consumerId);
-      if (standing && standing.height === height && now - standing.at < QUALITY_ASK_TTL_MS) {
+      if (standing && standing.height === height) {
+        this.#affirmed.add(consumerId);
+        affirmed.push(consumerId);
         continue;
       }
       if (this.#host.askQualityOf(base, consumerId, height, reasonText, now, urgent)) {
+        this.#affirmed.add(consumerId);
         asked.push(consumerId);
       }
     }
     if (asked.length === 0) {
-      return false;
+      // Asked already and asked again: true, so a caller does not go on to say
+      // that nothing could be prepared; nothing new is written.
+      return affirmed.length > 0;
     }
     logger.info(
       `[budget] transcode ${base.id} asks the player to move ${playing.join("p/")}p → ${height}p${urgent ? " (urgent)" : ""}: ${reasonText} ` +
@@ -400,19 +407,50 @@ export class QualityController {
       return;
     }
     this.#judging.add(consumerId);
+    this.#affirmed.delete(consumerId);
+    const standingBefore = this.#host.standingAskOf(base, consumerId);
     try {
-      if (this.#host.videoEncoder?.kind === "software" &&
-        (await this.#checkSupply(session, consumerId))) {
-        return;
-      }
-      if (this.#checkVisiblePicture(session, consumerId)) {
-        return;
-      }
-      if (this.#host.videoEncoder?.kind === "software") {
-        await this.#checkStepUp(session, consumerId);
+      await this.#judge(session, consumerId);
+      // A request this judgement did not ask for again no longer has the
+      // conditions it was asked under: their buffer stopped draining, the room
+      // for a step up went, or the smaller picture is no longer smaller. It is
+      // let go here, and their page drops the move it was preparing.
+      const standing = this.#host.standingAskOf(base, consumerId);
+      // The same request, not one made meanwhile: compared by what it is, since
+      // it is read as a copy.
+      const unchanged = standing && standingBefore &&
+        standing.height === standingBefore.height && standing.at === standingBefore.at;
+      if (unchanged && !this.#affirmed.has(consumerId)) {
+        this.#host.dropAskOf(base, consumerId);
+        logger.info(
+          `[budget] transcode ${base.id} no longer asks ${consumerId} for ${standing.height}p: ` +
+            `the conditions it was asked under (${standing.reason}) no longer hold`
+        );
       }
     } finally {
+      this.#affirmed.delete(consumerId);
       this.#judging.delete(consumerId);
+    }
+  }
+
+  /**
+   * One judgement of one viewer's report, in order: what they are given against
+   * what keeps up, the picture they see, and the room for more.
+   *
+   * @param {HlsSession} session - The output on their screen.
+   * @param {string} consumerId
+   * @returns {Promise<void>}
+   */
+  async #judge(session, consumerId) {
+    if (this.#host.videoEncoder?.kind === "software" &&
+      (await this.#checkSupply(session, consumerId))) {
+      return;
+    }
+    if (this.#checkVisiblePicture(session, consumerId)) {
+      return;
+    }
+    if (this.#host.videoEncoder?.kind === "software") {
+      await this.#checkStepUp(session, consumerId);
     }
   }
 
@@ -654,10 +692,11 @@ export class QualityController {
    * The height this proxy is asking the player to move to, or 0.
    *
    * Cleared the moment the viewer is on it — the request has been answered —
-   * and dropped when it runs out, which is the only sign this side ever gets
-   * that a player could not or would not follow it. A browser on a manual pick
-   * ignores every request by design, so an unanswered one is not an error; it
-   * is said once and let go, rather than repeated for the rest of the film.
+   * and let go by the judgement of their next report that does not ask for it
+   * again (`noteViewerReported`): a request stands for as long as the
+   * conditions it was asked under hold, not for a chosen time. A player that
+   * cannot follow it reads it in every progress answer and does nothing, which
+   * costs nothing; it is written to the log once, when it is made.
    *
    * @param {HlsSession} named - The session the browser addressed.
    * @returns {number}
@@ -676,14 +715,6 @@ export class QualityController {
     const current = onScreen ? this.#host.outputs.get(onScreen) : base;
     if (this.#host.outputs.variantHeightOf(current ?? base) === ask.height) {
       this.#host.dropAskOf(base, consumerId); // this viewer is there; nothing left to ask for
-      return 0;
-    }
-    if (Date.now() - ask.at > QUALITY_ASK_TTL_MS) {
-      this.#host.dropAskOf(base, consumerId);
-      logger.info(
-        `[budget] transcode ${base.id} asked viewer ${consumerId || "unnamed"} for ${ask.height}p and the player stayed where it was ` +
-          `(${ask.reason}); letting the request go`
-      );
       return 0;
     }
     return ask.height;

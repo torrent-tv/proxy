@@ -142,7 +142,7 @@ function fakeSession({ id = SESSION_ID } = {}) {
     useSyntheticPlaylist: true,
     playlistText: "#EXTM3U\n",
     segmentCount: 10,
-    progress: { state: "running", processedSeconds: 0, startPositionSeconds: 0, speed: "1.0x" }
+    progress: { state: "running", processedSeconds: 0, startPositionSeconds: 0 }
   };
 }
 
@@ -182,7 +182,6 @@ test("the progress report keeps every figure it carries today", async () => {
     "percent",
     "remainingSeconds",
     "segmentDurationSec",
-    "speed",
     "currentHeight",
     "offeredHeights",
     "requestedHeight",

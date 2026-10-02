@@ -13,8 +13,6 @@ export function qualityStateOf(output) {
     state = {
       predictedSpeedWhenOffered: null,
       lastPredictionRatio: null,
-      recentSpeed: null,
-      learnSample: undefined,
       lastAloneSpeed: undefined,
       saidNoVariants: undefined,
       offeredHeightsVersion: undefined,

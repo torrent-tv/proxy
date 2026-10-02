@@ -640,6 +640,22 @@ different figures, none of which reproduced the answer the plan had given.
 A zero in `firstByte`, `kill` or `refetch` is a measurement nobody has taken, not
 a free operation. It is printed so that reading it as free is a choice.
 
+**`speed` has one owner: the run.** `EncodeRun.speedX` is the film a run made
+between two closed pieces over its own working time (`encode/RunClock.js`), so
+the time its input waited for the swarm and the time it was stopped are not in
+it. The run announces each reading once (`onSpeedMeasured`); `EncodeCost` learns
+the price of the output from it, the quality budget and the playback forecast
+read the newest reading of the output's runs, and the plan reads the runs
+themselves. Before a run has closed two pieces, and after a restart, the plan
+uses `startingSpeedFor`: what this output was last measured doing alone, or
+what the startup measurements predict. Nothing keeps a copy across restarts,
+and ffmpeg's cumulative `speed=` is read by nothing: it divides by every second
+the encoder was stopped or starved.
+
+What the swarm delivers is not in this figure, by construction. It is the
+separate supply term `refetch`, and while that is unmeasured (printed as zero)
+the plan's arrivals assume the input keeps up.
+
 It was missing, and its absence cost three wrong diagnoses of one field session.
 The line printed the windows, the budget and where the live runs stood; the
 intervals the actions carried were the one thing it did not print. What that

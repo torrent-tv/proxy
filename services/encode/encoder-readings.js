@@ -8,11 +8,11 @@
  * field on 2026-10-01, and the forecast carried that over the whole film while
  * charging the same download separately.
  *
- * A run's work sample (`EncodeRun.workSample`) states the film made and the
- * milliseconds of the run's OWN work, with input waits and stops taken out
- * (`RunClock`). Two samples of one run give its processing speed over the
- * stretch between them, whatever that stretch's length: the samples are taken
- * at ffmpeg's own progress reports, so there is no window to choose.
+ * A run's work sample states the film made and the milliseconds of the run's
+ * OWN work, with input waits and stops taken out (`RunClock`). Two samples of
+ * one run give its processing speed over the stretch between them; the run
+ * takes them when it closes pieces (`EncodeRun.speedReading`), so there is no
+ * window to choose.
  */
 
 /**

@@ -28,22 +28,18 @@ export class RunProgress {
     this.totalSeconds = Number.isFinite(totalSeconds) && totalSeconds > 0 ? totalSeconds : null;
     this.percent = null;
     this.remainingSeconds = this.totalSeconds;
-    this.speed = "";
     this.updatedAt = now();
     this.lastLoggedAt = 0;
     this.now = now;
     this.#derive();
   }
 
-  note({ processedSeconds = null, outTime, speed = null }) {
+  note({ processedSeconds = null, outTime }) {
     const relative = Number.isFinite(processedSeconds)
       ? processedSeconds
       : parseTimestamp(outTime);
     if (relative !== null) {
       this.processedSeconds = this.startPositionSeconds + Math.max(0, relative);
-    }
-    if (typeof speed === "string") {
-      this.speed = speed;
     }
     this.updatedAt = this.now();
     this.#derive();
@@ -65,7 +61,6 @@ export class RunProgress {
       totalSeconds: this.totalSeconds,
       percent: this.percent,
       remainingSeconds: this.remainingSeconds,
-      speed: this.speed,
       updatedAt: this.updatedAt
     };
   }

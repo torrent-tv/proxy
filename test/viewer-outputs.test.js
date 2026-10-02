@@ -98,7 +98,7 @@ function fakeSession({ id, dirPath, file, encodeHeight = 0, audioOnly = false, i
     useSyntheticPlaylist: true,
     playlistText: "#EXTM3U\n",
     segmentCount: 100,
-    progress: { state: "running", processedSeconds: 0, startPositionSeconds: 0, speed: "1.0x" }
+    progress: { state: "running", processedSeconds: 0, startPositionSeconds: 0 }
   };
 }
 

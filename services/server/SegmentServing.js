@@ -607,7 +607,9 @@ export class SegmentServing {
       : this.#host.runStartTimeFor(session, this.#host.encodeRuns.earliestStartOf(session) ?? 0);
     const position = Number(progress?.processedSeconds);
     const produced = Number.isFinite(position) ? position - runStartSeconds : null;
-    const speed = progress?.speed || "n/a";
+    const measured = this.#host.encodeRuns.liveRunsOf(session)
+      .reduce((best, run) => Math.max(best, run.speedX || 0), 0);
+    const speed = measured > 0 ? `${measured.toFixed(2)}x` : "n/a";
     logger.warn(
       `transcode ${session.id} holding ${fileName}: ${reason} ` +
       `(runs from #${this.#host.encodeRuns.earliestStartOf(session) ?? "?"}, viewer at #${this.#host.outputTimes.segmentIndexForTime(session, this.#host.viewerSecondsOn(session))}, ` +

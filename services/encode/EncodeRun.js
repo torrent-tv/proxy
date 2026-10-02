@@ -39,6 +39,7 @@
 
 import { ENCODE_RUN_EVENT, ENCODE_RUN_STATE, INITIAL_RUN_STATE, nextState } from "./encode-run-state.js";
 import { classifyEncodeExit, ENCODE_EXIT } from "./encode-exit.js";
+import { speedFromWork } from "./encoder-readings.js";
 import { RunClock } from "./RunClock.js";
 import { RunProgress } from "./RunProgress.js";
 
@@ -151,11 +152,14 @@ export class EncodeRun {
    */
   #firstOutputAt = 0;
 
-  /** @type {number} */
-  #speedX = 0;
-
   /** The film made and the run's own working time, as of the last progress report. */
   #workSample = null;
+
+  /** The work sample taken when this run last measured its speed. */
+  #pieceSample = null;
+
+  /** @type {{ speed: number, at: number } | null} */
+  #speedReading = null;
 
   /** @type {boolean} */
   #stopping = false;
@@ -190,6 +194,9 @@ export class EncodeRun {
    * @param {{ info: (line: string) => void, warn: (line: string) => void, error?: (line: string) => void }} params.logger
    * @param {() => number} [params.now]
    * @param {(ended: RunEnded) => void} [params.onEnded]
+   * @param {(reading: { speed: number, at: number }) => void} [params.onSpeedMeasured] -
+   *   Told each time this run has measured its processing speed, once per
+   *   reading.
    * @param {(name: string) => string | null} [params.onClosed] - Called with the
    *   WORKING name of every piece the encoder has finished writing, as the
    *   encoder itself names it on its own channel, and answers with the name that
@@ -226,6 +233,7 @@ export class EncodeRun {
     logger,
     now,
     onEnded,
+    onSpeedMeasured,
     onClosed,
     onProgress,
     lastSegmentIndex,
@@ -250,6 +258,7 @@ export class EncodeRun {
     this.clock = new RunClock({ now: this.now });
     this.onEnded = typeof onEnded === "function" ? onEnded : () => {};
     this.onProgress = typeof onProgress === "function" ? onProgress : () => {};
+    this.onSpeedMeasured = typeof onSpeedMeasured === "function" ? onSpeedMeasured : () => {};
     // Told the NAME of every piece the encoder has closed. The name is the
     // proof it is whole; nothing else here can prove that.
     this.onClosed = typeof onClosed === "function" ? onClosed : (name) => name;
@@ -270,9 +279,25 @@ export class EncodeRun {
     return this.#state;
   }
 
-  /** @returns {number} */
+  /**
+   * This run's processing speed: film made over its own working time between
+   * two closed pieces, with the time its input waited and the time it was
+   * stopped taken out (`RunClock`). Zero until two pieces have closed.
+   *
+   * @returns {number}
+   */
   get speedX() {
-    return this.#speedX;
+    return this.#speedReading?.speed ?? 0;
+  }
+
+  /**
+   * The same speed with the moment it was measured, or null before a second
+   * piece has closed.
+   *
+   * @returns {{ speed: number, at: number } | null}
+   */
+  get speedReading() {
+    return this.#speedReading === null ? null : { ...this.#speedReading };
   }
 
   /** @returns {number} When it was spawned, or 0 before that. */
@@ -359,18 +384,6 @@ export class EncodeRun {
    */
   get isStopping() {
     return this.#stopping && !this.#ended;
-  }
-
-  /**
-   * The film this run has made and the milliseconds of its own work it took,
-   * both as of its last progress report, so the two belong to one moment. The
-   * difference of two samples of one run is its processing speed, free of the
-   * time its input waited and the time it was stopped.
-   *
-   * @returns {{ at: number, producedSeconds: number, workingMs: number } | null}
-   */
-  get workSample() {
-    return this.#workSample;
   }
 
   /** An input read of this run starts waiting for bytes; see {@link RunClock}. */
@@ -488,13 +501,10 @@ export class EncodeRun {
       if (key === "out_time_ms") {
         const numeric = Number(value);
         if (Number.isFinite(numeric) && numeric >= 0) {
-          this.#reportProgress({ processedSeconds: numeric / MICROSECONDS_PER_SECOND, speed: null });
+          this.#reportProgress({ processedSeconds: numeric / MICROSECONDS_PER_SECOND });
         }
       } else if (key === "out_time") {
-        this.#reportProgress({ processedSeconds: null, speed: null, outTime: value });
-      } else if (key === "speed") {
-        this.noteSpeed(Number.parseFloat(value));
-        this.#reportProgress({ processedSeconds: null, speed: value });
+        this.#reportProgress({ processedSeconds: null, outTime: value });
       }
     }
   }
@@ -530,11 +540,6 @@ export class EncodeRun {
   }
 
   /**
-   * What ffmpeg says about its own speed.
-   *
-   * @param {number} speedX - Times realtime.
-   */
-  /**
    * Names of finished pieces, as the encoder writes them.
    *
    * @param {string} text
@@ -560,6 +565,7 @@ export class EncodeRun {
   }
 
   #publishClosed(name) {
+      this.#measureSpeed();
       // ITS SERVED NAME, which is what whoever owns the disk gives it in answer.
       // ffmpeg writes a piece under a working name and reports that; the piece
       // becomes servable by being renamed, and everything below works in the
@@ -584,9 +590,28 @@ export class EncodeRun {
       return true;
   }
 
-  noteSpeed(speedX) {
-    if (Number.isFinite(speedX) && speedX > 0) {
-      this.#speedX = speedX;
+  /**
+   * A closed piece is the moment this run's speed is read: what it made since
+   * the last reading, over its own working time. Measured from the first
+   * closed piece rather than from the spawn, so the process start and the wait
+   * for its first input bytes, which are charged once as startup, are not
+   * counted as processing. A stretch with no progress keeps the earlier sample,
+   * and the next reading spans both.
+   */
+  #measureSpeed() {
+    const sample = this.#workSample;
+    if (sample === null) {
+      return;
+    }
+    if (this.#pieceSample === null) {
+      this.#pieceSample = sample;
+      return;
+    }
+    const speed = speedFromWork(this.#pieceSample, sample);
+    if (speed !== null) {
+      this.#speedReading = { speed, at: sample.at };
+      this.#pieceSample = sample;
+      this.onSpeedMeasured(this.speedReading);
     }
   }
 

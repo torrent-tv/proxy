@@ -88,7 +88,11 @@ Seconds appear again only for rates, schedules and the answer.
 A closed non-final fragment is reusable only if the end of its last frame, on
 every track, reaches its next declared cut less `SEGMENT_CUT_TIME_DELTA_SECONDS`,
 the delta the muxer is configured with. That is a fact of production, so no
-browser rule enters it. Interrupted fragments are excluded on publication and
-when reading an existing cache, so the production schedule treats their media
-as unfinished work. The final fragment uses its actual media end rather than
-the container's approximate duration.
+browser rule enters it, and the encoding decides it
+(`encode/piece-completeness.js`): `EncodeRuns` judges a closed file before it is
+published, and judges a stored piece left by an earlier process when the
+forecast asks for it, taking a short one off the disk. The segment store keeps
+the bytes and the media intervals read from them and judges nothing. Interrupted
+fragments are therefore never served or counted, so the production schedule
+treats their media as unfinished work. The final fragment uses its actual media
+end rather than the container's approximate duration.

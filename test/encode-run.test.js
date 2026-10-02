@@ -146,13 +146,41 @@ test("a process that could not be started ends like any other failure", () => {
   assert.match(ends[0].because, /ENOENT/);
 });
 
-test("only a measured speed is kept", () => {
-  const { run } = makeRun();
+test("its speed is film made between closed pieces over its own working time", () => {
+  const clock = { at: 1000 };
+  const process_ = new FakeProcess();
+  process_.stdout = new EventEmitter();
+  process_.stdio = [null, process_.stdout, null, new EventEmitter()];
+  const readings = [];
+  const run = new EncodeRun({
+    address: "torrent:abc:fmt=fmp4:grid=kf@0:video-only:v=0/copy",
+    encoder: new SoftwareEncoder(),
+    from: 0,
+    to: 9,
+    buildArgs: () => [],
+    spawn: () => process_,
+    logger: { info() {}, warn() {} },
+    now: () => clock.at,
+    onSpeedMeasured: (reading) => readings.push(reading)
+  });
   assert.equal(run.speedX, 0, "nothing measured yet");
-  run.noteSpeed(0);
-  assert.equal(run.speedX, 0);
-  run.noteSpeed(2.5);
-  assert.equal(run.speedX, 2.5);
+  const report = (seconds) => process_.stdout.emit("data", `out_time_ms=${seconds * 1_000_000}\n`);
+  const closed = (name) => process_.stdio[3].emit("data", `${name}\n`);
+  report(0);
+  closed("a");
+  clock.at += 1000;
+  report(4);
+  closed("b"); // "a" is published: the reckoning starts here
+  assert.equal(run.speedX, 0, "one closed piece measures nothing");
+  // The input waits for the swarm for 30 s; that is not the run's work.
+  run.inputWaitBegins();
+  clock.at += 30_000;
+  run.inputWaitEnds();
+  clock.at += 2000;
+  report(12);
+  closed("c"); // "b" is published
+  assert.equal(run.speedX, 4, "8 s of film over 2 s of work");
+  assert.deepEqual(readings, [{ speed: 4, at: 34_000 }], "told once, with when");
 });
 
 test("a segment number behind its own start is not its to claim", () => {

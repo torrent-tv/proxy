@@ -155,6 +155,8 @@ are recorded in `docs/browser-proxy-contract.md`.
         `piece-disk-store.js`). Lives in the torrent WORKER thread.
       - `storage/segment-store/` — the segments an encoder has produced
         (`SegmentStore.js`), addressed by the output's own key. Main thread.
+        It keeps bytes and what is read from them; whether a piece is whole is
+        decided by the encoding (`encode/piece-completeness.js`).
       - `storage/files/` — files downloaded whole and kept as files
         (`CompletedFiles.js`, `piece-from-whole-file.js`). Worker thread.
       - `storage/` — THE ONE BUDGET: how much of this machine the proxy may

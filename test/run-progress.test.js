@@ -16,7 +16,7 @@ test("a run rebases ffmpeg's relative clock onto its own source position", () =>
   let now = 10;
   const progress = new RunProgress({ startSeconds: 600, totalSeconds: 1000, now: () => now });
   now = 20;
-  progress.note({ processedSeconds: 12.5, speed: "2.0x" });
+  progress.note({ processedSeconds: 12.5 });
 
   assert.deepEqual(progress.snapshot(), {
     processedSeconds: 612.5,
@@ -24,7 +24,6 @@ test("a run rebases ffmpeg's relative clock onto its own source position", () =>
     totalSeconds: 1000,
     percent: 3.125,
     remainingSeconds: 387.5,
-    speed: "2.0x",
     updatedAt: 20
   });
 });
@@ -33,7 +32,7 @@ test("two runs of one output retain separate clocks", () => {
   const made = orchestrator();
   const first = { from: 0, to: 49, isAlive: true, progress: new RunProgress({ startSeconds: 0 }) };
   const second = { from: 50, to: 99, isAlive: true, progress: new RunProgress({ startSeconds: 200 }) };
-  first.progress.note({ processedSeconds: 40, speed: "1.0x" });
+  first.progress.note({ processedSeconds: 40 });
   second.progress.note({ processedSeconds: 8, speed: "2.0x" });
   made.adopt("picture", first);
   made.adopt("picture", second);

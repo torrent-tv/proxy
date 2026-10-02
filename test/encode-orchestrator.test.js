@@ -12,6 +12,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
 import { EncodeRun } from "../services/encode/EncodeRun.js";
+import { measureSpeed } from "./helpers/encode-run.js";
 import { ENCODE_EXIT } from "../services/encode/encode-exit.js";
 import { SoftwareEncoder } from "../services/encode/SoftwareEncoder.js";
 import { EncodeOrchestrator } from "../services/encode/EncodeOrchestrator.js";
@@ -33,10 +34,16 @@ const RUN_COSTS = { killCostSec: 0, firstByteWaitSec: 0.12 };
 
 const PICTURE = "torrent:abc:fmt=fmp4:grid=kf@0:video-only:v=0/copy";
 
+/** What every run of these tests reads as now; a measurement advances it. */
+const clock = { at: 1000 };
+
 class FakeProcess extends EventEmitter {
   constructor() {
     super();
     this.pid = 1;
+    // The progress channel and the channel closed pieces are named on.
+    this.stdout = new EventEmitter();
+    this.stdio = [null, this.stdout, null, new EventEmitter()];
     this.signals = [];
   }
 
@@ -123,7 +130,7 @@ function orchestrator({ maxRuns = 2 } = {}) {
         buildArgs: () => ["-i", "in", "out"],
         spawn: () => process_,
         logger: { info: (line) => lines.push(line), warn: (line) => lines.push(line) },
-        now: () => 1000,
+        now: () => clock.at,
         onEnded: (ended) => made.noteEnded(ended)
       });
       // Filed under the run itself: a run has no name, so a test that has to
@@ -146,7 +153,7 @@ function orchestrator({ maxRuns = 2 } = {}) {
       buildArgs: () => ["-i", "in", "out"],
       spawn: () => process_,
       logger: { info: (line) => lines.push(line), warn: (line) => lines.push(line) },
-      now: () => 1000,
+      now: () => clock.at,
       onEnded: (ended) => made.noteEnded(ended)
     });
     processes.set(run, process_);
@@ -210,7 +217,7 @@ test("an encoder already working covers what it will reach in time", () => {
   // wanted at all.
   const { made, buildRun } = orchestrator();
   const first = buildRun({ from: 0, to: -1 });
-  first.noteSpeed(8);
+  measureSpeed(first, 8, clock);
   made.adopt(PICTURE, first);
   made.noteProduced(PICTURE, 0);
   made.noteProduced(PICTURE, 1);
@@ -240,7 +247,7 @@ test("somebody stopped where no encoder can arrive in time is served, and the sc
   // seconds anybody spends looking at a spinner — outranks it.
   const { made, buildRun } = orchestrator();
   const first = buildRun({ from: 0, to: -1 });
-  first.noteSpeed(1);
+  measureSpeed(first, 1, clock);
   made.adopt(PICTURE, first);
   made.noteProduced(PICTURE, 0);
   made.noteProduced(PICTURE, 1);
@@ -260,7 +267,7 @@ test("two encoders on one output never share a segment number", () => {
   // what that neighbour makes sooner.
   const { made, buildRun } = orchestrator();
   const first = buildRun({ from: 0, to: -1 });
-  first.noteSpeed(1);
+  measureSpeed(first, 1, clock);
   made.adopt(PICTURE, first);
   made.noteProduced(PICTURE, 0);
   wants(made, [{ from: 200, to: 230, withinSeconds: 0 }]);
@@ -294,7 +301,7 @@ test("a second viewer far behind is served, at whatever the score says is soones
   wants(made, [{ from: 500, to: 530, withinSeconds: 0 }]);
   made.reconcile();
   for (const run of made.runsOn(PICTURE)) {
-    run.noteSpeed(2);
+    measureSpeed(run, 2, clock);
   }
   wants(made, [
     { from: 500, to: 530, withinSeconds: 0 },
@@ -359,7 +366,7 @@ test("a run that meets material made elsewhere is moved past it", () => {
   for (let index = 102; index <= 150; index += 1) {
     made.coverageOf(PICTURE).markReady(index);
   }
-  first.noteSpeed(1);
+  measureSpeed(first, 1, clock);
   made.reconcile();
   const runs = made.runsOn(PICTURE);
   assert.equal(runs.length, 1, "one encoder, moved rather than joined by another");
@@ -407,7 +414,7 @@ test("the swarm limits the encoders, whatever the processor allows", () => {
   const { made, lines } = orchestrator({ maxRuns: 2 });
   wants(made, [{ from: 100, to: 130 }]);
   made.reconcile();
-  made.runsOn(PICTURE)[0].noteSpeed(8);
+  measureSpeed(made.runsOn(PICTURE)[0], 8, clock);
   wants(made, [{ from: 500, to: 530 }]);
   made.reconcile();
 

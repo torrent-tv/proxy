@@ -141,11 +141,13 @@ export function requiredSpeedFrom(waits) {
   const lostSec = interruptions
     .slice(0, last)
     .reduce((total, one) => total + (one.end - one.start), 0) / 1000;
-  // A span that is all interruption says the supply delivered nothing at all
-  // while it was watched. There is no speed that survives that, and saying a
-  // huge number is less honest than saying it is not a speed question — so the
-  // largest figure any step is ever compared against is stated and named.
-  const lostShare = spanSec > 0 ? Math.min(0.99, lostSec / spanSec) : 0;
+  // Strictly below one: the span holds at least one gap of positive length
+  // (`intervals` above is not empty), and the gaps are the time the supply
+  // delivered. So the speed this asks for is finite whatever it measured, and
+  // it is not cut down to a figure chosen here: a supply that delivered for a
+  // thousandth of the time asks a thousand times realtime, which no re-encode
+  // meets and which leaves the copy, as it should.
+  const lostShare = spanSec > 0 ? lostSec / spanSec : 0;
   return {
     requiredSpeed: 1 / (1 - lostShare),
     lostShare,

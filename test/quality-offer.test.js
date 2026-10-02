@@ -58,10 +58,9 @@ function offerOver(
     runningEncoders: () => 0,
     encodersRunningNow: () => 0,
     torrentCostSecFor: () => 0,
-    boundBy: async () => "cpu",
     runsFor: (session) => [...(session.runs ?? [])],
     stateFor: (session) => runStateOf(session.runs),
-    progressFor: (session) => session.progress ?? null
+    workSampleFor: (session) => session.work ?? null
   });
   let computed = 0;
   const real = cost.sustainableHeights.bind(cost);

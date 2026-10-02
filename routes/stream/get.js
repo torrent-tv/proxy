@@ -11,6 +11,37 @@ import { parseRange } from "../../utils/parse-range.js";
 import { logger } from "../../utils/logger.js";
 
 /**
+ * The same fragments, with every wait for the next one marked: `mark(true)`
+ * before it is asked for and `mark(false)` when it has come. The time between
+ * is time the encoder reading this response waits for its input.
+ *
+ * @template T
+ * @param {AsyncIterable<T>} source
+ * @param {(waiting: boolean) => void} mark
+ * @returns {AsyncGenerator<T>}
+ */
+async function* markingWaits(source, mark) {
+  const iterator = source[Symbol.asyncIterator]();
+  try {
+    while (true) {
+      mark(true);
+      let step;
+      try {
+        step = await iterator.next();
+      } finally {
+        mark(false);
+      }
+      if (step.done) {
+        return;
+      }
+      yield step.value;
+    }
+  } finally {
+    await iterator.return?.();
+  }
+}
+
+/**
  * Resolve source parameters from the query string.
  * Prefers a registered `sourceKey`; falls back to inline `sourceType`+`source`.
  *
@@ -138,7 +169,7 @@ function serveWholeFile(req, reply, file, handle) {
   return reply.send(handle.createReadStream({ start, end }));
 }
 
-export async function handleStreamGet(req, reply, { sourceRegistry, torrentPool, noteInputBytes = null }) {
+export async function handleStreamGet(req, reply, { sourceRegistry, torrentPool, noteInputBytes = null, noteInputWaiting = null }) {
   const fileIndexRaw = typeof req.query.fileIndex === "string" ? req.query.fileIndex : "";
   const fileIndex = Number(fileIndexRaw);
   const { sourceType, source, sourceKey } = getSourceParams(req.query, sourceRegistry);
@@ -265,6 +296,11 @@ export async function handleStreamGet(req, reply, { sourceRegistry, torrentPool,
   // file — and two sessions can read one file, so the file cannot stand in for
   // the session.
   const sessionId = typeof req.query.session === "string" ? req.query.session : "";
+  // Which run of that output, so the time its input waits is that run's.
+  const runToken = Number(req.query.run);
+  const markWaits = noteInputWaiting && Number.isInteger(runToken)
+    ? (waiting) => noteInputWaiting(runToken, waiting)
+    : null;
 
   const fragments = typeof file.createFragmentReader === "function"
     ? file.createFragmentReader({ start, end, windowBytes })
@@ -286,7 +322,7 @@ export async function handleStreamGet(req, reply, { sourceRegistry, torrentPool,
 
     let sent = 0;
     try {
-      for await (const fragment of fragments) {
+      for await (const fragment of markWaits ? markingWaits(fragments, markWaits) : fragments) {
         if (reply.raw.writableEnded || reply.raw.destroyed) {
           fragment.release();
           break;

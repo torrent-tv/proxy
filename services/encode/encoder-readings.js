@@ -1,45 +1,43 @@
 /**
- * @file Turning two readings of a running encoder into a speed.
+ * @file Turning two work samples of a running encoder into a speed.
  *
- * ffmpeg reports `speed=` cumulatively, over the whole run. That figure counts
- * every second the encoder spent SIGSTOPped by the look-ahead cap, and a COPY
- * spends most of its life there — it reaches the cap in about fifteen seconds
- * and then waits a minute. Read that way, a copy running at eight times
- * realtime reports 1.6x and falling; filed as the price of copying, it would
- * refuse quality rungs on arithmetic that had measured a pause.
+ * ffmpeg reports `speed=` cumulatively, over the whole run: every second the
+ * encoder was stopped and every second its input waited for the swarm is in
+ * the denominator. A copy at eight times realtime that waits a minute reads
+ * 1.6x; a copy that waited 32.93 s and 43.91 s for two pieces read 0.21x in the
+ * field on 2026-10-01, and the forecast carried that over the whole film while
+ * charging the same download separately.
  *
- * The difference between two readings of an uninterrupted stretch does not have
- * that fault, and it is the same technique the startup benchmarks use.
+ * A run's work sample (`EncodeRun.workSample`) states the film made and the
+ * milliseconds of the run's OWN work, with input waits and stops taken out
+ * (`RunClock`). Two samples of one run give its processing speed over the
+ * stretch between them, whatever that stretch's length: the samples are taken
+ * at ffmpeg's own progress reports, so there is no window to choose.
  */
 
 /**
- * @typedef {object} EncoderReading
- * @property {number} takenAt - Wall clock, in milliseconds.
- * @property {number} processedSeconds - Output position ffmpeg has reached.
+ * @typedef {object} WorkSample
+ * @property {number} at - Wall clock, in milliseconds.
+ * @property {number} producedSeconds - Film this run has made.
+ * @property {number} workingMs - The run's own working time so far.
  */
 
 /**
- * Speed between two readings, or null when the pair cannot answer.
+ * Processing speed between two samples of one run, or null when the pair
+ * cannot answer: nothing made, or no working time between them.
  *
- * @param {EncoderReading | null} previous
- * @param {EncoderReading | null} current
- * @param {number} minimumWindowSec - The narrowest stretch worth dividing by.
- * @returns {number | null} Video seconds produced per second of clock.
+ * @param {WorkSample | null} previous
+ * @param {WorkSample | null} current
+ * @returns {number | null} Film seconds made per second of the run's own work.
  */
-export function speedFromReadings(previous, current, minimumWindowSec) {
+export function speedFromWork(previous, current) {
   if (!previous || !current) {
     return null;
   }
-  const wallSeconds = (current.takenAt - previous.takenAt) / 1000;
-  const producedSeconds = current.processedSeconds - previous.processedSeconds;
-  if (!Number.isFinite(wallSeconds) || !Number.isFinite(producedSeconds)) {
+  const producedSeconds = current.producedSeconds - previous.producedSeconds;
+  const workingSeconds = (current.workingMs - previous.workingMs) / 1000;
+  if (!(producedSeconds > 0) || !(workingSeconds > 0)) {
     return null;
   }
-  // A window too narrow to divide by, or one in which nothing was produced —
-  // the second happens when a run has just been repositioned and has not yet
-  // reached the position it is restarting from.
-  if (!(wallSeconds >= minimumWindowSec) || !(producedSeconds > 0)) {
-    return null;
-  }
-  return producedSeconds / wallSeconds;
+  return producedSeconds / workingSeconds;
 }

@@ -207,3 +207,31 @@ test("a file this proxy does not have whole still goes to the torrent", async ()
   await handleStreamGet(req, reply, deps);
   assert.equal(state.prioritized.length, 1, "the ordinary path was not taken");
 });
+
+test("every wait of an encoder's input read is marked for the run its URL names", async () => {
+  // The run's processing speed is read over its own working time; the time its
+  // input waits for the swarm is what this marks (RunClock).
+  const { req, reply, deps } = harness({ method: "GET", range: "bytes=0-5" });
+  const { files: [file] } = await deps.torrentPool.getTorrent();
+  const pieces = [Buffer.from("abc"), Buffer.from("def")];
+  file.createFragmentReader = () => ({
+    cancel() {},
+    async *[Symbol.asyncIterator]() {
+      for (const bytes of pieces) {
+        yield { bytes, release() {} };
+      }
+    }
+  });
+  reply.raw.write = (_bytes, done) => done();
+  reply.raw.writableEnded = false;
+  reply.raw.destroyed = false;
+  req.query.session = "output-1";
+  req.query.run = "7";
+  const marks = [];
+  deps.noteInputWaiting = (runToken, waiting) => marks.push([runToken, waiting]);
+
+  await handleStreamGet(req, reply, deps);
+
+  assert.deepEqual(marks, [[7, true], [7, false], [7, true], [7, false], [7, true], [7, false]],
+    "a wait before each fragment and one before the end, each closed");
+});

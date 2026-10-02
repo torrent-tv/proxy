@@ -52,12 +52,9 @@ export function costKindForSession(session) {
   return session?.spec?.transcodesVideo === true ? "decode" : "copy";
 }
 
-/** The narrowest stretch of uninterrupted encoding a speed may be read from. */
-const LEARN_WINDOW_MIN_SEC = 3;
-
 import { correctForAvailability } from "../available-share.js";
 import { medianOf, movedBeyondScatter, READINGS_KEPT } from "../learned-median.js";
-import { speedFromReadings } from "../encoder-readings.js";
+import { speedFromWork } from "../encoder-readings.js";
 import { contentionPenalty } from "../contention.js";
 import { ENCODE_RUN_STATE, liveRunsOf, processCanBeSignalled } from "../encode-run-state.js";
 import { canSustainOutput, chooseSoftwareEncodeSettings, speedBar } from "../hwaccel.js";
@@ -105,10 +102,9 @@ export class EncodeCost {
   #runningEncoders;
   #encodersRunningNow;
   #torrentCostSecFor;
-  #boundBy;
   #runsFor;
   #stateFor;
-  #progressFor;
+  #workSampleFor;
 
   /**
    * @param {{
@@ -117,13 +113,13 @@ export class EncodeCost {
    *   runningEncoders: () => number,
    *   encodersRunningNow: () => number,
    *   torrentCostSecFor: (session: object) => number,
-   *   boundBy: (session: object) => Promise<"cpu" | "download" | "unknown">,
    *   runsFor: (output: object) => object[],
    *   stateFor: (output: object) => string,
-   *   progressFor: (output: object, run: object | null) => object | null - The progress of that one run.
+   *   workSampleFor: (output: object, run: object | null) => import("../encoder-readings.js").WorkSample | null
+   *     - The film that one run has made and its own working time.
    * }} deps
    */
-  constructor({ outputs, host, runningEncoders, encodersRunningNow, torrentCostSecFor, boundBy, runsFor, stateFor, progressFor }) {
+  constructor({ outputs, host, runningEncoders, encodersRunningNow, torrentCostSecFor, runsFor, stateFor, workSampleFor }) {
     this.#outputs = outputs;
     // Asked at the moment of the question, not copied: the share of the machine
     // that is free is re-read every few seconds, and a copy taken when this was
@@ -132,25 +128,22 @@ export class EncodeCost {
     this.#runningEncoders = runningEncoders;
     this.#encodersRunningNow = encodersRunningNow;
     this.#torrentCostSecFor = torrentCostSecFor;
-    // WHETHER A SLOW RUN IS SHORT OF THE MACHINE OR SHORT OF THE SWARM, which
-    // this cannot answer and must not guess at: a run starved of torrent data
-    // reports a speed that measures the swarm, and filed as a price it refuses
-    // every quality step on the download's account. Asked of whoever holds the
-    // torrent's readings; passed in, so this can still be exercised with plain
-    // values and no swarm.
-    this.#boundBy = boundBy;
     if (typeof runsFor !== "function") {
       throw new TypeError("EncodeCost requires runsFor");
     }
     if (typeof stateFor !== "function") {
       throw new TypeError("EncodeCost requires stateFor");
     }
-    if (typeof progressFor !== "function") {
-      throw new TypeError("EncodeCost requires progressFor");
+    if (typeof workSampleFor !== "function") {
+      throw new TypeError("EncodeCost requires workSampleFor");
     }
     this.#runsFor = runsFor;
     this.#stateFor = stateFor;
-    this.#progressFor = progressFor;
+    // WHETHER A SLOW RUN IS SHORT OF THE MACHINE OR SHORT OF THE SWARM is not
+    // guessed at: the work sample states the run's own working time, with the
+    // time its input waited for the swarm and the time it was stopped taken
+    // out, so a speed read from two samples is the machine's.
+    this.#workSampleFor = workSampleFor;
   }
 
   /**
@@ -805,11 +798,11 @@ export class EncodeCost {
    * ladder, a step whose ladder is one rung long, a picture that is copied.
    * Measuring has no such preconditions.
    *
-   * What it does refuse: a suspended encoder (ffmpeg reports a CUMULATIVE
-   * speed, so a look-ahead pause is divided into it and the figure decays while
-   * nothing is being encoded), a reading that has not moved since the last one,
-   * and a run short of input, where what is short is the swarm rather than the
-   * machine.
+   * What it does refuse: a reading that has not moved since the last one, and
+   * a pair taken across a restart. A suspended encoder and a starved input are
+   * not refused but subtracted: the speed is read over the run's own working
+   * time (`RunClock`), so neither the time it was stopped nor the time its
+   * input waited for the swarm enters it.
    *
    * @param {HlsSession} session
    * @returns {Promise<void>}
@@ -826,44 +819,31 @@ export class EncodeCost {
       qualityStateOf(session).learnSample = null;
       return;
     }
-    // Measured as a DELTA between two readings of a run that was going for the
-    // whole interval, not from ffmpeg's cumulative `speed=`. The cumulative
-    // figure counts every second the encoder spent SIGSTOPped by the look-ahead
-    // cap in its denominator, and a copy spends most of its life there — it
-    // reaches the cap in about fifteen seconds and then waits a minute. Read
-    // that way a copy running at 8x reports 1.6x and falling, which would be
-    // filed as the price of copying and refuse rungs on arithmetic that
-    // measured a pause.
+    // Measured as a DELTA between two work samples of ONE run: the film it
+    // made over its own working time (`RunClock`). ffmpeg's cumulative `speed=`
+    // divides by every second the encoder was stopped or its input waited for
+    // the swarm; field 2026-10-01, a copy read 0.21x after waiting 32.93 s and
+    // 43.91 s for two pieces. The samples come from that run's own progress
+    // reports, so with two encoders on one output the pair is never two
+    // processes' positions filed under one run.
     const run = liveRunsOf(this.#runsFor(session))[0] ?? null;
-    // The position is THAT run's own, read from the same process the sample is
-    // stamped with. It used to be the output's progress, which is whichever
-    // live run covers the viewer and updated last — so with two encoders on
-    // one output a pair of readings could be two processes' positions filed
-    // under one run, and the difference between them read as a speed.
-    const processedSeconds = Number(this.#progressFor(session, run)?.processedSeconds);
-    const takenAt = Date.now();
+    const sample = this.#workSampleFor(session, run);
     const state = qualityStateOf(session);
     const previous = state.learnSample ?? null;
-    // Stamped with the run it was taken from. A restart clears this sample, but
-    // it then spends up to a second and a half making its directory and burying
-    // its predecessor, and through that window the session still carries the
-    // OLD process and the OLD position — so a sample taken there, paired with
-    // the new run's first position, reads a twenty-minute seek as twenty
-    // minutes of video produced in five seconds. Filed as this file's price it
-    // admits every quality step there is. Comparing the serials is what the
-    // twenty-second wait used to stand in for, and unlike the wait it costs no
-    // readings on a short run.
-    state.learnSample = { takenAt, processedSeconds, run };
-    if (previous === null || !Number.isFinite(processedSeconds) || !Number.isFinite(previous.processedSeconds)) {
+    if (!sample) {
       return;
     }
-    if (previous.run !== run) {
-      return; // the pair straddles a restart and measures the seek, not the host
+    // Stamped with the run it was taken from: a pair that straddles a restart
+    // measures the seek, not the host.
+    state.learnSample = { sample, run };
+    if (previous === null || previous.run !== run || !(sample.at > previous.sample.at)) {
+      return;
     }
-    const speed = speedFromReadings(previous, { takenAt, processedSeconds }, LEARN_WINDOW_MIN_SEC);
+    const speed = speedFromWork(previous.sample, sample);
     if (speed === null) {
       return;
     }
+    const takenAt = sample.at;
     // Recorded HERE, before any of the conditions below can discard the
     // reading, because the budget and the learning ask different questions of
     // it. Learning refuses a reading taken beside another encoder, since it
@@ -901,18 +881,11 @@ export class EncodeCost {
       }
       othersCostSec = others;
     }
-    if (speed < 1 && await this.#boundBy(session) === "download") {
-      return; // the torrent is what is short; this says nothing about the host
-    }
     // What this encode did with the machine to itself — the one figure a live
     // reading is authority on, and what withdraws a quality step that has been
-    // seen failing without letting it speak for steps nobody has run.
-    //
-    // Recorded only AFTER the download-bound check, and that order is the whole
-    // point: a run starved of torrent data reports a speed that measures the
-    // swarm. Stored first, as it was, that figure became this encode's price —
-    // 0.3x reads as 3.33 s of work per second of video, more than the machine
-    // has — and every other quality step was refused on the download's account.
+    // seen failing without letting it speak for steps nobody has run. The time
+    // the input waited for the swarm is not in it, so a starved run no longer
+    // reads as a slow machine.
     state.lastAloneSpeed = speed;
     // What the offer predicted for this very step, against what it then did
     // with the machine to itself. The prediction is corrected for the share of
@@ -955,14 +928,6 @@ export class EncodeCost {
     if (this.#stateFor(session) === ENCODE_RUN_STATE.SUSPENDED) {
       return; // a suspended run reports a cumulative figure that is decaying
     }
-    // Always asked, not only below realtime. A re-encode near 1x may be the
-    // host; a COPY near 1x is a copy waiting for the torrent, because copying
-    // is what a machine does at eight times realtime — and a starved reading
-    // filed as the price of copying would refuse rungs on the download's
-    // account.
-    if (await this.#boundBy(session) === "download") {
-      return;
-    }
     const costSec = 1 / speed;
     if (!(costSec > 0) || !Number.isFinite(costSec)) {
       return;
@@ -984,9 +949,6 @@ export class EncodeCost {
 
   async #learnAudioCost(session, speed) {
     if (this.#stateFor(session) === ENCODE_RUN_STATE.SUSPENDED) {
-      return;
-    }
-    if (await this.#boundBy(session) === "download") {
       return;
     }
     const costSec = 1 / speed;

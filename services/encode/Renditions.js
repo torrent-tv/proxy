@@ -1661,7 +1661,7 @@ export class Renditions {
     ) ?? null;
   }
 
-  inputOf(session) {
+  inputOf(session, runToken) {
     return encoderInputs({
       picture: session.file,
       soundtrack: session.spec.audio
@@ -1670,6 +1670,7 @@ export class Renditions {
       carries: session.spec.carries,
       audioSeparate: this.servesAudioSeparately(session),
       sessionId: session.id,
+      runToken,
       readWindowBytes: this.#host.encodeRuns.readWindowFor(session),
       baseUrl: this.#host.localBaseUrl
     });

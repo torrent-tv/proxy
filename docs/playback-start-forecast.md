@@ -14,7 +14,11 @@ Each output's remaining processing work subtracts progress only within its
 actual live run intervals. Initial video rates use existing codec/size/encoder
 calibration. Initial audio rates use short packaged per-codec measurements and
 sample work (encoding) or encoded bytes (copying). Actual output progress
-replaces these initial rates. Startup is charged once, separately from processing
+replaces these initial rates. That rate is the run's processing speed: film
+made over the run's own working time, with the time its input waited for the
+swarm and the time it was stopped taken out (`RunClock`, fed by the stream
+route, which marks each wait of a run's input read). The download is charged
+once, by the source service, and not a second time inside the processing rate. Startup is charged once, separately from processing
 throughput, and disappears once actual run progress establishes processing.
 
 Input arrival and processing overlap. With arrival time D(m), processing rate

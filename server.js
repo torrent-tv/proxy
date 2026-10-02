@@ -658,7 +658,10 @@ export async function startProxyServer({
       // So a session that has produced nothing yet can still show it is being
       // fed. The route knows only files; the session id rides on the URL the
       // session itself built.
-      noteInputBytes: (sessionId, bytes) => outputParts.encodeRuns.noteInputBytes(sessionId, bytes)
+      noteInputBytes: (sessionId, bytes) => outputParts.encodeRuns.noteInputBytes(sessionId, bytes),
+      // When the encoder reading this waits for its input, so its speed is
+      // measured over its own work and not over the swarm's.
+      noteInputWaiting: (runToken, waiting) => outputParts.encodeRuns.noteInputWaiting(runToken, waiting)
     })
   );
   app.post("/api/transcode-sessions", async (req, reply) =>

@@ -94,3 +94,21 @@ test("the writer that does report a closure is unaffected", async (t) => {
   assert.equal(store.publish(KEY, making, fmp4Format), fmp4Format.segmentFileName(4));
   assert.equal(await waited, true);
 });
+
+test("a directory removed from outside and made again is watched again", async (t) => {
+  const { store, root } = storeInATempRoot();
+  t.after(() => {
+    store.dropAll("the test is over");
+    rmSync(root, { recursive: true, force: true });
+  });
+
+  // Removed by something other than the store, so its watch was not stopped
+  // first. The watch held on that path watches a directory that is gone.
+  rmSync(store.directoryFor(KEY), { recursive: true, force: true });
+  const dir = store.directoryFor(KEY);
+  const waited = store.waitFor(KEY, 3, BACKSTOP_MS);
+
+  writeFileSync(path.join(dir, fmp4Format.segmentFileName(3)), Buffer.alloc(64));
+
+  assert.equal(await waited, true, "the piece arrived in the new directory and the wait did not end");
+});

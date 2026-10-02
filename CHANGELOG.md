@@ -1,3 +1,7 @@
+## 2.89.5
+
+- **Fix**: A segment store's watch on an output's directory ends when that directory is removed by anything other than `drop`. On Windows the watch emits no `error` for it, and reports `rename` for the removed directory without end — measured 2026-10-02 on Node 24.2, 232 618 events in eight seconds — which kept the process alive; `test/segments-are-shared.test.js` and `test/segment-store-eviction.test.js` passed every check and never exited. A directory made again under the same name is watched again: the dead watch used to stay registered and stop a new one being made, so a wait for a piece there ended only on its deadline.
+
 ## 2.89.4
 
 - **Fix**: An encoder's speed is read over its own working time. The stream route says when a run's input starts and stops waiting for bytes, each input read carries the number of the run it feeds, and a run's clock (`RunClock`) takes out that waiting and the time it was stopped. Field 2026-10-01: a copy waited 32.93 s and 43.91 s for two pieces and read 0.21x, which the start forecast then carried over the whole remaining film while it charged the same download separately. The forecast's processing rate and the learned price of copying, decoding and soundtracks now measure the machine.

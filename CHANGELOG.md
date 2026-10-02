@@ -1,3 +1,14 @@
+## 2.89.2
+
+- **Fix**: Whether buffered media is continuous is decided in exact time. A piece's media is read as integer ticks of its track's timescale, and the page's seconds are converted to the exact binary fractions they are. Measured 2026-10-02 on a served film: seven joins whose ticks were equal read as `88.67299999999999` against `88.673` and were taken for holes.
+- **Fix**: A gap counts as joined only when every engine joins it — Gecko's longest-frame fuzz and WebKit's 2002/24000 s, from which Chromium's bound follows. The previous rule was Chromium's alone.
+- **Fix**: The position written into a served piece's `tfdt` and the position its coverage is read at come from one integer function. Measured on 20 field pieces: the bytes served are unchanged.
+- **Fix**: A piece is refused as unfinished when the end of its last frame does not reach its cut less the muxer's configured delta. The check no longer uses a browser's join rule.
+- **Fix**: A range the page reports holding is read as every exact time it can denote: Chromium converts a sample's time, its duration and the page's `timestampOffset` to whole microseconds before a buffered range exists, so each edge is widened by 3 µs. A piece the browser already holds is no longer counted as missing and transferred again in the forecast. A held range is allowed the largest frame duration of the served pieces inside it, as Gecko's `Interval::Span` keeps it.
+- **Fix**: A hole between two ranges the browser already holds is reported as a continuity fault. The forecast used to find holes only where a new arrival crossed one, and started playback over a hole nothing would fill.
+- **Fix**: An edit list made only of empty edits places its track after them, which is where the piece's own start is read from.
+- **Chore**: The playback start forecast moved to the viewer component, with the join rule it uses; the request operation is handed it at assembly. The format states served ranges in ticks; the page's `timestampOffset` is applied by the forecast. The forecast works in one timescale in which every one of its times is whole, and keeps a piece's joined ranges with the piece: 12.7 ms per forecast on a 208-piece film on the development machine, the same as before the change.
+
 ## 2.89.1
 
 - **Fix**: The subtitle walk reads a file kept whole from the disk. Once a file is kept whole its pieces leave the torrent's store while the bitfield still says they are held, and every read the walk made through the torrent waited on a store that no longer had them and was given up after 30 s — one structure read every 30 s, field 2026-10-01 on proxy 2.89.0. What of such a file is held is now the whole file, and a file removed for space is forgotten so the torrent answers again.

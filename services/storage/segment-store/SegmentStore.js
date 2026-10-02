@@ -437,10 +437,10 @@ export class SegmentStore {
     if (format?.readMediaRanges && index >= 0) {
       try {
         mediaRanges = format.readMediaRanges(readFileSync(path.join(dir, makingName)));
-        if (mediaRanges.length === 0) throw new Error("The closed file contains no playable media intervals.");
-        const end = format.mediaCoverageEnd?.(mediaRanges);
+        const end = format.producedThroughSeconds?.(mediaRanges);
+        if (end === null) throw new Error("The closed file contains no playable media intervals.");
         if (Number.isFinite(endSeconds) && Number.isFinite(end) && end < endSeconds) {
-          this.#logger?.warn?.(`segment store: refusing short segment ${index}: coverage=${end}s cut=${endSeconds}s`);
+          this.#logger?.warn?.(`segment store: refusing short segment ${index}: produced through ${end}s, cut ${endSeconds}s`);
           return null;
         }
       } catch (error) {
@@ -481,9 +481,9 @@ export class SegmentStore {
     const format = this.#formats.get(key);
     if (!format?.readMediaRanges) return undefined;
     const checked = (ranges) => {
-      const end = format.mediaCoverageEnd?.(ranges);
+      const end = format.producedThroughSeconds?.(ranges);
       if (Number.isFinite(endSeconds) && Number.isFinite(end) && end < endSeconds) {
-        this.#logger?.warn?.(`segment store: removing short cached segment ${index}: coverage=${end}s cut=${endSeconds}s`);
+        this.#logger?.warn?.(`segment store: removing short cached segment ${index}: produced through ${end}s, cut ${endSeconds}s`);
         this.#removeSegment(key, index);
         return undefined;
       }

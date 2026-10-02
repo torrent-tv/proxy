@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
 import { EncodeRun } from "../services/encode/EncodeRun.js";
 import { SoftwareEncoder } from "../services/encode/SoftwareEncoder.js";
-import { predictPlaybackReadiness } from "../services/server/playback-readiness.js";
+import { predictPlaybackReadiness } from "../services/viewer/playback-readiness.js";
 
 function encode() {
   const child = new EventEmitter();
@@ -83,11 +83,13 @@ test("future browser ranges are retained rather than transferred again", () => {
 
 test("a real media hole is not hidden by the scalar buffer or ready file count", () => {
   const input = state([{ start: 0, end: 3 }, { start: 4, end: 8 }]);
-  input.tracks[0].segments[0].mediaRanges = [{ start: 0, end: 3 }];
+  // A ready piece always has its coverage read; the hole is between them.
+  input.tracks[0].segments[0].mediaRanges = { timescale: 1000n, ranges: [{ start: 0n, end: 3000n, frame: 0n }] };
+  input.tracks[0].segments[1].mediaRanges = { timescale: 1000n, ranges: [{ start: 4000n, end: 8000n, frame: 0n }] };
   const forecast = predictPlaybackReadiness(input);
   assert.equal(forecast.ready, false);
   assert.equal(forecast.bufferedSeconds, 3);
-  assert.equal(forecast.reason, "no-safe-start-found");
+  assert.equal(forecast.reason, "media-continuity-unavailable");
 });
 
 test("missing work before global progress can still be produced", () => {

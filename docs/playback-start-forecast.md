@@ -46,11 +46,45 @@ authorize playback. Only the proxy's readiness and real track coverage can.
 
 Zero service, missing media facts and a genuine timestamp gap remain explicit
 noncomputable states. The UI reports their causes instead of an estimating
-placeholder or a fabricated duration. Small coded-frame joins follow measured
-frame durations and Chromium's continuous-track rule, not a hand-picked margin.
+placeholder or a fabricated duration.
 
-A closed non-final fragment is reusable only if its measured coded-frame
-coverage reaches its next declared cut. Interrupted one-frame fragments are
-excluded on publication and when reading an existing cache, so the production
-schedule treats their media as unfinished work. The final fragment uses its
-actual media end rather than the container's approximate duration.
+## Continuity is decided in exact time
+
+The forecast lives in the viewer component (`services/viewer/`), because what
+it predicts is how the viewer's browser will play; the request operation
+(`ViewerRequests`) is handed it by `wire-outputs.js`.
+
+1. **The file states integers.** A piece's media is read as presentation
+   intervals in the integer ticks of each track's timescale
+   (`readPresentationRanges`, `services/encode/segment-formats/mp4-boxes.js`).
+   Intervals are joined there only where they touch or overlap; the format
+   states what the samples say and nothing about browsers.
+2. **One function places a piece.** The position written into `tfdt` when a
+   piece is served and the position its coverage is read at both come from
+   `readTrackEdits`, which converts the movie-timescale edit into track ticks
+   with one stated rounding. The reader and the writer cannot disagree.
+3. **Seconds from the page are exact fractions.** A buffered range, a position
+   or a cut time arrives as a JavaScript number, which is a binary fraction;
+   `services/viewer/media-time.js` converts it to that fraction exactly. No unit
+   is chosen. A buffered range is widened by `REPORTED_TIME_ERROR`, the bound of
+   Chromium's three truncations to whole microseconds, so that it denotes every
+   exact time the report can stand for.
+4. **The join rule holds in every engine.** The Media Source specification
+   leaves the threshold to the implementation, so a gap counts as joined only
+   when Chromium, Gecko and WebKit all join it: twice the gap within the two
+   ranges' longest frames since a keyframe (Gecko's fuzz), and the gap within
+   2002/24000 s (WebKit's `timeFudgeFactor`). Chromium's own bound follows from
+   the first. Old iOS without Media Source plays HLS in a closed player, and
+   nothing is derived for it.
+
+Seconds appear again only for rates, schedules and the answer.
+
+## A piece is finished when its frames reach its cut
+
+A closed non-final fragment is reusable only if the end of its last frame, on
+every track, reaches its next declared cut less `SEGMENT_CUT_TIME_DELTA_SECONDS`,
+the delta the muxer is configured with. That is a fact of production, so no
+browser rule enters it. Interrupted fragments are excluded on publication and
+when reading an existing cache, so the production schedule treats their media
+as unfinished work. The final fragment uses its actual media end rather than
+the container's approximate duration.

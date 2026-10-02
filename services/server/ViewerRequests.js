@@ -9,7 +9,6 @@
 
 import { logger } from "../../utils/logger.js";
 import { isOutputName, SEGMENT_CUT_TIME_DELTA_SECONDS } from "../encode/output/index.js";
-import { predictPlaybackReadiness, RateTrend, forecastRate as forecastRateOf } from "./playback-readiness.js";
 
 function isWarmupTimeoutError(error) {
   if (!(error instanceof Error)) {
@@ -572,18 +571,22 @@ export class ViewerRequests {
           endSeconds: index < timeline.segmentCount - 1 ?
             timeline.publishedStartOf(index + 1) - SEGMENT_CUT_TIME_DELTA_SECONDS : undefined
         }));
+      // The page states the offset its player applied to this track, and the
+      // init it applied it to is the session's. Until both are known, the
+      // pieces stay on their own presentation timeline: there is nothing yet
+      // to place them by.
+      const playerOffset = viewerReading?.timestampOffsets?.[trackName];
+      const servedInit = Number.isFinite(playerOffset) ? this.#host.segmentStore.initOf(output.outputKey) : null;
+      const placedByPlayer = Boolean(servedInit?.length);
+      const sessionInit = placedByPlayer ? servedInit : null;
       const segments = Array.from({ length: timeline?.segmentCount ?? 0 }, (_, index) => {
         const ranges = nativeRanges[index];
         return {
           index,
           startSeconds: timeline.publishedStartOf(index),
           endSeconds: timeline.publishedStartOf(index + 1),
-          mediaRanges: ranges && output.segmentFormat?.clientMediaRanges ?
-            output.segmentFormat.clientMediaRanges(ranges, {
-              initBytes: this.#host.segmentStore.initOf(output.outputKey),
-              nextRanges: nativeRanges[index + 1],
-              timestampOffsetSeconds: viewerReading?.timestampOffsets?.[trackName]
-            }) : ranges
+          mediaRanges: ranges && output.segmentFormat?.servedMediaRanges ?
+            output.segmentFormat.servedMediaRanges(ranges, { initBytes: sessionInit }) : undefined
         };
       });
       const sourceIndexes = [output.spec.video?.fileIndex, output.spec.audio?.fileIndex]
@@ -638,6 +641,7 @@ export class ViewerRequests {
       const startedAt = liveRuns.find(({ startedAt }) => startedAt > 0)?.startedAt ?? now;
       tracks.push({
         id: output.outputKey,
+        clockOffsetSeconds: placedByPlayer ? playerOffset : 0,
         clientRanges: viewerReading?.bufferedRanges?.[output === session ? "video" : "audio"] ??
           viewerReading?.bufferedRanges?.media,
         sourceIds,
@@ -704,9 +708,9 @@ export class ViewerRequests {
       tracks,
       linkReadings: measurement.link.snapshot()
     };
-    const forecast = predictPlaybackReadiness(input);
+    const forecast = this.#host.playbackReadiness.predict(input);
     forecast.operations = outputs.flatMap((output, index) => {
-      const common = { speed: forecastRateOf(tracks[index].readings), processedSeconds: tracks[index].processedSeconds };
+      const common = { speed: this.#host.playbackReadiness.forecastRate(tracks[index].readings), processedSeconds: tracks[index].processedSeconds };
       return [
         ...(output.spec.video ? [{ ...common, track: "video",
           operation: output.spec.transcodesVideo ? "encode" : "copy",
@@ -746,7 +750,7 @@ export class ViewerRequests {
     const id = typeof consumerId === "string" ? consumerId : "";
     let state = byViewer.get(id);
     if (!state) {
-      state = { link: new RateTrend(this.#host.lookaheadSeconds), downloads: new Map(), tracks: new Map() };
+      state = { link: new this.#host.playbackReadiness.RateTrend(this.#host.lookaheadSeconds), downloads: new Map(), tracks: new Map() };
       byViewer.set(id, state);
     }
     return state;
@@ -755,7 +759,7 @@ export class ViewerRequests {
   #downloadRateReadings(state, serviceId, downloadSpeed, now) {
     let trend = state.downloads.get(serviceId);
     if (!trend) {
-      trend = new RateTrend(this.#host.lookaheadSeconds);
+      trend = new this.#host.playbackReadiness.RateTrend(this.#host.lookaheadSeconds);
       state.downloads.set(serviceId, trend);
     }
     const speed = Number(downloadSpeed);
@@ -769,7 +773,7 @@ export class ViewerRequests {
     const id = output.outputKey;
     let trend = state.tracks.get(id);
     if (!trend) {
-      trend = new RateTrend(this.#host.lookaheadSeconds);
+      trend = new this.#host.playbackReadiness.RateTrend(this.#host.lookaheadSeconds);
       state.tracks.set(id, trend);
     }
     const reading = this.#host.encodeSpeedReadingOf?.(output, now) ?? null;

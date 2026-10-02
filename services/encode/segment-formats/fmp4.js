@@ -11,18 +11,24 @@
  */
 
 import {
-  continuePresentationRanges,
   rebaseSegmentDecodeTimes,
   neutralizeEmptyEdits,
-  presentationCoverageEnd,
+  producedThroughSeconds,
   readPresentationRanges,
   readSelfContainedStartSeconds,
   readTrackTimescales,
   readVideoSampleSize,
+  servedPresentationRanges,
   stampSegmentStartTime,
-  translatePresentationRanges,
   walkBoxes
 } from "./mp4-boxes.js";
+
+/**
+ * Served ranges by the coverage they were derived from; see `servedMediaRanges`.
+ *
+ * @type {WeakMap<object, { initBytes: Buffer | null, served: object }>}
+ */
+const servedRangesKept = new WeakMap();
 
 /**
  * How many distinct tracks have a fragment in this segment.
@@ -282,16 +288,28 @@ export const fmp4Format = {
    * transcode itself; the box walk never descends into `mdat`.
    */
   needsSegmentRewrite: true,
-  mediaCoverageEnd: presentationCoverageEnd,
+  producedThroughSeconds,
   readMediaRanges(raw, { initBytes = null, startSeconds = 0 } = {}) {
     if (this.extractInit(raw)) return readPresentationRanges(raw);
     if (!initBytes?.length) return undefined;
     const served = this.prepareSegmentBytes(raw, { initBytes, startSeconds, rawBytes: raw });
     return readPresentationRanges(Buffer.concat([initBytes, served]));
   },
-  clientMediaRanges(ranges, context) {
-    return translatePresentationRanges(continuePresentationRanges(ranges, context.nextRanges),
-      context.initBytes, context.timestampOffsetSeconds);
+  /**
+   * The same object is returned while the coverage and the init are the same
+   * ones, so a reader can keep what it derives from a piece instead of deriving
+   * it on every report.
+   */
+  servedMediaRanges(coverage, { initBytes = null } = {}) {
+    const kept = servedRangesKept.get(coverage);
+    if (kept && kept.initBytes === initBytes) {
+      return kept.served;
+    }
+    const served = servedPresentationRanges(coverage, initBytes);
+    if (coverage !== null && typeof coverage === "object") {
+      servedRangesKept.set(coverage, { initBytes, served });
+    }
+    return served;
   },
 
   /**

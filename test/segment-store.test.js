@@ -40,7 +40,7 @@ test("a complete audio cut within the configured muxer delta remains usable", (t
   const { store, root } = storeInATempRoot();
   t.after(() => { store.dropAll("the check is over"); rmSync(root, { recursive: true, force: true }); });
   const format = { ...fmp4Format, readMediaRanges: () => [{ start: 0, end: 4.738913832199547 }],
-    mediaCoverageEnd: (ranges) => ranges.at(-1).end };
+    producedThroughSeconds: (ranges) => ranges.at(-1).end };
   const dir = store.directoryFor(KEY);
   store.useFormat(KEY, format);
   const endSeconds = 4.755 - SEGMENT_CUT_TIME_DELTA_SECONDS;
@@ -53,7 +53,7 @@ test("a closed but truncated non-final piece is not published or reused", (t) =>
   const { store, root } = storeInATempRoot();
   t.after(() => { store.dropAll("the check is over"); rmSync(root, { recursive: true, force: true }); });
   const format = { ...fmp4Format, readMediaRanges: () => [{ start: 456, end: 456.084 }],
-    mediaCoverageEnd: (ranges) => ranges.at(-1).end };
+    producedThroughSeconds: (ranges) => ranges.at(-1).end };
   const dir = store.directoryFor(KEY);
   store.useFormat(KEY, format);
   writeFileSync(path.join(dir, "making-0-00071.mp4"), Buffer.alloc(16));

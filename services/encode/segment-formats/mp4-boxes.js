@@ -16,7 +16,6 @@
  * @type {ReadonlySet<string>}
  */
 const CONTAINER_BOXES = new Set(["moov", "mvex", "trak", "mdia", "minf", "stbl", "edts", "moof", "traf"]);
-const presentationTracks = new WeakMap();
 
 /**
  * Walk the box tree, invoking `visit` for every box encountered.
@@ -96,37 +95,68 @@ export function readTrackTimescales(initSegment) {
   return timescales;
 }
 
-/** Movie presentation time minus track media time, in seconds per track. */
-export function readTrackEditOffsets(initSegment) {
-  const scales = readTrackTimescales(initSegment);
-  const offsets = new Map([...scales.keys()].map((id) => [id, 0]));
-  let movieScale = 0;
+/**
+ * `numerator / denominator` rounded half up, for non-negative operands.
+ *
+ * An edit list states a track's position in the MOVIE timescale and `tfdt` is
+ * an integer in the TRACK timescale, so writing a position into a fragment
+ * rounds once. This is that rounding, stated in one place so the writer of a
+ * position ({@link rebaseSegmentDecodeTimes}) and every reader of it
+ * ({@link readPresentationRanges}) agree to the tick.
+ *
+ * @param {bigint} numerator
+ * @param {bigint} denominator
+ * @returns {bigint}
+ */
+function roundedQuotient(numerator, denominator) {
+  return (2n * numerator + denominator) / (2n * denominator);
+}
+
+/**
+ * Where each track's media time zero is presented, in that track's own ticks:
+ * the leading empty edits of its `elst`, converted from the movie timescale,
+ * minus the `media_time` of its first real edit. A track with no edit list is
+ * presented as its media time.
+ *
+ * @param {Buffer} initSegment
+ * @returns {Map<number, { timescale: bigint, offset: bigint }>}
+ */
+export function readTrackEdits(initSegment) {
+  const edits = new Map([...readTrackTimescales(initSegment)].map(([id, timescale]) =>
+    [id, { timescale: BigInt(timescale), offset: 0n }]));
+  let movieTimescale = 0n;
   let trackId = null;
   walkBoxes(initSegment, (type, start, end) => {
     const version = initSegment[start];
     if (type === "mvhd") {
       const at = start + (version === 1 ? 20 : 12);
-      if (at + 4 <= end) movieScale = initSegment.readUInt32BE(at);
+      if (at + 4 <= end) movieTimescale = BigInt(initSegment.readUInt32BE(at));
     } else if (type === "tkhd") {
       const at = start + (version === 1 ? 20 : 12);
       if (at + 4 <= end) trackId = initSegment.readUInt32BE(at);
-    } else if (type === "elst" && scales.has(trackId) && movieScale > 0 && start + 8 <= end) {
+    } else if (type === "elst" && edits.has(trackId) && movieTimescale > 0n && start + 8 <= end) {
+      const edit = edits.get(trackId);
       const count = initSegment.readUInt32BE(start + 4);
       const width = version === 1 ? 20 : 12;
-      let movieStart = 0;
+      let emptyTicks = 0n;
+      // A list of empty edits alone still places the track: its media follows
+      // them from media time zero, which is where `readSelfContainedStartSeconds`
+      // reads a piece's start from.
+      let mediaTime = 0n;
       for (let entry = 0, at = start + 8; entry < count && at + width <= end; entry++, at += width) {
-        const duration = version === 1 ? Number(initSegment.readBigUInt64BE(at)) : initSegment.readUInt32BE(at);
-        const mediaTime = version === 1 ? Number(initSegment.readBigInt64BE(at + 8)) : initSegment.readInt32BE(at + 4);
-        if (mediaTime === -1) {
-          movieStart += duration / movieScale;
+        const duration = version === 1 ? initSegment.readBigUInt64BE(at) : BigInt(initSegment.readUInt32BE(at));
+        const entryMediaTime = version === 1 ? initSegment.readBigInt64BE(at + 8) : BigInt(initSegment.readInt32BE(at + 4));
+        if (entryMediaTime === -1n) {
+          emptyTicks += duration;
         } else {
-          offsets.set(trackId, movieStart - mediaTime / scales.get(trackId));
+          mediaTime = entryMediaTime;
           break;
         }
       }
+      edit.offset = roundedQuotient(emptyTicks * edit.timescale, movieTimescale) - mediaTime;
     }
   });
-  return offsets;
+  return edits;
 }
 
 /** An init shared across seeks has no segment-specific empty edit. */
@@ -147,182 +177,215 @@ export function neutralizeEmptyEdits(initSegment) {
   return neutral;
 }
 
-/** Preserve sample presentation times when replacing a piece's own init. */
+/**
+ * Place a piece made with its own init on the timeline of the session's init:
+ * every `tfdt` moves by the difference of the two inits' track positions
+ * ({@link readTrackEdits}), in integer ticks.
+ *
+ * @param {Buffer} segment - The piece's fragments, its own `moov` removed.
+ * @param {Buffer} ownInit
+ * @param {Buffer} sessionInit
+ * @returns {Buffer}
+ */
 export function rebaseSegmentDecodeTimes(segment, ownInit, sessionInit) {
-  const scales = readTrackTimescales(sessionInit);
-  const ownOffsets = readTrackEditOffsets(ownInit);
-  const sessionOffsets = readTrackEditOffsets(sessionInit);
+  const own = readTrackEdits(ownInit);
+  const session = readTrackEdits(sessionInit);
   const stamped = Buffer.from(segment);
   let trackId = null;
   walkBoxes(stamped, (type, start, end) => {
     if (type === "tfhd" && start + 8 <= end) {
       trackId = stamped.readUInt32BE(start + 4);
-    } else if (type === "tfdt" && scales.has(trackId) && ownOffsets.has(trackId)) {
+    } else if (type === "tfdt" && own.has(trackId) && session.has(trackId)) {
       const version = stamped[start];
       if (start + (version === 1 ? 12 : 8) > end) return;
-      const existing = version === 1 ? Number(stamped.readBigUInt64BE(start + 4)) : stamped.readUInt32BE(start + 4);
-      const value = existing + Math.round((ownOffsets.get(trackId) - sessionOffsets.get(trackId)) * scales.get(trackId));
-      if (value < 0) throw new Error("A fragment cannot be placed before its shared init's decode origin.");
-      if (version === 1) stamped.writeBigUInt64BE(BigInt(value), start + 4);
-      else if (value <= 0xffffffff) stamped.writeUInt32BE(value, start + 4);
+      if (own.get(trackId).timescale !== session.get(trackId).timescale) {
+        throw new Error(`Track ${trackId} counts ${own.get(trackId).timescale} ticks a second in its piece ` +
+          `and ${session.get(trackId).timescale} in the session's init.`);
+      }
+      const existing = version === 1 ? stamped.readBigUInt64BE(start + 4) : BigInt(stamped.readUInt32BE(start + 4));
+      const value = existing + own.get(trackId).offset - session.get(trackId).offset;
+      if (value < 0n) throw new Error("A fragment cannot be placed before its shared init's decode origin.");
+      if (version === 1) stamped.writeBigUInt64BE(value, start + 4);
+      else if (value <= 0xffffffffn) stamped.writeUInt32BE(Number(value), start + 4);
       else throw new Error("Fragment decode time exceeds its 32-bit field.");
     }
   });
   return stamped;
 }
 
-/** Presentation intervals from the durations and composition times of samples. */
+/** `sample_is_non_sync_sample` in the sample flags of ISO/IEC 14496-12. */
+const SAMPLE_IS_NON_SYNC = 0x10000;
+
+/**
+ * What a piece's samples say about the media it holds, per track, in integer
+ * ticks of that track's timescale: presentation intervals (decode time plus
+ * composition offset, plus the track's position) joined only where they touch
+ * or overlap, as they are written. Nothing is joined across a gap here: whether
+ * a browser closes a gap is a fact about the browser, and it is decided in the
+ * viewer component, which models the viewer's browser.
+ *
+ * Each range carries `frame`, the duration Gecko gives an inserted interval as
+ * twice its fuzz: the longest frame since the last keyframe
+ * (`TrackBuffersManager::ProcessFrames` keeps it, `InsertFrames` applies it to
+ * a batch of frames). The engine does not state whether a batch is one fragment
+ * or the whole appended piece, so the smaller of the two values is taken; a
+ * merged range keeps the larger of its parts, as `Interval::Span` does.
+ *
+ * @param {Buffer} raw - An init followed by fragments, or a self-contained piece.
+ * @returns {{ tracks: Array<{ id: number, kind: string | undefined, timescale: bigint,
+ *   ranges: Array<{ start: bigint, end: bigint, frame: bigint }> }> }}
+ */
 export function readPresentationRanges(raw) {
-  const scales = readTrackTimescales(raw);
-  const edits = readTrackEditOffsets(raw);
-  const byTrack = new Map();
-  const decodeRanges = new Map();
-  const defaultDurations = new Map();
-  let trackId = null;
-  let decodeTime = 0;
-  let defaultDuration = 0;
-  let movieScale = 0;
-  let declaredTrack = null;
+  const edits = readTrackEdits(raw);
+  const frames = new Map();
+  const defaults = new Map();
   const kinds = new Map();
+  let declaredTrack = null;
+  let trackId = null;
+  let fragment = 0;
+  let decodeTime = 0n;
+  let defaultDuration = 0n;
+  let defaultFlags = 0;
   walkBoxes(raw, (type, start, end) => {
-    if (type === "mvhd") {
-      const at = start + (raw[start] === 1 ? 20 : 12);
-      if (at + 4 <= end) movieScale = raw.readUInt32BE(at);
-    } else if (type === "tkhd") {
+    if (type === "tkhd") {
       const at = start + (raw[start] === 1 ? 20 : 12);
       if (at + 4 <= end) declaredTrack = raw.readUInt32BE(at);
     } else if (type === "hdlr" && start + 12 <= end) {
       kinds.set(declaredTrack, raw.toString("latin1", start + 8, start + 12));
-    } else if (type === "trex" && start + 20 <= end) {
-      defaultDurations.set(raw.readUInt32BE(start + 4), raw.readUInt32BE(start + 12));
+    } else if (type === "trex" && start + 24 <= end) {
+      defaults.set(raw.readUInt32BE(start + 4), {
+        duration: BigInt(raw.readUInt32BE(start + 12)), flags: raw.readUInt32BE(start + 20)
+      });
     } else if (type === "tfhd" && start + 8 <= end) {
       const flags = raw.readUIntBE(start + 1, 3);
       trackId = raw.readUInt32BE(start + 4);
-      const at = start + 8 + ((flags & 1) ? 8 : 0) + ((flags & 2) ? 4 : 0);
-      defaultDuration = (flags & 8) && at + 4 <= end ? raw.readUInt32BE(at) :
-        defaultDurations.get(trackId) ?? 0;
+      fragment += 1;
+      defaultDuration = defaults.get(trackId)?.duration ?? 0n;
+      defaultFlags = defaults.get(trackId)?.flags ?? 0;
+      let at = start + 8 + ((flags & 0x1) ? 8 : 0) + ((flags & 0x2) ? 4 : 0);
+      if ((flags & 0x8) && at + 4 <= end) defaultDuration = BigInt(raw.readUInt32BE(at));
+      at += (flags & 0x8) ? 4 : 0;
+      at += (flags & 0x10) ? 4 : 0;
+      if ((flags & 0x20) && at + 4 <= end) defaultFlags = raw.readUInt32BE(at);
     } else if (type === "tfdt" && start + (raw[start] === 1 ? 12 : 8) <= end) {
-      decodeTime = raw[start] === 1 ? Number(raw.readBigUInt64BE(start + 4)) : raw.readUInt32BE(start + 4);
-    } else if (type === "trun" && scales.has(trackId) && start + 8 <= end) {
-      const scale = scales.get(trackId);
+      decodeTime = raw[start] === 1 ? raw.readBigUInt64BE(start + 4) : BigInt(raw.readUInt32BE(start + 4));
+    } else if (type === "trun" && edits.has(trackId) && start + 8 <= end) {
+      const offset = edits.get(trackId).offset;
       const flags = raw.readUIntBE(start + 1, 3);
       const count = raw.readUInt32BE(start + 4);
-      let at = start + 8 + ((flags & 1) ? 4 : 0) + ((flags & 4) ? 4 : 0);
+      let at = start + 8 + ((flags & 0x1) ? 4 : 0);
+      const firstFlags = (flags & 0x4) ? raw.readUInt32BE(at) : null;
+      at += (flags & 0x4) ? 4 : 0;
       const width = Number(Boolean(flags & 0x100)) * 4 + Number(Boolean(flags & 0x200)) * 4 +
         Number(Boolean(flags & 0x400)) * 4 + Number(Boolean(flags & 0x800)) * 4;
-      const ranges = byTrack.get(trackId) ?? [];
+      const samples = frames.get(trackId) ?? [];
       for (let sample = 0; sample < count && at + width <= end; sample++) {
-        const duration = flags & 0x100 ? raw.readUInt32BE(at) : defaultDuration;
+        const duration = (flags & 0x100) ? BigInt(raw.readUInt32BE(at)) : defaultDuration;
         if (flags & 0x100) at += 4;
         if (flags & 0x200) at += 4;
-        if (flags & 0x400) at += 4;
-        const composition = flags & 0x800 ?
-          (raw[start] === 1 ? raw.readInt32BE(at) : raw.readUInt32BE(at)) : 0;
+        let sampleFlags = sample === 0 && firstFlags !== null ? firstFlags : defaultFlags;
+        if (flags & 0x400) {
+          sampleFlags = raw.readUInt32BE(at);
+          at += 4;
+        }
+        const composition = (flags & 0x800)
+          ? BigInt(raw[start] === 1 ? raw.readInt32BE(at) : raw.readUInt32BE(at))
+          : 0n;
         if (flags & 0x800) at += 4;
-        if (!(duration > 0)) return;
-        const position = (decodeTime + composition) / scale + (edits.get(trackId) ?? 0);
-        ranges.push({ start: position, end: position + duration / scale });
-        const decode = decodeRanges.get(trackId) ?? [];
-        decode.push({ start: decodeTime / scale + (edits.get(trackId) ?? 0),
-          end: (decodeTime + duration) / scale + (edits.get(trackId) ?? 0) });
-        decodeRanges.set(trackId, decode);
+        if (!(duration > 0n)) break;
+        samples.push({
+          start: decodeTime + composition + offset,
+          duration,
+          keyframe: (sampleFlags & SAMPLE_IS_NON_SYNC) === 0,
+          fragment
+        });
         decodeTime += duration;
       }
-      byTrack.set(trackId, ranges);
+      frames.set(trackId, samples);
     }
   });
-  // Merge in presentation order: B frames arrive in decode order.
-  const mergedTracks = [...byTrack].map(([id, samples]) => {
-    const merged = [];
-    // Sample durations are decode durations. A displayed video frame remains
-    // present until the next presentation sample, including variable-rate holds.
-    const ordered = samples.sort((left, right) => left.start - right.start);
-    const precision = 1 / (movieScale || scales.get(id));
-    for (const sample of ordered) {
-      const previous = merged.at(-1);
-      if (previous && (kinds.get(id) === "vide" ||
-        sample.start - previous.end <= precision + Number.EPSILON * Math.max(1, sample.end) * 8)) {
-        previous.end = Math.max(previous.end, sample.end);
-      } else merged.push({ ...sample });
-      // Preserve coded-frame timing separately from the presentation interval.
-      // Chromium joins an adjacent frame within twice the maximum coded-frame
-      // duration of the stream (SourceBufferRange::GetFudgeRoom), measured from
-      // the last frame's timestamp, not from the segment's nominal cut.
-      const range = merged.at(-1);
-      range.lastFrameStart = Math.max(range.lastFrameStart ?? sample.start, sample.start);
-      range.maxFrameDuration = Math.max(range.maxFrameDuration ?? 0, sample.end - sample.start);
+  const tracks = [];
+  for (const [id, samples] of frames) {
+    // Gecko's longest frame since the last keyframe, in decode order, at the
+    // end of each fragment and at the end of the piece.
+    let longest = 0n;
+    const longestAtFragmentEnd = new Map();
+    for (const sample of samples) {
+      longest = sample.keyframe || sample.duration > longest ? sample.duration : longest;
+      longestAtFragmentEnd.set(sample.fragment, longest);
     }
-    // Movie edits quantize independent pieces to movie ticks. Preserve that
-    // declared resolution at joins; it is not a playback buffer threshold.
-    for (const range of merged) range.end += precision;
-    const decoded = decodeRanges.get(id);
-    return { id, ranges: merged.map(({ start, end }) => ({ start, end })),
-      frameRanges: merged, kind: kinds.get(id), precision,
-      decodeStart: Math.min(...decoded.map(({ start }) => start)),
-      decodeEnd: Math.max(...decoded.map(({ end }) => end)) };
-  });
-  // A multiplexed segment is playable only where every declared track exists.
-  const result = intersectPresentationTracks(mergedTracks);
-  presentationTracks.set(result, mergedTracks);
-  return result;
-}
-
-/** Last continuous coded-frame boundary on every track in a closed piece. */
-export function presentationCoverageEnd(ranges) {
-  const tracks = presentationTracks.get(ranges);
-  if (!tracks?.length) return null;
-  return Math.min(...tracks.map(({ frameRanges, precision }) => Math.max(...frameRanges.map((range) =>
-    range.lastFrameStart + 2 * range.maxFrameDuration + precision))));
-}
-
-/** A video frame can cross a file boundary when decoding remains continuous. */
-export function continuePresentationRanges(ranges, nextRanges) {
-  const tracks = presentationTracks.get(ranges);
-  const next = presentationTracks.get(nextRanges);
-  if (!tracks || !next) return ranges;
-  const continued = tracks.map((track) => {
-    const following = next.find(({ id }) => id === track.id);
-    const held = track.ranges.map((range) => ({ ...range }));
-    if (track.kind === "vide" && following && held.length > 0 && following.ranges.length > 0 &&
-      Math.abs(track.decodeEnd - following.decodeStart) <= track.precision + following.precision +
-        Number.EPSILON * Math.max(1, following.decodeStart) * 8) {
-      held.at(-1).end = Math.max(held.at(-1).end, following.ranges[0].start);
+    const ranges = [];
+    const inPresentationOrder = [...samples].sort((left, right) =>
+      (left.start < right.start ? -1 : left.start > right.start ? 1 : 0));
+    for (const sample of inPresentationOrder) {
+      const atFragmentEnd = longestAtFragmentEnd.get(sample.fragment);
+      const frame = atFragmentEnd < longest ? atFragmentEnd : longest;
+      const end = sample.start + sample.duration;
+      const previous = ranges.at(-1);
+      if (previous && sample.start <= previous.end) {
+        previous.end = end > previous.end ? end : previous.end;
+        previous.frame = frame > previous.frame ? frame : previous.frame;
+      } else {
+        ranges.push({ start: sample.start, end, frame });
+      }
     }
-    return { ...track, ranges: held };
+    tracks.push({ id, kind: kinds.get(id), timescale: edits.get(id).timescale, ranges });
+  }
+  return { tracks };
+}
+
+/**
+ * How far a closed piece holds media on every track, in seconds of the piece's
+ * own timeline, or null when a track holds none. Compared with the cut the
+ * piece was asked to reach, it says whether the encoder finished the piece.
+ * That is a fact of production, so no browser behaviour enters it.
+ *
+ * @param {{ tracks: Array<{ timescale: bigint, ranges: Array<{ end: bigint }> }> }} coverage
+ * @returns {number | null}
+ */
+export function producedThroughSeconds(coverage) {
+  const tracks = coverage?.tracks ?? [];
+  if (tracks.length === 0 || tracks.some(({ ranges }) => ranges.length === 0)) {
+    return null;
+  }
+  return Math.min(...tracks.map(({ timescale, ranges }) => Number(ranges.at(-1).end) / Number(timescale)));
+}
+
+/**
+ * The media a piece holds on the timeline its served bytes declare, in exact
+ * ticks. Given the session's init, every track moves by that init's position
+ * ({@link readTrackEdits}), which is what the bytes the browser receives state;
+ * without one, the piece's own presentation timeline is returned. A
+ * multiplexed piece is playable only where every track holds media, so tracks
+ * are intersected in the least common multiple of their timescales; an
+ * intersected range keeps the smaller `frame`.
+ *
+ * @param {{ tracks: Array<{ id: number, timescale: bigint,
+ *   ranges: Array<{ start: bigint, end: bigint, frame: bigint }> }> }} coverage
+ * @param {Buffer | null} sessionInit
+ * @returns {{ timescale: bigint | null, ranges: Array<{ start: bigint, end: bigint, frame: bigint }> }}
+ */
+export function servedPresentationRanges(coverage, sessionInit) {
+  const tracks = coverage?.tracks ?? [];
+  if (tracks.length === 0) {
+    return { timescale: null, ranges: [] };
+  }
+  const session = sessionInit?.length ? readTrackEdits(sessionInit) : new Map();
+  const gcd = (left, right) => (right === 0n ? left : gcd(right, left % right));
+  const common = tracks.reduce((scale, { timescale }) => scale / gcd(scale, timescale) * timescale, 1n);
+  const placed = tracks.map(({ id, timescale, ranges }) => {
+    const shift = -(session.get(id)?.offset ?? 0n);
+    const factor = common / timescale;
+    return ranges.map(({ start, end, frame }) => ({
+      start: (start + shift) * factor, end: (end + shift) * factor, frame: frame * factor
+    }));
   });
-  const result = intersectPresentationTracks(continued);
-  presentationTracks.set(result, continued);
-  return result;
-}
-
-function intersectPresentationTracks(tracks) {
-  return tracks.slice(1).map(({ ranges }) => ranges).reduce((common, ranges) => common.flatMap((left) => ranges
-    .map((right) => ({ start: Math.max(left.start, right.start), end: Math.min(left.end, right.end),
-      ...(left.joinEnd !== undefined || right.joinEnd !== undefined ? {
-        joinEnd: Math.min(left.joinEnd ?? left.end, right.joinEnd ?? right.end)
-      } : {}) }))
-    .filter(({ start, end }) => end > start)), tracks[0]?.ranges ?? []);
-}
-
-/** Project the same parsed samples onto the media player's reported clock. */
-export function translatePresentationRanges(ranges, initBytes, timestampOffsetSeconds) {
-  const tracks = presentationTracks.get(ranges);
-  if (!tracks || !initBytes?.length || !Number.isFinite(timestampOffsetSeconds)) return ranges;
-  const edits = readTrackEditOffsets(initBytes);
-  return intersectPresentationTracks(tracks.map(({ id, ranges: held, frameRanges, kind }) => ({
-    id,
-    ranges: held.map(({ start, end }, index) => ({
-      start: Math.max(0, start + timestampOffsetSeconds - (edits.get(id) ?? 0)),
-      end: end + timestampOffsetSeconds - (edits.get(id) ?? 0),
-      // Chromium joins continuous audio and video within twice the measured
-      // frame distance. This is a coded-frame rule, not an ETA tolerance.
-      // https://chromium.googlesource.com/chromium/src/+/refs/heads/main/media/filters/source_buffer_stream.cc
-      ...(["soun", "vide"].includes(kind) ? {
-        joinEnd: frameRanges[index].lastFrameStart + 2 * frameRanges[index].maxFrameDuration +
-          timestampOffsetSeconds - (edits.get(id) ?? 0)
-      } : {})
-    })).filter(({ start, end }) => end > start)
-  })));
+  const ranges = placed.slice(1).reduce((held, other) => held.flatMap((left) => other.map((right) => ({
+    start: left.start > right.start ? left.start : right.start,
+    end: left.end < right.end ? left.end : right.end,
+    frame: left.frame < right.frame ? left.frame : right.frame
+  })).filter(({ start, end }) => end > start)), placed[0]);
+  return { timescale: common, ranges };
 }
 
 /**

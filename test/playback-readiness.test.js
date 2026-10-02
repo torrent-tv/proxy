@@ -1,6 +1,11 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { predictPlaybackReadiness, RateTrend, forecastRate } from "../services/server/playback-readiness.js";
+import { predictPlaybackReadiness, RateTrend, forecastRate } from "../services/viewer/playback-readiness.js";
+
+/** Served ranges in milliseconds, as the format states them for a piece. */
+function servedMs(...pairs) {
+  return { timescale: 1000n, ranges: pairs.map(([start, end]) => ({ start: BigInt(start), end: BigInt(end), frame: 0n })) };
+}
 
 function input(overrides = {}) {
   const now = 10_000;
@@ -72,12 +77,42 @@ test("subtracts progress only inside the actual processing run interval", () => 
 test("future cuts follow measured track time without inventing a permanent clock gap", () => {
   const state = input({ bufferedAheadSeconds: 3.9, reserveSeconds: 0 });
   state.tracks[0].clientRanges = [{ start: 0, end: 3.9 }];
-  state.tracks[0].segments[0].mediaRanges = [{ start: 0, end: 3.9 }];
+  state.tracks[0].segments[0].mediaRanges = servedMs([0, 3900]);
   const forecast = predictPlaybackReadiness(state);
   assert.notEqual(forecast.reason, "no-safe-start-found");
-  state.tracks[0].segments[1].mediaRanges = [{ start: 4, end: 8 }];
+  state.tracks[0].segments[1].mediaRanges = servedMs([4000, 8000]);
   state.tracks[0].readySegmentIndices = [0, 1];
   assert.equal(predictPlaybackReadiness(state).reason, "media-continuity-unavailable");
+});
+
+test("a held range is compared with served ticks exactly, not through rounded seconds", () => {
+  // 1418768 ticks of 16000 is 88.673 s; as a double the page reports the end
+  // of the same media as 88.67299999999999. Measured 2026-10-02: the float
+  // comparison called this join a hole.
+  const state = input({ durationSeconds: 92.673, reserveSeconds: 0 });
+  const piece = (start, end) => ({ timescale: 16000n, ranges: [{ start, end, frame: 672n }] });
+  state.tracks[0].clientRanges = [{ start: 0, end: 88.67299999999999 }];
+  state.tracks[0].segments = [
+    { index: 0, startSeconds: 0, endSeconds: 88.673, mediaRanges: piece(0n, 1418768n) },
+    { index: 1, startSeconds: 88.673, endSeconds: 92.673, mediaRanges: piece(1418768n, 1482768n) }
+  ];
+  state.tracks[0].readySegmentIndices = [0, 1];
+  state.tracks[0].segmentSizesBytes = new Map([[0, 40], [1, 40]]);
+  const forecast = predictPlaybackReadiness(state);
+  assert.notEqual(forecast.reason, "media-continuity-unavailable");
+  assert.equal(forecast.preparedSegments, 2);
+});
+
+test("a browser range within Chromium's microsecond truncation still holds the piece", () => {
+  const state = input({ reserveSeconds: 0 });
+  state.tracks[0].segments[0].mediaRanges = servedMs([0, 4000]);
+  state.tracks[0].clientRanges = [{ start: 0, end: 4 - 2e-6 }];
+  state.tracks[0].readySegmentIndices = [0, 1];
+  state.tracks[0].segmentSizesBytes = new Map([[0, 40], [1, 40]]);
+  const held = predictPlaybackReadiness(state);
+  state.tracks[0].clientRanges = [];
+  const absent = predictPlaybackReadiness(state);
+  assert.ok(held.delaySeconds < absent.delaySeconds);
 });
 
 test("keeps source-stall reserve in the proxy's prepared timeline, not the capped browser buffer", () => {

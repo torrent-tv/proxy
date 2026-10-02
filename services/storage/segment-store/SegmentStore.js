@@ -160,6 +160,9 @@ export class SegmentStore {
   directoryFor(key) {
     const dir = path.join(this.#root, directoryNameFor(key));
     if (!existsSync(dir)) {
+      // A watch held on this path watches the directory that was removed, not
+      // the one about to be made, and while it is held `#watch` makes no other.
+      this.#unwatch(key);
       mkdirSync(dir, { recursive: true });
       // What this directory is, for whoever finds it after this process has
       // been killed. Without it the sweep can only throw everything away.
@@ -574,11 +577,14 @@ export class SegmentStore {
    * being made for a run, and a wait beginning on an output this process has
    * adopted rather than made.
    *
-   * WHOEVER REMOVES ONE OF THESE DIRECTORIES GOES THROUGH `drop`, which stops
-   * the watch first. On Linux, where this runs, an open watch does not prevent
-   * a directory being removed; on Windows it does, and `rmSync` then retries
-   * until it gives up — measured, a check that removed a store's directory
-   * behind its back took 110 s instead of 3.
+   * `drop` stops the watch before it removes the directory. A DIRECTORY
+   * REMOVED BY ANYBODY ELSE ENDS ITS WATCH TOO, and it has to be noticed here,
+   * because no `error` is emitted for it. Measured 2026-10-02 on Windows, Node
+   * 24.2: the removal succeeds, and the watch then reports `rename` for the
+   * directory itself without end — 232 618 events in eight seconds — and that
+   * stream keeps the process alive although the watch is not persistent. Two
+   * test files never exited for it. Left in place, a dead watch also stops
+   * this method from watching the directory made again under the same name.
    *
    * @param {string} key
    * @returns {void}
@@ -596,12 +602,28 @@ export class SegmentStore {
       return;
     }
     try {
-      const watcher = watch(dir, { persistent: false }, (_event, name) => {
+      // Closes this watch only: by the time it is told, the key may already
+      // name the watch on a directory made again.
+      const end = () => {
+        if (this.#watchers.get(key) === watcher) {
+          this.#unwatch(key);
+        } else {
+          watcher.close();
+        }
+      };
+      const watcher = watch(dir, { persistent: false }, (event, name) => {
+        // A removal is a `rename`, and the writes of a piece are `change`, so
+        // the directory is asked about only where it can have gone.
+        if (event === "rename" && !existsSync(dir)) {
+          this.#held.delete(key);
+          end();
+          return;
+        }
         this.#noticed(key, typeof name === "string" ? name : null);
       });
       // A directory that goes away takes its watch with it rather than leaving
       // an error nobody reads.
-      watcher.on("error", () => this.#unwatch(key));
+      watcher.on("error", end);
       this.#watchers.set(key, watcher);
     } catch (error) {
       // Watching is how a wait ends early, not how a segment is found: every

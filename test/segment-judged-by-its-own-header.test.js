@@ -152,10 +152,11 @@ async function managerHolding({ piece, sessionHeader }) {
     segmentFormat: fmp4Format,
     useSyntheticPlaylist: true,
     playlistText: "#EXTM3U\n",
-    initBytes: sessionHeader,
     waitEpoch: 0
   };
   manager.outputs.set(SESSION_ID, session);
+  // The header this output serves is the store's, one owner for it.
+  manager.segmentStore.keepInit(OUTPUT_KEY, sessionHeader);
   // No plan runs here: this file is about the path that answers a request.
   manager.encodeRuns.planEncodersNow = () => {};
   manager.encodeRuns.planEncodersSoon = () => {};

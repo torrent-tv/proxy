@@ -97,12 +97,14 @@ function fakeSession({ dirPath, transcodeVideo = true, cutGrid = transcodeVideo 
 }
 
 /**
- * @param {{ transcodeVideo?: boolean, cutGrid?: string }} [options]
+ * @param {{ transcodeVideo?: boolean, cutGrid?: string, softwarePresetBenchmark?: object[] }} [options]
+ *   `softwarePresetBenchmark` is the host's startup measurement, read through
+ *   the encoder in use and not assigned afterwards.
  * @returns {Promise<{ manager: object, session: object, dirPath: string, restarts: number[] }>}
  */
-async function managerWithSession({ transcodeVideo = true, cutGrid } = {}) {
+async function managerWithSession({ transcodeVideo = true, cutGrid, softwarePresetBenchmark } = {}) {
   // Its own store root — see `helpers/manager.js` for what sharing one cost.
-  const { manager } = managerWithOwnStore();
+  const { manager } = managerWithOwnStore({ softwarePresetBenchmark });
   // ADDRESSED THE WAY PRODUCTION ADDRESSES IT: a session's segments live in the
   // store's directory for its OUTPUT, and what it has produced is asked of the
   // store by that same key. A fixture with a directory of its own and no key
@@ -499,6 +501,9 @@ test("the way BACK UP exists, one rung at a time", async (t) => {
   session.encodeWidth = 854;
   session.encodeHeight = 480;
   measureSpeed([...session.runs][0], 2.4);
+  // What another output takes to be ready here: the picture's first segment
+  // on the addon host, field 2026-08-31.
+  manager.hostTimings.rememberFirstSegmentLatency(8_400);
   // Their link is not measured here: what is under test is the room, and a
   // measured link would also weigh a soundtrack this fixture states no rate for.
   fillingReports(manager.viewers.get("viewer"), null);
@@ -564,7 +569,9 @@ test("a stream that publishes no variants is left alone, and said so once", asyn
 });
 
 test("a height this machine has been MEASURED failing at is not what the way back up offers", async (t) => {
-  const { manager, session, dirPath } = await managerWithSession();
+  const { manager, session, dirPath } = await managerWithSession({
+    softwarePresetBenchmark: [{ preset: "ultrafast", pixelsPerSec: 1e6 }]
+  });
   t.after(async () => {
     await manager.lifecycle.disposeAll();
     // The store closes its watch on the directory as it drops the output, and
@@ -578,7 +585,6 @@ test("a height this machine has been MEASURED failing at is not what the way bac
   // rung on screen, back when a step changed the encode inside it — so the way
   // back up would have asked for 720p again, failed again, and stepped down
   // again, about every hundred seconds for the length of the film.
-  manager.softwarePresetBenchmark = [{ preset: "ultrafast", pixelsPerSec: 1e6 }];
   qualityStateOf(session).lastAloneSpeed = 0.5;
   session.variantHeight = 720;
 
@@ -671,6 +677,9 @@ test("a picture seen larger than the rung on screen is asked one rung up, when t
   session.encodeWidth = 854;
   session.encodeHeight = 480;
   measureSpeed([...session.runs][0], 2.4);
+  // What another output takes to be ready here: the picture's first segment
+  // on the addon host, field 2026-08-31.
+  manager.hostTimings.rememberFirstSegmentLatency(8_400);
   manager.viewers.get("viewer").noteVisiblePicture({ width: 1920, height: 1080 });
   fillingReports(manager.viewers.get("viewer"), null);
 

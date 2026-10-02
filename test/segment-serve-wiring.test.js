@@ -52,16 +52,19 @@ function box(type, body) {
 
 /**
  * `elst` holding one empty edit — how the `segment` muxer records where the
- * piece sits on the source timeline.
+ * piece sits on the source timeline. A version 0 entry is twelve bytes
+ * (ISO/IEC 14496-12): duration, media time, and the media rate as an integer
+ * and a fraction.
  *
  * @param {number} offsetSeconds
  * @returns {Buffer}
  */
 function emptyEdit(offsetSeconds) {
-  const body = Buffer.alloc(16);
+  const body = Buffer.alloc(20);
   body.writeUInt32BE(1, 4);                                        // entry count
   body.writeUInt32BE(Math.round(offsetSeconds * MOVIE_TIMESCALE), 8); // duration
   body.writeInt32BE(-1, 12);                                       // media_time
+  body.writeInt16BE(1, 16);                                        // media_rate_integer
   return box("elst", body);
 }
 
@@ -206,7 +209,10 @@ async function managerWithReadySegment(overrides = {}) {
   // `prepareSegmentBytes` has no timescales without it and hands the piece back
   // unstamped, which is silent and is exactly the fault stamping exists to
   // prevent.
-  manager.segmentStore.keepInit(OUTPUT_KEY, fmp4Format.extractInit(piece));
+  // Kept as production keeps the header lifted out of a self-contained piece:
+  // shared by every piece, so its piece-specific empty edit is neutralized and
+  // each piece is placed by its own.
+  manager.segmentStore.keepInit(OUTPUT_KEY, fmp4Format.prepareSharedInit(fmp4Format.extractInit(piece)));
   manager.outputs.set(SESSION_ID, session);
   // SOMEBODY IS WATCHING IT. A segment is requested by a viewer, so a fixture
   // that asks for one without stating a viewer describes a state production

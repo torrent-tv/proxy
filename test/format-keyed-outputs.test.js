@@ -72,7 +72,7 @@ test("when a hardware encoder fails, the outputs it named are closed rather than
   });
   await new Promise((resolve) => setImmediate(resolve));
 
-  assert.equal(manager.videoEncoder.kind, "software");
+  assert.equal(manager.encoders.current.kind, "software");
   assert.equal(manager.outputs.has(failing.id), false, "an output of the failed encoder is closed");
   assert.equal(manager.outputs.has(software.id), true, "an output of another encoder is untouched");
 });

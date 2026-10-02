@@ -378,16 +378,26 @@ test("the OFFER drops the rungs the host cannot hold, and the master keeps addre
   );
 
   // A host with a little more encoder keeps the rungs it can actually hold. A
-  // second session, because the answer is settled once per session.
-  manager.softwarePresetBenchmark = [{ preset: "ultrafast", pixelsPerSec: 12e6 }];
+  // second host, because the encoder's measured modes are a fact the host is
+  // started with — read through the encoder in use, never assigned later — and
+  // a second session on it, because the answer is settled once per session.
+  const strongerHost = wireOutputs({
+    enabled: true,
+    ffmpegBin: "ffmpeg",
+    localBindHost: "127.0.0.1",
+    localPort: 9090,
+    softwarePresetBenchmark: [{ preset: "ultrafast", pixelsPerSec: 12e6 }],
+    decodeCostModel: ADDON_HOST_MODEL
+  });
+  t.after(() => strongerHost.lifecycle.disposeAll());
   const stronger = { ...session, id: "ddddddddeeeeffff", offeredHeightsCache: undefined };
-  manager.outputs.set(stronger.id, stronger);
+  strongerHost.outputs.set(stronger.id, stronger);
   assert.deepEqual(
-    manager.quality.offeredHeights(stronger),
+    strongerHost.quality.offeredHeights(stronger),
     [1080, 360, 240],
     "nothing is known about this swarm, so the bar is realtime"
   );
-  const master = manager.renditions.buildMasterPlaylist(stronger.id);
+  const master = strongerHost.renditions.buildMasterPlaylist(stronger.id);
   assert.ok(master, "1080p copied plus every rung that can be spliced beside it");
   assert.deepEqual(
     [...master.matchAll(/^v\/(\d+)\/index\.m3u8$/gm)].map((match) => Number(match[1])),
@@ -398,15 +408,18 @@ test("the OFFER drops the rungs the host cannot hold, and the master keeps addre
   // The same host, once the reader has measured what this file's supply
   // demands: waits arriving as they did on the field torrent of 2026-08-17 ask
   // 1.67x of any step, and the rungs that only just cleared realtime go.
+  // What the supply demands is a fact of the FILE, measured by its reader
+  // (1 + worst wait 1.49 s / median interval 2.22 s, twelve waits), and it is
+  // asked of the host's load by the file — not read off a session.
+  strongerHost.hostLoad.requiredSpeedFor = () => 1.67;
   const onAThinSwarm = {
     ...stronger,
     id: "eeeeeeeeffff0000",
-    offeredHeightsCache: undefined,
-    supplyFigures: { requiredSpeed: 1.67, worstWaitSec: 1.49, medianIntervalSec: 2.22, samples: 12 }
+    offeredHeightsCache: undefined
   };
-  manager.outputs.set(onAThinSwarm.id, onAThinSwarm);
+  strongerHost.outputs.set(onAThinSwarm.id, onAThinSwarm);
   assert.deepEqual(
-    manager.quality.offeredHeights(onAThinSwarm),
+    strongerHost.quality.offeredHeights(onAThinSwarm),
     [1080],
     "the copied height costs no encoder and stays; nothing re-encoded survives that supply"
   );

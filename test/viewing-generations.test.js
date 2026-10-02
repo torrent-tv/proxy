@@ -17,7 +17,7 @@ import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
 import { handleTranscodeVariantFileGet } from "../routes/transcode/variant-file/get.js";
 import { handleTranscodeAudioFileGet } from "../routes/transcode/audio-file/get.js";
-import { serveSessionFile, statedGenerationOf } from "../routes/transcode/session-file/get.js";
+import { serveSessionFile, statedGenerationOf } from "../services/server/transcode-session-files.js";
 import { Viewers } from "../services/viewer/Viewers.js";
 import { ACCEPT_WINDOW_MS } from "../services/viewer/Viewer.js";
 import {

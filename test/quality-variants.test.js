@@ -137,16 +137,20 @@ function fakeSession({
 
 
 /**
+ * @param {object} [options] - Passed to the manager: the host's own startup
+ *   measurements, which are read through the encoder in use and are not
+ *   assigned afterwards.
  * @returns {Promise<{ manager: object, base: object, dirPath: string }>}
  */
-async function managerWithBase() {
+async function managerWithBase(options = {}) {
   const dirPath = await mkdtemp(path.join(os.tmpdir(), "quality-variants-"));
   // Its own store root — see `helpers/manager.js` for what sharing one cost.
-  const { manager } = managerWithOwnStore();
+  const { manager } = managerWithOwnStore(options);
   // 812p is what a viewport-sized budget actually produces — deliberately not a
   // ladder rung, because that is the case the master has to carry.
   const base = fakeSession({ id: BASE_ID, encodeHeight: 812, dirPath });
   manager.outputs.set(BASE_ID, base);
+  manager.encodeCost.loadOfOutput = () => ({ costSec: 0.25, fileKey: "", fileCostSec: 0 });
   return { manager, base, dirPath };
 }
 
@@ -328,6 +332,7 @@ test("the rung the page says it plays is the viewer's rung, and the encoder goes
     await manager.lifecycle.disposeAll();
     await rm(dirPath, { recursive: true, force: true });
   });
+  manager.encodeRuns.planEncodersSoon = () => {};
   const variant = fakeSession({ id: VARIANT_ID, encodeHeight: 540, dirPath });
   variant.variantHeight = 540;
   // A step of the picture: made as one, same file, and a height of its own.
@@ -339,7 +344,6 @@ test("the rung the page says it plays is the viewer's rung, and the encoder goes
   base.lastRequestedSegment = 25;
   const encoder = fakeEncoder();
   startManagedRun(manager, base, { process: encoder });
-  manager.encodeRuns.planEncodersSoon = () => {};
   const served = await manager.renditions.resolveVariantFile(BASE_ID, 540, "segment-00025.mp4", VIEWER);
   assert.equal(served.sessionId, VARIANT_ID, "the file must be served from the variant, not the base");
   assert.equal(
@@ -411,6 +415,7 @@ test("warming a rung prepares it without taking the encoder from the one on scre
     await manager.lifecycle.disposeAll();
     await rm(dirPath, { recursive: true, force: true });
   });
+  manager.encodeRuns.planEncodersSoon = () => {};
   const variant = fakeSession({ id: VARIANT_ID, encodeHeight: 540, dirPath });
   variant.variantHeight = 540;
   // A step of the picture: made as one, same file, and a height of its own.
@@ -420,7 +425,6 @@ test("warming a rung prepares it without taking the encoder from the one on scre
   chooseFor(manager, base, 540, variant.outputKey);
   const encoder = fakeEncoder();
   startManagedRun(manager, base, { process: encoder });
-  manager.encodeRuns.planEncodersSoon = () => {};
   const prepared = await manager.renditions.prepareVariant(BASE_ID, 540, 240, VIEWER);
 
   assert.deepEqual(
@@ -521,6 +525,7 @@ test("the rung on screen fetching its own segments does not cancel a warm-up", a
     await manager.lifecycle.disposeAll();
     await rm(dirPath, { recursive: true, force: true });
   });
+  manager.encodeRuns.planEncodersSoon = () => {};
   const variant = fakeSession({ id: VARIANT_ID, encodeHeight: 540, dirPath });
   variant.variantHeight = 540;
   // A step of the picture: made as one, same file, and a height of its own.
@@ -531,7 +536,6 @@ test("the rung on screen fetching its own segments does not cancel a warm-up", a
   const warmedEncoder = fakeEncoder();
   startManagedRun(manager, variant, { process: warmedEncoder });
   startManagedRun(manager, base, { process: fakeEncoder() });
-  manager.encodeRuns.planEncodersSoon = () => {};
   await manager.renditions.prepareVariant(BASE_ID, 540, 100, VIEWER);
 
   // The viewer has not moved: the rung they are watching goes on asking for its
@@ -777,7 +781,13 @@ test("a run on the keyframe grid is given no trim to apply", () => {
 });
 
 test("a rung served by copy stays offered while a re-encoded rung is on screen", async (t) => {
-  const { manager, base, dirPath } = await managerWithBase();
+  // Enough to re-encode 240p (1.67x combined) and nowhere near enough for
+  // 720p (0.45x) — the field's own shape, where the rung the viewer picked was
+  // offered and everything between it and the copy was not.
+  const { manager, base, dirPath } = await managerWithBase({
+    softwarePresetBenchmark: [{ preset: "ultrafast", pixelsPerSec: 12_000_000 }],
+    decodeCostModel: { pixelTerm: 0.00793, bitrateTerm: 0, constantTerm: 0 }
+  });
   t.after(async () => {
     await manager.lifecycle.disposeAll();
     await rm(dirPath, { recursive: true, force: true });
@@ -787,11 +797,6 @@ test("a rung served by copy stays offered while a re-encoded rung is on screen",
   base.spec = outputSpec({ transcodeVideo: false, cutGrid: "keyframe" });
   base.encodeHeight = 1080;
   base.variantHeight = 1080;
-  // Enough to re-encode 240p (1.67x combined) and nowhere near enough for
-  // 720p (0.45x) — the field's own shape, where the rung the viewer picked was
-  // offered and everything between it and the copy was not.
-  manager.softwarePresetBenchmark = [{ preset: "ultrafast", pixelsPerSec: 12_000_000 }];
-  manager.decodeCostModel = { pixelTerm: 0.00793, bitrateTerm: 0, constantTerm: 0 };
   // What decoding this source costs comes from the file's own facts, stated in
   // the fixture: 49.766 Mpx/s at 8 Mbit/s.
   assert.ok(base.file.decode, "the fixture must state enough for a decode cost to exist");
@@ -1114,8 +1119,16 @@ test("two heights that clamp onto one picture share a single encoder", async (t)
   const madeIds = [VARIANT_ID, SECOND_VARIANT_ID];
   const created = [];
   manager.viewerRequests.createOrGetSession = async (params) => {
-    const id = madeIds[created.length];
     created.push(params);
+    // ONE FORMAT, ONE OUTPUT, as `OutputOpening` has it: an output is named by
+    // what it carries, so a request clamped onto a picture already made is
+    // answered by that output and makes nothing.
+    const probe = fakeSession({ id: "probe", encodeHeight: 240, dirPath });
+    const existing = [...manager.outputs.values()].find((output) => output.outputKey === probe.outputKey);
+    if (existing) {
+      return existing;
+    }
+    const id = madeIds[created.length - 1];
     const variantDir = await mkdtemp(path.join(os.tmpdir(), "quality-variants-clamped-"));
     spawnedDirs.push(variantDir);
     const variant = fakeSession({ id, encodeHeight: 240, dirPath: variantDir });

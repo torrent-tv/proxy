@@ -29,7 +29,10 @@ test("the first opening holds capacity before a concurrent opening is admitted",
         viewer = {
           position: null,
           linkReading: () => null,
-          noteVisiblePicture: () => {}
+          noteVisiblePicture: () => {},
+          // What the request says about them, kept by the real viewer; what
+          // this check is about is the place on the machine, not the report.
+          report: () => {}
         };
         viewersOnOutput.set(consumerId, viewer);
       }

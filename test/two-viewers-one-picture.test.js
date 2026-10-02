@@ -147,12 +147,15 @@ function startManagedRun(manager, output, options = {}) {
  * A base picture serving two viewers, with its audio published separately and
  * every rendition created by a stub instead of an encoder.
  *
+ * @param {object} [options] - Passed to the manager: the host's own startup
+ *   measurements, which are read through the encoder in use and are not
+ *   assigned afterwards.
  * @returns {Promise<{ manager: object, base: object, dirPath: string, renditions: Map<string, object> }>}
  */
-async function pictureWithTwoViewers() {
+async function pictureWithTwoViewers(options = {}) {
   const dirPath = await mkdtemp(path.join(os.tmpdir(), "two-viewers-"));
   // Its own store root — see `helpers/manager.js` for what sharing one cost.
-  const { manager } = managerWithOwnStore();
+  const { manager } = managerWithOwnStore(options);
   // These checks cover ownership changes made by viewer requests. Encoder
   // placement is covered by the plan tests and must not run asynchronously in
   // the middle of an assertion about the request path.
@@ -341,17 +344,18 @@ test("one viewer changing quality does not take the other off their step", async
 });
 
 test("a step somebody is watching is never withdrawn from the offer", async (t) => {
-  const { manager, base, dirPath } = await pictureWithTwoViewers();
+  // A host that can re-encode 240p and nothing above it — the shape of the
+  // field case of 2026-08-15.
+  const { manager, base, dirPath } = await pictureWithTwoViewers({
+    softwarePresetBenchmark: [{ preset: "ultrafast", pixelsPerSec: 12_000_000 }],
+    decodeCostModel: { pixelTerm: 0.00793, bitrateTerm: 0, constantTerm: 0 }
+  });
   t.after(async () => {
     await manager.lifecycle.disposeAll();
     await rm(dirPath, { recursive: true, force: true });
   });
-  // A host that can re-encode 240p and nothing above it — the shape of the
-  // field case of 2026-08-15.
   base.output.encodeHeight = 1080;
   base.variantHeight = 1080;
-  manager.softwarePresetBenchmark = [{ preset: "ultrafast", pixelsPerSec: 12_000_000 }];
-  manager.decodeCostModel = { pixelTerm: 0.00793, bitrateTerm: 0, constantTerm: 0 };
   // 1080p24 at 8 Mbit/s, stated as the file's own facts — what decoding costs
   // is derived from them.
   base.file.learn({ width: 1920, height: 1080, fps: 24, bitrateKbps: 8000 });

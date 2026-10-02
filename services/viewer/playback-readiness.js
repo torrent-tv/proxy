@@ -10,7 +10,32 @@
  * is conditional on these measured services continuing. Browser storage
  * capacity is not an admission condition. There are no fitted weights or
  * rate multipliers, and no search over candidate start times.
+ *
+ * Whether media is continuous is decided in exact time ({@link ./media-time.js}):
+ * the ticks the served pieces declare, the binary fractions the page reports,
+ * and the rule by which every browser this player runs on joins buffered
+ * ranges. Seconds are used for rates, schedules and the answer.
  */
+
+import {
+  add,
+  compare,
+  contains,
+  contiguousEnd,
+  earliest,
+  fromSeconds,
+  latest,
+  mediaTime,
+  nearest,
+  REPORTED_TIME_ERROR,
+  rescale,
+  addRange as addMediaRange,
+  commonTimescale,
+  scale,
+  subtract,
+  toSeconds,
+  ZERO
+} from "./media-time.js";
 
 /**
  * The mean rate predicted over a horizon by the integral of the measured rate.
@@ -78,24 +103,58 @@ export class RateTrend {
  *   readings: Array<{ at: number, value: number }> }>} input.sources
  * @param {Array<{ id: string, sourceIds: string[], processedSeconds: number,
  *   bitsPerMediaSecond: number, readings: Array<{ at: number, value: number }>,
- *   segments: Array<{ index: number, startSeconds: number, endSeconds: number }>,
+ *   clockOffsetSeconds?: number, clientRanges?: Array<{ start: number, end: number }>,
+ *   segments: Array<{ index: number, startSeconds: number, endSeconds: number,
+ *     mediaRanges?: { timescale: bigint | null, ranges: Array<{ start: bigint, end: bigint, frame: bigint }> } }>,
  *   readySegmentIndices: number[], segmentSizesBytes: Map<number, number> | object }>} input.tracks
+ *   `mediaRanges` are a read piece's ranges on its served timeline, in ticks;
+ *   `clockOffsetSeconds` is the `timestampOffset` the page's player applied to
+ *   that track; `clientRanges` are what the page reports holding, in seconds.
  * @param {Array<{ at: number, value: number }>} input.linkReadings - Bits/s.
  * @returns {object}
  */
 export function predictPlaybackReadiness(input = {}) {
   const now = Number.isFinite(input.now) ? input.now : Date.now();
   const tracks = Array.isArray(input.tracks) ? input.tracks : [];
-  const mediaOrigin = Math.max(0, ...tracks.map((track) =>
-    track.segments?.find(({ index }) => index === 0)?.mediaRanges?.[0]?.start ?? 0));
-  const position = Math.max(mediaOrigin, finiteNonNegative(input.positionSeconds));
   const duration = finiteNonNegative(input.durationSeconds);
+  // Each track's served ticks are placed on the clock the page reports by the
+  // offset its player applied (`timestampOffset`).
+  const clocks = tracks.map((track) =>
+    Number.isFinite(track.clockOffsetSeconds) ? fromSeconds(track.clockOffsetSeconds) : ZERO);
+  const reported = tracks.map((track) => Array.isArray(track.clientRanges)
+    ? track.clientRanges.filter((range) => Number.isFinite(range?.start) && Number.isFinite(range?.end) &&
+      range.end > range.start).map((range) => ({ start: fromSeconds(range.start), end: fromSeconds(range.end) }))
+    : null);
+  // One timescale in which every time of this forecast is a whole number of
+  // ticks, so that adding and comparing never seek a common denominator.
+  const unit = commonTimescale([
+    fromSeconds(finiteNonNegative(input.positionSeconds)), fromSeconds(duration),
+    fromSeconds(finiteNonNegative(input.bufferedAheadSeconds)), REPORTED_TIME_ERROR, ...clocks,
+    ...reported.flatMap((ranges) => (ranges ?? []).flatMap(({ start, end }) => [start, end])),
+    ...tracks.flatMap((track) => (Array.isArray(track.segments) ? track.segments : []).flatMap((segment) => [
+      ...(segment.mediaRanges?.timescale ? [mediaTime(0n, segment.mediaRanges.timescale)] : []),
+      ...[segment.startSeconds, segment.endSeconds].filter(Number.isFinite).map(fromSeconds)
+    ]))
+  ]);
+  const zero = mediaTime(0n, unit);
+  const segmentsOf = tracks.map((track, trackIndex) =>
+    (Array.isArray(track.segments) ? track.segments : []).map((segment) => ({
+      ...segment, ranges: playerRanges(segment.mediaRanges, rescale(clocks[trackIndex], unit), unit)
+    })));
+  const origin = latest(zero, ...segmentsOf.map((segments) =>
+    segments.find(({ index }) => index === 0)?.ranges?.[0]?.start ?? zero));
+  const at = latest(origin, rescale(fromSeconds(finiteNonNegative(input.positionSeconds)), unit));
+  const position = toSeconds(at);
   const remaining = Math.max(0, duration - position);
-  const measuredRanges = tracks.map((track) => Array.isArray(track.clientRanges) ?
-    normalizedRanges(track.clientRanges) : null);
-  const buffered = measuredRanges.length > 0 && measuredRanges.every(Boolean) ?
-    Math.max(0, Math.min(...measuredRanges.map((ranges) => contiguousEnd(ranges, position) - position))) :
-    finiteNonNegative(input.bufferedAheadSeconds);
+  const measuredRanges = reported.map((ranges, trackIndex) => ranges ?
+    heldRanges(ranges, segmentsOf[trackIndex], unit) : null);
+  const measured = measuredRanges.length > 0 && measuredRanges.every(Boolean);
+  const heldEnd = measured ? earliest(...measuredRanges.map((ranges) => contiguousEnd(ranges, at))) : null;
+  // The figure reported back is what the page said it holds; the widening by
+  // the report's error only decides whether a piece is already there.
+  const buffered = measured
+    ? secondsAhead(subtract(heldEnd, rescale(REPORTED_TIME_ERROR, unit)), at)
+    : finiteNonNegative(input.bufferedAheadSeconds);
   const reserve = Math.min(remaining, finiteNonNegative(input.reserveSeconds));
   const sources = new Map((Array.isArray(input.sources) ? input.sources : [])
     .filter((source) => typeof source?.id === "string")
@@ -107,22 +166,23 @@ export function predictPlaybackReadiness(input = {}) {
   if (tracks.length < requiredTracks) {
     return result(false, null, buffered, reserve, null, "separate-audio-not-observed", 0);
   }
-  if (remaining <= buffered) {
+  if (measured ? compare(heldEnd, rescale(fromSeconds(duration), unit)) >= 0 : remaining <= buffered) {
     return result(true, 0, buffered, reserve, 0, "client-buffer-covers-end", 0);
   }
   if (tracks.some((track) => !Array.isArray(track.segments) || track.segments.length === 0)) {
     return result(false, null, buffered, reserve, null, "timeline-unavailable", 0);
   }
 
-  const trackState = tracks.map((track) => ({
+  const trackState = tracks.map((track, trackIndex) => ({
     track,
-    clientRanges: Array.isArray(track.clientRanges) ? normalizedRanges(track.clientRanges) :
-      [{ start: position, end: position + buffered }],
+    clientRanges: measuredRanges[trackIndex] ??
+      [{ start: at, end: add(at, measured ? nearest(fromSeconds(buffered), unit) :
+        rescale(fromSeconds(buffered), unit)), frame: zero }],
     ready: new Set(Array.isArray(track.readySegmentIndices) ? track.readySegmentIndices : []),
     curve: rateCurve(track.readings, now),
     bitsPerMediaSecond: averageBitsPerMediaSecond(track, track.segments,
       new Set(Array.isArray(track.readySegmentIndices) ? track.readySegmentIndices : [])),
-    segments: predictedMediaSegments(track.segments)
+    segments: predictedMediaSegments(segmentsOf[trackIndex], unit)
       .filter((segment) => Number.isInteger(segment?.index) &&
         Number.isFinite(segment?.startSeconds) && Number.isFinite(segment?.endSeconds) &&
         segment.endSeconds > segment.startSeconds && segment.endSeconds > position)
@@ -161,8 +221,10 @@ export function predictPlaybackReadiness(input = {}) {
     const { track, segments } = state;
     const measuredBitsPerMediaSecond = state.bitsPerMediaSecond;
     for (const segment of segments) {
-      if (coveredSeconds(state.clientRanges, Math.max(position, segment.startSeconds), segment.endSeconds) >=
-        segment.endSeconds - Math.max(position, segment.startSeconds) - Number.EPSILON * duration) {
+      // Media the page already holds is not transferred again.
+      const needed = segment.ranges.filter((range) => compare(range.end, at) > 0);
+      if (segment.ranges.length > 0 && needed.every((range) =>
+        contains(state.clientRanges, latest(range.start, at), range.end))) {
         continue;
       }
       const exactBytes = sizeOf(track.segmentSizesBytes, segment.index);
@@ -180,7 +242,8 @@ export function predictPlaybackReadiness(input = {}) {
       // position from another run must not erase a missing earlier segment.
       const workStart = segment.startSeconds;
       const remainingProcessing = uncoveredIntervals({ start: workStart, end: segment.endSeconds },
-        normalizedRanges(Array.isArray(track.processingRanges) ? track.processingRanges : []));
+        (Array.isArray(track.processingRanges) ? track.processingRanges : []).filter((range) =>
+          Number.isFinite(range?.start) && Number.isFinite(range?.end) && range.end > range.start));
       const encodeWork = produced ? 0 : remainingProcessing.reduce((sum, part) => sum + part.end - part.start, 0);
 
       const sourceIntervals = new Map();
@@ -288,39 +351,41 @@ export function predictPlaybackReadiness(input = {}) {
   }
 
   const constraints = [];
+  const end = rescale(fromSeconds(duration), unit);
   for (let trackIndex = 0; trackIndex < trackState.length; trackIndex += 1) {
     const state = trackState[trackIndex];
     const delivered = state.clientRanges.map((range) => ({ ...range }));
     const prepared = state.clientRanges.map((range) => ({ ...range }));
-    const trackEnd = Math.min(duration, state.segments.at(-1).mediaRanges?.at(-1)?.end ?? duration);
+    const lastRange = state.segments.at(-1).ranges.at(-1);
+    const trackEnd = lastRange ? earliest(end, lastRange.end) : end;
     for (const completion of completions.filter((item) => item.trackIndex === trackIndex)) {
-      const before = contiguousEnd(delivered, position);
-      const ranges = completion.segment.mediaRanges ?? [{
-        start: completion.segment.startSeconds, end: completion.segment.endSeconds
-      }];
-      for (const range of ranges) addRange(delivered, range.start, range.end, range.joinEnd);
-      const after = contiguousEnd(delivered, position);
-      constraints.push(completion.at - Math.max(0, Math.min(before, trackEnd) - position));
-      if (!(after > before) && ranges.some(({ start }) => start > before)) {
+      const before = contiguousEnd(delivered, at);
+      for (const range of completion.segment.ranges) addMediaRange(delivered, range);
+      const after = contiguousEnd(delivered, at);
+      constraints.push(completion.at - secondsAhead(earliest(before, trackEnd), at));
+      if (compare(after, before) <= 0 && completion.segment.ranges.some(({ start }) => compare(start, before) > 0)) {
         // A timestamp hole cannot be repaired by waiting longer. Keep it
         // distinct from an unavailable rate or a slow but finite service.
         return result(false, null, buffered, reserve, null, 'media-continuity-unavailable', preparedSegments);
       }
     }
+    if (compare(contiguousEnd(delivered, at), trackEnd) < 0) {
+      // Everything this track still needs has been delivered in the schedule
+      // and its media still stops short of the end: a hole between ranges
+      // already held, which no arrival crosses.
+      return result(false, null, buffered, reserve, null, 'media-continuity-unavailable', preparedSegments);
+    }
     for (const production of productions.filter((item) => item.trackIndex === trackIndex)) {
-      const before = contiguousEnd(prepared, position);
-      const ranges = production.segment.mediaRanges ?? [{
-        start: production.segment.startSeconds, end: production.segment.endSeconds
-      }];
-      for (const range of ranges) addRange(prepared, range.start, range.end, range.joinEnd);
+      const before = contiguousEnd(prepared, at);
+      for (const range of production.segment.ranges) addMediaRange(prepared, range);
       // Supply interruption coverage is stock held by the proxy as well as
       // the browser. It is not a browser buffer-size admission rule.
-      constraints.push(production.at - Math.max(0, before - position -
-        Math.min(reserve, Math.max(0, trackEnd - before)) * Number(production.requiresSource)));
+      constraints.push(production.at - Math.max(0, secondsAhead(before, at) -
+        Math.min(reserve, secondsAhead(trackEnd, before)) * Number(production.requiresSource)));
     }
   }
   const delay = Math.max(0, ...constraints);
-  const originReady = trackState.every(({ clientRanges }) => contiguousEnd(clientRanges, position) > position);
+  const originReady = trackState.every(({ clientRanges }) => compare(contiguousEnd(clientRanges, at), at) > 0);
   const ready = delay === 0 && originReady;
   const forecast = result(ready, Number.isFinite(delay) ? delay : null, buffered, reserve,
     Math.max(0, reserve - buffered), ready ? 'trajectory-safe-now' :
@@ -329,13 +394,106 @@ export function predictPlaybackReadiness(input = {}) {
     preparedUntilSeconds: Math.min(duration, ...trackState.map((state, index) => {
       const ranges = state.clientRanges.map((range) => ({ ...range }));
       for (const item of productions.filter((item) => item.trackIndex === index && item.at <= delay)) {
-        for (const range of item.segment.mediaRanges ?? [{ start: item.segment.startSeconds, end: item.segment.endSeconds }]) {
-          addRange(ranges, range.start, range.end, range.joinEnd);
-        }
+        for (const range of item.segment.ranges) addMediaRange(ranges, range);
       }
-      return contiguousEnd(ranges, position);
+      return toSeconds(contiguousEnd(ranges, at));
     })) };
 
+}
+
+/**
+ * Seconds from `from` to `to`, or zero when `to` is not later.
+ *
+ * @param {import("./media-time.js").MediaTime} to
+ * @param {import("./media-time.js").MediaTime} from
+ * @returns {number}
+ */
+function secondsAhead(to, from) {
+  return compare(to, from) > 0 ? toSeconds(subtract(to, from)) : 0;
+}
+
+/**
+ * Served ranges of a piece on the page's clock, in the forecast's timescale.
+ * Media Source drops coded frames that start before `appendWindowStart`, zero
+ * unless a page sets it, so nothing before zero is held; a range is cut there.
+ *
+ * @param {{ timescale: bigint | null, ranges: Array<{ start: bigint, end: bigint, frame: bigint }> }
+ *   | undefined | null} served
+ * @param {import("./media-time.js").MediaTime} clock - In `unit`.
+ * @param {bigint} unit
+ * @returns {import("./media-time.js").MediaRange[] | undefined}
+ */
+function playerRanges(served, clock, unit) {
+  if (served === undefined || served === null) {
+    return undefined;
+  }
+  if (!served.timescale || !Array.isArray(served.ranges)) {
+    // A piece whose coverage could not be read is not known to hold nothing.
+    return undefined;
+  }
+  const zero = mediaTime(0n, unit);
+  return joinedPiece(served).map(({ start, end, frame }) => ({
+    start: latest(zero, add(rescale(start, unit), clock)),
+    end: add(rescale(end, unit), clock),
+    frame: rescale(frame, unit)
+  })).filter(({ start, end }) => compare(end, start) > 0);
+}
+
+/**
+ * A piece's intervals joined by the rule a browser applies to them. A piece is
+ * appended whole, and joining is unchanged by moving every interval by one
+ * clock offset, so this is done once per served piece, in its own ticks, and
+ * kept with it.
+ *
+ * @type {WeakMap<object, import("./media-time.js").MediaRange[]>}
+ */
+const joinedPieces = new WeakMap();
+
+function joinedPiece(served) {
+  let joined = joinedPieces.get(served);
+  if (!joined) {
+    joined = [];
+    for (const { start, end, frame } of served.ranges) {
+      addMediaRange(joined, {
+        start: mediaTime(start, served.timescale),
+        end: mediaTime(end, served.timescale),
+        frame: mediaTime(frame, served.timescale)
+      });
+    }
+    joinedPieces.set(served, joined);
+  }
+  return joined;
+}
+
+/**
+ * What the page reports holding, as every exact time the report can denote:
+ * each edge widened by {@link REPORTED_TIME_ERROR}.
+ *
+ * The page does not report the frames behind a range, but what it holds is
+ * pieces this proxy served. Gecko gives a merged interval the largest fuzz of
+ * its parts (`Interval::Span`), so a held range is allowed at least the largest
+ * `frame` of the read pieces lying inside it; a range holding none is allowed
+ * nothing of its own and joins a neighbour only on the neighbour's allowance.
+ *
+ * @param {Array<{ start: import("./media-time.js").MediaTime, end: import("./media-time.js").MediaTime }>}
+ *   ranges - As reported, converted exactly.
+ * @param {Array<{ ranges?: import("./media-time.js").MediaRange[] }>} segments - The
+ *   track's pieces on the page's clock.
+ * @param {bigint} unit
+ * @returns {import("./media-time.js").MediaRange[]}
+ */
+function heldRanges(ranges, segments, unit) {
+  const pieces = segments.flatMap((segment) => segment.ranges ?? []);
+  const zero = mediaTime(0n, unit);
+  const error = rescale(REPORTED_TIME_ERROR, unit);
+  const held = [];
+  for (const range of ranges) {
+    const start = latest(zero, subtract(rescale(range.start, unit), error));
+    const end = add(rescale(range.end, unit), error);
+    const inside = pieces.filter((piece) => contains([{ start, end }], piece.start, piece.end));
+    addMediaRange(held, { start, end, frame: latest(zero, ...inside.map(({ frame }) => frame)) });
+  }
+  return held;
 }
 
 function uncoveredIntervals(interval, served) {
@@ -349,22 +507,38 @@ function uncoveredIntervals(interval, served) {
   return remaining;
 }
 
-/** Predict only unknown cuts in the same clock as the measured track. */
-function predictedMediaSegments(segments) {
-  const anchors = segments.filter(({ mediaRanges }) => mediaRanges?.length > 0);
+/**
+ * Ranges for pieces not read yet, placed in the clock of the pieces that were.
+ * A cut time of the playlist is mapped linearly between the nearest measured
+ * pieces around it, exactly, so neighbouring predictions share their boundary
+ * and meet the measured pieces at their own edges. A predicted time is put on
+ * the forecast's nearest tick; a measured edge is already one, so the
+ * prediction still meets it exactly. A prediction says nothing about the frames
+ * inside it, so its `frame` is zero.
+ */
+function predictedMediaSegments(segments, unit) {
+  const zero = mediaTime(0n, unit);
+  const anchors = segments.filter(({ ranges }) => ranges?.length > 0);
   return segments.map((segment) => {
-    if (segment.mediaRanges !== undefined && segment.mediaRanges !== null || anchors.length === 0) return segment;
+    if (segment.ranges !== undefined) return segment;
+    if (anchors.length === 0) {
+      return { ...segment, ranges: [{ start: rescale(fromSeconds(segment.startSeconds), unit),
+        end: rescale(fromSeconds(segment.endSeconds), unit), frame: zero }] };
+    }
     const previous = anchors.findLast(({ index }) => index < segment.index);
     const next = anchors.find(({ index }) => index > segment.index);
-    const nominalLeft = previous?.endSeconds ?? next.startSeconds;
-    const actualLeft = previous?.mediaRanges.at(-1).end ?? next.mediaRanges[0].start;
-    const nominalRight = next?.startSeconds ?? nominalLeft;
-    const actualRight = next?.mediaRanges[0].start ?? actualLeft;
-    const scale = nominalRight > nominalLeft ? (actualRight - actualLeft) / (nominalRight - nominalLeft) : 1;
-    return { ...segment, mediaRanges: [{
-      start: actualLeft + (segment.startSeconds - nominalLeft) * scale,
-      end: actualLeft + (segment.endSeconds - nominalLeft) * scale
-    }] };
+    const nominalLeft = fromSeconds(previous?.endSeconds ?? next.startSeconds);
+    const actualLeft = previous?.ranges.at(-1).end ?? next.ranges[0].start;
+    const nominalRight = next ? fromSeconds(next.startSeconds) : nominalLeft;
+    const actualRight = next?.ranges[0].start ?? actualLeft;
+    const nominalSpan = subtract(nominalRight, nominalLeft);
+    const place = (seconds) => {
+      const fromLeft = subtract(fromSeconds(seconds), nominalLeft);
+      return nearest(add(actualLeft, nominalSpan.ticks > 0n
+        ? scale(fromLeft, subtract(actualRight, actualLeft), nominalSpan)
+        : fromLeft), unit);
+    };
+    return { ...segment, ranges: [{ start: place(segment.startSeconds), end: place(segment.endSeconds), frame: zero }] };
   });
 }
 
@@ -431,61 +605,6 @@ function averageBitsPerMediaSecond(track, segments, ready) {
     return bits / mediaSeconds;
   }
   return finiteNonNegative(track.bitsPerMediaSecond);
-}
-
-function addRange(ranges, start, end, joinEnd) {
-  const merged = [];
-  let next = { start, end, ...(Number.isFinite(joinEnd) ? { joinEnd } : {}) };
-  let inserted = false;
-  for (const range of ranges) {
-    // The declared coded-frame join boundary connects two ranges only after
-    // both have arrived. It never extends an isolated range's playable end.
-    if (Math.max(range.end, range.joinEnd ?? range.end) < next.start) {
-      merged.push(range);
-    } else if (Math.max(next.end, next.joinEnd ?? next.end) < range.start) {
-      if (!inserted) {
-        merged.push(next);
-        inserted = true;
-      }
-      merged.push(range);
-    } else {
-      next = { start: Math.min(next.start, range.start), end: Math.max(next.end, range.end),
-        ...(next.joinEnd !== undefined || range.joinEnd !== undefined ? {
-          joinEnd: Math.max(next.joinEnd ?? next.end, range.joinEnd ?? range.end)
-        } : {}) };
-    }
-  }
-  if (!inserted) {
-    merged.push(next);
-  }
-  ranges.splice(0, ranges.length, ...merged);
-}
-
-function normalizedRanges(ranges) {
-  const result = [];
-  for (const range of ranges) {
-    if (Number.isFinite(range?.start) && Number.isFinite(range?.end) && range.end > range.start) {
-      addRange(result, range.start, range.end);
-    }
-  }
-  return result;
-}
-
-function coveredSeconds(ranges, start, end) {
-  return ranges.reduce((total, range) => total + Math.max(0,
-    Math.min(end, range.end) - Math.max(start, range.start)), 0);
-}
-
-function contiguousEnd(ranges, position) {
-  for (const range of ranges) {
-    if (range.start <= position && position <= range.end) {
-      return range.end;
-    }
-    if (range.start > position) {
-      break;
-    }
-  }
-  return position;
 }
 
 function sizeOf(sizes, index) {

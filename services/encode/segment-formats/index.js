@@ -50,12 +50,30 @@ import { mpegtsFormat } from "./mpegts.js";
  *   prepareSegmentBytes - Correct a segment before serving. Identity for
  *   formats that need nothing.
  * @property {(bytes: Buffer, context?: Partial<PrepareSegmentContext>) =>
- *   { start: number, end: number }[] | undefined} [readMediaRanges] - Actual
- *   served presentation intervals, or undefined until their header is available.
- * @property {(ranges: { start: number, end: number }[], context: {
- *   initBytes: Buffer | null, timestampOffsetSeconds?: number, nextRanges?: Array<{ start: number, end: number }> }) =>
- *   { start: number, end: number }[]} [clientMediaRanges] - Project parsed
- *   presentation intervals onto the clock reported by this viewer's player.
+ *   MediaCoverage | undefined} [readMediaRanges] - What a piece's samples say
+ *   it holds, or undefined until its header is available.
+ * @property {(coverage: MediaCoverage) => number | null} [producedThroughSeconds]
+ *   - How far a closed piece holds media on every track, in seconds of its own
+ *   timeline, or null when a track holds none.
+ * @property {(coverage: MediaCoverage, context: { initBytes: Buffer | null }) =>
+ *   ServedRanges} [servedMediaRanges] - The same media on the timeline the
+ *   served bytes declare.
+ */
+
+/**
+ * What a piece holds, per track, in the integer ticks of that track's
+ * timescale: presentation intervals joined only where they touch or overlap,
+ * and `frame`, the coded-frame duration a browser allows the interval when it
+ * decides whether a neighbour joins it. Values cross the interface as plain
+ * data; whether a browser joins a gap is decided by the viewer component.
+ *
+ * @typedef {{ tracks: Array<{ id: number, kind?: string, timescale: bigint,
+ *   ranges: Array<{ start: bigint, end: bigint, frame: bigint }> }> }} MediaCoverage
+ */
+
+/**
+ * @typedef {{ timescale: bigint | null,
+ *   ranges: Array<{ start: bigint, end: bigint, frame: bigint }> }} ServedRanges
  */
 
 /** @type {Readonly<Record<string, SegmentFormat>>} */

@@ -69,6 +69,7 @@ import { ViewerRequests } from "./ViewerRequests.js";
 import { OutputLifecycle } from "./OutputLifecycle.js";
 import { SegmentServing } from "./SegmentServing.js";
 import { audioStartSecondsFor } from "../viewer/audio-start.js";
+import { forecastRate, predictPlaybackReadiness, RateTrend } from "../viewer/playback-readiness.js";
 import { audioRenditionName } from "../media/audio-inventory.js";
 import { Renditions } from "../encode/Renditions.js";
 import { CushionReport, LOOKAHEAD_PAUSE_SECONDS } from "../encode/CushionReport.js";
@@ -553,6 +554,9 @@ export function wireOutputs({
     planEncodersSoon: (...args) => parts.encodeRuns.planEncodersSoon(...args),
     waitUntilReady: (...args) => parts.serving.waitUntilReady(...args),
     get encodeRuns() { return parts.encodeRuns; },
+    // When this viewer's playback can start and run to the end: the viewer
+    // component's forecast, which models the viewer's browser.
+    playbackReadiness: { predict: predictPlaybackReadiness, forecastRate, RateTrend },
     encodeSpeedReadingOf: (output) => parts.encodeCost.latestSpeedReadingOf(output),
     projectedEncodeSpeedOf: (output) => parts.encodeCost.projectedSpeedOf(output),
     audioDescriptionOf,

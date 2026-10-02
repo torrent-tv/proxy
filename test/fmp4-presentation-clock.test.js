@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { fmp4Format } from "../services/encode/segment-formats/fmp4.js";
-import { continuePresentationRanges, presentationCoverageEnd, readPresentationRanges, walkBoxes } from "../services/encode/segment-formats/mp4-boxes.js";
+import { producedThroughSeconds, readPresentationRanges, walkBoxes } from "../services/encode/segment-formats/mp4-boxes.js";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -55,8 +55,8 @@ function fragment(decodeTime, composition) {
 
 test("an interrupted frame cannot prove coverage of a full future cut", () => {
   const ranges = readPresentationRanges(Buffer.concat([init(456000, 0), fragment(0, 0)]));
-  assert.ok(presentationCoverageEnd(ranges) > 456);
-  assert.ok(presentationCoverageEnd(ranges) < 456.1);
+  assert.ok(producedThroughSeconds(ranges) > 456);
+  assert.ok(producedThroughSeconds(ranges) < 456.1);
 });
 
 test("a shared init preserves presentation times without adding composition delay twice", () => {
@@ -75,12 +75,10 @@ test("a shared init preserves presentation times without adding composition dela
   assert.deepEqual(times, [98000, 146000]);
 });
 
-test("video exposes its coded-frame join boundary without changing its measured end", () => {
-  const header = init(0, 0, "vide");
-  const ranges = readPresentationRanges(Buffer.concat([header, fragment(24000, 0)]));
-  const translated = fmp4Format.clientMediaRanges(ranges, { initBytes: header, timestampOffsetSeconds: 0 });
-  assert.equal(translated[0].end, ranges[0].end);
-  assert.ok(Math.abs(translated[0].joinEnd - (1 + 2 * (1000 / 24000))) <= Number.EPSILON);
+test("a piece states each range in ticks with the frame duration a browser allows it", () => {
+  const coverage = readPresentationRanges(Buffer.concat([init(0, 0, "vide"), fragment(24000, 0)]));
+  assert.deepEqual(coverage.tracks[0].ranges, [{ start: 24000n, end: 25000n, frame: 1000n }]);
+  assert.equal(coverage.tracks[0].timescale, 24000n);
 });
 
 test("a shared init first read after a seek also supports returning to the beginning", () => {
@@ -111,46 +109,32 @@ test("HLS fragments use the separate init and the same timeline translation as s
   const served = fmp4Format.prepareSegmentBytes(media, { initBytes: header, startSeconds: 4 });
   assert.deepEqual(store.mediaRangesOf(key, 1, { startSeconds: 4 }),
     readPresentationRanges(Buffer.concat([header, served])));
-  assert.ok(store.mediaRangesOf(key, 1)[0].start > 4);
+  assert.ok(store.mediaRangesOf(key, 1).tracks[0].ranges[0].start > 4n * 24000n);
 });
 
-test("variable-rate video retains its frame until the next presentation sample", () => {
+test("a decode gap between fragments is two ranges, for video as for audio", () => {
+  // Joining across a gap is the browser's decision, made in the viewer
+  // component; the piece states what it holds.
   const media = Buffer.concat([fragment(0, 0), fragment(72000, 0)]);
-  const video = readPresentationRanges(Buffer.concat([init(0, 0), media]));
-  assert.equal(video.length, 1);
-  assert.equal(video[0].start, 0);
-  assert.ok(video[0].end > 3);
-  const audio = readPresentationRanges(Buffer.concat([init(0, 0, "soun"), media]));
-  assert.equal(audio.length, 2);
-  assert.ok(audio[0].end < 0.05);
-  assert.equal(audio[1].start, 3);
+  for (const kind of ["vide", "soun"]) {
+    const coverage = readPresentationRanges(Buffer.concat([init(0, 0, kind), media]));
+    assert.deepEqual(coverage.tracks[0].ranges.map(({ start, end }) => [start, end]),
+      [[0n, 1000n], [72000n, 73000n]]);
+  }
 });
 
-test("client clock projection accounts for shared edits and audio initPTS", () => {
+test("served ranges move every track by the session init's position, in ticks", () => {
   const audioHeader = init(0, 0, "soun");
   const audio = readPresentationRanges(Buffer.concat([audioHeader, fragment(96000, 0)]));
-  const shifted = fmp4Format.clientMediaRanges(audio, {
-    initBytes: audioHeader, timestampOffsetSeconds: -0.083
-  });
-  assert.equal(shifted[0].start, 4 - 0.083);
-  const videoHeader = fmp4Format.prepareSharedInit(init(83, 2000));
+  assert.equal(fmp4Format.servedMediaRanges(audio, { initBytes: audioHeader }).ranges[0].start, 96000n);
+  const shared = fmp4Format.prepareSharedInit(init(83, 2000));
   const video = readPresentationRanges(Buffer.concat([init(83, 2000), fragment(0, 2000)]));
-  const projected = fmp4Format.clientMediaRanges(video, {
-    initBytes: videoHeader, timestampOffsetSeconds: -2000 / 24000
-  });
-  assert.deepEqual(projected.map(({ start, end }) => ({ start, end })), video);
-  assert.ok(projected[0].joinEnd > projected[0].end);
-});
-
-test("a variable-rate frame crosses a cut only with continuous decode samples", () => {
-  const first = readPresentationRanges(Buffer.concat([init(0, 0), fragment(0, 0)]));
-  const continuous = readPresentationRanges(Buffer.concat([init(0, 0), fragment(1000, 72000)]));
-  assert.equal(continuePresentationRanges(first, continuous)[0].end, continuous[0].start);
-  const missing = readPresentationRanges(Buffer.concat([init(0, 0), fragment(24000, 72000)]));
-  assert.deepEqual(continuePresentationRanges(first, missing), first);
-  const audioFirst = readPresentationRanges(Buffer.concat([init(0, 0, "soun"), fragment(0, 0)]));
-  const audioNext = readPresentationRanges(Buffer.concat([init(0, 0, "soun"), fragment(1000, 72000)]));
-  assert.deepEqual(continuePresentationRanges(audioFirst, audioNext), audioFirst);
+  // The piece's own edit puts its first frame at round(83 ms * 24000) = 1992
+  // ticks; the served bytes carry the composition delay the shared init's
+  // edit removes, which is what a page's timestampOffset then takes back.
+  assert.equal(video.tracks[0].ranges[0].start, 1992n);
+  assert.equal(fmp4Format.servedMediaRanges(video, { initBytes: shared }).ranges[0].start, 1992n + 2000n);
+  assert.deepEqual(fmp4Format.servedMediaRanges(video, { initBytes: null }).ranges, video.tracks[0].ranges);
 });
 
 test("a viewer retains only finite per-track player clock offsets", () => {

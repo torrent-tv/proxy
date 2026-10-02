@@ -1,13 +1,13 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
-import { readPresentationRanges, translatePresentationRanges, walkBoxes } from "../services/encode/segment-formats/mp4-boxes.js";
-import { predictPlaybackReadiness } from "../services/server/playback-readiness.js";
+import { readPresentationRanges, servedPresentationRanges, walkBoxes } from "../services/encode/segment-formats/mp4-boxes.js";
+import { predictPlaybackReadiness } from "../services/viewer/playback-readiness.js";
 
 const evidence = JSON.parse(readFileSync(new URL("./fixtures/audio-frame-boundary.json", import.meta.url), "utf8"));
 const header = Buffer.from(evidence.files["init.mp4"], "base64");
 
-function ranges(name, shiftedFrames = 0) {
+function served(name, shiftedFrames = 0) {
   const bytes = Buffer.from(evidence.files[name], "base64");
   let frameTicks;
   walkBoxes(bytes, (type, start) => {
@@ -21,49 +21,56 @@ function ranges(name, shiftedFrames = 0) {
       bytes.writeBigUInt64BE(bytes.readBigUInt64BE(start + 4) + BigInt(frameTicks * shiftedFrames), start + 4);
     }
   });
-  return translatePresentationRanges(readPresentationRanges(Buffer.concat([header, bytes])), header, 0);
+  return servedPresentationRanges(readPresentationRanges(Buffer.concat([header, bytes])), header);
 }
 
-function state(second = ranges("segment-00172.mp4")) {
-  const first = ranges("segment-00171.mp4");
+const seconds = ({ timescale }, ticks) => Number(ticks) / Number(timescale);
+
+function state(second = served("segment-00172.mp4")) {
+  const first = served("segment-00171.mp4");
   const now = 1000;
+  const firstStart = seconds(first, first.ranges[0].start);
+  const secondStart = seconds(second, second.ranges[0].start);
+  const secondEnd = seconds(second, second.ranges.at(-1).end);
   return {
     now,
-    positionSeconds: first[0].start,
-    durationSeconds: second.at(-1).end,
-    bufferLimitSeconds: second.at(-1).end - first[0].start,
+    positionSeconds: firstStart,
+    durationSeconds: secondEnd,
     reserveSeconds: 0,
-    lookaheadSeconds: second.at(-1).end - first[0].start,
+    lookaheadSeconds: secondEnd - firstStart,
     sources: [{ id: "source", complete: true }],
     linkReadings: [{ at: now, value: 1_000_000 }],
     tracks: [{
-      id: "audio", sourceIds: ["source"], clientRanges: [
+      id: "audio", sourceIds: ["source"], clockOffsetSeconds: 0, clientRanges: [
         { start: evidence.browserBufferedRanges[0][0], end: evidence.browserBufferedRanges[0][1] }
       ],
       readings: [{ at: now, value: 1 }],
       readySegmentIndices: [0, 1], segmentSizesBytes: { 0: 170000, 1: 170000 },
       segments: [
-        { index: 0, startSeconds: first[0].start, endSeconds: second[0].start, mediaRanges: first },
-        { index: 1, startSeconds: second[0].start, endSeconds: second.at(-1).end, mediaRanges: second }
+        { index: 0, startSeconds: firstStart, endSeconds: secondStart, mediaRanges: first },
+        { index: 1, startSeconds: secondStart, endSeconds: secondEnd, mediaRanges: second }
       ]
     }]
   };
 }
 
-test("captured AAC boundary agrees with Chrome's continuous buffered range", () => {
+test("the captured AAC join, 432 ticks at 48 kHz, is one Chrome closed and every engine closes", () => {
   const input = state();
   assert.equal(predictPlaybackReadiness(input).ready, true);
+  // Without the frame durations the pieces state, nothing allows the gap.
   for (const segment of input.tracks[0].segments) {
-    segment.mediaRanges = segment.mediaRanges.map(({ start, end }) => ({ start, end }));
+    segment.mediaRanges = { ...segment.mediaRanges,
+      ranges: segment.mediaRanges.ranges.map((range) => ({ ...range, frame: 0n })) };
   }
-  assert.equal(predictPlaybackReadiness(input).reason, "no-safe-start-found");
+  assert.equal(predictPlaybackReadiness(input).reason, "media-continuity-unavailable");
 });
 
 test("four missing AAC frames preserve the discontinuity observed in Chrome", () => {
-  assert.equal(predictPlaybackReadiness(state(ranges("segment-00172.mp4", 4))).reason, "no-safe-start-found");
+  assert.equal(predictPlaybackReadiness(state(served("segment-00172.mp4", 4))).reason,
+    "media-continuity-unavailable");
 });
 
-test("a join boundary never supplies audio before the adjacent segment arrives", () => {
+test("a join never supplies audio before the adjacent segment arrives", () => {
   const input = state();
   input.linkReadings[0].value = 1;
   assert.notEqual(predictPlaybackReadiness(input).ready, true);

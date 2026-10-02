@@ -229,7 +229,12 @@ are recorded in `docs/browser-proxy-contract.md`.
   - `viewer/`: every viewer has a name (`Viewers.of` refuses an empty one); the
     relation to outputs is stored only in `Viewer.outputs` and read the other way
     by `Viewers.forOutput`. A quality request belongs to one viewer and exists
-    only in AUTO (`Viewer.askQuality`).
+    only in AUTO (`Viewer.askQuality`). The playback start forecast
+    (`playback-readiness.js`) is the viewer's, because it predicts how the
+    viewer's browser will play; `ViewerRequests` is handed it by
+    `wire-outputs.js`. `media-time.js` is exact media time and the rule by which
+    every Media Source engine joins buffered ranges — see
+    `docs/playback-start-forecast.md`.
   - `torrent/` reaches the piece store by what it does (`piece-store-of.js`) and
     is handed the store's class by `torrent/worker/worker.js`, where that thread
     is assembled. `transport/` imports nothing of another component; `bin/cli.js`

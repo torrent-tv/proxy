@@ -166,7 +166,11 @@ export class EncodeRuns {
   #planScheduled = false;
 
   /**
-   * @param {object} host - `logger`, `viewerSecondsOn`, `noteRunStarting`, `inputOf`, `producedNumbers`, `servesAudioSeparately`, `disposeSession`, `contentionPenalties`, `encodeCost`, `encodeOrchestrator`, `encoders`, `ffmpegBin`, `outputTimes`, `outputs`, `priority`, `segmentDurationSec`, `segmentFiles`, `videoEncoder`
+   * @param {object} host - `logger`, `viewerSecondsOn`, `noteRunStarting`, `notePiecePublished`, `inputOf`, `producedNumbers`, `servesAudioSeparately`, `disposeSession`, `contentionPenalties`, `encodeCost`, `encodeOrchestrator`, `encoders`, `ffmpegBin`, `outputTimes`, `outputs`, `priority`, `segmentDurationSec`, `segmentFiles`, `videoEncoder`
+   * @param {(session: object) => void} [host.notePiecePublished] - A run of
+   *   this output has closed a piece: the moment its work is read.
+   * @param {(session: object, runToken: number) => object} host.inputOf - The
+   *   addresses a run reads; `runToken` marks them as that run's.
    * @param {SegmentFiles} host.segmentFiles - The storage operations used to
    *   write and inspect output files.
    */
@@ -870,10 +874,16 @@ export class EncodeRuns {
         const index = session.segmentFormat.segmentIndexFromName(
           session.segmentFormat.servedNameOf?.(name) ?? name);
         if (Number.isInteger(index) && index < safeIndex) return null;
-        return this.#host.segmentFiles.publish(session.outputKey ?? "", name, session.segmentFormat, {
+        const served = this.#host.segmentFiles.publish(session.outputKey ?? "", name, session.segmentFormat, {
           endSeconds: index < session.timeline.segmentCount - 1 ?
             session.timeline.publishedStartOf(index + 1) - SEGMENT_CUT_TIME_DELTA_SECONDS : undefined
         });
+        // A closed piece is the moment this run's work can be read: what it has
+        // made against its own working time since the last one.
+        if (served) {
+          this.#host.notePiecePublished?.(session);
+        }
+        return served;
       },
       onEnded: (ended) => {
         this.#runsByInputToken.delete(inputToken);

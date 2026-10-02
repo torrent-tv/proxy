@@ -303,6 +303,11 @@ export function wireOutputs({
   // The encoders of this proxy: built where the plan places them, followed while they run, accounted when they end.
   parts.encodeRuns = new EncodeRuns({
     logger,
+    // What this host is doing with an encode is learned each time it closes a
+    // piece, on every host: the forecast's processing rate is that reading.
+    notePiecePublished: (session) => {
+      void parts.encodeCost.learnFrom(session);
+    },
     // What an admitted encode was seen to do, filed under its configuration.
     observeEncodeEnded: (session) => {
       if (!parts.localObservations || !session?.spec?.video?.encode) {

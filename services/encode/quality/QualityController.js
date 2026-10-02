@@ -9,34 +9,15 @@
 
 import { stat } from "node:fs/promises";
 import { logger } from "../../../utils/logger.js";
-import { ENCODE_RUN_STATE } from "../encode-run-state.js";
-import { LINK_SAFETY, linkCouldCarry, loadOf } from "./link-budget.js";
+import { linkCouldCarry, loadOf } from "./link-budget.js";
 import { qualityStateOf } from "./OutputQualityState.js";
 import { drainThreat } from "./drain-threat.js";
 import { visibleHeightCap } from "./visible-rung.js";
 
-// Realtime budget — runtime downswitch (software encoder only). Periodically
-// check each active software-transcode session's ffmpeg `speed`; when it stays
-// below realtime for a sustained window AND the input is not download-starved
-// (so the limit is the encoder, not the torrent), step down one resolution rung
-// and restart at the current segment. Conservative so it never thrashes: a long
-// sustained window, a post-action cooldown, a step cap, and no upswitch (v1).
+// How often the host's load and the torrents' download rates are sampled.
+// A sampling period of the machine, not a quality decision: every decision
+// about a viewer's quality is taken on that viewer's report.
 export const BUDGET_CHECK_INTERVAL_MS = 5_000;
-// Speed below this (cumulative ffmpeg average) counts as "slow"; recovery to
-// realtime resets the slow window (hysteresis).
-const BUDGET_SPEED_SLOW = 0.95;
-const BUDGET_SPEED_OK = 1.0;
-// Slow must persist this long before a downshift (absorbs warm-up + brief
-// complex scenes; the cumulative average won't dip this long unless the host
-// genuinely can't keep up).
-const BUDGET_SUSTAINED_MS = 15_000;
-// The step BACK UP has to be slower to fire than the step down, or the two
-// take turns: a rung that has just been left is by definition one the arithmetic
-// still thinks this machine can hold, so it would be asked for again as soon as
-// the cooldown expired. Four times the down window is a statement about how long
-// a machine has to look able before it is believed, not a measured quantity, and
-// it is written here rather than dressed up as one.
-const BUDGET_UP_SUSTAINED_MS = 60_000;
 // How long a request to the player to change variant stands before it is
 // treated as unanswered. A progress report is polled about every 1.5 s and the
 // switch itself needs the rung warmed, which is the cold start this host
@@ -44,17 +25,18 @@ const BUDGET_UP_SUSTAINED_MS = 60_000;
 // cannot honour the request (no master playlist, a viewer on a manual pick) is
 // not chased for the rest of the film.
 const QUALITY_ASK_TTL_MS = 45_000;
-// The input counts as "keeping up" when the torrent downloads at least this
-// multiple of the source's average byte rate. Below it (and not yet fully
-// downloaded), a low speed is download-bound, not CPU-bound → do NOT downscale.
-const BUDGET_DOWNLOAD_OK_FACTOR = 1.0;
-// Viewer-link adaptation. Judged on each report a viewer makes, for that
-// viewer alone (roadmap item 98): when their link does not carry the stream
-// they are given AND their buffer, on its present trend, would run dry before
-// another output could have the piece they need (`drain-threat.js`), a smaller
-// output is prepared for them. A chosen window of slowness and a chosen buffer
-// threshold stood here, and a chosen wait after every action; all three are
-// gone. A manual viewer is never sent an automatic quality request.
+// Every quality step is judged on a report a viewer makes, for that viewer
+// alone (roadmap item 98). DOWN: their buffer, on its present trend, would run
+// dry before another output could have the piece they need (`drain-threat.js`),
+// and the reason is one a smaller output removes — their link carries less
+// than the stream, or this machine makes the picture slower than realtime
+// over its own working time (`RunClock`). UP: their buffer is not draining,
+// holds the time another output takes to be ready, the machine makes the
+// picture at least at realtime, and their link carries the next height. A
+// chosen threshold of slowness, a chosen window to sustain it, a window four
+// times as long before stepping back up, a safety share of the link and a
+// chosen test for a download-starved input stood here; all are gone. A manual
+// viewer is never sent an automatic quality request.
 // Observed produced bitrate: average over this many recently completed
 // segments (the newest file on disk may still be written and is excluded).
 const LINK_OBSERVED_SEGMENTS = 5;
@@ -65,14 +47,14 @@ export class QualityController {
   /** What this reads and asks of the rest of the proxy, and nothing else. @type {object} */
   #host;
 
-  /** A budget pass is under way; a timer tick that lands meanwhile is skipped. */
+  /** A sampling pass is under way; a timer tick that lands meanwhile is skipped. */
   #tickRunning = false;
 
   /** Viewers whose report is being judged now (`noteViewerReported`). @type {Set<string>} */
   #judging = new Set();
 
   /**
-   * @param {object} host - `isLive`, `liveConsumers`, `liveRunsOf`, `producedNumbers`, `reportHostLoad`, `runStateOf`, `sampleDownloadRates`, `encodeCost`, `getSourceStats`, `outputs`, `qualityOffer`, `segmentDurationSec`, `segmentPaths`, `videoEncoder`, `prepareSameHeightSwitch`, `sameHeightSwitchPending`, `sameHeightSwitchDirection`, `cancelSameHeightSwitch`, `heightReadyFor`, `bufferOf`, `visiblePictureOf`, `expectedFirstSegmentMs`
+   * @param {object} host - `isLive`, `liveConsumers`, `liveRunsOf`, `producedNumbers`, `reportHostLoad`, `runStateOf`, `sampleDownloadRates`, `encodeCost`, `outputs`, `qualityOffer`, `segmentDurationSec`, `segmentPaths`, `videoEncoder`, `prepareSameHeightSwitch`, `sameHeightSwitchPending`, `sameHeightSwitchDirection`, `cancelSameHeightSwitch`, `heightReadyFor`, `bufferOf`, `visiblePictureOf`, `expectedFirstSegmentMs`
    * @param {SegmentPathLookup} host.segmentPaths - Lookup for completed
    *   segment paths needed by quality decisions.
    */
@@ -81,23 +63,20 @@ export class QualityController {
   }
 
   /**
-   * One pass of the quality budget: learn what this host is doing with each
-   * running encode, and act on it.
+   * One sampling pass: the host's load and the torrents' download rates.
    *
-   * Public because it is an operation with a name, not an implementation
-   * detail of a timer — and because a loop that decides what the viewer sees
-   * and can only be reached through `setInterval` is a loop nothing can check.
-   * The timer calls exactly this.
+   * Public because it is an operation with a name, not an implementation detail
+   * of a timer. It decides nothing about any viewer: an encoder's price is
+   * learned when it closes a piece (`EncodeCost.learnFrom`), and a quality step
+   * is judged on a viewer's report (`noteViewerReported`).
    *
    * @returns {Promise<void>}
    */
   async runQualityBudgetOnce() {
     void this.#host.reportHostLoad();
-    // One tick at a time. Both halves await torrent statistics per source, so a
-    // slow or stuck answer would otherwise let the next tick in behind it — two
-    // passes over the same sessions, taking the same reading twice and acting
-    // on the same speed twice, and an earlier tick's rates landing on top of a
-    // later tick's.
+    // One tick at a time: the rates await torrent statistics per source, so a
+    // slow answer would otherwise let the next tick in behind it and take the
+    // same reading twice.
     if (this.#tickRunning === true) {
       return;
     }
@@ -106,113 +85,37 @@ export class QualityController {
       // Taken whatever the encoder is: the torrent's price is charged against
       // this rate on every host, not only on the ones that re-encode.
       await this.#host.sampleDownloadRates();
-      if (this.#host.videoEncoder?.kind !== "software") {
-        return;
-      }
-      await this.#realtimeBudgetPass();
     } finally {
       this.#tickRunning = false;
     }
   }
 
-  async #realtimeBudgetPass() {
-    const now = Date.now();
-    for (const session of this.#host.outputs.values()) {
-      // What this file costs to decode is learned from EVERY encoding session,
-      // before any of the budget's own conditions are consulted. Those exist to
-      // decide whether to step the quality, and they exclude most of what is
-      // worth measuring: a rung already at the foot of its ladder has nowhere
-      // to step, and a 240p variant IS its whole ladder — which is exactly the
-      // rung the field measured at 0.95x on 2026-08-15, learning nothing from
-      // three minutes of it because the loop had already skipped the session as
-      // un-actionable.
-      await this.#host.encodeCost.learnFrom(session);
-      if (
-        !session ||
-        !this.#host.isLive(session) ||
-        this.#host.runStateOf(session) === ENCODE_RUN_STATE.ENDED_FAILED ||
-        // Nothing is encoding, so there is no speed to judge. A variant the
-        // viewer has switched away from is left in exactly this state, and its
-        // last recorded speed would otherwise buy it a step — which restarts
-        // the encoder it was just stopped for.
-        this.#host.liveRunsOf(session).length === 0 ||
-        // A soundtrack published on its own carries no picture, so no quality
-        // step is its to make; its price is learned above and that is all.
-        session.spec.carries === "audio-only"
-      ) {
-        continue;
-      }
-      // A viewer's link is judged on each of their reports
-      // (`noteViewerReported`), not here: nothing about it changes between two
-      // reports, so a timer would only read the same statement again.
-      if (await this.#checkEncoderBudget(session, now)) {
-        continue;
-      }
-      await this.#checkStepUp(session, now);
-    }
+  /**
+   * This output's processing speed now, over its run's own working time, or
+   * null when no run has measured one. Copying and re-encoding alike; a copy
+   * has no encoder a smaller picture would relieve, which is decided where
+   * this is asked.
+   *
+   * @param {HlsSession} session
+   * @returns {number | null}
+   */
+  #processingSpeedOf(session) {
+    return this.#host.encodeCost.latestSpeedReadingOf(session)?.speed ?? null;
   }
 
   /**
-   * The encoder-speed check for one session: sustained sub-realtime, and the
-   * encoder — not a download-starved input — is the limit.
+   * How long another output of the mode on this viewer's screen takes to be
+   * ready here, in seconds: as observed on this host (roadmap item 97, step
+   * 14), and otherwise this host's time to a first segment. Null when neither
+   * has been measured.
    *
    * @param {HlsSession} session
-   * @param {number} now
-   * @returns {Promise<boolean>} True when a step was asked for this tick.
+   * @returns {number | null}
    */
-  async #checkEncoderBudget(session, now) {
-    if (!session.spec.transcodesVideo) {
-      // A copy has no encoder to make cheaper. Whatever the machine is short
-      // of, moving this viewer to a RE-ENCODED rung costs it more, not less —
-      // so the copy path's only lever is the viewer's link, above.
-      return false;
-    }
-    const speed = this.#host.encodeCost.recentSpeedOf(session, now, BUDGET_CHECK_INTERVAL_MS * 2);
-    if (speed === null) {
-      return false; // no measurement yet
-    }
-    if (speed >= BUDGET_SPEED_OK) {
-      qualityStateOf(session).budgetSlowSince = 0; // recovered — reset the slow window
-      return false;
-    }
-    if (speed >= BUDGET_SPEED_SLOW) {
-      return false; // in the hysteresis band; neither slow nor ok
-    }
-    if (qualityStateOf(session).budgetSlowSince === 0) {
-      qualityStateOf(session).budgetSlowSince = now;
-      return false;
-    }
-    if (now - qualityStateOf(session).budgetSlowSince < BUDGET_SUSTAINED_MS) {
-      return false; // not sustained yet
-    }
-    const bound = await this.classifyTranscodeBound(session);
-    if (bound === "download") {
-      logger.info(
-        `[budget] transcode ${session.id} speed=${speed.toFixed(2)}x but download-limited ` +
-          `"${session.file.name}"; not stepping down (torrent is the bottleneck)`
-      );
-      qualityStateOf(session).budgetSlowSince = 0; // re-evaluate fresh; don't thrash on this
-      return false;
-    }
-    qualityStateOf(session).budgetSlowSince = 0;
-    qualityStateOf(session).budgetUpSince = 0;
-    const boundLabel = bound === "unknown" ? "assuming CPU-bound" : "CPU-bound";
-    // The machine is the output's reason, so every viewer with it on screen is
-    // asked — each to the rung their own picture bounds a re-encode by, where
-    // that is lower than the next rung down (roadmap item 98).
-    const reasonText = `${boundLabel} speed=${speed.toFixed(2)}x`;
-    const base = this.#host.outputs.pictureOf(session);
-    const watching = this.#host.presentOn(session).filter((consumerId) => this.#onScreenHere(session, consumerId));
-    if (watching.length === 0) {
-      return this.#askLowerHeight(session, reasonText);
-    }
-    let asked = false;
-    for (const consumerId of watching) {
-      if (this.#askLowerHeight(session, reasonText, [consumerId], { cap: this.#visibleCapOf(base, consumerId) })) {
-        asked = true;
-      }
-    }
-    return asked;
+  #secondsToReady(session) {
+    const observedMs = this.#host.observedPreparationMs?.(session) ?? null;
+    const expectedMs = Number.isFinite(observedMs) ? observedMs : (this.#host.expectedFirstSegmentMs?.() ?? null);
+    return Number.isFinite(expectedMs) && expectedMs >= 0 ? expectedMs / 1000 : null;
   }
 
   /**
@@ -377,99 +280,73 @@ export class QualityController {
    * @param {number} now
    * @returns {Promise<void>}
    */
-  async #checkStepUp(session, now) {
+  async #checkStepUp(session, consumerId) {
+    if (!this.#roomToSpare(session, consumerId)) {
+      // A step up being prepared for a viewer who no longer has room is let go:
+      // the conditions it was asked under have gone back (roadmap item 98).
+      this.#dropUpAsk(session, consumerId, "the room it was asked for has gone");
+      return;
+    }
     const base = this.#host.outputs.pictureOf(session);
     const current = this.#host.outputs.variantHeightOf(session);
-    // What the machine and the link would have to look like for a step up, held
-    // for a window four times the one a step DOWN needs. Anything that fails
-    // resets it, so the window measures an unbroken stretch.
-    const spare = this.#roomToSpare(session, now);
-    // A step up being prepared for a viewer who no longer has room is let go:
-    // the conditions it was asked under have gone back (roadmap item 98).
-    for (const consumerId of this.#host.presentOn(session)) {
-      if (!spare.includes(consumerId)) {
-        this.#dropUpAsk(session, consumerId, "the room it was asked for has gone");
-      }
-    }
-    if (spare.length === 0) {
-      qualityStateOf(session).budgetUpSince = 0;
+    const reasonText = `the machine and the link carry ${current}p with room to spare`;
+    const move = await this.#host.prepareSameHeightSwitch(session, consumerId, "up", reasonText);
+    if (move.started) {
       return;
     }
-    if (qualityStateOf(session).budgetUpSince === 0) {
-      qualityStateOf(session).budgetUpSince = now;
+    // Refused because the MACHINE holds no more encoders: a higher height costs
+    // more than the limit that was just refused, so it is not asked for.
+    if (move.noPlace) {
+      logger.info(`[budget] transcode ${session.id} no step up for ${consumerId}: ${move.reason}`);
       return;
-    }
-    if (now - qualityStateOf(session).budgetUpSince < BUDGET_UP_SUSTAINED_MS) {
-      return;
-    }
-    qualityStateOf(session).budgetUpSince = 0;
-    const reasonText =
-      `the machine and the link have carried ${current}p for ` +
-      `${Math.round(BUDGET_UP_SUSTAINED_MS / 1000)}s with room to spare`;
-    const atTheirHighestLimit = [];
-    for (const consumerId of spare) {
-      const move = await this.#host.prepareSameHeightSwitch(session, consumerId, "up", reasonText);
-      if (move.started) {
-        continue;
-      }
-      // Refused because the MACHINE holds no more encoders: a higher height
-      // costs more than the limit that was just refused, so it is not asked for.
-      if (move.noPlace) {
-        logger.info(`[budget] transcode ${session.id} no step up for ${consumerId}: ${move.reason}`);
-        continue;
-      }
-      atTheirHighestLimit.push(consumerId);
     }
     // One rung at a time: the lowest height above the one on screen, never
-    // above the source (upscaling invents detail and costs more than the
-    // source itself). A second step follows a second unbroken window.
+    // above the source (upscaling invents detail and costs more than the source
+    // itself). A rung this host has been measured failing at is not offered
+    // (`QualityOffer`), so the step back up cannot return to it.
     const higher = this.#host.qualityOffer.nextHeightUp(base, current);
     if (higher === undefined) {
       return;
     }
-    // Only the viewers whose OWN link admits the next rung, and whose picture on
-    // screen is not already served by the rung they are on: a re-encode is
-    // never made taller than the picture they see (roadmap item 98). The copy
-    // of the source is not a re-encode, and going back to it is not bounded.
-    // Another viewer's fast link or large screen says nothing about theirs.
+    // Only where their OWN link admits the next rung, and the picture on their
+    // screen is not already served by the rung they are on: a re-encode is never
+    // made taller than the picture they see (roadmap item 98). The copy of the
+    // source is not a re-encode, and going back to it is not bounded.
     const copied = this.#host.qualityOffer.copiedHeightOf(base);
-    const carriers = atTheirHighestLimit.filter((consumerId) =>
-      this.#linkAdmitsHeight(base, session, consumerId, higher) &&
-      (higher === copied || this.#visibleCapOf(base, consumerId) === null || higher <= this.#visibleCapOf(base, consumerId))
-    );
-    if (carriers.length > 0) {
-      this.#askQualityHeight(base, higher, reasonText, carriers);
+    const cap = this.#visibleCapOf(base, consumerId);
+    if (this.#linkAdmitsHeight(base, session, consumerId, higher) &&
+      (higher === copied || cap === null || higher <= cap)) {
+      this.#askQualityHeight(base, higher, reasonText, [consumerId]);
     }
   }
 
   /**
-   * The viewers who have this session on screen with room to spare: the
-   * encoder ahead of realtime and the torrent not the limit — which are the
-   * OUTPUT's and hold for all of them or none — and, for each viewer on their
-   * own, a buffer that is not draining and no move of theirs already being
-   * prepared.
+   * Whether this viewer has room for more, every term measured: the picture on
+   * their screen is made at least at realtime over its run's own working time
+   * (a copy is not limited by an encoder), their buffer is not draining, it
+   * holds at least the time another output takes to be ready here, and no move
+   * of theirs is already being prepared.
    *
    * @param {HlsSession} session
-   * @param {number} now
-   * @returns {string[]} Empty when nobody has room.
+   * @param {string} consumerId
+   * @returns {boolean}
    */
-  #roomToSpare(session, now) {
+  #roomToSpare(session, consumerId) {
+    if (!this.#onScreenHere(session, consumerId) || this.#host.sameHeightSwitchPending(consumerId)) {
+      return false;
+    }
     if (session.spec.transcodesVideo) {
-      const speed = this.#host.encodeCost.recentSpeedOf(session, now, BUDGET_CHECK_INTERVAL_MS * 2);
-      if (speed === null || speed < BUDGET_SPEED_OK) {
-        return [];
+      const speed = this.#processingSpeedOf(session);
+      if (speed === null || speed < 1) {
+        return false;
       }
     }
-    if (qualityStateOf(session).budgetSlowSince !== 0) {
-      return [];
+    const buffer = this.#host.bufferOf(session, consumerId, this.#host.segmentDurationSec);
+    if (!buffer || !Number.isFinite(buffer.slope) || buffer.slope < 0) {
+      return false;
     }
-    // A buffer that drains over a whole segment's period is being spent faster
-    // than it is filled: there is no room for more.
-    return this.#host.presentOn(session).filter((consumerId) =>
-      !((this.#host.bufferOf(session, consumerId, this.#host.segmentDurationSec)?.slope ?? 0) < 0) &&
-      this.#onScreenHere(session, consumerId) &&
-      !this.#host.sameHeightSwitchPending(consumerId)
-    );
+    const secondsToReady = this.#secondsToReady(session);
+    return secondsToReady !== null && (buffer.bufferedSec ?? 0) >= secondsToReady;
   }
 
   /**
@@ -477,7 +354,7 @@ export class QualityController {
    * may have produced yet.
    *
    * Nothing measured their link: no ground to refuse, the same silence that
-   * stops `#checkViewerLink` from acting on them.
+   * stops `#checkSupply` from blaming their link.
    *
    * @param {HlsSession} base
    * @param {HlsSession} session
@@ -524,90 +401,88 @@ export class QualityController {
     }
     this.#judging.add(consumerId);
     try {
-      const now = Date.now();
       if (this.#host.videoEncoder?.kind === "software" &&
-        (await this.#checkViewerLink(session, consumerId, now))) {
+        (await this.#checkSupply(session, consumerId))) {
         return;
       }
-      this.#checkVisiblePicture(session, consumerId, now);
+      if (this.#checkVisiblePicture(session, consumerId)) {
+        return;
+      }
+      if (this.#host.videoEncoder?.kind === "software") {
+        await this.#checkStepUp(session, consumerId);
+      }
     } finally {
       this.#judging.delete(consumerId);
     }
   }
 
   /**
-   * This viewer's link against the stream they are given.
+   * Whether this viewer's buffer can keep up with what they are given.
    *
-   * THE CONDITION, both halves measured: their link does not carry the stream
-   * (the reading times the safety margin is below the observed bitrate), and
-   * their buffer, on its present trend, would run dry before another output
-   * could close the piece they need (`drain-threat.js`). A buffer that falls
-   * without that threat moves nothing.
+   * THE CONDITION, every term measured: their buffer, on its present trend,
+   * would run dry before another output could close the piece they need
+   * (`drain-threat.js`), AND a smaller output removes the reason — their link
+   * carries less than the stream they are given, or this machine makes the
+   * picture slower than realtime over its run's own working time. A buffer
+   * that falls without that threat moves nothing; a threat neither reason
+   * explains (the swarm is short) is not answered with a smaller picture, which
+   * reads the same input.
    *
-   * THE LEVERS, in order: another limit of the height on their screen (roadmap
-   * item 97, step 12), then a lower height, asked of their player as URGENT —
-   * their page switches as soon as the rung is ready, without waiting for a
-   * cushion that is shrinking. Where neither can be prepared they stay where
-   * they are, with no message: what is on screen goes on being delivered, and
-   * a buffer that runs dry is filled again before the picture moves.
+   * THE LEVERS, in order: for the link, another limit of the height on their
+   * screen (roadmap item 97, step 12), then a lower height; for the machine, a
+   * lower height. A lower height is asked of their player as URGENT — their
+   * page switches as soon as the rung is ready, without waiting for a cushion
+   * that is shrinking. Where nothing can be prepared they stay where they are,
+   * with no message.
    *
    * @param {HlsSession} session - The output on their screen.
    * @param {string} consumerId
-   * @param {number} now
    * @returns {Promise<boolean>} True when a move was started or asked for.
    */
-  async #checkViewerLink(session, consumerId, now) {
+  async #checkSupply(session, consumerId) {
     if (!this.#onScreenHere(session, consumerId)) {
       return false;
     }
-    const report = this.#host.linkReportOf(session, consumerId);
-    if (!report) {
-      return false; // their link has not been measured: no ground to move them
-    }
-    const observed = await this.observedStreamMbps(session);
-    if (observed === null) {
-      return false; // not enough produced material to compare against
-    }
     const buffer = this.#host.bufferOf(session, consumerId, this.#host.segmentDurationSec);
-    // How long another output of the mode on their screen has been seen taking
-    // to be ready here (roadmap item 97, step 14), and otherwise this host's
-    // time to a first segment. The observation refines WHEN a move is started;
-    // what the move may be — admission, the link, the viewer's mode — is
-    // decided below exactly as without it.
-    const observedMs = this.#host.observedPreparationMs?.(session) ?? null;
-    const expectedMs = Number.isFinite(observedMs) ? observedMs : (this.#host.expectedFirstSegmentMs?.() ?? null);
     const { threat, secondsToEmpty } = drainThreat({
       bufferedSec: buffer?.bufferedSec ?? 0,
       slope: buffer?.slope ?? null,
       reportGapSec: buffer?.reportGapSec ?? 0,
-      secondsToReady: Number.isFinite(expectedMs) && expectedMs >= 0 ? expectedMs / 1000 : null
+      secondsToReady: this.#secondsToReady(session)
     });
-    const carries = report.linkMbps * LINK_SAFETY >= observed;
-    if (carries && !threat) {
+    if (!threat) {
       return false;
     }
     // Whatever else happens, a step UP prepared for them is not what they need.
-    this.#dropUpAsk(session, consumerId, "their buffer is draining or their link does not carry the stream");
+    this.#dropUpAsk(session, consumerId, "their buffer is draining");
     if (this.#host.sameHeightSwitchDirection(consumerId) === "up") {
-      this.#host.cancelSameHeightSwitch(consumerId, "their buffer is draining or their link does not carry the stream");
+      this.#host.cancelSameHeightSwitch(consumerId, "their buffer is draining");
     }
-    if (carries || !threat) {
+    const report = this.#host.linkReportOf(session, consumerId);
+    const observed = report ? await this.observedStreamMbps(session) : null;
+    const linkShort = report !== null && report !== undefined && observed !== null && report.linkMbps < observed;
+    const speed = session.spec.transcodesVideo ? this.#processingSpeedOf(session) : null;
+    const machineShort = speed !== null && speed < 1;
+    if (!linkShort && !machineShort) {
       return false;
     }
     if (this.#host.sameHeightSwitchPending(consumerId)) {
       return false; // a move down is already being prepared for them
     }
     const reasonText =
-      `link=${report.linkMbps.toFixed(2)}Mbps stream=${observed.toFixed(2)}Mbps ` +
+      (linkShort ? `link=${report.linkMbps.toFixed(2)}Mbps stream=${observed.toFixed(2)}Mbps ` : "") +
+      (machineShort ? `CPU-bound speed=${speed.toFixed(2)}x ` : "") +
       `buffer=${(buffer?.bufferedSec ?? 0).toFixed(1)}s empty in ${secondsToEmpty === null ? "?" : secondsToEmpty.toFixed(1)}s ` +
       `for ${consumerId}`;
-    const move = await this.#host.prepareSameHeightSwitch(session, consumerId, "down", `viewer-link-bound ${reasonText}`);
-    if (move.started) {
-      return true;
+    if (linkShort) {
+      const move = await this.#host.prepareSameHeightSwitch(session, consumerId, "down", `viewer-link-bound ${reasonText}`);
+      if (move.started) {
+        return true;
+      }
+      logger.info(`[budget] transcode ${session.id} ${reasonText}: no lower limit to move to (${move.reason})`);
     }
-    logger.info(`[budget] transcode ${session.id} ${reasonText}: no lower limit to move to (${move.reason})`);
     const base = this.#host.outputs.pictureOf(session);
-    if (this.#askLowerHeight(session, `viewer-link-bound ${reasonText}`, [consumerId], {
+    if (this.#askLowerHeight(session, `${linkShort ? "viewer-link-bound" : "machine-bound"} ${reasonText}`, [consumerId], {
       urgent: true,
       cap: this.#visibleCapOf(base, consumerId)
     })) {
@@ -640,17 +515,16 @@ export class QualityController {
    *
    * @param {HlsSession} session - The output on their screen.
    * @param {string} consumerId
-   * @param {number} now
-   * @returns {void}
+   * @returns {boolean} True when a move was asked for.
    */
-  #checkVisiblePicture(session, consumerId, now) {
+  #checkVisiblePicture(session, consumerId) {
     if (!session.spec.transcodesVideo || !this.#onScreenHere(session, consumerId)) {
-      return;
+      return false;
     }
     const base = this.#host.outputs.pictureOf(session);
     const cap = this.#visibleCapOf(base, consumerId);
     if (cap === null || !this.#host.outputs.publishesVariants(base)) {
-      return;
+      return false;
     }
     const current = this.#host.outputs.variantHeightOf(session);
     const offered = this.#host.qualityOffer.offeredHeights(base);
@@ -658,19 +532,12 @@ export class QualityController {
       const target = this.#host.outputs.splicableHeights(base)
         .find((height) => height <= cap && offered.includes(height));
       if (target === undefined || !this.#host.heightReadyFor(base, consumerId, target)) {
-        return;
+        return false;
       }
       this.#askQualityHeight(base, target, `the picture they see (${cap}p) is smaller than ${current}p`, [consumerId]);
-      return;
+      return true;
     }
-    if (current < cap) {
-      const higher = this.#host.qualityOffer.nextHeightUp(base, current);
-      const room = this.#roomToSpare(session, now).includes(consumerId);
-      if (higher === undefined || higher > cap || !room || !this.#linkAdmitsHeight(base, session, consumerId, higher)) {
-        return;
-      }
-      this.#askQualityHeight(base, higher, `the picture they see (${cap}p) is larger than ${current}p`, [consumerId]);
-    }
+    return false;
   }
 
   /**
@@ -769,49 +636,11 @@ export class QualityController {
   }
 
   /**
-   * Decide whether a sustained sub-realtime transcode is limited by the encoder
-   * (CPU) or by a download-starved input. Compares the torrent's download rate
-   * with the source's average byte rate; a fully-downloaded file can never be
-   * download-bound. Returns "cpu" | "download" | "unknown" ("unknown" is treated
-   * as CPU by the caller — the common case, logged as such).
-   *
-   * @param {HlsSession} session
-   * @returns {Promise<"cpu" | "download" | "unknown">}
-   */
-  async classifyTranscodeBound(session) {
-    if (!this.#host.getSourceStats) {
-      return "unknown";
-    }
-    let stats;
-    try {
-      stats = await this.#host.getSourceStats(session.file.sourceKey, session.file.fileIndex);
-    } catch {
-      return "unknown";
-    }
-    if (!stats) {
-      return "unknown";
-    }
-    // A fully (or almost fully) downloaded file cannot be download-bound.
-    if (typeof stats.fileProgress === "number" && stats.fileProgress >= 0.999) {
-      return "cpu";
-    }
-    const duration = Number.isFinite(session.file.durationSeconds) ? session.file.durationSeconds : 0;
-    const length = Number.isFinite(stats.fileLength) && stats.fileLength > 0 ? stats.fileLength : 0;
-    const downloadSpeed = Number.isFinite(stats.downloadSpeed) ? stats.downloadSpeed : 0;
-    if (duration <= 0 || length <= 0) {
-      return "unknown"; // cannot compute the source byte rate
-    }
-    const sourceByteRate = length / duration;
-    return downloadSpeed >= sourceByteRate * BUDGET_DOWNLOAD_OK_FACTOR ? "cpu" : "download";
-  }
-
-  /**
    * An encoder is about to start on this output.
    *
-   * Any start resets the cumulative `speed` ffmpeg reports, so both of this
-   * budget's windows over it start again: the pair of readings speed is learned
-   * from, and the slow window — otherwise warm-up right after a seek reads as
-   * sustained sub-realtime and triggers a premature step down.
+   * A new run is a new process, so the work sample its speed is learned from
+   * starts again: a pair of samples straddling two runs measures the seek, not
+   * the machine.
    *
    * @param {object} output
    * @returns {void}
@@ -819,7 +648,6 @@ export class QualityController {
   noteRunStarting(output) {
     const state = qualityStateOf(output);
     state.learnSample = null;
-    state.budgetSlowSince = 0;
   }
 
   /**

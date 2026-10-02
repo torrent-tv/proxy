@@ -295,20 +295,31 @@ The page has no quality control: the quality is always automatic. What moves a
 viewer is decided here, per viewer, and each part of it is a measurement.
 
 1. **Judged on the viewer's report, not on a timer.** `QualityController.noteViewerReported`
-   runs from the net-report route. The chosen fifteen-second window of a slow
-   link, the ten-second buffer threshold and the thirty-second wait after every
-   action are gone.
-2. **Down when the buffer would run dry first.** Their link does not carry the
-   stream they are given AND, on the buffer's trend, it ends sooner than another
-   output could close the piece they need, counting the time until their next
-   report (`quality/drain-threat.js`). The trend is a least-squares fit over the
-   shortest run of their reports spanning one segment
+   runs from the net-report route, for the step down, the picture they see and
+   the step up alike. The chosen fifteen-second window of a slow link or a slow
+   machine, the 0.95x threshold of slowness, the sixty-second window before a
+   step back up, the ten-second buffer threshold, the thirty-second wait after
+   every action and the 80 % share of the link are gone. The five-second timer
+   only samples the host's load and the torrents' download rates; an encoder's
+   price is learned when it closes a piece.
+2. **Down when the buffer would run dry first, for a reason a smaller output
+   removes.** On the buffer's trend it ends sooner than another output could
+   close the piece they need, counting the time until their next report
+   (`quality/drain-threat.js`), AND either their link carries less than the
+   stream they are given, or this machine makes the picture slower than
+   realtime over its run's own working time (`encode/RunClock.js`: the time its
+   input waited for the swarm and the time it was stopped are taken out). A
+   threat neither explains — the swarm is short — is not answered with a
+   smaller picture, which reads the same input. The trend is a least-squares fit
+   over the shortest run of their reports spanning one segment
    (`viewer/buffer-trend.js`), because the buffer rises a segment at a time and
-   two readings catch only the rise or the fall. The time to readiness is this
-   host's measured first-segment time. The levers: a lower limit of the same
-   height, then a lower height asked of the player as URGENT — their page
-   switches as soon as the rung is ready, without waiting for a cushion. Where
-   neither can be prepared they stay on what they are given, with no message.
+   two readings catch only the rise or the fall. The time to readiness is the
+   observed preparation time of another output of this mode, else this host's
+   measured first-segment time. The levers: for the link, a lower limit of the
+   same height, then a lower height; for the machine, a lower height. A lower
+   height is asked of the player as URGENT — their page switches as soon as the
+   rung is ready, without waiting for a cushion. Where nothing can be prepared
+   they stay on what they are given, with no message.
 3. **The picture the viewer sees bounds a re-encode.** The page sends the
    frame it would show without enlarging, in physical pixels; it is kept on
    `Viewer.visiblePicture`. The bound is the smallest rung of the source's
@@ -319,12 +330,18 @@ viewer is decided here, per viewer, and each part of it is a measurement.
 4. **A smaller picture moves the viewer only onto a READY rung**
    (`Renditions.heightReadyFor`: the piece they ask for next closed on it);
    with none ready, the next judgement of their link or of the machine applies
-   the bound. **A larger picture** asks one rung up when the machine and their
-   link have room.
-5. **A step up is let go when its conditions go back**: a draining buffer, a
+   the bound.
+5. **Up one rung when there is room, every term measured**: the picture on
+   their screen is made at least at realtime over its run's own working time (a
+   copy is not limited by an encoder), their buffer is not draining and holds
+   at least the time another output takes to be ready, their link carries the
+   next height, and the picture they see is not already served. A rung this
+   host has been measured failing at is not offered, so the step back up cannot
+   return to it; no window has to pass.
+6. **A step up is let go when its conditions go back**: a draining buffer, a
    link that no longer carries the stream, or no room for the output. The page
    drops the move it was preparing when the proxy stops asking for it.
-6. **The page switches a variant when the rung is ready**, and for a request
+7. **The page switches a variant when the rung is ready**, and for a request
    that is not urgent only once it holds `minimumBufferSeconds`.
 
 ## A place on the machine

@@ -1,7 +1,7 @@
 /**
  * Mutable quality observations for one output.
  *
- * An encoded output describes media. Measurements, budget windows and cached
+ * An encoded output describes media. Measurements and cached
  * offers belong to the quality component and disappear with its owner.
  */
 
@@ -13,8 +13,6 @@ export function qualityStateOf(output) {
     state = {
       predictedSpeedWhenOffered: null,
       lastPredictionRatio: null,
-      budgetSlowSince: 0,
-      budgetUpSince: 0,
       recentSpeed: null,
       learnSample: undefined,
       lastAloneSpeed: undefined,

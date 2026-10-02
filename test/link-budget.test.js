@@ -9,7 +9,6 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {
   admissionRank,
-  LINK_SAFETY,
   LINK_VERDICT,
   linkCouldCarry,
   loadOf,
@@ -67,11 +66,11 @@ test("a load is as trustworthy as its least trustworthy part", () => {
   assert.ok(Math.abs(loadOf(known(3), known(0.128)).totalMbps - 3.128) < 1e-9, "the sound is added to the picture");
 });
 
-test("the sound is counted before the link's usable share is applied", () => {
-  // The picture alone fits the usable share exactly; with the soundtrack the
-  // viewer hears, it does not.
+test("the sound is counted with the picture against the whole measured link", () => {
+  // The picture alone fits the link exactly; with the soundtrack the viewer
+  // hears, it does not. No share of the link is held back.
   const link = 10;
-  const picture = known(link * LINK_SAFETY);
+  const picture = known(link);
   assert.equal(linkCouldCarry(link, loadOf(picture, null)).verdict, LINK_VERDICT.FITS, "without sound it would pass");
   assert.equal(
     linkCouldCarry(link, loadOf(picture, known(AUDIO_TRANSCODE_KBPS / 1000))).verdict,

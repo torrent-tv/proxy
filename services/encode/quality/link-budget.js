@@ -24,21 +24,6 @@
 
 import { AUDIO_TRANSCODE_KBPS, maxrateKbpsFor, nominalKbpsFor } from "../args.js";
 
-/**
- * How much of a measured link may be spent on the stream.
- *
- * The rest is what the link does when it is not being perfect: transport
- * framing, retransmission, the other tabs, the moment somebody else in the
- * house starts something. A load sized to the whole reading stalls on the
- * first of those.
- *
- * Chosen, not measured, and written as a constant rather than dressed up as a
- * measurement. What would replace it is a reading of the transport's own
- * overhead and of how far a link's throughput varies over a session, which
- * nothing takes.
- */
-export const LINK_SAFETY = 0.8;
-
 /** How far a figure in a load can be trusted. */
 export const PEAK_CLASS = Object.freeze({
   KNOWN: "known",
@@ -279,7 +264,11 @@ export function linkCouldCarry(linkMbps, load) {
   if (load.peakClass === PEAK_CLASS.UNKNOWN) {
     return answer(LINK_VERDICT.NO_SAFE_BOUND, false, false);
   }
-  if (linkMbps * LINK_SAFETY < load.totalMbps) {
+  // The measured link against the whole load, with no share held back. The
+  // reading is what the link carried while it carried a piece, and the stream
+  // needs that on average; what a link does when it is not perfect — a pause,
+  // another tab — is what the viewer's buffer and `drain-threat.js` measure.
+  if (linkMbps < load.totalMbps) {
     return answer(LINK_VERDICT.DOES_NOT_FIT, false, false);
   }
   return load.peakClass === PEAK_CLASS.KNOWN
@@ -338,7 +327,6 @@ export function linkAnswerFigures(answer) {
   return {
     verdict: answer.verdict,
     linkMbps: answer.linkMbps,
-    linkSafety: LINK_SAFETY,
     videoMbps: answer.load.video?.mbps ?? null,
     videoClass: answer.load.video?.peakClass ?? null,
     audioMbps: answer.load.audio?.mbps ?? null,

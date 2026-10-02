@@ -65,7 +65,6 @@ import { SourceFile } from "../services/media/SourceFile.js";
 import { fmp4Format } from "../services/encode/segment-formats/fmp4.js";
 import { outputSpec } from "./helpers/output-spec.js";
 import { maxrateKbpsFor, nominalKbpsFor, softwareRateControlFor } from "../services/encode/args.js";
-import { LINK_SAFETY } from "../services/encode/quality/link-budget.js";
 
 const BASE_ID = "1111111122223333";
 const SEGMENT_SECONDS = 4;
@@ -86,7 +85,7 @@ const AUDIO_MBPS = 0.128;
  * @returns {number}
  */
 function linkJustFor(limit) {
-  return (maxrateKbpsFor(limit) / 1000 + AUDIO_MBPS + 0.01) / LINK_SAFETY;
+  return maxrateKbpsFor(limit) / 1000 + AUDIO_MBPS + 0.01;
 }
 
 /**

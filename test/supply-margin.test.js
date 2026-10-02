@@ -175,3 +175,16 @@ test("a term with nothing observed contributes nothing", () => {
   assert.equal(minimumBufferFrom({}), null, "without a segment duration nothing can be said");
   assert.equal(minimumBufferFrom({ segmentSeconds: 0 }), null);
 });
+
+test("a supply that delivered for a sliver of the time asks for what it measured, uncut", () => {
+  // Two stalls of 99.9 s with 0.1 s of delivery between them: the share lost is
+  // 0.999, and the speed asked for is a thousand times realtime. A cap at a
+  // chosen 0.99 used to report a hundred.
+  const answer = requiredSpeedFrom([
+    { waitedMs: 99_900, at: 99_900 },
+    { waitedMs: 99_900, at: 199_900 }
+  ]);
+  assert.ok(answer);
+  assert.ok(Math.abs(answer.lostShare - 0.999) < 1e-9, `got ${answer.lostShare}`);
+  assert.ok(Math.abs(answer.requiredSpeed - 1000) < 1e-6, `got ${answer.requiredSpeed}`);
+});

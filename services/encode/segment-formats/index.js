@@ -68,6 +68,7 @@ import { mpegtsFormat } from "./mpegts.js";
  * data; whether a browser joins a gap is decided by the viewer component.
  *
  * @typedef {{ tracks: Array<{ id: number, kind?: string, timescale: bigint,
+ *   firstSampleStart?: bigint, positionErrorTicks?: bigint,
  *   ranges: Array<{ start: bigint, end: bigint, frame: bigint }> }> }} MediaCoverage
  */
 

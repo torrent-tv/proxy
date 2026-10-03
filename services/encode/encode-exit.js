@@ -52,6 +52,8 @@ export const ENCODE_EXIT = Object.freeze({
   SHORT: "short",
   /** The input was not there. Recoverable: the data can come back. */
   INPUT_LOST: "input-lost",
+  /** Closed bytes could not be published; this says nothing about hardware. */
+  PUBLICATION_FAILED: "publication-failed",
   /** Anything else. Terminal for this target until something restarts it. */
   FAILED: "failed"
 });

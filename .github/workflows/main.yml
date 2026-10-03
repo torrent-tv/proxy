@@ -17,10 +17,6 @@ on:
         options: [auto, patch, minor]
         default: auto
 
-concurrency:
-  group: main-${{ github.ref }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
-
 permissions:
   contents: read
 
@@ -28,6 +24,11 @@ jobs:
   checks:
     name: Checks
     runs-on: ubuntu-latest
+    # A newer push to a pull request makes its older checks pointless; every push to
+    # main gets a group of its own, so no check of main is ever replaced.
+    concurrency:
+      group: ${{ github.event_name == 'pull_request' && format('checks-{0}', github.ref) || format('checks-{0}', github.run_id) }}
+      cancel-in-progress: ${{ github.event_name == 'pull_request' }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -49,6 +50,12 @@ jobs:
     if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     environment: production
+    # Every release runs, one at a time, in the order the runs reach the queue; the
+    # version comparisons below make the order of arrival harmless.
+    concurrency:
+      group: release
+      cancel-in-progress: false
+      queue: max
     permissions:
       contents: write
       id-token: write
@@ -69,7 +76,7 @@ jobs:
           bump: ${{ inputs.bump || 'auto' }}
 
       - name: Publish to npm
-        if: steps.release.outputs.released == 'true'
+        if: steps.release.outputs.released == 'true' && steps.release.outputs.already != 'true'
         env:
           # Empty once npm trusted publishing is enabled; npm then authenticates with
           # the workflow's OIDC token.
@@ -85,18 +92,23 @@ jobs:
           notes-file: ${{ steps.release.outputs.notes-file }}
           github-token: ${{ github.token }}
 
-      - name: Check out the add-on
+      - name: Token for the add-on only
+        id: addon-token
         if: steps.release.outputs.released == 'true'
-        uses: actions/checkout@v7
+        uses: actions/create-github-app-token@v3
         with:
-          repository: torrent-tv/ha-addon
-          ssh-key: ${{ secrets.ADDON_DEPLOY_KEY }}
-          path: ha-addon
+          app-id: ${{ vars.RELEASE_APP_ID }}
+          private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+          owner: torrent-tv
+          repositories: ha-addon
+          permission-contents: write
+          permission-actions: read
 
       - if: steps.release.outputs.released == 'true'
         uses: torrent-tv/.github/actions/addon-install-proxy@main
         with:
-          addon-path: ha-addon
+          github-token: ${{ steps.addon-token.outputs.token }}
           proxy-version: ${{ steps.release.outputs.version }}
           bump: ${{ steps.release.outputs.bump }}
           notes-file: ${{ steps.release.outputs.notes-file }}
+          task: "#ttv-91"

@@ -589,7 +589,7 @@ export class EncodeRun {
         // A refused closed piece must release this run's claim now, rather
         // than keep its viewer waiting until the rest of the film is encoded.
         this.#continue();
-        try { this.#process?.kill("SIGTERM"); } catch { /* Exit will release the claim. */ }
+        this.#signal("SIGTERM");
         return false;
       } finally {
         this.#closedTimings.delete(name);
@@ -663,10 +663,37 @@ export class EncodeRun {
     // A suspended process does not act on SIGTERM until it is continued, so the
     // wait for its exit would never end. Let it run before asking it to stop.
     this.#continue();
+    this.#signal("SIGTERM");
+  }
+
+  /**
+   * Send a signal to this run's process, and only to it.
+   *
+   * ONLY A PROCESS THAT STARTED IS SIGNALLED. When the executable cannot be
+   * started, Node reports the failure on a later turn, and until then the child
+   * holds a handle whose process id is 0. Signalling it then is `kill(0, …)`,
+   * which reaches every process in our own process group: the proxy itself, and
+   * under `node --test` the test runner. Measured 2026-10-03: a run stopped in
+   * the same turn its `ffmpeg` failed to start ended the whole test run
+   * ("Interrupted while running") in 5 of 40 runs of one file.
+   *
+   * Sent through the child object rather than `process.kill(pid)`, so the
+   * signal goes to the process this run spawned and to nothing that happens to
+   * hold the same number.
+   *
+   * @param {NodeJS.Signals} signal
+   * @returns {boolean} Whether the signal was delivered.
+   */
+  #signal(signal) {
+    const child = this.#process;
+    if (!child || !(Number(child.pid) > 0)) {
+      return false;
+    }
     try {
-      this.#process.kill("SIGTERM");
+      return child.kill(signal) !== false;
     } catch {
       // Best effort: it may already be gone, and its exit will say so.
+      return false;
     }
   }
 
@@ -685,7 +712,9 @@ export class EncodeRun {
       return false;
     }
     try {
-      globalThis.process.kill(this.#process.pid, "SIGSTOP");
+      // A platform without the signal throws here (ENOSYS), which is what
+      // marks suspension unsupported below.
+      this.#process.kill("SIGSTOP");
     } catch (error) {
       this.#pauseUnsupported = true;
       this.logger.info(
@@ -731,15 +760,10 @@ export class EncodeRun {
     if (this.#state !== ENCODE_RUN_STATE.SUSPENDED || !this.#process?.pid) {
       return false;
     }
-    let continued = true;
-    try {
-      globalThis.process.kill(this.#process.pid, "SIGCONT");
-    } catch {
-      // The process is gone; its exit handler will deal with it. The state is
-      // moved either way — but nothing was resumed, and saying so is what stops
-      // a dead run being reported as producing again.
-      continued = false;
-    }
+    // The process may be gone; its exit handler will deal with it. The state
+    // is moved either way — but nothing was resumed, and saying so is what
+    // stops a dead run being reported as producing again.
+    const continued = this.#signal("SIGCONT");
     this.#transition(ENCODE_RUN_EVENT.RESUMED);
     this.clock.continued();
     return continued;

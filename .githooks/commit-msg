@@ -1,13 +1,19 @@
 #!/bin/sh
-# Rejects a commit whose header does not follow Conventional Commits.
+# Rejects a commit whose header does not follow Conventional Commits or does not
+# end with a task reference: <type>(<scope>)!: <subject> #ttv-<issue>.
 # Enable once per clone: git config core.hooksPath .githooks
 header=$(head -n 1 "$1")
 case "$header" in
   Merge\ *|fixup!\ *|squash!\ *) exit 0 ;;
 esac
-if printf '%s\n' "$header" | grep -Eq '^(feat|fix|perf|refactor|docs|test|build|ci|chore|style|revert)(\([^()]+\))?!?: [^ ].*$'; then
-  exit 0
+if ! printf '%s\n' "$header" | grep -Eq '^(feat|fix|perf|refactor|docs|test|build|ci|chore|style|revert)(\([^()]+\))?!?: [^ ].*$'; then
+  echo "commit-msg: \"$header\" is not a Conventional Commits header" >&2
+  echo "  <type>(<scope>)!: <subject> #ttv-<issue>; type: feat fix perf refactor docs test build ci chore style revert" >&2
+  exit 1
 fi
-echo "commit-msg: \"$header\" is not a Conventional Commits header" >&2
-echo "  <type>(<scope>)!: <subject>; type: feat fix perf refactor docs test build ci chore style revert" >&2
-exit 1
+if ! printf '%s\n' "$header" | grep -Eq '[[:space:]]#ttv-[1-9][0-9]*$'; then
+  echo "commit-msg: \"$header\" does not end with a task reference" >&2
+  echo "  end the header with #ttv-<issue number in torrent-tv/meta>, e.g. fix(subtitles): keep the track #ttv-12" >&2
+  exit 1
+fi
+exit 0

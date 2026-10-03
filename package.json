@@ -15,7 +15,7 @@
     "node": ">=24"
   },
   "bin": {
-    "torrent-tv-proxy": "./bin/cli.js"
+    "torrent-tv-proxy": "bin/cli.js"
   },
   "scripts": {
     "start": "node ./bin/cli.js",

@@ -344,15 +344,20 @@ job in the `production` environment:
 
 1. writes the version into `package.json`/`package-lock.json` and renames
    `## Unreleased` to it, commits `chore(release): <version>` and tags it;
-2. publishes `@torrent-tv/proxy` to npm with provenance;
+2. publishes `@torrent-tv/proxy` to npm with provenance, through npm trusted
+   publishing (the workflow's OIDC token; no npm token is stored);
 3. pushes the tag and the commit and creates the GitHub release;
-4. pushes `fix(proxy)`/`feat(proxy): install proxy <version>` to
+4. waits until npm serves the version — npm accepts a publication before it
+   serves it, 6.5 minutes for 2.89.8 — then pushes
+   `fix(proxy)`/`feat(proxy): install proxy <version>` to
    `torrent-tv/ha-addon` (`PROXY_VERSION` and the add-on changelog), whose own
    workflow builds the add-on image and releases the add-on.
 
 So the order proxy → add-on is kept by construction. A release can also be
-started by hand from the Actions tab with an explicit `patch` or `minor` step.
-Updating the add-on on the Home Assistant host is still done there.
+started by hand from the Actions tab with an explicit `patch` or `minor` step;
+it still needs an entry under `## Unreleased`. Re-running a failed release job
+is safe: once the tag exists, publication is skipped and only what is missing
+is done. Updating the add-on on the Home Assistant host is still done there.
 
 `.github/workflows/dependencies.yml` updates dependencies daily within the
 ranges, runs the same checks and pushes to `main`.

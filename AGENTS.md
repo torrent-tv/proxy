@@ -318,21 +318,41 @@ rented infra (flat-rate/unmetered bandwidth — Hetzner dedicated / OVH; NOT
 metered-egress clouds). Provider/economics analysis in the parent
 `../CLAUDE.md` "Cloud proxy" section.
 
+## Commits
+
+Every commit header follows Conventional Commits (`<type>(<scope>)!: <subject>`,
+types `feat fix perf refactor docs test build ci chore style revert`); CI refuses
+a pushed commit that does not. Enable the local check once per clone:
+`git config core.hooksPath .githooks`. Rules: `torrent-tv/.github` CONTRIBUTING.md.
+
 ## Changelog
 
-Every behavioural change must be recorded in `CHANGELOG.md` — add an entry under
-a new `## <version>` heading at the top, following the existing
-`- **New**/**Fix**/**Chore**:` format.
-
-**Do NOT edit `package.json` version.** `npm run patch`/`minor` runs `npm
-version …` which bumps it. Write the CHANGELOG entry at the version that bump
-will produce: **current `package.json` version + 1 patch** (or + 1 minor).
-Accumulate bullets into that single pending entry until it's published. See the
-parent `../CLAUDE.md`.
+Every behavioural change must be recorded in `CHANGELOG.md` — add a bullet
+under `## Unreleased` at the top (create the heading if it is missing),
+following the existing `- **New**/**Fix**/**Chore**:` format. Never write a
+version heading and never edit the `package.json` version: the release job
+does both. CI refuses a releasable push without an `## Unreleased` entry.
 
 ## Release
 
-`npm run patch` (publishes to npm + pushes tags). The HA addon then needs its
-own version bump to pull the new package. Publish proxy BEFORE bumping the addon.
+GitHub Actions releases; nothing is published from a workstation. A push to
+`main` runs `.github/workflows/main.yml`: lint, the tests, and
+`scripts/check-tests-start-no-torrent.mjs` (no check may start a real
+torrent). Then, when the commits since the last `v*` tag ask for it (`feat`
+→ minor; `fix`/`perf`/`revert` → patch; anything else → none), the release
+job in the `production` environment:
 
-**Any proxy change requires bumping the ha-addon version** (`ha-addon/torrent_tv_proxy/config.yaml`). The addon installs the proxy from npm at build time and the build is cached; without a version bump the plugin will NOT update and keeps running the old proxy. So after `npm run patch`, always bump the addon `config.yaml` version, push, and update the addon.
+1. writes the version into `package.json`/`package-lock.json` and renames
+   `## Unreleased` to it, commits `chore(release): <version>` and tags it;
+2. publishes `@torrent-tv/proxy` to npm with provenance;
+3. pushes the tag and the commit and creates the GitHub release;
+4. pushes `fix(proxy)`/`feat(proxy): install proxy <version>` to
+   `torrent-tv/ha-addon` (`PROXY_VERSION` and the add-on changelog), whose own
+   workflow builds the add-on image and releases the add-on.
+
+So the order proxy → add-on is kept by construction. A release can also be
+started by hand from the Actions tab with an explicit `patch` or `minor` step.
+Updating the add-on on the Home Assistant host is still done there.
+
+`.github/workflows/dependencies.yml` updates dependencies daily within the
+ranges, runs the same checks and pushes to `main`.

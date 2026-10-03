@@ -1,4 +1,4 @@
-## Unreleased
+## 2.89.8
 
 - **Chore**: Update dependencies: @fastify/cors 11.2.0 → 11.3.0, @fastify/helmet 13.0.2 → 13.1.1, @fastify/static 10.1.2 → 10.1.5, parse-torrent 11.0.23 → 11.0.24, werift 0.24.2 → 0.24.4, ws 8.21.1 → 8.22.0, @biomejs/biome 2.5.7 → 2.5.15; 78 package(s) changed in the lock file, 15 removed; 1 known vulnerability resolved.
 - **Fix**: An encoder run sends a signal only to a process that started, and only through that process. When `ffmpeg` could not be started, stopping its run in the same turn sent `SIGTERM` to pid 0, which is the proxy's own process group: the proxy would end itself. Suspend and continue no longer signal a process number either.

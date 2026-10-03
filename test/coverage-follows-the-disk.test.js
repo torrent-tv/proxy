@@ -190,7 +190,12 @@ test("a piece discarded with the run that had it open is not ready either", (t) 
   // A run stopped the instant after opening #0 leaves a file of no bytes under a
   // name that reads as a segment; the store throws it away. Field 2026-09-07,
   // 20:13:13 and 20:13:57 — printed twice while the map went on saying 482.
+  // Whoever removes a piece tells the store, as the serving path does after
+  // taking out a piece short of a track: the store's memory of a directory ends
+  // on an event, not on the directory's modification time, which moves in
+  // steps of several milliseconds and can stay where it was.
   rmSync(path.join(dir, fmp4Format.segmentFileName(0)), { force: true });
+  store.forget(PICTURE);
 
   made.reconcile();
   assert.equal(made.runsOn(PICTURE).length, 1, "one number missing is one encoder");

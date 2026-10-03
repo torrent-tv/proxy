@@ -611,9 +611,12 @@ test("a playlist or an init segment does not move the encoder", async (t) => {
   });
   const variant = fakeSession({ id: VARIANT_ID, encodeHeight: 540, dirPath });
   manager.outputs.set(VARIANT_ID, variant);
-  chooseFor(manager, base, 540, variant.outputKey);
-  startManagedRun(manager, base, { process: fakeEncoder() });
+  // The plan is kept out of this: it is not what is being checked, and a run
+  // with no measured speed is one it would take away for changing nothing.
   manager.encodeRuns.planEncodersSoon = () => {};
+  chooseFor(manager, base, 540, variant.outputKey);
+  const encoder = fakeEncoder();
+  startManagedRun(manager, base, { process: encoder });
   chooseFor(manager, base, 540, variant.outputKey);
   await manager.renditions.resolveVariantFile(BASE_ID, 540, "index.m3u8", VIEWER);
   await manager.renditions.resolveVariantFile(BASE_ID, 540, "init.mp4", VIEWER);
@@ -624,6 +627,7 @@ test("a playlist or an init segment does not move the encoder", async (t) => {
     "hls.js fetches a level's playlist and init to decide with, and may never switch to it"
   );
   assert.ok([...base.runs][0]?.process, "the stream on screen must keep its encoder while the player is only looking");
+  assert.deepEqual(encoder.signals, [], "and nothing was sent to stop it");
 });
 
 test("the name of a variant is fixed, whatever its encode is later set to", async (t) => {

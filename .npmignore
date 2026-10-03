@@ -6,3 +6,6 @@ npm-debug.log*
 .cursor/
 .DS_Store
 host-timings.json
+.github/
+.githooks/
+scripts/check-tests-start-no-torrent.mjs

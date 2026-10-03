@@ -1,0 +1,13 @@
+#!/bin/sh
+# Rejects a commit whose header does not follow Conventional Commits.
+# Enable once per clone: git config core.hooksPath .githooks
+header=$(head -n 1 "$1")
+case "$header" in
+  Merge\ *|fixup!\ *|squash!\ *) exit 0 ;;
+esac
+if printf '%s\n' "$header" | grep -Eq '^(feat|fix|perf|refactor|docs|test|build|ci|chore|style|revert)(\([^()]+\))?!?: [^ ].*$'; then
+  exit 0
+fi
+echo "commit-msg: \"$header\" is not a Conventional Commits header" >&2
+echo "  <type>(<scope>)!: <subject>; type: feat fix perf refactor docs test build ci chore style revert" >&2
+exit 1

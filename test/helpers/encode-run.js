@@ -8,9 +8,9 @@
  * product builds and injects only the one thing a test may not have, which is a
  * child process.
  *
- * The pid is deliberately absent unless a test asks for one. `pause` and
- * `resume` send signals by pid, and a made-up number is somebody else's process
- * on the machine running the tests.
+ * The fake has a pid, as a started process does: a run signals only a process
+ * that started. The number is never used to signal anything — every signal goes
+ * through the child object, and this one records it.
  */
 
 import { EncodeRun } from "../../services/encode/EncodeRun.js";
@@ -92,11 +92,10 @@ function say(channel, text) {
  * A child process that records what was done to it.
  *
  * @param {object} [options]
- * @param {number | null} [options.pid] - Only where a test genuinely exercises
- *   suspend or resume, and then it must be this process's own.
+ * @param {number | null} [options.pid] - Null for a process that did not start.
  * @returns {object}
  */
-export function fakeProcess({ pid = null, exitsWhenKilled = true } = {}) {
+export function fakeProcess({ pid = 4242, exitsWhenKilled = true } = {}) {
   /** @type {Map<string, (...args: unknown[]) => void>} */
   const listeners = new Map();
   const stdout = channel();
@@ -123,6 +122,10 @@ export function fakeProcess({ pid = null, exitsWhenKilled = true } = {}) {
     },
     kill(signal = "SIGTERM") {
       this.signals.push(signal);
+      // Suspending and continuing are not ends.
+      if (signal === "SIGSTOP" || signal === "SIGCONT") {
+        return true;
+      }
       this.killed = true;
       // A real process answers a signal by exiting, and it does so on a later
       // turn. A fake that never exits makes every disposal wait out the grace
@@ -142,6 +145,11 @@ export function fakeProcess({ pid = null, exitsWhenKilled = true } = {}) {
       this.exitCode = code;
       this.signalCode = signal;
       for (const handler of listeners.get("exit") ?? []) {
+        handler(code, signal);
+      }
+      // A real child process emits `close` after `exit`, once its stdio has
+      // closed, and the run takes its ending from `close`.
+      for (const handler of listeners.get("close") ?? []) {
         handler(code, signal);
       }
     }

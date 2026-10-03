@@ -7,23 +7,21 @@ import assert from "node:assert/strict";
 import os from "node:os";
 
 import { collectHealthMetrics } from "../services/transport/health-collector.js";
-import { availableMemoryBytes } from "../services/storage/machine-memory.js";
+import { availableMemory, availableMemoryBytes } from "../services/storage/machine-memory.js";
 
 test("free memory is what could be given out, not what is idle this instant", () => {
-  const available = availableMemoryBytes();
-  assert.ok(Number.isFinite(available) && available > 0);
+  const available = availableMemory();
+  assert.ok(Number.isFinite(available.bytes) && available.bytes > 0);
 
-  // On Linux this reads the kernel's own `MemAvailable`, and it is at least
-  // `os.freemem()` by construction: the kernel keeps free memory low on purpose
-  // and fills the rest with cache, which it hands back the moment anything
-  // asks. The old reading was `os.freemem()`, so a host with 4 GB of cache and
-  // 200 MB genuinely free reported itself nearly full while it had 4.2 GB to
-  // give — and that figure weighs 0.4 of every proxy's score.
+  // On Linux this is the kernel's own `MemAvailable`, not `os.freemem()`: the
+  // kernel keeps free memory low on purpose and fills the rest with cache, which
+  // it hands back the moment anything asks. The old reading was `os.freemem()`,
+  // so a host with 4 GB of cache and 200 MB genuinely free reported itself nearly
+  // full while it had 4.2 GB to give — and that figure weighs 0.4 of every
+  // proxy's score. Asked of the reading itself: comparing it with a second
+  // reading taken a moment later measures whatever else the machine was doing.
   if (os.platform() === "linux") {
-    assert.ok(
-      available >= os.freemem(),
-      `MemAvailable ${available} is below freemem ${os.freemem()}, which cannot be`
-    );
+    assert.equal(available.measured, true, "the kernel's own estimate was not read");
   }
 });
 

@@ -1,3 +1,7 @@
+## Unreleased
+
+- **Fix**: An encoder run sends a signal only to a process that started, and only through that process. When `ffmpeg` could not be started, stopping its run in the same turn sent `SIGTERM` to pid 0, which is the proxy's own process group: the proxy would end itself. Suspend and continue no longer signal a process number either.
+
 ## 2.89.7
 
 - **Fix**: Whole audio pieces are published on the muxer's reference clock. The segment closure channel reports packet ends before MP4 truncates empty edits, and a restarted run's first packet is recovered from its sample span rather than assumed to equal the requested seek. Cut comparisons use integer microseconds; stored pieces retain the precision of their movie timescale. Captured Home Assistant audio pieces 13 and 90, and the restarted piece 13, reproduce the failures and now pass; a missing AAC frame still fails.

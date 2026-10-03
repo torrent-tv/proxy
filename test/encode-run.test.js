@@ -13,6 +13,7 @@ import { EventEmitter } from "node:events";
 import { EncodeRun } from "../services/encode/EncodeRun.js";
 import { ENCODE_EXIT } from "../services/encode/encode-exit.js";
 import { SoftwareEncoder } from "../services/encode/SoftwareEncoder.js";
+import { fakeProcess, silentLogger } from "./helpers/encode-run.js";
 
 /**
  * A process that does nothing until the test says what became of it.
@@ -225,4 +226,23 @@ test("a refused publication stops its claim and ends as a publication failure", 
   assert.equal(run.isAlive, false);
   assert.equal(ends[0].ending, ENCODE_EXIT.PUBLICATION_FAILED);
   assert.equal(ends[0].because, "piece 13 is incomplete");
+});
+
+test("a run whose process never started is not signalled, because pid 0 is our own process group", () => {
+  // Node reports a failed start (ENOENT) on a later turn; until then the child's
+  // process id is 0, and a signal sent to it is `kill(0, …)` — every process in
+  // our group, the proxy included. Measured 2026-10-03 under `node --test`.
+  const child = fakeProcess({ pid: null });
+  const run = new EncodeRun({
+    address: "torrent:abc:video-only:v=0/copy",
+    encoder: { name: "libx264", kind: "software" },
+    from: 0,
+    to: 4,
+    buildArgs: () => [],
+    spawn: () => child,
+    logger: silentLogger,
+    because: "a test asked for it"
+  });
+  run.stop("the viewer left");
+  assert.deepEqual(child.signals, [], "a process that did not start was sent a signal");
 });

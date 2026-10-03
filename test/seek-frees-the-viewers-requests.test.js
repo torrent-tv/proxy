@@ -28,7 +28,7 @@ import { rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { wireOutputs } from "../services/server/wire-outputs.js";
-import { waitForSessionFile } from "../routes/transcode/session-file/get.js";
+import { waitForSessionFile } from "../services/server/transcode-session-files.js";
 import { SourceFile } from "../services/media/SourceFile.js";
 import { Timeline } from "../services/encode/output/Timeline.js";
 import { Output } from "../services/encode/output/Output.js";

@@ -79,8 +79,11 @@ test("a report without a link measurement still states everything about the view
 
   assert.equal(viewer.positionSeconds(AT), 12);
   assert.equal(viewer.waiting, true);
-  // Nothing was measured, so nothing is claimed about the link.
-  assert.equal(viewer.netReport, null);
+  // The report is kept from the first one the page sends (proxy 2.86.0), and
+  // since nothing was measured, nothing is claimed about the link.
+  assert.equal(viewer.netReport.linkMbps, null);
+  assert.equal(viewer.netReport.linkSampleMbps, null);
+  assert.equal(viewer.netReport.positionSeconds, 12);
 });
 
 test("a page one release behind, which cannot say `waiting`, is read from what it does say", () => {

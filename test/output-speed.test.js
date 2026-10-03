@@ -11,6 +11,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { EncodeCost } from "../services/encode/quality/EncodeCost.js";
 import { OutputCatalog } from "../services/encode/output/OutputCatalog.js";
+import { qualityStateOf } from "../services/encode/quality/OutputQualityState.js";
 import { outputSpec } from "./helpers/output-spec.js";
 
 const PICTURE = "torrent:abc:fmt=fmp4:grid=kf@0:video-only:v=0/copy";
@@ -21,7 +22,11 @@ const PICTURE = "torrent:abc:fmt=fmp4:grid=kf@0:video-only:v=0/copy";
  */
 function costOf(sessions, host = {}) {
   const outputs = new OutputCatalog();
-  sessions.forEach((session, index) => outputs.set(String(index), session));
+  sessions.forEach(({ lastAloneSpeed, ...session }, index) => {
+    // What a run measured belongs to the quality component's state of the output.
+    qualityStateOf(session).lastAloneSpeed = lastAloneSpeed ?? undefined;
+    outputs.set(String(index), session);
+  });
   return new EncodeCost({
     runsFor: () => [],
     stateFor: () => "IDLE",

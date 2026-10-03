@@ -27,7 +27,7 @@ import { ENCODE_RUN_STATE } from "../services/encode/encode-run-state.js";
 import { fmp4Format } from "../services/encode/segment-formats/fmp4.js";
 import { EncodeRun } from "../services/encode/EncodeRun.js";
 import { fakeProcess, silentLogger } from "./helpers/encode-run.js";
-import { waitForSessionFile } from "../routes/transcode/session-file/get.js";
+import { waitForSessionFile } from "../services/server/transcode-session-files.js";
 import { outputSpec } from "./helpers/output-spec.js";
 
 const SESSION_ID = "3333333344445555";

@@ -169,9 +169,10 @@ test("a hardware output is unavailable against a measured link, and given while 
 });
 
 test("the soundtrack the viewer hears counts toward what their link carries", () => {
-  // 720p nominal peaks at 3.64 Mbit/s. A 4.6 Mbit/s link admits 3.68 of it:
-  // enough for the picture, not for the picture and 128 kbit/s of sound.
-  const linkMbps = 4.6;
+  // 720p nominal peaks at 3.64 Mbit/s, and the whole measured link is compared
+  // with the stream (no share of it is set aside since proxy 2.89.4). A 3.7 Mbit/s
+  // link carries the picture, not the picture and 128 kbit/s of sound (3.768).
+  const linkMbps = 3.7;
   assert.equal(decideFor({ mode: "manual", linkMbps }).answer.verdict, "fits");
   assert.ok(
     decideFor({ mode: "manual", linkMbps, audioLoad: { mbps: 0.128, peakClass: "known" } }).unavailable,

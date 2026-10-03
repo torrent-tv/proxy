@@ -77,10 +77,9 @@ jobs:
 
       - name: Publish to npm
         if: steps.release.outputs.released == 'true' && steps.release.outputs.already != 'true'
-        env:
-          # Empty once npm trusted publishing is enabled; npm then authenticates with
-          # the workflow's OIDC token.
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        # npm trusted publishing (npmjs.com: torrent-tv/proxy, main.yml, environment
+        # production) authenticates this step with the workflow's OIDC token; no npm
+        # token is stored.
         run: |
           npm install --global npm@11
           npm publish --provenance --access public

@@ -1,0 +1,8 @@
+{
+  "GHSA-2p57-rm9w-gvfp": {
+    "package": "ip",
+    "path": "webtorrent > torrent-discovery > bittorrent-tracker > ip",
+    "reason": "The advisory is about ip.isPublic. bittorrent-tracker 11.2.3 imports ip only in lib/server/parse-udp.js and calls only ip.toString there, in the tracker server, which the proxy never runs; nothing in the tree calls isPublic. No fixed version of ip exists.",
+    "reviewed": "2026-10-03"
+  }
+}

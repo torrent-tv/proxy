@@ -188,3 +188,41 @@ test("a segment number behind its own start is not its to claim", () => {
   run.noteProduced(4);
   assert.deepEqual(run.produced, []);
 });
+
+test("CSV closure times survive split channel chunks and a zero first-entry start", () => {
+  const process_ = new FakeProcess();
+  process_.stdio = [null, null, null, new EventEmitter()];
+  const closed = [];
+  const run = new EncodeRun({
+    address: "audio", encoder: new SoftwareEncoder(), from: 13, to: 14,
+    buildArgs: () => [], spawn: () => process_, logger: { info() {}, warn() {} },
+    indexOfName: name => Number(name.match(/(\d+)\.mp4$/)[1]),
+    onClosed: (name, timing) => { closed.push({ name, timing }); return name; }
+  });
+  process_.stdio[3].emit("data", "making-0-00013.mp4,0.000000,81.364");
+  process_.stdio[3].emit("data", "000\nmaking-0-00014.mp4,81.364000,91.800000\n");
+  process_.exitWith(0);
+  assert.equal(run.reached, 14);
+  assert.deepEqual(closed.map(({ timing }) => timing), [
+    { endMicros: 81_364_000n },
+    { endMicros: 91_800_000n }
+  ]);
+});
+
+test("a refused publication stops its claim and ends as a publication failure", () => {
+  const process_ = new FakeProcess();
+  process_.stdio = [null, null, null, new EventEmitter()];
+  const ends = [];
+  const run = new EncodeRun({
+    address: "audio", encoder: new SoftwareEncoder(), from: 13, to: 14,
+    buildArgs: () => [], spawn: () => process_, logger: { info() {}, warn() {} },
+    onClosed: () => { throw new Error("piece 13 is incomplete"); },
+    onEnded: ended => ends.push(ended)
+  });
+  process_.stdio[3].emit("data", "making-0-00013.mp4,71.55,71.56\nmaking-0-00014.mp4,71.56,91.8\n");
+  assert.deepEqual(process_.signals, ["SIGTERM"]);
+  process_.exitWith(0);
+  assert.equal(run.isAlive, false);
+  assert.equal(ends[0].ending, ENCODE_EXIT.PUBLICATION_FAILED);
+  assert.equal(ends[0].because, "piece 13 is incomplete");
+});

@@ -106,6 +106,8 @@ export class EncodeRun {
   /** Half a name left over from the last chunk of the encoder's own channel. */
   #closedTail = "";
   #pendingClosed = null;
+  #closedTimings = new Map();
+  #publicationError = null;
   #inputTruncated = false;
   #stderrReadTail = "";
   #processExited = false;
@@ -550,16 +552,24 @@ export class EncodeRun {
     // The last piece of the chunk may be half a name; it waits for the rest.
     this.#closedTail = lines.pop() ?? "";
     for (const line of lines) {
-      const name = line.trim();
+      const entry = line.trim();
+      const csv = /^"?([^",]+)"?,(-?\d+(?:\.\d+)?),(-?\d+(?:\.\d+)?)$/.exec(entry);
+      const name = csv ? csv[1] : entry;
       if (name.length === 0) {
         continue;
       }
-      if (this.#stopping) continue;
+      if (this.#stopping || this.#publicationError) continue;
+      if (csv) {
+        this.#closedTimings.set(name, {
+          endMicros: BigInt(Math.round(Number(csv[3]) * 1_000_000))
+        });
+      }
       // A subsequent closed file proves the previous one reached a cut.
       // The last file can instead have been flushed by an input failure.
       if (this.#pendingClosed !== null) {
         this.#publishClosed(this.#pendingClosed);
       }
+      if (this.#publicationError) break;
       this.#pendingClosed = name;
     }
   }
@@ -570,7 +580,20 @@ export class EncodeRun {
       // ffmpeg writes a piece under a working name and reports that; the piece
       // becomes servable by being renamed, and everything below works in the
       // name a request can actually ask for.
-      const served = this.onClosed(name);
+      let served;
+      try {
+        served = this.onClosed(name, this.#closedTimings.get(name) ?? null);
+      } catch (error) {
+        this.#publicationError = error instanceof Error ? error.message : String(error);
+        this.lastError = this.#publicationError;
+        // A refused closed piece must release this run's claim now, rather
+        // than keep its viewer waiting until the rest of the film is encoded.
+        this.#continue();
+        try { this.#process?.kill("SIGTERM"); } catch { /* Exit will release the claim. */ }
+        return false;
+      } finally {
+        this.#closedTimings.delete(name);
+      }
       if (!served) return false;
       if (!this.#stopping) {
         this.#provenName = served;
@@ -727,6 +750,10 @@ export class EncodeRun {
    * @param {string | null} signal
    */
   #onExit(code, signal) {
+    if (this.#publicationError) {
+      this.#finish(ENCODE_EXIT.PUBLICATION_FAILED, this.#publicationError, code, signal);
+      return;
+    }
     if (this.#stopping) {
       this.#finish(ENCODE_EXIT.STOPPED, this.#stopReason, code, signal);
       return;
@@ -749,7 +776,8 @@ export class EncodeRun {
     if (outcome === ENCODE_EXIT.COMPLETE) {
       if (this.#pendingClosed !== null && !this.#inputTruncated) {
         if (!this.#publishClosed(this.#pendingClosed)) {
-          this.#finish(ENCODE_EXIT.SHORT, "its final file could not be published", code, signal);
+          this.#finish(this.#publicationError ? ENCODE_EXIT.PUBLICATION_FAILED : ENCODE_EXIT.SHORT,
+            this.#publicationError ?? "its final file could not be published", code, signal);
           return;
         }
         this.#pendingClosed = null;

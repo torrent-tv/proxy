@@ -154,6 +154,11 @@ export function readTrackEdits(initSegment) {
         }
       }
       edit.offset = roundedQuotient(emptyTicks * edit.timescale, movieTimescale) - mediaTime;
+      // movenc writes a positive empty edit with AV_ROUND_DOWN. Keep the
+      // uncertainty of that position separate from the served timestamps.
+      if (emptyTicks > 0n) {
+        edit.positionErrorTicks = (edit.timescale + movieTimescale - 1n) / movieTimescale;
+      }
     }
   });
   return edits;
@@ -329,7 +334,9 @@ export function readPresentationRanges(raw) {
         ranges.push({ start: sample.start, end, frame });
       }
     }
-    tracks.push({ id, kind: kinds.get(id), timescale: edits.get(id).timescale, ranges });
+    const edit = edits.get(id);
+    tracks.push({ id, kind: kinds.get(id), timescale: edit.timescale, ranges,
+      firstSampleStart: samples[0].start, positionErrorTicks: edit.positionErrorTicks ?? 0n });
   }
   return { tracks };
 }

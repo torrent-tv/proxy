@@ -86,9 +86,24 @@ Seconds appear again only for rates, schedules and the answer.
 ## A piece is finished when its frames reach its cut
 
 A closed non-final fragment is reusable only if the end of its last frame, on
-every track, reaches its next declared cut less `SEGMENT_CUT_TIME_DELTA_SECONDS`,
+every track, reaches its muxer's cut less `SEGMENT_CUT_TIME_DELTA_SECONDS`,
 the delta the muxer is configured with. That is a fact of production, so no
-browser rule enters it, and the encoding decides it
+browser frame allowance is used to decide completeness. For explicit cuts the
+closure channel is CSV: its reference packet end has not lost the fraction of
+a movie tick that MP4's empty edit loses. The first reference packet's time is
+recovered from that end minus the first piece's exact sample span (the first
+CSV start is zero even after a seek), and is added to the relative cut times
+handed to FFmpeg. Comparisons use integer microseconds, as FFmpeg's segment
+muxer does. A stored piece without this closure reading carries the upper
+uncertainty of its empty edit, read from the movie and track timescales.
+
+The last frame must still reach the cut on every track. No playable media, a
+missing full frame, or a failed rename remains a publication failure. Such a
+failure stops the run, records that cause and releases its claimed interval;
+the existing repeated-start failure limit applies to subsequent attempts. A
+refused file cannot stay claimed while the encoder finishes the whole film.
+
+The encoding decides completeness
 (`encode/piece-completeness.js`): `EncodeRuns` judges a closed file before it is
 published, and judges a stored piece left by an earlier process when the
 forecast asks for it, taking a short one off the disk. The segment store keeps

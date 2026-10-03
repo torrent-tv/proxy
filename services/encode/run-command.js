@@ -711,6 +711,8 @@ export function buildRunCommand({
       // one — which never comes for the last piece of every run.
       "-segment_list",
       "pipe:3",
+      "-segment_list_type",
+      "csv",
       "-segment_list_flags",
       "+live",
       ...explicitTimes,
@@ -750,6 +752,6 @@ export function buildRunCommand({
       PLAYLIST_FILE_NAME
     );
   }
-  return { args, safeIndex, startSeconds, cutTimes };
+  return { args, safeIndex, inputIndex, startSeconds, cutTimes };
 
 }

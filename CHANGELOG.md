@@ -1,3 +1,8 @@
+## 2.89.7
+
+- **Fix**: Whole audio pieces are published on the muxer's reference clock. The segment closure channel reports packet ends before MP4 truncates empty edits, and a restarted run's first packet is recovered from its sample span rather than assumed to equal the requested seek. Cut comparisons use integer microseconds; stored pieces retain the precision of their movie timescale. Captured Home Assistant audio pieces 13 and 90, and the restarted piece 13, reproduce the failures and now pass; a missing AAC frame still fails.
+- **Fix**: A refused or failed closed-piece publication terminates its encoder run as a publication failure and releases its claim through the existing ending path. It no longer leaves an absent piece claimed while encoding the rest of the film, or misreports that refusal as input exhaustion; repeated fast failures use the existing retry limit.
+
 ## 2.89.6
 
 - **Chore**: Seventeen checks that failed on an unmodified checkout are brought in line with the system they check; no service code changes. Each followed a change of the system that its test did not follow:

@@ -67,7 +67,8 @@ test("a shared init preserves presentation times without adding composition dela
   const prepared = fmp4Format.prepareSegmentBytes(media, {
     startSeconds: 4.125, initBytes: shared, rawBytes: raw
   });
-  assert.deepEqual(readPresentationRanges(Buffer.concat([shared, prepared])), readPresentationRanges(raw));
+  assert.deepEqual(fmp4Format.servedMediaRanges(readPresentationRanges(Buffer.concat([shared, prepared])), { initBytes: null }),
+    fmp4Format.servedMediaRanges(readPresentationRanges(raw), { initBytes: null }));
   const times = [];
   walkBoxes(prepared, (type, start) => {
     if (type === "tfdt") times.push(Number(prepared.readBigUInt64BE(start + 4)));
@@ -88,7 +89,8 @@ test("a shared init first read after a seek also supports returning to the begin
   const prepared = fmp4Format.prepareSegmentBytes(media, {
     startSeconds: 0.083, initBytes: shared, rawBytes: raw
   });
-  assert.deepEqual(readPresentationRanges(Buffer.concat([shared, prepared])), readPresentationRanges(raw));
+  assert.deepEqual(fmp4Format.servedMediaRanges(readPresentationRanges(Buffer.concat([shared, prepared])), { initBytes: null }),
+    fmp4Format.servedMediaRanges(readPresentationRanges(raw), { initBytes: null }));
 });
 
 test("HLS fragments use the separate init and the same timeline translation as serving", (t) => {

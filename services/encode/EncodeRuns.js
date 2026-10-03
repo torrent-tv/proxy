@@ -15,7 +15,7 @@ import { ENCODE_EXIT } from "./encode-exit.js";
 import { EncodeRun } from "./EncodeRun.js";
 import { computeOutputDimensions } from "./args.js";
 import { buildRunCommand, trueStartOf } from "./run-command.js";
-import { cutOf, judgePiece } from "./piece-completeness.js";
+import { cutOf, judgePiece, originOf, productionOf } from "./piece-completeness.js";
 
 /**
  * @typedef {Object} SegmentFiles
@@ -346,7 +346,7 @@ export class EncodeRuns {
    * @param {number} index
    * @returns {object | null | false}
    */
-  #wholeClosedPiece(session, name, index) {
+  #wholeClosedPiece(session, name, index, production = null) {
     const format = session.segmentFormat;
     if (!format?.readMediaRanges || !Number.isInteger(index) || index < 0) {
       return null;
@@ -354,6 +354,7 @@ export class EncodeRuns {
     const address = session.outputKey ?? "";
     try {
       const mediaRanges = format.readMediaRanges(this.#host.segmentFiles.closedBytesOf(address, name));
+      if (mediaRanges && production) mediaRanges.production = production;
       const cut = cutOf(session.timeline, index);
       const { whole, throughSeconds } = judgePiece(format, mediaRanges, cut);
       if (!whole) {
@@ -851,7 +852,7 @@ export class EncodeRuns {
     this.#lastInputToken += 1;
     const inputToken = this.#lastInputToken;
     const inputs = this.#host.inputOf(session, inputToken);
-    const { args, safeIndex, startSeconds, cutTimes } = buildRunCommand({
+    const { args, safeIndex, inputIndex, startSeconds, cutTimes } = buildRunCommand({
       keyframes: session.keyframes,
       inputFile: inputs.inputFile,
       audioFile: inputs.audioFile,
@@ -897,6 +898,8 @@ export class EncodeRuns {
     // killed mid-piece leaving a partial file — is not a correctness problem
     // either, because the store serves a segment only once its closure is
     // proven, and it is cleared up when the run ends.
+    let originMicros = null;
+    const referenceKind = session.spec.video ? "vide" : "soun";
     const run = new EncodeRun({
       address: session.outputKey ?? session.id,
       encoder: this.#host.videoEncoder,
@@ -929,13 +932,22 @@ export class EncodeRuns {
       // Why this encoder exists, recorded with its argument list. It used to be
       // handed to a separate `start` call; there is no separate call now.
       because,
-      onClosed: (name) => {
+      onClosed: (name, timing) => {
         const index = session.segmentFormat.segmentIndexFromName(
           session.segmentFormat.servedNameOf?.(name) ?? name);
+        if (timing && originMicros === null && session.segmentFormat.readMediaRanges) {
+          const ranges = session.segmentFormat.readMediaRanges(
+            this.#host.segmentFiles.closedBytesOf(session.outputKey ?? "", name));
+          originMicros = originOf(ranges, timing.endMicros, referenceKind);
+        }
         if (Number.isInteger(index) && index < safeIndex) return null;
-        const mediaRanges = this.#wholeClosedPiece(session, name, index);
-        if (mediaRanges === false) return null;
-        return this.#host.segmentFiles.publish(session.outputKey ?? "", name, session.segmentFormat, { mediaRanges });
+        const production = productionOf(timing ? { ...timing, originMicros } : null,
+          cutTimes, index - inputIndex, referenceKind);
+        const mediaRanges = this.#wholeClosedPiece(session, name, index, production);
+        if (mediaRanges === false) throw new Error(`Closed piece #${index} could not be published: its media does not reach its muxer cut or is unreadable.`);
+        const published = this.#host.segmentFiles.publish(session.outputKey ?? "", name, session.segmentFormat, { mediaRanges });
+        if (!published) throw new Error(`Closed piece #${index} could not be published to the segment store.`);
+        return published;
       },
       onSpeedMeasured: () => this.#host.noteRunSpeedMeasured?.(session, run),
       onEnded: (ended) => {

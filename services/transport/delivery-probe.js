@@ -414,6 +414,7 @@ export function readProbeState(state) {
  * @returns {{
  *   attach: (sessionId: string, tag: string, label: string, channel: import('node-datachannel').DataChannel) => void,
  *   detach: (sessionId: string, channel: import('node-datachannel').DataChannel) => void,
+ *   forget: (sessionId: string) => void,
  *   noteEcho: (sessionId: string, echo: object) => void,
  *   dispose: () => void
  * }}
@@ -697,6 +698,24 @@ export function createDeliveryProbe({
           connections.delete(sessionId);
         }
       }
+    },
+
+    // The connection is gone, whether or not its channels said so. A peer
+    // connection closed moments after its channels opened gives no `onClosed`
+    // (field 2026-10-04: a trial connection closed 70 ms after opening was
+    // still probed hours later), so `detach` alone left a timer per such
+    // connection for the life of the process.
+    forget(sessionId) {
+      const connection = connections.get(sessionId);
+      if (!connection) {
+        return;
+      }
+      if (connection.timer !== null) {
+        clearInterval(connection.timer);
+        connection.timer = null;
+      }
+      connection.channels.clear();
+      connections.delete(sessionId);
     },
 
     noteEcho(sessionId, echo) {

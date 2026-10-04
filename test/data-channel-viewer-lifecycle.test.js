@@ -160,3 +160,34 @@ test("a viewer whose newest channel closed is reached on the older connection", 
   assert.equal(cuesOn(old.control), 1);
   assert.deepEqual(gone, [], "the trial connection still has its media channel");
 });
+
+test("a connection the transport no longer knows is not probed any more, though no channel said it closed", (t) => {
+  t.mock.timers.enable({ apis: ["setInterval", "setTimeout", "Date"] });
+  let alive = true;
+  const handler = createDataChannelHandler({
+    proxyPort: 9090,
+    getTransportSnapshot: () => (alive ? { bytesSent: 0, bytesReceived: 0 } : null),
+    onViewerGone: () => {}
+  });
+  const channels = ["proxy", "proxy-control", "proxy-fast"].map((label) => new FakeDataChannel(label));
+  for (const channel of channels) {
+    handler.handleChannel("trial-peer", channel);
+  }
+  const probes = () =>
+    channels.reduce((sum, channel) => sum + channel.messages.filter((message) => message.includes('"probe"')).length, 0);
+  t.mock.timers.tick(2_000);
+  assert.ok(probes() > 0, "an open connection is probed");
+
+  // Field 2026-10-04: the peer connection closed 70 ms after its channels
+  // opened, and none of them reported `onClosed`.
+  alive = false;
+  const advance = (ms) => {
+    // Second by second: the watcher compares the clock between its own ticks,
+    // and one long jump lands every tick on the same instant.
+    for (let elapsed = 0; elapsed < ms; elapsed += 1_000) t.mock.timers.tick(1_000);
+  };
+  advance(30_000);
+  const afterGone = probes();
+  advance(30_000);
+  assert.equal(probes(), afterGone, "nothing is sent on a connection that is gone");
+});

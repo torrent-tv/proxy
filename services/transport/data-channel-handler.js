@@ -761,6 +761,7 @@ export function createDataChannelHandler({
    * @returns {void}
    */
   function connectionGone(sessionId, because) {
+    deliveryProbe.forget(sessionId);
     const viewers = viewersOnConnection.get(sessionId);
     viewersOnConnection.delete(sessionId);
     if (!viewers || viewers.size === 0) {

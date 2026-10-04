@@ -76,3 +76,26 @@ test("a stream carrying metadata in brackets is still read", () => {
   `);
   assert.deepEqual(counts, { video: 1, audio: 1, subtitle: 0, other: 0 });
 });
+
+test("only the input's streams are counted, not the output ffmpeg describes after them", () => {
+  // The planner probes with `-i <file> -t 0.1 -f null -`, so the banner goes on
+  // to describe what it maps and the null output it writes. Counted whole, this
+  // field file (one picture, one soundtrack, one subtitle, one font) read as
+  // "2 video, 2 audio, 1 subtitle, 3 other" on 2026-10-04 — which would make a
+  // second soundtrack look present when it is not.
+  const banner = `
+Input #0, matroska,webm, from 'http://127.0.0.1:9090/stream?sourceKey=torrent%3A84acab5f&fileIndex=35':
+  Duration: 00:23:41.44, start: 0.000000, bitrate: 3195 kb/s
+  Stream #0:0: Video: h264 (High), yuv420p(progressive), 1920x1080 [SAR 1:1 DAR 16:9], 23.81 fps, 23.81 tbr, 1k tbn (default)
+  Stream #0:1(jpn): Audio: aac (LC), 44100 Hz, stereo, fltp (default)
+  Stream #0:2(eng): Subtitle: ass (ssa) (default)
+  Stream #0:3: Attachment: ttf
+Stream mapping:
+  Stream #0:0 -> #0:0 (h264 (native) -> wrapped_avframe (native))
+  Stream #0:1 -> #0:1 (aac (native) -> pcm_s16le (native))
+Output #0, null, to 'pipe:':
+  Stream #0:0: Video: wrapped_avframe, yuv420p(progressive), 1920x1080 [SAR 1:1 DAR 16:9], q=2-31, 200 kb/s, 23.81 fps, 23.81 tbn (default)
+  Stream #0:1(jpn): Audio: pcm_s16le, 44100 Hz, stereo, s16, 1411 kb/s (default)
+`;
+  assert.deepEqual(parseFfmpegStreamCounts(banner), { video: 1, audio: 1, subtitle: 1, other: 1 });
+});

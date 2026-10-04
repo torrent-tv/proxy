@@ -1,3 +1,7 @@
+## Unreleased
+
+- **Fix**: A failed run counts only the source's own streams. The planner probes with an output, so ffmpeg's banner goes on to list the streams it maps and writes, and those were counted too: a file with one picture, one soundtrack, one subtitle and one font read as `2 video, 2 audio, 1 subtitle, 3 other` in the field — enough to make a second soundtrack look present when it is not.
+
 ## 2.89.13
 
 - **Fix**: The proxy no longer stops answering everybody when one output is priced near zero. Asking how many encoders an output may run counted them one at a time until the machine was full, so the number of steps grew as the price shrank. On the stand on 2026-10-04 a soundtrack priced at 5.4e-14 s of machine per second of film held the main thread in that count for minutes, past 3.3 billion steps: no data channel was served, `/healthz` did not answer, and every viewer stopped. The count is now found by doubling and halving, in at most a few hundred steps whatever the price. The price itself is wrong and is not corrected here.

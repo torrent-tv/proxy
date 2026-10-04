@@ -141,7 +141,13 @@ export function parseFfmpegStreamCounts(stderrText) {
   if (typeof stderrText !== "string" || stderrText.length === 0) {
     return null;
   }
-  const lines = stderrText.match(/^\s*Stream #\d+:\d+.*$/gim);
+  // The source's streams only. A probe that writes somewhere — the planner's
+  // `-f null -` does — goes on to print `Stream mapping:` and `Output #0` with
+  // stream lines of their own, and counting those doubled the picture and the
+  // sound (field 2026-10-04: one soundtrack read as two).
+  const end = stderrText.search(/^(?:Stream mapping:|Output #\d+)/m);
+  const inputText = end >= 0 ? stderrText.slice(0, end) : stderrText;
+  const lines = inputText.match(/^\s*Stream #\d+:\d+.*$/gim);
   if (!lines || lines.length === 0) {
     return null;
   }

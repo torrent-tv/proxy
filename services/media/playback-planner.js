@@ -16,7 +16,8 @@ import {
   parseFfmpegBitDepth,
   parseFfmpegBitrateKbps,
   parseFfmpegVideoFps,
-  parseFfmpegHdr
+  parseFfmpegHdr,
+  parseFfmpegStreamCounts
 } from "./ffmpeg-banner.js";
 
 /** Audio codecs that browsers can decode natively without transcoding. */
@@ -912,7 +913,12 @@ export function createPlaybackPlanner({
           fps: videoFacts.fps,
           startTime: parseFfmpegStartTimeSeconds(probe.stderr),
           isHdr: videoFacts.isHdr,
-          bitDepth: videoFacts.bitDepth
+          bitDepth: videoFacts.bitDepth,
+          // What the source holds, from this same banner. A failed run reads it
+          // to say whose fault an output with no stream is, and a session takes
+          // its media info from this cache without probing again — so a field
+          // left out here was "not recorded" on every failure (field 2026-09-29).
+          streamCounts: parseFfmpegStreamCounts(probe.stderr)
         });
         // Warm the file-body start for the transcode session that follows.
         // Fire-and-forget: never delays the plan response.

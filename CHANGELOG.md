@@ -1,3 +1,7 @@
+## Unreleased
+
+- **Fix**: An audio track warm-up that is still being made answers `503` with `warming: true`. That answer means the track and how it is produced are recorded for the viewer; a `503` without it is a preparation that failed and recorded nothing. Until now the two were the same status, so a page restating its soundtrack after a reconnect could not tell whether the proxy had kept it.
+
 ## 2.89.9
 
 - **Fix**: The delivery probe judges a connection by how old the newest probe the browser has seen is, not by how long that probe took to arrive. The time it took is fixed once it has arrived, so on the wedge of 2026-09-28 it stayed 9 ms for a whole minute while the browser saw nothing after probe 1464, and every line read `flowing`; on idle healthy connections its 3 ms allowance left out the browser's own handling of the message, and `association-stopped` was printed for connections that delivered every probe. The age's allowance now also counts the probe interval, which `probeWedgeIsCertain` already counted. A real wedge is now named within about a second and reaches the packet witness.

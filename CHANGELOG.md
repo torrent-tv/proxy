@@ -1,4 +1,4 @@
-## Unreleased
+## 2.89.15
 
 - **Fix**: A torrent downloaded whole is no longer removed while something is still reading it. The sweep that writes whole files out and removes the torrent asked only who had stated a need, and a read whose pieces are all here waits for nothing and states nothing. On the stand on 2026-10-04 the torrent was removed under ffmpeg's own read of the film: the read ended with "Piece store is closed" 277 MB in, ffmpeg reported `Stream ends prematurely`, the copied picture lost 2.6 s, and the page refused to start with "Prepared media contains a timestamp gap" (torrent-tv/meta#105). Open reads now count as use.
 

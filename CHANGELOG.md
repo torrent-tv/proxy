@@ -1,3 +1,7 @@
+## Unreleased
+
+- **Fix**: A connection that is gone is no longer probed. The delivery probe stopped only when a data channel reported `onClosed`, and a peer connection closed moments after its channels opened reports nothing: on the stand on 2026-10-04 a trial connection the page closed 70 ms after opening was still sent probes twice a second hours later, one timer left behind per such connection. When the transport watcher finds the connection gone, its probes now end with it.
+
 ## 2.89.11
 
 - **Fix**: A failed encoder run says what the source holds again. The line `this run asked for …, and the source holds N video, N audio, N subtitle` was meant to tell an output with no stream (the source's fault) from a track index past the end (ours), but every field failure printed `what the source holds was not recorded`: a session takes its media info from the playback planner's cache, and the planner left the stream counts out of it although it parses the same ffmpeg banner. They are cached with the rest now.

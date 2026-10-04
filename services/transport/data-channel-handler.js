@@ -688,30 +688,71 @@ export function createDataChannelHandler({
   sendChunkBytes = 0
 }) {
   /**
-   * Who is on each connection, by WebRTC session id.
+   * Who is on each connection, by WebRTC session id, and the channel each of
+   * them named themselves on — null once that channel has closed.
    *
    * One connection carries one page, and a page holds one name per film it has
    * open — so this is normally one id, and more than one only where a page has
    * opened more than one.
    *
-   * @type {Map<string, Set<string>>}
+   * ONE PERSON MAY BE ON TWO CONNECTIONS AT ONCE, and this is the only record of
+   * it. The page raises a second connection before it lets go of the first
+   * when the first stops delivering, and it may then keep the first and close
+   * the second (it delivered again) or the reverse. The relation used to be
+   * held twice — this map and a second one naming each viewer's NEWEST
+   * connection — and the second could only point at one: a viewer named on a
+   * trial connection that was then closed was released while still watching
+   * through the old one. Both questions below are asked of this map instead.
+   *
+   * @type {Map<string, Map<string, DataChannel | null>>}
    */
   const viewersOnConnection = new Map();
-  /**
-   * The newest connection currently carrying each viewer's identity.
-   *
-   * A reconnect can open its channels before the old connection finishes
-   * closing. The old connection must not release a viewer who has already
-   * identified themselves on the replacement.
-   *
-   * @type {Map<string, string>}
-   */
-  const connectionOfViewer = new Map();
 
   /**
-   * Everyone on this connection has gone, because the connection has.
+   * The connections a viewer is still named on, oldest first.
    *
-   * Said once per connection: a second call after the set is emptied must not
+   * @param {string} consumerId
+   * @returns {string[]}
+   */
+  function connectionsCarrying(consumerId) {
+    const carrying = [];
+    for (const [sessionId, viewers] of viewersOnConnection) {
+      if (viewers.has(consumerId)) {
+        carrying.push(sessionId);
+      }
+    }
+    return carrying;
+  }
+
+  /**
+   * The channel a viewer can be reached on right now: the one they named
+   * themselves on, on the newest connection that still carries them with that
+   * channel open.
+   *
+   * The transport knows a NAME and nothing else about a viewer: what it means,
+   * who holds it and what they are watching are somebody else's facts. Keeping
+   * only "this name is reachable here" is what lets a subscription made once
+   * outlive the channel it was made on — a reconnect, and a rotation done on
+   * purpose, both just add a connection to the map.
+   *
+   * @param {string} consumerId
+   * @returns {DataChannel | null}
+   */
+  function channelOfViewer(consumerId) {
+    let reachable = null;
+    for (const viewers of viewersOnConnection.values()) {
+      const channel = viewers.get(consumerId);
+      if (channel) {
+        reachable = channel;
+      }
+    }
+    return reachable;
+  }
+
+  /**
+   * This connection has gone, and with it everyone it was the last to carry.
+   *
+   * Said once per connection: a second call after the entry is removed must not
    * announce departures a second time, and the two detectors below — the close
    * event and the transport's own counters — can both fire for one death.
    *
@@ -725,11 +766,15 @@ export function createDataChannelHandler({
     if (!viewers || viewers.size === 0) {
       return;
     }
-    for (const consumerId of viewers) {
-      if (connectionOfViewer.get(consumerId) !== sessionId) {
+    for (const consumerId of viewers.keys()) {
+      const still = connectionsCarrying(consumerId);
+      if (still.length > 0) {
+        onLog?.(
+          `[dc] Session ${sessionId.slice(0, 8)}: viewer ${consumerId} stays — still on ` +
+            `${still.map((id) => id.slice(0, 8)).join(", ")} (${because})`
+        );
         continue;
       }
-      connectionOfViewer.delete(consumerId);
       onLog?.(`[dc] Session ${sessionId.slice(0, 8)}: viewer ${consumerId} left — ${because}`);
       try {
         onViewerGone(consumerId, because);
@@ -738,30 +783,20 @@ export function createDataChannelHandler({
       }
     }
   }
-  /**
-   * The channel each viewer is reachable on right now, by the name the far end
-   * presented when it opened.
-   *
-   * The transport knows a NAME and nothing else about a viewer: what it means,
-   * who holds it and what they are watching are somebody else's facts. Keeping
-   * only "this name is reachable here" is what lets a subscription made once
-   * outlive the channel it was made on — a reconnect, and a rotation done on
-   * purpose, both just rewrite this entry.
-   *
-   * @type {Map<string, DataChannel>}
-   */
-  const channelOfViewer = new Map();
 
   /**
-   * Forget every name that was reachable on this channel.
+   * This channel has closed: nobody can be reached on it any more. Who is on
+   * the connection does not change — that ends with the connection.
    *
    * @param {DataChannel} channel
    * @returns {void}
    */
   function forgetChannel(channel) {
-    for (const [consumerId, on] of channelOfViewer) {
-      if (on === channel) {
-        channelOfViewer.delete(consumerId);
+    for (const viewers of viewersOnConnection.values()) {
+      for (const [consumerId, on] of viewers) {
+        if (on === channel) {
+          viewers.set(consumerId, null);
+        }
       }
     }
   }
@@ -795,7 +830,7 @@ export function createDataChannelHandler({
     });
     let sent = 0;
     for (const consumerId of names) {
-      const channel = channelOfViewer.get(consumerId);
+      const channel = channelOfViewer(consumerId);
       if (!channel) {
         // Subscribed but not reachable this instant — between connections, or
         // rotating. Nothing is dropped: they are still subscribed, and the walk
@@ -1011,12 +1046,10 @@ export function createDataChannelHandler({
       // one person two the first time that happened, each with their own
       // position.
       if (message.type === "viewer" && typeof message.consumerId === "string" && message.consumerId) {
-        const known = viewersOnConnection.get(sessionId) ?? new Set();
+        const known = viewersOnConnection.get(sessionId) ?? new Map();
         const isNew = !known.has(message.consumerId);
-        known.add(message.consumerId);
+        known.set(message.consumerId, channel);
         viewersOnConnection.set(sessionId, known);
-        connectionOfViewer.set(message.consumerId, sessionId);
-        channelOfViewer.set(message.consumerId, channel);
         if (isNew) {
           log(`[dc] Session ${tag}: viewer ${message.consumerId} is on this connection`);
         }

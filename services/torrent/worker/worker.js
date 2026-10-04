@@ -34,6 +34,7 @@ import { heldRangesOf, ownsItsMemory, readHeldBytes } from "./held-bytes.js";
 import { CompletedFiles, completedFilesRoot } from "../../storage/files/CompletedFiles.js";
 import { pieceFromWholeFiles, pieceIsInWholeFiles } from "../../storage/files/piece-from-whole-file.js";
 import { Command, Event } from "./protocol.js";
+import { filesInUse } from "./files-in-use.js";
 import { startMemoryReport, WORKER_MEMORY_SAMPLE_MS } from "../../storage/memory-report.js";
 import { forwardLogsTo, logger } from "../../../utils/logger.js";
 
@@ -94,6 +95,14 @@ const torrentsByKey = new Map();
 const sourceRecipes = new Map();
 /** In-flight reads, so a cancel can stop one mid-body. */
 const readsById = new Map();
+/**
+ * What each in-flight read is reading. A read whose pieces are all here waits
+ * for nothing and so states nothing in the demand register; this is how the
+ * thread knows it is still open.
+ *
+ * @type {Map<number, { torrent: object, fileIndex: number }>}
+ */
+const openReads = new Map();
 
 /**
  * Shorthand for this file. The same path as `logger.info` anywhere else in the
@@ -257,6 +266,7 @@ async function streamRange({ id, sourceKey, fileIndex, start, end, windowBytes }
 
   const sender = createSendStream({ port: parentPort, requestId: id });
   readsById.set(id, sender);
+  openReads.set(id, { torrent, fileIndex });
 
   const rangeStart = start ?? 0;
   const rangeEnd = end ?? file.length - 1;
@@ -295,6 +305,7 @@ async function streamRange({ id, sourceKey, fileIndex, start, end, windowBytes }
     throw error;
   } finally {
     readsById.delete(id);
+    openReads.delete(id);
     // Any fragment still awaiting confirmation will never get one now; settling
     // it here releases its pin rather than leaking a held slot.
     settleFragment(id);
@@ -947,18 +958,12 @@ async function keepWholeFiles() {
     if (!infoHash || !Array.isArray(torrent.files)) {
       continue;
     }
-    // What anybody wants of this torrent. A file something is stated for is a
-    // file somebody may be reading, and this is the same list the reader counts
-    // used to give.
-    const wanted = new Set(
-      demandFor(torrent).register.windows()
-        .filter((window) =>
-          !String(window.claimant).startsWith("file-edges:") &&
-          !String(window.claimant).startsWith("torrent-fill:") &&
-          !String(window.claimant).startsWith("background-fill:")
-        )
-        .map((window) => window.fileIndex)
-    );
+    // What anybody wants of this torrent or is reading from it now.
+    const wanted = filesInUse({
+      torrent,
+      windows: demandFor(torrent).register.windows(),
+      openReads: openReads.values()
+    });
     for (const [fileIndex, file] of torrent.files.entries()) {
       const key = `${infoHash}/${fileIndex}`;
       if (file?.done !== true || completedFiles.find(infoHash, fileIndex) || beingKept.has(key)) {

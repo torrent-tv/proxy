@@ -1,4 +1,4 @@
-## Unreleased
+## 2.89.12
 
 - **Fix**: A connection that is gone is no longer probed. The delivery probe stopped only when a data channel reported `onClosed`, and a peer connection closed moments after its channels opened reports nothing: on the stand on 2026-10-04 a trial connection the page closed 70 ms after opening was still sent probes twice a second hours later, one timer left behind per such connection. When the transport watcher finds the connection gone, its probes now end with it.
 

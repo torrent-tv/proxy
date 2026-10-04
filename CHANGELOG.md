@@ -1,5 +1,7 @@
 ## 2.89.10
 
+- **Fix**: A failed encoder run says what the source holds again. The line `this run asked for …, and the source holds N video, N audio, N subtitle` was meant to tell an output with no stream (the source's fault) from a track index past the end (ours), but every field failure printed `what the source holds was not recorded`: a session takes its media info from the playback planner's cache, and the planner left the stream counts out of it although it parses the same ffmpeg banner. They are cached with the rest now.
+
 - **Fix**: An audio track warm-up that is still being made answers `503` with `warming: true`. That answer means the track and how it is produced are recorded for the viewer; a `503` without it is a preparation that failed and recorded nothing. Until now the two were the same status, so a page restating its soundtrack after a reconnect could not tell whether the proxy had kept it.
 
 ## 2.89.9

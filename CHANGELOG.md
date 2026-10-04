@@ -1,3 +1,7 @@
+## Unreleased
+
+- **Fix**: A torrent downloaded whole is no longer removed while something is still reading it. The sweep that writes whole files out and removes the torrent asked only who had stated a need, and a read whose pieces are all here waits for nothing and states nothing. On the stand on 2026-10-04 the torrent was removed under ffmpeg's own read of the film: the read ended with "Piece store is closed" 277 MB in, ffmpeg reported `Stream ends prematurely`, the copied picture lost 2.6 s, and the page refused to start with "Prepared media contains a timestamp gap" (torrent-tv/meta#105). Open reads now count as use.
+
 ## 2.89.14
 
 - **Fix**: A failed run counts only the source's own streams. The planner probes with an output, so ffmpeg's banner goes on to list the streams it maps and writes, and those were counted too: a file with one picture, one soundtrack, one subtitle and one font read as `2 video, 2 audio, 1 subtitle, 3 other` in the field — enough to make a second soundtrack look present when it is not.

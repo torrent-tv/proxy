@@ -356,17 +356,37 @@ export class EncodeAdmission {
       return { runs: Number.POSITIVE_INFINITY, because: "the output is not priced" };
     }
     const others = this.#occupied(address);
+    const fits = (count) => this.#speedAt(others.costSec + EncodeAdmission.#added(load, others.files, count)) >= 1;
     let runs = 0;
-    for (;;) {
-      const next = runs + 1;
-      if (this.#speedAt(others.costSec + EncodeAdmission.#added(load, others.files, next)) < 1) {
-        break;
-      }
-      runs = next;
+    if (fits(1)) {
       if (!(load.costSec > 0)) {
         // Free to run: the per-output limit is the only bound.
         return { runs: Number.POSITIVE_INFINITY, because: "it costs nothing measurable" };
       }
+      // The largest count that still fits, found by doubling and halving: the
+      // speed only falls as encoders are added. Counting up one at a time took
+      // as many steps as the price is small — field 2026-10-04, a soundtrack
+      // priced at 5.4e-14 s per film second kept the main thread in this loop
+      // for minutes, past 3.3 billion steps, and every viewer of the proxy
+      // stopped receiving.
+      let low = 1;
+      let high = 2;
+      while (fits(high)) {
+        low = high;
+        high *= 2;
+      }
+      for (;;) {
+        const middle = Math.floor((low + high) / 2);
+        if (middle === low || middle === high) {
+          break;
+        }
+        if (fits(middle)) {
+          low = middle;
+        } else {
+          high = middle;
+        }
+      }
+      runs = low;
     }
     if (runs >= floor) {
       return { runs, because: "the machine" };

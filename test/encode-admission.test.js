@@ -144,3 +144,27 @@ test("unpriced occupied work is neither spare pool headroom nor capacity for ano
   assert.equal(answer.admitted, false);
   assert.match(answer.reason, /capacity is unknown/);
 });
+
+test("a near-free output is answered at once, whatever its price", () => {
+  // Field 2026-10-04: a soundtrack priced at 5.4e-14 s per film second kept
+  // the main thread counting encoders one at a time for minutes.
+  const { admission } = machine({ costs: { sound: 5.36680075607109e-14 }, share: 0.6 });
+  const started = Date.now();
+  const { runs } = admission.placesFor("sound", 0);
+  assert.ok(Date.now() - started < 1_000, "answered without counting one at a time");
+  assert.ok(runs > 1e12 && Number.isFinite(runs), `as many as fit: ${runs}`);
+});
+
+test("the count is the largest that keeps every output at realtime", () => {
+  for (const cost of [0.5, 0.1, 0.03, 0.007, 0.0011]) {
+    for (const share of [null, 1, 0.37]) {
+      const { admission } = machine({ costs: { a: cost, b: PICTURE_1080 / 4 }, running: { b: 1 }, share });
+      const usable = share ?? 1;
+      let expected = 0;
+      while (usable / (PICTURE_1080 / 4 + (expected + 1) * cost) >= 1) {
+        expected += 1;
+      }
+      assert.equal(admission.placesFor("a", 0).runs, Math.max(expected, 0), `cost ${cost}, share ${share}`);
+    }
+  }
+});

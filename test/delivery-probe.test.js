@@ -90,10 +90,11 @@ test("a channel that has never reported counts as behind, not as unknown", () =>
 
 test("the allowance is the queue's own drain time, not a chosen number", () => {
   // 8 MB queued at 8 MB/s is one second of draining; probes go twice a second,
-  // so two of them may legitimately be outstanding, plus the round trip.
+  // so two of them may legitimately be outstanding, plus the one sent after
+  // the peer composed its report, plus the round trip.
   assert.equal(
     allowedGap({ queuedBytes: 8 * 1024 * 1024, bytesPerSecond: 8 * 1024 * 1024, rttMs: 0 }),
-    Math.ceil(1000 / PROBE_INTERVAL_MS)
+    Math.ceil(1000 / PROBE_INTERVAL_MS) + 1
   );
   // An empty queue still allows the one probe that is always in flight.
   assert.equal(allowedGap({ queuedBytes: 0, bytesPerSecond: 8 * 1024 * 1024, rttMs: 0 }), 1);
@@ -132,13 +133,14 @@ test("a burst big enough to explain the lag is not called a stopped association"
 test("the peer's own answering cadence counts toward the allowance", () => {
   // Field case 2026-08-27: queues empty, 3.4 MB/s crossing, tab hidden so the
   // browser echoed about once a second. Without the peer's cadence the
-  // allowance is one probe and every other line read `association-stopped`.
+  // allowance is the probe interval and the crossing — two probes — and every
+  // other line read `association-stopped`.
   const withoutCadence = allowedGap({
     queuedBytes: 0,
     bytesPerSecond: 3.4 * 1024 * 1024,
     rttMs: 9
   });
-  assert.equal(withoutCadence, 1);
+  assert.equal(withoutCadence, 2);
   const withCadence = allowedGap({
     queuedBytes: 0,
     bytesPerSecond: 3.4 * 1024 * 1024,
@@ -227,7 +229,8 @@ test("a frozen tab's own event-loop delay counts toward the allowance", () => {
   // `flowing`. Nothing had stopped: the browser simply could not run the timer
   // that answers a probe.
   // The line printed `gap 12 of 11`; the queue was empty and the round trip
-  // 162 ms, so the cadence term is whatever makes the allowance 11.
+  // 162 ms, so the cadence term is whatever made the allowance 11. The probe
+  // interval, added to the allowance on 2026-10-04, makes the same figures 12.
   const measured = {
     queuedBytes: 0,
     bytesPerSecond: 300,
@@ -236,7 +239,7 @@ test("a frozen tab's own event-loop delay counts toward the allowance", () => {
   };
   const withoutLag = allowedGap(measured);
   const withLag = allowedGap({ ...measured, peerLoopLagMs: 1881 });
-  assert.equal(withoutLag, 11, `the field allowance was 11, not ${withoutLag}`);
+  assert.equal(withoutLag, 12, `11 in the field plus the probe interval, not ${withoutLag}`);
   assert.ok(withLag > 12, `a gap of 12 must fit inside ${withLag}`);
   const allowed = Object.fromEntries(ALL.map((label) => [label, withLag]));
   const { verdict, detail } = readProbeState(
@@ -358,34 +361,20 @@ test("with no send time recorded the count still decides", () => {
   assert.equal(verdict, "association-stopped");
 });
 
-test("the measured one-way time is preferred over the age of the report", () => {
-  // With the clocks reconciled, the proxy knows how long the probe itself took
-  // to reach the peer. The age of the newest reported probe is the same thing
-  // plus the peer's reporting cadence and the way back — so where both are
-  // known, the measurement wins and its allowance carries neither.
+test("a one-way delay of a probe that arrived says nothing about one that did not", () => {
+  // Field 2026-09-28, 10b53a7e: probe 1464 had taken 9 ms, and for the whole
+  // wedge it stayed the newest the peer had seen. A one-way figure in the
+  // state is not read: the age of that probe decides.
   const { verdict } = readProbeState(
     state(
-      { proxy: 40, "proxy-control": 41, "proxy-fast": 42 },
+      { proxy: 1464, "proxy-control": 1464, "proxy-fast": 1464 },
       {
-        // The age says far behind against its allowance...
-        behindMs: { proxy: 9000, "proxy-control": 9000, "proxy-fast": 9000 },
-        allowedWaitMs: { proxy: 2000, "proxy-control": 2000, "proxy-fast": 2000 },
-        // ...while the probe itself took 300 ms of the 900 its queue may take.
-        oneWayMs: { proxy: 300, "proxy-control": 300, "proxy-fast": 300 },
-        allowedOneWayMs: { proxy: 900, "proxy-control": 900, "proxy-fast": 900 }
-      }
-    )
-  );
-  assert.equal(verdict, "flowing");
-});
-
-test("a one-way time past what the queue can account for is the association", () => {
-  const { verdict } = readProbeState(
-    state(
-      { proxy: 40, "proxy-control": 41, "proxy-fast": 42 },
-      {
-        oneWayMs: { proxy: 12_000, "proxy-control": 12_000, "proxy-fast": 12_000 },
-        allowedOneWayMs: { proxy: 900, "proxy-control": 900, "proxy-fast": 900 }
+        seq: 1526,
+        behindMs: { proxy: 30_600, "proxy-control": 30_600, "proxy-fast": 30_600 },
+        allowedWaitMs: { proxy: 1029, "proxy-control": 1029, "proxy-fast": 1029 },
+        oneWayMs: { proxy: 9, "proxy-control": 9, "proxy-fast": 9 },
+        allowedOneWayMs: { proxy: 13, "proxy-control": 13, "proxy-fast": 13 },
+        peerBytesAdvancing: false
       }
     )
   );

@@ -90,6 +90,12 @@ export async function handleTranscodeAudioWarmGet(req, reply, { renditions, serv
   }
   // Still being produced. The caller may switch anyway — it will wait where it
   // would have waited before — or ask again.
+  //
+  // `warming: true` says the track and how it is produced ARE recorded for this
+  // viewer — `prepareAudioTrack` records them before the wait — which the
+  // status alone cannot say: the 503 above is a preparation that recorded
+  // nothing. A page restating its soundtrack after a reconnect needs to know
+  // which of the two it got.
   reply.header("Retry-After", "1");
-  return reply.code(503).send({ error: "The audio track is still warming up." });
+  return reply.code(503).send({ error: "The audio track is still warming up.", warming: true });
 }

@@ -1,3 +1,8 @@
+## Unreleased
+
+- **Fix**: The delivery probe judges a connection by how old the newest probe the browser has seen is, not by how long that probe took to arrive. The time it took is fixed once it has arrived, so on the wedge of 2026-09-28 it stayed 9 ms for a whole minute while the browser saw nothing after probe 1464, and every line read `flowing`; on idle healthy connections its 3 ms allowance left out the browser's own handling of the message, and `association-stopped` was printed for connections that delivered every probe. The age's allowance now also counts the probe interval, which `probeWedgeIsCertain` already counted. A real wedge is now named within about a second and reaches the packet witness.
+- **Fix**: A viewer named on two connections at once stays until the last of them closes. The page raises a second connection before it lets go of one that stopped delivering, and may then close the second instead; the proxy kept only the newest connection per viewer, so closing that trial connection released a viewer still watching through the old one, and their subtitle pushes went to a closed channel. Pushes now go to the newest connection that still carries the viewer.
+
 ## 2.89.8
 
 - **Chore**: Update dependencies: @fastify/cors 11.2.0 → 11.3.0, @fastify/helmet 13.0.2 → 13.1.1, @fastify/static 10.1.2 → 10.1.5, parse-torrent 11.0.23 → 11.0.24, werift 0.24.2 → 0.24.4, ws 8.21.1 → 8.22.0, @biomejs/biome 2.5.7 → 2.5.15; 78 package(s) changed in the lock file, 15 removed; 1 known vulnerability resolved.

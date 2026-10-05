@@ -16,7 +16,7 @@
  * append, and an empty picture for six minutes (field 2026-09-05).
  */
 
-import { emptyMap, mapForViewer, mergeMaps, runsOf } from "./PriorityMap.js";
+import { emptyMap, mapForViewer, mergeMaps, runsOf, pauseCoefficient } from "./PriorityMap.js";
 
 export class PriorityOrchestrator {
   /** Where the map goes once it is built. @type {(published: object) => void} */
@@ -66,6 +66,7 @@ export class PriorityOrchestrator {
   /** Whether this output is what that person is consuming, as opposed to one
    * they merely hold a record on. @type {(session: object, viewer: object) => boolean} */
   #watchedBy;
+  #urgentReadyFor;
 
   /**
    * Who watches an output is this component's own registry, handed in as the
@@ -85,7 +86,7 @@ export class PriorityOrchestrator {
    *   this layer does not know; absent, every registered viewer counts, and then
    *   the per-output map says the same as the per-file one.
    */
-  constructor({ publish, viewers, allowanceFor, watchedBy }) {
+  constructor({ publish, viewers, allowanceFor, watchedBy, urgentReadyFor }) {
     if (typeof viewers?.forOutput !== "function") {
       throw new TypeError("PriorityOrchestrator needs the viewer registry");
     }
@@ -93,6 +94,16 @@ export class PriorityOrchestrator {
     this.#viewers = viewers;
     this.#allowanceFor = typeof allowanceFor === "function" ? allowanceFor : () => 0;
     this.#watchedBy = typeof watchedBy === "function" ? watchedBy : () => true;
+    this.#urgentReadyFor = typeof urgentReadyFor === "function" ? urgentReadyFor : () => false;
+  }
+
+  /** Apply the viewer's same pause attenuation to related source preparation. */
+  priorityFor(session, viewer, priority, viewerCount, now = Date.now()) {
+    const allowanceSeconds = this.#allowanceFor(session);
+    const coefficient = pauseCoefficient({ playing: viewer.playing || viewer.waiting, viewerCount,
+      pauseSeconds: viewer.pausedAt === null ? 0 : (now - viewer.pausedAt) / 1000, allowanceSeconds,
+      urgentReady: viewer.pausedAt !== null && this.#urgentReadyFor(session, viewer, allowanceSeconds, now) });
+    return Math.max(1, 1 + Math.floor((priority - 1) * coefficient));
   }
 
   /**
@@ -110,17 +121,21 @@ export class PriorityOrchestrator {
    *   nobody is watching or the film's length is unknown, which says the same as
    *   a map with nothing in it.
    */
-  #mapFrom({ durationSeconds, allowanceSeconds, viewers }) {
+  #mapFrom({ durationSeconds, allowanceSeconds, viewers, viewerCount }) {
     if (!(durationSeconds > 0) || !(viewers?.length > 0)) {
       return emptyMap(0);
     }
+    const count = viewerCount ?? new Set(viewers.map((one, index) => one.id ?? index)).size;
     return mergeMaps(
       viewers.map((viewer) =>
         mapForViewer({
           atSeconds: viewer.atSeconds,
           durationSeconds,
           allowanceSeconds,
-          playing: viewer.playing !== false
+          playing: viewer.playing !== false,
+          pauseSeconds: viewer.pauseSeconds ?? 0,
+          urgentReady: viewer.urgentReady === true,
+          viewerCount: count
         })
       )
     );
@@ -139,7 +154,7 @@ export class PriorityOrchestrator {
    * @returns {import("./PriorityMap.js").PriorityMap} One number per second of
    *   film, merged over everyone watching it.
    */
-  build({ sourceKey, fileIndex, durationSeconds, allowanceSeconds, viewers }) {
+  build({ sourceKey, fileIndex, durationSeconds, allowanceSeconds, viewers, demandKey = null }) {
     const map = this.#mapFrom({ durationSeconds, allowanceSeconds, viewers });
     const key = `${sourceKey}:${fileIndex}`;
     this.#maps.set(key, map);
@@ -148,7 +163,7 @@ export class PriorityOrchestrator {
     // make it do that several times a second. Compared as stretches rather than
     // second by second, which is the same comparison over far fewer values.
     const zones = runsOf(map);
-    const shape = JSON.stringify(zones);
+    const shape = JSON.stringify({ zones, demandKey });
     if (this.#last.get(key)?.shape !== shape) {
       // The length is remembered with the shape, so that a file whose viewers
       // have all gone can still be spoken for: what is published then is the
@@ -196,7 +211,12 @@ export class PriorityOrchestrator {
     const byOutput = new Map();
     for (const sessions of sessionGroups) {
       for (const session of sessions) {
-        const key = `${session.sourceKey}:${session.fileIndex}`;
+        const sourceKey = session.file?.sourceKey;
+        const fileIndex = session.file?.fileIndex;
+        if (typeof sourceKey !== "string" || !sourceKey || !Number.isSafeInteger(fileIndex) || fileIndex < 0) {
+          throw new TypeError("A priority map requires its output file's source and file index.");
+        }
+        const key = `${sourceKey}:${fileIndex}`;
         const durationSeconds = Number(session.file?.durationSeconds) || 0;
         // The first band is as wide as an interruption this file has actually
         // shown on this swarm, never a chosen number.
@@ -204,11 +224,12 @@ export class PriorityOrchestrator {
         let held = byFile.get(key);
         if (!held) {
           held = {
-            sourceKey: session.sourceKey,
-            fileIndex: session.fileIndex,
+            sourceKey,
+            fileIndex,
             durationSeconds,
             allowanceSeconds,
-            viewers: []
+            viewers: [],
+            demandKey: []
           };
           byFile.set(key, held);
         }
@@ -219,15 +240,21 @@ export class PriorityOrchestrator {
         const address = session.outputKey ?? "";
         let mine = byOutput.get(address);
         if (!mine) {
-          mine = { durationSeconds, allowanceSeconds, viewers: [] };
+          mine = { durationSeconds, allowanceSeconds, viewers: [], fileKey: key };
           byOutput.set(address, mine);
         }
         for (const viewer of this.#viewers.forOutput(session).values()) {
           if (!viewer.isPresent()) {
             continue;
           }
+          held.demandKey.push([session.outputKey, viewer.id, viewer.audio?.trackIndex,
+            viewer.audio?.transcode, viewer.activeVariantId, viewer.warmingVariantId,
+            viewer.warmingAudioId, this.#watchedBy(session, viewer)]);
           const stated = {
+            id: viewer.id,
             atSeconds: viewer.positionSeconds(now) ?? 0,
+            pauseSeconds: viewer.pausedAt == null ? 0 : Math.max(0, (now - viewer.pausedAt) / 1000),
+            urgentReady: viewer.pausedAt != null && this.#urgentReadyFor(session, viewer, allowanceSeconds, now),
             // WATCHING OR WAITING, not merely playing. Three states reach this
             // one question: a viewer whose picture is advancing, a viewer
             // blocked on material we owe them, and a viewer who stopped it
@@ -236,9 +263,9 @@ export class PriorityOrchestrator {
             // on screen has its timers throttled and asks for nothing, which is
             // indistinguishable from a full cushion, so it is not consuming
             // either — told apart on the page, folded into one question here.
-            playing: typeof viewer.wantsFilmNow === "function"
+            playing: viewer.pausedAt == null && (typeof viewer.wantsFilmNow === "function"
               ? viewer.wantsFilmNow()
-              : viewer.playing === true || viewer.waiting === true
+              : viewer.playing === true || viewer.waiting === true)
           };
           held.viewers.push(stated);
           if (this.#watchedBy(session, viewer)) {
@@ -280,6 +307,8 @@ export class PriorityOrchestrator {
       }
     }
     for (const [address, one] of byOutput) {
+      // Competition is per file, even when two viewers use different outputs.
+      one.viewerCount = new Set((byFile.get(one.fileKey)?.viewers ?? []).map((viewer, index) => viewer.id ?? index)).size;
       this.#byOutput.set(address, this.#mapFrom(one));
     }
   }

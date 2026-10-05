@@ -4,7 +4,7 @@
  * A Container knows how to read its own format's track table and index.
  * Concrete containers (MatroskaContainer, Mp4Container, AviContainer) implement
  * spec-specific parsing. All byte access goes through `readRange(start,end)` so
- * the class works over torrent piece windows.
+ * the class reads only bytes already held for the source.
  *
  * Spec refs:
  *  - Matroska RFC 9559 §5: EBML, Segment, SeekHead, Tracks, Cues, Clusters
@@ -29,7 +29,7 @@ import { strictReader } from "./unavailable.js";
 
 export class Container {
   /**
-   * One reader, the one that fetches what is missing, and one container per
+   * One strict available-byte reader and one container per
    * file — the one `ContainerOrchestrator` keeps.
    *
    * `readRange` is made strict here: it answers with every byte asked for or
@@ -53,10 +53,11 @@ export class Container {
    * @param {string} [params.label]
    * @param {number} [params.portionBytes]
    */
-  constructor({ readRange, fileSize, label = "", portionBytes } = {}) {
+  constructor({ readRange, fileSize, label = "", portionBytes, packetMemory } = {}) {
     this.fileSize = fileSize;
     this.readRange = typeof readRange === "function" ? strictReader(readRange, fileSize) : readRange;
     this.label = label;
+    this.packetMemory = packetMemory;
     this.portionBytes = Number.isFinite(portionBytes) && portionBytes > 0 ? portionBytes : Number.POSITIVE_INFINITY;
   }
 
@@ -359,6 +360,9 @@ export class Container {
   get formatName() {
     return "unknown";
   }
+
+  /** Retained binary packet storage; this excludes declarations and JS heap. */
+  packetIndexBytes() { return 0; }
 
   /** Whether `head` (first bytes) looks like this container. */
   static detect(_head) {

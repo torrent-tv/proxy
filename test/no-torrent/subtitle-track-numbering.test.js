@@ -273,11 +273,10 @@ test("two walks of one file at the same time read each cluster once", async () =
   assert.equal(first.coveredClusters, 1, "the cluster the table names was walked");
   assert.equal(second.coveredClusters, 1, "and the second track sees the same walk, not its own");
   const clusterReads = reads.filter((range) => range.start === clusterAt);
-  assert.equal(
-    clusterReads.length,
-    2,
-    "one probe of the cluster's header and one read of its body — not two of each"
-  );
+  assert.deepEqual(clusterReads.slice(0, 3).map(range => range.end - range.start + 1), [1, 5, 8],
+    "one structural header read: leading byte, element id and size prefix, complete header");
+  assert.equal(clusterReads.length, 4, "one header inspection and one body read, shared by both tracks");
+  assert.equal(clusterReads[3].end, file.length - 1, "the cluster body is read exactly once");
   forgetSubtitles(sourceKey);
 });
 

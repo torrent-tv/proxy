@@ -192,6 +192,8 @@ export class Viewer {
      * @type {Set<string>}
      */
     this.outputs = new Set();
+    /** Source selection exists before any prepared output. */
+    this.source = null;
     /**
      * Which output answers THIS viewer, and for how long that stands.
      *
@@ -225,6 +227,7 @@ export class Viewer {
      * @type {Set<string>}
      */
     this.wantsCuesFor = new Set();
+    this.subtitle = null;
     // WHETHER THE PICTURE IS MOVING, and separately WHETHER THIS VIEWER IS
     // BLOCKED ON US. Two booleans, because there are three states and one
     // boolean cannot hold them:
@@ -254,6 +257,8 @@ export class Viewer {
     // the instant they arrive, without the position ever being invented.
     this.playing = false;
     this.waiting = true;
+    /** When explicit paused state began; waiting for media is not a pause. */
+    this.pausedAt = null;
     // Whether the page carrying this viewer is ON SCREEN, and whether the
     // picture has been pulled out of it.
     //
@@ -312,6 +317,7 @@ export class Viewer {
       return;
     }
     this.#place(seconds, now);
+    if (this.pausedAt !== null) this.pausedAt = now;
     // The buffer's history belongs to the place they left.
     this.bufferReadings = [];
     // WHAT THEY HELD AT THE PLACE THEY LEFT SAYS NOTHING ABOUT THE PLACE THEY
@@ -475,6 +481,11 @@ export class Viewer {
     // material, which is the direction that costs an encoder rather than a
     // viewer.
     this.waiting = waiting === undefined ? this.playing === false && held === 0 : waiting === true;
+    if (!this.playing && !this.waiting) {
+      if (this.pausedAt === null) this.pausedAt = now;
+    } else {
+      this.pausedAt = null;
+    }
     this.inPictureInPicture = inPictureInPicture === undefined ? false : Boolean(inPictureInPicture);
     this.onScreen = onScreen === undefined ? true : Boolean(onScreen);
     this.seen(now);

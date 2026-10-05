@@ -16,7 +16,8 @@
  */
 
 import { ContainerFactory } from "./container/ContainerFactory.js";
-import { isUnavailable } from "./container/unavailable.js";
+import { BytesUnavailable, isUnavailable } from "./container/unavailable.js";
+import { IndexMemoryUnavailable } from "./container/memory-unavailable.js";
 import { logger } from "../../utils/logger.js";
 
 /**
@@ -29,6 +30,12 @@ import { logger } from "../../utils/logger.js";
 export const CONTAINER_HEAD_BYTES = 256 * 1024;
 
 export class ContainerOrchestrator {
+  #reads = new Map();
+  #lifetimes = new Map();
+  #activityEpoch = 0;
+  #activeReads = 0;
+
+  activity() { return { epoch: this.#activityEpoch, active: this.#activeReads > 0 }; }
   constructor() {
     /** @type {Map<string, import("./container/Container.js").Container|null>} */
     this.cache = new Map();
@@ -60,6 +67,93 @@ export class ContainerOrchestrator {
     return this.cache.get(`${sourceKey}:${fileIndex}`);
   }
 
+  packetIndexBytes() {
+    return [...new Set(this.cache.values())].reduce((bytes, container) => bytes + (container?.packetIndexBytes?.() ?? 0), 0);
+  }
+
+  /** Read one statement without converting missing bytes into an empty answer. */
+  async inspect(params, statement = "tracks") {
+    if (!["container", "tracks", "media-info", "keyframes", "packets"].includes(statement)) {
+      throw new TypeError(`Unknown media statement: ${statement}`);
+    }
+    const key = `${params.sourceKey}:${params.fileIndex}`;
+    let lifetime = this.#lifetimes.get(key);
+    if (!lifetime) this.#lifetimes.set(key, lifetime = {});
+    const isCurrent = () => this.#lifetimes.get(key) === lifetime && params.isCurrent?.() !== false;
+    const previous = this.#reads.get(key) ?? Promise.resolve();
+    const reading = previous.catch(() => undefined).then(async () => {
+      if (!isCurrent()) return { result: { kind: "terminal", reason: "request-obsolete", requestId: params.requestId } };
+      const revision = params.onReadStart?.(statement);
+      const result = await this.#inspectRead({ ...params, isCurrent }, statement);
+      return { result, revision };
+    });
+    this.#reads.set(key, reading);
+    try {
+      const { result, revision } = await reading;
+      if (!isCurrent()) return { kind: "terminal", reason: "request-obsolete", requestId: params.requestId };
+      if (result.kind === "needs-ranges") params.onNeedsRanges?.(result);
+      if (statement === "tracks" && result.kind === "result") params.onTracks?.(result.value);
+      await params.onReadResult?.(statement, result, revision);
+      return result;
+    } finally {
+      if (this.#reads.get(key) === reading) this.#reads.delete(key);
+    }
+  }
+
+  async #inspectRead(params, statement) {
+    const requestId = params.requestId ?? `${params.sourceKey}:${params.fileIndex}:${statement}`;
+    this.#activityEpoch++;
+    this.#activeReads++;
+    try {
+      const container = await this.containerFor(params);
+      if (!container) {
+        const result = { kind: "terminal", reason: "format-not-supported", requestId };
+        logger.info(`media request=${requestId} terminal=${result.reason}`);
+        return result;
+      }
+      let value;
+      if (statement === "container") {
+        value = container;
+      } else if (statement === "tracks") {
+        const key = `${params.sourceKey}:${params.fileIndex}`;
+        value = this.tracks.get(key);
+        if (!value) {
+          value = await container.readTracks();
+          if (!Array.isArray(value)) throw new Error("Container did not return a track table.");
+          if (params.isCurrent?.() === false) return { kind: "terminal", reason: "request-obsolete", requestId };
+          this.tracks.set(key, value);
+        }
+      } else if (statement === "media-info") {
+        value = await container.readMediaInfo();
+      } else if (statement === "keyframes") {
+        value = await container.readKeyframeIndex();
+      } else if (statement === "packets") {
+        value = await container.readPacketIndex(params.packetInterval);
+        await value?.prepareAudioDependencies?.(params.packetInterval, container.readRange);
+      } else {
+        throw new TypeError(`Unknown media statement: ${statement}`);
+      }
+      return { kind: "result", value, requestId };
+    } catch (error) {
+      if (error instanceof IndexMemoryUnavailable) {
+        const result = { kind: "needs-memory", bytes: error.bytes, requestId };
+        logger.info(`media request=${requestId} needs memory=${error.bytes}`);
+        return result;
+      }
+      if (isUnavailable(error)) {
+        const result = { kind: "needs-ranges", ranges: [[error.start, error.end]], requestId };
+        logger.info(`media request=${requestId} needs bytes=${error.start}-${error.end}`);
+        return result;
+      }
+      const result = { kind: "terminal", reason: "media-read-failed", message: error?.message ?? String(error), requestId };
+      logger.warn(`media request=${requestId} terminal=${result.reason}: ${result.message}`);
+      return result;
+    } finally {
+      this.#activeReads--;
+      this.#activityEpoch++;
+    }
+  }
+
   /**
    * The file's one container, built on first ask.
    *
@@ -74,12 +168,13 @@ export class ContainerOrchestrator {
    * @throws {import("./container/unavailable.js").BytesUnavailable} While the
    *   head has not arrived. Nothing is kept for it.
    */
-  async containerFor({ sourceKey, fileIndex, readRange, fileSize, label = "", portionBytes }) {
+  async containerFor({ sourceKey, fileIndex, readRange, fileSize, label = "", portionBytes, probe, packetMemory }) {
     const key = `${sourceKey}:${fileIndex}`;
     if (this.cache.has(key)) return this.cache.get(key);
     if (this.pending.has(key)) return this.pending.get(key);
-    const p = ContainerFactory.create({ readRange, fileSize, label, portionBytes })
+    const p = ContainerFactory.create({ readRange, fileSize, label, portionBytes, probe, packetMemory })
       .then((c) => {
+        if (this.pending.get(key) !== p) throw new Error("Container request was withdrawn.");
         this.cache.set(key, c);
         if (c) logger.info(`container: ${c.formatName} for "${label}"`);
         else logger.info(`container: unknown for "${label}"`);
@@ -92,7 +187,7 @@ export class ContainerOrchestrator {
         throw e;
       })
       .finally(() => {
-        this.pending.delete(key);
+        if (this.pending.get(key) === p) this.pending.delete(key);
       });
     this.pending.set(key, p);
     return p;
@@ -106,13 +201,8 @@ export class ContainerOrchestrator {
    * @returns {Promise<import("./container/Container.js").Container|null>}
    */
   async getContainer(params) {
-    try {
-      return await this.containerFor(params);
-    } catch {
-      // `containerFor` has already said what failed, where it was not a
-      // shortage of bytes; either way nothing was kept.
-      return null;
-    }
+    const result = await this.inspect(params, "container");
+    return result.kind === "result" ? result.value : null;
   }
 
   /**
@@ -121,26 +211,8 @@ export class ContainerOrchestrator {
    *   the bytes have not arrived; that empty answer is not kept.
    */
   async getTracks(params) {
-    const key = `${params.sourceKey}:${params.fileIndex}`;
-    const known = this.tracks.get(key);
-    if (known) {
-      return known;
-    }
-    try {
-      const container = await this.containerFor(params);
-      if (!container) return [];
-      const tracks = await container.readTracks();
-      if (Array.isArray(tracks)) {
-        this.tracks.set(key, tracks);
-        return tracks;
-      }
-      return [];
-    } catch (e) {
-      if (!isUnavailable(e)) {
-        logger.warn(`container: readTracks failed for "${params.label}": ${e?.message ?? e}`);
-      }
-      return [];
-    }
+    const result = await this.inspect(params, "tracks");
+    return result.kind === "result" ? result.value : [];
   }
 
   /**
@@ -155,16 +227,8 @@ export class ContainerOrchestrator {
    * @returns {Promise<import("./container/Container.js").ContainerMediaInfo|null>}
    */
   async getMediaInfo(params) {
-    try {
-      const container = await this.containerFor(params);
-      if (!container) return null;
-      return await container.readMediaInfo();
-    } catch (e) {
-      if (!isUnavailable(e)) {
-        logger.warn(`container: readMediaInfo failed for "${params.label}": ${e?.message ?? e}`);
-      }
-      return null;
-    }
+    const result = await this.inspect(params, "media-info");
+    return result.kind === "result" ? result.value : null;
   }
 
   /**
@@ -176,17 +240,23 @@ export class ContainerOrchestrator {
    *   not record "no keyframes" for a file whose index is still downloading.
    */
   async getKeyframeIndex(params) {
-    const container = await this.containerFor(params);
-    if (!container) return null;
-    try {
-      return await container.readKeyframeIndex();
-    } catch (e) {
-      if (isUnavailable(e)) throw e;
-      return null;
+    const result = await this.inspect(params, "keyframes");
+    if (result.kind === "needs-memory") throw new IndexMemoryUnavailable(result.bytes);
+    if (result.kind === "needs-ranges") {
+      const [start, end] = result.ranges[0];
+      throw new BytesUnavailable(start, end, 0);
     }
+    return result.kind === "result" ? result.value : null;
   }
 
   forget(sourceKey, fileIndex) {
+    const prefix = `${sourceKey}:`;
+    for (const key of this.#lifetimes.keys()) {
+      if (fileIndex === undefined ? key.startsWith(prefix) : key === `${sourceKey}:${fileIndex}`) {
+        this.#lifetimes.delete(key);
+        this.#reads.delete(key);
+      }
+    }
     if (fileIndex === undefined) {
       for (const k of [...this.cache.keys()]) if (k.startsWith(`${sourceKey}:`)) this.cache.delete(k);
       for (const k of [...this.pending.keys()]) if (k.startsWith(`${sourceKey}:`)) this.pending.delete(k);

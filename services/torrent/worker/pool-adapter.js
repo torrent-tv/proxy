@@ -9,11 +9,8 @@
  * construction, and the call sites are untouched — which is what keeps a change
  * of this size reviewable.
  *
- * Two accommodations are needed, and both are deliberate:
+ * Source handles retain their derived identity across calls:
  *
- *  - **`prioritizeByteRange` stays synchronous.** It returns nothing the caller
- *    inspects, so the command is dispatched and not awaited. Awaiting it would
- *    mean touching every call site for no observable gain.
  *  - **`getTorrent` needs a `sourceKey`.** Torrent objects cannot cross a
  *    thread, so the worker keys them. Callers that have one pass it; the rest
  *    get one derived from the source itself, so the identity stays stable
@@ -33,13 +30,17 @@ export class WorkerTorrentPool {
   #client;
   /** Stand-ins by source key, so repeat calls return the same object. */
   #torrents = new Map();
+  #pending = new Map();
 
   /**
    * @param {{ memoryBytes?: number, stateDir?: string }} [options]
    * @param {object | null} [client] - The worker interface; tests supply a fake.
    */
   constructor(options = {}, client = null) {
-    this.#client = client ?? new TorrentWorkerClient(options);
+    this.#client = client ?? new TorrentWorkerClient({ ...options, onSourceForgotten: event => {
+      this.forget(event.sourceKey);
+      options.onSourceForgotten?.(event);
+    } });
   }
 
   /**
@@ -55,9 +56,29 @@ export class WorkerTorrentPool {
     if (existing) {
       return existing;
     }
-    const torrent = await this.#client.getTorrent({ sourceKey, sourceType, source });
-    this.#torrents.set(sourceKey, torrent);
-    return torrent;
+    const joined = this.#pending.get(sourceKey);
+    if (joined) return joined;
+    const pending = this.#client.getTorrent({ sourceKey, sourceType, source }).then(torrent => {
+      if (this.#pending.get(sourceKey) !== pending) {
+        const error = new Error("Source was forgotten while its metadata was being read.");
+        error.code = "SOURCE_FORGOTTEN";
+        throw error;
+      }
+      this.#torrents.set(sourceKey, torrent);
+      return torrent;
+    }).finally(() => { if (this.#pending.get(sourceKey) === pending) this.#pending.delete(sourceKey); });
+    this.#pending.set(sourceKey, pending);
+    return pending;
+  }
+
+  forget(sourceKey) {
+    this.#torrents.delete(sourceKey);
+    this.#pending.delete(sourceKey);
+  }
+
+  /** Return an existing handle without adding, reviving, or waiting for it. */
+  knownTorrent(sourceKey) {
+    return this.#torrents.get(sourceKey) ?? null;
   }
 
   /**
@@ -119,10 +140,9 @@ export class WorkerTorrentPool {
    *
    * @param {object} torrent
    * @param {number | null} [fileIndex]
-   * @param {{ resumeAnchorByteStart?: number | null }} [options]
    * @returns {Promise<object | null>}
    */
-  async getFileStats(torrent, fileIndex = null, options = {}) {
+  async getFileStats(torrent, fileIndex = null, { forecast = false } = {}) {
     const sourceKey = torrent?.sourceKey;
     if (!sourceKey) {
       return null;
@@ -130,97 +150,8 @@ export class WorkerTorrentPool {
     return this.#client.getFileStats({
       sourceKey,
       fileIndex,
-      resumeAnchorByteStart: options?.resumeAnchorByteStart ?? null
+      forecast
     });
-  }
-
-  /**
-   * Fetch one whole file using only the room the viewer's own reading leaves.
-   *
-   * For a soundtrack or subtitle file shipped beside the picture: small next to
-   * the film, and having it on disk is what turns a later switch into a local
-   * read instead of a wait on the swarm.
-   *
-   * @param {object} torrent
-   * @param {number} fileIndex
-   * @returns {Promise<boolean>} Whether a fill was started by this call.
-   */
-  async fillFileInBackground(torrent, fileIndex) {
-    const sourceKey = torrent?.sourceKey;
-    if (!sourceKey) {
-      return false;
-    }
-    const answer = await this.#client.fillFile({ sourceKey, fileIndex });
-    return answer?.started === true;
-  }
-
-  /**
-   * Ask the torrent to fetch all remaining files at conditional TAIL urgency.
-   *
-   * @param {object} torrent
-   * @returns {Promise<boolean>}
-   */
-  async fillTorrent(torrent) {
-    const sourceKey = torrent?.sourceKey;
-    if (!sourceKey) {
-      return false;
-    }
-    const answer = await this.#client.fillTorrent(sourceKey);
-    return answer?.started === true;
-  }
-
-
-
-
-  /**
-   * Start fetching the region a viewer is about to resume at. Named in seconds
-   * here; the worker turns it into bytes, where the file's duration is readable.
-   *
-   * @param {object} torrent
-   * @param {number} fileIndex
-   * @param {number} positionSeconds
-   * @returns {Promise<boolean>}
-   */
-  async warmResumePosition(torrent, fileIndex, positionSeconds, durationSeconds) {
-    const sourceKey = torrent?.sourceKey;
-    if (!sourceKey) {
-      return false;
-    }
-    const answer = await this.#client.warmResumePosition({ sourceKey, fileIndex, positionSeconds, durationSeconds });
-    return answer?.started === true;
-  }
-
-
-
-
-
-
-  /**
-   * Reorder piece selection around a read position.
-   *
-   * Synchronous by design — see the file header.
-   *
-   * @param {object} torrent
-   * @param {number} fileIndex
-   * @param {number} byteStart
-   * @param {number} [windowBytes]
-   * @param {{ wholeFileRead?: boolean }} [options]
-   * @returns {void}
-   */
-  prioritizeByteRange(torrent, fileIndex, byteStart, windowBytes, options) {
-    const sourceKey = torrent?.sourceKey;
-    if (!sourceKey) {
-      return;
-    }
-    void this.#client
-      .prioritizeByteRange({
-        sourceKey,
-        fileIndex,
-        byteStart,
-        windowBytes,
-        wholeFileRead: options?.wholeFileRead === true
-      })
-      .catch(() => undefined);
   }
 
   /**
@@ -240,21 +171,6 @@ export class WorkerTorrentPool {
     await this.#client.setPriorityMap({ sourceKey, fileIndex, durationSeconds, zones });
   }
 
-  /**
-   * Pre-fetch the head and tail the codec probe needs.
-   *
-   * Takes an options object, matching `TorrentPool.prefetchFileEdges` — this
-   * adapter exists to present that same interface. It previously declared
-   * positional parameters instead, so the planner's options object arrived as
-   * `headBytes` and only worked because it was passed along far enough to be
-   * destructured at the far end. Anyone calling it as documented got the
-   * defaults instead of the sizes they asked for.
-   *
-   * @param {object} torrent
-   * @param {number} fileIndex
-   * @param {{ headBytes?: number, tailBytes?: number, timeoutMs?: number }} [options]
-   * @returns {Promise<unknown>}
-   */
   /**
    * One byte range of one file, as bytes, on THIS thread.
    *
@@ -313,6 +229,11 @@ export class WorkerTorrentPool {
     return sourceKey ? this.#client.readHeld({ sourceKey, fileIndex, start, end }) : null;
   }
 
+  async readHeldRangesOf(torrent, fileIndex, ranges, maxBytes) {
+    const sourceKey = torrent?.sourceKey;
+    return sourceKey ? this.#client.readHeldRanges({ sourceKey, fileIndex, ranges, maxBytes }) : null;
+  }
+
   async readRangeOf(torrent, fileIndex, start, end) {
     const sourceKey = torrent?.sourceKey;
     if (!sourceKey || !(end >= start) || !(start >= 0)) {
@@ -337,14 +258,6 @@ export class WorkerTorrentPool {
     return total > 0 ? Buffer.concat(chunks, total) : null;
   }
 
-  async prefetchFileEdges(torrent, fileIndex, options = {}) {
-    const sourceKey = torrent?.sourceKey;
-    if (!sourceKey) {
-      return null;
-    }
-    return this.#client.prefetchFileEdges({ sourceKey, fileIndex, options });
-  }
-
   /**
    * Which films this proxy holds right now, and how much of each.
    *
@@ -366,6 +279,7 @@ export class WorkerTorrentPool {
    */
   async destroyAll() {
     this.#torrents.clear();
+    this.#pending.clear();
     await this.#client.destroyAll();
   }
 }

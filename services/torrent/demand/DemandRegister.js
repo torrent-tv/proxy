@@ -23,6 +23,9 @@ import { unionOf, Window } from "./Window.js";
 export class DemandRegister {
   /** Claimant → the one window it currently states. */
   #windows = new Map();
+  #revision = 0;
+
+  get revision() { return this.#revision; }
 
   /**
    * State a need, replacing whatever that claimant said before.
@@ -39,9 +42,12 @@ export class DemandRegister {
    * @param {number} params.urgency
    * @returns {Window}
    */
-  state({ claimant, fileIndex, byteStart, byteEnd, urgency }) {
-    const window = new Window({ claimant, fileIndex, byteStart, byteEnd, urgency });
-    this.#windows.set(claimant, window);
+  state(params) {
+    const window = new Window(params);
+    const previous = this.#windows.get(window.claimant);
+    if (previous?.equals(window) && previous.requestId === window.requestId) return previous;
+    this.#windows.set(window.claimant, window);
+    this.#revision++;
     return window;
   }
 
@@ -57,7 +63,9 @@ export class DemandRegister {
    * @returns {boolean} Whether there was anything to withdraw.
    */
   withdraw(claimant) {
-    return this.#windows.delete(claimant);
+    const removed = this.#windows.delete(claimant);
+    if (removed) this.#revision++;
+    return removed;
   }
 
   /** How many claimants are stating something. */
@@ -195,6 +203,7 @@ export class DemandRegister {
 
   /** Forget everything. The torrent is going. */
   clear() {
+    if (this.#windows.size) this.#revision++;
     this.#windows.clear();
   }
 }

@@ -21,3 +21,15 @@
 export function isUsableTorrentHandle(torrent) {
   return Boolean(torrent) && torrent.destroyed !== true && (torrent.files?.length ?? 0) > 0;
 }
+
+/** Resolve only the source lifetime that the caller originally observed. */
+export async function requireCurrentTorrent(handles, sourceKey, pending = handles.get(sourceKey)) {
+  const torrent = pending ? await pending : null;
+  if (!pending || handles.get(sourceKey) !== pending || !isUsableTorrentHandle(torrent)) {
+    if (pending && handles.get(sourceKey) === pending) handles.delete(sourceKey);
+    const error = new Error(`Source ${sourceKey} is no longer available.`);
+    error.code = "SOURCE_FORGOTTEN";
+    throw error;
+  }
+  return torrent;
+}

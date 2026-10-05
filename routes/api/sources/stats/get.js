@@ -30,32 +30,25 @@ export async function handleApiSourceStatsGet(req, reply, { sourceRegistry, torr
 
   let torrent;
   try {
-    // getTorrent resolves immediately when the torrent is already loaded.
-    torrent = await torrentPool.getTorrent(sourceRecord.sourceType, sourceRecord.source);
+    torrent = torrentPool.knownTorrent(sourceKey);
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     logger.warn(`stats: getTorrent failed for ${sourceKey.slice(0, 8)}: ${message} stack=${error instanceof Error ? error.stack?.split("\n")[1]?.trim() ?? "" : ""}`);
     return reply.code(500).send({ error: `Failed to load torrent: ${message}` });
   }
   if (!torrent) {
-    logger.warn(`stats: torrent missing for ${sourceKey.slice(0, 8)} (getTorrent returned null/undefined)`);
-    return reply.code(500).send({ error: "Torrent instance not found" });
+    return reply.code(202).send({ pending: true });
   }
 
   const fileIndexRaw = typeof req.query.fileIndex === "string" ? req.query.fileIndex : "";
   const fileIndex = fileIndexRaw !== "" && /^\d+$/.test(fileIndexRaw) ? Number(fileIndexRaw) : null;
 
-  // Optional: pin the resume window to a FIXED byte offset for the duration of
-  // one buffering episode (see getFileStats JSDoc) instead of the live, moving
-  // read position — otherwise "bytes needed" can jump up mid-poll as the window
-  // slides forward with playback/encoding progress.
-  const resumeAnchorRaw = typeof req.query.resumeAnchorByteStart === "string" ? req.query.resumeAnchorByteStart : "";
-  const resumeAnchorByteStart = resumeAnchorRaw !== "" && /^\d+$/.test(resumeAnchorRaw) ? Number(resumeAnchorRaw) : null;
 
   // Awaited: with the torrent on its own thread this is a round trip, not a
   // local lookup. Without the await the reply was the pending promise itself,
   // which serialises to `{}` — the empty stats seen in the field 2026-08-02.
-  const stats = await torrentPool.getFileStats(torrent, fileIndex, { resumeAnchorByteStart });
+  const stats = await torrentPool.getFileStats(torrent, fileIndex);
+  if (stats?.pending || !stats) return reply.code(202).send({ pending: true });
 
   // Diagnostic: surface the real swarm state per poll so a cold-start download
   // stall (0 peers / header not advancing → playback-plan blocks on the codec

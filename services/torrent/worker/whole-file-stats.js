@@ -34,6 +34,8 @@ export function wholeFileStats(length) {
     fileProgress: 1,
     fileDownloaded: fileLength,
     fileLength,
+    fileOffset: 0,
+    fileAvailable: fileLength > 0,
     residence: fileLength > 0 ? [{ start: 0, end: fileLength, location: "whole-file" }] : [],
     resumeNeededBytes: null,
     resumeDownloadedBytes: null,

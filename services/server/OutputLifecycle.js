@@ -389,6 +389,7 @@ export class OutputLifecycle {
     }
     const watched = this.#host.viewers.get(consumerId)?.outputs;
     if (!watched || watched.size === 0) {
+      this.#host.viewers.hasGone(consumerId);
       return 0;
     }
     // Copied before anything is released: releasing walks the same set.
@@ -396,6 +397,7 @@ export class OutputLifecycle {
     for (const outputId of outputs) {
       await this.releaseSessionConsumer(outputId, consumerId, because);
     }
+    this.#host.viewers.hasGone(consumerId);
     return outputs.length;
   }
 

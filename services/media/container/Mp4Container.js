@@ -16,11 +16,17 @@
  */
 
 import { Container } from "./Container.js";
+import { RetainedBytes } from "./RetainedBytes.js";
 import { VideoTrack } from "../tracks/VideoTrack.js";
 import { AudioTrack } from "../tracks/AudioTrack.js";
 import { TextSubtitleTrack, TEXT_FORMATS_MP4 } from "../tracks/TextSubtitleTrack.js";
 import { ImageSubtitleTrack } from "../tracks/ImageSubtitleTrack.js";
 import { isUnavailable } from "./unavailable.js";
+import { PacketIndex } from "./PacketIndex.js";
+import { h264Configuration } from "./h264-configuration.js";
+import { hevcConfiguration } from "./hevc-configuration.js";
+import { mpegAudioFrame } from "./mpeg-audio-frame.js";
+import { readMp4Fragments } from "./mp4-fragments.js";
 
 /** A box header is eight bytes, or sixteen when the size field says 1 (§4.2). */
 const HEADER_BYTES = 8;
@@ -111,20 +117,84 @@ function readAudioSampleEntry(buf, entry) {
     return null;
   }
   const version = buf.readUInt16BE(base + 8);
-  const channels = buf.readUInt16BE(base + 16);
-  const sampleRate = buf.readUInt32BE(base + 24) / 65536;
+  let channels = buf.readUInt16BE(base + 16);
+  let sampleRate = buf.readUInt32BE(base + 24) / 65536;
+  let bitDepth = buf.readUInt16BE(base + 18);
+  let codecId = entry.type;
+  if (entry.type === ".mp3") codecId = "mp3";
+  let codecDelaySeconds = 0;
+  let seekPrerollSeconds = 0;
   const childrenStart = base + 28 + (version === 1 ? 16 : version === 2 ? 36 : 0);
+  if (version > 2 || childrenStart > entry.end) throw new Error("QuickTime audio sample description is incomplete or unsupported.");
+  if (version === 2) {
+    sampleRate = buf.readDoubleBE(base + 32);
+    channels = buf.readUInt32BE(base + 40);
+    bitDepth = buf.readUInt32BE(base + 48);
+    if (entry.type === "lpcm") {
+      const flags = buf.readUInt32BE(base + 52);
+      if ((flags & 32) || !(flags & 8)) throw new Error("QuickTime LPCM needs packed interleaved samples.");
+      codecId = `pcm_${flags & 1 ? "f" : flags & 4 ? "s" : "u"}${bitDepth}${bitDepth === 8 ? "" : flags & 2 ? "be" : "le"}`;
+    }
+  } else {
+    codecId = new Map([["sowt", `pcm_s${bitDepth}le`], ["twos", `pcm_s${bitDepth}be`],
+      ["in24", "pcm_s24be"], ["in32", "pcm_s32be"], ["fl32", "pcm_f32be"], ["fl64", "pcm_f64be"], ["raw ", "pcm_u8"]]).get(entry.type) ?? entry.type;
+    const declaredBits = /^pcm_[suf](\d+)/.exec(codecId);
+    if (declaredBits) bitDepth = Number(declaredBits[1]);
+    const wave = childOf(buf, childrenStart, entry.end, "wave");
+    const endian = childOf(buf, childrenStart, entry.end, "enda") ??
+      (wave && childOf(buf, wave.dataOffset, wave.end, "enda"));
+    if (endian && /^pcm_[sf]\d+(?:be|le)$/.test(codecId)) {
+      if (endian.end - endian.dataOffset !== 2) throw new Error("QuickTime PCM byte-order declaration is invalid.");
+      const little = buf.readUInt16BE(endian.dataOffset);
+      if (little > 1) throw new Error("QuickTime PCM byte order is unsupported.");
+      codecId = codecId.replace(/(?:be|le)$/, little ? "le" : "be");
+    }
+  }
   let decoderConfig = null;
   if (entry.type === "mp4a" && childrenStart < entry.end) {
-    const esds = childOf(buf, childrenStart, Math.min(entry.end, buf.length), "esds");
+    const wave = childOf(buf, childrenStart, Math.min(entry.end, buf.length), "wave");
+    const esds = childOf(buf, childrenStart, Math.min(entry.end, buf.length), "esds") ??
+      (wave && childOf(buf, wave.dataOffset, wave.end, "esds"));
     if (esds) {
-      decoderConfig = decoderSpecificInfoOf(buf, esds.dataOffset + 4, Math.min(esds.end, buf.length));
+      const description = decoderSpecificInfoOf(buf, esds.dataOffset + 4, Math.min(esds.end, buf.length));
+      decoderConfig = description?.decoderConfig ?? null;
+      if ([0x69, 0x6b].includes(description?.objectType)) {
+        codecId = "mpeg_audio";
+        decoderConfig = null;
+      }
     }
+  }
+  if (entry.type === "alac") {
+    const config = childOf(buf, childrenStart, entry.end, "alac");
+    if (!config || config.end - config.dataOffset < 28) throw new Error("ALAC decoder configuration is absent or truncated.");
+    decoderConfig = buf.subarray(config.dataOffset + 4, config.end);
+  }
+  if (entry.type === "Opus") {
+    const config = childOf(buf, childrenStart, entry.end, "dOps");
+    if (!config || config.end - config.dataOffset < 11) throw new Error("MP4 Opus decoder declaration is absent or truncated.");
+    const data = buf.subarray(config.dataOffset, config.end);
+    const family = data[10];
+    if (data[0] !== 0 || !data[1] || (!family && data[1] > 2) || (family && data.length < 13 + data[1])) {
+      throw new Error("MP4 Opus channel mapping is invalid.");
+    }
+    const head = Buffer.alloc(19);
+    head.write("OpusHead");
+    head[8] = 1;
+    head[9] = data[1];
+    head.writeUInt16LE(data.readUInt16BE(2), 10);
+    head.writeUInt32LE(data.readUInt32BE(4), 12);
+    head.writeInt16LE(data.readInt16BE(8), 16);
+    head[18] = family;
+    decoderConfig = family ? Buffer.concat([head, data.subarray(11, 13 + data[1])]) : head;
+    codecDelaySeconds = data.readUInt16BE(2) / 48000;
+    seekPrerollSeconds = 0.08;
+    sampleRate = 48000;
+    channels = data[1];
   }
   return {
     channels: channels > 0 ? channels : null,
     sampleRate: sampleRate > 0 ? sampleRate : null,
-    decoderConfig
+    decoderConfig, bitDepth: bitDepth > 0 ? bitDepth : null, codecId, codecDelaySeconds, seekPrerollSeconds
   };
 }
 
@@ -140,41 +210,49 @@ function readAudioSampleEntry(buf, entry) {
  * @returns {Buffer | null}
  */
 function decoderSpecificInfoOf(buf, start, end) {
-  const descriptorAt = (offset) => {
-    if (offset >= end) return null;
+  const descriptorAt = (offset, limit = end) => {
+    if (offset >= limit) return null;
     const tag = buf[offset];
     let size = 0;
     let cursor = offset + 1;
-    for (let i = 0; i < 4 && cursor < end; i += 1) {
+    let complete = false;
+    for (let i = 0; i < 4 && cursor < limit; i += 1) {
       const byte = buf[cursor];
       cursor += 1;
       size = (size * 128) + (byte & 0x7f);
-      if ((byte & 0x80) === 0) break;
+      if ((byte & 0x80) === 0) { complete = true; break; }
     }
-    return { tag, dataOffset: cursor, end: Math.min(end, cursor + size) };
+    if (!complete || cursor + size > limit) throw new Error("MP4 audio descriptor exceeds its declared parent.");
+    return { tag, dataOffset: cursor, end: cursor + size };
   };
   const es = descriptorAt(start);
   if (!es || es.tag !== 0x03 || es.dataOffset + 3 > es.end) return null;
   const flags = buf[es.dataOffset + 2];
   let cursor = es.dataOffset + 3;
   if (flags & 0x80) cursor += 2;
-  if (flags & 0x40) cursor += 1 + (buf[cursor] ?? 0);
+  if (flags & 0x40) {
+    if (cursor >= es.end) throw new Error("MP4 audio descriptor URL length is absent.");
+    cursor += 1 + buf[cursor];
+  }
   if (flags & 0x20) cursor += 2;
+  if (cursor > es.end) throw new Error("MP4 audio descriptor flags exceed its declared size.");
   while (cursor < es.end) {
-    const descriptor = descriptorAt(cursor);
+    const descriptor = descriptorAt(cursor, es.end);
     if (!descriptor) return null;
     if (descriptor.tag === 0x04) {
       // objectTypeIndication, streamType, bufferSizeDB, maxBitrate, avgBitrate.
+      if (descriptor.dataOffset + 13 > descriptor.end) throw new Error("MP4 audio decoder descriptor is truncated.");
+      const objectType = buf[descriptor.dataOffset];
       let inner = descriptor.dataOffset + 13;
       while (inner < descriptor.end) {
-        const child = descriptorAt(inner);
+        const child = descriptorAt(inner, descriptor.end);
         if (!child) return null;
         if (child.tag === 0x05) {
-          return child.end > child.dataOffset ? Buffer.from(buf.subarray(child.dataOffset, child.end)) : null;
+          return { objectType, decoderConfig: child.end > child.dataOffset ? Buffer.from(buf.subarray(child.dataOffset, child.end)) : null };
         }
         inner = child.end;
       }
-      return null;
+      return { objectType, decoderConfig: null };
     }
     cursor = descriptor.end;
   }
@@ -182,9 +260,12 @@ function decoderSpecificInfoOf(buf, start, end) {
 }
 
 export class Mp4Container extends Container {
+  #tracks = null;
   get formatName() {
     return "mp4";
   }
+
+  packetIndexBytes() { return this.packetIndex?.allocatedBytes() ?? 0; }
 
   static detect(head) {
     return isMp4(head);
@@ -330,6 +411,7 @@ export class Mp4Container extends Container {
   }
 
   async readTracks() {
+    if (this.#tracks) return this.#tracks;
     const head = await this.readRange(0, Math.min(64 - 1, this.fileSize - 1));
     if (!isMp4(head)) return [];
 
@@ -379,6 +461,18 @@ export class Mp4Container extends Container {
       // them above when they were stpp (non-text not in plan's tracks). The plan already excludes stpp from tracks
       // but increments declaredIndex, so alignment holds: we don't need extra placeholders.
     }
+    const pendingAudio = tracks.filter(track => track.codecId === "mpeg_audio");
+    if (pendingAudio.length) {
+      this.fragmentState ??= {};
+      await readMp4Fragments({ readRange: this.readRange, fileSize: this.fileSize,
+        tracks: fragmentTracks(held, tracks), memory: this.packetMemory, state: this.fragmentState,
+        firstTrackIds: pendingAudio.map(track => track.trackNumber) });
+      for (const track of pendingAudio) {
+        if (track.codecId !== "mpeg_audio") continue;
+        throw new Error("MP4 MPEG audio has no addressed sample declaring its codec.");
+      }
+    }
+    this.#tracks = tracks;
     return tracks;
   }
 
@@ -412,9 +506,32 @@ export class Mp4Container extends Container {
       this.moovHeld = null;
       return null;
     }
-    const moov = await this.readRange(found.offset, found.offset + found.size - 1);
-    this.moovHeld = { moov, header: found.headerBytes };
+    this.moovMemory ??= new RetainedBytes(this.packetMemory);
+    const moov = await this.moovMemory.read(found.size,
+      () => this.readRange(found.offset, found.offset + found.size - 1));
+    this.moovHeld = { moov, header: found.headerBytes, offset: found.offset };
     return this.moovHeld;
+  }
+
+  /** Exact decode-order samples from the same moov used for all metadata. */
+  async readPacketIndex() {
+    if (this.packetIndex) return this.packetIndex;
+    const held = await this.#moovBuffer();
+    if (!held) throw new Error(this.moovRefused ? "MP4 metadata exceeds the configured read limit." : "MP4 has no sample tables.");
+    const tracks = await this.readTracks();
+    const fragmented = childOf(held.moov, held.header, held.moov.length, "mvex");
+    let index;
+    if (fragmented) {
+      this.fragmentState ??= {};
+      index = await readMp4Fragments({ readRange: this.readRange, fileSize: this.fileSize,
+        tracks: fragmentTracks(held, tracks), memory: this.packetMemory, state: this.fragmentState });
+      const timeline = tracks.find(track => track.type === "video") ?? tracks.find(track => track.type === "audio");
+      const bounds = timeline && index.boundsOf(timeline.trackNumber);
+      if (bounds) this.mediaInfo = { ...(await this.readMediaInfo()), startTimeSeconds: bounds.start,
+        durationSeconds: bounds.end - bounds.start };
+    } else index = packetIndexFromMoov(held, this.fileSize, tracks, this.packetMemory);
+    this.packetIndex = index;
+    return index;
   }
 
   /**
@@ -540,14 +657,15 @@ export class Mp4Container extends Container {
       let height = null;
       if (tkhd) {
         const ver = moov[tkhd.dataOffset];
-        const flags = moov.readUInt32BE(tkhd.dataOffset + 1) & 0xffffff; // 3 bytes after version
+        const flags = moov.readUIntBE(tkhd.dataOffset + 1, 3);
         isEnabled = (flags & 0x000001) !== 0;
         trackId = moov.readUInt32BE(ver === 1 ? tkhd.dataOffset + 20 : tkhd.dataOffset + 12);
-        alternateGroup = moov.readUInt16BE(ver === 1 ? tkhd.dataOffset + 26 : tkhd.dataOffset + 18);
+        const groupAt = tkhd.dataOffset + (ver === 1 ? 46 : 34);
+        if (groupAt + 2 <= tkhd.end) alternateGroup = moov.readUInt16BE(groupAt);
         // width/height are 16.16 fixed point at end of tkhd
-        if (tkhd.end - tkhd.dataOffset >= 84) {
-          const w = moov.readUInt32BE(ver === 1 ? tkhd.dataOffset + 76 : tkhd.dataOffset + 68);
-          const h = moov.readUInt32BE(ver === 1 ? tkhd.dataOffset + 80 : tkhd.dataOffset + 72);
+        if (tkhd.end - tkhd.dataOffset >= (ver === 1 ? 96 : 84)) {
+          const w = moov.readUInt32BE(ver === 1 ? tkhd.dataOffset + 88 : tkhd.dataOffset + 76);
+          const h = moov.readUInt32BE(ver === 1 ? tkhd.dataOffset + 92 : tkhd.dataOffset + 80);
           width = w / 65536;
           height = h / 65536;
         }
@@ -557,14 +675,31 @@ export class Mp4Container extends Container {
         videoIdx += 1;
         // stsd format for codecId
         let codecId = "";
+        let codecPrivateB64 = "";
+        const displayWidth = width;
+        const displayHeight = height;
         const minf = childOf(moov, mdia.dataOffset, mdia.end, "minf");
         const stbl = minf && childOf(moov, minf.dataOffset, minf.end, "stbl");
         const stsd = stbl && childOf(moov, stbl.dataOffset, stbl.end, "stsd");
         if (stsd) {
           const first = readBox(moov, stsd.dataOffset + 8);
-          if (first) codecId = first.type;
+          if (first) {
+            codecId = first.type;
+            if (first.end - first.dataOffset >= 78) {
+              width = moov.readUInt16BE(first.dataOffset + 24);
+              height = moov.readUInt16BE(first.dataOffset + 26);
+            }
+            for (const name of ["avcC", "hvcC", "av1C"]) {
+              const configuration = childOf(moov, first.dataOffset + 78, first.end, name);
+              if (configuration) codecPrivateB64 = moov.subarray(configuration.dataOffset, configuration.end).toString("base64");
+            }
+          }
         }
-        result.push(new VideoTrack({
+        const configuration = codecPrivateB64 && ["avc1", "avc3"].includes(codecId)
+          ? h264Configuration(Buffer.from(codecPrivateB64, "base64"))
+          : codecPrivateB64 && ["hvc1", "hev1"].includes(codecId)
+            ? hevcConfiguration(Buffer.from(codecPrivateB64, "base64")) : null;
+        const track = new VideoTrack({
           trackNumber: trackId,
           declaredIndex: videoIdx,
           codecId,
@@ -574,11 +709,20 @@ export class Mp4Container extends Container {
           isEnabled,
           isDefault: true,
           declaresDefault: false,
-          codecPrivateB64: "",
+          codecPrivateB64,
           alternateGroup,
-          width,
-          height
-        }));
+          width: configuration?.width ?? width,
+          height: configuration?.height ?? height,
+          displayWidth,
+          displayHeight,
+          fps: configuration?.fps ?? videoSampleRate(moov, mdhd, stbl),
+          bitDepth: configuration?.bitDepth ?? null
+        });
+        if (configuration) {
+          track.codecConfiguration = configuration;
+          track.reorderDepth = configuration.reorderDepth;
+        }
+        result.push(track);
       } else if (handler === "soun") {
         audioIdx += 1;
         let codecId = "";
@@ -589,8 +733,22 @@ export class Mp4Container extends Container {
         if (stsd) {
           const first = readBox(moov, stsd.dataOffset + 8);
           if (first) {
-            codecId = first.type;
             sampleEntry = readAudioSampleEntry(moov, first);
+            codecId = sampleEntry?.codecId ?? first.type;
+            if (codecId === "mpeg_audio" && !childOf(moov, held.header, moov.length, "mvex")) {
+              const chunks = childOf(moov, stbl.dataOffset, stbl.end, "stco") ?? childOf(moov, stbl.dataOffset, stbl.end, "co64");
+              const sizes = childOf(moov, stbl.dataOffset, stbl.end, "stsz");
+              if (!chunks || !sizes || !moov.readUInt32BE(chunks.dataOffset + 4) || !moov.readUInt32BE(sizes.dataOffset + 8)) {
+                throw new Error("MP4 MPEG audio has no addressed first sample.");
+              }
+              const offset = chunks.type === "co64" ? Number(moov.readBigUInt64BE(chunks.dataOffset + 8)) : moov.readUInt32BE(chunks.dataOffset + 8);
+              const size = moov.readUInt32BE(sizes.dataOffset + 4) || moov.readUInt32BE(sizes.dataOffset + 12);
+              if (!Number.isSafeInteger(offset) || size < 4 || offset + size > this.fileSize) throw new Error("MP4 MPEG audio sample address is invalid.");
+              const facts = mpegAudioFrame(await this.readRange(offset, offset + 3));
+              codecId = facts.codecId;
+              sampleEntry.channels = facts.channels;
+              sampleEntry.sampleRate = facts.sampleRate;
+            }
           }
         }
         result.push(new AudioTrack({
@@ -603,15 +761,17 @@ export class Mp4Container extends Container {
           isEnabled,
           isDefault: true,
           declaresDefault: false,
-          // The AudioSpecificConfig an `mp4a` entry carries in its `esds`, which
-          // is what Matroska writes as CodecPrivate for the same codec.
+          // The sample entry's decoder configuration in its Matroska declaration form.
           codecPrivateB64: sampleEntry?.decoderConfig ? sampleEntry.decoderConfig.toString("base64") : "",
           alternateGroup,
           isOriginal: false,
           isCommentary: false,
           isVisualImpaired: false,
           channels: sampleEntry?.channels ?? null,
-          samplingFrequency: sampleEntry?.sampleRate ?? null
+          samplingFrequency: sampleEntry?.sampleRate ?? null,
+          bitDepth: sampleEntry?.bitDepth ?? null,
+          codecDelaySeconds: sampleEntry?.codecDelaySeconds ?? 0,
+          seekPrerollSeconds: sampleEntry?.seekPrerollSeconds ?? 0
         }));
       }
     }
@@ -641,11 +801,78 @@ export class Mp4Container extends Container {
 
   async parseKeyframeIndex() {
     const held = await this.#moovBuffer();
+    if (held && childOf(held.moov, held.header, held.moov.length, "mvex")) {
+      const video = (await this.readTracks()).find(track => track.type === "video");
+      return video ? { times: (await this.readPacketIndex()).keyframesOf(video.trackNumber), tolerance: 0 } : null;
+    }
     const r = held ? keyframeTimesFromMoov(held.moov, held.header) : null;
     if (!r) return null;
     if (Array.isArray(r)) return { times: r, tolerance: 0 };
     return r;
   }
+}
+
+/** Average decoded-frame cadence from the declared sample timing table. */
+function videoSampleRate(bytes, mdhd, stbl) {
+  if (!mdhd || !stbl) return null;
+  const scaleAt = mdhd.dataOffset + (bytes[mdhd.dataOffset] === 1 ? 20 : 12);
+  if (scaleAt + 4 > mdhd.end) throw new Error("MP4 video timescale is truncated.");
+  const scale = bytes.readUInt32BE(scaleAt);
+  const stts = childOf(bytes, stbl.dataOffset, stbl.end, "stts");
+  if (!stts) return null;
+  if (stts.dataOffset + 8 > stts.end) throw new Error("MP4 video timing table is truncated.");
+  const count = bytes.readUInt32BE(stts.dataOffset + 4);
+  if (stts.dataOffset + 8 + count * 8 !== stts.end) throw new Error("MP4 video timing count differs from its table size.");
+  let samples = 0, ticks = 0;
+  for (let at = stts.dataOffset + 8; at < stts.end; at += 8) {
+    const n = bytes.readUInt32BE(at), duration = bytes.readUInt32BE(at + 4);
+    samples += n;
+    ticks += n * duration;
+    if (!Number.isSafeInteger(samples) || !Number.isSafeInteger(ticks)) throw new Error("MP4 video timing exceeds its integer range.");
+  }
+  return scale > 0 && samples > 0 && ticks > 0 ? samples * scale / ticks : null;
+}
+
+function fragmentTracks({ moov, header }, tracks) {
+  const movie = childOf(moov, header, moov.length, "mvhd");
+  const movieScale = movie && moov.readUInt32BE(movie.dataOffset + (moov[movie.dataOffset] === 1 ? 20 : 12));
+  const mvex = childOf(moov, header, moov.length, "mvex");
+  const defaults = new Map(childrenOf(moov, mvex.dataOffset, mvex.end, "trex").map(trex => {
+    if (trex.dataOffset + 24 !== trex.end) throw new Error("MP4 fragment defaults are incomplete.");
+    const at = trex.dataOffset;
+    return [moov.readUInt32BE(at + 4), { description: moov.readUInt32BE(at + 8),
+      duration: moov.readUInt32BE(at + 12), size: moov.readUInt32BE(at + 16), flags: moov.readUInt32BE(at + 20) }];
+  }));
+  return childrenOf(moov, header, moov.length, "trak").map(trak => {
+    const tkhd = childOf(moov, trak.dataOffset, trak.end, "tkhd");
+    const mdia = childOf(moov, trak.dataOffset, trak.end, "mdia");
+    if (!tkhd || !mdia) throw new Error("MP4 fragment track declaration is absent.");
+    const id = moov.readUInt32BE(tkhd.dataOffset + (moov[tkhd.dataOffset] === 1 ? 20 : 12));
+    const track = tracks.find(track => track.trackNumber === id);
+    const mdhd = childOf(moov, mdia.dataOffset, mdia.end, "mdhd");
+    const scale = mdhd && moov.readUInt32BE(mdhd.dataOffset + (moov[mdhd.dataOffset] === 1 ? 20 : 12));
+    if (!track || !scale || !defaults.has(id)) throw new Error("MP4 fragment track settings are incomplete.");
+    let shift = 0;
+    const edts = childOf(moov, trak.dataOffset, trak.end, "edts");
+    const elst = edts && childOf(moov, edts.dataOffset, edts.end, "elst");
+    if (elst) {
+      const wide = moov[elst.dataOffset] === 1, count = moov.readUInt32BE(elst.dataOffset + 4);
+      const width = wide ? 20 : 12;
+      if (moov[elst.dataOffset] > 1 || elst.dataOffset + 8 + count * width !== elst.end) throw new Error("MP4 fragment edits are incomplete.");
+      let mediaEdit = false;
+      for (let entry = 0, at = elst.dataOffset + 8; entry < count; entry++, at += width) {
+        const duration = wide ? Number(moov.readBigUInt64BE(at)) : moov.readUInt32BE(at);
+        const time = wide ? Number(moov.readBigInt64BE(at + 8)) : moov.readInt32BE(at + 4);
+        const rate = at + (wide ? 16 : 8);
+        if (!Number.isSafeInteger(duration) || !Number.isSafeInteger(time) ||
+            moov.readInt16BE(rate) !== 1 || moov.readInt16BE(rate + 2) !== 0 || mediaEdit) throw new Error("MP4 fragment edits require a different presentation mapping.");
+        if (time === -1 && movieScale) shift += duration / movieScale;
+        else if (time >= 0) { shift -= time / scale; mediaEdit = true; }
+        else throw new Error("MP4 fragment edit has no valid presentation time.");
+      }
+    }
+    return { id, track, scale, shift, ...defaults.get(id) };
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -705,80 +932,170 @@ const TEXT_FORMATS = new Set(["tx3g", "text", "wvtt"]);
  * @param {number} total - How many samples the size table declares.
  * @returns {number[]} Ticks each sample lasts.
  */
-function sampleDurations(moov, stts, total) {
-  const durations = new Array(total).fill(0);
-  const entries = moov.readUInt32BE(stts.dataOffset + 4);
-  let at = stts.dataOffset + 8;
-  let sample = 0;
-  for (let entry = 0; entry < entries && at + 8 <= stts.end && sample < total; entry += 1, at += 8) {
-    const count = moov.readUInt32BE(at);
-    const delta = moov.readUInt32BE(at + 4);
-    for (let index = 0; index < count && sample < total; index += 1, sample += 1) {
-      durations[sample] = delta;
+function packetIndexFromMoov({ moov, header, offset: moovOffset }, fileSize, declaredTracks, packetMemory) {
+  const index = new PacketIndex({ packetMemory });
+  try {
+  const movie = childOf(moov, header, moov.length, "mvhd");
+  const movieScaleAt = movie ? movie.dataOffset + (moov[movie.dataOffset] === 1 ? 20 : 12) : 0;
+  const movieScale = movie ? moov.readUInt32BE(movieScaleAt) : 0;
+  for (const trak of childrenOf(moov, header, moov.length, "trak")) {
+    const tkhd = childOf(moov, trak.dataOffset, trak.end, "tkhd");
+    const mdia = childOf(moov, trak.dataOffset, trak.end, "mdia");
+    if (!tkhd || !mdia) throw new Error("MP4 track address is absent.");
+    const id = moov.readUInt32BE(tkhd.dataOffset + (moov[tkhd.dataOffset] === 1 ? 20 : 12));
+    const track = declaredTracks.find(one => one.trackNumber === id);
+    if (!track || (!["video", "audio"].includes(track.type) &&
+      !(track.type === "subtitle" && track.isTextBased()))) continue;
+    const mdhd = childOf(moov, mdia.dataOffset, mdia.end, "mdhd");
+    const scale = mdhd && moov.readUInt32BE(mdhd.dataOffset + (moov[mdhd.dataOffset] === 1 ? 20 : 12));
+    if (!(scale > 0)) throw new Error("MP4 media timescale is invalid.");
+    const minf = childOf(moov, mdia.dataOffset, mdia.end, "minf");
+    const stbl = minf && childOf(moov, minf.dataOffset, minf.end, "stbl");
+    if (!stbl) throw new Error("MP4 track sample table is absent.");
+    const table = name => childOf(moov, stbl.dataOffset, stbl.end, name);
+    const stsz = table("stsz"), stts = table("stts"), stsc = table("stsc"), stsd = table("stsd");
+    const chunks = table("stco") ?? table("co64");
+    if (!stsz || !stts || !stsc || !stsd || !chunks) throw new Error("MP4 track sample tables are incomplete.");
+    const count = moov.readUInt32BE(stsz.dataOffset + 8);
+    const uniform = moov.readUInt32BE(stsz.dataOffset + 4);
+    if ((!uniform && stsz.dataOffset + 12 + count * 4 > stsz.end) ||
+      (uniform && count * uniform > fileSize)) throw new Error("MP4 sample sizes exceed the file.");
+    const sizeAt = sample => uniform || moov.readUInt32BE(stsz.dataOffset + 12 + sample * 4);
+    const validateRuns = (box, width) => {
+      const entries = moov.readUInt32BE(box.dataOffset + 4);
+      if (box.dataOffset + 8 + entries * width > box.end) throw new Error("MP4 sample table is truncated.");
+      return entries;
+    };
+    const timeEntries = validateRuns(stts, 8);
+    let timedSamples = 0;
+    for (let entry = 0; entry < timeEntries; entry++) {
+      timedSamples += moov.readUInt32BE(stts.dataOffset + 8 + entry * 8);
     }
+    if (timedSamples !== count) throw new Error("MP4 sample timing count differs from its size count.");
+    const nextDuration = sampleRunReader(moov, stts);
+    const ctts = table("ctts");
+    if (ctts) {
+      const entries = validateRuns(ctts, 8);
+      let sample = 0;
+      if (moov[ctts.dataOffset] > 1) throw new Error("MP4 composition table version is invalid.");
+      for (let entry = 0; entry < entries; entry++) {
+        const at = ctts.dataOffset + 8 + entry * 8;
+        const run = moov.readUInt32BE(at);
+        if (sample + run > count) throw new Error("MP4 composition count exceeds its size count.");
+        sample += run;
+      }
+      if (sample !== count) throw new Error("MP4 composition count differs from its size count.");
+    }
+    const nextComposition = ctts ? sampleRunReader(moov, ctts, moov[ctts.dataOffset] === 1) : () => 0;
+    const chunkWidth = chunks.type === "co64" ? 8 : 4;
+    const chunkCount = validateRuns(chunks, chunkWidth);
+    const chunkRuns = validateRuns(stsc, 12);
+    let declaredCount = 0;
+    let previousChunk = 0;
+    for (let run = 0; run < chunkRuns; run++) {
+      const at = stsc.dataOffset + 8 + run * 12;
+      const first = moov.readUInt32BE(at), perChunk = moov.readUInt32BE(at + 4);
+      const next = run + 1 < chunkRuns ? moov.readUInt32BE(at + 12) : chunkCount + 1;
+      if (first <= previousChunk || (run === 0 && first !== 1) || next <= first || next > chunkCount + 1 || !perChunk) {
+        throw new Error("MP4 sample-to-chunk run is invalid.");
+      }
+      declaredCount += (next - first) * perChunk;
+      previousChunk = first;
+    }
+    if (declaredCount !== count) throw new Error("MP4 chunk sample count differs from its size count.");
+    const nextAddress = sampleAddressReader(moov, stsc, chunks, chunkWidth, chunkRuns);
+    const stss = table("stss");
+    let syncEntries = 0;
+    if (stss) {
+      syncEntries = validateRuns(stss, 4);
+      let previous = 0;
+      for (let entry = 0; entry < syncEntries; entry++) {
+        const sample = moov.readUInt32BE(stss.dataOffset + 8 + entry * 4);
+        if (sample <= previous || sample > count) throw new Error("MP4 sync sample is outside the sample table or unordered.");
+        previous = sample;
+      }
+    }
+    let emptyShiftSeconds = 0;
+    let mediaShiftTicks = 0;
+    const edts = childOf(moov, trak.dataOffset, trak.end, "edts");
+    const edits = edts && childOf(moov, edts.dataOffset, edts.end, "elst");
+    if (edits) {
+      const version = moov[edits.dataOffset], wide = version === 1;
+      if (version > 1) throw new Error("MP4 edit list version is invalid.");
+      const entries = validateRuns(edits, wide ? 20 : 12);
+      let emptySeconds = 0, mediaEdit = false;
+      for (let entry = 0; entry < entries; entry++) {
+        const at = edits.dataOffset + 8 + entry * (wide ? 20 : 12);
+        const duration = wide ? Number(moov.readBigUInt64BE(at)) : moov.readUInt32BE(at);
+        const mediaTime = wide ? Number(moov.readBigInt64BE(at + 8)) : moov.readInt32BE(at + 4);
+        const rateAt = at + (wide ? 16 : 8);
+        if (moov.readInt16BE(rateAt) !== 1 || moov.readInt16BE(rateAt + 2) !== 0) throw new Error("MP4 non-unit edit rate requires a presentation mapping.");
+        if (mediaTime === -1 && !mediaEdit && movieScale > 0) emptySeconds += duration / movieScale;
+        else if (mediaTime >= 0 && !mediaEdit) { emptyShiftSeconds = emptySeconds; mediaShiftTicks = mediaTime; mediaEdit = true; }
+        else throw new Error("MP4 repeated edits require a presentation mapping.");
+      }
+    }
+    const audioPreroll = track.seekPrerollSeconds || (track.codecId === "Opus" ? 0.08 : 0);
+    index.declareTrack(id, { type: track.type, codecId: track.codecId,
+      codecRanges: track.type === "subtitle" ? [] : [[moovOffset + stsd.dataOffset, moovOffset + stsd.end - 1]],
+      prerollSeconds: audioPreroll, reorderDepth: track.reorderDepth ?? 0 });
+    index.reservePackets(id, count);
+    let decodeTicks = 0, syncAt = 0;
+    for (let sample = 0; sample < count; sample++) {
+      const duration = nextDuration();
+      const pts = (decodeTicks + nextComposition() - mediaShiftTicks) / scale + emptyShiftSeconds;
+      const dts = (decodeTicks - mediaShiftTicks) / scale + emptyShiftSeconds;
+      decodeTicks += duration;
+      const size = sizeAt(sample), start = nextAddress(size);
+      const keyframe = !stss || (syncAt < syncEntries && moov.readUInt32BE(stss.dataOffset + 8 + syncAt * 4) === sample + 1);
+      if (stss && keyframe) syncAt++;
+      if (size === 0) continue;
+      if (!Number.isSafeInteger(start) || start < 0 || start + size > fileSize) throw new Error("MP4 sample address exceeds the file.");
+      const discardPaddingSeconds = track.type === "audio" && !(track.codecDelaySeconds > 0)
+        ? -Math.min(duration / scale, Math.max(0, emptyShiftSeconds - pts)) : 0;
+      index.append(id, { pts, dts, duration: duration / scale, keyframe, ranges: [[start, start + size - 1]],
+        ...(discardPaddingSeconds ? { discardPaddingSeconds } : {}) });
+    }
+    index.complete(id);
   }
-  return durations;
+  return index;
+  } catch (error) {
+    index.dispose();
+    throw error;
+  }
 }
 
-/**
- * Sample sizes, whether the table states one for all or one for each.
- *
- * @param {Buffer} moov
- * @param {{ dataOffset: number, end: number }} stsz
- * @returns {number[]}
- */
-function sampleSizes(moov, stsz) {
-  const uniform = moov.readUInt32BE(stsz.dataOffset + 4);
-  const count = moov.readUInt32BE(stsz.dataOffset + 8);
-  if (uniform > 0) {
-    return new Array(count).fill(uniform);
-  }
-  const sizes = new Array(count).fill(0);
-  let at = stsz.dataOffset + 12;
-  for (let index = 0; index < count && at + 4 <= stsz.end; index += 1, at += 4) {
-    sizes[index] = moov.readUInt32BE(at);
-  }
-  return sizes;
+/** Read compressed timing runs without expanding a whole-track array. */
+function sampleRunReader(bytes, table, signed = false) {
+  let at = table.dataOffset + 8, remaining = 0, value = 0;
+  return () => {
+    while (!remaining) {
+      if (at + 8 > table.end) throw new Error("MP4 sample timing run ended early.");
+      remaining = bytes.readUInt32BE(at);
+      value = signed ? bytes.readInt32BE(at + 4) : bytes.readUInt32BE(at + 4);
+      at += 8;
+    }
+    remaining--;
+    return value;
+  };
 }
 
-/**
- * Where every sample of a track begins in the file.
- *
- * The sample-to-chunk table says how many samples each run of chunks holds, and
- * the chunk-offset table says where each chunk starts; a sample's own offset is
- * its chunk's start plus the sizes of the samples before it in that chunk.
- *
- * @param {Buffer} moov
- * @param {{ dataOffset: number, end: number }} stsc
- * @param {number[]} chunkOffsets
- * @param {number[]} sizes
- * @returns {number[]}
- */
-function sampleOffsets(moov, stsc, chunkOffsets, sizes) {
-  const offsets = new Array(sizes.length).fill(0);
-  const entries = moov.readUInt32BE(stsc.dataOffset + 4);
-  /** @type {{ firstChunk: number, perChunk: number }[]} */
-  const runs = [];
-  let at = stsc.dataOffset + 8;
-  for (let entry = 0; entry < entries && at + 12 <= stsc.end; entry += 1, at += 12) {
-    runs.push({ firstChunk: moov.readUInt32BE(at), perChunk: moov.readUInt32BE(at + 4) });
-  }
-  let sample = 0;
-  for (let run = 0; run < runs.length && sample < sizes.length; run += 1) {
-    const from = runs[run].firstChunk;
-    const to = run + 1 < runs.length ? runs[run + 1].firstChunk - 1 : chunkOffsets.length;
-    for (let chunk = from; chunk <= to && sample < sizes.length; chunk += 1) {
-      let inChunk = chunkOffsets[chunk - 1];
-      if (inChunk === undefined) {
-        break;
-      }
-      for (let index = 0; index < runs[run].perChunk && sample < sizes.length; index += 1, sample += 1) {
-        offsets[sample] = inChunk;
-        inChunk += sizes[sample];
-      }
+/** Sample addresses follow chunk runs directly from the retained tables. */
+function sampleAddressReader(bytes, stsc, chunks, width, runs) {
+  let chunk = 1, run = 0, remaining = 0, address = 0;
+  return size => {
+    if (!remaining) {
+      while (run + 1 < runs && bytes.readUInt32BE(stsc.dataOffset + 8 + (run + 1) * 12) <= chunk) run++;
+      remaining = bytes.readUInt32BE(stsc.dataOffset + 12 + run * 12);
+      const at = chunks.dataOffset + 8 + (chunk - 1) * width;
+      address = width === 8 ? Number(bytes.readBigUInt64BE(at)) : bytes.readUInt32BE(at);
+      chunk++;
     }
-  }
-  return offsets;
+    const start = address;
+    address += size;
+    remaining--;
+    return start;
+  };
 }
 
 /**
@@ -812,6 +1129,57 @@ function sampleOffsets(moov, stsc, chunkOffsets, sizes) {
  * @param {Buffer} moov - The whole `moov` box, its header included.
  * @returns {{ tracks: Mp4SubtitleTrack[] } | null}
  */
+function subtitleSampleView(bytes, { stsz, stts, stsc, chunks, timescale }) {
+  const count = bytes.readUInt32BE(stsz.dataOffset + 8), uniform = bytes.readUInt32BE(stsz.dataOffset + 4);
+  const sizeAt = sample => uniform || bytes.readUInt32BE(stsz.dataOffset + 12 + sample * 4);
+  if (!uniform && stsz.dataOffset + 12 + count * 4 > stsz.end) throw new Error("MP4 subtitle sample sizes are truncated.");
+  const entries = (table, width) => {
+    const value = bytes.readUInt32BE(table.dataOffset + 4);
+    if (table.dataOffset + 8 + value * width > table.end) throw new Error("MP4 subtitle sample table is truncated.");
+    return value;
+  };
+  const timeEntries = entries(stts, 8), runs = entries(stsc, 12), width = chunks.type === "co64" ? 8 : 4;
+  const chunkCount = entries(chunks, width);
+  let timed = 0, addressed = 0, previous = 0;
+  for (let entry = 0; entry < timeEntries; entry++) timed += bytes.readUInt32BE(stts.dataOffset + 8 + entry * 8);
+  for (let run = 0; run < runs; run++) {
+    const at = stsc.dataOffset + 8 + run * 12;
+    const first = bytes.readUInt32BE(at), perChunk = bytes.readUInt32BE(at + 4);
+    const next = run + 1 < runs ? bytes.readUInt32BE(at + 12) : chunkCount + 1;
+    if (first <= previous || (run === 0 && first !== 1) || next <= first || next > chunkCount + 1 || !perChunk) throw new Error("MP4 subtitle chunk run is invalid.");
+    addressed += (next - first) * perChunk;
+    previous = first;
+  }
+  if (timed !== count || addressed !== count) throw new Error("MP4 subtitle sample tables disagree on their count.");
+  let length = uniform ? uniform > 2 ? count : 0 : 0;
+  if (!uniform) for (let sample = 0; sample < count; sample++) if (sizeAt(sample) > 2) length++;
+  const view = {
+    length,
+    *[Symbol.iterator]() {
+      if (!length) return;
+      const nextDuration = sampleRunReader(bytes, stts);
+      const nextAddress = sampleAddressReader(bytes, stsc, chunks, width, runs);
+      let ticks = 0;
+      for (let sample = 0; sample < count; sample++) {
+        const startSeconds = ticks / timescale;
+        ticks += nextDuration();
+        const size = sizeAt(sample), offset = nextAddress(size);
+        if (size > 2) yield { startSeconds, endSeconds: ticks / timescale, offset, size };
+      }
+    },
+    map(callback) { return Array.from(this, callback); },
+    at(index) {
+      if (index < 0) index += length;
+      if (!Number.isSafeInteger(index) || index < 0 || index >= length) return undefined;
+      let current = 0;
+      for (const sample of this) if (current++ === index) return sample;
+    }
+  };
+  return new Proxy(view, { get(target, property, receiver) {
+    return typeof property === "string" && /^(0|[1-9]\d*)$/.test(property) ? target.at(Number(property)) : Reflect.get(target, property, receiver);
+  } });
+}
+
 function subtitlePlanFromMoov(moov) {
   if (!moov || moov.length < HEADER_BYTES) {
     return null;
@@ -915,41 +1283,7 @@ function subtitlePlanFromMoov(moov) {
       continue;
     }
 
-    const sizes = sampleSizes(moov, stsz);
-    const durations = sampleDurations(moov, stts, sizes.length);
-    const chunkOffsets = [];
-    if (stco) {
-      const count = moov.readUInt32BE(stco.dataOffset + 4);
-      let at = stco.dataOffset + 8;
-      for (let index = 0; index < count && at + 4 <= stco.end; index += 1, at += 4) {
-        chunkOffsets.push(moov.readUInt32BE(at));
-      }
-    } else {
-      const count = moov.readUInt32BE(co64.dataOffset + 4);
-      let at = co64.dataOffset + 8;
-      for (let index = 0; index < count && at + 8 <= co64.end; index += 1, at += 8) {
-        chunkOffsets.push(Number(moov.readBigUInt64BE(at)));
-      }
-    }
-    const offsets = sampleOffsets(moov, stsc, chunkOffsets, sizes);
-
-    /** @type {Mp4SubtitleSample[]} */
-    const samples = [];
-    let ticks = 0;
-    for (let index = 0; index < sizes.length; index += 1) {
-      const start = ticks / timescale;
-      ticks += durations[index];
-      // An empty sample is a gap between cues, which the format uses to say
-      // "nothing on screen"; it is not a cue and would show as a blank line.
-      if (sizes[index] > 2) {
-        samples.push({
-          startSeconds: start,
-          endSeconds: ticks / timescale,
-          offset: offsets[index],
-          size: sizes[index]
-        });
-      }
-    }
+    const samples = subtitleSampleView(moov, { stsz, stts, stsc, chunks: stco ?? co64, timescale });
     tracks.push({
       trackId,
       declaredIndex,
@@ -1150,7 +1484,7 @@ function findAllBoxes(buffer, start, end, type) {
  * @param {Set<number>} wanted - Sample numbers (1-based).
  * @returns {number[]} Seconds, ascending.
  */
-function resolveSampleTimes(buffer, stts, timescale, wanted, offsets = null) {
+function resolveSampleTimes(buffer, stts, timescale, wanted, offsets = null, editShift = 0) {
   const entryCount = buffer.readUInt32BE(stts.dataOffset + 4);
   const times = [];
   let sampleNumber = 1;
@@ -1164,7 +1498,7 @@ function resolveSampleTimes(buffer, stts, timescale, wanted, offsets = null) {
         // `CT(n) = DT(n) + CTTS(n)` — ISO/IEC 14496-12 §8.6.1.3. The offset is
         // what turns decode order into the order frames are shown in, and it is
         // the timeline ffmpeg cuts on.
-        times.push((ticks + (offsets?.get(sampleNumber) ?? 0)) / timescale);
+        times.push((ticks + (offsets?.get(sampleNumber) ?? 0) - editShift) / timescale);
       }
       ticks += delta;
       sampleNumber += 1;
@@ -1339,15 +1673,14 @@ function keyframeTimesFromMoov(moov, headerBytes) {
     const elst = edts && findBox(moov, edts.dataOffset, edts.end, "elst");
     const editShift = elst ? readEditShift(moov, elst) : 0;
 
-    const times = resolveSampleTimes(moov, stts, timescale, wanted, offsets);
+    const times = resolveSampleTimes(moov, stts, timescale, wanted, offsets, editShift);
     if (times.length > 0) {
       // A shift applied after the division would be in the wrong units: the
       // edit's `media_time` is in MEDIA ticks, like everything else here.
-      const shifted = editShift === 0 ? times : times.map((time) => time - editShift / timescale);
       // A negative time is not a position in the file. It happens when an edit
       // starts later than a keyframe the table lists, and those frames are not
       // presented at all.
-      return shifted.filter((time) => time >= 0);
+      return times.filter((time) => time >= 0);
     }
   }
   return null;

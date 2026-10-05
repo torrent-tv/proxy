@@ -15,19 +15,6 @@ import { medianOf, movedBeyondScatter, READINGS_KEPT, scatterOf } from "../learn
 import { ENCODE_RUN_STATE, processCanBeSignalled } from "../encode-run-state.js";
 import { SourceFiles } from "../../media/SourceFile.js";
 
-// How far ahead of its own read head a reader asks the swarm for, expressed in
-// seconds of PLAYBACK. The torrent thread can only think in bytes, and a fixed
-// byte window is wrong at both ends of the range: 32 MB is half a minute of a
-// 1080p film and about four seconds of a disc remux. Duration and file size are
-// both known here, so the window is sized where the knowledge is and sent down
-// on the ffmpeg input URL.
-const READ_WINDOW_SECONDS = 30;
-// Bounds, so a wrong or unusual byte rate cannot ask for something absurd. The
-// floor keeps a few pieces in flight on a low-bitrate file; the ceiling keeps
-// one reader from claiming more than a fraction of the piece store.
-const READ_WINDOW_MIN_BYTES = 16 * 1024 * 1024;
-const READ_WINDOW_MAX_BYTES = 96 * 1024 * 1024;
-
 export class HostLoad {
   /** What this reads and asks of the rest of the proxy, and nothing else. @type {object} */
   #host;
@@ -42,8 +29,7 @@ export class HostLoad {
   #idleLoadSample = null;
 
   /**
-   * How long each file is in bytes, from the stats call the read window already
-   * makes. The torrent moves the CONTAINER, so this — not the video stream's
+   * How long each file is in bytes, from its declared source statistics. The torrent moves the CONTAINER, so this — not the video stream's
    * bitrate — is what its work should be priced against.
    *
    * @type {Map<string, number>}
@@ -96,67 +82,18 @@ export class HostLoad {
     this.#host = host;
   }
 
-  /**
-   * The read-ahead window for a file, in bytes, sized from how many seconds of
-   * playback it holds.
-   *
-   * @param {string} sourceKey
-   * @param {number} fileIndex
-   * @param {number} durationSeconds
-   * @returns {Promise<number>} Zero when the byte rate cannot be established,
-   *   which leaves the reader on its own default.
-   */
-  async readWindowBytesFor(sourceKey, fileIndex, durationSeconds) {
-    // The length read here is also what prices the torrent's own work for this
-    // file, so it is remembered rather than discarded.
-
-    if (!this.#host.getSourceStats || !Number.isFinite(durationSeconds) || durationSeconds <= 0) {
-      return 0;
-    }
-    let fileLength = 0;
+  /** Read the declared source length for pricing; this does not request file bytes. */
+  async readFileLength(sourceKey, fileIndex) {
+    if (!this.#host.getSourceStats) return null;
     try {
       const stats = await this.#host.getSourceStats(sourceKey, fileIndex);
-      fileLength = Number(stats?.fileLength);
+      const length = Number(stats?.fileLength);
+      if (!Number.isFinite(length) || length <= 0) return null;
+      this.fileLengthByKey.set(SourceFiles.keyFor(sourceKey, fileIndex), length);
+      return length;
     } catch {
-      return 0;
+      return null;
     }
-    if (!Number.isFinite(fileLength) || fileLength <= 0) {
-      return 0;
-    }
-    this.fileLengthByKey.set(SourceFiles.keyFor(sourceKey, fileIndex), fileLength);
-    const bytesPerSecond = fileLength / durationSeconds;
-    // Shared between the readers this file already has. The window is stated in
-    // seconds of playback and the store's memory is one budget for the whole
-    // torrent, so N readers asking for thirty seconds each ask for N times what
-    // was provided for — and on 2026-08-15 that is exactly what happened: a
-    // viewer with a picture and an audio track had every resident piece held at
-    // once, a read ended with zero bytes, and every encoder on the file took
-    // that for the end of it.
-    //
-    // Dividing keeps the promise the budget was written against. It is not the
-    // sliding window of roadmap item 8 — pieces still leave only by the store's
-    // own eviction — but it removes the multiplication that broke it.
-    const readers = Math.max(1, this.#readersOn(sourceKey, fileIndex));
-    const wanted = Math.round((bytesPerSecond * READ_WINDOW_SECONDS) / readers);
-    return Math.min(READ_WINDOW_MAX_BYTES, Math.max(READ_WINDOW_MIN_BYTES, wanted));
-  }
-
-  /**
-   * How many live sessions read this file: the picture, any rung being warmed
-   * beside it, and any audio track published on its own.
-   *
-   * @param {string} sourceKey
-   * @param {number} fileIndex
-   * @returns {number}
-   */
-  #readersOn(sourceKey, fileIndex) {
-    let readers = 0;
-    for (const session of this.#host.outputs.values()) {
-      if (session?.file.sourceKey === sourceKey && session.file.fileIndex === fileIndex) {
-        readers += 1;
-      }
-    }
-    return readers;
   }
 
   /**
@@ -172,16 +109,23 @@ export class HostLoad {
    * is the torrent's.
    */
   async #learnTorrentCost() {
+    const activityBefore = this.#host.readMetadataActivity?.();
+    const bytes = await this.#torrentBytesMoved();
     const now = {
       takenAt: Date.now(),
       cpuSeconds: this.#host.readProxyCpuSeconds(),
-      bytes: await this.#torrentBytesMoved()
+      bytes,
+      metadata: this.#host.readMetadataActivity?.()
     };
     const previous = this.#idleLoadSample;
     this.#idleLoadSample = now;
     if (previous === null || now.bytes === null || previous.bytes === null) {
       return;
     }
+    // Process CPU includes metadata parsing. Keep the sample as a baseline,
+    // but never attribute an interval containing that work to torrent bytes.
+    if (activityBefore?.active || now.metadata?.active || previous.metadata?.active ||
+      activityBefore?.epoch !== now.metadata?.epoch || previous.metadata?.epoch !== now.metadata?.epoch) return;
     const elapsedSec = (now.takenAt - previous.takenAt) / 1000;
     const megabytes = (now.bytes - previous.bytes) / 1e6;
     // Divided by the cores, because `process.cpuUsage()` adds up every thread
@@ -260,6 +204,8 @@ export class HostLoad {
         // client, whichever of its files are being read. Kept per source and
         // divided among the files being watched, so two episodes of one pack
         // do not each charge the machine for the whole download.
+        const length = Number(stats?.fileLength);
+        if (Number.isFinite(length) && length > 0) this.fileLengthByKey.set(key, length);
         const rate = Number(stats?.downloadSpeed);
         if (Number.isFinite(rate) && rate >= 0) {
           measured.set(source.sourceKey, rate);

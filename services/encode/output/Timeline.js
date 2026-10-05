@@ -118,6 +118,17 @@ export class Timeline {
     return this.sourceTimes[Math.min(index, this.sourceTimes.length - 1)] ?? null;
   }
 
+  /** Address source packets with exact cuts, translated only for another file. */
+  sourceInterval(fromIndex, toIndex, sourceStartTime = 0) {
+    const base = this.sourceStartOf(0);
+    const from = this.sourceStartOf(fromIndex), to = this.sourceStartOf(toIndex + 1);
+    const shift = sourceStartTime - (base ?? 0);
+    return {
+      from: from === null ? this.publishedStartOf(fromIndex) + sourceStartTime : from + shift,
+      to: to === null ? this.publishedStartOf(toIndex + 1) + sourceStartTime : to + shift
+    };
+  }
+
   /**
    * Where segment `index` begins on the live table — where a run cutting now
    * will really put it.

@@ -43,6 +43,29 @@ const sharedContainers = new ContainerOrchestrator();
  */
 export function heldFileOver(torrent, fileIndex, sourceKey, options = {}) {
   const file = torrent?.files?.[fileIndex] ?? {};
+  // This fake storage serves the prepared file bytes without a torrent client.
+  // Production reads storage directly; streams here only expose the test data.
+  if (!torrent.store) {
+    torrent.store = {
+      protectedRanges: () => [],
+      locationOf: (index) => torrent.bitfield.get(index) ? "memory" : "missing",
+      holdAvailable: (indexes) => indexes.every((index) => torrent.bitfield.get(index)) ? () => {} : null,
+      get(index, { offset, length }, callback) {
+        const from = index * torrent.pieceLength + offset;
+        const to = from + length - 1;
+        const read = async () => {
+          const chunks = [];
+          for (const item of torrent.files) {
+            const start = Math.max(from, item.offset);
+            const end = Math.min(to, item.offset + item.length - 1);
+            if (end >= start) chunks.push(await readThroughStream(item, start - item.offset, end - item.offset));
+          }
+          return Buffer.concat(chunks);
+        };
+        read().then((bytes) => callback(null, bytes), (error) => callback(error));
+      }
+    };
+  }
   const containers = options.containers ?? sharedContainers;
   const readRange = options.readRange ?? ((start, end) => readThroughStream(file, start, end));
   return {

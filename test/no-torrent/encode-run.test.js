@@ -22,6 +22,7 @@ class FakeProcess extends EventEmitter {
   constructor() {
     super();
     this.pid = 4242;
+    this.stdin = new EventEmitter();
     this.signals = [];
   }
 
@@ -59,6 +60,16 @@ function makeRun(span = {}) {
   });
   return { run, process: process_, lines, ends };
 }
+
+test("an input error between writes is observed without losing the decoder failure", () => {
+  const { run, process, lines, ends } = makeRun();
+  run.lastError = "invalid decoder data";
+  assert.doesNotThrow(() => process.stdin.emit("error", new Error("write EPIPE")));
+  assert.equal(run.lastError, "invalid decoder data");
+  assert.ok(lines.some(([level, line]) => level === "warn" && line.includes("write EPIPE")));
+  process.exitWith(1);
+  assert.equal(ends.length, 1);
+});
 
 test("a start says why it is starting and with what", () => {
   // The argument list alone cannot say whether this was a first open, a seek, a
@@ -153,6 +164,7 @@ test("its speed is film made between closed pieces over its own working time", (
   process_.stdout = new EventEmitter();
   process_.stdio = [null, process_.stdout, null, new EventEmitter()];
   const readings = [];
+  const closedPairs = [];
   const run = new EncodeRun({
     address: "torrent:abc:fmt=fmp4:grid=kf@0:video-only:v=0/copy",
     encoder: new SoftwareEncoder(),
@@ -162,7 +174,8 @@ test("its speed is film made between closed pieces over its own working time", (
     spawn: () => process_,
     logger: { info() {}, warn() {} },
     now: () => clock.at,
-    onSpeedMeasured: (reading) => readings.push(reading)
+    onSpeedMeasured: (reading) => readings.push(reading),
+    onClosed: (name, following) => { closedPairs.push([name, following]); return name; }
   });
   assert.equal(run.speedX, 0, "nothing measured yet");
   const report = (seconds) => process_.stdout.emit("data", `out_time_ms=${seconds * 1_000_000}\n`);
@@ -180,6 +193,7 @@ test("its speed is film made between closed pieces over its own working time", (
   clock.at += 2000;
   report(12);
   closed("c"); // "b" is published
+  assert.deepEqual(closedPairs, [["a", "b"], ["b", "c"]], "only a named closed successor may supply neighboring media");
   assert.equal(run.speedX, 4, "8 s of film over 2 s of work");
   assert.deepEqual(readings, [{ speed: 4, at: 34_000 }], "told once, with when");
 });
@@ -198,7 +212,7 @@ test("CSV closure times survive split channel chunks and a zero first-entry star
     address: "audio", encoder: new SoftwareEncoder(), from: 13, to: 14,
     buildArgs: () => [], spawn: () => process_, logger: { info() {}, warn() {} },
     indexOfName: name => Number(name.match(/(\d+)\.mp4$/)[1]),
-    onClosed: (name, timing) => { closed.push({ name, timing }); return name; }
+    onClosed: (name, _following, timing) => { closed.push({ name, timing }); return name; }
   });
   process_.stdio[3].emit("data", "making-0-00013.mp4,0.000000,81.364");
   process_.stdio[3].emit("data", "000\nmaking-0-00014.mp4,81.364000,91.800000\n");

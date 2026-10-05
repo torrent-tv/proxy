@@ -27,6 +27,7 @@ import os from "node:os";
 import path from "node:path";
 import { wireOutputs } from "../../../services/server/wire-outputs.js";
 import { SegmentStore } from "../../../services/storage/segment-store/SegmentStore.js";
+import { fakeEncodeInputs } from "./admitted-input.js";
 
 /**
  * A manager whose produced segments live where nothing else can reach them.
@@ -45,6 +46,7 @@ export function managerWithOwnStore(options = {}) {
     ffmpegBin: "ffmpeg",
     localBindHost: "127.0.0.1",
     localPort: 9090,
+    encodeInputs: fakeEncodeInputs(),
     // What this host has measured about itself is kept beside the store, not
     // beside the installed proxy: read from there, one run's figures became
     // the next run's premises, and a check passed only on a machine that had

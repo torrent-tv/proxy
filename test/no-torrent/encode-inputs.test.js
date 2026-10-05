@@ -1,0 +1,99 @@
+import test from "node:test";
+import assert from "node:assert/strict";
+import { setImmediate } from "node:timers/promises";
+import { EncodeInputs } from "../../services/encode/EncodeInputs.js";
+
+const output = { id: "output" };
+const source = { sourceKey: "source", fileIndex: 0, input: { ranges: [[0, 1]], tracks: [{
+  track: { type: "video", codecId: "vp8", width: 64, height: 64 },
+  packets: [{ pts: 0, duration: 1, keyframe: true, ranges: [[0, 1]] }]
+}] } };
+
+test("run admission is synchronous and retries missing bytes only after an availability event", async () => {
+  let reads = 0, available = false, changed = 0;
+  const inputs = new EncodeInputs({ resolve: async () => ({ kind: "result", sources: [source] }),
+    readRanges: async () => { reads++; return available ? [Buffer.from("ab")] : null; },
+    reviseBudget: async () => inputs.allow(100), changed: () => changed++, failed: error => { throw error; } });
+  assert.equal(inputs.take(output, 0, 0), null);
+  await setImmediate();
+  assert.equal(reads, 1);
+  for (let index = 0; index < 10; index++) assert.equal(inputs.take(output, 0, 0), null);
+  assert.equal(reads, 1);
+  available = true;
+  inputs.bytesChanged();
+  await setImmediate();
+  assert.equal(changed, 1);
+  assert.equal(inputs.held(), 2);
+  const admitted = inputs.take(output, 0, 0);
+  assert.equal(admitted.kind, "result");
+  admitted.release();
+  assert.equal(inputs.held(), 0);
+});
+
+test("withdrawing an output during a read releases the late result without announcing readiness", async () => {
+  let settle, changed = 0;
+  const inputs = new EncodeInputs({ resolve: async () => ({ kind: "result", sources: [source] }),
+    readRanges: () => new Promise(resolve => { settle = resolve; }), reviseBudget: async () => inputs.allow(100),
+    changed: () => changed++, failed: error => { throw error; } });
+  inputs.take(output, 0, 0);
+  await setImmediate();
+  assert.equal(inputs.held(), 2);
+  inputs.forget(output);
+  settle([Buffer.from("ab")]);
+  await setImmediate();
+  assert.equal(inputs.held(), 0);
+  assert.equal(changed, 0);
+});
+
+test("an availability event during an unsuccessful read is not lost", async () => {
+  let settle, reads = 0;
+  const inputs = new EncodeInputs({ resolve: async () => ({ kind: "result", sources: [source] }),
+    readRanges: () => ++reads === 1 ? new Promise(resolve => { settle = resolve; }) : Promise.resolve([Buffer.from("ab")]),
+    reviseBudget: async () => inputs.allow(100), changed: () => {}, failed: error => { throw error; } });
+  inputs.take(output, 0, 0);
+  await setImmediate();
+  inputs.bytesChanged();
+  settle(null);
+  await setImmediate();
+  assert.equal(reads, 2);
+  inputs.forget(output);
+  assert.equal(inputs.held(), 0);
+});
+
+test("withdrawing segment demand returns a prepared input immediately", async () => {
+  const inputs = new EncodeInputs({ resolve: async () => ({ kind: "result", sources: [source] }),
+    readRanges: async () => [Buffer.from("ab")], reviseBudget: async () => inputs.allow(100),
+    changed: () => {}, failed: error => { throw error; } });
+  inputs.take(output, 5, 5);
+  await setImmediate();
+  assert.equal(inputs.held(), 2);
+  inputs.retain(output, [{ from: 0, to: 4 }]);
+  assert.equal(inputs.held(), 0);
+});
+
+test("an urgent complete input exceeding measured machine capacity is terminal before reading", async () => {
+  let reads = 0, announced;
+  const inputs = new EncodeInputs({ resolve: async () => ({ kind: "result", sources: [source] }),
+    readRanges: async () => { reads++; return [Buffer.from("ab")]; }, reviseBudget: async () => inputs.allow(1),
+    capacity: () => 1, changed: (_output, result) => { announced = result; }, failed: error => { throw error; } });
+  inputs.take(output, 0, 0);
+  await setImmediate();
+  assert.equal(reads, 0);
+  assert.equal(announced.reason, "source-input-exceeds-memory-capacity");
+  assert.equal(inputs.failureOf(output), announced);
+  assert.equal(inputs.wanted(), 0);
+});
+
+test("nonurgent memory shortage can become a terminal reason when that segment becomes urgent", async () => {
+  let urgent = false;
+  const inputs = new EncodeInputs({ resolve: async () => ({ kind: "result", sources: [source] }),
+    readRanges: async () => assert.fail("Insufficient memory must prevent reads"), reviseBudget: async () => inputs.allow(1),
+    capacity: () => 1, urgent: () => urgent, changed: () => {}, failed: error => { throw error; } });
+  inputs.take(output, 0, 0);
+  await setImmediate();
+  assert.equal(inputs.failureOf(output), null);
+  urgent = true;
+  inputs.retain(output, [{ from: 0, to: 1 }]);
+  await setImmediate();
+  assert.equal(inputs.failureOf(output).reason, "source-input-exceeds-memory-capacity");
+});

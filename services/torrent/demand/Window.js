@@ -26,7 +26,7 @@ export class Window {
    * @param {number} params.byteEnd - Last byte, inclusive.
    * @param {number} params.urgency - A value of {@link import("./Urgency.js").Urgency}.
    */
-  constructor({ claimant, fileIndex, byteStart, byteEnd, urgency }) {
+  constructor({ claimant, fileIndex, byteStart, byteEnd, urgency, priority = 1, deadlineAt = Number.POSITIVE_INFINITY, requestId = claimant, order = 0 }) {
     if (typeof claimant !== "string" || claimant.length === 0) {
       throw new Error("A window needs a claimant to release it by.");
     }
@@ -47,6 +47,14 @@ export class Window {
     this.byteStart = byteStart;
     this.byteEnd = byteEnd;
     this.urgency = urgency;
+    if (!Number.isFinite(priority) || priority < 1 || priority > 100 ||
+      !(Number.isFinite(deadlineAt) || deadlineAt === Number.POSITIVE_INFINITY) || !Number.isSafeInteger(order) || order < 0) {
+      throw new TypeError("Invalid download priority or deadline.");
+    }
+    this.priority = priority;
+    this.deadlineAt = deadlineAt;
+    this.requestId = requestId;
+    this.order = order;
     Object.freeze(this);
   }
 
@@ -80,7 +88,10 @@ export class Window {
       && this.fileIndex === other.fileIndex
       && this.byteStart === other.byteStart
       && this.byteEnd === other.byteEnd
-      && this.urgency === other.urgency;
+      && this.urgency === other.urgency
+      && this.priority === other.priority
+      && this.deadlineAt === other.deadlineAt
+      && this.order === other.order;
   }
 
   /** @returns {string} */

@@ -20,6 +20,30 @@ import { MachineBudget } from "../../services/storage/MachineBudget.js";
 
 const MEGABYTE = 1024 * 1024;
 
+test("a demand change during a budget reading queues a fresh reading without parallel division", async () => {
+  let release, entered;
+  const started = new Promise(resolve => { entered = resolve; });
+  const reading = new Promise(resolve => { release = resolve; });
+  let reads = 0, wanted = 10, allowed;
+  const budget = new MachineBudget({ policy: { kind: "fixed", bytes: 100 } });
+  budget.defineResource({ name: "memory", readFree: async () => {
+    if (++reads === 1) { entered(); await reading; }
+    return 100;
+  } });
+  budget.register({ name: "index", resource: "memory", held: () => 0, wanted: () => wanted,
+    required: () => wanted, allow: value => { allowed = value; } });
+  const first = budget.revise();
+  await started;
+  wanted = 50;
+  const second = budget.revise();
+  assert.equal(first, second);
+  assert.equal(reads, 1);
+  release();
+  await first;
+  assert.equal(reads, 2);
+  assert.equal(allowed, 50);
+});
+
 /**
  * @param {{ name: string, resource: string, held?: number, wanted: number, minimum?: number }} shape
  * @returns {{ claimant: object, allowed: () => number }}

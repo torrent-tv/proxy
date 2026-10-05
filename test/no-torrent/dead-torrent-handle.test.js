@@ -19,7 +19,36 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
-import { isUsableTorrentHandle } from "../../services/torrent/worker/handle-state.js";
+import { isUsableTorrentHandle, requireCurrentTorrent } from "../../services/torrent/worker/handle-state.js";
+
+test("a late source resolution cannot replace a newer lifetime", async () => {
+  let resolve;
+  const old = new Promise(done => { resolve = done; });
+  const handles = new Map([["source", old]]);
+  const read = requireCurrentTorrent(handles, "source");
+  const fresh = Promise.resolve({ files: [{ name: "fresh.mkv" }] });
+  handles.set("source", fresh);
+  resolve({ files: [{ name: "old.mkv" }] });
+  await assert.rejects(read, { code: "SOURCE_FORGOTTEN" });
+  assert.equal(handles.get("source"), fresh);
+  assert.equal((await requireCurrentTorrent(handles, "source")).files[0].name, "fresh.mkv");
+});
+
+test("retired and destroyed sources reject reads without creating another source", async () => {
+  const dead = Promise.resolve({ destroyed: true, files: [{ name: "old.mkv" }] });
+  const handles = new Map([["source", dead]]);
+  await assert.rejects(requireCurrentTorrent(handles, "source"), { code: "SOURCE_FORGOTTEN" });
+  assert.equal(handles.size, 0);
+  await assert.rejects(requireCurrentTorrent(handles, "source"), { code: "SOURCE_FORGOTTEN" });
+  let resolve;
+  const pending = new Promise(done => { resolve = done; });
+  handles.set("source", pending);
+  const read = requireCurrentTorrent(handles, "source");
+  handles.delete("source");
+  resolve({ files: [{ name: "retired.mkv" }] });
+  await assert.rejects(read, { code: "SOURCE_FORGOTTEN" });
+  assert.equal(handles.size, 0);
+});
 
 test("a live torrent is usable", () => {
   assert.equal(isUsableTorrentHandle({ destroyed: false, files: [{ name: "a.mkv" }] }), true);

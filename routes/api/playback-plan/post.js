@@ -24,23 +24,37 @@ function getPayload(body) {
   return {};
 }
 
-export async function handleApiPlaybackPlanPost(req, reply, { playbackPlanner, sourceRegistry, torrentPool, ffmpegBin, localBaseUrl }) {
+export async function handleApiPlaybackPlanPost(req, reply, { playbackPlanner, sourceRegistry, torrentPool, ffmpegBin, localBaseUrl, viewers }) {
   const payload = getPayload(req.body);
   const sourceKey = typeof payload.sourceKey === "string" ? payload.sourceKey.trim() : "";
   const fileIndex = Number(payload.fileIndex);
   const userAgent = typeof payload.userAgent === "string" ? payload.userAgent : "";
 
-  if (!sourceKey || !Number.isInteger(fileIndex) || fileIndex < 0) {
+  if (!sourceKey || !Number.isSafeInteger(fileIndex) || fileIndex < 0) {
     return reply.code(400).send({ error: "sourceKey and valid fileIndex are required." });
   }
+  const consumerId = typeof payload.consumerId === "string" ? payload.consumerId.trim() : "";
+  const selection = {};
+  if (typeof payload.positionSeconds === "number" && Number.isFinite(payload.positionSeconds) && payload.positionSeconds >= 0) selection.positionSeconds = payload.positionSeconds;
+  if (typeof payload.wantsToPlay === "boolean") selection.wantsToPlay = payload.wantsToPlay;
+  if (consumerId) viewers?.selectsFile(consumerId, sourceKey, fileIndex, Date.now(), selection);
 
   // Interface delegates to PlaybackController (orchestrator + domain). Keeps route thin.
   const { PlaybackController } = await import("../../../services/server/controllers/PlaybackController.js");
   const controller = new PlaybackController({ torrentPool, sourceRegistry, ffmpegBin, localBaseUrl, playbackPlanner });
+  const cancellation = new AbortController();
+  const aborted = () => cancellation.abort();
+  const closed = () => { if (!reply.raw?.writableEnded) aborted(); };
+  req.raw?.once?.("aborted", aborted);
+  reply.raw?.once?.("close", closed);
+  if (req.raw?.aborted) aborted();
   try {
-    const plan = await controller.getPlan({ sourceKey, fileIndex, userAgent, maxWaitMs: 8_000 });
+    const params = { sourceKey, fileIndex, userAgent };
+    const plan = payload.waitForReady === true
+      ? await controller.getReadyPlan(params, { signal: cancellation.signal }) : await controller.getPlan(params);
     return reply.send(plan);
   } catch (error) {
+    if (cancellation.signal.aborted) return;
     if (error instanceof Error && error.code === "SOURCE_NOT_FOUND") {
       return reply.code(404).send({ error: error.message });
     }
@@ -48,6 +62,9 @@ export async function handleApiPlaybackPlanPost(req, reply, { playbackPlanner, s
       return reply.code(404).send({ error: error.message });
     }
     const message = error instanceof Error ? error.message : String(error);
-    return reply.code(500).send({ error: `Failed to prepare playback plan: ${message}` });
+    return reply.code(500).send({ error: `Failed to prepare playback plan: ${message}`, code: error?.code, canRetry: error?.canRetry !== false });
+  } finally {
+    req.raw?.removeListener?.("aborted", aborted);
+    reply.raw?.removeListener?.("close", closed);
   }
 }

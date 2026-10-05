@@ -20,9 +20,10 @@ import os from "node:os";
 import path from "node:path";
 import { costKindForSession } from "../../services/encode/quality/EncodeCost.js";
 import { managerWithOwnStore } from "./helpers/manager.js";
+import { buildAdmittedCommand } from "../../services/encode/admitted-command.js";
 import { fmp4Format } from "../../services/encode/segment-formats/fmp4.js";
 import { computeCutGrid } from "../../services/encode/output/cut-grid.js";
-import { buildRunCommand, nearestKeyframeAtOrBefore } from "../../services/encode/run-command.js";
+import { nearestKeyframeAtOrBefore } from "../../services/encode/run-command.js";
 import { Output } from "../../services/encode/output/Output.js";
 import { outputSpec } from "./helpers/output-spec.js";
 import { qualityStateOf } from "../../services/encode/quality/OutputQualityState.js";
@@ -106,7 +107,8 @@ function fakeSession({
       width: 1920,
       height: 1080,
       fps: 24,
-      bitrateKbps: 8000
+      bitrateKbps: 8000,
+      durationSeconds: 100 * SEGMENT_SECONDS
     }),
     // An ordinary session reads its own file, and its sound is inside it. The
     // three differ only for a soundtrack shipped as a file of its own.
@@ -613,6 +615,7 @@ test("a playlist or an init segment does not move the encoder", async (t) => {
   manager.outputs.set(VARIANT_ID, variant);
   // The plan is kept out of this: it is not what is being checked, and a run
   // with no measured speed is one it would take away for changing nothing.
+
   manager.encodeRuns.planEncodersSoon = () => {};
   chooseFor(manager, base, 540, variant.outputKey);
   const encoder = fakeEncoder();
@@ -749,7 +752,8 @@ test("a run on the keyframe grid is given no trim to apply", () => {
   });
 
   for (let index = 1; index < grid.boundaries.length - 1; index += 1) {
-    const { args } = buildRunCommand({
+    const { args } = buildAdmittedCommand({
+      admittedInput: { originSeconds: grid.boundaries[index], fingerprint: "a".repeat(64) },
       keyframes: { times: keyframeTimes },
       inputFile: { startTime },
       audioFile: { startTime },
@@ -766,21 +770,13 @@ test("a run on the keyframe grid is given no trim to apply", () => {
       rateControl: null,
       startIndex: index,
       endIndex: index,
+      output: {},
       videoEncoder: { name: "libx264" },
       segmentDurationSec: SEGMENT_SECONDS
     });
-    // One input seek establishes decode order in the preceding private cut.
-    assert.equal(
-      args.filter((one) => one === "-ss").length,
-      1,
-      `run at #${index} was given a trim beside -copyts`
-    );
-    const seek = Number(args[args.indexOf("-ss") + 1]);
-    assert.ok(
-      Math.abs(seek - grid.sourceTimes[index - 1]) < 0.2,
-      `run at #${index} seeks to ${seek}, not to the preceding keyframe ${grid.sourceTimes[index - 1]}`
-    );
-    assert.equal(Number(args[args.indexOf("-segment_start_number") + 1]), index - 1);
+    assert.equal(args.includes("-ss"), false);
+    assert.equal(args[args.indexOf("-i") + 1], "pipe:0");
+    assert.equal(Number(args[args.indexOf("-segment_start_number") + 1]), index);
   }
 });
 

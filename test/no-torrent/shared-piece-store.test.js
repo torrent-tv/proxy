@@ -16,6 +16,25 @@ import { SharedPieceStore } from "../../services/storage/piece-store/shared-piec
 
 const CHUNK = 64 * 1024;
 
+test("available input is held atomically across tiers without partial holds", async () => {
+  const { store, directory } = await makeStore({ pieces: 2 });
+  try {
+    await put(store, 0, piece(0));
+    assert.equal(store.holdAvailable([0, 9]), null);
+    assert.equal(store.stats().pinned, 0);
+    const release = store.holdAvailable([0, 0]);
+    assert.equal(typeof release, "function");
+    assert.equal(store.stats().pinned, 1);
+    assert.deepEqual(await get(store, 0), piece(0));
+    release();
+    release();
+    assert.equal(store.stats().pinned, 0);
+  } finally {
+    await new Promise((resolve) => store.destroy(resolve));
+    await fs.rm(directory, { recursive: true, force: true, maxRetries: 10, retryDelay: 20 });
+  }
+});
+
 /**
  * @param {object} [options]
  * @returns {Promise<{ store: SharedPieceStore, directory: string }>}

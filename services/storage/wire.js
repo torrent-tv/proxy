@@ -61,6 +61,8 @@ export function wireMachineBudget({
   segmentStore,
   spill,
   memory,
+  encodeInputs,
+  indexMemory,
   wholeFiles,
   diagnostics,
   diagnosticsRoot = "",
@@ -87,6 +89,10 @@ export function wireMachineBudget({
   };
 
   budget.defineResource({ name: "memory", readFree: () => availableMemoryBytes() });
+  if (encodeInputs) budget.register({ name: "admitted encode inputs", resource: "memory",
+    held: () => encodeInputs.held(), wanted: () => encodeInputs.wanted(), required: () => encodeInputs.held(), allow: bytes => encodeInputs.allow(bytes) });
+  if (indexMemory) budget.register({ name: "media metadata", resource: "memory",
+    held: () => indexMemory.held(), wanted: () => indexMemory.wanted(), required: () => indexMemory.required(), allow: bytes => indexMemory.allow(bytes) });
 
   const segmentsOn = deviceOf(segmentStore.root);
   defineDisk(segmentsOn, segmentStore.root);
@@ -162,6 +168,7 @@ export function wireMachineBudget({
   }
 
   return {
+    capacityOf: name => budget.capacityOf(name),
     revise: async () => {
       // Re-read the evidence before dividing: it is the one claimant whose
       // bytes are written by something that never reports them.

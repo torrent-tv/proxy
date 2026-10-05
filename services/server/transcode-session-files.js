@@ -1,7 +1,6 @@
 import { logger } from "../../utils/logger.js";
 import { bandOf, waits } from "./WaitLedger.js";
 
-const HOLD_HEADER = "x-hold-ms";
 /**
  * Which viewer is asking, or an empty string where the transport names nobody.
  *
@@ -57,8 +56,7 @@ export function refusedAsStale(req, reply, viewerRequests, fileName) {
     `[hold] ${fileName} refused: made in generation ${stated} of ${consumerId}, ` +
     `a viewing they have left and whose window for new requests has passed`
   );
-  reply.header("Retry-After", "0");
-  reply.code(503).send({ error: "Made for a viewing that has been left." });
+  reply.code(409).send({ error: "Made for a viewing that has been left.", reason: "request-obsolete", canRetry: false });
   return true;
 }
 
@@ -83,22 +81,8 @@ export async function serveSessionFile(req, reply, { serving, viewerRequests, se
   // a plain HTTP transport, where no loader of ours builds the URL, and then
   // the single shared position decides as it always did.
   const consumerId = consumerOf(req);
-  // Hold the request only briefly, then answer "retry" instead of waiting for
-  // the segment. iOS's native HLS player (AVPlayer) enforces a hard ~3.5 s
-  // deadline on RESPONSE HEADERS and raises -12889 ("No response for media
-  // file") when it passes — it then cancels in-flight requests, probes
-  // neighbouring positions and can restart the stream from the beginning. That
-  // is exactly the post-seek "player thrashing" seen in the field, because a
-  // seek restarts ffmpeg and the first segment then takes far longer than 3.5 s
-  // to appear. Holding the connection for 30 s (as this did) guaranteed the
-  // timeout on every seek. A short hold keeps the fast path intact (a ready or
-  // nearly-ready segment is still served on the first request) while a slow one
-  // gets a prompt retryable answer, which resets the player's own deadline.
-  // hls.js is unaffected: it consumes the 503 through its retry policy, whose
-  // budget the client widens to match (see hls-player.js fragLoadPolicy).
-  // Instrumented wait. `clientAborted` flips when the player drops the
-  // connection while we are still holding it — the single most informative
-  // signal about its real patience, and observable only from this side.
+  // Readiness or a terminal state ends the wait. A caller leaving cancels it;
+  // elapsed time is not evidence that media preparation failed.
   const holdStartedAt = Date.now();
   let clientAborted = false;
   let onClientAbort = () => {};
@@ -108,17 +92,26 @@ export async function serveSessionFile(req, reply, { serving, viewerRequests, se
       resolve();
     };
   });
-  req.raw.on("close", onClientAbort);
-  const statedHoldMs = Number(req.headers?.[HOLD_HEADER]);
+  const onResponseClose = () => { if (!reply.raw?.writableEnded) onClientAbort(); };
+  req.raw.on("aborted", onClientAbort);
+  reply.raw?.on("close", onResponseClose);
 
-  const result = await waitForSessionFile(serving, sessionId, fileName, {
-    holdMs: Number.isFinite(statedHoldMs) && statedHoldMs > 0 ? statedHoldMs : Number.POSITIVE_INFINITY,
-    until: clientGone,
-    consumerId
-  });
-
-  req.raw.off("close", onClientAbort);
+  let result;
+  try {
+    result = await waitForSessionFile(serving, sessionId, fileName, {
+      until: clientGone,
+      consumerId
+    });
+  } finally {
+    req.raw.off("aborted", onClientAbort);
+    reply.raw?.off("close", onResponseClose);
+  }
   const heldMs = Date.now() - holdStartedAt;
+  if (clientAborted || result.kind === "cancelled") {
+    logger.info(`[hold] request=${req.id ?? "unknown"} ${fileName} cancelled after ${heldMs}ms`);
+    result.stream?.destroy?.();
+    return;
+  }
   if (result.isPlaylist !== true) {
     const outcome = clientAborted
       ? "client-aborted"
@@ -156,36 +149,10 @@ export async function serveSessionFile(req, reply, { serving, viewerRequests, se
       `[hold] ${fileName} refused: the viewer is at ` +
       `${viewerRequests.viewerPositionOf(sessionId, consumerId).toFixed(1)}s and this is not the segment there`
     );
-    reply.header("Retry-After", "0");
-    return reply.code(503).send({ error: "Superseded by a seek." });
-  }
-  if (result.kind === "warming-up") {
-    // The segment is still being produced (e.g. just after a seek-restart).
-    // Return a retryable 503 — never 202, which hls.js cannot consume as a
-    // media segment — so the player retries the fetch shortly.
-    reply.header("Retry-After", "1");
-    // `Retry-After` tells the player to re-request THIS segment after a short
-    // pause. Without it a bare 503 reads as "nothing here", and the player goes
-    // looking elsewhere: because our synthetic VOD playlist lists every segment
-    // of the file, it believes they all exist and SCANS them (field log: one
-    // user seek produced probes at #617, #717, #732…). That scan is what used
-    // to steer the encoder off the real target. Whether iOS's native player
-    // honours the hint is not guaranteed — its behaviour is closed — but this
-    // is the standard, correct way to say "wait, don't look elsewhere", and
-    // hls.js already retries the same fragment regardless.
-    reply.header("Retry-After", "1");
-    // SAY WHY, to the viewer and not only to the log. The same refusal is
-    // written into `proxy.log` with the rank the priority map gave this
-    // segment; the page had no access to that and told the viewer it did not
-    // know why. Field 2026-09-14: `rank 1 of 100` — nothing was making it —
-    // printed sixty seconds before the page gave up saying the opposite.
-    return reply.code(503).send({
-      error: "Transcode segment is still being produced.",
-      reason: warmingReason(result.ranked ?? null)
-    });
+    return reply.code(409).send({ error: "Superseded by a seek.", reason: "request-obsolete", canRetry: false });
   }
   if (result.kind === "failed") {
-    return reply.code(500).send({ error: result.message });
+    return reply.code(500).send({ error: result.message, canRetry: false });
   }
 
   if (result.isPlaylist) {
@@ -230,8 +197,7 @@ function holdWhileSending(reply, stream, release) {
 /**
  * Ask `serving.getFileStream()` again each time the file may have become
  * available — a segment's publication, or a waited-on invalidation — until it
- * is, the session fails, the requester's stated wait runs out, or the
- * requester goes.
+ * is, the session fails, the request becomes obsolete, or the requester goes.
  *
  * @param {object} serving - `services/server/SegmentServing.js`
  * @param {string} sessionId
@@ -246,8 +212,29 @@ function holdWhileSending(reply, stream, release) {
  *   viewers, and the seek epoch belongs to all of them.
  * @returns {Promise<Awaited<ReturnType<import("./SegmentServing.js").SegmentServing["getFileStream"]>>>}
  */
-export async function waitForSessionFile(serving, sessionId, fileName, { holdMs, until = null, consumerId = "" }) {
-  const startedAt = Date.now();
+export async function waitForRequestedFile(req, reply, serving, sessionId, fileName, consumerId) {
+  let cancel;
+  const until = new Promise(resolve => { cancel = resolve; });
+  let gone = false;
+  const aborted = () => { gone = true; cancel(); };
+  const closed = () => { if (!reply.raw?.writableEnded) aborted(); };
+  req.raw?.on?.("aborted", aborted);
+  reply.raw?.on?.("close", closed);
+  if (req.raw?.aborted || reply.raw?.destroyed) aborted();
+  try {
+    const result = await waitForSessionFile(serving, sessionId, fileName, { until, consumerId });
+    if (gone) {
+      result.stream?.destroy?.();
+      return { kind: "cancelled" };
+    }
+    return result;
+  } finally {
+    req.raw?.off?.("aborted", aborted);
+    reply.raw?.off?.("close", closed);
+  }
+}
+
+export async function waitForSessionFile(serving, sessionId, fileName, { until = null, consumerId = "" } = {}) {
   let gone = false;
   const requesterGone = until ? until.then(() => { gone = true; }) : new Promise(() => {});
   // The viewer's position when this request was made. A seek makes every held
@@ -259,8 +246,14 @@ export async function waitForSessionFile(serving, sessionId, fileName, { holdMs,
   let seekEpoch = serving.seekEpoch(sessionId);
   /** @type {{ address: string, rank: number, topRank: number } | null} */
   let lastRanked = null;
-  while (!gone && Date.now() - startedAt < holdMs) {
+  while (!gone) {
+    const change = serving.subscribeFileChange(sessionId);
+    try {
     const result = await serving.getFileStream(sessionId, fileName, { consumerId });
+    if (gone) {
+      result.stream?.destroy?.();
+      return { kind: "cancelled" };
+    }
     if (result.kind !== "warming-up") {
       return result;
     }
@@ -282,44 +275,10 @@ export async function waitForSessionFile(serving, sessionId, fileName, { holdMs,
     // patience is still counted against what it was promised. Kept across the
     // polls because the timeout path has no result of its own.
     lastRanked = result.ranked ?? lastRanked;
-    const remaining = Math.max(0, holdMs - (Date.now() - startedAt));
-    const waitedForSegment = await serving.waitForSegment(sessionId, fileName, remaining, until);
-    if (!waitedForSegment && !gone) {
-      // Playlists and init files are not segment publications.
-      await Promise.race([delay(Math.min(300, remaining)), requesterGone]);
+    await Promise.race([change.changed, requesterGone]);
+    } finally {
+      change.release();
     }
   }
-  return { kind: "warming-up", ranked: lastRanked };
-}
-
-/**
- * Resolve after a given number of milliseconds.
- *
- * @param {number} ms
- * @returns {Promise<void>}
- */
-function delay(ms) {
-  return new Promise((resolve) => {
-    setTimeout(resolve, ms);
-  });
-}
-
-/**
- * What to tell the VIEWER when a segment is not there yet.
- *
- * In their terms — the film, and what is being done about it — never in ours: a
- * viewer cannot read a log, does not know what a rank is, and is not helped by
- * being told which of our parts is waiting for which other.
- *
- * @param {{ rank: number, topRank: number } | null} ranked - What the priority
- *   map thought of this segment while the request was held.
- * @returns {string}
- */
-function warmingReason(ranked) {
-  if (ranked && ranked.rank < ranked.topRank) {
-    // The map is working somewhere else in the film. That is the answer the
-    // failure of 2026-09-14 needed and nobody was given.
-    return "This part of the film is not being prepared yet — the proxy is working further along.";
-  }
-  return "This part of the film is still being prepared.";
+  return { kind: "cancelled", ranked: lastRanked };
 }

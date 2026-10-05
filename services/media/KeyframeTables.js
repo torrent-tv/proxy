@@ -1,68 +1,8 @@
-/**
- * @file Reading the keyframe table of a file: once, whoever asks, with a bound
- * on how long anybody waits for it.
- *
- * The table itself is `container/KeyframeTable.js`, one object per file. This is
- * the policy around filling it in, and it is a policy because three things had
- * to be true at once and each of them was learned from a field session:
- *
- * 1. **once per file, and one WAIT per file.** Two sessions created in the same
- *    moment used to miss the cache together and read the table twice — which is
- *    what two viewers opening one film do, measured 13 ms apart on 2026-09-03.
- *    Whoever asks second joins the read already running;
- * 2. **the wait is bounded, the READ is not.** A picture cannot be copied
- *    without the table, so the answer to "not yet" is to re-encode — but the
- *    read goes on, lands in the file's own table, and is there for whoever holds
- *    it. Cancelling it would make every later viewer pay the whole wait again;
- * 3. **a read that THREW is not an answer.** "The head is not downloaded" says
- *    nothing about the file; turning it into "this file has no keyframes" makes
- *    every picture of it a re-encode for as long as the process lives. Bytes
- *    that have not arrived reach here as `BytesUnavailable` — until 2026-10-01
- *    they came back as a reading of no times, which `KeyframeTable.learn`
- *    records as answered, so point 3 held only for reads that crashed. When
- *    pieces of such a file arrive the read is made again
- *    (`readAgainIfUnanswered`), and its answer lands in the same table.
- *
- * **What it does NOT know.** Where the bytes come from. The reader is one
- * function handed in at construction — on this proxy it crosses to the torrent
- * thread, where one container per file answers the track table and the media
- * info from the same header — so this can be exercised with plain values alone.
- * It used to live in the session manager, which also carried a SECOND reader
- * that fetched the file over the proxy's own HTTP and parsed it there: a
- * transport inside a layer that must not have one, and a second answer to a
- * question with one owner.
- *
- * **Why this is not `ContainerOrchestrator`.** Both live on the main thread
- * (the parse moved there on 2026-09-15). That one holds the file's one
- * container, which keeps its own reading of the Cues table; this keeps the
- * ANSWER the sessions hold — the keyframe times taken from that reading, and
- * the wait around it, which a container cannot have because it does not know
- * there is a viewer.
- */
+/** One shared keyframe table per source file. Reads use available bytes only. */
 
 import { KeyframeTable } from "./container/KeyframeTable.js";
 import { isUnavailable } from "./container/unavailable.js";
 import { logger as defaultLogger } from "../../utils/logger.js";
-
-/**
- * How long anybody waits for the table before giving up on copying the picture.
- *
- * Measured on the addon host, 2026-09-04, over seventeen files from
- * `Dropbox/trn` — four containers, pieces from 0.25 to 16 MB, files from 0.36 to
- * 20 GB, each torrent registered fresh so nothing of it was downloaded
- * (`research/keyframe-table-read-2026-09-04.md`). Every table that arrived did
- * so within 24.8 s, most within half a second; the two files that answered
- * nothing took 120.9 s and 120.5 s.
- *
- * Those two figures are not a coincidence and they are what fixes this one:
- * they are TWO of the bound the read already has — `READ_ABANDON_MS` in
- * `torrent/worker/resume-warm.js`, one for the wait on the file's edges and
- * one for the read itself, in series. A caller waiting for two of them is the
- * defect; waiting for one is the bound, and it leaves 2.4x over the slowest
- * table that did arrive. The line printed when it fires names which case
- * happened, so the field can move it rather than an argument.
- */
-export const KEYFRAME_TABLE_BUDGET_MS = 60_000;
 
 export class KeyframeTables {
   /** One per file, handed out rather than copied. @type {Map<string, KeyframeTable>} */
@@ -74,9 +14,6 @@ export class KeyframeTables {
   /** @type {((params: { sourceKey: string, fileIndex: number }) => Promise<object | null>) | null} */
   #readTable;
 
-  /** @type {number} */
-  #budgetMs;
-
   /** @type {{ info: Function, warn: Function }} */
   #logger;
 
@@ -85,13 +22,10 @@ export class KeyframeTables {
    * @param {(params: { sourceKey: string, fileIndex: number }) => Promise<object | null>} [params.readTable] -
    *   Whatever can answer what this file's container states. The whole of this
    *   object's outside world.
-   * @param {number} [params.budgetMs] - How long `within` waits.
    * @param {{ info: Function, warn: Function }} [params.logger]
    */
-  constructor({ readTable = null, budgetMs = KEYFRAME_TABLE_BUDGET_MS, logger = defaultLogger } = {}) {
+  constructor({ readTable = null, logger = defaultLogger } = {}) {
     this.#readTable = typeof readTable === "function" ? readTable : null;
-    const declared = Number(budgetMs);
-    this.#budgetMs = Number.isFinite(declared) && declared > 0 ? declared : KEYFRAME_TABLE_BUDGET_MS;
     this.#logger = logger;
   }
 
@@ -102,11 +36,6 @@ export class KeyframeTables {
    */
   static keyFor(sourceKey, fileIndex) {
     return `${sourceKey}:${fileIndex}`;
-  }
-
-  /** How long a caller of `within` waits. @returns {number} */
-  get budgetMs() {
-    return this.#budgetMs;
   }
 
   /**
@@ -173,6 +102,7 @@ export class KeyframeTables {
     }
     const work = started
       .then((reading) => {
+        if (this.#byFile.get(key) !== table) throw new DOMException("Keyframe request was withdrawn.", "AbortError");
         table.learn({
           times: Array.isArray(reading?.times) ? reading.times : null,
           tolerance: reading?.tolerance,
@@ -202,7 +132,7 @@ export class KeyframeTables {
         throw error;
       })
       .finally(() => {
-        this.#reading.delete(key);
+        if (this.#reading.get(key) === work) this.#reading.delete(key);
       });
     this.#reading.set(key, work);
     return work;
@@ -247,47 +177,15 @@ export class KeyframeTables {
     void this.warm(params);
   }
 
-  /**
-   * The same read, with a bound on how long THIS caller waits for it.
-   *
-   * The read is not cancelled when the bound is reached — it goes on, and it
-   * lands in the table this returns, which is the file's own. What the bound
-   * decides is only whether this caller waits: a copied picture cannot be cut
-   * without the table, so the answer to "not yet" is to re-encode, which needs
-   * no table because it places the keyframes itself.
-   *
-   * @param {{ sourceKey: string, fileIndex: number, logName?: string }} params
-   * @returns {Promise<{ table: KeyframeTable, arrived: boolean }>} `arrived` is
-   *   about THIS wait. False with an unanswered table means the read is still
-   *   running, or found the bytes not downloaded yet and will be made again
-   *   when they arrive — neither is the same as a file with no keyframes.
-   */
+  /** Available-byte reads do not replace copying after elapsed time. */
   async within(params) {
-    const read = this.read(params);
-    let timer = null;
-    const budget = new Promise((resolve) => {
-      timer = setTimeout(() => resolve(null), this.#budgetMs);
-      // A caller must not be held open by this timer alone.
-      timer?.unref?.();
-    });
-    // Bytes not downloaded yet are "not arrived" to this caller: the table
-    // stays unanswered and is read again when pieces of the file arrive.
-    // Thrown out of here, a shortage of bytes would fail the opening of an
-    // output. Any other failure is still the caller's to see.
-    const answer = await Promise.race([
-      read.then(
-        (table) => ({ table, arrived: true }),
-        (error) => {
-          if (isUnavailable(error)) {
-            return { table: this.of(params), arrived: false };
-          }
-          throw error;
-        }
-      ),
-      budget
-    ]);
-    clearTimeout(timer);
-    return answer ?? { table: this.of(params), arrived: false };
+    try {
+      const table = await this.read(params);
+      return { table, arrived: table.answered };
+    } catch (error) {
+      if (isUnavailable(error)) return { table: this.of(params), arrived: false };
+      throw error;
+    }
   }
 
   /**
@@ -342,11 +240,14 @@ export class KeyframeTables {
       for (const key of [...this.#byFile.keys()]) {
         if (key.startsWith(`${sourceKey}:`)) {
           this.#byFile.delete(key);
+          this.#reading.delete(key);
         }
       }
       return;
     }
-    this.#byFile.delete(KeyframeTables.keyFor(sourceKey, fileIndex));
+    const key = KeyframeTables.keyFor(sourceKey, fileIndex);
+    this.#byFile.delete(key);
+    this.#reading.delete(key);
   }
 
   /** @returns {number} */

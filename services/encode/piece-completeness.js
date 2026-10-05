@@ -40,10 +40,14 @@ export function cutOf(timeline, index) {
  * @param {number | undefined} cutSeconds - From {@link cutOf}.
  * @returns {{ whole: boolean, throughSeconds: number | null }}
  */
-export function judgePiece(format, ranges, cutSeconds) {
+export function judgePiece(format, ranges, cutSeconds, interval) {
   const throughSeconds = format.producedThroughSeconds?.(ranges) ?? null;
   if (throughSeconds === null) {
     return { whole: false, throughSeconds };
+  }
+  if (interval) {
+    const reason = intervalFailure(ranges, interval);
+    return reason ? { whole: false, throughSeconds, reason } : { whole: true, throughSeconds };
   }
   const cutMicros = ranges?.production?.cutMicros ??
     (Number.isFinite(cutSeconds) ? BigInt(Math.round(cutSeconds * 1_000_000)) : null);
@@ -72,6 +76,7 @@ export function judgePiece(format, ranges, cutSeconds) {
     return { whole, throughSeconds };
   }
   if (cutMicros !== null && throughSeconds < Number(cutMicros) / 1_000_000) {
+
     return { whole: false, throughSeconds };
   }
   return { whole: true, throughSeconds };
@@ -101,4 +106,52 @@ export function originOf(ranges, endMicros, kind) {
   // CSV rounds to microseconds; rescale with the muxer's nearest rounding.
   return ticks >= 0n ? (2n * ticks + track.timescale) / (2n * track.timescale) :
     -((-2n * ticks + track.timescale) / (2n * track.timescale));
+}
+
+/** Compare adjacent production ranges in their declared track clocks. */
+export function judgeNeighbors(left, right) {
+  if (!left?.tracks?.length || !right?.tracks?.length) return { whole: false, reason: "neighbor-tracks-are-missing" };
+  for (const track of right.tracks) {
+    if (!left.tracks.some(previous => previous.kind === track.kind)) return { whole: false, reason: `neighbor-missing-${track.kind}` };
+  }
+  for (const track of left?.tracks ?? []) {
+    const next = right?.tracks?.find(candidate => candidate.kind === track.kind);
+    if (!next?.ranges?.length || !track.ranges?.length) return { whole: false, reason: `neighbor-missing-${track.kind}` };
+    if (!(track.timescale > 0n) || !(next.timescale > 0n)) return { whole: false, reason: "neighbor-clock-is-invalid" };
+    const end = track.ranges.at(-1), start = next.ranges[0];
+    const difference = start.start * track.timescale - end.end * next.timescale;
+    const leftFrame = (track.productionFrame ?? end.frame) * next.timescale;
+    const rightFrame = (next.productionFrame ?? start.frame) * track.timescale;
+    if (!(leftFrame > 0n) || !(rightFrame > 0n)) return { whole: false, reason: "neighbor-frame-is-invalid" };
+    const allowance = leftFrame > rightFrame ? leftFrame : rightFrame;
+    if (difference > allowance || difference < -allowance) return { whole: false, reason: `neighbor-discontinuity-${track.kind}` };
+  }
+  return { whole: true };
+}
+
+/** Every required track must cover the interval with at most one-frame error. */
+function intervalFailure(coverage, { from, to, requiredKinds, sourceEnds = {} }) {
+  if (!Number.isFinite(from) || !Number.isFinite(to) || !(to > from) || !requiredKinds?.length) return "segment-interval-is-not-declared";
+  for (const kind of requiredKinds) {
+    const track = coverage?.tracks?.find(track => track.kind === kind);
+    if (!track?.ranges?.length || !(track.timescale > 0n)) return `segment-missing-${kind}`;
+    const start = BigInt(Math.round(from * Number(track.timescale)));
+    const through = Number.isFinite(sourceEnds[kind]) ? Math.min(to, sourceEnds[kind]) : to;
+    if (!(through > from)) return `segment-interval-is-empty-${kind}`;
+    const end = BigInt(Math.round(through * Number(track.timescale)));
+    const first = track.ranges[0];
+    const frame = track.productionFrame ?? first.frame;
+    if (first.start > start + frame || first.start < start - frame) return `segment-start-outside-interval-${kind}`;
+    // The first sample's cadence already bounds the interval start. A shorter
+    // final sample must not replace that bound when this range is traversed.
+    let reached = first.start;
+    for (const range of track.ranges) {
+      if (!(range.frame > 0n) || range.end <= range.start || range.start > reached + range.frame) return `segment-gap-within-interval-${kind}`;
+      if (range.end > reached) reached = range.end;
+    }
+    const finalFrame = track.productionFrame ?? track.ranges.at(-1).frame;
+    if (reached < end - finalFrame || reached > end + finalFrame) return `segment-end-outside-interval-${kind}`;
+  }
+  return null;
+
 }

@@ -80,6 +80,8 @@ export class PieceDiskStore {
 
   /** Where the live readers stand, from whoever holds that fact. @type {() => number[]} */
   #readHeads;
+  #canForget;
+  #wantedAt;
 
   /**
    * Said whenever this tier stops holding a piece, whatever the reason.
@@ -107,12 +109,16 @@ export class PieceDiskStore {
     allowanceBytes = null,
     now = Date.now,
     readHeads = () => [],
+    canForget = () => true,
+    wantedAt = null,
     onForgotten = () => undefined
   }) {
     this.#directory = path.join(directory, name);
     this.#allowanceBytes = Number.isFinite(allowanceBytes) && allowanceBytes >= 0 ? allowanceBytes : null;
     this.#now = now;
     this.#readHeads = typeof readHeads === "function" ? readHeads : () => [];
+    this.#canForget = canForget;
+    this.#wantedAt = wantedAt;
     this.#onForgotten = typeof onForgotten === "function" ? onForgotten : () => undefined;
     this.#adoptWhatIsAlreadyHere();
   }
@@ -211,6 +217,7 @@ export class PieceDiskStore {
    */
   reviseAllowance(bytes) {
     this.#allowanceBytes = Number.isFinite(bytes) && bytes >= 0 ? bytes : null;
+    this.#makeRoomFor(0, -1);
     return this.#allowanceBytes;
   }
 
@@ -358,7 +365,7 @@ export class PieceDiskStore {
    * @returns {void}
    */
   forget(index) {
-    if (this.#reading.has(index)) {
+    if (this.#reading.has(index) || !this.#canForget(index)) {
       return;
     }
     const length = this.#stored.get(index);
@@ -482,7 +489,7 @@ export class PieceDiskStore {
    * @param {number} incomingIndex
    * @returns {Promise<void>}
    */
-  async #makeRoomFor(incomingBytes, incomingIndex) {
+  #makeRoomFor(incomingBytes, incomingIndex) {
     if (this.#allowanceBytes === null) {
       return;
     }
@@ -519,7 +526,15 @@ export class PieceDiskStore {
     let victim = null;
     let worst = null;
     for (const [index, at] of this.#touched) {
-      if (index === except || this.#reading.has(index)) {
+      if (index === except || this.#reading.has(index) || !this.#canForget(index)) {
+        continue;
+      }
+      if (this.#wantedAt) {
+        const want = this.#wantedAt(index);
+        if (worst === null || want > worst.want || (want === worst.want && at < worst.at)) {
+          worst = { want, at };
+          victim = index;
+        }
         continue;
       }
       const behind = earliest !== null && index < earliest;

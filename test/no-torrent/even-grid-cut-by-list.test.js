@@ -18,7 +18,7 @@ import assert from "node:assert/strict";
 import { mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { buildRunCommand } from "../../services/encode/run-command.js";
+import { buildAdmittedCommand } from "../../services/encode/admitted-command.js";
 import { computeCutGrid, cutsAtGivenTimes } from "../../services/encode/output/cut-grid.js";
 import { Timeline } from "../../services/encode/output/Timeline.js";
 import { PLAYLIST_FILE_NAME } from "../../services/encode/output/index.js";
@@ -38,7 +38,8 @@ const SEGMENT_SECONDS = 4;
 function evenGridRun(segmentFormat) {
   const grid = computeCutGrid({ useKeyframeGrid: false, durationSeconds: 40, segDur: SEGMENT_SECONDS });
   const timeline = new Timeline({ boundaries: grid.boundaries, sourceTimes: grid.sourceTimes, cutGrid: "uniform" });
-  return buildRunCommand({
+  return buildAdmittedCommand({
+    admittedInput: { originSeconds: 12, fingerprint: "test-even-grid", runTag: "3" },
     keyframes: { times: null },
     inputFile: { startTime: 0 },
     audioFile: { startTime: 0 },
@@ -66,7 +67,7 @@ function evenGridRun(segmentFormat) {
  * @returns {string | undefined}
  */
 function valueOf(args, flag) {
-  const at = args.indexOf(flag);
+  const at = args.lastIndexOf(flag);
   return at === -1 ? undefined : args[at + 1];
 }
 
@@ -79,7 +80,7 @@ for (const format of [fmp4Format, mpegtsFormat]) {
     assert.deepEqual(cutTimes, [4, 8, 12, 16, 20, 24]);
     assert.equal(valueOf(args, "-segment_times"), "4,8,12,16,20,24");
     // One list for the cuts and for the keyframes forced at them.
-    assert.equal(valueOf(args, "-force_key_frames"), "4,8,12,16,20,24");
+    assert.equal(valueOf(args, "-force_key_frames"), "0,4,8,12,16,20,24");
     assert.equal(valueOf(args, "-segment_start_number"), "3");
     assert.equal(valueOf(args, "-segment_list"), "pipe:3", "a closed piece is reported, so it can be proven");
     assert.equal(args.at(-1), format.makingFileNameTemplate("3"), "it is written under a working name");

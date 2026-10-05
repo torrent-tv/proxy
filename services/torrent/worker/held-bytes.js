@@ -1,9 +1,12 @@
+import { pieceStoreOf } from "../piece-store-of.js";
+
 /**
  * @file What of a file the torrent already HOLDS, and reading it without
  * asking the swarm for anything.
  *
- * Two questions, and both are the torrent's own: which pieces have arrived is
- * its bitfield, and reading a piece it has is its store. They are here because
+ * Storage answers both questions: which pieces remain available, and how to
+ * read them. The library bitfield is not a second availability authority.
+ * They are here because
  * of that and for no other reason — everything else that used to keep them
  * company, the subtitle plan and the cue walk and the cursor a browser follows,
  * is what a FILE says about itself and moved to the thread the sessions are on
@@ -27,8 +30,8 @@
 /**
  * The byte ranges of one file that are downloaded WHOLE.
  *
- * Whole because a piece is the unit the swarm delivers and the unit the
- * bitfield counts: a range that is half a piece short cannot be read, so
+ * Whole because a piece is the unit storage retains: a range that is half a
+ * piece short cannot be read, so
  * reporting it would be reporting bytes that are not there.
  *
  * @param {object} torrent
@@ -40,7 +43,8 @@
 export function heldRangesOf(torrent, fileIndex) {
   const file = torrent?.files?.[fileIndex];
   const pieceLength = Number(torrent?.pieceLength);
-  if (!file || !Number.isFinite(pieceLength) || pieceLength <= 0 || !torrent?.bitfield) {
+  const store = pieceStoreOf(torrent);
+  if (!file || !Number.isSafeInteger(pieceLength) || pieceLength <= 0 || typeof store?.locationOf !== "function") {
     return [];
   }
   const offset = Number(file.offset) || 0;
@@ -54,7 +58,7 @@ export function heldRangesOf(torrent, fileIndex) {
   const ranges = [];
   let runStart = -1;
   for (let index = first; index <= last; index += 1) {
-    if (torrent.bitfield.get(index)) {
+    if (store.locationOf(index) !== "missing") {
       if (runStart < 0) {
         runStart = index;
       }
@@ -99,14 +103,16 @@ function rangeWithin(firstPiece, lastPiece, pieceLength, offset, length) {
 export function isRangeHeld(torrent, fileIndex, start, end) {
   const file = torrent?.files?.[fileIndex];
   const pieceLength = Number(torrent?.pieceLength);
-  if (!file || !Number.isFinite(pieceLength) || pieceLength <= 0 || !torrent?.bitfield) {
+  const store = pieceStoreOf(torrent);
+  if (!file || !Number.isSafeInteger(pieceLength) || pieceLength <= 0 || typeof store?.locationOf !== "function" ||
+      !Number.isSafeInteger(start) || !Number.isSafeInteger(end) || start < 0 || end < start || end >= file.length) {
     return false;
   }
   const offset = Number(file.offset) || 0;
   const first = Math.floor((offset + start) / pieceLength);
   const last = Math.floor((offset + end) / pieceLength);
   for (let index = first; index <= last; index += 1) {
-    if (!torrent.bitfield.get(index)) {
+    if (store.locationOf(index) === "missing") {
       return false;
     }
   }
@@ -114,105 +120,82 @@ export function isRangeHeld(torrent, fileIndex, start, end) {
 }
 
 /**
- * How long a read of bytes the torrent HOLDS may take before it is taken to be
- * a fault.
- *
- * Not a measurement and nothing is derived from it: the bytes are checked to be
- * held before the read starts, so a read that does not finish is a store that
- * failed to serve what it has, and the line it writes says so. Until 2026-10-01
- * this read was started on bytes that had NOT arrived, the stream waited for
- * them, and this was the bound that gave it up — 36 such reads gave up at once
- * at a torrent's open, and one of them was the Cues table of the file being
- * watched.
+ * Read downloaded bytes through storage only. Availability and acquisition of
+ * all input holds are one synchronous operation before the first disk read.
+ * Missing input returns null without selecting pieces or opening a torrent
+ * file stream. The returned allocation can be transferred to another thread.
  */
-const READ_ABANDON_MS = 30_000;
-
-/**
- * Read a byte range of a file straight from the store, without asking the swarm
- * for anything.
- *
- * Answered at once with null where any piece under the range has not arrived:
- * "not here" is the whole answer, and nothing is waited for or requested.
- *
- * The bytes come back in a buffer that owns its whole memory — not a slice of
- * Node's shared pool and not a view of the store's own blocks — so the reply can
- * hand that memory to the other thread instead of copying it, and nothing the
- * store or another read still uses goes with it.
- *
- * @param {object} torrent
- * @param {number} fileIndex
- * @param {number} start
- * @param {number} end - Inclusive.
- * @param {{ info: Function }} [logger]
- * @returns {Promise<Buffer | null>}
- */
-export function readHeldBytes(torrent, fileIndex, start, end, logger = null) {
+export async function readHeldBytes(torrent, fileIndex, start, end, logger = null) {
   const file = torrent?.files?.[fileIndex];
-  if (!file || !(end >= start) || !(start >= 0)) {
-    return Promise.resolve(null);
-  }
+  const pieceLength = Number(torrent?.pieceLength);
+  const store = pieceStoreOf(torrent);
+  if (!file || !store || !Number.isSafeInteger(start) || !Number.isSafeInteger(end) ||
+      start < 0 || end < start || start >= Number(file.length) || !(pieceLength > 0)) return null;
   const last = Math.min(end, Number(file.length) - 1);
-  if (!isRangeHeld(torrent, fileIndex, start, last)) {
-    return Promise.resolve(null);
-  }
-  return new Promise((resolve) => {
-    const chunks = [];
-    let stream;
-    try {
-      stream = file.createReadStream({ start, end: last });
-    } catch {
-      resolve(null);
-      return;
+  const absoluteStart = (Number(file.offset) || 0) + start;
+  const absoluteEnd = (Number(file.offset) || 0) + last;
+  const firstPiece = Math.floor(absoluteStart / pieceLength);
+  const lastPiece = Math.floor(absoluteEnd / pieceLength);
+  const indexes = Array.from({ length: lastPiece - firstPiece + 1 }, (_, index) => firstPiece + index);
+  const release = store.holdAvailable(indexes);
+  if (!release) return null;
+  try {
+    const owned = Buffer.allocUnsafeSlow(last - start + 1);
+    for (const index of indexes) {
+      const from = Math.max(absoluteStart, index * pieceLength);
+      const to = Math.min(absoluteEnd, (index + 1) * pieceLength - 1);
+      const wanted = to - from + 1;
+      const bytes = await new Promise((resolve, reject) => {
+        store.get(index, { offset: from - index * pieceLength, length: wanted }, (error, value) => {
+          if (error) reject(error);
+          else resolve(value);
+        });
+      });
+      if (!bytes || bytes.length !== wanted) return null;
+      owned.set(bytes, from - absoluteStart);
     }
-    let settled = false;
-    /** @type {ReturnType<typeof setTimeout> | null} */
-    let abandon = null;
-    const settle = (value) => {
-      if (settled) {
-        return;
-      }
-      settled = true;
-      if (abandon !== null) {
-        clearTimeout(abandon);
-      }
-      if (value === null) {
-        stream.destroy?.();
-      }
-      resolve(value);
-    };
-    abandon = setTimeout(() => {
-      logger?.info(
-        `subtitles: a read of ${start}-${last} in "${String(file.name).slice(0, 40)}" ` +
-        `was held but not served in ${READ_ABANDON_MS / 1000}s and was given up — the store failed to serve bytes it has`
-      );
-      settle(null);
-    }, READ_ABANDON_MS);
-    abandon.unref?.();
-    stream.on("data", (chunk) => chunks.push(chunk));
-    stream.on("end", () => settle(ownedCopyOf(chunks)));
-    stream.on("error", () => settle(null));
-  });
-}
-
-/**
- * The chunks as one buffer over memory of its own.
- *
- * @param {Uint8Array[]} chunks
- * @returns {Buffer}
- */
-function ownedCopyOf(chunks) {
-  const total = chunks.reduce((sum, chunk) => sum + chunk.length, 0);
-  // `allocUnsafeSlow` never takes from the shared pool, so the buffer is the
-  // whole of its ArrayBuffer and may be transferred.
-  const owned = Buffer.allocUnsafeSlow(total);
-  let at = 0;
-  for (const chunk of chunks) {
-    owned.set(chunk, at);
-    at += chunk.length;
+    return owned;
+  } catch (error) {
+    logger?.info?.(`held read ${fileIndex}:${start}-${last} failed: ${error?.message ?? error}`);
+    return null;
+  } finally {
+    release();
   }
-  return owned;
 }
 
+/** Acquire every input piece before copying any of the segment's ranges. */
+export async function readHeldRanges(torrent, fileIndex, ranges, maxBytes, logger = null) {
+  const file = torrent?.files?.[fileIndex];
+  const pieceLength = Number(torrent?.pieceLength);
+  const store = pieceStoreOf(torrent);
+  if (!file || !store || !Array.isArray(ranges) || ranges.length === 0 ||
+    !Number.isSafeInteger(maxBytes) || maxBytes <= 0 || !(pieceLength > 0)) return null;
+  const indexes = new Set();
+  let bytes = 0;
+  for (const range of ranges) {
+    if (!Array.isArray(range) || range.length !== 2) return null;
+    const [start, end] = range;
+    if (!Number.isSafeInteger(start) || !Number.isSafeInteger(end) || start < 0 || end < start || end >= file.length) return null;
+    bytes += end - start + 1;
+    if (!Number.isSafeInteger(bytes) || bytes > maxBytes) return null;
+    const first = Math.floor(((Number(file.offset) || 0) + start) / pieceLength);
+    const last = Math.floor(((Number(file.offset) || 0) + end) / pieceLength);
+    for (let index = first; index <= last; index++) indexes.add(index);
+  }
+  const release = store.holdAvailable([...indexes]);
+  if (!release) return null;
+  try {
+    const result = [];
+    for (const [start, end] of ranges) {
+      const owned = await readHeldBytes(torrent, fileIndex, start, end, logger);
+      if (!owned) return null;
+      result.push(owned);
+    }
+    return result;
+  } finally {
+    release();
+  }
+}
 /**
  * Whether a buffer may be TRANSFERRED to another thread: it must be the whole of
  * a plain ArrayBuffer. A slice of the shared pool would take every other

@@ -47,6 +47,8 @@ function harness({ method, range }) {
     raw: {
       // `bindRelease` listens here; HEAD writes its response here.
       once() {},
+      write(_bytes, done) { done(); },
+      destroy() { this.destroyed = true; },
       writeHead(code, headers) {
         sent.code = code;
         for (const [name, value] of Object.entries(headers)) {
@@ -62,9 +64,11 @@ function harness({ method, range }) {
   const file = {
     name: "movie.mkv",
     length: 5_869_669_065,
-    createReadStream(options = {}) {
+    createFragmentReader(options = {}) {
       opened.push(`${options.start ?? 0}-${options.end ?? "end"}`);
-      return { on() {} };
+      return { cancel() {}, async *[Symbol.asyncIterator]() {
+        yield { bytes: { length: (options.end ?? 5_869_669_064) - (options.start ?? 0) + 1 }, release() {} };
+      } };
     }
   };
 
@@ -128,20 +132,20 @@ test("GET with a range streams only that range", async () => {
 // encoder restart. Reported as ordinary reads at offset 0, they undid the seek
 // that had just happened and sent the swarm walking the file from its first
 // missing piece; a seek to 89.1% of a 4.7 GB film downloaded 2.47 GB that way.
-test("a range-less GET is reported as a whole-file read", async () => {
+test("a range-less GET does not create whole-file demand", async () => {
   const { req, reply, state, deps } = harness({ method: "GET" });
 
   await handleStreamGet(req, reply, deps);
 
-  assert.deepEqual(state.prioritized, [{ byteStart: 0, wholeFileRead: true }]);
+  assert.deepEqual(state.prioritized, []);
 });
 
-test("a ranged GET is reported as a real read position", async () => {
+test("a ranged GET does not change the download map", async () => {
   const { req, reply, state, deps } = harness({ method: "GET", range: "bytes=4390000000-" });
 
   await handleStreamGet(req, reply, deps);
 
-  assert.deepEqual(state.prioritized, [{ byteStart: 4_390_000_000, wholeFileRead: false }]);
+  assert.deepEqual(state.prioritized, []);
 });
 
 test("a file downloaded whole is served from disk without touching the torrent", async () => {
@@ -205,7 +209,7 @@ test("a file this proxy does not have whole still goes to the torrent", async ()
   const { req, reply, state, deps } = harness({ method: "GET", range: "bytes=0-99" });
   deps.torrentPool.wholeFiles = new Map([["other/7", { path: "/nowhere", length: 1, name: "x" }]]);
   await handleStreamGet(req, reply, deps);
-  assert.equal(state.prioritized.length, 1, "the ordinary path was not taken");
+  assert.equal(state.prioritized.length, 0, "a read must not change download demand");
 });
 
 test("every wait of an encoder's input read is marked for the run its URL names", async () => {
@@ -234,4 +238,20 @@ test("every wait of an encoder's input read is marked for the run its URL names"
 
   assert.deepEqual(marks, [[7, true], [7, false], [7, true], [7, false], [7, true], [7, false]],
     "a wait before each fragment and one before the end, each closed");
+});
+
+test("a short source response fails the connection and an unsuccessful write releases its fragment", async () => {
+  for (const writeFails of [false, true]) {
+    const { req, reply, sent, deps } = harness({ method: "GET", range: "bytes=0-9" });
+    let released = 0;
+    deps.torrentPool.getTorrent = async () => ({ files: [{ name: "file", length: 10,
+      createFragmentReader: () => ({ cancel() {}, async *[Symbol.asyncIterator]() {
+        yield { bytes: Buffer.alloc(5), release: () => { released++; } };
+      } }) }] });
+    if (writeFails) reply.raw.write = (_bytes, done) => done(new Error("Write refused"));
+    await handleStreamGet(req, reply, deps);
+    assert.equal(released, 1);
+    assert.equal(reply.raw.destroyed, true);
+    assert.equal(sent.called, false);
+  }
 });

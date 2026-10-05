@@ -14,6 +14,7 @@ import { waits } from "./WaitLedger.js";
 import { readMachineState, readProcessCpuSeconds, readProxyCpuSeconds, readSystemCpu, shareOfMachine } from "../encode/host-load.js";
 import { minimumBufferFrom } from "../torrent/supply-margin.js";
 import { PriorityOrchestrator } from "../viewer/PriorityOrchestrator.js";
+import { urgentOutputsReady } from "../viewer/urgent-output-ready.js";
 import { softwareDescriptor } from "../encode/hwaccel.js";
 import { resolveSegmentFormat } from "../encode/segment-formats/index.js";
 import { Timelines } from "../encode/output/Timeline.js";
@@ -74,6 +75,7 @@ import { audioRenditionName } from "../media/audio-inventory.js";
 import { Renditions } from "../encode/Renditions.js";
 import { CushionReport, LOOKAHEAD_PAUSE_SECONDS } from "../encode/CushionReport.js";
 import { EncodeRuns } from "../encode/EncodeRuns.js";
+import { EncodeInputs } from "../encode/EncodeInputs.js";
 import { OutputTimes } from "../encode/OutputTimes.js";
 import { HostLoad } from "../encode/quality/HostLoad.js";
 import { HostTimings } from "../encode/quality/HostTimings.js";
@@ -87,8 +89,6 @@ import { OutputSpec } from "../encode/output/OutputSpec.js";
 import { compareInits } from "../encode/segment-formats/init-compat.js";
 import { nominalKbpsFor, AUDIO_TRANSCODE_KBPS } from "../encode/args.js";
 import { audioReadingFor } from "../encode/audio-work-rate.js";
-import { probeInputMediaInfo } from "../media/media-info-probe.js";
-import { probeVideoKeyframeTimes } from "../media/keyframe-probe.js";
 import { wireMachineBudget } from "../storage/wire.js";
 import { Returns } from "../storage/returns.js";
 import { freeBytesFor } from "../storage/free.js";
@@ -217,7 +217,6 @@ export function wireOutputs({
     getCachedMediaInfo = null,
     getCachedAudioTracks = null,
     getContainerMediaInfo = null,
-    fetchWholeFile = null,
     segmentFormatId = undefined,
     stateDir = "",
     segmentStore = null,
@@ -228,7 +227,15 @@ export function wireOutputs({
     diagnostics = null,
     diagnosticsRoot = "",
     memoryClaimant = null,
-    budgetPolicy = null}) {
+    resolveEncodeInput = null,
+    readSourceMedia = null,
+    readMetadataActivity = null,
+    sourceInputsFor = null,
+    readEncodeRanges = null,
+    encodeInputs = null,
+    indexMemory = null,
+    budgetPolicy = null,
+    onViewerChanged = null}) {
   const parts = {};
   const audioDescriptionOf = (output) => (getCachedAudioTracks?.({
     sourceKey: output.file.sourceKey, fileIndex: output.spec.grid?.fileIndex ?? output.file.fileIndex
@@ -284,6 +291,7 @@ export function wireOutputs({
   parts.limitsFor = (frame) => [nominalKbpsFor(frame)];
   // What the torrent and the proxy itself spend on this host, and how fast each watched torrent moves.
   parts.hostLoad = new HostLoad({
+    readMetadataActivity,
     readMachineState,
     readProcessCpuSeconds,
     readProxyCpuSeconds,
@@ -326,7 +334,7 @@ export function wireOutputs({
       });
     },
     viewerSecondsOn: (output, consumerId, now) => viewerSecondsOn(parts.viewers, output, consumerId, now),
-    inputOf: (...args) => parts.renditions.inputOf(...args),
+    get encodeInputs() { return parts.encodeInputs; },
     producedNumbers: (...args) => parts.serving.producedNumbers(...args),
     servesAudioSeparately: (...args) => parts.renditions.servesAudioSeparately(...args),
     disposeSession: (...args) => parts.lifecycle.disposeSession(...args),
@@ -352,7 +360,6 @@ export function wireOutputs({
     logger,
     producedNumbers: (...args) => parts.serving.producedNumbers(...args),
     get encodeRuns() { return parts.encodeRuns; },
-    get fetchWholeFile() { return parts.fetchWholeFile; },
     get getCachedAudioTracks() { return parts.getCachedAudioTracks; },
     get hostLoad() { return parts.hostLoad; },
     get lookaheadSeconds() { return parts.lookaheadSeconds; },
@@ -523,8 +530,8 @@ export function wireOutputs({
     // carrying here: the only figure an encoder with no bound of its own has.
     observedPeakMbps: (spec) => parts.localObservations?.peakMbps(spec) ?? null,
     limitsFor: (frame) => parts.limitsFor(frame),
-    probeMediaInfo: (url) => probeInputMediaInfo(parts.ffmpegBin, url),
-    probeKeyframeTimes: (url, budgetMs) => probeVideoKeyframeTimes(parts.ffmpegBin, url, budgetMs),
+    readSourceMedia,
+    get encodeInputs() { return parts.encodeInputs; },
     get decodeCostModel() { return parts.decodeCostModel; },
     get enabled() { return parts.enabled; },
     get encodeCost() { return parts.encodeCost; },
@@ -565,6 +572,7 @@ export function wireOutputs({
     // When this viewer's playback can start and run to the end: the viewer
     // component's forecast, which models the viewer's browser.
     playbackReadiness: { predict: predictPlaybackReadiness, forecastRate, RateTrend },
+    sourceInputsFor: (output, index) => parts.sourceInputsFor?.(output, index),
     encodeSpeedReadingOf: (output) => parts.encodeCost.latestSpeedReadingOf(output),
     projectedEncodeSpeedOf: (output) => parts.encodeCost.projectedSpeedOf(output),
     audioDescriptionOf,
@@ -615,6 +623,7 @@ export function wireOutputs({
   });
   parts.enabled = Boolean(enabled);
   parts.ffmpegBin = ffmpegBin;
+  parts.sourceInputsFor = typeof sourceInputsFor === "function" ? sourceInputsFor : null;
   parts.keyframeTables = keyframeTables;
   // Where measurements about this host are kept between runs. Empty means
   // beside the installed proxy; a deployment with somewhere persistent to
@@ -637,12 +646,6 @@ export function wireOutputs({
   // it meant reading a header this proxy had already read.
   parts.getContainerMediaInfo =
     typeof getContainerMediaInfo === "function" ? getContainerMediaInfo : null;
-  // Fetch one whole file of a source, as a bounded read rather than a
-  // selection. Used to pull a soundtrack that ships beside the picture onto
-  // the disk while the swarm has capacity to spare — see
-  // `#fetchSpareSoundtracks`. Optional: a proxy wired without it simply reads
-  // such a soundtrack when it is played.
-  parts.fetchWholeFile = typeof fetchWholeFile === "function" ? fetchWholeFile : null;
   // Optional async accessor for a source's live download stats, used by the
   // realtime budget to tell a CPU limit from a download-starved input:
   // (sourceKey, fileIndex) => Promise<{ downloadSpeed, fileLength, fileProgress } | null>.
@@ -760,7 +763,10 @@ export function wireOutputs({
   // exist, because that decision reads nothing else about viewers. It used to
   // be re-taken on a five-second timer instead, which made a just-created
   // output wait up to five seconds before anything noticed it had a viewer.
-  parts.viewers = new Viewers({ onChange: () => parts.encodeRuns.planEncodersSoon() });
+  parts.viewers = new Viewers({ onChange: () => {
+    parts.encodeRuns.planEncodersSoon();
+    onViewerChanged?.();
+  } });
   // The outputs that exist, and every question about them: the picture a step
   // belongs to, the steps, the soundtracks, the height a step is named by.
   parts.outputs = new OutputCatalog({
@@ -863,6 +869,19 @@ export function wireOutputs({
     // a step supersedes belongs to the film's shape. Neither layer is handed
     // the other — one gets a plain id, the other is read for one field.
     watchedBy: (session, viewer) => !parts.outputs.supersededBy(session, viewer.activeVariantId ?? null),
+    urgentReadyFor: (session, viewer, seconds, now) => {
+      if (parts.subtitleReadyFor?.(viewer) === false) return false;
+      return urgentOutputsReady({
+        sourceKey: session.file.sourceKey, fileIndex: session.file.fileIndex,
+        durationSeconds: session.file.durationSeconds, atSeconds: viewer.positionSeconds(now) ?? 0, seconds,
+        outputs: parts.outputs.values(),
+        consumed: (output) => parts.viewers.forOutput(output).has(viewer.id) &&
+          !parts.outputs.supersededBy(output, viewer.activeVariantId ?? null),
+        segmentIndex: (output, at) => parts.outputTimes.segmentIndexForTime(output, at),
+        segmentStart: (output, index) => parts.outputTimes.segmentStartTime(output, index),
+        closed: (key, index) => parts.segmentStore.isClosed(key, index)
+      });
+    },
     allowanceFor: (session) => minimumBufferFrom({
       segmentSeconds: parts.segmentDurationSec,
       worstSupplyWaitSec: parts.hostLoad.supplyFor(session.file)?.worstWaitSec
@@ -910,6 +929,9 @@ export function wireOutputs({
     availability: () => parts.hostLoad.hostAvailability ?? null
   });
   parts.encodeOrchestrator = new EncodeOrchestrator({
+    inputDemandChanged: (address, windows) => {
+      for (const output of parts.outputs.outputsOn(address)) parts.encodeInputs?.retain(output, windows);
+    },
     admission: parts.admission,
     // What the viewers actually waited for, by band. The ledger is the
     // priority layer's; the encoding is handed a way to ask it.
@@ -951,6 +973,25 @@ export function wireOutputs({
   // one term of the keeping period that is guessed rather than measured, and
   // the only place it can be measured from.
   parts.returns = new Returns();
+  parts.encodeInputs = encodeInputs ?? (typeof resolveEncodeInput === "function" ? new EncodeInputs({
+    resolve: resolveEncodeInput,
+    readRanges: readEncodeRanges,
+    reviseBudget: () => parts.machineBudget.revise(),
+    capacity: () => parts.machineBudget.capacityOf("memory"),
+    urgent: (output, index) => parts.encodeOrchestrator.wantedSegmentsOn(output.outputKey).some(window =>
+      index >= window.from && index <= window.to && window.withinSeconds === 0),
+    changed: (output, result) => {
+      if (result.kind === "terminal") {
+        logger.warn(`encode input output=${output.outputKey} terminal=${result.reason}: ${result.message ?? ""}`);
+        parts.serving.invalidateWaits(output);
+      }
+      parts.encodeRuns.planEncodersSoon();
+    },
+    failed: (output, error) => {
+      logger.warn(`encode input output=${output.outputKey} failed: ${error.message}`);
+      parts.serving.invalidateWaits(output);
+    }
+  }) : null);
   // One owner of the disk, and the list of what takes it lives with the owner.
   parts.machineBudget = wireMachineBudget({
     segmentStore: parts.segmentStore,
@@ -959,6 +1000,8 @@ export function wireOutputs({
     diagnostics: parts.diagnostics,
     diagnosticsRoot: parts.diagnosticsRoot,
     memory: parts.memoryClaimant,
+    encodeInputs: parts.encodeInputs,
+    indexMemory,
     policy: parts.budgetPolicy ?? undefined,
     readFree: freeBytesFor,
     logger

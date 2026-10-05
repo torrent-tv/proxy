@@ -33,3 +33,12 @@ export function filesInUse({ torrent, windows, openReads }) {
   }
   return used;
 }
+
+/** Range admission owns its read before any asynchronous storage operation. */
+export async function readWhileInUse(openReads, id, torrent, fileIndex, read) {
+  if (!torrent) return read();
+  const entry = { torrent, fileIndex };
+  openReads.set(id, entry);
+  try { return await read(); }
+  finally { if (openReads.get(id) === entry) openReads.delete(id); }
+}

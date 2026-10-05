@@ -24,6 +24,18 @@ import { Viewers } from "../../services/viewer/Viewers.js";
 /** An output is only ever held by id here, so the thinnest possible stand-in. */
 const anOutput = (id) => ({ id, viewers: new Set() });
 
+test("subtitle selection belongs to the current source and is cleared by file selection", () => {
+  const viewers = new Viewers();
+  assert.equal(viewers.selectsSubtitle("alice", "source", 0, 0), false);
+  viewers.selectsFile("alice", "source", 0);
+  assert.equal(viewers.selectsSubtitle("alice", "source", 1, 0), false);
+  assert.equal(viewers.selectsSubtitle("alice", "other", 0, 0), false);
+  assert.equal(viewers.selectsSubtitle("alice", "source", 0, 2), true);
+  assert.deepEqual(viewers.get("alice").subtitle, { sourceKey: "source", fileIndex: 0, trackIndex: 2 });
+  viewers.selectsFile("alice", "source", 1);
+  assert.equal(viewers.get("alice").subtitle, null);
+});
+
 test("a viewer who switched subtitles on is listed for that file", () => {
   const viewers = new Viewers();
   viewers.of(anOutput("picture"), "alice");

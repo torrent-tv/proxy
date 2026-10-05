@@ -17,11 +17,31 @@
 
 import { DemandRegister } from "../demand/DemandRegister.js";
 import { SwarmSelection } from "./SwarmSelection.js";
+import { DeadlineScheduler } from "./DeadlineScheduler.js";
+import { futureDownload } from "./FutureDownload.js";
 
 /** @type {WeakMap<object, { register: DemandRegister, selection: SwarmSelection }>} */
 const byTorrent = new WeakMap();
 /** @type {Set<{ register: DemandRegister, selection: SwarmSelection }>} */
 const live = new Set();
+const scheduler = new DeadlineScheduler({ entries: () => live });
+let futurePending = null;
+let publishingSelections = false;
+
+/** Concurrent file reports share one snapshot of every live download map. */
+export function forecastDownloads() {
+  if (!futurePending) {
+    const entries = [...live];
+    const revisions = entries.map(entry => entry.register.revision);
+    const withdrawals = entries.map(entry => entry.withdrawalRevision);
+    const isCurrent = () => entries.length === live.size && !entries.some((entry, index) =>
+        !live.has(entry) || entry.register.revision !== revisions[index] ||
+        entry.withdrawalRevision !== withdrawals[index]);
+    futurePending = futureDownload(entries, { isCurrent }).then(result =>
+      isCurrent() ? result : new Map()).finally(() => { futurePending = null; });
+  }
+  return futurePending;
+}
 
 /**
  * The register and selection for a torrent, made on first use.
@@ -35,9 +55,19 @@ export function demandFor(torrent) {
     return held;
   }
   const register = new DemandRegister();
-  const entry = { register, selection: new SwarmSelection({ torrent, register }) };
+  const entry = { torrent, register, selection: new SwarmSelection({ torrent, register }), withdrawalRevision: 0 };
+  if (typeof torrent._request === "function" && typeof torrent._updateWire === "function") {
+    entry.previousWireUpdate = torrent._updateWire;
+    torrent._updateWire = () => {
+      if (!publishingSelections) scheduler.reconcile();
+    };
+  }
   byTorrent.set(torrent, entry);
   live.add(entry);
+  entry.onBytesChanged = () => reconcileAll();
+  entry.onWithdrawn = () => { entry.withdrawalRevision++; reconcileAll(); };
+  torrent.on?.("verified", entry.onBytesChanged);
+  torrent.on?.("piece-withdrawn", entry.onWithdrawn);
   return entry;
 }
 
@@ -74,6 +104,9 @@ export function forgetTorrent(torrent) {
   }
   held.selection.releaseAll();
   held.register.clear();
+  torrent.removeListener?.("verified", held.onBytesChanged);
+  torrent.removeListener?.("piece-withdrawn", held.onWithdrawn);
+  if (held.previousWireUpdate) torrent._updateWire = held.previousWireUpdate;
   byTorrent.delete(torrent);
   live.delete(held);
 }
@@ -89,14 +122,21 @@ export function forgetTorrent(torrent) {
  * @returns {{ torrents: number, speculativeAllowed: boolean, stated: number, withdrawn: number }}
  */
 export function reconcileAll() {
+  if (publishingSelections) return { torrents: live.size, speculativeAllowed: false, stated: 0, withdrawn: 0 };
   const entries = [...live];
   const speculativeAllowed = !entries.some((entry) => entry.selection.hasUrgentMissing());
   let stated = 0;
   let withdrawn = 0;
-  for (const entry of entries) {
-    const result = entry.selection.reconcile({ speculativeAllowed });
-    stated += result.stated;
-    withdrawn += result.withdrawn;
+  publishingSelections = true;
+  try {
+    for (const entry of entries) {
+      const result = entry.selection.reconcile({ speculativeAllowed, deadlineDriven: !!entry.previousWireUpdate });
+      stated += result.stated;
+      withdrawn += result.withdrawn;
+    }
+  } finally {
+    publishingSelections = false;
   }
+  scheduler.reconcile();
   return { torrents: entries.length, speculativeAllowed, stated, withdrawn };
 }

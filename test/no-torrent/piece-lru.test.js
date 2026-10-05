@@ -11,6 +11,29 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { PieceLru } from "../../services/storage/piece-store/piece-lru.js";
 
+test("capacity eviction drops the latest deadline, preserving the earliest shared need", () => {
+  const lru = new PieceLru(3);
+  for (const piece of [0, 1, 2]) lru.touch(piece);
+  lru.protect("viewer-one", 0, 0, 0, 2000, 100);
+  lru.protect("viewer-two", 0, 0, 0, 100, 100);
+  lru.protect("near", 1, 1, 0, 500, 100);
+  lru.protect("later", 2, 2, 0, 1000, 100);
+  assert.equal(lru.wantAt(0), 100);
+  assert.equal(lru.evictionCandidate(), 2);
+  lru.pin(2);
+  assert.equal(lru.evictionCandidate(), 1);
+});
+
+test("unused bytes go before demand with no finite deadline", () => {
+  const lru = new PieceLru(3);
+  for (const piece of [0, 1, 2]) lru.touch(piece);
+  lru.protect("paused", 0, 0, 0, Infinity, 1);
+  lru.protect("background", 1, 1, 0, Infinity, 50);
+  assert.equal(lru.evictionCandidate(), 2);
+  lru.remove(2);
+  assert.equal(lru.evictionCandidate(), 0);
+});
+
 test("evicts the least recently used piece", () => {
   const lru = new PieceLru(3);
   lru.touch(1);

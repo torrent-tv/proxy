@@ -10,6 +10,29 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { readProcessCpuSeconds, readSystemCpu, sampleHost, shareOfMachine } from "../../services/encode/host-load.js";
+import { HostLoad } from "../../services/encode/quality/HostLoad.js";
+
+test("metadata CPU cannot be learned as torrent download cost", async t => {
+  let now = 0, cpu = 0, downloaded = 0, epoch = 0, active = false;
+  t.mock.method(Date, "now", () => now);
+  const load = new HostLoad({ outputs: new Map(), readProxyCpuSeconds: () => cpu,
+    getTorrentTotals: async () => ({ downloaded }), readMetadataActivity: () => ({ epoch, active }) });
+  await load.reportHostLoad();
+  now += 1000;
+  await load.reportHostLoad();
+  now += 1000; cpu += 100; downloaded += 1e6; epoch += 2;
+  await load.reportHostLoad();
+  assert.equal(load.observedTorrentCostPerMegabyte, null);
+  now += 1000; cpu += 100; downloaded += 1e6; active = true;
+  await load.reportHostLoad();
+  assert.equal(load.observedTorrentCostPerMegabyte, null);
+  now += 1000; active = false; epoch += 1;
+  await load.reportHostLoad();
+  now += 1000; cpu += 1; downloaded += 1e6;
+  await load.reportHostLoad();
+  assert.ok(load.observedTorrentCostPerMegabyte > 0);
+  assert.ok(load.observedTorrentCostPerMegabyte <= 1);
+});
 
 test("a process using one core of four for a second reports a quarter of the machine", () => {
   const before = { takenAt: 1_000, processCpuSeconds: 10, system: null };

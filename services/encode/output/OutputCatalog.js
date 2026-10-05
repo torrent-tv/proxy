@@ -401,7 +401,7 @@ export class OutputCatalog {
         // The probe's own reading of the video stream, which is known from the
         // moment the session exists and covers the gap before the torrent has
         // reported a length.
-        streamBitsPerSecond: (Number(session.file?.decode?.megabitsPerSecond) || 0) * 1_000_000,
+        streamBitsPerSecond: (Number(session.file?.megabitsPerSecond) || 0) * 1_000_000,
         largest: this.largestPieceOf(session.outputKey ?? ""),
         boundaries: session.timeline?.published ?? session.timeline?.boundaries ?? null,
         producedHeight: this.producedHeightOf(session),

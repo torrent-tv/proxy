@@ -88,8 +88,10 @@ test("a request for a viewing that was left is refused before the step is resolv
     { renditions, serving: {}, viewerRequests }
   );
   assert.equal(resolved.length, 0, "resolving could make a step and register the viewer on it");
-  assert.equal(stale.sent.code, 503);
-  assert.equal(stale.sent.headers["retry-after"], "0");
+  assert.equal(stale.sent.code, 409);
+  assert.equal(stale.sent.headers["retry-after"], undefined);
+  assert.equal(stale.sent.body.reason, "request-obsolete");
+  assert.equal(stale.sent.body.canRetry, false);
 
   const current = recordingReply();
   await handleTranscodeVariantFileGet(
@@ -119,7 +121,9 @@ test("a request for a soundtrack of a viewing that was left is refused before it
   );
 
   assert.equal(resolved.length, 0);
-  assert.equal(sent.code, 503);
+  assert.equal(sent.code, 409);
+  assert.equal(sent.body.reason, "request-obsolete");
+  assert.equal(sent.body.canRetry, false);
 });
 
 test("only a stated non-negative integer is a generation", () => {
@@ -177,6 +181,7 @@ test("a response already begun holds its output across a change of viewing, and 
   const output = { id: OUTPUT_ID, outputKey: "key-sent" };
   viewers.of({ id: OTHER_ID, outputKey: "key-other" }, "viewer-a");
   const serving = {
+    subscribeFileChange: () => ({ changed: new Promise(() => {}), release: () => {} }),
     seekEpoch: () => 0,
     getFileStream: async () => ({ kind: "file", contentType: "video/mp4", stream: "bytes", isPlaylist: false })
   };
@@ -207,6 +212,7 @@ test("a response over before it began is released at once", async () => {
   const output = { id: OUTPUT_ID, outputKey: "key-sent" };
   viewers.of({ id: OTHER_ID, outputKey: "key-other" }, "viewer-a");
   const serving = {
+    subscribeFileChange: () => ({ changed: new Promise(() => {}), release: () => {} }),
     seekEpoch: () => 0,
     getFileStream: async () => ({ kind: "file", contentType: "video/mp4", stream: "bytes", isPlaylist: false })
   };

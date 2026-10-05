@@ -19,7 +19,7 @@ import { Readable } from "node:stream";
 import { open } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import { logger, writeAlreadyDecided } from "../../../utils/logger.js";
-import { createCaller, createReceiveStream } from "./channel.js";
+import { createCaller, createReceiveStream, workerReplyError } from "./channel.js";
 import { Command, Event } from "./protocol.js";
 
 const WORKER_URL = new URL("./worker.js", import.meta.url);
@@ -110,11 +110,12 @@ export class TorrentWorkerClient {
   /** @type {(event: { sourceKey: string, fileIndex: number, trackIndex: number, cues: object[], language: string }) => void} */
   /** @type {(event: { sourceKey: string, fileIndexes: number[] }) => void} */
   #onPiecesArrived;
+  #onSourceForgotten;
 
   /**
    * @param {{ memoryBytes?: number, stateDir?: string, onPiecesArrived?: (event: object) => void }} [options]
    */
-  constructor({ memoryBytes, stateDir, onPiecesArrived } = {}) {
+  constructor({ memoryBytes, stateDir, onPiecesArrived, onSourceForgotten } = {}) {
     this.#worker = new Worker(fileURLToPath(WORKER_URL), {
       // `stateDir` travels because the worker writes heap snapshots of its own
       // isolate there. It cannot choose a directory any other way: a worker may
@@ -124,6 +125,7 @@ export class TorrentWorkerClient {
     });
     this.#caller = createCaller(this.#worker);
     this.#onPiecesArrived = onPiecesArrived ?? (() => undefined);
+    this.#onSourceForgotten = onSourceForgotten ?? (() => undefined);
 
     this.#worker.on("message", (message) => {
       // A failed read must fail its stream. This is checked BEFORE the caller
@@ -135,13 +137,13 @@ export class TorrentWorkerClient {
       if (message?.type === Event.ERROR && this.#reads.has(message.id)) {
         const read = this.#reads.get(message.id);
         this.#reads.delete(message.id);
-        read.fail(new Error(message.error ?? "Torrent worker read failed."));
+        read.fail(workerReplyError(message, "Torrent worker read failed."));
         return;
       }
       if (message?.type === Event.ERROR && this.#fragmentReaders.has(message.id)) {
         const reader = this.#fragmentReaders.get(message.id);
         this.#fragmentReaders.delete(message.id);
-        reader.fail(new Error(message.error ?? "Torrent worker read failed."));
+        reader.fail(workerReplyError(message, "Torrent worker read failed."));
         return;
       }
       if (this.#caller.handleReply(message)) {
@@ -233,13 +235,20 @@ export class TorrentWorkerClient {
             length: message.length,
             name: message.name
           });
+          this.#onPiecesArrived({ sourceKey: message.sourceKey ?? `torrent:${message.infoHash}`,
+            fileIndexes: [message.fileIndex], reason: "file-complete" });
+          break;
+        case Event.SOURCE_FORGOTTEN:
+          this.#onSourceForgotten({ sourceKey: message.sourceKey });
           break;
         case Event.PIECES_ARRIVED:
+        case Event.PIECES_CHANGED:
           // ANNOUNCED by the thread that owns the swarm, acted on here: the
           // subtitle walk is this thread's and needs to know a piece arrived.
           this.#onPiecesArrived({
             sourceKey: message.sourceKey,
-            fileIndexes: Array.isArray(message.fileIndexes) ? message.fileIndexes : []
+              fileIndexes: Array.isArray(message.fileIndexes) ? message.fileIndexes : [],
+              ...(typeof message.reason === "string" ? { reason: message.reason } : {})
           });
           break;
         default:
@@ -323,11 +332,11 @@ export class TorrentWorkerClient {
   /**
    * Live download figures for the progress display.
    *
-   * @param {{ sourceKey: string, fileIndex: number, resumeAnchorByteStart?: number | null }} params
+   * @param {{ sourceKey: string, fileIndex: number }} params
    * @returns {Promise<object>}
    */
-  async getFileStats({ sourceKey, fileIndex, resumeAnchorByteStart = null }) {
-    return this.#caller.call(Command.FILE_STATS, { sourceKey, fileIndex, resumeAnchorByteStart });
+  async getFileStats({ sourceKey, fileIndex, forecast = false }) {
+    return this.#caller.call(Command.FILE_STATS, { sourceKey, fileIndex, forecast });
   }
 
   /**
@@ -339,22 +348,6 @@ export class TorrentWorkerClient {
 
 
 
-
-  /**
-   * Start fetching the region a viewer is about to resume at.
-   *
-   * @param {{ sourceKey: string, fileIndex: number, positionSeconds: number }} params
-   * @returns {Promise<{ started: boolean }>}
-   */
-  /**
-   * Fetch one whole file in the room the viewer's own reading leaves.
-   *
-   * @param {{ sourceKey: string, fileIndex: number }} params
-   * @returns {Promise<{ started: boolean }>}
-   */
-  async fillFile({ sourceKey, fileIndex }) {
-    return this.#caller.call(Command.FILL_FILE, { sourceKey, fileIndex });
-  }
 
   /**
    * The byte ranges of one file the torrent holds WHOLE.
@@ -401,6 +394,22 @@ export class TorrentWorkerClient {
     return bytes ? Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength) : null;
   }
 
+  async readHeldRanges({ sourceKey, fileIndex, ranges, maxBytes }) {
+    const whole = this.#wholeFileOf(sourceKey, fileIndex);
+    if (whole) {
+      try {
+        return await readWholeFileRanges(whole, ranges, maxBytes);
+      } catch (error) {
+        const key = `${String(sourceKey).slice("torrent:".length).toLowerCase()}/${fileIndex}`;
+        if (this.wholeFiles.get(key) === whole) this.wholeFiles.delete(key);
+        logger.info(`whole-file input ${sourceKey}:${fileIndex} is unavailable: ${error?.code ?? error?.message ?? error}`);
+        return null;
+      }
+    }
+    const answer = await this.#caller.call(Command.READ_HELD_RANGES, { sourceKey, fileIndex, ranges, maxBytes });
+    return answer?.buffers ? answer.buffers.map(bytes => Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength)) : null;
+  }
+
   /**
    * The file kept whole on disk for this source and index, if there is one.
    *
@@ -422,11 +431,6 @@ export class TorrentWorkerClient {
     const infoHash = String(sourceKey).slice("torrent:".length).toLowerCase();
     return this.wholeFiles.get(`${infoHash}/${fileIndex}`) ?? null;
   }
-
-  async warmResumePosition({ sourceKey, fileIndex, positionSeconds, durationSeconds }) {
-    return this.#caller.call(Command.WARM_POSITION, { sourceKey, fileIndex, positionSeconds, durationSeconds });
-  }
-
 
   /**
    * Bytes every torrent on the worker has moved, downloaded and uploaded apart.
@@ -454,27 +458,6 @@ export class TorrentWorkerClient {
     return this.#caller.call(Command.HELD_TORRENTS, {});
   }
 
-  /** State conditional demand for every file in a selected torrent. */
-  async fillTorrent(sourceKey) {
-    return this.#caller.call(Command.FILL_TORRENT, { sourceKey });
-  }
-
-  /**
-   * Reorder piece selection around a read position (seek prioritisation).
-   *
-   * @param {{ sourceKey: string, fileIndex: number, byteStart: number, windowBytes?: number, wholeFileRead?: boolean }} params
-   * @returns {Promise<void>}
-   */
-  async prioritizeByteRange({ sourceKey, fileIndex, byteStart, windowBytes, wholeFileRead }) {
-    await this.#caller.call(Command.PRIORITIZE, {
-      sourceKey,
-      fileIndex,
-      byteStart,
-      windowBytes,
-      wholeFileRead
-    });
-  }
-
   /**
    * Hand the download the priority map for one file.
    *
@@ -496,26 +479,16 @@ export class TorrentWorkerClient {
   }
 
   /**
-   * Pre-fetch the head and tail the codec probe needs.
-   *
-   * @param {{ sourceKey: string, fileIndex: number, options?: { headBytes?: number, tailBytes?: number, timeoutMs?: number, awaited?: boolean } }} params
-   * @returns {Promise<unknown>}
-   */
-  async prefetchFileEdges({ sourceKey, fileIndex, options = {} }) {
-    return this.#caller.call(Command.PREFETCH_EDGES, { sourceKey, fileIndex, options });
-  }
-
-  /**
    * Read a byte range as a stream.
    *
    * Returns immediately with a stream that fills as chunks arrive; cancelling it
    * (viewer gone, seek superseded) stops the worker reading, so pieces are not
    * fetched for a stream nobody will drain.
    *
-   * @param {{ sourceKey: string, fileIndex: number, start?: number | null, end?: number | null, windowBytes?: number }} params
+   * @param {{ sourceKey: string, fileIndex: number, start?: number | null, end?: number | null }} params
    * @returns {ReadableStream<Uint8Array>}
    */
-  createReadStream({ sourceKey, fileIndex, start = null, end = null, windowBytes }) {
+  createReadStream({ sourceKey, fileIndex, start = null, end = null }) {
     // Same id sequence as commands — see `nextId` in `channel.js`.
     const readId = this.#caller.nextId();
     const receive = createReceiveStream({
@@ -534,7 +507,7 @@ export class TorrentWorkerClient {
     this.#worker.postMessage({
       command: Command.READ_RANGE,
       id: readId,
-      params: { sourceKey, fileIndex, start, end, windowBytes }
+      params: { sourceKey, fileIndex, start, end }
     });
 
     return receive.stream;
@@ -554,10 +527,10 @@ export class TorrentWorkerClient {
    * Returns `null` when this source has no shared pool, so the caller can fall
    * back to {@link createReadStream}.
    *
-   * @param {{ sourceKey: string, fileIndex: number, start?: number | null, end?: number | null, windowBytes?: number }} params
+   * @param {{ sourceKey: string, fileIndex: number, start?: number | null, end?: number | null }} params
    * @returns {{ [Symbol.asyncIterator]: () => AsyncGenerator<{ bytes: Uint8Array, release: () => void }>, cancel: () => void } | null}
    */
-  createFragmentReader({ sourceKey, fileIndex, start = null, end = null, windowBytes }) {
+  createFragmentReader({ sourceKey, fileIndex, start = null, end = null }) {
     const readId = this.#caller.nextId();
     /** @type {{ bytes: Uint8Array, release: () => void }[]} */
     const queue = [];
@@ -598,7 +571,7 @@ export class TorrentWorkerClient {
     this.#worker.postMessage({
       command: Command.READ_RANGE,
       id: readId,
-      params: { sourceKey, fileIndex, start, end, windowBytes }
+      params: { sourceKey, fileIndex, start, end }
     });
 
     return {
@@ -661,7 +634,7 @@ export class TorrentWorkerClient {
       files: info.files.map((file) => ({
         ...file,
         /**
-         * @param {{ start?: number, end?: number, windowBytes?: number }} [options]
+         * @param {{ start?: number, end?: number }} [options]
          * @returns {ReadableStream<Uint8Array>}
          */
         createReadStream(options = {}) {
@@ -674,8 +647,7 @@ export class TorrentWorkerClient {
               sourceKey,
               fileIndex: file.index,
               start: options.start ?? null,
-              end: options.end ?? null,
-              windowBytes: options.windowBytes
+              end: options.end ?? null
             })
           );
         },
@@ -684,7 +656,7 @@ export class TorrentWorkerClient {
          * Fragments of shared memory, for a caller that can say when it has
          * finished with each one. `null` when this source has no shared pool.
          *
-         * @param {{ start?: number, end?: number, windowBytes?: number }} [options]
+         * @param {{ start?: number, end?: number }} [options]
          * @returns {ReturnType<TorrentWorkerClient["createFragmentReader"]>}
          */
         createFragmentReader(options = {}) {
@@ -692,8 +664,7 @@ export class TorrentWorkerClient {
             sourceKey,
             fileIndex: file.index,
             start: options.start ?? null,
-            end: options.end ?? null,
-            windowBytes: options.windowBytes
+            end: options.end ?? null
           });
         }
       }))
@@ -830,6 +801,37 @@ export async function readWholeFile(whole, start, end) {
     const bytes = Buffer.allocUnsafe(last - start + 1);
     const { bytesRead } = await handle.read(bytes, 0, bytes.length, start);
     return bytesRead === bytes.length ? bytes : null;
+  } finally {
+    await handle.close();
+  }
+}
+
+/** One open descriptor holds the complete file throughout segment acquisition. */
+export async function readWholeFileRanges(whole, ranges, maxBytes) {
+  if (!Array.isArray(ranges) || ranges.length === 0 || !Number.isSafeInteger(maxBytes) || maxBytes <= 0) return null;
+  let wanted = 0;
+  for (const range of ranges) {
+    if (!Array.isArray(range) || range.length !== 2) return null;
+    const [start, end] = range;
+    if (!Number.isSafeInteger(start) || !Number.isSafeInteger(end) || start < 0 || end < start || end >= whole.length) return null;
+    wanted += end - start + 1;
+    if (!Number.isSafeInteger(wanted) || wanted > maxBytes) return null;
+  }
+  const handle = await open(whole.path, "r");
+  try {
+    if ((await handle.stat()).size !== whole.length) return null;
+    const result = [];
+    for (const [start, end] of ranges) {
+      const bytes = Buffer.allocUnsafeSlow(end - start + 1);
+      let offset = 0;
+      while (offset < bytes.length) {
+        const { bytesRead } = await handle.read(bytes, offset, bytes.length - offset, start + offset);
+        if (bytesRead === 0) return null;
+        offset += bytesRead;
+      }
+      result.push(bytes);
+    }
+    return result;
   } finally {
     await handle.close();
   }

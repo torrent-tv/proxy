@@ -12,6 +12,25 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { Timeline, Timelines } from "../../services/encode/output/Timeline.js";
+import { PacketIndex } from "../../services/media/container/PacketIndex.js";
+
+test("packet admission uses exact source cuts rather than rounded playlist boundaries", () => {
+  const cuts = [0, 13.5, 605 / 24, 30];
+  const timeline = new Timeline({ boundaries: cuts.map(time => Number(time.toFixed(6))),
+    sourceTimes: cuts, cutGrid: "keyframe" });
+  const index = new PacketIndex();
+  index.declareTrack(1, { type: "video" });
+  for (let n = 0; n < cuts.length - 1; n++) index.append(1, {
+    pts: cuts[n], duration: cuts[n + 1] - cuts[n], keyframe: true, ranges: [[n * 10, n * 10 + 9]]
+  });
+  index.complete(1);
+  assert.equal(index.inputFor({ trackId: 1, from: timeline.publishedStartOf(1),
+    to: timeline.publishedStartOf(2), mode: "copy" }).reason, "video-copy-cut-is-not-a-keyframe");
+  assert.equal(index.inputFor({ trackId: 1, ...timeline.sourceInterval(1, 1), mode: "copy" }).kind, "result");
+  assert.deepEqual(timeline.sourceInterval(1, 1, 2), { from: 15.5, to: cuts[2] + 2 });
+  assert.deepEqual(new Timeline({ boundaries: [0, 4, 8], cutGrid: "uniform" }).sourceInterval(1, 1, 2),
+    { from: 6, to: 10 });
+});
 
 /**
  * @returns {Timeline}

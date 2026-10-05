@@ -30,7 +30,6 @@ import {
   isWanted,
   leaveSwarm,
   rejoinSwarm,
-  stateFileEdges,
   swarmDecisionFor
 } from "../../services/torrent/torrent-pool.js";
 import { demandFor, forgetTorrent } from "../../services/torrent/download/registry.js";
@@ -118,13 +117,14 @@ test("anything stated makes it wanted, and the last withdrawal ends that", () =>
     // The ends of a file being opened, which is the first thing said about a
     // torrent anybody has picked and the reason it stays in its swarm through
     // the seconds when nothing else can say anything about it.
-    stateFileEdges(torrent, 0, Urgency.TAIL);
+    const { register } = demandFor(torrent);
+    register.state({ claimant: "metadata:head", fileIndex: 0, byteStart: 0, byteEnd: 0, urgency: Urgency.TAIL });
+    register.state({ claimant: "metadata:tail", fileIndex: 0, byteStart: 3, byteEnd: 3, urgency: Urgency.TAIL });
     assert.equal(isWanted(torrent), true);
 
-    const { register } = demandFor(torrent);
-    register.withdraw("file-edges:0:head");
+    register.withdraw("metadata:head");
     assert.equal(isWanted(torrent), true, "one end of it is still wanted");
-    register.withdraw("file-edges:0:tail");
+    register.withdraw("metadata:tail");
     assert.equal(isWanted(torrent), false);
   } finally {
     forgetTorrent(torrent);

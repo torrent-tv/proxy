@@ -14,6 +14,16 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { SourceFile, SourceFiles, sourceDecodeCharacteristics } from "../../services/media/SourceFile.js";
 
+test("a known source rate survives missing decoded-frame characteristics", () => {
+  const file = new SourceFile({ sourceKey: "source", fileIndex: 0 });
+  assert.equal(file.megabitsPerSecond, null);
+  file.learn({ bitrateKbps: 4200, width: 1920, height: 1080 });
+  assert.equal(file.decode, null);
+  assert.equal(file.megabitsPerSecond, 4.2);
+  file.learn({ fps: 24 });
+  assert.equal(file.decode.megabitsPerSecond, file.megabitsPerSecond);
+});
+
 test("a file's key is the pair that identifies it, spelled in one place", () => {
   const file = new SourceFile({ sourceKey: "abc123", fileIndex: 4 });
   assert.equal(file.key, "abc123:4");

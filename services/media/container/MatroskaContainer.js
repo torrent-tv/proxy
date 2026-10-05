@@ -34,16 +34,17 @@
 
 import { Container } from "./Container.js";
 import { VideoTrack } from "../tracks/VideoTrack.js";
+import { h264Configuration } from "./h264-configuration.js";
+import { hevcConfiguration } from "./hevc-configuration.js";
 import { AudioTrack } from "../tracks/AudioTrack.js";
 import { TextSubtitleTrack, TEXT_CODECS_MATROSKA } from "../tracks/TextSubtitleTrack.js";
 import { ImageSubtitleTrack } from "../tracks/ImageSubtitleTrack.js";
 import { ContainerTrack } from "../tracks/ContainerTrack.js";
-import { iterateElements, readFloat, readUint, readVint } from "./ebml-reader.js";
-import { ElementReader, sizeIsUnknown } from "./ebml-stream.js";
+import { iterateElements, readFloat, readUint } from "./ebml-reader.js";
+import { ElementReader } from "./ebml-stream.js";
 import { firstFrameOffset, readBlockHeader, walkHeldClusters } from "./matroska-clusters.js";
-
-/** Enough to hold the EBML header and the Segment's own header. */
-const HEAD_BYTES = 64 * 1024;
+import { readMatroskaPackets } from "./matroska-packets.js";
+import { RetainedReads } from "./RetainedReads.js";
 
 const ID_EBML = 0x1a45dfa3;
 const ID_SEGMENT = 0x18538067;
@@ -91,6 +92,7 @@ const ID_DISPLAY_WIDTH = 0x54b0;
 const ID_DISPLAY_HEIGHT = 0x54ba;
 const ID_SAMPLING_FREQUENCY = 0xb5;
 const ID_CHANNELS = 0x9f;
+const ID_AUDIO_BIT_DEPTH = 0x6264;
 
 /** RFC 9559 §5.1.2.1: nanoseconds per tick when Info omits TimestampScale. */
 const DEFAULT_TIMESTAMP_SCALE = 1_000_000;
@@ -127,13 +129,15 @@ function readString(buf, el) {
 
 export class MatroskaContainer extends Container {
   /** @type {Buffer | null} */
-  #head = null;
+  #declarations = null;
 
   /** @type {SegmentLayout | null} */
   #layout = null;
 
   /** @type {Array<import("../tracks/ContainerTrack.js").ContainerTrack> | null} */
   #tracks = null;
+  #packets = null;
+  #packetState = {};
 
   /**
    * The Cues reading: undefined until read, null when the file has none.
@@ -143,6 +147,11 @@ export class MatroskaContainer extends Container {
 
   get formatName() {
     return "matroska";
+  }
+
+  packetIndexBytes() {
+    return (this.#packets?.allocatedBytes() ?? 0) +
+      [...(this.#packetState.packets?.values() ?? [])].reduce((sum, records) => sum + records.allocatedBytes, 0);
   }
 
   static detect(head) {
@@ -218,14 +227,6 @@ export class MatroskaContainer extends Container {
     });
   }
 
-  /** @returns {Promise<Buffer>} */
-  async #headBytes() {
-    if (this.#head === null) {
-      this.#head = await this.readRange(0, Math.min(HEAD_BYTES, this.fileSize) - 1);
-    }
-    return this.#head;
-  }
-
   /**
    * Where the Segment's top-level elements are.
    *
@@ -242,18 +243,22 @@ export class MatroskaContainer extends Container {
     if (this.#layout !== null) {
       return this.#layout;
     }
-    const head = await this.#headBytes();
-    if (!isMatroska(head)) {
-      return null;
+    const reader = new ElementReader({ read: this.readRange, fileSize: this.fileSize, portionBytes: this.portionBytes });
+    let segment = null;
+    for (let at = 0; at < this.fileSize;) {
+      const header = await reader.header(at, this.fileSize);
+      if (!header || (at === 0 && header.id !== ID_EBML)) return null;
+      if (header.end !== null && header.end > this.fileSize) throw new Error("Matroska top-level element exceeds the file.");
+      if (header.id === ID_SEGMENT) { segment = header; break; }
+      if (header.end === null || header.end <= at) throw new Error("Matroska top-level element has no bounded next position.");
+      at = header.end;
     }
-    const segment = segmentHeaderIn(head);
     if (!segment) {
       return null;
     }
     const segmentDataOffset = segment.dataOffset;
     const segmentEnd = segment.size === null ? this.fileSize : Math.min(this.fileSize, segmentDataOffset + segment.size);
 
-    const reader = new ElementReader({ read: this.readRange, fileSize: this.fileSize, portionBytes: this.portionBytes });
     /** @type {Map<number, number>} */
     const found = new Map();
     /** @type {Map<number, number>} */
@@ -367,6 +372,7 @@ export class MatroskaContainer extends Container {
    * @returns {Promise<import("../tracks/index.js").ContainerTrack[]>}
    */
   async readTracks() {
+    this.#declarations ??= new RetainedReads(this.packetMemory);
     if (this.#tracks !== null) {
       return this.#tracks;
     }
@@ -392,7 +398,8 @@ export class MatroskaContainer extends Container {
         break;
       }
       if (entry.id === ID_TRACK_ENTRY) {
-        const data = await within.data(entry);
+        const data = entry.size === 0 ? Buffer.alloc(0) : entry.size > this.portionBytes ? null
+          : await this.#declarations.read(entry.dataOffset, entry.end - 1, () => within.data(entry));
         // An entry larger than one portion is refused rather than assembled.
         // Its type cannot be known without its data, so it is kept as a track
         // of no kind — which makes the count of its kind short by one, and
@@ -401,6 +408,20 @@ export class MatroskaContainer extends Container {
         const fields = data ? parseTrackEntry(data) : { refused: true, trackNumber: null };
         const track = trackFrom(fields, counters);
         if (track) {
+          if (["V_MPEG4/ISO/AVC", "V_MPEGH/ISO/HEVC"].includes(track.codecId) && track.codecPrivateB64) {
+            const configuration = (track.codecId === "V_MPEG4/ISO/AVC" ? h264Configuration : hevcConfiguration)(Buffer.from(track.codecPrivateB64, "base64"));
+            track.codecConfiguration = configuration;
+            track.reorderDepth = configuration.reorderDepth;
+            track.width = configuration.width;
+            track.height = configuration.height;
+            track.bitDepth = configuration.bitDepth;
+            track.fps = configuration.fps ?? track.fps;
+          }
+          track.defaultDurationSeconds = fields.defaultDurationSeconds || track.defaultDurationSeconds || 0;
+          track.seekPrerollSeconds = Math.max(fields.seekPrerollSeconds ?? 0, track.seekPrerollSeconds ?? 0);
+          track.codecDelaySeconds = fields.codecDelaySeconds ?? 0;
+          track.timestampScale = fields.timestampScale ?? 1;
+          track.codecRanges = [[entry.dataOffset, entry.end - 1]];
           result.push(track);
         }
       }
@@ -408,6 +429,22 @@ export class MatroskaContainer extends Container {
     }
     this.#tracks = result;
     return result;
+  }
+
+  async readPacketIndex(interval) {
+    if (this.#packets) return this.#packets;
+    const layout = await this.#segmentLayout();
+    if (!layout) throw new Error("Matroska Segment is absent.");
+    const tracks = await this.readTracks();
+    const info = await this.readMediaInfo();
+    const index = await readMatroskaPackets({ readRange: this.readRange,
+      fileSize: this.fileSize, portionBytes: this.portionBytes, layout, tracks,
+      durationSeconds: info.durationSeconds, interval, state: this.#packetState, packetMemory: this.packetMemory });
+    if (index.isComplete()) {
+      this.#packets = index;
+      this.#packetState = {};
+    }
+    return index;
   }
 
   /**
@@ -600,7 +637,13 @@ export class MatroskaContainer extends Container {
    */
   static cueTextOf(payload, codecId) {
     const text = Buffer.isBuffer(payload) ? payload.toString("utf8") : String(payload ?? "");
-    if (codecId !== "S_TEXT/ASS" && codecId !== "S_TEXT/SSA") {
+    if (String(codecId).startsWith("D_WEBVTT/")) {
+      // WebM blocks prefix the cue with its identifier and settings lines.
+      const first = text.indexOf("\n"), second = text.indexOf("\n", first + 1);
+      if (first < 0 || second < 0) throw new Error("WebM subtitle cue prefixes are truncated.");
+      return text.slice(second + 1);
+    }
+    if (!["S_TEXT/ASS", "S_TEXT/SSA", "S_ASS", "S_SSA"].includes(codecId)) {
       return text;
     }
     const fields = text.split(",");
@@ -656,30 +699,6 @@ export class MatroskaContainer extends Container {
  */
 function isMatroska(head) {
   return head.length >= 4 && head.readUInt32BE(0) === ID_EBML;
-}
-
-/**
- * The Segment element's header, from the top-level elements of the head.
- *
- * @param {Buffer} head
- * @returns {{ dataOffset: number, size: number | null } | null} `size` is null
- *   for an unknown-sized Segment (RFC 8794 §6.2), which runs to the file's end.
- */
-function segmentHeaderIn(head) {
-  let offset = 0;
-  while (offset < head.length) {
-    const id = readVint(head, offset, true);
-    const size = id && readVint(head, offset + id.length, false);
-    if (!id || !size) {
-      return null;
-    }
-    const dataOffset = offset + id.length + size.length;
-    if (id.value === ID_SEGMENT) {
-      return { dataOffset, size: sizeIsUnknown(size) ? null : size.value };
-    }
-    offset = dataOffset + size.value;
-  }
-  return null;
 }
 
 /**
@@ -818,6 +837,10 @@ function parseTrackEntry(data) {
   };
   for (const f of iterateElements(data)) {
     switch (f.id) {
+      case 0x23e383: fields.defaultDurationSeconds = readUint(data, f.dataOffset, f.size) / 1e9; break;
+      case 0x56bb: fields.seekPrerollSeconds = readUint(data, f.dataOffset, f.size) / 1e9; break;
+      case 0x56aa: fields.codecDelaySeconds = readUint(data, f.dataOffset, f.size) / 1e9; break;
+      case 0x23314f: fields.timestampScale = readFloat(data, f.dataOffset, f.size); break;
       case ID_TRACK_NUMBER: fields.trackNumber = readUint(data, f.dataOffset, f.size); break;
       case ID_TRACK_TYPE: fields.type = readUint(data, f.dataOffset, f.size); break;
       case ID_CODEC_ID: fields.codecId = readString(data, f); break;
@@ -853,6 +876,8 @@ function parseTrackEntry(data) {
             fields.samplingFreq = af.size === 8 ? data.readDoubleBE(af.dataOffset) : readFloat(data, af.dataOffset, af.size);
           } else if (af.id === ID_CHANNELS) {
             fields.channels = readUint(data, af.dataOffset, af.size);
+          } else if (af.id === ID_AUDIO_BIT_DEPTH) {
+            fields.bitDepth = readUint(data, af.dataOffset, af.size);
           }
         }
         break;
@@ -916,7 +941,8 @@ function trackFrom(fields, counters) {
       isCommentary: fields.isCommentary,
       isVisualImpaired: fields.isVisual,
       channels: fields.channels,
-      samplingFrequency: fields.samplingFreq
+      samplingFrequency: fields.samplingFreq,
+      bitDepth: fields.bitDepth
     });
   }
   if (fields.type === TRACK_TYPE_SUBTITLE) {

@@ -50,6 +50,79 @@ export class Viewers {
     this.#onChange = typeof onChange === "function" ? onChange : () => {};
   }
 
+  /** Register presence before source metadata or an output exists. */
+  present(consumerId, now = Date.now()) {
+    if (typeof consumerId !== "string" || !consumerId) throw new TypeError("A viewer needs a name.");
+    const known = this.#byId.get(consumerId);
+    const viewer = known ?? new Viewer(consumerId, now);
+    viewer.seen(now);
+    viewer.gone = false;
+    this.#byId.set(consumerId, viewer);
+    if (!known) this.#onChange();
+    return viewer;
+  }
+
+  /** Bind the same viewer to their source before metadata preparation. */
+  selectsSource(consumerId, sourceKey, now = Date.now()) {
+    if (typeof sourceKey !== "string" || !sourceKey) throw new TypeError("A selected source needs a key.");
+    const viewer = this.present(consumerId, now);
+    if (viewer.source?.sourceKey !== sourceKey) {
+      viewer.source = { sourceKey, visibleFileIndices: [], selectedFileIndex: null };
+      viewer.subtitle = null;
+      this.#onChange();
+    }
+    return viewer;
+  }
+
+  selectsFile(consumerId, sourceKey, fileIndex, now = Date.now(), selection = {}) {
+    if (!Number.isSafeInteger(fileIndex) || fileIndex < 0) throw new TypeError("A selected file needs its source index.");
+    const viewer = this.selectsSource(consumerId, sourceKey, now);
+    const changed = viewer.source.selectedFileIndex !== fileIndex;
+    if (changed) {
+      viewer.source.selectedFileIndex = fileIndex;
+      viewer.source.generation = 0;
+      viewer.subtitle = null;
+    }
+    if (changed || Number.isFinite(selection.positionSeconds)) viewer.moveTo(selection.positionSeconds ?? 0, now);
+    if (typeof selection.wantsToPlay === "boolean") {
+      viewer.playing = false;
+      viewer.waiting = selection.wantsToPlay;
+      viewer.pausedAt = selection.wantsToPlay ? null : viewer.pausedAt ?? now;
+    }
+    if (changed || Object.keys(selection).length) this.#onChange();
+    return viewer;
+  }
+
+  visibleFiles(consumerId, sourceKey, indices, now = Date.now()) {
+    if (!Array.isArray(indices) || indices.some(index => !Number.isSafeInteger(index) || index < 0)) {
+      throw new TypeError("Visible files need source indices.");
+    }
+    const viewer = this.selectsSource(consumerId, sourceKey, now);
+    const visible = [...new Set(indices)];
+    if (JSON.stringify(viewer.source.visibleFileIndices) !== JSON.stringify(visible)) {
+      viewer.source.visibleFileIndices = visible;
+      this.#onChange();
+    }
+    return viewer;
+  }
+
+  /** Accept a source report only while its original selection is still present. */
+  reportSource(consumerId, sourceKey, fileIndex, report, now = Date.now()) {
+    const viewer = this.get(consumerId);
+    if (!viewer || viewer.gone || viewer.outputs.size !== 0 ||
+        viewer.source?.sourceKey !== sourceKey || viewer.source.selectedFileIndex !== fileIndex) return false;
+    if (report.generation !== undefined) {
+      if (!Number.isSafeInteger(report.generation) || report.generation < (viewer.source.generation ?? 0)) return false;
+      viewer.source.generation = report.generation;
+    }
+    if (report.seek === true && Number.isFinite(report.positionSeconds) && report.positionSeconds >= 0) {
+      viewer.moveTo(report.positionSeconds, now);
+    }
+    viewer.report(report, now);
+    this.#onChange();
+    return true;
+  }
+
   /**
    * This viewer, watching this output.
    *
@@ -104,6 +177,15 @@ export class Viewers {
    */
   get(consumerId) {
     return this.#byId.get(consumerId) ?? null;
+  }
+
+  sourceKeys() {
+    return new Set([...this.#byId.values()].filter(viewer => viewer.isPresent() && viewer.source)
+      .map(viewer => viewer.source.sourceKey));
+  }
+
+  forSource(sourceKey) {
+    return [...this.#byId.values()].filter(viewer => viewer.isPresent() && viewer.source?.sourceKey === sourceKey);
   }
 
   /**
@@ -244,7 +326,7 @@ export class Viewers {
       return false;
     }
     viewer.outputs.delete(output.id);
-    if (viewer.outputs.size === 0) {
+    if (viewer.outputs.size === 0 && !viewer.source) {
       // Watching nothing at all: this is a statement that they are gone, and
       // not merely that this one output is no longer theirs.
       viewer.markGone();
@@ -287,7 +369,7 @@ export class Viewers {
     for (const [consumerId, viewer] of this.#byId) {
       if (!viewer.outputs.delete(outputId)) continue;
       if (viewer.activeVariantId === outputId) viewer.activeVariantId = null;
-      if (viewer.outputs.size === 0) {
+      if (viewer.outputs.size === 0 && !viewer.source) {
         viewer.markGone();
         this.#byId.delete(consumerId);
       }
@@ -331,6 +413,31 @@ export class Viewers {
       return false;
     }
     viewer.wantsCuesFor.add(`${sourceKey}:${fileIndex}`);
+    return true;
+  }
+
+  /** Record the chosen subtitle without creating or restoring a viewer. */
+  selectsSubtitle(consumerId, sourceKey, fileIndex, trackIndex = null) {
+    const viewer = this.get(consumerId);
+    if (!viewer || viewer.gone || viewer.source?.sourceKey !== sourceKey ||
+      !Number.isSafeInteger(fileIndex) || fileIndex < 0 ||
+      (trackIndex !== null && (!Number.isSafeInteger(trackIndex) || trackIndex < 0))) return false;
+    if (trackIndex !== null && viewer.source.selectedFileIndex !== fileIndex) return false;
+    const selection = { sourceKey, fileIndex, trackIndex };
+    if (JSON.stringify(viewer.subtitle) !== JSON.stringify(selection)) {
+      viewer.subtitle = selection;
+      this.#onChange();
+    }
+    return true;
+  }
+
+  clearsSubtitle(consumerId, sourceKey) {
+    const viewer = this.get(consumerId);
+    if (!viewer || viewer.gone || viewer.source?.sourceKey !== sourceKey) return false;
+    if (viewer.subtitle !== null) {
+      viewer.subtitle = null;
+      this.#onChange();
+    }
     return true;
   }
 

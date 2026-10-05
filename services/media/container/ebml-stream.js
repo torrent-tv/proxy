@@ -130,7 +130,13 @@ export class ElementReader {
     if (room <= 1) {
       return null;
     }
-    const bytes = await this.bytes(at, Math.min(MAX_HEADER_BYTES, room));
+    const first = await this.bytes(at, 1);
+    const idWidth = vintWidth(first[0]);
+    if (!idWidth || idWidth > 4 || idWidth >= room) return null;
+    const beginning = await this.bytes(at, idWidth + 1);
+    const sizeWidth = vintWidth(beginning[idWidth]);
+    if (!sizeWidth || idWidth + sizeWidth > room) return null;
+    const bytes = await this.bytes(at, idWidth + sizeWidth);
     const id = readVint(bytes, 0, true);
     if (!id) {
       return null;
@@ -171,4 +177,9 @@ export class ElementReader {
     const available = element.size === null ? length : Math.min(length, element.size);
     return this.bytes(element.dataOffset, available);
   }
+}
+
+function vintWidth(byte) {
+  for (let width = 1; width <= 8; width++) if (byte & (1 << (8 - width))) return width;
+  return 0;
 }

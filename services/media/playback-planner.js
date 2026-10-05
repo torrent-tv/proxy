@@ -2,44 +2,18 @@
  * @file Playback planner service.
  *
  * Determines whether a torrent file can be served directly or requires
- * HLS audio transcoding by probing the stream codecs with ffmpeg.
+ * HLS audio transcoding from the file's shared container declarations.
  * Results are cached indefinitely (keyed by source + file index).
  */
 
-import { spawn } from "node:child_process";
 import { logger } from "../../utils/logger.js";
 import { Container } from "./container/Container.js";
 import { buildAudioInventory, enrichAudioInventoryFromSidecar } from "./audio-inventory.js";
-import {
-  parseFfmpegDurationSeconds,
-  parseFfmpegStartTimeSeconds,
-  parseFfmpegBitDepth,
-  parseFfmpegBitrateKbps,
-  parseFfmpegVideoFps,
-  parseFfmpegHdr,
-  parseFfmpegStreamCounts
-} from "./ffmpeg-banner.js";
+import { waitForPlan } from "./await-plan.js";
+import { playbackDeclarations } from "./playback-declarations.js";
 
 /** Audio codecs that browsers can decode natively without transcoding. */
 const DIRECT_AUDIO_CODECS = new Set(["aac", "mp3", "opus", "vorbis", "flac"]);
-
-// Once the plan probe succeeds, warm the START of the file body so the
-// transcode session's ffmpeg reads hit downloaded data instead of paying
-// piece latency at encode time (the edge prefetch only covers head+tail for
-// the codec probe). ~16 MB ≈ the first segments of typical media.
-const BODY_PREFETCH_BYTES = 16 * 1024 * 1024;
-
-/**
- * How long the plan waits for a file's own header before offering its
- * soundtrack without what that header would have said.
- *
- * Not a measurement, and nothing is derived from it: it is the point past which
- * holding the viewer costs more than the language and flags being waited for —
- * which the folder name supplies anyway, from the torrent's file list, at no
- * cost. The read continues asynchronously after this response and is shared
- * with the refresh request, so a later answer can use the same container read.
- */
-const SIDECAR_HEADER_WAIT_MS = 3_000;
 
 /** Subtitle codecs that can be converted to WebVTT (text-based). */
 const TEXT_SUBTITLE_CODECS = new Set(["subrip", "srt", "ass", "ssa", "webvtt", "vtt", "mov_text", "text"]);
@@ -178,81 +152,6 @@ export function parseStreamCodecs(ffmpegOutput) {
 }
 
 /**
- * Run a brief ffmpeg probe to identify the audio and video codecs of a stream.
- * Times out after `timeoutMs` and returns empty strings on failure.
- *
- * @param {object} options
- * @param {string} options.ffmpegBin
- * @param {string} options.inputUrl
- * @param {string} [options.userAgent=""]
- * @param {number} [options.timeoutMs=8000]
- * @returns {Promise<{ audioCodec: string, videoCodec: string, container: string, durationSeconds: number, videoWidth: number, videoHeight: number, audioTracks: object[], subtitleTracks: object[], stderr: string }>}
- *   Parsed banner fields plus the raw `stderr`, so the caller can derive the
- *   full media info (fps/startTime/HDR) without a second ffmpeg scan.
- */
-function probeStreamCodecs({ ffmpegBin, inputUrl, userAgent = "", timeoutMs = 8_000 }) {
-  return new Promise((resolve) => {
-    const args = ["-hide_banner", "-loglevel", "info"];
-    if (typeof userAgent === "string" && userAgent.trim().length > 0) {
-      args.push("-user_agent", userAgent.trim());
-    }
-    // Decode a tiny slice of all streams (no per-stream -map, so video-only
-    // files probe correctly too).  The ffmpeg banner that precedes decoding
-    // gives us audio/video codecs, the container format and the duration in a
-    // single pass.
-    args.push("-i", inputUrl, "-t", "0.1", "-f", "null", "-");
-
-    const ffmpeg = spawn(ffmpegBin, args, {
-      stdio: ["ignore", "ignore", "pipe"],
-      windowsHide: true
-    });
-    let stderr = "";
-    let settled = false;
-
-    const finish = (codecs) => {
-      if (settled) {
-        return;
-      }
-      settled = true;
-      resolve(codecs);
-    };
-
-    const timeoutId = setTimeout(() => {
-      if (!ffmpeg.killed) {
-        ffmpeg.kill("SIGTERM");
-      }
-      finish({ ...parseStreamCodecs(stderr), stderr });
-    }, timeoutMs);
-
-    ffmpeg.stderr.on("data", (chunk) => {
-      stderr += String(chunk);
-    });
-
-    ffmpeg.on("error", () => {
-      clearTimeout(timeoutId);
-      finish({ audioCodec: "", videoCodec: "", stderr: "" });
-    });
-
-    ffmpeg.on("exit", () => {
-      clearTimeout(timeoutId);
-      finish({ ...parseStreamCodecs(stderr), stderr });
-    });
-  });
-}
-
-/**
- * Resolve after a given number of milliseconds.
- *
- * @param {number} ms
- * @returns {Promise<void>}
- */
-function delay(ms) {
-  return new Promise((resolve) => {
-    setTimeout(resolve, ms);
-  });
-}
-
-/**
  * Build the direct stream URL for a source file served by the local proxy.
  *
  * @param {string} localBaseUrl - e.g. "http://127.0.0.1:9090"
@@ -278,12 +177,11 @@ function buildDirectUrl(localBaseUrl, sourceKey, fileIndex) {
  * @property {number} durationSeconds   - Total media duration in seconds (0 if unknown).
  * @property {number} videoWidth        - Source coded width (0 if unknown).
  * @property {number} videoHeight       - Source coded height (0 if unknown).
- * @property {boolean} audioTracksPending - At least one sidecar header timed out and can be refreshed later.
+ * @property {boolean} audioTracksPending - At least one sidecar declaration still needs source bytes.
  */
 
 /**
  * @typedef {Object} PlaybackPlannerOptions
- * @property {string}  ffmpegBin
  * @property {boolean} transcodeAudioEnabled
  * @property {string}  localBaseUrl
  * @property {ReturnType<import("../../store/source-registry.js").createSourceRegistry>} sourceRegistry
@@ -298,7 +196,6 @@ function buildDirectUrl(localBaseUrl, sourceKey, fileIndex) {
  * @returns {{ getPlan: (params: { sourceKey: string, fileIndex: number, userAgent?: string }) => Promise<PlaybackPlan>, refreshAudioTracks: (params: { sourceKey: string, fileIndex: number }) => Promise<{ audioTracks: object[], pending: boolean }> }}
  */
 export function createPlaybackPlanner({
-  ffmpegBin,
   transcodeAudioEnabled,
   localBaseUrl,
   sourceRegistry,
@@ -320,6 +217,8 @@ export function createPlaybackPlanner({
   // happened in the torrent thread and came back over the channel. It happens
   // on this thread now, and what is passed here is the ordinary container read.
   declaredTracksOf = null,
+  readDeclarations = null,
+  subscribeSource = null,
   // Optional. Called once the file's edges are downloaded, so the keyframe
   // index — which reads the same tail of the file — is fetched alongside the
   // codec probe instead of after it. It goes straight to `KeyframeTables`,
@@ -333,6 +232,7 @@ export function createPlaybackPlanner({
 }) {
   /** @type {Map<string, PlaybackPlan>} */
   const cache = new Map();
+  const lifetimes = new Map();
   const pendingSidecarHeaders = new Map();
   const declaredAudioReads = new Map();
   /**
@@ -461,22 +361,8 @@ export function createPlaybackPlanner({
         () => { if (declaredAudioReads.get(readKey) === readPromise) declaredAudioReads.delete(readKey); }
       );
     }
-    let timer = null;
     try {
-      return await Promise.race([
-        readPromise,
-        new Promise((resolve) => {
-          timer = setTimeout(() => resolve(null), SIDECAR_HEADER_WAIT_MS);
-          timer.unref?.();
-        })
-      ]).then((tracks) => {
-        if (tracks === null) {
-          logger.info(
-            `audio tracks: "${label}" did not answer within ${SIDECAR_HEADER_WAIT_MS / 1000}s — ` +
-            "offered without what its header would say"
-          );
-          return { tracks: [], complete: false, timedOut: true };
-        }
+      return await readPromise.then((tracks) => {
         return {
           tracks: Array.isArray(tracks?.tracks) ? tracks.tracks : [],
           complete: tracks?.complete === true,
@@ -486,8 +372,6 @@ export function createPlaybackPlanner({
     } catch (error) {
       logger.info(`audio tracks: "${label}" could not be read (${error?.message ?? error})`);
       return { tracks: [], complete: false, timedOut: false };
-    } finally {
-      if (timer !== null) clearTimeout(timer);
     }
   }
 
@@ -564,6 +448,7 @@ export function createPlaybackPlanner({
     for (const sidecar of sidecarFiles) {
       if (!pendingIndexes.has(sidecar.fileIndex)) continue;
       const read = await declaredAudioOf(sourceKey, sidecar.fileIndex, sidecar.name);
+      if (cache.get(cacheKey) !== plan) return { audioTracks: [], pending: false };
       if (read.timedOut) continue;
       if (read.tracks.length === 0) {
         if (read.complete) pendingIndexes.delete(sidecar.fileIndex);
@@ -589,6 +474,7 @@ export function createPlaybackPlanner({
         );
       }
     }
+    if (cache.get(cacheKey) !== plan) return { audioTracks: [], pending: false };
     pendingSidecarHeaders.set(cacheKey, [...pendingIndexes]);
     plan.audioTracksPending = pendingIndexes.size > 0;
     return { audioTracks: plan.audioTracks, pending: pendingIndexes.size > 0 };
@@ -638,6 +524,16 @@ export function createPlaybackPlanner({
   }
 
   return {
+    forget(sourceKey) {
+      for (const records of [cache, lifetimes, pendingSidecarHeaders, declaredAudioReads, mediaInfoCache]) {
+        for (const key of records.keys()) if (key.startsWith(`${sourceKey}:`)) records.delete(key);
+      }
+    },
+    getReadyPlan(params, { signal } = {}) {
+      if (!subscribeSource) throw new Error("Event-driven source preparation is unavailable.");
+      return waitForPlan({ read: () => this.getPlan(params), signal,
+        subscribe: listener => subscribeSource(params.sourceKey, params.fileIndex, listener) });
+    },
     /**
      * Media info the planner already probed for this file, or `null`. Lets the
      * HLS session manager skip its own duplicate `probeInputMediaInfo` scan.
@@ -670,23 +566,28 @@ export function createPlaybackPlanner({
      * Throws with `error.code === "SOURCE_NOT_FOUND"` or `"FILE_NOT_FOUND"`
      * when the source or file cannot be located.
      *
-     * When the file header has not downloaded yet (cold torrent, peers still
-     * connecting) the codec probe cannot succeed. Rather than block the HTTP
-     * response until it can, the planner prioritises the header, probes for at
-     * most `maxWaitMs`, and if still undetectable returns a plan flagged
-     * `pending: true` (NOT cached). The caller polls again — each call keeps the
-     * header prioritised and downloading — until a real plan comes back. This
-     * avoids a single long request racing the transport's request timeout.
+     * A probe reads only bytes already stored. Missing input becomes demand in
+     * the shared map and returns `pending: true`, which is never cached as a
+     * playback plan. Storage changes repeat unfinished probes; another request
+     * reads their latest result without creating a separate download request.
      *
      * @param {object} params
      * @param {string} params.sourceKey
      * @param {number} params.fileIndex
      * @param {string} [params.userAgent=""]
-     * @param {number} [params.maxWaitMs=60000] - Max time to wait for the header within ONE call.
      * @returns {Promise<PlaybackPlan & { pending?: boolean }>}
      */
-    async getPlan({ sourceKey, fileIndex, userAgent = "", maxWaitMs = 60_000, background = false }) {
+    async getPlan({ sourceKey, fileIndex, background = false }) {
       const cacheKey = `${sourceKey}:${fileIndex}`;
+      let lifetime = lifetimes.get(cacheKey);
+      if (!lifetime) lifetimes.set(cacheKey, lifetime = {});
+      const ensureCurrent = () => {
+        if (lifetimes.get(cacheKey) === lifetime) return;
+        const error = new Error("Source preparation was withdrawn.");
+        error.code = "SOURCE_FORGOTTEN";
+        error.canRetry = false;
+        throw error;
+      };
       const cached = cache.get(cacheKey);
       if (cached) {
         return withHostTimings(cached);
@@ -698,7 +599,6 @@ export function createPlaybackPlanner({
       // cached, and nothing said which part of it was slow.
       const planEntryMs = Date.now();
       let torrentReadyMs = 0;
-      let edgesReadyMs = 0;
 
       const sourceRecord = sourceRegistry.get(sourceKey);
       if (!sourceRecord) {
@@ -708,6 +608,7 @@ export function createPlaybackPlanner({
       }
 
       const torrent = await torrentPool.getTorrent(sourceRecord.sourceType, sourceRecord.source);
+      ensureCurrent();
       torrentReadyMs = Date.now() - planEntryMs;
       const file = torrent.files[fileIndex];
       if (!file) {
@@ -736,94 +637,47 @@ export function createPlaybackPlanner({
         return withHostTimings(plan);
       }
 
-      // Pre-fetch file edges (head + tail), then probe — retrying while the
-      // file header is still downloading. In a multi-file torrent the pieces
-      // for a given file arrive unevenly, so the first probe can return empty
-      // codecs. A transient empty probe must NOT be cached: otherwise the wrong
-      // plan (file treated as directly playable) sticks permanently for this
-      // file, and an unsupported codec like xvid gets copied → black video.
-      // Awaited in the literal sense: this answer cannot be given until the
-      // file has said what is in it, and a person is watching a loading screen
-      // for as long as that takes.
-      await torrentPool.prefetchFileEdges(torrent, fileIndex, {
-        awaited: !background,
-        timeoutMs: background ? 10_000 : 300_000
-      });
-      edgesReadyMs = Date.now() - planEntryMs;
-      // The keyframe index reads the tail of the file, which the probe has just
-      // waited for as well. Started here it overlaps the probe instead of
-      // following the whole plan — worth 311-430 ms of the time before the
-      // first segment. Fire and forget: a session that finds the table
-      // unanswered joins this very read rather than starting a second one.
+      // Structural reads state their exact missing bytes through
+      // the shared download map. No separate edge or body demand is created.
+      if (typeof declaredTracksOf === "function") await declaredTracksOf({ sourceKey, fileIndex });
       if (!background) {
         warmKeyframeIndex?.({ sourceKey, fileIndex, logName: file.name });
       }
-      let probe = await probeStreamCodecs({ ffmpegBin, inputUrl: directUrl, userAgent });
-      const probeDeadline = Date.now() + Math.max(0, maxWaitMs);
-      let attempt = 0;
-      while (
-        probe.audioCodec.length === 0 &&
-        probe.videoCodec.length === 0 &&
-        Date.now() < probeDeadline
-      ) {
-        attempt += 1;
-        await delay(Math.min(3_000, 500 + attempt * 250));
-        await torrentPool.prefetchFileEdges(torrent, fileIndex, {
-          awaited: !background,
-          timeoutMs: background ? 10_000 : 300_000
-        });
-        probe = await probeStreamCodecs({ ffmpegBin, inputUrl: directUrl, userAgent });
+      if (typeof readDeclarations !== "function") throw new Error("Source container declarations are unavailable.");
+      const probeResult = await readDeclarations({ sourceKey, fileIndex });
+      ensureCurrent();
+      if (probeResult.kind === "terminal") {
+        const error = new Error(probeResult.message || probeResult.reason);
+        error.code = probeResult.reason;
+        error.canRetry = false;
+        throw error;
       }
+      if (probeResult.kind === "cancelled") {
+        throw new DOMException("Playback preparation was cancelled.", "AbortError");
+      }
+      const probe = probeResult.kind === "result" ? playbackDeclarations({ ...probeResult.value, fileBytes: file.length })
+        : { audioCodec: "", videoCodec: "", container: "", durationSeconds: null,
+          videoWidth: 0, videoHeight: 0, audioTracks: [], subtitleTracks: [] };
       const { audioCodec, videoCodec, container, durationSeconds, videoWidth, videoHeight, audioTracks, subtitleTracks } = probe;
       const codecsDetected = audioCodec.length > 0 || videoCodec.length > 0;
+      if (!codecsDetected && probeResult?.kind === "result") {
+        const error = new Error("The available source bytes declare no playable audio or video track.");
+        error.code = "media-probe-no-tracks";
+        error.canRetry = false;
+        throw error;
+      }
       logger.info(
         `plan ${sourceKey.slice(0, 8)}:${fileIndex} torrent-ready=${torrentReadyMs}ms ` +
-          `file-edges=${edgesReadyMs - torrentReadyMs}ms probe=${Date.now() - planEntryMs - edgesReadyMs}ms ` +
-          `total=${Date.now() - planEntryMs}ms attempts=${attempt + 1} ` +
-          `${codecsDetected ? `${videoCodec || "-"}/${audioCodec || "-"}` : "codecs NOT detected (will be polled again)"}`
+          `probe=${Date.now() - planEntryMs - torrentReadyMs}ms total=${Date.now() - planEntryMs}ms ` +
+          `${codecsDetected ? `${videoCodec || "-"}/${audioCodec || "-"}` : "codec declaration awaits source bytes"}`
       );
 
-      // The picture's own facts come from two readings and only one was ever
-      // used: every figure the encode is planned from came from ffmpeg's
-      // banner, while the `VideoTrack` the container declares was read and used
-      // for nothing but a line in the log.
-      let declaredVideo = null;
-      if (typeof declaredTracksOf === "function") {
-        try {
-          // One, because ffmpeg's `0:v:0` is what everything downstream is built
-          // on and a second video stream is a cover image far more often than a
-          // second film.
-          declaredVideo = (await declaredTracksOf({ sourceKey, fileIndex }))
-            .filter((track) => track?.type === "video")
-            .sort((left, right) => (left.declaredIndex ?? 0) - (right.declaredIndex ?? 0))[0] ?? null;
-        } catch (error) {
-          logger.info(`video track: could not be read (${error?.message ?? error})`);
-        }
-      }
-      // `mode` is advisory only (audio-codec based). The browser makes the
-      // authoritative decision independently per stream via canPlayType /
-      // mediaCapabilities, transcoding only what it cannot play.
       const requiresTranscode = audioCodec.length > 0 && !DIRECT_AUDIO_CODECS.has(audioCodec);
-      // The two readings of the picture, lined up. Which one answers is decided
-      // per field by what each IS — see `Container.mergeVideoFacts`.
-      const videoFacts = Container.mergeVideoFacts(
-        {
-          width: videoWidth,
-          height: videoHeight,
-          fps: parseFfmpegVideoFps(probe.stderr),
-          isHdr: parseFfmpegHdr(probe.stderr),
-          bitDepth: parseFfmpegBitDepth(probe.stderr)
-        },
-        declaredVideo
-      );
-      if (videoFacts.disagreements.length > 0) {
-        logger.info(
-          `video track: the file and the probe disagree — ${videoFacts.disagreements.join("; ")}; ` +
-          "the size and frame rate are the probe's, the bit depth and HDR the file's"
-        );
-      }
+      const videoFacts = Container.mergeVideoFacts({ width: videoWidth, height: videoHeight,
+        fps: probe.fps, isHdr: probe.isHdr, bitDepth: probe.bitDepth }, probe.video ?? null);
       const sidecars = sidecarsOf(torrent, fileIndex);
       const inventory = await buildInventory(sourceKey, torrent, fileIndex, audioTracks ?? []);
+      ensureCurrent();
       const plan = {
         mode: requiresTranscode ? "hls" : "direct",
         directUrl,
@@ -871,7 +725,7 @@ export function createPlaybackPlanner({
           width: videoFacts.width,
           height: videoFacts.height,
           fps: videoFacts.fps,
-          bitrateKbps: parseFfmpegBitrateKbps(probe.stderr),
+          bitrateKbps: probe.bitrateKbps,
           // Which family of the decode measurement prices this source. A video
           // that has to be re-encoded is one the browser could not play, so it
           // is usually NOT H.264, and H.264 constants are wrong for it.
@@ -884,12 +738,12 @@ export function createPlaybackPlanner({
           fileIndex
         }
       };
+      ensureCurrent();
       // Only cache a plan whose codecs were actually detected. An empty probe is
       // a "header not downloaded yet" signal, not a valid result — caching it
       // would permanently mis-plan the file. In that case flag the plan
-      // `pending` so the caller polls again (the header keeps downloading,
-      // prioritised by the prefetch above).
-      if (codecsDetected) {
+      // `pending`; the media request's missing ranges remain in the shared map.
+      if (codecsDetected && durationSeconds > 0) {
         cache.set(cacheKey, plan);
         pendingSidecarHeaders.set(cacheKey, inventory.pendingFileIndexes);
         // Cache the full media info from THIS probe's banner (same helpers the
@@ -906,29 +760,17 @@ export function createPlaybackPlanner({
           // guard expecting zero tracks and therefore accepting any header.
           videoCodec: plan.videoCodec,
           audioCodec: plan.audioCodec,
-          durationSeconds: parseFfmpegDurationSeconds(probe.stderr),
+          durationSeconds: durationSeconds,
           width: videoFacts.width,
           height: videoFacts.height,
-          bitrateKbps: parseFfmpegBitrateKbps(probe.stderr),
+          bitrateKbps: probe.bitrateKbps,
           fps: videoFacts.fps,
-          startTime: parseFfmpegStartTimeSeconds(probe.stderr),
+          startTime: probe.startTimeSeconds,
           isHdr: videoFacts.isHdr,
           bitDepth: videoFacts.bitDepth,
-          // What the source holds, from this same banner. A failed run reads it
-          // to say whose fault an output with no stream is, and a session takes
-          // its media info from this cache without probing again — so a field
-          // left out here was "not recorded" on every failure (field 2026-09-29).
-          streamCounts: parseFfmpegStreamCounts(probe.stderr)
+          // Retain every declared stream count for failed-run diagnostics.
+          streamCounts: probe.streamCounts
         });
-        // Warm the file-body start for the transcode session that follows.
-        // Fire-and-forget: never delays the plan response.
-        void torrentPool
-          .prefetchFileEdges(torrent, fileIndex, {
-            headBytes: BODY_PREFETCH_BYTES,
-            tailBytes: 0,
-            timeoutMs: 60_000
-          })
-          .catch(() => {});
         return withHostTimings(plan);
       }
       return withHostTimings({ ...plan, pending: true });

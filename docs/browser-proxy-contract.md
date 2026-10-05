@@ -24,6 +24,56 @@ answer. Legacy plan responses can still carry `pending: true`, which means
 unknown facts rather than no video. File-list answers use proxy file indices;
 the browser keeps those indices when opening a file.
 
+## File chapters
+
+`GET /api/sources/:sourceKey/chapters?fileIndex=N` returns an immediate,
+no-store snapshot. It is independent of playback preparation. Discovery never
+starts a torrent and reads only available file bytes. A missing endpoint on an
+older proxy means unsupported chapter metadata, not an absence of chapters.
+
+1. `version: 1`, `sourceKey`, `fileIndex` and a monotonically increasing
+   `revision` identify the contract, exact selected file and snapshot.
+2. `state` is `pending`, `available`, `absent`, `unsupported` or `error`.
+   `complete: false` means further data can change the answer. `missingRange`
+   contains an inclusive byte range when reading needs data. A partial available
+   MP4 representation can include `pending` for another representation.
+3. `editions` retains file declarations, including ordered Matroska editions.
+   `selectedEditionId` follows the file's default edition. Ordered editions are
+   reported with reason `ordered-edition-playback`; they are not flattened into
+   the physical file timeline and are not replaced silently with another edition.
+4. `sections` contains visible, enabled chapter navigation entries, preserving
+   stable identifiers, parent identifiers, names and language declarations.
+   `startSeconds` and `endSeconds` use the source presentation timeline; MP4
+   chapter samples are mapped through the track edit list. Matroska nanoseconds
+   and unsigned UIDs are additionally preserved as decimal strings.
+5. `endSeconds: null` means the file declares no end. `displayEndSeconds` may
+   use the next sibling's start or known duration for navigation;
+   `endSource` distinguishes `declared`, `navigation` and `unknown` boundaries.
+6. `type` is `chapter`, `opening`, `ending`, `credits` or `post-credits`.
+   A recognized title has `classification: "title-hint"`; other titles remain
+   `unclassified`. Every entry has `evidence: "file-chapter"` and
+   `automaticSkipAllowed: false`. `tailContent: "unknown"` never proves the
+   absence of a later scene. These results cannot authorize automatic skipping.
+
+WebRTC sends `{ type: "chapters-changed", sourceKey, fileIndex, revision }`
+to channels that requested that selected file. The browser obtains a fresh
+snapshot, ignores older revisions and discards responses after selection changes.
+
+Supported representations are Matroska simple chapters, QuickTime `tref/chap`
+text chapter tracks (`text` and `tx3g`, internal data references, supported
+sample tables and unit-rate edit lists), and the `udta/chpl` extension. The
+QuickTime reference takes precedence when both MP4 representations are present;
+`representationsDisagree` preserves a difference rather than merging timelines.
+External chapter data and other text formats or edit rates return an explicit
+unsupported reason. Per-read bounds are 4096 chapter entries, depth 64,
+8192 bytes per title, 8 MiB of metadata reads and 100000 structure operations.
+
+Format semantics follow [RFC 9559](https://www.rfc-editor.org/rfc/rfc9559.html),
+the [Matroska chapter specification](https://www.matroska.org/technical/chapters.html)
+and Apple's [QuickTime chapter lists](https://developer.apple.com/documentation/quicktime-file-format/chapter_lists).
+`chpl` is an extension, not an ISO chapter structure; its timestamp unit is
+one ten-millionth of a second.
+
 ## Playback plan and transcode session
 
 `POST /api/playback-plan` takes `{ sourceKey, fileIndex, userAgent, consumerId,

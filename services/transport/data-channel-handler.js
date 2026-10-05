@@ -713,6 +713,16 @@ export function createDataChannelHandler({
    * @type {Map<string, Map<string, DataChannel | null>>}
    */
   const viewersOnConnection = new Map();
+  // One selected chapter file per channel; removed with the channel.
+  const chapterChannels = new Map();
+
+  function publishChaptersChanged(event) {
+    for (const [channel, selected] of chapterChannels) {
+      if (selected.sourceKey === event.sourceKey && selected.fileIndex === event.fileIndex) {
+        try { send(channel, { type: "chapters-changed", ...event }); } catch {}
+      }
+    }
+  }
 
   /**
    * The connections a viewer is still named on, oldest first.
@@ -799,6 +809,7 @@ export function createDataChannelHandler({
    * @returns {void}
    */
   function forgetChannel(channel) {
+    chapterChannels.delete(channel);
     for (const viewers of viewersOnConnection.values()) {
       for (const [consumerId, on] of viewers) {
         if (on === channel) {
@@ -1162,6 +1173,14 @@ export function createDataChannelHandler({
       return;
     }
 
+    const chapterPath = /^\/api\/sources\/([^/]+)\/chapters$/.exec(path);
+    if (method === "GET" && chapterPath) {
+      const fileIndex = Number(new URLSearchParams(query ?? "").get("fileIndex"));
+      if (Number.isSafeInteger(fileIndex) && fileIndex >= 0) {
+        try { chapterChannels.set(channel, { sourceKey: decodeURIComponent(chapterPath[1]), fileIndex }); } catch {}
+      }
+    }
+
 
     const queryInfo = query ? `?${query}` : "";
     const bodyInfo =
@@ -1464,7 +1483,8 @@ export function createDataChannelHandler({
     handleChannel,
     publishSubtitleCues,
     /** What the film costs viewers' links beyond itself, per byte of film, or null. */
-    serviceShare: () => deliveryShares.serviceShare()
+    serviceShare: () => deliveryShares.serviceShare(),
+    publishChaptersChanged
   };
 }
 

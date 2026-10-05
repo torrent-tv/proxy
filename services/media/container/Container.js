@@ -14,6 +14,7 @@
 
 import { isUnavailable, strictReader } from "./unavailable.js";
 import { textList } from "./work-tags.js";
+import { chapterResult } from "./chapters.js";
 
 /**
  * What one file declares about itself. Every field is either a value the
@@ -29,6 +30,10 @@ import { textList } from "./work-tags.js";
  */
 
 export class Container {
+  /** Read chapters only through the caller's non-fetching held-byte reader. */
+  async readChapters(_held) {
+    return chapterResult("unsupported", { reason: `chapter-container:${this.formatName}` });
+  }
   /**
    * One strict available-byte reader and one container per
    * file — the one `ContainerOrchestrator` keeps.

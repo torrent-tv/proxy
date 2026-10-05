@@ -928,6 +928,8 @@
 
 - **Fix**: Publish all torrent selections before calculating peer requests once, and compile byte windows into piece demand once per map revision. Each peer update still checks live storage availability. Native packet maps no longer repeat the complete map scan for every library selection or peer update and delay source-stat replies during playback opening (torrent-tv/meta#127).
 
+- **New**: Read file chapter metadata using available bytes and expose versioned snapshots separately from playback preparation (torrent-tv/meta#110).
+
 - **Fix**: Use preserved source cut times for packet demand and encoder input; rounded playlist times no longer reject copied segments as non-keyframes.
 
 - **Fix**: Preserve the measured source rate for link admission and playlist declarations when decoded-frame characteristics are incomplete.

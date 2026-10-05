@@ -31,8 +31,9 @@ no-store snapshot. It is independent of playback preparation. Discovery never
 starts a torrent and reads only available file bytes. A missing endpoint on an
 older proxy means unsupported chapter metadata, not an absence of chapters.
 
-1. `version: 1`, `sourceKey`, `fileIndex` and a monotonically increasing
-   `revision` identify the contract, exact selected file and snapshot.
+1. `version: 1`, `sourceKey`, `fileIndex`, `generation` and `revision` identify
+   the contract, exact selected file, cache lifetime and snapshot. Revisions
+   increase within a generation; recreation or another proxy has a new generation.
 2. `state` is `pending`, `available`, `absent`, `unsupported` or `error`.
    `complete: false` means further data can change the answer. `missingRange`
    contains an inclusive byte range when reading needs data. A partial available

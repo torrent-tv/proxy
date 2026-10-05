@@ -274,6 +274,17 @@ test("forgotten in-flight read cannot repopulate the file result", async () => {
   assert.equal(orchestrator.files.size, 0);
 });
 
+test("recreated chapter cache has a distinct revision generation", async () => {
+  const orchestrator = new ChapterOrchestrator({ containers: {}, fileFor: async () => null });
+  const first = orchestrator.get("source", 0);
+  await orchestrator.files.get("source:0").reading;
+  orchestrator.forget("source", 0);
+  const second = orchestrator.get("source", 0);
+  await orchestrator.files.get("source:0").reading;
+  assert.notEqual(first.generation, second.generation);
+  assert.equal(first.revision, second.revision);
+});
+
 test("withdrawn chapter read cannot reserve memory after its last byte arrives", async () => {
   let finish, current = true, accepted = false;
   const containers = new ContainerOrchestrator();

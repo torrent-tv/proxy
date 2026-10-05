@@ -9,6 +9,13 @@
  *
  * The tunnel reconnects automatically with a fixed back-off after any
  * unexpected close.
+ *
+ * A server being replaced by a release asks its proxies to move
+ * (`server-moving`). The proxy then opens a second connection, which reaches the
+ * new server, and keeps the old one until the old server closes it. While both
+ * are open each reply goes over the connection its request arrived on: a
+ * browser that signalled through the old server is answered there, because the
+ * new one does not know that browser.
  */
 
 import { WebSocket } from "ws";
@@ -27,6 +34,11 @@ import { WebSocket } from "ws";
  *   Auth token sent as the `x-proxy-id` / `x-proxy-token` headers during the WS handshake.
  * @property {number}  proxyPort
  *   Local port the proxy's Fastify server is listening on.
+ * @property {string}  [name]
+ *   Display name, sent with every connection so that whichever server instance
+ *   the connection reaches knows it without a separate registration request.
+ * @property {string}  [baseUrl]
+ *   Advertised direct URL, sent with every connection for the same reason.
  * @property {(sessionId: string, signal: WebRtcSignal) => void} [onSignal]
  *   Called when the server forwards a WebRTC signal (SDP offer or ICE candidate)
  *   from a browser to this proxy.  `sessionId` scopes the signal to a P2P session.
@@ -120,6 +132,8 @@ export function createTunnelClient({
   proxyId,
   token,
   proxyPort,
+  name = "",
+  baseUrl = "",
   onSignal,
   onConnect,
   onHealthRequest,
@@ -141,6 +155,21 @@ export function createTunnelClient({
    */
   let renewalTimer = null;
   let stopped = false;
+  /**
+   * Every connection that is open now. Usually one; two while a renewal or a
+   * move to a new server is under way.
+   *
+   * @type {Set<WebSocket>}
+   */
+  const openConnections = new Set();
+  /**
+   * The connection each browser session signalled through. The proxy's answer
+   * and its ICE candidates go back the same way, because only the server
+   * instance that holds that browser's signalling socket can deliver them.
+   *
+   * @type {Map<string, WebSocket>}
+   */
+  const signalRoutes = new Map();
 
   /**
    * Write a message to the log sink if one was provided.
@@ -174,6 +203,14 @@ export function createTunnelClient({
       headers: {
         "x-proxy-id": proxyId,
         "x-proxy-token": token,
+        // Who this proxy is, on the connection itself: a separate registration
+        // request may reach a different server instance during a release.
+        "x-proxy-name": encodeURIComponent(name),
+        "x-proxy-base-url": baseUrl,
+        // This proxy answers on the connection a request arrived on and opens a
+        // new connection when the server says `server-moving`, so the server
+        // may wait for it to arrive at the new instance.
+        "x-proxy-follows-moves": "1",
         "user-agent": "torrent-tv-proxy/1.0"
       }
     });
@@ -182,6 +219,7 @@ export function createTunnelClient({
     socket = connection;
 
     connection.addEventListener("open", () => {
+      openConnections.add(connection);
       log("Tunnel connected.");
       // Start keepalive pings to prevent Cloudflare's idle WebSocket timeout.
       keepaliveTimer = setInterval(() => {
@@ -213,8 +251,19 @@ export function createTunnelClient({
         return;
       }
 
+      // The server is being replaced. A new connection reaches its successor;
+      // this one stays open until the old server has finished with the
+      // browsers it is still signalling for, and then it closes it.
+      if (message.type === "server-moving") {
+        if (connection === socket && !stopped) {
+          log("Tunnel: the server is being replaced; connecting to its successor before this connection closes.");
+          connect();
+        }
+        return;
+      }
+
       if (message.type === "request") {
-        void handleRelayRequest(message).catch((error) => {
+        void handleRelayRequest(message, connection).catch((error) => {
           log(`Tunnel relay error: ${error?.message ?? error}`);
         });
         return;
@@ -223,6 +272,7 @@ export function createTunnelClient({
       // WebRTC signalling: server forwards a signal from a browser session.
       if (message.type === "signal") {
         if (typeof message.sessionId === "string" && message.signal && typeof onSignal === "function") {
+          signalRoutes.set(message.sessionId, connection);
           onSignal(message.sessionId, message.signal);
         }
         return;
@@ -244,7 +294,7 @@ export function createTunnelClient({
           // silent-ok: an unanswerable question is answered "no", which is what
           // a null offer means to the caller.
         }
-        send({ type: "can-serve-response", requestId: message.requestId, offer });
+        send({ type: "can-serve-response", requestId: message.requestId, offer }, connection);
         return;
       }
 
@@ -266,7 +316,7 @@ export function createTunnelClient({
             requestId: message.requestId,
             metrics: answer?.metrics ?? answer ?? {},
             holds: Array.isArray(answer?.holds) ? answer.holds : []
-          });
+          }, connection);
         })();
         return;
       }
@@ -277,6 +327,12 @@ export function createTunnelClient({
         clearInterval(keepaliveTimer);
         keepaliveTimer = null;
       }
+      openConnections.delete(connection);
+      for (const [sessionId, route] of signalRoutes) {
+        if (route === connection) {
+          signalRoutes.delete(sessionId);
+        }
+      }
       // A connection this one replaced. The server closes it as soon as the
       // replacement registers, which is the whole point of renewing early —
       // there is nothing to report and nothing to reconnect, because the tunnel
@@ -285,15 +341,24 @@ export function createTunnelClient({
         log(`Tunnel handed over (code=${event.code}); the replacement is already carrying it.`);
         return;
       }
+      // The newest connection ended while an older one is still open: a move
+      // whose new connection did not get through. The older one goes on
+      // carrying the tunnel until its server closes it, and the move is tried
+      // again meanwhile.
+      const survivor = [...openConnections].at(-1);
+      if (survivor) {
+        socket = survivor;
+        log(`Tunnel connection ended (code=${event.code}) while the previous one is still open; it carries the tunnel, and a new connection is tried in ${RECONNECT_DELAY_MS}ms.`);
+        scheduleReconnect();
+        return;
+      }
       log(`Tunnel disconnected (code=${event.code}). Reconnecting in ${RECONNECT_DELAY_MS}ms...`);
       socket = null;
       if (renewalTimer !== null) {
         clearTimeout(renewalTimer);
         renewalTimer = null;
       }
-      if (!stopped) {
-        reconnectTimer = setTimeout(connect, RECONNECT_DELAY_MS);
-      }
+      scheduleReconnect();
     });
 
     connection.addEventListener("error", (event) => {
@@ -302,13 +367,30 @@ export function createTunnelClient({
   }
 
   /**
+   * Connect again after a fixed back-off, unless a reconnect is already due.
+   *
+   * @returns {void}
+   */
+  function scheduleReconnect() {
+    if (stopped || reconnectTimer !== null) {
+      return;
+    }
+    reconnectTimer = setTimeout(() => {
+      reconnectTimer = null;
+      connect();
+    }, RECONNECT_DELAY_MS);
+  }
+
+  /**
    * Fetch a resource from the local Fastify server and stream the response
    * back to the registry server chunk-by-chunk over the WebSocket.
    *
    * @param {TunnelRelayRequest} relayRequest
+   * @param {WebSocket} over - The connection the request arrived on, which
+   *   the response goes back over.
    * @returns {Promise<void>}
    */
-  async function handleRelayRequest(relayRequest) {
+  async function handleRelayRequest(relayRequest, over) {
     const { requestId, method, path, query, headers: forwardedHeaders, body } = relayRequest;
     const targetUrl = `http://127.0.0.1:${proxyPort}${path}` + (query ? `?${query}` : "");
     const requestHeaders = { ...(forwardedHeaders ?? {}), host: `127.0.0.1:${proxyPort}` };
@@ -322,7 +404,7 @@ export function createTunnelClient({
         redirect: "manual"
       });
     } catch (fetchError) {
-      sendError(requestId, fetchError?.message ?? String(fetchError));
+      sendError(requestId, fetchError?.message ?? String(fetchError), over);
       return;
     }
 
@@ -332,10 +414,10 @@ export function createTunnelClient({
       responseHeaders[headerName] = headerValue;
     }
 
-    send({ type: "response-start", requestId, status: response.status, headers: responseHeaders });
+    send({ type: "response-start", requestId, status: response.status, headers: responseHeaders }, over);
 
     if (!response.body) {
-      send({ type: "response-chunk", requestId, data: "", done: true });
+      send({ type: "response-chunk", requestId, data: "", done: true }, over);
       return;
     }
 
@@ -344,7 +426,7 @@ export function createTunnelClient({
       while (true) {
         const { done, value } = await reader.read();
         if (done) {
-          send({ type: "response-chunk", requestId, data: "", done: true });
+          send({ type: "response-chunk", requestId, data: "", done: true }, over);
           break;
         }
         send({
@@ -352,10 +434,10 @@ export function createTunnelClient({
           requestId,
           data: Buffer.from(value).toString("base64"),
           done: false
-        });
+        }, over);
       }
     } catch {
-      send({ type: "response-chunk", requestId, data: "", done: true });
+      send({ type: "response-chunk", requestId, data: "", done: true }, over);
     }
   }
 
@@ -363,13 +445,15 @@ export function createTunnelClient({
    * Serialise a message to JSON and send it through the WebSocket if open.
    *
    * @param {object} message
+   * @param {WebSocket | null} [over]
    * @returns {void}
    */
   function send(message, over = null) {
-    // Everything the proxy has to say goes over the LIVE connection. `over` is
-    // for the one thing that belongs to a particular socket rather than to the
-    // tunnel — its own keepalive — which must not be sent over a replacement
-    // that has already taken over.
+    // What the proxy says on its own goes over the LIVE connection. `over` is
+    // for what belongs to a particular socket rather than to the tunnel: its
+    // own keepalive, and every reply, which goes back over the connection its
+    // request arrived on — during a move that is the old server, the only one
+    // still waiting for it.
     const target = over ?? socket;
     if (target && target.readyState === WebSocket.OPEN) {
       target.send(JSON.stringify(message));
@@ -381,10 +465,11 @@ export function createTunnelClient({
    *
    * @param {string} requestId
    * @param {string} errorMessage
+   * @param {WebSocket} over - The connection the request arrived on.
    * @returns {void}
    */
-  function sendError(requestId, errorMessage) {
-    send({ type: "response-error", requestId, error: errorMessage });
+  function sendError(requestId, errorMessage, over) {
+    send({ type: "response-error", requestId, error: errorMessage }, over);
   }
 
   return {
@@ -414,6 +499,9 @@ export function createTunnelClient({
         clearTimeout(reconnectTimer);
         reconnectTimer = null;
       }
+      for (const connection of openConnections) {
+        connection.close(1000, "shutdown");
+      }
       if (socket) {
         socket.close(1000, "shutdown");
         socket = null;
@@ -429,7 +517,10 @@ export function createTunnelClient({
      * @returns {void}
      */
     sendSignal(sessionId, signal) {
-      send({ type: "signal", sessionId, signal });
+      // Back over the connection this session signalled through, while it is
+      // open; the server instance at the other end holds that browser.
+      const route = signalRoutes.get(sessionId);
+      send({ type: "signal", sessionId, signal }, route?.readyState === WebSocket.OPEN ? route : null);
     },
 
     /**

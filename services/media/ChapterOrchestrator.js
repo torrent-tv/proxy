@@ -1,6 +1,7 @@
 /** Selected-file snapshots; retries belong to the shared media request queue. */
 import { chapterResult } from "./container/chapters.js";
 import { IndexMemoryUnavailable } from "./container/memory-unavailable.js";
+import { randomUUID } from "node:crypto";
 
 export class ChapterOrchestrator {
   constructor({ containers, fileFor, subscribe = () => () => {}, withdraw = () => {}, now = Date.now, onChanged = () => {}, failed = () => {} }) {
@@ -13,7 +14,7 @@ export class ChapterOrchestrator {
     const key = `${sourceKey}:${fileIndex}`;
     let entry = this.files.get(key);
     if (!entry) {
-      entry = { sourceKey, fileIndex, reading: null, requested: false, bytes: 0 };
+      entry = { sourceKey, fileIndex, generation: randomUUID(), reading: null, requested: false, bytes: 0 };
       entry.dispose = () => {
         entry.allocation?.release(entry.bytes + (entry.candidate?.length ?? 0));
         entry.allocation?.dispose();
@@ -29,7 +30,8 @@ export class ChapterOrchestrator {
     }
     entry.expires = this.now() + 3600000;
     if (!entry.requested) this.warm(entry);
-    return { ...(entry.buffer ? JSON.parse(entry.buffer.toString("utf8")) : chapterResult("pending")), sourceKey, fileIndex, revision: entry.revision ?? 0 };
+    return { ...(entry.buffer ? JSON.parse(entry.buffer.toString("utf8")) : chapterResult("pending")), sourceKey, fileIndex,
+      generation: entry.generation, revision: entry.revision ?? 0 };
   }
 
   update(entry, result) {

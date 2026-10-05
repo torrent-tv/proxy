@@ -517,7 +517,6 @@ export class Mp4Container extends Container {
     this.moovMemory ??= new RetainedBytes(this.packetMemory);
     const moov = await this.moovMemory.read(found.size,
       () => this.readRange(found.offset, found.offset + found.size - 1));
-    const moov = await this.readRange(found.offset, found.offset + found.size - 1);
     this.moovHeld = { moov, header: found.headerBytes, offset: found.offset };
     return this.moovHeld;
   }

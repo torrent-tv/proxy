@@ -33,7 +33,7 @@ export class ContainerFactory {
   static async create(params) {
     const { readRange, fileSize } = params;
     if (typeof readRange !== "function" || !Number.isFinite(fileSize) || fileSize <= 0) return null;
-    const head = await strictReader(params.detectRange ?? readRange, fileSize)(0, Math.min(SNIFF_BYTES, fileSize) - 1);
+    const head = await strictReader(readRange, fileSize)(0, Math.min(SNIFF_BYTES, fileSize) - 1);
     if (MatroskaContainer.detect(head)) return new MatroskaContainer(params);
     if (Mp4Container.detect(head)) return new Mp4Container(params);
     if (AviContainer.detect(head)) return new AviContainer(params);

@@ -209,6 +209,31 @@ test("the loopback request carries its data-channel request ID", async (t) => {
   assert.equal(received, "trace-request");
 });
 
+test("chapter changes reach only the requested file and stop after channel closure", (t) => {
+  t.mock.method(globalThis, "fetch", async () => new Response(null, { status: 204 }));
+  const handler = createDataChannelHandler({ proxyPort: 9090 });
+  const selected = new FakeDataChannel("proxy");
+  const other = new FakeDataChannel("proxy");
+  selected.sendMessageBinary = () => {};
+  other.sendMessageBinary = () => {};
+  handler.handleChannel("chapter-peer", selected);
+  handler.handleChannel("other-peer", other);
+  t.after(() => { selected.close(); other.close(); });
+  selected.message(JSON.stringify({ type: "request", requestId: "chapters", method: "GET",
+    path: "/api/sources/source/chapters", query: "fileIndex=1" }));
+  other.message(JSON.stringify({ type: "request", requestId: "invalid-chapters", method: "GET",
+    path: "/api/sources/source/chapters" }));
+  const notices = (channel) => channel.messages.filter((message) => JSON.parse(message).type === "chapters-changed");
+  handler.publishChaptersChanged({ sourceKey: "source", fileIndex: 0, revision: 1 });
+  assert.equal(notices(other).length, 0);
+  handler.publishChaptersChanged({ sourceKey: "source", fileIndex: 1, revision: 2 });
+  assert.equal(notices(selected).length, 1);
+  assert.equal(notices(other).length, 0);
+  selected.close();
+  handler.publishChaptersChanged({ sourceKey: "source", fileIndex: 1, revision: 3 });
+  assert.equal(notices(selected).length, 1);
+});
+
 test("cancellation releases a response stalled on a full outgoing channel", async (t) => {
   let cancelled;
   let reachedQueue;

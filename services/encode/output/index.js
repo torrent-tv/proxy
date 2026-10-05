@@ -1,5 +1,6 @@
 export { OutputSpec, VideoOutput, AudioOutput, CutGrid, isOutputName } from "./OutputSpec.js";
 export { PLAYLIST_FILE_NAME } from "./playlists.js";
+export { cutsAtGivenTimes } from "./cut-grid.js";
 
 // FFmpeg may close a segment this far before its requested cut. Both the
 // command and coverage validation use this existing muxer configuration.

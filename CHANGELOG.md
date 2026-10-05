@@ -1,3 +1,7 @@
+## Unreleased
+
+- **New**: The tunnel follows a server release without a gap. When the server instance being replaced says `server-moving`, the proxy opens a second connection, which reaches the new instance, and keeps the first until the old instance closes it; while both are open, every reply goes back over the connection its request arrived on, so a browser that was signalling through the old instance is still answered there. The proxy's name and advertised URL now travel on the connection itself (`x-proxy-name`, `x-proxy-base-url`), because the separate registration request may reach the other instance during a release (torrent-tv/meta#94).
+
 ## 2.90.0
 
 - **Fix**: A film watched from its whole file no longer brings its torrent back every ten seconds. Once every file of a torrent is kept whole the torrent is removed, and the download figures the page polls, the priority map and the other requests that steer a download each rebuilt it from its recipe only to be told nothing was missing; the next sweep removed it again. Field 2026-10-04, proxy 2.89.11: one viewer, one whole file, and the torrent removed and added 671 times in two hours, each time connecting to the swarm anew. A file held whole now answers those requests without its torrent — the figures say everything is here and nothing is arriving — and the torrent is used only while it exists (torrent-tv/meta#1).

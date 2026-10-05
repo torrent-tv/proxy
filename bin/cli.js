@@ -559,6 +559,8 @@ try {
     proxyId: clientId,
     token,
     proxyPort: actualPort,
+    name: clientName,
+    baseUrl: directBaseUrl,
     onSignal(sessionId, signal) {
       webRtcManager?.handleSignal(sessionId, signal);
     },

@@ -16,6 +16,32 @@
 import { createWriteStream, mkdirSync, renameSync, statSync } from "node:fs";
 import { dirname, join } from "node:path";
 
+/**
+ * Where a browser's lines go when the proxy was started without `--log-file`.
+ *
+ * The proxy runs as the Home Assistant addon, from npm, in Docker, on Linux,
+ * macOS or Windows; only the addon names a file. Without one these lines were
+ * dropped, so on every other host the browser's half of a viewing existed
+ * nowhere at all. They go to the proxy's own console instead, beside the
+ * proxy's lines, and reach whatever keeps that output on the host: `docker
+ * logs`, the journal of a systemd unit, a terminal. Each line carries the
+ * session id, which is what the file name carries when there is a file.
+ *
+ * @param {(message: string) => void} log - The proxy's logger.
+ * @returns {{ write: (session: object, lines: string[]) => void, close: () => Promise<void> }}
+ */
+export function createClientLogConsole(log) {
+  return {
+    write(session, lines) {
+      const id = safeName(session?.sessionId, 8) || "unknown";
+      for (const line of lines) {
+        log(`client ${id} ${line}`);
+      }
+    },
+    async close() {}
+  };
+}
+
 /** One file may reach this before it is rotated. */
 const MAX_BYTES = 16 * 1024 * 1024;
 

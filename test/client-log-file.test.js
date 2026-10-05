@@ -12,7 +12,7 @@ import { mkdtempSync, readdirSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { createClientLogFiles } from "../utils/client-log-file.js";
+import { createClientLogConsole, createClientLogFiles } from "../utils/client-log-file.js";
 
 /** A directory with a proxy log in it, which is what the sink is given. */
 function aDirectory() {
@@ -107,4 +107,20 @@ test("no proxy log path means nothing is written and nothing throws", async () =
   const logs = createClientLogFiles("");
   logs.write(aSession(), ["dropped"]);
   await logs.close();
+});
+
+test("without a log file the lines go to the console, each naming its session", async () => {
+  // A proxy started from npm or Docker names no file; the browser's half of
+  // the viewing must still reach the output the host keeps.
+  const printed = [];
+  const logs = createClientLogConsole((message) => printed.push(message));
+  logs.write(aSession(), ["first line", "second line"]);
+  logs.write(aSession({ sessionId: "" }), ["no id"]);
+  await logs.close();
+
+  assert.deepEqual(printed, [
+    "client abcd1234 first line",
+    "client abcd1234 second line",
+    "client unknown no id"
+  ]);
 });

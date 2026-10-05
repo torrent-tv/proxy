@@ -1,9 +1,36 @@
 # Logs — where to look
 
 No browser console copy-paste is needed: the page forwards its own log. But it
-lands in TWO places depending on the phase of the session, and `docker logs` is
-only one of them — see "Browser logs are in TWO places" below before concluding
+lands in TWO places depending on the phase of the session — the registry server
+and the proxy — see "Browser logs are in TWO places" below before concluding
 anything from a half-session.
+
+## Where the proxy writes its log, by how it is started
+
+The proxy is deployment-agnostic: the Home Assistant addon is one way to run it,
+npm and Docker on Linux, macOS or Windows are others. Where its log goes is
+decided by one start parameter, `--log-file <path>`, and nothing else:
+
+- **With `--log-file`**: every line goes to the console AND to that file
+  (appended, rotated to `<path>.1` past 1 GiB), and the browser's lines go to
+  one file per viewing session in the same directory (see "The files on the
+  proxy" below). The directory of the file must exist.
+- **Without it**: everything goes to the console only, the browser's lines
+  included, each prefixed `client <sessionId:8>`. Before torrent-tv/meta#96 the
+  browser's lines were dropped in this case. The console is kept by whatever
+  started the process, and only as long as that keeps it.
+
+| How it is started | Log | Browser lines | Survives |
+|---|---|---|---|
+| Home Assistant addon | `/data/proxy.log` (`run.sh` passes `--log-file /data/proxy.log`) | `/data/client-*.log` | restarts and addon updates |
+| npm / `npx`, any OS, no `--log-file` | the terminal | the terminal | nothing |
+| npm under systemd, no `--log-file` | the unit's journal: `journalctl -u <unit>` | the same journal | restarts, within journald's limits |
+| npm with `--log-file`, e.g. `/var/log/torrent-tv-proxy/proxy.log`, `~/Library/Logs/torrent-tv/proxy.log`, `%LOCALAPPDATA%\torrent-tv\proxy.log` | that file | `client-*.log` beside it | restarts and updates |
+| Docker, no `--log-file` | `docker logs <container>` | the same | only the container's life: recreating it deletes the log |
+| Docker with a volume and `--log-file`, e.g. `-v ttv-proxy-logs:/logs … --log-file /logs/proxy.log` | the file in the volume | `client-*.log` in the volume | recreating the container |
+
+So on any host where the log matters, pass `--log-file` and point it at a
+directory that outlives the process — which is what the addon does.
 
 ## HA proxy (aarch64, addon `b34a1737_torrent_tv_proxy`)
 
@@ -30,15 +57,27 @@ SSH to HA requires `MACs hmac-sha2-256-etm@openssh.com,hmac-sha2-512-etm@openssh
 
 ## DO server (webauth.courses, `infra-server-1`)
 
-- Server is `infra-server-1` (`ghcr.io/torrent-tv/server:latest`) on `do` (`206.189.97.152`).
-- Frontend logs reach here only in the phases the proxy cannot be reached in — see "Browser logs are in TWO places" below. When they do, the server `console.log`s them with the prefix `[client <tag> <id> sig=<webrtcSessionId>]` (`server/routes/api/client-logs/post.js`), in the same container as its own lines.
-- Via container:
+- Server is `infra-server-1` (`ghcr.io/torrent-tv/server`) on `do` (`206.189.97.152`).
+- Every container there logs to the host journal, and rsyslog writes one file per
+  source to `/var/log/torrent-tv/`; the files and the journal survive the
+  deployments that recreate the containers (`infra` README, "Logs";
+  torrent-tv/meta#96):
+  - `server.log` — the server's own lines;
+  - `client.log` — browser lines the server received, prefixed
+    `[client <tag> <id> sig=<webrtcSessionId>]`
+    (`server/routes/api/client-logs/post.js`);
+  - `nginx.log`, `doco-cd.log`.
+- Frontend logs reach the droplet only in the phases the proxy cannot be reached
+  in — see "Browser logs are in TWO places" below.
+- Reading:
   ```bash
-  ssh do "docker logs infra-server-1 --tail 200 | cat"
+  ssh do "tail -n 300 /var/log/torrent-tv/client.log"
   # filter a single viewing:
-  ssh do "docker logs infra-server-1 --tail 500 | grep 003ed2fd"
-  ssh do "docker logs infra-server-1 --tail 500 | grep '\[client'"
+  ssh do "grep 003ed2fd /var/log/torrent-tv/client.log /var/log/torrent-tv/server.log"
+  ssh do "journalctl -t torrent-tv-server --since '-1h' -o short-iso-precise"
   ```
+- `docker logs infra-server-1` shows only the CURRENT container's lines — a
+  deployment gives it a new container. Use the files or `journalctl -t`.
 - No need to open eruda or copy the browser console on a phone — it is forwarded.
 
 ## Browser logs are in TWO places, split by phase — read both
@@ -52,7 +91,7 @@ The split is by PHASE, and neither half is the whole session:
 
 1. **Before a transport exists** — the page opening, the proxy being chosen, a
    connection failing — there is nowhere else to send it, so it goes to the
-   SERVER (`infra-server-1`);
+   SERVER (`/var/log/torrent-tv/client.log` on the droplet);
 2. **From the moment the data channel is up**, the page's logger is given a
    proxy sink (`loading.js`, `setProxySink`) and every batch goes to the PROXY
    over that channel. This is the bulk of a viewing;
@@ -66,8 +105,10 @@ failure needs both.
 
 ### The files on the proxy
 
-One file per viewing session, in the proxy log's own directory (`/data` on the
-addon host), named so the two halves join without guessing:
+When the proxy was started with `--log-file`: one file per viewing session, in
+the proxy log's own directory (`/data` on the addon host), named so the two
+halves join without guessing. Without `--log-file` the same lines are in the
+proxy's console, prefixed `client <sessionId:8>`.
 
 ```
 client-<YYYYMMDD-HHMMSS UTC of the session start>-<sessionId:8>-<torrent name:60>-<infoHash:8>.log
@@ -86,7 +127,7 @@ Implementation: `utils/client-log-file.js`, route `routes/api/client-logs/post.j
 
 ## Quick triage
 
-- Rewind/seek bug (hold 0ms → 500): HA `hold ... failed after 0ms → 500` + `encode-run` lines for the same `<sessionId>`, and DO `[client ...] fragLoadError / levelLoadError 500` for same `sn`.
+- Rewind/seek bug (hold 0ms → 500): HA `hold ... failed after 0ms → 500` + `encode-run` lines for the same `<sessionId>`, and DO `client.log` `[client ...] fragLoadError / levelLoadError 500` for same `sn`.
 - Cushion / link budget: HA `memory: rss=... anon=...` and `cushion` lines; DO `[eta]` / `[cushion]` from client.
 - Update check: `ssh ha "sudo docker exec hassio_cli ha apps info b34a1737_torrent_tv_proxy | grep version"` and `ssh ha "sudo docker ps --filter name=app_b34a1737_torrent_tv_proxy"`.
 

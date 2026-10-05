@@ -103,6 +103,8 @@ jobs:
         uses: torrent-tv/.github/actions/release-finish@main
         with:
           tag: ${{ steps.release.outputs.tag }}
+          changelog: CHANGELOG.md
+          version-files: package.json,package-lock.json
           notes-file: ${{ steps.release.outputs.notes-file }}
           github-token: ${{ github.token }}
 

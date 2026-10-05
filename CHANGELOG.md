@@ -1,3 +1,7 @@
+## Unreleased
+
+- **Fix**: The Docker image takes node from Alpine's own `nodejs` package in every stage, as the add-on does, instead of copying the official image's binary: one way of getting node, and 285 MB instead of 348 MB on the HA host. The binary was chosen for being three patch releases newer, and none of those three is a security release; 24.18.1, which Alpine ships, is the last one (torrent-tv/meta#98).
+
 ## 2.89.19
 
 - **Fix**: A session's browser log file on the proxy is named after the torrent it played. The first batch from the page always arrives before a torrent is chosen, the file was named then and never again, so on the addon host on 2026-10-05 146 of 147 files ended in `-no-torrent-yet` and none could be found by its film (torrent-tv/meta#123). The file is now renamed when the first torrent arrives and keeps the lines written before it; another torrent opened later in the same page gets a file of its own under the same `client-<start>-<session>` prefix.

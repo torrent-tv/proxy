@@ -35,6 +35,8 @@ import { CompletedFiles, completedFilesRoot } from "../../storage/files/Complete
 import { pieceFromWholeFiles, pieceIsInWholeFiles } from "../../storage/files/piece-from-whole-file.js";
 import { Command, Event } from "./protocol.js";
 import { filesInUse } from "./files-in-use.js";
+import { createWholeSources } from "./whole-sources.js";
+import { wholeFileStats } from "./whole-file-stats.js";
 import { startMemoryReport, WORKER_MEMORY_SAMPLE_MS } from "../../storage/memory-report.js";
 import { forwardLogsTo, logger } from "../../../utils/logger.js";
 
@@ -151,6 +153,22 @@ async function knownTorrent(sourceKey) {
   }
   const torrent = await pending.catch(() => null);
   return isUsableTorrentHandle(torrent) ? torrent : null;
+}
+
+/**
+ * The torrent for one file, but never one rebuilt for a file held whole.
+ *
+ * For the questions that steer or measure a download: a file held whole has no
+ * download, and rebuilding its torrent to be told so is what made the torrent
+ * come back after every removal (see `whole-sources.js`). The torrent is still
+ * used while it exists.
+ *
+ * @param {string} sourceKey
+ * @param {number} fileIndex
+ * @returns {Promise<import("webtorrent").Torrent | null>}
+ */
+async function torrentUnlessWhole(sourceKey, fileIndex) {
+  return wholeSources.fileOf(sourceKey, fileIndex) ? knownTorrent(sourceKey) : requireTorrent(sourceKey);
 }
 
 async function requireTorrent(sourceKey) {
@@ -350,7 +368,18 @@ async function runCommand(command, params, id) {
           }
         });
       }
-      const torrent = await pending;
+      // A torrent removed because it was downloaded whole is answered for by
+      // what was written down when it went: a destroyed torrent keeps its object
+      // and empties its `files`, so it would hand a viewer opening the film an
+      // empty list, and rebuilding it here would bring it back on every stream
+      // and stats request, which all come through this command. Any other
+      // destroyed torrent is rebuilt, because its files still need it.
+      const added = await pending;
+      const described = isUsableTorrentHandle(added) ? null : wholeSources.describe(params.sourceKey);
+      if (described) {
+        return described;
+      }
+      const torrent = isUsableTorrentHandle(added) ? added : await requireTorrent(params.sourceKey);
       return {
         infoHash: torrent.infoHash,
         name: torrent.name,
@@ -369,6 +398,10 @@ async function runCommand(command, params, id) {
     }
 
     case Command.LIST_FILES: {
+      const described = (await knownTorrent(params.sourceKey)) ? null : wholeSources.describe(params.sourceKey);
+      if (described) {
+        return described.files;
+      }
       const torrent = await requireTorrent(params.sourceKey);
       return (torrent.files ?? []).map((file, index) => ({
         index,
@@ -419,19 +452,24 @@ async function runCommand(command, params, id) {
 
 
     case Command.FILL_FILE: {
-      const torrent = await requireTorrent(params.sourceKey);
+      const torrent = await torrentUnlessWhole(params.sourceKey, params.fileIndex);
       return {
-        started: fillFileInBackground(torrent, params.fileIndex, params.sourceKey)
+        started: torrent ? fillFileInBackground(torrent, params.fileIndex, params.sourceKey) : false
       };
     }
 
     case Command.FILL_TORRENT: {
-      const torrent = await requireTorrent(params.sourceKey);
-      return { started: pool.fillTorrentAsCapacityAllows(torrent) };
+      const torrent = wholeSources.isWhole(params.sourceKey)
+        ? await knownTorrent(params.sourceKey)
+        : await requireTorrent(params.sourceKey);
+      return { started: torrent ? pool.fillTorrentAsCapacityAllows(torrent) : false };
     }
 
     case Command.WARM_POSITION: {
-      const torrent = await requireTorrent(params.sourceKey);
+      const torrent = await torrentUnlessWhole(params.sourceKey, params.fileIndex);
+      if (!torrent) {
+        return { started: false };
+      }
       return {
         started: await warmResumePosition(
           torrent,
@@ -451,7 +489,10 @@ async function runCommand(command, params, id) {
 
 
     case Command.FILE_STATS: {
-      const torrent = await requireTorrent(params.sourceKey);
+      const torrent = await torrentUnlessWhole(params.sourceKey, params.fileIndex);
+      if (!torrent) {
+        return wholeFileStats(wholeSources.fileOf(params.sourceKey, params.fileIndex)?.length ?? 0);
+      }
       const stats = pool.getFileStats(torrent, params.fileIndex, {
         resumeAnchorByteStart: params.resumeAnchorByteStart ?? null
       });
@@ -475,9 +516,10 @@ async function runCommand(command, params, id) {
       // handle from its recipe, so asking that way would re-add a torrent in
       // order to be told that nothing is wanted of it.
       const zones = Array.isArray(params.zones) ? params.zones : [];
+      // Nor may one for a file held whole, which has nothing left to fetch.
       const torrent = zones.length === 0
         ? await knownTorrent(params.sourceKey)
-        : await requireTorrent(params.sourceKey);
+        : await torrentUnlessWhole(params.sourceKey, params.fileIndex);
       if (torrent) {
         pool.applyPriorityMap(torrent, params.fileIndex, zones, params.durationSeconds);
       }
@@ -485,16 +527,18 @@ async function runCommand(command, params, id) {
     }
 
     case Command.PRIORITIZE: {
-      const torrent = await requireTorrent(params.sourceKey);
-      pool.prioritizeByteRange(torrent, params.fileIndex, params.byteStart, params.windowBytes, {
-        wholeFileRead: params.wholeFileRead === true
-      });
+      const torrent = await torrentUnlessWhole(params.sourceKey, params.fileIndex);
+      if (torrent) {
+        pool.prioritizeByteRange(torrent, params.fileIndex, params.byteStart, params.windowBytes, {
+          wholeFileRead: params.wholeFileRead === true
+        });
+      }
       return true;
     }
 
     case Command.PREFETCH_EDGES: {
-      const torrent = await requireTorrent(params.sourceKey);
-      return pool.prefetchFileEdges(torrent, params.fileIndex, params.options ?? {});
+      const torrent = await torrentUnlessWhole(params.sourceKey, params.fileIndex);
+      return torrent ? pool.prefetchFileEdges(torrent, params.fileIndex, params.options ?? {}) : undefined;
     }
 
     case Command.READ_RANGE: {
@@ -520,7 +564,11 @@ async function runCommand(command, params, id) {
     }
 
     case Command.HELD_RANGES: {
-      const torrent = await requireTorrent(params.sourceKey);
+      const torrent = await torrentUnlessWhole(params.sourceKey, params.fileIndex);
+      if (!torrent) {
+        const length = wholeSources.fileOf(params.sourceKey, params.fileIndex)?.length ?? 0;
+        return { ranges: length > 0 ? [[0, length - 1]] : [] };
+      }
       return { ranges: heldRangesOf(torrent, params.fileIndex) };
     }
 
@@ -880,6 +928,7 @@ setInterval(() => {
  * thread writes them, the main thread serves them without asking anybody.
  */
 const completedFiles = new CompletedFiles({ root: completedFilesRoot() });
+const wholeSources = createWholeSources({ find: (infoHash, fileIndex) => completedFiles.find(infoHash, fileIndex) });
 
 /**
  * Which torrent a set of files belongs to.
@@ -1047,6 +1096,12 @@ async function keepWholeFiles() {
       // checked against what the torrent says. Re-hashing a gigabyte and a
       // half to learn what we wrote down is a minute of a viewer's time for
       // nothing.
+      wholeSources.remember(sourceKey, {
+        infoHash: torrent.infoHash,
+        name: torrent.name,
+        pieceLength: Number(torrent.pieceLength) || 0,
+        files: torrent.files.map((file, index) => ({ index, name: file.name, path: file.path, length: file.length }))
+      });
       pool.remove(torrent, "downloaded-whole");
       pool.addWholeSource(sourceKey);
     }

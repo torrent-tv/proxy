@@ -281,6 +281,13 @@ export async function readMp4Chapters(container, held) {
     if (referrer) {
       const track = tracks.find((item) => item.id === referrer.refs[0]);
       if (!track) throw new Error("Referenced chapter track is missing");
+      const extensions = await inside(reader, one(parts, "mvex"));
+      for (const defaults of extensions.filter((item) => item.type === "trex")) {
+        if ((await payload(reader, defaults, 8)).readUInt32BE(4) === track.id) {
+          // Fragment samples are not described by the initial sample tables.
+          throw new ChapterUnsupported("chapter-fragmented-track");
+        }
+      }
       const timing = await timedHeader(reader, one(parts, "mvhd"));
       editions.unshift(await quicktime(reader, track, timing.scale));
     }

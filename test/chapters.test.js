@@ -163,7 +163,7 @@ test("moov at head does not require headers or bytes after moov", async () => {
   assert.equal((await container.readChapters(held)).state, "available");
 });
 
-function qtFile({ edits = null, co64 = false, title = "Opening", nameBytes = null, language = 0, format = "text", external = false } = {}) {
+function qtFile({ edits = null, co64 = false, title = "Opening", nameBytes = null, language = 0, format = "text", external = false, fragmentedTrack = null } = {}) {
   const name = nameBytes ?? Buffer.from(title), sample = Buffer.concat([u16(name.length), name]);
   const build = (offset) => {
     const tkhd = (id, enabled) => mpbox("tkhd", Buffer.from([0, 0, 0, enabled ? 1 : 0]), Buffer.alloc(8), u32(id));
@@ -174,7 +174,7 @@ function qtFile({ edits = null, co64 = false, title = "Opening", nameBytes = nul
     const minf = mpbox("minf", mpbox("dinf", mpbox("dref", Buffer.alloc(4), u32(1), mpbox("url ", Buffer.from([0, 0, 0, external ? 0 : 1])))), stbl);
     const mdhd = mpbox("mdhd", Buffer.alloc(12), u32(1000), u32(1000), u16(language));
     const track = mpbox("trak", tkhd(2, false), ...(edits ? [mpbox("edts", mpbox("elst", Buffer.alloc(4), u32(edits.length), ...edits.map(([duration, media]) => Buffer.concat([u32(duration), u32(media < 0 ? 0xffffffff : media), u16(1), u16(0)]))))] : []), mpbox("mdia", mdhd, minf));
-    return mp4(movie(), owner, track);
+    return mp4(movie(), owner, track, ...(fragmentedTrack === null ? [] : [mpbox("mvex", mpbox("trex", Buffer.alloc(4), u32(fragmentedTrack), Buffer.alloc(16)))]));
   };
   const prefix = build(0);
   return Buffer.concat([build(prefix.length + 8), mpbox("mdat", sample)]);
@@ -186,6 +186,16 @@ test("QuickTime chapter track is read by reference even when that track is disab
   assert.equal(result.sections[0].titles[0].text, "Opening");
   assert.equal(result.sections[0].startSeconds, 0);
   assert.equal(result.sections[0].endSeconds, 1);
+});
+
+test("fragmented chapter samples are refused without claiming absence or completeness", async () => {
+  const { held, container } = heldFile(qtFile({ fragmentedTrack: 2 }), Mp4Container);
+  await assert.rejects(container.readChapters(held), /chapter-fragmented-track/);
+});
+
+test("fragmented video does not reject an ordinary chapter track", async () => {
+  const { held, container } = heldFile(qtFile({ fragmentedTrack: 1 }), Mp4Container);
+  assert.equal((await container.readChapters(held)).state, "available");
 });
 
 test("QuickTime legacy English uses Macintosh encoding while tx3g uses Unicode", async () => {
@@ -262,6 +272,19 @@ test("forgotten in-flight read cannot repopulate the file result", async () => {
   orchestrator.forget("source", 0);
   finish(null); await work;
   assert.equal(orchestrator.files.size, 0);
+});
+
+test("withdrawn chapter read cannot reserve memory after its last byte arrives", async () => {
+  let finish, current = true, accepted = false;
+  const containers = new ContainerOrchestrator();
+  containers.cache.set("source:0", { readChapters: () => new Promise((resolve) => { finish = resolve; }) });
+  const work = containers.inspect({ sourceKey: "source", fileIndex: 0, isCurrent: () => current,
+    acceptChapterResult: () => { accepted = true; } }, "chapters");
+  await settle();
+  current = false;
+  finish({ version: 1, state: "available", complete: true });
+  assert.equal((await work).reason, "request-obsolete");
+  assert.equal(accepted, false);
 });
 
 test("chapter snapshot waits for its shared memory budget and releases its retained bytes", async () => {

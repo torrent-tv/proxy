@@ -42,9 +42,12 @@ export class MediaReadRequests {
     const existing = this.#requests.get(key);
     if (existing) { existing.params = params; existing.kind = result.kind; }
     else this.#requests.set(key, { params, statement, kind: result.kind, running: false, changed: false });
-    if (result.kind === "needs-memory" ? memoryRevision !== this.#memoryVersion : revision !== this.revision(params.sourceKey, params.fileIndex)) {
-      const request = this.#requests.get(key);
-      request.changed = true;
+    const request = this.#requests.get(key);
+    // A read can change from missing memory to missing bytes. An event for
+    // its previous resource cannot authorize another read of unchanged bytes.
+    request.changed = result.kind === "needs-memory"
+      ? memoryRevision !== this.#memoryVersion : revision !== this.revision(params.sourceKey, params.fileIndex);
+    if (request.changed) {
       if (!request.running) queueMicrotask(() => { if (!request.running) void this.#retry(request); });
     }
   }
@@ -53,7 +56,8 @@ export class MediaReadRequests {
     this.#memoryVersion++;
     for (const request of this.#requests.values()) {
       if (request.kind !== "needs-memory") continue;
-      this.#notify(request.params.sourceKey, request.params.fileIndex, { kind: "memory-changed" });
+      // The retried statement announces its result. A memory event is not a
+      // source change for another statement still waiting for missing bytes.
       request.changed = true;
       if (!request.running) void this.#retry(request);
     }

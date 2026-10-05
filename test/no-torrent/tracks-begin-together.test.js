@@ -1,0 +1,209 @@
+/**
+ * @file Picture and sound must begin their runs at the same real instant.
+ *
+ * The two branches are asked for the same time and land in different places: a
+ * copied picture may only begin at a real keyframe and may not begin before the
+ * time asked for, so it moves FORWARD to the next one; a soundtrack has no
+ * keyframes and begins exactly where asked. Measured 2026-08-17, the difference
+ * was 0.58-2.96 s on one file, and the viewer got sound with no new picture for
+ * as long as it lasted.
+ *
+ * The picture's true start is measured from the piece it produced. This pins
+ * that the measurement is carried to the other members of the family.
+ */
+
+import assert from "node:assert/strict";
+import { SourceFile } from "../../services/media/SourceFile.js";
+import { startRunOn } from "./helpers/encode-run.js";
+import { Timeline } from "../../services/encode/output/Timeline.js";
+import test from "node:test";
+
+import { wireOutputs } from "../../services/server/wire-outputs.js";
+import { trueStartOf } from "../../services/encode/run-command.js";
+import { fmp4Format } from "../../services/encode/segment-formats/fmp4.js";
+import { ENCODE_RUN_STATE, INITIAL_RUN_STATE } from "../../services/encode/encode-run-state.js";
+import { outputSpec } from "./helpers/output-spec.js";
+
+const BOUNDARIES = [0, 4, 8, 12, 16, 20];
+
+/**
+ * A film's family: the picture, and a soundtrack rendition of it. Both runs
+ * begin at boundary #2, which the container's table puts at 8 s.
+ *
+ * @returns {{ manager: object, picture: object, sound: object }}
+ */
+function familyAtBoundaryTwo() {
+  // ONE table for the film. Where it is cut is a fact about the FILE, so the
+  // picture and its soundtrack hold the same array rather than a copy each.
+  const boundaries = [...BOUNDARIES];
+  const manager = wireOutputs({
+    enabled: true,
+    ffmpegBin: "ffmpeg",
+    localBindHost: "127.0.0.1",
+    localPort: 9090
+  });
+  const picture = {
+    id: "picture",
+    spec: outputSpec({ transcodeVideo: false }),
+    get outputKey() { return this.spec.toKey(); },
+    state: "ready",
+    timeline: new Timeline({ boundaries: boundaries, cutGrid: "uniform" }),
+    file: new SourceFile({ sourceKey: "source-1", fileIndex: 0, name: "film.mkv" }),
+    // An ordinary session reads its own file, and its sound is inside it. The
+    // three differ only for a soundtrack shipped as a file of its own — and the
+    // command is built from all three, so a fixture that states only the first
+    // describes a session the product cannot make.
+    get inputFile() { return this.file; },
+    get audioFile() { return this.file; },
+    // How its pieces are packaged. The command asks the format where to cut and
+    // what to name the files, so a session without one is not a session.
+    segmentFormat: fmp4Format,
+    // Where its encoder has got to, which a run writes into as it works.
+    progress: { processedSeconds: 0 },
+    runs: new Set()
+  };
+  // The soundtrack of that picture: the same file, published on its own. Found
+  // by what it is, since no list of ids names it any more.
+  const sound = {
+    id: "sound",
+    spec: outputSpec({ audioOnly: true }),
+    get outputKey() { return this.spec.toKey(); },
+    state: "ready",
+    baseSessionId: "picture",
+    timeline: new Timeline({ boundaries: boundaries, cutGrid: "uniform" }),
+    file: new SourceFile({ sourceKey: "source-1", fileIndex: 0, name: "film.mkv" }),
+    // An ordinary session reads its own file, and its sound is inside it. The
+    // three differ only for a soundtrack shipped as a file of its own — and the
+    // command is built from all three, so a fixture that states only the first
+    // describes a session the product cannot make.
+    get inputFile() { return this.file; },
+    get audioFile() { return this.file; },
+    // How its pieces are packaged. The command asks the format where to cut and
+    // what to name the files, so a session without one is not a session.
+    segmentFormat: fmp4Format,
+    // Where its encoder has got to, which a run writes into as it works.
+    progress: { processedSeconds: 0 },
+    runs: new Set()
+  };
+  const pictureRun = startRunOn(picture, { from: 2 });
+  const soundRun = startRunOn(sound, { from: 2 });
+  manager.encodeOrchestrator.adopt(picture.outputKey, pictureRun);
+  manager.encodeOrchestrator.adopt(sound.outputKey, soundRun);
+  manager.outputs.set("picture", picture);
+  manager.outputs.set("sound", sound);
+
+  return { manager, picture, sound };
+}
+
+test("a soundtrack follows the picture to the instant the picture really began", () => {
+  const { manager, picture, sound } = familyAtBoundaryTwo();
+  const runBefore = [...sound.runs][0];
+
+  manager.outputTimes.correctBoundaryFromSegment(picture, 2, 10.5);
+
+  assert.deepEqual(
+    picture.timeline.boundaries,
+    [0, 4, 10.5, 12, 16, 20],
+    "the family's table must hold what the file itself said"
+  );
+  assert.equal(
+    sound.timeline.boundaries[2],
+    10.5,
+    "and every member's table with it — one film, one table, nothing to keep in step"
+  );
+  // THE RUN AT THE WRONG INSTANT IS STOPPED, and nothing here places its
+  // replacement. What has been learned is that this run is producing in the
+  // wrong place, which nothing but the piece it produced could say — the plan
+  // reasons about numbers and cannot know it. So the fact is acted on as far as
+  // it is known and no further: the run goes, the stretch it held returns to the
+  // map, and where the next one stands follows from where the viewers are.
+  assert.equal(runBefore.state, ENCODE_RUN_STATE.STOPPED, "the run in the wrong place goes");
+  assert.equal(
+    manager.encodeOrchestrator.runsOn(sound.outputKey).filter((run) => run.isAlive).length,
+    0,
+    "and this path places nothing"
+  );
+  // The corrected instant reaches whatever the plan places there through the
+  // table, which every session of the file shares. It used to be passed as an
+  // argument from this one call site, so only a run started by that line ever
+  // had it — a run the plan placed at the same number landed apart again.
+  assert.equal(
+    trueStartOf(sound.timeline, 2),
+    10.5,
+    "the live table holds the measurement and the published one the prediction"
+  );
+});
+
+test("where a number really begins is answered only where it has been measured", () => {
+  const { sound } = familyAtBoundaryTwo();
+
+  assert.equal(
+    trueStartOf(sound.timeline, 2),
+    undefined,
+    "the two tables agree, so there is nothing measured to prefer"
+  );
+  sound.timeline.boundaries[2] = 10.5;
+  assert.equal(trueStartOf(sound.timeline, 2), 10.5);
+  assert.equal(trueStartOf(sound.timeline, 3), undefined, "and only about the number measured");
+  assert.equal(trueStartOf(sound.timeline, 99), undefined, "a number the file does not have");
+  assert.equal(trueStartOf(null, 0), undefined, "and no table at all");
+});
+
+test("a correction the table already holds moves nobody", () => {
+  const { manager, picture, sound } = familyAtBoundaryTwo();
+  const before = [...sound.timeline.boundaries];
+  // Within the tolerance: the reading agrees with the table, so there is
+  // nothing to correct and nothing to move. This is what makes the repositioning
+  // converge instead of repeating on every produced segment.
+  manager.outputTimes.correctBoundaryFromSegment(picture, 2, 8.1);
+  assert.deepEqual(sound.timeline.boundaries, before);
+});
+
+test("a member that is not running is left alone", () => {
+  const { manager, picture, sound } = familyAtBoundaryTwo();
+  // A rung the viewer switched away from has no process. Moving it would start
+  // an encoder for nobody — the failure that put three ffmpeg runs on one file.
+  const soundRun = [...sound.runs][0];
+  soundRun.stop("the viewer switched away");
+  // A stopped run is no longer live, so nothing of this session begins at #2
+  // any more — which is what "left alone" means here.
+  manager.outputTimes.correctBoundaryFromSegment(picture, 2, 10.5);
+  assert.equal(
+    manager.encodeOrchestrator.runsOn(sound.outputKey).filter((run) => run.isAlive).length,
+    0,
+    "a stopped member is not started again for nobody"
+  );
+  assert.equal(soundRun.from, 2, "a stopped member keeps its place and its silence");
+  assert.equal(soundRun.state, ENCODE_RUN_STATE.STOPPED);
+  assert.notEqual(INITIAL_RUN_STATE, ENCODE_RUN_STATE.STOPPED);
+});
+
+test("a soundtrack does not move the grid the picture is cut on", () => {
+  const { manager, picture, sound } = familyAtBoundaryTwo();
+  const pictureBefore = [...picture.timeline.boundaries];
+  const soundBefore = [...sound.timeline.boundaries];
+
+  // The sound reports where IT began, which is where it was asked to begin, to
+  // within one audio frame. The picture's own boundary is a keyframe of the
+  // file and can be seconds away from that — both readings correct, about
+  // different things.
+  //
+  // Field 2026-08-20: boundary #521 of one film was corrected 2086.084 →
+  // 2084.082 by the picture and 2084.082 → 2086.033 by the sound 1.6 s later,
+  // 1.951 s apart, each overwriting the other for as long as the film ran. The
+  // table never converged, so the guard that stops a correction the table
+  // already holds never fired.
+  manager.outputTimes.correctBoundaryFromSegment(sound, 2, 10.5);
+
+  assert.deepEqual(
+    picture.timeline.boundaries,
+    pictureBefore,
+    "the grid is the picture's cut list and a soundtrack may not move it"
+  );
+  assert.deepEqual(sound.timeline.boundaries, soundBefore);
+  assert.equal(
+    manager.encodeOrchestrator.runsOn(picture.outputKey).filter((run) => run.isAlive).length,
+    1,
+    "and nothing is restarted on a soundtrack's say-so"
+  );
+});

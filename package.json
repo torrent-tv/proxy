@@ -29,7 +29,7 @@
   "scripts": {
     "start": "node ./bin/cli.js",
     "dev": "node --inspect=0 --experimental-network-inspection ./bin/cli.js",
-    "test": "npm run lint && node --test",
+    "test": "npm run lint && node --require ./test/no-torrent/support/refuse-torrent.cjs --test \"test/no-torrent/**/*.test.js\"",
     "graph": "node scripts/render-run-graph.js",
     "lint": "biome lint ."
   },

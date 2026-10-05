@@ -13,7 +13,7 @@ import { access, readFile, stat, unlink } from "node:fs/promises";
 import { Readable } from "node:stream";
 import path from "node:path";
 import { logger } from "../../utils/logger.js";
-import { isOutputName, PLAYLIST_FILE_NAME } from "../encode/output/index.js";
+import { cutsAtGivenTimes, isOutputName, PLAYLIST_FILE_NAME } from "../encode/output/index.js";
 // The index of variants. Served from the same route as the media playlist, so
 // it needs no path of its own.
 export const MASTER_PLAYLIST_FILE_NAME = "master.m3u8";
@@ -50,25 +50,6 @@ function isSafeFileName(fileName, segmentFormat) {
     segmentFormat.isSegmentFileName(fileName)
   );
 }
-/**
- * Whether this output is cut at times we hand the muxer, rather than at a
- * duration it chooses for itself.
- *
- * A property of the output and not of a run: the cut grid and the branch decide
- * it, so every run of one output answers alike. It decides how a segment is
- * judged finished — see getFileStream.
- *
- * @param {object} session
- * @returns {boolean}
- */
-function cutsAtGivenTimes(session) {
-  const explicit = session?.segmentFormat?.explicitTimesMuxerArgs?.() ?? null;
-  if (!explicit) {
-    return false;
-  }
-  return !session.spec.transcodesVideo || session.timeline?.cutGrid === "keyframe";
-}
-
 export class SegmentServing {
   /** Serving state keyed by the output object it belongs to. */
   #states = new WeakMap();
@@ -275,14 +256,12 @@ export class SegmentServing {
       return this.#holdForProduction(session, fileName, isPlaylist, options);
     }
     try {
-      // Existing is not the same as finished. The `hls` muxer wrote each
-      // segment to a temporary name and renamed it once complete, so a file
-      // appearing WAS a finished segment. The `segment` muxer has no such
-      // option: the file appears when writing begins. Serving it then hands the
-      // player a truncated segment, which it rejects and then simply stops —
-      // observed as playback dying a few seconds in with the encoder still
-      // running happily ahead. A segment is finished once the NEXT one has been
-      // started, or once the run producing it has ended.
+      // Existing is not the same as finished. The `hls` muxer writes each
+      // segment to a temporary name and renames it when it ends the segment —
+      // at its cut, but also on SIGTERM and when its input stops, so a file
+      // appearing there proves only that the muxer let go of it. Every output
+      // with a grid is therefore cut by the `segment` muxer, whose file appears
+      // when writing begins and is served only once it is published below.
       if (!isPlaylist && cutsAtGivenTimes(session)) {
         // WHAT PROVES A PIECE IS WHOLE is the encoder's own word for it: it
         // names each file on a channel of its own the moment it closes it, and

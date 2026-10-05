@@ -8,7 +8,7 @@
  */
 
 import { logger } from "../../utils/logger.js";
-import { isOutputName } from "../encode/output/index.js";
+import { isOutputName, PLAYLIST_FILE_NAME } from "../encode/output/index.js";
 import { IDLE_KEEP_MS } from "../storage/keep.js";
 /**
  * How long produced segments are kept after the last request for them.
@@ -273,7 +273,12 @@ export class OutputLifecycle {
   adoptSegmentsLeftBehind() {
     // Which container the segments are in is stated by the key itself; a key
     // that cannot say is a directory that goes (`encode/output-key-format.js`).
-    return this.#host.segmentStore.adoptWhatSurvived((key) => this.#host.segmentFormatOfKey(key));
+    // The `hls` muxer writes its own list, under the playlist's name, beside the
+    // pieces it named itself; none of those pieces is proven whole.
+    return this.#host.segmentStore.adoptWhatSurvived(
+      (key) => this.#host.segmentFormatOfKey(key),
+      { selfNamedListFileName: PLAYLIST_FILE_NAME }
+    );
   }
 
   /**

@@ -673,11 +673,24 @@ Its NAME, and there is nothing else. A piece being written is called
 was given — and it takes `segment-00042.mp4` when the encoder says it has closed
 it, which it does on a channel of its own (`-segment_list pipe:3`). Making it
 servable is therefore one rename inside one directory, performed by the store
-because the store owns the disk. The `hls` branch needs nothing extra: its muxer
-writes through a temporary name of its own, so its files appear under their final
-name whole.
+because the store owns the disk. A name the encoder reports after it was told
+to stop, or after its input ended early, is the piece it had open being flushed
+and is never published; every published piece is also shown, from its own
+media, to reach its cut (`encode/piece-completeness.js`).
 
-Three things follow, and each replaced a guess:
+Every output with a grid is cut this way, the even grid of a re-encode
+included (`cutsAtGivenTimes` in `encode/output/cut-grid.js`, read by the run
+command and by the serving alike). The `hls` muxer, which re-encoded outputs on
+the even grid used to take, renames its pieces itself — including the one it
+has open when it ends, on our SIGTERM and when its input stops — so a stopped
+run left a piece shorter than its span under the served name. Field 2026-09-27
+shows what that costs after a backward seek: piece #111 held 0.37 s of its
+4.2 s, the browser appended it, counted the fragment as loaded and never asked
+for that stretch again. Only a run given no cut list still takes the `hls`
+muxer, and at startup the pieces that muxer named in an earlier life of the
+process are removed rather than adopted.
+
+Four things follow, and each replaced a guess:
 
 1. **a request can never reach a half-written piece.** Closure used to be
    inferred from the NEXT number existing — sound for one writer walking forward,
@@ -693,7 +706,10 @@ Three things follow, and each replaced a guess:
    the ones carrying its own tag: no stretch to search, no bytes to judge, and no
    way to remove a complete piece somebody else closed. `services/encode/
    open-piece.js` did all three of those by guessing and is gone, along with the
-   session manager's copy of it.
+   session manager's copy of it;
+4. **stopping a run never leaves a short piece servable.** The plan stops runs
+   whenever the map moves, a backward seek among them, and each stop used to
+   be able to leave one.
 
 ## How a request for a segment ends
 

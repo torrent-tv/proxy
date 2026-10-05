@@ -98,6 +98,19 @@ The split is by PHASE, and neither half is the whole session:
 3. **At unload** it goes to the server again: `navigator.sendBeacon` is the only
    thing a page that is going away can use, and a data channel is not;
 4. **A batch that cannot reach the proxy** falls back to the server.
+5. **A batch nobody took** goes back into the page's queue and leaves with the
+   next send. What the page lost — lines pushed out by its 500-line queue — and
+   every refused send, by route and cause, are written into the log itself as
+   one line, `[client-logger] since <time>: …`, which travels with the next
+   batch that is delivered.
+
+Every line carries the number of the page's send it came in, as `batch=<n>`,
+on both sides: `[Windows/Chrome batch=12]` here, `[client Windows/Chrome
+<sessionId> batch=12]` on the droplet. A number on neither side is a send no
+route took: its lines went out again under a later number, and the report line
+says why. A number on both is a batch the proxy took but whose answer never
+reached the page — a connection wedged in the proxy-to-page direction still
+carries requests the other way — which the page then sent to the server too.
 
 So a session that failed while connecting is on the droplet, a session that
 failed while playing is on the addon host, and a complete reading of a long

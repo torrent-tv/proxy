@@ -303,6 +303,7 @@ npm start -- --server-url http://localhost:3000
 | `--name` | hostname | Display name in registry |
 | `--token` | — | Auth token for register/heartbeat |
 | `--ffmpeg-bin` | bundled | Path to custom ffmpeg binary |
+| `--log-file` | — | Also write the log to this file, and the browser's lines to `client-*.log` beside it; without it everything goes to the console only. See `docs/logs.md` |
 | `--no-transcode-audio` | — | Disable HLS audio transcoding |
 | `--help` | — | Print all options and exit |
 
@@ -311,6 +312,13 @@ npm start -- --server-url http://localhost:3000
 ```bash
 docker build -t torrent-tv-proxy .
 docker run torrent-tv-proxy --server-url http://my-server:8080
+```
+
+Without `--log-file` the log is only in `docker logs`, which recreating the
+container deletes. To keep it, put it on a volume:
+
+```bash
+docker run -v ttv-proxy-logs:/logs torrent-tv-proxy --server-url http://my-server:8080 --log-file /logs/proxy.log
 ```
 
 ## Full End-to-End Flow

@@ -1,3 +1,7 @@
+## Unreleased
+
+- **Fix**: A proxy started without `--log-file` keeps the browser's log. The page sends its log to the proxy for most of a viewing, and the proxy wrote it only to per-session files beside its own log file; with no log file named, which is every run from npm or Docker other than the Home Assistant addon, the browser's half of every viewing was dropped. It now goes to the console, beside the proxy's lines, each prefixed `client <sessionId>`. `docs/logs.md` states where the log goes for each way of starting the proxy (torrent-tv/meta#96).
+
 ## 2.89.15
 
 - **Fix**: A torrent downloaded whole is no longer removed while something is still reading it. The sweep that writes whole files out and removes the torrent asked only who had stated a need, and a read whose pieces are all here waits for nothing and states nothing. On the stand on 2026-10-04 the torrent was removed under ffmpeg's own read of the film: the read ended with "Piece store is closed" 277 MB in, ffmpeg reported `Stream ends prematurely`, the copied picture lost 2.6 s, and the page refused to start with "Prepared media contains a timestamp gap" (torrent-tv/meta#105). Open reads now count as use.

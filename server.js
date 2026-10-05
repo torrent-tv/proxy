@@ -25,7 +25,7 @@ import { handleApiSourceWarmPost } from "./routes/api/sources/warm/post.js";
 import { handleApiPlaybackPlanPost } from "./routes/api/playback-plan/post.js";
 import { handleApiPlaybackPlanAudioTracksPost } from "./routes/api/playback-plan/audio-tracks/post.js";
 import { handleApiClientLogsPost } from "./routes/api/client-logs/post.js";
-import { createClientLogFiles } from "./utils/client-log-file.js";
+import { createClientLogConsole, createClientLogFiles } from "./utils/client-log-file.js";
 import { handleApiSubtitlesGet } from "./routes/api/subtitles/get.js";
 import { handleApiTranscodeSessionsPost } from "./routes/api/transcode-sessions/post.js";
 import { handleApiTranscodeSessionsProgressGet } from "./routes/api/transcode-sessions/progress/get.js";
@@ -629,9 +629,12 @@ export async function startProxyServer({
       }
     })
   );
-  // The browser's own log, kept beside the proxy's. See the route's own file
-  // for why it is here and not only on the registry server.
-  const clientLogs = logFile ? createClientLogFiles(logFile) : null;
+  // The browser's own log, kept beside the proxy's: a file per session when
+  // the proxy writes its log to a file, its console otherwise. See the route's
+  // own file for why it is here and not only on the registry server.
+  const clientLogs = logFile
+    ? createClientLogFiles(logFile)
+    : createClientLogConsole((message) => logger.info(message));
   app.post("/api/client-logs", async (req, reply) =>
     handleApiClientLogsPost(req, reply, { clientLogs })
   );

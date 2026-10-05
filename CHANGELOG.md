@@ -1,3 +1,7 @@
+## Unreleased
+
+- **Fix**: The npm package holds only what the proxy runs: `bin/`, `server.js`, `routes/`, `services/`, `store/`, `utils/`, `assets/`, the README and the licence. It carried everything the repository has — the tests, research notes, `docs/`, `openspec/`, `.claude/`, `AGENTS.md`, this changelog, a 1.6 MB language corpus and a CPU profile committed by mistake — 541 files and 18.4 MB packed for 2.89.16; it is now 246 files and 16.4 MB, of which 15.4 MB are the calibration clips. `package.json` states the list in `files`, and `.npmignore` is gone. `public/`, whose one file answered a request Chrome DevTools makes, is removed with `@fastify/static` and its sixteen packages (torrent-tv/meta#98).
+
 ## 2.89.17
 
 - **Fix**: Every browser log line the proxy keeps names the page's send it came in, as `batch=<n>`, and the server prints the same number. A send that reached neither side, or a batch the proxy took over a connection that could no longer carry its answer back, is now visible by comparing the two (torrent-tv/meta#77).

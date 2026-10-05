@@ -66,18 +66,62 @@ test("a session that has not chosen a film yet still gets its own file", async (
   assert.match(name, /-no-torrent-yet\.log$/);
 });
 
-test("the file keeps its name when the film arrives mid-session", async () => {
-  // Keyed by the session, not by the name: the earlier lines belong to the same
-  // viewing and must not start a second file.
+test("the file is renamed after the film when one is chosen, and keeps the earlier lines", async () => {
+  // The first batch always comes before a torrent is chosen. Keyed by the
+  // session, the file is not a second one when the film arrives; it gains the
+  // film's name, so the log can be found by the film it played.
   const { dir, proxyLog } = aDirectory();
   const logs = createClientLogFiles(proxyLog);
   logs.write(aSession({ torrentName: "", infoHash: "" }), ["before"]);
   logs.write(aSession(), ["after"]);
+  logs.write(aSession({ torrentName: "", infoHash: "" }), ["a batch that names nothing"]);
+  await logs.close();
+
+  const names = readdirSync(dir).filter((f) => f.startsWith("client-"));
+  assert.deepEqual(names, ["client-20260913-160524-abcd1234-Reacher.S04E07.1080p.rus.LostFilm.TV.mkv-94dda59f.log"]);
+  assert.equal(readFileSync(join(dir, names[0]), "utf8"), "before\nafter\na batch that names nothing\n");
+});
+
+test("another torrent in the same page starts its own file under the same prefix", async () => {
+  // Renaming again would put the first film's lines under the second film's
+  // name, where nobody looking for the first film finds them.
+  const { dir, proxyLog } = aDirectory();
+  const logs = createClientLogFiles(proxyLog);
+  logs.write(aSession(), ["first film"]);
+  logs.write(aSession({ torrentName: "Drifters", infoHash: "0123456789abcdef0123456789abcdef01234567" }), ["second film"]);
+  await logs.close();
+
+  const names = readdirSync(dir).filter((f) => f.startsWith("client-")).sort();
+  assert.deepEqual(names, [
+    "client-20260913-160524-abcd1234-Drifters-01234567.log",
+    "client-20260913-160524-abcd1234-Reacher.S04E07.1080p.rus.LostFilm.TV.mkv-94dda59f.log"
+  ]);
+  assert.equal(readFileSync(join(dir, names[0]), "utf8"), "second film\n");
+  assert.equal(readFileSync(join(dir, names[1]), "utf8"), "first film\n");
+});
+
+test("the same torrent named again changes nothing", async () => {
+  const { dir, proxyLog } = aDirectory();
+  const logs = createClientLogFiles(proxyLog);
+  logs.write(aSession(), ["one"]);
+  logs.write(aSession(), ["two"]);
   await logs.close();
 
   const names = readdirSync(dir).filter((f) => f.startsWith("client-"));
   assert.equal(names.length, 1);
-  assert.match(names[0], /-no-torrent-yet\.log$/);
+  assert.equal(readFileSync(join(dir, names[0]), "utf8"), "one\ntwo\n");
+});
+
+test("a hostile torrent name cannot escape the directory when the file is renamed", async () => {
+  const { dir, proxyLog } = aDirectory();
+  const logs = createClientLogFiles(proxyLog);
+  logs.write(aSession({ torrentName: "", infoHash: "" }), ["before"]);
+  logs.write(aSession({ torrentName: "../../etc/passwd", infoHash: "../.." }), ["after"]);
+  await logs.close();
+
+  const names = readdirSync(dir).filter((f) => f.startsWith("client-"));
+  assert.equal(names.length, 1);
+  assert.ok(!names[0].includes(".."), `no traversal in ${names[0]}`);
   assert.equal(readFileSync(join(dir, names[0]), "utf8"), "before\nafter\n");
 });
 
@@ -91,6 +135,22 @@ test("a hostile torrent name cannot escape the directory", async () => {
   assert.equal(names.length, 1);
   assert.ok(!names[0].includes(".."), `no traversal in ${names[0]}`);
   assert.ok(!names[0].includes("/"), `no separator in ${names[0]}`);
+});
+
+test("a full file is rotated, and the next batch starts a fresh one under the name", async () => {
+  // The next batch arrives while the rotated file may still be flushing; it
+  // must not append to the file being moved.
+  const { dir, proxyLog } = aDirectory();
+  const logs = createClientLogFiles(proxyLog);
+  const big = "x".repeat(16 * 1024 * 1024);
+  logs.write(aSession(), [big]);
+  logs.write(aSession(), ["after rotation"]);
+  await logs.close();
+
+  const base = "client-20260913-160524-abcd1234-Reacher.S04E07.1080p.rus.LostFilm.TV.mkv-94dda59f.log";
+  assert.deepEqual(readdirSync(dir).filter((f) => f.startsWith("client-")).sort(), [base, `${base}.1`]);
+  assert.equal(readFileSync(join(dir, `${base}.1`), "utf8").length, big.length + 1);
+  assert.equal(readFileSync(join(dir, base), "utf8"), "after rotation\n");
 });
 
 test("two sessions of one film are two files", async () => {

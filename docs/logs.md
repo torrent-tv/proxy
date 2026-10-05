@@ -127,9 +127,13 @@ proxy's console, prefixed `client <sessionId:8>`.
 client-<YYYYMMDD-HHMMSS UTC of the session start>-<sessionId:8>-<torrent name:60>-<infoHash:8>.log
 ```
 
-A session that has not chosen a torrent yet writes `no-torrent-yet` in that
-last part — the file is keyed by the session id, not by the name, so choosing a
-torrent later does NOT start a second file. Rotated at 16 MB to `<name>.log.1`.
+The page's first batch always arrives before a torrent is chosen, so the file
+starts as `…-no-torrent-yet.log` and is renamed when the first torrent arrives;
+the lines written before it stay in it. A different torrent opened later in the
+same page starts a file of its own under the same
+`client-<start>-<sessionId:8>` prefix, so `ls /data/client-*-<sessionId:8>-*`
+lists every file of one page. A file still ending in `no-torrent-yet` is a page
+that never chose a torrent. Rotated at 16 MB to `<name>.log.1`.
 
 ```bash
 ssh ha "sudo docker exec app_b34a1737_torrent_tv_proxy sh -c 'ls -la /data/client-*.log'"

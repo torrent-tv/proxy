@@ -1,3 +1,7 @@
+## Unreleased
+
+- **Fix**: A film watched from its whole file no longer brings its torrent back every ten seconds. Once every file of a torrent is kept whole the torrent is removed, and the download figures the page polls, the priority map and the other requests that steer a download each rebuilt it from its recipe only to be told nothing was missing; the next sweep removed it again. Field 2026-10-04, proxy 2.89.11: one viewer, one whole file, and the torrent removed and added 671 times in two hours, each time connecting to the swarm anew. A file held whole now answers those requests without its torrent — the figures say everything is here and nothing is arriving — and the torrent is used only while it exists (torrent-tv/meta#1).
+
 ## 2.89.20
 
 - **Fix**: The Docker image takes node from Alpine's own `nodejs` package in every stage, as the add-on does, instead of copying the official image's binary: one way of getting node, and 285 MB instead of 348 MB on the HA host. The binary was chosen for being three patch releases newer, and none of those three is a security release; 24.18.1, which Alpine ships, is the last one (torrent-tv/meta#98).

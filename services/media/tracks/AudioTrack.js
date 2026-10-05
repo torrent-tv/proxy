@@ -86,6 +86,8 @@ export class AudioTrack extends ContainerTrack {
     this.isVisualImpaired = params.isVisualImpaired === true;
     this.channels = Number.isFinite(params.channels) ? params.channels : null;
     this.samplingFrequency = Number.isFinite(params.samplingFrequency) ? params.samplingFrequency : null;
+    this.bitDepth = Number.isSafeInteger(params.bitDepth) && params.bitDepth > 0 ? params.bitDepth : null;
+    this.codecDelaySeconds = Number.isFinite(params.codecDelaySeconds) && params.codecDelaySeconds >= 0 ? params.codecDelaySeconds : 0;
     // What the codec is configured as, and the most that configuration allows
     // the track to carry — a statement of the file, read with the rest of the
     // track table (`audio-bound.js`). Own properties rather than getters, so a
@@ -97,6 +99,13 @@ export class AudioTrack extends ContainerTrack {
       samplingFrequency: this.samplingFrequency
     });
     this.peakKbps = peakKbpsOf(this.codecParameters);
+    if (this.codecParameters?.frameLength > 0 && this.codecParameters.sampleRate > 0) {
+      this.defaultDurationSeconds = this.codecParameters.frameLength / this.codecParameters.sampleRate;
+      this.seekPrerollSeconds = this.defaultDurationSeconds;
+    }
+    if (Number.isFinite(params.seekPrerollSeconds) && params.seekPrerollSeconds > 0) {
+      this.seekPrerollSeconds = Math.max(this.seekPrerollSeconds ?? 0, params.seekPrerollSeconds);
+    }
   }
 
   /**

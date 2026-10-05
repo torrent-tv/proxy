@@ -189,6 +189,12 @@ export class SourceFile {
     return sourceDecodeCharacteristics(this.media);
   }
 
+  /** The measured source rate does not require decoded-frame characteristics. */
+  get megabitsPerSecond() {
+    const kbps = Number(this.media?.bitrateKbps);
+    return Number.isFinite(kbps) && kbps > 0 ? kbps / 1000 : null;
+  }
+
   /**
    * The address this proxy's own HTTP serves this file at.
    *

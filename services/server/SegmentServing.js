@@ -28,11 +28,6 @@ const SEGMENT_READ_HIGH_WATER_MARK = 4 * 1024 * 1024;
  * @param {number} ms
  * @returns {Promise<void>}
  */
-function delay(ms) {
-  return new Promise((resolve) => {
-    setTimeout(resolve, ms);
-  });
-}
 /**
  * Guard against path traversal by restricting file names to the known
  * playlist and segment patterns produced by ffmpeg. Which segment names are
@@ -81,6 +76,18 @@ export class SegmentServing {
     state.waitEpoch += 1;
     for (const wake of state.waitListeners) wake(true);
     state.waitListeners.clear();
+  }
+
+  /** Observe storage and lifecycle before a request checks file availability. */
+  subscribeFileChange(sessionId) {
+    const output = isOutputName(sessionId) ? this.#host.outputs.get(sessionId) : null;
+    if (!output) return { changed: Promise.resolve(), release: () => {} };
+    const state = this.#stateFor(output);
+    let wake;
+    const changed = new Promise((resolve) => { wake = resolve; });
+    state.waitListeners.add(wake);
+    const stop = this.#host.segmentStore.subscribeChanges(output.outputKey ?? "", wake);
+    return { changed, release: () => { state.waitListeners.delete(wake); stop(); } };
   }
 
   /**
@@ -615,6 +622,16 @@ export class SegmentServing {
   }
 
   #holdForProduction(session, fileName, isPlaylist, options) {
+    let ranked = null;
+    if (!isPlaylist) {
+      const index = session.segmentFormat.segmentIndexFromName(fileName);
+      const address = session.outputKey ?? "";
+      const { rank, topRank } = this.#host.encodeOrchestrator.rankAt(address, index);
+      ranked = { address, rank, topRank };
+      if (Number.isFinite(index) && topRank > 0 && rank === 0) {
+        return { kind: "superseded", ranked };
+      }
+    }
     // The file is not there and production has ended in an error: nothing is
     // going to write it, so the viewer is told instead of held.
     if (this.#host.encodeRuns.hasFailed(session)) {
@@ -625,10 +642,8 @@ export class SegmentServing {
       // the truthful answer: nothing is broken and there is nothing for the
       // viewer to retry. Only what is NOT on disk is held for it — a piece that
       // exists is whole, and it is served whatever the encoder is doing.
-      return { kind: "warming-up" };
+      return { kind: "warming-up", ranked };
     }
-    /** @type {{ address: string, rank: number, topRank: number } | null} */
-    let ranked = null;
     if (!isPlaylist) {
       this.#explainHold(session, fileName, "the file is not on disk");
     }
@@ -654,22 +669,6 @@ export class SegmentServing {
       // discarded at the one point where a viewer measurably waits for a named
       // segment; it goes back out with the answer, because the wait is measured
       // by whoever holds the request.
-      const address = session.outputKey ?? "";
-      const { rank, topRank } = this.#host.encodeOrchestrator.rankAt(address, requestedIndex);
-      ranked = { address, rank, topRank };
-      const nobodyIsComing = topRank > 0 && rank === 0;
-      if (
-        Number.isFinite(requestedIndex) &&
-        requestedIndex < (this.#host.encodeRuns.earliestStartOf(session) ?? 0) &&
-        nobodyIsComing &&
-        this.#host.encodeRuns.liveRunsOf(session).length > 0
-      ) {
-        logger.info(
-          `transcode ${session.id} segment #${requestedIndex} is ${(this.#host.encodeRuns.earliestStartOf(session) ?? 0) - requestedIndex} ` +
-          "segments behind the run and in nobody's zone; answered as absent rather than held"
-        );
-        return { kind: "not-found", ranked };
-      }
       this.#noteWanted(session, requestedIndex);
     }
     return { kind: "warming-up", ranked };
@@ -996,9 +995,7 @@ export class SegmentServing {
   }
 
   /**
-   * Poll until the HLS playlist file exists and contains a valid `#EXTM3U`
-   * header, or until the session fails, or until the startup timeout elapses.
-   * Throws with message `"HLS playlist is still warming up."` on timeout.
+   * Wait for a valid HLS playlist or a terminal output state, without polling.
    *
    * @param {HlsSession} session
    * @returns {Promise<void>}
@@ -1016,9 +1013,9 @@ export class SegmentServing {
     }
 
     const playlistPath = path.join(this.#host.segmentStore.pathFor(session.outputKey ?? ""), PLAYLIST_FILE_NAME);
-    const deadline = Date.now() + this.#host.startupWaitMs;
-
-    while (Date.now() < deadline) {
+    while (this.#host.outputs.get(session.id) === session) {
+      const change = this.subscribeFileChange(session.id);
+      try {
       if (this.#host.encodeRuns.hasFailed(session)) {
         throw new Error(this.#host.encodeRuns.lastErrorOf(session) || "ffmpeg failed to start HLS session.");
       }
@@ -1031,10 +1028,12 @@ export class SegmentServing {
       } catch (_error) {
         // Playlist is not ready yet.
       }
-      await delay(250);
+      await change.changed;
+      } finally {
+        change.release();
+      }
     }
-
-    throw new Error("HLS playlist is still warming up.");
+    throw new Error("HLS output was disposed before its playlist became available.");
   }
 
   /**

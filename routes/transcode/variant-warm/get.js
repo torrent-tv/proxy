@@ -14,11 +14,8 @@
  */
 
 import { replyOutputUnavailable } from "../../../services/server/http-responses.js";
-import { waitForSessionFile } from "../../../services/server/transcode-session-files.js";
+import { waitForRequestedFile } from "../../../services/server/transcode-session-files.js";
 import { OUTPUT_UNAVAILABLE } from "../../../services/encode/output/index.js";
-
-/** How long to hold the warm-up request before telling the caller to retry. */
-const WARM_WAIT_MS = 30_000;
 
 /**
  * @param {import("fastify").FastifyRequest} req
@@ -51,19 +48,19 @@ export async function handleTranscodeVariantWarmGet(req, reply, { renditions, se
       return replyOutputUnavailable(reply, error.details);
     }
     const message = error instanceof Error ? error.message : String(error);
-    reply.header("Retry-After", "1");
-    return reply.code(503).send({ error: `Could not prepare the quality variant: ${message}` });
+    return reply.code(500).send({ canRetry: false, error: `Could not prepare the quality variant: ${message}` });
   }
   if (!prepared) {
     return reply.code(404).send({ error: "No such quality variant for this transcode session." });
   }
 
-  const result = await waitForSessionFile(
-    serving,
+  const result = await waitForRequestedFile(
+    req, reply, serving,
     prepared.sessionId,
     prepared.fileName,
-    { holdMs: WARM_WAIT_MS }
+    consumerId
   );
+  if (result.kind === "cancelled") return;
   if (result.kind === "file") {
     // The bytes are not sent — the player fetches them itself the moment it
     // switches, and by then they are on disk — but the handle opened to reach
@@ -75,10 +72,7 @@ export async function handleTranscodeVariantWarmGet(req, reply, { renditions, se
     return reply.code(204).send();
   }
   if (result.kind === "failed") {
-    return reply.code(500).send({ error: result.message });
+    return reply.code(500).send({ error: result.message, canRetry: false });
   }
-  // Still being produced. The caller may switch anyway — it will simply wait
-  // where it would have waited before — or ask again.
-  reply.header("Retry-After", "1");
-  return reply.code(503).send({ error: "The quality variant is still warming up." });
+  return reply.code(404).send({ error: "The requested output is no longer wanted.", canRetry: false });
 }

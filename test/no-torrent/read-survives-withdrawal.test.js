@@ -16,6 +16,7 @@ import os from "node:os";
 import path from "node:path";
 import fs from "node:fs/promises";
 import { readFragments } from "../../services/torrent/worker/piece-reader.js";
+import { demandFor } from "../../services/torrent/download/registry.js";
 import { SharedPieceStore } from "../../services/storage/piece-store/shared-piece-store.js";
 
 const PIECE = 1024;
@@ -86,6 +87,7 @@ async function torrentWithAGap({ emptyFor, times }) {
     critical() {}
   });
 
+  demandFor(torrent).register.state({ claimant: "priority-map:test", fileIndex: 0, byteStart: 0, byteEnd: TOTAL - 1, urgency: 0 });
   return {
     torrent,
     clean: async () => {

@@ -71,6 +71,7 @@ export class ViewerRequests {
    * @returns {Promise<import("../encode/output/EncodedOutput.js").EncodedOutput>}
    */
   async createOrGetSession({ consumerId = "", ...request }) {
+    request.signal?.throwIfAborted();
     const requestStartedAt = Date.now();
     // What this viewer's link last measured, where the request does not say:
     // a viewer who comes back to open another film has a link this proxy has
@@ -90,6 +91,7 @@ export class ViewerRequests {
     // state nothing has every encoder on it stopped.
     const claim = consumerId
       ? (candidate) => {
+          request.signal?.throwIfAborted();
           alreadyOn = this.#host.viewers.forOutput(candidate).has(consumerId);
           const answer = alreadyOn
             ? { admitted: true, reason: "already watching it", speedX: null }
@@ -105,6 +107,7 @@ export class ViewerRequests {
       viewerLinkMbps,
       claim
     });
+    request.signal?.throwIfAborted();
     if (consumerId) {
       const joined = existed && !alreadyOn;
       // What THIS viewer wants of the sound, which an output they are joining
@@ -558,6 +561,7 @@ export class ViewerRequests {
     }
 
     const sourceMeasurements = new Map();
+    const sourceForecasts = new Map();
     const tracks = [];
     for (const output of outputs) {
       const trackProgress = output === session ? progress : this.#host.encodeRuns.progressOf(output);
@@ -580,6 +584,7 @@ export class ViewerRequests {
           index,
           startSeconds: timeline.publishedStartOf(index),
           endSeconds: timeline.publishedStartOf(index + 1),
+          sourceInputs: this.#host.sourceInputsFor?.(output, index) ?? undefined,
           mediaRanges: ranges && output.segmentFormat?.servedMediaRanges ?
             output.segmentFormat.servedMediaRanges(ranges, { initBytes: sessionInit }) : undefined
         };
@@ -596,34 +601,25 @@ export class ViewerRequests {
         if (sourceMeasurements.has(sourceId)) {
           continue;
         }
-        const sourceFile = fileIndex === output.file.fileIndex
-          ? output.file
-          : this.#host.sourceFiles.get(output.file.sourceKey, fileIndex);
         let stats = null;
         try {
-          stats = await this.#host.getSourceStats?.(output.file.sourceKey, fileIndex) ?? null;
+          stats = await this.#host.getSourceStats?.(output.file.sourceKey, fileIndex,
+            { forecast: !sourceForecasts.has(output.file.sourceKey) }) ?? null;
         } catch {
           stats = null;
         }
-        const sourceTrend = this.#downloadRateReadings(
-          measurement,
-          output.file.sourceKey,
-          stats?.downloadSpeed,
-          now
-        );
-        const fileLength = Number(stats?.fileLength);
-        const downloaded = Number(stats?.fileDownloaded);
-        const sourceDuration = Number(sourceFile?.durationSeconds);
+        if (!sourceForecasts.has(output.file.sourceKey)) sourceForecasts.set(output.file.sourceKey, stats?.downloadForecast ?? { ranges: [] });
+        const sharedForecast = sourceForecasts.get(output.file.sourceKey);
+        const downloadForecast = sharedForecast.global ? { measuredAt: sharedForecast.measuredAt,
+          ranges: !stats ? [] : sharedForecast.ranges.map(range => ({ ...range,
+            start: Math.max(0, range.start - stats.fileOffset),
+            end: Math.min(stats.fileLength, range.end - stats.fileOffset)
+          })).filter(range => range.end > range.start) } : sharedForecast;
         sourceMeasurements.set(sourceId, {
           id: sourceId,
-          serviceId: output.file.sourceKey,
-          complete: Number.isFinite(fileLength) && fileLength > 0 && downloaded >= fileLength,
-          bytesPerMediaSecond: Number.isFinite(fileLength) && fileLength > 0 &&
-            Number.isFinite(sourceDuration) && sourceDuration > 0
-            ? fileLength / sourceDuration
-            : 0,
-          readings: sourceTrend,
+          complete: stats?.fileAvailable === true,
           residence: stats?.residence,
+          downloadForecast,
         });
       }
 
@@ -659,12 +655,6 @@ export class ViewerRequests {
     for (const id of measurement.tracks.keys()) {
       if (!activeTrackIds.has(id)) {
         measurement.tracks.delete(id);
-      }
-    }
-    const activeDownloadServices = new Set([...sourceMeasurements.values()].map(({ serviceId }) => serviceId));
-    for (const id of measurement.downloads.keys()) {
-      if (!activeDownloadServices.has(id)) {
-        measurement.downloads.delete(id);
       }
     }
     const bufferedAheadSeconds = Number(viewerReading?.bufferedAheadSec);
@@ -727,7 +717,11 @@ export class ViewerRequests {
         bufferLimitSeconds: input.bufferLimitSeconds,
         lookaheadSeconds: input.lookaheadSeconds,
         link: input.linkReadings,
-        sources: input.sources,
+        sources: input.sources.map(({ id, complete, residence, downloadForecast }) => ({
+          id, complete, residenceRanges: residence?.length ?? 0,
+          forecastAt: downloadForecast?.measuredAt ?? null, plannedPieces: downloadForecast?.ranges.length ?? 0,
+          unknownPieces: downloadForecast?.ranges.filter(range => range.availableAt === null).length ?? 0
+        })),
         tracks: tracks.map(({ id, processedSeconds, readings, segments, readySegmentIndices }) => ({
           id, processedSeconds, readings, segments: segments.length, prepared: readySegmentIndices.length
         }))
@@ -745,23 +739,10 @@ export class ViewerRequests {
     const id = typeof consumerId === "string" ? consumerId : "";
     let state = byViewer.get(id);
     if (!state) {
-      state = { link: new this.#host.playbackReadiness.RateTrend(this.#host.lookaheadSeconds), downloads: new Map(), tracks: new Map() };
+      state = { link: new this.#host.playbackReadiness.RateTrend(this.#host.lookaheadSeconds), tracks: new Map() };
       byViewer.set(id, state);
     }
     return state;
-  }
-
-  #downloadRateReadings(state, serviceId, downloadSpeed, now) {
-    let trend = state.downloads.get(serviceId);
-    if (!trend) {
-      trend = new this.#host.playbackReadiness.RateTrend(this.#host.lookaheadSeconds);
-      state.downloads.set(serviceId, trend);
-    }
-    const speed = Number(downloadSpeed);
-    if (Number.isFinite(speed) && speed >= 0) {
-      trend.add(now, speed);
-    }
-    return trend.snapshot();
   }
 
   #trackRateReadings(state, output, now) {

@@ -74,7 +74,7 @@ test("what the walk may read is answered as a list, not asked per cluster", () =
   const held = source("held-bytes.js");
 
   assert.match(held, /export function heldRangesOf\(torrent, fileIndex\)/);
-  assert.match(held, /export function readHeldBytes\(/);
+  assert.match(held, /export async function readHeldBytes\(/);
 });
 
 test("the walk's read never fetches", () => {
@@ -87,16 +87,13 @@ test("the walk's read never fetches", () => {
   assert.equal(held.includes("readFragments"), false);
 });
 
-test("the resume warm is TOLD how long the file runs", () => {
-  // It used to read the container itself to find out, which is what a file
-  // states about itself. What is left here is the part that really is the
-  // torrent's: a position in seconds becomes a byte offset, and that region is
-  // pulled off the swarm.
-  const warm = source("resume-warm.js");
-
-  assert.match(warm, /options\.durationSeconds/);
-  assert.equal(warm.includes("containerOrchestrator"), false);
-  assert.equal(warm.includes("ContainerFactory"), false);
+test("the torrent thread has no independent resume or whole-file warm commands", () => {
+  const worker = source("worker.js");
+  const commands = source("protocol.js");
+  for (const name of ["WARM_POSITION", "FILL_FILE", "FILL_TORRENT"]) {
+    assert.equal(worker.includes(`Command.${name}`), false);
+    assert.equal(commands.includes(`${name}:`), false);
+  }
 });
 
 test("the main thread can read a byte range of a file", () => {
@@ -104,4 +101,13 @@ test("the main thread can read a byte range of a file", () => {
   // from. Without it the parse has nowhere to get its bytes and the commands
   // come back.
   assert.match(source("pool-adapter.js"), /async readRangeOf\(torrent, fileIndex, start, end\)/);
+});
+
+test("priority publication cannot announce unchanged bytes and retry its own read", () => {
+  const worker = source("worker.js");
+  const publication = worker.slice(worker.indexOf("case Command.PRIORITY_MAP:"), worker.indexOf("case Command.READ_RANGE:"));
+  assert.doesNotMatch(publication, /announceArrivals/);
+  assert.match(publication, /ensureArrivalsWired/);
+  assert.match(worker, /torrent\.on\("verified"/);
+  assert.match(worker, /torrent\.on\("piece-withdrawn"/);
 });

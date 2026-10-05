@@ -251,8 +251,10 @@ export class PieceLru {
   wantAt(index) {
     let want = Number.POSITIVE_INFINITY;
     for (const range of this.#protected.values()) {
-      if (index >= range.from && index <= range.to && range.urgency < want) {
-        want = range.urgency;
+      const deadline = range.deadlineAt === undefined ? range.urgency :
+        Number.isFinite(range.deadlineAt) ? range.deadlineAt : Number.MAX_SAFE_INTEGER - range.priority;
+      if (index >= range.from && index <= range.to && deadline < want) {
+        want = deadline;
       }
     }
     return want;
@@ -432,14 +434,16 @@ export class PieceLru {
    *   displace a stated one.
    * @returns {void}
    */
-  protect(readerId, from, to, urgency) {
+  protect(readerId, from, to, urgency, deadlineAt, priority = 1) {
     if (!Number.isInteger(from) || !Number.isInteger(to) || to < from) {
       return;
     }
     this.#protected.set(readerId, {
       from,
       to,
-      urgency: Number.isFinite(urgency) ? Number(urgency) : Number.MAX_SAFE_INTEGER
+      urgency: Number.isFinite(urgency) ? Number(urgency) : Number.MAX_SAFE_INTEGER,
+      deadlineAt,
+      priority
     });
   }
 

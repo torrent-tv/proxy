@@ -72,8 +72,7 @@ test("without a seek the request is still held until the segment appears", async
   let polls = 0;
   const serving = {
     seekEpoch: () => 7,
-    // The segment is published between polls.
-    waitForSegment: async () => true,
+    subscribeFileChange: () => ({ changed: Promise.resolve(), release() {} }),
     async getFileStream() {
       polls += 1;
       if (polls < 3) {

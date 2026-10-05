@@ -10,7 +10,7 @@
  * and nothing about a viewer enters what is decided here.
  *
  * What the file says about itself is read by the media component and handed in
- * (`probeMediaInfo`, `probeKeyframeTimes`), as is everything else this reads.
+ * (`readSourceMedia`), as is everything else this reads.
  */
 
 import { createRequire } from "node:module";
@@ -44,7 +44,7 @@ export class OutputOpening {
   #host;
 
   /**
-   * @param {object} host - `logger`, `probeMediaInfo`, `probeKeyframeTimes`, `enabled`, `segmentFormat`, `renditions`, `sourceFiles`, `getCachedMediaInfo`, `localBaseUrl`, `tonemapSupported`, `videoEncoder`, `hostLoad`, `keyframeTables`, `timelines`, `segmentDurationSec`, `softwarePresetBenchmark`, `decodeCostModel`, `encodeCost`, `admission`, `outputs`, `segmentOutputFiles`, `hostTimings`, `returns`, `encodeRuns`
+   * @param {object} host - `logger`, `readSourceMedia`, `enabled`, `segmentFormat`, `renditions`, `sourceFiles`, `getCachedMediaInfo`, `localBaseUrl`, `tonemapSupported`, `videoEncoder`, `hostLoad`, `keyframeTables`, `timelines`, `segmentDurationSec`, `softwarePresetBenchmark`, `decodeCostModel`, `encodeCost`, `admission`, `outputs`, `segmentOutputFiles`, `hostTimings`, `returns`, `encodeRuns`
    * @param {SegmentOutputFiles} host.segmentOutputFiles - The storage
    *   operations needed while selecting or opening an output.
    */
@@ -292,7 +292,6 @@ export class OutputOpening {
     // statement as "the file it reads is not the file of the picture", so it is
     // that comparison now and there is nothing to keep in step.
     const audioFile = this.#host.sourceFiles.get(sourceKey, audioSource.fileIndex, audioSource.name);
-    const inputFile = audioOnly === true && audioSource.isSidecar ? audioFile : file;
     // Media info (duration/resolution/fps/startTime/HDR) up front, so we can
     // serve a complete VOD playlist (#EXT-X-ENDLIST) with the correct total
     // duration and a fully seekable timeline before a single segment exists.
@@ -317,10 +316,16 @@ export class OutputOpening {
     // No session id on it: this read is a probe of the picture, not this
     // session's own delivery, and counting it against the session would tell a
     // waiting browser that its film is arriving when what arrived was a header.
-    const pictureUrl = file.streamUrl(this.#host.localBaseUrl);
     const mediaInfo = cachedUsable
       ? cachedMediaInfo
-      : await this.#host.probeMediaInfo(pictureUrl.toString());
+      : this.#host.readSourceMedia
+        ? await this.#host.readSourceMedia({ sourceKey, fileIndex })
+        : (() => {
+          const error = new Error("Source media declarations are not configured.");
+          error.code = "SOURCE_MEDIA_READER_UNAVAILABLE";
+          error.canRetry = false;
+          throw error;
+        })();
     const mediaInfoMs = Date.now() - mediaInfoStartMs;
     const mediaInfoSource = cachedUsable ? "cached" : "probed";
     // The file takes in what the probe said. It is the same answer for every
@@ -329,6 +334,7 @@ export class OutputOpening {
     // fresher reading updates it: on a cold torrent the first probe can come
     // back without a duration, and the second is the one that has it.
     file.learn(mediaInfo);
+    await this.#host.hostLoad.readFileLength(sourceKey, fileIndex);
     const durationSeconds = file.durationSeconds ?? 0;
     const sourceWidth = file.width;
     const sourceHeight = file.height;
@@ -383,11 +389,6 @@ export class OutputOpening {
     // duration, so the picture's byte rate would buy a window twenty times
     // wider than the seconds it is meant to represent, and the piece store
     // would hold it.
-    const readWindowBytes = await this.#host.hostLoad.readWindowBytesFor(
-      inputFile.sourceKey,
-      inputFile.fileIndex,
-      durationSeconds
-    );
     if (!hasDuration) {
       this.#host.logger.warn(
         `transcode "${logName}": could not probe duration; falling back to ` +
@@ -428,13 +429,6 @@ export class OutputOpening {
       // segment boundaries (the playlist itself), so this MUST block session
       // creation — an incorrect playlist is worse than a slower start.
       //
-      // The wait is bounded, and the bound is what the read costs on a real
-      // host rather than a figure picked here (`KEYFRAME_TABLE_BUDGET_MS`). A
-      // comment in this place used to promise a short timeout and "never more
-      // than ~6 s to session start" when no timeout existed at all; the file
-      // comes off a torrent, so the bytes the table lives in may still be
-      // arriving, and a session used to wait for them without limit.
-      //
       // What is read is the container's OWN table (Cues/stss) rather than a
       // scan of the media. On the copy path ffmpeg can only cut at the source's
       // existing keyframes, so these times ARE the segment boundaries —
@@ -449,18 +443,9 @@ export class OutputOpening {
       const { arrived } = await this.#host.keyframeTables.within({ sourceKey, fileIndex, logName });
       keyframeMs = Date.now() - keyframeStartMs;
       if (!arrived) {
-        // A read that ran out of its budget is still running, and one that
-        // found its bytes not downloaded yet is made again when they arrive;
-        // either way the table is still unanswered — which is not the same as a file with no keyframes,
-        // and the distinction is the table's own (`answered` against
-        // `readable`). Recorded as an absence it would make a passing shortage
-        // of bytes look like a property of the bytes, and every later session
-        // of the file would re-encode a picture that can be copied.
-        this.#host.logger.warn(
-          `transcode: the keyframe table for "${logName}" has not arrived after ${keyframeMs}ms ` +
-            `(budget ${Math.round(this.#host.keyframeTables.budgetMs / 1000)}s), so this session re-encodes the picture ` +
-            "instead of copying it; the read goes on and the next session of this file gets the copy"
-        );
+        const error = new Error("Source keyframe declarations require more available bytes.");
+        error.code = "MEDIA_BYTES_UNAVAILABLE";
+        throw error;
       }
       if (!keyframes.readable) {
         // No index, so there is no honest grid for a COPY: a copied picture can
@@ -474,9 +459,7 @@ export class OutputOpening {
         // then PLACED at our own cut times rather than found, so the grid is
         // correct by construction whatever the container. MPEG-TS is the case
         // this exists for — measured 2026-08-21, 669 real keyframes and no
-        // index of any kind to read them from — and a container whose index
-        // could not be read in the budget lands here too, which is right for
-        // the same reason.
+        // index of any kind to read them from.
         transcodeVideo = true;
         if (keyframes.answered) {
           this.#host.logger.warn(
@@ -486,36 +469,6 @@ export class OutputOpening {
           );
         }
       }
-    } else if (hasDuration && transcodeVideo) {
-      // Re-encode path: keyframeTimes are ONLY used to snap a LATER seek (see
-      // #startEncodeRun) — segment boundaries stay on the uniform grid either
-      // way. So this does NOT need to block session creation / the first
-      // segment's start. Run it in the background with a FULL budget instead of
-      // the 6 s cap: AVI-class containers need a full packet scan, which 6 s can
-      // never afford without delaying playback start — that starved budget is
-      // exactly why the probe kept missing on the container where the seek bug
-      // was field-diagnosed. A run reads the file's table on every call, so a
-      // seek that happens AFTER this finishes picks it up automatically; one
-      // that happens before falls back to the existing circuit breaker as a
-      // safety net (no regression either way).
-      keyframeMs = -2;
-      const backgroundStartedAt = Date.now();
-      void this.#host.probeKeyframeTimes(inputFile.streamUrl(this.#host.localBaseUrl).toString(), 25_000).then((times) => {
-        // Into the FILE's table, which the picture, its quality steps and a
-        // second viewer's session all hold — so nothing has to be alive for the
-        // answer to be kept, and the session this probe was started for may
-        // long since have gone. It used to be written onto whichever session
-        // was still there, and dropped outright when none was.
-        this.#host.keyframeTables.learn({ sourceKey, fileIndex }, { times, format: "packet probe" });
-        const elapsedMs = Date.now() - backgroundStartedAt;
-        this.#host.logger.info(
-          times
-            ? `transcode: background keyframe probe found ${times.length} keyframes ` +
-                `(${elapsedMs}ms) for "${logName}" — later seeks will snap to them`
-            : `transcode: background keyframe probe unavailable (${elapsedMs}ms) for "${logName}" ` +
-                `— seeks keep using the raw target (falls back to the circuit breaker on failure)`
-        );
-      });
     }
     this.#host.logger.info(
       `cold-start "${logName}": media-info=${mediaInfoMs}ms (${mediaInfoSource}) ` +
@@ -584,7 +537,7 @@ export class OutputOpening {
       encodesPicture: transcodeVideo && carriesVideo,
       exact: forceExactSize,
       target: this.#targetFor({ normalizedTargetWidth, normalizedTargetHeight, visiblePicture, sourceWidth, sourceHeight }),
-      source: { width: sourceWidth, height: sourceHeight, megabitsPerSecond: file.decode?.megabitsPerSecond ?? null, decode: file.decode },
+      source: { width: sourceWidth, height: sourceHeight, megabitsPerSecond: file.megabitsPerSecond, decode: file.decode },
       fps: outputFps,
       encoder: this.#host.videoEncoder,
       benchmark: this.#host.softwarePresetBenchmark,
@@ -722,7 +675,6 @@ export class OutputOpening {
     this.#host.segmentOutputFiles.directoryFor(spec.toKey());
     this.#host.segmentOutputFiles.useFormat(spec.toKey(), segmentFormat);
     this.#host.hostTimings.noteOutputCreated(session, createEntryMs);
-    this.#host.encodeRuns.setReadWindow(session, readWindowBytes);
     this.#host.encodeCost.notePredictionFor(session, output.encodeHeight);
     // Decided before the key was built and only recorded here. Whether the audio
     // travels separately decides the ffmpeg arguments, what the master says,

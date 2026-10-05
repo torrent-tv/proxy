@@ -28,7 +28,8 @@
 import { SubtitleTrack } from "./SubtitleTrack.js";
 import { detectLanguage } from "./language-detect.js";
 
-const TEXT_CODECS_MATROSKA = new Set(["S_TEXT/UTF8", "S_TEXT/ASS", "S_TEXT/SSA", "S_TEXT/WEBVTT"]);
+const TEXT_CODECS_MATROSKA = new Set(["S_TEXT/UTF8", "S_TEXT/ASCII", "S_TEXT/ASS", "S_TEXT/SSA", "S_ASS", "S_SSA",
+  "S_TEXT/WEBVTT", "D_WEBVTT/SUBTITLES", "D_WEBVTT/CAPTIONS", "D_WEBVTT/DESCRIPTIONS", "D_WEBVTT/METADATA"]);
 const TEXT_FORMATS_MP4 = new Set(["tx3g", "text", "wvtt"]);
 
 /** How a cue's text is marked up, once the container's framing is off. */
@@ -55,6 +56,8 @@ export const MarkupKind = {
 const MARKUP_BY_CODEC = new Map([
   ["S_TEXT/ASS", MarkupKind.ASS],
   ["S_TEXT/SSA", MarkupKind.ASS],
+  ["S_ASS", MarkupKind.ASS],
+  ["S_SSA", MarkupKind.ASS],
   [".ass", MarkupKind.ASS],
   [".ssa", MarkupKind.ASS],
   ["S_TEXT/UTF8", MarkupKind.NONE],

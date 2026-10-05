@@ -29,6 +29,7 @@ import { OutputCatalog } from "../../services/encode/output/OutputCatalog.js";
 import { Viewers } from "../../services/viewer/Viewers.js";
 import { runsOf } from "../../services/viewer/PriorityMap.js";
 import { outputSpec } from "./helpers/output-spec.js";
+import { SourceFile } from "../../services/media/SourceFile.js";
 
 const FILM = { sourceKey: "source-1", fileIndex: 0, durationSeconds: 600 };
 const STALE_AFTER_MS = 60_000;
@@ -47,9 +48,8 @@ function outputOf({ id, outputKey, isStep = false, audioOnly = false }) {
     isStep,
     audioOnly,
     state: "ready",
-    sourceKey: FILM.sourceKey,
-    fileIndex: FILM.fileIndex,
-    file: { key: "film-1", durationSeconds: FILM.durationSeconds }
+    file: new SourceFile({ sourceKey: FILM.sourceKey, fileIndex: FILM.fileIndex, name: "film.mkv" })
+      .learn({ durationSeconds: FILM.durationSeconds })
   };
 }
 

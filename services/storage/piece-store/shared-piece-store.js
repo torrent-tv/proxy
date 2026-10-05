@@ -530,6 +530,8 @@ export class SharedPieceStore {
       // Where the live readers stand, so what goes first is decided by them and
       // not by which piece happened to be touched longest ago.
       readHeads: () => this.#lru.readHeads(),
+      canForget: (index) => !this.#lru.isPinned(index),
+      wantedAt: (index) => this.#lru.wantAt(index),
       // EVERY WAY A PIECE LEAVES THE DISK COMES THROUGH HERE — behind the read
       // heads, over the allowance, dropped as a duplicate, or forgotten while a
       // spill finished. One listener instead of a list of call sites to
@@ -631,19 +633,13 @@ export class SharedPieceStore {
    * @returns {{ name: string, allowanceBytes: number | null, bytes: number }}
    */
   reviseSpillCeiling(allowedBytes) {
-    // THE OTHER RULE, and it does not wait for the disk to be short. A piece
-    // behind every read head has been read and will not be read again unless
-    // somebody seeks back, and a seek back re-downloads it — the same bargain
-    // this tier makes whenever it drops a piece for room. Without it the spill
-    // is bounded only by a share of free space, which on a roomy host is tens of
-    // gigabytes against a measured growth of 14 400 MB in one viewing: the
-    // ceiling never binds and nothing is ever removed until the torrent goes.
-    const behind = this.#disk.forgetBehind(this.#lru.readHeads());
+    // Downloaded material is removed only for capacity. Playback position
+    // alone cannot invalidate bytes needed by another viewer or a later seek.
     return {
       name: this.#name,
       allowanceBytes: this.#disk.reviseAllowance(allowedBytes),
       bytes: this.#disk.bytes,
-      behind
+      behind: 0
     };
   }
 
@@ -816,8 +812,27 @@ export class SharedPieceStore {
 
   /** Availability belongs to the store, not to a second cached bitfield. */
   locationOf(index) {
+    if (this.#closed || !Number.isSafeInteger(index) || index < 0 ||
+        (this.#lastChunkIndex >= 0 && index > this.#lastChunkIndex)) return "missing";
     return this.#buffers.has(index) ? "memory" : this.#evicting.has(index) ? "writing" :
       this.#disk.has(index) ? "disk" : this.isInWholeFiles(index) ? "whole-file" : "missing";
+  }
+
+  /** Atomically acquire holds only when every requested piece is present. */
+  holdAvailable(indexes) {
+    if (this.#closed || !Array.isArray(indexes)) return null;
+    const unique = [...new Set(indexes)];
+    if (unique.some((index) => !Number.isInteger(index) || index < 0 || this.locationOf(index) === "missing")) {
+      return null;
+    }
+    for (const index of unique) this.#lru.pin(index);
+    let held = true;
+    return () => {
+      if (!held) return;
+      held = false;
+      for (const index of unique) this.#lru.unpin(index);
+      this.#noteProgress();
+    };
   }
 
   pin(index) {
@@ -1833,8 +1848,8 @@ export class SharedPieceStore {
    * @param {number} [urgency]
    * @returns {void}
    */
-  protectRange(readerId, from, to, urgency) {
-    this.#lru.protect(readerId, from, to, urgency);
+  protectRange(readerId, from, to, urgency, deadlineAt, priority) {
+    this.#lru.protect(readerId, from, to, urgency, deadlineAt, priority);
     // A READER DECLARES ITSELF IN A MOMENT; the allowance was re-derived once a
     // minute. Between the two a read met whatever the store had shrunk to while
     // nobody was reading, and a claim gives up after five seconds — twelve

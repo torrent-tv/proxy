@@ -69,7 +69,7 @@ async function until(ready, what) {
   }
 }
 
-test("a piece left behind every reader is dropped AND the claim withdrawn", async () => {
+test("a capacity reduction drops stored pieces and withdraws their claims", async () => {
   const { store, gone, put, clean } = await storeWithGone();
   try {
     await put(0);
@@ -80,9 +80,9 @@ test("a piece left behind every reader is dropped AND the claim withdrawn", asyn
     // path — `reviseSpillCeiling` asks `forgetBehind(readHeads)` — and it is
     // what dropped 565 pieces in the field.
     store.protectRange("reader", 2, 3, 0);
-    const revision = store.reviseSpillCeiling(null);
+    const revision = store.reviseSpillCeiling(0);
 
-    assert.ok(revision.behind >= 1, `something should have been dropped, got ${revision.behind}`);
+    assert.equal(revision.bytes, 0, "capacity is enforced when it changes");
     assert.ok(gone.includes(0), `piece 0 has gone and should say so, got ${JSON.stringify(gone)}`);
     assert.ok(
       gone.every((index) => index < 2),
@@ -122,7 +122,7 @@ test("a closing store announces nothing, because its torrent is going too", asyn
     await put(1);
     store.protectRange("reader", 2, 3, 0);
     store.close(() => undefined);
-    store.reviseSpillCeiling(null);
+    store.reviseSpillCeiling(0);
     assert.deepEqual(gone, [], "a claim withdrawn against a dying torrent reaches nothing useful");
   } finally {
     await clean();
@@ -136,7 +136,7 @@ test("the withdrawal is counted in the store's own figures", async () => {
     await put(1);
     await put(2);
     store.protectRange("reader", 2, 3, 0);
-    store.reviseSpillCeiling(null);
+    store.reviseSpillCeiling(0);
     assert.ok(
       store.stats().withdrawn >= 1,
       "the figure that makes the eviction's bargain checkable must move"
@@ -197,15 +197,15 @@ test("a library that refuses says so instead of failing the eviction", () => {
   assert.match(said[0], /piece 2 of film\.mkv/);
 });
 
-test("a store with nobody listening evicts exactly as it did before", async () => {
+test("capacity eviction does not require a listener", async () => {
   const { store, put, clean } = await storeWithGone({ onPieceGone: undefined });
   try {
     await put(0);
     await put(1);
     await put(2);
     store.protectRange("reader", 2, 3, 0);
-    const revision = store.reviseSpillCeiling(null);
-    assert.ok(revision.behind >= 1, "the eviction does not depend on anybody listening");
+    const revision = store.reviseSpillCeiling(0);
+    assert.equal(revision.bytes, 0, "the eviction does not depend on anybody listening");
   } finally {
     await clean();
   }

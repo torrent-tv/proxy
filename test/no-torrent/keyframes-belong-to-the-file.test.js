@@ -99,14 +99,11 @@ test("a table read after a session was made still reaches it", async () => {
   let answer = null;
   const keyframes = tables(() => new Promise((resolve) => { answer = resolve; }), 30);
 
-  // What a session does: ask for the file's table, wait as long as it may, and
-  // carry whatever it was handed.
-  const { table, arrived } = await keyframes.within(FILE);
-  assert.equal(arrived, false, "the read outran the budget");
-  assert.equal(table.answered, false, "and nothing has answered yet, which is not the same as no keyframes");
-
+  const table = keyframes.of(FILE);
+  const waiting = keyframes.within(FILE);
+  assert.equal(table.answered, false);
   answer({ times: [0, 4, 8], tolerance: 0, format: "matroska" });
-  await new Promise((resolve) => { setImmediate(resolve); });
+  assert.equal((await waiting).arrived, true);
 
   // The session is holding THIS object, so the late answer is in its hands
   // without anybody having gone round telling it.

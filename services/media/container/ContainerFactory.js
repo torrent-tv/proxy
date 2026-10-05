@@ -1,15 +1,19 @@
 /**
  * @file Container factory — detects format and returns the precise Container subclass.
  *
- * Sniffs first 16 bytes (same as container-index/index.js) and instantiates
- * MatroskaContainer / Mp4Container / AviContainer. Falls back to null (unknown).
+ * Reads the first 16 bytes and selects Matroska, MP4, AVI, TS, PS or ASF.
+ * Other formats use the supplied packet probe; without a probe they return null.
  * Orchestrators depend on this, not on concrete constructors.
  */
 
 import { MatroskaContainer } from "./MatroskaContainer.js";
 import { Mp4Container } from "./Mp4Container.js";
 import { AviContainer } from "./AviContainer.js";
+import { MpegTsContainer } from "./MpegTsContainer.js";
+import { AsfContainer } from "./AsfContainer.js";
+import { MpegPsContainer } from "./MpegPsContainer.js";
 import { strictReader } from "./unavailable.js";
+import { FfprobeContainer } from "./FfprobeContainer.js";
 
 const SNIFF_BYTES = 16;
 
@@ -33,6 +37,9 @@ export class ContainerFactory {
     if (MatroskaContainer.detect(head)) return new MatroskaContainer(params);
     if (Mp4Container.detect(head)) return new Mp4Container(params);
     if (AviContainer.detect(head)) return new AviContainer(params);
-    return null;
+    if (MpegTsContainer.detect(head)) return new MpegTsContainer(params);
+    if (AsfContainer.detect(head)) return new AsfContainer(params);
+    if (MpegPsContainer.detect(head)) return new MpegPsContainer(params);
+    return typeof params.probe === "function" ? new FfprobeContainer(params) : null;
   }
 }

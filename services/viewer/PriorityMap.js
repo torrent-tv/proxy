@@ -87,31 +87,14 @@
  */
 
 /**
- * THE SCALE. Three bands, and the order between them is the whole of what the
- * numbers claim.
- *
- * 1. IN FRONT OF SOMEBODY WHO IS WATCHING — the top value at the second they
- *    are about to see, falling as the film gets further from them;
- * 2. IN FRONT OF SOMEBODY WHO HAS STOPPED — the same shape, and every value of
- *    it below every value of band 1. A stopped viewer will watch this film when
- *    they press play, so it is still in front of them; nobody is waiting for it
- *    now, so it yields to anybody who is;
- * 3. BEHIND EVERYBODY — reachable only by a seek back, and nothing measures how
- *    likely that is, so it is one value rather than a shape.
- *
- * IN FRONT ALWAYS OUTRANKS BEHIND, at any distance and whoever is stopped. The
- * bands make that true by construction rather than by a comparison somebody has
- * to remember to write.
- *
- * The values inside a band are AN ENCODING OF AN ORDER, not a measurement:
- * every consumer asks only which of two seconds comes first, so any strictly
- * decreasing shape does the same work, and none of these numbers claims
- * anything about the world.
+ * Wanted seconds use priorities 1..100. Distance lowers priority relative to
+ * the measured urgent allowance. Pause preserves the same priorities until
+ * urgent outputs are ready. With competing viewers, elapsed pause time then
+ * attenuates the excess above 1 before maps merge. Zero means no demand.
+ * Direction, urgent preparation and attenuation are separate map fields;
+ * priority alone cannot distinguish an attenuated second from a passed one.
  */
 export const AT_A_WATCHING_VIEWER = 100;
-const WATCHING_FLOOR = 70;
-const AT_A_STOPPED_VIEWER = 69;
-const STOPPED_FLOOR = 39;
 
 /** Behind everybody. */
 export const NOBODY_IS_COMING = 1;
@@ -159,7 +142,7 @@ export function isAtAWatchingViewer(priority) {
  * @returns {boolean}
  */
 export function isNobodyComingNow(priority) {
-  return priority > NOBODY_IS_COMING && priority <= AT_A_STOPPED_VIEWER;
+  return priority === NOBODY_IS_COMING;
 }
 
 /**
@@ -197,7 +180,9 @@ export function emptyMap(durationSeconds) {
     durationSeconds: seconds,
     priority: new Uint8Array(seconds),
     secondsUntilPlayed: new Float64Array(seconds).fill(Number.POSITIVE_INFINITY),
-    behind: new Uint8Array(seconds).fill(1)
+    behind: new Uint8Array(seconds).fill(1),
+    urgent: new Uint8Array(seconds),
+    deferred: new Uint8Array(seconds)
   };
 }
 
@@ -209,11 +194,9 @@ export function emptyMap(durationSeconds) {
  * a clock time — is what the value is derived from, and it is why two viewers
  * can be compared at all: the nearer one wins the second they both want.
  *
- * **A pause removes the time, not the direction.** A stopped viewer is still
- * standing somewhere, and the film in front of them is still the film they will
- * watch, so their map keeps its shape and moves into the band below. Collapsed
- * to one flat value over the whole film, as it was, their position disappeared
- * entirely — and with it the rule that what is in front is made first.
+ * Pause retains urgent preparation first. Once that work is ready, the
+ * allowance / (allowance + pauseSeconds) coefficient gradually reduces this
+ * viewer's priorities if others consume the file. Resume restores them.
  *
  * **What must NOT be here**, and the boundary is the point: how fast this
  * machine encodes, how many encoders that takes, what a second weighs in bytes,
@@ -229,7 +212,15 @@ export function emptyMap(durationSeconds) {
  * @param {boolean} [params.playing] - Whether the picture is moving.
  * @returns {PriorityMap}
  */
-export function mapForViewer({ atSeconds, durationSeconds, allowanceSeconds, playing = true }) {
+export function pauseCoefficient({ playing, urgentReady, viewerCount, pauseSeconds, allowanceSeconds }) {
+  if (playing !== false || !urgentReady || viewerCount <= 1) return 1;
+  const allowance = Number.isFinite(allowanceSeconds) && allowanceSeconds > 0 ? allowanceSeconds : 1;
+  const elapsed = Number.isFinite(pauseSeconds) ? Math.max(0, pauseSeconds) : 0;
+  return allowance / (allowance + elapsed);
+}
+
+export function mapForViewer({ atSeconds, durationSeconds, allowanceSeconds, playing = true,
+  pauseSeconds = 0, urgentReady = false, viewerCount = 1 }) {
   const map = emptyMap(durationSeconds);
   if (map.durationSeconds === 0) {
     return map;
@@ -237,10 +228,13 @@ export function mapForViewer({ atSeconds, durationSeconds, allowanceSeconds, pla
   const at = Number.isFinite(atSeconds) && atSeconds > 0 ? Math.floor(atSeconds) : 0;
   const allowance = Number.isFinite(allowanceSeconds) && allowanceSeconds > 0
     ? allowanceSeconds
-    : 1;
+    : map.durationSeconds;
   const watching = playing !== false;
-  const top = watching ? AT_A_WATCHING_VIEWER : AT_A_STOPPED_VIEWER;
-  const floor = watching ? WATCHING_FLOOR : STOPPED_FLOOR;
+  // The measured urgent span is the time scale. There is no chosen decay
+  // period: one span on pause halves the excess above minimum priority.
+  const attenuate = !watching && urgentReady && viewerCount > 1;
+  const elapsed = Number.isFinite(pauseSeconds) ? Math.max(0, pauseSeconds) : 0;
+  const coefficient = pauseCoefficient({ playing, urgentReady, viewerCount, pauseSeconds: elapsed, allowanceSeconds: allowance });
   for (let second = 0; second < map.durationSeconds; second += 1) {
     if (second < at) {
       map.priority[second] = NOBODY_IS_COMING;
@@ -248,11 +242,13 @@ export function mapForViewer({ atSeconds, durationSeconds, allowanceSeconds, pla
     }
     map.behind[second] = 0;
     const distance = second - at;
-    map.priority[second] = Math.max(floor, top - stepsAway(distance, allowance));
-    // A viewer who has stopped is on their way nowhere, so there is no second by
-    // which any of this must exist. The direction survives the pause, in the
-    // priority above; the time does not, because there is none to state.
-    map.secondsUntilPlayed[second] = watching ? distance : Number.POSITIVE_INFINITY;
+    const priority = Math.max(NOBODY_IS_COMING, AT_A_WATCHING_VIEWER - stepsAway(distance, allowance));
+    map.priority[second] = Math.max(NOBODY_IS_COMING, 1 + Math.floor((priority - 1) * coefficient));
+    map.urgent[second] = distance < allowance && !attenuate ? 1 : 0;
+    map.deferred[second] = attenuate ? 1 : 0;
+    // Urgent preparation keeps its deadline during pause. After completion,
+    // pause duration defers this viewer's work without altering other viewers.
+    map.secondsUntilPlayed[second] = distance + (attenuate ? elapsed : 0);
   }
   return map;
 }
@@ -308,6 +304,7 @@ export function mergeMaps(maps) {
     return emptyMap(0);
   }
   const merged = emptyMap(Math.max(...all.map((map) => map.durationSeconds)));
+  merged.deferred.fill(1);
   for (const map of all) {
     for (let second = 0; second < map.durationSeconds; second += 1) {
       if (map.priority[second] > merged.priority[second]) {
@@ -321,7 +318,13 @@ export function mergeMaps(maps) {
       if (map.behind[second] === 0) {
         merged.behind[second] = 0;
       }
+      if (map.urgent?.[second]) merged.urgent[second] = 1;
+      // Deferred only if every viewer needing this second has yielded it.
+      if (map.behind[second] === 0 && !map.deferred?.[second]) merged.deferred[second] = 0;
     }
+  }
+  for (let second = 0; second < merged.durationSeconds; second += 1) {
+    if (merged.behind[second]) merged.deferred[second] = 0;
   }
   return merged;
 }
@@ -349,12 +352,16 @@ export function runsOf(map) {
       continue;
     }
     const behind = map.behind[second] === 1;
+    const urgent = map.urgent?.[second] === 1;
+    const deferred = map.deferred?.[second] === 1;
     const previous = runs[runs.length - 1];
     if (
       previous
       && previous.to === second
       && previous.priority === priority
       && previous.behind === behind
+      && previous.urgent === urgent
+      && previous.deferred === deferred
     ) {
       previous.to = second + 1;
       continue;
@@ -373,7 +380,9 @@ export function runsOf(map) {
       to: second + 1,
       priority,
       withinSeconds,
-      behind
+      behind,
+      urgent,
+      deferred
     });
   }
   return runs;

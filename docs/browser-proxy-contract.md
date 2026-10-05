@@ -3,26 +3,31 @@
 This document records the HTTP contract used by the browser playback code and
 implemented by this proxy. The same paths and payloads pass through either the
 direct HTTP transport or the WebRTC data channel. It is a description of the
-current code, not a generated schema or a version negotiation protocol.
+current code. Source registration declares the map playback contract; the page
+requires that declaration before using event-driven preparation.
 
 ## Source and file discovery
 
 | Request | Required input | Successful answer |
 |---|---|---|
-| `POST /api/sources` | `{ sourceType, source }` | `{ sourceKey }` identifies the registered source. |
-| `GET /api/sources/:sourceKey/files?maxWaitMs=N` | Registered `sourceKey`; optional wait budget | While magnet metadata is unavailable: `{ pending: true }`. When ready: `{ name, infoHash, files, items, shape }`. `files` carries `fileIndex`, `name`, `relativePath`, `length`, and `kind`; `items` maps each video `fileIndex` to audio, subtitle, and image file indices and carries `episode` — what the name states in the release's own numbering (`season`, `episodes`, `part`, `special`, `showHint`, `titleHint`) or `null`. `shape` is `single`, `series` or `undetermined` (2.88.0); an older proxy sends neither field. |
+| `POST /api/sources` | `{ sourceType, source, consumerId }`; older pages may omit `consumerId` | `{ sourceKey, playbackMapVersion: 1 }` identifies the source and declares source viewer reports and event-driven preparation. The page reports an update requirement if the declaration is missing. |
+| `GET /api/sources/:sourceKey/files?consumerId=ID` | Registered `sourceKey`; viewer identifier when available | Waits for metadata, terminal failure or cancellation without an elapsed deadline. Success returns `{ name, infoHash, files, items, shape }`. `files` carries `fileIndex`, `name`, `relativePath`, `length`, `kind` and exclusion facts; `items` omits samples and release-group promos, maps video indices to audio, subtitle and image indices, and carries filename-derived `episode` metadata. The visible indices are recorded for the viewer. |
 | `GET /api/sources/:sourceKey/stats?fileIndex=N` | Registered source; optional file index | Current peer, transfer, header, and file progress readings. A reading may not contain every measurement; absent or `null` measurements are unknown. |
-| `POST /api/sources/:sourceKey/warm` | Optional `{ fileIndex, positionSeconds }`; an empty object warms source metadata and the first video | `{ started, swarm, edges, sidecars }` reports which preparation started. Work continues in the background. |
+| `POST /api/sources/:sourceKey/warm` | Registered source | Compatibility acknowledgement `{ started, swarm, edges: false, fill: false }`. This does not create a download order; present viewers determine preparation. |
+| `POST /api/sources/:sourceKey/files/:fileIndex/viewer` | `{ consumerId, positionSeconds, generation, playing, waiting }` and optional seek, buffer and visibility readings | `{ received: true }` records direct playback. An obsolete selection returns `409`, `code: REQUEST_OBSOLETE`, `canRetry: false`. Older generations cannot restore a previous position. |
 | `GET /api/link-probe?bytes=N` | Positive byte count | A no-store binary body of zero bytes, capped at 2 MiB. The browser measures completed transfer time; an unavailable route leaves link speed unknown. |
 
-`pending: true` means the requested metadata or plan is not ready yet. The
-browser polls again. It does not mean that the torrent has no video or that the
-request failed. A non-pending file-list answer uses the proxy's file indices;
-the browser must keep those indices when opening a file.
+The file list waits for metadata instead of returning an elapsed-time pending
+answer. Legacy plan responses can still carry `pending: true`, which means
+unknown facts rather than no video. File-list answers use proxy file indices;
+the browser keeps those indices when opening a file.
 
 ## Playback plan and transcode session
 
-`POST /api/playback-plan` takes `{ sourceKey, fileIndex, userAgent }`. Its answer
+`POST /api/playback-plan` takes `{ sourceKey, fileIndex, userAgent, consumerId,
+positionSeconds, wantsToPlay, waitForReady }`. With `waitForReady: true`, it
+subscribes before checking and waits for facts, a terminal refusal or caller
+cancellation; it has no production deadline. Its answer
 contains `mode`, `directUrl`, codec and container names, duration and source
 dimensions, track inventories, paired sidecar files, `offeredHeights`,
 `audioTracksPending`, and `pending`. The browser uses the codec fields to make

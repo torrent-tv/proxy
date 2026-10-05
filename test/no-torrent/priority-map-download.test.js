@@ -33,20 +33,37 @@ function torrentOf({ length = 1_000_000, offset = 0 } = {}) {
 /** The pool's method under test, called without building a pool. */
 const applyPriorityMap = TorrentPool.prototype.applyPriorityMap;
 
-test("seconds of film become bytes of the file", () => {
+function indexed(zones) {
+  return zones.map((zone, index) => ({ ...zone, byteStart: index * 1024, byteEnd: index * 1024 + 1023 }));
+}
+
+test("metadata bytes are demanded before the duration is known", () => {
+  const torrent = torrentOf({ length: 1000 });
+  try {
+    applyPriorityMap.call(null, torrent, 0, [{ byteStart: 37, byteEnd: 81, priority: 100, urgent: true, downloadOnly: true }], 0);
+    const windows = demandFor(torrent).register.windows().filter(one => String(one.claimant).startsWith("priority-map:"));
+    assert.equal(windows.length, 1);
+    assert.equal(windows[0].byteStart, 37);
+    assert.equal(windows[0].byteEnd, 81);
+  } finally {
+    forgetTorrent(torrent);
+  }
+});
+
+test("container byte ranges are independent of their time span", () => {
   const torrent = torrentOf({ length: 1000 });
   try {
     applyPriorityMap.call(null, torrent, 0, [
-      { from: 0, to: 100, priority: 5 },
-      { from: 100, to: 200, priority: 3 }
+      { from: 0, to: 100, byteStart: 0, byteEnd: 41, priority: 5 },
+      { from: 100, to: 200, byteStart: 42, byteEnd: 999, priority: 3 }
     ], 200);
 
     const { register } = demandFor(torrent);
     const stated = register.windows().filter((one) => String(one.claimant).startsWith("priority-map:"));
     assert.equal(stated.length, 2);
     const first = stated.find((one) => one.byteStart === 0);
-    assert.equal(first.byteEnd, 499, "half the film is half the file");
-    const second = stated.find((one) => one.byteStart === 500);
+    assert.equal(first.byteEnd, 41, "the index declares a variable byte rate");
+    const second = stated.find((one) => one.byteStart === 42);
     assert.equal(second.byteEnd, 999, "the last byte of the file, not one past it");
   } finally {
     forgetTorrent(torrent);
@@ -58,11 +75,11 @@ test("a zone is stated at the level it means, not at the level of its position",
   try {
     // A viewer 300 s into a 3000 s film: one band behind them that nobody is
     // approaching, then bands of decreasing urgency ahead.
-    const zones = runsOf(mapForViewer({
+    const zones = indexed(runsOf(mapForViewer({
       atSeconds: 300,
       durationSeconds: 3000,
       allowanceSeconds: 10
-    }));
+    })));
     assert.ok(zones.length > 5, "the map should be finer than the register's levels");
 
     applyPriorityMap.call(null, torrent, 0, zones, 3000);
@@ -71,7 +88,7 @@ test("a zone is stated at the level it means, not at the level of its position",
 
     const near = stated.filter((one) => one.urgency === Urgency.NEAR);
     assert.equal(near.length, 1, "exactly one band is where the viewer is");
-    assert.equal(near[0].byteStart, Math.floor((300 / 3000) * 1_000_000));
+    assert.equal(near[0].byteStart, zones.find(zone => zone.urgent).byteStart);
 
     const behind = stated.filter((one) => one.urgency === Urgency.BEHIND);
     assert.equal(behind.length, 1, "what nobody is approaching is the one thing wanted last");
@@ -90,56 +107,26 @@ test("a zone is stated at the level it means, not at the level of its position",
   }
 });
 
-test("a viewer who has stopped the picture makes the whole film wanted last", () => {
+test("a sole paused viewer retains urgent download demand", () => {
   const torrent = torrentOf();
   try {
-    const zones = runsOf(mapForViewer({
-      atSeconds: 300,
-      durationSeconds: 3000,
-      allowanceSeconds: 10,
-      playing: false
-    }));
+    const zones = indexed(runsOf(mapForViewer({ atSeconds: 300, durationSeconds: 3000, allowanceSeconds: 10, playing: false })));
     applyPriorityMap.call(null, torrent, 0, zones, 3000);
-
-    const { register } = demandFor(torrent);
-    const stated = register.windows().filter((one) => String(one.claimant).startsWith("priority-map:"));
-    // A PAUSE REMOVES THE TIME, NOT THE DIRECTION. What they have watched is
-    // behind them and what they have not is in front, exactly as while they were
-    // watching; what changes is that nothing has a time any more, so every band
-    // of theirs yields to anybody who is on their way somewhere.
-    assert.ok(stated.length >= 2, "their position survives the pause");
-    for (const one of stated) {
-      assert.ok(
-        one.urgency === Urgency.BEHIND || one.urgency === Urgency.TAIL,
-        "and nothing of theirs is urgent, because nobody is coming"
-      );
-    }
-    const front = stated.filter((one) => one.urgency === Urgency.TAIL);
-    assert.ok(front.length >= 1, "the film in front of them is still in front");
-    assert.ok(
-      front[0].byteStart >= Math.floor((300 / 3000) * 1_000_000),
-      "and it begins where they stopped"
-    );
-    // Wanted last ABSOLUTELY, not relative to this film's own map. The two
-    // speculative levels are withheld across every torrent at once while
-    // anything urgent is missing anywhere, so this has to lose to a film
-    // somebody is actually watching — and judged against itself alone it would
-    // be the most urgent thing there is.
-    const behind = stated.filter((one) => one.urgency === Urgency.BEHIND);
-    assert.equal(behind.length, 1, "what they have already watched is wanted last of all");
-    assert.equal(behind[0].byteStart, 0, "and it is the stretch from the beginning to where they stopped");
+    const stated = demandFor(torrent).register.windows().filter(one => String(one.claimant).startsWith("priority-map:"));
+    assert.ok(stated.some(one => one.urgency === Urgency.NEAR));
+    assert.ok(stated.some(one => one.urgency === Urgency.BEHIND && one.byteStart === 0));
+    assert.ok(zones.every(zone => zone.priority >= 1));
   } finally {
     forgetTorrent(torrent);
   }
 });
-
 test("a map with fewer bands than the last one leaves nothing stated behind", () => {
   const torrent = torrentOf();
   try {
     applyPriorityMap.call(null, torrent, 0, [
-      { from: 0, to: 100, priority: 5 },
-      { from: 100, to: 200, priority: 4 },
-      { from: 200, to: 300, priority: 3 }
+      { from: 0, to: 100, byteStart: 0, byteEnd: 41, priority: 5 },
+      { byteStart: 42, byteEnd: 100, priority: 4 },
+      { byteStart: 101, byteEnd: 200, priority: 3 }
     ], 300);
     const { register } = demandFor(torrent);
     assert.equal(
@@ -147,7 +134,7 @@ test("a map with fewer bands than the last one leaves nothing stated behind", ()
       3
     );
 
-    applyPriorityMap.call(null, torrent, 0, [{ from: 0, to: 300, priority: 5 }], 300);
+    applyPriorityMap.call(null, torrent, 0, [{ byteStart: 0, byteEnd: 200, priority: 5 }], 300);
     assert.equal(
       register.windows().filter((one) => String(one.claimant).startsWith("priority-map:")).length,
       1,
@@ -161,8 +148,8 @@ test("a map with fewer bands than the last one leaves nothing stated behind", ()
 test("a file of unknown length or duration is not guessed at", () => {
   const torrent = torrentOf();
   try {
-    applyPriorityMap.call(null, torrent, 0, [{ from: 0, to: 100, priority: 5 }], 0);
-    applyPriorityMap.call(null, torrent, 7, [{ from: 0, to: 100, priority: 5 }], 300);
+    applyPriorityMap.call(null, torrent, 0, [{ from: 0, to: 100, priority: 5 }], 300);
+    applyPriorityMap.call(null, torrent, 7, [{ from: 0, to: 100, byteStart: 0, byteEnd: 41, priority: 5 }], 300);
     const { register } = demandFor(torrent);
     assert.equal(
       register.windows().filter((one) => String(one.claimant).startsWith("priority-map:")).length,

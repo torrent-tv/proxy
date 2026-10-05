@@ -98,7 +98,14 @@ export function machineAllowanceBytes(freeBytes, heldBytes, reserveBytes) {
  * @param {number} allowanceBytes
  * @returns {number[]} What each store may hold, in the same order.
  */
-export function divideAllowance(wantedBytes, allowanceBytes) {
+export function divideAllowance(wantedBytes, allowanceBytes, requiredBytes = []) {
+  const required = wantedBytes.map((wanted, index) => Math.min(Math.max(0, wanted), Math.max(0, requiredBytes[index] ?? 0)));
+  const requiredTotal = required.reduce((sum, bytes) => sum + bytes, 0);
+  if (requiredTotal > 0) {
+    if (requiredTotal >= allowanceBytes) return divideAllowance(required, allowanceBytes);
+    const remaining = divideAllowance(wantedBytes.map((wanted, index) => Math.max(0, wanted - required[index])), allowanceBytes - requiredTotal);
+    return remaining.map((bytes, index) => bytes + required[index]);
+  }
   const total = wantedBytes.reduce((sum, want) => sum + Math.max(0, want), 0);
   if (total <= allowanceBytes || total === 0) {
     return wantedBytes.map((want) => Math.max(0, want));

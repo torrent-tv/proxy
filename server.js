@@ -12,6 +12,12 @@ import fastifyHelmet from "@fastify/helmet";
 import getPort from "get-port";
 import { createRequire } from "node:module";
 import { handleHealthGet } from "./routes/health/get.js";
+import { handleMediaGet } from "./routes/media/get.js";
+import { ProbeRequests } from "./services/media/ProbeRequests.js";
+import { IndexMemory } from "./services/storage/IndexMemory.js";
+import { probePackets } from "./services/media/probe-packets.js";
+import { segmentDemands, sourceDeadline } from "./services/viewer/segment-demands.js";
+import { SourcePreparation } from "./services/viewer/SourcePreparation.js";
 import { handleHealthzGet } from "./routes/healthz/get.js";
 import { handleApiDeliverySinkGet } from "./routes/api/delivery-sink/get.js";
 import { handleApiLinkProbeGet } from "./routes/api/link-probe/get.js";
@@ -19,11 +25,13 @@ import { handleApiSourcesPost } from "./routes/api/sources/post.js";
 import { handleApiSourceStatsGet } from "./routes/api/sources/stats/get.js";
 import { handleApiSourceFilesGet } from "./routes/api/sources/files/get.js";
 import { handleApiSourceWarmPost } from "./routes/api/sources/warm/post.js";
+import { handleApiSourceViewerPost } from "./routes/api/sources/viewer/post.js";
 import { handleApiPlaybackPlanPost } from "./routes/api/playback-plan/post.js";
 import { handleApiPlaybackPlanAudioTracksPost } from "./routes/api/playback-plan/audio-tracks/post.js";
 import { handleApiClientLogsPost } from "./routes/api/client-logs/post.js";
 import { createClientLogConsole, createClientLogFiles } from "./utils/client-log-file.js";
 import { handleApiSubtitlesGet } from "./routes/api/subtitles/get.js";
+import { handleApiSubtitlesPost } from "./routes/api/subtitles/post.js";
 import { handleApiTranscodeSessionsPost } from "./routes/api/transcode-sessions/post.js";
 import { handleApiTranscodeSessionsProgressGet } from "./routes/api/transcode-sessions/progress/get.js";
 import { handleApiTranscodeSessionReleasePost } from "./routes/api/transcode-sessions/release/post.js";
@@ -44,7 +52,12 @@ import { KeyframeTables } from "./services/media/KeyframeTables.js";
 import { contentsOf } from "./services/torrent/Contents.js";
 import { SubtitleOrchestrator } from "./services/media/SubtitleOrchestrator.js";
 import { containerOrchestrator, CONTAINER_HEAD_BYTES } from "./services/media/ContainerOrchestrator.js";
-import { viewerStartsOn } from "./services/viewer/PriorityMap.js";
+import { readPlaybackDeclarations } from "./services/media/read-playback-declarations.js";
+import { DownloadMaps } from "./services/viewer/DownloadMaps.js";
+import { nativeSourceMap } from "./services/viewer/NativeSourceMap.js";
+import { MediaReadRequests } from "./services/media/MediaReadRequests.js";
+import { SegmentInputs } from "./services/media/SegmentInputs.js";
+import { pauseCoefficient, viewerStartsOn } from "./services/viewer/PriorityMap.js";
 import { coalescing } from "./utils/coalesce.js";
 import {
   warmSubtitleCues,
@@ -138,6 +151,17 @@ export async function startProxyServer({
   const torrentPool = new WorkerTorrentPool({
     memoryBytes,
     stateDir,
+    onSourceForgotten: ({ sourceKey }) => {
+      sourcePreparation?.forget(sourceKey);
+      mediaReads.forget(sourceKey);
+      probeReads.forget(sourceKey);
+      subtitles.forget(sourceKey);
+      keyframeTables.forget(sourceKey);
+      playbackPlanner.forget(sourceKey);
+      indexMemory.forget(sourceKey);
+      downloadMaps.retire(sourceKey);
+      outputParts.encodeInputs?.bytesChanged();
+    },
     // Pieces arriving is ANNOUNCED by the thread that owns the swarm; what is
     // done about it — walking a file's new subtitle clusters and pushing what
     // came out — happens here, because that is a reading of what the file says
@@ -148,11 +172,16 @@ export async function startProxyServer({
     // after the declarations below have run.
     onPiecesArrived: ({ sourceKey, fileIndexes }) => {
       for (const fileIndex of fileIndexes) {
+        mediaReads.bytesChanged(sourceKey, fileIndex);
+        probeReads.bytesChanged(sourceKey, fileIndex);
+        void sourcePreparation?.bytesChanged(sourceKey, fileIndex).catch(error =>
+          logger.warn(`source input readiness failed: ${error.message}`));
         void pushFreshCues(`${sourceKey}:${fileIndex}`, sourceKey, fileIndex);
         // A keyframe table somebody asked for while its bytes had not arrived
         // is read again now; nothing was recorded for that wait.
         keyframeTables.readAgainIfUnanswered({ sourceKey, fileIndex, logName: String(fileIndex) });
       }
+      outputParts.encodeInputs?.bytesChanged();
     }
   });
   const selectedPort = await getPort({
@@ -275,11 +304,8 @@ export async function startProxyServer({
   const heldFileFor = async (sourceKey, fileIndex, known = null) => {
     let torrent = known;
     if (!torrent) {
-      const record = sourceRegistry.get(sourceKey);
-      if (!record) {
-        return null;
-      }
-      torrent = await torrentPool.getTorrent(record.sourceType, record.source);
+      torrent = torrentPool.knownTorrent(sourceKey);
+      if (!torrent) return null;
     }
     const file = torrent?.files?.[fileIndex];
     if (!file || !(file.length > 0)) {
@@ -329,6 +355,7 @@ export async function startProxyServer({
         return;
       }
       for (const entry of await warmSubtitleCues(file)) {
+        if (subtitles.hasPacketCues(sourceKey, fileIndex, entry.trackIndex)) continue;
         const span = entry.spanStartSeconds === null
           ? "empty"
           : `${entry.spanStartSeconds.toFixed(1)}-${entry.spanEndSeconds.toFixed(1)}s`;
@@ -345,6 +372,7 @@ export async function startProxyServer({
     }
   });
   const subtitles = new SubtitleOrchestrator(containerOrchestrator, {
+    publish: entry => onSubtitleCues?.(entry),
     warm: async (torrent, fileIndex, sourceKey) => {
       const file = await heldFileFor(sourceKey, fileIndex, torrent);
       return file ? warmSubtitleCues(file) : [];
@@ -374,39 +402,132 @@ export async function startProxyServer({
   // every answer carried back across the channel — which is what made "where is
   // this fact kept" a question at all.
   //
-  // The edges are fetched first because the file this is asked about is usually
-  // one nobody has played: a sidecar soundtrack is asked about before anyone
-  // has chosen it, and a Matroska file's Cues sit at the END behind a SeekHead
-  // in the head, so a read that has neither waits for the swarm twice over.
-  const containerOver = async ({ sourceKey, fileIndex, tailBytes = 0 }) => {
+  // Missing metadata bytes are demand in the same file map as playback.
+  // Readers never start their own downloads or wait for source bytes.
+  const downloadMaps = new DownloadMaps({
+    publish: (map) => torrentPool.setPriorityMap(map),
+    resolvePlayback: async (map) => {
+      if (map.zones.length === 0) return [];
+      const params = await containerOver(map);
+      if (!params) return [];
+      const tracks = await containerOrchestrator.inspect(params, "tracks");
+      if (tracks.kind !== "result") return [];
+      const container = containerOrchestrator.known(map.sourceKey, map.fileIndex);
+      if (typeof container?.readPacketIndex !== "function") return [];
+      const media = await containerOrchestrator.inspect(params, "media-info");
+      if (media.kind !== "result") return [];
+      const shift = Number(media.value?.startTimeSeconds) || 0;
+      const converted = [];
+      const demands = [];
+      for (const output of outputParts.outputs.values()) {
+        if (output.file.sourceKey !== map.sourceKey) continue;
+        const consumers = [...outputParts.viewers.forOutput(output).values()].filter(viewer =>
+          viewer.isPresent() && !outputParts.outputs.supersededBy(output, viewer.activeVariantId ?? null));
+        if (consumers.length === 0) continue;
+        const inventory = outputParts.segmentStore.sizesOf(output.outputKey);
+        let bytes = 0, seconds = 0;
+        for (const [index, size] of inventory) {
+          const span = output.timeline.publishedStartOf(index + 1) - output.timeline.publishedStartOf(index);
+          if (span > 0) { bytes += size; seconds += span; }
+        }
+        const links = consumers.map(viewer => viewer.linkReading()?.linkMbps)
+          .filter(value => Number.isFinite(value) && value > 0);
+        const encodeSpeed = outputParts.encodeCost.latestSpeedReadingOf(output)?.speed;
+        for (const demand of segmentDemands(output, map.fileIndex, map.zones)) {
+          if (inventory.has(demand.index)) continue;
+          const deadlineAt = sourceDeadline(demand, { encodeSpeed,
+            outputBytes: seconds > 0 ? bytes / seconds * (demand.to - demand.from) : null,
+            linkMbps: links.length ? Math.min(...links) : null });
+          const leadSeconds = Number.isFinite(demand.deadlineAt) ? Math.max(0, (demand.deadlineAt - deadlineAt) / 1000) : 0;
+          demands.push({ ...demand, deadlineAt, leadSeconds, outputKey: output.outputKey,
+            sourceInterval: output.timeline.sourceInterval(demand.index, demand.index, shift) });
+        }
+      }
+      demands.sort((left, right) => left.deadlineAt - right.deadlineAt || right.priority - left.priority || left.index - right.index);
+      for (const zone of demands) {
+        const selected = zone.tracks.map(choice => ({ choice, track: tracks.value.filter(track => track.type === choice.type)[choice.index] }));
+        if (selected.some(({ track }) => !track)) continue;
+        const wanted = selected.map(({ track }) => track);
+        const modes = new Map(selected.map(({ choice, track }) => [track, choice.mode]));
+        const interval = { ...zone.sourceInterval, trackIds: wanted.map(track => track.trackNumber),
+          modes: Object.fromEntries(wanted.map(track => [track.trackNumber, modes.get(track)])) };
+        const intervalParams = await containerOver({ ...map, packetInterval: interval,
+          requestId: `download:${map.sourceKey}:${map.fileIndex}:${zone.outputKey}:${zone.index}`,
+          demand: { ...zone.owner, leadSeconds: zone.leadSeconds } });
+        if (!intervalParams) continue;
+        const packets = await containerOrchestrator.inspect(intervalParams, "packets");
+        if (packets.kind !== "result") continue;
+        const input = new SegmentInputs({ index: packets.value, tracks: wanted }).forInterval({ ...interval, mode: track => modes.get(track) });
+        if (input.kind !== "result") continue;
+        const { tracks: _choices, owner: _owner, sourceInterval: _sourceInterval, ...demand } = zone;
+        for (const [byteStart, byteEnd] of input.ranges) converted.push({ ...demand,
+          downloadInterval: { from: zone.owner.from, to: zone.owner.to }, byteStart, byteEnd });
+      }
+      return converted;
+    }
+  });
+  const mediaReads = new MediaReadRequests({
+    read: (params, statement) => statement === "subtitle-file" ? subtitles.inspectFile(params)
+      : statement === "subtitle-cues" ? subtitles.inspectPackets(params) : containerOrchestrator.inspect(params, statement),
+    failed: (params, statement, error) => logger.warn(`media source=${params.sourceKey} file=${params.fileIndex} statement=${statement} retry failed: ${error?.message ?? error}`)
+  });
+  const probeReads = new ProbeRequests({
+    publish: async (result) => {
+      if (result.statement.startsWith("ffprobe:")) return;
+      await downloadMaps.metadata(result);
+      if (result.result.kind === "result") await downloadMaps.refresh(result.sourceKey, result.fileIndex);
+    },
+    failed: (request, error) => logger.warn(`media request=${request.key} probe failed: ${error?.message ?? error}`)
+  });
+  const indexMemory = new IndexMemory({
+    reviseBudget: () => { void outputParts.machineBudget.revise().catch(error => logger.warn(`packet index budget: ${error.message}`)); },
+    changed: () => { mediaReads.memoryChanged(); probeReads.memoryChanged(); }
+  });
+  const containerOver = async ({ sourceKey, fileIndex, requestId, packetInterval, demand }) => {
     const record = sourceRegistry.get(sourceKey);
     if (!record) {
       return null;
     }
-    const torrent = await torrentPool.getTorrent(record.sourceType, record.source);
+    const torrent = torrentPool.knownTorrent(sourceKey);
     const file = torrent?.files?.[fileIndex];
     if (!file || !(file.length > 0)) {
       return null;
     }
-    try {
-      await torrentPool.prefetchFileEdges(torrent, fileIndex, {
-        headBytes: CONTAINER_HEAD_BYTES,
-        tailBytes,
-        timeoutMs: 60_000
-      });
-    } catch {
-      // A prefetch that failed is not a reason to skip the read: the read
-      // fetches what it needs itself, only more slowly.
-    }
-    return {
+    const params = {
       sourceKey,
       fileIndex,
+      requestId,
+      packetInterval,
+      packetMemory: indexMemory.forFile(sourceKey, fileIndex),
+      downloadInterval: demand ? { from: demand.from, to: demand.to } : null,
       readRange: (start, end) =>
-        torrentPool.readRangeOf(torrent, fileIndex, start, Math.min(end, file.length - 1)),
+        torrentPool.readHeldOf(torrent, fileIndex, start, Math.min(end, file.length - 1)),
       fileSize: file.length,
+      probe: (statement, onRecord) => probeReads.read({ sourceKey, fileIndex, statement: `ffprobe:${statement}`,
+        probe: ({ requestId, signal }) => {
+          const url = new URL("/media", outputParts.localBaseUrl);
+          url.searchParams.set("sourceKey", sourceKey);
+          url.searchParams.set("fileIndex", String(fileIndex));
+          url.searchParams.set("readId", requestId);
+          return probePackets({ url: url.toString(), statement, signal, onRecord });
+        } }),
       label: String(file.name ?? ""),
+      onTracks: (tracks) => contentsOf(torrent).noteVideo(fileIndex, tracks.some((track) => track.type === "video")),
+      onReadStart: () => ({ storage: mediaReads.revision(sourceKey, fileIndex), memory: mediaReads.memoryRevision(), demand: downloadMaps.epoch(sourceKey, fileIndex) }),
+      onReadResult: async (statement, result, revision) => {
+        if (revision.demand !== downloadMaps.epoch(sourceKey, fileIndex)) return;
+        if (demand && !downloadMaps.wantsInterval(sourceKey, fileIndex, demand)) return;
+        const finished = mediaReads.record(params, statement, result, revision.storage, revision.memory);
+        await downloadMaps.metadata({ sourceKey, fileIndex, statement: requestId ? `${statement}:${requestId}` : statement, result,
+          ...(demand ? { priority: demand.priority, urgent: demand.urgent, deadlineAt: demand.deadlineAt, interval: demand, leadSeconds: demand.leadSeconds ?? 0 } : {}) });
+        if (finished && result.kind === "result") {
+          void downloadMaps.refresh(sourceKey, fileIndex).catch(error =>
+            logger.warn(`download map source=${sourceKey} file=${fileIndex} metadata refresh failed: ${error?.message ?? error}`));
+        }
+      },
       portionBytes: Number(torrent.pieceLength) > 0 ? Number(torrent.pieceLength) : undefined
     };
+    return params;
   };
   const keyframeTables = new KeyframeTables({
     // Read by the same container that answers the track table and the media
@@ -429,7 +550,68 @@ export async function startProxyServer({
       };
     }
   });
+  let sourcePreparation;
   const outputParts = wireOutputs({
+    indexMemory,
+    readMetadataActivity: () => containerOrchestrator.activity(),
+    onViewerChanged: () => { void sourcePreparation?.refresh(); },
+    sourceInputsFor: (output, index) => downloadMaps.inputsForOutput(output.file.sourceKey, output.outputKey, index),
+    readSourceMedia: async (params) => {
+      await playbackPlanner.getPlan(params);
+      const media = playbackPlanner.getCachedMediaInfo(params);
+      if (media) return media;
+      const error = new Error("Source media declarations require more available bytes.");
+      error.code = "MEDIA_BYTES_UNAVAILABLE";
+      error.canRetry = true;
+      throw error;
+    },
+    resolveEncodeInput: async (output, fromIndex, toIndex) => {
+      const grid = output.timeline?.published ?? output.timeline?.boundaries;
+      const from = grid?.[fromIndex], to = grid?.[toIndex + 1];
+      if (!Number.isFinite(from) || !(to > from)) return { kind: "terminal", reason: "output-interval-not-declared" };
+      const selected = new Map();
+      for (const type of ["video", "audio"]) {
+        const spec = output.spec[type];
+        if (!spec) continue;
+        const list = selected.get(spec.fileIndex) ?? [];
+        list.push({ type, index: type === "video" ? 0 : spec.trackIndex,
+          mode: type === "video" ? spec.encode ? "transcode" : "copy" : spec.transcode ? "transcode" : "copy" });
+        selected.set(spec.fileIndex, list);
+      }
+      const sources = [];
+      for (const [fileIndex, choices] of selected) {
+        const params = await containerOver({ sourceKey: output.file.sourceKey, fileIndex });
+        if (!params) return { kind: "needs-source" };
+        const tracks = await containerOrchestrator.inspect(params, "tracks");
+        if (tracks.kind !== "result") return tracks;
+        const container = containerOrchestrator.known(params.sourceKey, fileIndex);
+        if (typeof container?.readPacketIndex !== "function") return { kind: "needs-index", reason: "packet-index-not-yet-available" };
+        const modes = new Map(), wanted = [];
+        for (const choice of choices) {
+          const track = tracks.value.filter(track => track.type === choice.type)[choice.index];
+          if (!track) return { kind: "terminal", reason: "selected-track-is-absent" };
+          wanted.push(track); modes.set(track, choice.mode);
+        }
+        const media = await containerOrchestrator.inspect(params, "media-info");
+        if (media.kind !== "result") return media;
+        const timeShiftSeconds = Number(media.value?.startTimeSeconds) || 0;
+        const sourceInterval = output.timeline.sourceInterval(fromIndex, toIndex, timeShiftSeconds);
+        params.packetInterval = { ...sourceInterval,
+          trackIds: wanted.map(track => track.trackNumber),
+          modes: Object.fromEntries(wanted.map(track => [track.trackNumber, modes.get(track)])) };
+        const packets = await containerOrchestrator.inspect(params, "packets");
+        if (packets.kind !== "result") return packets;
+        const input = new SegmentInputs({ index: packets.value, tracks: wanted }).forInterval({
+          ...sourceInterval, mode: track => modes.get(track) });
+        if (input.kind !== "result") return input;
+        sources.push({ sourceKey: params.sourceKey, fileIndex, input, timeShiftSeconds });
+      }
+      return { kind: "result", sources };
+    },
+    readEncodeRanges: async (source, ranges, maxBytes) => {
+      const torrent = torrentPool.knownTorrent(source.sourceKey);
+      return torrent ? torrentPool.readHeldRangesOf(torrent, source.fileIndex, ranges, maxBytes) : null;
+    },
     enabled: transcodeAudio,
     keyframeTables,
     ffmpegBin,
@@ -492,27 +674,36 @@ export async function startProxyServer({
     // seconds into bytes, what to ask the swarm for, what to keep in memory —
     // is its own business.
     setPriorityMap: async ({ sourceKey, fileIndex, durationSeconds, zones }) => {
+      void sourcePreparation?.refresh();
       const record = sourceRegistry.get(sourceKey);
       if (!record) {
         return;
       }
       try {
-        await torrentPool.setPriorityMap({ sourceKey, fileIndex, durationSeconds, zones });
-      } catch {
-        // Best effort: the map is republished on the next change, and the
-        // downloading goes on serving reads meanwhile.
+        if (zones.length === 0) {
+          mediaReads.retain(sourceKey, fileIndex, params => params.requestId?.startsWith("prepare:"));
+          if (!outputParts.viewers.forSource(sourceKey).length) probeReads.forget(sourceKey, fileIndex);
+          await downloadMaps.forget(sourceKey, fileIndex, { keepPreparation: true });
+          return;
+        }
+        await downloadMaps.playback({ sourceKey, fileIndex, durationSeconds, zones });
+        mediaReads.retain(sourceKey, fileIndex, params => !params.requestId?.startsWith("download:") ||
+          zones.some(zone => zone.from === params.downloadInterval?.from && zone.to === params.downloadInterval?.to));
+      } catch (error) {
+        logger.warn(`download map source=${sourceKey} file=${fileIndex} publication failed: ${error?.message ?? error}`);
       }
     },
-    getSourceStats: async (sourceKey, fileIndex) => {
+    getSourceStats: async (sourceKey, fileIndex, options) => {
       const record = sourceRegistry.get(sourceKey);
       if (!record) {
         return null;
       }
       try {
-        const torrent = await torrentPool.getTorrent(record.sourceType, record.source);
+        const torrent = torrentPool.knownTorrent(sourceKey);
+        if (!torrent) return null;
         // Awaited for the same reason as the stats route: this now crosses a
         // thread boundary and returns a promise.
-        return await torrentPool.getFileStats(torrent, Number.isInteger(fileIndex) ? fileIndex : null);
+        return await torrentPool.getFileStats(torrent, Number.isInteger(fileIndex) ? fileIndex : null, options);
       } catch {
         return null;
       }
@@ -567,12 +758,173 @@ export async function startProxyServer({
   // decides anything, keeps the segments whose closure is proven, and removes
   // the one piece per output that was being written when the process died.
   outputParts.lifecycle.adoptSegmentsLeftBehind();
+  const publishNative = work => {
+    if (!work.nativeInput || !sourcePreparation.accepts(work)) return Promise.resolve();
+    const viewers = outputParts.viewers.forSource(work.sourceKey)
+      .filter(viewer => viewer.source.selectedFileIndex === work.fileIndex && viewer.outputs.size === 0);
+    const zones = nativeSourceMap({ ...work.nativeInput, viewers,
+      allowanceSeconds: outputParts.segmentDurationSec,
+      urgentReadyFor: viewer => sourcePreparation.urgentReadyFor(viewer) });
+    return downloadMaps.native({ sourceKey: work.sourceKey, fileIndex: work.fileIndex, zones });
+  };
+  sourcePreparation = new SourcePreparation({
+    viewers: outputParts.viewers,
+    candidatesFor: async sourceKey => {
+      const record = sourceRegistry.get(sourceKey);
+      if (!record) return [];
+      const torrent = await torrentPool.getTorrent(record.sourceType, record.source);
+      return contentsOf(torrent).items.map(item => item.fileIndex);
+    },
+    relatedFilesFor: (sourceKey, fileIndex) => {
+      const torrent = torrentPool.knownTorrent(sourceKey);
+      if (!torrent) return [];
+      const contents = contentsOf(torrent);
+      const sidecars = contents.sidecarsOf(fileIndex);
+      const items = contents.items;
+      const current = items.findIndex(item => item.fileIndex === fileIndex);
+      const next = current >= 0 ? items[current + 1] : null;
+      return [{ fileIndex, role: "source-rest" },
+        ...sidecars.audio.map(file => ({ fileIndex: file.fileIndex, role: "audio" })),
+        ...sidecars.subtitles.map(file => ({ fileIndex: file.fileIndex, role: "subtitle" })),
+        ...(next?.episode ? [{ fileIndex: next.fileIndex, role: "next-episode" }] : [])];
+    },
+    priorityFor: (viewer, priority, work) => {
+      if (!sourcePreparation.subtitleReadyFor(viewer)) return priority;
+      const fileIndex = work.ownerFileIndex ?? work.fileIndex;
+      const output = [...outputParts.outputs.values()].find(output => output.file?.sourceKey === work.sourceKey &&
+        output.file?.fileIndex === fileIndex && outputParts.viewers.forOutput(output).has(viewer.id) &&
+        !outputParts.outputs.supersededBy(output, viewer.activeVariantId ?? null));
+      const viewerCount = outputParts.viewers.forSource(work.sourceKey)
+        .filter(person => person.source.selectedFileIndex === fileIndex).length;
+      if (!output) {
+        const coefficient = pauseCoefficient({ playing: viewer.playing || viewer.waiting, viewerCount,
+          pauseSeconds: viewer.pausedAt === null ? 0 : (Date.now() - viewer.pausedAt) / 1000,
+          allowanceSeconds: outputParts.segmentDurationSec,
+          urgentReady: sourcePreparation.urgentReadyFor(viewer) });
+        return Math.max(1, 1 + Math.floor((priority - 1) * coefficient));
+      }
+      return outputParts.priority.priorityFor(output, viewer, priority, viewerCount);
+    },
+    inputReady: async work => {
+      const torrent = torrentPool.knownTorrent(work.sourceKey);
+      if (!torrent || !work.inputRanges?.length) return false;
+      const held = await torrentPool.heldRangesOf(torrent, work.fileIndex);
+      return work.inputRanges.every(([start, end]) => held.some(([from, to]) => from <= start && to >= end));
+    },
+    readyChanged: (work, ready) => logger.info(`source urgent request=${work.requestId} viewer=${work.ownerId} ` +
+      `source=${work.sourceKey} file=${work.fileIndex} inputReady=${ready}`),
+    inspect: async work => {
+      const params = await containerOver(work);
+      if (!params) return { kind: "needs-source" };
+      params.isCurrent = () => sourcePreparation.accepts(work);
+      if (work.statement === "packets" && work.role === "source-rest" && sourcePreparation.accepts(work)) {
+        const file = torrentPool.knownTorrent(work.sourceKey)?.files?.[work.fileIndex];
+        if (file?.length > 0) {
+          const statement = `${work.statement}:${work.requestId}:input`;
+          await downloadMaps.metadata({ sourceKey: work.sourceKey, fileIndex: work.fileIndex, statement,
+            result: { kind: "needs-ranges", ranges: [[0, file.length - 1]], requestId: statement },
+            scope: "preparation", ...sourcePreparation.demandFor(work) });
+        }
+      }
+      if (["packets", "subtitle-cues"].includes(work.statement) && (work.selected || work.role === "subtitle-embedded")) {
+        const info = await containerOrchestrator.inspect({ ...params, onReadResult: undefined }, "media-info");
+        if (info.kind !== "result") return info;
+        const positions = outputParts.viewers.forSource(work.sourceKey)
+          .filter(viewer => viewer.source.selectedFileIndex === work.fileIndex &&
+            (work.ownerId === undefined || viewer.id === work.ownerId))
+          .map(viewer => viewer.positionSeconds() ?? 0);
+        const from = (positions.length ? Math.min(...positions) : 0) + (Number(info.value?.startTimeSeconds) || 0);
+        params.packetInterval = { from, to: from + outputParts.segmentDurationSec };
+        if (work.role === "subtitle-embedded") {
+          const tracks = await containerOrchestrator.containerFor(params).then(container => container.readTracks());
+          const track = tracks.find(track => track.type === "subtitle" && track.declaredIndex === work.trackIndex);
+          if (!track || track.isTextBased?.() !== true) return { kind: "terminal", reason: "subtitle-track-not-supported" };
+          params.packetInterval.trackIds = [track.trackNumber];
+          params.subtitleTrackIndex = work.trackIndex;
+        }
+      }
+      params.onReadResult = async (statement, result, revision) => {
+        if (!sourcePreparation.accepts(work)) return;
+        mediaReads.record(params, statement, result, revision.storage, revision.memory);
+        const inputStatement = `${work.statement}:${work.requestId}:input`;
+        if (statement === "packets" && work.role === "source-rest" && result.kind === "result") {
+          const tracks = await containerOrchestrator.containerFor(params).then(container => container.readTracks());
+          const info = await containerOrchestrator.inspect({ ...params, onReadResult: undefined }, "media-info");
+          if (!sourcePreparation.accepts(work)) return;
+          if (info.kind === "result") {
+            work.nativeInput = { index: result.value, tracks, durationSeconds: info.value.durationSeconds,
+              startTimeSeconds: info.value.startTimeSeconds ?? 0 };
+            await publishNative(work);
+          }
+        }
+        if (statement === "packets" && work.role !== "source-rest" && result.kind === "result" && (work.selected || work.ownerFileIndex !== undefined)) {
+          const tracks = await containerOrchestrator.containerFor(params).then(container => container.readTracks());
+          if (!sourcePreparation.accepts(work)) return;
+          const bounds = tracks.filter(track => ["video", "audio"].includes(track.type))
+            .map(track => result.value.boundsOf(track.trackNumber)).filter(Boolean);
+          const interval = params.packetInterval ?? (bounds.length ? {
+            from: Math.max(0, Math.min(...bounds.map(bound => bound.start))), to: Math.max(...bounds.map(bound => bound.end))
+          } : null);
+          if (interval && interval.to > interval.from) {
+            const input = work.role === "subtitle-embedded"
+              ? result.value.inputFor({ trackId: params.packetInterval.trackIds[0], ...interval })
+              : new SegmentInputs({ index: result.value, tracks }).forInterval(interval);
+            if (work.selected) work.inputRanges = input.kind === "result" ? input.ranges : null;
+            await downloadMaps.metadata({ sourceKey: work.sourceKey, fileIndex: work.fileIndex,
+              statement: inputStatement, result: input.kind === "result" ? { kind: "needs-ranges", ranges: input.ranges, requestId: inputStatement } : input,
+              scope: "preparation", ...sourcePreparation.demandFor(work) });
+            if (work.selected) await sourcePreparation.bytesChanged(work.sourceKey, work.fileIndex);
+          }
+        }
+        if (!sourcePreparation.accepts(work)) return;
+        await downloadMaps.metadata({ sourceKey: work.sourceKey, fileIndex: work.fileIndex,
+          statement: `${work.statement}:${work.requestId}`, result, scope: "preparation", ...sourcePreparation.demandFor(work) });
+        sourcePreparation.result(work, result);
+        if (["subtitle-file", "subtitle-cues"].includes(statement)) outputParts.encodeRuns.planEncodersSoon();
+      };
+      return work.statement === "subtitle-file"
+        ? subtitles.inspectFile(params) : work.statement === "subtitle-cues"
+          ? subtitles.inspectPackets(params) : containerOrchestrator.inspect(params, work.statement);
+    },
+    withdraw: work => {
+      if (work.role === "source-rest" && work.statement === "packets") {
+        void downloadMaps.native({ sourceKey: work.sourceKey, fileIndex: work.fileIndex, zones: [] })
+          .catch(error => logger.warn(`native source map withdrawal failed: ${error.message}`));
+      }
+      mediaReads.retain(work.sourceKey, work.fileIndex, params => params.requestId !== work.requestId);
+      void downloadMaps.withdrawMetadata(work.sourceKey, work.fileIndex, `${work.statement}:${work.requestId}`)
+        .catch(error => logger.warn(`source preparation request=${work.requestId} withdrawal failed: ${error.message}`));
+      void downloadMaps.withdrawMetadata(work.sourceKey, work.fileIndex, `${work.statement}:${work.requestId}:input`)
+        .catch(error => logger.warn(`source preparation request=${work.requestId} input withdrawal failed: ${error.message}`));
+      if (!sourcePreparation.ownsFile(work.sourceKey, work.fileIndex)) {
+        probeReads.withdraw(work.sourceKey, work.fileIndex);
+        void downloadMaps.withdrawMetadata(work.sourceKey, work.fileIndex, "codec-probe")
+          .catch(error => logger.warn(`source preparation request=${work.requestId} probe withdrawal failed: ${error.message}`));
+      }
+    },
+    reprice: (work, demand) => {
+      if (work.nativeInput) void publishNative(work)
+        .catch(error => logger.warn(`native source map repricing failed: ${error.message}`));
+      void downloadMaps.repriceMetadata(work.sourceKey, work.fileIndex, `${work.statement}:${work.requestId}`, demand)
+        .catch(error => logger.warn(`source preparation request=${work.requestId} repricing failed: ${error.message}`));
+      void downloadMaps.repriceMetadata(work.sourceKey, work.fileIndex, `${work.statement}:${work.requestId}:input`, demand)
+        .catch(error => logger.warn(`source preparation request=${work.requestId} input repricing failed: ${error.message}`));
+    },
+    failed: error => logger.warn(`source preparation failed: ${error?.message ?? error}`)
+  });
+  outputParts.subtitleReadyFor = viewer => sourcePreparation.subtitleReadyFor(viewer);
   const playbackPlanner = createPlaybackPlanner({
     ffmpegBin,
     transcodeAudioEnabled: transcodeAudio,
     localBaseUrl: outputParts.localBaseUrl,
     sourceRegistry,
     torrentPool,
+    subscribeSource: (sourceKey, fileIndex, listener) => mediaReads.subscribe(sourceKey, fileIndex, listener),
+    readDeclarations: async ({ sourceKey, fileIndex }) => {
+      const params = await containerOver({ sourceKey, fileIndex });
+      if (!params) return { kind: "terminal", reason: "source-forgotten" };
+      return readPlaybackDeclarations(containerOrchestrator, params);
+    },
     sidecarsFromTorrent: (torrent, fileIndex) => contentsOf(torrent).sidecarsOf(fileIndex),
     // What a file declares about its own tracks, parsed on this thread from the
     // header the swarm delivered. The planner used to ask the torrent pool for
@@ -593,6 +945,13 @@ export async function startProxyServer({
   });
 
   app.get("/health", async (req, reply) => handleHealthGet(req, reply, { version }));
+  app.get("/media", async (req, reply) => handleMediaGet(req, reply, {
+    torrentPool,
+    onMissing: ({ sourceKey, fileIndex, start, end, requestId }) => {
+      logger.info(`media request=${requestId} ${sourceKey}:${fileIndex} needs bytes ${start}-${end}`);
+      probeReads.needs(requestId, start, end);
+    }
+  }));
   app.get("/healthz", async (req, reply) => handleHealthzGet(req, reply, { version }));
   // Off unless --delivery-sink was given; see the route for why it exists.
   app.get("/api/delivery-sink", async (req, reply) =>
@@ -601,27 +960,22 @@ export async function startProxyServer({
   // Bytes a browser can time its link with before any film has been chosen.
   app.get("/api/link-probe", async (req, reply) => handleApiLinkProbeGet(req, reply));
   app.post("/api/sources", async (req, reply) =>
-    handleApiSourcesPost(req, reply, { sourceRegistry })
+    handleApiSourcesPost(req, reply, { sourceRegistry, viewers: outputParts.viewers })
   );
   app.get("/api/sources/:sourceKey/stats", async (req, reply) =>
     handleApiSourceStatsGet(req, reply, { sourceRegistry, torrentPool })
   );
   app.get("/api/sources/:sourceKey/files", async (req, reply) =>
-    handleApiSourceFilesGet(req, reply, { sourceRegistry, torrentPool })
+    handleApiSourceFilesGet(req, reply, { sourceRegistry, torrentPool, viewers: outputParts.viewers })
   );
   app.post("/api/sources/:sourceKey/warm", async (req, reply) =>
     handleApiSourceWarmPost(req, reply, {
       sourceRegistry,
-      torrentPool,
-      playbackPlanner,
-      // How long the file runs, read on this thread from the header. The warm
-      // turns a position in seconds into a byte offset and needs it; it used to
-      // read the container itself, in the torrent thread, to find out.
-      durationOf: async (params) => {
-        const over = await containerOver(params);
-        return over ? (await containerOrchestrator.getMediaInfo(over))?.durationSeconds ?? null : null;
-      }
+      viewers: outputParts.viewers
     })
+  );
+  app.post("/api/sources/:sourceKey/files/:fileIndex/viewer", async (req, reply) =>
+    handleApiSourceViewerPost(req, reply, { sourceRegistry, viewers: outputParts.viewers })
   );
   // The browser's own log, kept beside the proxy's: a file per session when
   // the proxy writes its log to a file, its console otherwise. See the route's
@@ -633,17 +987,25 @@ export async function startProxyServer({
     handleApiClientLogsPost(req, reply, { clientLogs })
   );
   app.post("/api/playback-plan", async (req, reply) =>
-    handleApiPlaybackPlanPost(req, reply, { playbackPlanner })
+    handleApiPlaybackPlanPost(req, reply, { playbackPlanner, viewers: outputParts.viewers })
   );
   app.post("/api/playback-plan/audio-tracks", async (req, reply) =>
     handleApiPlaybackPlanAudioTracksPost(req, reply, { playbackPlanner })
   );
+  app.post("/api/subtitles", async (req, reply) => handleApiSubtitlesPost(req, reply, {
+    viewers: outputParts.viewers, sourceRegistry,
+    subtitleTracksFor: (sourceKey, fileIndex) =>
+      (containerOrchestrator.tracks.get(`${sourceKey}:${fileIndex}`) ?? []).filter(track => track.type === "subtitle"),
+    subtitleFilesFor: (sourceKey, fileIndex) => {
+      const torrent = torrentPool.knownTorrent(sourceKey);
+      return torrent && Number.isSafeInteger(fileIndex)
+        ? contentsOf(torrent).sidecarsOf(fileIndex).subtitles.map(file => file.fileIndex) : [];
+    }
+  }));
   app.get("/api/subtitles", async (req, reply) =>
     handleApiSubtitlesGet(req, reply, {
       sourceRegistry,
       torrentPool,
-      ffmpegBin,
-      localBaseUrl: outputParts.localBaseUrl,
       viewers: outputParts.viewers,
       subtitles
     })
@@ -662,7 +1024,8 @@ export async function startProxyServer({
     })
   );
   app.post("/api/transcode-sessions", async (req, reply) =>
-    handleApiTranscodeSessionsPost(req, reply, { viewerRequests: outputParts.viewerRequests, renditions: outputParts.renditions, quality: outputParts.quality, outputs: outputParts.outputs, lookaheadSeconds: outputParts.lookaheadSeconds, sourceRegistry, torrentPool })
+    handleApiTranscodeSessionsPost(req, reply, { viewerRequests: outputParts.viewerRequests, renditions: outputParts.renditions, quality: outputParts.quality, outputs: outputParts.outputs, lookaheadSeconds: outputParts.lookaheadSeconds, sourceRegistry, torrentPool,
+      subscribeSource: (sourceKey, fileIndex, listener) => mediaReads.subscribe(sourceKey, fileIndex, listener) })
   );
   app.post("/api/transcode-sessions/:sessionId/release", async (req, reply) =>
     handleApiTranscodeSessionReleasePost(req, reply, { lifecycle: outputParts.lifecycle })
@@ -724,6 +1087,7 @@ export async function startProxyServer({
     // file: could THIS host sustain it? Answered from the startup benchmarks
     // and a description, so it needs no torrent and costs milliseconds.
     outputParts,
+    mediaMemory: { packetIndexBytes: () => indexMemory.packetBytes() },
     // The browser only ever knows a source by its REGISTRY key (a hash of the
     // raw request bytes, scoped to one API session) — never the torrent
     // pool's own key (the content's infohash, shared across a magnet and a

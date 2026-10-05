@@ -25,8 +25,8 @@ function input(overrides = {}) {
       bitsPerMediaSecond: 80,
       readings: [{ at: now - 1_000, value: 2 }, { at: now, value: 2 }],
       segments: [
-        { index: 0, startSeconds: 0, endSeconds: 4 },
-        { index: 1, startSeconds: 4, endSeconds: 8 }
+        { index: 0, startSeconds: 0, endSeconds: 4, sourceInputs: [{ sourceId: "source", ranges: [{ start: 0, end: 4 }] }] },
+        { index: 1, startSeconds: 4, endSeconds: 8, sourceInputs: [{ sourceId: "source", ranges: [{ start: 4, end: 8 }] }] }
       ],
       readySegmentIndices: [0],
       segmentSizesBytes: new Map([[0, 40]])
@@ -35,6 +35,20 @@ function input(overrides = {}) {
     ...overrides
   };
 }
+
+test("a later prepared piece places the predicted origin on the same clock", () => {
+  const state = input();
+  state.tracks[0].segments[1].mediaRanges = servedMs([4042, 8042]);
+  state.tracks[0].readySegmentIndices = [1];
+  state.tracks[0].clientRanges = [];
+  state.tracks[0].segmentSizesBytes = new Map([[1, 40]]);
+  const forecast = predictPlaybackReadiness(state);
+  assert.equal(forecast.reason, "minimum-safe-delay");
+  assert.ok(Number.isFinite(forecast.delaySeconds));
+  // Moving a measured piece does not erase a genuine hole between pieces.
+  state.tracks[0].segments[0].mediaRanges = servedMs([42, 3000]);
+  assert.equal(predictPlaybackReadiness(state).reason, "media-continuity-unavailable");
+});
 
 test("finds the first safe start from segments delivered before playback", () => {
   const forecast = predictPlaybackReadiness(input());
@@ -64,6 +78,55 @@ test("held input does not require a second download or a download rate", () => {
   assert.equal(predictPlaybackReadiness(state).delaySeconds, 1);
 });
 
+test("exact input addresses use residence without inventing a constant-rate byte position", () => {
+  const state = input();
+  state.sources[0] = { id: "source", complete: false, bytesPerMediaSecond: 1000, readings: [],
+    residence: [{ start: 100, end: 108, location: "disk" }] };
+  state.tracks[0].segments[1].sourceInputs = [{ sourceId: "source", ranges: [{ start: 100, end: 108 }] }];
+  assert.equal(predictPlaybackReadiness(state).delaySeconds, 1);
+});
+
+test("exact missing input is priced by its byte count before segment processing", () => {
+  const state = input({ reserveSeconds: 0 });
+  state.sources[0] = { id: "source", complete: false, bytesPerMediaSecond: 1000,
+    readings: [{ at: state.now, value: 2 }], residence: [{ start: 100, end: 108, location: "missing" }],
+    downloadForecast: { ranges: [{ start: 100, end: 108, availableAt: state.now + 4000 }] } };
+  state.tracks[0].segments[1].sourceInputs = [{ sourceId: "source", ranges: [{ start: 100, end: 108 }] }];
+  // Eight bytes take 4 s, four media seconds take 2 s to encode, transfer 1 s.
+  // The second segment begins at 4 s, so its required startup delay is 3 s.
+  assert.equal(predictPlaybackReadiness(state).delaySeconds, 3);
+});
+
+test("mapped piece arrivals retain other viewers' wait and require the whole piece", () => {
+  const state = input({ reserveSeconds: 0 });
+  state.tracks[0].readySegmentIndices = [];
+  state.sources[0] = { id: "source", complete: false, readings: [], residence: [],
+    downloadForecast: { measuredAt: state.now, ranges: [{ start: 0, end: 16384, availableAt: state.now + 2000 }] } };
+  const delayed = predictPlaybackReadiness(state);
+  assert.equal(delayed.delaySeconds, 5);
+  state.sources[0].downloadForecast.ranges[0].availableAt = state.now + 1000;
+  assert.equal(predictPlaybackReadiness(state).delaySeconds, 4);
+  state.sources[0].downloadForecast.ranges[0].availableAt = null;
+  assert.equal(predictPlaybackReadiness(state).reason, "download-schedule-unavailable");
+});
+
+test("a declared map forecast cannot invent an absent future range from download speed", () => {
+  const state = input({ reserveSeconds: 0 });
+  state.sources[0] = { id: "source", complete: false, residence: [],
+    readings: [{ at: state.now, value: 1e9 }], downloadForecast: { ranges: [] } };
+  assert.equal(predictPlaybackReadiness(state).reason, "download-schedule-unavailable");
+});
+
+test("missing packet addresses cannot be replaced by file-average density even when bytes are held", () => {
+  const state = input();
+  state.sources[0] = { id: "source", complete: false, bytesPerMediaSecond: 1,
+    readings: [{ at: state.now, value: 2 }], residence: [{ start: 0, end: 8, location: "disk" }] };
+  delete state.tracks[0].segments[1].sourceInputs;
+  const forecast = predictPlaybackReadiness(state);
+  assert.equal(forecast.reason, "source-input-ranges-unavailable");
+  assert.equal(forecast.delaySeconds, null);
+});
+
 test("subtracts progress only inside the actual processing run interval", () => {
   const state = input({ reserveSeconds: 0 });
   state.tracks[0].readySegmentIndices = [];
@@ -72,6 +135,20 @@ test("subtracts progress only inside the actual processing run interval", () => 
   assert.equal(predictPlaybackReadiness(state).delaySeconds, 2);
   state.tracks[0].processingRanges = [{ start: 40, end: 50 }];
   assert.equal(predictPlaybackReadiness(state).delaySeconds, 5);
+});
+
+test("partial or malformed exact inputs cannot omit a required source", () => {
+  for (const sourceInputs of [[], [{ sourceId: "source", ranges: null }],
+    [{ sourceId: "source", ranges: [null] }]]) {
+    const state = input();
+    state.sources[0].complete = false;
+    state.tracks[0].segments[1].sourceInputs = sourceInputs;
+    assert.equal(predictPlaybackReadiness(state).reason, "source-input-ranges-unavailable");
+  }
+  const state = input();
+  state.sources.push({ id: "audio-source", complete: false, readings: [] });
+  state.tracks[0].sourceIds.push("audio-source");
+  assert.equal(predictPlaybackReadiness(state).reason, "source-input-ranges-unavailable");
 });
 
 test("future cuts follow measured track time without inventing a permanent clock gap", () => {
@@ -129,7 +206,7 @@ test("keeps source-stall reserve in the proxy's prepared timeline, not the cappe
       id: "source",
       complete: false,
       bytesPerMediaSecond: 1,
-      readings: [{ at: now - 1_000, value: 2 }, { at: now, value: 2 }]
+      downloadForecast: { ranges: [{ start: 8, end: 10, availableAt: now + 1000 }, { start: 10, end: 12, availableAt: now + 2000 }] }
     }],
     tracks: [{
       id: "video",
@@ -138,12 +215,12 @@ test("keeps source-stall reserve in the proxy's prepared timeline, not the cappe
       bitsPerMediaSecond: 80,
       readings: [{ at: now - 1_000, value: 2 }, { at: now, value: 2 }],
       segments: [
-        { index: 0, startSeconds: 0, endSeconds: 2 },
-        { index: 1, startSeconds: 2, endSeconds: 4 },
-        { index: 2, startSeconds: 4, endSeconds: 6 },
-        { index: 3, startSeconds: 6, endSeconds: 8 },
-        { index: 4, startSeconds: 8, endSeconds: 10 },
-        { index: 5, startSeconds: 10, endSeconds: 12 }
+        { index: 0, startSeconds: 0, endSeconds: 2, sourceInputs: [{ sourceId: "source", ranges: [{ start: 0, end: 2 }] }] },
+        { index: 1, startSeconds: 2, endSeconds: 4, sourceInputs: [{ sourceId: "source", ranges: [{ start: 2, end: 4 }] }] },
+        { index: 2, startSeconds: 4, endSeconds: 6, sourceInputs: [{ sourceId: "source", ranges: [{ start: 4, end: 6 }] }] },
+        { index: 3, startSeconds: 6, endSeconds: 8, sourceInputs: [{ sourceId: "source", ranges: [{ start: 6, end: 8 }] }] },
+        { index: 4, startSeconds: 8, endSeconds: 10, sourceInputs: [{ sourceId: "source", ranges: [{ start: 8, end: 10 }] }] },
+        { index: 5, startSeconds: 10, endSeconds: 12, sourceInputs: [{ sourceId: "source", ranges: [{ start: 10, end: 12 }] }] }
       ],
       readySegmentIndices: [0, 1, 2, 3],
       segmentSizesBytes: new Map([[0, 20], [1, 20], [2, 20], [3, 20], [4, 20], [5, 20]])
@@ -158,12 +235,12 @@ test("keeps source-stall reserve in the proxy's prepared timeline, not the cappe
   assert.equal(forecast.preparedSegments, 4);
 });
 
-test("overlaps source reads and encoding, then waits for the slower stage and delivery", () => {
+test("finishes source input before encoding the segment and delivering it", () => {
   const source = {
     id: "source",
     complete: false,
     bytesPerMediaSecond: 1,
-    readings: [{ at: 9_000, value: 2 }, { at: 10_000, value: 2 }]
+    downloadForecast: { ranges: [{ start: 4, end: 8, availableAt: 12_000 }] }
   };
   const track = {
     ...input().tracks[0],
@@ -172,7 +249,8 @@ test("overlaps source reads and encoding, then waits for the slower stage and de
   const forecast = predictPlaybackReadiness(input({ sources: [source], tracks: [track] }));
 
   assert.equal(forecast.ready, false);
-  assert.ok(Math.abs(forecast.delaySeconds - 2) < 1e-8);
+  // Four source seconds take two seconds to download, then 0.4 to encode.
+  assert.ok(Math.abs(forecast.delaySeconds - 2.4) < 1e-8);
 });
 
 test("does not produce an ETA without a client-link measurement", () => {
@@ -260,8 +338,8 @@ test("downloads an overlapping source interval once when two tracks use the same
       bitsPerMediaSecond: 80,
       readings,
       segments: [
-        { index: 0, startSeconds: 0, endSeconds: 2 },
-        { index: 1, startSeconds: 2, endSeconds: 4 }
+        { index: 0, startSeconds: 0, endSeconds: 2, sourceInputs: [{ sourceId: "shared", ranges: [{ start: 0, end: 2 }] }] },
+        { index: 1, startSeconds: 2, endSeconds: 4, sourceInputs: [{ sourceId: "shared", ranges: [{ start: 2, end: 4 }] }] }
       ],
       readySegmentIndices: [0],
       segmentSizesBytes: new Map([[0, 20], [1, 20]])
@@ -272,7 +350,7 @@ test("downloads an overlapping source interval once when two tracks use the same
       processedSeconds: 0,
       bitsPerMediaSecond: 80,
       readings,
-      segments: [{ index: 11, startSeconds: 0, endSeconds: 4 }],
+      segments: [{ index: 11, startSeconds: 0, endSeconds: 4, sourceInputs: [{ sourceId: "shared", ranges: [{ start: 0, end: 4 }] }] }],
       readySegmentIndices: [],
       segmentSizesBytes: new Map([[11, 40]])
     }
@@ -290,7 +368,7 @@ test("downloads an overlapping source interval once when two tracks use the same
       id: "shared",
       complete: false,
       bytesPerMediaSecond: 1,
-      readings: [{ at: now - 1_000, value: 2 }, { at: now, value: 2 }]
+      downloadForecast: { ranges: [{ start: 0, end: 4, availableAt: now + 2000 }] }
     }],
     tracks,
     linkReadings: [{ at: now - 1_000, value: 10_000 }, { at: now, value: 10_000 }]
@@ -298,7 +376,8 @@ test("downloads an overlapping source interval once when two tracks use the same
 
   assert.equal(forecast.ready, false);
   assert.equal(forecast.reason, "minimum-safe-delay");
-  assert.ok(Math.abs(forecast.delaySeconds - 2.032) < 1e-8);
+  // The full audio input takes 2 s, encoding takes 0.4 s, delivery 0.032 s.
+  assert.ok(Math.abs(forecast.delaySeconds - 2.432) < 1e-8);
 });
 
 test("downloads sources on separate torrents concurrently", () => {
@@ -311,7 +390,7 @@ test("downloads sources on separate torrents concurrently", () => {
       processedSeconds: 0,
       bitsPerMediaSecond: 80,
       readings,
-      segments: [{ index: 0, startSeconds: 0, endSeconds: 4 }],
+      segments: [{ index: 0, startSeconds: 0, endSeconds: 4, sourceInputs: [{ sourceId: "video-source", ranges: [{ start: 0, end: 4 }] }] }],
       readySegmentIndices: [],
       segmentSizesBytes: new Map([[0, 40]])
     },
@@ -321,12 +400,12 @@ test("downloads sources on separate torrents concurrently", () => {
       processedSeconds: 0,
       bitsPerMediaSecond: 80,
       readings,
-      segments: [{ index: 7, startSeconds: 0, endSeconds: 4 }],
+      segments: [{ index: 7, startSeconds: 0, endSeconds: 4, sourceInputs: [{ sourceId: "audio-source", ranges: [{ start: 0, end: 4 }] }] }],
       readySegmentIndices: [],
       segmentSizesBytes: new Map([[7, 40]])
     }
   ];
-  const sourceReadings = [{ at: now - 1_000, value: 2 }, { at: now, value: 2 }];
+  const downloadForecast = { ranges: [{ start: 0, end: 4, availableAt: now + 2000 }] };
   const forecast = predictPlaybackReadiness({
     now,
     positionSeconds: 0,
@@ -337,8 +416,8 @@ test("downloads sources on separate torrents concurrently", () => {
     lookaheadSeconds: 4,
     requiredAudio: true,
     sources: [
-      { id: "video-source", complete: false, bytesPerMediaSecond: 1, readings: sourceReadings },
-      { id: "audio-source", complete: false, bytesPerMediaSecond: 1, readings: sourceReadings }
+      { id: "video-source", complete: false, downloadForecast },
+      { id: "audio-source", complete: false, downloadForecast }
     ],
     tracks,
     linkReadings: [{ at: now - 1_000, value: 10_000 }, { at: now, value: 10_000 }]
@@ -346,13 +425,13 @@ test("downloads sources on separate torrents concurrently", () => {
 
   assert.equal(forecast.ready, false);
   assert.equal(forecast.reason, "minimum-safe-delay");
-  assert.ok(Math.abs(forecast.delaySeconds - 2.064) < 1e-8);
+  // Both inputs arrive at 2 s, both encode until 2.4 s, two transfers cost 0.064 s.
+  assert.ok(Math.abs(forecast.delaySeconds - 2.464) < 1e-8);
 });
 
-test("shares one torrent download rate across distinct video and audio files", () => {
+test("shared torrent scheduling retains distinct video and audio file arrival times", () => {
   const now = 10_000;
   const readings = [{ at: now - 1_000, value: 10 }, { at: now, value: 10 }];
-  const sourceReadings = [{ at: now - 1_000, value: 2 }, { at: now, value: 2 }];
   const tracks = [
     {
       id: "video",
@@ -360,7 +439,7 @@ test("shares one torrent download rate across distinct video and audio files", (
       processedSeconds: 0,
       bitsPerMediaSecond: 80,
       readings,
-      segments: [{ index: 0, startSeconds: 0, endSeconds: 4 }],
+      segments: [{ index: 0, startSeconds: 0, endSeconds: 4, sourceInputs: [{ sourceId: "torrent:video-file", ranges: [{ start: 0, end: 4 }] }] }],
       readySegmentIndices: [],
       segmentSizesBytes: new Map([[0, 40]])
     },
@@ -370,7 +449,7 @@ test("shares one torrent download rate across distinct video and audio files", (
       processedSeconds: 0,
       bitsPerMediaSecond: 80,
       readings,
-      segments: [{ index: 7, startSeconds: 0, endSeconds: 4 }],
+      segments: [{ index: 7, startSeconds: 0, endSeconds: 4, sourceInputs: [{ sourceId: "torrent:audio-file", ranges: [{ start: 0, end: 4 }] }] }],
       readySegmentIndices: [],
       segmentSizesBytes: new Map([[7, 40]])
     }
@@ -390,14 +469,14 @@ test("shares one torrent download rate across distinct video and audio files", (
         serviceId: "torrent",
         complete: false,
         bytesPerMediaSecond: 1,
-        readings: sourceReadings
+        downloadForecast: { ranges: [{ start: 0, end: 4, availableAt: now + 2000 }] }
       },
       {
         id: "torrent:audio-file",
         serviceId: "torrent",
         complete: false,
         bytesPerMediaSecond: 1,
-        readings: sourceReadings
+        downloadForecast: { ranges: [{ start: 0, end: 4, availableAt: now + 4000 }] }
       }
     ],
     tracks,
@@ -406,7 +485,8 @@ test("shares one torrent download rate across distinct video and audio files", (
 
   assert.equal(forecast.ready, false);
   assert.equal(forecast.reason, "minimum-safe-delay");
-  assert.ok(Math.abs(forecast.delaySeconds - 4.032) < 1e-8);
+  // The shared source service takes 4 s, followed by 0.4 s encode and 0.032 s transfer.
+  assert.ok(Math.abs(forecast.delaySeconds - 4.432) < 1e-8);
 });
 
 test("does not invent future encode acceleration to start an unsustainable output", () => {

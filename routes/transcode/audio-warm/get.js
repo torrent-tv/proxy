@@ -16,13 +16,10 @@
  * start as a spinner over a stopped picture (measured 2026-08-15).
  *
  * Answers 204 when the segment at that position is ready, so the caller can
- * switch into bytes that already exist; 503 while it is still being made.
+ * switch into bytes that already exist. Otherwise it waits for readiness or refusal.
  */
 
-import { waitForSessionFile } from "../../../services/server/transcode-session-files.js";
-
-/** How long to hold the request before telling the caller to retry. */
-const WARM_WAIT_MS = 12_000;
+import { waitForRequestedFile } from "../../../services/server/transcode-session-files.js";
 
 /**
  * @param {import("fastify").FastifyRequest} req
@@ -65,19 +62,19 @@ export async function handleTranscodeAudioWarmGet(req, reply, { renditions, serv
     );
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
-    reply.header("Retry-After", "1");
-    return reply.code(503).send({ error: `Could not prepare the audio track: ${message}` });
+    return reply.code(500).send({ canRetry: false, error: `Could not prepare the audio track: ${message}` });
   }
   if (!prepared) {
     return reply.code(404).send({ error: "No such audio track for this transcode session." });
   }
 
-  const result = await waitForSessionFile(
-    serving,
+  const result = await waitForRequestedFile(
+    req, reply, serving,
     prepared.sessionId,
     prepared.fileName,
-    { holdMs: WARM_WAIT_MS }
+    consumerId
   );
+  if (result.kind === "cancelled") return;
   if (result.kind === "file") {
     // The bytes are the player's to fetch; the handle opened to reach them is
     // ours to close, or a long-running proxy walks to EMFILE one track change
@@ -86,16 +83,7 @@ export async function handleTranscodeAudioWarmGet(req, reply, { renditions, serv
     return reply.code(204).send();
   }
   if (result.kind === "failed") {
-    return reply.code(500).send({ error: result.message });
+    return reply.code(500).send({ error: result.message, canRetry: false });
   }
-  // Still being produced. The caller may switch anyway — it will wait where it
-  // would have waited before — or ask again.
-  //
-  // `warming: true` says the track and how it is produced ARE recorded for this
-  // viewer — `prepareAudioTrack` records them before the wait — which the
-  // status alone cannot say: the 503 above is a preparation that recorded
-  // nothing. A page restating its soundtrack after a reconnect needs to know
-  // which of the two it got.
-  reply.header("Retry-After", "1");
-  return reply.code(503).send({ error: "The audio track is still warming up.", warming: true });
+  return reply.code(404).send({ error: "The requested output is no longer wanted.", canRetry: false });
 }

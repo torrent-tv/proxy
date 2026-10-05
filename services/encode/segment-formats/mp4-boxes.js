@@ -335,8 +335,10 @@ export function readPresentationRanges(raw) {
       }
     }
     const edit = edits.get(id);
-    tracks.push({ id, kind: kinds.get(id), timescale: edit.timescale, ranges,
+    const productionFrame = samples.reduce((maximum, sample) => sample.duration > maximum ? sample.duration : maximum, 0n);
+    tracks.push({ id, kind: kinds.get(id), timescale: edit.timescale, productionFrame, ranges,
       firstSampleStart: samples[0].start, positionErrorTicks: edit.positionErrorTicks ?? 0n });
+
   }
   return { tracks };
 }

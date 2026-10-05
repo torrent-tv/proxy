@@ -11,6 +11,7 @@
  * Browser → Proxy
  * ```
  * { type: "request",  requestId, method, path, query, headers, body }
+ * { type: "request-cancel", requestId }
  * { type: "ping",     id }
  * { type: "probe-echo", seen: { <label>: seq }, report }
  * ```
@@ -46,6 +47,10 @@
 /** @import { DataChannel } from 'node-datachannel' */
 
 import { createDeliveryProbe, PROBE_INTERVAL_MS } from "./delivery-probe.js";
+import { Agent } from "undici";
+
+// Route availability and caller cancellation determine media request lifetime.
+const loopbackDispatcher = new Agent({ headersTimeout: 0, bodyTimeout: 0 });
 
 /**
  * Configuration for the data channel handler.
@@ -854,6 +859,8 @@ export function createDataChannelHandler({
 
   /** Request id → its ASCII bytes; see {@link requestIdBytes}. */
   const requestIdCache = new Map();
+  /** Channel-scoped requests cannot be cancelled by a different connection. */
+  const activeRequests = new WeakMap();
 
   const { watchSendQueue, readDelivery, noteBrowserReport } = makeSendQueueWatcher({
     log: (message) => log(message),
@@ -912,6 +919,8 @@ export function createDataChannelHandler({
     // assembled request through the same path as a single-message request.
     /** @type {Map<string, { meta: object, chunks: Buffer[], receivedBytes: number, bodyBytes: number, timer: ReturnType<typeof setTimeout> }>} */
     const partials = new Map();
+    const requests = new Map();
+    activeRequests.set(channel, requests);
 
     const dropPartial = (requestId) => {
       const entry = partials.get(requestId);
@@ -1032,6 +1041,12 @@ export function createDataChannelHandler({
         return;
       }
 
+      if (message.type === "request-cancel") {
+        dropPartial(message.requestId);
+        requests.get(message.requestId)?.abort();
+        return;
+      }
+
       if (message.type === "ping") {
         send(channel, { type: "pong", id: message.id });
         return;
@@ -1089,6 +1104,8 @@ export function createDataChannelHandler({
         clearTimeout(entry.timer);
       }
       partials.clear();
+      for (const controller of requests.values()) controller.abort();
+      requests.clear();
       forgetChannel(channel);
       log(`[dc] Session ${tag}: channel closed`);
       // One closed data channel does not mean the peer connection is gone:
@@ -1113,6 +1130,22 @@ export function createDataChannelHandler({
    * @returns {Promise<void>}
    */
   async function handleRequest(channel, req, viaChunks = false) {
+    const requests = activeRequests.get(channel);
+    if (typeof req.requestId !== "string" || !req.requestId || !requests) return;
+    if (requests.has(req.requestId)) {
+      send(channel, { type: "response-error", requestId: req.requestId, error: "Duplicate active request." });
+      return;
+    }
+    const controller = new AbortController();
+    requests.set(req.requestId, controller);
+    try {
+      await forwardRequest(channel, req, viaChunks, controller.signal);
+    } finally {
+      if (requests.get(req.requestId) === controller) requests.delete(req.requestId);
+    }
+  }
+
+  async function forwardRequest(channel, req, viaChunks, signal) {
     const { requestId, method, path, query, headers: forwardedHeaders, body } = req;
 
     // Reject paths that are not absolute, contain traversal sequences, or
@@ -1144,9 +1177,12 @@ export function createDataChannelHandler({
         method,
         headers: requestHeaders,
         body: body != null ? body : undefined,
-        redirect: "manual"
+        redirect: "manual",
+        dispatcher: loopbackDispatcher,
+        signal
       });
     } catch (fetchError) {
+      if (signal.aborted) return;
       log(`[dc] ${method} ${path}${queryInfo} → error: ${fetchError?.message ?? String(fetchError)}`);
       send(channel, { type: "response-error", requestId, error: fetchError?.message ?? String(fetchError) });
       return;
@@ -1169,8 +1205,8 @@ export function createDataChannelHandler({
       return;
     }
 
+    const reader = response.body.getReader();
     try {
-      const reader = response.body.getReader();
       // [net-debug] TEMPORARY: measure transfer size/time and channel buffering.
       // fetchMs = time waiting for the route (incl. ffmpeg segment finalization).
       // ttfbMs  = time from body-read start to the first chunk with data (loopback).
@@ -1191,8 +1227,10 @@ export function createDataChannelHandler({
       const body = bodySender((bytes) => sendChunk(channel, requestId, bytes, false), sendChunkBytes);
       resetEventLoopDelay();
       while (true) {
+        if (signal.aborted) return;
         const readStartedAt = performance.now();
         const { done, value } = await reader.read();
+        if (signal.aborted) return;
         readMs += performance.now() - readStartedAt;
         if (done) {
           chunks += body.flush();
@@ -1233,11 +1271,16 @@ export function createDataChannelHandler({
         // buffer is large — wait for it to drain. Prevents the SCTP send buffer
         // from ballooning, which stalls throughput.
         const drainStepAt = performance.now();
-        await waitForBufferDrain(channel);
+        await waitForBufferDrain(channel, signal);
         drainMs += performance.now() - drainStepAt;
       }
-    } catch {
-      sendChunk(channel, requestId, null, true);
+    } catch (error) {
+      if (!signal.aborted) {
+        send(channel, { type: "response-error", requestId, error: error?.message ?? String(error) });
+      }
+    } finally {
+      if (signal.aborted) await reader.cancel().catch(() => {});
+      reader.releaseLock();
     }
   }
 
@@ -1296,10 +1339,10 @@ export function createDataChannelHandler({
    * @param {DataChannel} channel
    * @returns {Promise<void>}
    */
-  function waitForBufferDrain(channel) {
+  function waitForBufferDrain(channel, signal) {
     return new Promise((resolve) => {
       try {
-        if (typeof channel.bufferedAmount !== "function" || channel.bufferedAmount() <= DC_BUFFER_HIGH_WATER) {
+        if (signal.aborted || typeof channel.bufferedAmount !== "function" || channel.bufferedAmount() <= DC_BUFFER_HIGH_WATER) {
           resolve();
           return;
         }
@@ -1309,14 +1352,13 @@ export function createDataChannelHandler({
           if (settled) return;
           settled = true;
           if (poll) clearInterval(poll);
-          try { channel.onBufferedAmountLow(() => {}); } catch {}
+          signal.removeEventListener("abort", done);
           resolve();
         };
-        channel.setBufferedAmountLowThreshold(DC_BUFFER_LOW_WATER);
-        channel.onBufferedAmountLow(done);
-        // Poll as a fallback for a missed low-water event — the previous
-        // 5 s timeout resolved while the buffer was still high, which is the
-        // defect. Polling waits until the condition is actually met.
+        signal.addEventListener("abort", done, { once: true });
+        // The native channel exposes one callback for all requests. Sampling
+        // avoids one request replacing another's callback. Cancellation ends
+        // the wait immediately; elapsed time alone never resumes sending.
         poll = setInterval(() => {
           try {
             if (channel.bufferedAmount() <= DC_BUFFER_LOW_WATER) {
@@ -1332,6 +1374,7 @@ export function createDataChannelHandler({
         if (channel.bufferedAmount() <= DC_BUFFER_LOW_WATER) {
           done();
         }
+        if (signal.aborted) done();
       } catch {
         resolve();
       }

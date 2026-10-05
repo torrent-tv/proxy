@@ -12,6 +12,7 @@
 import { logger } from "../../../utils/logger.js";
 import { OUTPUT_NO_CAPACITY, OUTPUT_UNAVAILABLE } from "../../../services/encode/output/index.js";
 import { replyNoCapacity, replyOutputUnavailable } from "../../../services/server/http-responses.js";
+import { waitForPlan } from "../../../services/media/await-plan.js";
 
 /**
  * Extract a plain object from the request body, guarding against
@@ -28,7 +29,7 @@ function getPayload(body) {
 }
 
 
-export async function handleApiTranscodeSessionsPost(req, reply, { viewerRequests, renditions, quality, outputs, lookaheadSeconds, sourceRegistry, torrentPool }) {
+export async function handleApiTranscodeSessionsPost(req, reply, { viewerRequests, renditions, quality, outputs, lookaheadSeconds, sourceRegistry, torrentPool, subscribeSource }) {
   const payload = getPayload(req.body);
   const sourceKey = typeof payload.sourceKey === "string" ? payload.sourceKey.trim() : "";
   const fileIndex = Number(payload.fileIndex);
@@ -79,8 +80,13 @@ export async function handleApiTranscodeSessionsPost(req, reply, { viewerRequest
     return reply.code(400).send({ error: "consumerId is required." });
   }
 
+  const cancellation = new AbortController();
+  const cancelled = () => cancellation.abort();
+  reply.raw?.once?.("close", cancelled);
+  if (reply.raw?.destroyed) cancelled();
   try {
-    const session = await viewerRequests.createOrGetSession({
+    const open = () => viewerRequests.createOrGetSession({
+      signal: cancellation.signal,
       sourceKey,
       fileIndex,
       transcodeVideo,
@@ -107,6 +113,16 @@ export async function handleApiTranscodeSessionsPost(req, reply, { viewerRequest
         Number.isInteger(audioTrackIndex) && audioTrackIndex > 0 ? audioTrackIndex : 0,
       segmentFormatId
     });
+    const session = subscribeSource ? (await waitForPlan({ signal: cancellation.signal,
+      subscribe: listener => subscribeSource(sourceKey, fileIndex, listener),
+      read: async () => {
+        try { return { pending: false, session: await open() }; }
+        catch (error) {
+          if (error?.code === "MEDIA_BYTES_UNAVAILABLE") return { pending: true };
+          throw error;
+        }
+      }
+    })).session : await open();
     // The index of quality variants, when this session has more than one to
     // offer. Its presence is what tells the browser it can change quality
     // without a new session: the player switches variants itself, appending the
@@ -152,6 +168,10 @@ export async function handleApiTranscodeSessionsPost(req, reply, { viewerRequest
       lookaheadSeconds: lookaheadSeconds
     });
   } catch (error) {
+    if (cancellation.signal.aborted || error?.name === "AbortError") return;
+    if (error?.code === "SOURCE_FORGOTTEN") {
+      return reply.code(410).send({ error: error.message, retryable: false, terminal: true });
+    }
     if (error instanceof Error && error.code === "TRANSCODE_DISABLED") {
       return reply.code(409).send({ error: error.message });
     }
@@ -174,5 +194,7 @@ export async function handleApiTranscodeSessionsPost(req, reply, { viewerRequest
         `${error instanceof Error ? (error.stack ?? "") : ""}`
     );
     return reply.code(500).send({ error: `Failed to prepare transcode session: ${message}` });
+  } finally {
+    reply.raw?.removeListener?.("close", cancelled);
   }
 }

@@ -477,5 +477,5 @@ test("a request behind the run that nobody is coming for is answered absent, not
   ]);
   const refused = await manager.serving.getFileStream(SESSION_ID, "segment-00002.mp4");
 
-  assert.equal(refused.kind, "not-found");
+  assert.equal(refused.kind, "superseded");
 });

@@ -260,7 +260,7 @@ test("one viewer paused: nothing is late, so no encoder is added", () => {
   assertNoOverlap(made);
 });
 
-test("one viewer paused states no deadline anywhere", () => {
+test("one viewer paused retains the download and encoding order", () => {
   // The map's own answer, checked directly, because every placement decision
   // below rests on it.
   const map = mapForViewer({
@@ -271,8 +271,8 @@ test("one viewer paused states no deadline anywhere", () => {
   });
   assert.ok(map.durationSeconds > 0, "a paused viewer still wants the film");
   for (let second = 0; second < map.durationSeconds; second += 1) {
-    assert.equal(map.secondsUntilPlayed[second], Number.POSITIVE_INFINITY,
-      "but no second of it has a time by which it must exist");
+    assert.equal(map.secondsUntilPlayed[second], second < 400 ? Number.POSITIVE_INFINITY : second - 400,
+      "pausing alone does not reduce this viewer's demand");
   }
   // Their POSITION survives the pause, and with it the rule that what is in
   // front of them is made before what is behind.

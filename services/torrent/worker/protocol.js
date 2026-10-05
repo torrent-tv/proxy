@@ -55,8 +55,6 @@ export const Command = {
   TORRENT_TOTALS: "torrent-totals",
   /** Which films this proxy holds right now, for content affinity. */
   HELD_TORRENTS: "held-torrents",
-  /** Reorder piece selection around a read position (seek prioritisation). */
-  PRIORITIZE: "prioritize",
   /**
    * The priority map for one file: seconds of film against a number.
    *
@@ -71,21 +69,6 @@ export const Command = {
   READ_RANGE: "read-range",
   /** Abandon an in-flight READ_RANGE (viewer gone, seek superseded). */
   CANCEL_READ: "cancel-read",
-  /** Pre-fetch the head and tail a codec probe needs. */
-  PREFETCH_EDGES: "prefetch-edges",
-  /**
-   * Fetch one whole file using only the room the viewer's own reading leaves —
-   * a soundtrack or subtitle file they may switch to later. Returns as soon as
-   * the work is under way.
-   */
-  FILL_FILE: "fill-file",
-  /** Claim every remaining file as conditional TAIL demand for one torrent. */
-  FILL_TORRENT: "fill-torrent",
-  /**
-   * Start fetching the region a viewer is about to resume at, named in seconds
-   * and turned into bytes here, where the file's own duration can be read.
-   */
-  WARM_POSITION: "warm-position",
   /**
    * The byte ranges of one file the torrent holds WHOLE, so the subtitle walk
    * can decide what it may read without asking the swarm. A list rather than a
@@ -102,6 +85,8 @@ export const Command = {
    * must pull nothing.
    */
   READ_HELD: "read-held",
+  /** Acquire all source pieces of an admitted input before copying its ranges. */
+  READ_HELD_RANGES: "read-held-ranges",
 
   /** Shut the client down, optionally deleting downloaded data. */
   /**
@@ -158,6 +143,10 @@ export const Event = {
    * which put the cue reading in the thread that owns the swarm.
    */
   PIECES_ARRIVED: "pieces-arrived",
+  /** Available source bytes changed after verification or withdrawal. */
+  PIECES_CHANGED: "pieces-changed",
+  /** A resolved source handle closed; retained media readings must be released. */
+  SOURCE_FORGOTTEN: "source-forgotten",
 
   /**
    * A file has been downloaded whole and written out as a file.

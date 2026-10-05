@@ -7,7 +7,8 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
-import { cutOf, judgePiece, originOf, productionOf } from "../../services/encode/piece-completeness.js";
+import { cutOf, judgeNeighbors, judgePiece, originOf, productionOf } from "../../services/encode/piece-completeness.js";
+
 import { SEGMENT_CUT_TIME_DELTA_SECONDS } from "../../services/encode/output/index.js";
 import { readFileSync } from "node:fs";
 import { fmp4Format } from "../../services/encode/segment-formats/fmp4.js";
@@ -75,4 +76,59 @@ test("a muxer's reference clock cannot conceal a shorter multiplexed track", () 
   const audio = ranges.tracks[0];
   ranges.tracks.push({ ...audio, kind: "vide", ranges: audio.ranges.map(range => ({ ...range, end: range.end - 4800n })) });
   assert.equal(judgePiece(fmp4Format, ranges, 81.365).whole, false);
+});
+
+test("admitted segments require every track's continuous start and end including the final segment", () => {
+  const mediaFormat = { producedThroughSeconds: coverage => coverage.tracks.reduce((end, track) =>
+    Math.min(end, Number(track.ranges.at(-1).end) / Number(track.timescale)), Infinity) };
+  const video = { kind: "vide", timescale: 1000n, ranges: [{ start: 1000n, end: 1950n, frame: 100n }] };
+  const sound = { kind: "soun", timescale: 1000n, ranges: [{ start: 1000n, end: 2000n, frame: 20n }] };
+  const interval = { from: 1, to: 2, requiredKinds: ["vide", "soun"] };
+  assert.equal(judgePiece(mediaFormat, { tracks: [video, sound] }, 1.98, interval).whole, true);
+  assert.equal(judgePiece(mediaFormat, { tracks: [video] }, undefined, interval).reason, "segment-missing-soun");
+  const late = { ...video, ranges: [{ start: 1200n, end: 2000n, frame: 100n }] };
+  assert.equal(judgePiece(mediaFormat, { tracks: [late, sound] }, undefined, interval).reason, "segment-start-outside-interval-vide");
+  const gap = { ...video, ranges: [{ start: 1000n, end: 1200n, frame: 100n }, { start: 1500n, end: 2000n, frame: 100n }] };
+  assert.equal(judgePiece(mediaFormat, { tracks: [gap, sound] }, undefined, interval).reason, "segment-gap-within-interval-vide");
+  const short = { ...sound, ranges: [{ start: 1000n, end: 1500n, frame: 20n }] };
+  assert.equal(judgePiece(mediaFormat, { tracks: [video, short] }, undefined, interval).reason, "segment-end-outside-interval-soun");
+});
+
+test("neighbors cannot use opposite one-frame tolerances to leave a two-frame gap", () => {
+  const left = { tracks: [{ kind: "soun", timescale: 1000n, productionFrame: 20n,
+    ranges: [{ start: 0n, end: 980n, frame: 10n }] }] };
+  const right = { tracks: [{ kind: "soun", timescale: 48000n, productionFrame: 960n,
+    ranges: [{ start: 48000n, end: 96000n, frame: 960n }] }] };
+  assert.equal(judgeNeighbors(left, right).whole, true);
+  right.tracks[0].ranges[0].start = 48960n;
+  assert.equal(judgeNeighbors(left, right).reason, "neighbor-discontinuity-soun");
+  right.tracks[0].ranges[0].start = 46080n;
+  assert.equal(judgeNeighbors(left, right).whole, true);
+  right.tracks[0].ranges[0].start = 44160n;
+  assert.equal(judgeNeighbors(left, right).reason, "neighbor-discontinuity-soun");
+});
+
+test("final admitted media retains distinct proven track ends without accepting a truncated track", () => {
+  const mediaFormat = { producedThroughSeconds: coverage => Math.min(...coverage.tracks.map(track =>
+    Number(track.ranges.at(-1).end) / Number(track.timescale))) };
+  const video = { kind: "vide", timescale: 1000n, ranges: [{ start: 880000n, end: 888000n, frame: 42n }] };
+  const audio = { kind: "soun", timescale: 1000n, ranges: [{ start: 880000n, end: 888064n, frame: 22n }] };
+  const interval = { from: 880, to: 888.064, requiredKinds: ["vide", "soun"] };
+  assert.equal(judgePiece(mediaFormat, { tracks: [video, audio] }, undefined, interval).whole, false);
+  interval.sourceEnds = { vide: 888, soun: 888.064 };
+  assert.equal(judgePiece(mediaFormat, { tracks: [video, audio] }, undefined, interval).whole, true);
+  const truncated = { ...audio, ranges: [{ start: 880000n, end: 888000n, frame: 22n }] };
+  assert.equal(judgePiece(mediaFormat, { tracks: [video, truncated] }, undefined, interval).reason,
+    "segment-end-outside-interval-soun");
+});
+
+test("neighbor validation refuses absent tracks and invalid frame clocks", () => {
+  const track = { kind: "vide", timescale: 1000n, productionFrame: 40n,
+    ranges: [{ start: 0n, end: 1000n, frame: 40n }] };
+  assert.equal(judgeNeighbors({ tracks: [] }, { tracks: [track] }).whole, false);
+  assert.equal(judgeNeighbors({ tracks: [track] }, { tracks: [track, { ...track, kind: "soun" }] }).reason,
+    "neighbor-missing-soun");
+  assert.equal(judgeNeighbors({ tracks: [{ ...track, productionFrame: 0n }] }, { tracks: [track] }).reason,
+    "neighbor-frame-is-invalid");
+
 });

@@ -1,3 +1,141 @@
+## Unreleased
+
+- **Fix**: Deadline reassignment must improve a block's previous predicted arrival. Changing peer rates cannot repeatedly cancel the same pending block and postpone its delivery; forecasts preserve the same request evidence.
+
+- **Fix**: Failed process starts, signals, hardware failures and resource errors do not permanently refuse unchanged admitted media input. Recoverable failures retain the existing bounded start-failure handling.
+
+- **Fix**: Playback forecasts place an unread first segment and its origin on the same clock derived from prepared segments. A positive initial presentation offset is not mistaken for an irreparable timestamp gap.
+
+- **New**: Source registration declares map playback compatibility so new pages can identify proxies that support source viewer reports and event-driven preparation before starting playback.
+
+- **Fix**: Keep local media forwarding active until readiness, terminal refusal or caller cancellation, without an elapsed header or body timeout.
+
+- **Fix**: Cut separate audio at its declared segment boundary without the video keyframe tolerance.
+
+- **Fix**: Preserve source declarations and maps when completed files replace a torrent, announce adopted whole files to pending readers, and protect admitted range reads from whole-file removal (torrent-tv/meta#129).
+
+- **Fix**: Admit the final copied interval and verify its output against each track's proven source end. Audio extending beyond the final video sample no longer leaves the last video segment without source ranges (torrent-tv/meta#128).
+
+- **Fix**: Publish all torrent selections before calculating peer requests once, and compile byte windows into piece demand once per map revision. Each peer update still checks live storage availability. Native packet maps no longer repeat the complete map scan for every library selection or peer update and delay source-stat replies during playback opening (torrent-tv/meta#127).
+
+- **Fix**: Use preserved source cut times for packet demand and encoder input; rounded playlist times no longer reject copied segments as non-keyframes.
+
+- **Fix**: Preserve the measured source rate for link admission and playlist declarations when decoded-frame characteristics are incomplete.
+- **Fix**: Read MP4 video cadence from sample timing when codec settings omit it, so decoding costs use declared frame timing.
+
+- **Fix**: MP4 sample tables request their declared complete packet allocation before reconstruction, avoiding repeated full parsing with one-block budget growth. Successful decoder declarations are shared by all callers. Fragmented MPEG audio resolves its first frame through the fragment's exact sample address.
+
+- **Fix**: Encoder input errors remain observed between admitted writes and preserve the original decoder failure instead of terminating the proxy through an unhandled stream error.
+
+- **New**: Fragmented MP4 reads track defaults, fragment decode clocks and exact sample addresses, preserving decode order and retrying unavailable fragment headers without duplicate packets. Its complete packet index supplies duration and keyframes.
+
+- **Fix**: AVI AVC uses the container's declared cadence with picture-order types 1 and 2 as well as type 0, retaining decode order without treating picture-order values as proportional clock ticks.
+
+- **Fix**: Streaming audio-only ASF derives its duration from complete indexed payload timing when the header does not declare an end. Failed temporary timestamp reads release their admitted memory.
+
+- **Fix**: AVI AVC and HEVC indexing reads in-band decoder declarations and preserves reordered presentation times. HEVC ranks its bounded picture order against the declared AVI presentation cadence, including nonproportional order values and resets. Track declarations retain the parsed settings for later callers.
+
+- **Fix**: AVI packed DivX/Xvid input separates each coded picture into its own exact source range and presentation time, skips placeholder pictures, and admits temporary parsing bytes before reading. Generated MPEG-4 and packed Xvid files preserve every decoded frame with and without idx1.
+
+- **Fix**: Matroska and ASF presentation-time sorting reserves temporary memory before allocation and releases it after calculation. MP4 decoder descriptors reject unfinished lengths and child payloads extending beyond their declared parent. Update the container architecture description to the shared map and admitted stdin input.
+
+- **Fix**: MP3 decoder preparation includes a preceding presentation frame and its reservoir dependencies, restoring synthesis state before the requested interval. Synthetic MKV, MP4 and ASF seek decoding matches the complete decode sample for sample. Matroska locates its segment through exact element headers without a fixed initial file window.
+
+- **Fix**: AAC input includes one preceding decoder frame across containers. MP3 reservoir dependencies are read from exact header ranges and retained in existing binary packet fields, including grouped or fragmented packets. MP4 distinguishes MPEG audio from AAC through its decoder descriptor and the addressed first frame, reads nested QuickTime audio descriptions, and preserves leading edit-list audio discard padding.
+- **Fix**: MPEG transport and program streams containing only audio obtain duration and starting time from their indexed audio frames.
+
+- **Fix**: Retained ASF, AVI and Matroska declarations reserve their byte storage through the shared metadata budget before reading. Repeated and concurrent declaration reads share owned byte buffers; incomplete reads return reservations and source retirement rejects late results. Worker replies preserve terminal source error codes.
+
+- **Fix**: Whole-file assembly reads held storage pieces instead of opening a torrent file stream. Retired source reads cannot recreate a torrent or replace a newer source lifetime. Remove obsolete read-window parameters from the worker contract.
+- **Fix**: AVI indexing reads MPEG-4 Visual picture timing for reordered frames and progressively indexes variable-rate MPEG audio with or without an AVI index. MP3 input includes the exact preceding frames required by its bit reservoir. Synthetic AVI input preserves decoded video frames and audio samples.
+
+- **Fix**: MP4 sample indexing walks compressed timing and chunk tables without expanding whole-track arrays. Subtitle sample views retain those same tables rather than duplicate cue objects. The retained moov buffer reserves memory before reading, releases failed reads, and cannot survive source retirement.
+
+- **Fix**: Playback preparation requests complete indexed timing when a container header does not declare duration, forwarding missing bytes or memory instead of remaining pending without demand. MPEG-PS restores its duration after a final allocation refusal. AVI without an index progressively reads intra-frame video and fixed-size audio chunks, retaining its cursor across missing bytes and allocation refusal.
+
+- **Fix**: Admit retained packet storage through the shared machine memory budget, preserve indivisible index requests and held encoder input, and serialize concurrent budget revisions. MPEG transport parsing retains completed packet facts across allocation refusal without rereading or duplicating transport bytes. Additional demuxers store retained packet facts in admitted binary blocks, wait for memory changes, and release scan storage after indexing.
+
+- **Fix**: Build playback plans and failed-run stream counts from the shared container declarations. Opening a file no longer launches a separate ffmpeg URL probe; unavailable bytes or index memory keep preparation pending without caching an empty media answer.
+
+- **Fix**: Run completed container-read callbacks outside the parser queue so source preparation can request another statement from the same file without waiting on itself.
+
+- **Fix**: Exclude intervals containing container metadata work from learned torrent CPU cost and idle CPU draw; take CPU and metadata activity snapshots together after asynchronous torrent statistics arrive.
+
+- **Fix**: Keep packet-index memory shortages pending, retry only when the missing resource changes, and roll back incomplete Matroska laced blocks before retrying. Validate packet facts before reserving memory and return reservations when allocation fails.
+
+- **Fix**: Admitted PCM normalizes signed 8-bit, unsigned multibyte and big-endian floating samples to Matroska representations without modifying source bytes. Conversion buffers are reserved before input admission. Subtitle packet initialization retries unavailable seed bytes instead of retaining a rejected promise.
+
+- **Fix**: Packet facts use binary storage with exact allocation counters instead of retaining one JavaScript object per packet and byte range. Matroska and ASF release their intermediate packet records once indexing completes; rollback of an incomplete ASF packet releases unused storage blocks. The memory log reports retained binary packet-index bytes. Retiring a source withdraws its completed preparation and maps, rejects late conversion and cancels queued map publication.
+
+- **Fix**: QuickTime audio descriptions retain version-2 sampling, channel and PCM format fields, including declared byte order. MP4 ALAC retains its decoder cookie and MP4 Opus converts dOps to the required OpusHead with codec delay and seek preroll. Synthetic MOV PCM and MP4 ALAC/Opus preserve decoded samples in copy and transcode preparation.
+- **New**: DTS core indexing preserves exact frame ranges, sample-block timing and 16-bit or 14-bit word layouts. Synthetic admitted input produces identical decoded audio for both byte orders.
+- **Fix**: Admitted PCM retains its declared bit depth; ASF PCM retains its complete decoder declaration. Matroska audio retains codec delay, seek preroll and signed discard padding, including padding spanning laced frames. Copied audio includes a frame crossing the requested interval start without adding unrelated decoder preroll. Synthetic PCM and Opus input preserves decoded samples and presentation timestamps.
+- **Fix**: Closing a torrent source releases retained media, subtitle, keyframe and probe readings on the main thread. Concurrent metadata requests share one result, and a late result cannot restore a forgotten source or replace a newer handle. Pending output allocation receives an explicit terminal response when its source disappears.
+- **Fix**: AVI admitted input preserves the complete BITMAPINFOHEADER and WAVEFORMATEX decoder declarations through Matroska VFW/ACM mappings. Synthetic MJPEG with PCM and WMA audio decodes from the admitted stdin stream.
+- **Fix**: Source file discovery and keyframe preparation wait for declared byte availability without elapsed-time decisions. Cancelled output allocation removes its source subscriptions, and forgotten media cannot be restored by late reads.
+- **New**: AVC picture-order types 1 and 2 retain frame-number wrap and signed cycle offsets without treating picture-order counts as proportional timestamps. AAC-LATM declarations preserve explicit SBR/PS, program channel elements and complete version-1 decoder configuration.
+
+- **Fix**: Obsolete download forecasts stop replaying after demand or storage changes. Subtitle packet initialization is shared across concurrent readers, forgotten sources cannot be restored by late reads, and later cues correct previously delivered open-ended durations with new delivery cursors.
+
+- **Fix**: Playback readiness uses conditional whole-piece arrival times from the actual download scheduler, including other viewers' demand, occupied peer requests and deadline reassignment. Missing future ranges remain unknown instead of being inferred from file-average byte density.
+- **Fix**: Verified and withdrawn source pieces update scheduling directly. Publishing a priority map does not announce unchanged bytes or recursively retry media reads.
+- **Fix**: A complete source means all its verified bytes are available in storage, rather than a received-byte counter reaching its length. Changed map demand or storage withdrawal invalidates an unfinished future calculation.
+- **Fix**: Matroska WebM subtitle codec identifiers and MP4 text tracks participate in exact packet preparation. Generated SubRip, ASS, WebVTT and mov_text inputs preserve cue text and timing; missing payload never becomes an empty document.
+
+- **New**: HEVC elementary packet indexing derives missing PES presentation clocks from declared proportional picture order, retaining reference-picture wrap and B-frame positions. Missing field-picture timing remains an explicit refusal.
+
+- **Fix**: Selected embedded subtitles prepare their exact packet ranges at the viewer's current position, including after an output is created. Packet text is published once with a retained cursor; seeking or turning subtitles off withdraws obsolete preparation. Subtitle delivery no longer launches an independent ffmpeg extraction through the source stream.
+
+- **Fix**: External text subtitles declare exact missing source bytes through viewer preparation. Reading no longer creates an independent stream or revives a source; callers wait for document publication and release their subscription when cancelled.
+
+- **Fix**: Direct source viewers report position, pause and seek without creating an output. Obsolete selections and pre-seek reports cannot restore old demand; each viewer prepares its own indexed interval.
+- **Fix**: A paused direct viewer retains urgent preparation until its exact indexed input is held. Afterwards its priorities decay gradually when other viewers share the file, preserving the minimum priority and sole-viewer exemption.
+- **Fix**: Source reads only wait for ranges declared by the shared priority map. Removing demand cancels missing-byte waits without reader-owned selection, speculative windows or bitrate-based byte estimates.
+- **New**: MP4 and Matroska HEVC declarations include source dimensions, bit depth, NAL framing and declared frame reorder depth for admitted Matroska input.
+- **New**: MPEG-TS HEVC input preserves access-unit source ranges and presentation/decode timestamps, including streams without AUD. In-band parameter sets declare decoder configuration and frame timing.
+- **New**: MPEG-TS AAC-LATM input preserves source byte and payload bit addresses, decoder configuration and audio timing. Admitted payloads are normalized to raw AAC for the shared Matroska input.
+- **Fix**: Direct source packets use the same whole-film priority map as encoded outputs. Preparation progress counts exact urgent byte ranges and actual residence; statistics and delayed map publications cannot revive removed sources.
+
+- **New**: Additional container formats use strict available-byte ffprobe declarations and packet indexing. Packet addresses are checked against demuxed SHA-256 payload hashes before encoder admission; incomplete timing or mismatched payloads are refused.
+- **New**: FLV packet payload addresses are resolved from their declared tag framing and checked against demuxer lengths and timestamps. Synthetic AVC/AAC FLV and MP4 inputs pass packet verification and Matroska decoding.
+- **New**: Separate audio declarations and indexes, subtitle declarations and next-episode preparation belong to the selecting source viewers. Resolved related-file bytes retain low-priority demand and are withdrawn when the selection changes.
+- **New**: AVI OpenDML standard and super indexes resolve packet addresses across AVI/AVIX segments and beyond 4 GiB. Empty video chunks extend the previous picture while preserving following packet times.
+- **New**: MPEG transport-stream packet input supports AC-3 and independent E-AC-3 frames with exact source ranges, channel declarations and sample-count durations.
+- **New**: MPEG program-stream packet input supports AVC and DVD AC-3 substreams. AVC frame picture-order declarations and source clock ticks supply missing per-frame PES times; explicit PES times remain authoritative.
+- **Fix**: Source warm requests no longer create independent edge downloads, metadata polling or whole-torrent fill. Selected files record resume position and explicit play intent before output creation.
+- **Fix**: Remove the torrent's implicit remainder download and obsolete resume/whole-file warm commands. Every requested source byte now requires an explicit published demand.
+
+- **Fix**: Playback plans and audio or quality preparation wait on source and output events without polling or elapsed deadlines. Cancelled requests release their subscriptions; terminal refusals preserve their retry classification.
+- **New**: Source selection prepares candidate video declarations before visible-file indexes, without waiting for an output. Selecting an episode withdraws other-file requests and reprices retained declarations as urgent. Preparation demand survives output replacement and ends with its current viewers.
+- **New**: MPEG-TS indexes AVC access units with their PES presentation/decode times and in-band decoder declarations. Admitted Annex B packets become length-framed Matroska payloads without copying compressed frame data. Partial indexing works with and without access-unit delimiters.
+- **Fix**: Repricing a complete segment retains its resolved bytes during asynchronous index reads. Source demand excludes picture outputs superseded by the viewer's selected output.
+- **New**: MPEG-TS and MPEG-PS index MPEG video, layered MPEG audio and AAC ADTS into exact packet ranges, preserving reordered timestamps and resuming partial reads. Their own sequence declarations provide coded dimensions and frame cadence; AAC input excludes transport headers and retains decoder configuration.
+- **Fix**: Playback forecasts start segment processing after its complete input arrives, matching production admission instead of overlapping encoding with missing source bytes.
+- **Fix**: Download demand uses complete output segments and their selected source tracks, with the same packet calculation as encode admission. Source deadlines subtract measured encode and delivery time, including metadata retries. Track and output changes refresh source demand even at an unchanged position.
+- **Fix**: Viewer identity exists before source metadata and output preparation. Source registration binds that identity; output replacement retains it, and connection closure releases viewers even when they have no output yet.
+- **Fix**: Admitted output validates continuous coverage of every required track, including the final segment. Video cadence retains the requested timeline origin; MP4 edits preserve AAC sample precision. Closed combined output is partitioned by presentation time so copied B-frames cannot shorten the accompanying audio interval.
+- **Fix**: An admitted input that failed is not restarted with unchanged bytes and output parameters. Each run has its own temporary-file tag, and output opening uses shared available-byte media discovery instead of a second streaming probe.
+- **New**: Encoding admits complete owned packet ranges before starting ffmpeg and writes one Matroska input through stdin. Consecutive available intervals append to the same input; a missing interval closes it without waiting for torrent bytes. Input identity includes decoder declarations and packet timing.
+- **New**: ASF media objects retain exact fragmented and compressed payload addresses. AVC SPS declarations supply coded dimensions and the decoder reorder bound for MP4 and Matroska inputs.
+- **Fix**: ASF and Matroska resume unfinished indexing without repeating completed packet headers. Matroska interval indexing uses the codec reorder bound; EBML header reads require only the declared header bytes. ASF states the first picture time before indexing the rest of the file.
+- **Fix**: Interval metadata requests preserve playback priority and deadline, remain independent across byte arrivals, and are withdrawn when the requested interval changes. Preparing a later interval no longer discards an earlier resolved byte map.
+- **Fix**: MP4 reads track flags, alternate groups and dimensions at their declared offsets, retains video decoder configuration and indexes decode timestamps separately from presentation timestamps.
+- **Fix**: Codec probes and sidecar declarations do not create independent edge/body downloads or production deadlines. Missing probe bytes use the shared file map and storage events trigger another read; withdrawing a file map cancels its unfinished media demand.
+- **New**: Matroska packet addresses include all lacing forms, random-access flags, declared frame durations, codec delay and seek preroll. Metadata discovery uses existing torrent handles and reports missing bytes through the shared map.
+- **Fix**: AVI track and duration declarations are read from RIFF lists beyond a fixed header window, including audio streams and their own time bases.
+- **New**: Peer block requests follow one deadline order across torrents, using the library's measured per-peer request capacity. Blocks predicted to miss their deadline can be reassigned to a faster peer. Storage eviction uses the earliest shared piece deadline and drops unused bytes first.
+- **New**: MP4 download maps use exact sample addresses, decode order and composition times. Metadata missing ranges share the playback download map and retry on byte arrivals without independent prefetches or polling. ASF header declarations supply tracks, codec settings and duration from downloaded bytes.
+- **Fix**: Enforce a reduced disk allowance immediately instead of waiting for another piece write, retaining pieces held by an active read.
+- **New**: Media reads state exact missing byte ranges separately from empty results and terminal failures. MPEG-TS track declarations are parsed from downloaded program tables, including M2TS framing, multi-packet tables, languages and CRC validation.
+- **Fix**: Output file delivery subscribes before reading and waits on storage or lifecycle changes, including playlists and init segments, without polling or an X-Hold-Ms timeout. Caller cancellation ends the wait without a false media response.
+- **Fix**: Withdrawing download demand immediately cancels outstanding peer blocks that no remaining selected range needs, including on torrent release.
+- **Fix**: Torrent contents exclude exact sample words and identified release-group promos from film and episode grouping. Completed track reads revise provisional extension classifications in the same owner.
+- **Fix**: Paused viewers keep urgent preparation unchanged, then gradually reduce their own priorities toward one when competing with other viewers of the file. Seek resets pause time, resume restores priority, and shared demand retains the other viewer's priority. Both picture and soundtrack must be ready before attenuation.
+- **New**: Codec discovery reads through a downloaded-only media endpoint. Missing ranges are reported immediately; inspection neither creates demand nor revives a removed torrent.
+- **Fix**: Segment waits register before checking availability, recheck stored bytes on publication events, and end when the output is disposed or the requester cancels. An event alone cannot report a missing segment as ready.
+- **Fix**: Browser request cancellation and data-channel closure abort the associated local HTTP request. A response read failure reports an error instead of marking a truncated body complete.
+- **Fix**: Reads of downloaded media acquire all piece holds atomically and read storage directly, without WebTorrent file streams or source-read timers. Disk removal respects these holds and map demand; a playback position alone no longer deletes downloaded pieces.
+
 ## 2.91.0
 
 - **New**: The tunnel follows a server release without a gap. When the server instance being replaced says `server-moving`, the proxy opens a second connection, which reaches the new instance, and keeps the first until the old instance closes it; while both are open, every reply goes back over the connection its request arrived on, so a browser that was signalling through the old instance is still answered there. The proxy's name and advertised URL now travel on the connection itself (`x-proxy-name`, `x-proxy-base-url`), because the separate registration request may reach the other instance during a release (torrent-tv/meta#94).

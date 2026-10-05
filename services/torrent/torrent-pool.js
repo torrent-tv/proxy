@@ -16,6 +16,7 @@ import { rmSync } from "node:fs";
 import WebTorrent from "webtorrent";
 import { logger } from "../../utils/logger.js";
 import { pieceStoreOf } from "./piece-store-of.js";
+import { demandProgress } from "./demand-progress.js";
 import { Urgency, urgencyName } from "./demand/index.js";
 import { demandFor, forgetTorrent, reconcileAll, hasUnmetDemand } from "./download/registry.js";
 import { withdrawClaim } from "./download/withdraw-claim.js";
@@ -27,13 +28,10 @@ import { noteTorrentDestroyed } from "./destroyed-torrents.js";
 const MAP_CLAIMANT = "priority-map";
 
 /** Files of a selected torrent requested for background completion. */
-const torrentFillEnabled = new WeakSet();
 
 /** Claimant prefix for conditional whole-torrent fill demand. */
-const TORRENT_FILL_CLAIMANT = "torrent-fill:";
 
 /** How the two ends of a file name themselves. */
-const EDGES_CLAIMANT = "file-edges";
 
 // The DHT's entry points. Two of the three the library ships answer nothing —
 // measured 2026-08-21 from the addon host: `router.bittorrent.com` and
@@ -80,21 +78,6 @@ const WEBTORRENT_STORE_ROOT = path.join(os.tmpdir(), "webtorrent");
 // feeds, so a viewer returning at the twentieth minute got a session whose source
 // had gone.
 const TORRENT_IDLE_TTL_MS = IDLE_KEEP_MS;
-
-// Bytes ahead of a read position to mark CRITICAL on each range request. In
-// WebTorrent, `critical` does NOT reorder the sequential piece scan — it enables
-// HOTSWAP (re-request a block from a faster peer when a slower one already
-// reserved it), so this is the near read-ahead cushion where stealing from slow
-// peers pays off. The actual "download the seek target first" effect comes from
-// deselecting the gap BEHIND the playhead (see prioritizeByteRange). Kept a
-// moving window (reset each call) so criticality never accumulates over the
-// whole file across seeks, which would make hotswap thrash.
-const PRIORITY_WINDOW_BYTES = 16 * 1024 * 1024;
-
-// The file's header/index region the codec probe needs (phase 1). Must match
-// the ranges prefetchFileEdges fetches: leading bytes + trailing bytes.
-const HEADER_HEAD_BYTES = 256 * 1024;
-const HEADER_TAIL_BYTES = 2 * 1024 * 1024;
 
 // Adaptive upload. Seeding to the BitTorrent swarm does not help our viewer (we
 // deliver over our own WebRTC/HTTPS channel) — it is pure uplink cost and the
@@ -815,81 +798,6 @@ function withdrawPriorityMap(torrent, fileIndex, keepBelow = 0) {
 }
 
 /**
- * WHERE A FILE SAYS WHAT IT IS: the piece at each of its ends.
- *
- * A container keeps its directory at one end or the other — `ftyp` and an EBML
- * header at the front, and for an MP4 that was not written for streaming the
- * `moov` at the very back. Nothing can be read of such a file until those have
- * arrived, and they stay wanted for as long as it is open: a player asks for
- * the file's shape again at every seek.
- *
- * **The size is not chosen, and it cannot be.** One byte is claimed at each
- * end, and the piece is what the swarm delivers — so one byte at each end IS
- * one piece at each end, with nothing rounded up by a number anybody picked.
- * The 256 KB and 2 MB the prefetch reads are its own affair; where a directory
- * is bigger than the piece it starts in, the read that needs it says so itself,
- * at the level of a reader that is stopped.
- *
- * **Stated by the FILE, not by the read that happens to want it.** A read
- * withdraws what it stated the moment it finishes, so until now the two ends of
- * an open film were held by nothing at all once the codec probe was done — and
- * they are exactly the pieces a seek needs and eviction is free to take.
- *
- * A function of a torrent rather than of the pool, like `leaveSwarm` beside it,
- * so both can be exercised without building one.
- *
- * @param {object} torrent
- * @param {number} fileIndex
- * @param {number} urgency - NEAR while somebody is waiting for them, TAIL to
- *   keep them afterwards.
- * @returns {boolean} Whether anything was stated.
- */
-export function stateFileEdges(torrent, fileIndex, urgency, { lower = false } = {}) {
-  const file = Array.isArray(torrent?.files) ? torrent.files[fileIndex] : null;
-  const length = Number(file?.length);
-  if (!file || !(length > 0)) {
-    return false;
-  }
-  const { register } = demandFor(torrent);
-  const ends = [
-    { claimant: `${EDGES_CLAIMANT}:${fileIndex}:head`, byteStart: 0, byteEnd: 0 },
-    { claimant: `${EDGES_CLAIMANT}:${fileIndex}:tail`, byteStart: length - 1, byteEnd: length - 1 }
-  ];
-  for (const end of ends) {
-    // RAISED, NEVER LOWERED, unless the caller is the one putting them back
-    // down. Two things ask for the same ends — a warm-up that nobody is waiting
-    // for and a playback plan that somebody is — and the warm-up's sidecars are
-    // fired off without being awaited, so it can arrive second. Taking the
-    // plan's urgency away there would leave a person watching a loading screen
-    // behind a film somebody else is watching.
-    const stated = register.windows().find((window) => String(window.claimant) === end.claimant);
-    const level = !lower && stated ? Math.min(stated.urgency, urgency) : urgency;
-    register.state({ ...end, fileIndex, urgency: level });
-  }
-  return true;
-}
-
-/**
- * Give up the ends of a file nobody has any use for.
- *
- * @param {object} torrent
- * @param {number} fileIndex
- * @returns {number} How many were withdrawn.
- */
-export function withdrawFileEdges(torrent, fileIndex) {
-  const { register } = demandFor(torrent);
-  let withdrawn = 0;
-  for (const end of ["head", "tail"]) {
-    const claimant = `${EDGES_CLAIMANT}:${fileIndex}:${end}`;
-    if (register.windows().some((window) => String(window.claimant) === claimant)) {
-      register.withdraw(claimant);
-      withdrawn += 1;
-    }
-  }
-  return withdrawn;
-}
-
-/**
  * IS ANYTHING WANTED OF THIS TORRENT — the one question asked about a torrent's
  * life, and it is answered by what has been stated, never by counting who is
  * reading.
@@ -966,17 +874,6 @@ export class TorrentPool {
    */
   #lastAccess = new Map();
 
-  /**
-   * Last byte offset each active reader is streaming from, keyed by torrent then
-   * fileIndex. Set by prioritizeByteRange on every /stream range request; read by
-   * getFileStats to report how much of the window ahead of the read head is still
-   * to download — the "amount left to resume" shown while buffering.
-   *
-   * @type {Map<import("webtorrent").Torrent, Map<number, number>>}
-   */
-  #readPositionByTorrent = new Map();
-
-
   /** When each torrent's download first fell below the stall threshold. */
   #stallSince = new Map();
   /** When each torrent's stall was last reported, so it is not repeated hotly. */
@@ -988,7 +885,6 @@ export class TorrentPool {
    *
    * @type {Map<string, Promise<void>>}
    */
-  #edgePrefetches = new Map();
 
   /** Memory budget per torrent for resident pieces; undefined = store default. */
   #memoryBytes;
@@ -1313,77 +1209,6 @@ export class TorrentPool {
   }
 
   /**
-   * State what is worth fetching once nothing urgent is missing: the rest of
-   * each file being read, from the furthest window in THAT file to its end.
-   *
-   * Per file, and that is a fix rather than a detail. It used to take the
-   * furthest window across ALL files and the last piece across ALL files and
-   * claim everything between: with two viewers on two episodes of one release —
-   * the ordinary case for a season pack — that claimed every episode lying
-   * between them, none of which anybody had asked for.
-   *
-   * Whether it is stated at all is not decided here. It is a level of urgency
-   * like any other, and the swarm layer withholds it while anything urgent, on
-   * ANY torrent, is still missing.
-   *
-   * @param {import("webtorrent").Torrent} torrent
-   * @returns {void}
-   */
-  #stateBackgroundFill(torrent) {
-    const { register } = demandFor(torrent);
-    const pieceLength = Number(torrent.pieceLength);
-    if (!Number.isFinite(pieceLength) || pieceLength <= 0) {
-      return;
-    }
-    if (torrentFillEnabled.has(torrent)) {
-      for (const [fileIndex, file] of (torrent.files ?? []).entries()) {
-        const claimant = `${TORRENT_FILL_CLAIMANT}${fileIndex}`;
-        const length = Number(file?.length);
-        if (!(length > 0) || file.done === true) {
-          register.withdraw(claimant);
-          continue;
-        }
-        register.state({
-          claimant,
-          fileIndex,
-          byteStart: 0,
-          byteEnd: length - 1,
-          urgency: Urgency.TAIL
-        });
-      }
-    }
-    // The files anything is stated for — which is the same list the reader
-    // counts used to give and is one fact rather than two.
-    for (const fileIndex of register.files()) {
-      const file = torrent.files?.[fileIndex] ?? null;
-      const claimant = `background-fill:${fileIndex}`;
-      if (!file) {
-        register.withdraw(claimant);
-        continue;
-      }
-      const wanted = register
-        .windows()
-        .filter((window) => window.fileIndex === fileIndex && window.claimant !== claimant);
-      const furthest = wanted.length === 0
-        ? -1
-        : Math.max(...wanted.map((window) => window.byteEnd));
-      const byteStart = furthest + 1;
-      const byteEnd = Number(file.length) - 1;
-      if (wanted.length === 0 || byteStart > byteEnd) {
-        register.withdraw(claimant);
-        continue;
-      }
-      register.state({
-        claimant,
-        fileIndex,
-        byteStart,
-        byteEnd,
-        urgency: Urgency.TAIL
-      });
-    }
-  }
-
-  /**
    * Take the priority map for one file and state what to fetch from it.
    *
    * THE MAP IS THE ONLY SOURCE. What used to state demand here was the reads
@@ -1412,7 +1237,6 @@ export class TorrentPool {
       withdrawPriorityMap(torrent, fileIndex);
       // The ends of the file go with it. They are kept for as long as the file
       // is open, and this is what says it is not.
-      withdrawFileEdges(torrent, fileIndex);
       // And this may have been the last thing anybody wanted of this torrent.
       // Optional because these two are functions of a torrent and are exercised
       // as such; called on the pool, the pool also acts on what they said.
@@ -1422,14 +1246,15 @@ export class TorrentPool {
     const file = Array.isArray(torrent?.files) ? torrent.files[fileIndex] : null;
     const length = Number(file?.length);
     const duration = Number(durationSeconds);
-    if (!file || !(length > 0) || !(duration > 0) || !Array.isArray(zones)) {
+    if (!file || !(length > 0) || !Array.isArray(zones)) {
       return;
     }
     const { register } = demandFor(torrent);
     // Highest number first, so the stretch a viewer reaches soonest is stated
     // first and the rest fall in behind it.
     const ordered = [...zones]
-      .filter((zone) => Number.isFinite(zone?.from) && Number.isFinite(zone?.to) && zone.to > zone.from)
+      .filter((zone) => Number.isSafeInteger(zone?.byteStart) && Number.isSafeInteger(zone?.byteEnd) &&
+        zone.byteStart >= 0 && zone.byteEnd >= zone.byteStart && zone.byteStart < length)
       .sort((left, right) => (right.priority ?? 0) - (left.priority ?? 0));
     /**
      * Which level of urgency one zone is stated at, from the map's own number
@@ -1463,23 +1288,20 @@ export class TorrentPool {
       // The scale is that layer's, and the numbers inside a band mean nothing
       // but their order.
       const priority = zone.priority ?? 0;
-      if (isBehindEverybody(priority)) {
+      if (zone.behind === true || (zone.behind === undefined && isBehindEverybody(priority))) {
         return Urgency.BEHIND;
       }
-      if (isNobodyComingNow(priority)) {
+      if (zone.deferred === true || (zone.deferred === undefined && isNobodyComingNow(priority))) {
         // In front of somebody who has stopped the picture, and of nobody who is
         // watching. Wanted, and wanted after everyone who is on their way.
         return Urgency.TAIL;
       }
-      return isAtAWatchingViewer(priority) ? Urgency.NEAR : Urgency.AHEAD;
+      return (zone.urgent === true || (zone.urgent === undefined && isAtAWatchingViewer(priority))) ? Urgency.NEAR : Urgency.AHEAD;
     };
     ordered.forEach((zone, index) => {
-      // A second of film sits at that fraction of the file. Constant bitrate is
-      // an approximation, and it is the only one available without an index of
-      // the container — near enough to say which stretch matters more, which is
-      // all this decides.
-      const byteStart = Math.max(0, Math.floor((zone.from / duration) * length));
-      const byteEnd = Math.min(length - 1, Math.ceil((zone.to / duration) * length) - 1);
+      // Only ranges declared by the container index or metadata read are wanted.
+      const byteStart = zone.byteStart;
+      const byteEnd = Math.min(length - 1, zone.byteEnd);
       if (byteEnd < byteStart) {
         return;
       }
@@ -1488,7 +1310,12 @@ export class TorrentPool {
         fileIndex,
         byteStart,
         byteEnd,
-        urgency: levelOf(zone)
+        urgency: levelOf(zone),
+        priority: Number.isFinite(zone.priority) ? Math.max(1, Math.min(100, zone.priority)) : 1,
+        order: Number.isSafeInteger(zone.order) && zone.order >= 0 ? zone.order : 0,
+        deadlineAt: Number.isFinite(zone.deadlineAt) ? zone.deadlineAt :
+          Number.isFinite(zone.withinSeconds) ? Date.now() + Math.max(0, zone.withinSeconds) * 1000 : Number.POSITIVE_INFINITY,
+        requestId: zone.requestId ?? `${torrent.infoHash}:${fileIndex}:map`
       });
     });
     // Bands the map no longer has: a viewer moved on, and what they had wanted
@@ -1507,10 +1334,10 @@ export class TorrentPool {
     const byLevel = new Map();
     for (const zone of ordered) {
       const level = levelOf(zone);
-      const seconds = Math.max(0, zone.to - zone.from);
+      const byteCount = Math.max(0, Math.min(length - 1, zone.byteEnd) - zone.byteStart + 1);
       const held = byLevel.get(level) ?? { zones: 0, megabytes: 0 };
       held.zones += 1;
-      held.megabytes += (seconds / duration) * length / 1048576;
+      held.megabytes += byteCount / 1048576;
       byLevel.set(level, held);
     }
     const shape = [...byLevel.entries()]
@@ -1528,23 +1355,6 @@ export class TorrentPool {
         `(${ordered.length} band(s) of the map, over ${Math.round(duration)}s of film)`
       );
     }
-  }
-
-  /**
-   * Enable conditional whole-torrent download for a selected source.
-   *
-   * @param {import("webtorrent").Torrent} torrent
-   * @returns {boolean}
-   */
-  fillTorrentAsCapacityAllows(torrent) {
-    if (!torrent || !Array.isArray(torrent.files) || torrent.destroyed) {
-      return false;
-    }
-    torrentFillEnabled.add(torrent);
-    this.#stateBackgroundFill(torrent);
-    this.followTheDemand(torrent);
-    reconcileAll();
-    return true;
   }
 
   #reportStalledDownloads() {
@@ -1600,12 +1410,6 @@ export class TorrentPool {
       if (!isWanted(torrent) || torrent?.done === true) {
         continue;
       }
-      this.#stateBackgroundFill(torrent);
-      // And act on what that just said. The fill withdraws itself once nothing
-      // else wants the file, so a torrent everybody has left can be held by the
-      // fill's own claim until this pass — and without this line the moment it
-      // goes would be noticed by nobody, leaving the torrent in its swarm with
-      // no idle clock running.
       this.followTheDemand(torrent);
     }
     this.#reportStalledDownloads();
@@ -1659,6 +1463,16 @@ export class TorrentPool {
     const label = () => String(torrent.infoHash ?? "?").slice(0, 8);
     const addedAt = Date.now();
     this.#swarmTimingByTorrent.set(torrent, { addedAt, firstPeerAt: null });
+
+    torrent.on("download-requested", ({ piece, deadlineAt, requestId, peer, queued }) => {
+      logger.info(`download request=${requestId} piece=${piece} deadline=${deadlineAt} peer=${peer} outstanding=${queued}`);
+    });
+    torrent.on("download-request-cancelled", ({ piece, offset, length, reason, requestId }) => {
+      logger.info(`download request=${requestId ?? `${torrent.infoHash ?? "unknown"}:${piece}:${offset}`} cancel bytes=${length} reason=${reason}`);
+    });
+    torrent.on("download-request-cancel-failed", ({ piece, offset, length, error }) => {
+      logger.warn(`download request=${torrent.infoHash ?? "unknown"}:${piece}:${offset} cancel bytes=${length} failed: ${error}`);
+    });
 
     // The first connected peer, said once, because the wait for it can BE the
     // whole cold start and nothing else measures it.
@@ -2125,7 +1939,6 @@ export class TorrentPool {
   #forgetBookkeeping(torrent) {
     this.#cancelIdleRemoval(torrent);
     this.#lastAccess.delete(torrent);
-    this.#readPositionByTorrent.delete(torrent);
     this.#stallSince.delete(torrent);
     this.#stallReportedAt.delete(torrent);
   }
@@ -2166,16 +1979,6 @@ export class TorrentPool {
    *
    * @param {import("webtorrent").Torrent} torrent
    * @param {number | null} [fileIndex] - Zero-based file index, or null for torrent-level only.
-   * @param {{ resumeAnchorByteStart?: number | null }} [options] - `resumeAnchorByteStart`
-   *   pins the resume window to a FIXED byte offset instead of the live (moving)
-   *   read position. Without it, the window is anchored to wherever the file is
-   *   CURRENTLY being read from — which slides forward as playback/encoding
-   *   advances, so "bytes still needed" can jump up mid-poll even though nothing
-   *   regressed (the window just moved past already-downloaded pieces into
-   *   fresh ones). The caller should capture the returned `resumeAnchorByteStart`
-   *   on the FIRST poll of a buffering episode and pass it back on subsequent
-   *   polls of that SAME episode, so "bytes needed" counts down monotonically
-   *   against a fixed target instead of chasing a moving one.
    * @returns {{
    *   numPeers: number,
    *   downloadSpeed: number,
@@ -2193,7 +1996,7 @@ export class TorrentPool {
    *   secondsWaitingForFirstPeer: number | null
    * }}
    */
-  getFileStats(torrent, fileIndex = null, options = {}) {
+  getFileStats(torrent, fileIndex = null) {
     const numPeers = typeof torrent?.numPeers === "number" ? torrent.numPeers : 0;
     const downloadSpeed = typeof torrent?.downloadSpeed === "number" ? torrent.downloadSpeed : 0;
     const uploadSpeed = typeof torrent?.uploadSpeed === "number" ? torrent.uploadSpeed : 0;
@@ -2237,19 +2040,10 @@ export class TorrentPool {
       return { ...base, fileProgress: null, fileDownloaded: null, fileLength: null };
     }
 
-    const header = this.#getHeaderRangeProgress(torrent, file);
-
-    // Bytes still to download in the window ahead of the anchor point — "how
-    // much left to resume". Null until a read position is known. The anchor is
-    // the caller-supplied FROZEN offset when given (see JSDoc above), otherwise
-    // the live (moving) read position tracked from /stream range requests.
-    const readPositions = this.#readPositionByTorrent.get(torrent);
-    const liveReadByteStart = readPositions ? readPositions.get(fileIndex) : undefined;
-    const requestedAnchor = options?.resumeAnchorByteStart;
-    const readByteStart = Number.isFinite(requestedAnchor) ? requestedAnchor : liveReadByteStart;
-    const resume = typeof readByteStart === "number"
-      ? this.#getResumeWindowProgress(torrent, file, readByteStart)
-      : null;
+    // Current map demand is the only source of preparation progress.
+    const resume = demandProgress({ windows: demandFor(torrent).register.windows()
+      .filter(window => window.fileIndex === fileIndex && window.urgency <= Urgency.NEAR),
+      file, pieceLength: torrent.pieceLength, locationOf: pieceStoreOf(torrent)?.locationOf?.bind(pieceStoreOf(torrent)) });
 
     // Null-safe downloaded/progress (webtorrent's own getters throw on a
     // deselected null piece — see fileDownloadedBytes).
@@ -2273,371 +2067,16 @@ export class TorrentPool {
       fileProgress: fileLength > 0 ? Math.max(0, Math.min(1, fileDownloaded / fileLength)) : 0,
       fileDownloaded,
       fileLength,
+      fileOffset: file.offset,
       residence,
-      // Resume window (ahead of the anchor): bytes needed vs downloaded, plus
-      // the anchor itself so the caller can pin it for the rest of one episode.
+      fileAvailable: fileLength > 0 && residence.length > 0 && residence.every(range => range.location !== "missing"),
+      // Compatibility fields report the same current urgent map demand.
       resumeNeededBytes: resume ? resume.totalBytes : null,
       resumeDownloadedBytes: resume ? resume.downloadedBytes : null,
-      resumeAnchorByteStart: typeof readByteStart === "number" ? readByteStart : null,
-      // Phase-1 progress: how much of the header/index region (the bytes the
-      // codec probe needs before transcoding can start) is downloaded. Counted
-      // by whole pieces from the torrent bitfield, so it advances coarsely
-      // (piece granularity). Null when the bitfield/piece info is unavailable.
-      headerBytes: header ? header.totalBytes : null,
-      headerDownloadedBytes: header ? header.downloadedBytes : null
+      resumeAnchorByteStart: null,
+      headerBytes: resume ? resume.totalBytes : null,
+      headerDownloadedBytes: resume ? resume.downloadedBytes : null
     };
-  }
-
-  /**
-   * Count, by whole torrent pieces, how many bytes of a file's header/index
-   * region (leading {@link HEADER_HEAD_BYTES} + trailing {@link HEADER_TAIL_BYTES})
-   * are downloaded. Used to show progress toward the codec-probe phase.
-   *
-   * @param {import("webtorrent").Torrent} torrent
-   * @param {import("webtorrent").TorrentFile} file
-   * @returns {{ totalBytes: number, downloadedBytes: number } | null}
-   */
-  #getHeaderRangeProgress(torrent, file) {
-    const pieceLength = Number(torrent?.pieceLength);
-    const bitfield = torrent?.bitfield;
-    const fileLength = Number(file?.length);
-    if (
-      !Number.isFinite(pieceLength) || pieceLength <= 0 ||
-      !bitfield || typeof bitfield.get !== "function" ||
-      !Number.isFinite(fileLength) || fileLength <= 0
-    ) {
-      return null;
-    }
-    const fileOffset = Number.isFinite(file.offset) ? file.offset : 0;
-    const headEnd = Math.min(HEADER_HEAD_BYTES, fileLength) - 1;
-    const ranges = [[0, headEnd]];
-    const tailStart = Math.max(headEnd + 1, fileLength - HEADER_TAIL_BYTES);
-    if (tailStart <= fileLength - 1) {
-      ranges.push([tailStart, fileLength - 1]);
-    }
-    const pieces = new Set();
-    for (const [start, end] of ranges) {
-      const first = Math.floor((fileOffset + start) / pieceLength);
-      const last = Math.floor((fileOffset + end) / pieceLength);
-      for (let piece = first; piece <= last; piece += 1) {
-        pieces.add(piece);
-      }
-    }
-    let totalBytes = 0;
-    let downloadedBytes = 0;
-    for (const piece of pieces) {
-      totalBytes += pieceLength;
-      if (bitfield.get(piece)) {
-        downloadedBytes += pieceLength;
-      }
-    }
-    return { totalBytes, downloadedBytes };
-  }
-
-  /**
-   * Count, by whole torrent pieces, how many bytes of the window AHEAD of the
-   * current read position are downloaded — i.e. how much is still to download
-   * before playback can continue from that point. Mirrors
-   * {@link #getHeaderRangeProgress}, for the moving read head.
-   *
-   * @param {import("webtorrent").Torrent} torrent
-   * @param {import("webtorrent").TorrentFile} file
-   * @param {number} readByteStart - Byte offset within the file the reader is at.
-   * @returns {{ totalBytes: number, downloadedBytes: number } | null}
-   */
-  #getResumeWindowProgress(torrent, file, readByteStart) {
-    const pieceLength = Number(torrent?.pieceLength);
-    const bitfield = torrent?.bitfield;
-    const fileLength = Number(file?.length);
-    if (
-      !Number.isFinite(pieceLength) || pieceLength <= 0 ||
-      !bitfield || typeof bitfield.get !== "function" ||
-      !Number.isFinite(fileLength) || fileLength <= 0
-    ) {
-      return null;
-    }
-    const fileOffset = Number.isFinite(file.offset) ? file.offset : 0;
-    const windowStart = Math.max(0, Math.min(Number(readByteStart) || 0, fileLength - 1));
-    const windowEnd = Math.min(fileLength - 1, windowStart + PRIORITY_WINDOW_BYTES - 1);
-    const firstPiece = Math.floor((fileOffset + windowStart) / pieceLength);
-    const lastPiece = Math.floor((fileOffset + windowEnd) / pieceLength);
-    // Byte-accurate: count the PARTIAL progress of in-progress pieces (not whole
-    // pieces), so "amount left" moves smoothly instead of jumping by a whole
-    // piece (8 MB here) at a time.
-    let totalBytes = 0;
-    let downloadedBytes = 0;
-    for (let piece = firstPiece; piece <= lastPiece; piece += 1) {
-      totalBytes += pieceLength;
-      downloadedBytes += pieceDownloadedBytes(torrent, piece);
-    }
-    return { totalBytes, downloadedBytes };
-  }
-
-  /**
-   * Pre-fetch the leading and trailing bytes of a torrent file so that
-   * WebTorrent prioritises the pieces that contain file headers and footers.
-   *
-   * For MP4 files the MOOV atom is often placed at the very end of the file
-   * (non-faststart encoding).  Fetching the tail ensures that ffprobe can
-   * identify codecs and duration even for freshly-added torrents without
-   * waiting for the rest of the content to download.
-   *
-   * Resolves once both regions have been fully downloaded, or when the
-   * timeout elapses — whichever comes first.  Never rejects.
-   *
-   * @param {import("webtorrent").Torrent} torrent
-   * @param {number} fileIndex - Zero-based index into `torrent.files`.
-   * @param {object} [options]
-   * @param {number} [options.headBytes=262144]   - Leading bytes to fetch (default 256 KB).
-   * @param {number} [options.tailBytes=2097152]  - Trailing bytes to fetch (default 2 MB).
-   * @param {number} [options.timeoutMs=300000]   - Maximum wait time in milliseconds (default 5 min).
-   * @param {boolean} [options.awaited=false] - Whether somebody is waiting for
-   *   these bytes right now. The playback plan is: it cannot answer until the
-   *   file has said what is in it, and a person is watching a loading screen
-   *   meanwhile. The warm-up is NOT, by its whole purpose — it happens while
-   *   the viewer is still choosing, so it must not outrank another film that
-   *   somebody is watching on this proxy this minute.
-   * @returns {Promise<void>}
-   */
-  async prefetchFileEdges(
-    torrent,
-    fileIndex,
-    { headBytes = 256 * 1024, tailBytes = 2 * 1024 * 1024, timeoutMs = 300_000, awaited = false } = {}
-  ) {
-    if (!torrent || !Array.isArray(torrent.files)) {
-      return;
-    }
-    // THE ENDS OF THIS FILE ARE WANTED, and they go on being wanted after this
-    // read is over: the file's own directory lives there, and a seek asks for
-    // it again. Stated before the read rather than by it, and kept afterwards
-    // at the level of something nobody is waiting for.
-    stateFileEdges(torrent, fileIndex, awaited ? Urgency.NEAR : Urgency.TAIL);
-    // The first thing ever stated about a torrent being opened, and therefore
-    // what keeps it in its swarm through the seconds when nothing else can say
-    // anything about it.
-    this.followTheDemand(torrent);
-    // Two callers can ask for the same edges at once: the warm-up that starts
-    // when a torrent is picked, and the playback plan a moment later. Reading
-    // the same two pieces twice costs nothing in bandwidth — the torrent
-    // fetches each piece once — but it does open a second pair of readers, each
-    // claiming a window and holding pieces. One is enough.
-    const inFlightKey = `${torrent.infoHash}:${fileIndex}`;
-    const running = this.#edgePrefetches.get(inFlightKey);
-    if (running) {
-      return running;
-    }
-    const prefetch = this.#prefetchFileEdgesOnce(torrent, fileIndex, { headBytes, tailBytes, timeoutMs });
-    this.#edgePrefetches.set(inFlightKey, prefetch);
-    try {
-      return await prefetch;
-    } finally {
-      this.#edgePrefetches.delete(inFlightKey);
-      // Nobody is waiting for them now. Said with `lower`, because this is the
-      // one caller entitled to put them back down: the read it belongs to is
-      // over, and there is no other — a file's edges are fetched once at a time.
-      stateFileEdges(torrent, fileIndex, Urgency.TAIL, { lower: true });
-    }
-  }
-
-  /**
-   * Fetch a bounded region in the MIDDLE of a file.
-   *
-   * The warm-up fetches a file's two edges because the codec probe reads them.
-   * A viewer resuming a film needs neither: they need the region under their own
-   * position, and until now nothing asked for it before the encoder did. Field
-   * 2026-09-03 — a retry after a crash reached the encoder 53 s after the button
-   * was pressed, and only THEN was the piece under the viewer's position first
-   * requested; it took another 46 s, and the browser gave up 0.4 s before it
-   * landed.
-   *
-   * Read as an ordinary bounded read, never as a selection: claiming a whole
-   * region alongside the readers' own windows is the mistake `#syncSelections`
-   * was written against.
-   *
-   * @param {import("webtorrent").Torrent} torrent
-   * @param {number} fileIndex
-   * @param {number} startByte
-   * @param {number} bytes
-   * @param {{ timeoutMs?: number }} [options]
-   * @returns {Promise<void>}
-   */
-  async prefetchFileRegion(torrent, fileIndex, startByte, bytes, { timeoutMs = 300_000 } = {}) {
-    const file = torrent?.files?.[fileIndex];
-    if (!file || typeof file.createReadStream !== "function") {
-      return;
-    }
-    const fileSize = file.length;
-    if (!Number.isFinite(fileSize) || fileSize <= 0 || !(bytes > 0)) {
-      return;
-    }
-    const start = Math.max(0, Math.min(Math.floor(startByte), fileSize - 1));
-    const end = Math.min(fileSize - 1, start + Math.floor(bytes) - 1);
-    if (end <= start) {
-      return;
-    }
-    const drained = new Promise((resolve) => {
-      const stream = file.createReadStream({ start, end });
-      stream.on("data", () => undefined);
-      stream.once("end", resolve);
-      stream.once("error", resolve);
-      stream.once("close", resolve);
-    });
-    await Promise.race([drained, new Promise((resolve) => setTimeout(resolve, timeoutMs))]);
-  }
-
-  /**
-   * The body of {@link prefetchFileEdges}, without the de-duplication.
-   *
-   * @param {import("webtorrent").Torrent} torrent
-   * @param {number} fileIndex
-   * @param {{ headBytes: number, tailBytes: number, timeoutMs: number }} options
-   * @returns {Promise<void>}
-   */
-  async #prefetchFileEdgesOnce(torrent, fileIndex, { headBytes, tailBytes, timeoutMs }) {
-    if (!torrent || !Array.isArray(torrent.files)) {
-      return;
-    }
-    const file = torrent.files[fileIndex];
-    if (!file || typeof file.createReadStream !== "function") {
-      return;
-    }
-    const fileSize = file.length;
-    if (!Number.isFinite(fileSize) || fileSize <= 0) {
-      return;
-    }
-
-    const safeHeadEnd = Math.min(headBytes, fileSize) - 1;
-    const safeTailStart = Math.max(0, fileSize - tailBytes);
-
-    /** Drain a readable stream, resolving on end/error/close. */
-    const drainStream = (stream) =>
-      new Promise((resolve) => {
-        stream.on("data", () => undefined);
-        stream.once("end", resolve);
-        stream.once("error", resolve);
-        stream.once("close", resolve);
-      });
-
-    try {
-      const tasks = [
-        // Head: FTYP/MOOV (faststart MP4), EBML header (MKV), etc.
-        drainStream(file.createReadStream({ start: 0, end: safeHeadEnd }))
-      ];
-
-      // Tail: MOOV atom for non-faststart MP4.  Skip when it overlaps the head.
-      if (safeTailStart > safeHeadEnd + 1) {
-        tasks.push(drainStream(file.createReadStream({ start: safeTailStart, end: fileSize - 1 })));
-      }
-
-      await Promise.race([
-        Promise.all(tasks),
-        new Promise((resolve) => setTimeout(resolve, timeoutMs))
-      ]);
-    } catch (_error) {
-      // Best-effort — a prefetch failure must never prevent playback.
-    }
-  }
-
-
-
-  /**
-   * Record where a file is being read from.
-   *
-   * This used to also decide what the torrent should download, and that was the
-   * mistake: it was one of THREE places claiming pieces for the same file — the
-   * whole-file selection, a window around the read head, and the reader itself
-   * — and they overwrote each other on every request. Every need is now stated
-   * in one register (`services/demand/`) and one class turns the register into
-   * requests to the swarm (`services/torrent/download/SwarmSelection.js`); several
-   * readers on one file therefore produce the union of their windows instead of
-   * the last caller's opinion.
-   *
-   * What is left here is bookkeeping the readers cannot do: `getFileStats`
-   * reports how much of the window ahead of the read head is still missing, so
-   * the viewer can be shown how long a resume will take, and a jump in the read
-   * position is logged because a seek that never reaches the torrent is
-   * invisible otherwise.
-   *
-   * @param {import("webtorrent").Torrent} torrent
-   * @param {number} fileIndex
-   * @param {number} byteStart - Start offset within the file.
-   * @param {number} [windowBytes] - Unused; kept so callers need not change.
-   * @param {{ wholeFileRead?: boolean, isPlaybackRead?: boolean }} [options] -
-   *   `wholeFileRead` marks a request that carried no byte range, i.e. one that
-   *   merely opens the file at 0 rather than asking to read from there.
-   *   `isPlaybackRead` marks the encoder's input read, the only one that
-   *   follows the viewer. See the guards below.
-   * @returns {void}
-   */
-  prioritizeByteRange(
-    torrent,
-    fileIndex,
-    byteStart,
-    windowBytes = PRIORITY_WINDOW_BYTES,
-    options = {}
-  ) {
-    if (!torrent || !Array.isArray(torrent.files)) {
-      return;
-    }
-    const file = torrent.files[fileIndex];
-    if (!file) {
-      return;
-    }
-    const fileLength = Number(file.length);
-    if (!Number.isFinite(fileLength) || fileLength <= 0) {
-      return;
-    }
-
-    const safeStart = Math.max(0, Number(byteStart) || 0);
-
-    // Remember where this file is being read from, so getFileStats can report the
-    // download progress of the window ahead of the read head (resume amount).
-    let readPositions = this.#readPositionByTorrent.get(torrent);
-    if (!readPositions) {
-      readPositions = new Map();
-      this.#readPositionByTorrent.set(torrent, readPositions);
-    }
-    const previousStart = readPositions.get(fileIndex);
-
-    // A request with no byte range says nothing about where the viewer is. ffmpeg
-    // opens its input with a plain GET and abandons it the moment it seeks, and
-    // the keyframe index and the codec probe do the same — four such reads around
-    // every encoder restart, each one arriving here as "position 0". Acting on
-    // them undoes the seek that just happened: the whole file is re-selected from
-    // piece 0, the picker skips the pieces already on disk and walks the swarm
-    // forward from the first hole. Measured on a 4.7 GB film: a seek to 89.1%
-    // downloaded 2.47 GB over 93 s before the segment could be served. So a
-    // whole-file read only sets the position when nothing else has.
-    if (options.wholeFileRead && previousStart !== undefined) {
-      return;
-    }
-
-    readPositions.set(fileIndex, safeStart);
-
-    // Log jumps only. Sequential reading calls this on every range request and
-    // would drown the log; a jump is a seek, and a seek that never reaches the
-    // torrent is exactly the failure this line exists to make visible — after a
-    // seek the encoder waits on pieces nobody has been told to fetch.
-    const isJump =
-      previousStart === undefined || Math.abs(safeStart - previousStart) > PRIORITY_WINDOW_BYTES;
-    if (isJump) {
-      // A jump in the read that follows the viewer is a seek. Whatever the
-      // swarm was giving us was for somewhere else, and the pieces at the new
-      // position have to be earned from peers that are choking us — the same
-      // standing start as a fresh torrent. A jump in any OTHER read is the
-      // codec probe or the keyframe index visiting the ends of the file, and
-      // nobody is waiting on those the way a viewer waits on a seek.
-      if (options.isPlaybackRead) {
-        this.#markHurry(torrent, "the viewer moved");
-      }
-      const percent = ((safeStart / fileLength) * 100).toFixed(1);
-      logger.info(
-        `torrent-pool: [${String(torrent.infoHash).slice(0, 8)}] read position -> ` +
-        `${(safeStart / 1024 / 1024).toFixed(0)}MB (${percent}% of file ${fileIndex})` +
-        (previousStart === undefined ? " (first)" : ` (was ${(previousStart / 1024 / 1024).toFixed(0)}MB)`)
-      );
-    }
-
   }
 
   /**

@@ -75,6 +75,8 @@ import { OtherDemand, divideAllowance } from "./allowance.js";
  */
 
 export class MachineBudget {
+  #revisionPromise = null;
+  #reviseAgain = false;
   /** Resource name → how to read what is free, and what others have needed. */
   #resources = new Map();
 
@@ -135,12 +137,33 @@ export class MachineBudget {
     this.#claimants = this.#claimants.filter((one) => one.name !== name);
   }
 
+  /** Total measured policy allowance, independent of its current division. */
+  capacityOf(name) {
+    const reading = this.#last.get(name);
+    return reading?.measured ? reading.allowanceBytes : null;
+  }
+
   /**
    * Read every resource, divide each, and tell each claimant its share.
    *
    * @returns {Promise<Map<string, { freeBytes: number, allowanceBytes: number, shares: object[] }>>}
    */
-  async revise() {
+  revise() {
+    if (this.#revisionPromise) {
+      this.#reviseAgain = true;
+      return this.#revisionPromise;
+    }
+    this.#revisionPromise = (async () => {
+      do {
+        this.#reviseAgain = false;
+        await this.#readRevision();
+      } while (this.#reviseAgain);
+      return this.#last;
+    })().finally(() => { this.#revisionPromise = null; });
+    return this.#revisionPromise;
+  }
+
+  async #readRevision() {
     for (const [name, resource] of this.#resources) {
       const claimants = this.#claimants.filter((one) => one.resource === name);
       if (claimants.length === 0) {
@@ -153,14 +176,15 @@ export class MachineBudget {
       // there is how the spill file came to have no limit in the first place.
       const freeBytes = Number.isFinite(free) && free !== null ? Math.max(0, free) : 0;
       const allowanceBytes = this.#allowanceFor(name, resource, freeBytes, held);
-      const shares = divideAllowance(claimants.map((one) => Math.max(0, one.wanted())), allowanceBytes);
+      const shares = divideAllowance(claimants.map((one) => Math.max(0, one.wanted())), allowanceBytes,
+        claimants.map(one => Math.max(0, one.required?.() ?? 0)));
       const reading = claimants.map((one, position) => ({
         name: one.name,
         held: one.held(),
         allowed: shares[position],
         short: Number.isFinite(one.minimum) && shares[position] < one.minimum
       }));
-      this.#last.set(name, { freeBytes, allowanceBytes, shares: reading });
+      this.#last.set(name, { freeBytes, allowanceBytes, measured: Number.isFinite(free) && free !== null, shares: reading });
       for (const [position, one] of claimants.entries()) {
         one.allow(shares[position]);
       }

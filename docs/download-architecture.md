@@ -1,261 +1,59 @@
-# Download architecture — what is wanted, and what the swarm is told
+# Download architecture
 
-Two questions, kept apart, and neither of them is "which file".
+## Owners and maps
 
-## Two axes, and what is NOT a third
+The viewer layer owns source selection, position, playback intent, pause time,
+selected tracks and visible files. PriorityOrchestrator builds the per-output
+production map and the merged per-file playback map. SourcePreparation owns
+metadata and index work derived from those same viewers before an output exists.
 
-**What somebody needs** — a claimant, a file, a byte range, a level of urgency.
-Stated in `services/torrent/demand/`. Knows nothing about WebTorrent, nothing about
-pieces, nothing about the piece store: it is numbers and rules, and it is
-testable without a torrent.
+DownloadMaps publishes one byte map per file. It combines exact playback input
+ranges, native source playback ranges and metadata reads that returned missing
+bytes. Only this publication can state download demand. A media read cannot
+select a torrent piece, and a storage read cannot create download demand.
 
-**What the swarm is told** — one class, `services/torrent/download/SwarmSelection.js`,
-which reads the register and calls `select`, `deselect` and `critical`. It is
-the only thing in this proxy that calls them.
+The media layer resolves segment input once for both download demand and encoder
+admission. It reads available bytes and returns a result, missing ranges, memory
+requirements or an explicit terminal refusal. Results belong to the source file;
+only outstanding work is withdrawn when viewer demand changes.
 
-"Which file" is not a third axis. A file nobody has stated a need for is simply
-absent from the register, and a torrent is added with `deselect: true` so
-nothing is fetched until something is stated. Before 2026-09-02 the library's
-own default selected the whole torrent and this proxy undid that afterwards by
-deselecting the files nobody had opened — so on a season pack every episode was
-being fetched for as long as the viewer took to choose one.
+## Publication and scheduling
 
-## Layers
+DemandRegister retains windows by claimant and exposes a revision. SwarmSelection
+projects them into WebTorrent selections and storage priorities. Registry batches
+selection changes before one global DeadlineScheduler pass. Reentrant library
+wire updates cannot rescan a partly published map.
 
-```mermaid
-flowchart TB
-  subgraph Statements["services/torrent/demand — what is wanted"]
-    W[Window<br/>claimant, file, bytes, urgency]
-    U[Urgency<br/>BLOCKED NEAR AHEAD TAIL BEHIND]
-    R[DemandRegister<br/>live windows by claimant]
-    P[pieces.js<br/>the one bytes to pieces conversion]
-  end
+DeadlineScheduler orders missing pieces by deadline, priority, list order and
+piece number across all live torrents. Each peer retains its protocol request
+capacity and piece verification. A faster peer can replace a block request whose
+predicted completion misses its deadline. Compiled piece demand is reused until
+the register changes; actual piece availability is read again on every pass.
 
-  subgraph Swarm["services/torrent/download — what the swarm is told"]
-    S[SwarmSelection<br/>select / deselect / critical]
-    G[registry<br/>one per torrent + the cross-torrent rule]
-  end
+FutureDownload uses the same ordering and request-capacity rules against an
+isolated copy of peer state. A piece becomes available only after every block is
+received. Unmeasured completion remains unknown. Concurrent source reports share
+one forecast; a changed or withdrawn map invalidates that forecast.
 
-  subgraph Claimants["who states needs"]
-    PM[priority map<br/>where the viewers are, per FILE]
-    PR[piece-reader<br/>the piece it is stopped on]
-    BF[torrent-pool<br/>background fill, per file]
-  end
+## Storage and input
 
-  PM -->|state / withdraw| R
-  PR -->|state / withdraw| R
-  BF -->|state / withdraw| R
-  W --> R
-  U --> R
-  R --> S
-  P --> S
-  G --> S
-  S -->|the only caller| WT[(WebTorrent)]
-```
+Storage owns residence and atomic acquisition of available input. Held pieces
+cannot be evicted. Capacity-driven removal follows the published map and announces
+changed availability, causing unfinished media reads and input admission to retry.
 
-## Who the claimants are, and what each of them knows
+The encoder receives complete admitted input under its memory allowance. It never
+reads a source URL or waits for the torrent to fill an incomplete input. A stopped
+or superseded request releases its reservation. Completed segments remain facts
+available to every compatible viewer.
 
-**The priority map** states what should be downloaded AHEAD of the viewers, once
-per file, built in `services/viewer/` (`PriorityOrchestrator`) from where they are and from nothing
-else. It is the same map the encoding reads — the encoding reads it per OUTPUT
-and in segment numbers, this layer reads it per FILE and in bytes, and both
-scopes are right for what asks them (`encode-architecture.md`).
+A fully retained source is described by its whole files after its torrent closes.
+It continues to answer availability and source facts without rebuilding a torrent.
+Open admission reads participate in file ownership before asynchronous reading.
 
-**A read** states only the piece it is STOPPED ON. That is not a forecast but the
-fact that somebody is waiting there, and it is what keeps working for the reads
-the viewers' map does not cover: a container header at open, the subtitle walk, a
-soundtrack being fetched whole. Until 2026-09-02 each read built four bands
-around its own head instead, so fifteen reads were fifteen forecasts on a store
-holding sixteen pieces, half of all evictions took a piece a reader had said it
-wanted, and two thirds of reads came back from disk.
+## Pause
 
-**The background fill** states one file at a time — a soundtrack pulled whole
-once the cushion is full, and no further.
-
-## Whether the map reaches the swarm, and in what shape
-
-Applied in silence until 2026-09-08: that the map had been BUILT was visible in
-the encoding's own line, that the download had received it was visible nowhere,
-and a whole field session carried not one line about it. Said now on change, per
-LEVEL rather than per zone — the register has five levels and the map has as many
-bands as the film needs, and the fit between the two is the one thing here that
-could be wrong:
-
-```
-torrent-pool: the swarm is told, for "film.mkv": NEAR 1 zone(s) 42MB,
-AHEAD 4 zone(s) 310MB, TAIL 1 zone(s) 1900MB (7 band(s) of the map, over 1218s of film)
-```
-
-In megabytes, because that is what a swarm delivers. `NEAR` absent while
-somebody is watching means the map is not arriving; every band landing in one
-level means the fit has collapsed.
-
-Beside it, where the waits fell: the reader records each wait against the level
-the map put its piece in, and the `supply` line carries the table. Long waits at
-`blocked` mean the urgent zone is too narrow; long waits further out mean the
-lead is.
-
-## What reaches MEMORY is not what reaches the swarm
-
-`BLOCKED` and `NEAR` only. Memory holds what will be READ soon; the swarm is
-told what will be DOWNLOADED soon, and the map states the second over the whole
-rest of the film.
-
-`AHEAD` used to reach memory too, and it is exactly the speculative lead. The
-map states one claimant per zone, so a film with seven zones arrived at the piece
-store as five separate holders — one `NEAR` and four `AHEAD` — each covering tens
-of megabytes. Field 2026-09-08: `5 reader(s) want 24 piece(s) of 25 the store may
-hold (widest window 17)`, on a session with exactly two reads. The union of what
-was declared equalled the whole capacity, so every admission had to evict a piece
-somebody had declared, and 100 of 1395 evictions did; beside that, 6565 spills
-and 7575 revivals in 44 minutes with a median 0.0 s on disk.
-
-Raising the allowance does not touch it: a lead stated over the rest of the film
-grows to fill whatever memory it is given, and the ratio is unchanged.
-
-The store's own line now NAMES its holders (`[priority-map:22:0 read:…]`) rather
-than counting them, because the count read as five encoders on a session that
-had two, and choosing between "narrow the windows" and "raise the allowance" was
-guesswork without the names.
-
-## How much faster than realtime a step must run
-
-`1 / (1 - the share of the reading's time that was lost to waiting)`, over whole
-cycles: from the first interruption's start to the last one's, which holds
-exactly one running stretch per interruption in it.
-
-The model is unchanged and was always right — if a fraction `f` of the time
-delivers nothing, producing one second of film takes `1/(1 - f)` seconds. What
-was wrong were the two quantities fed into it: the WORST single interruption
-divided by the MEDIAN gap between interruptions, a maximum over a median, from
-populations that need not be the same events. It asks what would happen if the
-worst interruption recurred at the typical rate — a compound case that never
-occurs — and it divides by a gap that goes to zero whenever interruptions arrive
-in a burst.
-
-Field 2026-09-08: 0.79 s over 0.01 s gave **158.60x** on a file already
-downloaded whole, and the quality budget refused every step against it forty
-times in one session. The same measurements as a share of time lost give 1.00x.
-
-## The five levels
-
-| level | what it is | stated |
-|---|---|---|
-| `BLOCKED` | the bytes a reader is stopped on | always; may take a block from a slow peer |
-| `NEAR` | the rest of that reader's window | always |
-| `AHEAD` | the lead the encoder will reach | always |
-| `TAIL` | to the end of the file | only while nothing urgent is missing, anywhere |
-| `BEHIND` | the gap left by a forward seek | only while nothing urgent is missing, anywhere |
-
-## Why urgency is not a number handed to the library
-
-Measured against the vendored WebTorrent 2.8.5. Selections are sorted by
-priority **only when one is inserted**:
-
-```js
-this._selections.sort((a, b) => b.priority - a.priority)
-```
-
-and after a wire's pipeline is filled from a selection, that selection is moved
-to the back of the whole non-zero group:
-
-```js
-function shufflePriority (i) {
-  let last = i
-  for (let j = i; j < self._selections.length && self._selections.get(j).priority; j++) last = j
-  self._selections.swap(i, last)
-}
-```
-
-So distinct non-zero numbers give an order once and a round robin thereafter.
-Two things hold: non-zero rotates fairly, zero is always last.
-
-The ordering is therefore kept in `DemandRegister.levelsToState`, by choosing
-what to state at all, and the library is given only the distinction it honours —
-`1` for anything wanted now, `0` for the speculative tail.
-
-The rotation is wanted, not merely tolerated: with two viewers of one film both
-stopped, both needs sit at `BLOCKED` and the swarm alternates between them
-instead of always serving whoever asked first.
-
-## Why the speculative levels are withdrawn rather than lowered
-
-A peer that cannot help with anything urgent — it lacks those pieces, or every
-block of them is reserved by somebody else — falls through the selection list to
-whatever is below. With a permanently low priority it would then spend the
-shared link on pieces nobody is waiting for, about a second of its own
-throughput at a time (`PIPELINE_MAX_DURATION = 1`).
-
-A withdrawn window is not in the download set at all, so there is nothing to
-fall through to.
-
-The condition is **global**, in `services/torrent/download/registry.js`, and not per
-torrent: two films on one proxy share the link, so filling the tail of one while
-a viewer of the other has a still picture spends the same bandwidth twice over.
-
-## `select` against `critical` — two different things
-
-`select(from, to, priority)` decides **what is asked for next**: it inserts into
-the sorted selection list the picker walks.
-
-`critical(from, to)` decides **whom it is asked of**. Every block of a piece is
-reserved to exactly one wire; `piece.reserve()` returns `-1` once they all are,
-and a fast idle peer walks past. The flag lets `_hotswap` take a block from the
-slowest holder and give it to the asker:
-
-```js
-if (reservation === -1 && hotswap && self._hotswap(wire, index)) {
-  reservation = piece.reserve()
-}
-```
-
-Its thresholds are constants in the library, not settings: the asker must be
-above 16 KB/s, the holder below 48 KB/s and at least twice as slow. So a holder
-at 50 KB/s is never displaced, however long the piece has been waited for.
-Whether that costs us anything is measured rather than assumed — `askFastestWiresFor`
-counts the requests refused while every block was reserved, and the wait line
-prints it. A number there would justify replacing `_hotswap` on the torrent
-object; a zero says the thresholds are not what we are short of.
-
-## Several viewers
-
-- **Same file.** Each reader is its own claimant. Two stopped viewers put two
-  disjoint ranges at `BLOCKED`, and the library's rotation alternates between
-  them. Two readers wanting the same pieces are merged into one instruction.
-- **Same torrent, different files.** The background fill is stated **per file**,
-  from the furthest window in that file to that file's end. It used to take the
-  furthest window across all files and the last piece across all files and claim
-  everything between — with two viewers on two episodes of one release, that
-  claimed every episode lying between them.
-- **Different torrents.** One register and one selection each, and the
-  speculative condition spans all of them.
-
-## What was deleted, and why
-
-- `claimWindow`, `releaseWindow`, `markCritical`, `clearCritical` in
-  `piece-reader.js` — the reader no longer speaks to the library.
-- `#reassertReaderWindows` in `torrent/torrent-pool.js` — it read the piece store's
-  MEMORY claims and rebuilt download claims from them, because WebTorrent
-  deletes a selection once satisfied. `SwarmSelection.reconcile` does that from
-  the register, which is where the statement lives.
-- `#updateBackgroundFill` and `#tailAfterWindows` — replaced by a stated need at
-  the `TAIL` level, per file.
-- `#syncSelections` — obsolete once nothing is selected by default.
-- `setActiveFile` — dead: no caller anywhere in the repository.
-- The two claim strategies and the environment variable that chose between them
-  (`TORRENT_TV_READ_MODE`). Each read was assigned at random to one of them and
-  the waits were sorted by which, and the comparison never decided anything: the
-  split halved the sample, so on 2026-08-28 there were nine reads in one arm and
-  three in the other against a threshold of ten, and on 2026-08-29 the two arms
-  printed together for the first and only time as forty waits against one. Waits
-  are now recorded by the LEVEL the reader was stopped in, which says whether a
-  band is too narrow rather than whether banding is the wrong idea.
-
-## What this does NOT do
-
-The piece store keeps its own list of protected ranges for memory
-(`protectRange` / `protectedRanges`). It is fed by the same readers with the
-same windows, but it is a second list, and one of the two could still drift from
-the other. Making the store read this register instead is the remaining half of
-the deduplication; it was left out of the first release because the memory path
-had just been rewritten and had not yet been seen in the field.
+A paused viewer retains its priorities until urgent selected input, output and
+subtitle work is ready. Its priorities then gradually approach 1 as pause time
+increases. They never become zero through attenuation. Competition is counted per
+source file, including viewers using different outputs; a sole viewer keeps full
+priority. Explicit resume restores full demand and a seek resets pause time.

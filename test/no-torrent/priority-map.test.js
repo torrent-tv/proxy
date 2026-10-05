@@ -72,7 +72,7 @@ test("what is behind a viewer is wanted, and wanted last", () => {
     "nobody is on their way there, so there is no time by which it must exist");
 });
 
-test("a viewer who has stopped the picture keeps their position, and loses their times", () => {
+test("a pause keeps priorities and urgent deadlines until urgent work is ready", () => {
   // A pause removes the time, not the direction. Collapsed to one flat value
   // over the whole film, as it was, their position disappeared entirely — and
   // with it the rule that what is in front of them is made first.
@@ -81,20 +81,46 @@ test("a viewer who has stopped the picture keeps their position, and loses their
   assert.equal(map.behind[600], 0, "and what they have not is still in front");
   assert.ok(map.priority[600] > map.priority[599], "in front still outranks behind");
   assert.ok(map.priority[600] > map.priority[3000], "and nearer still outranks further");
-  for (const second of [599, 600, 3000]) {
-    assert.equal(map.secondsUntilPlayed[second], Number.POSITIVE_INFINITY,
-      "but nothing has a time, because they are on their way nowhere");
-  }
+  assert.deepEqual(map.priority, viewer(600).priority);
+  assert.deepEqual(map.secondsUntilPlayed, viewer(600).secondsUntilPlayed);
 });
 
-test("anybody who is watching outranks anybody who has stopped", () => {
+test("completed urgent work enables gradual attenuation only with competing viewers", () => {
   // An ordering fact rather than a chosen number: somebody watching needs their
   // next second almost at once, while somebody stopped needs theirs at a time
   // nothing here knows.
   const watching = viewer(600);
-  const stopped = viewer(3000, false);
+  const stopped = mapForViewer({ atSeconds: 3000, durationSeconds: FILM, allowanceSeconds: ALLOWANCE,
+    playing: false, urgentReady: true, pauseSeconds: ALLOWANCE, viewerCount: 2 });
   assert.ok(watching.priority[3599] > stopped.priority[3000],
     "the far tail of a watching viewer beats the very next second of a stopped one");
+});
+
+test("pause attenuation approaches one, never zero, and resume restores priorities", () => {
+  const make = (pauseSeconds, overrides = {}) => mapForViewer({
+    atSeconds: 600, durationSeconds: FILM, allowanceSeconds: ALLOWANCE,
+    playing: false, urgentReady: true, viewerCount: 2, pauseSeconds, ...overrides
+  });
+  const early = make(8);
+  const late = make(80);
+  for (let second = 0; second < FILM; second += 1) {
+    assert.ok(late.priority[second] >= 1);
+    assert.ok(late.priority[second] <= early.priority[second]);
+  }
+  assert.equal(make(8000).priority[600], 1);
+  assert.deepEqual(make(80, { playing: true }).priority, viewer(600).priority);
+  assert.deepEqual(make(80, { viewerCount: 1 }).priority, viewer(600).priority);
+  assert.deepEqual(make(80, { urgentReady: false }).priority, viewer(600).priority);
+});
+
+test("a paused viewer cannot reduce another viewer's priority for shared media", () => {
+  const active = viewer(600);
+  const paused = mapForViewer({ atSeconds: 600, durationSeconds: FILM, allowanceSeconds: ALLOWANCE,
+    playing: false, urgentReady: true, pauseSeconds: 8000, viewerCount: 2 });
+  const merged = mergeMaps([active, paused]);
+  assert.deepEqual(merged.priority, active.priority);
+  assert.equal(merged.urgent[600], 1);
+  assert.equal(merged.deferred[600], 0);
 });
 
 test("two viewers merge to the more urgent of them, second by second", () => {

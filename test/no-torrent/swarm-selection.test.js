@@ -15,6 +15,49 @@ import { SwarmSelection } from "../../services/torrent/download/SwarmSelection.j
 
 const PIECE = 1024;
 
+function wireWithRequests(pieces) {
+  const requests = pieces.map((piece) => ({ piece, offset: 0, length: 1024 }));
+  return {
+    requests, cancelled: [],
+    cancel(piece, offset, length) {
+      this.cancelled.push([piece, offset, length]);
+      const index = requests.findIndex((request) => request.piece === piece && request.offset === offset);
+      requests.splice(index, 1);
+    }
+  };
+}
+
+test("withdrawn demand cancels outstanding blocks in the same reconciliation", () => {
+  const torrent = stubTorrent();
+  const wire = wireWithRequests([0, 1, 5]);
+  torrent.wires = [wire];
+  const register = new DemandRegister();
+  const selection = new SwarmSelection({ torrent, register });
+  register.state({ claimant: "keep", fileIndex: 0, byteStart: 0, byteEnd: 2 * PIECE - 1, urgency: Urgency.NEAR });
+  selection.reconcile();
+  assert.deepEqual(wire.cancelled, [[5, 0, 1024]]);
+  register.withdraw("keep");
+  selection.reconcile();
+  assert.deepEqual(wire.cancelled, [[5, 0, 1024], [0, 0, 1024], [1, 0, 1024]]);
+  assert.equal(wire.requests.length, 0);
+});
+
+test("a shared piece remains requested while another range needs it", () => {
+  const torrent = stubTorrent();
+  const register = new DemandRegister();
+  const selection = new SwarmSelection({ torrent, register });
+  register.state({ claimant: "first", fileIndex: 0, byteStart: 0, byteEnd: 2 * PIECE - 1, urgency: Urgency.NEAR });
+  register.state({ claimant: "second", fileIndex: 0, byteStart: PIECE, byteEnd: 3 * PIECE - 1, urgency: Urgency.NEAR });
+  selection.reconcile();
+  const wire = wireWithRequests([0, 1, 2]);
+  torrent.wires = [wire];
+  register.withdraw("first");
+  selection.reconcile();
+  assert.deepEqual(wire.cancelled, [[0, 0, 1024]]);
+  selection.releaseAll();
+  assert.equal(wire.requests.length, 0);
+});
+
 /**
  * @param {object} [params]
  * @param {number[]} [params.have] - Pieces that have arrived.
@@ -84,8 +127,7 @@ test("two viewers of one film are two instructions, and both are urgent", () => 
     { from: 0, to: 0, priority: 1, isStream: true },
     { from: 5, to: 5, priority: 1, isStream: true }
   ]);
-  // Both may take a block from a slow peer, and the mark spans both.
-  assert.deepEqual(torrent.calls.critical, [{ from: 0, to: 5 }]);
+  assert.deepEqual(torrent.calls.critical, [], "deadline scheduling replaces persistent critical-piece marks");
 });
 
 test("the same pieces wanted by two claimants are one instruction", () => {
@@ -102,7 +144,7 @@ test("the same pieces wanted by two claimants are one instruction", () => {
   assert.equal(torrent.calls.select.length, 1);
 });
 
-test("the speculative levels are withdrawn whole the moment something urgent is missing", () => {
+test("all mapped ranges stay eligible when urgent bytes are missing", () => {
   const torrent = stubTorrent({ have: [0] });
   const register = new DemandRegister();
   const selection = new SwarmSelection({ torrent, register });
@@ -120,8 +162,8 @@ test("the speculative levels are withdrawn whole the moment something urgent is 
 
   assert.deepEqual(
     selection.statedRanges().map((range) => range.priority),
-    [1],
-    "the tail is out of the download set entirely, not lowered — a peer with nothing urgent to give must not be able to fall through to it"
+    [0, 1],
+    "peers may fill mapped background bytes when they cannot supply earlier deadlines"
   );
   assert.ok(torrent.calls.deselect.length > 0);
 });
@@ -209,12 +251,11 @@ test("the store is told what will be read soon, from the same stated needs", () 
   // thing twice — once to the store for memory, once to the torrent for
   // download — and a third piece of code read the first to rebuild the second.
   assert.equal(protectedBy.get("video"), "0-0");
-  // But only the urgent levels: memory holds what will be READ soon, and the
-  // tail is fetched speculatively. Protecting it would push out a piece the
-  // decoder is about to want.
-  assert.equal(protectedBy.has("fill"), false);
+  // Background demand remains known to eviction at its later deadline.
+  assert.equal(protectedBy.get("fill"), "5-8");
 
   register.withdraw("video");
   selection.reconcile();
-  assert.equal(protectedBy.size, 0, "a reader that withdrew still held memory");
+  assert.equal(protectedBy.has("video"), false, "a withdrawn range does not remain wanted");
+  assert.equal(protectedBy.size, 1, "background demand remains at its own deadline");
 });

@@ -18,6 +18,32 @@ import { PieceDiskStore } from "../../services/storage/piece-store/piece-disk-st
 
 const PIECE = 4096;
 
+test("capacity eviction follows map demand and respects holds from the shared store", async () => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), "piece-map-"));
+  const held = new Set([0]);
+  const demand = new Map([[0, 1], [1, 10], [2, 2]]);
+  const store = new PieceDiskStore({
+    directory, name: "pieces", allowanceBytes: 3 * PIECE,
+    canForget: (index) => !held.has(index),
+    wantedAt: (index) => demand.get(index) ?? Infinity
+  });
+  try {
+    for (const index of [0, 1, 2]) await store.write(index, Buffer.alloc(PIECE, index));
+    store.forget(0);
+    assert.equal(store.has(0), true);
+    await store.write(3, Buffer.alloc(PIECE, 3));
+    assert.equal(store.has(1), false);
+    assert.equal(store.has(0), true);
+    assert.equal(store.has(2), true);
+    held.clear();
+    store.forget(0);
+    assert.equal(store.has(0), false);
+  } finally {
+    await store.destroy();
+    await fs.rm(directory, { recursive: true, force: true, maxRetries: 10, retryDelay: 20 });
+  }
+});
+
 test("bytes held before a memory wait cannot be forgotten or evicted", async () => {
   const { store } = await makeStore(PIECE);
   try {
@@ -212,7 +238,7 @@ test("a piece wanted again after being thrown away is written, not refused", asy
   }
 });
 
-test("lowering the allowance frees nothing by itself, and binds the next write", async () => {
+test("lowering the allowance removes excess unused pieces immediately", async () => {
   const { store, directory, clock } = await makeStore(null);
   try {
     for (const index of [0, 1, 2]) {
@@ -220,7 +246,7 @@ test("lowering the allowance frees nothing by itself, and binds the next write",
       await store.write(index, pieceOf(index));
     }
     store.reviseAllowance(PIECE);
-    assert.equal(store.size, 3, "lowering the allowance threw pieces away on its own");
+    assert.equal(store.size, 1, "the reduced capacity is enforced without another write");
 
     clock.at += 100;
     await store.write(3, pieceOf(3));

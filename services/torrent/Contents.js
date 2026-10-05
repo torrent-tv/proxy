@@ -27,19 +27,12 @@
  *    into the torrent's own list — and whoever takes them holds nothing of this
  *    object.
  *
- * **What was measured and deliberately NOT built**, so that it is not proposed
- * again as an oversight: telling a real episode from an extra. Over the 134
- * torrents of the survey collection, the words that would say so (`sample`,
- * `trailer`, `extra`, `bonus`, `preview`, `making`) matched four files, and all
- * four were ordinary titles — "Making cash with her pussy" is an episode, not a
- * making-of. Size says no more: the ratio of a video to the median of its own
- * torrent runs continuously from 0.00 to 1.00 with no gap anywhere, because a
- * collection of short clips is made of short clips. So there is nothing here to
- * derive a rule from, and a rule invented anyway would decide the order in
- * which a stranger's bandwidth is spent. Every picture is an item.
- *
- * Nothing here reads bytes, waits on the swarm or knows about ffmpeg. Like the
- * functions it is built on, it is a function of the list of names.
+ * Exact `sample`/`samples` words in a file or folder exclude an example clip.
+ * A video named exactly after an identified release group is its promo. Other
+ * words such as `making`, file sizes and guessed group names exclude nothing.
+ * Extension classifications are provisional until a completed media read
+ * reports whether the file carries video. This object owns every revision.
+ * Nothing here reads bytes, waits on the swarm or knows about ffmpeg.
  */
 
 import { readEpisodeMarker } from "./episode-naming.js";
@@ -132,6 +125,10 @@ function showKey(text) {
 }
 
 export class TorrentContents {
+  #files;
+  #name;
+  #releaseGroup;
+  #videoFacts = new Map();
   /** @type {TorrentItem[]} */
   #items = [];
 
@@ -154,24 +151,56 @@ export class TorrentContents {
    * @param {string} [params.name] - The torrent's name, which WebTorrent
    *   prefixes to every path in a multi-file torrent.
    */
-  constructor({ files, name = "" }) {
-    const list = Array.isArray(files) ? files : [];
+  constructor({ files, name = "", releaseGroup = "" }) {
+    this.#files = Array.isArray(files) ? files : [];
+    this.#name = name;
+    this.#releaseGroup = releaseGroup;
+    this.#rebuild();
+  }
+
+  /** A completed track read replaces the provisional extension classification. */
+  noteVideo(fileIndex, hasVideo) {
+    if (!Number.isSafeInteger(fileIndex) || !this.#files[fileIndex] || typeof hasVideo !== "boolean") return false;
+    if (this.#videoFacts.get(fileIndex) === hasVideo) return false;
+    this.#videoFacts.set(fileIndex, hasVideo);
+    this.#rebuild();
+    return true;
+  }
+
+  /** Only an explicitly identified release group may exclude its own promo. */
+  noteReleaseGroup(group) {
+    if (typeof group !== "string" || this.#releaseGroup === group) return false;
+    this.#releaseGroup = group;
+    this.#rebuild();
+    return true;
+  }
+
+  #rebuild() {
+    const list = this.#files;
+    const name = this.#name;
+    this.#items = [];
+    this.#itemByFile.clear();
     const described = list.map((file, fileIndex) => {
       const { folders, name: fileName } = splitTorrentPath(file?.path ?? file?.name ?? "", name);
+      const stem = fileName.slice(0, fileName.length - extensionOf(fileName).length);
+      const sample = [...folders, stem].some((part) => /(?:^|[^\p{L}\p{N}])samples?(?:$|[^\p{L}\p{N}])/iu.test(part));
+      const promo = Boolean(this.#releaseGroup) && stem.toLowerCase() === this.#releaseGroup.toLowerCase();
       return {
         fileIndex,
         name: fileName,
         folders,
         relativePath: [...folders, fileName].join("/"),
         length: Number.isFinite(file?.length) ? file.length : 0,
-        isVideo: VIDEO_FILE_EXTENSIONS.has(extensionOf(fileName))
+        isVideo: this.#videoFacts.get(fileIndex) ?? VIDEO_FILE_EXTENSIONS.has(extensionOf(fileName)),
+        provisional: !this.#videoFacts.has(fileIndex),
+        excludedReason: sample ? "sample" : promo ? "release-group-promo" : null
       };
     });
     this.#described = described;
-    this.#videoCount = described.filter((file) => file.isVideo).length;
+    this.#videoCount = described.filter((file) => file.isVideo && !file.excludedReason).length;
 
     const claimed = new Set();
-    for (const file of described.filter((one) => one.isVideo).sort(inReadingOrder)) {
+    for (const file of described.filter((one) => one.isVideo && !one.excludedReason).sort(inReadingOrder)) {
       const { audio, subtitles, images } = matchSidecarFiles({
         files: list,
         videoIndex: file.fileIndex,
@@ -318,7 +347,9 @@ export class TorrentContents {
         name: file.name,
         relativePath: file.relativePath,
         length: file.length,
-        kind: this.kindOf(file.fileIndex)
+        kind: this.kindOf(file.fileIndex),
+        provisional: file.provisional,
+        excludedReason: file.isVideo ? file.excludedReason : null
       }));
   }
 
@@ -375,7 +406,8 @@ export function contentsOf(torrent) {
   }
   const contents = new TorrentContents({
     files,
-    name: typeof torrent?.name === "string" ? torrent.name : ""
+    name: typeof torrent?.name === "string" ? torrent.name : "",
+    releaseGroup: typeof torrent?.releaseGroup === "string" ? torrent.releaseGroup : ""
   });
   byTorrent.set(torrent, { contents, fileCount: files.length });
   return contents;

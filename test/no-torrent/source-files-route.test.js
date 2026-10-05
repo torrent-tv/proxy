@@ -14,7 +14,27 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
+import { EventEmitter } from "node:events";
 import { handleApiSourceFilesGet } from "../../routes/api/sources/files/get.js";
+
+test("a cancelled metadata request removes its subscription without sending a file list", async () => {
+  const { req, reply, sent, deps } = harness([]);
+  reply.raw = new EventEmitter();
+  deps.torrentPool.getTorrent = () => new Promise(() => {});
+  const waiting = handleApiSourceFilesGet(req, reply, deps);
+  assert.equal(reply.raw.listenerCount("close"), 1);
+  reply.raw.emit("close");
+  await waiting;
+  assert.equal(sent.body, null);
+  assert.equal(reply.raw.listenerCount("close"), 0);
+});
+
+test("metadata readiness removes the cancellation subscription", async () => {
+  const { req, reply, deps } = harness([]);
+  reply.raw = new EventEmitter();
+  await handleApiSourceFilesGet(req, reply, deps);
+  assert.equal(reply.raw.listenerCount("close"), 0);
+});
 
 /**
  * A request, a reply and the torrent behind them.

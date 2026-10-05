@@ -16,7 +16,18 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { MessageChannel } from "node:worker_threads";
-import { createSendStream, createReceiveStream, createCaller } from "../../services/torrent/worker/channel.js";
+import { createSendStream, createReceiveStream, createCaller, workerReplyError } from "../../services/torrent/worker/channel.js";
+
+test("command and stream errors retain terminal source codes across threads", async () => {
+  const messages = [];
+  const caller = createCaller({ postMessage: message => messages.push(message) });
+  const result = caller.call("files", { sourceKey: "retired" });
+  const reply = { type: "error", id: messages[0].id, error: "Source retired.", code: "SOURCE_FORGOTTEN" };
+  assert.equal(caller.handleReply(reply), true);
+  await assert.rejects(result, { code: "SOURCE_FORGOTTEN", message: "Source retired." });
+  assert.equal(workerReplyError(reply).code, "SOURCE_FORGOTTEN");
+  assert.equal(workerReplyError({}).message, "Torrent worker request failed.");
+});
 
 /**
  * A buffer standing in for one owned by WebTorrent's piece cache: allocated

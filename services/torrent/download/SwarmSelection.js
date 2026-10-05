@@ -23,7 +23,6 @@
  */
 
 import {
-  isConditional,
   piecesOf,
   selectionPriority,
   Urgency,
@@ -36,8 +35,6 @@ export class SwarmSelection {
   #register;
   /** What was last stated to the library, so a restatement can be a no-op. */
   #stated = new Map();
-  /** Pieces this instance marked for displacement, so it clears only its own. */
-  #displacing = null;
   /** Claimants whose windows are currently protected in memory. */
   #protectedInMemory = new Set();
   #findStore;
@@ -72,11 +69,8 @@ export class SwarmSelection {
    *   shared and the question is not a per-torrent one.
    * @returns {{ stated: number, withdrawn: number }}
    */
-  reconcile({ speculativeAllowed = true } = {}) {
-    const levels = this.#register.levelsToState(
-      (window) => this.#isSatisfied(window),
-      speculativeAllowed
-    );
+  reconcile() {
+    const levels = [...new Set(this.#register.windows().map(window => window.urgency))];
     /** @type {Map<string, { from: number, to: number, priority: number }>} */
     const wanted = new Map();
     for (const urgency of levels) {
@@ -102,6 +96,8 @@ export class SwarmSelection {
       withdrawn += 1;
     }
 
+    this.#cancelUnwanted(wanted.values());
+
     let stated = 0;
     for (const [key, range] of wanted) {
       // Re-stated when the library has dropped it, even though this instance
@@ -114,7 +110,6 @@ export class SwarmSelection {
       stated += 1;
     }
 
-    this.#markDisplacement();
     this.#projectIntoMemory();
     return { stated, withdrawn };
   }
@@ -125,12 +120,33 @@ export class SwarmSelection {
       this.#deselect(range);
     }
     this.#stated.clear();
-    this.#clearDisplacement();
+    this.#cancelUnwanted([]);
     const store = this.#findStore(this.#torrent);
     for (const claimant of this.#protectedInMemory) {
       store?.releaseProtection?.(claimant);
     }
     this.#protectedInMemory.clear();
+  }
+
+  /** Cancel removed blocks in this pass; the wire callback releases reservations. */
+  #cancelUnwanted(ranges) {
+    const wanted = [...ranges];
+    for (const wire of this.#torrent.wires ?? []) {
+      for (const request of [...(wire.requests ?? [])]) {
+        if (wanted.some((range) => request.piece >= range.from && request.piece <= range.to)) continue;
+        if (typeof wire.cancel !== "function") continue;
+        try {
+          wire.cancel(request.piece, request.offset, request.length);
+          this.#torrent.emit?.("download-request-cancelled", {
+            piece: request.piece, offset: request.offset, length: request.length, reason: "demand-withdrawn"
+          });
+        } catch (error) {
+          this.#torrent.emit?.("download-request-cancel-failed", {
+            piece: request.piece, offset: request.offset, length: request.length, error: error?.message ?? String(error)
+          });
+        }
+      }
+    }
   }
 
   /**
@@ -171,30 +187,6 @@ export class SwarmSelection {
    *
    * @returns {void}
    */
-  #markDisplacement() {
-    const blocked = this.#register
-      .at(Urgency.BLOCKED)
-      .map((window) => this.#piecesFor(window))
-      .filter((range) => range !== null);
-    if (blocked.length === 0) {
-      this.#clearDisplacement();
-      return;
-    }
-    const nearest = Math.min(...blocked.map((range) => range.from));
-    const furthest = Math.max(...blocked.map((range) => range.to));
-    if (this.#displacing && this.#displacing.from === nearest && this.#displacing.to === furthest) {
-      return;
-    }
-    this.#clearDisplacement();
-    try {
-      this.#torrent.critical?.(nearest, furthest);
-      this.#displacing = { from: nearest, to: furthest };
-    } catch {
-      // silent-ok: displacement is an optimisation, and a torrent being torn
-      // down is not worth failing a read over.
-      this.#displacing = null;
-    }
-  }
 
   /**
    * Tell the piece store which bytes will be read soon, from the same stated
@@ -234,7 +226,7 @@ export class SwarmSelection {
       return;
     }
     const holding = new Set();
-    for (const urgency of [Urgency.BLOCKED, Urgency.NEAR]) {
+    for (const urgency of [...new Set(this.#register.windows().map(window => window.urgency))]) {
       for (const window of this.#register.at(urgency)) {
         const range = this.#piecesFor(window);
         if (!range) {
@@ -243,7 +235,7 @@ export class SwarmSelection {
         // The level goes with the range: it is what eviction compares when
         // everything resident is wanted by somebody, and dropping it here is
         // what left the store choosing by recency alone.
-        store.protectRange(window.claimant, range.from, range.to, window.urgency);
+        store.protectRange(window.claimant, range.from, range.to, window.urgency, window.deadlineAt, window.priority);
         holding.add(window.claimant);
       }
     }
@@ -255,17 +247,6 @@ export class SwarmSelection {
     this.#protectedInMemory = holding;
   }
 
-  /** @returns {void} */
-  #clearDisplacement() {
-    if (!this.#displacing || !Array.isArray(this.#torrent._critical)) {
-      this.#displacing = null;
-      return;
-    }
-    for (let index = this.#displacing.from; index <= this.#displacing.to; index += 1) {
-      this.#torrent._critical[index] = false;
-    }
-    this.#displacing = null;
-  }
 
   /**
    * The pieces a window covers, or null when the file or the torrent cannot
@@ -363,24 +344,14 @@ export class SwarmSelection {
    *
    * @returns {string}
    */
-  describe(speculativeAllowed = true) {
-    const stating = this.#register.levelsToState(
-      (window) => this.#isSatisfied(window),
-      speculativeAllowed
-    );
-    const speculative = stating.filter((urgency) => isConditional(urgency)).map(urgencyName);
+  describe() {
     const needs = this.#register
       .windows()
       .map((window) => `${urgencyName(window.urgency)}:${window.claimant}`);
     return (
       `download: ${this.#stated.size} instruction(s) to the swarm from ` +
       `${this.#register.size} stated need(s) [${needs.join(" ")}]` +
-      (speculative.length > 0
-        ? `; ${speculative.join(" and ")} also stated — nothing urgent is missing`
-        : "; nothing speculative is stated — something urgent is still missing") +
-      (this.#displacing
-        ? `; pieces ${this.#displacing.from}-${this.#displacing.to} may be taken from slow peers`
-        : "")
+      "; peer requests ordered by deadline and priority"
     );
   }
 }

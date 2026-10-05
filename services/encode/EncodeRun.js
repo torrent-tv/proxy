@@ -199,7 +199,7 @@ export class EncodeRun {
    * @param {(reading: { speed: number, at: number }) => void} [params.onSpeedMeasured] -
    *   Told each time this run has measured its processing speed, once per
    *   reading.
-   * @param {(name: string) => string | null} [params.onClosed] - Called with the
+   * @param {(name: string, following: string | null) => string | null} [params.onClosed] - Called with the
    *   WORKING name of every piece the encoder has finished writing, as the
    *   encoder itself names it on its own channel, and answers with the name that
    *   piece is served under — because making it servable is a rename, and only
@@ -230,6 +230,7 @@ export class EncodeRun {
     encoder,
     from,
     to,
+    makingTag = String(from),
     buildArgs,
     spawn,
     logger,
@@ -251,6 +252,7 @@ export class EncodeRun {
     this.encoder = encoder;
     this.from = from;
     this.to = to;
+    this.makingTag = makingTag;
     this.buildArgs = buildArgs;
     this.spawnProcess = spawn;
     this.logger = logger;
@@ -452,6 +454,12 @@ export class EncodeRun {
    * @param {import("node:child_process").ChildProcess} process
    */
   #wire(process) {
+    // The process owns this listener even between admitted input writes.
+    process.stdin?.on("error", (error) => {
+      const message = error instanceof Error ? error.message : String(error);
+      this.lastError ||= message;
+      this.logger.warn(`ffmpeg input #${this.from}..#${this.to} of ${this.address}: ${message}`);
+    });
     process.stdout?.on("data", (chunk) => this.#readProgress(String(chunk)));
     // THE CHANNEL THE ENCODER NAMES ITS FINISHED PIECES ON.
     //
@@ -567,14 +575,14 @@ export class EncodeRun {
       // A subsequent closed file proves the previous one reached a cut.
       // The last file can instead have been flushed by an input failure.
       if (this.#pendingClosed !== null) {
-        this.#publishClosed(this.#pendingClosed);
+        this.#publishClosed(this.#pendingClosed, name);
       }
       if (this.#publicationError) break;
       this.#pendingClosed = name;
     }
   }
 
-  #publishClosed(name) {
+  #publishClosed(name, following = null) {
       this.#measureSpeed();
       // ITS SERVED NAME, which is what whoever owns the disk gives it in answer.
       // ffmpeg writes a piece under a working name and reports that; the piece
@@ -582,7 +590,7 @@ export class EncodeRun {
       // name a request can actually ask for.
       let served;
       try {
-        served = this.onClosed(name, this.#closedTimings.get(name) ?? null);
+        served = this.onClosed(name, following, this.#closedTimings.get(name) ?? null);
       } catch (error) {
         this.#publicationError = error instanceof Error ? error.message : String(error);
         this.lastError = this.#publicationError;
@@ -594,6 +602,7 @@ export class EncodeRun {
       } finally {
         this.#closedTimings.delete(name);
       }
+
       if (!served) return false;
       if (!this.#stopping) {
         this.#provenName = served;

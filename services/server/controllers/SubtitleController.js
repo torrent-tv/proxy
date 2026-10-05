@@ -7,23 +7,6 @@
  * language detection) stays in orchestrator/domain.
  */
 
-const EXTERNAL_MAX_BYTES = 8 * 1024 * 1024;
-
-function readFileFully(file, maxBytes) {
-  return new Promise((resolve, reject) => {
-    const stream = file.createReadStream();
-    const chunks = [];
-    let total = 0;
-    stream.on("data", (chunk) => {
-      total += chunk.length;
-      if (total > maxBytes) { stream.destroy(); reject(new Error("subtitle file exceeds size cap")); return; }
-      chunks.push(chunk);
-    });
-    stream.on("end", () => resolve(Buffer.concat(chunks)));
-    stream.on("error", reject);
-  });
-}
-
 export class SubtitleController {
   /**
    * @param {object} deps
@@ -45,25 +28,19 @@ export class SubtitleController {
    * Serve external subtitle file or embedded track.
    * Returns { vtt, language, headers } or { error, status }.
    */
-  async getSubtitle({ sourceKey, fileIndex, trackIndex, since, after }) {
+  async getSubtitle({ sourceKey, fileIndex, trackIndex, since, after, signal }) {
     const rec = this.sourceRegistry.get(sourceKey);
     if (!rec) return { error: "Source key was not found.", status: 404 };
-    const torrent = await this.torrentPool.getTorrent(rec.sourceType, rec.source);
+    const torrent = this.torrentPool.knownTorrent(sourceKey);
+    if (!torrent) return { pending: true, status: 202 };
     const file = torrent.files[fileIndex];
     if (!file) return { error: "File index was not found in torrent.", status: 404 };
 
     const hasTrack = trackIndex !== undefined && trackIndex !== "" && Number.isFinite(Number(trackIndex));
     if (!hasTrack) {
-      const name = file.name ?? "";
-      const ext = name.slice(name.lastIndexOf(".")).toLowerCase();
-      try {
-        const bytes = await readFileFully(file, EXTERNAL_MAX_BYTES);
-        const converted = this.orchestrator.fileAsVtt(bytes, ext);
-        if (!converted) return { error: `Unsupported subtitle format: ${ext}`, status: 422 };
-        return { ...converted, headers: {} };
-      } catch (e) {
-        return { error: `Could not read subtitle file: ${e?.message ?? e}`, status: 502 };
-      }
+      const document = await this.orchestrator.waitForDocument(sourceKey, fileIndex, signal);
+      if (document.kind === "terminal") return { error: document.message ?? document.reason, status: 422 };
+      return { ...document.value, headers: {} };
     }
 
     const idx = Number(trackIndex);
@@ -72,6 +49,8 @@ export class SubtitleController {
     // Resolve via orchestrator (domain: cluster walk or MP4 sample ranges)
     const tracks = await this.orchestrator.getTracks(torrent, fileIndex, sourceKey);
     const track = Array.isArray(tracks) ? tracks.find((c) => c.declaredIndex === idx) ?? null : null;
+    if (!track && this.orchestrator.hasTrackDeclaration(sourceKey, fileIndex)) return { error: "Subtitle track index was not found.", status: 422 };
+    if (track?.isTextBased?.() === false) return { error: "The subtitle track is not supported.", status: 422 };
     // Also try domain's declaredIndex-agnostic lookup via getCues path — keep compat with existing subtitle-cues declaredIndex
     let held = null;
     try {

@@ -12,6 +12,13 @@
 
 import { Event, STREAM_HIGH_WATER_CHUNKS } from "./protocol.js";
 
+/** Preserve terminal source state when a failure crosses the thread boundary. */
+export function workerReplyError(message, fallback = "Torrent worker request failed.") {
+  const error = new Error(message.error ?? fallback);
+  if (typeof message.code === "string") error.code = message.code;
+  return error;
+}
+
 /**
  * Issue request ids that stay unique for the life of a thread.
  *
@@ -77,7 +84,7 @@ export function createCaller(port) {
       }
       if (message.type === Event.ERROR) {
         pending.delete(message.id);
-        entry.reject(new Error(message.error ?? "Torrent worker request failed."));
+        entry.reject(workerReplyError(message));
         return true;
       }
       return false;

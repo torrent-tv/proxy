@@ -217,22 +217,11 @@ test("the seek settle machinery is gone, whole", () => {
   }
 });
 
-test("where a soundtrack begins is read off the table, not handed in", () => {
-  // The instant a number really begins is a fact of the FILE's cutting, held in
-  // the live table every session of the file shares. Passed as an argument by
-  // the one caller that had measured it, only a run started by that caller ever
-  // had it, and a run the plan placed at the same number landed apart again.
-  const manager = source("services/encode/EncodeRuns.js");
-  assert.match(
-    manager,
-    /const positionSecondsOverride = session\.spec\.carries === "audio-only"\s*\n?\s*\? trueStartOf\(session\.timeline, startIndex\)/,
-    "derived where the run is built"
-  );
-  assert.equal(
-    manager.includes("this.#startEncodeRun(member, index, trueStart)"),
-    false,
-    "and not carried in from the correction that measured it"
-  );
+test("encoders require admitted stdin rather than source URLs or seek corrections", () => {
+  const runs = source("services/encode/EncodeRuns.js");
+  assert.equal(runs.includes("buildRunCommand"), false);
+  assert.equal(runs.includes("positionSecondsOverride"), false);
+  assert.match(runs, /if \(!admittedInput\) return null/);
 });
 
 test("each output is handed its own priority map, and the plan is what reads it", () => {

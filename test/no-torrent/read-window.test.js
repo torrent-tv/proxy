@@ -1,25 +1,4 @@
-/**
- * @file What a read asks the torrent to download, and what it gives back.
- *
- * A read used to select its whole requested range and never deselect it.
- * ffmpeg opens its input as `bytes <position>-<EOF>`, so the first read of a
- * session claimed the entire file and marked every piece of it critical — and
- * the claim outlived the read, which is abandoned a second later when ffmpeg
- * seeks. Nothing after that could outrank it: measured on a 4.7 GB film, a seek
- * to 89.1% waited 93 s while the swarm fetched 2.47 GB in file order.
- *
- * Now a read claims only the piece it is STOPPED on, and gives it back when it
- * ends. What should be downloaded ahead of a viewer is the priority map's
- * answer, stated once for the whole file by the side that knows where the
- * viewers are; a read is consumption, not a forecast. Fifteen reads on one file
- * used to declare fifteen windows on a piece store holding sixteen pieces, and
- * half of all evictions then took a piece a reader had declared (field
- * 2026-09-05).
- *
- * These tests pin what is left: a read that is not stopped claims nothing, a
- * read that is stopped claims the pieces it is waiting for and nothing beyond
- * them, and every claim is given back.
- */
+/** Reads consume the published map without declaring download demand. */
 
 import test from "node:test";
 import assert from "node:assert/strict";
@@ -28,10 +7,9 @@ import os from "node:os";
 import path from "node:path";
 import fs from "node:fs/promises";
 import {
-  nextWindowPieces,
-  readFragments,
-  readWindowFor
+  readFragments
 } from "../../services/torrent/worker/piece-reader.js";
+import { demandFor, forgetTorrent } from "../../services/torrent/download/registry.js";
 import { SharedPieceStore } from "../../services/storage/piece-store/shared-piece-store.js";
 
 const PIECE = 1024;
@@ -120,20 +98,6 @@ async function drain(torrent, start, end) {
   }
 }
 
-test("the window is bounded and clamped to the end of the read", () => {
-  assert.deepEqual(readWindowFor({ pieceIndex: 10, lastPiece: 999, windowPieces: 4 }), { from: 10, to: 13 });
-  assert.deepEqual(
-    readWindowFor({ pieceIndex: 997, lastPiece: 999, windowPieces: 4 }),
-    { from: 997, to: 999 },
-    "the window never reaches past the range the reader was given"
-  );
-  assert.deepEqual(
-    readWindowFor({ pieceIndex: 5, lastPiece: 999, windowPieces: 0 }),
-    { from: 5, to: 5 },
-    "a degenerate size still asks for the piece under the head"
-  );
-});
-
 test("a read that is not stopped claims nothing", async () => {
   // 8000 pieces of 1 KB, every one of them present, and the read asks as ffmpeg
   // does: to the last byte of the file. Nothing is missing, so this read is
@@ -160,6 +124,7 @@ test("a read that is not stopped claims nothing", async () => {
 
     await iterator.return();
   } finally {
+    forgetTorrent(torrent);
     store.destroy(() => undefined);
     await fs.rm(directory, { recursive: true, force: true, maxRetries: 10, retryDelay: 20 });
   }
@@ -171,6 +136,7 @@ test("a finished read leaves nothing selected", async () => {
     await drain(torrent, 0, 40 * PIECE - 1);
     assert.deepEqual(torrent.held, [], "the read kept its claim after finishing");
   } finally {
+    forgetTorrent(torrent);
     store.destroy(() => undefined);
     await fs.rm(directory, { recursive: true, force: true, maxRetries: 10, retryDelay: 20 });
   }
@@ -194,93 +160,7 @@ test("an abandoned read leaves nothing selected", async () => {
 
     assert.deepEqual(torrent.held, [], "an abandoned read kept its claim forever");
   } finally {
-    store.destroy(() => undefined);
-    await fs.rm(directory, { recursive: true, force: true, maxRetries: 10, retryDelay: 20 });
-  }
-});
-
-test("two stopped readers add up, and one leaving takes only its own", async () => {
-  // Nothing has arrived yet, so both readers are stopped on their first piece
-  // and each states it. Two claims, each withdrawn on its own.
-  let arrived = false;
-  const { torrent, store, directory } = await recordingTorrent({
-    pieceCount: 8000,
-    present: () => arrived
-  });
-  try {
-    const head = readFragments({
-      torrent, fileIndex: 0, start: 0, end: 8000 * PIECE - 1,
-      cancellation: { isCancelled: () => false },
-      windowBytes: WINDOW_PIECES * PIECE
-    });
-    const tail = readFragments({
-      torrent, fileIndex: 0, start: 4000 * PIECE, end: 8000 * PIECE - 1,
-      cancellation: { isCancelled: () => false },
-      windowBytes: WINDOW_PIECES * PIECE
-    });
-    const headPending = head.next();
-    const tailPending = tail.next();
-    await new Promise((resolve) => setImmediate(resolve));
-
-    const pieceOf = (range) => Number(range.split("-")[0]);
-    const held = [...torrent.held];
-    assert.ok(held.some((range) => pieceOf(range) < 4000), "the head reader claimed nothing");
-    assert.ok(held.some((range) => pieceOf(range) >= 4000), "the tail reader claimed nothing");
-
-    // Let both through to a yield, so ending them runs their `finally` at once.
-    arrived = true;
-    torrent.emit("verified", 0);
-    torrent.emit("verified", 4000);
-    (await headPending).value.release();
-    (await tailPending).value.release();
-
-    await tail.return();
-    const after = [...torrent.held];
-    assert.ok(
-      after.every((range) => pieceOf(range) < 4000),
-      "the tail reader left its claim behind"
-    );
-
-    await head.return();
-    assert.deepEqual(torrent.held, [], "the last reader left something behind");
-  } finally {
-    store.destroy(() => undefined);
-    await fs.rm(directory, { recursive: true, force: true, maxRetries: 10, retryDelay: 20 });
-  }
-});
-
-test("criticality marks the window being waited for, not the whole range", async () => {
-  // Nothing is present, so the reader blocks on its first piece and marks it.
-  let arrived = false;
-  const { torrent, store, directory } = await recordingTorrent({
-    pieceCount: 8000,
-    present: () => arrived
-  });
-  try {
-    const iterator = readFragments({
-      torrent, fileIndex: 0, start: 0, end: 8000 * PIECE - 1,
-      cancellation: { isCancelled: () => false },
-      windowBytes: WINDOW_PIECES * PIECE
-    });
-    const pending = iterator.next();
-    await new Promise((resolve) => setImmediate(resolve));
-
-    const criticals = torrent.calls.filter((entry) => entry.call === "critical");
-    assert.equal(criticals.length, 1);
-    const marked = criticals[0].to - criticals[0].from + 1;
-    // The window, and nothing beyond it. Marking only the blocked piece made
-    // the pieces after it arrive strictly one at a time — measured, the first
-    // segment after a seek took 7.2 s for four pieces. Marking the whole
-    // requested range would be the old mistake: for ffmpeg's input that is
-    // every piece to the end of the file, and the flag stops meaning anything.
-    assert.equal(marked, WINDOW_PIECES, `marked ${marked} pieces critical`);
-    assert.ok(criticals[0].to < 8000 - 1, "criticality must not reach the end of the file");
-
-    arrived = true;
-    torrent.emit("verified", 0);
-    (await pending).value.release();
-    await iterator.return();
-  } finally {
+    forgetTorrent(torrent);
     store.destroy(() => undefined);
     await fs.rm(directory, { recursive: true, force: true, maxRetries: 10, retryDelay: 20 });
   }
@@ -312,54 +192,75 @@ test("a reader that is abandoned mid-fragment does not keep the piece pinned", a
       "the abandoned fragment's piece is still pinned; slots leak one per seek"
     );
   } finally {
+    forgetTorrent(torrent);
     store.destroy(() => undefined);
     await fs.rm(directory, { recursive: true, force: true, maxRetries: 10, retryDelay: 20 });
   }
 });
 
-// ------------------------------------------ the window that grows into a lead
 
-test("a wait that mattered widens the window by a piece", () => {
-  // Field 2026-08-17: 5.1-5.9 MB/s delivered against ~1 MB/s consumed, and the
-  // reader still blocked 47 times in two minutes. The surplus never became
-  // distance ahead of the head.
-  assert.equal(
-    nextWindowPieces({ current: 4, base: 4, ceiling: 12, waitedMs: 1457, waitThresholdMs: 1000 }),
-    5
-  );
+
+test("a missing mapped piece waits without creating reader claims and map withdrawal ends the wait", async () => {
+  const { torrent, store, directory } = await recordingTorrent({ pieceCount: 1, present: () => false });
+  try {
+    const register = demandFor(torrent).register;
+    register.state({ claimant: "priority-map:test", fileIndex: 0, byteStart: 0, byteEnd: PIECE - 1, urgency: 0 });
+    const iterator = readFragments({ torrent, fileIndex: 0, start: 0, end: PIECE - 1,
+      cancellation: { isCancelled: () => false } });
+    const pending = iterator.next();
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(register.size, 1);
+    assert.deepEqual(torrent.calls, []);
+    assert.equal(torrent.listenerCount("verified"), 2, "the reader adds one subscription beside the scheduler");
+    register.withdraw("priority-map:test");
+    torrent.emit("priority-map-changed", 0);
+    await assert.rejects(pending, { code: "SOURCE_RANGE_NOT_WANTED", canRetry: false });
+    assert.equal(torrent.listenerCount("verified"), 1, "only the scheduler remains after the read ends");
+    assert.equal(torrent.listenerCount("priority-map-changed"), 0);
+    assert.equal(store.stats().pinned, 0);
+  } finally {
+    forgetTorrent(torrent);
+    store.destroy(() => undefined);
+    await fs.rm(directory, { recursive: true, force: true, maxRetries: 10, retryDelay: 20 });
+  }
 });
 
-test("a piece that was already there gives a piece back", () => {
-  assert.equal(
-    nextWindowPieces({ current: 7, base: 4, ceiling: 12, waitedMs: 0, waitThresholdMs: 1000 }),
-    6
-  );
+test("missing bytes outside the map fail without selecting pieces or waiting", async () => {
+  const { torrent, store, directory } = await recordingTorrent({ pieceCount: 1, present: () => false });
+  try {
+    const iterator = readFragments({ torrent, fileIndex: 0, start: 0, end: PIECE - 1,
+      cancellation: { isCancelled: () => false } });
+    await assert.rejects(iterator.next(), { code: "SOURCE_RANGE_NOT_WANTED" });
+    assert.deepEqual(torrent.calls, []);
+    assert.equal(demandFor(torrent).register.size, 0);
+    assert.equal(torrent.listenerCount("verified"), 1, "only the scheduler remains after the read ends");
+  } finally {
+    forgetTorrent(torrent);
+    store.destroy(() => undefined);
+    await fs.rm(directory, { recursive: true, force: true, maxRetries: 10, retryDelay: 20 });
+  }
 });
 
-test("it never shrinks below what the caller asked for", () => {
-  assert.equal(
-    nextWindowPieces({ current: 4, base: 4, ceiling: 12, waitedMs: 0, waitThresholdMs: 1000 }),
-    4
-  );
-});
-
-test("it never grows past this reader's share of the store", () => {
-  assert.equal(
-    nextWindowPieces({ current: 12, base: 4, ceiling: 12, waitedMs: 4453, waitThresholdMs: 1000 }),
-    12
-  );
-  // A ceiling below the base cannot pull the window under it: the caller sized
-  // the base from the file's own byte rate, and a store too small to hold it is
-  // an argument about memory, not about what the reader needs next.
-  assert.equal(
-    nextWindowPieces({ current: 4, base: 4, ceiling: 1, waitedMs: 2000, waitThresholdMs: 1000 }),
-    4
-  );
-});
-
-test("a wait exactly at the threshold counts as a wait", () => {
-  assert.equal(
-    nextWindowPieces({ current: 4, base: 4, ceiling: 9, waitedMs: 1000, waitThresholdMs: 1000 }),
-    5
-  );
+test("cancellation during listener registration removes every piece wait subscription", async () => {
+  const { torrent, store, directory } = await recordingTorrent({ pieceCount: 1, present: () => false });
+  try {
+    demandFor(torrent).register.state({ claimant: "priority-map:test", fileIndex: 0,
+      byteStart: 0, byteEnd: PIECE - 1, urgency: 0 });
+    let detached = 0;
+    const iterator = readFragments({ torrent, fileIndex: 0, start: 0, end: PIECE - 1,
+      cancellation: { isCancelled: () => false, onCancel: listener => {
+        listener();
+        return () => { detached++; };
+      } } });
+    await assert.rejects(iterator.next(), /Read cancelled/);
+    assert.equal(detached, 1);
+    assert.equal(torrent.listenerCount("verified"), 1, "only the scheduler remains after the read ends");
+    assert.equal(torrent.listenerCount("close"), 0);
+    assert.equal(torrent.listenerCount("priority-map-changed"), 0);
+    assert.equal(store.stats().pinned, 0);
+  } finally {
+    forgetTorrent(torrent);
+    store.destroy(() => undefined);
+    await fs.rm(directory, { recursive: true, force: true, maxRetries: 10, retryDelay: 20 });
+  }
 });

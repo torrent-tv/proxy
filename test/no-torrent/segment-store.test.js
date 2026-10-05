@@ -5,7 +5,7 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { directoryNameFor, SegmentStore } from "../../services/storage/segment-store/SegmentStore.js";
@@ -46,7 +46,9 @@ test("a published piece keeps the media intervals the encoding read from it", (t
   writeFileSync(path.join(dir, "making-0-00000.mp4"), Buffer.from("closed"));
   assert.deepEqual(store.closedBytesOf(KEY, "making-0-00000.mp4"), Buffer.from("closed"));
   const mediaRanges = { tracks: [] };
-  assert.equal(store.publish(KEY, "making-0-00000.mp4", format, { mediaRanges }), "segment-00000.mp4");
+  const partitioned = Buffer.from("complete presentation interval");
+  assert.equal(store.publish(KEY, "making-0-00000.mp4", format, { mediaRanges, bytes: partitioned }), "segment-00000.mp4");
+  assert.deepEqual(readFileSync(store.pathOf(KEY, 0)), partitioned);
   assert.equal(store.mediaRangesOf(KEY, 0), mediaRanges);
 });
 
@@ -179,6 +181,8 @@ test("clearing up after one run leaves every other run's work alone", (t) => {
     // with no channel of its own becomes an event — and a directory with an
     // open watch cannot be removed on Windows.
     store.dropAll("the check is over");
+    assert.equal(path.dirname(path.resolve(root)), path.resolve(os.tmpdir()));
+    assert.ok(path.basename(root).startsWith("segment-store-"));
     rmSync(root, { recursive: true, force: true });
   });
 
@@ -195,6 +199,11 @@ test("clearing up after one run leaves every other run's work alone", (t) => {
   // name inside the ended run's stretch and judged its bytes, so with the
   // naming rule above it would have removed #0, a piece that run had closed.
   assert.equal(store.clearUpAfter(KEY, 0), 1);
+  writeFileSync(path.join(dir, "making-0r1-00001.mp4"), Buffer.alloc(64));
+  writeFileSync(path.join(dir, "making-0r2-00001.mp4"), Buffer.alloc(64));
+  assert.equal(store.clearUpAfter(KEY, "0r1"), 1);
+  assert.equal(readdirSync(dir).includes("making-0r2-00001.mp4"), true,
+    "another run at the same segment retains its own partial file");
   assert.deepEqual(store.provenNumbers(KEY), [0, 100]);
   assert.equal(
     readdirSync(dir).includes("making-100-00101.mp4"),

@@ -14,8 +14,12 @@ import { ENCODE_RUN_STATE, liveRunsOf, runStateOf, wireState } from "./encode-ru
 import { ENCODE_EXIT } from "./encode-exit.js";
 import { EncodeRun } from "./EncodeRun.js";
 import { computeOutputDimensions } from "./args.js";
-import { buildRunCommand, trueStartOf } from "./run-command.js";
-import { cutOf, judgePiece, originOf, productionOf } from "./piece-completeness.js";
+import { buildAdmittedCommand } from "./admitted-command.js";
+import { writeAdmittedInput } from "./AdmittedInput.js";
+import { cutOf, judgeNeighbors, judgePiece } from "./piece-completeness.js";
+import { presentationSegment } from "./segment-formats/presentation-segment.js";
+import { InputFailures, failedAdmittedInput } from "./InputFailures.js";
+
 
 /**
  * @typedef {Object} SegmentFiles
@@ -158,6 +162,7 @@ export class EncodeRuns {
   #runsByInputToken = new Map();
 
   #lastInputToken = 0;
+  #inputFailures = new InputFailures();
   /** What this reads and asks of the rest of the proxy, and nothing else. @type {object} */
   #host;
 
@@ -185,7 +190,6 @@ export class EncodeRuns {
     let state = this.#inputState.get(output);
     if (!state) {
       state = {
-        readWindowBytes: 0,
         inputRetryCount: 0,
         backwardRestarts: { count: 0, segmentsBack: 0, worstBack: 0, remade: 0 },
         firstWantedAt: new Map(),
@@ -197,14 +201,6 @@ export class EncodeRuns {
       this.#inputState.set(output, state);
     }
     return state;
-  }
-
-  setReadWindow(output, bytes) {
-    this.#inputStateFor(output).readWindowBytes = Number.isFinite(bytes) ? bytes : 0;
-  }
-
-  readWindowFor(output) {
-    return this.#inputStateFor(output).readWindowBytes;
   }
 
   noteWanted(output, index, at = Date.now()) {
@@ -289,10 +285,16 @@ export class EncodeRuns {
   }
 
   runStateOf(output) {
+    if (this.#host.encodeInputs?.failureOf(output)) return ENCODE_RUN_STATE.ENDED_FAILED;
+    if (output && this.liveRunsOf(output).length === 0 && this.#inputFailures.reason(output.outputKey)) return ENCODE_RUN_STATE.ENDED_FAILED;
     return output ? this.#host.encodeOrchestrator.stateOf(output.outputKey) : runStateOf([]);
   }
 
   lastErrorOf(output) {
+    const failedInput = this.#host.encodeInputs?.failureOf(output);
+    if (failedInput) return `${failedInput.reason}: ${failedInput.message ?? ""}`;
+    const failed = output && this.#inputFailures.reason(output.outputKey);
+    if (failed) return failed;
     return output ? this.#host.encodeOrchestrator.errorOf(output.outputKey) : "";
   }
 
@@ -346,23 +348,45 @@ export class EncodeRuns {
    * @param {number} index
    * @returns {object | null | false}
    */
-  #wholeClosedPiece(session, name, index, production = null) {
+  #wholeClosedPiece(session, name, index, admitted = false, bytes = null) {
+
     const format = session.segmentFormat;
     if (!format?.readMediaRanges || !Number.isInteger(index) || index < 0) {
       return null;
     }
     const address = session.outputKey ?? "";
     try {
-      const mediaRanges = format.readMediaRanges(this.#host.segmentFiles.closedBytesOf(address, name));
-      if (mediaRanges && production) mediaRanges.production = production;
+      const mediaRanges = format.readMediaRanges(bytes ?? this.#host.segmentFiles.closedBytesOf(address, name));
+
       const cut = cutOf(session.timeline, index);
-      const { whole, throughSeconds } = judgePiece(format, mediaRanges, cut);
+      const grid = session.timeline.published ?? session.timeline.boundaries;
+      const interval = admitted ? { from: grid?.[index], to: grid?.[index + 1],
+        ...(index === session.timeline.segmentCount - 1 ? { sourceEnds: Object.fromEntries(
+          (admitted.tracks ?? []).filter(input => Number.isFinite(input.sourceEndSeconds))
+            .map(input => [input.track.type === "video" ? "vide" : "soun", input.sourceEndSeconds])) } : {}),
+        requiredKinds: [session.spec.carries !== "audio-only" ? "vide" : null,
+          session.spec.audio && !this.#host.servesAudioSeparately(session) ? "soun" : null].filter(Boolean) } : undefined;
+      const { whole, throughSeconds, reason } = judgePiece(format, mediaRanges, cut, interval);
       if (!whole) {
         this.#host.logger.warn(
           `encode: not publishing piece ${index} of ${address.slice(0, 60)}: ` +
-            (throughSeconds === null ? "it holds no playable media" : `produced through ${throughSeconds}s, cut ${cut}s`)
+            (reason ?? (throughSeconds === null ? "it holds no playable media" : `produced through ${throughSeconds}s, cut ${cut}s`))
         );
         return false;
+      }
+      if (admitted) {
+        const produced = this.#host.producedNumbers(session);
+        for (const neighbor of [index - 1, index + 1]) {
+          if (!produced.includes(neighbor)) continue;
+          const ranges = this.#host.segmentFiles.mediaRangesOf(address, neighbor,
+            { startSeconds: grid[neighbor] });
+          if (!ranges) continue;
+          const judged = neighbor < index ? judgeNeighbors(ranges, mediaRanges) : judgeNeighbors(mediaRanges, ranges);
+          if (!judged.whole) {
+            this.#host.logger.warn(`encode: not publishing piece ${index} of ${address}: ${judged.reason}`);
+            return false;
+          }
+        }
       }
       return mediaRanges;
     } catch (error) {
@@ -519,7 +543,9 @@ export class EncodeRuns {
   }
 
   forgetEncodingOfGone(output) {
+    this.#host.encodeInputs?.forget(output);
     if (this.#host.outputs.outputsOn(output.outputKey).length === 0) {
+      this.#inputFailures.forget(output.outputKey);
       this.#host.encodeOrchestrator.forgetOutput(output.outputKey);
     }
   }
@@ -567,7 +593,7 @@ export class EncodeRuns {
     //
     // A DIFFERENT position is unaffected and gets its own budget, and the count
     // resets the moment a run at this one does real work.
-    if (!this.#host.encodeOrchestrator.mayStartAt(address, from)) {
+    if (!this.#host.encodeInputs && !this.#host.encodeOrchestrator.mayStartAt(address, from)) {
       return null;
     }
     // The encoder is built and handed back in this same call. Nothing here
@@ -772,6 +798,19 @@ export class EncodeRuns {
     if (!this.isLive(session)) {
       return null;
     }
+    this.#host.encodeInputs?.retain(session, this.#host.encodeOrchestrator.wantedSegmentsOn(session.outputKey));
+    const admittedInput = this.#host.encodeInputs?.take(session, startIndex, startIndex) ?? null;
+    if (!admittedInput) return null;
+    const inputParameters = admittedInput ? { outputKey: session.outputKey, encoder: this.#host.videoEncoder.name,
+      width: session.output.encodeWidth, height: session.output.encodeHeight, fps: session.output.outputFps,
+      preset: session.output.softwarePreset, tonemap: session.output.applyTonemap,
+      rateControl: session.spec.video?.encode?.rateControl ?? null } : null;
+    const inputKey = admittedInput ? this.#inputFailures.key(admittedInput, inputParameters) : null;
+    if (inputKey && this.#inputFailures.failure(session.outputKey, startIndex, inputKey)) {
+      admittedInput.release();
+      return null;
+    }
+    try {
     // Where a restart's seconds go. A seek costs 5-8 s in the field and the
     // recorded reason — waiting for the previous ffmpeg to exit, measured at
     // 0.54-1.47 s — does not account for it. Before rebuilding the hottest path
@@ -793,7 +832,7 @@ export class EncodeRuns {
     // an argument. Reading it off the coverage map a second time was the last
     // remaining second answer to that question: the plan computed `to`, passed
     // it, and the parameter list did not name it.
-    const runEnd = Number.isInteger(ordered?.to)
+    const runEnd = admittedInput ? startIndex : Number.isInteger(ordered?.to)
       ? ordered.to
       : this.#runEndFrom(session, startIndex, null);
     // The restart backs off a segment or two from what was asked for, so the
@@ -839,10 +878,6 @@ export class EncodeRuns {
     // time and landed apart again. It is a fact of the FILE's cutting, held in
     // the live table every session of the file shares, so it is read from
     // there.
-    const positionSecondsOverride = session.spec.carries === "audio-only"
-      ? trueStartOf(session.timeline, startIndex)
-      : undefined;
-
     // What is still read off the session for a run. The list is the measure of
     // how far a session still is from being the three things a run is built
     // from — the material, what is produced of it, and the stretch — and it
@@ -851,13 +886,10 @@ export class EncodeRuns {
     // delete, and this is a thing that disappears by being emptied.
     this.#lastInputToken += 1;
     const inputToken = this.#lastInputToken;
-    const inputs = this.#host.inputOf(session, inputToken);
-    const { args, safeIndex, inputIndex, startSeconds, cutTimes } = buildRunCommand({
-      keyframes: session.keyframes,
-      inputFile: inputs.inputFile,
-      audioFile: inputs.audioFile,
-      inputUrl: inputs.inputUrl,
-      audioInputUrl: inputs.audioInputUrl,
+    if (admittedInput) admittedInput.runTag = `${startIndex}r${inputToken}`;
+    const { args, safeIndex, startSeconds, cutTimes } = buildAdmittedCommand({
+      admittedInput,
+
       timeline: session.timeline,
       output: session.output,
       segmentFormat: session.segmentFormat,
@@ -868,8 +900,7 @@ export class EncodeRuns {
       audioSourceTrackIndex: session.spec.audioSourceTrackIndex,
       rateControl: session.spec.video?.encode?.rateControl ?? null,
       startIndex,
-      endIndex: runEnd,
-      positionSecondsOverride,
+      endIndex: Number.isInteger(ordered?.to) ? ordered.to : runEnd >= startIndex ? runEnd : session.timeline.segmentCount - 1,
       videoEncoder: this.#host.videoEncoder,
       segmentDurationSec: this.#host.segmentDurationSec
     });
@@ -898,18 +929,17 @@ export class EncodeRuns {
     // killed mid-piece leaving a partial file — is not a correctness problem
     // either, because the store serves a segment only once its closure is
     // proven, and it is cleared up when the run ends.
-    let originMicros = null;
-    const referenceKind = session.spec.video ? "vide" : "soun";
     const run = new EncodeRun({
       address: session.outputKey ?? session.id,
       encoder: this.#host.videoEncoder,
       from: safeIndex,
       to: runEnd,
+      makingTag: admittedInput?.runTag ?? String(safeIndex),
       buildArgs: () => args,
       argsDescribed: describeFfmpegArgs(args),
       // Whether this run cuts at times we gave it. Decides how a segment is
       // judged finished — see getFileStream.
-      usesExplicitCuts: Boolean(cutTimes && cutTimes.length > 0),
+      usesExplicitCuts: Boolean(admittedInput || (cutTimes && cutTimes.length > 0)),
       startSeconds,
       totalSeconds: Number(session.file.durationSeconds) || null,
       spawn: (spawnArgs) =>
@@ -917,14 +947,14 @@ export class EncodeRuns {
           cwd: this.#host.segmentFiles.directoryFor(session.outputKey ?? ""),
           // A fourth channel: the encoder names every piece it has CLOSED on it,
           // which is the only proof a piece is whole.
-          stdio: ["ignore", "pipe", "pipe", "pipe"]
+          stdio: ["pipe", "pipe", "pipe", "pipe"]
         }),
       logger: this.#host.logger,
       // The film's last segment number, which is what tells "it reached the
       // end" from "its input dried up": ffmpeg exits zero for both and over a
       // torrent cannot tell them apart.
       lastSegmentIndex: () =>
-        session.timeline?.segmentCount > 0 ? session.timeline.segmentCount - 1 : null,
+        run.to,
       inputUnavailable: (message) => isInputUnavailable(message),
       onProgress: (report) => this.#noteRunProgress(session, run, report),
       indexOfName: (name) => session.segmentFormat.segmentIndexFromName(
@@ -932,22 +962,31 @@ export class EncodeRuns {
       // Why this encoder exists, recorded with its argument list. It used to be
       // handed to a separate `start` call; there is no separate call now.
       because,
-      onClosed: (name, timing) => {
+      onClosed: (name, following) => {
+
         const index = session.segmentFormat.segmentIndexFromName(
           session.segmentFormat.servedNameOf?.(name) ?? name);
-        if (timing && originMicros === null && session.segmentFormat.readMediaRanges) {
-          const ranges = session.segmentFormat.readMediaRanges(
-            this.#host.segmentFiles.closedBytesOf(session.outputKey ?? "", name));
-          originMicros = originOf(ranges, timing.endMicros, referenceKind);
-        }
         if (Number.isInteger(index) && index < safeIndex) return null;
-        const production = productionOf(timing ? { ...timing, originMicros } : null,
-          cutTimes, index - inputIndex, referenceKind);
-        const mediaRanges = this.#wholeClosedPiece(session, name, index, production);
-        if (mediaRanges === false) throw new Error(`Closed piece #${index} could not be published: its media does not reach its muxer cut or is unreadable.`);
-        const published = this.#host.segmentFiles.publish(session.outputKey ?? "", name, session.segmentFormat, { mediaRanges });
-        if (!published) throw new Error(`Closed piece #${index} could not be published to the segment store.`);
+        let bytes = null;
+        if (admittedInput && session.segmentFormat.id === "fmp4" && session.spec.carries !== "audio-only" &&
+          session.spec.audio && !this.#host.servesAudioSeparately(session)) {
+          try {
+            const address = session.outputKey ?? "";
+            const grid = session.timeline.published ?? session.timeline.boundaries;
+            bytes = presentationSegment(this.#host.segmentFiles.closedBytesOf(address, name),
+              following ? this.#host.segmentFiles.closedBytesOf(address, following) : null,
+              { from: grid[index], to: grid[index + 1] });
+          } catch (error) {
+            this.#host.logger.warn(`encode: could not partition closed segment ${index}: ${error.message}`);
+            throw error;
+          }
+        }
+        const mediaRanges = this.#wholeClosedPiece(session, name, index, admittedInput, bytes);
+        if (mediaRanges === false) throw new Error(`Closed piece #${index} has incomplete media.`);
+        const published = this.#host.segmentFiles.publish(session.outputKey ?? "", name, session.segmentFormat, { mediaRanges, bytes });
+        if (!published) throw new Error(`Closed piece #${index} could not be stored.`);
         return published;
+
       },
       onSpeedMeasured: () => this.#host.noteRunSpeedMeasured?.(session, run),
       onEnded: (ended) => {
@@ -955,6 +994,27 @@ export class EncodeRuns {
         this.noteRunEnded(session, run, ended);
       }
     });
+    if (admittedInput) {
+      run.inputFingerprint = admittedInput.fingerprint;
+      run.admittedInputKeys = new Map([[safeIndex, inputKey]]);
+      let nextIndex = startIndex + 1;
+      const canAppend = index => this.isLive(session) && run.isAlive &&
+        this.#host.encodeOrchestrator.wantedSegmentsOn(session.outputKey).some(window => index >= window.from && index <= window.to) &&
+        !this.liveRunsOf(session).some(other => other !== run && index >= other.from && index <= other.to) &&
+        !this.#host.producedNumbers(session).includes(index);
+      void writeAdmittedInput(admittedInput, run.process.stdin, { next: async () => {
+        if (nextIndex > (ordered?.to ?? startIndex) || !canAppend(nextIndex)) return null;
+        const next = await this.#host.encodeInputs.acquire(session, nextIndex, nextIndex);
+        if (!next) return null;
+        if (!canAppend(nextIndex)) { next.release(); return null; }
+        run.admittedInputKeys.set(nextIndex, this.#inputFailures.key(next, inputParameters));
+        run.to = nextIndex++;
+        return next;
+      } }).catch(error => {
+        this.#host.logger.warn(`encode input output=${session.outputKey} segment=${safeIndex} write failed: ${error.message}`);
+        run.process?.stdin?.destroy();
+      });
+    }
     this.#runsByInputToken.set(inputToken, run);
     // THE ONE FAULT THAT IS OTHERWISE SILENT, asked before this run produces a
     // frame. It lost its caller in a refactor on 2026-09-04 and had none until
@@ -978,6 +1038,17 @@ export class EncodeRuns {
         `numbering from #${safeIndex}`
     );
     return run;
+    } catch (error) {
+      admittedInput?.release();
+      if (inputKey && failedAdmittedInput({ ending: ENCODE_EXIT.FAILED,
+        code: error.code ? null : 1, because: error.message },
+        session.spec.transcodesVideo && this.#host.videoEncoder.kind !== "software")) {
+        this.#inputFailures.note(session.outputKey, startIndex, inputKey, error.message);
+        this.#host.invalidateWaits(session);
+        this.#host.productionFailed(session);
+      }
+      throw error;
+    }
   }
 
   /**
@@ -1040,6 +1111,16 @@ export class EncodeRuns {
     // been dead code — which is also why nothing ever stopped the restart loop
     // recorded in the field the same day.
     const wasCurrent = this.runsOf(session).includes(run);
+    const inputFailed = run.admittedInputKeys && failedAdmittedInput(ended,
+      session.spec.transcodesVideo && this.#host.videoEncoder.kind !== "software");
+    if (inputFailed) {
+      const index = run.head;
+      const key = run.admittedInputKeys.get(index);
+      if (key) {
+        this.#inputFailures.note(session.outputKey, index, key, ended.because);
+        this.#host.logger.warn(`encode: unchanged input will not be retried output=${session.outputKey} segment=${index} input=${key} reason=${ended.because}`);
+      }
+    }
     this.#host.encodeOrchestrator.noteEnded(ended);
     // What this admitted encode was seen to do, kept for the next time this
     // host prices the same mode (roadmap item 97, step 14). Whatever the
@@ -1178,7 +1259,7 @@ export class EncodeRuns {
     // an unbounded loop: measured 2026-09-05, ffmpeg failing to spawn produced
     // fifty passes of the plan before a probe stopped it, as fast as the
     // failures arrived.
-    const failure = this.#host.encodeOrchestrator.noteStartFailure(
+    const failure = inputFailed ? { count: 0 } : this.#host.encodeOrchestrator.noteStartFailure(
       session.outputKey,
       ended.from,
       ended.livedMs
@@ -1223,9 +1304,8 @@ export class EncodeRuns {
     // Named exactly as the command line names them, second input included: a
     // refusal whose message describes a different mapping than the one that was
     // refused is the reading that cost a wrong diagnosis before.
-    const inputs = this.#host.inputOf(session);
-    const audioInput = inputs.audioInputUrl.length > 0 ? 1 : 0;
-    const audioTrack = session.spec.audioSourceTrackIndex;
+    const audioInput = 0;
+    const audioTrack = 0;
     if (session.spec.carries === "audio-only") {
       wanted.push(`audio 0:a:${audioTrack}`);
     } else if (this.#host.servesAudioSeparately(session)) {

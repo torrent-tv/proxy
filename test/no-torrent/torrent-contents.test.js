@@ -20,6 +20,38 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { TorrentContents, contentsOf } from "../../services/torrent/Contents.js";
 
+test("only exact sample words in video names or folders exclude examples", () => {
+  const contents = new TorrentContents({ name: "Film", files: [
+    "Film/Film.mkv", "Film/Samples/clip.mkv", "Film/film-sample.mp4",
+    "Film/Sampleson.mkv", "Film/Making cash.mkv", "Film/sample2.mkv"
+  ].map((path) => ({ path, length: 100 })) });
+  assert.deepEqual(contents.items.map((item) => item.fileIndex).sort(), [0, 3, 4, 5]);
+  assert.equal(contents.files().find((file) => file.fileIndex === 1).excludedReason, "sample");
+});
+
+test("an identified release group excludes only its exact video filename", () => {
+  const contents = new TorrentContents({ files: ["Film-GROUP.mkv", "GROUP.mp4", "GROUP extra.mkv"]
+    .map((path) => ({ path, length: 100 })) });
+  assert.equal(contents.videoCount, 3);
+  contents.noteReleaseGroup("GROUP");
+  assert.deepEqual(contents.items.map((item) => item.fileIndex).sort(), [0, 2]);
+  assert.equal(contents.files().find((file) => file.fileIndex === 1).excludedReason, "release-group-promo");
+});
+
+test("track facts revise extension guesses and rebuild the single-film grouping", () => {
+  const contents = new TorrentContents({ files: ["Film.mkv", "Music.mp4", "Picture.bin"]
+    .map((path) => ({ path, length: 100 })) });
+  assert.equal(contents.shape, "undetermined");
+  assert.equal(contents.noteVideo(1, false), true);
+  assert.equal(contents.shape, "single");
+  assert.equal(contents.itemOf(1), null);
+  assert.equal(contents.noteVideo(2, true), true);
+  assert.equal(contents.kindOf(2), "video");
+  assert.equal(contents.videoCount, 2);
+  assert.equal(contents.noteVideo(2, true), false);
+  assert.equal(contents.files().find((file) => file.fileIndex === 2).provisional, false);
+});
+
 /**
  * The Drifters torrent, as WebTorrent reports it: every path prefixed with the
  * torrent's own name, and the episodes in the order the tool that made it chose

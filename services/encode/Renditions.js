@@ -14,7 +14,6 @@ import { variantHeightsFor } from "./output/ladder.js";
 import { isSameMaterial, outputSuits } from "./quality/serving-output.js";
 import { SOUNDTRACK_MODE_CAUSE, chooseSoundtrackMode, linkAnswerFigures, linkCouldCarry, loadOf, soundtrackLoadOf, videoLoadOfLimit, videoLoadOfSpec } from "./quality/link-budget.js";
 import { maxrateKbpsFor } from "./args.js";
-import { encoderInputs } from "./run-inputs.js";
 /**
  * How a base files the audio renditions it has made.
  *
@@ -132,7 +131,7 @@ export class Renditions {
       wanted,
       judge: (spec) => linkCouldCarry(
         linkMbps,
-        loadOf(videoLoadOfSpec(spec, base.file.decode?.megabitsPerSecond ?? null, this.#host.observedPeakMbps?.(spec) ?? null), audioLoad)
+        loadOf(videoLoadOfSpec(spec, base.file.megabitsPerSecond, this.#host.observedPeakMbps?.(spec) ?? null), audioLoad)
       )
     });
   }
@@ -1659,21 +1658,6 @@ export class Renditions {
       this.#flatAudioTrackOf(output) === choice.trackIndex &&
       output.spec.transcodesAudio === (choice.transcode === true)
     ) ?? null;
-  }
-
-  inputOf(session, runToken) {
-    return encoderInputs({
-      picture: session.file,
-      soundtrack: session.spec.audio
-        ? this.#host.sourceFiles.get(session.file.sourceKey, session.spec.audioFileIndex)
-        : session.file,
-      carries: session.spec.carries,
-      audioSeparate: this.servesAudioSeparately(session),
-      sessionId: session.id,
-      runToken,
-      readWindowBytes: this.#host.encodeRuns.readWindowFor(session),
-      baseUrl: this.#host.localBaseUrl
-    });
   }
 
   /**

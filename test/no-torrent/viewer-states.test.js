@@ -83,6 +83,8 @@ test("a report without a link measurement still states everything about the view
   // since nothing was measured, nothing is claimed about the link.
   assert.equal(viewer.netReport.linkMbps, null);
   assert.equal(viewer.netReport.linkSampleMbps, null);
+  assert.equal(viewer.netReport.linkMeasuredAt, null);
+
   assert.equal(viewer.netReport.positionSeconds, 12);
 });
 

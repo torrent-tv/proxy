@@ -20,6 +20,7 @@ import { Viewers } from "../../services/viewer/Viewers.js";
 import { TorrentPool } from "../../services/torrent/torrent-pool.js";
 import { demandFor, forgetTorrent } from "../../services/torrent/download/registry.js";
 import { Urgency } from "../../services/torrent/demand/index.js";
+import { SourceFile } from "../../services/media/SourceFile.js";
 
 /**
  * A session, as much of one as the orchestrator reads.
@@ -31,9 +32,7 @@ function outputOf({ id, fileIndex = 0 }) {
   return {
     id,
     outputKey: `out:${id}`,
-    sourceKey: "source-1",
-    fileIndex,
-    file: { key: `film-${fileIndex}`, durationSeconds: 600 }
+    file: new SourceFile({ sourceKey: "source-1", fileIndex, name: "film.mkv" }).learn({ durationSeconds: 600 })
   };
 }
 
@@ -109,6 +108,21 @@ test("an unchanged map is still not republished", () => {
   assert.equal(published.length, said, "the downloading rebuilds its requests on every one");
 });
 
+test("changing a selected track republishes source demand at the same position", () => {
+  const picture = outputOf({ id: "picture" });
+  const { viewers, published, publish } = over([picture]);
+  const viewer = viewers.of(picture, "person");
+  publish();
+  const zones = published.at(-1).zones;
+  const count = published.length;
+  viewer.audio = { trackIndex: 2, transcode: false };
+  publish();
+  assert.equal(published.length, count + 1);
+  assert.deepEqual(published.at(-1).zones, zones);
+  publish();
+  assert.equal(published.length, count + 1);
+});
+
 /** A torrent that is nothing but one file of a known length. */
 function torrentOf({ length = 1_000_000 } = {}) {
   return {
@@ -138,8 +152,8 @@ test("a map with nothing in it withdraws everything that file had stated", () =>
   const torrent = torrentOf();
   try {
     applyPriorityMap.call(null, torrent, 0, [
-      { from: 0, to: 100, priority: 100 },
-      { from: 100, to: 600, priority: 50 }
+      { byteStart: 0, byteEnd: 100, priority: 100 },
+      { byteStart: 101, byteEnd: 599, priority: 50 }
     ], 600);
     assert.equal(stated(torrent).length, 2);
 
@@ -154,7 +168,7 @@ test("it withdraws that file's bands and nobody else's", () => {
   const torrent = torrentOf();
   try {
     const { register } = demandFor(torrent);
-    applyPriorityMap.call(null, torrent, 0, [{ from: 0, to: 600, priority: 100 }], 600);
+    applyPriorityMap.call(null, torrent, 0, [{ byteStart: 0, byteEnd: 599, priority: 100 }], 600);
     // A read stopped on a piece right now, which only a read can say, and the
     // background fill, which the pool states for itself. Neither is the map's
     // to withdraw.
@@ -192,7 +206,7 @@ test("a departure is answered even when nothing else about the file is known", (
   // published as the last viewer leaves.
   const torrent = torrentOf();
   try {
-    applyPriorityMap.call(null, torrent, 0, [{ from: 0, to: 600, priority: 100 }], 600);
+    applyPriorityMap.call(null, torrent, 0, [{ byteStart: 0, byteEnd: 599, priority: 100 }], 600);
     assert.equal(stated(torrent).length, 1);
 
     torrent.files = [];

@@ -14,6 +14,7 @@
  */
 
 import { EncodeRun } from "../../../services/encode/EncodeRun.js";
+import { Writable } from "node:stream";
 
 /** The working time between two closed pieces of a test measurement. */
 const MEASURED_STEP_MS = 1000;
@@ -105,6 +106,7 @@ export function fakeProcess({ pid = 4242, exitsWhenKilled = true } = {}) {
     killed: false,
     exitCode: null,
     signalCode: null,
+    stdin: new Writable({ write(_chunk, _encoding, callback) { callback(); } }),
     /** Every signal it was sent, in order. */
     signals: [],
     stdout,
@@ -149,6 +151,7 @@ export function fakeProcess({ pid = 4242, exitsWhenKilled = true } = {}) {
       }
       // A real child process emits `close` after `exit`, once its stdio has
       // closed, and the run takes its ending from `close`.
+
       for (const handler of listeners.get("close") ?? []) {
         handler(code, signal);
       }

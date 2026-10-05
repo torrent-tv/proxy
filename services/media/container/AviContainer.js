@@ -1,18 +1,68 @@
 /**
  * @file AVI container — RIFF.
  *
- * Minimal: only keyframe index via idx1 (AVIIF_KEYFRAME). Tracks are not
- * used by current product beyond video — expose a single VideoTrack if needed.
- * Spec: RIFF AVI, idx1 chunk at file end, OpenDML may lack idx1 → no index.
+ * Stream declarations and exact packet addresses from idx1 or OpenDML indexes.
  */
 
 import { Container } from "./Container.js";
 import { VideoTrack } from "../tracks/VideoTrack.js";
+import { AudioTrack } from "../tracks/AudioTrack.js";
+import { ContainerTrack } from "../tracks/ContainerTrack.js";
+import { PacketIndex } from "./PacketIndex.js";
+import { openDmlPackets } from "./avi-open-dml.js";
+import { isUnavailable } from "./unavailable.js";
+import { Mpeg4PictureTiming } from "./mpeg4-picture-timing.js";
+import { MpegElementaryIndex } from "./mpeg-elementary-index.js";
+import { RetainedReads } from "./RetainedReads.js";
+
+const MPEG4_CODECS = new Set(["FMP4", "XVID", "DIVX", "DX50", "MP4V", "M4S2", "MP4S"]);
+const MPEG_AUDIO_CODECS = new Set(["mp1", "mp2", "mp3"]);
+const NAL_CODECS = new Map([["H264", "h264"], ["X264", "h264"], ["AVC1", "h264"], ["HEVC", "hevc"], ["H265", "hevc"]]);
 
 export class AviContainer extends Container {
+  #headers = null;
+  #tracks = null;
+  #packets = null;
+  #scan = null;
+  #declarations = null;
+
+  async #readHeaders() {
+    if (this.#headers) return this.#headers;
+    this.#declarations ??= new RetainedReads(this.packetMemory);
+    const head = await this.readRange(0, Math.min(11, this.fileSize - 1));
+    if (!isAvi(head)) throw new Error("AVI RIFF header is absent.");
+    const end = 8 + head.readUInt32LE(4);
+    if (end > this.fileSize || end < 12) throw new Error("AVI RIFF size is invalid.");
+    const lists = await riffChunks(this.readRange, 12, end, "hdrl");
+    const hdrl = lists.find(chunk => chunk.id === "LIST" && chunk.type === "hdrl");
+    if (!hdrl) throw new Error("AVI stream header list is absent.");
+    const chunks = await riffChunks(this.readRange, hdrl.start + 4, hdrl.end);
+    const main = chunks.find(chunk => chunk.id === "avih");
+    const avih = main ? await this.#declarations.read(main.start, main.end - 1, this.readRange) : null;
+    if (avih && avih.length < 20) throw new Error("AVI main header is truncated.");
+    const streams = [];
+    for (const list of chunks.filter(chunk => chunk.id === "LIST" && chunk.type === "strl")) {
+      const children = await riffChunks(this.readRange, list.start + 4, list.end);
+      const fields = {};
+      fields.codecRanges = [];
+      fields.indexChunks = children.filter(chunk => chunk.id === "indx");
+      for (const chunk of children) {
+        if (!["strh", "strf", "strn", "strd"].includes(chunk.id)) continue;
+        fields[chunk.id] = chunk.end > chunk.start
+          ? await this.#declarations.read(chunk.start, chunk.end - 1, this.readRange) : Buffer.alloc(0);
+        if (["strh", "strf", "strd"].includes(chunk.id) && chunk.end > chunk.start) fields.codecRanges.push([chunk.start, chunk.end - 1]);
+      }
+      if (!fields.strh || fields.strh.length < 48 || !fields.strf) throw new Error("AVI stream declaration is incomplete.");
+      streams.push(fields);
+    }
+    this.#headers = { avih, streams };
+    return this.#headers;
+  }
   get formatName() {
     return "avi";
   }
+
+  packetIndexBytes() { return (this.#packets ?? this.#scan?.index)?.allocatedBytes() ?? 0; }
 
   static detect(head) {
     return isAvi(head);
@@ -33,20 +83,52 @@ export class AviContainer extends Container {
   }
 
   async readTracks() {
-    const head = await this.readRange(0, Math.min(4095, this.fileSize - 1));
-    if (!isAvi(head)) return [];
-    // AVI track table is minimal — expose one video track for uniformity.
-    return [new VideoTrack({
-      trackNumber: 1,
-      declaredIndex: 0,
-      codecId: "",
-      language: "",
-      languageBcp47: "",
-      name: "",
-      isEnabled: true,
-      isDefault: true,
-      declaresDefault: false
-    })];
+    if (this.#tracks) return this.#tracks;
+    const { streams } = await this.#readHeaders();
+    const counts = { video: 0, audio: 0, other: 0 };
+    const tracks = streams.map(({ strh, strf, strn, strd }, trackNumber) => {
+      const kind = strh.toString("ascii", 0, 4);
+      const type = kind === "vids" ? "video" : kind === "auds" ? "audio" : "other";
+      const scale = strh.readUInt32LE(20);
+      const rate = strh.readUInt32LE(24);
+      const params = { trackNumber, declaredIndex: counts[type]++, type,
+        isEnabled: !(strh.readUInt32LE(8) & 1), isDefault: false, declaresDefault: false,
+        language: "", name: strn?.toString("utf8").replace(/\0+$/, "") ?? "",
+        codecPrivateB64: (strd ?? Buffer.alloc(0)).toString("base64") };
+      let track;
+      if (type === "video") {
+        if (strf.length < 40 || strf.readUInt32LE(0) < 40) throw new Error("AVI bitmap format is truncated.");
+        track = new VideoTrack({ ...params, codecId: strf.toString("ascii", 16, 20),
+          width: Math.abs(strf.readInt32LE(4)), height: Math.abs(strf.readInt32LE(8)),
+          bitDepth: strf.readUInt16LE(14), fps: scale > 0 && rate > 0 ? rate / scale : null });
+        // Preserve the complete decoder declaration, including palette and private bytes.
+        track.matroskaCodecId = "V_MS/VFW/FOURCC";
+        track.matroskaCodecPrivateB64 = strf.toString("base64");
+        const nalCodec = NAL_CODECS.get(track.codecId.toUpperCase());
+        if (nalCodec) {
+          track.codecId = nalCodec;
+          delete track.matroskaCodecId;
+          delete track.matroskaCodecPrivateB64;
+        }
+      } else if (type === "audio") {
+        if (strf.length < 16) throw new Error("AVI wave format is truncated.");
+        const tag = strf.readUInt16LE(0);
+        track = new AudioTrack({ ...params, codecId: waveCodec(tag),
+          channels: strf.readUInt16LE(2), samplingFrequency: strf.readUInt32LE(4),
+          codecPrivateB64: strf.subarray(18).toString("base64") });
+        track.matroskaCodecId = "A_MS/ACM";
+        track.matroskaCodecPrivateB64 = (strf.length === 16
+          ? Buffer.concat([strf, Buffer.alloc(2)]) : strf).toString("base64");
+      } else track = new ContainerTrack({ ...params, codecId: strh.toString("ascii", 4, 8) });
+      track.timeBase = scale > 0 && rate > 0 ? scale / rate : null;
+      track.startTimeSeconds = track.timeBase === null ? null : strh.readUInt32LE(28) * track.timeBase;
+      track.durationSeconds = track.timeBase === null ? null : strh.readUInt32LE(32) * track.timeBase;
+      track.sampleSize = strh.readUInt32LE(44);
+      if (["h264", "hevc"].includes(track.codecId)) track.presentationCadenceSeconds = track.timeBase;
+      return track;
+    });
+    this.#tracks = tracks;
+    return tracks;
   }
 
   /**
@@ -65,34 +147,261 @@ export class AviContainer extends Container {
     }
     /** @type {import("./Container.js").ContainerMediaInfo} */
     const info = { format: this.formatName, durationSeconds: null, startTimeSeconds: 0 };
-    const head = await this.readRange(0, Math.min(4095, this.fileSize - 1));
-    // Kept only once the head has been read: one that had not arrived used to
-    // leave an empty answer here for the life of the container.
-    this.mediaInfo = info;
-    if (!isAvi(head)) {
-      return info;
-    }
-    // RIFF("AVI ") -> LIST("hdrl") -> avih. The avih chunk's payload begins with
-    // dwMicroSecPerFrame and its fifth field is dwTotalFrames.
-    const at = head.indexOf("avih", 0, "latin1");
-    if (at < 0 || at + 8 + 20 > head.length) {
-      return info;
-    }
-    const payload = at + 8;
-    const microsecondsPerFrame = head.readUInt32LE(payload);
-    const totalFrames = head.readUInt32LE(payload + 16);
+    const { avih } = await this.#readHeaders();
+    const microsecondsPerFrame = avih?.readUInt32LE(0) ?? 0;
+    const totalFrames = avih?.readUInt32LE(16) ?? 0;
     if (microsecondsPerFrame > 0 && totalFrames > 0) {
       info.durationSeconds = (microsecondsPerFrame * totalFrames) / 1e6;
     }
+    this.mediaInfo = info;
     return info;
   }
 
   async parseKeyframeIndex() {
+    const { streams } = await this.#readHeaders();
+    const picture = (await this.readTracks()).find(track => track.type === "video");
+    if (streams.some(stream => stream.indexChunks.length) || ["h264", "hevc"].includes(picture?.codecId) || MPEG4_CODECS.has(picture?.codecId.toUpperCase())) {
+      const index = await this.readPacketIndex();
+      return picture ? { times: index.keyframesOf(picture.trackNumber), tolerance: 0 } : null;
+    }
     const r = await readAviKeyframeTimes(this.readRange, this.fileSize);
-    if (!r) return null;
+    if (!r) {
+      return picture ? { times: (await this.readPacketIndex()).keyframesOf(picture.trackNumber), tolerance: 0 } : null;
+    }
     if (Array.isArray(r)) return { times: r, tolerance: 0 };
     return r;
   }
+
+  async readPacketIndex(interval) {
+    if (this.#packets) return this.#packets;
+    if (this.#scan) return this.#readUnindexed(interval);
+    const tracks = await this.readTracks();
+    const { streams } = await this.#readHeaders();
+    if (streams.some(stream => stream.indexChunks.length)) {
+      const index = new PacketIndex({ packetMemory: this.packetMemory, deferMemory: true });
+      const timings = new Map();
+      try {
+      for (const track of tracks.filter(track => ["video", "audio"].includes(track.type))) {
+        if (!(track.timeBase > 0) || !streams[track.trackNumber].indexChunks.length) throw new Error("AVI OpenDML stream index is incomplete.");
+        index.declareTrack(track.trackNumber, { type: track.type, codecId: track.codecId, codecRanges: streams[track.trackNumber].codecRanges });
+        let pts = track.startTimeSeconds;
+        for await (const packet of openDmlPackets({ readRange: this.readRange, fileSize: this.fileSize,
+          indexes: streams[track.trackNumber].indexChunks, streamId: track.trackNumber })) {
+          if (!packet.length) {
+            if (track.type === "video") { index.extendLastPresentation(track.trackNumber, track.timeBase); pts += track.timeBase; }
+            continue;
+          }
+          if (track.sampleSize > 0 && packet.length % track.sampleSize) throw new Error("AVI packet contains an incomplete fixed-size sample.");
+          const duration = track.timeBase * (track.sampleSize > 0 ? packet.length / track.sampleSize : 1);
+          await this.#appendPacket(index, timings, track, { pts, duration, keyframe: track.type !== "video" || packet.keyframe,
+            ranges: [[packet.start, packet.start + packet.length - 1]] });
+          pts += duration;
+          index.flushPending();
+        }
+        timings.get(track.trackNumber)?.elementary?.complete();
+        index.flushPending();
+        index.complete(track.trackNumber);
+      }
+      this.#packets = index;
+      return index;
+      } catch (error) {
+        index.dispose();
+        throw error;
+      }
+    }
+    const header = await this.readRange(0, 11);
+    const chunks = await riffChunks(this.readRange, 12, 8 + header.readUInt32LE(4));
+    const movi = chunks.find(chunk => chunk.id === "LIST" && chunk.type === "movi");
+    const table = chunks.find(chunk => chunk.id === "idx1");
+    if (!movi) throw new Error("AVI media list is absent.");
+    if (!table) {
+      const index = new PacketIndex({ packetMemory: this.packetMemory, deferMemory: true });
+      const clocks = new Map();
+      for (const track of tracks.filter(track => ["video", "audio"].includes(track.type))) {
+        if (!(track.timeBase > 0)) throw new Error("AVI stream time base is invalid.");
+        if (track.type === "video" && !["h264", "hevc"].includes(track.codecId) && !MPEG4_CODECS.has(track.codecId.toUpperCase()) && !["MJPG", "JPEG", "DIB ", "\0\0\0\0"].includes(track.codecId.toUpperCase())) {
+          throw new Error("AVI video without an index requires elementary picture timing.");
+        }
+        if (track.type === "audio" && !(track.sampleSize > 0) && !MPEG_AUDIO_CODECS.has(track.codecId)) throw new Error("AVI variable-size audio requires elementary frame timing.");
+        index.declareTrack(track.trackNumber, { type: track.type, codecId: track.codecId, codecRanges: streams[track.trackNumber].codecRanges });
+        clocks.set(track.trackNumber, track.startTimeSeconds);
+      }
+      this.#scan = { index, tracks, clocks, timings: new Map(), at: 0,
+        stack: [{ end: this.fileSize, next: this.fileSize }] };
+      return this.#readUnindexed(interval);
+    }
+    if ((table.end - table.start) % 16 !== 0) throw new Error("AVI packet index entry is truncated.");
+    const index = new PacketIndex({ packetMemory: this.packetMemory, deferMemory: true });
+    try {
+    const clocks = new Map();
+    const timings = new Map();
+    for (const track of tracks) {
+      if (!["video", "audio", "subtitle"].includes(track.type)) continue;
+      if (!(track.timeBase > 0)) throw new Error("AVI stream time base is invalid.");
+      index.declareTrack(track.trackNumber, { type: track.type, codecId: track.codecId, codecRanges: streams[track.trackNumber].codecRanges });
+      clocks.set(track.trackNumber, track.startTimeSeconds);
+    }
+    let offsetBase = null;
+    for (let at = table.start; at < table.end; at += 16) {
+      const entry = await this.readRange(at, at + 15);
+      const chunkId = entry.toString("ascii", 0, 4);
+      if (!/^[0-9]{2}(db|dc|wb)$/.test(chunkId)) continue;
+      const id = Number(chunkId.slice(0, 2));
+      const track = tracks.find(track => track.trackNumber === id);
+      if (!track || !clocks.has(id)) throw new Error("AVI packet refers to an undeclared stream.");
+      const flags = entry.readUInt32LE(4);
+      const offset = entry.readUInt32LE(8);
+      const length = entry.readUInt32LE(12);
+      if (length === 0) {
+        if (track.type === "video") { index.extendLastPresentation(id, track.timeBase); clocks.set(id, clocks.get(id) + track.timeBase); }
+        continue;
+      }
+      if (offsetBase === null) {
+        for (const base of [movi.start, 0, movi.start + 4]) {
+          const address = base + offset;
+          if (address < movi.start + 4 || address + 8 + length > movi.end) continue;
+          const probe = await this.readRange(address, address + 7);
+          if (probe.toString("ascii", 0, 4) === chunkId && probe.readUInt32LE(4) === length) { offsetBase = base; break; }
+        }
+        if (offsetBase === null) throw new Error("AVI packet index has no valid offset base.");
+      }
+      const address = offsetBase + offset;
+      if (address < movi.start + 4 || address + 8 + length > movi.end) throw new Error("AVI indexed packet exceeds its media list.");
+      const probe = await this.readRange(address, address + 7);
+      if (probe.toString("ascii", 0, 4) !== chunkId || probe.readUInt32LE(4) !== length) throw new Error("AVI packet index disagrees with its chunk header.");
+      if (track.sampleSize > 0 && length % track.sampleSize !== 0) throw new Error("AVI packet contains an incomplete fixed-size sample.");
+      const duration = track.timeBase * (track.sampleSize > 0 ? length / track.sampleSize : 1);
+      const pts = clocks.get(id);
+      await this.#appendPacket(index, timings, track, { pts, duration, keyframe: track.type !== "video" || chunkId.endsWith("db") || !!(flags & 0x10),
+        ranges: [[address + 8, address + 8 + length - 1]] });
+      clocks.set(id, pts + duration);
+      index.flushPending();
+    }
+    for (const timing of timings.values()) timing.elementary?.complete();
+    index.flushPending();
+    for (const id of clocks.keys()) index.complete(id);
+    this.#packets = index;
+    return index;
+    } catch (error) {
+      index.dispose();
+      throw error;
+    }
+  }
+
+  async #readUnindexed(interval) {
+    const state = this.#scan;
+    state.index.flushPending();
+    const ready = () => interval && state.tracks.filter(track => state.clocks.has(track.trackNumber) &&
+      (!interval.trackIds || interval.trackIds.includes(track.trackNumber))).every(track =>
+      state.index.inputFor({ trackId: track.trackNumber, from: interval.from, to: interval.to }).kind === "result");
+    try {
+      while (state.stack.length) {
+        if (ready()) return state.index;
+        const parent = state.stack.at(-1);
+        if (state.at === parent.end) { state.at = parent.next; state.stack.pop(); continue; }
+        if (state.at + 8 > parent.end) throw new Error("AVI media chunk header is truncated.");
+        const head = await this.readRange(state.at, state.at + 7);
+        const id = head.toString("ascii", 0, 4), length = head.readUInt32LE(4);
+        const start = state.at + 8, end = start + length, next = end + (length & 1);
+        if (end > parent.end || next > parent.end) throw new Error("AVI media chunk exceeds its containing list.");
+        if (id === "LIST" || id === "RIFF") {
+          if (length < 4) throw new Error("AVI media list has no type.");
+          const type = (await this.readRange(start, start + 3)).toString("ascii");
+          if (id === "RIFF" && type !== "AVI " && type !== "AVIX") throw new Error("AVI continuation form type is invalid.");
+          if (id === "LIST" && type !== "rec " && type !== "movi") { state.at = next; continue; }
+          state.stack.push({ end, next });
+          state.at = start + 4;
+          continue;
+        }
+        if (/^[0-9]{2}(db|dc|wb)$/.test(id)) {
+          const trackId = Number(id.slice(0, 2));
+          const track = state.tracks.find(track => track.trackNumber === trackId);
+          if (!track || !state.clocks.has(trackId)) throw new Error("AVI packet refers to an undeclared stream.");
+          if (track.sampleSize > 0 && length % track.sampleSize) throw new Error("AVI packet contains an incomplete fixed-size sample.");
+          const duration = track.timeBase * (track.sampleSize > 0 ? length / track.sampleSize : 1);
+          const pts = state.clocks.get(trackId);
+          if (length) await this.#appendPacket(state.index, state.timings, track, { pts, duration, keyframe: true, ranges: [[start, end - 1]] });
+          else if (track.type === "video") state.index.extendLastPresentation(trackId, track.timeBase);
+          state.clocks.set(trackId, pts + duration);
+          if (!MPEG4_CODECS.has(track.codecId.toUpperCase()) && !["h264", "hevc"].includes(track.codecId) && !MPEG_AUDIO_CODECS.has(track.codecId) && (track.type === "audio" || length)) state.index.coverThrough(trackId, Math.max(0, pts + duration));
+        }
+        state.at = next;
+        state.index.flushPending();
+      }
+    } catch (error) {
+      if (isUnavailable(error) && ready()) return state.index;
+      throw error;
+    }
+    for (const timing of state.timings.values()) timing.elementary?.complete();
+    state.index.flushPending();
+    for (const trackId of state.clocks.keys()) state.index.complete(trackId);
+    this.#packets = state.index;
+    return this.#packets;
+  }
+
+  async #appendPacket(index, timings, track, packet) {
+    if ((track.type === "audio" && MPEG_AUDIO_CODECS.has(track.codecId)) ||
+        (track.type === "video" && ["h264", "hevc"].includes(track.codecId))) {
+      let timing = timings.get(track.trackNumber);
+      if (!timing) timings.set(track.trackNumber, timing = {
+        elementary: new MpegElementaryIndex([track], { index }), stamped: false, current: null
+      });
+      const [start, end] = packet.ranges[0];
+      if (timing.current?.start !== start) timing.current = { start, at: start };
+      index.flushPending();
+      while (timing.current.at <= end) {
+        const at = timing.current.at, last = Math.min(end, at + this.portionBytes - 1);
+        const bytes = await this.readRange(at, last);
+        timing.elementary.push(track.trackNumber, bytes, at, timing.stamped ? {} : { pts: track.startTimeSeconds, dts: track.startTimeSeconds });
+        timing.stamped = true;
+        timing.current.at = last + 1;
+        index.flushPending();
+      }
+      return;
+    }
+    if (track.type !== "video" || !MPEG4_CODECS.has(track.codecId.toUpperCase())) {
+      index.append(track.trackNumber, packet);
+      return;
+    }
+    let timing = timings.get(track.trackNumber);
+    if (!timing) timings.set(track.trackNumber, timing = new Mpeg4PictureTiming(this.packetMemory));
+    const [start, end] = packet.ranges[0];
+    const picture = await timing.read(this.readRange, start, end, track.startTimeSeconds);
+    for (const one of picture.pictures) {
+      if (one.coded) index.append(track.trackNumber, { ...packet, pts: one.pts, keyframe: one.keyframe, ranges: [[one.start, one.end]] });
+      else if (!picture.packed) index.extendLastPresentation(track.trackNumber, packet.duration);
+      if (one.coveredThrough !== null) index.coverThrough(track.trackNumber, Math.max(0, one.coveredThrough));
+    }
+    picture.commit();
+  }
+}
+
+/** Walk declared chunks without reading media or alignment padding. */
+async function riffChunks(read, start, end, stopAfterListType = null) {
+  const chunks = [];
+  for (let at = start; at < end;) {
+    if (at + 8 > end) throw new Error("AVI chunk header is truncated.");
+    const head = await read(at, at + 7);
+    const id = head.toString("ascii", 0, 4);
+    const size = head.readUInt32LE(4);
+    const dataStart = at + 8;
+    const dataEnd = dataStart + size;
+    if (dataEnd > end) throw new Error("AVI chunk exceeds its containing list.");
+    let type = null;
+    if (id === "LIST") {
+      if (size < 4) throw new Error("AVI list type is absent.");
+      type = (await read(dataStart, dataStart + 3)).toString("ascii");
+    }
+    chunks.push({ id, type, start: dataStart, end: dataEnd });
+    if (type !== null && type === stopAfterListType) break;
+    at = dataEnd + (size & 1);
+  }
+  return chunks;
+}
+
+function waveCodec(tag) {
+  return new Map([[1, "pcm"], [3, "pcm_float"], [0x50, "mp2"], [0x55, "mp3"],
+    [0xff, "aac"], [0x160, "wmav1"], [0x161, "wmav2"], [0x2000, "ac3"], [0x2001, "dts"]]).get(tag) ?? `wave:${tag}`;
 }
 
 // ---------------------------------------------------------------------------

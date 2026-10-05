@@ -442,10 +442,11 @@ try {
     // in and at the same instant as them.
     readExtra: () => {
       const fragments = fragmentBufferCollection();
-      return fragments.seen === 0
+      const pieces = fragments.seen === 0
         ? ""
         : `piece buffers handed here ${fragments.seen} seen, ${fragments.collected} collected, ` +
           `${fragments.seen - fragments.collected} still alive`;
+      return [pieces, `binary packet indexes ${started.mediaMemory.packetIndexBytes()} bytes`].filter(Boolean).join("; ");
     },
     // Once a minute cannot see what kills this process. Both out-of-memory
     // kills of 2026-09-02 happened inside a single gap of the old cadence: the
@@ -641,7 +642,7 @@ try {
     // reason as the transport snapshot above: the manager is built inside
     // `startProxyServer`, with this handler already in hand.
     onViewerPresent: (consumerId) => {
-      started?.outputParts?.viewers?.seen?.(consumerId);
+      started?.outputParts?.viewers?.present?.(consumerId);
     },
     onViewerGone: (consumerId, because) => {
       void started?.outputParts?.lifecycle?.viewerHasGone?.(consumerId, because)

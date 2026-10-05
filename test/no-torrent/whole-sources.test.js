@@ -64,6 +64,8 @@ test("a description with no files is not remembered", () => {
 
 test("the figures of a whole file say everything is here and nothing is arriving", () => {
   const stats = wholeFileStats(129241752);
+  assert.equal(stats.fileAvailable, true, "retained bytes satisfy readiness without a live torrent");
+  assert.equal(wholeFileStats(0).fileAvailable, false);
   assert.equal(stats.fileProgress, 1);
   assert.equal(stats.fileDownloaded, 129241752);
   assert.equal(stats.fileLength, 129241752);

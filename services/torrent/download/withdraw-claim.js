@@ -76,5 +76,7 @@ export function withdrawClaim({ index, files, torrent, warn = () => undefined })
     );
     return "refused";
   }
+  try { owner.emit?.("piece-withdrawn", index); }
+  catch (error) { warn(`piece withdrawal listener failed: ${error?.message ?? error}`); }
   return "withdrawn";
 }

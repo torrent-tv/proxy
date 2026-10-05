@@ -14,11 +14,15 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 
-import { readWholeFile } from "../../services/torrent/worker/client.js";
+import { readWholeFile, readWholeFileRanges } from "../../services/torrent/worker/client.js";
 
 test("a range of a whole file is read from the disk, and a range past it is not here", async (t) => {
   const dir = await mkdtemp(path.join(os.tmpdir(), "ttv-whole-"));
-  t.after(() => rm(dir, { recursive: true, force: true }));
+  t.after(() => {
+    assert.equal(path.dirname(path.resolve(dir)), path.resolve(os.tmpdir()));
+    assert.ok(path.basename(dir).startsWith("ttv-whole-"));
+    return rm(dir, { recursive: true, force: true });
+  });
   const file = path.join(dir, "film.mkv");
   await writeFile(file, Buffer.from("0123456789"));
   const whole = { path: file, length: 10, name: "film.mkv" };
@@ -26,5 +30,9 @@ test("a range of a whole file is read from the disk, and a range past it is not 
   assert.equal((await readWholeFile(whole, 2, 5)).toString(), "2345");
   assert.equal((await readWholeFile(whole, 8, 20)).toString(), "89", "clamped to the file");
   assert.equal(await readWholeFile(whole, 12, 20), null);
+  assert.deepEqual((await readWholeFileRanges(whole, [[0, 1], [8, 9]], 4)).map((bytes) => bytes.toString()), ["01", "89"]);
+  assert.equal(await readWholeFileRanges(whole, [[0, 1], [8, 9]], 3), null);
+  assert.equal(await readWholeFileRanges(whole, [[8, 10]], 10), null);
+  assert.equal(await readWholeFileRanges({ ...whole, length: 11 }, [[0, 1]], 2), null);
   await assert.rejects(readWholeFile({ ...whole, path: path.join(dir, "gone.mkv") }, 0, 1), { code: "ENOENT" });
 });

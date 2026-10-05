@@ -108,6 +108,23 @@ export class SegmentStore {
 
   /** Segment publication waiters by output key and segment number. @type {Map<string, Map<number, Set<Function>>>} */
   #waiters = new Map();
+  #changeListeners = new Map();
+
+  /** Register before inspecting files; changes include playlists, init and segments. */
+  subscribeChanges(key, listener) {
+    const listeners = this.#changeListeners.get(key) ?? new Set();
+    this.#changeListeners.set(key, listeners);
+    listeners.add(listener);
+    this.#watch(key);
+    return () => {
+      listeners.delete(listener);
+      if (listeners.size === 0 && this.#changeListeners.get(key) === listeners) this.#changeListeners.delete(key);
+    };
+  }
+
+  #changed(key) {
+    for (const listener of [...(this.#changeListeners.get(key) ?? [])]) listener();
+  }
 
   /** Output key → the watch on its directory. @type {Map<string, import("node:fs").FSWatcher>} */
   #watchers = new Map();
@@ -499,11 +516,11 @@ export class SegmentStore {
    * @param {string} key
    * @param {string} makingName - What the encoder called it while writing.
    * @param {{ servedNameOf?: (name: string) => string | null, segmentIndexFromName?: (name: string) => number }} format
-   * @param {{ mediaRanges?: object | null }} [read] - The piece's media
+   * @param {{ mediaRanges?: object | null, bytes?: Buffer | null }} [read] - The piece's media
    *   intervals as its format read them from the closed file, kept with it.
    * @returns {string | null} The served name, or null where nothing was renamed.
    */
-  publish(key, makingName, format, { mediaRanges = null } = {}) {
+  publish(key, makingName, format, { mediaRanges = null, bytes = null } = {}) {
     const served = format?.servedNameOf?.(makingName) ?? null;
     if (!served) {
       return null;
@@ -511,6 +528,10 @@ export class SegmentStore {
     const dir = path.join(this.#root, directoryNameFor(key));
     const index = format?.segmentIndexFromName?.(served) ?? -1;
     try {
+      if (bytes !== null) {
+        if (!Buffer.isBuffer(bytes) || bytes.length === 0) throw new TypeError("Published segment bytes must be complete and nonempty.");
+        writeFileSync(path.join(dir, makingName), bytes);
+      }
       renameSync(path.join(dir, makingName), path.join(dir, served));
     } catch (error) {
       // The file may already be gone — a process killed between closing the
@@ -685,10 +706,12 @@ export class SegmentStore {
         // the directory is asked about only where it can have gone.
         if (event === "rename" && !existsSync(dir)) {
           this.#held.delete(key);
+          this.#changed(key);
           end();
           return;
         }
         this.#noticed(key, typeof name === "string" ? name : null);
+        this.#changed(key);
       });
       // A directory that goes away takes its watch with it rather than leaving
       // an error nobody reads.
@@ -803,12 +826,14 @@ export class SegmentStore {
    * @param {number} index
    */
   announce(key, index) {
+    this.#changed(key);
     const byIndex = this.#waiters.get(key);
     const waiting = byIndex?.get(index);
     if (!waiting) return;
-    byIndex.delete(index);
-    if (byIndex.size === 0) this.#waiters.delete(key);
-    for (const resolve of waiting) resolve(true);
+    // An event only wakes readers. The store's current bytes decide readiness,
+    // including when a publication was followed by removal before this wake.
+    if (!this.pathOf(key, index)) return;
+    for (const resolve of [...waiting]) resolve(true);
   }
 
   /**
@@ -822,7 +847,7 @@ export class SegmentStore {
    * @returns {number}
    */
   waitingFor(key) {
-    let waiting = 0;
+    let waiting = this.#changeListeners.get(key)?.size ?? 0;
     for (const holders of this.#waiters.get(key)?.values() ?? []) {
       waiting += holders.size;
     }
@@ -842,16 +867,13 @@ export class SegmentStore {
    * @returns {Promise<boolean>}
    */
   waitFor(key, index, timeoutMs, cancelled = null) {
-    if (this.pathOf(key, index)) return Promise.resolve(true);
-    // An output adopted from a previous process has a directory nobody made in
-    // this one, so the wait itself is the first moment it is watched.
-    this.#watch(key);
     return new Promise((resolve) => {
       const byIndex = this.#waiters.get(key) ?? new Map();
       const waiting = byIndex.get(index) ?? new Set();
       this.#waiters.set(key, byIndex);
       byIndex.set(index, waiting);
       let settled = false;
+      let timer = null;
       const finish = (published) => {
         if (settled) return;
         settled = true;
@@ -865,15 +887,16 @@ export class SegmentStore {
         resolve(published);
       };
       waiting.add(finish);
+      // Subscribe before inspecting availability or starting the directory
+      // watch. A synchronous publication during either operation is visible.
+      this.#watch(key);
+      if (this.pathOf(key, index)) finish(true);
+      if (settled) return;
       // No deadline is a wait that ends only on the publication: a timer given
       // an infinite delay fires at once, which would turn the wait into a poll.
-      const timer = Number.isFinite(timeoutMs) ? setTimeout(() => finish(false), Math.max(0, timeoutMs)) : null;
+      timer = Number.isFinite(timeoutMs) ? setTimeout(() => finish(false), Math.max(0, timeoutMs)) : null;
       timer?.unref?.();
-      cancelled?.then(() => finish(false));
-      // Publication may have landed after the first path check and before this
-      // waiter was registered. Recheck once after registration so that window
-      // cannot turn a present segment into a full-deadline wait.
-      if (this.pathOf(key, index)) finish(true);
+      cancelled?.then(() => finish(false), () => finish(false));
     });
   }
 
@@ -892,7 +915,7 @@ export class SegmentStore {
    * name in a dead run's stretch is a piece it closed.
    *
    * @param {string} key
-   * @param {number} startedAt - The run's first segment number, which is its tag.
+   * @param {number | string} startedAt - The run's unique working-name tag.
    * @returns {number} How many unfinished pieces were removed.
    */
   clearUpAfter(key, startedAt) {
@@ -904,7 +927,8 @@ export class SegmentStore {
       key,
       this.directoryFor(key),
       format,
-      String(Number.isInteger(startedAt) && startedAt > 0 ? startedAt : 0)
+      typeof startedAt === "string" && /^[0-9a-z]+$/.test(startedAt)
+        ? startedAt : String(Number.isInteger(startedAt) && startedAt > 0 ? startedAt : 0)
     );
     if (removed > 0) {
       this.#logger?.info?.(
@@ -984,6 +1008,7 @@ export class SegmentStore {
    * @param {string} because
    */
   drop(key, because) {
+    this.#changed(key);
     const dir = path.join(this.#root, directoryNameFor(key));
     this.#unwatch(key);
     try {
@@ -996,6 +1021,12 @@ export class SegmentStore {
     this.#mediaRanges.delete(key);
     this.#touched.delete(key);
     this.#inits.delete(key);
+    // A removed output cannot publish to the existing waiters. Let callers
+    // re-evaluate its lifecycle instead of retaining an unbounded wait.
+    const byIndex = this.#waiters.get(key);
+    for (const waiting of byIndex?.values() ?? []) {
+      for (const finish of [...waiting]) finish(false);
+    }
     this.#logger.info(`segment-store dropped ${directoryNameFor(key)} (${because})`);
   }
 

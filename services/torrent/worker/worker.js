@@ -20,21 +20,19 @@
 // before WebTorrent can reach the native one. Two isolates using
 // node-datachannel at once abort the process, and the torrent's wss trackers
 // create peer connections of their own.
-import { isUsableTorrentHandle } from "./handle-state.js";
+import { isUsableTorrentHandle, requireCurrentTorrent } from "./handle-state.js";
 import "./install-webrtc-shim.js";
 import { parentPort, workerData } from "node:worker_threads";
+import { Readable } from "node:stream";
+import { heldFileBytes } from "./held-file-bytes.js";
 import { createSendStream } from "./channel.js";
 import { readFragments, supplyFiguresFor } from "./piece-reader.js";
-import {
-  warmResumePosition
-} from "./resume-warm.js";
-import { fillFileInBackground } from "./background-fill.js";
-import { demandFor } from "../download/registry.js";
-import { heldRangesOf, ownsItsMemory, readHeldBytes } from "./held-bytes.js";
+import { demandFor, forecastDownloads } from "../download/registry.js";
+import { heldRangesOf, ownsItsMemory, readHeldBytes, readHeldRanges } from "./held-bytes.js";
 import { CompletedFiles, completedFilesRoot } from "../../storage/files/CompletedFiles.js";
 import { pieceFromWholeFiles, pieceIsInWholeFiles } from "../../storage/files/piece-from-whole-file.js";
 import { Command, Event } from "./protocol.js";
-import { filesInUse } from "./files-in-use.js";
+import { filesInUse, readWhileInUse } from "./files-in-use.js";
 import { createWholeSources } from "./whole-sources.js";
 import { wholeFileStats } from "./whole-file-stats.js";
 import { describeHeldObjects, readUtpOpenCount } from "./held-objects.js";
@@ -88,15 +86,9 @@ const pool = new TorrentPool({
 
 /** Torrents by sourceKey — the main thread names them, this thread owns them. */
 const torrentsByKey = new Map();
+/** Resolved handles for reads that must never wait for or revive a source. */
+const resolvedTorrents = new Map();
 
-/**
- * How each source was named when it was added, so a torrent that has since been
- * destroyed can be added again. Kept separately from {@link torrentsByKey}
- * because that map holds the promise, not the recipe.
- *
- * @type {Map<string, { sourceType: string, source: string }>}
- */
-const sourceRecipes = new Map();
 /** In-flight reads, so a cancel can stop one mid-body. */
 const readsById = new Map();
 /**
@@ -154,57 +146,19 @@ async function knownTorrent(sourceKey) {
     return null;
   }
   const torrent = await pending.catch(() => null);
-  return isUsableTorrentHandle(torrent) ? torrent : null;
+  return torrentsByKey.get(sourceKey) === pending && isUsableTorrentHandle(torrent) ? torrent : null;
 }
 
 /**
- * The torrent for one file, but never one rebuilt for a file held whole.
- *
- * For the questions that steer or measure a download: a file held whole has no
- * download, and rebuilding its torrent to be told so is what made the torrent
- * come back after every removal (see `whole-sources.js`). The torrent is still
- * used while it exists.
+ * Resolve a live torrent handle and retain its synchronous lookup.
  *
  * @param {string} sourceKey
- * @param {number} fileIndex
  * @returns {Promise<import("webtorrent").Torrent | null>}
  */
-async function torrentUnlessWhole(sourceKey, fileIndex) {
-  return wholeSources.fileOf(sourceKey, fileIndex) ? knownTorrent(sourceKey) : requireTorrent(sourceKey);
-}
-
 async function requireTorrent(sourceKey) {
-  const pending = torrentsByKey.get(sourceKey);
-  if (!pending) {
-    throw new Error(`Unknown source ${sourceKey}.`);
-  }
-  const torrent = await pending;
-  if (isUsableTorrentHandle(torrent)) {
-    return torrent;
-  }
-  // The pool destroys a torrent that has gone unread for a quarter of an hour,
-  // and under disk pressure. It clears its OWN map when it does; this one it
-  // knows nothing about, so the promise here went on resolving to a corpse: a
-  // destroyed torrent keeps its object but loses its files. Every later session
-  // for that source then failed the same way — the plan and the codec probe
-  // answered from cache in milliseconds, nothing waited for metadata because
-  // everything believed the torrent was known, and ffmpeg's first read died on
-  // `File N not found` 130 ms in, after which the session answered 500 for
-  // ever. Measured 2026-08-06 on two sessions in a row, both from a phone,
-  // which is what made it look like a mobile problem.
-  const recipe = sourceRecipes.get(sourceKey);
-  if (!recipe) {
-    torrentsByKey.delete(sourceKey);
-    throw new Error(`Source ${sourceKey} is gone and cannot be re-added.`);
-  }
-  const revived = pool.getTorrent(recipe.sourceType, recipe.source);
-  torrentsByKey.set(sourceKey, revived);
-  revived.catch(() => {
-    if (torrentsByKey.get(sourceKey) === revived) {
-      torrentsByKey.delete(sourceKey);
-    }
-  });
-  return revived;
+  const torrent = await requireCurrentTorrent(torrentsByKey, sourceKey);
+  resolvedTorrents.set(sourceKey, torrent);
+  return torrent;
 }
 
 
@@ -277,7 +231,7 @@ function sendFragment(id, fragment) {
  * @param {number | null} params.end - Inclusive.
  * @returns {Promise<void>}
  */
-async function streamRange({ id, sourceKey, fileIndex, start, end, windowBytes }) {
+async function streamRange({ id, sourceKey, fileIndex, start, end }) {
   const torrent = await requireTorrent(sourceKey);
   const file = torrent.files?.[fileIndex];
   if (!file) {
@@ -301,8 +255,7 @@ async function streamRange({ id, sourceKey, fileIndex, start, end, windowBytes }
       fileIndex,
       start: rangeStart,
       end: rangeEnd,
-      cancellation: sender,
-      windowBytes
+      cancellation: sender
     })) {
       if (sender.isCancelled()) {
         fragment.release();
@@ -349,14 +302,15 @@ async function streamRange({ id, sourceKey, fileIndex, start, end, windowBytes }
 async function runCommand(command, params, id) {
   switch (command) {
     case Command.ADD_SOURCE: {
+      const retained = wholeSources.describe(params.sourceKey);
+      if (retained) {
+        announceWholeFiles(params.sourceKey, retained);
+        return retained;
+      }
       // Registered before it resolves, so anything naming this source while it
       // is being added waits for it instead of being told it does not exist.
       // Reusing the same promise for a repeated add also collapses two callers
       // racing to open the same torrent into one.
-      sourceRecipes.set(params.sourceKey, {
-        sourceType: params.sourceType,
-        source: params.source
-      });
       let pending = torrentsByKey.get(params.sourceKey);
       if (!pending) {
         pending = pool.getTorrent(params.sourceType, params.source);
@@ -379,9 +333,14 @@ async function runCommand(command, params, id) {
       const added = await pending;
       const described = isUsableTorrentHandle(added) ? null : wholeSources.describe(params.sourceKey);
       if (described) {
+        announceWholeFiles(params.sourceKey, described);
         return described;
       }
       const torrent = isUsableTorrentHandle(added) ? added : await requireTorrent(params.sourceKey);
+      resolvedTorrents.set(params.sourceKey, torrent);
+      ensureArrivalsWired(params.sourceKey, torrent);
+      announceWholeFiles(params.sourceKey, { infoHash: torrent.infoHash,
+        files: (torrent.files ?? []).map((file, index) => ({ index, name: file.name, length: file.length })) });
       return {
         infoHash: torrent.infoHash,
         name: torrent.name,
@@ -453,51 +412,12 @@ async function runCommand(command, params, id) {
     }
 
 
-    case Command.FILL_FILE: {
-      const torrent = await torrentUnlessWhole(params.sourceKey, params.fileIndex);
-      return {
-        started: torrent ? fillFileInBackground(torrent, params.fileIndex, params.sourceKey) : false
-      };
-    }
-
-    case Command.FILL_TORRENT: {
-      const torrent = wholeSources.isWhole(params.sourceKey)
-        ? await knownTorrent(params.sourceKey)
-        : await requireTorrent(params.sourceKey);
-      return { started: torrent ? pool.fillTorrentAsCapacityAllows(torrent) : false };
-    }
-
-    case Command.WARM_POSITION: {
-      const torrent = await torrentUnlessWhole(params.sourceKey, params.fileIndex);
-      if (!torrent) {
-        return { started: false };
-      }
-      return {
-        started: await warmResumePosition(
-          torrent,
-          params.fileIndex,
-          params.sourceKey,
-          params.positionSeconds,
-          {
-            // Told by the main thread, which is where what a file states about
-            // itself is read.
-            durationSeconds: params.durationSeconds,
-            fetchRegion: (start, bytes) =>
-              pool.prefetchFileRegion(torrent, params.fileIndex, start, bytes)
-          }
-        )
-      };
-    }
-
-
     case Command.FILE_STATS: {
-      const torrent = await torrentUnlessWhole(params.sourceKey, params.fileIndex);
+      const torrent = await knownTorrent(params.sourceKey);
       if (!torrent) {
-        return wholeFileStats(wholeSources.fileOf(params.sourceKey, params.fileIndex)?.length ?? 0);
+        const whole = wholeSources.fileOf(params.sourceKey, params.fileIndex);
+        return whole ? wholeFileStats(whole.length) : { pending: true };
       }
-      const stats = pool.getFileStats(torrent, params.fileIndex, {
-        resumeAnchorByteStart: params.resumeAnchorByteStart ?? null
-      });
       // What this file's own interruptions demand, measured by the reader in
       // this thread. It travels with the stats because the caller asking for
       // them is the one that has to decide with them — the browser's smallest
@@ -505,42 +425,35 @@ async function runCommand(command, params, id) {
       // second interruption has been seen: one wait shows no interval, and an
       // interval invented from one point is exactly what this work removes.
       const file = Array.isArray(torrent?.files) ? torrent.files[params.fileIndex] : null;
+      const forecast = file && params.forecast === true ? (await forecastDownloads()).get(torrent) : null;
+      const stats = pool.getFileStats(torrent, params.fileIndex);
+      const ranges = [];
+      if (forecast) for (const [piece, availableAt] of forecast.arrivals) {
+        const start = piece * torrent.pieceLength;
+        const end = Math.min(torrent.length, (piece + 1) * torrent.pieceLength);
+        if (end > start) ranges.push({ start, end, availableAt });
+      }
       return {
         ...stats,
+        ...(params.forecast === true ? { downloadForecast: {
+          measuredAt: forecast?.measuredAt ?? Date.now(), global: true, ranges
+        } } : {}),
         supply: supplyFiguresFor(torrent?.infoHash, file?.name, params.segmentSeconds ?? 4)
       };
     }
 
     case Command.PRIORITY_MAP: {
-      // A MAP WITH NOTHING IN IT MUST NOT BRING A TORRENT BACK. It is what is
-      // said when the last viewer of a file leaves, which is also when the
-      // torrent may be on its way out — and `requireTorrent` rebuilds a dead
-      // handle from its recipe, so asking that way would re-add a torrent in
-      // order to be told that nothing is wanted of it.
+      // Source preparation owns adding the source. A delayed publication may
+      // only update an existing source, never revive one after its viewer left.
       const zones = Array.isArray(params.zones) ? params.zones : [];
       // Nor may one for a file held whole, which has nothing left to fetch.
-      const torrent = zones.length === 0
-        ? await knownTorrent(params.sourceKey)
-        : await torrentUnlessWhole(params.sourceKey, params.fileIndex);
+      const torrent = await knownTorrent(params.sourceKey);
       if (torrent) {
+        ensureArrivalsWired(params.sourceKey, torrent);
         pool.applyPriorityMap(torrent, params.fileIndex, zones, params.durationSeconds);
+        torrent.emit("priority-map-changed", params.fileIndex);
       }
       return true;
-    }
-
-    case Command.PRIORITIZE: {
-      const torrent = await torrentUnlessWhole(params.sourceKey, params.fileIndex);
-      if (torrent) {
-        pool.prioritizeByteRange(torrent, params.fileIndex, params.byteStart, params.windowBytes, {
-          wholeFileRead: params.wholeFileRead === true
-        });
-      }
-      return true;
-    }
-
-    case Command.PREFETCH_EDGES: {
-      const torrent = await torrentUnlessWhole(params.sourceKey, params.fileIndex);
-      return torrent ? pool.prefetchFileEdges(torrent, params.fileIndex, params.options ?? {}) : undefined;
     }
 
     case Command.READ_RANGE: {
@@ -552,7 +465,6 @@ async function runCommand(command, params, id) {
         fileIndex: params.fileIndex,
         start: params.start ?? null,
         end: params.end ?? null,
-        windowBytes: params.windowBytes
       });
       return true;
     }
@@ -566,7 +478,8 @@ async function runCommand(command, params, id) {
     }
 
     case Command.HELD_RANGES: {
-      const torrent = await torrentUnlessWhole(params.sourceKey, params.fileIndex);
+      const known = resolvedTorrents.get(params.sourceKey);
+      const torrent = isUsableTorrentHandle(known) ? known : null;
       if (!torrent) {
         const length = wholeSources.fileOf(params.sourceKey, params.fileIndex)?.length ?? 0;
         return { ranges: length > 0 ? [[0, length - 1]] : [] };
@@ -575,9 +488,19 @@ async function runCommand(command, params, id) {
     }
 
     case Command.READ_HELD: {
-      const torrent = await requireTorrent(params.sourceKey);
-      const bytes = await readHeldBytes(torrent, params.fileIndex, params.start, params.end, logger);
+      const known = resolvedTorrents.get(params.sourceKey);
+      const torrent = isUsableTorrentHandle(known) ? known : null;
+      const bytes = await readWhileInUse(openReads, id, torrent, params.fileIndex,
+        () => readHeldBytes(torrent, params.fileIndex, params.start, params.end, logger));
       return { bytes };
+    }
+
+    case Command.READ_HELD_RANGES: {
+      const known = resolvedTorrents.get(params.sourceKey);
+      const torrent = isUsableTorrentHandle(known) ? known : null;
+      const buffers = await readWhileInUse(openReads, id, torrent, params.fileIndex,
+        () => readHeldRanges(torrent, params.fileIndex, params.ranges, params.maxBytes, logger));
+      return { buffers };
     }
 
     case Command.SPILL_ALLOWANCE: {
@@ -604,7 +527,7 @@ async function runCommand(command, params, id) {
 
     case Command.DESTROY_ALL: {
       torrentsByKey.clear();
-      sourceRecipes.clear();
+      resolvedTorrents.clear();
       await pool.destroyAll();
       return true;
     }
@@ -635,10 +558,11 @@ parentPort.on("message", async (message) => {
     // A held read's bytes are handed over rather than copied, and only when
     // the buffer is the whole of its own memory (`ownsItsMemory`): anything
     // else would take memory the store or another read still uses with it.
-    const transfer = command === Command.READ_HELD && ownsItsMemory(result?.bytes) ? [result.bytes.buffer] : [];
+    const transfer = command === Command.READ_HELD && ownsItsMemory(result?.bytes) ? [result.bytes.buffer]
+      : command === Command.READ_HELD_RANGES && result?.buffers?.every(ownsItsMemory) ? result.buffers.map(bytes => bytes.buffer) : [];
     parentPort.postMessage({ type: Event.RESULT, id, result }, transfer);
   } catch (error) {
-    parentPort.postMessage({ type: Event.ERROR, id, error: error?.message ?? String(error) });
+    parentPort.postMessage({ type: Event.ERROR, id, error: error?.message ?? String(error), code: error?.code });
   }
 });
 
@@ -886,12 +810,12 @@ function describePieceBuffers() {
  * @param {object} torrent
  * @returns {void}
  */
-function announceArrivals(sourceKey, torrent) {
+function announceArrivals(sourceKey, torrent, reason = "verified") {
   const fileIndexes = [...demandFor(torrent).register.files()];
   if (fileIndexes.length === 0) {
     return;
   }
-  parentPort.postMessage({ type: Event.PIECES_ARRIVED, sourceKey, fileIndexes });
+  parentPort.postMessage({ type: Event.PIECES_CHANGED, sourceKey, fileIndexes, reason });
 }
 
 
@@ -922,22 +846,17 @@ function ensureArrivalsWired(sourceKey, torrent) {
   }
   arrivalsWired.add(torrent);
   torrent.on("verified", () => announceArrivals(sourceKey, torrent));
+  torrent.on("piece-withdrawn", () => announceArrivals(sourceKey, torrent, "withdrawn"));
+  torrent.once("close", () => {
+    if (resolvedTorrents.get(sourceKey) !== torrent) return;
+    resolvedTorrents.delete(sourceKey);
+    torrentsByKey.delete(sourceKey);
+    if (wholeSources.isWhole(sourceKey)) {
+      const retained = wholeSources.describe(sourceKey);
+      announceWholeFiles(sourceKey, retained);
+    } else parentPort.postMessage({ type: Event.SOURCE_FORGOTTEN, sourceKey });
+  });
 }
-
-/**
- * How often arrivals are announced regardless, as a fallback beside the
- * per-piece `verified` listener above — it catches a listener attached after
- * pieces had already verified, and anything the event path might otherwise
- * miss. Cheap: the walk it wakes skips clusters it has already read.
- */
-const ARRIVAL_ANNOUNCE_INTERVAL_MS = 3_000;
-
-setInterval(() => {
-  for (const [sourceKey, torrent] of pool.torrents) {
-    ensureArrivalsWired(sourceKey, torrent);
-    announceArrivals(sourceKey, torrent);
-  }
-}, ARRIVAL_ANNOUNCE_INTERVAL_MS).unref();
 
 /**
  * Files this proxy has downloaded whole. One directory, two readers of it: this
@@ -945,6 +864,16 @@ setInterval(() => {
  */
 const completedFiles = new CompletedFiles({ root: completedFilesRoot() });
 const wholeSources = createWholeSources({ find: (infoHash, fileIndex) => completedFiles.find(infoHash, fileIndex) });
+
+/** Adopted files and newly completed files state the same availability event. */
+function announceWholeFiles(sourceKey, description) {
+  for (const file of description?.files ?? []) {
+    const held = completedFiles.find(description.infoHash, file.index);
+    if (!held || held.length !== file.length) continue;
+    parentPort.postMessage({ type: Event.FILE_COMPLETE, sourceKey, infoHash: description.infoHash,
+      fileIndex: file.index, path: held.path, length: held.length, name: file.name });
+  }
+}
 
 /**
  * Which torrent a set of files belongs to.
@@ -1049,7 +978,7 @@ async function keepWholeFiles() {
           fileIndex,
           length: file.length,
           name: file.name,
-          open: () => file.createReadStream()
+          open: () => Readable.from(heldFileBytes(torrent, fileIndex))
         });
         if (kept) {
           logger.info(
@@ -1069,6 +998,7 @@ async function keepWholeFiles() {
           }
           parentPort.postMessage({
             type: Event.FILE_COMPLETE,
+            sourceKey,
             infoHash,
             fileIndex,
             path: kept.path,

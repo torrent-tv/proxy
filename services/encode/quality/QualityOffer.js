@@ -409,7 +409,7 @@ export class QualityOffer {
     return videoLoadForFrame({
       sourceHeight,
       copiesAtSource: !base.spec.transcodesVideo,
-      sourceMbps: base.file.decode?.megabitsPerSecond ?? null,
+      sourceMbps: base.file.megabitsPerSecond,
       encoderKind
     }, frame);
   }

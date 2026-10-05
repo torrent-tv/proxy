@@ -90,7 +90,7 @@ test("the cursor of a pulled cue is the found-order the worker assigned", async 
 test("an orchestrator with no walk is refused, not answered emptily", async () => {
   const orchestrator = new SubtitleOrchestrator({ forget() {} });
   const held = await orchestrator.getCues(mainThreadTorrent(), 33, "a".repeat(40), 3);
-  assert.deepEqual(held, { cues: [], coveredClusters: 0, indexedClusters: 0, track: null });
+  assert.equal(held, null);
 });
 
 test("the walk refuses a torrent that cannot say which pieces it holds", async () => {

@@ -3,8 +3,8 @@ import assert from "node:assert/strict";
 
 import { handleTranscodeAudioWarmGet } from "../../routes/transcode/audio-warm/get.js";
 
-// A page restating its soundtrack after a reconnect has to know whether the
-// proxy RECORDED it. Both answers below are 503; only one of them recorded.
+// Readiness confirms that the proxy recorded and produced the soundtrack.
+// A failed preparation cannot be mistaken for an accepted warm-up.
 
 function reply() {
   return {
@@ -29,9 +29,10 @@ const request = {
   query: { position: "1641.2", consumer: "viewer-1", transcode: "1" }
 };
 
-test("a track still being made says it was recorded", async () => {
+test("an accepted soundtrack waits for its produced bytes before confirming readiness", async () => {
   let preparedFor = null;
-  const answer = await handleTranscodeAudioWarmGet(request, reply(), {
+  let ready = false, changed, closed = false, settled = false;
+  const pending = handleTranscodeAudioWarmGet(request, reply(), {
     renditions: {
       prepareAudioTrack: async (...args) => {
         preparedFor = args;
@@ -40,13 +41,18 @@ test("a track still being made says it was recorded", async () => {
     },
     serving: {
       seekEpoch: () => 0,
-      // Anything but a file or a failure is "not made yet".
-      getFileStream: async () => ({ kind: "superseded" })
+      subscribeFileChange: () => ({ changed: new Promise(resolve => { changed = resolve; }), release() {} }),
+      getFileStream: async () => ready ? { kind: "file", stream: { destroy: () => { closed = true; } } } : { kind: "warming-up" }
     }
-  });
+  }).then(answer => { settled = true; return answer; });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(settled, false);
   assert.deepEqual(preparedFor, ["base", 0, 1641.2, "viewer-1", false]);
-  assert.equal(answer.statusCode, 503);
-  assert.equal(answer.payload.warming, true);
+  ready = true;
+  changed();
+  const answer = await pending;
+  assert.equal(answer.statusCode, 204);
+  assert.equal(closed, true);
 });
 
 test("a preparation that failed says nothing was recorded", async () => {
@@ -58,6 +64,7 @@ test("a preparation that failed says nothing was recorded", async () => {
     },
     serving: {}
   });
-  assert.equal(answer.statusCode, 503);
+  assert.equal(answer.statusCode, 500);
   assert.equal(answer.payload.warming, undefined);
+  assert.equal(answer.payload.canRetry, false);
 });

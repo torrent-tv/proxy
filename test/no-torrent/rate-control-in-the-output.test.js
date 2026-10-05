@@ -173,6 +173,7 @@ test("the soundtrack the viewer hears counts toward what their link carries", ()
   // with the stream (no share of it is set aside since proxy 2.89.4). A 3.7 Mbit/s
   // link carries the picture, not the picture and 128 kbit/s of sound (3.768).
   const linkMbps = 3.7;
+
   assert.equal(decideFor({ mode: "manual", linkMbps }).answer.verdict, "fits");
   assert.ok(
     decideFor({ mode: "manual", linkMbps, audioLoad: { mbps: 0.128, peakClass: "known" } }).unavailable,

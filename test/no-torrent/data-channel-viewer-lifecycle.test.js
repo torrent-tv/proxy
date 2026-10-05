@@ -1,5 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { createServer } from "node:http";
 import { createDataChannelHandler } from "../../services/transport/data-channel-handler.js";
 
 class FakeDataChannel {
@@ -31,6 +32,104 @@ class FakeDataChannel {
     this.closed?.();
   }
 }
+
+test("the loopback dispatcher forwards a real HTTP response through the channel", async (t) => {
+  // A synthetic HTTP response only; no proxy or torrent client is started.
+  const server = createServer((_request, response) => response.end("held-media"));
+  await new Promise(resolve => server.listen(0, "127.0.0.1", resolve));
+  const channel = new FakeDataChannel("proxy");
+  const handler = createDataChannelHandler({ proxyPort: server.address().port });
+  handler.handleChannel("loopback-peer", channel);
+  t.after(async () => {
+    channel.close();
+    server.closeAllConnections();
+    await new Promise(resolve => server.close(resolve));
+  });
+  const chunks = [];
+  let finish, failed;
+  const completed = new Promise((resolve, reject) => { finish = resolve; failed = reject; });
+  const send = channel.sendMessage.bind(channel);
+  channel.sendMessage = message => {
+    send(message);
+    const parsed = JSON.parse(message);
+    if (parsed.type === "response-error") failed(new Error(parsed.error));
+  };
+  channel.sendMessageBinary = frame => {
+    if (frame[0] === 1) finish();
+    else chunks.push(frame.subarray(2 + frame[1]));
+  };
+  channel.message(JSON.stringify({ type: "request", requestId: "loopback", method: "GET", path: "/healthz" }));
+  await completed;
+  assert.equal(JSON.parse(channel.messages.find(message => JSON.parse(message).type === "response-start")).status, 200);
+  assert.equal(Buffer.concat(chunks).toString(), "held-media");
+});
+
+test("cancellation releases a response stalled on a full outgoing channel", async (t) => {
+  let cancelled;
+  let reachedQueue;
+  const released = new Promise((resolve) => { cancelled = resolve; });
+  const queued = new Promise((resolve) => { reachedQueue = resolve; });
+  t.mock.method(globalThis, "fetch", async () => new Response(new ReadableStream({
+    start(controller) { controller.enqueue(new Uint8Array(1024)); },
+    cancel() { cancelled(); }
+  })));
+  const handler = createDataChannelHandler({ proxyPort: 9090 });
+  const channel = new FakeDataChannel("proxy");
+  channel.sendMessageBinary = () => {};
+  channel.bufferedAmount = () => { reachedQueue(); return 16 * 1024 * 1024; };
+  handler.handleChannel("queue-peer", channel);
+  t.after(() => channel.close());
+  channel.message(JSON.stringify({ type: "request", requestId: "queued", method: "GET", path: "/healthz" }));
+  await queued;
+  channel.message(JSON.stringify({ type: "request-cancel", requestId: "queued" }));
+  await released;
+  assert.equal(channel.messages.some((message) => JSON.parse(message).type === "response-error"), false);
+});
+
+test("cancelling a browser request aborts its local HTTP wait", async (t) => {
+  let receivedSignal;
+  let requestEnded;
+  const ended = new Promise((resolve) => { requestEnded = resolve; });
+  t.mock.method(globalThis, "fetch", (_url, options) => {
+    receivedSignal = options.signal;
+    return new Promise((_resolve, reject) => {
+      options.signal.addEventListener("abort", () => {
+        reject(new DOMException("Cancelled", "AbortError"));
+        requestEnded();
+      }, { once: true });
+    });
+  });
+  const handler = createDataChannelHandler({ proxyPort: 9090 });
+  const channel = new FakeDataChannel("proxy");
+  handler.handleChannel("cancel-peer", channel);
+  t.after(() => channel.close());
+  channel.message(JSON.stringify({ type: "request", requestId: "cancel-me", method: "GET", path: "/healthz" }));
+  assert.equal(receivedSignal.aborted, false);
+  channel.message(JSON.stringify({ type: "request-cancel", requestId: "cancel-me" }));
+  await ended;
+  assert.equal(receivedSignal.aborted, true);
+});
+
+test("a different channel cannot cancel another connection's request", (t) => {
+  let receivedSignal;
+  t.mock.method(globalThis, "fetch", (_url, options) => {
+    receivedSignal = options.signal;
+    return new Promise((_resolve, reject) => {
+      options.signal.addEventListener("abort", () => reject(new DOMException("Closed", "AbortError")), { once: true });
+    });
+  });
+  const handler = createDataChannelHandler({ proxyPort: 9090 });
+  const channel = new FakeDataChannel("proxy");
+  const other = new FakeDataChannel("proxy");
+  handler.handleChannel("one-peer", channel);
+  handler.handleChannel("other-peer", other);
+  t.after(() => { channel.close(); other.close(); });
+  channel.message(JSON.stringify({ type: "request", requestId: "same-id", method: "GET", path: "/healthz" }));
+  other.message(JSON.stringify({ type: "request-cancel", requestId: "same-id" }));
+  assert.equal(receivedSignal.aborted, false);
+  channel.close();
+  assert.equal(receivedSignal.aborted, true);
+});
 
 test("a viewer remains present until every data channel on the connection closes", () => {
   const gone = [];

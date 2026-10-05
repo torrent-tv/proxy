@@ -120,8 +120,8 @@ are recorded in `docs/browser-proxy-contract.md`.
     back) and `readable` (it came back with times). The first distinguishes a
     file that must be re-encoded for ever from a passing shortage of bytes off
     the swarm. One read per file whoever asks, the second asker joins the first,
-    each caller's wait is bounded by the measured `KEYFRAME_TABLE_BUDGET_MS`
-    while the READ is not, and a read that threw — `BytesUnavailable` included —
+    preparation waits for the file's statement without an elapsed-time decision,
+    and a read that threw — `BytesUnavailable` included —
     is never recorded as an answer; it is read again when pieces of the file
     arrive (`readAgainIfUnanswered`). It is the ONLY store of the keyframe
     answer; the container keeps the Cues reading the times are taken from. The second reader is the packet probe in

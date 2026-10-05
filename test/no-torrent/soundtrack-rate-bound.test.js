@@ -41,6 +41,15 @@ const HE_AAC = Buffer.from([0x2b, 0x92, 0x08, 0x00]);
 
 const aacParams = (bytes) => codecParametersOf({ codec: "aac", codecPrivateB64: bytes.toString("base64") });
 
+test("AAC packet duration and preroll follow the configured frame length and core sampling rate", () => {
+  for (const [bytes, samples] of [[LC_48K_STEREO, 1024], [LC_48K_STEREO_960, 960]]) {
+    const track = new AudioTrack({ codecId: "A_AAC", codecPrivateB64: bytes.toString("base64"),
+      samplingFrequency: 96000, channels: 2 });
+    assert.equal(track.defaultDurationSeconds, samples / 48000);
+    assert.equal(track.seekPrerollSeconds, samples / 48000);
+  }
+});
+
 test("an AudioSpecificConfig gives its object type, frequency, channels and frame length", () => {
   assert.deepEqual(parseAudioSpecificConfig(LC_48K_STEREO), { objectType: 2, sampleRate: 48000, channels: 2, frameLength: 1024 });
   assert.deepEqual(parseAudioSpecificConfig(LC_44K_STEREO), { objectType: 2, sampleRate: 44100, channels: 2, frameLength: 1024 });
@@ -140,6 +149,18 @@ function mp4WithAac(config) {
   const ftyp = box("ftyp", Buffer.from("isom\0\0\0\0isom", "latin1"));
   return Buffer.concat([ftyp, box("moov", trak), box("mdat", Buffer.alloc(4))]);
 }
+
+test("MP4 refuses decoder descriptors that exceed their parent or never finish their length", async () => {
+  for (const malformed of ["oversized", "unfinished"]) {
+    const file = mp4WithAac(LC_48K_STEREO);
+    const offset = file.indexOf("esds", 0, "latin1") + 8;
+    if (malformed === "oversized") file[offset + 1] = 0x7f;
+    else file.fill(0x80, offset + 1, offset + 5);
+    const container = new Mp4Container({ fileSize: file.length,
+      readRange: async (start, end) => file.subarray(start, end + 1) });
+    await assert.rejects(container.readTracks(), /descriptor exceeds its declared parent/);
+  }
+});
 
 test("an MP4 soundtrack's AudioSpecificConfig is read out of its esds", async () => {
   const file = mp4WithAac(LC_48K_STEREO);

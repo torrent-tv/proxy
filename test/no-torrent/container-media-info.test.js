@@ -219,6 +219,9 @@ test("an AVI states its length as microseconds per frame times the frame count",
     avih
   ]);
 
+  file.writeUInt32LE(file.length - 8, 4);
+  file.writeUInt32LE(avih.length + 4, 16);
+  file.writeUInt32LE(56, 28);
   const container = new AviContainer({ readRange: readerOver(file), fileSize: file.length });
   const read = await container.readMediaInfo();
 

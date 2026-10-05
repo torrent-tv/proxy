@@ -60,43 +60,19 @@ function getSourceParams(query, sourceRegistry) {
   return { sourceType, source, sourceKey };
 }
 
-/**
- * How long a request may wait for a torrent that is still being added.
- *
- * Adding a magnet takes as long as its metadata does — seconds when peers
- * answer, forever when none do — and `getTorrent` waits for it. Awaiting that
- * with no bound is what made this route answer nothing at all.
- */
-const TORRENT_READY_TIMEOUT_MS = 10_000;
-
-/**
- * The torrent for a source, or a `TORRENT_NOT_READY` error once the wait has
- * gone on long enough to be worth reporting.
- *
- * The underlying add is NOT cancelled: it keeps running and warms the pool, so
- * the client's next attempt is likely to find it ready.
- *
- * @param {import("../../services/torrent/torrent-pool.js").TorrentPool} torrentPool
- * @param {string} sourceType
- * @param {string} source
- * @returns {Promise<import("webtorrent").Torrent>}
- */
-async function waitForTorrent(torrentPool, sourceType, source) {
-  let timer = null;
-  const expiry = new Promise((_resolve, reject) => {
-    timer = setTimeout(() => {
-      const error = new Error("Torrent metadata is not available yet.");
-      error.code = "TORRENT_NOT_READY";
-      reject(error);
-    }, TORRENT_READY_TIMEOUT_MS);
-    timer.unref?.();
-  });
+/** Torrent metadata has no elapsed-time failure; a disconnected caller cancels its wait. */
+async function waitForTorrent(torrentPool, sourceType, source, req, reply) {
+  let cancelled;
+  const until = new Promise((_resolve, reject) => { cancelled = () => reject(new DOMException("Source read was cancelled.", "AbortError")); });
+  const closed = () => { if (!reply.raw?.writableEnded) cancelled(); };
+  req.raw?.once?.("aborted", cancelled);
+  reply.raw?.once?.("close", closed);
   try {
-    return await Promise.race([torrentPool.getTorrent(sourceType, source), expiry]);
+    if (req.raw?.aborted) throw new DOMException("Source read was cancelled.", "AbortError");
+    return await Promise.race([torrentPool.getTorrent(sourceType, source), until]);
   } finally {
-    if (timer) {
-      clearTimeout(timer);
-    }
+    req.raw?.off?.("aborted", cancelled);
+    reply.raw?.off?.("close", closed);
   }
 }
 
@@ -212,18 +188,9 @@ export async function handleStreamGet(req, reply, { sourceRegistry, torrentPool,
 
   let torrent;
   try {
-    torrent = await waitForTorrent(torrentPool, sourceType, source);
+    torrent = await waitForTorrent(torrentPool, sourceType, source, req, reply);
   } catch (error) {
-    if (error instanceof Error && error.code === "TORRENT_NOT_READY") {
-      // Say so, rather than holding the connection until the client gives up.
-      // Reproduced 2026-08-04 on a magnet whose metadata never arrived: both a
-      // ranged GET and a HEAD returned nothing at all for the full 30 s the
-      // probe was willing to wait, and the route had written neither a status
-      // nor a header — from the client that is indistinguishable from the proxy
-      // having died, and it left no trace in the log either.
-      reply.header("Retry-After", "1");
-      return reply.code(503).send({ error: "Torrent metadata is not available yet." });
-    }
+    if (error?.name === "AbortError") return;
     const message = error instanceof Error ? error.message : String(error);
     return reply.code(500).send({ error: `Failed to load torrent source: ${message}` });
   }
@@ -259,20 +226,6 @@ export async function handleStreamGet(req, reply, { sourceRegistry, torrentPool,
   }
 
   const range = parseRange(req.headers.range, file.length);
-  // Prioritize the pieces at this read position so a seek (a request at a new
-  // byte offset) downloads first instead of waiting behind the sequential
-  // backlog — this is what caused ~15-18 s stalls when seeking into an
-  // undownloaded region.
-  // Only the encoder's own input read tracks where the viewer is. Everything
-  // else that comes through here — the codec probe, the keyframe index, a
-  // subtitle fetch — reads the file's edges, and treating those as a viewer
-  // position made every session start and every encoder restart look like a
-  // burst of seeks (measured: two spurious "the viewer moved" per start).
-  torrentPool.prioritizeByteRange(torrent, fileIndex, range ? range.start : 0, undefined, {
-    wholeFileRead: range === null,
-    isPlaybackRead: req.query.reader === "playback"
-  });
-
   const start = range ? range.start : 0;
   const end = range ? range.end : file.length - 1;
   const contentLength = end - start + 1;
@@ -281,16 +234,6 @@ export async function handleStreamGet(req, reply, { sourceRegistry, torrentPool,
   // no copy on either thread, at the cost of doing the writing by hand, because
   // only the write callback tells us when a piece may be released. Falls back to
   // the ordinary stream for sources without a shared pool.
-  // How far ahead of its own read head this reader should ask the swarm for.
-  // Supplied by whoever knows the media's byte rate — the transcode session
-  // puts it on the ffmpeg input URL, sized in seconds of playback — because
-  // this thread knows only bytes, and 32 MB is half a minute of a 1080p film
-  // but four seconds of a disc remux. Absent or unusable, the reader's own
-  // default stands.
-  const windowBytesRaw = Number(req.query.windowBytes);
-  const windowBytes =
-    Number.isFinite(windowBytesRaw) && windowBytesRaw > 0 ? windowBytesRaw : undefined;
-
   // Which transcode session this read feeds, when it feeds one. Put on the URL
   // by the session that builds it, because this route otherwise knows only a
   // file — and two sessions can read one file, so the file cannot stand in for
@@ -303,7 +246,7 @@ export async function handleStreamGet(req, reply, { sourceRegistry, torrentPool,
     : null;
 
   const fragments = typeof file.createFragmentReader === "function"
-    ? file.createFragmentReader({ start, end, windowBytes })
+    ? file.createFragmentReader({ start, end })
     : null;
 
   if (fragments) {
@@ -327,10 +270,11 @@ export async function handleStreamGet(req, reply, { sourceRegistry, torrentPool,
           fragment.release();
           break;
         }
-        await new Promise((resolve, reject) => {
-          reply.raw.write(fragment.bytes, (error) => (error ? reject(error) : resolve()));
-        });
-        sent += fragment.bytes.length;
+        try {
+          await new Promise((resolve, reject) => {
+            reply.raw.write(fragment.bytes, (error) => (error ? reject(error) : resolve()));
+          });
+          sent += fragment.bytes.length;
         // Say so, if this read belongs to a transcode session. It is the only
         // proof that a session which has produced nothing yet is nevertheless
         // being fed: the encoder's own progress cannot move until its first
@@ -345,7 +289,9 @@ export async function handleStreamGet(req, reply, { sourceRegistry, torrentPool,
         // Only now are these bytes gone: the piece can be unpinned, and the
         // slot it occupies reused. Releasing before this point corrupts the
         // response silently.
-        fragment.release();
+        } finally {
+          fragment.release();
+        }
       }
       // THE BODY MUST BE AS LONG AS THE HEADER PROMISED, and nothing checked.
       //
@@ -365,11 +311,8 @@ export async function handleStreamGet(req, reply, { sourceRegistry, torrentPool,
       // whether the body was short — which either names the cause or removes
       // the last candidate.
       if (sent !== contentLength) {
-        logger.error(
-          `stream: read of "${file.name}" bytes ${start}-${end} ENDED SHORT — ` +
-          `${sent} of ${contentLength} bytes sent under a Content-Length that promised all of them. ` +
-          "Whatever is reading this has a truncated body and no way to know it."
-        );
+        if (req.raw.aborted || reply.raw.destroyed) return;
+        throw new Error(`Source response is incomplete: ${sent} of ${contentLength} bytes.`);
       }
       reply.raw.end();
     } catch (error) {
@@ -400,17 +343,6 @@ export async function handleStreamGet(req, reply, { sourceRegistry, torrentPool,
     return;
   }
 
-  reply.header("Accept-Ranges", "bytes");
-  reply.header("Content-Type", "application/octet-stream");
-  reply.header("Content-Disposition", `inline; filename*=UTF-8''${encodeURIComponent(file.name)}`);
-
-  if (!range) {
-    reply.header("Content-Length", String(file.length));
-    return reply.send(file.createReadStream());
-  }
-
-  reply.code(206);
-  reply.header("Content-Length", String(contentLength));
-  reply.header("Content-Range", `bytes ${start}-${end}/${file.length}`);
-  return reply.send(file.createReadStream({ start, end }));
+  return reply.code(500).send({ error: "The map-governed source reader is unavailable.",
+    code: "SOURCE_READER_UNAVAILABLE", canRetry: false });
 }

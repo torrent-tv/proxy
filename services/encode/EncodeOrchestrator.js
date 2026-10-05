@@ -167,6 +167,7 @@ export class EncodeOrchestrator {
     startingSpeedFor = () => 0,
     segmentCoverage = null,
     planSoon = null,
+    inputDemandChanged = null,
     describeWaits = null,
     admission = null,
     logger,
@@ -202,6 +203,7 @@ export class EncodeOrchestrator {
     // Asked for, not commanded: this class decides, and something else owns the
     // loop that calls it. Absent in a test, where the clock is the test's own.
     this.planSoon = typeof planSoon === "function" ? planSoon : () => undefined;
+    this.inputDemandChanged = typeof inputDemandChanged === "function" ? inputDemandChanged : () => undefined;
   }
 
   /**
@@ -536,6 +538,7 @@ export class EncodeOrchestrator {
    */
   notePriorityMap(address, zones) {
     this.#demand.state(address, zones);
+    this.inputDemandChanged(address, this.#demand.mapOn(address));
     // NOBODY IS COMING HERE, so what was remembered about this output's input
     // is about nobody. Kept, those three entries would stay for the life of the
     // process, and the wait they describe would greet whoever opens this output
@@ -994,7 +997,7 @@ export class EncodeOrchestrator {
     // is a name match: no stretch to search and no bytes to judge. Done for
     // every ending, the normal one included, since a run that finished cleanly
     // has nothing under a working name and the sweep then removes nothing.
-    this.#segmentCoverage?.clearUpAfter(ended.address, ended.from);
+    this.#segmentCoverage?.clearUpAfter(ended.address, ended.run?.makingTag ?? ended.from);
     this.coverageOf(ended.address).release(ended.run);
     const remaining = this.runsOn(ended.address).filter((run) => run !== ended.run);
     if (remaining.length === 0) {

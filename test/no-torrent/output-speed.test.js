@@ -25,6 +25,7 @@ function costOf(sessions, host = {}) {
   sessions.forEach(({ lastAloneSpeed, ...session }, index) => {
     // What a run measured belongs to the quality component's state of the output.
     qualityStateOf(session).lastAloneSpeed = lastAloneSpeed ?? undefined;
+
     outputs.set(String(index), session);
   });
   return new EncodeCost({

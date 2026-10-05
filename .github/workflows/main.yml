@@ -44,9 +44,24 @@ jobs:
           # No check may start a real torrent; this is the static half of that rule.
           extra-check: node scripts/check-tests-start-no-torrent.mjs
 
+  # The README offers the Dockerfile as a way to run the proxy; nothing built it,
+  # and it stopped working unnoticed. `--help` loads every module of the main
+  # thread, node-datachannel's native binding included, and exits before
+  # anything connects.
+  build:
+    name: Image build
+    needs: checks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Build the image for amd64
+        run: docker build -t torrent-tv-proxy .
+      - name: Start the proxy in it
+        run: docker run --rm torrent-tv-proxy --help
+
   release:
     name: Release
-    needs: checks
+    needs: [checks, build]
     if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     environment: production

@@ -309,17 +309,28 @@ npm start -- --server-url http://localhost:3000
 
 ## Docker
 
+The image holds the npm package (built from `npm pack`, so `files` in
+`package.json` decides its contents), its production dependencies, node and
+ffmpeg. It starts the proxy on port 9090 with the image's ffmpeg and keeps its
+state in `/data`; arguments after the image name are passed to the proxy.
+
 ```bash
 docker build -t torrent-tv-proxy .
-docker run torrent-tv-proxy --server-url http://my-server:8080
+docker run --network host -v ttv-proxy:/data torrent-tv-proxy --server-url https://webauth.courses
 ```
+
+WebRTC uses UDP port 9090 beside the HTTP API on TCP 9090, and UPnP mapping
+needs the host's own address, so host networking is the supported setup.
 
 Without `--log-file` the log is only in `docker logs`, which recreating the
-container deletes. To keep it, put it on a volume:
+container deletes. To keep it, write it to the volume:
 
 ```bash
-docker run -v ttv-proxy-logs:/logs torrent-tv-proxy --server-url http://my-server:8080 --log-file /logs/proxy.log
+docker run --network host -v ttv-proxy:/data torrent-tv-proxy --server-url https://webauth.courses --log-file /data/proxy.log
 ```
+
+The image has no tcpdump and no gdb, and it runs as an unprivileged user, so
+packet captures and `--usrsctp-state` readings are not taken there.
 
 ## Full End-to-End Flow
 

@@ -237,6 +237,7 @@ export class ContainerOrchestrator {
         value = await container.readChapters({ read: params.readHeld ?? params.readRange,
           isCurrent: params.isCurrent,
           ranges: params.heldRanges ? await params.heldRanges() : undefined });
+        if (params.isCurrent?.() === false) return { kind: "terminal", reason: "request-obsolete", requestId };
         params.acceptChapterResult?.(value);
         if (!value.complete && value.pending) return { kind: "needs-ranges", ranges: [[value.pending.start, value.pending.end]], value, requestId };
       } else {

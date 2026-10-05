@@ -58,6 +58,8 @@ older proxy means unsupported chapter metadata, not an absence of chapters.
 WebRTC sends `{ type: "chapters-changed", sourceKey, fileIndex, revision }`
 to channels that requested that selected file. The browser obtains a fresh
 snapshot, ignores older revisions and discards responses after selection changes.
+The browser starts this optional request after the selected video first plays,
+so chapter discovery does not delay initial playback preparation.
 
 Chapter reading uses the common media request queue and shared memory budget.
 Required metadata ranges enter the common download map at priority 1 without
@@ -78,6 +80,9 @@ unsupported reason. Legacy QuickTime text follows its Macintosh language
 encoding; supported Roman languages and Russian are decoded directly, while
 other legacy encodings return `chapter-text-encoding:<code>`. `tx3g` uses Unicode.
 Unsupported data references and unavailable bytes remain separate states.
+Chapter tracks declared in `mvex/trex` return `chapter-fragmented-track`:
+the initial sample tables cannot establish the contents of later movie fragments.
+Fragmented video with an ordinary chapter track is supported.
 Per-read bounds are 4096 chapter entries, depth 64,
 8192 bytes per title, 8 MiB of metadata reads and 100000 structure operations.
 

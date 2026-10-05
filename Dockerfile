@@ -8,9 +8,11 @@
 #   docker build -t torrent-tv-proxy .
 #   docker run --network host -v ttv-proxy:/data torrent-tv-proxy --server-url https://webauth.courses
 
-FROM node:24-alpine AS dependencies
+# Every stage takes node from Alpine's own package, as the add-on does, so the
+# native modules are compiled for the node that runs them.
+FROM alpine:3 AS dependencies
 # utp-native ships no musl prebuild, so it is compiled here.
-RUN apk add --no-cache python3 make g++
+RUN apk add --no-cache nodejs npm python3 make g++
 WORKDIR /app
 COPY package.json package-lock.json ./
 # Install scripts are off for the whole tree: ip-set (a dependency of
@@ -36,21 +38,19 @@ RUN npm ci --omit=dev --ignore-scripts --no-audit --no-fund \
  && rm -rf node_modules/utp-native/build/Release/obj.target \
       node_modules/utp-native/build/Release/.deps
 
-FROM node:24-alpine AS package
+FROM alpine:3 AS package
+RUN apk add --no-cache nodejs npm
 WORKDIR /src
 COPY . .
 RUN npm pack --ignore-scripts --pack-destination /tmp \
  && mkdir /app \
  && tar -xzf /tmp/torrent-tv-proxy-*.tgz -C /app --strip-components=1
 
-# The runtime is Alpine with node copied from the image that built the native
-# modules, so both run against the same node; the official image's npm, yarn
-# and corepack are not needed to run anything.
+# The runtime has node and ffmpeg; npm stays in the stages that install.
 FROM alpine:3
-RUN apk add --no-cache libstdc++ ffmpeg \
+RUN apk add --no-cache nodejs ffmpeg \
  && addgroup -S app && adduser -S -G app app \
  && mkdir /data && chown app:app /data
-COPY --from=dependencies /usr/local/bin/node /usr/local/bin/node
 COPY --from=package /app /app
 COPY --from=dependencies /app/node_modules /app/node_modules
 

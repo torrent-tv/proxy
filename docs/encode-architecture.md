@@ -728,18 +728,18 @@ Which output a request is answered by is decided in the encoding component
 
 ## What is checked
 
-`test/one-authority.test.js` holds the shape: one caller of `#startEncodeRun`,
+`test/no-torrent/one-authority.test.js` holds the shape: one caller of `#startEncodeRun`,
 no encoder stopped for being unwatched, the settle machinery absent, each output
 reading its own map, and the soundtrack's start instant read off the table
 rather than handed in.
 
-`test/priority-map-per-output.test.js` holds the two scopes, over the real
+`test/no-torrent/priority-map-per-output.test.js` holds the two scopes, over the real
 viewer registry, the real `OutputCatalog` and the real `PriorityOrchestrator`.
 
-`test/encode-plan.test.js` holds the arithmetic, including that every encoder
+`test/no-torrent/encode-plan.test.js` holds the arithmetic, including that every encoder
 stops when nobody is watching the output.
 
-`test/segment-store.test.js` holds the naming rule: a piece under its served
+`test/no-torrent/segment-store.test.js` holds the naming rule: a piece under its served
 name is finished — the last one of a run included — one under a working name is
 not and cannot be reached, closing it is one rename, and clearing up after one
 run leaves every other run's work alone.

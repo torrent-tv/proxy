@@ -1,0 +1,237 @@
+/**
+ * @file What `/stream` does with a HEAD request.
+ *
+ * Fastify answers HEAD from the GET handler, so without an explicit branch a
+ * HEAD started a read of the entire file. Node discards the body, but the read
+ * itself runs on and the response never completes, which blocks the next
+ * request on that keep-alive connection. The keyframe index asks for the file
+ * size with exactly such a HEAD before every transcode session.
+ */
+
+import test from "node:test";
+import assert from "node:assert/strict";
+import fs from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
+import { handleStreamGet } from "../../routes/stream/get.js";
+import { WorkerTorrentPool } from "../../services/torrent/worker/pool-adapter.js";
+
+/**
+ * Minimal stand-ins for the parts of Fastify and the pool this route touches.
+ *
+ * @param {{ method: string, range?: string }} request
+ * @returns {{ req: object, reply: object, sent: object, opened: string[], state: object }}
+ */
+function harness({ method, range }) {
+  const opened = [];
+  const state = { prioritized: [] };
+
+  const sent = { code: 200, headers: {}, body: undefined, called: false };
+  const reply = {
+    code(value) {
+      sent.code = value;
+      return reply;
+    },
+    header(name, value) {
+      sent.headers[name.toLowerCase()] = value;
+      return reply;
+    },
+    send(body) {
+      sent.called = true;
+      sent.body = body;
+      return reply;
+    },
+    hijack() {
+      sent.hijacked = true;
+    },
+    raw: {
+      // `bindRelease` listens here; HEAD writes its response here.
+      once() {},
+      writeHead(code, headers) {
+        sent.code = code;
+        for (const [name, value] of Object.entries(headers)) {
+          sent.headers[name.toLowerCase()] = value;
+        }
+      },
+      end() {
+        sent.called = true;
+      }
+    }
+  };
+
+  const file = {
+    name: "movie.mkv",
+    length: 5_869_669_065,
+    createReadStream(options = {}) {
+      opened.push(`${options.start ?? 0}-${options.end ?? "end"}`);
+      return { on() {} };
+    }
+  };
+
+  const torrentPool = {
+    async getTorrent() {
+      return { files: [file], sourceKey: "key" };
+    },
+    prioritizeByteRange(_torrent, fileIndex, byteStart, _windowBytes, options) {
+      state.prioritized.push({ byteStart, wholeFileRead: options?.wholeFileRead === true });
+    }
+  };
+
+  const req = {
+    method,
+    query: { sourceType: "magnet", source: "magnet:?xt=urn:btih:abc", fileIndex: "0" },
+    headers: range ? { range } : {},
+    raw: { once() {} }
+  };
+
+  return { req, reply, sent, opened, state, deps: { sourceRegistry: { get: () => null }, torrentPool } };
+}
+
+test("HEAD reports the size without opening a read", async () => {
+  const { req, reply, sent, opened, state, deps } = harness({ method: "HEAD" });
+
+  await handleStreamGet(req, reply, deps);
+
+  assert.deepEqual(opened, [], "HEAD started a read of the file");
+  assert.deepEqual(state.prioritized, [], "HEAD asked the swarm for a read it never made");
+  // The real size, not the zero Fastify substitutes for an empty payload — the
+  // keyframe index reads this header and treats 0 as "no index".
+  assert.equal(sent.headers["content-length"], "5869669065");
+  assert.equal(sent.headers["accept-ranges"], "bytes");
+  assert.equal(sent.called, true, "HEAD never completed its response");
+  assert.equal(sent.body, undefined, "HEAD answered with a body");
+});
+
+test("GET still streams the bytes", async () => {
+  const { req, reply, sent, opened, deps } = harness({ method: "GET" });
+
+  await handleStreamGet(req, reply, deps);
+
+  assert.equal(opened.length, 1, "GET did not open a read");
+  assert.equal(sent.headers["content-length"], "5869669065");
+});
+
+test("GET with a range streams only that range", async () => {
+  const { req, reply, sent, opened, deps } = harness({ method: "GET", range: "bytes=100-199" });
+
+  await handleStreamGet(req, reply, deps);
+
+  assert.deepEqual(opened, ["100-199"]);
+  assert.equal(sent.code, 206);
+  assert.equal(sent.headers["content-range"], "bytes 100-199/5869669065");
+  assert.equal(sent.headers["content-length"], "100");
+});
+
+// A request with no byte range says nothing about where the viewer is: ffmpeg
+// opens its input with a plain GET and abandons it the moment it seeks, and the
+// keyframe index and the codec probe do the same — four such reads around every
+// encoder restart. Reported as ordinary reads at offset 0, they undid the seek
+// that had just happened and sent the swarm walking the file from its first
+// missing piece; a seek to 89.1% of a 4.7 GB film downloaded 2.47 GB that way.
+test("a range-less GET is reported as a whole-file read", async () => {
+  const { req, reply, state, deps } = harness({ method: "GET" });
+
+  await handleStreamGet(req, reply, deps);
+
+  assert.deepEqual(state.prioritized, [{ byteStart: 0, wholeFileRead: true }]);
+});
+
+test("a ranged GET is reported as a real read position", async () => {
+  const { req, reply, state, deps } = harness({ method: "GET", range: "bytes=4390000000-" });
+
+  await handleStreamGet(req, reply, deps);
+
+  assert.deepEqual(state.prioritized, [{ byteStart: 4_390_000_000, wholeFileRead: false }]);
+});
+
+test("a file downloaded whole is served from disk without touching the torrent", async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "stream-whole-"));
+  const where = path.join(root, "0");
+  const bytes = Buffer.from("a film that is a file now", "utf8");
+  await fs.writeFile(where, bytes);
+  try {
+    const { req, reply, sent, deps } = harness({ method: "GET", range: "bytes=2-6" });
+    let asked = false;
+    const wholeFiles = new Map([
+      ["abc/0", { path: where, length: bytes.length, name: "film.mkv" }]
+    ]);
+    // Supply the worker boundary explicitly: no Worker or torrent is started.
+    deps.torrentPool = new WorkerTorrentPool({}, {
+      wholeFiles,
+      async getTorrent() {
+        asked = true;
+        throw new Error("the worker must not be asked for completed bytes");
+      }
+    });
+    assert.equal(deps.torrentPool.wholeFiles, wholeFiles);
+    // The source key IS the identity — `torrent:<infohash>` — and it is all the
+    // route needs to find the file.
+    deps.sourceRegistry = { get: () => ({ sourceType: "torrent", source: "magnet:?xt=urn:btih:abc" }) };
+    req.query = { sourceKey: "torrent:abc", fileIndex: "0" };
+
+    await handleStreamGet(req, reply, deps);
+
+    assert.equal(asked, false, "the torrent was asked for");
+    assert.equal(sent.code, 206);
+    assert.equal(sent.headers["content-range"], `bytes 2-6/${bytes.length}`);
+    assert.equal(sent.headers["content-length"], "5");
+    const chunks = [];
+    for await (const chunk of sent.body) chunks.push(chunk);
+    assert.deepEqual(Buffer.concat(chunks), bytes.subarray(2, 7));
+  } finally {
+    await fs.rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 20 });
+  }
+});
+
+test("an announced file removed before opening falls back to the torrent before headers", async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "stream-removed-"));
+  try {
+    const { req, reply, sent, opened, deps } = harness({ method: "GET", range: "bytes=2-6" });
+    deps.torrentPool.wholeFiles = new Map([
+      ["abc/0", { path: path.join(root, "missing"), length: 10, name: "gone.mkv" }]
+    ]);
+    deps.sourceRegistry = { get: () => ({ sourceType: "magnet", source: "magnet:?xt=urn:btih:abc" }) };
+    req.query = { sourceKey: "torrent:abc", fileIndex: "0" };
+    await handleStreamGet(req, reply, deps);
+    assert.deepEqual(opened, ["2-6"]);
+    assert.equal(deps.torrentPool.wholeFiles.size, 0);
+    assert.equal(sent.headers["content-range"], "bytes 2-6/5869669065");
+  } finally {
+    await fs.rm(root, { recursive: true, force: true });
+  }
+});
+
+test("a file this proxy does not have whole still goes to the torrent", async () => {
+  const { req, reply, state, deps } = harness({ method: "GET", range: "bytes=0-99" });
+  deps.torrentPool.wholeFiles = new Map([["other/7", { path: "/nowhere", length: 1, name: "x" }]]);
+  await handleStreamGet(req, reply, deps);
+  assert.equal(state.prioritized.length, 1, "the ordinary path was not taken");
+});
+
+test("every wait of an encoder's input read is marked for the run its URL names", async () => {
+  // The run's processing speed is read over its own working time; the time its
+  // input waits for the swarm is what this marks (RunClock).
+  const { req, reply, deps } = harness({ method: "GET", range: "bytes=0-5" });
+  const { files: [file] } = await deps.torrentPool.getTorrent();
+  const pieces = [Buffer.from("abc"), Buffer.from("def")];
+  file.createFragmentReader = () => ({
+    cancel() {},
+    async *[Symbol.asyncIterator]() {
+      for (const bytes of pieces) {
+        yield { bytes, release() {} };
+      }
+    }
+  });
+  reply.raw.write = (_bytes, done) => done();
+  reply.raw.writableEnded = false;
+  reply.raw.destroyed = false;
+  req.query.session = "output-1";
+  req.query.run = "7";
+  const marks = [];
+  deps.noteInputWaiting = (runToken, waiting) => marks.push([runToken, waiting]);
+
+  await handleStreamGet(req, reply, deps);
+
+  assert.deepEqual(marks, [[7, true], [7, false], [7, true], [7, false], [7, true], [7, false]],
+    "a wait before each fragment and one before the end, each closed");
+});

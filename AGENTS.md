@@ -82,7 +82,7 @@ are recorded in `docs/browser-proxy-contract.md`.
     plus a store read that never fetches, both in
     `torrent/worker/held-bytes.js`. A piece arriving is ANNOUNCED
     (`PIECES_ARRIVED`) rather than acted on there. Pinned by
-    `test/the-torrent-thread-serves-bytes.test.js`.
+    `test/no-torrent/the-torrent-thread-serves-bytes.test.js`.
   - `media/container/` — domain: `Container` (abstract, RFC 9559 / ISO 14496-12),
     `MatroskaContainer` / `Mp4Container` / `AviContainer`, `ContainerFactory`
     (sniff 16 bytes → precise subclass), `KeyframeTable`. See
@@ -317,6 +317,28 @@ pool can't serve a viewer. Keep the proxy host-agnostic so it runs unchanged on
 rented infra (flat-rate/unmetered bandwidth — Hetzner dedicated / OVH; NOT
 metered-egress clouds). Provider/economics analysis in the parent
 `../CLAUDE.md` "Cloud proxy" section.
+
+## Checks: with a torrent and without
+
+A check never starts a real torrent outside the Home Assistant host. The checks
+are split by that one property, in two folders:
+
+1. `test/no-torrent/` — every check that does not need a real torrent. `npm test`
+   runs only these (`test/no-torrent/**/*.test.js`), in CI and on a development
+   machine. Two things keep them from reaching a torrent:
+   1. `scripts/check-tests-start-no-torrent.mjs`, run by CI before the tests,
+      reads them and refuses a line that constructs TorrentPool, WebTorrent or
+      the torrent worker, imports WebTorrent, or names the proxy entry point;
+   2. `test/no-torrent/support/refuse-torrent.cjs`, loaded by `npm test` with
+      `--require`, replaces WebTorrent with a class whose constructor throws, and
+      refuses to load a DHT, tracker or local-discovery package. It is in force
+      in every test process and in every worker thread a check creates, so a
+      torrent reached through any chain of calls is a failure, never a swarm.
+      `test/no-torrent/refuse-torrent.test.js` fails if the guard is not loaded.
+2. `test/with-torrent/` — checks that need a real torrent. Nothing loads them in
+   CI or locally; they run only on the Home Assistant host. The folder holds no
+   check yet; the command that runs it comes with the first one and refuses to
+   start outside the add-on (`SUPERVISOR_TOKEN`). See its `README.md`.
 
 ## Commits
 

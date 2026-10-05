@@ -81,6 +81,11 @@ export class WorkerTorrentPool {
     return this.#torrents.get(sourceKey) ?? null;
   }
 
+  /** Metadata already known here; never joins or revives a torrent. */
+  knownSource(sourceKey) {
+    return this.#torrents.get(sourceKey) ?? null;
+  }
+
   /**
    * Claim a file for reading; the returned function releases it.
    *

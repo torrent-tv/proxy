@@ -31,6 +31,9 @@ import { handleApiSourceFilesGet } from "./routes/api/sources/files/get.js";
 import { handleApiSourceFingerprintGet } from "./routes/api/sources/fingerprint/get.js";
 import { handleApiSourceContainerMetadataGet } from "./routes/api/sources/container-metadata/get.js";
 import { handleApiSourceCoverGet } from "./routes/api/sources/cover/get.js";
+import { handleApiSourceChaptersGet } from "./routes/api/sources/chapters/get.js";
+import { ChapterOrchestrator } from "./services/media/ChapterOrchestrator.js";
+import { ChapterController } from "./services/server/controllers/ChapterController.js";
 import { handleApiSourceWarmPost } from "./routes/api/sources/warm/post.js";
 import { handleApiSourceViewerPost } from "./routes/api/sources/viewer/post.js";
 import { handleApiPlaybackPlanPost } from "./routes/api/playback-plan/post.js";
@@ -127,7 +130,7 @@ function buildPortCandidates(startPort, maxAttempts = 51) {
  * @returns {Promise<{ app: import("fastify").FastifyInstance, port: number }>}
  */
 export async function startProxyServer({
-  host, port, transcodeAudio, ffmpegBin, memoryBytes, segmentFormat, stateDir, onSubtitleCues, diagnostics, budgetPolicy,
+  host, port, transcodeAudio, ffmpegBin, memoryBytes, segmentFormat, stateDir, onSubtitleCues, onChaptersChanged, diagnostics, budgetPolicy,
   deliverySink = false,
   // Whether a memory high-water earns a heap snapshot (`--heap-snapshots`).
   heapSnapshots = false,
@@ -251,6 +254,7 @@ export async function startProxyServer({
         probeReads.bytesChanged(sourceKey, fileIndex);
         void sourcePreparation?.bytesChanged(sourceKey, fileIndex).catch(error =>
           logger.warn(`source input readiness failed: ${error.message}`));
+        chapters.arrived(sourceKey, fileIndex);
         void pushFreshCues(`${sourceKey}:${fileIndex}`, sourceKey, fileIndex);
         // A keyframe table somebody asked for while its bytes had not arrived
         // is read again now; nothing was recorded for that wait.
@@ -382,6 +386,26 @@ export async function startProxyServer({
    * @param {object} [known] - The torrent handle when the caller already has it.
    * @returns {Promise<import("./services/media/SubtitleCues.js").HeldFile | null>}
    */
+  const chapters = new ChapterOrchestrator({
+    containers: containerOrchestrator,
+    onChanged: (event) => onChaptersChanged?.(event),
+    fileFor: async (sourceKey, fileIndex) => {
+      if (!sourceRegistry.get(sourceKey)) return null;
+      const torrent = torrentPool.knownSource(sourceKey);
+      const whole = torrentPool.wholeFiles.get(`${sourceKey.slice("torrent:".length).toLowerCase()}/${fileIndex}`);
+      const file = torrent?.files?.[fileIndex] ?? whole;
+      if (!file) return torrent ? { invalid: true } : null;
+      const handle = torrent ?? { sourceKey };
+      return {
+        sourceKey, fileIndex, fileSize: file.length, label: file.name ?? "",
+        portionBytes: Number(torrent?.pieceLength) > 0 ? Number(torrent.pieceLength) : undefined,
+        readRange: (start, end) => torrentPool.readRangeOf(handle, fileIndex, start, end),
+        readHeld: (start, end) => torrentPool.readHeldOf(handle, fileIndex, start, end),
+        heldRanges: () => torrentPool.heldRangesOf(handle, fileIndex)
+      };
+    }
+  });
+  const chapterController = new ChapterController({ sourceRegistry, chapters });
   const heldFileFor = async (sourceKey, fileIndex, known = null) => {
     let torrent = known;
     if (!torrent) {
@@ -1429,6 +1453,9 @@ export async function startProxyServer({
       probeReads.needs(requestId, start, end);
     }
   }));
+  app.get("/api/sources/:sourceKey/chapters", async (req, reply) =>
+    handleApiSourceChaptersGet(req, reply, { chapterController })
+  );
   app.get("/healthz", async (req, reply) => handleHealthzGet(req, reply, { version }));
   // Off unless --delivery-sink was given; see the route for why it exists.
   app.get("/api/delivery-sink", async (req, reply) =>

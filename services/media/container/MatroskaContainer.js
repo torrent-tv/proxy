@@ -34,6 +34,7 @@
 
 import { FFMPEG_STREAM_SEARCH_SECONDS } from "./ffmpeg-stream-search.js";
 import { Container } from "./Container.js";
+import { readMatroskaChapters } from "./matroska-chapters.js";
 import { VideoTrack } from "../tracks/VideoTrack.js";
 import { h264Configuration } from "./h264-configuration.js";
 import { hevcConfiguration } from "./hevc-configuration.js";
@@ -144,6 +145,9 @@ function readString(buf, el) {
  */
 
 export class MatroskaContainer extends Container {
+  async readChapters(held) {
+    return readMatroskaChapters(this, held);
+  }
   /** @type {Buffer | null} */
   #declarations = null;
 

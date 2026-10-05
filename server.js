@@ -9,11 +9,8 @@
 import Fastify from "fastify";
 import fastifyCors from "@fastify/cors";
 import fastifyHelmet from "@fastify/helmet";
-import fastifyStatic from "@fastify/static";
 import getPort from "get-port";
-import path from "node:path";
 import { createRequire } from "node:module";
-import { fileURLToPath } from "node:url";
 import { handleHealthGet } from "./routes/health/get.js";
 import { handleHealthzGet } from "./routes/healthz/get.js";
 import { handleApiDeliverySinkGet } from "./routes/api/delivery-sink/get.js";
@@ -64,11 +61,8 @@ import { benchmarkAudio } from "./services/encode/audio-calibration.js";
 import { logger } from "./utils/logger.js";
 import { completedFilesRoot } from "./services/storage/files/CompletedFiles.js";
 
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
 const require = createRequire(import.meta.url);
 const { version } = require("./package.json");
-const publicRoot = path.resolve(__dirname, "./public");
 
 /**
  * Build a list of candidate port numbers starting at `startPort`.
@@ -714,11 +708,6 @@ export async function startProxyServer({
   app.get("/transcode/:sessionId/v/:height/:fileName", async (req, reply) =>
     handleTranscodeVariantFileGet(req, reply, { renditions: outputParts.renditions, serving: outputParts.serving, viewerRequests: outputParts.viewerRequests })
   );
-  await app.register(fastifyStatic, {
-    root: publicRoot,
-    prefix: "/",
-    serveDotFiles: true
-  });
 
   app.addHook("onClose", async () => {
     // Order matters: stop the ffmpeg readers (HLS sessions) before destroying

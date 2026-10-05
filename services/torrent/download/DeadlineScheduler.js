@@ -136,7 +136,7 @@ export function dispatchDownloadCandidates(candidates, now) {
         for (const slower of torrent.wires ?? []) {
           if (slower === wire || typeof slower.cancel !== "function") continue;
           const lateAt = requestCompletionAt(slower, 0, now);
-          if (!(lateAt > deadlineAt && fasterAt < lateAt)) continue;
+          if (!Number.isFinite(lateAt) || !(lateAt > deadlineAt && fasterAt < lateAt)) continue;
           const request = slower.requests?.find(one => one.piece === piece);
           if (!request) continue;
           // A later queue estimate must not move the same block between peers

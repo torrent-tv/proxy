@@ -130,6 +130,16 @@ test("a faster peer takes a block whose old queue misses its deadline", () => {
   assert.equal(fast.requests[0].piece, 1);
 });
 
+test("an unknown peer rate cannot prove its pending request will miss a deadline", () => {
+  const one = entry({ speed: 0, maximum: 10 });
+  state(one.register, 1, { deadlineAt: 100 });
+  one.torrent._request(one.wire, 1);
+  one.torrent.wires.push({ ...one.wire, requests: [], downloadSpeed: () => 163840 });
+  const scheduler = new DeadlineScheduler({ entries: () => [one], findStore: () => null });
+  assert.deepEqual(scheduler.reconcile(0), { requested: 0, reassigned: 0 });
+  assert.equal(one.wire.requests[0].piece, 1);
+});
+
 test("changing rates cannot repeatedly move a pending block to a later arrival", () => {
   const one = entry({ speed: 16384, maximum: 10 });
   state(one.register, 1, { deadlineAt: 100 });

@@ -1,4 +1,4 @@
-## Unreleased
+## 2.89.19
 
 - **Fix**: A session's browser log file on the proxy is named after the torrent it played. The first batch from the page always arrives before a torrent is chosen, the file was named then and never again, so on the addon host on 2026-10-05 146 of 147 files ended in `-no-torrent-yet` and none could be found by its film (torrent-tv/meta#123). The file is now renamed when the first torrent arrives and keeps the lines written before it; another torrent opened later in the same page gets a file of its own under the same `client-<start>-<session>` prefix.
 - **Fix**: A browser log file that reached 16 MB no longer takes the next lines with it into the rotated copy. The file was moved to `.log.1` only after its stream had ended, while the next batch had already reopened the same name, so those lines went into the copy and the file under the name started counting from the copy's full size. The file is now moved first and the next batch opens a fresh one.

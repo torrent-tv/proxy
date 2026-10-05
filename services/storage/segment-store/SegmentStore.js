@@ -404,6 +404,74 @@ export class SegmentStore {
   }
 
   /**
+   * Remove the pieces a muxer that names its own pieces left in a directory,
+   * and the list it named them in.
+   *
+   * Asked only of what a previous life of the process left. The `hls` muxer
+   * renames the piece it has open when it ends, so a stopped run leaves a
+   * piece shorter than its span under the served name — the shape of field
+   * 2026-09-27, where #111 held 0.37 s of 4.2 s, the browser appended it and
+   * never asked for that stretch again. The list cannot say which piece is the
+   * short one, so every piece it names goes and is made again.
+   *
+   * @param {string} key
+   * @param {string} dir
+   * @param {{ isSegmentFileName?: (name: string) => boolean, initFileName?: string | null }} format
+   * @param {string | null} listFileName
+   * @returns {number} How many pieces were removed.
+   */
+  #sweepSelfNamed(key, dir, format, listFileName) {
+    if (!listFileName) {
+      return 0;
+    }
+    const listPath = path.join(dir, listFileName);
+    let text;
+    try {
+      text = readFileSync(listPath, "utf8");
+    } catch {
+      return 0;
+    }
+    let removed = 0;
+    for (const line of text.split(/\r?\n/)) {
+      const name = line.trim();
+      if (name.length === 0 || name.startsWith("#") || !format?.isSegmentFileName?.(name)) {
+        continue;
+      }
+      const piecePath = path.join(dir, name);
+      if (!existsSync(piecePath)) {
+        continue;
+      }
+      try {
+        rmSync(piecePath, { force: true });
+        removed += 1;
+      } catch {
+        // Then it stays, and is served as it was before this sweep existed.
+      }
+    }
+    // The list goes with the pieces it named, and so does the init file the
+    // same muxer wrote beside them: nothing else writes one into this
+    // directory, and a piece cut by the list carries its own header.
+    for (const leftover of [listFileName, format?.initFileName]) {
+      if (!leftover) {
+        continue;
+      }
+      try {
+        rmSync(path.join(dir, leftover), { force: true });
+      } catch {
+        // It names or describes pieces that are gone; reading it again removes nothing.
+      }
+    }
+    if (removed > 0) {
+      this.#held.delete(key);
+      this.#logger.info(
+        `segment-store removed ${removed} piece(s) of ${path.basename(dir)} that the hls muxer ` +
+        "named itself: nothing proves they reach their cut"
+      );
+    }
+    return removed;
+  }
+
+  /**
    * The encoder has closed a piece: give it the name it is served under.
    *
    * One rename inside the output's own directory — one filesystem operation, and
@@ -564,10 +632,11 @@ export class SegmentStore {
    * muxer writes under a working name and reports the closure on a channel of
    * its own (`publish`); the `hls` muxer writes through a temporary name of its
    * own (`+temp_file`) and reports nothing, so the file simply appears under the
-   * name it is served as. That branch is taken by every re-encoded output on the
-   * even grid — the ordinary quality step — and for those `waitFor` could only
-   * end on its deadline: the segment was on disk and the request that wanted it
-   * went on waiting, up to a full minute, and was then answered 503.
+   * name it is served as. That branch was then taken by every re-encoded output
+   * on the even grid — the ordinary quality step — and for those `waitFor` could
+   * only end on its deadline: the segment was on disk and the request that
+   * wanted it went on waiting, up to a full minute, and was then answered 503.
+   * It is now taken only by a run given no cut list.
    *
    * So the store watches what it owns. The rename into place moves the
    * directory's modification time, the kernel says so, and both branches reach
@@ -1243,9 +1312,12 @@ export class SegmentStore {
    * @param {(key: string) => object | null} formatFor - How to read the file
    *   names of an output, given its key. Null when this proxy cannot serve that
    *   output at all, and then the directory goes.
+   * @param {{ selfNamedListFileName?: string | null }} [writers] - The list a
+   *   muxer that names its own pieces writes beside them. Every piece in it was
+   *   given its served name by that muxer and not by a closure we were told of.
    * @returns {{ adopted: number, dropped: number, unprovenRemoved: number }}
    */
-  adoptWhatSurvived(formatFor) {
+  adoptWhatSurvived(formatFor, { selfNamedListFileName = null } = {}) {
     const swept = this.sweep();
     let adopted = 0;
     let dropped = 0;
@@ -1266,15 +1338,21 @@ export class SegmentStore {
         continue;
       }
       this.#formats.set(entry.key, format);
-      // EVERY SEGMENT FOUND IS COMPLETE, because a piece is given its served
-      // name only once the encoder has said it is closed. So there is nothing to
-      // prove here and nothing to un-prove: what the directory holds under
-      // served names is what a killed process finished.
+      // A SEGMENT GIVEN ITS SERVED NAME BY US IS COMPLETE, because we give it
+      // only once the encoder has said it is closed and its media reaches its
+      // cut. So there is nothing to prove here and nothing to un-prove: what
+      // the directory holds under those names is what a killed process
+      // finished.
       //
       // What it may also hold is pieces it was in the middle of, under their
       // working names, and those are swept — the file a run was writing when the
       // kernel took the process is exactly this.
       unprovenRemoved += this.#sweepUnfinished(entry.key, entry.dir, format);
+      // And pieces the `hls` muxer renamed itself. It renames the piece it has
+      // open whenever it ends, on SIGTERM and when its input stops, so nothing
+      // says any of them reaches its cut; an earlier version cut every
+      // re-encode on the even grid that way. The muxer's own list names them.
+      unprovenRemoved += this.#sweepSelfNamed(entry.key, entry.dir, format, selfNamedListFileName);
       adopted += 1;
       this.#logger.info(
         `segment-store adopted ${path.basename(entry.dir)}: ${this.provenNumbers(entry.key).length} ` +

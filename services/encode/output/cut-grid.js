@@ -105,3 +105,38 @@ export function computeCutGrid({ useKeyframeGrid, durationSeconds, segDur, keyfr
   // all, and an even one serves better than a table with a single entry.
   return boundaries.length >= 2 ? { boundaries, sourceTimes } : uniform();
 }
+
+/**
+ * Whether an output is cut at times we hand the muxer, rather than at a
+ * duration the muxer chooses for itself.
+ *
+ * One answer for the command a run is given and for the serving of what it
+ * made, because both follow from it: given times mean the `segment` muxer,
+ * which writes each piece self-contained under a working name and says when it
+ * has closed it; without them the `hls` muxer names its pieces itself and
+ * writes one init file beside them.
+ *
+ * Every grid is handed over, the even one included. The `hls` muxer finishes
+ * the piece it has open whenever it ends — on our SIGTERM, and when its input
+ * stops — and gives that piece its served name, so a piece shorter than its
+ * span became servable with nothing to say so. Field 2026-09-27, on the
+ * `segment` muxer before its own guard existed: a run stopped while it wrote
+ * #111 left 0.37 s of a 4.2 s piece, the browser appended it, counted the
+ * fragment as loaded and went on to the next one, and the picture stood at
+ * 463.3 s while the player fetched 515.7 s and beyond.
+ *
+ * What is left without times is an output with no grid at all, which has no
+ * duration to cut.
+ *
+ * @param {{ segmentFormat?: { explicitTimesMuxerArgs?: () => string[] | null } | null,
+ *   timeline?: { published?: number[], boundaries?: number[] } | null }} output
+ * @returns {boolean}
+ */
+export function cutsAtGivenTimes(output) {
+  if (!output?.segmentFormat?.explicitTimesMuxerArgs?.()) {
+    return false;
+  }
+  const published = output.timeline?.published;
+  const grid = Array.isArray(published) && published.length > 0 ? published : output.timeline?.boundaries;
+  return Array.isArray(grid) && grid.length >= 2;
+}

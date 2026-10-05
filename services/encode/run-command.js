@@ -17,7 +17,7 @@
 
 import { PLAYLIST_FILE_NAME } from "./output/playlists.js";
 import { AUDIO_TRANSCODE_KBPS } from "./args.js";
-import { SEGMENT_CUT_TIME_DELTA_SECONDS } from "./output/index.js";
+import { cutsAtGivenTimes, SEGMENT_CUT_TIME_DELTA_SECONDS } from "./output/index.js";
 
 /**
  * What ffmpeg's own CLI subtracts from an input seek, and therefore what has to
@@ -364,15 +364,26 @@ export function buildRunCommand({
   // the first requested cut. It is never published over another run's output.
   const inputIndex = !transcodeVideo && !audioOnly && explicitTimes && safeIndex > 0
     ? safeIndex - 1 : safeIndex;
-  // A COPY is cut by this list whatever grid it ended up on. Even when no
-  // keyframe index could be read and the boundaries are a plain grid, saying
-  // them outright is what keeps the playlist and the muxer agreeing — ffmpeg
-  // moves each cut forward to the first real keyframe, and serving reads back
-  // where the piece truly begins. Requiring a keyframe grid here dropped a
-  // copy with no index onto the `hls` muxer, which takes no cut list and
-  // writes no self-contained pieces, so nothing could read a true start and
-  // segments were stamped with times the file does not have — the 4.17 s
-  // speech-against-subtitles drift, back again.
+  // EVERY OUTPUT WITH A GRID is cut by this list, whatever the grid is and
+  // whether the picture is copied or re-encoded (`cutsAtGivenTimes`).
+  //
+  // A copy needs it even when no keyframe index could be read and the
+  // boundaries are a plain grid: saying them outright is what keeps the
+  // playlist and the muxer agreeing — ffmpeg moves each cut forward to the
+  // first real keyframe, and serving reads back where the piece truly begins.
+  // Requiring a keyframe grid here dropped a copy with no index onto the `hls`
+  // muxer, which takes no cut list and writes no self-contained pieces, so
+  // nothing could read a true start and segments were stamped with times the
+  // file does not have — the 4.17 s speech-against-subtitles drift, back again.
+  //
+  // A re-encode on the even grid needs it for the proof of a closed piece. The
+  // `hls` muxer finishes the piece it has open whenever it ends, on our SIGTERM
+  // and when its input stops, and renames it to the served name itself, so a
+  // stopped run left a piece shorter than its span where any request could
+  // take it. Measured 2026-10-05 with ffmpeg 8.1.2 on the addon host, a
+  // 4 s piece stopped 3 s in stayed as `segment-00001.mp4` with 3.04 s in it.
+  // Through the `segment` muxer the piece is published only on the encoder's
+  // word and only after its media is shown to reach its cut.
   //
   // Cut on the grid the PLAYER WAS GIVEN, not on the corrected one. A player
   // places a fragment by the playlist it holds, and that text was written
@@ -387,7 +398,7 @@ export function buildRunCommand({
   // created later inherits the corrected table and PUBLISHES it, so its own
   // playlist and its own cuts agree from the start. What they may not do is
   // move the cuts of a session whose playlist is already being read.
-  const gridCutTimes = explicitTimes && (!transcodeVideo || timeline.cutGrid === "keyframe")
+  const gridCutTimes = cutsAtGivenTimes({ segmentFormat, timeline })
     ? segmentCutTimesFrom(publishedGridFor(timeline), inputIndex)
     : null;
   // Cut times are stated on the grid, for both branches.
@@ -721,9 +732,10 @@ export function buildRunCommand({
       // into the same directory — and the name arrives on the channel above the
       // instant ffmpeg closes it, which is what turns it into the served one.
       //
-      // The other branch needs none of this: the HLS muxer writes through a
-      // temporary name of its own (`+temp_file`), so its files appear under
-      // their final name whole.
+      // The other branch cannot do this: the HLS muxer writes through a
+      // temporary name of its own (`+temp_file`) and renames each file itself,
+      // including the one it was writing when it ended. It is left for the runs
+      // that have no cut list at all.
       //
       // TAGGED WITH THE STRETCH IT WAS GIVEN, which names the run without any
       // counter to keep: intervals never overlap, so two live runs of one output

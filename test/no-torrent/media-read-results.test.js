@@ -52,6 +52,29 @@ test("memory becoming available during a read cannot leave its pending statement
   assert.equal(reads, 1);
 });
 
+test("a resource change during a read does not retry a different unchanged resource", async () => {
+  for (const initial of ["needs-memory", "needs-ranges"]) {
+    let reads = 0;
+    const notifications = [];
+    const next = initial === "needs-memory" ? "needs-ranges" : "needs-memory";
+    const pending = new MediaReadRequests({ read: async () => {
+      reads++;
+      const bytes = pending.revision("source", 0), memory = pending.memoryRevision();
+      if (initial === "needs-memory") pending.memoryChanged();
+      else pending.bytesChanged("source", 0);
+      pending.record(params, "packets", { kind: next }, bytes, memory);
+    } });
+    pending.subscribe("source", 0, result => notifications.push(result.kind));
+    pending.record(params, "packets", { kind: initial });
+    if (initial === "needs-memory") pending.memoryChanged();
+    else pending.bytesChanged("source", 0);
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(reads, 1, "the next read waits for the resource it actually lacks");
+    if (initial === "needs-memory") assert.deepEqual(notifications, [], "memory retries cannot wake an unrelated source wait");
+    pending.forget("source");
+  }
+});
+
 test("packet-storage accounting counts one shared container and releases forgotten sources", () => {
   const reader = new ContainerOrchestrator();
   const container = { packetIndexBytes: () => 65536 };

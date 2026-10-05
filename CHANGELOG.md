@@ -1,5 +1,7 @@
 ## Unreleased
 
+- **Fix**: A metadata read that changes from missing memory to missing bytes waits for a byte arrival. Events for its previous missing resource cannot cause repeated reads of unchanged data.
+
 - **Fix**: Deadline reassignment must improve a block's previous predicted arrival. Changing peer rates cannot repeatedly cancel the same pending block and postpone its delivery; forecasts preserve the same request evidence.
 
 - **Fix**: Failed process starts, signals, hardware failures and resource errors do not permanently refuse unchanged admitted media input. Recoverable failures retain the existing bounded start-failure handling.

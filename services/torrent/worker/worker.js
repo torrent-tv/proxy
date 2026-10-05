@@ -37,6 +37,8 @@ import { Command, Event } from "./protocol.js";
 import { filesInUse } from "./files-in-use.js";
 import { createWholeSources } from "./whole-sources.js";
 import { wholeFileStats } from "./whole-file-stats.js";
+import { describeHeldObjects, readUtpOpenCount } from "./held-objects.js";
+import { destroyedTorrents } from "../destroyed-torrents.js";
 import { startMemoryReport, WORKER_MEMORY_SAMPLE_MS } from "../../storage/memory-report.js";
 import { forwardLogsTo, logger } from "../../../utils/logger.js";
 
@@ -667,7 +669,14 @@ startMemoryReport({
   // thread still refers to or buffers the collector has not reached yet. On
   // separate timers the two were up to a minute apart and could not be
   // compared at all (roadmap item 2).
-  readExtra: describePieceBuffers,
+  readExtra: () => [
+    describePieceBuffers(),
+    describeHeldObjects({
+      liveTorrents: pool.client?.torrents?.length ?? 0,
+      destroyed: destroyedTorrents(),
+      utp: readUtpOpenCount()
+    })
+  ].filter(Boolean).join("; "),
   scope: "thread",
   label: "torrent worker",
   intervalMs: WORKER_MEMORY_SAMPLE_MS,
@@ -676,6 +685,13 @@ startMemoryReport({
   snapshotDir: workerData?.stateDir || undefined,
   snapshotFloorBytes: 400 * 1024 * 1024,
   snapshotGrowthBytes: 400 * 1024 * 1024,
+  // CHOSEN, not derived: no healthy session has recorded this figure yet, so
+  // there is no measured normal to stand above. It is set well below the
+  // 2.1-4.3 GB the worker held in the minutes before the kills of 2026-10-01,
+  // while the machine still has room to write a snapshot. The line prints what the
+  // stores hold beside it, which is what a derived floor will come from.
+  bufferSnapshotFloorBytes: 500 * 1024 * 1024,
+  bufferSnapshotGrowthBytes: 500 * 1024 * 1024,
   keepSnapshots: 3
 });
 

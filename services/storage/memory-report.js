@@ -383,6 +383,25 @@ export function readingIsWorthWriting({
 }
 
 /**
+ * Array-buffer memory that no torrent store accounts for.
+ *
+ * The heap is not the only thing a snapshot explains: every `ArrayBuffer` is in
+ * it, with the size of its backing store and who holds it. On 2026-10-01 the
+ * torrent worker reached 4.3 GB of array buffers while its stores had committed
+ * 40 MB, the kernel killed the process twice, and no snapshot existed, because
+ * the only trigger watched a heap that stood at 300 MB. Pieces the stores hold
+ * are expected; what is above them is the question.
+ *
+ * @param {number} arrayBuffers - The isolate's own `arrayBuffers` figure.
+ * @param {{ committedBytes?: number }[]} stores
+ * @returns {number}
+ */
+export function unaccountedBufferBytes(arrayBuffers, stores = []) {
+  const committed = stores.reduce((sum, store) => sum + (Number(store?.committedBytes) || 0), 0);
+  return Math.max(0, (Number(arrayBuffers) || 0) - committed);
+}
+
+/**
  * Report memory on a timer until stopped.
  *
  * @param {Object} options
@@ -408,6 +427,9 @@ export function readingIsWorthWriting({
  * @param {number} [options.snapshotFloorBytes]
  * @param {number} [options.snapshotGrowthBytes]
  * @param {number} [options.keepSnapshots] - Newest to keep; zero keeps all.
+ * @param {number} [options.bufferSnapshotFloorBytes] - Array buffers above what
+ *   the stores hold that earn a snapshot of their own; zero never takes one.
+ * @param {number} [options.bufferSnapshotGrowthBytes]
  * @param {() => string} [options.readExtra] - Figures to append to the line,
  *   read at the same instant as the memory itself.
  * @returns {{ stop: () => void }}
@@ -426,9 +448,12 @@ export function startMemoryReport({
   mayKeep = null,
   snapshotFloorBytes = 500 * 1024 * 1024,
   snapshotGrowthBytes = 100 * 1024 * 1024,
-  keepSnapshots = 0
+  keepSnapshots = 0,
+  bufferSnapshotFloorBytes = 0,
+  bufferSnapshotGrowthBytes = 500 * 1024 * 1024
 }) {
   let highWater = 0;
+  let bufferHighWater = 0;
   /** @type {Record<string, number>} */
   let lastWritten = {};
   let lastWrittenAt = 0;
@@ -555,6 +580,17 @@ export function startMemoryReport({
       if (heapWatched > highWater + snapshotGrowthBytes && heapWatched > snapshotFloorBytes) {
         highWater = heapWatched;
         await takeSnapshot(heapWatched, "a new high-water of the heap");
+      }
+      // The same for array buffers, which a snapshot names as well as it names
+      // the heap: each one is in it with its size and its holder.
+      const unaccounted = unaccountedBufferBytes(processMemory.arrayBuffers, stores);
+      if (
+        bufferSnapshotFloorBytes > 0 &&
+        unaccounted > bufferSnapshotFloorBytes &&
+        unaccounted > bufferHighWater + bufferSnapshotGrowthBytes
+      ) {
+        bufferHighWater = unaccounted;
+        await takeSnapshot(unaccounted, "a new high-water of array buffers no torrent store accounts for");
       }
       // Under `write` by construction: `anonymousBytes` is only read when the
       // line is, and at one reading a second an unconditional warning would be

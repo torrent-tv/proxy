@@ -21,6 +21,7 @@ import { demandFor, forgetTorrent, reconcileAll, hasUnmetDemand } from "./downlo
 import { withdrawClaim } from "./download/withdraw-claim.js";
 import { isAtAWatchingViewer, isBehindEverybody, isNobodyComingNow } from "../viewer/PriorityMap.js";
 import { deriveSourceKey } from "../../utils/torrent-source-key.js";
+import { noteTorrentDestroyed } from "./destroyed-torrents.js";
 
 /** How a window stated from the priority map names itself. */
 const MAP_CLAIMANT = "priority-map";
@@ -1683,6 +1684,9 @@ export class TorrentPool {
       logger.warn(`torrent-pool: [${label()}] warning: ${formatWarning(warning)}`);
     });
 
+    // Counted from here until the collector takes it, which is the only way a
+    // destroyed torrent that something still holds can be seen at all.
+    torrent.once("close", () => noteTorrentDestroyed(torrent));
 
     // A TORRENT THAT DIED WITHOUT US ASKING LEAVES ITS RECORD BEHIND, and the
     // record goes on answering. Field 2026-09-11: the store refused a block,

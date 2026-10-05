@@ -1,4 +1,4 @@
-## Unreleased
+## 2.91.0
 
 - **New**: The tunnel follows a server release without a gap. When the server instance being replaced says `server-moving`, the proxy opens a second connection, which reaches the new instance, and keeps the first until the old instance closes it; while both are open, every reply goes back over the connection its request arrived on, so a browser that was signalling through the old instance is still answered there. The proxy's name and advertised URL now travel on the connection itself (`x-proxy-name`, `x-proxy-base-url`), because the separate registration request may reach the other instance during a release (torrent-tv/meta#94).
 

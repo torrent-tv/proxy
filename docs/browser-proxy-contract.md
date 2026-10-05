@@ -59,13 +59,26 @@ WebRTC sends `{ type: "chapters-changed", sourceKey, fileIndex, revision }`
 to channels that requested that selected file. The browser obtains a fresh
 snapshot, ignores older revisions and discards responses after selection changes.
 
+Chapter reading uses the common media request queue and shared memory budget.
+Required metadata ranges enter the common download map at priority 1 without
+urgent playback demand. When Matroska does not declare a chapter location and
+traversal reaches unavailable headers after media, those headers are passive:
+reading retries on availability changes but does not download Clusters to search
+for chapters. This remains pending rather than claiming absence. Retained
+snapshots are UTF-8 buffers admitted under the shared metadata budget and released
+when the source or expired request is forgotten.
+
 Supported representations are Matroska simple chapters, QuickTime `tref/chap`
 text chapter tracks (`text` and `tx3g`, internal data references, supported
 sample tables and unit-rate edit lists), and the `udta/chpl` extension. The
 QuickTime reference takes precedence when both MP4 representations are present;
 `representationsDisagree` preserves a difference rather than merging timelines.
 External chapter data and other text formats or edit rates return an explicit
-unsupported reason. Per-read bounds are 4096 chapter entries, depth 64,
+unsupported reason. Legacy QuickTime text follows its Macintosh language
+encoding; supported Roman languages and Russian are decoded directly, while
+other legacy encodings return `chapter-text-encoding:<code>`. `tx3g` uses Unicode.
+Unsupported data references and unavailable bytes remain separate states.
+Per-read bounds are 4096 chapter entries, depth 64,
 8192 bytes per title, 8 MiB of metadata reads and 100000 structure operations.
 
 Format semantics follow [RFC 9559](https://www.rfc-editor.org/rfc/rfc9559.html),

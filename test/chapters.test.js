@@ -4,6 +4,8 @@ import { MatroskaContainer } from "../services/media/container/MatroskaContainer
 import { Mp4Container } from "../services/media/container/Mp4Container.js";
 import { ContainerOrchestrator } from "../services/media/ContainerOrchestrator.js";
 import { ChapterOrchestrator } from "../services/media/ChapterOrchestrator.js";
+import { MediaReadRequests } from "../services/media/MediaReadRequests.js";
+import { IndexMemory } from "../services/storage/IndexMemory.js";
 import { navigationSections } from "../services/media/container/chapters.js";
 import { BytesUnavailable } from "../services/media/container/unavailable.js";
 import { handleApiSourceChaptersGet } from "../routes/api/sources/chapters/get.js";
@@ -89,6 +91,16 @@ test("chapters after a Cluster without SeekHead are found from headers", async (
   assert.equal((await container.readChapters(held)).sections[0].type, "credits");
 });
 
+test("SeekHead reaches chapters after media without reading Cluster bytes", async () => {
+  const seek = (position) => ebml(0x114d9b74, ebml(0x4dbb,
+    ebml(0x53ab, Buffer.from("1043a770", "hex")), ebml(0x53ac, u64(position))));
+  const cluster = ebml(0x1f43b675, Buffer.alloc(131072));
+  const bytes = mkv(seek(seek(0).length + cluster.length), cluster, ebml(0x1043a770, edition(atom(1, 0, "Scene"))));
+  const marker = bytes.indexOf(Buffer.from("1043a770", "hex"), 64);
+  const { held, container } = heldFile(bytes, MatroskaContainer, [[0, 63], [marker, bytes.length - 1]]);
+  assert.equal((await container.readChapters(held)).sections[0].titles[0].text, "Scene");
+});
+
 test("walking available Cluster headers does not read video payloads", async () => {
   const bytes = mkv(...Array.from({ length: 150 }, () => ebml(0x1f43b675, Buffer.alloc(65536))),
     ebml(0x1043a770, edition(atom(1, 0, "Credits"))));
@@ -103,6 +115,12 @@ test("unknown-sized Cluster ends at next Segment-level chapter element", async (
   const bytes = Buffer.concat([ebml(0x1a45dfa3), Buffer.from("18538067ff1f43b675ff", "hex"), ebml(0xe7, Buffer.from([0])), ebml(0x1043a770, edition(atom(1, 0, "Scene")))]);
   const { held, container } = heldFile(bytes, MatroskaContainer);
   assert.equal((await container.readChapters(held)).state, "available");
+});
+
+test("missing traversal headers beyond media stay passive without a chapter location", async () => {
+  const bytes = mkv(ebml(0x1f43b675, Buffer.alloc(131072)), ebml(0x1043a770, edition(atom(1, 0, "Scene"))));
+  const { held, container } = heldFile(bytes, MatroskaContainer, [[0, 31]]);
+  await assert.rejects(container.readChapters(held), (error) => error instanceof BytesUnavailable && error.passive === true);
 });
 
 test("missing chapter bytes are retryable, never absent", async () => {
@@ -145,16 +163,16 @@ test("moov at head does not require headers or bytes after moov", async () => {
   assert.equal((await container.readChapters(held)).state, "available");
 });
 
-function qtFile({ edits = null, co64 = false, title = "Opening", external = false } = {}) {
-  const name = Buffer.from(title), sample = Buffer.concat([u16(name.length), name]);
+function qtFile({ edits = null, co64 = false, title = "Opening", nameBytes = null, language = 0, format = "text", external = false } = {}) {
+  const name = nameBytes ?? Buffer.from(title), sample = Buffer.concat([u16(name.length), name]);
   const build = (offset) => {
     const tkhd = (id, enabled) => mpbox("tkhd", Buffer.from([0, 0, 0, enabled ? 1 : 0]), Buffer.alloc(8), u32(id));
     const owner = mpbox("trak", tkhd(1, true), mpbox("tref", mpbox("chap", u32(2))));
-    const stsd = mpbox("stsd", Buffer.alloc(4), u32(1), mpbox("text", Buffer.alloc(6), u16(1)));
+    const stsd = mpbox("stsd", Buffer.alloc(4), u32(1), mpbox(format, Buffer.alloc(6), u16(1)));
     const stbl = mpbox("stbl", stsd, mpbox("stsz", Buffer.alloc(4), u32(sample.length), u32(1)),
       table("stts", 2, [1, 1000]), table("stsc", 3, [1, 1, 1]), co64 ? mpbox("co64", Buffer.alloc(4), u32(1), u64(offset)) : table("stco", 1, [offset]));
     const minf = mpbox("minf", mpbox("dinf", mpbox("dref", Buffer.alloc(4), u32(1), mpbox("url ", Buffer.from([0, 0, 0, external ? 0 : 1])))), stbl);
-    const mdhd = mpbox("mdhd", Buffer.alloc(12), u32(1000), u32(1000), u16(0));
+    const mdhd = mpbox("mdhd", Buffer.alloc(12), u32(1000), u32(1000), u16(language));
     const track = mpbox("trak", tkhd(2, false), ...(edits ? [mpbox("edts", mpbox("elst", Buffer.alloc(4), u32(edits.length), ...edits.map(([duration, media]) => Buffer.concat([u32(duration), u32(media < 0 ? 0xffffffff : media), u16(1), u16(0)]))))] : []), mpbox("mdia", mdhd, minf));
     return mp4(movie(), owner, track);
   };
@@ -168,6 +186,18 @@ test("QuickTime chapter track is read by reference even when that track is disab
   assert.equal(result.sections[0].titles[0].text, "Opening");
   assert.equal(result.sections[0].startSeconds, 0);
   assert.equal(result.sections[0].endSeconds, 1);
+});
+
+test("QuickTime legacy English uses Macintosh encoding while tx3g uses Unicode", async () => {
+  for (const [format, nameBytes] of [["text", Buffer.from([0x43, 0x61, 0x66, 0x8e])], ["tx3g", Buffer.from("Café")]]) {
+    const { held, container } = heldFile(qtFile({ format, nameBytes }), Mp4Container);
+    assert.equal((await container.readChapters(held)).sections[0].titles[0].text, "Café");
+  }
+});
+
+test("QuickTime text refuses an unsupported Macintosh encoding explicitly", async () => {
+  const { held, container } = heldFile(qtFile({ language: 11 }), Mp4Container);
+  await assert.rejects(container.readChapters(held), /chapter-text-encoding:11/);
 });
 
 test("QuickTime empty edit and repeated edits map chapter samples into movie time", async () => {
@@ -197,11 +227,18 @@ test("orchestrator shares reads, retries on bytes, emits changes only for change
   const bytes = mkv(ebml(0x1043a770, edition(atom(1, 0, "Scene"))));
   let ranges = [[0, 15]], calls = 0;
   const changes = [];
-  const orchestrator = new ChapterOrchestrator({ containers: new ContainerOrchestrator(), onChanged: (event) => changes.push(event), fileFor: async () => ({
+  const containers = new ContainerOrchestrator();
+  const requests = new MediaReadRequests({ read: (params, statement) => containers.inspect(params, statement) });
+  const readHeld = async (start, end) => { calls++; return ranges.some(([a, b]) => start >= a && end <= b) ? bytes.subarray(start, end + 1) : null; };
+  const orchestrator = new ChapterOrchestrator({ containers, subscribe: (source, file, listener) => requests.subscribe(source, file, listener),
+    onChanged: (event) => changes.push(event), fileFor: async () => {
+    const params = {
     sourceKey: "source", fileIndex: 0, fileSize: bytes.length,
-    readRange: () => { throw new Error("Fetching reader called"); }, heldRanges: async () => ranges,
-    readHeld: async (start, end) => { calls++; return ranges.some(([a, b]) => start >= a && end <= b) ? bytes.subarray(start, end + 1) : null; }
-  }) });
+    readRange: readHeld, heldRanges: async () => ranges, readHeld,
+    onReadResult: (statement, result) => requests.record(params, statement, result)
+    };
+    return params;
+  } });
   orchestrator.get("source", 0); orchestrator.get("source", 0);
   await orchestrator.files.get("source:0").reading;
   assert.equal(orchestrator.get("source", 0).state, "pending");
@@ -211,8 +248,8 @@ test("orchestrator shares reads, retries on bytes, emits changes only for change
   await orchestrator.files.get("source:0").reading;
   assert.equal(calls, before);
   ranges = [[0, bytes.length - 1]];
-  orchestrator.arrived("source", 0);
-  await orchestrator.files.get("source:0").reading;
+  requests.bytesChanged("source", 0);
+  for (let attempt = 0; attempt < 30 && orchestrator.get("source", 0).state !== "available"; attempt++) await settle();
   assert.equal(orchestrator.get("source", 0).state, "available");
   assert.equal(changes.length, 2);
 });
@@ -225,6 +262,29 @@ test("forgotten in-flight read cannot repopulate the file result", async () => {
   orchestrator.forget("source", 0);
   finish(null); await work;
   assert.equal(orchestrator.files.size, 0);
+});
+
+test("chapter snapshot waits for its shared memory budget and releases its retained bytes", async () => {
+  const bytes = mkv(ebml(0x1043a770, edition(atom(1, 0, "Scene"))));
+  const containers = new ContainerOrchestrator();
+  const requests = new MediaReadRequests({ read: (params, statement) => containers.inspect(params, statement) });
+  const memory = new IndexMemory({ reviseBudget: () => {}, changed: () => requests.memoryChanged() });
+  const orchestrator = new ChapterOrchestrator({ containers, fileFor: async () => {
+    const params = { sourceKey: "source", fileIndex: 0, fileSize: bytes.length,
+      readRange: async (start, end) => bytes.subarray(start, end + 1), packetMemory: memory.forFile("source", 0),
+      onReadResult: (statement, result) => requests.record(params, statement, result) };
+    return params;
+  } });
+  orchestrator.get("source", 0);
+  await orchestrator.files.get("source:0").reading;
+  assert.equal(orchestrator.get("source", 0).resource, "memory");
+  assert.equal(memory.held(), 0);
+  memory.allow(memory.wanted());
+  for (let attempt = 0; attempt < 30 && orchestrator.get("source", 0).state !== "available"; attempt++) await settle();
+  assert.equal(orchestrator.get("source", 0).state, "available");
+  assert.equal(memory.held(), orchestrator.files.get("source:0").buffer.length);
+  orchestrator.forget("source", 0);
+  assert.equal(memory.held(), 0);
 });
 
 test("route rejects missing index and does not await discovery", () => {
@@ -243,6 +303,6 @@ test("container forget prevents stale detection from repopulating its cache", as
   const work = containers.containerFor({ sourceKey: "source", fileIndex: 0, fileSize: 16, readRange: () => new Promise((resolve) => { finish = resolve; }) });
   await settle();
   containers.forget("source", 0);
-  finish(Buffer.alloc(16)); await work;
+  finish(Buffer.alloc(16)); await assert.rejects(work, /withdrawn/);
   assert.equal(containers.known("source", 0), undefined);
 });

@@ -20,6 +20,7 @@ import { BytesUnavailable, isUnavailable, strictReader } from "./container/unava
 import { OSHASH_EDGE_BYTES, hasOshash, oshash } from "./oshash.js";
 import { IndexMemoryUnavailable } from "./container/memory-unavailable.js";
 import { OutsideReadableEdges } from "./container/work-tags.js";
+import { ChapterUnsupported } from "./container/chapters.js";
 import { logger } from "../../utils/logger.js";
 
 /**
@@ -139,7 +140,7 @@ export class ContainerOrchestrator {
 
   /** Read one statement without converting missing bytes into an empty answer. */
   async inspect(params, statement = "tracks") {
-    if (!["container", "tracks", "media-info", "keyframes", "packets", "source-navigation", "source-ranges", "fingerprint", "work-tags", "cover"].includes(statement)) {
+    if (!["container", "tracks", "media-info", "keyframes", "packets", "source-navigation", "source-ranges", "fingerprint", "work-tags", "cover", "chapters"].includes(statement)) {
       throw new TypeError(`Unknown media statement: ${statement}`);
     }
     const key = `${params.sourceKey}:${params.fileIndex}`;
@@ -232,11 +233,19 @@ export class ContainerOrchestrator {
         value = await container.readPacketIndex(params.packetInterval, { isCurrent: params.isCurrent, account: params.walkAccount });
         if (value === null) return { kind: "terminal", reason: "request-obsolete", requestId };
         await value?.prepareAudioDependencies?.(params.packetInterval, container.readRange);
+      } else if (statement === "chapters") {
+        value = await container.readChapters({ read: params.readHeld ?? params.readRange,
+          isCurrent: params.isCurrent,
+          ranges: params.heldRanges ? await params.heldRanges() : undefined });
+        params.acceptChapterResult?.(value);
+        if (!value.complete && value.pending) return { kind: "needs-ranges", ranges: [[value.pending.start, value.pending.end]], value, requestId };
       } else {
         throw new TypeError(`Unknown media statement: ${statement}`);
       }
       return { kind: "result", value, requestId };
     } catch (error) {
+      if (statement === "chapters" && params.isCurrent?.() === false) return { kind: "terminal", reason: "request-obsolete", requestId };
+      if (error instanceof ChapterUnsupported) return { kind: "terminal", reason: "chapter-not-supported", chapterReason: error.message, requestId };
       if (error instanceof IndexMemoryUnavailable) {
         const result = { kind: "needs-memory", bytes: error.bytes, requestId };
         logger.info(`media request=${requestId} needs memory=${error.bytes}`);
@@ -248,7 +257,8 @@ export class ContainerOrchestrator {
         return { kind: "terminal", reason: "outside-edges", requestId };
       }
       if (isUnavailable(error)) {
-        const result = { kind: "needs-ranges", ranges: [[error.start, error.end]], requestId };
+        const result = { kind: "needs-ranges", ranges: [[error.start, error.end]], requestId,
+          ...(error.passive ? { passive: true } : {}) };
         logger.info(`media request=${requestId} needs bytes=${error.start}-${error.end}`);
         return result;
       }

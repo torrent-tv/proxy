@@ -25,6 +25,7 @@ export class ChapterBytes {
   }
 
   async bytes(start, length) {
+    if (this.held.isCurrent?.() === false) throw new Error("Chapter request was withdrawn");
     if (!Number.isSafeInteger(start) || !Number.isSafeInteger(length) || start < 0 || length < 0 || start + length > this.size) {
       throw new Error("Chapter byte range is outside the file");
     }
@@ -32,19 +33,28 @@ export class ChapterBytes {
     if (this.window && start >= this.windowAt && start + length <= this.windowAt + this.window.length) {
       return this.window.subarray(start - this.windowAt, start - this.windowAt + length);
     }
-    const range = this.held.ranges.find(([first, last]) => first <= start && last >= start + length - 1);
-    if (!range) throw new BytesUnavailable(start, start + length - 1, 0);
+    const range = this.held.ranges?.find(([first, last]) => first <= start && last >= start + length - 1);
+    if (this.held.ranges && !range) {
+      const error = new BytesUnavailable(start, start + length - 1, 0);
+      error.passive = this.passiveMissing === true;
+      throw error;
+    }
     // Header traversal must not copy adjacent video payloads into the metadata budget.
     const span = length;
     this.used += span;
     if (this.used > CHAPTER_LIMITS.readBytes) throw new ChapterUnsupported("chapter-read-budget");
     if (++this.elements % 64 === 0) await new Promise((resolve) => setImmediate(resolve));
-    this.window = await this.read(start, start + span - 1);
+    try { this.window = await this.read(start, start + span - 1); }
+    catch (error) {
+      if (error?.name === "BytesUnavailable") error.passive = this.passiveMissing === true;
+      throw error;
+    }
     this.windowAt = start;
     return this.window.subarray(0, length);
   }
 
   step(depth = 0) {
+    if (this.held.isCurrent?.() === false) throw new Error("Chapter request was withdrawn");
     if (++this.elements > CHAPTER_LIMITS.elements || depth > CHAPTER_LIMITS.depth) {
       throw new ChapterUnsupported("chapter-structure-budget");
     }

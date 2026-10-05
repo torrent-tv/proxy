@@ -255,8 +255,8 @@ async function quicktime(reader, track, movieScale) {
 export async function readMp4Chapters(container, held) {
   const cached = container.moovHeld;
   const originalRead = held.read;
-  const ranges = [...held.ranges];
-  if (cached?.offset !== undefined) ranges.push([cached.offset, cached.offset + cached.moov.length - 1]);
+  const ranges = held.ranges ? [...held.ranges] : undefined;
+  if (cached?.offset !== undefined) ranges?.push([cached.offset, cached.offset + cached.moov.length - 1]);
   const reader = new ChapterBytes({ ...held, ranges, read: (start, end) => {
     if (cached?.offset !== undefined && start >= cached.offset && end < cached.offset + cached.moov.length) return Promise.resolve(cached.moov.subarray(start - cached.offset, end - cached.offset + 1));
     return originalRead(start, end);

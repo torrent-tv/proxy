@@ -227,6 +227,7 @@ export async function startProxyServer({
     onSourceForgotten: ({ sourceKey }) => {
       sourcePreparation?.forget(sourceKey);
       mediaReads.forget(sourceKey);
+      chapters.forget(sourceKey);
       probeReads.forget(sourceKey);
       subtitles.forget(sourceKey);
       keyframeTables.forget(sourceKey);
@@ -254,7 +255,6 @@ export async function startProxyServer({
         probeReads.bytesChanged(sourceKey, fileIndex);
         void sourcePreparation?.bytesChanged(sourceKey, fileIndex).catch(error =>
           logger.warn(`source input readiness failed: ${error.message}`));
-        chapters.arrived(sourceKey, fileIndex);
         void pushFreshCues(`${sourceKey}:${fileIndex}`, sourceKey, fileIndex);
         // A keyframe table somebody asked for while its bytes had not arrived
         // is read again now; nothing was recorded for that wait.
@@ -388,21 +388,19 @@ export async function startProxyServer({
    */
   const chapters = new ChapterOrchestrator({
     containers: containerOrchestrator,
+    subscribe: (sourceKey, fileIndex, listener) => mediaReads.subscribe(sourceKey, fileIndex, listener),
+    withdraw: (sourceKey, fileIndex) => {
+      mediaReads.retain(sourceKey, fileIndex, (_params, statement) => statement !== "chapters");
+      void downloadMaps.withdrawMetadata(sourceKey, fileIndex, "chapters").catch(error => logger.warn(`chapter demand withdrawal failed: ${error.message}`));
+    },
+    failed: (error) => logger.warn(`chapter request failed: ${error.message}`),
     onChanged: (event) => onChaptersChanged?.(event),
     fileFor: async (sourceKey, fileIndex) => {
       if (!sourceRegistry.get(sourceKey)) return null;
-      const torrent = torrentPool.knownSource(sourceKey);
-      const whole = torrentPool.wholeFiles.get(`${sourceKey.slice("torrent:".length).toLowerCase()}/${fileIndex}`);
-      const file = torrent?.files?.[fileIndex] ?? whole;
+      const torrent = torrentPool.knownTorrent(sourceKey);
+      const file = torrent?.files?.[fileIndex];
       if (!file) return torrent ? { invalid: true } : null;
-      const handle = torrent ?? { sourceKey };
-      return {
-        sourceKey, fileIndex, fileSize: file.length, label: file.name ?? "",
-        portionBytes: Number(torrent?.pieceLength) > 0 ? Number(torrent.pieceLength) : undefined,
-        readRange: (start, end) => torrentPool.readRangeOf(handle, fileIndex, start, end),
-        readHeld: (start, end) => torrentPool.readHeldOf(handle, fileIndex, start, end),
-        heldRanges: () => torrentPool.heldRangesOf(handle, fileIndex)
-      };
+      return containerOver({ sourceKey, fileIndex });
     }
   });
   const chapterController = new ChapterController({ sourceRegistry, chapters });
@@ -883,7 +881,9 @@ export async function startProxyServer({
             format: containerOrchestrator.known(sourceKey, fileIndex)?.formatName ?? "unrecognised" });
         }
         const finished = mediaReads.record(params, statement, result, revision.storage, revision.memory);
-        await downloadMaps.metadata({ sourceKey, fileIndex, statement: requestId ? `${statement}:${requestId}` : statement, result,
+        if (statement === "chapters" && result.passive) await downloadMaps.withdrawMetadata(sourceKey, fileIndex, statement);
+        else await downloadMaps.metadata({ sourceKey, fileIndex, statement: requestId ? `${statement}:${requestId}` : statement, result,
+          ...(statement === "chapters" ? { priority: 1, urgent: false, deadlineAt: null } : {}),
           ...(demand ? { priority: demand.priority, urgent: demand.urgent, deadlineAt: demand.deadlineAt, interval: demand, leadSeconds: demand.leadSeconds ?? 0 } : {}) });
         if (finished && result.kind === "result") {
           void downloadMaps.refresh(sourceKey, fileIndex).catch(error =>

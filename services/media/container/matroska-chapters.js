@@ -15,12 +15,15 @@ async function header(reader, at, limit) {
     let n = 1;
     while (n <= 8 && !(first & (0x80 >> (n - 1)))) n++;
     if (n > (marker ? 4 : 8) || position + n > limit) throw new Error("Invalid chapter EBML header");
-    return readVint(await reader.bytes(position, n), 0, marker);
+    const bytes = await reader.bytes(position, n);
+    const value = readVint(bytes, 0, marker);
+    const mask = 2 ** (8 - n) - 1;
+    return { ...value, unknown: !marker && (bytes[0] & mask) === mask && bytes.subarray(1).every((byte) => byte === 255) };
   };
   const id = await vint(at, true);
   const size = await vint(at + id.length, false);
   const dataOffset = at + id.length + size.length;
-  const unknown = size.value === 2 ** (7 * size.length) - 1;
+  const unknown = size.unknown;
   const end = unknown ? null : dataOffset + size.value;
   if (!Number.isSafeInteger(dataOffset) || (!unknown && (!Number.isSafeInteger(end) || end > limit))) throw new Error("Chapter element exceeds its parent");
   return { id: id.value, at, dataOffset, end, size: unknown ? null : size.value };
@@ -165,6 +168,7 @@ export async function readMatroskaChapters(container, held) {
       if (id !== BigInt(CHAPTERS) && id !== BigInt(SEEK_HEAD)) continue;
       const offset = segment.dataOffset + Number(position);
       if (!Number.isSafeInteger(offset) || offset < segment.dataOffset || offset >= limit) throw new Error("Chapter SeekPosition is outside Segment");
+      reader.passiveMissing = false;
       const target = await header(reader, offset, limit);
       if (BigInt(target.id) !== id) throw new Error("Chapter SeekID does not match its target");
       if (target.id === CHAPTERS) return target;
@@ -173,10 +177,16 @@ export async function readMatroskaChapters(container, held) {
     return null;
   };
   let chapters = null;
+  let passedCluster = false;
   at = segment.dataOffset;
   while (at < limit && !chapters) {
+    // Without a declared location, traversing unavailable media must not
+    // download every Cluster just to discover whether chapters follow it.
+    reader.passiveMissing = passedCluster;
     const field = await header(reader, at, limit);
+    reader.passiveMissing = false;
     if (field.id === CHAPTERS) { chapters = field; break; }
+    if (field.id === CLUSTER) passedCluster = true;
     if (field.id === SEEK_HEAD) {
       chapters = await seek(field);
       while (!chapters && seekHeads.length) chapters = await seek(seekHeads.shift());
@@ -186,6 +196,7 @@ export async function readMatroskaChapters(container, held) {
     if (field.id !== CLUSTER) throw new Error("Unknown-sized non-Cluster element inside Segment");
     // An unknown-sized Cluster ends at the next Segment-level element (RFC 8794 §6.2).
     at = field.dataOffset;
+    reader.passiveMissing = true;
     while (at < limit) {
       const child = await header(reader, at, limit);
       if (TOP_LEVEL.has(child.id)) break;

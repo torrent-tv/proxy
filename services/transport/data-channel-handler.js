@@ -719,7 +719,8 @@ export function createDataChannelHandler({
   function publishChaptersChanged(event) {
     for (const [channel, selected] of chapterChannels) {
       if (selected.sourceKey === event.sourceKey && selected.fileIndex === event.fileIndex) {
-        try { send(channel, { type: "chapters-changed", ...event }); } catch {}
+        try { send(channel, { type: "chapters-changed", ...event }); }
+        catch (error) { log(`[dc] chapter notification failed: ${error.message}`); }
       }
     }
   }
@@ -1175,9 +1176,11 @@ export function createDataChannelHandler({
 
     const chapterPath = /^\/api\/sources\/([^/]+)\/chapters$/.exec(path);
     if (method === "GET" && chapterPath) {
-      const fileIndex = Number(new URLSearchParams(query ?? "").get("fileIndex"));
+      const rawIndex = new URLSearchParams(query ?? "").get("fileIndex");
+      const fileIndex = rawIndex !== null && /^\d+$/.test(rawIndex) ? Number(rawIndex) : NaN;
       if (Number.isSafeInteger(fileIndex) && fileIndex >= 0) {
-        try { chapterChannels.set(channel, { sourceKey: decodeURIComponent(chapterPath[1]), fileIndex }); } catch {}
+        try { chapterChannels.set(channel, { sourceKey: decodeURIComponent(chapterPath[1]), fileIndex }); }
+        catch (error) { log(`[dc] chapter source key cannot be decoded: ${error.message}`); }
       }
     }
 

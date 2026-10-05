@@ -53,7 +53,13 @@ function sanitizeLine(value) {
  * `POST /api/client-logs`
  *
  * Body: `{ sessionId, startedAt, torrentName, infoHash, tag, signalSessionId,
- * lines: [{ level, ts, msg }] }`.
+ * seq, lines: [{ level, ts, msg }] }`.
+ *
+ * `seq` numbers the page's sends and is printed as `batch=<seq>`. The server
+ * prints the same number, so a batch that reached neither side shows as a gap,
+ * and one taken here whose answer never reached the page — a wedged connection
+ * still carries the request — shows on both, because the page then sends it to
+ * the server too.
  *
  * @param {import("fastify").FastifyRequest} req
  * @param {import("fastify").FastifyReply} reply
@@ -69,6 +75,7 @@ export async function handleApiClientLogsPost(req, reply, { clientLogs }) {
     infoHash: safeString(body.infoHash, 40)
   };
   const tag = sanitizeLine(safeString(body.tag, MAX_TAG_LEN)) || "Unknown/Unknown";
+  const batch = Number.isSafeInteger(body.seq) && body.seq > 0 ? ` batch=${body.seq}` : "";
   const rows = Array.isArray(body.lines) ? body.lines.slice(0, MAX_LINES) : [];
 
   const lines = rows.map((row) => {
@@ -76,7 +83,7 @@ export async function handleApiClientLogsPost(req, reply, { clientLogs }) {
     const level = safeString(entry.level, 8) || "log";
     const at = sanitizeLine(safeString(entry.ts, 16));
     const message = sanitizeLine(safeString(entry.msg, MAX_MSG_LEN));
-    return `[${tag}] ${at} ${level}: ${message}`;
+    return `[${tag}${batch}] ${at} ${level}: ${message}`;
   });
 
   if (lines.length > 0) {

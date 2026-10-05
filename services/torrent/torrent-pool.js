@@ -1683,6 +1683,7 @@ export class TorrentPool {
       logger.warn(`torrent-pool: [${label()}] warning: ${formatWarning(warning)}`);
     });
 
+
     // A TORRENT THAT DIED WITHOUT US ASKING LEAVES ITS RECORD BEHIND, and the
     // record goes on answering. Field 2026-09-11: the store refused a block,
     // the client destroyed the torrent, and for the rest of the process every
@@ -1862,8 +1863,7 @@ export class TorrentPool {
                   this.torrents.delete(otherKey);
                 }
               }
-              this.#lastAccess.delete(existing);
-              this.#readPositionByTorrent.delete(existing);
+              this.#forgetBookkeeping(existing);
               this.client.remove(existing, { destroyStore: true }, () => {
                 const addedReplacement = this.client.add(torrentId, {
                   store: this.#pieceStore,
@@ -2083,8 +2083,7 @@ export class TorrentPool {
       return;
     }
     forgetTorrent(torrent);
-    this.#lastAccess.delete(torrent);
-    this.#readPositionByTorrent.delete(torrent);
+    this.#forgetBookkeeping(torrent);
     const name = typeof torrent.name === "string" ? torrent.name : "(unknown)";
     logger.warn(
       `torrent-pool: forgot "${name}" [${String(torrent.infoHash ?? "?").slice(0, 8)}] — ` +
@@ -2107,6 +2106,26 @@ export class TorrentPool {
     this.#removeTorrent(torrent, reason);
   }
 
+  /**
+   * Drop everything this pool keeps per torrent, for one that is going.
+   *
+   * Every one of these holds the torrent strongly, and the idle timer above all:
+   * left running, it kept each removed torrent — its pieces, its wires, the
+   * whole object — for the hour it was set for, then fired on the corpse and
+   * logged a second removal. Field 2026-10-04: 184 such removals of a torrent
+   * already gone, and 595 destroyed copies of it alive in one heap.
+   *
+   * @param {import("webtorrent").Torrent} torrent
+   * @returns {void}
+   */
+  #forgetBookkeeping(torrent) {
+    this.#cancelIdleRemoval(torrent);
+    this.#lastAccess.delete(torrent);
+    this.#readPositionByTorrent.delete(torrent);
+    this.#stallSince.delete(torrent);
+    this.#stallReportedAt.delete(torrent);
+  }
+
   #removeTorrent(torrent, reason = "unknown") {
     // Everything anybody stated for this torrent goes with it.
     forgetTorrent(torrent);
@@ -2126,8 +2145,7 @@ export class TorrentPool {
         break;
       }
     }
-    this.#lastAccess.delete(torrent);
-    this.#readPositionByTorrent.delete(torrent);
+    this.#forgetBookkeeping(torrent);
     logger.warn(`torrent-pool: removing torrent "${name}" [${infoHash}] reason=${reason} stated=${stated} downloaded=${hasData}B caller=${caller}`);
     try {
       torrent.destroy({ destroyStore: true }, () => {

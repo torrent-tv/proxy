@@ -1,30 +1,72 @@
 # syntax=docker/dockerfile:1.7
-FROM node:24-alpine
+#
+# The proxy as a container: exactly the npm package, its production
+# dependencies, node and ffmpeg — nothing else. The image is built from the
+# package `npm pack` makes, so `files` in package.json is the one list of what
+# ships, here and on npm alike.
+#
+#   docker build -t torrent-tv-proxy .
+#   docker run --network host -v ttv-proxy:/data torrent-tv-proxy --server-url https://webauth.courses
+
+FROM node:24-alpine AS dependencies
+# utp-native ships no musl prebuild, so it is compiled here.
+RUN apk add --no-cache python3 make g++
+WORKDIR /app
+COPY package.json package-lock.json ./
+# Install scripts are off for the whole tree: ip-set (a dependency of
+# webtorrent) runs `npx only-allow pnpm` in `preinstall`, which aborts a plain
+# npm install, and ffmpeg-static would download an ffmpeg this image does not
+# use. The two native modules that need theirs are rebuilt one by one.
+#
+# node-datachannel fetches a prebuilt binary, and one failed request ends the
+# build with an unrelated error from its broken source fallback, so the fetch
+# is retried and the result checked: without it the proxy has no WebRTC.
+#
+# utp-native is our fork, through `overrides`; it is best-effort as in the
+# add-on — without it peers are reached over TCP only.
+RUN npm ci --omit=dev --ignore-scripts --no-audit --no-fund \
+ && for attempt in 1 2 3 4 5; do \
+      npm rebuild node-datachannel && break; \
+      echo "node-datachannel: build attempt $attempt failed; retrying in 10s" >&2; \
+      sleep 10; \
+    done \
+ && ls node_modules/node-datachannel/build/Release/*.node \
+ && (npm_config_build_from_source=true npm rebuild utp-native \
+     || echo "WARNING: utp-native build failed; peer connections stay TCP-only") \
+ && rm -rf node_modules/utp-native/build/Release/obj.target \
+      node_modules/utp-native/build/Release/.deps
+
+FROM node:24-alpine AS package
+WORKDIR /src
+COPY . .
+RUN npm pack --ignore-scripts --pack-destination /tmp \
+ && mkdir /app \
+ && tar -xzf /tmp/torrent-tv-proxy-*.tgz -C /app --strip-components=1
+
+# The runtime is Alpine with node copied from the image that built the native
+# modules, so both run against the same node; the official image's npm, yarn
+# and corepack are not needed to run anything.
+FROM alpine:3
+RUN apk add --no-cache libstdc++ ffmpeg \
+ && addgroup -S app && adduser -S -G app app \
+ && mkdir /data && chown app:app /data
+COPY --from=dependencies /usr/local/bin/node /usr/local/bin/node
+COPY --from=package /app /app
+COPY --from=dependencies /app/node_modules /app/node_modules
 
 ENV NODE_ENV=production
-ENV PORT=9090
-ENV HOST=0.0.0.0
-
+USER app
 WORKDIR /app
 
-# ffmpeg is needed for optional HLS audio transcode mode.
-RUN apk add --no-cache ffmpeg
+# 9090/tcp is the HTTP API; WebRTC uses the same port number over UDP. Reaching
+# peers and viewers from a bridge network needs both published, so host
+# networking is what the README recommends.
+EXPOSE 9090/tcp 9090/udp
 
-# Create an unprivileged runtime user.
-RUN addgroup -S app && adduser -S -G app app
+HEALTHCHECK --interval=30s --timeout=5s --start-period=60s --retries=3 \
+  CMD ["node", "-e", "fetch('http://127.0.0.1:9090/healthz').then((r)=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
 
-# Install only production dependencies first for better layer caching.
-COPY package.json package-lock.json ./
-RUN npm ci --omit=dev && npm cache clean --force
-
-# Copy application sources.
-COPY --chown=app:app . .
-
-USER app
-
-EXPOSE 9090
-
-HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
-  CMD node -e "fetch(`http://127.0.0.1:${process.env.PORT || 9090}/healthz`).then((r)=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
-
-CMD ["sh", "-ec", "if [ -z \"${SERVER_URL:-}\" ]; then echo 'SERVER_URL is required' >&2; exit 1; fi; exec node ./bin/cli.js --server-url \"$SERVER_URL\" --host \"$HOST\" --port \"$PORT\" ${PROXY_EXTRA_ARGS:-}"]
+# /data keeps what the host has measured about itself, its identity and its
+# diagnostics across container recreation. Arguments given to `docker run`
+# follow these, so `--server-url` is the one a user must add.
+ENTRYPOINT ["node", "/app/bin/cli.js", "--host", "0.0.0.0", "--port", "9090", "--ffmpeg-bin", "/usr/bin/ffmpeg", "--state-dir", "/data"]

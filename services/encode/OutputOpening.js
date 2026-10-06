@@ -675,7 +675,7 @@ export class OutputOpening {
     this.#host.segmentOutputFiles.directoryFor(spec.toKey());
     this.#host.segmentOutputFiles.useFormat(spec.toKey(), segmentFormat);
     this.#host.hostTimings.noteOutputCreated(session, createEntryMs);
-    this.#host.encodeCost.notePredictionFor(session, output.encodeHeight);
+    this.#host.encodeCost.notePredictionFor(session);
     // Decided before the key was built and only recorded here. Whether the audio
     // travels separately decides the ffmpeg arguments, what the master says,
     // whether the rendition route answers at all AND what the session is keyed

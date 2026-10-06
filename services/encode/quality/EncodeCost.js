@@ -79,15 +79,97 @@ export class EncodeCost {
   #decodeCost = new Map();
 
   /**
-   * What each height was last predicted to do, kept so a session started at
-   * that height can be compared against the prediction once it runs.
+   * What this output is predicted to do on this machine, in the mode it is
+   * actually encoded in, kept on the output so that once it runs the field says
+   * what the prediction was worth (torrent-tv/meta#3).
    *
-   * @type {Map<number, number | null> | null}
+   * Computed here, for this output, and not taken from the last offer. Two
+   * faults came from taking it from there, both read from the field log of
+   * 2026-10-07. The offer prices a height at the CHEAPEST mode, because a
+   * height may be offered when any mode can hold it, while the budget then
+   * encodes at the best mode that clears the bar: an XviD 360p step was
+   * predicted 7.27x at `ultrafast` and measured 1.2-3.4x at `fast`, a ratio of
+   * 0.16-0.47 that said nothing about the arithmetic. And the last offer is one
+   * answer for the whole process, so an output could be given the figure of
+   * another film's offer.
+   *
+   * The offer's own figure for the height is kept beside it, so the line says
+   * both what the offer decided on and what this run was expected to do.
+   *
+   * @param {object} session
+   * @returns {void}
    */
-  lastPredictedByHeight = null;
+  notePredictionFor(session) {
+    const state = qualityStateOf(session);
+    state.predictedSpeedWhenOffered = null;
+    state.predictedMode = null;
+    state.offeredSpeedAtCheapestMode = null;
+    const encode = session?.spec?.video?.encode ?? null;
+    const benchmark = this.#host().benchmark;
+    if (!session?.spec?.transcodesVideo || !encode || !Array.isArray(benchmark) || benchmark.length === 0) {
+      return;
+    }
+    const entry = modeEntryFor(benchmark, encode.preset);
+    const priced = {
+      source: session.file?.decode ?? null,
+      width: encode.width,
+      height: encode.height,
+      fps: Number(encode.fps) || TRANSCODE_FPS,
+      observedDecodeCostSec: null,
+      // Everything else this output's family has running. The output itself has
+      // no process yet, so it is not in the total.
+      concurrentCostSec: this.committedCostOf(session)
+    };
+    state.offeredSpeedAtCheapestMode = this.#speedOnThisMachine({ ...priced, benchmark });
+    if (entry !== null) {
+      state.predictedMode = entry.preset;
+      state.predictedSpeedWhenOffered = this.#speedOnThisMachine({ ...priced, benchmark: [entry] });
+    }
+  }
 
-  notePredictionFor(session, height) {
-    qualityStateOf(session).predictedSpeedWhenOffered = this.lastPredictedByHeight?.get(height) ?? null;
+  /**
+   * The speed an encode is predicted to run at on this machine: the startup
+   * measurement of the cheapest mode in `benchmark` at this size, the decode of
+   * this source, the work already running beside it, how badly running together
+   * goes here, and the share of the machine nobody has been charged for.
+   *
+   * The one calculation both the offer and the per-output prediction use, so
+   * that a ratio between a run and its prediction measures the arithmetic and
+   * not a difference between two copies of it.
+   *
+   * @param {{ benchmark: object[], source: object | null, width: number, height: number, fps: number, observedDecodeCostSec: number | null, concurrentCostSec: number }} params
+   * @returns {number | null}
+   */
+  #speedOnThisMachine({ benchmark, source, width, height, fps, observedDecodeCostSec, concurrentCostSec }) {
+    const { speed } = canSustainOutput({
+      benchmark,
+      decodeModel: this.#host().decodeModel,
+      source,
+      outputPixelsPerSec: width * height * fps,
+      observedDecodeCostSec,
+      concurrentCostSec,
+      frame: { width, height }
+    });
+    // The benchmark behind that figure was taken on a QUIET host — one
+    // ffmpeg and nothing else. The machine a step will actually run on is
+    // also running the kernel, the container and whatever else its owner
+    // does, and on the addon host that was measured at 99 % busy with a
+    // quarter of it unattributed. Only the unattributed part is charged
+    // here: our own encoders are already in `concurrentCostSec` and the
+    // proxy's own work is already priced per megabyte moved.
+    // Two corrections, and they are different facts about the machine. The
+    // availability share removes work nobody has been charged for; the
+    // contention penalty says what OUR OWN second job costs, because the
+    // budget adds independent prices and this host does not behave that way
+    // — the same work measured 2.6× dearer beside one encoder and 3.7×
+    // beside two (2026-08-18). `concurrentCostSec` already counts what is
+    // committed; this multiplies by how badly running at all together goes.
+    const othersRunning = concurrentCostSec > 0 ? this.#encodersRunningNow() : 0;
+    const { penalty } = contentionPenalty(othersRunning, this.#host().contentionPenalties);
+    return correctForAvailability(
+      speed === null ? null : speed / penalty,
+      this.#host().availability
+    );
   }
 
   // The last refusal printed. The offer is recomputed on the path that serves
@@ -635,12 +717,6 @@ export class EncodeCost {
     const kept = [];
     /** @type {string[]} */
     const dropped = [];
-    // What each height was predicted to do on THIS machine, kept so a session
-    // started at that height can be compared against it once it runs. The
-    // manager holds the last answer, because the offer is computed on the path
-    // that serves every request while a session is created elsewhere.
-    /** @type {Map<number, number | null>} */
-    const predictedByHeight = new Map();
     for (const height of heights) {
       // A rung this session has actually been seen running below realtime is
       // withdrawn on that evidence, whatever the prediction says. This is the
@@ -707,40 +783,15 @@ export class EncodeCost {
         0,
         concurrentCostSec - (runningCostByHeight?.get(height) ?? 0)
       );
-      const { speed } = canSustainOutput({
+      const onThisMachine = this.#speedOnThisMachine({
         benchmark,
-        decodeModel: this.#host().decodeModel,
         source,
-        outputPixelsPerSec: width * height * fps,
+        width,
+        height,
+        fps,
         observedDecodeCostSec,
-        concurrentCostSec: concurrentBesideThis,
-        frame: { width, height }
+        concurrentCostSec: concurrentBesideThis
       });
-      // The benchmark behind that figure was taken on a QUIET host — one
-      // ffmpeg and nothing else. The machine a step will actually run on is
-      // also running the kernel, the container and whatever else its owner
-      // does, and on the addon host that was measured at 99 % busy with a
-      // quarter of it unattributed. Only the unattributed part is charged
-      // here: our own encoders are already in `concurrentBesideThis` and the
-      // proxy's own work is already priced per megabyte moved.
-      // Two corrections, and they are different facts about the machine. The
-      // availability share removes work nobody has been charged for; the
-      // contention penalty says what OUR OWN second job costs, because the
-      // budget adds independent prices and this host does not behave that way
-      // — the same work measured 2.6× dearer beside one encoder and 3.7×
-      // beside two (2026-08-18). `concurrentBesideThis` already counts what is
-      // committed; this multiplies by how badly running at all together goes.
-      const othersRunning = concurrentBesideThis > 0 ? this.#encodersRunningNow() : 0;
-      const { penalty } = contentionPenalty(othersRunning, this.#host().contentionPenalties);
-      const onThisMachine = correctForAvailability(
-        speed === null ? null : speed / penalty,
-        this.#host().availability
-      );
-      // Kept against the step's own session, so that when it runs the field
-      // says what the prediction was worth. Without this the only comparison
-      // available is between two figures written minutes apart in different
-      // lines of the log.
-      predictedByHeight.set(height, onThisMachine);
       if (onThisMachine !== null && onThisMachine >= bar) {
         kept.push(height);
         continue;
@@ -768,9 +819,7 @@ export class EncodeCost {
         this.#lastOfferLine = line;
         logger.info(line);
       }
-      this.lastPredictedByHeight = predictedByHeight;
     } else {
-      this.lastPredictedByHeight = predictedByHeight;
       this.#lastOfferLine = "";
     }
     return kept;
@@ -859,9 +908,12 @@ export class EncodeCost {
       if (!Number.isFinite(lastSaid) || Math.abs(ratio - lastSaid) > 0.1) {
         state.lastPredictionRatio = ratio;
         logger.info(
-          `prediction ${session.id.slice(0, 8)} ${session.output.encodeHeight || "source"}p: ` +
-          `predicted ${state.predictedSpeedWhenOffered.toFixed(2)}x, measured ${speed.toFixed(2)}x ` +
-          `(ratio ${ratio.toFixed(2)}; 1.00 would mean the arithmetic describes this machine)`
+          `prediction ${session.id.slice(0, 8)} ${session.output.encodeHeight || "source"}p ` +
+          `"${state.predictedMode}": predicted ${state.predictedSpeedWhenOffered.toFixed(2)}x, measured ${speed.toFixed(2)}x ` +
+          `(ratio ${ratio.toFixed(2)}; 1.00 would mean the arithmetic describes this machine)` +
+          (Number.isFinite(state.offeredSpeedAtCheapestMode)
+            ? `; offered on ${state.offeredSpeedAtCheapestMode.toFixed(2)}x at the cheapest mode`
+            : "")
         );
       }
     }
@@ -1040,4 +1092,24 @@ export class EncodeCost {
       { decodeModel: this.#host().decodeModel, source, requiredSpeed }
     );
   }
+}
+
+/**
+ * The startup measurement of the mode an output is encoded in.
+ *
+ * A mode is filed under its setting, or under the encoder's own name where the
+ * encoder has one setting (`calibration.js`), so an output that names no setting
+ * is matched to the one mode there is. Null when the output's setting was not
+ * measured: its prediction is then unknown rather than borrowed from another
+ * mode.
+ *
+ * @param {Array<{ preset: string }>} benchmark
+ * @param {string | null | undefined} preset
+ * @returns {{ preset: string } | null}
+ */
+export function modeEntryFor(benchmark, preset) {
+  if (typeof preset === "string" && preset.length > 0) {
+    return benchmark.find((entry) => entry.preset === preset) ?? null;
+  }
+  return benchmark.length === 1 ? benchmark[0] : null;
 }

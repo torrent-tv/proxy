@@ -60,6 +60,26 @@ const get = (store, index) =>
     store.get(index, (error, bytes) => (error ? reject(error) : resolve(bytes)));
   });
 
+test("whole-file download preferences do not raise the memory floor or its history", async () => {
+  const { store, directory } = await makeStore(64);
+  try {
+    const idle = store.wantedBytes;
+    store.protectRange("map:tail", 0, 63, 3, Infinity, 1, false);
+    assert.ok(store.wantedBytes >= 64 * PIECE, "the downloaded file may use spare memory");
+    assert.equal(store.reviseGrowthCeiling(2 * PIECE).ceilingBytes, 2 * PIECE);
+    assert.equal(store.protectedRanges().length, 1, "the map remains available to eviction ordering");
+    for (const piece of [10, 11, 12]) store.pin(piece);
+    assert.equal(store.reviseGrowthCeiling(2 * PIECE).ceilingBytes, 3 * PIECE,
+      "actual held reads remain a required floor");
+    for (const piece of [10, 11, 12]) store.unpin(piece);
+    store.releaseProtection("map:tail");
+    assert.equal(store.wantedBytes, idle, "a download preference cannot become a retained read window");
+  } finally {
+    store.destroy(() => undefined);
+    await fs.rm(directory, { recursive: true, force: true, maxRetries: 10, retryDelay: 20 });
+  }
+});
+
 test("concurrent puts past capacity never hand two pieces the same slot", async () => {
   const capacity = 4;
   const { store, directory } = await makeStore(capacity);

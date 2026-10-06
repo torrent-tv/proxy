@@ -289,15 +289,16 @@ export class PieceLru {
    *
    * @returns {{ readers: number, names: string[], unionPieces: number, widestPieces: number, capacity: number }}
    */
-  demand() {
+  demand({ memoryRequiredOnly = false } = {}) {
     // WHO THEY ARE, not only how many. A "reader" here is whoever declared a
     // range, and on 2026-09-08 the field said `5 reader(s) want 24 piece(s) of
     // 25` on a session with two encoders — because the priority map declares one
     // range per zone and four of its zones were arriving as four readers. The
     // count alone could not say that, and choosing between "narrow the windows"
     // and "raise the allowance" was guesswork until the names were printed.
-    const names = [...this.#protected.keys()].map(String).sort();
-    const ranges = [...this.#protected.values()]
+    const entries = [...this.#protected.entries()].filter(([, range]) => !memoryRequiredOnly || range.memoryRequired);
+    const names = entries.map(([name]) => String(name)).sort();
+    const ranges = entries.map(([, range]) => range)
       .map((range) => ({ from: range.from, to: range.to }))
       .sort((left, right) => left.from - right.from);
     let unionPieces = 0;
@@ -432,9 +433,11 @@ export class PieceLru {
    *   urgent. A caller that states none is treated as wanting these pieces
    *   least of everyone who did state one, so an unstated range can never
    *   displace a stated one.
+   * @param {boolean} [memoryRequired] - Read windows require room; download
+   *   preferences can yield under pressure.
    * @returns {void}
    */
-  protect(readerId, from, to, urgency, deadlineAt, priority = 1) {
+  protect(readerId, from, to, urgency, deadlineAt, priority = 1, memoryRequired = true) {
     if (!Number.isInteger(from) || !Number.isInteger(to) || to < from) {
       return;
     }
@@ -443,7 +446,8 @@ export class PieceLru {
       to,
       urgency: Number.isFinite(urgency) ? Number(urgency) : Number.MAX_SAFE_INTEGER,
       deadlineAt,
-      priority
+      priority,
+      memoryRequired
     });
   }
 

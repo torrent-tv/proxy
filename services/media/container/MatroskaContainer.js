@@ -437,7 +437,7 @@ export class MatroskaContainer extends Container {
       const cover = await this.#coverAddress(reader, layout);
       if (cover && cover.size > 0 && cover.size <= MAX_COVER_BYTES) tags.cover = { type: cover.mediaType, size: cover.size };
     } catch (error) { leftOut(error); }
-    tags.trackTitles = textList((await this.readTracks()).map((track) => track.name));
+    tags.trackTitles = await this.trackTitlesForWork();
     if (!tags.outsideEdges) this.#workTags = tags;
     return tags;
   }

@@ -54,6 +54,7 @@ const MICROSECONDS_PER_SECOND = 1_000_000;
  *   the stretch it was given, which no other live run of that output holds.
  * @property {string} address
  * @property {string} ending - One of {@link ENCODE_EXIT}.
+ * @property {string | null} publicationCode - The closed-piece refusal category, separate from the process exit.
  * @property {string} because - Why, in words, including who asked when we did.
  * @property {number | null} code
  * @property {string | null} signal
@@ -108,6 +109,7 @@ export class EncodeRun {
   #pendingClosed = null;
   #closedTimings = new Map();
   #publicationError = null;
+  #publicationCode = null;
   #inputTruncated = false;
   #stderrReadTail = "";
   #processExited = false;
@@ -602,6 +604,7 @@ export class EncodeRun {
         served = this.onClosed(name, following, this.#closedTimings.get(name) ?? null);
       } catch (error) {
         this.#publicationError = error instanceof Error ? error.message : String(error);
+        this.#publicationCode = error?.code ?? null;
         this.lastError = this.#publicationError;
         // A refused closed piece must release this run's claim now, rather
         // than keep its viewer waiting until the rest of the film is encoded.
@@ -877,6 +880,7 @@ export class EncodeRun {
       run: this,
       address: this.address,
       ending,
+      publicationCode: this.#publicationCode,
       because,
       code: code ?? null,
       signal: signal ?? null,

@@ -430,6 +430,9 @@ export class ViewerRequests {
     // without this the base session would idle out from under its own variants.
     const session = this.#host.activeOutputFor({ base: named, consumerId, outputs: this.#host.outputs });
     this.#host.outputs.touch(session);
+    const audio = this.#host.renditions.servesAudioSeparately(session)
+      ? this.#host.renditions.playbackAudioOutputFor(session, consumerId) : null;
+    const failed = [session, audio].find(output => output && this.#host.encodeRuns.wireStateOf(output) === "failed");
     const warmupTotalSeconds = this.#host.startupWaitMs / 1000;
     const warmupElapsedSeconds = Math.max(
       0,
@@ -452,7 +455,7 @@ export class ViewerRequests {
       // The id the caller asked about, not the variant it was answered from —
       // the browser tracks its sessions by the id it was given.
       sessionId: named.id,
-      state: this.#host.encodeRuns.wireStateOf(session),
+      state: failed ? "failed" : this.#host.encodeRuns.wireStateOf(session),
       // The smallest buffer at which no interruption reaches the viewer, from
       // THIS file's own recent interruptions: one whole segment — the one being
       // played — plus the worst wait that can arrive before the buffer refills.
@@ -537,7 +540,7 @@ export class ViewerRequests {
       expectedSessionCreateMs: this.#host.expectedSessionCreateMs(),
       expectedFirstSegmentMs: this.#host.expectedFirstSegmentMs(),
       updatedAt: progress.updatedAt,
-      error: this.#host.encodeRuns.failureOf(session)
+      error: this.#host.encodeRuns.failureOf(failed ?? session)
     };
   }
 

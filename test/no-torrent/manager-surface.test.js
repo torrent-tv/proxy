@@ -195,6 +195,25 @@ test("the progress report keeps every figure it carries today", async () => {
   assert.equal(progress.sessionId, SESSION_ID);
 });
 
+test("a failed selected soundtrack fails playback progress even while video remains available", async () => {
+  const manager = bareManager();
+  const video = fakeSession();
+  const audio = fakeSession({ id: "1111111122223333" });
+  audio.outputKey = "soundtrack";
+  manager.outputs.set(video.id, video);
+  manager.outputs.set(audio.id, audio);
+  manager.renditions.playbackAudioOutputFor = () => audio;
+  manager.encodeRuns.wireStateOf = output => output === audio ? "failed" : "running";
+  manager.encodeRuns.failureOf = output => output === audio ? "Closed audio piece has incomplete media." : "";
+  const progress = await manager.viewerRequests.getSessionProgress(video.id, "viewer-one");
+  assert.equal(progress.state, "failed");
+  assert.equal(progress.error, "Closed audio piece has incomplete media.");
+  manager.renditions.playbackAudioOutputFor = () => null;
+  const current = await manager.viewerRequests.getSessionProgress(video.id, "viewer-one");
+  assert.equal(current.state, "running");
+  assert.equal(current.error, "");
+});
+
 test("a session that is not there is answered, not invented", async () => {
   const manager = bareManager();
   const absent = "ffffffffffffffff";

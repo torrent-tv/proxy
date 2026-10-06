@@ -3,6 +3,9 @@ import { ENCODE_EXIT } from "./encode-exit.js";
 
 /** Process and resource failures are not evidence against the admitted bytes. */
 export function failedAdmittedInput(ended, hardwareEncode = false) {
+  if (ended.ending === ENCODE_EXIT.PUBLICATION_FAILED) {
+    return !hardwareEncode && ended.publicationCode === "ERR_INCOMPLETE_MEDIA";
+  }
   if (hardwareEncode || ended.signal || ended.code === null || ended.code === undefined) return false;
   if (!Number.isInteger(ended.code) || ended.code < 0) return false;
   if (/cannot allocate memory|out of memory|no space left|resource temporarily unavailable|too many open files|ENOMEM|ENOSPC|EMFILE|EAGAIN/i.test(ended.because ?? "")) return false;

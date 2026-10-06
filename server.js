@@ -830,7 +830,7 @@ export async function startProxyServer({
             scope: "preparation", ...sourcePreparation.demandFor(work) });
         }
       }
-      if (["packets", "subtitle-cues"].includes(work.statement) && (work.selected || work.role === "subtitle-embedded")) {
+      if ((work.statement === "packets" && work.role !== "source-rest") || work.role === "subtitle-embedded" && work.statement === "subtitle-cues") {
         const info = await containerOrchestrator.inspect({ ...params, onReadResult: undefined }, "media-info");
         if (info.kind !== "result") return info;
         const positions = outputParts.viewers.forSource(work.sourceKey)

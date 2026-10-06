@@ -395,6 +395,7 @@ export class EncodeRuns {
       return mediaRanges;
     } catch (error) {
       this.#host.logger.warn(`encode: could not read the media of ${name}: ${error instanceof Error ? error.message : String(error)}`);
+      if (/^E[A-Z]+$/.test(error?.code ?? "")) throw error;
       return false;
     }
   }
@@ -986,7 +987,8 @@ export class EncodeRuns {
           }
         }
         const mediaRanges = this.#wholeClosedPiece(session, name, index, admittedInput, bytes);
-        if (mediaRanges === false) throw new Error(`Closed piece #${index} has incomplete media.`);
+        if (mediaRanges === false) throw Object.assign(new Error(`Closed piece #${index} has incomplete media.`),
+          { code: "ERR_INCOMPLETE_MEDIA" });
         const published = this.#host.segmentFiles.publish(session.outputKey ?? "", name, session.segmentFormat, { mediaRanges, bytes });
         if (!published) throw new Error(`Closed piece #${index} could not be stored.`);
         return published;

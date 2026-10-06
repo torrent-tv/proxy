@@ -1,4 +1,4 @@
-## Unreleased
+## 2.93.3
 
 - **Fix**: Reserve the complete urgent encoder input before distributing memory to speculative torrent pieces, so a large file cannot prevent playback from starting while memory is available.
 

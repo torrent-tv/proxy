@@ -14,6 +14,7 @@
 
 - **New**: `GET /api/sources/:sourceKey/files/:fileIndex/container-metadata` answers what an opened file states about the work it carries — title, series, season, episode, episode title, year, genre, description, `IMDB`/`TMDB`/`TVDB` ids, track and chapter titles, and whether it has a cover — from Matroska `Tags`, `Info/Title`, `Chapters` and `Attachments`, the MP4 iTunes item list and QuickTime metadata keys, and AVI `LIST INFO`. It reads only the first and the last piece of the file, which opening it fetches anyway, and bytes already held; nothing is asked of the swarm for it (torrent-tv/meta#139).
 - **New**: `GET /api/sources/:sourceKey/files/:fileIndex/cover` answers the cover image a file carries inside it (Matroska `cover.*` attachment, MP4 `covr`, QuickTime artwork), checked to be an image by its bytes and at most 4 MiB (torrent-tv/meta#139).
+- **Fix**: The per-step `prediction` line compares a running encode with the prediction for the mode it is actually encoded in, computed for that output. It used to take the figure the offer decides on, which is the cheapest mode, and the last offer computed anywhere in the process: an XviD 360p step was predicted at `ultrafast` and measured at `fast`. The line now names the mode and keeps the offer's figure beside it (torrent-tv/meta#3).
 
 ## 2.93.4
 

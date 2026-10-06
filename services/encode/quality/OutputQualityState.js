@@ -12,6 +12,8 @@ export function qualityStateOf(output) {
   if (!state) {
     state = {
       predictedSpeedWhenOffered: null,
+      predictedMode: null,
+      offeredSpeedAtCheapestMode: null,
       lastPredictionRatio: null,
       lastAloneSpeed: undefined,
       saidNoVariants: undefined,

@@ -55,6 +55,20 @@
   "devDependencies": {
     "@biomejs/biome": "^2.5.7"
   },
+  "allowScripts": {
+    "@ffprobe-installer/darwin-arm64@5.0.1": true,
+    "@ffprobe-installer/darwin-x64@5.1.0": true,
+    "@ffprobe-installer/linux-arm@5.2.0": true,
+    "@ffprobe-installer/linux-arm64@5.2.0": true,
+    "@ffprobe-installer/linux-ia32@5.2.0": true,
+    "@ffprobe-installer/linux-x64@5.2.0": true,
+    "@torrent-tv/utp-native@2.5.3-ttv.9": true,
+    "bufferutil@4.1.0": true,
+    "ffmpeg-static@5.3.0": true,
+    "node-datachannel@0.32.3": true,
+    "utf-8-validate@6.0.6": true,
+    "ip-set": false
+  },
   "overrides": {
     "utp-native": "npm:@torrent-tv/utp-native@2.5.3-ttv.9"
   }

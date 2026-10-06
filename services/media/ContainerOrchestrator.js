@@ -16,7 +16,8 @@
  */
 
 import { ContainerFactory } from "./container/ContainerFactory.js";
-import { BytesUnavailable, isUnavailable } from "./container/unavailable.js";
+import { BytesUnavailable, isUnavailable, strictReader } from "./container/unavailable.js";
+import { OSHASH_EDGE_BYTES, hasOshash, oshash } from "./oshash.js";
 import { IndexMemoryUnavailable } from "./container/memory-unavailable.js";
 import { logger } from "../../utils/logger.js";
 
@@ -28,6 +29,21 @@ import { logger } from "../../utils/logger.js";
  * fetches bytes before asking is told this figure rather than choosing one.
  */
 export const CONTAINER_HEAD_BYTES = 256 * 1024;
+
+/**
+ * The size of the file and its OpenSubtitles hash, from the two edges. A read
+ * that has not arrived throws `BytesUnavailable`, so nothing partial is kept.
+ *
+ * @param {{ readRange: (start: number, end: number) => Promise<Buffer | null>, fileSize: number }} params
+ * @returns {Promise<{ hash: string, size: number } | null>} `null` for a file too short to have one.
+ */
+async function readFingerprint({ readRange, fileSize }) {
+  if (!hasOshash(fileSize)) return null;
+  const read = strictReader(readRange, fileSize);
+  const head = await read(0, OSHASH_EDGE_BYTES - 1);
+  const tail = await read(fileSize - OSHASH_EDGE_BYTES, fileSize - 1);
+  return { hash: oshash(fileSize, head, tail), size: fileSize };
+}
 
 export class ContainerOrchestrator {
   #reads = new Map();
@@ -73,7 +89,7 @@ export class ContainerOrchestrator {
 
   /** Read one statement without converting missing bytes into an empty answer. */
   async inspect(params, statement = "tracks") {
-    if (!["container", "tracks", "media-info", "keyframes", "packets"].includes(statement)) {
+    if (!["container", "tracks", "media-info", "keyframes", "packets", "fingerprint"].includes(statement)) {
       throw new TypeError(`Unknown media statement: ${statement}`);
     }
     const key = `${params.sourceKey}:${params.fileIndex}`;
@@ -105,6 +121,11 @@ export class ContainerOrchestrator {
     this.#activityEpoch++;
     this.#activeReads++;
     try {
+      if (statement === "fingerprint") {
+        // A fact about the bytes at the two ends of the file, whatever the format.
+        const value = await readFingerprint(params);
+        return value ? { kind: "result", value, requestId } : { kind: "terminal", reason: "file-too-short", requestId };
+      }
       const container = await this.containerFor(params);
       if (!container) {
         const result = { kind: "terminal", reason: "format-not-supported", requestId };

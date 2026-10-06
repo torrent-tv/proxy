@@ -19,7 +19,12 @@ export class HostLoad {
   /** What this reads and asks of the rest of the proxy, and nothing else. @type {object} */
   #host;
 
-  /** How much of the machine a new encoder could have, from the last reading; undefined before one. */
+  /**
+   * How much of the machine a new encoder could have, from the LAST reading;
+   * undefined before one, and `known: false` whenever the last reading was
+   * missing or was not a share of the machine. It is never older than the
+   * reading that made it: every pass either replaces it or says unknown.
+   */
   hostAvailability;
 
   /** The previous reading of the machine, to compare the next one against. */
@@ -27,6 +32,12 @@ export class HostLoad {
 
   /** The previous reading taken while nothing was encoding, for the torrent's own cost. */
   #idleLoadSample = null;
+
+  /** The previous reading of the whole machine taken while nothing was encoding. */
+  #idleAvailabilitySample = null;
+
+  /** A reading is under way; the next tick must not start another beside it. */
+  #reporting = false;
 
   /**
    * How long each file is in bytes, from its declared source statistics. The torrent moves the CONTAINER, so this — not the video stream's
@@ -335,7 +346,88 @@ export class HostLoad {
     }
   }
 
+  /**
+   * One reading of the machine, never beside another. The tick fires without
+   * waiting for the previous one, and two readings in flight at once each stamp
+   * their own time after their own await and then replace one another as the
+   * "previous" sample, so a delta of counters is divided by an interval that is
+   * not its own (field 2026-10-06: three readings inside 0.1 s).
+   *
+   * Only the reading of the MACHINE is held to one at a time: its awaits are
+   * files of `/proc` and `/sys`, which answer. The torrent's cost asks the
+   * torrent worker, which may not answer, and a reading waiting on it would
+   * stop every later one — the machine's availability would then stay as it
+   * was for as long as the worker did.
+   */
   async reportHostLoad() {
+    if (this.#reporting) {
+      return;
+    }
+    this.#reporting = true;
+    let nothingEncoding = false;
+    try {
+      nothingEncoding = await this.#reportMachineOnce();
+    } finally {
+      this.#reporting = false;
+    }
+    if (nothingEncoding) {
+      await this.#learnTorrentCost();
+    }
+  }
+
+  /**
+   * The machine's availability while nothing is encoding, taken the same way as
+   * while something is. Without it the last figure from the last encoder stayed
+   * in force for ever: it refused every new encoder, and a refused encoder is
+   * the only thing that would have taken the next reading.
+   */
+  async #learnIdleAvailability() {
+    const system = (await this.#host.readSystemCpu?.()) ?? null;
+    const sample = { takenAt: Date.now(), system, proxyCpuSeconds: this.#host.readProxyCpuSeconds() };
+    const previous = this.#idleAvailabilitySample;
+    this.#idleAvailabilitySample = sample;
+    if (previous === null) {
+      this.hostAvailability = availableShareFrom({});
+      return;
+    }
+    const share = this.#host.shareOfMachine(
+      { takenAt: previous.takenAt, processCpuSeconds: 0, system: previous.system },
+      { takenAt: sample.takenAt, processCpuSeconds: 0, system: sample.system }
+    );
+    this.#setAvailability(share, previous, sample);
+  }
+
+  /**
+   * @param {{ elapsedSec: number, processShare: number | null, systemShare: number | null, rejected?: string[] } | null} share
+   * @param {{ proxyCpuSeconds: number | null }} previous
+   * @param {{ proxyCpuSeconds: number | null }} sample
+   * @returns {number | null} The proxy's own share of the machine, for the log.
+   */
+  #setAvailability(share, previous, sample) {
+    if (share === null) {
+      this.hostAvailability = availableShareFrom({});
+      return null;
+    }
+    if (share.rejected?.length) {
+      logger.warn(
+        `host-load: ignored a reading over ${share.elapsedSec.toFixed(1)}s that is not a share of the machine ` +
+        `(${share.rejected.join(" ")}); availability is unknown until the next one`
+      );
+    }
+    const cores = Math.max(1, os.cpus().length);
+    const proxyShare = Number.isFinite(previous.proxyCpuSeconds)
+      ? (sample.proxyCpuSeconds - previous.proxyCpuSeconds) / (share.elapsedSec * cores)
+      : null;
+    this.hostAvailability = availableShareFrom({
+      systemBusy: share.systemShare,
+      encoderShare: share.processShare,
+      proxyShare
+    });
+    return proxyShare;
+  }
+
+  /** @returns {Promise<boolean>} True when no encoder is running, which is when the torrent's cost can be taken. */
+  async #reportMachineOnce() {
     const encoding = [...this.#host.outputs.values()].filter(
       (session) => processCanBeSignalled(this.#host.runStateOf(session))
     );
@@ -346,11 +438,12 @@ export class HostLoad {
       // in which every encoder was suspended, the torrent's price could have
       // been taken, and none was. What this process spends now is the download,
       // the verification, the piece store and the delivery. Item 7.
-      await this.#learnTorrentCost();
+      await this.#learnIdleAvailability();
       this.#hostLoadSample = null;
-      return;
+      return true;
     }
     this.#idleLoadSample = null;
+    this.#idleAvailabilitySample = null;
     // EVERY encoder, added up. One of them is meaningless on a host that runs a
     // picture and an audio track at once, and picking the first would have
     // reported whichever the map happened to hold.
@@ -387,7 +480,7 @@ export class HostLoad {
     const previous = this.#hostLoadSample;
     this.#hostLoadSample = sample;
     if (previous === null) {
-      return; // the first reading is only something to compare against
+      return false; // the first reading is only something to compare against
     }
     // Summed over the pids both readings hold, so nothing is measured against a
     // process that was not there before. Unknown stays unknown: on a host with
@@ -405,7 +498,8 @@ export class HostLoad {
       { takenAt: sample.takenAt, processCpuSeconds: encoderDelta, system: sample.system }
     );
     if (share === null) {
-      return;
+      this.hostAvailability = availableShareFrom({});
+      return false;
     }
     // How many of them are stopped by the look-ahead cap. Without this a zero
     // share reads as an encoder being starved of the machine, when it is an
@@ -417,19 +511,11 @@ export class HostLoad {
     const running = encoding.length - suspended;
     const machine = await this.#host.readMachineState();
     const asPercent = (value) => (value === null ? "n/a" : `${Math.round(value * 100)}%`);
-    const cores = Math.max(1, os.cpus().length);
-    const proxyShare = Number.isFinite(previous.proxyCpuSeconds)
-      ? (sample.proxyCpuSeconds - previous.proxyCpuSeconds) / (share.elapsedSec * cores)
-      : null;
     // Kept for the quality offer, which predicts from a benchmark taken on a
     // QUIET host: the same reading that is printed here says how much of the
     // machine a new encoder could actually have. Only what nobody has been
     // charged for is subtracted — see `encode/available-share.js`.
-    this.hostAvailability = availableShareFrom({
-      systemBusy: share.systemShare,
-      encoderShare: share.processShare,
-      proxyShare
-    });
+    const proxyShare = this.#setAvailability(share, previous, sample);
     logger.info(
       `host-load: ffmpeg=${asPercent(share.processShare)} proxy=${asPercent(proxyShare)} ` +
       `system=${asPercent(share.systemShare)} ` +
@@ -441,6 +527,7 @@ export class HostLoad {
       // readings it comes from.
       ` available=${asPercent(this.hostAvailability.share)}`
     );
+    return false;
   }
 
   /**

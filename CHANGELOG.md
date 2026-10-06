@@ -1,4 +1,4 @@
-## Unreleased
+## 2.92.3
 
 - **Fix**: Restoring source demand reconnects HTTP seeds closed when the previous demand ended, so preparation and subsequent playback can use the same seed without requiring external torrent peers.
 

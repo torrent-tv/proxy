@@ -1,4 +1,4 @@
-## Unreleased
+## 2.92.0
 
 - **Chore**: Declare the reviewed dependency installation scripts required by current npm, including executable permissions for ffprobe and native module builds; keep ip-set's package-manager restriction disabled.
 

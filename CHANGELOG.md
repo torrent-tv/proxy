@@ -1,4 +1,4 @@
-## Unreleased
+## 2.93.2
 
 - **Fix**: Playback forecasts look up source ranges by output and segment instead of scanning every packet range for every segment. Repricing, seeking and withdrawal replace the lookup together with the download map.
 

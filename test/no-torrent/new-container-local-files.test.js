@@ -5,6 +5,7 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import ffmpegBin from "ffmpeg-static";
+import ffprobe from "@ffprobe-installer/ffprobe";
 import { ContainerFactory } from "../../services/media/container/ContainerFactory.js";
 import { matroskaInput } from "../../services/encode/MatroskaInput.js";
 
@@ -69,7 +70,7 @@ for (const [format, video, audio, removeAud = false] of [["mpegts", "libx264", "
         const index = await container.readPacketIndex();
         const startSeconds = (await container.readMediaInfo()).startTimeSeconds ?? 0;
         if (format === "mpegts" && ["libx264", "libx265"].includes(video)) {
-          const checked = spawnSync("ffprobe", ["-v", "error", "-select_streams", "v:0",
+          const checked = spawnSync(ffprobe.path, ["-v", "error", "-select_streams", "v:0",
             "-show_packets", "-show_entries", "packet=pts_time,dts_time,duration_time,flags", "-of", "json", file],
             { windowsHide: true, encoding: "utf8" });
           assert.equal(checked.status, 0, checked.stderr);

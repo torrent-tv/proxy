@@ -27,7 +27,7 @@ export class DownloadMaps {
       if (!current || Object.keys(current).some(key => key !== "from" && key !== "to" && !Object.is(zone[key], key === "deadlineAt" ? deadlineAt : current[key]))) changed = true;
       return current ? [{ ...zone, ...current, from: zone.from, to: zone.to, deadlineAt }] : [];
     });
-    file.zones = retained;
+    this.#setZones(file, retained);
     for (const [statement, metadata] of file.metadata) {
       if (metadata.interval && !this.wantsInterval(sourceKey, fileIndex, metadata.interval)) {
         file.metadata.delete(statement);
@@ -47,7 +47,7 @@ export class DownloadMaps {
     const resolved = await this.#resolvePlayback({ sourceKey, fileIndex, durationSeconds, zones: file.sourceZones,
       isCurrent: () => this.#files.get(`${sourceKey}:${fileIndex}`) === file && revision === file.revision });
     if (revision !== file.revision) return;
-    file.zones = resolved;
+    this.#setZones(file, resolved);
     return this.#emit(file);
   }
 
@@ -87,10 +87,10 @@ export class DownloadMaps {
     const sources = [];
     for (const file of this.#files.values()) {
       if (file.sourceKey !== sourceKey) continue;
-      const zones = file.zones.filter(zone => zone.outputKey === outputKey && zone.index === index);
-      if (!zones.length) continue;
+      const ranges = file.inputs.get(outputKey)?.get(index);
+      if (!ranges?.length) continue;
       sources.push({ sourceId: `${sourceKey}:${file.fileIndex}`,
-        ranges: zones.map(zone => ({ start: zone.byteStart, end: zone.byteEnd + 1 })) });
+        ranges });
     }
     return sources.length ? sources : null;
   }
@@ -130,7 +130,7 @@ export class DownloadMaps {
 
   forget(sourceKey, fileIndex, { keepPreparation = false } = {}) {
     const file = this.#file(sourceKey, fileIndex);
-    file.zones = [];
+    this.#setZones(file, []);
     file.sourceZones = [];
     if (!keepPreparation) file.nativeZones = [];
     file.revision++;
@@ -158,10 +158,23 @@ export class DownloadMaps {
     const key = `${sourceKey}:${fileIndex}`;
     let file = this.#files.get(key);
     if (!file) {
-      file = { sourceKey, fileIndex, durationSeconds: 0, zones: [], nativeZones: [], sourceZones: [], revision: 0, epoch: ++this.#nextEpoch, metadata: new Map(), pending: Promise.resolve() };
+      file = { sourceKey, fileIndex, durationSeconds: 0, zones: [], inputs: new Map(), nativeZones: [], sourceZones: [], revision: 0, epoch: ++this.#nextEpoch, metadata: new Map(), pending: Promise.resolve() };
       this.#files.set(key, file);
     }
     return file;
+  }
+
+  #setZones(file, zones) {
+    file.zones = zones;
+    file.inputs = new Map();
+    for (const zone of zones) {
+      if (typeof zone.outputKey !== "string" || !Number.isSafeInteger(zone.index)) continue;
+      let output = file.inputs.get(zone.outputKey);
+      if (!output) file.inputs.set(zone.outputKey, output = new Map());
+      let ranges = output.get(zone.index);
+      if (!ranges) output.set(zone.index, ranges = []);
+      ranges.push({ start: zone.byteStart, end: zone.byteEnd + 1 });
+    }
   }
 
   #emit(file) {

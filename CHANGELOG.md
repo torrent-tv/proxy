@@ -1,3 +1,7 @@
+## Unreleased
+
+- **Fix**: Playback forecasts look up source ranges by output and segment instead of scanning every packet range for every segment. Repricing, seeking and withdrawal replace the lookup together with the download map.
+
 ## 2.93.1
 
 - **Fix**: A peer update schedules only that peer's queue and skips source availability scans when it cannot request. Updating every peer no longer repeats the complete cross-torrent download calculation for each peer; map changes still schedule all live downloads.

@@ -88,6 +88,28 @@ read never becomes an empty document. Embedded subtitle delivery does not launch
 an independent ffmpeg extraction. Image subtitle tracks retain their unsupported
 classification rather than silently disappearing from the inventory.
 
+## What a file states about the work
+
+`Container.readWorkTags(mayFetch)` answers what a file states about the work it
+carries, in the one shape of `container/work-tags.js`: title, series, season,
+episode, episode title, year, genres, description, external ids, track and
+chapter titles, and whether it carries a cover. Each container reads its own
+format: Matroska `Info/Title`, the `Tags` that name no particular track, edition,
+chapter or attachment (`matroska-work-tags.js`, by `TargetTypeValue` level),
+`Chapters` and the attachment named `cover.*`; MP4 the iTunes item list,
+QuickTime metadata keys and user data text inside the `moov` it already holds
+(`mp4-work-tags.js`); AVI `LIST INFO` before `movi`. An episode is recognised by
+the numbers the file states, never by a name. The container does not decide
+whether a title is a release name; the server's identification does.
+
+`mayFetch` is `edgesOf` in `ContainerOrchestrator`: the pieces that hold the
+file's first and last bytes, which opening a file fetches anyway for its hash
+and its head. A read elsewhere uses only bytes already held; when they are not,
+that element is left out and `outsideEdges` says so, and the reading is not kept
+so a later ask can read it. A read inside the edges that has not arrived throws
+`BytesUnavailable` like any other read. `readCover` returns the image's bytes,
+typed by their signature and bounded by `MAX_COVER_BYTES`.
+
 ## Verification
 
 Fragmented MP4 reads native fragment sample tables and preserves each payload

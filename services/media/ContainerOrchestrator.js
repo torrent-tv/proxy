@@ -19,6 +19,7 @@ import { ContainerFactory } from "./container/ContainerFactory.js";
 import { BytesUnavailable, isUnavailable, strictReader } from "./container/unavailable.js";
 import { OSHASH_EDGE_BYTES, hasOshash, oshash } from "./oshash.js";
 import { IndexMemoryUnavailable } from "./container/memory-unavailable.js";
+import { OutsideReadableEdges } from "./container/work-tags.js";
 import { logger } from "../../utils/logger.js";
 
 /**
@@ -43,6 +44,45 @@ async function readFingerprint({ readRange, fileSize }) {
   const head = await read(0, OSHASH_EDGE_BYTES - 1);
   const tail = await read(fileSize - OSHASH_EDGE_BYTES, fileSize - 1);
   return { hash: oshash(fileSize, head, tail), size: fileSize };
+}
+
+/**
+ * Which bytes of a file a reading of what it states about the work may ask the
+ * swarm for: the pieces that hold its first and last bytes. Those are fetched
+ * when a file is opened anyway — its OpenSubtitles hash is read from both
+ * edges (`readFingerprint`) and its container head from the first — so a
+ * reading that stays inside them costs no download (torrent-tv/meta#139).
+ *
+ * Where the file lies in the torrent is what decides which pieces those are;
+ * without it, the first and the last piece length of the file are taken, which
+ * is never more than one piece beyond them at each end.
+ *
+ * @param {{ fileSize: number, fileOffset?: number, portionBytes?: number }} params
+ * @returns {(start: number, end: number) => boolean}
+ */
+export function edgesOf({ fileSize, fileOffset, portionBytes }) {
+  const piece = Number.isFinite(portionBytes) && portionBytes > 0 ? portionBytes : CONTAINER_HEAD_BYTES;
+  const offset = Number.isInteger(fileOffset) && fileOffset >= 0 ? fileOffset : null;
+  const headEnd = offset === null ? piece : (Math.floor(offset / piece) + 1) * piece - offset;
+  const tailStart = offset === null ? fileSize - piece : Math.floor((offset + fileSize - 1) / piece) * piece - offset;
+  return (start, end) => end < headEnd || start >= tailStart;
+}
+
+/**
+ * One log line's worth of what a reading of work tags found: which fields the
+ * file states, not their values, and whether something was left outside the
+ * edges — the two things a field check counts.
+ *
+ * @param {{ kind: string, value?: object, reason?: string }} result
+ * @returns {string}
+ */
+export function describeWorkTags(result) {
+  if (result.kind !== "result" || !result.value) return `none (${result.reason ?? result.kind})`;
+  const tags = result.value;
+  const stated = Object.entries(tags)
+    .filter(([key, value]) => key !== "outsideEdges" && (Array.isArray(value) ? value.length > 0 : value && typeof value === "object" ? Object.keys(value).length > 0 : value !== null))
+    .map(([key, value]) => (key === "externalIds" ? `ids:${Object.keys(value).join("+")}` : key));
+  return `${stated.length ? stated.join(" ") : "nothing stated"}${tags.outsideEdges ? " (some elements lie outside the edges and are not held)" : ""}`;
 }
 
 export class ContainerOrchestrator {
@@ -89,7 +129,7 @@ export class ContainerOrchestrator {
 
   /** Read one statement without converting missing bytes into an empty answer. */
   async inspect(params, statement = "tracks") {
-    if (!["container", "tracks", "media-info", "keyframes", "packets", "fingerprint"].includes(statement)) {
+    if (!["container", "tracks", "media-info", "keyframes", "packets", "fingerprint", "work-tags", "cover"].includes(statement)) {
       throw new TypeError(`Unknown media statement: ${statement}`);
     }
     const key = `${params.sourceKey}:${params.fileIndex}`;
@@ -148,6 +188,9 @@ export class ContainerOrchestrator {
         value = await container.readMediaInfo();
       } else if (statement === "keyframes") {
         value = await container.readKeyframeIndex();
+      } else if (statement === "work-tags" || statement === "cover") {
+        value = await (statement === "cover" ? container.readCover(edgesOf(params)) : container.readWorkTags(edgesOf(params)));
+        if (value === null) return { kind: "terminal", reason: statement === "cover" ? "no-cover" : "format-states-nothing", requestId };
       } else if (statement === "packets") {
         value = await container.readPacketIndex(params.packetInterval);
         await value?.prepareAudioDependencies?.(params.packetInterval, container.readRange);
@@ -160,6 +203,11 @@ export class ContainerOrchestrator {
         const result = { kind: "needs-memory", bytes: error.bytes, requestId };
         logger.info(`media request=${requestId} needs memory=${error.bytes}`);
         return result;
+      }
+      if (error instanceof OutsideReadableEdges) {
+        // Not a fault and not "not here yet": the bytes lie where this reading
+        // may not ask for them. Asked again, it reads them once they are held.
+        return { kind: "terminal", reason: "outside-edges", requestId };
       }
       if (isUnavailable(error)) {
         const result = { kind: "needs-ranges", ranges: [[error.start, error.end]], requestId };

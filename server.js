@@ -25,6 +25,8 @@ import { handleApiSourcesPost } from "./routes/api/sources/post.js";
 import { handleApiSourceStatsGet } from "./routes/api/sources/stats/get.js";
 import { handleApiSourceFilesGet } from "./routes/api/sources/files/get.js";
 import { handleApiSourceFingerprintGet } from "./routes/api/sources/fingerprint/get.js";
+import { handleApiSourceContainerMetadataGet } from "./routes/api/sources/container-metadata/get.js";
+import { handleApiSourceCoverGet } from "./routes/api/sources/cover/get.js";
 import { handleApiSourceWarmPost } from "./routes/api/sources/warm/post.js";
 import { handleApiSourceViewerPost } from "./routes/api/sources/viewer/post.js";
 import { handleApiPlaybackPlanPost } from "./routes/api/playback-plan/post.js";
@@ -52,7 +54,7 @@ import { createPlaybackPlanner } from "./services/media/playback-planner.js";
 import { KeyframeTables } from "./services/media/KeyframeTables.js";
 import { contentsOf } from "./services/torrent/Contents.js";
 import { SubtitleOrchestrator } from "./services/media/SubtitleOrchestrator.js";
-import { containerOrchestrator, CONTAINER_HEAD_BYTES } from "./services/media/ContainerOrchestrator.js";
+import { containerOrchestrator, CONTAINER_HEAD_BYTES, describeWorkTags } from "./services/media/ContainerOrchestrator.js";
 import { readPlaybackDeclarations } from "./services/media/read-playback-declarations.js";
 import { DownloadMaps } from "./services/viewer/DownloadMaps.js";
 import { nativeSourceMap } from "./services/viewer/NativeSourceMap.js";
@@ -516,6 +518,7 @@ export async function startProxyServer({
           return probePackets({ url: url.toString(), statement, signal, onRecord });
         } }),
       label: String(file.name ?? ""),
+      fileOffset: file.offset,
       onTracks: (tracks) => contentsOf(torrent).noteVideo(fileIndex, tracks.some((track) => track.type === "video")),
       onReadStart: () => ({ storage: mediaReads.revision(sourceKey, fileIndex), memory: mediaReads.memoryRevision(), demand: downloadMaps.epoch(sourceKey, fileIndex) }),
       onReadResult: async (statement, result, revision) => {
@@ -978,6 +981,33 @@ export async function startProxyServer({
       inspectFingerprint: async (address) => {
         const params = await containerOver(address);
         return params ? containerOrchestrator.inspect(params, "fingerprint") : { kind: "pending" };
+      }
+    })
+  );
+  // What the opened file states about the work, and its cover: read only from
+  // the edges of the file, which opening it fetches anyway (meta#139).
+  const workTagsLogged = new Set();
+  app.get("/api/sources/:sourceKey/files/:fileIndex/container-metadata", async (req, reply) =>
+    handleApiSourceContainerMetadataGet(req, reply, {
+      sourceRegistry,
+      inspectWorkTags: async (address) => {
+        const params = await containerOver(address);
+        const result = params ? await containerOrchestrator.inspect(params, "work-tags") : { kind: "pending" };
+        const key = `${address.sourceKey}:${address.fileIndex}`;
+        if (result.kind !== "pending" && result.kind !== "needs-ranges" && !workTagsLogged.has(key)) {
+          workTagsLogged.add(key);
+          logger.info(`container metadata "${params?.label ?? ""}": ${describeWorkTags(result)}`);
+        }
+        return result;
+      }
+    })
+  );
+  app.get("/api/sources/:sourceKey/files/:fileIndex/cover", async (req, reply) =>
+    handleApiSourceCoverGet(req, reply, {
+      sourceRegistry,
+      inspectCover: async (address) => {
+        const params = await containerOver(address);
+        return params ? containerOrchestrator.inspect(params, "cover") : { kind: "pending" };
       }
     })
   );

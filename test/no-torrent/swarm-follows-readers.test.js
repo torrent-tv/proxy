@@ -93,6 +93,36 @@ test("the reader that comes back takes the swarm with it", () => {
   assert.equal(rejoinSwarm(torrent), false, "a torrent already in its swarm was resumed again");
 });
 
+test("returning demand restores the HTTP seeds closed at the previous withdrawal", () => {
+  const torrent = torrentWith(0);
+  torrent.urlList = ["https://seed.example/files/"];
+  const added = [];
+  torrent.addWebSeed = url => { added.push(url); torrent._peers.set(url, { destroy() { torrent._peers.delete(url); } }); };
+  torrent.addWebSeed(torrent.urlList[0]);
+  leaveSwarm(torrent);
+  added.length = 0;
+  rejoinSwarm(torrent);
+  assert.deepEqual(added, torrent.urlList);
+  rejoinSwarm(torrent);
+  assert.equal(added.length, 1, "an already resumed source must not duplicate its HTTP seed");
+});
+
+test("resuming respects disabled HTTP seeds and existing seed connections", () => {
+  const torrent = torrentWith(0);
+  torrent.paused = true;
+  torrent.urlList = ["https://seed.example/files/"];
+  torrent.client = { enableWebSeeds: false };
+  const added = [];
+  torrent.addWebSeed = url => added.push(url);
+  rejoinSwarm(torrent);
+  assert.deepEqual(added, []);
+  torrent.paused = true;
+  torrent.client.enableWebSeeds = true;
+  torrent._peers.set(torrent.urlList[0], {});
+  rejoinSwarm(torrent);
+  assert.deepEqual(added, []);
+});
+
 test("a torrent whose metadata has not arrived is wanted, whatever is stated", () => {
   // THE FIELD FAILURE OF 2026-09-11, as a question rather than as a mechanism.
   // A torrent being added has no list of files, so nothing can name a byte of

@@ -480,6 +480,13 @@ export function rejoinSwarm(torrent) {
     return false;
   }
   torrent.resume();
+  // resume() rediscovers protocol peers but does not recreate HTTP seeds
+  // explicitly closed by leaveSwarm(). Their URLs remain in the metadata.
+  if (torrent.client?.enableWebSeeds !== false && typeof torrent.addWebSeed === "function") {
+    for (const url of torrent.urlList ?? []) {
+      if (!torrent._peers?.has(url)) torrent.addWebSeed(url);
+    }
+  }
   logger.info(
     `torrent-pool: [${String(torrent.infoHash ?? "?").slice(0, 8)}] rejoined the swarm — a reader arrived`
   );

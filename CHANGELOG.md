@@ -1,3 +1,7 @@
+## Unreleased
+
+- **Fix**: Restoring source demand reconnects HTTP seeds closed when the previous demand ended, so preparation and subsequent playback can use the same seed without requiring external torrent peers.
+
 ## 2.92.2
 
 - **Fix**: Metadata reads waiting for an allocation retain their previously missing source ranges. Alternating memory and byte availability cannot cancel the download needed to finish the same read.

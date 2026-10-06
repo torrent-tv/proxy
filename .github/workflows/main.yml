@@ -37,7 +37,13 @@ jobs:
         with:
           node-version: 24
           cache: npm
+      # The installer's Linux ffprobe crashes on MPEG-TS packet inspection.
+      # Use Ubuntu's ffprobe as the independent packet-timing reference.
+      - name: Install the packet timing reference
+        run: sudo apt-get update && sudo apt-get install --no-install-recommends -y ffmpeg
       - uses: torrent-tv/.github/actions/checks@main
+        env:
+          FFPROBE_BIN: /usr/bin/ffprobe
         with:
           changelog: CHANGELOG.md
           version-file: package.json

@@ -70,10 +70,10 @@ for (const [format, video, audio, removeAud = false] of [["mpegts", "libx264", "
         const index = await container.readPacketIndex();
         const startSeconds = (await container.readMediaInfo()).startTimeSeconds ?? 0;
         if (format === "mpegts" && ["libx264", "libx265"].includes(video)) {
-          const checked = spawnSync(ffprobe.path, ["-v", "error", "-select_streams", "v:0",
+          const checked = spawnSync(process.env.FFPROBE_BIN || ffprobe.path, ["-v", "error", "-select_streams", "v:0",
             "-show_packets", "-show_entries", "packet=pts_time,dts_time,duration_time,flags", "-of", "json", file],
             { windowsHide: true, encoding: "utf8" });
-          assert.equal(checked.status, 0, checked.stderr);
+          assert.equal(checked.status, 0, checked.error?.message || checked.stderr || `ffprobe terminated with ${checked.signal}`);
           const expected = JSON.parse(checked.stdout).packets;
           const picture = tracks.find(track => track.type === "video");
           const bounds = index.boundsOf(picture.trackNumber);

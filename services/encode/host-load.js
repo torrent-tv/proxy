@@ -119,7 +119,8 @@ export async function readMachineState() {
  * @param {{ takenAt: number, processCpuSeconds: number | null, system: CpuTotals | null }} before
  * @param {{ takenAt: number, processCpuSeconds: number | null, system: CpuTotals | null }} after
  * @param {number} [cores=os.cpus().length]
- * @returns {{ elapsedSec: number, processShare: number | null, systemShare: number | null, iowaitShare: number | null } | null}
+ * @returns {{ elapsedSec: number, processShare: number | null, systemShare: number | null, iowaitShare: number | null, rejected: string[] } | null}
+ *   `rejected` names the readings that were not a share of the machine at all.
  */
 export function shareOfMachine(before, after, cores = os.cpus().length) {
   const elapsedSec = (after.takenAt - before.takenAt) / 1000;
@@ -127,16 +128,33 @@ export function shareOfMachine(before, after, cores = os.cpus().length) {
     return null;
   }
   const machineSeconds = elapsedSec * cores;
+  // A share of the machine lies between 0 and 1. The counters are whole clock
+  // ticks, so each reading can be off by one tick and the allowance is exactly
+  // that: derived from the tick and the interval, not chosen. A value beyond it
+  // is not a measurement of anything (field 2026-10-06: `system=2422%` over
+  // 1.7 s, then `1832%` over 0.1 s), and it is refused here instead of being
+  // stored as a fact the next decision rests on.
+  const allowance = 1 / (CLOCK_TICKS_PER_SECOND * elapsedSec);
+  /** @type {string[]} */
+  const rejected = [];
+  const shareOf = (name, seconds) => {
+    const share = seconds / machineSeconds;
+    if (!(share >= -allowance && share <= 1 + allowance)) {
+      rejected.push(`${name}=${Math.round(share * 100)}%`);
+      return null;
+    }
+    return share;
+  };
   const processShare = before.processCpuSeconds !== null && after.processCpuSeconds !== null
-    ? (after.processCpuSeconds - before.processCpuSeconds) / machineSeconds
+    ? shareOf("process", after.processCpuSeconds - before.processCpuSeconds)
     : null;
   const systemShare = before.system !== null && after.system !== null
-    ? (after.system.busySeconds - before.system.busySeconds) / machineSeconds
+    ? shareOf("system", after.system.busySeconds - before.system.busySeconds)
     : null;
   const iowaitShare = before.system !== null && after.system !== null
-    ? (after.system.iowaitSeconds - before.system.iowaitSeconds) / machineSeconds
+    ? shareOf("iowait", after.system.iowaitSeconds - before.system.iowaitSeconds)
     : null;
-  return { elapsedSec, processShare, systemShare, iowaitShare };
+  return { elapsedSec, processShare, systemShare, iowaitShare, rejected };
 }
 
 /**

@@ -1,3 +1,7 @@
+## Unreleased
+
+- **Fix**: An idle machine is no longer measured as having nothing to spare. The share of the machine a new encoder can have was last read while an encoder ran and was then kept for ever, and a reading of `system=2422%` taken from overlapping samples (three inside 0.1 s) made it 0 %, so every new encoder was refused with "this proxy doesn't currently have enough capacity" on a host that was 85 % idle, and no encoder could start to take the next reading (torrent-tv/meta#141). Readings now never overlap, a share beyond the machine plus one clock tick is refused instead of stored, the machine is also read while nothing encodes, and a missing or refused reading leaves the availability unknown instead of at its last value.
+
 ## 2.92.3
 
 - **Fix**: Restoring source demand reconnects HTTP seeds closed when the previous demand ended, so preparation and subsequent playback can use the same seed without requiring external torrent peers.

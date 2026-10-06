@@ -1,5 +1,7 @@
 ## Unreleased
 
+- **Fix**: Metadata reads waiting for an allocation retain their previously missing source ranges. Alternating memory and byte availability cannot cancel the download needed to finish the same read.
+
 - **Fix**: A trailing packet file beyond the input actually admitted to an encode run cannot fail its completed segment or publish an unadmitted interval. The trailing bytes remain available to complete the preceding segment's presentation partition.
 
 - **Fix**: Concurrent packet-read completions share one download-map refresh and one following pass. Obsolete map conversions stop reading further intervals instead of delaying current playback behind repeated full-file conversions.

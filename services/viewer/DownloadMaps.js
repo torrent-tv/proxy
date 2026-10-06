@@ -107,7 +107,9 @@ export class DownloadMaps {
         deadlineAt = Number.isFinite(current.deadlineAt) ? current.deadlineAt - leadSeconds * 1000 : current.deadlineAt;
       }
       file.metadata.set(statement, { ranges: result.ranges, requestId: result.requestId, priority, urgent, deadlineAt, interval, leadSeconds, scope, order });
-    } else {
+    } else if (result.kind !== "needs-memory") {
+      // Allocation refusal says nothing about whether previously missing
+      // source bytes have arrived. Keep their demand until the read resolves.
       file.metadata.delete(statement);
     }
     return this.#emit(file);

@@ -235,7 +235,9 @@ export class SwarmSelection {
         // The level goes with the range: it is what eviction compares when
         // everything resident is wanted by somebody, and dropping it here is
         // what left the store choosing by recency alone.
-        store.protectRange(window.claimant, range.from, range.to, window.urgency, window.deadlineAt, window.priority);
+        // The download map is an eviction preference. Actual reads own pins;
+        // declaring a whole-file tail must not set a whole-file memory floor.
+        store.protectRange(window.claimant, range.from, range.to, window.urgency, window.deadlineAt, window.priority, false);
         holding.add(window.claimant);
       }
     }

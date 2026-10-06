@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
-import { DeadlineScheduler, downloadCandidates, peerRequestCapacity } from "../../services/torrent/download/DeadlineScheduler.js";
+import { DeadlineScheduler, dispatchDownloadCandidates, downloadCandidates, peerRequestCapacity } from "../../services/torrent/download/DeadlineScheduler.js";
 import { DemandRegister } from "../../services/torrent/demand/DemandRegister.js";
 import { Urgency } from "../../services/torrent/demand/Urgency.js";
 import { demandFor, reconcileAll, forgetTorrent, forecastDownloads } from "../../services/torrent/download/registry.js";
@@ -55,6 +55,28 @@ test("selection publication schedules once after the complete map, then peer upd
 function state(register, piece, { deadlineAt = Infinity, priority = 1, urgency = Urgency.NEAR, order = 0 } = {}) {
   register.state({ claimant: `map:${piece}`, fileIndex: 0, byteStart: piece * 16384, byteEnd: piece * 16384 + 16383, urgency, deadlineAt, priority, order });
 }
+
+test("a full peer queue stops a large map pass without measuring each candidate again", () => {
+  const one = entry();
+  let measurements = 0;
+  one.wire.downloadSpeed = () => { measurements++; return 0; };
+  const candidates = Array.from({ length: 618 }, (_, piece) => ({
+    torrent: one.torrent, piece, deadlineAt: Infinity, priority: 1, order: 0
+  }));
+  assert.equal(dispatchDownloadCandidates(candidates, 0).requested, 2);
+  assert.equal(measurements, 1, "one peer rate reading per synchronous pass");
+});
+
+test("choked peers do not keep a pass running after the usable queues fill", () => {
+  const one = entry();
+  const choked = { destroyed: false, peerChoking: true,
+    get requests() { throw new Error("a choked peer has no usable request slots"); } };
+  one.torrent.wires.push(choked);
+  const candidates = Array.from({ length: 618 }, (_, piece) => ({
+    torrent: one.torrent, piece, deadlineAt: Infinity, priority: 1, order: 0
+  }));
+  assert.equal(dispatchDownloadCandidates(candidates, 0).requested, 2);
+});
 
 test("peer passes compile unchanged byte demand once but observe every storage arrival and withdrawal", () => {
   const one = entry();

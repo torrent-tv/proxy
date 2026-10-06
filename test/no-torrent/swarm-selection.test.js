@@ -236,8 +236,12 @@ test("releasing everything leaves the library holding nothing of ours", () => {
 test("the store is told what will be read soon, from the same stated needs", () => {
   const torrent = stubTorrent();
   const protectedBy = new Map();
+  const memoryRequiredBy = new Map();
   torrent.store = {
-    protectRange: (claimant, from, to) => protectedBy.set(claimant, `${from}-${to}`),
+    protectRange: (claimant, from, to, urgency, deadlineAt, priority, memoryRequired) => {
+      protectedBy.set(claimant, `${from}-${to}`);
+      memoryRequiredBy.set(claimant, memoryRequired);
+    },
     releaseProtection: (claimant) => protectedBy.delete(claimant)
   };
   const register = new DemandRegister();
@@ -253,6 +257,8 @@ test("the store is told what will be read soon, from the same stated needs", () 
   assert.equal(protectedBy.get("video"), "0-0");
   // Background demand remains known to eviction at its later deadline.
   assert.equal(protectedBy.get("fill"), "5-8");
+  assert.equal(memoryRequiredBy.get("video"), false, "download demand does not replace actual read pins");
+  assert.equal(memoryRequiredBy.get("fill"), false, "a whole tail cannot set a required memory floor");
 
   register.withdraw("video");
   selection.reconcile();

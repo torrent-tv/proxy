@@ -25,8 +25,7 @@ function requestArrival(wire, request, now) {
   return requestArrivals.get(request);
 }
 
-export function peerRequestCapacity(torrent, wire) {
-  const speed = Math.max(0, Number(wire.downloadSpeed?.()) || 0);
+export function peerRequestCapacity(torrent, wire, speed = Math.max(0, Number(wire.downloadSpeed?.()) || 0)) {
   if (wire.type === "webSeed") {
     return Math.min(1 + Math.ceil(speed / torrent.pieceLength), torrent.maxWebConns);
   }
@@ -36,8 +35,7 @@ export function peerRequestCapacity(torrent, wire) {
   return capacity;
 }
 
-export function requestCompletionAt(wire, bytes, now) {
-  const speed = Number(wire.downloadSpeed?.());
+export function requestCompletionAt(wire, bytes, now, speed = Number(wire.downloadSpeed?.())) {
   if (!(speed > 0)) return Number.POSITIVE_INFINITY;
   const queued = (wire.requests ?? []).reduce((total, request) => total + request.length, 0);
   return now + (queued + bytes) / speed * 1000;
@@ -116,26 +114,45 @@ export function downloadCandidates(entries, findStore = pieceStoreOf) {
 /** Run against protocol peers or an isolated future-state copy. */
 export function dispatchDownloadCandidates(candidates, now) {
   let requested = 0, reassigned = 0;
-  const hasCapacity = torrent => (torrent.wires ?? []).some(wire =>
-    !wire.destroyed && (wire.requests?.length ?? 0) < peerRequestCapacity(torrent, wire));
-  const writable = new Set(candidates.map(candidate => candidate.torrent).filter(hasCapacity));
+  // Rates and advertised limits cannot change during this synchronous pass.
+  // Read each peer once, and only inspect torrents once regardless of map size.
+  const readings = new Map();
+  const readingOf = (torrent, wire) => {
+    let reading = readings.get(wire);
+    if (!reading) {
+      const speed = Math.max(0, Number(wire.downloadSpeed?.()) || 0);
+      readings.set(wire, reading = { speed, capacity: peerRequestCapacity(torrent, wire, speed) });
+    }
+    return reading;
+  };
+  const usable = wire => !wire.destroyed &&
+    (!wire.peerChoking || (wire.hasFast && wire.peerAllowedFastSet?.length > 0));
+  const available = (torrent, wire) => usable(wire) &&
+    (wire.requests?.length ?? 0) < readingOf(torrent, wire).capacity;
+  const completionAt = (torrent, wire, bytes) =>
+    requestCompletionAt(wire, bytes, now, readingOf(torrent, wire).speed);
+  const writable = new Map();
+  for (const torrent of new Set(candidates.map(candidate => candidate.torrent))) {
+    const peers = (torrent.wires ?? []).filter(wire => available(torrent, wire));
+    if (peers.length) writable.set(torrent, peers);
+  }
   for (const candidate of candidates) {
     if (!writable.size) break;
     const { torrent, piece, deadlineAt, requestId } = candidate;
     if (!writable.has(torrent)) continue;
-    const wires = (torrent.wires ?? []).filter(wire => peerCanServe(wire, piece) &&
-      (wire.requests?.length ?? 0) < peerRequestCapacity(torrent, wire));
+    const peers = writable.get(torrent);
+    const wires = peers.filter(wire => peerCanServe(wire, piece) && available(torrent, wire));
     while (wires.length) {
-      wires.sort((a, b) => requestCompletionAt(a, BLOCK_BYTES, now) - requestCompletionAt(b, BLOCK_BYTES, now) ||
+      wires.sort((a, b) => completionAt(torrent, a, BLOCK_BYTES) - completionAt(torrent, b, BLOCK_BYTES) ||
         (a.requests?.length ?? 0) - (b.requests?.length ?? 0));
       const wire = wires[0];
       const before = wire.requests?.length ?? 0;
       let accepted = torrent._request(wire, piece, false);
       if (!accepted && Number.isFinite(deadlineAt)) {
-        const fasterAt = requestCompletionAt(wire, BLOCK_BYTES, now);
+        const fasterAt = completionAt(torrent, wire, BLOCK_BYTES);
         for (const slower of torrent.wires ?? []) {
           if (slower === wire || typeof slower.cancel !== "function") continue;
-          const lateAt = requestCompletionAt(slower, 0, now);
+          const lateAt = completionAt(torrent, slower, 0);
           if (!Number.isFinite(lateAt) || !(lateAt > deadlineAt && fasterAt < lateAt)) continue;
           const request = slower.requests?.find(one => one.piece === piece);
           if (!request) continue;
@@ -159,9 +176,9 @@ export function dispatchDownloadCandidates(candidates, now) {
         torrent.emit?.("download-requested", { piece, deadlineAt, requestId, peer: wire.remoteAddress, queued: wire.requests?.length ?? 0 });
       }
       if (!accepted || (wire.requests?.length ?? 0) <= before ||
-        (wire.requests?.length ?? 0) >= peerRequestCapacity(torrent, wire)) wires.shift();
+        (wire.requests?.length ?? 0) >= readingOf(torrent, wire).capacity) wires.shift();
     }
-    if (!hasCapacity(torrent)) writable.delete(torrent);
+    if (!peers.some(wire => available(torrent, wire))) writable.delete(torrent);
   }
   return { requested, reassigned };
 }

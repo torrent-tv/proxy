@@ -658,10 +658,13 @@ export class SharedPieceStore {
    * range to declare.
    */
   get wantedBytes() {
+    // Download preferences may use spare RAM, but cannot become a required
+    // floor or a retained reading window after the map has been withdrawn.
     const demand = this.#lru.demand();
+    const required = this.#lru.demand({ memoryRequiredOnly: true });
     const pinned = this.#lru.pinnedCount;
     if (demand.readers > 0) {
-      this.#widestSeenPieces = Math.max(this.#widestSeenPieces, demand.widestPieces);
+      this.#widestSeenPieces = Math.max(this.#widestSeenPieces, required.widestPieces);
       const pieces = Math.max(MIN_RESIDENT_PIECES, demand.unionPieces, demand.widestPieces, pinned);
       // Plus room to absorb what arrives while a write is finishing. Asking for
       // exactly what the readers want leaves no free place ever, so every
@@ -710,7 +713,7 @@ export class SharedPieceStore {
     // also pin pieces without a priority-map range, so those measured pins are
     // part of the same minimum. Exceeding the share is the lesser failure, and
     // the line below says when it happens.
-    const demand = this.#lru.demand();
+    const demand = this.#lru.demand({ memoryRequiredOnly: true });
     const activeDemandPieces = Math.max(
       MIN_RESIDENT_PIECES,
       demand.readers > 0 ? demand.unionPieces : 0,
@@ -1848,8 +1851,8 @@ export class SharedPieceStore {
    * @param {number} [urgency]
    * @returns {void}
    */
-  protectRange(readerId, from, to, urgency, deadlineAt, priority) {
-    this.#lru.protect(readerId, from, to, urgency, deadlineAt, priority);
+  protectRange(readerId, from, to, urgency, deadlineAt, priority, memoryRequired = true) {
+    this.#lru.protect(readerId, from, to, urgency, deadlineAt, priority, memoryRequired);
     // A READER DECLARES ITSELF IN A MOMENT; the allowance was re-derived once a
     // minute. Between the two a read met whatever the store had shrunk to while
     // nobody was reading, and a claim gives up after five seconds — twelve

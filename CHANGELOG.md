@@ -1,3 +1,8 @@
+## Unreleased
+
+- **Fix**: Download scheduling measures each usable peer once per pass and stops when its request slots are full. Whole-file priority maps no longer repeatedly scan choked peers or inflate the measured download CPU cost enough to refuse playback on an otherwise available host.
+- **Fix**: Download map ranges remain memory eviction preferences but no longer force their entire union to stay in RAM under pressure. Required read windows and actual byte holds retain their memory floor.
+
 ## 2.92.5
 
 - **Fix**: Matroska packet reads at a selected position begin at the indexed Cluster and retain the preceding decode dependencies. Opening or seeking into a partly downloaded film no longer requires structural bytes from its entire earlier portion, and a completed final interval cannot replace the whole-file packet index.

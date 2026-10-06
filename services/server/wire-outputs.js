@@ -982,7 +982,8 @@ export function wireOutputs({
       index >= window.from && index <= window.to && window.withinSeconds === 0),
     changed: (output, result) => {
       if (result.kind === "terminal") {
-        logger.warn(`encode input output=${output.outputKey} terminal=${result.reason}: ${result.message ?? ""}`);
+        logger.warn(`encode input output=${output.outputKey} terminal=${result.reason}: ${result.message ?? ""}` +
+          (Number.isFinite(result.bytes) ? ` bytes=${result.bytes} capacity=${result.capacity}` : ""));
         parts.serving.invalidateWaits(output);
       }
       parts.encodeRuns.planEncodersSoon();

@@ -138,6 +138,24 @@ test("forecast input addresses come from published segment demand without starti
   assert.equal(maps.inputsForOutput("source", "another", 2), null);
 });
 
+test("forecast lookups do not scan every packet range again and discard withdrawn addresses", async () => {
+  let reads = 0;
+  const ranges = Array.from({ length: 1000 }, (_, index) => ({
+    from: 0, to: 4, index: index % 10, byteStart: index * 10, byteEnd: index * 10 + 7,
+    get outputKey() { reads++; return "picture"; }
+  }));
+  const maps = new DownloadMaps({ publish() {}, resolvePlayback: async () => ranges });
+  await maps.playback({ sourceKey: "source", fileIndex: 0, durationSeconds: 4,
+    zones: [{ from: 0, to: 4, priority: 100 }] });
+  reads = 0;
+  for (let index = 0; index < 10; index++) {
+    assert.equal(maps.inputsForOutput("source", "picture", index)[0].ranges.length, 100);
+  }
+  assert.equal(reads, 0, "a published map must be indexed once instead of scanned for each segment forecast");
+  await maps.forget("source", 0);
+  assert.equal(maps.inputsForOutput("source", "picture", 0), null);
+});
+
 test("metadata deadlines include preparation time after a paused map is repriced", async () => {
   let published;
   const maps = new DownloadMaps({ publish: map => { published = map; }, resolvePlayback: async () => [] });

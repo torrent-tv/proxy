@@ -409,13 +409,13 @@ export async function startProxyServer({
     resolvePlayback: async (map) => {
       if (map.zones.length === 0) return [];
       const params = await containerOver(map);
-      if (!params) return [];
+      if (!params || !map.isCurrent()) return [];
       const tracks = await containerOrchestrator.inspect(params, "tracks");
-      if (tracks.kind !== "result") return [];
+      if (tracks.kind !== "result" || !map.isCurrent()) return [];
       const container = containerOrchestrator.known(map.sourceKey, map.fileIndex);
       if (typeof container?.readPacketIndex !== "function") return [];
       const media = await containerOrchestrator.inspect(params, "media-info");
-      if (media.kind !== "result") return [];
+      if (media.kind !== "result" || !map.isCurrent()) return [];
       const shift = Number(media.value?.startTimeSeconds) || 0;
       const converted = [];
       const demands = [];
@@ -445,6 +445,7 @@ export async function startProxyServer({
       }
       demands.sort((left, right) => left.deadlineAt - right.deadlineAt || right.priority - left.priority || left.index - right.index);
       for (const zone of demands) {
+        if (!map.isCurrent()) return [];
         const selected = zone.tracks.map(choice => ({ choice, track: tracks.value.filter(track => track.type === choice.type)[choice.index] }));
         if (selected.some(({ track }) => !track)) continue;
         const wanted = selected.map(({ track }) => track);
@@ -454,8 +455,10 @@ export async function startProxyServer({
         const intervalParams = await containerOver({ ...map, packetInterval: interval,
           requestId: `download:${map.sourceKey}:${map.fileIndex}:${zone.outputKey}:${zone.index}`,
           demand: { ...zone.owner, leadSeconds: zone.leadSeconds } });
+        if (!map.isCurrent()) return [];
         if (!intervalParams) continue;
         const packets = await containerOrchestrator.inspect(intervalParams, "packets");
+        if (!map.isCurrent()) return [];
         if (packets.kind !== "result") continue;
         const input = new SegmentInputs({ index: packets.value, tracks: wanted }).forInterval({ ...interval, mode: track => modes.get(track) });
         if (input.kind !== "result") continue;

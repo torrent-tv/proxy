@@ -102,7 +102,7 @@ export class AviContainer extends Container {
       if (!(error instanceof OutsideReadableEdges)) throw error;
       tags.outsideEdges = true;
     }
-    tags.trackTitles = textList((await this.readTracks()).map((track) => track.name));
+    tags.trackTitles = await this.trackTitlesForWork();
     if (!tags.outsideEdges) this.#workTags = tags;
     return tags;
   }

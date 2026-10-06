@@ -12,7 +12,8 @@
  *  - AVI RIFF §: LIST hdrl, idx1
  */
 
-import { strictReader } from "./unavailable.js";
+import { isUnavailable, strictReader } from "./unavailable.js";
+import { textList } from "./work-tags.js";
 
 /**
  * What one file declares about itself. Every field is either a value the
@@ -512,6 +513,23 @@ export class Container {
    */
   async readWorkTags(_mayFetch) {
     return null;
+  }
+
+  /**
+   * The titles of the file's tracks, for what it states about its work. A
+   * track table this program refuses to read costs only the titles: the
+   * statements about the work are read from other elements. Bytes that have
+   * not arrived are still "not here yet".
+   *
+   * @returns {Promise<string[]>}
+   */
+  async trackTitlesForWork() {
+    try {
+      return textList((await this.readTracks()).map((track) => track.name));
+    } catch (error) {
+      if (isUnavailable(error)) throw error;
+      return [];
+    }
   }
 
   /**

@@ -28,7 +28,7 @@ import { hevcConfiguration } from "./hevc-configuration.js";
 import { mpegAudioFrame } from "./mpeg-audio-frame.js";
 import { readMp4Fragments } from "./mp4-fragments.js";
 import { workFromMoov } from "./mp4-work-tags.js";
-import { COVER_TYPES, MAX_COVER_BYTES, emptyWorkTags, imageTypeOf, textList } from "./work-tags.js";
+import { COVER_TYPES, MAX_COVER_BYTES, emptyWorkTags, imageTypeOf } from "./work-tags.js";
 
 /** A box header is eight bytes, or sixteen when the size field says 1 (§4.2). */
 const HEADER_BYTES = 8;
@@ -532,7 +532,7 @@ export class Mp4Container extends Container {
       Object.assign(tags, work);
       if (cover && cover.size > 0 && cover.size <= MAX_COVER_BYTES) tags.cover = { type: cover.type, size: cover.size };
     }
-    tags.trackTitles = textList((await this.readTracks()).map((track) => track.name));
+    tags.trackTitles = await this.trackTitlesForWork();
     this.workTags = tags;
     return tags;
   }

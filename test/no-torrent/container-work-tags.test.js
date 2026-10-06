@@ -191,6 +191,24 @@ test("a LostFilm MP4 states its episode through the iTunes item list", async () 
   assert.ok(cover.bytes.equals(JPEG));
 });
 
+test("a track table this program refuses costs only the track titles", async () => {
+  // Field 2026-10-06: LostCoder writes an SPS with `00 00 03 b3`, which the SPS
+  // reading refuses; what the item list states about the work is elsewhere.
+  class RefusedTracks extends Mp4Container {
+    async readTracks() {
+      throw new Error("AVC emulation prevention byte is invalid.");
+    }
+  }
+  const ilst = box("ilst", item("©nam", 1, utf8("Moana")));
+  const hdlr = box("hdlr", Buffer.concat([Buffer.alloc(8), Buffer.from("mdir", "latin1"), Buffer.alloc(13)]));
+  const file = Buffer.concat([box("ftyp", Buffer.from("isom", "latin1")), box("moov", box("udta", box("meta", Buffer.concat([Buffer.alloc(4), hdlr, ilst]))))]);
+
+  const work = await new RefusedTracks({ readRange: readerOver(file), fileSize: file.length }).readWorkTags(everything);
+
+  assert.equal(work.title, "Moana");
+  assert.deepEqual(work.trackTitles, []);
+});
+
 test("QuickTime metadata keys name their items through the keys box", async () => {
   const key = (name) => box("mdta", utf8(name));
   const keys = box("keys", Buffer.concat([Buffer.alloc(4), uint(2, 4), key("com.apple.quicktime.title"), key("com.apple.quicktime.year")]));

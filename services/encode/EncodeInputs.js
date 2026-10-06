@@ -27,6 +27,14 @@ export class EncodeInputs {
 
   held() { return this.#held; }
   wanted() { return this.#held + [...this.#wanted.values()].reduce((sum, bytes) => sum + bytes, 0); }
+  required() {
+    let bytes = this.#held;
+    for (const [key, wanted] of this.#wanted) {
+      const request = this.#requests.get(key);
+      if (request && this.#urgent(request.output, request.from)) bytes += wanted;
+    }
+    return bytes;
+  }
   allow(bytes) {
     const changed = this.#allowed !== Math.max(0, bytes);
     this.#allowed = Math.max(0, bytes);

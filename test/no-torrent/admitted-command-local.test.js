@@ -17,12 +17,13 @@ import { presentationSegment } from "../../services/encode/segment-formats/prese
 import { walkBoxes } from "../../services/encode/segment-formats/mp4-boxes.js";
 
 // Only synthetic lavfi input and stdin are used; no torrent or HTTP boundary.
-test("audio-only cuts cover each declared interval within one AAC frame", async () => {
+for (const [codec, origin] of [["aac", 0], ["ac3", 850.016]]) {
+test(`audio-only ${codec} cuts at ${origin}s cover each declared interval within one AAC frame`, async () => {
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), "ttv-audio-cut-"));
   try {
-    const file = path.join(directory, "source.mp4");
+    const file = path.join(directory, codec === "ac3" ? "source.mkv" : "source.mp4");
     const made = spawnSync(ffmpegBin, ["-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i",
-      "sine=sample_rate=48000", "-t", "3", "-c:a", "aac", file], { windowsHide: true, encoding: "utf8" });
+      "sine=sample_rate=48000", "-t", "3", "-c:a", codec, file], { windowsHide: true, encoding: "utf8" });
     assert.equal(made.status, 0, made.stderr);
     const bytes = await fs.readFile(file);
     const container = await ContainerFactory.create({ fileSize: bytes.length, readRange: async (a, b) => bytes.subarray(a, b + 1) });
@@ -30,13 +31,13 @@ test("audio-only cuts cover each declared interval within one AAC frame", async 
     const index = await container.readPacketIndex();
     const input = new SegmentInputs({ tracks, index }).forInterval({ from: 0, to: 3, mode: "copy" });
     assert.equal(input.kind, "result");
-    const admitted = await admitInput({ sources: [{ sourceKey: "local", fileIndex: 0, input }], reserve: () => () => {},
+    const admitted = await admitInput({ sources: [{ sourceKey: "local", fileIndex: 0, input, timeShiftSeconds: -origin }], reserve: () => () => {},
       readRanges: async (_source, ranges) => ranges.map(([a, b]) => Buffer.from(bytes.subarray(a, b + 1))) });
     const chunks = [];
     await writeAdmittedInput(admitted, new Writable({ write(chunk, _encoding, done) { chunks.push(Buffer.from(chunk)); done(); } }));
-    const grid = [0, 1.5, 3];
+    const grid = [0, 1.5, 3].map(time => time + origin + (codec === "ac3" ? 0.001 : 0));
     const command = buildAdmittedCommand({ admittedInput: admitted, timeline: { published: grid }, output: {},
-      segmentFormat: fmp4Format, transcodeVideo: false, transcodeAudio: false, audioOnly: true,
+      segmentFormat: fmp4Format, transcodeVideo: false, transcodeAudio: codec === "ac3", audioOnly: true,
       audioSeparate: false, startIndex: 0, endIndex: 1, videoEncoder: softwareDescriptor(), segmentDurationSec: 1.5 });
     const encoded = spawnSync(ffmpegBin, command.args, { cwd: directory, windowsHide: true, input: Buffer.concat(chunks),
       encoding: "utf8", stdio: ["pipe", "pipe", "pipe", "pipe"] });
@@ -55,6 +56,7 @@ test("audio-only cuts cover each declared interval within one AAC frame", async 
     await fs.rm(directory, { recursive: true, force: true });
   }
 });
+}
 
 for (const transcode of [false, true]) {
   for (const preset of transcode ? ["ultrafast", "veryfast"] : ["ultrafast"]) {

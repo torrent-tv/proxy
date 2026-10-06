@@ -90,7 +90,7 @@ export function wireMachineBudget({
 
   budget.defineResource({ name: "memory", readFree: () => availableMemoryBytes() });
   if (encodeInputs) budget.register({ name: "admitted encode inputs", resource: "memory",
-    held: () => encodeInputs.held(), wanted: () => encodeInputs.wanted(), required: () => encodeInputs.held(), allow: bytes => encodeInputs.allow(bytes) });
+    held: () => encodeInputs.held(), wanted: () => encodeInputs.wanted(), required: () => encodeInputs.required(), allow: bytes => encodeInputs.allow(bytes) });
   if (indexMemory) budget.register({ name: "media metadata", resource: "memory",
     held: () => indexMemory.held(), wanted: () => indexMemory.wanted(), required: () => indexMemory.required(), allow: bytes => indexMemory.allow(bytes) });
 

@@ -14,6 +14,7 @@ import { isUnavailable } from "./unavailable.js";
 import { Mpeg4PictureTiming } from "./mpeg4-picture-timing.js";
 import { MpegElementaryIndex } from "./mpeg-elementary-index.js";
 import { RetainedReads } from "./RetainedReads.js";
+import { OutsideReadableEdges, edgeReader, emptyWorkTags, text, textList, yearOf } from "./work-tags.js";
 
 const MPEG4_CODECS = new Set(["FMP4", "XVID", "DIVX", "DX50", "MP4V", "M4S2", "MP4S"]);
 const MPEG_AUDIO_CODECS = new Set(["mp1", "mp2", "mp3"]);
@@ -25,6 +26,7 @@ export class AviContainer extends Container {
   #packets = null;
   #scan = null;
   #declarations = null;
+  #workTags = null;
 
   async #readHeaders() {
     if (this.#headers) return this.#headers;
@@ -61,6 +63,50 @@ export class AviContainer extends Container {
   get formatName() {
     return "avi";
   }
+  /**
+   * What the file states about the work, from the `LIST INFO` chunk of the
+   * RIFF (Microsoft, "Multimedia Programming Interface and Data
+   * Specifications 1.0", INFO list): `INAM` the title, `IGNR` the genre,
+   * `ICRD` the creation date, `ISBJ` the subject, `ICMT` comments.
+   *
+   * Looked for among the top-level chunks before `movi`, where writers put it;
+   * walking past `movi` would read the header of what follows it, which lies
+   * wherever the film ends. The specification states no character set, so a
+   * value that is not valid UTF-8 is left out rather than shown garbled.
+   *
+   * @param {(start: number, end: number) => boolean} mayFetch
+   * @returns {Promise<import("./work-tags.js").WorkTags>}
+   */
+  async readWorkTags(mayFetch) {
+    if (this.#workTags) return this.#workTags;
+    const tags = emptyWorkTags();
+    const head = await this.readRange(0, Math.min(11, this.fileSize - 1));
+    if (!isAvi(head)) throw new Error("AVI RIFF header is absent.");
+    const end = Math.min(this.fileSize, 8 + head.readUInt32LE(4));
+    const read = edgeReader(this.readRange, mayFetch, isUnavailable);
+    try {
+      const top = await riffChunks(read, 12, end, "movi");
+      const info = top.find((chunk) => chunk.id === "LIST" && chunk.type === "INFO");
+      const fields = new Map();
+      for (const field of info ? await riffChunks(read, info.start + 4, info.end) : []) {
+        if (field.end <= field.start || fields.has(field.id)) continue;
+        const value = (await read(field.start, field.end - 1)).toString("utf8");
+        // U+FFFD is what the decoder puts where the bytes were not UTF-8.
+        if (!value.includes(String.fromCodePoint(0xfffd))) fields.set(field.id, text(value));
+      }
+      tags.title = fields.get("INAM") ?? null;
+      tags.genres = textList([fields.get("IGNR")]);
+      tags.year = yearOf(fields.get("ICRD"));
+      tags.description = fields.get("ISBJ") ?? fields.get("ICMT") ?? null;
+    } catch (error) {
+      if (!(error instanceof OutsideReadableEdges)) throw error;
+      tags.outsideEdges = true;
+    }
+    tags.trackTitles = textList((await this.readTracks()).map((track) => track.name));
+    if (!tags.outsideEdges) this.#workTags = tags;
+    return tags;
+  }
+
 
   packetIndexBytes() { return (this.#packets ?? this.#scan?.index)?.allocatedBytes() ?? 0; }
 

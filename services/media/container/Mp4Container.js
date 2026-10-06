@@ -27,6 +27,8 @@ import { h264Configuration } from "./h264-configuration.js";
 import { hevcConfiguration } from "./hevc-configuration.js";
 import { mpegAudioFrame } from "./mpeg-audio-frame.js";
 import { readMp4Fragments } from "./mp4-fragments.js";
+import { workFromMoov } from "./mp4-work-tags.js";
+import { COVER_TYPES, MAX_COVER_BYTES, emptyWorkTags, imageTypeOf, textList } from "./work-tags.js";
 
 /** A box header is eight bytes, or sixteen when the size field says 1 (§4.2). */
 const HEADER_BYTES = 8;
@@ -511,6 +513,44 @@ export class Mp4Container extends Container {
       () => this.readRange(found.offset, found.offset + found.size - 1));
     this.moovHeld = { moov, header: found.headerBytes, offset: found.offset };
     return this.moovHeld;
+  }
+
+  /**
+   * What the file states about the work, from the `moov` box this class
+   * already holds for its tracks (see `mp4-work-tags.js`). The box is a read
+   * playback makes anyway, so `mayFetch` has nothing to decide here.
+   *
+   * @param {(start: number, end: number) => boolean} _mayFetch
+   * @returns {Promise<import("./work-tags.js").WorkTags>}
+   */
+  async readWorkTags(_mayFetch) {
+    if (this.workTags) return this.workTags;
+    const tags = emptyWorkTags();
+    const held = await this.#moovBuffer();
+    if (held) {
+      const { work, cover } = workFromMoov(held.moov, held.header);
+      Object.assign(tags, work);
+      if (cover && cover.size > 0 && cover.size <= MAX_COVER_BYTES) tags.cover = { type: cover.type, size: cover.size };
+    }
+    tags.trackTitles = textList((await this.readTracks()).map((track) => track.name));
+    this.workTags = tags;
+    return tags;
+  }
+
+  /**
+   * The cover the item list carries, its bytes checked to be the image its
+   * type says. `null` where there is none or it is larger than {@link MAX_COVER_BYTES}.
+   *
+   * @param {(start: number, end: number) => boolean} _mayFetch
+   * @returns {Promise<{ type: string, bytes: Buffer } | null>}
+   */
+  async readCover(_mayFetch) {
+    const held = await this.#moovBuffer();
+    const cover = held ? workFromMoov(held.moov, held.header).cover : null;
+    if (!cover || cover.size === 0 || cover.size > MAX_COVER_BYTES) return null;
+    const bytes = Buffer.from(held.moov.subarray(cover.at, cover.at + cover.size));
+    const type = imageTypeOf(bytes);
+    return type && COVER_TYPES.has(type) ? { type, bytes } : null;
   }
 
   /** Exact decode-order samples from the same moov used for all metadata. */

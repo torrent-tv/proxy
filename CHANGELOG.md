@@ -1,3 +1,8 @@
+## Unreleased
+
+- **New**: `GET /api/sources/:sourceKey/files/:fileIndex/container-metadata` answers what an opened file states about the work it carries — title, series, season, episode, episode title, year, genre, description, `IMDB`/`TMDB`/`TVDB` ids, track and chapter titles, and whether it has a cover — from Matroska `Tags`, `Info/Title`, `Chapters` and `Attachments`, the MP4 iTunes item list and QuickTime metadata keys, and AVI `LIST INFO`. It reads only the first and the last piece of the file, which opening it fetches anyway, and bytes already held; nothing is asked of the swarm for it (torrent-tv/meta#139).
+- **New**: `GET /api/sources/:sourceKey/files/:fileIndex/cover` answers the cover image a file carries inside it (Matroska `cover.*` attachment, MP4 `covr`, QuickTime artwork), checked to be an image by its bytes and at most 4 MiB (torrent-tv/meta#139).
+
 ## 2.93.4
 
 - **Fix**: Initial file preparation reads the first requested media interval instead of indexing the complete file. Full-source download demand remains a separate low-priority map entry.

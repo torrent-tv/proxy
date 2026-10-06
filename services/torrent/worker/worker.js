@@ -353,7 +353,10 @@ async function runCommand(command, params, id) {
           index,
           name: file.name,
           path: file.path,
-          length: file.length
+          length: file.length,
+          // Where the file begins in the torrent's bytes: which pieces hold its
+          // edges follows from it.
+          offset: file.offset
         }))
       };
     }
@@ -1046,7 +1049,7 @@ async function keepWholeFiles() {
         infoHash: torrent.infoHash,
         name: torrent.name,
         pieceLength: Number(torrent.pieceLength) || 0,
-        files: torrent.files.map((file, index) => ({ index, name: file.name, path: file.path, length: file.length }))
+        files: torrent.files.map((file, index) => ({ index, name: file.name, path: file.path, length: file.length, offset: file.offset }))
       });
       pool.remove(torrent, "downloaded-whole");
       pool.addWholeSource(sourceKey);

@@ -45,6 +45,14 @@ import { ElementReader } from "./ebml-stream.js";
 import { firstFrameOffset, readBlockHeader, walkHeldClusters } from "./matroska-clusters.js";
 import { readMatroskaPackets } from "./matroska-packets.js";
 import { RetainedReads } from "./RetainedReads.js";
+import { isUnavailable } from "./unavailable.js";
+import {
+  ID_ATTACHED_FILE, ID_ATTACHMENTS, ID_CHAPTERS, ID_FILE_DATA, ID_FILE_MEDIA_TYPE, ID_FILE_NAME, ID_INFO_TITLE, ID_TAGS,
+  chapterTitlesOf, coverIndexOf, workFromTags
+} from "./matroska-work-tags.js";
+import {
+  COVER_TYPES, MAX_COVER_BYTES, OutsideReadableEdges, edgeReader, emptyWorkTags, imageTypeOf, isNumberingOnly, text, textList
+} from "./work-tags.js";
 
 const ID_EBML = 0x1a45dfa3;
 const ID_SEGMENT = 0x18538067;
@@ -124,6 +132,10 @@ function readString(buf, el) {
  *   the walk to the first cluster or from the SeekHead.
  * @property {number | null} tracksAt
  * @property {number | null} cuesAt
+ * @property {number | null} tagsAt
+ * @property {number | null} chaptersAt
+ * @property {number | null} attachmentsAt
+ * @property {string | null} segmentTitle - `Info/Title`, RFC 9559 §5.1.2.12.
  * @property {number | null} firstClusterAt
  */
 
@@ -144,6 +156,15 @@ export class MatroskaContainer extends Container {
    * @type {{ points: Array<{ ticks: number, positions: Array<{ track: number, clusterAt: number }> }> } | null | undefined}
    */
   #cues = undefined;
+
+  /** @type {import("./work-tags.js").WorkTags | null} */
+  #workTags = null;
+
+  /**
+   * Where the cover's data lies: undefined until looked for, null for none.
+   * @type {{ at: number, size: number, mediaType: string } | null | undefined}
+   */
+  #coverAt = undefined;
 
   get formatName() {
     return "matroska";
@@ -293,6 +314,7 @@ export class MatroskaContainer extends Container {
     const positionOf = (id) => found.get(id) ?? seeks.get(id) ?? null;
 
     let secondsPerTick = DEFAULT_TIMESTAMP_SCALE / 1e9;
+    let segmentTitle = null;
     const infoAt = positionOf(ID_INFO);
     if (infoAt !== null) {
       const info = await reader.header(infoAt, segmentEnd);
@@ -304,6 +326,8 @@ export class MatroskaContainer extends Container {
             if (scale > 0) {
               secondsPerTick = scale / 1e9;
             }
+          } else if (field.id === ID_INFO_TITLE) {
+            segmentTitle = readString(data, field);
           }
         }
       }
@@ -315,6 +339,10 @@ export class MatroskaContainer extends Container {
       infoAt,
       tracksAt: positionOf(ID_TRACKS),
       cuesAt: positionOf(ID_CUES),
+      tagsAt: positionOf(ID_TAGS),
+      chaptersAt: positionOf(ID_CHAPTERS),
+      attachmentsAt: positionOf(ID_ATTACHMENTS),
+      segmentTitle,
       firstClusterAt: firstClusterAt ?? seeks.get(ID_CLUSTER) ?? null
     };
     return this.#layout;
@@ -364,6 +392,116 @@ export class MatroskaContainer extends Container {
     }
     this.mediaInfo = info;
     return info;
+  }
+
+  /**
+   * What the file states about the work: `Info/Title`, the `Tags` that apply
+   * to the whole file, the titles of its chapters and tracks, and whether it
+   * carries a cover (see `matroska-work-tags.js`).
+   *
+   * Each element is read on its own, so one that lies outside the bytes this
+   * reading may fetch costs only itself. A reading that left something out is
+   * not kept: the bytes may be held by the next ask.
+   *
+   * @param {(start: number, end: number) => boolean} mayFetch
+   * @returns {Promise<import("./work-tags.js").WorkTags>}
+   */
+  async readWorkTags(mayFetch) {
+    if (this.#workTags) return this.#workTags;
+    const tags = emptyWorkTags();
+    const layout = await this.#segmentLayout();
+    if (!layout) {
+      this.#workTags = tags;
+      return tags;
+    }
+    tags.segmentTitle = text(layout.segmentTitle);
+    const reader = new ElementReader({ read: edgeReader(this.readRange, mayFetch, isUnavailable), fileSize: this.fileSize, portionBytes: this.portionBytes });
+    const leftOut = (error) => {
+      if (!(error instanceof OutsideReadableEdges)) throw error;
+      tags.outsideEdges = true;
+    };
+    const dataOf = async (at, id) => {
+      if (at === null) return null;
+      const header = await reader.header(at, layout.segmentEnd);
+      return header && header.id === id ? reader.data(header) : null;
+    };
+    try {
+      const data = await dataOf(layout.tagsAt, ID_TAGS);
+      if (data) Object.assign(tags, workFromTags(data));
+    } catch (error) { leftOut(error); }
+    try {
+      const data = await dataOf(layout.chaptersAt, ID_CHAPTERS);
+      if (data) tags.chapterTitles = textList(chapterTitlesOf(data).filter((title) => !isNumberingOnly(title)));
+    } catch (error) { leftOut(error); }
+    try {
+      const cover = await this.#coverAddress(reader, layout);
+      if (cover && cover.size > 0 && cover.size <= MAX_COVER_BYTES) tags.cover = { type: cover.mediaType, size: cover.size };
+    } catch (error) { leftOut(error); }
+    tags.trackTitles = textList((await this.readTracks()).map((track) => track.name));
+    if (!tags.outsideEdges) this.#workTags = tags;
+    return tags;
+  }
+
+  /**
+   * The cover the file carries as an attachment, its bytes checked to be the
+   * image its type says. `null` where there is none, it is larger than
+   * {@link MAX_COVER_BYTES}, or its bytes are not an image a browser shows.
+   *
+   * @param {(start: number, end: number) => boolean} mayFetch
+   * @returns {Promise<{ type: string, bytes: Buffer } | null>}
+   */
+  async readCover(mayFetch) {
+    const layout = await this.#segmentLayout();
+    if (!layout) return null;
+    const read = edgeReader(this.readRange, mayFetch, isUnavailable);
+    const reader = new ElementReader({ read, fileSize: this.fileSize, portionBytes: this.portionBytes });
+    const cover = await this.#coverAddress(reader, layout);
+    if (!cover || cover.size === 0 || cover.size > MAX_COVER_BYTES) return null;
+    const bytes = Buffer.from(await read(cover.at, cover.at + cover.size - 1));
+    const type = imageTypeOf(bytes);
+    return type && COVER_TYPES.has(type) ? { type, bytes } : null;
+  }
+
+  /**
+   * Where the cover's data lies, from the headers of the attachments: each
+   * `AttachedFile`'s name and media type are read, its data never — fonts of
+   * an anime release are megabytes each.
+   *
+   * @param {ElementReader} reader
+   * @param {SegmentLayout} layout
+   * @returns {Promise<{ at: number, size: number, mediaType: string } | null>}
+   */
+  async #coverAddress(reader, layout) {
+    if (this.#coverAt !== undefined) return this.#coverAt;
+    if (layout.attachmentsAt === null) return (this.#coverAt = null);
+    const attachments = await reader.header(layout.attachmentsAt, layout.segmentEnd);
+    if (!attachments || attachments.id !== ID_ATTACHMENTS || attachments.end === null) return (this.#coverAt = null);
+    const files = [];
+    for (let at = attachments.dataOffset; at < attachments.end;) {
+      const file = await reader.header(at, attachments.end);
+      if (!file || file.end === null) break;
+      if (file.id === ID_ATTACHED_FILE) {
+        const found = { name: "", mediaType: "", at: null, size: 0 };
+        for (let inner = file.dataOffset; inner < file.end;) {
+          const field = await reader.header(inner, file.end);
+          if (!field || field.end === null) break;
+          if (field.id === ID_FILE_NAME || field.id === ID_FILE_MEDIA_TYPE) {
+            const value = (await reader.data(field))?.toString("utf8").replace(/\0+$/u, "") ?? "";
+            if (field.id === ID_FILE_NAME) found.name = value;
+            else found.mediaType = value.toLowerCase();
+          } else if (field.id === ID_FILE_DATA) {
+            found.at = field.dataOffset;
+            found.size = field.size ?? 0;
+          }
+          inner = field.end;
+        }
+        if (found.at !== null) files.push(found);
+      }
+      at = file.end;
+    }
+    const index = coverIndexOf(files);
+    this.#coverAt = index < 0 ? null : { at: files[index].at, size: files[index].size, mediaType: files[index].mediaType || "image/jpeg" };
+    return this.#coverAt;
   }
 
   /**

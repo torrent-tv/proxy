@@ -496,6 +496,36 @@ export class Container {
   }
 
   /**
+   * What the file states about the WORK it carries — title, series, season,
+   * episode, year, genre, description, ids, track and chapter titles, and
+   * whether it has a cover — in the one shape of `work-tags.js`.
+   *
+   * `mayFetch` says which bytes this reading may ask the swarm for: the edges
+   * of the file, which playback fetches anyway. Anything elsewhere is read only
+   * if already held, and left out otherwise (`outsideEdges`).
+   *
+   * `null` means this format states nothing about the work that this proxy
+   * reads — a final answer about the format, not "nobody has looked yet".
+   *
+   * @param {(start: number, end: number) => boolean} _mayFetch
+   * @returns {Promise<import("./work-tags.js").WorkTags | null>}
+   */
+  async readWorkTags(_mayFetch) {
+    return null;
+  }
+
+  /**
+   * The cover image the file carries, checked to be an image by its bytes.
+   * `null` where it carries none.
+   *
+   * @param {(start: number, end: number) => boolean} _mayFetch
+   * @returns {Promise<{ type: string, bytes: Buffer } | null>}
+   */
+  async readCover(_mayFetch) {
+    return null;
+  }
+
+  /**
    * Subtitle-specific: where cues live (Matroska cluster positions or MP4 sample ranges).
    * Returned via track objects' clusterPositions/samples, so base has no extra method — tracks carry it.
    */

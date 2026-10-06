@@ -370,7 +370,11 @@ export class EncodeRuns {
       if (!whole) {
         this.#host.logger.warn(
           `encode: not publishing piece ${index} of ${address.slice(0, 60)}: ` +
-            (reason ?? (throughSeconds === null ? "it holds no playable media" : `produced through ${throughSeconds}s, cut ${cut}s`))
+            (reason ?? (throughSeconds === null ? "it holds no playable media" : `produced through ${throughSeconds}s, cut ${cut}s`)) +
+            (interval ? ` expected=${interval.from}..${interval.to} tracks=${JSON.stringify(mediaRanges.tracks.map(track => ({
+              kind: track.kind, timescale: track.timescale, frame: track.productionFrame,
+              first: track.ranges[0], last: track.ranges.at(-1), count: track.ranges.length })),
+              (_key, value) => typeof value === "bigint" ? String(value) : value)}` : "")
         );
         return false;
       }

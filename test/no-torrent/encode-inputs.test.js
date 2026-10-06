@@ -2,8 +2,28 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { setImmediate } from "node:timers/promises";
 import { EncodeInputs } from "../../services/encode/EncodeInputs.js";
+import { MachineBudget } from "../../services/storage/MachineBudget.js";
 
 const output = { id: "output" };
+
+test("urgent complete input is admitted before speculative whole-file memory", async () => {
+  const budget = new MachineBudget({ policy: { kind: "fixed", bytes: 100 } });
+  budget.defineResource({ name: "memory", readFree: () => 100 });
+  const inputs = new EncodeInputs({ resolve: async () => ({ kind: "result", sources: [source] }),
+    readRanges: async () => [Buffer.from("ab")], reviseBudget: () => budget.revise(),
+    changed: () => {}, failed: (_output, error) => { throw error; } });
+  budget.register({ name: "input", resource: "memory", held: () => inputs.held(),
+    wanted: () => inputs.wanted(), required: () => inputs.required(), allow: bytes => inputs.allow(bytes) });
+  budget.register({ name: "speculative pieces", resource: "memory", held: () => 0,
+    wanted: () => 10_000, allow: () => {} });
+  inputs.take(output, 0, 0);
+  await setImmediate();
+  const admitted = inputs.take(output, 0, 0);
+  assert.equal(admitted?.kind, "result");
+  assert.equal(inputs.required(), 2);
+  admitted.release();
+  assert.equal(inputs.required(), 0);
+});
 const source = { sourceKey: "source", fileIndex: 0, input: { ranges: [[0, 1]], tracks: [{
   track: { type: "video", codecId: "vp8", width: 64, height: 64 },
   packets: [{ pts: 0, duration: 1, keyframe: true, ranges: [[0, 1]] }]

@@ -1,3 +1,7 @@
+## Unreleased
+
+- **Fix**: Reserve the complete urgent encoder input before distributing memory to speculative torrent pieces, so a large file cannot prevent playback from starting while memory is available.
+
 ## 2.93.2
 
 - **Fix**: Playback forecasts look up source ranges by output and segment instead of scanning every packet range for every segment. Repricing, seeking and withdrawal replace the lookup together with the download map.

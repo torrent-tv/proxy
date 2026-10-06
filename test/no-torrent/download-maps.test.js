@@ -3,6 +3,17 @@ import assert from "node:assert/strict";
 import { DownloadMaps } from "../../services/viewer/DownloadMaps.js";
 import { MediaReadRequests } from "../../services/media/MediaReadRequests.js";
 
+test("a missing allocation cannot withdraw bytes still needed by the same statement", async () => {
+  let published;
+  const maps = new DownloadMaps({ publish: map => { published = map; } });
+  const request = { sourceKey: "source", fileIndex: 0, statement: "tracks" };
+  await maps.metadata({ ...request, result: { kind: "needs-ranges", ranges: [[100, 699]] } });
+  await maps.metadata({ ...request, result: { kind: "needs-memory", bytes: 600 } });
+  assert.deepEqual(published.zones.map(zone => [zone.byteStart, zone.byteEnd]), [[100, 699]]);
+  await maps.metadata({ ...request, result: { kind: "result", value: [] } });
+  assert.deepEqual(published.zones, []);
+});
+
 test("completed packet reads coalesce file refreshes without losing a later completion", async () => {
   let calls = 0, release;
   const blocked = new Promise(resolve => { release = resolve; });

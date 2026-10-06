@@ -1,3 +1,8 @@
+## Unreleased
+
+- **Fix**: Initial file preparation reads the first requested media interval instead of indexing the complete file. Full-source download demand remains a separate low-priority map entry.
+- **Fix**: An unchanged input rejected for incomplete produced media is not encoded repeatedly. Storage publication failures remain recoverable, and failure of the selected audio output reaches the browser's playback progress.
+
 ## 2.93.3
 
 - **Fix**: Reserve the complete urgent encoder input before distributing memory to speculative torrent pieces, so a large file cannot prevent playback from starting while memory is available.

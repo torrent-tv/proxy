@@ -254,7 +254,7 @@ test("a refused publication stops its claim and ends as a publication failure", 
   const run = new EncodeRun({
     address: "audio", encoder: new SoftwareEncoder(), from: 13, to: 14,
     buildArgs: () => [], spawn: () => process_, logger: { info() {}, warn() {} },
-    onClosed: () => { throw new Error("piece 13 is incomplete"); },
+    onClosed: () => { throw Object.assign(new Error("piece 13 is incomplete"), { code: "ERR_INCOMPLETE_MEDIA" }); },
     onEnded: ended => ends.push(ended)
   });
   process_.stdio[3].emit("data", "making-0-00013.mp4,71.55,71.56\nmaking-0-00014.mp4,71.56,91.8\n");
@@ -263,6 +263,7 @@ test("a refused publication stops its claim and ends as a publication failure", 
   assert.equal(run.isAlive, false);
   assert.equal(ends[0].ending, ENCODE_EXIT.PUBLICATION_FAILED);
   assert.equal(ends[0].because, "piece 13 is incomplete");
+  assert.equal(ends[0].publicationCode, "ERR_INCOMPLETE_MEDIA");
 });
 
 test("a run whose process never started is not signalled, because pid 0 is our own process group", () => {

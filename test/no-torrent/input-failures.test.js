@@ -31,3 +31,11 @@ test("failed admitted input is refused only while its bytes and parameters agree
   failures.forget("output");
   assert.equal(failures.failure("output", 4, key), null);
 });
+
+test("incomplete media is not retried after publication refusal, while storage failures remain recoverable", () => {
+  const ended = { ending: "publication-failed", code: 255, signal: "SIGTERM", publicationCode: "ERR_INCOMPLETE_MEDIA" };
+  assert.equal(failedAdmittedInput(ended), true);
+  assert.equal(failedAdmittedInput(ended, true), false);
+  assert.equal(failedAdmittedInput({ ...ended, publicationCode: "ENOSPC" }), false);
+  assert.equal(failedAdmittedInput({ ...ended, publicationCode: null }), false);
+});

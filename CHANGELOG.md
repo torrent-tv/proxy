@@ -1,4 +1,4 @@
-## Unreleased
+## 2.93.4
 
 - **Fix**: Initial file preparation reads the first requested media interval instead of indexing the complete file. Full-source download demand remains a separate low-priority map entry.
 - **Fix**: An unchanged input rejected for incomplete produced media is not encoded repeatedly. Storage publication failures remain recoverable, and failure of the selected audio output reaches the browser's playback progress.

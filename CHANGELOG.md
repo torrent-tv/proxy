@@ -1,3 +1,7 @@
+## Unreleased
+
+- **Fix**: Concurrent packet-read completions share one download-map refresh and one following pass. Obsolete map conversions stop reading further intervals instead of delaying current playback behind repeated full-file conversions.
+
 ## 2.92.1
 
 - **Fix**: Use the system ffprobe when the bundled file cannot be executed, including installations that deliberately disable dependency installation scripts.

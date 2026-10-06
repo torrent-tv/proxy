@@ -44,7 +44,8 @@ export class DownloadMaps {
     }
     if (changed) await this.#emit(file);
     if (revision !== file.revision) return;
-    const resolved = await this.#resolvePlayback({ sourceKey, fileIndex, durationSeconds, zones: file.sourceZones });
+    const resolved = await this.#resolvePlayback({ sourceKey, fileIndex, durationSeconds, zones: file.sourceZones,
+      isCurrent: () => this.#files.get(`${sourceKey}:${fileIndex}`) === file && revision === file.revision });
     if (revision !== file.revision) return;
     file.zones = resolved;
     return this.#emit(file);
@@ -53,7 +54,18 @@ export class DownloadMaps {
   refresh(sourceKey, fileIndex) {
     const file = this.#files.get(`${sourceKey}:${fileIndex}`);
     if (!file) return Promise.resolve();
-    return this.playback({ sourceKey, fileIndex, durationSeconds: file.durationSeconds, zones: file.sourceZones });
+    file.refreshAgain = true;
+    if (file.refreshPending) return file.refreshPending;
+    file.refreshPending = (async () => {
+      try {
+        do {
+          file.refreshAgain = false;
+          if (this.#files.get(`${sourceKey}:${fileIndex}`) !== file) return;
+          await this.playback({ sourceKey, fileIndex, durationSeconds: file.durationSeconds, zones: file.sourceZones });
+        } while (file.refreshAgain);
+      } finally { file.refreshPending = null; }
+    })();
+    return file.refreshPending;
   }
 
   epoch(sourceKey, fileIndex) {

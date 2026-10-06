@@ -3,6 +3,63 @@ import assert from "node:assert/strict";
 import { DownloadMaps } from "../../services/viewer/DownloadMaps.js";
 import { MediaReadRequests } from "../../services/media/MediaReadRequests.js";
 
+test("completed packet reads coalesce file refreshes without losing a later completion", async () => {
+  let calls = 0, release;
+  const blocked = new Promise(resolve => { release = resolve; });
+  const maps = new DownloadMaps({ publish() {}, resolvePlayback: async () => {
+    if (++calls === 2) await blocked;
+    return [];
+  } });
+  await maps.playback({ sourceKey: "source", fileIndex: 0, durationSeconds: 8,
+    zones: [{ from: 0, to: 4, priority: 100 }] });
+  const first = maps.refresh("source", 0);
+  const repeated = Array.from({ length: 100 }, () => maps.refresh("source", 0));
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(calls, 2, "only one refresh may resolve packets while its predecessor is running");
+  release();
+  await Promise.all([first, ...repeated]);
+  assert.equal(calls, 3, "one following pass observes every completion during the first pass");
+});
+
+test("a conversion can stop before reading more intervals after replacement or retirement", async () => {
+  const reads = [];
+  let release;
+  const blocked = new Promise(resolve => { release = resolve; });
+  const maps = new DownloadMaps({ publish() {}, resolvePlayback: async map => {
+    reads.push(map);
+    if (reads.length === 1) await blocked;
+    return [];
+  } });
+  const file = { sourceKey: "source", fileIndex: 0, durationSeconds: 8 };
+  const first = maps.playback({ ...file, zones: [{ from: 0, to: 4, priority: 100 }] });
+  assert.equal(reads[0].isCurrent(), true);
+  await maps.playback({ ...file, zones: [{ from: 4, to: 8, priority: 100 }] });
+  assert.equal(reads[0].isCurrent(), false);
+  assert.equal(reads[1].isCurrent(), true);
+  maps.retire("source");
+  assert.equal(reads[1].isCurrent(), false);
+  release();
+  await first;
+});
+
+test("retiring a file cancels the following coalesced refresh", async () => {
+  let calls = 0, release;
+  const blocked = new Promise(resolve => { release = resolve; });
+  const maps = new DownloadMaps({ publish() {}, resolvePlayback: async () => {
+    if (++calls === 2) await blocked;
+    return [];
+  } });
+  await maps.playback({ sourceKey: "source", fileIndex: 0, durationSeconds: 8,
+    zones: [{ from: 0, to: 4, priority: 100 }] });
+  const first = maps.refresh("source", 0);
+  const repeated = maps.refresh("source", 0);
+  maps.retire("source");
+  release();
+  await Promise.all([first, repeated]);
+  assert.equal(calls, 2);
+  assert.equal(maps.epoch("source", 0), 0);
+});
+
 test("native packet demand shares publication with output and preparation demand", async () => {
   let published;
   const maps = new DownloadMaps({ publish: map => { published = map; } });

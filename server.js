@@ -24,6 +24,7 @@ import { handleApiLinkProbeGet } from "./routes/api/link-probe/get.js";
 import { handleApiSourcesPost } from "./routes/api/sources/post.js";
 import { handleApiSourceStatsGet } from "./routes/api/sources/stats/get.js";
 import { handleApiSourceFilesGet } from "./routes/api/sources/files/get.js";
+import { handleApiSourceFingerprintGet } from "./routes/api/sources/fingerprint/get.js";
 import { handleApiSourceWarmPost } from "./routes/api/sources/warm/post.js";
 import { handleApiSourceViewerPost } from "./routes/api/sources/viewer/post.js";
 import { handleApiPlaybackPlanPost } from "./routes/api/playback-plan/post.js";
@@ -970,6 +971,15 @@ export async function startProxyServer({
   );
   app.get("/api/sources/:sourceKey/files", async (req, reply) =>
     handleApiSourceFilesGet(req, reply, { sourceRegistry, torrentPool, viewers: outputParts.viewers })
+  );
+  app.get("/api/sources/:sourceKey/files/:fileIndex/fingerprint", async (req, reply) =>
+    handleApiSourceFingerprintGet(req, reply, {
+      sourceRegistry,
+      inspectFingerprint: async (address) => {
+        const params = await containerOver(address);
+        return params ? containerOrchestrator.inspect(params, "fingerprint") : { kind: "pending" };
+      }
+    })
   );
   app.post("/api/sources/:sourceKey/warm", async (req, reply) =>
     handleApiSourceWarmPost(req, reply, {

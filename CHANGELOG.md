@@ -1,5 +1,7 @@
 ## Unreleased
 
+- **Chore**: Declare the reviewed dependency installation scripts required by current npm, including executable permissions for ffprobe and native module builds; keep ip-set's package-manager restriction disabled.
+
 - **Fix**: Retain the shared initialization segment before answering concurrent first-media requests, so every fMP4 segment uses the same timeline conversion.
 
 - **Fix**: A peer with no measured download rate is not treated as proven late. Its first request can complete and establish a rate instead of being cancelled before any bytes arrive.

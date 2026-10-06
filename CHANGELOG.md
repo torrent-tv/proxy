@@ -1,4 +1,4 @@
-## Unreleased
+## 2.93.1
 
 - **Fix**: A peer update schedules only that peer's queue and skips source availability scans when it cannot request. Updating every peer no longer repeats the complete cross-torrent download calculation for each peer; map changes still schedule all live downloads.
 

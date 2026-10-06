@@ -46,6 +46,11 @@ export function peerCanServe(wire, piece) {
     wire.peerPieces?.get(piece);
 }
 
+function peerCanRequest(wire) {
+  return !wire.destroyed &&
+    (!wire.peerChoking || (wire.hasFast && wire.peerAllowedFastSet?.length > 0));
+}
+
 /** Identical map ordering for present requests and conditional future requests. */
 export function compareDownloadCandidates(a, b) {
   return a.deadlineAt - b.deadlineAt || b.priority - a.priority || a.order - b.order || a.piece - b.piece;
@@ -62,11 +67,18 @@ export class DeadlineScheduler {
     this.#store = findStore;
   }
 
-  reconcile(now = Date.now()) {
+  reconcile(now = Date.now(), { torrent = null, wire = null } = {}) {
     if (this.#running) return { requested: 0, reassigned: 0 };
+    // WebTorrent updates each peer in turn. A full or choked peer cannot issue
+    // a request, so its heartbeat must not scan every file's byte availability.
+    if (wire && (!peerCanRequest(wire) ||
+      (wire.requests?.length ?? 0) >= peerRequestCapacity(torrent, wire))) {
+      return { requested: 0, reassigned: 0 };
+    }
     this.#running = true;
     try {
-      return dispatchDownloadCandidates(downloadCandidates(this.#entries(), this.#store), now);
+      const entries = [...this.#entries()].filter(entry => !torrent || entry.torrent === torrent);
+      return dispatchDownloadCandidates(downloadCandidates(entries, this.#store), now, { wire });
     } finally {
       this.#running = false;
     }
@@ -112,7 +124,7 @@ export function downloadCandidates(entries, findStore = pieceStoreOf) {
 }
 
 /** Run against protocol peers or an isolated future-state copy. */
-export function dispatchDownloadCandidates(candidates, now) {
+export function dispatchDownloadCandidates(candidates, now, { wire: changedWire = null } = {}) {
   let requested = 0, reassigned = 0;
   // Rates and advertised limits cannot change during this synchronous pass.
   // Read each peer once, and only inspect torrents once regardless of map size.
@@ -125,15 +137,14 @@ export function dispatchDownloadCandidates(candidates, now) {
     }
     return reading;
   };
-  const usable = wire => !wire.destroyed &&
-    (!wire.peerChoking || (wire.hasFast && wire.peerAllowedFastSet?.length > 0));
-  const available = (torrent, wire) => usable(wire) &&
+  const available = (torrent, wire) => peerCanRequest(wire) &&
     (wire.requests?.length ?? 0) < readingOf(torrent, wire).capacity;
   const completionAt = (torrent, wire, bytes) =>
     requestCompletionAt(wire, bytes, now, readingOf(torrent, wire).speed);
   const writable = new Map();
   for (const torrent of new Set(candidates.map(candidate => candidate.torrent))) {
-    const peers = (torrent.wires ?? []).filter(wire => available(torrent, wire));
+    const peers = (changedWire ? [changedWire] : torrent.wires ?? [])
+      .filter(wire => available(torrent, wire));
     if (peers.length) writable.set(torrent, peers);
   }
   for (const candidate of candidates) {

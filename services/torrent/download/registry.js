@@ -58,8 +58,8 @@ export function demandFor(torrent) {
   const entry = { torrent, register, selection: new SwarmSelection({ torrent, register }), withdrawalRevision: 0 };
   if (typeof torrent._request === "function" && typeof torrent._updateWire === "function") {
     entry.previousWireUpdate = torrent._updateWire;
-    torrent._updateWire = () => {
-      if (!publishingSelections) scheduler.reconcile();
+    torrent._updateWire = wire => {
+      if (!publishingSelections) scheduler.reconcile(Date.now(), { torrent, wire });
     };
   }
   byTorrent.set(torrent, entry);

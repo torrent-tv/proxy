@@ -78,6 +78,36 @@ test("choked peers do not keep a pass running after the usable queues fill", () 
   assert.equal(dispatchDownloadCandidates(candidates, 0).requested, 2);
 });
 
+test("a peer heartbeat does not rescan availability when that peer cannot request", t => {
+  const one = entry();
+  const held = demandFor(one.torrent);
+  t.after(() => forgetTorrent(one.torrent));
+  state(held.register, 1);
+  let reads = 0;
+  one.torrent.bitfield.get = () => { reads++; return false; };
+  one.wire.peerChoking = true;
+  one.torrent._updateWire(one.wire);
+  assert.equal(reads, 0);
+  one.wire.peerChoking = false;
+  one.wire.requests = [{ piece: 2, length: 16384 }, { piece: 3, length: 16384 }];
+  one.torrent._updateWire(one.wire);
+  assert.equal(reads, 0);
+});
+
+test("a peer heartbeat fills only that peer while map publication fills all peers", t => {
+  const one = entry();
+  const another = { ...one.wire, requests: [] };
+  one.torrent.wires.push(another);
+  const held = demandFor(one.torrent);
+  t.after(() => forgetTorrent(one.torrent));
+  for (let piece = 0; piece < 6; piece++) state(held.register, piece);
+  one.torrent._updateWire(one.wire);
+  assert.equal(one.wire.requests.length, 2);
+  assert.equal(another.requests.length, 0, "an unrelated peer does not repeat the whole pass");
+  reconcileAll();
+  assert.equal(another.requests.length, 2, "a map change still reaches every usable peer");
+});
+
 test("peer passes compile unchanged byte demand once but observe every storage arrival and withdrawal", () => {
   const one = entry();
   for (let index = 0; index < 1000; index++) one.register.state({

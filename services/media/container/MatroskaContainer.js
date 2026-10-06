@@ -137,7 +137,7 @@ export class MatroskaContainer extends Container {
   /** @type {Array<import("../tracks/ContainerTrack.js").ContainerTrack> | null} */
   #tracks = null;
   #packets = null;
-  #packetState = {};
+  #packetStates = new Map();
 
   /**
    * The Cues reading: undefined until read, null when the file has none.
@@ -150,8 +150,8 @@ export class MatroskaContainer extends Container {
   }
 
   packetIndexBytes() {
-    return (this.#packets?.allocatedBytes() ?? 0) +
-      [...(this.#packetState.packets?.values() ?? [])].reduce((sum, records) => sum + records.allocatedBytes, 0);
+    return [...this.#packetStates.values()].reduce((sum, state) => sum +
+      [...(state.packets?.values() ?? [])].reduce((bytes, records) => bytes + records.allocatedBytes, 0), 0);
   }
 
   static detect(head) {
@@ -437,14 +437,48 @@ export class MatroskaContainer extends Container {
     if (!layout) throw new Error("Matroska Segment is absent.");
     const tracks = await this.readTracks();
     const info = await this.readMediaInfo();
+    const start = await this.#packetStart(layout, tracks, interval);
+    // Reuse a contiguous reading that has already reached this cue. A seek
+    // across an unindexed gap gets its own reading instead of walking the gap.
+    let state = [...this.#packetStates.values()]
+      .filter(one => one.startAt <= start && one.at >= start)
+      .sort((a, b) => b.startAt - a.startAt)[0];
+    if (!state) {
+      state = { startAt: start, at: start };
+      this.#packetStates.set(start, state);
+    }
     const index = await readMatroskaPackets({ readRange: this.readRange,
       fileSize: this.fileSize, portionBytes: this.portionBytes, layout, tracks,
-      durationSeconds: info.durationSeconds, interval, state: this.#packetState, packetMemory: this.packetMemory });
-    if (index.isComplete()) {
+      durationSeconds: info.durationSeconds, interval, state, packetMemory: this.packetMemory });
+    if (index.isComplete() && state.startAt === layout.firstClusterAt) {
       this.#packets = index;
-      this.#packetState = {};
     }
     return index;
+  }
+
+  async #packetStart(layout, tracks, interval) {
+    const first = layout.firstClusterAt ?? layout.segmentEnd;
+    if (!Number.isFinite(interval?.from) || interval.from <= 0) return first;
+    const cues = await this.readCues();
+    const requested = tracks.filter(track => interval.trackIds ? interval.trackIds.includes(track.trackNumber)
+      : ["video", "audio"].includes(track.type));
+    // A subtitle can remain visible across arbitrarily many picture Clusters;
+    // picture cues alone cannot prove that an earlier subtitle has ended.
+    if (requested.every(track => track.type === "subtitle")) return first;
+    const cueTrack = requested.find(track => track.type === "video") ??
+      tracks.find(track => track.type === "video") ?? requested[0];
+    if (!cueTrack) return first;
+    const points = (cues?.points ?? []).flatMap(point => point.positions
+      .filter(position => position.track === cueTrack.trackNumber && position.clusterAt >= first && position.clusterAt < layout.segmentEnd)
+      .map(position => ({ at: position.clusterAt, seconds: point.ticks * layout.secondsPerTick })))
+      .sort((a, b) => a.seconds - b.seconds);
+    const preroll = Math.max(0, ...requested.map(track =>
+      Math.max(track.seekPrerollSeconds ?? 0, track.defaultDurationSeconds ?? 0)));
+    let preceding = -1;
+    for (let index = 0; index < points.length && points[index].seconds <= interval.from - preroll; index++) preceding = index;
+    // The preceding cue's Cluster also retains audio that overlaps this cut
+    // and decoder dependencies before the first presented packet.
+    return preceding < 0 ? first : points[Math.max(0, preceding - 1)].at;
   }
 
   /**

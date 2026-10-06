@@ -15,7 +15,7 @@ export async function readMatroskaPackets({ readRange, fileSize, portionBytes, l
   const declared = new Map(tracks.filter(track => ["video", "audio", "subtitle"].includes(track.type)).map(track => [track.trackNumber, track]));
   if (!state.packets) {
     state.packets = new Map([...declared.keys()].map(id => [id, new PacketRecords(packetMemory)]));
-    state.at = layout.firstClusterAt ?? layout.segmentEnd;
+    state.at ??= layout.firstClusterAt ?? layout.segmentEnd;
   }
   const packets = state.packets;
   if (intervalCovered(declared, packets, interval)) return buildIndex(declared, packets, durationSeconds, false, interval, packetMemory);

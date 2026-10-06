@@ -73,7 +73,8 @@ function outputOn(manager, { id, key, audioOnly = false, height = 0 }) {
     consumers: new Set(),
     viewers: new Map(),
     segmentCount: 5,
-    segmentFormat: fmp4Format,
+    // These checks exercise request ownership with arbitrary file bytes.
+    segmentFormat: { ...fmp4Format, needsSegmentRewrite: false },
     useSyntheticPlaylist: true,
     playlistText: "#EXTM3U\n",
     output: new Output({ encodeWidth: 0, encodeHeight: height, outputFps: 25, softwarePreset: null, applyTonemap: false }),
@@ -214,4 +215,5 @@ test("the request that was kept is served when its segment appears", async (t) =
   const answer = await stayer;
 
   assert.equal(answer.kind, "file", `a wake is a re-check, not a cancellation — got ${answer.kind}`);
+  for await (const chunk of answer.stream) assert.ok(chunk.length > 0);
 });

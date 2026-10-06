@@ -302,6 +302,14 @@ export class SegmentServing {
       if (!isPlaylist && session.segmentFormat.needsSegmentRewrite) {
         const index = session.segmentFormat.segmentIndexFromName(fileName);
         const raw = await readFile(filePath);
+        // Players may fetch the init and first media segment concurrently.
+        // Both responses must use the same retained init before rewriting.
+        if (!this.#host.segmentStore.initOf(session.outputKey ?? "")) {
+          const init = cutsAtGivenTimes(session)
+            ? await this.#initFromFirstSegment(session)
+            : await readFile(path.join(this.#host.segmentStore.pathFor(session.outputKey ?? ""), session.segmentFormat.initFileName));
+          if (!this.#host.segmentStore.keepInit(session.outputKey ?? "", init)) return this.#failedOrWarming(session);
+        }
         // Self-contained pieces carry the init header; a media segment must not.
         const bytes = cutsAtGivenTimes(session) && session.segmentFormat.stripInit
           ? session.segmentFormat.stripInit(raw)

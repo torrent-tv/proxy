@@ -1,3 +1,7 @@
+## Unreleased
+
+- **Fix**: Use the system ffprobe when the bundled file cannot be executed, including installations that deliberately disable dependency installation scripts.
+
 ## 2.92.0
 
 - **Chore**: Declare the reviewed dependency installation scripts required by current npm, including executable permissions for ffprobe and native module builds; keep ip-set's package-manager restriction disabled.

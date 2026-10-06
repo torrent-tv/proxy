@@ -1,10 +1,15 @@
 import { spawn } from "node:child_process";
 import { createRequire } from "node:module";
+import { accessSync, constants } from "node:fs";
 import { ffprobeRecord } from "./container/ffprobe-record.js";
 
 const require = createRequire(import.meta.url);
 function bundledProbe() {
-  try { return require("@ffprobe-installer/ffprobe").path; }
+  try {
+    const binary = require("@ffprobe-installer/ffprobe").path;
+    accessSync(binary, constants.X_OK);
+    return binary;
+  }
   catch { return "ffprobe"; }
 }
 

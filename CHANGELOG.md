@@ -1,5 +1,7 @@
 ## Unreleased
 
+- **Fix**: Retain the shared initialization segment before answering concurrent first-media requests, so every fMP4 segment uses the same timeline conversion.
+
 - **Fix**: A peer with no measured download rate is not treated as proven late. Its first request can complete and establish a rate instead of being cancelled before any bytes arrive.
 
 - **Fix**: A metadata read that changes from missing memory to missing bytes waits for a byte arrival. Events for its previous missing resource cannot cause repeated reads of unchanged data.

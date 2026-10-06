@@ -212,7 +212,7 @@ async function managerWithReadySegment(overrides = {}) {
   // Kept as production keeps the header lifted out of a self-contained piece:
   // shared by every piece, so its piece-specific empty edit is neutralized and
   // each piece is placed by its own.
-  manager.segmentStore.keepInit(OUTPUT_KEY, fmp4Format.prepareSharedInit(fmp4Format.extractInit(piece)));
+  if (overrides.withInit !== false) manager.segmentStore.keepInit(OUTPUT_KEY, fmp4Format.prepareSharedInit(fmp4Format.extractInit(piece)));
   manager.outputs.set(SESSION_ID, session);
   // SOMEBODY IS WATCHING IT. A segment is requested by a viewer, so a fixture
   // that asks for one without stating a viewer describes a state production
@@ -282,8 +282,8 @@ test("only a copied picture's landing is taken as evidence about the file's keyf
   assert.equal(picture.session.keyframes.evidence.checked, 1, "a copy's landing does reach the file's table");
 });
 
-test("a segment that exists is served, not reported as still being produced", async (t) => {
-  const { manager, dirPath, session } = await managerWithReadySegment();
+test("a segment requested before its init is served with its real timeline position", async (t) => {
+  const { manager, dirPath, session } = await managerWithReadySegment({ withInit: false });
   t.after(async () => {
     await manager.lifecycle.disposeAll();
     await rm(dirPath, { recursive: true, force: true });

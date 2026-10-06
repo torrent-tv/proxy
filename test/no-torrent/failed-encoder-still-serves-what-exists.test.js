@@ -85,7 +85,8 @@ async function outputWhoseEncoderDied({ failed = true, segments = [0], cutsAtGiv
     consumers: new Set(),
     viewers: new Map(),
     segmentCount: 5,
-    segmentFormat: fmp4Format,
+    // These checks exercise lifecycle responses with arbitrary file bytes.
+    segmentFormat: { ...fmp4Format, needsSegmentRewrite: false },
     useSyntheticPlaylist: true,
     playlistText: "#EXTM3U\n",
     output: new Output({ encodeWidth: 0, encodeHeight: 0, outputFps: 25, softwarePreset: null, applyTonemap: false }),
@@ -142,6 +143,7 @@ test("a segment that is on disk is served although the encoder failed", async (t
 
   assert.equal(answer.kind, "file", `what is made is made — the answer was ${answer.kind}`);
   assert.equal(answer.contentType, fmp4Format.segmentContentType);
+  for await (const chunk of answer.stream) assert.ok(chunk.length > 0);
 });
 
 test("a segment that is not there says the encoder failed, instead of being held", async (t) => {

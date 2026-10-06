@@ -578,6 +578,15 @@ export class EncodeRun {
         this.#publishClosed(this.#pendingClosed, name);
       }
       if (this.#publicationError) break;
+      const index = this.indexOfName(name);
+      const endOfWork = Number.isFinite(endOfRun(this)) ? this.to : this.lastSegmentIndex();
+      // A packet crossing the final cut can flush a following file. It may
+      // complete its predecessor, but no unadmitted interval can be published.
+      if (Number.isInteger(index) && Number.isInteger(endOfWork) && index > endOfWork) {
+        this.#closedTimings.delete(name);
+        this.#pendingClosed = null;
+        continue;
+      }
       this.#pendingClosed = name;
     }
   }

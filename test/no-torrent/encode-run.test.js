@@ -224,6 +224,29 @@ test("CSV closure times survive split channel chunks and a zero first-entry star
   ]);
 });
 
+test("a trailing packet file outside the admitted run cannot fail its completed interval", () => {
+  const process_ = new FakeProcess();
+  process_.stdio = [null, null, null, new EventEmitter()];
+  const closed = [], ends = [];
+  const run = new EncodeRun({
+    address: "audio", encoder: new SoftwareEncoder(), from: 118, to: 118,
+    buildArgs: () => [], spawn: () => process_, logger: silentLogger,
+    indexOfName: name => Number(name.match(/(\d+)\.mp4$/)[1]),
+    onClosed: (name, following) => {
+      closed.push([name, following]);
+      if (name.endsWith("00119.mp4")) throw new Error("piece 119 was not admitted");
+      return name;
+    },
+    onEnded: ended => ends.push(ended)
+  });
+  process_.stdio[3].emit("data", "making-0-00118.mp4,854.464,875.285\nmaking-0-00119.mp4,875.285,875.307\n");
+  process_.exitWith(0);
+  assert.equal(run.reached, 118);
+  assert.deepEqual(closed, [["making-0-00118.mp4", "making-0-00119.mp4"]]);
+  assert.equal(ends[0].ending, ENCODE_EXIT.COMPLETE);
+  assert.deepEqual(process_.signals, []);
+});
+
 test("a refused publication stops its claim and ends as a publication failure", () => {
   const process_ = new FakeProcess();
   process_.stdio = [null, null, null, new EventEmitter()];

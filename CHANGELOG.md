@@ -1,3 +1,7 @@
+## Unreleased
+
+- **Fix**: A peer update schedules only that peer's queue and skips source availability scans when it cannot request. Updating every peer no longer repeats the complete cross-torrent download calculation for each peer; map changes still schedule all live downloads.
+
 ## 2.93.0
 
 - **New**: `GET /api/sources/:sourceKey/files/:fileIndex/fingerprint` answers the OpenSubtitles hash of a file (its size plus its first and last 64 KiB), the key under which release databases name an exact release. It reads only those two edges, answers `202` while they have not arrived, and `404` for a file shorter than 128 KiB (torrent-tv/meta#135).

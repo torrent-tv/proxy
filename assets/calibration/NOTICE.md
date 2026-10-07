@@ -42,6 +42,21 @@ The MPEG-4 Part 2 set is decoded by the same decoder (`mpeg4`) as an XviD or
 DivX 4+ release. VC-1 has no set because ffmpeg has no VC-1 encoder, and
 10-bit AV1 has none yet; both are priced as H.264, and the startup log says so.
 
+## The encode reference clip
+
+`cal-encode-reference.mp4` is 3 s of **"Chimera"**, also Netflix Open Content
+under CC BY 4.0, from `AV1/Chimera/Old/Chimera-AV1-8bit-1920x1080-6736kbps.mp4`
+at 250 s, re-encoded with `libx264 -preset slow -crf 21 -profile:v high -g 72`,
+1920×1080, 24 fps, no audio. Every startup encode reading is taken on it.
+
+It is the middle of that film by how hard it is to encode, and that film was
+the hardest of four measured on the addon host on 2026-10-07 (Meridian, Chimera,
+Sparks, Cosmos Laundromat): its typical stretch cost 1.30x the processor time per
+second of video of the Meridian clip used before at `ultrafast` and 2.2x at
+`fast`. Encoded at `-crf 12` instead, the same stretch cost the same within 2 %.
+(torrent-tv/meta#3, `research/startup-calibration-spread-2026-10-07.md` in
+`torrent-tv/meta`.)
+
 ## Why six, and why this grid
 
 `services/encode/hwaccel.js` decodes them at startup and fits the host's decode cost,

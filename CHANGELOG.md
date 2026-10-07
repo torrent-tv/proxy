@@ -1,3 +1,7 @@
+## Unreleased
+
+- **Fix**: Startup encode readings are taken on a typical stretch of the hardest of four films measured (3 s of Netflix Open Content "Chimera", `assets/calibration/NOTICE.md`) instead of a 2 s clip that was the cheapest of all to encode. On the addon host a typical film costs 1.30x the processor time per second of video of the old clip at `ultrafast` and 2.2x at `fast`, so the quality offered when a file is opened, before readings on the file itself arrive, was set by a machine faster than the one that encodes it (torrent-tv/meta#3).
+
 ## 2.95.1
 
 - **Fix**: Embedded text subtitles are offered again. Since the playback plan was built from the container's own declarations (torrent-tv/meta#95) its subtitle tracks no longer said which were text, and the page offers only those, so every embedded subtitle track disappeared from the menu (torrent-tv/meta#8).

@@ -9,7 +9,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { readProcessCpuSeconds, readSystemCpu, sampleHost, shareOfMachine } from "../../services/encode/host-load.js";
+import { freeShareDuring, readProcessCpuSeconds, readSystemCpu, sampleHost, shareOfMachine } from "../../services/encode/host-load.js";
 import { HostLoad } from "../../services/encode/quality/HostLoad.js";
 
 test("metadata CPU cannot be learned as torrent download cost", async t => {
@@ -171,4 +171,19 @@ test("a torrent worker that never answers does not stop the readings of the mach
   await new Promise((resolve) => setImmediate(resolve));
   assert.equal(load.hostAvailability.known, true);
   assert.ok(Math.abs(load.hostAvailability.share - 0.95) < 1e-9, `${load.hostAvailability.share}`);
+});
+
+test("the share a measured process was left is the machine minus what everything else did", () => {
+  // Field 2026-10-07: ffmpeg on 3.1 cores of 4 for a second, the whole machine
+  // busy 3.8 core-seconds, so other work took 0.7 of 4 cores.
+  const before = { takenAt: 0, processCpuSeconds: 10, system: { busySeconds: 100, iowaitSeconds: 0 } };
+  const after = { takenAt: 1000, processCpuSeconds: 13.1, system: { busySeconds: 103.8, iowaitSeconds: 0 } };
+  assert.ok(Math.abs(freeShareDuring(before, after, 4) - (1 - 0.7 / 4)) < 1e-9);
+});
+
+test("the share is unknown, not whole, when either reading is missing", () => {
+  const reading = { takenAt: 0, processCpuSeconds: 1, system: { busySeconds: 1, iowaitSeconds: 0 } };
+  assert.equal(freeShareDuring(null, reading, 4), null);
+  assert.equal(freeShareDuring(reading, { ...reading, takenAt: 1000, processCpuSeconds: null }, 4), null);
+  assert.equal(freeShareDuring(reading, { ...reading, takenAt: 1000, system: null }, 4), null);
 });

@@ -37,6 +37,7 @@ import {
 
 import { keyFrameArgs, TRANSCODE_FPS } from "./args.js";
 import { throughputAt } from "./throughput.js";
+import { freeShareDuring, sampleHost } from "./host-load.js";
 import { LADDER_HEIGHTS } from "./output/ladder.js";
 // The five kinds, one class each. Detection and benchmarking stay in this file;
 // how a kind is driven belongs to the kind.
@@ -715,7 +716,13 @@ async function fitOneFamily({ ffmpegBin, log, clipsDir, family, clips }) {
       );
       return null;
     }
-    const cost = 1 / measured.speed;
+    // On a quiet-machine basis, like every other startup figure the offer
+    // multiplies by the share free at the time of the question. Measured on the
+    // addon host on 2026-10-07: one clip decoded at 10.74x, 13.29x and 13.24x
+    // with other work taking 35 %, 19 % and 19 % of the machine, and at 16.4x,
+    // 16.3x and 16.3x once that share was divided out (torrent-tv/meta#3).
+    const quietSpeed = Number.isFinite(measured.freeShare) ? measured.speed / measured.freeShare : measured.speed;
+    const cost = 1 / quietSpeed;
     samples.push({
       megapixelsPerSecond: measured.megapixelsPerSecond,
       megabitsPerSecond: measured.megabitsPerSecond,
@@ -723,8 +730,11 @@ async function fitOneFamily({ ffmpegBin, log, clipsDir, family, clips }) {
     });
     log.info(
       `hwaccel: decode "${clip}" ${measured.megapixelsPerSecond.toFixed(1)} Mpx/s ` +
-        `${measured.megabitsPerSecond.toFixed(2)} Mbit/s -> ${measured.speed.toFixed(1)}x ` +
-        `(cost ${cost.toFixed(4)} s/s, over ${measured.windowSec.toFixed(1)}s of decoding)`
+        `${measured.megabitsPerSecond.toFixed(2)} Mbit/s -> ${quietSpeed.toFixed(1)}x ` +
+        (Number.isFinite(measured.freeShare)
+          ? `(read ${measured.speed.toFixed(1)}x with other work taking ${Math.round((1 - measured.freeShare) * 100)}% of the machine; `
+          : "(the machine's load was not readable, so as read; ") +
+        `cost ${cost.toFixed(4)} s/s, over ${measured.windowSec.toFixed(1)}s of decoding)`
     );
   }
   const fitted = fitDecodeCost(samples);
@@ -1032,12 +1042,20 @@ function decodePipedStream(ffmpegBin, stream, log = { info: () => {}, warn: () =
     // reads the same in both cases, only the byte count is kept, for the
     // MB/s figure below — a number to read, not a boolean to trust.
     let bytesWritten = 0;
-    const finish = () => {
+    /** The machine at the first kept report, where the window starts. @type {Promise<object | null> | null} */
+    let hostBefore = null;
+    const finish = async () => {
       if (settled) {
         return;
       }
       settled = true;
       clearTimeout(timer);
+      // The machine at the end of the window, read while the decoder still runs
+      // so both readings bound the interval the speed is read over.
+      const hostAfter = hostBefore !== null && child?.pid && child.exitCode === null
+        ? await sampleHost(child.pid).catch(() => null)
+        : null;
+      const freeShare = freeShareDuring(hostBefore === null ? null : await hostBefore, hostAfter);
       try {
         child?.stdin?.destroy();
       } catch {
@@ -1084,13 +1102,18 @@ function decodePipedStream(ffmpegBin, stream, log = { info: () => {}, warn: () =
       );
       resolve({
         speed,
+        // The share of the machine other work left the decoder over the window,
+        // or null where it could not be read. A caller pricing decoding on a
+        // quiet-machine basis divides by it; a caller measuring what company
+        // costs must not, because there the company IS the other work.
+        freeShare,
         windowSec,
         megapixelsPerSecond: stream.megapixelsPerSecond,
         megabitsPerSecond: stream.megabitsPerSecond,
         pipeThroughputMBps: achievedMBps
       });
     };
-    const timer = setTimeout(finish, DECODE_WINDOW_MAX_MS);
+    const timer = setTimeout(() => void finish(), DECODE_WINDOW_MAX_MS);
     try {
       child = spawn(ffmpegBin, args, { stdio: ["pipe", "pipe", "pipe"], windowsHide: true });
     } catch (error) {
@@ -1128,12 +1151,16 @@ function decodePipedStream(ffmpegBin, stream, log = { info: () => {}, warn: () =
           const microseconds = Number(line.slice("out_time_ms=".length));
           if (Number.isFinite(microseconds)) {
             samples.push({ wallSec: (Date.now() - startedAt) / 1000, outSec: microseconds / 1e6, bytesWritten });
+            if (samples.length === 2 && child?.pid) {
+              // The second report, because the window starts there (below).
+              hostBefore = sampleHost(child.pid).catch(() => null);
+            }
           }
         }
         newline = stdout.indexOf("\n");
       }
       if (samples.length >= 2 && samples[samples.length - 1].wallSec - samples[1].wallSec >= DECODE_WINDOW_MIN_SEC) {
-        finish();
+        void finish();
       }
     });
     child.on("error", (error) => {
@@ -1154,7 +1181,7 @@ function decodePipedStream(ffmpegBin, stream, log = { info: () => {}, warn: () =
       }
       resolve({ error: error instanceof Error ? error.message : String(error) });
     });
-    child.on("close", finish);
+    child.on("close", () => void finish());
     feed();
   });
 }
@@ -1343,99 +1370,6 @@ function barFor(cost) {
 }
 
 /**
- * Benchmark software libx264 presets on this host. Encodes a short synthetic
- * clip at a fixed reference resolution with each preset and measures encoder
- * throughput in pixels/second. The session manager uses this to pick, per
- * stream, the highest-quality preset that still encodes the actual
- * (source-capped) resolution faster than realtime.
- *
- * Runs once at startup; bounded by a per-encode timeout. Presets that fail are
- * omitted from the result.
- *
- * @param {{ ffmpegBin: string, logger?: { info: (m: string) => void, warn: (m: string) => void } }} options
- * @returns {Promise<Array<{ preset: string, pixelsPerSec: number }>>} Ordered slowest→fastest.
- */
-export async function benchmarkSoftwarePresets({ ffmpegBin, logger, encoder = null }) {
-  const log = logger ?? { info: () => {}, warn: () => {} };
-
-  // REAL footage, decoded ONCE into raw frames, and the presets are then timed
-  // on those frames.
-  //
-  // Two reasons, both measured. The pattern this replaced (`testsrc2`) has flat
-  // areas and no grain and encodes 1.23x cheaper than film on the same machine
-  // and preset — an error that always points at offering a rung the host cannot
-  // hold. And feeding a compressed clip to each preset instead would put
-  // decoding and scaling inside the measurement: subtracting them afterwards
-  // compares a wall clock that includes process startup against a decode figure
-  // measured to exclude it, while inside one ffmpeg the two halves overlap. On
-  // the fastest preset — the one every ladder decision reads as the ceiling —
-  // that subtraction is most of the number being measured, so a small error in
-  // it becomes a large error in the answer.
-  //
-  // Raw frames remove all of it: no decoder, no scaler, nothing to subtract,
-  // and no dependence on the decode model. The cost is 25 MB of memory in a
-  // pipe for a few seconds.
-  const rawFramesPath = await decodeToRawFrames(ffmpegBin, log);
-  if (rawFramesPath === null) {
-    // Said once more, in the words that matter to whoever reads the log next:
-    // with no benchmark, `#sustainableHeights` filters nothing and every rung
-    // is offered, which is the failure of 2026-08-14 in full.
-    log.warn("hwaccel: the quality ladder is UNFILTERED on this host — nothing measured the encoder");
-    return [];
-  }
-  /** @type {Array<{ preset: string, pixelsPerSec: number }>} */
-  const results = [];
-  try {
-    // THE CHOSEN ENCODER'S OWN LADDER, whatever kind it is. NVENC walks p1…p7,
-    // QSV veryfast…veryslow, VAAPI its quality levels. A kind with no ladder is
-    // measured once, which is still a reading where there was none at all.
-    const ladder = encoder?.speedLadder;
-    const rungs = Array.isArray(ladder?.values) && ladder.values.length > 0 ? ladder.values : [null];
-    for (const rung of rungs) {
-      const speed = await measureEncodeSlope(ffmpegBin, encoder, rung, rawFramesPath);
-      if (speed === null) {
-        log.warn(`hwaccel: the benchmark of "${rung ?? encoder?.name}" produced no usable reading; skipping`);
-        continue;
-      }
-      const pixelsPerSec = BENCHMARK_REF_W * BENCHMARK_REF_H * TRANSCODE_FPS * speed;
-      results.push({ preset: rung ?? encoder?.name, pixelsPerSec });
-      log.info(
-        `hwaccel: ${encoder?.name} "${rung ?? "as it comes"}" ~= ${(pixelsPerSec / 1e6).toFixed(1)} Mpx/s ` +
-          `(${speed.toFixed(2)}x @ ${BENCHMARK_REF_W}x${BENCHMARK_REF_H}, real footage)`
-      );
-    }
-  } finally {
-    // The encoder was killed a moment ago and on Windows the handle outlives
-    // the signal, so removal is retried and its failure is not worth a session:
-    // this is a temp directory the operating system will clear anyway.
-    try {
-      rmSync(path.dirname(rawFramesPath), { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
-    } catch (error) {
-      log.warn(`hwaccel: could not remove the benchmark's raw frames: ${error instanceof Error ? error.message : String(error)}`);
-    }
-  }
-  return results;
-}
-
-/**
- * How fast one preset encodes, from ffmpeg's own reports of how much video it
- * has written — not from the clock around the process.
- *
- * Timing whole runs measures the run STARTING. Measured 2026-08-15 on a desktop
- * that spawns ffmpeg in ~0.4 s: three seconds of raw frames encoded that way
- * put `fast` and `ultrafast` within 1.24x of each other, when libx264's own
- * presets differ by several times — the constant had swallowed the difference.
- * The slope between two progress reports contains no part of the startup.
- *
- * The frames are written repeatedly so there is runway to measure over,
- * whatever the preset's speed.
- *
- * @param {string} ffmpegBin
- * @param {string} preset
- * @param {string} rawFramesPath
- * @returns {Promise<number | null>} Video seconds encoded per second of clock.
- */
-/**
  * Video seconds produced per second of clock, from ffmpeg's own reports.
  *
  * Startup is excluded by taking a DIFFERENCE: it lands in the wall clock of
@@ -1465,7 +1399,37 @@ export function slopeOf(samples, minimumWindowSec = ENCODE_BENCHMARK_WINDOW_SEC)
   return slope <= ENCODE_BENCHMARK_MAX_PLAUSIBLE_SPEED ? slope : null;
 }
 
+/**
+ * How fast one mode encodes, from ffmpeg's own reports of how much video it
+ * has written — not from the clock around the process.
+ *
+ * Timing whole runs measures the run STARTING. Measured 2026-08-15 on a desktop
+ * that spawns ffmpeg in ~0.4 s: three seconds of raw frames encoded that way
+ * put `fast` and `ultrafast` within 1.24x of each other, when libx264's own
+ * presets differ by several times — the constant had swallowed the difference.
+ * The slope between two progress reports contains no part of the startup.
+ *
+ * The frames are written repeatedly so there is runway to measure over,
+ * whatever the preset's speed.
+ *
+ * THE MACHINE IS NOT QUIET while this runs, and the reading is returned as the
+ * speed this machine gives a software encoder with nothing else running
+ * (torrent-tv/meta#3).
+ *
+ * The figure is used on a quiet-machine basis: the offer later multiplies it by
+ * the share of the machine free at the time of the question
+ * (`available-share.js`). So the share other work took DURING the reading is
+ * divided back out. Measured on the addon host on 2026-10-07: other work took
+ * 17-53 % of the machine during readings, the same mode read 2.08x-3.10x, and
+ * divided by the share left it read 3.60x-3.79x.
+ *
+ * A hardware encoder is limited by its device and not by the cores, so its
+ * reading is kept as read.
+ *
+ * @returns {Promise<{ speed: number, measuredSpeed: number, freeShare: number | null } | null>}
+ */
 export function measureEncodeSlope(ffmpegBin, encoder, rung, rawFramesPath, frame = { width: BENCHMARK_REF_W, height: BENCHMARK_REF_H }) {
+  const cpuBound = encoder?.kind === "software";
   return new Promise((resolve) => {
     const args = [
       "-hide_banner", "-loglevel", "error", "-nostats",
@@ -1491,18 +1455,32 @@ export function measureEncodeSlope(ffmpegBin, encoder, rung, rawFramesPath, fram
     let buffered = "";
     let child;
     const startedAt = Date.now();
+    /** @type {Promise<object | null> | null} */
+    let hostBefore = null;
     const finish = (value) => {
       if (settled) {
         return;
       }
       settled = true;
       clearTimeout(timer);
-      try {
-        child?.kill("SIGKILL");
-      } catch {
-        // already gone
-      }
-      resolve(value);
+      // The second reading of the machine is taken while the encoder is still
+      // running, so the interval is the one the slope was read over.
+      const hostAfter = value !== null && cpuBound && hostBefore !== null && child?.pid
+        ? sampleHost(child.pid).catch(() => null)
+        : Promise.resolve(null);
+      void Promise.all([hostBefore ?? Promise.resolve(null), hostAfter]).then(([before, after]) => {
+        try {
+          child?.kill("SIGKILL");
+        } catch {
+          // already gone
+        }
+        if (value === null) {
+          resolve(null);
+          return;
+        }
+        const freeShare = freeShareDuring(before, after);
+        resolve({ speed: freeShare === null ? value : value / freeShare, measuredSpeed: value, freeShare });
+      });
     };
     const timer = setTimeout(() => finish(null), ENCODE_BENCHMARK_TIMEOUT_MS);
     try {
@@ -1529,6 +1507,10 @@ export function measureEncodeSlope(ffmpegBin, encoder, rung, rawFramesPath, fram
           // be taken for a position nine trillion seconds before the start.
           if (Number.isFinite(outSec) && outSec >= 0) {
             samples.push({ wallSec: (Date.now() - startedAt) / 1000, outSec });
+            if (samples.length === 1 && cpuBound && child?.pid) {
+              // At the first kept report, which is where the slope starts.
+              hostBefore = sampleHost(child.pid).catch(() => null);
+            }
           }
         }
         newline = buffered.indexOf(NEWLINE);

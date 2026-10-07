@@ -1,4 +1,4 @@
-## Unreleased
+## 2.95.0
 
 - **Fix**: The per-step `prediction` line compares a running encode with the prediction for the mode it is actually encoded in, computed for that output. It used to take the figure the offer decides on, which is the cheapest mode, and the last offer computed anywhere in the process: an XviD 360p step was predicted at `ultrafast` and measured at `fast`. The line now names the mode and keeps the offer's figure beside it (torrent-tv/meta#3).
 - **Fix**: Startup encode and decode readings are filed for a machine with nothing else running. Each reading measures the share of the machine other work took while it ran and divides it out, because the offer already multiplies every figure by the share free at the time of the question. On the addon host other work took 17-53 % of the machine during readings, and one mode read 2.08x-3.10x; divided out it reads 3.60x-3.79x. The calibration line states the share. The contention reading is left as read, because there the other work is what it measures (torrent-tv/meta#3).

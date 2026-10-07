@@ -1,3 +1,7 @@
+## Unreleased
+
+- **Fix**: Trim original-source AAC preroll with FFmpeg's output seek and explicitly preserve the published segment position when copying or transcoding separate audio. A later copied AAC segment no longer starts at zero (torrent-tv/meta#154).
+
 ## 2.95.12
 
 - **Fix**: Treat cgroup v2 `memory.high` (systemd's `MemoryHigh=`) as a memory limit alongside `memory.max`: past it the kernel throttles the process and pushes its memory to swap, so the budget no longer grows into it (torrent-tv/meta#155).

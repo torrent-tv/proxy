@@ -14,21 +14,22 @@ import { judgePiece } from "../../services/encode/piece-completeness.js";
 import { presentationSegment } from "../../services/encode/segment-formats/presentation-segment.js";
 
 // Generated ordinary media and a loopback HTTP server only; no torrent imports.
-for (const [bFrames, startIndex, videoIndex = 0, sourceStart = 0, codec = "libx264", rate = "25", cut = 2, final = false] of [[2, 0], [2, 1], [0, 1], [2, 1, 1], [2, 1, 0, 10], [4, 0, 0, 0, "libx265", "24000/1001", 10.01], [4, 1, 0, 0, "libx265", "24000/1001", 10.01], [4, 1, 0, 0, "libx265", "24000/1001", 10.01, true]]) test(`original ${codec} video ${videoIndex} preserves interval ${startIndex} with ${bFrames} B-pictures and source start ${sourceStart}, final=${final}`, async () => {
+for (const [bFrames, startIndex, videoIndex = 0, sourceStart = 0, codec = "libx264", rate = "25", cut = 2, final = false, transcodeAudio = false] of [[2, 0], [2, 1], [0, 1], [2, 1, 1], [2, 1, 0, 10], [4, 0, 0, 0, "libx265", "24000/1001", 10.01], [4, 1, 0, 0, "libx265", "24000/1001", 10.01], [4, 1, 0, 0, "libx265", "24000/1001", 10.01, true], [0, 0, 0, 0, "aac", "25", 10.01], [0, 1, 0, 0, "aac", "25", 10.01], [0, 1, 0, 10, "aac", "25", 10.01], [0, 1, 0, 0, "aac", "25", 10.01, false, true]]) test(`original ${codec} track ${videoIndex} preserves interval ${startIndex} with ${bFrames} B-pictures and source start ${sourceStart}, final=${final}, transcodeAudio=${transcodeAudio}`, async () => {
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), "ttv95-original-input-"));
+  const audioOnly = codec === "aac";
   let input, server;
   try {
     const file = path.join(directory, "input.mkv");
-    const generated = spawnSync(ffmpegBin, ["-v", "error", "-f", "lavfi", "-i", `testsrc2=size=64x64:rate=${rate}`,
+    const generated = spawnSync(ffmpegBin, ["-v", "error", "-f", "lavfi", "-i", audioOnly ? "sine=sample_rate=48000" : `testsrc2=size=64x64:rate=${rate}`,
       ...(videoIndex ? ["-f", "lavfi", "-i", "testsrc2=size=32x32:rate=25", "-map", "0:v", "-map", "1:v"] : []),
-      "-t", String(cut * 2 + (final ? 0 : 0.2)), "-c:v", codec, "-bf", String(bFrames), "-g", String(Math.round(Number(rate.split("/")[0]) / Number(rate.split("/")[1] ?? 1) * cut)),
+      "-t", String(cut * 2 + (final ? 0 : 0.2)), ...(audioOnly ? ["-c:a", codec] : ["-c:v", codec, "-bf", String(bFrames), "-g", String(Math.round(Number(rate.split("/")[0]) / Number(rate.split("/")[1] ?? 1) * cut))]),
       ...(codec === "libx265" ? ["-x265-params", "pools=1:frame-threads=1:scenecut=0:open-gop=1:log-level=error"] : []),
       "-output_ts_offset", String(sourceStart), file], { encoding: "utf8", windowsHide: true });
     assert.equal(generated.status, 0, generated.stderr);
     const bytes = await fs.readFile(file);
     input = await admitOriginalInput({ sources: [{ sourceKey: "generated", fileIndex: 0, timeShiftSeconds: sourceStart,
       input: { original: true, from: sourceStart + startIndex * cut, fileLength: bytes.length, ranges: [[0, bytes.length - 1]],
-        selections: [{ track: { type: "video", reorderDepth: bFrames }, index: videoIndex }] } }],
+        selections: [{ track: { type: audioOnly ? "audio" : "video", reorderDepth: bFrames }, index: videoIndex }] } }],
       reserve: async () => () => {}, readRanges: async () => [bytes] });
     input.runTag = "zero";
     server = http.createServer((req, res) => {
@@ -42,8 +43,8 @@ for (const [bFrames, startIndex, videoIndex = 0, sourceStart = 0, codec = "libx2
     const command = buildOriginalCommand({ admittedInput: input, inputToken: 1,
       baseUrl: `http://127.0.0.1:${server.address().port}`, startIndex,
       timeline: { published: [0, cut, cut * 2], cutGrid: "keyframe", sourceStartOf: () => startIndex * cut },
-      keyframes: { times: [0, cut, cut * 2].map(time => time + sourceStart) }, audioOnly: false, audioSeparate: true,
-      transcodeAudio: false, transcodeVideo: false, output: {}, videoEncoder: {},
+      keyframes: { times: [0, cut, cut * 2].map(time => time + sourceStart) }, audioOnly, audioSeparate: true,
+      transcodeAudio, transcodeVideo: false, output: {}, videoEncoder: {},
       segmentFormat: fmp4Format, segmentDurationSec: cut });
     const child = spawn(ffmpegBin, command.args, { cwd: directory, stdio: ["ignore", "ignore", "pipe", "ignore"], windowsHide: true });
     let diagnostics = "";
@@ -56,12 +57,12 @@ for (const [bFrames, startIndex, videoIndex = 0, sourceStart = 0, codec = "libx2
     const raw = await fs.readFile(path.join(directory, `making-zero-${String(startIndex).padStart(5, "0")}.mp4`));
     const followingName = path.join(directory, `making-zero-${String(startIndex + 1).padStart(5, "0")}.mp4`);
     const following = await fs.readFile(followingName).catch(error => { if (error.code === "ENOENT") return null; throw error; });
-    const partitioned = presentationSegment(raw, following, { from: startIndex * cut, to: (startIndex + 1) * cut });
+    const partitioned = audioOnly ? raw : presentationSegment(raw, following, { from: startIndex * cut, to: (startIndex + 1) * cut });
     const coverage = fmp4Format.readMediaRanges(partitioned);
-    assert.deepEqual(fmp4Format.initVideoSize(fmp4Format.extractInit(raw)), { width: videoIndex ? 32 : 64, height: videoIndex ? 32 : 64 });
-    const judged = judgePiece(fmp4Format, coverage, undefined, { from: startIndex * cut, to: (startIndex + 1) * cut, requiredKinds: ["vide"] });
+    if (!audioOnly) assert.deepEqual(fmp4Format.initVideoSize(fmp4Format.extractInit(raw)), { width: videoIndex ? 32 : 64, height: videoIndex ? 32 : 64 });
+    const judged = judgePiece(fmp4Format, coverage, undefined, { from: startIndex * cut, to: (startIndex + 1) * cut, requiredKinds: [audioOnly ? "soun" : "vide"] });
     assert.equal(judged.whole, true, JSON.stringify({ judged, coverage }, (_key, value) => typeof value === "bigint" ? String(value) : value));
-    assert.equal(coverage.tracks[0].ranges[0].start, BigInt(Math.round(startIndex * cut * Number(coverage.tracks[0].timescale))));
+    if (!audioOnly) assert.equal(coverage.tracks[0].ranges[0].start, BigInt(Math.round(startIndex * cut * Number(coverage.tracks[0].timescale))));
     if (codec === "libx265") {
       const interval = { from: startIndex * cut, to: (startIndex + 1) * cut, requiredKinds: ["vide"] };
       if (!final) {

@@ -471,5 +471,10 @@ test("the family is chosen by codec and depth, and unknown names fall to H.264",
   assert.equal(decodeFamilyOf({ codec: "h265", bitDepth: 12 }), "hevc10");
   assert.equal(decodeFamilyOf({ codec: "h264", bitDepth: 10 }), "h264");
   assert.equal(decodeFamilyOf({ codec: "vc1", bitDepth: null }), "h264");
+  assert.equal(decodeFamilyOf({ codec: "mpeg4", bitDepth: 8 }), "mpeg4");
+  assert.equal(decodeFamilyOf({ codec: "msmpeg4v3", bitDepth: 8 }), "h264");
+  assert.equal(decodeFamilyOf({ codec: "mpeg2video", bitDepth: null }), "mpeg2");
+  assert.equal(decodeFamilyOf({ codec: "av1", bitDepth: 8 }), "av1");
+  assert.equal(decodeFamilyOf({ codec: "av1", bitDepth: 10 }), "h264");
   assert.equal(decodeFamilyOf({}), "h264");
 });

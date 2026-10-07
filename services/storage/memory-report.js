@@ -169,13 +169,6 @@ export async function readMappingSummary() {
 }
 
 /**
- * Available memory, from the one place that reads it.
- *
- * @returns {{ bytes: number, measured: boolean }}
- */
-export { availableMemory };
-
-/**
  * Anonymous memory this process holds, from the kernel's own rollup.
  *
  * `process.memoryUsage()` sees what V8 knows about. It cannot see memory the
@@ -254,8 +247,8 @@ function megabytes(bytes) {
  * @param {"process" | "thread"} [reading.scope]
  * @param {string} [reading.label] - Which thread the isolate figures are of.
  * @param {{ rss: number, heapUsed: number, heapTotal: number, external: number, arrayBuffers: number }} reading.process
- * @param {number} [reading.availableBytes]
- * @param {boolean} [reading.availableMeasured]
+ * @param {import("./machine-memory.js").MemoryReading} [reading.available] -
+ *   What an allocation could obtain, and which reading decided it.
  * @param {number | null} [reading.anonymousBytes]
  * @param {ReturnType<typeof summariseMappings> | null} [reading.mappings]
  * @param {number | null} [reading.diskFreeBytes]
@@ -272,8 +265,7 @@ export function describeMemory({
   scope = "process",
   label = "",
   process: usage,
-  availableBytes,
-  availableMeasured,
+  available,
   anonymousBytes = null,
   mappings = null,
   diskFreeBytes = null,
@@ -312,11 +304,30 @@ export function describeMemory({
     `memory: rss=${megabytes(usage.rss)} ${isolate}` +
     `${anonymousBytes === null ? "" : ` anon=${megabytes(anonymousBytes)}`}${shape}; ` +
     `${storesPart}; ` +
-    `machine has ${megabytes(availableBytes ?? 0)} available` +
-    `${availableMeasured ? "" : " (estimated — /proc/meminfo could not be read)"}` +
+    describeAvailable(available) +
     `${diskFreeBytes === null ? "" : `, ${megabytes(diskFreeBytes)} free on disk`}` +
     tail
   );
+}
+
+/**
+ * What an allocation could obtain, with the reading that decided it and the
+ * container's limit, so a log says whether a limit is in force.
+ *
+ * @param {import("./machine-memory.js").MemoryReading | undefined} available
+ * @returns {string}
+ */
+function describeAvailable(available) {
+  if (!available) {
+    return "available memory not read";
+  }
+  const decided = available.source === "freemem"
+    ? "estimated from free memory — /proc/meminfo could not be read"
+    : `${available.source} decides`;
+  const limit = available.limitBytes === null
+    ? "no container limit"
+    : `container limit ${megabytes(available.limitBytes)}`;
+  return `machine has ${megabytes(available.bytes)} available (${decided}; ${limit})`;
 }
 
 /**
@@ -540,14 +551,13 @@ export function startMemoryReport({
           // mapping and a busy process has thousands; the rollup and
           // `/proc/meminfo` are single lines but still walk page tables, and
           // the reading now happens once a second rather than once a minute.
-          const { bytes, measured } = await availableMemory();
+          const available = availableMemory();
           anonymousBytes = await readAnonymousMemory();
           log(describeMemory({
             scope,
             label,
             process: processMemory,
-            availableBytes: bytes,
-            availableMeasured: measured,
+            available,
             anonymousBytes,
             mappings: await readMappingSummary(),
             diskFreeBytes: diskPath ? await readDiskFree(diskPath) : null,

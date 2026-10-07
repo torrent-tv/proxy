@@ -119,8 +119,7 @@ test("the memory line says bytes, and names what it could not measure", () => {
   };
   const measured = describeMemory({
     process: usage,
-    availableBytes: 1900 * MEGABYTE,
-    availableMeasured: true,
+    available: { bytes: 1900 * MEGABYTE, source: "MemAvailable", limitBytes: null, totalBytes: 8 * GIGABYTE },
     stores: [
       {
         name: "a film",
@@ -134,16 +133,35 @@ test("the memory line says bytes, and names what it could not measure", () => {
   // The figures the kernel's own kill line quoted, so the two can be compared.
   assert.match(measured, /rss=2366MB/);
   assert.match(measured, /1 torrent store\(s\) holding 504MB, committed 504MB of 512MB allowed/);
-  assert.match(measured, /machine has 1900MB available$/);
+  assert.match(measured, /machine has 1900MB available \(MemAvailable decides; no container limit\)$/);
 
   const estimated = describeMemory({
     process: usage,
-    availableBytes: 1900 * MEGABYTE,
-    availableMeasured: false,
+    available: { bytes: 1900 * MEGABYTE, source: "freemem", limitBytes: null, totalBytes: 8 * GIGABYTE },
     stores: []
   });
   assert.match(estimated, /no torrent stores/);
-  assert.match(estimated, /estimated — \/proc\/meminfo could not be read/);
+  assert.match(estimated, /estimated from free memory — \/proc\/meminfo could not be read/);
+});
+
+test("the memory line says whether a container's limit is in force, and whether it decided", () => {
+  // 2026-10-07: a 512 MiB container was killed two seconds after the proxy
+  // logged 4437 MB free — the host's figure — and no line said a limit existed
+  // (torrent-tv/meta#153).
+  const usage = { rss: 400 * MEGABYTE, heapUsed: 40 * MEGABYTE, heapTotal: 50 * MEGABYTE, external: 220 * MEGABYTE, arrayBuffers: 219 * MEGABYTE };
+  const limited = describeMemory({
+    process: usage,
+    available: { bytes: 90 * MEGABYTE, source: "cgroup v2", limitBytes: 512 * MEGABYTE, totalBytes: 512 * MEGABYTE },
+    stores: []
+  });
+  assert.match(limited, /machine has 90MB available \(cgroup v2 decides; container limit 512MB\)$/);
+
+  const roomier = describeMemory({
+    process: usage,
+    available: { bytes: 900 * MEGABYTE, source: "MemAvailable", limitBytes: 4 * GIGABYTE, totalBytes: 4 * GIGABYTE },
+    stores: []
+  });
+  assert.match(roomier, /machine has 900MB available \(MemAvailable decides; container limit 4096MB\)$/);
 });
 
 test("holding and having taken are separate figures, and the line says both", () => {
@@ -151,8 +169,7 @@ test("holding and having taken are separate figures, and the line says both", ()
   // slots taken and never given back, and a line that only mentioned the first.
   const line = describeMemory({
     process: { rss: 893 * MEGABYTE, heapUsed: 29 * MEGABYTE, heapTotal: 34 * MEGABYTE, external: 11 * MEGABYTE, arrayBuffers: 7 * MEGABYTE },
-    availableBytes: 2287 * MEGABYTE,
-    availableMeasured: true,
+    available: { bytes: 2287 * MEGABYTE, source: "MemAvailable", limitBytes: null, totalBytes: 8 * GIGABYTE },
     anonymousBytes: 870 * MEGABYTE,
     diskFreeBytes: 12000 * MEGABYTE,
     stores: [
@@ -341,8 +358,7 @@ test("no /proc, or nothing readable, is answered with zeroes rather than a throw
 test("the mapping shape is said in the line, and left out when it is not known", () => {
   const withShape = describeMemory({
     process: { rss: 900 * MEGABYTE, heapUsed: 27 * MEGABYTE, heapTotal: 30 * MEGABYTE, external: 6 * MEGABYTE, arrayBuffers: 2 * MEGABYTE },
-    availableBytes: 800 * MEGABYTE,
-    availableMeasured: true,
+    available: { bytes: 800 * MEGABYTE, source: "MemAvailable", limitBytes: null, totalBytes: 8 * GIGABYTE },
     anonymousBytes: 870 * MEGABYTE,
     mappings: summariseMappings(SMAPS),
     stores: []
@@ -351,8 +367,7 @@ test("the mapping shape is said in the line, and left out when it is not known",
 
   const withoutShape = describeMemory({
     process: { rss: 900 * MEGABYTE, heapUsed: 27 * MEGABYTE, heapTotal: 30 * MEGABYTE, external: 6 * MEGABYTE, arrayBuffers: 2 * MEGABYTE },
-    availableBytes: 800 * MEGABYTE,
-    availableMeasured: true,
+    available: { bytes: 800 * MEGABYTE, source: "MemAvailable", limitBytes: null, totalBytes: 8 * GIGABYTE },
     anonymousBytes: 870 * MEGABYTE,
     stores: []
   });

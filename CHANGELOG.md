@@ -1,6 +1,9 @@
-## 2.95.10
+## Unreleased
 
 - **Fix**: Publish copied open-GOP HEVC segments with the leading pictures that FFmpeg places in the following file and retain their decode references. Original-source fMP4 video is partitioned before completeness validation; unavailable following media still fails validation (torrent-tv/meta#154).
+
+## 2.95.10
+
 - **Fix**: Resume AVI idx1 parsing from its retained cursor after missing bytes or memory instead of discarding and rebuilding the index. Metadata memory admission wakes pending encoder inputs, including when admission changes during a read; successful keyframe retries populate the shared table, and memory shortages remain pending playback work (torrent-tv/meta#151).
 
 ## 2.95.9

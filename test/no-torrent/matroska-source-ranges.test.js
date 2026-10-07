@@ -1,7 +1,32 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { MatroskaContainer } from "../../services/media/container/MatroskaContainer.js";
-import { buildMatroska, trackEntry, clusterData, pictureBlock } from "./helpers/matroska-file.js";
+import { buildMatroska, trackEntry, clusterData, pictureBlock, element } from "./helpers/matroska-file.js";
+import { ContainerOrchestrator } from "../../services/media/ContainerOrchestrator.js";
+
+test("original ranges retain every declared tail element and retry its unavailable header", async () => {
+  const declarations = [0x1254c367, 0x1043a770, 0x1941a469].map(id => ({ id,
+    bytes: element(id, Buffer.alloc(2 * 1024 * 1024)) }));
+  const source = buildMatroska({ tracks: [trackEntry({ number: 1, type: 1, codecId: "V_VP8" })],
+    clusters: Array.from({ length: 6 }, (_, index) => ({ ticks: index * 2000,
+      data: clusterData({ ticks: index * 2000, blocks: [pictureBlock({ track: 1, payload: Buffer.alloc(2 * 1024 * 1024) })] }) })),
+    cues: [1], trailingElements: declarations });
+  let missing = true;
+  const declarationAt = source.file.length - declarations.reduce((sum, item) => sum + item.bytes.length, 0);
+  const params = { sourceKey: "generated", fileIndex: 0, fileSize: source.file.length,
+    packetInterval: { from: 0, to: 2 }, portionBytes: 4096,
+    readRange: async (start, end) => missing && start === declarationAt ? null : source.file.subarray(start, end + 1) };
+  const orchestrator = new ContainerOrchestrator();
+  assert.equal((await orchestrator.inspect(params, "source-ranges")).kind, "needs-ranges");
+  missing = false;
+  const result = await orchestrator.inspect(params, "source-ranges");
+  assert.equal(result.kind, "result");
+  let at = declarationAt;
+  for (const { bytes } of declarations) {
+    assert.ok(result.value.ranges.some(([start, end]) => start <= at && end >= at + bytes.length - 1));
+    at += bytes.length;
+  }
+});
 
 test("Cues publish the whole needed cluster range before media bytes arrive", async () => {
   const source = buildMatroska({ tracks: [trackEntry({ number: 1, type: 1, codecId: "V_VP8" })],

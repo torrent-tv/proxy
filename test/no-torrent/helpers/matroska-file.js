@@ -172,7 +172,7 @@ export function clusterData({ ticks, blocks, crc = false }) {
  * @param {boolean} [params.cuesBeforeClusters]
  * @returns {{ file: Buffer, clusterAt: number[], cuesAt: number | null, segmentDataOffset: number }}
  */
-export function buildMatroska({ tracks, clusters, cues = [], cuesBeforeClusters = false }) {
+export function buildMatroska({ tracks, clusters, cues = [], cuesBeforeClusters = false, trailingElements = [] }) {
   const info = element(ID.INFO, uintElement(ID.TIMESTAMP_SCALE, 1_000_000));
   const tracksElement = element(ID.TRACKS, Buffer.concat(tracks));
   const clusterElements = clusters.map((cluster) =>
@@ -203,13 +203,14 @@ export function buildMatroska({ tracks, clusters, cues = [], cuesBeforeClusters 
         );
   const seekEntry = (targetId, position) =>
     element(ID.SEEK, Buffer.concat([element(ID.SEEK_ID, idBytes(targetId)), uint32Element(ID.SEEK_POSITION, position)]));
-  const seekHeadWith = (infoAt, tracksAt, cuesAt) =>
+  const seekHeadWith = (infoAt, tracksAt, cuesAt, trailingAt = []) =>
     element(
       ID.SEEK_HEAD,
       Buffer.concat([
         seekEntry(ID.INFO, infoAt),
         seekEntry(ID.TRACKS, tracksAt),
-        ...(cues !== null && !cuesBeforeClusters ? [seekEntry(ID.CUES, cuesAt)] : [])
+        ...(cues !== null && !cuesBeforeClusters ? [seekEntry(ID.CUES, cuesAt)] : []),
+        ...trailingElements.map(({ id }, index) => seekEntry(id, trailingAt[index] ?? 0))
       ])
     );
 
@@ -226,7 +227,13 @@ export function buildMatroska({ tracks, clusters, cues = [], cuesBeforeClusters 
     at += cluster.length;
   }
   const cuesAt = cues === null ? null : cuesBeforeClusters ? tracksAt + tracksElement.length : at;
-  const parts = [seekHeadWith(infoAt, tracksAt, cuesAt ?? 0), info, tracksElement];
+  const trailingAt = [];
+  let trailingPosition = at + (cuesBeforeClusters ? 0 : cuesLength);
+  for (const { bytes } of trailingElements) {
+    trailingAt.push(trailingPosition);
+    trailingPosition += bytes.length;
+  }
+  const parts = [seekHeadWith(infoAt, tracksAt, cuesAt ?? 0, trailingAt), info, tracksElement];
   if (cuesBeforeClusters) {
     parts.push(cuesWith(positions));
   }
@@ -234,6 +241,7 @@ export function buildMatroska({ tracks, clusters, cues = [], cuesBeforeClusters 
   if (!cuesBeforeClusters) {
     parts.push(cuesWith(positions));
   }
+  parts.push(...trailingElements.map(({ bytes }) => bytes));
   const payload = Buffer.concat(parts);
   const ebml = element(ID.EBML, Buffer.from([0x42, 0x86, 0x81, 0x01]));
   const segment = element(ID.SEGMENT, payload);

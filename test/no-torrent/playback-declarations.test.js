@@ -100,3 +100,27 @@ test("a text subtitle track is declared text-based and a picture one is not (tor
   const plan = await planner.getPlan({ sourceKey: "source", fileIndex: 0 });
   assert.deepEqual(plan.subtitleTracks.map(track => track.textBased), [true, false]);
 });
+
+test("the picture and the opening soundtrack are the first ones the file marks usable (torrent-tv/meta#49)", () => {
+  const disabledPicture = new VideoTrack({ trackNumber: 5, declaredIndex: 0, codecId: "V_MPEG2",
+    width: 720, height: 576, isEnabled: false });
+  const picture = new VideoTrack({ trackNumber: 1, declaredIndex: 1, codecId: "V_MPEG4/ISO/AVC",
+    width: 1920, height: 1080, fps: 24 });
+  const tracks = [disabledPicture, picture,
+    new AudioTrack({ trackNumber: 2, declaredIndex: 0, codecId: "A_DTS", isEnabled: false }),
+    new AudioTrack({ trackNumber: 3, declaredIndex: 1, codecId: "A_AAC" })];
+  const facts = playbackDeclarations({ tracks, media });
+  assert.equal(facts.video.trackNumber, 1);
+  assert.equal(facts.videoCodec, "h264");
+  assert.equal(facts.videoWidth, 1920);
+  assert.equal(facts.audioCodec, "aac");
+  // The disabled soundtrack keeps its number: ffmpeg's `0:a:N` counts it.
+  assert.deepEqual(facts.audioTracks.map(track => [track.index, track.isEnabled]), [[0, false], [1, true]]);
+});
+
+test("a file whose only video track is disabled declares no picture (torrent-tv/meta#49)", () => {
+  const facts = playbackDeclarations({ tracks: [new VideoTrack({ trackNumber: 1, declaredIndex: 0,
+    codecId: "V_MPEG4/ISO/AVC", width: 1920, height: 1080, isEnabled: false })], media });
+  assert.equal(facts.video, undefined);
+  assert.equal(facts.videoCodec, "");
+});

@@ -604,7 +604,7 @@ export class MatroskaContainer extends Container {
     // picture cues alone cannot prove that an earlier subtitle has ended.
     if (requested.every(track => track.type === "subtitle")) return first;
     const cueTrack = requested.find(track => track.type === "video") ??
-      tracks.find(track => track.type === "video") ?? requested[0];
+      ContainerTrack.firstUsable(tracks, "video") ?? requested[0];
     if (!cueTrack) return first;
     const points = (cues?.points ?? []).flatMap(point => point.positions
       .filter(position => position.track === cueTrack.trackNumber && position.clusterAt >= first && position.clusterAt < layout.segmentEnd)
@@ -823,7 +823,7 @@ export class MatroskaContainer extends Container {
   }
 
   /**
-   * The keyframe times of the first video track, from the one Cues reading.
+   * The keyframe times of the first usable video track, from the one Cues reading.
    *
    * A CuePoint belongs to the track named inside its CueTrackPositions, and a
    * muxer indexes whatever tracks it likes — field files index their subtitle
@@ -845,7 +845,9 @@ export class MatroskaContainer extends Container {
       return null;
     }
     const tracks = await this.readTracks();
-    const video = tracks.find((track) => track.type === "video")?.trackNumber ?? null;
+    // The picture's own entries: a video track the file marks unusable is not
+    // played, so its keyframes are not where the picture can be cut.
+    const video = ContainerTrack.firstUsable(tracks, "video")?.trackNumber ?? null;
     const timesFor = (wanted) =>
       cues.points
         .filter((point) => wanted === null || point.positions.some((position) => position.track === wanted))

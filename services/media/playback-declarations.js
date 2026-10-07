@@ -1,5 +1,6 @@
 import { AudioTrack } from "./tracks/AudioTrack.js";
 import { TextSubtitleTrack } from "./tracks/TextSubtitleTrack.js";
+import { ContainerTrack } from "./tracks/ContainerTrack.js";
 
 const VIDEO_CODECS = new Map([
   ["V_MPEG4/ISO/AVC", "h264"], ["avc1", "h264"], ["avc3", "h264"],
@@ -33,7 +34,9 @@ function videoCodecOf(track) {
 export function playbackDeclarations({ tracks, media, fileBytes = null }) {
   const ordered = type => tracks.filter(track => track.type === type)
     .sort((a, b) => a.declaredIndex - b.declaredIndex);
-  const video = ordered("video")[0];
+  // The picture is the first video track the container marks usable; a
+  // disabled one is not played (torrent-tv/meta#49).
+  const video = ContainerTrack.firstUsable(tracks, "video") ?? undefined;
   const inventory = type => ordered(type).map((track, index) => ({
     ...track, index, streamIndex: track.declaredIndex,
     codec: type === "audio" ? AudioTrack.codecNameOf(track)
@@ -46,7 +49,8 @@ export function playbackDeclarations({ tracks, media, fileBytes = null }) {
   }));
   const audioTracks = inventory("audio"), subtitleTracks = inventory("subtitle");
   return { tracks, video, audioTracks, subtitleTracks,
-    audioCodec: audioTracks[0]?.codec ?? "",
+    // The soundtrack a file opens with is its first usable one.
+    audioCodec: ContainerTrack.firstUsable(audioTracks, "audio")?.codec ?? "",
     videoCodec: video ? videoCodecOf(video) : "",
     container: media.format,
     durationSeconds: media.durationSeconds,

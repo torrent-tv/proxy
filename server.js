@@ -60,6 +60,7 @@ import { DownloadMaps } from "./services/viewer/DownloadMaps.js";
 import { nativeSourceMap } from "./services/viewer/NativeSourceMap.js";
 import { MediaReadRequests } from "./services/media/MediaReadRequests.js";
 import { SegmentInputs } from "./services/media/SegmentInputs.js";
+import { ContainerTrack } from "./services/media/tracks/ContainerTrack.js";
 import { pauseCoefficient, viewerStartsOn } from "./services/viewer/PriorityMap.js";
 import { coalescing } from "./utils/coalesce.js";
 import {
@@ -581,7 +582,7 @@ export async function startProxyServer({
         const spec = output.spec[type];
         if (!spec) continue;
         const list = selected.get(spec.fileIndex) ?? [];
-        list.push({ type, index: type === "video" ? 0 : spec.trackIndex,
+        list.push({ type, index: type === "video" ? null : spec.trackIndex,
           mode: type === "video" ? spec.encode ? "transcode" : "copy" : spec.transcode ? "transcode" : "copy" });
         selected.set(spec.fileIndex, list);
       }
@@ -595,7 +596,10 @@ export async function startProxyServer({
         if (typeof container?.readPacketIndex !== "function") return { kind: "needs-index", reason: "packet-index-not-yet-available" };
         const modes = new Map(), wanted = [];
         for (const choice of choices) {
-          const track = tracks.value.filter(track => track.type === choice.type)[choice.index];
+          // The picture is the first usable video track (torrent-tv/meta#49);
+          // a soundtrack keeps the number every list of them uses.
+          const track = choice.type === "video" ? ContainerTrack.firstUsable(tracks.value, "video")
+            : tracks.value.filter(track => track.type === choice.type)[choice.index];
           if (!track) return { kind: "terminal", reason: "selected-track-is-absent" };
           wanted.push(track); modes.set(track, choice.mode);
         }

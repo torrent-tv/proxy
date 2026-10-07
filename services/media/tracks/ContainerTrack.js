@@ -72,6 +72,29 @@ export class ContainerTrack {
     this.alternateGroup = Number.isFinite(alternateGroup) ? alternateGroup : 0;
   }
 
+  /**
+   * The first track of `type` the container marks usable, or null.
+   *
+   * Matroska `FlagEnabled`: "Set to 1 if the track is usable" (RFC 9559
+   * §5.1.4.1.3). MP4 `track_enabled`: "A disabled track … is treated as if it
+   * were not present" (ISO/IEC 14496-12 §8.3.2). So the picture a file is
+   * played with, and the soundtrack it opens with when nobody chose one, are the
+   * first USABLE ones — not the first declared. A disabled track keeps its
+   * position in the list, because ffmpeg numbers it either way.
+   *
+   * Takes plain objects as well as tracks: tracks cross the worker boundary as
+   * plain objects.
+   *
+   * @param {Array<{ type: string, isEnabled?: boolean, declaredIndex?: number }>} tracks
+   * @param {"video" | "audio" | "subtitle"} type
+   * @returns {object | null}
+   */
+  static firstUsable(tracks, type) {
+    return (Array.isArray(tracks) ? tracks : [])
+      .filter((track) => track?.type === type && track.isEnabled !== false)
+      .sort((a, b) => (a.declaredIndex ?? 0) - (b.declaredIndex ?? 0))[0] ?? null;
+  }
+
   /** Whether this track should be offered in UI menus. Base rule: disabled tracks hidden but still counted for declaredIndex. */
   isOfferable() {
     return this.isEnabled;

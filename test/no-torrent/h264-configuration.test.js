@@ -15,3 +15,10 @@ test("invalid reorder bounds and missing SPS data cannot become decoder facts", 
   reserved[4] = 254;
   assert.throws(() => h264Configuration(reserved), /length size is reserved/);
 });
+test("an emulation prevention byte before a byte above 0x03 is removed the way decoders remove it", () => {
+  // LostFilm's LostCoder, field 2026-10-06: the SPS carries 00 00 03 b3, which H.264 §7.4.1 forbids and ffmpeg
+  // decodes anyway as time_scale 46000 (torrent-tv/meta#147).
+  const avcc = Buffer.from("0164001fffe100176764001fac2cac05005bb01100000303e8000003b3b08401000468ee3cb0", "hex");
+  assert.deepEqual(h264Configuration(avcc), { width: 1280, height: 720, fps: 23, bitDepth: 8, reorderDepth: 5,
+    frameOnly: true, timingTickSeconds: 1000 / 46000, picStructPresent: false, seiDelayBits: 0, nalLengthBytes: 4 });
+});

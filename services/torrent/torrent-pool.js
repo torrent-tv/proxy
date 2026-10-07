@@ -1826,17 +1826,19 @@ export class TorrentPool {
 
   /**
    * Schedule removal of a torrent (with its on-disk store) after
-   * {@link TORRENT_IDLE_TTL_MS} of nothing being wanted of it. Idempotent —
-   * replaces any existing timer for the torrent.
+   * {@link TORRENT_IDLE_TTL_MS} of nothing being wanted of it. The clock runs
+   * from when it stopped being wanted, so a timer already running is kept:
+   * replacing it on every report of the same state extended the time without
+   * end, and the withdrawal of one map's 4900 zones replaced it 3524 times in
+   * four seconds (Home Assistant 2026-10-07, torrent-tv/meta#95).
    *
    * @param {import("webtorrent").Torrent} torrent
    * @returns {void}
    */
   #scheduleIdleRemoval(torrent) {
-    if (!torrent) {
+    if (!torrent || this.#idleTimers.has(torrent)) {
       return;
     }
-    this.#cancelIdleRemoval(torrent);
     const name = typeof torrent.name === "string" ? torrent.name : "(unknown)";
     const infoHashShort = String(torrent.infoHash ?? "?").slice(0, 8);
     logger.info(`torrent-pool: scheduling idle removal for "${name}" [${infoHashShort}] in ${TORRENT_IDLE_TTL_MS / 1000}s`);

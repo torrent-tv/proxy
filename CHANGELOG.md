@@ -1,5 +1,6 @@
 ## Unreleased
 
+- **Fix**: The idle-removal clock of a torrent nobody wants runs from when it stopped being wanted instead of restarting on every report, which also stops thousands of identical log lines when a map is withdrawn (torrent-tv/meta#95).
 - **Fix**: Keep downloading and encoding while a viewer watches: each move of the viewer re-cut the download map, the interim map came out empty, the torrent left its swarm and the encoder lost its source ranges for ten to twenty seconds every few segments; zones still covering wanted film now stay until the new map is resolved (torrent-tv/meta#95).
 
 ## 2.95.7

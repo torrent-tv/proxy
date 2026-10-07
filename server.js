@@ -943,8 +943,6 @@ export async function startProxyServer({
       return params ? await containerOrchestrator.getTracks(params) : [];
     },
     warmKeyframeIndex: (params) => keyframeTables.warm(params),
-    expectedFirstSegmentMs: () => outputParts.hostTimings.expectedFirstSegmentMs(),
-    expectedSessionCreateMs: () => outputParts.hostTimings.expectedSessionCreateMs(),
     // The quality menu is on screen from the moment a file is opened, so the
     // heights this host can actually serve have to be answerable before any
     // encoder exists — from the probe and the startup benchmarks alone.

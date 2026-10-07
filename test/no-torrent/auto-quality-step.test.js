@@ -501,9 +501,12 @@ test("the way BACK UP exists, one rung at a time", async (t) => {
   session.encodeWidth = 854;
   session.encodeHeight = 480;
   measureSpeed([...session.runs][0], 2.4);
-  // What another output takes to be ready here: the picture's first segment
-  // on the addon host, field 2026-08-31.
-  manager.hostTimings.rememberFirstSegmentLatency(8_400);
+  // What another output takes to be ready here, computed as the proxy computes
+  // it: this mode's speed as the encoding layer has learned it, and the wait
+  // for a first output this host was measured to need — the picture's first
+  // segment on the addon host, field 2026-08-31.
+  qualityStateOf(session).lastAloneSpeed = 2.4;
+  manager.encodeOrchestrator.noteStartupCosts({ firstByteWaitSec: 8.4, killCostSec: 0 });
   // Their link is not measured here: what is under test is the room, and a
   // measured link would also weigh a soundtrack this fixture states no rate for.
   fillingReports(manager.viewers.get("viewer"), null);
@@ -677,9 +680,12 @@ test("a picture seen larger than the rung on screen is asked one rung up, when t
   session.encodeWidth = 854;
   session.encodeHeight = 480;
   measureSpeed([...session.runs][0], 2.4);
-  // What another output takes to be ready here: the picture's first segment
-  // on the addon host, field 2026-08-31.
-  manager.hostTimings.rememberFirstSegmentLatency(8_400);
+  // What another output takes to be ready here, computed as the proxy computes
+  // it: this mode's speed as the encoding layer has learned it, and the wait
+  // for a first output this host was measured to need — the picture's first
+  // segment on the addon host, field 2026-08-31.
+  qualityStateOf(session).lastAloneSpeed = 2.4;
+  manager.encodeOrchestrator.noteStartupCosts({ firstByteWaitSec: 8.4, killCostSec: 0 });
   manager.viewers.get("viewer").noteVisiblePicture({ width: 1920, height: 1080 });
   fillingReports(manager.viewers.get("viewer"), null);
 

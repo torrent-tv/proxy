@@ -41,13 +41,22 @@
  */
 
 import { readFileSync, writeFileSync } from "node:fs";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { configurationKeyOf, kindOfEncoderName } from "./fingerprint.js";
+
+/**
+ * The directory of the installed proxy, where these observations are kept when
+ * the deployment names no state directory. Deliberately not the working
+ * directory: for an ordinary `npm i -g` install that is wherever the operator
+ * launched from, which would split the history between runs.
+ */
+export const PROXY_ROOT = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
 
 /**
  * How many readings are kept per key. A history window, not a figure about the
  * machine: long enough that one run cannot decide, short enough that the
- * figure follows the host as it changes. The same length the host timings keep
- * (`quality/HostTimings.js`).
+ * figure follows the host as it changes.
  */
 const READINGS_KEPT = 20;
 

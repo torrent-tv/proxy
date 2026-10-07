@@ -119,6 +119,16 @@ export class EncodeOrchestrator {
     this.#costs.noteStartup(measured);
   }
 
+  /**
+   * What a stop and a start cost on this host, in seconds, as the plan reads
+   * them — for anyone else pricing a fresh encoder by the same figures.
+   *
+   * @returns {{ killCostSec: number, firstByteWaitSec: number, samples: number }}
+   */
+  runCostSeconds() {
+    return this.#costs.seconds();
+  }
+
   /** Derived segment demand for one output, copied from the discardable cache. */
   wantedSegmentsOn(address) {
     return [...this.#demand.mapOn(address)];

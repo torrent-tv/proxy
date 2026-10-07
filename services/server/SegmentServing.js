@@ -52,7 +52,7 @@ export class SegmentServing {
   #host;
 
   /**
-   * @param {object} host - `buildMasterPlaylist`, `declaredTracks`, `publishedGridFor`, `runStartTimeFor`, `cushion`, `encodeOrchestrator`, `encodeRuns`, `hostTimings`, `lookaheadSeconds`, `outputTimes`, `outputs`, `segmentStore`, `startupWaitMs`, `viewers`
+   * @param {object} host - `buildMasterPlaylist`, `declaredTracks`, `publishedGridFor`, `runStartTimeFor`, `cushion`, `encodeOrchestrator`, `encodeRuns`, `coldStarts`, `lookaheadSeconds`, `outputTimes`, `outputs`, `segmentStore`, `startupWaitMs`, `viewers`
    */
   constructor(host) {
     this.#host = host;
@@ -288,8 +288,8 @@ export class SegmentServing {
       }
 
       // Cold-start: the time from the create request to a playable first
-      // segment, measured once per output by the owner of host timings.
-      const coldStartMs = isPlaylist ? null : this.#host.hostTimings.noteSegmentServed(session);
+      // segment, measured once per output.
+      const coldStartMs = isPlaylist ? null : this.#host.coldStarts.noteSegmentServed(session);
       if (coldStartMs !== null) {
         // Data is flowing again, so the next loss starts its backoff afresh
         // rather than inheriting the delay of the last one.

@@ -213,7 +213,7 @@ are recorded in `docs/browser-proxy-contract.md`.
     host it reads. `hls-session-manager.js` is gone (2.87.0): each of its members
     is a method of the component that owns it. The operations own no long-lived
     fact: the init served for an output is kept by `SegmentStore`, the bytes read
-    for an output by `EncodeRuns`, the cold-start measurement by `HostTimings`.
+    for an output by `EncodeRuns`, the cold-start measurement by `ColdStarts`.
     They import no component's implementation — only the name of an output and
     of its playlist (`encode/output/index.js`) and the keeping period
     (`storage/keep.js`); biome checks it. A held request waits for the store's

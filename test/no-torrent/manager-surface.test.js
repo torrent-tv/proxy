@@ -45,7 +45,7 @@ const HERE = path.dirname(fileURLToPath(import.meta.url));
 const PROXY = path.join(HERE, "..", "..");
 const SESSION_ID = "aaaaaaaabbbbcccc";
 /** The components the HTTP layer is handed. */
-const COMPONENTS = ["serving", "viewerRequests", "renditions", "lifecycle", "quality", "outputs", "hostTimings", "viewers", "encodeRuns"];
+const COMPONENTS = ["serving", "viewerRequests", "renditions", "lifecycle", "quality", "outputs", "coldStarts", "viewers", "encodeRuns"];
 
 /**
  * Every `.js` file under a directory, at any depth.
@@ -185,8 +185,6 @@ test("the progress report keeps every figure it carries today", async () => {
     "currentHeight",
     "offeredHeights",
     "requestedHeight",
-    "expectedSessionCreateMs",
-    "expectedFirstSegmentMs",
     "updatedAt",
     "error"
   ];

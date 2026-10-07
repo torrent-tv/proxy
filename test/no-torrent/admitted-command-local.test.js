@@ -17,8 +17,8 @@ import { presentationSegment } from "../../services/encode/segment-formats/prese
 import { walkBoxes } from "../../services/encode/segment-formats/mp4-boxes.js";
 
 // Only synthetic lavfi input and stdin are used; no torrent or HTTP boundary.
-for (const [codec, origin] of [["aac", 0], ["ac3", 850.016]]) {
-test(`audio-only ${codec} cuts at ${origin}s cover each declared interval within one AAC frame`, async () => {
+for (const [codec, origin, delay = 0] of [["aac", 0], ["ac3", 850.016], ["aac", 0, 1024 / 48000]]) {
+test(`audio-only ${codec} cuts at ${origin}s with ${delay}s delay cover each declared interval within one AAC frame`, async () => {
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), "ttv-audio-cut-"));
   try {
     const file = path.join(directory, codec === "ac3" ? "source.mkv" : "source.mp4");
@@ -31,7 +31,7 @@ test(`audio-only ${codec} cuts at ${origin}s cover each declared interval within
     const index = await container.readPacketIndex();
     const input = new SegmentInputs({ tracks, index }).forInterval({ from: 0, to: 3, mode: "copy" });
     assert.equal(input.kind, "result");
-    const admitted = await admitInput({ sources: [{ sourceKey: "local", fileIndex: 0, input, timeShiftSeconds: -origin }], reserve: () => () => {},
+    const admitted = await admitInput({ sources: [{ sourceKey: "local", fileIndex: 0, input, timeShiftSeconds: -origin - delay }], reserve: () => () => {},
       readRanges: async (_source, ranges) => ranges.map(([a, b]) => Buffer.from(bytes.subarray(a, b + 1))) });
     const chunks = [];
     await writeAdmittedInput(admitted, new Writable({ write(chunk, _encoding, done) { chunks.push(Buffer.from(chunk)); done(); } }));

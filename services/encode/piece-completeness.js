@@ -141,7 +141,11 @@ function intervalFailure(coverage, { from, to, requiredKinds, sourceEnds = {} })
     const end = BigInt(Math.round(through * Number(track.timescale)));
     const first = track.ranges[0];
     const frame = track.productionFrame ?? first.frame;
-    if (first.start > start + frame || first.start < start - frame) return `segment-start-outside-interval-${kind}`;
+    // The muxer rounds an empty edit to movie ticks independently of sample
+    // cadence. Account for that recorded position uncertainty at the boundary,
+    // without admitting another missing frame or widening internal gaps.
+    const positionError = track.positionErrorTicks ?? 0n;
+    if (first.start > start + frame + positionError || first.start < start - frame - positionError) return `segment-start-outside-interval-${kind}`;
     // The first sample's cadence already bounds the interval start. A shorter
     // final sample must not replace that bound when this range is traversed.
     let reached = first.start;
@@ -150,7 +154,7 @@ function intervalFailure(coverage, { from, to, requiredKinds, sourceEnds = {} })
       if (range.end > reached) reached = range.end;
     }
     const finalFrame = track.productionFrame ?? track.ranges.at(-1).frame;
-    if (reached < end - finalFrame || reached > end + finalFrame) return `segment-end-outside-interval-${kind}`;
+    if (reached < end - finalFrame - positionError || reached > end + finalFrame + positionError) return `segment-end-outside-interval-${kind}`;
   }
   return null;
 

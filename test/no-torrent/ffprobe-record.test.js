@@ -8,6 +8,8 @@ test("compact records preserve escaped separators, control characters and equals
   assert.throws(() => ffprobeRecord("packet|size=2|size=3"), /Duplicate/);
   assert.throws(() => ffprobeRecord("packet|size=2\\"), /Truncated/);
   assert.deepEqual(ffprobeRecord("packet|size=2|side_data|"), { kind: "packet", size: "2" });
+  assert.deepEqual(ffprobeRecord("packet|size=2||"), { kind: "packet", size: "2" });
+  assert.throws(() => ffprobeRecord("packet|size=2||unexpected=3"), /Malformed/);
   assert.throws(() => ffprobeRecord("packet|size=2|side_data|unexpected=3"), /Malformed/);
 });
 

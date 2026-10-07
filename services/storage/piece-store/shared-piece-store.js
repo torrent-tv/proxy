@@ -52,6 +52,7 @@ import { PieceDiskStore } from "./piece-disk-store.js";
  * @type {Set<SharedPieceStore>}
  */
 const liveStores = new Set();
+let assignedMemoryAllowance = null;
 
 export function collectStoreStats() {
   return [...liveStores].map((store) => store.stats());
@@ -107,11 +108,17 @@ export function machineReserveBytes() {
 /** Forget what other processes have needed. For tests, which share a module. */
 export function forgetMachineMemory() {
   otherDemand.forget();
+  assignedMemoryAllowance = null;
 }
 
 export { divideAllowance, machineAllowanceBytes };
 
-export function reviseStoreBudgets(allowanceBytes = null) {
+export function reviseStoreBudgets(allowanceBytes = assignedMemoryAllowance) {
+  // Periodic maintenance must retain the main thread's latest allocation.
+  // Recomputing it from host free memory would overwrite a fixed limit and
+  // the memory reserved for admitted encoder input.
+  assignedMemoryAllowance = Number.isFinite(allowanceBytes) && allowanceBytes !== null
+    ? Math.max(0, allowanceBytes) : null;
   const stores = [...liveStores];
   const held = stores.reduce((sum, store) => sum + store.residentBytes, 0);
   // TOLD, NOT WORKED OUT. Memory has one owner and it is on the main thread,

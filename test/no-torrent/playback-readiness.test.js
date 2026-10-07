@@ -114,7 +114,24 @@ test("a declared map forecast cannot invent an absent future range from download
   const state = input({ reserveSeconds: 0 });
   state.sources[0] = { id: "source", complete: false, residence: [],
     readings: [{ at: state.now, value: 1e9 }], downloadForecast: { ranges: [] } };
-  assert.equal(predictPlaybackReadiness(state).reason, "download-schedule-unavailable");
+  const result = predictPlaybackReadiness(state);
+  assert.equal(result.reason, "download-schedule-unavailable");
+  assert.deepEqual(result.unavailableSource, { sourceId: "source", segmentIndex: 1,
+    range: { start: 4, end: 8 }, missing: [{ start: 4, end: 8 }] });
+});
+
+test("overlapping unordered arrivals preserve the latest required byte and ignore unrelated arrivals", () => {
+  const state = input({ reserveSeconds: 0 });
+  state.sources[0] = { id: "source", complete: false, residence: [], readings: [],
+    downloadForecast: { ranges: [
+      { start: 7, end: 8, availableAt: state.now + 3000 },
+      { start: 0, end: 6, availableAt: state.now + 1000 },
+      { start: 5, end: 7, availableAt: state.now + 2000 },
+      { start: 100, end: 200, availableAt: state.now + 90000 }
+    ] } };
+  assert.equal(predictPlaybackReadiness(state).delaySeconds, 2);
+  state.sources[0].downloadForecast.ranges[2].end = 6;
+  assert.deepEqual(predictPlaybackReadiness(state).unavailableSource.missing, [{ start: 6, end: 7 }]);
 });
 
 test("missing packet addresses cannot be replaced by file-average density even when bytes are held", () => {

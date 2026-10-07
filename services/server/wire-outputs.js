@@ -341,6 +341,7 @@ export function wireOutputs({
     get encodeCost() { return parts.encodeCost; },
     get encodeOrchestrator() { return parts.encodeOrchestrator; },
     get ffmpegBin() { return parts.ffmpegBin; },
+    get localBaseUrl() { return parts.localBaseUrl; },
     get outputTimes() { return parts.outputTimes; },
     get outputs() { return parts.outputs; },
     get priority() { return parts.priority; },
@@ -972,7 +973,7 @@ export function wireOutputs({
     reviseBudget: () => parts.machineBudget.revise(),
     capacity: () => parts.machineBudget.capacityOf("memory"),
     urgent: (output, index) => parts.encodeOrchestrator.wantedSegmentsOn(output.outputKey).some(window =>
-      index >= window.from && index <= window.to && window.withinSeconds === 0),
+      index >= window.from && index <= window.to && window.urgent === true),
     changed: (output, result) => {
       if (result.kind === "terminal") {
         logger.warn(`encode input output=${output.outputKey} terminal=${result.reason}: ${result.message ?? ""}` +

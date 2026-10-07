@@ -20,20 +20,33 @@ only outstanding work is withdrawn when viewer demand changes.
 ## Publication and scheduling
 
 DemandRegister retains windows by claimant and exposes a revision. SwarmSelection
-projects them into WebTorrent selections and storage priorities. Registry batches
-selection changes before one global DeadlineScheduler pass. Reentrant library
-wire updates cannot rescan a partly published map.
+projects them into public WebTorrent selections and storage priorities. Only
+the highest missing urgency and priority group with the earliest required time
+is selected. When it is satisfied,
+the next group becomes eligible. The map retains all lower groups. The registry
+applies this ordering across torrents sharing the host. Adjacent and overlapping
+ranges in the eligible group are published as a union, matching the library's
+public selection merging. Publishing background ranges alongside urgent ranges
+would otherwise merge them and lose the urgent interval's independent selection.
 
-DeadlineScheduler orders missing pieces by deadline, priority, list order and
-piece number across all live torrents. Each peer retains its protocol request
-capacity and piece verification. A faster peer can replace a block request whose
-predicted completion misses its deadline. Compiled piece demand is reused until
-the register changes; actual piece availability is read again on every pass.
+WebTorrent chooses peers, protocol blocks, request capacity and reassignment.
+The proxy does not replace its methods. Withdrawn selections cancel obsolete
+requests; selections shared by remaining demand keep their requests. `critical`
+marks missing blocked-read ranges through the public API.
 
-FutureDownload uses the same ordering and request-capacity rules against an
-isolated copy of peer state. A piece becomes available only after every block is
-received. Unmeasured completion remains unknown. Concurrent source reports share
-one forecast; a changed or withdrawn map invalidates that forecast.
+FutureDownload observes outstanding peer queues, advertised pieces and measured
+peer rates. Complete queues provide a piece's arrival. For unrequested blocks,
+the public map establishes the order between bands, including required times
+when priorities tie; every piece in a band uses
+the completion time of that whole band, because the native picker determines
+the order within it. Service times are summed across torrents instead of spending
+the same supply concurrently. A piece without a measured supplier leaves its
+band and later bands unknown; observed complete queues remain usable. The estimate
+is conditional on continued supply and successful verification. It never issues
+requests or replaces WebTorrent's picker.
+Concurrent source reports share one forecast; a changed or withdrawn map
+invalidates that forecast. Unknown arrival affects the estimate, not download
+selection or encoder admission of bytes that have actually arrived.
 
 ## Storage and input
 
@@ -41,10 +54,18 @@ Storage owns residence and atomic acquisition of available input. Held pieces
 cannot be evicted. Capacity-driven removal follows the published map and announces
 changed availability, causing unfinished media reads and input admission to retry.
 
-The encoder receives complete admitted input under its memory allowance. It never
-reads a source URL or waits for the torrent to fill an incomplete input. A stopped
-or superseded request releases its reservation. Completed segments remain facts
-available to every compatible viewer.
+The encoder receives complete admitted original-file ranges under its memory
+allowance, through a loopback-only HTTP address owned by its run. Each response
+ends within the retained range and is at most 1 MiB. Missing positions return
+503 immediately; reading never waits for the torrent. FFmpeg demuxes the original
+container and selects its tracks. Matroska Cues supply coarse media ranges without
+parsing media block headers. Original-source input is enabled only when that
+complete Cue map exists, the output is fMP4 and all selected tracks share one
+source file. Other layouts, MPEG-TS output and combined inputs from separate
+files retain their existing indexed input:
+a finite FFprobe interval does not establish addresses for the full future map.
+A stopped or superseded request releases its
+reservation. Completed segments remain available to every compatible viewer.
 
 A fully retained source is described by its whole files after its torrent closes.
 It continues to answer availability and source facts without rebuilding a torrent.

@@ -145,6 +145,8 @@ export class MatroskaContainer extends Container {
 
   /** @type {SegmentLayout | null} */
   #layout = null;
+  #sourceElementEnds = new Map();
+  #sourceSeekPoints = null;
 
   /** @type {Array<import("../tracks/ContainerTrack.js").ContainerTrack> | null} */
   #tracks = null;
@@ -567,6 +569,83 @@ export class MatroskaContainer extends Container {
     }
     this.#tracks = result;
     return result;
+  }
+
+  /** Original-file ranges from Cues alone, without reading media block headers.
+   * FFmpeg needs the declarations and seek table as well as complete clusters.
+   * One preceding cluster retains preroll; one following cluster covers demux
+   * lookahead beyond the presentation cut. No packet payload is parsed here.
+   */
+  async supportsOriginalSourceRanges() {
+    const cues = await this.readCues();
+    if (!cues?.points.length) return false;
+    const video = ContainerTrack.firstUsable(await this.readTracks(), "video");
+    return cues.points.some(point => point.positions.some(position => !video || position.track === video.trackNumber));
+  }
+
+  async readMappedSourceRanges(interval) { return this.readSourceRanges(interval); }
+
+  async readSourceRanges(interval) {
+    if (!Number.isFinite(interval?.from) || !Number.isFinite(interval?.to) || interval.to <= interval.from) {
+      throw new TypeError("Source ranges require a finite increasing interval.");
+    }
+    const layout = await this.#segmentLayout();
+    if (!layout || layout.firstClusterAt === null) return { kind: "terminal", reason: "source-has-no-clusters" };
+    const cues = await this.readCues();
+    if (!await this.supportsOriginalSourceRanges()) return { kind: "needs-index", reason: "source-has-no-cue-map" };
+    const tracks = await this.readTracks();
+    const requested = tracks.filter(track => !interval.trackIds?.length || interval.trackIds.includes(track.trackNumber));
+    const video = ContainerTrack.firstUsable(tracks, "video");
+    const points = this.#sourceSeekPoints ??= cues.points.flatMap(point => point.positions
+      .filter(position => !video || position.track === video.trackNumber)
+      .map(position => ({ at: position.clusterAt, seconds: point.ticks * layout.secondsPerTick })))
+      .sort((left, right) => left.seconds - right.seconds || left.at - right.at);
+    if (!points.length) return super.readSourceRanges(interval);
+    const preroll = Math.max(0, ...requested.map(track => track.seekPrerollSeconds ?? 0));
+    const firstAt = (seconds, strict) => {
+      let low = 0, high = points.length;
+      while (low < high) {
+        const middle = Math.floor((low + high) / 2);
+        if (points[middle].seconds < seconds || strict && points[middle].seconds === seconds) low = middle + 1;
+        else high = middle;
+      }
+      return low;
+    };
+    const first = Math.max(0, firstAt(interval.from - preroll, true) - 2);
+    const beyond = firstAt(interval.to, false);
+    const following = points[beyond + 1];
+    const mediaEnd = following ? following.at - 1 : layout.segmentEnd - 1;
+    const elementEnd = async at => {
+      if (this.#sourceElementEnds.has(at)) return this.#sourceElementEnds.get(at);
+      const reader = new ElementReader({ read: this.readRange, fileSize: this.fileSize, portionBytes: this.portionBytes });
+      const header = await reader.header(at, layout.segmentEnd);
+      if (!header || header.end === null) return null;
+      this.#sourceElementEnds.set(at, header.end);
+      return header.end;
+    };
+    const cuesEnd = await elementEnd(layout.cuesAt);
+    if (cuesEnd === null) return { kind: "terminal", reason: "source-seek-index-is-unbounded" };
+    const requestBytes = 1024 * 1024;
+    const paddedEnd = end => Math.min(this.fileSize - 1, end + requestBytes);
+    const ranges = [[0, paddedEnd(layout.firstClusterAt - 1)],
+      [points[first].at, paddedEnd(mediaEnd)], [layout.cuesAt, paddedEnd(cuesEnd - 1)],
+      [Math.max(0, this.fileSize - requestBytes), this.fileSize - 1]];
+    // SeekHead may name top-level declarations after media clusters. Preserve
+    // their original bytes instead of reconstructing declarations for FFmpeg.
+    for (const at of [layout.infoAt, layout.tracksAt]) {
+      if (at === null || at < layout.firstClusterAt) continue;
+      const end = await elementEnd(at);
+      if (end === null) return { kind: "terminal", reason: "source-declarations-are-unbounded" };
+      ranges.push([at, paddedEnd(end - 1)]);
+    }
+    ranges.sort((left, right) => left[0] - right[0]);
+    const union = [];
+    for (const range of ranges) {
+      const previous = union.at(-1);
+      if (previous && range[0] <= previous[1] + 1) previous[1] = Math.max(previous[1], range[1]);
+      else union.push([...range]);
+    }
+    return { kind: "result", from: interval.from, to: interval.to, ranges: union, fileLength: this.fileSize };
   }
 
   async readPacketIndex(interval) {

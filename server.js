@@ -42,6 +42,7 @@ import { handleApiTranscodeSessionNetReportPost } from "./routes/api/transcode-s
 import { handleApiTranscodeSessionFragmentFarPost } from "./routes/api/transcode-sessions/fragment-far/post.js";
 import { handleApiTranscodeSessionSeekPost } from "./routes/api/transcode-sessions/seek/post.js";
 import { handleStreamGet } from "./routes/stream/get.js";
+import { handleEncodeInputGet } from "./routes/encode-input/get.js";
 import { handleTranscodeSessionFileGet } from "./routes/transcode/session-file/get.js";
 import { handleTranscodeVariantFileGet } from "./routes/transcode/variant-file/get.js";
 import { handleTranscodeAudioFileGet } from "./routes/transcode/audio-file/get.js";
@@ -57,7 +58,7 @@ import { SubtitleOrchestrator } from "./services/media/SubtitleOrchestrator.js";
 import { containerOrchestrator, CONTAINER_HEAD_BYTES, describeWorkTags } from "./services/media/ContainerOrchestrator.js";
 import { readPlaybackDeclarations } from "./services/media/read-playback-declarations.js";
 import { DownloadMaps } from "./services/viewer/DownloadMaps.js";
-import { nativeSourceMap } from "./services/viewer/NativeSourceMap.js";
+import { nativeSourceMap, nativeOriginalSourceMap } from "./services/viewer/NativeSourceMap.js";
 import { MediaReadRequests } from "./services/media/MediaReadRequests.js";
 import { SegmentInputs } from "./services/media/SegmentInputs.js";
 import { ContainerTrack } from "./services/media/tracks/ContainerTrack.js";
@@ -417,7 +418,7 @@ export async function startProxyServer({
       const tracks = await containerOrchestrator.inspect(params, "tracks");
       if (tracks.kind !== "result" || !map.isCurrent()) return [];
       const container = containerOrchestrator.known(map.sourceKey, map.fileIndex);
-      if (typeof container?.readPacketIndex !== "function") return [];
+      if (typeof container?.readSourceRanges !== "function" && typeof container?.readPacketIndex !== "function") return [];
       const media = await containerOrchestrator.inspect(params, "media-info");
       if (media.kind !== "result" || !map.isCurrent()) return [];
       const shift = Number(media.value?.startTimeSeconds) || 0;
@@ -450,7 +451,9 @@ export async function startProxyServer({
       demands.sort((left, right) => left.deadlineAt - right.deadlineAt || right.priority - left.priority || left.index - right.index);
       for (const zone of demands) {
         if (!map.isCurrent()) return [];
-        const selected = zone.tracks.map(choice => ({ choice, track: tracks.value.filter(track => track.type === choice.type)[choice.index] }));
+        const selected = zone.tracks.map(choice => ({ choice, track: choice.type === "video"
+          ? ContainerTrack.firstUsable(tracks.value, "video")
+          : tracks.value.filter(track => track.type === choice.type)[choice.index] }));
         if (selected.some(({ track }) => !track)) continue;
         const wanted = selected.map(({ track }) => track);
         const modes = new Map(selected.map(({ choice, track }) => [track, choice.mode]));
@@ -461,10 +464,15 @@ export async function startProxyServer({
           demand: { ...zone.owner, leadSeconds: zone.leadSeconds } });
         if (!map.isCurrent()) return [];
         if (!intervalParams) continue;
-        const packets = await containerOrchestrator.inspect(intervalParams, "packets");
+        const navigation = await containerOrchestrator.inspect(intervalParams, "source-navigation");
+        if (navigation.kind !== "result") continue;
+        const originalRanges = navigation.value;
+        const packets = originalRanges && !zone.urgent
+          ? { kind: "result", value: await container.readMappedSourceRanges(interval) }
+          : await containerOrchestrator.inspect(intervalParams, originalRanges ? "source-ranges" : "packets");
         if (!map.isCurrent()) return [];
         if (packets.kind !== "result") continue;
-        const input = new SegmentInputs({ index: packets.value, tracks: wanted }).forInterval({ ...interval, mode: track => modes.get(track) });
+        const input = originalRanges ? packets.value : new SegmentInputs({ index: packets.value, tracks: wanted }).forInterval({ ...interval, mode: track => modes.get(track) });
         if (input.kind !== "result") continue;
         const { tracks: _choices, owner: _owner, sourceInterval: _sourceInterval, ...demand } = zone;
         for (const [byteStart, byteEnd] of input.ranges) converted.push({ ...demand,
@@ -610,6 +618,16 @@ export async function startProxyServer({
         params.packetInterval = { ...sourceInterval,
           trackIds: wanted.map(track => track.trackNumber),
           modes: Object.fromEntries(wanted.map(track => [track.trackNumber, modes.get(track)])) };
+        const navigation = await containerOrchestrator.inspect(params, "source-navigation");
+        if (navigation.kind !== "result") return navigation;
+        if (navigation.value && selected.size === 1 && output.segmentFormat.supportsOriginalInput === true) {
+          const ranges = await containerOrchestrator.inspect(params, "source-ranges");
+          if (ranges.kind !== "result") return ranges;
+          sources.push({ sourceKey: params.sourceKey, fileIndex, timeShiftSeconds,
+            input: { ...ranges.value, original: true, selections: wanted.map(track => ({ track,
+              index: track.declaredIndex ?? choices.find(choice => choice.type === track.type)?.index ?? 0 })) } });
+          continue;
+        }
         const packets = await containerOrchestrator.inspect(params, "packets");
         if (packets.kind !== "result") return packets;
         const input = new SegmentInputs({ index: packets.value, tracks: wanted }).forInterval({
@@ -769,13 +787,15 @@ export async function startProxyServer({
   // decides anything, keeps the segments whose closure is proven, and removes
   // the one piece per output that was being written when the process died.
   outputParts.lifecycle.adoptSegmentsLeftBehind();
-  const publishNative = work => {
+  const publishNative = async work => {
     if (!work.nativeInput || !sourcePreparation.accepts(work)) return Promise.resolve();
     const viewers = outputParts.viewers.forSource(work.sourceKey)
       .filter(viewer => viewer.source.selectedFileIndex === work.fileIndex && viewer.outputs.size === 0);
-    const zones = nativeSourceMap({ ...work.nativeInput, viewers,
+    const convert = work.nativeInput.container ? nativeOriginalSourceMap : nativeSourceMap;
+    const zones = await convert({ ...work.nativeInput, viewers,
       allowanceSeconds: outputParts.segmentDurationSec,
       urgentReadyFor: viewer => sourcePreparation.urgentReadyFor(viewer) });
+    if (!sourcePreparation.accepts(work)) return;
     return downloadMaps.native({ sourceKey: work.sourceKey, fileIndex: work.fileIndex, zones });
   };
   sourcePreparation = new SourcePreparation({
@@ -828,7 +848,12 @@ export async function startProxyServer({
       const params = await containerOver(work);
       if (!params) return { kind: "needs-source" };
       params.isCurrent = () => sourcePreparation.accepts(work);
-      if (work.statement === "packets" && work.role === "source-rest" && sourcePreparation.accepts(work)) {
+      const originalContainer = work.statement === "packets" ? await containerOrchestrator.containerFor(params) : null;
+      const navigation = work.statement === "packets" && work.role !== "subtitle-embedded"
+        ? await containerOrchestrator.inspect(params, "source-navigation") : { kind: "result", value: false };
+      if (navigation.kind !== "result") return navigation;
+      const originalRanges = navigation.value;
+      if (!originalRanges && work.statement === "packets" && work.role === "source-rest" && sourcePreparation.accepts(work)) {
         const file = torrentPool.knownTorrent(work.sourceKey)?.files?.[work.fileIndex];
         if (file?.length > 0) {
           const statement = `${work.statement}:${work.requestId}:input`;
@@ -837,7 +862,7 @@ export async function startProxyServer({
             scope: "preparation", ...sourcePreparation.demandFor(work) });
         }
       }
-      if ((work.statement === "packets" && work.role !== "source-rest") || work.role === "subtitle-embedded" && work.statement === "subtitle-cues") {
+      if ((work.statement === "packets" && (work.role !== "source-rest" || originalRanges)) || work.role === "subtitle-embedded" && work.statement === "subtitle-cues") {
         const info = await containerOrchestrator.inspect({ ...params, onReadResult: undefined }, "media-info");
         if (info.kind !== "result") return info;
         const positions = outputParts.viewers.forSource(work.sourceKey)
@@ -858,6 +883,23 @@ export async function startProxyServer({
         if (!sourcePreparation.accepts(work)) return;
         mediaReads.record(params, statement, result, revision.storage, revision.memory);
         const inputStatement = `${work.statement}:${work.requestId}:input`;
+        if (statement === "source-ranges" && result.kind === "result") {
+          if (work.selected) work.inputRanges = result.value.ranges;
+          if (work.role === "source-rest") {
+            const info = await containerOrchestrator.inspect({ ...params, onReadResult: undefined }, "media-info");
+            if (!sourcePreparation.accepts(work)) return;
+            if (info.kind === "result") {
+              work.nativeInput = { container: originalContainer, durationSeconds: info.value.durationSeconds,
+                startTimeSeconds: info.value.startTimeSeconds ?? 0 };
+              await publishNative(work);
+            }
+          } else {
+            await downloadMaps.metadata({ sourceKey: work.sourceKey, fileIndex: work.fileIndex,
+              statement: inputStatement, result: { kind: "needs-ranges", ranges: result.value.ranges, requestId: inputStatement },
+              scope: "preparation", ...sourcePreparation.demandFor(work) });
+            if (work.selected) await sourcePreparation.bytesChanged(work.sourceKey, work.fileIndex);
+          }
+        }
         if (statement === "packets" && work.role === "source-rest" && result.kind === "result") {
           const tracks = await containerOrchestrator.containerFor(params).then(container => container.readTracks());
           const info = await containerOrchestrator.inspect({ ...params, onReadResult: undefined }, "media-info");
@@ -895,7 +937,7 @@ export async function startProxyServer({
       };
       return work.statement === "subtitle-file"
         ? subtitles.inspectFile(params) : work.statement === "subtitle-cues"
-          ? subtitles.inspectPackets(params) : containerOrchestrator.inspect(params, work.statement);
+          ? subtitles.inspectPackets(params) : containerOrchestrator.inspect(params, originalRanges ? "source-ranges" : work.statement);
     },
     withdraw: work => {
       if (work.role === "source-rest" && work.statement === "packets") {
@@ -1054,6 +1096,9 @@ export async function startProxyServer({
       viewers: outputParts.viewers,
       subtitles
     })
+  );
+  app.get("/encode-input/:token/:fileIndex", (req, reply) =>
+    handleEncodeInputGet(req, reply, { inputOf: token => outputParts.encodeRuns.originalInputOf(token) })
   );
   app.get("/stream", async (req, reply) =>
     handleStreamGet(req, reply, {

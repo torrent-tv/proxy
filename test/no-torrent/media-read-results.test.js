@@ -7,6 +7,22 @@ import { MediaReadRequests } from "../../services/media/MediaReadRequests.js";
 
 const params = { sourceKey: "source", fileIndex: 0, requestId: "request", fileSize: 100 };
 
+test("original-source navigation retries missing Cues rather than keeping unsupported", async () => {
+  const reader = new ContainerOrchestrator();
+  let held = false;
+  reader.containerFor = async () => ({ supportsOriginalSourceRanges: async () => {
+    if (!held) throw new BytesUnavailable(40, 59);
+    return true;
+  } });
+  assert.deepEqual(await reader.inspect(params, "source-navigation"), {
+    kind: "needs-ranges", ranges: [[40, 59]], requestId: "request"
+  });
+  held = true;
+  assert.equal((await reader.inspect(params, "source-navigation")).value, true);
+  reader.containerFor = async () => ({});
+  assert.equal((await reader.inspect(params, "source-navigation")).value, false);
+});
+
 test("a completed statement callback can read another statement from the same file", async () => {
   const reader = new ContainerOrchestrator();
   reader.containerFor = async () => ({ readTracks: async () => [], readMediaInfo: async () => ({ durationSeconds: 7 }) });

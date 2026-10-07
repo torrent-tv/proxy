@@ -14,6 +14,21 @@ import assert from "node:assert/strict";
 import { Timeline, Timelines } from "../../services/encode/output/Timeline.js";
 import { PacketIndex } from "../../services/media/container/PacketIndex.js";
 
+test("segment demand preserves urgent preparation independently of equal priorities and deadlines", () => {
+  const timeline = new Timeline({ boundaries: [0, 4, 8, 12], cutGrid: "uniform" });
+  const map = { durationSeconds: 12, priority: new Uint8Array(12).fill(100),
+    secondsUntilPlayed: Float64Array.from({ length: 12 }, (_, index) => index),
+    behind: new Uint8Array(12), urgent: Uint8Array.from({ length: 12 }, (_, index) => index < 8 ? 1 : 0) };
+  assert.deepEqual(timeline.inSegments(map, 3), [
+    { from: 0, to: 1, priority: 100, withinSeconds: 0, urgent: true, behind: false },
+    { from: 2, to: 2, priority: 100, withinSeconds: 8, urgent: false, behind: false }
+  ]);
+  map.urgent.fill(0);
+  assert.deepEqual(timeline.inSegments(map, 3), [
+    { from: 0, to: 2, priority: 100, withinSeconds: 0, urgent: false, behind: false }
+  ]);
+});
+
 test("packet admission uses exact source cuts rather than rounded playlist boundaries", () => {
   const cuts = [0, 13.5, 605 / 24, 30];
   const timeline = new Timeline({ boundaries: cuts.map(time => Number(time.toFixed(6))),

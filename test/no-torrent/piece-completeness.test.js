@@ -132,3 +132,17 @@ test("neighbor validation refuses absent tracks and invalid frame clocks", () =>
     "neighbor-frame-is-invalid");
 
 });
+
+test("movie-edit quantization does not reject one-frame encoder priming or conceal a lost frame", () => {
+  const coverage = { tracks: [{ kind: "soun", timescale: 48000n, productionFrame: 1024n,
+    positionErrorTicks: 48n, ranges: [{ start: 40799744n, end: 41281296n, frame: 1024n }] }] };
+  const interval = { from: 850.017, to: 860.027, requiredKinds: ["soun"] };
+  assert.equal(judgePiece(fmp4Format, coverage, undefined, interval).whole, true);
+  coverage.tracks[0].ranges[0].start -= 1n;
+  assert.equal(judgePiece(fmp4Format, coverage, undefined, interval).reason, "segment-start-outside-interval-soun");
+  coverage.tracks[0].ranges = [
+    { start: 40800816n, end: 40900000n, frame: 1024n },
+    { start: 40901025n, end: 41281296n, frame: 1024n }
+  ];
+  assert.equal(judgePiece(fmp4Format, coverage, undefined, interval).reason, "segment-gap-within-interval-soun");
+});

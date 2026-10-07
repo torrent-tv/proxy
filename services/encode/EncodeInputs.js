@@ -1,4 +1,5 @@
 import { admitInput } from "./AdmittedInput.js";
+import { admitOriginalInput } from "./OriginalInput.js";
 
 /** Event-driven preparation; a synchronous run request can take only ready input. */
 export class EncodeInputs {
@@ -31,7 +32,11 @@ export class EncodeInputs {
     let bytes = this.#held;
     for (const [key, wanted] of this.#wanted) {
       const request = this.#requests.get(key);
-      if (request && this.#urgent(request.output, request.from)) bytes += wanted;
+      // The encode plan already chose this finite input. It must fit before
+      // production can advance, even when playback has not reached it yet.
+      // Sharing against speculative whole-file demand can otherwise deny it
+      // forever, so urgency must not decide its minimum allocation again.
+      if (request) bytes += wanted;
     }
     return bytes;
   }
@@ -110,7 +115,8 @@ export class EncodeInputs {
     request.promise = (async () => {
       const resolved = await this.#resolve(request.output, request.from, request.to);
       if (this.#requests.get(request.key) !== request) return;
-      const result = resolved.kind === "result" ? await admitInput({
+      const admit = resolved.sources?.every(source => source.input.original === true) ? admitOriginalInput : admitInput;
+      const result = resolved.kind === "result" ? await admit({
         sources: resolved.sources,
         readRanges: this.#read,
         reserve: async bytes => {

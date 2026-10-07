@@ -15,6 +15,8 @@ export function ffprobeRecord(line) {
   const kind = fields.shift();
   const record = { kind };
   for (const [position, value] of fields.entries()) {
+    // Disabled nested sections may leave a trailing separator in FFprobe 8.
+    if (value === "" && fields.slice(position + 1).every(field => field === "")) break;
     // ffprobe 5 emits an empty nested section even when its entries are disabled.
     if (value === "side_data" && fields.slice(position + 1).every(field => field === "")) break;
     const separator = value.indexOf("=");

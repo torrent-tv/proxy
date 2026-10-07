@@ -129,7 +129,7 @@ export class ContainerOrchestrator {
 
   /** Read one statement without converting missing bytes into an empty answer. */
   async inspect(params, statement = "tracks") {
-    if (!["container", "tracks", "media-info", "keyframes", "packets", "fingerprint", "work-tags", "cover"].includes(statement)) {
+    if (!["container", "tracks", "media-info", "keyframes", "packets", "source-navigation", "source-ranges", "fingerprint", "work-tags", "cover"].includes(statement)) {
       throw new TypeError(`Unknown media statement: ${statement}`);
     }
     const key = `${params.sourceKey}:${params.fileIndex}`;
@@ -191,6 +191,12 @@ export class ContainerOrchestrator {
       } else if (statement === "work-tags" || statement === "cover") {
         value = await (statement === "cover" ? container.readCover(edgesOf(params)) : container.readWorkTags(edgesOf(params)));
         if (value === null) return { kind: "terminal", reason: statement === "cover" ? "no-cover" : "format-states-nothing", requestId };
+      } else if (statement === "source-navigation") {
+        value = await container.supportsOriginalSourceRanges?.() === true;
+      } else if (statement === "source-ranges") {
+        if (typeof container.readSourceRanges !== "function") return { kind: "terminal", reason: "source-range-index-not-supported", requestId };
+        value = await container.readSourceRanges(params.packetInterval);
+        if (value.kind !== "result") return { ...value, requestId };
       } else if (statement === "packets") {
         value = await container.readPacketIndex(params.packetInterval);
         await value?.prepareAudioDependencies?.(params.packetInterval, container.readRange);

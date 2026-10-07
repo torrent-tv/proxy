@@ -165,16 +165,40 @@ export function readTrackEdits(initSegment) {
 }
 
 /** An init shared across seeks has no segment-specific empty edit. */
-export function neutralizeEmptyEdits(initSegment) {
+export function neutralizeEmptyEdits(initSegment, { audioEncoderDelay = 0 } = {}) {
   const neutral = Buffer.from(initSegment);
+  const audioTracks = new Set();
+  let trackId = null;
+  if (audioEncoderDelay > 0) walkBoxes(neutral, (type, start, end) => {
+    if (type === "tkhd") {
+      const at = start + (neutral[start] === 1 ? 20 : 12);
+      if (at + 4 <= end) trackId = neutral.readUInt32BE(at);
+    } else if (type === "hdlr" && start + 12 <= end && neutral.toString("latin1", start + 8, start + 12) === "soun") {
+      audioTracks.add(trackId);
+    }
+  });
+  trackId = null;
   walkBoxes(neutral, (type, start, end) => {
+    if (type === "tkhd") {
+      const at = start + (neutral[start] === 1 ? 20 : 12);
+      if (at + 4 <= end) trackId = neutral.readUInt32BE(at);
+    }
     if (type !== "elst" || start + 8 > end) return;
     const version = neutral[start];
     const width = version === 1 ? 20 : 12;
     const count = neutral.readUInt32BE(start + 4);
     for (let entry = 0, at = start + 8; entry < count && at + width <= end; entry++, at += width) {
       const mediaTime = version === 1 ? neutral.readBigInt64BE(at + 8) : BigInt(neutral.readInt32BE(at + 4));
-      if (mediaTime !== -1n) continue;
+      if (mediaTime !== -1n) {
+        // Native AAC emits 1024 samples of encoder delay (aacenc.c).
+        // A later run's positive start can hide that delay in an empty edit.
+        // The shared origin must also represent the first run's negative DTS.
+        if (audioTracks.has(trackId) && mediaTime < BigInt(audioEncoderDelay)) {
+          if (version === 1) neutral.writeBigInt64BE(BigInt(audioEncoderDelay), at + 8);
+          else neutral.writeInt32BE(audioEncoderDelay, at + 4);
+        }
+        continue;
+      }
       if (version === 1) neutral.writeBigUInt64BE(0n, at);
       else neutral.writeUInt32BE(0, at);
     }

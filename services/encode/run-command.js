@@ -23,19 +23,19 @@
  * duration parser rejects that outright: a field session died on
  * `Invalid duration for option ss: 3.3333333249174757e-7`, after which the
  * transcode was in state `failed` and every segment request answered 500 for
- * as long as the viewer kept trying. Anything under a millisecond is also not a
- * real offset — it is the residue of subtracting two nearly equal floats — so
- * it is dropped rather than passed on.
+ * as long as the viewer kept trying. Round to the duration parser's microsecond
+ * precision; a sub-millisecond value can be a real trim, not subtraction noise.
  *
  * @param {number} value
  * @returns {string}
  */
 export function ffmpegSeconds(value) {
-  if (!Number.isFinite(value) || Math.abs(value) < 0.001) {
+  if (!Number.isFinite(value)) {
     return "0";
   }
   // Microsecond resolution, fixed notation, no trailing zero noise.
-  return value.toFixed(6).replace(/\.?0+$/, "");
+  const rounded = value.toFixed(6).replace(/\.?0+$/, "");
+  return rounded === "-0" ? "0" : rounded;
 }
 
 /**

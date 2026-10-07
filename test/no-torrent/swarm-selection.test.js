@@ -70,32 +70,48 @@ test("a shared piece remains requested while another range needs it", () => {
   assert.equal(wire.requests.length, 0);
 });
 
-test("map priorities choose eligible ranges without modifying the library picker", () => {
+test("a lower map priority is stated at zero, so only an otherwise idle wire takes it", () => {
   const torrent=stubTorrent();
   const register=new DemandRegister();
   const selection=new SwarmSelection({torrent,register});
   register.state({claimant:"active",fileIndex:0,byteStart:PIECE,byteEnd:2*PIECE-1,urgency:Urgency.AHEAD,priority:100});
   register.state({claimant:"paused",fileIndex:0,byteStart:5*PIECE,byteEnd:6*PIECE-1,urgency:Urgency.AHEAD,priority:20});
   selection.reconcile();
-  assert.deepEqual(selection.statedRanges().map(({from,to})=>[from,to]),[[1,1]]);
+  assert.deepEqual(selection.statedRanges(),[{from:1,to:1,priority:1},{from:5,to:5,priority:0}]);
   torrent.complete(1);
   selection.reconcile();
-  assert.deepEqual(selection.statedRanges().map(({from,to})=>[from,to]),[[5,5]]);
+  assert.deepEqual(selection.statedRanges(),[{from:5,to:5,priority:1}]);
   assert.equal(register.windows().find(window=>window.claimant==="paused").priority,20);
 });
 
-test("equal-priority input groups advance by required time through public selections", () => {
+test("every deadline of the first class is stated at once, so no peer waits for one segment", () => {
+  // Field-shaped: each segment zone carries its own deadline. Stating only the
+  // earliest left peers without that segment's pieces idle (meta#95 stand:
+  // 184 s against 18.3 s for twelve segments over partial peers).
   const torrent = stubTorrent();
   const register = new DemandRegister();
   const selection = new SwarmSelection({ torrent, register });
-  for (const [piece, deadlineAt] of [[5, 20000], [1, 10000]]) register.state({ claimant: `part:${piece}`,
+  for (const [piece, deadlineAt] of [[5, 20000], [1, 10000], [2, 15000]]) register.state({ claimant: `part:${piece}`,
     fileIndex: 0, byteStart: piece * PIECE, byteEnd: (piece + 1) * PIECE - 1,
     urgency: Urgency.NEAR, priority: 100, deadlineAt });
   selection.reconcile();
-  assert.deepEqual(selection.statedRanges().map(({ from, to }) => [from, to]), [[1, 1]]);
+  assert.deepEqual(selection.statedRanges(), [{ from: 1, to: 2, priority: 1 }, { from: 5, to: 5, priority: 1 }]);
   torrent.complete(1);
+  torrent.complete(2);
   selection.reconcile();
-  assert.deepEqual(selection.statedRanges().map(({ from, to }) => [from, to]), [[5, 5]]);
+  assert.deepEqual(selection.statedRanges(), [{ from: 5, to: 5, priority: 1 }]);
+});
+
+test("a more urgent level keeps the first class while the lead is stated at zero", () => {
+  const torrent = stubTorrent();
+  const register = new DemandRegister();
+  const selection = new SwarmSelection({ torrent, register });
+  register.state({ claimant: "near", fileIndex: 0, byteStart: 3 * PIECE, byteEnd: 4 * PIECE - 1, urgency: Urgency.NEAR, priority: 100 });
+  register.state({ claimant: "ahead", fileIndex: 0, byteStart: 4 * PIECE, byteEnd: 8 * PIECE - 1, urgency: Urgency.AHEAD, priority: 99 });
+  register.state({ claimant: "tail", fileIndex: 0, byteStart: 9 * PIECE, byteEnd: 10 * PIECE - 1, urgency: Urgency.TAIL, priority: 1 });
+  selection.reconcile();
+  assert.deepEqual(selection.statedRanges(), [{ from: 3, to: 3, priority: 1 }, { from: 4, to: 7, priority: 0 }],
+    "the speculative tail waits while anything urgent is missing");
 });
 
 /**

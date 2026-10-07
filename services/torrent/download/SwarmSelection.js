@@ -17,14 +17,28 @@
  * vendored 2.8.5: selections are sorted by priority only when one is inserted,
  * and `shufflePriority` then moves the selection just served to the back of the
  * whole non-zero group. Distinct numbers therefore order the list once and
- * round-robin it afterwards. So the ordering is kept HERE, by choosing what to
- * state at all, and the library is given only the distinction it honours:
- * non-zero for what is wanted now, zero for the speculative tail.
+ * round-robin it afterwards. The library honours one distinction: non-zero
+ * before zero. A wire with nothing left to take from the non-zero selections
+ * goes on to the zero ones, and within a selection it takes the earliest piece
+ * it holds.
+ *
+ * **So everything wanted is stated, and only the first class is non-zero.**
+ * The first class is the most urgent level that is still missing anything, at
+ * its highest priority, whatever its deadlines. Everything else that is not
+ * speculative is stated at zero, so it is fetched only by a wire that would
+ * otherwise stand idle. Stating only the earliest deadline, as this did after
+ * #95, left every peer that held none of that segment's pieces without a
+ * request: on Home Assistant, with three peers each holding every third piece
+ * and one complete slow peer, twelve segments took 184 s at 0.61 MiB/s against
+ * 18.3 s at 6.1 MiB/s when the whole band was stated
+ * (`research/download-translation-2026-10-07.md`, torrent-tv/meta#95).
+ * Speculative levels stay withheld while anything urgent is missing anywhere,
+ * because the link is shared.
  */
 
 import {
+  isConditional,
   piecesOf,
-  selectionPriority,
   Urgency,
   urgencyName
 } from "../demand/index.js";
@@ -68,38 +82,39 @@ export class SwarmSelection {
    *   torrent is still waiting for something urgent. The registry works it out
    *   once and hands the same answer to every selection, because the link is
    *   shared and the question is not a per-torrent one.
+   * @param {{ urgency: number, priority: number } | null} [options.firstClass] -
+   *   The most urgent missing level and its highest priority across every
+   *   torrent. Without it, this torrent's own.
    * @returns {{ stated: number, withdrawn: number }}
    */
-  reconcile({ speculativeAllowed = true, maximumUrgency = Infinity, minimumPriority = 1, latestDeadlineAt = Infinity } = {}) {
-    const windows=this.#register.windows();
-    const missing=windows.filter(window=>!this.#isSatisfied(window));
-    const urgency=missing.length?Math.min(...missing.map(window=>window.urgency)):null;
-    const eligible=missing.filter(window=>window.urgency===urgency);
-    const priority=eligible.length?Math.max(...eligible.map(window=>window.priority)):null;
-    const ranked=eligible.filter(window=>window.priority===priority);
-    const deadlineAt=ranked.length?Math.min(...ranked.map(window=>window.deadlineAt)):Infinity;
-    const active=urgency===null||urgency>maximumUrgency||priority<minimumPriority||deadlineAt>latestDeadlineAt||(!speculativeAllowed&&urgency>=Urgency.TAIL)?[]:
-      ranked.filter(window=>window.deadlineAt===deadlineAt);
+  reconcile({ speculativeAllowed = !this.hasUrgentMissing(), firstClass = null } = {}) {
+    const missing = this.#register.windows().filter(window => !this.#isSatisfied(window));
+    const first = firstClass ?? this.missingBand();
     /** @type {Map<string, { from: number, to: number, priority: number }>} */
     const wanted = new Map();
-    for (const window of active) {
+    for (const priority of [1, 0]) {
+      const ranges = [];
+      for (const window of missing) {
+        if (!speculativeAllowed && isConditional(window.urgency)) continue;
+        // Speculative levels are never the first class: the library keeps
+        // zero-priority selections last and never rotates them above.
+        const inFirstClass = first !== null && !isConditional(window.urgency)
+          && window.urgency === first.urgency && window.priority >= first.priority;
+        if ((inFirstClass ? 1 : 0) !== priority) continue;
         const range = this.#piecesFor(window);
-        if (!range) {
-          continue;
-        }
-        // Merged by range and priority, not by claimant: two readers wanting
-        // the same pieces are one instruction to the swarm.
-        const key = `${range.from}-${range.to}-${selectionPriority(window.urgency)}`;
-        wanted.set(key, { from: range.from, to: range.to, priority: selectionPriority(window.urgency) });
+        if (range) ranges.push(range);
+      }
+      // Merged within one priority: two readers wanting the same or adjacent
+      // pieces are one instruction, and an unchanged map restates nothing.
+      ranges.sort((a, b) => a.from - b.from);
+      const union = [];
+      for (const range of ranges) {
+        const previous = union.at(-1);
+        if (previous && range.from <= previous.to + 1) previous.to = Math.max(previous.to, range.to);
+        else union.push({ from: range.from, to: range.to, priority });
+      }
+      for (const range of union) wanted.set(`${range.from}-${range.to}-${priority}`, range);
     }
-
-    // Public selections merge adjacent ranges. Publish their union so an
-    // unchanged map does not repeatedly replace the library's merged range.
-    const ordered=[...wanted.values()].sort((a,b)=>a.from-b.from);
-    wanted.clear();
-    const union=[];
-    for(const range of ordered){const previous=union.at(-1);if(previous&&range.from<=previous.to+1)previous.to=Math.max(previous.to,range.to);else union.push({...range});}
-    for(const range of union)wanted.set(`${range.from}-${range.to}-${range.priority}`,range);
 
     let withdrawn = 0;
     for (const [key, range] of [...this.#stated]) {

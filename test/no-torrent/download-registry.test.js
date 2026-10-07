@@ -69,15 +69,19 @@ test("changed demand or withdrawn storage invalidates an in-flight forecast", as
   assert.equal((await forecastDownloads()).get(entry.torrent).arrivals.size, 2);
 });
 
-test("required times order equal-priority groups across torrents", t => {
-  const first = source(t), second = source(t);
+test("the first class spans torrents and a lower class elsewhere is stated at zero", t => {
+  const first = source(t), second = source(t), third = source(t);
   for (const [entry, deadlineAt] of [[first, 10000], [second, 20000]]) entry.register.state({
     claimant: "viewer", fileIndex: 0, byteStart: 16384, byteEnd: 32767,
     urgency: 1, priority: 100, deadlineAt });
+  state(third.register, 2, 2, 40);
   reconcileAll();
-  assert.equal(first.torrent._selections._items.length, 1);
-  assert.equal(second.torrent._selections._items.length, 0);
+  assert.deepEqual(first.torrent._selections._items, [{ from: 1, to: 1, priority: 1 }]);
+  assert.deepEqual(second.torrent._selections._items, [{ from: 1, to: 1, priority: 1 }],
+    "a later deadline in the first class is not withheld");
+  assert.deepEqual(third.torrent._selections._items, [{ from: 2, to: 2, priority: 0 }]);
   first.held.add(1);
+  second.held.add(1);
   first.torrent.emit("verified", 1);
-  assert.equal(second.torrent._selections._items.length, 1);
+  assert.deepEqual(third.torrent._selections._items, [{ from: 2, to: 2, priority: 1 }]);
 });

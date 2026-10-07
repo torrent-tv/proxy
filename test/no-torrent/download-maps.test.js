@@ -344,3 +344,25 @@ test("bytes arriving during a read cannot leave its missing-range result waiting
   await Promise.resolve();
   assert.equal(calls, 1);
 });
+
+test("a viewer moving on keeps the resolved zones until the re-cut map is resolved", async () => {
+  // Field 2026-10-07: every advance re-cut the zones, none kept its exact
+  // interval, and the interim publication was empty — the swarm was let go and
+  // the encoder lost its resolved input every few seconds.
+  const sent = [];
+  let release;
+  const delayed = new Promise(resolve => { release = resolve; });
+  const maps = new DownloadMaps({ publish: async map => sent.push(map), resolvePlayback: async map => {
+    if (map.zones[0].from === 2) await delayed;
+    return map.zones.map(zone => ({ ...zone, outputKey: "out", index: zone.from, byteStart: zone.from * 100, byteEnd: zone.to * 100 - 1 }));
+  } });
+  const file = { sourceKey: "source", fileIndex: 0, durationSeconds: 30 };
+  await maps.playback({ ...file, zones: [{ from: 0, to: 10, priority: 100 }, { from: 10, to: 20, priority: 99 }] });
+  const moving = maps.playback({ ...file, zones: [{ from: 2, to: 12, priority: 100 }, { from: 12, to: 22, priority: 99 }] });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.deepEqual(sent.at(-1).zones.map(zone => zone.byteStart), [0, 1000], "the interim map still states the film being watched");
+  assert.deepEqual(maps.inputsForOutput("source", "out", 10), [{ sourceId: "source:0", ranges: [{ start: 1000, end: 2000 }] }]);
+  release();
+  await moving;
+  assert.deepEqual(sent.at(-1).zones.map(zone => zone.byteStart), [200, 1200]);
+});

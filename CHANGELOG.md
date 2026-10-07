@@ -1,3 +1,7 @@
+## Unreleased
+
+- **Fix**: Keep downloading and encoding while a viewer watches: each move of the viewer re-cut the download map, the interim map came out empty, the torrent left its swarm and the encoder lost its source ranges for ten to twenty seconds every few segments; zones still covering wanted film now stay until the new map is resolved (torrent-tv/meta#95).
+
 ## 2.95.7
 
 - **Fix**: Pieces downloaded ahead of the viewer go to disk instead of filling memory: the piece store no longer asks for memory by the download map, which on Home Assistant took 4.4 GB in five minutes and got the proxy killed by the kernel (torrent-tv/meta#95).

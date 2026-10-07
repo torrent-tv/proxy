@@ -1,4 +1,4 @@
-## Unreleased
+## 2.95.11
 
 - **Fix**: Publish copied open-GOP HEVC segments with the leading pictures that FFmpeg places in the following file and retain their decode references. Original-source fMP4 video is partitioned before completeness validation; unavailable following media still fails validation (torrent-tv/meta#154).
 

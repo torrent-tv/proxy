@@ -1,4 +1,4 @@
-## Unreleased
+## 2.95.12
 
 - **Fix**: Treat cgroup v2 `memory.high` (systemd's `MemoryHigh=`) as a memory limit alongside `memory.max`: past it the kernel throttles the process and pushes its memory to swap, so the budget no longer grows into it (torrent-tv/meta#155).
 

@@ -19,7 +19,7 @@ import {
 /**
  * The presets the startup benchmark walks, slowest first.
  *
- * The same list `benchmarkSoftwarePresets` measures and `pickSoftwarePreset`
+ * The same list `calibrateEncoder` measures and `pickSoftwarePreset`
  * chooses from; it is stated here because it is a property of this kind, and
  * the four hardware kinds beside it show what its absence looks like.
  */
@@ -37,7 +37,7 @@ export class SoftwareEncoder extends Encoder {
       values: PRESETS,
       measured: true,
       note:
-        "Measured on every host at startup by `benchmarkSoftwarePresets`, in " +
+        "Measured on every host at startup by `calibrateEncoder`, in " +
         "pixels per second per preset, and chosen from by `pickSoftwarePreset`."
     };
   }

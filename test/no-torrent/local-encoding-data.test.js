@@ -271,3 +271,16 @@ test("what an encode was made from is described by the file's own facts", () => 
   );
   assert.equal(contentOf({ width: 0, height: 0, decode: null }), null);
 });
+
+test("a reading taken while other work ran is filed at the speed it gives a machine with nothing else running", async () => {
+  // Field 2026-10-07: `fast` at 640x360 read 2.08x with 42 % of the machine
+  // taken by other work; the figure filed is the one the offer later corrects
+  // by the share free at the time of the question.
+  const encoder = new SoftwareEncoder();
+  const { modes } = await calibrateWith({
+    encoder: { ...encoder, kind: encoder.kind, name: encoder.name, selectableRungs: ["fast"], benchmarkArgs: (rung) => encoder.benchmarkArgs(rung) },
+    speeds: { "fast@256x144": { speed: 3.6, measuredSpeed: 2.08, freeShare: 0.578 } }
+  });
+  const fast = modes.find((mode) => mode.preset === "fast");
+  assert.equal(fast?.bySize[0].pixelsPerSec, 256 * 144 * 24 * 3.6);
+});

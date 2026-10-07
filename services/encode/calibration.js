@@ -196,7 +196,8 @@ export async function checkModeProducesCorrectSegments({ ffmpegBin, encoder, run
  * @param {number} [params.segmentDurationSec]
  * @param {Array<{ width: number, height: number }>} [params.frames]
  * @param {object} [params.measure] - Replaces the three readings, for a check
- *   that must not run ffmpeg: `check`, `rawFrames`, `speed`.
+ *   that must not run ffmpeg: `check`, `rawFrames`, `speed`. `speed` answers a
+ *   number, or `{ speed, freeShare }` as `measureEncodeSlope` does.
  * @returns {Promise<{ modes: CalibratedMode[], refused: Array<{ preset: string, reason: string }> }>}
  */
 export async function calibrateEncoder({
@@ -236,6 +237,8 @@ export async function calibrateEncoder({
 
   /** @type {Map<string | null, SizeReading[]>} */
   const readings = new Map(qualified.map((rung) => [rung, []]));
+  /** The share of the machine other work left each reading. @type {number[]} */
+  const freeShares = [];
   const sortedFrames = [...frames].sort((left, right) => left.width * left.height - right.width * right.height);
   for (const frame of sortedFrames) {
     if (qualified.length === 0) {
@@ -251,7 +254,13 @@ export async function calibrateEncoder({
       // Fastest first: the ladder is slowest first, so walk it backwards.
       for (let index = qualified.length - 1; index >= 0; index -= 1) {
         const rung = qualified[index];
-        const realtimes = await speed(rung, rawPath, frame);
+        const reading = await speed(rung, rawPath, frame);
+        // A number from a check that replaces the reading; the reading itself
+        // carries the share of the machine other work left it.
+        const realtimes = typeof reading === "number" ? reading : (reading?.speed ?? null);
+        if (Number.isFinite(reading?.freeShare)) {
+          freeShares.push(reading.freeShare);
+        }
         if (realtimes === null) {
           log.warn(`calibration: ${encoder.name} "${rung ?? "as it comes"}" gave no reading at ${frame.width}x${frame.height}`);
           break;
@@ -314,6 +323,10 @@ export async function calibrateEncoder({
   log.info(
     `calibration: ${encoder.name} ${modes.length} of ${rungs.length} mode(s) usable ` +
     `(${((Date.now() - startedAt) / 1000).toFixed(1)}s)` +
+    (freeShares.length > 0
+      ? `; other work took ${Math.round((1 - Math.max(...freeShares)) * 100)}-${Math.round((1 - Math.min(...freeShares)) * 100)}% ` +
+        "of the machine during the readings, and the figures are for a machine with nothing else running"
+      : encoder.kind === "software" ? "; the machine's load during the readings was not readable, so the figures are as read" : "") +
     (refused.length > 0 ? `; not usable: ${refused.map((one) => `${one.preset} (${one.reason})`).join(", ")}` : "")
   );
   return { modes, refused };

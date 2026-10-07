@@ -172,6 +172,40 @@ export async function sampleHost(pid) {
 }
 
 /**
+ * The share of the machine a measured process was LEFT by everything else,
+ * between two readings taken with `sampleHost(pid)` (torrent-tv/meta#3).
+ *
+ * A startup measurement reads how fast one ffmpeg runs, and the offer later
+ * multiplies that figure by the share of the machine free at the time of the
+ * question (`available-share.js`). That is right only if the measurement itself
+ * was taken on a machine with nothing else running, which it is not: measured on
+ * the addon host on 2026-10-07, other work took 17-53 % of the four cores during
+ * the readings, and the same mode read 2.08x, 3.10x and 3.08x while ffmpeg's own
+ * processor time per second of video stayed within 3 %. Divided by this share,
+ * the three readings come to 3.60x, 3.77x and 3.79x.
+ *
+ * Null when the host does not report its load (no `/proc`), or a reading was
+ * refused; the measurement is then used as it was read, and says so.
+ *
+ * @param {{ takenAt: number, processCpuSeconds: number | null, system: object | null } | null} before
+ * @param {{ takenAt: number, processCpuSeconds: number | null, system: object | null } | null} after
+ * @param {number} [cores]
+ * @returns {number | null} Between 0 and 1.
+ */
+export function freeShareDuring(before, after, cores = os.cpus().length) {
+  if (!before || !after) {
+    return null;
+  }
+  const shares = shareOfMachine(before, after, cores);
+  if (shares === null || shares.systemShare === null || shares.processShare === null) {
+    return null;
+  }
+  const others = Math.min(1, Math.max(0, shares.systemShare - shares.processShare));
+  const free = 1 - others;
+  return free > 0 ? free : null;
+}
+
+/**
  * How much CPU THIS process has used, across every thread it owns.
  *
  * The proxy is not only its encoders. It downloads the torrent, verifies every

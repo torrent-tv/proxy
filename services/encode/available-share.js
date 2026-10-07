@@ -1,7 +1,11 @@
 /**
  * @file How much of the machine a new encoder can actually have.
  *
- * The encoder benchmark measures a QUIET host: one ffmpeg, nothing else. A real
+ * The startup measurements are filed for a QUIET host: one ffmpeg, nothing
+ * else. The host is not quiet while they are taken, so each reading is divided
+ * by the share of the machine other work left it (`freeShareDuring`,
+ * torrent-tv/meta#3) — otherwise a reading taken while other work ran would be
+ * lowered once there and again here. A real
  * encode runs on a machine that is also downloading, hashing and serving, and
  * on the addon host that machine was measured 99 % busy — `ffmpeg=52-60%
  * proxy=17-24% system=99%` — while a step predicted at 1.83x ran at 1.01-1.12x

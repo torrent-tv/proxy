@@ -986,7 +986,7 @@ export class EncodeRuns {
         if (Number.isInteger(index) && (index < safeIndex || index > run.to)) return null;
         let bytes = null;
         if (admittedInput && session.segmentFormat.id === "fmp4" && session.spec.carries !== "audio-only" &&
-          session.spec.audio && !this.#host.servesAudioSeparately(session)) {
+          (admittedInput.original || session.spec.audio && !this.#host.servesAudioSeparately(session))) {
           try {
             const address = session.outputKey ?? "";
             const grid = session.timeline.published ?? session.timeline.boundaries;

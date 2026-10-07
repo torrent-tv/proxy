@@ -1,3 +1,7 @@
+## Unreleased
+
+- **Fix**: Treat cgroup v2 `memory.high` (systemd's `MemoryHigh=`) as a memory limit alongside `memory.max`: past it the kernel throttles the process and pushes its memory to swap, so the budget no longer grows into it (torrent-tv/meta#155).
+
 ## 2.95.11
 
 - **Fix**: Publish copied open-GOP HEVC segments with the leading pictures that FFmpeg places in the following file and retain their decode references. Original-source fMP4 video is partitioned before completeness validation; unavailable following media still fails validation (torrent-tv/meta#154).

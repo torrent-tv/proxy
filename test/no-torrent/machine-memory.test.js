@@ -191,3 +191,55 @@ test("nothing readable: free memory is the estimate, as before", () => {
   assert.equal(reading.limitBytes, null);
   assert.equal(reading.totalBytes, os.totalmem());
 });
+
+/**
+ * A cgroup v2 level whose limits are the given files, with no file cache.
+ *
+ * @param {Record<string, string>} limits - `memory.max`, `memory.high`.
+ * @param {number} currentBytes
+ * @returns {Record<string, string>}
+ */
+function v2Level(limits, currentBytes) {
+  const files = {
+    "/proc/meminfo": MEMINFO,
+    "/proc/self/cgroup": "0::/\n",
+    "/sys/fs/cgroup/memory.current": `${currentBytes}\n`,
+    "/sys/fs/cgroup/memory.stat": "active_file 0\ninactive_file 0\nslab_reclaimable 0\n"
+  };
+  for (const [name, value] of Object.entries(limits)) {
+    files[`/sys/fs/cgroup/${name}`] = `${value}\n`;
+  }
+  return files;
+}
+
+test("cgroup v2 memory.high below memory.max: the throttle limit decides", () => {
+  // Past `memory.high` the kernel throttles the cgroup and pushes its memory to
+  // swap: on the Home Assistant kernel a 300 MB allocation took 2123 ms instead
+  // of 527 ms under a 128 MiB `memory.high`, with 186 MiB swapped out
+  // (torrent-tv/meta#155).
+  const reading = availableMemory({
+    readFile: filesReader(v2Level({ "memory.max": 1024 * MIB, "memory.high": 512 * MIB }, 100 * MIB))
+  });
+  assert.equal(reading.source, "cgroup v2");
+  assert.equal(reading.limitBytes, 512 * MIB);
+  assert.equal(reading.totalBytes, 512 * MIB);
+  assert.equal(reading.bytes, 412 * MIB);
+});
+
+test("cgroup v2 memory.high alone is a limit: systemd's MemoryHigh= without MemoryMax=", () => {
+  const reading = availableMemory({
+    readFile: filesReader(v2Level({ "memory.max": "max", "memory.high": 512 * MIB }, 100 * MIB))
+  });
+  assert.equal(reading.source, "cgroup v2");
+  assert.equal(reading.limitBytes, 512 * MIB);
+  assert.equal(reading.bytes, 412 * MIB);
+});
+
+test("cgroup v2 memory.high of max leaves memory.max deciding", () => {
+  const reading = availableMemory({
+    readFile: filesReader(v2Level({ "memory.max": 512 * MIB, "memory.high": "max" }, 100 * MIB))
+  });
+  assert.equal(reading.source, "cgroup v2");
+  assert.equal(reading.limitBytes, 512 * MIB);
+  assert.equal(reading.bytes, 412 * MIB);
+});

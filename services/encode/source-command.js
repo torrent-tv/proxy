@@ -152,8 +152,12 @@ export function buildRunCommand({
     }
   } else {
     args.push("-copyts");
-    if (sourceStartTime !== 0) {
-      args.push("-output_ts_offset", ffmpegSeconds(-sourceStartTime));
+    // Audio's output seek removes demux preroll and subtracts that absolute
+    // seek from packet timestamps. Restore the published position explicitly;
+    // positive copied AAC timestamps alone are not retained by every movenc.
+    const offset = audioOnly ? startSeconds : -sourceStartTime;
+    if (offset !== 0) {
+      args.push("-output_ts_offset", ffmpegSeconds(offset));
     }
   }
   const runEnd = Number.isInteger(endIndex) ? endIndex : -1;
@@ -175,6 +179,8 @@ export function buildRunCommand({
     audioCodecArgs.push("-af", `atrim=start=${ffmpegSeconds(seekAt)}`);
   }
   if (audioOnly === true) {
+    // Input seeking locates bytes; copied audio also needs an output trim.
+    if (keyframeGrid) args.push("-ss", ffmpegSeconds(seekAt));
     args.push("-vn", "-map", `0:a:${audioSourceTrackIndex}?`, ...audioCodecArgs);
   } else if (servesAudioSeparately) {
     args.push("-an", "-map", `0:v:${videoSourceTrackIndex}?`, ...videoCodecArgs);

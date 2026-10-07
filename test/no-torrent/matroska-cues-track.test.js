@@ -30,6 +30,7 @@ const ID_TRACKS = 0x1654ae6b;
 const ID_TRACK_ENTRY = 0xae;
 const ID_TRACK_NUMBER = 0xd7;
 const ID_TRACK_TYPE = 0x83;
+const ID_FLAG_ENABLED = 0xb9;
 const ID_CUES = 0x1c53bb6b;
 const ID_CUE_POINT = 0xbb;
 const ID_CUE_TIME = 0xb3;
@@ -88,17 +89,24 @@ function cuePoint(timeMs, tracks) {
  * @param {{ withTracks?: boolean }} [options]
  * @returns {Buffer}
  */
-function buildFile({ withTracks = true, cueTrack = null } = {}) {
+function buildFile({ withTracks = true, cueTrack = null, disabledPictureFirst = false } = {}) {
   const info = element(ID_INFO, uintElement(ID_TIMESTAMP_SCALE, 1_000_000));
   const tracks = element(ID_TRACKS, Buffer.concat([
+    // A video track the file marks unusable, declared before the picture and
+    // indexed at 1.070 and 3.141 (FlagEnabled 0, RFC 9559 §5.1.4.1.3).
+    ...(disabledPictureFirst ? [element(ID_TRACK_ENTRY, Buffer.concat([
+      uintElement(ID_TRACK_NUMBER, 2),
+      uintElement(ID_TRACK_TYPE, 1),
+      uintElement(ID_FLAG_ENABLED, 0)
+    ]))] : []),
     element(ID_TRACK_ENTRY, Buffer.concat([
       uintElement(ID_TRACK_NUMBER, 1),
       uintElement(ID_TRACK_TYPE, 1) // video
     ])),
-    element(ID_TRACK_ENTRY, Buffer.concat([
+    ...(disabledPictureFirst ? [] : [element(ID_TRACK_ENTRY, Buffer.concat([
       uintElement(ID_TRACK_NUMBER, 2),
       uintElement(ID_TRACK_TYPE, 17) // subtitles
-    ]))
+    ]))])
   ]));
   const forPicture = cueTrack ?? 1;
   const forSubtitles = cueTrack ?? 2;
@@ -188,5 +196,17 @@ test("a file whose tracks cannot be read keeps every entry", async () => {
     times.map((time) => Number(time.toFixed(3))),
     [0, 1.07, 2.002, 3.141, 4.004],
     "with nothing to tell the tracks apart, the old behaviour is the only one available"
+  );
+});
+
+test("a video track the file marks unusable does not decide the cuts (torrent-tv/meta#49)", async () => {
+  const file = buildFile({ disabledPictureFirst: true });
+
+  const times = await MatroskaContainer.readKeyframeTimes(readerOver(file), file.length);
+
+  assert.deepEqual(
+    times.map((time) => Number(time.toFixed(3))),
+    [0, 2.002, 4.004],
+    "the picture is the first usable video track; the disabled one before it is not played"
   );
 });

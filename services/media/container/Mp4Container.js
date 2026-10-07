@@ -21,6 +21,7 @@ import { VideoTrack } from "../tracks/VideoTrack.js";
 import { AudioTrack } from "../tracks/AudioTrack.js";
 import { TextSubtitleTrack, TEXT_FORMATS_MP4 } from "../tracks/TextSubtitleTrack.js";
 import { ImageSubtitleTrack } from "../tracks/ImageSubtitleTrack.js";
+import { ContainerTrack } from "../tracks/ContainerTrack.js";
 import { isUnavailable } from "./unavailable.js";
 import { PacketIndex } from "./PacketIndex.js";
 import { h264Configuration } from "./h264-configuration.js";
@@ -565,7 +566,7 @@ export class Mp4Container extends Container {
       this.fragmentState ??= {};
       index = await readMp4Fragments({ readRange: this.readRange, fileSize: this.fileSize,
         tracks: fragmentTracks(held, tracks), memory: this.packetMemory, state: this.fragmentState });
-      const timeline = tracks.find(track => track.type === "video") ?? tracks.find(track => track.type === "audio");
+      const timeline = ContainerTrack.firstUsable(tracks, "video") ?? ContainerTrack.firstUsable(tracks, "audio");
       const bounds = timeline && index.boundsOf(timeline.trackNumber);
       if (bounds) this.mediaInfo = { ...(await this.readMediaInfo()), startTimeSeconds: bounds.start,
         durationSeconds: bounds.end - bounds.start };
@@ -842,7 +843,7 @@ export class Mp4Container extends Container {
   async parseKeyframeIndex() {
     const held = await this.#moovBuffer();
     if (held && childOf(held.moov, held.header, held.moov.length, "mvex")) {
-      const video = (await this.readTracks()).find(track => track.type === "video");
+      const video = ContainerTrack.firstUsable(await this.readTracks(), "video");
       return video ? { times: (await this.readPacketIndex()).keyframesOf(video.trackNumber), tolerance: 0 } : null;
     }
     const r = held ? keyframeTimesFromMoov(held.moov, held.header) : null;
@@ -1662,6 +1663,13 @@ function keyframeTimesFromMoov(moov, headerBytes) {
   for (const trak of findAllBoxes(moov, moovBox.headerBytes, moov.length, "trak")) {
     const mdia = findBox(moov, trak.dataOffset, trak.end, "mdia");
     if (!mdia || !isVideoTrack(moov, mdia)) {
+      continue;
+    }
+    // "A disabled track (the low bit is zero) is treated as if it were not
+    // present" (ISO/IEC 14496-12 §8.3.2), so it is not the picture whose
+    // keyframes decide the cuts (torrent-tv/meta#49).
+    const tkhd = findBox(moov, trak.dataOffset, trak.end, "tkhd");
+    if (tkhd && tkhd.dataOffset + 4 <= tkhd.end && (moov.readUIntBE(tkhd.dataOffset + 1, 3) & 0x000001) === 0) {
       continue;
     }
     const mdhd = findBox(moov, mdia.dataOffset, mdia.end, "mdhd");

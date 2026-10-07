@@ -506,7 +506,22 @@ const CALIBRATION_SETS = {
     "cal-av1-480-lo.mp4"
   ]
 };
-export const CALIBRATION_REFERENCE_CLIP = "cal-h264-1080-hi.mp4";
+/**
+ * The footage every encode reading is taken on: 3 s of Netflix Open Content
+ * "Chimera" (CC BY 4.0), from the middle of that film by how hard it is to
+ * encode (torrent-tv/meta#3).
+ *
+ * It used to be the first decode clip, 2 s of "Meridian". Measured on the addon
+ * host on 2026-10-07, against the hardest and the middle stretches of four films,
+ * that clip was the cheapest of them all to encode: a typical stretch of Chimera
+ * took 1.32x its processor time per second of video at `ultrafast` and 2.42x at
+ * `fast`, so every startup figure read a machine faster than it is on an
+ * ordinary film. The hardest film's typical stretch is the baseline, not its
+ * hardest five seconds: the offer is about the speed a machine holds for a whole
+ * film, and a short hard stretch is what the viewer's cushion is for
+ * (`research/startup-calibration-spread-2026-10-07.md`).
+ */
+export const CALIBRATION_REFERENCE_CLIP = "cal-encode-reference.mp4";
 export const CALIBRATION_DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "..", "assets", "calibration");
 // How wide the measured window must be before the slope is trusted, and how
 // long to wait for it at most.

@@ -1,4 +1,4 @@
-## Unreleased
+## 2.94.3
 
 - **Fix**: An H.264 parameter set that escapes a byte needing no escape (`00 00 03` before a byte above `03`, written by LostFilm's LostCoder) is read the way decoders read it instead of refused, so such an MP4 plays rather than failing with `AVC emulation prevention byte is invalid.` (torrent-tv/meta#147).
 

@@ -4,6 +4,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { KeyframeTables } from "../../services/media/KeyframeTables.js";
 import { BytesUnavailable } from "../../services/media/container/unavailable.js";
+import { IndexMemoryUnavailable } from "../../services/media/container/memory-unavailable.js";
 
 const QUIET = { info: () => {}, warn: () => {} };
 
@@ -17,6 +18,29 @@ function tables(budgetMs, readTable) {
 }
 
 const FILE = { sourceKey: "torrent:abc", fileIndex: 0, logName: "a.mkv" };
+
+test("memory admission is a pending keyframe answer, not a failed playback plan", async () => {
+  const keyframes = tables(1, async () => { throw new IndexMemoryUnavailable(65536); });
+  const table = keyframes.of(FILE);
+  const pending = await keyframes.within(FILE);
+  assert.equal(pending.arrived, false);
+  assert.equal(pending.table, table);
+  assert.equal(table.answered, false);
+  keyframes.learn(FILE, { times: [0, 4, 8], tolerance: 0, format: "avi" });
+  assert.equal((await keyframes.within(FILE)).arrived, true);
+  assert.equal(keyframes.of(FILE), table);
+});
+
+test("a successful retry published before the original refusal settles remains the answer", async () => {
+  let reject;
+  const keyframes = tables(1, () => new Promise((_resolve, refused) => { reject = refused; }));
+  const pending = keyframes.within(FILE);
+  const table = keyframes.learn(FILE, { times: [0, 4], tolerance: 0, format: "avi" });
+  reject(new IndexMemoryUnavailable(65536));
+  const result = await pending;
+  assert.equal(result.table, table);
+  assert.equal(result.arrived, true);
+});
 
 test("a table that arrives inside the budget is the answer", async () => {
   const keyframes = tables(1_000, async () => ({ times: [0, 4, 8], tolerance: 0, format: "matroska" }));

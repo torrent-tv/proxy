@@ -11,6 +11,7 @@ import { ContainerTrack } from "../tracks/ContainerTrack.js";
 import { PacketIndex } from "./PacketIndex.js";
 import { openDmlPackets } from "./avi-open-dml.js";
 import { isUnavailable } from "./unavailable.js";
+import { IndexMemoryUnavailable } from "./memory-unavailable.js";
 import { Mpeg4PictureTiming } from "./mpeg4-picture-timing.js";
 import { MpegElementaryIndex } from "./mpeg-elementary-index.js";
 import { RetainedReads } from "./RetainedReads.js";
@@ -25,6 +26,7 @@ export class AviContainer extends Container {
   #tracks = null;
   #packets = null;
   #scan = null;
+  #indexed = null;
   #declarations = null;
   #workTags = null;
 
@@ -108,7 +110,7 @@ export class AviContainer extends Container {
   }
 
 
-  packetIndexBytes() { return (this.#packets ?? this.#scan?.index)?.allocatedBytes() ?? 0; }
+  packetIndexBytes() { return (this.#packets ?? this.#scan?.index ?? this.#indexed?.index)?.allocatedBytes() ?? 0; }
 
   static detect(head) {
     return isAvi(head);
@@ -221,6 +223,7 @@ export class AviContainer extends Container {
   async readPacketIndex(interval) {
     if (this.#packets) return this.#packets;
     if (this.#scan) return this.#readUnindexed(interval);
+    if (this.#indexed) return this.#readIndexed();
     const tracks = await this.readTracks();
     const { streams } = await this.#readHeaders();
     if (streams.some(stream => stream.indexChunks.length)) {
@@ -278,20 +281,30 @@ export class AviContainer extends Container {
     }
     if ((table.end - table.start) % 16 !== 0) throw new Error("AVI packet index entry is truncated.");
     const index = new PacketIndex({ packetMemory: this.packetMemory, deferMemory: true });
-    try {
     const clocks = new Map();
     const timings = new Map();
+    if (tracks.some(track => ["video", "audio", "subtitle"].includes(track.type) && !(track.timeBase > 0))) {
+      throw new Error("AVI stream time base is invalid.");
+    }
     for (const track of tracks) {
       if (!["video", "audio", "subtitle"].includes(track.type)) continue;
-      if (!(track.timeBase > 0)) throw new Error("AVI stream time base is invalid.");
       index.declareTrack(track.trackNumber, { type: track.type, codecId: track.codecId, codecRanges: streams[track.trackNumber].codecRanges });
       clocks.set(track.trackNumber, track.startTimeSeconds);
     }
-    let offsetBase = null;
-    for (let at = table.start; at < table.end; at += 16) {
+    this.#indexed = { index, clocks, timings, tracks, movi, table, offsetBase: null, at: table.start };
+    return this.#readIndexed();
+  }
+
+  async #readIndexed() {
+    const state = this.#indexed;
+    const { index, clocks, timings, tracks, movi, table } = state;
+    try {
+    index.flushPending();
+    for (; state.at < table.end;) {
+      const at = state.at;
       const entry = await this.readRange(at, at + 15);
       const chunkId = entry.toString("ascii", 0, 4);
-      if (!/^[0-9]{2}(db|dc|wb)$/.test(chunkId)) continue;
+      if (!/^[0-9]{2}(db|dc|wb)$/.test(chunkId)) { state.at += 16; continue; }
       const id = Number(chunkId.slice(0, 2));
       const track = tracks.find(track => track.trackNumber === id);
       if (!track || !clocks.has(id)) throw new Error("AVI packet refers to an undeclared stream.");
@@ -300,18 +313,19 @@ export class AviContainer extends Container {
       const length = entry.readUInt32LE(12);
       if (length === 0) {
         if (track.type === "video") { index.extendLastPresentation(id, track.timeBase); clocks.set(id, clocks.get(id) + track.timeBase); }
+        state.at += 16;
         continue;
       }
-      if (offsetBase === null) {
+      if (state.offsetBase === null) {
         for (const base of [movi.start, 0, movi.start + 4]) {
           const address = base + offset;
           if (address < movi.start + 4 || address + 8 + length > movi.end) continue;
           const probe = await this.readRange(address, address + 7);
-          if (probe.toString("ascii", 0, 4) === chunkId && probe.readUInt32LE(4) === length) { offsetBase = base; break; }
+          if (probe.toString("ascii", 0, 4) === chunkId && probe.readUInt32LE(4) === length) { state.offsetBase = base; break; }
         }
-        if (offsetBase === null) throw new Error("AVI packet index has no valid offset base.");
+        if (state.offsetBase === null) throw new Error("AVI packet index has no valid offset base.");
       }
-      const address = offsetBase + offset;
+      const address = state.offsetBase + offset;
       if (address < movi.start + 4 || address + 8 + length > movi.end) throw new Error("AVI indexed packet exceeds its media list.");
       const probe = await this.readRange(address, address + 7);
       if (probe.toString("ascii", 0, 4) !== chunkId || probe.readUInt32LE(4) !== length) throw new Error("AVI packet index disagrees with its chunk header.");
@@ -321,15 +335,21 @@ export class AviContainer extends Container {
       await this.#appendPacket(index, timings, track, { pts, duration, keyframe: track.type !== "video" || chunkId.endsWith("db") || !!(flags & 0x10),
         ranges: [[address + 8, address + 8 + length - 1]] });
       clocks.set(id, pts + duration);
+      // The pending facts own this entry even if their allocation must wait.
+      state.at += 16;
       index.flushPending();
     }
     for (const timing of timings.values()) timing.elementary?.complete();
     index.flushPending();
     for (const id of clocks.keys()) index.complete(id);
     this.#packets = index;
+    this.#indexed = null;
     return index;
     } catch (error) {
-      index.dispose();
+      if (!isUnavailable(error) && !(error instanceof IndexMemoryUnavailable)) {
+        index.dispose();
+        this.#indexed = null;
+      }
       throw error;
     }
   }

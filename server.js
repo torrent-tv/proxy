@@ -467,9 +467,7 @@ export async function startProxyServer({
         const navigation = await containerOrchestrator.inspect(intervalParams, "source-navigation");
         if (navigation.kind !== "result") continue;
         const originalRanges = navigation.value;
-        const packets = originalRanges && !zone.urgent
-          ? { kind: "result", value: await container.readMappedSourceRanges(interval) }
-          : await containerOrchestrator.inspect(intervalParams, originalRanges ? "source-ranges" : "packets");
+        const packets = await containerOrchestrator.inspect(intervalParams, originalRanges ? "source-ranges" : "packets");
         if (!map.isCurrent()) return [];
         if (packets.kind !== "result") continue;
         const input = originalRanges ? packets.value : new SegmentInputs({ index: packets.value, tracks: wanted }).forInterval({ ...interval, mode: track => modes.get(track) });

@@ -600,7 +600,7 @@ export class MatroskaContainer extends Container {
       .filter(position => !video || position.track === video.trackNumber)
       .map(position => ({ at: position.clusterAt, seconds: point.ticks * layout.secondsPerTick })))
       .sort((left, right) => left.seconds - right.seconds || left.at - right.at);
-    if (!points.length) return super.readSourceRanges(interval);
+    if (!points.length) return { kind: "needs-index", reason: "source-has-no-cue-map" };
     const preroll = Math.max(0, ...requested.map(track => track.seekPrerollSeconds ?? 0));
     const firstAt = (seconds, strict) => {
       let low = 0, high = points.length;
@@ -632,7 +632,7 @@ export class MatroskaContainer extends Container {
       [Math.max(0, this.fileSize - requestBytes), this.fileSize - 1]];
     // SeekHead may name top-level declarations after media clusters. Preserve
     // their original bytes instead of reconstructing declarations for FFmpeg.
-    for (const at of [layout.infoAt, layout.tracksAt]) {
+    for (const at of [layout.infoAt, layout.tracksAt, layout.tagsAt, layout.chaptersAt, layout.attachmentsAt]) {
       if (at === null || at < layout.firstClusterAt) continue;
       const end = await elementEnd(at);
       if (end === null) return { kind: "terminal", reason: "source-declarations-are-unbounded" };

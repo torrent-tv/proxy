@@ -104,14 +104,26 @@ export class SourcePreparation {
       work.positions === this.#positionsFor(work.sourceKey, work.fileIndex, viewer.id));
   }
 
+  /**
+   * Whether the subtitle this viewer chose has been read where they stand.
+   *
+   * Playback readiness waits on this (`subtitle-readiness.js`), so every way
+   * the read can END must answer it, and a refusal is one of them. The cues
+   * are the last of four reads — the track table, the media info, the packet
+   * index, then the cues — and a refusal at an earlier step means the later
+   * ones are never asked. Counting only the cues' own answer left a track the
+   * proxy cannot read waiting for ever.
+   */
   subtitleReadyFor(viewer) {
     const selection = viewer.subtitle;
     if (!selection) return true;
+    const positions = () => this.#positionsFor(selection.sourceKey, selection.fileIndex, viewer.id, true);
     return [...this.#work.values()].some(work => work.sourceKey === selection.sourceKey &&
       work.fileIndex === selection.fileIndex && ["result", "terminal"].includes(work.result) &&
       (selection.trackIndex === null ? work.statement === "subtitle-file" && work.ownerFileIndex === viewer.source.selectedFileIndex
-        : work.statement === "subtitle-cues" && work.ownerId === viewer.id && work.trackIndex === selection.trackIndex &&
-          work.positions === this.#positionsFor(work.sourceKey, work.fileIndex, viewer.id, true)));
+        : work.role === "subtitle-embedded" && work.ownerId === viewer.id && work.trackIndex === selection.trackIndex &&
+          (work.positions === undefined || work.positions === positions()) &&
+          (work.statement === "subtitle-cues" || work.result === "terminal")));
   }
 
   async bytesChanged(sourceKey, fileIndex) {

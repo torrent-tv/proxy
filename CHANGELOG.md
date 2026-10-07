@@ -1,5 +1,6 @@
 ## 2.94.1
 
+- **Fix**: Playback readiness waits for the subtitle the viewer chose to be read where they stand, so a film whose file says to show a subtitle track no longer opens without it. The forecast states the choice as `playbackReadiness.subtitles` and holds with reason `subtitles-pending`; a track the proxy refuses to read at any step ends the wait instead of holding it for ever (torrent-tv/meta#8).
 - **Fix**: A track table this proxy refuses to read no longer hides what a file states about its work: the titles of its tracks are left out and the rest is answered (torrent-tv/meta#139).
 
 ## 2.94.0

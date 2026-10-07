@@ -572,6 +572,9 @@ export function wireOutputs({
     // When this viewer's playback can start and run to the end: the viewer
     // component's forecast, which models the viewer's browser.
     playbackReadiness: { predict: predictPlaybackReadiness, forecastRate, RateTrend },
+    // Whether the subtitle a viewer chose has been read where they stand — the
+    // source preparation's answer, set on these parts by the assembly.
+    subtitleReadyFor: (viewer) => parts.subtitleReadyFor?.(viewer) ?? true,
     sourceInputsFor: (output, index) => parts.sourceInputsFor?.(output, index),
     encodeSpeedReadingOf: (output) => parts.encodeCost.latestSpeedReadingOf(output),
     projectedEncodeSpeedOf: (output) => parts.encodeCost.projectedSpeedOf(output),

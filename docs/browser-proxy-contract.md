@@ -122,6 +122,7 @@ The progress response may include `playbackReadiness`:
 | `reason` | Machine-readable result of the forecast. |
 | `preparedSegments` | Number of already-produced output segments available across required tracks. |
 | `bufferedAtStartSeconds` | Forecast playable buffer at the proposed start time, when a finite delay is available. |
+| `subtitles` | The subtitle this viewer chose for the file, as `{ fileIndex, trackIndex, ready }`, or `null` when none is chosen. Always present, so the browser can tell a proxy that weighed the choice from one that predates it. While the chosen track has not been read at the viewer's position, `ready` is false with reason `subtitles-pending` and `delaySeconds: null`. |
 
 The forecast considers the video output and the selected audio output when audio
 is delivered separately. A mixed output can depend on more than one source
@@ -129,6 +130,14 @@ file. Repeated source files are counted once; distinct files keep separate
 remaining-work estimates and share the measured download rate of their torrent.
 The browser reports buffer state and delivery measurements, but does not
 calculate or override readiness.
+
+The subtitle the viewer chose (`POST /api/subtitles`) is the last input the
+forecast waits for: one segment of that track at the viewer's position, read at
+the picture's urgency. The wait ends with its cues or with the proxy's refusal
+to read the track, at any of the reads before them (track table, media info,
+packet index, cues). The browser does not decide readiness for subtitles; it
+only does not release the startup wait on a forecast taken before its own
+start choice reached the proxy (torrent-tv/meta#8).
 
 Service work is the integral of a nonnegative measured-rate forecast. The latest
 rate relaxes over the observed measurement span toward the lower of its latest

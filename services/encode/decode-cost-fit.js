@@ -337,6 +337,18 @@ export function decodeFamilyOf(source) {
   if (codec === "hevc" || codec === "h265" || codec === "x265") {
     return tenBit ? "hevc10" : "hevc";
   }
+  // ffmpeg's own names. Only what has a clip set: `msmpeg4v3` (DivX 3) is a
+  // different decoder from `mpeg4`, and 10-bit AV1 was not measured, so both
+  // fall through to H.264 like every other unmeasured codec.
+  if (codec === "mpeg4") {
+    return "mpeg4";
+  }
+  if (codec === "mpeg2video") {
+    return "mpeg2";
+  }
+  if (codec === "av1" && !tenBit) {
+    return "av1";
+  }
   return "h264";
 }
 

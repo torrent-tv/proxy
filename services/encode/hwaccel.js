@@ -482,6 +482,28 @@ const CALIBRATION_SETS = {
     "cal-hevc10-1080-lo.mp4",
     "cal-hevc10-480-hi.mp4",
     "cal-hevc10-480-lo.mp4"
+  ],
+  // MPEG-4 Part 2 is what XviD and DivX releases carry — about 8 % of the
+  // releases surveyed on 2026-07-10 — and it was priced as H.264 until these
+  // (torrent-tv/meta#3). MPEG-2 is what DVD rips carry, AV1 a growing share of
+  // recent releases. VC-1 has no set: ffmpeg has no VC-1 encoder to make one.
+  mpeg4: [
+    "cal-mpeg4-1080-hi.mp4",
+    "cal-mpeg4-1080-lo.mp4",
+    "cal-mpeg4-480-hi.mp4",
+    "cal-mpeg4-480-lo.mp4"
+  ],
+  mpeg2: [
+    "cal-mpeg2-1080-hi.mp4",
+    "cal-mpeg2-1080-lo.mp4",
+    "cal-mpeg2-480-hi.mp4",
+    "cal-mpeg2-480-lo.mp4"
+  ],
+  av1: [
+    "cal-av1-1080-hi.mp4",
+    "cal-av1-1080-lo.mp4",
+    "cal-av1-480-hi.mp4",
+    "cal-av1-480-lo.mp4"
   ]
 };
 export const CALIBRATION_REFERENCE_CLIP = "cal-h264-1080-hi.mp4";
@@ -676,6 +698,9 @@ export async function benchmarkDecodeCost({ ffmpegBin, logger, clipsDir = CALIBR
   log.info(
     `hwaccel: decode cost measured for ${Object.keys(families).join(", ")}` +
       (missing.length > 0 ? `; ${missing.join(" and ")} priced as H.264` : "") +
+      // Said, because it is a fact about every film in those codecs: VC-1 has
+      // no set (ffmpeg cannot encode one), and neither do DivX 3 or 10-bit AV1.
+      "; every other codec is priced as H.264" +
       ` (in ${((Date.now() - startedAllAt) / 1000).toFixed(1)}s)`
   );
   return { families, ...families.h264 };
@@ -701,7 +726,7 @@ async function fitOneFamily({ ffmpegBin, log, clipsDir, family, clips }) {
   );
   if (!streams) {
     log.warn(
-      `hwaccel: ${family} cannot be lifted out of its container — no Annex-B filter is mapped for it, ` +
+      `hwaccel: ${family} cannot be lifted out of its container — no elementary-stream form is mapped for it, ` +
         `so its clips were never measured`
     );
     return null;
@@ -756,18 +781,27 @@ async function fitOneFamily({ ffmpegBin, log, clipsDir, family, clips }) {
 }
 
 /**
- * The bitstream filter and demuxer that turn a clip's video track into a
+ * The bitstream filter, muxer and demuxer that turn a clip's video track into a
  * continuous elementary stream, by codec family.
  *
- * H.264 and HEVC in MP4 keep their parameter sets in the container's `avcC` /
- * `hvcC` and their access units length-prefixed; Annex-B carries them inline,
- * with start codes, which is what makes plain byte concatenation a valid
- * stream. That is the property this whole measurement rests on.
+ * The property this whole measurement rests on is that plain byte
+ * concatenation of the stream is a valid stream, so every header a decoder
+ * needs has to travel inside it. H.264 and HEVC in MP4 keep their parameter
+ * sets in the container's `avcC` / `hvcC` and their access units
+ * length-prefixed; Annex-B carries them inline, with start codes. MPEG-4 Part 2
+ * and MPEG-2 in MP4 keep their headers in the decoder configuration;
+ * `dump_extra` puts them back in front of every keyframe. AV1 needs no filter:
+ * the low-overhead OBU form carries the sequence header in every keyframe's
+ * temporal unit. MPEG-2's raw stream is written as `mpeg2video` and read as
+ * `mpegvideo`, which is why the two names are kept apart.
  */
-const ANNEX_B_BY_FAMILY = {
-  h264: { filter: "h264_mp4toannexb", demuxer: "h264" },
-  hevc: { filter: "hevc_mp4toannexb", demuxer: "hevc" },
-  hevc10: { filter: "hevc_mp4toannexb", demuxer: "hevc" }
+const ELEMENTARY_BY_FAMILY = {
+  h264: { filter: "h264_mp4toannexb", muxer: "h264", demuxer: "h264" },
+  hevc: { filter: "hevc_mp4toannexb", muxer: "hevc", demuxer: "hevc" },
+  hevc10: { filter: "hevc_mp4toannexb", muxer: "hevc", demuxer: "hevc" },
+  mpeg4: { filter: "dump_extra=freq=keyframe", muxer: "m4v", demuxer: "m4v" },
+  mpeg2: { filter: "dump_extra=freq=keyframe", muxer: "mpeg2video", demuxer: "mpegvideo" },
+  av1: { filter: null, muxer: "obu", demuxer: "obu" }
 };
 
 /**
@@ -794,8 +828,8 @@ function lastErrorLine(stderr) {
 const EXTRACT_TIMEOUT_MS = 20_000;
 
 /**
- * Lift a whole family's clips out of their containers, as Annex-B elementary
- * streams, in ONE ffmpeg run.
+ * Lift a whole family's clips out of their containers, as elementary streams,
+ * in ONE ffmpeg run.
  *
  * No re-encoding — the frames are copied — so the work itself is trivial and
  * the cost is almost entirely the process. Doing one process per clip added
@@ -819,24 +853,22 @@ const EXTRACT_TIMEOUT_MS = 20_000;
  *   One entry per clip, in order; null when the family cannot be lifted at all.
  */
 async function extractFamilyStreams(ffmpegBin, clipPaths, family) {
-  const shape = ANNEX_B_BY_FAMILY[family];
+  const shape = ELEMENTARY_BY_FAMILY[family];
   // A family with no mapping is a hard failure, not a silent fallback to
-  // H.264's filter. AV1 has no Annex-B form at all (its packaging is OBU), and
-  // MPEG-2 and VC-1 have no `*_mp4toannexb` filter — so the three families the
-  // roadmap plans next cannot come through here, and finding that out as
-  // "the clip failed" would send the reader after the clip.
+  // H.264's filter: finding that out as "the clip failed" would send the
+  // reader after the clip.
   if (!shape) {
     return null;
   }
   const workDir = await mkdtemp(path.join(os.tmpdir(), "ttv-calibration-"));
-  const outputs = clipPaths.map((_, index) => path.join(workDir, `stream-${index}.${shape.demuxer}`));
+  const outputs = clipPaths.map((_, index) => path.join(workDir, `stream-${index}.${shape.muxer}`));
   /** @type {string[]} */
   const args = ["-hide_banner", "-loglevel", "info", "-nostats", "-y"];
   for (const clipPath of clipPaths) {
     args.push("-i", clipPath);
   }
   for (const [index, output] of outputs.entries()) {
-    args.push("-map", `${index}:v:0`, "-c:v", "copy", "-bsf:v", shape.filter, "-f", shape.demuxer, output);
+    args.push("-map", `${index}:v:0`, "-c:v", "copy", ...(shape.filter ? ["-bsf:v", shape.filter] : []), "-f", shape.muxer, output);
   }
   const stderr = await runCapturingStderr(ffmpegBin, args, EXTRACT_TIMEOUT_MS);
   try {

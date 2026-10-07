@@ -17,6 +17,31 @@ H.264 High, 24 fps, 2 s each, no audio:
 | `cal-h264-480-hi.mp4` | 854×480 | 9.48 Mbit/s |
 | `cal-h264-480-lo.mp4` | 854×480 | 1.25 Mbit/s |
 
+The sets for the other codec families are made from `cal-h264-1080-hi.mp4`
+above, scaled and re-encoded with ffmpeg 8.1, 2 s, 24 fps, no audio
+(torrent-tv/meta#3). The bitrates are what the encoders produced; libxvid and
+the MPEG-2 encoder at a 9 Mbit/s target stop at their best quantizer on this
+short clip, so the high clips use a fixed quantizer instead:
+
+| file | encoder and settings | resolution | bitrate |
+|---|---|---|---|
+| `cal-mpeg4-1080-hi.mp4` | `mpeg4 -q:v 2 -bf 2 -g 48 -mbd 2` | 1920×1080 | 5.98 Mbit/s |
+| `cal-mpeg4-1080-lo.mp4` | `mpeg4 -b:v 1M -maxrate 1M -bufsize 2M -qmin 1 -bf 2 -g 48 -mbd 2` | 1920×1080 | 1.25 Mbit/s |
+| `cal-mpeg4-480-hi.mp4` | `mpeg4 -q:v 1 -qmin 1 -bf 2 -g 48 -mbd 2` | 854×480 | 3.93 Mbit/s |
+| `cal-mpeg4-480-lo.mp4` | `mpeg4 -b:v 400k -maxrate 400k -bufsize 1M -bf 2 -g 48 -mbd 2` | 854×480 | 0.54 Mbit/s |
+| `cal-mpeg2-1080-hi.mp4` | `mpeg2video -b:v 9M -maxrate 9M -bufsize 18M -qmin 1 -bf 2 -g 12` | 1920×1080 | 7.45 Mbit/s |
+| `cal-mpeg2-1080-lo.mp4` | `mpeg2video -b:v 1M -maxrate 1M -bufsize 4M -qmin 1 -bf 2 -g 12` | 1920×1080 | 2.80 Mbit/s |
+| `cal-mpeg2-480-hi.mp4` | `mpeg2video -q:v 1 -qmin 1 -bf 2 -g 12` | 854×480 | 5.95 Mbit/s |
+| `cal-mpeg2-480-lo.mp4` | `mpeg2video -b:v 500k -maxrate 500k -bufsize 2M -bf 2 -g 12` | 854×480 | 0.97 Mbit/s |
+| `cal-av1-1080-hi.mp4` | `libsvtav1 -preset 8 -b:v 9M -g 48` | 1920×1080 | 5.07 Mbit/s |
+| `cal-av1-1080-lo.mp4` | `libsvtav1 -preset 8 -b:v 1M -g 48` | 1920×1080 | 0.52 Mbit/s |
+| `cal-av1-480-hi.mp4` | `libsvtav1 -preset 8 -b:v 9M -g 48` | 854×480 | 4.38 Mbit/s |
+| `cal-av1-480-lo.mp4` | `libsvtav1 -preset 8 -b:v 1M -g 48` | 854×480 | 0.56 Mbit/s |
+
+The MPEG-4 Part 2 set is decoded by the same decoder (`mpeg4`) as an XviD or
+DivX 4+ release. VC-1 has no set because ffmpeg has no VC-1 encoder, and
+10-bit AV1 has none yet; both are priced as H.264, and the startup log says so.
+
 ## Why six, and why this grid
 
 `services/encode/hwaccel.js` decodes them at startup and fits the host's decode cost,

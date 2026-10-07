@@ -19,13 +19,25 @@ export class DownloadMaps {
     file.sourceZones = zones.map(zone => Number.isFinite(zone.deadlineAt) || !Number.isFinite(zone.withinSeconds)
       ? zone : { ...zone, deadlineAt: now + Math.max(0, zone.withinSeconds) * 1000 });
     let changed = false;
+    // Until the new zones are resolved to bytes, a resolved zone stays while
+    // the film it covers is still wanted. A viewer moving on re-cuts every zone
+    // without making its film unwanted; dropping the zones that lost their
+    // exact interval published an empty map every few seconds of playback,
+    // which let the swarm go and emptied the encoder's resolved input (Home
+    // Assistant 2026-10-07, torrent-tv/meta#95). A zone no new zone overlaps —
+    // a seek away — is withdrawn at once.
     const retained = file.zones.flatMap(zone => {
       const interval = zone.downloadInterval ?? zone;
       const current = file.sourceZones.find(candidate => candidate.from === interval.from && candidate.to === interval.to);
-      const deadlineAt = current && Number.isFinite(current.deadlineAt)
-        ? current.deadlineAt + (Math.max(0, zone.from - current.from) - (zone.leadSeconds ?? 0)) * 1000 : current?.deadlineAt;
-      if (!current || Object.keys(current).some(key => key !== "from" && key !== "to" && !Object.is(zone[key], key === "deadlineAt" ? deadlineAt : current[key]))) changed = true;
-      return current ? [{ ...zone, ...current, from: zone.from, to: zone.to, deadlineAt }] : [];
+      if (!current) {
+        const stillWanted = file.sourceZones.some(candidate => candidate.from < interval.to && interval.from < candidate.to);
+        if (!stillWanted) changed = true;
+        return stillWanted ? [zone] : [];
+      }
+      const deadlineAt = Number.isFinite(current.deadlineAt)
+        ? current.deadlineAt + (Math.max(0, zone.from - current.from) - (zone.leadSeconds ?? 0)) * 1000 : current.deadlineAt;
+      if (Object.keys(current).some(key => key !== "from" && key !== "to" && !Object.is(zone[key], key === "deadlineAt" ? deadlineAt : current[key]))) changed = true;
+      return [{ ...zone, ...current, from: zone.from, to: zone.to, deadlineAt }];
     });
     this.#setZones(file, retained);
     for (const [statement, metadata] of file.metadata) {

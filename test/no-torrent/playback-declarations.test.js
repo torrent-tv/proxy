@@ -81,3 +81,22 @@ test("whole-file decode pricing uses measured size and duration without inventin
   header.write("XVID", 16, "ascii");
   assert.equal(playbackDeclarations({ tracks: [{ ...video, codecId: "V_MS/VFW/FOURCC", codecPrivateB64: header.toString("base64") }], media }).videoCodec, "mpeg4");
 });
+
+test("a text subtitle track is declared text-based and a picture one is not (torrent-tv/meta#8)", async () => {
+  // The browser offers only tracks marked text-based. Since the plan was built
+  // from container declarations (torrent-tv/meta#95) nothing marked them, so
+  // every embedded subtitle disappeared from the menu.
+  const tracks = [video,
+    { type: "subtitle", declaredIndex: 2, trackNumber: 3, codecId: "S_TEXT/ASS", name: "Signs", language: "rus" },
+    { type: "subtitle", declaredIndex: 3, trackNumber: 4, codecId: "S_HDMV/PGS", name: "", language: "eng" }];
+  const declared = playbackDeclarations({ tracks, media });
+  assert.deepEqual(declared.subtitleTracks.map(track => [track.codec, track.textBased]),
+    [["ass", true], ["hdmv_pgs_subtitle", false]]);
+  const planner = createPlaybackPlanner({ transcodeAudioEnabled: true, localBaseUrl: "http://127.0.0.1:9090",
+    sourceRegistry: { get: () => ({ sourceType: "fake", source: "fake" }) },
+    torrentPool: { getTorrent: async () => ({ files: [{ name: "film.mkv", length: 100 }] }) },
+    declaredTracksOf: async () => tracks,
+    readDeclarations: async () => ({ kind: "result", value: { tracks, media } }) });
+  const plan = await planner.getPlan({ sourceKey: "source", fileIndex: 0 });
+  assert.deepEqual(plan.subtitleTracks.map(track => track.textBased), [true, false]);
+});

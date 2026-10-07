@@ -13,18 +13,18 @@ import { fmp4Format } from "../../services/encode/segment-formats/fmp4.js";
 import { judgePiece } from "../../services/encode/piece-completeness.js";
 
 // Generated ordinary media and a loopback HTTP server only; no torrent imports.
-for (const [bFrames, startIndex, videoIndex = 0] of [[2, 0], [2, 1], [0, 1], [2, 1, 1]]) test(`original video ${videoIndex} preserves interval ${startIndex} with ${bFrames} B-pictures`, async () => {
+for (const [bFrames, startIndex, videoIndex = 0, sourceStart = 0] of [[2, 0], [2, 1], [0, 1], [2, 1, 1], [2, 1, 0, 10]]) test(`original video ${videoIndex} preserves interval ${startIndex} with ${bFrames} B-pictures and source start ${sourceStart}`, async () => {
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), "ttv95-original-input-"));
   let input, server;
   try {
     const file = path.join(directory, "input.mkv");
     const generated = spawnSync(ffmpegBin, ["-v", "error", "-f", "lavfi", "-i", "testsrc2=size=64x64:rate=25",
       ...(videoIndex ? ["-f", "lavfi", "-i", "testsrc2=size=32x32:rate=25", "-map", "0:v", "-map", "1:v"] : []),
-      "-t", "4.2", "-c:v", "libx264", "-bf", String(bFrames), "-g", "50", file], { encoding: "utf8", windowsHide: true });
+      "-t", "4.2", "-c:v", "libx264", "-bf", String(bFrames), "-g", "50", "-output_ts_offset", String(sourceStart), file], { encoding: "utf8", windowsHide: true });
     assert.equal(generated.status, 0, generated.stderr);
     const bytes = await fs.readFile(file);
-    input = await admitOriginalInput({ sources: [{ sourceKey: "generated", fileIndex: 0, timeShiftSeconds: 0,
-      input: { original: true, fileLength: bytes.length, ranges: [[0, bytes.length - 1]],
+    input = await admitOriginalInput({ sources: [{ sourceKey: "generated", fileIndex: 0, timeShiftSeconds: sourceStart,
+      input: { original: true, from: sourceStart + startIndex * 2, fileLength: bytes.length, ranges: [[0, bytes.length - 1]],
         selections: [{ track: { type: "video", reorderDepth: bFrames }, index: videoIndex }] } }],
       reserve: async () => () => {}, readRanges: async () => [bytes] });
     input.runTag = "zero";
@@ -39,7 +39,7 @@ for (const [bFrames, startIndex, videoIndex = 0] of [[2, 0], [2, 1], [0, 1], [2,
     const command = buildOriginalCommand({ admittedInput: input, inputToken: 1,
       baseUrl: `http://127.0.0.1:${server.address().port}`, startIndex,
       timeline: { published: [0, 2, 4], cutGrid: "keyframe", sourceStartOf: () => startIndex * 2 },
-      keyframes: { times: [0, 2, 4] }, audioOnly: false, audioSeparate: true,
+      keyframes: { times: [0, 2, 4].map(time => time + sourceStart) }, audioOnly: false, audioSeparate: true,
       transcodeAudio: false, transcodeVideo: false, output: {}, videoEncoder: {},
       segmentFormat: fmp4Format, segmentDurationSec: 2 });
     const child = spawn(ffmpegBin, command.args, { cwd: directory, stdio: ["ignore", "ignore", "pipe", "ignore"], windowsHide: true });

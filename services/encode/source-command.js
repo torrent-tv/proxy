@@ -64,6 +64,13 @@ export function buildRunCommand({
   const audioCodecArgs = transcodeAudio
     ? ["-c:a", "aac", "-ac", "2", "-b:a", `${AUDIO_TRANSCODE_KBPS}k`]
     : ["-c:a", "copy"];
+  // Under `-copyts` FFmpeg trims a decoded stream at `-ss` PLUS its own idea of
+  // the file's start, ignoring `-seek_timestamp` (ffmpeg_demux.c, n8.1.2,
+  // `trim_start_us`): an absolute seek would be trimmed a second start later.
+  // On the keyframe grid its trim is therefore switched off on every input and
+  // the decoded soundtrack is cut here, on the picture file's clock, which is
+  // the clock every stream carries there.
+  const inputSeekArgs = keyframeGrid ? ["-noaccurate_seek"] : ["-accurate_seek"];
 
   const args = ["-hide_banner", "-nostats", "-loglevel", "error", "-progress", "pipe:1"];
   if (transcodeVideo && Array.isArray(videoEncoder.inputArgs)) {
@@ -71,16 +78,23 @@ export function buildRunCommand({
   }
   const inputStartSeconds = inputIndex === safeIndex ? startSeconds :
     publishedStartTime(timeline, inputIndex, segmentDurationSec);
-  const seekSeconds = timeline.cutGrid === "keyframe"
-    ? inputStartSeconds + sourceStartTime
-    : inputStartSeconds;
+  // ONE CLOCK FOR EVERY INPUT SEEK. Each `-ss` below is an absolute timestamp
+  // of the file it seeks, given with `-seek_timestamp 1`: without it FFmpeg
+  // adds its own idea of the file's start time to the value, which is a second
+  // copy of a start this code already knows. Published positions begin at
+  // zero, so the picture's instant is the published time plus the picture
+  // file's start; keyframe times are on the same file clock; a soundtrack in
+  // another file is the same instant on that file's clock. Whether the cuts
+  // follow the source's keyframes or an even grid changes how the run ENDS
+  // and what its output timestamps are, never where its input is.
+  const seekAt = inputStartSeconds + sourceStartTime;
   const carriedKeyframe = timeline.cutGrid === "keyframe" && typeof timeline.sourceStartOf === "function"
     ? timeline.sourceStartOf(inputIndex)
     : null;
   const snappedKeyframe = Number.isFinite(carriedKeyframe)
     ? carriedKeyframe
     : (Array.isArray(keyframes?.times) && keyframes.times.length > 0
-      ? nearestKeyframeAtOrBefore(keyframes.times, seekSeconds)
+      ? nearestKeyframeAtOrBefore(keyframes.times, seekAt)
       : null);
   const audioInputUrl =
     typeof audioInputUrlGiven === "string" && audioInputUrlGiven.length > 0
@@ -98,8 +112,8 @@ export function buildRunCommand({
    * order wrong would silently turn the audio file's seek into a trim of the
    * finished stream.
    *
-   * @param {number} inputSeekSeconds - Where to start, on the PICTURE's
-   *   timeline. Translated to the soundtrack file's own here.
+   * @param {number} inputSeekSeconds - Where to start, on the PICTURE
+   *   file's clock. Translated to the soundtrack file's own here.
    */
   const pushAudioInput = (inputSeekSeconds) => {
     if (!audioInputUrl) {
@@ -108,17 +122,17 @@ export function buildRunCommand({
     if (audioTimelineShift !== 0 && keyframeGrid) {
       args.push("-itsoffset", ffmpegSeconds(-audioTimelineShift));
     }
-    const audioSeek = Math.max(0, inputSeekSeconds + audioTimelineShift);
-    if (audioSeek > 0) {
-      args.push("-accurate_seek", "-ss", ffmpegSeconds(audioSeek));
+    const audioSeek = inputSeekSeconds + audioTimelineShift;
+    if (audioSeek > audioFileStartTime) {
+      args.push("-seek_timestamp", "1", ...inputSeekArgs, "-ss", ffmpegSeconds(audioSeek));
     }
     args.push("-i", audioInputUrl);
   };
 
   if (snappedKeyframe !== null) {
-    const residualSeconds = Math.max(0, seekSeconds - snappedKeyframe);
-    if (snappedKeyframe > 0) {
-      args.push("-ss", ffmpegSeconds(snappedKeyframe + seekLandingOffsetFor({ audioOnly, transcodeVideo, keyframes, reorderDepth }, snappedKeyframe)));
+    const residualSeconds = Math.max(0, seekAt - snappedKeyframe);
+    if (snappedKeyframe > sourceStartTime) {
+      args.push("-seek_timestamp", "1", ...inputSeekArgs, "-ss", ffmpegSeconds(snappedKeyframe + seekLandingOffsetFor({ audioOnly, transcodeVideo, keyframes, reorderDepth }, snappedKeyframe)));
     }
     args.push("-i", inputUrl);
     pushAudioInput(snappedKeyframe);
@@ -126,11 +140,11 @@ export function buildRunCommand({
       args.push("-ss", ffmpegSeconds(residualSeconds));
     }
   } else {
-    if (seekSeconds > 0) {
-      args.push("-accurate_seek", "-ss", ffmpegSeconds(seekSeconds));
+    if (seekAt > sourceStartTime) {
+      args.push("-seek_timestamp", "1", ...inputSeekArgs, "-ss", ffmpegSeconds(seekAt));
     }
     args.push("-i", inputUrl);
-    pushAudioInput(seekSeconds);
+    pushAudioInput(seekAt);
   }
   if (!keyframeGrid) {
     if (startSeconds > 0) {
@@ -146,11 +160,19 @@ export function buildRunCommand({
   const publishedGrid = publishedGridFor(timeline);
   if (runEnd >= safeIndex && Array.isArray(publishedGrid) && publishedGrid[runEnd + 1] > 0) {
     const endsAt = publishedGrid[runEnd + 1];
-    if (transcodeVideo) {
-      args.push("-t", ffmpegSeconds(Math.max(0.1, endsAt - publishedGrid[safeIndex])));
+    if (keyframeGrid) {
+      // `-copyts` keeps the input's own clock up to the muxer, and an output
+      // `-to` is compared there, before `-output_ts_offset` moves it.
+      args.push("-to", ffmpegSeconds(endsAt + sourceStartTime));
     } else {
-      args.push("-to", ffmpegSeconds(endsAt));
+      // The output clock starts at zero where this run begins, so the end is
+      // a length; an output `-to` would be read as a length from zero too and
+      // run past the interval by its own start.
+      args.push("-t", ffmpegSeconds(Math.max(0.1, endsAt - startSeconds)));
     }
+  }
+  if (keyframeGrid && transcodeAudio && !servesAudioSeparately) {
+    audioCodecArgs.push("-af", `atrim=start=${ffmpegSeconds(seekAt)}`);
   }
   if (audioOnly === true) {
     args.push("-vn", "-map", `0:a:${audioSourceTrackIndex}?`, ...audioCodecArgs);
@@ -217,7 +239,7 @@ export function buildOriginalCommand(params) {
   if (!primary) throw new Error("The selected source track is absent from original input.");
   const url = source => new URL(`/encode-input/${inputToken}/${source.fileIndex}`, baseUrl).href;
   const localTimeline = { ...timeline, published: [from, to, to + (to - from)],
-    boundaries: [from, to, to + (to - from)], sourceStartOf: () => timeline.sourceStartOf?.(startIndex) ?? from + primary.timeShiftSeconds };
+    boundaries: [from, to, to + (to - from)], sourceStartOf: () => primary.input.from ?? from + primary.timeShiftSeconds };
   const command = buildRunCommand({ ...params, startIndex: 0, endIndex: 0, timeline: localTimeline,
     videoSourceTrackIndex: primary.input.selections.find(selection => selection.track.type === "video")?.index ?? 0,
     reorderDepth: primary.input.selections.find(selection => selection.track.type === "video")?.track.reorderDepth ?? 0,
@@ -229,7 +251,7 @@ export function buildOriginalCommand(params) {
   // the inner muxer writes its edit list, moving B-picture PTS off the source.
   args.splice(args.indexOf("-f"), 0, "-avoid_negative_ts", "disabled");
   const formatOptions = args.indexOf("-segment_format_options");
-  if (formatOptions >= 0) args[formatOptions + 1] += ":avoid_negative_ts=disabled";
+  if (formatOptions >= 0) args[formatOptions + 1] += ":avoid_negative_ts=disabled:movie_timescale=1000000";
   const numbering = args.indexOf("-segment_start_number");
   if (numbering < 0) throw new Error("The format cannot produce finite original-source segments.");
   args[numbering + 1] = String(startIndex);

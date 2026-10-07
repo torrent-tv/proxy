@@ -1,6 +1,7 @@
 ## Unreleased
 
 - **Fix**: Retain Matroska declarations that FFmpeg follows through SeekHead, and retry missing source-range metadata for speculative segments through the same read tracking as urgent segments (torrent-tv/meta#95).
+- **Fix**: Seek original-source input on one clock: every `-ss` is an absolute time of the file it seeks, so a file that does not start at zero no longer lands a transcoded picture, a soundtrack output or a separate soundtrack file away from the published interval, and transcoded sound on the keyframe grid is cut at the interval instead of a file start later (torrent-tv/meta#95).
 
 ## 2.95.4
 

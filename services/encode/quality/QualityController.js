@@ -51,7 +51,7 @@ export class QualityController {
   #affirmed = new Set();
 
   /**
-   * @param {object} host - `isLive`, `liveConsumers`, `liveRunsOf`, `producedNumbers`, `reportHostLoad`, `runStateOf`, `sampleDownloadRates`, `encodeCost`, `outputs`, `qualityOffer`, `segmentDurationSec`, `segmentPaths`, `videoEncoder`, `prepareSameHeightSwitch`, `sameHeightSwitchPending`, `sameHeightSwitchDirection`, `cancelSameHeightSwitch`, `heightReadyFor`, `bufferOf`, `visiblePictureOf`, `expectedFirstSegmentMs`
+   * @param {object} host - `isLive`, `liveConsumers`, `liveRunsOf`, `producedNumbers`, `reportHostLoad`, `runStateOf`, `sampleDownloadRates`, `encodeCost`, `outputs`, `qualityOffer`, `segmentDurationSec`, `segmentPaths`, `videoEncoder`, `prepareSameHeightSwitch`, `sameHeightSwitchPending`, `sameHeightSwitchDirection`, `cancelSameHeightSwitch`, `heightReadyFor`, `bufferOf`, `visiblePictureOf`, `computedPreparationSec`
    * @param {SegmentPathLookup} host.segmentPaths - Lookup for completed
    *   segment paths needed by quality decisions.
    */
@@ -103,16 +103,20 @@ export class QualityController {
   /**
    * How long another output of the mode on this viewer's screen takes to be
    * ready here, in seconds: as observed on this host (roadmap item 97, step
-   * 14), and otherwise this host's time to a first segment. Null when neither
-   * has been measured.
+   * 14), and otherwise computed from this host's measured wait for a first
+   * output and this output's own measured speed (torrent-tv/meta#3). Null
+   * when neither can be said.
    *
    * @param {HlsSession} session
    * @returns {number | null}
    */
   #secondsToReady(session) {
     const observedMs = this.#host.observedPreparationMs?.(session) ?? null;
-    const expectedMs = Number.isFinite(observedMs) ? observedMs : (this.#host.expectedFirstSegmentMs?.() ?? null);
-    return Number.isFinite(expectedMs) && expectedMs >= 0 ? expectedMs / 1000 : null;
+    if (Number.isFinite(observedMs) && observedMs >= 0) {
+      return observedMs / 1000;
+    }
+    const computed = this.#host.computedPreparationSec?.(session) ?? null;
+    return Number.isFinite(computed) && computed >= 0 ? computed : null;
   }
 
   /**

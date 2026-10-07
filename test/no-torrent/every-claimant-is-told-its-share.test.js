@@ -107,7 +107,7 @@ test("over its share the evidence stops being collected, and nothing recorded is
     await fs.writeFile(path.join(root, "core.MainThread.1.2"), Buffer.alloc(4 * KILOBYTE));
     await fs.writeFile(path.join(root, "heap-x-1-2.heapsnapshot"), Buffer.alloc(2 * KILOBYTE));
     // Not evidence: the proxy's own state lives in the same directory.
-    await fs.writeFile(path.join(root, "host-timings.json"), Buffer.alloc(KILOBYTE));
+    await fs.writeFile(path.join(root, "local-observations.json"), Buffer.alloc(KILOBYTE));
 
     const said = [];
     const diagnostics = new Diagnostics({
@@ -134,7 +134,7 @@ test("over its share the evidence stops being collected, and nothing recorded is
     const left = (await fs.readdir(root)).sort();
     assert.deepEqual(
       left,
-      ["core.MainThread.1.2", "heap-x-1-2.heapsnapshot", "host-timings.json"],
+      ["core.MainThread.1.2", "heap-x-1-2.heapsnapshot", "local-observations.json"],
       "nothing already recorded may be removed to make room for more"
     );
   } finally {

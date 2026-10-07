@@ -45,7 +45,7 @@ test("order on disk does not decide; the time written does", () => {
 test("only core dumps are considered", () => {
   assert.equal(isCoreDump("core.WorkerThread.81.1787292750"), true);
   assert.equal(isCoreDump("proxy.log"), false);
-  assert.equal(isCoreDump("host-timings.json"), false);
+  assert.equal(isCoreDump("local-observations.json"), false);
   // Not a path, and not a directory called core.
   assert.equal(isCoreDump("core.foo/bar"), false);
   assert.equal(isCoreDump(""), false);

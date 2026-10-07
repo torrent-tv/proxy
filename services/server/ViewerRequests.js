@@ -47,7 +47,7 @@ export class ViewerRequests {
   #rateStateBySession = new WeakMap();
 
   /**
-   * @param {object} host - `opening`, `activeOutputFor`, `viewerSecondsOn`, `minimumBufferSecondsFor`, `getSourceStats`, `disposeSession`, `expectedFirstSegmentMs`, `expectedSessionCreateMs`, `planEncodersSoon`, `waitUntilReady`, `encodeRuns`, `encodeSpeedReadingOf`, `outputTimes`, `outputs`, `lookaheadSeconds`, `quality`, `qualityOffer`, `renditions`, `segmentDurationSec`, `segmentStore`, `sourceFiles`, `startupWaitMs`, `viewers`, `acceptsGeneration`, `generationOfRequest`, `noteGivenOutput`, `holdForResponse`, `noteServingVerdict`, `servingVerdictOf`
+   * @param {object} host - `opening`, `activeOutputFor`, `viewerSecondsOn`, `minimumBufferSecondsFor`, `getSourceStats`, `disposeSession`, `planEncodersSoon`, `waitUntilReady`, `encodeRuns`, `encodeSpeedReadingOf`, `outputTimes`, `outputs`, `lookaheadSeconds`, `quality`, `qualityOffer`, `renditions`, `segmentDurationSec`, `segmentStore`, `sourceFiles`, `startupWaitMs`, `viewers`, `acceptsGeneration`, `generationOfRequest`, `noteGivenOutput`, `holdForResponse`, `noteServingVerdict`, `servingVerdictOf`
    */
   constructor(host) {
     this.#host = host;
@@ -531,15 +531,6 @@ export class ViewerRequests {
       // confirmed), or `no measurement`. The page says which, so an estimate
       // is never presented as a guarantee.
       servingVerdict: this.#host.servingVerdictOf(consumerId),
-      // What this host takes to create a session and to make a first segment.
-      // Also on the playback plan, but the browser reads that once per file:
-      // measured 2026-08-06 across four seeks, a proxy that had just restarted
-      // answered null for both, and every later seek then computed its estimate
-      // with one term of four — the figure hit zero after 3.5 s of an 11.8 s
-      // wait and read "starting now" for the remaining 8.4 s. This response is
-      // polled about every 1.5 s, so carrying them here keeps them current.
-      expectedSessionCreateMs: this.#host.expectedSessionCreateMs(),
-      expectedFirstSegmentMs: this.#host.expectedFirstSegmentMs(),
       updatedAt: progress.updatedAt,
       error: this.#host.encodeRuns.failureOf(failed ?? session)
     };

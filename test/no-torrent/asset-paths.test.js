@@ -12,7 +12,7 @@ import assert from "node:assert/strict";
 import { existsSync } from "node:fs";
 import path from "node:path";
 import { CALIBRATION_DIR } from "../../services/encode/hwaccel.js";
-import { PROXY_ROOT } from "../../services/encode/quality/HostTimings.js";
+import { PROXY_ROOT } from "../../services/encode/LocalObservations.js";
 import { SCTPSTATE_SCRIPT_PATH } from "../../services/transport/usrsctp-state.js";
 
 test("the calibration clips are where the benchmark looks", () => {

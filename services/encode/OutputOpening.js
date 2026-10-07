@@ -44,7 +44,7 @@ export class OutputOpening {
   #host;
 
   /**
-   * @param {object} host - `logger`, `readSourceMedia`, `enabled`, `segmentFormat`, `renditions`, `sourceFiles`, `getCachedMediaInfo`, `localBaseUrl`, `tonemapSupported`, `videoEncoder`, `hostLoad`, `keyframeTables`, `timelines`, `segmentDurationSec`, `softwarePresetBenchmark`, `decodeCostModel`, `encodeCost`, `admission`, `outputs`, `segmentOutputFiles`, `hostTimings`, `returns`, `encodeRuns`
+   * @param {object} host - `logger`, `readSourceMedia`, `enabled`, `segmentFormat`, `renditions`, `sourceFiles`, `getCachedMediaInfo`, `localBaseUrl`, `tonemapSupported`, `videoEncoder`, `hostLoad`, `keyframeTables`, `timelines`, `segmentDurationSec`, `softwarePresetBenchmark`, `decodeCostModel`, `encodeCost`, `admission`, `outputs`, `segmentOutputFiles`, `coldStarts`, `returns`, `encodeRuns`
    * @param {SegmentOutputFiles} host.segmentOutputFiles - The storage
    *   operations needed while selecting or opening an output.
    */
@@ -627,9 +627,6 @@ export class OutputOpening {
       }
     }
 
-    // Only a session actually made is timed: a viewer joining one costs none
-    // of what this figure predicts for the next viewer who has to wait.
-    this.#host.hostTimings.rememberSessionCreateLatency(Date.now() - createEntryMs);
     const sessionId = spec.toName();
     const output = new Output({
       encodeWidth: width,
@@ -674,7 +671,7 @@ export class OutputOpening {
     this.#host.returns.note({ lastReadAt: this.#host.segmentOutputFiles.lastReadAt(spec.toKey()), now: Date.now() });
     this.#host.segmentOutputFiles.directoryFor(spec.toKey());
     this.#host.segmentOutputFiles.useFormat(spec.toKey(), segmentFormat);
-    this.#host.hostTimings.noteOutputCreated(session, createEntryMs);
+    this.#host.coldStarts.noteOutputCreated(session, createEntryMs);
     this.#host.encodeCost.notePredictionFor(session);
     // Decided before the key was built and only recorded here. Whether the audio
     // travels separately decides the ffmpeg arguments, what the master says,

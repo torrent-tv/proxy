@@ -78,7 +78,7 @@ import { EncodeRuns } from "../encode/EncodeRuns.js";
 import { EncodeInputs } from "../encode/EncodeInputs.js";
 import { OutputTimes } from "../encode/OutputTimes.js";
 import { HostLoad } from "../encode/quality/HostLoad.js";
-import { HostTimings } from "../encode/quality/HostTimings.js";
+import { ColdStarts, secondsToFirstPiece } from "../encode/quality/ColdStarts.js";
 import { BUDGET_CHECK_INTERVAL_MS, QualityController } from "../encode/quality/QualityController.js";
 import { EncodeOrchestrator } from "../encode/EncodeOrchestrator.js";
 import { EncodeAdmission } from "../encode/EncodeAdmission.js";
@@ -93,9 +93,8 @@ import { wireMachineBudget } from "../storage/wire.js";
 import { Returns } from "../storage/returns.js";
 import { freeBytesFor } from "../storage/free.js";
 import path from "node:path";
-import { contentOf, LocalObservations } from "../encode/LocalObservations.js";
+import { contentOf, LocalObservations, PROXY_ROOT } from "../encode/LocalObservations.js";
 import { configurationKeyOf } from "../encode/fingerprint.js";
-import { PROXY_ROOT } from "../encode/quality/HostTimings.js";
 import { qualityStateOf } from "../encode/quality/OutputQualityState.js";
 
 // Where a variant and an audio rendition live under a session — `v/<height>/…`
@@ -488,7 +487,7 @@ export function wireOutputs({
     get cushion() { return parts.cushion; },
     get encodeOrchestrator() { return parts.encodeOrchestrator; },
     get encodeRuns() { return parts.encodeRuns; },
-    get hostTimings() { return parts.hostTimings; },
+    get coldStarts() { return parts.coldStarts; },
     get lookaheadSeconds() { return parts.lookaheadSeconds; },
     get outputTimes() { return parts.outputTimes; },
     get outputs() { return parts.outputs; },
@@ -539,7 +538,7 @@ export function wireOutputs({
     get admission() { return parts.admission; },
     get getCachedMediaInfo() { return parts.getCachedMediaInfo; },
     get hostLoad() { return parts.hostLoad; },
-    get hostTimings() { return parts.hostTimings; },
+    get coldStarts() { return parts.coldStarts; },
     get keyframeTables() { return parts.keyframeTables; },
     get localBaseUrl() { return parts.localBaseUrl; },
     get outputs() { return parts.outputs; },
@@ -564,8 +563,6 @@ export function wireOutputs({
     minimumBufferSecondsFor: (output) => minimumBufferSecondsOf(output),
     getSourceStats: (...args) => parts.getSourceStats?.(...args) ?? null,
     disposeSession: (...args) => parts.lifecycle.disposeSession(...args),
-    expectedFirstSegmentMs: (...args) => parts.hostTimings.expectedFirstSegmentMs(...args),
-    expectedSessionCreateMs: (...args) => parts.hostTimings.expectedSessionCreateMs(...args),
     planEncodersSoon: (...args) => parts.encodeRuns.planEncodersSoon(...args),
     waitUntilReady: (...args) => parts.serving.waitUntilReady(...args),
     get encodeRuns() { return parts.encodeRuns; },
@@ -618,12 +615,8 @@ export function wireOutputs({
     noteServingVerdict: (consumerId, verdict) => noteServingVerdict(parts.viewers, consumerId, verdict),
     servingVerdictOf: (consumerId) => servingVerdictOf(parts.viewers, consumerId),
   });
-  // What this host takes to create an output and to produce its first segment, kept across restarts until the synthetic figure can replace it (CLAUDE.md, host timings).
-  parts.hostTimings = new HostTimings({
-    get segmentDurationSec() { return parts.segmentDurationSec; },
-    get softwarePresetBenchmark() { return parts.softwarePresetBenchmark; },
-    get stateDir() { return parts.stateDir; },
-  });
+  // How long each output took to its first served segment, said once in the log.
+  parts.coldStarts = new ColdStarts();
   parts.enabled = Boolean(enabled);
   parts.ffmpegBin = ffmpegBin;
   parts.sourceInputsFor = typeof sourceInputsFor === "function" ? sourceInputsFor : null;
@@ -776,9 +769,6 @@ export function wireOutputs({
     fileLengthOf: (session) => parts.hostLoad.fileLengthByKey.get(session.file.key) ?? 0,
     largestPieceOf: (address) => parts.segmentStore.largestPiece(address)
   });
-  // What this host learned last time it ran. Without it every restart shows
-  // the first viewer a figure with no measurement behind it.
-  parts.hostTimings.loadHostTimings();
   // Where produced segments live, addressed by WHAT they are rather than by
   // which session's encoder wrote them. Two sessions of one output — two
   // viewers who opened the same film at different places — write into one
@@ -1033,9 +1023,14 @@ export function wireOutputs({
     // (roadmap item 98), as values.
     bufferOf: (output, consumerId, spanSec) => bufferOf(parts.viewers, output, consumerId, spanSec),
     visiblePictureOf: (output, consumerId) => visiblePictureOf(parts.viewers, output, consumerId),
-    // How long this host takes to close a first segment: how soon another
-    // output could have the piece a viewer needs.
-    expectedFirstSegmentMs: () => parts.hostTimings.expectedFirstSegmentMs(),
+    // How soon another output of this mode could have the piece a viewer needs,
+    // computed from this host's measured wait for a first output and the
+    // output's own measured speed.
+    computedPreparationSec: (output) => secondsToFirstPiece({
+      firstByteWaitSec: parts.encodeOrchestrator?.runCostSeconds().firstByteWaitSec ?? 0,
+      segmentDurationSec: parts.segmentDurationSec,
+      speed: parts.encodeCost.speedForOutput(output?.outputKey ?? "")
+    }),
     dropAskOf: (output, consumerId) => dropAskOf(parts.viewers, output, consumerId),
     // EACH viewer's own link and who is present: a thin link decides for the
     // person on it and for nobody else (roadmap item 97, step 11), so the

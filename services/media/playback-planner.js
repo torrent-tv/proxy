@@ -200,12 +200,6 @@ export function createPlaybackPlanner({
   localBaseUrl,
   sourceRegistry,
   torrentPool,
-  // Optional. Reports what this host typically takes to produce a session's
-  // first segment. The browser needs it for the gap between "the file is
-  // downloaded" and "a segment exists": until now it assumed the pipeline
-  // merely keeps up with realtime, and showed 15 s where 3.8 s were left.
-  expectedFirstSegmentMs,
-  expectedSessionCreateMs,
   // What the torrent holds beside this picture — its dubs, its subtitle files,
   // its contact sheets — grouped by whoever knows what a torrent contains. This
   // layer answers about ONE file and must not read a torrent's file list.
@@ -480,13 +474,11 @@ export function createPlaybackPlanner({
     return { audioTracks: plan.audioTracks, pending: pendingIndexes.size > 0 };
   }
 
-  function withHostTimings(plan) {
+  function withLiveFigures(plan) {
     const withOffer = {
       ...plan,
-      expectedFirstSegmentMs: expectedFirstSegmentMs?.() ?? null,
-      expectedSessionCreateMs: expectedSessionCreateMs?.() ?? null,
-      // Answered here for the same reason as the two above: a plan is cached for
-      // the life of the process, and what this host will serve a file at is not.
+      // Answered here, not when the plan is built: a plan is cached for the
+      // life of the process, and what this host will serve a file at is not.
       // It starts as a prediction from the startup benchmarks and is replaced by
       // what an encoder running on this very source turns out to cost — frozen
       // into the cache, every later open of the file would hand the browser the
@@ -590,7 +582,7 @@ export function createPlaybackPlanner({
       };
       const cached = cache.get(cacheKey);
       if (cached) {
-        return withHostTimings(cached);
+        return withLiveFigures(cached);
       }
       // Where the time before playback goes. `cold-start` already breaks down
       // everything from the transcode-session request onwards, but the plan
@@ -634,7 +626,7 @@ export function createPlaybackPlanner({
           subtitleTracks: []
         };
         cache.set(cacheKey, plan);
-        return withHostTimings(plan);
+        return withLiveFigures(plan);
       }
 
       // Structural reads state their exact missing bytes through
@@ -710,11 +702,9 @@ export function createPlaybackPlanner({
         // all.
         sidecarSubtitles: sidecars.subtitles,
         sidecarImages: sidecars.images,
-        // Both host timings are filled in by `withHostTimings` on the way out,
-        // never here: read at build time they would be frozen into the cached
-        // plan, which is the bug fixed in 2.9.106.
-        expectedFirstSegmentMs: null,
-        expectedSessionCreateMs: null,
+        // Filled in by `withLiveFigures` on the way out, never here: read at
+        // build time it would be frozen into the cached plan, which is the bug
+        // fixed in 2.9.106.
         offeredHeights: null,
         // What the offer is computed FROM, kept on the cached plan so the offer
         // itself can be recomputed on every response. The figures are the
@@ -771,9 +761,9 @@ export function createPlaybackPlanner({
           // Retain every declared stream count for failed-run diagnostics.
           streamCounts: probe.streamCounts
         });
-        return withHostTimings(plan);
+        return withLiveFigures(plan);
       }
-      return withHostTimings({ ...plan, pending: true });
+      return withLiveFigures({ ...plan, pending: true });
     }
   };
 }

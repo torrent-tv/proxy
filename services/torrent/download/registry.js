@@ -116,16 +116,18 @@ export function reconcileAll() {
   if (publishingSelections) return { torrents: live.size, speculativeAllowed: false, stated: 0, withdrawn: 0 };
   const entries = [...live];
   const speculativeAllowed = !entries.some((entry) => entry.selection.hasUrgentMissing());
-  const bands=entries.map(entry=>entry.selection.missingBand()).filter(Boolean);
-  const maximumUrgency=bands.length?Math.min(...bands.map(band=>band.urgency)):Infinity;
-  const minimumPriority=bands.length?Math.max(...bands.filter(band=>band.urgency===maximumUrgency).map(band=>band.priority)):1;
-  const latestDeadlineAt=bands.length?Math.min(...bands.filter(band=>band.urgency===maximumUrgency&&band.priority===minimumPriority).map(band=>band.deadlineAt)):Infinity;
+  // The first class across every torrent: the most urgent missing level and
+  // its highest priority. Each selection states it non-zero and the rest zero.
+  const bands = entries.map(entry => entry.selection.missingBand()).filter(Boolean);
+  const urgency = bands.length ? Math.min(...bands.map(band => band.urgency)) : null;
+  const firstClass = urgency === null ? null
+    : { urgency, priority: Math.max(...bands.filter(band => band.urgency === urgency).map(band => band.priority)) };
   let stated = 0;
   let withdrawn = 0;
   publishingSelections = true;
   try {
     for (const entry of entries) {
-      const result = entry.selection.reconcile({ speculativeAllowed, maximumUrgency, minimumPriority, latestDeadlineAt });
+      const result = entry.selection.reconcile({ speculativeAllowed, firstClass });
       stated += result.stated;
       withdrawn += result.withdrawn;
     }

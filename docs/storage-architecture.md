@@ -200,7 +200,9 @@ collector went on publishing the wrong quantity until 2026-09-02.
 on 2026-10-07 a 512 MiB container was killed two seconds after the proxy logged
 4437 MB free (torrent-tv/meta#153). The reading is now the smaller of the
 host's figure and the room under every memory limit on this process's cgroup
-path, found from `/proc/self/cgroup` (cgroup v2 and v1). That room is `limit −
+path, found from `/proc/self/cgroup` (cgroup v2 and v1; on v2 a level's limit
+is the smaller of `memory.max`, where the kernel kills, and `memory.high`, where
+it throttles and swaps — torrent-tv/meta#155). That room is `limit −
 usage` plus the file cache and reclaimable slab the cgroup is charged for,
 because the kernel takes those back before it kills: in a 512 MiB container
 whose usage stood at 531 MB after a file write, 515 MB of it cache, a 450 MB

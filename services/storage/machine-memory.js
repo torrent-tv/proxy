@@ -58,17 +58,26 @@ import os from "node:os";
  * Version 1 states the file lists of the cgroup alone as `active_file` and of
  * it with its descendants as `total_active_file`; its usage includes the
  * descendants, so the hierarchical figures are the ones that subtract from it.
+ *
+ * Version 2 has two limits. `memory.max` is where the kernel kills;
+ * `memory.high` is where it throttles the cgroup and pushes its memory out —
+ * on the Home Assistant kernel a 300 MB allocation took 2123 ms instead of
+ * 527 ms past a 128 MiB `memory.high`, with 186 MiB of it sent to swap
+ * (torrent-tv/meta#155). systemd's `MemoryHigh=` sets it without
+ * `MemoryMax=`, so it is a limit of its own, and a level's limit is the
+ * smaller of the two. Version 1's soft limit is not a counterpart: it only
+ * orders reclaim when the whole machine is short.
  */
 const HIERARCHIES = {
   1: {
     mount: "/sys/fs/cgroup/memory",
-    limit: "memory.limit_in_bytes",
+    limits: ["memory.limit_in_bytes"],
     usage: "memory.usage_in_bytes",
     reclaimable: ["total_active_file", "total_inactive_file"]
   },
   2: {
     mount: "/sys/fs/cgroup",
-    limit: "memory.max",
+    limits: ["memory.max", "memory.high"],
     usage: "memory.current",
     reclaimable: ["active_file", "inactive_file", "slab_reclaimable"]
   }
@@ -230,18 +239,24 @@ function levelsOf(mount, path) {
  * @param {string} directory
  * @param {number} hostTotal
  * @returns {{ roomBytes: number, limitBytes: number } | null} Null where this
- *   level states no limit — `max`, the version 1 sentinel — or is not there.
+ *   level states no limit — `max` in every limit file, the version 1
+ *   sentinel — or is not there.
  */
 function roomAt(readFile, hierarchy, directory, hostTotal) {
-  let limitBytes;
   let usageBytes;
   try {
-    limitBytes = bytesOf(readFile(`${directory}/${hierarchy.limit}`));
     usageBytes = bytesOf(readFile(`${directory}/${hierarchy.usage}`));
   } catch {
     return null; // silent-ok: no such level, or no memory controller on it.
   }
-  if (!Number.isFinite(limitBytes) || limitBytes >= hostTotal || !Number.isFinite(usageBytes)) {
+  const limitBytes = Math.min(...hierarchy.limits.map((name) => {
+    try {
+      return bytesOf(readFile(`${directory}/${name}`));
+    } catch {
+      return Number.NaN; // silent-ok: a limit file this kernel does not have states no limit.
+    }
+  }).filter(Number.isFinite));
+  if (limitBytes >= hostTotal || !Number.isFinite(usageBytes)) {
     return null;
   }
   let reclaimableBytes = 0;

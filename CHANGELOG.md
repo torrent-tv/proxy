@@ -1,4 +1,4 @@
-## Unreleased
+## 2.95.1
 
 - **Fix**: Embedded text subtitles are offered again. Since the playback plan was built from the container's own declarations (torrent-tv/meta#95) its subtitle tracks no longer said which were text, and the page offers only those, so every embedded subtitle track disappeared from the menu (torrent-tv/meta#8).
 

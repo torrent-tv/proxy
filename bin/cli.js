@@ -24,7 +24,7 @@ import { createTunnelClient } from "../services/transport/tunnel-client.js";
 import { createWebRtcManager } from "../services/transport/webrtc-manager.js";
 import { createDataChannelHandler } from "../services/transport/data-channel-handler.js";
 import { dumpsToRemove, pruneCoreDumps } from "../services/storage/core-dumps.js";
-import { availableMemoryBytes } from "../services/storage/machine-memory.js";
+import { availableMemory } from "../services/storage/machine-memory.js";
 import { Diagnostics } from "../services/storage/Diagnostics.js";
 import { adoptOrphanRingFiles, createPacketWitness, pruneWitnessCaptures } from "../services/transport/packet-witness.js";
 import { createUsrsctpStateReader } from "../services/transport/usrsctp-state.js";
@@ -586,7 +586,7 @@ try {
       const encode = started?.outputParts?.admission?.headroom?.() ?? null;
       return {
         metrics: {
-          ...collectHealthMetrics({ availableMemoryBytes }),
+          ...collectHealthMetrics({ availableMemory }),
           ...(encode ? { encodeSpeedX: encode.encodeSpeedX, encodeOccupiedCostSec: encode.occupiedCostSec } : {})
         },
         holds

@@ -1,3 +1,7 @@
+## Unreleased
+
+- **Fix**: Take a container's memory limit into account: the memory budget, the memory line and the health score read the smaller of the host's available memory and the room under every cgroup v2 or v1 memory limit on the process's path, counting the file cache the kernel reclaims before it kills. A proxy under a 512 MiB Docker limit was killed while it believed the host's 4.4 GB were free. The memory line now says which reading decided and whether a container limit is in force (torrent-tv/meta#153).
+
 ## 2.95.8
 
 - **Fix**: The idle-removal clock of a torrent nobody wants runs from when it stopped being wanted instead of restarting on every report, which also stops thousands of identical log lines when a map is withdrawn (torrent-tv/meta#95).

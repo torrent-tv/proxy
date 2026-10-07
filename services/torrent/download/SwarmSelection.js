@@ -29,6 +29,7 @@ import {
   urgencyName
 } from "../demand/index.js";
 import { pieceStoreOf } from "../piece-store-of.js";
+import { compareBands } from "./bands.js";
 
 export class SwarmSelection {
   #torrent;
@@ -69,22 +70,36 @@ export class SwarmSelection {
    *   shared and the question is not a per-torrent one.
    * @returns {{ stated: number, withdrawn: number }}
    */
-  reconcile() {
-    const levels = [...new Set(this.#register.windows().map(window => window.urgency))];
+  reconcile({ speculativeAllowed = true, maximumUrgency = Infinity, minimumPriority = 1, latestDeadlineAt = Infinity } = {}) {
+    const windows=this.#register.windows();
+    const missing=windows.filter(window=>!this.#isSatisfied(window));
+    const urgency=missing.length?Math.min(...missing.map(window=>window.urgency)):null;
+    const eligible=missing.filter(window=>window.urgency===urgency);
+    const priority=eligible.length?Math.max(...eligible.map(window=>window.priority)):null;
+    const ranked=eligible.filter(window=>window.priority===priority);
+    const deadlineAt=ranked.length?Math.min(...ranked.map(window=>window.deadlineAt)):Infinity;
+    const active=urgency===null||urgency>maximumUrgency||priority<minimumPriority||deadlineAt>latestDeadlineAt||(!speculativeAllowed&&urgency>=Urgency.TAIL)?[]:
+      ranked.filter(window=>window.deadlineAt===deadlineAt);
     /** @type {Map<string, { from: number, to: number, priority: number }>} */
     const wanted = new Map();
-    for (const urgency of levels) {
-      for (const window of this.#register.at(urgency)) {
+    for (const window of active) {
         const range = this.#piecesFor(window);
         if (!range) {
           continue;
         }
         // Merged by range and priority, not by claimant: two readers wanting
         // the same pieces are one instruction to the swarm.
-        const key = `${range.from}-${range.to}-${selectionPriority(urgency)}`;
-        wanted.set(key, { from: range.from, to: range.to, priority: selectionPriority(urgency) });
-      }
+        const key = `${range.from}-${range.to}-${selectionPriority(window.urgency)}`;
+        wanted.set(key, { from: range.from, to: range.to, priority: selectionPriority(window.urgency) });
     }
+
+    // Public selections merge adjacent ranges. Publish their union so an
+    // unchanged map does not repeatedly replace the library's merged range.
+    const ordered=[...wanted.values()].sort((a,b)=>a.from-b.from);
+    wanted.clear();
+    const union=[];
+    for(const range of ordered){const previous=union.at(-1);if(previous&&range.from<=previous.to+1)previous.to=Math.max(previous.to,range.to);else union.push({...range});}
+    for(const range of union)wanted.set(`${range.from}-${range.to}-${range.priority}`,range);
 
     let withdrawn = 0;
     for (const [key, range] of [...this.#stated]) {
@@ -111,6 +126,14 @@ export class SwarmSelection {
     }
 
     this.#projectIntoMemory();
+    for (const window of this.#register.at(Urgency.BLOCKED)) {
+      if (this.#isSatisfied(window)) continue;
+      const range = this.#piecesFor(window);
+      if (range) {
+        try { this.#torrent.critical?.(range.from, range.to); }
+        catch { /* A closing torrent cannot accept a critical selection. */ }
+      }
+    }
     return { stated, withdrawn };
   }
 
@@ -177,16 +200,15 @@ export class SwarmSelection {
     return false;
   }
 
-  /**
-   * Permission to take a block from a slow peer, for the level being waited on
-   * and nothing else.
-   *
-   * Cleared before it is set again, because WebTorrent never clears the flag
-   * itself: a reader walking a film would otherwise leave every piece of it
-   * marked, and the mark would mean nothing anywhere.
-   *
-   * @returns {void}
-   */
+  /** The highest missing map band, without choosing protocol blocks. */
+  missingBand() {
+    let band=null;
+    for(const window of this.#register.windows()) {
+      if(this.#isSatisfied(window))continue;
+      if(!band||compareBands(window,band)<0)band={urgency:window.urgency,priority:window.priority,deadlineAt:window.deadlineAt};
+    }
+    return band;
+  }
 
   /**
    * Tell the piece store which bytes will be read soon, from the same stated
@@ -281,8 +303,10 @@ export class SwarmSelection {
     if (!range) {
       return true;
     }
+    const store = this.#findStore(this.#torrent);
     for (let index = range.from; index <= range.to; index += 1) {
-      if (!this.#torrent.bitfield?.get(index)) {
+      const present = store?.locationOf ? store.locationOf(index) !== "missing" : this.#torrent.bitfield?.get(index);
+      if (!present) {
         return false;
       }
     }
@@ -311,15 +335,7 @@ export class SwarmSelection {
    */
   #select({ from, to, priority }) {
     try {
-      // The private form takes the stream flag, which makes a selection several
-      // claimants can hold at the same bounds; the public one merges and
-      // subtracts intervals and cannot express "one of several wants this". The
-      // public call is the fallback if a future version drops the private one.
-      if (typeof this.#torrent._select === "function") {
-        this.#torrent._select(from, to, priority, null, true);
-      } else if (typeof this.#torrent.select === "function") {
-        this.#torrent.select(from, to, priority);
-      }
+      this.#torrent.select?.(from, to, priority);
     } catch {
       // silent-ok: never fail a read because the download set refused.
     }
@@ -331,11 +347,7 @@ export class SwarmSelection {
    */
   #deselect({ from, to }) {
     try {
-      if (typeof this.#torrent._deselect === "function") {
-        this.#torrent._deselect(from, to, true);
-      } else if (typeof this.#torrent.deselect === "function") {
-        this.#torrent.deselect(from, to);
-      }
+      this.#torrent.deselect?.(from, to);
     } catch {
       // silent-ok.
     }
@@ -353,7 +365,7 @@ export class SwarmSelection {
     return (
       `download: ${this.#stated.size} instruction(s) to the swarm from ` +
       `${this.#register.size} stated need(s) [${needs.join(" ")}]` +
-      "; peer requests ordered by deadline and priority"
+      "; peer requests issued by WebTorrent"
     );
   }
 }

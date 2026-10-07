@@ -13,6 +13,7 @@ import {
   machineAllowanceBytes,
   machineReserveBytes,
   noteMachineMemory,
+  reviseStoreBudgets,
   SharedPieceStore
 } from "../../services/storage/piece-store/shared-piece-store.js";
 import { mkdtemp, rm } from "node:fs/promises";
@@ -21,6 +22,25 @@ import path from "node:path";
 
 const MEGABYTE = 1024 * 1024;
 const GIGABYTE = 1024 * MEGABYTE;
+
+test("periodic store maintenance retains the main thread's latest memory allocation", async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "assigned-store-budget-"));
+  const store = new SharedPieceStore(1024, { path: directory, name: "assigned", memoryBytes: 64 * 1024 });
+  try {
+    store.protectRange("map", 0, 99, 2, Infinity, 10, false);
+    reviseStoreBudgets(8 * 1024);
+    assert.equal(store.stats().budgetBytes, 8 * 1024);
+    reviseStoreBudgets();
+    assert.equal(store.stats().budgetBytes, 8 * 1024);
+    reviseStoreBudgets(16 * 1024);
+    reviseStoreBudgets();
+    assert.equal(store.stats().budgetBytes, 16 * 1024);
+  } finally {
+    await new Promise(resolve => store.destroy(resolve));
+    forgetMachineMemory();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
 
 test("the stores are allowed what the machine has, less what others were seen to need", () => {
   // Not a share of what is free. A share is a number chosen out of nothing, and

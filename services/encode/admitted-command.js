@@ -13,7 +13,13 @@ export function buildAdmittedCommand({ admittedInput, timeline, output, segmentF
   const origin = admittedInput.originSeconds;
   const relativeStart = Math.max(0, startSeconds - origin);
   const relativeEnd = endSeconds - origin;
-  const cutTimes = grid.slice(safeIndex + 1, endIndex + 1).map(time => time - startSeconds);
+  // segment.c adds the first reference packet's PTS to every relative cut.
+  // Copied audio can start after the published boundary; price cuts from its
+  // actual first packet rather than adding that delay to every segment end.
+  const firstAudio = audioOnly && !transcodeAudio
+    ? admittedInput.tracks.find(input => input.track.type === "audio")?.packets[0]?.pts : null;
+  const cutOrigin = Number.isFinite(firstAudio) ? firstAudio : startSeconds;
+  const cutTimes = grid.slice(safeIndex + 1, endIndex + 1).map(time => time - cutOrigin);
   const args = ["-hide_banner", "-nostats", "-loglevel", "error", "-progress", "pipe:1"];
   if (transcodeVideo && Array.isArray(videoEncoder.inputArgs)) args.push(...videoEncoder.inputArgs);
   args.push("-f", "matroska", "-i", "pipe:0", "-copyts", "-avoid_negative_ts", "disabled", "-output_ts_offset", ffmpegSeconds(origin));
@@ -42,7 +48,7 @@ export function buildAdmittedCommand({ admittedInput, timeline, output, segmentF
   else args.push("-map", "0:v:0", "-map", "0:a:0?", ...video, ...audio);
   args.push("-to", ffmpegSeconds(relativeEnd), "-f", "segment");
   if (cutTimes.length) args.push("-segment_times", cutTimes.join(","));
-  else args.push("-segment_time", ffmpegSeconds(endSeconds - startSeconds));
+  else args.push("-segment_time", ffmpegSeconds(endSeconds - cutOrigin));
   const formatArgs = segmentFormat.explicitTimesMuxerArgs?.();
   if (!Array.isArray(formatArgs)) throw new Error("The segment format cannot publish admitted packet input.");
   const muxOptions = formatArgs.indexOf("-segment_format_options");

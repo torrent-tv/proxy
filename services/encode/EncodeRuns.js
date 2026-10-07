@@ -15,6 +15,7 @@ import { ENCODE_EXIT } from "./encode-exit.js";
 import { EncodeRun } from "./EncodeRun.js";
 import { computeOutputDimensions } from "./args.js";
 import { buildAdmittedCommand } from "./admitted-command.js";
+import { buildOriginalCommand } from "./source-command.js";
 import { writeAdmittedInput } from "./AdmittedInput.js";
 import { cutOf, judgeNeighbors, judgePiece } from "./piece-completeness.js";
 import { presentationSegment } from "./segment-formats/presentation-segment.js";
@@ -252,6 +253,10 @@ export class EncodeRuns {
     } else {
       run.inputWaitEnds();
     }
+  }
+
+  originalInputOf(runToken) {
+    return this.#runsByInputToken.get(runToken)?.originalInput ?? null;
   }
 
   /**
@@ -892,8 +897,12 @@ export class EncodeRuns {
     this.#lastInputToken += 1;
     const inputToken = this.#lastInputToken;
     if (admittedInput) admittedInput.runTag = `${startIndex}r${inputToken}`;
-    const { args, safeIndex, startSeconds, cutTimes } = buildAdmittedCommand({
+    const buildCommand = admittedInput.original ? buildOriginalCommand : buildAdmittedCommand;
+    const { args, safeIndex, startSeconds, cutTimes } = buildCommand({
       admittedInput,
+      inputToken,
+      baseUrl: this.#host.localBaseUrl,
+      keyframes: session.file.keyframes,
 
       timeline: session.timeline,
       output: session.output,
@@ -971,7 +980,10 @@ export class EncodeRuns {
 
         const index = session.segmentFormat.segmentIndexFromName(
           session.segmentFormat.servedNameOf?.(name) ?? name);
-        if (Number.isInteger(index) && index < safeIndex) return null;
+        // Encoder flush can create a partial file beyond its assigned interval.
+        // It belongs to no requested output segment and must not condemn the
+        // complete input or overwrite a neighboring run's segment.
+        if (Number.isInteger(index) && (index < safeIndex || index > run.to)) return null;
         let bytes = null;
         if (admittedInput && session.segmentFormat.id === "fmp4" && session.spec.carries !== "audio-only" &&
           session.spec.audio && !this.#host.servesAudioSeparately(session)) {
@@ -997,10 +1009,16 @@ export class EncodeRuns {
       onSpeedMeasured: () => this.#host.noteRunSpeedMeasured?.(session, run),
       onEnded: (ended) => {
         this.#runsByInputToken.delete(inputToken);
+        if (admittedInput.original) admittedInput.release();
         this.noteRunEnded(session, run, ended);
       }
     });
-    if (admittedInput) {
+    if (admittedInput.original) {
+      run.originalInput = admittedInput;
+      run.inputFingerprint = admittedInput.fingerprint;
+      run.admittedInputKeys = new Map([[safeIndex, inputKey]]);
+      run.process.stdin.end();
+    } else if (admittedInput) {
       run.inputFingerprint = admittedInput.fingerprint;
       run.admittedInputKeys = new Map([[safeIndex, inputKey]]);
       let nextIndex = startIndex + 1;

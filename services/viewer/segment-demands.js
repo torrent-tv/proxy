@@ -16,13 +16,17 @@ export function segmentDemands(output, fileIndex, zones) {
     if (!Number.isFinite(from) || !Number.isFinite(to) || !(to > from)) throw new Error("An output segment needs a valid interval.");
     const overlapping = zones.filter(zone => zone.priority > 0 && zone.from < to && zone.to > from);
     if (!overlapping.length) continue;
-    const owner = overlapping.reduce((first, zone) => (zone.deadlineAt ?? Infinity) < (first.deadlineAt ?? Infinity) ? zone : first);
+    // A zone states the deadline of its near edge. A later segment within it
+    // is reached later, at one second of film per second of playback.
+    const deadlineOf = zone => Number.isFinite(zone.deadlineAt)
+      ? zone.deadlineAt + Math.max(0, from - zone.from) * 1000 : Infinity;
+    const owner = overlapping.reduce((first, zone) => deadlineOf(zone) < deadlineOf(first) ? zone : first);
     demands.push({ index, from, to, tracks, owner,
       priority: Math.max(...overlapping.map(zone => zone.priority)),
       urgent: overlapping.some(zone => zone.urgent),
       behind: overlapping.every(zone => zone.behind),
       deferred: overlapping.every(zone => zone.deferred),
-      deadlineAt: Math.min(...overlapping.map(zone => Number.isFinite(zone.deadlineAt) ? zone.deadlineAt : Infinity)) });
+      deadlineAt: Math.min(...overlapping.map(deadlineOf)) });
   }
   return demands.sort((left, right) => left.deadlineAt - right.deadlineAt || right.priority - left.priority || left.index - right.index);
 }

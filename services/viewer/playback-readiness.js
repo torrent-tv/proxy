@@ -208,6 +208,8 @@ export function predictPlaybackReadiness(input = {}) {
   for (let trackIndex = 0; trackIndex < trackState.length; trackIndex += 1) {
     const state = trackState[trackIndex];
     const { track, segments } = state;
+    const processingCoverage = numericCoverage((Array.isArray(track.processingRanges) ? track.processingRanges : [])
+      .filter(range => Number.isFinite(range?.start) && Number.isFinite(range?.end) && range.end > range.start));
     const measuredBitsPerMediaSecond = state.bitsPerMediaSecond;
     for (const segment of segments) {
       // Media the page already holds is not transferred again.
@@ -230,9 +232,7 @@ export function predictPlaybackReadiness(input = {}) {
       // Attribute unfinished work to the actual run interval. A global
       // position from another run must not erase a missing earlier segment.
       const workStart = segment.startSeconds;
-      const remainingProcessing = uncoveredIntervals({ start: workStart, end: segment.endSeconds },
-        (Array.isArray(track.processingRanges) ? track.processingRanges : []).filter((range) =>
-          Number.isFinite(range?.start) && Number.isFinite(range?.end) && range.end > range.start));
+      const remainingProcessing = uncoveredIntervals({ start: workStart, end: segment.endSeconds }, processingCoverage);
       const encodeWork = produced ? 0 : remainingProcessing.reduce((sum, part) => sum + part.end - part.start, 0);
 
       const sourceByteIntervals = new Map();
@@ -309,29 +309,29 @@ export function predictPlaybackReadiness(input = {}) {
     }
   }
   const trackFinish = trackState.map(({ track }) => finiteNonNegative(track.startupRemainingSeconds));
+  const sourceByteCoverage = new Map([...sourceByteService].map(([id, ranges]) => [id, numericCoverage(ranges)]));
+  const sourceArrivals = new Map([...sourceByteService].map(([id, ranges]) => [id, indexedArrivals(ranges)]));
   let transferFinish = 0;
   const completions = [];
   const productions = [];
   for (const job of jobs) {
     const { track, trackIndex, segment, sizeBits, encodeWork, sourceByteIntervals } = job;
-    const sourceArrivals = [];
+    let sourceArrivalAt = 0;
     for (const [sourceId, ranges] of sourceByteIntervals) {
-      const served = sourceByteService.get(sourceId) ?? [];
       for (const interval of ranges) {
-        if (uncoveredIntervals(interval, served).length) return result(false, null, buffered, reserve, null, "download-schedule-unavailable", preparedSegments);
-        for (const part of served.filter(part => part.end > interval.start && part.start < interval.end)) {
-          sourceArrivals.push({ at: part.finish });
-        }
+        const missing = uncoveredIntervals(interval, sourceByteCoverage.get(sourceId) ?? []);
+        if (missing.length) return { ...result(false, null, buffered, reserve, null, "download-schedule-unavailable", preparedSegments),
+          unavailableSource: { sourceId, segmentIndex: segment.index, range: interval, missing } };
+        sourceArrivalAt = Math.max(sourceArrivalAt, latestArrival(interval, sourceArrivals.get(sourceId)));
       }
-      sourceByteService.set(sourceId, served);
     }
     // Production accepts a complete held segment input. It cannot overlap its
     // own source download; reused input retains its original arrival time.
     const processing = trackState[trackIndex].curve;
-    const admittedAt = Math.max(trackFinish[trackIndex], ...sourceArrivals.map(({ at }) => at));
+    const admittedAt = Math.max(trackFinish[trackIndex], sourceArrivalAt);
     const producedAt = job.produced || encodeWork === 0 ? 0 : processing.finish(encodeWork, admittedAt);
     trackFinish[trackIndex] = Math.max(trackFinish[trackIndex], producedAt);
-    productions.push({ at: producedAt, trackIndex, segment, requiresSource: sourceArrivals.some(({ at }) => at > 0) });
+    productions.push({ at: producedAt, trackIndex, segment, requiresSource: sourceArrivalAt > 0 });
     const deliveryAt = link.finish(sizeBits, Math.max(transferFinish, producedAt));
     transferFinish = deliveryAt;
     completions.push({ at: deliveryAt + finiteNonNegative(track.appendSeconds), trackIndex, segment });
@@ -483,15 +483,57 @@ function heldRanges(ranges, segments, unit) {
   return held;
 }
 
-function uncoveredIntervals(interval, served) {
-  let remaining = [{ ...interval }];
-  for (const held of served) {
-    remaining = remaining.flatMap((part) => held.end <= part.start || held.start >= part.end ? [part] : [
-      { start: part.start, end: Math.min(part.end, held.start) },
-      { start: Math.max(part.start, held.end), end: part.end }
-    ].filter(({ start, end }) => end > start));
+/** Coverage is joined once per resource, independently of arrival times. */
+function numericCoverage(ranges) {
+  const joined = [];
+  for (const range of [...ranges].sort((left, right) => left.start - right.start || left.end - right.end)) {
+    const previous = joined.at(-1);
+    if (previous && range.start <= previous.end) previous.end = Math.max(previous.end, range.end);
+    else joined.push({ start: range.start, end: range.end });
   }
-  return remaining;
+  return joined;
+}
+
+/** Already held bytes have no arrival delay. Index future arrivals once. */
+function indexedArrivals(ranges) {
+  let maximumEnd = 0;
+  return ranges.filter(range => range.finish > 0)
+    .sort((left, right) => left.start - right.start || left.end - right.end)
+    .map(range => ({ ...range, maximumEnd: maximumEnd = Math.max(maximumEnd, range.end) }));
+}
+
+function latestArrival(interval, ranges = []) {
+  let low = 0, high = ranges.length;
+  while (low < high) {
+    const middle = (low + high) >>> 1;
+    if (ranges[middle].maximumEnd <= interval.start) low = middle + 1;
+    else high = middle;
+  }
+  let finish = 0;
+  for (let index = low; index < ranges.length && ranges[index].start < interval.end; index++) {
+    if (ranges[index].end > interval.start) finish = Math.max(finish, ranges[index].finish);
+  }
+  return finish;
+}
+
+/** Exact gaps in sorted disjoint numeric coverage, without per-range splitting. */
+function uncoveredIntervals(interval, served) {
+  let low = 0, high = served.length;
+  while (low < high) {
+    const middle = (low + high) >>> 1;
+    if (served[middle].end <= interval.start) low = middle + 1;
+    else high = middle;
+  }
+  const missing = [];
+  let cursor = interval.start;
+  for (let index = low; index < served.length && cursor < interval.end; index++) {
+    const held = served[index];
+    if (held.start >= interval.end) break;
+    if (held.start > cursor) missing.push({ start: cursor, end: held.start });
+    cursor = Math.max(cursor, held.end);
+  }
+  if (cursor < interval.end) missing.push({ start: cursor, end: interval.end });
+  return missing;
 }
 
 /**

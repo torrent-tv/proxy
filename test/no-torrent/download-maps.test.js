@@ -110,18 +110,18 @@ test("complete segment bytes remain published while their map interval is repric
   const blocked = new Promise(resolve => { release = resolve; });
   const maps = new DownloadMaps({ publish: map => sent.push(map), resolvePlayback: async map => {
     if (++calls === 2) await blocked;
-    return [{ from: 0, to: 4, downloadInterval: { from: 0, to: 1 },
-      priority: map.zones[0].priority, deadlineAt: map.zones[0].deadlineAt - 2000,
+    return [{ from: 4, to: 8, downloadInterval: { from: 0, to: 6 },
+      priority: map.zones[0].priority, deadlineAt: map.zones[0].deadlineAt + 2000,
       leadSeconds: 2, byteStart: 10, byteEnd: 20 }];
   } });
   const file = { sourceKey: "source", fileIndex: 0, durationSeconds: 8 };
-  await maps.playback({ ...file, zones: [{ from: 0, to: 1, priority: 100, deadlineAt: 5000 }] });
-  const pending = maps.playback({ ...file, zones: [{ from: 0, to: 1, priority: 10, deadlineAt: 15000 }] });
+  await maps.playback({ ...file, zones: [{ from: 0, to: 6, priority: 100, deadlineAt: 5000 }] });
+  const pending = maps.playback({ ...file, zones: [{ from: 0, to: 6, priority: 10, deadlineAt: 15000 }] });
   await new Promise(resolve => setImmediate(resolve));
   assert.equal(sent.at(-1).zones.length, 1);
-  assert.equal(sent.at(-1).zones[0].to, 4);
+  assert.equal(sent.at(-1).zones[0].to, 8);
   assert.equal(sent.at(-1).zones[0].priority, 10);
-  assert.equal(sent.at(-1).zones[0].deadlineAt, 13000);
+  assert.equal(sent.at(-1).zones[0].deadlineAt, 17000);
   release();
   await pending;
 });

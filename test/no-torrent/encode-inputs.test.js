@@ -6,10 +6,11 @@ import { MachineBudget } from "../../services/storage/MachineBudget.js";
 
 const output = { id: "output" };
 
-test("urgent complete input is admitted before speculative whole-file memory", async () => {
+for (const urgent of [true, false]) test(`chosen complete input is admitted before speculative whole-file memory (urgent=${urgent})`, async () => {
   const budget = new MachineBudget({ policy: { kind: "fixed", bytes: 100 } });
   budget.defineResource({ name: "memory", readFree: () => 100 });
   const inputs = new EncodeInputs({ resolve: async () => ({ kind: "result", sources: [source] }),
+    urgent: () => urgent,
     readRanges: async () => [Buffer.from("ab")], reviseBudget: () => budget.revise(),
     changed: () => {}, failed: (_output, error) => { throw error; } });
   budget.register({ name: "input", resource: "memory", held: () => inputs.held(),

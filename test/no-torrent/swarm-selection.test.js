@@ -3,17 +3,28 @@
  *
  * Driven against a stub torrent shaped like the vendored 2.8.5: a selection
  * list it can be asked about, a bitfield saying what has arrived, and the
- * private `_select`/`_deselect` the real one exposes.
+ * public selection methods and the library's pure interval list.
  */
 
 import test from "node:test";
 import assert from "node:assert/strict";
+import { Selections } from "webtorrent/lib/selections.js";
 
 import { DemandRegister } from "../../services/torrent/demand/DemandRegister.js";
 import { Urgency } from "../../services/torrent/demand/Urgency.js";
 import { SwarmSelection } from "../../services/torrent/download/SwarmSelection.js";
 
 const PIECE = 1024;
+
+test("a stale complete bitfield cannot suppress demand for an evicted piece", () => {
+  const torrent = stubTorrent();
+  torrent.bitfield.get = () => true;
+  const register = new DemandRegister();
+  const selection = new SwarmSelection({ torrent, register, findStore: () => ({ locationOf: () => "missing" }) });
+  register.state({ claimant: "viewer", fileIndex: 0, byteStart: PIECE, byteEnd: 2 * PIECE - 1, urgency: Urgency.NEAR });
+  selection.reconcile();
+  assert.deepEqual(selection.statedRanges(), [{ from: 1, to: 1, priority: 1 }]);
+});
 
 function wireWithRequests(pieces) {
   const requests = pieces.map((piece) => ({ piece, offset: 0, length: 1024 }));
@@ -53,9 +64,38 @@ test("a shared piece remains requested while another range needs it", () => {
   torrent.wires = [wire];
   register.withdraw("first");
   selection.reconcile();
+  assert.deepEqual(torrent._selections._items.map(({from,to})=>[from,to]),[[1,2]],"native subtraction retains the other viewer's complete range");
   assert.deepEqual(wire.cancelled, [[0, 0, 1024]]);
   selection.releaseAll();
   assert.equal(wire.requests.length, 0);
+});
+
+test("map priorities choose eligible ranges without modifying the library picker", () => {
+  const torrent=stubTorrent();
+  const register=new DemandRegister();
+  const selection=new SwarmSelection({torrent,register});
+  register.state({claimant:"active",fileIndex:0,byteStart:PIECE,byteEnd:2*PIECE-1,urgency:Urgency.AHEAD,priority:100});
+  register.state({claimant:"paused",fileIndex:0,byteStart:5*PIECE,byteEnd:6*PIECE-1,urgency:Urgency.AHEAD,priority:20});
+  selection.reconcile();
+  assert.deepEqual(selection.statedRanges().map(({from,to})=>[from,to]),[[1,1]]);
+  torrent.complete(1);
+  selection.reconcile();
+  assert.deepEqual(selection.statedRanges().map(({from,to})=>[from,to]),[[5,5]]);
+  assert.equal(register.windows().find(window=>window.claimant==="paused").priority,20);
+});
+
+test("equal-priority input groups advance by required time through public selections", () => {
+  const torrent = stubTorrent();
+  const register = new DemandRegister();
+  const selection = new SwarmSelection({ torrent, register });
+  for (const [piece, deadlineAt] of [[5, 20000], [1, 10000]]) register.state({ claimant: `part:${piece}`,
+    fileIndex: 0, byteStart: piece * PIECE, byteEnd: (piece + 1) * PIECE - 1,
+    urgency: Urgency.NEAR, priority: 100, deadlineAt });
+  selection.reconcile();
+  assert.deepEqual(selection.statedRanges().map(({ from, to }) => [from, to]), [[1, 1]]);
+  torrent.complete(1);
+  selection.reconcile();
+  assert.deepEqual(selection.statedRanges().map(({ from, to }) => [from, to]), [[5, 5]]);
 });
 
 /**
@@ -66,7 +106,8 @@ test("a shared piece remains requested while another range needs it", () => {
  */
 function stubTorrent({ have = [], files = 1 } = {}) {
   const arrived = new Set(have);
-  const items = [];
+  const selections = new Selections();
+  const items = selections._items;
   return {
     pieceLength: PIECE,
     store: null,
@@ -76,19 +117,17 @@ function stubTorrent({ have = [], files = 1 } = {}) {
     })),
     bitfield: { get: (index) => arrived.has(index) },
     _critical: [],
-    _selections: { _items: items },
+    _selections: selections,
     calls: { select: [], deselect: [], critical: [] },
-    _select(from, to, priority, notify, isStream) {
-      this.calls.select.push({ from, to, priority, isStream });
-      items.push({ from, to, priority });
+    select(from, to, priority) {
+      this.calls.select.push({ from, to, priority });
+      selections.insert({ from, to, priority, offset: 0, isStreamSelection: false });
     },
-    _deselect(from, to) {
+    deselect(from, to) {
       this.calls.deselect.push({ from, to });
-      const at = items.findIndex((item) => item.from === from && item.to === to);
-      if (at >= 0) {
-        items.splice(at, 1);
-      }
+      selections.remove({ from, to, isStreamSelection: false });
     },
+    complete(piece) { arrived.add(piece); },
     critical(from, to) {
       this.calls.critical.push({ from, to });
       for (let index = from; index <= to; index += 1) {
@@ -124,10 +163,10 @@ test("two viewers of one film are two instructions, and both are urgent", () => 
   selection.reconcile();
 
   assert.deepEqual(torrent.calls.select, [
-    { from: 0, to: 0, priority: 1, isStream: true },
-    { from: 5, to: 5, priority: 1, isStream: true }
+    { from: 0, to: 0, priority: 1 },
+    { from: 5, to: 5, priority: 1 }
   ]);
-  assert.deepEqual(torrent.calls.critical, [], "deadline scheduling replaces persistent critical-piece marks");
+  assert.deepEqual(torrent.calls.critical, [{from:0,to:0},{from:5,to:5}]);
 });
 
 test("the same pieces wanted by two claimants are one instruction", () => {
@@ -144,7 +183,7 @@ test("the same pieces wanted by two claimants are one instruction", () => {
   assert.equal(torrent.calls.select.length, 1);
 });
 
-test("all mapped ranges stay eligible when urgent bytes are missing", () => {
+test("background ranges are withdrawn while urgent bytes are missing", () => {
   const torrent = stubTorrent({ have: [0] });
   const register = new DemandRegister();
   const selection = new SwarmSelection({ torrent, register });
@@ -153,7 +192,7 @@ test("all mapped ranges stay eligible when urgent bytes are missing", () => {
   register.state({ claimant: "fill", fileIndex: 0, byteStart: 5 * PIECE, byteEnd: 9 * PIECE - 1, urgency: Urgency.TAIL });
   selection.reconcile();
 
-  assert.equal(selection.statedRanges().length, 2, "nothing urgent is missing, so the tail is stated");
+  assert.equal(selection.statedRanges().length, 1, "completed demand needs no selection; the tail is stated");
   assert.ok(torrent.calls.select.some((call) => call.priority === 0), "and it is stated as zero");
 
   // The viewer moves on to a piece that has not arrived.
@@ -162,8 +201,8 @@ test("all mapped ranges stay eligible when urgent bytes are missing", () => {
 
   assert.deepEqual(
     selection.statedRanges().map((range) => range.priority),
-    [0, 1],
-    "peers may fill mapped background bytes when they cannot supply earlier deadlines"
+    [1],
+    "background demand must not merge into an urgent public selection"
   );
   assert.ok(torrent.calls.deselect.length > 0);
 });
@@ -200,9 +239,7 @@ test("a claimant that withdraws takes its instruction with it", () => {
 
   assert.equal(after.withdrawn, 1);
   assert.equal(selection.statedRanges().length, 0);
-  // And the displacement mark goes with it: WebTorrent never clears it itself,
-  // so a reader walking a film would leave every piece of it marked.
-  assert.equal(torrent._critical.some((marked) => marked === true), false);
+  assert.equal(torrent._selections.length, 0, "native critical marks cannot request an unselected piece");
 });
 
 test("a window is bounded by its own file, so it cannot claim the next one", () => {
@@ -216,7 +253,7 @@ test("a window is bounded by its own file, so it cannot claim the next one", () 
   });
   selection.reconcile();
 
-  assert.deepEqual(torrent.calls.select, [{ from: 10, to: 19, priority: 1, isStream: true }]);
+  assert.deepEqual(torrent.calls.select, [{ from: 10, to: 19, priority: 1 }]);
 });
 
 test("releasing everything leaves the library holding nothing of ours", () => {
@@ -230,7 +267,7 @@ test("releasing everything leaves the library holding nothing of ours", () => {
 
   assert.equal(torrent._selections._items.length, 0);
   assert.equal(selection.statedRanges().length, 0);
-  assert.equal(torrent._critical.some((marked) => marked === true), false);
+  assert.equal(torrent.calls.critical.length, 1, "release does not mutate native critical state");
 });
 
 test("the store is told what will be read soon, from the same stated needs", () => {

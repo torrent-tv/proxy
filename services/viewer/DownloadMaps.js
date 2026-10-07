@@ -23,7 +23,7 @@ export class DownloadMaps {
       const interval = zone.downloadInterval ?? zone;
       const current = file.sourceZones.find(candidate => candidate.from === interval.from && candidate.to === interval.to);
       const deadlineAt = current && Number.isFinite(current.deadlineAt)
-        ? current.deadlineAt - (zone.leadSeconds ?? 0) * 1000 : current?.deadlineAt;
+        ? current.deadlineAt + (Math.max(0, zone.from - current.from) - (zone.leadSeconds ?? 0)) * 1000 : current?.deadlineAt;
       if (!current || Object.keys(current).some(key => key !== "from" && key !== "to" && !Object.is(zone[key], key === "deadlineAt" ? deadlineAt : current[key]))) changed = true;
       return current ? [{ ...zone, ...current, from: zone.from, to: zone.to, deadlineAt }] : [];
     });

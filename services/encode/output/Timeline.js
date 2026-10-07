@@ -180,6 +180,7 @@ export class Timeline {
       let priority = 0;
       let withinSeconds = Number.POSITIVE_INFINITY;
       let behind = true;
+      let urgent = false;
       for (let second = from; second < until && second < map.durationSeconds; second += 1) {
         if (map.priority[second] > priority) {
           priority = map.priority[second];
@@ -190,6 +191,7 @@ export class Timeline {
         if (map.behind[second] === 0) {
           behind = false;
         }
+        if (map.urgent?.[second]) urgent = true;
       }
       if (priority === 0) {
         continue;
@@ -200,6 +202,7 @@ export class Timeline {
         && previous.to === index - 1
         && previous.priority === priority
         && previous.behind === behind
+        && previous.urgent === urgent
       ) {
         // The time is not compared, only the rank. A run's time is that of its
         // near edge — a stretch is met at its beginning — and whoever needs the
@@ -212,6 +215,7 @@ export class Timeline {
         to: index,
         priority,
         withinSeconds,
+        urgent,
         // Which side of the viewers this is. Stated by the map and carried
         // through: converting seconds into piece numbers cannot move a stretch
         // from in front of somebody to behind them.

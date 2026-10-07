@@ -794,7 +794,9 @@ export class SegmentServing {
         }
         const ownInit = session.segmentFormat.extractInit(cached ?? await readFile(found));
         const init = ownInit && session.segmentFormat.prepareSharedInit ?
-          session.segmentFormat.prepareSharedInit(ownInit) : ownInit;
+          session.segmentFormat.prepareSharedInit(ownInit, {
+            audioEncoderDelay: session.spec.transcodesAudio ? 1024 : 0
+          }) : ownInit;
         if (!init || init.length === 0) {
           continue;
         }

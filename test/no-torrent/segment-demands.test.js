@@ -32,3 +32,10 @@ test("source deadline subtracts observed processing and delivery and retains ove
   assert.equal(sourceDeadline(demand, { encodeSpeed: 0.5, outputBytes: 1_000_000, linkMbps: 4 }), -5000);
   assert.equal(sourceDeadline(demand, {}), 5000);
 });
+
+test("a broad equal-priority zone retains each segment's presentation deadline", () => {
+  const output = { spec: { video: { fileIndex: 0 } }, timeline: { published: [0, 10, 20, 30] } };
+  const demands = segmentDemands(output, 0, [{ from: 0, to: 30, priority: 100,
+    urgent: true, deadlineAt: 1000 }]);
+  assert.deepEqual(demands.map(demand => demand.deadlineAt), [1000, 11000, 21000]);
+});

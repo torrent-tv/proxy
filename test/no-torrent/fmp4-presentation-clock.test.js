@@ -93,6 +93,14 @@ test("a shared init first read after a seek also supports returning to the begin
     fmp4Format.servedMediaRanges(readPresentationRanges(raw), { initBytes: null }));
 });
 
+test("AAC init first obtained after a seek preserves encoder priming when returning to zero", () => {
+  const shared = fmp4Format.prepareSharedInit(init(851000, 0, "soun"), { audioEncoderDelay: 1024 });
+  const media = fragment(0, 0);
+  const raw = Buffer.concat([init(0, 1024, "soun"), media]);
+  const prepared = fmp4Format.prepareSegmentBytes(media, { startSeconds: 0, initBytes: shared, rawBytes: raw });
+  assert.deepEqual(readPresentationRanges(Buffer.concat([shared, prepared])), readPresentationRanges(raw));
+});
+
 test("HLS fragments use the separate init and the same timeline translation as serving", (t) => {
   const root = mkdtempSync(path.join(os.tmpdir(), "presentation-ranges-"));
   const store = new SegmentStore({ root });

@@ -83,6 +83,7 @@
  * @property {number} to - Last second, exclusive.
  * @property {number} priority
  * @property {number} withinSeconds
+ * @property {boolean} urgent - Required preparation before playback can continue.
  * @property {boolean} behind - Whether this lies behind every viewer.
  */
 

@@ -17,14 +17,12 @@
 
 import { DemandRegister } from "../demand/DemandRegister.js";
 import { SwarmSelection } from "./SwarmSelection.js";
-import { DeadlineScheduler } from "./DeadlineScheduler.js";
 import { futureDownload } from "./FutureDownload.js";
 
 /** @type {WeakMap<object, { register: DemandRegister, selection: SwarmSelection }>} */
 const byTorrent = new WeakMap();
 /** @type {Set<{ register: DemandRegister, selection: SwarmSelection }>} */
 const live = new Set();
-const scheduler = new DeadlineScheduler({ entries: () => live });
 let futurePending = null;
 let publishingSelections = false;
 
@@ -56,12 +54,6 @@ export function demandFor(torrent) {
   }
   const register = new DemandRegister();
   const entry = { torrent, register, selection: new SwarmSelection({ torrent, register }), withdrawalRevision: 0 };
-  if (typeof torrent._request === "function" && typeof torrent._updateWire === "function") {
-    entry.previousWireUpdate = torrent._updateWire;
-    torrent._updateWire = wire => {
-      if (!publishingSelections) scheduler.reconcile(Date.now(), { torrent, wire });
-    };
-  }
   byTorrent.set(torrent, entry);
   live.add(entry);
   entry.onBytesChanged = () => reconcileAll();
@@ -106,7 +98,6 @@ export function forgetTorrent(torrent) {
   held.register.clear();
   torrent.removeListener?.("verified", held.onBytesChanged);
   torrent.removeListener?.("piece-withdrawn", held.onWithdrawn);
-  if (held.previousWireUpdate) torrent._updateWire = held.previousWireUpdate;
   byTorrent.delete(torrent);
   live.delete(held);
 }
@@ -125,18 +116,21 @@ export function reconcileAll() {
   if (publishingSelections) return { torrents: live.size, speculativeAllowed: false, stated: 0, withdrawn: 0 };
   const entries = [...live];
   const speculativeAllowed = !entries.some((entry) => entry.selection.hasUrgentMissing());
+  const bands=entries.map(entry=>entry.selection.missingBand()).filter(Boolean);
+  const maximumUrgency=bands.length?Math.min(...bands.map(band=>band.urgency)):Infinity;
+  const minimumPriority=bands.length?Math.max(...bands.filter(band=>band.urgency===maximumUrgency).map(band=>band.priority)):1;
+  const latestDeadlineAt=bands.length?Math.min(...bands.filter(band=>band.urgency===maximumUrgency&&band.priority===minimumPriority).map(band=>band.deadlineAt)):Infinity;
   let stated = 0;
   let withdrawn = 0;
   publishingSelections = true;
   try {
     for (const entry of entries) {
-      const result = entry.selection.reconcile({ speculativeAllowed, deadlineDriven: !!entry.previousWireUpdate });
+      const result = entry.selection.reconcile({ speculativeAllowed, maximumUrgency, minimumPriority, latestDeadlineAt });
       stated += result.stated;
       withdrawn += result.withdrawn;
     }
   } finally {
     publishingSelections = false;
   }
-  scheduler.reconcile();
   return { torrents: entries.length, speculativeAllowed, stated, withdrawn };
 }

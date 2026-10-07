@@ -98,6 +98,7 @@ const SEGMENT_PATTERN = /^segment-(\d{5})\.mp4$/;
  */
 export const fmp4Format = {
   id: "fmp4",
+  supportsOriginalInput: true,
   initFileName: INIT_FILE_NAME,
   initContentType: "video/mp4",
   segmentContentType: "video/mp4",

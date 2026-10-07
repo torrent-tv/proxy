@@ -27,7 +27,9 @@ test("periodic store maintenance retains the main thread's latest memory allocat
   const directory = await mkdtemp(path.join(os.tmpdir(), "assigned-store-budget-"));
   const store = new SharedPieceStore(1024, { path: directory, name: "assigned", memoryBytes: 64 * 1024 });
   try {
-    store.protectRange("map", 0, 99, 2, Infinity, 10, false);
+    store.protectRange("read", 0, 99);
+    assert.ok(store.wantedBytes >= 100 * 1024, "a read window is asked for");
+    store.releaseProtection("read");
     reviseStoreBudgets(8 * 1024);
     assert.equal(store.stats().budgetBytes, 8 * 1024);
     reviseStoreBudgets();

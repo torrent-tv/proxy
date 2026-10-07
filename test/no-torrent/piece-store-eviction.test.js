@@ -60,12 +60,12 @@ const get = (store, index) =>
     store.get(index, (error, bytes) => (error ? reject(error) : resolve(bytes)));
   });
 
-test("whole-file download preferences do not raise the memory floor or its history", async () => {
+test("whole-file download preferences ask for no memory and leave no floor behind", async () => {
   const { store, directory } = await makeStore(64);
   try {
     const idle = store.wantedBytes;
     store.protectRange("map:tail", 0, 63, 3, Infinity, 1, false);
-    assert.ok(store.wantedBytes >= 64 * PIECE, "the downloaded file may use spare memory");
+    assert.equal(store.wantedBytes, idle, "a download preference asks for no memory; pieces ahead have the disk");
     assert.equal(store.reviseGrowthCeiling(2 * PIECE).ceilingBytes, 2 * PIECE);
     assert.equal(store.protectedRanges().length, 1, "the map remains available to eviction ordering");
     for (const piece of [10, 11, 12]) store.pin(piece);

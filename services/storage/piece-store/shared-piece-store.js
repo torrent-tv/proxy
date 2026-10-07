@@ -665,14 +665,17 @@ export class SharedPieceStore {
    * range to declare.
    */
   get wantedBytes() {
-    // Download preferences may use spare RAM, but cannot become a required
-    // floor or a retained reading window after the map has been withdrawn.
-    const demand = this.#lru.demand();
+    // MEMORY HOLDS WHAT IS READ; WHAT IS DOWNLOADED AHEAD HAS THE DISK. Download
+    // preferences order eviction and nothing else. Counted here, the map of a
+    // whole film asked for the whole film, the adaptive budget handed over all
+    // the memory the machine had free, and once the swarm was told the whole
+    // band the store filled 4.4 GB in five minutes and the kernel killed the
+    // process (Home Assistant, 2026-10-07, torrent-tv/meta#95).
     const required = this.#lru.demand({ memoryRequiredOnly: true });
     const pinned = this.#lru.pinnedCount;
-    if (demand.readers > 0) {
+    if (required.readers > 0) {
       this.#widestSeenPieces = Math.max(this.#widestSeenPieces, required.widestPieces);
-      const pieces = Math.max(MIN_RESIDENT_PIECES, demand.unionPieces, demand.widestPieces, pinned);
+      const pieces = Math.max(MIN_RESIDENT_PIECES, required.unionPieces, required.widestPieces, pinned);
       // Plus room to absorb what arrives while a write is finishing. Asking for
       // exactly what the readers want leaves no free place ever, so every
       // arrival evicts one of them — measured 2026-09-02: `6 reader(s) want 23

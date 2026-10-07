@@ -1,3 +1,7 @@
+## Unreleased
+
+- **Fix**: Pieces downloaded ahead of the viewer go to disk instead of filling memory: the piece store no longer asks for memory by the download map, which on Home Assistant took 4.4 GB in five minutes and got the proxy killed by the kernel (torrent-tv/meta#95).
+
 ## 2.95.6
 
 - **Fix**: Tell WebTorrent about every wanted segment instead of only the earliest one: the most important class is requested first and the rest only by peers that would otherwise stand idle, so peers that do not hold the next segment keep downloading the following ones; on a stand with partial peers twelve segments arrived in 18 s instead of 170 s (torrent-tv/meta#95).

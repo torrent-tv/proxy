@@ -2,6 +2,7 @@
 
 import { KeyframeTable } from "./container/KeyframeTable.js";
 import { isUnavailable } from "./container/unavailable.js";
+import { IndexMemoryUnavailable } from "./container/memory-unavailable.js";
 import { logger as defaultLogger } from "../../utils/logger.js";
 
 export class KeyframeTables {
@@ -123,6 +124,8 @@ export class KeyframeTables {
             `keyframe index "${logName}": not downloaded yet after ${Date.now() - startedMs}ms — ` +
               "read again when pieces of the file arrive"
           );
+        } else if (error instanceof IndexMemoryUnavailable) {
+          this.#logger.info(`keyframe index "${logName}": waiting for ${error.bytes} additional allocation bytes`);
         } else {
           this.#logger.warn(
             `keyframe index "${logName}": the read failed after ${Date.now() - startedMs}ms — ` +
@@ -183,7 +186,10 @@ export class KeyframeTables {
       const table = await this.read(params);
       return { table, arrived: table.answered };
     } catch (error) {
-      if (isUnavailable(error)) return { table: this.of(params), arrived: false };
+      if (isUnavailable(error) || error instanceof IndexMemoryUnavailable) {
+        const table = this.of(params);
+        return { table, arrived: table.answered };
+      }
       throw error;
     }
   }

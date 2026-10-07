@@ -494,7 +494,7 @@ export async function startProxyServer({
   });
   const indexMemory = new IndexMemory({
     reviseBudget: () => { void outputParts.machineBudget.revise().catch(error => logger.warn(`packet index budget: ${error.message}`)); },
-    changed: () => { mediaReads.memoryChanged(); probeReads.memoryChanged(); }
+    changed: () => { mediaReads.memoryChanged(); probeReads.memoryChanged(); outputParts.encodeInputs?.memoryChanged(); }
   });
   const containerOver = async ({ sourceKey, fileIndex, requestId, packetInterval, demand }) => {
     const record = sourceRegistry.get(sourceKey);
@@ -531,6 +531,10 @@ export async function startProxyServer({
       onReadResult: async (statement, result, revision) => {
         if (revision.demand !== downloadMaps.epoch(sourceKey, fileIndex)) return;
         if (demand && !downloadMaps.wantsInterval(sourceKey, fileIndex, demand)) return;
+        if (statement === "keyframes" && result.kind === "result") {
+          keyframeTables.learn(params, { times: result.value?.times ?? null, tolerance: result.value?.tolerance ?? 0,
+            format: containerOrchestrator.known(sourceKey, fileIndex)?.formatName ?? "unrecognised" });
+        }
         const finished = mediaReads.record(params, statement, result, revision.storage, revision.memory);
         await downloadMaps.metadata({ sourceKey, fileIndex, statement: requestId ? `${statement}:${requestId}` : statement, result,
           ...(demand ? { priority: demand.priority, urgent: demand.urgent, deadlineAt: demand.deadlineAt, interval: demand, leadSeconds: demand.leadSeconds ?? 0 } : {}) });

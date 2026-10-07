@@ -5,6 +5,7 @@ import { admitOriginalInput } from "./OriginalInput.js";
 export class EncodeInputs {
   #requests = new Map();
   #revision = 0;
+  #memoryRevision = 0;
   #held = 0;
   #allowed = 0;
   #wanted = new Map();
@@ -43,7 +44,13 @@ export class EncodeInputs {
   allow(bytes) {
     const changed = this.#allowed !== Math.max(0, bytes);
     this.#allowed = Math.max(0, bytes);
-    if (changed) this.#retryMemory();
+    if (changed) this.memoryChanged();
+  }
+
+  /** Metadata admission and input admission can change independently. */
+  memoryChanged() {
+    this.#memoryRevision++;
+    this.#retryMemory();
   }
 
   #retryMemory() {
@@ -112,6 +119,7 @@ export class EncodeInputs {
   #prepare(request) {
     request.pending = true;
     request.revision = this.#revision;
+    request.memoryRevision = this.#memoryRevision;
     request.promise = (async () => {
       const resolved = await this.#resolve(request.output, request.from, request.to);
       if (this.#requests.get(request.key) !== request) return;
@@ -133,7 +141,7 @@ export class EncodeInputs {
           return () => {
             if (!released) {
               released = true; this.#held -= bytes;
-              queueMicrotask(() => this.#retryMemory());
+              queueMicrotask(() => this.memoryChanged());
             }
           };
         }
@@ -149,7 +157,9 @@ export class EncodeInputs {
     }).finally(() => {
       request.pending = false;
       if (request.result?.kind !== "needs-memory") this.#wanted.delete(request.key);
-      if (this.#requests.get(request.key) === request && request.revision !== this.#revision &&
+      const changed = request.result?.kind === "needs-memory"
+        ? request.memoryRevision !== this.#memoryRevision : request.revision !== this.#revision;
+      if (this.#requests.get(request.key) === request && changed &&
         request.result?.kind !== "result" && request.result?.kind !== "terminal") this.#prepare(request);
     });
   }

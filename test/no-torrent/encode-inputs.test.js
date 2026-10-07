@@ -6,6 +6,50 @@ import { MachineBudget } from "../../services/storage/MachineBudget.js";
 
 const output = { id: "output" };
 
+test("input allowance changing before a pending memory refusal is returned is not lost", async () => {
+  let finish, calls = 0;
+  const inputs = new EncodeInputs({
+    resolve: () => ++calls === 1 ? new Promise(resolve => { finish = resolve; })
+      : Promise.resolve({ kind: "result", sources: [source] }),
+    readRanges: async () => [Buffer.from("ab")], reviseBudget: async () => {},
+    changed: () => {}, failed: (_output, error) => { throw error; }
+  });
+  inputs.take(output, 0, 0);
+  await setImmediate();
+  inputs.allow(100);
+  finish({ kind: "needs-memory", bytes: 64 });
+  await setImmediate();
+  assert.equal(calls, 2);
+  const admitted = inputs.take(output, 0, 0);
+  assert.equal(admitted?.kind, "result");
+  admitted.release();
+});
+
+for (const duringRead of [false, true]) test(`metadata memory admission wakes encoder input (duringRead=${duringRead})`, async () => {
+  let available = false, finish, calls = 0;
+  const inputs = new EncodeInputs({
+    resolve: async () => {
+      calls++;
+      if (available) return { kind: "result", sources: [source] };
+      if (duringRead) return new Promise(resolve => { finish = resolve; });
+      return { kind: "needs-memory", bytes: 64 };
+    },
+    readRanges: async () => [Buffer.from("ab")], reviseBudget: async () => inputs.allow(100),
+    changed: () => {}, failed: (_output, error) => { throw error; }
+  });
+  inputs.take(output, 0, 0);
+  await setImmediate();
+  available = true;
+  inputs.memoryChanged();
+  finish?.({ kind: "needs-memory", bytes: 64 });
+  await setImmediate();
+  assert.equal(calls, 2);
+  const admitted = inputs.take(output, 0, 0);
+  assert.equal(admitted?.kind, "result");
+  admitted.release();
+  assert.equal(inputs.held(), 0);
+});
+
 for (const urgent of [true, false]) test(`chosen complete input is admitted before speculative whole-file memory (urgent=${urgent})`, async () => {
   const budget = new MachineBudget({ policy: { kind: "fixed", bytes: 100 } });
   budget.defineResource({ name: "memory", readFree: () => 100 });

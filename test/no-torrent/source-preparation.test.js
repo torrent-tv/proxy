@@ -55,6 +55,40 @@ test("chosen embedded subtitle input follows an output viewer and is withdrawn o
   assert.ok(withdrawn.includes(current));
 });
 
+test("a chosen embedded subtitle the proxy refuses to read is not waited for", async () => {
+  const viewers = new Viewers();
+  const viewer = viewers.selectsFile("viewer", "source", 0);
+  viewers.of({ id: "output" }, "viewer");
+  viewers.selectsSubtitle("viewer", "source", 0, 2);
+  const reads = [];
+  const preparation = new SourcePreparation({ viewers, candidatesFor: async () => [0],
+    inspect: async work => {
+      reads.push(work);
+      // The packet index answers that this track is not one it can read, so the
+      // cues are never asked for: that refusal is the whole answer.
+      return work.role === "subtitle-embedded" && work.statement === "packets"
+        ? { kind: "terminal", reason: "subtitle-track-not-supported" } : { kind: "result" };
+    }, withdraw: () => {} });
+  await preparation.refresh();
+  assert.ok(reads.some(work => work.role === "subtitle-embedded" && work.statement === "packets"));
+  assert.equal(reads.some(work => work.statement === "subtitle-cues"), false);
+  assert.equal(preparation.subtitleReadyFor(viewer), true);
+  viewer.moveTo(20);
+  assert.equal(preparation.subtitleReadyFor(viewer), false);
+});
+
+test("a chosen embedded subtitle is not ready before its cues are read", async () => {
+  const viewers = new Viewers();
+  const viewer = viewers.selectsFile("viewer", "source", 0);
+  viewers.of({ id: "output" }, "viewer");
+  viewers.selectsSubtitle("viewer", "source", 0, 2);
+  const preparation = new SourcePreparation({ viewers, candidatesFor: async () => [0],
+    inspect: async work => work.statement === "subtitle-cues" ? { kind: "needs-ranges" } : { kind: "result" },
+    withdraw: () => {} });
+  await preparation.refresh();
+  assert.equal(preparation.subtitleReadyFor(viewer), false);
+});
+
 test("a paused direct viewer keeps urgency until exact input is held, then yields to the other viewer", async () => {
   const viewers = new Viewers();
   const paused = viewers.selectsFile("paused", "source", 0, 1000, { wantsToPlay: false });

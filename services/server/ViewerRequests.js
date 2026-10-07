@@ -9,6 +9,7 @@
 
 import { logger } from "../../utils/logger.js";
 import { isOutputName } from "../encode/output/index.js";
+import { withSubtitleReadiness } from "./subtitle-readiness.js";
 
 function isWarmupTimeoutError(error) {
   if (!(error instanceof Error)) {
@@ -696,7 +697,13 @@ export class ViewerRequests {
       tracks,
       linkReadings: measurement.link.snapshot()
     };
-    const forecast = this.#host.playbackReadiness.predict(input);
+    // A subtitle track chosen inside THIS file is the last input the forecast
+    // waits for. A subtitle FILE beside it is named by its own index and is
+    // fetched whole by the page before it is chosen, so it never matches here.
+    const subtitle = viewer?.subtitle?.sourceKey === session.file.sourceKey &&
+      viewer.subtitle.fileIndex === session.file.fileIndex ? viewer.subtitle : null;
+    const forecast = withSubtitleReadiness(this.#host.playbackReadiness.predict(input), subtitle,
+      subtitle ? this.#host.subtitleReadyFor?.(viewer) !== false : true);
     forecast.operations = outputs.flatMap((output, index) => {
       const common = { speed: this.#host.playbackReadiness.forecastRate(tracks[index].readings), processedSeconds: tracks[index].processedSeconds };
       return [

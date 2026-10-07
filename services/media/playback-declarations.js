@@ -1,4 +1,5 @@
 import { AudioTrack } from "./tracks/AudioTrack.js";
+import { TextSubtitleTrack } from "./tracks/TextSubtitleTrack.js";
 
 const VIDEO_CODECS = new Map([
   ["V_MPEG4/ISO/AVC", "h264"], ["avc1", "h264"], ["avc3", "h264"],
@@ -37,7 +38,11 @@ export function playbackDeclarations({ tracks, media, fileBytes = null }) {
     ...track, index, streamIndex: track.declaredIndex,
     codec: type === "audio" ? AudioTrack.codecNameOf(track)
       : SUBTITLE_CODECS.get(track.codecId) ?? track.codecId.toLowerCase(),
-    title: track.name ?? ""
+    title: track.name ?? "",
+    // The browser offers only tracks marked text-based: a picture subtitle
+    // cannot become WebVTT. Dropped when the plan moved to these declarations
+    // (torrent-tv/meta#95), which emptied every subtitle menu (#8).
+    ...(type === "subtitle" ? { textBased: TextSubtitleTrack.isTextCodec(track.codecId) } : {})
   }));
   const audioTracks = inventory("audio"), subtitleTracks = inventory("subtitle");
   return { tracks, video, audioTracks, subtitleTracks,

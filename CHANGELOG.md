@@ -1,5 +1,7 @@
 ## 2.94.2
 
+- **Fix**: An H.264 parameter set that escapes a byte needing no escape (`00 00 03` before a byte above `03`, written by LostFilm's LostCoder) is read the way decoders read it instead of refused, so such an MP4 plays rather than failing with `AVC emulation prevention byte is invalid.` (torrent-tv/meta#147).
+
 - **Fix**: Playback readiness waits for the subtitle the viewer chose to be read where they stand, so a film whose file says to show a subtitle track no longer opens without it. The forecast states the choice as `playbackReadiness.subtitles` and holds with reason `subtitles-pending`; a track the proxy refuses to read at any step ends the wait instead of holding it for ever (torrent-tv/meta#8).
 
 ## 2.94.1

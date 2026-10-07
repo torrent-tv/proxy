@@ -21,16 +21,7 @@ export function h264Configuration(avcc) {
 
 function readSps(nal, includeOrder = false) {
   if ((nal[0] & 31) !== 7 || nal[0] & 128) throw new Error("AVC configuration entry is not an SPS.");
-  const bytes = [];
-  for (let at = 1, zeroes = 0; at < nal.length; at++) {
-    const byte = nal[at];
-    if (zeroes >= 2 && byte === 3) {
-      if (at + 1 >= nal.length || nal[at + 1] > 3) throw new Error("AVC emulation prevention byte is invalid.");
-      zeroes = 0; continue;
-    }
-    bytes.push(byte); zeroes = byte === 0 ? zeroes + 1 : 0;
-  }
-  const bits = new Bits(Buffer.from(bytes));
+  const bits = new Bits(unescapeNal(nal));
   const profile = bits.uint(8), constraints = bits.uint(8), level = bits.uint(8);
   bits.ue();
   let chroma = 1, separate = 0, depth = 8;
@@ -131,14 +122,16 @@ export function avcOrderParameters(sps, pps) {
   return { ...facts.pictureOrder, bottomFieldOrderPresent: bits.uint(1) === 1 };
 }
 
+/**
+ * Remove every emulation prevention byte: a 0x03 after two zero bytes, whatever follows it. H.264 §7.4.1
+ * forbids 0x000003 before a byte above 0x03, but encoders write it (LostFilm's LostCoder) and decoders drop
+ * it (ffmpeg's ff_h2645_extract_rbsp), so refusing it refuses files every player plays.
+ */
 export function unescapeNal(nal) {
   const bytes = [];
   for (let at = 1, zeroes = 0; at < nal.length; at++) {
     const byte = nal[at];
-    if (zeroes >= 2 && byte === 3) {
-      if (at + 1 >= nal.length || nal[at + 1] > 3) throw new Error("AVC escape byte is invalid.");
-      zeroes = 0; continue;
-    }
+    if (zeroes >= 2 && byte === 3) { zeroes = 0; continue; }
     bytes.push(byte);
     zeroes = byte === 0 ? zeroes + 1 : 0;
   }

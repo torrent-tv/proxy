@@ -1,4 +1,4 @@
-## Unreleased
+## 2.95.4
 
 - **Fix**: Cut copied audio from its actual first packet time when it starts after the published boundary, avoiding an extra start delay at every segment end and refusal of complete MP4 audio (torrent-tv/meta#95).
 - **Fix**: Index source-byte coverage and arrival times once per playback forecast, avoiding repeated range splitting and full-file arrival scans that delay media requests (torrent-tv/meta#95).

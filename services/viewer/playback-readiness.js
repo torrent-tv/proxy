@@ -99,7 +99,8 @@ export class RateTrend {
  * @param {number} input.lookaheadSeconds
  * @param {number} input.now
  * @param {boolean} [input.requiredAudio]
- * @param {Array<{ id: string, complete: boolean,
+ * @param {Array<{ id: string, serviceKey?: string, complete: boolean, fileOffset?: number,
+ *   fileLength?: number, pieceLength?: number, downloadRateReadings?: object,
  *   downloadForecast?: { ranges: Array<{ start: number, end: number, availableAt: number | null }> } }>} input.sources
  * @param {Array<{ id: string, sourceIds: string[], processedSeconds: number,
  *   bitsPerMediaSecond: number, readings: Array<{ at: number, value: number }>,
@@ -192,8 +193,16 @@ export function predictPlaybackReadiness(input = {}) {
     return result(false, null, buffered, reserve, null, "timeline-unavailable", 0);
   }
   const sourceState = new Map();
+  // A torrent has one download service, even when required media lives in separate files.
+  const sourceServices = new Map();
   for (const [id, source] of sources) {
-    sourceState.set(id, { source, rate: rateCurve(source.downloadRateReadings, now), serviceFinish: 0 });
+    const serviceKey = typeof source.serviceKey === "string" ? source.serviceKey : id;
+    let service = sourceServices.get(serviceKey);
+    if (!service) {
+      service = { rate: rateCurve(source.downloadRateReadings, now), finish: 0 };
+      sourceServices.set(serviceKey, service);
+    }
+    sourceState.set(id, { source, service });
   }
   const link = rateCurve(input.linkReadings, now);
   let unknownReason = null;
@@ -333,7 +342,8 @@ export function predictPlaybackReadiness(input = {}) {
         // pieces, project only the media-order demand from the torrent's latest
         // measured download service; no supplier or positive rate means no
         // estimated arrival.
-        const { source: facts, rate } = source;
+        const { source: facts, service: sourceService } = source;
+        const { rate } = sourceService;
         if (!rate || !(rate.rateAt(0) > 0) || !Number.isSafeInteger(facts.pieceLength) ||
             facts.pieceLength <= 0 || !Number.isSafeInteger(facts.fileOffset) ||
             !Number.isSafeInteger(facts.fileLength) || facts.fileLength <= 0) {
@@ -342,7 +352,7 @@ export function predictPlaybackReadiness(input = {}) {
           unavailableSource: { sourceId, segmentIndex: segment.index, range: interval, missing } };
         }
         const estimatedPieces = sourcePiecesFor(missing, facts);
-        let finish = Math.max(source.serviceFinish, sourceArrivalAt);
+        let finish = Math.max(sourceService.finish, sourceArrivalAt);
         const service = sourceByteService.get(sourceId) ?? [];
         for (const pieceRange of estimatedPieces) {
           const stillMissing = uncoveredIntervals(pieceRange, sourceByteCoverage.get(sourceId) ?? []);
@@ -354,7 +364,7 @@ export function predictPlaybackReadiness(input = {}) {
           sourceByteCoverage.set(sourceId, numericCoverage(service));
           sourceArrivals.set(sourceId, indexedArrivals(service));
         }
-        source.serviceFinish = finish;
+        sourceService.finish = finish;
       }
     }
     // Production accepts a complete held segment input. It cannot overlap its

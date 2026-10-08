@@ -232,8 +232,13 @@ export class AviContainer extends Container {
       } else if (type === "audio") {
         if (strf.length < 16) throw new Error("AVI wave format is truncated.");
         const tag = strf.readUInt16LE(0);
+        // WAVEFORMATEX states the average bytes per second the stream carries
+        // (`nAvgBytesPerSec`); zero states nothing. Without it a soundtrack the
+        // browser plays is re-encoded only because its copy has no figure to
+        // ask the link about (torrent-tv/meta#159).
         track = new AudioTrack({ ...params, codecId: waveCodec(tag),
           channels: strf.readUInt16LE(2), samplingFrequency: strf.readUInt32LE(4),
+          bitrateKbps: strf.readUInt32LE(8) * 8 / 1000,
           codecPrivateB64: strf.subarray(18).toString("base64") });
         track.blockAlign = strf.readUInt16LE(12);
         track.matroskaCodecId = "A_MS/ACM";

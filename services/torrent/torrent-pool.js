@@ -2118,6 +2118,7 @@ export class TorrentPool {
       fileDownloaded,
       fileLength,
       fileOffset: file.offset,
+      pieceLength: torrent.pieceLength,
       residence,
       fileAvailable: fileLength > 0 && residence.length > 0 && residence.every(range => range.location !== "missing"),
       // Compatibility fields report the same current urgent map demand.

@@ -193,7 +193,7 @@ export function predictPlaybackReadiness(input = {}) {
   }
   const sourceState = new Map();
   for (const [id, source] of sources) {
-    sourceState.set(id, { source });
+    sourceState.set(id, { source, rate: rateCurve(source.downloadRateReadings, now), serviceFinish: 0 });
   }
   const link = rateCurve(input.linkReadings, now);
   let unknownReason = null;
@@ -318,11 +318,43 @@ export function predictPlaybackReadiness(input = {}) {
     const { track, trackIndex, segment, sizeBits, encodeWork, sourceByteIntervals } = job;
     let sourceArrivalAt = 0;
     for (const [sourceId, ranges] of sourceByteIntervals) {
+      const source = sourceState.get(sourceId);
+      if (!source) {
+        return result(false, null, buffered, reserve, null, "source-measurement-unavailable", preparedSegments);
+      }
       for (const interval of ranges) {
         const missing = uncoveredIntervals(interval, sourceByteCoverage.get(sourceId) ?? []);
-        if (missing.length) return { ...result(false, null, buffered, reserve, null, "download-schedule-unavailable", preparedSegments),
+        if (missing.length === 0) {
+          sourceArrivalAt = Math.max(sourceArrivalAt, latestArrival(interval, sourceArrivals.get(sourceId)));
+          continue;
+        }
+
+        // Explicit piece arrivals remain authoritative. For still-unmapped
+        // pieces, project only the media-order demand from the torrent's latest
+        // measured download service; no supplier or positive rate means no
+        // estimated arrival.
+        const { source: facts, rate } = source;
+        if (!rate || !(rate.rateAt(0) > 0) || !Number.isSafeInteger(facts.pieceLength) ||
+            facts.pieceLength <= 0 || !Number.isSafeInteger(facts.fileOffset) ||
+            !Number.isSafeInteger(facts.fileLength) || facts.fileLength <= 0) {
+          return { ...result(false, null, buffered, reserve, null,
+            rate ? "service-not-advancing" : "download-rate-unavailable", preparedSegments),
           unavailableSource: { sourceId, segmentIndex: segment.index, range: interval, missing } };
-        sourceArrivalAt = Math.max(sourceArrivalAt, latestArrival(interval, sourceArrivals.get(sourceId)));
+        }
+        const estimatedPieces = sourcePiecesFor(missing, facts);
+        let finish = Math.max(source.serviceFinish, sourceArrivalAt);
+        const service = sourceByteService.get(sourceId) ?? [];
+        for (const pieceRange of estimatedPieces) {
+          const stillMissing = uncoveredIntervals(pieceRange, sourceByteCoverage.get(sourceId) ?? []);
+          for (const part of stillMissing) {
+            finish = rate.finish(part.end - part.start, finish);
+            service.push({ start: part.start, end: part.end, begin: finish, finish });
+            sourceArrivalAt = Math.max(sourceArrivalAt, finish);
+          }
+          sourceByteCoverage.set(sourceId, numericCoverage(service));
+          sourceArrivals.set(sourceId, indexedArrivals(service));
+        }
+        source.serviceFinish = finish;
       }
     }
     // Production accepts a complete held segment input. It cannot overlap its
@@ -534,6 +566,22 @@ function uncoveredIntervals(interval, served) {
   }
   if (cursor < interval.end) missing.push({ start: cursor, end: interval.end });
   return missing;
+}
+
+/** Expand missing file bytes to the whole torrent pieces the reader must hold. */
+function sourcePiecesFor(ranges, source) {
+  const pieces = [];
+  for (const range of ranges) {
+    if (!(range.end > range.start)) continue;
+    const first = Math.floor((source.fileOffset + range.start) / source.pieceLength);
+    const last = Math.ceil((source.fileOffset + range.end) / source.pieceLength) - 1;
+    for (let index = first; index <= last; index += 1) {
+      const start = Math.max(0, index * source.pieceLength - source.fileOffset);
+      const end = Math.min(source.fileLength, (index + 1) * source.pieceLength - source.fileOffset);
+      if (end > start) pieces.push({ start, end });
+    }
+  }
+  return numericCoverage(pieces);
 }
 
 /**

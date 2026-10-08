@@ -24,6 +24,9 @@ const SEGMENT_PATTERN = /^segment-(\d{5})\.ts$/;
  */
 export const mpegtsFormat = {
   id: "mpegts",
+  // FFmpeg may read the source file itself; self-contained segments need no
+  // partition by presentation time (torrent-tv/meta#151).
+  supportsOriginalInput: true,
   // No init segment: every `.ts` segment is self-describing.
   initFileName: null,
   initContentType: null,

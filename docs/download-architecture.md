@@ -66,8 +66,8 @@ the ranges are the header, the index FFmpeg reads at open, the first packet of
 each stream and the packets of the interval, from the keyframe two before it.
 AVI states no presentation time, so a picture whose codec may reorder is
 re-encoded rather than copied (`KeyframeTable.copyable`). Original-source input
-is enabled when every selected file can name its ranges this way and the output
-is fMP4. Other layouts, MPEG-TS output and AVI without an index retain their
+is enabled when every selected file can name its ranges this way, for fMP4 and
+MPEG-TS output alike. Other layouts and AVI without an index retain their
 existing indexed input:
 a finite FFprobe interval does not establish addresses for the full future map.
 A stopped or superseded request releases its

@@ -11,6 +11,7 @@ import { admitOriginalInput } from "../../services/encode/OriginalInput.js";
 import { buildOriginalCommand } from "../../services/encode/source-command.js";
 import { handleEncodeInputGet } from "../../routes/encode-input/get.js";
 import { fmp4Format } from "../../services/encode/segment-formats/fmp4.js";
+import { mpegtsFormat } from "../../services/encode/segment-formats/mpegts.js";
 
 // Generated ordinary media and a loopback HTTP server only; no torrent imports.
 //
@@ -76,7 +77,7 @@ function containerOf(bytes) {
 }
 
 /** Run one output over only the named ranges; the route refuses every other byte. */
-async function runOver(directory, { bytes, ranges, from, command }) {
+async function runOver(directory, { bytes, ranges, from, command, format = fmp4Format }) {
   const input = await admitOriginalInput({
     sources: [{ sourceKey: "generated", fileIndex: 0, timeShiftSeconds: 0,
       input: { original: true, from, fileLength: bytes.length, ranges, selections: command.selections } }],
@@ -94,7 +95,7 @@ async function runOver(directory, { bytes, ranges, from, command }) {
   try {
     await new Promise(resolve => server.listen(0, "127.0.0.1", resolve));
     const { args } = buildOriginalCommand({ admittedInput: input, inputToken: 1,
-      baseUrl: `http://127.0.0.1:${server.address().port}`, output: {}, segmentFormat: fmp4Format, segmentDurationSec: 2,
+      baseUrl: `http://127.0.0.1:${server.address().port}`, output: {}, segmentFormat: format, segmentDurationSec: 2,
       videoEncoder: { buildVideoArgs: () => ["-c:v", "libx264", "-qp", "0", "-preset", "ultrafast", "-pix_fmt", "yuv420p", "-bf", "0"] },
       transcodeAudio: false, transcodeVideo: false, audioOnly: false, audioSeparate: true, ...command });
     const child = spawn(ffmpegBin, args, { cwd: directory, stdio: ["ignore", "ignore", "pipe", "ignore"], windowsHide: true });
@@ -105,8 +106,8 @@ async function runOver(directory, { bytes, ranges, from, command }) {
     clearTimeout(timeout);
     assert.deepEqual(refused, [], "FFmpeg read only bytes the container named");
     assert.equal(code, 0, `${diagnostics}\n${args.join(" ")}`);
-    const piece = path.join(directory, `making-avi-${String(command.startIndex).padStart(5, "0")}.mp4`);
-    return { piece, coverage: fmp4Format.readMediaRanges(await fs.readFile(piece)) };
+    const piece = path.join(directory, `making-avi-${String(command.startIndex).padStart(5, "0")}.${format === fmp4Format ? "mp4" : "ts"}`);
+    return { piece, coverage: format.readMediaRanges?.(await fs.readFile(piece)) ?? null };
   } finally {
     await new Promise(resolve => server.close(resolve));
     input.release();
@@ -180,4 +181,30 @@ test("an OpenDML AVI past one gibibyte plays its interval from the named bytes o
   const bytes = await fs.readFile(file);
   assert.ok(bytes.includes(Buffer.from("AVIX")), "the file has a second RIFF");
   await checkAvi(directory, file, { duration: 100, audio: true, timeBase: 1 / FPS, copyable: true });
+}));
+
+
+test("an idx1 AVI with MP3 plays its interval as MPEG-TS, the container a copied MP3 needs", () => inDirectory(async directory => {
+  // The page asks for MPEG-TS when MP3 is copied: MediaSource takes MP3 there and not in fMP4.
+  const file = path.join(directory, "source.avi");
+  ffmpeg(["-f", "lavfi", "-i", `testsrc2=size=320x240:rate=${FPS}`, "-f", "lavfi", "-i", `aevalsrc=${LOUD}:s=48000`,
+    "-t", "60", "-c:v", "mpeg4", "-vtag", "XVID", "-bf", "2", "-g", "50", "-q:v", "3", "-c:a", "libmp3lame", "-b:a", "128k", "-f", "avi", file]);
+  const bytes = await fs.readFile(file);
+  const container = containerOf(bytes);
+  const keyframes = (await container.parseKeyframeIndex()).times;
+  const grid = [];
+  for (const time of keyframes) if (!grid.length || time - grid.at(-1) >= 1.9) grid.push(time);
+  grid.push(60);
+  const at = grid.findIndex(time => time >= 30);
+  const from = grid[at], to = grid[at + 1];
+  const tracks = await container.readTracks();
+  const source = await container.readSourceRanges({ from, to, trackIds: tracks.filter(track => ["video", "audio"].includes(track.type)).map(track => track.trackNumber) });
+  const run = command => runOver(directory, { bytes, ranges: source.ranges, from, format: mpegtsFormat, command: {
+    startIndex: at, timeline: { published: grid, cutGrid: "keyframe" }, keyframes: { times: keyframes }, ...command } });
+  const firstTime = piece => Number(lines(ffmpeg(["-i", piece, "-c", "copy", "-f", "framecrc", "-"]))[0].split(",")[1]) / 90000;
+  const picture = await run({ transcodeVideo: true, selections: [{ track: { type: "video", reorderDepth: 0 }, index: 0 }] });
+  const expected = pictures(file, 1 / FPS).filter(([pts]) => pts >= from - 1e-6 && pts < to - 1e-6).map(([, hash]) => hash);
+  assert.deepEqual(pictures(picture.piece, 1).map(([, hash]) => hash), expected, "the piece holds exactly the interval's pictures");
+  const sound = await run({ audioOnly: true, transcodeAudio: false, audioSourceTrackIndex: 0, selections: [{ track: { type: "audio" }, index: 0 }] });
+  assert.ok(Math.abs(firstTime(sound.piece) - firstTime(picture.piece)) < 0.03, "the copied sound starts where the picture does");
 }));

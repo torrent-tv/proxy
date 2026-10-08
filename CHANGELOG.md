@@ -1,3 +1,7 @@
+## Unreleased
+
+- **Fix**: An encoder input states each change of what it waits for — bytes, memory, ready or refused — and when it is withdrawn, so a piece that is never made names its cause in the log. Field 2026-10-08: an AVI stopped after four pieces with nothing in the log but "no encoder could be made" (torrent-tv/meta#151).
+
 ## 2.95.15
 
 - **Fix**: An AVI run names enough of the file for what FFmpeg reads ahead: each stream runs on for the packets FFmpeg's thread queues can hold, and each range for FFmpeg's 32 KiB input buffer instead of a chosen 1 MiB. A picture whose every frame is a keyframe left one frame of margin, FFmpeg asked for bytes the run did not hold, and the run was taken for one whose input was lost (torrent-tv/meta#151).

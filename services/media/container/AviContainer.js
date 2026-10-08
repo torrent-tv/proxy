@@ -1,7 +1,10 @@
 /**
  * @file AVI container — RIFF.
  *
- * Stream declarations and exact packet addresses from idx1 or OpenDML indexes.
+ * Stream declarations, and from the index alone (`idx1` or OpenDML) the
+ * keyframes and the original bytes a run needs: FFmpeg reads an indexed AVI
+ * from the file itself (`avi-index.js`, torrent-tv/meta#151). Packets are
+ * reassembled only for an AVI that states no index.
  */
 
 import { Container } from "./Container.js";
@@ -9,15 +12,16 @@ import { VideoTrack } from "../tracks/VideoTrack.js";
 import { AudioTrack } from "../tracks/AudioTrack.js";
 import { ContainerTrack } from "../tracks/ContainerTrack.js";
 import { PacketIndex } from "./PacketIndex.js";
-import { openDmlPackets } from "./avi-open-dml.js";
+import { readAviIndex } from "./avi-index.js";
 import { isUnavailable } from "./unavailable.js";
-import { IndexMemoryUnavailable } from "./memory-unavailable.js";
 import { Mpeg4PictureTiming } from "./mpeg4-picture-timing.js";
 import { MpegElementaryIndex } from "./mpeg-elementary-index.js";
 import { RetainedReads } from "./RetainedReads.js";
 import { OutsideReadableEdges, edgeReader, emptyWorkTags, text, textList, yearOf } from "./work-tags.js";
 
 const MPEG4_CODECS = new Set(["FMP4", "XVID", "DIVX", "DX50", "MP4V", "M4S2", "MP4S"]);
+/** Picture codecs whose every picture stands alone, so decoding order is showing order. */
+const INTRA_PICTURE_CODECS = new Set(["MJPG", "JPEG", "DIB ", "\0\0\0\0", "I420", "YV12", "YUY2", "UYVY"]);
 const MPEG_AUDIO_CODECS = new Set(["mp1", "mp2", "mp3"]);
 const NAL_CODECS = new Map([["H264", "h264"], ["X264", "h264"], ["AVC1", "h264"], ["HEVC", "hevc"], ["H265", "hevc"]]);
 
@@ -26,9 +30,11 @@ export class AviContainer extends Container {
   #tracks = null;
   #packets = null;
   #scan = null;
-  #indexed = null;
   #declarations = null;
   #workTags = null;
+  /** The index alone: undefined until read, null when the file states none. */
+  #index = undefined;
+  #layout = null;
 
   async #readHeaders() {
     if (this.#headers) return this.#headers;
@@ -110,24 +116,83 @@ export class AviContainer extends Container {
   }
 
 
-  packetIndexBytes() { return (this.#packets ?? this.#scan?.index ?? this.#indexed?.index)?.allocatedBytes() ?? 0; }
-
-  static detect(head) {
-    return isAvi(head);
+  /** The first RIFF's `movi` list and `idx1` chunk. */
+  async #topLevel() {
+    if (this.#layout) return this.#layout;
+    const header = await this.readRange(0, 11);
+    const chunks = await riffChunks(this.readRange, 12, 8 + header.readUInt32LE(4));
+    const movi = chunks.find(chunk => chunk.id === "LIST" && chunk.type === "movi");
+    if (!movi) throw new Error("AVI media list is absent.");
+    this.#layout = { movi, idx1: chunks.find(chunk => chunk.id === "idx1") ?? null };
+    return this.#layout;
   }
 
   /**
-   * The keyframe times this container's own index states, in ascending seconds.
-   *
-   * Static so a caller that has bytes and no container can ask; the instance
-   * form is {@link Container#readKeyframeIndex}.
-   *
-   * @param {(start:number,end:number)=>Promise<Buffer|null>} readRange
-   * @param {number} fileSize
-   * @returns {Promise<number[]|null>} Null where the container has no index.
+   * What the index states, read once; null when the file states no index.
+   * A shortage of bytes or memory is thrown and nothing is kept, so the next
+   * read starts again from the index (the index is small and read in requests).
    */
-  static readKeyframeTimes(readRange, fileSize) {
-    return readAviKeyframeTimes(readRange, fileSize);
+  async #readIndex() {
+    if (this.#index !== undefined) return this.#index;
+    const tracks = await this.readTracks();
+    const { streams } = await this.#readHeaders();
+    const { movi, idx1 } = await this.#topLevel();
+    const record = { dispose: () => this.#index?.dispose?.() };
+    const allocation = this.packetMemory?.forRecord?.(record, "index") ?? this.packetMemory;
+    const index = await readAviIndex({ read: this.readRange, fileSize: this.fileSize, movi, idx1, allocation,
+      streams: tracks.map(track => ({ type: track.type, timeBase: track.timeBase, sampleSize: track.sampleSize,
+        startTimeSeconds: track.startTimeSeconds, indexChunks: streams[track.trackNumber].indexChunks })) });
+    this.#index = index;
+    return index;
+  }
+
+  async supportsOriginalSourceRanges() {
+    const index = await this.#readIndex();
+    if (!index) return false;
+    const picture = ContainerTrack.firstUsable(await this.readTracks(), "video");
+    return !picture || index.keyframeTimes(picture.trackNumber).length > 0;
+  }
+
+  async readMappedSourceRanges(interval) { return this.readSourceRanges(interval); }
+
+  /**
+   * The bytes FFmpeg reads to produce `[from, to)` from the original file:
+   * the declarations and the start of `movi` it probes, the index it loads at
+   * open (`idx1` to the end of the file, or every OpenDML standard index), the
+   * first packet of each stream it inspects, and the selected streams' packets
+   * around the interval. Each range is held one MiB past its last named byte,
+   * because FFmpeg's input buffer reads ahead of the packet it is parsing.
+   */
+  async readSourceRanges(interval) {
+    if (!Number.isFinite(interval?.from) || !Number.isFinite(interval?.to) || interval.to <= interval.from) {
+      throw new TypeError("Source ranges require a finite increasing interval.");
+    }
+    const index = await this.#readIndex();
+    if (!index) return { kind: "needs-index", reason: "source-has-no-avi-index" };
+    const tracks = await this.readTracks();
+    const { movi } = await this.#topLevel();
+    const requested = tracks.filter(track => ["video", "audio"].includes(track.type) &&
+      (!interval.trackIds?.length || interval.trackIds.includes(track.trackNumber)));
+    const picture = ContainerTrack.firstUsable(tracks, "video");
+    const requestBytes = 1024 * 1024;
+    const padded = ([start, end]) => [Math.max(0, start), Math.min(this.fileSize - 1, end + requestBytes)];
+    const ranges = [[0, movi.start + 3], ...index.indexRanges, ...index.firstPackets(),
+      ...index.mediaRanges({ from: interval.from, to: interval.to, picture: picture?.trackNumber ?? null,
+        streams: requested.map(track => track.trackNumber) })].map(padded);
+    ranges.sort((left, right) => left[0] - right[0]);
+    const union = [];
+    for (const range of ranges) {
+      const previous = union.at(-1);
+      if (previous && range[0] <= previous[1] + 1) previous[1] = Math.max(previous[1], range[1]);
+      else union.push([...range]);
+    }
+    return { kind: "result", from: interval.from, to: interval.to, ranges: union, fileLength: this.fileSize };
+  }
+
+  packetIndexBytes() { return (this.#packets ?? this.#scan?.index)?.allocatedBytes() ?? 0; }
+
+  static detect(head) {
+    return isAvi(head);
   }
 
   async readTracks() {
@@ -206,152 +271,46 @@ export class AviContainer extends Container {
   }
 
   async parseKeyframeIndex() {
-    const { streams } = await this.#readHeaders();
-    const picture = (await this.readTracks()).find(track => track.type === "video");
-    if (streams.some(stream => stream.indexChunks.length) || ["h264", "hevc"].includes(picture?.codecId) || MPEG4_CODECS.has(picture?.codecId.toUpperCase())) {
-      const index = await this.readPacketIndex();
-      return picture ? { times: index.keyframesOf(picture.trackNumber), tolerance: 0 } : null;
-    }
-    const r = await readAviKeyframeTimes(this.readRange, this.fileSize);
-    if (!r) {
-      return picture ? { times: (await this.readPacketIndex()).keyframesOf(picture.trackNumber), tolerance: 0 } : null;
-    }
-    if (Array.isArray(r)) return { times: r, tolerance: 0 };
-    return r;
+    const picture = ContainerTrack.firstUsable(await this.readTracks(), "video");
+    if (!picture) return null;
+    // The index states every keyframe on the clock FFmpeg reads the file by,
+    // so no packet is read to learn them (torrent-tv/meta#151). A file with no
+    // index has its packets scanned instead.
+    // AVI states no presentation time, only each packet's place in decoding
+    // order. A picture whose codec may show its pictures in another order
+    // (B-pictures) is therefore not copied: FFmpeg stamps a copy with the
+    // decoding times and the pictures lose their order — measured on an H.264
+    // AVI with B-pictures, where a whole-file copy to MP4 decodes to other
+    // pictures than the source. Reading the order from the bitstream is the
+    // parsing the original-file path exists to avoid (torrent-tv/meta#151).
+    const copyable = INTRA_PICTURE_CODECS.has(picture.codecId.toUpperCase());
+    const index = await this.#readIndex();
+    if (index) return { times: index.keyframeTimes(picture.trackNumber), tolerance: 0, copyable };
+    return { times: (await this.readPacketIndex()).keyframesOf(picture.trackNumber), tolerance: 0, copyable };
   }
 
   async readPacketIndex(interval) {
     if (this.#packets) return this.#packets;
     if (this.#scan) return this.#readUnindexed(interval);
-    if (this.#indexed) return this.#readIndexed();
+    // A file with an index is read by FFmpeg from the original bytes; packets
+    // are reassembled only where no index states them (torrent-tv/meta#151).
+    if (await this.#readIndex()) throw new Error("AVI with an index is read from the original file, not from reassembled packets.");
     const tracks = await this.readTracks();
     const { streams } = await this.#readHeaders();
-    if (streams.some(stream => stream.indexChunks.length)) {
-      const index = new PacketIndex({ packetMemory: this.packetMemory, deferMemory: true });
-      const timings = new Map();
-      try {
-      for (const track of tracks.filter(track => ["video", "audio"].includes(track.type))) {
-        if (!(track.timeBase > 0) || !streams[track.trackNumber].indexChunks.length) throw new Error("AVI OpenDML stream index is incomplete.");
-        index.declareTrack(track.trackNumber, { type: track.type, codecId: track.codecId, codecRanges: streams[track.trackNumber].codecRanges });
-        let pts = track.startTimeSeconds;
-        for await (const packet of openDmlPackets({ readRange: this.readRange, fileSize: this.fileSize,
-          indexes: streams[track.trackNumber].indexChunks, streamId: track.trackNumber })) {
-          if (!packet.length) {
-            if (track.type === "video") { index.extendLastPresentation(track.trackNumber, track.timeBase); pts += track.timeBase; }
-            continue;
-          }
-          if (track.sampleSize > 0 && packet.length % track.sampleSize) throw new Error("AVI packet contains an incomplete fixed-size sample.");
-          const duration = track.timeBase * (track.sampleSize > 0 ? packet.length / track.sampleSize : 1);
-          await this.#appendPacket(index, timings, track, { pts, duration, keyframe: track.type !== "video" || packet.keyframe,
-            ranges: [[packet.start, packet.start + packet.length - 1]] });
-          pts += duration;
-          index.flushPending();
-        }
-        timings.get(track.trackNumber)?.elementary?.complete();
-        index.flushPending();
-        index.complete(track.trackNumber);
-      }
-      this.#packets = index;
-      return index;
-      } catch (error) {
-        index.dispose();
-        throw error;
-      }
-    }
-    const header = await this.readRange(0, 11);
-    const chunks = await riffChunks(this.readRange, 12, 8 + header.readUInt32LE(4));
-    const movi = chunks.find(chunk => chunk.id === "LIST" && chunk.type === "movi");
-    const table = chunks.find(chunk => chunk.id === "idx1");
-    if (!movi) throw new Error("AVI media list is absent.");
-    if (!table) {
-      const index = new PacketIndex({ packetMemory: this.packetMemory, deferMemory: true });
-      const clocks = new Map();
-      for (const track of tracks.filter(track => ["video", "audio"].includes(track.type))) {
-        if (!(track.timeBase > 0)) throw new Error("AVI stream time base is invalid.");
-        if (track.type === "video" && !["h264", "hevc"].includes(track.codecId) && !MPEG4_CODECS.has(track.codecId.toUpperCase()) && !["MJPG", "JPEG", "DIB ", "\0\0\0\0"].includes(track.codecId.toUpperCase())) {
-          throw new Error("AVI video without an index requires elementary picture timing.");
-        }
-        if (track.type === "audio" && !(track.sampleSize > 0) && !MPEG_AUDIO_CODECS.has(track.codecId)) throw new Error("AVI variable-size audio requires elementary frame timing.");
-        index.declareTrack(track.trackNumber, { type: track.type, codecId: track.codecId, codecRanges: streams[track.trackNumber].codecRanges });
-        clocks.set(track.trackNumber, track.startTimeSeconds);
-      }
-      this.#scan = { index, tracks, clocks, timings: new Map(), at: 0,
-        stack: [{ end: this.fileSize, next: this.fileSize }] };
-      return this.#readUnindexed(interval);
-    }
-    if ((table.end - table.start) % 16 !== 0) throw new Error("AVI packet index entry is truncated.");
     const index = new PacketIndex({ packetMemory: this.packetMemory, deferMemory: true });
     const clocks = new Map();
-    const timings = new Map();
-    if (tracks.some(track => ["video", "audio", "subtitle"].includes(track.type) && !(track.timeBase > 0))) {
-      throw new Error("AVI stream time base is invalid.");
-    }
-    for (const track of tracks) {
-      if (!["video", "audio", "subtitle"].includes(track.type)) continue;
+    for (const track of tracks.filter(track => ["video", "audio"].includes(track.type))) {
+      if (!(track.timeBase > 0)) throw new Error("AVI stream time base is invalid.");
+      if (track.type === "video" && !["h264", "hevc"].includes(track.codecId) && !MPEG4_CODECS.has(track.codecId.toUpperCase()) && !INTRA_PICTURE_CODECS.has(track.codecId.toUpperCase())) {
+        throw new Error("AVI video without an index requires elementary picture timing.");
+      }
+      if (track.type === "audio" && !(track.sampleSize > 0) && !MPEG_AUDIO_CODECS.has(track.codecId)) throw new Error("AVI variable-size audio requires elementary frame timing.");
       index.declareTrack(track.trackNumber, { type: track.type, codecId: track.codecId, codecRanges: streams[track.trackNumber].codecRanges });
       clocks.set(track.trackNumber, track.startTimeSeconds);
     }
-    this.#indexed = { index, clocks, timings, tracks, movi, table, offsetBase: null, at: table.start };
-    return this.#readIndexed();
-  }
-
-  async #readIndexed() {
-    const state = this.#indexed;
-    const { index, clocks, timings, tracks, movi, table } = state;
-    try {
-    index.flushPending();
-    for (; state.at < table.end;) {
-      const at = state.at;
-      const entry = await this.readRange(at, at + 15);
-      const chunkId = entry.toString("ascii", 0, 4);
-      if (!/^[0-9]{2}(db|dc|wb)$/.test(chunkId)) { state.at += 16; continue; }
-      const id = Number(chunkId.slice(0, 2));
-      const track = tracks.find(track => track.trackNumber === id);
-      if (!track || !clocks.has(id)) throw new Error("AVI packet refers to an undeclared stream.");
-      const flags = entry.readUInt32LE(4);
-      const offset = entry.readUInt32LE(8);
-      const length = entry.readUInt32LE(12);
-      if (length === 0) {
-        if (track.type === "video") { index.extendLastPresentation(id, track.timeBase); clocks.set(id, clocks.get(id) + track.timeBase); }
-        state.at += 16;
-        continue;
-      }
-      if (state.offsetBase === null) {
-        for (const base of [movi.start, 0, movi.start + 4]) {
-          const address = base + offset;
-          if (address < movi.start + 4 || address + 8 + length > movi.end) continue;
-          const probe = await this.readRange(address, address + 7);
-          if (probe.toString("ascii", 0, 4) === chunkId && probe.readUInt32LE(4) === length) { state.offsetBase = base; break; }
-        }
-        if (state.offsetBase === null) throw new Error("AVI packet index has no valid offset base.");
-      }
-      const address = state.offsetBase + offset;
-      if (address < movi.start + 4 || address + 8 + length > movi.end) throw new Error("AVI indexed packet exceeds its media list.");
-      const probe = await this.readRange(address, address + 7);
-      if (probe.toString("ascii", 0, 4) !== chunkId || probe.readUInt32LE(4) !== length) throw new Error("AVI packet index disagrees with its chunk header.");
-      if (track.sampleSize > 0 && length % track.sampleSize !== 0) throw new Error("AVI packet contains an incomplete fixed-size sample.");
-      const duration = track.timeBase * (track.sampleSize > 0 ? length / track.sampleSize : 1);
-      const pts = clocks.get(id);
-      await this.#appendPacket(index, timings, track, { pts, duration, keyframe: track.type !== "video" || chunkId.endsWith("db") || !!(flags & 0x10),
-        ranges: [[address + 8, address + 8 + length - 1]] });
-      clocks.set(id, pts + duration);
-      // The pending facts own this entry even if their allocation must wait.
-      state.at += 16;
-      index.flushPending();
-    }
-    for (const timing of timings.values()) timing.elementary?.complete();
-    index.flushPending();
-    for (const id of clocks.keys()) index.complete(id);
-    this.#packets = index;
-    this.#indexed = null;
-    return index;
-    } catch (error) {
-      if (!isUnavailable(error) && !(error instanceof IndexMemoryUnavailable)) {
-        index.dispose();
-        this.#indexed = null;
-      }
-      throw error;
-    }
+    this.#scan = { index, tracks, clocks, timings: new Map(), at: 0,
+      stack: [{ end: this.fileSize, next: this.fileSize }] };
+    return this.#readUnindexed(interval);
   }
 
   async #readUnindexed(interval) {
@@ -470,34 +429,6 @@ function waveCodec(tag) {
     [0xff, "aac"], [0x160, "wmav1"], [0x161, "wmav2"], [0x2000, "ac3"], [0x2001, "dts"]]).get(tag) ?? `wave:${tag}`;
 }
 
-// ---------------------------------------------------------------------------
-// RIFF speaking about AVI: the idx1 index and its keyframe flag.
-// Here because the class is the only way in.
-// ---------------------------------------------------------------------------
-/**
- * @file Keyframe index for AVI, read without downloading the file.
- *
- * AVI ends with an `idx1` chunk: one fixed-size entry per stream chunk, each
- * carrying a flags word whose keyframe bit says whether that chunk starts a
- * keyframe. Frame number times the video stream's frame duration gives the
- * time, so the index alone is enough — no media has to be read.
- *
- * `idx1` lives at the end of the file and the top-level chunk headers state
- * their sizes, so it is reached by stepping over headers (typically two hops:
- * `LIST hdrl`, `LIST movi`), not by scanning.
- *
- * Still relevant despite the format's age: older releases are largely XviD in
- * AVI, and those are exactly the files that get copied rather than re-encoded.
- */
-
-const HEADER_BYTES = 8;
-const PROBE_BYTES = 4096;
-// Keyframe flag in an idx1 entry's flags word (AVIIF_KEYFRAME).
-const KEYFRAME_FLAG = 0x10;
-const IDX1_ENTRY_BYTES = 16;
-// Cap on the idx1 read. One entry per chunk, 16 bytes each — a long film runs
-// to a few MB; beyond this is not a normal index.
-const MAX_IDX1_BYTES = 64 * 1024 * 1024;
 
 /**
  * Whether this looks like AVI: a RIFF container whose form type is `AVI `.
@@ -513,131 +444,5 @@ function isAvi(head) {
   );
 }
 
-/**
- * Microseconds per frame and the video stream's chunk id prefix, from the main
- * header. Both live in the `hdrl` list near the file start.
- *
- * @param {Buffer} head
- * @returns {{ microsecondsPerFrame: number } | null}
- */
-function readMainHeader(head) {
-  // Top-level: "RIFF" size "AVI " then chunks. `avih` sits inside `LIST hdrl`.
-  let offset = 12;
-  while (offset + HEADER_BYTES <= head.length) {
-    const id = head.toString("latin1", offset, offset + 4);
-    const size = head.readUInt32LE(offset + 4);
-    if (size <= 0) {
-      return null;
-    }
-    if (id === "LIST") {
-      // Descend: list type follows the header, then its own chunks.
-      const listType = head.toString("latin1", offset + 8, offset + 12);
-      if (listType === "hdrl") {
-        let inner = offset + 12;
-        while (inner + HEADER_BYTES <= Math.min(head.length, offset + 8 + size)) {
-          const innerId = head.toString("latin1", inner, inner + 4);
-          const innerSize = head.readUInt32LE(inner + 4);
-          if (innerSize <= 0) {
-            return null;
-          }
-          if (innerId === "avih" && inner + 8 + 4 <= head.length) {
-            return { microsecondsPerFrame: head.readUInt32LE(inner + 8) };
-          }
-          inner += HEADER_BYTES + innerSize + (innerSize % 2);
-        }
-      }
-      offset += HEADER_BYTES + 4 + (size - 4) + ((size - 4) % 2);
-      continue;
-    }
-    offset += HEADER_BYTES + size + (size % 2);
-  }
-  return null;
-}
 
-/**
- * Step over top-level chunks to find `idx1`.
- *
- * @param {(start: number, end: number) => Promise<Buffer | null>} readRange
- * @param {number} fileSize
- * @returns {Promise<{ offset: number, size: number } | null>}
- */
-async function findIdx1(readRange, fileSize) {
-  let offset = 12; // Past "RIFF" size "AVI ".
-  while (offset + HEADER_BYTES < fileSize) {
-    const probe = await readRange(offset, Math.min(fileSize - 1, offset + HEADER_BYTES - 1));
-    if (!probe || probe.length < HEADER_BYTES) {
-      return null;
-    }
-    const id = probe.toString("latin1", 0, 4);
-    const size = probe.readUInt32LE(4);
-    if (size <= 0) {
-      return null;
-    }
-    if (id === "idx1") {
-      return { offset: offset + HEADER_BYTES, size };
-    }
-    // Chunks are word-aligned; a LIST carries its type inside the payload, so
-    // the same size arithmetic covers both cases.
-    offset += HEADER_BYTES + size + (size % 2);
-  }
-  return null;
-}
 
-/**
- * Read the keyframe times of an AVI file.
- *
- * @param {(start: number, end: number) => Promise<Buffer | null>} readRange
- * @param {number} fileSize
- * @returns {Promise<number[] | null>} Ascending seconds, or null when the file
- *   has no `idx1` (OpenDML-only index, interrupted write, damaged upload).
- */
-async function readAviKeyframeTimes(readRange, fileSize) {
-  const head = await readRange(0, Math.min(PROBE_BYTES - 1, fileSize - 1));
-  if (!head || !isAvi(head)) {
-    return null;
-  }
-  const mainHeader = readMainHeader(head);
-  if (!mainHeader || !mainHeader.microsecondsPerFrame) {
-    return null;
-  }
-
-  const idx1 = await findIdx1(readRange, fileSize);
-  if (!idx1 || idx1.size > MAX_IDX1_BYTES) {
-    return null;
-  }
-
-  const table = await readRange(idx1.offset, Math.min(fileSize - 1, idx1.offset + idx1.size - 1));
-  if (!table || table.length < IDX1_ENTRY_BYTES) {
-    return null;
-  }
-
-  const secondsPerFrame = mainHeader.microsecondsPerFrame / 1e6;
-  const times = [];
-  let videoFrame = 0;
-  for (let at = 0; at + IDX1_ENTRY_BYTES <= table.length; at += IDX1_ENTRY_BYTES) {
-    const chunkId = table.toString("latin1", at, at + 4);
-    // Video chunks are "##db" (uncompressed) or "##dc" (compressed); audio is
-    // "##wb" and must not advance the frame counter.
-    const isVideo = chunkId.endsWith("db") || chunkId.endsWith("dc");
-    if (!isVideo) {
-      continue;
-    }
-    const flags = table.readUInt32LE(at + 4);
-    if ((flags & KEYFRAME_FLAG) !== 0) {
-      times.push(videoFrame * secondsPerFrame);
-    }
-    videoFrame += 1;
-  }
-  if (times.length === 0) {
-    return null;
-  }
-  // AVI names a keyframe by its FRAME NUMBER, and the time above is that number
-  // multiplied by the frame duration the header declares. The frames are the
-  // right ones — measured 2026-08-21 against the files themselves, 1196 index
-  // entries against 1196 real keyframes and 901 against 901, exactly — but the
-  // names are 10-44 ms away from the presentation times the demuxer computes,
-  // always under one frame. So the caller is told how far a time here may be
-  // from the instant it refers to, and can ask for a seek late enough that it
-  // still lands on the frame rather than on the one before it.
-  return { times, tolerance: secondsPerFrame };
-}

@@ -9,7 +9,9 @@ import { AviContainer } from "../../services/media/container/AviContainer.js";
 import { matroskaInput } from "../../services/encode/MatroskaInput.js";
 
 // Only synthetic local files; no torrent client or source is used.
-for (const indexed of [true, false]) test(`AVI variable-bitrate MP3 retains samples ${indexed ? "with" : "without"} idx1`, async () => {
+// Packets are reassembled only for an AVI without an index; an indexed AVI is
+// read from the original file (original-input-avi.test.js).
+test(`AVI variable-bitrate MP3 retains samples without idx1`, async () => {
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), "ttv-avi-vbr-"));
   try {
     const file = path.join(directory, "source.avi");
@@ -18,7 +20,7 @@ for (const indexed of [true, false]) test(`AVI variable-bitrate MP3 retains samp
     { windowsHide: true, encoding: "utf8" });
     assert.equal(made.status, 0, made.stderr);
     let bytes = await fs.readFile(file);
-    if (!indexed) {
+    {
       let at = 12;
       while (at + 8 <= bytes.length && bytes.toString("ascii", at, at + 4) !== "idx1") at += 8 + bytes.readUInt32LE(at + 4) + (bytes.readUInt32LE(at + 4) & 1);
       assert.ok(at < bytes.length);

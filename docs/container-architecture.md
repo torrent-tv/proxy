@@ -46,7 +46,10 @@ back before another attempt.
 
 Matroska finds its Segment and following elements by their exact EBML headers;
 unneeded payloads are skipped. AVI walks RIFF lists and indexed or sequential
-media chunks, including AVIX continuations. Packet indexes retain physical
+media chunks, including AVIX continuations. An AVI with an `idx1` or OpenDML
+index is not reassembled: `avi-index.js` holds its packet addresses in typed
+arrays and FFmpeg reads the original file (`docs/download-architecture.md`).
+Packet indexes retain physical
 ranges separately from presentation order and decode order.
 
 ## Download demand and encoder input

@@ -468,6 +468,16 @@ export class OutputOpening {
               "re-encoded instead and its keyframes are placed on our own cuts"
           );
         }
+      } else if (!keyframes.copyable) {
+        // The container states when each picture is decoded and not when it is
+        // shown, and this picture may show them in another order: a copy would
+        // carry the decoding times and play its pictures out of order. A
+        // re-encode decodes them in their own order and stamps them itself.
+        transcodeVideo = true;
+        this.#host.logger.warn(
+          `transcode: the ${keyframes.format} container states no presentation times for "${logName}" and its ` +
+            "picture may reorder, so a copy would play out of order — the video is re-encoded instead"
+        );
       }
     }
     this.#host.logger.info(

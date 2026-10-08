@@ -19,9 +19,12 @@ export function handleEncodeInputGet(req, reply, { inputOf }) {
   }
   const range = parseRange(req.headers.range, length);
   if (!range || range.start >= length) return reply.code(416).header("Content-Range", `bytes */${length}`).send();
-  // Older FFmpeg versions request through EOF. A finite partial response keeps
-  // each read within the admitted lookahead, without version-specific options.
-  range.end = Math.min(range.end, range.start + 1048575);
+  // The answer runs to the end of the admitted range the read starts in, which
+  // is what keeps FFmpeg inside the bytes the run holds. A shorter answer is
+  // not continued by every FFmpeg: 6.1 (ffmpeg-static) takes it for the end of
+  // the input and stops, where 8.1 sends a new request (http.c, EAGAIN at the
+  // end of a content range). A cap of 1 MiB here ended every original-source
+  // segment longer than that on 6.1 (torrent-tv/meta#151).
   const held = input.read(fileIndex, range.start, range.end, true);
   if (!held) return reply.code(503).send({ error: "Original input bytes are outside the admitted ranges." });
   return reply.code(206).header("Content-Length", String(held.bytes.length))

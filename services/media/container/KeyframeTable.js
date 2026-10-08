@@ -65,6 +65,9 @@ export class KeyframeTable {
   /** @type {boolean} */
   #answered = false;
 
+  /** @type {boolean} */
+  #copyable = true;
+
   /**
    * What copied pieces of this file have shown about the table above.
    *
@@ -141,7 +144,7 @@ export class KeyframeTable {
   }
 
   /**
-   * Whether a picture of this file can be COPIED.
+   * Whether this file has a table of keyframe times.
    *
    * A copy can only be cut where a keyframe already is, so without a table
    * there is no honest grid: declaring an even one instead is a falsehood the
@@ -156,6 +159,18 @@ export class KeyframeTable {
   }
 
   /**
+   * Whether a copy of this file's picture keeps the order its pictures are
+   * shown in. False where the container states only decoding order and the
+   * picture's codec may reorder — an AVI holding H.264 (torrent-tv/meta#151).
+   * A container that says so is never overruled by a later reading.
+   *
+   * @returns {boolean}
+   */
+  get copyable() {
+    return this.#copyable;
+  }
+
+  /**
    * Take in what a reader found. Called only by `KeyframeTables`.
    *
    * **A table already here is never displaced by an emptier one.** Two readers
@@ -166,12 +181,13 @@ export class KeyframeTable {
    * all 570 in 0.8 s from the index. Whichever of them answers second, the
    * fuller answer is the one that stands.
    *
-   * @param {{ times?: number[] | null, tolerance?: number, format?: string } | null} reading
+   * @param {{ times?: number[] | null, tolerance?: number, format?: string, copyable?: boolean } | null} reading
    * @returns {this}
    */
   learn(reading) {
     const wasAnswered = this.#answered;
     this.#answered = true;
+    if (reading?.copyable === false) this.#copyable = false;
     const times = Array.isArray(reading?.times) && reading.times.length > 0 ? reading.times : null;
     const format = typeof reading?.format === "string" && reading.format.length > 0 ? reading.format : "";
     const fuller = times !== null && (this.#times === null || times.length > this.#times.length);

@@ -107,6 +107,7 @@ export class KeyframeTables {
         table.learn({
           times: Array.isArray(reading?.times) ? reading.times : null,
           tolerance: reading?.tolerance,
+          copyable: reading?.copyable,
           // Which container answered, whether or not it produced a table: the
           // refusal that follows names it, and "unknown" would make that line
           // say nothing about the file it is refusing.

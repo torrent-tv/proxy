@@ -1489,6 +1489,13 @@ export class TorrentPool {
     torrent.on("download-request-cancel-failed", ({ piece, offset, length, error }) => {
       logger.warn(`download request=${torrent.infoHash ?? "unknown"}:${piece}:${offset} cancel bytes=${length} failed: ${error}`);
     });
+    // WHEN each piece arrived. The requests above say what was asked for; this
+    // says what came and in which order, which is what decides how far an
+    // encoder reading the file can go before it meets a piece still missing
+    // (torrent-tv/meta#151). One short line per piece: a 2.3 GB film is 563.
+    torrent.on("verified", (piece) => {
+      logger.info(`download ${label()} verified piece=${piece}`);
+    });
 
     // The first connected peer, said once, because the wait for it can BE the
     // whole cold start and nothing else measures it.

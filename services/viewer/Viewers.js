@@ -247,11 +247,9 @@ export class Viewers {
    * being sent from it, or a request that may still be repeated and must be
    * answered by it.
    *
-   * The second half of {@link stillNeeded}, asked on its own where presence is
-   * NOT the question. Expiry after a long idle is that place: an output a paused
-   * viewer is registered on still goes when it has not been read for the whole
-   * keeping period — that is roadmap item 75's decision, not this one's — but
-   * it does not go while its bytes are going out.
+   * The assignment part of {@link stillNeeded}, also checked after the last
+   * viewer leaves. A live response or a repeatable request keeps the output
+   * available until that assignment ends.
    *
    * @param {object} output
    * @param {number} [now]

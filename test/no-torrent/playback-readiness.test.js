@@ -141,6 +141,44 @@ test("unmapped source pieces use the measured torrent download rate in media ord
   assert.equal(forecast.delaySeconds, 4);
 });
 
+test("source files from one torrent share its measured download service", () => {
+  const state = input({ reserveSeconds: 0 });
+  state.bufferedAheadSeconds = 4;
+  state.tracks[0].readySegmentIndices = [0];
+  state.requiredAudio = true;
+  state.tracks[0].sourceIds = ["video-source"];
+  state.tracks[0].segments[1].sourceInputs = [
+    { sourceId: "video-source", ranges: [{ start: 4, end: 8 }] }
+  ];
+  const audioTrack = {
+    ...state.tracks[0],
+    id: "audio",
+    sourceIds: ["audio-source"],
+    segments: state.tracks[0].segments.map((segment, index) => ({
+      ...segment,
+      sourceInputs: index === 1 ? [{ sourceId: "audio-source", ranges: [{ start: 0, end: 4 }] }] : []
+    }))
+  };
+  state.tracks.push(audioTrack);
+  const readings = { count: 1, lastAt: state.now, lastValue: 1, meanValue: 1, spanSeconds: 0 };
+  state.sources = [
+    { id: "video-source", serviceKey: "torrent", complete: false, fileOffset: 0,
+      fileLength: 8, pieceLength: 4, residence: [], downloadForecast: { ranges: [] },
+      downloadRateReadings: readings },
+    { id: "audio-source", serviceKey: "torrent", complete: false, fileOffset: 8,
+      fileLength: 8, pieceLength: 4, residence: [], downloadForecast: { ranges: [] },
+      downloadRateReadings: readings }
+  ];
+
+  const forecast = predictPlaybackReadiness(state);
+
+  assert.equal(forecast.reason, "minimum-safe-delay");
+  const sharedDelay = forecast.delaySeconds;
+  state.sources[1].serviceKey = "another-torrent";
+  const separateDelay = predictPlaybackReadiness(state).delaySeconds;
+  assert.ok(sharedDelay > separateDelay);
+});
+
 test("an unmapped source piece stays unknown without positive measured download service", () => {
   const state = input();
   state.sources[0] = {

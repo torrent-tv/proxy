@@ -612,12 +612,13 @@ export class ViewerRequests {
           })).filter(range => range.end > range.start) } : sharedForecast;
         sourceMeasurements.set(sourceId, {
           id: sourceId,
+          serviceKey: output.file.sourceKey,
           complete: stats?.fileAvailable === true,
           residence: stats?.residence,
           fileOffset: stats?.fileOffset,
           fileLength: stats?.fileLength,
           pieceLength: stats?.pieceLength,
-          downloadRateReadings: this.#sourceRateReadings(measurement, sourceId, stats, now),
+          downloadRateReadings: this.#sourceRateReadings(measurement, output.file.sourceKey, stats, now),
           downloadForecast,
         });
       }

@@ -1,4 +1,4 @@
-## Unreleased
+## 2.95.26
 
 - **Fix**: The proxy states when each piece of a torrent arrives (`download <hash> verified piece=N`). The requests to the swarm were logged and the arrivals were not, so the order in which a film actually arrives could not be read from any log (torrent-tv/meta#151).
 

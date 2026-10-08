@@ -452,6 +452,16 @@ export async function startProxyServer({
         }
       }
       demands.sort((left, right) => left.deadlineAt - right.deadlineAt || right.priority - left.priority || left.index - right.index);
+      // A container that names the bytes of an interval from an index it holds
+      // answers every segment by arithmetic: once that index is read
+      // ("source-navigation"), the ranges are computed here directly instead of
+      // through the file's queue of reads, three steps per segment. On Home
+      // Assistant those steps made a pass over a two-hour AVI take minutes while
+      // the arithmetic takes milliseconds (torrent-tv/meta#151).
+      const navigated = await containerOrchestrator.inspect(params, "source-navigation");
+      if (!map.isCurrent()) return [];
+      const direct = navigated.kind === "result" && navigated.value === true &&
+        typeof container?.readSourceRanges === "function" ? container : null;
       for (const zone of demands) {
         if (!map.isCurrent()) return [];
         const selected = zone.tracks.map(choice => ({ choice, track: choice.type === "video"
@@ -475,6 +485,17 @@ export async function startProxyServer({
         const rangesKey = `${map.sourceKey}:${map.fileIndex}:${JSON.stringify(interval)}`;
         const known = segmentSourceRanges.get(rangesKey);
         if (known) { convert(known); continue; }
+        if (direct) {
+          let value = null;
+          try { value = await direct.readSourceRanges(interval); }
+          catch { value = null; }
+          if (!map.isCurrent()) return [];
+          if (value?.kind === "result") {
+            segmentSourceRanges.set(rangesKey, value.ranges);
+            convert(value.ranges);
+            continue;
+          }
+        }
         const intervalParams = await containerOver({ ...map, packetInterval: interval,
           requestId: `download:${map.sourceKey}:${map.fileIndex}:${zone.outputKey}:${zone.index}`,
           demand: { ...zone.owner, leadSeconds: zone.leadSeconds } });

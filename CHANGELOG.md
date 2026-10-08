@@ -1,4 +1,4 @@
-## Unreleased
+## 2.95.24
 
 - **Perf**: The encoder plan counts the made pieces an encoder would pass over as it walks the film instead of counting them again for every piece. On a two-hour film of 2035 segments one plan took 31-93 ms and takes 1.6-5.6 ms on a desktop; on Home Assistant the plan held the proxy's thread for half of every second, its answers to FFmpeg waited up to 3 s, and a 4-second piece took 20 s to make (torrent-tv/meta#151).
 

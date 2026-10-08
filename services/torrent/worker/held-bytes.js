@@ -163,6 +163,9 @@ export async function readHeldBytes(torrent, fileIndex, start, end, logger = nul
   }
 }
 
+/** The last missing-piece line said per torrent, so a wait is named once and not on every arrival. */
+const missingSaid = new WeakMap();
+
 /** Acquire every input piece before copying any of the segment's ranges. */
 export async function readHeldRanges(torrent, fileIndex, ranges, maxBytes, logger = null) {
   const file = torrent?.files?.[fileIndex];
@@ -183,7 +186,18 @@ export async function readHeldRanges(torrent, fileIndex, ranges, maxBytes, logge
     for (let index = first; index <= last; index++) indexes.add(index);
   }
   const release = store.holdAvailable([...indexes]);
-  if (!release) return null;
+  if (!release) {
+    // Say which pieces are not here: an input that waits for them waits until
+    // somebody asks the swarm for them, and nothing else names them.
+    const missing = [...indexes].filter((index) => store.locationOf(index) === "missing");
+    const said = `${fileIndex}:${missing.join(",")}`;
+    if (missingSaid.get(torrent) !== said) {
+      missingSaid.set(torrent, said);
+      logger?.info?.(`held ranges of file ${fileIndex}: piece(s) ${missing.join(", ") || "none"} not in storage ` +
+        `(${indexes.size} piece(s) asked, have=${missing.map((index) => torrent.bitfield?.get?.(index) ? 1 : 0).join("")})`);
+    }
+    return null;
+  }
   try {
     const result = [];
     for (const [start, end] of ranges) {

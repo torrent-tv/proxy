@@ -16,8 +16,9 @@ export class EncodeInputs {
   #failed;
   #capacity;
   #urgent;
+  #log;
 
-  constructor({ resolve, readRanges, reviseBudget, changed, failed, capacity = () => null, urgent = () => true }) {
+  constructor({ resolve, readRanges, reviseBudget, changed, failed, capacity = () => null, urgent = () => true, log = () => {} }) {
     this.#resolve = resolve;
     this.#read = readRanges;
     this.#revise = reviseBudget;
@@ -25,6 +26,15 @@ export class EncodeInputs {
     this.#failed = failed;
     this.#capacity = capacity;
     this.#urgent = urgent;
+    this.#log = log;
+  }
+
+  /** One line when a request's state changes, so a wait that never ends names what it waits for. */
+  #note(request, state) {
+    if (request.noted === state) return;
+    request.noted = state;
+    this.#log(`encode input #${request.from}..#${request.to} of ${request.output.outputKey ?? request.output.id}: ${state}` +
+      ` (held ${this.#held} of ${this.#allowed} allowed)`);
   }
 
   held() { return this.#held; }
@@ -69,6 +79,7 @@ export class EncodeInputs {
   retain(output, windows) {
     for (const [key, request] of this.#requests) {
       if (request.output !== output || windows.some(window => request.from <= window.to && request.to >= window.from)) continue;
+      this.#note(request, "withdrawn: no wanted window covers it");
       this.#requests.delete(key);
       this.#wanted.delete(key);
       request.result?.release?.();
@@ -148,6 +159,8 @@ export class EncodeInputs {
       }) : resolved;
       if (this.#requests.get(request.key) !== request) { result.release?.(); return; }
       request.result = result;
+      this.#note(request, result.kind === "result" ? `ready, ${result.bytes ?? "?"} bytes`
+        : `${result.kind}${result.reason ? ` ${result.reason}` : ""}${Number.isFinite(result.bytes) ? ` ${result.bytes} bytes` : ""}`);
       if (result.kind === "result" || result.kind === "terminal") this.#changed(request.output, result);
     })().catch(error => {
       if (this.#requests.get(request.key) === request) {

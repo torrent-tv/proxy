@@ -974,6 +974,7 @@ export function wireOutputs({
     capacity: () => parts.machineBudget.capacityOf("memory"),
     urgent: (output, index) => parts.encodeOrchestrator.wantedSegmentsOn(output.outputKey).some(window =>
       index >= window.from && index <= window.to && window.urgent === true),
+    log: line => logger.info(line),
     changed: (output, result) => {
       if (result.kind === "terminal") {
         logger.warn(`encode input output=${output.outputKey} terminal=${result.reason}: ${result.message ?? ""}` +

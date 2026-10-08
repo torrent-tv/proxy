@@ -1,4 +1,4 @@
-## Unreleased
+## 2.95.29
 
 - **Fix**: Forecast startup from measured torrent download service when future media pieces have no queued arrival, and keep an unconfirmed zero delay unknown to the viewer (#ttv-160).
 

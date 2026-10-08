@@ -1,3 +1,7 @@
+## Unreleased
+
+- **Fix**: The proxy says what it tells the swarm to fetch first — the level, its priority and the pieces — whenever that changes. Field 2026-10-08: the piece an AVI's fifth segment needed was never requested while pieces near the film's end were (torrent-tv/meta#151).
+
 ## 2.95.17
 
 - **Fix**: A read of encoder input that finds pieces missing from storage names them, and whether the torrent still counts them as held. Field 2026-10-08: an AVI's fifth piece waited for bytes for minutes while the swarm reported nothing missing (torrent-tv/meta#151).

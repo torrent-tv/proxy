@@ -18,7 +18,7 @@ import { logger } from "../../utils/logger.js";
 import { pieceStoreOf } from "./piece-store-of.js";
 import { demandProgress } from "./demand-progress.js";
 import { Urgency, urgencyName } from "./demand/index.js";
-import { demandFor, forgetTorrent, reconcileAll, hasUnmetDemand } from "./download/registry.js";
+import { demandFor, firstClassStatement, forgetTorrent, reconcileAll, hasUnmetDemand } from "./download/registry.js";
 import { withdrawClaim } from "./download/withdraw-claim.js";
 import { isAtAWatchingViewer, isBehindEverybody, isNobodyComingNow } from "../viewer/PriorityMap.js";
 import { deriveSourceKey } from "../../utils/torrent-source-key.js";
@@ -883,6 +883,8 @@ export class TorrentPool {
 
   /** When each torrent's download first fell below the stall threshold. */
   #stallSince = new Map();
+  /** The first-class line last said. */
+  #firstClassSaid = "";
   /** When each torrent's stall was last reported, so it is not repeated hotly. */
   #stallReportedAt = new Map();
 
@@ -1413,6 +1415,13 @@ export class TorrentPool {
     // speculative levels may be stated at all — which is a question about every
     // torrent at once, because they share the link.
     reconcileAll();
+    // What is fetched FIRST, said on change: everything else waits for a wire
+    // with nothing first-class left to take (torrent-tv/meta#151).
+    const firstClass = firstClassStatement();
+    if (firstClass !== this.#firstClassSaid) {
+      this.#firstClassSaid = firstClass;
+      logger.info(`download: first class ${firstClass}`);
+    }
     for (const torrent of this.torrents.values()) {
       if (!isWanted(torrent) || torrent?.done === true) {
         continue;

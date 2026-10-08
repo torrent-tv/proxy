@@ -114,7 +114,9 @@ export class SwarmSelection {
         else union.push({ from: range.from, to: range.to, priority });
       }
       for (const range of union) wanted.set(`${range.from}-${range.to}-${priority}`, range);
+      if (priority === 1) this.firstClassPieces = union.map(range => range.from === range.to ? `${range.from}` : `${range.from}-${range.to}`);
     }
+    this.firstClass = first;
 
     let withdrawn = 0;
     for (const [key, range] of [...this.#stated]) {

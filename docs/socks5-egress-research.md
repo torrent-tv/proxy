@@ -4,7 +4,7 @@ Research only (2026-07-10), no code. Question: can the proxy route its
 **torrent** traffic (peers, trackers, DHT) through an owner-configured SOCKS5
 endpoint (e.g. a VPN provider's) to hide the owner's home IP from the swarm,
 while WebRTC to the viewer stays direct? Roadmap item 8 in the root
-`CLAUDE.md`.
+`AGENTS.md`.
 
 Stack: WebTorrent 2.8.5, Node. Verified against
 `node_modules/webtorrent/lib/*.js` and `index.js`.

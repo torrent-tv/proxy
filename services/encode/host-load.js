@@ -15,7 +15,7 @@
  *
  * Everything here is Linux-specific and best effort: a host without these files
  * reports nulls and nothing above it changes. The proxy stays
- * deployment-agnostic (`../CLAUDE.md`).
+ * deployment-agnostic (`../AGENTS.md`).
  */
 
 import { readFile } from "node:fs/promises";

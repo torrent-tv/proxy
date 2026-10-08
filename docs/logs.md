@@ -150,6 +150,6 @@ Implementation: `utils/client-log-file.js`, route `routes/api/client-logs/post.j
 
 ## Related
 
-- `ha-addon/CLAUDE.md` — addon build/update detour via `hassio_cli`, cache-bust via `config.yaml` version.
+- `ha-addon/AGENTS.md` — addon build/update detour via `hassio_cli`, cache-bust via `config.yaml` version.
 - `docs/container-architecture.md` — what container/track classes log and where.
 - `routes/api/client-logs/post.js` and `server/routes/api/client-logs/post.js` — the two receivers; both sanitize the same way (control chars → space, `MAX_LINES`, `MAX_MSG_LEN`).

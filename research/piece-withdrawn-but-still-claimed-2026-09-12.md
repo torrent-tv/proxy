@@ -106,7 +106,7 @@ had never once been honoured.
 byte 0 (`bytes 0-2363497961` in the log), which is precisely the region
 `forgetBehind` removes first.
 
-This is the "un-have problem" the parent `CLAUDE.md` names in the Level 2 disk
+This is the "un-have problem" the parent `AGENTS.md` names in the Level 2 disk
 design — "mark the piece incomplete in the completion store → it re-downloads on
 the next read". The eviction shipped; the un-have did not.
 

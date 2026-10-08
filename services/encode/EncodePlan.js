@@ -794,13 +794,24 @@ function latenessOf(encoders, coverage, wanted, untilNeeded, rate, refetchSecPer
   const lateAt = new Map(ranks.map((rank) => [rank, 0]));
   /** When the last number of a rank is made, per rank. @type {Map<number, number>} */
   const doneAt = new Map(ranks.map((rank) => [rank, 0]));
+  // How many numbers each encoder has already passed over that are made, kept
+  // as the walk goes rather than counted again for every number: counted again,
+  // a film of two thousand pieces cost the plan four million steps, and the
+  // plan held the proxy's thread for most of every second (Home Assistant
+  // 2026-10-08, torrent-tv/meta#151). The same count `madeBetween` gives.
+  const passed = encoders.map((encoder) => coverage.madeBetween(encoder.at, first - 1));
   for (let index = first; index <= last; index += 1) {
+    const readyHere = coverage.isReady(index);
+    for (let at = 0; at < encoders.length; at += 1) {
+      if (readyHere && encoders[at].at <= index) passed[at] += 1;
+    }
     // Which encoder gets to this piece first, and when. One standing on it is
     // already there; one behind it must work its way up, re-making anything
     // already made on the way, which costs its own time and the swarm's.
     let soonest = Number.POSITIVE_INFINITY;
     let byWhom = null;
-    for (const encoder of encoders) {
+    for (let at = 0; at < encoders.length; at += 1) {
+      const encoder = encoders[at];
       if (encoder.at > index) {
         continue;
       }
@@ -820,13 +831,13 @@ function latenessOf(encoders, coverage, wanted, untilNeeded, rate, refetchSecPer
       // stood still for 116.7 s.
       const arrival = encoder.delaySec
         + (index - encoder.at) / rate
-        + coverage.madeBetween(encoder.at, index) * refetchSecPerSegment;
+        + passed[at] * refetchSecPerSegment;
       if (arrival < soonest) {
         soonest = arrival;
         byWhom = encoder;
       }
     }
-    if (coverage.isReady(index)) {
+    if (readyHere) {
       // It exists. Nobody waits for it and nothing is owed — but whoever passes
       // over it makes it a second time, and the swarm fetches its bytes again.
       if (byWhom !== null) {
@@ -1103,8 +1114,19 @@ function gapFinderFor(coverage, surviving, rate, refetchSecPerSegment = 0) {
     // the map happens to be in.
     let best = null;
     let bestDue = Number.POSITIVE_INFINITY;
+    // Where every encoder already placed stands, and how many made numbers lie
+    // between it and the number the walk is on — kept as the walk goes, because
+    // counted again for every number a two-hour film made this one walk
+    // millions of steps, and the plan held the proxy's thread for most of every
+    // second (Home Assistant 2026-10-08, torrent-tv/meta#151).
+    const standing = [...placed.map((live) => live.at), ...(alsoPlaced ?? [])];
+    const passed = standing.map((a) => coverage.madeBetween(a, start - 1));
     for (let index = start; index <= last; index += 1) {
-      if (coverage.isReady(index)) {
+      const readyHere = coverage.isReady(index);
+      for (let which = 0; which < standing.length; which += 1) {
+        if (readyHere && standing[which] <= index) passed[which] += 1;
+      }
+      if (readyHere) {
         continue;
       }
       const deadline = deadlineAt(index);
@@ -1121,7 +1143,8 @@ function gapFinderFor(coverage, surviving, rate, refetchSecPerSegment = 0) {
       // second and a third on the very next numbers — three processes a segment
       // apart for one person, which is the waste this model exists to refuse.
       let soonest = Number.POSITIVE_INFINITY;
-      for (const a of [...placed.map((live) => live.at), ...(alsoPlaced ?? [])]) {
+      for (let which = 0; which < standing.length; which += 1) {
+        const a = standing[which];
         if (a > index) {
           // Standing past it. Encoders only move forward, so it never will.
           continue;
@@ -1141,7 +1164,7 @@ function gapFinderFor(coverage, surviving, rate, refetchSecPerSegment = 0) {
         // to arrive, and the model compares arrivals. Asked separately it was a
         // second authority over the same encoder, and the two disagreed.
         const arrival = (index - a + 1) / rate
-          + coverage.madeBetween(a, index) * refetchSecPerSegment;
+          + passed[which] * refetchSecPerSegment;
         if (arrival < soonest) {
           soonest = arrival;
         }

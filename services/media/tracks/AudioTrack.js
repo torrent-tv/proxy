@@ -78,6 +78,8 @@ export class AudioTrack extends ContainerTrack {
    * @param {boolean} params.isVisualImpaired - FlagVisualImpaired / descriptive audio
    * @param {number | null} params.channels
    * @param {number | null} params.samplingFrequency
+   * @param {number | null} [params.bitrateKbps] - The rate the file states for
+   *   this track, in kbit/s: an average, not a bound.
    */
   constructor(params) {
     super({ ...params, type: "audio" });
@@ -86,6 +88,7 @@ export class AudioTrack extends ContainerTrack {
     this.isVisualImpaired = params.isVisualImpaired === true;
     this.channels = Number.isFinite(params.channels) ? params.channels : null;
     this.samplingFrequency = Number.isFinite(params.samplingFrequency) ? params.samplingFrequency : null;
+    this.bitrateKbps = Number.isFinite(params.bitrateKbps) && params.bitrateKbps > 0 ? params.bitrateKbps : null;
     this.bitDepth = Number.isSafeInteger(params.bitDepth) && params.bitDepth > 0 ? params.bitDepth : null;
     this.codecDelaySeconds = Number.isFinite(params.codecDelaySeconds) && params.codecDelaySeconds >= 0 ? params.codecDelaySeconds : 0;
     // What the codec is configured as, and the most that configuration allows

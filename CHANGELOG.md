@@ -1,6 +1,7 @@
 ## Unreleased
 
 - **Fix**: A copied soundtrack served beside a re-encoded picture begins at its own interval. FFmpeg's seek lands on the picture's keyframe before the time asked for, and only decoded streams were trimmed there, so a copied piece began at that keyframe: with a keyframe every 11 s a piece of `Frankenstein.rus.LostFilm.TV.avi` held the film's first four seconds and playback failed at 8 s (torrent-tv/meta#159).
+- **Fix**: An AVI soundtrack states the rate its file declares (WAVEFORMATEX `nAvgBytesPerSec`), so an MP3 track the browser plays is copied instead of re-encoded to AAC. Without the rate the proxy had no figure to ask the viewer's link about and re-encoded every AVI soundtrack; Frankenstein states 23 338 bytes a second (torrent-tv/meta#159).
 
 ## 2.95.31
 

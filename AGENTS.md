@@ -157,6 +157,10 @@ are recorded in `docs/browser-proxy-contract.md`.
         (`SegmentStore.js`), addressed by the output's own key. Main thread.
         It keeps bytes and what is read from them; whether a piece is whole is
         decided by the encoding (`encode/piece-completeness.js`).
+        It executes publication and deletion but owns no idle or eviction
+        policy. `encode/output/OutputRetention` owns the unused period and
+        removal order; `server/OutputLifecycle` coordinates current viewer
+        demand, writers and reads before applying that policy.
       - `storage/files/` — files downloaded whole and kept as files
         (`CompletedFiles.js`, `piece-from-whole-file.js`). Worker thread.
       - `storage/` — THE ONE BUDGET: how much of this machine the proxy may

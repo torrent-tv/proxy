@@ -8,18 +8,9 @@
  */
 
 import { logger } from "../../utils/logger.js";
-import { isOutputName, PLAYLIST_FILE_NAME } from "../encode/output/index.js";
+import { isOutputName, PLAYLIST_FILE_NAME, leastNeededSegments } from "../encode/output/index.js";
 import { IDLE_KEEP_MS } from "../storage/keep.js";
-/**
- * How long produced segments are kept after the last request for them.
- *
- * Long on purpose, and deliberately not the session TTL: an output outlives
- * every session on it, and the reason to keep it is that somebody may ask
- * again — the viewer who closed the tab, or one who has not arrived yet and
- * will find the film already encoded. Reclaiming space is the allowance below,
- * not this; this only stops something nobody has touched all day from sitting
- * there for the life of the process.
- */
+// The keeping period starts when absence of demand is confirmed, not on a file read.
 const SEGMENT_STORE_IDLE_MS = IDLE_KEEP_MS;
 /**
  * Wait for a child process to exit, with a hard timeout fallback.
@@ -64,14 +55,14 @@ export class OutputLifecycle {
   #host;
 
   /**
-   * @param {object} host - `invalidateWaits`, `segmentFormatOfKey`, `viewerSegmentsOn`, `budgetTimer`, `cleanupTimer`, `encodeRuns`, `keyframeTables`, `machineBudget`, `outputTimes`, `outputs`, `returns`, `segmentStore`, `sessionTtlMs`, `sourceFiles`, `timelines`, `viewers`
+   * @param {object} host - `retention`, `outputNeeded`, `outputWriting`, `outputReading`, `planEncodersSoon`, `now`, `invalidateWaits`, `segmentFormatOfKey`, `viewerSegmentsOn`, `budgetTimer`, `cleanupTimer`, `encodeRuns`, `keyframeTables`, `machineBudget`, `outputTimes`, `outputs`, `returns`, `segmentStore`, `sessionTtlMs`, `sourceFiles`, `timelines`, `viewers`
    */
   constructor(host) {
     this.#host = host;
   }
 
   /**
-   * Kill the ffmpeg process, remove it from all maps, and delete the temp dir.
+   * Stop encoding and remove the live output record; retain produced material.
    *
    * @param {string} sessionId
    * @returns {Promise<void>}
@@ -133,32 +124,25 @@ export class OutputLifecycle {
     // a minute from now and find the work already done. A session ending says
     // nothing about any of that.
     //
-    // What decides instead is when the material was last READ, and how much
-    // room there is — `segmentStore.enforce`, run by the same timer that
+    // What decides instead is when demand for the material ended, and how much
+    // room there is — the output retention policy, run by the same timer that
     // expires sessions.
   }
 
   /**
-   * Dispose all sessions that have been idle longer than `sessionTtlMs`.
+   * Dispose sessions unused for `sessionTtlMs` after confirmed absence of demand.
    * Called automatically on the cleanup interval.
    *
    * @returns {Promise<void>}
    */
   async cleanupExpired() {
-    const idsToDispose = this.#host.outputs.expiredBefore(Date.now() - this.#host.sessionTtlMs);
-    for (const sessionId of idsToDispose) {
-      // ASSIGNMENTS ONLY, NOT PRESENCE. An output nobody has read for the whole
-      // idle period goes even when a paused viewer is still registered on it —
-      // whether a pause should hold it longer is roadmap item 75's question, and
-      // asking `stillNeeded` here would answer it by accident. What must not
-      // happen is taking the output away while a response is still being sent
-      // from it, or while a request made against it may still be repeated.
-      const output = this.#host.outputs.get(sessionId);
-      if (output && this.#host.viewers.assignmentsHold(output)) {
-        logger.info(`transcode ${sessionId} idle past its time, kept: assignments still hold it`);
-        continue;
+    this.observeUse();
+    const now = this.#host.now?.() ?? Date.now();
+    for (const output of [...this.#host.outputs.values()]) {
+      if (this.#host.retention.expired(output.outputKey, this.#host.sessionTtlMs, now) &&
+          !this.#host.outputNeeded(output.outputKey, now)) {
+        await this.disposeSession(output.id);
       }
-      await this.disposeSession(sessionId);
     }
     // A timeline nobody is reading any more. It is small — two arrays of a few
     // thousand numbers — but nothing removed it, and a proxy that has served a
@@ -188,8 +172,8 @@ export class OutputLifecycle {
     this.#host.sourceFiles.forgetUnused(filesInUse);
     this.#host.keyframeTables.forgetUnused(keyframesInUse);
     // The segments outlive every session on them, so what they cost is decided
-    // here rather than by anybody's departure: how long ago each output was
-    // last read, and how much room the disk has for the lot.
+    // here rather than by anybody's departure: how long each output has been
+    // unused, and how much room the disk has for the lot.
     // The room is the disk owner's to divide; this asks what the share is now.
     await this.#host.machineBudget.revise();
     // What viewers actually do, beside the period that stands in for it. Said
@@ -201,9 +185,18 @@ export class OutputLifecycle {
     this.keepWithinRoom();
   }
 
+  /** Record confirmed usage changes without storing a second viewer relation. */
+  observeUse() {
+    const now = this.#host.now?.() ?? Date.now();
+    const keys = new Set(this.#host.segmentStore.addresses());
+    for (const output of this.#host.outputs.values()) keys.add(output.outputKey);
+    for (const key of keys) this.#host.retention.observe(key, this.#host.outputNeeded(key, now), now);
+    this.#host.retention.forgetExcept(keys);
+  }
+
   /**
    * Keep the produced segments within the share of the disk they are given,
-   * removing what the viewers want least, and drop what nobody has read for
+   * removing what the viewers want least, and drop what nobody has needed for
    * the keeping period.
    *
    * Asked when a segment is published — that is the moment the store grows —
@@ -213,11 +206,34 @@ export class OutputLifecycle {
    * @returns {void}
    */
   keepWithinRoom() {
-    this.#host.segmentStore.enforce({
-      idleMs: SEGMENT_STORE_IDLE_MS,
-      maxBytes: this.#host.machineBudget.segmentBytes(),
-      viewersAt: (key) => this.#host.viewerSegmentsOn(key)
-    });
+    this.observeUse();
+    const now = this.#host.now?.() ?? Date.now();
+    // No await between checking current demand and deleting files. A return or
+    // a publication runs either before this decision or after its completion.
+    for (const key of this.#host.segmentStore.addresses()) {
+      if (this.#host.retention.expired(key, SEGMENT_STORE_IDLE_MS, now) &&
+          !this.#host.outputNeeded(key, now) && !this.#host.outputWriting(key) && !this.#host.outputReading(key)) {
+        this.#host.segmentStore.drop(key, "no viewer has needed it for the keeping period");
+      }
+    }
+    const maxBytes = this.#host.machineBudget.segmentBytes();
+    const inventory = this.#host.segmentStore.inventory();
+    let held = inventory.reduce((bytes, output) => bytes + output.bytes, 0);
+    if (!Number.isFinite(maxBytes) || maxBytes <= 0 || held <= maxBytes) return;
+    const candidates = leastNeededSegments(inventory.map(output => ({
+      ...output,
+      positions: this.#host.viewerSegmentsOn(output.key),
+      reading: this.#host.outputReading(output.key)
+    })));
+    let removed = 0;
+    for (const { key, index } of candidates) {
+      if (held <= maxBytes) break;
+      const bytes = this.#host.segmentStore.remove(key, index);
+      held -= bytes;
+      if (bytes > 0) removed += 1;
+    }
+    if (removed > 0) logger.info(`output retention removed ${removed} segment(s): ${held} of ${maxBytes} bytes allowed`);
+    if (removed > 0) this.#host.planEncodersSoon?.();
   }
 
   /**

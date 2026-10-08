@@ -29,6 +29,7 @@ import {
   noteGivenOutput
 } from "../../services/viewer/choices.js";
 import { ViewerRequests } from "../../services/server/ViewerRequests.js";
+import { OutputRetention } from "../../services/encode/output/OutputRetention.js";
 import { OutputLifecycle } from "../../services/server/OutputLifecycle.js";
 import { fmp4Format } from "../../services/encode/segment-formats/fmp4.js";
 
@@ -275,6 +276,11 @@ function lifecycleOver({ viewers, outputs }) {
   const byId = new Map(outputs.map((output) => [output.id, output]));
   const lifecycle = new OutputLifecycle({
     viewers,
+    retention: new OutputRetention(),
+    outputNeeded: (key, now) => viewers.assignmentsHold({ outputKey: key }, now) ||
+      [...byId.values()].some(output => output.outputKey === key && viewers.stillNeeded(output, now)),
+    outputWriting: () => false,
+    outputReading: key => viewers.responsesHold(key),
     sessionTtlMs: 0,
     outputs: {
       get: (id) => byId.get(id) ?? null,
@@ -289,7 +295,7 @@ function lifecycleOver({ viewers, outputs }) {
     keyframeTables: { forgetUnused() {} },
     machineBudget: { revise: async () => {}, segmentBytes: () => 0 },
     returns: { describe: () => null },
-    segmentStore: { enforce() {} },
+    segmentStore: { addresses: () => [], inventory: () => [] },
     viewerSegmentsOn: () => []
   });
   const disposed = [];
@@ -322,10 +328,8 @@ test("an output an assignment holds is kept when its last viewer leaves, and by 
   assert.deepEqual(disposed, [OUTPUT_ID], "once the window of that viewing has passed, it goes");
 });
 
-test("the idle expiry does not ask whether anybody is registered — only the assignments", async () => {
-  // A paused viewer stays registered on what they were watching. Whether that
-  // should hold an output past the idle period is roadmap item 75's question;
-  // step 9 must not answer it by accident.
+test("a paused viewer protects its output from idle expiry", async () => {
+  // A pause is not a departure, regardless of time since the last file read.
   const viewers = new Viewers();
   const output = { id: OUTPUT_ID, outputKey: "key-paused" };
   viewers.of(output, "viewer-paused");
@@ -333,7 +337,7 @@ test("the idle expiry does not ask whether anybody is registered — only the as
 
   await lifecycle.cleanupExpired();
 
-  assert.deepEqual(disposed, [OUTPUT_ID]);
+  assert.deepEqual(disposed, []);
 });
 
 test("a response already begun holds its output across a change of choice and the viewer leaving that output", () => {

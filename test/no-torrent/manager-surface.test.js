@@ -258,23 +258,6 @@ test("what a viewer states about themselves is kept and answered", () => {
   manager.serving.recordFragmentFar("no-such-session", { sn: 1, track: "video" });
 });
 
-test("a session nobody has touched is disposed, one that is being watched is not", async () => {
-  const manager = bareManager();
-  const stale = fakeSession({ id: "1111111111111111" });
-  const fresh = fakeSession({ id: "2222222222222222" });
-  // Older than any TTL this manager could carry, without naming one here: the
-  // period is the manager's business and this test is about the rule.
-  manager.outputs.set(stale.id, stale);
-  manager.outputs.set(fresh.id, fresh);
-  manager.outputs.touch(stale, Date.now() - (2 * 60 * 60 * 1000));
-
-  await manager.lifecycle.cleanupExpired();
-
-  assert.equal(manager.outputs.has(stale.id), false, "an untouched session goes");
-  assert.equal("state" in stale, false, "removal from the registry is the only lifetime fact");
-  assert.equal(manager.outputs.has(fresh.id), true, "a session just read stays");
-});
-
 test("what a file declares and what this host could offer are answered without a session", () => {
   const manager = bareManager();
   const session = fakeSession();

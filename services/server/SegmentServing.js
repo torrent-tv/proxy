@@ -108,6 +108,30 @@ export class SegmentServing {
    * >}
    */
   async getFileStream(sessionId, fileName, options = {}) {
+    const output = this.#host.outputs.get(sessionId);
+    if (!output) return { kind: "not-found" };
+    return this.#withMaterialRead(output.outputKey, () => this.#getFileStream(sessionId, fileName, options));
+  }
+
+  async #withMaterialRead(key, read) {
+    const release = this.#host.segmentStore.holdRead?.(key) ?? (() => {});
+    let streaming = false;
+    try {
+      const answer = await read();
+      if (answer?.stream) {
+        streaming = true;
+        answer.stream.once("end", release);
+        answer.stream.once("close", release);
+        answer.stream.once("error", release);
+        if (answer.stream.destroyed || answer.stream.readableEnded) release();
+      }
+      return answer;
+    } finally {
+      if (!streaming) release();
+    }
+  }
+
+  async #getFileStream(sessionId, fileName, options = {}) {
     const consumerId = typeof options.consumerId === "string" ? options.consumerId : "";
     if (!isOutputName(sessionId)) {
       return { kind: "not-found" };
@@ -505,6 +529,10 @@ export class SegmentServing {
    * @returns {Promise<{ kind: "file", stream: Readable, contentType: string, isPlaylist: false } | null>}
    */
   async storedPieceOf(goneKey, likeId, fileName) {
+    return this.#withMaterialRead(goneKey, () => this.#storedPieceOf(goneKey, likeId, fileName));
+  }
+
+  async #storedPieceOf(goneKey, likeId, fileName) {
     const like = isOutputName(likeId) ? this.#host.outputs.get(likeId) : null;
     const format = this.#host.segmentFormatOfKey(goneKey);
     const spec = this.#host.specOfKey(goneKey);

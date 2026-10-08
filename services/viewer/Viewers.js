@@ -270,6 +270,11 @@ export class Viewers {
     return false;
   }
 
+  /** Active responses protect stored files while their bytes are being read. */
+  responsesHold(outputKey) {
+    return [...this.#byId.values()].some(viewer => viewer.assignments.responseHolds(outputKey));
+  }
+
   /**
    * Every output a present viewer is being prepared onto, as ids: a step being
    * warmed for them, and an output of another limit of the height on their

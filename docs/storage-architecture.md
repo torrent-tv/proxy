@@ -43,9 +43,24 @@ disk: 104584MB free; segments 0MB of 52292MB, spilled pieces 0MB of 52292MB
 They are kept apart because they were briefly proposed as one, and that was
 wrong.
 
-**Time.** Material nobody needs should not sit on the owner's disk merely
-because there is room for it. An output nobody has read for long enough goes
-whole, whatever the free space is.
+**Time.** `OutputRetention` owns the start of each output's unused period.
+`OutputLifecycle` supplies current demand from the viewer registry, including
+assignments that still stand. A paused viewer is present. Usage changes cancel
+the unused period immediately; requests for progress or a directory do not
+start or extend it. An output can leave after `IDLE_KEEP_MS` of confirmed
+absence of demand, with no writer or read using its material.
+
+`OutputLifecycle` executes the decision without an asynchronous gap between
+checking demand and removing files. `SegmentStore` owns physical files and
+their inventory only: it reports numbers, sizes and media intervals, and
+executes explicit publication or deletion. It has no idle or disk-pressure
+policy. Publication and directory creation receive the output format again,
+so production after cleanup is independent of an earlier registration.
+
+Physical reads hold their material from preparation through stream completion;
+the store refuses deletion while such a read is open. A failed deletion is
+reported and is not counted as reclaimed space. `CoverageMap` derives readiness
+from the current store inventory before each encoding decision.
 
 **Space.** Material everyone needs must still go when there is no room.
 
@@ -55,7 +70,8 @@ however tight the disk had become.
 
 ## What goes first, and it is the viewers who decide
 
-For the segments, the order is the priority map's own read from the other end:
+For the segments, `leastNeededSegments` in the encoding domain orders the
+current inventory using viewer positions supplied by the application:
 
 1. outputs nobody is watching at all;
 2. what lies behind the earliest viewer — furthest behind first;

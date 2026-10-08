@@ -65,6 +65,7 @@ import {
 } from "../viewer/choices.js";
 import { viewerSecondsOn, viewerSegmentsOn } from "../viewer/positions.js";
 import { Viewers } from "../viewer/Viewers.js";
+import { OutputRetention } from "../encode/output/index.js";
 import { OutputCatalog } from "../encode/output/OutputCatalog.js";
 import { ViewerRequests } from "./ViewerRequests.js";
 import { OutputLifecycle } from "./OutputLifecycle.js";
@@ -104,23 +105,9 @@ import { qualityStateOf } from "../encode/quality/OutputQualityState.js";
 
 const CLEANUP_INTERVAL_MS = 30_000;
 const DEFAULT_SEGMENT_DURATION_SEC = 4;
-// Idle TTL: a session is disposed this long after the last segment/playlist
-// access. Long enough that a viewer who pauses, backgrounds the tab, or briefly
-// turns the phone off can resume WITHOUT a cold ffmpeg restart (the warm session
-// also backs the seamless auto-reconnect). ffmpeg stops producing at the
-// look-ahead cap when idle, so a lingering session costs retained segments on
-// disk, not sustained CPU. Active playback refreshes the timer on every segment
-// fetch, so it never expires mid-watch.
-// How long a session outlives the BROWSER, not the viewing. Since server
-// 0.8.103 a browser that holds a session re-asserts it every 30 s, so an open
-// tab never consumes this at all — not while paused, not across a three-hour
-// film. What is left is the case where the browser has genuinely gone: the tab
-// was killed without releasing, the phone slept, the network dropped. Keeping
-// the session means such a viewer comes back to a warm encoder instead of
-// waiting out a cold start; the cost while nobody is there is disk for the
-// produced segments, since the encoder is suspended and burns no CPU, and that
-// disk is already bounded by the pool's 10 GB cap with eviction. Thirty minutes
-// covers a meal, a phone call or a lift ride.
+// Sessions expire after confirmed absence of viewer demand. Material has the
+// longer keeping period in storage/keep.js; both use OutputRetention's single
+// unused timestamp. A pause or progress polling is not a departure.
 const DEFAULT_SESSION_TTL_MS = 30 * 60 * 1000;
 const DEFAULT_STARTUP_WAIT_MS = 5_000;
 
@@ -252,7 +239,7 @@ export function wireOutputs({
   const segmentFiles = {
     pathFor: (address) => parts.segmentStore.pathFor(address),
     initOf: (address) => parts.segmentStore.initOf(address),
-    directoryFor: (address) => parts.segmentStore.directoryFor(address),
+    directoryFor: (address, format) => parts.segmentStore.directoryFor(address, format),
     publish: (address, makingName, format, read) => parts.segmentStore.publish(address, makingName, format, read),
     closedBytesOf: (address, makingName) => parts.segmentStore.closedBytesOf(address, makingName),
     mediaRangesOf: (address, index, where) => parts.segmentStore.mediaRangesOf(address, index, where),
@@ -262,8 +249,7 @@ export function wireOutputs({
     addresses: () => parts.segmentStore.addresses(),
     isClosed: (address, index) => parts.segmentStore.isClosed(address, index),
     lastReadAt: (address) => parts.segmentStore.lastReadAt(address),
-    directoryFor: (address) => parts.segmentStore.directoryFor(address),
-    useFormat: (address, format) => parts.segmentStore.useFormat(address, format)
+    directoryFor: (address, format) => parts.segmentStore.directoryFor(address, format)
   };
   const segmentPaths = {
     pathOf: (address, index) => parts.segmentStore.pathOf(address, index),
@@ -498,10 +484,16 @@ export function wireOutputs({
   });
   // How an output ends: disposed when nobody is left on it and it has been idle, or all at once on shutdown; and the segments an earlier process left behind adopted at startup.
   parts.lifecycle = new OutputLifecycle({
+    get retention() { return parts.retention; },
+    outputNeeded: (key, now) => parts.segmentStore.isReading(key) || parts.viewers.assignmentsHold({ outputKey: key }, now) ||
+      parts.outputs.outputsOn(key).some(output => parts.viewers.stillNeeded(output, now)),
+    outputWriting: key => parts.encodeOrchestrator.runsOn(key).some(run => run.isAlive || run.isStopping),
+    outputReading: key => parts.segmentStore.isReading(key) || parts.viewers.responsesHold(key),
+    planEncodersSoon: () => parts.encodeRuns.planEncodersSoon(),
     invalidateWaits: (output) => parts.serving.invalidateWaits(output),
     segmentFormatOfKey,
     // Where the viewers of one output stand, in its segments: what the store
-    // reads to give disk back in the right order.
+    // the output retention policy reads to give disk back in the right order.
     viewerSegmentsOn: (key) => viewerSegmentsOn({
       outputs: parts.outputs.values(),
       outputKey: key,
@@ -760,7 +752,9 @@ export function wireOutputs({
   // exist, because that decision reads nothing else about viewers. It used to
   // be re-taken on a five-second timer instead, which made a just-created
   // output wait up to five seconds before anything noticed it had a viewer.
+  parts.retention = new OutputRetention();
   parts.viewers = new Viewers({ onChange: () => {
+    parts.lifecycle.observeUse();
     parts.encodeRuns.planEncodersSoon();
     onViewerChanged?.();
   } });

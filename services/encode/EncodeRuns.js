@@ -958,7 +958,7 @@ export class EncodeRuns {
       totalSeconds: Number(session.file.durationSeconds) || null,
       spawn: (spawnArgs) =>
         spawn(this.#host.ffmpegBin, spawnArgs, {
-          cwd: this.#host.segmentFiles.directoryFor(session.outputKey ?? ""),
+          cwd: this.#host.segmentFiles.directoryFor(session.outputKey ?? "", session.segmentFormat),
           // A fourth channel: the encoder names every piece it has CLOSED on it,
           // which is the only proof a piece is whole.
           stdio: ["pipe", "pipe", "pipe", "pipe"]

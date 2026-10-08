@@ -165,6 +165,7 @@ export async function startProxyServer({
       playbackPlanner.forget(sourceKey);
       indexMemory.forget(sourceKey);
       downloadMaps.retire(sourceKey);
+      for (const key of segmentSourceRanges.keys()) if (key.startsWith(`${sourceKey}:`)) segmentSourceRanges.delete(key);
       outputParts.encodeInputs?.bytesChanged();
     },
     // Pieces arriving is ANNOUNCED by the thread that owns the swarm; what is
@@ -409,6 +410,8 @@ export async function startProxyServer({
   //
   // Missing metadata bytes are demand in the same file map as playback.
   // Readers never start their own downloads or wait for source bytes.
+  /** Source byte ranges of one segment interval, by file and interval; forgotten with the source. */
+  const segmentSourceRanges = new Map();
   const downloadMaps = new DownloadMaps({
     publish: (map) => torrentPool.setPriorityMap(map),
     resolvePlayback: async (map) => {
@@ -459,6 +462,19 @@ export async function startProxyServer({
         const modes = new Map(selected.map(({ choice, track }) => [track, choice.mode]));
         const interval = { ...zone.sourceInterval, trackIds: wanted.map(track => track.trackNumber),
           modes: Object.fromEntries(wanted.map(track => [track.trackNumber, modes.get(track)])) };
+        const { tracks: _choices, owner: _owner, sourceInterval: _sourceInterval, ...demand } = zone;
+        const convert = ranges => {
+          for (const [byteStart, byteEnd] of ranges) converted.push({ ...demand,
+            downloadInterval: { from: zone.owner.from, to: zone.owner.to }, byteStart, byteEnd });
+        };
+        // The bytes one segment needs are a fact of the file and the output, so
+        // they are worked out once. A whole film is thousands of segments and
+        // the map changes every few seconds; worked out afresh on every change,
+        // a pass over a two-hour AVI never finished and the next segment's bytes
+        // were never asked for (Home Assistant 2026-10-08, torrent-tv/meta#151).
+        const rangesKey = `${map.sourceKey}:${map.fileIndex}:${JSON.stringify(interval)}`;
+        const known = segmentSourceRanges.get(rangesKey);
+        if (known) { convert(known); continue; }
         const intervalParams = await containerOver({ ...map, packetInterval: interval,
           requestId: `download:${map.sourceKey}:${map.fileIndex}:${zone.outputKey}:${zone.index}`,
           demand: { ...zone.owner, leadSeconds: zone.leadSeconds } });
@@ -472,9 +488,8 @@ export async function startProxyServer({
         if (packets.kind !== "result") continue;
         const input = originalRanges ? packets.value : new SegmentInputs({ index: packets.value, tracks: wanted }).forInterval({ ...interval, mode: track => modes.get(track) });
         if (input.kind !== "result") continue;
-        const { tracks: _choices, owner: _owner, sourceInterval: _sourceInterval, ...demand } = zone;
-        for (const [byteStart, byteEnd] of input.ranges) converted.push({ ...demand,
-          downloadInterval: { from: zone.owner.from, to: zone.owner.to }, byteStart, byteEnd });
+        segmentSourceRanges.set(rangesKey, input.ranges);
+        convert(input.ranges);
       }
       return converted;
     }

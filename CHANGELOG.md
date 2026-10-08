@@ -1,4 +1,4 @@
-## Unreleased
+## 2.95.33
 
 - **Fix**: Share the measured torrent download service across media files from the same torrent when forecasting playback readiness (#ttv-160).
 

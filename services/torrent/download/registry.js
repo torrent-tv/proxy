@@ -125,7 +125,7 @@ export function reconcileAll() {
   const entries = [...live];
   const speculativeAllowed = !entries.some((entry) => entry.selection.hasUrgentMissing());
   // The first class across every torrent: the most urgent missing level and
-  // its highest priority. Each selection states it non-zero and the rest zero.
+  // its highest priority. Lower classes stay out of every torrent's selection.
   const bands = entries.map(entry => entry.selection.missingBand()).filter(Boolean);
   const urgency = bands.length ? Math.min(...bands.map(band => band.urgency)) : null;
   const firstClass = urgency === null ? null
@@ -142,8 +142,8 @@ export function reconcileAll() {
   } finally {
     publishingSelections = false;
   }
-  // What the swarm is told to fetch FIRST, said when it changes: the rest is
-  // fetched only by a wire with nothing first-class left to take.
+  // What the swarm is told to fetch FIRST, said when it changes. Lower classes
+  // are withheld because a wire with no first-class piece would fall through.
   const said = entries.map(entry => `${String(entry.torrent.infoHash ?? "").slice(0, 8)}: ` +
     `${(entry.selection.firstClassPieces ?? []).slice(0, 8).join(",") || "nothing"}` +
     `${(entry.selection.firstClassPieces?.length ?? 0) > 8 ? ` +${entry.selection.firstClassPieces.length - 8} more` : ""}`).join("; ");

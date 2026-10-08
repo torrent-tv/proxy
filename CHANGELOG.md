@@ -1,3 +1,7 @@
+## Unreleased
+
+- **Fix**: While any urgent piece is missing, state only the global first class to WebTorrent. Its picker checks selections per peer and falls through to zero-priority pieces when that peer holds none of the first-class pieces; this allowed less urgent data to download while playback was waiting. Stall reports now include the numbers of peers holding each first-class piece and outstanding requests for it (torrent-tv/meta#161).
+
 ## 2.95.27
 
 - **Fix**: An AVI soundtrack states the rate its file declares (WAVEFORMATEX `nAvgBytesPerSec`), so an MP3 track the browser plays is copied instead of re-encoded to AAC. Without it the proxy had no figure to ask the viewer's link about and re-encoded every AVI soundtrack: field 2026-10-08, Frankenstein, 23 338 bytes a second, logged `re-encoded: nothing states how much a copy of it would carry` (torrent-tv/meta#159).

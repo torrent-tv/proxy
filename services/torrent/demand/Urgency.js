@@ -18,12 +18,10 @@
  * So distinct non-zero numbers give an order once and a round robin thereafter.
  * Only two things hold: non-zero rotates fairly, zero is always last.
  *
- * Therefore urgency here is expressed by WHETHER a need is stated to the swarm
- * at all. A level is stated only while every level above it is satisfied, and
- * withdrawn the moment one is not — a withdrawn need is not in the download set
- * at all, so a peer with nothing urgent to give cannot fall through to it and
- * spend the shared link on it. A permanently low priority does exactly that,
- * which is why it is not what this does.
+ * WebTorrent checks selections per wire and falls through to zero-priority
+ * selections when a wire has no piece from a non-zero selection. Therefore the
+ * global first class is the only urgent level stated while any urgent piece is
+ * missing. Conditional levels are stated only when no urgent piece is missing.
  *
  * The rotation is not merely tolerated, it is wanted: with two viewers of one
  * film both stopped, both their needs sit at {@link Urgency.BLOCKED} and the
@@ -107,10 +105,10 @@ export function isConditional(urgency) {
 /**
  * The number handed to `torrent.select`.
  *
- * Two values only, because two is all the library keeps: everything urgent
- * shares one non-zero priority and rotates fairly among itself; the
- * speculative levels take zero, which the library always places last and never
- * rotates into the group above.
+ * Two values only, because two is all the library keeps: selected first-class
+ * windows share one non-zero priority and rotate fairly among themselves;
+ * conditional levels take zero. Less urgent windows are withheld while an
+ * urgent piece is missing, rather than relying on zero to keep them back.
  *
  * @param {number} urgency
  * @returns {number}

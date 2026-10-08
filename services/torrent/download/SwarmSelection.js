@@ -17,23 +17,17 @@
  * vendored 2.8.5: selections are sorted by priority only when one is inserted,
  * and `shufflePriority` then moves the selection just served to the back of the
  * whole non-zero group. Distinct numbers therefore order the list once and
- * round-robin it afterwards. The library honours one distinction: non-zero
- * before zero. A wire with nothing left to take from the non-zero selections
- * goes on to the zero ones, and within a selection it takes the earliest piece
- * it holds.
+ * round-robin it afterwards. The library checks selections separately for each
+ * wire. If that wire holds no missing piece from a non-zero selection, it falls
+ * through to a zero selection. A zero priority therefore does not withhold a
+ * less urgent piece from a peer that lacks the first class.
  *
- * **So everything wanted is stated, and only the first class is non-zero.**
- * The first class is the most urgent level that is still missing anything, at
- * its highest priority, whatever its deadlines. Everything else that is not
- * speculative is stated at zero, so it is fetched only by a wire that would
- * otherwise stand idle. Stating only the earliest deadline, as this did after
- * #95, left every peer that held none of that segment's pieces without a
- * request: on Home Assistant, with three peers each holding every third piece
- * and one complete slow peer, twelve segments took 184 s at 0.61 MiB/s against
- * 18.3 s at 6.1 MiB/s when the whole band was stated
- * (`research/download-translation-2026-10-07.md`, torrent-tv/meta#95).
- * Speculative levels stay withheld while anything urgent is missing anywhere,
- * because the link is shared.
+ * While an urgent piece is missing, only the global first class is stated.
+ * This keeps a wire that lacks those pieces from spending its requests on a
+ * lower class. The first class is the most urgent missing level at its highest
+ * map priority, regardless of deadlines. Every window in that class is stated
+ * so peers holding different first-class pieces can all contribute. Once no
+ * urgent piece is missing, conditional levels may be stated at zero.
  */
 
 import {
@@ -90,16 +84,18 @@ export class SwarmSelection {
   reconcile({ speculativeAllowed = !this.hasUrgentMissing(), firstClass = null } = {}) {
     const missing = this.#register.windows().filter(window => !this.#isSatisfied(window));
     const first = firstClass ?? this.missingBand();
+    const strictFirstClass = first !== null && !isConditional(first.urgency);
     /** @type {Map<string, { from: number, to: number, priority: number }>} */
     const wanted = new Map();
     for (const priority of [1, 0]) {
       const ranges = [];
       for (const window of missing) {
         if (!speculativeAllowed && isConditional(window.urgency)) continue;
-        // Speculative levels are never the first class: the library keeps
-        // zero-priority selections last and never rotates them above.
+        // The first class is the only eligible urgent level; zero priority
+        // still falls through on wires that have none of its pieces.
         const inFirstClass = first !== null && !isConditional(window.urgency)
           && window.urgency === first.urgency && window.priority >= first.priority;
+        if (strictFirstClass && !inFirstClass) continue;
         if ((inFirstClass ? 1 : 0) !== priority) continue;
         const range = this.#piecesFor(window);
         if (range) ranges.push(range);

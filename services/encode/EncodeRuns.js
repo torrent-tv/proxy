@@ -1009,7 +1009,16 @@ export class EncodeRuns {
       onSpeedMeasured: () => this.#host.noteRunSpeedMeasured?.(session, run),
       onEnded: (ended) => {
         this.#runsByInputToken.delete(inputToken);
-        if (admittedInput.original) admittedInput.release();
+        if (admittedInput.original) {
+          const reads = admittedInput.reads?.();
+          if (reads) {
+            const since = (at) => at ? `${at - run.startedAt}ms` : "never";
+            this.#host.logger.info(`encode input of run #${run.from}..#${run.to} on ${session.outputKey}: ` +
+              `${reads.count} read(s), ${reads.bytes} bytes, first at ${since(reads.firstAt)}, last at ${since(reads.lastAt)}, ` +
+              `ended at ${Date.now() - run.startedAt}ms`);
+          }
+          admittedInput.release();
+        }
         this.noteRunEnded(session, run, ended);
       }
     });

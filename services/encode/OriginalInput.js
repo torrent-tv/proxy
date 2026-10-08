@@ -27,6 +27,10 @@ export async function admitOriginalInput({ sources, reserve, readRanges }) {
     }
     let released = false;
     retained = true;
+    // What FFmpeg asked of this input, for the run's own account of where its
+    // time went: field 2026-10-08, a run took 6-9 s for a piece FFmpeg makes in
+    // 1.6 s from a file, and nothing said whether it was waiting on its input.
+    const reads = { count: 0, bytes: 0, firstAt: 0, lastAt: 0 };
     return {
       kind: "result", original: true, sources, bytes, fingerprint: hash.digest("hex"),
       tracks: sources.flatMap(source => (source.input.selections ?? []).map(selection => ({ track: selection.track,
@@ -43,9 +47,15 @@ export async function admitOriginalInput({ sources, reserve, readRanges }) {
         const position = ranges.findIndex(([from, to]) => from <= start && (partial ? start : stop) <= to);
         if (position < 0) return null;
         stop = Math.min(stop, ranges[position][1]);
+        const now = Date.now();
+        reads.count += 1;
+        reads.bytes += stop - start + 1;
+        reads.firstAt ||= now;
+        reads.lastAt = now;
         return { length: fileLength, end: stop, bytes: entry.buffers[position].subarray(start - ranges[position][0], stop - ranges[position][0] + 1) };
       },
       lengthOf: fileIndex => held.get(fileIndex)?.source.input.fileLength ?? null,
+      reads: () => ({ ...reads }),
       release() {
         if (released) return;
         released = true;

@@ -1,4 +1,4 @@
-## Unreleased
+## 2.95.27
 
 - **Fix**: An AVI soundtrack states the rate its file declares (WAVEFORMATEX `nAvgBytesPerSec`), so an MP3 track the browser plays is copied instead of re-encoded to AAC. Without it the proxy had no figure to ask the viewer's link about and re-encoded every AVI soundtrack: field 2026-10-08, Frankenstein, 23 338 bytes a second, logged `re-encoded: nothing states how much a copy of it would carry` (torrent-tv/meta#159).
 

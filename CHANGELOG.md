@@ -1,4 +1,4 @@
-## Unreleased
+## 2.95.34
 
 - **Fix**: Apply the browser's 0.25 s starting-range allowance to reported media ranges in playback readiness. On HA, the video range started at 0.083 s while the play position was 0 s; the page counted 60 s as buffered, but the proxy counted 0 s and withheld playback (#ttv-160).
 

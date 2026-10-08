@@ -847,7 +847,24 @@ export class EncodeOrchestrator {
     // between is synchronous, and a process cannot say a word before the next
     // tick. What it removes is the second act — building a run and starting it
     // were two steps, and two owners each performed the second one.
-    this.coverageOf(address).claim(run, from, endOfRun({ from, to }));
+    //
+    // A run whose input is one copied stretch can make nothing past it, so it
+    // claims that stretch and not the plan's longer bound: the rest stays free
+    // for the next run (torrent-tv/meta#158). Every other run claims as before.
+    const through = Number.isInteger(run.inputThrough) ? run.inputThrough : to;
+    this.coverageOf(address).claim(run, from, endOfRun({ from, to: through }));
+  }
+
+  /**
+   * The speed one encoder on this output is taken to run at: the fastest live
+   * run's measurement, else what this output last measured or the startup
+   * figures predict. Zero where none exists.
+   *
+   * @param {string} address
+   * @returns {number}
+   */
+  speedOn(address) {
+    return this.#speedOn(address, this.runsOn(address).filter((run) => run.isAlive));
   }
 
   /**

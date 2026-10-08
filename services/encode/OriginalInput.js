@@ -4,18 +4,22 @@ import { createHash } from "node:crypto";
  * The available-only reader acquires complete pieces atomically before copying;
  * owned buffers then outlive torrent eviction without keeping duplicate pins.
  */
-export async function admitOriginalInput({ sources, reserve, readRanges }) {
-  const bytes = sources.reduce((total, source) => total + source.input.ranges
-    .reduce((sum, [start, end]) => sum + end - start + 1, 0), 0);
+export async function admitOriginalInput({ sources, reserve, readRanges, now = Date.now }) {
+  const bytes = originalInputBytes(sources);
   if (!Number.isSafeInteger(bytes) || bytes <= 0) throw new TypeError("Original input requires complete finite byte ranges.");
   const releaseBudget = await reserve(bytes);
   if (typeof releaseBudget !== "function") return releaseBudget?.kind === "terminal" ? releaseBudget : { kind: "needs-memory", bytes };
   const held = new Map();
   const hash = createHash("sha256");
   let retained = false;
+  // How long the copy itself took, apart from any wait for memory or bytes
+  // before it: the figure a run's stretch is sized from, read where the copy is.
+  let copyMs = 0;
   try {
     for (const source of sources) {
+      const startedAt = now();
       const buffers = await readRanges(source, source.input.ranges, bytes);
+      copyMs += Math.max(0, now() - startedAt);
       if (buffers === null) return { kind: "needs-bytes", sourceKey: source.sourceKey, fileIndex: source.fileIndex, ranges: source.input.ranges };
       if (!Array.isArray(buffers) || buffers.length !== source.input.ranges.length || buffers.some((buffer, index) =>
         !Buffer.isBuffer(buffer) || buffer.length !== source.input.ranges[index][1] - source.input.ranges[index][0] + 1)) {
@@ -32,7 +36,7 @@ export async function admitOriginalInput({ sources, reserve, readRanges }) {
     // 1.6 s from a file, and nothing said whether it was waiting on its input.
     const reads = { count: 0, bytes: 0, firstAt: 0, lastAt: 0 };
     return {
-      kind: "result", original: true, sources, bytes, fingerprint: hash.digest("hex"),
+      kind: "result", original: true, sources, bytes, copyMs, fingerprint: hash.digest("hex"),
       tracks: sources.flatMap(source => (source.input.selections ?? []).map(selection => ({ track: selection.track,
         ...(Number.isFinite(source.input.sourceEnds?.[selection.track.trackNumber]) ? {
           sourceEndSeconds: source.input.sourceEnds[selection.track.trackNumber] - source.timeShiftSeconds
@@ -66,4 +70,10 @@ export async function admitOriginalInput({ sources, reserve, readRanges }) {
   } finally {
     if (!retained) releaseBudget();
   }
+}
+
+/** The bytes an original input of these sources holds once copied. */
+export function originalInputBytes(sources) {
+  return sources.reduce((total, source) => total + source.input.ranges
+    .reduce((sum, [start, end]) => sum + end - start + 1, 0), 0);
 }

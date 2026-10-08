@@ -218,6 +218,7 @@ export function wireOutputs({
     readMetadataActivity = null,
     sourceInputsFor = null,
     readEncodeRanges = null,
+    readEncodeHeldRanges = null,
     encodeInputs = null,
     indexMemory = null,
     budgetPolicy = null,
@@ -964,6 +965,7 @@ export function wireOutputs({
   parts.encodeInputs = encodeInputs ?? (typeof resolveEncodeInput === "function" ? new EncodeInputs({
     resolve: resolveEncodeInput,
     readRanges: readEncodeRanges,
+    heldRanges: readEncodeHeldRanges,
     reviseBudget: () => parts.machineBudget.revise(),
     capacity: () => parts.machineBudget.capacityOf("memory"),
     urgent: (output, index) => parts.encodeOrchestrator.wantedSegmentsOn(output.outputKey).some(window =>

@@ -1,4 +1,4 @@
-## Unreleased
+## 2.95.22
 
 - **Fix**: Once a container's index is read, the download map computes each segment's source bytes directly instead of through the file's queue of reads. A pass over a two-hour AVI took minutes on Home Assistant, so the map reached the swarm only after the viewer had run out of film (torrent-tv/meta#151).
 

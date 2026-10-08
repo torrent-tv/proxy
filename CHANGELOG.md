@@ -1,3 +1,7 @@
+## Unreleased
+
+- **Fix**: An AVI soundtrack is re-encoded to AAC again; 2.95.27 copied a playable MP3 track, and on Home Assistant every copied piece of `Frankenstein.rus.LostFilm.TV.avi` after the first began where the film begins rather than at its own time, so the browser's sound stopped at 8 s and playback failed. The copy returns once its pieces are proven to start at their own time (torrent-tv/meta#159).
+
 ## 2.95.29
 
 - **Fix**: Forecast startup from measured torrent download service when future media pieces have no queued arrival, and keep an unconfirmed zero delay unknown to the viewer (#ttv-160).

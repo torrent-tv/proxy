@@ -1,4 +1,4 @@
-## Unreleased
+## 2.95.21
 
 - **Fix**: The download map remembers the source bytes of each segment instead of working them out for the whole film on every change of the map. A two-hour AVI is thousands of segments, the map changes every few seconds, and a pass discarded at each change never finished: the next segment's bytes were never asked of the swarm and the film stopped after 16 seconds (torrent-tv/meta#151).
 

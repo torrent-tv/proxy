@@ -32,8 +32,7 @@ import { SOUNDTRACK_MODE_CAUSE, chooseSoundtrackMode, linkAnswerFigures as linkF
  * @property {() => string[]} addresses
  * @property {(address: string, index: number) => boolean} isClosed
  * @property {(address: string) => number | null} lastReadAt
- * @property {(address: string) => string} directoryFor
- * @property {(address: string, format: object) => void} useFormat
+ * @property {(address: string, format: object) => string} directoryFor
  */
 
 /** Own package version, stamped onto output-start log lines. */
@@ -679,8 +678,7 @@ export class OutputOpening {
     // term of the keeping period that nothing measures. Read BEFORE the
     // directory is claimed, since claiming it is what marks it read.
     this.#host.returns.note({ lastReadAt: this.#host.segmentOutputFiles.lastReadAt(spec.toKey()), now: Date.now() });
-    this.#host.segmentOutputFiles.directoryFor(spec.toKey());
-    this.#host.segmentOutputFiles.useFormat(spec.toKey(), segmentFormat);
+    this.#host.segmentOutputFiles.directoryFor(spec.toKey(), segmentFormat);
     this.#host.coldStarts.noteOutputCreated(session, createEntryMs);
     this.#host.encodeCost.notePredictionFor(session);
     // Decided before the key was built and only recorded here. Whether the audio

@@ -12,6 +12,8 @@ import assert from "node:assert/strict";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import { OutputLifecycle } from "../../services/server/OutputLifecycle.js";
+import { OutputRetention } from "../../services/encode/output/OutputRetention.js";
 import { SegmentStore } from "../../services/storage/segment-store/SegmentStore.js";
 
 const SEGMENT = 1024;
@@ -62,6 +64,20 @@ async function heldNumbers(store, key) {
     .sort((left, right) => left - right);
 }
 
+function enforce(store, { maxBytes, viewersAt }) {
+  const lifecycle = new OutputLifecycle({
+    retention: new OutputRetention(),
+    segmentStore: store,
+    outputs: { values: () => [] },
+    outputNeeded: key => viewersAt(key).length > 0,
+    outputWriting: () => false,
+    outputReading: key => store.isReading(key),
+    viewerSegmentsOn: viewersAt,
+    machineBudget: { segmentBytes: () => maxBytes }
+  });
+  lifecycle.keepWithinRoom();
+}
+
 test("what nobody is watching goes before anything anybody is", async () => {
   const { store, root } = await makeStore();
   try {
@@ -69,8 +85,7 @@ test("what nobody is watching goes before anything anybody is", async () => {
     await fill(store, "abandoned", [0, 1, 2, 3]);
 
     // Room for five segments of the eight held.
-    store.enforce({
-      idleMs: Number.POSITIVE_INFINITY,
+    enforce(store, {
       maxBytes: 5 * SEGMENT,
       viewersAt: (key) => (key === "watched" ? [2] : [])
     });
@@ -93,8 +108,7 @@ test("behind the viewer goes before ahead of the viewer, furthest behind first",
     await fill(store, "one", [0, 1, 2, 3, 4, 5]);
 
     // The viewer stands on #3. Room for four of the six.
-    store.enforce({
-      idleMs: Number.POSITIVE_INFINITY,
+    enforce(store, {
       maxBytes: 4 * SEGMENT,
       viewersAt: () => [3]
     });
@@ -115,8 +129,7 @@ test("with nothing left behind, the furthest ahead goes next", async () => {
     await fill(store, "one", [4, 5, 6, 7, 8]);
 
     // The viewer is on #4, so nothing is behind. Room for three of the five.
-    store.enforce({
-      idleMs: Number.POSITIVE_INFINITY,
+    enforce(store, {
       maxBytes: 3 * SEGMENT,
       viewersAt: () => [4]
     });
@@ -137,8 +150,7 @@ test("the segment a viewer is standing on is never taken", async () => {
     await fill(store, "one", [0, 1, 2]);
 
     // Two viewers, one on each end, and room for one segment only.
-    store.enforce({
-      idleMs: Number.POSITIVE_INFINITY,
+    enforce(store, {
       maxBytes: SEGMENT,
       viewersAt: () => [0, 2]
     });
@@ -158,8 +170,7 @@ test("two viewers of one output: behind the EARLIEST, ahead of the FURTHEST", as
     await fill(store, "one", [0, 1, 2, 3, 4, 5, 6]);
 
     // Viewers on #2 and #5. Behind means below #2; ahead means above #5.
-    store.enforce({
-      idleMs: Number.POSITIVE_INFINITY,
+    enforce(store, {
       maxBytes: 5 * SEGMENT,
       viewersAt: () => [2, 5]
     });
@@ -169,45 +180,6 @@ test("two viewers of one output: behind the EARLIEST, ahead of the FURTHEST", as
       [2, 3, 4, 5, 6],
       "what lies behind the earliest viewer must go before anything ahead of the furthest"
     );
-  } finally {
-    await fs.rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 20 });
-  }
-});
-
-test("an output nobody has read for long enough goes whole, however much room there is", async () => {
-  const { store, root, clock } = await makeStore();
-  try {
-    await fill(store, "stale", [0, 1, 2]);
-    clock.at += 60 * 60 * 1000;
-    await fill(store, "fresh", [0, 1, 2]);
-
-    const result = store.enforce({
-      idleMs: 30 * 60 * 1000,
-      // Room for everything: this is the rule that does not wait for pressure.
-      maxBytes: Number.MAX_SAFE_INTEGER,
-      viewersAt: () => []
-    });
-
-    assert.equal(result.droppedIdle, 1);
-    assert.deepEqual(await heldNumbers(store, "stale"), [], "the stale output was kept");
-    assert.deepEqual(await heldNumbers(store, "fresh"), [0, 1, 2], "the fresh output was taken");
-  } finally {
-    await fs.rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 20 });
-  }
-});
-
-test("told nothing about viewers, it falls back to the oldest directory", async () => {
-  const { store, root, clock } = await makeStore();
-  try {
-    await fill(store, "older", [0, 1, 2]);
-    clock.at += 1000;
-    await fill(store, "newer", [0, 1, 2]);
-
-    const result = store.enforce({ idleMs: Number.POSITIVE_INFINITY, maxBytes: 4 * SEGMENT });
-
-    assert.equal(result.droppedForRoom, 1);
-    assert.deepEqual(await heldNumbers(store, "older"), []);
-    assert.deepEqual(await heldNumbers(store, "newer"), [0, 1, 2]);
   } finally {
     await fs.rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 20 });
   }

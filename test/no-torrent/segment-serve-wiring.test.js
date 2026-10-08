@@ -250,6 +250,29 @@ test("serving a segment records what its real start says about the container's i
   assert.equal(session.output.landing.checked, 1, "the piece that was just produced must have been examined");
 });
 
+test("the same session serves material published after its store was cleaned", async t => {
+  const { manager, session, dirPath } = await managerWithReadySegment({ withRun: false });
+  t.after(async () => {
+    await manager.lifecycle.disposeAll();
+    await rm(dirPath, { recursive: true, force: true });
+  });
+  assert.equal(manager.segmentStore.drop(OUTPUT_KEY, "previous material expired"), true);
+  manager.segmentStore.directoryFor(OUTPUT_KEY);
+  await writeFile(path.join(dirPath, "making-reopened-00000.mp4"), selfContainedPiece(0));
+  manager.segmentStore.publish(OUTPUT_KEY, "making-reopened-00000.mp4", fmp4Format);
+  assert.equal(manager.outputs.get(SESSION_ID), session);
+  const pending = manager.serving.getFileStream(SESSION_ID, "segment-00000.mp4");
+  assert.equal(manager.segmentStore.isReading(OUTPUT_KEY), true, "material is held before the async read");
+  assert.equal(manager.segmentStore.drop(OUTPUT_KEY, "concurrent cleanup"), false);
+  const answer = await pending;
+  assert.equal(answer.kind, "file");
+  assert.equal(manager.segmentStore.isReading(OUTPUT_KEY), true, "an unread stream still holds its material");
+  let bytes = 0;
+  for await (const chunk of answer.stream) bytes += chunk.length;
+  assert.ok(bytes > 0);
+  assert.equal(manager.segmentStore.isReading(OUTPUT_KEY), false);
+});
+
 test("only a copied picture's landing is taken as evidence about the file's keyframe table", async (t) => {
   // The one reading, sent to the two owners the manager decides between. A
   // soundtrack is cut exactly where it is asked to be and has no keyframes, so

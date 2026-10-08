@@ -293,6 +293,11 @@ export class Assignments {
     this.#accepted.delete(token);
   }
 
+  /** Whether a response from this output has begun and has not finished. */
+  responseHolds(outputKey) {
+    return [...this.#accepted.values()].some(accepted => accepted.outputKey === outputKey);
+  }
+
   /**
    * Every output this viewer's assignments hold, asked BEFORE one is let go.
    *

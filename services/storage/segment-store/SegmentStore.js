@@ -87,6 +87,25 @@ export class SegmentStore {
 
   /** Output key → how to read its file names. @type {Map<string, object>} */
   #formats = new Map();
+  #reads = new Map();
+
+  /** Hold physical material while a read is prepared or its stream is open. */
+  holdRead(key) {
+    this.#reads.set(key, (this.#reads.get(key) ?? 0) + 1);
+    let held = true;
+    return () => {
+      if (!held) return;
+      held = false;
+      const remaining = this.#reads.get(key) - 1;
+      if (remaining > 0) this.#reads.set(key, remaining);
+      else this.#reads.delete(key);
+    };
+  }
+
+  isReading(key) {
+    return this.#reads.has(key);
+  }
+
 
   /** Output key → when it was last asked for. @type {Map<string, number>} */
   #touched = new Map();
@@ -172,9 +191,11 @@ export class SegmentStore {
    * The directory this output's segments live in, made if it is not there.
    *
    * @param {string} key - `OutputSpec.toKey()`.
+   * @param {object | null} [format] - Register newly created material with its format.
    * @returns {string}
    */
-  directoryFor(key) {
+  directoryFor(key, format = null) {
+    if (format) this.useFormat(key, format);
     const dir = path.join(this.#root, directoryNameFor(key));
     if (!existsSync(dir)) {
       // A watch held on this path watches the directory that was removed, not
@@ -543,6 +564,8 @@ export class SegmentStore {
       );
       return null;
     }
+    // Publication registers the material even after the previous directory was dropped.
+    this.useFormat(key, format);
     // What the directory holds has changed, so the memory of it is stale.
     this.#held.delete(key);
     if (index >= 0) {
@@ -1006,15 +1029,20 @@ export class SegmentStore {
    *
    * @param {string} key
    * @param {string} because
+   * @returns {boolean} Whether the files and their registration were removed.
    */
   drop(key, because) {
-    this.#changed(key);
+    if (this.isReading(key)) return false;
     const dir = path.join(this.#root, directoryNameFor(key));
     this.#unwatch(key);
     try {
       rmSync(dir, { recursive: true, force: true });
-    } catch {
-      // Already gone, or in use; the next sweep sees it either way.
+    } catch (error) {
+      this.#held.delete(key);
+      this.#watch(key);
+      this.#logger.warn(`segment-store could not drop ${directoryNameFor(key)}: ${error.message}`);
+      this.#changed(key);
+      return false;
     }
     this.#held.delete(key);
     this.#formats.delete(key);
@@ -1028,6 +1056,8 @@ export class SegmentStore {
       for (const finish of [...waiting]) finish(false);
     }
     this.#logger.info(`segment-store dropped ${directoryNameFor(key)} (${because})`);
+    this.#changed(key);
+    return true;
   }
 
   /**
@@ -1075,8 +1105,7 @@ export class SegmentStore {
   dropAll(because) {
     let dropped = 0;
     for (const key of [...this.#formats.keys()]) {
-      this.drop(key, because);
-      dropped += 1;
+      if (this.drop(key, because)) dropped += 1;
     }
     // EVERY WATCH GOES, not only the watches of outputs that named their file
     // format. A directory is made before anything says how its files are named
@@ -1090,125 +1119,12 @@ export class SegmentStore {
     return dropped;
   }
 
-  /**
-   * Keep only what is still being read, and only as much of it as there is room
-   * for.
-   *
-   * **Not tied to a session.** An output is worth keeping while somebody may
-   * still ask for it, and a session ending says nothing about that: the viewer
-   * who left may come back, and a viewer who never had a session here may open
-   * the same film a minute later and find every segment already made. So the
-   * only question asked is when this output was last READ, and the only bound
-   * is the disk.
-   *
-   * The idle period is deliberately long. Its job is not to reclaim space —
-   * that is the cap's — but to stop an output nobody has touched in hours from
-   * sitting there for the life of the process.
-   *
-   * TWO RULES, ANSWERING TWO QUESTIONS. Kept apart because they were briefly
-   * proposed as one and that was wrong: material nobody needs should not sit on
-   * the owner's disk merely because there is room for it, and material everyone
-   * needs must still go when there is no room. The first is time, the second is
-   * space.
-   *
-   * WHAT GOES FIRST WHEN THERE IS NO ROOM is decided by where the viewers are,
-   * not by when a directory was last read. Behind every viewer of an output is
-   * material that has been played and will not be asked for again unless
-   * somebody seeks back; ahead of the furthest viewer is material that will be
-   * asked for, eventually. So the order is: outputs nobody is watching at all,
-   * then what lies behind the earliest viewer, furthest behind first, then what
-   * lies ahead of the furthest viewer, furthest ahead first. It is the priority
-   * map's own order read from the other end.
-   *
-   * A segment a viewer is standing on is never a victim.
-   *
-   * @param {object} params
-   * @param {number} params.idleMs - Untouched for longer than this, and it goes.
-   * @param {number} params.maxBytes - The most the whole store may hold.
-   * @param {(key: string) => number[]} [params.viewersAt] - Where the viewers of
-   *   an output stand, as segment numbers. An empty answer means nobody is
-   *   watching it, which is what makes its segments the first to go. Absent, the
-   *   store has nothing to order by and falls back to the oldest directory —
-   *   which is what it did before it could be told.
-   * @returns {{ droppedIdle: number, droppedForRoom: number, segmentsRemoved: number, bytes: number }}
-   */
-  enforce({ idleMs, maxBytes, viewersAt = null }) {
-    const now = this.#now();
-    let droppedIdle = 0;
-    for (const [key, touchedAt] of [...this.#touched]) {
-      if (now - touchedAt > idleMs) {
-        this.drop(key, `nothing has read it for ${Math.round((now - touchedAt) / 60000)} minutes`);
-        droppedIdle += 1;
-      }
-    }
-    let held = this.stats().bytes;
-    if (!Number.isFinite(maxBytes) || maxBytes <= 0 || held <= maxBytes) {
-      return { droppedIdle, droppedForRoom: 0, segmentsRemoved: 0, bytes: held };
-    }
-    if (typeof viewersAt !== "function") {
-      let droppedForRoom = 0;
-      const byAge = [...this.#touched.entries()].sort((left, right) => left[1] - right[1]);
-      for (const [key] of byAge) {
-        if (held <= maxBytes) {
-          break;
-        }
-        const size = this.refresh(key).bytes;
-        this.drop(key, `the store is over its ${(maxBytes / 1073741824).toFixed(1)}GB allowance`);
-        held -= size;
-        droppedForRoom += 1;
-      }
-      return { droppedIdle, droppedForRoom, segmentsRemoved: 0, bytes: held };
-    }
-
-    let segmentsRemoved = 0;
-    for (const victim of this.#leastWantedFirst(viewersAt)) {
-      if (held <= maxBytes) {
-        break;
-      }
-      held -= this.#removeSegment(victim.key, victim.index);
-      segmentsRemoved += 1;
-    }
-    if (segmentsRemoved > 0) {
-      this.#logger.info(
-        `segment-store removed ${segmentsRemoved} segment(s) for room: ` +
-        `${megabytes(held)} of ${megabytes(maxBytes)} allowed`
-      );
-    }
-    return { droppedIdle, droppedForRoom: 0, segmentsRemoved, bytes: held };
-  }
-
-  /**
-   * Every segment in the store, least wanted first.
-   *
-   * @param {(key: string) => number[]} viewersAt
-   * @returns {{ key: string, index: number }[]}
-   */
-  #leastWantedFirst(viewersAt) {
-    const candidates = [];
-    for (const key of this.#formats.keys()) {
-      const positions = (viewersAt(key) ?? []).filter((at) => Number.isInteger(at));
-      const earliest = positions.length > 0 ? Math.min(...positions) : null;
-      const furthest = positions.length > 0 ? Math.max(...positions) : null;
-      for (const index of this.refresh(key).byNumber.keys()) {
-        if (earliest === null) {
-          // Nobody is watching this output at all. Everything it holds is worth
-          // less than anything somebody is on their way to.
-          candidates.push({ key, index, rank: 0, distance: index });
-          continue;
-        }
-        if (positions.includes(index)) {
-          continue;
-        }
-        if (index < earliest) {
-          candidates.push({ key, index, rank: 1, distance: earliest - index });
-        } else {
-          candidates.push({ key, index, rank: 2, distance: index - /** @type {number} */ (furthest) });
-        }
-      }
-    }
-    return candidates
-      .sort((left, right) => (left.rank !== right.rank ? left.rank - right.rank : right.distance - left.distance))
-      .map(({ key, index }) => ({ key, index }));
+  /** Storage facts only; the output lifecycle decides what may be removed. */
+  inventory() {
+    return this.addresses().map(key => {
+      const contents = this.refresh(key);
+      return { key, bytes: contents.bytes, segments: [...(contents.sizes ?? [])].map(([index, size]) => ({ index, size })) };
+    });
   }
 
   /**
@@ -1216,13 +1132,14 @@ export class SegmentStore {
    *
    * @param {string} key
    * @param {number} index
-   * @param {string} because
-   * @returns {void}
+   * @param {string} [because]
+   * @returns {number} Bytes actually removed; zero on a read or filesystem refusal.
    */
   remove(key, index, because) {
-    if (this.#removeSegment(key, index) > 0) {
-      this.#logger?.warn?.(`segment store: removed segment ${index} of ${key.slice(0, 60)}: ${because}`);
-    }
+    if (this.isReading(key)) return 0;
+    const bytes = this.#removeSegment(key, index);
+    if (bytes > 0 && because) this.#logger.info(`segment store: removed segment ${index} of ${key.slice(0, 60)}: ${because}`);
+    return bytes;
   }
 
   /**
@@ -1241,11 +1158,14 @@ export class SegmentStore {
     try {
       size = statSync(full, { throwIfNoEntry: false })?.size ?? 0;
       rmSync(full, { force: true });
-    } catch {
-      // Gone already, or refused. The next refresh reports what is really there.
+    } catch (error) {
+      this.#held.delete(key);
+      this.#logger.warn(`segment store: could not remove segment ${index}: ${error.message}`);
+      return 0;
     }
     this.#held.delete(key);
     this.#mediaRanges.get(key)?.delete(index);
+    this.#changed(key);
     return size;
   }
 
@@ -1392,12 +1312,4 @@ export class SegmentStore {
     }
     return { adopted, dropped, unprovenRemoved };
   }
-}
-
-/**
- * @param {number} bytes
- * @returns {string}
- */
-function megabytes(bytes) {
-  return `${Math.round(Math.max(0, bytes) / (1024 * 1024))}MB`;
 }

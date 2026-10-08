@@ -1,3 +1,7 @@
+## Unreleased
+
+- **Perf**: The encoder plan counts the made pieces an encoder would pass over as it walks the film instead of counting them again for every piece. On a two-hour film of 2035 segments one plan took 31-93 ms and takes 1.6-5.6 ms on a desktop; on Home Assistant the plan held the proxy's thread for half of every second, its answers to FFmpeg waited up to 3 s, and a 4-second piece took 20 s to make (torrent-tv/meta#151).
+
 ## 2.95.23
 
 - **Fix**: An AVI run names the bytes of every audio and video stream of its interval, whichever tracks it outputs. FFmpeg's AVI demuxer seeks to the earliest position any stream gives for the keyframe and reads every stream in file order; a picture-only run, given only the picture's bytes, failed its seek wherever the sound was stored ahead of two keyframes of picture, and Frankenstein stopped at 384 s. A failed seek is now taken as lost input, so the piece made after it is never served, and a refused byte of encoder input is logged. AVI stream clocks follow FFmpeg's rules exactly: audio packets count by the header's block alignment and FFmpeg's sample-size corrections (torrent-tv/meta#151).

@@ -37,6 +37,10 @@ import {
   ZERO
 } from "./media-time.js";
 
+// Match the media element's allowance for a range that starts a few frames
+// after its current position (see server/public/domain/buffer-metrics.js).
+const CLIENT_RANGE_START_TOLERANCE_SECONDS = 0.25;
+
 /**
  * The mean rate predicted over a horizon by the integral of the measured rate.
  * Polling does not change the last measured service rate.
@@ -148,7 +152,7 @@ export function predictPlaybackReadiness(input = {}) {
   const position = toSeconds(at);
   const remaining = Math.max(0, duration - position);
   const measuredRanges = reported.map((ranges, trackIndex) => ranges ?
-    heldRanges(ranges, segmentsOf[trackIndex], unit) : null);
+    heldRanges(ranges, segmentsOf[trackIndex], unit, at) : null);
   const measured = measuredRanges.length > 0 && measuredRanges.every(Boolean);
   const heldEnd = measured ? earliest(...measuredRanges.map((ranges) => contiguousEnd(ranges, at))) : null;
   // The figure reported back is what the page said it holds; the widening by
@@ -511,13 +515,18 @@ function joinedPiece(served) {
  * @param {bigint} unit
  * @returns {import("./media-time.js").MediaRange[]}
  */
-function heldRanges(ranges, segments, unit) {
+function heldRanges(ranges, segments, unit, position) {
   const pieces = segments.flatMap((segment) => segment.ranges ?? []);
   const zero = mediaTime(0n, unit);
   const error = rescale(REPORTED_TIME_ERROR, unit);
+  const startTolerance = add(position, rescale(fromSeconds(CLIENT_RANGE_START_TOLERANCE_SECONDS), unit));
   const held = [];
   for (const range of ranges) {
-    const start = latest(zero, subtract(rescale(range.start, unit), error));
+    const reportedStart = rescale(range.start, unit);
+    let start = latest(zero, subtract(reportedStart, error));
+    if (compare(reportedStart, position) > 0 && compare(reportedStart, startTolerance) <= 0) {
+      start = position;
+    }
     const end = add(rescale(range.end, unit), error);
     const inside = pieces.filter((piece) => contains([{ start, end }], piece.start, piece.end));
     addMediaRange(held, { start, end, frame: latest(zero, ...inside.map(({ frame }) => frame)) });

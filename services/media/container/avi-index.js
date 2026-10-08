@@ -235,6 +235,8 @@ function streamOf(chunkId, streamCount) {
 export class AviIndex {
   #held;
   #allocation;
+  /** @type {Map<number, Uint32Array> | undefined} */
+  #keyframes;
 
   constructor({ packets, indexRanges, held, allocation }) {
     this.packets = packets;
@@ -243,12 +245,27 @@ export class AviIndex {
     this.#allocation = allocation;
   }
 
+  /**
+   * Positions of a stream's keyframes, ascending; made once, because every
+   * interval of the film asks for them (each segment of each output).
+   */
+  #keyframesOf(stream) {
+    this.#keyframes ??= new Map();
+    let keys = this.#keyframes.get(stream);
+    if (!keys) {
+      const packets = this.packets[stream];
+      const found = [];
+      for (let at = 0; at < packets.count; at++) if (packets.keyframes[at] && packets.lengths[at]) found.push(at);
+      keys = Uint32Array.from(found);
+      this.#keyframes.set(stream, keys);
+    }
+    return keys;
+  }
+
   /** Keyframe times of a stream, ascending. */
   keyframeTimes(stream) {
     const packets = this.packets[stream];
-    const times = [];
-    for (let at = 0; at < packets.count; at++) if (packets.keyframes[at] && packets.lengths[at]) times.push(packets.times[at]);
-    return times;
+    return Array.from(this.#keyframesOf(stream), at => packets.times[at]);
   }
 
   /**
@@ -268,11 +285,22 @@ export class AviIndex {
     let first = from, last = to;
     if (picture !== null) {
       const video = this.packets[picture];
-      const keys = [];
-      for (let at = 0; at < video.count; at++) if (video.keyframes[at] && video.lengths[at]) keys.push(at);
+      const keys = this.#keyframesOf(picture);
       if (!keys.length) throw new Error("AVI picture index states no keyframe.");
-      const before = keys.findLastIndex(at => video.times[at] <= from);
-      const after = keys.findIndex(at => video.times[at] >= to);
+      // The first keyframe at or after a time, by halving: keyframe times ascend.
+      const firstAtOrAfter = seconds => {
+        let low = 0, high = keys.length;
+        while (low < high) {
+          const middle = (low + high) >> 1;
+          if (video.times[keys[middle]] < seconds) low = middle + 1;
+          else high = middle;
+        }
+        return low;
+      };
+      const atOrAfterFrom = firstAtOrAfter(from);
+      const before = atOrAfterFrom < keys.length && video.times[keys[atOrAfterFrom]] === from ? atOrAfterFrom : atOrAfterFrom - 1;
+      const afterIndex = firstAtOrAfter(to);
+      const after = afterIndex < keys.length ? afterIndex : -1;
       first = video.times[keys[Math.max(0, before - 2)]];
       last = after < 0 || after + 1 >= keys.length ? Infinity : video.times[keys[after + 1]];
     }

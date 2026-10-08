@@ -1,4 +1,4 @@
-## Unreleased
+## 2.95.15
 
 - **Fix**: An AVI run names enough of the file for what FFmpeg reads ahead: each stream runs on for the packets FFmpeg's thread queues can hold, and each range for FFmpeg's 32 KiB input buffer instead of a chosen 1 MiB. A picture whose every frame is a keyframe left one frame of margin, FFmpeg asked for bytes the run did not hold, and the run was taken for one whose input was lost (torrent-tv/meta#151).
 - **Fix**: Read the original file for MPEG-TS output too. The page asks for MPEG-TS when MP3 is copied, which is the usual AVI (XviD with MP3), and those runs fell back to reassembled packets, which an indexed AVI no longer has: the film did not start (torrent-tv/meta#151).

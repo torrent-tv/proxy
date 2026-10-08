@@ -63,6 +63,9 @@ const MICROSECONDS_PER_SECOND = 1_000_000;
  * @property {number} reached - The last number it finished, or `from - 1` when
  *   it finished none.
  * @property {number} livedMs
+ * @property {number | null} [firstNamedMs] - Spawn to the moment the encoder
+ *   named its first closed piece: the open of its input plus that one piece's
+ *   encoding, without the wait for the following piece that publication adds.
  * @property {boolean} normal - Whether this ending is the expected one.
  * @property {string} lastError - The last thing ffmpeg said on stderr.
  * @property {string | null} provenName - The last piece this run named while it
@@ -155,6 +158,13 @@ export class EncodeRun {
    * largest part of what a restart costs. Nothing measured it before.
    */
   #firstOutputAt = 0;
+
+  /**
+   * When the encoder first NAMED a closed piece of its own stretch. A piece is
+   * published only once the next one is named, so the first output above holds
+   * two pieces' encoding; this holds one, and is what an open is read from.
+   */
+  #firstNamedAt = 0;
 
   /** The film made and the run's own working time, as of the last progress report. */
   #workSample = null;
@@ -583,6 +593,7 @@ export class EncodeRun {
       }
       if (this.#publicationError) break;
       const index = this.indexOfName(name);
+      if (this.#firstNamedAt === 0 && Number.isInteger(index) && index >= this.from) this.#firstNamedAt = this.now();
       const endOfWork = Number.isFinite(endOfRun(this)) ? this.to : this.lastSegmentIndex();
       // A packet crossing the final cut can flush a following file. It may
       // complete its predecessor, but no unadmitted interval can be published.
@@ -899,6 +910,7 @@ export class EncodeRun {
         this.#firstOutputAt > 0 && this.#startedAt > 0
           ? this.#firstOutputAt - this.#startedAt
           : null,
+      firstNamedMs: this.#firstNamedAt > 0 && this.#startedAt > 0 ? this.#firstNamedAt - this.#startedAt : null,
       normal: ending === ENCODE_EXIT.COMPLETE,
       lastError: this.lastError
     };

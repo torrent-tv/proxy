@@ -690,6 +690,13 @@ export async function startProxyServer({
       const torrent = torrentPool.knownTorrent(source.sourceKey);
       return torrent ? torrentPool.readHeldRangesOf(torrent, source.fileIndex, ranges, maxBytes) : null;
     },
+    // Which bytes of a file are downloaded whole now — what an original
+    // input's stretch may extend over. A snapshot: the copy that follows
+    // holds the pieces it reads, and refuses where one has gone since.
+    readEncodeHeldRanges: async (source) => {
+      const torrent = torrentPool.knownTorrent(source.sourceKey);
+      return torrent ? torrentPool.heldRangesOf(torrent, source.fileIndex) : [];
+    },
     enabled: transcodeAudio,
     keyframeTables,
     ffmpegBin,

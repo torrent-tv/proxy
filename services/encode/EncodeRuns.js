@@ -809,12 +809,23 @@ export class EncodeRuns {
       return null;
     }
     this.#host.encodeInputs?.retain(session, this.#host.encodeOrchestrator.wantedSegmentsOn(session.outputKey));
-    const admittedInput = this.#host.encodeInputs?.take(session, startIndex, startIndex) ?? null;
+    // THE LAST NUMBER THIS RUN MAY REACH is the plan's; how far its input
+    // really reaches is the input's answer. An original input is one copied
+    // stretch, and the run is given exactly that stretch (torrent-tv/meta#158).
+    const segmentCount = Number(session.timeline?.segmentCount) || 0;
+    const mayReach = Number.isInteger(ordered?.to) && ordered.to >= startIndex ? ordered.to
+      : segmentCount > startIndex ? segmentCount - 1 : startIndex;
+    const admittedInput = this.#host.encodeInputs?.take(session, startIndex, mayReach) ?? null;
     if (!admittedInput) return null;
+    const inputEnd = admittedInput.original ? admittedInput.to : startIndex;
+    // The stretch is part of an original input's identity: two stretches from
+    // one start can hold the same padded bytes, and a stretch that failed is
+    // refused only while it is the same stretch.
     const inputParameters = admittedInput ? { outputKey: session.outputKey, encoder: this.#host.videoEncoder.name,
       width: session.output.encodeWidth, height: session.output.encodeHeight, fps: session.output.outputFps,
       preset: session.output.softwarePreset, tonemap: session.output.applyTonemap,
-      rateControl: session.spec.video?.encode?.rateControl ?? null } : null;
+      rateControl: session.spec.video?.encode?.rateControl ?? null,
+      ...(admittedInput.original ? { interval: [startIndex, inputEnd] } : {}) } : null;
     const inputKey = admittedInput ? this.#inputFailures.key(admittedInput, inputParameters) : null;
     if (inputKey && this.#inputFailures.failure(session.outputKey, startIndex, inputKey)) {
       admittedInput.release();
@@ -842,7 +853,7 @@ export class EncodeRuns {
     // an argument. Reading it off the coverage map a second time was the last
     // remaining second answer to that question: the plan computed `to`, passed
     // it, and the parameter list did not name it.
-    const runEnd = admittedInput ? startIndex : Number.isInteger(ordered?.to)
+    const runEnd = admittedInput ? inputEnd : Number.isInteger(ordered?.to)
       ? ordered.to
       : this.#runEndFrom(session, startIndex, null);
     // The restart backs off a segment or two from what was asked for, so the
@@ -914,7 +925,8 @@ export class EncodeRuns {
       audioSourceTrackIndex: session.spec.audioSourceTrackIndex,
       rateControl: session.spec.video?.encode?.rateControl ?? null,
       startIndex,
-      endIndex: Number.isInteger(ordered?.to) ? ordered.to : runEnd >= startIndex ? runEnd : session.timeline.segmentCount - 1,
+      endIndex: admittedInput.original ? inputEnd
+        : Number.isInteger(ordered?.to) ? ordered.to : runEnd >= startIndex ? runEnd : session.timeline.segmentCount - 1,
       videoEncoder: this.#host.videoEncoder,
       segmentDurationSec: this.#host.segmentDurationSec
     });
@@ -1017,6 +1029,7 @@ export class EncodeRuns {
               `${reads.count} read(s), ${reads.bytes} bytes, first at ${since(reads.firstAt)}, last at ${since(reads.lastAt)}, ` +
               `ended at ${Date.now() - run.startedAt}ms`);
           }
+          this.#noteOpen(session, run, ended);
           admittedInput.release();
         }
         this.noteRunEnded(session, run, ended);
@@ -1025,7 +1038,13 @@ export class EncodeRuns {
     if (admittedInput.original) {
       run.originalInput = admittedInput;
       run.inputFingerprint = admittedInput.fingerprint;
-      run.admittedInputKeys = new Map([[safeIndex, inputKey]]);
+      // Every number of the stretch answers to its one key, so a failure
+      // anywhere inside it is recorded against the stretch that was commanded.
+      run.admittedInputKeys = new Map(Array.from({ length: inputEnd - safeIndex + 1 }, (_, offset) => [safeIndex + offset, inputKey]));
+      // What this run can make is what its input holds, and that is what it
+      // claims; the plan's longer bound would read as made by a run that
+      // cannot reach it.
+      run.inputThrough = inputEnd;
       run.process.stdin.end();
     } else if (admittedInput) {
       run.inputFingerprint = admittedInput.fingerprint;
@@ -1082,6 +1101,28 @@ export class EncodeRuns {
       }
       throw error;
     }
+  }
+
+  /**
+   * How long this run took to open its original input, for sizing the next
+   * stretch: from its spawn to the name of its first closed piece, less what
+   * encoding that piece costs at the run's speed — its own where it measured
+   * one, else the output's. Nothing is noted where either is unknown.
+   *
+   * @param {object} session
+   * @param {import("./EncodeRun.js").EncodeRun} run
+   * @param {import("./EncodeRun.js").RunEnded} ended
+   * @returns {void}
+   */
+  #noteOpen(session, run, ended) {
+    const grid = session.timeline?.published ?? session.timeline?.boundaries;
+    const pieceSeconds = Number(grid?.[run.from + 1]) - Number(grid?.[run.from]);
+    const speed = run.speedX > 0 ? run.speedX : this.#host.encodeOrchestrator.speedOn?.(session.outputKey) ?? 0;
+    if (!Number.isFinite(ended.firstNamedMs) || !(pieceSeconds > 0) || !(speed > 0)) return;
+    const openSeconds = Math.max(0, ended.firstNamedMs / 1000 - pieceSeconds / speed);
+    this.#host.encodeInputs?.noteOpen(session, openSeconds);
+    this.#host.logger.info(`encode input of run #${run.from}..#${run.to} on ${session.outputKey}: opened in ` +
+      `${openSeconds.toFixed(2)}s (first piece named at ${ended.firstNamedMs}ms, ${pieceSeconds.toFixed(3)}s of film at ${speed.toFixed(2)}x)`);
   }
 
   /**

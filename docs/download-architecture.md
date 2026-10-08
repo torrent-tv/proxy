@@ -73,6 +73,29 @@ a finite FFprobe interval does not establish addresses for the full future map.
 A stopped or superseded request releases its
 reservation. Completed segments remain available to every compatible viewer.
 
+An original-input run is given one finite stretch of segments, copied once
+before it starts, so FFmpeg opens the file once per stretch instead of once per
+segment (torrent-tv/meta#158). `EncodeInputs` ends the stretch at the largest
+segment, within the plan's bound for the run, such that:
+
+1. every byte of the stretch is downloaded whole now (storage's held ranges; a
+   snapshot, and the copy refuses where a piece has gone since);
+2. copying it takes no longer than opening the input: the recent copy rate,
+   timed around the reads of real admissions, times this output's recent open,
+   which is the time from a run's spawn to the name of its first closed piece
+   less that piece's encoding at the run's speed. Until both are measured a run
+   gets one segment;
+3. it fits the memory the budget allows. Only one segment is required of the
+   budget; a longer stretch is wanted like any other claim. A stretch over the
+   allowance or the policy capacity runs as its longest prefix that fits, and
+   only one segment over the capacity is terminal.
+
+The run's end, its coverage claim and its failure identity are that stretch. A
+failure inside it is recorded at the run's head under the stretch it was given,
+so a retry from the head is a new stretch and the same stretch failing again is
+refused. Segments past the stretch are placed by the plan when their bytes
+arrive or memory is freed.
+
 A fully retained source is described by its whole files after its torrent closes.
 It continues to answer availability and source facts without rebuilding a torrent.
 Open admission reads participate in file ownership before asynchronous reading.

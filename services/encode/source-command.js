@@ -233,20 +233,34 @@ export function buildRunCommand({
 
 }
 
-/** One finite original-source run, preserving the published interval and track choice. */
+/**
+ * One finite original-source run over the stretch its input holds, `startIndex`
+ * through `endIndex`, preserving the published intervals and track choice.
+ *
+ * The command works on a local timeline holding the stretch's own boundaries
+ * plus one beyond its end, so every published boundary inside it, the end
+ * included, is a cut, and what the muxer flushes after the end is a piece
+ * nobody publishes. Numbering continues from `startIndex`.
+ */
 export function buildOriginalCommand(params) {
   const { admittedInput, timeline, startIndex, inputToken, baseUrl, audioOnly } = params;
+  const endIndex = Number.isInteger(params.endIndex) && params.endIndex >= startIndex ? params.endIndex : startIndex;
   const grid = publishedGridFor(timeline);
-  const from = grid[startIndex], to = grid[startIndex + 1];
-  if (!(to > from)) throw new Error("Original-source encoding requires a finite published interval.");
+  const stretch = grid.slice(startIndex, endIndex + 2);
+  const from = stretch[0], to = stretch.at(-1);
+  if (stretch.length !== endIndex - startIndex + 2 || !stretch.every((at, index) => index === 0 || at > stretch[index - 1])) {
+    throw new Error("Original-source encoding requires a finite published interval.");
+  }
+  const last = stretch.at(-2);
   const sourceFor = kind => admittedInput.sources.find(source => source.input.selections.some(selection => selection.track.type === kind));
   const primary = sourceFor(audioOnly ? "audio" : "video");
   const audio = sourceFor("audio") ?? primary;
   if (!primary) throw new Error("The selected source track is absent from original input.");
   const url = source => new URL(`/encode-input/${inputToken}/${source.fileIndex}`, baseUrl).href;
-  const localTimeline = { ...timeline, published: [from, to, to + (to - from)],
-    boundaries: [from, to, to + (to - from)], sourceStartOf: () => primary.input.from ?? from + primary.timeShiftSeconds };
-  const command = buildRunCommand({ ...params, startIndex: 0, endIndex: 0, timeline: localTimeline,
+  const local = [...stretch, to + (to - last)];
+  const localTimeline = { ...timeline, published: local,
+    boundaries: local, sourceStartOf: () => primary.input.from ?? from + primary.timeShiftSeconds };
+  const command = buildRunCommand({ ...params, startIndex: 0, endIndex: endIndex - startIndex, timeline: localTimeline,
     videoSourceTrackIndex: primary.input.selections.find(selection => selection.track.type === "video")?.index ?? 0,
     reorderDepth: primary.input.selections.find(selection => selection.track.type === "video")?.track.reorderDepth ?? 0,
     inputFile: { startTime: primary.timeShiftSeconds }, audioFile: { startTime: audio.timeShiftSeconds },

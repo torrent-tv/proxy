@@ -288,6 +288,42 @@ test("a browser range within Chromium's microsecond truncation still holds the p
   assert.ok(held.delaySeconds < absent.delaySeconds);
 });
 
+test("accepts the browser's initial media range when one track starts within its frame slack", () => {
+  const state = input({ durationSeconds: 64, bufferedAheadSeconds: 60, requiredAudio: true });
+  const segments = Array.from({ length: 16 }, (_, index) => ({
+    index,
+    startSeconds: index * 4,
+    endSeconds: (index + 1) * 4,
+    sourceInputs: [{ sourceId: "source", ranges: [{ start: index * 4, end: (index + 1) * 4 }] }]
+  }));
+  const readySegmentIndices = segments.map(({ index }) => index);
+  const segmentSizesBytes = new Map(readySegmentIndices.map((index) => [index, 40]));
+  state.tracks[0] = {
+    ...state.tracks[0],
+    processedSeconds: 64,
+    clientRanges: [{ start: 1 / 12, end: 60 }],
+    segments,
+    readySegmentIndices,
+    segmentSizesBytes
+  };
+  state.tracks.push({
+    ...state.tracks[0],
+    id: "audio",
+    clientRanges: [{ start: 0, end: 60 }]
+  });
+
+  const forecast = predictPlaybackReadiness(state);
+
+  assert.equal(forecast.bufferedSeconds, 60);
+  assert.equal(forecast.ready, true);
+  assert.equal(forecast.reason, "trajectory-safe-now");
+
+  state.tracks[0].clientRanges = [{ start: 0.250001, end: 60 }];
+  const outsideSlack = predictPlaybackReadiness(state);
+  assert.equal(outsideSlack.bufferedSeconds, 0);
+  assert.equal(outsideSlack.ready, false);
+});
+
 test("keeps source-stall reserve in the proxy's prepared timeline, not the capped browser buffer", () => {
   const now = 10_000;
   const forecast = predictPlaybackReadiness({

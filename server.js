@@ -1147,7 +1147,8 @@ export async function startProxyServer({
     })
   );
   app.get("/encode-input/:token/:fileIndex", (req, reply) =>
-    handleEncodeInputGet(req, reply, { inputOf: token => outputParts.encodeRuns.originalInputOf(token) })
+    handleEncodeInputGet(req, reply, { inputOf: token => outputParts.encodeRuns.originalInputOf(token),
+      refused: ({ fileIndex, start, runTag }) => logger.warn(`encode input: run ${runTag ?? "?"} asked for byte ${start} of file ${fileIndex}, which it was not given`) })
   );
   app.get("/stream", async (req, reply) =>
     handleStreamGet(req, reply, {

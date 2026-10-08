@@ -115,7 +115,7 @@ async function runOver(directory, { bytes, ranges, from, command, format = fmp4F
   }
 }
 
-async function checkAvi(directory, file, { duration, audio, timeBase, copyable }) {
+async function checkAvi(directory, file, { duration, audio, timeBase, copyable, loud = true }) {
   const bytes = await fs.readFile(file);
   const container = containerOf(bytes);
   const table = await container.parseKeyframeIndex();
@@ -133,8 +133,11 @@ async function checkAvi(directory, file, { duration, audio, timeBase, copyable }
   const at = grid.findIndex(time => time >= 30);
   const from = grid[at], to = grid[at + 1];
   const tracks = await container.readTracks();
-  const trackIds = tracks.filter(track => ["video", "audio"].includes(track.type)).map(track => track.trackNumber);
-  const source = await container.readSourceRanges({ from, to, trackIds });
+  // Each run names its own tracks, as the proxy does; the picture run's ranges
+  // must still hold what FFmpeg reads of the sound.
+  const rangesOf = async type => container.readSourceRanges({ from, to,
+    trackIds: tracks.filter(track => track.type === type).map(track => track.trackNumber) });
+  const source = await rangesOf("video");
   assert.equal(source.kind, "result");
   // The run holds the interval, not the film: no packet ten to twenty seconds on is named.
   const far = lines(spawnSync(ffprobe.path, ["-v", "error", "-show_entries", "packet=dts_time,pos", "-of", "csv=p=0", file],
@@ -157,10 +160,11 @@ async function checkAvi(directory, file, { duration, audio, timeBase, copyable }
   await fs.rm(picture.piece);
 
   if (!audio) return;
-  const sound = await runOver(directory, { bytes, ranges: source.ranges, from, command: {
+  const sound = await runOver(directory, { bytes, ranges: (await rangesOf("audio")).ranges, from, command: {
     startIndex: at, timeline: { published: grid, cutGrid: "keyframe" }, keyframes: { times: keyframes },
     audioOnly: true, transcodeAudio: true, audioSourceTrackIndex: 0,
     selections: [{ track: { type: "audio" }, index: 0 }] } });
+  if (!loud) return;
   const loudFrom = Math.max(0, 31 - from), loudTo = Math.min(to, 32) - from;
   if (loudTo - loudFrom > 0.4) assert.ok(loudness(sound.piece, loudFrom + 0.1, loudTo - 0.1) > 0.2, "the loud second is where the interval puts it");
   if (loudFrom > 0.4) assert.ok(loudness(sound.piece, 0.05, loudFrom - 0.1) < 0.02, "and nothing loud before it");
@@ -178,6 +182,33 @@ for (const [name, video, audio, copyable = false] of [
   ffmpeg(["-f", "lavfi", "-i", `testsrc2=size=320x240:rate=${FPS}`, "-f", "lavfi", "-i", `aevalsrc=${LOUD}:s=48000`,
     "-t", "60", ...video, ...audio, "-f", "avi", file]);
   await checkAvi(directory, file, { duration: 60, audio: true, timeBase: 1 / FPS, copyable });
+}));
+
+test("a picture-only run holds the sound FFmpeg seeks through when the sound is stored ahead of the picture", () => inDirectory(async directory => {
+  // FFmpeg seeks to the earliest position any stream gives for the keyframe
+  // time (avi_read_seek, pos_min); sound stored five seconds ahead lies before
+  // two keyframes of picture (field 2026-10-08, "Seek failed").
+  const file = path.join(directory, "source.avi");
+  ffmpeg(["-f", "lavfi", "-i", `testsrc2=size=320x240:rate=${FPS}`, "-f", "lavfi", "-i", `aevalsrc=${LOUD}:s=48000`,
+    "-t", "60", "-c:v", "mpeg4", "-vtag", "XVID", "-g", "50", "-q:v", "3", "-c:a", "libmp3lame", "-b:a", "128k",
+    "-audio_preload", "5000000", "-f", "avi", file]);
+  await checkAvi(directory, file, { duration: 60, audio: true, timeBase: 1 / FPS, copyable: false });
+}));
+
+test("an AVI whose audio block alignment is shorter than its packets is timed by FFmpeg's clock", () => inDirectory(async directory => {
+  // FFmpeg counts an audio packet as ceil(length / nBlockAlign) units (avidec.c,
+  // get_duration); one packet per unit put the sound's bytes elsewhere than the
+  // seek asks for (field 2026-10-08, a two-hour MP3 AVI at 384 s).
+  const file = path.join(directory, "source.avi");
+  ffmpeg(["-f", "lavfi", "-i", `testsrc2=size=320x240:rate=${FPS}`, "-f", "lavfi", "-i", `aevalsrc=${LOUD}:s=48000`,
+    "-t", "60", "-c:v", "mpeg4", "-vtag", "XVID", "-g", "50", "-q:v", "3", "-c:a", "libmp3lame", "-b:a", "128k", "-f", "avi", file]);
+  const bytes = await fs.readFile(file);
+  let strf = -1, audioFormat = -1;
+  while ((strf = bytes.indexOf("strf", strf + 1)) >= 0) if (bytes.readUInt16LE(strf + 8) === 0x55) audioFormat = strf + 8;
+  assert.ok(audioFormat > 0, "the MP3 wave format is found");
+  bytes.writeUInt16LE(128, audioFormat + 12);
+  await fs.writeFile(file, bytes);
+  await checkAvi(directory, file, { duration: 60, audio: true, timeBase: 1 / FPS, copyable: false, loud: false });
 }));
 
 test("an OpenDML AVI past one gibibyte plays its interval from the named bytes only", () => inDirectory(async directory => {
@@ -233,15 +264,16 @@ test("an idx1 AVI with MP3 plays its interval as MPEG-TS, the container a copied
   const at = grid.findIndex(time => time >= 30);
   const from = grid[at], to = grid[at + 1];
   const tracks = await container.readTracks();
-  const source = await container.readSourceRanges({ from, to, trackIds: tracks.filter(track => ["video", "audio"].includes(track.type)).map(track => track.trackNumber) });
-  const run = command => runOver(directory, { bytes, ranges: source.ranges, from, format: mpegtsFormat, command: {
-    startIndex: at, timeline: { published: grid, cutGrid: "keyframe" }, keyframes: { times: keyframes }, ...command } });
-  const picture = (await tsTimes((await run({ transcodeVideo: true, selections: [{ track: { type: "video", reorderDepth: 0 }, index: 0 }] })).piece)).video;
+  const rangesOf = async type => (await container.readSourceRanges({ from, to,
+    trackIds: tracks.filter(track => track.type === type).map(track => track.trackNumber) })).ranges;
+  const run = (command, type) => rangesOf(type).then(ranges => runOver(directory, { bytes, ranges, from, format: mpegtsFormat, command: {
+    startIndex: at, timeline: { published: grid, cutGrid: "keyframe" }, keyframes: { times: keyframes }, ...command } }));
+  const picture = (await tsTimes((await run({ transcodeVideo: true, selections: [{ track: { type: "video", reorderDepth: 0 }, index: 0 }] }, "video")).piece)).video;
   const expected = pictures(file, 1 / FPS).filter(([pts]) => pts >= from - 1e-6 && pts < to - 1e-6).length;
   assert.equal(picture.length, expected, "the piece holds the interval's pictures and nothing past it");
   picture.forEach((time, at) => assert.ok(Math.abs(time - picture[0] - at / FPS) < 1e-3, `picture ${at} is one frame after the last`));
   const sound = (await tsTimes((await run({ audioOnly: true, transcodeAudio: false, audioSourceTrackIndex: 0,
-    selections: [{ track: { type: "audio" }, index: 0 }] })).piece)).audio;
+    selections: [{ track: { type: "audio" }, index: 0 }] }, "audio")).piece)).audio;
   assert.ok(Math.abs(sound[0] - picture[0]) < 0.03, "the copied sound starts where the picture does");
   assert.ok(Math.abs(sound.at(-1) - picture.at(-1)) < 0.1, "and ends where it ends");
 }));

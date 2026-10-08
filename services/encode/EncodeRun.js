@@ -478,7 +478,9 @@ export class EncodeRun {
       if (line.length > 0) {
         this.lastError = line;
         const errorText = this.#stderrReadTail + String(chunk);
-        this.#inputTruncated ||= /Stream ends prematurely|Input\/output error|Error during demuxing/i.test(errorText);
+        // A failed seek leaves the demuxer wherever it stood, so what follows is
+        // not the stretch asked for and is never published (torrent-tv/meta#151).
+        this.#inputTruncated ||= /Stream ends prematurely|Input\/output error|Error during demuxing|Seek failed/i.test(errorText);
         this.#stderrReadTail = errorText.slice(-512);
         this.logger.warn(`ffmpeg #${this.from}..#${this.to} of ${this.address}: ${line}`);
       }

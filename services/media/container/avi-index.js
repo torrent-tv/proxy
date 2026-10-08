@@ -74,8 +74,9 @@ class StreamPackets {
  * @param {number} params.fileSize
  * @param {{ start: number, end: number }} params.movi - The first `movi` list (`start` at its type).
  * @param {{ start: number, end: number } | null} params.idx1 - The `idx1` chunk's payload, if any.
- * @param {Array<{ type: string, timeBase: number | null, sampleSize: number, startTimeSeconds: number | null,
- *   indexChunks: Array<{ start: number, end: number }> }>} params.streams - In stream-number order.
+ * @param {Array<{ type: string, codecId: string, timeBase: number | null, sampleSize: number, blockAlign: number,
+ *   startUnits: number, indexChunks: Array<{ start: number, end: number }> }>} params.streams - In stream-number order,
+ *   as the stream headers declare them (`strh` sample size and start, `WAVEFORMATEX` block alignment).
  * @param {{ reserve?: (bytes: number) => boolean, release?: (bytes: number) => void }} params.allocation
  * @returns {Promise<AviIndex | null>} Null when the file states no index.
  */
@@ -104,8 +105,38 @@ function reserve(allocation, count) {
   return bytes;
 }
 
-function durationOf(stream, length) {
-  return stream.timeBase * (stream.sampleSize > 0 ? length / stream.sampleSize : 1);
+/**
+ * A stream's clock as FFmpeg's AVI demuxer keeps it (avidec.c n8.1). The clock
+ * counts units: bytes where the stream has a sample size, otherwise blocks of
+ * the audio's `nBlockAlign` rounded up per packet (`get_duration`), otherwise
+ * one per packet, an empty one included. A packet's time is its units, divided
+ * by the sample size where there is one, times the time base. FFmpeg's header
+ * rules decide the sample size and the block alignment it uses; they are taken
+ * over exactly, since a time that disagrees with FFmpeg's moves the bytes a
+ * seek asks for out of the ranges named (field 2026-10-08: a two-hour MP3 AVI
+ * failed to seek at 384 s).
+ */
+function clockOf(stream) {
+  // The header's sample size is a signed 32-bit field to FFmpeg; the start is
+  // multiplied by it as read, before any correction, and a start beyond an hour
+  // is discarded.
+  const declared = (stream.sampleSize ?? 0) | 0;
+  const startUnits = (stream.startUnits ?? 0) * stream.timeBase > 3600 ? 0 : stream.startUnits ?? 0;
+  let sampleSize = stream.type === "video" || declared < 0 ? 0 : declared;
+  let blockAlign = 0;
+  if (stream.type === "audio") {
+    blockAlign = stream.blockAlign > 0 ? stream.blockAlign : 0;
+    if (sampleSize && blockAlign && sampleSize !== blockAlign) sampleSize = blockAlign;
+    if (["aac", "flac", "mp2"].includes(stream.codecId) && blockAlign <= 4) blockAlign = 0;
+    if ((stream.codecId === "aac" && (blockAlign === 1024 || blockAlign === 4096) && sampleSize === blockAlign) ||
+      (stream.codecId === "mp3" && blockAlign === 1152 && sampleSize === 1152)) sampleSize = 0;
+  }
+  return {
+    sampleSize,
+    units: startUnits * Math.max(1, declared),
+    advance(length) { this.units += sampleSize ? length : blockAlign ? Math.ceil(length / blockAlign) : 1; },
+    seconds() { return stream.timeBase * (sampleSize ? Math.floor(this.units / sampleSize) : this.units); }
+  };
 }
 
 async function readIdx1({ read, fileSize, movi, idx1, streams, allocation }) {
@@ -139,7 +170,7 @@ async function readIdx1({ read, fileSize, movi, idx1, streams, allocation }) {
   const held = reserve(allocation, counts.reduce((sum, count) => sum + count, 0));
   try {
     const packets = counts.map(count => new StreamPackets(count));
-    const clocks = streams.map(stream => stream.startTimeSeconds ?? 0);
+    const clocks = streams.map(clockOf);
     for await (const { bytes } of blocks(read, idx1.start, idx1.end, IDX1_ENTRY_BYTES)) {
       for (let offset = 0; offset < bytes.length; offset += IDX1_ENTRY_BYTES) {
         const chunkId = bytes.toString("ascii", offset, offset + 4);
@@ -151,8 +182,8 @@ async function readIdx1({ read, fileSize, movi, idx1, streams, allocation }) {
         // FFmpeg takes the index flag alone, and every entry as a keyframe
         // when no entry carries it (avi_read_idx1).
         const keyframe = !anyKeyframe || !!(bytes.readUInt32LE(offset + 4) & AVIIF_KEYFRAME);
-        packets[id].push(start, length, clocks[id], keyframe);
-        clocks[id] += durationOf(streams[id], length);
+        packets[id].push(start, length, clocks[id].seconds(), keyframe);
+        clocks[id].advance(length);
       }
     }
     return new AviIndex({ packets, indexRanges: [[idx1.start - 8, fileSize - 1]], held, allocation });
@@ -202,9 +233,8 @@ async function readOpenDml({ read, fileSize, streams, allocation }) {
   const held = reserve(allocation, counts.reduce((sum, count) => sum + count, 0));
   try {
     const packets = counts.map(count => new StreamPackets(count));
-    const clocks = streams.map(stream => stream.startTimeSeconds ?? 0);
+    const clocks = streams.map(clockOf);
     for (const standard of parsed) {
-      const stream = streams[standard.id];
       const tableStart = standard.start + 32;
       const tableEnd = tableStart + standard.count * standard.entryBytes;
       for await (const { bytes } of blocks(read, tableStart, tableEnd, standard.entryBytes)) {
@@ -212,8 +242,8 @@ async function readOpenDml({ read, fileSize, streams, allocation }) {
           const start = standard.base + bytes.readUInt32LE(offset);
           const encoded = bytes.readUInt32LE(offset + 4), length = encoded & 0x7fffffff;
           if (length && (start < 8 || start + length > fileSize)) throw new Error("AVI OpenDML packet exceeds the file.");
-          packets[standard.id].push(start, length, clocks[standard.id], !(encoded & 0x80000000));
-          clocks[standard.id] += durationOf(stream, length);
+          packets[standard.id].push(start, length, clocks[standard.id].seconds(), !(encoded & 0x80000000));
+          clocks[standard.id].advance(length);
         }
       }
     }

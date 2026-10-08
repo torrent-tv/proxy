@@ -129,6 +129,8 @@ export function buildRunCommand({
     args.push("-i", audioInputUrl);
   };
 
+  // Whether an output `-ss` already cuts at the interval's start.
+  let trimmedAtStart = false;
   if (snappedKeyframe !== null) {
     const residualSeconds = Math.max(0, seekAt - snappedKeyframe);
     if (snappedKeyframe > sourceStartTime) {
@@ -138,6 +140,7 @@ export function buildRunCommand({
     pushAudioInput(snappedKeyframe);
     if (residualSeconds > 0 && !keyframeGrid) {
       args.push("-ss", ffmpegSeconds(residualSeconds));
+      trimmedAtStart = true;
     }
   } else {
     if (seekAt > sourceStartTime) {
@@ -145,6 +148,15 @@ export function buildRunCommand({
     }
     args.push("-i", inputUrl);
     pushAudioInput(seekAt);
+  }
+  // An input seek lands on the picture's keyframe at or before the time asked
+  // for, in every stream (AVI `avi_read_seek`, Matroska Cues). `-accurate_seek`
+  // trims only what is decoded, so a copied soundtrack began at that keyframe
+  // and `-t` counted its length from there: a piece of a LostFilm AVI with a
+  // keyframe every 11 s carried the film's first four seconds (torrent-tv/meta#159).
+  // Without `-copyts` the time asked for is zero on the output's input clock.
+  if (!keyframeGrid && !servesAudioSeparately && !transcodeAudio && !trimmedAtStart) {
+    args.push("-ss", "0");
   }
   if (!keyframeGrid) {
     if (startSeconds > 0) {

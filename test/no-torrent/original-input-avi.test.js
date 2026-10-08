@@ -277,3 +277,29 @@ test("an idx1 AVI with MP3 plays its interval as MPEG-TS, the container a copied
   assert.ok(Math.abs(sound[0] - picture[0]) < 0.03, "the copied sound starts where the picture does");
   assert.ok(Math.abs(sound.at(-1) - picture.at(-1)) < 0.1, "and ends where it ends");
 }));
+
+test("a copied AVI soundtrack on an even grid starts at its interval, not at the picture's keyframe before it", () => inDirectory(async directory => {
+  // FFmpeg's input seek lands every stream on the picture's keyframe at or
+  // before the time asked for, and `-accurate_seek` trims only what is decoded.
+  // With a keyframe every 11 s, as in a LostFilm AVI, the copied piece 28-32 s
+  // carried 22-26 s (field 2026-10-08, torrent-tv/meta#159).
+  const file = path.join(directory, "source.avi");
+  ffmpeg(["-f", "lavfi", "-i", `testsrc2=size=320x240:rate=${FPS}`, "-f", "lavfi", "-i", `aevalsrc=${LOUD}:s=48000`,
+    "-t", "60", "-c:v", "mpeg4", "-vtag", "XVID", "-g", "275", "-q:v", "3", "-c:a", "libmp3lame", "-b:a", "128k", "-f", "avi", file]);
+  const bytes = await fs.readFile(file);
+  const container = containerOf(bytes);
+  const grid = Array.from({ length: 16 }, (_, index) => Math.min(60, index * 4));
+  const at = 7, from = grid[at], to = grid[at + 1];
+  const keyframes = (await container.parseKeyframeIndex()).times;
+  assert.ok(keyframes.findLast(time => time <= from) <= from - (to - from), "the keyframe before the interval lies a piece or more before it");
+  const { ranges } = await container.readSourceRanges({ from, to });
+  const { piece } = await runOver(directory, { bytes, ranges, from, format: mpegtsFormat, command: {
+    startIndex: at, timeline: { published: grid, cutGrid: "even" }, keyframes: null,
+    audioOnly: true, transcodeAudio: false, audioSourceTrackIndex: 0, selections: [{ track: { type: "audio" }, index: 0 }] } });
+  const sound = (await tsTimes(piece)).audio;
+  // A PES packet carries several MP3 frames, so the last one starts up to a few frames before the end.
+  const span = sound.at(-1) - sound[0];
+  assert.ok(span > to - from - 0.3 && span < to - from, `the piece holds the interval's length of sound, not more: ${span} s`);
+  assert.ok(loudness(piece, 3.1, 3.9) > 0.2, "the loud second 31-32 s is the piece's last second");
+  assert.ok(loudness(piece, 0.05, 2.9) < 0.02, "and nothing loud before it");
+}));

@@ -45,4 +45,4 @@ the top of design.md first.
       this file.
 - [ ] 4.3 CHANGELOG entry (current version + 1 patch); `npm run patch`; bump
       ha-addon `config.yaml` + its CHANGELOG; push; update the addon in HA
-      (proxy FIRST, then addon — release order per root CLAUDE.md).
+      (proxy FIRST, then addon — release order per root AGENTS.md).

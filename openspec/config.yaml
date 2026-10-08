@@ -5,7 +5,7 @@ context: |
   and streams the chosen file to the browser over a WebRTC data channel (plain
   HTTPS transport planned), transcoding to HLS only for the track(s) the browser
   cannot play natively (supported track = copied).
-  Constraints (see CLAUDE.md for the full set):
+  Constraints (see AGENTS.md for the full set):
   - Deployment-agnostic: the HA addon is only one way to run it. No
     Home-Assistant assumptions; runtime detection with graceful fallback only.
   - Routes: routes/<path>/<method>.js exporting handle<Name><Method>.

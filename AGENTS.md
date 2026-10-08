@@ -1,7 +1,7 @@
 # proxy — @torrent-tv/proxy (WebTorrent + ffmpeg)
 
 Downloads a torrent and streams the chosen file to the browser, transcoding to
-HLS only when needed. See the parent `../CLAUDE.md` for the overall architecture
+HLS only when needed. See the parent `../AGENTS.md` for the overall architecture
 and release process.
 
 ## Deployment-agnostic — important
@@ -259,7 +259,7 @@ are recorded in `docs/browser-proxy-contract.md`.
 
 ## Planned: public reachability (remote access)
 
-Decided direction — full plan in the parent `../CLAUDE.md`. Proxy-side pieces:
+Decided direction — full plan in the parent `../AGENTS.md`. Proxy-side pieces:
 
 - **Auto port mapping** — IMPLEMENTED (`services/transport/port-mapper.js`, changelog
   2.9.16). UPnP IGD / NAT-PMP via `@silentbot1/nat-api` (now a direct dep; the
@@ -268,7 +268,7 @@ Decided direction — full plan in the parent `../CLAUDE.md`. Proxy-side pieces:
   Best-effort + start/stop timeouts; `--no-port-mapping` opts out;
   `getMappedEndpoint()` exposes the external endpoint. NOT yet done: mapping the
   **UDP** port WebRTC actually uses (it binds ephemeral UDP ports, so this TCP
-  mapping does not yet help WebRTC — roadmap step 3 in the parent CLAUDE.md).
+  mapping does not yet help WebRTC — roadmap step 3 in the parent AGENTS.md).
   Also pending (next iteration): a success log line in `transport/port-mapper.js` `stop()`
   (`removed mapping for TCP <port>`) — today stop() only logs on failure, so a
   clean unmap on shutdown is silent.
@@ -282,7 +282,7 @@ Decided direction — full plan in the parent `../CLAUDE.md`. Proxy-side pieces:
   web-app origin so hls.js / `<video>` can fetch cross-origin.
 - Plain HTTPS becomes the preferred video transport; WebRTC data channel stays
   as fallback for hosts where no port could be opened.
-- **Later roadmap steps** (single staged roadmap in parent `../CLAUDE.md`,
+- **Later roadmap steps** (single staged roadmap in parent `../AGENTS.md`,
   WebRTC-first ordering): step 3 map the WebRTC UDP port (fixed
   `portRangeBegin`/`End` + UPnP-map UDP); step 4 birthday-paradox port
   prediction (open ~256 UDP sockets, inject predicted-port ICE candidates) for
@@ -308,7 +308,7 @@ file refcount 0 + idle TTL (mirror the HLS session model); startup sweep of
 orphaned store dirs under `os.tmpdir()`; global disk cap with LRU eviction of
 whole torrents. (Shutdown teardown ✅ done.)
 Level 2 (research): sliding-window chunk store. Full rationale in the parent
-`../CLAUDE.md` "Disk hygiene" section.
+`../AGENTS.md` "Disk hygiene" section.
 
 ## Cloud proxy
 
@@ -316,7 +316,7 @@ The same proxy code also runs as the company-hosted fallback when the user
 pool can't serve a viewer. Keep the proxy host-agnostic so it runs unchanged on
 rented infra (flat-rate/unmetered bandwidth — Hetzner dedicated / OVH; NOT
 metered-egress clouds). Provider/economics analysis in the parent
-`../CLAUDE.md` "Cloud proxy" section.
+`../AGENTS.md` "Cloud proxy" section.
 
 ## Checks: with a torrent and without
 

@@ -9,7 +9,9 @@ import { ContainerFactory } from "../../services/media/container/ContainerFactor
 import { matroskaInput } from "../../services/encode/MatroskaInput.js";
 
 // Synthetic local files only; neither the container nor its byte reader starts a torrent.
-for (const [format, videoCodec] of [["avi", "mjpeg"], ["asf", "wmv2"]]) {
+// An AVI with an index is read by FFmpeg from the original file
+// (original-input-avi.test.js); packets are admitted for ASF here.
+for (const [format, videoCodec] of [["asf", "wmv2"]]) {
 for (const audioCodec of ["pcm_s16le", "wmav2"]) {
   test(`${format} ${videoCodec} and ${audioCodec} preserve their decoder declarations in admitted input`, async () => {
     const directory = await fs.mkdtemp(path.join(os.tmpdir(), "ttv-avi-admitted-"));

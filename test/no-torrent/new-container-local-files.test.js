@@ -66,7 +66,9 @@ for (const [format, video, audio, removeAud = false] of [["mpegts", "libx264", "
         }
       }
       const earlyInfo = format === "asf" ? await container.readMediaInfo() : null;
-      if (["avi", "matroska", "mp4", "asf", "mpegts", "mpeg"].includes(format)) {
+      // An AVI with an index is read by FFmpeg from the original file
+      // (torrent-tv/meta#151, test/no-torrent/original-input-avi.test.js).
+      if (["matroska", "mp4", "asf", "mpegts", "mpeg"].includes(format)) {
         const index = await container.readPacketIndex();
         const startSeconds = (await container.readMediaInfo()).startTimeSeconds ?? 0;
         if (format === "mpegts" && ["libx264", "libx265"].includes(video)) {

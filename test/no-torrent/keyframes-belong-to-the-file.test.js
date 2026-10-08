@@ -128,7 +128,8 @@ test("a read that threw is not an answer, and the next asker reads again", async
   await assert.rejects(() => keyframes.read(FILE), /the head is not downloaded/);
   assert.equal(keyframes.of(FILE).answered, false);
 
-  const table = await keyframes.read(FILE);
+  await keyframes.warm(FILE);
+  const table = keyframes.of(FILE);
 
   assert.equal(reads, 2, "it was read again rather than refused from a cached failure");
   assert.deepEqual(table.times, [0, 6]);
@@ -160,7 +161,8 @@ test("the packet probe IS the answer where no container index exists", () => {
 test("a registry with no reader says nothing about the file rather than lying about it", async () => {
   const keyframes = new KeyframeTables({ logger: QUIET });
 
-  const table = await keyframes.read(FILE);
+  await keyframes.warm(FILE);
+  const table = keyframes.of(FILE);
 
   assert.equal(table.readable, false, "there is no table, so a picture of this file is re-encoded");
   assert.equal(
@@ -243,4 +245,16 @@ test("answered and readable are two questions, and a bag of fields cannot tell t
   assert.equal(table.answered, true, "the container came back");
   assert.equal(table.readable, false, "with no keyframes, which is permanent for this file");
   assert.equal(table.format, "mpegts", "and the refusal can name what it is refusing");
+});
+
+test("a container that says a copy loses the picture order is carried through, and not overruled", async () => {
+  // AVI states decoding order only; an H.264 picture in it may reorder (torrent-tv/meta#151).
+  const keyframes = tables(async () => ({ times: [0, 2, 4], tolerance: 0, copyable: false, format: "avi" }));
+  await keyframes.warm(FILE);
+  const table = keyframes.of(FILE);
+  assert.equal(table.readable, true);
+  assert.equal(table.copyable, false);
+  table.learn({ times: [0, 2, 4, 6], format: "packets" });
+  assert.equal(table.copyable, false, "a fuller reading that says nothing keeps the container's statement");
+  assert.equal(new KeyframeTable().learn({ times: [0, 2] }).copyable, true, "a table that says nothing is copyable");
 });

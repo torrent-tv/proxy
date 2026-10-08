@@ -1,3 +1,7 @@
+## Unreleased
+
+- **Fix**: Play indexed AVI files (`idx1` and OpenDML) by letting FFmpeg read the original file. The index names the header, the bytes FFmpeg reads at open and each interval's packets, so no packet is reassembled and the OpenDML reader is removed. Every selected file of a run takes the same path. The encoder input route answers to the end of the admitted range: FFmpeg 6.1 stopped at a 1 MiB answer. An AVI picture whose codec may reorder (H.264, HEVC, MPEG-4) is re-encoded, because AVI states no presentation time and a copy plays its pictures out of order (torrent-tv/meta#151).
+
 ## 2.95.13
 
 - **Fix**: Trim original-source AAC preroll with FFmpeg's output seek and explicitly preserve the published segment position when copying or transcoding separate audio. A later copied AAC segment no longer starts at zero (torrent-tv/meta#154).

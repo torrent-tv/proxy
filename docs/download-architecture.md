@@ -56,13 +56,19 @@ changed availability, causing unfinished media reads and input admission to retr
 
 The encoder receives complete admitted original-file ranges under its memory
 allowance, through a loopback-only HTTP address owned by its run. Each response
-ends within the retained range and is at most 1 MiB. Missing positions return
+runs to the end of the retained range the read starts in: FFmpeg 6.1 takes a
+shorter answer for the end of the input. Missing positions return
 503 immediately; reading never waits for the torrent. FFmpeg demuxes the original
 container and selects its tracks. Matroska Cues supply coarse media ranges without
-parsing media block headers. Original-source input is enabled only when that
-complete Cue map exists, the output is fMP4 and all selected tracks share one
-source file. Other layouts, MPEG-TS output and combined inputs from separate
-files retain their existing indexed input:
+parsing media block headers. An AVI `idx1` or OpenDML index states every
+packet's offset, length and keyframe flag, and its decoding position is its time;
+the ranges are the header, the index FFmpeg reads at open, the first packet of
+each stream and the packets of the interval, from the keyframe two before it.
+AVI states no presentation time, so a picture whose codec may reorder is
+re-encoded rather than copied (`KeyframeTable.copyable`). Original-source input
+is enabled when every selected file can name its ranges this way and the output
+is fMP4. Other layouts, MPEG-TS output and AVI without an index retain their
+existing indexed input:
 a finite FFprobe interval does not establish addresses for the full future map.
 A stopped or superseded request releases its
 reservation. Completed segments remain available to every compatible viewer.

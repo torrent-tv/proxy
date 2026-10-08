@@ -561,6 +561,7 @@ export async function startProxyServer({
       return {
         times: index?.times ?? null,
         tolerance: index?.tolerance ?? 0,
+        copyable: index?.copyable,
         // Which container answered, whether or not it produced a table: the
         // refusal that follows names it, and a measurement of how often an
         // index disagrees with its own file cannot be read without it.
@@ -596,14 +597,19 @@ export async function startProxyServer({
           mode: type === "video" ? spec.encode ? "transcode" : "copy" : spec.transcode ? "transcode" : "copy" });
         selected.set(spec.fileIndex, list);
       }
-      const sources = [];
+      // Every selected file is read the same way in one run: from the original
+      // file when each container can name the bytes the interval needs, from
+      // reassembled packets otherwise.
+      const files = [];
       for (const [fileIndex, choices] of selected) {
         const params = await containerOver({ sourceKey: output.file.sourceKey, fileIndex });
         if (!params) return { kind: "needs-source" };
         const tracks = await containerOrchestrator.inspect(params, "tracks");
         if (tracks.kind !== "result") return tracks;
         const container = containerOrchestrator.known(params.sourceKey, fileIndex);
-        if (typeof container?.readPacketIndex !== "function") return { kind: "needs-index", reason: "packet-index-not-yet-available" };
+        if (typeof container?.readPacketIndex !== "function" && typeof container?.readSourceRanges !== "function") {
+          return { kind: "needs-index", reason: "packet-index-not-yet-available" };
+        }
         const modes = new Map(), wanted = [];
         for (const choice of choices) {
           // The picture is the first usable video track (torrent-tv/meta#49);
@@ -622,7 +628,12 @@ export async function startProxyServer({
           modes: Object.fromEntries(wanted.map(track => [track.trackNumber, modes.get(track)])) };
         const navigation = await containerOrchestrator.inspect(params, "source-navigation");
         if (navigation.kind !== "result") return navigation;
-        if (navigation.value && selected.size === 1 && output.segmentFormat.supportsOriginalInput === true) {
+        files.push({ fileIndex, choices, params, wanted, modes, timeShiftSeconds, sourceInterval, navigable: navigation.value === true });
+      }
+      const original = output.segmentFormat.supportsOriginalInput === true && files.every(file => file.navigable);
+      const sources = [];
+      for (const { fileIndex, choices, params, wanted, modes, timeShiftSeconds, sourceInterval } of files) {
+        if (original) {
           const ranges = await containerOrchestrator.inspect(params, "source-ranges");
           if (ranges.kind !== "result") return ranges;
           sources.push({ sourceKey: params.sourceKey, fileIndex, timeShiftSeconds,

@@ -22,7 +22,9 @@ for (const format of ["avi", "mkv"]) test(`${format} opening completes through m
     assert.equal(made.status, 0, made.stderr);
     const bytes = await fs.readFile(file);
     const reads = new Map();
-    const missingEntry = format === "avi" ? bytes.lastIndexOf(Buffer.from("idx1")) + 8 + 20 * 16 : -1;
+    // The AVI index is read in requests; the first one finds its bytes missing.
+    const idx1 = bytes.lastIndexOf(Buffer.from("idx1")) + 8;
+    const missingEntry = format === "avi" ? idx1 : -1;
     let bytesArrived = false;
     const reader = new ContainerOrchestrator();
     const budget = new MachineBudget({ policy: { kind: "fixed", bytes: 64 * 1024 * 1024 } });
@@ -54,8 +56,9 @@ for (const format of ["avi", "mkv"]) test(`${format} opening completes through m
     assert.equal(result.kind, "result", JSON.stringify(result));
     if (format === "avi") {
       assert.ok(result.value.times.length > 1);
-      const committedEntry = bytes.lastIndexOf(Buffer.from("idx1")) + 8 + 10 * 16;
-      assert.equal(reads.get(committedEntry), 1, "memory growth must resume the existing AVI index");
+      assert.ok(bytesArrived, "the index waited for missing bytes and resumed");
+      const indexReads = [...reads].filter(([at]) => at >= idx1).reduce((sum, [, count]) => sum + count, 0);
+      assert.ok(indexReads <= 8, `the index is read in requests, not entry by entry (${indexReads} reads)`);
     }
     else assert.ok(result.value.some(track => track.codecId === "V_MPEGH/ISO/HEVC"));
     requests.forget("source");

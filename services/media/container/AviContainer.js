@@ -142,8 +142,9 @@ export class AviContainer extends Container {
     const record = { dispose: () => this.#index?.dispose?.() };
     const allocation = this.packetMemory?.forRecord?.(record, "index") ?? this.packetMemory;
     const index = await readAviIndex({ read: this.readRange, fileSize: this.fileSize, movi, idx1, allocation,
-      streams: tracks.map(track => ({ type: track.type, timeBase: track.timeBase, sampleSize: track.sampleSize,
-        startTimeSeconds: track.startTimeSeconds, indexChunks: streams[track.trackNumber].indexChunks })) });
+      streams: tracks.map(track => ({ type: track.type, codecId: track.codecId, timeBase: track.timeBase,
+        sampleSize: track.sampleSize, blockAlign: track.blockAlign ?? 0, startUnits: track.startUnits ?? 0,
+        indexChunks: streams[track.trackNumber].indexChunks })) });
     this.#index = index;
     return index;
   }
@@ -173,8 +174,12 @@ export class AviContainer extends Container {
     if (!index) return { kind: "needs-index", reason: "source-has-no-avi-index" };
     const tracks = await this.readTracks();
     const { movi } = await this.#topLevel();
-    const requested = tracks.filter(track => ["video", "audio"].includes(track.type) &&
-      (!interval.trackIds?.length || interval.trackIds.includes(track.trackNumber)));
+    // Every audio and video stream, whichever the run outputs: FFmpeg's AVI
+    // demuxer seeks to the earliest position any stream's index gives for the
+    // keyframe time (`pos_min`, avi_read_seek) and reads every stream's packets
+    // in file order. Naming only the run's own tracks left a picture-only run
+    // asking for sound it was not given, and its seek failed (torrent-tv/meta#151).
+    const requested = tracks.filter(track => ["video", "audio"].includes(track.type));
     const picture = ContainerTrack.firstUsable(tracks, "video");
     const padded = ([start, end]) => [Math.max(0, start), Math.min(this.fileSize - 1, end + FFMPEG_INPUT_BUFFER_BYTES)];
     const ranges = [[0, movi.start + 3], ...index.indexRanges, ...index.firstPackets(),
@@ -230,6 +235,7 @@ export class AviContainer extends Container {
         track = new AudioTrack({ ...params, codecId: waveCodec(tag),
           channels: strf.readUInt16LE(2), samplingFrequency: strf.readUInt32LE(4),
           codecPrivateB64: strf.subarray(18).toString("base64") });
+        track.blockAlign = strf.readUInt16LE(12);
         track.matroskaCodecId = "A_MS/ACM";
         track.matroskaCodecPrivateB64 = (strf.length === 16
           ? Buffer.concat([strf, Buffer.alloc(2)]) : strf).toString("base64");
@@ -238,6 +244,7 @@ export class AviContainer extends Container {
       track.startTimeSeconds = track.timeBase === null ? null : strh.readUInt32LE(28) * track.timeBase;
       track.durationSeconds = track.timeBase === null ? null : strh.readUInt32LE(32) * track.timeBase;
       track.sampleSize = strh.readUInt32LE(44);
+      track.startUnits = strh.readUInt32LE(28);
       if (["h264", "hevc"].includes(track.codecId)) track.presentationCadenceSeconds = track.timeBase;
       return track;
     });

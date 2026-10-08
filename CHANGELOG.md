@@ -1,3 +1,7 @@
+## Unreleased
+
+- **Fix**: An AVI run names the bytes of every audio and video stream of its interval, whichever tracks it outputs. FFmpeg's AVI demuxer seeks to the earliest position any stream gives for the keyframe and reads every stream in file order; a picture-only run, given only the picture's bytes, failed its seek wherever the sound was stored ahead of two keyframes of picture, and Frankenstein stopped at 384 s. A failed seek is now taken as lost input, so the piece made after it is never served, and a refused byte of encoder input is logged. AVI stream clocks follow FFmpeg's rules exactly: audio packets count by the header's block alignment and FFmpeg's sample-size corrections (torrent-tv/meta#151).
+
 ## 2.95.22
 
 - **Fix**: Once a container's index is read, the download map computes each segment's source bytes directly instead of through the file's queue of reads. A pass over a two-hour AVI took minutes on Home Assistant, so the map reached the swarm only after the viewer had run out of film (torrent-tv/meta#151).

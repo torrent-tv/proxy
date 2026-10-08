@@ -1,3 +1,7 @@
+## Unreleased
+
+- **Fix**: Forecast startup from measured torrent download service when future media pieces have no queued arrival, and keep an unconfirmed zero delay unknown to the viewer (#ttv-160).
+
 ## 2.95.28
 
 - **Fix**: While any urgent piece is missing, state only the global first class to WebTorrent. Its picker checks selections per peer and falls through to zero-priority pieces when that peer holds none of the first-class pieces; this allowed less urgent data to download while playback was waiting. Stall reports now include the numbers of peers holding each first-class piece and outstanding requests for it (torrent-tv/meta#161).

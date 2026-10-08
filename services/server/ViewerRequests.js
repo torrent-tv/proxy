@@ -614,6 +614,10 @@ export class ViewerRequests {
           id: sourceId,
           complete: stats?.fileAvailable === true,
           residence: stats?.residence,
+          fileOffset: stats?.fileOffset,
+          fileLength: stats?.fileLength,
+          pieceLength: stats?.pieceLength,
+          downloadRateReadings: this.#sourceRateReadings(measurement, sourceId, stats, now),
           downloadForecast,
         });
       }
@@ -718,10 +722,11 @@ export class ViewerRequests {
         bufferLimitSeconds: input.bufferLimitSeconds,
         lookaheadSeconds: input.lookaheadSeconds,
         link: input.linkReadings,
-        sources: input.sources.map(({ id, complete, residence, downloadForecast }) => ({
+        sources: input.sources.map(({ id, complete, residence, downloadForecast, downloadRateReadings }) => ({
           id, complete, residenceRanges: residence?.length ?? 0,
           forecastAt: downloadForecast?.measuredAt ?? null, plannedPieces: downloadForecast?.ranges.length ?? 0,
-          unknownPieces: downloadForecast?.ranges.filter(range => range.availableAt === null).length ?? 0
+          unknownPieces: downloadForecast?.ranges.filter(range => range.availableAt === null).length ?? 0,
+          downloadRateBytesPerSecond: downloadRateReadings?.lastValue ?? null
         })),
         tracks: tracks.map(({ id, processedSeconds, readings, segments, readySegmentIndices }) => ({
           id, processedSeconds, readings, segments: segments.length, prepared: readySegmentIndices.length
@@ -740,7 +745,7 @@ export class ViewerRequests {
     const id = typeof consumerId === "string" ? consumerId : "";
     let state = byViewer.get(id);
     if (!state) {
-      state = { link: new this.#host.playbackReadiness.RateTrend(this.#host.lookaheadSeconds), tracks: new Map() };
+      state = { link: new this.#host.playbackReadiness.RateTrend(this.#host.lookaheadSeconds), tracks: new Map(), sources: new Map() };
       byViewer.set(id, state);
     }
     return state;
@@ -761,6 +766,18 @@ export class ViewerRequests {
       if (Number.isFinite(projected) && projected > 0) {
         trend.add(now, projected);
       }
+    }
+    return trend.snapshot();
+  }
+
+  #sourceRateReadings(state, id, stats, now) {
+    let trend = state.sources.get(id);
+    if (!trend) {
+      trend = new this.#host.playbackReadiness.RateTrend(this.#host.lookaheadSeconds);
+      state.sources.set(id, trend);
+    }
+    if (Number.isFinite(stats?.downloadSpeed) && stats.downloadSpeed >= 0) {
+      trend.add(now, stats.downloadSpeed);
     }
     return trend.snapshot();
   }

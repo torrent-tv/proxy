@@ -107,7 +107,7 @@ test("mapped piece arrivals retain other viewers' wait and require the whole pie
   state.sources[0].downloadForecast.ranges[0].availableAt = state.now + 1000;
   assert.equal(predictPlaybackReadiness(state).delaySeconds, 4);
   state.sources[0].downloadForecast.ranges[0].availableAt = null;
-  assert.equal(predictPlaybackReadiness(state).reason, "download-schedule-unavailable");
+  assert.equal(predictPlaybackReadiness(state).reason, "download-rate-unavailable");
 });
 
 test("a declared map forecast cannot invent an absent future range from download speed", () => {
@@ -115,9 +115,50 @@ test("a declared map forecast cannot invent an absent future range from download
   state.sources[0] = { id: "source", complete: false, residence: [],
     readings: [{ at: state.now, value: 1e9 }], downloadForecast: { ranges: [] } };
   const result = predictPlaybackReadiness(state);
-  assert.equal(result.reason, "download-schedule-unavailable");
+  assert.equal(result.reason, "download-rate-unavailable");
   assert.deepEqual(result.unavailableSource, { sourceId: "source", segmentIndex: 1,
     range: { start: 4, end: 8 }, missing: [{ start: 4, end: 8 }] });
+});
+
+test("unmapped source pieces use the measured torrent download rate in media order", () => {
+  const state = input({ reserveSeconds: 0 });
+  state.tracks[0].readySegmentIndices = [];
+  state.sources[0] = {
+    id: "source",
+    complete: false,
+    fileOffset: 0,
+    fileLength: 8,
+    pieceLength: 4,
+    residence: [],
+    downloadForecast: { ranges: [] },
+    downloadRateReadings: { count: 1, lastAt: state.now, lastValue: 4, meanValue: 4, spanSeconds: 0 }
+  };
+
+  const forecast = predictPlaybackReadiness(state);
+
+  assert.equal(forecast.ready, false);
+  assert.equal(forecast.reason, "minimum-safe-delay");
+  assert.equal(forecast.delaySeconds, 4);
+});
+
+test("an unmapped source piece stays unknown without positive measured download service", () => {
+  const state = input();
+  state.sources[0] = {
+    id: "source",
+    complete: false,
+    fileOffset: 0,
+    fileLength: 8,
+    pieceLength: 4,
+    residence: [],
+    downloadForecast: { ranges: [] },
+    downloadRateReadings: { count: 1, lastAt: state.now, lastValue: 0, meanValue: 0, spanSeconds: 0 }
+  };
+
+  const forecast = predictPlaybackReadiness(state);
+
+  assert.equal(forecast.ready, false);
+  assert.equal(forecast.reason, "service-not-advancing");
+  assert.equal(forecast.delaySeconds, null);
 });
 
 test("overlapping unordered arrivals preserve the latest required byte and ignore unrelated arrivals", () => {

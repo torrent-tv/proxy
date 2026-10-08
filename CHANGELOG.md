@@ -1,3 +1,7 @@
+## Unreleased
+
+- **Fix**: The proxy states when each piece of a torrent arrives (`download <hash> verified piece=N`). The requests to the swarm were logged and the arrivals were not, so the order in which a film actually arrives could not be read from any log (torrent-tv/meta#151).
+
 ## 2.95.25
 
 - **Fix**: A run that reads the original file states at its end how many reads FFmpeg made of its input, how many bytes, and when the first and the last came. Field 2026-10-08: a run took 6-9 s for a piece FFmpeg makes from a file in 1.6 s, and nothing said whether it was waiting on its input (torrent-tv/meta#151).

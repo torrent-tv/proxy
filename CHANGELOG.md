@@ -1,3 +1,7 @@
+## Unreleased
+
+- **Fix**: A copied soundtrack served beside a re-encoded picture begins at its own interval. FFmpeg's seek lands on the picture's keyframe before the time asked for, and only decoded streams were trimmed there, so a copied piece began at that keyframe: with a keyframe every 11 s a piece of `Frankenstein.rus.LostFilm.TV.avi` held the film's first four seconds and playback failed at 8 s (torrent-tv/meta#159).
+
 ## 2.95.31
 
 - **Perf**: A run that reads the original file (AVI, Matroska with Cues) is given a stretch of segments copied once before it starts, instead of one segment. FFmpeg opened Frankenstein's 2.36 GB AVI for every 4 s of film, 3.5-3.7 s each time, and made 0.2-0.9x of real time; a 30-segment run made 2.6x. The stretch ends at the first segment whose bytes are not all downloaded, where copying it would take longer than one open measured on this host, or where memory runs out, whichever is first; until the copy rate and the open are measured a run gets one segment, as before. The run claims only its stretch, and a failure inside it is refused only while the same stretch is commanded again (torrent-tv/meta#158).

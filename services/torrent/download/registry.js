@@ -18,6 +18,7 @@
 import { DemandRegister } from "../demand/DemandRegister.js";
 import { SwarmSelection } from "./SwarmSelection.js";
 import { futureDownload } from "./FutureDownload.js";
+import { urgencyName } from "../demand/index.js";
 
 /** @type {WeakMap<object, { register: DemandRegister, selection: SwarmSelection }>} */
 const byTorrent = new WeakMap();
@@ -25,6 +26,8 @@ const byTorrent = new WeakMap();
 const live = new Set();
 let futurePending = null;
 let publishingSelections = false;
+/** What the last reconciliation told the swarm to fetch first, for the pool to say. */
+let firstClassStated = "none";
 
 /** Concurrent file reports share one snapshot of every live download map. */
 export function forecastDownloads() {
@@ -102,6 +105,11 @@ export function forgetTorrent(torrent) {
   live.delete(held);
 }
 
+/** What the swarm was last told to fetch first: the level, its priority and the pieces per torrent. */
+export function firstClassStatement() {
+  return firstClassStated;
+}
+
 /**
  * Bring every torrent's download set into line with what is stated.
  *
@@ -134,5 +142,12 @@ export function reconcileAll() {
   } finally {
     publishingSelections = false;
   }
+  // What the swarm is told to fetch FIRST, said when it changes: the rest is
+  // fetched only by a wire with nothing first-class left to take.
+  const said = entries.map(entry => `${String(entry.torrent.infoHash ?? "").slice(0, 8)}: ` +
+    `${(entry.selection.firstClassPieces ?? []).slice(0, 8).join(",") || "nothing"}` +
+    `${(entry.selection.firstClassPieces?.length ?? 0) > 8 ? ` +${entry.selection.firstClassPieces.length - 8} more` : ""}`).join("; ");
+  const head = firstClass ? `${urgencyName(firstClass.urgency)} priority ${firstClass.priority}` : "none";
+  firstClassStated = `${head} — pieces ${said}`;
   return { torrents: entries.length, speculativeAllowed, stated, withdrawn };
 }

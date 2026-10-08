@@ -250,6 +250,28 @@ async function tsTimes(piece) {
   return times;
 }
 
+/**
+ * The audio elementary stream of an MPEG-TS piece, from its PES payloads
+ * (ISO/IEC 13818-1 2.4.3.2, 2.4.3.6), so the sound can be decoded without
+ * FFmpeg's MPEG-TS demuxer, which the CI build cannot run (see `tsTimes`).
+ */
+async function tsAudioStream(piece) {
+  const bytes = await fs.readFile(piece);
+  const parts = [];
+  let audioPid = null;
+  for (let at = 0; at + 188 <= bytes.length; at += 188) {
+    const pid = ((bytes[at + 1] & 0x1f) << 8) | bytes[at + 2];
+    if (!(bytes[at + 3] & 0x10)) continue;
+    let payload = at + 4;
+    if (bytes[at + 3] & 0x20) payload += 1 + bytes[at + 4];
+    const starts = (bytes[at + 1] & 0x40) && bytes[payload] === 0 && bytes[payload + 1] === 0 && bytes[payload + 2] === 1;
+    if (starts && bytes[payload + 3] >= 0xc0 && bytes[payload + 3] <= 0xdf) audioPid ??= pid;
+    if (pid !== audioPid) continue;
+    parts.push(bytes.subarray(starts ? payload + 9 + bytes[payload + 8] : payload, at + 188));
+  }
+  return Buffer.concat(parts);
+}
+
 test("an idx1 AVI with MP3 plays its interval as MPEG-TS, the container a copied MP3 needs", () => inDirectory(async directory => {
   // The page asks for MPEG-TS when MP3 is copied: MediaSource takes MP3 there and not in fMP4.
   const file = path.join(directory, "source.avi");
@@ -300,6 +322,8 @@ test("a copied AVI soundtrack on an even grid starts at its interval, not at the
   // A PES packet carries several MP3 frames, so the last one starts up to a few frames before the end.
   const span = sound.at(-1) - sound[0];
   assert.ok(span > to - from - 0.3 && span < to - from, `the piece holds the interval's length of sound, not more: ${span} s`);
-  assert.ok(loudness(piece, 3.1, 3.9) > 0.2, "the loud second 31-32 s is the piece's last second");
-  assert.ok(loudness(piece, 0.05, 2.9) < 0.02, "and nothing loud before it");
+  const stream = path.join(directory, "piece.mp3");
+  await fs.writeFile(stream, await tsAudioStream(piece));
+  assert.ok(loudness(stream, 3.1, 3.9) > 0.2, "the loud second 31-32 s is the piece's last second");
+  assert.ok(loudness(stream, 0.05, 2.9) < 0.02, "and nothing loud before it");
 }));

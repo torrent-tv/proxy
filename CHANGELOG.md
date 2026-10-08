@@ -1,3 +1,7 @@
+## Unreleased
+
+- **Fix**: Read the original file for MPEG-TS output too. The page asks for MPEG-TS when MP3 is copied, which is the usual AVI (XviD with MP3), and those runs fell back to reassembled packets, which an indexed AVI no longer has: the film did not start (torrent-tv/meta#151).
+
 ## 2.95.14
 
 - **Fix**: Play indexed AVI files (`idx1` and OpenDML) by letting FFmpeg read the original file. The index names the header, the bytes FFmpeg reads at open and each interval's packets, so no packet is reassembled and the OpenDML reader is removed. Every selected file of a run takes the same path. The encoder input route answers to the end of the admitted range: FFmpeg 6.1 stopped at a 1 MiB answer. An AVI picture whose codec may reorder (H.264, HEVC, MPEG-4) is re-encoded, because AVI states no presentation time and a copy plays its pictures out of order (torrent-tv/meta#151).

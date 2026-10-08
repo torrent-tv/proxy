@@ -1,4 +1,4 @@
-## Unreleased
+## 2.95.16
 
 - **Fix**: An encoder input states each change of what it waits for — bytes, memory, ready or refused — and when it is withdrawn, so a piece that is never made names its cause in the log. Field 2026-10-08: an AVI stopped after four pieces with nothing in the log but "no encoder could be made" (torrent-tv/meta#151).
 

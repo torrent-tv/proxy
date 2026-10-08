@@ -23,6 +23,18 @@ const READ_BYTES = 1024 * 1024;
 /** Bytes held per packet: position (8), size (4), time (8), keyframe flag (1). */
 const ENTRY_BYTES = 21;
 const AVIIF_KEYFRAME = 0x10;
+/**
+ * Packets of a stream FFmpeg can read past the last one a run needs before it
+ * stops reading: its demuxer runs in a thread and goes on until a selected
+ * stream's queue is full (fftools n8.1). Eight packets queued to the decoder
+ * or muxer (`DEFAULT_PACKET_THREAD_QUEUE_SIZE`), two frames queued to the
+ * filter (`DEFAULT_FRAME_THREAD_QUEUE_SIZE`), at most sixteen packets held by
+ * a frame-threaded decoder (`MAX_AUTO_THREADS`), and at most sixteen pictures
+ * held for reordering (H.264's largest picture buffer). Without it a picture
+ * whose every frame is a keyframe left FFmpeg one frame of margin, and its
+ * read-ahead asked for bytes the run did not hold (torrent-tv/meta#151).
+ */
+const READ_AHEAD_PACKETS = 8 + 2 + 16 + 16;
 
 /** One stream's packets in file order, in typed arrays. */
 class StreamPackets {
@@ -246,7 +258,8 @@ export class AviIndex {
    * same margin the Matroska reading keeps in Cue points — to the keyframe that
    * follows the one after `to`. Every other selected stream is taken over the
    * same span of time, so an interleave that places sound ahead of or behind
-   * its picture is covered in either direction.
+   * its picture is covered in either direction. Each stream then runs on for
+   * the packets FFmpeg reads ahead (`READ_AHEAD_PACKETS`).
    *
    * @param {{ from: number, to: number, picture: number | null, streams: number[] }} params
    * @returns {Array<[number, number]>}
@@ -269,7 +282,7 @@ export class AviIndex {
       if (!packets?.count) continue;
       const start = packets.atOrBefore(first);
       let end = packets.count - 1;
-      if (Number.isFinite(last)) end = Math.min(end, packets.atOrBefore(last));
+      if (Number.isFinite(last)) end = Math.min(end, packets.atOrBefore(last) + READ_AHEAD_PACKETS);
       let low = Infinity, high = -1;
       for (let at = start; at <= end; at++) {
         if (!packets.lengths[at]) continue;

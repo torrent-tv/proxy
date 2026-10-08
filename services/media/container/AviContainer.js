@@ -20,6 +20,8 @@ import { RetainedReads } from "./RetainedReads.js";
 import { OutsideReadableEdges, edgeReader, emptyWorkTags, text, textList, yearOf } from "./work-tags.js";
 
 const MPEG4_CODECS = new Set(["FMP4", "XVID", "DIVX", "DX50", "MP4V", "M4S2", "MP4S"]);
+/** FFmpeg's input buffer, filled ahead of what its demuxer parses (`IO_BUFFER_SIZE`, libavformat/aviobuf.c n8.1). */
+const FFMPEG_INPUT_BUFFER_BYTES = 32768;
 /** Picture codecs whose every picture stands alone, so decoding order is showing order. */
 const INTRA_PICTURE_CODECS = new Set(["MJPG", "JPEG", "DIB ", "\0\0\0\0", "I420", "YV12", "YUY2", "UYVY"]);
 const MPEG_AUDIO_CODECS = new Set(["mp1", "mp2", "mp3"]);
@@ -160,8 +162,8 @@ export class AviContainer extends Container {
    * the declarations and the start of `movi` it probes, the index it loads at
    * open (`idx1` to the end of the file, or every OpenDML standard index), the
    * first packet of each stream it inspects, and the selected streams' packets
-   * around the interval. Each range is held one MiB past its last named byte,
-   * because FFmpeg's input buffer reads ahead of the packet it is parsing.
+   * around the interval. Each range is held one input buffer of FFmpeg past its
+   * last named byte, because that buffer is filled ahead of the packet parsed.
    */
   async readSourceRanges(interval) {
     if (!Number.isFinite(interval?.from) || !Number.isFinite(interval?.to) || interval.to <= interval.from) {
@@ -174,8 +176,7 @@ export class AviContainer extends Container {
     const requested = tracks.filter(track => ["video", "audio"].includes(track.type) &&
       (!interval.trackIds?.length || interval.trackIds.includes(track.trackNumber)));
     const picture = ContainerTrack.firstUsable(tracks, "video");
-    const requestBytes = 1024 * 1024;
-    const padded = ([start, end]) => [Math.max(0, start), Math.min(this.fileSize - 1, end + requestBytes)];
+    const padded = ([start, end]) => [Math.max(0, start), Math.min(this.fileSize - 1, end + FFMPEG_INPUT_BUFFER_BYTES)];
     const ranges = [[0, movi.start + 3], ...index.indexRanges, ...index.firstPackets(),
       ...index.mediaRanges({ from: interval.from, to: interval.to, picture: picture?.trackNumber ?? null,
         streams: requested.map(track => track.trackNumber) })].map(padded);

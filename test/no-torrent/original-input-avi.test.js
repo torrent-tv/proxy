@@ -6,6 +6,7 @@ import os from "node:os";
 import path from "node:path";
 import { spawn, spawnSync } from "node:child_process";
 import ffmpegBin from "ffmpeg-static";
+import ffprobe from "@ffprobe-installer/ffprobe";
 import { AviContainer } from "../../services/media/container/AviContainer.js";
 import { admitOriginalInput } from "../../services/encode/OriginalInput.js";
 import { buildOriginalCommand } from "../../services/encode/source-command.js";
@@ -135,8 +136,14 @@ async function checkAvi(directory, file, { duration, audio, timeBase, copyable }
   const trackIds = tracks.filter(track => ["video", "audio"].includes(track.type)).map(track => track.trackNumber);
   const source = await container.readSourceRanges({ from, to, trackIds });
   assert.equal(source.kind, "result");
-  const named = source.ranges.reduce((sum, [start, end]) => sum + end - start + 1, 0);
-  assert.ok(named < bytes.length / 2, `the run needs ${named} of ${bytes.length} bytes, not the whole film`);
+  // The run holds the interval, not the film: no packet ten to twenty seconds on is named.
+  const far = lines(spawnSync(ffprobe.path, ["-v", "error", "-show_entries", "packet=dts_time,pos", "-of", "csv=p=0", file],
+    { encoding: "utf8", windowsHide: true, maxBuffer: 64 * 1024 * 1024 }).stdout).map(line => line.split(",").map(Number))
+    .filter(([time]) => time > to + 10 && time < to + 20);
+  assert.ok(far.length > 0);
+  for (const [time, position] of far) {
+    assert.ok(!source.ranges.some(([start, end]) => position >= start && position <= end), `the packet at ${time}s is not named`);
+  }
 
   const picture = await runOver(directory, { bytes, ranges: source.ranges, from, command: {
     startIndex: at, timeline: { published: grid, cutGrid: "keyframe" }, keyframes: { times: keyframes },
@@ -184,6 +191,34 @@ test("an OpenDML AVI past one gibibyte plays its interval from the named bytes o
 }));
 
 
+/**
+ * Presentation time of every PES packet of an MPEG-TS piece, by stream kind,
+ * read from the packet headers (ISO/IEC 13818-1 2.4.3.2, 2.4.3.7). Neither
+ * FFmpeg nor ffprobe can read it in CI: the static 7.0.2 Linux build crashes
+ * (SIGSEGV) on any MPEG-TS input, its own output included.
+ */
+async function tsTimes(piece) {
+  const bytes = await fs.readFile(piece);
+  const times = { video: [], audio: [] };
+  for (let at = 0; at + 188 <= bytes.length; at += 188) {
+    assert.equal(bytes[at], 0x47, "every packet starts with the sync byte");
+    if (!(bytes[at + 1] & 0x40)) continue;
+    let payload = at + 4;
+    if (bytes[at + 3] & 0x20) payload += 1 + bytes[at + 4];
+    if (bytes[payload] !== 0 || bytes[payload + 1] !== 0 || bytes[payload + 2] !== 1) continue;
+    const stream = bytes[payload + 3];
+    const kind = stream >= 0xe0 && stream <= 0xef ? "video" : stream >= 0xc0 && stream <= 0xdf ? "audio" : null;
+    if (!kind || !(bytes[payload + 7] & 0x80)) continue;
+    const field = payload + 9;
+    const pts = (bytes[field] & 0x0e) * 2 ** 29 + bytes[field + 1] * 2 ** 22 + (bytes[field + 2] >> 1) * 2 ** 15 +
+      bytes[field + 3] * 2 ** 7 + (bytes[field + 4] >> 1);
+    times[kind].push(pts / 90000);
+  }
+  times.video.sort((left, right) => left - right);
+  times.audio.sort((left, right) => left - right);
+  return times;
+}
+
 test("an idx1 AVI with MP3 plays its interval as MPEG-TS, the container a copied MP3 needs", () => inDirectory(async directory => {
   // The page asks for MPEG-TS when MP3 is copied: MediaSource takes MP3 there and not in fMP4.
   const file = path.join(directory, "source.avi");
@@ -201,10 +236,12 @@ test("an idx1 AVI with MP3 plays its interval as MPEG-TS, the container a copied
   const source = await container.readSourceRanges({ from, to, trackIds: tracks.filter(track => ["video", "audio"].includes(track.type)).map(track => track.trackNumber) });
   const run = command => runOver(directory, { bytes, ranges: source.ranges, from, format: mpegtsFormat, command: {
     startIndex: at, timeline: { published: grid, cutGrid: "keyframe" }, keyframes: { times: keyframes }, ...command } });
-  const firstTime = piece => Number(lines(ffmpeg(["-i", piece, "-c", "copy", "-f", "framecrc", "-"]))[0].split(",")[1]) / 90000;
-  const picture = await run({ transcodeVideo: true, selections: [{ track: { type: "video", reorderDepth: 0 }, index: 0 }] });
-  const expected = pictures(file, 1 / FPS).filter(([pts]) => pts >= from - 1e-6 && pts < to - 1e-6).map(([, hash]) => hash);
-  assert.deepEqual(pictures(picture.piece, 1).map(([, hash]) => hash), expected, "the piece holds exactly the interval's pictures");
-  const sound = await run({ audioOnly: true, transcodeAudio: false, audioSourceTrackIndex: 0, selections: [{ track: { type: "audio" }, index: 0 }] });
-  assert.ok(Math.abs(firstTime(sound.piece) - firstTime(picture.piece)) < 0.03, "the copied sound starts where the picture does");
+  const picture = (await tsTimes((await run({ transcodeVideo: true, selections: [{ track: { type: "video", reorderDepth: 0 }, index: 0 }] })).piece)).video;
+  const expected = pictures(file, 1 / FPS).filter(([pts]) => pts >= from - 1e-6 && pts < to - 1e-6).length;
+  assert.equal(picture.length, expected, "the piece holds the interval's pictures and nothing past it");
+  picture.forEach((time, at) => assert.ok(Math.abs(time - picture[0] - at / FPS) < 1e-3, `picture ${at} is one frame after the last`));
+  const sound = (await tsTimes((await run({ audioOnly: true, transcodeAudio: false, audioSourceTrackIndex: 0,
+    selections: [{ track: { type: "audio" }, index: 0 }] })).piece)).audio;
+  assert.ok(Math.abs(sound[0] - picture[0]) < 0.03, "the copied sound starts where the picture does");
+  assert.ok(Math.abs(sound.at(-1) - picture.at(-1)) < 0.1, "and ends where it ends");
 }));

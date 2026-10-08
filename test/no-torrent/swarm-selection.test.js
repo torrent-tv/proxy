@@ -70,14 +70,14 @@ test("a shared piece remains requested while another range needs it", () => {
   assert.equal(wire.requests.length, 0);
 });
 
-test("a lower map priority is stated at zero, so only an otherwise idle wire takes it", () => {
+test("a lower map priority is withheld until the first class is satisfied", () => {
   const torrent=stubTorrent();
   const register=new DemandRegister();
   const selection=new SwarmSelection({torrent,register});
   register.state({claimant:"active",fileIndex:0,byteStart:PIECE,byteEnd:2*PIECE-1,urgency:Urgency.AHEAD,priority:100});
   register.state({claimant:"paused",fileIndex:0,byteStart:5*PIECE,byteEnd:6*PIECE-1,urgency:Urgency.AHEAD,priority:20});
   selection.reconcile();
-  assert.deepEqual(selection.statedRanges(),[{from:1,to:1,priority:1},{from:5,to:5,priority:0}]);
+  assert.deepEqual(selection.statedRanges(),[{from:1,to:1,priority:1}]);
   torrent.complete(1);
   selection.reconcile();
   assert.deepEqual(selection.statedRanges(),[{from:5,to:5,priority:1}]);
@@ -102,7 +102,7 @@ test("every deadline of the first class is stated at once, so no peer waits for 
   assert.deepEqual(selection.statedRanges(), [{ from: 5, to: 5, priority: 1 }]);
 });
 
-test("a more urgent level keeps the first class while the lead is stated at zero", () => {
+test("a more urgent level withholds the lead and conditional tail", () => {
   const torrent = stubTorrent();
   const register = new DemandRegister();
   const selection = new SwarmSelection({ torrent, register });
@@ -110,8 +110,8 @@ test("a more urgent level keeps the first class while the lead is stated at zero
   register.state({ claimant: "ahead", fileIndex: 0, byteStart: 4 * PIECE, byteEnd: 8 * PIECE - 1, urgency: Urgency.AHEAD, priority: 99 });
   register.state({ claimant: "tail", fileIndex: 0, byteStart: 9 * PIECE, byteEnd: 10 * PIECE - 1, urgency: Urgency.TAIL, priority: 1 });
   selection.reconcile();
-  assert.deepEqual(selection.statedRanges(), [{ from: 3, to: 3, priority: 1 }, { from: 4, to: 7, priority: 0 }],
-    "the speculative tail waits while anything urgent is missing");
+  assert.deepEqual(selection.statedRanges(), [{ from: 3, to: 3, priority: 1 }],
+    "all less urgent ranges wait while the first class is missing");
 });
 
 /**

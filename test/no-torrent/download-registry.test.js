@@ -69,7 +69,7 @@ test("changed demand or withdrawn storage invalidates an in-flight forecast", as
   assert.equal((await forecastDownloads()).get(entry.torrent).arrivals.size, 2);
 });
 
-test("the first class spans torrents and a lower class elsewhere is stated at zero", t => {
+test("the first class spans torrents and withholds lower classes everywhere", t => {
   const first = source(t), second = source(t), third = source(t);
   for (const [entry, deadlineAt] of [[first, 10000], [second, 20000]]) entry.register.state({
     claimant: "viewer", fileIndex: 0, byteStart: 16384, byteEnd: 32767,
@@ -79,7 +79,7 @@ test("the first class spans torrents and a lower class elsewhere is stated at ze
   assert.deepEqual(first.torrent._selections._items, [{ from: 1, to: 1, priority: 1 }]);
   assert.deepEqual(second.torrent._selections._items, [{ from: 1, to: 1, priority: 1 }],
     "a later deadline in the first class is not withheld");
-  assert.deepEqual(third.torrent._selections._items, [{ from: 2, to: 2, priority: 0 }]);
+  assert.deepEqual(third.torrent._selections._items, []);
   first.held.add(1);
   second.held.add(1);
   first.torrent.emit("verified", 1);

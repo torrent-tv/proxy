@@ -283,11 +283,36 @@ function describeSwarmDemand(torrent) {
     ? torrent._critical.reduce((count, flag) => (flag ? count + 1 : count), 0)
     : 0;
 
+  const firstClassPieces = [];
+  const seenFirstClassPieces = new Set();
+  let omittedFirstClassPieces = 0;
+  for (const item of items) {
+    if (!(Number(item?.priority) > 0)) continue;
+    const from = Number(item?.from);
+    const to = Number(item?.to);
+    if (!Number.isSafeInteger(from) || !Number.isSafeInteger(to)) continue;
+    for (let index = from; index <= to; index += 1) {
+      if (seenFirstClassPieces.has(index) || torrent.bitfield?.get(index)) continue;
+      seenFirstClassPieces.add(index);
+      if (firstClassPieces.length >= 32) {
+        omittedFirstClassPieces += 1;
+        continue;
+      }
+      const holders = wires.filter(wire => !wire?.destroyed && wire?.peerPieces?.get?.(index) === true);
+      const ready = holders.filter(wire => wire.peerChoking !== true).length;
+      const requests = wires.reduce((count, wire) => count + (Array.isArray(wire?.requests)
+        ? wire.requests.filter(request => request?.piece === index).length : 0), 0);
+      firstClassPieces.push(`${index}(holders=${holders.length},unchoked=${ready},requests=${requests})`);
+    }
+  }
+
   return (
     `${items.length} selection(s) covering ${selectedPieces} piece(s), ` +
     `${missingSelected} of them missing, ${critical} marked critical; ` +
     `${wires.length} peers, ${interested} we want data from, ${choking} choking us, ` +
-    `${asking} being asked, ${inFlight} blocks in flight`
+    `${asking} being asked, ${inFlight} blocks in flight; first-class missing ` +
+    `${firstClassPieces.join(", ") || "none"}` +
+    (omittedFirstClassPieces > 0 ? `; ${omittedFirstClassPieces} more first-class piece(s)` : "")
   );
 }
 
@@ -1183,10 +1208,10 @@ export class TorrentPool {
    * line of the log said anything was wrong — the collapse had to be recovered
    * afterwards by hand from three unrelated counters.
    *
-   * So the stall reports itself, and it reports the two things that tell the
-   * candidates apart: whether the swarm was ASKED for anything (pieces selected
-   * and still missing, blocks in flight) or was asked and did not answer (peers
-   * holding what we want, how many are choking us).
+   * So the stall reports itself, and it reports whether the swarm was asked for
+   * anything (pieces selected and still missing, blocks in flight) or was asked
+   * and did not answer (peer holders and outstanding requests for each missing
+   * first-class piece, plus how many peers are choking us).
    *
    * @returns {void}
    */

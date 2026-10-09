@@ -273,6 +273,14 @@ export function createTunnelClient({
         return;
       }
 
+      // The server's answer to this proxy's keepalive, echoed at once on the
+      // same connection: the server measures the tunnel round trip from it on
+      // its own clock, and chooses proxies partly by that.
+      if (message.type === "rtt-probe") {
+        send({ type: "rtt-echo", sentAt: message.sentAt }, connection);
+        return;
+      }
+
       // Could this host serve a file it is only told ABOUT? Asked when the
       // proxy a viewer landed on has refused the file, so the browser can be
       // sent somewhere that will work instead of being shown an error. The

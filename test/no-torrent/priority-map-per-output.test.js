@@ -37,13 +37,13 @@ const STALE_AFTER_MS = 60_000;
 /**
  * A session, as much of one as these classes read.
  *
- * @param {{ id: string, outputKey: string, isStep?: boolean, audioOnly?: boolean }} params
+ * @param {{ id: string, outputKey: string, isStep?: boolean, audioOnly?: boolean, audioSeparate?: boolean, audioFileIndex?: number }} params
  * @returns {object}
  */
-function outputOf({ id, outputKey, isStep = false, audioOnly = false }) {
+function outputOf({ id, outputKey, isStep = false, audioOnly = false, audioSeparate = false, audioFileIndex = FILM.fileIndex }) {
   return {
     id,
-    spec: outputSpec({ sourceKey: FILM.sourceKey, audioOnly }),
+    spec: outputSpec({ sourceKey: FILM.sourceKey, audioOnly, audioSeparate, audioFileIndex }),
     outputKey,
     isStep,
     audioOnly,
@@ -123,6 +123,28 @@ test("a soundtrack is wanted by whoever is registered on it", () => {
   publish();
 
   assert.ok(runsOf(priority.mapForOutput("out:a1")).length > 0);
+});
+
+test("a soundtrack shipped as its own file is wanted from that file", () => {
+  // Field 2026-10-09, Drifters: the Russian track is `Rus Sound/….mka`, file 19
+  // beside the picture's file 27. Mapped under the picture's file only, nobody
+  // asked the swarm for the soundtrack's bytes, its encoder waited for a piece
+  // for ever, and the viewer who chose it stood still.
+  const SOUNDTRACK_FILE = 1;
+  const picture = outputOf({ id: "pic", outputKey: "out:1080", audioSeparate: true });
+  const sound = outputOf({ id: "rus", outputKey: "out:a1", audioOnly: true, audioFileIndex: SOUNDTRACK_FILE });
+  const { priority, viewers, publish } = over([picture, sound]);
+  viewers.of(picture, "p");
+  const person = viewers.of(sound, "p");
+  person.moveTo(493);
+  publish();
+
+  const soundtrack = runsOf(priority.mapFor(FILM.sourceKey, SOUNDTRACK_FILE));
+  assert.ok(soundtrack.length > 0, "the soundtrack's own file is wanted");
+  assert.ok(soundtrack.some((zone) => zone.from <= 493 && zone.to > 493), "and wanted where the viewer stands");
+  assert.deepEqual(soundtrack, runsOf(priority.mapFor(FILM.sourceKey, FILM.fileIndex)),
+    "at the same seconds of film as the picture they are watching with it");
+  assert.ok(runsOf(priority.mapForOutput("out:a1")).length > 0, "and its encoder is wanted");
 });
 
 test("a step being warmed is wanted, and so is the picture still on screen", () => {

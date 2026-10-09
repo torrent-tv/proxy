@@ -258,6 +258,19 @@ export class OutputSpec {
     return this.audio?.fileIndex ?? -1;
   }
 
+  /**
+   * The files of the torrent whose bytes this output reads: the picture's file
+   * where it carries a picture, the soundtrack's where it carries sound. A
+   * soundtrack shipped beside the picture is a file of its own, and its bytes
+   * are wanted from that file and not from the picture's.
+   *
+   * @returns {number[]}
+   */
+  get sourceFileIndexes() {
+    return [...new Set([this.video?.fileIndex, this.audio?.fileIndex]
+      .filter((fileIndex) => Number.isInteger(fileIndex) && fileIndex >= 0))];
+  }
+
   /** @returns {number} */
   get audioSourceTrackIndex() {
     return this.audio?.trackIndex ?? 0;

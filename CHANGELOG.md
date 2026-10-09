@@ -1,4 +1,4 @@
-## Unreleased
+## 2.95.37
 
 - **Fix**: Measure each libx264 preset through its own realtime limit, and derive software bitrate ceilings from the source picture's measured rate and output area. Unknown source rates leave the encode uncapped, so the proxy does not impose an unsupported picture limit.
 

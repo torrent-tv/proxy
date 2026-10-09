@@ -155,7 +155,13 @@ export const Event = {
    * for anything: an ordinary read of an ordinary file, with no piece store
    * between them and nothing that can refuse it for want of memory.
    */
-  FILE_COMPLETE: "file-complete"
+  FILE_COMPLETE: "file-complete",
+  /**
+   * What this proxy holds has changed: a torrent was added or closed, a file
+   * was kept whole or let go. Announced by this thread, which owns both; the
+   * main thread tells the server, which chooses proxies by what they hold.
+   */
+  HOLDINGS_CHANGED: "holdings-changed"
 };
 
 /**

@@ -104,6 +104,25 @@ export class CompletedFiles {
   }
 
   /**
+   * Every file held whole, by torrent: what this proxy can serve without any
+   * swarm. Read without counting as a read, so asking does not keep a file.
+   *
+   * @returns {Map<string, { fileIndexes: number[], bytes: number }>} Infohash → its files.
+   */
+  heldByTorrent() {
+    const byTorrent = new Map();
+    for (const [key, file] of this.#held) {
+      const slash = key.lastIndexOf("/");
+      const infoHash = key.slice(0, slash);
+      const entry = byTorrent.get(infoHash) ?? { fileIndexes: [], bytes: 0 };
+      entry.fileIndexes.push(Number(key.slice(slash + 1)));
+      entry.bytes += file.length;
+      byTorrent.set(infoHash, entry);
+    }
+    return byTorrent;
+  }
+
+  /**
    * @param {string} infoHash
    * @param {number} fileIndex
    * @returns {string}

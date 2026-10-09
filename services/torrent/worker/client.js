@@ -111,11 +111,13 @@ export class TorrentWorkerClient {
   /** @type {(event: { sourceKey: string, fileIndexes: number[] }) => void} */
   #onPiecesArrived;
   #onSourceForgotten;
+  /** Told when what this proxy holds changed; see `Event.HOLDINGS_CHANGED`. */
+  #onHoldingsChanged;
 
   /**
    * @param {{ memoryBytes?: number, stateDir?: string, onPiecesArrived?: (event: object) => void }} [options]
    */
-  constructor({ memoryBytes, stateDir, onPiecesArrived, onSourceForgotten } = {}) {
+  constructor({ memoryBytes, stateDir, onPiecesArrived, onSourceForgotten, onHoldingsChanged } = {}) {
     this.#worker = new Worker(fileURLToPath(WORKER_URL), {
       // `stateDir` travels because the worker writes heap snapshots of its own
       // isolate there. It cannot choose a directory any other way: a worker may
@@ -126,6 +128,7 @@ export class TorrentWorkerClient {
     this.#caller = createCaller(this.#worker);
     this.#onPiecesArrived = onPiecesArrived ?? (() => undefined);
     this.#onSourceForgotten = onSourceForgotten ?? (() => undefined);
+    this.#onHoldingsChanged = onHoldingsChanged ?? (() => undefined);
 
     this.#worker.on("message", (message) => {
       // A failed read must fail its stream. This is checked BEFORE the caller
@@ -240,6 +243,9 @@ export class TorrentWorkerClient {
           break;
         case Event.SOURCE_FORGOTTEN:
           this.#onSourceForgotten({ sourceKey: message.sourceKey });
+          break;
+        case Event.HOLDINGS_CHANGED:
+          this.#onHoldingsChanged();
           break;
         case Event.PIECES_ARRIVED:
         case Event.PIECES_CHANGED:

@@ -1035,6 +1035,7 @@ export class EncodeRuns {
           admittedInput.release();
         }
         this.noteRunEnded(session, run, ended);
+        this.#host.encodersChanged?.();
       }
     });
     if (admittedInput.original) {
@@ -1070,6 +1071,7 @@ export class EncodeRuns {
       });
     }
     this.#runsByInputToken.set(inputToken, run);
+    this.#host.encodersChanged?.();
     // THE ONE FAULT THAT IS OTHERWISE SILENT, asked before this run produces a
     // frame. It lost its caller in a refactor on 2026-09-04 and had none until
     // 2026-09-15 — not by a decision, which is why it is back rather than gone.

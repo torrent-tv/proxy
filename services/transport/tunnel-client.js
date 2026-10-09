@@ -509,6 +509,21 @@ export function createTunnelClient({
     },
 
     /**
+     * Tell the server this proxy's state: its load, its room for one more
+     * encode and the films it holds (`transport/proxy-state.js`). Over every
+     * open connection: during a move between server instances both keep a
+     * table of proxies, and each chooses from its own.
+     *
+     * @param {{ metrics?: object, holds?: object[] }} state
+     * @returns {void}
+     */
+    sendState(state) {
+      for (const connection of openConnections) {
+        send({ type: "proxy-state", metrics: state?.metrics ?? {}, holds: Array.isArray(state?.holds) ? state.holds : [] }, connection);
+      }
+    },
+
+    /**
      * Forward a WebRTC signal (SDP answer or ICE candidate) from this proxy
      * to the browser via the server tunnel.
      *

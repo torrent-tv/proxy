@@ -226,7 +226,10 @@ export function wireOutputs({
     // the transport measured it (`transport/delivery-shares.js`); null while
     // nothing has been delivered.
     serviceShare = () => null,
-    onViewerChanged = null}) {
+    onViewerChanged = null,
+    // Told when an encoder starts or ends: the room this host has for one more
+    // encode changes with it, and the server chooses proxies by that room.
+    onEncodersChanged = null}) {
   const parts = {};
   const audioDescriptionOf = (output) => (getCachedAudioTracks?.({
     sourceKey: output.file.sourceKey, fileIndex: output.spec.grid?.fileIndex ?? output.file.fileIndex
@@ -339,6 +342,7 @@ export function wireOutputs({
     get encoders() { return parts.encoders; },
     invalidateWaits: (output) => parts.serving.invalidateWaits(output),
     productionFailed: (output) => parts.renditions.noteProductionFailed(output),
+    encodersChanged: () => onEncodersChanged?.(),
   });
   // How much film is ready in front of the viewers, said; and the spare soundtracks fetched once it is full.
   parts.cushion = new CushionReport({

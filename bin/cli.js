@@ -31,6 +31,7 @@ import { createUsrsctpStateReader } from "../services/transport/usrsctp-state.js
 import { startMemoryReport } from "../services/storage/memory-report.js";
 import { fragmentBufferCollection } from "../services/torrent/worker/client.js";
 import { collectHealthMetrics } from "../services/transport/health-collector.js";
+import { LOAD_REFRESH_MS, ProxyStateReporter } from "../services/transport/proxy-state.js";
 import { createPortMapper } from "../services/transport/port-mapper.js";
 import { installationId } from "../services/identity/installation-id.js";
 import { classifyNat } from "../services/transport/nat-classifier.js";
@@ -356,6 +357,24 @@ const diagnostics = new Diagnostics({
   ]
 });
 
+/**
+ * What this proxy says about itself to the server, which chooses proxies by
+ * it: the machine's load and free memory, its room for one more encode, and
+ * the films it holds. Filled in once the server parts exist; before that it
+ * says only the machine.
+ *
+ * @type {() => Promise<{ metrics: object, holds: object[] }>}
+ */
+let describeSelf = async () => ({ metrics: {}, holds: [] });
+
+// The state goes to the server when it changes rather than when it is asked
+// for (torrent-tv/meta#36). The load average has no event, so it is looked at
+// on the cadence the kernel recomputes it.
+const stateReporter = new ProxyStateReporter({
+  describe: () => describeSelf(),
+  send: (state) => tunnelClient?.sendState(state)
+});
+
 try {
   logToFile(options.logFile);
   if (transcodeAudio) {
@@ -379,10 +398,40 @@ try {
     onSubtitleCues: (event) => dataChannelHandler?.publishSubtitleCues(event),
     // Late-bound for the same reason: what the connections carry beyond the
     // film is counted by the data-channel handler, built further down.
-    serviceShare: () => dataChannelHandler?.serviceShare?.() ?? null
+    serviceShare: () => dataChannelHandler?.serviceShare?.() ?? null,
+    onStateChanged: () => void stateReporter.changed()
   });
   app = started.app;
   actualPort = started.port;
+  describeSelf = async () => {
+    // Which films this proxy holds: a viewer sent to a proxy that is
+    // downloading their film costs it the encode and nothing else, while the
+    // same viewer sent anywhere else starts the download from nothing. Asked
+    // of the worker, so a film this proxy let go of is not claimed.
+    let holds = [];
+    try {
+      holds = (await started.torrentPool?.heldTorrents?.()) ?? [];
+    } catch {
+      // silent-ok: a proxy that cannot say what it holds is scored on its
+      // machine alone, which is what every proxy was scored on until now.
+    }
+    // WHETHER THIS MACHINE HAS ROOM FOR ONE MORE ENCODE (roadmap item 97,
+    // step 14): what holds a place on it now, and the speed that leaves every
+    // output at. The load average cannot say this — an encoder admitted a
+    // moment ago has not raised it yet.
+    const encode = started.outputParts?.admission?.headroom?.() ?? null;
+    // The uptime is left out: it changes every second, nothing chooses by it,
+    // and it would make every description differ from the last.
+    const { uptime: _uptime, ...machine } = collectHealthMetrics({ availableMemory });
+    return {
+      metrics: {
+        ...machine,
+        ...(encode ? { encodeSpeedX: encode.encodeSpeedX, encodeOccupiedCostSec: encode.occupiedCostSec } : {})
+      },
+      holds
+    };
+  };
+  setInterval(() => void stateReporter.changed(), LOAD_REFRESH_MS).unref();
   const directBaseUrl = explicitBaseUrl || `http://${bindHost}:${actualPort}`;
 
   // A native fault writes the whole address space out — 4.18 GB each on the
@@ -568,33 +617,9 @@ try {
     onSignal(sessionId, signal) {
       webRtcManager?.handleSignal(sessionId, signal);
     },
-    async onHealthRequest() {
-      // Which films this proxy holds travels with the health poll the browser
-      // already makes before it picks one: a viewer sent to a proxy that is
-      // downloading their film costs it the encode and nothing else, while the
-      // same viewer sent anywhere else starts the download from nothing. Asked
-      // of the worker, so a film this proxy let go of is not claimed.
-      let holds = [];
-      try {
-        holds = (await started?.torrentPool?.heldTorrents?.()) ?? [];
-      } catch {
-        // silent-ok: a proxy that cannot say what it holds is scored on its
-        // machine alone, which is what every proxy was scored on until now.
-      }
-      // WHETHER THIS MACHINE HAS ROOM FOR ONE MORE ENCODE, read by the pool
-      // before any film is chosen (roadmap item 97, step 14): what holds a
-      // place on it now, and the speed that leaves every output at. The load
-      // average cannot say this — an encoder admitted a moment ago has not
-      // raised it yet.
-      const encode = started?.outputParts?.admission?.headroom?.() ?? null;
-      return {
-        metrics: {
-          ...collectHealthMetrics({ availableMemory }),
-          ...(encode ? { encodeSpeedX: encode.encodeSpeedX, encodeOccupiedCostSec: encode.occupiedCostSec } : {})
-        },
-        holds
-      };
-    },
+    // Asked by a server that still polls; the same description the proxy
+    // sends on its own when it changes.
+    onHealthRequest: () => describeSelf(),
     // Whether this host could sustain a file it has only been told about. The
     // same arithmetic the first offer uses, against this host's own startup
     // benchmarks — no torrent, no bytes, no ffmpeg — so the browser can ask
@@ -604,6 +629,9 @@ try {
       return started?.outputParts?.quality?.predictOfferedHeights?.(mediaInfo) ?? null;
     },
     onConnect() {
+      // A new connection — a reconnect, or a move to another server instance —
+      // has not heard this proxy's state: send it whether or not it changed.
+      void stateReporter.resend();
       // Re-register on every tunnel connect/reconnect so the server's
       // in-memory store stays consistent after server restarts.
       void registerClientSafe().catch((error) => {

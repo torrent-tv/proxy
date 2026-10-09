@@ -74,6 +74,31 @@ test("segment ranges acquire every piece before reading and stay held until the 
   assert.equal(active.size, 0);
 });
 
+test("segment ranges read each source piece once even when many packet ranges share it", async () => {
+  const bytes = Buffer.from(Array.from({ length: 64 }, (_, index) => index));
+  const { torrent, streams } = torrentOver(bytes, () => true);
+  const ranges = Array.from({ length: 8 }, (_, index) => [index * 2, index * 2]);
+  const result = await readHeldRanges(torrent, 0, ranges, ranges.length);
+  assert.deepEqual(result.map(buffer => buffer[0]), ranges.map(([start]) => bytes[start]));
+  assert.deepEqual(streams, [{ index: 0, offset: 0, length: 15 }]);
+});
+
+test("segment range assembly preserves file offsets and ranges crossing torrent pieces", async () => {
+  const bytes = Buffer.from(Array.from({ length: 64 }, (_, index) => index));
+  const { torrent, streams } = torrentOver(bytes, () => true);
+  torrent.files[0].offset = 5;
+  torrent.files[0].length = 38;
+  const result = await readHeldRanges(torrent, 0, [[10, 20], [25, 30]], 17);
+  assert.deepEqual(result.map(buffer => [...buffer]), [
+    [...bytes.subarray(15, 26)], [...bytes.subarray(30, 36)]
+  ]);
+  assert.deepEqual(streams, [
+    { index: 0, offset: 15, length: 1 },
+    { index: 1, offset: 0, length: 16 },
+    { index: 2, offset: 0, length: 4 }
+  ]);
+});
+
 test("an incomplete or over-budget segment reads no partial input", async () => {
   const { torrent, streams } = torrentOver(Buffer.alloc(64), index => index !== 3);
   assert.equal(await readHeldRanges(torrent, 0, [[0, 3], [48, 51]], 8), null);

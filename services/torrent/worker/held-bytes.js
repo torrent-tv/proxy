@@ -174,16 +174,28 @@ export async function readHeldRanges(torrent, fileIndex, ranges, maxBytes, logge
   if (!file || !store || !Array.isArray(ranges) || ranges.length === 0 ||
     !Number.isSafeInteger(maxBytes) || maxBytes <= 0 || !(pieceLength > 0)) return null;
   const indexes = new Set();
+  const pieceSpans = new Map();
   let bytes = 0;
-  for (const range of ranges) {
+  for (let rangeIndex = 0; rangeIndex < ranges.length; rangeIndex++) {
+    const range = ranges[rangeIndex];
     if (!Array.isArray(range) || range.length !== 2) return null;
     const [start, end] = range;
     if (!Number.isSafeInteger(start) || !Number.isSafeInteger(end) || start < 0 || end < start || end >= file.length) return null;
     bytes += end - start + 1;
     if (!Number.isSafeInteger(bytes) || bytes > maxBytes) return null;
-    const first = Math.floor(((Number(file.offset) || 0) + start) / pieceLength);
-    const last = Math.floor(((Number(file.offset) || 0) + end) / pieceLength);
-    for (let index = first; index <= last; index++) indexes.add(index);
+    const absoluteStart = (Number(file.offset) || 0) + start;
+    const absoluteEnd = (Number(file.offset) || 0) + end;
+    const first = Math.floor(absoluteStart / pieceLength);
+    const last = Math.floor(absoluteEnd / pieceLength);
+    for (let index = first; index <= last; index++) {
+      indexes.add(index);
+      const pieceStart = index * pieceLength;
+      const span = pieceSpans.get(index) ?? { start: Number.POSITIVE_INFINITY, end: -1, ranges: [] };
+      span.start = Math.min(span.start, Math.max(absoluteStart, pieceStart));
+      span.end = Math.max(span.end, Math.min(absoluteEnd, pieceStart + pieceLength - 1));
+      span.ranges.push({ rangeIndex, absoluteStart, absoluteEnd });
+      pieceSpans.set(index, span);
+    }
   }
   const release = store.holdAvailable([...indexes]);
   if (!release) {
@@ -199,13 +211,29 @@ export async function readHeldRanges(torrent, fileIndex, ranges, maxBytes, logge
     return null;
   }
   try {
-    const result = [];
-    for (const [start, end] of ranges) {
-      const owned = await readHeldBytes(torrent, fileIndex, start, end, logger);
-      if (!owned) return null;
-      result.push(owned);
+    const result = ranges.map(([start, end]) => Buffer.allocUnsafeSlow(end - start + 1));
+    for (const [index, span] of pieceSpans) {
+      const pieceStart = index * pieceLength;
+      const offset = span.start - pieceStart;
+      const length = span.end - span.start + 1;
+      const buffer = await new Promise((resolve, reject) => {
+        store.get(index, { offset, length }, (error, value) => {
+          if (error) reject(error);
+          else resolve(value);
+        });
+      });
+      if (!buffer || buffer.length !== length) return null;
+      for (const { rangeIndex, absoluteStart, absoluteEnd } of span.ranges) {
+        const from = Math.max(absoluteStart, pieceStart);
+        const to = Math.min(absoluteEnd, pieceStart + pieceLength - 1);
+        const sourceStart = from - span.start;
+        result[rangeIndex].set(buffer.subarray(sourceStart, sourceStart + to - from + 1), from - absoluteStart);
+      }
     }
     return result;
+  } catch (error) {
+    logger?.info?.(`held ranges read ${fileIndex} failed: ${error?.message ?? error}`);
+    return null;
   } finally {
     release();
   }

@@ -162,3 +162,17 @@ test("a move whose new connection is refused keeps the old one carrying the tunn
   await waitFor(() => old.received.some((m) => m.type === "proxy-endpoint"), "the endpoint on the old connection");
   assert.equal(lines.filter((line) => line.includes("Tunnel disconnected")).length, 0, lines.join("\n"));
 });
+
+test("the server's round-trip probe is echoed at once on the connection it came by", async (t) => {
+  const registry = await startRegistry();
+  const client = createTunnelClient({ serverUrl: registry.url, proxyId: "p3", token: "t", proxyPort: 9090, connectionLifetimeMs: 60_000 });
+  t.after(async () => {
+    client.disconnect();
+    await registry.close();
+  });
+  client.connect();
+  await waitFor(() => registry.accepted.length === 1 && registry.accepted[0].socket.readyState === 1, "the connection");
+  const [server] = registry.accepted;
+  server.socket.send(JSON.stringify({ type: "rtt-probe", sentAt: 1234 }));
+  await waitFor(() => server.received.some((m) => m.type === "rtt-echo" && m.sentAt === 1234), "the echo");
+});

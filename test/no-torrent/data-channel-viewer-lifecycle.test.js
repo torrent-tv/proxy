@@ -33,6 +33,123 @@ class FakeDataChannel {
   }
 }
 
+/**
+ * A global setTimeout whose time moves only when the check moves it. When the
+ * check ends, every handle it gave out goes on real timers.
+ *
+ * undici keeps its request timeouts on one clock per module: the first of them
+ * calls the global setTimeout, and every later one refreshes that handle
+ * (undici lib/util/timers.js, refreshTimeout). A handle from node:test's mocked
+ * timers does nothing on refresh(), so they move that clock one step only.
+ */
+function manualClock(t) {
+  const realSetTimeout = globalThis.setTimeout;
+  const realClearTimeout = globalThis.clearTimeout;
+  let now = 0;
+  let real = false;
+  const armed = new Set();
+  class Handle {
+    constructor(callback, delay, args) {
+      Object.assign(this, { callback, delay, args, timer: null });
+      this.refresh();
+    }
+
+    refresh() {
+      realClearTimeout(this.timer);
+      if (real) {
+        this.timer = realSetTimeout(this.callback, this.delay, ...this.args).unref();
+      } else {
+        this.due = now + this.delay;
+        armed.add(this);
+      }
+      return this;
+    }
+
+    unref() {
+      return this;
+    }
+  }
+  t.mock.method(globalThis, "setTimeout", (callback, delay = 0, ...args) => new Handle(callback, delay, args));
+  t.mock.method(globalThis, "clearTimeout", (timer) => {
+    if (!(timer instanceof Handle)) return realClearTimeout(timer);
+    armed.delete(timer);
+    realClearTimeout(timer.timer);
+  });
+  // undici keeps this handle as its clock for the rest of the process.
+  t.after(() => {
+    real = true;
+    for (const handle of armed) handle.refresh();
+    armed.clear();
+  });
+  const earliest = () => [...armed].reduce((first, handle) => (!first || handle.due < first.due ? handle : first), null);
+  return {
+    armed: () => armed.size,
+    advance(ms) {
+      const until = now + ms;
+      for (let next = earliest(); next && next.due <= until; next = earliest()) {
+        armed.delete(next);
+        now = next.due;
+        next.callback(...next.args);
+      }
+      now = until;
+    }
+  };
+}
+
+// First in this file: once any request has put undici's clock on a real timer,
+// no check in this process can move it.
+test("a response held past undici's default five-minute timeouts still reaches the browser", async (t) => {
+  // undici's default for both the headers and the body wait. Its clock moves in
+  // half-second steps and a timeout starts counting on the step after it is
+  // armed, so two seconds more passes either default.
+  const pastDefault = 300_000 + 2_000;
+  const clock = manualClock(t);
+  let arrived;
+  const held = new Promise((resolve) => { arrived = resolve; });
+  // A synthetic HTTP route only; no proxy or torrent client is started.
+  const server = createServer((_request, response) => arrived(response));
+  await new Promise(resolve => server.listen(0, "127.0.0.1", resolve));
+  const channel = new FakeDataChannel("proxy");
+  const handler = createDataChannelHandler({ proxyPort: server.address().port });
+  handler.handleChannel("held-peer", channel);
+  t.after(async () => {
+    channel.close();
+    server.closeAllConnections();
+    await new Promise(resolve => server.close(resolve));
+  });
+  const events = [];
+  let recheck = () => {};
+  const record = (event) => { events.push(event); recheck(); };
+  channel.sendMessage = message => record(JSON.parse(message));
+  channel.sendMessageBinary = frame =>
+    record(frame[0] === 1 ? { type: "done" } : { type: "body", bytes: Buffer.from(frame.subarray(2 + frame[1])) });
+  // The first message of one of `types`, once the channel has carried it.
+  const first = (...types) => new Promise((resolve) => {
+    recheck = () => {
+      const event = events.find(candidate => types.includes(candidate.type));
+      if (event) resolve(event);
+    };
+    recheck();
+  });
+
+  channel.message(JSON.stringify({ type: "request", requestId: "held", method: "GET", path: "/stream" }));
+  const response = await held;
+  assert.ok(clock.armed() > 0, "undici's clock is on this check's setTimeout");
+
+  clock.advance(pastDefault);
+  response.writeHead(200, { "content-type": "video/mp4" });
+  response.write("first-");
+  const started = await first("response-start", "response-error");
+  assert.equal(started.type, "response-start", `the headers wait ended the request: ${started.error}`);
+
+  clock.advance(pastDefault);
+  response.end("rest");
+  const ended = await first("done", "response-error");
+  assert.equal(ended.type, "done", `the body wait ended the request: ${ended.error}`);
+  const body = Buffer.concat(events.filter(event => event.type === "body").map(event => event.bytes));
+  assert.equal(body.toString(), "first-rest");
+});
+
 test("the loopback dispatcher forwards a real HTTP response through the channel", async (t) => {
   // A synthetic HTTP response only; no proxy or torrent client is started.
   const server = createServer((_request, response) => response.end("held-media"));

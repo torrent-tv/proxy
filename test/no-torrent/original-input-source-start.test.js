@@ -10,6 +10,7 @@ import { admitOriginalInput } from "../../services/encode/OriginalInput.js";
 import { buildOriginalCommand } from "../../services/encode/source-command.js";
 import { handleEncodeInputGet } from "../../routes/encode-input/get.js";
 import { fmp4Format } from "../../services/encode/segment-formats/fmp4.js";
+import { judgePiece } from "../../services/encode/piece-completeness.js";
 
 // Generated ordinary media and a loopback HTTP server only; no torrent imports.
 //
@@ -122,6 +123,8 @@ function assertSound(piece, coverage) {
   assert.ok(loudness(piece, 1.1, 1.9) < 0.02, "and ends one second into it");
   const audio = coverage.tracks.find(track => track.kind === "soun");
   if (audio) assert.ok(Math.abs(Number(audio.ranges[0].start) / Number(audio.timescale) - 2) < 0.03);
+  const judged = judgePiece(fmp4Format, coverage, undefined, { from: 2, to: 4, requiredKinds: ["soun"] });
+  assert.equal(judged.whole, true, judged.reason);
 }
 
 for (const start of [0, 1.5]) {

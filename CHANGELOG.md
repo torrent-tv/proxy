@@ -1,4 +1,4 @@
-## Unreleased
+## 2.95.39
 
 - **Fix**: Choose the software encode size and preset using the measured free machine share and currently committed encoders, together with the source decode cost and this file's measured supply requirement. The playback readiness forecast continues to calculate segment and buffer timing from live service readings.
 

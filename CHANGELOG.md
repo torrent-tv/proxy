@@ -1,10 +1,10 @@
-## 2.95.36
-
-- **Fix**: A seek onto a piece boundary with a copied soundtrack no longer waits for ever. A copied piece ends where its packets end, up to one packet past its cut, and the player places the next piece there; at 4000 s it asked for the piece ending at 4000 s, which the priority map gave to nobody. A copied piece is now wanted by the second its end falls in (torrent-tv/meta#159).
-
 ## Unreleased
 
 - **Fix**: Measure each libx264 preset through its own realtime limit, and derive software bitrate ceilings from the source picture's measured rate and output area. Unknown source rates leave the encode uncapped, so the proxy does not impose an unsupported picture limit.
+
+## 2.95.36
+
+- **Fix**: A seek onto a piece boundary with a copied soundtrack no longer waits for ever. A copied piece ends where its packets end, up to one packet past its cut, and the player places the next piece there; at 4000 s it asked for the piece ending at 4000 s, which the priority map gave to nobody. A copied piece is now wanted by the second its end falls in (torrent-tv/meta#159).
 
 ## 2.95.35
 

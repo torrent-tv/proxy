@@ -12,7 +12,7 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
-import { SourceFile, SourceFiles, sourceDecodeCharacteristics } from "../../services/media/SourceFile.js";
+import { SourceFile, SourceFiles, sourceDecodeCharacteristics, sourcePictureBitrateKbps } from "../../services/media/SourceFile.js";
 
 test("a known source rate survives missing decoded-frame characteristics", () => {
   const file = new SourceFile({ sourceKey: "source", fileIndex: 0 });
@@ -22,6 +22,15 @@ test("a known source rate survives missing decoded-frame characteristics", () =>
   assert.equal(file.megabitsPerSecond, 4.2);
   file.learn({ fps: 24 });
   assert.equal(file.decode.megabitsPerSecond, file.megabitsPerSecond);
+});
+
+test("the picture rate excludes every embedded audio track and stays unknown when one rate is missing", () => {
+  const file = new SourceFile({ sourceKey: "source", fileIndex: 0 });
+  file.learn({ bitrateKbps: 2323, audioTracks: [{ bitrateKbps: 187 }] });
+  assert.equal(file.pictureKbps, 2136);
+  file.learn({ audioTracks: [{ bitrateKbps: 187 }, { bitrateKbps: null }] });
+  assert.equal(file.pictureKbps, null);
+  assert.equal(sourcePictureBitrateKbps({ bitrateKbps: 2323, audioTracks: [] }), 2323);
 });
 
 test("a file's key is the pair that identifies it, spelled in one place", () => {

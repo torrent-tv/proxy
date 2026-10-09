@@ -78,7 +78,9 @@ function outputOf({ id, file, height = 0, segmentFormatId = "fmp4", preset = nul
     preset,
     // A limit, when the test gives one: what the viewer's link is compared
     // against. None is a hardware-like output with no bound.
-    rateControl: capKbps ? softwareRateControlFor({ width, height, fps: 24, capKbps }) : null
+    rateControl: capKbps ? softwareRateControlFor({
+      width, height, fps: 24, source: { width, height, pictureKbps: 20000 }, capKbps
+    }) : null
   });
   return {
     id,

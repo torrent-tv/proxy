@@ -168,21 +168,49 @@ test("a mode whose segments do not decode is not used at all", async () => {
   assert.equal(modes.length, encoder.selectableRungs.length - 1);
 });
 
-test("slower modes are not read where a faster one fell behind, nor larger sizes where the fastest did", async () => {
+test("each preset is read through its own realtime limit, while larger sizes stop when the fastest falls behind", async () => {
   const encoder = new SoftwareEncoder();
   const speeds = {
     "ultrafast@256x144": 20, "superfast@256x144": 15, "veryfast@256x144": 10, "faster@256x144": 8, "fast@256x144": 6,
-    "ultrafast@640x360": 6, "superfast@640x360": 4, "veryfast@640x360": 0.8,
-    "ultrafast@1280x720": 0.9
+    "ultrafast@640x360": 6, "superfast@640x360": 0.8, "veryfast@640x360": 0.8, "faster@640x360": 2, "fast@640x360": 1.2,
+    "ultrafast@1280x720": 0.9, "superfast@1280x720": 0.8, "faster@1280x720": 1.4, "fast@1280x720": 0.95
   };
   const { modes, asked } = await calibrateWith({ encoder, speeds });
-  assert.ok(!asked.includes("faster@640x360"), "a mode slower than one that fell behind is not read");
+  assert.ok(asked.includes("faster@1280x720"), "a slower preset is still measured after a faster preset falls behind");
+  assert.ok(asked.includes("fast@1280x720"), "each previously usable preset gets its own reading");
   assert.ok(!asked.some((one) => one.endsWith("@1920x1080")), "a size larger than one the fastest could not hold is not read");
   const ultrafast = modes.find((mode) => mode.preset === "ultrafast");
   assert.deepEqual(ultrafast.bySize.map((reading) => `${reading.width}x${reading.height}`), ["256x144", "640x360", "1280x720"]);
   assert.equal(ultrafast.pixelsPerSec, 640 * 360 * 24 * 6, "the reference figure is the 640x360 reading");
   const fast = modes.find((mode) => mode.preset === "fast");
-  assert.equal(throughputAt(fast, { width: 640, height: 360 }), null, "fast was never read at 640x360");
+  assert.ok(throughputAt(fast, { width: 1280, height: 720 }) > 0, "fast has its own reading at the larger size");
+  const frame = { width: 720, height: 400 };
+  const priced = [
+    {
+      preset: "fast",
+      pixelsPerSec: 6.2e6,
+      bySize: [
+        { width: 640, height: 360, pixelsPerSec: 6.2e6 },
+        { width: 1280, height: 720, pixelsPerSec: 5e6 }
+      ],
+      interpolationError: 0
+    },
+    {
+      preset: "faster",
+      pixelsPerSec: 10.6e6,
+      bySize: [
+        { width: 256, height: 144, pixelsPerSec: 15e6 },
+        { width: 640, height: 360, pixelsPerSec: 10.6e6 },
+        { width: 1280, height: 720, pixelsPerSec: 9e6 }
+      ],
+      interpolationError: 0
+    }
+  ];
+  assert.equal(
+    pickSoftwarePreset(priced, frame.width * frame.height * 24, {}, frame),
+    "faster",
+    "faster is selected at 720x400 when its measured interval clears the bar"
+  );
 });
 
 test("a device is calibrated only at the one setting its arguments pass", () => {

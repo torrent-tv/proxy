@@ -13,7 +13,6 @@
  */
 
 import os from "node:os";
-import { LADDER_HEIGHTS } from "./output/ladder.js";
 
 export const SOFTWARE_PRESET = "ultrafast";
 export const SOFTWARE_CRF = "24";
@@ -65,27 +64,6 @@ export function chooseOutputFps(sourceFps, cap = MAX_OUTPUT_FPS) {
 // Software x264 on weak ARM hosts is the transcode bottleneck — use all cores.
 export const CPU_THREADS = Math.max(1, os.cpus().length);
 
-// Bitrate caps (constrained CRF). CRF stays the quality driver; -maxrate/
-// -bufsize only bound the peaks. Field evidence (iPhone on cellular,
-// 2026-07-10): uncapped complex scenes produced 4 s segments of ~18 Mbit/s
-// against a 1-6 Mbit/s viewer link — 45 s prebuffer, draining buffer.
-// Nominal H.264 rates per row; multipliers from webtor's production ladder
-// (content-transcoder): maxrate = 1.3x nominal, bufsize = 1.5x. The nominal
-// figures themselves came with no source when they were written (2026-07-10,
-// openspec `adaptive-bitrate`) and stand as an assumption until roadmap item
-// 97, step 14 measures them.
-const NOMINAL_KBPS_BY_ROW = new Map([
-  [1080, 5000],
-  [720, 2800],
-  [480, 1400],
-  [360, 800],
-  [240, 400]
-]);
-// The picture every row is named after: a 16:9 frame of the row's height, as
-// the encode itself would size one (`computeOutputDimensions` from a 16:9
-// source), so the reference is the frame the product makes and not a width
-// written down beside it.
-const ROW_REFERENCE_SOURCE = Object.freeze({ width: 3840, height: 2160 });
 /**
  * The rate a re-encoded soundtrack is asked for, in kbit/s: stereo AAC. A
  * TARGET, not a bound — ffmpeg's AAC encoder lets single frames run above it
@@ -98,95 +76,25 @@ const CAP_MAXRATE_FACTOR = 1.3;
 const CAP_BUFSIZE_FACTOR = 1.5;
 
 /**
- * The rows of limits, one per height of the ladder, each with the area of the
- * frame it is named after.
- *
- * @type {{ height: number, area: number }[] | null}
- */
-let limitRows = null;
-
-/**
- * @returns {{ height: number, area: number }[]}
- */
-function rows() {
-  if (limitRows === null) {
-    limitRows = LADDER_HEIGHTS.map((height) => {
-      const frame = computeOutputDimensions(
-        ROW_REFERENCE_SOURCE.width,
-        height,
-        ROW_REFERENCE_SOURCE.width,
-        ROW_REFERENCE_SOURCE.height
-      );
-      return { height, area: frame.w * frame.h };
-    });
-  }
-  return limitRows;
-}
-
-/**
- * The row whose frame area is nearest to this one, measured as a ratio rather
- * than a difference (decided with the user 2026-09-24): a rate grows with the
- * number of points multiplicatively, and the rows stand at uneven distances, so
- * the border between two rows is the geometric mean of their areas. On the
- * border itself the row with the larger area wins, so the choice has one answer.
- *
- * Keyed by area and not by height because a height alone names the wrong
- * frame for any picture that is not 16:9: a 2.4:1 film in a 1080 box is
- * encoded at about 1920x800, 1.54 million points, which a height puts in the
- * 720 row (0.92 million) although it is nearer the 1080 row (2.07 million).
+ * Nominal video rate for an output frame, scaled from the measured source
+ * picture rate by pixel area. Missing source facts mean no safe ceiling.
  *
  * @param {{ width: number, height: number }} frame
- * @returns {number} The height the row is named after.
+ * @param {{ width: number, height: number, pictureKbps: number | null } | null} source
+ * @returns {number | null}
  */
-export function limitRowFor({ width, height }) {
-  const area = Number(width) * Number(height);
-  if (!(Number.isFinite(area) && area > 0)) {
-    throw new RangeError(`a limit row is chosen for a frame, not for ${width}x${height}`);
+export function nominalKbpsFor(frame, source) {
+  const width = Number(frame?.width);
+  const height = Number(frame?.height);
+  const sourceWidth = Number(source?.width);
+  const sourceHeight = Number(source?.height);
+  const pictureKbps = Number(source?.pictureKbps);
+  if (![width, height, sourceWidth, sourceHeight, pictureKbps].every(Number.isFinite) ||
+      width <= 0 || height <= 0 || sourceWidth <= 0 || sourceHeight <= 0 || pictureKbps <= 0) {
+    return null;
   }
-  return nearestByArea(rows(), area).height;
-}
-
-/**
- * @param {{ height: number, area: number }[]} candidates
- * @param {number} area
- * @returns {{ height: number, area: number }}
- */
-function nearestByArea(candidates, area) {
-  // The larger area over the smaller: the same order as the distance of the
-  // logarithms, without a logarithm. Taken as log(a / b) the two sides of a
-  // border come out one last digit apart — log(2/3) is not exactly -log(3/2) —
-  // and the tie rule below would never be reached.
-  const ratioTo = (rowArea) => Math.max(area, rowArea) / Math.min(area, rowArea);
-  let best = candidates[0];
-  let bestDistance = ratioTo(best.area);
-  for (const row of candidates.slice(1)) {
-    const distance = ratioTo(row.area);
-    if (distance < bestDistance || (distance === bestDistance && row.area > best.area)) {
-      best = row;
-      bestDistance = distance;
-    }
-  }
-  return best;
-}
-
-/**
- * Nominal kbps for a frame: the nominal of the row its area falls in. A row
- * that has no nominal of its own yet (540, 1440 and 2160 today) takes the one
- * of the nearest row by area that has one, by the same rule, until step 14
- * measures it.
- *
- * @param {{ width: number, height: number }} frame
- * @returns {number}
- */
-export function nominalKbpsFor(frame) {
-  const row = limitRowFor(frame);
-  const own = NOMINAL_KBPS_BY_ROW.get(row);
-  if (own !== undefined) {
-    return own;
-  }
-  const named = rows().filter((candidate) => NOMINAL_KBPS_BY_ROW.has(candidate.height));
-  const rowArea = rows().find((candidate) => candidate.height === row).area;
-  return NOMINAL_KBPS_BY_ROW.get(nearestByArea(named, rowArea).height);
+  const nominal = pictureKbps * (width * height) / (sourceWidth * sourceHeight);
+  return Number.isFinite(nominal) && nominal > 0 ? Math.round(nominal) : null;
 }
 
 /**
@@ -282,12 +190,19 @@ export function h264LevelFor({ width, height, fps, maxrateKbps, bufsizeKbps }) {
  * higher level than the one every other output of this size declares, and the
  * request would then be answered with something other than what it asked for.
  *
- * @param {{ width: number, height: number, fps: number, capKbps?: number | null }} params
- *   `capKbps` is the nominal rate asked for; absent, the size's own.
- * @returns {{ maxrateKbps: number, bufsizeKbps: number, level: string | null }}
+ * @param {{ width: number, height: number, fps: number, source: object | null, capKbps?: number | null }} params
+ *   `source` supplies source dimensions and measured picture rate. `capKbps`
+ *   is an explicit nominal limit; absent, the source-scaled rate is used.
+ * @returns {{ maxrateKbps: number, bufsizeKbps: number, level: string | null } | null}
  */
-export function softwareRateControlFor({ width, height, fps, capKbps = null }) {
-  const nominal = nominalKbpsFor({ width, height });
+export function softwareRateControlFor({ width, height, fps, source = null, capKbps = null }) {
+  const nominal = nominalKbpsFor({ width, height }, source);
+  if (nominal === null && (capKbps === null || capKbps === undefined)) {
+    return null;
+  }
+  if (nominal === null) {
+    throw new RangeError(`a bitrate limit for ${width}x${height} needs a measured source picture rate`);
+  }
   const asked = capKbps === null || capKbps === undefined ? nominal : Number(capKbps);
   if (!(Number.isFinite(asked) && asked > 0)) {
     throw new RangeError(`a bitrate limit must be a positive number of kbit/s, not ${capKbps}`);

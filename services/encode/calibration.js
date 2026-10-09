@@ -74,6 +74,9 @@ export const CALIBRATION_FRAMES = Object.freeze([
 
 /** The size the correctness check encodes at, and every earlier reading was taken at. */
 const CHECK_FRAME = Object.freeze({ width: 640, height: 360 });
+// Measured from the bundled 1920x1080 calibration clip with ffprobe. It has no
+// audio streams, so its whole-file rate is its picture rate.
+const CALIBRATION_SOURCE = Object.freeze({ width: 1920, height: 1080, pictureKbps: 19653 });
 
 /**
  * @typedef {object} SizeReading
@@ -121,7 +124,7 @@ export async function checkModeProducesCorrectSegments({ ffmpegBin, encoder, run
   // Three segments' worth, so at least two are cut and each is checked alone.
   const seconds = segmentDurationSec * 3;
   const rateControl = encoder.kind === "software"
-    ? softwareRateControlFor({ ...CHECK_FRAME, fps: TRANSCODE_FPS })
+    ? softwareRateControlFor({ ...CHECK_FRAME, fps: TRANSCODE_FPS, source: CALIBRATION_SOURCE })
     : null;
   const args = [
     "-hide_banner", "-loglevel", "error",
@@ -237,6 +240,10 @@ export async function calibrateEncoder({
 
   /** @type {Map<string | null, SizeReading[]>} */
   const readings = new Map(qualified.map((rung) => [rung, []]));
+  // Each preset remains in the size walk until its own reading falls below
+  // realtime. A faster preset's result says nothing reliable about a slower
+  // preset when readings vary with load.
+  const activeRungs = new Set(qualified);
   /** The share of the machine other work left each reading. @type {number[]} */
   const freeShares = [];
   const sortedFrames = [...frames].sort((left, right) => left.width * left.height - right.width * right.height);
@@ -254,6 +261,7 @@ export async function calibrateEncoder({
       // Fastest first: the ladder is slowest first, so walk it backwards.
       for (let index = qualified.length - 1; index >= 0; index -= 1) {
         const rung = qualified[index];
+        if (!activeRungs.has(rung)) continue;
         const reading = await speed(rung, rawPath, frame);
         // A number from a check that replaces the reading; the reading itself
         // carries the share of the machine other work left it.
@@ -263,7 +271,8 @@ export async function calibrateEncoder({
         }
         if (realtimes === null) {
           log.warn(`calibration: ${encoder.name} "${rung ?? "as it comes"}" gave no reading at ${frame.width}x${frame.height}`);
-          break;
+          activeRungs.delete(rung);
+          continue;
         }
         readings.get(rung).push({
           width: frame.width,
@@ -274,8 +283,7 @@ export async function calibrateEncoder({
           fastestKeptUp = realtimes >= 1;
         }
         if (realtimes < 1) {
-          // Every slower mode is slower still at this size.
-          break;
+          activeRungs.delete(rung);
         }
       }
     } finally {

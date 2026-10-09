@@ -268,13 +268,10 @@ export function wireOutputs({
     const count = Number(session?.timeline?.segmentCount) || 0;
     return count > 0 && parts.segmentStore.provenNumbers(session.outputKey).length >= count;
   };
-  // The nominal limits a size may be produced at, highest first. ONE list, read
-  // by the opening of an output and by the move between limits of a height, so
-  // the two cannot disagree about which limits exist. Only the size's own until
-  // a set of lower limits is decided (roadmap item 97, step 14): a lower limit
-  // handed to a viewer must come with the page saying so. Asked with the whole
-  // frame, because the row is chosen by area (`limitRowFor`).
-  parts.limitsFor = (frame) => [nominalKbpsFor(frame)];
+  // The limit follows this file's measured picture rate and the output frame;
+  // no rate means no ceiling. The same answer is used when opening and moving
+  // between limits, so one size of one file keeps one declared H.264 level.
+  parts.limitsFor = (frame, file) => [nominalKbpsFor(frame, file)];
   // What the torrent and the proxy itself spend on this host, and how fast each watched torrent moves.
   parts.hostLoad = new HostLoad({
     readMetadataActivity,
@@ -418,7 +415,7 @@ export function wireOutputs({
     // item 97, step 12): which heights their choice is the output on screen
     // under, the segment they were last given, the move being prepared, and
     // whether a segment is closed on the output being prepared.
-    limitsFor: (frame) => parts.limitsFor(frame),
+    limitsFor: (frame, file) => parts.limitsFor(frame, file),
     heightsChosenAs: (consumerId, outputKey) => heightsChosenAs(parts.viewers, consumerId, outputKey),
     highestGivenSegmentOf: (consumerId, askedHeight) => highestGivenSegmentOf(parts.viewers, consumerId, askedHeight),
     sameHeightSwitchOf: (consumerId) => sameHeightSwitchOf(parts.viewers, consumerId),
@@ -522,7 +519,7 @@ export function wireOutputs({
     // The largest peak an output of this mode and rate control has been seen
     // carrying here: the only figure an encoder with no bound of its own has.
     observedPeakMbps: (spec) => parts.localObservations?.peakMbps(spec) ?? null,
-    limitsFor: (frame) => parts.limitsFor(frame),
+    limitsFor: (frame, file) => parts.limitsFor(frame, file),
     readSourceMedia,
     get encodeInputs() { return parts.encodeInputs; },
     get decodeCostModel() { return parts.decodeCostModel; },

@@ -24,7 +24,7 @@ function decide(encoder, capKbps = null) {
     encodesPicture: true,
     exact: true,
     target: { width: 1280, height: 720 },
-    source: { width: 1920, height: 1080, megabitsPerSecond: 8, decode: null },
+    source: { ...SOURCE, megabitsPerSecond: 8, decode: null },
     fps: 24,
     encoder,
     benchmark: null,
@@ -45,13 +45,14 @@ function decide(encoder, capKbps = null) {
 
 const SOFTWARE = { kind: "software", name: "libx264" };
 const HARDWARE = { kind: "nvenc", name: "h264_nvenc" };
+const SOURCE = { width: 1920, height: 1080, pictureKbps: 6300 };
 
 test("a software output is bounded at its size's nominal rate unless a lower limit is asked for", () => {
   const plain = decide(SOFTWARE).spec.video.encode.rateControl;
   const lower = decide(SOFTWARE, 1400).spec.video.encode.rateControl;
 
-  assert.deepEqual(plain, softwareRateControlFor({ width: 1280, height: 720, fps: 24 }));
-  assert.deepEqual(lower, softwareRateControlFor({ width: 1280, height: 720, fps: 24, capKbps: 1400 }));
+  assert.deepEqual(plain, softwareRateControlFor({ width: 1280, height: 720, fps: 24, source: SOURCE }));
+  assert.deepEqual(lower, softwareRateControlFor({ width: 1280, height: 720, fps: 24, source: SOURCE, capKbps: 1400 }));
   assert.equal(lower.level, plain.level, "both are declared at the nominal output's level");
   assert.notEqual(decide(SOFTWARE).spec.toKey(), decide(SOFTWARE, 1400).spec.toKey(), "and are two outputs");
 });
@@ -64,7 +65,7 @@ test("a limit named in the request is not answered by an output of another limit
     encodesPicture: true,
     exact: true,
     target: { width: 1280, height: 720 },
-    source: { width: 1920, height: 1080, megabitsPerSecond: 8, decode: null },
+    source: { ...SOURCE, megabitsPerSecond: 8, decode: null },
     fps: 24,
     encoder: SOFTWARE,
     benchmark: null,
@@ -82,7 +83,7 @@ test("a limit named in the request is not answered by an output of another limit
     serving: { mode: "manual", linkMbps: null, keys: [nominal], readyAt: () => true }
   });
   assert.equal(asked.reusedKey, null);
-  assert.deepEqual(asked.spec.video.encode.rateControl, softwareRateControlFor({ width: 1280, height: 720, fps: 24, capKbps: 1400 }));
+  assert.deepEqual(asked.spec.video.encode.rateControl, softwareRateControlFor({ width: 1280, height: 720, fps: 24, source: SOURCE, capKbps: 1400 }));
 });
 
 test("a hardware output states no limit, because it is given none", () => {
@@ -91,7 +92,7 @@ test("a hardware output states no limit, because it is given none", () => {
 });
 
 test("a limit above the size's own is refused rather than lowered", () => {
-  assert.throws(() => decide(SOFTWARE, nominalKbpsFor({ width: 1280, height: 720 }) + 1), RangeError);
+  assert.throws(() => decide(SOFTWARE, nominalKbpsFor({ width: 1280, height: 720 }, SOURCE) + 1), RangeError);
   assert.throws(() => decide(SOFTWARE, 0), RangeError, "and a limit that is not a positive rate is not a limit");
 });
 
@@ -109,14 +110,14 @@ function decideFor({ mode = "manual", linkMbps = null, limits = null, encoder = 
     encodesPicture: true,
     exact: true,
     target: { width: 1280, height: 720 },
-    source: { width: 1920, height: 1080, megabitsPerSecond: 8, decode: null },
+    source: { ...SOURCE, megabitsPerSecond: 8, decode: null },
     fps: 24,
     encoder,
     benchmark: null,
     cost: { decodeModel: null, observedDecodeCostSec: null, requiredSpeed: null },
     chooseBudget: () => null,
     tonemap: false,
-    ...(limits ? { limitsFor: (frame) => (frame.height === 720 ? limits : [nominalKbpsFor(frame)]) } : {}),
+    ...(limits ? { limitsFor: (frame, source) => (frame.height === 720 ? limits : [nominalKbpsFor(frame, source)]) } : {}),
     audioLoad,
     specWith: (encode) => new OutputSpec({
       sourceKey: "torrent:abc",
@@ -136,7 +137,7 @@ test("a size picked by hand keeps its height and takes the highest limit the lin
   assert.equal(decided.spec.video.encode.height, 720, "the height picked by hand is kept");
   assert.deepEqual(
     decided.spec.video.encode.rateControl,
-    softwareRateControlFor({ width: 1280, height: 720, fps: 24, capKbps: 1400 })
+    softwareRateControlFor({ width: 1280, height: 720, fps: 24, source: SOURCE, capKbps: 1400 })
   );
   assert.equal(decided.answer.verdict, "fits");
 });

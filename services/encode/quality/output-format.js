@@ -62,7 +62,7 @@ import { linkAnswerFigures, linkCouldCarry, linkRefusalReason, loadOf, videoLoad
  *   soundtrack this viewer receives with the picture, from it or beside it.
  * @param {(encode: object | null) => OutputSpec} params.specWith - The output
  *   with this picture format and every other part as the request made it.
- * @param {{ mode: "auto" | "manual", linkMbps: number | null, keys: Iterable<string>, readyAt: (key: string) => boolean, observedPeakMbps?: (spec: OutputSpec) => number | null }} params.serving
+ * @param {{ mode: "auto" | "manual", linkMbps: number | null, keys: Iterable<string>, readyAt: (key: string) => boolean, observedPeakMbps?: (spec: OutputSpec) => number | null, serviceShare?: () => number | null }} params.serving
  * @returns {{
  *   spec: OutputSpec | null,
  *   budget: object | null,
@@ -97,7 +97,8 @@ export function decideOutputFormat({
     loadOf(
       videoLoadOfSpec(spec, Number.isFinite(source.pictureKbps) ? source.pictureKbps / 1000 : null,
         serving.observedPeakMbps?.(spec) ?? null),
-      audioLoad
+      audioLoad,
+      serving.serviceShare?.() ?? null
     )
   );
   const given = (spec, answer, extra = {}) => ({

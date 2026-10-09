@@ -373,7 +373,8 @@ export class QualityController {
     const report = this.#host.linkReportOf(session, consumerId);
     const load = loadOf(
       this.#host.qualityOffer.videoLoadFor(base, height, this.#host.videoEncoder?.kind ?? ""),
-      this.#host.viewerAudioLoadOf(base, consumerId)
+      this.#host.viewerAudioLoadOf(base, consumerId),
+      this.#host.serviceShare?.() ?? null
     );
     return linkCouldCarry(report?.linkMbps ?? null, load).admitted;
   }

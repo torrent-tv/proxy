@@ -75,7 +75,12 @@ rule (`serving-output.js`, `outputSuits`) asks the picture's material, the size
 a viewer who picked by hand requires, and what the viewer's OWN link does with
 the output's whole load: the picture and the soundtrack they chose, each part
 `known` (a limit), `estimated` (a stated average) or `unknown` (no bound), the
-load as trustworthy as its worst part (`link-budget.js`). `unknown` is refused
+load as trustworthy as its worst part (`link-budget.js`). On top of the picture
+and the sound the load carries what the same connection carries besides them —
+message framing, playlists, poll answers, probes, cues — as the share the
+transport measured over everything this proxy has delivered
+(`transport/delivery-shares.js`); it moves the figure and not the class, and is
+absent until a film has been delivered. `unknown` is refused
 against a measured link; `estimated` is admitted by estimate and reported to
 the page as not confirmed; a bound is taken before an average. When nothing
 suits, nothing is handed over: the answer is `output-unavailable`, with the
@@ -97,11 +102,15 @@ for the nominal output is checked before a release
 (`stand/segment-compat/level-check.mjs`).
 
 **A software limit follows the source picture rate and output area** (step 14).
-The source picture rate is the measured whole-file average minus the stated
-rates of every embedded audio track. The nominal for an output is that rate
-scaled by output area divided by source area; maxrate and buffer remain 1.3 and
-1.5 times that nominal. If any required rate or dimension is unknown, the
-software encode has no ceiling and the link rule has no safe peak estimate.
+The source picture rate is chosen in one place (`SourceFile.pictureRate`):
+the picture track's own rate where the container states it (an MP4 track's
+sample sizes over its duration, a Matroska track's `BPS` statistics tag);
+otherwise the measured whole-file average minus the stated rates of every
+embedded audio track; otherwise the whole-file average itself, which bounds the
+picture from above (torrent-tv/meta#169). The nominal for an output is that
+rate scaled by output area divided by source area; maxrate and buffer remain
+1.3 and 1.5 times that nominal. If the file's rate or a dimension is unknown,
+the software encode has no ceiling and the link rule has no safe peak estimate.
 Opening an output, the same-height move, the offer and the link rule all use
 the same source and frame. Lower limits can be added only as explicit values
 under this source-specific nominal.

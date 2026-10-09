@@ -60,30 +60,58 @@ export function sourceDecodeCharacteristics(mediaInfo) {
   };
 }
 
+/** Where a picture rate was taken from, most exact first. */
+export const PICTURE_RATE_SOURCE = Object.freeze({
+  TRACK: "the picture track's own rate",
+  FILE_MINUS_AUDIO: "the file's rate minus every soundtrack's",
+  FILE_BOUND: "bounded by the whole file's rate"
+});
+
 /**
- * The source picture's average rate, derived from the file rate after removing
- * the rates stated for every embedded audio track. A missing track rate makes
- * the picture rate unknown rather than treating the whole file rate as video.
+ * The source picture's average rate, and where it came from.
  *
- * @param {{ bitrateKbps?: number | null, audioTracks?: Array<{ bitrateKbps?: number | null }> } | null} mediaInfo
+ * 1. the picture track's own rate, where the container states it per track —
+ *    MP4 counts it from the sizes of its samples, Matroska carries it in the
+ *    track's statistics tags;
+ * 2. otherwise the whole file's rate minus every soundtrack's stated rate;
+ * 3. otherwise the whole file's rate. The picture is part of the file, so its
+ *    average cannot be larger: this is an upper bound, not a guess, and it
+ *    errs towards a heavier load. It is used where a soundtrack states no
+ *    average — before torrent-tv/meta#169 that made the picture unknown, and
+ *    every MP4 and Matroska file with sound was refused on a measured link.
+ *
+ * @param {{ bitrateKbps?: number | null, videoBitrateKbps?: number | null, audioTracks?: Array<{ bitrateKbps?: number | null }> } | null} mediaInfo
+ * @returns {{ kbps: number, source: string } | null} Null when not even the
+ *   file's rate is known.
+ */
+export function sourcePictureRate(mediaInfo) {
+  const positive = (value) => Number.isFinite(Number(value)) && Number(value) > 0;
+  if (positive(mediaInfo?.videoBitrateKbps)) {
+    return { kbps: Math.round(Number(mediaInfo.videoBitrateKbps)), source: PICTURE_RATE_SOURCE.TRACK };
+  }
+  const totalKbps = Number(mediaInfo?.bitrateKbps);
+  if (!positive(totalKbps)) {
+    return null;
+  }
+  const audioTracks = Array.isArray(mediaInfo?.audioTracks) ? mediaInfo.audioTracks : null;
+  if (audioTracks && audioTracks.every((track) => positive(track?.bitrateKbps))) {
+    const pictureKbps = totalKbps - audioTracks.reduce((sum, track) => sum + Number(track.bitrateKbps), 0);
+    if (pictureKbps > 0) {
+      return { kbps: Math.round(pictureKbps), source: PICTURE_RATE_SOURCE.FILE_MINUS_AUDIO };
+    }
+  }
+  return { kbps: Math.round(totalKbps), source: PICTURE_RATE_SOURCE.FILE_BOUND };
+}
+
+/**
+ * The source picture's average rate in kbit/s, or null while not even the
+ * file's rate is known ({@link sourcePictureRate}).
+ *
+ * @param {object | null} mediaInfo
  * @returns {number | null}
  */
 export function sourcePictureBitrateKbps(mediaInfo) {
-  const totalKbps = Number(mediaInfo?.bitrateKbps);
-  const audioTracks = mediaInfo?.audioTracks;
-  if (!(Number.isFinite(totalKbps) && totalKbps > 0) || !Array.isArray(audioTracks)) {
-    return null;
-  }
-  let audioKbps = 0;
-  for (const track of audioTracks) {
-    const rate = Number(track?.bitrateKbps);
-    if (!(Number.isFinite(rate) && rate > 0)) {
-      return null;
-    }
-    audioKbps += rate;
-  }
-  const pictureKbps = totalKbps - audioKbps;
-  return Number.isFinite(pictureKbps) && pictureKbps > 0 ? Math.round(pictureKbps) : null;
+  return sourcePictureRate(mediaInfo)?.kbps ?? null;
 }
 
 export class SourceFile {
@@ -221,9 +249,18 @@ export class SourceFile {
     return Number.isFinite(kbps) && kbps > 0 ? kbps / 1000 : null;
   }
 
-  /** The source picture's average rate, or null until every required fact is known. */
+  /** The source picture's average rate, or null until the file's rate is known. */
   get pictureKbps() {
     return sourcePictureBitrateKbps(this.media);
+  }
+
+  /**
+   * The source picture's average rate with where it came from, for log lines.
+   *
+   * @returns {{ kbps: number, source: string } | null}
+   */
+  get pictureRate() {
+    return sourcePictureRate(this.media);
   }
 
   /**

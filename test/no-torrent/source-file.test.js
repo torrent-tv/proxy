@@ -24,12 +24,14 @@ test("a known source rate survives missing decoded-frame characteristics", () =>
   assert.equal(file.decode.megabitsPerSecond, file.megabitsPerSecond);
 });
 
-test("the picture rate excludes every embedded audio track and stays unknown when one rate is missing", () => {
+test("the picture rate excludes every embedded audio track, and is bounded by the file when one rate is missing", () => {
   const file = new SourceFile({ sourceKey: "source", fileIndex: 0 });
   file.learn({ bitrateKbps: 2323, audioTracks: [{ bitrateKbps: 187 }] });
   assert.equal(file.pictureKbps, 2136);
   file.learn({ audioTracks: [{ bitrateKbps: 187 }, { bitrateKbps: null }] });
-  assert.equal(file.pictureKbps, null);
+  assert.equal(file.pictureKbps, 2323);
+  file.learn({ videoBitrateKbps: 1990 });
+  assert.equal(file.pictureKbps, 1990);
   assert.equal(sourcePictureBitrateKbps({ bitrateKbps: 2323, audioTracks: [] }), 2323);
 });
 

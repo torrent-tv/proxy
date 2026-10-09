@@ -376,7 +376,10 @@ try {
     // Late-bound the same way `webRtcManager` is below: the torrent pool is
     // built inside `startProxyServer`, before `dataChannelHandler` — the
     // thing that actually owns a channel to push down — exists.
-    onSubtitleCues: (event) => dataChannelHandler?.publishSubtitleCues(event)
+    onSubtitleCues: (event) => dataChannelHandler?.publishSubtitleCues(event),
+    // Late-bound for the same reason: what the connections carry beyond the
+    // film is counted by the data-channel handler, built further down.
+    serviceShare: () => dataChannelHandler?.serviceShare?.() ?? null
   });
   app = started.app;
   actualPort = started.port;

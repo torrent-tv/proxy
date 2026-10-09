@@ -716,6 +716,7 @@ export function createPlaybackPlanner({
           height: videoFacts.height,
           fps: videoFacts.fps,
           bitrateKbps: probe.bitrateKbps,
+          videoBitrateKbps: probe.videoBitrateKbps,
           audioTracks: probe.audioTracks,
           // Which family of the decode measurement prices this source. A video
           // that has to be re-encoded is one the browser could not play, so it
@@ -755,6 +756,7 @@ export function createPlaybackPlanner({
           width: videoFacts.width,
           height: videoFacts.height,
           bitrateKbps: probe.bitrateKbps,
+          videoBitrateKbps: probe.videoBitrateKbps,
           audioTracks: probe.audioTracks,
           fps: videoFacts.fps,
           startTime: probe.startTimeSeconds,

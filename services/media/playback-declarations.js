@@ -57,6 +57,8 @@ export function playbackDeclarations({ tracks, media, fileBytes = null }) {
     startTimeSeconds: media.startTimeSeconds,
     videoWidth: video?.width ?? 0, videoHeight: video?.height ?? 0,
     fps: video?.fps ?? null, isHdr: video?.isHdr ?? false, bitDepth: video?.bitDepth ?? null,
+    // The picture's own average, where the container states it per track.
+    videoBitrateKbps: video?.bitrateKbps ?? null,
     // The measured whole-file average prices decoding; it never addresses packets.
     bitrateKbps: Number.isFinite(media.bitrateKbps) ? media.bitrateKbps
       : Number.isSafeInteger(fileBytes) && fileBytes > 0 && media.durationSeconds > 0

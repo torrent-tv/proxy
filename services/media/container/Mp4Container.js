@@ -8,6 +8,7 @@
  *  - elng: extendedLanguage BCP47 (when present, replaces mdhd language per spec)
  *  - stsd: sample entry format (avc1/hev1/mp4a/tx3g/wvtt/stpp)
  *  - stbl tables for subtitle cue ranges (stts/stsz/stsc/stco/co64) and video keyframes (stss/stts/ctts/elst)
+ *  - stsz + mdhd: each track's average rate, from the sizes of its own samples
  *
  * Keyframe reading is delegated to mp4.js. The subtitle sample table is read in
  * this module, because every rule in it is a statement of ISO/IEC 14496-12 about
@@ -757,7 +758,8 @@ export class Mp4Container extends Container {
           displayWidth,
           displayHeight,
           fps: configuration?.fps ?? videoSampleRate(moov, mdhd, stbl),
-          bitDepth: configuration?.bitDepth ?? null
+          bitDepth: configuration?.bitDepth ?? null,
+          bitrateKbps: trackBitrateKbps(moov, mdhd, stbl)
         });
         if (configuration) {
           track.codecConfiguration = configuration;
@@ -811,6 +813,7 @@ export class Mp4Container extends Container {
           channels: sampleEntry?.channels ?? null,
           samplingFrequency: sampleEntry?.sampleRate ?? null,
           bitDepth: sampleEntry?.bitDepth ?? null,
+          bitrateKbps: trackBitrateKbps(moov, mdhd, stbl),
           codecDelaySeconds: sampleEntry?.codecDelaySeconds ?? 0,
           seekPrerollSeconds: sampleEntry?.seekPrerollSeconds ?? 0
         }));
@@ -854,6 +857,42 @@ export class Mp4Container extends Container {
 }
 
 /** Average decoded-frame cadence from the declared sample timing table. */
+/**
+ * The average rate of one track, from its own sample table: every sample's
+ * size (`stsz`, ISO/IEC 14496-12 §8.7.3) added up, over the track's duration
+ * in its media timescale (`mdhd`, §8.4.2). These are the bytes the track
+ * carries, counted, not a figure a muxer wrote down.
+ *
+ * Null where the table lists no samples — a fragmented file keeps them in its
+ * fragments — the duration is zero, or either box is too short for what it
+ * declares. A rate is one figure among the track's facts; a damaged table
+ * costs that figure and not the track.
+ *
+ * @param {Buffer} bytes
+ * @param {{ dataOffset: number, end: number } | null} mdhd
+ * @param {{ dataOffset: number, end: number } | null} stbl
+ * @returns {number | null} kbit/s
+ */
+function trackBitrateKbps(bytes, mdhd, stbl) {
+  const stsz = mdhd && stbl && childOf(bytes, stbl.dataOffset, stbl.end, "stsz");
+  if (!stsz) return null;
+  const version = bytes[mdhd.dataOffset];
+  const scaleAt = mdhd.dataOffset + (version === 1 ? 20 : 12);
+  if (scaleAt + (version === 1 ? 12 : 8) > mdhd.end) return null;
+  const scale = bytes.readUInt32BE(scaleAt);
+  const duration = version === 1 ? Number(bytes.readBigUInt64BE(scaleAt + 4)) : bytes.readUInt32BE(scaleAt + 4);
+  if (stsz.dataOffset + 12 > stsz.end) return null;
+  const uniform = bytes.readUInt32BE(stsz.dataOffset + 4);
+  const count = bytes.readUInt32BE(stsz.dataOffset + 8);
+  if (!uniform && stsz.dataOffset + 12 + count * 4 > stsz.end) return null;
+  let total = uniform * count;
+  if (!uniform) {
+    for (let at = stsz.dataOffset + 12, end = at + count * 4; at < end; at += 4) total += bytes.readUInt32BE(at);
+  }
+  const seconds = scale > 0 && Number.isSafeInteger(duration) ? duration / scale : 0;
+  return total > 0 && seconds > 0 ? total * 8 / seconds / 1000 : null;
+}
+
 function videoSampleRate(bytes, mdhd, stbl) {
   if (!mdhd || !stbl) return null;
   const scaleAt = mdhd.dataOffset + (bytes[mdhd.dataOffset] === 1 ? 20 : 12);

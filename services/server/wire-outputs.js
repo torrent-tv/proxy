@@ -222,6 +222,10 @@ export function wireOutputs({
     encodeInputs = null,
     indexMemory = null,
     budgetPolicy = null,
+    // What viewers' connections carry beyond the film, per byte of film, as
+    // the transport measured it (`transport/delivery-shares.js`); null while
+    // nothing has been delivered.
+    serviceShare = () => null,
     onViewerChanged = null}) {
   const parts = {};
   const audioDescriptionOf = (output) => (getCachedAudioTracks?.({
@@ -363,6 +367,7 @@ export function wireOutputs({
     // re-encoded where it may be, and copied where it may not.
     get transcodeEnabled() { return parts.enabled; },
     observedPeakMbps: (spec) => parts.localObservations?.peakMbps(spec) ?? null,
+    serviceShare,
     // A viewer has been moved onto an output prepared for them: how long it
     // took, and what they held.
     notePreparation: (output, seconds, bufferedSec) =>
@@ -519,6 +524,7 @@ export function wireOutputs({
     // The largest peak an output of this mode and rate control has been seen
     // carrying here: the only figure an encoder with no bound of its own has.
     observedPeakMbps: (spec) => parts.localObservations?.peakMbps(spec) ?? null,
+    serviceShare,
     limitsFor: (frame, file) => parts.limitsFor(frame, file),
     readSourceMedia,
     get encodeInputs() { return parts.encodeInputs; },
@@ -1000,6 +1006,7 @@ export function wireOutputs({
   // otherwise.
   // The quality budget: what each output is asked to step to, and the bitrate ceiling a viewer's link sets. Everything it reads of the rest of the proxy is listed here.
   parts.quality = new QualityController({
+    serviceShare,
     // The longest an output of this mode has been seen taking to be ready for
     // a viewer moving onto it, in milliseconds, or null.
     observedPreparationMs: (output) => {

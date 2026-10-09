@@ -1,4 +1,4 @@
-## Unreleased
+## 2.95.36
 
 - **Fix**: A seek onto a piece boundary with a copied soundtrack no longer waits for ever. A copied piece ends where its packets end, up to one packet past its cut, and the player places the next piece there; at 4000 s it asked for the piece ending at 4000 s, which the priority map gave to nobody. A copied piece is now wanted by the second its end falls in (torrent-tv/meta#159).
 

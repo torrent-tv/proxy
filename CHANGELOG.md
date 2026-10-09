@@ -1,4 +1,4 @@
-## Unreleased
+## 2.95.41
 
 - **Fix**: Read each source piece once when assembling disjoint packet ranges for an encoder. This avoids repeated reads of spilled pieces while preparing copied MP4 segments (#ttv-163).
 

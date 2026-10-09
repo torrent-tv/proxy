@@ -285,6 +285,15 @@ export class EncodeRun {
     this.indexOfName = typeof indexOfName === "function" ? indexOfName : () => null;
     /** The last thing ffmpeg said on stderr, which is what a failure is explained by. */
     this.lastError = "";
+    /**
+     * How far after the start it was asked for this run's segment muxer counts
+     * its cuts from, in seconds. The muxer measures every cut from its first
+     * reference packet, and a copied stream's first packet lies up to one frame
+     * after the requested start, so every piece of the run ends that much later
+     * than its cut. `null` until the run's first piece has closed
+     * (`piece-completeness.js`, `cutShiftOf`).
+     */
+    this.cutShiftSeconds = null;
     // EXISTING IS RUNNING. There is no moment at which a built run is not yet a
     // process, so there is no second act for two owners to perform.
     this.#begin(because);

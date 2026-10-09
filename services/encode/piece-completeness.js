@@ -30,82 +30,81 @@ export function cutOf(timeline, index) {
 }
 
 /**
- * Track positions read from empty edits retain their movie-tick uncertainty.
- * Fresh closures also carry the muxer's packet end and its actual cut, so a
- * restarted run is judged on its own reference clock. Neither allowance is a
- * browser's frame-join rule.
+ * Whether a closed piece holds its stretch of film. With `interval` (a run
+ * reading the original file, which states the stretch each piece covers) the
+ * piece's tracks are compared with that stretch; otherwise with the cut.
+ *
+ * Both are compared on the clock the producing run's muxer cut by: moved by
+ * `ranges.cutShiftSeconds`, which the run states for every piece it closes
+ * ({@link cutShiftOf}) and which travels with the piece. A piece whose run is
+ * not known — one adopted from an earlier life of the process — has none, and
+ * is compared with the cut as published.
  *
  * @param {{ producedThroughSeconds?: (ranges: object) => number | null }} format
  * @param {object} ranges - The piece's media intervals, as the format read them.
  * @param {number | undefined} cutSeconds - From {@link cutOf}.
- * @returns {{ whole: boolean, throughSeconds: number | null }}
+ * @param {{ from: number, to: number, requiredKinds: string[], sourceEnds?: object }} [interval]
+ * @returns {{ whole: boolean, throughSeconds: number | null, reason?: string }}
  */
 export function judgePiece(format, ranges, cutSeconds, interval) {
   const throughSeconds = format.producedThroughSeconds?.(ranges) ?? null;
   if (throughSeconds === null) {
     return { whole: false, throughSeconds };
   }
+  const shift = Number.isFinite(ranges?.cutShiftSeconds) ? ranges.cutShiftSeconds : 0;
   if (interval) {
-    const reason = intervalFailure(ranges, interval);
+    const reason = intervalFailure(ranges, { ...interval, shift });
     return reason ? { whole: false, throughSeconds, reason } : { whole: true, throughSeconds };
   }
-  const cutMicros = ranges?.production?.cutMicros ??
-    (Number.isFinite(cutSeconds) ? BigInt(Math.round(cutSeconds * 1_000_000)) : null);
+  const cutMicros = Number.isFinite(cutSeconds) ? BigInt(Math.round((cutSeconds + shift) * 1_000_000)) : null;
   if (cutMicros !== null && ranges?.tracks?.length) {
-    const tracks = ranges.tracks;
-    const production = ranges.production;
-    const reference = production ? tracks.find(({ kind }) => kind === production.kind) : null;
-    const referenceEnd = reference?.ranges.at(-1)?.end;
-    const whole = tracks.every((track) => {
-      const { timescale, ranges: held, positionErrorTicks = 0n } = track;
+    const whole = ranges.tracks.every(({ timescale, ranges: held, positionErrorTicks = 0n }) => {
       const end = held.at(-1)?.end;
-      if (end === undefined) return false;
-      if (referenceEnd !== undefined) {
-        if (track === reference) return 2n * production.endMicros + 1n >= 2n * cutMicros;
-        // The segment muxer's CSV reports packet time before movenc truncates
-        // the empty edit. Compare on that clock, including another track's
-        // relative end and the precision of both written track positions.
-        const difference = (end + positionErrorTicks) * reference.timescale -
-          (referenceEnd - (reference.positionErrorTicks ?? 0n)) * timescale;
-        const denominator = timescale * reference.timescale;
-        return 2n * difference * 1_000_000n +
-          (2n * production.endMicros + 1n) * denominator >= 2n * cutMicros * denominator;
-      }
-      return (end + positionErrorTicks) * 1_000_000n >= cutMicros * timescale;
+      return end !== undefined && (end + positionErrorTicks) * 1_000_000n >= cutMicros * timescale;
     });
     return { whole, throughSeconds };
   }
   if (cutMicros !== null && throughSeconds < Number(cutMicros) / 1_000_000) {
-
     return { whole: false, throughSeconds };
   }
   return { whole: true, throughSeconds };
 }
 
-/** The muxer cuts relative to its first reference packet, not the requested seek. */
-export function productionOf(timing, cutTimes, relativeIndex, kind) {
-  if (!timing || timing.originMicros === null || !Number.isFinite(cutTimes?.[relativeIndex])) return null;
-  return {
-    kind,
-    endMicros: timing.endMicros,
-    cutMicros: timing.originMicros + BigInt(Math.round(cutTimes[relativeIndex] * 1_000_000)) -
-      BigInt(Math.round(SEGMENT_CUT_TIME_DELTA_SECONDS * 1_000_000))
-  };
-}
-
 /**
- * The first CSV entry has start_time = 0 even after a seek (segment.c).
- * Recover its reference packet's PTS from the reported end minus the exact
- * sample span. The edit-list offset cancels, including its lost precision.
+ * How far after its requested start a run's segment muxer counts its cuts
+ * from, read from the run's FIRST piece, or `null` when that piece does not
+ * start within one frame of the start.
+ *
+ * With `endMicros`, the end of the piece in the muxer's own clock as its
+ * segment list states it, the first packet is that end less the span of the
+ * piece's samples: exact, because the span is a sum of sample durations and
+ * the muxer's clock needs no track position. Without it, the first sample's
+ * position is read, which the piece states only to within its position error.
+ *
+ * The muxer measures every cut time from its first packet of the reference
+ * stream, not from the start it was asked for (measured on ffmpeg 8.1.2,
+ * 2026-10-09: AAC copied from Matroska, asked to start at 10.385 s with its
+ * first packet at 10.403 s and a cut at 10.386 s from the start, closed the
+ * piece at 20.805 s — the first packet at or after 10.403 + 10.386). A copied
+ * stream cannot start between its packets, so its first packet lies up to one
+ * frame after the requested start, and every cut of the run moves by as much.
+ *
+ * @param {object} ranges - The first piece's media intervals.
+ * @param {number} startSeconds - Where the run was asked to start.
+ * @param {string} kind - The reference track: `vide` when the output carries a picture, else `soun`.
+ * @returns {number | null}
  */
-export function originOf(ranges, endMicros, kind) {
-  const track = ranges?.tracks?.find(track => track.kind === kind);
-  if (track?.firstSampleStart === undefined || !track.ranges.length) return null;
-  const ticks = endMicros * track.timescale -
-    (track.ranges.at(-1).end - track.firstSampleStart) * 1_000_000n;
-  // CSV rounds to microseconds; rescale with the muxer's nearest rounding.
-  return ticks >= 0n ? (2n * ticks + track.timescale) / (2n * track.timescale) :
-    -((-2n * ticks + track.timescale) / (2n * track.timescale));
+export function cutShiftOf(ranges, startSeconds, kind, endMicros = null) {
+  const track = ranges?.tracks?.find((candidate) => candidate.kind === kind);
+  const first = track?.ranges?.[0];
+  if (!first || !(track.timescale > 0n) || !Number.isFinite(startSeconds)) return null;
+  const timescale = Number(track.timescale);
+  const firstSeconds = typeof endMicros === "bigint" && track.firstSampleStart !== undefined
+    ? Number(endMicros) / 1_000_000 - Number(track.ranges.at(-1).end - track.firstSampleStart) / timescale
+    : Number(first.start) / timescale;
+  const shift = firstSeconds - startSeconds;
+  const allowance = Number((track.productionFrame ?? first.frame) + (track.positionErrorTicks ?? 0n)) / timescale;
+  return Math.abs(shift) <= allowance ? shift : null;
 }
 
 /** Compare adjacent production ranges in their declared track clocks. */
@@ -129,15 +128,19 @@ export function judgeNeighbors(left, right) {
   return { whole: true };
 }
 
-/** Every required track must cover the interval with at most one-frame error. */
-function intervalFailure(coverage, { from, to, requiredKinds, sourceEnds = {} }) {
+/**
+ * Every required track must cover the interval with at most one-frame error,
+ * on the clock the run's muxer cut by: the interval moved by `shift`
+ * ({@link cutShiftOf}). A track's own end in the file is not moved.
+ */
+function intervalFailure(coverage, { from, to, requiredKinds, sourceEnds = {}, shift = 0 }) {
   if (!Number.isFinite(from) || !Number.isFinite(to) || !(to > from) || !requiredKinds?.length) return "segment-interval-is-not-declared";
   for (const kind of requiredKinds) {
     const track = coverage?.tracks?.find(track => track.kind === kind);
     if (!track?.ranges?.length || !(track.timescale > 0n)) return `segment-missing-${kind}`;
-    const start = BigInt(Math.round(from * Number(track.timescale)));
-    const through = Number.isFinite(sourceEnds[kind]) ? Math.min(to, sourceEnds[kind]) : to;
-    if (!(through > from)) return `segment-interval-is-empty-${kind}`;
+    const start = BigInt(Math.round((from + shift) * Number(track.timescale)));
+    const through = Number.isFinite(sourceEnds[kind]) ? Math.min(to + shift, sourceEnds[kind]) : to + shift;
+    if (!(through > from + shift)) return `segment-interval-is-empty-${kind}`;
     const end = BigInt(Math.round(through * Number(track.timescale)));
     const first = track.ranges[0];
     const frame = track.productionFrame ?? first.frame;

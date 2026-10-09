@@ -17,7 +17,7 @@ import { computeOutputDimensions } from "./args.js";
 import { buildAdmittedCommand } from "./admitted-command.js";
 import { buildOriginalCommand } from "./source-command.js";
 import { writeAdmittedInput } from "./AdmittedInput.js";
-import { cutOf, judgeNeighbors, judgePiece } from "./piece-completeness.js";
+import { cutOf, cutShiftOf, judgeNeighbors, judgePiece } from "./piece-completeness.js";
 import { presentationSegment } from "./segment-formats/presentation-segment.js";
 import { InputFailures, failedAdmittedInput } from "./InputFailures.js";
 
@@ -351,9 +351,13 @@ export class EncodeRuns {
    * @param {HlsSession} session
    * @param {string} name - The working name the encoder closed it under.
    * @param {number} index
+   * @param {object | false} [admitted] - The original input the run reads, when it reads one.
+   * @param {Buffer | null} [bytes]
+   * @param {EncodeRun | null} [run] - The run that closed it, which keeps where its muxer counts cuts from.
+   * @param {{ endMicros: bigint } | null} [timing] - The piece's end in the muxer's clock, from its segment list.
    * @returns {object | null | false}
    */
-  #wholeClosedPiece(session, name, index, admitted = false, bytes = null) {
+  #wholeClosedPiece(session, name, index, admitted = false, bytes = null, run = null, timing = null) {
 
     const format = session.segmentFormat;
     if (!format?.readMediaRanges || !Number.isInteger(index) || index < 0) {
@@ -371,6 +375,16 @@ export class EncodeRuns {
             .map(input => [input.track.type === "video" ? "vide" : "soun", input.sourceEndSeconds])) } : {}),
         requiredKinds: [session.spec.carries !== "audio-only" ? "vide" : null,
           session.spec.audio && !this.#host.servesAudioSeparately(session) ? "soun" : null].filter(Boolean) } : undefined;
+      if (run) {
+        // Where the muxer counts this run's cuts from is known once its first
+        // piece has closed, and holds for every piece after it. It is a fact
+        // of each piece the run makes, so it travels with the piece.
+        if (run.cutShiftSeconds === null && index === run.from) {
+          run.cutShiftSeconds = cutShiftOf(mediaRanges, grid?.[run.from], session.spec.carries !== "audio-only" ? "vide" : "soun",
+            timing?.endMicros ?? null);
+        }
+        if (mediaRanges && run.cutShiftSeconds !== null) mediaRanges.cutShiftSeconds = run.cutShiftSeconds;
+      }
       const { whole, throughSeconds, reason } = judgePiece(format, mediaRanges, cut, interval);
       if (!whole) {
         this.#host.logger.warn(
@@ -990,7 +1004,7 @@ export class EncodeRuns {
       // Why this encoder exists, recorded with its argument list. It used to be
       // handed to a separate `start` call; there is no separate call now.
       because,
-      onClosed: (name, following) => {
+      onClosed: (name, following, timing) => {
 
         const index = session.segmentFormat.segmentIndexFromName(
           session.segmentFormat.servedNameOf?.(name) ?? name);
@@ -1012,7 +1026,7 @@ export class EncodeRuns {
             throw error;
           }
         }
-        const mediaRanges = this.#wholeClosedPiece(session, name, index, admittedInput, bytes);
+        const mediaRanges = this.#wholeClosedPiece(session, name, index, admittedInput, bytes, run, timing);
         if (mediaRanges === false) throw Object.assign(new Error(`Closed piece #${index} has incomplete media.`),
           { code: "ERR_INCOMPLETE_MEDIA" });
         const published = this.#host.segmentFiles.publish(session.outputKey ?? "", name, session.segmentFormat, { mediaRanges, bytes });

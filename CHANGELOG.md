@@ -1,3 +1,7 @@
+## Unreleased
+
+- **Fix**: A copied soundtrack whose first packet lands a fraction of a frame after the requested start is no longer refused piece by piece: the segment muxer counts its cuts from that first packet, so every piece of the run ends that much later than its cut, and the completeness check now measures on the muxer's clock — the run reads the shift from its first piece and the muxer's segment list, and the shift travels with every piece it makes. Field 2026-10-09: `[HorribleSubs] Drifters - 01 [1080p].mkv` (AAC 44.1 kHz) refused every audio piece for `segment-end-outside-interval-soun` and the player stopped (#ttv-8).
+
 ## 2.96.1
 
 - **Fix**: The proxy echoes the server's round-trip probe (`rtt-probe` → `rtt-echo`) so the server can measure the tunnel round trip; the WebSocket ping frame it used first never came back over Cloudflare and nginx. The `health-request` the server no longer sends is no longer answered (#ttv-36).

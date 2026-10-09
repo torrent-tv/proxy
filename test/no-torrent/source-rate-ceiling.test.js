@@ -16,12 +16,13 @@ test("the film picture rate is the container rate minus its embedded audio rates
   }), 2136);
 });
 
-test("an unknown rate for any embedded soundtrack leaves the picture rate unknown", () => {
+test("an unknown rate for any embedded soundtrack leaves the whole file's rate as the picture's bound", () => {
   assert.equal(sourcePictureBitrateKbps({
     bitrateKbps: 2323,
     audioTracks: [{ bitrateKbps: 187 }, { bitrateKbps: null }]
-  }), null);
-  assert.equal(sourcePictureBitrateKbps({ bitrateKbps: 2323 }), null);
+  }), 2323);
+  assert.equal(sourcePictureBitrateKbps({ bitrateKbps: 2323 }), 2323);
+  assert.equal(sourcePictureBitrateKbps({}), null);
 });
 
 test("the nominal follows source rate and output area, including a downscale", () => {

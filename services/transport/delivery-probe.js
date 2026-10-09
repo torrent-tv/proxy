@@ -425,7 +425,10 @@ export function createDeliveryProbe({
   readDelivery,
   getTransportSnapshot,
   witness,
-  usrsctpState
+  usrsctpState,
+  // Every probe handed to a channel, in bytes: what it costs the viewer's link
+  // is counted with everything else the connection carries.
+  onSent = () => {}
 }) {
   /** @type {Map<string, ProbeConnection>} */
   const connections = new Map();
@@ -456,6 +459,7 @@ export function createDeliveryProbe({
     for (const channel of connection.channels.keys()) {
       try {
         channel.sendMessage(message);
+        onSent(Buffer.byteLength(message));
       } catch {
         // A channel closing between the check and the send is ordinary.
       }

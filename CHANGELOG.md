@@ -1,3 +1,8 @@
+## Unreleased
+
+- **Fix**: A copied or re-encoded picture of an MP4 or Matroska file with sound is no longer refused on a measured link for want of a picture rate. Since 2.95.37 the picture's rate was the file's minus every soundtrack's, and neither reader stated a soundtrack's average, so the picture had no figure: field 2026-10-09, `Moana.2026.720p.rus.LostFilm.TV.mp4` on a measured 70.79 Mbit/s link (`videoMbps=null`, HTTP 409), and the same for `Drifters - 01 [1080p].mkv`. An MP4 track's rate is now counted from its own sample sizes, a Matroska track's is read from its `BPS` statistics tag, and where a file states neither the whole file's rate bounds the picture from above. The link decision logs which source the picture rate came from (#ttv-169).
+- **Fix**: The load a viewer's link is asked about now includes what the same connection carries besides the film — message framing, playlists, poll answers, probes, cues — as the share the transport measured over everything delivered; 0.31% of the film's bytes in the field log of 2026-10-09 (#ttv-169).
+
 ## 2.95.39
 
 - **Fix**: Choose the software encode size and preset using the measured free machine share and currently committed encoders, together with the source decode cost and this file's measured supply requirement. The playback readiness forecast continues to calculate segment and buffer timing from live service readings.

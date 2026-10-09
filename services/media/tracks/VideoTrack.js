@@ -19,6 +19,8 @@ export class VideoTrack extends ContainerTrack {
    * @param {number | null} params.fps - From container when available (otherwise from ffmpeg banner elsewhere).
    * @param {boolean} params.isHdr - From container colr / ffmpeg detection later.
    * @param {number | null} params.bitDepth
+   * @param {number | null} [params.bitrateKbps] - The rate the file states for
+   *   this track, in kbit/s: an average, not a bound.
    */
   constructor(params) {
     super({ ...params, type: "video" });
@@ -29,5 +31,6 @@ export class VideoTrack extends ContainerTrack {
     this.fps = Number.isFinite(params.fps) ? params.fps : null;
     this.isHdr = params.isHdr === true;
     this.bitDepth = Number.isFinite(params.bitDepth) ? params.bitDepth : null;
+    this.bitrateKbps = Number.isFinite(params.bitrateKbps) && params.bitrateKbps > 0 ? params.bitrateKbps : null;
   }
 }

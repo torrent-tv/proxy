@@ -49,7 +49,7 @@ import { RetainedReads } from "./RetainedReads.js";
 import { isUnavailable } from "./unavailable.js";
 import {
   ID_ATTACHED_FILE, ID_ATTACHMENTS, ID_CHAPTERS, ID_FILE_DATA, ID_FILE_MEDIA_TYPE, ID_FILE_NAME, ID_INFO_TITLE, ID_TAGS,
-  chapterTitlesOf, coverIndexOf, workFromTags
+  chapterTitlesOf, coverIndexOf, trackRatesFromTags, uidKeyOf, workFromTags
 } from "./matroska-work-tags.js";
 import {
   COVER_TYPES, MAX_COVER_BYTES, OutsideReadableEdges, edgeReader, emptyWorkTags, imageTypeOf, isNumberingOnly, text, textList
@@ -80,6 +80,7 @@ const ID_TRACKS = 0x1654ae6b;
 const ID_TRACK_ENTRY = 0xae;
 const ID_TRACK_NUMBER = 0xd7;
 const ID_TRACK_TYPE = 0x83;
+const ID_TRACK_UID = 0x73c5;
 const ID_FLAG_ENABLED = 0xb9;
 const ID_FLAG_DEFAULT = 0x88;
 const ID_FLAG_FORCED = 0x55aa;
@@ -531,6 +532,8 @@ export class MatroskaContainer extends Container {
     /** @type {import("../tracks/index.js").ContainerTrack[]} */
     const result = [];
     const counters = { video: -1, audio: -1, subtitle: -1 };
+    /** @type {Map<string, import("../tracks/index.js").ContainerTrack>} */
+    const byUid = new Map();
     const within = this.#readerWithin(tracksHeader.end);
     let at = tracksHeader.dataOffset;
     while (at < tracksHeader.end) {
@@ -563,13 +566,49 @@ export class MatroskaContainer extends Container {
           track.codecDelaySeconds = fields.codecDelaySeconds ?? 0;
           track.timestampScale = fields.timestampScale ?? 1;
           track.codecRanges = [[entry.dataOffset, entry.end - 1]];
+          if (fields.trackUid && (track.type === "video" || track.type === "audio")) byUid.set(fields.trackUid, track);
           result.push(track);
         }
       }
       at = entry.end;
     }
+    await this.#readTrackRates(reader, layout, byUid);
     this.#tracks = result;
     return result;
+  }
+
+  /**
+   * The average rate each picture and soundtrack's statistics state, written
+   * onto the track as `bitrateKbps` (`trackRatesFromTags`).
+   *
+   * Read strictly with the track table, like the table itself: a `Tags`
+   * element whose bytes have not arrived is not an answer that the file states
+   * none, so the whole reading is asked again when they have. A `Tags`
+   * element larger than one portion is not read, and one that cannot be parsed
+   * states no rates: a damaged tag costs the rate, never the track table.
+   *
+   * @param {ElementReader} reader
+   * @param {SegmentLayout} layout
+   * @param {Map<string, import("../tracks/index.js").ContainerTrack>} byUid
+   * @returns {Promise<void>}
+   */
+  async #readTrackRates(reader, layout, byUid) {
+    if (byUid.size === 0 || layout.tagsAt === null) return;
+    const header = await reader.header(layout.tagsAt, layout.segmentEnd);
+    if (!header || header.id !== ID_TAGS || header.size === null || header.size > this.portionBytes) return;
+    const data = await reader.data(header);
+    if (!data) return;
+    let rates;
+    try {
+      rates = trackRatesFromTags(data);
+    } catch (error) {
+      if (isUnavailable(error)) throw error;
+      return;
+    }
+    for (const [uid, kbps] of rates) {
+      const track = byUid.get(uid);
+      if (track) track.bitrateKbps = kbps;
+    }
   }
 
   /** Original-file ranges from Cues alone, without reading media block headers.
@@ -1071,6 +1110,7 @@ function parseTrackEntry(data) {
   const fields = {
     refused: false,
     trackNumber: null,
+    trackUid: "",
     type: null,
     codecId: "",
     language: null,
@@ -1102,6 +1142,7 @@ function parseTrackEntry(data) {
       case 0x56aa: fields.codecDelaySeconds = readUint(data, f.dataOffset, f.size) / 1e9; break;
       case 0x23314f: fields.timestampScale = readFloat(data, f.dataOffset, f.size); break;
       case ID_TRACK_NUMBER: fields.trackNumber = readUint(data, f.dataOffset, f.size); break;
+      case ID_TRACK_UID: fields.trackUid = uidKeyOf(data, f); break;
       case ID_TRACK_TYPE: fields.type = readUint(data, f.dataOffset, f.size); break;
       case ID_CODEC_ID: fields.codecId = readString(data, f); break;
       case ID_CODEC_PRIVATE: fields.codecPrivateB64 = data.toString("base64", f.dataOffset, f.dataOffset + f.size); break;

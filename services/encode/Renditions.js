@@ -137,7 +137,8 @@ export class Renditions {
             Number.isFinite(base.file.pictureKbps) ? base.file.pictureKbps / 1000 : null,
             this.#host.observedPeakMbps?.(spec) ?? null
           ),
-          audioLoad
+          audioLoad,
+          this.#host.serviceShare?.() ?? null
         )
       )
     });
@@ -535,7 +536,8 @@ export class Renditions {
     }
     const linkMbps = this.#host.linkMbpsOf(base, consumerId);
     const audioLoad = this.viewerAudioLoadOf(base, consumerId);
-    const admits = (limit) => linkCouldCarry(linkMbps, loadOf(videoLoadOfLimit(limit), audioLoad)).admitted;
+    const serviceShare = this.#host.serviceShare?.() ?? null;
+    const admits = (limit) => linkCouldCarry(linkMbps, loadOf(videoLoadOfLimit(limit), audioLoad, serviceShare)).admitted;
     const target = direction === "down"
       ? limits.slice(at + 1).find(admits)
       : (at > 0 && admits(limits[at - 1]) ? limits[at - 1] : undefined);

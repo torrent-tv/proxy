@@ -587,13 +587,21 @@ export class OutputOpening {
         linkMbps: viewerLinkMbps,
         keys: [...this.#host.outputs.values()].map((other) => other.outputKey).concat(this.#host.segmentOutputFiles.addresses()),
         readyAt: (key) => this.#host.segmentOutputFiles.isClosed(key, timeline.indexForTime(Math.max(0, startPositionSeconds))),
-        observedPeakMbps: (candidate) => this.#host.observedPeakMbps?.(candidate) ?? null
+        observedPeakMbps: (candidate) => this.#host.observedPeakMbps?.(candidate) ?? null,
+        serviceShare: () => this.#host.serviceShare?.() ?? null
       }
     });
+    // Which picture rate the link was asked about, and where it came from
+    // (`SourceFile.pictureRate`): a track's own figure, the file minus its
+    // soundtracks, or the whole file as a bound.
+    const pictureRate = file.pictureRate;
+    const pictureRateNote = pictureRate
+      ? ` picture=${pictureRate.kbps}kbps (${pictureRate.source})`
+      : " picture rate unknown: the file's own rate is not known yet";
     if (decided.unavailable) {
       this.#host.logger.info(
         `transcode "${logName}": no output suits this viewer — ${decided.unavailable.reason} ` +
-        `${JSON.stringify(decided.unavailable.figures)} (wanted ${decided.wantedKey})`
+        `${JSON.stringify(decided.unavailable.figures)} (wanted ${decided.wantedKey})${pictureRateNote}`
       );
       const error = new Error(`No output suits this viewer: ${decided.unavailable.reason}.`);
       // Bound by the MACHINE rather than by the viewer's link, for the output a
@@ -616,7 +624,7 @@ export class OutputOpening {
     }
     if (decided.answer) {
       this.#host.logger.info(
-        `transcode "${logName}": ${decided.answer.verdict} for this viewer ${JSON.stringify(linkFiguresOf(decided.answer))}`
+        `transcode "${logName}": ${decided.answer.verdict} for this viewer ${JSON.stringify(linkFiguresOf(decided.answer))}${pictureRateNote}`
       );
     }
     const spec = decided.spec;

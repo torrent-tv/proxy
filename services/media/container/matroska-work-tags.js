@@ -25,7 +25,8 @@ export const ID_INFO_TITLE = 0x7ba9;
 const ID_TAG = 0x7373;
 const ID_TARGETS = 0x63c0;
 const ID_TARGET_TYPE_VALUE = 0x68ca;
-const TARGET_UIDS = new Set([0x63c5, 0x63c9, 0x63c4, 0x63c6]);
+const ID_TAG_TRACK_UID = 0x63c5;
+const TARGET_UIDS = new Set([ID_TAG_TRACK_UID, 0x63c9, 0x63c4, 0x63c6]);
 const ID_SIMPLE_TAG = 0x67c8;
 const ID_TAG_NAME = 0x45a3;
 const ID_TAG_STRING = 0x4487;
@@ -100,6 +101,52 @@ export function tagsByLevel(data) {
     levels.get(level).push(...found);
   }
   return levels;
+}
+
+/**
+ * A Matroska UID as a key: its bytes in hexadecimal, leading zeros dropped.
+ * A UID is any 64-bit value, which a JavaScript number cannot hold exactly.
+ *
+ * @param {Buffer} buffer
+ * @param {{ dataOffset: number, size: number }} element
+ * @returns {string}
+ */
+export function uidKeyOf(buffer, element) {
+  return buffer.toString("hex", element.dataOffset, element.dataOffset + element.size).replace(/^0+/u, "");
+}
+
+/**
+ * The average rate each track's statistics state, keyed by its `TrackUID`.
+ *
+ * mkvmerge writes, per track, a `Tag` whose `Targets` name that track by
+ * `TagTrackUID` and whose `SimpleTag`s carry `BPS` — the bits the track holds
+ * over its duration — beside `NUMBER_OF_BYTES` and `DURATION`. Those are the
+ * tags read here; a track the file gives no `BPS` is left out.
+ *
+ * @param {Buffer} data - The data of a `Tags` element.
+ * @returns {Map<string, number>} kbit/s by {@link uidKeyOf} of the track.
+ */
+export function trackRatesFromTags(data) {
+  /** @type {Map<string, number>} */
+  const rates = new Map();
+  for (const tag of iterateElements(data)) {
+    if (tag.id !== ID_TAG) continue;
+    const end = Math.min(data.length, tag.dataOffset + tag.size);
+    const tracks = [];
+    for (const element of iterateElements(data, tag.dataOffset, end)) {
+      if (element.id !== ID_TARGETS) continue;
+      for (const field of iterateElements(data, element.dataOffset, Math.min(end, element.dataOffset + element.size))) {
+        if (field.id === ID_TAG_TRACK_UID) tracks.push(uidKeyOf(data, field));
+      }
+    }
+    if (tracks.length === 0) continue;
+    const found = [];
+    simpleTags(data, tag.dataOffset, end, found);
+    const bps = Number(found.find((simple) => simple.name === "BPS")?.value);
+    if (!(Number.isFinite(bps) && bps > 0)) continue;
+    for (const uid of tracks) if (uid.length > 0) rates.set(uid, bps / 1000);
+  }
+  return rates;
 }
 
 /**

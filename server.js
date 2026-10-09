@@ -117,6 +117,9 @@ function buildPortCandidates(startPort, maxAttempts = 51) {
 export async function startProxyServer({
   host, port, transcodeAudio, ffmpegBin, memoryBytes, segmentFormat, stateDir, onSubtitleCues, diagnostics, budgetPolicy,
   deliverySink = false,
+  // What viewers' connections carry beyond the film, per byte of film; the
+  // transport counts it and is built after this server, so it is late-bound.
+  serviceShare = () => null,
   // Where the proxy writes its own log. Its DIRECTORY is what matters here:
   // the browser's half of every session is written beside it, so the two are
   // on one durable disk and join by name.
@@ -608,6 +611,7 @@ export async function startProxyServer({
   let sourcePreparation;
   const outputParts = wireOutputs({
     indexMemory,
+    serviceShare,
     readMetadataActivity: () => containerOrchestrator.activity(),
     onViewerChanged: () => { void sourcePreparation?.refresh(); },
     sourceInputsFor: (output, index) => downloadMaps.inputsForOutput(output.file.sourceKey, output.outputKey, index),

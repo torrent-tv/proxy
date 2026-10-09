@@ -20,6 +20,14 @@
  *    soundtrack whose rate nothing states.
  *
  * A load is as trustworthy as its least trustworthy part.
+ *
+ * AND WHAT THE CONNECTION CARRIES BESIDES THE FILM (torrent-tv/meta#169). The
+ * same connection carries message framing, playlists, poll answers, probes and
+ * pushed cues. Their share is measured by the transport over everything this
+ * proxy has delivered (`transport/delivery-shares.js`) and added on top of the
+ * picture and the sound. It is an average proportion and not a bound, so it
+ * moves the figure without deciding the load's class; unmeasured, nothing is
+ * added and the figures say so (`serviceShare: null`).
  */
 
 import { AUDIO_TRANSCODE_KBPS, maxrateKbpsFor, nominalKbpsFor } from "../args.js";
@@ -44,7 +52,7 @@ const CLASS_ORDER = [PEAK_CLASS.KNOWN, PEAK_CLASS.ESTIMATED, PEAK_CLASS.UNKNOWN]
 
 /**
  * @typedef {{ mbps: number | null, peakClass: string }} LoadPart
- * @typedef {{ video: LoadPart | null, audio: LoadPart | null, totalMbps: number | null, peakClass: string }} Load
+ * @typedef {{ video: LoadPart | null, audio: LoadPart | null, serviceMbps: number | null, serviceShare: number | null, totalMbps: number | null, peakClass: string }} Load
  */
 
 /**
@@ -220,22 +228,29 @@ export const SOUNDTRACK_MODE_CAUSE = Object.freeze({
 });
 
 /**
- * The whole load: the parts added, and the class of the least trustworthy.
+ * The whole load: the parts added, what the connection carries besides them,
+ * and the class of the least trustworthy part.
  *
  * @param {LoadPart | null} video
  * @param {LoadPart | null} audio
+ * @param {number | null} [serviceShare] - What the connection carries beyond
+ *   the film, per byte of film, as the transport measured it; null while
+ *   nothing has been measured.
  * @returns {Load}
  */
-export function loadOf(video, audio) {
+export function loadOf(video, audio, serviceShare = null) {
   const parts = [video, audio].filter(Boolean);
   const peakClass = parts.reduce(
     (worst, one) => (CLASS_ORDER.indexOf(one.peakClass) > CLASS_ORDER.indexOf(worst) ? one.peakClass : worst),
     PEAK_CLASS.KNOWN
   );
-  const totalMbps = peakClass === PEAK_CLASS.UNKNOWN
+  const share = Number.isFinite(serviceShare) && serviceShare >= 0 ? serviceShare : null;
+  const filmMbps = peakClass === PEAK_CLASS.UNKNOWN
     ? null
     : parts.reduce((sum, one) => sum + one.mbps, 0);
-  return { video, audio, totalMbps, peakClass };
+  const serviceMbps = filmMbps === null || share === null ? null : filmMbps * share;
+  const totalMbps = filmMbps === null ? null : filmMbps + (serviceMbps ?? 0);
+  return { video, audio, serviceMbps, serviceShare: share, totalMbps, peakClass };
 }
 
 /**
@@ -335,6 +350,8 @@ export function linkAnswerFigures(answer) {
     videoClass: answer.load.video?.peakClass ?? null,
     audioMbps: answer.load.audio?.mbps ?? null,
     audioClass: answer.load.audio?.peakClass ?? null,
+    serviceMbps: answer.load.serviceMbps ?? null,
+    serviceShare: answer.load.serviceShare ?? null,
     totalMbps: answer.load.totalMbps,
     peakClass: answer.load.peakClass
   };

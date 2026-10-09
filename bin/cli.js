@@ -617,9 +617,6 @@ try {
     onSignal(sessionId, signal) {
       webRtcManager?.handleSignal(sessionId, signal);
     },
-    // Asked by a server that still polls; the same description the proxy
-    // sends on its own when it changes.
-    onHealthRequest: () => describeSelf(),
     // Whether this host could sustain a file it has only been told about. The
     // same arithmetic the first offer uses, against this host's own startup
     // benchmarks — no torrent, no bytes, no ffmpeg — so the browser can ask

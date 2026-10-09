@@ -20,7 +20,6 @@
 
 import { WebSocket } from "ws";
 
-/** @import { HealthMetrics } from './health-collector.js' */
 
 /**
  * Configuration for the tunnel client.
@@ -52,9 +51,6 @@ import { WebSocket } from "ws";
  *   Answered from this host's startup benchmarks alone: no torrent is added, no
  *   bytes are fetched and ffmpeg is not run, so it costs milliseconds and can
  *   be asked of every proxy in the pool at once.
- * @property {() => HealthMetrics} [onHealthRequest]
- *   Called when the server sends a `health-request` message.  The return value is
- *   sent back as `health-response` and used by the server to score this proxy.
  * @property {(message: string) => void} [onLog]
  *   Optional structured log sink.
  */
@@ -136,7 +132,6 @@ export function createTunnelClient({
   baseUrl = "",
   onSignal,
   onConnect,
-  onHealthRequest,
   onCanServeRequest,
   onLog,
   connectionLifetimeMs = CONNECTION_LIFETIME_MS
@@ -295,29 +290,6 @@ export function createTunnelClient({
           // a null offer means to the caller.
         }
         send({ type: "can-serve-response", requestId: message.requestId, offer }, connection);
-        return;
-      }
-
-      // Health check: server requests current metrics for proxy scoring.
-      if (message.type === "health-request") {
-        // Awaited: the answer now carries which films this proxy holds, and the
-        // truthful list of those lives on the torrent thread.
-        void (async () => {
-          let answer = {};
-          try {
-            answer = typeof onHealthRequest === "function" ? await onHealthRequest() : {};
-          } catch {
-            // silent-ok: a proxy that cannot describe itself is scored on
-            // nothing rather than not answered at all, which would drop it out
-            // of every selection until the next poll.
-          }
-          send({
-            type: "health-response",
-            requestId: message.requestId,
-            metrics: answer?.metrics ?? answer ?? {},
-            holds: Array.isArray(answer?.holds) ? answer.holds : []
-          }, connection);
-        })();
         return;
       }
     });

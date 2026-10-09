@@ -159,10 +159,13 @@ export class Timeline {
    * @param {import("../../viewer/PriorityMap.js").PriorityMap} map - One number
    *   per second of film.
    * @param {number} segmentCount - How many pieces this output has.
+   * @param {{ runsPastEnd?: boolean }} [shape] - `runsPastEnd`: the output's
+   *   pieces copy a stream, which is cut where its packets end, so a piece
+   *   holds sound past its published end by up to one packet.
    * @returns {import("../../viewer/PriorityMap.js").DemandZone[]} Runs of pieces
    *   that agree. Empty where nothing is stated, which says nobody is coming.
    */
-  inSegments(map, segmentCount) {
+  inSegments(map, segmentCount, { runsPastEnd = false } = {}) {
     if (!(segmentCount > 0) || !map || !(map.durationSeconds > 0)) {
       return [];
     }
@@ -173,9 +176,17 @@ export class Timeline {
       // whole, so it is wanted as soon as the soonest second inside it is
       // wanted — and the piece a viewer is standing in the middle of is wanted
       // exactly as much as the second under their feet.
+      // A COPIED PIECE ALSO HOLDS THE SECOND ITS END FALLS IN. A copy ends at
+      // the first packet boundary at or after its published end, and the
+      // player places the next piece where this one truly ends (hls.js
+      // `updateFragPTSDTS` carries a parsed piece's end to every later one).
+      // Field 2026-10-09, MP3 copied out of an AVI on a 4 s grid: pieces ended
+      // up to 24 ms late, and a seek to 4000 s asked for the piece ending at
+      // 4000 s, which nothing made because second 4000 belonged to the next.
       const from = Math.max(0, Math.floor(this.publishedStartOf(index)));
+      const end = this.publishedStartOf(index + 1);
       const until = index + 1 < segmentCount
-        ? Math.max(from + 1, Math.ceil(this.publishedStartOf(index + 1)))
+        ? Math.max(from + 1, runsPastEnd ? Math.floor(end) + 1 : Math.ceil(end))
         : map.durationSeconds;
       let priority = 0;
       let withinSeconds = Number.POSITIVE_INFINITY;

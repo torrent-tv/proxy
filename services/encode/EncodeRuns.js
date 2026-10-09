@@ -494,11 +494,13 @@ export class EncodeRuns {
     // each: 454 pieces against 401 on the field file.
     for (const [address, sessions] of byOutput) {
       const timeline = sessions[0].timeline;
+      const spec = sessions[0].spec;
       this.#host.encodeOrchestrator.notePriorityMap(
         address,
         timeline?.inSegments?.(
           this.#host.priority.mapForOutput(address),
-          Number(timeline?.segmentCount) || 0
+          Number(timeline?.segmentCount) || 0,
+          { runsPastEnd: Boolean(spec?.audio) && spec?.transcodesAudio !== true }
         ) ?? []
       );
     }

@@ -116,3 +116,21 @@ test("a timeline nobody holds is dropped", () => {
   assert.equal(timelines.forgetUnused(new Set([kept])), 1);
   assert.equal(timelines.size, 1);
 });
+
+test("a copied piece is wanted by the second its end falls in, because a copy runs past its end", () => {
+  // MP3 copied out of an AVI on a 4 s grid ended up to 24 ms past each cut, and
+  // the player placed the next piece there: a viewer at 8 s asked for the piece
+  // ending at 8 s (field 2026-10-09, torrent-tv/meta#159).
+  const timeline = new Timeline({ boundaries: [0, 4, 8, 12], cutGrid: "uniform" });
+  const map = { durationSeconds: 12, priority: Uint8Array.from({ length: 12 }, (_, second) => second >= 8 ? 100 : 1),
+    secondsUntilPlayed: Float64Array.from({ length: 12 }, (_, second) => Math.max(0, second - 8)),
+    behind: Uint8Array.from({ length: 12 }, (_, second) => second < 8 ? 1 : 0), urgent: new Uint8Array(12) };
+  assert.deepEqual(timeline.inSegments(map, 3), [
+    { from: 0, to: 1, priority: 1, withinSeconds: 0, urgent: false, behind: true },
+    { from: 2, to: 2, priority: 100, withinSeconds: 0, urgent: false, behind: false }
+  ]);
+  assert.deepEqual(timeline.inSegments(map, 3, { runsPastEnd: true }), [
+    { from: 0, to: 0, priority: 1, withinSeconds: 0, urgent: false, behind: true },
+    { from: 1, to: 2, priority: 100, withinSeconds: 0, urgent: false, behind: false }
+  ]);
+});

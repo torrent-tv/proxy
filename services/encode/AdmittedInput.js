@@ -2,6 +2,8 @@ import { createHash } from "node:crypto";
 import { matroskaInput, matroskaTrackIdentity } from "./MatroskaInput.js";
 import { pcmNormalization, normalizePcmSlices } from "./pcm-normalization.js";
 
+const INPUT_WRITE_BATCH_BYTES = 64 * 1024;
+
 /** Acquire complete source ranges before any process can consume the input. */
 export async function admitInput({ sources, reserve, readRanges }) {
   if (!Array.isArray(sources) || sources.length === 0 || typeof reserve !== "function" || typeof readRanges !== "function") {
@@ -106,31 +108,53 @@ export async function writeAdmittedInput(input, stdin, { next = null } = {}) {
   let current = input, includeHeader = true;
   try {
     while (current) {
-    if (JSON.stringify(current.tracks.map(input => matroskaTrackIdentity(input.track))) !== declarations) {
-      throw new Error("Consecutive encoder input changed its declared tracks.");
-    }
-    for (let index = 0; index < current.tracks.length; index++) {
-      const end = current.tracks[index].sourceEndSeconds;
-      if (Number.isFinite(end)) input.tracks[index].sourceEndSeconds = end;
-    }
-    for await (const chunk of current.stream({ originSeconds, includeHeader, seen })) {
-      await new Promise((resolve, reject) => {
-        const failed = error => { stdin.off("error", failed); reject(error); };
-        stdin.once("error", failed);
-        stdin.write(chunk, error => {
-          stdin.off("error", failed);
-          if (error) reject(error);
-          else resolve();
-        });
-      });
-    }
-    current.release();
-    current = next ? await next() : null;
-    includeHeader = false;
+      if (JSON.stringify(current.tracks.map(input => matroskaTrackIdentity(input.track))) !== declarations) {
+        throw new Error("Consecutive encoder input changed its declared tracks.");
+      }
+      for (let index = 0; index < current.tracks.length; index++) {
+        const end = current.tracks[index].sourceEndSeconds;
+        if (Number.isFinite(end)) input.tracks[index].sourceEndSeconds = end;
+      }
+      let batch = Buffer.allocUnsafe(INPUT_WRITE_BATCH_BYTES);
+      let used = 0;
+      const flush = async () => {
+        if (used === 0) return;
+        const chunk = batch.subarray(0, used);
+        batch = Buffer.allocUnsafe(INPUT_WRITE_BATCH_BYTES);
+        used = 0;
+        await writeChunk(stdin, chunk);
+      };
+      for await (const chunk of current.stream({ originSeconds, includeHeader, seen })) {
+        if (!Buffer.isBuffer(chunk)) throw new TypeError("Admitted input stream yielded a non-buffer chunk.");
+        let offset = 0;
+        while (offset < chunk.length) {
+          const copied = Math.min(INPUT_WRITE_BATCH_BYTES - used, chunk.length - offset);
+          chunk.copy(batch, used, offset, offset + copied);
+          used += copied;
+          offset += copied;
+          if (used === INPUT_WRITE_BATCH_BYTES) await flush();
+        }
+      }
+      await flush();
+      current.release();
+      current = next ? await next() : null;
+      includeHeader = false;
     }
     stdin.end();
   } finally {
     current?.release();
     input.release();
   }
+}
+
+function writeChunk(stdin, chunk) {
+  return new Promise((resolve, reject) => {
+    const failed = error => { stdin.off("error", failed); reject(error); };
+    stdin.once("error", failed);
+    stdin.write(chunk, error => {
+      stdin.off("error", failed);
+      if (error) reject(error);
+      else resolve();
+    });
+  });
 }

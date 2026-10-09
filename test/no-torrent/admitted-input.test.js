@@ -150,3 +150,35 @@ test("fragmented packet streaming borrows each admitted buffer without joining p
     chunk.byteOffset === buffer.byteOffset && chunk.length === buffer.length));
   input.release();
 });
+
+test("admitted packet writes batch small Matroska chunks", async () => {
+  const packetCount = 1000, packetBytes = 128;
+  const payload = Buffer.alloc(packetCount * packetBytes);
+  for (let index = 0; index < packetCount; index++) payload.fill(index % 251, index * packetBytes, (index + 1) * packetBytes);
+  const candidate = { sourceKey: "source", fileIndex: 0, input: {
+    ranges: [[0, payload.length - 1]],
+    tracks: [{ track: { type: "video", trackNumber: 1, codecId: "vp8", width: 64, height: 64 },
+      packets: Array.from({ length: packetCount }, (_, index) => ({ pts: index, duration: 1, keyframe: true,
+        ranges: [[index * packetBytes, (index + 1) * packetBytes - 1]] })) }]
+  } };
+  const input = await admitInput({ sources: [candidate], reserve: () => () => {}, readRanges: async () => [payload] });
+  let writes = 0, writtenBytes = 0;
+  const output = [];
+  const stdin = new Writable({ highWaterMark: 1024 * 1024, write(chunk, _encoding, done) {
+    writes++;
+    writtenBytes += chunk.length;
+    output.push(Buffer.from(chunk));
+    done();
+  } });
+  await writeAdmittedInput(input, stdin);
+  assert.ok(writes <= 3, `expected at most three writes, received ${writes}`);
+  assert.ok(writtenBytes > payload.length);
+  const joined = Buffer.concat(output);
+  let previous = -1;
+  for (let index = 0; index < packetCount; index++) {
+    const packet = payload.subarray(index * packetBytes, (index + 1) * packetBytes);
+    const found = joined.indexOf(packet, previous + 1);
+    assert.ok(found > previous, `packet ${index} was missing or out of order`);
+    previous = found;
+  }
+});

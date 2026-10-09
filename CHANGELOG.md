@@ -1,3 +1,7 @@
+## Unreleased
+
+- **Fix**: Batch proxy-built packet input into 64 KiB writes. The Moana logs showed copied video at 0.31x and a 29.1 s wait for a segment while source delivery was 3.7–4.1 MB/s. The proxy no longer waits for a separate stdin write callback for each small Matroska chunk (#ttv-163).
+
 ## 2.95.37
 
 - **Fix**: Measure each libx264 preset through its own realtime limit, and derive software bitrate ceilings from the source picture's measured rate and output area. Unknown source rates leave the encode uncapped, so the proxy does not impose an unsupported picture limit.

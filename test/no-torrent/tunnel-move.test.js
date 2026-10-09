@@ -87,7 +87,7 @@ test("a move opens a second connection and answers each request where it arrived
     name: "Кухня",
     baseUrl: "http://192.168.1.5:9090",
     onLog: (line) => lines.push(line),
-    onHealthRequest: () => ({ metrics: { cpuLoad: 0.1 }, holds: [] }),
+    onCanServeRequest: () => ({ copy: [1080], transcode: [] }),
     // The proxy's WebRTC manager answers an offer through `sendSignal`.
     onSignal: (sessionId) => { client.sendSignal(sessionId, { type: "answer", sdp: "x" }); },
     connectionLifetimeMs: 60_000
@@ -113,11 +113,11 @@ test("a move opens a second connection and answers each request where it arrived
   const fresh = registry.accepted[1];
 
   // Both open now. A late request on the old connection is answered there.
-  old.socket.send(JSON.stringify({ type: "health-request", requestId: "h-old" }));
+  old.socket.send(JSON.stringify({ type: "can-serve-request", requestId: "h-old", mediaInfo: {} }));
   old.socket.send(JSON.stringify({ type: "signal", sessionId: "s-old", signal: { type: "candidate", candidate: "c" } }));
-  fresh.socket.send(JSON.stringify({ type: "health-request", requestId: "h-new" }));
-  await waitFor(() => old.received.some((m) => m.requestId === "h-old"), "the old health answer");
-  await waitFor(() => fresh.received.some((m) => m.requestId === "h-new"), "the new health answer");
+  fresh.socket.send(JSON.stringify({ type: "can-serve-request", requestId: "h-new", mediaInfo: {} }));
+  await waitFor(() => old.received.some((m) => m.requestId === "h-old"), "the old answer");
+  await waitFor(() => fresh.received.some((m) => m.requestId === "h-new"), "the new answer");
   await waitFor(() => old.received.filter((m) => m.type === "signal").length === 2, "the second answer to the old session");
   assert.equal(fresh.received.some((m) => m.requestId === "h-old"), false);
   assert.equal(fresh.received.some((m) => m.type === "signal"), false);
@@ -142,7 +142,6 @@ test("a move whose new connection is refused keeps the old one carrying the tunn
     token: "t",
     proxyPort: 9090,
     onLog: (line) => lines.push(line),
-    onHealthRequest: () => ({ metrics: {}, holds: [] }),
     connectionLifetimeMs: 60_000
   });
   t.after(async () => {

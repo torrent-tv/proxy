@@ -32,6 +32,7 @@
  * only way in.
  */
 
+import { FFMPEG_STREAM_SEARCH_SECONDS } from "./ffmpeg-stream-search.js";
 import { Container } from "./Container.js";
 import { VideoTrack } from "../tracks/VideoTrack.js";
 import { h264Configuration } from "./h264-configuration.js";
@@ -572,7 +573,8 @@ export class MatroskaContainer extends Container {
   }
 
   /** Original-file ranges from Cues alone, without reading media block headers.
-   * FFmpeg needs the declarations and seek table as well as complete clusters.
+   * FFmpeg needs the declarations, the Clusters its stream search reads from the
+   * first one, and the seek table as well as complete clusters.
    * One preceding cluster retains preroll; one following cluster covers demux
    * lookahead beyond the presentation cut. No packet payload is parsed here.
    */
@@ -627,7 +629,11 @@ export class MatroskaContainer extends Container {
     if (cuesEnd === null) return { kind: "terminal", reason: "source-seek-index-is-unbounded" };
     const requestBytes = 1024 * 1024;
     const paddedEnd = end => Math.min(this.fileSize - 1, end + requestBytes);
-    const ranges = [[0, paddedEnd(layout.firstClusterAt - 1)],
+    // FFmpeg's stream search reads on from the first Cluster for its stated
+    // media time and stops on the first packet past it, which lies before the
+    // first Cue later than that time; the padding holds its read-ahead.
+    const searchEnd = points[firstAt(points[0].seconds + FFMPEG_STREAM_SEARCH_SECONDS, true)];
+    const ranges = [[0, paddedEnd((searchEnd ? searchEnd.at : layout.segmentEnd) - 1)],
       [points[first].at, paddedEnd(mediaEnd)], [layout.cuesAt, paddedEnd(cuesEnd - 1)],
       [Math.max(0, this.fileSize - requestBytes), this.fileSize - 1]];
     // SeekHead may name top-level declarations after media clusters. Preserve
@@ -645,7 +651,8 @@ export class MatroskaContainer extends Container {
       if (previous && range[0] <= previous[1] + 1) previous[1] = Math.max(previous[1], range[1]);
       else union.push([...range]);
     }
-    return { kind: "result", from: interval.from, to: interval.to, ranges: union, fileLength: this.fileSize };
+    return { kind: "result", from: interval.from, to: interval.to, ranges: union, fileLength: this.fileSize,
+      streamSearchSeconds: FFMPEG_STREAM_SEARCH_SECONDS };
   }
 
   async readPacketIndex(interval) {

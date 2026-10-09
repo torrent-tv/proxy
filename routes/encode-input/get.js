@@ -21,10 +21,14 @@ export function handleEncodeInputGet(req, reply, { inputOf, refused = () => {} }
   if (!range || range.start >= length) return reply.code(416).header("Content-Range", `bytes */${length}`).send();
   // The answer runs to the end of the admitted range the read starts in, which
   // is what keeps FFmpeg inside the bytes the run holds. A shorter answer is
-  // not continued by every FFmpeg: 6.1 (ffmpeg-static) takes it for the end of
-  // the input and stops, where 8.1 sends a new request (http.c, EAGAIN at the
-  // end of a content range). A cap of 1 MiB here ended every original-source
-  // segment longer than that on 6.1 (torrent-tv/meta#151).
+  // not continued by every FFmpeg: measured, 8.1.2 and 9.0.2 send a new
+  // request, while 5.1, 6.1, 7.0.2 (ffmpeg-static on Linux), 7.1 and 8.0 take
+  // it for a read error. A cap of 1 MiB here ended every original-source
+  // segment longer than that on 6.1 (torrent-tv/meta#151). The end of an
+  // admitted range is therefore only reached where FFmpeg needs nothing more,
+  // and a byte past it is refused, which from 7.1 on ends the run: every read
+  // FFmpeg makes, its stream search at open included, must be named by the
+  // container (torrent-tv/meta#165).
   const held = input.read(fileIndex, range.start, range.end, true);
   if (!held) {
     // FFmpeg asked for a byte the run was not given: the container named too

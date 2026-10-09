@@ -123,7 +123,11 @@ export async function startProxyServer({
   // Where the proxy writes its own log. Its DIRECTORY is what matters here:
   // the browser's half of every session is written beside it, so the two are
   // on one durable disk and join by name.
-  logFile = ""
+  logFile = "",
+  // Told whenever what the server chooses proxies by may have changed here:
+  // the films held, an encoder started or ended, a viewer came or went
+  // (`transport/proxy-state.js`).
+  onStateChanged = () => undefined
 }) {
   const app = Fastify({
     // No practical body-size limit — the proxy server is localhost-only and
@@ -159,6 +163,7 @@ export async function startProxyServer({
   const torrentPool = new WorkerTorrentPool({
     memoryBytes,
     stateDir,
+    onHoldingsChanged: () => onStateChanged(),
     onSourceForgotten: ({ sourceKey }) => {
       sourcePreparation?.forget(sourceKey);
       mediaReads.forget(sourceKey);
@@ -613,7 +618,8 @@ export async function startProxyServer({
     indexMemory,
     serviceShare,
     readMetadataActivity: () => containerOrchestrator.activity(),
-    onViewerChanged: () => { void sourcePreparation?.refresh(); },
+    onViewerChanged: () => { void sourcePreparation?.refresh(); onStateChanged(); },
+    onEncodersChanged: () => onStateChanged(),
     sourceInputsFor: (output, index) => downloadMaps.inputsForOutput(output.file.sourceKey, output.outputKey, index),
     readSourceMedia: async (params) => {
       await playbackPlanner.getPlan(params);

@@ -381,6 +381,7 @@ async function runCommand(command, params, id) {
       // stand-ins, which is only cleared on shutdown and would name films this
       // proxy let go of hours ago.
       const held = [];
+      const whole = completedFiles.heldByTorrent();
       for (const torrent of pool.client?.torrents ?? []) {
         const infoHash = String(torrent?.infoHash ?? "");
         if (!infoHash) {
@@ -392,8 +393,15 @@ async function runCommand(command, params, id) {
           // nothing, so the share is reported and the decision is made where
           // the viewer is.
           progress: Number.isFinite(torrent?.progress) ? torrent.progress : 0,
-          bytes: Number.isFinite(torrent?.downloaded) ? torrent.downloaded : 0
+          bytes: Number.isFinite(torrent?.downloaded) ? torrent.downloaded : 0,
+          wholeFiles: whole.get(infoHash)?.fileIndexes ?? []
         });
+        whole.delete(infoHash);
+      }
+      // A film downloaded whole is kept as files after its torrent is removed:
+      // this proxy still holds it, and serves it with no swarm at all.
+      for (const [infoHash, files] of whole) {
+        held.push({ infoHash, progress: null, bytes: files.bytes, wholeFiles: files.fileIndexes });
       }
       return { held };
     }
@@ -525,6 +533,7 @@ async function runCommand(command, params, id) {
       // other. What arrives is their share; what goes back is what they hold
       // after it, which is what the owner divides by next time.
       const after = await completedFiles.allow(Number(params.bytes));
+      if (after.removed > 0) holdingsChanged();
       return after.bytes;
     }
 
@@ -848,6 +857,7 @@ function ensureArrivalsWired(sourceKey, torrent) {
     return;
   }
   arrivalsWired.add(torrent);
+  holdingsChanged();
   torrent.on("verified", () => announceArrivals(sourceKey, torrent));
   torrent.on("piece-withdrawn", () => announceArrivals(sourceKey, torrent, "withdrawn"));
   torrent.once("close", () => {
@@ -858,7 +868,13 @@ function ensureArrivalsWired(sourceKey, torrent) {
       const retained = wholeSources.describe(sourceKey);
       announceWholeFiles(sourceKey, retained);
     } else parentPort.postMessage({ type: Event.SOURCE_FORGOTTEN, sourceKey });
+    holdingsChanged();
   });
+}
+
+/** Say that what this proxy holds has changed (`Event.HOLDINGS_CHANGED`). */
+function holdingsChanged() {
+  parentPort.postMessage({ type: Event.HOLDINGS_CHANGED });
 }
 
 /**
@@ -913,6 +929,7 @@ pool.buildStoresWith({
 });
 void completedFiles.adopt(() => null).then((adopted) => {
   if (adopted > 0) {
+    holdingsChanged();
     logger.info(
       `whole files: took up ${adopted} file(s) a previous life left in ${completedFiles.root}`
     );
@@ -1008,6 +1025,7 @@ async function keepWholeFiles() {
             length: kept.length,
             name: kept.name
           });
+          holdingsChanged();
         }
       } catch (error) {
         logger.warn(`whole files: could not keep "${file?.name}": ${error?.message ?? error}`);

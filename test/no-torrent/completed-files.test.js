@@ -113,3 +113,19 @@ test("forgetting a torrent removes its files and nobody else's", async () => {
     await fs.rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 20 });
   }
 });
+
+test("the files held whole are listed by torrent, and listing them is not a read", async () => {
+  const root = await directory();
+  const files = new CompletedFiles({ root });
+  try {
+    await files.allow(1024);
+    await files.keep({ infoHash: INFO_HASH, fileIndex: 3, length: 4, name: "a.mkv", open: opens(Buffer.from("abcd")) });
+    await files.keep({ infoHash: INFO_HASH, fileIndex: 5, length: 2, name: "b.mkv", open: opens(Buffer.from("ef")) });
+    const held = files.heldByTorrent();
+    assert.deepEqual([...held.keys()], [INFO_HASH]);
+    assert.deepEqual(held.get(INFO_HASH).fileIndexes.sort(), [3, 5]);
+    assert.equal(held.get(INFO_HASH).bytes, 6);
+  } finally {
+    await fs.rm(root, { recursive: true, force: true });
+  }
+});

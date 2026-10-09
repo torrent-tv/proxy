@@ -1,5 +1,6 @@
 ## 2.95.41
 
+- **New**: The proxy sends the server its state when it changes — load and free memory, room for one more encode, and the films it holds, now including files kept whole after their torrent was removed — over every open tunnel connection: on connect, when a torrent is added or closed or a file kept or let go, when an encoder starts or ends, when a viewer comes or goes, and every 5 s (the kernel's load-average cadence) when anything differs. The server chooses proxies from these reports instead of asking every proxy on each choice (#ttv-36).
 - **Fix**: Read each source piece once when assembling disjoint packet ranges for an encoder. This avoids repeated reads of spilled pieces while preparing copied MP4 segments (#ttv-163).
 
 ## 2.95.40

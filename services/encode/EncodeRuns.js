@@ -370,7 +370,7 @@ export class EncodeRuns {
       const cut = cutOf(session.timeline, index);
       const grid = session.timeline.published ?? session.timeline.boundaries;
       const interval = admitted ? { from: grid?.[index], to: grid?.[index + 1],
-        ...(index === session.timeline.segmentCount - 1 ? { sourceEnds: Object.fromEntries(
+        ...(index === session.timeline.segmentCount - 1 ? { endsWithSource: true, sourceEnds: Object.fromEntries(
           (admitted.tracks ?? []).filter(input => Number.isFinite(input.sourceEndSeconds))
             .map(input => [input.track.type === "video" ? "vide" : "soun", input.sourceEndSeconds])) } : {}),
         requiredKinds: [session.spec.carries !== "audio-only" ? "vide" : null,

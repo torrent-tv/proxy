@@ -37,10 +37,10 @@ export async function admitOriginalInput({ sources, reserve, readRanges, now = D
     const reads = { count: 0, bytes: 0, firstAt: 0, lastAt: 0 };
     return {
       kind: "result", original: true, sources, bytes, copyMs, fingerprint: hash.digest("hex"),
-      tracks: sources.flatMap(source => (source.input.selections ?? []).map(selection => ({ track: selection.track,
-        ...(Number.isFinite(source.input.sourceEnds?.[selection.track.trackNumber]) ? {
-          sourceEndSeconds: source.input.sourceEnds[selection.track.trackNumber] - source.timeShiftSeconds
-        } : {}) }))),
+      // No track's own end: the container names the bytes an interval needs,
+      // not where each track stops. The final piece is judged by the input
+      // reaching the end of the file instead (`piece-completeness.js`).
+      tracks: sources.flatMap(source => (source.input.selections ?? []).map(selection => ({ track: selection.track }))),
       read(fileIndex, start, end, partial = false) {
         if (released) return null;
         const entry = held.get(fileIndex);

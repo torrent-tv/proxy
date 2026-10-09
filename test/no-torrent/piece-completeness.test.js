@@ -128,6 +128,29 @@ test("final admitted media retains distinct proven track ends without accepting 
     "segment-end-outside-interval-soun");
 });
 
+test("the final piece ends where its tracks end in the file, and is still refused if it starts late or runs past", () => {
+  // Field 2026-10-09, Drifters episode 1: the final cut is 1419.993 s, the
+  // picture's last packet ends at 1419.92 s and the separate soundtrack's at
+  // 1419.904 s (68155375 / 48000).
+  const mediaFormat = { producedThroughSeconds: coverage => Math.min(...coverage.tracks.map(track =>
+    Number(track.ranges.at(-1).end) / Number(track.timescale))) };
+  const sound = { kind: "soun", timescale: 48000n, ranges: [{ start: 67644415n, end: 68155375n, frame: 1024n }] };
+  const interval = { from: 1409.243, to: 1419.993, requiredKinds: ["soun"] };
+  assert.equal(judgePiece(mediaFormat, { tracks: [sound] }, undefined, interval).reason, "segment-end-outside-interval-soun",
+    "a piece in the middle of the film must reach its cut");
+  assert.equal(judgePiece(mediaFormat, { tracks: [sound] }, undefined, { ...interval, endsWithSource: true }).whole, true,
+    "the final piece's input is the rest of the file, so its end is the track's own");
+  const late = { ...sound, ranges: [{ start: 67644415n + 48000n, end: 68155375n, frame: 1024n }] };
+  assert.equal(judgePiece(mediaFormat, { tracks: [late] }, undefined, { ...interval, endsWithSource: true }).reason,
+    "segment-start-outside-interval-soun");
+  const past = { ...sound, ranges: [{ start: 67644415n, end: 68155375n + 48000n, frame: 1024n }] };
+  assert.equal(judgePiece(mediaFormat, { tracks: [past] }, undefined, { ...interval, endsWithSource: true }).reason,
+    "segment-end-outside-interval-soun");
+  // A track end the input does state is held to.
+  assert.equal(judgePiece(mediaFormat, { tracks: [sound] }, undefined,
+    { ...interval, endsWithSource: true, sourceEnds: { soun: 1419.993 } }).reason, "segment-end-outside-interval-soun");
+});
+
 test("neighbor validation refuses absent tracks and invalid frame clocks", () => {
   const track = { kind: "vide", timescale: 1000n, productionFrame: 40n,
     ranges: [{ start: 0n, end: 1000n, frame: 40n }] };

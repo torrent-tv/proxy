@@ -1,3 +1,7 @@
+## Unreleased
+
+- **Fix**: The last piece of a film is no longer refused when its tracks end before the final cut. Its input is the rest of the file and it is published only by a run that reached the end of that input, so a track stopping short of the interval stops there in the file; the check now takes that end as the track's own, and still refuses a piece that starts late or runs past. The original-file path had been reading a `sourceEnds` field no container fills, so the final piece of every copied Matroska output whose tracks are shorter than the file's duration was refused and the viewer could not reach the end. Field 2026-10-09, Drifters episode 1: final cut 1419.993 s, picture ends 1419.92 s, the separate soundtrack 1419.904 s (#ttv-8).
+
 ## 2.96.3
 
 - **Fix**: A soundtrack shipped as its own file beside the picture is now downloaded where the viewer stands. The priority map was built per file an output is NAMED after — the picture's — so for a soundtrack read from another file nobody asked the swarm for that file's bytes, its encoder waited for a piece for ever, and choosing the track left the viewer on the waiting overlay with a full picture buffer. The map now covers every file an output reads (`OutputSpec.sourceFileIndexes`). Field 2026-10-09: Drifters episode 1, `Rus Sound/[HorribleSubs] Drifters - 01 [1080p].mka` (file 19), piece 26 never requested (#ttv-8).

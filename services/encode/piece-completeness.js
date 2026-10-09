@@ -43,7 +43,7 @@ export function cutOf(timeline, index) {
  * @param {{ producedThroughSeconds?: (ranges: object) => number | null }} format
  * @param {object} ranges - The piece's media intervals, as the format read them.
  * @param {number | undefined} cutSeconds - From {@link cutOf}.
- * @param {{ from: number, to: number, requiredKinds: string[], sourceEnds?: object }} [interval]
+ * @param {{ from: number, to: number, requiredKinds: string[], sourceEnds?: object, endsWithSource?: boolean }} [interval]
  * @returns {{ whole: boolean, throughSeconds: number | null, reason?: string }}
  */
 export function judgePiece(format, ranges, cutSeconds, interval) {
@@ -132,8 +132,18 @@ export function judgeNeighbors(left, right) {
  * Every required track must cover the interval with at most one-frame error,
  * on the clock the run's muxer cut by: the interval moved by `shift`
  * ({@link cutShiftOf}). A track's own end in the file is not moved.
+ *
+ * `endsWithSource` marks the final piece of a film. Its input is the rest of
+ * the file, and it is published only by a run that reached the end of that
+ * input, so a track that stops before the interval's end stops there in the
+ * file too: the end the piece shows is the track's own, and only a track
+ * running past the interval is refused. Where the input states a track's end
+ * (`sourceEnds`), that end is held to as before. Field 2026-10-09, Drifters
+ * episode 1: the picture's last packet ends at 1419.92 s and the separate
+ * soundtrack's at 1419.904 s against a final cut of 1419.993 s, and both last
+ * pieces were refused, so no viewer could reach the end of the episode.
  */
-function intervalFailure(coverage, { from, to, requiredKinds, sourceEnds = {}, shift = 0 }) {
+function intervalFailure(coverage, { from, to, requiredKinds, sourceEnds = {}, shift = 0, endsWithSource = false }) {
   if (!Number.isFinite(from) || !Number.isFinite(to) || !(to > from) || !requiredKinds?.length) return "segment-interval-is-not-declared";
   for (const kind of requiredKinds) {
     const track = coverage?.tracks?.find(track => track.kind === kind);
@@ -157,7 +167,10 @@ function intervalFailure(coverage, { from, to, requiredKinds, sourceEnds = {}, s
       if (range.end > reached) reached = range.end;
     }
     const finalFrame = track.productionFrame ?? track.ranges.at(-1).frame;
-    if (reached < end - finalFrame - positionError || reached > end + finalFrame + positionError) return `segment-end-outside-interval-${kind}`;
+    const endsInFile = endsWithSource && !Number.isFinite(sourceEnds[kind]);
+    if ((reached < end - finalFrame - positionError && !endsInFile) || reached > end + finalFrame + positionError) {
+      return `segment-end-outside-interval-${kind}`;
+    }
   }
   return null;
 

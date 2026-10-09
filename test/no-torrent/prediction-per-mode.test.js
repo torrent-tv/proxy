@@ -25,15 +25,16 @@ const BENCHMARK = [
 /** Decoding this source costs 1/6 s per second: alone, it would run at 6x. */
 const DECODE_MODEL = { pixelTerm: 0, bitrateTerm: 0, constantTerm: 1 / 6 };
 
-function costWith(benchmark = BENCHMARK) {
+function costWith(benchmark = BENCHMARK, active = [], share = 1) {
   return new EncodeCost({
-    outputs: { familyOf: () => [], variantHeightOf: () => 0 },
-    host: () => ({ benchmark, decodeModel: DECODE_MODEL, contentionPenalties: null, availability: null }),
-    runningEncoders: () => 0,
-    encodersRunningNow: () => 0,
+    outputs: { familyOf: () => [], values: () => active, variantHeightOf: () => 0 },
+    host: () => ({ benchmark, decodeModel: DECODE_MODEL, contentionPenalties: null,
+      availability: { known: true, share }, encoderKind: "software" }),
+    runningEncoders: () => active.length,
+    encodersRunningNow: () => active.length,
     torrentCostSecFor: () => 0,
     runsFor: () => [],
-    stateFor: () => "IDLE"
+    stateFor: (session) => session.running ? "PRODUCING" : "IDLE"
   });
 }
 
@@ -59,6 +60,39 @@ test("an output is predicted at its own mode, and the offer's cheapest-mode figu
   // 1 / (1/6 + 1/3) = 2x at `fast`; 1 / (1/6 + 1/12) = 4x at `ultrafast`.
   assert.ok(Math.abs(state.predictedSpeedWhenOffered - 2) < 1e-9, `predicted ${state.predictedSpeedWhenOffered}`);
   assert.ok(Math.abs(state.offeredSpeedAtCheapestMode - 4) < 1e-9, `offered ${state.offeredSpeedAtCheapestMode}`);
+});
+
+test("new software mode choice includes the costs of currently running encoders", () => {
+  const active = outputAt("fast");
+  active.running = true;
+  qualityStateOf(active).lastAloneSpeed = 1.5;
+  const cost = costWith(BENCHMARK, [active]);
+  const choice = cost.chooseEncodeBudget({
+    transcodeVideo: true,
+    targetWidth: FRAME.width,
+    targetHeight: FRAME.height,
+    sourceWidth: FRAME.width,
+    sourceHeight: FRAME.height,
+    outputFps: FPS,
+    source: { megapixelsPerSecond: 5.5, megabitsPerSecond: 1 },
+    requiredSpeed: 1
+  });
+  assert.equal(choice.preset, "ultrafast");
+});
+
+test("new software mode choice reflects the measured free share of the machine", () => {
+  const cost = costWith(BENCHMARK, [], 0.3);
+  const choice = cost.chooseEncodeBudget({
+    transcodeVideo: true,
+    targetWidth: FRAME.width,
+    targetHeight: FRAME.height,
+    sourceWidth: FRAME.width,
+    sourceHeight: FRAME.height,
+    outputFps: FPS,
+    source: { megapixelsPerSecond: 5.5, megabitsPerSecond: 1 },
+    requiredSpeed: 1
+  });
+  assert.equal(choice.preset, "ultrafast");
 });
 
 test("a mode that was not measured has no prediction rather than another mode's", () => {

@@ -172,6 +172,21 @@ export class EncodeCost {
     );
   }
 
+  #committedMachineCostSec() {
+    let cost = 0;
+    for (const session of this.#outputs.values()) {
+      if (!processCanBeSignalled(this.#stateFor(session))) {
+        continue;
+      }
+      const measured = this.#loadOfSession(session)?.costSec;
+      if (!Number.isFinite(measured) || measured <= 0) {
+        return null;
+      }
+      cost += measured;
+    }
+    return cost;
+  }
+
   // The last refusal printed. The offer is recomputed on the path that serves
   // every playlist, init and segment, and the figures behind it move every few
   // seconds — so the line is written when the ANSWER changes, not when it is
@@ -1085,11 +1100,26 @@ export class EncodeCost {
     if (!ceiling) {
       return null;
     }
+    const concurrentCostSec = this.#committedMachineCostSec();
+    const speedForPreset = (benchmark, frame, outputPixelsPerSec) => {
+      if (concurrentCostSec === null) {
+        return null;
+      }
+      return this.#speedOnThisMachine({
+        benchmark,
+        source,
+        width: frame.width,
+        height: frame.height,
+        fps: outputPixelsPerSec / (frame.width * frame.height),
+        observedDecodeCostSec: null,
+        concurrentCostSec
+      });
+    };
     return chooseSoftwareEncodeSettings(
       this.#host().benchmark,
       { width: ceiling.w, height: ceiling.h },
       outputFps,
-      { decodeModel: this.#host().decodeModel, source, requiredSpeed }
+      { decodeModel: this.#host().decodeModel, source, requiredSpeed, speedForPreset }
     );
   }
 }

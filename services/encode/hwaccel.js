@@ -1682,13 +1682,15 @@ export function pickSoftwarePreset(benchmark, pixelsPerSecNeeded, cost = {}, fra
     if (encodePixelsPerSec === null) {
       continue;
     }
-    const speed = predictedRealtimeSpeed({
-      decodeModel: cost.decodeModel ?? null,
-      encodePixelsPerSec,
-      outputPixelsPerSec: pixelsPerSecNeeded,
-      source: cost.source ?? null,
-      observedDecodeCostSec: observed
-    });
+    const speed = typeof cost.speedForPreset === "function"
+      ? cost.speedForPreset([entry], frame, pixelsPerSecNeeded)
+      : predictedRealtimeSpeed({
+        decodeModel: cost.decodeModel ?? null,
+        encodePixelsPerSec,
+        outputPixelsPerSec: pixelsPerSecNeeded,
+        source: cost.source ?? null,
+        observedDecodeCostSec: observed
+      });
     if (speed !== null && speed >= bar) {
       return entry.preset;
     }
@@ -1786,12 +1788,15 @@ export function chooseSoftwareEncodeSettings(benchmark, ceiling, outputFps, cost
     if (fastest === null) {
       continue;
     }
-    const speed = predictedRealtimeSpeed({
-      decodeModel: cost.decodeModel ?? null,
-      encodePixelsPerSec: fastest,
-      outputPixelsPerSec: ladder[i].width * ladder[i].height * fps,
-      source: cost.source ?? null
-    });
+    const outputPixelsPerSec = ladder[i].width * ladder[i].height * fps;
+    const speed = typeof cost.speedForPreset === "function"
+      ? cost.speedForPreset([benchmark.at(-1)], ladder[i], outputPixelsPerSec)
+      : predictedRealtimeSpeed({
+        decodeModel: cost.decodeModel ?? null,
+        encodePixelsPerSec: fastest,
+        outputPixelsPerSec,
+        source: cost.source ?? null
+      });
     if (speed !== null && speed >= bar) {
       chosenIndex = i;
       break;

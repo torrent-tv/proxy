@@ -21,7 +21,7 @@ import {
 } from "../../services/encode/fingerprint.js";
 import { interpolationErrorOf, throughputAt } from "../../services/encode/throughput.js";
 import { calibrateEncoder, HostCalibration } from "../../services/encode/calibration.js";
-import { canSustainOutput, pickSoftwarePreset } from "../../services/encode/hwaccel.js";
+import { canSustainOutput, chooseSoftwareEncodeSettings, pickSoftwarePreset } from "../../services/encode/hwaccel.js";
 import { contentOf, LocalObservations } from "../../services/encode/LocalObservations.js";
 import { OutputSpec, VideoOutput, CutGrid } from "../../services/encode/output/index.js";
 import { PEAK_CLASS, videoLoadOfSpec } from "../../services/encode/quality/link-budget.js";
@@ -223,6 +223,17 @@ test("the modes of the encoder in use are what prices, and software is kept for 
   assert.equal(calibration.modesFor("vaapi").length, 1);
   assert.deepEqual(calibration.modesFor("software"), [], "calibrated, nothing qualified");
   assert.equal(calibration.modesFor("nvenc"), null, "not calibrated at all");
+});
+
+test("software mode selection uses the measured machine-load prediction when supplied", () => {
+  const benchmark = [
+    { preset: "fast", pixelsPerSec: 20e6, bySize: [{ width: 720, height: 400, pixelsPerSec: 20e6 }], interpolationError: 0 },
+    { preset: "ultrafast", pixelsPerSec: 40e6, bySize: [{ width: 720, height: 400, pixelsPerSec: 40e6 }], interpolationError: 0 }
+  ];
+  const choice = chooseSoftwareEncodeSettings(benchmark, { width: 720, height: 400 }, 24, {
+    speedForPreset: ([entry]) => entry.preset === "fast" ? 0.82 : 1.31
+  });
+  assert.equal(choice.preset, "ultrafast");
 });
 
 // --- Local observations ----------------------------------------------------

@@ -761,6 +761,13 @@ presets. The size walk ends when even the fastest preset cannot sustain
 realtime. If a detected device has no qualified mode, the proxy uses software
 encoding.
 
+The software size and preset choice prices each measured mode with the current
+free machine share, running encoder costs and their measured contention penalty,
+source decoding and the file's measured supply requirement. The playback
+readiness forecast uses live source, processing and viewer-link rates to
+estimate segment arrival and buffer continuity for the selected output; it does
+not forecast future changes in host load.
+
 `encode/LocalObservations.js` stores observations from admitted encodes in the
 proxy's `local-observations.json`. It keeps speed without competing encodes,
 average and peak segment rates, output preparation time and the viewer buffer at

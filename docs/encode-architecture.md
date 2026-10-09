@@ -89,24 +89,22 @@ viewer's link for that viewer alone.
 slow viewer's limit can no longer land on every viewer of a picture — which is
 what it did while it was a field of the output set by the worst of their links.
 The level is pinned (`-level:v`) to the level of the NOMINAL output of that
-size and frame rate, so every limit at one size writes the same header
-and a viewer can be moved between them under the address they already play.
+size, frame rate and source, so every limit of one source at one size writes
+the same header and a viewer can be moved between them under the address they already play.
 A limit above the nominal one is refused. Hardware encoders are given no limit
 and state none (`vbv=-`). Whether the pinned level is the one x264 would choose
 for the nominal output is checked before a release
 (`stand/segment-compat/level-check.mjs`).
 
-**Which limits a frame has is decided by its AREA** (step 14, decided with the
-user 2026-09-24). The rows of limits are the ladder's frames at 16:9, sized by
-the same function that sizes an encode; a frame takes the row nearest by the
-ratio of areas, the larger row on the exact border, and a row with no nominal
-of its own borrows the nearest row that has one (`limitRowFor`,
-`nominalKbpsFor`). Every place that picks a row — opening an output, the move
-between limits, the offer's price of a step and the link rule — is handed the
-whole frame, so all of them name the same row. By height alone a 1920x800 film
-fell in the 720 row although it is nearer the 1080 one. The proposed measured
-table of lower limits was dropped on 2026-09-27. Step 14 now qualifies this
-machine's encoder modes and does not set lower bitrate limits.
+**A software limit follows the source picture rate and output area** (step 14).
+The source picture rate is the measured whole-file average minus the stated
+rates of every embedded audio track. The nominal for an output is that rate
+scaled by output area divided by source area; maxrate and buffer remain 1.3 and
+1.5 times that nominal. If any required rate or dimension is unknown, the
+software encode has no ceiling and the link rule has no safe peak estimate.
+Opening an output, the same-height move, the offer and the link rule all use
+the same source and frame. Lower limits can be added only as explicit values
+under this source-specific nominal.
 
 ## Where a viewer is, and how it reaches the encoders
 
@@ -757,9 +755,11 @@ the previous configuration.
 `encode/throughput.js` measures qualified modes at five frame sizes from
 256×144 through 3840×2160. Between measured sizes it interpolates and subtracts
 the measured interpolation error; it does not offer a size outside the measured
-range. Calibration stops measuring slower modes and larger sizes once a faster
-mode cannot sustain realtime. If a detected device has no qualified mode, the
-proxy uses software encoding.
+range. Each preset is read at successive sizes until its own reading falls
+below realtime; a faster preset's miss does not end measurements of slower
+presets. The size walk ends when even the fastest preset cannot sustain
+realtime. If a detected device has no qualified mode, the proxy uses software
+encoding.
 
 `encode/LocalObservations.js` stores observations from admitted encodes in the
 proxy's `local-observations.json`. It keeps speed without competing encodes,

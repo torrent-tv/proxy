@@ -23,6 +23,7 @@ import { outputSpec } from "./helpers/output-spec.js";
 const known = (mbps) => ({ mbps, peakClass: PEAK_CLASS.KNOWN });
 const estimated = (mbps) => ({ mbps, peakClass: PEAK_CLASS.ESTIMATED });
 const unknown = () => ({ mbps: null, peakClass: PEAK_CLASS.UNKNOWN });
+const SOURCE = { width: 1920, height: 1080, pictureKbps: 4200 };
 
 test("a copied source at its own height is its stated average — an estimate, not a bound", () => {
   const part = videoLoadForFrame({ sourceHeight: 1080, copiesAtSource: true, sourceMbps: 3.73, encoderKind: "software" }, { width: 1920, height: 1080 });
@@ -30,8 +31,8 @@ test("a copied source at its own height is its stated average — an estimate, n
 });
 
 test("a height the software encoder makes is bounded by the nominal limit of that height", () => {
-  const part = videoLoadForFrame({ sourceHeight: 1080, copiesAtSource: true, sourceMbps: 3.73, encoderKind: "software" }, { width: 1280, height: 720 });
-  assert.deepEqual(part, known(maxrateKbpsFor(nominalKbpsFor({ width: 1280, height: 720 })) / 1000));
+  const part = videoLoadForFrame({ sourceWidth: 1920, sourceHeight: 1080, sourcePictureKbps: 4200, copiesAtSource: true, sourceMbps: 3.73, encoderKind: "software" }, { width: 1280, height: 720 });
+  assert.deepEqual(part, known(maxrateKbpsFor(nominalKbpsFor({ width: 1280, height: 720 }, SOURCE)) / 1000));
 });
 
 test("a height a hardware encoder makes has no bound at all", () => {
@@ -42,7 +43,7 @@ test("a height a hardware encoder makes has no bound at all", () => {
 });
 
 test("an output's picture is read off its own rate control", () => {
-  const rateControl = softwareRateControlFor({ width: 1280, height: 720, fps: 24, capKbps: 1400 });
+  const rateControl = softwareRateControlFor({ width: 1280, height: 720, fps: 24, source: SOURCE, capKbps: 1400 });
   const limited = outputSpec({ transcodeVideo: true, width: 1280, height: 720, rateControl });
   const unlimited = outputSpec({ transcodeVideo: true, width: 1280, height: 720 });
   assert.deepEqual(videoLoadOfSpec(limited, 3.73), known(rateControl.maxrateKbps / 1000));

@@ -2,6 +2,10 @@
 
 - **Fix**: A seek onto a piece boundary with a copied soundtrack no longer waits for ever. A copied piece ends where its packets end, up to one packet past its cut, and the player places the next piece there; at 4000 s it asked for the piece ending at 4000 s, which the priority map gave to nobody. A copied piece is now wanted by the second its end falls in (torrent-tv/meta#159).
 
+## Unreleased
+
+- **Fix**: Measure each libx264 preset through its own realtime limit, and derive software bitrate ceilings from the source picture's measured rate and output area. Unknown source rates leave the encode uncapped, so the proxy does not impose an unsupported picture limit.
+
 ## 2.95.35
 
 - **Fix**: A run from the original file holds the stretch FFmpeg reads at open to learn its streams (`find_stream_info`, 5 s of media), and tells FFmpeg that stretch with `-analyzeduration`. When a track starts late (a soundtrack from 12 s, picture subtitles) FFmpeg read past the bytes the container named; the input route refused the read, and FFmpeg 7.1, 8.0, 8.1 and 9.0 then ended the run with nothing made, so no encoder was placed again: field 2026-10-08 on Home Assistant (ffmpeg 8.1.2), `asked for byte 1546371 … which it was not given`, then `Read error`. Measured with the real binaries over generated MKV and AVI files through the real route: 5.1, 6.1, 7.0.2 (the bundled ffmpeg-static on Linux), 7.1, 8.0, 8.1 and 9.0 now make whole pieces with no refused read. A run holds about 5 s of film more: on a 1080p 10 Mbit/s file with 4 s keyframe spacing, 29.0 MB instead of 18.2 MB (torrent-tv/meta#165).

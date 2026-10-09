@@ -546,7 +546,13 @@ export class OutputOpening {
       encodesPicture: transcodeVideo && carriesVideo,
       exact: forceExactSize,
       target: this.#targetFor({ normalizedTargetWidth, normalizedTargetHeight, visiblePicture, sourceWidth, sourceHeight }),
-      source: { width: sourceWidth, height: sourceHeight, megabitsPerSecond: file.megabitsPerSecond, decode: file.decode },
+      source: {
+        width: sourceWidth,
+        height: sourceHeight,
+        megabitsPerSecond: file.megabitsPerSecond,
+        pictureKbps: file.pictureKbps,
+        decode: file.decode
+      },
       fps: outputFps,
       encoder: this.#host.videoEncoder,
       benchmark: this.#host.softwarePresetBenchmark,
@@ -561,7 +567,7 @@ export class OutputOpening {
         : null,
       tonemap: applyTonemap,
       capKbps,
-      limitsFor: (frame) => this.#host.limitsFor(frame),
+      limitsFor: (frame) => this.#host.limitsFor(frame, file),
       audioLoad: viewerAudio !== undefined
         ? soundtrackLoadOf(viewerAudio?.entry ?? null, viewerAudio ? viewerAudio.transcode : null)
         : soundtrackLoadOf(audioSource.entry, audioTranscoded),

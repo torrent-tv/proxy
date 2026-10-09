@@ -716,6 +716,7 @@ export function createPlaybackPlanner({
           height: videoFacts.height,
           fps: videoFacts.fps,
           bitrateKbps: probe.bitrateKbps,
+          audioTracks: probe.audioTracks,
           // Which family of the decode measurement prices this source. A video
           // that has to be re-encoded is one the browser could not play, so it
           // is usually NOT H.264, and H.264 constants are wrong for it.
@@ -754,6 +755,7 @@ export function createPlaybackPlanner({
           width: videoFacts.width,
           height: videoFacts.height,
           bitrateKbps: probe.bitrateKbps,
+          audioTracks: probe.audioTracks,
           fps: videoFacts.fps,
           startTime: probe.startTimeSeconds,
           isHdr: videoFacts.isHdr,

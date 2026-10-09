@@ -95,11 +95,10 @@ export function videoLoadOfSpec(spec, sourceMbps, observedPeakMbps = null) {
  * with no limit on a hardware one, and as the source's own stream when the
  * picture is copied at the source's height.
  *
- * The nominal limit is the one of the FRAME the height would be encoded at,
- * chosen by its area (`nominalKbpsFor`) — the same row the output is then
- * opened in, so the offer and the output cannot price one step differently.
+ * The nominal limit scales this file's measured picture rate by the output
+ * frame's area, matching the rate control used when the output is opened.
  *
- * @param {{ sourceHeight: number, copiesAtSource: boolean, sourceMbps: number | null, encoderKind: string }} picture
+ * @param {{ sourceWidth: number, sourceHeight: number, sourceMbps: number | null, sourcePictureKbps: number | null, copiesAtSource: boolean, encoderKind: string }} picture
  * @param {{ width: number, height: number }} frame - The frame this height is
  *   encoded at for this source.
  * @returns {LoadPart}
@@ -112,7 +111,12 @@ export function videoLoadForFrame(picture, frame) {
   if (picture?.encoderKind !== "software") {
     return part(null, PEAK_CLASS.UNKNOWN);
   }
-  return part(maxrateKbpsFor(nominalKbpsFor(frame)) / 1000, PEAK_CLASS.KNOWN);
+  const nominal = nominalKbpsFor(frame, {
+    width: picture.sourceWidth,
+    height: picture.sourceHeight,
+    pictureKbps: picture.sourcePictureKbps
+  });
+  return part(nominal === null ? null : maxrateKbpsFor(nominal) / 1000, PEAK_CLASS.KNOWN);
 }
 
 /**

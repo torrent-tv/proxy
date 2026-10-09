@@ -35,6 +35,7 @@ import { outputSpec } from "./helpers/output-spec.js";
 
 const BASE_ID = "aaaaaaaabbbbcccc";
 const SEGMENT_SECONDS = 4;
+const RATE_SOURCE = { width: 1280, height: 720, pictureKbps: 2800 };
 
 
 /**
@@ -327,8 +328,8 @@ test("the output's own rate control is what reaches ffmpeg, and nothing about th
   // read off the output's identity and handed to the encoder as they are. The
   // level is the nominal output's, so every limit at one size declares the
   // same one.
-  const nominal = softwareRateControlFor({ width: 1280, height: 720, fps: 24 });
-  const lower = softwareRateControlFor({ width: 1280, height: 720, fps: 24, capKbps: 1200 });
+  const nominal = softwareRateControlFor({ width: 1280, height: 720, fps: 24, source: RATE_SOURCE });
+  const lower = softwareRateControlFor({ width: 1280, height: 720, fps: 24, source: RATE_SOURCE, capKbps: 1200 });
   const build = (rateControl) => softwareDescriptor().buildVideoArgs({
     targetWidth: 1280,
     targetHeight: 720,
@@ -339,7 +340,7 @@ test("the output's own rate control is what reaches ffmpeg, and nothing about th
   const atNominal = build(nominal);
   const atLower = build(lower);
 
-  assert.equal(atNominal[atNominal.indexOf("-maxrate") + 1], `${maxrateKbpsFor(nominalKbpsFor({ width: 1280, height: 720 }))}k`);
+  assert.equal(atNominal[atNominal.indexOf("-maxrate") + 1], `${maxrateKbpsFor(nominalKbpsFor({ width: 1280, height: 720 }, RATE_SOURCE))}k`);
   assert.equal(atLower[atLower.indexOf("-maxrate") + 1], `${maxrateKbpsFor(1200)}k`);
   assert.equal(lower.level, nominal.level, "a lower limit is declared at the nominal output's level");
   assert.equal(atLower[atLower.indexOf("-level:v") + 1], nominal.level);
@@ -350,7 +351,7 @@ test("the output's own rate control is what reaches ffmpeg, and nothing about th
   );
   assert.equal(build(null).includes("-maxrate"), false, "an output that states no limit is given none");
   assert.throws(
-    () => softwareRateControlFor({ width: 1280, height: 720, fps: 24, capKbps: nominalKbpsFor({ width: 1280, height: 720 }) + 1 }),
+    () => softwareRateControlFor({ width: 1280, height: 720, fps: 24, source: RATE_SOURCE, capKbps: nominalKbpsFor({ width: 1280, height: 720 }, RATE_SOURCE) + 1 }),
     RangeError,
     "a limit above the size's own is refused, not lowered"
   );

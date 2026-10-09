@@ -53,7 +53,6 @@ import {
 export {
   chooseOutputFps,
   maxrateKbpsFor,
-  limitRowFor,
   nominalKbpsFor,
   TRANSCODE_FPS
 } from "./args.js";

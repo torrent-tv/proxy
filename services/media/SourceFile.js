@@ -60,6 +60,32 @@ export function sourceDecodeCharacteristics(mediaInfo) {
   };
 }
 
+/**
+ * The source picture's average rate, derived from the file rate after removing
+ * the rates stated for every embedded audio track. A missing track rate makes
+ * the picture rate unknown rather than treating the whole file rate as video.
+ *
+ * @param {{ bitrateKbps?: number | null, audioTracks?: Array<{ bitrateKbps?: number | null }> } | null} mediaInfo
+ * @returns {number | null}
+ */
+export function sourcePictureBitrateKbps(mediaInfo) {
+  const totalKbps = Number(mediaInfo?.bitrateKbps);
+  const audioTracks = mediaInfo?.audioTracks;
+  if (!(Number.isFinite(totalKbps) && totalKbps > 0) || !Array.isArray(audioTracks)) {
+    return null;
+  }
+  let audioKbps = 0;
+  for (const track of audioTracks) {
+    const rate = Number(track?.bitrateKbps);
+    if (!(Number.isFinite(rate) && rate > 0)) {
+      return null;
+    }
+    audioKbps += rate;
+  }
+  const pictureKbps = totalKbps - audioKbps;
+  return Number.isFinite(pictureKbps) && pictureKbps > 0 ? Math.round(pictureKbps) : null;
+}
+
 export class SourceFile {
   /**
    * @param {object} params
@@ -193,6 +219,11 @@ export class SourceFile {
   get megabitsPerSecond() {
     const kbps = Number(this.media?.bitrateKbps);
     return Number.isFinite(kbps) && kbps > 0 ? kbps / 1000 : null;
+  }
+
+  /** The source picture's average rate, or null until every required fact is known. */
+  get pictureKbps() {
+    return sourcePictureBitrateKbps(this.media);
   }
 
   /**

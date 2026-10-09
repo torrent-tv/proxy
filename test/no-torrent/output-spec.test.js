@@ -5,6 +5,7 @@ import { createHash } from "node:crypto";
 import { AudioOutput, CutGrid, isOutputName, OutputSpec, VideoOutput } from "../../services/encode/output/OutputSpec.js";
 
 const TORRENT = "torrent:11f0929918e2b5aa2e5b71ecdbe5c0f1a4bbf7d1";
+const SOURCE = { width: 1920, height: 1080, pictureKbps: 4200 };
 
 /**
  * The picture of a file, copied, cut at that file's own keyframes.
@@ -93,8 +94,8 @@ test("the bitrate limit is part of the output: two limits are two outputs, and t
   // Roadmap item 97, step 10. A limit changes the bytes of every piece, so it
   // names the output; the level is the nominal output's, so it is the same for
   // both limits of one size and their headers agree.
-  const nominal = softwareRateControlFor({ width: 1280, height: 720, fps: 24 });
-  const lower = softwareRateControlFor({ width: 1280, height: 720, fps: 24, capKbps: 1400 });
+  const nominal = softwareRateControlFor({ width: 1280, height: 720, fps: 24, source: SOURCE });
+  const lower = softwareRateControlFor({ width: 1280, height: 720, fps: 24, source: SOURCE, capKbps: 1400 });
   const atNominal = encoded({ rateControl: nominal });
   const atLower = encoded({ rateControl: lower });
 

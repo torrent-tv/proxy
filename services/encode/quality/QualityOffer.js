@@ -404,12 +404,14 @@ export class QualityOffer {
     if (!(frame.width > 0)) {
       // No source size read yet: the frame, and so its row, cannot be named,
       // and a load that cannot be named is unknown rather than a guess.
-      return videoLoadForFrame({ sourceHeight, copiesAtSource: false, sourceMbps: null, encoderKind: "" }, frame);
+      return videoLoadForFrame({ sourceWidth: 0, sourceHeight, sourcePictureKbps: null, copiesAtSource: false, sourceMbps: null, encoderKind: "" }, frame);
     }
     return videoLoadForFrame({
+      sourceWidth,
       sourceHeight,
       copiesAtSource: !base.spec.transcodesVideo,
-      sourceMbps: base.file.megabitsPerSecond,
+      sourceMbps: Number.isFinite(base.file.pictureKbps) ? base.file.pictureKbps / 1000 : null,
+      sourcePictureKbps: base.file.pictureKbps,
       encoderKind
     }, frame);
   }

@@ -131,7 +131,14 @@ export class Renditions {
       wanted,
       judge: (spec) => linkCouldCarry(
         linkMbps,
-        loadOf(videoLoadOfSpec(spec, base.file.megabitsPerSecond, this.#host.observedPeakMbps?.(spec) ?? null), audioLoad)
+        loadOf(
+          videoLoadOfSpec(
+            spec,
+            Number.isFinite(base.file.pictureKbps) ? base.file.pictureKbps / 1000 : null,
+            this.#host.observedPeakMbps?.(spec) ?? null
+          ),
+          audioLoad
+        )
       )
     });
   }
@@ -479,9 +486,9 @@ export class Renditions {
    * given, so a move that never completes costs them nothing.
    *
    * WHAT IS MOVED BETWEEN: outputs of the same material and the same produced
-   * size whose bounds are two neighbouring limits of `limitsFor(frame)` — the
-   * row of the frame on screen, chosen by its area, the same row the output was
-   * opened in (`output-format.js`). Down,
+   * size whose bounds are two neighbouring limits of `limitsFor(frame, file)` — the
+   * source-scaled nominal for the frame on screen, the same nominal used
+   * to open the output (`output-format.js`). Down,
    * the highest lower limit their link admits; up, the next limit only, and
    * only if their link admits it. A copy has no limit and a hardware encode is
    * given none, so neither has anywhere to move to here, and the caller's other
@@ -521,7 +528,7 @@ export class Renditions {
     if (askedHeights.length === 0) {
       return refuse("no height is chosen as the output on screen");
     }
-    const limits = this.#host.limitsFor({ width: encode.width, height: encode.height });
+    const limits = this.#host.limitsFor({ width: encode.width, height: encode.height }, base.file).filter(Number.isFinite);
     const at = limits.findIndex((limit) => maxrateKbpsFor(limit) === encode.rateControl.maxrateKbps);
     if (at < 0) {
       return refuse(`the limit on screen (maxrate ${encode.rateControl.maxrateKbps}k) is not one of ${encode.height}p's`);

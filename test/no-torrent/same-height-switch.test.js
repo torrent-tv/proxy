@@ -70,7 +70,8 @@ const BASE_ID = "1111111122223333";
 const SEGMENT_SECONDS = 4;
 const SEGMENTS = 150;
 const HEIGHT = 720;
-const NOMINAL = nominalKbpsFor({ width: 1280, height: HEIGHT });
+const SOURCE = { width: 1920, height: 1080, pictureKbps: 6300 };
+const NOMINAL = nominalKbpsFor({ width: 1280, height: HEIGHT }, SOURCE);
 // Three limits of one height, highest first. Given here, because the product
 // offers only the nominal one until the set is decided (step 14).
 const LIMITS = [NOMINAL, Math.round(NOMINAL * 0.6), Math.round(NOMINAL * 0.35)];
@@ -101,7 +102,7 @@ function outputAt({ id, file, limit }) {
     transcodeVideo: true,
     width,
     height: HEIGHT,
-    rateControl: softwareRateControlFor({ width, height: HEIGHT, fps: 24, capKbps: limit })
+    rateControl: softwareRateControlFor({ width, height: HEIGHT, fps: 24, source: SOURCE, capKbps: limit })
   });
   return {
     id,
@@ -122,7 +123,7 @@ function outputAt({ id, file, limit }) {
  */
 function pictureAtNominal(how = {}) {
   const file = new SourceFile({ sourceKey: "source-1", fileIndex: 0, name: "video.mkv" })
-    .learn({ durationSeconds: SEGMENTS * SEGMENT_SECONDS, height: 1080, width: 1920 });
+    .learn({ durationSeconds: SEGMENTS * SEGMENT_SECONDS, height: 1080, width: 1920, bitrateKbps: 4200, audioTracks: [] });
   const base = outputAt({ id: BASE_ID, file, limit: NOMINAL });
   const outputs = new OutputCatalog();
   outputs.set(BASE_ID, base);

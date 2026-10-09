@@ -13,10 +13,10 @@
  * 3. on a hardware encoder, or with no startup measurement, there is no ladder
  *    to choose from and the box asked for is produced.
  *
- * The rate control is part of the format: a software encode is bounded at a
- * limit from `limitsFor(frame)` — the nominal one until a set of lower limits
- * is decided — or at the limit asked for (`capKbps`), and declared at the
- * level of that size's nominal output. A hardware encoder is given no bound.
+ * The rate control is part of the format: a software encode is bounded at the
+ * source-scaled nominal from `limitsFor(frame, source)` or at the limit asked
+ * for (`capKbps`), and declared at that source and size's nominal level. A
+ * hardware encoder is given no bound. Unknown source rates mean no bound.
  *
  * AND THE VIEWER'S LINK DECIDES WHETHER IT MAY BE GIVEN AT ALL (roadmap item
  * 97, step 11). Every format considered is judged by what this viewer's link
@@ -45,7 +45,7 @@ import { linkAnswerFigures, linkCouldCarry, linkRefusalReason, loadOf, videoLoad
  * @param {boolean} params.encodesPicture - The output carries a picture and re-encodes it.
  * @param {boolean} params.exact - The size is produced exactly as asked.
  * @param {{ width: number, height: number }} params.target - The box asked for; zeroes mean the source's.
- * @param {{ width: number, height: number, megabitsPerSecond: number | null, decode: object | null }} params.source
+ * @param {{ width: number, height: number, megabitsPerSecond: number | null, pictureKbps?: number | null, decode: object | null }} params.source
  * @param {number} params.fps
  * @param {{ kind: string, name: string }} params.encoder
  * @param {unknown} params.benchmark - The startup measurement of the software encoder, or null.
@@ -56,9 +56,8 @@ import { linkAnswerFigures, linkCouldCarry, linkRefusalReason, loadOf, videoLoad
  * @param {boolean} params.tonemap
  * @param {number | null} [params.capKbps] - A nominal limit asked for outright;
  *   above the size's own it is refused (`softwareRateControlFor`).
- * @param {(frame: { width: number, height: number }) => number[]} [params.limitsFor] -
- *   The nominal limits a frame may be produced at, highest first; the row is
- *   chosen by the frame's area (`limitRowFor`).
+ * @param {(frame: { width: number, height: number }, source: object) => Array<number | null>} [params.limitsFor] -
+ *   The nominal limit derived from this source's picture rate and frame area.
  * @param {import("./link-budget.js").LoadPart | null} [params.audioLoad] - The
  *   soundtrack this viewer receives with the picture, from it or beside it.
  * @param {(encode: object | null) => OutputSpec} params.specWith - The output
@@ -85,7 +84,9 @@ export function decideOutputFormat({
   chooseBudget,
   tonemap,
   capKbps = null,
-  limitsFor = (frame) => [nominalKbpsFor(frame)],
+  limitsFor = (frame, source) => [nominalKbpsFor(frame, {
+    width: source.width, height: source.height, pictureKbps: source.pictureKbps
+  })],
   audioLoad = null,
   specWith,
   serving,
@@ -93,7 +94,11 @@ export function decideOutputFormat({
 }) {
   const judge = (spec) => linkCouldCarry(
     serving.linkMbps,
-    loadOf(videoLoadOfSpec(spec, source.megabitsPerSecond, serving.observedPeakMbps?.(spec) ?? null), audioLoad)
+    loadOf(
+      videoLoadOfSpec(spec, Number.isFinite(source.pictureKbps) ? source.pictureKbps / 1000 : null,
+        serving.observedPeakMbps?.(spec) ?? null),
+      audioLoad
+    )
   );
   const given = (spec, answer, extra = {}) => ({
     spec,
@@ -196,7 +201,7 @@ export function decideOutputFormat({
       ? [null]
       : capKbps !== null && capKbps !== undefined && w === width && h === height
         ? [capKbps]
-        : limitsFor({ width: w, height: h });
+        : limitsFor({ width: w, height: h }, source);
     return limits.map((limit) => specWith({
       encoder: encoder.name,
       width: w,
@@ -204,7 +209,7 @@ export function decideOutputFormat({
       fps,
       preset: presetFor(w, h),
       tonemap,
-      rateControl: limit === null ? null : softwareRateControlFor({ width: w, height: h, fps, capKbps: limit })
+      rateControl: limit === null ? null : softwareRateControlFor({ width: w, height: h, fps, source, capKbps: limit })
     }));
   };
   const wantedFormats = formatsAt(width, height);

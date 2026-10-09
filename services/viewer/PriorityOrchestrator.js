@@ -216,23 +216,34 @@ export class PriorityOrchestrator {
         if (typeof sourceKey !== "string" || !sourceKey || !Number.isSafeInteger(fileIndex) || fileIndex < 0) {
           throw new TypeError("A priority map requires its output file's source and file index.");
         }
-        const key = `${sourceKey}:${fileIndex}`;
         const durationSeconds = Number(session.file?.durationSeconds) || 0;
         // The first band is as wide as an interruption this file has actually
         // shown on this swarm, never a chosen number.
         const allowanceSeconds = this.#allowanceFor(session);
-        let held = byFile.get(key);
-        if (!held) {
-          held = {
-            sourceKey,
-            fileIndex,
-            durationSeconds,
-            allowanceSeconds,
-            viewers: [],
-            demandKey: []
-          };
-          byFile.set(key, held);
-        }
+        // EVERY FILE THE OUTPUT READS, not only the one it is named after. A
+        // soundtrack shipped beside the picture is an output of the picture's
+        // film whose bytes live in another file; mapped under the picture's
+        // file only, nobody asked the swarm for that file, its encoder waited
+        // for pieces for ever and the viewer who chose the soundtrack stood
+        // still (Home Assistant 2026-10-09, torrent-tv/meta#8).
+        const read = session.spec?.sourceFileIndexes;
+        const files = Array.isArray(read) && read.length ? read : [fileIndex];
+        const helds = files.map((index) => {
+          const fileKey = `${sourceKey}:${index}`;
+          let held = byFile.get(fileKey);
+          if (!held) {
+            held = {
+              sourceKey,
+              fileIndex: index,
+              durationSeconds,
+              allowanceSeconds,
+              viewers: [],
+              demandKey: []
+            };
+            byFile.set(fileKey, held);
+          }
+          return held;
+        });
         // Every output anybody holds a session for, whether or not a viewer is
         // consuming it — an output with nobody on it must get a map with
         // nothing in it, which is how the plan is told to stop its encoders.
@@ -240,16 +251,19 @@ export class PriorityOrchestrator {
         const address = session.outputKey ?? "";
         let mine = byOutput.get(address);
         if (!mine) {
-          mine = { durationSeconds, allowanceSeconds, viewers: [], fileKey: key };
+          // Counted over a file the output itself reads, which is always among
+          // the files mapped above; the picture's file is not one for a
+          // soundtrack read from a file of its own.
+          mine = { durationSeconds, allowanceSeconds, viewers: [], fileKey: `${sourceKey}:${files[0]}` };
           byOutput.set(address, mine);
         }
         for (const viewer of this.#viewers.forOutput(session).values()) {
           if (!viewer.isPresent()) {
             continue;
           }
-          held.demandKey.push([session.outputKey, viewer.id, viewer.audio?.trackIndex,
+          const demand = [session.outputKey, viewer.id, viewer.audio?.trackIndex,
             viewer.audio?.transcode, viewer.activeVariantId, viewer.warmingVariantId,
-            viewer.warmingAudioId, this.#watchedBy(session, viewer)]);
+            viewer.warmingAudioId, this.#watchedBy(session, viewer)];
           const stated = {
             id: viewer.id,
             atSeconds: viewer.positionSeconds(now) ?? 0,
@@ -267,7 +281,10 @@ export class PriorityOrchestrator {
               ? viewer.wantsFilmNow()
               : viewer.playing === true || viewer.waiting === true)
           };
-          held.viewers.push(stated);
+          for (const held of helds) {
+            held.demandKey.push(demand);
+            held.viewers.push(stated);
+          }
           if (this.#watchedBy(session, viewer)) {
             mine.viewers.push(stated);
           }

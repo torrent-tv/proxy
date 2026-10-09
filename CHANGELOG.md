@@ -1,3 +1,7 @@
+## Unreleased
+
+- **Fix**: A soundtrack shipped as its own file beside the picture is now downloaded where the viewer stands. The priority map was built per file an output is NAMED after — the picture's — so for a soundtrack read from another file nobody asked the swarm for that file's bytes, its encoder waited for a piece for ever, and choosing the track left the viewer on the waiting overlay with a full picture buffer. The map now covers every file an output reads (`OutputSpec.sourceFileIndexes`). Field 2026-10-09: Drifters episode 1, `Rus Sound/[HorribleSubs] Drifters - 01 [1080p].mka` (file 19), piece 26 never requested (#ttv-8).
+
 ## 2.96.2
 
 - **Fix**: A copied soundtrack whose first packet lands a fraction of a frame after the requested start is no longer refused piece by piece: the segment muxer counts its cuts from that first packet, so every piece of the run ends that much later than its cut, and the completeness check now measures on the muxer's clock — the run reads the shift from its first piece and the muxer's segment list, and the shift travels with every piece it makes. Field 2026-10-09: `[HorribleSubs] Drifters - 01 [1080p].mkv` (AAC 44.1 kHz) refused every audio piece for `segment-end-outside-interval-soun` and the player stopped (#ttv-8).

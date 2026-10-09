@@ -584,8 +584,7 @@ export class ViewerRequests {
             output.segmentFormat.servedMediaRanges(ranges, { initBytes: sessionInit }) : undefined
         };
       });
-      const sourceIndexes = [output.spec.video?.fileIndex, output.spec.audio?.fileIndex]
-        .filter((fileIndex) => Number.isInteger(fileIndex) && fileIndex >= 0);
+      const sourceIndexes = [...output.spec.sourceFileIndexes];
       if (sourceIndexes.length === 0) {
         sourceIndexes.push(output.file.fileIndex);
       }

@@ -1,4 +1,4 @@
-## Unreleased
+## 2.96.3
 
 - **Fix**: A soundtrack shipped as its own file beside the picture is now downloaded where the viewer stands. The priority map was built per file an output is NAMED after — the picture's — so for a soundtrack read from another file nobody asked the swarm for that file's bytes, its encoder waited for a piece for ever, and choosing the track left the viewer on the waiting overlay with a full picture buffer. The map now covers every file an output reads (`OutputSpec.sourceFileIndexes`). Field 2026-10-09: Drifters episode 1, `Rus Sound/[HorribleSubs] Drifters - 01 [1080p].mka` (file 19), piece 26 never requested (#ttv-8).
 

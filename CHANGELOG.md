@@ -1,4 +1,4 @@
-## Unreleased
+## 2.95.38
 
 - **Fix**: Batch proxy-built packet input into 64 KiB writes. The Moana logs showed copied video at 0.31x and a 29.1 s wait for a segment while source delivery was 3.7–4.1 MB/s. The proxy no longer waits for a separate stdin write callback for each small Matroska chunk (#ttv-163).
 

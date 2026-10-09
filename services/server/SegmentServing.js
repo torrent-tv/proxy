@@ -16,7 +16,7 @@ import { logger } from "../../utils/logger.js";
 import { cutsAtGivenTimes, isOutputName, PLAYLIST_FILE_NAME } from "../encode/output/index.js";
 // The index of variants. Served from the same route as the media playlist, so
 // it needs no path of its own.
-export const MASTER_PLAYLIST_FILE_NAME = "master.m3u8";
+const MASTER_PLAYLIST_FILE_NAME = "master.m3u8";
 // Read segment files in large blocks so the body is delivered to the data
 // channel in few, big chunks. On a busy ARM host the in-process WebTorrent
 // hashing starves the event loop in bursts, so fewer read iterations means

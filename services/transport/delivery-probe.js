@@ -133,7 +133,7 @@ export function allowedGap({
  *   echoIntervalMs?: number, peerLoopLagMs?: number, intervalMs?: number }} state
  * @returns {number}
  */
-export function allowedWaitMs({
+function allowedWaitMs({
   queuedBytes,
   bytesPerSecond,
   rttMs,

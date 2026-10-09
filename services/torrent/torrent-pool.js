@@ -614,7 +614,7 @@ function pieceDownloadedBytes(torrent, index) {
  * @param {import("webtorrent").Torrent} torrent
  * @returns {number}
  */
-export function torrentDownloadedBytes(torrent) {
+function torrentDownloadedBytes(torrent) {
   if (!torrent?.bitfield || !Array.isArray(torrent.pieces)) {
     return 0;
   }
@@ -634,7 +634,7 @@ export function torrentDownloadedBytes(torrent) {
  * @param {import("webtorrent").TorrentFile & { _startPiece?: number, _endPiece?: number, offset?: number, length?: number }} file
  * @returns {number}
  */
-export function fileDownloadedBytes(torrent, file) {
+function fileDownloadedBytes(torrent, file) {
   if (!torrent?.bitfield || !Array.isArray(torrent.pieces) || !file) {
     return 0;
   }

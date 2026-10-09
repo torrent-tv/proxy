@@ -165,28 +165,6 @@ export function countVideoFiles(files) {
 }
 
 /**
- * Subtitle formats that are text, and therefore small by construction — a whole
- * episode of dialogue is tens of kilobytes.
- *
- * The distinction is used to decide how much of such a file to fetch ahead of
- * the viewer: a text file is fetched WHOLE, because it is smaller than the
- * torrent's own piece and reading its edges would cost the same pieces as
- * reading all of it. An image-based one (`.sup`, `.sub`+`.idx`) is a picture per
- * cue and runs to tens of megabytes, so it gets the same edges treatment as
- * anything else.
- */
-export const TEXT_SUBTITLE_SIDECAR_EXTENSIONS = new Set([
-  ".srt",
-  ".ass",
-  ".ssa",
-  ".vtt",
-  ".webvtt",
-  ".ttml",
-  ".smi",
-  ".txt"
-]);
-
-/**
  * Extensions whose track table a `Container` subclass can read. Everything else
  * in {@link AUDIO_SIDECAR_EXTENSIONS} is a bare stream: one track, no metadata.
  */
@@ -224,7 +202,7 @@ export function baseNameOf(name) {
  * @param {string} extension - Lowercased, with the dot.
  * @returns {boolean}
  */
-export function declaresItsOwnTracks(extension) {
+function declaresItsOwnTracks(extension) {
   return CONTAINER_BACKED_AUDIO.has(extension);
 }
 
@@ -331,7 +309,7 @@ export function namesPair(sidecarName, videoName) {
  * @param {string} videoName
  * @returns {boolean}
  */
-export function imageNamesPair(imageName, videoName) {
+function imageNamesPair(imageName, videoName) {
   if (sameRelease(imageName, videoName)) {
     return true;
   }

@@ -60,7 +60,7 @@ export function formatSeconds(seconds) {
  * @param {object[] | Set<object>} runs
  * @returns {number | null}
  */
-export function earliestRunStart(runs) {
+function earliestRunStart(runs) {
   const live = liveRunsOf(runs);
   return live.length > 0 ? live[0].from : null;
 }
@@ -129,7 +129,7 @@ export function isInputUnavailable(message) {
  * @param {string[]} args
  * @returns {string}
  */
-export function describeFfmpegArgs(args) {
+function describeFfmpegArgs(args) {
   const parts = [];
   for (let index = 0; index < args.length; index += 1) {
     const value = args[index];

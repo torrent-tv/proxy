@@ -493,7 +493,7 @@ export function declaredContainment() {
  * @param {object[] | Set<object>} runs
  * @returns {object[]}
  */
-export function runsOf(runs) {
+function runsOf(runs) {
   const listed = Array.isArray(runs) ? runs : runs instanceof Set ? [...runs] : [];
   return [...listed].sort((left, right) => left.from - right.from);
 }

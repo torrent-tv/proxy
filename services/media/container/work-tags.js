@@ -18,10 +18,10 @@
  */
 
 /** Longest text taken from one field, in characters. A stated limit. */
-export const MAX_TEXT = 2000;
+const MAX_TEXT = 2000;
 
 /** Most genres, track titles or chapter titles kept. A stated limit. */
-export const MAX_LIST = 32;
+const MAX_LIST = 32;
 
 /** Largest cover image read, in bytes. A stated limit: covers measured in #136 are tens of kilobytes. */
 export const MAX_COVER_BYTES = 4 * 1024 * 1024;

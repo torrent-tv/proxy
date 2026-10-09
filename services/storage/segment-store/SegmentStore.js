@@ -46,7 +46,7 @@ import os from "node:os";
 import path from "node:path";
 
 /** Where every output's segments live. One root for the process. */
-export const DEFAULT_STORE_ROOT = path.join(os.tmpdir(), "torrent-tv-hls");
+const DEFAULT_STORE_ROOT = path.join(os.tmpdir(), "torrent-tv-hls");
 
 /** The file inside each directory that says which output it holds. */
 const KEY_FILE = "key.txt";

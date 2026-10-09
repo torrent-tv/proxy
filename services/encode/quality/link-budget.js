@@ -179,7 +179,7 @@ export function soundtrackLoadOf(entry, transcode) {
  * @param {import("../../media/audio-inventory.js").AudioInventoryEntry | null | undefined} entry
  * @returns {boolean}
  */
-export function soundtrackHasFigure(entry) {
+function soundtrackHasFigure(entry) {
   const peakKbps = Number(entry?.peakKbps);
   const bitrateKbps = Number(entry?.bitrateKbps);
   return (Number.isFinite(peakKbps) && peakKbps > 0) || (Number.isFinite(bitrateKbps) && bitrateKbps > 0);

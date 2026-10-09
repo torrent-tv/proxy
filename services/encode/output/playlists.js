@@ -42,7 +42,7 @@ export const PLAYLIST_FILE_NAME = "index.m3u8";
  * @param {string} language
  * @returns {string}
  */
-export function languageTag(language) {
+function languageTag(language) {
   const code = String(language ?? "").toLowerCase();
   return LANGUAGE_TAGS.get(code) ?? code;
 }
@@ -57,7 +57,7 @@ export function languageTag(language) {
  * @param {string} value
  * @returns {string}
  */
-export function escapeAttribute(value) {
+function escapeAttribute(value) {
   return String(value ?? "").replace(/"/g, "'").replace(/[\u0000-\u001f\u007f]/g, " ").trim();
 }
 
@@ -281,4 +281,3 @@ export function segmentIndexForTime(boundaries, seconds, segmentDurationSec) {
   return Math.min(result, boundaries.length - 2);
 }
 
-export { AUDIO_GROUP_ID, AUDIO_PATH_PREFIX, VARIANT_PATH_PREFIX };

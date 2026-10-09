@@ -31,7 +31,7 @@ const SEGMENT_START_DISAGREEMENT_SEC = 0.25;
  * judged not to have loaded — so the player asks for it again, and again.
  * Taken from the player's published default rather than chosen here.
  */
-export const PLAYER_BUFFER_HOLE_SEC = 0.5;
+const PLAYER_BUFFER_HOLE_SEC = 0.5;
 /**
  * A live run of this session that begins exactly at this number, if there is
  * one.

@@ -130,30 +130,3 @@ export function readFloat(buffer, offset, size) {
   }
   return null;
 }
-
-/**
- * Depth-first search for the first element with `id`, descending only into the
- * container ids listed in `descendInto`.
- *
- * @param {Buffer} buffer
- * @param {number} id - Element id to find.
- * @param {number[]} descendInto - Container ids worth entering.
- * @param {number} [start=0]
- * @param {number} [end=buffer.length]
- * @returns {{ dataOffset: number, size: number } | null}
- */
-export function findElement(buffer, id, descendInto, start = 0, end = buffer.length) {
-  for (const element of iterateElements(buffer, start, end)) {
-    if (element.id === id) {
-      return { dataOffset: element.dataOffset, size: element.size };
-    }
-    if (descendInto.includes(element.id)) {
-      const limit = Math.min(end, element.dataOffset + element.size);
-      const found = findElement(buffer, id, descendInto, element.dataOffset, limit);
-      if (found) {
-        return found;
-      }
-    }
-  }
-  return null;
-}

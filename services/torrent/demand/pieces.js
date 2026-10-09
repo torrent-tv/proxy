@@ -44,38 +44,6 @@ export function piecesOf({ fileOffset, byteStart, byteEnd, pieceLength }) {
 }
 
 /**
- * The bytes of a file that a piece range covers, clamped to the file.
- *
- * The inverse of {@link piecesOf}, and here for the same reason: a caller that
- * still thinks in pieces — the reader, which walks a file piece by piece
- * because that is what arrives — states its need in bytes like everyone else,
- * and the conversion stays in this one file rather than being written out
- * again at the boundary.
- *
- * @param {object} params
- * @param {number} params.fileOffset - Where the file starts within the torrent.
- * @param {number} params.fileLength
- * @param {number} params.from - First piece, inclusive.
- * @param {number} params.to - Last piece, inclusive.
- * @param {number} params.pieceLength
- * @returns {{ byteStart: number, byteEnd: number } | null}
- */
-export function bytesOf({ fileOffset, fileLength, from, to, pieceLength }) {
-  if (!Number.isFinite(pieceLength) || pieceLength <= 0) {
-    return null;
-  }
-  if (!Number.isFinite(fileOffset) || !Number.isFinite(fileLength) || fileLength <= 0) {
-    return null;
-  }
-  if (!Number.isInteger(from) || !Number.isInteger(to) || to < from) {
-    return null;
-  }
-  const byteStart = Math.max(0, from * pieceLength - fileOffset);
-  const byteEnd = Math.min(fileLength - 1, (to + 1) * pieceLength - 1 - fileOffset);
-  return byteEnd < byteStart ? null : { byteStart, byteEnd };
-}
-
-/**
  * How many pieces a number of bytes needs, at worst.
  *
  * At worst, because a range of one byte can still straddle two pieces. Used

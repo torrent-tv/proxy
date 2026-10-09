@@ -1270,7 +1270,7 @@ export function firstUnmetWant(coverage, windows) {
  *   stated want is due now.
  * @returns {number[]} Where to start each encoder, ascending.
  */
-export function placeEncoders({
+function placeEncoders({
   coverage,
   windows,
   howMany,

@@ -7,6 +7,7 @@
  * reassembled only for an AVI that states no index.
  */
 
+import { FFMPEG_STREAM_SEARCH_SECONDS } from "./ffmpeg-stream-search.js";
 import { Container } from "./Container.js";
 import { VideoTrack } from "../tracks/VideoTrack.js";
 import { AudioTrack } from "../tracks/AudioTrack.js";
@@ -162,7 +163,8 @@ export class AviContainer extends Container {
    * The bytes FFmpeg reads to produce `[from, to)` from the original file:
    * the declarations and the start of `movi` it probes, the index it loads at
    * open (`idx1` to the end of the file, or every OpenDML standard index), the
-   * first packet of each stream it inspects, and the selected streams' packets
+   * first packet of each stream it inspects, the stretch its stream search
+   * reads from the start of `movi`, and the selected streams' packets
    * around the interval. Each range is held one input buffer of FFmpeg past its
    * last named byte, because that buffer is filled ahead of the packet parsed.
    */
@@ -182,7 +184,11 @@ export class AviContainer extends Container {
     const requested = tracks.filter(track => ["video", "audio"].includes(track.type));
     const picture = ContainerTrack.firstUsable(tracks, "video");
     const padded = ([start, end]) => [Math.max(0, start), Math.min(this.fileSize - 1, end + FFMPEG_INPUT_BUFFER_BYTES)];
-    const ranges = [[0, movi.start + 3], ...index.indexRanges, ...index.firstPackets(),
+    // FFmpeg's stream search reads `movi` on from its start for its stated
+    // media time: every stream's packets in file order, from the first.
+    const search = index.mediaRanges({ from: 0, to: FFMPEG_STREAM_SEARCH_SECONDS, picture: null,
+      streams: requested.map(track => track.trackNumber) });
+    const ranges = [[0, movi.start + 3], ...index.indexRanges, ...index.firstPackets(), ...search,
       ...index.mediaRanges({ from: interval.from, to: interval.to, picture: picture?.trackNumber ?? null,
         streams: requested.map(track => track.trackNumber) })].map(padded);
     ranges.sort((left, right) => left[0] - right[0]);
@@ -192,7 +198,8 @@ export class AviContainer extends Container {
       if (previous && range[0] <= previous[1] + 1) previous[1] = Math.max(previous[1], range[1]);
       else union.push([...range]);
     }
-    return { kind: "result", from: interval.from, to: interval.to, ranges: union, fileLength: this.fileSize };
+    return { kind: "result", from: interval.from, to: interval.to, ranges: union, fileLength: this.fileSize,
+      streamSearchSeconds: FFMPEG_STREAM_SEARCH_SECONDS };
   }
 
   packetIndexBytes() { return (this.#packets ?? this.#scan?.index)?.allocatedBytes() ?? 0; }

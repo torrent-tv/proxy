@@ -17,6 +17,8 @@ export function buildRunCommand({
   audioFile,
   inputUrl,
   audioInputUrl: audioInputUrlGiven,
+  inputOpenArgs = [],
+  audioInputOpenArgs = [],
   timeline,
   output,
   segmentFormat,
@@ -126,7 +128,7 @@ export function buildRunCommand({
     if (audioSeek > audioFileStartTime) {
       args.push("-seek_timestamp", "1", ...inputSeekArgs, "-ss", ffmpegSeconds(audioSeek));
     }
-    args.push("-i", audioInputUrl);
+    args.push(...audioInputOpenArgs, "-i", audioInputUrl);
   };
 
   // Whether an output `-ss` already cuts at the interval's start.
@@ -136,7 +138,7 @@ export function buildRunCommand({
     if (snappedKeyframe > sourceStartTime) {
       args.push("-seek_timestamp", "1", ...inputSeekArgs, "-ss", ffmpegSeconds(snappedKeyframe + seekLandingOffsetFor({ audioOnly, transcodeVideo, keyframes, reorderDepth }, snappedKeyframe)));
     }
-    args.push("-i", inputUrl);
+    args.push(...inputOpenArgs, "-i", inputUrl);
     pushAudioInput(snappedKeyframe);
     if (residualSeconds > 0 && !keyframeGrid) {
       args.push("-ss", ffmpegSeconds(residualSeconds));
@@ -146,7 +148,7 @@ export function buildRunCommand({
     if (seekAt > sourceStartTime) {
       args.push("-seek_timestamp", "1", ...inputSeekArgs, "-ss", ffmpegSeconds(seekAt));
     }
-    args.push("-i", inputUrl);
+    args.push(...inputOpenArgs, "-i", inputUrl);
     pushAudioInput(seekAt);
   }
   // An input seek lands on the picture's keyframe at or before the time asked
@@ -269,6 +271,10 @@ export function buildOriginalCommand(params) {
   const audio = sourceFor("audio") ?? primary;
   if (!primary) throw new Error("The selected source track is absent from original input.");
   const url = source => new URL(`/encode-input/${inputToken}/${source.fileIndex}`, baseUrl).href;
+  // The container named the bytes FFmpeg's stream search reads for this much
+  // media time; the search is told the same, whatever its own default.
+  const openArgs = source => Number.isFinite(source.input.streamSearchSeconds)
+    ? ["-analyzeduration", String(Math.round(source.input.streamSearchSeconds * 1_000_000))] : [];
   const local = [...stretch, to + (to - last)];
   const localTimeline = { ...timeline, published: local,
     boundaries: local, sourceStartOf: () => primary.input.from ?? from + primary.timeShiftSeconds };
@@ -277,6 +283,7 @@ export function buildOriginalCommand(params) {
     reorderDepth: primary.input.selections.find(selection => selection.track.type === "video")?.track.reorderDepth ?? 0,
     inputFile: { startTime: primary.timeShiftSeconds }, audioFile: { startTime: audio.timeShiftSeconds },
     inputUrl: url(primary), audioInputUrl: audio !== primary && !audioOnly ? url(audio) : "",
+    inputOpenArgs: openArgs(primary), audioInputOpenArgs: openArgs(audio),
     audioSourceTrackIndex: audio.input.selections.find(selection => selection.track.type === "audio")?.index ?? 0 });
   const args = command.args;
   // The segment muxer otherwise shifts negative initial DTS to zero before

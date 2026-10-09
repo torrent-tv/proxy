@@ -320,20 +320,6 @@ export function visiblePictureOf(viewers, output, consumerId) {
 }
 
 /**
- * Take the picture as this viewer's page measured it, sent with the request
- * that opened their output.
- *
- * @param {object} viewers
- * @param {string} consumerId
- * @param {unknown} size
- * @returns {void}
- */
-export function noteVisiblePicture(viewers, consumerId, size) {
-  const viewer = consumerId ? viewers.get(consumerId) : null;
-  viewer?.noteVisiblePicture(size);
-}
-
-/**
  * Which way this viewer's buffer is going, and how much film it holds, as their
  * page last said (`viewer/buffer-trend.js`).
  *

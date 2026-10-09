@@ -326,7 +326,7 @@ export function duplicateTailFor(torrent, pieceIndex) {
  * @param {number} pieceIndex
  * @returns {boolean}
  */
-export function pieceIsFullyReserved(torrent, pieceIndex) {
+function pieceIsFullyReserved(torrent, pieceIndex) {
   const piece = torrent?.pieces?.[pieceIndex];
   if (!piece || typeof piece.reserve !== "function") {
     return false;

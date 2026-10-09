@@ -79,7 +79,7 @@ function simpleTags(buffer, start, end, out) {
  * @param {Buffer} data - The data of a `Tags` element.
  * @returns {Map<number, Array<{ name: string, value: string, isDefault: boolean }>>}
  */
-export function tagsByLevel(data) {
+function tagsByLevel(data) {
   /** @type {Map<number, Array<{ name: string, value: string, isDefault: boolean }>>} */
   const levels = new Map();
   for (const tag of iterateElements(data)) {

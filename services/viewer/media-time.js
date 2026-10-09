@@ -162,7 +162,7 @@ export function subtract(left, right) {
  * @param {bigint} factor
  * @returns {MediaTime}
  */
-export function multiply(time, factor) {
+function multiply(time, factor) {
   return { ticks: time.ticks * factor, timescale: time.timescale };
 }
 

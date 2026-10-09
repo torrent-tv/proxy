@@ -31,41 +31,6 @@ const PIECE_WAIT_LOG_MS = 1_000;
 
 
 /**
- * Who is working on the piece a reader is blocked on, right now.
- *
- * The open question about a seek: a single 8 MiB piece takes 3.0-4.6 s to
- * arrive while the swarm as a whole is moving 4-6 MB/s, so roughly 2 MB/s is
- * reaching the piece that is actually being waited for. Whether that is because
- * few peers hold it, few are being asked, or each is slow cannot be told apart
- * from the outside — these three counts tell them apart.
- *
- * `wire.requests` is what has been asked of that peer and not yet answered; a
- * block is 16 KB, so `blocks x 16 KB` is the work in flight on this piece.
- *
- * @param {import("webtorrent").Torrent} torrent
- * @param {number} pieceIndex
- * @returns {{ peers: number, holders: number, askedOf: number, blocks: number }}
- */
-export function pieceSupply(torrent, pieceIndex) {
-  const wires = Array.isArray(torrent?.wires) ? torrent.wires : [];
-  let holders = 0;
-  let askedOf = 0;
-  let blocks = 0;
-  for (const wire of wires) {
-    if (wire?.peerPieces?.get?.(pieceIndex)) {
-      holders += 1;
-    }
-    const requests = Array.isArray(wire?.requests) ? wire.requests : [];
-    const forThisPiece = requests.filter((request) => request?.piece === pieceIndex).length;
-    if (forThisPiece > 0) {
-      askedOf += 1;
-      blocks += forThisPiece;
-    }
-  }
-  return { peers: wires.length, holders, askedOf, blocks };
-}
-
-/**
  * Wait until a piece has been downloaded and verified.
  *
  * WebTorrent announces this as `verified`. The bitfield is re-checked after the
@@ -286,80 +251,6 @@ function describeWaitLevels(key) {
  */
 const waitsByLevel = new Map();
 
-/**
- * How many readers are blocked on a torrent AT THIS MOMENT, by infohash.
- *
- * Not a history and not an average: the question it answers is "is anything the
- * viewer is watching waiting for the swarm right now", and the only honest
- * answer is a count of readers currently inside a wait.
- *
- * It exists so that work which is NOT what the viewer is watching — fetching a
- * soundtrack or a subtitle file they may switch to later — can proceed while the
- * swarm has room and stand aside the instant it does not. That ordering is the
- * whole of the requirement: the picture and the track being played come first,
- * the other tracks next, and reading the film far ahead last.
- *
- * @type {Map<string, number>}
- */
-const blockedReaders = new Map();
-
-/**
- * How many stalls a torrent's readers have had, ever. Only differences between
- * two readings of it mean anything.
- *
- * @type {Map<string, number>}
- */
-const stallsSeen = new Map();
-
-/**
- * Whether any reader on this torrent is waiting for a piece right now.
- *
- * @param {string} infoHash
- * @returns {boolean}
- */
-export function readersAreBlockedOn(infoHash) {
-  return (blockedReaders.get(infoHash) ?? 0) > 0;
-}
-
-/**
- * How many times a reader on this torrent has been blocked since the process
- * started.
- *
- * Exists so that work of lower importance can ask "did the viewer stall while I
- * was busy?" — which is a different and stricter question than "is the viewer
- * stalled right now". On a swarm delivering exactly what the film needs, a
- * background fetch that only pauses DURING a stall still takes bandwidth
- * between them, and the stalls are the proof it had none to spare. Field
- * 2026-08-31: the swarm delivered 200-600 KB/s against the 399 KB/s the film
- * needs, and the picture stood still 145.6 s.
- *
- * @param {string} infoHash
- * @returns {number}
- */
-export function stallsSeenOn(infoHash) {
-  return stallsSeen.get(infoHash) ?? 0;
-}
-
-/**
- * @param {string} infoHash
- * @param {number} delta
- * @returns {void}
- */
-function countBlockedReader(infoHash, delta) {
-  if (!infoHash) {
-    return;
-  }
-  if (delta > 0) {
-    stallsSeen.set(infoHash, (stallsSeen.get(infoHash) ?? 0) + 1);
-  }
-  const next = (blockedReaders.get(infoHash) ?? 0) + delta;
-  if (next > 0) {
-    blockedReaders.set(infoHash, next);
-    return;
-  }
-  blockedReaders.delete(infoHash);
-}
-
 function noteSupplyWait(key, label, waitedMs) {
   const history = supplyWaits.get(key) ?? [];
   history.push({ waitedMs, at: Date.now() });
@@ -427,9 +318,7 @@ export async function* readFragments({ torrent, fileIndex, start, end, cancellat
       let retries = 0;
       while (true) {
         const waitAt = Date.now();
-        countBlockedReader(torrent.infoHash, 1);
-        try { await whenPieceReady(torrent, index, cancellation, wanted); }
-        finally { countBlockedReader(torrent.infoHash, -1); }
+        await whenPieceReady(torrent, index, cancellation, wanted);
         const waitedMs = Date.now() - waitAt;
         if (index > first && waitedMs >= PIECE_WAIT_LOG_MS) {
           const key = `${torrent.infoHash ?? "?"}/${file.name ?? "?"}`;

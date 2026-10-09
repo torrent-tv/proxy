@@ -262,7 +262,7 @@ function streamOf(chunkId, streamCount) {
 }
 
 /** The packets an AVI index states, and the index bytes FFmpeg reads to learn them. */
-export class AviIndex {
+class AviIndex {
   #held;
   #allocation;
   /** @type {Map<number, Uint32Array> | undefined} */

@@ -53,7 +53,6 @@ import {
 } from "./hwaccel.js";
 import { interpolationErrorOf } from "./throughput.js";
 
-export { throughputAt, interpolationErrorOf } from "./throughput.js";
 
 /**
  * The sizes a mode is read at, smallest first.
@@ -64,7 +63,7 @@ export { throughputAt, interpolationErrorOf } from "./throughput.js";
  * rows, where most films are watched. 640x360 is the reference size every
  * earlier reading was taken at, so the figures stay comparable with them.
  */
-export const CALIBRATION_FRAMES = Object.freeze([
+const CALIBRATION_FRAMES = Object.freeze([
   Object.freeze({ width: 256, height: 144 }),
   Object.freeze({ width: 640, height: 360 }),
   Object.freeze({ width: 1280, height: 720 }),
@@ -96,25 +95,13 @@ const CALIBRATION_SOURCE = Object.freeze({ width: 1920, height: 1080, pictureKbp
  */
 
 /**
- * The settings a mode is known by, as text, for the log and for the key its
- * later observations are filed under.
- *
- * @param {{ benchmarkArgs: (rung: string | null) => string[] }} encoder
- * @param {string | null} rung
- * @returns {string}
- */
-export function settingsOf(encoder, rung) {
-  return encoder.benchmarkArgs(rung).join(" ");
-}
-
-/**
  * Encode the calibration clip through the product's own arguments for this
  * mode, and check every segment decodes on its own.
  *
  * @param {{ ffmpegBin: string, encoder: object, rung: string | null, segmentDurationSec: number }} params
  * @returns {Promise<{ ok: boolean, reason: string, segmentKbps: { averageKbps: number, peakKbps: number } | null }>}
  */
-export async function checkModeProducesCorrectSegments({ ffmpegBin, encoder, rung, segmentDurationSec }) {
+async function checkModeProducesCorrectSegments({ ffmpegBin, encoder, rung, segmentDurationSec }) {
   let directory;
   try {
     directory = mkdtempSync(path.join(os.tmpdir(), "tt-modecheck-"));

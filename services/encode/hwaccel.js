@@ -53,8 +53,7 @@ import {
 export {
   chooseOutputFps,
   maxrateKbpsFor,
-  nominalKbpsFor,
-  TRANSCODE_FPS
+  nominalKbpsFor
 } from "./args.js";
 
 const BENCHMARK_REF_W = 640;
@@ -72,7 +71,7 @@ const BENCHMARK_DURATION_SEC = 3;
  * @param {{ width: number, height: number }} frame
  * @returns {number}
  */
-export function rawFrameCountFor(frame) {
+function rawFrameCountFor(frame) {
   const referenceBytes = BENCHMARK_REF_W * BENCHMARK_REF_H * 1.5 * TRANSCODE_FPS * BENCHMARK_DURATION_SEC;
   const frameBytes = frame.width * frame.height * 1.5;
   return Math.max(TRANSCODE_FPS, Math.floor(referenceBytes / frameBytes));
@@ -614,10 +613,9 @@ export async function benchmarkContention({ ffmpegBin, logger, clipsDir = CALIBR
   // company, not the clip's own cost, so the smallest one says it soonest.
   const clip = path.join(clipsDir, "cal-h264-480-lo.mp4");
   const startedAt = Date.now();
-  // Lifted once and decoded three times from the same bytes. Going through
-  // `measureDecodeSlope` lifted it again for every reading — three process
-  // starts on a path that is awaited before the proxy's tunnel opens, for a
-  // remux whose result had not changed.
+  // Lifted once and decoded three times from the same bytes. Lifting it again
+  // for every reading cost three process starts on a path that is awaited
+  // before the proxy's tunnel opens, for a remux whose result had not changed.
   const streams = await extractFamilyStreams(ffmpegBin, [clip], "h264");
   const stream = streams?.[0];
   if (!stream) {
@@ -993,58 +991,6 @@ function runCapturingStderr(ffmpegBin, args, timeoutMs) {
     child.on("error", () => settle(null));
     child.on("close", (code) => settle(code === 0 ? stderr : null));
   });
-}
-
-/**
- * Measure how fast this host DECODES a clip, from ffmpeg's own report of how
- * much video it has processed.
- *
- * Two things are deliberately outside the measurement.
- *
- * **The process starting.** Wall-clock around the process cannot answer this:
- * starting ffmpeg costs about a second, and on a quick machine a five-second
- * clip decodes in a tenth of that, so the measurement would be of the program
- * starting. Progress lines arrive AFTER it has started, and the slope between
- * two of them — video processed against time taken — contains no part of the
- * startup by construction.
- *
- * **The clip restarting.** This used to loop the clip with `-stream_loop -1`,
- * and a loop is not free: measured 2026-08-22 on a desktop, a restart costs
- * 0.03 s on the 480p clip and 0.12 s on the 1080p one — the decoder tearing
- * down and re-allocating its frame buffers, which is why the price rises with
- * the picture. A five-second clip decoded at 55x restarts eleven times a
- * second, so that cost DOMINATED the reading: the same clips measured 53.7x
- * looped against 80.3x in one continuous pass, and 11.8x against 15.8x. Worse,
- * the bias is not shared — it depends on the clip's own resolution and on how
- * fast the host is — so it does not cancel out of the fit, it tilts it. That is
- * the fast-host failure recorded on 2026-08-20, where 1080p read cheaper than
- * 720p, which is not a thing a decoder does.
- *
- * So the clip is fed to the decoder as ONE stream instead. An Annex-B
- * elementary stream carries its parameter sets inline, so writing the same
- * bytes again is simply more stream — the decoder never re-initialises, and
- * there is no restart inside the window to measure. Verified against the
- * continuous-pass truth on the same host: -0.2 % and -5.5 %, against -25 % and
- * -33 % for the loop. Nothing is written to disk and the process is killed as
- * soon as the window is wide enough.
- *
- * Exported because the property that broke here is checkable and was not being
- * checked: a bigger picture must cost more than a smaller one of the same
- * bitrate, and under the loop it did not.
- *
- * @param {string} ffmpegBin
- * @param {string} clipPath
- * @param {string} [family="h264"]
- * @returns {Promise<{ speed: number, windowSec: number, megapixelsPerSecond: number, megabitsPerSecond: number } | null>}
- */
-export async function measureDecodeSlope(ffmpegBin, clipPath, family = "h264") {
-  const streams = await extractFamilyStreams(ffmpegBin, [clipPath], family);
-  const stream = streams?.[0];
-  if (!stream) {
-    return null;
-  }
-  const measured = await decodePipedStream(ffmpegBin, stream);
-  return measured?.speed ? measured : null;
 }
 
 /**

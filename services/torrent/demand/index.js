@@ -4,5 +4,5 @@
 // still used there.
 export { DemandRegister } from "./DemandRegister.js";
 export { Window } from "./Window.js";
-export { isConditional, selectionPriority, Urgency, urgencyName } from "./Urgency.js";
-export { bytesOf, piecesOf } from "./pieces.js";
+export { isConditional, Urgency, urgencyName } from "./Urgency.js";
+export { piecesOf } from "./pieces.js";

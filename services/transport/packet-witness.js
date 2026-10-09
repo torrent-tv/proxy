@@ -40,7 +40,7 @@ import os from "node:os";
 import path from "node:path";
 
 /** Per-packet capture length. Small: headers are what the signatures need. */
-export const WITNESS_SNAPLEN_BYTES = 128;
+const WITNESS_SNAPLEN_BYTES = 128;
 
 /**
  * usrsctp's maximum retransmission timeout, seconds (its `RTO.max` default).
@@ -66,19 +66,19 @@ export const WITNESS_RING_FILE_MB = 16;
 export const WITNESS_RING_FILES = 4;
 
 /** Megabytes per tail file. A wedged session emits a few packets a second. */
-export const WITNESS_TAIL_FILE_MB = 8;
+const WITNESS_TAIL_FILE_MB = 8;
 
 /** How many tail files may be written before tcpdump stops on its own. */
-export const WITNESS_TAIL_FILES = 2;
+const WITNESS_TAIL_FILES = 2;
 
 /** Extra time before the SIGKILL fallback lands on a hanging tcpdump. */
-export const WITNESS_KILL_GRACE_MS = 5_000;
+const WITNESS_KILL_GRACE_MS = 5_000;
 
 /** Minimum spacing between tail captures, whatever the reason for them. */
 export const WITNESS_COOLDOWN_MS = 10 * 60_000;
 
 /** How many old captures survive at startup, newest first. */
-export const WITNESS_CAPTURES_KEPT = 8;
+const WITNESS_CAPTURES_KEPT = 8;
 
 /** Base name of the rolling ring, before tcpdump appends its file number. */
 export const WITNESS_RING_BASENAME = "packet-witness-ring.pcap";

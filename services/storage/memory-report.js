@@ -26,7 +26,7 @@ import v8 from "node:v8";
 import path from "node:path";
 
 /** How often the reading is taken and written. */
-export const MEMORY_REPORT_INTERVAL_MS = 60_000;
+const MEMORY_REPORT_INTERVAL_MS = 60_000;
 
 /**
  * How often the torrent worker takes its own reading.
@@ -57,7 +57,7 @@ export const WORKER_MEMORY_SAMPLE_MS = 1_000;
  *
  * @returns {{ rss: number, heapUsed: number, heapTotal: number, external: number, arrayBuffers: number, heapLimit: number }}
  */
-export function readProcessMemory() {
+function readProcessMemory() {
   const usage = process.memoryUsage();
   let heapLimit = 0;
   try {
@@ -158,7 +158,7 @@ const LARGE_MAPPING_BYTES = 2 * 1024 * 1024;
  *
  * @returns {Promise<ReturnType<typeof summariseMappings> | null>}
  */
-export async function readMappingSummary() {
+async function readMappingSummary() {
   try {
     return summariseMappings(await readFile("/proc/self/smaps", "utf8"));
   } catch {
@@ -181,7 +181,7 @@ export async function readMappingSummary() {
  *
  * @returns {Promise<number | null>} Bytes, or null off Linux.
  */
-export async function readAnonymousMemory() {
+async function readAnonymousMemory() {
   try {
     const text = await readFile("/proc/self/smaps_rollup", "utf8");
     const match = /^Anonymous:\s+(\d+)\s+kB$/m.exec(text);
@@ -206,7 +206,7 @@ export async function readAnonymousMemory() {
  * @param {string} directory
  * @returns {Promise<number | null>} Bytes free, or null where it cannot be read.
  */
-export async function readDiskFree(directory) {
+async function readDiskFree(directory) {
   try {
     const stats = await statfs(directory);
     return Number(stats.bavail) * Number(stats.bsize);

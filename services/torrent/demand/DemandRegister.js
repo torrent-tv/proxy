@@ -17,7 +17,7 @@
  * about pieces — so it is testable with numbers alone.
  */
 
-import { isConditional, Urgency, URGENCY_ORDER } from "./Urgency.js";
+import { isConditional, URGENCY_ORDER } from "./Urgency.js";
 import { unionOf, Window } from "./Window.js";
 
 export class DemandRegister {
@@ -208,4 +208,3 @@ export class DemandRegister {
   }
 }
 
-export { Urgency };

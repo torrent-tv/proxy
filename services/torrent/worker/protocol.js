@@ -27,11 +27,12 @@
  * standard interface outside, ownership transfer inside. Callers cannot tell
  * the difference; the cost is a tenth of a percent of a segment's playing time.
  *
- * Chunk size follows from the same measurements: a round trip costs ~100 µs, so
- * 64 KB chunks would spend 13 ms per segment on overhead against 0.5 ms sent
- * whole. {@link STREAM_CHUNK_BYTES} of 1 MB puts a 10 MB segment at ten
- * messages — about 1 ms — while still allowing a read to be cancelled promptly
- * and keeping peak memory bounded.
+ * The unit of one message follows from the same measurements: a round trip
+ * costs ~100 µs, so 64 KB chunks would spend 13 ms per segment on overhead
+ * against 0.5 ms sent whole. A read crosses as one message per PIECE fragment —
+ * its position in shared memory, not its bytes (`piece-reader.js`) — so a
+ * segment of a few pieces is a few messages, and a read is still cancelled at
+ * the next fragment.
  *
  * Torrent objects cannot cross a thread boundary, so the main thread names them
  * by `sourceKey` (the identifier the registry already uses) and the worker owns
@@ -163,11 +164,6 @@ export const Event = {
    */
   HOLDINGS_CHANGED: "holdings-changed"
 };
-
-/**
- * Bytes per CHUNK message. See the file header for why 1 MB.
- */
-export const STREAM_CHUNK_BYTES = 1024 * 1024;
 
 /**
  * How many chunks may be in flight before the worker waits for an acknowledgement.

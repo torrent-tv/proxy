@@ -31,7 +31,7 @@ export const TONEMAP_FILTER_CHAIN =
 export const TRANSCODE_FPS = 24;
 // Upper bound on the output frame rate: 50/60 fps sources are halved-in-effort
 // by capping to 30, protecting the realtime encode budget on weak hosts.
-export const MAX_OUTPUT_FPS = 30;
+const MAX_OUTPUT_FPS = 30;
 
 /**
  * Choose an INTEGER output frame rate from the (possibly fractional) source
@@ -232,7 +232,7 @@ export function softwareRateControlFor({ width, height, fps, source = null, capK
  * @param {number} nominalKbps
  * @returns {number}
  */
-export function bufsizeKbpsFor(nominalKbps) {
+function bufsizeKbpsFor(nominalKbps) {
   return Math.round(nominalKbps * CAP_BUFSIZE_FACTOR);
 }
 

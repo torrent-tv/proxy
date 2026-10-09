@@ -1,0 +1,22 @@
+{
+  "$schema": "https://unpkg.com/knip@6/schema.json",
+  "entry": [
+    "test/no-torrent/*.test.js"
+  ],
+  "project": [
+    "bin/**/*.js",
+    "routes/**/*.js",
+    "services/**/*.js",
+    "utils/**/*.js",
+    "test/**/*.js"
+  ],
+  "ignoreDependencies": [
+    // A pin, not a use: WebTorrent 2.8.5 accepts uint8-util ^2.2.5, and the
+    // 2.3.x a fresh install pulls breaks it (`arr2hex`). Listing 2.2.6 here
+    // makes npm dedupe WebTorrent's copy to it (CHANGELOG 2.9.44).
+    "uint8-util",
+    // Our fork, installed under this name by `overrides`; required by name so
+    // it resolves to the copy WebTorrent loads (held-objects.js).
+    "utp-native"
+  ]
+}

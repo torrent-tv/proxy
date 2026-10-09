@@ -17,7 +17,7 @@ import path from "node:path";
 import { logger } from "../../utils/logger.js";
 
 /** How many to keep, newest first. */
-export const CORE_DUMPS_KEPT = 2;
+const CORE_DUMPS_KEPT = 2;
 
 /**
  * Which dumps to remove, given what is there.

@@ -217,11 +217,11 @@ function sendFragment(id, fragment) {
 /**
  * Stream a byte range back as CHUNK messages.
  *
- * Reads through WebTorrent's own read stream — which serves already-downloaded
- * pieces from disk and waits for the rest — and forwards it in
- * {@link STREAM_CHUNK_BYTES} pieces, transferring ownership of each so nothing
- * is copied across the boundary. `createSendStream` applies the backpressure,
- * so a fast disk cannot outrun the main thread and rebuild the queue in memory.
+ * Reads the range piece by piece (`readFragments`), which waits for what has
+ * not arrived, and forwards each fragment as its position in shared memory, so
+ * nothing is copied across the boundary. `createSendStream` applies the
+ * backpressure, so a fast disk cannot outrun the main thread and rebuild the
+ * queue in memory.
  *
  * @param {object} params
  * @param {number} params.id - Request id; CHUNK/READ_END carry it.

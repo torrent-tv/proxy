@@ -24,7 +24,7 @@ export function workerReplyError(message, fallback = "Torrent worker request fai
  *
  * @returns {() => number}
  */
-export function createRequestIds() {
+function createRequestIds() {
   let next = 0;
   return () => (next += 1);
 }

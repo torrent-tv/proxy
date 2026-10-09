@@ -29,7 +29,7 @@ export const MAX_HEADER_BYTES = 12;
  * @param {{ value: number, length: number }} size
  * @returns {boolean}
  */
-export function sizeIsUnknown(size) {
+function sizeIsUnknown(size) {
   return size.value === 2 ** (7 * size.length) - 1;
 }
 

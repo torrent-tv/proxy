@@ -11,7 +11,7 @@ function seekLandingOffsetFor(material, keyframe) {
   return next === undefined ? wanted : Math.min(wanted, (next - keyframe) / 2);
 }
 
-export function buildRunCommand({
+function buildRunCommand({
   keyframes,
   inputFile,
   audioFile,

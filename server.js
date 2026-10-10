@@ -423,7 +423,14 @@ export async function startProxyServer({
   /** Source byte ranges of one segment interval, by file and interval; forgotten with the source. */
   const segmentSourceRanges = new Map();
   const downloadMaps = new DownloadMaps({
-    publish: (map) => torrentPool.setPriorityMap(map),
+    // The ranges a picture reads at open are named again by every segment;
+    // only the zone the swarm would rank first is sent (torrent-tv/meta#166).
+    // Left out of what is SENT and nowhere else: every segment's own zones are
+    // also what says which bytes that segment needs, and a segment whose zones
+    // all repeat another's — two of one group of pictures in an AVI read the
+    // same bytes — lost them with 2.96.11, and the start forecast answered
+    // "source-input-ranges-unavailable" for ever (Home Assistant 2026-10-11).
+    publish: (map) => torrentPool.setPriorityMap({ ...map, zones: withoutRepeatedZones(map.zones) }),
     log: (line) => logger.info(line),
     resolvePlayback: async (map) => {
       if (map.zones.length === 0) return [];
@@ -534,9 +541,7 @@ export async function startProxyServer({
         segmentSourceRanges.set(rangesKey, input.ranges);
         convert(input.ranges);
       }
-      // The ranges a picture reads at open are named again by every segment;
-      // only the zone the swarm would rank first is sent (torrent-tv/meta#166).
-      return withoutRepeatedZones(converted);
+      return converted;
     }
   });
   const mediaReads = new MediaReadRequests({

@@ -158,3 +158,37 @@ test("an encoder is not started behind what is being made elsewhere, and is star
   assert.deepEqual(started.filter((one) => one.address === SOUND).map((one) => one.from), [200],
     "once the picture is in the soundtrack's band, the soundtrack is placed");
 });
+
+test("an encoder paused and let go can be paused again", async () => {
+  const { EventEmitter } = await import("node:events");
+  const { EncodeRun } = await import("../../services/encode/EncodeRun.js");
+  const { SoftwareEncoder } = await import("../../services/encode/SoftwareEncoder.js");
+  class Process extends EventEmitter {
+    constructor() {
+      super();
+      this.pid = 1;
+      this.stdout = new EventEmitter();
+      this.stdio = [null, this.stdout, null, new EventEmitter()];
+      this.signals = [];
+    }
+
+    kill(signal) {
+      this.signals.push(signal);
+      return true;
+    }
+  }
+  const lines = [];
+  const process_ = new Process();
+  const encoder = new EncodeRun({
+    address: SOUND, encoder: new SoftwareEncoder(), from: 0, to: 9,
+    buildArgs: () => ["-i", "in", "out"], spawn: () => process_,
+    logger: { info: (line) => lines.push(line), warn: (line) => lines.push(line) }, now: () => 1000
+  });
+  assert.equal(encoder.pause("first"), true);
+  assert.equal(encoder.isSuspended, true);
+  assert.equal(encoder.resume("let go"), true);
+  assert.equal(encoder.isSuspended, false, "a resumed encoder is producing again, not still suspended");
+  assert.equal(encoder.pause("second"), true, "and it can be paused once more");
+  assert.deepEqual(process_.signals, ["SIGSTOP", "SIGCONT", "SIGSTOP"]);
+  assert.ok(!lines.some((line) => /no such edge/.test(line)), lines.join("\n"));
+});

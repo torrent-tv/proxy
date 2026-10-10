@@ -1,4 +1,4 @@
-## Unreleased
+## 2.96.13
 
 - **Fix**: An AVI film starts playing again once enough of it is ready. 2.96.11 left repeated byte ranges out of the download map itself, but a segment's own zones are also what the start forecast reads to know which bytes that segment needs; two segments of one group of pictures read the same bytes, so the second lost all of them and the forecast answered `source-input-ranges-unavailable` for ever. On Home Assistant 2026-10-11 the page held 32 s and never started. Repeats are now left out only of what is sent to the torrent (#ttv-166).
 - **Fix**: An encoder paused because something more urgent was being made could not be paused a second time. Letting it go sent an event the run's state table does not have, so it stayed "suspended" while it ran — counted as suspended, and refused every later pause (#ttv-166).

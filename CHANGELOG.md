@@ -1,4 +1,4 @@
-## Unreleased
+## 2.96.11
 
 - **Fix**: The download map of an AVI film no longer carries the same bytes once per segment. The ranges its picture reads at open — the declarations and the indexes — were named again in the zone of every segment: on Home Assistant 2026-10-10 (proxy 2.96.10) each map of a 2035-segment film held about 9700 zones and took half a second to reach the torrent thread, 25 s of waiting a minute. Each piece is fetched in the band of the best zone that holds it, so a zone naming exactly the bytes of a better one changes nothing the swarm is told, and only that one is sent (#ttv-166).
 

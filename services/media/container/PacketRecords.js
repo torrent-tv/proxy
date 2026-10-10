@@ -17,6 +17,12 @@ export class PacketRecords {
   #onDispose;
   #disposed = false;
   #prepaid = 0;
+  // Where the records first go back in time (-1 while they never do), the last
+  // time pushed, and the longest duration any record has had: what lets a
+  // reader find an interval by search instead of reading every record.
+  #descentAt = -1;
+  #lastPts = -Infinity;
+  #longest = 0;
 
   constructor(memory = {}) {
     const allocation = memory.forRecord?.(this) ?? memory;
@@ -77,7 +83,28 @@ export class PacketRecords {
       this.#bytes = [...this.#blocks, ...this.#addresses].reduce((sum, buffer) => sum + buffer.length, 0);
     }
     this.#length = value;
+    if (this.#descentAt >= value) this.#descentAt = -1;
+    this.#lastPts = value ? this.ptsAt(value - 1) : -Infinity;
+    if (!value) this.#longest = 0;
     if (previousBytes !== this.#bytes) this.#release(previousBytes - this.#bytes);
+  }
+
+  /** Whether every record's time is at least the one before it. */
+  get ptsAscending() { return this.#descentAt < 0; }
+
+  /** No record has lasted longer than this, though a removed one may have: a bound, not a measurement. */
+  get longestDuration() { return this.#longest; }
+
+  /** The first record whose time is at least `seconds`, `length` when there is none; only when the times ascend. */
+  firstAtOrAfter(seconds) {
+    if (!this.ptsAscending) throw new Error("Records whose times go back cannot be searched by time.");
+    let low = 0, high = this.#length;
+    while (low < high) {
+      const middle = (low + high) >>> 1;
+      if (this.ptsAt(middle) < seconds) low = middle + 1;
+      else high = middle;
+    }
+    return low;
   }
 
   push(packet) {
@@ -137,6 +164,9 @@ export class PacketRecords {
     if (packet.streamId !== undefined) block.writeUInt32LE(packet.streamId, at + bytes - 4 - (packet.decodeFromIndex !== undefined ? 4 : 0));
     if (packet.decodeFromIndex !== undefined) block.writeUInt32LE(packet.decodeFromIndex, at + bytes - 4);
     this.#used += bytes;
+    if (this.#descentAt < 0 && packet.pts < this.#lastPts) this.#descentAt = this.#length;
+    this.#lastPts = packet.pts;
+    if (packet.duration > this.#longest) this.#longest = packet.duration;
     return ++this.#length;
   }
 
@@ -204,7 +234,9 @@ export class PacketRecords {
   extendLastPresentation(seconds) {
     if (!this.#length) return;
     const [block, at] = this.#address(this.#length - 1);
-    block.writeDoubleLE(block.readDoubleLE(at + 8) + seconds, at + 8);
+    const duration = block.readDoubleLE(at + 8) + seconds;
+    block.writeDoubleLE(duration, at + 8);
+    if (duration > this.#longest) this.#longest = duration;
   }
 
   setDuration(index, seconds, derived = false) {
@@ -213,6 +245,7 @@ export class PacketRecords {
     }
     const [block, at] = this.#address(index);
     block.writeDoubleLE(seconds, at + 8);
+    if (seconds > this.#longest) this.#longest = seconds;
     const flags = block.readUInt32LE(at + 48);
     block.writeUInt32LE(derived ? flags | 4 : flags & ~4, at + 48);
   }

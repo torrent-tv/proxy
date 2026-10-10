@@ -72,7 +72,13 @@ export class PacketIndex {
       if (track.type !== "audio" || !isMp3Codec(track.codecId) ||
           (interval?.trackIds && !interval.trackIds.includes(id)) || interval?.modes?.[id] === "copy") continue;
       const records = track.packets;
-      for (let position = 0; position < records.length; position++) {
+      // As in inputFor: records in time order are searched rather than read
+      // in full; one that starts too early to reach the interval is skipped
+      // below unless a record its preroll frames ahead does reach it.
+      const ordered = interval && records.ptsAscending;
+      const scanFrom = ordered ? Math.max(0, records.firstAtOrAfter(interval.from - records.longestDuration) - track.prerollFrames) : 0;
+      const scanTo = ordered ? records.firstAtOrAfter(interval.to) : records.length;
+      for (let position = scanFrom; position < scanTo; position++) {
         const packet = records.at(position);
         if (!packet.decodeDependencyUnknown || (interval &&
             (packet.pts >= interval.to || (packet.pts < interval.from && packet.pts + packet.duration <= interval.from &&
@@ -174,7 +180,15 @@ export class PacketIndex {
     const packets = track.packets;
     const startAt = from - (track.type === "audio" && mode === "transcode" ? track.prerollSeconds : 0);
     const selected = [];
-    for (let index = 0; index < packets.length; index++) {
+    // Records in time order are searched: only one starting within the
+    // longest duration before the interval can reach into it. Read in full,
+    // a two-hour soundtrack is 340 thousand records per interval, and the
+    // download map asked for two thousand intervals at once: the proxy's main
+    // thread stopped for minutes (Home Assistant 2026-10-10, torrent-tv/meta#166).
+    const ordered = packets.ptsAscending;
+    const scanFrom = ordered ? packets.firstAtOrAfter(startAt - packets.longestDuration) : 0;
+    const scanTo = ordered ? packets.firstAtOrAfter(to) : packets.length;
+    for (let index = scanFrom; index < scanTo; index++) {
       const pts = packets.ptsAt(index);
       if (pts < to && (pts >= startAt ||
         ((mode === "transcode" || track.type === "audio") && pts + packets.durationAt(index) > startAt))) selected.push(index);

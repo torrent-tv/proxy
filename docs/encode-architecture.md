@@ -390,6 +390,38 @@ once (roadmap item 97, step 13).
 Not solved: places go to whoever asks first, so a second encoder catching up on
 one output can hold the place a viewer opening another film waits for.
 
+## Who gets the processor first
+
+A place says whether an encoder may exist. Which of the encoders that exist
+gets the processor is a second question, and it is answered over every output
+at once (`EncodeOrchestrator.shareTheMachine`), because the machine is one.
+Each output is planned on its own and is encoded whole in its map's order, so
+an output that is cheap to make ran far ahead of one that is dear: field
+2026-10-10, a copied soundtrack at 38 minutes while its picture, re-encoded at
+0.65–1.31x, was at five and the viewer stalled (torrent-tv/meta#166).
+
+1. **The band** of an encoder is the band of the map its next segment lies in:
+   whether that segment is needed before playback can continue (the map's
+   `urgent`), then the map's priority. Everything urgent is ONE band, so two
+   viewers each short of their own minimum share the machine; priority orders
+   only what can wait (`compareUrgency`).
+2. **The leading band** is the most urgent band any live encoder stands in, on
+   any output.
+3. **An encoder in a less urgent band is paused** — `SIGSTOP`, so it keeps its
+   process, its input and its claim — and **let go** as soon as nothing more
+   urgent is being made. The encoder in the leading band is never paused, so
+   something is always being made.
+4. **A start behind the leading band is not made**: the encoder would be paused
+   the moment it exists. The log says `#N of <output> waits — #M of <output>
+   is wanted more urgently and is being made`.
+5. **Decided again on every pass and on every closed piece** (`EncodeRun`
+   `onProduced`), because a closed piece is what moves an encoder into another
+   band.
+
+Paused rather than lowered in priority: a lowered priority cannot be raised
+again without `CAP_SYS_NICE`, which the add-on's container does not have
+(Home Assistant 2026-10-10: `renice 0` after `renice 19` left 19).
+
 ## What each of the eight other places used to do
 
 Before 2026-09-08 the plan was one opinion among nine. Each of these placed or

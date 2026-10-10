@@ -999,6 +999,9 @@ export class EncodeRuns {
         run.to,
       inputUnavailable: (message) => isInputUnavailable(message),
       onProgress: (report) => this.#noteRunProgress(session, run, report),
+      // A closed piece moves this encoder forward, perhaps out of the band that
+      // led; who has the processor is decided again at once.
+      onProduced: () => this.#host.encodeOrchestrator?.shareTheMachine?.(),
       indexOfName: (name) => session.segmentFormat.segmentIndexFromName(
         session.segmentFormat.servedNameOf?.(name) ?? name),
       // Why this encoder exists, recorded with its argument list. It used to be

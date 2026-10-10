@@ -32,6 +32,8 @@ export class AviContainer extends Container {
   #headers = null;
   #tracks = null;
   #packets = null;
+  /** The sound packets of an indexed file while they are being stated, so two asks build them once. */
+  #soundPacketsReading = null;
   #scan = null;
   #declarations = null;
   #workTags = null;
@@ -150,10 +152,18 @@ export class AviContainer extends Container {
     return index;
   }
 
-  async supportsOriginalSourceRanges() {
+  /**
+   * Whether `interval` is read from the original file. Only a picture needs
+   * it: an AVI states no presentation time, so FFmpeg's own reading is what
+   * keeps its frames in order. Sound alone is read from its own packets, whose
+   * time the index states (torrent-tv/meta#166); asked of the file as a whole,
+   * the answer is the picture's.
+   */
+  async supportsOriginalSourceRanges(interval = null) {
     const index = await this.#readIndex();
     if (!index) return false;
     const picture = ContainerTrack.firstUsable(await this.readTracks(), "video");
+    if (picture && interval?.trackIds?.length && !interval.trackIds.includes(picture.trackNumber)) return false;
     return !picture || index.keyframeTimes(picture.trackNumber).length > 0;
   }
 
@@ -312,9 +322,19 @@ export class AviContainer extends Container {
   async readPacketIndex(interval) {
     if (this.#packets) return this.#packets;
     if (this.#scan) return this.#readUnindexed(interval);
-    // A file with an index is read by FFmpeg from the original bytes; packets
-    // are reassembled only where no index states them (torrent-tv/meta#151).
-    if (await this.#readIndex()) throw new Error("AVI with an index is read from the original file, not from reassembled packets.");
+    // A picture of a file with an index is read by FFmpeg from the original
+    // bytes (torrent-tv/meta#151). Its SOUND is not: the index states every
+    // sound packet's place and FFmpeg's time for it, and a soundtrack read from
+    // the original file has to carry the picture's bytes too, because sound and
+    // picture are interleaved — field 2026-10-10, a two-hour film's soundtrack
+    // copied 2.3 GB for 0.19 GB of its own (torrent-tv/meta#166).
+    const indexed = await this.#readIndex();
+    if (indexed) {
+      this.#soundPacketsReading ??= this.#soundPacketsOf(indexed).then(
+        packets => (this.#packets = packets),
+        error => { this.#soundPacketsReading = null; throw error; });
+      return this.#soundPacketsReading;
+    }
     const tracks = await this.readTracks();
     const { streams } = await this.#readHeaders();
     const index = new PacketIndex({ packetMemory: this.packetMemory, deferMemory: true });
@@ -331,6 +351,45 @@ export class AviContainer extends Container {
     this.#scan = { index, tracks, clocks, timings: new Map(), at: 0,
       stack: [{ end: this.fileSize, next: this.fileSize }] };
     return this.#readUnindexed(interval);
+  }
+
+  /**
+   * The sound packets an AVI index states, on FFmpeg's clock: the time the
+   * index gives each packet is the one FFmpeg's demuxer gives it, and a packet
+   * lasts until the next one of its stream, the last until the stream's clock
+   * after it. Only sound is declared; a picture of an indexed AVI states no
+   * presentation time and is read from the original file.
+   *
+   * @param {{ packets: Array<{ count: number, starts: Float64Array, lengths: Uint32Array, times: Float64Array, end: number | null }> }} index
+   * @returns {Promise<PacketIndex>}
+   */
+  async #soundPacketsOf(index) {
+    const tracks = await this.readTracks();
+    const { streams } = await this.#readHeaders();
+    const packets = new PacketIndex({ packetMemory: this.packetMemory });
+    try {
+      for (const track of tracks.filter(one => one.type === "audio")) {
+        const stream = index.packets[track.trackNumber];
+        packets.declareTrack(track.trackNumber, { type: "audio", codecId: track.codecId,
+          codecRanges: streams[track.trackNumber].codecRanges });
+        let previous = -1;
+        const append = (end) => {
+          packets.append(track.trackNumber, { pts: stream.times[previous], duration: Math.max(0, end - stream.times[previous]),
+            keyframe: true, ranges: [[stream.starts[previous], stream.starts[previous] + stream.lengths[previous] - 1]] });
+        };
+        for (let at = 0; at < stream.count; at++) {
+          if (!stream.lengths[at]) continue;
+          if (previous >= 0) append(stream.times[at]);
+          previous = at;
+        }
+        if (previous >= 0) append(stream.end ?? stream.times[previous]);
+        packets.complete(track.trackNumber);
+      }
+    } catch (error) {
+      packets.dispose();
+      throw error;
+    }
+    return packets;
   }
 
   async #readUnindexed(interval) {

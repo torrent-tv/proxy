@@ -198,7 +198,7 @@ export class ContainerOrchestrator {
         value = await (statement === "cover" ? container.readCover(edgesOf(params)) : container.readWorkTags(edgesOf(params)));
         if (value === null) return { kind: "terminal", reason: statement === "cover" ? "no-cover" : "format-states-nothing", requestId };
       } else if (statement === "source-navigation") {
-        value = await container.supportsOriginalSourceRanges?.() === true;
+        value = await container.supportsOriginalSourceRanges?.(params.packetInterval ?? null) === true;
       } else if (statement === "source-ranges") {
         if (typeof container.readSourceRanges !== "function") return { kind: "terminal", reason: "source-range-index-not-supported", requestId };
         value = await container.readSourceRanges(params.packetInterval);

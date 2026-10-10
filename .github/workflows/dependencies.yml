@@ -27,7 +27,14 @@ jobs:
       - uses: actions/setup-node@v7
         with:
           node-version: 24
+      # The same packet timing reference the main workflow's checks read: the
+      # installer's Linux ffprobe crashes on MPEG-TS packet inspection, and
+      # without this the update's own checks failed every day from 2026-10-06.
+      - name: Install the packet timing reference
+        run: sudo apt-get update && sudo apt-get install --no-install-recommends -y ffmpeg
       - uses: torrent-tv/.github/actions/update-dependencies@main
+        env:
+          FFPROBE_BIN: /usr/bin/ffprobe
         with:
           github-token: ${{ github.token }}
           # npm users install the proxy from the ranges in package.json; the lock file

@@ -1,3 +1,7 @@
+## Unreleased
+
+- **Fix**: The picture no longer stops for a minute where one stretch of an AVI's original file hands over to the next. The next stretch's input was copied only after the run before it had ended, so nothing made the picture while it was copied and opened: on Home Assistant 2026-10-11, 909 MB copied in 48.9 s after run #1..#32 ended, and the viewer stood 69 s at 2:15. The next stretch is now requested when a run starts and is copied while it works (#ttv-166).
+
 ## 2.96.13
 
 - **Fix**: An AVI film starts playing again once enough of it is ready. 2.96.11 left repeated byte ranges out of the download map itself, but a segment's own zones are also what the start forecast reads to know which bytes that segment needs; two segments of one group of pictures read the same bytes, so the second lost all of them and the forecast answered `source-input-ranges-unavailable` for ever. On Home Assistant 2026-10-11 the page held 32 s and never started. Repeats are now left out only of what is sent to the torrent (#ttv-166).

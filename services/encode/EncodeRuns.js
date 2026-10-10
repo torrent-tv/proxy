@@ -1066,6 +1066,13 @@ export class EncodeRuns {
       // cannot reach it.
       run.inputThrough = inputEnd;
       run.process.stdin.end();
+      // THE NEXT STRETCH IS PREPARED WHILE THIS ONE IS BEING MADE. Asked for
+      // only when this run had ended, its copy fell between the two runs and
+      // nothing made the picture meanwhile: field 2026-10-11, 909 MB copied in
+      // 48.9 s after run #1..#32 ended, then the start of #33..#892, and the
+      // viewer stood 69 s (torrent-tv/meta#166). Asked now, it is copied while
+      // this run works and is ready when the plan places the next run there.
+      if (inputEnd < mayReach) this.#host.encodeInputs?.take(session, inputEnd + 1, mayReach);
     } else if (admittedInput) {
       run.inputFingerprint = admittedInput.fingerprint;
       run.admittedInputKeys = new Map([[safeIndex, inputKey]]);

@@ -422,6 +422,7 @@ export async function startProxyServer({
   const segmentSourceRanges = new Map();
   const downloadMaps = new DownloadMaps({
     publish: (map) => torrentPool.setPriorityMap(map),
+    log: (line) => logger.info(line),
     resolvePlayback: async (map) => {
       if (map.zones.length === 0) return [];
       const params = await containerOver(map);

@@ -1,14 +1,24 @@
+/**
+ * How often what the publications of one file cost is said, at most: the
+ * cadence of the proxy's other once-a-minute readings.
+ */
+const REPORT_EVERY_MS = 60_000;
+
 /** One published download map per file, including download-only metadata reads. */
 export class DownloadMaps {
   #files = new Map();
   #publish;
   #resolvePlayback;
   #nextEpoch = 0;
+  #log;
+  #now;
 
-  constructor({ publish, resolvePlayback = async map => map.zones }) {
+  constructor({ publish, resolvePlayback = async map => map.zones, log = null, now = Date.now }) {
     if (typeof publish !== "function") throw new TypeError("Download map publication is required.");
     this.#publish = publish;
     this.#resolvePlayback = resolvePlayback;
+    this.#log = typeof log === "function" ? log : null;
+    this.#now = now;
   }
 
   async playback({ sourceKey, fileIndex, durationSeconds, zones }) {
@@ -197,11 +207,130 @@ export class DownloadMaps {
       }
     }
     const publication = { sourceKey: file.sourceKey, fileIndex: file.fileIndex, durationSeconds: file.durationSeconds, zones };
+    // SENT ONLY WHEN THE TORRENT WOULD ACT ON IT DIFFERENTLY: other bytes,
+    // another level or order of claim, or deadlines in another order. A map was
+    // sent after every read of the file's statements, changed or not, and the
+    // read waited for it: field 2026-10-10, 48-64 such reads per stretch of a
+    // two-hour AVI, 28-54 s before its copy began, with 5-12 thousand zones in
+    // each map (torrent-tv/meta#166). A deadline worked out again on a later
+    // clock moves every zone of a viewer playing on by the same amount and
+    // orders nothing differently, so the deadlines' order is compared and not
+    // their values.
+    const shape = shapeOf(publication);
+    if (file.shape && sameShape(file.shape, shape)) {
+      this.#statsOf(file).unchanged += 1;
+      this.#report(file);
+      return Promise.resolve();
+    }
+    file.shape = shape;
     const pending = file.pending.then(() => {
-      if (this.#files.get(`${file.sourceKey}:${file.fileIndex}`) === file) return this.#publish(publication);
+      if (this.#files.get(`${file.sourceKey}:${file.fileIndex}`) !== file) return undefined;
+      const sentAt = this.#now();
+      return Promise.resolve(this.#publish(publication)).then(reply => {
+        // A torrent not yet in the thread applies nothing, so this map was not
+        // delivered and the next one, however alike, has to be.
+        if (reply?.appliedMs === null && file.shape === shape) file.shape = null;
+        // The window open now, which a report since this map was asked for may have started.
+        const stats = this.#statsOf(file);
+        stats.sent += 1;
+        stats.zones.push(zones.length);
+        stats.deliveredMs.push(this.#now() - sentAt);
+        if (Number.isFinite(reply?.appliedMs)) stats.appliedMs.push(reply.appliedMs);
+        this.#report(file);
+        return reply;
+      });
     });
-    // A failed publication must not prevent the next state change from being sent.
-    file.pending = pending.catch(() => undefined);
+    // A failed publication must not prevent the next state change from being
+    // sent, and leaves nothing to compare the next one against.
+    file.pending = pending.catch(() => {
+      if (file.shape === shape) file.shape = null;
+    });
     return pending;
   }
+
+  #statsOf(file) {
+    file.stats ??= { since: this.#now(), sent: 0, unchanged: 0, zones: [], deliveredMs: [], appliedMs: [] };
+    return file.stats;
+  }
+
+  /** What this file's publications cost, said once a minute at most and only when one was asked for. */
+  #report(file) {
+    const stats = file.stats;
+    const now = this.#now();
+    if (!this.#log || !stats || now - stats.since < REPORT_EVERY_MS) return;
+    const total = values => Math.round(values.reduce((sum, value) => sum + value, 0));
+    this.#log(`download map ${file.sourceKey.slice(0, 48)}:${file.fileIndex}: ${stats.sent} sent and ` +
+      `${stats.unchanged} unchanged not sent in ${((now - stats.since) / 1000).toFixed(1)}s; ` +
+      `zones median ${middle(stats.zones)} max ${largest(stats.zones)}; ` +
+      `delivered median ${middle(stats.deliveredMs)}ms max ${largest(stats.deliveredMs)}ms (${total(stats.deliveredMs)}ms in all), ` +
+      `applied in the torrent thread median ${middle(stats.appliedMs)}ms max ${largest(stats.appliedMs)}ms ` +
+      `(${total(stats.appliedMs)}ms in all)`);
+    file.stats = { since: now, sent: 0, unchanged: 0, zones: [], deliveredMs: [], appliedMs: [] };
+  }
+}
+
+/** How many numbers describe one zone's part in what the torrent does. */
+const ZONE_FIELDS = 7;
+
+/** @param {boolean | undefined} value */
+function flag(value) {
+  return value === true ? 2 : value === false ? 1 : 0;
+}
+
+/** @param {{ deadlineAt?: number }} zone */
+function deadlineOf(zone) {
+  return Number.isFinite(zone.deadlineAt) ? zone.deadlineAt : Number.POSITIVE_INFINITY;
+}
+
+/**
+ * What the torrent acts on in a publication, packed for comparison: each
+ * zone's bytes, priority, words of level, order of claim, and the RANK of its
+ * deadline among the map's zones rather than the deadline itself. A zone with
+ * no deadline carries the time it is wanted within, which the torrent turns
+ * into a deadline on its own clock when the map is applied.
+ *
+ * @param {{ durationSeconds: number, zones: object[] }} publication
+ * @returns {{ durationSeconds: number, fields: Float64Array }}
+ */
+function shapeOf({ durationSeconds, zones }) {
+  const byDeadline = zones.map((_zone, index) => index).sort((left, right) => {
+    const first = deadlineOf(zones[left]);
+    const second = deadlineOf(zones[right]);
+    return first === second ? left - right : first < second ? -1 : 1;
+  });
+  const fields = new Float64Array(zones.length * ZONE_FIELDS);
+  byDeadline.forEach((index, rank) => {
+    fields[index * ZONE_FIELDS + 5] = rank;
+  });
+  zones.forEach((zone, index) => {
+    const at = index * ZONE_FIELDS;
+    fields[at] = Number.isFinite(zone.byteStart) ? zone.byteStart : -1;
+    fields[at + 1] = Number.isFinite(zone.byteEnd) ? zone.byteEnd : -1;
+    fields[at + 2] = Number.isFinite(zone.priority) ? zone.priority : -1;
+    fields[at + 3] = flag(zone.urgent) * 27 + flag(zone.deferred) * 9 + flag(zone.behind) * 3 + flag(zone.downloadOnly);
+    fields[at + 4] = Number.isSafeInteger(zone.order) ? zone.order : 0;
+    fields[at + 6] = Number.isFinite(zone.deadlineAt) ? -2 : Number.isFinite(zone.withinSeconds) ? zone.withinSeconds : -1;
+  });
+  return { durationSeconds: Number.isFinite(durationSeconds) ? durationSeconds : -1, fields };
+}
+
+/** @param {{ durationSeconds: number, fields: Float64Array }} left @param {{ durationSeconds: number, fields: Float64Array }} right */
+function sameShape(left, right) {
+  if (left.durationSeconds !== right.durationSeconds || left.fields.length !== right.fields.length) return false;
+  for (let index = 0; index < left.fields.length; index++) {
+    if (left.fields[index] !== right.fields[index]) return false;
+  }
+  return true;
+}
+
+/** @param {number[]} values */
+function middle(values) {
+  if (values.length === 0) return "n/a";
+  const sorted = [...values].sort((left, right) => left - right);
+  return Math.round(sorted[Math.floor(sorted.length / 2)]);
+}
+
+/** @param {number[]} values */
+function largest(values) {
+  return values.length === 0 ? "n/a" : Math.round(Math.max(...values));
 }

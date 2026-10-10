@@ -1,6 +1,9 @@
-## 2.96.8
+## Unreleased
 
 - **Fix**: The proxy no longer stops for minutes when the download map works out what a long soundtrack read from its own packets needs. Each interval was found by reading every packet of the track, a two-hour soundtrack is 339 thousand of them, and the map asked for 2035 intervals in one pass without giving the event loop a turn: on Home Assistant 2026-10-10 (proxy 2.96.8) the main thread ran at a full core with nothing written to the log and no picture encoded. Records whose times ascend are now searched — only a packet starting within the longest duration before an interval can reach into it — and select exactly the same packets: 2035 intervals took 88.5 s on a desktop and take 0.42 s. Records whose times go back are still read whole (#ttv-166).
+
+## 2.96.8
+
 - **Fix**: An indexed AVI's soundtrack no longer fails to start for lack of memory the machine has. Its table of sound packets asked the shared budget for memory one block at a time; a refusal named one block, the table was thrown away and built again for the next, and on Home Assistant 2026-10-10 (proxy 2.96.7) a two-hour film's soundtrack was refused 3485 times in three minutes with 4 GB free: no soundtrack encoder was made, the picture did not start, and the download map fell back to a queued read of the file for every one of the soundtrack's zones. The index states how many packets there are, so the table now asks for all of them at once and the first refusal names everything it needs (#ttv-166).
 
 ## 2.96.7

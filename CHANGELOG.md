@@ -1,4 +1,4 @@
-## Unreleased
+## 2.96.5
 
 - **Chore**: The line that says an original input is ready (or what it waits for) now says where its preparation spent its time: how many statements of the interval it asked for and how long they took, how much of that the reads of the file spent waiting behind earlier reads of the same file, the checks of which bytes are held, and the memory budget. Reads of one file run one after another, and a picture input in the field took 38 s before its copy began with nothing logged (#ttv-166).
 

@@ -54,6 +54,7 @@ import { wireOutputs } from "./services/server/wire-outputs.js";
 import { createPlaybackPlanner } from "./services/media/playback-planner.js";
 import { KeyframeTables } from "./services/media/KeyframeTables.js";
 import { contentsOf } from "./services/torrent/Contents.js";
+import { joinedWithinPieces } from "./services/torrent/demand/pieces.js";
 import { SubtitleOrchestrator } from "./services/media/SubtitleOrchestrator.js";
 import { containerOrchestrator, CONTAINER_HEAD_BYTES, describeWorkTags } from "./services/media/ContainerOrchestrator.js";
 import { readPlaybackDeclarations } from "./services/media/read-playback-declarations.js";
@@ -434,6 +435,9 @@ export async function startProxyServer({
       const media = await containerOrchestrator.inspect(params, "media-info");
       if (media.kind !== "result" || !map.isCurrent()) return [];
       const shift = Number(media.value?.startTimeSeconds) || 0;
+      // A zone's ranges are stated to the torrent at the precision it fetches:
+      // ranges closer than a piece hold the same pieces as one.
+      const pieceLength = Number(torrentPool.knownTorrent(map.sourceKey)?.pieceLength);
       const converted = [];
       const demands = [];
       for (const output of outputParts.outputs.values()) {
@@ -483,7 +487,7 @@ export async function startProxyServer({
           modes: Object.fromEntries(wanted.map(track => [track.trackNumber, modes.get(track)])) };
         const { tracks: _choices, owner: _owner, sourceInterval: _sourceInterval, ...demand } = zone;
         const convert = ranges => {
-          for (const [byteStart, byteEnd] of ranges) converted.push({ ...demand,
+          for (const [byteStart, byteEnd] of joinedWithinPieces(ranges, pieceLength)) converted.push({ ...demand,
             downloadInterval: { from: zone.owner.from, to: zone.owner.to }, byteStart, byteEnd });
         };
         // The bytes one segment needs are a fact of the file and the output, so

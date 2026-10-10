@@ -1,4 +1,4 @@
-## Unreleased
+## 2.96.8
 
 - **Fix**: An indexed AVI's soundtrack no longer fails to start for lack of memory the machine has. Its table of sound packets asked the shared budget for memory one block at a time; a refusal named one block, the table was thrown away and built again for the next, and on Home Assistant 2026-10-10 (proxy 2.96.7) a two-hour film's soundtrack was refused 3485 times in three minutes with 4 GB free: no soundtrack encoder was made, the picture did not start, and the download map fell back to a queued read of the file for every one of the soundtrack's zones. The index states how many packets there are, so the table now asks for all of them at once and the first refusal names everything it needs (#ttv-166).
 

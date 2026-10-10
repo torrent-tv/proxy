@@ -10,7 +10,6 @@ import { AviContainer } from "../../services/media/container/AviContainer.js";
 import { SegmentInputs } from "../../services/media/SegmentInputs.js";
 import { admitInput, writeAdmittedInput } from "../../services/encode/AdmittedInput.js";
 import { buildAdmittedCommand } from "../../services/encode/admitted-command.js";
-import { mpegtsFormat } from "../../services/encode/segment-formats/mpegts.js";
 import { fmp4Format } from "../../services/encode/segment-formats/fmp4.js";
 import { judgePiece } from "../../services/encode/piece-completeness.js";
 import { softwareDescriptor } from "../../services/encode/hwaccel.js";
@@ -41,13 +40,14 @@ function samples(file) {
   return new Int16Array(raw.buffer, raw.byteOffset, Math.floor(raw.length / 2));
 }
 
-// FFmpeg's MPEG-TS muxer delays every timestamp by twice its default mux
-// delay of 0.7 s; the page's player takes the first piece's time as its start.
-const TS_DELAY = 1.4;
+// The pieces are fMP4, the proxy's default, and read whole: the run writes the
+// film's own times into them. MPEG-TS is left out because the Linux build of
+// ffmpeg-static CI installs (7.0.2) crashes reading any MPEG-TS file, one it
+// has just written from the AVI included, while a Debian ffmpeg reads it.
 
 /** The time a piece states for its first sound, on the film's clock. */
 function startOf(file) {
-  return packetsOf(file, TS_DELAY)[0].pts;
+  return packetsOf(file)[0].pts;
 }
 
 /** Where in the reference the produced samples fit best, searched within half a second of a guess. */
@@ -85,18 +85,18 @@ async function inDirectory(body) {
  * The audio packets FFmpeg reads from `file`, in its own `framemd5` listing:
  * time on the film's clock, duration and content.
  */
-function packetsOf(file, shift = 0) {
+function packetsOf(file) {
   const lines = String(run(ffmpegBin, ["-v", "error", "-copyts", "-i", file, "-map", "0:a:0", "-c", "copy", "-f", "framemd5", "-"]))
     .split(/\r?\n/);
   const base = lines.find(line => line.startsWith("#tb 0:"))?.match(/(\d+)\/(\d+)/);
   assert.ok(base, "the listing states its time base");
   const unit = Number(base[1]) / Number(base[2]);
   return lines.filter(line => line && !line.startsWith("#")).map(line => line.split(",").map(field => field.trim()))
-    .map(([, , pts, duration, , hash]) => ({ pts: Number(pts) * unit - shift, duration: Number(duration) * unit, hash }));
+    .map(([, , pts, duration, , hash]) => ({ pts: Number(pts) * unit, duration: Number(duration) * unit, hash }));
 }
 
 /** The soundtrack piece of `[from, to)` made from the sound's own packets, as the proxy's packet path makes it. */
-async function soundPiece(directory, bytes, grid, at, transcodeAudio, segmentFormat = mpegtsFormat) {
+async function soundPiece(directory, bytes, grid, at, transcodeAudio) {
   const container = new AviContainer({ fileSize: bytes.length, readRange: async (start, end) => bytes.subarray(start, end + 1) });
   const tracks = (await container.readTracks()).filter(track => track.type === "audio");
   const index = await container.readPacketIndex();
@@ -111,7 +111,7 @@ async function soundPiece(directory, bytes, grid, at, transcodeAudio, segmentFor
   const chunks = [];
   await writeAdmittedInput(admitted, new Writable({ write(chunk, _encoding, done) { chunks.push(Buffer.from(chunk)); done(); } }));
   const command = buildAdmittedCommand({ admittedInput: admitted, timeline: { published: grid, cutGrid: "keyframe" }, output: {},
-    segmentFormat, transcodeVideo: false, transcodeAudio, audioOnly: true, audioSeparate: false,
+    segmentFormat: fmp4Format, transcodeVideo: false, transcodeAudio, audioOnly: true, audioSeparate: false,
     startIndex: at, endIndex: at, videoEncoder: softwareDescriptor(), segmentDurationSec: 4 });
   const made = spawnSync(ffmpegBin, command.args, { cwd: directory, windowsHide: true, input: Buffer.concat(chunks),
     encoding: "utf8", stdio: ["pipe", "pipe", "pipe", "pipe"] });
@@ -122,8 +122,7 @@ async function soundPiece(directory, bytes, grid, at, transcodeAudio, segmentFor
   return { piece: path.join(directory, name), own, original };
 }
 
-// What a browser cannot play is transcoded; PCM has no MPEG-TS stream type and
-// is never copied, AC-3 is copied for a browser that plays it and transcoded
+// What a browser cannot play is transcoded: PCM is never copied, AC-3 is copied for a browser that plays it and transcoded
 // for one that does not.
 for (const [name, audio, transcodeAudio, extra = []] of [
   ["constant-bitrate MP3", ["-c:a", "libmp3lame", "-b:a", "128k"], false],
@@ -143,18 +142,14 @@ for (const [name, audio, transcodeAudio, extra = []] of [
   const [from, to] = [grid[at], grid[at + 1]];
   const { piece, own, original } = await soundPiece(directory, bytes, grid, at, transcodeAudio);
   assert.ok(own * 3 < original, `the sound's own bytes (${own}) are a small part of what the original path copies (${original})`);
-  // The format the proxy serves by default: the same stdin, muxed to fMP4,
-  // covers the interval it is published for.
-  const fmp4Directory = path.join(directory, "fmp4");
-  await fs.mkdir(fmp4Directory);
-  const fmp4 = await soundPiece(fmp4Directory, bytes, grid, at, transcodeAudio, fmp4Format);
-  const judged = judgePiece(fmp4Format, fmp4Format.readMediaRanges(await fs.readFile(fmp4.piece)), undefined,
+  // The proxy's own judgement of the piece: it covers the interval it is published for.
+  const judged = judgePiece(fmp4Format, fmp4Format.readMediaRanges(await fs.readFile(piece)), undefined,
     { from, to, requiredKinds: ["soun"] });
   assert.equal(judged.whole, true, JSON.stringify(judged));
   if (!transcodeAudio) {
     // A copy carries the file's own frames: the same content at the same time
     // FFmpeg's reading of the original file gives each of them.
-    const produced = packetsOf(piece, TS_DELAY);
+    const produced = packetsOf(piece);
     const expected = packetsOf(file).filter(packet => packet.pts < to && packet.pts + packet.duration > from);
     assert.equal(produced.length, expected.length, `the piece holds ${produced.length} frames, the interval ${expected.length}`);
     produced.forEach((packet, index) => {

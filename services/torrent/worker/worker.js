@@ -459,12 +459,17 @@ async function runCommand(command, params, id) {
       const zones = Array.isArray(params.zones) ? params.zones : [];
       // Nor may one for a file held whole, which has nothing left to fetch.
       const torrent = await knownTorrent(params.sourceKey);
-      if (torrent) {
-        ensureArrivalsWired(params.sourceKey, torrent);
-        pool.applyPriorityMap(torrent, params.fileIndex, zones, params.durationSeconds);
-        torrent.emit("priority-map-changed", params.fileIndex);
+      if (!torrent) {
+        return { appliedMs: null };
       }
-      return true;
+      // What applying a map costs this thread, told to whoever sent it: every
+      // zone becomes a window of the register and the swarm is told again
+      // (torrent-tv/meta#166).
+      const startedAt = performance.now();
+      ensureArrivalsWired(params.sourceKey, torrent);
+      pool.applyPriorityMap(torrent, params.fileIndex, zones, params.durationSeconds);
+      torrent.emit("priority-map-changed", params.fileIndex);
+      return { appliedMs: performance.now() - startedAt };
     }
 
     case Command.READ_RANGE: {

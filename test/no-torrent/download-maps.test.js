@@ -366,3 +366,75 @@ test("a viewer moving on keeps the resolved zones until the re-cut map is resolv
   await moving;
   assert.deepEqual(sent.at(-1).zones.map(zone => zone.byteStart), [200, 1200]);
 });
+
+test("a read that changes nothing in the map does not send it again, and does not wait for it", async () => {
+  const sent = [];
+  let deliver;
+  const maps = new DownloadMaps({ publish: map => { sent.push(map); return new Promise(resolve => { deliver = resolve; }); } });
+  const request = { sourceKey: "source", fileIndex: 0, statement: "tracks" };
+  const first = maps.metadata({ ...request, result: { kind: "needs-ranges", ranges: [[100, 699]] } });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(sent.length, 1);
+  let answered = false;
+  void maps.metadata({ sourceKey: "source", fileIndex: 0, statement: "media-info", result: { kind: "result", value: {} } })
+    .then(() => { answered = true; });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(answered, true, "a read whose answer changes no zone is not held behind a delivery");
+  assert.equal(sent.length, 1);
+  deliver();
+  await first;
+});
+
+test("deadlines worked out again on a later clock are not a change, a new order of deadlines is", async () => {
+  const sent = [];
+  const maps = new DownloadMaps({ publish: map => { sent.push(map); } });
+  const zone = (byteStart, deadlineAt) => ({ byteStart, byteEnd: byteStart + 9, priority: 100, deadlineAt });
+  await maps.native({ sourceKey: "source", fileIndex: 0, zones: [zone(0, 1_000), zone(10, 2_000)] });
+  await maps.native({ sourceKey: "source", fileIndex: 0, zones: [zone(0, 1_400), zone(10, 2_400)] });
+  assert.equal(sent.length, 1, "every deadline moved by the same amount");
+  await maps.native({ sourceKey: "source", fileIndex: 0, zones: [zone(0, 3_000), zone(10, 2_400)] });
+  assert.equal(sent.length, 2, "the second zone is now needed first");
+  await maps.native({ sourceKey: "source", fileIndex: 0, zones: [zone(0, 3_000), zone(20, 2_400)] });
+  assert.equal(sent.length, 3, "other bytes");
+});
+
+test("a publication that failed is sent again by the same map", async () => {
+  let attempts = 0;
+  const maps = new DownloadMaps({ publish: () => {
+    attempts += 1;
+    if (attempts === 1) throw new Error("the torrent thread is gone");
+  } });
+  const zones = [{ byteStart: 0, byteEnd: 9, priority: 100, deadlineAt: 1_000 }];
+  await assert.rejects(maps.native({ sourceKey: "source", fileIndex: 0, zones }));
+  await maps.native({ sourceKey: "source", fileIndex: 0, zones });
+  assert.equal(attempts, 2);
+});
+
+test("what the publications of a file cost is said once a minute", async () => {
+  const lines = [];
+  const clock = { at: 0 };
+  const maps = new DownloadMaps({ log: line => lines.push(line), now: () => clock.at, publish: () => {
+    clock.at += 30;
+    return { appliedMs: 12 };
+  } });
+  const zones = deadlineAt => [{ byteStart: 0, byteEnd: 9, priority: 100, deadlineAt },
+    { byteStart: 10, byteEnd: 19, priority: 99, deadlineAt: 5_000 - deadlineAt }];
+  await maps.native({ sourceKey: "source", fileIndex: 0, zones: zones(1_000) });
+  await maps.native({ sourceKey: "source", fileIndex: 0, zones: zones(1_000) });
+  assert.equal(lines.length, 0);
+  clock.at = 60_000;
+  await maps.native({ sourceKey: "source", fileIndex: 0, zones: zones(4_000) });
+  assert.equal(lines.length, 1);
+  assert.match(lines[0], /source:0: 2 sent and 1 unchanged not sent in 60\.0s; zones median 2 max 2; delivered median 30ms max 30ms \(60ms in all\), applied in the torrent thread median 12ms max 12ms \(24ms in all\)/);
+});
+
+test("a map the torrent thread could not apply is sent again even when nothing changed", async () => {
+  const replies = [{ appliedMs: null }, { appliedMs: 3 }];
+  let sent = 0;
+  const maps = new DownloadMaps({ publish: () => replies[sent++] });
+  const zones = [{ byteStart: 0, byteEnd: 9, priority: 100, deadlineAt: 1_000 }];
+  await maps.native({ sourceKey: "source", fileIndex: 0, zones });
+  await maps.native({ sourceKey: "source", fileIndex: 0, zones });
+  await maps.native({ sourceKey: "source", fileIndex: 0, zones });
+  assert.equal(sent, 2, "sent again after the torrent was not there, and not a third time once applied");
+});

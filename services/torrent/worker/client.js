@@ -476,7 +476,7 @@ export class TorrentWorkerClient {
    * @returns {Promise<void>}
    */
   async setPriorityMap({ sourceKey, fileIndex, zones, durationSeconds }) {
-    await this.#caller.call(Command.PRIORITY_MAP, {
+    return this.#caller.call(Command.PRIORITY_MAP, {
       sourceKey,
       fileIndex,
       zones,

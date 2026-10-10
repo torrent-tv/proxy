@@ -1,3 +1,7 @@
+## Unreleased
+
+- **Fix**: A file's download map is sent to the torrent thread only when the torrent would act on it differently — other bytes, another level or order of claim, or deadlines in another order — and a read of the file's statements no longer waits for a map it did not change. Every read used to send the whole map again and wait for it: field 2026-10-10, a two-hour AVI's map held 5-12 thousand zones, a long input stretch made 48-64 such reads, and its preparation took 28-54 s before the copy began. A map the thread could not apply because the torrent was not there yet is sent again. A line once a minute per file says how many maps were sent and not sent, how many zones they held, and what delivering and applying them cost (#ttv-166).
+
 ## 2.96.5
 
 - **Chore**: The line that says an original input is ready (or what it waits for) now says where its preparation spent its time: how many statements of the interval it asked for and how long they took, how much of that the reads of the file spent waiting behind earlier reads of the same file, the checks of which bytes are held, and the memory budget. Reads of one file run one after another, and a picture input in the field took 38 s before its copy began with nothing logged (#ttv-166).

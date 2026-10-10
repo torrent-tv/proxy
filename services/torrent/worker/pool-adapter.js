@@ -168,7 +168,7 @@ export class WorkerTorrentPool {
     if (!sourceKey) {
       return;
     }
-    await this.#client.setPriorityMap({ sourceKey, fileIndex, durationSeconds, zones });
+    return this.#client.setPriorityMap({ sourceKey, fileIndex, durationSeconds, zones });
   }
 
   /**

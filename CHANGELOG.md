@@ -1,4 +1,4 @@
-## Unreleased
+## 2.96.12
 
 - **Fix**: The processor goes to what a viewer needs first, across every output at once. Each output was planned on its own and encoded whole, so one cheap to make ran far ahead of one that was dear: on Home Assistant 2026-10-10 a copied soundtrack was at 38 minutes while its picture, re-encoded at 0.65–1.31x, was at five, and the viewer stalled. Now an encoder making something less urgent than what another encoder is making anywhere — by whether it is needed before playback can continue, then by the map's priority — is paused where it stands, keeping its process, input and place, and goes on as soon as nothing more urgent is being made; no encoder is started behind that. Everything needed before playback can continue is one band, so two viewers each short of their own minimum share the machine, and the most urgent encoder is never paused. Paused rather than lowered in priority, because the add-on's container cannot raise a priority back (#ttv-166).
 

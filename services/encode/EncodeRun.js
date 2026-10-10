@@ -812,7 +812,7 @@ export class EncodeRun {
     // is moved either way — but nothing was resumed, and saying so is what
     // stops a dead run being reported as producing again.
     const continued = this.#signal("SIGCONT");
-    this.#transition(ENCODE_RUN_EVENT.RESUMED);
+    this.#transition(ENCODE_RUN_EVENT.RESUME_ORDERED);
     this.clock.continued();
     return continued;
   }

@@ -372,6 +372,14 @@ export class AviContainer extends Container {
         const stream = index.packets[track.trackNumber];
         packets.declareTrack(track.trackNumber, { type: "audio", codecId: track.codecId,
           codecRanges: streams[track.trackNumber].codecRanges });
+        // The index says how many packets there are, so the memory they take is
+        // asked for at once. Asked for block by block, a refusal named one
+        // block, the table was discarded and built again for the next one:
+        // field 2026-10-10, 3485 refusals of 64 KB for a two-hour film's
+        // soundtrack, and no soundtrack encoder in three minutes.
+        let count = 0;
+        for (let at = 0; at < stream.count; at++) if (stream.lengths[at]) count++;
+        packets.reservePackets(track.trackNumber, count);
         let previous = -1;
         const append = (end) => {
           packets.append(track.trackNumber, { pts: stream.times[previous], duration: Math.max(0, end - stream.times[previous]),

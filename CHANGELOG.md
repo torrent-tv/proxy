@@ -1,4 +1,4 @@
-## Unreleased
+## 2.96.7
 
 - **Fix**: The soundtrack of an AVI with an index is read from its own packets instead of from the original file. Sound and picture are interleaved in an AVI, so a soundtrack read from the original file carried the picture's bytes too, and every run opened the AVI anew: field 2026-10-10, Frankenstein's soundtrack copied 2.3 GB for 0.19 GB of its own in 16-17 runs, and while it worked ahead the proxy took 22-25 % of the machine and the picture fell below realtime. The index states each sound packet's place and the time FFmpeg's demuxer gives it, and the last packet ends where the stream's clock stands after it; a picture is still read from the original file, because an AVI states no presentation time. The container answers which interval is read which way, and the download map and the encoder ask it the same question. Checked on generated AVIs against FFmpeg's own reading of the file: copied MP3 (constant and variable bitrate, and stored five seconds ahead of the picture) and AC-3 carry the file's frames at the file's times; AC-3, PCM and MP3 transcoded land within a millisecond of the time their piece states (#ttv-166).
 

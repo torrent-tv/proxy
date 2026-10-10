@@ -1,4 +1,4 @@
-## Unreleased
+## 2.96.14
 
 - **Fix**: The picture no longer stops for a minute where one stretch of an AVI's original file hands over to the next. The next stretch's input was copied only after the run before it had ended, so nothing made the picture while it was copied and opened: on Home Assistant 2026-10-11, 909 MB copied in 48.9 s after run #1..#32 ended, and the viewer stood 69 s at 2:15. The next stretch is now requested when a run starts and is copied while it works (#ttv-166).
 

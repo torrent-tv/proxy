@@ -216,6 +216,8 @@ export class EncodeRun {
    *   encoder itself names it on its own channel, and answers with the name that
    *   piece is served under — because making it servable is a rename, and only
    *   whoever owns the disk can perform one.
+   * @param {(index: number) => void} [params.onProduced] - Called with every
+   *   segment number this run has closed, as it closes it.
    * @param {(progress: object) => void} [params.onProgress] - Called with this
    *   run's progress on the source timeline after every `-progress` report.
    * @param {() => number | null} [params.lastSegmentIndex] - The film's last
@@ -251,6 +253,7 @@ export class EncodeRun {
     onSpeedMeasured,
     onClosed,
     onProgress,
+    onProduced,
     lastSegmentIndex,
     inputUnavailable,
     argsDescribed = "",
@@ -274,6 +277,7 @@ export class EncodeRun {
     this.clock = new RunClock({ now: this.now });
     this.onEnded = typeof onEnded === "function" ? onEnded : () => {};
     this.onProgress = typeof onProgress === "function" ? onProgress : () => {};
+    this.onProduced = typeof onProduced === "function" ? onProduced : () => {};
     this.onSpeedMeasured = typeof onSpeedMeasured === "function" ? onSpeedMeasured : () => {};
     // Told the NAME of every piece the encoder has closed. The name is the
     // proof it is whole; nothing else here can prove that.
@@ -569,6 +573,7 @@ export class EncodeRun {
       if (this.#state === ENCODE_RUN_STATE.STARTING) {
         this.#transition(ENCODE_RUN_EVENT.FIRST_SEGMENT);
       }
+      this.onProduced(index);
     }
   }
 

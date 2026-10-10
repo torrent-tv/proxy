@@ -34,6 +34,24 @@ import { SegmentDemand } from "./SegmentDemand.js";
 import { runStateOf } from "./encode-run-state.js";
 
 /**
+ * Which of two bands of the map is wanted sooner: what is needed before
+ * playback can continue first, then the higher priority.
+ *
+ * Everything needed before playback can continue is ONE band, whatever its
+ * priority: two viewers each short of their own minimum share the machine, and
+ * neither is stopped for the other. Priority orders only what can wait.
+ *
+ * @param {{ urgent: boolean, priority: number }} left
+ * @param {{ urgent: boolean, priority: number }} right
+ * @returns {number} Negative when `left` is more urgent, zero when equal.
+ */
+export function compareUrgency(left, right) {
+  const urgent = Number(right.urgent === true) - Number(left.urgent === true);
+  if (urgent !== 0 || left.urgent === true) return urgent;
+  return right.priority - left.priority;
+}
+
+/**
  * @typedef {Object} SegmentCoverage
  * @property {(address: string) => number[]} provenNumbers
  * @property {(address: string, index: number) => void} announce
@@ -104,6 +122,14 @@ export class EncodeOrchestrator {
 
   /** The last state said out loud, so an unchanged state is not repeated. */
   #lastDescribed = "";
+
+  /**
+   * The most urgent band any live encoder stands in, over every output, as the
+   * pass that is deciding now found it. Null when no encoder is alive.
+   *
+   * @type {{ urgent: boolean, priority: number, address: string, index: number } | null}
+   */
+  #leading = null;
 
   /** What a stop and a start have cost on this host. */
   #costs = new RunCosts();
@@ -575,6 +601,9 @@ export class EncodeOrchestrator {
     for (const run of this.runsOn(address)) {
       run.noteProduced(index);
     }
+    // A closed piece moves its encoder forward, perhaps out of the band that
+    // led: who has the processor is decided again now, not at the next pass.
+    this.shareTheMachine();
   }
 
   /**
@@ -586,9 +615,11 @@ export class EncodeOrchestrator {
    */
   reconcile() {
     const addresses = new Set([...this.#demand.addresses(), ...this.#runs.keys()]);
+    this.#leading = this.#leadingBand();
     for (const address of addresses) {
       this.#reconcileOne(address);
     }
+    this.shareTheMachine();
     // WHAT THIS CLASS BELIEVES, said by this class. `describe()` was written
     // and called from nowhere, so on 2026-09-05 the question "why did the plan
     // not see the gap the viewer was stopped at" had to be answered by
@@ -601,6 +632,82 @@ export class EncodeOrchestrator {
     if (state !== this.#lastDescribed) {
       this.#lastDescribed = state;
       this.logger.info(state);
+    }
+  }
+
+  /**
+   * How urgently the map wants one segment of one output: whether it is needed
+   * before playback can continue, and the map's priority for it. A number in
+   * nobody's zone is wanted least of all.
+   *
+   * The priority is a step of distance from a viewer on one scale for every
+   * output, so the picture and the soundtrack a viewer plays are compared on it
+   * directly.
+   *
+   * @param {string} address
+   * @param {number} index
+   * @returns {{ urgent: boolean, priority: number }}
+   */
+  #bandAt(address, index) {
+    let band = { urgent: false, priority: 0 };
+    for (const zone of this.#demand.mapOn(address)) {
+      if (index < zone.from || index > zone.to) continue;
+      const candidate = { urgent: zone.urgent === true, priority: Number(zone.priority) || 0 };
+      if (compareUrgency(candidate, band) < 0) band = candidate;
+    }
+    return band;
+  }
+
+  /**
+   * The most urgent band a live encoder stands in, over every output.
+   *
+   * @returns {{ urgent: boolean, priority: number, address: string, index: number } | null}
+   */
+  #leadingBand() {
+    let leading = null;
+    for (const [address, runs] of this.#runs) {
+      for (const run of runs) {
+        if (!run.isAlive || run.isStopping) continue;
+        const band = this.#bandAt(address, run.head);
+        if (!leading || compareUrgency(band, leading) < 0) leading = { ...band, address, index: run.head };
+      }
+    }
+    return leading;
+  }
+
+  /**
+   * WHO GETS THE PROCESSOR FIRST, over every output at once.
+   *
+   * Each output is planned on its own, and a file is encoded whole in the order
+   * its map gives (the rule of 2026-09-05), so an output that is cheap to make
+   * runs far ahead of one that is dear: field 2026-10-10, a copied soundtrack
+   * at 38 minutes while its picture, re-encoded at 0.65–1.31x, was at five and
+   * the viewer stalled. The machine is one, so the order is one: an encoder
+   * making something less urgent than what another encoder is making somewhere
+   * stands still where it is — paused, not stopped, so it keeps its place, its
+   * input and its claim — and goes on the moment nothing more urgent is being
+   * made. The encoder in the most urgent band is never paused, so something is
+   * always being made.
+   *
+   * Paused rather than lowered in priority: a lowered priority cannot be raised
+   * again without `CAP_SYS_NICE`, which the add-on's container does not have
+   * (Home Assistant 2026-10-10: `renice 0` after `renice 19` left 19).
+   */
+  shareTheMachine() {
+    const leading = this.#leadingBand();
+    this.#leading = leading;
+    if (!leading) return;
+    for (const [address, runs] of this.#runs) {
+      for (const run of runs) {
+        if (!run.isAlive || run.isStopping || typeof run.pause !== "function") continue;
+        const behind = compareUrgency(this.#bandAt(address, run.head), leading) > 0;
+        if (behind && run.isSuspended !== true) {
+          run.pause(`#${run.head} of ${address} is wanted less urgently than #${leading.index} of ${leading.address}, ` +
+            `which is being made`);
+        } else if (!behind && run.isSuspended === true) {
+          run.resume(`nothing more urgent than #${run.head} of ${address} is being made`);
+        }
+      }
     }
   }
 
@@ -739,7 +846,16 @@ export class EncodeOrchestrator {
         `live=${JSON.stringify(live.map((run) => ({ from: run.from, to: run.to, head: run.head, speedX: run.speedX })))}`
       );
     }
+    // A START BEHIND WHAT IS BEING MADE ELSEWHERE IS NOT MADE: the encoder would
+    // be paused the moment it exists (`shareTheMachine`), holding a process and
+    // its input for nothing. It is placed when nothing more urgent is in hand.
+    let heldBack = null;
     for (const action of actions) {
+      if (action.type === "start" && this.#leading &&
+          compareUrgency(this.#bandAt(address, action.from), this.#leading) > 0) {
+        heldBack = action;
+        continue;
+      }
       if (action.type === "stop") {
         this.#stop(action.run, action.because);
         continue;
@@ -795,6 +911,15 @@ export class EncodeOrchestrator {
     const stillRunning = this.runsOn(address).filter((run) => run.isAlive);
     if (wanting === null || stillRunning.length > 0) {
       this.#lastUnmet.delete(address);
+    } else if (heldBack) {
+      const said = `held:${heldBack.from}:${this.#leading?.address}:${this.#leading?.index}`;
+      if (this.#lastUnmet.get(address) !== said) {
+        this.#lastUnmet.set(address, said);
+        this.logger.info(
+          `encode: #${heldBack.from} of ${address} waits — #${this.#leading?.index} of ` +
+          `${this.#leading?.address} is wanted more urgently and is being made`
+        );
+      }
     } else if (this.#lastUnmet.get(address) !== wanting) {
       this.#lastUnmet.set(address, wanting);
       const held = this.#segmentCoverage ? this.#segmentCoverage.filesHeld(address) : -1;

@@ -1,4 +1,4 @@
-## Unreleased
+## 2.96.10
 
 - **Fix**: The proxy's memory no longer climbs by gigabytes while an AVI soundtrack read from its own packets is wanted. Every packet's bytes became a zone of the download map, because in an AVI the sound is interleaved with the picture: on Home Assistant 2026-10-10 (proxy 2.96.9) one map held 350 191 zones, took 20.8 s to reach the torrent thread, grew that thread's heap to 818 MB and the process to 2.4 GB, and the picture stopped after its first piece. The torrent fetches whole pieces, and a gap shorter than a piece holds none, so ranges closer than a piece are now stated as one; the pieces fetched are exactly the same (#ttv-166).
 

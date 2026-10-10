@@ -6,7 +6,6 @@ import os from "node:os";
 import path from "node:path";
 import { Writable } from "node:stream";
 import ffmpegBin from "ffmpeg-static";
-import ffprobe from "@ffprobe-installer/ffprobe";
 import { AviContainer } from "../../services/media/container/AviContainer.js";
 import { SegmentInputs } from "../../services/media/SegmentInputs.js";
 import { admitInput, writeAdmittedInput } from "../../services/encode/AdmittedInput.js";
@@ -33,7 +32,7 @@ const CHIRP = "aevalsrc=0.5*sin(2*PI*(200*t+20*t*t)):s=48000";
 
 function run(binary, args, input) {
   const result = spawnSync(binary, args, { windowsHide: true, maxBuffer: 512 * 1024 * 1024, input });
-  assert.equal(result.status, 0, String(result.stderr));
+  assert.equal(result.status, 0, `${result.error ?? ""} ${result.signal ?? ""} ${result.stderr}`);
   return result.stdout;
 }
 
@@ -48,9 +47,7 @@ const TS_DELAY = 1.4;
 
 /** The time a piece states for its first sound, on the film's clock. */
 function startOf(file) {
-  const stated = String(run(ffprobe.path, ["-v", "error", "-select_streams", "a:0", "-show_entries", "stream=start_time",
-    "-of", "default=noprint_wrappers=1:nokey=1", file])).trim().split(/\s+/)[0];
-  return Number(stated) - TS_DELAY;
+  return packetsOf(file, TS_DELAY)[0].pts;
 }
 
 /** Where in the reference the produced samples fit best, searched within half a second of a guess. */
@@ -84,13 +81,18 @@ async function inDirectory(body) {
   }
 }
 
-/** The audio packets FFmpeg reads from `file`: time on the film's clock, duration and content. */
+/**
+ * The audio packets FFmpeg reads from `file`, in its own `framemd5` listing:
+ * time on the film's clock, duration and content.
+ */
 function packetsOf(file, shift = 0) {
-  return String(run(ffprobe.path, ["-v", "error", "-select_streams", "a:0", "-show_data_hash", "MD5",
-    "-show_entries", "packet=pts_time,duration_time,data_hash", "-of", "csv=p=0", file])).trim().split(/\r?\n/)
-    // A packet's side data is printed as rows of its own, with no time and no content.
-    .map(line => line.split(",")).filter(fields => fields[2]?.startsWith("MD5:"))
-    .map(([pts, duration, hash]) => ({ pts: Number(pts) - shift, duration: Number(duration), hash }));
+  const lines = String(run(ffmpegBin, ["-v", "error", "-copyts", "-i", file, "-map", "0:a:0", "-c", "copy", "-f", "framemd5", "-"]))
+    .split(/\r?\n/);
+  const base = lines.find(line => line.startsWith("#tb 0:"))?.match(/(\d+)\/(\d+)/);
+  assert.ok(base, "the listing states its time base");
+  const unit = Number(base[1]) / Number(base[2]);
+  return lines.filter(line => line && !line.startsWith("#")).map(line => line.split(",").map(field => field.trim()))
+    .map(([, , pts, duration, , hash]) => ({ pts: Number(pts) * unit - shift, duration: Number(duration) * unit, hash }));
 }
 
 /** The soundtrack piece of `[from, to)` made from the sound's own packets, as the proxy's packet path makes it. */

@@ -200,3 +200,23 @@ test("an unreadable format and failed parsing carry terminal reasons", async () 
   assert.equal(result.kind, "terminal");
   assert.equal(result.message, "Invalid track header.");
 });
+
+test("a read says how long it waited behind an earlier read of the same file", async () => {
+  const reader = new ContainerOrchestrator();
+  let releaseTracks;
+  const tracksHeld = new Promise(resolve => { releaseTracks = resolve; });
+  reader.containerFor = async () => ({
+    readTracks: async () => { await tracksHeld; return []; },
+    readMediaInfo: async () => ({ durationSeconds: 7 })
+  });
+  const timed = new Map();
+  const onTimed = (statement, waitedMs, readMs) => timed.set(statement, { waitedMs, readMs });
+  const tracks = reader.inspect({ ...params, onTimed }, "tracks");
+  const media = reader.inspect({ ...params, onTimed }, "media-info");
+  await new Promise(resolve => setTimeout(resolve, 20));
+  releaseTracks();
+  await Promise.all([tracks, media]);
+  assert.ok(timed.get("tracks").readMs > 0, "the first read was held by its own container");
+  assert.ok(timed.get("media-info").waitedMs >= timed.get("tracks").readMs,
+    "the second read waited for the whole of the first");
+});

@@ -59,12 +59,36 @@ export class EncodeInputs {
     this.#now = now;
   }
 
-  /** One line when a request's state changes, so a wait that never ends names what it waits for. */
-  #note(request, state) {
+  /**
+   * One line when a request's state changes, so a wait that never ends names
+   * what it waits for. `detail` is said with it and does not count as a change.
+   */
+  #note(request, state, detail = "") {
     if (request.noted === state) return;
     request.noted = state;
     this.#log(`encode input #${request.from}..#${request.to} of ${request.output.outputKey ?? request.output.id}: ${state}` +
-      ` (held ${this.#held} of ${this.#allowed} allowed)`);
+      ` (held ${this.#held} of ${this.#allowed} allowed)${detail}`);
+  }
+
+  /** The container's statement of an interval, its time added to the request's account. */
+  async #resolveTimed(timing, output, from, to) {
+    const startedAt = this.#now();
+    try {
+      return await this.#resolve(output, from, to, timing);
+    } finally {
+      timing.resolutions += 1;
+      timing.resolveMs += this.#now() - startedAt;
+    }
+  }
+
+  /** `work`'s time added to one field of the request's account. */
+  async #spent(timing, field, work) {
+    const startedAt = this.#now();
+    try {
+      return await work();
+    } finally {
+      timing[field] += this.#now() - startedAt;
+    }
   }
 
   held() { return this.#held; }
@@ -216,8 +240,14 @@ export class EncodeInputs {
     request.stale = false;
     request.revision = this.#revision;
     request.memoryRevision = this.#memoryRevision;
+    // Where the time from the request to its input goes, across every attempt:
+    // field 2026-10-10, a picture's request took 38 s before its copy began and
+    // nothing said on what (torrent-tv/meta#166).
+    request.timing ??= { askedAt: this.#now(), attempts: 0, resolutions: 0, resolveMs: 0,
+      reads: 0, queuedMs: 0, readMs: 0, heldMs: 0, budgetMs: 0 };
+    request.timing.attempts += 1;
     request.promise = (async () => {
-      const resolved = await this.#resolve(request.output, request.from, request.from);
+      const resolved = await this.#resolveTimed(request.timing, request.output, request.from, request.from);
       if (this.#requests.get(request.key) !== request) return;
       let result;
       if (resolved.kind !== "result") {
@@ -240,7 +270,8 @@ export class EncodeInputs {
       request.result = result;
       this.#note(request, result.kind === "result" ? `ready #${result.from}..#${result.to}, ${result.bytes ?? "?"} bytes` +
         (Number.isFinite(result.copyMs) ? `, copied in ${result.copyMs}ms` : "")
-        : `${result.kind}${result.reason ? ` ${result.reason}` : ""}${Number.isFinite(result.bytes) ? ` ${result.bytes} bytes` : ""}`);
+        : `${result.kind}${result.reason ? ` ${result.reason}` : ""}${Number.isFinite(result.bytes) ? ` ${result.bytes} bytes` : ""}`,
+      describeTiming(request.timing, this.#now()));
       if (result.kind === "result" || result.kind === "terminal") this.#changed(request.output, result);
     })().catch(error => {
       if (this.#requests.get(request.key) === request) {
@@ -261,7 +292,7 @@ export class EncodeInputs {
   #reserveFor(request) {
     return async bytes => {
       this.#wanted.set(request.key, { wanted: bytes, required: bytes });
-      await this.#revise();
+      await this.#spent(request.timing, "budgetMs", () => this.#revise());
       const capacity = this.#capacity();
       if (capacity !== null && bytes > capacity && this.#urgent(request.output, request.from)) return {
         kind: "terminal", reason: "source-input-exceeds-memory-capacity", bytes, capacity
@@ -303,7 +334,7 @@ export class EncodeInputs {
       if (!stretches.has(end)) {
         // A longer stretch that cannot be stated is not one to copy; the
         // shorter one already stated still runs.
-        const resolved = await this.#resolve(output, from, end).catch(() => null);
+        const resolved = await this.#resolveTimed(request.timing, output, from, end).catch(() => null);
         stretches.set(end, resolved?.kind === "result" && resolved.sources?.every(source => source.input.original === true)
           ? { sources: resolved.sources, bytes: originalInputBytes(resolved.sources) } : null);
       }
@@ -311,7 +342,7 @@ export class EncodeInputs {
     };
     const fits = async (end, maxBytes) => {
       const stretch = await at(end);
-      return Boolean(stretch) && stretch.bytes <= maxBytes && await this.#present(stretch.sources, held);
+      return Boolean(stretch) && stretch.bytes <= maxBytes && await this.#present(stretch.sources, held, request.timing);
     };
     // Grows by doubling and then halves back: a handful of resolutions find
     // the end whether it is a piece away or the rest of the film.
@@ -333,7 +364,7 @@ export class EncodeInputs {
     let end = target === null || this.#heldRanges === null ? from : await longest(target);
     if (this.#requests.get(request.key) !== request) return undefined;
     this.#wanted.set(request.key, { wanted: stretches.get(end).bytes, required: minimum });
-    await this.#revise();
+    await this.#spent(request.timing, "budgetMs", () => this.#revise());
     if (this.#requests.get(request.key) !== request) return undefined;
     const capacity = this.#capacity();
     if (capacity !== null && minimum > capacity && this.#urgent(output, from)) {
@@ -371,15 +402,34 @@ export class EncodeInputs {
   }
 
   /** Whether every range of these sources is downloaded whole now. */
-  async #present(sources, held) {
+  async #present(sources, held, timing) {
     for (const source of sources) {
       const name = `${source.sourceKey}:${source.fileIndex}`;
-      if (!held.has(name)) held.set(name, await Promise.resolve().then(() => this.#heldRanges(source)).catch(() => null) ?? []);
+      if (!held.has(name)) held.set(name, await this.#spent(timing, "heldMs", () => Promise.resolve().then(() => this.#heldRanges(source)).catch(() => null)) ?? []);
       const ranges = held.get(name);
       if (!source.input.ranges.every(([start, end]) => ranges.some(([first, last]) => first <= start && last >= end))) return false;
     }
     return true;
   }
+}
+
+/**
+ * Where a request has spent its time since it was asked, as one clause of its
+ * log line. The resolutions include the reads of the file they made, and those
+ * reads are split into the time spent behind earlier reads of the same file and
+ * the time of the read itself; what is left of the total is the copy and the
+ * waits between attempts for bytes or memory.
+ *
+ * @param {object | undefined} timing
+ * @param {number} now
+ * @returns {string}
+ */
+function describeTiming(timing, now) {
+  if (!timing) return "";
+  return `; asked ${Math.max(0, now - timing.askedAt)}ms ago over ${timing.attempts} attempt(s): ` +
+    `${timing.resolutions} resolution(s) ${timing.resolveMs}ms ` +
+    `(${timing.reads} file read(s): queued ${timing.queuedMs}ms, reading ${timing.readMs}ms), ` +
+    `held ranges ${timing.heldMs}ms, budget ${timing.budgetMs}ms`;
 }
 
 function addressOf(output) { return output.outputKey ?? output.id; }

@@ -106,3 +106,29 @@ export function nearestFirst({ byteStart, byteEnd, parts }) {
   }
   return ranges;
 }
+
+/**
+ * Byte ranges joined wherever the gap between two of them is shorter than a
+ * piece: the pieces they hold are the same, and there are fewer of them.
+ *
+ * A gap shorter than a piece cannot hold a whole piece, so every piece it
+ * touches is touched by a range beside it. The soundtrack of an AVI read from
+ * its own packets is one range per packet, interleaved with the picture's
+ * bytes: field 2026-10-10 (torrent-tv/meta#166), a map of 350 191 zones took
+ * 20.8 s to reach the torrent thread and grew its heap to 818 MB, for pieces of
+ * 4 MiB that the whole soundtrack touches anyway.
+ *
+ * @param {Array<[number, number]>} ranges - Inclusive byte ranges in ascending order.
+ * @param {number} pieceLength
+ * @returns {Array<[number, number]>} The same ranges when the piece length is not usable.
+ */
+export function joinedWithinPieces(ranges, pieceLength) {
+  if (!Number.isFinite(pieceLength) || pieceLength <= 0) return ranges;
+  const joined = [];
+  for (const [start, end] of ranges) {
+    const previous = joined.at(-1);
+    if (previous && start >= previous[0] && start - previous[1] - 1 < pieceLength) previous[1] = Math.max(previous[1], end);
+    else joined.push([start, end]);
+  }
+  return joined;
+}

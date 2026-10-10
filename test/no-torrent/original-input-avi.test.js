@@ -133,6 +133,12 @@ async function checkAvi(directory, file, { duration, audio, timeBase, copyable, 
   const at = grid.findIndex(time => time >= 30);
   const from = grid[at], to = grid[at + 1];
   const tracks = await container.readTracks();
+  // Only a picture is read from the original file; a soundtrack alone is read
+  // from its own packets (avi-soundtrack-packets-local.test.js).
+  const idsOf = type => tracks.filter(track => track.type === type).map(track => track.trackNumber);
+  assert.equal(await container.supportsOriginalSourceRanges({ from, to, trackIds: idsOf("video") }), true);
+  assert.equal(await container.supportsOriginalSourceRanges({ from, to, trackIds: [...idsOf("video"), ...idsOf("audio")] }), true);
+  if (idsOf("audio").length) assert.equal(await container.supportsOriginalSourceRanges({ from, to, trackIds: idsOf("audio") }), false);
   // Each run names its own tracks, as the proxy does; the picture run's ranges
   // must still hold what FFmpeg reads of the sound.
   const rangesOf = async type => container.readSourceRanges({ from, to,

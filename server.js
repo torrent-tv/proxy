@@ -495,9 +495,17 @@ export async function startProxyServer({
         const known = segmentSourceRanges.get(rangesKey);
         if (known) { convert(known); continue; }
         if (direct) {
+          // Asked per zone too: a soundtrack of an AVI is read from its own
+          // packets, which the same index states (torrent-tv/meta#166).
           let value = null;
-          try { value = await direct.readSourceRanges(interval); }
-          catch { value = null; }
+          try {
+            if (await direct.supportsOriginalSourceRanges(interval) === true) value = await direct.readSourceRanges(interval);
+            else {
+              const index = await direct.readPacketIndex(interval);
+              await index.prepareAudioDependencies?.(interval, direct.readRange);
+              value = new SegmentInputs({ index, tracks: wanted }).forInterval({ ...interval, mode: track => modes.get(track) });
+            }
+          } catch { value = null; }
           if (!map.isCurrent()) return [];
           if (value?.kind === "result") {
             segmentSourceRanges.set(rangesKey, value.ranges);

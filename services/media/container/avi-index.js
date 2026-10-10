@@ -44,6 +44,8 @@ class StreamPackets {
     this.lengths = new Uint32Array(count);
     this.times = new Float64Array(count);
     this.keyframes = new Uint8Array(count);
+    /** Where the stream's clock stands after its last packet: the last packet's end. */
+    this.end = null;
   }
 
   push(start, length, time, keyframe) {
@@ -186,6 +188,7 @@ async function readIdx1({ read, fileSize, movi, idx1, streams, allocation }) {
         clocks[id].advance(length);
       }
     }
+    packets.forEach((stream, id) => { stream.end = clocks[id].seconds(); });
     return new AviIndex({ packets, indexRanges: [[idx1.start - 8, fileSize - 1]], held, allocation });
   } catch (error) {
     allocation?.release?.(held);
@@ -247,6 +250,7 @@ async function readOpenDml({ read, fileSize, streams, allocation }) {
         }
       }
     }
+    packets.forEach((stream, id) => { stream.end = clocks[id].seconds(); });
     return new AviIndex({ packets, indexRanges: parsed.map(standard => [standard.start, standard.end - 1]), held, allocation });
   } catch (error) {
     allocation?.release?.(held);

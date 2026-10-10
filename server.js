@@ -55,6 +55,7 @@ import { createPlaybackPlanner } from "./services/media/playback-planner.js";
 import { KeyframeTables } from "./services/media/KeyframeTables.js";
 import { contentsOf } from "./services/torrent/Contents.js";
 import { joinedWithinPieces } from "./services/torrent/demand/pieces.js";
+import { withoutRepeatedZones } from "./services/torrent/map-zones.js";
 import { SubtitleOrchestrator } from "./services/media/SubtitleOrchestrator.js";
 import { containerOrchestrator, CONTAINER_HEAD_BYTES, describeWorkTags } from "./services/media/ContainerOrchestrator.js";
 import { readPlaybackDeclarations } from "./services/media/read-playback-declarations.js";
@@ -533,7 +534,9 @@ export async function startProxyServer({
         segmentSourceRanges.set(rangesKey, input.ranges);
         convert(input.ranges);
       }
-      return converted;
+      // The ranges a picture reads at open are named again by every segment;
+      // only the zone the swarm would rank first is sent (torrent-tv/meta#166).
+      return withoutRepeatedZones(converted);
     }
   });
   const mediaReads = new MediaReadRequests({

@@ -137,10 +137,16 @@ export class ContainerOrchestrator {
     if (!lifetime) this.#lifetimes.set(key, lifetime = {});
     const isCurrent = () => this.#lifetimes.get(key) === lifetime && params.isCurrent?.() !== false;
     const previous = this.#reads.get(key) ?? Promise.resolve();
+    // Reads of one file run one after another, so an answer can wait for every
+    // read asked before it. Told to whoever asked, apart from the read itself,
+    // because the two call for different remedies (torrent-tv/meta#166).
+    const askedAt = Date.now();
     const reading = previous.catch(() => undefined).then(async () => {
       if (!isCurrent()) return { result: { kind: "terminal", reason: "request-obsolete", requestId: params.requestId } };
+      const startedAt = Date.now();
       const revision = params.onReadStart?.(statement);
       const result = await this.#inspectRead({ ...params, isCurrent }, statement);
+      params.onTimed?.(statement, startedAt - askedAt, Date.now() - startedAt);
       return { result, revision };
     });
     this.#reads.set(key, reading);

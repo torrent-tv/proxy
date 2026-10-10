@@ -630,7 +630,9 @@ export async function startProxyServer({
       error.canRetry = true;
       throw error;
     },
-    resolveEncodeInput: async (output, fromIndex, toIndex) => {
+    // `timing`, when given, is told how long each read of a file waited behind
+    // the reads asked before it and how long it took (torrent-tv/meta#166).
+    resolveEncodeInput: async (output, fromIndex, toIndex, timing = null) => {
       const grid = output.timeline?.published ?? output.timeline?.boundaries;
       const from = grid?.[fromIndex], to = grid?.[toIndex + 1];
       if (!Number.isFinite(from) || !(to > from)) return { kind: "terminal", reason: "output-interval-not-declared" };
@@ -650,6 +652,13 @@ export async function startProxyServer({
       for (const [fileIndex, choices] of selected) {
         const params = await containerOver({ sourceKey: output.file.sourceKey, fileIndex });
         if (!params) return { kind: "needs-source" };
+        if (timing) {
+          params.onTimed = (_statement, waitedMs, readMs) => {
+            timing.reads += 1;
+            timing.queuedMs += waitedMs;
+            timing.readMs += readMs;
+          };
+        }
         const tracks = await containerOrchestrator.inspect(params, "tracks");
         if (tracks.kind !== "result") return tracks;
         const container = containerOrchestrator.known(params.sourceKey, fileIndex);

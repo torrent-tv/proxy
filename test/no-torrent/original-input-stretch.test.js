@@ -360,3 +360,35 @@ for (const [label, startIndex, endIndex, seconds] of [["before the film's end", 
     }
   });
 }
+
+test("the line that says an input is ready says where its preparation spent its time", async () => {
+  const lines = [];
+  const clock = { at: 0 };
+  const inputs = new EncodeInputs({
+    // Each statement of an interval reports one read of the file that waited
+    // 7 ms behind an earlier read and took 3 ms; the clock moves by both.
+    resolve: async (out, from, to, timing) => {
+      if (timing) {
+        timing.reads += 1;
+        timing.queuedMs += 7;
+        timing.readMs += 3;
+      }
+      clock.at += 10;
+      return resolve(out, from, to);
+    },
+    heldRanges: async () => [[0, 999], HEADER],
+    readRanges: async (_source, ranges) => ranges.map(([start, end]) => Buffer.alloc(end - start + 1)),
+    reviseBudget: async () => {
+      clock.at += 1;
+      inputs.allow(10_000);
+    },
+    changed: () => {},
+    failed: (_output, error) => { throw error; },
+    log: line => lines.push(line),
+    now: () => clock.at
+  });
+  const input = await admitted(inputs, 0, 50);
+  input.release();
+  const ready = lines.find(line => line.includes(": ready #0..#0"));
+  assert.match(ready, /asked 11ms ago over 1 attempt\(s\): 1 resolution\(s\) 10ms \(1 file read\(s\): queued 7ms, reading 3ms\), held ranges 0ms, budget 1ms$/);
+});

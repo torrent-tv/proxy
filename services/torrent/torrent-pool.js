@@ -20,7 +20,7 @@ import { demandProgress } from "./demand-progress.js";
 import { Urgency, urgencyName } from "./demand/index.js";
 import { demandFor, firstClassStatement, forgetTorrent, reconcileAll, hasUnmetDemand } from "./download/registry.js";
 import { withdrawClaim } from "./download/withdraw-claim.js";
-import { isAtAWatchingViewer, isBehindEverybody, isNobodyComingNow } from "../viewer/PriorityMap.js";
+import { deadlineOfMapZone, levelOfMapZone, priorityOfMapZone } from "./map-zones.js";
 import { deriveSourceKey } from "../../utils/torrent-source-key.js";
 import { noteTorrentDestroyed } from "./destroyed-torrents.js";
 
@@ -1290,48 +1290,9 @@ export class TorrentPool {
       .filter((zone) => Number.isSafeInteger(zone?.byteStart) && Number.isSafeInteger(zone?.byteEnd) &&
         zone.byteStart >= 0 && zone.byteEnd >= zone.byteStart && zone.byteStart < length)
       .sort((left, right) => (right.priority ?? 0) - (left.priority ?? 0));
-    /**
-     * Which level of urgency one zone is stated at, from the map's own number
-     * and nothing else. The map's numbers are a scale as long as the film needs
-     * — ten bands on a fifty-minute film — while the register has five levels,
-     * and the fit is by meaning:
-     *
-     *  - the top of the scale is where a viewer is standing, so it is the
-     *    cushion being built: {@link Urgency.NEAR}. Never BLOCKED — that level
-     *    means a reader is stopped on those bytes right now, which only a read
-     *    can say;
-     *  - the bottom is what nobody is approaching: behind a viewer moving
-     *    forward, and the whole film of a viewer who has stopped the picture.
-     *    Wanted only if somebody seeks back, which is {@link Urgency.BEHIND};
-     *  - one above the bottom is the far tail — wanted for certain if the
-     *    viewer watches on, and not before: {@link Urgency.TAIL};
-     *  - everything between is the lead being built: {@link Urgency.AHEAD}.
-     *
-     * Read from the scale's own ends rather than from the highest and lowest
-     * number in THIS file's map. The two speculative levels are withheld across
-     * every torrent at once while anything urgent is missing anywhere, so a
-     * paused viewer's film has to compare as wanted-last against another film
-     * somebody is watching — and relative to itself alone it would compare as
-     * the most urgent thing there is.
-     *
-     * @param {{ priority?: number }} zone
-     * @returns {number}
-     */
-    const levelOf = (zone) => {
-      // Read through the map's own words rather than by comparing its numbers.
-      // The scale is that layer's, and the numbers inside a band mean nothing
-      // but their order.
-      const priority = zone.priority ?? 0;
-      if (zone.behind === true || (zone.behind === undefined && isBehindEverybody(priority))) {
-        return Urgency.BEHIND;
-      }
-      if (zone.deferred === true || (zone.deferred === undefined && isNobodyComingNow(priority))) {
-        // In front of somebody who has stopped the picture, and of nobody who is
-        // watching. Wanted, and wanted after everyone who is on their way.
-        return Urgency.TAIL;
-      }
-      return (zone.urgent === true || (zone.urgent === undefined && isAtAWatchingViewer(priority))) ? Urgency.NEAR : Urgency.AHEAD;
-    };
+    // Which level each zone is stated at: `map-zones.js`, where the main thread
+    // reads the same rule before it sends a map.
+    const levelOf = levelOfMapZone;
     ordered.forEach((zone, index) => {
       // Only ranges declared by the container index or metadata read are wanted.
       const byteStart = zone.byteStart;
@@ -1345,10 +1306,9 @@ export class TorrentPool {
         byteStart,
         byteEnd,
         urgency: levelOf(zone),
-        priority: Number.isFinite(zone.priority) ? Math.max(1, Math.min(100, zone.priority)) : 1,
+        priority: priorityOfMapZone(zone),
         order: Number.isSafeInteger(zone.order) && zone.order >= 0 ? zone.order : 0,
-        deadlineAt: Number.isFinite(zone.deadlineAt) ? zone.deadlineAt :
-          Number.isFinite(zone.withinSeconds) ? Date.now() + Math.max(0, zone.withinSeconds) * 1000 : Number.POSITIVE_INFINITY,
+        deadlineAt: deadlineOfMapZone(zone),
         requestId: zone.requestId ?? `${torrent.infoHash}:${fileIndex}:map`
       });
     });

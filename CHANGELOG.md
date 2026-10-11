@@ -1,4 +1,4 @@
-## Unreleased
+## 2.97.4
 
 - **Fix**: An encoder's input is named by its source, file, ranges and what is stated about its packets, without hashing every copied byte. On Home Assistant hashing took 13.45 s of 180 s of the main thread on a Matroska film whose picture and sound copy the same ~30 MB per piece. The check that a packet's address holds its expected payload stays (#ttv-178).
 - **Fix**: A refusal of memory for an AVI soundtrack's packet table is kept while the memory still could not hold it, instead of every reader counting the packets and asking again: on Home Assistant one two-hour film was refused 1 943 times in 8.3 s, once per soundtrack segment. It ends as soon as the reservation would fit, also when other memory is released under an unchanged allowance (#ttv-178).

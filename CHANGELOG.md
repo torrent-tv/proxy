@@ -1,5 +1,6 @@
 ## Unreleased
 
+- **Fix**: An encoder's input is named by its source, file, ranges and what is stated about its packets, without hashing every copied byte. On Home Assistant hashing took 13.45 s of 180 s of the main thread on a Matroska film whose picture and sound copy the same ~30 MB per piece. The check that a packet's address holds its expected payload stays (#ttv-178).
 - **Fix**: A refusal of memory for an AVI soundtrack's packet table is kept while the memory still could not hold it, instead of every reader counting the packets and asking again: on Home Assistant one two-hour film was refused 1 943 times in 8.3 s, once per soundtrack segment. It ends as soon as the reservation would fit, also when other memory is released under an unchanged allowance (#ttv-178).
 - **Fix**: A statement about a file that changes nothing in its download map — a refusal of memory, the same missing bytes asked again, a result for a statement that asked for nothing — no longer rebuilds and sorts every zone of the map. On Home Assistant a two-hour AVI built 9 933 maps it did not send in its first minute, 14 s of the main thread in three minutes; a map the torrent thread did not apply, or whose publication failed, is still sent again (#ttv-178).
 

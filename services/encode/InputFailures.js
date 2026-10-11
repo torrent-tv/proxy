@@ -12,7 +12,7 @@ export function failedAdmittedInput(ended, hardwareEncode = false) {
   return ended.ending === ENCODE_EXIT.SHORT || ended.ending === ENCODE_EXIT.FAILED;
 }
 
-/** A failed input is retried only after its bytes or output parameters change. */
+/** A failed input is retried only after its identity — source, file, ranges and what is stated about them — or the output parameters change. */
 export class InputFailures {
   #failures = new Map();
 

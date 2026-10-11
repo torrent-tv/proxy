@@ -1039,7 +1039,6 @@ export class EncodeRuns {
     });
     if (admittedInput.original) {
       run.originalInput = admittedInput;
-      run.inputFingerprint = admittedInput.fingerprint;
       // Every number of the stretch answers to its one key, so a failure
       // anywhere inside it is recorded against the stretch that was commanded.
       run.admittedInputKeys = new Map(Array.from({ length: inputEnd - safeIndex + 1 }, (_, offset) => [safeIndex + offset, inputKey]));
@@ -1052,7 +1051,6 @@ export class EncodeRuns {
       // this run works and is ready when the plan places the next run there.
       if (inputEnd < mayReach) this.#host.encodeInputs?.take(session, inputEnd + 1, mayReach);
     } else if (admittedInput) {
-      run.inputFingerprint = admittedInput.fingerprint;
       run.admittedInputKeys = new Map([[safeIndex, inputKey]]);
       let nextIndex = startIndex + 1;
       const canAppend = index => this.isLive(session) && run.isAlive &&

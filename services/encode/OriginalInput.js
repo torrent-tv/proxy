@@ -25,8 +25,13 @@ export async function admitOriginalInput({ sources, reserve, readRanges, now = D
         !Buffer.isBuffer(buffer) || buffer.length !== source.input.ranges[index][1] - source.input.ranges[index][0] + 1)) {
         throw new Error("Original input reader returned incomplete ranges.");
       }
+      // THE INPUT IS NAMED BY WHAT IT IS, NOT BY ITS BYTES. Every source is a
+      // torrent whose pieces are verified before they are stored, and a read
+      // gives every byte or none, so the same source, file, ranges and
+      // selections are the same bytes. Hashing the bytes as well took 13.45 s
+      // of 180 s of the main thread on a Matroska film whose picture and sound
+      // copy the same ~30 MB a piece (torrent-tv/meta#178).
       hash.update(JSON.stringify([source.sourceKey, source.fileIndex, source.input.ranges, source.input.selections]));
-      for (const buffer of buffers) hash.update(buffer);
       held.set(source.fileIndex, { source, buffers });
     }
     let released = false;

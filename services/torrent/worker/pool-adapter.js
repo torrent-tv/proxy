@@ -164,11 +164,11 @@ export class WorkerTorrentPool {
    * @param {{ sourceKey: string, fileIndex: number, durationSeconds: number, zones: object[] }} params
    * @returns {Promise<void>}
    */
-  async setPriorityMap({ sourceKey, fileIndex, durationSeconds, zones }) {
+  async setPriorityMap({ sourceKey, fileIndex, durationSeconds, zones, postedAt }) {
     if (!sourceKey) {
       return;
     }
-    return this.#client.setPriorityMap({ sourceKey, fileIndex, durationSeconds, zones });
+    return this.#client.setPriorityMap({ sourceKey, fileIndex, durationSeconds, zones, postedAt });
   }
 
   /**

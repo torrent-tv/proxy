@@ -72,3 +72,20 @@ test("original FFmpeg commands retain the audio track and published segment numb
   assert.equal(command.args[command.args.indexOf("-to") + 1], "860.027");
   assert.equal(command.args.includes("pipe:0"), false);
 });
+
+test("an original input is named by its source and ranges, not by hashing its bytes (torrent-tv/meta#178)", async () => {
+  const admit = async (candidate, buffers) => admitOriginalInput({ sources: candidate, reserve: async () => () => {},
+    readRanges: async () => buffers });
+  const first = await admit(sources, [Buffer.from("abcd"), Buffer.from("klmn")]);
+  const same = await admit(structuredClone(sources), [Buffer.from("wxyz"), Buffer.from("0123")]);
+  const otherRange = structuredClone(sources);
+  otherRange[0].input.ranges[1] = [11, 14];
+  const ranged = await admit(otherRange, [Buffer.from("abcd"), Buffer.from("lmno")]);
+  const otherFile = structuredClone(sources);
+  otherFile[0].fileIndex = 4;
+  const filed = await admit(otherFile, [Buffer.from("abcd"), Buffer.from("klmn")]);
+  assert.equal(first.fingerprint, same.fingerprint, "the bytes of one identity are not read to name it");
+  assert.notEqual(first.fingerprint, ranged.fingerprint);
+  assert.notEqual(first.fingerprint, filed.fingerprint);
+  for (const input of [first, same, ranged, filed]) input.release();
+});

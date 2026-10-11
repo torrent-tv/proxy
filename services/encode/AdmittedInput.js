@@ -28,12 +28,12 @@ export async function admitInput({ sources, reserve, readRanges }) {
         !Buffer.isBuffer(buffer) || buffer.length !== source.input.ranges[index][1] - source.input.ranges[index][0] + 1)) {
         throw new Error("Available-only input reader returned incomplete ranges.");
       }
-      hash.update(JSON.stringify(source.input.ranges));
-      for (const buffer of buffers) {
-        hash.update(String(buffer.length));
-        hash.update(":");
-        hash.update(buffer);
-      }
+      // Named by the source and what is stated about its packets below, not by
+      // the bytes: verified pieces and strict reads make the same ranges of the
+      // same source the same bytes (torrent-tv/meta#178). The check that each
+      // packet's address holds its expected payload (`expectedHash`) stays: a
+      // verified piece does not prove an address inside it was worked out right.
+      hash.update(JSON.stringify([source.sourceKey, source.fileIndex, source.input.ranges]));
       for (const input of source.input.tracks) {
         const shifted = { ...input,
           ...(Number.isFinite(input.sourceEndSeconds) ? { sourceEndSeconds: input.sourceEndSeconds - (source.timeShiftSeconds ?? 0) } : {}),

@@ -182,3 +182,16 @@ test("admitted packet writes batch small Matroska chunks", async () => {
     previous = found;
   }
 });
+
+test("a packet input of another file with the same ranges is another input (torrent-tv/meta#178)", async () => {
+  const acquire = candidate => admitInput({ sources: [candidate], reserve: () => () => {},
+    readRanges: async () => [Buffer.from("ab"), Buffer.from("cd")] });
+  const otherFile = structuredClone(source);
+  otherFile.fileIndex = 1;
+  const otherSource = structuredClone(source);
+  otherSource.sourceKey = "another";
+  const first = await acquire(source), filed = await acquire(otherFile), sourced = await acquire(otherSource);
+  assert.notEqual(first.fingerprint, filed.fingerprint);
+  assert.notEqual(first.fingerprint, sourced.fingerprint);
+  for (const input of [first, filed, sourced]) input.release();
+});

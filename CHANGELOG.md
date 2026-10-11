@@ -1,4 +1,4 @@
-## Unreleased
+## 2.97.1
 
 - **Fix**: At a cold start the second run of an AVI or Matroska original input is no longer one piece. A stretch is sized by the copy rate times how long an encoder takes to open that input, and a new output had no reading of its own, so its second run copied one piece and cost another open (6.34 s on Home Assistant, #ttv-166 run 12). Until an output has opened once, the host's startup reading of an encoder's start stands in, and the log says so (#ttv-184).
 - **Fix**: A pause no longer counts as part of starting an encoder. The time to the first output and the open of an input were wall-clock times, so an encoder paused for a more urgent one read as slow to start, and the next stretch was sized from that (#ttv-184).

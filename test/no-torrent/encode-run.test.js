@@ -119,6 +119,18 @@ test("exiting cleanly short of its stretch is abnormal and says where it stopped
   assert.match(ends[0].because, /#11 of #14/);
 });
 
+test("a suspended run that is stopped is continued first, so it can act on SIGTERM", () => {
+  // Field 2026-10-11: the stop moved the state off SUSPENDED before asking for
+  // SIGCONT, which is sent only from SUSPENDED, so the process stayed stopped
+  // with its input admitted until the proxy itself was restarted.
+  const { run, process, ends } = makeRun();
+  assert.equal(run.pause("nothing is waiting for it"), true);
+  run.stop("nobody is watching this output");
+  assert.deepEqual(process.signals, ["SIGSTOP", "SIGCONT", "SIGTERM"]);
+  process.exitWith(null, "SIGTERM");
+  assert.equal(ends[0].ending, ENCODE_EXIT.STOPPED);
+});
+
 test("a non-zero exit is a failure carrying its code", () => {
   const { process, ends, lines } = makeRun();
   process.exitWith(255, null);

@@ -975,6 +975,9 @@ export function wireOutputs({
     heldRanges: readEncodeHeldRanges,
     reviseBudget: () => parts.machineBudget.revise(),
     capacity: () => parts.machineBudget.capacityOf("memory"),
+    // How long this output's input takes to open, from the one owner of start
+    // readings (torrent-tv/meta#184).
+    openOf: (output) => parts.encodeOrchestrator?.openOf?.(output.outputKey ?? "") ?? null,
     urgent: (output, index) => parts.encodeOrchestrator.wantedSegmentsOn(output.outputKey).some(window =>
       index >= window.from && index <= window.to && window.urgent === true),
     log: line => logger.info(line),

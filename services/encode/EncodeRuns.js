@@ -582,6 +582,7 @@ export class EncodeRuns {
     this.#host.encodeInputs?.forget(output);
     if (this.#host.outputs.outputsOn(output.outputKey).length === 0) {
       this.#inputFailures.forget(output.outputKey);
+      this.#host.encodeOrchestrator.forgetOpens?.(output.outputKey);
       this.#host.encodeOrchestrator.forgetOutput(output.outputKey);
     }
   }
@@ -793,40 +794,6 @@ export class EncodeRuns {
     );
   }
 
-  /**
-   * How far a run starting here may work before it meets somebody else's
-   * material — read off the ONE coverage map, never worked out again here.
-   *
-   * This replaced `planRunInterval`, which was a second authority over the same
-   * question and answered it by different rules: it walked the whole track for
-   * the first free number, MOVED the start there itself, and counted every live
-   * run as claiming up to `head + look-ahead`. Measured in the field
-   * 2026-09-05: the plan commanded a start at #46, this moved it to #78 — the
-   * "run moved forward from #46 to #78" line — and the plan, seeing a run
-   * outside the window it had asked for, killed it as unwanted and commanded
-   * the same start again, 350-700ms per cycle, dozens of times, the viewer's
-   * picture stopped for 125 seconds.
-   *
-   * Where a run STARTS is the plan's decision and arrives here as an argument.
-   * All this answers is where it must stop, and the answer is a fact of the
-   * map: the free stretch from that number on. `-1` means the end of the track,
-   * which is what "no end" is written as everywhere here.
-   *
-   * @param {object} session
-   * @param {number} startIndex
-   * @param {object | null} exceptRun - The run being replaced, whose own claim
-   *   is not somebody else's material.
-   * @returns {number} The last number to work through, or `-1` for the end.
-   */
-  #runEndFrom(session, startIndex, exceptRun = null) {
-    return this.#host.encodeOrchestrator.freeStretchEnd({
-      address: session.outputKey ?? "",
-      from: startIndex,
-      exceptRun,
-      segmentCount: Number(session.timeline?.segmentCount) || 0
-    });
-  }
-
   // Returns the encoder it built, or nothing when there was nothing to build.
   // It waits for nothing: the one thing it used to wait for was the death of
   // the run it was replacing, and that killing is gone.
@@ -834,7 +801,10 @@ export class EncodeRuns {
     if (!this.isLive(session)) {
       return null;
     }
-    this.#host.encodeInputs?.retain(session, this.#host.encodeOrchestrator.wantedSegmentsOn(session.outputKey));
+    // A copy held for a start that no live run ends before and that is not
+    // being started now goes back (torrent-tv/meta#184).
+    this.#host.encodeInputs?.retain(session, this.#host.encodeOrchestrator.wantedSegmentsOn(session.outputKey),
+      new Set([startIndex, ...this.liveRunsOf(session).map((run) => run.to + 1)]));
     // THE LAST NUMBER THIS RUN MAY REACH is the plan's; how far its input
     // really reaches is the input's answer. An original input is one copied
     // stretch, and the run is given exactly that stretch (torrent-tv/meta#158).
@@ -847,13 +817,13 @@ export class EncodeRuns {
     // The stretch is part of an original input's identity: two stretches from
     // one start can hold the same padded bytes, and a stretch that failed is
     // refused only while it is the same stretch.
-    const inputParameters = admittedInput ? { outputKey: session.outputKey, encoder: this.#host.videoEncoder.name,
+    const inputParameters = { outputKey: session.outputKey, encoder: this.#host.videoEncoder.name,
       width: session.output.encodeWidth, height: session.output.encodeHeight, fps: session.output.outputFps,
       preset: session.output.softwarePreset, tonemap: session.output.applyTonemap,
       rateControl: session.spec.video?.encode?.rateControl ?? null,
-      ...(admittedInput.original ? { interval: [startIndex, inputEnd] } : {}) } : null;
-    const inputKey = admittedInput ? this.#inputFailures.key(admittedInput, inputParameters) : null;
-    if (inputKey && this.#inputFailures.failure(session.outputKey, startIndex, inputKey)) {
+      ...(admittedInput.original ? { interval: [startIndex, inputEnd] } : {}) };
+    const inputKey = this.#inputFailures.key(admittedInput, inputParameters);
+    if (this.#inputFailures.failure(session.outputKey, startIndex, inputKey)) {
       admittedInput.release();
       return null;
     }
@@ -879,9 +849,10 @@ export class EncodeRuns {
     // an argument. Reading it off the coverage map a second time was the last
     // remaining second answer to that question: the plan computed `to`, passed
     // it, and the parameter list did not name it.
-    const runEnd = admittedInput ? inputEnd : Number.isInteger(ordered?.to)
-      ? ordered.to
-      : this.#runEndFrom(session, startIndex, null);
+    // A run ends where its input does: an original input is one copied
+    // stretch, and a packet input grows one segment at a time from its first
+    // (`run.to` follows it below).
+    const runEnd = inputEnd;
     // The restart backs off a segment or two from what was asked for, so the
     // request that prompted it is recorded under a HIGHER index than the run
     // starts at. Looking it up by the start index alone found nothing and the
@@ -1056,7 +1027,7 @@ export class EncodeRuns {
             const since = (at) => at ? `${at - run.startedAt}ms` : "never";
             this.#host.logger.info(`encode input of run #${run.from}..#${run.to} on ${session.outputKey}: ` +
               `${reads.count} read(s), ${reads.bytes} bytes, first at ${since(reads.firstAt)}, last at ${since(reads.lastAt)}, ` +
-              `ended at ${Date.now() - run.startedAt}ms` + describeTaken(reads.answers, run.startedAt, ended.firstNamedMs));
+              `ended at ${Date.now() - run.startedAt}ms` + describeTaken(reads.answers, run.startedAt, ended.firstNamedWallMs));
           }
           this.#noteOpen(session, run, ended);
           admittedInput.release();
@@ -1072,10 +1043,6 @@ export class EncodeRuns {
       // Every number of the stretch answers to its one key, so a failure
       // anywhere inside it is recorded against the stretch that was commanded.
       run.admittedInputKeys = new Map(Array.from({ length: inputEnd - safeIndex + 1 }, (_, offset) => [safeIndex + offset, inputKey]));
-      // What this run can make is what its input holds, and that is what it
-      // claims; the plan's longer bound would read as made by a run that
-      // cannot reach it.
-      run.inputThrough = inputEnd;
       run.process.stdin.end();
       // THE NEXT STRETCH IS PREPARED WHILE THIS ONE IS BEING MADE. Asked for
       // only when this run had ended, its copy fell between the two runs and
@@ -1159,7 +1126,7 @@ export class EncodeRuns {
     const speed = run.speedX > 0 ? run.speedX : this.#host.encodeOrchestrator.speedOn?.(session.outputKey) ?? 0;
     if (!Number.isFinite(ended.firstNamedMs) || !(pieceSeconds > 0) || !(speed > 0)) return;
     const openSeconds = Math.max(0, ended.firstNamedMs / 1000 - pieceSeconds / speed);
-    this.#host.encodeInputs?.noteOpen(session, openSeconds);
+    this.#host.encodeOrchestrator.noteOpen?.(session.outputKey ?? "", openSeconds);
     this.#host.logger.info(`encode input of run #${run.from}..#${run.to} on ${session.outputKey}: opened in ` +
       `${openSeconds.toFixed(2)}s (first piece named at ${ended.firstNamedMs}ms, ${pieceSeconds.toFixed(3)}s of film at ${speed.toFixed(2)}x)`);
   }

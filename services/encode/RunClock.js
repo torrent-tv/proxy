@@ -28,6 +28,15 @@ export class RunClock {
   #idleCauses = 0;
   #idleSince = 0;
   #idleMs = 0;
+  /**
+   * Stopped time alone, apart from input waits: a pause is a decision of
+   * ours, while a wait for input is part of what starting a run costs, so the
+   * readings of a start leave out the first and keep the second
+   * (torrent-tv/meta#184).
+   */
+  #stoppedSince = 0;
+  #stoppedMs = 0;
+  #isStopped = false;
 
   /**
    * @param {{ now?: () => number }} [options]
@@ -67,11 +76,29 @@ export class RunClock {
   /** The process is stopped. */
   stopped() {
     this.#idleBegins();
+    if (!this.#isStopped) {
+      this.#isStopped = true;
+      this.#stoppedSince = this.#now();
+    }
   }
 
   /** The process runs again. */
   continued() {
     this.#idleEnds();
+    if (this.#isStopped) {
+      this.#isStopped = false;
+      this.#stoppedMs += this.#now() - this.#stoppedSince;
+    }
+  }
+
+  /**
+   * Milliseconds the process has been stopped so far.
+   *
+   * @param {number} [at]
+   * @returns {number}
+   */
+  stoppedMs(at = this.#now()) {
+    return this.#stoppedMs + (this.#isStopped ? Math.max(0, at - this.#stoppedSince) : 0);
   }
 
   /**

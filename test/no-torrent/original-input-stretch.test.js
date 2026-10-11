@@ -31,6 +31,7 @@ import { presentationSegment } from "../../services/encode/segment-formats/prese
 import { EncodeRun } from "../../services/encode/EncodeRun.js";
 import { SoftwareEncoder } from "../../services/encode/SoftwareEncoder.js";
 import { EncodeOrchestrator } from "../../services/encode/EncodeOrchestrator.js";
+import { RunCosts } from "../../services/encode/run-costs.js";
 
 // A file whose segment k is the ten bytes at 10k, and whose header and index
 // are ten bytes at 1000 that every stretch needs once. A stretch of n segments
@@ -48,7 +49,9 @@ const resolve = async (_output, from, to) => ({ kind: "result", sources: [{ sour
 function inputsOver({ held = () => [[0, 999], HEADER], allowance = () => 10_000, capacity = () => null, urgent = () => true } = {}) {
   const clock = { at: 0 };
   const announced = [];
+  const costs = new RunCosts();
   const inputs = new EncodeInputs({
+    openOf: (asked) => costs.openOf(asked.outputKey),
     resolve,
     heldRanges: async () => held(),
     readRanges: async (_source, ranges) => {
@@ -60,6 +63,7 @@ function inputsOver({ held = () => [[0, 999], HEADER], allowance = () => 10_000,
     capacity, urgent, now: () => clock.at,
     changed: (_output, result) => announced.push(result), failed: (_output, error) => { throw error; }
   });
+  inputs.costs = costs;
   return { inputs, announced };
 }
 
@@ -76,7 +80,7 @@ async function admitted(inputs, from, to) {
 async function measured(inputs) {
   const first = await admitted(inputs, 0, 0);
   first.release();
-  inputs.noteOpen(output, 0.1);
+  inputs.costs.noteOpen(output.outputKey, 0.1);
   assert.equal(inputs.stretchBytesFor(output), 100);
 }
 
@@ -86,7 +90,7 @@ test("before a copy and an open are measured, a run gets one piece", async () =>
   const input = await admitted(inputs, 0, 50);
   assert.deepEqual([input.from, input.to, input.bytes], [0, 0, bytesOf(0, 0)]);
   input.release();
-  inputs.noteOpen(output, 0.1);
+  inputs.costs.noteOpen(output.outputKey, 0.1);
   assert.equal(inputs.stretchBytesFor(output), 100, "the one-piece copy measured the rate");
 });
 
@@ -140,7 +144,9 @@ test("room taken by another output while a stretch is being shortened shortens i
   // longer fit, and it settles on the 80 that are left.
   let gates = null;
   const clock = { at: 0 };
+  const costs = new RunCosts();
   const inputs = new EncodeInputs({
+    openOf: (asked) => costs.openOf(asked.outputKey),
     resolve, heldRanges: async () => [[0, 999], HEADER], now: () => clock.at,
     readRanges: async (_source, ranges) => {
       const buffers = ranges.map(([start, end]) => Buffer.alloc(end - start + 1));
@@ -154,11 +160,12 @@ test("room taken by another output while a stretch is being shortened shortens i
     },
     changed: () => {}, failed: (_output, error) => { throw error; }
   });
+  inputs.costs = costs;
   await measured(inputs);
   const soundtrack = { outputKey: "soundtrack" };
-  inputs.noteOpen(output, 0.15);
-  inputs.noteOpen(output, 0.15);
-  inputs.noteOpen(soundtrack, 0.05);
+  inputs.costs.noteOpen(output.outputKey, 0.15);
+  inputs.costs.noteOpen(output.outputKey, 0.15);
+  inputs.costs.noteOpen(soundtrack.outputKey, 0.05);
   assert.equal(inputs.stretchBytesFor(output), 150);
   gates = [];
   assert.equal(inputs.take(output, 0, 50), null);
@@ -197,18 +204,49 @@ test("a stretch over the policy capacity is shortened, and only one piece over i
   assert.equal(announced.at(-1).bytes, bytesOf(5, 5), "the terminal answer names the one-piece minimum");
 });
 
-test("a copy reaching past a bound the plan has since narrowed is given back and made again", async () => {
+test("a copy reaching past a bound the plan has since narrowed runs over its prefix, without a second copy", async () => {
   const { inputs } = inputsOver();
   await measured(inputs);
   assert.equal(inputs.take(output, 0, 50), null);
   for (let turn = 0; turn < 5; turn++) await setImmediate();
   assert.equal(inputs.held(), 100);
-  assert.equal(inputs.take(output, 0, 4), null, "the prepared 0..8 is longer than 0..4");
-  for (let turn = 0; turn < 5; turn++) await setImmediate();
+  const copies = inputs.held();
   const input = inputs.take(output, 0, 4);
-  assert.deepEqual([input.from, input.to], [0, 4]);
-  assert.equal(inputs.held(), bytesOf(0, 4));
+  assert.deepEqual([input.from, input.to], [0, 4], "the prepared 0..8 holds 0..4 whole");
+  assert.equal(inputs.held(), copies, "kept until the run ends, not copied again");
   input.release();
+  assert.equal(inputs.held(), 0);
+});
+
+test("a held copy whose start no live run ends before and no start is placed at goes back", async () => {
+  const { inputs } = inputsOver();
+  await measured(inputs);
+  assert.equal(inputs.take(output, 10, 50), null);
+  for (let turn = 0; turn < 5; turn++) await setImmediate();
+  assert.ok(inputs.held() > 0);
+  inputs.retain(output, [{ from: 0, to: 2000 }], new Set([10]));
+  assert.ok(inputs.held() > 0, "a live run ends at #9: kept");
+  inputs.retain(output, [{ from: 0, to: 2000 }], new Set([40]));
+  assert.equal(inputs.held(), 0, "after a seek to #40 it is given back, though the map still covers it");
+});
+
+test("an output that has not opened is sized by the host's startup reading, and says so", async () => {
+  const lines = [];
+  const costs = new RunCosts();
+  costs.noteStartup({ firstByteWaitSec: 0.05, killCostSec: 0 });
+  let at = 0;
+  const inputs = new EncodeInputs({ resolve, openOf: (asked) => costs.openOf(asked.outputKey),
+    heldRanges: async () => [[0, 999], HEADER],
+    readRanges: async (_source, ranges) => { const buffers = ranges.map(([start, end]) => Buffer.alloc(end - start + 1)); at += buffers.reduce((sum, one) => sum + one.length, 0); return buffers; },
+    reviseBudget: async () => inputs.allow(10_000), now: () => at, log: (line) => lines.push(line),
+    changed: () => {}, failed: (_output, error) => { throw error; } });
+  const first = await admitted(inputs, 0, 50);
+  assert.deepEqual([first.from, first.to], [0, 0], "no copy rate yet: one piece");
+  first.release();
+  const second = await admitted(inputs, 1, 50);
+  assert.deepEqual([second.from, second.to], [1, 4], "rate x the startup open: 50 bytes, four pieces");
+  assert.ok(lines.some((line) => line.includes("sized by the host's startup open")));
+  second.release();
 });
 
 test("the copy time is the reads alone", async () => {
@@ -236,7 +274,7 @@ test("a stretch claims what its input reaches, and gives the rest back when it e
       const run = new EncodeRun({ address: on, encoder: new SoftwareEncoder(), from, to: from + 2,
         buildArgs: () => [], spawn: () => process_, logger: { info() {}, warn() {} }, now: () => 1000,
         onEnded: (ended) => made.noteEnded(ended) });
-      run.inputThrough = from + 2;
+      run.originalInput = { from, to: from + 2 };
       processes.set(run, process_);
       return run;
     }
@@ -364,7 +402,9 @@ for (const [label, startIndex, endIndex, seconds] of [["before the film's end", 
 test("the line that says an input is ready says where its preparation spent its time", async () => {
   const lines = [];
   const clock = { at: 0 };
+  const costs = new RunCosts();
   const inputs = new EncodeInputs({
+    openOf: (asked) => costs.openOf(asked.outputKey),
     // Each statement of an interval reports one read of the file that waited
     // 7 ms behind an earlier read and took 3 ms; the clock moves by both.
     resolve: async (out, from, to, timing) => {
@@ -387,6 +427,7 @@ test("the line that says an input is ready says where its preparation spent its 
     log: line => lines.push(line),
     now: () => clock.at
   });
+  inputs.costs = costs;
   const input = await admitted(inputs, 0, 50);
   input.release();
   const ready = lines.find(line => line.includes(": ready #0..#0"));

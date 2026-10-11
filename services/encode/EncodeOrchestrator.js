@@ -146,6 +146,30 @@ export class EncodeOrchestrator {
   }
 
   /**
+   * One output's original-input open, and what sizes its stretch: the one
+   * owner of start readings is this class's `RunCosts` (torrent-tv/meta#184).
+   *
+   * @param {string} address
+   * @param {number} seconds
+   */
+  noteOpen(address, seconds) {
+    this.#costs.noteOpen(address, seconds);
+  }
+
+  /**
+   * @param {string} address
+   * @returns {{ seconds: number, measured: boolean } | null}
+   */
+  openOf(address) {
+    return this.#costs.openOf(address);
+  }
+
+  /** @param {string} address */
+  forgetOpens(address) {
+    this.#costs.forgetOpens(address);
+  }
+
+  /**
    * What a stop and a start cost on this host, in seconds, as the plan reads
    * them — for anyone else pricing a fresh encoder by the same figures.
    *
@@ -287,41 +311,6 @@ export class EncodeOrchestrator {
       coverage.setReady(this.#segmentCoverage.provenNumbers(address));
     }
     return coverage;
-  }
-
-  /**
-   * Where a run started here must stop: the free stretch in front of it.
-   *
-   * Asked of the one map, brought up to date first. It used to be worked out by
-   * the session manager, which reached into this layer for the map and into the
-   * store for what was on the disk and put the two together itself — one fact
-   * with two owners and a third party carrying it between them, which is how the
-   * two came to disagree.
-   *
-   * @param {object} params
-   * @param {string} params.address
-   * @param {number} params.from - Where the run will start.
-   * @param {object | null} [params.exceptRun] - The run being replaced, whose
-   *   own claim is not somebody else's material.
-   * @param {number} [params.segmentCount] - The output's length, when known.
-   * @returns {number} The last number to work through, or `-1` for the end of
-   *   the film.
-   */
-  freeStretchEnd({ address, from, exceptRun = null, segmentCount = 0 }) {
-    if (!address) {
-      return -1;
-    }
-    if (segmentCount > 0) {
-      this.coverageOf(address).setSegmentCount(segmentCount);
-    }
-    const coverage = this.#upToDateCoverage(address);
-    const start = Math.max(0, from);
-    const free = coverage.freeRunFrom(start, exceptRun);
-    if (!Number.isFinite(free)) {
-      return -1;
-    }
-    const end = start + Math.max(1, free) - 1;
-    return segmentCount > 0 && end >= segmentCount - 1 ? -1 : end;
   }
 
   /**
@@ -974,9 +963,11 @@ export class EncodeOrchestrator {
     // were two steps, and two owners each performed the second one.
     //
     // A run whose input is one copied stretch can make nothing past it, so it
-    // claims that stretch and not the plan's longer bound: the rest stays free
-    // for the next run (torrent-tv/meta#158). Every other run claims as before.
-    const through = Number.isInteger(run.inputThrough) ? run.inputThrough : to;
+    // claims that stretch — its own `to` — and not the plan's longer bound:
+    // the rest stays free for the next run (torrent-tv/meta#158). A run whose
+    // input grows a segment at a time claims the plan's bound, as it may reach
+    // it (torrent-tv/meta#184).
+    const through = run.originalInput ? run.to : to;
     this.coverageOf(address).claim(run, from, endOfRun({ from, to: through }));
   }
 

@@ -64,8 +64,14 @@ const MICROSECONDS_PER_SECOND = 1_000_000;
  *   it finished none.
  * @property {number} livedMs
  * @property {number | null} [firstNamedMs] - Spawn to the moment the encoder
- *   named its first closed piece: the open of its input plus that one piece's
- *   encoding, without the wait for the following piece that publication adds.
+ *   named its first closed piece, less the time it was paused before then: the
+ *   open of its input plus that one piece's encoding, without the wait for the
+ *   following piece that publication adds.
+ * @property {number | null} [firstNamedWallMs] - The same on the wall clock,
+ *   pauses included: what the viewer waited.
+ * @property {number | null} [firstOutputWallMs] - Spawn to the first output on
+ *   the wall clock; `firstOutputMs` leaves the pauses out.
+ * @property {number} [stoppedMs] - How long the run was paused in all.
  * @property {boolean} normal - Whether this ending is the expected one.
  * @property {string} lastError - The last thing ffmpeg said on stderr.
  * @property {string | null} provenName - The last piece this run named while it
@@ -165,6 +171,10 @@ export class EncodeRun {
    * two pieces' encoding; this holds one, and is what an open is read from.
    */
   #firstNamedAt = 0;
+
+  /** How long the run had been paused when each of the two above was taken. */
+  #stoppedBeforeFirstOutput = 0;
+  #stoppedBeforeFirstNamed = 0;
 
   /** The film made and the run's own working time, as of the last progress report. */
   #workSample = null;
@@ -569,6 +579,7 @@ export class EncodeRun {
       this.#produced.add(index);
       if (this.#firstOutputAt === 0) {
         this.#firstOutputAt = this.now();
+        this.#stoppedBeforeFirstOutput = this.clock.stoppedMs(this.#firstOutputAt);
       }
       if (this.#state === ENCODE_RUN_STATE.STARTING) {
         this.#transition(ENCODE_RUN_EVENT.FIRST_SEGMENT);
@@ -607,7 +618,10 @@ export class EncodeRun {
       }
       if (this.#publicationError) break;
       const index = this.indexOfName(name);
-      if (this.#firstNamedAt === 0 && Number.isInteger(index) && index >= this.from) this.#firstNamedAt = this.now();
+      if (this.#firstNamedAt === 0 && Number.isInteger(index) && index >= this.from) {
+        this.#firstNamedAt = this.now();
+        this.#stoppedBeforeFirstNamed = this.clock.stoppedMs(this.#firstNamedAt);
+      }
       const endOfWork = Number.isFinite(endOfRun(this)) ? this.to : this.lastSegmentIndex();
       // A packet crossing the final cut can flush a following file. It may
       // complete its predecessor, but no unadmitted interval can be published.
@@ -920,11 +934,18 @@ export class EncodeRun {
       // Null where the run was never told to stop, or never produced anything:
       // an absent measurement says so rather than reading as zero.
       dyingMs: this.#stopOrderedAt > 0 ? this.now() - this.#stopOrderedAt : null,
+      // Without the time this run was paused before then: a pause is our own
+      // decision, not what starting cost (torrent-tv/meta#184). The wall-clock
+      // figures beside them are what the viewer waited.
       firstOutputMs:
         this.#firstOutputAt > 0 && this.#startedAt > 0
-          ? this.#firstOutputAt - this.#startedAt
+          ? this.#firstOutputAt - this.#startedAt - this.#stoppedBeforeFirstOutput
           : null,
-      firstNamedMs: this.#firstNamedAt > 0 && this.#startedAt > 0 ? this.#firstNamedAt - this.#startedAt : null,
+      firstOutputWallMs: this.#firstOutputAt > 0 && this.#startedAt > 0 ? this.#firstOutputAt - this.#startedAt : null,
+      firstNamedMs: this.#firstNamedAt > 0 && this.#startedAt > 0
+        ? this.#firstNamedAt - this.#startedAt - this.#stoppedBeforeFirstNamed : null,
+      firstNamedWallMs: this.#firstNamedAt > 0 && this.#startedAt > 0 ? this.#firstNamedAt - this.#startedAt : null,
+      stoppedMs: this.clock.stoppedMs(),
       normal: ending === ENCODE_EXIT.COMPLETE,
       lastError: this.lastError
     };

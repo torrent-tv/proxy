@@ -100,8 +100,10 @@ export class RunCosts {
     // Without it the figure that prices a move could only ever be learned from
     // runs that survived, so the state in which moves are ruinous was exactly
     // the state in which their cost stayed unknown.
-    if (!Number.isFinite(ended?.firstOutputMs) && Number.isFinite(ended?.livedMs) && ended.livedMs > 0) {
-      RunCosts.#keep(this.#firstOutput, /** @type {number} */ (ended.livedMs));
+    // Its pauses are left out: a pause is our decision, not what a start costs.
+    const livedWorking = Number(ended?.livedMs) - Math.max(0, Number(ended?.stoppedMs) || 0);
+    if (!Number.isFinite(ended?.firstOutputMs) && Number.isFinite(livedWorking) && livedWorking > 0) {
+      RunCosts.#keep(this.#firstOutput, livedWorking);
     }
     if (Number.isFinite(ended?.dyingMs)) {
       RunCosts.#keep(this.#dying, /** @type {number} */ (ended.dyingMs));
@@ -109,6 +111,49 @@ export class RunCosts {
     if (Number.isFinite(ended?.firstOutputMs)) {
       RunCosts.#keep(this.#firstOutput, /** @type {number} */ (ended.firstOutputMs));
     }
+  }
+
+  /**
+   * How long an encoder took to open one output's original input, in seconds:
+   * from its spawn to the name of its first closed piece, less that piece's
+   * encoding and any pause (torrent-tv/meta#184). Kept per output, beside the
+   * host's time to first output above and apart from it: the two are related
+   * and not the same quantity, and the stretch of an original input is sized
+   * from this one.
+   *
+   * @type {Map<string, number[]>}
+   */
+  #opens = new Map();
+
+  /**
+   * @param {string} address
+   * @param {number} seconds
+   */
+  noteOpen(address, seconds) {
+    if (!address || !Number.isFinite(seconds) || seconds < 0) return;
+    const readings = this.#opens.get(address) ?? [];
+    RunCosts.#keep(readings, seconds);
+    this.#opens.set(address, readings);
+  }
+
+  /**
+   * The open of this output: its own readings' median where it has any; else
+   * the host's startup reading of spawn to first piece, said to be an
+   * approximation — it opened a generated picture, not this file; else null.
+   *
+   * @param {string} address
+   * @returns {{ seconds: number, measured: boolean } | null}
+   */
+  openOf(address) {
+    const own = middleOf(this.#opens.get(address) ?? []);
+    if (own !== null) return { seconds: own, measured: true };
+    const startup = this.#atStartup?.firstByteWaitSec;
+    return Number.isFinite(startup) && startup > 0 ? { seconds: startup, measured: false } : null;
+  }
+
+  /** @param {string} address */
+  forgetOpens(address) {
+    this.#opens.delete(address);
   }
 
   /**

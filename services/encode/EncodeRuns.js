@@ -302,7 +302,13 @@ export class EncodeRuns {
   runStateOf(output) {
     if (this.#host.encodeInputs?.failureOf(output)) return ENCODE_RUN_STATE.ENDED_FAILED;
     if (output && this.liveRunsOf(output).length === 0 && this.#inputFailures.reason(output.outputKey)) return ENCODE_RUN_STATE.ENDED_FAILED;
-    return output ? this.#host.encodeOrchestrator.stateOf(output.outputKey) : runStateOf([]);
+    const state = output ? this.#host.encodeOrchestrator.stateOf(output.outputKey) : runStateOf([]);
+    // A piece of a longer input failed and is to be made from an input holding
+    // it alone: production has not ended, and a request for it is held rather
+    // than refused (torrent-tv/meta#178).
+    if (state === ENCODE_RUN_STATE.ENDED_FAILED && this.liveRunsOf(output).length === 0 &&
+      this.#inputFailures.retrying(output.outputKey)) return ENCODE_RUN_STATE.IDLE;
+    return state;
   }
 
   lastErrorOf(output) {
@@ -823,8 +829,11 @@ export class EncodeRuns {
     // really reaches is the input's answer. An original input is one copied
     // stretch, and the run is given exactly that stretch (torrent-tv/meta#158).
     const segmentCount = Number(session.timeline?.segmentCount) || 0;
-    const mayReach = Number.isInteger(ordered?.to) && ordered.to >= startIndex ? ordered.to
-      : segmentCount > startIndex ? segmentCount - 1 : startIndex;
+    // A piece whose longer input failed is made from an input holding it alone,
+    // so a run reaches no further than the number before it.
+    const mayReach = this.#inputFailures.boundFor(session.outputKey, startIndex,
+      Number.isInteger(ordered?.to) && ordered.to >= startIndex ? ordered.to
+        : segmentCount > startIndex ? segmentCount - 1 : startIndex);
     const admittedInput = this.#host.encodeInputs?.take(session, startIndex, mayReach) ?? null;
     if (!admittedInput) return null;
     const inputEnd = admittedInput.original ? admittedInput.to : startIndex;
@@ -1113,7 +1122,7 @@ export class EncodeRuns {
       if (inputKey && failedAdmittedInput({ ending: ENCODE_EXIT.FAILED,
         code: error.code ? null : 1, because: error.message },
         session.spec.transcodesVideo && this.#host.videoEncoder.kind !== "software")) {
-        this.#inputFailures.note(session.outputKey, startIndex, inputKey, error.message);
+        this.#inputFailures.note(session.outputKey, startIndex, inputKey, error.message, { pieces: inputEnd - startIndex + 1 });
         this.#host.invalidateWaits(session);
         this.#host.productionFailed(session);
       }
@@ -1248,8 +1257,11 @@ export class EncodeRuns {
       const index = run.head;
       const key = run.admittedInputKeys.get(index);
       if (key) {
-        this.#inputFailures.note(session.outputKey, index, key, ended.because);
-        this.#host.logger.warn(`encode: unchanged input will not be retried output=${session.outputKey} segment=${index} input=${key} reason=${ended.because}`);
+        const pieces = [...run.admittedInputKeys.values()].filter(held => held === key).length;
+        this.#inputFailures.note(session.outputKey, index, key, ended.because, { pieces });
+        this.#host.logger.warn(pieces > 1
+          ? `encode: piece ${index} will be made again from an input holding it alone output=${session.outputKey} input=${key} (held ${pieces} pieces) reason=${ended.because}`
+          : `encode: unchanged input will not be retried output=${session.outputKey} segment=${index} input=${key} reason=${ended.because}`);
       }
     }
     this.#host.encodeOrchestrator.noteEnded(ended);

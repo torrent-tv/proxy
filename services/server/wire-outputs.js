@@ -97,6 +97,9 @@ import path from "node:path";
 import { contentOf, LocalObservations, PROXY_ROOT } from "../encode/LocalObservations.js";
 import { configurationKeyOf } from "../encode/fingerprint.js";
 import { qualityStateOf } from "../encode/quality/OutputQualityState.js";
+import os from "node:os";
+import { downloadShare } from "../storage/processor-share.js";
+import { ENCODE_RUN_STATE, processCanBeSignalled } from "../encode/encode-run-state.js";
 
 // Where a variant and an audio rendition live under a session — `v/<height>/…`
 // and `a/<track>/…` — is stated in `encode/output/playlists.js`, beside the lines that
@@ -193,6 +196,7 @@ export function wireOutputs({
     decodeCostModel = null,
     getSourceStats = null,
     setPriorityMap = null,
+    setDownloadRate = null,
     // What a second job costs on this host, measured at startup. Null when it
     // could not be measured, and then nothing is corrected — the alternative
     // is inventing a penalty, which is the same fault as inventing a fill rate.
@@ -342,7 +346,7 @@ export function wireOutputs({
     get encoders() { return parts.encoders; },
     invalidateWaits: (output) => parts.serving.invalidateWaits(output),
     productionFailed: (output) => parts.renditions.noteProductionFailed(output),
-    encodersChanged: () => onEncodersChanged?.(),
+    encodersChanged: () => { parts.applyDownloadShare?.(); onEncodersChanged?.(); },
   });
   // How much film is ready in front of the viewers, said; and the spare soundtracks fetched once it is full.
   parts.cushion = new CushionReport({
@@ -648,6 +652,31 @@ export function wireOutputs({
   // (sourceKey, fileIndex) => Promise<{ downloadSpeed, fileLength, fileProgress } | null>.
   parts.getSourceStats = typeof getSourceStats === "function" ? getSourceStats : null;
   parts.setPriorityMap = typeof setPriorityMap === "function" ? setPriorityMap : null;
+  parts.setDownloadRate = typeof setDownloadRate === "function" ? setDownloadRate : null;
+  // HOW FAST THE TORRENTS MAY DOWNLOAD: the processor the encoders leave
+  // (`storage/processor-share.js`, torrent-tv/meta#178). Worked out again
+  // when the machine is read and when an encoder starts or ends, over every
+  // watched file of every torrent.
+  parts.applyDownloadShare = () => {
+    if (!parts.setDownloadRate || !parts.hostLoad || !parts.encodeCost) return;
+    const files = new Map();
+    for (const output of parts.outputs.values()) {
+      if (!(parts.viewers?.forOutput(output)?.size > 0)) continue;
+      const key = output.file.key;
+      const length = Number(output.file.lengthBytes ?? parts.hostLoad.fileLengthByKey.get(key));
+      const file = files.get(key) ?? { bytesPerFilmSecond: length / Number(output.file.durationSeconds), encodeCostSec: 0 };
+      const state = parts.encodeRuns.runStateOf(output);
+      if (processCanBeSignalled(state) && state !== ENCODE_RUN_STATE.SUSPENDED) {
+        file.encodeCostSec += parts.encodeCost.loadOfOutput(output.outputKey)?.costSec ?? 0;
+      }
+      files.set(key, file);
+    }
+    const watched = [...files.values()].filter((file) => Number.isFinite(file.bytesPerFilmSecond) && file.bytesPerFilmSecond > 0);
+    const share = downloadShare({ cores: os.cpus().length, availableShare: parts.hostLoad.hostAvailability?.share ?? 1,
+      baseDraw: parts.hostLoad.baseDraw, costPerMegabyte: parts.hostLoad.observedTorrentCostPerMegabyte, files: watched });
+    void Promise.resolve(parts.setDownloadRate(share.bytesPerSecond, `film speed ${share.filmSpeed.toFixed(2)}x ` +
+      `over ${watched.length} file(s), ${share.capacity.toFixed(2)} core(s) for the proxy`)).catch(() => {});
+  };
   parts.contentionPenalties = contentionPenalties instanceof Map ? contentionPenalties : null;
   // Seconds of film per second when the picture is COPIED, measured at
   // startup. Nothing else prices that branch: the other benchmarks measure
@@ -1060,7 +1089,7 @@ export function wireOutputs({
     liveConsumers: (...args) => parts.renditions.liveConsumers(...args),
     liveRunsOf: (...args) => parts.encodeRuns.liveRunsOf(...args),
     producedNumbers: (...args) => parts.serving.producedNumbers(...args),
-    reportHostLoad: (...args) => parts.hostLoad.reportHostLoad(...args),
+    reportHostLoad: async (...args) => { await parts.hostLoad.reportHostLoad(...args); parts.applyDownloadShare?.(); },
     runStateOf: (...args) => parts.encodeRuns.runStateOf(...args),
     sampleDownloadRates: (...args) => parts.hostLoad.sampleDownloadRates(...args),
     get encodeCost() { return parts.encodeCost; },

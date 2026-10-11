@@ -164,6 +164,17 @@ export class WorkerTorrentPool {
    * @param {{ sourceKey: string, fileIndex: number, durationSeconds: number, zones: object[] }} params
    * @returns {Promise<void>}
    */
+  /**
+   * How fast the torrents may download in all, Infinity for no limit.
+   *
+   * @param {number} bytesPerSecond
+   * @param {string} [because]
+   * @returns {Promise<void>}
+   */
+  async setDownloadRate(bytesPerSecond, because = "") {
+    return this.#client.setDownloadRate(bytesPerSecond, because);
+  }
+
   async setPriorityMap({ sourceKey, fileIndex, durationSeconds, zones, postedAt }) {
     if (!sourceKey) {
       return;

@@ -89,6 +89,11 @@ export class HostLoad {
   /**
    * @param {object} host - `liveRunsOf`, `runStateOf`, the readings of `encode/host-load.js` (`readMachineState`, `readProcessCpuSeconds`, `readProxyCpuSeconds`, `readSystemCpu`, `shareOfMachine`), `getSourceStats`, `getTorrentTotals`, `outputs`
    */
+  /** The share of one core this process draws doing nothing priced; zero until measured. */
+  get baseDraw() {
+    return this.#observedBaseDraw ?? 0;
+  }
+
   constructor(host) {
     this.#host = host;
   }

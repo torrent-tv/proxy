@@ -476,6 +476,11 @@ async function runCommand(command, params, id) {
       return { appliedMs: performance.now() - startedAt, receivedAt, repliedAt: performance.timeOrigin + performance.now() };
     }
 
+    case Command.DOWNLOAD_RATE: {
+      pool.setDownloadRate(params.bytesPerSecond, params.because);
+      return true;
+    }
+
     case Command.READ_RANGE: {
       // Streams its own reply; the caller's promise resolves once the body has
       // been fully sent, which is what lets the client await completion.

@@ -1,3 +1,7 @@
+## Unreleased
+
+- **Fix**: The processor line no longer reads impossible shares such as "process 1238 %" of a core. Its counters were read as promises while the main thread was busy and the time afterwards, so one second took several seconds of counting; they are now read together, at one instant (#ttv-177).
+
 ## 2.97.1
 
 - **Fix**: At a cold start the second run of an AVI or Matroska original input is no longer one piece. A stretch is sized by the copy rate times how long an encoder takes to open that input, and a new output had no reading of its own, so its second run copied one piece and cost another open (6.34 s on Home Assistant, #ttv-166 run 12). Until an output has opened once, the host's startup reading of an encoder's start stands in, and the log says so (#ttv-184).

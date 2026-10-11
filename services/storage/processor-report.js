@@ -16,7 +16,7 @@
  * process figure alone is said.
  */
 
-import { readFile, readdir } from "node:fs/promises";
+import { readFileSync, readdirSync } from "node:fs";
 
 /** Clock ticks per second of `/proc/<pid>/stat`, as in `encode/host-load.js`. */
 const CLOCK_TICKS_PER_SECOND = 100;
@@ -59,25 +59,45 @@ export function partOfThread(tid, name, pid) {
 }
 
 /**
+ * One `/proc` stat file, or null when it cannot be read.
+ *
+ * @param {string} file
+ * @returns {{ name: string, seconds: number } | null}
+ */
+function statOf(file) {
+  try {
+    return parseStat(readFileSync(file, "utf8"));
+  } catch {
+    return null;
+  }
+}
+
+/**
  * CPU seconds of this process's threads, by part, or null where `/proc` cannot
  * be read.
  *
+ * READ SYNCHRONOUSLY, with the clock read beside it: a reading is only a share
+ * when every counter in it and its time belong to one instant. Read as
+ * promises on the field host (2.97.0), the counters were taken while the main
+ * thread was busy and the time after, and a second read "process 1238 %" of a
+ * core (torrent-tv/meta#177). About a hundred small files a second, kernel
+ * memory, no disk.
+ *
  * @param {number} [pid]
- * @returns {Promise<{ main: number, worker: number, other: number } | null>}
+ * @returns {{ main: number, worker: number, other: number } | null}
  */
-export async function readThreadSeconds(pid = process.pid) {
+export function readThreadSeconds(pid = process.pid) {
   let tids;
   try {
-    tids = await readdir(`/proc/${pid}/task`);
+    tids = readdirSync(`/proc/${pid}/task`);
   } catch {
     return null;
   }
   const parts = { main: 0, worker: 0, other: 0 };
-  await Promise.all(tids.map(async (entry) => {
-    const tid = Number(entry);
-    const stat = await readFile(`/proc/${pid}/task/${entry}/stat`, "utf8").then(parseStat, () => null);
-    if (stat) parts[partOfThread(tid, stat.name, pid)] += stat.seconds;
-  }));
+  for (const entry of tids) {
+    const stat = statOf(`/proc/${pid}/task/${entry}/stat`);
+    if (stat) parts[partOfThread(Number(entry), stat.name, pid)] += stat.seconds;
+  }
   return parts;
 }
 
@@ -85,14 +105,14 @@ export async function readThreadSeconds(pid = process.pid) {
  * CPU seconds of each of these processes that can be read now.
  *
  * @param {number[]} pids
- * @returns {Promise<Map<number, number>>}
+ * @returns {Map<number, number>}
  */
-export async function readProcessesSeconds(pids) {
+export function readProcessesSeconds(pids) {
   const seconds = new Map();
-  await Promise.all(pids.map(async (pid) => {
-    const stat = await readFile(`/proc/${pid}/stat`, "utf8").then(parseStat, () => null);
+  for (const pid of pids) {
+    const stat = statOf(`/proc/${pid}/stat`);
     if (stat) seconds.set(pid, stat.seconds);
-  }));
+  }
   return seconds;
 }
 
@@ -158,29 +178,22 @@ export function startProcessorReport({ log, ffmpegPids, detailed = () => false, 
   let previous = null;
   let series = [];
   let since = Date.now();
-  let reading = false;
-  const tick = async () => {
-    if (reading) return;
-    reading = true;
-    try {
-      const usage = process.cpuUsage();
-      const [threads, ffmpeg] = await Promise.all([readThreadSeconds(), readProcessesSeconds(ffmpegPids())]);
-      const now = { at: Date.now(), process: (usage.user + usage.system) / 1e6, threads, ffmpeg };
-      const shares = previous ? sharesBetween(previous, now) : null;
-      previous = now;
-      if (!shares) return;
-      series.push(shares);
-      if (detailed()) log(`processor: ${describeShares([shares])}`);
-      if (now.at - since >= sayEveryMs) {
-        log(`processor: ${describeShares(series)}`);
-        series = [];
-        since = now.at;
-      }
-    } finally {
-      reading = false;
+  const tick = () => {
+    const at = Date.now();
+    const usage = process.cpuUsage();
+    const now = { at, process: (usage.user + usage.system) / 1e6, threads: readThreadSeconds(), ffmpeg: readProcessesSeconds(ffmpegPids()) };
+    const shares = previous ? sharesBetween(previous, now) : null;
+    previous = now;
+    if (!shares) return;
+    series.push(shares);
+    if (detailed()) log(`processor: ${describeShares([shares])}`);
+    if (now.at - since >= sayEveryMs) {
+      log(`processor: ${describeShares(series)}`);
+      series = [];
+      since = now.at;
     }
   };
-  const timer = setInterval(() => { void tick(); }, everyMs);
+  const timer = setInterval(tick, everyMs);
   if (typeof timer.unref === "function") timer.unref();
   return { stop: () => clearInterval(timer) };
 }

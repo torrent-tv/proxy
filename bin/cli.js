@@ -88,6 +88,7 @@ program
   .option("--no-transcode-audio", "Disable optional HLS AAC audio transcoding")
   .option("--no-port-mapping", "Disable automatic UPnP/NAT-PMP port mapping")
   .option("--delivery-sink", "Serve /api/delivery-sink, a torrent-free byte stream for delivery testing")
+  .option("--profile-start <seconds>", "Profile the main thread's CPU for this many seconds from the first source opened, written beside the state (off by default)")
   .option(
     "--send-chunk-bytes <bytes>",
     "Size of one data-channel message when sending a response body (0 = whatever the body read hands over, ~64KB). For measuring whether the delivery wedge depends on that size."
@@ -392,6 +393,7 @@ try {
     budgetPolicy,
     logFile: options.logFile ?? "",
     deliverySink: options.deliverySink === true,
+    profileStartSeconds: Number(options.profileStart) || 0,
     // Late-bound the same way `webRtcManager` is below: the torrent pool is
     // built inside `startProxyServer`, before `dataChannelHandler` — the
     // thing that actually owns a channel to push down — exists.

@@ -80,6 +80,8 @@ import { measureStartAndStop } from "./services/encode/start-stop-cost.js";
 import { benchmarkAudio } from "./services/encode/audio-calibration.js";
 import { logger } from "./utils/logger.js";
 import { completedFilesRoot } from "./services/storage/files/CompletedFiles.js";
+import { startupCpuProfile } from "./services/storage/cpu-profile.js";
+import { startProcessorReport } from "./services/storage/processor-report.js";
 
 const require = createRequire(import.meta.url);
 const { version } = require("./package.json");
@@ -119,6 +121,8 @@ function buildPortCandidates(startPort, maxAttempts = 51) {
 export async function startProxyServer({
   host, port, transcodeAudio, ffmpegBin, memoryBytes, segmentFormat, stateDir, onSubtitleCues, diagnostics, budgetPolicy,
   deliverySink = false,
+  // Seconds of main-thread CPU profile from the first source opened; 0 is off.
+  profileStartSeconds = 0,
   // What viewers' connections carry beyond the film, per byte of film; the
   // transport counts it and is built after this server, so it is late-bound.
   serviceShare = () => null,
@@ -875,6 +879,22 @@ export async function startProxyServer({
       await torrentPool.fillFileInBackground?.(torrent, fileIndex);
     }
   });
+  // Where the processor goes, and at a cold start what the main thread does
+  // with it, when the operator asks (torrent-tv/meta#177).
+  const startupProfile = startupCpuProfile({
+    seconds: profileStartSeconds,
+    dir: stateDir || "",
+    log: (line) => logger.info(line),
+    mayKeep: (bytes) => diagnostics?.mayKeep?.({ what: "a CPU profile", bytes }) ?? true
+  });
+  startProcessorReport({
+    log: (line) => logger.info(line),
+    ffmpegPids: () => [...outputParts.outputs.values()]
+      .flatMap((output) => outputParts.encodeRuns.liveRunsOf(output))
+      .map((run) => run.process?.pid)
+      .filter((pid) => Number.isInteger(pid)),
+    detailed: () => startupProfile.active()
+  });
   // What the last life of this process left on the disk. The kernel kills this
   // one often enough for that to be an ordinary state rather than an odd one —
   // twice in a single viewing on 2026-09-02 — and when it does, no exit handler
@@ -1106,9 +1126,11 @@ export async function startProxyServer({
   );
   // Bytes a browser can time its link with before any film has been chosen.
   app.get("/api/link-probe", async (req, reply) => handleApiLinkProbeGet(req, reply));
-  app.post("/api/sources", async (req, reply) =>
-    handleApiSourcesPost(req, reply, { sourceRegistry, viewers: outputParts.viewers })
-  );
+  app.post("/api/sources", async (req, reply) => {
+    // A cold start begins with the first source opened (torrent-tv/meta#177).
+    startupProfile.begin();
+    return handleApiSourcesPost(req, reply, { sourceRegistry, viewers: outputParts.viewers });
+  });
   app.get("/api/sources/:sourceKey/stats", async (req, reply) =>
     handleApiSourceStatsGet(req, reply, { sourceRegistry, torrentPool })
   );

@@ -13,6 +13,7 @@ import { VideoTrack } from "../tracks/VideoTrack.js";
 import { AudioTrack } from "../tracks/AudioTrack.js";
 import { ContainerTrack } from "../tracks/ContainerTrack.js";
 import { PacketIndex } from "./PacketIndex.js";
+import { IndexMemoryUnavailable } from "./memory-unavailable.js";
 import { readAviIndex } from "./avi-index.js";
 import { isUnavailable } from "./unavailable.js";
 import { Mpeg4PictureTiming } from "./mpeg4-picture-timing.js";
@@ -34,6 +35,8 @@ export class AviContainer extends Container {
   #packets = null;
   /** The sound packets of an indexed file while they are being stated, so two asks build them once. */
   #soundPacketsReading = null;
+  /** The bytes the sound packet table was refused, while memory still could not hold them. */
+  #soundPacketsRefused = null;
   #scan = null;
   #declarations = null;
   #workTags = null;
@@ -330,9 +333,25 @@ export class AviContainer extends Container {
     // copied 2.3 GB for 0.19 GB of its own (torrent-tv/meta#166).
     const indexed = await this.#readIndex();
     if (indexed) {
+      // A refusal of memory for the table is kept for as long as the memory's
+      // owner says the same reservation still would not fit. Not kept, the
+      // next reader walked the index, counted the packets and was refused
+      // again — once per soundtrack segment, 1943 times in 8.3 s for one
+      // two-hour film (torrent-tv/meta#178). Asked at each use, the refusal
+      // cannot outlive the state of memory it was given in.
+      if (this.#soundPacketsRefused !== null) {
+        if (this.packetMemory?.fits?.(this.#soundPacketsRefused) === false) {
+          throw new IndexMemoryUnavailable(this.#soundPacketsRefused);
+        }
+        this.#soundPacketsRefused = null;
+      }
       this.#soundPacketsReading ??= this.#soundPacketsOf(indexed).then(
         packets => (this.#packets = packets),
-        error => { this.#soundPacketsReading = null; throw error; });
+        error => {
+          this.#soundPacketsReading = null;
+          if (error instanceof IndexMemoryUnavailable) this.#soundPacketsRefused = error.bytes;
+          throw error;
+        });
       return this.#soundPacketsReading;
     }
     const tracks = await this.readTracks();

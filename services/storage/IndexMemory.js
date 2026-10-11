@@ -41,32 +41,39 @@ export class IndexMemory {
     let file = this.#files.get(key);
     if (file) return file.memory;
     file = { sourceKey, held: 0, needed: 0, records: new Set(), closed: false };
-    file.memory = { forRecord: (record, kind = "packets") => {
-      file.records.add(record);
-      let disposed = false;
-      return {
-        reserve: bytes => {
-          if (file.closed || disposed) return false;
-          if (this.#held + bytes > this.#allowed) {
-            const needed = file.held + bytes;
-            if (needed > file.needed) { file.needed = needed; this.#requestRevision(); }
-            return false;
-          }
-          file.held += bytes;
-          this.#held += bytes;
-          if (kind === "packets") this.#packetBytes += bytes;
-          if (file.held >= file.needed) file.needed = 0;
-          return true;
-        },
-        release: bytes => {
-          file.held -= bytes;
-          this.#held -= bytes;
-          if (kind === "packets") this.#packetBytes -= bytes;
-          this.#requestRevision();
-        },
-        dispose: () => { disposed = true; file.records.delete(record); }
-      };
-    } };
+    file.memory = {
+      // Whether a reservation of this many bytes would succeed now. Asked by a
+      // reader that keeps a refusal, so the refusal never outlives the state
+      // of memory it was given in — an event comes only when the allowance
+      // changes, and bytes released under the same allowance raise none.
+      fits: bytes => !file.closed && this.#held + bytes <= this.#allowed,
+      forRecord: (record, kind = "packets") => {
+        file.records.add(record);
+        let disposed = false;
+        return {
+          reserve: bytes => {
+            if (file.closed || disposed) return false;
+            if (this.#held + bytes > this.#allowed) {
+              const needed = file.held + bytes;
+              if (needed > file.needed) { file.needed = needed; this.#requestRevision(); }
+              return false;
+            }
+            file.held += bytes;
+            this.#held += bytes;
+            if (kind === "packets") this.#packetBytes += bytes;
+            if (file.held >= file.needed) file.needed = 0;
+            return true;
+          },
+          release: bytes => {
+            file.held -= bytes;
+            this.#held -= bytes;
+            if (kind === "packets") this.#packetBytes -= bytes;
+            this.#requestRevision();
+          },
+          dispose: () => { disposed = true; file.records.delete(record); }
+        };
+      }
+    };
     this.#files.set(key, file);
     return file.memory;
   }

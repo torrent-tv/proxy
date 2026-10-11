@@ -39,3 +39,24 @@ test("incomplete media is not retried after publication refusal, while storage f
   assert.equal(failedAdmittedInput({ ...ended, publicationCode: "ENOSPC" }), false);
   assert.equal(failedAdmittedInput({ ...ended, publicationCode: null }), false);
 });
+
+test("a piece of a longer input that failed is made again from an input holding it alone, and only that failure is final", () => {
+  const failures = new InputFailures();
+  // Run #314..#319 refused its piece 316 (field 2026-10-11, torrent-tv/meta#178).
+  failures.note("output", 316, "stretch-314-319", "Closed piece #316 has incomplete media.", { pieces: 6 });
+  assert.equal(failures.reason("output"), null, "production has not ended");
+  assert.equal(failures.retrying("output"), true);
+  // A run at the piece holds it alone; a run before it stops before it.
+  assert.equal(failures.boundFor("output", 316, 945), 316);
+  assert.equal(failures.boundFor("output", 314, 945), 315);
+  assert.equal(failures.boundFor("output", 317, 945), 945);
+  assert.equal(failures.boundFor("another", 316, 945), 945);
+  // The input holding it alone is another input: admitting it clears the wait.
+  assert.equal(failures.failure("output", 316, "alone-316"), null);
+  assert.equal(failures.retrying("output"), false);
+  // Its failure is final.
+  failures.note("output", 316, "alone-316", "Closed piece #316 has incomplete media.", { pieces: 1 });
+  assert.equal(failures.reason("output"), "Closed piece #316 has incomplete media.");
+  assert.equal(failures.retrying("output"), false);
+  assert.equal(failures.boundFor("output", 314, 945), 945);
+});

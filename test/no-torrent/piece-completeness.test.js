@@ -7,7 +7,7 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
-import { cutOf, cutShiftOf, judgeNeighbors, judgePiece } from "../../services/encode/piece-completeness.js";
+import { cutOf, cutShiftOf, judgeNeighbors, judgePiece, onItsCutClock } from "../../services/encode/piece-completeness.js";
 
 import { SEGMENT_CUT_TIME_DELTA_SECONDS } from "../../services/encode/output/index.js";
 import { readFileSync } from "node:fs";
@@ -174,4 +174,22 @@ test("movie-edit quantization does not reject one-frame encoder priming or conce
     { start: 40901025n, end: 41281296n, frame: 1024n }
   ];
   assert.equal(judgePiece(fmp4Format, coverage, undefined, interval).reason, "segment-gap-within-interval-soun");
+});
+
+test("a piece the proxy cut again is judged on the published grid, not on the muxer's shift", () => {
+  // Field 2026-10-11, torrent-tv/meta#178, piece 316 of an open-GOP HEVC copy
+  // (24000/1001 in a millisecond Matroska clock, 16 000 ticks a second): cut
+  // again at 2511.676..2521.686, it holds the next keyframe its leading
+  // pictures need and so ends one frame past the cut. The run's muxer counted
+  // its cuts from 0.001 s before its start.
+  const piece = () => ({ tracks: [{ kind: "vide", timescale: 16000n, productionFrame: 672n, positionErrorTicks: 1n,
+    ranges: [{ start: 40186816n, end: 40347648n, frame: 672n }] }] });
+  const interval = { from: 2511.676, to: 2521.686, requiredKinds: ["vide"] };
+  const shift = -0.001;
+  const asJudgedInTheField = judgePiece(fmp4Format, { ...piece(), cutShiftSeconds: shift }, undefined, interval);
+  assert.deepEqual([asJudgedInTheField.whole, asJudgedInTheField.reason], [false, "segment-end-outside-interval-vide"]);
+  assert.equal(judgePiece(fmp4Format, onItsCutClock(piece(), shift, true), undefined, interval).whole, true);
+  // A piece the muxer cut is still moved by its shift.
+  assert.equal(onItsCutClock(piece(), shift, false).cutShiftSeconds, shift);
+  assert.equal(onItsCutClock(piece(), null, false).cutShiftSeconds, undefined);
 });

@@ -25,6 +25,8 @@ function keep(readings, value) {
 /** Event-driven preparation; a synchronous run request can take only ready input. */
 export class EncodeInputs {
   #requests = new Map();
+  /** Whether an output's last resolved input was its original file. @type {WeakMap<object, boolean>} */
+  #original = new WeakMap();
   #revision = 0;
   #memoryRevision = 0;
   #held = 0;
@@ -128,6 +130,17 @@ export class EncodeInputs {
     for (const request of this.#requests.values()) {
       if (!request.pending && request.result?.kind === "needs-memory") this.#prepare(request);
     }
+  }
+
+  /**
+   * Whether this output reads its original file, as its last resolved input
+   * did, or undefined before any was resolved.
+   *
+   * @param {object} output
+   * @returns {boolean | undefined}
+   */
+  readsOriginal(output) {
+    return this.#original.get(output);
   }
 
   failureOf(output) {
@@ -262,6 +275,7 @@ export class EncodeInputs {
     request.timing.attempts += 1;
     request.promise = (async () => {
       const resolved = await this.#resolveTimed(request.timing, request.output, request.from, request.from);
+      if (resolved.kind === "result") this.#original.set(request.output, resolved.sources?.every(source => source.input.original === true) === true);
       if (this.#requests.get(request.key) !== request) return;
       let result;
       if (resolved.kind !== "result") {

@@ -116,6 +116,12 @@ export class EncodeRun {
   /** Half a name left over from the last chunk of the encoder's own channel. */
   #closedTail = "";
   #pendingClosed = null;
+  /**
+   * The last closed piece when this run was stopped, published once the file
+   * the muxer flushes after it is named — the file that says where the next
+   * keyframe's leading pictures end it — or at the exit when none is.
+   */
+  #pendingAtStop = null;
   #closedTimings = new Map();
   #publicationError = null;
   #publicationCode = null;
@@ -226,6 +232,9 @@ export class EncodeRun {
    *   encoder itself names it on its own channel, and answers with the name that
    *   piece is served under — because making it servable is a rename, and only
    *   whoever owns the disk can perform one.
+   * @param {(name: string) => void} [params.onTail] - Called with the working
+   *   name of a file this run closed but will not publish: past its last cut, or
+   *   flushed when it was stopped. It begins with the next keyframe.
    * @param {(index: number) => void} [params.onProduced] - Called with every
    *   segment number this run has closed, as it closes it.
    * @param {(progress: object) => void} [params.onProgress] - Called with this
@@ -262,6 +271,7 @@ export class EncodeRun {
     onEnded,
     onSpeedMeasured,
     onClosed,
+    onTail,
     onProgress,
     onProduced,
     lastSegmentIndex,
@@ -292,6 +302,7 @@ export class EncodeRun {
     // Told the NAME of every piece the encoder has closed. The name is the
     // proof it is whole; nothing else here can prove that.
     this.onClosed = typeof onClosed === "function" ? onClosed : (name) => name;
+    this.onTail = typeof onTail === "function" ? onTail : () => {};
     this.lastSegmentIndex = typeof lastSegmentIndex === "function" ? lastSegmentIndex : () => null;
     this.inputUnavailable = typeof inputUnavailable === "function" ? inputUnavailable : () => false;
     this.argsDescribed = argsDescribed;
@@ -605,7 +616,18 @@ export class EncodeRun {
       if (name.length === 0) {
         continue;
       }
-      if (this.#stopping || this.#publicationError) continue;
+      if (this.#publicationError) continue;
+      if (this.#stopping) {
+        // Flushed by our stop. Never published; it tells where the piece closed
+        // before the stop ends, and it begins with the next keyframe.
+        if (this.#pendingAtStop !== null) {
+          const pending = this.#pendingAtStop;
+          this.#pendingAtStop = null;
+          this.#publishClosed(pending, name, { quiet: true });
+        }
+        this.onTail(name);
+        continue;
+      }
       if (csv) {
         this.#closedTimings.set(name, {
           endMicros: BigInt(Math.round(Number(csv[3]) * 1_000_000))
@@ -626,6 +648,7 @@ export class EncodeRun {
       // A packet crossing the final cut can flush a following file. It may
       // complete its predecessor, but no unadmitted interval can be published.
       if (Number.isInteger(index) && Number.isInteger(endOfWork) && index > endOfWork) {
+        this.onTail(name);
         this.#closedTimings.delete(name);
         this.#pendingClosed = null;
         continue;
@@ -634,7 +657,7 @@ export class EncodeRun {
     }
   }
 
-  #publishClosed(name, following = null) {
+  #publishClosed(name, following = null, { quiet = false } = {}) {
       this.#measureSpeed();
       // ITS SERVED NAME, which is what whoever owns the disk gives it in answer.
       // ffmpeg writes a piece under a working name and reports that; the piece
@@ -644,6 +667,14 @@ export class EncodeRun {
       try {
         served = this.onClosed(name, following, this.#closedTimings.get(name) ?? null);
       } catch (error) {
+        if (quiet) {
+          // A piece closed before our stop that cannot be proved whole is not
+          // published, and it is not a failure of the run: it is made again
+          // where it is wanted.
+          this.logger?.warn?.(`encode-run #${this.from}..#${this.to} on ${this.address}: ${name} closed before the stop is not published: ` +
+            `${error instanceof Error ? error.message : String(error)}`);
+          return false;
+        }
         this.#publicationError = error instanceof Error ? error.message : String(error);
         this.#publicationCode = error?.code ?? null;
         this.lastError = this.#publicationError;
@@ -713,9 +744,11 @@ export class EncodeRun {
       return;
     }
     // A cut closed before our stop stays complete; the file flushed by the
-    // subsequent signal must never be published as that same proof.
+    // subsequent signal must never be published as that same proof. It is
+    // waited for all the same: it says where the next keyframe's leading
+    // pictures end the piece before it (torrent-tv/meta#178).
     if (this.#pendingClosed !== null && !this.#processExited && !this.#inputTruncated) {
-      this.#publishClosed(this.#pendingClosed);
+      this.#pendingAtStop = this.#pendingClosed;
       this.#pendingClosed = null;
     }
     this.#stopping = true;
@@ -845,6 +878,11 @@ export class EncodeRun {
       return;
     }
     if (this.#stopping) {
+      if (this.#pendingAtStop !== null) {
+        const pending = this.#pendingAtStop;
+        this.#pendingAtStop = null;
+        this.#publishClosed(pending, null, { quiet: true });
+      }
       this.#finish(ENCODE_EXIT.STOPPED, this.#stopReason, code, signal);
       return;
     }

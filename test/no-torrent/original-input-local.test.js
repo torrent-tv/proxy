@@ -10,7 +10,7 @@ import { admitOriginalInput } from "../../services/encode/OriginalInput.js";
 import { buildOriginalCommand } from "../../services/encode/source-command.js";
 import { handleEncodeInputGet } from "../../routes/encode-input/get.js";
 import { fmp4Format } from "../../services/encode/segment-formats/fmp4.js";
-import { judgePiece } from "../../services/encode/piece-completeness.js";
+import { judgePiece, leadingSecondsOf } from "../../services/encode/piece-completeness.js";
 import { presentationSegment } from "../../services/encode/segment-formats/presentation-segment.js";
 
 // Generated ordinary media and a loopback HTTP server only; no torrent imports.
@@ -57,8 +57,14 @@ for (const [bFrames, startIndex, videoIndex = 0, sourceStart = 0, codec = "libx2
     const raw = await fs.readFile(path.join(directory, `making-zero-${String(startIndex).padStart(5, "0")}.mp4`));
     const followingName = path.join(directory, `making-zero-${String(startIndex + 1).padStart(5, "0")}.mp4`);
     const following = await fs.readFile(followingName).catch(error => { if (error.code === "ENOENT") return null; throw error; });
-    const partitioned = audioOnly ? raw : presentationSegment(raw, following, { from: startIndex * cut, to: (startIndex + 1) * cut });
+    // A run reading from a keyframe has no group before it: the first piece's
+    // leading pictures, which it cannot make, are removed.
+    const partitioned = audioOnly ? raw : presentationSegment(raw, following, { from: startIndex * cut, to: (startIndex + 1) * cut },
+      { firstOfRun: startIndex > 0 });
     const coverage = fmp4Format.readMediaRanges(partitioned);
+    // The next keyframe's leading pictures end the piece before its cut.
+    const lead = !audioOnly && following ? leadingSecondsOf(fmp4Format.readMediaRanges(following)) : 0;
+    coverage.nextLeadingSeconds = lead;
     if (!audioOnly) assert.deepEqual(fmp4Format.initVideoSize(fmp4Format.extractInit(raw)), { width: videoIndex ? 32 : 64, height: videoIndex ? 32 : 64 });
     const judged = judgePiece(fmp4Format, coverage, undefined, { from: startIndex * cut, to: (startIndex + 1) * cut, requiredKinds: [audioOnly ? "soun" : "vide"] });
     assert.equal(judged.whole, true, JSON.stringify({ judged, coverage }, (_key, value) => typeof value === "bigint" ? String(value) : value));
@@ -66,37 +72,27 @@ for (const [bFrames, startIndex, videoIndex = 0, sourceStart = 0, codec = "libx2
     if (codec === "libx265") {
       const interval = { from: startIndex * cut, to: (startIndex + 1) * cut, requiredKinds: ["vide"] };
       if (!final) {
-        assert.equal(judgePiece(fmp4Format, fmp4Format.readMediaRanges(raw), undefined, interval).whole, false,
-          "the muxer's unpartitioned open GOP lacks leading pictures");
-        assert.equal(judgePiece(fmp4Format, fmp4Format.readMediaRanges(presentationSegment(raw, null, interval)), undefined, interval).whole, false,
-          "absent following media remains incomplete");
+        assert.ok(lead > 0, "the next keyframe of the generated open GOP has leading pictures");
+        const { nextLeadingSeconds: _span, ...unstated } = coverage;
+        assert.equal(judgePiece(fmp4Format, unstated, undefined, interval).whole, false,
+          "without the next keyframe's span the piece reads short of its cut");
       } else {
         assert.equal(following, null, "the final interval needs no following file");
       }
       const restored = path.join(directory, "restored.mp4");
       await fs.writeFile(restored, partitioned);
-      const hashes = (source, end = interval.to) => {
+      const until = interval.to - lead - 0.001;
+      const hashes = (source) => {
         const decoded = spawnSync(ffmpegBin, ["-v", "error", "-xerror", "-copyts", "-i", source, "-an",
-          "-vf", `trim=start=${interval.from}:end=${end}`, "-fps_mode", "passthrough", "-enc_time_base", "1:1000000", "-f", "framemd5", "-"],
+          "-vf", `trim=start=${interval.from}:end=${until}`, "-fps_mode", "passthrough", "-enc_time_base", "1:1000000", "-f", "framemd5", "-"],
           { encoding: "utf8", windowsHide: true });
         assert.equal(decoded.status, 0, decoded.stderr);
         assert.equal(decoded.stderr.trim(), "");
-        return decoded.stdout.split(/\r?\n/).filter(line => line && !line.startsWith("#")).map(line => {
-          const columns = line.split(",");
-          return { pts: Number(columns[2]), hash: columns.at(-1).trim() };
-        });
+        return decoded.stdout.split(/\r?\n/).filter(line => line && !line.startsWith("#")).map(line => line.split(",").at(-1).trim());
       };
       const expected = hashes(file);
-      assert.equal(expected.length, 240);
-      const decoded = hashes(restored, interval.to + 0.02);
-      assert.deepEqual(decoded.slice(0, expected.length).map(frame => frame.hash), expected.map(frame => frame.hash), "every recovered picture decodes identically to the original interval");
-      assert.equal(decoded.length, expected.length + Number(!final), "only a required following CRA is retained as a decode reference");
-      const withReference = hashes(file, interval.to + 0.02);
-      assert.deepEqual(decoded.map(frame => frame.hash), withReference.map(frame => frame.hash), "the additional decode reference is the next source picture");
-      for (let index = 0; index < decoded.length; index++) {
-        assert.ok(Math.abs(decoded[index].pts - withReference[index].pts) <= Math.ceil(1_000_000 / Number(coverage.tracks[0].timescale)) + 1,
-          `picture ${index} retains its presentation time: ${decoded[index].pts} vs ${withReference[index].pts}`);
-      }
+      assert.ok(expected.length > 200, `the interval holds its pictures: ${expected.length}`);
+      assert.deepEqual(hashes(restored), expected, "every picture of the piece decodes as the original does, from its keyframe on");
     }
   } finally {
     if (server) await new Promise(resolve => server.close(resolve));

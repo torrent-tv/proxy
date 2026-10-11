@@ -55,3 +55,60 @@ test("an indexed AVI's soundtrack asks the budget for its whole packet table at 
     await fs.rm(absolute, { recursive: true, force: true });
   }
 });
+
+// torrent-tv/meta#178: a refused table is not counted and reserved again by
+// every reader while the memory's owner says it still would not fit — and the
+// refusal ends as soon as it would, including when bytes are released under an
+// unchanged allowance, which raises no memory event.
+test("an indexed AVI's refused soundtrack table is asked for again only when it would fit", async () => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), "ttv178-avi-refusal-"));
+  try {
+    const file = path.join(directory, "source.avi");
+    const made = spawnSync(ffmpegBin, ["-v", "error", "-f", "lavfi", "-i", "testsrc2=size=64x64:rate=5",
+      "-f", "lavfi", "-i", "sine=sample_rate=48000", "-t", "60", "-c:v", "mpeg4", "-vtag", "XVID",
+      "-c:a", "libmp3lame", "-b:a", "32k", "-f", "avi", file], { windowsHide: true, encoding: "utf8" });
+    assert.equal(made.status, 0, made.stderr);
+    const bytes = await fs.readFile(file);
+    const memory = new IndexMemory({});
+    const owner = memory.forFile("local", 0);
+    let packetReservations = 0;
+    const counted = { fits: owner.fits, forRecord: (record, kind = "packets") => {
+      const allocation = owner.forRecord(record, kind);
+      return { ...allocation, reserve: size => { if (kind === "packets") packetReservations++; return allocation.reserve(size); } };
+    } };
+    const container = new AviContainer({ fileSize: bytes.length, readRange: async (start, end) => bytes.subarray(start, end + 1),
+      packetMemory: counted });
+    for (let attempt = 0; ; attempt++) {
+      try { await container.supportsOriginalSourceRanges(); break; } catch (error) {
+        if (!(error instanceof IndexMemoryUnavailable) || attempt > 50) throw error;
+        memory.allow(memory.wanted());
+      }
+    }
+    const refusal = async () => {
+      try { await container.readPacketIndex(); } catch (error) { if (error instanceof IndexMemoryUnavailable) return error.bytes; throw error; }
+      return null;
+    };
+    const before = packetReservations;
+    const table = await refusal();
+    assert.ok(table > 0, "the table does not fit under the allowance the index left");
+    for (let read = 0; read < 99; read++) assert.equal(await refusal(), table);
+    assert.equal(packetReservations - before, 1, "one reservation was attempted for a hundred readers");
+
+    // The table would fit, but another holder takes the room: still refused, and still not reserved again.
+    memory.allow(memory.held() + table);
+    const other = owner.forRecord({}, "index");
+    assert.equal(other.reserve(table), true);
+    assert.equal(await refusal(), table);
+    assert.equal(packetReservations - before, 1);
+    // The other holder lets go; the allowance is unchanged, so no event comes. The next reader builds it.
+    other.release(table);
+    other.dispose();
+    assert.equal(await refusal(), null, "released memory ends the refusal without a new allowance");
+    const audio = (await container.readTracks()).find(track => track.type === "audio");
+    assert.ok((await container.readPacketIndex()).boundsOf(audio.trackNumber).end > 59);
+  } finally {
+    const absolute = path.resolve(directory);
+    assert.ok(path.basename(absolute).startsWith("ttv178-avi-refusal-"));
+    await fs.rm(absolute, { recursive: true, force: true });
+  }
+});

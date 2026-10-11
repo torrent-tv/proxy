@@ -17,7 +17,7 @@ import { computeOutputDimensions } from "./args.js";
 import { buildAdmittedCommand } from "./admitted-command.js";
 import { buildOriginalCommand } from "./source-command.js";
 import { writeAdmittedInput } from "./AdmittedInput.js";
-import { cutOf, cutShiftOf, judgeNeighbors, judgePiece } from "./piece-completeness.js";
+import { cutOf, cutShiftOf, judgeNeighbors, judgePiece, onItsCutClock } from "./piece-completeness.js";
 import { presentationSegment } from "./segment-formats/presentation-segment.js";
 import { InputFailures, failedAdmittedInput } from "./InputFailures.js";
 import { readProcessCpuSeconds } from "./host-load.js";
@@ -374,6 +374,9 @@ export class EncodeRuns {
       return null;
     }
     const address = session.outputKey ?? "";
+    // `bytes` is the piece the proxy cut again by presentation time at the
+    // published grid; without it the piece is as the muxer cut it.
+    const cutByProxy = bytes !== null;
     try {
       const mediaRanges = format.readMediaRanges(bytes ?? this.#host.segmentFiles.closedBytesOf(address, name));
 
@@ -390,16 +393,27 @@ export class EncodeRuns {
         // piece has closed, and holds for every piece after it. It is a fact
         // of each piece the run makes, so it travels with the piece.
         if (run.cutShiftSeconds === null && index === run.from) {
-          run.cutShiftSeconds = cutShiftOf(mediaRanges, grid?.[run.from], session.spec.carries !== "audio-only" ? "vide" : "soun",
+          // Read from the piece as the muxer closed it: a piece cut again by
+          // the proxy starts where the grid says, whatever the muxer did.
+          const asMuxed = cutByProxy ? format.readMediaRanges(this.#host.segmentFiles.closedBytesOf(address, name)) : mediaRanges;
+          run.cutShiftSeconds = cutShiftOf(asMuxed, grid?.[run.from], session.spec.carries !== "audio-only" ? "vide" : "soun",
             timing?.endMicros ?? null);
+          // Said once per run: a piece judged on the wrong clock is refused by
+          // a millisecond, and nothing else in the log says which clock it was
+          // judged on (torrent-tv/meta#178).
+          this.#host.logger.info(`encode-run #${run.from}..#${run.to} on ${address}: its muxer counts cuts ` +
+            (run.cutShiftSeconds === null ? "from a first packet more than a frame away from its start (shift unknown)"
+              : `${run.cutShiftSeconds.toFixed(6)}s from its start at ${grid?.[run.from]}s`) +
+            (cutByProxy ? "; its pieces are cut again by the proxy at the published grid, so the shift does not apply to them" : ""));
         }
-        if (mediaRanges && run.cutShiftSeconds !== null) mediaRanges.cutShiftSeconds = run.cutShiftSeconds;
+        onItsCutClock(mediaRanges, run.cutShiftSeconds, cutByProxy);
       }
       const { whole, throughSeconds, reason } = judgePiece(format, mediaRanges, cut, interval);
       if (!whole) {
         this.#host.logger.warn(
           `encode: not publishing piece ${index} of ${address.slice(0, 60)}: ` +
             (reason ?? (throughSeconds === null ? "it holds no playable media" : `produced through ${throughSeconds}s, cut ${cut}s`)) +
+            ` cutBy=${cutByProxy ? "proxy" : "muxer"} shift=${Number.isFinite(mediaRanges?.cutShiftSeconds) ? mediaRanges.cutShiftSeconds : "none"}` +
             (interval ? ` expected=${interval.from}..${interval.to} tracks=${JSON.stringify(mediaRanges.tracks.map(track => ({
               kind: track.kind, timescale: track.timescale, frame: track.productionFrame,
               first: track.ranges[0], last: track.ranges.at(-1), count: track.ranges.length })),

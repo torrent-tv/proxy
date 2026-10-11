@@ -71,6 +71,29 @@ export function judgePiece(format, ranges, cutSeconds, interval) {
 }
 
 /**
+ * Put a piece on the clock it was cut by, for {@link judgePiece}.
+ *
+ * The run's cut shift ({@link cutShiftOf}) says where the segment MUXER counts
+ * its cuts from, so it belongs only to a piece the muxer cut. A copied picture
+ * read from the original file is cut again by the proxy, by presentation time
+ * at the published grid (`presentationSegment`), and that piece is judged on
+ * the grid as published. Field 2026-10-11, torrent-tv/meta#178: an open-GOP
+ * HEVC piece cut again at 2511.676..2521.686 holds the next keyframe, which its
+ * leading pictures need, and so ends one frame (672 of 16 000 ticks) past the
+ * cut, as it must; moved by the muxer's shift of −0.001 s the allowance ended
+ * one millisecond before that frame, the piece was refused and playback ended.
+ *
+ * @param {object | null | undefined} ranges - The piece's media intervals.
+ * @param {number | null} shift - The run's cut shift, or null when not known.
+ * @param {boolean} cutByProxy - Whether the proxy cut the piece again.
+ * @returns {object | null | undefined} The same intervals.
+ */
+export function onItsCutClock(ranges, shift, cutByProxy) {
+  if (ranges && !cutByProxy && Number.isFinite(shift)) ranges.cutShiftSeconds = shift;
+  return ranges;
+}
+
+/**
  * How far after its requested start a run's segment muxer counts its cuts
  * from, read from the run's FIRST piece, or `null` when that piece does not
  * start within one frame of the start.

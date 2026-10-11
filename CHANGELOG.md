@@ -1,3 +1,7 @@
+## Unreleased
+
+- **Fix**: A copied picture cut again by the proxy at the published times is judged on those times, not moved by where the segment muxer counted its own cuts from. An open-GOP HEVC piece holds the next keyframe its leading pictures need and so ends one frame past its cut; moved by the muxer's shift of −0.001 s it was refused by one millisecond and the viewer's playback ended with a 500 after a seek (Home Assistant, piece 316 of a 1036p film). Each run now says where its muxer counts cuts from, and a refusal says which clock it used (#ttv-178).
+
 ## 2.97.4
 
 - **Fix**: An encoder's input is named by its source, file, ranges and what is stated about its packets, without hashing every copied byte. On Home Assistant hashing took 13.45 s of 180 s of the main thread on a Matroska film whose picture and sound copy the same ~30 MB per piece. The check that a packet's address holds its expected payload stays (#ttv-178).

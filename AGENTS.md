@@ -67,21 +67,16 @@ are recorded in `docs/browser-proxy-contract.md`.
     `SubtitleOrchestrator` by `server.js`, and `torrent/Contents.js` to the
     planner — so this layer can be exercised with plain values, no torrent, no
     thread and no disk. Checked by breaking it in every direction.
-  - **The parse happens on the MAIN thread, and the torrent thread serves
-    bytes.** It used to parse containers too — tracks, media info, keyframe
-    index — and carry each answer back over the channel, on the stated ground
-    that "the main thread cannot open a read stream on one of its files". True
-    of WebTorrent's API, not of the bytes: a container is built from one
-    function, `readRange(start, end)`, the pieces live in shared memory, and
-    `WorkerTorrentPool.readRangeOf` is the read that serves every segment — it
-    waits for what has not arrived and steers the swarm toward it. That split
-    is what made "where is this fact kept" a question at all; with one thread it
-    does not arise. NOTHING in that thread reaches into the media layer now —
-    the subtitle cue walk was the last, and it is handed which byte ranges of a
-    file are downloaded WHOLE (one list per pass, not a question per cluster)
-    plus a store read that never fetches, both in
-    `torrent/worker/held-bytes.js`. A piece arriving is ANNOUNCED
-    (`PIECES_ARRIVED`) rather than acted on there. Pinned by
+  - **Which thread does a piece of work is decided by what it gives the viewer,
+    measured — not by a rule** (user, 2026-10-11, torrent-tv/meta#183). Today
+    containers are parsed on the main thread from `readRange(start, end)` over
+    the pieces in shared memory, and the torrent thread serves bytes, lists
+    which ranges of a file are held whole and reads them without fetching
+    (`torrent/worker/held-bytes.js`). That is a current placement, open to
+    change where a measurement shows a gain. What does not change: ONE owner
+    per fact — one container orchestrator, its readings kept once, never a
+    second independent parse — and only the viewers' priority map tells the
+    torrent what to download. Pinned by
     `test/no-torrent/the-torrent-thread-serves-bytes.test.js`.
   - `media/container/` — domain: `Container` (abstract, RFC 9559 / ISO 14496-12),
     `MatroskaContainer` / `Mp4Container` / `AviContainer`, `ContainerFactory`

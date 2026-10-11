@@ -1,22 +1,16 @@
 /**
- * @file The torrent thread serves bytes. It does not read what a file says.
+ * @file One owner of what a file says, and the torrent thread fetching only
+ * what the map asks for.
  *
- * Both halves of that were true of the design and only one was true of the
- * code: pieces have lived in shared memory since the reader was rewritten, and
- * the torrent thread ALSO parsed containers — the track table, the media info
- * and the keyframe index — and carried each answer back over the channel.
- *
- * The stated reason was "the main thread cannot open a read stream on one of
- * its files". That is true of WebTorrent's own API and not of the bytes: a
- * container is built from one function, `readRange(start, end)`, and the read
- * that serves every segment already waits for what has not arrived and steers
- * the swarm toward it. What the split cost was three commands, a second
- * `ContainerOrchestrator` in that thread, and — because an answer then had to
- * be carried across — the question of where each such answer is KEPT, which is
- * how one fact came to be stored twice.
- *
- * These checks are structural because the property is structural: there is no
- * input that makes a parse happen in the wrong thread, only an import.
+ * Which thread reads a container is not a rule here: it is decided by what it
+ * gives the viewer, measured (torrent-tv/meta#183). What these checks hold is
+ * what a thread placement once served as a proxy for. A container's readings
+ * were once kept in two places — the torrent thread parsed the track table,
+ * the media info and the keyframe index and carried each answer back, while
+ * the main thread kept its own — and one fact came to be stored twice. So
+ * there is ONE container orchestrator, wherever it runs; and the reads this
+ * thread offers others never fetch, because only the viewers' priority map
+ * tells the torrent what to download.
  */
 
 import test from "node:test";
@@ -25,7 +19,8 @@ import { readFileSync, readdirSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
-const WORKER = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../services/torrent/worker");
+const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
+const WORKER = path.join(ROOT, "services/torrent/worker");
 
 /**
  * @param {string} name
@@ -35,35 +30,28 @@ function source(name) {
   return readFileSync(path.join(WORKER, name), "utf8");
 }
 
-test("no command asks the torrent thread what a file declares", () => {
-  const protocol = source("protocol.js");
+/**
+ * Every source file of the proxy itself, tests and dependencies left out.
+ *
+ * @param {string} directory
+ * @returns {string[]}
+ */
+function sourcesUnder(directory) {
+  return readdirSync(directory, { withFileTypes: true }).flatMap((entry) => {
+    const full = path.join(directory, entry.name);
+    if (entry.isDirectory()) return sourcesUnder(full);
+    return entry.name.endsWith(".js") ? [full] : [];
+  });
+}
 
-  for (const gone of [
-    "CONTAINER_TRACKS",
-    "CONTAINER_MEDIA_INFO",
-    "CONTAINER_KEYFRAMES",
-    "SUBTITLE_TRACKS",
-    "SUBTITLE_CUES"
-  ]) {
-    assert.equal(
-      protocol.includes(gone),
-      false,
-      `${gone} is a question about the FILE, and it is answered where the sessions are`
-    );
-  }
-});
+test("a file's container readings have one owner", () => {
+  // The orchestrator is the one place a container is built and its readings
+  // kept; a second instance in any thread is the fact stored twice again.
+  const building = [path.join(ROOT, "server.js"), ...sourcesUnder(path.join(ROOT, "services")), ...sourcesUnder(path.join(ROOT, "bin"))]
+    .filter((file) => /new ContainerOrchestrator\(/.test(readFileSync(file, "utf8")))
+    .map((file) => path.relative(ROOT, file).replaceAll("\\", "/"));
 
-test("nothing in that thread reaches into the media layer at all", () => {
-  // The last one to was the subtitle cue walk, and it moved with the rest: it
-  // is handed which ranges of a file are downloaded whole and how to read one
-  // of those, and it has no use for a torrent beyond that. What stayed behind
-  // is the two things only this thread can answer — the bitfield as a list of
-  // ranges, and a store read that never fetches (`held-bytes.js`).
-  const reaching = readdirSync(WORKER)
-    .filter((name) => name.endsWith(".js"))
-    .filter((name) => /from "(?:\.\.\/)+media\//.test(source(name)));
-
-  assert.deepEqual(reaching, []);
+  assert.deepEqual(building, ["services/media/ContainerOrchestrator.js"]);
 });
 
 test("what the walk may read is answered as a list, not asked per cluster", () => {
@@ -97,9 +85,8 @@ test("the torrent thread has no independent resume or whole-file warm commands",
 });
 
 test("the main thread can read a byte range of a file", () => {
-  // The one thing the move needed, and the whole of what a container is built
-  // from. Without it the parse has nowhere to get its bytes and the commands
-  // come back.
+  // What a container is built from wherever it runs today: one function,
+  // `readRange(start, end)`, over the pieces in shared memory.
   assert.match(source("pool-adapter.js"), /async readRangeOf\(torrent, fileIndex, start, end\)/);
 });
 

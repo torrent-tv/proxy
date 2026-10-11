@@ -35,6 +35,11 @@ export async function admitOriginalInput({ sources, reserve, readRanges, now = D
     // time went: field 2026-10-08, a run took 6-9 s for a piece FFmpeg makes in
     // 1.6 s from a file, and nothing said whether it was waiting on its input.
     const reads = { count: 0, bytes: 0, firstAt: 0, lastAt: 0 };
+    // Each answer FFmpeg was sent, in order: where it began, where its range
+    // ended, what was handed to the system before the connection closed, and
+    // whether all of it was (torrent-tv/meta#177).
+    /** @type {{ fileIndex: number, start: number, end: number, written: number, handedOver: boolean, at: number }[]} */
+    const answers = [];
     return {
       kind: "result", original: true, sources, bytes, copyMs, fingerprint: hash.digest("hex"),
       // No track's own end: the container names the bytes an interval needs,
@@ -59,7 +64,10 @@ export async function admitOriginalInput({ sources, reserve, readRanges, now = D
         return { length: fileLength, end: stop, bytes: entry.buffers[position].subarray(start - ranges[position][0], stop - ranges[position][0] + 1) };
       },
       lengthOf: fileIndex => held.get(fileIndex)?.source.input.fileLength ?? null,
-      reads: () => ({ ...reads }),
+      reads: () => ({ ...reads, answers: describeAnswers(answers) }),
+      noteAnswer(answer) {
+        if (!released) answers.push({ ...answer, at: Date.now() });
+      },
       release() {
         if (released) return;
         released = true;
@@ -76,4 +84,40 @@ export async function admitOriginalInput({ sources, reserve, readRanges, now = D
 export function originalInputBytes(sources) {
   return sources.reduce((total, source) => total + source.input.ranges
     .reduce((sum, [start, end]) => sum + end - start + 1, 0), 0);
+}
+
+/**
+ * The shape of FFmpeg's reads of one input, from the answers it was sent:
+ * how much was handed to the system (at most what FFmpeg read), how many
+ * connections closed before all of an answer was handed over, what share began
+ * at or after the end of the previous one (a forward read), the largest jump
+ * back, and the bytes written again that an earlier answer had already
+ * written. Per file, since two files are read independently.
+ *
+ * @param {{ fileIndex: number, start: number, end: number, written: number, handedOver: boolean, at: number }[]} answers
+ * @returns {{ count: number, written: number, unfinished: number, forwardShare: number | null, largestBackBytes: number, rewritten: number, list: object[] }}
+ */
+export function describeAnswers(answers) {
+  let written = 0, unfinished = 0, forward = 0, largestBackBytes = 0, rewritten = 0;
+  const reachedOf = new Map();
+  const coveredOf = new Map();
+  for (const answer of answers) {
+    written += answer.written;
+    if (!answer.handedOver) unfinished += 1;
+    const reached = reachedOf.get(answer.fileIndex);
+    if (reached === undefined || answer.start >= reached) forward += 1;
+    else largestBackBytes = Math.max(largestBackBytes, reached - answer.start);
+    // Bytes actually taken by this answer, as a range from its start.
+    const takenEnd = answer.start + Math.max(0, answer.written) - 1;
+    const covered = coveredOf.get(answer.fileIndex) ?? [];
+    for (const [from, to] of covered) {
+      const overlap = Math.min(to, takenEnd) - Math.max(from, answer.start) + 1;
+      if (overlap > 0) rewritten += overlap;
+    }
+    if (takenEnd >= answer.start) covered.push([answer.start, takenEnd]);
+    coveredOf.set(answer.fileIndex, covered);
+    reachedOf.set(answer.fileIndex, Math.max(reached ?? 0, takenEnd + 1));
+  }
+  return { count: answers.length, written, unfinished,
+    forwardShare: answers.length ? forward / answers.length : null, largestBackBytes, rewritten, list: answers };
 }

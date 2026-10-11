@@ -136,13 +136,40 @@ export class DownloadMaps {
         urgent = current.urgent;
         deadlineAt = Number.isFinite(current.deadlineAt) ? current.deadlineAt - leadSeconds * 1000 : current.deadlineAt;
       }
-      file.metadata.set(statement, { ranges: result.ranges, requestId: result.requestId, priority, urgent, deadlineAt, interval, leadSeconds, scope, order });
-    } else if (result.kind !== "needs-memory") {
+      const entry = { ranges: result.ranges, requestId: result.requestId, priority, urgent, deadlineAt, interval, leadSeconds, scope, order };
+      const previous = file.metadata.get(statement);
+      if (previous && sameMetadata(previous, entry) && this.#standing(file)) return this.#unchanged(file);
+      file.metadata.set(statement, entry);
+    } else if (result.kind === "needs-memory") {
       // Allocation refusal says nothing about whether previously missing
-      // source bytes have arrived. Keep their demand until the read resolves.
-      file.metadata.delete(statement);
+      // source bytes have arrived. Keep their demand until the read resolves —
+      // and since it changes nothing in the map, nothing is built for it: the
+      // sound packet table of a two-hour AVI was refused once per soundtrack
+      // segment, 1943 times in 8.3 s, each a build and sort of every zone of
+      // the file (torrent-tv/meta#178).
+      if (this.#standing(file)) return this.#unchanged(file);
+    } else if (!file.metadata.delete(statement) && this.#standing(file)) {
+      return this.#unchanged(file);
     }
     return this.#emit(file);
+  }
+
+  /**
+   * Whether the map last built for this file still stands, so a statement that
+   * changes nothing needs no new one: nothing `#emit` reads has changed since
+   * it ran (`dirty`), and the publication it made was not refused — `#emit`
+   * forgets the shape when the torrent thread did not apply the map or the
+   * publication failed, and that is what makes the next statement, changed or
+   * not, send it again.
+   */
+  #standing(file) {
+    return !file.dirty && Boolean(file.shape);
+  }
+
+  #unchanged(file) {
+    this.#statsOf(file).skipped += 1;
+    this.#report(file);
+    return Promise.resolve();
   }
 
   withdrawMetadata(sourceKey, fileIndex, statement) {
@@ -188,7 +215,7 @@ export class DownloadMaps {
     const key = `${sourceKey}:${fileIndex}`;
     let file = this.#files.get(key);
     if (!file) {
-      file = { sourceKey, fileIndex, durationSeconds: 0, zones: [], inputs: new Map(), nativeZones: [], sourceZones: [], revision: 0, epoch: ++this.#nextEpoch, metadata: new Map(), pending: Promise.resolve() };
+      file = { sourceKey, fileIndex, durationSeconds: 0, zones: [], inputs: new Map(), nativeZones: [], sourceZones: [], revision: 0, epoch: ++this.#nextEpoch, metadata: new Map(), pending: Promise.resolve(), dirty: true };
       this.#files.set(key, file);
     }
     return file;
@@ -196,6 +223,8 @@ export class DownloadMaps {
 
   #setZones(file, zones) {
     file.zones = zones;
+    // What `#emit` reads has changed, whether or not it is published now.
+    file.dirty = true;
     file.inputs = new Map();
     for (const zone of zones) {
       if (typeof zone.outputKey !== "string" || !Number.isSafeInteger(zone.index)) continue;
@@ -208,6 +237,7 @@ export class DownloadMaps {
   }
 
   #emit(file) {
+    file.dirty = false;
     const builtFrom = this.#clock();
     const zones = [...file.zones, ...file.nativeZones];
     for (const { ranges, requestId, priority, urgent, deadlineAt, order } of file.metadata.values()) {
@@ -297,7 +327,8 @@ export class DownloadMaps {
       `(${total(stats.appliedMs)}ms in all); ` +
       `stages of a sent map — built ${stage(stats.sentBuildMs)}, waited behind the previous ${stage(stats.waitedMs)}, ` +
       `posted ${stage(stats.postMs)}, post to the torrent thread's handler ${stage(stats.toHandlerMs)}, ` +
-      `reply back ${stage(stats.replyMs)}; maps built and not sent took ${total([stats.unsentBuildMs])}ms here`);
+      `reply back ${stage(stats.replyMs)}; maps built and not sent took ${total([stats.unsentBuildMs])}ms here; ` +
+      `${stats.skipped} statement(s) changed nothing and built no map`);
     file.stats = emptyStats(now);
   }
 }
@@ -305,7 +336,7 @@ export class DownloadMaps {
 /** @param {number} since */
 function emptyStats(since) {
   return { since, sent: 0, unchanged: 0, zones: [], deliveredMs: [], appliedMs: [],
-    sentBuildMs: [], waitedMs: [], postMs: [], toHandlerMs: [], replyMs: [], unsentBuildMs: 0 };
+    sentBuildMs: [], waitedMs: [], postMs: [], toHandlerMs: [], replyMs: [], unsentBuildMs: 0, skipped: 0 };
 }
 
 /** One stage's median, largest and sum, in milliseconds with tenths. @param {number[]} values */
@@ -314,6 +345,22 @@ function stage(values) {
   const sorted = [...values].sort((left, right) => left - right);
   const sum = values.reduce((total, value) => total + value, 0);
   return `median ${sorted[Math.floor(sorted.length / 2)].toFixed(1)}ms max ${sorted.at(-1).toFixed(1)}ms sum ${Math.round(sum)}ms`;
+}
+
+/**
+ * Whether two metadata demands are the same demand: every field, the byte
+ * ranges and the interval by value. The fields that do not reach the
+ * publication — the interval, the preparation time, the scope — decide how the
+ * demand is repriced and withdrawn later, so a change of them is a change.
+ */
+function sameMetadata(left, right) {
+  return left.requestId === right.requestId && Object.is(left.priority, right.priority) &&
+    left.urgent === right.urgent && Object.is(left.deadlineAt, right.deadlineAt) &&
+    Object.is(left.leadSeconds, right.leadSeconds) && left.scope === right.scope && left.order === right.order &&
+    (left.interval?.from ?? null) === (right.interval?.from ?? null) &&
+    (left.interval?.to ?? null) === (right.interval?.to ?? null) &&
+    left.ranges.length === right.ranges.length &&
+    left.ranges.every(([start, end], index) => start === right.ranges[index][0] && end === right.ranges[index][1]);
 }
 
 /** How many numbers describe one zone's part in what the torrent does. */

@@ -438,3 +438,48 @@ test("a map the torrent thread could not apply is sent again even when nothing c
   await maps.native({ sourceKey: "source", fileIndex: 0, zones });
   assert.equal(sent, 2, "sent again after the torrent was not there, and not a third time once applied");
 });
+
+test("a statement that changes nothing builds no map (torrent-tv/meta#178)", async () => {
+  let built = 0;
+  const maps = new DownloadMaps({ publish: () => ({ appliedMs: 1 }), clock: () => { built += 1; return 0; } });
+  const request = { sourceKey: "source", fileIndex: 0, statement: "packets:92" };
+  await maps.metadata({ ...request, result: { kind: "needs-ranges", ranges: [[100, 699]], requestId: "r" } });
+  const afterFirst = built;
+  await maps.metadata({ ...request, result: { kind: "needs-ranges", ranges: [[100, 699]], requestId: "r" } });
+  for (let index = 0; index < 50; index++) await maps.metadata({ ...request, result: { kind: "needs-memory", bytes: 31_522_816 } });
+  await maps.metadata({ sourceKey: "source", fileIndex: 0, statement: "media-info", result: { kind: "result", value: {} } });
+  assert.equal(built, afterFirst, "neither the same ranges, a refusal of memory nor a result with no demand built a map");
+  await maps.metadata({ ...request, result: { kind: "needs-ranges", ranges: [[100, 799]], requestId: "r" } });
+  assert.ok(built > afterFirst, "another range bound is another demand");
+});
+
+test("an unchanged statement still sends a map the torrent thread did not apply, or that failed", async () => {
+  const replies = [{ appliedMs: null }, { appliedMs: 2 }];
+  let sent = 0;
+  const maps = new DownloadMaps({ publish: () => replies[sent++] });
+  const request = { sourceKey: "source", fileIndex: 0, statement: "packets" };
+  await maps.metadata({ ...request, result: { kind: "needs-ranges", ranges: [[0, 9]] } });
+  await maps.metadata({ ...request, result: { kind: "needs-memory", bytes: 600 } });
+  assert.equal(sent, 2, "the map not applied is sent again by the next statement, unchanged as it is");
+  await maps.metadata({ ...request, result: { kind: "needs-memory", bytes: 600 } });
+  assert.equal(sent, 2, "and not again once applied");
+
+  let attempts = 0;
+  const failing = new DownloadMaps({ publish: () => { if (++attempts === 1) throw new Error("the torrent thread is gone"); } });
+  await assert.rejects(failing.metadata({ ...request, result: { kind: "needs-ranges", ranges: [[0, 9]] } }));
+  await failing.metadata({ ...request, result: { kind: "needs-ranges", ranges: [[0, 9]] } });
+  assert.equal(attempts, 2, "a failed publication is sent again by the same statement");
+});
+
+test("a demand that differs only in a field the publication does not carry is still a change", async () => {
+  let built = 0;
+  const maps = new DownloadMaps({ publish: () => ({ appliedMs: 1 }), clock: () => { built += 1; return 0; } });
+  const request = { sourceKey: "source", fileIndex: 0, statement: "tracks", result: { kind: "needs-ranges", ranges: [[0, 9]] } };
+  await maps.metadata({ ...request, scope: "preparation" });
+  const afterFirst = built;
+  await maps.metadata({ ...request, scope: "playback" });
+  assert.ok(built > afterFirst, "the scope decides what forget keeps, so it is recorded");
+  const afterScope = built;
+  await maps.metadata({ ...request, scope: "playback", deadlineAt: 5_000 });
+  assert.ok(built > afterScope, "another deadline is another demand");
+});

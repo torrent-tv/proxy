@@ -1,3 +1,7 @@
+## Unreleased
+
+- **Fix**: A statement about a file that changes nothing in its download map — a refusal of memory, the same missing bytes asked again, a result for a statement that asked for nothing — no longer rebuilds and sorts every zone of the map. On Home Assistant a two-hour AVI built 9 933 maps it did not send in its first minute, 14 s of the main thread in three minutes; a map the torrent thread did not apply, or whose publication failed, is still sent again (#ttv-178).
+
 ## 2.97.3
 
 - **Fix**: An encoder that was paused is now really stopped when its output is given up. The stop moved the run out of its paused state before it asked the process to continue, so the request to continue was never sent, and a paused process does not act on a request to stop: on Home Assistant 2026-10-11 a soundtrack encoder stayed paused for ten minutes after its viewer left and held 75 MB of its input until the proxy was restarted (#ttv-184).

@@ -33,8 +33,13 @@ export class EncodeInputs {
   #wanted = new Map();
   /** Bytes per millisecond of recent original-input copies, read where the copy is made. */
   #copyRates = [];
-  /** Seconds an encoder took to open its original input, per output. */
-  #opens = new Map();
+  /**
+   * How long an encoder takes to open an output's original input: asked of
+   * the one owner of start readings (`RunCosts`, torrent-tv/meta#184).
+   *
+   * @type {(output: object) => { seconds: number, measured: boolean } | null}
+   */
+  #openOf;
   #resolve;
   #read;
   #heldRanges;
@@ -46,7 +51,9 @@ export class EncodeInputs {
   #log;
   #now;
 
-  constructor({ resolve, readRanges, heldRanges = null, reviseBudget, changed, failed, capacity = () => null, urgent = () => true, log = () => {}, now = Date.now }) {
+  constructor({ resolve, readRanges, heldRanges = null, reviseBudget, changed, failed, capacity = () => null, urgent = () => true,
+    openOf = () => null, log = () => {}, now = Date.now }) {
+    this.#openOf = openOf;
     this.#resolve = resolve;
     this.#read = readRanges;
     this.#heldRanges = heldRanges;
@@ -130,10 +137,26 @@ export class EncodeInputs {
     return null;
   }
 
-  retain(output, windows) {
+  /**
+   * Withdraw what this output no longer needs: a request no wanted window
+   * covers, and — when `starts` is given — a copy already held whose start is
+   * neither where a live run ends nor where one is being started. A next
+   * stretch is copied for the run working before it (torrent-tv/meta#158);
+   * once that run has gone and the plan starts elsewhere, after a seek, the
+   * copy held memory nobody would use (torrent-tv/meta#184).
+   *
+   * @param {object} output
+   * @param {{ from: number, to: number }[]} windows
+   * @param {Set<number> | null} [starts]
+   */
+  retain(output, windows, starts = null) {
     for (const [key, request] of this.#requests) {
-      if (request.output !== output || windows.some(window => request.from <= window.to && request.to >= window.from)) continue;
-      this.#note(request, "withdrawn: no wanted window covers it");
+      if (request.output !== output) continue;
+      const covered = windows.some(window => request.from <= window.to && request.to >= window.from);
+      const unused = starts !== null && request.result?.kind === "result" && !starts.has(request.from);
+      if (covered && !unused) continue;
+      this.#note(request, covered ? "withdrawn: no live run ends before it and no start is placed there"
+        : "withdrawn: no wanted window covers it");
       this.#requests.delete(key);
       this.#wanted.delete(key);
       request.result?.release?.();
@@ -154,16 +177,13 @@ export class EncodeInputs {
     let existing = this.#requests.get(key);
     if (existing && existing.to !== to) {
       // The plan's bound for this start moved. A copy already made beyond it
-      // would be a run over somebody else's stretch, so it is given back; one
-      // being made is checked when it is done, and one waiting for bytes or
-      // memory takes the new bound when its own event prepares it again.
+      // holds the shorter stretch whole, so the run is commanded over its
+      // prefix and the copy is kept until the run ends: copying it again cost
+      // as long as the first copy (torrent-tv/meta#184). One being made is
+      // narrowed when it is done, and one waiting for bytes or memory takes the
+      // new bound when its own event prepares it again.
       existing.to = to;
-      if (existing.result?.kind === "result" && existing.result.to > to) {
-        this.#requests.delete(key);
-        this.#wanted.delete(key);
-        existing.result.release();
-        existing = undefined;
-      }
+      if (existing.result?.kind === "result" && existing.result.to > to) existing.result.to = Math.max(existing.from, to);
     }
     if (existing?.result?.kind === "result") {
       this.#requests.delete(key);
@@ -200,22 +220,6 @@ export class EncodeInputs {
       this.#wanted.delete(key);
       request.result?.release?.();
     }
-    this.#opens.delete(addressOf(output));
-  }
-
-  /**
-   * How long an encoder took to open this output's original input: from its
-   * spawn to the name of its first closed piece, less what encoding that piece
-   * costs. Measured by whoever ran it, kept here where a stretch is sized.
-   *
-   * @param {object} output
-   * @param {number} seconds
-   */
-  noteOpen(output, seconds) {
-    if (!Number.isFinite(seconds) || seconds < 0) return;
-    const readings = this.#opens.get(addressOf(output)) ?? [];
-    keep(readings, seconds);
-    this.#opens.set(addressOf(output), readings);
   }
 
   /**
@@ -223,21 +227,31 @@ export class EncodeInputs {
    * opening the input it replaces: the recent copy rate times this output's
    * recent open. Beyond it the open's share of each piece falls below the
    * copy's, which is the same for every piece; a longer stretch buys less and
-   * delays the run's start more. Null until both have been measured, and the
-   * run then gets one piece, as it did before either reading existed.
+   * delays the run's start more. Null until a copy rate is measured and an
+   * open is known, and the run then gets one piece. An output that has not
+   * opened yet is sized by the host's startup reading, which is said: at a
+   * cold start the second run was one piece too for want of it, and cost
+   * another open (6.34 s, torrent-tv/meta#166 run 12).
    *
+   * @param {object} output
+   * @returns {{ bytes: number, openMeasured: boolean } | null}
+   */
+  stretchFor(output) {
+    const rate = middleOf(this.#copyRates);
+    const open = this.#openOf(output);
+    return rate === null || !open ? null : { bytes: Math.floor(rate * open.seconds * 1000), openMeasured: open.measured };
+  }
+
+  /**
    * @param {object} output
    * @returns {number | null}
    */
   stretchBytesFor(output) {
-    const rate = middleOf(this.#copyRates);
-    const open = middleOf(this.#opens.get(addressOf(output)) ?? []);
-    return rate === null || open === null ? null : Math.floor(rate * open * 1000);
+    return this.stretchFor(output)?.bytes ?? null;
   }
 
   #prepare(request) {
     request.pending = true;
-    request.stale = false;
     request.revision = this.#revision;
     request.memoryRevision = this.#memoryRevision;
     // Where the time from the request to its input goes, across every attempt:
@@ -260,13 +274,9 @@ export class EncodeInputs {
         if (result.kind === "result") Object.assign(result, { from: request.from, to: request.from });
       }
       if (this.#requests.get(request.key) !== request) { result.release?.(); return; }
-      if (result.kind === "result" && result.to > request.to) {
-        // The plan narrowed this start while the copy was being made.
-        result.release();
-        request.result = null;
-        request.stale = true;
-        return;
-      }
+      // The plan narrowed this start while the copy was being made: the run
+      // is commanded over its prefix.
+      if (result.kind === "result" && result.to > request.to) result.to = Math.max(request.from, request.to);
       request.result = result;
       this.#note(request, result.kind === "result" ? `ready #${result.from}..#${result.to}, ${result.bytes ?? "?"} bytes` +
         (Number.isFinite(result.copyMs) ? `, copied in ${result.copyMs}ms` : "")
@@ -281,8 +291,8 @@ export class EncodeInputs {
     }).finally(() => {
       request.pending = false;
       if (request.result?.kind !== "needs-memory") this.#wanted.delete(request.key);
-      const changed = request.stale || (request.result?.kind === "needs-memory"
-        ? request.memoryRevision !== this.#memoryRevision : request.revision !== this.#revision);
+      const changed = request.result?.kind === "needs-memory"
+        ? request.memoryRevision !== this.#memoryRevision : request.revision !== this.#revision;
       if (this.#requests.get(request.key) === request && changed &&
         request.result?.kind !== "result" && request.result?.kind !== "terminal") this.#prepare(request);
     });
@@ -360,7 +370,9 @@ export class EncodeInputs {
       }
       return good;
     };
-    const target = this.stretchBytesFor(output);
+    const sizing = this.stretchFor(output);
+    const target = sizing?.bytes ?? null;
+    if (sizing && !sizing.openMeasured) request.timing.openApproximate = true;
     let end = target === null || this.#heldRanges === null ? from : await longest(target);
     if (this.#requests.get(request.key) !== request) return undefined;
     this.#wanted.set(request.key, { wanted: stretches.get(end).bytes, required: minimum });
@@ -429,7 +441,8 @@ function describeTiming(timing, now) {
   return `; asked ${Math.max(0, now - timing.askedAt)}ms ago over ${timing.attempts} attempt(s): ` +
     `${timing.resolutions} resolution(s) ${timing.resolveMs}ms ` +
     `(${timing.reads} file read(s): queued ${timing.queuedMs}ms, reading ${timing.readMs}ms), ` +
-    `held ranges ${timing.heldMs}ms, budget ${timing.budgetMs}ms`;
+    `held ranges ${timing.heldMs}ms, budget ${timing.budgetMs}ms` +
+    (timing.openApproximate ? "; sized by the host's startup open, this output has not opened yet" : "");
 }
 
 function addressOf(output) { return output.outputKey ?? output.id; }

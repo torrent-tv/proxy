@@ -450,30 +450,25 @@ export class EncodeRuns {
   }
 
   /**
-   * The media intervals of a stored piece of this output that holds the whole
-   * of its stretch, or undefined. A stored piece short of its cut — left by an
-   * earlier process — is taken off the disk here, where its cut is known.
+   * The media intervals of a stored piece of this output, or undefined.
+   *
+   * A piece is stored under its served name only once it was judged whole,
+   * when it was published — by this process, or by the one before it, whose
+   * pieces are adopted on that ground (`SegmentStore.adoptWhatSurvived`). So
+   * this only reads. It used to judge every piece again on every progress
+   * report and delete what it found short: a second place for one verdict,
+   * with a read that removed files, and a rule that could not know a piece
+   * ends before its cut by the next keyframe's leading pictures
+   * (torrent-tv/meta#178).
    *
    * @param {HlsSession} output
    * @param {number} index
    * @returns {object | undefined}
    */
   finishedMediaRangesOf(output, index) {
-    const address = output.outputKey ?? "";
-    const timeline = output.timeline;
-    const ranges = this.#host.segmentFiles.mediaRangesOf(address, index, {
-      startSeconds: timeline.publishedStartOf(index)
+    return this.#host.segmentFiles.mediaRangesOf(output.outputKey ?? "", index, {
+      startSeconds: output.timeline.publishedStartOf(index)
     });
-    if (!ranges || !output.segmentFormat?.producedThroughSeconds) {
-      return ranges;
-    }
-    const cut = cutOf(timeline, index);
-    const { whole, throughSeconds } = judgePiece(output.segmentFormat, ranges, cut);
-    if (whole || throughSeconds === null) {
-      return ranges;
-    }
-    this.#host.segmentFiles.remove(address, index, `produced through ${throughSeconds}s, short of its cut at ${cut}s`);
-    return undefined;
   }
 
   progressOf(output, index = null) {

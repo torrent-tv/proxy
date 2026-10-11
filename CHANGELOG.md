@@ -1,3 +1,7 @@
+## Unreleased
+
+- **Fix**: A progress report no longer judges every stored piece again and deletes what it reads as short. A piece is stored under its served name only once it was judged whole at publication, and pieces left by an earlier process are adopted on that ground; judging them again was a second place for one verdict, a read that removed files, and a rule that could not know a copied open-GOP picture ends before its cut by the next keyframe's leading pictures (#ttv-178).
+
 ## 2.97.5
 
 - **Fix**: A refused piece of a copied stretch no longer ends playback. The piece is placed again as a run of its own, and a request for it is held meanwhile instead of answered 500; only the failure of a run holding that one piece ends production. On Home Assistant one refused piece of a six-piece stretch ended the viewer's playback right after a seek, while the same piece made alone had been published in an earlier session (#ttv-178).

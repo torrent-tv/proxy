@@ -20,6 +20,7 @@ import { writeAdmittedInput } from "./AdmittedInput.js";
 import { cutOf, cutShiftOf, judgeNeighbors, judgePiece } from "./piece-completeness.js";
 import { presentationSegment } from "./segment-formats/presentation-segment.js";
 import { InputFailures, failedAdmittedInput } from "./InputFailures.js";
+import { readProcessCpuSeconds } from "./host-load.js";
 
 
 /**
@@ -161,6 +162,15 @@ export class EncodeRuns {
    * @type {Map<number, import("./EncodeRun.js").EncodeRun>}
    */
   #runsByInputToken = new Map();
+  /**
+   * Each live run's ffmpeg CPU seconds against the film it had made, as of its
+   * last progress report: what one second of film costs this machine in
+   * processor time, which the speed in x does not say once other work shares
+   * the processor (torrent-tv/meta#177). Said when the run ends.
+   *
+   * @type {WeakMap<object, { cpuSeconds: number, filmSeconds: number, reading: boolean, beside: number }>}
+   */
+  #cpuOfRun = new WeakMap();
 
   #lastInputToken = 0;
   #inputFailures = new InputFailures();
@@ -1046,11 +1056,12 @@ export class EncodeRuns {
             const since = (at) => at ? `${at - run.startedAt}ms` : "never";
             this.#host.logger.info(`encode input of run #${run.from}..#${run.to} on ${session.outputKey}: ` +
               `${reads.count} read(s), ${reads.bytes} bytes, first at ${since(reads.firstAt)}, last at ${since(reads.lastAt)}, ` +
-              `ended at ${Date.now() - run.startedAt}ms`);
+              `ended at ${Date.now() - run.startedAt}ms` + describeTaken(reads.answers, run.startedAt, ended.firstNamedMs));
           }
           this.#noteOpen(session, run, ended);
           admittedInput.release();
         }
+        this.#sayRunCpu(session, run);
         this.noteRunEnded(session, run, ended);
         this.#host.encodersChanged?.();
       }
@@ -1167,6 +1178,7 @@ export class EncodeRuns {
     if (!this.isLive(session) || !this.runsOf(session).includes(run)) {
       return;
     }
+    this.#readRunCpu(run, progress);
     if (run.progress.shouldLog(PROGRESS_LOG_INTERVAL_MS)) {
       this.#host.logger.info(
         `transcode ${session.id} "${session.file.name}" ${progress.percent.toFixed(1)}% ` +
@@ -1174,6 +1186,44 @@ export class EncodeRuns {
           ` speed=${run.speedX > 0 ? `${run.speedX.toFixed(2)}x` : "n/a"}`
       );
     }
+  }
+
+  /**
+   * Read the run's ffmpeg CPU beside the film it has made, one reading at a
+   * time; a reading that cannot be taken (no `/proc`, the process gone)
+   * leaves the last one.
+   *
+   * @param {import("./EncodeRun.js").EncodeRun} run
+   * @param {{ processedSeconds?: number, startPositionSeconds?: number }} progress
+   */
+  #readRunCpu(run, progress) {
+    const pid = run.process?.pid;
+    const filmSeconds = Number(progress?.processedSeconds) - Number(progress?.startPositionSeconds ?? 0);
+    const known = this.#cpuOfRun.get(run) ?? { cpuSeconds: 0, filmSeconds: 0, reading: false, beside: 0 };
+    this.#cpuOfRun.set(run, known);
+    if (known.reading || !Number.isInteger(pid) || !(filmSeconds > 0)) return;
+    known.reading = true;
+    void readProcessCpuSeconds(pid).then((cpuSeconds) => {
+      if (Number.isFinite(cpuSeconds)) {
+        known.cpuSeconds = cpuSeconds;
+        known.filmSeconds = filmSeconds;
+        known.beside = Math.max(known.beside, this.#runsByInputToken.size - 1);
+      }
+    }).finally(() => { known.reading = false; });
+  }
+
+  /**
+   * What the run's ffmpeg spent per second of film, said once when it ends.
+   *
+   * @param {object} session
+   * @param {import("./EncodeRun.js").EncodeRun} run
+   */
+  #sayRunCpu(session, run) {
+    const known = this.#cpuOfRun.get(run);
+    if (!known || !(known.filmSeconds > 0) || !(known.cpuSeconds > 0)) return;
+    this.#host.logger.info(`encode-run #${run.from}..#${run.to} on ${session.outputKey}: ffmpeg used ` +
+      `${known.cpuSeconds.toFixed(2)}s of CPU for ${known.filmSeconds.toFixed(2)}s of film, ` +
+      `${(known.cpuSeconds / known.filmSeconds).toFixed(3)}s per second of film; at most ${known.beside} other encoder(s) alive beside it`);
   }
 
   /**
@@ -1530,4 +1580,27 @@ export class EncodeRuns {
       // silent-ok: a reading that fails is not worth ending a restart over.
     });
   }
+}
+
+/**
+ * What FFmpeg was handed of an original input, as a clause of the run's input
+ * line (torrent-tv/meta#177): bytes handed to the system (at most what it
+ * read), connections closed before an answer was all handed over,
+ * the share of reads that went forward, the largest jump back, bytes taken
+ * twice, and what it read before it named its first piece — its open.
+ *
+ * @param {{ count: number, written: number, unfinished: number, forwardShare: number | null, largestBackBytes: number, rewritten: number, list: { at: number, written: number }[] } | undefined} answers
+ * @param {number} startedAt
+ * @param {number | null | undefined} firstNamedMs
+ * @returns {string}
+ */
+function describeTaken(answers, startedAt, firstNamedMs) {
+  if (!answers || answers.count === 0) return "";
+  const opened = Number.isFinite(firstNamedMs)
+    ? answers.list.filter((answer) => answer.at - startedAt <= firstNamedMs) : null;
+  return `; handed over: ${answers.written} bytes in ${answers.count} answer(s), ${answers.unfinished} closed before all was handed over, ` +
+    `${answers.forwardShare === null ? "n/a" : `${Math.round(answers.forwardShare * 100)}%`} forward, ` +
+    `largest jump back ${answers.largestBackBytes} bytes, ${answers.rewritten} bytes taken twice` +
+    (opened ? `; before the first piece was named ${opened.length} answer(s), ` +
+      `${opened.reduce((sum, answer) => sum + answer.written, 0)} bytes` : "");
 }

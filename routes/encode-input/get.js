@@ -36,6 +36,19 @@ export function handleEncodeInputGet(req, reply, { inputOf, refused = () => {} }
     refused({ token, fileIndex, start: range.start, runTag: input.runTag ?? null });
     return reply.code(503).send({ error: "Original input bytes are outside the admitted ranges." });
   }
+  // What was handed to the system for this answer before its connection
+  // closed, and whether all of it was: an answer runs to the end of its
+  // admitted range and FFmpeg closes the connection once it has what it wants,
+  // so the range answered says nothing about the bytes taken. What FFmpeg read
+  // is at most what was handed over; the kernel's buffer is the difference,
+  // and it cannot be seen from here (torrent-tv/meta#177).
+  const socket = req.raw?.socket;
+  const writtenBefore = socket?.bytesWritten ?? 0;
+  reply.raw?.once?.("close", () => {
+    input.noteAnswer?.({ fileIndex, start: range.start, end: held.end,
+      written: Math.max(0, (socket?.bytesWritten ?? writtenBefore) - writtenBefore),
+      handedOver: reply.raw?.writableFinished === true });
+  });
   return reply.code(206).header("Content-Length", String(held.bytes.length))
     .header("Content-Range", `bytes ${range.start}-${held.end}/${length}`).send(held.bytes);
 }

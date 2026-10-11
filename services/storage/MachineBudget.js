@@ -77,6 +77,13 @@ import { OtherDemand, divideAllowance } from "./allowance.js";
 export class MachineBudget {
   #revisionPromise = null;
   #reviseAgain = false;
+  /**
+   * The revision in hand, for its own line: when it was first asked for, how
+   * many asks joined it, and which pass this is. At a cold start on the addon
+   * host a caller waited 20.2 s inside `revise()` and nothing said whether it
+   * waited for passes, for a reading, or for the thread (torrent-tv/meta#177).
+   */
+  #revision = null;
   /** Resource name → how to read what is free, and what others have needed. */
   #resources = new Map();
 
@@ -151,11 +158,14 @@ export class MachineBudget {
   revise() {
     if (this.#revisionPromise) {
       this.#reviseAgain = true;
+      this.#revision.asks += 1;
       return this.#revisionPromise;
     }
+    this.#revision = { askedAt: Date.now(), asks: 1, pass: 0 };
     this.#revisionPromise = (async () => {
       do {
         this.#reviseAgain = false;
+        this.#revision.pass += 1;
         await this.#readRevision();
       } while (this.#reviseAgain);
       return this.#last;
@@ -164,13 +174,17 @@ export class MachineBudget {
   }
 
   async #readRevision() {
+    const passFrom = Date.now();
+    let readingMs = 0;
     for (const [name, resource] of this.#resources) {
       const claimants = this.#claimants.filter((one) => one.resource === name);
       if (claimants.length === 0) {
         continue;
       }
       const held = claimants.reduce((sum, one) => sum + Math.max(0, one.held()), 0);
+      const readFrom = Date.now();
       const free = await resource.readFree();
+      readingMs += Date.now() - readFrom;
       // WITHOUT A READING, NOTHING IS ALLOWED TO GROW. A resource whose free
       // space cannot be read is not a resource with room; answering "unbounded"
       // there is how the spill file came to have no limit in the first place.
@@ -197,7 +211,11 @@ export class MachineBudget {
         );
       }
     }
-    this.#logger?.info?.(this.describe());
+    const revision = this.#revision;
+    this.#logger?.info?.(`${this.describe()}` + (revision
+      ? ` (pass ${revision.pass} of a revision asked ${revision.asks} time(s), first ${Date.now() - revision.askedAt}ms ago; ` +
+        `this pass ${Date.now() - passFrom}ms, ${readingMs}ms of it reading what is free)`
+      : ""));
     return this.#last;
   }
 

@@ -721,10 +721,14 @@ export class EncodeRun {
     this.#stopping = true;
     this.#stopReason = because;
     this.#stopOrderedAt = this.now();
-    this.#transition(ENCODE_RUN_EVENT.STOP_ORDERED);
     // A suspended process does not act on SIGTERM until it is continued, so the
-    // wait for its exit would never end. Let it run before asking it to stop.
+    // wait for its exit would never end. Let it run before asking it to stop —
+    // and before the state leaves SUSPENDED, because the state is what
+    // `#continue` reads. Field 2026-10-11: the order was the other way round,
+    // no SIGCONT was sent, and a stopped soundtrack encoder stayed in state `T`
+    // with its 75 MB input admitted for as long as the process lived.
     this.#continue();
+    this.#transition(ENCODE_RUN_EVENT.STOP_ORDERED);
     this.#signal("SIGTERM");
   }
 

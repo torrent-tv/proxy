@@ -12,13 +12,13 @@ import { spawn } from "node:child_process";
 import { contentionPenalty } from "./contention.js";
 import { ENCODE_RUN_STATE, liveRunsOf, runStateOf, wireState } from "./encode-run-state.js";
 import { ENCODE_EXIT } from "./encode-exit.js";
-import { EncodeRun } from "./EncodeRun.js";
+import { EncodeRun, endOfRun } from "./EncodeRun.js";
 import { computeOutputDimensions } from "./args.js";
 import { buildAdmittedCommand } from "./admitted-command.js";
 import { buildOriginalCommand } from "./source-command.js";
 import { writeAdmittedInput } from "./AdmittedInput.js";
-import { cutOf, cutShiftOf, judgeNeighbors, judgePiece, onItsCutClock } from "./piece-completeness.js";
-import { presentationSegment } from "./segment-formats/presentation-segment.js";
+import { cutOf, cutShiftOf, judgeNeighbors, judgePiece, leadingSecondsOf, lacksOnlyItsLeadingPictures } from "./piece-completeness.js";
+import { leadingPictures, presentationSegment } from "./segment-formats/presentation-segment.js";
 import { InputFailures, failedAdmittedInput } from "./InputFailures.js";
 import { readProcessCpuSeconds } from "./host-load.js";
 
@@ -174,6 +174,18 @@ export class EncodeRuns {
 
   #lastInputToken = 0;
   #inputFailures = new InputFailures();
+  /**
+   * The leading pictures of a keyframe as a run that had the group before it
+   * in hand made them, by output and the number of the piece that keyframe
+   * opens: taken from the file a run closes past its last cut, and given to
+   * the run that starts at that keyframe, which cannot make them
+   * (torrent-tv/meta#178). Null where that file said the keyframe has none,
+   * which is as much an answer; an entry goes when that piece is published or
+   * the output is gone.
+   *
+   * @type {Map<string, Map<number, Buffer | null>>}
+   */
+  #leadingByOutput = new Map();
   /** What this reads and asks of the rest of the proxy, and nothing else. @type {object} */
   #host;
 
@@ -371,18 +383,16 @@ export class EncodeRuns {
    * @param {Buffer | null} [bytes]
    * @param {EncodeRun | null} [run] - The run that closed it, which keeps where its muxer counts cuts from.
    * @param {{ endMicros: bigint } | null} [timing] - The piece's end in the muxer's clock, from its segment list.
+   * @param {string | null} [following] - The working name of the file the muxer closed after it.
    * @returns {object | null | false}
    */
-  #wholeClosedPiece(session, name, index, admitted = false, bytes = null, run = null, timing = null) {
+  #wholeClosedPiece(session, name, index, admitted = false, bytes = null, run = null, timing = null, following = null) {
 
     const format = session.segmentFormat;
     if (!format?.readMediaRanges || !Number.isInteger(index) || index < 0) {
       return null;
     }
     const address = session.outputKey ?? "";
-    // `bytes` is the piece the proxy cut again by presentation time at the
-    // published grid; without it the piece is as the muxer cut it.
-    const cutByProxy = bytes !== null;
     try {
       const mediaRanges = format.readMediaRanges(bytes ?? this.#host.segmentFiles.closedBytesOf(address, name));
 
@@ -394,32 +404,35 @@ export class EncodeRuns {
             .map(input => [input.track.type === "video" ? "vide" : "soun", input.sourceEndSeconds])) } : {}),
         requiredKinds: [session.spec.carries !== "audio-only" ? "vide" : null,
           session.spec.audio && !this.#host.servesAudioSeparately(session) ? "soun" : null].filter(Boolean) } : undefined;
+      // THE NEXT KEYFRAME'S LEADING PICTURES end this piece before its cut. The
+      // muxer cut where that keyframe is, and the file it closed next begins
+      // with it: its pictures shown before it are the span (torrent-tv/meta#178).
+      if (mediaRanges && following && session.spec.carries !== "audio-only") {
+        mediaRanges.nextLeadingSeconds = leadingSecondsOf(format.readMediaRanges(this.#host.segmentFiles.closedBytesOf(address, following)));
+      }
       if (run) {
         // Where the muxer counts this run's cuts from is known once its first
         // piece has closed, and holds for every piece after it. It is a fact
         // of each piece the run makes, so it travels with the piece.
         if (run.cutShiftSeconds === null && index === run.from) {
-          // Read from the piece as the muxer closed it: a piece cut again by
-          // the proxy starts where the grid says, whatever the muxer did.
-          const asMuxed = cutByProxy ? format.readMediaRanges(this.#host.segmentFiles.closedBytesOf(address, name)) : mediaRanges;
-          run.cutShiftSeconds = cutShiftOf(asMuxed, grid?.[run.from], session.spec.carries !== "audio-only" ? "vide" : "soun",
+          run.cutShiftSeconds = cutShiftOf(mediaRanges, grid?.[run.from], session.spec.carries !== "audio-only" ? "vide" : "soun",
             timing?.endMicros ?? null);
           // Said once per run: a piece judged on the wrong clock is refused by
           // a millisecond, and nothing else in the log says which clock it was
           // judged on (torrent-tv/meta#178).
           this.#host.logger.info(`encode-run #${run.from}..#${run.to} on ${address}: its muxer counts cuts ` +
             (run.cutShiftSeconds === null ? "from a first packet more than a frame away from its start (shift unknown)"
-              : `${run.cutShiftSeconds.toFixed(6)}s from its start at ${grid?.[run.from]}s`) +
-            (cutByProxy ? "; its pieces are cut again by the proxy at the published grid, so the shift does not apply to them" : ""));
+              : `${run.cutShiftSeconds.toFixed(6)}s from its start at ${grid?.[run.from]}s`));
         }
-        onItsCutClock(mediaRanges, run.cutShiftSeconds, cutByProxy);
+        if (mediaRanges && run.cutShiftSeconds !== null) mediaRanges.cutShiftSeconds = run.cutShiftSeconds;
       }
       const { whole, throughSeconds, reason } = judgePiece(format, mediaRanges, cut, interval);
       if (!whole) {
         this.#host.logger.warn(
           `encode: not publishing piece ${index} of ${address.slice(0, 60)}: ` +
             (reason ?? (throughSeconds === null ? "it holds no playable media" : `produced through ${throughSeconds}s, cut ${cut}s`)) +
-            ` cutBy=${cutByProxy ? "proxy" : "muxer"} shift=${Number.isFinite(mediaRanges?.cutShiftSeconds) ? mediaRanges.cutShiftSeconds : "none"}` +
+            ` shift=${Number.isFinite(mediaRanges?.cutShiftSeconds) ? mediaRanges.cutShiftSeconds : "none"}` +
+            ` nextLeading=${mediaRanges?.nextLeadingSeconds ?? "none"}` +
             (interval ? ` expected=${interval.from}..${interval.to} tracks=${JSON.stringify(mediaRanges.tracks.map(track => ({
               kind: track.kind, timescale: track.timescale, frame: track.productionFrame,
               first: track.ranges[0], last: track.ranges.at(-1), count: track.ranges.length })),
@@ -434,7 +447,18 @@ export class EncodeRuns {
           const ranges = this.#host.segmentFiles.mediaRangesOf(address, neighbor,
             { startSeconds: grid[neighbor] });
           if (!ranges) continue;
-          const judged = neighbor < index ? judgeNeighbors(ranges, mediaRanges) : judgeNeighbors(mediaRanges, ranges);
+          const [left, right] = neighbor < index ? [ranges, mediaRanges] : [mediaRanges, ranges];
+          const judged = judgeNeighbors(left, right);
+          // The one discontinuity that is known and not a fault of either
+          // piece: the right one's leading pictures, which a run starting at
+          // its keyframe cannot make and no run before it left. The gap is
+          // exactly the span the left one states it ends short by, and the
+          // right one begins at its keyframe.
+          if (!judged.whole && judged.reason?.startsWith("neighbor-discontinuity") && lacksOnlyItsLeadingPictures(left, right)) {
+            this.#host.logger.warn(`encode: publishing piece ${index} of ${address} beside a piece without its leading ` +
+              `pictures (${left.nextLeadingSeconds}s): the picture stands that long at #${Math.max(index, neighbor)}`);
+            continue;
+          }
           if (!judged.whole) {
             this.#host.logger.warn(`encode: not publishing piece ${index} of ${address}: ${judged.reason}`);
             return false;
@@ -593,10 +617,49 @@ export class EncodeRuns {
     return byOutput;
   }
 
+  /** Whether a run copies the picture from the original file it reads. */
+  #copiesOriginalPicture(session, admittedInput) {
+    return Boolean(admittedInput?.original) && !session.spec.transcodesVideo && session.spec.carries !== "audio-only";
+  }
+
+  /**
+   * Whether a run placed at `startIndex` reads from the keyframe before it:
+   * a copied picture read from its original file, the piece before made or
+   * being made — so a viewer goes on from it into this one — and nothing
+   * known of the leading pictures of the keyframe at the start.
+   */
+  #startsAtKeyframeBefore(session, startIndex) {
+    if (!(startIndex > 0) || session.spec.transcodesVideo || session.spec.carries === "audio-only" ||
+      session.segmentFormat?.id !== "fmp4" || this.#host.encodeInputs?.readsOriginal?.(session) !== true) return false;
+    if (this.#leadingByOutput.get(session.outputKey ?? "")?.has(startIndex)) return false;
+    const before = startIndex - 1;
+    return this.#host.producedNumbers(session).includes(before) ||
+      this.liveRunsOf(session).some(run => run.from <= before && endOfRun(run) >= before);
+  }
+
+  /**
+   * Keep what a run's unpublished file says of the keyframe it begins with:
+   * its leading pictures, or that it has none. Only for a piece not made yet.
+   */
+  #keepLeadingPictures(session, admittedInput, name) {
+    if (!this.#copiesOriginalPicture(session, admittedInput) || session.segmentFormat?.id !== "fmp4") return;
+    const address = session.outputKey ?? "";
+    const index = session.segmentFormat.segmentIndexFromName(session.segmentFormat.servedNameOf?.(name) ?? name);
+    if (!Number.isInteger(index) || this.#host.producedNumbers(session).includes(index)) return;
+    try {
+      const byIndex = this.#leadingByOutput.get(address) ?? new Map();
+      byIndex.set(index, leadingPictures(this.#host.segmentFiles.closedBytesOf(address, name)));
+      this.#leadingByOutput.set(address, byIndex);
+    } catch (error) {
+      this.#host.logger.warn(`encode: could not read the leading pictures of ${name}: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+
   forgetEncodingOfGone(output) {
     this.#host.encodeInputs?.forget(output);
     if (this.#host.outputs.outputsOn(output.outputKey).length === 0) {
       this.#inputFailures.forget(output.outputKey);
+      this.#leadingByOutput.delete(output.outputKey);
       this.#host.encodeOrchestrator.forgetOpens?.(output.outputKey);
       this.#host.encodeOrchestrator.forgetOutput(output.outputKey);
     }
@@ -816,10 +879,17 @@ export class EncodeRuns {
     if (!this.isLive(session)) {
       return null;
     }
+    // A COPIED PICTURE STARTED AT ITS KEYFRAME cannot make that keyframe's
+    // leading pictures: they reference the group before. Where the piece
+    // before is made and nothing is known of this keyframe's leading pictures,
+    // the run starts one keyframe earlier and publishes from its start, so the
+    // group before is in hand (torrent-tv/meta#178).
+    const fromKeyframeBefore = this.#startsAtKeyframeBefore(session, startIndex);
+    const inputStart = fromKeyframeBefore ? startIndex - 1 : startIndex;
     // A copy held for a start that no live run ends before and that is not
     // being started now goes back (torrent-tv/meta#184).
     this.#host.encodeInputs?.retain(session, this.#host.encodeOrchestrator.wantedSegmentsOn(session.outputKey),
-      new Set([startIndex, ...this.liveRunsOf(session).map((run) => run.to + 1)]));
+      new Set([inputStart, ...this.liveRunsOf(session).map((run) => run.to + 1)]));
     // THE LAST NUMBER THIS RUN MAY REACH is the plan's; how far its input
     // really reaches is the input's answer. An original input is one copied
     // stretch, and the run is given exactly that stretch (torrent-tv/meta#158).
@@ -829,7 +899,7 @@ export class EncodeRuns {
     const mayReach = this.#inputFailures.boundFor(session.outputKey, startIndex,
       Number.isInteger(ordered?.to) && ordered.to >= startIndex ? ordered.to
         : segmentCount > startIndex ? segmentCount - 1 : startIndex);
-    const admittedInput = this.#host.encodeInputs?.take(session, startIndex, mayReach) ?? null;
+    const admittedInput = this.#host.encodeInputs?.take(session, inputStart, mayReach) ?? null;
     if (!admittedInput) return null;
     const inputEnd = admittedInput.original ? admittedInput.to : startIndex;
     // The stretch is part of an original input's identity: two stretches from
@@ -924,7 +994,7 @@ export class EncodeRuns {
     const inputToken = this.#lastInputToken;
     if (admittedInput) admittedInput.runTag = `${startIndex}r${inputToken}`;
     const buildCommand = admittedInput.original ? buildOriginalCommand : buildAdmittedCommand;
-    const { args, safeIndex, startSeconds, cutTimes } = buildCommand({
+    const built = buildCommand({
       admittedInput,
       inputToken,
       baseUrl: this.#host.localBaseUrl,
@@ -939,12 +1009,18 @@ export class EncodeRuns {
       audioSeparate: this.#host.servesAudioSeparately(session),
       audioSourceTrackIndex: session.spec.audioSourceTrackIndex,
       rateControl: session.spec.video?.encode?.rateControl ?? null,
-      startIndex,
+      startIndex: inputStart,
       endIndex: admittedInput.original ? inputEnd
         : Number.isInteger(ordered?.to) ? ordered.to : runEnd >= startIndex ? runEnd : session.timeline.segmentCount - 1,
       videoEncoder: this.#host.videoEncoder,
       segmentDurationSec: this.#host.segmentDurationSec
     });
+    const { args, cutTimes } = built;
+    // The piece before the start, made only to have its group in hand, is
+    // closed under a number below the run's and never published; the run
+    // itself begins where it publishes.
+    const safeIndex = fromKeyframeBefore ? startIndex : built.safeIndex;
+    const startSeconds = fromKeyframeBefore ? session.timeline.publishedStartOf(startIndex) : built.startSeconds;
 
     // The exact command, every run. An encode failure is otherwise reported
     // with ffmpeg's message and nothing about what it was asked to do, and the
@@ -1015,27 +1091,39 @@ export class EncodeRuns {
         // complete input or overwrite a neighboring run's segment.
         if (Number.isInteger(index) && (index < safeIndex || index > run.to)) return null;
         let bytes = null;
-        if (admittedInput && session.segmentFormat.id === "fmp4" && session.spec.carries !== "audio-only" &&
-          (admittedInput.original || session.spec.audio && !this.#host.servesAudioSeparately(session))) {
+        const address = session.outputKey ?? "";
+        const fmp4 = admittedInput && session.segmentFormat.id === "fmp4" && session.spec.carries !== "audio-only";
+        // The first piece of a run that read the picture from its keyframe:
+        // its leading pictures are the ones the run before made, or none.
+        const firstOfRun = fmp4 && this.#copiesOriginalPicture(session, admittedInput) &&
+          index === run.from && index > 0 && !fromKeyframeBefore;
+        const soundInPiece = fmp4 && session.spec.audio && !this.#host.servesAudioSeparately(session);
+        if (firstOfRun || soundInPiece) {
           try {
-            const address = session.outputKey ?? "";
             const grid = session.timeline.published ?? session.timeline.boundaries;
-            bytes = presentationSegment(this.#host.segmentFiles.closedBytesOf(address, name),
-              following ? this.#host.segmentFiles.closedBytesOf(address, following) : null,
-              { from: grid[index], to: grid[index + 1] });
+            const raw = this.#host.segmentFiles.closedBytesOf(address, name);
+            const leading = firstOfRun ? this.#leadingByOutput.get(address)?.get(index) ?? null : null;
+            bytes = presentationSegment(raw, soundInPiece && following ? this.#host.segmentFiles.closedBytesOf(address, following) : null,
+              { from: grid[index], to: grid[index + 1] }, { firstOfRun, leading });
           } catch (error) {
-            this.#host.logger.warn(`encode: could not partition closed segment ${index}: ${error.message}`);
+            this.#host.logger.warn(`encode: could not prepare closed segment ${index}: ${error.message}`);
             throw error;
           }
         }
-        const mediaRanges = this.#wholeClosedPiece(session, name, index, admittedInput, bytes, run, timing);
+        const mediaRanges = this.#wholeClosedPiece(session, name, index, admittedInput, bytes, run, timing, following);
         if (mediaRanges === false) throw Object.assign(new Error(`Closed piece #${index} has incomplete media.`),
           { code: "ERR_INCOMPLETE_MEDIA" });
-        const published = this.#host.segmentFiles.publish(session.outputKey ?? "", name, session.segmentFormat, { mediaRanges, bytes });
+        const published = this.#host.segmentFiles.publish(address, name, session.segmentFormat, { mediaRanges, bytes });
         if (!published) throw new Error(`Closed piece #${index} could not be stored.`);
+        this.#leadingByOutput.get(address)?.delete(index);
         return published;
 
       },
+      // A file closed past the run's last cut, or flushed when it was stopped:
+      // never published, but it begins with the next keyframe, made with the
+      // group before it in hand — the leading pictures the run that starts
+      // there cannot make.
+      onTail: (name) => this.#keepLeadingPictures(session, admittedInput, name),
       onSpeedMeasured: () => this.#host.noteRunSpeedMeasured?.(session, run),
       onEnded: (ended) => {
         this.#runsByInputToken.delete(inputToken);

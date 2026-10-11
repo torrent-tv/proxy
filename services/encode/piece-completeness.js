@@ -53,14 +53,15 @@ export function judgePiece(format, ranges, cutSeconds, interval) {
   }
   const shift = Number.isFinite(ranges?.cutShiftSeconds) ? ranges.cutShiftSeconds : 0;
   if (interval) {
-    const reason = intervalFailure(ranges, { ...interval, shift });
+    const reason = intervalFailure(ranges, { ...interval, shift, nextLeadingSeconds: leadingOfNext(ranges) });
     return reason ? { whole: false, throughSeconds, reason } : { whole: true, throughSeconds };
   }
   const cutMicros = Number.isFinite(cutSeconds) ? BigInt(Math.round((cutSeconds + shift) * 1_000_000)) : null;
   if (cutMicros !== null && ranges?.tracks?.length) {
-    const whole = ranges.tracks.every(({ timescale, ranges: held, positionErrorTicks = 0n }) => {
+    const leadMicros = BigInt(Math.round(leadingOfNext(ranges) * 1_000_000));
+    const whole = ranges.tracks.every(({ kind, timescale, ranges: held, positionErrorTicks = 0n }) => {
       const end = held.at(-1)?.end;
-      return end !== undefined && (end + positionErrorTicks) * 1_000_000n >= cutMicros * timescale;
+      return end !== undefined && (end + positionErrorTicks) * 1_000_000n >= (cutMicros - (kind === "vide" ? leadMicros : 0n)) * timescale;
     });
     return { whole, throughSeconds };
   }
@@ -71,26 +72,51 @@ export function judgePiece(format, ranges, cutSeconds, interval) {
 }
 
 /**
- * Put a piece on the clock it was cut by, for {@link judgePiece}.
+ * How long a picture's leading pictures are shown before it: the span from the
+ * first presented picture of a piece to its first decoded one, which for a
+ * copied picture is its keyframe. Zero without a picture or leading pictures.
  *
- * The run's cut shift ({@link cutShiftOf}) says where the segment MUXER counts
- * its cuts from, so it belongs only to a piece the muxer cut. A copied picture
- * read from the original file is cut again by the proxy, by presentation time
- * at the published grid (`presentationSegment`), and that piece is judged on
- * the grid as published. Field 2026-10-11, torrent-tv/meta#178: an open-GOP
- * HEVC piece cut again at 2511.676..2521.686 holds the next keyframe, which its
- * leading pictures need, and so ends one frame (672 of 16 000 ticks) past the
- * cut, as it must; moved by the muxer's shift of −0.001 s the allowance ended
- * one millisecond before that frame, the piece was refused and playback ended.
+ * In an open GOP the pictures decoded right after a keyframe can be shown
+ * before it. They belong to the piece of their keyframe, so the piece before
+ * ends that much before its cut and this piece begins that much before it
+ * (torrent-tv/meta#178). A piece states the next keyframe's span as
+ * `nextLeadingSeconds`, read from the piece the muxer closed after it.
  *
- * @param {object | null | undefined} ranges - The piece's media intervals.
- * @param {number | null} shift - The run's cut shift, or null when not known.
- * @param {boolean} cutByProxy - Whether the proxy cut the piece again.
- * @returns {object | null | undefined} The same intervals.
+ * @param {object | null | undefined} ranges - A piece's media intervals.
+ * @returns {number}
  */
-export function onItsCutClock(ranges, shift, cutByProxy) {
-  if (ranges && !cutByProxy && Number.isFinite(shift)) ranges.cutShiftSeconds = shift;
-  return ranges;
+export function leadingSecondsOf(ranges) {
+  const track = ranges?.tracks?.find(candidate => candidate.kind === "vide");
+  const first = track?.ranges?.[0];
+  if (!first || track.firstSampleStart === undefined || !(track.timescale > 0n)) return 0;
+  const lead = track.firstSampleStart - first.start;
+  return lead > 0n ? Number(lead) / Number(track.timescale) : 0;
+}
+
+/**
+ * Whether the only gap between two adjacent pieces is the right one's leading
+ * pictures, which it lacks: it begins at its keyframe, and the gap is the span
+ * the left one states it ends short by, within a frame. A run that starts at a
+ * keyframe cannot make those pictures and none was left by a run before it, so
+ * the picture stands that long — known, and no fault of either piece.
+ *
+ * @param {object} left
+ * @param {object} right
+ * @returns {boolean}
+ */
+export function lacksOnlyItsLeadingPictures(left, right) {
+  const before = left?.tracks?.find(track => track.kind === "vide");
+  const after = right?.tracks?.find(track => track.kind === "vide");
+  if (!before?.ranges?.length || !after?.ranges?.length || before.timescale !== after.timescale || leadingSecondsOf(right) !== 0) return false;
+  const lead = BigInt(Math.round(leadingOfNext(left) * Number(before.timescale)));
+  const gap = after.ranges[0].start - before.ranges.at(-1).end;
+  const frame = before.productionFrame ?? before.ranges.at(-1).frame;
+  return lead > 0n && gap > 0n && gap - lead <= frame && lead - gap <= frame;
+}
+
+/** The span a piece ends before its cut: the next keyframe's leading pictures. */
+function leadingOfNext(ranges) {
+  return Number.isFinite(ranges?.nextLeadingSeconds) && ranges.nextLeadingSeconds > 0 ? ranges.nextLeadingSeconds : 0;
 }
 
 /**
@@ -166,13 +192,14 @@ export function judgeNeighbors(left, right) {
  * soundtrack's at 1419.904 s against a final cut of 1419.993 s, and both last
  * pieces were refused, so no viewer could reach the end of the episode.
  */
-function intervalFailure(coverage, { from, to, requiredKinds, sourceEnds = {}, shift = 0, endsWithSource = false }) {
+function intervalFailure(coverage, { from, to, requiredKinds, sourceEnds = {}, shift = 0, endsWithSource = false, nextLeadingSeconds = 0 }) {
   if (!Number.isFinite(from) || !Number.isFinite(to) || !(to > from) || !requiredKinds?.length) return "segment-interval-is-not-declared";
   for (const kind of requiredKinds) {
     const track = coverage?.tracks?.find(track => track.kind === kind);
     if (!track?.ranges?.length || !(track.timescale > 0n)) return `segment-missing-${kind}`;
     const start = BigInt(Math.round((from + shift) * Number(track.timescale)));
-    const through = Number.isFinite(sourceEnds[kind]) ? Math.min(to + shift, sourceEnds[kind]) : to + shift;
+    const cutAt = to + shift - (kind === "vide" && !endsWithSource ? nextLeadingSeconds : 0);
+    const through = Number.isFinite(sourceEnds[kind]) ? Math.min(cutAt, sourceEnds[kind]) : cutAt;
     if (!(through > from + shift)) return `segment-interval-is-empty-${kind}`;
     const end = BigInt(Math.round(through * Number(track.timescale)));
     const first = track.ranges[0];
@@ -181,7 +208,11 @@ function intervalFailure(coverage, { from, to, requiredKinds, sourceEnds = {}, s
     // cadence. Account for that recorded position uncertainty at the boundary,
     // without admitting another missing frame or widening internal gaps.
     const positionError = track.positionErrorTicks ?? 0n;
-    if (first.start > start + frame + positionError || first.start < start - frame - positionError) return `segment-start-outside-interval-${kind}`;
+    // A piece starts at its first DECODED sample — a copied picture's keyframe;
+    // pictures shown before it are its leading pictures, and the walk below
+    // holds them to the same continuity as every other range.
+    const anchor = track.firstSampleStart ?? first.start;
+    if (anchor > start + frame + positionError || anchor < start - frame - positionError) return `segment-start-outside-interval-${kind}`;
     // The first sample's cadence already bounds the interval start. A shorter
     // final sample must not replace that bound when this range is traversed.
     let reached = first.start;

@@ -296,3 +296,69 @@ test("a run whose process never started is not signalled, because pid 0 is our o
   run.stop("the viewer left");
   assert.deepEqual(child.signals, [], "a process that did not start was sent a signal");
 });
+
+test("a piece closed before a stop is published with the file the stop flushed, which is kept as a tail", () => {
+  // torrent-tv/meta#178: the file flushed after a stop begins with the next
+  // keyframe; it says where that keyframe's leading pictures end the piece
+  // before, and it holds those pictures for the run that starts there.
+  const process_ = new FakeProcess();
+  process_.stdio = [null, null, null, new EventEmitter()];
+  const closed = [], tails = [], ends = [];
+  const run = new EncodeRun({
+    address: "picture", encoder: new SoftwareEncoder(), from: 20, to: 30,
+    buildArgs: () => [], spawn: () => process_, logger: silentLogger,
+    indexOfName: name => Number(name.match(/(\d+)\.mp4$/)[1]),
+    onClosed: (name, following) => { closed.push([name, following]); return name; },
+    onTail: name => tails.push(name),
+    onEnded: ended => ends.push(ended)
+  });
+  process_.stdio[3].emit("data", "making-0-00020.mp4,200,210\nmaking-0-00021.mp4,210,220\n");
+  assert.deepEqual(closed, [["making-0-00020.mp4", "making-0-00021.mp4"]]);
+  run.stop("the viewer moved away");
+  assert.equal(closed.length, 1, "the piece waits for the file the stop flushes");
+  process_.stdio[3].emit("data", "making-0-00022.mp4,220,223.5\n");
+  assert.deepEqual(closed[1], ["making-0-00021.mp4", "making-0-00022.mp4"]);
+  assert.deepEqual(tails, ["making-0-00022.mp4"]);
+  process_.exitWith(255);
+  assert.equal(ends[0].ending, ENCODE_EXIT.STOPPED);
+});
+
+test("a piece closed before a stop that cannot be proved whole is left unpublished, and the run ends as stopped", () => {
+  const process_ = new FakeProcess();
+  process_.stdio = [null, null, null, new EventEmitter()];
+  const ends = [];
+  let calls = 0;
+  const run = new EncodeRun({
+    address: "picture", encoder: new SoftwareEncoder(), from: 20, to: 30,
+    buildArgs: () => [], spawn: () => process_, logger: silentLogger,
+    indexOfName: name => Number(name.match(/(\d+)\.mp4$/)[1]),
+    onClosed: (name) => {
+      calls += 1;
+      if (calls === 2) throw Object.assign(new Error(`${name} is short`), { code: "ERR_INCOMPLETE_MEDIA" });
+      return name;
+    },
+    onEnded: ended => ends.push(ended)
+  });
+  process_.stdio[3].emit("data", "making-0-00020.mp4,200,210\nmaking-0-00021.mp4,210,220\n");
+  run.stop("the viewer moved away");
+  // No flushed file is named before the exit: the piece is judged without one.
+  process_.exitWith(255);
+  assert.equal(calls, 2);
+  assert.equal(ends[0].ending, ENCODE_EXIT.STOPPED, "a refusal at a stop is not a publication failure");
+});
+
+test("the file a run closes past its last cut is handed over as a tail and not published", () => {
+  const process_ = new FakeProcess();
+  process_.stdio = [null, null, null, new EventEmitter()];
+  const closed = [], tails = [];
+  new EncodeRun({
+    address: "picture", encoder: new SoftwareEncoder(), from: 7, to: 7,
+    buildArgs: () => [], spawn: () => process_, logger: silentLogger,
+    indexOfName: name => Number(name.match(/(\d+)\.mp4$/)[1]),
+    onClosed: (name, following) => { closed.push([name, following]); return name; },
+    onTail: name => tails.push(name)
+  });
+  process_.stdio[3].emit("data", "making-0-00007.mp4,0,73.99\nmaking-0-00008.mp4,74.283,74.657\n");
+  assert.deepEqual(closed, [["making-0-00007.mp4", "making-0-00008.mp4"]]);
+  assert.deepEqual(tails, ["making-0-00008.mp4"]);
+});

@@ -7,7 +7,7 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
-import { cutOf, cutShiftOf, judgeNeighbors, judgePiece, onItsCutClock } from "../../services/encode/piece-completeness.js";
+import { cutOf, cutShiftOf, judgeNeighbors, judgePiece, lacksOnlyItsLeadingPictures, leadingSecondsOf } from "../../services/encode/piece-completeness.js";
 
 import { SEGMENT_CUT_TIME_DELTA_SECONDS } from "../../services/encode/output/index.js";
 import { readFileSync } from "node:fs";
@@ -176,20 +176,48 @@ test("movie-edit quantization does not reject one-frame encoder priming or conce
   assert.equal(judgePiece(fmp4Format, coverage, undefined, interval).reason, "segment-gap-within-interval-soun");
 });
 
-test("a piece the proxy cut again is judged on the published grid, not on the muxer's shift", () => {
-  // Field 2026-10-11, torrent-tv/meta#178, piece 316 of an open-GOP HEVC copy
-  // (24000/1001 in a millisecond Matroska clock, 16 000 ticks a second): cut
-  // again at 2511.676..2521.686, it holds the next keyframe its leading
-  // pictures need and so ends one frame past the cut. The run's muxer counted
-  // its cuts from 0.001 s before its start.
-  const piece = () => ({ tracks: [{ kind: "vide", timescale: 16000n, productionFrame: 672n, positionErrorTicks: 1n,
-    ranges: [{ start: 40186816n, end: 40347648n, frame: 672n }] }] });
-  const interval = { from: 2511.676, to: 2521.686, requiredKinds: ["vide"] };
+test("an open-GOP picture is judged from its keyframe to the next keyframe's leading pictures", () => {
+  // Field 2026-10-11, torrent-tv/meta#178: pieces 316 and 317 of a 1036p HEVC
+  // copy (16 000 ticks a second, frames of 672 ticks), as the segment muxer
+  // cut them from keyframe to keyframe on HA. Keyframe 317 (2521.686 s) has
+  // three leading pictures, shown at 2521.561-2521.644 s and decoded after it.
+  const track = (first, keyframe, end) => ({ tracks: [{ kind: "vide", timescale: 16000n, productionFrame: 672n, positionErrorTicks: 1n,
+    firstSampleStart: keyframe, ranges: [{ start: first, end, frame: 672n }] }] });
+  const piece316 = () => track(40186144n, 40186816n, 40344976n);
+  const piece317 = () => ({ ...track(40344976n, 40346976n, 40415696n) });
   const shift = -0.001;
-  const asJudgedInTheField = judgePiece(fmp4Format, { ...piece(), cutShiftSeconds: shift }, undefined, interval);
-  assert.deepEqual([asJudgedInTheField.whole, asJudgedInTheField.reason], [false, "segment-end-outside-interval-vide"]);
-  assert.equal(judgePiece(fmp4Format, onItsCutClock(piece(), shift, true), undefined, interval).whole, true);
-  // A piece the muxer cut is still moved by its shift.
-  assert.equal(onItsCutClock(piece(), shift, false).cutShiftSeconds, shift);
-  assert.equal(onItsCutClock(piece(), null, false).cutShiftSeconds, undefined);
+  assert.equal(leadingSecondsOf(piece317()), 0.125);
+  assert.equal(leadingSecondsOf(piece316()), 0.042);
+  const ending316 = { from: 2511.676, to: 2521.686, requiredKinds: ["vide"] };
+  // Without the next keyframe's span the piece reads three frames short.
+  assert.equal(judgePiece(fmp4Format, { ...piece316(), cutShiftSeconds: shift }, undefined, ending316).reason, "segment-end-outside-interval-vide");
+  assert.equal(judgePiece(fmp4Format, { ...piece316(), cutShiftSeconds: shift, nextLeadingSeconds: leadingSecondsOf(piece317()) },
+    undefined, ending316).whole, true);
+  // The next piece starts at its keyframe; its leading pictures come before it.
+  const ending317 = { from: 2521.686, to: 2525.982, requiredKinds: ["vide"] };
+  assert.equal(judgePiece(fmp4Format, { ...piece317(), cutShiftSeconds: shift }, undefined, ending317).whole, true);
+  const withoutKeyframe = piece317();
+  delete withoutKeyframe.tracks[0].firstSampleStart;
+  assert.equal(judgePiece(fmp4Format, withoutKeyframe, undefined, ending317).reason, "segment-start-outside-interval-vide");
+  // The two meet without a gap.
+  assert.equal(judgeNeighbors(piece316(), piece317()).whole, true);
+  // A piece judged against its cut alone ends short by the same span.
+  const cut = 2521.686 - SEGMENT_CUT_TIME_DELTA_SECONDS;
+  assert.equal(judgePiece(fmp4Format, piece316(), cut).whole, false);
+  assert.equal(judgePiece(fmp4Format, { ...piece316(), nextLeadingSeconds: 0.125 }, cut).whole, true);
+});
+
+test("the only gap two pieces may have is the right one's leading pictures it could not make", () => {
+  const piece = (first, keyframe, end) => ({ tracks: [{ kind: "vide", timescale: 16000n, productionFrame: 672n, positionErrorTicks: 1n,
+    firstSampleStart: keyframe, ranges: [{ start: first, end, frame: 672n }] }] });
+  const left = { ...piece(40186144n, 40186816n, 40344976n), nextLeadingSeconds: 0.125 };
+  // Piece 317 begun at its keyframe 2521.686 s without its three leading pictures.
+  const bare = piece(40346976n, 40346976n, 40415696n);
+  assert.equal(judgeNeighbors(left, bare).whole, false);
+  assert.equal(lacksOnlyItsLeadingPictures(left, bare), true);
+  // With them there is no gap to excuse; a piece that has them is not excused a gap.
+  assert.equal(lacksOnlyItsLeadingPictures(left, piece(40344976n, 40346976n, 40415696n)), false);
+  // A gap wider than the stated span is a fault.
+  assert.equal(lacksOnlyItsLeadingPictures(left, piece(40348320n, 40348320n, 40415696n)), false);
+  assert.equal(lacksOnlyItsLeadingPictures({ ...left, nextLeadingSeconds: 0 }, bare), false);
 });

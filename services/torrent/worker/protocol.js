@@ -66,6 +66,12 @@ export const Command = {
    * sixteen pieces is what tore a film apart on 2026-09-05.
    */
   PRIORITY_MAP: "priority-map",
+  /**
+   * How fast the torrents may download in all, in bytes per second, or
+   * Infinity for no limit: the share of the processor the encoders leave
+   * (`storage/processor-share.js`, torrent-tv/meta#178).
+   */
+  DOWNLOAD_RATE: "download-rate",
   /** Read a byte range; the body arrives as CHUNK messages. */
   READ_RANGE: "read-range",
   /** Abandon an in-flight READ_RANGE (viewer gone, seek superseded). */

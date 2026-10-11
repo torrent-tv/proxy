@@ -475,6 +475,17 @@ export class TorrentWorkerClient {
    * @param {{ sourceKey: string, fileIndex: number, durationSeconds: number, zones: { from: number, to: number, priority: number }[] }} params
    * @returns {Promise<void>}
    */
+  /**
+   * How fast the torrents may download in all (`Command.DOWNLOAD_RATE`).
+   *
+   * @param {number} bytesPerSecond - Infinity for no limit.
+   * @param {string} [because]
+   * @returns {Promise<void>}
+   */
+  async setDownloadRate(bytesPerSecond, because = "") {
+    return this.#caller.call(Command.DOWNLOAD_RATE, { bytesPerSecond: Number.isFinite(bytesPerSecond) ? bytesPerSecond : null, because });
+  }
+
   async setPriorityMap({ sourceKey, fileIndex, zones, durationSeconds, postedAt }) {
     return this.#caller.call(Command.PRIORITY_MAP, {
       sourceKey,

@@ -1261,6 +1261,35 @@ export class TorrentPool {
    *   film against a number, highest first in urgency.
    * @param {number} durationSeconds
    */
+  /**
+   * How fast every torrent may download in all: the share of the processor
+   * the encoders leave (`storage/processor-share.js`, torrent-tv/meta#178).
+   * Within it the swarm is asked for what the priority map puts first.
+   *
+   * @param {number | null} bytesPerSecond - Infinity or null for no limit.
+   * @param {string} [because]
+   */
+  setDownloadRate(bytesPerSecond, because = "") {
+    if (!this.client || this.client.destroyed || typeof this.client.throttleDownload !== "function") return;
+    const rate = Number.isFinite(bytesPerSecond) ? Math.max(1, Math.round(bytesPerSecond)) : -1;
+    if (rate === this.#downloadLimit) return;
+    this.client.throttleDownload(rate);
+    // Said when the limit is set or lifted, and when it moves by a factor of
+    // two either way — the scale on which a limit changes what the swarm gives.
+    const scale = rate < 0 ? null : Math.round(Math.log2(rate));
+    if (scale !== this.#downloadLimitScale) {
+      this.#downloadLimitScale = scale;
+      logger.info(`torrent-pool: download limit -> ${rate < 0 ? "none" : `${Math.round(rate / 1024)} KB/s`}${because ? ` (${because})` : ""}`);
+    }
+    this.#downloadLimit = rate;
+  }
+
+  /** The download limit in force, -1 for none. */
+  #downloadLimit = -1;
+
+  /** The power of two the last limit said was nearest, null for none. */
+  #downloadLimitScale = null;
+
   applyPriorityMap(torrent, fileIndex, zones, durationSeconds) {
     // A MAP WITH NOTHING IN IT IS A STATEMENT, and it is answered before
     // anything else is looked at. It says nobody wants any of this file, and

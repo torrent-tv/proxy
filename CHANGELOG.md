@@ -1,4 +1,4 @@
-## Unreleased
+## 2.97.7
 
 - **Fix**: Downloading no longer takes the processor a re-encoded picture needs. The torrents download at the rate the processor leaves them once every watched film's encoders and downloads advance at one film speed — `s = C / Σ(k + w·c)` from the measured free processor, encoder cost per second of film, bytes per second of film and processor per megabyte — and never below what the films play; within it the priority map decides what comes first. On Home Assistant a 720x400 AVI re-encode got 176-182 % of a core against the 230 % it needs while the torrent fetched 4.5-9.8 MB/s far ahead of the viewer, and the picture stopped; where the rates cannot be held, the start forecast waits for it at the start instead (#ttv-178).
 

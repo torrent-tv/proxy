@@ -12,13 +12,21 @@ export class DownloadMaps {
   #nextEpoch = 0;
   #log;
   #now;
+  /**
+   * Milliseconds on the clock both threads read the same way, to the
+   * microsecond: what a publication's stages are measured with, the torrent
+   * thread's receipt included (torrent-tv/meta#177).
+   */
+  #clock;
 
-  constructor({ publish, resolvePlayback = async map => map.zones, log = null, now = Date.now }) {
+  constructor({ publish, resolvePlayback = async map => map.zones, log = null, now = Date.now,
+    clock = () => performance.timeOrigin + performance.now() }) {
     if (typeof publish !== "function") throw new TypeError("Download map publication is required.");
     this.#publish = publish;
     this.#resolvePlayback = resolvePlayback;
     this.#log = typeof log === "function" ? log : null;
     this.#now = now;
+    this.#clock = clock;
   }
 
   async playback({ sourceKey, fileIndex, durationSeconds, zones }) {
@@ -200,6 +208,7 @@ export class DownloadMaps {
   }
 
   #emit(file) {
+    const builtFrom = this.#clock();
     const zones = [...file.zones, ...file.nativeZones];
     for (const { ranges, requestId, priority, urgent, deadlineAt, order } of file.metadata.values()) {
       for (const [byteStart, byteEnd] of ranges) {
@@ -217,16 +226,32 @@ export class DownloadMaps {
     // orders nothing differently, so the deadlines' order is compared and not
     // their values.
     const shape = shapeOf(publication);
+    // WHAT A PUBLICATION COSTS, stage by stage (torrent-tv/meta#177): building
+    // and comparing it here, every time something is stated, sent or not;
+    // waiting behind the previous one; the synchronous post, which drops the
+    // zones repeated for the torrent and copies the rest for the other thread;
+    // from the post to the torrent thread's
+    // handler, which holds the transfer and that thread's queue together; and
+    // applying it there. A cold minute of #166 run 12 built 10 408 maps and
+    // sent 439, and nothing said what that cost.
+    const builtMs = this.#clock() - builtFrom;
     if (file.shape && sameShape(file.shape, shape)) {
-      this.#statsOf(file).unchanged += 1;
+      const stats = this.#statsOf(file);
+      stats.unchanged += 1;
+      stats.unsentBuildMs += builtMs;
       this.#report(file);
       return Promise.resolve();
     }
     file.shape = shape;
+    const askedAt = this.#clock();
     const pending = file.pending.then(() => {
       if (this.#files.get(`${file.sourceKey}:${file.fileIndex}`) !== file) return undefined;
       const sentAt = this.#now();
-      return Promise.resolve(this.#publish(publication)).then(reply => {
+      const postedAt = this.#clock();
+      const sent = this.#publish({ ...publication, postedAt });
+      const postMs = this.#clock() - postedAt;
+      return Promise.resolve(sent).then(reply => {
+        const answeredAt = this.#clock();
         // A torrent not yet in the thread applies nothing, so this map was not
         // delivered and the next one, however alike, has to be.
         if (reply?.appliedMs === null && file.shape === shape) file.shape = null;
@@ -235,6 +260,11 @@ export class DownloadMaps {
         stats.sent += 1;
         stats.zones.push(zones.length);
         stats.deliveredMs.push(this.#now() - sentAt);
+        stats.sentBuildMs.push(builtMs);
+        stats.waitedMs.push(postedAt - askedAt);
+        stats.postMs.push(postMs);
+        if (Number.isFinite(reply?.receivedAt)) stats.toHandlerMs.push(Math.max(0, reply.receivedAt - postedAt - postMs));
+        if (Number.isFinite(reply?.repliedAt)) stats.replyMs.push(Math.max(0, answeredAt - reply.repliedAt));
         if (Number.isFinite(reply?.appliedMs)) stats.appliedMs.push(reply.appliedMs);
         this.#report(file);
         return reply;
@@ -249,7 +279,7 @@ export class DownloadMaps {
   }
 
   #statsOf(file) {
-    file.stats ??= { since: this.#now(), sent: 0, unchanged: 0, zones: [], deliveredMs: [], appliedMs: [] };
+    file.stats ??= emptyStats(this.#now());
     return file.stats;
   }
 
@@ -264,9 +294,26 @@ export class DownloadMaps {
       `zones median ${middle(stats.zones)} max ${largest(stats.zones)}; ` +
       `delivered median ${middle(stats.deliveredMs)}ms max ${largest(stats.deliveredMs)}ms (${total(stats.deliveredMs)}ms in all), ` +
       `applied in the torrent thread median ${middle(stats.appliedMs)}ms max ${largest(stats.appliedMs)}ms ` +
-      `(${total(stats.appliedMs)}ms in all)`);
-    file.stats = { since: now, sent: 0, unchanged: 0, zones: [], deliveredMs: [], appliedMs: [] };
+      `(${total(stats.appliedMs)}ms in all); ` +
+      `stages of a sent map — built ${stage(stats.sentBuildMs)}, waited behind the previous ${stage(stats.waitedMs)}, ` +
+      `posted ${stage(stats.postMs)}, post to the torrent thread's handler ${stage(stats.toHandlerMs)}, ` +
+      `reply back ${stage(stats.replyMs)}; maps built and not sent took ${total([stats.unsentBuildMs])}ms here`);
+    file.stats = emptyStats(now);
   }
+}
+
+/** @param {number} since */
+function emptyStats(since) {
+  return { since, sent: 0, unchanged: 0, zones: [], deliveredMs: [], appliedMs: [],
+    sentBuildMs: [], waitedMs: [], postMs: [], toHandlerMs: [], replyMs: [], unsentBuildMs: 0 };
+}
+
+/** One stage's median, largest and sum, in milliseconds with tenths. @param {number[]} values */
+function stage(values) {
+  if (values.length === 0) return "n/a";
+  const sorted = [...values].sort((left, right) => left - right);
+  const sum = values.reduce((total, value) => total + value, 0);
+  return `median ${sorted[Math.floor(sorted.length / 2)].toFixed(1)}ms max ${sorted.at(-1).toFixed(1)}ms sum ${Math.round(sum)}ms`;
 }
 
 /** How many numbers describe one zone's part in what the torrent does. */

@@ -61,29 +61,17 @@ export async function admitOriginalInput({ sources, reserve, readRanges, now = D
     let released = false;
     let failed = false;
     retained = true;
-    // A stretch is copied one piece of the torrent at a time, so a release
-    // stops it at the next piece: the thread it is copied on serves every other
-    // read too, and a copy nobody will use went on to its end (torrent-tv/meta#178).
-    const copyLater = async job => {
-      const { source } = job.entry;
-      const [first, last] = source.input.ranges[job.position];
-      const unit = Number(source.pieceLength) > 0 ? Number(source.pieceLength) : last - first + 1;
-      const target = Buffer.allocUnsafeSlow(last - first + 1);
-      try {
-        for (let at = first; at <= last; at += unit) {
-          if (released) return false;
-          const buffers = await read(source, [[at, Math.min(last, at + unit - 1)]]);
-          if (buffers === null) { failed = true; return false; }
-          buffers[0].copy(target, at - first);
-        }
-      } catch {
-        failed = true;
-        return false;
-      }
+    // ONE READ FOR THE STRETCH. Copied a torrent piece per read (2.97.12), a
+    // stretch took 33.1 s for 83.9 MB on the field's AVI against 126.5 MB in
+    // 16.3 s as one read beside another copy (torrent-tv/meta#178): each read
+    // waits its turn on two busy threads, and the stretch paid that once per
+    // piece. A release therefore discards the stretch when its read returns.
+    const copyLater = job => read(job.entry.source, [job.entry.source.input.ranges[job.position]]).then(buffers => {
+      if (buffers === null) { failed = true; return false; }
       if (released) return false;
-      job.entry.buffers[job.position] = target;
+      job.entry.buffers[job.position] = buffers[0];
       return true;
-    };
+    }, () => { failed = true; return false; });
     // The stretches, one source after another: they share one reader, and the
     // first source's stretch is the one FFmpeg reaches first.
     const whole = (async () => {

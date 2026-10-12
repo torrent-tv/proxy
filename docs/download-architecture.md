@@ -77,7 +77,7 @@ An original-input run is given one finite stretch of segments, copied once,
 so FFmpeg opens the file once per stretch instead of once per segment
 (torrent-tv/meta#158). The run starts once what FFmpeg opens with — the
 header, the index, the stream search — is copied; the largest range, the film
-itself, is copied after it one torrent piece at a time while FFmpeg opens, and
+itself, is copied after it in one read while FFmpeg opens, and
 a read inside it waits for it (torrent-tv/meta#178). `EncodeInputs` ends the
 stretch at the largest segment, within the plan's bound for the run, such that:
 
@@ -101,7 +101,8 @@ refused. Segments past the stretch are placed by the plan when their bytes
 arrive or memory is freed. The next stretch is copied once the run's own
 stretch is, and an input prepared or held for a start the last plan of its
 output does not place — one it starts or holds back, or the number after a run
-it left alive — is withdrawn, its copy stopping at the next piece.
+it left alive — is withdrawn, and a stretch still being copied is dropped when
+its read returns.
 
 A fully retained source is described by its whole files after its torrent closes.
 It continues to answer availability and source facts without rebuilding a torrent.

@@ -208,7 +208,7 @@ export class EncodeInputs {
       this.#requests.delete(key);
       this.#wanted.delete(key);
       // A copy already answered may still be copying its stretch; released,
-      // it stops at the next piece.
+      // the stretch is dropped when its read returns.
       request.result?.release?.();
     }
     this.#retryMemory();

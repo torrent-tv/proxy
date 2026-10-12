@@ -23,6 +23,7 @@
 import { isUsableTorrentHandle, requireCurrentTorrent } from "./handle-state.js";
 import "./install-webrtc-shim.js";
 import { parentPort, workerData } from "node:worker_threads";
+import { monitorEventLoopDelay, performance } from "node:perf_hooks";
 import { Readable } from "node:stream";
 import { heldFileBytes } from "./held-file-bytes.js";
 import { createSendStream } from "./channel.js";
@@ -107,6 +108,18 @@ const openReads = new Map();
  * against the bytes it downloads (torrent-tv/meta#178).
  */
 let servedBytes = 0;
+
+/**
+ * How long reads for readers took inside this thread, from the command's
+ * arrival to its answer, and how many there were; and how late this thread's
+ * event loop ran. A copy for an encoder took 16.3 s for 126.5 MB as one read
+ * and 33.1 s for 83.9 MB as one read per piece on the field's AVI, and nothing
+ * said whether the time was spent here or on the way (torrent-tv/meta#178).
+ */
+let readerMs = 0;
+let readerReads = 0;
+const loopDelay = monitorEventLoopDelay({ resolution: 20 });
+loopDelay.enable();
 
 /**
  * Shorthand for this file. The same path as `logger.info` anywhere else in the
@@ -432,7 +445,12 @@ async function runCommand(command, params, id) {
       // bytes, so the price of a downloaded byte is taken over one interval
       // whether or not anything encodes (torrent-tv/meta#178).
       const usage = process.threadCpuUsage();
-      return { downloaded, uploaded, served: servedBytes, threadCpuSeconds: (usage.user + usage.system) / 1e6 };
+      // The loop's lateness over the interval since the last reading, in ms.
+      const loopP99Ms = loopDelay.count > 0 ? loopDelay.percentile(99) / 1e6 : null;
+      const loopMaxMs = loopDelay.count > 0 ? loopDelay.max / 1e6 : null;
+      loopDelay.reset();
+      return { downloaded, uploaded, served: servedBytes, threadCpuSeconds: (usage.user + usage.system) / 1e6,
+        readerMs, readerReads, loopP99Ms, loopMaxMs };
     }
 
 
@@ -528,8 +546,11 @@ async function runCommand(command, params, id) {
     case Command.READ_HELD: {
       const known = resolvedTorrents.get(params.sourceKey);
       const torrent = isUsableTorrentHandle(known) ? known : null;
+      const startedAt = performance.now();
       const bytes = await readWhileInUse(openReads, id, torrent, params.fileIndex,
         () => readHeldBytes(torrent, params.fileIndex, params.start, params.end, logger));
+      readerMs += performance.now() - startedAt;
+      readerReads += 1;
       servedBytes += bytes?.length ?? 0;
       return { bytes };
     }
@@ -537,9 +558,13 @@ async function runCommand(command, params, id) {
     case Command.READ_HELD_RANGES: {
       const known = resolvedTorrents.get(params.sourceKey);
       const torrent = isUsableTorrentHandle(known) ? known : null;
+      const startedAt = performance.now();
+      // Counted as each piece is read, so a long copy lands in the intervals
+      // it was made in rather than in the one it ended in.
       const buffers = await readWhileInUse(openReads, id, torrent, params.fileIndex,
-        () => readHeldRanges(torrent, params.fileIndex, params.ranges, params.maxBytes, logger));
-      for (const buffer of buffers ?? []) servedBytes += buffer?.length ?? 0;
+        () => readHeldRanges(torrent, params.fileIndex, params.ranges, params.maxBytes, logger, (length) => { servedBytes += length; }));
+      readerMs += performance.now() - startedAt;
+      readerReads += 1;
       return { buffers };
     }
 

@@ -1,3 +1,8 @@
+## Unreleased
+
+- **Fix**: The stretch of an encoder input is copied in one read again. Copied a torrent piece per read (2.97.12), it took 33.1 s for 83.9 MB on the field's AVI against 126.5 MB in 16.3 s as one read, and the seek back waited 45.1 s: each read waited its turn on two busy threads, once per piece. The encoder still starts while the stretch is copied (#ttv-178).
+- **Chore**: The machine's reading says how late this thread's event loop ran, and each `torrent:` line how late the torrent thread's loop ran and how long reads for readers took inside it; bytes handed to readers are counted as each piece is read, so a long copy lands in the intervals it was made in (#ttv-178).
+
 ## 2.97.12
 
 - **Fix**: After a seek back to bytes already downloaded, the encoder starts while its input is still being copied. It used to wait for the whole stretch: on the field's AVI 126.5 MB took 16.3 s, then FFmpeg's own open 10.1 s, and the picture stood 33 s. Now the header and index are copied first and the run starts; the film itself is copied a torrent piece at a time while FFmpeg opens, and a read inside it waits for it. The run is as long as before, so no extra start is paid. The open a stretch is sized from leaves out that wait, so the stretch does not grow by its own copy time (#ttv-178).

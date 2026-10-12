@@ -8,12 +8,31 @@
  */
 
 import os from "node:os";
+import { monitorEventLoopDelay } from "node:perf_hooks";
 import { logger } from "../../../utils/logger.js";
 import { availableShareFrom } from "../available-share.js";
 import { baseDrawFrom, costPerMegabyteFrom } from "../torrent-cost.js";
 import { medianOf, movedBeyondScatter, READINGS_KEPT, scatterOf } from "../learned-median.js";
 import { ENCODE_RUN_STATE, processCanBeSignalled } from "../encode-run-state.js";
 import { SourceFiles } from "../../media/SourceFile.js";
+
+/**
+ * What the torrent thread says of itself over one interval: how late its event
+ * loop ran, and how long reads for readers took inside it, from a command's
+ * arrival to its answer (torrent-tv/meta#178). Empty where it says nothing.
+ *
+ * @param {{ readerMs: number | null, readerReads: number | null, loopP99Ms: number | null, loopMaxMs: number | null }} now
+ * @param {{ readerMs: number | null, readerReads: number | null }} previous
+ * @returns {string}
+ */
+function threadSays(now, previous) {
+  const loop = Number.isFinite(now.loopP99Ms) && Number.isFinite(now.loopMaxMs)
+    ? `; its loop late p99=${Math.round(now.loopP99Ms)}ms max=${Math.round(now.loopMaxMs)}ms` : "";
+  const reads = Number.isFinite(now.readerReads) && Number.isFinite(previous.readerReads) && now.readerReads > previous.readerReads
+    && Number.isFinite(now.readerMs) && Number.isFinite(previous.readerMs)
+    ? `; ${now.readerReads - previous.readerReads} read(s) for readers took ${Math.round(now.readerMs - previous.readerMs)}ms in it` : "";
+  return loop + reads;
+}
 
 export class HostLoad {
   /** What this reads and asks of the rest of the proxy, and nothing else. @type {object} */
@@ -35,6 +54,8 @@ export class HostLoad {
 
   /** The previous reading of the torrent thread's processor and the bytes downloaded. */
   #torrentSample = null;
+  /** This thread's event-loop lateness, begun at the first machine reading. */
+  #mainLoop = null;
 
   /** A reading of the torrent thread is under way; it asks the worker, which may not answer. */
   #readingTorrent = false;
@@ -186,6 +207,10 @@ export class HostLoad {
         uploaded: totals?.uploaded ?? null,
         served: totals?.served ?? null,
         threadCpuSeconds: totals?.threadCpuSeconds ?? null,
+        readerMs: totals?.readerMs ?? null,
+        readerReads: totals?.readerReads ?? null,
+        loopP99Ms: totals?.loopP99Ms ?? null,
+        loopMaxMs: totals?.loopMaxMs ?? null,
         metadata: this.#host.readMetadataActivity?.()
       };
       this.#learnThreadCost(now);
@@ -241,7 +266,7 @@ export class HostLoad {
         `torrent: downloaded ${(megabytes / elapsedSec).toFixed(2)} MB/s, sent to peers ${rateOf("uploaded")}, ` +
         `handed to readers ${rateOf("served")} over ${elapsedSec.toFixed(1)}s, ` +
         `limit ${Number.isFinite(limit) ? `${(limit / 1e6).toFixed(2)} MB/s` : "none"}; ` +
-        `its thread drew ${Math.round(cpuSeconds / elapsedSec * 100)}% of the machine`
+        `its thread drew ${Math.round(cpuSeconds / elapsedSec * 100)}% of the machine` + threadSays(now, previous)
       );
     }
     if (megabytes === 0) {
@@ -456,7 +481,8 @@ export class HostLoad {
     try {
       const totals = await this.#host.getTorrentTotals();
       const read = (key) => { const value = Number(totals?.[key]); return Number.isFinite(value) ? value : null; };
-      return { downloaded: read("downloaded"), uploaded: read("uploaded"), served: read("served"), threadCpuSeconds: read("threadCpuSeconds") };
+      return { downloaded: read("downloaded"), uploaded: read("uploaded"), served: read("served"), threadCpuSeconds: read("threadCpuSeconds"),
+        readerMs: read("readerMs"), readerReads: read("readerReads"), loopP99Ms: read("loopP99Ms"), loopMaxMs: read("loopMaxMs") };
     } catch {
       return null; // the pool is busy or gone; a reading missed is not a fault
     }
@@ -525,6 +551,16 @@ export class HostLoad {
    */
   async #sayMachine(share, proxyShare, running, suspended) {
     const machine = await this.#host.readMachineState();
+    // HOW LATE THIS THREAD'S LOOP RAN over the interval: every answer to FFmpeg
+    // and every hand-over of a copy waits for it (torrent-tv/meta#178). Begun at
+    // the first reading, so a check that never reads the machine starts no timer.
+    if (!this.#mainLoop) {
+      this.#mainLoop = monitorEventLoopDelay({ resolution: 20 });
+      this.#mainLoop.enable();
+    }
+    const late = this.#mainLoop.count > 0
+      ? ` loop p99=${Math.round(this.#mainLoop.percentile(99) / 1e6)}ms max=${Math.round(this.#mainLoop.max / 1e6)}ms` : "";
+    this.#mainLoop.reset();
     const asPercent = (value) => (value === null || value === undefined ? "n/a" : `${Math.round(value * 100)}%`);
     const free = Number.isFinite(share.systemShare) ? Math.max(0, 1 - share.systemShare) : null;
     logger.info(
@@ -536,7 +572,7 @@ export class HostLoad {
       ` over=${share.elapsedSec.toFixed(1)}s` +
       // What the offer will multiply a prediction by, in the same line as the
       // readings it comes from.
-      ` available=${asPercent(this.hostAvailability.share)} free=${asPercent(free)}`
+      ` available=${asPercent(this.hostAvailability.share)} free=${asPercent(free)}` + late
     );
   }
 

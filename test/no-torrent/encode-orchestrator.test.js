@@ -94,7 +94,7 @@ function onTheStretchOf(made, segment) {
   }).length;
 }
 
-function orchestrator({ maxRuns = 2 } = {}) {
+function orchestrator({ maxRuns = 2, inputsUnplaced = null } = {}) {
   const lines = [];
   const processes = new Map();
   /** @type {EncodeOrchestrator} */
@@ -119,6 +119,7 @@ function orchestrator({ maxRuns = 2 } = {}) {
     // and fewer encoders can genuinely finish sooner.
     contentionPenalties: MEASURED_PENALTIES,
     now: () => 1000,
+    inputsUnplaced,
     logger: { info: (line) => lines.push(line), warn: (line) => lines.push(line) },
     makeRun: ({ address, from, to }) => {
       const process_ = new FakeProcess();
@@ -353,6 +354,27 @@ test("a viewer who leaves takes the encoder with them", () => {
   made.reconcile();
   assert.equal(made.runsOn(PICTURE).length, 0);
   assert.equal(made.endings()[ENCODE_EXIT.STOPPED], 1);
+});
+
+test("inputs are kept only where the plan places a run, after a seek too (torrent-tv/meta#178)", () => {
+  const told = [];
+  const { made, buildRun } = orchestrator({ maxRuns: 1, inputsUnplaced: (address, starts) => told.push({ address, starts: [...starts] }) });
+  // A run working a finite stretch, as an original input's run does: its next
+  // stretch, from #141, is copied while it works.
+  const working = buildRun({ from: 100, to: 140 });
+  made.adopt(PICTURE, working);
+  wants(made, [{ from: 100, to: 130 }]);
+  made.reconcile();
+  assert.equal(told.at(-1).address, PICTURE);
+  assert.ok(told.at(-1).starts.includes(141), "the number after a run left alive is kept");
+  // The viewer seeks far ahead: the run is moved, and what its next stretch
+  // was being copied for is no longer a start.
+  wants(made, [{ from: 600, to: 630 }]);
+  made.reconcile();
+  assert.equal(working.isAlive, false, "the seek stopped it");
+  const starts = told.at(-1).starts;
+  assert.ok(starts.includes(600) && starts.includes(599), "the start placed, and the number before it a copied picture may begin at");
+  assert.equal(starts.includes(141), false, "the next stretch of the run the seek stopped is not kept");
 });
 
 test("a run that meets material made elsewhere is moved past it", () => {

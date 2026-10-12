@@ -1,0 +1,140 @@
+/**
+ * @file A run starts once what FFmpeg opens with is copied, and copies nobody
+ * places a run for go back (torrent-tv/meta#178).
+ *
+ * Field 2026-10-12, a seek back on an AVI: the encoder was started only after
+ * its whole input, 126.5 MB, had been copied in 16.3 s, beside a copy for the
+ * position the viewer had left, and the picture stood 33 s. What is checked:
+ * the answer comes before the stretch of film is copied, a read inside the
+ * stretch waits for it, a release stops the stretch at the next piece, a
+ * stretch that cannot be copied fails the read waiting for it, and an input
+ * prepared or held for a start the plan does not place is withdrawn. Storage
+ * is a fake; nothing here reaches a torrent.
+ */
+
+import test from "node:test";
+import assert from "node:assert/strict";
+import { setImmediate } from "node:timers/promises";
+import { admitOriginalInput } from "../../services/encode/OriginalInput.js";
+import { EncodeInputs } from "../../services/encode/EncodeInputs.js";
+import { handleEncodeInputGet } from "../../routes/encode-input/get.js";
+
+// A file of 400 bytes whose byte n is n % 251; a header of ten bytes at 0 and
+// a stretch of film of 300 bytes at 100, copied 100 bytes — one piece — at a time.
+const FILE = Buffer.from(Array.from({ length: 400 }, (_, index) => index % 251));
+const sources = [{ sourceKey: "film", fileIndex: 0, timeShiftSeconds: 0, pieceLength: 100,
+  input: { original: true, fileLength: FILE.length, ranges: [[0, 9], [100, 399]], selections: [] } }];
+
+/** A reader whose answers wait until the check lets each one go. */
+function gatedReader({ refuseAt = null } = {}) {
+  const asked = [];
+  const waiting = [];
+  const readRanges = (_source, list) => {
+    asked.push(list.map(range => [...range]));
+    return new Promise(resolve => waiting.push(() =>
+      resolve(list.some(([start]) => start === refuseAt) ? null : list.map(([start, end]) => FILE.subarray(start, end + 1)))));
+  };
+  const next = async () => {
+    while (waiting.length === 0) await setImmediate();
+    waiting.shift()();
+    await setImmediate();
+  };
+  return { asked, readRanges, next };
+}
+
+test("the input is answered once the header is copied, and a read in the stretch waits for the stretch", async () => {
+  const reader = gatedReader();
+  const admitting = admitOriginalInput({ sources, reserve: async () => () => {}, readRanges: reader.readRanges });
+  await reader.next();
+  const input = await admitting;
+  assert.deepEqual(reader.asked, [[[0, 9]], [[100, 199]]],
+    "the answer comes once the header is copied, with the stretch's first piece asked for and not yet copied");
+  assert.equal(input.deferredBytes, 300);
+  assert.deepEqual([...input.read(0, 2, 5).bytes], [...FILE.subarray(2, 6)], "the header is read at once");
+  assert.equal(input.waitedBefore(Date.now()), 0, "a read of the header waited for nothing");
+  let answered = null;
+  const reading = Promise.resolve(input.read(0, 150, 160, true)).then(answer => { answered = answer; });
+  await reader.next();
+  await reader.next();
+  assert.equal(answered, null, "two of three pieces copied: the read still waits");
+  await new Promise(resolve => setTimeout(resolve, 20));
+  await reader.next();
+  await reading;
+  assert.ok(input.waitedBefore(Date.now()) >= 19, "and the wait is recorded, so a run's open can leave it out");
+  assert.deepEqual([...answered.bytes], [...FILE.subarray(150, 161)], "the bytes asked for, from the copied stretch");
+  assert.equal(await input.whole, true);
+  assert.deepEqual(reader.asked.slice(1), [[[100, 199]], [[200, 299]], [[300, 399]]], "one piece at a time");
+  input.release();
+});
+
+test("a release stops the copy of the stretch at the next piece", async () => {
+  const reader = gatedReader();
+  const admitting = admitOriginalInput({ sources, reserve: async () => () => {}, readRanges: reader.readRanges });
+  await reader.next();
+  const input = await admitting;
+  const waiting = input.read(0, 120, 130, true);
+  input.release();
+  await reader.next();
+  assert.equal(await waiting, null, "a read waiting on a released input is refused");
+  assert.equal(await input.whole, false);
+  assert.equal(input.copyFailed(), false, "a release is not a failed copy");
+  assert.equal(reader.asked.length, 2, "nothing past the piece being copied is asked for");
+});
+
+test("a stretch that cannot be copied fails the read waiting for it, and the route says so", async () => {
+  const reader = gatedReader({ refuseAt: 200 });
+  const admitting = admitOriginalInput({ sources, reserve: async () => () => {}, readRanges: reader.readRanges });
+  await reader.next();
+  const input = await admitting;
+  const req = { raw: { socket: { remoteAddress: "127.0.0.1" } }, method: "GET",
+    params: { token: "1", fileIndex: "0" }, headers: { range: "bytes=250-" } };
+  const reply = { status: 200, headers: {}, code(status) { this.status = status; return this; },
+    header(name, value) { this.headers[name] = value; return this; }, send(body) { this.body = body; return this; } };
+  const answering = handleEncodeInputGet(req, reply, { inputOf: () => input, refused: () => assert.fail("not a byte outside the input") });
+  await reader.next();
+  await reader.next();
+  const answered = await answering;
+  assert.equal(answered.status, 503);
+  assert.match(answered.body.error, /could not be copied/);
+  assert.equal(input.copyFailed(), true);
+  assert.equal(await input.whole, false);
+  input.release();
+});
+
+const packetSource = { sourceKey: "source", fileIndex: 0, input: { ranges: [[0, 1]], tracks: [{
+  track: { type: "video", codecId: "vp8", width: 64, height: 64 },
+  packets: [{ pts: 0, duration: 1, keyframe: true, ranges: [[0, 1]] }]
+}] } };
+const output = { id: "output" };
+
+test("an input being prepared for a start the plan does not place is withdrawn, and one it places is kept", async () => {
+  let settle, changed = 0;
+  const lines = [];
+  const inputs = new EncodeInputs({ resolve: async () => ({ kind: "result", sources: [packetSource] }),
+    readRanges: () => new Promise(resolve => { settle = resolve; }), reviseBudget: async () => inputs.allow(100),
+    changed: () => changed++, failed: error => { throw error; }, log: line => lines.push(line) });
+  inputs.take(output, 7, 7);
+  await setImmediate();
+  inputs.withdrawUnplaced(output, new Set([7]));
+  assert.equal(inputs.held(), 2, "a start the plan places keeps its copy");
+  inputs.withdrawUnplaced(output, new Set([30, 29]));
+  assert.ok(lines.some(line => line.includes("withdrawn: the plan places no run there")));
+  settle([Buffer.from("ab")]);
+  await setImmediate();
+  assert.equal(inputs.held(), 0, "the copy that finished after it was withdrawn gives its memory back");
+  assert.equal(changed, 0, "and is not announced as ready");
+});
+
+test("an input held for a start the plan does not place goes back", async () => {
+  const inputs = new EncodeInputs({ resolve: async () => ({ kind: "result", sources: [packetSource] }),
+    readRanges: async () => [Buffer.from("ab")], reviseBudget: async () => inputs.allow(100),
+    changed: () => {}, failed: error => { throw error; } });
+  inputs.take(output, 7, 7);
+  await setImmediate();
+  await setImmediate();
+  assert.equal(inputs.held(), 2);
+  inputs.withdrawUnplaced(output, new Set([30]));
+  assert.equal(inputs.held(), 0);
+  assert.equal(inputs.take(output, 7, 7), null, "taken again, it is prepared afresh");
+  inputs.forget(output);
+});

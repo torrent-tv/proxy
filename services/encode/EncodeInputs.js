@@ -188,6 +188,33 @@ export class EncodeInputs {
   }
 
   /**
+   * Withdraw what is being prepared or held for a start the plan no longer
+   * places: `starts` holds every start the last plan of this output placed or
+   * held back, and the number after each run it left alive. `retain` withdrew
+   * such a copy only once it was held, and only when a run was started; while
+   * it was being made it shared the torrent thread with the copy the viewer
+   * was waiting for. Field 2026-10-12: after a seek back, the next stretch of
+   * the run the seek had stopped went on being copied beside the one for the
+   * new position, 127.5 and 126.5 MB in 16 s each, and was withdrawn only once
+   * it was done (torrent-tv/meta#178).
+   *
+   * @param {object} output
+   * @param {Set<number>} starts
+   */
+  withdrawUnplaced(output, starts) {
+    for (const [key, request] of this.#requests) {
+      if (request.output !== output || request.result?.kind === "terminal" || starts.has(request.from)) continue;
+      this.#note(request, "withdrawn: the plan places no run there");
+      this.#requests.delete(key);
+      this.#wanted.delete(key);
+      // A copy already answered may still be copying its stretch; released,
+      // it stops at the next piece.
+      request.result?.release?.();
+    }
+    this.#retryMemory();
+  }
+
+  /**
    * The input of a run starting at `from`, once it is prepared.
    *
    * `to` is the last number the run may reach. A packet input is prepared for
@@ -306,7 +333,9 @@ export class EncodeInputs {
       if (result.kind === "result" && result.to > request.to) result.to = Math.max(request.from, request.to);
       request.result = result;
       this.#note(request, result.kind === "result" ? `ready #${result.from}..#${result.to}, ${result.bytes ?? "?"} bytes` +
-        (Number.isFinite(result.copyMs) ? `, copied in ${result.copyMs}ms` : "")
+        (Number.isFinite(result.copyMs) ? (result.deferredBytes > 0
+          ? `, opening part copied in ${result.copyMs}ms, ${result.deferredBytes} bytes of the stretch copied while the run opens`
+          : `, copied in ${result.copyMs}ms`) : "")
         : `${result.kind}${result.reason ? ` ${result.reason}` : ""}${Number.isFinite(result.bytes) ? ` ${result.bytes} bytes` : ""}`,
       describeTiming(request.timing, this.#now()));
       if (result.kind === "result" || result.kind === "terminal") this.#changed(request.output, result);
@@ -444,7 +473,16 @@ export class EncodeInputs {
     if (result.kind === "needs-memory") this.#wanted.set(request.key, { wanted: minimum, required: minimum });
     if (result.kind === "result") {
       Object.assign(result, { from, to: end });
-      if (result.copyMs > 0) keep(this.#copyRates, result.bytes / result.copyMs);
+      // The stretch is copied after the answer, while the run opens; the rate
+      // is the whole copy's, learned once it is done.
+      const copied = result.whole ?? Promise.resolve(true);
+      void copied.then(whole => {
+        if (whole && result.copyMs > 0) keep(this.#copyRates, result.bytes / result.copyMs);
+        this.#log(`encode input #${from}..#${end} of ${addressOf(output)}: ` + (whole
+          ? `stretch copied, ${result.bytes} bytes in ${result.copyMs}ms of copying since it was admitted`
+          : result.copyFailed?.() ? "the stretch could not be copied: a piece it needs is no longer held"
+            : "released before its stretch was copied"));
+      });
     }
     return result;
   }

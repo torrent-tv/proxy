@@ -82,7 +82,7 @@ async function runOver(directory, { bytes, ranges, from, command, format = fmp4F
   const input = await admitOriginalInput({
     sources: [{ sourceKey: "generated", fileIndex: 0, timeShiftSeconds: 0,
       input: { original: true, from, fileLength: bytes.length, ranges, selections: command.selections } }],
-    reserve: async () => () => {}, readRanges: async () => ranges.map(([start, end]) => bytes.subarray(start, end + 1)) });
+    reserve: async () => () => {}, readRanges: async (_source, list) => list.map(([start, end]) => bytes.subarray(start, end + 1)) });
   input.runTag = "avi";
   const refused = [];
   const server = http.createServer((req, res) => {

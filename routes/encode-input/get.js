@@ -1,7 +1,7 @@
 import { parseRange } from "../../utils/parse-range.js";
 
 /** FFmpeg reads only original byte ranges already owned by its live run. */
-export function handleEncodeInputGet(req, reply, { inputOf, refused = () => {} }) {
+export async function handleEncodeInputGet(req, reply, { inputOf, refused = () => {} }) {
   const address = req.raw?.socket?.remoteAddress;
   if (!["127.0.0.1", "::1", "::ffff:127.0.0.1"].includes(address)) return reply.code(403).send();
   const token = Number(req.params.token), fileIndex = Number(req.params.fileIndex);
@@ -29,7 +29,15 @@ export function handleEncodeInputGet(req, reply, { inputOf, refused = () => {} }
   // and a byte past it is refused, which from 7.1 on ends the run: every read
   // FFmpeg makes, its stream search at open included, must be named by the
   // container (torrent-tv/meta#165).
-  const held = input.read(fileIndex, range.start, range.end, true);
+  // A read inside the stretch of film waits for its copy, which goes on while
+  // FFmpeg opens (`OriginalInput.js`); the answer is then whole, as any other.
+  const held = await input.read(fileIndex, range.start, range.end, true);
+  if (!held && input.copyFailed?.()) {
+    // The copy of the stretch failed: a piece left the store between the
+    // check that it was there and the copy. The run ends on this refusal, and
+    // the failure is said where the copy is accounted for (`EncodeInputs.js`).
+    return reply.code(503).send({ error: "Original input bytes could not be copied." });
+  }
   if (!held) {
     // FFmpeg asked for a byte the run was not given: the container named too
     // little. Said, because FFmpeg itself reports only a failed seek or read.

@@ -959,6 +959,9 @@ export function wireOutputs({
     inputDemandChanged: (address, windows) => {
       for (const output of parts.outputs.outputsOn(address)) parts.encodeInputs?.retain(output, windows);
     },
+    inputsUnplaced: (address, starts) => {
+      for (const output of parts.outputs.outputsOn(address)) parts.encodeInputs?.withdrawUnplaced(output, starts);
+    },
     admission: parts.admission,
     // What the viewers actually waited for, by band. The ledger is the
     // priority layer's; the encoding is handed a way to ask it.

@@ -1,3 +1,7 @@
+## Unreleased
+
+- **Fix**: The torrent thread's price of a downloaded byte is measured and said in the log, but neither the download limit nor the quality offer uses it until it is established. On 2.97.8 it carried the thread's other work — 1287, 217 and 146 ms per MB at an AVI's start, median 263 against 12.5 on an MKV — and held the AVI's download at its own film rate while its cold start took 56.0 s against 44.9 s on 2.97.7. The download is unlimited again and the offer counts no torrent cost, for a control run (#ttv-178).
+
 ## 2.97.8
 
 - **Fix**: The download limit by processor share counts the proxy's processor as a share of the machine, as the encoder cost and the price of a byte already were; 2.97.7 counted it in cores, so on the four-core addon host the limit was about four times looser than the model (#ttv-178).

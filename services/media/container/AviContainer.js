@@ -404,8 +404,19 @@ export class AviContainer extends Container {
           packets.append(track.trackNumber, { pts: stream.times[previous], duration: Math.max(0, end - stream.times[previous]),
             keyframe: true, ranges: [[stream.starts[previous], stream.starts[previous] + stream.lengths[previous] - 1]] });
         };
+        // THE THREAD IS GIVEN BACK at each portion of the file the table
+        // reaches: a two-hour soundtrack is some 300 000 packets, and built in
+        // one stretch it held the main thread with the map's first pass for
+        // 5-7 s while FFmpeg's first open waited for its answers
+        // (torrent-tv/meta#178).
+        let portion = -1;
         for (let at = 0; at < stream.count; at++) {
           if (!stream.lengths[at]) continue;
+          const reached = Math.floor(stream.starts[at] / this.portionBytes);
+          if (Number.isFinite(reached) && reached !== portion) {
+            if (portion >= 0) await new Promise(resolve => setImmediate(resolve));
+            portion = reached;
+          }
           if (previous >= 0) append(stream.times[at]);
           previous = at;
         }

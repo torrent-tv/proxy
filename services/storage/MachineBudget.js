@@ -78,6 +78,14 @@ export class MachineBudget {
   #revisionPromise = null;
   #reviseAgain = false;
   /**
+   * The resources the next pass reads: `null` for every one, else their names.
+   * A claimant short of memory asks for memory alone; reading the disks first
+   * made its answer wait for them (torrent-tv/meta#178).
+   *
+   * @type {Set<string> | null}
+   */
+  #againScope = null;
+  /**
    * The revision in hand, for its own line: when it was first asked for, how
    * many asks joined it, and which pass this is. At a cold start on the addon
    * host a caller waited 20.2 s inside `revise()` and nothing said whether it
@@ -151,32 +159,45 @@ export class MachineBudget {
   }
 
   /**
-   * Read every resource, divide each, and tell each claimant its share.
+   * Read the resources, divide each, and tell each claimant its share.
    *
+   * @param {string | null} [resource] - One resource to read and divide; every
+   *   resource when absent. The others keep their last division.
+   * @param {string | null} [because] - Who asked, said in the revision's line.
    * @returns {Promise<Map<string, { freeBytes: number, allowanceBytes: number, shares: object[] }>>}
    */
-  revise() {
+  revise(resource = null, because = null) {
+    const scope = resource === null ? null : new Set([resource]);
     if (this.#revisionPromise) {
       this.#reviseAgain = true;
+      this.#againScope = this.#againScope === null || scope === null ? null : new Set([...this.#againScope, ...scope]);
       this.#revision.asks += 1;
       return this.#revisionPromise;
     }
-    this.#revision = { askedAt: Date.now(), asks: 1, pass: 0 };
+    this.#revision = { askedAt: Date.now(), asks: 1, pass: 0, because };
+    this.#againScope = scope;
     this.#revisionPromise = (async () => {
       do {
+        const passScope = this.#againScope;
+        this.#againScope = new Set();
         this.#reviseAgain = false;
         this.#revision.pass += 1;
-        await this.#readRevision();
+        await this.#readRevision(passScope);
       } while (this.#reviseAgain);
       return this.#last;
     })().finally(() => { this.#revisionPromise = null; });
     return this.#revisionPromise;
   }
 
-  async #readRevision() {
+  /** @param {Set<string> | null} scope */
+  async #readRevision(scope) {
     const passFrom = Date.now();
     let readingMs = 0;
+    const readings = [];
     for (const [name, resource] of this.#resources) {
+      if (scope !== null && !scope.has(name)) {
+        continue;
+      }
       const claimants = this.#claimants.filter((one) => one.resource === name);
       if (claimants.length === 0) {
         continue;
@@ -185,6 +206,7 @@ export class MachineBudget {
       const readFrom = Date.now();
       const free = await resource.readFree();
       readingMs += Date.now() - readFrom;
+      readings.push(`${name} ${Date.now() - readFrom}ms`);
       // WITHOUT A READING, NOTHING IS ALLOWED TO GROW. A resource whose free
       // space cannot be read is not a resource with room; answering "unbounded"
       // there is how the spill file came to have no limit in the first place.
@@ -213,8 +235,9 @@ export class MachineBudget {
     }
     const revision = this.#revision;
     this.#logger?.info?.(`${this.describe()}` + (revision
-      ? ` (pass ${revision.pass} of a revision asked ${revision.asks} time(s), first ${Date.now() - revision.askedAt}ms ago; ` +
-        `this pass ${Date.now() - passFrom}ms, ${readingMs}ms of it reading what is free)`
+      ? ` (pass ${revision.pass} of a revision asked ${revision.asks} time(s), first ${Date.now() - revision.askedAt}ms ago` +
+        `${revision.because ? `, first by ${revision.because}` : ""}; ` +
+        `this pass ${Date.now() - passFrom}ms, ${readingMs}ms of it reading what is free: ${readings.join(", ") || "nothing"})`
       : ""));
     return this.#last;
   }

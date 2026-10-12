@@ -44,6 +44,47 @@ test("a demand change during a budget reading queues a fresh reading without par
   assert.equal(allowed, 50);
 });
 
+test("a claimant short of memory has memory read alone, and the disks keep their division", async () => {
+  // Reading the disks first made the memory's answer wait for them: 2.05 s on a
+  // cold AVI, with every encoder input allowed nothing (torrent-tv/meta#178).
+  const reads = [];
+  const budget = new MachineBudget({ policy: { kind: "fixed", bytes: 100 * MEGABYTE } });
+  budget.defineResource({ name: "memory", readFree: async () => { reads.push("memory"); return 100 * MEGABYTE; } });
+  budget.defineResource({ name: "disk", readFree: async () => { reads.push("disk"); return 100 * MEGABYTE; } });
+  const inputs = claimantOf({ name: "inputs", resource: "memory", wanted: 10 * MEGABYTE });
+  const segments = claimantOf({ name: "segments", resource: "disk", wanted: 30 * MEGABYTE });
+  budget.register(inputs.claimant);
+  budget.register(segments.claimant);
+  await budget.revise();
+  assert.deepEqual(reads, ["memory", "disk"]);
+  inputs.claimant.wanted = () => 20 * MEGABYTE;
+  await budget.revise("memory", "inputs");
+  assert.deepEqual(reads, ["memory", "disk", "memory"], "the disk is not read for memory");
+  assert.equal(inputs.allowed(), 20 * MEGABYTE);
+  assert.equal(segments.allowed(), 30 * MEGABYTE, "and the disk keeps the share it was given");
+});
+
+test("a full revision asked during a memory pass reads every resource in the pass after it", async () => {
+  const reads = [];
+  let release;
+  const held = new Promise(resolve => { release = resolve; });
+  const budget = new MachineBudget({ policy: { kind: "fixed", bytes: 100 } });
+  budget.defineResource({ name: "memory", readFree: async () => {
+    reads.push("memory");
+    if (reads.length === 1) await held;
+    return 100;
+  } });
+  budget.defineResource({ name: "disk", readFree: async () => { reads.push("disk"); return 100; } });
+  budget.register(claimantOf({ name: "inputs", resource: "memory", wanted: 10 }).claimant);
+  budget.register(claimantOf({ name: "segments", resource: "disk", wanted: 10 }).claimant);
+  const memory = budget.revise("memory");
+  const full = budget.revise();
+  assert.equal(memory, full, "one revision, joined");
+  release();
+  await full;
+  assert.deepEqual(reads, ["memory", "memory", "disk"]);
+});
+
 /**
  * @param {{ name: string, resource: string, held?: number, wanted: number, minimum?: number }} shape
  * @returns {{ claimant: object, allowed: () => number }}

@@ -568,9 +568,15 @@ export async function startProxyServer({
               value = new SegmentInputs({ index, tracks: wanted }).forInterval({ ...interval, mode: track => modes.get(track) });
             }
           } catch { value = null; }
+          // A zone worked out gives the thread back before the next: worked out
+          // in one stretch, the first pass over a film's 4000 zones held the main
+          // thread 5-7 s while FFmpeg's first open waited for its answers. What
+          // was worked out is kept, so a pass a newer map ends is not lost
+          // (torrent-tv/meta#178).
+          if (value?.kind === "result") segmentSourceRanges.set(rangesKey, value.ranges);
+          await new Promise(resolve => setImmediate(resolve));
           if (!map.isCurrent()) return [];
           if (value?.kind === "result") {
-            segmentSourceRanges.set(rangesKey, value.ranges);
             convert(value.ranges);
             continue;
           }

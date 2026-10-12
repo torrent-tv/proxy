@@ -112,3 +112,42 @@ test("an indexed AVI's refused soundtrack table is asked for again only when it 
     await fs.rm(absolute, { recursive: true, force: true });
   }
 });
+
+// torrent-tv/meta#178: a two-hour soundtrack is some 300 000 packets, and its
+// table built in one stretch held the main thread 5-7 s with the map's first
+// pass. It gives the thread back at each portion of the file it reaches, and
+// is the same table.
+test("an indexed AVI's soundtrack table gives the thread back at each portion of the file", async () => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), "ttv178-avi-portions-"));
+  try {
+    const file = path.join(directory, "source.avi");
+    const made = spawnSync(ffmpegBin, ["-v", "error", "-f", "lavfi", "-i", "testsrc2=size=64x64:rate=5",
+      "-f", "lavfi", "-i", "sine=sample_rate=48000", "-t", "60", "-c:v", "mpeg4", "-vtag", "XVID",
+      "-c:a", "libmp3lame", "-b:a", "32k", "-f", "avi", file], { windowsHide: true, encoding: "utf8" });
+    assert.equal(made.status, 0, made.stderr);
+    const bytes = await fs.readFile(file);
+    const tableOf = async (portionBytes) => {
+      const memory = new IndexMemory({});
+      memory.allow(Number.MAX_SAFE_INTEGER);
+      const container = new AviContainer({ fileSize: bytes.length, portionBytes,
+        readRange: async (start, end) => bytes.subarray(start, end + 1), packetMemory: memory.forFile("local", 0) });
+      await container.supportsOriginalSourceRanges();
+      const audio = (await container.readTracks()).find(track => track.type === "audio");
+      let turns = 0;
+      let counting = true;
+      const count = () => { if (counting) { turns++; setImmediate(count); } };
+      setImmediate(count);
+      const index = await container.readPacketIndex();
+      counting = false;
+      return { turns, bounds: index.boundsOf(audio.trackNumber) };
+    };
+    const whole = await tableOf(undefined);
+    const portions = await tableOf(16 * 1024);
+    assert.ok(portions.turns > whole.turns + 5, `${portions.turns} turns of the loop against ${whole.turns}`);
+    assert.deepEqual(portions.bounds, whole.bounds, "the same table");
+  } finally {
+    const absolute = path.resolve(directory);
+    assert.ok(path.basename(absolute).startsWith("ttv178-avi-portions-"));
+    await fs.rm(absolute, { recursive: true, force: true });
+  }
+});

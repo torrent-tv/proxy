@@ -716,7 +716,10 @@ export async function startProxyServer({
         if (original) {
           const ranges = await containerOrchestrator.inspect(params, "source-ranges");
           if (ranges.kind !== "result") return ranges;
+          // The torrent's piece is the unit its stretch is copied in, so a copy
+          // nobody needs any more stops at the next piece (`OriginalInput.js`).
           sources.push({ sourceKey: params.sourceKey, fileIndex, timeShiftSeconds,
+            pieceLength: torrentPool.knownTorrent(params.sourceKey)?.pieceLength ?? null,
             input: { ...ranges.value, original: true, selections: wanted.map(track => ({ track,
               index: track.declaredIndex ?? choices.find(choice => choice.type === track.type)?.index ?? 0 })) } });
           continue;

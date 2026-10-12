@@ -228,6 +228,7 @@ export class EncodeOrchestrator {
     segmentCoverage = null,
     planSoon = null,
     inputDemandChanged = null,
+    inputsUnplaced = null,
     describeWaits = null,
     admission = null,
     logger,
@@ -264,6 +265,9 @@ export class EncodeOrchestrator {
     // loop that calls it. Absent in a test, where the clock is the test's own.
     this.planSoon = typeof planSoon === "function" ? planSoon : () => undefined;
     this.inputDemandChanged = typeof inputDemandChanged === "function" ? inputDemandChanged : () => undefined;
+    // Told, after each plan of an output, where that plan places runs and
+    // where the runs it kept end, so inputs prepared for anywhere else go back.
+    this.inputsUnplaced = typeof inputsUnplaced === "function" ? inputsUnplaced : () => undefined;
   }
 
   /**
@@ -881,6 +885,20 @@ export class EncodeOrchestrator {
       // `-to` and simply stops when its head meets somebody else's claim.
       coverage.claim(action.run, action.from, endOfRun({ from: action.from, to: action.to }));
     }
+
+    // AN INPUT IS PREPARED ONLY FOR A START THIS PLAN PLACES: one it starts or
+    // holds back (a copied picture's input may begin one number earlier), or
+    // the number after a run it left alive, whose next stretch is copied while
+    // it works. Any other copy shares the torrent thread with the one a viewer
+    // waits for (torrent-tv/meta#178).
+    const starts = new Set();
+    for (const action of actions) {
+      if (action.type !== "start" && action.type !== "move") continue;
+      starts.add(action.from);
+      starts.add(action.from - 1);
+    }
+    for (const run of this.runsOn(address)) if (run.isAlive) starts.add(run.to + 1);
+    this.inputsUnplaced(address, starts);
 
     // NOBODY IS MAKING WHAT SOMEBODY IS WAITING FOR. Said here, with the numbers
     // the decision was taken from, because it is the one state in which a viewer

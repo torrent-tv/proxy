@@ -1,3 +1,8 @@
+## Unreleased
+
+- **Fix**: After a seek back to bytes already downloaded, the encoder starts while its input is still being copied. It used to wait for the whole stretch: on the field's AVI 126.5 MB took 16.3 s, then FFmpeg's own open 10.1 s, and the picture stood 33 s. Now the header and index are copied first and the run starts; the film itself is copied a torrent piece at a time while FFmpeg opens, and a read inside it waits for it. The run is as long as before, so no extra start is paid. The open a stretch is sized from leaves out that wait, so the stretch does not grow by its own copy time (#ttv-178).
+- **Fix**: A copy of an encoder input that the plan no longer places a run for is withdrawn while it is still being made, and stops at the next piece; the next stretch is copied after the run's own. After that seek the next stretch of the run the seek had stopped went on copying beside the one the viewer waited for, at half the speed each, and was dropped only once it was done (#ttv-178).
+
 ## 2.97.11
 
 - **Fix**: The copy of an encoder input is no longer cut short by the time before the viewer reaches its piece. On the field's AVI after a seek (2.97.10) the piece was always about to be needed, so every input shrank to one piece and every run paid its open again — about 9 s for each 4 s piece, and the picture stood on almost every piece. The input still always holds the piece it is prepared for (#ttv-178).

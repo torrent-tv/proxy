@@ -1178,7 +1178,16 @@ export class EncodeRuns {
       // 48.9 s after run #1..#32 ended, then the start of #33..#892, and the
       // viewer stood 69 s (torrent-tv/meta#166). Asked now, it is copied while
       // this run works and is ready when the plan places the next run there.
-      if (inputEnd < mayReach) this.#host.encodeInputs?.take(session, inputEnd + 1, mayReach);
+      // It waits for this run's own stretch to be copied: that copy goes on
+      // while the run opens and FFmpeg's reads wait for it, and a second copy
+      // beside it on the same thread would slow it (torrent-tv/meta#178).
+      if (inputEnd < mayReach) {
+        const askNext = () => {
+          if (this.isLive(session) && run.isAlive) this.#host.encodeInputs?.take(session, inputEnd + 1, mayReach);
+        };
+        if (admittedInput.whole) void admittedInput.whole.then(whole => { if (whole) askNext(); });
+        else askNext();
+      }
     } else if (admittedInput) {
       run.admittedInputKeys = new Map([[safeIndex, inputKey]]);
       let nextIndex = startIndex + 1;
@@ -1252,10 +1261,14 @@ export class EncodeRuns {
     const pieceSeconds = Number(grid?.[run.from + 1]) - Number(grid?.[run.from]);
     const speed = run.speedX > 0 ? run.speedX : this.#host.encodeOrchestrator.speedOn?.(session.outputKey) ?? 0;
     if (!Number.isFinite(ended.firstNamedMs) || !(pieceSeconds > 0) || !(speed > 0)) return;
-    const openSeconds = Math.max(0, ended.firstNamedMs / 1000 - pieceSeconds / speed);
+    // FFmpeg's reads may have waited for the stretch being copied; that wait
+    // is the copy's, and the stretch is sized from the open (torrent-tv/meta#178).
+    const waitedMs = Number.isFinite(ended.firstNamedWallMs) ? run.originalInput?.waitedBefore?.(ended.firstNamedWallMs) ?? 0 : 0;
+    const openSeconds = Math.max(0, (ended.firstNamedMs - waitedMs) / 1000 - pieceSeconds / speed);
     this.#host.encodeOrchestrator.noteOpen?.(session.outputKey ?? "", openSeconds);
     this.#host.logger.info(`encode input of run #${run.from}..#${run.to} on ${session.outputKey}: opened in ` +
-      `${openSeconds.toFixed(2)}s (first piece named at ${ended.firstNamedMs}ms, ${pieceSeconds.toFixed(3)}s of film at ${speed.toFixed(2)}x)`);
+      `${openSeconds.toFixed(2)}s (first piece named at ${ended.firstNamedMs}ms, ${pieceSeconds.toFixed(3)}s of film at ${speed.toFixed(2)}x` +
+      `${waitedMs > 0 ? `, ${waitedMs}ms of it waiting for the stretch to be copied, not counted` : ""})`);
   }
 
   /**

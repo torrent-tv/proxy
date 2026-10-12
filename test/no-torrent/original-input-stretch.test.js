@@ -255,7 +255,9 @@ test("the copy time is the reads alone", async () => {
   const input = await admitOriginalInput({ sources, now: () => at,
     reserve: async () => { at += 1000; return () => {}; },
     readRanges: async (_source, ranges) => { at += 7; return ranges.map(([start, end]) => Buffer.alloc(end - start + 1)); } });
-  assert.equal(input.copyMs, 7, "the wait for memory is not copying");
+  assert.equal(await input.whole, true);
+  // Two reads: the header first, then the stretch, which goes on after the answer.
+  assert.equal(input.copyMs, 14, "the wait for memory is not copying");
   input.release();
 });
 

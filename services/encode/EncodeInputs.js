@@ -51,11 +51,13 @@ export class EncodeInputs {
   #capacity;
   #urgent;
   #rankAt;
+  #deadlineOf;
+  #firstPieceIn;
   #log;
   #now;
 
   constructor({ resolve, readRanges, heldRanges = null, reviseBudget, changed, failed, capacity = () => null, urgent = () => true,
-    rankAt = () => null, openOf = () => null, log = () => {}, now = Date.now }) {
+    rankAt = () => null, deadlineOf = () => null, firstPieceIn = () => null, openOf = () => null, log = () => {}, now = Date.now }) {
     this.#openOf = openOf;
     this.#resolve = resolve;
     this.#read = readRanges;
@@ -66,6 +68,8 @@ export class EncodeInputs {
     this.#capacity = capacity;
     this.#urgent = urgent;
     this.#rankAt = rankAt;
+    this.#deadlineOf = deadlineOf;
+    this.#firstPieceIn = firstPieceIn;
     this.#log = log;
     this.#now = now;
   }
@@ -364,7 +368,7 @@ export class EncodeInputs {
    */
   async #admitStretch(request, firstSources) {
     const { output, from } = request;
-    const minimum = originalInputBytes(firstSources);
+    let minimum = originalInputBytes(firstSources);
     const stretches = new Map([[from, { sources: firstSources, bytes: minimum }]]);
     const held = new Map();
     const at = async end => {
@@ -383,8 +387,17 @@ export class EncodeInputs {
     };
     // Grows by doubling and then halves back: a handful of resolutions find
     // the end whether it is a piece away or the rest of the film.
+    // THE LEAST THAT MAKES THE PIECE IT IS FOR. An input read from the keyframe
+    // before starts one piece early; holding that piece alone would not make
+    // the one the viewer wants (torrent-tv/meta#178).
+    const serves = Math.max(from, Math.min(request.serves ?? from, request.to));
+    let floor = from;
+    if (serves > from) {
+      const covering = await at(serves);
+      if (covering) { floor = serves; minimum = covering.bytes; }
+    }
     const longest = async maxBytes => {
-      let good = from, bad = null, step = 1;
+      let good = floor, bad = null, step = 1;
       while (bad === null) {
         const end = good + step;
         if (end > request.to) bad = request.to + 1;
@@ -398,9 +411,27 @@ export class EncodeInputs {
       return good;
     };
     const sizing = this.stretchFor(output);
-    const target = sizing?.bytes ?? null;
+    let target = sizing?.bytes ?? null;
     if (sizing && !sizing.openMeasured) request.timing.openApproximate = true;
-    let end = target === null || this.#heldRanges === null ? from : await longest(target);
+    // NO LONGER THAN THE VIEWER CAN WAIT. A stretch is sized so its copy takes
+    // no longer than an open; for a piece the viewer reaches soon, the copy and
+    // the time to that piece's being served must both fit before they reach it.
+    // Field 2026-10-12: after a seek back, 222.4 MB were copied for 7.7 s ahead
+    // of a piece needed in about 8 s, and the picture stood 13.2 s. Unknown
+    // terms leave the stretch as it was.
+    const deadline = this.#deadlineOf(output, serves);
+    const firstPiece = this.#firstPieceIn(output, from, serves);
+    const copyRate = middleOf(this.#copyRates);
+    if (target !== null && Number.isFinite(deadline) && Number.isFinite(firstPiece) && copyRate !== null) {
+      const fitting = Math.floor(copyRate * Math.max(0, deadline - firstPiece) * 1000);
+      if (fitting < target) {
+        const capped = Math.max(minimum, fitting);
+        this.#log(`encode input #${from}..#${request.to} of ${output.outputKey ?? output.id}: copy held to ${capped} of ${target} bytes ` +
+          `— #${serves} is needed in ${deadline.toFixed(1)}s and its first piece takes ${firstPiece.toFixed(1)}s to be served`);
+        target = capped;
+      }
+    }
+    let end = target === null || this.#heldRanges === null ? floor : await longest(target);
     if (this.#requests.get(request.key) !== request) return undefined;
     this.#wanted.set(request.key, { wanted: stretches.get(end).bytes, required: minimum });
     await this.#spent(request.timing, "budgetMs", () => this.#revise());

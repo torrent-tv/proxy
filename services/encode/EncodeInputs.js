@@ -51,13 +51,11 @@ export class EncodeInputs {
   #capacity;
   #urgent;
   #rankAt;
-  #deadlineOf;
-  #firstPieceIn;
   #log;
   #now;
 
   constructor({ resolve, readRanges, heldRanges = null, reviseBudget, changed, failed, capacity = () => null, urgent = () => true,
-    rankAt = () => null, deadlineOf = () => null, firstPieceIn = () => null, openOf = () => null, log = () => {}, now = Date.now }) {
+    rankAt = () => null, openOf = () => null, log = () => {}, now = Date.now }) {
     this.#openOf = openOf;
     this.#resolve = resolve;
     this.#read = readRanges;
@@ -68,8 +66,6 @@ export class EncodeInputs {
     this.#capacity = capacity;
     this.#urgent = urgent;
     this.#rankAt = rankAt;
-    this.#deadlineOf = deadlineOf;
-    this.#firstPieceIn = firstPieceIn;
     this.#log = log;
     this.#now = now;
   }
@@ -411,26 +407,8 @@ export class EncodeInputs {
       return good;
     };
     const sizing = this.stretchFor(output);
-    let target = sizing?.bytes ?? null;
+    const target = sizing?.bytes ?? null;
     if (sizing && !sizing.openMeasured) request.timing.openApproximate = true;
-    // NO LONGER THAN THE VIEWER CAN WAIT. A stretch is sized so its copy takes
-    // no longer than an open; for a piece the viewer reaches soon, the copy and
-    // the time to that piece's being served must both fit before they reach it.
-    // Field 2026-10-12: after a seek back, 222.4 MB were copied for 7.7 s ahead
-    // of a piece needed in about 8 s, and the picture stood 13.2 s. Unknown
-    // terms leave the stretch as it was.
-    const deadline = this.#deadlineOf(output, serves);
-    const firstPiece = this.#firstPieceIn(output, from, serves);
-    const copyRate = middleOf(this.#copyRates);
-    if (target !== null && Number.isFinite(deadline) && Number.isFinite(firstPiece) && copyRate !== null) {
-      const fitting = Math.floor(copyRate * Math.max(0, deadline - firstPiece) * 1000);
-      if (fitting < target) {
-        const capped = Math.max(minimum, fitting);
-        this.#log(`encode input #${from}..#${request.to} of ${output.outputKey ?? output.id}: copy held to ${capped} of ${target} bytes ` +
-          `— #${serves} is needed in ${deadline.toFixed(1)}s and its first piece takes ${firstPiece.toFixed(1)}s to be served`);
-        target = capped;
-      }
-    }
     let end = target === null || this.#heldRanges === null ? floor : await longest(target);
     if (this.#requests.get(request.key) !== request) return undefined;
     this.#wanted.set(request.key, { wanted: stretches.get(end).bytes, required: minimum });

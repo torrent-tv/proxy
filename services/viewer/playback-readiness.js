@@ -49,8 +49,8 @@ const CLIENT_RANGE_START_TOLERANCE_SECONDS = 0.25;
  * @param {number} horizonSeconds
  * @returns {number | null}
  */
-export function forecastRate(readings, now = Date.now(), horizonSeconds = 0) {
-  const curve = rateCurve(readings, now);
+export function forecastRate(readings, now = Date.now(), horizonSeconds = 0, weighting = "last") {
+  const curve = rateCurve(readings, now, weighting);
   if (!curve) {
     return null;
   }
@@ -192,7 +192,12 @@ export function predictPlaybackReadiness(input = {}) {
       [{ start: at, end: add(at, measured ? nearest(fromSeconds(buffered), unit) :
         rescale(fromSeconds(buffered), unit)), frame: zero }],
     ready: new Set(Array.isArray(track.readySegmentIndices) ? track.readySegmentIndices : []),
-    curve: rateCurve(track.readings, now),
+    // Film made over the encoder's working time, over the readings the trend
+    // keeps: one reading is one closed piece, so the harmonic mean is that
+    // ratio. The last reading alone is one piece's content and machine — a
+    // first piece of credits read 6.49x and started a cold AVI on 2.4 s of
+    // buffer that the next piece, at 0.57x, did not hold (torrent-tv/meta#178).
+    curve: rateCurve(track.readings, now, "piece"),
     bitsPerMediaSecond: averageBitsPerMediaSecond(track, track.segments,
       new Set(Array.isArray(track.readySegmentIndices) ? track.readySegmentIndices : [])),
     segments: segmentsOf[trackIndex]
@@ -211,7 +216,10 @@ export function predictPlaybackReadiness(input = {}) {
     const serviceKey = typeof source.serviceKey === "string" ? source.serviceKey : id;
     let service = sourceServices.get(serviceKey);
     if (!service) {
-      service = { rate: rateCurve(source.downloadRateReadings, now), finish: 0 };
+      // Bytes over time across the readings the trend keeps: the last 5 s of a
+      // swarm moved between 0.97 and 5.8 MB/s and was carried to the end of the
+      // film each time (torrent-tv/meta#178).
+      service = { rate: rateCurve(source.downloadRateReadings, now, "time"), finish: 0 };
       sourceServices.set(serviceKey, service);
     }
     sourceState.set(id, { source, service });
@@ -330,6 +338,22 @@ export function predictPlaybackReadiness(input = {}) {
     }
   }
   const trackFinish = trackState.map(({ track }) => finiteNonNegative(track.startupRemainingSeconds));
+  // WHERE A RUN STARTS, AND WHAT IT COSTS. A run is given the stretch whose
+  // bytes are held when its input is admitted, and the next one starts after
+  // it, when more bytes are held, and opens its input first — 6-10 s on an
+  // OpenDML AVI. Charged once at the first start only, a cold AVI made of runs
+  // of one to five pieces was forecast as one run (torrent-tv/meta#178). So a
+  // piece outside the live runs' stretches whose bytes arrive after the run
+  // the schedule last started was admitted begins a run of its own, admitted
+  // when the piece before it is made and its bytes are held, then opened.
+  // The first run's start is `startupRemainingSeconds`, charged once above; a
+  // stretch's bound by memory and by its copy time is not modelled.
+  const runStarts = trackState.map(({ track }) => ({
+    openSeconds: finiteNonNegative(track.openSeconds),
+    spans: (Array.isArray(track.runSpans) ? track.runSpans : [])
+      .filter(span => Number.isFinite(span?.start) && span.end > span.start),
+    admittedAt: finiteNonNegative(track.startupRemainingSeconds) > 0 ? 0 : null
+  }));
   const sourceByteCoverage = new Map([...sourceByteService].map(([id, ranges]) => [id, numericCoverage(ranges)]));
   const sourceArrivals = new Map([...sourceByteService].map(([id, ranges]) => [id, indexedArrivals(ranges)]));
   let transferFinish = 0;
@@ -386,7 +410,15 @@ export function predictPlaybackReadiness(input = {}) {
     // Production accepts a complete held segment input. It cannot overlap its
     // own source download; reused input retains its original arrival time.
     const processing = trackState[trackIndex].curve;
-    const admittedAt = Math.max(trackFinish[trackIndex], sourceArrivalAt);
+    let admittedAt = Math.max(trackFinish[trackIndex], sourceArrivalAt);
+    if (!job.produced && encodeWork > 0) {
+      const run = runStarts[trackIndex];
+      const live = run.spans.some(span => segment.startSeconds >= span.start && segment.startSeconds < span.end);
+      if (!live && (run.admittedAt === null || sourceArrivalAt > run.admittedAt)) {
+        run.admittedAt = admittedAt;
+        admittedAt += run.openSeconds;
+      }
+    }
     const producedAt = job.produced || encodeWork === 0 ? 0 : processing.finish(encodeWork, admittedAt);
     trackFinish[trackIndex] = Math.max(trackFinish[trackIndex], producedAt);
     productions.push({ at: producedAt, trackIndex, segment, requiresSource: sourceArrivalAt > 0 });
@@ -787,11 +819,19 @@ function roundedHalfUp(numerator, denominator) {
   return 2n * (numerator - floor * denominator) >= denominator ? floor + 1n : floor;
 }
 
-function rateCurve(readings, now) {
+/**
+ * @param {*} readings - A summary (`RateTrend.snapshot`) or the readings themselves.
+ * @param {number} now
+ * @param {"last" | "piece" | "time"} [weighting] - Which rate the readings
+ *   stand for: the last one; work per working time where each reading is one
+ *   piece of film; or quantity per wall time where each reading holds until
+ *   the next.
+ */
+function rateCurve(readings, now, weighting = "last") {
   if (readings && Number.isFinite(readings.count) && readings.count > 0 &&
     Number.isFinite(readings.lastAt) && Number.isFinite(readings.lastValue) &&
     Number.isFinite(readings.meanValue) && Number.isFinite(readings.spanSeconds)) {
-    return rateCurveFrom(readings, now);
+    return rateCurveFrom(readings, weighting);
   }
   const ordered = (Array.isArray(readings) ? readings : [])
     .filter((reading) => Number.isFinite(reading?.at) && Number.isFinite(reading?.value) && reading.value >= 0)
@@ -802,25 +842,38 @@ function rateCurve(readings, now) {
     return null;
   }
 
-  return rateCurveFrom(summarizeRate(ordered), now);
+  return rateCurveFrom(summarizeRate(ordered), weighting);
 }
 
 function summarizeRate(readings) {
   const latest = readings.at(-1);
+  let weighted = 0;
+  for (let index = 0; index + 1 < readings.length; index += 1) {
+    weighted += readings[index].value * (readings[index + 1].at - readings[index].at);
+  }
+  const spanMs = latest.at - readings[0].at;
   return {
     count: readings.length,
     lastAt: latest.at,
     lastValue: latest.value,
     meanValue: readings.reduce((sum, reading) => sum + reading.value, 0) / readings.length,
-    spanSeconds: (latest.at - readings[0].at) / 1000
+    // Each reading one piece of work: work over the time it took.
+    harmonicValue: readings.some(reading => !(reading.value > 0)) ? 0
+      : readings.length / readings.reduce((sum, reading) => sum + 1 / reading.value, 0),
+    // Each reading holding until the next: quantity over the span.
+    timeWeightedValue: spanMs > 0 ? weighted / spanMs : latest.value,
+    spanSeconds: spanMs / 1000
   };
 }
 
-function rateCurveFrom({ lastValue }) {
-  // Conditional projection of the current measured service. No exponential
+function rateCurveFrom(summary, weighting = "last") {
+  // Conditional projection of the measured service. No exponential
   // relaxation, smoothing time, slope extrapolation or guessed recovery.
   // A new measurement changes the integral; polling does not change its rate.
-  const rate = Math.max(0, lastValue);
+  const value = weighting === "piece" && Number.isFinite(summary.harmonicValue) ? summary.harmonicValue
+    : weighting === "time" && Number.isFinite(summary.timeWeightedValue) ? summary.timeWeightedValue
+      : summary.lastValue;
+  const rate = Math.max(0, value);
   const workBy = (seconds) => rate * Math.max(0, seconds);
   return {
     rateAt: () => rate,

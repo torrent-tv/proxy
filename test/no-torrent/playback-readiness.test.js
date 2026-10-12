@@ -58,6 +58,25 @@ test("finds the first safe start from segments delivered before playback", () =>
   assert.ok(Math.abs(forecast.delaySeconds - 1) < 1e-8);
 });
 
+test("a held start names the piece that holds it, and the difference is the delay", () => {
+  // The log could only say that some term was positive while a cold AVI's
+  // picture stood for 17 s (Home Assistant 2026-10-12, torrent-tv/meta#178).
+  const forecast = predictPlaybackReadiness(input());
+  // Piece 0 is made and not yet at the page: 40 bytes at 320 bit/s arrive in
+  // 1 s with nothing before them.
+  assert.equal(forecast.holdingBy.track, "video");
+  assert.equal(forecast.holdingBy.segment, 0);
+  assert.equal(forecast.holdingBy.kind, "delivery");
+  assert.ok(Math.abs(forecast.holdingBy.atSeconds - forecast.holdingBy.aheadSeconds - forecast.delaySeconds) < 1e-8);
+  const ready = input();
+  ready.tracks[0].readySegmentIndices = [0, 1];
+  ready.tracks[0].segmentSizesBytes = new Map([[0, 40], [1, 40]]);
+  ready.bufferedAheadSeconds = 8;
+  const started = predictPlaybackReadiness(ready);
+  assert.equal(started.ready, true, started.reason);
+  assert.ok(!started.holdingBy, "nothing holds a start that may happen");
+});
+
 test("startup delay is independent of browser capacity and proxy lookahead", () => {
   for (const bufferLimitSeconds of [undefined, null, 0, 1, 120]) {
     for (const lookaheadSeconds of [undefined, 0, 4, 120]) {

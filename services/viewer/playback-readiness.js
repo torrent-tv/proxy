@@ -396,6 +396,16 @@ export function predictPlaybackReadiness(input = {}) {
   }
 
   const constraints = [];
+  // WHICH CONSTRAINT HOLDS THE START, said with the answer: the delay is the
+  // largest of thousands, and the log could only say that some term was
+  // positive while the picture stood for 17 s (torrent-tv/meta#178).
+  let holding = null;
+  const constrain = (value, kind, trackIndex, segment, atSeconds, aheadSeconds, requiresSource) => {
+    constraints.push(value);
+    if (value > 0 && (holding === null || value > holding.value)) {
+      holding = { value, kind, trackIndex, segment, atSeconds, aheadSeconds, requiresSource };
+    }
+  };
   const end = rescale(fromSeconds(duration), unit);
   for (let trackIndex = 0; trackIndex < trackState.length; trackIndex += 1) {
     const state = trackState[trackIndex];
@@ -407,7 +417,8 @@ export function predictPlaybackReadiness(input = {}) {
       const before = contiguousEnd(delivered, at);
       for (const range of completion.segment.ranges) addMediaRange(delivered, range);
       const after = contiguousEnd(delivered, at);
-      constraints.push(completion.at - secondsAhead(earliest(before, trackEnd), at));
+      const ahead = secondsAhead(earliest(before, trackEnd), at);
+      constrain(completion.at - ahead, "delivery", trackIndex, completion.segment.index, completion.at, ahead, false);
       if (compare(after, before) <= 0 && completion.segment.ranges.some(({ start }) => compare(start, before) > 0)) {
         // A timestamp hole cannot be repaired by waiting longer. Keep it
         // distinct from an unavailable rate or a slow but finite service.
@@ -425,8 +436,10 @@ export function predictPlaybackReadiness(input = {}) {
       for (const range of production.segment.ranges) addMediaRange(prepared, range);
       // Supply interruption coverage is stock held by the proxy as well as
       // the browser. It is not a browser buffer-size admission rule.
-      constraints.push(production.at - Math.max(0, secondsAhead(before, at) -
-        Math.min(reserve, secondsAhead(trackEnd, before)) * Number(production.requiresSource)));
+      const ahead = Math.max(0, secondsAhead(before, at) -
+        Math.min(reserve, secondsAhead(trackEnd, before)) * Number(production.requiresSource));
+      constrain(production.at - ahead, "production", trackIndex, production.segment.index, production.at, ahead,
+        production.requiresSource);
     }
   }
   const delay = Math.max(0, ...constraints);
@@ -436,6 +449,13 @@ export function predictPlaybackReadiness(input = {}) {
     Math.max(0, reserve - buffered), ready ? 'trajectory-safe-now' :
       Number.isFinite(delay) ? 'minimum-safe-delay' : 'service-not-advancing', preparedSegments);
   return { ...forecast, measuredAt: now, predictedStartAt: Number.isFinite(delay) ? now + delay * 1000 : null,
+    // The piece whose `kind` — its production, or its delivery to the page —
+    // comes `atSeconds` from now while the media before it lasts
+    // `aheadSeconds`: the difference is the delay.
+    holdingBy: ready ? null : holding === null ? (originReady ? null : { kind: "position-not-held" })
+      : { kind: holding.kind, track: tracks[holding.trackIndex]?.id ?? holding.trackIndex,
+        segment: holding.segment, atSeconds: holding.atSeconds, aheadSeconds: holding.aheadSeconds,
+        requiresSource: holding.requiresSource },
     preparedUntilSeconds: Math.min(duration, ...trackState.map((state, index) => {
       const ranges = state.clientRanges.map((range) => ({ ...range }));
       for (const item of productions.filter((item) => item.trackIndex === index && item.at <= delay)) {

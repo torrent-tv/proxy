@@ -1,3 +1,7 @@
+## Unreleased
+
+- **Fix**: The copy of an encoder input is no longer cut short by the time before the viewer reaches its piece. On the field's AVI after a seek (2.97.10) the piece was always about to be needed, so every input shrank to one piece and every run paid its open again — about 9 s for each 4 s piece, and the picture stood on almost every piece. The input still always holds the piece it is prepared for (#ttv-178).
+
 ## 2.97.10
 
 - **Fix**: Lowering the download limit no longer fails a peer's data. WebTorrent's limiter cut a peer's data into slices of a tenth of the rate at the time, and a slice still waiting when the limit fell asked the smaller bucket for more than it holds ("exceeds bucket size"), which ends that peer's stream; slices are now one BitTorrent block, 16 KiB, whatever the rate (#ttv-178).

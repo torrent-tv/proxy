@@ -35,6 +35,29 @@ test("appended final input declares its proven source end to the existing run", 
   assert.equal(released, 2);
 });
 
+test("a wait for the next input is said as a wait, the writing of an input is not", async () => {
+  // Field 2026-10-12: a soundtrack copy fed one segment at a time read 0.43x
+  // with 0.014 s of processor per second of film; the waits for its next
+  // segment were counted as its work (torrent-tv/meta#178).
+  const prepare = () => admitInput({ sources: [structuredClone(source)], reserve: () => () => {},
+    readRanges: async () => [Buffer.from("ab"), Buffer.from("cd")] });
+  const events = [];
+  let given = 0;
+  await writeAdmittedInput(await prepare(), new Writable({ write(_chunk, _encoding, done) { events.push("write"); done(); } }), {
+    next: async () => {
+      events.push("asked");
+      await new Promise(resolve => setImmediate(resolve));
+      return given++ < 1 ? prepare() : null;
+    },
+    waiting: waits => events.push(waits ? "waits" : "has")
+  });
+  const between = events.filter(event => event !== "write");
+  assert.deepEqual(between, ["waits", "asked", "has", "waits", "asked", "has"], "every ask for the next input is bracketed");
+  const firstWait = events.indexOf("waits"), firstHas = events.indexOf("has");
+  assert.ok(events.slice(firstWait, firstHas).every(event => event !== "write"), "nothing is written while waiting");
+  assert.ok(events.indexOf("write") < firstWait, "the first input is written before the wait for the next");
+});
+
 test("PCM conversion reserves its owned bytes before reading and preserves the source", async () => {
   const original = Buffer.from([0x80, 0, 0x7f]);
   const candidate = { sourceKey: "source", fileIndex: 0, input: { ranges: [[0, 2]], tracks: [{

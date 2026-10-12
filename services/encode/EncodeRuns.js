@@ -1206,7 +1206,7 @@ export class EncodeRuns {
         run.admittedInputKeys.set(nextIndex, this.#inputFailures.key(next, inputParameters));
         run.to = nextIndex++;
         return next;
-      } }).catch(error => {
+      }, waiting: waits => { if (waits) run.inputWaitBegins(); else run.inputWaitEnds(); } }).catch(error => {
         this.#host.logger.warn(`encode input output=${session.outputKey} segment=${safeIndex} write failed: ${error.message}`);
         run.process?.stdin?.destroy();
       });

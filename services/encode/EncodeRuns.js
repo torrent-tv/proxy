@@ -282,6 +282,21 @@ export class EncodeRuns {
   }
 
   /**
+   * What FFmpeg's caches may hold for the live runs that read an original
+   * file: at most what each was admitted, since a cache keeps what its run
+   * read of it (`source-command.js`).
+   *
+   * @returns {number}
+   */
+  inputCacheBytes() {
+    let bytes = 0;
+    for (const run of this.#runsByInputToken.values()) {
+      if (run.isAlive && run.originalInput) bytes += Math.max(0, Number(run.originalInput.bytes) || 0);
+    }
+    return bytes;
+  }
+
+  /**
    * @param {object} output
    * @returns {number}
    */

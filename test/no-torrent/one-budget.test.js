@@ -16,7 +16,9 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
+import os from "node:os";
 import { MachineBudget } from "../../services/storage/MachineBudget.js";
+import { wireMachineBudget } from "../../services/storage/wire.js";
 
 const MEGABYTE = 1024 * 1024;
 
@@ -105,6 +107,20 @@ function claimantOf({ name, resource, held = 0, wanted, minimum }) {
     allowed: () => allowed
   };
 }
+
+test("what FFmpeg caches of a run's input is counted on its disk in full, before the segments", async () => {
+  // The cache keeps what a run read of an original file and nobody else gives
+  // it back, so the segments are divided what is left (torrent-tv/meta#178).
+  let caches = 0;
+  const wired = wireMachineBudget({ segmentStore: { root: os.tmpdir(), stats: () => ({ bytes: 0 }) },
+    inputCaches: { held: () => caches, root: null }, readFree: async () => 100 * MEGABYTE,
+    policy: { kind: "fixed", bytes: 100 * MEGABYTE }, logger: { info: () => {}, warn: () => {} } });
+  await wired.revise();
+  assert.equal(wired.segmentBytes(), 100 * MEGABYTE);
+  caches = 30 * MEGABYTE;
+  await wired.revise(wired.inputCachesOn, "encoder input caches");
+  assert.equal(wired.segmentBytes(), 70 * MEGABYTE, "the segments give way to what the caches hold");
+});
 
 test("each resource is divided on its own — a share of memory is not a share of disk", async () => {
   const budget = new MachineBudget({ logger: { info: () => {}, warn: () => {} } });

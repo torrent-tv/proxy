@@ -93,6 +93,7 @@ import { audioReadingFor } from "../encode/audio-work-rate.js";
 import { wireMachineBudget } from "../storage/wire.js";
 import { Returns } from "../storage/returns.js";
 import { freeBytesFor } from "../storage/free.js";
+import { existsSync } from "node:fs";
 import path from "node:path";
 import { contentOf, LocalObservations, PROXY_ROOT } from "../encode/LocalObservations.js";
 import { configurationKeyOf } from "../encode/fingerprint.js";
@@ -345,7 +346,7 @@ export function wireOutputs({
     get encoders() { return parts.encoders; },
     invalidateWaits: (output) => parts.serving.invalidateWaits(output),
     productionFailed: (output) => parts.renditions.noteProductionFailed(output),
-    encodersChanged: () => { parts.applyDownloadShare?.(); onEncodersChanged?.(); },
+    encodersChanged: () => { parts.applyDownloadShare?.(); reviseInputCaches(); onEncodersChanged?.(); },
   });
   // How much film is ready in front of the viewers, said; and the spare soundtracks fetched once it is full.
   parts.cushion = new CushionReport({
@@ -1044,10 +1045,25 @@ export function wireOutputs({
     memory: parts.memoryClaimant,
     encodeInputs: parts.encodeInputs,
     indexMemory,
+    // FFmpeg puts its temporary files in /tmp, or where it runs when there is
+    // none — an output directory of the segments.
+    inputCaches: { held: () => parts.encodeRuns?.inputCacheBytes() ?? 0, root: existsSync("/tmp") ? "/tmp" : null },
     policy: parts.budgetPolicy ?? undefined,
     readFree: freeBytesFor,
     logger
   });
+  /**
+   * A run reading an original file started or ended, so the disk its cache is
+   * on is divided again — only when what the caches may hold has changed.
+   */
+  let inputCachesDivided = 0;
+  function reviseInputCaches() {
+    const bytes = parts.encodeRuns?.inputCacheBytes() ?? 0;
+    const on = parts.machineBudget?.inputCachesOn;
+    if (!on || bytes === inputCachesDivided) return;
+    inputCachesDivided = bytes;
+    void parts.machineBudget.revise(on, "encoder input caches").catch(error => logger.warn(`input cache budget: ${error.message}`));
+  }
   /**
    * What starting a run costs this output before its first piece is encoded:
    * its own measured open where it has one (`RunCosts.openOf`), else the

@@ -1,4 +1,4 @@
-## Unreleased
+## 2.97.16
 
 - **Chore**: 2.97.15's entry said a copy for an encoder reads four pieces at once unless `UV_THREADPOOL_SIZE` says otherwise; the proxy sets 64 where the deployment states none, so a copy reads up to 64 at once (#ttv-178).
 - **Chore**: A waiting viewer's start says what holds it — which piece, its production or its delivery, when against the media before it, and the rates the forecast used — and a budget revision says how long each resource took to read and who asked first (#ttv-178).

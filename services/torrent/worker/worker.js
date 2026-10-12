@@ -419,7 +419,11 @@ async function runCommand(command, params, id) {
         downloaded += Number.isFinite(gotBytes) ? gotBytes : 0;
         uploaded += Number.isFinite(sentBytes) ? sentBytes : 0;
       }
-      return { downloaded, uploaded };
+      // This thread's own processor time, read in the same moment as the
+      // bytes, so the price of a downloaded byte is taken over one interval
+      // whether or not anything encodes (torrent-tv/meta#178).
+      const usage = process.threadCpuUsage();
+      return { downloaded, uploaded, threadCpuSeconds: (usage.user + usage.system) / 1e6 };
     }
 
 

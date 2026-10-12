@@ -7,32 +7,60 @@
  */
 
 import assert from "node:assert/strict";
+import os from "node:os";
 import test from "node:test";
 
 import { freeShareDuring, readProcessCpuSeconds, readSystemCpu, sampleHost, shareOfMachine } from "../../services/encode/host-load.js";
 import { HostLoad } from "../../services/encode/quality/HostLoad.js";
 
-test("metadata CPU cannot be learned as torrent download cost", async t => {
-  let now = 0, cpu = 0, downloaded = 0, epoch = 0, active = false;
+test("metadata parsing never becomes this process's base draw", async t => {
+  let now = 0, cpu = 0, epoch = 0, active = false;
   t.mock.method(Date, "now", () => now);
   const load = new HostLoad({ outputs: new Map(), readProxyCpuSeconds: () => cpu,
     readSystemCpu: async () => null, shareOfMachine,
-    getTorrentTotals: async () => ({ downloaded }), readMetadataActivity: () => ({ epoch, active }) });
+    getTorrentTotals: async () => ({ downloaded: 0, threadCpuSeconds: 0 }), readMetadataActivity: () => ({ epoch, active }) });
+  t.mock.method(os, "cpus", () => new Array(4).fill({}));
   await load.reportHostLoad();
-  now += 1000;
+  now += 1000; cpu += 0.4; epoch += 2;
   await load.reportHostLoad();
-  now += 1000; cpu += 100; downloaded += 1e6; epoch += 2;
+  assert.equal(load.baseDraw, 0);
+  now += 1000; cpu += 0.4; active = true;
   await load.reportHostLoad();
-  assert.equal(load.observedTorrentCostPerMegabyte, null);
-  now += 1000; cpu += 100; downloaded += 1e6; active = true;
-  await load.reportHostLoad();
-  assert.equal(load.observedTorrentCostPerMegabyte, null);
+  assert.equal(load.baseDraw, 0);
   now += 1000; active = false; epoch += 1;
   await load.reportHostLoad();
-  now += 1000; cpu += 1; downloaded += 1e6;
+  now += 1000; cpu += 0.04;
   await load.reportHostLoad();
-  assert.ok(load.observedTorrentCostPerMegabyte > 0);
-  assert.ok(load.observedTorrentCostPerMegabyte <= 1);
+  // 0.04 s of one core of four over a second: 1 % of the machine.
+  assert.ok(Math.abs(load.baseDraw - 0.01) < 1e-9, `${load.baseDraw}`);
+});
+
+test("the price of a downloaded byte is the torrent thread's own time, its base draw off, taken while an encoder runs", async t => {
+  let now = 0, threadCpu = 0, downloaded = 0, processCpu = 0;
+  t.mock.method(Date, "now", () => now);
+  const load = new HostLoad({
+    outputs: new Map([["s", { id: "s" }]]), runStateOf: () => "PRODUCING", liveRunsOf: () => [],
+    readProxyCpuSeconds: () => processCpu, readSystemCpu: async () => null, readProcessCpuSeconds: async () => null,
+    readMachineState: async () => ({ megahertz: null, celsius: null }),
+    shareOfMachine: (before, after) => shareOfMachine(before, after, 4),
+    getTorrentTotals: async () => ({ downloaded, threadCpuSeconds: threadCpu })
+  });
+  t.mock.method(os, "cpus", () => new Array(4).fill({}));
+  await load.reportHostLoad();
+  // Three seconds that downloaded nothing: the thread draws 1 % of the machine.
+  for (let second = 0; second < 3; second++) {
+    now += 1000; threadCpu += 0.04;
+    await load.reportHostLoad();
+  }
+  assert.equal(load.observedTorrentCostPerMegabyte, null, "an interval with nothing downloaded is never a price");
+  // 10 MB in a second, the thread 0.44 s of one core, the process 100 s more.
+  now += 1000; threadCpu += 0.44; downloaded += 10e6; processCpu += 100;
+  await load.reportHostLoad();
+  assert.ok(Math.abs(load.observedTorrentCostPerMegabyte - 0.01) < 1e-9, `${load.observedTorrentCostPerMegabyte}`);
+  // A torrent leaving the pool takes its bytes out of the total: no price.
+  now += 1000; threadCpu += 5; downloaded -= 5e6;
+  await load.reportHostLoad();
+  assert.ok(Math.abs(load.observedTorrentCostPerMegabyte - 0.01) < 1e-9, `${load.observedTorrentCostPerMegabyte}`);
 });
 
 test("a process using one core of four for a second reports a quarter of the machine", () => {

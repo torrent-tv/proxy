@@ -1,8 +1,8 @@
 /**
  * What the proxy's own work costs this host, read while it runs.
  *
- * The torrent's CPU per megabyte it moves, the share of a core this process
- * draws doing nothing priced, how fast each watched torrent is moving, the speed
+ * The torrent thread's processor per megabyte it downloads, the share of the
+ * machine this process draws doing nothing priced, how fast each watched torrent is moving, the speed
  * each file's supply demands, how long each file is, and how much of the machine
  * a new encoder could have. The encoders' own cost is `EncodeCost`'s.
  */
@@ -30,8 +30,31 @@ export class HostLoad {
   /** The previous reading of the machine, to compare the next one against. */
   #hostLoadSample = null;
 
-  /** The previous reading taken while nothing was encoding, for the torrent's own cost. */
+  /** The previous reading taken while nothing was encoding, for this process's base draw. */
   #idleLoadSample = null;
+
+  /** The previous reading of the torrent thread's processor and the bytes downloaded. */
+  #torrentSample = null;
+
+  /** A reading of the torrent thread is under way; it asks the worker, which may not answer. */
+  #readingTorrent = false;
+
+  /**
+   * The share of the machine the torrent thread draws in intervals that
+   * downloaded nothing: what comes off its spending before the rest is priced
+   * per downloaded byte.
+   */
+  #observedThreadBaseDraw = null;
+
+  /** @type {number[]} Recent readings behind that median. */
+  #threadBaseReadings = [];
+
+  /**
+   * The download limit the processor share last set, bytes per second;
+   * Infinity for none, null before the share ran. Said beside what the
+   * torrents actually moved.
+   */
+  downloadLimit = null;
 
   /** The previous reading of the whole machine taken while nothing was encoding. */
   #idleAvailabilitySample = null;
@@ -47,16 +70,21 @@ export class HostLoad {
    */
   fileLengthByKey = new Map();
 
-  /** Seconds of this process's CPU per megabyte the torrent moves, once measured. */
+  /**
+   * The machine's seconds per megabyte downloaded, spent by the torrent thread
+   * (its own processor time divided by the cores, its base draw taken off),
+   * once measured. The torrent's work on other threads — libuv's pool, the main
+   * thread — is not in it. Read by the processor share and the quality offer.
+   */
   observedTorrentCostPerMegabyte = null;
 
   /** @type {number[]} Recent readings behind that median. */
   #torrentCostReadings = [];
 
   /**
-   * The share of one core this process draws with nothing encoding and the
-   * torrents moving nothing — the spending that would have happened anyway, and
-   * which must come off a reading before the rest is called the torrent's.
+   * The share of the machine this process draws with nothing encoding and the
+   * torrents moving nothing — the spending that would have happened anyway.
+   * The processor share takes it off what the proxy has.
    */
   #observedBaseDraw = null;
 
@@ -89,7 +117,7 @@ export class HostLoad {
   /**
    * @param {object} host - `liveRunsOf`, `runStateOf`, the readings of `encode/host-load.js` (`readMachineState`, `readProcessCpuSeconds`, `readProxyCpuSeconds`, `readSystemCpu`, `shareOfMachine`), `getSourceStats`, `getTorrentTotals`, `outputs`
    */
-  /** The share of one core this process draws doing nothing priced; zero until measured. */
+  /** The share of the machine this process draws doing nothing priced; zero until measured. */
   get baseDraw() {
     return this.#observedBaseDraw ?? 0;
   }
@@ -113,60 +141,100 @@ export class HostLoad {
   }
 
   /**
-   * What the torrent itself costs this machine, per megabyte it moves.
+   * What the torrent costs this machine per megabyte it downloads, and what
+   * this process draws when it is doing nothing priced. One reading of the
+   * torrent totals feeds both.
    *
-   * Downloading, verifying every piece and pushing segments down a data channel
-   * are work on the same box as the encoder, they scale with the file's own
-   * bitrate, and the budget counts none of it. Measured on the addon host with
-   * every encoder suspended, the machine was still 20-29 % busy.
+   * THE PRICE OF A BYTE is the torrent thread's own processor time against the
+   * bytes every torrent downloaded, both read by that thread in one moment, so
+   * they cover one interval. It is taken whether or not anything encodes: up to
+   * 2.97.7 it was taken only while nothing encoded, and an AVI re-encoded from
+   * the first second of its download never got a price, so the processor share
+   * never limited the download it was built for (field 2026-10-11: 0 limits on
+   * the AVI, 267 on the MKV, torrent-tv/meta#178). The thread's base draw —
+   * what it spends in intervals that downloaded nothing — comes off first, with
+   * the check of `encode/torrent-cost.js` that what is left is more than the
+   * base draw's own scatter; an interval that downloaded nothing is never a
+   * price. The torrent's work on other threads is not counted.
    *
-   * Taken only while NOTHING is encoding, because that is the only moment the
-   * spending can be attributed without arithmetic: what this process uses then
-   * is the torrent's.
+   * THE BASE DRAW OF THIS PROCESS is taken as before: only while nothing
+   * encodes and nothing downloads, and never across metadata parsing.
+   *
+   * @param {boolean} nothingEncoding
    */
-  async #learnTorrentCost() {
-    const activityBefore = this.#host.readMetadataActivity?.();
-    const bytes = await this.#torrentBytesMoved();
-    const now = {
-      takenAt: Date.now(),
-      cpuSeconds: this.#host.readProxyCpuSeconds(),
-      bytes,
-      metadata: this.#host.readMetadataActivity?.()
-    };
-    const previous = this.#idleLoadSample;
-    this.#idleLoadSample = now;
-    if (previous === null || now.bytes === null || previous.bytes === null) {
-      return;
+  async #learnTorrentCost(nothingEncoding) {
+    if (this.#readingTorrent) return;
+    this.#readingTorrent = true;
+    try {
+      const activityBefore = this.#host.readMetadataActivity?.();
+      const totals = await this.#torrentTotals();
+      const now = {
+        takenAt: Date.now(),
+        cpuSeconds: this.#host.readProxyCpuSeconds(),
+        bytes: totals?.downloaded ?? null,
+        threadCpuSeconds: totals?.threadCpuSeconds ?? null,
+        metadata: this.#host.readMetadataActivity?.()
+      };
+      this.#learnThreadCost(now);
+      if (!nothingEncoding) {
+        this.#idleLoadSample = null;
+        return;
+      }
+      const previous = this.#idleLoadSample;
+      this.#idleLoadSample = now;
+      if (previous === null || now.bytes === null || previous.bytes === null || now.bytes !== previous.bytes) return;
+      // Process CPU includes metadata parsing; an interval holding it is not
+      // what this process draws doing nothing.
+      if (activityBefore?.active || now.metadata?.active || previous.metadata?.active ||
+        activityBefore?.epoch !== now.metadata?.epoch || previous.metadata?.epoch !== now.metadata?.epoch) return;
+      const elapsedSec = (now.takenAt - previous.takenAt) / 1000;
+      // Divided by the cores: `process.cpuUsage()` adds up every thread, while
+      // everything this figure is set against is a share of the whole machine.
+      const cpuSeconds = (now.cpuSeconds - previous.cpuSeconds) / Math.max(1, os.cpus().length);
+      this.#learnBaseDraw(baseDrawFrom({ cpuSeconds, elapsedSeconds: elapsedSec }));
+    } finally {
+      this.#readingTorrent = false;
     }
-    // Process CPU includes metadata parsing. Keep the sample as a baseline,
-    // but never attribute an interval containing that work to torrent bytes.
-    if (activityBefore?.active || now.metadata?.active || previous.metadata?.active ||
-      activityBefore?.epoch !== now.metadata?.epoch || previous.metadata?.epoch !== now.metadata?.epoch) return;
+  }
+
+  /**
+   * One interval of the torrent thread: its base draw where it downloaded
+   * nothing, a price where it downloaded something, and what it moved against
+   * the limit in force, said while anything moves or is limited.
+   *
+   * @param {{ takenAt: number, bytes: number | null, threadCpuSeconds: number | null }} now
+   */
+  #learnThreadCost(now) {
+    const previous = this.#torrentSample;
+    this.#torrentSample = now;
+    if (previous === null || now.bytes === null || previous.bytes === null ||
+      now.threadCpuSeconds === null || previous.threadCpuSeconds === null) return;
     const elapsedSec = (now.takenAt - previous.takenAt) / 1000;
     const megabytes = (now.bytes - previous.bytes) / 1e6;
-    // Divided by the cores, because `process.cpuUsage()` adds up every thread
-    // while everything this figure is later added to is measured in WALL
-    // seconds per second of video. Left undivided on the four-core addon host
-    // it overstated the torrent by four times, which on the field's own rung
-    // was the difference between offering it and refusing it.
-    const cores = Math.max(1, os.cpus().length);
-    const cpuSeconds = (now.cpuSeconds - previous.cpuSeconds) / cores;
+    // A torrent leaving the pool takes its bytes out of the total, and a new
+    // worker starts its clock again: such an interval says nothing.
+    if (!(elapsedSec > 0) || megabytes < 0 || now.threadCpuSeconds < previous.threadCpuSeconds) return;
+    const cpuSeconds = (now.threadCpuSeconds - previous.threadCpuSeconds) / Math.max(1, os.cpus().length);
+    const limit = this.downloadLimit;
+    if (megabytes > 0 || Number.isFinite(limit)) {
+      logger.info(
+        `torrent: downloaded ${(megabytes / elapsedSec).toFixed(2)} MB/s over ${elapsedSec.toFixed(1)}s, ` +
+        `limit ${Number.isFinite(limit) ? `${(limit / 1e6).toFixed(2)} MB/s` : "none"}; ` +
+        `its thread drew ${Math.round(cpuSeconds / elapsedSec * 100)}% of the machine`
+      );
+    }
     if (megabytes === 0) {
-      // Nothing encoding and not one byte moved: whatever this process spent in
-      // that interval, it spends whether or not there is a torrent. Measuring
-      // it is what lets the next interval be attributed instead of divided
-      // whole — see `encode/torrent-cost.js` for the readings that forced this.
-      this.#learnBaseDraw(baseDrawFrom({ cpuSeconds, elapsedSeconds: elapsedSec }));
+      this.#learnThreadBaseDraw(baseDrawFrom({ cpuSeconds, elapsedSeconds: elapsedSec }));
       return;
     }
     const costPerMegabyte = costPerMegabyteFrom({
       cpuSeconds,
       elapsedSeconds: elapsedSec,
       megabytes,
-      baseDraw: this.#observedBaseDraw,
-      // How much the draw's own readings disagree, which is how much of this
-      // interval's remainder means nothing.
-      drawScatter: scatterOf(this.#baseDrawReadings)
+      baseDraw: this.#observedThreadBaseDraw,
+      // How much the base draw's own readings disagree, which is how much of
+      // this interval's remainder means nothing.
+      drawScatter: scatterOf(this.#threadBaseReadings)
     });
     if (costPerMegabyte === null) {
       return;
@@ -179,9 +247,31 @@ export class HostLoad {
     }
     this.observedTorrentCostPerMegabyte = median;
     logger.info(
-      `host-load: the torrent costs ${(median * 1000).toFixed(1)}ms of CPU per MB on this host ` +
+      `host-load: the torrent thread costs ${(median * 1000).toFixed(1)}ms of the machine per downloaded MB ` +
       `(median of ${readings.length}, latest ${(costPerMegabyte * 1000).toFixed(1)}ms over ${megabytes.toFixed(1)}MB, ` +
-      `base draw ${((this.#observedBaseDraw ?? 0) * 100).toFixed(1)}% of a core already taken off)`
+      `its base draw ${((this.#observedThreadBaseDraw ?? 0) * 100).toFixed(1)}% of the machine taken off)`
+    );
+  }
+
+  /**
+   * What the torrent thread draws in an interval that downloaded nothing.
+   *
+   * @param {number | null} share - Of the machine, over the interval just read.
+   */
+  #learnThreadBaseDraw(share) {
+    if (share === null) {
+      return;
+    }
+    const readings = [...this.#threadBaseReadings, share].slice(-READINGS_KEPT);
+    this.#threadBaseReadings = readings;
+    const median = medianOf(readings);
+    if (!movedBeyondScatter(this.#observedThreadBaseDraw, median, readings)) {
+      return;
+    }
+    this.#observedThreadBaseDraw = median;
+    logger.info(
+      `host-load: the torrent thread draws ${(median * 100).toFixed(1)}% of the machine while it downloads nothing ` +
+      `(median of ${readings.length}, latest ${(share * 100).toFixed(1)}%)`
     );
   }
 
@@ -308,7 +398,7 @@ export class HostLoad {
    * Record what this process draws when it is doing none of the work that gets
    * priced.
    *
-   * @param {number | null} share - Of one core, over the interval just read.
+   * @param {number | null} share - Of the machine, over the interval just read.
    * @returns {void}
    */
   #learnBaseDraw(share) {
@@ -323,29 +413,31 @@ export class HostLoad {
     }
     this.#observedBaseDraw = median;
     logger.info(
-      `host-load: this process draws ${(median * 100).toFixed(1)}% of a core with nothing encoding and ` +
+      `host-load: this process draws ${(median * 100).toFixed(1)}% of the machine with nothing encoding and ` +
       `nothing downloading (median of ${readings.length}, latest ${(share * 100).toFixed(1)}%)`
     );
   }
 
   /**
-   * Bytes this proxy's torrents have moved in total, or null when it cannot be
-   * asked.
+   * The bytes every torrent has downloaded and the torrent thread's processor
+   * seconds, read together by that thread, or null when it cannot be asked.
+   * Downloaded bytes only: every one is verified against the piece hash and
+   * written to the store; a byte sent back to the swarm is neither.
    *
-   * @returns {Promise<number | null>}
+   * @returns {Promise<{ downloaded: number | null, threadCpuSeconds: number | null } | null>}
    */
-  async #torrentBytesMoved() {
+  async #torrentTotals() {
     if (typeof this.#host.getTorrentTotals !== "function") {
       return null;
     }
     try {
       const totals = await this.#host.getTorrentTotals();
-      // Downloaded bytes only. Every one of them is verified against the piece
-      // hash and written to the store; a byte sent back to the swarm is neither,
-      // and adding the two would price both at whatever the mixture happened to
-      // be on the day.
       const downloaded = Number(totals?.downloaded);
-      return Number.isFinite(downloaded) ? downloaded : null;
+      const threadCpuSeconds = Number(totals?.threadCpuSeconds);
+      return {
+        downloaded: Number.isFinite(downloaded) ? downloaded : null,
+        threadCpuSeconds: Number.isFinite(threadCpuSeconds) ? threadCpuSeconds : null
+      };
     } catch {
       return null; // the pool is busy or gone; a reading missed is not a fault
     }
@@ -375,9 +467,7 @@ export class HostLoad {
     } finally {
       this.#reporting = false;
     }
-    if (nothingEncoding) {
-      await this.#learnTorrentCost();
-    }
+    await this.#learnTorrentCost(nothingEncoding);
   }
 
   /**
@@ -386,7 +476,7 @@ export class HostLoad {
    * in force for ever: it refused every new encoder, and a refused encoder is
    * the only thing that would have taken the next reading.
    */
-  async #learnIdleAvailability() {
+  async #learnIdleAvailability(watched, suspended) {
     const system = (await this.#host.readSystemCpu?.()) ?? null;
     const sample = { takenAt: Date.now(), system, proxyCpuSeconds: this.#host.readProxyCpuSeconds() };
     const previous = this.#idleAvailabilitySample;
@@ -399,7 +489,36 @@ export class HostLoad {
       { takenAt: previous.takenAt, processCpuSeconds: 0, system: previous.system },
       { takenAt: sample.takenAt, processCpuSeconds: 0, system: sample.system }
     );
-    this.#setAvailability(share, previous, sample);
+    const proxyShare = this.#setAvailability(share, previous, sample);
+    // Said while something is watched, so what is free while every encoder
+    // stands is seen beside what it is free for (torrent-tv/meta#178); a proxy
+    // nobody watches stays quiet.
+    if (share !== null && watched) {
+      await this.#sayMachine(share, proxyShare, 0, suspended);
+    }
+  }
+
+  /**
+   * One line of the machine's reading, the same whether encoders run or stand.
+   * `available` is the share OTHER processes leave the proxy, what the offer
+   * and the processor share divide; `free` is what nothing used over the
+   * interval. Unknown stays `n/a`, never zero.
+   */
+  async #sayMachine(share, proxyShare, running, suspended) {
+    const machine = await this.#host.readMachineState();
+    const asPercent = (value) => (value === null || value === undefined ? "n/a" : `${Math.round(value * 100)}%`);
+    const free = Number.isFinite(share.systemShare) ? Math.max(0, 1 - share.systemShare) : null;
+    logger.info(
+      `host-load: ffmpeg=${asPercent(share.processShare)} proxy=${asPercent(proxyShare)} ` +
+      `system=${asPercent(share.systemShare)} ` +
+      `iowait=${asPercent(share.iowaitShare)} cpu=${machine.megahertz === null ? "n/a" : `${machine.megahertz}MHz`} ` +
+      `temp=${machine.celsius === null ? "n/a" : `${machine.celsius}C`} ` +
+      `encoders=${running} running` + (suspended > 0 ? ` +${suspended} suspended` : "") +
+      ` over=${share.elapsedSec.toFixed(1)}s` +
+      // What the offer will multiply a prediction by, in the same line as the
+      // readings it comes from.
+      ` available=${asPercent(this.hostAvailability.share)} free=${asPercent(free)}`
+    );
   }
 
   /**
@@ -433,7 +552,8 @@ export class HostLoad {
 
   /** @returns {Promise<boolean>} True when no encoder is running, which is when the torrent's cost can be taken. */
   async #reportMachineOnce() {
-    const encoding = [...this.#host.outputs.values()].filter(
+    const outputs = [...this.#host.outputs.values()];
+    const encoding = outputs.filter(
       (session) => processCanBeSignalled(this.#host.runStateOf(session))
     );
     const runningNow = encoding.filter((session) => this.#host.runStateOf(session) !== ENCODE_RUN_STATE.SUSPENDED);
@@ -443,7 +563,8 @@ export class HostLoad {
       // in which every encoder was suspended, the torrent's price could have
       // been taken, and none was. What this process spends now is the download,
       // the verification, the piece store and the delivery. Item 7.
-      await this.#learnIdleAvailability();
+      await this.#learnIdleAvailability(outputs.length > 0,
+        encoding.filter((session) => this.#host.runStateOf(session) === ENCODE_RUN_STATE.SUSPENDED).length);
       this.#hostLoadSample = null;
       return true;
     }
@@ -514,24 +635,12 @@ export class HostLoad {
     // they stopped).
     const suspended = encoding.filter((session) => this.#host.runStateOf(session) === ENCODE_RUN_STATE.SUSPENDED).length;
     const running = encoding.length - suspended;
-    const machine = await this.#host.readMachineState();
-    const asPercent = (value) => (value === null ? "n/a" : `${Math.round(value * 100)}%`);
     // Kept for the quality offer, which predicts from a benchmark taken on a
     // QUIET host: the same reading that is printed here says how much of the
     // machine a new encoder could actually have. Only what nobody has been
     // charged for is subtracted — see `encode/available-share.js`.
     const proxyShare = this.#setAvailability(share, previous, sample);
-    logger.info(
-      `host-load: ffmpeg=${asPercent(share.processShare)} proxy=${asPercent(proxyShare)} ` +
-      `system=${asPercent(share.systemShare)} ` +
-      `iowait=${asPercent(share.iowaitShare)} cpu=${machine.megahertz === null ? "n/a" : `${machine.megahertz}MHz`} ` +
-      `temp=${machine.celsius === null ? "n/a" : `${machine.celsius}C`} ` +
-      `encoders=${running} running` + (suspended > 0 ? ` +${suspended} suspended` : "") +
-      ` over=${share.elapsedSec.toFixed(1)}s` +
-      // What the offer will multiply a prediction by, in the same line as the
-      // readings it comes from.
-      ` available=${asPercent(this.hostAvailability.share)}`
-    );
+    await this.#sayMachine(share, proxyShare, running, suspended);
     return false;
   }
 
@@ -541,8 +650,9 @@ export class HostLoad {
    *
    * A viewer consumes the file at its own byte rate, and every one of those
    * bytes is downloaded, verified and pushed by this process. Priced per
-   * megabyte from readings taken while nothing was encoding, so the two
-   * measurements do not contain each other. Zero while either term is unmeasured
+   * megabyte by the torrent thread's own processor time, which no encoder's
+   * reading contains, so the two do not contain each other; the torrent's
+   * work on other threads is not in it. Zero while either term is unmeasured
    * — a guess here would refuse rungs on arithmetic nobody performed.
    *
    * @param {HlsSession} session

@@ -52,7 +52,7 @@ export function costKindForSession(session) {
   return session?.spec?.transcodesVideo === true ? "decode" : "copy";
 }
 
-import { correctForAvailability } from "../available-share.js";
+import { correctForAvailability, leftForEncoders } from "../available-share.js";
 import { medianOf, movedBeyondScatter, READINGS_KEPT } from "../learned-median.js";
 import { contentionPenalty } from "../contention.js";
 import { ENCODE_RUN_STATE, liveRunsOf, processCanBeSignalled } from "../encode-run-state.js";
@@ -366,7 +366,7 @@ export class EncodeCost {
     const outputs = this.#outputs.outputsOn(address);
     let measured = 0;
     for (const session of outputs) {
-      const speed = Number(qualityStateOf(session).lastAloneSpeed);
+      const speed = correctForAvailability(Number(qualityStateOf(session).lastAloneSpeed), this.#host().availability);
       if (Number.isFinite(speed) && speed > measured) {
         measured = speed;
       }
@@ -649,7 +649,7 @@ export class EncodeCost {
     /** @type {Map<number, number>} */
     const speeds = new Map();
     for (const session of this.#outputs.familyOf(base)) {
-      const speed = qualityStateOf(session).lastAloneSpeed;
+      const speed = correctForAvailability(qualityStateOf(session).lastAloneSpeed, this.#host().availability);
       if (!session.spec.transcodesVideo || !Number.isFinite(speed)) {
         continue;
       }
@@ -874,6 +874,17 @@ export class EncodeCost {
     if (speed === null) {
       return;
     }
+    // What this would have done alone on a quiet machine: the reading divided
+    // by what the machine left encoders while it was taken, the unit every
+    // price here is in. A prediction multiplies it by what is left NOW, so the
+    // proxy's own draw at the reading is not taken off a second time
+    // (torrent-tv/meta#178). A machine that left encoders nothing says nothing
+    // about that.
+    const left = leftForEncoders(this.#host().availability);
+    if (!(left > 0)) {
+      return;
+    }
+    const quietSpeed = speed / left;
     const state = qualityStateOf(session);
     const kind = costKindForSession(session);
     // A reading taken beside another encoder contains that other encoder's
@@ -906,10 +917,11 @@ export class EncodeCost {
     }
     // What this encode did with the machine to itself — the one figure a live
     // reading is authority on, and what withdraws a quality step that has been
-    // seen failing without letting it speak for steps nobody has run. The time
-    // the input waited for the swarm is not in it, so a starved run no longer
-    // reads as a slow machine.
-    state.lastAloneSpeed = speed;
+    // seen failing without letting it speak for steps nobody has run, judged
+    // at what the machine leaves encoders now. The time the input waited for
+    // the swarm is not in it, so a starved run no longer reads as a slow
+    // machine.
+    state.lastAloneSpeed = quietSpeed;
     // What the offer predicted for this very step, against what it then did
     // with the machine to itself. The prediction is corrected for the share of
     // the machine that was free at the time, so this ratio is the error that
@@ -936,7 +948,7 @@ export class EncodeCost {
       // What is left after the work that was already accounted for. `null` when
       // the subtraction leaves nothing positive, which means the reading says
       // less than the noise in it.
-      const ownCostSec = 1 / speed - othersCostSec;
+      const ownCostSec = 1 / quietSpeed - othersCostSec;
       if (!(ownCostSec > 0) || !Number.isFinite(ownCostSec)) {
         return;
       }
@@ -944,10 +956,10 @@ export class EncodeCost {
       return;
     }
     if (kind === "decode") {
-      this.#learnDecodeCost(session, speed);
+      this.#learnDecodeCost(session, quietSpeed);
       return;
     }
-    await this.#learnCopyCost(session, speed);
+    await this.#learnCopyCost(session, quietSpeed);
   }
 
   async #learnCopyCost(session, speed) {

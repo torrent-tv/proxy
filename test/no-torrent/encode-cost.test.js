@@ -171,6 +171,22 @@ test("the time a run's input waited for the swarm is not in the price of this ho
   assert.equal(cost.copyVersionFor("torrent:abc:0"), 1, "and it is filed as what copying costs here");
 });
 
+test("a reading is filed as if alone on a quiet machine, so what the machine left it is taken off once", async () => {
+  // A speed read while the proxy and everything else took part of the machine
+  // already contains that. Every prediction multiplies by what is left, so a
+  // reading filed as it stands lost the proxy's draw twice (torrent-tv/meta#178).
+  const { cost, host } = costOn();
+  const session = sessionProducing({ transcodeVideo: false });
+  host.share = 0.6;
+
+  await watchItRun(cost, session, 1.2);
+
+  assert.ok(Math.abs(qualityStateOf(session).lastAloneSpeed - 2) < 1e-9, "filed as 1.2 / 0.6");
+  assert.ok(Math.abs(cost.projectedSpeedOf(session) - 1.2) < 1e-9, "predicted at the same load, it is the reading");
+  host.share = 0.9;
+  assert.ok(Math.abs(cost.projectedSpeedOf(session) - 1.8) < 1e-9, "and with more of the machine left, more");
+});
+
 test("a picture's reading taken beside another encoder is not filed", async () => {
   // It contains that other encoder's work, and the budget ADDS the same work
   // again when it predicts — so the price is counted twice and grows with every

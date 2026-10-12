@@ -860,6 +860,7 @@ export function wireOutputs({
     encodeCost: parts.encodeCost,
     occupiedCostSec: (fileKey) => parts.admission?.occupiedCost({ exceptFileKey: fileKey }).costSec ?? 0,
     occupancyKnownFor: (fileKey) => (parts.admission?.occupiedCost({ exceptFileKey: fileKey }).unpriced ?? 0) === 0,
+    availability: () => parts.hostLoad.hostAvailability ?? null,
     outputs: parts.outputs,
     stateFor: (session) => parts.encodeRuns.runStateOf(session),
     // WHICH HEIGHTS A LIVE VIEWER HAS ON SCREEN, as numbers. Who is watching

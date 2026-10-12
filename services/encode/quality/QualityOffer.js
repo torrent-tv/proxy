@@ -31,6 +31,7 @@ import { chooseOutputFps, computeOutputDimensions, TRANSCODE_FPS } from "../args
 import { processCanBeSignalled } from "../encode-run-state.js";
 import { sourceDecodeCharacteristics } from "../../media/SourceFile.js";
 import { qualityStateOf } from "./OutputQualityState.js";
+import { leftForEncoders } from "../available-share.js";
 
 export class QualityOffer {
   #cost;
@@ -39,6 +40,7 @@ export class QualityOffer {
   #supplyFor;
   #stateFor;
   #occupancyKnownFor;
+  #availability;
 
   /**
    * @param {{
@@ -69,8 +71,13 @@ export class QualityOffer {
     // Whether every other output holding a place has a measured price. The
     // pool must not be told this host can serve a file while existing work is
     // unpriced (roadmap item 97, step 14).
-    occupancyKnownFor = () => true
+    occupancyKnownFor = () => true,
+    // WHAT THIS MACHINE LEAVES AN ENCODER, as the host last measured it
+    // (`available-share.js`): read into the answer, so a change of it reaches
+    // the menu (torrent-tv/meta#178).
+    availability = () => null
   }) {
+    this.#availability = availability;
     this.#occupiedCostSec = occupiedCostSec;
     this.#occupancyKnownFor = occupancyKnownFor;
     this.#cost = encodeCost;
@@ -164,14 +171,24 @@ export class QualityOffer {
     // whole film; while rounding alone would hide the 0.995-1.005 crossing,
     // which is exactly the band a step spends its time in when the host is
     // marginal. The flag carries the crossing, the rounded cost carries the
-    // rest.
+    // rest. The speed is filed as if alone on a quiet machine; the crossing is
+    // judged at what the machine leaves encoders now.
+    // WHAT THE MACHINE LEAVES AN ENCODER divides every prediction the answer is
+    // made of, and it moves with the download and everything else this process
+    // does. Left out, a menu computed while the proxy was quiet stood for the
+    // whole film: `fast` at a predicted 1.0x ran at 0.9-1.1x once the swarm
+    // delivered, and the picture stood at nearly every piece after a seek
+    // (Home Assistant 2026-10-12, torrent-tv/meta#178). To a hundredth of the
+    // machine, the finest the predictions it divides are compared at.
+    const availability = this.#availability();
+    const left = leftForEncoders(availability);
     const measured = this.#outputs.familyOf(owner)
       .map((member) => {
         const speed = qualityStateOf(member).lastAloneSpeed;
         if (!Number.isFinite(speed) || !(speed > 0)) {
           return "-";
         }
-        return `${speed < 1 ? "slow" : "ok"}${(1 / speed).toFixed(2)}`;
+        return `${speed * left < 1 ? "slow" : "ok"}${(1 / speed).toFixed(2)}`;
       })
       .join(",");
     // The bar the answer is judged against, and the rate the torrent's price is
@@ -185,7 +202,7 @@ export class QualityOffer {
     const version =
       `${observed?.version ?? 0}:${playing}:${copyVersion}:${torrentCost.toFixed(6)}:` +
       `${audioVersion}:${running}:${measured}:${(demanded ?? 0).toFixed(2)}:` +
-      `${(movingMegabytes ?? 0).toFixed(2)}`;
+      `${(movingMegabytes ?? 0).toFixed(2)}:${left.toFixed(2)}`;
     const state = qualityStateOf(owner);
     if (Array.isArray(state.offeredHeightsCache) && state.offeredHeightsVersion === version) {
       return state.offeredHeightsCache;

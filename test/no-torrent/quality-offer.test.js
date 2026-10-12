@@ -43,7 +43,8 @@ function sessionProducing() {
  */
 function offerOver(
   supply = { requiredSpeed: null, megabytesPerSecond: null, costPerMegabyte: null },
-  occupancyKnownFor = () => true
+  occupancyKnownFor = () => true,
+  availability = () => null
 ) {
   const picture = sessionProducing();
   const outputs = {
@@ -73,7 +74,8 @@ function offerOver(
     stateFor: (session) => runStateOf(session.runs),
     heightsOnScreen: () => [],
     supplyFor: () => supply,
-    occupancyKnownFor
+    occupancyKnownFor,
+    availability
   });
   return { offer, picture, computed: () => computed, supply };
 }
@@ -119,6 +121,24 @@ test("what the swarm is doing is part of what identifies that cached answer", ()
   supply.costPerMegabyte = 0.05;
   offer.offeredHeightsFor(picture);
   assert.equal(computed(), 4, "and what a megabyte costs this process");
+});
+
+test("and so is what the machine leaves an encoder", () => {
+  // It divides every prediction the answer is made of and moves with the
+  // download. Left out, a menu computed while the proxy was quiet offered
+  // `fast` at a predicted 1.0x for the whole film, and once the swarm delivered
+  // it ran 0.9-1.1x (Home Assistant 2026-10-12, torrent-tv/meta#178).
+  let measured = { share: 0.95, forEncoders: 0.9, unattributed: 0.05, known: true };
+  const { offer, picture, computed } = offerOver(undefined, () => true, () => measured);
+  offer.offeredHeightsFor(picture);
+  offer.offeredHeightsFor(picture);
+  assert.equal(computed(), 1, "unchanged, it is answered from the cache");
+  measured = { ...measured, forEncoders: 0.55 };
+  offer.offeredHeightsFor(picture);
+  assert.equal(computed(), 2, "the proxy took more of the machine");
+  measured = { ...measured, forEncoders: 0.551 };
+  offer.offeredHeightsFor(picture);
+  assert.equal(computed(), 2, "a thousandth of the machine does not recompute it");
 });
 
 test("and so is what each running encode was last seen doing", () => {

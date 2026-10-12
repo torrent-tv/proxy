@@ -26,6 +26,21 @@ function isWarmupTimeoutError(error) {
  * @param {string} fileName
  * @returns {number | null}
  */
+/**
+ * Whether two lists of a piece's torrent inputs state the same bytes: the
+ * download map hands out new lists around the ranges it keeps, so the ranges
+ * themselves are compared.
+ *
+ * @param {Array<{ sourceId: string, ranges: object[] }> | undefined} left
+ * @param {Array<{ sourceId: string, ranges: object[] }> | undefined} right
+ * @returns {boolean}
+ */
+function sameInputs(left, right) {
+  if (left === right) return true;
+  if (!Array.isArray(left) || !Array.isArray(right) || left.length !== right.length) return false;
+  return left.every((input, index) => input.sourceId === right[index].sourceId && input.ranges === right[index].ranges);
+}
+
 function segmentAddressOf(output, fileName) {
   const format = output.segmentFormat;
   if (!format) {
@@ -45,6 +60,8 @@ export class ViewerRequests {
   #host;
   /** @type {WeakMap<object, Map<string, object>>} */
   #rateStateBySession = new WeakMap();
+  /** The pieces of each output as the start forecast read them last; see `#segmentsOf`. */
+  #forecastPieces = new WeakMap();
 
   /**
    * @param {object} host - `opening`, `activeOutputFor`, `viewerSecondsOn`, `minimumBufferSecondsFor`, `getSourceStats`, `disposeSession`, `planEncodersSoon`, `waitUntilReady`, `encodeRuns`, `encodeSpeedReadingOf`, `outputTimes`, `outputs`, `lookaheadSeconds`, `quality`, `qualityOffer`, `renditions`, `segmentDurationSec`, `segmentStore`, `sourceFiles`, `startupWaitMs`, `viewers`, `acceptsGeneration`, `generationOfRequest`, `noteGivenOutput`, `holdForResponse`, `noteServingVerdict`, `servingVerdictOf`
@@ -561,10 +578,7 @@ export class ViewerRequests {
     for (const output of outputs) {
       const trackProgress = output === session ? progress : this.#host.encodeRuns.progressOf(output);
       const trackRates = this.#trackRateReadings(measurement, output, now);
-      const timeline = output.timeline;
       const trackName = output === session ? "video" : "audio";
-      const nativeRanges = Array.from({ length: timeline?.segmentCount ?? 0 }, (_, index) =>
-        this.#host.encodeRuns.finishedMediaRangesOf(output, index));
       // The page states the offset its player applied to this track, and the
       // init it applied it to is the session's. Until both are known, the
       // pieces stay on their own presentation timeline: there is nothing yet
@@ -573,17 +587,9 @@ export class ViewerRequests {
       const servedInit = Number.isFinite(playerOffset) ? this.#host.segmentStore.initOf(output.outputKey) : null;
       const placedByPlayer = Boolean(servedInit?.length);
       const sessionInit = placedByPlayer ? servedInit : null;
-      const segments = Array.from({ length: timeline?.segmentCount ?? 0 }, (_, index) => {
-        const ranges = nativeRanges[index];
-        return {
-          index,
-          startSeconds: timeline.publishedStartOf(index),
-          endSeconds: timeline.publishedStartOf(index + 1),
-          sourceInputs: this.#host.sourceInputsFor?.(output, index) ?? undefined,
-          mediaRanges: ranges && output.segmentFormat?.servedMediaRanges ?
-            output.segmentFormat.servedMediaRanges(ranges, { initBytes: sessionInit }) : undefined
-        };
-      });
+      const inventory = this.#host.segmentStore.sizesOf(output.outputKey);
+      const segments = this.#segmentsOf(output, sessionInit, inventory, Number.isFinite(viewerReading?.positionSeconds)
+        ? viewerReading.positionSeconds : this.#host.viewerSecondsOn(session, consumerId, now));
       const sourceIndexes = [...output.spec.sourceFileIndexes];
       if (sourceIndexes.length === 0) {
         sourceIndexes.push(output.file.fileIndex);
@@ -622,7 +628,6 @@ export class ViewerRequests {
         });
       }
 
-      const inventory = this.#host.segmentStore.sizesOf(output.outputKey);
       const observedMbps = output === session
         ? outputMbps
         : await this.#host.quality.observedStreamMbps(output);
@@ -734,6 +739,55 @@ export class ViewerRequests {
       })}`);
     }
     return forecast;
+  }
+
+  /**
+   * The pieces of one output as the start forecast reads them, kept between
+   * polls: a piece whose playlist edges, read ranges and torrent inputs have
+   * not changed is the same object it was, so what the forecast derived from it
+   * once — its exact edges, its joined ranges — is not derived again. An unread
+   * piece that is not made and ends before the viewer is not listed: the
+   * forecast reads nothing from it. Building the whole film anew on every poll
+   * was part of what held the main thread for seconds (torrent-tv/meta#178).
+   *
+   * @param {object} output
+   * @param {Buffer | null} sessionInit
+   * @param {Map<number, number>} inventory - Made pieces and their sizes.
+   * @param {number} positionSeconds
+   * @returns {object[]}
+   */
+  #segmentsOf(output, sessionInit, inventory, positionSeconds) {
+    const timeline = output.timeline;
+    const count = timeline?.segmentCount ?? 0;
+    let kept = this.#forecastPieces.get(output);
+    if (!kept) {
+      kept = [];
+      this.#forecastPieces.set(output, kept);
+    }
+    const segments = [];
+    for (let index = 0; index < count; index++) {
+      const endSeconds = timeline.publishedStartOf(index + 1);
+      const ranges = this.#host.encodeRuns.finishedMediaRangesOf(output, index);
+      const mediaRanges = ranges && output.segmentFormat?.servedMediaRanges ?
+        output.segmentFormat.servedMediaRanges(ranges, { initBytes: sessionInit }) : undefined;
+      if (index !== 0 && mediaRanges === undefined && !inventory.has(index) &&
+        Number.isFinite(endSeconds) && Number.isFinite(positionSeconds) && endSeconds <= positionSeconds) {
+        continue;
+      }
+      const startSeconds = timeline.publishedStartOf(index);
+      const sourceInputs = this.#host.sourceInputsFor?.(output, index) ?? undefined;
+      const previous = kept[index];
+      if (previous && previous.startSeconds === startSeconds && previous.endSeconds === endSeconds &&
+        previous.mediaRanges === mediaRanges && sameInputs(previous.sourceInputs, sourceInputs)) {
+        segments.push(previous);
+        continue;
+      }
+      const segment = { index, startSeconds, endSeconds, sourceInputs, mediaRanges };
+      kept[index] = segment;
+      segments.push(segment);
+    }
+    if (kept.length > count) kept.length = count;
+    return segments;
   }
 
   #rateStateFor(session, consumerId) {

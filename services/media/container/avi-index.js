@@ -296,6 +296,16 @@ class AviIndex {
     return keys;
   }
 
+  /**
+   * Whether a stream states any keyframe. Asked for every segment while a map
+   * is turned into bytes; answered from the times it built a list of every
+   * keyframe of the film each time, 6.1 s at once on Home Assistant
+   * (torrent-tv/meta#178).
+   */
+  hasKeyframes(stream) {
+    return this.#keyframesOf(stream).length > 0;
+  }
+
   /** Keyframe times of a stream, ascending. */
   keyframeTimes(stream) {
     const packets = this.packets[stream];

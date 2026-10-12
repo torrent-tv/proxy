@@ -167,7 +167,7 @@ export class AviContainer extends Container {
     if (!index) return false;
     const picture = ContainerTrack.firstUsable(await this.readTracks(), "video");
     if (picture && interval?.trackIds?.length && !interval.trackIds.includes(picture.trackNumber)) return false;
-    return !picture || index.keyframeTimes(picture.trackNumber).length > 0;
+    return !picture || index.hasKeyframes(picture.trackNumber);
   }
 
   async readMappedSourceRanges(interval) { return this.readSourceRanges(interval); }

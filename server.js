@@ -180,6 +180,7 @@ export async function startProxyServer({
       indexMemory.forget(sourceKey);
       downloadMaps.retire(sourceKey);
       for (const key of segmentSourceRanges.keys()) if (key.startsWith(`${sourceKey}:`)) segmentSourceRanges.delete(key);
+      for (const key of segmentReadings.keys()) if (key.startsWith(`${sourceKey}:`)) segmentReadings.delete(key);
       outputParts.encodeInputs?.bytesChanged();
     },
     // Pieces arriving is ANNOUNCED by the thread that owns the swarm; what is
@@ -426,6 +427,42 @@ export async function startProxyServer({
   // Readers never start their own downloads or wait for source bytes.
   /** Source byte ranges of one segment interval, by file and interval; forgotten with the source. */
   const segmentSourceRanges = new Map();
+  /**
+   * What one segment of an output reads — its tracks, its interval and the key
+   * its bytes are kept under — by output and segment, until the tracks, the
+   * file's start time, the segment's interval or the choices of the output
+   * change; forgotten with the source.
+   */
+  const segmentReadings = new Map();
+  const segmentReadingOf = (zone, trackList, shift, map) => {
+    const choicesKey = zone.tracks.map(choice => `${choice.type}/${choice.index}/${choice.mode}`).join(",");
+    const key = `${map.sourceKey}:${map.fileIndex}:${zone.outputKey}:${zone.index}`;
+    const kept = segmentReadings.get(key);
+    if (kept && kept.trackList === trackList && kept.shift === shift && kept.choicesKey === choicesKey &&
+      kept.from === zone.sourceInterval.from && kept.to === zone.sourceInterval.to) return kept.reading;
+    const selected = zone.tracks.map(choice => ({ choice, track: choice.type === "video"
+      ? ContainerTrack.firstUsable(trackList, "video")
+      : trackList.filter(track => track.type === choice.type)[choice.index] }));
+    let reading = null;
+    if (!selected.some(({ track }) => !track)) {
+      const wanted = selected.map(({ track }) => track);
+      const modes = new Map(selected.map(({ choice, track }) => [track, choice.mode]));
+      const interval = { ...zone.sourceInterval, trackIds: wanted.map(track => track.trackNumber),
+        modes: Object.fromEntries(wanted.map(track => [track.trackNumber, modes.get(track)])) };
+      reading = { wanted, modes, interval, rangesKey: `${map.sourceKey}:${map.fileIndex}:${JSON.stringify(interval)}` };
+    }
+    segmentReadings.set(key, { trackList, shift, choicesKey, from: zone.sourceInterval.from, to: zone.sourceInterval.to, reading });
+    return reading;
+  };
+  /** A segment's ranges joined at the precision the torrent fetches, once per kept list and piece length. */
+  const joinedRanges = new WeakMap();
+  const joinedRangesOf = (ranges, pieceLength) => {
+    const kept = joinedRanges.get(ranges);
+    if (kept && kept.pieceLength === pieceLength) return kept.joined;
+    const joined = joinedWithinPieces(ranges, pieceLength);
+    if (ranges !== null && typeof ranges === "object") joinedRanges.set(ranges, { pieceLength, joined });
+    return joined;
+  };
   const downloadMaps = new DownloadMaps({
     // The ranges a picture reads at open are named again by every segment;
     // only the zone the swarm would rank first is sent (torrent-tv/meta#166).
@@ -489,17 +526,18 @@ export async function startProxyServer({
         typeof container?.readSourceRanges === "function" ? container : null;
       for (const zone of demands) {
         if (!map.isCurrent()) return [];
-        const selected = zone.tracks.map(choice => ({ choice, track: choice.type === "video"
-          ? ContainerTrack.firstUsable(tracks.value, "video")
-          : tracks.value.filter(track => track.type === choice.type)[choice.index] }));
-        if (selected.some(({ track }) => !track)) continue;
-        const wanted = selected.map(({ track }) => track);
-        const modes = new Map(selected.map(({ choice, track }) => [track, choice.mode]));
-        const interval = { ...zone.sourceInterval, trackIds: wanted.map(track => track.trackNumber),
-          modes: Object.fromEntries(wanted.map(track => [track.trackNumber, modes.get(track)])) };
+        // WHAT A SEGMENT READS IS WORKED OUT ONCE, not on every publication: its
+        // tracks, its interval and the key its bytes are kept under depend on
+        // the output, the segment and the file's start time, none of which a
+        // new map changes. Rebuilt for every segment of the film on every map,
+        // this pass held the main thread up to 1.5 s at a time on Home
+        // Assistant (torrent-tv/meta#178).
+        const reading = segmentReadingOf(zone, tracks.value, shift, map);
+        if (!reading) continue;
+        const { wanted, modes, interval, rangesKey } = reading;
         const { tracks: _choices, owner: _owner, sourceInterval: _sourceInterval, ...demand } = zone;
         const convert = ranges => {
-          for (const [byteStart, byteEnd] of joinedWithinPieces(ranges, pieceLength)) converted.push({ ...demand,
+          for (const [byteStart, byteEnd] of joinedRangesOf(ranges, pieceLength)) converted.push({ ...demand,
             downloadInterval: { from: zone.owner.from, to: zone.owner.to }, byteStart, byteEnd });
         };
         // The bytes one segment needs are a fact of the file and the output, so
@@ -507,7 +545,6 @@ export async function startProxyServer({
         // the map changes every few seconds; worked out afresh on every change,
         // a pass over a two-hour AVI never finished and the next segment's bytes
         // were never asked for (Home Assistant 2026-10-08, torrent-tv/meta#151).
-        const rangesKey = `${map.sourceKey}:${map.fileIndex}:${JSON.stringify(interval)}`;
         const known = segmentSourceRanges.get(rangesKey);
         if (known) { convert(known); continue; }
         if (direct) {

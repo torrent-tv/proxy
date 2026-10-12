@@ -130,6 +130,17 @@ export class EncodeOrchestrator {
    * @type {{ urgent: boolean, priority: number, address: string, index: number } | null}
    */
   #leading = null;
+  /**
+   * Outputs whose start the last plan held back behind a more urgent encoder,
+   * and the band of the number it would have started at. Looked at again
+   * whenever that encoder moves on (`shareTheMachine`), because a closed piece
+   * is what lowers its band: placed only by a full plan, a soundtrack the
+   * viewer was stopped for waited 59 s behind a picture that had long left
+   * the urgent band (Home Assistant 2026-10-12, torrent-tv/meta#178).
+   *
+   * @type {Map<string, { urgent: boolean, priority: number }>}
+   */
+  #heldBack = new Map();
 
   /** What a stop and a start have cost on this host. */
   #costs = new RunCosts();
@@ -689,7 +700,10 @@ export class EncodeOrchestrator {
   shareTheMachine() {
     const leading = this.#leadingBand();
     this.#leading = leading;
-    if (!leading) return;
+    if (!leading) {
+      this.#placeHeldBack(null);
+      return;
+    }
     for (const [address, runs] of this.#runs) {
       for (const run of runs) {
         if (!run.isAlive || run.isStopping || typeof run.pause !== "function") continue;
@@ -701,6 +715,22 @@ export class EncodeOrchestrator {
           run.resume(`nothing more urgent than #${run.head} of ${address} is being made`);
         }
       }
+    }
+    this.#placeHeldBack(leading);
+  }
+
+  /**
+   * Plan again every output whose start was held back behind what is no
+   * longer more urgent than it: the start is placed now, by the same plan,
+   * rather than at whatever event next re-plans everything.
+   *
+   * @param {{ urgent: boolean, priority: number } | null} leading
+   */
+  #placeHeldBack(leading) {
+    for (const [address, band] of [...this.#heldBack]) {
+      if (leading && compareUrgency(band, leading) > 0) continue;
+      this.#heldBack.delete(address);
+      this.#reconcileOne(address);
     }
   }
 
@@ -916,6 +946,8 @@ export class EncodeOrchestrator {
     // a 159 090-line file, 31 % of the log, all of one wedge.
     const wanting = firstUnmetWant(coverage, windows);
     const stillRunning = this.runsOn(address).filter((run) => run.isAlive);
+    if (heldBack) this.#heldBack.set(address, this.#bandAt(address, heldBack.from));
+    else this.#heldBack.delete(address);
     if (wanting === null || stillRunning.length > 0) {
       this.#lastUnmet.delete(address);
     } else if (heldBack) {

@@ -461,6 +461,17 @@ export class EncodeInputs {
         if (this.#requests.get(request.key) !== request) return undefined;
       }
       const chosen = stretches.get(end);
+      // EVERY BYTE IS HERE BEFORE THE RUN IS ANSWERED. The stretch is copied
+      // after the answer (`OriginalInput.js`), so a stretch that is not all
+      // downloaded would start an encoder whose input then fails; checked here,
+      // it waits for the bytes as one read of everything used to. Field
+      // 2026-10-12: a cold MKV's first piece was answered, its stretch read
+      // found pieces missing, and the run was refused for good (torrent-tv/meta#178).
+      if (this.#heldRanges !== null && !await this.#present(chosen.sources, held, request.timing)) {
+        const [first] = chosen.sources;
+        return { kind: "needs-bytes", sourceKey: first.sourceKey, fileIndex: first.fileIndex, ranges: first.input.ranges };
+      }
+      if (this.#requests.get(request.key) !== request) return undefined;
       this.#wanted.set(request.key, { wanted: chosen.bytes, required: chosen.bytes });
       result = await admitOriginalInput({ sources: chosen.sources, readRanges: this.#read, now: this.#now,
         reserve: async bytes => this.#hold(request, bytes) });

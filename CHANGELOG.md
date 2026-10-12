@@ -1,4 +1,4 @@
-## Unreleased
+## 2.97.11
 
 - **Fix**: The copy of an encoder input is no longer cut short by the time before the viewer reaches its piece. On the field's AVI after a seek (2.97.10) the piece was always about to be needed, so every input shrank to one piece and every run paid its open again — about 9 s for each 4 s piece, and the picture stood on almost every piece. The input still always holds the piece it is prepared for (#ttv-178).
 

@@ -1,3 +1,9 @@
+## Unreleased
+
+- **Fix**: The download limit by processor share counts the proxy's processor as a share of the machine, as the encoder cost and the price of a byte already were; 2.97.7 counted it in cores, so on the four-core addon host the limit was about four times looser than the model (#ttv-178).
+- **Fix**: The price of a downloaded byte is the torrent thread's own processor time against the bytes downloaded, its base draw taken off, measured whether or not an encoder runs. It was taken only while nothing encoded, so an AVI re-encoded from the first second of its download never got a price and was never limited (field 2026-10-11: 0 limits on the AVI, 267 on the MKV). The quality offer reads the same price (#ttv-178).
+- **Chore**: The machine's reading is said the same way while encoders run and while they stand, with the share nothing used (`free=`) beside the share other processes leave (`available=`); each torrent reading says what was downloaded against the limit in force; an encoder input's state names the piece it is prepared for and that piece's rank in the output's map (#ttv-178).
+
 ## 2.97.7
 
 - **Fix**: Downloading no longer takes the processor a re-encoded picture needs. The torrents download at the rate the processor leaves them once every watched film's encoders and downloads advance at one film speed — `s = C / Σ(k + w·c)` from the measured free processor, encoder cost per second of film, bytes per second of film and processor per megabyte — and never below what the films play; within it the priority map decides what comes first. On Home Assistant a 720x400 AVI re-encode got 176-182 % of a core against the 230 % it needs while the torrent fetched 4.5-9.8 MB/s far ahead of the viewer, and the picture stopped; where the rates cannot be held, the start forecast waits for it at the start instead (#ttv-178).

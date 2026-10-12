@@ -98,7 +98,6 @@ import { contentOf, LocalObservations, PROXY_ROOT } from "../encode/LocalObserva
 import { configurationKeyOf } from "../encode/fingerprint.js";
 import { qualityStateOf } from "../encode/quality/OutputQualityState.js";
 import { downloadShare } from "../storage/processor-share.js";
-import { secondsToServe, secondsUntilPiece } from "../encode/input-deadline.js";
 import { ENCODE_RUN_STATE, processCanBeSignalled } from "../encode/encode-run-state.js";
 
 // Where a variant and an audio rendition live under a session — `v/<height>/…`
@@ -1014,19 +1013,6 @@ export function wireOutputs({
       index >= window.from && index <= window.to && window.urgent === true),
     // The piece's rank in the output's own map, said with an input's state.
     rankAt: (output, index) => parts.encodeOrchestrator?.rankAt?.(output.outputKey ?? "", index) ?? null,
-    // WHEN THE VIEWER REACHES A PIECE: the output map's zones state it for their
-    // near edge, and a piece inside a zone is that much film further on.
-    deadlineOf: (output, index) => secondsUntilPiece(parts.encodeOrchestrator?.wantedSegmentsOn(output.outputKey ?? "") ?? [],
-      output.timeline?.published ?? output.timeline?.boundaries, index),
-    // HOW LONG A RUN STARTED AT `from` TAKES TO SERVE `serves`: its open, the
-    // pieces it encodes up to and including `serves`, and the next one where a
-    // piece waits for the file after it.
-    firstPieceIn: (output, from, serves) => secondsToServe({
-      open: parts.encodeOrchestrator?.openOf?.(output.outputKey ?? "")?.seconds,
-      speed: parts.encodeOrchestrator?.speedOn?.(output.outputKey ?? ""),
-      grid: output.timeline?.published ?? output.timeline?.boundaries,
-      from, serves, waitsForNext: !parts.encodeRuns.publishesAlone(output)
-    }),
     log: line => logger.info(line),
     changed: (output, result) => {
       if (result.kind === "terminal") {

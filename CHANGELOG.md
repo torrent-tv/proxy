@@ -1,4 +1,4 @@
-## Unreleased
+## 2.97.20
 
 - **Fix**: A cold film starts as soon as its whole map is worked out, not some 20 s later. The start forecast plans the whole film and needs the bytes every piece reads, which the download map's first pass works out; handed the main thread back after every one of its 4000 zones (2.97.17), that pass took 14.7 s and 22 s of wall time on a cold two-hour AVI for about 4 s of its own work, and the forecast said the input was unavailable all along. The pass now shares the thread in equal turns, handing it back once it has run as long as the rest of the thread took in its own last turn. Handing back after every zone did not shorten FFmpeg's first open, which took 8.2 s held in one stretch and 7.8-8.2 s handed back (#ttv-178).
 

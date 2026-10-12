@@ -1,3 +1,7 @@
+## Unreleased
+
+- **Fix**: A cold film's first encoder input no longer waits seconds for memory behind reads that cannot succeed. On a cold two-hour AVI the input waited 5.8 s: when the index's last piece arrived, every one of the soundtrack's 1943 segments was read and refused the same 31.5 MB table in turn, holding the main thread for 3.3 s, and the revision that would give the memory then waited for the disks to be read and the evidence to be measured; the swarm meanwhile had no film bytes to fetch. Now one refusal of memory answers the other requests of the same statement until memory changes, an output whose index or table is not there is asked once per map, and a claimant short of memory has memory alone read (#ttv-178).
+
 ## 2.97.15
 
 - **Fix**: A viewer waiting for the picture no longer holds up the proxy's other answers. The start forecast, worked out on every progress poll, converted every piece of the film anew each time, 160-250 ms on an input the size of the field's two-hour AVI; and the download map's pass worked out what every piece reads on every map, which held the main thread up to 1.5 s (Home Assistant profile, 2026-10-12). A piece already played that was never read and is not made is left out, what has not changed is kept between polls, and the forecast takes about 45 ms on that input with the same answer (#ttv-178).

@@ -524,6 +524,14 @@ export async function startProxyServer({
       if (!map.isCurrent()) return [];
       const direct = navigated.kind === "result" && navigated.value === true &&
         typeof container?.readSourceRanges === "function" ? container : null;
+      // An output whose file-level reading is not there in this pass — the
+      // index or Cues that say where a segment is, not yet downloaded, or the
+      // table its segments read, refused memory — answers its other segments
+      // the same way. One unanswered request is kept to be retried when the
+      // bytes or the memory change, and the map is built again when it
+      // answers; asking every segment held the main thread for 3.3 s on a cold
+      // two-hour AVI (torrent-tv/meta#178).
+      const waiting = new Set();
       for (const zone of demands) {
         if (!map.isCurrent()) return [];
         // WHAT A SEGMENT READS IS WORKED OUT ONCE, not on every publication: its
@@ -547,6 +555,7 @@ export async function startProxyServer({
         // were never asked for (Home Assistant 2026-10-08, torrent-tv/meta#151).
         const known = segmentSourceRanges.get(rangesKey);
         if (known) { convert(known); continue; }
+        if (waiting.has(zone.outputKey)) continue;
         if (direct) {
           // Asked per zone too: a soundtrack of an AVI is read from its own
           // packets, which the same index states (torrent-tv/meta#166).
@@ -572,10 +581,14 @@ export async function startProxyServer({
         if (!map.isCurrent()) return [];
         if (!intervalParams) continue;
         const navigation = await containerOrchestrator.inspect(intervalParams, "source-navigation");
-        if (navigation.kind !== "result") continue;
+        if (navigation.kind !== "result") {
+          if (navigation.kind === "needs-ranges" || navigation.kind === "needs-memory") waiting.add(zone.outputKey);
+          continue;
+        }
         const originalRanges = navigation.value;
         const packets = await containerOrchestrator.inspect(intervalParams, originalRanges ? "source-ranges" : "packets");
         if (!map.isCurrent()) return [];
+        if (packets.kind === "needs-memory") waiting.add(zone.outputKey);
         if (packets.kind !== "result") continue;
         const input = originalRanges ? packets.value : new SegmentInputs({ index: packets.value, tracks: wanted }).forInterval({ ...interval, mode: track => modes.get(track) });
         if (input.kind !== "result") continue;
@@ -599,7 +612,7 @@ export async function startProxyServer({
     failed: (request, error) => logger.warn(`media request=${request.key} probe failed: ${error?.message ?? error}`)
   });
   const indexMemory = new IndexMemory({
-    reviseBudget: () => { void outputParts.machineBudget.revise().catch(error => logger.warn(`packet index budget: ${error.message}`)); },
+    reviseBudget: () => { void outputParts.machineBudget.revise("memory", "media metadata").catch(error => logger.warn(`packet index budget: ${error.message}`)); },
     changed: () => { mediaReads.memoryChanged(); probeReads.memoryChanged(); outputParts.encodeInputs?.memoryChanged(); }
   });
   const containerOver = async ({ sourceKey, fileIndex, requestId, packetInterval, demand }) => {

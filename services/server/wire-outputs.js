@@ -1008,7 +1008,7 @@ export function wireOutputs({
     resolve: resolveEncodeInput,
     readRanges: readEncodeRanges,
     heldRanges: readEncodeHeldRanges,
-    reviseBudget: () => parts.machineBudget.revise(),
+    reviseBudget: () => parts.machineBudget.revise("memory", "admitted encode inputs"),
     capacity: () => parts.machineBudget.capacityOf("memory"),
     // How long this output's input takes to open, from the one owner of start
     // readings (torrent-tv/meta#184).

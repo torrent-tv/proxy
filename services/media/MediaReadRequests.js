@@ -1,6 +1,22 @@
-/** Retry unfinished statements when their missing resource changes. */
+/**
+ * Retry unfinished statements when their missing resource changes.
+ *
+ * ONE REFUSAL OF MEMORY ANSWERS THE STATEMENT, not one request of it. The
+ * table a statement reserves belongs to the file — a soundtrack's packet table
+ * is one table for every segment of it — so once a read of a statement has
+ * been refused memory, the other requests of the same statement of the same
+ * file wait for memory to change instead of being read and refused one by one.
+ * Read one by one, a cold two-hour AVI's 1943 soundtrack segments were refused
+ * in turn when the index's last piece arrived, which held the main thread for
+ * 3.3 s and the budget revision that would have given the memory behind it
+ * (Home Assistant 2026-10-12, torrent-tv/meta#178). A retry wave therefore
+ * reads one request of each statement first and the others once it has
+ * answered.
+ */
 export class MediaReadRequests {
   #requests = new Map();
+  /** File and statement → the memory revision at which a read of it was refused memory. */
+  #refusedMemory = new Map();
   #read;
   #failed;
   #versions = new Map();
@@ -39,6 +55,7 @@ export class MediaReadRequests {
       this.#notify(params.sourceKey, params.fileIndex, result);
       return this.#requests.delete(key);
     }
+    if (result.kind === "needs-memory") this.#refusedMemory.set(statementKey(params, statement), memoryRevision);
     const existing = this.#requests.get(key);
     if (existing) { existing.params = params; existing.kind = result.kind; }
     else this.#requests.set(key, { params, statement, kind: result.kind, running: false, changed: false });
@@ -54,24 +71,49 @@ export class MediaReadRequests {
 
   memoryChanged() {
     this.#memoryVersion++;
+    const wave = [];
     for (const request of this.#requests.values()) {
       if (request.kind !== "needs-memory") continue;
       // The retried statement announces its result. A memory event is not a
       // source change for another statement still waiting for missing bytes.
       request.changed = true;
-      if (!request.running) void this.#retry(request);
+      if (!request.running) wave.push(request);
     }
+    this.#retryWave(wave);
   }
 
   bytesChanged(sourceKey, fileIndex) {
     const fileKey = `${sourceKey}:${fileIndex}`;
     this.#versions.set(fileKey, this.revision(sourceKey, fileIndex) + 1);
     this.#notify(sourceKey, fileIndex, { kind: "bytes-changed" });
+    const wave = [];
     for (const request of this.#requests.values()) {
       if (request.params.sourceKey !== sourceKey || request.params.fileIndex !== fileIndex) continue;
       if (request.kind !== "needs-ranges") continue;
       request.changed = true;
-      if (!request.running) void this.#retry(request);
+      if (!request.running) wave.push(request);
+    }
+    this.#retryWave(wave);
+  }
+
+  /**
+   * Retry `requests`: one of each statement of each file first, the others of
+   * that statement once it has answered.
+   *
+   * @param {object[]} requests
+   */
+  #retryWave(requests) {
+    const groups = new Map();
+    for (const request of requests) {
+      const key = statementKey(request.params, request.statement);
+      const group = groups.get(key);
+      if (group) group.push(request);
+      else groups.set(key, [request]);
+    }
+    for (const [head, ...rest] of groups.values()) {
+      void this.#retry(head).then(() => {
+        for (const request of rest) if (!request.running) void this.#retry(request);
+      });
     }
   }
 
@@ -90,6 +132,10 @@ export class MediaReadRequests {
     for (const key of this.#versions.keys()) {
       if (fileIndex === undefined ? key.startsWith(`${sourceKey}:`) : key === `${sourceKey}:${fileIndex}`) this.#versions.delete(key);
     }
+    for (const key of [...this.#refusedMemory.keys()]) {
+      const [refusedSource, refusedFile] = JSON.parse(key);
+      if (refusedSource === sourceKey && (fileIndex === undefined || refusedFile === fileIndex)) this.#refusedMemory.delete(key);
+    }
   }
 
   retain(sourceKey, fileIndex, wanted) {
@@ -105,6 +151,12 @@ export class MediaReadRequests {
     try {
       while (request.changed && this.#requests.get(key) === request) {
         request.changed = false;
+        if (this.#refusedMemory.get(statementKey(request.params, request.statement)) === this.#memoryVersion) {
+          // The same statement of the same file was refused memory in this
+          // very state of memory: so is this one, without reading it.
+          request.kind = "needs-memory";
+          break;
+        }
         await this.#read(request.params, request.statement);
       }
     } catch (error) {
@@ -117,4 +169,8 @@ export class MediaReadRequests {
 
 function requestKey(params, statement) {
   return JSON.stringify([params.sourceKey, params.fileIndex, statement, params.requestId ?? null]);
+}
+
+function statementKey(params, statement) {
+  return JSON.stringify([params.sourceKey, params.fileIndex, statement]);
 }

@@ -153,8 +153,9 @@ export function wireMachineBudget({
     });
   }
 
+  let evidenceOn = null;
   if (diagnostics) {
-    const evidenceOn = diagnosticsRoot ? deviceOf(diagnosticsRoot) : segmentsOn;
+    evidenceOn = diagnosticsRoot ? deviceOf(diagnosticsRoot) : segmentsOn;
     defineDisk(evidenceOn, diagnosticsRoot || segmentStore.root);
     budget.register({
       name: "diagnostics",
@@ -169,11 +170,22 @@ export function wireMachineBudget({
 
   return {
     capacityOf: name => budget.capacityOf(name),
-    revise: async () => {
-      // Re-read the evidence before dividing: it is the one claimant whose
-      // bytes are written by something that never reports them.
-      await diagnostics?.measure();
-      return budget.revise();
+    /**
+     * @param {string | null} [resource] - One resource to revise; all when absent.
+     * @param {string | null} [because] - Who asked, for the revision's line.
+     */
+    revise: async (resource = null, because = null) => {
+      // Re-read the evidence before dividing its disk: it is the one claimant
+      // whose bytes are written by something that never reports them. Only
+      // there: a claimant short of memory asks for memory alone, and walking
+      // the evidence's directory first made every memory answer wait for it —
+      // 3.7 s on a cold AVI behind 1943 other reads (torrent-tv/meta#178).
+      if (diagnostics && (resource === null || resource === evidenceOn)) {
+        const from = Date.now();
+        await diagnostics.measure();
+        because = `${because ?? "a full revision"}, after the evidence was measured in ${Date.now() - from}ms`;
+      }
+      return budget.revise(resource, because);
     },
     segmentBytes: () => segmentBytes,
     diagnostics: diagnostics ?? null,

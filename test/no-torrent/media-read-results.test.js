@@ -58,6 +58,29 @@ test("resource changes retry only statements waiting for that resource", async (
   assert.equal(read.length, 2);
 });
 
+test("one refusal of memory answers the other requests of the statement until memory changes", async () => {
+  // A cold two-hour AVI's 1943 soundtrack segments were each read and refused
+  // the same 31.5 MB table when the index's last piece arrived, holding the
+  // main thread for 3.3 s (Home Assistant 2026-10-12, torrent-tv/meta#178).
+  let reads = 0;
+  let memoryFits = false;
+  const pending = new MediaReadRequests({ read: async (request, statement) => {
+    reads++;
+    pending.record(request, statement, memoryFits || statement === "tracks" ? { kind: "result", value: [] }
+      : { kind: "needs-memory", bytes: 31522816 });
+  } });
+  const segments = Array.from({ length: 100 }, (_, index) => ({ ...params, requestId: `segment-${index}` }));
+  for (const segment of segments) pending.record(segment, "packets", { kind: "needs-ranges", ranges: [[90, 99]] });
+  pending.record({ ...params, requestId: "tracks" }, "tracks", { kind: "needs-ranges", ranges: [[0, 15]] });
+  pending.bytesChanged("source", 0);
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(reads, 2, "one segment read and refused, the track table read on its own");
+  memoryFits = true;
+  pending.memoryChanged();
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(reads, 102, "with memory, every segment is read");
+});
+
 test("memory becoming available during a read cannot leave its pending statement asleep", async () => {
   let reads = 0;
   const pending = new MediaReadRequests({ read: async () => { reads++; } });

@@ -31,7 +31,6 @@ import {
   rescale,
   addRange as addMediaRange,
   commonTimescale,
-  scale,
   subtract,
   toSeconds,
   ZERO
@@ -120,7 +119,16 @@ export class RateTrend {
  */
 export function predictPlaybackReadiness(input = {}) {
   const now = Number.isFinite(input.now) ? input.now : Date.now();
-  const tracks = Array.isArray(input.tracks) ? input.tracks : [];
+  // WHAT IS BEHIND THE VIEWER IS NOT PLANNED AGAIN. The forecast runs on every
+  // progress poll of a waiting viewer, and it converted every piece of the film
+  // to exact time before dropping those already played: 5.1 s of the proxy's
+  // main thread at once after a seek back on Home Assistant, every second of
+  // which FFmpeg's input and the page's pieces waited (torrent-tv/meta#178).
+  // Kept are the pieces still to play, the first piece (where the track
+  // starts), the read piece nearest before them (what an unread piece is placed
+  // by) and read pieces inside what the page reports holding (their frames).
+  const tracks = (Array.isArray(input.tracks) ? input.tracks : []).map((track) =>
+    Array.isArray(track.segments) ? { ...track, segments: piecesThatMatter(track, finiteNonNegative(input.positionSeconds)) } : track);
   const duration = finiteNonNegative(input.durationSeconds);
   // Each track's served ticks are placed on the clock the page reports by the
   // offset its player applied (`timestampOffset`).
@@ -138,13 +146,13 @@ export function predictPlaybackReadiness(input = {}) {
     ...reported.flatMap((ranges) => (ranges ?? []).flatMap(({ start, end }) => [start, end])),
     ...tracks.flatMap((track) => (Array.isArray(track.segments) ? track.segments : []).flatMap((segment) => [
       ...(segment.mediaRanges?.timescale ? [mediaTime(0n, segment.mediaRanges.timescale)] : []),
-      ...[segment.startSeconds, segment.endSeconds].filter(Number.isFinite).map(fromSeconds)
+      ...exactBoundsOf(segment)
     ]))
   ]);
   const zero = mediaTime(0n, unit);
   const segmentsOf = tracks.map((track, trackIndex) => predictedMediaSegments(
     (Array.isArray(track.segments) ? track.segments : []).map((segment) => ({
-      ...segment, ranges: playerRanges(segment.mediaRanges, rescale(clocks[trackIndex], unit), unit)
+      ...segment, exact: exactTimesOf(segment), ranges: playerRanges(segment.mediaRanges, rescale(clocks[trackIndex], unit), unit)
     })), unit));
   const origin = latest(zero, ...segmentsOf.map((segments) =>
     segments.find(({ index }) => index === 0)?.ranges?.[0]?.start ?? zero));
@@ -362,11 +370,15 @@ export function predictPlaybackReadiness(input = {}) {
           const stillMissing = uncoveredIntervals(pieceRange, sourceByteCoverage.get(sourceId) ?? []);
           for (const part of stillMissing) {
             finish = rate.finish(part.end - part.start, finish);
-            service.push({ start: part.start, end: part.end, begin: finish, finish });
+            const arrival = { start: part.start, end: part.end, begin: finish, finish };
+            service.push(arrival);
             sourceArrivalAt = Math.max(sourceArrivalAt, finish);
+            // Joined in place, as the whole list would join: pieces arrive in
+            // media order, so each one extends the end. Sorting the whole list
+            // again after every piece was most of the forecast's time.
+            sourceByteCoverage.set(sourceId, withCoverage(sourceByteCoverage.get(sourceId) ?? [], arrival));
+            sourceArrivals.set(sourceId, withArrival(sourceArrivals.get(sourceId) ?? [], arrival, service));
           }
-          sourceByteCoverage.set(sourceId, numericCoverage(service));
-          sourceArrivals.set(sourceId, indexedArrivals(service));
         }
         sourceService.finish = finish;
       }
@@ -534,6 +546,95 @@ function heldRanges(ranges, segments, unit, position) {
   return held;
 }
 
+/**
+ * The pieces of a track this forecast reads: those still to play (ending after
+ * `position`), the first piece, every piece that has been read and every piece
+ * that is made. A piece that is none of these changes no answer: it is not
+ * scheduled, it is not where the track starts, no unread piece is placed by it
+ * (only read pieces are), it lends no frame to what the page holds, and it has
+ * no size to measure the output's rate by.
+ *
+ * @param {{ segments: object[], readySegmentIndices?: number[] }} track
+ * @param {number} position - Seconds.
+ * @returns {object[]}
+ */
+function piecesThatMatter(track, position) {
+  const made = new Set(Array.isArray(track.readySegmentIndices) ? track.readySegmentIndices : []);
+  const kept = track.segments.filter((segment) => segment?.index === 0 || segment?.mediaRanges !== undefined ||
+    made.has(segment?.index) || !(Number.isFinite(segment?.endSeconds) && segment.endSeconds <= position));
+  return kept.length === track.segments.length ? track.segments : kept;
+}
+
+/**
+ * The exact times of a piece's playlist edges, converted once per piece and
+ * kept with it: the playlist's cut times do not change between polls, and
+ * converting them again on every one was a fifth of the forecast's time.
+ *
+ * @type {WeakMap<object, { startSeconds: number, endSeconds: number, start: import("./media-time.js").MediaTime | null, end: import("./media-time.js").MediaTime | null }>}
+ */
+const exactBounds = new WeakMap();
+
+function exactTimesOf(segment) {
+  let bounds = exactBounds.get(segment);
+  if (!bounds || bounds.startSeconds !== segment.startSeconds || bounds.endSeconds !== segment.endSeconds) {
+    bounds = {
+      startSeconds: segment.startSeconds,
+      endSeconds: segment.endSeconds,
+      start: Number.isFinite(segment.startSeconds) ? fromSeconds(segment.startSeconds) : null,
+      end: Number.isFinite(segment.endSeconds) ? fromSeconds(segment.endSeconds) : null
+    };
+    exactBounds.set(segment, bounds);
+  }
+  return bounds;
+}
+
+/** The exact edges a piece carries from the forecast, or converts once. */
+function timesOf(segment) {
+  return segment.exact ?? exactTimesOf(segment);
+}
+
+/** @returns {import("./media-time.js").MediaTime[]} The finite playlist edges of a piece, exactly. */
+function exactBoundsOf(segment) {
+  const { start, end } = exactTimesOf(segment);
+  return [start, end].filter(Boolean);
+}
+
+/**
+ * `coverage` (sorted, joined; this forecast's own list) with `range` added in
+ * place, as `numericCoverage` of the whole list would give it: found by halves,
+ * joined with every neighbour it reaches or touches. Bytes held further on —
+ * a piece of the file read for another viewer — sit after the place pieces are
+ * added in media order, so adding only at the end did not hold.
+ */
+function withCoverage(coverage, range) {
+  let low = 0, high = coverage.length;
+  while (low < high) {
+    const middle = (low + high) >>> 1;
+    if (coverage[middle].end < range.start) low = middle + 1;
+    else high = middle;
+  }
+  const joined = { start: range.start, end: range.end };
+  let last = low;
+  while (last < coverage.length && coverage[last].start <= joined.end) {
+    joined.start = Math.min(joined.start, coverage[last].start);
+    joined.end = Math.max(joined.end, coverage[last].end);
+    last += 1;
+  }
+  coverage.splice(low, last - low, joined);
+  return coverage;
+}
+
+/** `arrivals` (this forecast's own list) with `range` indexed, as `indexedArrivals` of the whole list would give it. */
+function withArrival(arrivals, range, all) {
+  if (!(range.finish > 0)) return arrivals;
+  const last = arrivals.at(-1);
+  if (!last || range.start > last.start || (range.start === last.start && range.end >= last.end)) {
+    arrivals.push({ ...range, maximumEnd: Math.max(last?.maximumEnd ?? 0, range.end) });
+    return arrivals;
+  }
+  return indexedArrivals(all);
+}
+
 /** Coverage is joined once per resource, independently of arrival times. */
 function numericCoverage(ranges) {
   const joined = [];
@@ -614,28 +715,56 @@ function sourcePiecesFor(ranges, source) {
  */
 function predictedMediaSegments(segments, unit) {
   const zero = mediaTime(0n, unit);
-  const anchors = segments.filter(({ ranges }) => ranges?.length > 0);
+  // In order of index, searched by halves: each unread piece looked through
+  // every read one for its neighbours, a cost of pieces times read pieces.
+  const anchors = segments.filter(({ ranges }) => ranges?.length > 0)
+    .sort((left, right) => left.index - right.index);
+  const firstAfter = (index) => {
+    let low = 0, high = anchors.length;
+    while (low < high) {
+      const middle = (low + high) >>> 1;
+      if (anchors[middle].index <= index) low = middle + 1;
+      else high = middle;
+    }
+    return low;
+  };
   return segments.map((segment) => {
     if (segment.ranges !== undefined) return segment;
+    const times = timesOf(segment);
     if (anchors.length === 0) {
-      return { ...segment, ranges: [{ start: rescale(fromSeconds(segment.startSeconds), unit),
-        end: rescale(fromSeconds(segment.endSeconds), unit), frame: zero }] };
+      return { ...segment, ranges: [{ start: rescale(times.start, unit), end: rescale(times.end, unit), frame: zero }] };
     }
-    const previous = anchors.findLast(({ index }) => index < segment.index);
-    const next = anchors.find(({ index }) => index > segment.index);
-    const nominalLeft = fromSeconds(previous?.endSeconds ?? next.startSeconds);
+    const after = firstAfter(segment.index);
+    let before = after - 1;
+    while (before >= 0 && anchors[before].index >= segment.index) before -= 1;
+    const previous = before >= 0 ? anchors[before] : undefined;
+    const next = anchors[after];
+    const nominalLeft = previous ? timesOf(previous).end : timesOf(next).start;
     const actualLeft = previous?.ranges.at(-1).end ?? next.ranges[0].start;
-    const nominalRight = next ? fromSeconds(next.startSeconds) : nominalLeft;
+    const nominalRight = next ? timesOf(next).start : nominalLeft;
     const actualRight = next?.ranges[0].start ?? actualLeft;
     const nominalSpan = subtract(nominalRight, nominalLeft);
-    const place = (seconds) => {
-      const fromLeft = subtract(fromSeconds(seconds), nominalLeft);
-      return nearest(add(actualLeft, nominalSpan.ticks > 0n
-        ? scale(fromLeft, subtract(actualRight, actualLeft), nominalSpan)
-        : fromLeft), unit);
+    // `nearest(actualLeft + fromLeft * (actualRight - actualLeft) / nominalSpan)`
+    // in ticks of `unit`, as one fraction: both actual edges are already whole
+    // ticks of it, so only the scaled part is rounded, and no common
+    // denominator is sought for every piece (most of the forecast's time).
+    const actualSpan = actualRight.ticks - actualLeft.ticks;
+    const place = (time) => {
+      const fromLeft = subtract(time, nominalLeft);
+      const [numerator, denominator] = nominalSpan.ticks > 0n
+        ? [fromLeft.ticks * nominalSpan.timescale * actualSpan, fromLeft.timescale * nominalSpan.ticks]
+        : [fromLeft.ticks * unit, fromLeft.timescale];
+      return { ticks: actualLeft.ticks + roundedHalfUp(numerator, denominator), timescale: unit };
     };
-    return { ...segment, ranges: [{ start: place(segment.startSeconds), end: place(segment.endSeconds), frame: zero }] };
+    return { ...segment, ranges: [{ start: place(times.start), end: place(times.end), frame: zero }] };
   });
+}
+
+/** `numerator / denominator` to the nearest whole number, halves up, as `nearest` rounds; `denominator` positive. */
+function roundedHalfUp(numerator, denominator) {
+  const quotient = numerator / denominator;
+  const floor = numerator - quotient * denominator < 0n ? quotient - 1n : quotient;
+  return 2n * (numerator - floor * denominator) >= denominator ? floor + 1n : floor;
 }
 
 function rateCurve(readings, now) {

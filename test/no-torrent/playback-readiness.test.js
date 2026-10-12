@@ -728,3 +728,31 @@ test("a measured source stop is not replaced by hypothetical future recovery", (
   assert.equal(forecast.ready, false);
   assert.equal(forecast.delaySeconds, null);
 });
+
+test("pieces already played and never read change no answer, so they are not planned again", () => {
+  // The forecast runs on every poll of a waiting viewer; converting the whole
+  // film before dropping what was played held the proxy's main thread for
+  // seconds after a seek back (torrent-tv/meta#178). Dropping them must not
+  // move the answer.
+  const now = 10_000;
+  const segments = Array.from({ length: 60 }, (_, index) => ({
+    index, startSeconds: index * 4, endSeconds: (index + 1) * 4,
+    sourceInputs: [{ sourceId: "source", ranges: [{ start: index * 4, end: (index + 1) * 4 }] }]
+  }));
+  const state = (pieces) => ({
+    now, positionSeconds: 150, durationSeconds: 240, bufferedAheadSeconds: 2, bufferLimitSeconds: 120,
+    reserveSeconds: 4, lookaheadSeconds: 120,
+    sources: [{ id: "source", complete: false, fileOffset: 0, fileLength: 240, pieceLength: 8,
+      residence: [{ location: "disk", start: 0, end: 160 }],
+      downloadRateReadings: [{ at: now - 1_000, value: 2 }, { at: now, value: 2 }] }],
+    tracks: [{ id: "video", sourceIds: ["source"], processedSeconds: 152, bitsPerMediaSecond: 80,
+      readings: [{ at: now - 1_000, value: 1.5 }, { at: now, value: 1.5 }], segments: pieces,
+      readySegmentIndices: [10, 37, 38], segmentSizesBytes: new Map([[10, 50], [37, 40], [38, 40]]) }],
+    linkReadings: [{ at: now - 1_000, value: 320 }, { at: now, value: 320 }]
+  });
+  const everything = predictPlaybackReadiness(state(segments));
+  const withoutPlayed = predictPlaybackReadiness(state(segments.filter(({ index, endSeconds }) =>
+    index === 0 || index === 10 || endSeconds > 150)));
+  assert.equal(everything.reason, "minimum-safe-delay");
+  assert.deepEqual(withoutPlayed, everything);
+});

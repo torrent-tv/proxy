@@ -52,6 +52,19 @@ Zero service, missing media facts and a genuine timestamp gap remain explicit
 noncomputable states. The UI reports their causes instead of an estimating
 placeholder or a fabricated duration.
 
+The forecast is answered on every progress poll of a waiting viewer, on the
+proxy's main thread, so it does no work twice (torrent-tv/meta#178). A piece
+already played that was never read and is not made is left out before anything
+is converted: it is not scheduled, not where a track starts, places no unread
+piece and lends no frame to what the page holds. The exact edges of a piece are
+converted once and kept with it; the pieces an output hands over between polls
+are the same objects while their edges, read ranges and torrent inputs stay
+the same. An unread piece finds the read pieces around it by halves and is
+placed in the forecast's ticks as one fraction. Torrent bytes estimated to
+arrive join the coverage in place. The whole remaining film is still planned;
+the answer is unchanged (checked against the previous computation on 500
+varied inputs, none different).
+
 ## Continuity is decided in exact time
 
 The forecast lives in the viewer component (`services/viewer/`), because what

@@ -1,3 +1,7 @@
+## Unreleased
+
+- **Fix**: A viewer waiting for the picture no longer holds up the proxy's other answers. The start forecast, worked out on every progress poll, converted every piece of the film anew each time, 160-250 ms on an input the size of the field's two-hour AVI; and the download map's pass worked out what every piece reads on every map, which held the main thread up to 1.5 s (Home Assistant profile, 2026-10-12). A piece already played that was never read and is not made is left out, what has not changed is kept between polls, and the forecast takes about 45 ms on that input with the same answer (#ttv-178).
+
 ## 2.97.14
 
 - **Fix**: A film whose first piece is not all downloaded plays again (broken in 2.97.12). An encoder input was answered once its header was copied, before its stretch was checked; on a cold MKV the stretch's pieces were still missing, its copy failed after FFmpeg had started, and the run was refused for good, so the page said the video could not be played. The input is now answered only when its whole stretch is downloaded, and waits for the bytes otherwise; a stretch whose copy fails after the run started counts as an input that went away and is asked for again, not as a fault of the input (#ttv-178).

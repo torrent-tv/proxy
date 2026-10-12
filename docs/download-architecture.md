@@ -103,7 +103,7 @@ stretch is, and an input prepared or held for a start the last plan of its
 output does not place — one it starts or holds back, or the number after a run
 it left alive — is withdrawn, and a stretch still being copied is dropped when
 its read returns. The torrent thread reads a copy's pieces as many at once as
-libuv has file threads (`UV_THREADPOOL_SIZE`, four unless set), each written
+libuv has file threads (`UV_THREADPOOL_SIZE`, 64 as the proxy starts), each written
 straight into the copy; a piece shared by several ranges is read once and
 divided. One after another, every read from disk waited for the thread's loop
 on its own (torrent-tv/meta#178).

@@ -49,6 +49,9 @@ unneeded payloads are skipped. AVI walks RIFF lists and indexed or sequential
 media chunks, including AVIX continuations. An AVI with an `idx1` or OpenDML
 index is not reassembled: `avi-index.js` holds its packet addresses in typed
 arrays and FFmpeg reads the original file (`docs/download-architecture.md`).
+As FFmpeg does, the first RIFF's `idx1` is looked for only when the file states
+no OpenDML index: finding it reads the chunk after `movi`, where the first RIFF
+ends, which a cold start fetches as a piece of its own.
 Packet indexes retain physical
 ranges separately from presentation order and decode order.
 

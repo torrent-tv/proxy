@@ -43,6 +43,8 @@ export class AviContainer extends Container {
   /** The index alone: undefined until read, null when the file states none. */
   #index = undefined;
   #layout = null;
+  /** The first RIFF's `idx1`: undefined until looked for, null when there is none. */
+  #idx1Chunk = undefined;
 
   async #readHeaders() {
     if (this.#headers) return this.#headers;
@@ -124,15 +126,38 @@ export class AviContainer extends Container {
   }
 
 
-  /** The first RIFF's `movi` list and `idx1` chunk. */
+  /**
+   * The first RIFF's `movi` list, found without reading past it: the chunk
+   * after `movi` lies where the first RIFF ends, which on a cold start is a
+   * piece of its own off the swarm.
+   */
   async #topLevel() {
     if (this.#layout) return this.#layout;
     const header = await this.readRange(0, 11);
-    const chunks = await riffChunks(this.readRange, 12, 8 + header.readUInt32LE(4));
-    const movi = chunks.find(chunk => chunk.id === "LIST" && chunk.type === "movi");
+    const end = 8 + header.readUInt32LE(4);
+    const before = await riffChunks(this.readRange, 12, end, "movi");
+    const movi = before.find(chunk => chunk.id === "LIST" && chunk.type === "movi");
     if (!movi) throw new Error("AVI media list is absent.");
-    this.#layout = { movi, idx1: chunks.find(chunk => chunk.id === "idx1") ?? null };
+    this.#layout = { movi, end, before };
     return this.#layout;
+  }
+
+  /**
+   * The first RIFF's `idx1` chunk, which follows `movi`. Read only for a file
+   * with no OpenDML index, as FFmpeg reads it: a loaded OpenDML index marks
+   * the index loaded and `avi_load_index` is not called (avidec.c n6.1 and
+   * n8.1, `read_odml_index`). Looked for on every file, it cost a cold
+   * two-hour OpenDML AVI a round trip to the swarm: its index's own piece was
+   * asked for 4.4 s later than it could have been (Home Assistant 2026-10-12,
+   * torrent-tv/meta#178).
+   */
+  async #idx1() {
+    if (this.#idx1Chunk !== undefined) return this.#idx1Chunk;
+    const { movi, end, before } = await this.#topLevel();
+    const after = movi.end + ((movi.end - movi.start) & 1);
+    const chunks = [...before, ...(after < end ? await riffChunks(this.readRange, after, end) : [])];
+    this.#idx1Chunk = chunks.find(chunk => chunk.id === "idx1") ?? null;
+    return this.#idx1Chunk;
   }
 
   /**
@@ -144,7 +169,8 @@ export class AviContainer extends Container {
     if (this.#index !== undefined) return this.#index;
     const tracks = await this.readTracks();
     const { streams } = await this.#readHeaders();
-    const { movi, idx1 } = await this.#topLevel();
+    const { movi } = await this.#topLevel();
+    const idx1 = streams.some(stream => stream.indexChunks.length) ? null : await this.#idx1();
     const record = { dispose: () => this.#index?.dispose?.() };
     const allocation = this.packetMemory?.forRecord?.(record, "index") ?? this.packetMemory;
     const index = await readAviIndex({ read: this.readRange, fileSize: this.fileSize, movi, idx1, allocation,

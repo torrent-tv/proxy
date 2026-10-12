@@ -224,6 +224,21 @@ test("an OpenDML AVI past one gibibyte plays its interval from the named bytes o
     "-t", "100", "-c:v", "rawvideo", "-pix_fmt", "yuv420p", "-c:a", "libmp3lame", "-b:a", "128k", "-f", "avi", file]);
   const bytes = await fs.readFile(file);
   assert.ok(bytes.includes(Buffer.from("AVIX")), "the file has a second RIFF");
+  // FFmpeg reads the first RIFF's `idx1` only when no OpenDML index loads, and
+  // so does the container: the chunk after the first `movi` lies where the
+  // first RIFF ends, a piece of its own off a cold swarm (torrent-tv/meta#178).
+  const movi = bytes.indexOf(Buffer.from("movi")) - 8;
+  const moviSize = bytes.readUInt32LE(movi + 4);
+  const afterMovi = movi + 8 + moviSize + (moviSize & 1);
+  assert.equal(bytes.toString("ascii", afterMovi, afterMovi + 4), "idx1", "the legacy index follows the first movi");
+  const reads = [];
+  const recording = new AviContainer({ fileSize: bytes.length, readRange: async (start, end) => {
+    reads.push([start, end]);
+    return bytes.subarray(start, end + 1);
+  } });
+  assert.ok((await recording.parseKeyframeIndex()).times.length > 0);
+  assert.equal((await recording.readSourceRanges({ from: 30, to: 32 })).kind, "result");
+  assert.ok(!reads.some(([start, end]) => start <= afterMovi + 7 && afterMovi <= end), "the chunk after the first movi is not read");
   await checkAvi(directory, file, { duration: 100, audio: true, timeBase: 1 / FPS, copyable: true });
 }));
 

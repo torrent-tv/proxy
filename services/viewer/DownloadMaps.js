@@ -74,8 +74,28 @@ export class DownloadMaps {
     }
     if (changed) await this.#emit(file);
     if (revision !== file.revision) return;
+    const isCurrent = () => this.#files.get(`${sourceKey}:${fileIndex}`) === file && revision === file.revision;
+    // WHAT IS RESOLVED IS STATED WHILE THE REST IS STILL BEING RESOLVED. A pass
+    // works the zones out in the order the swarm is to fetch them, and
+    // published only at its end it kept the first bytes from the swarm for as
+    // long as the far end of the film took: 14.6 s on a cold two-hour AVI, the
+    // swarm fetching nothing for 17.5 s while the encoder waited for its next
+    // piece (Home Assistant 2026-10-12, torrent-tv/meta#178). The swarm
+    // fetches the highest group still missing, so before the pass works out a
+    // zone of a lower priority than any before it, what it has resolved is
+    // published, with the zones still retained for what it has not reached. A
+    // pass that works nothing out — every pass over a film already worked out
+    // — states nothing early.
+    let stated = Number.POSITIVE_INFINITY;
+    const workingOut = (priority, zones) => {
+      if (!(priority < stated)) return;
+      stated = priority;
+      if (zones.length === 0 || !isCurrent()) return;
+      this.#setZones(file, withRetained(zones, retained));
+      this.#emit(file).catch(() => undefined);
+    };
     const resolved = await this.#resolvePlayback({ sourceKey, fileIndex, durationSeconds, zones: file.sourceZones,
-      isCurrent: () => this.#files.get(`${sourceKey}:${fileIndex}`) === file && revision === file.revision });
+      isCurrent, workingOut });
     if (revision !== file.revision) return;
     this.#setZones(file, resolved);
     return this.#emit(file);
@@ -331,6 +351,19 @@ export class DownloadMaps {
       `${stats.skipped} statement(s) changed nothing and built no map`);
     file.stats = emptyStats(now);
   }
+}
+
+/**
+ * Zones resolved so far, with the retained zones of every segment they do not
+ * yet resolve again: a segment's bytes are stated once, by its newest reading.
+ */
+function withRetained(resolved, retained) {
+  const keyOf = zone => typeof zone.outputKey === "string" && Number.isSafeInteger(zone.index) ? `${zone.outputKey}:${zone.index}` : null;
+  const resolvedKeys = new Set(resolved.map(keyOf).filter(key => key !== null));
+  return [...resolved, ...retained.filter(zone => {
+    const key = keyOf(zone);
+    return key === null || !resolvedKeys.has(key);
+  })];
 }
 
 /** @param {number} since */

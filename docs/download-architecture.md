@@ -29,6 +29,14 @@ ranges in the eligible group are published as a union, matching the library's
 public selection merging. Publishing background ranges alongside urgent ranges
 would otherwise merge them and lose the urgent interval's independent selection.
 
+A file's zones are resolved to bytes in the order of their deadlines, and the
+first pass over a film works out thousands of them. Before that pass works out
+a zone of a lower priority than any before it, what it has resolved is
+published, with the zones still retained for what it has not reached; the
+bytes the swarm is to fetch first never wait for the far end of the film. A
+pass over zones already worked out publishes once, at its end
+(torrent-tv/meta#178).
+
 WebTorrent chooses peers, protocol blocks, request capacity and reassignment.
 The proxy does not replace its methods. Withdrawn selections cancel obsolete
 requests; selections shared by remaining demand keep their requests. `critical`

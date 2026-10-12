@@ -1,6 +1,14 @@
 import { pieceStoreOf } from "../piece-store-of.js";
 
 /**
+ * How many pieces one read for a reader asks of the store at once: the threads
+ * libuv runs file operations on (`UV_THREADPOOL_SIZE`, four unless set). A
+ * piece from disk is three of their operations, and more at once would only
+ * wait behind them (torrent-tv/meta#178).
+ */
+const FILE_READS_AT_ONCE = Math.max(1, Number.parseInt(process.env.UV_THREADPOOL_SIZE ?? "", 10) || 4);
+
+/**
  * @file What of a file the torrent already HOLDS, and reading it without
  * asking the swarm for anything.
  *
@@ -212,17 +220,35 @@ export async function readHeldRanges(torrent, fileIndex, ranges, maxBytes, logge
   }
   try {
     const result = ranges.map(([start, end]) => Buffer.allocUnsafeSlow(end - start + 1));
-    for (const [index, span] of pieceSpans) {
+    // SEVERAL PIECES AT ONCE, each written straight into the copy. One after
+    // another, every read from disk waited for this thread's loop on its own,
+    // and the loop runs 0.3-0.7 s late while the swarm delivers 7-14 MB/s: a
+    // 210 MB stretch took 11 s here (Home Assistant 2026-10-12,
+    // torrent-tv/meta#178). As many are in flight as the runtime has threads
+    // for file operations (libuv's pool, `UV_THREADPOOL_SIZE`, four by
+    // default); more would only queue behind them and ahead of everything else
+    // this process reads or writes.
+    const readOne = async ([index, span]) => {
       const pieceStart = index * pieceLength;
       const offset = span.start - pieceStart;
       const length = span.end - span.start + 1;
+      const [only] = span.ranges;
+      // A piece holding one range alone is read into the copy itself; one
+      // shared by several ranges is read once and divided, as before.
+      if (span.ranges.length === 1 && typeof store.getInto === "function") {
+        const from = Math.max(only.absoluteStart, pieceStart);
+        const filled = await store.getInto(index, offset, result[only.rangeIndex].subarray(from - only.absoluteStart, from - only.absoluteStart + length));
+        if (!filled) return false;
+        onRead?.(length);
+        return true;
+      }
       const buffer = await new Promise((resolve, reject) => {
         store.get(index, { offset, length }, (error, value) => {
           if (error) reject(error);
           else resolve(value);
         });
       });
-      if (!buffer || buffer.length !== length) return null;
+      if (!buffer || buffer.length !== length) return false;
       onRead?.(length);
       for (const { rangeIndex, absoluteStart, absoluteEnd } of span.ranges) {
         const from = Math.max(absoluteStart, pieceStart);
@@ -230,8 +256,27 @@ export async function readHeldRanges(torrent, fileIndex, ranges, maxBytes, logge
         const sourceStart = from - span.start;
         result[rangeIndex].set(buffer.subarray(sourceStart, sourceStart + to - from + 1), from - absoluteStart);
       }
-    }
-    return result;
+      return true;
+    };
+    const spans = [...pieceSpans];
+    let next = 0;
+    let whole = true;
+    const reader = async () => {
+      while (whole && next < spans.length) {
+        try {
+          if (!await readOne(spans[next++])) whole = false;
+        } catch (error) {
+          whole = false;
+          throw error;
+        }
+      }
+    };
+    // Every read has returned before the pieces are let go, a failed one too:
+    // a read still in flight would otherwise read a piece nothing holds.
+    const outcomes = await Promise.allSettled(Array.from({ length: Math.min(spans.length, FILE_READS_AT_ONCE) }, reader));
+    const failed = outcomes.find((outcome) => outcome.status === "rejected");
+    if (failed) throw failed.reason;
+    return whole ? result : null;
   } catch (error) {
     logger?.info?.(`held ranges read ${fileIndex} failed: ${error?.message ?? error}`);
     return null;

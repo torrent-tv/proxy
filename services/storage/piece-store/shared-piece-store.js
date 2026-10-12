@@ -1786,6 +1786,47 @@ export class SharedPieceStore {
     write().then(() => callback(null), (error) => callback(error));
   }
 
+  /**
+   * What `get` answers, written into `target` (exactly `length` bytes long)
+   * instead of a buffer of its own, by the same three routes: memory, disk,
+   * whole file. A reader copying a stretch of film into memory it already holds
+   * then needs nothing beside it while several pieces are read at once
+   * (torrent-tv/meta#178). Answers whether `target` was filled.
+   *
+   * @param {number} index
+   * @param {number} offset - Within the piece.
+   * @param {Buffer} target
+   * @returns {Promise<boolean>}
+   */
+  async getInto(index, offset, target) {
+    if (this.#closed) throw new Error("Piece store is closed.");
+    const length = target.length;
+    if (offset < 0 || offset + length > this.#lengthOf(index)) return false;
+    const fromMemory = () => {
+      const resident = this.#buffers.get(index);
+      if (resident === undefined) return false;
+      this.#lru.touch(index);
+      this.#counters.fromMemory += 1;
+      Buffer.from(resident, offset, length).copy(target);
+      return true;
+    };
+    if (fromMemory()) return true;
+    // A spill that is still being written owns the only copy there is.
+    const spill = this.#evicting.get(index);
+    if (spill) await spill.catch(() => undefined);
+    if (fromMemory()) return true;
+    if (this.#disk.has(index)) {
+      const bytesRead = await this.#disk.read(index, target, offset);
+      this.#counters.fromDisk += 1;
+      return bytesRead === length;
+    }
+    const whole = await this.#fromWholeFiles(index);
+    if (!whole || whole.length < offset + length) return false;
+    this.#counters.fromWholeFile += 1;
+    whole.copy(target, 0, offset, offset + length);
+    return true;
+  }
+
   get(index, options, callback) {
     if (typeof options === "function") {
       return this.get(index, undefined, options);

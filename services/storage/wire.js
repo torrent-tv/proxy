@@ -44,6 +44,9 @@ import { availableMemoryBytes } from "./machine-memory.js";
  *   not fit in memory is spilled, so this share decides how much disk is needed.
  * @param {{ held: () => number, allow: (bytes: number) => unknown, root?: string }} [params.wholeFiles] -
  *   Files downloaded whole and kept as files, on the torrent thread as well.
+ * @param {{ held: () => number, root?: string | null }} [params.inputCaches] -
+ *   What FFmpeg's caches of original input hold, and the directory FFmpeg puts
+ *   them in (the segments' disk when none).
  * @param {import("./Diagnostics.js").Diagnostics} [params.diagnostics] - The
  *   evidence. Built where the collectors are, so one object is both registered
  *   here and consulted by them.
@@ -64,6 +67,7 @@ export function wireMachineBudget({
   encodeInputs,
   indexMemory,
   wholeFiles,
+  inputCaches,
   diagnostics,
   diagnosticsRoot = "",
   readFree,
@@ -153,6 +157,25 @@ export function wireMachineBudget({
     });
   }
 
+  // FFMPEG'S CACHE OF WHAT A RUN READ from an original file (`cache:`,
+  // `encode/source-command.js`): a temporary file where FFmpeg puts its own,
+  // as large as what the run has read and at most what it was admitted. Held
+  // while the run lives and given back by nobody else, so it is required in
+  // full and the rest of its disk is divided after it.
+  let inputCachesOn = null;
+  if (typeof inputCaches?.held === "function") {
+    inputCachesOn = inputCaches.root ? deviceOf(inputCaches.root) : segmentsOn;
+    defineDisk(inputCachesOn, inputCaches.root || segmentStore.root);
+    budget.register({
+      name: "encoder input caches",
+      resource: inputCachesOn,
+      held: () => inputCaches.held(),
+      wanted: () => inputCaches.held(),
+      required: () => inputCaches.held(),
+      allow: () => {}
+    });
+  }
+
   let evidenceOn = null;
   if (diagnostics) {
     evidenceOn = diagnosticsRoot ? deviceOf(diagnosticsRoot) : segmentsOn;
@@ -188,6 +211,8 @@ export function wireMachineBudget({
       return budget.revise(resource, because);
     },
     segmentBytes: () => segmentBytes,
+    /** The disk FFmpeg's input caches are counted on, or null when none are. */
+    inputCachesOn,
     diagnostics: diagnostics ?? null,
     describe: () => budget.describe()
   };

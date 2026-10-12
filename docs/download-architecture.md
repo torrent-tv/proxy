@@ -65,7 +65,12 @@ cannot be evicted. Capacity-driven removal follows the published map and announc
 changed availability, causing unfinished media reads and input admission to retry.
 
 The encoder receives complete admitted original-file ranges under its memory
-allowance, through a loopback-only HTTP address owned by its run. Each response
+allowance, through a loopback-only HTTP address owned by its run, read through
+FFmpeg's `cache:` protocol so that a return to bytes already read is not a new
+request: an OpenDML AVI's open goes from its super index to each standard
+index and back, 390 requests on a two-hour film against 3 through the cache.
+The cache's temporary file holds what the run read, at most what it was
+admitted, and is counted on its disk by the budget. Each response
 runs to the end of the retained range the read starts in: FFmpeg 6.1 takes a
 shorter answer for the end of the input. Missing positions return
 503 immediately; reading never waits for the torrent. FFmpeg demuxes the original

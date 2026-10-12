@@ -270,7 +270,15 @@ export function buildOriginalCommand(params) {
   const primary = sourceFor(audioOnly ? "audio" : "video");
   const audio = sourceFor("audio") ?? primary;
   if (!primary) throw new Error("The selected source track is absent from original input.");
-  const url = source => new URL(`/encode-input/${inputToken}/${source.fileIndex}`, baseUrl).href;
+  // READ THROUGH FFMPEG'S CACHE, so a return to bytes already read is not a
+  // new request. An OpenDML AVI's open seeks from its super index in the header
+  // to each standard index and back: on the field's two-hour AVI, 195 indexes
+  // made 390 requests and 636-1243 MB of answers, and the first piece came 4.8 s
+  // after the start against 2.8 s through the cache, which made 3 requests;
+  // the pieces were the same to the byte, on FFmpeg 6.1 and 8.1.2 (Home
+  // Assistant 2026-10-13, torrent-tv/meta#178). The cache's file holds what
+  // FFmpeg read and is counted by the budget (`EncodeRuns.inputCacheBytes`).
+  const url = source => `cache:${new URL(`/encode-input/${inputToken}/${source.fileIndex}`, baseUrl).href}`;
   // The container named the bytes FFmpeg's stream search reads for this much
   // media time; the search is told the same, whatever its own default.
   const openArgs = source => Number.isFinite(source.input.streamSearchSeconds)

@@ -71,7 +71,7 @@ test("original FFmpeg commands retain the audio track and published segment numb
     startIndex: 121, inputToken: 1, baseUrl: "http://127.0.0.1:9090", audioOnly: true,
     audioSeparate: false, transcodeAudio: true, transcodeVideo: false,
     output: {}, videoEncoder: {}, segmentFormat: fmp4Format, segmentDurationSec: 10 });
-  assert.ok(command.args.includes("http://127.0.0.1:9090/encode-input/1/3"));
+  assert.ok(command.args.includes("cache:http://127.0.0.1:9090/encode-input/1/3"));
   assert.ok(command.args.includes("0:a:1?"));
   assert.equal(command.args[command.args.indexOf("-segment_start_number") + 1], "121");
   assert.equal(command.args[command.args.indexOf("-to") + 1], "860.027");

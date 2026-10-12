@@ -322,8 +322,8 @@ test("a stretch's command cuts at every boundary inside it, ends at its end and 
   assert.equal(argument(copied, "-segment_times"), "4,8,12", "interior boundaries and the end, from the stretch's start");
   assert.equal(argument(copied, "-to"), "52.5", "the end on the picture file's own clock");
   assert.equal(argument(copied, "-segment_start_number"), "10");
-  assert.ok(copied.includes("http://127.0.0.1:9090/encode-input/7/0"));
-  assert.ok(copied.includes("http://127.0.0.1:9090/encode-input/7/1"), "the separate soundtrack file is a second input");
+  assert.ok(copied.includes("cache:http://127.0.0.1:9090/encode-input/7/0"));
+  assert.ok(copied.includes("cache:http://127.0.0.1:9090/encode-input/7/1"), "the separate soundtrack file is a second input");
   assert.ok(copied.includes("1:a:2?"));
   assert.ok(copied.at(-1).includes("10r7"));
 

@@ -17,7 +17,9 @@ sample work (encoding) or encoded bytes (copying). Actual output progress
 replaces these initial rates. That rate is the run's processing speed: film
 made over the run's own working time, with the time its input waited for the
 swarm and the time it was stopped taken out (`RunClock`, fed by the stream
-route, which marks each wait of a run's input read). The download is charged
+route, which marks each wait of a run's input read, and by the writer of an
+input piped to the encoder, which marks each wait for the next segment's
+input). The download is charged
 once, by the source service, and not a second time inside the processing rate. Startup is charged once, separately from processing
 throughput, and disappears once actual run progress establishes processing.
 

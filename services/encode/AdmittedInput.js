@@ -99,8 +99,17 @@ export async function admitInput({ sources, reserve, readRanges }) {
   }
 }
 
-/** Respect stdin backpressure and release input on every completion path. */
-export async function writeAdmittedInput(input, stdin, { next = null } = {}) {
+/**
+ * Respect stdin backpressure and release input on every completion path.
+ *
+ * `waiting(true)` and `waiting(false)` bracket each wait for the next input:
+ * the encoder has nothing to read then, and that time is not its work. Counted
+ * as work, a soundtrack copy fed a segment at a time read 0.43x while ffmpeg
+ * used 0.014 s of processor per second of film, and the start forecast charged
+ * the download a second time through it (Home Assistant 2026-10-12,
+ * torrent-tv/meta#178).
+ */
+export async function writeAdmittedInput(input, stdin, { next = null, waiting = null } = {}) {
   if (input?.kind !== "result") throw new TypeError("Only complete input may be written to an encoder.");
   const originSeconds = input.originSeconds;
   const declarations = JSON.stringify(input.tracks.map(input => matroskaTrackIdentity(input.track)));
@@ -137,7 +146,14 @@ export async function writeAdmittedInput(input, stdin, { next = null } = {}) {
       }
       await flush();
       current.release();
-      current = next ? await next() : null;
+      if (next) {
+        waiting?.(true);
+        try {
+          current = await next();
+        } finally {
+          waiting?.(false);
+        }
+      } else current = null;
       includeHeader = false;
     }
     stdin.end();

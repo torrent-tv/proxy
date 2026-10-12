@@ -197,7 +197,11 @@ export class LocalObservations {
    * @param {import("./output/OutputSpec.js").OutputSpec} params.spec
    * @param {ContentDescriptor | null} params.content - What it was encoded from.
    * @param {number | null} params.aloneSpeedX - Seconds of film per second,
-   *   measured with nothing else encoding.
+   *   measured with nothing else encoding and filed as if on a quiet machine
+   *   (`EncodeCost.learnFrom`), the unit the startup prediction it replaces
+   *   is in. Readings kept before torrent-tv/meta#178 were filed as read,
+   *   lower by what the machine was doing; the slowest is used, so they err
+   *   toward the viewer until newer ones replace them.
    * @param {{ averageKbps: number, peakKbps: number } | null} params.segmentKbps
    * @returns {void}
    */

@@ -572,7 +572,8 @@ export class HostLoad {
       ` over=${share.elapsedSec.toFixed(1)}s` +
       // What the offer will multiply a prediction by, in the same line as the
       // readings it comes from.
-      ` available=${asPercent(this.hostAvailability.share)} free=${asPercent(free)}` + late
+      ` available=${asPercent(this.hostAvailability.share)} for-encoders=${asPercent(this.hostAvailability.forEncoders)}` +
+      ` free=${asPercent(free)}` + late
     );
   }
 

@@ -1,4 +1,4 @@
-## Unreleased
+## 2.97.19
 
 - **Fix**: An encoder fed one segment at a time no longer counts its waits for the next segment as work. A soundtrack copy read 0.43x while ffmpeg used 0.014 s of processor per second of film, because the time it waited for each next segment's input — bytes off the swarm, memory, its turn — was taken for processing, and the start forecast charged the download a second time through that rate (10633 s of delay by the soundtrack's last segment on a cold AVI). Those waits are now taken out of the encoder's working time, as the waits of an input read from the file already were (#ttv-178).
 

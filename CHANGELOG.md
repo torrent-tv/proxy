@@ -1,4 +1,4 @@
-## Unreleased
+## 2.97.9
 
 - **Fix**: The torrent thread's price of a downloaded byte is measured and said in the log, but neither the download limit nor the quality offer uses it until it is established. On 2.97.8 it carried the thread's other work — 1287, 217 and 146 ms per MB at an AVI's start, median 263 against 12.5 on an MKV — and held the AVI's download at its own film rate while its cold start took 56.0 s against 44.9 s on 2.97.7. The download is unlimited again and the offer counts no torrent cost, for a control run (#ttv-178).
 

@@ -35,7 +35,7 @@ test("metadata parsing never becomes this process's base draw", async t => {
   assert.ok(Math.abs(load.baseDraw - 0.01) < 1e-9, `${load.baseDraw}`);
 });
 
-test("the price of a downloaded byte is the torrent thread's own time, its base draw off, taken while an encoder runs", async t => {
+test("the torrent thread's price of a downloaded byte, its base draw off, is taken while an encoder runs and used by nothing", async t => {
   let now = 0, threadCpu = 0, downloaded = 0, processCpu = 0;
   t.mock.method(Date, "now", () => now);
   const load = new HostLoad({
@@ -52,15 +52,17 @@ test("the price of a downloaded byte is the torrent thread's own time, its base 
     now += 1000; threadCpu += 0.04;
     await load.reportHostLoad();
   }
-  assert.equal(load.observedTorrentCostPerMegabyte, null, "an interval with nothing downloaded is never a price");
+  assert.equal(load.torrentThreadCostPerMegabyte, null, "an interval with nothing downloaded is never a price");
   // 10 MB in a second, the thread 0.44 s of one core, the process 100 s more.
   now += 1000; threadCpu += 0.44; downloaded += 10e6; processCpu += 100;
   await load.reportHostLoad();
-  assert.ok(Math.abs(load.observedTorrentCostPerMegabyte - 0.01) < 1e-9, `${load.observedTorrentCostPerMegabyte}`);
+  assert.ok(Math.abs(load.torrentThreadCostPerMegabyte - 0.01) < 1e-9, `${load.torrentThreadCostPerMegabyte}`);
+  // Until a price is established nothing reads this one (meta#178, control run).
+  assert.equal(load.observedTorrentCostPerMegabyte, null);
   // A torrent leaving the pool takes its bytes out of the total: no price.
   now += 1000; threadCpu += 5; downloaded -= 5e6;
   await load.reportHostLoad();
-  assert.ok(Math.abs(load.observedTorrentCostPerMegabyte - 0.01) < 1e-9, `${load.observedTorrentCostPerMegabyte}`);
+  assert.ok(Math.abs(load.torrentThreadCostPerMegabyte - 0.01) < 1e-9, `${load.torrentThreadCostPerMegabyte}`);
 });
 
 test("a process using one core of four for a second reports a quarter of the machine", () => {

@@ -71,12 +71,23 @@ export class HostLoad {
   fileLengthByKey = new Map();
 
   /**
-   * The machine's seconds per megabyte downloaded, spent by the torrent thread
-   * (its own processor time divided by the cores, its base draw taken off),
-   * once measured. The torrent's work on other threads — libuv's pool, the main
-   * thread — is not in it. Read by the processor share and the quality offer.
+   * The machine's seconds per megabyte downloaded, as the processor share and
+   * the quality offer read it. Null: no established price, so the download is
+   * not limited and the offer counts no torrent cost.
+   *
+   * Not set from the torrent thread's reading below. On 2.97.8 that reading
+   * carried the thread's other work — 1287, 217 and 146 ms per MB at the AVI's
+   * start, median 263 against 12.5 on the MKV — and held the AVI download at
+   * its own film rate; until the price is established it is kept for the log
+   * only (torrent-tv/meta#178, control run).
    */
   observedTorrentCostPerMegabyte = null;
+
+  /**
+   * The torrent thread's processor per downloaded megabyte, its base draw taken
+   * off: a reading for the log, used by nothing.
+   */
+  torrentThreadCostPerMegabyte = null;
 
   /** @type {number[]} Recent readings behind that median. */
   #torrentCostReadings = [];
@@ -242,14 +253,15 @@ export class HostLoad {
     const readings = [...this.#torrentCostReadings, costPerMegabyte].slice(-READINGS_KEPT);
     this.#torrentCostReadings = readings;
     const median = medianOf(readings);
-    if (!movedBeyondScatter(this.observedTorrentCostPerMegabyte, median, readings)) {
+    if (!movedBeyondScatter(this.torrentThreadCostPerMegabyte, median, readings)) {
       return;
     }
-    this.observedTorrentCostPerMegabyte = median;
+    this.torrentThreadCostPerMegabyte = median;
     logger.info(
       `host-load: the torrent thread costs ${(median * 1000).toFixed(1)}ms of the machine per downloaded MB ` +
       `(median of ${readings.length}, latest ${(costPerMegabyte * 1000).toFixed(1)}ms over ${megabytes.toFixed(1)}MB, ` +
-      `its base draw ${((this.#observedThreadBaseDraw ?? 0) * 100).toFixed(1)}% of the machine taken off)`
+      `its base draw ${((this.#observedThreadBaseDraw ?? 0) * 100).toFixed(1)}% of the machine taken off; ` +
+      `for the log only, not the download limit or the quality offer)`
     );
   }
 
@@ -650,9 +662,8 @@ export class HostLoad {
    *
    * A viewer consumes the file at its own byte rate, and every one of those
    * bytes is downloaded, verified and pushed by this process. Priced per
-   * megabyte by the torrent thread's own processor time, which no encoder's
-   * reading contains, so the two do not contain each other; the torrent's
-   * work on other threads is not in it. Zero while either term is unmeasured
+   * megabyte by `observedTorrentCostPerMegabyte`, which is unset while no price
+   * is established. Zero while either term is unmeasured
    * — a guess here would refuse rungs on arithmetic nobody performed.
    *
    * @param {HlsSession} session

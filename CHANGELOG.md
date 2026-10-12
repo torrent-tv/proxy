@@ -1,5 +1,6 @@
 ## Unreleased
 
+- **Chore**: 2.97.15's entry said a copy for an encoder reads four pieces at once unless `UV_THREADPOOL_SIZE` says otherwise; the proxy sets 64 where the deployment states none, so a copy reads up to 64 at once (#ttv-178).
 - **Chore**: A waiting viewer's start says what holds it — which piece, its production or its delivery, when against the media before it, and the rates the forecast used — and a budget revision says how long each resource took to read and who asked first (#ttv-178).
 - **Fix**: A cold film's first encoder input no longer waits seconds for memory behind reads that cannot succeed. On a cold two-hour AVI the input waited 5.8 s: when the index's last piece arrived, every one of the soundtrack's 1943 segments was read and refused the same 31.5 MB table in turn, holding the main thread for 3.3 s, and the revision that would give the memory then waited for the disks to be read and the evidence to be measured; the swarm meanwhile had no film bytes to fetch. Now one refusal of memory answers the other requests of the same statement until memory changes, an output whose index or table is not there is asked once per map, and a claimant short of memory has memory alone read (#ttv-178).
 

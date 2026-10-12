@@ -2,9 +2,11 @@ import { pieceStoreOf } from "../piece-store-of.js";
 
 /**
  * How many pieces one read for a reader asks of the store at once: the threads
- * libuv runs file operations on (`UV_THREADPOOL_SIZE`, four unless set). A
- * piece from disk is three of their operations, and more at once would only
- * wait behind them (torrent-tv/meta#178).
+ * libuv runs file operations on (`UV_THREADPOOL_SIZE`). The proxy's entry point
+ * sets 64 where the deployment states none (`bin/thread-pool.js`), and libuv's
+ * own default of four applies only to code run without it, such as the
+ * checks. A piece from disk is three of their operations, and more at once
+ * would only wait behind them (torrent-tv/meta#178).
  */
 const FILE_READS_AT_ONCE = Math.max(1, Number.parseInt(process.env.UV_THREADPOOL_SIZE ?? "", 10) || 4);
 
@@ -225,8 +227,8 @@ export async function readHeldRanges(torrent, fileIndex, ranges, maxBytes, logge
     // and the loop runs 0.3-0.7 s late while the swarm delivers 7-14 MB/s: a
     // 210 MB stretch took 11 s here (Home Assistant 2026-10-12,
     // torrent-tv/meta#178). As many are in flight as the runtime has threads
-    // for file operations (libuv's pool, `UV_THREADPOOL_SIZE`, four by
-    // default); more would only queue behind them and ahead of everything else
+    // for file operations (libuv's pool, `UV_THREADPOOL_SIZE`, 64 as the proxy
+    // starts); more would only queue behind them and ahead of everything else
     // this process reads or writes.
     const readOne = async ([index, span]) => {
       const pieceStart = index * pieceLength;

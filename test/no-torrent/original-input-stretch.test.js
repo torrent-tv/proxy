@@ -46,7 +46,8 @@ const resolve = async (_output, from, to) => ({ kind: "result", sources: [{ sour
  * EncodeInputs over that file. The copy moves one byte per millisecond on a
  * clock the read itself advances, so the measured copy rate is exact.
  */
-function inputsOver({ held = () => [[0, 999], HEADER], allowance = () => 10_000, capacity = () => null, urgent = () => true } = {}) {
+function inputsOver({ held = () => [[0, 999], HEADER], allowance = () => 10_000, capacity = () => null, urgent = () => true,
+  deadlineOf = () => null, firstPieceIn = () => null } = {}) {
   const clock = { at: 0 };
   const announced = [];
   const costs = new RunCosts();
@@ -60,7 +61,7 @@ function inputsOver({ held = () => [[0, 999], HEADER], allowance = () => 10_000,
       return buffers;
     },
     reviseBudget: async () => inputs.allow(allowance()),
-    capacity, urgent, now: () => clock.at,
+    capacity, urgent, deadlineOf, firstPieceIn, now: () => clock.at,
     changed: (_output, result) => announced.push(result), failed: (_output, error) => { throw error; }
   });
   inputs.costs = costs;
@@ -432,4 +433,34 @@ test("the line that says an input is ready says where its preparation spent its 
   input.release();
   const ready = lines.find(line => line.includes(": ready #0..#0"));
   assert.match(ready, /asked 11ms ago over 1 attempt\(s\): 1 resolution\(s\) 10ms \(1 file read\(s\): queued 7ms, reading 3ms\), held ranges 0ms, budget 1ms$/);
+});
+
+test("a piece the viewer reaches soon gets a stretch whose copy leaves room to serve it, never less than the piece itself", async () => {
+  let deadline = null, firstPiece = null;
+  const { inputs } = inputsOver({ deadlineOf: () => deadline, firstPieceIn: () => firstPiece });
+  await measured(inputs);
+  // Unknown terms: one open's worth, 100 bytes.
+  let input = await admitted(inputs, 0, 50);
+  assert.deepEqual([input.from, input.to], [0, 8]);
+  input.release();
+  // Needed in 0.07 s, served 0.02 s after the run starts: 50 ms of copy at 1 byte/ms.
+  deadline = 0.07; firstPiece = 0.02;
+  input = await admitted(inputs, 0, 50);
+  assert.deepEqual([input.from, input.to, input.bytes], [0, 3, 50]);
+  input.release();
+  // No room at all: the least that makes the piece.
+  deadline = 0.01;
+  input = await admitted(inputs, 0, 50);
+  assert.deepEqual([input.from, input.to], [0, 0]);
+  input.release();
+});
+
+test("an input read from the keyframe before holds the piece it is for, however short the deadline", async () => {
+  const { inputs } = inputsOver({ deadlineOf: () => 0, firstPieceIn: () => 1 });
+  await measured(inputs);
+  assert.equal(inputs.take(output, 4, 50, 5), null);
+  for (let turn = 0; turn < 5; turn++) await setImmediate();
+  const input = inputs.take(output, 4, 50, 5);
+  assert.deepEqual([input.from, input.to], [4, 5], "#4 alone would not make #5");
+  input.release();
 });

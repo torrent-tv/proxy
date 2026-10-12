@@ -232,6 +232,10 @@ export class EncodeRun {
    *   encoder itself names it on its own channel, and answers with the name that
    *   piece is served under — because making it servable is a rename, and only
    *   whoever owns the disk can perform one.
+   * @param {boolean} [params.publishesAlone] - Its pieces take nothing from the
+   *   file closed after them (a re-encoded picture, or sound served on its own),
+   *   so each is published on its own line once the completeness check proves it
+   *   whole, instead of when the next file closes (torrent-tv/meta#178).
    * @param {(name: string) => void} [params.onTail] - Called with the working
    *   name of a file this run closed but will not publish: past its last cut, or
    *   flushed when it was stopped. It begins with the next keyframe.
@@ -271,6 +275,7 @@ export class EncodeRun {
     onEnded,
     onSpeedMeasured,
     onClosed,
+    publishesAlone = false,
     onTail,
     onProgress,
     onProduced,
@@ -303,6 +308,7 @@ export class EncodeRun {
     // proof it is whole; nothing else here can prove that.
     this.onClosed = typeof onClosed === "function" ? onClosed : (name) => name;
     this.onTail = typeof onTail === "function" ? onTail : () => {};
+    this.publishesAlone = publishesAlone === true;
     this.lastSegmentIndex = typeof lastSegmentIndex === "function" ? lastSegmentIndex : () => null;
     this.inputUnavailable = typeof inputUnavailable === "function" ? inputUnavailable : () => false;
     this.argsDescribed = argsDescribed;
@@ -653,19 +659,29 @@ export class EncodeRun {
         this.#pendingClosed = null;
         continue;
       }
+      // A PIECE THAT NEEDS NOTHING AFTER IT does not wait for the next file:
+      // the completeness check reads its own bytes and decides whether it
+      // reached its cut. Waiting for the next file cost the viewer that file's
+      // whole encode — 5.6 s after a seek on the field's AVI, where the picture
+      // stood 13.2 s (torrent-tv/meta#178). One it cannot prove yet waits as
+      // before; the file after it publishes it or the stop judges it.
+      if (this.publishesAlone && this.#publishClosed(name, null, { tentative: true })) {
+        this.#pendingClosed = null;
+        continue;
+      }
       this.#pendingClosed = name;
     }
   }
 
-  #publishClosed(name, following = null, { quiet = false } = {}) {
-      this.#measureSpeed();
+  #publishClosed(name, following = null, { quiet = false, tentative = false } = {}) {
+      if (!tentative) this.#measureSpeed();
       // ITS SERVED NAME, which is what whoever owns the disk gives it in answer.
       // ffmpeg writes a piece under a working name and reports that; the piece
       // becomes servable by being renamed, and everything below works in the
       // name a request can actually ask for.
       let served;
       try {
-        served = this.onClosed(name, following, this.#closedTimings.get(name) ?? null);
+        served = this.onClosed(name, following, this.#closedTimings.get(name) ?? null, { tentative });
       } catch (error) {
         if (quiet) {
           // A piece closed before our stop that cannot be proved whole is not
@@ -684,10 +700,13 @@ export class EncodeRun {
         this.#signal("SIGTERM");
         return false;
       } finally {
-        this.#closedTimings.delete(name);
+        // A piece not proved whole on its own keeps its timing for the file
+        // after it.
+        if (!tentative || served) this.#closedTimings.delete(name);
       }
 
       if (!served) return false;
+      if (tentative) this.#measureSpeed();
       if (!this.#stopping) {
         this.#provenName = served;
       }

@@ -362,3 +362,50 @@ test("the file a run closes past its last cut is handed over as a tail and not p
   assert.deepEqual(closed, [["making-0-00007.mp4", "making-0-00008.mp4"]]);
   assert.deepEqual(tails, ["making-0-00008.mp4"]);
 });
+
+test("a piece that needs nothing after it is published on its own line once proved whole, and only once", () => {
+  const process_ = new FakeProcess();
+  process_.stdio = [null, null, null, new EventEmitter()];
+  const calls = [];
+  // The field case of 2026-10-12: the AVI's run from #27 after a seek back to
+  // 100 s; #27 is proved whole by its own bytes, #28 is not yet.
+  const provedOnItsOwn = new Set(["making-27-00027.mp4"]);
+  const run = new EncodeRun({
+    address: "video", encoder: new SoftwareEncoder(), from: 27, to: 30,
+    buildArgs: () => [], spawn: () => process_, logger: silentLogger, publishesAlone: true,
+    indexOfName: name => Number(name.match(/(\d+)\.mp4$/)[1]),
+    onClosed: (name, following, _timing, { tentative = false } = {}) => {
+      calls.push([name, following, tentative]);
+      return tentative && !provedOnItsOwn.has(name) ? null : name;
+    }
+  });
+  process_.stdio[3].emit("data", "making-27-00027.mp4,108.000000,112.000000\n");
+  assert.deepEqual(run.produced, [27], "published on its own line");
+  process_.stdio[3].emit("data", "making-27-00028.mp4,112.000000,116.000000\n");
+  assert.deepEqual(run.produced, [27], "#28 is not proved on its own and waits");
+  process_.stdio[3].emit("data", "making-27-00029.mp4,116.000000,120.000000\n");
+  assert.deepEqual(run.produced, [27, 28], "the file after it publishes #28");
+  assert.deepEqual(calls.slice(0, 4), [
+    ["making-27-00027.mp4", null, true],
+    ["making-27-00028.mp4", null, true],
+    ["making-27-00028.mp4", "making-27-00029.mp4", false],
+    ["making-27-00029.mp4", null, true]
+  ]);
+  assert.equal(calls.filter(([name]) => name === "making-27-00027.mp4").length, 1, "#27 is never published again");
+});
+
+test("a run whose pieces take material from the next file still waits for it", () => {
+  const process_ = new FakeProcess();
+  process_.stdio = [null, null, null, new EventEmitter()];
+  const calls = [];
+  const run = new EncodeRun({
+    address: "muxed", encoder: new SoftwareEncoder(), from: 5, to: 6,
+    buildArgs: () => [], spawn: () => process_, logger: silentLogger,
+    indexOfName: name => Number(name.match(/(\d+)\.mp4$/)[1]),
+    onClosed: (name, following, _timing, options) => { calls.push([name, following, options?.tentative ?? false]); return name; }
+  });
+  process_.stdio[3].emit("data", "making-5-00005.mp4,40.0,50.0\n");
+  assert.deepEqual(run.produced, []);
+  process_.stdio[3].emit("data", "making-5-00006.mp4,50.0,60.0\n");
+  assert.deepEqual(calls, [["making-5-00005.mp4", "making-5-00006.mp4", false]]);
+});

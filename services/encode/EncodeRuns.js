@@ -386,7 +386,7 @@ export class EncodeRuns {
    * @param {string | null} [following] - The working name of the file the muxer closed after it.
    * @returns {object | null | false}
    */
-  #wholeClosedPiece(session, name, index, admitted = false, bytes = null, run = null, timing = null, following = null) {
+  #wholeClosedPiece(session, name, index, admitted = false, bytes = null, run = null, timing = null, following = null, { tentative = false } = {}) {
 
     const format = session.segmentFormat;
     if (!format?.readMediaRanges || !Number.isInteger(index) || index < 0) {
@@ -427,6 +427,9 @@ export class EncodeRuns {
         if (mediaRanges && run.cutShiftSeconds !== null) mediaRanges.cutShiftSeconds = run.cutShiftSeconds;
       }
       const { whole, throughSeconds, reason } = judgePiece(format, mediaRanges, cut, interval);
+      // A piece tried before the next file closed is judged again then; its
+      // refusal now is not a fault and is not said.
+      if (!whole && tentative) return false;
       if (!whole) {
         this.#host.logger.warn(
           `encode: not publishing piece ${index} of ${address.slice(0, 60)}: ` +
@@ -460,6 +463,7 @@ export class EncodeRuns {
             continue;
           }
           if (!judged.whole) {
+            if (tentative) return false;
             this.#host.logger.warn(`encode: not publishing piece ${index} of ${address}: ${judged.reason}`);
             return false;
           }
@@ -615,6 +619,18 @@ export class EncodeRuns {
       byOutput.set(address, [...(byOutput.get(address) ?? []), session]);
     }
     return byOutput;
+  }
+
+  /**
+   * Whether a piece of this output takes nothing from the file closed after it:
+   * no sound moved into a piece of the picture, and no open-GOP leading
+   * pictures to read from it — a re-encoded picture, or sound served as its own
+   * output. Such a piece is published on its own line (torrent-tv/meta#178).
+   */
+  publishesAlone(session) {
+    return (session.spec.transcodesVideo || session.spec.carries === "audio-only") &&
+      !(session.segmentFormat?.id === "fmp4" && session.spec.audio && session.spec.carries !== "audio-only" &&
+        !this.#host.servesAudioSeparately(session));
   }
 
   /** Whether a run copies the picture from the original file it reads. */
@@ -1082,7 +1098,12 @@ export class EncodeRuns {
       // Why this encoder exists, recorded with its argument list. It used to be
       // handed to a separate `start` call; there is no separate call now.
       because,
-      onClosed: (name, following, timing) => {
+      // ITS PIECES TAKE NOTHING FROM THE FILE CLOSED AFTER THEM: no sound moved
+      // into a piece of the picture, and no open-GOP leading pictures to read
+      // from it — a re-encoded picture, or sound served as its own output. Such
+      // a piece is published on its own line (torrent-tv/meta#178).
+      publishesAlone: this.publishesAlone(session),
+      onClosed: (name, following, timing, { tentative = false } = {}) => {
 
         const index = session.segmentFormat.segmentIndexFromName(
           session.segmentFormat.servedNameOf?.(name) ?? name);
@@ -1110,7 +1131,9 @@ export class EncodeRuns {
             throw error;
           }
         }
-        const mediaRanges = this.#wholeClosedPiece(session, name, index, admittedInput, bytes, run, timing, following);
+        const mediaRanges = this.#wholeClosedPiece(session, name, index, admittedInput, bytes, run, timing, following, { tentative });
+        // Tried on its own line and not proved whole: it waits for the next file.
+        if (mediaRanges === false && tentative) return null;
         if (mediaRanges === false) throw Object.assign(new Error(`Closed piece #${index} has incomplete media.`),
           { code: "ERR_INCOMPLETE_MEDIA" });
         const published = this.#host.segmentFiles.publish(address, name, session.segmentFormat, { mediaRanges, bytes });

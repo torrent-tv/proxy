@@ -1,4 +1,4 @@
-## Unreleased
+## 2.97.18
 
 - **Fix**: A cold film's first bytes are asked of the swarm as soon as they are known, not after the whole film has been worked out (broken in 2.97.17). The download map was published only once its pass had worked out what every piece of the film reads; with the main thread given back after each piece, that pass took 14.6 s on a cold two-hour AVI, and the swarm fetched nothing for 17.5 s while the encoder waited for its next piece and the start forecast read the download as 0.00 MB/s. What a pass has resolved is now published before it works out a piece of lower priority (#ttv-178).
 - **Fix**: An AVI with an OpenDML index no longer looks for the legacy `idx1`. Finding it read the chunk after the first `movi`, where the first RIFF ends: on a cold two-hour AVI that was a piece of its own off the swarm, and the index's own piece was asked for 4.4 s later than it could have been. FFmpeg reads `idx1` only when no OpenDML index loads, and so does the proxy now (#ttv-178).

@@ -899,7 +899,7 @@ export class EncodeRuns {
     const mayReach = this.#inputFailures.boundFor(session.outputKey, startIndex,
       Number.isInteger(ordered?.to) && ordered.to >= startIndex ? ordered.to
         : segmentCount > startIndex ? segmentCount - 1 : startIndex);
-    const admittedInput = this.#host.encodeInputs?.take(session, inputStart, mayReach) ?? null;
+    const admittedInput = this.#host.encodeInputs?.take(session, inputStart, mayReach, startIndex) ?? null;
     if (!admittedInput) return null;
     const inputEnd = admittedInput.original ? admittedInput.to : startIndex;
     // The stretch is part of an original input's identity: two stretches from

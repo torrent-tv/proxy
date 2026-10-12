@@ -50,11 +50,12 @@ export class EncodeInputs {
   #failed;
   #capacity;
   #urgent;
+  #rankAt;
   #log;
   #now;
 
   constructor({ resolve, readRanges, heldRanges = null, reviseBudget, changed, failed, capacity = () => null, urgent = () => true,
-    openOf = () => null, log = () => {}, now = Date.now }) {
+    rankAt = () => null, openOf = () => null, log = () => {}, now = Date.now }) {
     this.#openOf = openOf;
     this.#resolve = resolve;
     this.#read = readRanges;
@@ -64,6 +65,7 @@ export class EncodeInputs {
     this.#failed = failed;
     this.#capacity = capacity;
     this.#urgent = urgent;
+    this.#rankAt = rankAt;
     this.#log = log;
     this.#now = now;
   }
@@ -71,12 +73,20 @@ export class EncodeInputs {
   /**
    * One line when a request's state changes, so a wait that never ends names
    * what it waits for. `detail` is said with it and does not count as a change.
+   *
+   * It names the piece the input is prepared FOR and that piece's rank in the
+   * output's map: an input read from the keyframe before starts one piece
+   * early, and its own first piece would understate how urgently it is wanted
+   * (torrent-tv/meta#178).
    */
   #note(request, state, detail = "") {
     if (request.noted === state) return;
     request.noted = state;
+    const serves = request.serves ?? request.from;
+    const rank = this.#rankAt(request.output, serves);
     this.#log(`encode input #${request.from}..#${request.to} of ${request.output.outputKey ?? request.output.id}: ${state}` +
-      ` (held ${this.#held} of ${this.#allowed} allowed)${detail}`);
+      ` (held ${this.#held} of ${this.#allowed} allowed; for #${serves}` +
+      `${rank ? `, rank ${rank.rank} of ${rank.topRank}` : ""})${detail}`);
   }
 
   /** The container's statement of an interval, its time added to the request's account. */
@@ -183,11 +193,14 @@ export class EncodeInputs {
    * `to` is the last number the run may reach. A packet input is prepared for
    * `from` alone; an original input for the longest stretch from `from` that
    * is present, fits memory and copies no longer than an open of that input.
-   * The answer carries the stretch it holds as `from` and `to`.
+   * The answer carries the stretch it holds as `from` and `to`. `serves` is
+   * the piece the run is started for, which is `from` unless the input is read
+   * from the keyframe before.
    */
-  take(output, from, to) {
+  take(output, from, to, serves = from) {
     const key = keyOf(output, from);
     let existing = this.#requests.get(key);
+    if (existing) existing.serves = serves;
     if (existing && existing.to !== to) {
       // The plan's bound for this start moved. A copy already made beyond it
       // holds the shorter stretch whole, so the run is commanded over its
@@ -203,7 +216,7 @@ export class EncodeInputs {
       return existing.result;
     }
     if (existing?.pending || existing?.revision === this.#revision || existing?.result?.kind === "terminal") return null;
-    const request = existing ?? { output, from, to, key };
+    const request = existing ?? { output, from, to, key, serves };
     this.#requests.set(key, request);
     this.#prepare(request);
     return null;

@@ -162,3 +162,20 @@ test("nonurgent memory shortage can become a terminal reason when that segment b
   await setImmediate();
   assert.equal(inputs.failureOf(output).reason, "source-input-exceeds-memory-capacity");
 });
+
+test("an input's state names the piece it is prepared for and that piece's rank, not its own first piece", async () => {
+  const lines = [];
+  const asked = [];
+  const inputs = new EncodeInputs({
+    resolve: async () => ({ kind: "needs-bytes" }),
+    readRanges: async () => null, reviseBudget: async () => {},
+    rankAt: (_output, index) => { asked.push(index); return { rank: 2, topRank: 3 }; },
+    log: line => lines.push(line),
+    changed: () => {}, failed: (_output, error) => { throw error; }
+  });
+  // Read from the keyframe before: the input starts at #4 for the run at #5.
+  inputs.take(output, 4, 9, 5);
+  await setImmediate();
+  assert.deepEqual(asked, [5]);
+  assert.match(lines.at(-1), /encode input #4\.\.#9 of output: needs-bytes \(held 0 of 0 allowed; for #5, rank 2 of 3\)/);
+});

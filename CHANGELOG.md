@@ -1,3 +1,7 @@
+## Unreleased
+
+- **Fix**: A cold film starts as soon as its whole map is worked out, not some 20 s later. The start forecast plans the whole film and needs the bytes every piece reads, which the download map's first pass works out; handed the main thread back after every one of its 4000 zones (2.97.17), that pass took 14.7 s and 22 s of wall time on a cold two-hour AVI for about 4 s of its own work, and the forecast said the input was unavailable all along. The pass now shares the thread in equal turns, handing it back once it has run as long as the rest of the thread took in its own last turn. Handing back after every zone did not shorten FFmpeg's first open, which took 8.2 s held in one stretch and 7.8-8.2 s handed back (#ttv-178).
+
 ## 2.97.19
 
 - **Fix**: An encoder fed one segment at a time no longer counts its waits for the next segment as work. A soundtrack copy read 0.43x while ffmpeg used 0.014 s of processor per second of film, because the time it waited for each next segment's input — bytes off the swarm, memory, its turn — was taken for processing, and the start forecast charged the download a second time through that rate (10633 s of delay by the soundtrack's last segment on a cold AVI). Those waits are now taken out of the encoder's working time, as the waits of an input read from the file already were (#ttv-178).

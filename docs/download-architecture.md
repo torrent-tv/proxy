@@ -34,8 +34,10 @@ first pass over a film works out thousands of them. Before that pass works out
 a zone of a lower priority than any before it, what it has resolved is
 published, with the zones still retained for what it has not reached; the
 bytes the swarm is to fetch first never wait for the far end of the film. A
-pass over zones already worked out publishes once, at its end
-(torrent-tv/meta#178).
+pass over zones already worked out publishes once, at its end. The start
+forecast needs the whole pass, so the pass shares the main thread in equal
+turns (`utils/take-turns.js`): it hands the thread back once it has run as
+long as the rest of the thread took in its own last turn (torrent-tv/meta#178).
 
 WebTorrent chooses peers, protocol blocks, request capacity and reassignment.
 The proxy does not replace its methods. Withdrawn selections cancel obsolete

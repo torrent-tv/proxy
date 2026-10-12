@@ -79,6 +79,7 @@ import { readHostFingerprint } from "./services/encode/fingerprint.js";
 import { measureStartAndStop } from "./services/encode/start-stop-cost.js";
 import { benchmarkAudio } from "./services/encode/audio-calibration.js";
 import { logger } from "./utils/logger.js";
+import { takeTurns } from "./utils/take-turns.js";
 import { completedFilesRoot } from "./services/storage/files/CompletedFiles.js";
 import { startupCpuProfile } from "./services/storage/cpu-profile.js";
 import { startProcessorReport } from "./services/storage/processor-report.js";
@@ -532,6 +533,7 @@ export async function startProxyServer({
       // answers; asking every segment held the main thread for 3.3 s on a cold
       // two-hour AVI (torrent-tv/meta#178).
       const waiting = new Set();
+      const turn = takeTurns();
       for (const zone of demands) {
         if (!map.isCurrent()) return [];
         // WHAT A SEGMENT READS IS WORKED OUT ONCE, not on every publication: its
@@ -571,14 +573,14 @@ export async function startProxyServer({
               value = new SegmentInputs({ index, tracks: wanted }).forInterval({ ...interval, mode: track => modes.get(track) });
             }
           } catch { value = null; }
-          // A zone worked out gives the thread back before the next: worked out
-          // in one stretch, the first pass over a film's 4000 zones held the main
-          // thread 5-7 s while FFmpeg's first open waited for its answers. What
-          // was worked out is kept, so a pass a newer map ends is not lost
+          // The pass shares the thread in equal turns (`takeTurns`): in one
+          // stretch the first pass over a film's 4000 zones held the main thread
+          // for all of its work, and handed back after every zone it took
+          // 14.7-22 s while the start forecast waited for it. What was worked
+          // out is kept, so a pass a newer map ends is not lost
           // (torrent-tv/meta#178).
           if (value?.kind === "result") segmentSourceRanges.set(rangesKey, value.ranges);
-          await new Promise(resolve => setImmediate(resolve));
-          if (!map.isCurrent()) return [];
+          if (await turn() && !map.isCurrent()) return [];
           if (value?.kind === "result") {
             convert(value.ranges);
             continue;

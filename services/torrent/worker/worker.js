@@ -101,6 +101,14 @@ const readsById = new Map();
 const openReads = new Map();
 
 /**
+ * Bytes this thread has handed to readers — encoder inputs, container reads and
+ * `/stream` — across every torrent. Said with the torrent totals so that the
+ * thread's processor can be set against each kind of work it does, not only
+ * against the bytes it downloads (torrent-tv/meta#178).
+ */
+let servedBytes = 0;
+
+/**
  * Shorthand for this file. The same path as `logger.info` anywhere else in the
  * thread — kept only because it reads better at the hundred call sites here.
  *
@@ -261,6 +269,7 @@ async function streamRange({ id, sourceKey, fileIndex, start, end }) {
         fragment.release();
         break;
       }
+      servedBytes += fragment.length;
       // One fragment in flight at a time. Each one holds a piece pinned, and
       // the store guarantees only two resident pieces at its smallest budget —
       // holding two pins while asking for a third would deadlock it against
@@ -423,7 +432,7 @@ async function runCommand(command, params, id) {
       // bytes, so the price of a downloaded byte is taken over one interval
       // whether or not anything encodes (torrent-tv/meta#178).
       const usage = process.threadCpuUsage();
-      return { downloaded, uploaded, threadCpuSeconds: (usage.user + usage.system) / 1e6 };
+      return { downloaded, uploaded, served: servedBytes, threadCpuSeconds: (usage.user + usage.system) / 1e6 };
     }
 
 
@@ -521,6 +530,7 @@ async function runCommand(command, params, id) {
       const torrent = isUsableTorrentHandle(known) ? known : null;
       const bytes = await readWhileInUse(openReads, id, torrent, params.fileIndex,
         () => readHeldBytes(torrent, params.fileIndex, params.start, params.end, logger));
+      servedBytes += bytes?.length ?? 0;
       return { bytes };
     }
 
@@ -529,6 +539,7 @@ async function runCommand(command, params, id) {
       const torrent = isUsableTorrentHandle(known) ? known : null;
       const buffers = await readWhileInUse(openReads, id, torrent, params.fileIndex,
         () => readHeldRanges(torrent, params.fileIndex, params.ranges, params.maxBytes, logger));
+      for (const buffer of buffers ?? []) servedBytes += buffer?.length ?? 0;
       return { buffers };
     }
 

@@ -1,4 +1,4 @@
-## Unreleased
+## 2.97.21
 
 - **Fix**: An encoder reading an original file opens in a fraction of the time. FFmpeg read through the input route alone, so every return to bytes it had already read was a new request: an OpenDML AVI's open goes from its super index in the header to each standard index and back, and on the field's two-hour AVI its 195 indexes made 390 requests and 636-1243 MB of answers, each waiting for the main thread — 7.8-13.7 s for a cold start's first open. Read through FFmpeg's `cache:` protocol the same open makes 3 requests: on Home Assistant's FFmpeg 8.1.2 the first piece came after 2.8 s against 4.8 s with nothing else running, and the pieces were the same to the byte, on FFmpeg 6.1 as well. The cache's temporary file holds at most what the run was admitted and is counted by the budget on its disk (#ttv-178).
 

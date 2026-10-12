@@ -19,6 +19,7 @@ import { pieceStoreOf } from "./piece-store-of.js";
 import { demandProgress } from "./demand-progress.js";
 import { Urgency, urgencyName } from "./demand/index.js";
 import { demandFor, firstClassStatement, forgetTorrent, reconcileAll, hasUnmetDemand } from "./download/registry.js";
+import { applyDownloadRate } from "./download/throttle.js";
 import { withdrawClaim } from "./download/withdraw-claim.js";
 import { deadlineOfMapZone, levelOfMapZone, priorityOfMapZone } from "./map-zones.js";
 import { deriveSourceKey } from "../../utils/torrent-source-key.js";
@@ -1273,7 +1274,8 @@ export class TorrentPool {
     if (!this.client || this.client.destroyed || typeof this.client.throttleDownload !== "function") return;
     const rate = Number.isFinite(bytesPerSecond) ? Math.max(1, Math.round(bytesPerSecond)) : -1;
     if (rate === this.#downloadLimit) return;
-    this.client.throttleDownload(rate);
+    // One block per slice, so a lower limit cannot fail a slice already waiting (download/throttle.js).
+    applyDownloadRate(this.client, rate);
     // Said when the limit is set or lifted, and when it moves by a factor of
     // two either way — the scale on which a limit changes what the swarm gives.
     const scale = rate < 0 ? null : Math.round(Math.log2(rate));

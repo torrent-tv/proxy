@@ -183,6 +183,8 @@ export class HostLoad {
         takenAt: Date.now(),
         cpuSeconds: this.#host.readProxyCpuSeconds(),
         bytes: totals?.downloaded ?? null,
+        uploaded: totals?.uploaded ?? null,
+        served: totals?.served ?? null,
         threadCpuSeconds: totals?.threadCpuSeconds ?? null,
         metadata: this.#host.readMetadataActivity?.()
       };
@@ -213,7 +215,7 @@ export class HostLoad {
    * nothing, a price where it downloaded something, and what it moved against
    * the limit in force, said while anything moves or is limited.
    *
-   * @param {{ takenAt: number, bytes: number | null, threadCpuSeconds: number | null }} now
+   * @param {{ takenAt: number, bytes: number | null, uploaded: number | null, served: number | null, threadCpuSeconds: number | null }} now
    */
   #learnThreadCost(now) {
     const previous = this.#torrentSample;
@@ -227,9 +229,17 @@ export class HostLoad {
     if (!(elapsedSec > 0) || megabytes < 0 || now.threadCpuSeconds < previous.threadCpuSeconds) return;
     const cpuSeconds = (now.threadCpuSeconds - previous.threadCpuSeconds) / Math.max(1, os.cpus().length);
     const limit = this.downloadLimit;
-    if (megabytes > 0 || Number.isFinite(limit)) {
+    // What else the thread moved over the same interval, across every torrent:
+    // sent back to the swarm, and handed to readers (encoder inputs, container
+    // reads, `/stream`). Said beside the download so that the thread's
+    // processor can be set against each kind of work (torrent-tv/meta#178).
+    const movedOf = (key) => Number.isFinite(now[key]) && Number.isFinite(previous[key]) && now[key] >= previous[key]
+      ? (now[key] - previous[key]) / 1e6 : null;
+    const rateOf = (key) => movedOf(key) === null ? "n/a" : `${(movedOf(key) / elapsedSec).toFixed(2)} MB/s`;
+    if (megabytes > 0 || Number.isFinite(limit) || movedOf("served") > 0 || movedOf("uploaded") > 0) {
       logger.info(
-        `torrent: downloaded ${(megabytes / elapsedSec).toFixed(2)} MB/s over ${elapsedSec.toFixed(1)}s, ` +
+        `torrent: downloaded ${(megabytes / elapsedSec).toFixed(2)} MB/s, sent to peers ${rateOf("uploaded")}, ` +
+        `handed to readers ${rateOf("served")} over ${elapsedSec.toFixed(1)}s, ` +
         `limit ${Number.isFinite(limit) ? `${(limit / 1e6).toFixed(2)} MB/s` : "none"}; ` +
         `its thread drew ${Math.round(cpuSeconds / elapsedSec * 100)}% of the machine`
       );
@@ -431,12 +441,13 @@ export class HostLoad {
   }
 
   /**
-   * The bytes every torrent has downloaded and the torrent thread's processor
-   * seconds, read together by that thread, or null when it cannot be asked.
+   * The bytes every torrent has downloaded and sent to peers, the bytes the
+   * torrent thread handed to readers, and that thread's processor seconds, read
+   * together by that thread, or null when it cannot be asked.
    * Downloaded bytes only: every one is verified against the piece hash and
    * written to the store; a byte sent back to the swarm is neither.
    *
-   * @returns {Promise<{ downloaded: number | null, threadCpuSeconds: number | null } | null>}
+   * @returns {Promise<{ downloaded: number | null, uploaded: number | null, served: number | null, threadCpuSeconds: number | null } | null>}
    */
   async #torrentTotals() {
     if (typeof this.#host.getTorrentTotals !== "function") {
@@ -444,12 +455,8 @@ export class HostLoad {
     }
     try {
       const totals = await this.#host.getTorrentTotals();
-      const downloaded = Number(totals?.downloaded);
-      const threadCpuSeconds = Number(totals?.threadCpuSeconds);
-      return {
-        downloaded: Number.isFinite(downloaded) ? downloaded : null,
-        threadCpuSeconds: Number.isFinite(threadCpuSeconds) ? threadCpuSeconds : null
-      };
+      const read = (key) => { const value = Number(totals?.[key]); return Number.isFinite(value) ? value : null; };
+      return { downloaded: read("downloaded"), uploaded: read("uploaded"), served: read("served"), threadCpuSeconds: read("threadCpuSeconds") };
     } catch {
       return null; // the pool is busy or gone; a reading missed is not a fault
     }

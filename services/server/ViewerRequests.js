@@ -738,7 +738,47 @@ export class ViewerRequests {
         }))
       })}`);
     }
+    this.#sayHolding(session, consumerId, measurement, forecast, input, now);
     return forecast;
+  }
+
+  /**
+   * What holds a waiting viewer's start, said when it changes: which piece,
+   * its production or its delivery, when it comes against the media before it,
+   * and the rates the forecast used. Said again when the delay has moved by a
+   * second, at most once a second; a hold that changes nothing says nothing.
+   *
+   * @param {object} session
+   * @param {string} consumerId
+   * @param {object} measurement - This viewer's forecast state.
+   * @param {object} forecast
+   * @param {object} input
+   * @param {number} now
+   */
+  #sayHolding(session, consumerId, measurement, forecast, input, now) {
+    const holding = forecast.holdingBy;
+    if (!holding) {
+      measurement.held = null;
+      return;
+    }
+    const key = `${holding.kind}:${holding.track}:${holding.segment}`;
+    const delay = Number.isFinite(forecast.delaySeconds) ? forecast.delaySeconds : null;
+    const said = measurement.held;
+    if (said && said.key === key && (delay === null || said.delay === null || Math.abs(delay - said.delay) < 1 ||
+      now - said.at < 1000)) return;
+    measurement.held = { key, delay, at: now };
+    const seconds = value => Number.isFinite(value) ? value.toFixed(2) : "?";
+    const rates = (forecast.operations ?? []).map(operation =>
+      `${operation.track} ${operation.operation} ${Number.isFinite(operation.speed) ? operation.speed.toFixed(2) : "?"}x`);
+    const downloads = (input.sources ?? []).map(source => {
+      const rate = source.downloadRateReadings?.lastValue;
+      return `${Number.isFinite(rate) ? (rate / 1_048_576).toFixed(2) : "?"} MB/s`;
+    });
+    logger.info(`playback held ${session.id} consumer=${consumerId}: delay ${seconds(delay)}s by ` +
+      (holding.kind === "position-not-held" ? "the position, which nothing buffered covers" :
+        `the ${holding.kind} of ${holding.track} #${holding.segment} in ${seconds(holding.atSeconds)}s against ` +
+        `${seconds(holding.aheadSeconds)}s of media before it${holding.requiresSource ? ", its input still downloading" : ""}`) +
+      `; buffered ${seconds(forecast.bufferedSeconds)}s; rates ${rates.join(", ") || "none"}; download ${downloads.join(", ") || "none"}`);
   }
 
   /**

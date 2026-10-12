@@ -1,3 +1,7 @@
+## Unreleased
+
+- **Fix**: A cold film's first bytes are asked of the swarm as soon as they are known, not after the whole film has been worked out (broken in 2.97.17). The download map was published only once its pass had worked out what every piece of the film reads; with the main thread given back after each piece, that pass took 14.6 s on a cold two-hour AVI, and the swarm fetched nothing for 17.5 s while the encoder waited for its next piece and the start forecast read the download as 0.00 MB/s. What a pass has resolved is now published before it works out a piece of lower priority (#ttv-178).
+
 ## 2.97.17
 
 - **Fix**: A cold AVI's first encoder open no longer waits for the main thread. Building the soundtrack's packet table and the map's first pass over some 4000 zones held it 5.4-6.9 s while FFmpeg's first open waited for its answers (8.2-9.8 s against 3.5-6.6 s for later opens). Both now give the thread back as they go — the table at each portion of the file, the pass after each zone it works out — and what the pass worked out is kept when a newer map ends it (#ttv-178).

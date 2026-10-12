@@ -556,6 +556,9 @@ export async function startProxyServer({
         const known = segmentSourceRanges.get(rangesKey);
         if (known) { convert(known); continue; }
         if (waiting.has(zone.outputKey)) continue;
+        // What is resolved so far is stated before a lower zone is worked out
+        // (DownloadMaps, torrent-tv/meta#178).
+        map.workingOut?.(zone.priority, converted);
         if (direct) {
           // Asked per zone too: a soundtrack of an AVI is read from its own
           // packets, which the same index states (torrent-tv/meta#166).

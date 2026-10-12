@@ -367,6 +367,55 @@ test("a viewer moving on keeps the resolved zones until the re-cut map is resolv
   assert.deepEqual(sent.at(-1).zones.map(zone => zone.byteStart), [200, 1200]);
 });
 
+test("a pass states what it has resolved before it works out a lower zone", async () => {
+  // Field 2026-10-12: the first pass over a cold two-hour AVI took 14.6 s and
+  // was published only at its end; the swarm fetched nothing for 17.5 s while
+  // the encoder waited for its next piece (torrent-tv/meta#178).
+  const sent = [];
+  let release = () => {}, reached = () => {};
+  const atLast = () => new Promise(resolve => { reached = resolve; });
+  const worked = [];
+  const maps = new DownloadMaps({ publish: async map => sent.push(map), resolvePlayback: async map => {
+    const converted = [];
+    for (const [at, zone] of map.zones.entries()) {
+      map.workingOut(zone.priority, converted);
+      await new Promise(resolve => setImmediate(resolve));
+      worked.push(sent.length);
+      if (at === map.zones.length - 1) {
+        reached();
+        await new Promise(resolve => { release = resolve; });
+      }
+      converted.push({ ...zone, outputKey: "out", index: zone.from, byteStart: zone.from * 100, byteEnd: zone.to * 100 - 1 });
+    }
+    return converted;
+  } });
+  const file = { sourceKey: "source", fileIndex: 0, durationSeconds: 40 };
+  const zones = [{ from: 0, to: 10, priority: 100 }, { from: 10, to: 20, priority: 100 },
+    { from: 20, to: 30, priority: 99 }, { from: 30, to: 40, priority: 98 }];
+  let last = atLast();
+  const passing = maps.playback({ ...file, zones });
+  await last;
+  assert.deepEqual(worked, [0, 0, 1, 2], "nothing before the first zone; one map as each lower priority is reached");
+  assert.deepEqual(sent.at(-1).zones.map(zone => zone.byteStart), [0, 1000, 2000],
+    "the swarm has the higher zones while the lowest is worked out");
+  assert.deepEqual(maps.inputsForOutput("source", "out", 20), [{ sourceId: "source:0", ranges: [{ start: 2000, end: 3000 }] }]);
+  release();
+  await passing;
+  assert.deepEqual(sent.at(-1).zones.map(zone => zone.byteStart), [0, 1000, 2000, 3000]);
+
+  // Worked out again under a newer map, a segment is stated once: by its new
+  // reading where the pass has reached it, by the retained one where not.
+  last = atLast();
+  const again = maps.playback({ ...file, zones: zones.map(zone => ({ ...zone, priority: zone.priority - 1 })) });
+  await last;
+  const stated = [[0, 99], [1000, 99], [2000, 98], [3000, 97]];
+  assert.deepEqual(sent.at(-1).zones.map(zone => [zone.byteStart, zone.priority]), stated);
+  assert.deepEqual(maps.inputsForOutput("source", "out", 0), [{ sourceId: "source:0", ranges: [{ start: 0, end: 1000 }] }]);
+  release();
+  await again;
+  assert.deepEqual(sent.at(-1).zones.map(zone => [zone.byteStart, zone.priority]), stated);
+});
+
 test("a read that changes nothing in the map does not send it again, and does not wait for it", async () => {
   const sent = [];
   let deliver;

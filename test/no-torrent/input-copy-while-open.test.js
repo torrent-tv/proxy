@@ -135,3 +135,26 @@ test("an input held for a start the plan does not place goes back", async () => 
   assert.equal(inputs.take(output, 7, 7), null, "taken again, it is prepared afresh");
   inputs.forget(output);
 });
+
+test("an input whose stretch is not all downloaded waits for the bytes instead of starting a run", async () => {
+  // Field 2026-10-12, a cold MKV: the first piece was answered once its header
+  // was copied, the read of its stretch found pieces missing, and the run was
+  // refused for good. The answer waits for every byte, as one read used to.
+  let downloaded = [[0, 9]];
+  const lines = [];
+  const inputs = new EncodeInputs({ resolve: async () => ({ kind: "result", sources }),
+    heldRanges: async () => downloaded,
+    readRanges: async (_source, list) => list.map(([start, end]) => FILE.subarray(start, end + 1)),
+    reviseBudget: async () => inputs.allow(1000), changed: () => {}, failed: error => { throw error; },
+    log: line => lines.push(line) });
+  assert.equal(inputs.take(output, 0, 0), null);
+  for (let turn = 0; turn < 5; turn++) await setImmediate();
+  assert.ok(lines.some(line => line.includes("needs-bytes")), "it waits for the bytes");
+  assert.equal(inputs.take(output, 0, 0), null, "and answers nothing meanwhile");
+  downloaded = [[0, 9], [100, 399]];
+  inputs.bytesChanged();
+  for (let turn = 0; turn < 5; turn++) await setImmediate();
+  const ready = inputs.take(output, 0, 0);
+  assert.equal(ready?.kind, "result", "once they are here it is answered");
+  ready.release();
+});

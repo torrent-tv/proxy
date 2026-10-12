@@ -1,3 +1,7 @@
+## Unreleased
+
+- **Fix**: A film whose first piece is not all downloaded plays again (broken in 2.97.12). An encoder input was answered once its header was copied, before its stretch was checked; on a cold MKV the stretch's pieces were still missing, its copy failed after FFmpeg had started, and the run was refused for good, so the page said the video could not be played. The input is now answered only when its whole stretch is downloaded, and waits for the bytes otherwise; a stretch whose copy fails after the run started counts as an input that went away and is asked for again, not as a fault of the input (#ttv-178).
+
 ## 2.97.13
 
 - **Fix**: The stretch of an encoder input is copied in one read again. Copied a torrent piece per read (2.97.12), it took 33.1 s for 83.9 MB on the field's AVI against 126.5 MB in 16.3 s as one read, and the seek back waited 45.1 s: each read waited its turn on two busy threads, once per piece. The encoder still starts while the stretch is copied (#ttv-178).

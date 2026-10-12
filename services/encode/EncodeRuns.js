@@ -1088,7 +1088,10 @@ export class EncodeRuns {
       // torrent cannot tell them apart.
       lastSegmentIndex: () =>
         run.to,
-      inputUnavailable: (message) => isInputUnavailable(message),
+      // A stretch whose copy failed after the run started — a piece left the
+      // store between the check and the copy — is an input that went away, not
+      // a fault of the input: the plan asks for it again (torrent-tv/meta#178).
+      inputUnavailable: (message) => isInputUnavailable(message) || admittedInput?.copyFailed?.() === true,
       onProgress: (report) => this.#noteRunProgress(session, run, report),
       // A closed piece moves this encoder forward, perhaps out of the band that
       // led; who has the processor is decided again at once.
@@ -1370,7 +1373,8 @@ export class EncodeRuns {
     // been dead code — which is also why nothing ever stopped the restart loop
     // recorded in the field the same day.
     const wasCurrent = this.runsOf(session).includes(run);
-    const inputFailed = run.admittedInputKeys && failedAdmittedInput(ended,
+    // A stretch that could not be copied says nothing of the input itself.
+    const inputFailed = run.admittedInputKeys && run.originalInput?.copyFailed?.() !== true && failedAdmittedInput(ended,
       session.spec.transcodesVideo && this.#host.videoEncoder.kind !== "software");
     if (inputFailed) {
       const index = run.head;

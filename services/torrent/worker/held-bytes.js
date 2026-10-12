@@ -167,7 +167,7 @@ export async function readHeldBytes(torrent, fileIndex, start, end, logger = nul
 const missingSaid = new WeakMap();
 
 /** Acquire every input piece before copying any of the segment's ranges. */
-export async function readHeldRanges(torrent, fileIndex, ranges, maxBytes, logger = null) {
+export async function readHeldRanges(torrent, fileIndex, ranges, maxBytes, logger = null, onRead = null) {
   const file = torrent?.files?.[fileIndex];
   const pieceLength = Number(torrent?.pieceLength);
   const store = pieceStoreOf(torrent);
@@ -223,6 +223,7 @@ export async function readHeldRanges(torrent, fileIndex, ranges, maxBytes, logge
         });
       });
       if (!buffer || buffer.length !== length) return null;
+      onRead?.(length);
       for (const { rangeIndex, absoluteStart, absoluteEnd } of span.ranges) {
         const from = Math.max(absoluteStart, pieceStart);
         const to = Math.min(absoluteEnd, pieceStart + pieceLength - 1);

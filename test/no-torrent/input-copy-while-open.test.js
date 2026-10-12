@@ -6,8 +6,8 @@
  * its whole input, 126.5 MB, had been copied in 16.3 s, beside a copy for the
  * position the viewer had left, and the picture stood 33 s. What is checked:
  * the answer comes before the stretch of film is copied, a read inside the
- * stretch waits for it, a release stops the stretch at the next piece, a
- * stretch that cannot be copied fails the read waiting for it, and an input
+ * stretch waits for it, a released input drops its stretch, a stretch that
+ * cannot be copied fails the read waiting for it, and an input
  * prepared or held for a start the plan does not place is withdrawn. Storage
  * is a fake; nothing here reaches a torrent.
  */
@@ -20,9 +20,9 @@ import { EncodeInputs } from "../../services/encode/EncodeInputs.js";
 import { handleEncodeInputGet } from "../../routes/encode-input/get.js";
 
 // A file of 400 bytes whose byte n is n % 251; a header of ten bytes at 0 and
-// a stretch of film of 300 bytes at 100, copied 100 bytes — one piece — at a time.
+// a stretch of film of 300 bytes at 100.
 const FILE = Buffer.from(Array.from({ length: 400 }, (_, index) => index % 251));
-const sources = [{ sourceKey: "film", fileIndex: 0, timeShiftSeconds: 0, pieceLength: 100,
+const sources = [{ sourceKey: "film", fileIndex: 0, timeShiftSeconds: 0,
   input: { original: true, fileLength: FILE.length, ranges: [[0, 9], [100, 399]], selections: [] } }];
 
 /** A reader whose answers wait until the check lets each one go. */
@@ -47,27 +47,25 @@ test("the input is answered once the header is copied, and a read in the stretch
   const admitting = admitOriginalInput({ sources, reserve: async () => () => {}, readRanges: reader.readRanges });
   await reader.next();
   const input = await admitting;
-  assert.deepEqual(reader.asked, [[[0, 9]], [[100, 199]]],
-    "the answer comes once the header is copied, with the stretch's first piece asked for and not yet copied");
+  assert.deepEqual(reader.asked, [[[0, 9]], [[100, 399]]],
+    "the answer comes once the header is copied, with the stretch asked for in one read and not yet copied");
   assert.equal(input.deferredBytes, 300);
   assert.deepEqual([...input.read(0, 2, 5).bytes], [...FILE.subarray(2, 6)], "the header is read at once");
   assert.equal(input.waitedBefore(Date.now()), 0, "a read of the header waited for nothing");
   let answered = null;
   const reading = Promise.resolve(input.read(0, 150, 160, true)).then(answer => { answered = answer; });
-  await reader.next();
-  await reader.next();
-  assert.equal(answered, null, "two of three pieces copied: the read still waits");
   await new Promise(resolve => setTimeout(resolve, 20));
+  assert.equal(answered, null, "the stretch is not copied yet: the read waits");
   await reader.next();
   await reading;
   assert.ok(input.waitedBefore(Date.now()) >= 19, "and the wait is recorded, so a run's open can leave it out");
   assert.deepEqual([...answered.bytes], [...FILE.subarray(150, 161)], "the bytes asked for, from the copied stretch");
   assert.equal(await input.whole, true);
-  assert.deepEqual(reader.asked.slice(1), [[[100, 199]], [[200, 299]], [[300, 399]]], "one piece at a time");
+  assert.equal(reader.asked.length, 2, "one read for the header, one for the stretch");
   input.release();
 });
 
-test("a release stops the copy of the stretch at the next piece", async () => {
+test("a released input drops its stretch when the read of it returns", async () => {
   const reader = gatedReader();
   const admitting = admitOriginalInput({ sources, reserve: async () => () => {}, readRanges: reader.readRanges });
   await reader.next();
@@ -78,11 +76,11 @@ test("a release stops the copy of the stretch at the next piece", async () => {
   assert.equal(await waiting, null, "a read waiting on a released input is refused");
   assert.equal(await input.whole, false);
   assert.equal(input.copyFailed(), false, "a release is not a failed copy");
-  assert.equal(reader.asked.length, 2, "nothing past the piece being copied is asked for");
+  assert.equal(reader.asked.length, 2, "nothing more is asked for");
 });
 
 test("a stretch that cannot be copied fails the read waiting for it, and the route says so", async () => {
-  const reader = gatedReader({ refuseAt: 200 });
+  const reader = gatedReader({ refuseAt: 100 });
   const admitting = admitOriginalInput({ sources, reserve: async () => () => {}, readRanges: reader.readRanges });
   await reader.next();
   const input = await admitting;
@@ -91,7 +89,6 @@ test("a stretch that cannot be copied fails the read waiting for it, and the rou
   const reply = { status: 200, headers: {}, code(status) { this.status = status; return this; },
     header(name, value) { this.headers[name] = value; return this; }, send(body) { this.body = body; return this; } };
   const answering = handleEncodeInputGet(req, reply, { inputOf: () => input, refused: () => assert.fail("not a byte outside the input") });
-  await reader.next();
   await reader.next();
   const answered = await answering;
   assert.equal(answered.status, 503);

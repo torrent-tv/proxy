@@ -97,7 +97,6 @@ import path from "node:path";
 import { contentOf, LocalObservations, PROXY_ROOT } from "../encode/LocalObservations.js";
 import { configurationKeyOf } from "../encode/fingerprint.js";
 import { qualityStateOf } from "../encode/quality/OutputQualityState.js";
-import os from "node:os";
 import { downloadShare } from "../storage/processor-share.js";
 import { ENCODE_RUN_STATE, processCanBeSignalled } from "../encode/encode-run-state.js";
 
@@ -672,10 +671,13 @@ export function wireOutputs({
       files.set(key, file);
     }
     const watched = [...files.values()].filter((file) => Number.isFinite(file.bytesPerFilmSecond) && file.bytesPerFilmSecond > 0);
-    const share = downloadShare({ cores: os.cpus().length, availableShare: parts.hostLoad.hostAvailability?.share ?? 1,
+    const share = downloadShare({ availableShare: parts.hostLoad.hostAvailability?.share ?? 1,
       baseDraw: parts.hostLoad.baseDraw, costPerMegabyte: parts.hostLoad.observedTorrentCostPerMegabyte, files: watched });
+    // Kept beside the readings it is judged against: what the torrents moved
+    // over each interval is said next to the limit in force (meta#178).
+    parts.hostLoad.downloadLimit = share.bytesPerSecond;
     void Promise.resolve(parts.setDownloadRate(share.bytesPerSecond, `film speed ${share.filmSpeed.toFixed(2)}x ` +
-      `over ${watched.length} file(s), ${share.capacity.toFixed(2)} core(s) for the proxy`)).catch(() => {});
+      `over ${watched.length} file(s), ${Math.round(share.capacity * 100)}% of the machine for the proxy`)).catch(() => {});
   };
   parts.contentionPenalties = contentionPenalties instanceof Map ? contentionPenalties : null;
   // Seconds of film per second when the picture is COPIED, measured at
@@ -1009,6 +1011,8 @@ export function wireOutputs({
     openOf: (output) => parts.encodeOrchestrator?.openOf?.(output.outputKey ?? "") ?? null,
     urgent: (output, index) => parts.encodeOrchestrator.wantedSegmentsOn(output.outputKey).some(window =>
       index >= window.from && index <= window.to && window.urgent === true),
+    // The piece's rank in the output's own map, said with an input's state.
+    rankAt: (output, index) => parts.encodeOrchestrator?.rankAt?.(output.outputKey ?? "", index) ?? null,
     log: line => logger.info(line),
     changed: (output, result) => {
       if (result.kind === "terminal") {

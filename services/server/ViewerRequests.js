@@ -646,6 +646,14 @@ export class ViewerRequests {
         processingRanges: liveRuns.map(({ progress }) => ({
           start: progress.startPositionSeconds, end: progress.processedSeconds
         })),
+        // What a run's start costs this output, and the stretches its live
+        // runs were given: the forecast starts a run wherever production meets
+        // bytes that were not held when the run before was admitted.
+        openSeconds: this.#host.openSecondsOf?.(output) ?? null,
+        runSpans: liveRuns.map(run => ({
+          start: output.timeline?.publishedStartOf?.(run.from),
+          end: Number.isInteger(run.to) && run.to >= run.from ? output.timeline?.publishedStartOf?.(run.to + 1) : Number.POSITIVE_INFINITY
+        })),
         bitsPerMediaSecond: Number.isFinite(observedMbps) && observedMbps > 0 ? observedMbps * 1_000_000 :
           this.#host.initialOutputBitsPerMediaSecondOf?.(output) ?? 0,
         readings: trackRates,
@@ -705,7 +713,8 @@ export class ViewerRequests {
     const forecast = withSubtitleReadiness(this.#host.playbackReadiness.predict(input), subtitle,
       subtitle ? this.#host.subtitleReadyFor?.(viewer) !== false : true);
     forecast.operations = outputs.flatMap((output, index) => {
-      const common = { speed: this.#host.playbackReadiness.forecastRate(tracks[index].readings), processedSeconds: tracks[index].processedSeconds };
+      const common = { speed: this.#host.playbackReadiness.forecastRate(tracks[index].readings, now, 0, "piece"),
+        processedSeconds: tracks[index].processedSeconds };
       return [
         ...(output.spec.video ? [{ ...common, track: "video",
           operation: output.spec.transcodesVideo ? "encode" : "copy",
@@ -855,10 +864,17 @@ export class ViewerRequests {
     const reading = this.#host.encodeSpeedReadingOf?.(output, now) ?? null;
     if (Number.isFinite(reading?.speed) && reading.speed > 0 && Number.isFinite(reading.at)) {
       trend.add(reading.at, reading.speed);
-    } else {
-      const projected = Number(this.#host.projectedEncodeSpeedOf?.(output));
+    } else if (!trend.snapshot()) {
+      // ONLY UNTIL A PIECE IS MEASURED does the prediction stand for the
+      // encoder, and it is not kept among the readings. Added on every poll
+      // between runs, it put the machine's share of that moment — 1 % at a
+      // cold start — on the whole film, and the forecast read 0.03x
+      // (torrent-tv/meta#178).
+      const projected = Number(this.#host.predictedEncodeSpeedOf?.(output) ?? this.#host.projectedEncodeSpeedOf?.(output));
       if (Number.isFinite(projected) && projected > 0) {
-        trend.add(now, projected);
+        const seed = new this.#host.playbackReadiness.RateTrend();
+        seed.add(now, projected);
+        return seed.snapshot();
       }
     }
     return trend.snapshot();

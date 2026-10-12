@@ -579,13 +579,16 @@ export function wireOutputs({
     sourceInputsFor: (output, index) => parts.sourceInputsFor?.(output, index),
     encodeSpeedReadingOf: (output) => parts.encodeCost.latestSpeedReadingOf(output),
     projectedEncodeSpeedOf: (output) => parts.encodeCost.projectedSpeedOf(output),
+    // The speed the offer predicted for this output when it chose its mode: a
+    // forecast with no measured piece yet stands on it rather than on the
+    // machine's share of the moment (torrent-tv/meta#178).
+    predictedEncodeSpeedOf: (output) => {
+      const predicted = Number(qualityStateOf(output).predictedSpeedWhenOffered);
+      return Number.isFinite(predicted) && predicted > 0 ? predicted : null;
+    },
     audioDescriptionOf,
-    processingStartupSecondsOf: (output) => output.spec.carries === "audio-only" ?
-      audioReadingFor(audioCalibration, { ...audioDescriptionOf(output),
-        codec: audioDescriptionOf(output)?.codec ?? output.file.media?.audioCodec,
-        transcode: output.spec.audio?.transcode })?.startupSeconds ?? 0 :
-      Math.max(0, (startStopCost?.firstByteWaitSec ?? 0) - parts.segmentDurationSec /
-        parts.encodeCost.projectedSpeedOf(output)),
+    openSecondsOf: (output) => runStartSecondsOf(output),
+    processingStartupSecondsOf: (output) => runStartSecondsOf(output),
     initialOutputBitsPerMediaSecondOf: (output) => {
       const description = audioDescriptionOf(output);
       const reference = audioReadingFor(audioCalibration, { codec: description?.codec, transcode: false });
@@ -1045,6 +1048,27 @@ export function wireOutputs({
     readFree: freeBytesFor,
     logger
   });
+  /**
+   * What starting a run costs this output before its first piece is encoded:
+   * its own measured open where it has one (`RunCosts.openOf`), else the
+   * host's startup reading of spawn to first piece less that piece's encoding;
+   * for sound, its packaged startup reading.
+   *
+   * @param {object} output
+   * @returns {number}
+   */
+  function runStartSecondsOf(output) {
+    if (output.spec.carries === "audio-only") {
+      return audioReadingFor(audioCalibration, { ...audioDescriptionOf(output),
+        codec: audioDescriptionOf(output)?.codec ?? output.file.media?.audioCodec,
+        transcode: output.spec.audio?.transcode })?.startupSeconds ?? 0;
+    }
+    const open = parts.encodeOrchestrator?.openOf?.(output.outputKey ?? "");
+    if (open?.measured) return open.seconds;
+    return Math.max(0, (startStopCost?.firstByteWaitSec ?? 0) - parts.segmentDurationSec /
+      parts.encodeCost.projectedSpeedOf(output));
+  }
+
   // Realtime-budget monitor: only meaningful for the software encoder with a
   // benchmark (the only path that can pick/step resolution). Cheap no-op scan
   // otherwise.

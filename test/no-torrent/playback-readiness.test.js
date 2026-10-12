@@ -58,6 +58,41 @@ test("finds the first safe start from segments delivered before playback", () =>
   assert.ok(Math.abs(forecast.delaySeconds - 1) < 1e-8);
 });
 
+test("an encoder's rate is its pieces over their time, and a swarm's its bytes over the span", () => {
+  // A first piece of credits read 6.49x and the next 0.57x (Home Assistant
+  // 2026-10-12, torrent-tv/meta#178): the film they make together took the
+  // time of both.
+  const pieces = [{ at: 1_000, value: 6.49 }, { at: 9_000, value: 0.57 }, { at: 13_000, value: 1.4 }];
+  const together = 3 / (1 / 6.49 + 1 / 0.57 + 1 / 1.4);
+  assert.ok(Math.abs(forecastRate(pieces, 20_000, 0, "piece") - together) < 1e-9);
+  assert.equal(forecastRate(pieces, 20_000), 1.4, "the last reading, where nothing else is asked");
+  // 1 MB/s for 8 s, then 5 MB/s for 4 s: 28 MB over 12 s.
+  const swarm = [{ at: 0, value: 1 }, { at: 8_000, value: 5 }, { at: 12_000, value: 3 }];
+  assert.ok(Math.abs(forecastRate(swarm, 20_000, 0, "time") - 28 / 12) < 1e-9);
+});
+
+test("a piece no live run was given starts a run of its own, and pays its open", () => {
+  const baseline = predictPlaybackReadiness(input()).delaySeconds;
+  const opening = input();
+  opening.tracks[0].openSeconds = 3;
+  const opened = predictPlaybackReadiness(opening);
+  assert.ok(opened.delaySeconds > baseline, `${opened.delaySeconds} against ${baseline}`);
+  assert.equal(opened.holdingBy.segment, 1, "the piece behind the open holds the start");
+  // The same piece inside a live run's stretch is made by that run: no open.
+  const live = input();
+  live.tracks[0].openSeconds = 3;
+  live.tracks[0].runSpans = [{ start: 0, end: 8 }];
+  assert.equal(predictPlaybackReadiness(live).delaySeconds, baseline);
+  // And the first start, already charged as startup, is not charged twice.
+  const starting = input();
+  starting.tracks[0].openSeconds = 3;
+  starting.tracks[0].startupRemainingSeconds = 3;
+  const started = predictPlaybackReadiness(starting);
+  const once = input();
+  once.tracks[0].startupRemainingSeconds = 3;
+  assert.equal(started.delaySeconds, predictPlaybackReadiness(once).delaySeconds);
+});
+
 test("a held start names the piece that holds it, and the difference is the delay", () => {
   // The log could only say that some term was positive while a cold AVI's
   // picture stood for 17 s (Home Assistant 2026-10-12, torrent-tv/meta#178).
@@ -670,7 +705,9 @@ test("does not invent future encode acceleration to start an unsustainable outpu
 
   assert.equal(forecast.ready, false);
   assert.equal(forecast.reason, "minimum-safe-delay");
-  assert.ok(Math.abs(forecast.delaySeconds - (4 / 0.15 + 8 / 100 - 6)) < 1e-8);
+  // The two pieces took 1/0.1 + 1/0.15 of their film: no faster than that is assumed.
+  const rate = 2 / (1 / 0.1 + 1 / 0.15);
+  assert.ok(Math.abs(forecast.delaySeconds - (4 / rate + 8 / 100 - 6)) < 1e-8);
 });
 
 test("a faster old probe cannot turn positive delivery into a permanent zero rate", () => {

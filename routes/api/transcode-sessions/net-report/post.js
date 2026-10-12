@@ -19,14 +19,15 @@ import { recordViewerReport } from "../../../../services/viewer/report-intake.js
  *
  * @param {import("fastify").FastifyRequest} req
  * @param {import("fastify").FastifyReply} reply
- * @param {{ outputs: { get: (id: string) => object | undefined }, viewers: object, renditions: { viewerPlays: Function, noteViewerReported: Function }, quality: { noteViewerReported: Function } }} deps -
+ * @param {{ outputs: { get: (id: string) => object | undefined }, viewers: object, renditions: { viewerPlays: Function, noteViewerReported: Function }, quality: { noteViewerReported: Function }, planSoon?: () => void, segmentAt?: (output: object, seconds: number) => number | null }} deps -
  *   The live outputs, the registry of viewers, and the rungs of a picture. The
  *   VIEWER component takes the statement; which rung a stated height is, is the
  *   encoding component's. This route's whole job is turning a request into
  *   those calls and their answer into a status code.
  * @returns {Promise<void>}
  */
-export async function handleApiTranscodeSessionNetReportPost(req, reply, { outputs, viewers, renditions, quality }) {
+export async function handleApiTranscodeSessionNetReportPost(req, reply,
+  { outputs, viewers, renditions, quality, planSoon = () => {}, segmentAt = () => null }) {
   const sessionId = typeof req.params.sessionId === "string" ? req.params.sessionId : "";
   const body = req.body && typeof req.body === "object" && !Array.isArray(req.body) ? req.body : {};
   // WHAT THIS REPORT IS. A statement by one viewer about itself: where the
@@ -100,6 +101,10 @@ export async function handleApiTranscodeSessionNetReportPost(req, reply, { outpu
       Number.isFinite(positionSeconds) && positionSeconds >= 0 ? positionSeconds : undefined
     );
   }
+  // Where they stood and whether they were playing or waiting, before this
+  // report: what the encoders are planned from (`movedForThePlan`).
+  const before = viewers.get?.(consumerId);
+  const was = before ? { seconds: before.position?.seconds ?? null, playing: before.playing, waiting: before.waiting } : null;
   const recorded = recordViewerReport({
     outputs,
     viewers,
@@ -127,6 +132,14 @@ export async function handleApiTranscodeSessionNetReportPost(req, reply, { outpu
   if (!recorded) {
     return reply.code(404).send({ error: "Transcode session was not found." });
   }
+  // A VIEWER WHO MOVED INTO ANOTHER PIECE, or started or stopped playing or
+  // waiting, changed the maps the encoders are placed from; the plan is taken
+  // again now. Recorded and not re-planned, a soundtrack the viewer was
+  // stopped for waited 59 s behind a picture that had long left the urgent
+  // band, because only the end of that picture's run planned again (Home
+  // Assistant 2026-10-12, torrent-tv/meta#178).
+  const after = viewers.get?.(consumerId);
+  if (after && movedForThePlan(was, after, outputs.get(sessionId), segmentAt)) planSoon();
   // After the statement is recorded, so what is judged is what they just said:
   // a move of theirs to another limit may no longer be wanted.
   renditions.noteViewerReported(sessionId, consumerId);
@@ -135,4 +148,24 @@ export async function handleApiTranscodeSessionNetReportPost(req, reply, { outpu
   // the next tick of a timer.
   void quality.noteViewerReported(sessionId, consumerId);
   return reply.code(204).send();
+}
+
+/**
+ * Whether a report changed what the encoders are planned from: the piece the
+ * viewer stands in, or whether they play or wait.
+ *
+ * @param {{ seconds: number | null, playing: boolean, waiting: boolean } | null} was
+ * @param {{ position?: { seconds: number } | null, playing: boolean, waiting: boolean }} now
+ * @param {object | undefined} output
+ * @param {(output: object, seconds: number) => number | null} segmentAt
+ * @returns {boolean}
+ */
+export function movedForThePlan(was, now, output, segmentAt) {
+  if (!was) return true;
+  if (was.playing !== now.playing || was.waiting !== now.waiting) return true;
+  const seconds = now.position?.seconds;
+  if (!Number.isFinite(seconds)) return false;
+  if (!Number.isFinite(was.seconds)) return true;
+  if (!output) return false;
+  return segmentAt(output, was.seconds) !== segmentAt(output, seconds);
 }

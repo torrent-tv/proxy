@@ -1,3 +1,7 @@
+## Unreleased
+
+- **Fix**: A soundtrack the viewer is stopped for is started as soon as nothing more urgent is being made. On a cold AVI the soundtrack's next piece was held back behind the picture's urgent one, and nothing planned again for 59 s while that picture run made eighteen pieces: the viewer stood 36 s at 23.9 s with the picture loaded to 56 s. A held-back start is now looked at again whenever the encoder ahead of it closes a piece, and a viewer's report that moves them into another piece, or starts or stops their playing or waiting, plans the encoders again (#ttv-178).
+
 ## 2.97.16
 
 - **Chore**: 2.97.15's entry said a copy for an encoder reads four pieces at once unless `UV_THREADPOOL_SIZE` says otherwise; the proxy sets 64 where the deployment states none, so a copy reads up to 64 at once (#ttv-178).

@@ -1301,7 +1301,12 @@ export async function startProxyServer({
       outputs: outputParts.outputs,
       viewers: outputParts.viewers,
       renditions: outputParts.renditions,
-      quality: outputParts.quality
+      quality: outputParts.quality,
+      planSoon: () => outputParts.encodeRuns.planEncodersSoon(),
+      segmentAt: (output, seconds) => {
+        // A cut table not built yet has no pieces to move between.
+        try { return outputParts.outputTimes.segmentIndexForTime(output, seconds); } catch { return null; }
+      }
     })
   );
   app.post("/api/transcode-sessions/:sessionId/fragment-far", async (req, reply) =>

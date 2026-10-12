@@ -159,6 +159,42 @@ test("an encoder is not started behind what is being made elsewhere, and is star
     "once the picture is in the soundtrack's band, the soundtrack is placed");
 });
 
+test("a start held back is placed when the encoder ahead of it closes a piece, without waiting for a full plan", () => {
+  // Field 2026-10-12: a soundtrack's start was held back behind a picture
+  // run's urgent piece, and nothing planned again for 59 s while that run made
+  // eighteen pieces; the viewer stood 36 s for the sound (torrent-tv/meta#178).
+  const started = [];
+  const made = new EncodeOrchestrator({
+    maxRunsFor: () => 1,
+    segmentSeconds: 4,
+    killCostSec: 0,
+    firstByteWaitSec: 0.12,
+    startingSpeedFor: () => 1,
+    now: () => 1000,
+    logger: { info: () => {}, warn: () => {} },
+    makeRun: ({ address, from, to }) => {
+      const one = { ...run(from), to };
+      started.push({ address, from, run: one });
+      return one;
+    }
+  });
+  for (const address of [PICTURE, SOUND]) {
+    made.setSegmentCount(address, 500);
+    made.notePriorityMap(address, viewerMap(0));
+  }
+  made.noteAlreadyMade(SOUND, Array.from({ length: 200 }, (_, index) => index));
+  const picture = run(1);
+  made.adopt(PICTURE, picture);
+  made.reconcile();
+  assert.equal(started.filter((one) => one.address === SOUND).length, 0, "held back behind the urgent picture");
+
+  made.noteAlreadyMade(PICTURE, Array.from({ length: 29 }, (_, index) => index));
+  for (const one of [picture, ...started.filter((entry) => entry.address === PICTURE).map((entry) => entry.run)]) one.head = 30;
+  made.noteProduced(PICTURE, 29);
+  assert.deepEqual(started.filter((one) => one.address === SOUND).map((one) => one.from), [200],
+    "the closed piece moved the picture into the soundtrack's band, and the soundtrack is placed at once");
+});
+
 test("an encoder paused and let go can be paused again", async () => {
   const { EventEmitter } = await import("node:events");
   const { EncodeRun } = await import("../../services/encode/EncodeRun.js");

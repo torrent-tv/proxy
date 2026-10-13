@@ -1,3 +1,7 @@
+## Unreleased
+
+- **Perf**: While a viewer's new map is turned into bytes, the zones already resolved stand as they are unless one is withdrawn or changes its level or priority; a deadline worked out on a later clock no longer replaces them. Replaced on every pass, they were a new list each time, and every metadata statement during the pass packed the whole film again: 24 s of the main thread in fifteen minutes of a two-hour AVI on Home Assistant (#ttv-178).
+
 ## 2.97.28
 
 - **Perf**: A metadata read no longer packs every playback zone of the film again before it adds its own few ranges to the download map. The packed playback and native zones are kept until they change, and a statement is added to them: on Home Assistant that packing took 27 s of the main thread in fifteen minutes of a two-hour AVI, on the thread that also sends the viewer its segments (#ttv-178).

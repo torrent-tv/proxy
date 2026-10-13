@@ -620,3 +620,34 @@ test("a pass that hands back the zones it resolved before is neither packed nor 
   assert.equal(packed, once);
   assert.deepEqual(maps.inputsForOutput("source", "out", 0), [{ sourceId: "source:0", ranges: [{ start: 0, end: 1000 }] }]);
 });
+
+test("a pass whose zones only moved their deadlines leaves the packed zones standing for the statements made meanwhile", async () => {
+  // Set anew on every pass, the zones were a new list each time and every
+  // metadata statement during the pass packed the film again (r24,
+  // torrent-tv/meta#178).
+  let packed = 0;
+  let release = null;
+  const maps = new DownloadMaps({ publish: async () => undefined, pack: zones => { packed += 1; return coalescedZones(zones, 0); },
+    resolvePlayback: async map => {
+      if (release) await new Promise(resolve => { const go = release; release = null; go(resolve); });
+      return map.zones.map(zone => ({ ...zone, outputKey: "out", index: zone.from, byteStart: zone.from * 100, byteEnd: zone.to * 100 - 1 }));
+    } });
+  const file = { sourceKey: "source", fileIndex: 0, durationSeconds: 30 };
+  await maps.playback({ ...file, zones: [{ from: 0, to: 10, priority: 100, urgent: true, deadlineAt: 5_000 }] });
+  const before = packed;
+  let finish = null;
+  release = resolve => { finish = resolve; };
+  const moving = maps.playback({ ...file, zones: [{ from: 0, to: 10, priority: 100, urgent: true, deadlineAt: 6_000 }] });
+  await new Promise(resolve => setImmediate(resolve));
+  await maps.metadata({ ...file, statement: "packets", result: { kind: "needs-ranges", ranges: [[5000, 5099]], requestId: "r" } });
+  assert.equal(packed, before, "the statement is added to the packed zones as they stand");
+  finish();
+  await moving;
+  // A zone withdrawn is still said at once.
+  release = resolve => { finish = resolve; };
+  const away = maps.playback({ ...file, zones: [{ from: 20, to: 30, priority: 100, urgent: true, deadlineAt: 9_000 }] });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.deepEqual(maps.inputsForOutput("source", "out", 0), null);
+  finish();
+  await away;
+});

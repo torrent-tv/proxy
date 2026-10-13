@@ -59,10 +59,19 @@ export class DownloadMaps {
       }
       const deadlineAt = Number.isFinite(current.deadlineAt)
         ? current.deadlineAt + (Math.max(0, zone.from - current.from) - (zone.leadSeconds ?? 0)) * 1000 : current.deadlineAt;
-      if (Object.keys(current).some(key => key !== "from" && key !== "to" && !Object.is(zone[key], key === "deadlineAt" ? deadlineAt : current[key]))) changed = true;
+      // A deadline worked out again on a later clock is no change: the
+      // torrent orders by deadlines and is sent their order, which the pass
+      // below states with the rest.
+      if (Object.keys(current).some(key => key !== "from" && key !== "to" && key !== "deadlineAt" && key !== "withinSeconds" &&
+        !Object.is(zone[key], current[key]))) changed = true;
       return [{ ...zone, ...current, from: zone.from, to: zone.to, deadlineAt }];
     });
-    this.#setZones(file, retained);
+    // THE ZONES STAND AS THEY ARE UNLESS ONE IS WITHDRAWN OR RE-WORDED. Set
+    // anew on every pass, they were a new list each time, so every metadata
+    // statement during the pass packed the whole film again: 24 s of the main
+    // thread in fifteen minutes of a two-hour AVI on Home Assistant (r24,
+    // torrent-tv/meta#178).
+    if (changed) this.#setZones(file, retained);
     for (const [statement, metadata] of file.metadata) {
       if (metadata.interval && !this.wantsInterval(sourceKey, fileIndex, metadata.interval)) {
         file.metadata.delete(statement);

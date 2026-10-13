@@ -5,7 +5,7 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, readdirSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { directoryNameFor, SegmentStore } from "../../services/storage/segment-store/SegmentStore.js";
@@ -50,6 +50,16 @@ test("a published piece keeps the media intervals the encoding read from it", (t
   assert.equal(store.publish(KEY, "making-0-00000.mp4", format, { mediaRanges, bytes: partitioned }), "segment-00000.mp4");
   assert.deepEqual(readFileSync(store.pathOf(KEY, 0)), partitioned);
   assert.equal(store.mediaRangesOf(KEY, 0), mediaRanges);
+});
+
+test("a closed piece says when its encoder last wrote it, on the file's own clock", (t) => {
+  const { store, root } = storeInATempRoot();
+  t.after(() => { store.dropAll("the check is over"); rmSync(root, { recursive: true, force: true }); });
+  const dir = store.directoryFor(KEY);
+  writeFileSync(path.join(dir, "making-0-00003.mp4"), Buffer.from("closed"));
+  utimesSync(path.join(dir, "making-0-00003.mp4"), new Date(1_000_000), new Date(2_000_000));
+  assert.equal(store.writtenAtOf(KEY, "making-0-00003.mp4"), 2_000_000);
+  assert.equal(store.writtenAtOf(KEY, "making-0-00004.mp4"), null);
 });
 
 test("a stored piece is taken off the disk at its owner's word", (t) => {

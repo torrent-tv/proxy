@@ -1,3 +1,9 @@
+## Unreleased
+
+- **Perf**: The swarm is asked for a run's whole input at once. While anything urgent is missing it is told only the most urgent group, and at a cold start that was one segment's input, so a peer holding none of its pieces had nothing to send and the next run was admitted only as far as its input had arrived. The segments the next run would copy — as much as its copy rate, its open and memory allow — now take the first segment's place in the download map, one group, since WebTorrent keeps no order between several (#ttv-178).
+- **Perf**: The start forecast reads what the swarm can give from the time our own selection held no peer back. A peer that let us download, had room in its queue and held a piece the map wanted outside what was asked was held back by us; a rate measured then describes our asking — a cold Matroska read 0.4-1.3 MB/s while the same swarm later gave 12-14 MB/s. Until such a time is measured the delivered rate stands. The forecast of single pieces takes each peer's rate with its queue kept full, and the torrent line says how much of the time a peer was held back and what the rest gave (#ttv-178).
+- **Fix**: Each published piece says when the encoder finished writing it; the encoders were given no way to ask, and the line said "unknown" (#ttv-178).
+
 ## 2.97.24
 
 - **Fix**: An encoder reads its input through FFmpeg's cache only where that cache works. A Linux FFmpeg keeps the cache's file in /tmp alone, and with no /tmp it can write, every run failed at its open ("Cannot open temporary file /tmp/ffcacheXXXXXX" on Home Assistant's FFmpeg with a read-only root). One small read through the cache is tried at startup with this proxy's own FFmpeg; until it has worked, inputs are read directly and nothing is counted for the cache on the disk budget (#ttv-178).

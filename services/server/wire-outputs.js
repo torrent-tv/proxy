@@ -254,6 +254,7 @@ export function wireOutputs({
     directoryFor: (address, format) => parts.segmentStore.directoryFor(address, format),
     publish: (address, makingName, format, read) => parts.segmentStore.publish(address, makingName, format, read),
     closedBytesOf: (address, makingName) => parts.segmentStore.closedBytesOf(address, makingName),
+    writtenAtOf: (address, makingName) => parts.segmentStore.writtenAtOf(address, makingName),
     mediaRangesOf: (address, index, where) => parts.segmentStore.mediaRangesOf(address, index, where),
     remove: (address, index, because) => parts.segmentStore.remove(address, index, because)
   };

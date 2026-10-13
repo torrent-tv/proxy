@@ -18,12 +18,15 @@ export class DownloadMaps {
    * thread's receipt included (torrent-tv/meta#177).
    */
   #clock;
+  /** What the torrent is told of the playback zones: as many windows as say the same thing. */
+  #pack;
 
   constructor({ publish, resolvePlayback = async map => map.zones, log = null, now = Date.now,
-    clock = () => performance.timeOrigin + performance.now() }) {
+    clock = () => performance.timeOrigin + performance.now(), pack = zones => zones }) {
     if (typeof publish !== "function") throw new TypeError("Download map publication is required.");
     this.#publish = publish;
     this.#resolvePlayback = resolvePlayback;
+    this.#pack = pack;
     this.#log = typeof log === "function" ? log : null;
     this.#now = now;
     this.#clock = clock;
@@ -74,7 +77,8 @@ export class DownloadMaps {
     }
     if (changed) await this.#emit(file);
     if (revision !== file.revision) return;
-    const isCurrent = () => this.#files.get(`${sourceKey}:${fileIndex}`) === file && revision === file.revision;
+    const fileKey = `${sourceKey}:${fileIndex}`;
+    const isCurrent = () => this.#files.get(fileKey) === file && revision === file.revision;
     // WHAT IS RESOLVED IS STATED WHILE THE REST IS STILL BEING RESOLVED. A pass
     // works the zones out in the order the swarm is to fetch them, and
     // published only at its end it kept the first bytes from the swarm for as
@@ -264,7 +268,9 @@ export class DownloadMaps {
   #emit(file) {
     file.dirty = false;
     const builtFrom = this.#clock();
-    const zones = [...file.zones, ...file.nativeZones];
+    // Compared and sent as the torrent is to act on it: the playback zones
+    // packed into as few windows as say the same (`coalescedZones`).
+    const zones = this.#pack([...file.zones, ...file.nativeZones]);
     for (const { ranges, requestId, priority, urgent, deadlineAt, order } of file.metadata.values()) {
       for (const [byteStart, byteEnd] of ranges) {
         zones.push({ byteStart, byteEnd, priority, urgent, downloadOnly: true, requestId, deadlineAt, ...(order ? { order } : {}) });

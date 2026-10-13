@@ -80,12 +80,70 @@ export function deadlineOfMapZone(zone, now = Date.now()) {
  * @returns {Zone[]} In their order, without the repeats.
  */
 export function withoutRepeatedZones(zones, now = Date.now()) {
-  const bandOf = zone => ({ urgency: levelOfMapZone(zone), priority: priorityOfMapZone(zone), deadlineAt: deadlineOfMapZone(zone, now) });
+  const keys = zones.map(zone => `${zone.byteStart}:${zone.byteEnd}`);
   const best = new Map();
   zones.forEach((zone, index) => {
-    const key = `${zone.byteStart}:${zone.byteEnd}`;
-    const kept = best.get(key);
-    if (!kept || compareBands(bandOf(zone), kept.band) < 0) best.set(key, { index, band: bandOf(zone) });
+    const kept = best.get(keys[index]);
+    const band = { urgency: levelOfMapZone(zone), priority: priorityOfMapZone(zone), deadlineAt: deadlineOfMapZone(zone, now) };
+    if (!kept || compareBands(band, kept.band) < 0) best.set(keys[index], { index, band });
   });
-  return zones.filter((zone, index) => best.get(`${zone.byteStart}:${zone.byteEnd}`).index === index);
+  return zones.filter((_zone, index) => best.get(keys[index]).index === index);
+}
+
+/**
+ * What the torrent is told, as few windows as say the same thing: every stretch
+ * of bytes once, in the best band that names it, and the stretches of one
+ * level and priority that touch or overlap joined into one window, wanted by
+ * the earliest deadline among them.
+ *
+ * A map names every range of every segment — three of an AVI's segment, two of
+ * them the header and index all its segments read — and a film is thousands of
+ * segments: 10 000 zones, built, compared, copied to the torrent thread and
+ * stated there every three seconds a viewer plays on, about 70 s of the main
+ * thread in ten minutes on Home Assistant (torrent-tv/meta#178). The swarm acts
+ * on the band of a piece and nothing else, and within one band the pieces of
+ * consecutive segments are consecutive bytes. A zone a metadata read states
+ * keeps its own request and order, and is left as it is.
+ *
+ * @template {{ byteStart: number, byteEnd: number }} Zone
+ * @param {Zone[]} zones
+ * @param {number} [now]
+ * @returns {object[]}
+ */
+export function coalescedZones(zones, now = Date.now()) {
+  const kept = [];
+  const groups = new Map();
+  for (const zone of withoutRepeatedZones(zones, now)) {
+    if (zone.requestId !== undefined || zone.downloadOnly || (Number.isSafeInteger(zone.order) && zone.order > 0)) {
+      kept.push(zone);
+      continue;
+    }
+    const urgency = levelOfMapZone(zone);
+    const priority = priorityOfMapZone(zone);
+    const key = `${urgency}:${priority}`;
+    let group = groups.get(key);
+    if (!group) groups.set(key, group = { urgency, priority, parts: [] });
+    group.parts.push({ start: zone.byteStart, end: zone.byteEnd, deadlineAt: deadlineOfMapZone(zone, now) });
+  }
+  for (const { urgency, priority, parts } of groups.values()) {
+    parts.sort((left, right) => left.start - right.start);
+    let window = null;
+    const close = () => {
+      if (!window) return;
+      kept.push({ byteStart: window.start, byteEnd: window.end, priority, urgent: urgency === Urgency.NEAR,
+        behind: urgency === Urgency.BEHIND, deferred: urgency === Urgency.TAIL,
+        ...(Number.isFinite(window.deadlineAt) ? { deadlineAt: window.deadlineAt } : {}) });
+    };
+    for (const part of parts) {
+      if (window && part.start <= window.end + 1) {
+        window.end = Math.max(window.end, part.end);
+        window.deadlineAt = Math.min(window.deadlineAt, part.deadlineAt);
+      } else {
+        close();
+        window = { ...part };
+      }
+    }
+    close();
+  }
+  return kept;
 }

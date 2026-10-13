@@ -6,8 +6,8 @@ import { compareBands } from "./bands.js";
 const BLOCK_BYTES = 16 * 1024;
 
 /** Estimate completion from observed queues and the public selection bands.
- * The native picker decides the order within a band, so every unqueued piece
- * uses that band's completion time rather than an invented request order.
+ * The native picker takes a band's pieces from its first up (the `sequential`
+ * strategy), so an unqueued piece arrives after the band's pieces before it.
  * Pieces without a measured supplier remain unknown. No requests are changed.
  * Times are conditional on the measured rate and successful verification.
  */
@@ -97,21 +97,18 @@ export async function futureDownload(entries, { now = Date.now(), findStore = pi
     }
     forecasts.set(torrent, { measuredAt: now, arrivals });
   }
-  pending.sort(compareBands);
+  // WITHIN A BAND, IN THE ORDER THE PIECES COME. The picker walks each
+  // selection from its first piece up (WebTorrent 2.8.5's default `sequential`
+  // strategy, which this proxy keeps), so a piece of a band arrives once those
+  // before it have. Charged the whole band's end instead, a band of many
+  // segments — the map states one per stretch of a level since 2.97.27 — would
+  // put its nearest piece at its farthest piece's time (torrent-tv/meta#178).
+  pending.sort((left, right) => compareBands(left, right) || left.index - right.index);
   let finish = now;
-  for (let start = 0; start < pending.length;) {
-    let end = start;
-    const first = pending[start];
-    while (end < pending.length && compareBands(pending[end], first) === 0) {
-      const seconds = pending[end++].seconds;
-      finish = finish === null || seconds === null ? null : finish + seconds * 1000;
-    }
-    for (let i = start; i < end; i++) {
-      const { arrivals, index } = pending[i];
-      const queuedAt = arrivals.get(index);
-      if (finish !== null) arrivals.set(index, queuedAt === null ? finish : Math.min(queuedAt, finish));
-    }
-    start = end;
+  for (const { arrivals, index, seconds } of pending) {
+    finish = finish === null || seconds === null ? null : finish + seconds * 1000;
+    const queuedAt = arrivals.get(index);
+    if (finish !== null) arrivals.set(index, queuedAt === null ? finish : Math.min(queuedAt, finish));
   }
   return isCurrent() ? forecasts : new Map();
 }

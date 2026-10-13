@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { deadlineOfMapZone, levelOfMapZone, priorityOfMapZone, withoutRepeatedZones } from "../../services/torrent/map-zones.js";
+import { coalescedZones, deadlineOfMapZone, levelOfMapZone, priorityOfMapZone, withoutRepeatedZones } from "../../services/torrent/map-zones.js";
 import { compareBands } from "../../services/torrent/download/bands.js";
 import { Urgency } from "../../services/torrent/demand/Urgency.js";
 
@@ -65,4 +65,37 @@ test("a zone's level is read from its own words before its number", () => {
   assert.equal(priorityOfMapZone({}), 1);
   assert.equal(deadlineOfMapZone({ withinSeconds: 2 }, 1000), 3000);
   assert.equal(deadlineOfMapZone({}, 1000), Number.POSITIVE_INFINITY);
+});
+
+test("what the torrent is told is one window per touching stretch of a band, each piece in the band it had", () => {
+  // Three segments of one AVI output: each names the header (0-99) and index
+  // (100-199) every segment reads, and its own media; then two farther segments
+  // of a lower band, and a metadata read (torrent-tv/meta#178).
+  const now = 1_000;
+  const segment = (index, priority, start, deadlineAt) => [
+    { byteStart: 0, byteEnd: 99, priority, urgent: priority === 100, deadlineAt },
+    { byteStart: 100, byteEnd: 199, priority, urgent: priority === 100, deadlineAt },
+    { byteStart: start, byteEnd: start + 999, priority, urgent: priority === 100, deadlineAt, outputKey: "picture", index }];
+  const zones = [...segment(0, 100, 1000, 5_000), ...segment(1, 100, 2000, 9_000), ...segment(2, 99, 3000, 13_000),
+    ...segment(3, 99, 4000, 17_000), ...segment(4, 99, 6000, 21_000),
+    { byteStart: 9000, byteEnd: 9099, priority: 100, urgent: true, requestId: "read", downloadOnly: true, deadlineAt: 2_000 }];
+  const packed = coalescedZones(zones, now);
+  const windows = packed.map(zone => [zone.byteStart, zone.byteEnd, priorityOfMapZone(zone), levelOfMapZone(zone), zone.deadlineAt]);
+  assert.deepEqual(windows, [
+    [9000, 9099, 100, Urgency.NEAR, 2_000],
+    // The header and index joined, and the first two segments' media joined.
+    [0, 199, 100, Urgency.NEAR, 5_000],
+    [1000, 2999, 100, Urgency.NEAR, 5_000],
+    // The lower band: touching media joined, a gap left as it is.
+    [3000, 4999, 99, Urgency.AHEAD, 13_000],
+    [6000, 6999, 99, Urgency.AHEAD, 21_000]]);
+  // Every piece is in the band the best zone holding it gave it.
+  for (const zone of zones) {
+    const window = packed.find(one => one.byteStart <= zone.byteStart && zone.byteEnd <= one.byteEnd);
+    const best = zones.filter(other => other.byteStart === zone.byteStart && other.byteEnd === zone.byteEnd)
+      .map(other => ({ urgency: levelOfMapZone(other), priority: priorityOfMapZone(other), deadlineAt: deadlineOfMapZone(other, now) }))
+      .sort(compareBands)[0];
+    assert.equal(priorityOfMapZone(window), best.priority);
+    assert.equal(levelOfMapZone(window), best.urgency);
+  }
 });

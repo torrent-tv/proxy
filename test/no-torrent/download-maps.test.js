@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { DownloadMaps } from "../../services/viewer/DownloadMaps.js";
 import { MediaReadRequests } from "../../services/media/MediaReadRequests.js";
+import { coalescedZones } from "../../services/torrent/map-zones.js";
 
 test("a missing allocation cannot withdraw bytes still needed by the same statement", async () => {
   let published;
@@ -548,4 +549,23 @@ test("a demand that differs only in a field the publication does not carry is st
   const afterScope = built;
   await maps.metadata({ ...request, scope: "playback", deadlineAt: 5_000 });
   assert.ok(built > afterScope, "another deadline is another demand");
+});
+
+test("what a map sends and compares is packed: one window per touching stretch of a band", async () => {
+  // Ten thousand zones were built, compared and copied every few seconds of
+  // playback; the torrent acts on bands alone (torrent-tv/meta#178).
+  const sent = [];
+  const maps = new DownloadMaps({ publish: async map => sent.push(map), pack: zones => coalescedZones(zones, 0),
+    resolvePlayback: async map => map.zones.map(zone => ({ ...zone, outputKey: "out", index: zone.from,
+      byteStart: zone.from * 100, byteEnd: zone.to * 100 - 1 })) });
+  const file = { sourceKey: "source", fileIndex: 0, durationSeconds: 40 };
+  await maps.playback({ ...file, zones: [{ from: 0, to: 10, priority: 100, urgent: true }, { from: 10, to: 20, priority: 100, urgent: true },
+    { from: 20, to: 30, priority: 99 }] });
+  assert.deepEqual(sent.at(-1).zones.map(zone => [zone.byteStart, zone.byteEnd, zone.priority]), [[0, 1999, 100], [2000, 2999, 99]]);
+  // Each segment still states the bytes it reads.
+  assert.deepEqual(maps.inputsForOutput("source", "out", 10), [{ sourceId: "source:0", ranges: [{ start: 1000, end: 2000 }] }]);
+  // A pass that changes nothing the torrent acts on sends nothing.
+  await maps.playback({ ...file, zones: [{ from: 0, to: 10, priority: 100, urgent: true }, { from: 10, to: 20, priority: 100, urgent: true },
+    { from: 20, to: 30, priority: 99 }] });
+  assert.equal(sent.length, 1);
 });

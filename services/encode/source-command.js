@@ -278,7 +278,10 @@ export function buildOriginalCommand(params) {
   // the pieces were the same to the byte, on FFmpeg 6.1 and 8.1.2 (Home
   // Assistant 2026-10-13, torrent-tv/meta#178). The cache's file holds what
   // FFmpeg read and is counted by the budget (`EncodeRuns.inputCacheBytes`).
-  const url = source => `cache:${new URL(`/encode-input/${inputToken}/${source.fileIndex}`, baseUrl).href}`;
+  // Only where a read through it has worked on this machine
+  // (`encode/input-cache.js`); elsewhere the input is read directly.
+  const readThroughCache = params.readThroughCache !== false;
+  const url = source => `${readThroughCache ? "cache:" : ""}${new URL(`/encode-input/${inputToken}/${source.fileIndex}`, baseUrl).href}`;
   // The container named the bytes FFmpeg's stream search reads for this much
   // media time; the search is told the same, whatever its own default.
   const openArgs = source => Number.isFinite(source.input.streamSearchSeconds)

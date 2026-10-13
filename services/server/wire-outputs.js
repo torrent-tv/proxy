@@ -93,7 +93,7 @@ import { audioReadingFor } from "../encode/audio-work-rate.js";
 import { wireMachineBudget } from "../storage/wire.js";
 import { Returns } from "../storage/returns.js";
 import { freeBytesFor } from "../storage/free.js";
-import { existsSync } from "node:fs";
+import { inputCacheRoot, probeInputCache } from "../encode/input-cache.js";
 import path from "node:path";
 import { contentOf, LocalObservations, PROXY_ROOT } from "../encode/LocalObservations.js";
 import { configurationKeyOf } from "../encode/fingerprint.js";
@@ -341,6 +341,7 @@ export function wireOutputs({
     get outputs() { return parts.outputs; },
     get priority() { return parts.priority; },
     get segmentDurationSec() { return parts.segmentDurationSec; },
+    readsThroughCache: () => parts.inputCacheAvailable === true,
     segmentFiles,
     get videoEncoder() { return parts.encoders.current; },
     get encoders() { return parts.encoders; },
@@ -627,6 +628,16 @@ export function wireOutputs({
   parts.coldStarts = new ColdStarts();
   parts.enabled = Boolean(enabled);
   parts.ffmpegBin = ffmpegBin;
+  // Whether a run may read its input through FFmpeg's cache: once a read
+  // through it has worked with this FFmpeg, and directly until then
+  // (`encode/input-cache.js`).
+  parts.inputCacheAvailable = false;
+  if (parts.enabled && ffmpegBin) {
+    void probeInputCache({ ffmpegBin }).then(({ available, reason }) => {
+      parts.inputCacheAvailable = available;
+      logger.info(`encoder input: ${available ? "read through FFmpeg's cache" : "read directly"} — ${reason}`);
+    });
+  }
   parts.sourceInputsFor = typeof sourceInputsFor === "function" ? sourceInputsFor : null;
   parts.keyframeTables = keyframeTables;
   // Where measurements about this host are kept between runs. Empty means
@@ -1045,9 +1056,9 @@ export function wireOutputs({
     memory: parts.memoryClaimant,
     encodeInputs: parts.encodeInputs,
     indexMemory,
-    // FFmpeg puts its temporary files in /tmp, or where it runs when there is
-    // none — an output directory of the segments.
-    inputCaches: { held: () => parts.encodeRuns?.inputCacheBytes() ?? 0, root: existsSync("/tmp") ? "/tmp" : null },
+    // FFmpeg's cache keeps its file in /tmp, or where FFmpeg runs on a build
+    // without `mkstemp` — an output directory of the segments.
+    inputCaches: { held: () => parts.encodeRuns?.inputCacheBytes() ?? 0, root: inputCacheRoot() },
     policy: parts.budgetPolicy ?? undefined,
     readFree: freeBytesFor,
     logger

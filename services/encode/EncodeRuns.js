@@ -291,7 +291,7 @@ export class EncodeRuns {
   inputCacheBytes() {
     let bytes = 0;
     for (const run of this.#runsByInputToken.values()) {
-      if (run.isAlive && run.originalInput) bytes += Math.max(0, Number(run.originalInput.bytes) || 0);
+      if (run.isAlive && run.originalInput?.readThroughCache) bytes += Math.max(0, Number(run.originalInput.bytes) || 0);
     }
     return bytes;
   }
@@ -1024,6 +1024,9 @@ export class EncodeRuns {
     this.#lastInputToken += 1;
     const inputToken = this.#lastInputToken;
     if (admittedInput) admittedInput.runTag = `${startIndex}r${inputToken}`;
+    // Whether this run's FFmpeg keeps what it reads in its cache's file, which
+    // is what the budget counts on that file's disk.
+    if (admittedInput?.original) admittedInput.readThroughCache = this.#host.readsThroughCache?.() === true;
     const buildCommand = admittedInput.original ? buildOriginalCommand : buildAdmittedCommand;
     const built = buildCommand({
       admittedInput,
@@ -1044,7 +1047,8 @@ export class EncodeRuns {
       endIndex: admittedInput.original ? inputEnd
         : Number.isInteger(ordered?.to) ? ordered.to : runEnd >= startIndex ? runEnd : session.timeline.segmentCount - 1,
       videoEncoder: this.#host.videoEncoder,
-      segmentDurationSec: this.#host.segmentDurationSec
+      segmentDurationSec: this.#host.segmentDurationSec,
+      readThroughCache: admittedInput.readThroughCache === true
     });
     const { args, cutTimes } = built;
     // The piece before the start, made only to have its group in hand, is

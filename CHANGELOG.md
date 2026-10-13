@@ -1,6 +1,7 @@
 ## Unreleased
 
 - **Fix**: The bytes each segment reads are kept for the start forecast in a table of their own instead of being read off the zones the torrent is told. The forecast lost a segment's bytes whenever its zone left the map in the meantime, and could only ever see what the torrent was told in the form it was told it (#ttv-178).
+- **Chore**: The proxy says once a minute what turning download maps into bytes cost: how many passes were taken whole from the last one and how many worked out again, how many segments and ranges those went through, how many zones they gave, the time from start to result, and the time spent building the zone lists (#ttv-178).
 
 ## 2.97.29
 

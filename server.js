@@ -480,6 +480,31 @@ export async function startProxyServer({
   const resolvedPasses = new Map();
   /** Which source bytes each segment of an output reads, for the forecast (`segment-input-table.js`). */
   const segmentInputs = new SegmentInputTable();
+  // WHAT THE PASSES COST, said once a minute: how many were taken whole from
+  // the last one and how many worked out again, how many segments and ranges
+  // those went through, how many zones they built, and the time from a pass's
+  // start to its result — which includes waits for reads, so it bounds the
+  // main thread's share rather than measuring it. A pass worked out again
+  // whose zones state the same bytes as the last is the repeated work worth
+  // removing; how often that happens is what the map's own "unchanged not
+  // sent" count says (torrent-tv/meta#178 review).
+  const passCosts = { since: Date.now(), reused: 0, worked: 0, incomplete: 0, segments: 0, ranges: 0, zones: 0, built: 0, buildMs: 0, ms: 0, maxMs: 0 };
+  const notePass = ({ reused = false, complete = true, segments = 0, ranges = 0, zones = 0, ms = 0 }) => {
+    if (reused) passCosts.reused += 1;
+    else {
+      passCosts.worked += 1;
+      if (!complete) passCosts.incomplete += 1;
+      passCosts.segments += segments; passCosts.ranges += ranges; passCosts.zones += zones;
+      passCosts.ms += ms; passCosts.maxMs = Math.max(passCosts.maxMs, ms);
+    }
+    const now = Date.now();
+    if (now - passCosts.since < 60_000) return;
+    logger.info(`download map passes in ${((now - passCosts.since) / 1000).toFixed(1)}s: ${passCosts.reused} taken whole from the last, ` +
+      `${passCosts.worked} worked out (${passCosts.incomplete} incomplete) over ${passCosts.segments} segment(s) and ${passCosts.ranges} range(s), ` +
+      `giving ${passCosts.zones} zone(s); ${Math.round(passCosts.ms)}ms from start to result in all, longest ${Math.round(passCosts.maxMs)}ms; ` +
+      `${passCosts.built} zone list(s) built for the map in ${Math.round(passCosts.buildMs)}ms`);
+    Object.assign(passCosts, { since: now, reused: 0, worked: 0, incomplete: 0, segments: 0, ranges: 0, zones: 0, built: 0, buildMs: 0, ms: 0, maxMs: 0 });
+  };
   /** A segment's ranges joined at the precision the torrent fetches, once per kept list and piece length. */
   const joinedRanges = new WeakMap();
   const joinedRangesOf = (ranges, pieceLength) => {
@@ -517,12 +542,20 @@ export async function startProxyServer({
       // A zone's ranges are stated to the torrent at the precision it fetches:
       // ranges closer than a piece hold the same pieces as one.
       const pieceLength = Number(torrentPool.knownTorrent(map.sourceKey)?.pieceLength);
+      const passStartedAt = performance.now();
+      let segments = 0;
       const converted = [];
       const demands = [];
       // What each output's next run would copy, asked of the swarm as one group
       // with its first segment (`target-input-expansion.js`).
       const targets = new Map();
-      const expanded = () => expandToTargetInputs(converted, outputKey => targets.get(outputKey) ?? null);
+      const expanded = () => {
+        const startedAt = performance.now();
+        const zones = expandToTargetInputs(converted, outputKey => targets.get(outputKey) ?? null);
+        passCosts.built += 1;
+        passCosts.buildMs += performance.now() - startedAt;
+        return zones;
+      };
       for (const output of outputParts.outputs.values()) {
         if (output.file.sourceKey !== map.sourceKey) continue;
         const consumers = [...outputParts.viewers.forOutput(output).values()].filter(viewer =>
@@ -556,7 +589,10 @@ export async function startProxyServer({
       const fileKey = `${map.sourceKey}:${map.fileIndex}`;
       const pass = { tracks: tracks.value, ...passInputs({ pieceLength, shift, targets, demands }) };
       const last = resolvedPasses.get(fileKey);
-      if (samePass(last, pass)) return last.result;
+      if (samePass(last, pass)) {
+        notePass({ reused: true });
+        return last.result;
+      }
       // Kept only from a pass that worked every segment out; one that met a
       // reading not there yet is worked out again until it is.
       let complete = true;
@@ -593,6 +629,7 @@ export async function startProxyServer({
         const { tracks: _choices, owner: _owner, sourceInterval: _sourceInterval, ...demand } = zone;
         const convert = ranges => {
           const joined = joinedRangesOf(ranges, pieceLength);
+          segments += 1;
           // What the segment reads is kept for the forecast in a table of its
           // own, whatever form the torrent is told it in.
           segmentInputs.set(map.sourceKey, map.fileIndex, zone.outputKey, zone.index, joined);
@@ -657,6 +694,7 @@ export async function startProxyServer({
         convert(input.ranges);
       }
       const result = expanded();
+      notePass({ complete, segments, ranges: converted.length, zones: result.length, ms: performance.now() - passStartedAt });
       if (complete) resolvedPasses.set(fileKey, { ...pass, result });
       else resolvedPasses.delete(fileKey);
       return result;
